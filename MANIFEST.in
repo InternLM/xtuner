@@ -1,0 +1,5 @@
+include requirements/*.txt
+include mmchat/.mim/model-index.yml
+include mmchat/.mim/demo/*/*
+recursive-include mmchat/.mim/configs *.py *.yml
+recursive-include mmchat/.mim/tools *.sh *.py
