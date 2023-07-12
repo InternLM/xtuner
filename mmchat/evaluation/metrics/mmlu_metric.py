@@ -40,8 +40,7 @@ class MMLUMetric(BaseMetric):
 
     @staticmethod
     def ABCD_to_0123(abcd):
-        func = lambda x: {'A': 0, 'B': 1, 'C': 2, 'D': 3}[x]
-        return func(abcd)
+        return {'A': 0, 'B': 1, 'C': 2, 'D': 3}[abcd]
 
     @staticmethod
     def accuracy(preds, gts):
