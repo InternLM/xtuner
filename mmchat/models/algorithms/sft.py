@@ -57,11 +57,12 @@ class SupervisedFinetune(BaseModel):
         self.llm = self._build_from_cfg_or_module(llm, LLM)
         self.llm.config.use_cache = False
         self.llm.config.torch_dtype = torch.float32
-        smart_tokenizer_and_embedding_resize(
-            special_tokens_dict=dict(pad_token=DEFAULT_PAD_TOKEN),
-            tokenizer=self.tokenizer,
-            model=self.llm,
-        )
+        if self.tokenizer._pad_token is None:
+            smart_tokenizer_and_embedding_resize(
+                special_tokens_dict=dict(pad_token=DEFAULT_PAD_TOKEN),
+                tokenizer=self.tokenizer,
+                model=self.llm,
+            )
         from transformers.models.llama import LlamaTokenizer
         
         if  isinstance(self.tokenizer, LlamaTokenizer):
