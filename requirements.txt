@@ -1,4 +1,8 @@
 bitsandbytes==0.39.1
 mmengine==0.8.1
-git+https://github.com/huggingface/peft.git
+peft@git+https://github.com/huggingface/peft.git
 transformers==4.30.2
+scipy
+SentencePiece
+datasets
+
