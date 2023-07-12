@@ -111,14 +111,12 @@ class SupervisedFinetune(BaseModel):
         return outputs
 
     def predict(self, data, data_samples=None):
-        
         outputs = self.llm(**data)
-        
-        return outputs
-
+        logits_dict = [{'labels': labels, 'logits': logits} \
+            for labels, logits in zip(data['labels'], outputs.logits)]
+        return logits_dict
 
     def compute_loss(self, data, data_samples=None):
-        
         outputs = self.llm(**data)
         # import pdb;pdb.set_trace()
         loss_dict = {'loss_llm': outputs.loss}
