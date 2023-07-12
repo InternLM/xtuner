@@ -1,4 +1,4 @@
 bitsandbytes==0.39.1
 mmengine==0.8.1
-peft==0.4.0.dev0
+git+https://github.com/huggingface/peft.git
 transformers==4.30.2
