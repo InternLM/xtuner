@@ -35,5 +35,5 @@ test_dataloader = dict(
 val_cfg = dict(type='ValLoop')
 test_cfg = dict(type='TestLoop')
 
-val_evaluator = dict(type='MMLUMetric', tokenizer=None, prefix='mmlu_val')
-test_evaluator = dict(type='MMLUMetric', tokenizer=None, prefix='mmlu_test')
+val_evaluator = dict(type='MMLUMetric', tokenizer=None, prefix='mmlu_fs_val')
+test_evaluator = dict(type='MMLUMetric', tokenizer=None, prefix='mmlu_fs_test')
