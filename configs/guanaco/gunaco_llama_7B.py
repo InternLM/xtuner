@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import torch
 with read_base():
     from .._base_.datasets.oasst1 import *
+    from .._base_.datasets.mmlu_fs import *
     from .._base_.schedules.guanaco import *
     from .._base_.default_runtime import *
 
@@ -20,7 +21,7 @@ model = dict(
             use_fast = False,
             padding_side="right",
         ),
-        source_max_len = 16,
+        source_max_len = 2048,
         target_max_len = 512,
         train_on_source = False,
         predict_with_generate = False,
@@ -50,3 +51,14 @@ model = dict(
 
 )
 
+val_evaluator['tokenizer'] = dict(
+    type=AutoTokenizer.from_pretrained,
+    pretrained_model_name_or_path='/nvme/share_data/llama-7b',
+    use_fast=False,
+    padding_side="right")
+
+test_evaluator['tokenizer'] = dict(
+    type=AutoTokenizer.from_pretrained,
+    pretrained_model_name_or_path='/nvme/share_data/llama-7b',
+    use_fast=False,
+    padding_side="right")
