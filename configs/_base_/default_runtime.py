@@ -1,5 +1,5 @@
-from mmengine.hooks import (IterTimerHook, LoggerHook, ParamSchedulerHook,
-                            CheckpointHook, DistSamplerSeedHook)
+from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
+                            LoggerHook, ParamSchedulerHook)
 
 # defaults to use registries in mmpretrain
 default_scope = 'mmchat'

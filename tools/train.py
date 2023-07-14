@@ -49,14 +49,12 @@ def parse_args():
     return args
 
 
-
-
 def main():
     args = parse_args()
 
     # load config
     cfg = Config.fromfile(args.config)
-    
+
     cfg.launcher = args.launcher
     if args.cfg_options is not None:
         cfg.merge_from_dict(args.cfg_options)
@@ -73,7 +71,7 @@ def main():
     # enable automatic-mixed-precision training
     if args.amp is True:
         optim_wrapper = cfg.optim_wrapper.type
-        from mmengine.optim import OptimWrapper, AmpOptimWrapper
+        from mmengine.optim import AmpOptimWrapper, OptimWrapper
         if optim_wrapper == AmpOptimWrapper:
             print_log(
                 'AMP training is already enabled in your config.',
