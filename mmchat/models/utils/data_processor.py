@@ -70,5 +70,5 @@ class DataProcesorForCausalLM(BaseDataPreprocessor):
         if labels is not None:
             data_dict['labels'] = labels
 
-        return {'data': data_dict, 'data_samples': None}
+        return self.cast_data({'data': data_dict, 'data_samples': None})
 

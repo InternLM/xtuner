@@ -33,9 +33,10 @@ def process_hf_dataset(dataset, mode='train',
         dataset = dataset.rename_column(old, new)
 
     # Remove unused columns.
-    dataset = dataset.remove_columns(
-        [col for col in dataset.column_names['train'] if col not in ['input', 'output']]
-    )
+    if 'train' in dataset.column_names:
+        dataset = dataset.remove_columns(
+            [col for col in dataset.column_names['train'] if col not in ['input', 'output']]
+        )
     return dataset[mode]
 
 
