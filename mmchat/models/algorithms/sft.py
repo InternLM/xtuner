@@ -57,11 +57,12 @@ class SupervisedFinetune(BaseModel):
         self.llm = self._build_from_cfg_or_module(llm, LLM)
         self.llm.config.use_cache = False
         self.llm.config.torch_dtype = torch.float32
-        smart_tokenizer_and_embedding_resize(
-            special_tokens_dict=dict(pad_token=DEFAULT_PAD_TOKEN),
-            tokenizer=self.tokenizer,
-            model=self.llm,
-        )
+        if self.tokenizer._pad_token is None:
+            smart_tokenizer_and_embedding_resize(
+                special_tokens_dict=dict(pad_token=DEFAULT_PAD_TOKEN),
+                tokenizer=self.tokenizer,
+                model=self.llm,
+            )
         from transformers.models.llama import LlamaTokenizer
         
         if  isinstance(self.tokenizer, LlamaTokenizer):
@@ -110,14 +111,12 @@ class SupervisedFinetune(BaseModel):
         return outputs
 
     def predict(self, data, data_samples=None):
-        
         outputs = self.llm(**data)
-        
-        return outputs
-
+        logits_dict = [{'labels': labels, 'logits': logits} \
+            for labels, logits in zip(data['labels'], outputs.logits)]
+        return logits_dict
 
     def compute_loss(self, data, data_samples=None):
-        
         outputs = self.llm(**data)
         # import pdb;pdb.set_trace()
         loss_dict = {'loss_llm': outputs.loss}
