@@ -1,7 +1,6 @@
 import bitsandbytes as bnb
 import torch
 from peft import get_peft_model, prepare_model_for_kbit_training
-from peft.tuners.lora import LoraLayer
 
 from mmchat.registry import MODELS
 from .sft import SupervisedFinetune
@@ -35,14 +34,15 @@ class SupervisedQloraFinetune(SupervisedFinetune):
         self.llm = get_peft_model(self.llm, lora)
 
         for name, module in self.llm.named_modules():
-            if isinstance(module, LoraLayer):
-                module = module.to(torch.float16)
+            # todo
+            # if isinstance(module, LoraLayer):
+            #     module = module.to(torch.bfloat16)
             if 'norm' in name:
                 module = module.to(torch.float32)
-            if 'lm_head' in name or 'embed_tokens' in name:
-                if hasattr(module, 'weight'):
-                    if module.weight.dtype == torch.float32:
-                        module = module.to(torch.float16)
+            # if 'lm_head' in name or 'embed_tokens' in name:
+            #     if hasattr(module, 'weight'):
+            #         if module.weight.dtype == torch.float32:
+            #             module = module.to(torch.float16)
         self._is_init = True
 
     def init_weights(self):
