@@ -1,3 +1,5 @@
+from collections import OrderedDict
+
 import bitsandbytes as bnb
 import torch
 from peft import (PeftType, PromptLearningConfig, get_peft_model,
@@ -129,4 +131,4 @@ class SupervisedQloraFinetune(SupervisedFinetune):
 
         state_dict = super().state_dict()
         to_return = get_peft_model_state_dict(self.llm, state_dict=state_dict)
-        return to_return
+        return OrderedDict(to_return)
