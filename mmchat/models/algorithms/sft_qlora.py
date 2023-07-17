@@ -11,6 +11,7 @@ from .sft import SupervisedFinetune
 
 def find_all_linear_names(model):
     cls = bnb.nn.Linear4bit
+    # cls = nn.Linear
     lora_module_names = set()
     for name, module in model.named_modules():
         if isinstance(module, cls):
