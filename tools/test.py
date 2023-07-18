@@ -2,10 +2,7 @@
 import argparse
 import os
 import os.path as osp
-import warnings
-from copy import deepcopy
 
-from mmengine import ConfigDict
 from mmengine.config import Config, DictAction
 from mmengine.runner import Runner
 
@@ -14,8 +11,7 @@ from mmchat.registry import RUNNERS
 
 # TODO: support fuse_conv_bn and format_only
 def parse_args():
-    parser = argparse.ArgumentParser(
-        description='MMChat test a model')
+    parser = argparse.ArgumentParser(description='MMChat test a model')
     parser.add_argument('config', help='test config file path')
     parser.add_argument('checkpoint', help='checkpoint file')
     parser.add_argument(

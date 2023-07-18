@@ -1,12 +1,11 @@
-from mmengine.optim import DeepSpeedOptimWrapper
 from mmengine._strategy import DeepSpeedStrategy
+from mmengine.optim import DeepSpeedOptimWrapper
 from torch.optim import AdamW
+
 # optimizer
 optim_wrapper = dict(
     type=DeepSpeedOptimWrapper,
-    optimizer=dict(
-        type=AdamW, lr=0.0002, weight_decay=0.0))
-
+    optimizer=dict(type=AdamW, lr=0.0002, weight_decay=0.0))
 
 # training strategy
 strategy = dict(

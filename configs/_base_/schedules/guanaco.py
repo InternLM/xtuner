@@ -1,16 +1,12 @@
-from mmengine.optim import OptimWrapper
-from mmengine.optim import LinearLR, ConstantLR
-from mmengine.runner import IterBasedTrainLoop
-from torch.optim import AdamW
 from bitsandbytes.optim import PagedAdamW32bit
+from mmengine.optim import ConstantLR, LinearLR, OptimWrapper
+
 # optimizer
 optim_wrapper = dict(
     type=OptimWrapper,
-    optimizer=dict(
-        type=PagedAdamW32bit, lr=0.0002, weight_decay=0.0),
+    optimizer=dict(type=PagedAdamW32bit, lr=0.0002, weight_decay=0.0),
     clip_grad=dict(max_norm=0.3, error_if_nonfinite=True),
-    )
-
+)
 
 # learning policy
 param_scheduler = [
@@ -32,10 +28,7 @@ param_scheduler = [
 ]
 
 # train, val, test setting
-train_cfg = dict(
-    by_epoch=True,
-    max_epochs = 3, val_interval=1)
-
+train_cfg = dict(by_epoch=True, max_epochs=3, val_interval=1)
 
 # NOTE: `auto_scale_lr` is for automatically scaling LR
 # based on the actual training batch size.

@@ -1,15 +1,16 @@
-
+import dataclasses
 from typing import Dict
-from torch import nn
-from mmengine.model import BaseModel
-from mmengine import Config
-from mmchat.registry import MODELS, TOKENIZER, LLM
+
 import torch
 import transformers
-import dataclasses
 from mmengine import print_log
+from mmengine.model import BaseModel
+from torch import nn
 
-DEFAULT_PAD_TOKEN = "[PAD]"
+from mmchat.registry import LLM
+
+DEFAULT_PAD_TOKEN = '[PAD]'
+
 
 def traverse_dict(d):
     if isinstance(d, dict):
@@ -27,6 +28,7 @@ def traverse_dict(d):
         for element in d:
             traverse_dict(element)
 
+
 def smart_tokenizer_and_embedding_resize(
     special_tokens_dict: Dict,
     tokenizer: transformers.PreTrainedTokenizer,
@@ -34,7 +36,8 @@ def smart_tokenizer_and_embedding_resize(
 ):
     """Resize tokenizer and embedding.
 
-    Note: This is the unoptimized version that may make your embedding size not be divisible by 64.
+    Note: This is the unoptimized version that may make your embedding size
+    not be divisible by 64.
     """
     num_new_tokens = tokenizer.add_special_tokens(special_tokens_dict)
     model.resize_token_embeddings(len(tokenizer))
@@ -43,8 +46,10 @@ def smart_tokenizer_and_embedding_resize(
         input_embeddings = model.get_input_embeddings().weight.data
         output_embeddings = model.get_output_embeddings().weight.data
 
-        input_embeddings_avg = input_embeddings[:-num_new_tokens].mean(dim=0, keepdim=True)
-        output_embeddings_avg = output_embeddings[:-num_new_tokens].mean(dim=0, keepdim=True)
+        input_embeddings_avg = input_embeddings[:-num_new_tokens].mean(
+            dim=0, keepdim=True)
+        output_embeddings_avg = output_embeddings[:-num_new_tokens].mean(
+            dim=0, keepdim=True)
 
         input_embeddings[-num_new_tokens:] = input_embeddings_avg
         output_embeddings[-num_new_tokens:] = output_embeddings_avg
@@ -64,26 +69,32 @@ class SupervisedFinetune(BaseModel):
                 model=self.llm,
             )
         from transformers.models.llama import LlamaTokenizer
-        
-        if  isinstance(self.tokenizer, LlamaTokenizer):
-        # LLaMA tokenizer may not have correct special tokens set.
-        # Check and add them if missing to prevent them from being parsed into different tokens.
-        # Note that these are present in the vocabulary.
-        # Note also that `model.config.pad_token_id` is 0 which corresponds to `<unk>` token.
+
+        if isinstance(self.tokenizer, LlamaTokenizer):
+            # LLaMA tokenizer may not have correct special tokens set.
+            # Check and add them if missing to prevent them from being
+            # parsed into different tokens.
+            # Note that these are present in the vocabulary.
+            # Note also that `model.config.pad_token_id` is 0 which
+            # corresponds to `<unk>` token.
             print('Adding special tokens.')
             self.tokenizer.add_special_tokens({
-                    "eos_token": self.tokenizer.convert_ids_to_tokens(self.llm.config.eos_token_id),
-                    "bos_token": self.tokenizer.convert_ids_to_tokens(self.llm.config.bos_token_id),
-                    "unk_token": self.tokenizer.convert_ids_to_tokens(
-                        self.llm.config.pad_token_id if self.llm.config.pad_token_id != -1 else self.tokenizer.pad_token_id
-                    ),
+                'eos_token':
+                self.tokenizer.convert_ids_to_tokens(
+                    self.llm.config.eos_token_id),
+                'bos_token':
+                self.tokenizer.convert_ids_to_tokens(
+                    self.llm.config.bos_token_id),
+                'unk_token':
+                self.tokenizer.convert_ids_to_tokens(
+                    self.llm.config.pad_token_id if self.llm.config.
+                    pad_token_id != -1 else self.tokenizer.pad_token_id),
             })
 
     @property
     def tokenizer(self):
         return self.data_preprocessor.tokenizer
 
-        
     def _build_from_cfg_or_module(self, cfg_or_mod, registry):
         if isinstance(cfg_or_mod, nn.Module):
             return cfg_or_mod
@@ -91,10 +102,10 @@ class SupervisedFinetune(BaseModel):
             traverse_dict(cfg_or_mod)
             return registry.build(cfg_or_mod)
         else:
-            raise NotImplemented
-        
+            raise NotImplementedError
+
     def forward(self, data, data_samples=None, mode='loss'):
-        
+
         if mode == 'loss':
             return self.compute_loss(data, data_samples)
         elif mode == 'predict':
@@ -105,15 +116,17 @@ class SupervisedFinetune(BaseModel):
             raise NotImplementedError
 
     def _forward(self, data, data_samples=None):
-        
+
         outputs = self.llm(**data)
-        
+
         return outputs
 
     def predict(self, data, data_samples=None):
         outputs = self.llm(**data)
-        logits_dict = [{'labels': labels, 'logits': logits} \
-            for labels, logits in zip(data['labels'], outputs.logits)]
+        logits_dict = [{
+            'labels': labels,
+            'logits': logits
+        } for labels, logits in zip(data['labels'], outputs.logits)]
         return logits_dict
 
     def compute_loss(self, data, data_samples=None):
@@ -121,5 +134,3 @@ class SupervisedFinetune(BaseModel):
         # import pdb;pdb.set_trace()
         loss_dict = {'loss_llm': outputs.loss}
         return loss_dict
-        
-    

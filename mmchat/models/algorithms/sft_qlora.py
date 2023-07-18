@@ -1,15 +1,11 @@
-import torch
-from .sft import SupervisedFinetune, traverse_dict
-from peft import (
-    prepare_model_for_kbit_training,
-    LoraConfig,
-    get_peft_model,
-    PeftModel
-)
-from peft.tuners.lora import LoraLayer
 import bitsandbytes as bnb
+import torch
+from peft import get_peft_model, prepare_model_for_kbit_training
+from peft.tuners.lora import LoraLayer
+
 from mmchat.registry import MODELS
-from mmengine import print_log
+from .sft import SupervisedFinetune
+
 
 def find_all_linear_names(model):
     cls = bnb.nn.Linear4bit
@@ -19,10 +15,10 @@ def find_all_linear_names(model):
             names = name.split('.')
             lora_module_names.add(names[0] if len(names) == 1 else names[-1])
 
-
-    if 'lm_head' in lora_module_names: # needed for 16-bit
+    if 'lm_head' in lora_module_names:  # needed for 16-bit
         lora_module_names.remove('lm_head')
     return list(lora_module_names)
+
 
 class SupervisedQloraFinetune(SupervisedFinetune):
 
@@ -35,7 +31,7 @@ class SupervisedQloraFinetune(SupervisedFinetune):
 
         lora = MODELS.build(lora)
         lora.target_modules = modules
-        
+
         self.llm = get_peft_model(self.llm, lora)
 
         for name, module in self.llm.named_modules():
@@ -47,7 +43,7 @@ class SupervisedQloraFinetune(SupervisedFinetune):
                 if hasattr(module, 'weight'):
                     if module.weight.dtype == torch.float32:
                         module = module.to(torch.float16)
-        self._is_init=True
-    
+        self._is_init = True
+
     def init_weights(self):
         pass
