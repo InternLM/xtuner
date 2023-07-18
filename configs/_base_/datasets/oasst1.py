@@ -42,7 +42,7 @@ oasst1 = dict(
 )
 
 train_dataloader = dict(
-    batch_size=16,
+    batch_size=1,
     num_workers=2,
     dataset=oasst1,
     sampler=dict(type=DefaultSampler, shuffle=True))
