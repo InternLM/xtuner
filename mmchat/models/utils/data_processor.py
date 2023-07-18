@@ -6,9 +6,7 @@ from mmengine.model import BaseDataPreprocessor
 from torch.nn.utils.rnn import pad_sequence
 
 from mmchat.registry import TOKENIZER
-
-IGNORE_INDEX = -100
-DEFAULT_PAD_TOKEN = '[PAD]'
+from mmchat.utils import IGNORE_INDEX
 
 
 class DataProcesorForCausalLM(BaseDataPreprocessor):

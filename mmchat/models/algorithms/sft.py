@@ -8,8 +8,7 @@ from mmengine.model import BaseModel
 from torch import nn
 
 from mmchat.registry import LLM
-
-DEFAULT_PAD_TOKEN = '[PAD]'
+from mmchat.utils import DEFAULT_PAD_TOKEN
 
 
 def traverse_dict(d):

@@ -1,8 +1,5 @@
 from mmchat.registry import DATASETS
 
-IGNORE_INDEX = -100
-DEFAULT_PAD_TOKEN = '[PAD]'
-
 
 def process_hf_dataset(dataset,
                        mode='train',
