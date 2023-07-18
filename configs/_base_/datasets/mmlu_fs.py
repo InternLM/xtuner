@@ -1,7 +1,7 @@
 from datasets import load_dataset
-from mmchat.datasets import process_hf_dataset
 from mmengine.dataset import DefaultSampler
 
+from mmchat.datasets import process_hf_dataset
 
 data_root = 'data/mmlu/'
 
@@ -13,9 +13,7 @@ mmlu_fs_dataset = dict(
         test=data_root + 'five_shot_mmlu_test.json'))
 
 val_mmlu_fs = dict(
-    type=process_hf_dataset,
-    dataset=mmlu_fs_dataset,
-    mode='val')
+    type=process_hf_dataset, dataset=mmlu_fs_dataset, mode='val')
 val_dataloader = dict(
     batch_size=1,
     num_workers=1,
@@ -23,9 +21,7 @@ val_dataloader = dict(
     sampler=dict(type=DefaultSampler, shuffle=False))
 
 test_mmlu_fs = dict(
-    type=process_hf_dataset,
-    dataset=mmlu_fs_dataset,
-    mode='test')
+    type=process_hf_dataset, dataset=mmlu_fs_dataset, mode='test')
 test_dataloader = dict(
     batch_size=1,
     num_workers=1,
