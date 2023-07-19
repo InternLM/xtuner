@@ -3,24 +3,11 @@ from mmchat.registry import DATASETS
 
 def process_hf_dataset(dataset,
                        mode='train',
-                       prompt_input_format=None,
-                       prompt_no_input_format=None,
-                       map_fn=lambda x: x,
+                       map_fn=None,
                        remove_columns=[],
                        rename_maps=[]):
 
     dataset = DATASETS.build(dataset)
-
-    def _prompt_format(example):
-        if example.get('input', '') != '':
-            prompt_format = prompt_input_format
-        else:
-            prompt_format = prompt_no_input_format
-        return {'input': prompt_format.format(**example)}
-
-    if prompt_input_format and prompt_no_input_format:
-        dataset = dataset.map(_prompt_format)
-
     if isinstance(map_fn, str):
         map_fn = eval(map_fn)
     dataset = dataset.map(map_fn, remove_columns=remove_columns)

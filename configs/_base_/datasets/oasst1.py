@@ -31,15 +31,12 @@ from datasets import load_dataset
 from mmengine.dataset import DefaultSampler
 
 from mmchat.datasets import process_hf_dataset
+from mmchat.datasets.utils import oasst1_map_fn
 
 oasst1 = dict(
     type=process_hf_dataset,
-    dataset=dict(
-        type=load_dataset,
-        path='timdettmers/openassistant-guanaco',
-    ),
-    map_fn="lambda x: {'input': '', 'output': x['text']}",
-)
+    dataset=dict(type=load_dataset, path='timdettmers/openassistant-guanaco'),
+    map_fn=oasst1_map_fn)
 
 train_dataloader = dict(
     batch_size=1,
