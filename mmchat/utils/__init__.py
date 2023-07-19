@@ -1,3 +1,3 @@
-from .constants import DEFAULT_PAD_TOKEN, IGNORE_INDEX
+from .constants import DEFAULT_PAD_TOKEN_INDEX, IGNORE_INDEX
 
-__all__ = ['IGNORE_INDEX', 'DEFAULT_PAD_TOKEN']
+__all__ = ['IGNORE_INDEX', 'DEFAULT_PAD_TOKEN_INDEX']
