@@ -1,14 +1,13 @@
 import copy
-from typing import Dict, Sequence
+from dataclasses import dataclass
+from typing import Any, Dict, Sequence
 
 import torch
-from mmengine.model import BaseDataPreprocessor
 from torch.nn.utils.rnn import pad_sequence
 
 from mmchat.registry import TOKENIZER
-from mmchat.utils import IGNORE_INDEX, DEFAULT_PAD_TOKEN_INDEX
-from dataclasses import dataclass
-from typing import Any
+from mmchat.utils import DEFAULT_PAD_TOKEN_INDEX, IGNORE_INDEX
+
 
 @dataclass
 class CollatorWithPadding:
@@ -68,14 +67,12 @@ class CollatorWithPadding:
                 input_ids.append(torch.tensor(tokenized_source))
 
         # Apply padding
-        if self.tokenizer.pad_token_id is not None
-            pad_index = self.tokenizer.pad_token_id 
+        if self.tokenizer.pad_token_id is not None:
+            pad_index = self.tokenizer.pad_token_id
         else:
             pad_index = DEFAULT_PAD_TOKEN_INDEX
         input_ids = pad_sequence(
-            input_ids,
-            batch_first=True,
-            padding_value=pad_index)
+            input_ids, batch_first=True, padding_value=pad_index)
         labels = pad_sequence(
             labels, batch_first=True, padding_value=IGNORE_INDEX
         ) if not self.predict_with_generate else None
