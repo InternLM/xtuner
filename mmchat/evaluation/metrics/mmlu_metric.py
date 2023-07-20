@@ -104,6 +104,14 @@ class MMLUMetric(BaseMetric):
         return {'A': 0, 'B': 1, 'C': 2, 'D': 3}[abcd]
 
     @staticmethod
+    def find_first_zero_index(tensor):
+        indices = torch.nonzero(tensor == 0)
+        if indices.numel() > 0:
+            return indices[0].item()
+        else:
+            return None
+
+    @staticmethod
     def accuracy(preds, gts):
         """Computes the accuracy for preds and gts."""
         correct = [1 if pred == gt else 0 for pred, gt in zip(preds, gts)]
@@ -120,15 +128,19 @@ class MMLUMetric(BaseMetric):
             data_samples (Sequence[dict]): A batch of outputs from
                 the model.
         """
-        subjects = data_batch['subject']
-        gts = [self.ABCD_to_0123(gt) for gt in data_batch['output']]
+        subjects = data_batch['data_samples']['subjects']
+        gts = [
+            self.ABCD_to_0123(gt)
+            for gt in data_batch['data_samples']['labels']
+        ]
         preds = []
-        for sample, subject, gt in zip(data_samples, subjects, gts):
+        for sample, attn_mask, subject, gt in zip(
+                data_samples, data_batch['data']['attention_mask'], subjects,
+                gts):
             pred_logits = sample['logits']
-            labels = sample['labels']
-            labels_non_zero_id = (labels != -100).nonzero()[0][0]
-            pred_logtis_abcd = pred_logits[labels_non_zero_id - 1,
-                                           self.abcd_idx]
+            first_zero_idx = self.find_first_zero_index(attn_mask)
+            pred_idx = -1 if first_zero_idx is None else first_zero_idx - 1
+            pred_logtis_abcd = pred_logits[pred_idx, self.abcd_idx]
             pred = torch.argmax(pred_logtis_abcd).item()
             preds.append(pred)
             self.results.append((subject, pred, gt))

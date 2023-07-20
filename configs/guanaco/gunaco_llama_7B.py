@@ -1,5 +1,6 @@
 import torch
 from mmengine.config import read_base
+from mmengine.model import BaseDataPreprocessor
 from peft import LoraConfig
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           BitsAndBytesConfig)
@@ -15,6 +16,7 @@ with read_base():
 pretrained_model_name_or_path = '/nvme/share_data/llama-7b'
 model = dict(
     type=SupervisedQloraFinetune,
+    data_preprocessor=dict(type=BaseDataPreprocessor),
     llm=dict(
         type=AutoModelForCausalLM.from_pretrained,
         pretrained_model_name_or_path=pretrained_model_name_or_path,

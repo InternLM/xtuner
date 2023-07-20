@@ -89,10 +89,7 @@ class SupervisedFinetune(BaseModel):
 
     def predict(self, data, data_samples=None):
         outputs = self.llm(**data)
-        logits_dict = [{
-            'labels': labels,
-            'logits': logits
-        } for labels, logits in zip(data['labels'], outputs.logits)]
+        logits_dict = [{'logits': logits} for logits in outputs.logits]
         return logits_dict
 
     def compute_loss(self, data, data_samples=None):
