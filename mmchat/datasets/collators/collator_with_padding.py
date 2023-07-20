@@ -20,6 +20,11 @@ class CollatorWithPadding:
 
     def __post_init__(self):
         self.tokenizer = TOKENIZER.build(self.tokenizer)
+        if self.tokenizer.pad_token_id is None:
+            self.tokenizer.add_special_tokens({
+                'pad_token':
+                self.tokenizer.convert_ids_to_tokens(DEFAULT_PAD_TOKEN_INDEX)
+            })
 
     def __call__(self, instances: Sequence[Dict]) -> Dict[str, torch.Tensor]:
         # Extract elements
@@ -67,18 +72,16 @@ class CollatorWithPadding:
                 input_ids.append(torch.tensor(tokenized_source))
 
         # Apply padding
-        if self.tokenizer.pad_token_id is not None:
-            pad_index = self.tokenizer.pad_token_id
-        else:
-            pad_index = DEFAULT_PAD_TOKEN_INDEX
         input_ids = pad_sequence(
-            input_ids, batch_first=True, padding_value=pad_index)
+            input_ids,
+            batch_first=True,
+            padding_value=self.tokenizer.pad_token_id)
         labels = pad_sequence(
             labels, batch_first=True, padding_value=IGNORE_INDEX
         ) if not self.predict_with_generate else None
         data_dict = {
             'input_ids': input_ids,
-            'attention_mask': input_ids.ne(pad_index),
+            'attention_mask': input_ids.ne(self.tokenizer.pad_token_id),
         }
 
         if labels is not None:
