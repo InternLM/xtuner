@@ -9,8 +9,6 @@ from torch import nn
 
 from mmchat.registry import LLM
 
-DEFAULT_PAD_TOKEN = '[PAD]'
-
 
 def traverse_dict(d):
     if isinstance(d, dict):
@@ -57,43 +55,11 @@ def smart_tokenizer_and_embedding_resize(
 
 class SupervisedFinetune(BaseModel):
 
-    def __init__(self, llm, data_preprocessor):
+    def __init__(self, llm, data_preprocessor=None):
         super().__init__(data_preprocessor)
         self.llm = self._build_from_cfg_or_module(llm, LLM)
         self.llm.config.use_cache = False
         self.llm.config.torch_dtype = torch.float32
-        if self.tokenizer._pad_token is None:
-            smart_tokenizer_and_embedding_resize(
-                special_tokens_dict=dict(pad_token=DEFAULT_PAD_TOKEN),
-                tokenizer=self.tokenizer,
-                model=self.llm,
-            )
-        from transformers.models.llama import LlamaTokenizer
-
-        if isinstance(self.tokenizer, LlamaTokenizer):
-            # LLaMA tokenizer may not have correct special tokens set.
-            # Check and add them if missing to prevent them from being
-            # parsed into different tokens.
-            # Note that these are present in the vocabulary.
-            # Note also that `model.config.pad_token_id` is 0 which
-            # corresponds to `<unk>` token.
-            print('Adding special tokens.')
-            self.tokenizer.add_special_tokens({
-                'eos_token':
-                self.tokenizer.convert_ids_to_tokens(
-                    self.llm.config.eos_token_id),
-                'bos_token':
-                self.tokenizer.convert_ids_to_tokens(
-                    self.llm.config.bos_token_id),
-                'unk_token':
-                self.tokenizer.convert_ids_to_tokens(
-                    self.llm.config.pad_token_id if self.llm.config.
-                    pad_token_id != -1 else self.tokenizer.pad_token_id),
-            })
-
-    @property
-    def tokenizer(self):
-        return self.data_preprocessor.tokenizer
 
     def _build_from_cfg_or_module(self, cfg_or_mod, registry):
         if isinstance(cfg_or_mod, nn.Module):
@@ -123,10 +89,7 @@ class SupervisedFinetune(BaseModel):
 
     def predict(self, data, data_samples=None):
         outputs = self.llm(**data)
-        logits_dict = [{
-            'labels': labels,
-            'logits': logits
-        } for labels, logits in zip(data['labels'], outputs.logits)]
+        logits_dict = [{'logits': logits} for logits in outputs.logits]
         return logits_dict
 
     def compute_loss(self, data, data_samples=None):

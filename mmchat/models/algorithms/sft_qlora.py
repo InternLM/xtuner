@@ -24,7 +24,7 @@ def find_all_linear_names(model):
 
 class SupervisedQloraFinetune(SupervisedFinetune):
 
-    def __init__(self, llm, data_preprocessor, lora):
+    def __init__(self, llm, lora, data_preprocessor=None):
         super().__init__(llm, data_preprocessor)
 
         self.llm = prepare_model_for_kbit_training(self.llm)

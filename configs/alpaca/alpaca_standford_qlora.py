@@ -4,7 +4,7 @@ from peft import LoraConfig
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           BitsAndBytesConfig)
 
-from mmchat.models import DataProcesorForCausalLM, SupervisedQloraFinetune
+from mmchat.models import SupervisedQloraFinetune
 
 with read_base():
     from .._base_.datasets.aplaca import *  # noqa: F401,F403
@@ -14,18 +14,6 @@ with read_base():
 pretrained_model_name_or_path = '/share/gaojianfei/merged_chinese_lora_7b'
 model = dict(
     type=SupervisedQloraFinetune,
-    data_preprocessor=dict(
-        type=DataProcesorForCausalLM,
-        tokenizer=dict(
-            type=AutoTokenizer.from_pretrained,
-            pretrained_model_name_or_path=pretrained_model_name_or_path,
-            use_fast=False,
-        ),
-        source_max_len=512,
-        target_max_len=512,
-        train_on_source=False,
-        predict_with_generate=False,
-    ),
     llm=dict(
         type=AutoModelForCausalLM.from_pretrained,
         pretrained_model_name_or_path=pretrained_model_name_or_path,
@@ -44,3 +32,11 @@ model = dict(
         lora_dropout=0.1,
         bias='none',
         task_type='CAUSAL_LM'))
+
+tokenizer = dict(
+    type=AutoTokenizer.from_pretrained,
+    pretrained_model_name_or_path=pretrained_model_name_or_path,
+    use_fast=False,
+    padding_side='right')
+
+train_dataloader['collate_fn']['tokenizer'] = tokenizer  # noqa: F405

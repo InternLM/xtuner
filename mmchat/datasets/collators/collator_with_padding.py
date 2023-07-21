@@ -1,44 +1,40 @@
 import copy
-from typing import Dict, Sequence
+from dataclasses import dataclass
+from typing import Any, Dict, Sequence
 
 import torch
-from mmengine.model import BaseDataPreprocessor
 from torch.nn.utils.rnn import pad_sequence
 
 from mmchat.registry import TOKENIZER
-
-IGNORE_INDEX = -100
-DEFAULT_PAD_TOKEN = '[PAD]'
+from mmchat.utils import DEFAULT_PAD_TOKEN_INDEX, IGNORE_INDEX
 
 
-class DataProcesorForCausalLM(BaseDataPreprocessor):
+@dataclass
+class CollatorWithPadding:
 
-    def __init__(self,
-                 tokenizer,
-                 source_max_len,
-                 target_max_len,
-                 train_on_source,
-                 predict_with_generate,
-                 non_blocking: bool = False):
-        super().__init__(non_blocking)
-        self.tokenizer = TOKENIZER.build(tokenizer)
-        # import pdb;pdb.set_trace()
-        self.source_max_len = source_max_len
-        self.target_max_len = target_max_len
-        self.train_on_source = train_on_source
-        self.predict_with_generate = predict_with_generate
+    tokenizer: Any
+    source_max_len: int
+    target_max_len: int
+    train_on_source: bool = False
+    predict_with_generate: bool = False
 
-    def forward(self,
-                instances: Sequence[Dict],
-                training=True) -> Dict[str, torch.Tensor]:
+    def __post_init__(self):
+        self.tokenizer = TOKENIZER.build(self.tokenizer)
+        if self.tokenizer.pad_token_id is None:
+            self.tokenizer.add_special_tokens({
+                'pad_token':
+                self.tokenizer.convert_ids_to_tokens(DEFAULT_PAD_TOKEN_INDEX)
+            })
+
+    def __call__(self, instances: Sequence[Dict]) -> Dict[str, torch.Tensor]:
         # Extract elements
         sources = [
-            f'{self.tokenizer.bos_token}{example}'
-            for example in instances['input']
+            f"{self.tokenizer.bos_token}{example['input']}"
+            for example in instances
         ]
         targets = [
-            f'{example}{self.tokenizer.eos_token}'
-            for example in instances['output']
+            f"{example['output']}{self.tokenizer.eos_token}"
+            for example in instances
         ]
         # Tokenize
         tokenized_sources_with_prompt = self.tokenizer(
@@ -74,7 +70,6 @@ class DataProcesorForCausalLM(BaseDataPreprocessor):
                                           tokenized_target)))
             else:
                 input_ids.append(torch.tensor(tokenized_source))
-        # import pdb;pdb.set_trace()
 
         # Apply padding
         input_ids = pad_sequence(
@@ -92,4 +87,4 @@ class DataProcesorForCausalLM(BaseDataPreprocessor):
         if labels is not None:
             data_dict['labels'] = labels
 
-        return self.cast_data({'data': data_dict, 'data_samples': None})
+        return {'data': data_dict, 'data_samples': None}
