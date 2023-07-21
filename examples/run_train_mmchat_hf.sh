@@ -1,4 +1,4 @@
-torchrun --nproc_per_node=4 --master_port=10000 train_mmchat_hf.py \
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6 torchrun --nproc_per_node=7 --master_port=10000 train_mmchat_hf.py \
     --model_name_or_path /nvme/share_data/llama-7b/ \
     --bf16 True \
     --output_dir /home/humu/MMChat/work_dirs/mmchat_hf_llama-7b \
@@ -17,4 +17,5 @@ torchrun --nproc_per_node=4 --master_port=10000 train_mmchat_hf.py \
     --logging_steps 1 \
     --fsdp "full_shard auto_wrap" \
     --fsdp_transformer_layer_cls_to_wrap 'LlamaDecoderLayer' \
-    --tf32 True
+    --tf32 True \
+    --remove_unused_columns False

@@ -4,9 +4,9 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from mmchat.models import SupervisedFinetune
 
 with read_base():
-    from .._base_.datasets.alpaca import *  # noqa: F401,F403
+    from .._base_.datasets.aplaca import *  # noqa: F401,F403
     from .._base_.default_runtime import *  # noqa: F401,F403
-    from .._base_.schedules.guanaco import *  # noqa: F401,F403
+    from .._base_.schedules.guanaco_deepspeed import *  # noqa: F401,F403
 
 pretrained_model_name_or_path = '/nvme/share_data/llama-7b'
 model = dict(
@@ -21,4 +21,4 @@ tokenizer = dict(
     use_fast=False,
     padding_side='right')
 
-train_dataloader['dataset']['tokenizer'] = tokenizer  # noqa: F405
+train_dataloader['collate_fn']['tokenizer'] = tokenizer  # noqa: F405

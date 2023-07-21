@@ -60,6 +60,7 @@ class SupervisedFinetune(BaseModel):
         self.llm = self._build_from_cfg_or_module(llm, LLM)
         self.llm.config.use_cache = False
         self.llm.config.torch_dtype = torch.float32
+    
     def _build_from_cfg_or_module(self, cfg_or_mod, registry):
         if isinstance(cfg_or_mod, nn.Module):
             return cfg_or_mod
@@ -94,5 +95,11 @@ class SupervisedFinetune(BaseModel):
     def compute_loss(self, data, data_samples=None):
         outputs = self.llm(**data)
         # import pdb;pdb.set_trace()
-        loss_dict = {'loss_llm': outputs.loss}
+        loss_dict = {'loss': outputs.loss}
         return loss_dict
+    
+    def __getattr__(self, name: str):
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            return getattr(self.llm, name)

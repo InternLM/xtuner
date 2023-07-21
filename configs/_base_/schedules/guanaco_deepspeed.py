@@ -5,13 +5,7 @@ from torch.optim import AdamW
 # optimizer
 optim_wrapper = dict(
     type=DeepSpeedOptimWrapper,
-<<<<<<< HEAD
     optimizer=dict(type=AdamW, lr=0.0002, weight_decay=0.0))
-=======
-    optimizer=dict(
-        type=AdamW, lr=0.0016, weight_decay=0.0))
-
->>>>>>> passed deepspeed
 
 # training strategy
 strategy = dict(

@@ -6,7 +6,7 @@ optim_wrapper = dict(
     type=AmpOptimWrapper,
     optimizer=dict(type=PagedAdamW32bit, lr=0.0002, weight_decay=0.0),
     clip_grad=dict(max_norm=0.3, error_if_nonfinite=True),
-    accumulative_counts=16,
+    accumulative_counts=1,
     loss_scale='dynamic',
     dtype='float16')
 
