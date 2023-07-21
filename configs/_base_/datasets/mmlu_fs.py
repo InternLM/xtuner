@@ -2,6 +2,7 @@ from datasets import load_dataset
 from mmengine.dataset import DefaultSampler
 
 from mmchat.datasets import process_hf_dataset
+from mmchat.datasets.collators import CollatorMMLU
 
 data_root = 'data/mmlu/'
 
@@ -18,7 +19,8 @@ val_dataloader = dict(
     batch_size=1,
     num_workers=1,
     dataset=val_mmlu_fs,
-    sampler=dict(type=DefaultSampler, shuffle=False))
+    sampler=dict(type=DefaultSampler, shuffle=False),
+    collate_fn=dict(type=CollatorMMLU, tokenizer=None, max_len=2048))
 
 test_mmlu_fs = dict(
     type=process_hf_dataset, dataset=mmlu_fs_dataset, mode='test')
@@ -26,7 +28,8 @@ test_dataloader = dict(
     batch_size=1,
     num_workers=1,
     dataset=test_mmlu_fs,
-    sampler=dict(type=DefaultSampler, shuffle=False))
+    sampler=dict(type=DefaultSampler, shuffle=False),
+    collate_fn=dict(type=CollatorMMLU, tokenizer=None, max_len=2048))
 
 val_cfg = dict(type='ValLoop')
 test_cfg = dict(type='TestLoop')

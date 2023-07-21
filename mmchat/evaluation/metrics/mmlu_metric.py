@@ -3,7 +3,7 @@ from typing import Any, Sequence
 import numpy as np
 import torch
 from mmengine.evaluator import BaseMetric
-from mmengine.logging import MMLogger
+from mmengine.logging import print_log
 from rich.console import Console
 from rich.table import Table
 
@@ -90,7 +90,6 @@ class MMLUMetric(BaseMetric):
 
     def __init__(self, tokenizer, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.logger: MMLogger = MMLogger.get_current_instance()
         tokenizer = TOKENIZER.build(tokenizer)
         self.abcd_idx = [
             tokenizer('A', add_special_tokens=False).input_ids[0],
@@ -102,6 +101,14 @@ class MMLUMetric(BaseMetric):
     @staticmethod
     def ABCD_to_0123(abcd):
         return {'A': 0, 'B': 1, 'C': 2, 'D': 3}[abcd]
+
+    @staticmethod
+    def find_first_zero_index(tensor):
+        indices = torch.nonzero(tensor == 0)
+        if indices.numel() > 0:
+            return indices[0].item()
+        else:
+            return None
 
     @staticmethod
     def accuracy(preds, gts):
@@ -120,15 +127,19 @@ class MMLUMetric(BaseMetric):
             data_samples (Sequence[dict]): A batch of outputs from
                 the model.
         """
-        subjects = data_batch['subject']
-        gts = [self.ABCD_to_0123(gt) for gt in data_batch['output']]
+        subjects = data_batch['data_samples']['subjects']
+        gts = [
+            self.ABCD_to_0123(gt)
+            for gt in data_batch['data_samples']['labels']
+        ]
         preds = []
-        for sample, subject, gt in zip(data_samples, subjects, gts):
+        for sample, attn_mask, subject, gt in zip(
+                data_samples, data_batch['data']['attention_mask'], subjects,
+                gts):
             pred_logits = sample['logits']
-            labels = sample['labels']
-            labels_non_zero_id = (labels != -100).nonzero()[0][0]
-            pred_logtis_abcd = pred_logits[labels_non_zero_id - 1,
-                                           self.abcd_idx]
+            first_zero_idx = self.find_first_zero_index(attn_mask)
+            pred_idx = -1 if first_zero_idx is None else first_zero_idx - 1
+            pred_logtis_abcd = pred_logits[pred_idx, self.abcd_idx]
             pred = torch.argmax(pred_logtis_abcd).item()
             preds.append(pred)
             self.results.append((subject, pred, gt))
@@ -186,7 +197,7 @@ class MMLUMetric(BaseMetric):
             assert len(subjects_results[subject]['preds']) == len(
                 subjects_results[subject]['gts'])
             if len(subjects_results[subject]['preds']) == 0:
-                self.logger.info(f'Skip subject {subject} for mmlu')
+                print_log(f'Skip subject {subject} for mmlu', 'current')
             else:
                 score = self.accuracy(subjects_results[subject]['preds'],
                                       subjects_results[subject]['gts'])
@@ -195,7 +206,7 @@ class MMLUMetric(BaseMetric):
             assert len(subcats_results[subcat]['preds']) == len(
                 subcats_results[subcat]['gts'])
             if len(subcats_results[subcat]['preds']) == 0:
-                self.logger.info(f'Skip subcategory {subcat} for mmlu')
+                print_log(f'Skip subcategory {subcat} for mmlu', 'current')
             else:
                 score = self.accuracy(subcats_results[subcat]['preds'],
                                       subcats_results[subcat]['gts'])
@@ -204,7 +215,7 @@ class MMLUMetric(BaseMetric):
             assert len(cats_results[cat]['preds']) == len(
                 cats_results[cat]['gts'])
             if len(cats_results[cat]['preds']) == 0:
-                self.logger.info(f'Skip category {cat} for mmlu')
+                print_log(f'Skip category {cat} for mmlu', 'current')
             else:
                 score = self.accuracy(cats_results[cat]['preds'],
                                       cats_results[cat]['gts'])
@@ -232,4 +243,4 @@ class MMLUMetric(BaseMetric):
             table.add_row(cat, f'{acc:.1f}')
         with console.capture() as capture:
             console.print(table, end='')
-        self.logger.info('\n' + capture.get())
+        print_log('\n' + capture.get(), 'current')

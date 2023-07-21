@@ -1,10 +1,11 @@
 import torch
 from mmengine.config import read_base
+from mmengine.model import BaseDataPreprocessor
 from peft import LoraConfig
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           BitsAndBytesConfig)
 
-from mmchat.models import DataProcesorForCausalLM, SupervisedQloraFinetune
+from mmchat.models import SupervisedQloraFinetune
 
 with read_base():
     from .._base_.datasets.mmlu_fs import *  # noqa: F401,F403
@@ -15,17 +16,7 @@ with read_base():
 pretrained_model_name_or_path = '/nvme/share_data/llama-7b'
 model = dict(
     type=SupervisedQloraFinetune,
-    data_preprocessor=dict(
-        type=DataProcesorForCausalLM,
-        tokenizer=dict(
-            type=AutoTokenizer.from_pretrained,
-            pretrained_model_name_or_path=pretrained_model_name_or_path,
-            use_fast=False,
-            padding_side='right'),
-        source_max_len=2048,
-        target_max_len=512,
-        train_on_source=False,
-        predict_with_generate=False),
+    data_preprocessor=dict(type=BaseDataPreprocessor),
     llm=dict(
         type=AutoModelForCausalLM.from_pretrained,
         pretrained_model_name_or_path=pretrained_model_name_or_path,
@@ -48,14 +39,15 @@ model = dict(
         bias='none',
         task_type='CAUSAL_LM'))
 
-val_evaluator['tokenizer'] = dict(  # noqa: F405
+tokenizer = dict(
     type=AutoTokenizer.from_pretrained,
     pretrained_model_name_or_path=pretrained_model_name_or_path,
     use_fast=False,
     padding_side='right')
 
-test_evaluator['tokenizer'] = dict(  # noqa: F405
-    type=AutoTokenizer.from_pretrained,
-    pretrained_model_name_or_path=pretrained_model_name_or_path,
-    use_fast=False,
-    padding_side='right')
+train_dataloader['collate_fn']['tokenizer'] = tokenizer  # noqa: F405
+val_dataloader['collate_fn']['tokenizer'] = tokenizer  # noqa: F405
+test_dataloader['collate_fn']['tokenizer'] = tokenizer  # noqa: F405
+
+val_evaluator['tokenizer'] = tokenizer  # noqa: F405
+test_evaluator['tokenizer'] = tokenizer  # noqa: F405

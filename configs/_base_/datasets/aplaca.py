@@ -2,29 +2,24 @@ from datasets import load_dataset
 from mmengine.dataset import DefaultSampler
 
 from mmchat.datasets import process_hf_dataset
+from mmchat.datasets.collators import CollatorWithPadding
+from mmchat.datasets.utils import aplaca_map_fn
 
 _alpaca = dict(
     type=process_hf_dataset,
-    dataset=dict(
-        type=load_dataset,
-        path='tatsu-lab/alpaca',
-    ),
-    # map_fn = extract_alpaca_dataset,
-    prompt_input_format=(
-        'Below is an instruction that describes a task, '
-        'paired with an input that provides further context. '
-        'Write a response that appropriately completes the request.\n\n'
-        '### Instruction:\n{instruction}\n\n### Input:\n{input}\n\n'
-        '### Response: '),
-    prompt_no_input_format=(
-        'Below is an instruction that describes a task. '
-        'Write a response that appropriately completes the request.\n\n'
-        '### Instruction:\n{instruction}\n\n### Response: '),
-    remove_columns=['instruction'],
-)
+    dataset=dict(type=load_dataset, path='tatsu-lab/alpaca'),
+    map_fn=aplaca_map_fn,
+    remove_columns=['instruction', 'text'])
 
 train_dataloader = dict(
     batch_size=1,
     num_workers=2,
     dataset=_alpaca,
-    sampler=dict(type=DefaultSampler, shuffle=True))
+    sampler=dict(type=DefaultSampler, shuffle=True),
+    collate_fn=dict(
+        type=CollatorWithPadding,
+        tokenizer=None,
+        source_max_len=1024,
+        target_max_len=1024,
+        train_on_source=False,
+        predict_with_generate=False))
