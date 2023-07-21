@@ -3,7 +3,7 @@ from typing import Any, Sequence
 import numpy as np
 import torch
 from mmengine.evaluator import BaseMetric
-from mmengine.logging import MMLogger
+from mmengine.logging import print_log
 from rich.console import Console
 from rich.table import Table
 
@@ -90,7 +90,6 @@ class MMLUMetric(BaseMetric):
 
     def __init__(self, tokenizer, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.logger: MMLogger = MMLogger.get_current_instance()
         tokenizer = TOKENIZER.build(tokenizer)
         self.abcd_idx = [
             tokenizer('A', add_special_tokens=False).input_ids[0],
@@ -198,7 +197,7 @@ class MMLUMetric(BaseMetric):
             assert len(subjects_results[subject]['preds']) == len(
                 subjects_results[subject]['gts'])
             if len(subjects_results[subject]['preds']) == 0:
-                self.logger.info(f'Skip subject {subject} for mmlu')
+                print_log(f'Skip subject {subject} for mmlu', 'current')
             else:
                 score = self.accuracy(subjects_results[subject]['preds'],
                                       subjects_results[subject]['gts'])
@@ -207,7 +206,7 @@ class MMLUMetric(BaseMetric):
             assert len(subcats_results[subcat]['preds']) == len(
                 subcats_results[subcat]['gts'])
             if len(subcats_results[subcat]['preds']) == 0:
-                self.logger.info(f'Skip subcategory {subcat} for mmlu')
+                print_log(f'Skip subcategory {subcat} for mmlu', 'current')
             else:
                 score = self.accuracy(subcats_results[subcat]['preds'],
                                       subcats_results[subcat]['gts'])
@@ -216,7 +215,7 @@ class MMLUMetric(BaseMetric):
             assert len(cats_results[cat]['preds']) == len(
                 cats_results[cat]['gts'])
             if len(cats_results[cat]['preds']) == 0:
-                self.logger.info(f'Skip category {cat} for mmlu')
+                print_log(f'Skip category {cat} for mmlu', 'current')
             else:
                 score = self.accuracy(cats_results[cat]['preds'],
                                       cats_results[cat]['gts'])
@@ -244,4 +243,4 @@ class MMLUMetric(BaseMetric):
             table.add_row(cat, f'{acc:.1f}')
         with console.capture() as capture:
             console.print(table, end='')
-        self.logger.info('\n' + capture.get())
+        print_log('\n' + capture.get(), 'current')
