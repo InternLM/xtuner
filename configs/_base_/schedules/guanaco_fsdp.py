@@ -2,7 +2,7 @@ from mmengine.optim import OptimWrapper
 from mmengine._strategy import FSDPStrategy
 from mmengine.model.wrappers import MMFullyShardedDataParallel
 from bitsandbytes.optim import PagedAdamW32bit
-from mmchat.models.utils import ignored_uint8_params
+from mmchat.models.utils import ignored_lora_params
 # optimizer
 optim_wrapper = dict(
     type=OptimWrapper,
@@ -13,7 +13,7 @@ optim_wrapper = dict(
 
 model_wrapper = dict(type=MMFullyShardedDataParallel,
                      use_orig_params=True,
-                     auto_wrap_policy=ignored_uint8_params)
+                     auto_wrap_policy=ignored_lora_params)
 
 # training strategy
 strategy = dict(type=FSDPStrategy, model_wrapper=model_wrapper)

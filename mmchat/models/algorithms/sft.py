@@ -60,7 +60,6 @@ class SupervisedFinetune(BaseModel):
         self.llm = self._build_from_cfg_or_module(llm, LLM)
         self.llm.config.use_cache = False
         self.llm.config.torch_dtype = torch.float32
-
     def _build_from_cfg_or_module(self, cfg_or_mod, registry):
         if isinstance(cfg_or_mod, nn.Module):
             return cfg_or_mod
