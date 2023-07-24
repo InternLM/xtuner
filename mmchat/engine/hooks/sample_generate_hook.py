@@ -28,7 +28,6 @@ class SampleGenerateHook(Hook):
 
         for sample_input in self.sample_inputs:
             inputs = self.prompt.format(sample_input=sample_input)
-            runner.logger.info(f'sample input: {inputs}')
             input_ids = tokenizer(inputs, return_tensors='pt')['input_ids']
             input_ids = input_ids.to(device)
             generation_output = model.llm.generate(
