@@ -7,9 +7,15 @@ from mmchat.registry import HOOKS
 @HOOKS.register_module()
 class SampleGenerateHook(Hook):
 
-    def __init__(self, sample_inputs, every_n_iters=None):
+    def __init__(self,
+                 sample_inputs,
+                 prompt,
+                 every_n_iters=None,
+                 max_new_tokens=370):
         self.sample_inputs = sample_inputs
+        self.prompt = prompt
         self.every_n_iters = every_n_iters
+        self.max_new_tokens = max_new_tokens
 
     def _generate_samples(self, runner):
         runner.logger.info('after_train_iter in SampleGenerateHook.')
@@ -17,19 +23,17 @@ class SampleGenerateHook(Hook):
         if is_model_wrapper(model):
             model = model.module
 
+        device = next(iter(model.parameters())).device
         tokenizer = model.data_preprocessor.tokenizer
 
         for sample_input in self.sample_inputs:
-            inputs = 'Below is an instruction that describes a task. ' \
-                'Write a response that appropriately completes the request.' \
-                '\n\n ### Instruction:\n{sample_input}\n\n' \
-                '### Response: '.format(sample_input=sample_input)
+            inputs = self.prompt.format(sample_input=sample_input)
             runner.logger.info(f'sample input: {inputs}')
             input_ids = tokenizer(inputs, return_tensors='pt')['input_ids']
-            input_ids = input_ids.to('cuda')
+            input_ids = input_ids.to(device)
             generation_output = model.llm.generate(
                 input_ids=input_ids,
-                max_new_tokens=370,
+                max_new_tokens=self.max_new_tokens,
             )
             runner.logger.info(
                 f'sample output: {tokenizer.decode(generation_output[0])}')
