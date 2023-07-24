@@ -7,7 +7,7 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer,
 from mmchat.models import SupervisedQloraFinetune
 
 with read_base():
-    from .._base_.datasets.aplaca import *  # noqa: F401,F403
+    from .._base_.datasets.alpaca import *  # noqa: F401,F403
     from .._base_.default_runtime import *  # noqa: F401,F403
     from .._base_.schedules.guanaco import *  # noqa: F401,F403
 
