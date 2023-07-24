@@ -1,4 +1,4 @@
-def aplaca_map_fn(example):
+def alpaca_map_fn(example):
     PROMPT = {
         'with_input':
         ('Below is an instruction that describes a task, paired with an '
