@@ -21,4 +21,4 @@ tokenizer = dict(
     use_fast=False,
     padding_side='right')
 
-train_dataloader['collate_fn']['tokenizer'] = tokenizer  # noqa: F405
+train_dataloader['dataset']['tokenizer'] = tokenizer  # noqa: F405
