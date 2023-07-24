@@ -55,7 +55,7 @@ class Concatenator:
                 for k, v in concatenated_samples.items()
             }
         else:
-            result = concatenated_samples
+            result = {k: [v] for k, v in concatenated_samples.items()}
             self.residual = {k: [] for k in concatenated_samples.keys()}
 
         return result
