@@ -2,34 +2,49 @@ from datasets import load_dataset
 from mmengine.dataset import DefaultSampler
 
 from mmchat.datasets import process_hf_dataset
-from mmchat.datasets.collators import CollatorMMLU
+from mmchat.datasets.collate_fns import mmlu_collate_fn
 
 data_root = 'data/mmlu/'
 
-mmlu_fs_dataset = dict(
+mmlu_fs_val_dataset = dict(
     type=load_dataset,
     path='json',
-    data_files=dict(
-        val=data_root + 'five_shot_mmlu_val.json',
-        test=data_root + 'five_shot_mmlu_test.json'))
+    data_files=dict(val=data_root + 'five_shot_mmlu_val.json'))
+
+mmlu_fs_test_dataset = dict(
+    type=load_dataset,
+    path='json',
+    data_files=dict(test=data_root + 'five_shot_mmlu_test.json'))
 
 val_mmlu_fs = dict(
-    type=process_hf_dataset, dataset=mmlu_fs_dataset, mode='val')
+    type=process_hf_dataset,
+    dataset=mmlu_fs_val_dataset,
+    mode='val',
+    tokenizer=False,
+    max_length=2048,
+    concat_to_max_length=False,
+    predict_with_generation=True)
 val_dataloader = dict(
     batch_size=1,
     num_workers=1,
     dataset=val_mmlu_fs,
     sampler=dict(type=DefaultSampler, shuffle=False),
-    collate_fn=dict(type=CollatorMMLU, tokenizer=None, max_len=2048))
+    collate_fn=dict(type=mmlu_collate_fn))
 
 test_mmlu_fs = dict(
-    type=process_hf_dataset, dataset=mmlu_fs_dataset, mode='test')
+    type=process_hf_dataset,
+    dataset=mmlu_fs_test_dataset,
+    mode='test',
+    tokenizer=False,
+    max_length=2048,
+    concat_to_max_length=False,
+    predict_with_generation=True)
 test_dataloader = dict(
     batch_size=1,
     num_workers=1,
     dataset=test_mmlu_fs,
     sampler=dict(type=DefaultSampler, shuffle=False),
-    collate_fn=dict(type=CollatorMMLU, tokenizer=None, max_len=2048))
+    collate_fn=dict(type=mmlu_collate_fn))
 
 val_cfg = dict(type='ValLoop')
 test_cfg = dict(type='TestLoop')

@@ -1,23 +1,61 @@
-def oasst1_map_fn(example):
-    return {'input': '', 'output': example['text']}
+import copy
+from itertools import chain
+
+from mmchat.utils import IGNORE_INDEX
 
 
-def aplaca_map_fn(example):
-    PROMPT = {
-        'with_input':
-        ('Below is an instruction that describes a task, paired with an '
-         'input that provides further context. '
-         'Write a response that appropriately completes the request.\n\n'
-         '### Instruction:\n{instruction}\n\n### Input:\n{input}\n\n'
-         '### Response: '),
-        'without_input':
-        ('Below is an instruction that describes a task. '
-         'Write a response that appropriately completes the request.\n\n'
-         '### Instruction:\n{instruction}\n\n'
-         '### Response: ')
-    }
-    if example.get('input', '') != '':
-        prompt_template = PROMPT['with_input']
+def encode_fn(example, tokenizer, max_length, with_output=True):
+    input_encode = tokenizer(
+        f"{tokenizer.bos_token}{example['input']}", add_special_tokens=False)
+    if with_output:
+        output_encode = tokenizer(
+            f"{example['output']}{tokenizer.eos_token}",
+            add_special_tokens=False)
+        input_ids = input_encode['input_ids'] + output_encode['input_ids']
+        labels = [IGNORE_INDEX] * len(
+            input_encode['input_ids']) + copy.deepcopy(
+                output_encode['input_ids'])
     else:
-        prompt_template = PROMPT['without_input']
-    return {'input': prompt_template.format(**example)}
+        input_ids = input_encode['input_ids']
+        labels = [IGNORE_INDEX] * len(input_encode['input_ids'])
+    if len(input_ids) > max_length:
+        input_ids = input_ids[:max_length]
+        labels = labels[:max_length]
+    return {'input_ids': input_ids, 'labels': labels}
+
+
+class Concatenator:
+    # https://github.com/facebookresearch/llama-recipes/blob/main/ft_datasets/utils.py
+
+    def __init__(self, chunk_size=2048):
+        self.chunk_size = chunk_size
+        self.residual = {'input_ids': [], 'labels': []}
+
+    def __call__(self, batch):
+        concatenated_samples = {
+            k: v + list(chain(*batch[k]))
+            for k, v in self.residual.items()
+        }
+
+        total_length = len(concatenated_samples[list(
+            concatenated_samples.keys())[0]])
+
+        if total_length >= self.chunk_size:
+            chunk_num = total_length // self.chunk_size
+            result = {
+                k: [
+                    v[i:i + self.chunk_size]
+                    for i in range(0, chunk_num *
+                                   self.chunk_size, self.chunk_size)
+                ]
+                for k, v in concatenated_samples.items()
+            }
+            self.residual = {
+                k: v[(chunk_num * self.chunk_size):]
+                for k, v in concatenated_samples.items()
+            }
+        else:
+            result = concatenated_samples
+            self.residual = {k: [] for k in concatenated_samples.keys()}
+
+        return result
