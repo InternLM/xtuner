@@ -1,5 +1,7 @@
 from functools import partial
 
+from torch.utils.data import ConcatDataset
+
 from mmchat.registry import DATASETS, TOKENIZER
 from .utils import Concatenator, encode_fn
 
@@ -34,3 +36,23 @@ def process_hf_dataset(dataset,
             batched=True,
             remove_columns=column_names)
     return dataset[mode]
+
+
+class HfDatasets(ConcatDataset):
+
+    def __init__(self, datasets_cfg):
+        datasets = []
+        names = []
+        for name, cfg in datasets_cfg.items():
+            datasets.append(DATASETS.build(cfg))
+            names.append(name)
+        self.names = names
+        super().__init__(datasets=datasets)
+
+    def __repr__(self):
+        main_str = 'Dataset as a concatenation of multiple datasets. \n{\n'
+        main_str += '\n'.join([
+            f'{name}: {repr(dataset)}'
+            for name, dataset in zip(self.names, self.datasets)
+        ])
+        return main_str
