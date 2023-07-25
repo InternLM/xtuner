@@ -50,9 +50,9 @@ class HfDatasets(ConcatDataset):
         super().__init__(datasets=datasets)
 
     def __repr__(self):
-        main_str = 'Dataset as a concatenation of multiple datasets. \n{\n'
+        main_str = 'Dataset as a concatenation of multiple datasets. \n'
         main_str += '\n'.join([
-            f'{name}: {repr(dataset)}'
+            f'{name}: {repr(dataset)},'
             for name, dataset in zip(self.names, self.datasets)
         ])
         return main_str
