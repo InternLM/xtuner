@@ -10,13 +10,13 @@ default_hooks = dict(
     timer=dict(type=IterTimerHook),
 
     # print log every 100 iterations.
-    logger=dict(type=LoggerHook, interval=1),
+    logger=dict(type=LoggerHook, interval=10),
 
     # enable the parameter scheduler.
     param_scheduler=dict(type=ParamSchedulerHook),
 
     # save checkpoint per epoch.
-    checkpoint=dict(type=CheckpointHook, interval=10),
+    checkpoint=dict(type=CheckpointHook, interval=1),
 
     # set sampler seed in distributed evrionment.
     sampler_seed=dict(type=DistSamplerSeedHook),
