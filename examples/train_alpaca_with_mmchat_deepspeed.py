@@ -16,11 +16,11 @@ def get_argument_parser():
                         default="/nvme/share_data/llama-7b")
     parser.add_argument("--dataset_cfg_path", 
                         type=str, 
-                        default="/home/humu/MMChat/configs/alpaca/alpaca_standford.py",
+                        default="../configs/alpaca/alpaca_standford_llama-7b.py",
                         help="Path to mmchat dataset config")
     parser.add_argument("--deepspeed_config", 
                         type=str, 
-                        default="/home/humu/MMChat/examples/deepspeed_config.json",
+                        default="./deepspeed_config.json",
                         help="Path to deepspeed config")
     parser.add_argument("--num_train_epochs",
                         type=int,

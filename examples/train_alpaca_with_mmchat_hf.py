@@ -14,7 +14,7 @@ class ModelArguments:
 
 @dataclass
 class DataArguments:
-    dataset_cfg_path: str = field(default='/home/humu/MMChat/configs/alpaca/alpaca_standford.py')
+    dataset_cfg_path: str = field(default='../configs/alpaca/alpaca_standford_llama-7b.py')
 
 
 @dataclass
