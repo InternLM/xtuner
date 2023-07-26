@@ -37,8 +37,8 @@ class SampleGenerateHook(Hook):
                 max_new_tokens=self.max_new_tokens,
             )
             runner.logger.info(
-                f'sample output: {self.tokenizer.decode(generation_output[0])}'
-            )
+                f'Sample output:\n'
+                f'{self.tokenizer.decode(generation_output[0])}\n')
 
     def after_train_iter(self,
                          runner,
