@@ -6,19 +6,19 @@ from mmchat.datasets.collate_fns import mmlu_collate_fn
 
 data_root = 'data/mmlu/'
 
-mmlu_fs_val_dataset = dict(
+mmlu_fs_val = dict(
     type=load_dataset,
     path='json',
     data_files=dict(val=data_root + 'five_shot_mmlu_val.json'))
 
-mmlu_fs_test_dataset = dict(
+mmlu_fs_test = dict(
     type=load_dataset,
     path='json',
     data_files=dict(test=data_root + 'five_shot_mmlu_test.json'))
 
-val_mmlu_fs = dict(
+mmlu_fs_val_dataset = dict(
     type=process_hf_dataset,
-    dataset=mmlu_fs_val_dataset,
+    dataset=mmlu_fs_val,
     mode='val',
     tokenizer=False,
     max_length=2048,
@@ -27,13 +27,13 @@ val_mmlu_fs = dict(
 val_dataloader = dict(
     batch_size=1,
     num_workers=1,
-    dataset=val_mmlu_fs,
+    dataset=mmlu_fs_val_dataset,
     sampler=dict(type=DefaultSampler, shuffle=False),
     collate_fn=dict(type=mmlu_collate_fn))
 
-test_mmlu_fs = dict(
+mmlu_fs_test_dataset = dict(
     type=process_hf_dataset,
-    dataset=mmlu_fs_test_dataset,
+    dataset=mmlu_fs_test,
     mode='test',
     tokenizer=False,
     max_length=2048,
@@ -42,7 +42,7 @@ test_mmlu_fs = dict(
 test_dataloader = dict(
     batch_size=1,
     num_workers=1,
-    dataset=test_mmlu_fs,
+    dataset=mmlu_fs_test_dataset,
     sampler=dict(type=DefaultSampler, shuffle=False),
     collate_fn=dict(type=mmlu_collate_fn))
 
