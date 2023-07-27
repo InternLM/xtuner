@@ -28,7 +28,7 @@ class SampleGenerateHook(Hook):
         device = next(iter(model.parameters())).device
 
         for sample_input in self.sample_inputs:
-            inputs = self.prompt.format(sample_input=sample_input)
+            inputs = self.prompt.format(input=sample_input)
             input_ids = self.tokenizer(
                 inputs, return_tensors='pt')['input_ids']
             input_ids = input_ids.to(device)
