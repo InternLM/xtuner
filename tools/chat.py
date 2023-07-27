@@ -33,12 +33,15 @@ def parse_args():
         '--top-k',
         type=int,
         default=50,
-        help='The number of highest probability vocabulary tokens to keep for top-k-filtering.')
+        help='The number of highest probability vocabulary tokens to '
+        'keep for top-k-filtering.')
     parser.add_argument(
         '--top-p',
         type=float,
         default=1,
-        help='If set to float < 1, only the smallest set of most probable tokens with probabilities that add up to top_p or higher are kept for generation.')
+        help='If set to float < 1, only the smallest set of most probable '
+        'tokens with probabilities that add up to top_p or higher are '
+        'kept for generation.')
     parser.add_argument(
         '--seed',
         type=int,
