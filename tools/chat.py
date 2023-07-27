@@ -3,7 +3,7 @@ import argparse
 import torch
 from mmengine.config import Config, DictAction
 from transformers import GenerationConfig
-from utils import PROMPTS, get_chat_utils
+from utils import PROMPT_TEMPLATE, get_chat_utils
 
 from mmchat.registry import MODELS, TOKENIZER
 
@@ -14,7 +14,7 @@ def parse_args():
     parser.add_argument('config', help='config file path')
     parser.add_argument(
         '--prompt',
-        choices=PROMPTS.keys(),
+        choices=PROMPT_TEMPLATE.keys(),
         default=None,
         help='Specify a prompt option')
     parser.add_argument(
@@ -27,14 +27,18 @@ def parse_args():
     parser.add_argument(
         '--temperature',
         type=float,
-        default=0.8,
-        help='Temperature value to control the diversity of generated text')
+        default=1.,
+        help='The value used to modulate the next token probabilities.')
+    parser.add_argument(
+        '--top-k',
+        type=int,
+        default=50,
+        help='The number of highest probability vocabulary tokens to keep for top-k-filtering.')
     parser.add_argument(
         '--top-p',
         type=float,
-        default=0.95,
-        help='Cumulative probability threshold for selecting next token '
-        'during text generation')
+        default=1,
+        help='If set to float < 1, only the smallest set of most probable tokens with probabilities that add up to top_p or higher are kept for generation.')
     parser.add_argument(
         '--seed',
         type=int,
@@ -89,6 +93,7 @@ def main():
         do_sample=args.temperature > 0,
         temperature=args.temperature,
         top_p=args.top_p,
+        top_k=args.top_k,
     )
 
     # warmup
@@ -97,6 +102,7 @@ def main():
         do_sample=args.temperature > 0,
         temperature=args.temperature,
         top_p=args.top_p,
+        top_k=args.top_k,
     )
 
     model.llm.generate(
@@ -109,7 +115,7 @@ def main():
         if text == 'exit':
             exit(0)
         if args.prompt is not None:
-            text = PROMPTS[args.prompt].format(input=text)
+            text = PROMPT_TEMPLATE[args.prompt].format(input=text)
         text = Decorator.decorate(text)
         ids = tokenizer.encode(text, return_tensors='pt')
 

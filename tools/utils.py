@@ -4,9 +4,9 @@ from transformers import (PreTrainedTokenizerFast, StoppingCriteria,
                           StoppingCriteriaList)
 from transformers.generation.streamers import BaseStreamer
 
-PROMPTS = {
+PROMPT_TEMPLATE = {
     'medical':
-    '',
+    '请从一名专业医生的角度，对下述医学问题给出安全、可靠的回答\n\n问：{input}\n\n答：',
     'title':
     'If you are an expert in writing papers, please generate '
     "a good paper title for this paper based on other authors' "
@@ -20,7 +20,6 @@ PROMPTS = {
 
 
 def unwarpper_model(model):
-    model = model.llm
     if 'PeftModel' in model.__class__.__name__:
         model = model.base_model.model
     return model
@@ -28,15 +27,18 @@ def unwarpper_model(model):
 
 def get_chat_utils(model):
     """Get utils by model type."""
-    model = unwarpper_model(model)
-    name = model.__class__.__name__
-    if name == 'InferenceEngine':
-        name = model.module.__class__.__name__
-
-    if name == 'InternLMForCausalLM':
+    if model.__class__.__name__ == 'InferenceEngine':
+        model = model.module
+    model = model.llm
+    is_peft = 'PeftModel' in model.__class__.__name__
+    is_internlm = 'InternLM' in unwarpper_model(model).__class__.__name__
+    if is_internlm:
         stop_criteria = InternLMStoppingCriteria()
         stop_criteria = StoppingCriteriaList([stop_criteria])
-        return InternLMDecorator, InternLMStreamer, stop_criteria
+        if is_peft:
+            return BaseDecorator, InternLMStreamer, stop_criteria
+        else:
+            return InternLMDecorator, InternLMStreamer, stop_criteria
     else:
         return BaseDecorator, DecodeOutputStreamer, None
 
