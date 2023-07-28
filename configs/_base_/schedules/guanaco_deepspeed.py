@@ -20,10 +20,10 @@ strategy = dict(
         initial_scale_power=15,
     ),
     inputs_to_half=['inputs'],
-    gradient_accumulation_steps=16,
+    gradient_accumulation_steps=1,
     gradient_clipping=0.3,
     zero_optimization=dict(
-        stage=1,
+        stage=2,
         allgather_partitions=True,
         reduce_scatter=True,
         allgather_bucket_size=50000000,
@@ -40,27 +40,23 @@ runner_type = 'FlexibleRunner'
 param_scheduler = [
     # warm up learning rate scheduler
     dict(
-        type='LinearLR',
-        start_factor=0.01,
-        by_epoch=True,
+        type="LinearLR",
+        start_factor=1e-5,
+        by_epoch=False,
         begin=0,
         end=5,
-        # update by iter
-        convert_to_iter_based=True),
+    ),
     # main learning rate scheduler
     dict(
-        type='CosineAnnealingLR',
-        T_max=95,
-        by_epoch=True,
+        type="ConstantLR",
+        by_epoch=False,
+        factor=1.0,
         begin=5,
-        end=100,
     )
 ]
 
 # train, val, test setting
-train_cfg = dict(by_epoch=True, max_epochs=100, val_interval=1)
-val_cfg = dict()
-test_cfg = dict()
+train_cfg = dict(by_epoch=True, max_epochs=3, val_interval=1)
 
 # NOTE: `auto_scale_lr` is for automatically scaling LR
 # based on the actual training batch size.
