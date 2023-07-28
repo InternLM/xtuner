@@ -91,8 +91,8 @@ custom_hooks = [
             'to build on our work and contribute to the responsible '
             'development of LLMs.',
         ],
-        prompt='If you are an expert in writing papers, please generate '
-        "a good paper title for this paper based on other authors' "
-        'descriptions of their abstracts.\n\n'
-        '### Descriptions:\n{input}\n\n### Title: ')
+        meta_instruction='If you are an expert in writing papers, please '
+        "generate a good paper title for this paper based on other authors' "
+        'descriptions of their abstracts.\n\n',
+        instruction='### Descriptions:\n{input}\n\n### Title: ')
 ]

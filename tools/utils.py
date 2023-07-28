@@ -5,17 +5,20 @@ from transformers import (PreTrainedTokenizerFast, StoppingCriteria,
 from transformers.generation.streamers import BaseStreamer
 
 PROMPT_TEMPLATE = {
-    'medical':
-    '请从一名专业医生的角度，对下述医学问题给出安全、可靠的回答\n\n问：{input}\n\n答：',
-    'title':
-    'If you are an expert in writing papers, please generate '
-    "a good paper title for this paper based on other authors' "
-    'descriptions of their abstracts.\n\n'
-    '### Descriptions:\n{input}\n\n### Title: ',
-    'law':
-    '',
-    'finance':
-    '',
+    'medical': {
+        'meta_instruction': '请从一名专业医生的角度，对下述医学问题给出安全、可靠的回答。\n\n',
+        'instruction': '问：{input}\n\n答：'
+    },
+    'title': {
+        'meta_instruction':
+        'If you are an expert in writing papers, please generate '
+        "a good paper title for this paper based on other authors' "
+        'descriptions of their abstracts.\n\n',
+        'instruction':
+        '### Descriptions:\n{input}\n\n### Title: '
+    },
+    'law': {},
+    'finance': {},
 }
 
 

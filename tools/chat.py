@@ -118,7 +118,12 @@ def main():
         if text == 'exit':
             exit(0)
         if args.prompt is not None:
-            text = PROMPT_TEMPLATE[args.prompt].format(input=text)
+            template = PROMPT_TEMPLATE[args.prompt]
+            prompt = ''
+            if 'meta_instruction' in template:
+                prompt += template['meta_instruction']
+            prompt += template['instruction']
+            text = prompt.format(input=text)
         text = Decorator.decorate(text)
         ids = tokenizer.encode(text, return_tensors='pt')
 

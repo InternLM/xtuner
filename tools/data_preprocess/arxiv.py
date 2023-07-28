@@ -20,7 +20,7 @@ def read_json_file(file_path):
     return data
 
 
-file_path = '../data/arxiv-metadata-oai-snapshot.json'
+file_path = './data/arxiv-metadata-oai-snapshot.json'
 json_data = read_json_file(file_path)
 
 target_categories = ['cs.AI', 'cs.CL', 'cs.CV']
@@ -31,7 +31,7 @@ filtered_data = [
     and datetime.strptime(item['update_date'], '%Y-%m-%d') >= from_time
 ]
 
-file_path = '../data/arxiv_postprocess_csAIcsCLcsCV_20200101.json'
+file_path = './data/arxiv_postprocess_csAIcsCLcsCV_20200101.json'
 
 with open(file_path, 'w') as file:
     json.dump(filtered_data, file)
