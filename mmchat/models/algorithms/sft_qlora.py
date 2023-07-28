@@ -2,7 +2,8 @@ from collections import OrderedDict
 
 import bitsandbytes as bnb
 import torch
-from peft import (PeftType, PromptLearningConfig, get_peft_model,
+import torch.nn as nn
+from peft import (PeftType, PromptLearningConfig, PeftConfig, get_peft_model,
                   prepare_model_for_kbit_training)
 
 from mmchat.registry import MODELS
@@ -11,6 +12,7 @@ from .sft import SupervisedFinetune
 
 def find_all_linear_names(model):
     cls = bnb.nn.Linear4bit
+    # cls = nn.Linear
     lora_module_names = set()
     for name, module in model.named_modules():
         if isinstance(module, cls):
@@ -31,7 +33,13 @@ class SupervisedQloraFinetune(SupervisedFinetune):
 
         modules = find_all_linear_names(self.llm)
 
-        lora = MODELS.build(lora)
+        if isinstance(lora, PeftConfig):
+            lora = lora
+        elif isinstance(lora, dict):
+            lora = MODELS.build(lora)
+        else:
+            raise NotImplementedError
+        
         lora.target_modules = modules
 
         self.llm = get_peft_model(self.llm, lora)
@@ -51,6 +59,12 @@ class SupervisedQloraFinetune(SupervisedFinetune):
     def init_weights(self):
         pass
 
+    def __getattr__(self, name: str):
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            return getattr(self.llm, name)
+        
     def state_dict(self, destination=None, prefix='', keep_vars=False):
 
         def get_peft_model_state_dict(model,
