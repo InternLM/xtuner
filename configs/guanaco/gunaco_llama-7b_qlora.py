@@ -21,7 +21,6 @@ model = dict(
         type=AutoModelForCausalLM.from_pretrained,
         pretrained_model_name_or_path=pretrained_model_name_or_path,
         torch_dtype=torch.float16,
-        device_map='auto',
         quantization_config=dict(
             type=BitsAndBytesConfig,
             load_in_4bit=True,
