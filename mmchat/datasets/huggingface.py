@@ -27,8 +27,7 @@ def process_hf_dataset(dataset,
             dataset = dataset.map(fn)
         dataset = dataset.map(
             map_fn[-1].build(), remove_columns=remove_columns)
-    else:
-        assert callable(map_fn)
+    elif map_fn is not None:
         dataset = dataset.map(map_fn, remove_columns=remove_columns)
     for old, new in rename_maps:
         dataset = dataset.rename_column(old, new)
