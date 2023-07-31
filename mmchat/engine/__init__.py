@@ -1,3 +1,3 @@
-from .hooks import SampleGenerateHook
+from .hooks import LogSampleHook, SampleGenerateHook
 
-__all__ = ['SampleGenerateHook']
+__all__ = ['SampleGenerateHook', 'LogSampleHook']
