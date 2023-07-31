@@ -22,7 +22,7 @@ class LogSampleHook(Hook):
             train_dataset = runner.train_dataloader.dataset
             self.log(runner, train_dataset, mode='train')
         if do_eval:
-            eval_dataset = runner.eval_dataloader.dataset
+            eval_dataset = runner.val_dataloader.dataset
             self.log(runner, eval_dataset, mode='eval')
         if do_test:
             test_dataset = runner.test_dataloader.dataset
