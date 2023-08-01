@@ -1,7 +1,7 @@
 from bitsandbytes.optim import PagedAdamW32bit
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR
 
-lr = 2e-4
+lr = 1e-4
 betas = (0.9, 0.95)
 weight_decay = 0.01
 # optimizer
@@ -14,7 +14,7 @@ optim_wrapper = dict(
     loss_scale='dynamic',
     dtype='float16')
 
-max_epochs = 3
+max_epochs = 1
 # learning policy
 param_scheduler = dict(
     type=CosineAnnealingLR,
