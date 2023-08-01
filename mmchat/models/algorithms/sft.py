@@ -1,6 +1,5 @@
 import dataclasses
 
-import torch
 import transformers
 from mmengine import print_log
 from mmengine.model import BaseModel
@@ -60,7 +59,6 @@ class SupervisedFinetune(BaseModel):
         super().__init__(data_preprocessor)
         self.llm = self._build_from_cfg_or_module(llm, LLM)
         self.llm.config.use_cache = False
-        self.llm.config.torch_dtype = torch.float32
         tokenizer = TOKENIZER.build(tokenizer)
         smart_tokenizer_and_embedding_resize(tokenizer, self.llm)
 
