@@ -41,9 +41,6 @@ class SupervisedLoraFinetune(SupervisedFinetune):
         if peft_model is not None:
             _ = load_checkpoint(self, peft_model)
 
-        for name, module in self.llm.named_modules():
-            if 'norm' in name:
-                module = module.to(torch.float32)
         self._is_init = True
 
     def init_weights(self):
