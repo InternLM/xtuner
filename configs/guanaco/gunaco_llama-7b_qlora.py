@@ -5,6 +5,7 @@ from peft import LoraConfig
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           BitsAndBytesConfig)
 
+from mmchat.engine import LogSampleHook
 from mmchat.models import SupervisedQloraFinetune
 
 with read_base():
@@ -14,6 +15,13 @@ with read_base():
     from .._base_.schedules.guanaco import *  # noqa: F401,F403
 
 pretrained_model_name_or_path = '/nvme/share_data/llama-7b'
+
+tokenizer = dict(
+    type=AutoTokenizer.from_pretrained,
+    pretrained_model_name_or_path=pretrained_model_name_or_path,
+    use_fast=False,
+    padding_side='right')
+
 model = dict(
     type=SupervisedQloraFinetune,
     data_preprocessor=dict(type=BaseDataPreprocessor),
@@ -36,13 +44,8 @@ model = dict(
         lora_alpha=16,
         lora_dropout=0.1,
         bias='none',
-        task_type='CAUSAL_LM'))
-
-tokenizer = dict(
-    type=AutoTokenizer.from_pretrained,
-    pretrained_model_name_or_path=pretrained_model_name_or_path,
-    use_fast=False,
-    padding_side='right')
+        task_type='CAUSAL_LM'),
+    tokenizer=tokenizer)
 
 train_dataloader['dataset']['tokenizer'] = tokenizer  # noqa: F405
 val_dataloader['dataset']['tokenizer'] = tokenizer  # noqa: F405
@@ -50,3 +53,8 @@ test_dataloader['dataset']['tokenizer'] = tokenizer  # noqa: F405
 
 val_evaluator['tokenizer'] = tokenizer  # noqa: F405
 test_evaluator['tokenizer'] = tokenizer  # noqa: F405
+
+custom_hooks = [dict(
+    type=LogSampleHook,
+    tokenizer=tokenizer,
+)]

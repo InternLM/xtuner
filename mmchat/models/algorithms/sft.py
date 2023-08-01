@@ -1,5 +1,4 @@
 import dataclasses
-from typing import Dict
 
 import torch
 import transformers
@@ -7,7 +6,7 @@ from mmengine import print_log
 from mmengine.model import BaseModel
 from torch import nn
 
-from mmchat.registry import LLM
+from mmchat.registry import LLM, TOKENIZER
 
 
 def traverse_dict(d):
@@ -28,7 +27,6 @@ def traverse_dict(d):
 
 
 def smart_tokenizer_and_embedding_resize(
-    special_tokens_dict: Dict,
     tokenizer: transformers.PreTrainedTokenizer,
     model: transformers.PreTrainedModel,
 ):
@@ -37,8 +35,9 @@ def smart_tokenizer_and_embedding_resize(
     Note: This is the unoptimized version that may make your embedding size
     not be divisible by 64.
     """
-    num_new_tokens = tokenizer.add_special_tokens(special_tokens_dict)
+    model_vocab_size = model.get_output_embeddings().weight.size(0)
     model.resize_token_embeddings(len(tokenizer))
+    num_new_tokens = len(tokenizer) - model_vocab_size
 
     if num_new_tokens > 0:
         input_embeddings = model.get_input_embeddings().weight.data
@@ -51,16 +50,20 @@ def smart_tokenizer_and_embedding_resize(
 
         input_embeddings[-num_new_tokens:] = input_embeddings_avg
         output_embeddings[-num_new_tokens:] = output_embeddings_avg
+    elif num_new_tokens < 0:
+        raise RuntimeError
 
 
 class SupervisedFinetune(BaseModel):
 
-    def __init__(self, llm, data_preprocessor=None):
+    def __init__(self, llm, data_preprocessor=None, tokenizer=None):
         super().__init__(data_preprocessor)
         self.llm = self._build_from_cfg_or_module(llm, LLM)
         self.llm.config.use_cache = False
         self.llm.config.torch_dtype = torch.float32
-    
+        tokenizer = TOKENIZER.build(tokenizer)
+        smart_tokenizer_and_embedding_resize(tokenizer, self.llm)
+
     def _build_from_cfg_or_module(self, cfg_or_mod, registry):
         if isinstance(cfg_or_mod, nn.Module):
             return cfg_or_mod
@@ -97,7 +100,7 @@ class SupervisedFinetune(BaseModel):
         # import pdb;pdb.set_trace()
         loss_dict = {'loss': outputs.loss}
         return loss_dict
-    
+
     def __getattr__(self, name: str):
         try:
             return super().__getattr__(name)
