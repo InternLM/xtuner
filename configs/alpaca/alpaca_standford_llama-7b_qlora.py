@@ -12,6 +12,13 @@ with read_base():
     from .._base_.schedules.guanaco import *  # noqa: F401,F403
 
 pretrained_model_name_or_path = '/share/gaojianfei/merged_chinese_lora_7b'
+
+tokenizer = dict(
+    type=AutoTokenizer.from_pretrained,
+    pretrained_model_name_or_path=pretrained_model_name_or_path,
+    use_fast=False,
+    padding_side='right')
+
 model = dict(
     type=SupervisedQloraFinetune,
     llm=dict(
@@ -31,12 +38,7 @@ model = dict(
         lora_alpha=16,
         lora_dropout=0.1,
         bias='none',
-        task_type='CAUSAL_LM'))
-
-tokenizer = dict(
-    type=AutoTokenizer.from_pretrained,
-    pretrained_model_name_or_path=pretrained_model_name_or_path,
-    use_fast=False,
-    padding_side='right')
+        task_type='CAUSAL_LM'),
+    tokenizer=tokenizer)
 
 train_dataloader['dataset']['tokenizer'] = tokenizer  # noqa: F405
