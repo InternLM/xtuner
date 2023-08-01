@@ -40,7 +40,7 @@ def main():
     checkpoints = set(index['weight_map'].values())
     for ckpt in checkpoints:
         state_dict = torch.load(
-            os.path.join(args.src_dir, ckpt), map_location='cpu')
+            os.path.join(args.src_dir, ckpt), map_location='cuda')
         keys = sorted(list(state_dict.keys()))
         for k in keys:
             new_state_dict_name = 'pytorch_model-{:05d}-of-{:05d}.bin'.format(
@@ -50,6 +50,8 @@ def main():
             torch.save(new_state_dict,
                        os.path.join(args.dst_dir, new_state_dict_name))
             cnt += 1
+        del state_dict
+        torch.cuda.empty_cache()
     with open(os.path.join(args.dst_dir, 'pytorch_model.bin.index.json'),
               'w') as f:
         json.dump(new_index, f)
