@@ -17,8 +17,20 @@ PROMPT_TEMPLATE = {
         'instruction':
         '### Descriptions:\n{input}\n\n### Title: '
     },
-    'law': {},
-    'finance': {},
+    'plugins': {
+        'meta_instruction':
+        'You are an AI assistant whose name is {bot_name}.\n'
+        'Capabilities and tools that {bot_name} can possess.\n'
+        '- Inner thoughts: enabled.\n'
+        '- Web search: enabled. API: Search(query)\n'
+        '- Calculator: enabled. API: Calculate(expression)\n'
+        '- Equation solver: enabled. API: Solve(equation)\n'
+        '- Text-to-image: disabled.\n'
+        '- Image edition: disabled.\n'
+        '- Text-to-speech: disabled.\n',
+        'instruction':
+        '<|Human|>: {input}'
+    }
 }
 
 
@@ -35,15 +47,15 @@ def get_chat_utils(model):
     model = model.llm
     is_peft = 'PeftModel' in model.__class__.__name__
     is_internlm = 'InternLM' in unwarpper_model(model).__class__.__name__
+    stop_criteria = StoppingCriteriaList()
     if is_internlm:
-        stop_criteria = InternLMStoppingCriteria()
-        stop_criteria = StoppingCriteriaList([stop_criteria])
+        stop_criteria.append(InternLMStoppingCriteria())
         if is_peft:
             return BaseDecorator, InternLMStreamer, stop_criteria
         else:
             return InternLMDecorator, InternLMStreamer, stop_criteria
     else:
-        return BaseDecorator, DecodeOutputStreamer, None
+        return BaseDecorator, DecodeOutputStreamer, stop_criteria
 
 
 class DecodeOutputStreamer(BaseStreamer):

@@ -1,7 +1,9 @@
 import argparse
+import re
 
 import torch
 from mmengine.config import Config, DictAction
+from plugins import get_plugins_stop_criteria, plugins_api
 from transformers import GenerationConfig
 from utils import PROMPT_TEMPLATE, get_chat_utils
 
@@ -12,6 +14,10 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description='MMChat chat with a pretrained model')
     parser.add_argument('config', help='config file path')
+    parser.add_argument(
+        '--with-plugins', action='store_true', help='Whether to with plugins')
+    parser.add_argument('--command-stop-word', default=None, help='Stop key')
+    parser.add_argument('--answer-stop-word', default=None, help='Stop key')
     parser.add_argument(
         '--prompt',
         choices=PROMPT_TEMPLATE.keys(),
@@ -91,6 +97,12 @@ def main():
 
     tokenizer = TOKENIZER.build(cfg.tokenizer)
 
+    command_stop_cr, answer_stop_cr = get_plugins_stop_criteria(
+        base=stop_criteria,
+        tokenizer=tokenizer,
+        command_stop_word=args.command_stop_word,
+        answer_stop_word=args.answer_stop_word)
+
     gen_config = GenerationConfig(
         max_new_tokens=args.max_new_tokens,
         do_sample=args.temperature > 0,
@@ -111,27 +123,59 @@ def main():
     model.llm.generate(
         inputs=torch.tensor([[1]]).cuda(), generation_config=warmup_config)
 
+    n_turn = 0
+    inputs = ''
     while True:
-        streamer = Streamer(tokenizer)
         text = get_input()
 
         if text == 'exit':
             exit(0)
+        text = Decorator.decorate(text)
         if args.prompt is not None:
             template = PROMPT_TEMPLATE[args.prompt]
-            prompt = ''
-            if 'meta_instruction' in template:
-                prompt += template['meta_instruction']
-            prompt += template['instruction']
-            text = prompt.format(input=text)
-        text = Decorator.decorate(text)
-        ids = tokenizer.encode(text, return_tensors='pt')
-
-        model.llm.generate(
-            inputs=ids.cuda(),
-            generation_config=gen_config,
-            streamer=streamer,
-            stopping_criteria=stop_criteria)
+            if 'meta_instruction' in template and n_turn == 0:
+                inputs += template['meta_instruction']
+            inputs += template['instruction']
+            inputs = inputs.format(input=text, **cfg)
+        else:
+            inputs += text
+        ids = tokenizer.encode(
+            inputs, return_tensors='pt', add_special_tokens=n_turn == 0)
+        streamer = Streamer(tokenizer)
+        if args.with_plugins:
+            generate_output = model.llm.generate(
+                inputs=ids.cuda(),
+                generation_config=gen_config,
+                streamer=streamer,
+                stopping_criteria=command_stop_cr).cpu()
+            generate_output_text = tokenizer.decode(
+                generate_output[0][len(ids[0]):])
+            pattern = r'<\|Commands\|>:(.*?)<eoc>'
+            command_text = ', '.join(re.findall(pattern, generate_output_text))
+            extent_text = plugins_api(command_text)
+            print(extent_text)
+            extent_text_ids = tokenizer.encode(
+                extent_text, return_tensors='pt', add_special_tokens=False)
+            new_ids = torch.cat((generate_output, extent_text_ids), dim=1)
+            new_streamer = Streamer(tokenizer)
+            generate_output = model.llm.generate(
+                inputs=new_ids.cuda(),
+                generation_config=gen_config,
+                streamer=new_streamer,
+                stopping_criteria=answer_stop_cr)
+        else:
+            generate_output = model.llm.generate(
+                inputs=ids.cuda(),
+                generation_config=gen_config,
+                streamer=streamer,
+                stopping_criteria=stop_criteria)
+        inputs = tokenizer.decode(generate_output[0]) + '\n'
+        n_turn += 1
+        if len(generate_output[0]) >= args.max_new_tokens:
+            print('Remove the memory for history responses, since '
+                  f'it exceeds the length limitation {args.max_new_tokens}.')
+            n_turn = 0
+            inputs = ''
 
 
 if __name__ == '__main__':
