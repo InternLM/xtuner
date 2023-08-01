@@ -2,8 +2,7 @@ from collections import OrderedDict
 
 import torch
 from mmengine.runner import load_checkpoint
-from peft import (PeftType, PromptLearningConfig, get_peft_model,
-                  prepare_model_for_kbit_training)
+from peft import PeftType, get_peft_model, prepare_model_for_kbit_training
 
 from mmchat.registry import MODELS
 from .sft import SupervisedFinetune
@@ -61,9 +60,7 @@ class SupervisedLoraFinetune(SupervisedFinetune):
             config = model.peft_config[adapter_name]
             if state_dict is None:
                 state_dict = model.state_dict()
-            if config.peft_type in (PeftType.LORA, PeftType.ADALORA):
-                # to_return = lora_state_dict(model,
-                #                             bias=model.peft_config.bias)
+            if config.peft_type == PeftType.LORA:
                 # adapted from `https://github.com/microsoft/LoRA/blob/main/
                 # loralib/utils.py`
                 # to be used directly with the state dict which is necessary
@@ -94,40 +91,8 @@ class SupervisedLoraFinetune(SupervisedFinetune):
                     for k, v in to_return.items()
                     if (('lora_' in k and adapter_name in k) or ('bias' in k))
                 }
-                if config.peft_type == PeftType.ADALORA:
-                    # todo
-                    raise NotImplementedError
-                    # rank_pattern = config.rank_pattern
-                    # if rank_pattern is not None:
-                    #     rank_pattern = {
-                    #         k.replace(f'.{adapter_name}', ''): v
-                    #         for k, v in rank_pattern.items()
-                    #     }
-                    #     config.rank_pattern = rank_pattern
-                    #     to_return = model.resize_state_dict_by_rank_pattern(
-                    #         rank_pattern, to_return, adapter_name)
-
-            elif config.peft_type == PeftType.ADAPTION_PROMPT:
-                to_return = {
-                    k: state_dict[k]
-                    for k in state_dict
-                    if k.split('.')[-1].startswith('adaption_')
-                }
-            elif isinstance(config, PromptLearningConfig):
-                to_return = {}
-                if config.inference_mode:
-                    prompt_embeddings = model.prompt_encoder[
-                        adapter_name].embedding.weight
-                else:
-                    prompt_embeddings = model.get_prompt_embedding_to_save(
-                        adapter_name)
-                to_return['prompt_embeddings'] = prompt_embeddings
-            elif config.peft_type == PeftType.IA3:
-                to_return = {
-                    k: state_dict[k]
-                    for k in state_dict if 'ia3_' in k
-                }
             else:
+                # Currently we only support lora
                 raise NotImplementedError
             if model.modules_to_save is not None:
                 for key, value in state_dict.items():
