@@ -23,4 +23,4 @@ model = dict(
         pretrained_model_name_or_path=pretrained_model_name_or_path),
     tokenizer=tokenizer)
 
-train_dataloader['dataset']['tokenizer'] = tokenizer  # noqa: F405
+train_dataloader.dataset.tokenizer = tokenizer  # noqa: F405

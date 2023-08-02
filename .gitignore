@@ -122,3 +122,5 @@ work_dirs/
 
 # mim
 *.mim
+
+/models

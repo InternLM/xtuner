@@ -40,7 +40,7 @@ runner_type = 'FlexibleRunner'
 param_scheduler = [
     # warm up learning rate scheduler
     dict(
-        type="LinearLR",
+        type='LinearLR',
         start_factor=1e-5,
         by_epoch=False,
         begin=0,
@@ -48,7 +48,7 @@ param_scheduler = [
     ),
     # main learning rate scheduler
     dict(
-        type="ConstantLR",
+        type='ConstantLR',
         by_epoch=False,
         factor=1.0,
         begin=5,
