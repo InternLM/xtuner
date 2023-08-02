@@ -8,7 +8,7 @@ with read_base():
     from .._base_.models.llama2_7b_chat_qlora import *  # noqa: F401,F403
     from .._base_.schedules.cosine import *  # noqa: F401,F403
 
-bot_name = 'Llama 2'
+bot_name = 'Llama2'
 train_dataloader.dataset.tokenizer = tokenizer  # noqa: F405
 train_dataloader.dataset.bot_name = bot_name  # noqa: F405
 
