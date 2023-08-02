@@ -5,7 +5,10 @@ from mmchat.datasets import process_hf_dataset
 from mmchat.datasets.collate_fns import default_collate_fn
 from mmchat.datasets.map_fns import arxiv_map_fn
 
-data_root = 'data/'
+data_root = './data/'
+
+# 1. Download data from https://kaggle.com/datasets/Cornell-University/arxiv
+# 2. Process data with `./tools/data_preprocess/arxiv.py`
 json_file = 'arxiv_postprocess_csAIcsCLcsCV_20200101.json'
 
 arxiv = dict(

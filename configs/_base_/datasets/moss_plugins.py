@@ -5,6 +5,7 @@ from mmchat.datasets.collate_fns import default_collate_fn
 
 data_root = './data/'
 
+# Download data from https://huggingface.co/datasets/fnlp/moss-003-sft-data
 data_file = 'conversations_with_tools_with_inner_instruction_no_text2image_train_all_random_meta0.5_0.1_0.01_moss_0709.jsonl'  # noqa: E501
 
 moss_plugins = dict(

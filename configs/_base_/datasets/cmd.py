@@ -5,8 +5,9 @@ from mmchat.datasets import process_hf_dataset
 from mmchat.datasets.collate_fns import default_collate_fn
 from mmchat.datasets.map_fns import cmd_map_fn
 
-data_root = 'data/'
+data_root = './data/'
 
+# Download data from https://github.com/Toyhom/Chinese-medical-dialogue-data
 all_csv = [
     'Chinese-medical-dialogue-data/Data_数据/Andriatria_男科/男科5-13000.csv',
     'Chinese-medical-dialogue-data/Data_数据/IM_内科/内科5000-33000.csv',
