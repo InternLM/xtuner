@@ -19,7 +19,7 @@ try:
     SERPER_KEY = os.environ['SERPER_KEY']
 except Exception:
     print('Please obtain the `SERPER_KEY` from https://serper.dev and '
-          'set it as an environment variable.')
+          'set it using `export SERPER_KEY=xxx`.')
     sys.exit(1)
 
 fasttext.FastText.eprint = lambda x: None

@@ -6,19 +6,21 @@ from transformers.generation.streamers import BaseStreamer
 
 PROMPT_TEMPLATE = {
     'medical': {
-        'meta_instruction': '请从一名专业医生的角度，对下述医学问题给出安全、可靠的回答。\n\n',
-        'instruction': '问：{input}\n\n答：'
+        'INSTRUCTION_START':
+        '请从一名专业医生的角度，对下述医学问题给出安全、可靠的回答。\n\n问：{input}\n\n答：',
+        'INSTRUCTION': '问：{input}\n\n答：'
     },
     'title': {
-        'meta_instruction':
+        'INSTRUCTION_START':
         'If you are an expert in writing papers, please generate '
         "a good paper title for this paper based on other authors' "
-        'descriptions of their abstracts.\n\n',
-        'instruction':
+        'descriptions of their abstracts.\n\n'
+        '### Descriptions:\n{input}\n\n### Title: ',
+        'INSTRUCTION':
         '### Descriptions:\n{input}\n\n### Title: '
     },
     'plugins': {
-        'meta_instruction':
+        'INSTRUCTION_START':
         'You are an AI assistant whose name is {bot_name}.\n'
         'Capabilities and tools that {bot_name} can possess.\n'
         '- Inner thoughts: enabled.\n'
@@ -27,9 +29,21 @@ PROMPT_TEMPLATE = {
         '- Equation solver: enabled. API: Solve(equation)\n'
         '- Text-to-image: disabled.\n'
         '- Image edition: disabled.\n'
-        '- Text-to-speech: disabled.\n',
-        'instruction':
+        '- Text-to-speech: disabled.\n'
+        '<|Human|>: {input}',
+        'INSTRUCTION':
         '<|Human|>: {input}'
+    },
+    'llama-2-chat': {
+        'INSTRUCTION_START':
+        '[INST] <<SYS>>\n You are a helpful, respectful and honest assistant. '
+        'Always answer as helpfully as possible, while being safe. Your '
+        'answers should not include any harmful, unethical, racist, sexist, '
+        'toxic, dangerous, or illegal content. Please ensure that your '
+        'responses are socially unbiased and positive in nature. '
+        '\n<</SYS>>\n\n{input} [/INST]',
+        'INSTRUCTION':
+        '[INST] {input} [/INST]',
     }
 }
 

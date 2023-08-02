@@ -111,18 +111,6 @@ def main():
         top_k=args.top_k,
     )
 
-    # warmup
-    warmup_config = GenerationConfig(
-        max_new_tokens=1,
-        do_sample=args.temperature > 0,
-        temperature=args.temperature,
-        top_p=args.top_p,
-        top_k=args.top_k,
-    )
-
-    model.llm.generate(
-        inputs=torch.tensor([[1]]).cuda(), generation_config=warmup_config)
-
     n_turn = 0
     inputs = ''
     while True:
@@ -133,10 +121,12 @@ def main():
         text = Decorator.decorate(text)
         if args.prompt is not None:
             template = PROMPT_TEMPLATE[args.prompt]
-            if 'meta_instruction' in template and n_turn == 0:
-                inputs += template['meta_instruction']
-            inputs += template['instruction']
-            inputs = inputs.format(input=text, **cfg)
+            if 'INSTRUCTION_START' in template and n_turn == 0:
+                prompt_text = template['INSTRUCTION_START'].format(
+                    input=text, **cfg)
+            else:
+                prompt_text = template['INSTRUCTION'].format(input=text, **cfg)
+            inputs += prompt_text
         else:
             inputs += text
         ids = tokenizer.encode(
