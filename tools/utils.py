@@ -7,41 +7,41 @@ from transformers.generation.streamers import BaseStreamer
 PROMPT_TEMPLATE = {
     'medical': {
         'INSTRUCTION_START':
-        '请从一名专业医生的角度，对下述医学问题给出安全、可靠的回答。\n\n问：{input}\n\n答：',
+        ('请从一名专业医生的角度，对下述医学问题给出安全、可靠的回答。\n\n问：{input}\n\n答：'),
         'INSTRUCTION': '问：{input}\n\n答：'
     },
     'title': {
         'INSTRUCTION_START':
-        'If you are an expert in writing papers, please generate '
-        "a good paper title for this paper based on other authors' "
-        'descriptions of their abstracts.\n\n'
-        '### Descriptions:\n{input}\n\n### Title: ',
+        ('If you are an expert in writing papers, please generate '
+         "a good paper title for this paper based on other authors' "
+         'descriptions of their abstracts.\n\n'
+         '### Descriptions:\n{input}\n\n### Title: '),
         'INSTRUCTION':
         '### Descriptions:\n{input}\n\n### Title: '
     },
     'plugins': {
         'INSTRUCTION_START':
-        'You are an AI assistant whose name is {bot_name}.\n'
-        'Capabilities and tools that {bot_name} can possess.\n'
-        '- Inner thoughts: enabled.\n'
-        '- Web search: enabled. API: Search(query)\n'
-        '- Calculator: enabled. API: Calculate(expression)\n'
-        '- Equation solver: enabled. API: Solve(equation)\n'
-        '- Text-to-image: disabled.\n'
-        '- Image edition: disabled.\n'
-        '- Text-to-speech: disabled.\n'
-        '<|Human|>: {input}',
+        ('You are an AI assistant whose name is {bot_name}.\n'
+         'Capabilities and tools that {bot_name} can possess.\n'
+         '- Inner thoughts: enabled.\n'
+         '- Web search: enabled. API: Search(query)\n'
+         '- Calculator: enabled. API: Calculate(expression)\n'
+         '- Equation solver: enabled. API: Solve(equation)\n'
+         '- Text-to-image: disabled.\n'
+         '- Image edition: disabled.\n'
+         '- Text-to-speech: disabled.\n'
+         '<|Human|>: {input}'),
         'INSTRUCTION':
         '<|Human|>: {input}'
     },
     'llama-2-chat': {
         'INSTRUCTION_START':
-        '[INST] <<SYS>>\n You are a helpful, respectful and honest assistant. '
-        'Always answer as helpfully as possible, while being safe. Your '
-        'answers should not include any harmful, unethical, racist, sexist, '
-        'toxic, dangerous, or illegal content. Please ensure that your '
-        'responses are socially unbiased and positive in nature. '
-        '\n<</SYS>>\n\n{input} [/INST]',
+        ('[INST] <<SYS>>\n You are a helpful, respectful and honest '
+         'assistant. Always answer as helpfully as possible, while being '
+         'safe. Your answers should not include any harmful, unethical, '
+         'racist, sexist, toxic, dangerous, or illegal content. Please ensure '
+         'that your responses are socially unbiased and positive in nature. '
+         '\n<</SYS>>\n\n{input} [/INST]'),
         'INSTRUCTION':
         '[INST] {input} [/INST]',
     }

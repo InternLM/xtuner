@@ -1,11 +1,16 @@
 from mmengine._strategy import DeepSpeedStrategy
-from mmengine.optim import DeepSpeedOptimWrapper
+from mmengine.optim import ConstantLR, DeepSpeedOptimWrapper, LinearLR
 from torch.optim import AdamW
 
+lr = 2e-4
+betas = (0.9, 0.999)
+weight_decay = 0.01
+max_norm = 1
+accumulative_counts = 16
 # optimizer
 optim_wrapper = dict(
     type=DeepSpeedOptimWrapper,
-    optimizer=dict(type=AdamW, lr=0.0002, weight_decay=0.0))
+    optimizer=dict(type=AdamW, lr=lr, betas=betas, weight_decay=weight_decay))
 
 # training strategy
 strategy = dict(
@@ -20,8 +25,8 @@ strategy = dict(
         initial_scale_power=15,
     ),
     inputs_to_half=['inputs'],
-    gradient_accumulation_steps=1,
-    gradient_clipping=0.3,
+    gradient_accumulation_steps=accumulative_counts,
+    gradient_clipping=max_norm,
     zero_optimization=dict(
         stage=2,
         allgather_partitions=True,
@@ -36,28 +41,29 @@ strategy = dict(
 # runner which supports strategies
 runner_type = 'FlexibleRunner'
 
+max_epochs = 3
 # learning policy
 param_scheduler = [
     # warm up learning rate scheduler
     dict(
-        type='LinearLR',
+        type=LinearLR,
         start_factor=1e-5,
         by_epoch=False,
         begin=0,
-        end=5,
+        end=500,
     ),
     # main learning rate scheduler
     dict(
-        type='ConstantLR',
+        type=ConstantLR,
         by_epoch=False,
         factor=1.0,
-        begin=5,
+        begin=500,
     )
 ]
 
 # train, val, test setting
-train_cfg = dict(by_epoch=True, max_epochs=3, val_interval=1)
+train_cfg = dict(by_epoch=True, max_epochs=max_epochs, val_interval=1)
 
 # NOTE: `auto_scale_lr` is for automatically scaling LR
 # based on the actual training batch size.
-auto_scale_lr = dict(base_batch_size=64)
+auto_scale_lr = dict(base_batch_size=1)

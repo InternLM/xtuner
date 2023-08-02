@@ -10,7 +10,7 @@ from peft import LoraConfig
 from tqdm import tqdm
 from transformers import BitsAndBytesConfig
 
-from mmchat.models.algorithms import SupervisedQloraFinetune
+from mmchat.models import SupervisedFinetuneLoRA
 
 
 def get_argument_parser():
@@ -90,7 +90,7 @@ def train():
         lora_dropout=0.1,
         bias='none',
         task_type='CAUSAL_LM')
-    model = SupervisedQloraFinetune(llm=llm, lora=lora_config)
+    model = SupervisedFinetuneLoRA(llm=llm, lora=lora_config)
 
     # build deepspeed engine
     model_parameters = filter(lambda p: p.requires_grad, model.parameters())

@@ -1,6 +1,4 @@
-from .algorithms import (SupervisedFinetune, SupervisedLoraFinetune,
-                         SupervisedQloraFinetune)
+from .sft import SupervisedFinetune
+from .sft_lora import SupervisedFinetuneLoRA
 
-__all__ = [
-    'SupervisedFinetune', 'SupervisedLoraFinetune', 'SupervisedQloraFinetune'
-]
+__all__ = ['SupervisedFinetune', 'SupervisedFinetuneLoRA']

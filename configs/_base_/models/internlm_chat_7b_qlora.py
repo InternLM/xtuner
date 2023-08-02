@@ -1,33 +1,27 @@
 import torch
-from mmengine.config import read_base
 from mmengine.model import BaseDataPreprocessor
 from peft import LoraConfig
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           BitsAndBytesConfig)
 
-from mmchat.models import SupervisedQloraFinetune
+from mmchat.models import SupervisedFinetuneLoRA
 
-with read_base():
-    from .._base_.datasets.mmlu_fs import *  # noqa: F401,F403
-    from .._base_.datasets.oasst1 import *  # noqa: F401,F403
-    from .._base_.default_runtime import *  # noqa: F401,F403
-    from .._base_.schedules.guanaco_deepspeed import *  # noqa: F401,F403
-
-pretrained_model_name_or_path = '/nvme/share_data/llama-7b'
+pretrained_model_name_or_path = 'internlm/internlm-chat-7b'
 
 tokenizer = dict(
     type=AutoTokenizer.from_pretrained,
     pretrained_model_name_or_path=pretrained_model_name_or_path,
-    use_fast=False,
-    padding_side='right')
+    padding_side='right',
+    trust_remote_code=True)
 
 model = dict(
-    type=SupervisedQloraFinetune,
+    type=SupervisedFinetuneLoRA,
     data_preprocessor=dict(type=BaseDataPreprocessor),
     llm=dict(
         type=AutoModelForCausalLM.from_pretrained,
         pretrained_model_name_or_path=pretrained_model_name_or_path,
         torch_dtype=torch.float16,
+        trust_remote_code=True,
         quantization_config=dict(
             type=BitsAndBytesConfig,
             load_in_4bit=True,
@@ -45,10 +39,3 @@ model = dict(
         bias='none',
         task_type='CAUSAL_LM'),
     tokenizer=tokenizer)
-
-train_dataloader.dataset.tokenizer = tokenizer  # noqa: F405
-val_dataloader.dataset.tokenizer = tokenizer  # noqa: F405
-test_dataloader.dataset.tokenizer = tokenizer  # noqa: F405
-
-val_evaluator.tokenizer = tokenizer  # noqa: F405
-test_evaluator.tokenizer = tokenizer  # noqa: F405

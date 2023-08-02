@@ -1,5 +1,6 @@
 from functools import partial
 
+from datasets import DatasetDict
 from mmengine.config.lazy import LazyObject
 
 from mmchat.registry import DATASETS, TOKENIZER
@@ -9,14 +10,17 @@ from .utils import Concatenator, encode_fn
 def process_hf_dataset(dataset,
                        tokenizer,
                        max_length,
-                       mode='train',
+                       split='train',
                        map_fn=None,
                        remove_columns=[],
                        rename_maps=[],
                        concat_to_max_length=True,
-                       predict_with_generation=False):
+                       input_with_labels=True):
 
     dataset = DATASETS.build(dataset)
+    if isinstance(dataset, DatasetDict):
+        dataset = dataset[split]
+
     if isinstance(map_fn, str):
         map_fn = eval(map_fn)
     if isinstance(map_fn, list):
@@ -32,16 +36,16 @@ def process_hf_dataset(dataset,
     for old, new in rename_maps:
         dataset = dataset.rename_column(old, new)
     tokenizer = TOKENIZER.build(tokenizer)
-    column_names = list(dataset[mode].column_names)
     dataset = dataset.map(
         partial(
             encode_fn,
             tokenizer=tokenizer,
             max_length=max_length,
-            with_output=predict_with_generation is False))
-    if concat_to_max_length and mode == 'train':
+            input_with_labels=input_with_labels))
+    if concat_to_max_length and split == 'train':
+        column_names = list(dataset.column_names)
         dataset = dataset.map(
             Concatenator(max_length),
             batched=True,
             remove_columns=column_names)
-    return dataset[mode]
+    return dataset

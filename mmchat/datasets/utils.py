@@ -4,10 +4,10 @@ from itertools import chain
 from mmchat.utils import IGNORE_INDEX
 
 
-def encode_fn(example, tokenizer, max_length, with_output=True):
+def encode_fn(example, tokenizer, max_length, input_with_labels=True):
     input_encode = tokenizer(
         f"{tokenizer.bos_token}{example['input']}", add_special_tokens=False)
-    if with_output:
+    if input_with_labels:
         output_encode = tokenizer(
             f"{example['output']}{tokenizer.eos_token}",
             add_special_tokens=False)

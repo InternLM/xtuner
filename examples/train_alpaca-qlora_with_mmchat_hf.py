@@ -8,7 +8,7 @@ from mmengine.runner import Runner
 from peft import LoraConfig
 from transformers import BitsAndBytesConfig, Trainer
 
-from mmchat.models.algorithms import SupervisedQloraFinetune
+from mmchat.models import SupervisedFinetuneLoRA
 
 
 @dataclass
@@ -63,7 +63,7 @@ def train():
         bias='none',
         task_type='CAUSAL_LM')
 
-    model = SupervisedQloraFinetune(llm=llm, lora=lora_config)
+    model = SupervisedFinetuneLoRA(llm=llm, lora=lora_config)
 
     # build trainer_hf
     dataset_cfg = Config.fromfile(data_args.dataset_cfg_path)

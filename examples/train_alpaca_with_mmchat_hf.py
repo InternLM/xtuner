@@ -6,7 +6,7 @@ from mmengine.config import Config
 from mmengine.runner import Runner
 from transformers import Trainer
 
-from mmchat.models.algorithms import SupervisedFinetune
+from mmchat.models import SupervisedFinetune
 
 
 @dataclass

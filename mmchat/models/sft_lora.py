@@ -20,7 +20,7 @@ def find_all_linear_names(model):
     return list(lora_module_names)
 
 
-class SupervisedLoraFinetune(SupervisedFinetune):
+class SupervisedFinetuneLoRA(SupervisedFinetune):
 
     def __init__(self,
                  llm,

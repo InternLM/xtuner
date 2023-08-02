@@ -8,7 +8,7 @@ from mmengine.config import Config
 from mmengine.runner import Runner
 from tqdm import tqdm
 
-from mmchat.models.algorithms import SupervisedFinetune
+from mmchat.models import SupervisedFinetune
 
 
 def get_argument_parser():

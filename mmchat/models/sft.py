@@ -95,7 +95,6 @@ class SupervisedFinetune(BaseModel):
 
     def compute_loss(self, data, data_samples=None):
         outputs = self.llm(**data)
-        # import pdb;pdb.set_trace()
         loss_dict = {'loss': outputs.loss}
         return loss_dict
 

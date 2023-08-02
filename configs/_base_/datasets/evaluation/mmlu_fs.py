@@ -20,14 +20,14 @@ mmlu_fs_test = dict(
 mmlu_fs_val_dataset = dict(
     type=process_hf_dataset,
     dataset=mmlu_fs_val,
-    mode='val',
+    split='val',
     tokenizer=False,
     max_length=2048,
     concat_to_max_length=False,
-    predict_with_generation=True)
+    input_with_labels=False)
 val_dataloader = dict(
     batch_size=1,
-    num_workers=1,
+    num_workers=0,
     dataset=mmlu_fs_val_dataset,
     sampler=dict(type=DefaultSampler, shuffle=False),
     collate_fn=dict(type=mmlu_collate_fn))
@@ -35,14 +35,14 @@ val_dataloader = dict(
 mmlu_fs_test_dataset = dict(
     type=process_hf_dataset,
     dataset=mmlu_fs_test,
-    mode='test',
+    split='test',
     tokenizer=False,
     max_length=2048,
     concat_to_max_length=False,
-    predict_with_generation=True)
+    input_with_labels=False)
 test_dataloader = dict(
     batch_size=1,
-    num_workers=1,
+    num_workers=0,
     dataset=mmlu_fs_test_dataset,
     sampler=dict(type=DefaultSampler, shuffle=False),
     collate_fn=dict(type=mmlu_collate_fn))
