@@ -46,9 +46,9 @@ model = dict(
         task_type='CAUSAL_LM'),
     tokenizer=tokenizer)
 
-train_dataloader['dataset']['tokenizer'] = tokenizer  # noqa: F405
-val_dataloader['dataset']['tokenizer'] = tokenizer  # noqa: F405
-test_dataloader['dataset']['tokenizer'] = tokenizer  # noqa: F405
+train_dataloader.dataset.tokenizer = tokenizer  # noqa: F405
+val_dataloader.dataset.tokenizer = tokenizer  # noqa: F405
+test_dataloader.dataset.tokenizer = tokenizer  # noqa: F405
 
-val_evaluator['tokenizer'] = tokenizer  # noqa: F405
-test_evaluator['tokenizer'] = tokenizer  # noqa: F405
+val_evaluator.tokenizer = tokenizer  # noqa: F405
+test_evaluator.tokenizer = tokenizer  # noqa: F405

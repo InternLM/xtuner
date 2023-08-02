@@ -10,6 +10,6 @@ def llama2_map_fn(example):
         'unbiased and positive in nature.'
 
     instruction = example.get('input', '')
-    prompt = f'<BOS>{B_INST} {B_SYS} {DEFAULT_SYSTEM_PROMPT} {E_SYS}' \
-        f'{instruction} {E_INST}'
+    prompt = f'{B_INST} {B_SYS} {DEFAULT_SYSTEM_PROMPT} {E_SYS}' \
+             f'{instruction} {E_INST}'
     return {'input': prompt}

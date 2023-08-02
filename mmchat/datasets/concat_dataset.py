@@ -10,7 +10,7 @@ class ConcatDataset(_ConcatDataset):
         names = []
         for name, cfg in datasets_cfg.items():
             if cfg.get('tokenizer', None) is None:
-                cfg['tokenizer'] = tokenizer
+                cfg.tokenizer = tokenizer
             datasets.append(DATASETS.build(cfg))
             names.append(name)
         self.names = names

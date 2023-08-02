@@ -4,8 +4,9 @@ from mmengine.dataset import DefaultSampler
 from mmchat.datasets import process_hf_dataset
 from mmchat.datasets.collate_fns import mmlu_collate_fn
 
-data_root = 'data/mmlu/'
+data_root = './data/mmlu/'
 
+# Download data from https://github.com/artidoro/qlora/tree/main/data/mmlu
 mmlu_zs_val = dict(
     type=load_dataset,
     path='json',

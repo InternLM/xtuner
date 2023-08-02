@@ -10,11 +10,11 @@ class SampleGenerateHook(Hook):
     def __init__(self,
                  tokenizer,
                  sample_inputs,
-                 prompt,
+                 instruction,
                  every_n_iters=None,
                  max_new_tokens=370):
         self.sample_inputs = sample_inputs
-        self.prompt = prompt
+        self.instruction = instruction
         self.every_n_iters = every_n_iters
         self.max_new_tokens = max_new_tokens
         self.tokenizer = TOKENIZER.build(tokenizer)
@@ -28,7 +28,7 @@ class SampleGenerateHook(Hook):
         device = next(iter(model.parameters())).device
 
         for sample_input in self.sample_inputs:
-            inputs = self.prompt.format(sample_input=sample_input)
+            inputs = self.instruction.format(input=sample_input)
             input_ids = self.tokenizer(
                 inputs, return_tensors='pt')['input_ids']
             input_ids = input_ids.to(device)
