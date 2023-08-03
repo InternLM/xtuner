@@ -35,7 +35,7 @@ class MOSSSFTDataset(Dataset):
         self.process_data()
 
     def load_data(self):
-        print_log('Loading MOSS plugins data...', 'current')
+        print_log('Loading MOSS SFT data...', 'current')
         name = f'{self.tokenizer.__class__.__name__}_{self.bot_name}'
         data_file = self.src_data_file.replace('.jsonl', f'_data_{name}')
         no_loss_spans_file = self.src_data_file.replace(

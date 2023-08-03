@@ -5,13 +5,15 @@ from mmchat.datasets import ConcatDataset
 from mmchat.datasets.collate_fns import default_collate_fn
 
 with read_base():
-    from .alpaca import alpaca
-    from .alpaca_zh import alpaca_zh
+    from .moss_003_sft_no_plugins import moss_sft_no_plugins
+    from .moss_003_sft_plugins import moss_sft_plugins
 
 train_dataset = dict(
     type=ConcatDataset,
-    datasets_cfg=dict(alpaca=alpaca, alpaca_zh=alpaca_zh),
-    datasets_kwargs=dict(tokenizer=None))
+    datasets_cfg=dict(
+        moss_sft_no_plugins=moss_sft_no_plugins,
+        moss_sft_plugins=moss_sft_plugins),
+    datasets_kwargs=dict(tokenizer=None, bot_name=None))
 
 train_dataloader = dict(
     batch_size=1,
