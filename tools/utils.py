@@ -43,7 +43,7 @@ PROMPT_TEMPLATE = {
          'that your responses are socially unbiased and positive in nature. '
          '\n<</SYS>>\n\n{input} [/INST]'),
         'INSTRUCTION':
-        '[INST] {input} [/INST]',
+        '[INST] {input} [/INST]'
     }
 }
 
