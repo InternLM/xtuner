@@ -4,7 +4,7 @@ from peft import LoraConfig
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           BitsAndBytesConfig)
 
-from mmchat.models import SupervisedFinetuneLoRA
+from mmchat.models import SupervisedFinetune
 
 pretrained_model_name_or_path = 'huggyllama/llama-7b'
 
@@ -15,7 +15,7 @@ tokenizer = dict(
     padding_side='right')
 
 model = dict(
-    type=SupervisedFinetuneLoRA,
+    type=SupervisedFinetune,
     data_preprocessor=dict(type=BaseDataPreprocessor),
     llm=dict(
         type=AutoModelForCausalLM.from_pretrained,
