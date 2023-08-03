@@ -12,7 +12,7 @@ class SampleGenerateHook(Hook):
                  sample_inputs,
                  instruction,
                  every_n_iters=None,
-                 max_new_tokens=370):
+                 max_new_tokens=600):
         self.sample_inputs = sample_inputs
         self.instruction = instruction
         self.every_n_iters = every_n_iters
