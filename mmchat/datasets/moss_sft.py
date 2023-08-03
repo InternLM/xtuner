@@ -10,7 +10,7 @@ from tqdm import tqdm
 from mmchat.registry import TOKENIZER
 
 
-class MOSSPluginsDataset(Dataset):
+class MOSSSFTDataset(Dataset):
 
     def __init__(self, data_file, tokenizer, max_length=2048, bot_name=None):
         super().__init__()
