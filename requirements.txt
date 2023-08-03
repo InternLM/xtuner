@@ -1,6 +1,7 @@
 beautifulsoup4
 bitsandbytes
 datasets
+deepspeed
 fasttext
 mmengine
 peft
