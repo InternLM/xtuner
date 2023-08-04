@@ -63,7 +63,3 @@ param_scheduler = [
 
 # train, val, test setting
 train_cfg = dict(by_epoch=True, max_epochs=max_epochs, val_interval=1)
-
-# NOTE: `auto_scale_lr` is for automatically scaling LR
-# based on the actual training batch size.
-auto_scale_lr = dict(base_batch_size=1)
