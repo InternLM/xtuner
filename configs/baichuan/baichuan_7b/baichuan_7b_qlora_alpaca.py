@@ -1,6 +1,7 @@
 from mmengine.config import read_base
 
 from mmchat.engine import LogSampleHook, SampleGenerateHook
+from mmchat.utils import PROMPT_TEMPLATE
 
 with read_base():
     from ..._base_.datasets.alpaca_enzh import *  # noqa: F401,F403
@@ -19,9 +20,5 @@ custom_hooks = [
         sample_inputs=[
             '请给我介绍五个上海的景点', 'Please tell me five scenic spots in Shanghai'
         ],
-        instruction=(
-            'Below is an instruction that describes a task. '
-            'Write a response that appropriately completes the request.\n\n'
-            '### Instruction:\n{input}\n\n'
-            '### Response: '))
+        instruction=PROMPT_TEMPLATE.alpaca.INSTRUCTION_START)
 ]

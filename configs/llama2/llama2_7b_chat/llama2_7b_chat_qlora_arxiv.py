@@ -1,6 +1,7 @@
 from mmengine.config import read_base
 
 from mmchat.engine import LogSampleHook, SampleGenerateHook
+from mmchat.utils import PROMPT_TEMPLATE
 
 with read_base():
     from ..._base_.datasets.arxiv import *  # noqa: F401,F403
@@ -51,8 +52,5 @@ custom_hooks = [
              'to build on our work and contribute to the responsible '
              'development of LLMs.')
         ],
-        instruction=('If you are an expert in writing papers, please generate '
-                     'a good paper title for this paper based on other '
-                     "authors' descriptions of their abstracts.\n\n"
-                     '### Descriptions:\n{input}\n\n### Title: '))
+        instruction=PROMPT_TEMPLATE.title.INSTRUCTION_START)
 ]

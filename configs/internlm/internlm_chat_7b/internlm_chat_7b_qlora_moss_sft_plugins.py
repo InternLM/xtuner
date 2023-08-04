@@ -1,6 +1,7 @@
 from mmengine.config import read_base
 
 from mmchat.engine import LogSampleHook, SampleGenerateHook
+from mmchat.utils import PROMPT_TEMPLATE
 
 with read_base():
     from ..._base_.datasets.moss_003_sft_plugins import *  # noqa: F401,F403
@@ -22,14 +23,5 @@ custom_hooks = [
             '一个球体的表面积是384平方厘米，求它的体积。', '今有鸡兔同笼，上有二十头，下有六十二足， 问鸡兔各几何？',
             '介绍一下比尔盖茨'
         ],
-        instruction=(f'You are an AI assistant whose name is {bot_name}.\n'
-                     f'Capabilities and tools that {bot_name} can possess.\n'
-                     '- Inner thoughts: enabled.\n'
-                     '- Web search: enabled. API: Search(query)\n'
-                     '- Calculator: enabled. API: Calculate(expression)\n'
-                     '- Equation solver: enabled. API: Solve(equation)\n'
-                     '- Text-to-image: disabled.\n'
-                     '- Image edition: disabled.\n'
-                     '- Text-to-speech: disabled.\n'
-                     '<|Human|>: {input}<eoh>\n'))
+        instruction=PROMPT_TEMPLATE.plugins.INSTRUCTION_START)
 ]

@@ -4,9 +4,10 @@ import re
 import torch
 from mmengine.config import Config, DictAction
 from transformers import GenerationConfig
-from utils import PROMPT_TEMPLATE, get_chat_utils, update_stop_criteria
+from utils import get_chat_utils, update_stop_criteria
 
 from mmchat.registry import MODELS, TOKENIZER
+from mmchat.utils import PROMPT_TEMPLATE
 
 
 def parse_args():
