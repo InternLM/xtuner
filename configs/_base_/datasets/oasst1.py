@@ -1,32 +1,3 @@
-"""
------------- Dataset Meta Info (after `load_dataset`) ------------
-
-DatasetDict({
-    train: Dataset({
-        features: ['text'],
-        num_rows: 9846
-    })
-    test: Dataset({
-        features: ['text'],
-        num_rows: 518
-    })
-})
-
------------- Dataset Meta Info (after `process_hf_dataset`) ------------
-
-DatasetDict({
-    train: Dataset({
-        features: ['text', 'input', 'output'],
-        num_rows: 9846
-    })
-    test: Dataset({
-        features: ['text', 'input', 'output'],
-        num_rows: 518
-    })
-})
-
-"""
-
 from datasets import load_dataset
 from mmengine.dataset import DefaultSampler
 
