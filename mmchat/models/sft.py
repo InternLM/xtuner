@@ -16,7 +16,6 @@ def traverse_dict(d):
     if isinstance(d, dict):
         for key, value in d.items():
             if isinstance(value, dict):
-                # print(key)
                 if 'type' in value and dataclasses.is_dataclass(value['type']):
                     builder = value.pop('type')
                     new_value = builder(**value)
@@ -53,8 +52,6 @@ def smart_tokenizer_and_embedding_resize(
 
         input_embeddings[-num_new_tokens:] = input_embeddings_avg
         output_embeddings[-num_new_tokens:] = output_embeddings_avg
-    elif num_new_tokens < 0:
-        raise RuntimeError
 
 
 def find_all_linear_names(model):

@@ -20,7 +20,6 @@ class SampleGenerateHook(Hook):
         self.tokenizer = TOKENIZER.build(tokenizer)
 
     def _generate_samples(self, runner):
-        runner.logger.info('after_train_iter in SampleGenerateHook.')
         model = runner.model
         if is_model_wrapper(model):
             model = model.module
@@ -41,6 +40,7 @@ class SampleGenerateHook(Hook):
                 f'{self.tokenizer.decode(generation_output[0])}\n')
 
     def before_train(self, runner):
+        runner.logger.info('before_train in SampleGenerateHook.')
         self._generate_samples(runner)
 
     def after_train_iter(self,
@@ -51,9 +51,11 @@ class SampleGenerateHook(Hook):
         if self.every_n_iters is None or (batch_idx +
                                           1) % self.every_n_iters != 0:
             return
+        runner.logger.info('after_train_iter in SampleGenerateHook.')
         self._generate_samples(runner)
 
     def after_val(self, runner) -> None:
         if self.every_n_iters is not None:
             return
+        runner.logger.info('after_val in SampleGenerateHook.')
         self._generate_samples(runner)
