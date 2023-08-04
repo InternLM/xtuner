@@ -28,7 +28,7 @@ class SampleGenerateHook(Hook):
         device = next(iter(model.parameters())).device
 
         for sample_input in self.sample_inputs:
-            inputs = self.instruction.format(input=sample_input)
+            inputs = self.instruction.format(input=sample_input, **runner.cfg)
             input_ids = self.tokenizer(
                 inputs, return_tensors='pt')['input_ids']
             input_ids = input_ids.to(device)
@@ -39,6 +39,9 @@ class SampleGenerateHook(Hook):
             runner.logger.info(
                 f'Sample output:\n'
                 f'{self.tokenizer.decode(generation_output[0])}\n')
+
+    def before_train(self, runner):
+        self._generate_samples(runner)
 
     def after_train_iter(self,
                          runner,
