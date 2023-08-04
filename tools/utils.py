@@ -1,3 +1,4 @@
+import copy
 import re
 
 from transformers import (PreTrainedTokenizerFast, StoppingCriteria,
@@ -5,11 +6,6 @@ from transformers import (PreTrainedTokenizerFast, StoppingCriteria,
 from transformers.generation.streamers import BaseStreamer
 
 PROMPT_TEMPLATE = {
-    'medical': {
-        'INSTRUCTION_START':
-        ('请从一名专业医生的角度，对下述医学问题给出安全、可靠的回答。\n\n问：{input}\n\n答：'),
-        'INSTRUCTION': '问：{input}\n\n答：'
-    },
     'title': {
         'INSTRUCTION_START':
         ('If you are an expert in writing papers, please generate '
@@ -44,6 +40,23 @@ PROMPT_TEMPLATE = {
          '\n<</SYS>>\n\n{input} [/INST]'),
         'INSTRUCTION':
         '[INST] {input} [/INST]'
+    },
+    'alpaca': {
+        'INSTRUCTION_START':
+        ('Below is an instruction that describes a task. '
+         'Write a response that appropriately completes the request.\n\n'
+         '### Instruction:\n{input}\n\n'
+         '### Response: '),
+        'INSTRUCTION':
+        '### Instruction:\n{input}\n\n### Response: '
+    },
+    'openassistant': {
+        'INSTRUCTION': '### Human: {input}\n### Assistant: '
+    },
+    'medical': {
+        'INSTRUCTION_START':
+        ('请从一名专业医生的角度，对下述医学问题给出安全、可靠的回答。\n\n问：{input}\n\n答：'),
+        'INSTRUCTION': '问：{input}\n\n答：'
     }
 }
 
@@ -184,3 +197,30 @@ class InternLMStoppingCriteria(StoppingCriteria):
 
     def __call__(self, input_ids, *args, **kwargs) -> bool:
         return input_ids[0, -1] in [2, 103028]
+
+
+class StopWordStoppingCriteria(StoppingCriteria):
+    """Stopping criteria."""
+
+    def __init__(self, tokenizer, stop_word):
+        self.tokenizer = tokenizer
+        self.stop_word = stop_word
+        self.length = len(self.stop_word)
+
+    def __call__(self, input_ids, *args, **kwargs) -> bool:
+        cur_text = self.tokenizer.decode(input_ids[0])
+        cur_text = cur_text.replace('\r', '').replace('\n', '')
+        return cur_text[-self.length:] == self.stop_word
+
+
+def update_stop_criteria(base,
+                         tokenizer,
+                         command_stop_word=None,
+                         answer_stop_word=None):
+    command = copy.deepcopy(base)
+    answer = copy.deepcopy(base)
+    if command_stop_word is not None:
+        command.append(StopWordStoppingCriteria(tokenizer, command_stop_word))
+    if answer_stop_word is not None:
+        answer.append(StopWordStoppingCriteria(tokenizer, answer_stop_word))
+    return command, answer
