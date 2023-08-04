@@ -21,15 +21,6 @@ PROMPT_TEMPLATE = ConfigDict(
             '- Text-to-speech: disabled.\n'
             '<|Human|>: {input}'),
         INSTRUCTION='<|Human|>: {input}'),
-    llama_2_chat=dict(
-        INSTRUCTION_START=(
-            '[INST] <<SYS>>\n You are a helpful, respectful and honest '
-            'assistant. Always answer as helpfully as possible, while being '
-            'safe. Your answers should not include any harmful, unethical, '
-            'racist, sexist, toxic, dangerous, or illegal content. Please '
-            'ensure that your responses are socially unbiased and positive in '
-            'nature. \n<</SYS>>\n\n{input} [/INST]'),
-        INSTRUCTION='[INST] {input} [/INST]'),
     alpaca=dict(
         INSTRUCTION_START=(
             'Below is an instruction that describes a task. '
@@ -43,4 +34,17 @@ PROMPT_TEMPLATE = ConfigDict(
     medical=dict(
         INSTRUCTION_START=(
             '请从一名专业医生的角度，对下述医学问题给出安全、可靠的回答。\n\n问：{input}\n\n答：'),
-        INSTRUCTION='问：{input}\n\n答：'))
+        INSTRUCTION='问：{input}\n\n答：'),
+    llama_2_chat=dict(
+        INSTRUCTION_START=(
+            '[INST] <<SYS>>\n You are a helpful, respectful and honest '
+            'assistant. Always answer as helpfully as possible, while being '
+            'safe. Your answers should not include any harmful, unethical, '
+            'racist, sexist, toxic, dangerous, or illegal content. Please '
+            'ensure that your responses are socially unbiased and positive in '
+            'nature. \n<</SYS>>\n\n{input} [/INST]'),
+        INSTRUCTION='[INST] {input} [/INST]'),
+    internlm_chat=dict(
+        INSTRUCTION_START='<|User|>:{input}<eoh>\n<|Bot|>:',
+        INSTRUCTION='<|User|>:{input}<eoh>\n<|Bot|>:'),
+)

@@ -5,61 +5,6 @@ from transformers import (PreTrainedTokenizerFast, StoppingCriteria,
                           StoppingCriteriaList)
 from transformers.generation.streamers import BaseStreamer
 
-PROMPT_TEMPLATE = {
-    'title': {
-        'INSTRUCTION_START':
-        ('If you are an expert in writing papers, please generate '
-         "a good paper title for this paper based on other authors' "
-         'descriptions of their abstracts.\n\n'
-         '### Descriptions:\n{input}\n\n### Title: '),
-        'INSTRUCTION':
-        '### Descriptions:\n{input}\n\n### Title: '
-    },
-    'plugins': {
-        'INSTRUCTION_START':
-        ('You are an AI assistant whose name is {bot_name}.\n'
-         'Capabilities and tools that {bot_name} can possess.\n'
-         '- Inner thoughts: enabled.\n'
-         '- Web search: enabled. API: Search(query)\n'
-         '- Calculator: enabled. API: Calculate(expression)\n'
-         '- Equation solver: enabled. API: Solve(equation)\n'
-         '- Text-to-image: disabled.\n'
-         '- Image edition: disabled.\n'
-         '- Text-to-speech: disabled.\n'
-         '<|Human|>: {input}'),
-        'INSTRUCTION':
-        '<|Human|>: {input}'
-    },
-    'llama-2-chat': {
-        'INSTRUCTION_START':
-        ('[INST] <<SYS>>\n You are a helpful, respectful and honest '
-         'assistant. Always answer as helpfully as possible, while being '
-         'safe. Your answers should not include any harmful, unethical, '
-         'racist, sexist, toxic, dangerous, or illegal content. Please ensure '
-         'that your responses are socially unbiased and positive in nature. '
-         '\n<</SYS>>\n\n{input} [/INST]'),
-        'INSTRUCTION':
-        '[INST] {input} [/INST]'
-    },
-    'alpaca': {
-        'INSTRUCTION_START':
-        ('Below is an instruction that describes a task. '
-         'Write a response that appropriately completes the request.\n\n'
-         '### Instruction:\n{input}\n\n'
-         '### Response: '),
-        'INSTRUCTION':
-        '### Instruction:\n{input}\n\n### Response: '
-    },
-    'openassistant': {
-        'INSTRUCTION': '### Human: {input}\n### Assistant: '
-    },
-    'medical': {
-        'INSTRUCTION_START':
-        ('请从一名专业医生的角度，对下述医学问题给出安全、可靠的回答。\n\n问：{input}\n\n答：'),
-        'INSTRUCTION': '问：{input}\n\n答：'
-    }
-}
-
 
 def unwarpper_model(model):
     if 'PeftModel' in model.__class__.__name__:
@@ -72,17 +17,13 @@ def get_chat_utils(model):
     if model.__class__.__name__ == 'InferenceEngine':
         model = model.module
     model = model.llm
-    is_peft = 'PeftModel' in model.__class__.__name__
     is_internlm = 'InternLM' in unwarpper_model(model).__class__.__name__
     stop_criteria = StoppingCriteriaList()
     if is_internlm:
         stop_criteria.append(InternLMStoppingCriteria())
-        if is_peft:
-            return BaseDecorator, InternLMStreamer, stop_criteria
-        else:
-            return InternLMDecorator, InternLMStreamer, stop_criteria
+        return InternLMStreamer, stop_criteria
     else:
-        return BaseDecorator, DecodeOutputStreamer, stop_criteria
+        return DecodeOutputStreamer, stop_criteria
 
 
 class DecodeOutputStreamer(BaseStreamer):
@@ -160,36 +101,6 @@ class InternLMStreamer(DecodeOutputStreamer):
             tok = '\n'
 
         return tok
-
-
-class BaseDecorator:
-    """Base decorator for decorating prompt and extracting generated output."""
-
-    @classmethod
-    def decorate(cls, prompt):
-        """Abstract method for adding Add special tokens to prompt."""
-        return prompt
-
-    @classmethod
-    def extract(cls, gen_out):
-        """Abstract methods for extract generated output from model output."""
-        return gen_out
-
-
-class InternLMDecorator(BaseDecorator):
-    """Decorator for InternLM."""
-
-    regex = re.compile(r'<\|Bot\|>:(.*)')
-
-    @classmethod
-    def decorate(cls, prompt):
-        """Decorate prompt for InternLM."""
-        return f'<|User|>:{prompt}<eoh>'
-
-    @classmethod
-    def extract(cls, gen_out):
-        """Extract generated tokens for InternLM."""
-        return cls.regex.search(gen_out).group(1)
 
 
 class InternLMStoppingCriteria(StoppingCriteria):

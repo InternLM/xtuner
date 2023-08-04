@@ -91,8 +91,9 @@ def main():
         cfg.merge_from_dict(args.cfg_options)
 
     model = MODELS.build(cfg.model)
+    tokenizer = TOKENIZER.build(cfg.tokenizer)
 
-    Decorator, Streamer, stop_criteria = get_chat_utils(model)
+    Streamer, stop_criteria = get_chat_utils(model)
     if args.no_streamer:
         Streamer = None
 
@@ -101,8 +102,6 @@ def main():
             args.adapter_checkpoint, map_location='cpu')
         model.load_state_dict(adapter_checkpoint['state_dict'], strict=False)
         print(f'Load adapter from {args.adapter_checkpoint}')
-
-    tokenizer = TOKENIZER.build(cfg.tokenizer)
 
     command_stop_cr, answer_stop_cr = update_stop_criteria(
         base=stop_criteria,
@@ -125,7 +124,6 @@ def main():
 
         if text == 'exit':
             exit(0)
-        text = Decorator.decorate(text)
         if args.prompt is not None:
             template = PROMPT_TEMPLATE[args.prompt]
             if 'INSTRUCTION_START' in template and n_turn == 0:
