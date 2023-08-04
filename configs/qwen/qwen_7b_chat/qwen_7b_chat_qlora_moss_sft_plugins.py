@@ -9,7 +9,7 @@ with read_base():
     from ..._base_.models.qwen_7b_chat_qlora import *  # noqa: F401,F403
     from ..._base_.schedules.cosine_e1 import *  # noqa: F401,F403
 
-bot_name = 'InternLM'
+bot_name = 'Qwen'
 train_dataloader.dataset.tokenizer = tokenizer  # noqa: F405
 train_dataloader.dataset.bot_name = bot_name  # noqa: F405
 
