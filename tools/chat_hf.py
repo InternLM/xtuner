@@ -2,19 +2,22 @@ import argparse
 import re
 
 import torch
-from mmengine.config import Config, DictAction
-from transformers import GenerationConfig
+from peft import PeftModel
+from transformers import (AutoModelForCausalLM, AutoTokenizer,
+                          BitsAndBytesConfig, GenerationConfig)
 from utils import get_chat_utils, update_stop_criteria
 
-from mmchat.registry import MODELS, TOKENIZER
 from mmchat.utils import PROMPT_TEMPLATE
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description='MMChat chat with a pretrained model')
-    parser.add_argument('config', help='config file path')
-    parser.add_argument('--adapter', default=None, help='adapter model')
+        description='MMChat chat with a pretrained HF model')
+    parser.add_argument(
+        'model_name_or_path', help='Hugging Face model name or path')
+    parser.add_argument('--adapter', default=None, help='adapter name or path')
+    parser.add_argument(
+        '--bot-name', type=str, default='BOT', help='Name for Bot')
     parser.add_argument(
         '--with-plugins', action='store_true', help='Whether to with plugins')
     parser.add_argument(
@@ -54,16 +57,6 @@ def parse_args():
         type=int,
         default=0,
         help='Random seed for reproducible text generation')
-    parser.add_argument(
-        '--cfg-options',
-        nargs='+',
-        action=DictAction,
-        help='override some settings in the used config, the key-value pair '
-        'in xxx=yyy format will be merged into config file. If the value to '
-        'be overwritten is a list, it should be like key="[a,b]" or key=a,b '
-        'It also allows nested list/tuple values, e.g. key="[(a,b),(c,d)]" '
-        'Note that the quotation marks are necessary and that no white space '
-        'is allowed.')
     args = parser.parse_args()
     return args
 
@@ -84,19 +77,23 @@ def main():
 
     torch.manual_seed(args.seed)
 
-    # load config
-    cfg = Config.fromfile(args.config)
-    if args.cfg_options is not None:
-        cfg.merge_from_dict(args.cfg_options)
-
-    model = MODELS.build(cfg.model)
-    tokenizer = TOKENIZER.build(cfg.tokenizer)
-
+    # build model
+    quantization_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        load_in_8bit=False,
+        llm_int8_threshold=6.0,
+        llm_int8_has_fp16_weight=False,
+        bnb_4bit_compute_dtype=torch.float16,
+        bnb_4bit_use_double_quant=True,
+        bnb_4bit_quant_type='nf4')
+    model = AutoModelForCausalLM.from_pretrained(
+        args.model_name_or_path,
+        quantization_config=quantization_config,
+        trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.model_name_or_path, trust_remote_code=True)
     if args.adapter is not None:
-        adapter = torch.load(args.adapter, map_location='cpu')
-        model.load_state_dict(adapter['state_dict'], strict=False)
-        print(f'Load adapter from {args.adapter}')
-
+        model = PeftModel.from_pretrained(model, args.adapter)
     Streamer, stop_criteria = get_chat_utils(model)
     if args.no_streamer:
         Streamer = None
@@ -126,9 +123,10 @@ def main():
             template = PROMPT_TEMPLATE[args.prompt]
             if 'INSTRUCTION_START' in template and n_turn == 0:
                 prompt_text = template['INSTRUCTION_START'].format(
-                    input=text, **cfg)
+                    input=text, bot_name=args.bot_name)
             else:
-                prompt_text = template['INSTRUCTION'].format(input=text, **cfg)
+                prompt_text = template['INSTRUCTION'].format(
+                    input=text, bot_name=args.bot_name)
             inputs += prompt_text
         else:
             inputs += text
@@ -136,7 +134,7 @@ def main():
             inputs, return_tensors='pt', add_special_tokens=n_turn == 0)
         streamer = Streamer(tokenizer) if Streamer is not None else None
         if args.with_plugins:
-            generate_output = model.llm.generate(
+            generate_output = model.generate(
                 inputs=ids.cuda(),
                 generation_config=gen_config,
                 streamer=streamer,
@@ -154,7 +152,7 @@ def main():
             new_ids = torch.cat((generate_output, extent_text_ids), dim=1)
             new_streamer = Streamer(
                 tokenizer) if Streamer is not None else None
-            generate_output = model.llm.generate(
+            generate_output = model.generate(
                 inputs=new_ids.cuda(),
                 generation_config=gen_config,
                 streamer=new_streamer,
@@ -164,7 +162,7 @@ def main():
                     tokenizer.decode(generate_output[0][len(new_ids[0]):]),
                     end='')
         else:
-            generate_output = model.llm.generate(
+            generate_output = model.generate(
                 inputs=ids.cuda(),
                 generation_config=gen_config,
                 streamer=streamer,

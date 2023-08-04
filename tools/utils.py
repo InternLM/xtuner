@@ -9,6 +9,8 @@ from mmchat.utils import StopWordStoppingCriteria
 
 
 def unwarpper_model(model):
+    if hasattr(model, 'llm'):
+        model = model.llm
     if 'PeftModel' in model.__class__.__name__:
         model = model.base_model.model
     return model
@@ -18,7 +20,6 @@ def get_chat_utils(model):
     """Get utils by model type."""
     if model.__class__.__name__ == 'InferenceEngine':
         model = model.module
-    model = model.llm
     is_internlm = 'InternLM' in unwarpper_model(model).__class__.__name__
     stop_criteria = StoppingCriteriaList()
     if is_internlm:
