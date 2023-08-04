@@ -38,7 +38,7 @@ class SampleGenerateHook(Hook):
             input_ids = self.tokenizer(
                 inputs, return_tensors='pt')['input_ids']
             input_ids = input_ids.to(device)
-            generation_output = model.llm.generate(
+            generation_output = model.generate(
                 input_ids=input_ids,
                 max_new_tokens=self.max_new_tokens,
                 stopping_criteria=self.stop_criteria)

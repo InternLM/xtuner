@@ -136,7 +136,7 @@ def main():
             inputs, return_tensors='pt', add_special_tokens=n_turn == 0)
         streamer = Streamer(tokenizer) if Streamer is not None else None
         if args.with_plugins:
-            generate_output = model.llm.generate(
+            generate_output = model.generate(
                 inputs=ids.cuda(),
                 generation_config=gen_config,
                 streamer=streamer,
@@ -154,7 +154,7 @@ def main():
             new_ids = torch.cat((generate_output, extent_text_ids), dim=1)
             new_streamer = Streamer(
                 tokenizer) if Streamer is not None else None
-            generate_output = model.llm.generate(
+            generate_output = model.generate(
                 inputs=new_ids.cuda(),
                 generation_config=gen_config,
                 streamer=new_streamer,
@@ -164,7 +164,7 @@ def main():
                     tokenizer.decode(generate_output[0][len(new_ids[0]):]),
                     end='')
         else:
-            generate_output = model.llm.generate(
+            generate_output = model.generate(
                 inputs=ids.cuda(),
                 generation_config=gen_config,
                 streamer=streamer,
