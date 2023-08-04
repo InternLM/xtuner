@@ -8,5 +8,6 @@ peft
 scipy
 SentencePiece
 spacy
+tiktoken
 torch
 transformers
