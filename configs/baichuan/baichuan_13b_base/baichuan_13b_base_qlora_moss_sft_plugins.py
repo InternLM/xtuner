@@ -8,7 +8,7 @@ with read_base():
     from ..._base_.models.baichuan_13b_base_qlora import *  # noqa: F401,F403
     from ..._base_.schedules.cosine_e1 import *  # noqa: F401,F403
 
-bot_name = 'InternLM'
+bot_name = 'Baichuan'
 train_dataloader.dataset.tokenizer = tokenizer  # noqa: F405
 train_dataloader.dataset.bot_name = bot_name  # noqa: F405
 
