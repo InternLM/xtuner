@@ -5,6 +5,8 @@ from transformers import (PreTrainedTokenizerFast, StoppingCriteria,
                           StoppingCriteriaList)
 from transformers.generation.streamers import BaseStreamer
 
+from mmchat.utils import StopWordStoppingCriteria
+
 
 def unwarpper_model(model):
     if 'PeftModel' in model.__class__.__name__:
@@ -108,20 +110,6 @@ class InternLMStoppingCriteria(StoppingCriteria):
 
     def __call__(self, input_ids, *args, **kwargs) -> bool:
         return input_ids[0, -1] in [2, 103028]
-
-
-class StopWordStoppingCriteria(StoppingCriteria):
-    """Stopping criteria."""
-
-    def __init__(self, tokenizer, stop_word):
-        self.tokenizer = tokenizer
-        self.stop_word = stop_word
-        self.length = len(self.stop_word)
-
-    def __call__(self, input_ids, *args, **kwargs) -> bool:
-        cur_text = self.tokenizer.decode(input_ids[0])
-        cur_text = cur_text.replace('\r', '').replace('\n', '')
-        return cur_text[-self.length:] == self.stop_word
 
 
 def update_stop_criteria(base,
