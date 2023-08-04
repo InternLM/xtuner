@@ -3,14 +3,14 @@ from mmengine.config import read_base
 from mmchat.engine import LogSampleHook, SampleGenerateHook
 
 with read_base():
-    from .._base_.datasets.moss_003_sft_all import *  # noqa: F401,F403
-    from .._base_.default_runtime import *  # noqa: F401,F403
-    from .._base_.models.internlm_7b_qlora import *  # noqa: F401,F403
-    from .._base_.schedules.cosine_e1 import *  # noqa: F401,F403
+    from ..._base_.datasets.moss_003_sft_plugins import *  # noqa: F401,F403
+    from ..._base_.default_runtime import *  # noqa: F401,F403
+    from ..._base_.models.internlm_7b_qlora import *  # noqa: F401,F403
+    from ..._base_.schedules.cosine_e1 import *  # noqa: F401,F403
 
 bot_name = 'InternLM'
-train_dataloader.dataset.datasets_kwargs.tokenizer = tokenizer  # noqa: F405
-train_dataloader.dataset.datasets_kwargs.bot_name = bot_name  # noqa: F405
+train_dataloader.dataset.tokenizer = tokenizer  # noqa: F405
+train_dataloader.dataset.bot_name = bot_name  # noqa: F405
 
 custom_hooks = [
     dict(type=LogSampleHook, tokenizer=tokenizer),  # noqa: F405
