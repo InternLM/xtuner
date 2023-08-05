@@ -17,6 +17,7 @@ custom_hooks = [
         type=SampleGenerateHook,
         tokenizer=tokenizer,  # noqa: F405
         every_n_iters=500,
+        stop_word='<|endoftext|>',
         sample_inputs=[
             '请给我介绍五个上海的景点', 'Please tell me five scenic spots in Shanghai'
         ],

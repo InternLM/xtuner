@@ -19,6 +19,7 @@ custom_hooks = [
         type=SampleGenerateHook,
         tokenizer=tokenizer,  # noqa: F405
         every_n_iters=500,
+        stop_word='<eom>',
         sample_inputs=[
             '一个球体的表面积是384平方厘米，求它的体积。', '今有鸡兔同笼，上有二十头，下有六十二足， 问鸡兔各几何？',
             '介绍一下比尔盖茨'

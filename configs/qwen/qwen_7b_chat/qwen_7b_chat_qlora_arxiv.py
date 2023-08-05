@@ -17,6 +17,7 @@ custom_hooks = [
         type=SampleGenerateHook,
         tokenizer=tokenizer,  # noqa: F405
         every_n_iters=500,
+        stop_word='<|endoftext|>',
         sample_inputs=[
             ('We present InternLM, a multilingual foundational language '
              'model with 104B parameters. InternLM is pre-trained on a large '

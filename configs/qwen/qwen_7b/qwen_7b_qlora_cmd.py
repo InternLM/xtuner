@@ -17,6 +17,7 @@ custom_hooks = [
         type=SampleGenerateHook,
         tokenizer=tokenizer,  # noqa: F405
         every_n_iters=500,
+        stop_word='<|endoftext|>',
         sample_inputs=[
             '我有家族遗传性的过敏，请问可以可以献血吗？', '我爷爷有高血压，请问他可以喝咖啡吗？',
             '我女儿今年3岁了，从昨天晚上九点开始腹泻，到现在已经八个小时了，请问应该怎么办？'
