@@ -1,6 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from functools import partial
 
+import numpy as np
 from datasets import DatasetDict
 from mmengine.config.lazy import LazyObject
 
@@ -11,6 +12,7 @@ from .utils import Concatenator, encode_fn
 def process_hf_dataset(dataset,
                        tokenizer,
                        max_length,
+                       max_dataset_length=None,
                        split='train',
                        map_fn=None,
                        remove_columns=[],
@@ -21,6 +23,14 @@ def process_hf_dataset(dataset,
     dataset = DATASETS.build(dataset)
     if isinstance(dataset, DatasetDict):
         dataset = dataset[split]
+
+    # sample `max_dataset_length` items from the original dataset to
+    # save time consumed by map function
+    if max_dataset_length is not None:
+        max_dataset_length = min(max_dataset_length, len(dataset))
+        indices = np.random.choice(
+            len(dataset), max_dataset_length, replace=False)
+        dataset = dataset.select(indices)
 
     if isinstance(map_fn, str):
         map_fn = eval(map_fn)
