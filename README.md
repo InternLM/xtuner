@@ -62,7 +62,7 @@
 
 
 
-### 🔧 Chat with Plugins
+### 🔧 LLMs with Plugins
 
 Calculate, Equations Solve, Web Search, ...
 
