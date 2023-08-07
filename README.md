@@ -20,39 +20,41 @@
 <tr valign="top">
 <td align="left" valign="top">
 <ul>
-  <li><a href="">InternLM</a></li>
-  <li><a href="">InternLM-Chat</a></li>
-  <li><a href="">Llama</a></li>
-  <li><a href="">Llama2</a></li>
-  <li><a href="">Llama2-Chat</a></li>
-  <li><a href="">Qwen</a></li>
-  <li><a href="">Qwen-Chat</a></li>
-  <li><a href="">Baichuan-7B</a></li>
-  <li><a href="">Baichuan-13B-Base</a></li>
-  <li><a href="">Baichuan-13B-Chat</a></li>
+  <li><a href="https://github.com/InternLM/InternLM">InternLM</a></li>
+  <li><a href="https://github.com/InternLM/InternLM">InternLM-Chat</a></li>
+  <li><a href="https://github.com/facebookresearch/llama">Llama</a></li>
+  <li><a href="https://github.com/facebookresearch/llama">Llama2</a></li>
+  <li><a href="https://github.com/facebookresearch/llama">Llama2-Chat</a></li>
+  <li><a href="https://github.com/QwenLM/Qwen-7B">Qwen</a></li>
+  <li><a href="https://github.com/QwenLM/Qwen-7B">Qwen-Chat</a></li>
+  <li><a href="https://github.com/baichuan-inc/Baichuan-7B">Baichuan-7B</a></li>
+  <li><a href="https://github.com/baichuan-inc/Baichuan-13B">Baichuan-13B-Base</a></li>
+  <li><a href="https://github.com/baichuan-inc/Baichuan-13B">Baichuan-13B-Chat</a></li>
   <li>...</li>    
 </ul>
 </td>
 <td>
 <ul>
-  <li><a href="">MOSS-003-SFT</a></li>
-  <li><a href="">Alpaca en/zh</a></li>
-  <li><a href="">oasst1</a></li>
-  <li><a href="">Arxiv GenTitle</a></li>
-  <li><a href="">Chinese Medical Dialogue</a></li>
+  <li><a href="https://github.com/OpenLMLab/MOSS/tree/main/SFT_data">MOSS-003-SFT</a></li>
+  <li><a href="https://huggingface.co/datasets/tatsu-lab/alpaca">Alpaca en</a> / <a href="https://huggingface.co/datasets/silk-road/alpaca-data-gpt4-chinese">zh</a></li>
+  <li><a href="https://huggingface.co/datasets/timdettmers/openassistant-guanaco">oasst1</a></li>
+  <li><a href="https://github.com/WangRongsheng/ChatGenTitle">Arxiv GenTitle</a></li>
+  <li><a href="https://github.com/Toyhom/Chinese-medical-dialogue-data">Chinese Medical Dialogue</a></li>
   <li>...</li>  
 </ul>
 </td>
 <td>
 <ul>
-  <li><a href="">Normal (Distributed) Data Parallel</a></li>
-  <li><a href="">Deepspeed</a></li>
+  <li>Normal (Distributed) Data Parallel</li>
+  <li><a href="https://github.com/microsoft/DeepSpeed">Deepspeed</a></li>
   <li>...</li>  
 </ul>
 </td>
 </tr>
 </tbody>
 </table>
+
+
 
 ### Chat with Plugins
 
