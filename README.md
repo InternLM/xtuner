@@ -113,12 +113,13 @@ We support to chat with pretrained / fine-tuned LLMs.
   python tools/chat_hf.py [MODEL_NAME_OR_PATH] --adapter [ADAPTER_NAME_OR_PATH] ...
   ```
 
-  *e.g.*,
+  <details>
+  <summary>Examples</summary>
 
   - Llama-2-7B, plugins adapter,
 
     ```shell
-    python tools/chat_hf.py meta-llama/Llama-2-7b --adapter XXX --prompt plugins --with-plugins --command-stop-word "<eoc>" --answer-stop-word "<eom>" --no-streamer
+    python tools/chat_hf.py meta-llama/Llama-2-7b --adapter XXX --bot-name Llama2 --prompt plugins --with-plugins --command-stop-word "<eoc>" --answer-stop-word "<eom>" --no-streamer
     ```
 
   - InternLM-7B, arxiv GenTitle adapter,
@@ -139,11 +140,43 @@ We support to chat with pretrained / fine-tuned LLMs.
     python tools/chat_hf.py internlm/internlm-7b --adapter XXX --prompt openassistant --answer-stop-word "###"
     ```
 
+  </details>
+
 - With XXX config, and the corresponding PTH adapter fine-tuned from XXX
 
   ```shell
   python tools/chat.py [CONFIG] --adapter [PTH_ADAPTER_PATH] ...
   ```
+
+  <details>
+  <summary>Examples</summary>
+
+  - Llama-2-7B, plugins adapter,
+
+    ```shell
+    python tools/chat.py configs/llama/llama2_7b/llama2_7b_qlora_moss_sft_all.py --adapter XXX --prompt plugins --with-plugins --command-stop-word "<eoc>" --answer-stop-word "<eom>" --no-streamer
+    ```
+
+  - InternLM-7B, arxiv GenTitle adapter,
+
+    ```shell
+    python tools/chat.py configs/internlm/internlm_7b/internlm_7b_qlora_arxiv.py --adapter XXX --prompt title
+    ```
+
+  - InternLM-7B, alpaca adapter,
+
+    ```shell
+    python tools/chat.py configs/internlm/internlm_7b/internlm_7b_qlora_alpaca.py --adapter XXX --prompt alpaca
+    ```
+
+  - InternLM-7B, oasst1 adapter,
+
+    ```shell
+    python tools/chat.py configs/internlm/internlm_7b/internlm_7b_qlora_oasst1.py --adapter XXX --prompt openassistant --answer-stop-word "###"
+    ```
+
+  </details>
+
 
 ### Deploy
 
