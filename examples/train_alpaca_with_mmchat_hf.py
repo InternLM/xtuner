@@ -2,22 +2,21 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 import transformers
-from mmengine.config import Config
-from mmengine.runner import Runner
-from transformers import Trainer
+from transformers import Trainer, AutoTokenizer
 
 from mmchat.models import SupervisedFinetune
+from data_utils import get_train_dataloader
 
 
 @dataclass
 class ModelArguments:
-    model_name_or_path: Optional[str] = field(default='facebook/opt-125m')
+    model_name_or_path: Optional[str] = field(default='internlm/internlm-7b')
 
 
 @dataclass
 class DataArguments:
     dataset_cfg_path: str = field(
-        default='../configs/alpaca/alpaca_standford_llama-7b.py')
+        default='../configs/_base_/datasets/alpaca.py')
 
 
 @dataclass
@@ -43,13 +42,15 @@ def train():
     llm = transformers.AutoModelForCausalLM.from_pretrained(
         model_args.model_name_or_path,
         cache_dir=training_args.cache_dir,
+        trust_remote_code=True
     )
+    tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path,
+                                              trust_remote_code=True)
 
-    model = SupervisedFinetune(llm)
+    model = SupervisedFinetune(llm, tokenizer=tokenizer)
 
     # build trainer_hf
-    dataset_cfg = Config.fromfile(data_args.dataset_cfg_path)
-    train_dataloader = Runner.build_dataloader(dataset_cfg.train_dataloader)
+    train_dataloader = get_train_dataloader(data_args.dataset_cfg_path, tokenizer)
     train_dataset = train_dataloader.dataset
     data_collator = train_dataloader.collate_fn
     data_module = dict(

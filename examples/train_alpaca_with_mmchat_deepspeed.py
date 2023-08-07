@@ -14,11 +14,11 @@ from mmchat.models import SupervisedFinetune
 def get_argument_parser():
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        '--model_name_or_path', type=str, default='/nvme/share_data/llama-7b')
+        '--model_name_or_path', type=str, default='internlm/internlm-7b')
     parser.add_argument(
         '--dataset_cfg_path',
         type=str,
-        default='../configs/alpaca/alpaca_standford_llama-7b.py',
+        default='../configs/internlm/internlm_7b/internlm_7b_qlora_alpaca.py',
         help='Path to mmchat dataset config')
     parser.add_argument(
         '--deepspeed_config',
@@ -71,7 +71,7 @@ def print_rank_0(msg, rank=0):
 def train():
     # build model
     llm = transformers.AutoModelForCausalLM.from_pretrained(
-        args.model_name_or_path)
+        args.model_name_or_path, trust_remote_code=True)
     model = SupervisedFinetune(llm=llm)
 
     # build deepspeed engine

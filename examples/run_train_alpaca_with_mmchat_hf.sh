@@ -1,7 +1,7 @@
-CUDA_VISIBLE_DEVICES=1,2,3,4 torchrun --nproc_per_node=4 --master_port=10000 train_alpaca_with_mmchat_hf.py \
-    --model_name_or_path /nvme/share_data/llama-7b/ \
+CUDA_VISIBLE_DEVICES=0 torchrun --nproc_per_node=1 --master_port=10000 train_alpaca_with_mmchat_hf.py \
+    --model_name_or_path internlm/internlm-7b \
     --bf16 True \
-    --output_dir /nvme/humu/llm-ckpts/mmchat_hf_llama-7b \
+    --output_dir work-dirs/mmchat_hf_internlm-7b \
     --num_train_epochs 3 \
     --per_device_train_batch_size 1 \
     --per_device_eval_batch_size 1 \
@@ -16,6 +16,4 @@ CUDA_VISIBLE_DEVICES=1,2,3,4 torchrun --nproc_per_node=4 --master_port=10000 tra
     --lr_scheduler_type "cosine" \
     --logging_steps 1 \
     --tf32 True \
-    --remove_unused_columns False \
-    --fsdp "full_shard auto_wrap" \
-    --fsdp_transformer_layer_cls_to_wrap 'LlamaDecoderLayer' \
+    --remove_unused_columns False

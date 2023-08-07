@@ -10,17 +10,17 @@ from peft import LoraConfig
 from tqdm import tqdm
 from transformers import BitsAndBytesConfig
 
-from mmchat.models import SupervisedFinetuneLoRA
+from mmchat.models import SupervisedFinetune
 
 
 def get_argument_parser():
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        '--model_name_or_path', type=str, default='/nvme/share_data/llama-7b')
+        '--model_name_or_path', type=str, default='internlm/internlm-7b')
     parser.add_argument(
         '--dataset_cfg_path',
         type=str,
-        default='../configs/alpaca/alpaca_standford_llama-7b.py',
+        default='../configs/internlm/internlm_7b/internlm_7b_qlora_alpaca.py',
         help='Path to mmchat dataset config')
     parser.add_argument(
         '--deepspeed_config',
@@ -83,6 +83,7 @@ def train():
     llm = transformers.AutoModelForCausalLM.from_pretrained(
         args.model_name_or_path,
         quantization_config=quantization_config,
+        trust_remote_code=True
     )
     lora_config = LoraConfig(
         r=64,
@@ -90,7 +91,7 @@ def train():
         lora_dropout=0.1,
         bias='none',
         task_type='CAUSAL_LM')
-    model = SupervisedFinetuneLoRA(llm=llm, lora=lora_config)
+    model = SupervisedFinetune(llm=llm, lora=lora_config)
 
     # build deepspeed engine
     model_parameters = filter(lambda p: p.requires_grad, model.parameters())
