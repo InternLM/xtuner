@@ -6,7 +6,7 @@
 
 <table>
 <tbody>
-<tr align="left" valign="middle">
+<tr align="center" valign="middle">
 <td>
   <b>Models</b>
 </td>
