@@ -12,6 +12,7 @@ def parse_args():
     parser.add_argument('lora_name_or_path', help='lora name or path')
     parser.add_argument(
         'save_dir', help='the directory to save the merged model')
+    parser.add_argument('--max-shard-size', type=str, default='2GB')
     args = parser.parse_args()
     return args
 
@@ -33,7 +34,8 @@ def main():
         torch_dtype=torch.float16,
         is_trainable=False)
     model_merged = model_unmerged.merge_and_unload()
-    model_merged.save_pretrained(args.save_dir)
+    model_merged.save_pretrained(
+        args.save_dir, max_shard_size=args.max_shard_size)
     tokenizer.save_pretrained(args.save_dir)
     print(f'Save to {args.save_dir}')
 
