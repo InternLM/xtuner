@@ -101,7 +101,7 @@ python tools/train.py configs/internlm/internlm_7b/internlm_7b_qlora_alpaca.py
 
 ### Chat
 
-We support the chat with pretrained / fine-tuned LLMs. 
+We support to chat with pretrained / fine-tuned LLMs.
 
 - With the pretrained HuggingFace LLM, and the corresponding HuggingFace adapter fine-tuned from XXX
 
