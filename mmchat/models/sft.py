@@ -5,8 +5,8 @@ from collections import OrderedDict
 import torch
 import transformers
 from mmengine import print_log
-from mmengine.model import BaseModel
 from mmengine.config import Config, ConfigDict
+from mmengine.model import BaseModel
 from mmengine.runner import load_checkpoint
 from peft import PeftType, get_peft_model, prepare_model_for_kbit_training
 from torch import nn
@@ -79,11 +79,13 @@ class SupervisedFinetune(BaseModel):
         super().__init__(data_preprocessor)
         self.llm = self._build_from_cfg_or_module(llm, LLM)
         self.llm.config.use_cache = False
-        if isinstance(tokenizer, dict) or isinstance(tokenizer, Config) or isinstance(tokenizer, ConfigDict):
+        if isinstance(tokenizer, dict) or isinstance(
+                tokenizer, Config) or isinstance(tokenizer, ConfigDict):
             tokenizer = TOKENIZER.build(tokenizer)
         smart_tokenizer_and_embedding_resize(tokenizer, self.llm)
 
-        if isinstance(lora, dict) or isinstance(lora, Config) or isinstance(lora, ConfigDict):
+        if isinstance(lora, dict) or isinstance(lora, Config) or isinstance(
+                lora, ConfigDict):
             self.lora = MODELS.build(lora)
         else:
             self.lora = lora
@@ -95,7 +97,7 @@ class SupervisedFinetune(BaseModel):
         self._is_init = True
 
     def _prepare_for_lora(self, peft_model=None):
-        self.llm = prepare_model_for_kbit_training(self.llm)  
+        self.llm = prepare_model_for_kbit_training(self.llm)
         if self.lora.target_modules is None:
             modules = find_all_linear_names(self.llm)
             self.lora.target_modules = modules

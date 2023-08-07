@@ -3,11 +3,11 @@ from typing import Optional
 
 import torch
 import transformers
+from data_utils import get_train_dataloader
 from peft import LoraConfig
-from transformers import BitsAndBytesConfig, Trainer, AutoTokenizer
+from transformers import AutoTokenizer, BitsAndBytesConfig, Trainer
 
 from mmchat.models import SupervisedFinetune
-from data_utils import get_train_dataloader
 
 
 @dataclass
@@ -15,6 +15,7 @@ class ModelArguments:
     model_name_or_path: Optional[str] = field(default='internlm/internlm-7b')
     use_qlora: bool = field(default=True)
     use_lora: bool = field(default=False)
+
 
 @dataclass
 class DataArguments:
@@ -68,20 +69,20 @@ def train():
     else:
         quantization_config = None
         lora_config = None
-        
+
     llm = transformers.AutoModelForCausalLM.from_pretrained(
         model_args.model_name_or_path,
         cache_dir=training_args.cache_dir,
         quantization_config=quantization_config,
-        trust_remote_code=True
-    )
-    tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path,
-                                              trust_remote_code=True)
+        trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_args.model_name_or_path, trust_remote_code=True)
 
     model = SupervisedFinetune(llm=llm, lora=lora_config, tokenizer=tokenizer)
 
     # build trainer_hf
-    train_dataloader = get_train_dataloader(data_args.dataset_cfg_path, tokenizer)
+    train_dataloader = get_train_dataloader(data_args.dataset_cfg_path,
+                                            tokenizer)
     train_dataset = train_dataloader.dataset
     data_collator = train_dataloader.collate_fn
     data_module = dict(

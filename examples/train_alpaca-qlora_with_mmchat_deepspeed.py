@@ -4,22 +4,20 @@ import os
 import deepspeed
 import torch
 import transformers
+from data_utils import get_train_dataloader
 from peft import LoraConfig
 from tqdm import tqdm
-from transformers import BitsAndBytesConfig, AutoTokenizer
+from transformers import AutoTokenizer, BitsAndBytesConfig
 
 from mmchat.models import SupervisedFinetune
-from data_utils import get_train_dataloader
 
 
 def get_argument_parser():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         '--model_name_or_path', type=str, default='internlm/internlm-7b')
-    parser.add_argument(
-        '--use_qlora', type=bool, default=True)
-    parser.add_argument(
-        '--use_lora', type=bool, default=False)
+    parser.add_argument('--use_qlora', type=bool, default=True)
+    parser.add_argument('--use_lora', type=bool, default=False)
     parser.add_argument(
         '--dataset_cfg_path',
         type=str,
@@ -101,14 +99,13 @@ def train():
     else:
         quantization_config = None
         lora_config = None
-        
+
     llm = transformers.AutoModelForCausalLM.from_pretrained(
         args.model_name_or_path,
         quantization_config=quantization_config,
-        trust_remote_code=True
-    )
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path,
-                                              trust_remote_code=True)
+        trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.model_name_or_path, trust_remote_code=True)
 
     model = SupervisedFinetune(llm=llm, lora=lora_config, tokenizer=tokenizer)
 

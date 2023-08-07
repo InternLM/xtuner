@@ -10,10 +10,10 @@
 
 2. run training scripts
 
-   ``` shell
+   ```shell
    # huggingface training pipeline
    bash run_train_alpaca-qlora_with_mmchat_hf.sh
-   
+
    # deepspeed training pipeline
    bash run_train_alpaca-qlora_with_mmchat_deepspeed.sh
    ```
@@ -26,11 +26,11 @@
    # case 1. use qlora
    --use_qlora True
    --use_lora False
-   
+
    # case 2. use lora
    --use_qlora False
    --use_lora True
-   
+
    # case 3. neither
    --use_qlora False
    --use_lora False
@@ -68,7 +68,7 @@ lora_config = LoraConfig(
     bias='none',
     task_type='CAUSAL_LM')
 
-# build base llm model 
+# build base llm model
 llm = AutoModelForCausalLM.from_pretrained(
     model_name_or_path,
     quantization_config=quantization_config,
@@ -80,7 +80,7 @@ model = SupervisedFinetune(llm=llm, lora=lora_config, tokenizer=tokenizer)
 
 ```
 
-## How to build train_dataloader 
+## How to build train_dataloader
 
 ```python
 from .data_utils import get_train_dataloader
@@ -94,4 +94,3 @@ train_dataloader = get_train_dataloader(dataset_cfg_path, tokenizer)
 train_dataset = train_dataloader.dataset
 data_collator = train_dataloader.collate_fn
 ```
-

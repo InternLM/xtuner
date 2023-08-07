@@ -3,8 +3,8 @@ from functools import partial
 
 import numpy as np
 from datasets import DatasetDict
-from mmengine.config.lazy import LazyObject
 from mmengine.config import Config, ConfigDict
+from mmengine.config.lazy import LazyObject
 
 from mmchat.registry import DATASETS, TOKENIZER
 from .utils import Concatenator, encode_fn
@@ -47,7 +47,8 @@ def process_hf_dataset(dataset,
         dataset = dataset.map(map_fn, remove_columns=remove_columns)
     for old, new in rename_maps:
         dataset = dataset.rename_column(old, new)
-    if isinstance(tokenizer, dict) or isinstance(tokenizer, Config) or isinstance(tokenizer, ConfigDict):
+    if isinstance(tokenizer, dict) or isinstance(
+            tokenizer, Config) or isinstance(tokenizer, ConfigDict):
         tokenizer = TOKENIZER.build(tokenizer)
     dataset = dataset.map(
         partial(

@@ -4,8 +4,8 @@ import json
 import os
 
 import torch
-from mmengine.logging import print_log
 from mmengine.config import Config, ConfigDict
+from mmengine.logging import print_log
 from torch.utils.data import Dataset
 from tqdm import tqdm
 
@@ -18,7 +18,8 @@ class MOSSSFTDataset(Dataset):
         super().__init__()
         self.bot_name = bot_name
         self.src_data_file = data_file
-        if isinstance(tokenizer, dict) or isinstance(tokenizer, Config) or isinstance(tokenizer, ConfigDict):
+        if isinstance(tokenizer, dict) or isinstance(
+                tokenizer, Config) or isinstance(tokenizer, ConfigDict):
             self.tokenizer = TOKENIZER.build(tokenizer)
         else:
             self.tokenizer = tokenizer
