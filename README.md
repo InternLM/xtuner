@@ -45,7 +45,7 @@
 </td>
 <td>
 <ul>
-  <li>Normal (Distributed) Data Parallel</li>
+  <li>(Distributed) Data Parallel</li>
   <li><a href="https://github.com/microsoft/DeepSpeed">Deepspeed 🚀</a></li>
   <li>...</li>  
 </ul>
