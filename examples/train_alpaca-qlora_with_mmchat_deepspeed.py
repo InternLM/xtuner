@@ -4,8 +4,6 @@ import os
 import deepspeed
 import torch
 import transformers
-from mmengine.config import Config
-from mmengine.runner import Runner
 from peft import LoraConfig
 from tqdm import tqdm
 from transformers import BitsAndBytesConfig, AutoTokenizer
