@@ -1,10 +1,8 @@
 beautifulsoup4
 bitsandbytes
 datasets
-deepspeed
 fasttext
 mmengine
-mpi4py
 peft
 scipy
 SentencePiece
