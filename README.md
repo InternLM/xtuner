@@ -103,7 +103,7 @@ python tools/train.py configs/internlm/internlm_7b/internlm_7b_qlora_alpaca.py
 
 We support the chat with pretrained / fine-tuned LLMs. 
 
-- Begin with the pretrained HuggingFace LLM, and the corresponding HuggingFace adapter fine-tuned from XXX
+- With the pretrained HuggingFace LLM, and the corresponding HuggingFace adapter fine-tuned from XXX
 
   ```shell
   python tools/chat_hf.py [MODEL_NAME_OR_PATH] --adapter [ADAPTER_NAME_OR_PATH] ...
@@ -135,7 +135,7 @@ We support the chat with pretrained / fine-tuned LLMs.
     python tools/chat_hf.py internlm/internlm-7b --adapter XXX --prompt openassistant --answer-stop-word "###"
     ```
 
-- Begin with XXX config, and the corresponding PTH adapter fine-tuned from XXX
+- With XXX config, and the corresponding PTH adapter fine-tuned from XXX
 
   ```shell
   python tools/chat.py [CONFIG] --adapter [PTH_ADAPTER_PATH] ...
