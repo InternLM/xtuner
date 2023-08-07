@@ -78,7 +78,14 @@
 conda install pytorch torchvision torchaudio pytorch-cuda=11.7 -c pytorch -c nvidia
 ```
 
-2. Install dependencies and XXX.
+2. (optional) Install deepspeed and mpi4py.
+
+```shell
+pip install deepspeed
+conda install mpi4py
+```
+
+3. Install dependencies and XXX.
 
 ```shell
 git clone XXX
