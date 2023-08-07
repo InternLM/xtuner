@@ -23,4 +23,4 @@ param_scheduler = dict(
     type=CosineAnnealingLR, eta_min=lr * 0.1, by_epoch=False, T_max=max_iters)
 
 # train, val, test setting
-train_cfg = dict(by_epoch=False, max_iters=max_iters, val_interval=4000)
+train_cfg = dict(by_epoch=False, max_iters=max_iters, val_interval=max_iters)
