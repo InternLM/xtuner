@@ -60,6 +60,7 @@
 
 
 
+
 ### 🔧 Chat with Plugins
 
 Calculate, Equations Solve, Web Search, ...
@@ -116,6 +117,7 @@ We support to chat with pretrained / fine-tuned LLMs.
   <details>
   <summary>Examples</summary>
 
+
   - Llama-2-7B, plugins adapter,
 
     ```shell
@@ -151,6 +153,7 @@ We support to chat with pretrained / fine-tuned LLMs.
   <details>
   <summary>Examples</summary>
 
+
   - Llama-2-7B, plugins adapter,
 
     ```shell
@@ -176,6 +179,39 @@ We support to chat with pretrained / fine-tuned LLMs.
     ```
 
   </details>
+
+### Evaluation
+
+- If a comprehensive and systematic evaluation of the LLM is required, we recommend using the [OpenCompass](https://github.com/InternLM/opencompass), which currently supports evaluation scheme of 50+ datasets with about 300,000 questions.
+
+- In XXX, we support the MMLU evaluation for LLMs, by
+  
+  ```
+  python tools/test.py [CONFIG] [CHECKPOINT]
+  ```
+  Notably, all provided configs disable the evaluation since it may introduce potential biases when evaluated by only one dataset and it is widely believed that fine-tune stage introduces little additional knowledge to LLMs.
+
+  <details>
+  <summary>How to enable it?</summary>
+
+
+  If the evaluation is needed, user can add below lines to the original config to enable it.
+  
+  ```python
+  from mmengine.config import read_base
+
+  with read_base():
+      from ..._base_.datasets.evaluation.mmlu_fs import *  # noqa: F401,F403
+
+  val_dataloader.dataset.tokenizer = tokenizer  # noqa: F405
+  test_dataloader.dataset.tokenizer = tokenizer  # noqa: F405
+  val_evaluator.tokenizer = tokenizer  # noqa: F405
+  test_evaluator.tokenizer = tokenizer  # noqa: F405
+  ```
+
+  </detals>
+
+
 
 
 ### Deploy
