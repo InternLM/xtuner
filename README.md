@@ -61,6 +61,7 @@
 
 
 
+
 ### 🔧 Chat with Plugins
 
 Calculate, Equations Solve, Web Search, ...
@@ -80,13 +81,13 @@ Calculate, Equations Solve, Web Search, ...
 
 ### Installation
 
-1. Install PyTorch following [official instructions](https://pytorch.org/get-started/locally/), e.g.
+1. Install PyTorch following [official instructions](https://pytorch.org/get-started/locally/), *e.g.*,
 
   ```shell
 conda install pytorch torchvision torchaudio pytorch-cuda=11.7 -c pytorch -c nvidia
   ```
 
-2. Install dependencies and XXX
+2. Install dependencies and XXX.
 
   ```shell
 git clone XXX
@@ -108,7 +109,7 @@ python tools/train.py configs/internlm/internlm_7b/internlm_7b_qlora_alpaca.py
 
 We support to chat with pretrained / fine-tuned LLMs.
 
-- With the pretrained HuggingFace LLM, and the corresponding HuggingFace adapter fine-tuned from XXX
+- With the pretrained HuggingFace LLM, and the corresponding HuggingFace adapter fine-tuned from XXX.
 
   ```shell
   python tools/chat_hf.py [MODEL_NAME_OR_PATH] --adapter [ADAPTER_NAME_OR_PATH] ...
@@ -144,7 +145,7 @@ We support to chat with pretrained / fine-tuned LLMs.
 
   </details>
 
-- With XXX config, and the corresponding PTH adapter fine-tuned from XXX
+- With XXX config, and the corresponding PTH adapter fine-tuned from XXX.
 
   ```shell
   python tools/chat.py [CONFIG] --adapter [PTH_ADAPTER_PATH] ...
@@ -185,10 +186,11 @@ We support to chat with pretrained / fine-tuned LLMs.
 - If a comprehensive and systematic evaluation of the LLM is required, we recommend using the [OpenCompass](https://github.com/InternLM/opencompass), which currently supports evaluation scheme of 50+ datasets with about 300,000 questions.
 
 - In XXX, we support the MMLU evaluation for LLMs, by
-  
+
   ```
   python tools/test.py [CONFIG] [CHECKPOINT]
   ```
+
   Notably, all provided configs disable the evaluation since it may introduce potential biases when evaluated by only one dataset and it is widely believed that fine-tune stage introduces little additional knowledge to LLMs.
 
   <details>
@@ -196,7 +198,7 @@ We support to chat with pretrained / fine-tuned LLMs.
 
 
   If the evaluation is needed, user can add below lines to the original config to enable it.
-  
+
   ```python
   from mmengine.config import read_base
 
