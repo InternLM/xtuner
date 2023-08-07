@@ -56,6 +56,7 @@
 
 
 
+
 ### 🔧 Chat with Plugins
 
 Calculate, Equations Solve, Web Search, ...
@@ -86,15 +87,61 @@ cd XXX
 pip install -v -e .
 ```
 
-### Finetune
+### Fine-tune
 
-We support the Full / LoRA / QLoRA finetune for Large Language Models (LLM). 
+We support the efficient fine-tune (*e.g.*, QLoRA) for Large Language Models (LLM). 
 
+Taking the QLoRA fine-tuning of InternLM-7B with Alpaca dataset as an example, we can start it by：
 
+```shell
+python tools/train.py configs/internlm/internlm_7b/internlm_7b_qlora_alpaca.py
+```
 
 ### Chat
 
+We support the chat with pretrained / fine-tuned LLMs. 
+
+- Begin with the pretrained HuggingFace LLM, and the corresponding HuggingFace adapter fine-tuned from XXX
+
+  ```shell
+  python tools/chat_hf.py [MODEL_NAME_OR_PATH] --adapter [ADAPTER_NAME_OR_PATH] ...
+  ```
+
+  *e.g.*,
+
+  -  Llama-2-7B, plugins adapter,
+
+     ```shell
+     python tools/chat_hf.py meta-llama/Llama-2-7b --adapter XXX --prompt plugins --with-plugins --command-stop-word "<eoc>" --answer-stop-word "<eom>" --no-streamer
+     ```
+
+  -  InternLM-7B, arxiv GenTitle adapter,
+
+     ```shell
+     python tools/chat_hf.py internlm/internlm-7b --adapter XXX --prompt title
+     ```
+
+  -  InternLM-7B, alpaca adapter,
+
+     ```shell
+     python tools/chat_hf.py internlm/internlm-7b --adapter XXX --prompt alpaca
+     ```
+
+  -  InternLM-7B, oasst1 adapter,
+
+     ```shell
+     python tools/chat_hf.py internlm/internlm-7b --adapter XXX --prompt openassistant --answer-stop-word "###"
+     ```
+
+- Begin with XXX config, and the corresponding PTH adapter fine-tuned from XXX
+
+    ```shell
+  python tools/chat.py [CONFIG] --adapter [PTH_ADAPTER_PATH] ...
+    ```
+
 ### Deploy
+
+
 
 ## Performance
 
@@ -103,4 +150,3 @@ We support the Full / LoRA / QLoRA finetune for Large Language Models (LLM).
 ## Acknowledgement
 
 ## License
-
