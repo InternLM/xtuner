@@ -71,8 +71,8 @@
 
 ### 🌟 Colab Demos 
 
-- InternLM-7B, QLoRA Fine-tune: [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1yzGeYXayLomNQjLD4vC6wgUHvei3ezt4?usp=sharing)
-- Llama2-7B-Plugins, Chat: [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)]()
+- InternLM-7B, QLoRA Fine-tune. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1yzGeYXayLomNQjLD4vC6wgUHvei3ezt4?usp=sharing)
+- Llama2-7B-Plugins, Chat. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)]()
 
 ### 🖥️ Minimum System Requirements
 
