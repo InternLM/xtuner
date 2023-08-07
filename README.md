@@ -38,7 +38,7 @@
   <li><a href="https://github.com/OpenLMLab/MOSS/tree/main/SFT_data">MOSS-003-SFT</a> 🔧</li>
   <li><a href="https://huggingface.co/datasets/tatsu-lab/alpaca">Alpaca en</a> / <a href="https://huggingface.co/datasets/silk-road/alpaca-data-gpt4-chinese">zh</a></li>
   <li><a href="https://huggingface.co/datasets/timdettmers/openassistant-guanaco">oasst1</a></li>
-  <li><a href="https://github.com/WangRongsheng/ChatGenTitle">Arxiv GenTitle</a> 📃</li>
+  <li><a href="https://github.com/WangRongsheng/ChatGenTitle">Arxiv GenTitle</a> 👨‍🎓</li>
   <li><a href="https://github.com/Toyhom/Chinese-medical-dialogue-data">Chinese Medical Dialogue</a> 🧑‍⚕️</li>
   <li>...</li>  
 </ul>
@@ -53,6 +53,8 @@
 </tr>
 </tbody>
 </table>
+
+
 
 
 
@@ -75,17 +77,17 @@ Calculate, Equations Solve, Web Search, ...
 
 1. Install PyTorch following [official instructions](https://pytorch.org/get-started/locally/), e.g.
 
-```shell
+  ```shell
 conda install pytorch torchvision torchaudio pytorch-cuda=11.7 -c pytorch -c nvidia
-```
+  ```
 
 2. Install dependencies and XXX
 
-```shell
+  ```shell
 git clone XXX
 cd XXX
 pip install -v -e .
-```
+  ```
 
 ### Fine-tune
 
@@ -109,39 +111,53 @@ We support the chat with pretrained / fine-tuned LLMs.
 
   *e.g.*,
 
-  -  Llama-2-7B, plugins adapter,
+  - Llama-2-7B, plugins adapter,
 
-     ```shell
-     python tools/chat_hf.py meta-llama/Llama-2-7b --adapter XXX --prompt plugins --with-plugins --command-stop-word "<eoc>" --answer-stop-word "<eom>" --no-streamer
-     ```
+    ```shell
+    python tools/chat_hf.py meta-llama/Llama-2-7b --adapter XXX --prompt plugins --with-plugins --command-stop-word "<eoc>" --answer-stop-word "<eom>" --no-streamer
+    ```
 
-  -  InternLM-7B, arxiv GenTitle adapter,
+  - InternLM-7B, arxiv GenTitle adapter,
 
-     ```shell
-     python tools/chat_hf.py internlm/internlm-7b --adapter XXX --prompt title
-     ```
+    ```shell
+    python tools/chat_hf.py internlm/internlm-7b --adapter XXX --prompt title
+    ```
 
-  -  InternLM-7B, alpaca adapter,
+  - InternLM-7B, alpaca adapter,
 
-     ```shell
-     python tools/chat_hf.py internlm/internlm-7b --adapter XXX --prompt alpaca
-     ```
+    ```shell
+    python tools/chat_hf.py internlm/internlm-7b --adapter XXX --prompt alpaca
+    ```
 
-  -  InternLM-7B, oasst1 adapter,
+  - InternLM-7B, oasst1 adapter,
 
-     ```shell
-     python tools/chat_hf.py internlm/internlm-7b --adapter XXX --prompt openassistant --answer-stop-word "###"
-     ```
+    ```shell
+    python tools/chat_hf.py internlm/internlm-7b --adapter XXX --prompt openassistant --answer-stop-word "###"
+    ```
 
 - Begin with XXX config, and the corresponding PTH adapter fine-tuned from XXX
 
-    ```shell
+  ```shell
   python tools/chat.py [CONFIG] --adapter [PTH_ADAPTER_PATH] ...
-    ```
+  ```
 
 ### Deploy
 
+- **Step 0**, convert the pth adapter to HuggingFace adapter, by
 
+  ```shell
+  python tools/model_converters/adapter_pth2hf.py [CONFIG] [PTH_ADAPTER_PATH] [SAVE_DIR]
+  ```
+
+- **Step 1**, merge the HuggingFace adapter to the pretrained LLM, by
+
+  ```shell
+  python tools/model_converters/merge_lora_hf.py [MODEL_NAME_OR_PATH] [ADAPTER_NAME_OR_PATH] [SAVE_DIR]
+  ```
+
+- **Step 2**, deploy with any other framework, such as [LMDeploy](https://github.com/InternLM/lmdeploy)🚀.
+
+  - Note: We are woking closely with LMDeploy team, to implement the deployment of **dialogues with plugins**.
 
 ## Performance
 
