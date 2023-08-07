@@ -238,9 +238,10 @@ We support to chat with pretrained / fine-tuned LLMs.
 
 The project has conducted testing on various relevant models on the objective evaluation set for the "Natural Language Understanding (NLU)" category. Given that such evaluations are strictly reliant on provided label outputs, the results are devoid of any subjective elements. This allows for a degree of reflection on the performance and numerous practical capabilities of large-scale models. We have empirically tested the performance of a series of related models on the newly released MMLU dataset. Below are the average evaluation results of some models on the validation and test sets.
 
-| Model              | Valid (zero-shot) | Valid (five-shot) | Test (zero-shot) | Test (five-shot) |
-| Llama2-7b          |              42.6 |              46.5 |             42.4 |             46.8 |
-| Llama2-7b oasst1   |              Data |              Data |             Data |             Data |
+| Model                  | Valid (zero-shot) | Valid (five-shot) | Test (zero-shot) | Test (five-shot) |
+| ---------------------- | ----------------- | ----------------- | ---------------- | ---------------- |
+| Llama2-7b              | 42.6              | 46.5              | 42.4             | 46.8             |
+| Llama2-7b oasst1 qlora | Data              | Data              | Data             | Data             |
 
 ### Instant generation
 
