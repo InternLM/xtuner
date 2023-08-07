@@ -66,7 +66,7 @@
 
 Calculate, Equations Solve, Web Search, ...
 
-<img src="https://github.com/InternLM/lmdeploy/assets/36994684/a9fd6fff-955e-4476-a786-dae685182d58">
+<img src="https://github.com/InternLM/lmdeploy/assets/36994684/43a87e81-a726-4ef1-a251-c698186b4938">
 
 
 ### 🌟 Colab Demos 
