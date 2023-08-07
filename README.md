@@ -30,7 +30,7 @@
   <li><a href="https://github.com/baichuan-inc/Baichuan-7B">Baichuan-7B</a></li>
   <li><a href="https://github.com/baichuan-inc/Baichuan-13B">Baichuan-13B-Base</a></li>
   <li><a href="https://github.com/baichuan-inc/Baichuan-13B">Baichuan-13B-Chat</a></li>
-  <li>...</li>    
+  <li>...</li>
 </ul>
 </td>
 <td>
@@ -41,26 +41,19 @@
   <li><a href="https://huggingface.co/datasets/tatsu-lab/alpaca">Alpaca en</a> / <a href="https://huggingface.co/datasets/silk-road/alpaca-data-gpt4-chinese">zh</a> 🦙</li>
   <li><a href="https://huggingface.co/datasets/timdettmers/openassistant-guanaco">oasst1</a> 🤖️</li>
   <li><a href="https://github.com/Toyhom/Chinese-medical-dialogue-data">Chinese Medical Dialogue</a> 🧑‍⚕️</li>
-  <li>...</li>  
+  <li>...</li>
 </ul>
 </td>
 <td>
 <ul>
   <li>(Distributed) Data Parallel</li>
   <li><a href="https://github.com/microsoft/DeepSpeed">Deepspeed 🚀</a></li>
-  <li>...</li>  
+  <li>...</li>
 </ul>
 </td>
 </tr>
 </tbody>
 </table>
-
-
-
-
-
-
-
 
 ### 🔧 LLMs with Plugins
 
@@ -68,17 +61,12 @@
 
 <img src="https://github.com/InternLM/lmdeploy/assets/36994684/43a87e81-a726-4ef1-a251-c698186b4938">
 
-
-### 🌟 Colab Demos 
+### 🌟 Colab Demos
 
 - InternLM-7B, QLoRA Fine-tune. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1yzGeYXayLomNQjLD4vC6wgUHvei3ezt4?usp=sharing)
-- Llama2-7B-Plugins, Chat. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)]()
+- Llama2-7B-Plugins, Chat. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](<>)
 
 ### 🖥️ Minimum System Requirements
-
-
-
-
 
 ## Quick Start
 
@@ -86,21 +74,21 @@
 
 1. Install PyTorch following [official instructions](https://pytorch.org/get-started/locally/), *e.g.*,
 
-  ```shell
+```shell
 conda install pytorch torchvision torchaudio pytorch-cuda=11.7 -c pytorch -c nvidia
-  ```
+```
 
 2. Install dependencies and XXX.
 
-  ```shell
+```shell
 git clone XXX
 cd XXX
 pip install -v -e .
-  ```
+```
 
 ### Fine-tune
 
-We support the efficient fine-tune (*e.g.*, QLoRA) for LLMs. 
+We support the efficient fine-tune (*e.g.*, QLoRA) for LLMs.
 
 - On a single GPU
 
@@ -109,13 +97,13 @@ We support the efficient fine-tune (*e.g.*, QLoRA) for LLMs.
   ```
 
   Taking the QLoRA fine-tuning of InternLM-7B with Alpaca dataset as an example, we can start it by
-  
+
   ```shell
   python ./tools/train.py ./configs/internlm/internlm_7b/internlm_7b_qlora_alpaca.py
   ```
 
 - On multiple GPUs
-  
+
   ```shell
   bash ./tools/dist_train.sh \
       ${CONFIG_FILE} \
@@ -135,7 +123,6 @@ We support to chat with pretrained / fine-tuned LLMs.
 
   <details>
   <summary>Examples</summary>
-
 
   - Llama-2-7B, plugins adapter,
 
@@ -171,7 +158,6 @@ We support to chat with pretrained / fine-tuned LLMs.
 
   <details>
   <summary>Examples</summary>
-
 
   - Llama-2-7B, plugins adapter,
 
@@ -214,7 +200,6 @@ We support to chat with pretrained / fine-tuned LLMs.
   <details>
   <summary>How to enable it?</summary>
 
-
   If the evaluation is needed, user can add below lines to the original config to enable it.
 
   ```python
@@ -228,9 +213,6 @@ We support to chat with pretrained / fine-tuned LLMs.
   ```
 
   </details>
-
-
-
 
 ### Deploy
 
