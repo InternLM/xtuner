@@ -232,7 +232,7 @@ We support to chat with pretrained / fine-tuned LLMs.
 
 - **Step 2**, deploy the merged LLM with any other framework, such as [LMDeploy](https://github.com/InternLM/lmdeploy) 🚀.
 
-  - Note: We are woking closely with LMDeploy team, to implement the deployment of **dialogues with plugins**.
+  - We are woking closely with LMDeploy team, to implement the deployment of **dialogues with plugins**!
 
 ## Performance
 
