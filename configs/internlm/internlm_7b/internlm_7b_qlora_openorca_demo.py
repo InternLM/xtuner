@@ -10,16 +10,16 @@ with read_base():
     from ..._base_.schedules.cosine_e1 import *  # noqa: F401,F403
 
 train_dataloader.dataset.tokenizer = tokenizer  # noqa: F405
-train_dataloader.dataset.max_dataset_length = 50000  # noqa: F405
 
 custom_hooks = [
     dict(type=LogSampleHook, tokenizer=tokenizer),  # noqa: F405
     dict(
         type=SampleGenerateHook,
         tokenizer=tokenizer,  # noqa: F405
-        every_n_iters=500,
+        every_n_iters=5000,
         sample_inputs=[
-            '请给我介绍五个上海的景点', 'Please tell me five scenic spots in Shanghai'
+            'Please explain AI to me.',
+            'Please tell me five scenic spots in London.'
         ],
         instruction=PROMPT_TEMPLATE.alpaca.INSTRUCTION_START)
 ]
