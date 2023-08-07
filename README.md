@@ -100,7 +100,7 @@ pip install -v -e .
 
 ### Fine-tune
 
-We support the efficient fine-tune (*e.g.*, QLoRA) for Large Language Models (LLM). 
+We support the efficient fine-tune (*e.g.*, QLoRA) for LLMs. 
 
 - On a single GPU
 
