@@ -241,9 +241,9 @@ The project has conducted testing on various relevant models on the objective ev
 | Model                  | Valid (zero-shot) | Valid (5-shot) | Test (zero-shot) | Test (5-shot) |
 | ---------------------- | ----------------- | -------------- | ---------------- | ------------- |
 | InternLM-7b            | 47.9              | 49.3           | 47.0             | 50.6          |
-| InternLM-7b alpaca sft | Data              | Data           | Data             | Data          |
+| InternLM-7b Alpaca     | Data              | Data           | Data             | Data          |
 | Llama2-7b              | 42.6              | 46.5           | 42.4             | 46.8          |
-| Llama2-7b alpaca sft   | Data              | Data           | Data             | Data          |
+| Llama2-7b Alpaca       | Data              | Data           | Data             | Data          |
 
 ### Instant generation
 
