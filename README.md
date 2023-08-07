@@ -102,11 +102,26 @@ pip install -v -e .
 
 We support the efficient fine-tune (*e.g.*, QLoRA) for Large Language Models (LLM). 
 
-Taking the QLoRA fine-tuning of InternLM-7B with Alpaca dataset as an example, we can start it by：
+- On a single GPU
 
-```shell
-python tools/train.py configs/internlm/internlm_7b/internlm_7b_qlora_alpaca.py
-```
+  ```shell
+  python ./tools/train.py ${CONFIG_FILE} [optional arguments]
+  ```
+
+  Taking the QLoRA fine-tuning of InternLM-7B with Alpaca dataset as an example, we can start it by
+  
+  ```shell
+  python ./tools/train.py ./configs/internlm/internlm_7b/internlm_7b_qlora_alpaca.py
+  ```
+
+- On multiple GPUs
+  
+  ```shell
+  bash ./tools/dist_train.sh \
+      ${CONFIG_FILE} \
+      ${GPU_NUM} \
+      [optional arguments]
+  ```
 
 ### Chat
 
@@ -115,7 +130,7 @@ We support to chat with pretrained / fine-tuned LLMs.
 - With the pretrained HuggingFace LLM, and the corresponding HuggingFace adapter fine-tuned from XXX.
 
   ```shell
-  python tools/chat_hf.py [MODEL_NAME_OR_PATH] --adapter [ADAPTER_NAME_OR_PATH] ...
+  python ./tools/chat_hf.py ${MODEL_NAME_OR_PATH} --adapter ${ADAPTER_NAME_OR_PATH} [other optional arguments]
   ```
 
   <details>
@@ -125,25 +140,25 @@ We support to chat with pretrained / fine-tuned LLMs.
   - Llama-2-7B, plugins adapter,
 
     ```shell
-    python tools/chat_hf.py meta-llama/Llama-2-7b --adapter XXX --bot-name Llama2 --prompt plugins --with-plugins --command-stop-word "<eoc>" --answer-stop-word "<eom>" --no-streamer
+    python ./tools/chat_hf.py meta-llama/Llama-2-7b --adapter XXX --bot-name Llama2 --prompt plugins --with-plugins --command-stop-word "<eoc>" --answer-stop-word "<eom>" --no-streamer
     ```
 
   - InternLM-7B, arxiv GenTitle adapter,
 
     ```shell
-    python tools/chat_hf.py internlm/internlm-7b --adapter XXX --prompt title
+    python ./tools/chat_hf.py internlm/internlm-7b --adapter XXX --prompt title
     ```
 
   - InternLM-7B, alpaca adapter,
 
     ```shell
-    python tools/chat_hf.py internlm/internlm-7b --adapter XXX --prompt alpaca
+    python ./tools/chat_hf.py internlm/internlm-7b --adapter XXX --prompt alpaca
     ```
 
   - InternLM-7B, oasst1 adapter,
 
     ```shell
-    python tools/chat_hf.py internlm/internlm-7b --adapter XXX --prompt openassistant --answer-stop-word "###"
+    python ./tools/chat_hf.py internlm/internlm-7b --adapter XXX --prompt openassistant --answer-stop-word "###"
     ```
 
   </details>
@@ -151,7 +166,7 @@ We support to chat with pretrained / fine-tuned LLMs.
 - With XXX config, and the corresponding PTH adapter fine-tuned from XXX.
 
   ```shell
-  python tools/chat.py [CONFIG] --adapter [PTH_ADAPTER_PATH] ...
+  python ./tools/chat.py ${CONFIG_FILE} --adapter ${PTH_ADAPTER_PATH} [other optional arguments]
   ```
 
   <details>
@@ -161,25 +176,25 @@ We support to chat with pretrained / fine-tuned LLMs.
   - Llama-2-7B, plugins adapter,
 
     ```shell
-    python tools/chat.py configs/llama/llama2_7b/llama2_7b_qlora_moss_sft_all.py --adapter XXX --prompt plugins --with-plugins --command-stop-word "<eoc>" --answer-stop-word "<eom>" --no-streamer
+    python ./tools/chat.py ./configs/llama/llama2_7b/llama2_7b_qlora_moss_sft_all.py --adapter XXX --prompt plugins --with-plugins --command-stop-word "<eoc>" --answer-stop-word "<eom>" --no-streamer
     ```
 
   - InternLM-7B, arxiv GenTitle adapter,
 
     ```shell
-    python tools/chat.py configs/internlm/internlm_7b/internlm_7b_qlora_arxiv.py --adapter XXX --prompt title
+    python ./tools/chat.py ./configs/internlm/internlm_7b/internlm_7b_qlora_arxiv.py --adapter XXX --prompt title
     ```
 
   - InternLM-7B, alpaca adapter,
 
     ```shell
-    python tools/chat.py configs/internlm/internlm_7b/internlm_7b_qlora_alpaca.py --adapter XXX --prompt alpaca
+    python ./tools/chat.py ./configs/internlm/internlm_7b/internlm_7b_qlora_alpaca.py --adapter XXX --prompt alpaca
     ```
 
   - InternLM-7B, oasst1 adapter,
 
     ```shell
-    python tools/chat.py configs/internlm/internlm_7b/internlm_7b_qlora_oasst1.py --adapter XXX --prompt openassistant --answer-stop-word "###"
+    python ./tools/chat.py ./configs/internlm/internlm_7b/internlm_7b_qlora_oasst1.py --adapter XXX --prompt openassistant --answer-stop-word "###"
     ```
 
   </details>
@@ -191,7 +206,7 @@ We support to chat with pretrained / fine-tuned LLMs.
 - In XXX, we support the MMLU evaluation for LLMs, by
 
   ```
-  python tools/test.py [CONFIG] [(Optional)ADAPTER_CHECKPOINT]
+  python ./tools/test.py ${CONFIG_FILE} --checkpoint ${PTH_ADAPTER_PATH} [other optional arguments]
   ```
 
   Notably, all provided configs disable the evaluation since it may introduce potential biases when evaluated by only one dataset and it is widely believed that fine-tune stage introduces little additional knowledge to LLMs.
@@ -222,13 +237,13 @@ We support to chat with pretrained / fine-tuned LLMs.
 - **Step 0**, convert the pth adapter to HuggingFace adapter, by
 
   ```shell
-  python tools/model_converters/adapter_pth2hf.py [CONFIG] [PTH_ADAPTER_PATH] [SAVE_DIR]
+  python ./tools/model_converters/adapter_pth2hf.py ${CONFIG_FILE} ${PTH_ADAPTER_PATH} ${SAVE_DIR}
   ```
 
 - **Step 1**, merge the HuggingFace adapter to the pretrained LLM, by
 
   ```shell
-  python tools/model_converters/merge_lora_hf.py [MODEL_NAME_OR_PATH] [ADAPTER_NAME_OR_PATH] [SAVE_DIR]
+  python ./tools/model_converters/merge_lora_hf.py ${MODEL_NAME_OR_PATH} ${ADAPTER_NAME_OR_PATH} ${SAVE_DIR}
   ```
 
 - **Step 2**, deploy the merged LLM with any other framework, such as [LMDeploy](https://github.com/InternLM/lmdeploy) 🚀.
