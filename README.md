@@ -66,6 +66,8 @@
 
 Calculate, Equations Solve, Web Search, ...
 
+
+
 ### 🌟 Colab Demos 
 
 - InternLM-7B, QLoRA Fine-tuning: [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1yzGeYXayLomNQjLD4vC6wgUHvei3ezt4?usp=sharing)
@@ -188,7 +190,7 @@ We support to chat with pretrained / fine-tuned LLMs.
 - In XXX, we support the MMLU evaluation for LLMs, by
 
   ```
-  python tools/test.py [CONFIG] [CHECKPOINT]
+  python tools/test.py [CONFIG] [(Optional)ADAPTER_CHECKPOINT]
   ```
 
   Notably, all provided configs disable the evaluation since it may introduce potential biases when evaluated by only one dataset and it is widely believed that fine-tune stage introduces little additional knowledge to LLMs.
@@ -205,9 +207,7 @@ We support to chat with pretrained / fine-tuned LLMs.
   with read_base():
       from ..._base_.datasets.evaluation.mmlu_fs import *  # noqa: F401,F403
 
-  val_dataloader.dataset.tokenizer = tokenizer  # noqa: F405
   test_dataloader.dataset.tokenizer = tokenizer  # noqa: F405
-  val_evaluator.tokenizer = tokenizer  # noqa: F405
   test_evaluator.tokenizer = tokenizer  # noqa: F405
   ```
 
