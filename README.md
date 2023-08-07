@@ -36,9 +36,10 @@
 <td>
 <ul>
   <li><a href="https://github.com/OpenLMLab/MOSS/tree/main/SFT_data">MOSS-003-SFT</a> 🔧</li>
-  <li><a href="https://huggingface.co/datasets/tatsu-lab/alpaca">Alpaca en</a> / <a href="https://huggingface.co/datasets/silk-road/alpaca-data-gpt4-chinese">zh</a></li>
-  <li><a href="https://huggingface.co/datasets/timdettmers/openassistant-guanaco">oasst1</a></li>
   <li><a href="https://github.com/WangRongsheng/ChatGenTitle">Arxiv GenTitle</a> 👨‍🎓</li>
+  <li><a href="https://huggingface.co/datasets/Open-Orca/OpenOrca">OpenOrca</a> 🐋</li>
+  <li><a href="https://huggingface.co/datasets/tatsu-lab/alpaca">Alpaca en</a> / <a href="https://huggingface.co/datasets/silk-road/alpaca-data-gpt4-chinese">zh</a> 🦙</li>
+  <li><a href="https://huggingface.co/datasets/timdettmers/openassistant-guanaco">oasst1</a> 🤖️</li>
   <li><a href="https://github.com/Toyhom/Chinese-medical-dialogue-data">Chinese Medical Dialogue</a> 🧑‍⚕️</li>
   <li>...</li>  
 </ul>
