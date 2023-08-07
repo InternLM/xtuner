@@ -4,6 +4,7 @@ datasets
 deepspeed
 fasttext
 mmengine
+mpi4py
 peft
 scipy
 SentencePiece
