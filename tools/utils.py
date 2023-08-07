@@ -8,7 +8,7 @@ from transformers.generation.streamers import BaseStreamer
 from mmchat.utils import StopWordStoppingCriteria
 
 
-def unwarpper_model(model):
+def get_base_model(model):
     if hasattr(model, 'llm'):
         model = model.llm
     if 'PeftModel' in model.__class__.__name__:
@@ -20,11 +20,15 @@ def get_chat_utils(model):
     """Get utils by model type."""
     if model.__class__.__name__ == 'InferenceEngine':
         model = model.module
-    is_internlm = 'InternLM' in unwarpper_model(model).__class__.__name__
+    base_model = get_base_model(model)
+    base_model_name = base_model.__class__.__name__
+    is_internlm = 'InternLM' in base_model_name
+    no_space = 'InternLM' in base_model_name or 'QWen' in base_model_name
     stop_criteria = StoppingCriteriaList()
     if is_internlm:
         stop_criteria.append(InternLMStoppingCriteria())
-        return InternLMStreamer, stop_criteria
+    if no_space:
+        return NoSpaceStreamer, stop_criteria
     else:
         return DecodeOutputStreamer, stop_criteria
 
@@ -84,8 +88,7 @@ class DecodeOutputStreamer(BaseStreamer):
         print('\n')
 
 
-class InternLMStreamer(DecodeOutputStreamer):
-    """Streamer for InternLM."""
+class NoSpaceStreamer(DecodeOutputStreamer):
 
     def __init__(self, tokenizer, skip_prompt=True) -> None:
         BaseStreamer().__init__()
@@ -95,12 +98,10 @@ class InternLMStreamer(DecodeOutputStreamer):
         self.hex_regex = re.compile(r'^<0x([0-9ABCDEF]+)>$')
 
     def decode(self, value):
-        """Decode generated tokens for InternLM."""
-
         tok = self.tokenizer.decode(value)
         if res := self.hex_regex.match(tok):
             tok = chr(int(res.group(1), 16))
-        if tok == '</s>' or tok == '<eoa>' or tok == '\r':
+        if tok == '</s>' or tok == '\r':
             tok = '\n'
 
         return tok
