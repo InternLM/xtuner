@@ -2,7 +2,7 @@
 
 ## Highlights
 
-### Supported Models, Datasets, and Strategies
+### 🔥 Supported Models, Datasets, and Strategies
 
 <table>
 <tbody>
@@ -35,18 +35,18 @@
 </td>
 <td>
 <ul>
-  <li><a href="https://github.com/OpenLMLab/MOSS/tree/main/SFT_data">MOSS-003-SFT</a></li>
+  <li><a href="https://github.com/OpenLMLab/MOSS/tree/main/SFT_data">MOSS-003-SFT</a> 🔧</li>
   <li><a href="https://huggingface.co/datasets/tatsu-lab/alpaca">Alpaca en</a> / <a href="https://huggingface.co/datasets/silk-road/alpaca-data-gpt4-chinese">zh</a></li>
   <li><a href="https://huggingface.co/datasets/timdettmers/openassistant-guanaco">oasst1</a></li>
-  <li><a href="https://github.com/WangRongsheng/ChatGenTitle">Arxiv GenTitle</a></li>
-  <li><a href="https://github.com/Toyhom/Chinese-medical-dialogue-data">Chinese Medical Dialogue</a></li>
+  <li><a href="https://github.com/WangRongsheng/ChatGenTitle">Arxiv GenTitle</a> 📃</li>
+  <li><a href="https://github.com/Toyhom/Chinese-medical-dialogue-data">Chinese Medical Dialogue</a> 🧑‍⚕️</li>
   <li>...</li>  
 </ul>
 </td>
 <td>
 <ul>
   <li>Normal (Distributed) Data Parallel</li>
-  <li><a href="https://github.com/microsoft/DeepSpeed">Deepspeed</a></li>
+  <li><a href="https://github.com/microsoft/DeepSpeed">Deepspeed 🚀</a></li>
   <li>...</li>  
 </ul>
 </td>
@@ -56,13 +56,13 @@
 
 
 
-### Chat with Plugins
+### 🔧 Chat with Plugins
 
 Calculate, Equations Solve, Web Search, ...
 
-### Colab Demos
+### 🌟 Colab Demos 
 
-### Minimum System Requirements
+### 🖥️ Minimum System Requirements
 
 
 
