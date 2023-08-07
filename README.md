@@ -227,7 +227,7 @@ We support to chat with pretrained / fine-tuned LLMs.
   test_evaluator.tokenizer = tokenizer  # noqa: F405
   ```
 
-  </detals>
+  </details>
 
 
 
@@ -252,8 +252,27 @@ We support to chat with pretrained / fine-tuned LLMs.
 
 ## Performance
 
+### Objective evaluation
+
+The project has conducted testing on various relevant models on the objective evaluation set for the "Natural Language Understanding (NLU)" category. Given that such evaluations are strictly reliant on provided label outputs, the results are devoid of any subjective elements. This allows for a degree of reflection on the performance and numerous practical capabilities of large-scale models. We have empirically tested the performance of a series of related models on the newly released MMLU dataset. Below are the average evaluation results of some models on the validation and test sets.
+
+| Model                  | Valid (zero-shot) | Valid (5-shot) | Test (zero-shot) | Test (5-shot) |
+| ---------------------- | ----------------- | -------------- | ---------------- | ------------- |
+| InternLM-7b            | 47.9              | 49.3           | 47.0             | 50.6          |
+| InternLM-7b alpaca sft | Data              | Data           | Data             | Data          |
+| Llama2-7b              | 42.6              | 46.5           | 42.4             | 46.8          |
+| Llama2-7b alpaca sft   | Data              | Data           | Data             | Data          |
+
+### Instant generation
+
+Nonetheless, experimental findings indicate that MMLU does not fully capture the performance of large-scale models. Hence we've leveraged [SampleGenerateHook](<>) to illustrate the impact of instruction fine-tuning more vividly. By engaging in single-turn dialogues with the model, using user-defined commands at regular intervals throughout the training process, we're able to offer a more lucid portrayal of the model's conversational abality.
+
 ## Roadmap
 
 ## Acknowledgement
+
+- [Llama 2](https://github.com/facebookresearch/llama-recipes)
+- [QLoRA](https://github.com/artidoro/qlora)
+- [LMDeploy](https://github.com/InternLM/lmdeploy)
 
 ## License
