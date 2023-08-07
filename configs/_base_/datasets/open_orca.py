@@ -16,7 +16,7 @@ orca = dict(
 
 train_dataloader = dict(
     batch_size=1,
-    num_workers=2,
+    num_workers=0,
     dataset=orca,
     sampler=dict(type=DefaultSampler, shuffle=True),
     collate_fn=dict(type=default_collate_fn))
