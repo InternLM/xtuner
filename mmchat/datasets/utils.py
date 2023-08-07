@@ -1,3 +1,4 @@
+# Copyright (c) OpenMMLab. All rights reserved.
 import copy
 from itertools import chain
 
@@ -31,6 +32,7 @@ def encode_fn(example, tokenizer, max_length, input_with_labels=True):
 
 
 class Concatenator:
+    # modified from
     # https://github.com/facebookresearch/llama-recipes/blob/main/ft_datasets/utils.py
 
     def __init__(self, chunk_size=2048):

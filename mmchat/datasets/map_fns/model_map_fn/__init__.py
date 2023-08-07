@@ -1,3 +1,4 @@
+# Copyright (c) OpenMMLab. All rights reserved.
 from .internlm_map_fn import internlm_map_fn
 from .llama2_map_fn import llama2_map_fn
 

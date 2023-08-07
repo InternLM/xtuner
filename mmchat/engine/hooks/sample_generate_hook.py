@@ -1,3 +1,4 @@
+# Copyright (c) OpenMMLab. All rights reserved.
 from mmengine.hooks import Hook
 from mmengine.model import is_model_wrapper
 from transformers import StoppingCriteriaList

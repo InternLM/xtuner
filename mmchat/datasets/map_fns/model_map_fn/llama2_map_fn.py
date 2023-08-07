@@ -1,3 +1,4 @@
+# Copyright (c) OpenMMLab. All rights reserved.
 def llama2_map_fn(example):
     B_INST, E_INST = '[INST]', '[/INST]'
     B_SYS, E_SYS = '<<SYS>>\n', '\n<</SYS>>\n\n'

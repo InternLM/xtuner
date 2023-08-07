@@ -1,3 +1,5 @@
+# Copyright (c) OpenMMLab. All rights reserved.
+# Modified from https://github.com/OpenLMLab/MOSS_WebSearchTool
 import heapq
 import json
 import os

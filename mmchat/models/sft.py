@@ -1,3 +1,4 @@
+# Copyright (c) OpenMMLab. All rights reserved.
 import dataclasses
 from collections import OrderedDict
 

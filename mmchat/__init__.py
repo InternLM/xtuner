@@ -1,3 +1,4 @@
+# Copyright (c) OpenMMLab. All rights reserved.
 from mmengine.utils import digit_version
 
 from .version import __version__, version_info

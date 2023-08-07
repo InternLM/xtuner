@@ -1,3 +1,4 @@
+# Copyright (c) OpenMMLab. All rights reserved.
 from .alpaca_map_fn import alpaca_map_fn
 from .alpaca_zh_map_fn import alpaca_zh_map_fn
 from .arxiv_map_fn import arxiv_map_fn

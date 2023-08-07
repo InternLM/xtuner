@@ -1,3 +1,4 @@
+# Copyright (c) OpenMMLab. All rights reserved.
 from math import *  # noqa: F401, F403
 
 
