@@ -45,15 +45,18 @@ except Exception:
 try:
     nlp_en = spacy.load('en_core_web_sm')
 except Exception:
-    print('Please download `en_core_web_sm` by '
-          '`python -m spacy download en_core_web_sm`')
-    sys.exit(1)
+    print('Download and install en_core_web_sm by '
+          'running `python -m spacy download en_core_web_sm`...')
+    os.system('python -m spacy download en_core_web_sm')
+    nlp_en = spacy.load('en_core_web_sm')
+
 try:
     nlp_zh = spacy.load('zh_core_web_sm')
 except Exception:
-    print('Please download `zh_core_web_sm` by '
-          '`python -m spacy download zh_core_web_sm`')
-    sys.exit(1)
+    print('Download and install zh_core_web_sm by '
+          'running `python -m spacy download zh_core_web_sm`...')
+    os.system('python -m spacy download zh_core_web_sm')
+    nlp_zh = spacy.load('zh_core_web_sm')
 
 
 def score(key_words, sentence, ft):
