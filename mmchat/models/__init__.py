@@ -1,6 +1,4 @@
-from .algorithms import (SupervisedFinetune, SupervisedLoraFinetune,
-                         SupervisedQloraFinetune)
+# Copyright (c) OpenMMLab. All rights reserved.
+from .sft import SupervisedFinetune
 
-__all__ = [
-    'SupervisedFinetune', 'SupervisedLoraFinetune', 'SupervisedQloraFinetune'
-]
+__all__ = ['SupervisedFinetune']

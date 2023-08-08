@@ -3,23 +3,24 @@ from typing import Optional
 
 import torch
 import transformers
-from mmengine.config import Config
-from mmengine.runner import Runner
+from data_utils import get_train_dataloader
 from peft import LoraConfig
-from transformers import BitsAndBytesConfig, Trainer
+from transformers import AutoTokenizer, BitsAndBytesConfig, Trainer
 
-from mmchat.models.algorithms import SupervisedQloraFinetune
+from mmchat.models import SupervisedFinetune
 
 
 @dataclass
 class ModelArguments:
-    model_name_or_path: Optional[str] = field(default='facebook/opt-125m')
+    model_name_or_path: Optional[str] = field(default='internlm/internlm-7b')
+    use_qlora: bool = field(default=True)
+    use_lora: bool = field(default=False)
 
 
 @dataclass
 class DataArguments:
     dataset_cfg_path: str = field(
-        default='../configs/alpaca/alpaca_standford_llama-7b.py')
+        default='../configs/_base_/datasets/alpaca.py')
 
 
 @dataclass
@@ -42,32 +43,46 @@ def train():
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
 
     # build model
-    quantization_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        load_in_8bit=False,
-        llm_int8_threshold=6.0,
-        llm_int8_has_fp16_weight=False,
-        bnb_4bit_compute_dtype=torch.float16,
-        bnb_4bit_use_double_quant=True,
-        bnb_4bit_quant_type='nf4')
+    if model_args.use_qlora:
+        quantization_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            load_in_8bit=False,
+            llm_int8_threshold=6.0,
+            llm_int8_has_fp16_weight=False,
+            bnb_4bit_compute_dtype=torch.float16,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type='nf4')
+        lora_config = LoraConfig(
+            r=64,
+            lora_alpha=16,
+            lora_dropout=0.1,
+            bias='none',
+            task_type='CAUSAL_LM')
+    elif not model_args.use_qlora and model_args.use_lora:
+        quantization_config = None
+        lora_config = LoraConfig(
+            r=64,
+            lora_alpha=16,
+            lora_dropout=0.1,
+            bias='none',
+            task_type='CAUSAL_LM')
+    else:
+        quantization_config = None
+        lora_config = None
+
     llm = transformers.AutoModelForCausalLM.from_pretrained(
         model_args.model_name_or_path,
         cache_dir=training_args.cache_dir,
         quantization_config=quantization_config,
-    )
+        trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_args.model_name_or_path, trust_remote_code=True)
 
-    lora_config = LoraConfig(
-        r=64,
-        lora_alpha=16,
-        lora_dropout=0.1,
-        bias='none',
-        task_type='CAUSAL_LM')
-
-    model = SupervisedQloraFinetune(llm=llm, lora=lora_config)
+    model = SupervisedFinetune(llm=llm, lora=lora_config, tokenizer=tokenizer)
 
     # build trainer_hf
-    dataset_cfg = Config.fromfile(data_args.dataset_cfg_path)
-    train_dataloader = Runner.build_dataloader(dataset_cfg.train_dataloader)
+    train_dataloader = get_train_dataloader(data_args.dataset_cfg_path,
+                                            tokenizer)
     train_dataset = train_dataloader.dataset
     data_collator = train_dataloader.collate_fn
     data_module = dict(

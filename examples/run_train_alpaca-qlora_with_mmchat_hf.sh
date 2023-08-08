@@ -1,7 +1,9 @@
 CUDA_VISIBLE_DEVICES=1,2,3,4 torchrun --nproc_per_node=4 --master_port=10000 train_alpaca-qlora_with_mmchat_hf.py \
-    --model_name_or_path /nvme/share_data/llama-7b/ \
+    --model_name_or_path internlm/internlm-7b \
+    --use_qlora True \
+    --use_lora False \
     --bf16 True \
-    --output_dir /nvme/humu/llm-ckpts/mmchat_hf_llama-7b \
+    --output_dir work_dirs/mmchat_hf_internlm-7b_qlora \
     --num_train_epochs 3 \
     --per_device_train_batch_size 1 \
     --per_device_eval_batch_size 1 \
@@ -17,4 +19,4 @@ CUDA_VISIBLE_DEVICES=1,2,3,4 torchrun --nproc_per_node=4 --master_port=10000 tra
     --logging_steps 1 \
     --tf32 True \
     --remove_unused_columns False \
-    --ddp_find_unused_parameters False \
+    --ddp_find_unused_parameters False

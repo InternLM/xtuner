@@ -19,7 +19,7 @@ arxiv = dict(
 arxiv_dataset = dict(
     type=process_hf_dataset,
     dataset=arxiv,
-    mode='train',
+    split='train',
     tokenizer=None,
     max_length=2048,
     map_fn=arxiv_map_fn,
@@ -32,7 +32,7 @@ arxiv_dataset = dict(
 
 train_dataloader = dict(
     batch_size=1,
-    num_workers=1,
+    num_workers=0,
     dataset=arxiv_dataset,
     sampler=dict(type=DefaultSampler, shuffle=True),
     collate_fn=dict(type=default_collate_fn))

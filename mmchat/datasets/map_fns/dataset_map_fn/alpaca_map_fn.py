@@ -1,3 +1,4 @@
+# Copyright (c) OpenMMLab. All rights reserved.
 def alpaca_map_fn(example):
     PROMPT = {
         'with_input':

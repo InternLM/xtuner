@@ -1,7 +1,12 @@
-bitsandbytes==0.39.1
+beautifulsoup4
+bitsandbytes
 datasets
-mmengine==0.8.1
-peft@git+https://github.com/huggingface/peft.git
+fasttext
+mmengine
+peft
 scipy
 SentencePiece
-transformers==4.30.2
+spacy
+tiktoken
+torch
+transformers
