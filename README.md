@@ -78,7 +78,6 @@ XXX is a toolkit for quickly fine-tuning LLM, developed by the [MMRazor](https:/
 </tbody>
 </table>
 
-
 ### 🔧 LLM with Plugins
 
 - Calculate, Equations Solve, Web Search, ...
@@ -117,7 +116,6 @@ cd XXX
 pip install -v -e .
 ```
 
-
 ### Chat
 
 - With the pretrained HuggingFace LLM, and the corresponding HuggingFace adapter fine-tuned from XXX.
@@ -128,7 +126,6 @@ pip install -v -e .
 
   <details>
   <summary>Examples</summary>
-
 
   - Llama-2-7B, plugins adapter,
 
@@ -165,7 +162,6 @@ pip install -v -e .
   <details>
   <summary>Examples</summary>
 
-
   - Llama-2-7B, plugins adapter,
 
     ```shell
@@ -191,7 +187,6 @@ pip install -v -e .
     ```
 
   </details>
-
 
 ### Fine-tune
 
@@ -231,21 +226,19 @@ pip install -v -e .
   <details>
   <summary>How to enable it?</summary>
 
-
   If the evaluation is needed, user can add below lines to the original config to enable it.
 
   ```python
   from mmengine.config import read_base
-  
+
   with read_base():
       from ..._base_.datasets.evaluation.mmlu_fs import *  # noqa: F401,F403
-  
+
   test_dataloader.dataset.tokenizer = tokenizer  # noqa: F405
   test_evaluator.tokenizer = tokenizer  # noqa: F405
   ```
 
   </details>
-
 
 ### Deploy
 
@@ -265,9 +258,6 @@ pip install -v -e .
 
   - We are woking closely with LMDeploy team, to implement the deployment of **dialogues with plugins**!
 
-
-
-
 ## Performance
 
 ### Objective evaluation
@@ -275,9 +265,9 @@ pip install -v -e .
 The project has conducted testing on various relevant models on the objective evaluation set for the "Natural Language Understanding (NLU)" category. Given that such evaluations are strictly reliant on provided label outputs, the results are devoid of any subjective elements. This allows for a degree of reflection on the performance and numerous practical capabilities of large-scale models. We have empirically tested the performance of a series of related models on the newly released MMLU dataset. Below are the average evaluation results of some models on the validation and test sets.
 
 | Model                  | Valid (zero-shot) | Valid (five-shot) | Test (zero-shot) | Test (five-shot) |
-|:---------------------- | -----------------:| -----------------:| ----------------:| ----------------:|
-| Llama2-7b              | 42.6              | 46.5              | 42.4             | 46.8             |
-| Llama2-7b oasst1 QLoRA | Data              | Data              | Data             | Data             |
+| :--------------------- | ----------------: | ----------------: | ---------------: | ---------------: |
+| Llama2-7b              |              42.6 |              46.5 |             42.4 |             46.8 |
+| Llama2-7b oasst1 QLoRA |              Data |              Data |             Data |             Data |
 
 ### Instant generation
 
