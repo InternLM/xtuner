@@ -1,16 +1,23 @@
+# Copyright (c) OpenMMLab. All rights reserved.
 import copy
 from itertools import chain
 
 from mmchat.utils import IGNORE_INDEX
 
 
-def encode_fn(example, tokenizer, max_length, with_output=True):
+def encode_fn(example, tokenizer, max_length, input_with_labels=True):
+    encode_kwargs = {}
+    if tokenizer.__class__.__name__ == 'QWenTokenizer':
+        encode_kwargs['disallowed_special'] = ()
     input_encode = tokenizer(
-        f"{tokenizer.bos_token}{example['input']}", add_special_tokens=False)
-    if with_output:
+        f"{tokenizer.bos_token}{example['input']}",
+        add_special_tokens=False,
+        **encode_kwargs)
+    if input_with_labels:
         output_encode = tokenizer(
             f"{example['output']}{tokenizer.eos_token}",
-            add_special_tokens=False)
+            add_special_tokens=False,
+            **encode_kwargs)
         input_ids = input_encode['input_ids'] + output_encode['input_ids']
         labels = [IGNORE_INDEX] * len(
             input_encode['input_ids']) + copy.deepcopy(
@@ -25,6 +32,7 @@ def encode_fn(example, tokenizer, max_length, with_output=True):
 
 
 class Concatenator:
+    # modified from
     # https://github.com/facebookresearch/llama-recipes/blob/main/ft_datasets/utils.py
 
     def __init__(self, chunk_size=2048):

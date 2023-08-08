@@ -1,3 +1,4 @@
+# Copyright (c) OpenMMLab. All rights reserved.
 def arxiv_map_fn(example):
     PROMPT = ('If you are an expert in writing papers, please generate '
               "a good paper title for this paper based on other authors' "

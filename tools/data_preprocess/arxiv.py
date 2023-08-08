@@ -1,3 +1,4 @@
+# Copyright (c) OpenMMLab. All rights reserved.
 import json
 from datetime import datetime
 

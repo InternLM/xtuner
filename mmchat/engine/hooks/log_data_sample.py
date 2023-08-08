@@ -1,3 +1,4 @@
+# Copyright (c) OpenMMLab. All rights reserved.
 from mmengine.hooks import Hook
 
 from mmchat.registry import HOOKS, TOKENIZER

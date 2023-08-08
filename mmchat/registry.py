@@ -25,8 +25,6 @@ from mmengine.registry import \
 from mmengine.registry import RUNNERS as MMENGINE_RUNNERS
 from mmengine.registry import TASK_UTILS as MMENGINE_TASK_UTILS
 from mmengine.registry import TRANSFORMS as MMENGINE_TRANSFORMS
-from mmengine.registry import VISBACKENDS as MMENGINE_VISBACKENDS
-from mmengine.registry import VISUALIZERS as MMENGINE_VISUALIZERS
 from mmengine.registry import \
     WEIGHT_INITIALIZERS as MMENGINE_WEIGHT_INITIALIZERS
 from mmengine.registry import Registry
@@ -36,7 +34,7 @@ __all__ = [
     'OPTIMIZERS', 'OPTIM_WRAPPERS', 'OPTIM_WRAPPER_CONSTRUCTORS',
     'PARAM_SCHEDULERS', 'DATASETS', 'DATA_SAMPLERS', 'TRANSFORMS', 'MODELS',
     'MODEL_WRAPPERS', 'WEIGHT_INITIALIZERS', 'BATCH_AUGMENTS', 'TASK_UTILS',
-    'METRICS', 'EVALUATORS', 'VISUALIZERS', 'VISBACKENDS'
+    'METRICS', 'EVALUATORS'
 ]
 
 #######################################################################
@@ -181,21 +179,4 @@ EVALUATORS = Registry(
     'evaluator',
     parent=MMENGINE_EVALUATOR,
     locations=['mmchat.evaluation'],
-)
-
-#######################################################################
-#                      mmchat.visualization                       #
-#######################################################################
-
-# Visualizers to display task-specific results.
-VISUALIZERS = Registry(
-    'visualizer',
-    parent=MMENGINE_VISUALIZERS,
-    locations=['mmchat.visualization'],
-)
-# Backends to save the visualization results, like TensorBoard, WandB.
-VISBACKENDS = Registry(
-    'vis_backend',
-    parent=MMENGINE_VISBACKENDS,
-    locations=['mmchat.visualization'],
 )

@@ -1,3 +1,5 @@
+# Copyright (c) OpenMMLab. All rights reserved.
+# Modified from https://github.com/OpenLMLab/MOSS_WebSearchTool
 import heapq
 import json
 import os
@@ -24,33 +26,37 @@ except Exception:
 
 fasttext.FastText.eprint = lambda x: None
 
+cwd_path = os.getcwd()
 try:
-    ft_en = fasttext.load_model('./models/cc.en.300.bin')
+    ft_en = fasttext.load_model(os.path.join(cwd_path, 'models/cc.en.300.bin'))
 except Exception:
     print('Please download and gunzip `cc.en.300.bin` from '
           'https://dl.fbaipublicfiles.com/fasttext/vectors-crawl/'
-          'cc.en.300.bin.gz, and put it in `./models/`.')
+          f'cc.en.300.bin.gz, and put it in `{cwd_path}/models/`.')
     sys.exit(1)
 try:
-    ft_zh = fasttext.load_model('./models/cc.zh.300.bin')
+    ft_zh = fasttext.load_model(os.path.join(cwd_path, 'models/cc.zh.300.bin'))
 except Exception:
-    print('Please download and gunzip `cc.en.300.bin` from '
+    print('Please download and gunzip `cc.zn.300.bin` from '
           'https://dl.fbaipublicfiles.com/fasttext/vectors-crawl/'
-          'cc.zh.300.bin.gz, and put it in `./models/`.')
+          f'cc.zh.300.bin.gz, and put it in `{cwd_path}/models/`.')
     sys.exit(1)
 
 try:
     nlp_en = spacy.load('en_core_web_sm')
 except Exception:
-    print('Please download `en_core_web_sm` by '
-          '`python -m spacy download en_core_web_sm`')
-    sys.exit(1)
+    print('Download and install en_core_web_sm by '
+          'running `python -m spacy download en_core_web_sm`...')
+    os.system('python -m spacy download en_core_web_sm')
+    nlp_en = spacy.load('en_core_web_sm')
+
 try:
     nlp_zh = spacy.load('zh_core_web_sm')
 except Exception:
-    print('Please download `zh_core_web_sm` by '
-          '`python -m spacy download zh_core_web_sm`')
-    sys.exit(1)
+    print('Download and install zh_core_web_sm by '
+          'running `python -m spacy download zh_core_web_sm`...')
+    os.system('python -m spacy download zh_core_web_sm')
+    nlp_zh = spacy.load('zh_core_web_sm')
 
 
 def score(key_words, sentence, ft):

@@ -1,21 +1,25 @@
+# Copyright (c) OpenMMLab. All rights reserved.
 import argparse
 import re
 
 import torch
 from mmengine.config import Config, DictAction
-from plugins import get_plugins_stop_criteria, plugins_api
 from transformers import GenerationConfig
-from utils import PROMPT_TEMPLATE, get_chat_utils
+from utils import get_chat_utils, update_stop_criteria
 
 from mmchat.registry import MODELS, TOKENIZER
+from mmchat.utils import PROMPT_TEMPLATE
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
         description='MMChat chat with a pretrained model')
     parser.add_argument('config', help='config file path')
+    parser.add_argument('--adapter', default=None, help='adapter model')
     parser.add_argument(
         '--with-plugins', action='store_true', help='Whether to with plugins')
+    parser.add_argument(
+        '--no-streamer', action='store_true', help='Whether to with streamer')
     parser.add_argument('--command-stop-word', default=None, help='Stop key')
     parser.add_argument('--answer-stop-word', default=None, help='Stop key')
     parser.add_argument(
@@ -23,8 +27,6 @@ def parse_args():
         choices=PROMPT_TEMPLATE.keys(),
         default=None,
         help='Specify a prompt option')
-    parser.add_argument(
-        '--adapter-checkpoint', default=None, help='adapter checkpoint file')
     parser.add_argument(
         '--max-new-tokens',
         type=int,
@@ -78,6 +80,9 @@ def get_input():
 def main():
     args = parse_args()
 
+    if args.with_plugins:
+        from plugins import plugins_api
+
     torch.manual_seed(args.seed)
 
     # load config
@@ -86,18 +91,18 @@ def main():
         cfg.merge_from_dict(args.cfg_options)
 
     model = MODELS.build(cfg.model)
-
-    Decorator, Streamer, stop_criteria = get_chat_utils(model)
-
-    if args.adapter_checkpoint is not None:
-        adapter_checkpoint = torch.load(
-            args.adapter_checkpoint, map_location='cpu')
-        model.load_state_dict(adapter_checkpoint['state_dict'], strict=False)
-        print(f'Load adapter from {args.adapter_checkpoint}')
-
     tokenizer = TOKENIZER.build(cfg.tokenizer)
 
-    command_stop_cr, answer_stop_cr = get_plugins_stop_criteria(
+    if args.adapter is not None:
+        adapter = torch.load(args.adapter, map_location='cpu')
+        model.load_state_dict(adapter['state_dict'], strict=False)
+        print(f'Load adapter from {args.adapter}')
+
+    Streamer, stop_criteria = get_chat_utils(model)
+    if args.no_streamer:
+        Streamer = None
+
+    command_stop_cr, answer_stop_cr = update_stop_criteria(
         base=stop_criteria,
         tokenizer=tokenizer,
         command_stop_word=args.command_stop_word,
@@ -110,6 +115,9 @@ def main():
         top_p=args.top_p,
         top_k=args.top_k,
     )
+    encode_kwargs = {}
+    if tokenizer.__class__.__name__ == 'QWenTokenizer':
+        encode_kwargs['disallowed_special'] = ()
 
     n_turn = 0
     inputs = ''
@@ -118,7 +126,6 @@ def main():
 
         if text == 'exit':
             exit(0)
-        text = Decorator.decorate(text)
         if args.prompt is not None:
             template = PROMPT_TEMPLATE[args.prompt]
             if 'INSTRUCTION_START' in template and n_turn == 0:
@@ -130,35 +137,51 @@ def main():
         else:
             inputs += text
         ids = tokenizer.encode(
-            inputs, return_tensors='pt', add_special_tokens=n_turn == 0)
-        streamer = Streamer(tokenizer)
+            inputs,
+            return_tensors='pt',
+            add_special_tokens=n_turn == 0,
+            **encode_kwargs)
+        streamer = Streamer(tokenizer) if Streamer is not None else None
         if args.with_plugins:
-            generate_output = model.llm.generate(
+            generate_output = model.generate(
                 inputs=ids.cuda(),
                 generation_config=gen_config,
                 streamer=streamer,
                 stopping_criteria=command_stop_cr).cpu()
             generate_output_text = tokenizer.decode(
                 generate_output[0][len(ids[0]):])
+            if streamer is None:
+                print(generate_output_text, end='')
             pattern = r'<\|Commands\|>:(.*?)<eoc>'
             command_text = ', '.join(re.findall(pattern, generate_output_text))
             extent_text = plugins_api(command_text)
-            print(extent_text)
+            print(extent_text, end='')
             extent_text_ids = tokenizer.encode(
-                extent_text, return_tensors='pt', add_special_tokens=False)
+                extent_text,
+                return_tensors='pt',
+                add_special_tokens=False,
+                **encode_kwargs)
             new_ids = torch.cat((generate_output, extent_text_ids), dim=1)
-            new_streamer = Streamer(tokenizer)
-            generate_output = model.llm.generate(
+            new_streamer = Streamer(
+                tokenizer) if Streamer is not None else None
+            generate_output = model.generate(
                 inputs=new_ids.cuda(),
                 generation_config=gen_config,
                 streamer=new_streamer,
                 stopping_criteria=answer_stop_cr)
+            if streamer is None:
+                print(
+                    tokenizer.decode(generate_output[0][len(new_ids[0]):]),
+                    end='')
         else:
-            generate_output = model.llm.generate(
+            generate_output = model.generate(
                 inputs=ids.cuda(),
                 generation_config=gen_config,
                 streamer=streamer,
-                stopping_criteria=stop_criteria)
+                stopping_criteria=answer_stop_cr)
+            if streamer is None:
+                print(
+                    tokenizer.decode(generate_output[0][len(ids[0]):]), end='')
         inputs = tokenizer.decode(generate_output[0]) + '\n'
         n_turn += 1
         if len(generate_output[0]) >= args.max_new_tokens:
