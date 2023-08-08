@@ -35,27 +35,27 @@ XXX is a toolkit for quickly fine-tuning LLM, developed by the [MMRazor](https:/
 <tr valign="top">
 <td align="left" valign="top">
 <ul>
-  <li><a href="https://github.com/InternLM/InternLM">InternLM</a></li>
-  <li><a href="https://github.com/InternLM/InternLM">InternLM-Chat</a></li>
-  <li><a href="https://github.com/facebookresearch/llama">Llama</a></li>
-  <li><a href="https://github.com/facebookresearch/llama">Llama2</a></li>
-  <li><a href="https://github.com/facebookresearch/llama">Llama2-Chat</a></li>
-  <li><a href="https://github.com/QwenLM/Qwen-7B">Qwen</a></li>
-  <li><a href="https://github.com/QwenLM/Qwen-7B">Qwen-Chat</a></li>
-  <li><a href="https://github.com/baichuan-inc/Baichuan-7B">Baichuan-7B</a></li>
-  <li><a href="https://github.com/baichuan-inc/Baichuan-13B">Baichuan-13B-Base</a></li>
-  <li><a href="https://github.com/baichuan-inc/Baichuan-13B">Baichuan-13B-Chat</a></li>
+  <li><a href="configs/internlm/internlm_7b">InternLM</a></li>
+  <li><a href="configs/internlm/internlm_chat_7b">InternLM-Chat</a></li>
+  <li><a href="configs/llama/llama_7b">Llama</a></li>
+  <li><a href="configs/llama/llama2_7b">Llama2</a></li>
+  <li><a href="configs/llama/llama2_7b_chat">Llama2-Chat</a></li>
+  <li><a href="configs/qwen/qwen_7b">Qwen</a></li>
+  <li><a href="configs/qwen/qwen_7b_chat">Qwen-Chat</a></li>
+  <li><a href="configs/baichuan/baichuan_7b">Baichuan-7B</a></li>
+  <li><a href="configs/baichuan/baichuan_13b_base">Baichuan-13B-Base</a></li>
+  <li><a href="configs/baichuan/baichuan_13b_chat">Baichuan-13B-Chat</a></li>
   <li>...</li>
 </ul>
 </td>
 <td>
 <ul>
-  <li><a href="https://github.com/OpenLMLab/MOSS/tree/main/SFT_data">MOSS-003-SFT</a> 🔧</li>
-  <li><a href="https://github.com/WangRongsheng/ChatGenTitle">Arxiv GenTitle</a> 👨‍🎓</li>
-  <li><a href="https://huggingface.co/datasets/Open-Orca/OpenOrca">OpenOrca</a> 🐋</li>
-  <li><a href="https://huggingface.co/datasets/tatsu-lab/alpaca">Alpaca en</a> / <a href="https://huggingface.co/datasets/silk-road/alpaca-data-gpt4-chinese">zh</a> 🦙</li>
-  <li><a href="https://huggingface.co/datasets/timdettmers/openassistant-guanaco">oasst1</a> 🤖️</li>
-  <li><a href="https://github.com/Toyhom/Chinese-medical-dialogue-data">Chinese Medical Dialogue</a> 🧑‍⚕️</li>
+  <li><a href="configs/_base_/datasets/moss_003_sft_all.py">MOSS-003-SFT</a> 🔧</li>
+  <li><a href="configs/_base_/datasets/arxiv.py">Arxiv GenTitle</a> 👨‍🎓</li>
+  <li><a href="configs/_base_/datasets/open_orca.py">OpenOrca</a> 🐋</li>
+  <li><a href="configs/_base_/datasets/alpaca.py">Alpaca en</a> / <a href="configs/_base_/datasets/alpaca_zh.py">zh</a> 🦙</li>
+  <li><a href="configs/_base_/datasets/oasst1.py">oasst1</a> 🤖️</li>
+  <li><a href="configs/_base_/datasets/cmd.py">Chinese Medical Dialogue</a> 🧑‍⚕️</li>
   <li>...</li>
 </ul>
 </td>
@@ -203,10 +203,7 @@ pip install -v -e .
 - On multiple GPUs
 
   ```shell
-  bash ./tools/dist_train.sh \
-      ${CONFIG_FILE} \
-      ${GPU_NUM} \
-      [optional arguments]
+  bash ./tools/dist_train.sh ${CONFIG_FILE} ${GPU_NUM} [optional arguments]
   ```
 
 ### Evaluation
