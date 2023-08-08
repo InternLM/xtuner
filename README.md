@@ -89,8 +89,6 @@ XXX is a toolkit for quickly fine-tuning LLM, developed by the [MMRazor](https:/
 - InternLM-7B, QLoRA Fine-tune. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1yzGeYXayLomNQjLD4vC6wgUHvei3ezt4?usp=sharing)
 - Llama2-7B-Plugins, Chat. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](<>)
 
-### 🖥️ Minimum System Requirements
-
 ## Quick Start
 
 ### Installation
