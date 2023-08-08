@@ -2,14 +2,15 @@
 
 ## Introduction
 
-XXX is a toolkit for quickly fine-tuning LLMs, developed by the [MMRazor](https://github.com/open-mmlab/mmrazor) and [MMDeploy](https://github.com/open-mmlab/mmdeploy) teams. It has the following core features:
+XXX is a toolkit for quickly fine-tuning LLM, developed by the [MMRazor](https://github.com/open-mmlab/mmrazor) and [MMDeploy](https://github.com/open-mmlab/mmdeploy) teams. It has the following core features:
 
 - Embrace [HuggingFace](https://huggingface.co) and provide fast support for new models, datasets, and algorithms 🤗
 - Provide a comprehensive solution and related models for [MOSS plugins datasets](https://github.com/OpenLMLab/MOSS/tree/main/SFT_data) 🤖️
 - Support arbitrary combinations of multiple datasets during fine-tuning ➕
-- Compatible with [DeepSpeed](https://github.com/microsoft/DeepSpeed), enabling the efficient fine-tuning of LLMs on multiple GPUs 🚀
-- Support [QLoRA](http://arxiv.org/abs/2305.14314), enabling the efficient fine-tuning of LLMs using free resources on Colab ⚡️
+- Compatible with [DeepSpeed](https://github.com/microsoft/DeepSpeed), enabling the efficient fine-tuning of LLM on multiple GPUs 🚀
+- Support [QLoRA](http://arxiv.org/abs/2305.14314), enabling the efficient fine-tuning of LLM using free resources on Colab ⚡️
 
+> 💥 [MMRazor](https://github.com/open-mmlab/mmrazor) and [MMDeploy](https://github.com/open-mmlab/mmdeploy) teams have also collaborated in developing [LMDeploy](https://github.com/InternLM/lmdeploy), a toolkit for for compressing, deploying, and serving LLM. Welcome to subscribe to stay updated with our latest developments.
 
 ## Highlights
 
@@ -78,7 +79,7 @@ XXX is a toolkit for quickly fine-tuning LLMs, developed by the [MMRazor](https:
 </table>
 
 
-### 🔧 LLMs with Plugins
+### 🔧 LLM with Plugins
 
 - Calculate, Equations Solve, Web Search, ...
 
@@ -215,6 +216,37 @@ pip install -v -e .
       [optional arguments]
   ```
 
+### Evaluation
+
+- If a comprehensive and systematic evaluation of the LLM is required, we recommend using the [OpenCompass](https://github.com/InternLM/opencompass), which currently supports evaluation scheme of 50+ datasets with about 300,000 questions.
+
+- In XXX, we support the MMLU evaluation for LLM, by
+
+  ```
+  python ./tools/test.py ${CONFIG_FILE} --checkpoint ${PTH_ADAPTER_PATH} [other optional arguments]
+  ```
+
+  Notably, all provided configs disable the evaluation since it may introduce potential biases when evaluated by only one dataset and it is widely believed that fine-tune stage introduces little additional knowledge to LLM.
+
+  <details>
+  <summary>How to enable it?</summary>
+
+
+  If the evaluation is needed, user can add below lines to the original config to enable it.
+
+  ```python
+  from mmengine.config import read_base
+  
+  with read_base():
+      from ..._base_.datasets.evaluation.mmlu_fs import *  # noqa: F401,F403
+  
+  test_dataloader.dataset.tokenizer = tokenizer  # noqa: F405
+  test_evaluator.tokenizer = tokenizer  # noqa: F405
+  ```
+
+  </details>
+
+
 ### Deploy
 
 - **Step 0**, convert the pth adapter to HuggingFace adapter, by
@@ -234,36 +266,6 @@ pip install -v -e .
   - We are woking closely with LMDeploy team, to implement the deployment of **dialogues with plugins**!
 
 
-
-### Evaluation
-
-- If a comprehensive and systematic evaluation of the LLM is required, we recommend using the [OpenCompass](https://github.com/InternLM/opencompass), which currently supports evaluation scheme of 50+ datasets with about 300,000 questions.
-
-- In XXX, we support the MMLU evaluation for LLMs, by
-
-  ```
-  python ./tools/test.py ${CONFIG_FILE} --checkpoint ${PTH_ADAPTER_PATH} [other optional arguments]
-  ```
-
-  Notably, all provided configs disable the evaluation since it may introduce potential biases when evaluated by only one dataset and it is widely believed that fine-tune stage introduces little additional knowledge to LLMs.
-
-  <details>
-  <summary>How to enable it?</summary>
-
-
-  If the evaluation is needed, user can add below lines to the original config to enable it.
-
-  ```python
-  from mmengine.config import read_base
-  
-  with read_base():
-      from ..._base_.datasets.evaluation.mmlu_fs import *  # noqa: F401,F403
-  
-  test_dataloader.dataset.tokenizer = tokenizer  # noqa: F405
-  test_evaluator.tokenizer = tokenizer  # noqa: F405
-  ```
-
-  </details>
 
 
 ## Performance
