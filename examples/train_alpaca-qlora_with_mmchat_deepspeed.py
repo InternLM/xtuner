@@ -36,7 +36,7 @@ def get_argument_parser():
     parser.add_argument(
         '--output_dir',
         type=str,
-        default='work-dirs',
+        default='work_dirs',
         help='Dir to store checkpoint files')
     parser.add_argument(
         '--local_rank',

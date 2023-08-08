@@ -3,7 +3,7 @@ CUDA_VISIBLE_DEVICES=1,2,3,4 torchrun --nproc_per_node=4 --master_port=10000 tra
     --use_qlora True \
     --use_lora False \
     --bf16 True \
-    --output_dir work-dirs/mmchat_hf_internlm-7b_qlora \
+    --output_dir work_dirs/mmchat_hf_internlm-7b_qlora \
     --num_train_epochs 3 \
     --per_device_train_batch_size 1 \
     --per_device_eval_batch_size 1 \
