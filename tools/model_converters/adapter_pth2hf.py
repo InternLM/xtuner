@@ -38,8 +38,7 @@ def main():
         cfg.merge_from_dict(args.cfg_options)
 
     # load on cpu
-    if cfg.model.llm.get('device_map'):
-        cfg.model.llm.device_map = 'cpu'
+    cfg.model.llm.device_map = 'cpu'
     if cfg.model.llm.get('quantization_config'):
         cfg.model.llm.quantization_config.\
             llm_int8_enable_fp32_cpu_offload = True

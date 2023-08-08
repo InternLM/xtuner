@@ -5,19 +5,15 @@ from mmchat.datasets import process_hf_dataset
 from mmchat.datasets.collate_fns import default_collate_fn
 from mmchat.datasets.map_fns import cmd_map_fn
 
-data_root = './data/'
+data_url = 'https://github.com/Toyhom/Chinese-medical-dialogue-data/raw/master/Data_数据/'  # noqa: E501
 
-# Download data from https://github.com/Toyhom/Chinese-medical-dialogue-data
 all_csv = [
-    'Chinese-medical-dialogue-data/Data_数据/Andriatria_男科/男科5-13000.csv',
-    'Chinese-medical-dialogue-data/Data_数据/IM_内科/内科5000-33000.csv',
-    'Chinese-medical-dialogue-data/Data_数据/OAGD_妇产科/妇产科6-28000.csv',
-    'Chinese-medical-dialogue-data/Data_数据/Oncology_肿瘤科/肿瘤科5-10000.csv',
-    'Chinese-medical-dialogue-data/Data_数据/Pediatric_儿科/儿科5-14000.csv',
-    'Chinese-medical-dialogue-data/Data_数据/Surgical_外科/外科5-14000.csv'
+    'Andriatria_男科/男科5-13000.csv', 'IM_内科/内科5000-33000.csv',
+    'OAGD_妇产科/妇产科6-28000.csv', 'Oncology_肿瘤科/肿瘤科5-10000.csv',
+    'Pediatric_儿科/儿科5-14000.csv', 'Surgical_外科/外科5-14000.csv'
 ]
 
-all_csv = [data_root + csv for csv in all_csv]
+all_csv = [data_url + csv for csv in all_csv]
 
 cmd = dict(
     type=load_dataset,
@@ -28,7 +24,7 @@ cmd = dict(
 train_dataset = dict(
     type=process_hf_dataset,
     dataset=cmd,
-    mode='train',
+    split='train',
     tokenizer=None,
     max_length=2048,
     map_fn=cmd_map_fn,
@@ -37,7 +33,7 @@ train_dataset = dict(
 
 train_dataloader = dict(
     batch_size=1,
-    num_workers=1,
+    num_workers=0,
     dataset=train_dataset,
     sampler=dict(type=DefaultSampler, shuffle=True),
     collate_fn=dict(type=default_collate_fn))

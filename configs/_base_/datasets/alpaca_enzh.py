@@ -10,12 +10,12 @@ with read_base():
 
 train_dataset = dict(
     type=ConcatDataset,
-    tokenizer=None,
-    datasets_cfg=dict(alpaca=alpaca, alpaca_zh=alpaca_zh))
+    datasets_cfg=dict(alpaca=alpaca, alpaca_zh=alpaca_zh),
+    datasets_kwargs=dict(tokenizer=None))
 
 train_dataloader = dict(
     batch_size=1,
-    num_workers=2,
+    num_workers=0,
     dataset=train_dataset,
     sampler=dict(type=DefaultSampler, shuffle=True),
     collate_fn=dict(type=default_collate_fn))

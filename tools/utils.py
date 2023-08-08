@@ -1,54 +1,17 @@
+# Copyright (c) OpenMMLab. All rights reserved.
+import copy
 import re
 
 from transformers import (PreTrainedTokenizerFast, StoppingCriteria,
                           StoppingCriteriaList)
 from transformers.generation.streamers import BaseStreamer
 
-PROMPT_TEMPLATE = {
-    'medical': {
-        'INSTRUCTION_START':
-        '请从一名专业医生的角度，对下述医学问题给出安全、可靠的回答。\n\n问：{input}\n\n答：',
-        'INSTRUCTION': '问：{input}\n\n答：'
-    },
-    'title': {
-        'INSTRUCTION_START':
-        'If you are an expert in writing papers, please generate '
-        "a good paper title for this paper based on other authors' "
-        'descriptions of their abstracts.\n\n'
-        '### Descriptions:\n{input}\n\n### Title: ',
-        'INSTRUCTION':
-        '### Descriptions:\n{input}\n\n### Title: '
-    },
-    'plugins': {
-        'INSTRUCTION_START':
-        'You are an AI assistant whose name is {bot_name}.\n'
-        'Capabilities and tools that {bot_name} can possess.\n'
-        '- Inner thoughts: enabled.\n'
-        '- Web search: enabled. API: Search(query)\n'
-        '- Calculator: enabled. API: Calculate(expression)\n'
-        '- Equation solver: enabled. API: Solve(equation)\n'
-        '- Text-to-image: disabled.\n'
-        '- Image edition: disabled.\n'
-        '- Text-to-speech: disabled.\n'
-        '<|Human|>: {input}',
-        'INSTRUCTION':
-        '<|Human|>: {input}'
-    },
-    'llama-2-chat': {
-        'INSTRUCTION_START':
-        '[INST] <<SYS>>\n You are a helpful, respectful and honest assistant. '
-        'Always answer as helpfully as possible, while being safe. Your '
-        'answers should not include any harmful, unethical, racist, sexist, '
-        'toxic, dangerous, or illegal content. Please ensure that your '
-        'responses are socially unbiased and positive in nature. '
-        '\n<</SYS>>\n\n{input} [/INST]',
-        'INSTRUCTION':
-        '[INST] {input} [/INST]',
-    }
-}
+from mmchat.utils import StopWordStoppingCriteria
 
 
-def unwarpper_model(model):
+def get_base_model(model):
+    if hasattr(model, 'llm'):
+        model = model.llm
     if 'PeftModel' in model.__class__.__name__:
         model = model.base_model.model
     return model
@@ -58,18 +21,17 @@ def get_chat_utils(model):
     """Get utils by model type."""
     if model.__class__.__name__ == 'InferenceEngine':
         model = model.module
-    model = model.llm
-    is_peft = 'PeftModel' in model.__class__.__name__
-    is_internlm = 'InternLM' in unwarpper_model(model).__class__.__name__
+    base_model = get_base_model(model)
+    base_model_name = base_model.__class__.__name__
+    is_internlm = 'InternLM' in base_model_name
+    no_space = 'InternLM' in base_model_name or 'QWen' in base_model_name
     stop_criteria = StoppingCriteriaList()
     if is_internlm:
         stop_criteria.append(InternLMStoppingCriteria())
-        if is_peft:
-            return BaseDecorator, InternLMStreamer, stop_criteria
-        else:
-            return InternLMDecorator, InternLMStreamer, stop_criteria
+    if no_space:
+        return NoSpaceStreamer, stop_criteria
     else:
-        return BaseDecorator, DecodeOutputStreamer, stop_criteria
+        return DecodeOutputStreamer, stop_criteria
 
 
 class DecodeOutputStreamer(BaseStreamer):
@@ -127,8 +89,7 @@ class DecodeOutputStreamer(BaseStreamer):
         print('\n')
 
 
-class InternLMStreamer(DecodeOutputStreamer):
-    """Streamer for InternLM."""
+class NoSpaceStreamer(DecodeOutputStreamer):
 
     def __init__(self, tokenizer, skip_prompt=True) -> None:
         BaseStreamer().__init__()
@@ -138,45 +99,13 @@ class InternLMStreamer(DecodeOutputStreamer):
         self.hex_regex = re.compile(r'^<0x([0-9ABCDEF]+)>$')
 
     def decode(self, value):
-        """Decode generated tokens for InternLM."""
-
         tok = self.tokenizer.decode(value)
         if res := self.hex_regex.match(tok):
             tok = chr(int(res.group(1), 16))
-        if tok == '</s>' or tok == '<eoa>' or tok == '\r':
+        if tok == '</s>' or tok == '\r':
             tok = '\n'
 
         return tok
-
-
-class BaseDecorator:
-    """Base decorator for decorating prompt and extracting generated output."""
-
-    @classmethod
-    def decorate(cls, prompt):
-        """Abstract method for adding Add special tokens to prompt."""
-        return prompt
-
-    @classmethod
-    def extract(cls, gen_out):
-        """Abstract methods for extract generated output from model output."""
-        return gen_out
-
-
-class InternLMDecorator(BaseDecorator):
-    """Decorator for InternLM."""
-
-    regex = re.compile(r'<\|Bot\|>:(.*)')
-
-    @classmethod
-    def decorate(cls, prompt):
-        """Decorate prompt for InternLM."""
-        return f'<|User|>:{prompt}<eoh>'
-
-    @classmethod
-    def extract(cls, gen_out):
-        """Extract generated tokens for InternLM."""
-        return cls.regex.search(gen_out).group(1)
 
 
 class InternLMStoppingCriteria(StoppingCriteria):
@@ -184,3 +113,16 @@ class InternLMStoppingCriteria(StoppingCriteria):
 
     def __call__(self, input_ids, *args, **kwargs) -> bool:
         return input_ids[0, -1] in [2, 103028]
+
+
+def update_stop_criteria(base,
+                         tokenizer,
+                         command_stop_word=None,
+                         answer_stop_word=None):
+    command = copy.deepcopy(base)
+    answer = copy.deepcopy(base)
+    if command_stop_word is not None:
+        command.append(StopWordStoppingCriteria(tokenizer, command_stop_word))
+    if answer_stop_word is not None:
+        answer.append(StopWordStoppingCriteria(tokenizer, answer_stop_word))
+    return command, answer
