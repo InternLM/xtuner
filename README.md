@@ -1,8 +1,19 @@
 # MMChat
 
+## Introduction
+
+XXX is a toolkit for quickly fine-tuning LLMs, developed by the [MMRazor](https://github.com/open-mmlab/mmrazor) and [MMDeploy](https://github.com/open-mmlab/mmdeploy) teams. It has the following core features:
+
+- Embrace [HuggingFace](https://huggingface.co) and provide fast support for new models, datasets, and algorithms 🤗
+- Provide a comprehensive solution and related models for [MOSS plugins datasets](https://github.com/OpenLMLab/MOSS/tree/main/SFT_data) 🤖️
+- Support arbitrary combinations of multiple datasets during fine-tuning ➕
+- Compatible with [DeepSpeed](https://github.com/microsoft/DeepSpeed), enabling the efficient fine-tuning of LLMs on multiple GPUs 🚀
+- Support [QLoRA](http://arxiv.org/abs/2305.14314), enabling the efficient fine-tuning of LLMs using free resources on Colab ⚡️
+
+
 ## Highlights
 
-### 🔥 Supported Models, Datasets, and Strategies
+### 🔥 Supported Models, Datasets, Strategies, and Algorithms
 
 <table>
 <tbody>
@@ -15,6 +26,9 @@
 </td>
 <td>
   <b>Strategies</b>
+</td>
+ <td>
+  <b>Algorithms</b>
 </td>
 </tr>
 <tr valign="top">
@@ -51,9 +65,18 @@
   <li>...</li>
 </ul>
 </td>
+<td>
+<ul>
+  <li>Full parameter fine-tune</li>
+  <li><a href="http://arxiv.org/abs/2106.09685">LoRA</a></li>
+  <li><a href="http://arxiv.org/abs/2305.14314">QLoRA</a></li>
+  <li>...</li>
+</ul>
+</td>
 </tr>
 </tbody>
 </table>
+
 
 ### 🔧 LLMs with Plugins
 
@@ -93,34 +116,8 @@ cd XXX
 pip install -v -e .
 ```
 
-### Fine-tune
-
-We support the efficient fine-tune (*e.g.*, QLoRA) for LLMs.
-
-- On a single GPU
-
-  ```shell
-  python ./tools/train.py ${CONFIG_FILE} [optional arguments]
-  ```
-
-  Taking the QLoRA fine-tuning of InternLM-7B with Alpaca dataset as an example, we can start it by
-
-  ```shell
-  python ./tools/train.py ./configs/internlm/internlm_7b/internlm_7b_qlora_alpaca.py
-  ```
-
-- On multiple GPUs
-
-  ```shell
-  bash ./tools/dist_train.sh \
-      ${CONFIG_FILE} \
-      ${GPU_NUM} \
-      [optional arguments]
-  ```
 
 ### Chat
-
-We support to chat with pretrained / fine-tuned LLMs.
 
 - With the pretrained HuggingFace LLM, and the corresponding HuggingFace adapter fine-tuned from XXX.
 
@@ -130,6 +127,7 @@ We support to chat with pretrained / fine-tuned LLMs.
 
   <details>
   <summary>Examples</summary>
+
 
   - Llama-2-7B, plugins adapter,
 
@@ -166,6 +164,7 @@ We support to chat with pretrained / fine-tuned LLMs.
   <details>
   <summary>Examples</summary>
 
+
   - Llama-2-7B, plugins adapter,
 
     ```shell
@@ -192,34 +191,29 @@ We support to chat with pretrained / fine-tuned LLMs.
 
   </details>
 
-### Evaluation
 
-- If a comprehensive and systematic evaluation of the LLM is required, we recommend using the [OpenCompass](https://github.com/InternLM/opencompass), which currently supports evaluation scheme of 50+ datasets with about 300,000 questions.
+### Fine-tune
 
-- In XXX, we support the MMLU evaluation for LLMs, by
+- On a single GPU
 
-  ```
-  python ./tools/test.py ${CONFIG_FILE} --checkpoint ${PTH_ADAPTER_PATH} [other optional arguments]
-  ```
-
-  Notably, all provided configs disable the evaluation since it may introduce potential biases when evaluated by only one dataset and it is widely believed that fine-tune stage introduces little additional knowledge to LLMs.
-
-  <details>
-  <summary>How to enable it?</summary>
-
-  If the evaluation is needed, user can add below lines to the original config to enable it.
-
-  ```python
-  from mmengine.config import read_base
-
-  with read_base():
-      from ..._base_.datasets.evaluation.mmlu_fs import *  # noqa: F401,F403
-
-  test_dataloader.dataset.tokenizer = tokenizer  # noqa: F405
-  test_evaluator.tokenizer = tokenizer  # noqa: F405
+  ```shell
+  python ./tools/train.py ${CONFIG_FILE} [optional arguments]
   ```
 
-  </details>
+  Taking the QLoRA fine-tuning of InternLM-7B with Alpaca dataset as an example, we can start it by
+
+  ```shell
+  python ./tools/train.py ./configs/internlm/internlm_7b/internlm_7b_qlora_alpaca.py
+  ```
+
+- On multiple GPUs
+
+  ```shell
+  bash ./tools/dist_train.sh \
+      ${CONFIG_FILE} \
+      ${GPU_NUM} \
+      [optional arguments]
+  ```
 
 ### Deploy
 
@@ -239,6 +233,39 @@ We support to chat with pretrained / fine-tuned LLMs.
 
   - We are woking closely with LMDeploy team, to implement the deployment of **dialogues with plugins**!
 
+
+
+### Evaluation
+
+- If a comprehensive and systematic evaluation of the LLM is required, we recommend using the [OpenCompass](https://github.com/InternLM/opencompass), which currently supports evaluation scheme of 50+ datasets with about 300,000 questions.
+
+- In XXX, we support the MMLU evaluation for LLMs, by
+
+  ```
+  python ./tools/test.py ${CONFIG_FILE} --checkpoint ${PTH_ADAPTER_PATH} [other optional arguments]
+  ```
+
+  Notably, all provided configs disable the evaluation since it may introduce potential biases when evaluated by only one dataset and it is widely believed that fine-tune stage introduces little additional knowledge to LLMs.
+
+  <details>
+  <summary>How to enable it?</summary>
+
+
+  If the evaluation is needed, user can add below lines to the original config to enable it.
+
+  ```python
+  from mmengine.config import read_base
+  
+  with read_base():
+      from ..._base_.datasets.evaluation.mmlu_fs import *  # noqa: F401,F403
+  
+  test_dataloader.dataset.tokenizer = tokenizer  # noqa: F405
+  test_evaluator.tokenizer = tokenizer  # noqa: F405
+  ```
+
+  </details>
+
+
 ## Performance
 
 ### Objective evaluation
@@ -246,9 +273,9 @@ We support to chat with pretrained / fine-tuned LLMs.
 The project has conducted testing on various relevant models on the objective evaluation set for the "Natural Language Understanding (NLU)" category. Given that such evaluations are strictly reliant on provided label outputs, the results are devoid of any subjective elements. This allows for a degree of reflection on the performance and numerous practical capabilities of large-scale models. We have empirically tested the performance of a series of related models on the newly released MMLU dataset. Below are the average evaluation results of some models on the validation and test sets.
 
 | Model                  | Valid (zero-shot) | Valid (five-shot) | Test (zero-shot) | Test (five-shot) |
-| ---------------------- | ----------------- | ----------------- | ---------------- | ---------------- |
+|:---------------------- | -----------------:| -----------------:| ----------------:| ----------------:|
 | Llama2-7b              | 42.6              | 46.5              | 42.4             | 46.8             |
-| Llama2-7b oasst1 qlora | Data              | Data              | Data             | Data             |
+| Llama2-7b oasst1 QLoRA | Data              | Data              | Data             | Data             |
 
 ### Instant generation
 
@@ -258,8 +285,8 @@ Nonetheless, experimental findings indicate that MMLU does not fully capture the
 
 ## Acknowledgement
 
-- [Llama 2](https://github.com/facebookresearch/llama-recipes)
-- [QLoRA](https://github.com/artidoro/qlora)
+- [Llama 2](https://github.com/facebookresearch/llama)
+- [QLoRA](http://arxiv.org/abs/2305.14314)
 - [LMDeploy](https://github.com/InternLM/lmdeploy)
 
 ## License
