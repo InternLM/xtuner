@@ -196,6 +196,10 @@ For more usages, please see [finetune.md](./docs/en/finetune.md).
 
 ## 🔜 Roadmap
 
+## 🤝 Contributing
+
+We appreciate all contributions to XXX. Please refer to [CONTRIBUTING.md](.github/CONTRIBUTING.md) for the contributing guideline.
+
 ## 🎖️ Acknowledgement
 
 - [Llama 2](https://github.com/facebookresearch/llama)
@@ -203,3 +207,5 @@ For more usages, please see [finetune.md](./docs/en/finetune.md).
 - [LMDeploy](https://github.com/InternLM/lmdeploy)
 
 ## License
+
+This project is released under the [Apache 2.0 license](LICENSE).
