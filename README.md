@@ -82,7 +82,7 @@ MMChat is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](
 <td>
 <ul>
   <li>(Distributed) Data Parallel</li>
-  <li><a href="https://github.com/microsoft/DeepSpeed">Deepspeed</a> 🚀</li>
+  <li><a href="examples">Deepspeed</a> 🚀</li>
 </ul>
 </td>
 <td>
