@@ -9,6 +9,8 @@ from mmengine.logging import print_log
 from mmengine.registry import RUNNERS
 from mmengine.runner import Runner
 
+from mmchat.models import replace_llama_attn_with_flash_attn
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train a detector')
@@ -123,4 +125,5 @@ def main():
 
 
 if __name__ == '__main__':
+    replace_llama_attn_with_flash_attn()
     main()
