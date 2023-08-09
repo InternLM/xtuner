@@ -138,7 +138,7 @@ MMChat provides the tools to chat with pretrained / fine-tuned LLMs.
   python ./tools/chat_hf.py meta-llama/Llama-2-7b --adapter XXX --bot-name Llama2 --prompt plugins --with-plugins --command-stop-word "<eoc>" --answer-stop-word "<eom>" --no-streamer
   ```
 
-For more usages, please see [TODO](<>).
+For more usages, please see [chat.md](<./docs/en/chat.md>).
 
 ### Fine-tune [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1yzGeYXayLomNQjLD4vC6wgUHvei3ezt4?usp=sharing)
 
@@ -155,7 +155,7 @@ Taking the QLoRA fine-tuning  as an example, we can start it by
   bash ./tools/dist_train.sh ./configs/internlm/internlm_7b/internlm_7b_qlora_oasst1.py ${GPU_NUM}
   ```
 
-For more usages, please see [TODO](<>).
+For more usages, please see [finetune.md](<./docs/en/finetune.md>).
 
 ### Deploy
 
