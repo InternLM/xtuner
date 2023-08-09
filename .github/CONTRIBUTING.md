@@ -232,4 +232,3 @@ The clang-format config is stored in [.clang-format](../.clang-format).
    - Prefix: add new feature \[Feature\], fix bug \[Fix\], related to documents \[Docs\], in developing \[WIP\] (which will not be reviewed temporarily)
    - Introduce main changes, results and influences on other modules in short description
    - Associate related issues and pull requests with a milestone
-
