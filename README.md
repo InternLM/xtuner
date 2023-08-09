@@ -208,4 +208,4 @@ We appreciate all contributions to XXX. Please refer to [CONTRIBUTING.md](.githu
 
 ## License
 
-This project is released under the [Apache 2.0 license](LICENSE).
+This project is released under the [Apache License 2.0](LICENSE).
