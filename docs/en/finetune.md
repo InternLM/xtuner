@@ -62,7 +62,6 @@
   python ./tools/train.py ./configs/qwen/qwen_7b/qwen_7b_qlora_arxiv.py
   ```
 
-
 ## Fine-tune [Baichuan](https://github.com/baichuan-inc)
 
 - Baichuan-7B, Alpaca-enzh
