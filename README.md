@@ -203,7 +203,7 @@ For more usages, please see [TODO](<>).
 ## 🎖️ Acknowledgement
 
 - [Llama 2](https://github.com/facebookresearch/llama)
-- [QLoRA](http://arxiv.org/abs/2305.14314)
+- [QLoRA](https://github.com/artidoro/qlora)
 - [LMDeploy](https://github.com/InternLM/lmdeploy)
 
 ## License
