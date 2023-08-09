@@ -2,34 +2,42 @@
 
 <div align="center">
 
+
 [![docs](https://readthedocs.org/projects/opencompass/badge)](https://opencompass.readthedocs.io/en)
 [![license](https://img.shields.io/github/license/InternLM/opencompass.svg)](https://github.com/InternLM/opencompass/blob/main/LICENSE)
 [![PyPI](https://badge.fury.io/py/opencompass.svg)](https://pypi.org/project/opencompass/)
 
-[📘Documentation](https://opencompass.readthedocs.io/en/latest/) |
-[🤔Reporting Issues](https://github.com/InternLM/opencompass/issues/new/choose)
+[📘 Documentation](https://opencompass.readthedocs.io/en/latest/) |
+[🤔 Reporting Issues](https://github.com/InternLM/opencompass/issues/new/choose) | 
+[⚙️ Model Zoo]()
 
 English | [简体中文](README_zh-CN.md)
 
 </div>
+
+## 📣 News  
+
+- **[2023.08.xx]** We release XXX, with multiple fine-tuned adapters.
+
+## 🧭 Introduction
+
+MMChat is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](https://github.com/open-mmlab/mmrazor) and [MMDeploy](https://github.com/open-mmlab/mmdeploy) teams. 
+
+- **Efficiency**: Support the LLM fine-tuning on consumer-grade GPUs.
+
+- **Versatile**: Support various LLMs, datasets and algorithms, allowing users to choose the most suitable solution for their requirements.
+
+- **Compatibility**: Compatible with [DeepSpeed](https://github.com/microsoft/DeepSpeed) and the [HuggingFace](https://huggingface.co) training pipeline, enabling effortless integration and utilization.
+
+
+> 💥 [MMRazor](https://github.com/open-mmlab/mmrazor) and [MMDeploy](https://github.com/open-mmlab/mmdeploy) teams have also collaborated in developing [LMDeploy](https://github.com/InternLM/lmdeploy), a toolkit for for compressing, deploying, and serving LLM. Welcome to subscribe to stay updated with our latest developments.
+
 
 ## 🌟 Demos
 
 - QLoRA fine-tune for InternLM-7B [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1yzGeYXayLomNQjLD4vC6wgUHvei3ezt4?usp=sharing)
 - Chat with Llama2-7B-Plugins [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](<>)
 - Use MMChat in HuggingFace training pipeline [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1eBI9yiOkX-t7P-0-t9vS8y1x5KmWrkoU?usp=sharing)
-
-## 🧭 Introduction
-
-MMChat is a toolkit for quickly fine-tuning LLM, developed by the [MMRazor](https://github.com/open-mmlab/mmrazor) and [MMDeploy](https://github.com/open-mmlab/mmdeploy) teams. It has the following core features:
-
-- Embrace [HuggingFace](https://huggingface.co) and provide fast support for new models, datasets, and algorithms.
-- Provide a comprehensive solution and related models for [MOSS plugins datasets](https://github.com/OpenLMLab/MOSS/tree/main/SFT_data).
-- Support arbitrary combinations of multiple datasets during fine-tuning.
-- Compatible with [DeepSpeed](https://github.com/microsoft/DeepSpeed), enabling the efficient fine-tuning of LLM on multiple GPUs.
-- Support [QLoRA](http://arxiv.org/abs/2305.14314), enabling the efficient fine-tuning of LLM using free resources on Colab.
-
-> 💥 [MMRazor](https://github.com/open-mmlab/mmrazor) and [MMDeploy](https://github.com/open-mmlab/mmdeploy) teams have also collaborated in developing [LMDeploy](https://github.com/InternLM/lmdeploy), a toolkit for for compressing, deploying, and serving LLM. Welcome to subscribe to stay updated with our latest developments.
 
 ## 🔥 Supports
 
@@ -94,6 +102,7 @@ MMChat is a toolkit for quickly fine-tuning LLM, developed by the [MMRazor](http
 </tbody>
 </table>
 
+
 ## 🛠️ Quick Start
 
 ### Installation
@@ -124,6 +133,7 @@ pip install -v -e .
 </tr>
 </table>
 
+
 MMChat provides the tools to chat with pretrained / fine-tuned LLMs.
 
 - For example, we can start the chat with Llama2-7B-Plugins by
@@ -141,6 +151,7 @@ MMChat supports the efficient fine-tune (*e.g.*, QLoRA) for Large Language Model
 Taking the QLoRA fine-tuning  as an example, we can start it by
 
 - For example, we can start the QLoRA fine-tuning of InternLM-7B with oasst1 dataset by
+
   ```shell
   # On a single GPU
   python ./tools/train.py ./configs/internlm/internlm_7b/internlm_7b_qlora_oasst1.py
@@ -195,4 +206,4 @@ For more usages, please see [TODO](<>).
 - [QLoRA](http://arxiv.org/abs/2305.14314)
 - [LMDeploy](https://github.com/InternLM/lmdeploy)
 
-## 🎫 License
+## License
