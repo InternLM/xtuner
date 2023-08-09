@@ -2,26 +2,25 @@
 
 <div align="center">
 
-
 [![docs](https://readthedocs.org/projects/opencompass/badge)](https://opencompass.readthedocs.io/en)
 [![license](https://img.shields.io/github/license/InternLM/opencompass.svg)](https://github.com/InternLM/opencompass/blob/main/LICENSE)
 [![PyPI](https://badge.fury.io/py/opencompass.svg)](https://pypi.org/project/opencompass/)
 
 [📘 Documentation](https://opencompass.readthedocs.io/en/latest/) |
-[🤔 Reporting Issues](https://github.com/InternLM/opencompass/issues/new/choose) | 
-[⚙️ Model Zoo]()
+[🤔 Reporting Issues](https://github.com/InternLM/opencompass/issues/new/choose) |
+[⚙️ Model Zoo](<>)
 
 English | [简体中文](README_zh-CN.md)
 
 </div>
 
-## 📣 News  
+## 📣 News
 
-- **[2023.08.xx]** We release XXX, with multiple fine-tuned adapters.
+- **\[2023.08.xx\]** We release XXX, with multiple fine-tuned adapters.
 
 ## 🧭 Introduction
 
-MMChat is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](https://github.com/open-mmlab/mmrazor) and [MMDeploy](https://github.com/open-mmlab/mmdeploy) teams. 
+MMChat is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](https://github.com/open-mmlab/mmrazor) and [MMDeploy](https://github.com/open-mmlab/mmdeploy) teams.
 
 - **Efficiency**: Support the LLM fine-tuning on consumer-grade GPUs.
 
@@ -29,9 +28,7 @@ MMChat is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](
 
 - **Compatibility**: Compatible with [DeepSpeed](https://github.com/microsoft/DeepSpeed) and the [HuggingFace](https://huggingface.co) training pipeline, enabling effortless integration and utilization.
 
-
 > 💥 [MMRazor](https://github.com/open-mmlab/mmrazor) and [MMDeploy](https://github.com/open-mmlab/mmdeploy) teams have also collaborated in developing [LMDeploy](https://github.com/InternLM/lmdeploy), a toolkit for for compressing, deploying, and serving LLM. Welcome to subscribe to stay updated with our latest developments.
-
 
 ## 🌟 Demos
 
@@ -102,7 +99,6 @@ MMChat is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](
 </tbody>
 </table>
 
-
 ## 🛠️ Quick Start
 
 ### Installation
@@ -132,7 +128,6 @@ pip install -v -e .
 </td>
 </tr>
 </table>
-
 
 MMChat provides the tools to chat with pretrained / fine-tuned LLMs.
 
