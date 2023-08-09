@@ -1,3 +1,4 @@
+# Copyright (c) OpenMMLab. All rights reserved.
 from mmengine.config import Config
 from mmengine.runner import Runner
 
