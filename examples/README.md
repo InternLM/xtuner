@@ -1,4 +1,4 @@
-# How to use MMChat in HuggingFace & Deepspeed training pipelines
+# How to use MMChat in HuggingFace & DeepSpeed training pipelines
 
 ## Quick run
 
@@ -11,10 +11,10 @@
 2. run training scripts
 
    ```shell
-   # huggingface training pipeline
+   # HuggingFace training pipeline
    bash run_train_alpaca-qlora_with_mmchat_hf.sh
 
-   # deepspeed training pipeline
+   # DeepSpeed training pipeline
    bash run_train_alpaca-qlora_with_mmchat_deepspeed.sh
    ```
 
