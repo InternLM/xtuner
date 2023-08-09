@@ -1,4 +1,4 @@
-# How to use MMChat in huggingface & deepspeed training pipelines
+# How to use MMChat in HuggingFace & Deepspeed training pipelines
 
 ## Quick run
 
@@ -40,7 +40,7 @@
 
 If you want to use mmchat for efficient finetuning in your original training pipelines, you just need to change the implement of building `model` and `dataloader`, reserve other parts. Thus you can quickly fine-tune various models with various datasets by changing the relevant configs.
 
-## How to build model with MMChat for qlora
+## How to build model with MMChat for QLoRA
 
 ```python
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
@@ -60,7 +60,7 @@ quantization_config = BitsAndBytesConfig(
     bnb_4bit_use_double_quant=True,
     bnb_4bit_quant_type='nf4')
 
-# if neither use qlora or lora, `lora_config = None`
+# if neither use QLoRA or LoRA, `lora_config = None`
 lora_config = LoraConfig(
     r=64,
     lora_alpha=16,
