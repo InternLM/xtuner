@@ -113,7 +113,11 @@ pip install -v -e .
 
 ### Chat [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](<>)
 
+
 <table>
+<tr>
+  <th colspan="3" align="center">Examples of Plugins-based Chat 🔥🔥🔥</th>
+</tr>
 <tr>
 <td>
 <a><img src="https://github.com/InternLM/lmdeploy/assets/36994684/7c429d98-7630-4539-8aff-c89094826f8c"></a>
