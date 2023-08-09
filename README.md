@@ -112,7 +112,7 @@ pip install -v -e .
 
 <img src="https://github.com/InternLM/lmdeploy/assets/36994684/20159556-7711-4b0d-9568-6884998ad66a">
 
-MMChat provides the tool to chat with pretrained / fine-tuned LLMs.
+MMChat provides the tools to chat with pretrained / fine-tuned LLMs.
 
 - For example, we can start the chat with Llama2-7B-Plugins by
 
