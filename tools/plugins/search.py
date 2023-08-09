@@ -9,7 +9,6 @@ from collections import Counter
 from string import punctuation
 from urllib import parse
 
-import cv2  # noqa: F401
 import fasttext
 import requests
 import spacy
