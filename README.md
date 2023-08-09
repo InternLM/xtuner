@@ -18,7 +18,7 @@ English | [简体中文](README_zh-CN.md)
 
 - **\[2023.08.xx\]** We release XXX, with multiple fine-tuned adapters.
 
-## 🧭 Introduction
+## 📖 Introduction
 
 MMChat is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](https://github.com/open-mmlab/mmrazor) and [MMDeploy](https://github.com/open-mmlab/mmdeploy) teams.
 
