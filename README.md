@@ -6,7 +6,7 @@
 [![license](https://img.shields.io/github/license/InternLM/opencompass.svg)](https://github.com/InternLM/opencompass/blob/main/LICENSE)
 [![PyPI](https://badge.fury.io/py/opencompass.svg)](https://pypi.org/project/opencompass/)
 
-[📘Documentation](https://opencompass.readthedocs.io/en/latest/) | 
+[📘Documentation](https://opencompass.readthedocs.io/en/latest/) |
 [🤔Reporting Issues](https://github.com/InternLM/opencompass/issues/new/choose)
 
 English | [简体中文](README_zh-CN.md)
@@ -14,10 +14,10 @@ English | [简体中文](README_zh-CN.md)
 </div>
 
 ## 🌟 Demos
-  
-  - QLoRA fine-tune for InternLM-7B [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1yzGeYXayLomNQjLD4vC6wgUHvei3ezt4?usp=sharing)
-  - Chat with Llama2-7B-Plugins [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](<>)
-  - Use MMChat in HuggingFace training pipeline [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1eBI9yiOkX-t7P-0-t9vS8y1x5KmWrkoU?usp=sharing)
+
+- QLoRA fine-tune for InternLM-7B [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1yzGeYXayLomNQjLD4vC6wgUHvei3ezt4?usp=sharing)
+- Chat with Llama2-7B-Plugins [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](<>)
+- Use MMChat in HuggingFace training pipeline [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1eBI9yiOkX-t7P-0-t9vS8y1x5KmWrkoU?usp=sharing)
 
 ## 🧭 Introduction
 
@@ -112,21 +112,22 @@ pip install -v -e .
 
 <img src="https://github.com/InternLM/lmdeploy/assets/36994684/20159556-7711-4b0d-9568-6884998ad66a">
 
-MMChat provides the tool to chat with pretrained / fine-tuned LLMs. 
+MMChat provides the tool to chat with pretrained / fine-tuned LLMs.
 
-- For example, we can start the chat with Llama2-7B-Plugins by 
-  
+- For example, we can start the chat with Llama2-7B-Plugins by
+
   ```shell
   python ./tools/chat_hf.py meta-llama/Llama-2-7b --adapter XXX --bot-name Llama2 --prompt plugins --with-plugins --command-stop-word "<eoc>" --answer-stop-word "<eom>" --no-streamer
   ```
 
-For more usages, please see [TODO]().
+For more usages, please see [TODO](<>).
 
 ### Fine-tune [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1yzGeYXayLomNQjLD4vC6wgUHvei3ezt4?usp=sharing)
 
 MMChat supports the efficient fine-tune (*e.g.*, QLoRA) for Large Language Models (LLM).
 
 Taking the QLoRA fine-tuning  as an example, we can start it by
+
 - For example, we can start the QLoRA fine-tuning of InternLM-7B with oasst1 dataset by
   ```shell
   # On a single GPU
@@ -135,7 +136,7 @@ Taking the QLoRA fine-tuning  as an example, we can start it by
   bash ./tools/dist_train.sh ./configs/internlm/internlm_7b/internlm_7b_qlora_oasst1.py ${GPU_NUM}
   ```
 
-For more usages, please see [TODO]().
+For more usages, please see [TODO](<>).
 
 ### Deploy
 
@@ -183,4 +184,3 @@ For more usages, please see [TODO]().
 - [LMDeploy](https://github.com/InternLM/lmdeploy)
 
 ## 🎫 License
-
