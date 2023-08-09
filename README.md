@@ -110,7 +110,19 @@ pip install -v -e .
 
 ### Chat [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](<>)
 
-<img src="https://github.com/InternLM/lmdeploy/assets/36994684/20159556-7711-4b0d-9568-6884998ad66a">
+<table>
+<tr>
+<td>
+<a><img src="https://github.com/InternLM/lmdeploy/assets/36994684/7c429d98-7630-4539-8aff-c89094826f8c"></a>
+</td>
+<td>
+<a><img src="https://github.com/InternLM/lmdeploy/assets/36994684/05d02906-5a82-45bc-b4e3-2cc32d473b2c"></a>
+</td>
+<td>
+<a><img src="https://github.com/InternLM/lmdeploy/assets/36994684/80395303-997a-47f2-b7d2-d585034df683"></a>
+</td>
+</tr>
+</table>
 
 MMChat provides the tools to chat with pretrained / fine-tuned LLMs.
 
