@@ -38,18 +38,18 @@ def parse_args():
     parser.add_argument(
         '--temperature',
         type=float,
-        default=1.,
+        default=0.1,
         help='The value used to modulate the next token probabilities.')
     parser.add_argument(
         '--top-k',
         type=int,
-        default=50,
+        default=40,
         help='The number of highest probability vocabulary tokens to '
         'keep for top-k-filtering.')
     parser.add_argument(
         '--top-p',
         type=float,
-        default=1,
+        default=0.75,
         help='If set to float < 1, only the smallest set of most probable '
         'tokens with probabilities that add up to top_p or higher are '
         'kept for generation.')
