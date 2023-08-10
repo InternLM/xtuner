@@ -152,9 +152,22 @@ def main():
                 generate_output[0][len(ids[0]):])
             if streamer is None:
                 print(generate_output_text, end='')
+            try:
+                calculate_open = re.findall(r'- Calculator: (.+)\.',
+                                            inputs)[0] == 'enabled'
+                solve_open = re.findall(r'- Equation solver: (.+)\.',
+                                        inputs)[0] == 'enabled'
+                search_open = re.findall(r'- Web search: (.+)\.',
+                                         inputs)[0] == 'enabled'
+            except Exception:
+                print(f'Wrong prompt:\n{inputs}')
             pattern = r'<\|Commands\|>:(.*?)<eoc>'
             command_text = ', '.join(re.findall(pattern, generate_output_text))
-            extent_text = plugins_api(command_text)
+            extent_text = plugins_api(
+                command_text,
+                calculate_open=calculate_open,
+                solve_open=solve_open,
+                search_open=search_open)
             print(extent_text, end='')
             extent_text_ids = tokenizer.encode(
                 extent_text,

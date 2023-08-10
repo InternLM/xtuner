@@ -1,12 +1,11 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import re
 
-from .calculate import Calculate
-from .search import Search
-from .solve import Solve
 
-
-def plugins_api(input_str):
+def plugins_api(input_str,
+                calculate_open=True,
+                solve_open=True,
+                search_open=True):
 
     pattern = r'(Solve|solve|Solver|solver|Calculate|calculate|Calculator|calculator|Search)\("([^"]*)"\)'  # noqa: E501
 
@@ -19,13 +18,25 @@ def plugins_api(input_str):
                 'Calculate', 'calculate'
                 'Calculator', 'calculator'
         ]:
-            result = Calculate(matches[i][1])
+            if calculate_open:
+                from .calculate import Calculate
+                result = Calculate(matches[i][1])
+            else:
+                result = None
             converted_str += f"Calculate(\"{matches[i][1]}\") => {result}\n"
         elif matches[i][0] in ['Solve', 'solve', 'Solver', 'solver']:
-            result = Solve(matches[i][1])
+            if solve_open:
+                from .solve import Solve
+                result = Solve(matches[i][1])
+            else:
+                result = None
             converted_str += f"Solve(\"{matches[i][1]}\") =>\n{result}\n"
         elif matches[i][0] == 'Search':
-            result = Search(matches[i][1])
+            if search_open:
+                from .search import Search
+                result = Search(matches[i][1])
+            else:
+                result = None
             converted_str += f"Search(\"{matches[i][1]}\") =>\n{result}"
 
     converted_str += '<eor>\n'

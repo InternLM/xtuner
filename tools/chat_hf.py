@@ -112,6 +112,9 @@ def main():
         top_p=args.top_p,
         top_k=args.top_k,
     )
+    encode_kwargs = {}
+    if tokenizer.__class__.__name__ == 'QWenTokenizer':
+        encode_kwargs['disallowed_special'] = ()
 
     n_turn = 0
     inputs = ''
@@ -132,7 +135,10 @@ def main():
         else:
             inputs += text
         ids = tokenizer.encode(
-            inputs, return_tensors='pt', add_special_tokens=n_turn == 0)
+            inputs,
+            return_tensors='pt',
+            add_special_tokens=n_turn == 0,
+            **encode_kwargs)
         streamer = Streamer(tokenizer) if Streamer is not None else None
         if args.with_plugins:
             generate_output = model.generate(
@@ -144,12 +150,28 @@ def main():
                 generate_output[0][len(ids[0]):])
             if streamer is None:
                 print(generate_output_text, end='')
+            try:
+                calculate_open = re.findall(r'- Calculator: (.+)\.',
+                                            inputs)[0] == 'enabled'
+                solve_open = re.findall(r'- Equation solver: (.+)\.',
+                                        inputs)[0] == 'enabled'
+                search_open = re.findall(r'- Web search: (.+)\.',
+                                         inputs)[0] == 'enabled'
+            except Exception:
+                print(f'Wrong prompt:\n{inputs}')
             pattern = r'<\|Commands\|>:(.*?)<eoc>'
             command_text = ', '.join(re.findall(pattern, generate_output_text))
-            extent_text = plugins_api(command_text)
+            extent_text = plugins_api(
+                command_text,
+                calculate_open=calculate_open,
+                solve_open=solve_open,
+                search_open=search_open)
             print(extent_text, end='')
             extent_text_ids = tokenizer.encode(
-                extent_text, return_tensors='pt', add_special_tokens=False)
+                extent_text,
+                return_tensors='pt',
+                add_special_tokens=False,
+                **encode_kwargs)
             new_ids = torch.cat((generate_output, extent_text_ids), dim=1)
             new_streamer = Streamer(
                 tokenizer) if Streamer is not None else None
