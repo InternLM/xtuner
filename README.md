@@ -135,7 +135,7 @@ MMChat provides the tools to chat with pretrained / fine-tuned LLMs.
 - For example, we can start the chat with Llama2-7B-Plugins by
 
   ```shell
-  python ./tools/chat_hf.py meta-llama/Llama-2-7b --adapter XXX --bot-name Llama2 --prompt plugins --with-plugins --command-stop-word "<eoc>" --answer-stop-word "<eom>" --no-streamer
+  python ./tools/chat_hf.py meta-llama/Llama-2-7b-hf --adapter XXX --bot-name Llama2 --prompt plugins --with-plugins --command-stop-word "<eoc>" --answer-stop-word "<eom>" --no-streamer
   ```
 
 For more usages, please see [chat.md](./docs/en/chat.md).
