@@ -188,7 +188,7 @@ For more usages, please see [finetune.md](./docs/en/finetune.md).
       --seed 0
   ```
 
-  🎯 We are woking closely with [LMDeploy](https://github.com/InternLM/lmdeploy), to implement the deployment of **dialogues with plugins**!
+  🎯 We are woking closely with [LMDeploy](https://github.com/InternLM/lmdeploy), to implement the deployment of **plugins-based chat**!
 
 ### Evaluation
 
