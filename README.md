@@ -157,7 +157,7 @@ Taking the QLoRA fine-tuning  as an example, we can start it by
 
 For more usages, please see [finetune.md](./docs/en/finetune.md).
 
-### Deploy
+### Deployment
 
 - **Step 0**, convert the pth adapter to HuggingFace adapter, by
 
