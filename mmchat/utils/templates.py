@@ -20,8 +20,8 @@ PROMPT_TEMPLATE = ConfigDict(
             '- Text-to-image: disabled.\n'
             '- Image edition: disabled.\n'
             '- Text-to-speech: disabled.\n'
-            '<|Human|>: {input}'),
-        INSTRUCTION='<|Human|>: {input}'),
+            '<|Human|>: {input}<eoh>'),
+        INSTRUCTION='<|Human|>: {input}<eoh>'),
     alpaca=dict(
         INSTRUCTION_START=(
             'Below is an instruction that describes a task. '
