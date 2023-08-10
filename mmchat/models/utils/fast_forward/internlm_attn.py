@@ -33,6 +33,7 @@ def internlm_attn_forward(
     use_cache: bool = False,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor],
            Optional[Tuple[torch.Tensor]]]:
+    # Modified from https://huggingface.co/internlm/internlm-7b/blob/main/modeling_internlm.py#L161  # noqa:E501
     bsz, q_len, _ = hidden_states.size()
 
     query_states = self.q_proj(hidden_states).view(bsz, q_len, self.num_heads,
