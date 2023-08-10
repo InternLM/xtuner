@@ -25,13 +25,13 @@
 - Llama2-7B, MOSS-003-SFT **(plugins!)**
 
   ```shell
-  python ./tools/chat_hf.py meta-llama/Llama-2-7b --adapter XXX --bot-name Llama2 --prompt plugins --with-plugins --command-stop-word "<eoc>" --answer-stop-word "<eom>" --no-streamer
+  python ./tools/chat_hf.py meta-llama/Llama-2-7b-hf --adapter XXX --bot-name Llama2 --prompt plugins --with-plugins --command-stop-word "<eoc>" --answer-stop-word "<eom>" --no-streamer
   ```
 
 - Llama2-7B, Arxiv Gentitle
 
   ```shell
-  python ./tools/chat_hf.py meta-llama/Llama-2-7b --adapter XXX --prompt title --no-streamer
+  python ./tools/chat_hf.py meta-llama/Llama-2-7b-hf --adapter XXX --prompt title --no-streamer
   ```
 
 ## Chat with [Qwen](https://github.com/QwenLM)
