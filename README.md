@@ -142,7 +142,7 @@ For more usages, please see [chat.md](./docs/en/chat.md).
 
 ### Fine-tune [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1yzGeYXayLomNQjLD4vC6wgUHvei3ezt4?usp=sharing)
 
-MMChat supports the efficient fine-tune (*e.g.*, QLoRA) for Large Language Models (LLM).
+MMChat supports the efficient fine-tune (*e.g.*, QLoRA) for LLMs.
 
 Taking the QLoRA fine-tuning  as an example, we can start it by
 
