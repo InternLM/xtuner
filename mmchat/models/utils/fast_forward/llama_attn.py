@@ -1,10 +1,7 @@
-import warnings
 from typing import Optional, Tuple
 
 import torch
 import torch.nn.functional as F
-import transformers
-from mmengine.utils import digit_version
 
 
 def rotate_half(x):
@@ -44,7 +41,7 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
                                  head_dim)
 
 
-def forward(
+def llama_attn_forward(
     self,
     hidden_states: torch.Tensor,
     attention_mask: Optional[torch.Tensor] = None,
@@ -133,22 +130,7 @@ def forward(
     else:
         attn_output = self.o_proj(attn_output)
 
-    if not output_attentions:
-        attn_weights = None
-
-    return attn_output, attn_weights, past_key_value
-
-
-def replace_llama_attn_with_flash_attn():
-    if digit_version(torch.__version__) < digit_version('2.0.0'):
-        # flash attention is only supported after pytorch2.0
-        return
-    cuda_major, cuda_minor = torch.cuda.get_device_capability()
-    if cuda_major < 8:
-        warnings.warn(
-            'Flash attention is only supported on A100 or H100 GPU during '
-            'training due to head dim > 64 backward.'
-            'ref: https://github.com/HazyResearch/flash-attention/issues/190#issuecomment-1523359593'  # noqa:E501
-        )
-
-    transformers.models.llama.modeling_llama.LlamaAttention.forward = forward
+    # Due to the implementation of the PyTorch version of flash attention,
+    # even when the output_attentions flag is set to True, it is not possible
+    # to return the attn_weights.
+    return attn_output, None, past_key_value

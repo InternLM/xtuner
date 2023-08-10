@@ -1,3 +1,3 @@
-from .llama_flash_attn_monkey_patch import replace_llama_attn_with_flash_attn
+from .dispatch_fast_forward import dispatch_fast_forward
 
-__all__ = ['replace_llama_attn_with_flash_attn']
+__all__ = ['dispatch_fast_forward']
