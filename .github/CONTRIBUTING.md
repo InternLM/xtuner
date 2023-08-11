@@ -1,6 +1,6 @@
 ## Contributing to InternLM
 
-Welcome to the InternLM community, all kinds of contributions are welcomed, including but not limited to
+Welcome to the xTuner community! All kinds of contributions are welcomed, including but not limited to
 
 **Fix bug**
 
@@ -27,7 +27,7 @@ If you're not familiar with Pull Request, don't worry! The following guidance wi
 
 #### 1. Fork and clone
 
-If you are posting a pull request for the first time, you should fork the InternLM repositories by clicking the **Fork** button in the top right corner of the GitHub page, and the forked repositories will appear under your GitHub profile.
+If you are posting a pull request for the first time, you should fork the xTuner repository by clicking the **Fork** button in the top right corner of the GitHub page, and the forked repository will appear under your GitHub profile.
 
 <img src="https://user-images.githubusercontent.com/57566630/167305749-43c7f4e9-449b-4e98-ade5-0c9276d5c9ce.png" width="1200">
 
@@ -56,7 +56,7 @@ upstream	git@github.com:InternLM/xtuner.git (push)
 
 #### 2. Configure pre-commit
 
-You should configure [pre-commit](https://pre-commit.com/#intro) in the local development environment to make sure the code style matches that of InternLM. **Note**: The following code should be executed under the xtuner directory.
+You should configure [pre-commit](https://pre-commit.com/#intro) in the local development environment to make sure the code style matches that of InternLM. **Note**: The following code should be executed under the xTuner directory.
 
 ```shell
 pip install -U pre-commit
@@ -141,7 +141,7 @@ Find more details about Pull Request description in [pull request guidelines](#p
 
 **note**
 
-(a) The Pull Request description should contain the reason for the change, the content of the change, and the impact of the change, and be associated with the relevant Issue (see [documentation](https://docs.github.com/en/issues/tracking-your-work-with-issues/linking-a-pull-request-to-an-issue))
+(a) The Pull Request description should contain the reason for the change, the content of the change, and the impact of the change, and be associated with the relevant Issue (see [documentation](https://docs.github.com/en/issues/tracking-your-work-with-issues/linking-a-pull-request-to-an-issue)
 
 (b) If it is your first contribution, please sign the CLA
 
@@ -177,6 +177,28 @@ If you are very good at handling conflicts, then you can use rebase to resolve c
 
 ### Guidance
 
+#### Unit test
+
+If you cannot run the unit test of some modules for lacking of some dependencies, such as [video](https://github.com/open-mmlab/mmcv/tree/master/mmcv/video) module, you can try to install the following dependencies:
+
+```shell
+# Linux
+sudo apt-get update -y
+sudo apt-get install -y libturbojpeg
+sudo apt-get install -y ffmpeg
+
+# Windows
+conda install ffmpeg
+```
+
+We should also make sure the committed code will not decrease the coverage of unit test, we could run the following command to check the coverage of unit test:
+
+```shell
+python -m coverage run -m pytest /path/to/test_file
+python -m coverage html
+# check file in htmlcov/index.html
+```
+
 #### Document rendering
 
 If the documents are modified/added, we should check the rendering result. We could install the dependencies and run the following command to render the documents and check the results:
@@ -204,13 +226,15 @@ We use the following tools for linting and formatting:
 - [mdformat](https://github.com/executablebooks/mdformat): Mdformat is an opinionated Markdown formatter that can be used to enforce a consistent style in Markdown files.
 - [docformatter](https://github.com/myint/docformatter): A formatter to format docstring.
 
+Style configurations of yapf and isort can be found in [setup.cfg](./setup.cfg).
+
 We use [pre-commit hook](https://pre-commit.com/) that checks and formats for `flake8`, `yapf`, `isort`, `trailing whitespaces`, `markdown files`,
 fixes `end-of-files`, `double-quoted-strings`, `python-encoding-pragma`, `mixed-line-ending`, sorts `requirments.txt` automatically on every commit.
-The config for a pre-commit hook is stored in [.pre-commit-config](../.pre-commit-config.yaml).
+The config for a pre-commit hook is stored in [.pre-commit-config](./.pre-commit-config.yaml).
 
 #### C++ and CUDA
 
-The clang-format config is stored in [.clang-format](../.clang-format).
+We follow the [Google C++ Style Guide](https://google.github.io/styleguide/cppguide.html).
 
 ### PR Specs
 
