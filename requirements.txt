@@ -3,7 +3,7 @@ bitsandbytes
 datasets
 fasttext
 mmengine>=0.8.0
-peft
+peft>=0.4.0
 scipy
 SentencePiece
 spacy
