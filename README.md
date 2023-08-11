@@ -168,7 +168,8 @@ For more usages, please see [finetune.md](./docs/en/finetune.md).
   python ./tools/model_converters/merge_adapter.py \
       ${CONFIG_FILE} \
       ${PATH_TO_PTH_ADAPTER} \
-      ${SAVE_PATH_TO_MERGED_LLM}
+      ${SAVE_PATH_TO_MERGED_LLM} \
+      --max-shard-size 2GB
   ```
 
 - **Step 1**, deploy the merged LLM with any other framework, such as [LMDeploy](https://github.com/InternLM/lmdeploy) 🚀.
