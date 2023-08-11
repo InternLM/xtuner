@@ -1,13 +1,11 @@
-# MMChat
-
 <div align="center">
 
-[![docs](https://readthedocs.org/projects/opencompass/badge)](https://opencompass.readthedocs.io/en)
-[![license](https://img.shields.io/github/license/InternLM/opencompass.svg)](https://github.com/InternLM/opencompass/blob/main/LICENSE)
+[![docs](https://readthedocs.org/projects/xtuner/badge)](https://xtuner.readthedocs.io/en)
+[![license](https://img.shields.io/github/license/InternLM/xtuner.svg)](https://github.com/InternLM/xtuner/blob/main/LICENSE)
 [![PyPI](https://badge.fury.io/py/opencompass.svg)](https://pypi.org/project/opencompass/)
 
-[📘 Documentation](https://opencompass.readthedocs.io/en/latest/) |
-[🤔 Reporting Issues](https://github.com/InternLM/opencompass/issues/new/choose) |
+[📘 Documentation](https://xtuner.readthedocs.io/en/latest/) |
+[🤔 Reporting Issues](https://github.com/InternLM/xtuner/issues/new/choose) |
 [⚙️ Model Zoo](<>)
 
 English | [简体中文](README_zh-CN.md)
@@ -16,11 +14,11 @@ English | [简体中文](README_zh-CN.md)
 
 ## 📣 News
 
-- **\[2023.08.xx\]** We release XXX, with multiple fine-tuned adapters.
+- **\[2023.08.xx\]** We release xTuner, with multiple fine-tuned adapters.
 
 ## 📖 Introduction
 
-MMChat is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](https://github.com/open-mmlab/mmrazor) and [MMDeploy](https://github.com/open-mmlab/mmdeploy) teams.
+xTuner is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](https://github.com/open-mmlab/mmrazor) and [MMDeploy](https://github.com/open-mmlab/mmdeploy) teams.
 
 - **Efficiency**: Support LLM fine-tuning on consumer-grade GPUs. The minimum GPU memory required for 7B LLM fine-tuning is only 15GB, indicating that users can leverage the free resource, *e.g.*, Colab, to fine-tune their custom LLM models. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1yzGeYXayLomNQjLD4vC6wgUHvei3ezt4?usp=sharing)
 - **Versatile**: Support various **LLMs** ([InternLM](https://github.com/InternLM/InternLM), [Llama2](https://github.com/facebookresearch/llama), [Qwen](https://github.com/QwenLM/Qwen-7B), [Baichuan](https://github.com/baichuan-inc)), **datasets** ([MOSS_003_SFT](https://huggingface.co/datasets/fnlp/moss-003-sft-data), [Arxiv GenTitle](https://github.com/WangRongsheng/ChatGenTitle), [OpenOrca](https://huggingface.co/datasets/Open-Orca/OpenOrca), [Alpaca](https://huggingface.co/datasets/tatsu-lab/alpaca), [oasst1](https://huggingface.co/datasets/timdettmers/openassistant-guanaco), [Chinese Medical Dialogue](https://github.com/Toyhom/Chinese-medical-dialogue-data/)) and **algorithms** ([QLoRA](http://arxiv.org/abs/2305.14314), [LoRA](http://arxiv.org/abs/2106.09685)), allowing users to choose the most suitable solution for their requirements.
@@ -102,11 +100,11 @@ MMChat is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](
 Below are quick steps for installation:
 
 ```shell
-conda create -n mmchat python=3.10
-conda activate mmchat
-git clone XXX
-cd MMChat
-pip install -v -e .
+conda create -n xtuner python=3.10
+conda activate xtuner
+git clone https://github.com/InternLM/xtuner.git
+cd xtuner
+pip install -e .
 ```
 
 ### Chat [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](<>)
@@ -128,7 +126,7 @@ pip install -v -e .
 </tr>
 </table>
 
-MMChat provides the tools to chat with pretrained / fine-tuned LLMs.
+xTuner provides the tools to chat with pretrained / fine-tuned LLMs.
 
 - For example, we can start the chat with Llama2-7B-Plugins by
 
@@ -140,7 +138,7 @@ For more usages, please see [chat.md](./docs/en/chat.md).
 
 ### Fine-tune [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1yzGeYXayLomNQjLD4vC6wgUHvei3ezt4?usp=sharing)
 
-MMChat supports the efficient fine-tune (*e.g.*, QLoRA) for LLMs.
+xTuner supports the efficient fine-tune (*e.g.*, QLoRA) for LLMs.
 
 - For example, we can start the QLoRA fine-tuning of InternLM-7B with oasst1 dataset by
 
@@ -193,7 +191,7 @@ For more usages, please see [finetune.md](./docs/en/finetune.md).
 
 ## 🤝 Contributing
 
-We appreciate all contributions to XXX. Please refer to [CONTRIBUTING.md](.github/CONTRIBUTING.md) for the contributing guideline.
+We appreciate all contributions to xTuner. Please refer to [CONTRIBUTING.md](.github/CONTRIBUTING.md) for the contributing guideline.
 
 ## 🎖️ Acknowledgement
 
