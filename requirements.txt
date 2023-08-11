@@ -1,5 +1,5 @@
 beautifulsoup4
-bitsandbytes
+bitsandbytes>=0.40.0
 datasets
 fasttext
 mmengine>=0.8.0
