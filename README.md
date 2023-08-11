@@ -161,7 +161,7 @@ For more usages, please see [finetune.md](./docs/en/finetune.md).
   		${PATH_TO_PTH_ADAPTER} \
   		${SAVE_PATH_TO_HF_ADAPTER}
   ```
-  or, directly merge adapter to pretrained LLM, by
+  or, directly merge pth adapter to pretrained LLM, by
 
   ```shell
   python ./tools/model_converters/merge_adapter.py \
