@@ -23,7 +23,7 @@ def parse_args():
     parser.add_argument('--command-stop-word', default=None, help='Stop key')
     parser.add_argument('--answer-stop-word', default=None, help='Stop key')
     parser.add_argument(
-        '--prompt',
+        '--prompt-template',
         choices=PROMPT_TEMPLATE.keys(),
         default=None,
         help='Specify a prompt option')
@@ -126,8 +126,8 @@ def main():
 
         if text == 'exit':
             exit(0)
-        if args.prompt is not None:
-            template = PROMPT_TEMPLATE[args.prompt]
+        if args.prompt_template is not None:
+            template = PROMPT_TEMPLATE[args.prompt_template]
             if 'INSTRUCTION_START' in template and n_turn == 0:
                 prompt_text = template['INSTRUCTION_START'].format(
                     input=text, **cfg)
