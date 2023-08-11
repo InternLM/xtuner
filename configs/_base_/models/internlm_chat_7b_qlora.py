@@ -4,7 +4,7 @@ from peft import LoraConfig
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           BitsAndBytesConfig)
 
-from mmchat.models import SupervisedFinetune
+from xtuner.models import SupervisedFinetune
 
 pretrained_model_name_or_path = 'internlm/internlm-chat-7b'
 

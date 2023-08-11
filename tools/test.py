@@ -6,12 +6,12 @@ import os.path as osp
 from mmengine.config import Config, DictAction
 from mmengine.runner import Runner
 
-from mmchat.registry import RUNNERS
+from xtuner.registry import RUNNERS
 
 
 # TODO: support fuse_conv_bn and format_only
 def parse_args():
-    parser = argparse.ArgumentParser(description='MMChat test a model')
+    parser = argparse.ArgumentParser(description='xTuner test a model')
     parser.add_argument('config', help='test config file path')
     parser.add_argument('--checkpoint', help='checkpoint file', default=None)
     parser.add_argument(

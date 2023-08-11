@@ -2,7 +2,7 @@
 import copy
 from itertools import chain
 
-from mmchat.utils import IGNORE_INDEX
+from xtuner.utils import IGNORE_INDEX
 
 
 def encode_fn(example, tokenizer, max_length, input_with_labels=True):

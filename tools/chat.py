@@ -7,13 +7,13 @@ from mmengine.config import Config, DictAction
 from transformers import GenerationConfig
 from utils import get_chat_utils, update_stop_criteria
 
-from mmchat.registry import MODELS, TOKENIZER
-from mmchat.utils import PROMPT_TEMPLATE
+from xtuner.registry import MODELS, TOKENIZER
+from xtuner.utils import PROMPT_TEMPLATE
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description='MMChat chat with a pretrained model')
+        description='xTuner chat with a pretrained model')
     parser.add_argument('config', help='config file path')
     parser.add_argument('--adapter', default=None, help='adapter model')
     parser.add_argument(

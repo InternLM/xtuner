@@ -8,7 +8,7 @@ from mmengine.logging import print_log
 from rich.console import Console
 from rich.table import Table
 
-from mmchat.registry import METRICS, TOKENIZER
+from xtuner.registry import METRICS, TOKENIZER
 
 
 @METRICS.register_module()
