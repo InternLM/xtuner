@@ -22,17 +22,15 @@ English | [简体中文](README_zh-CN.md)
 
 MMChat is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](https://github.com/open-mmlab/mmrazor) and [MMDeploy](https://github.com/open-mmlab/mmdeploy) teams.
 
-- **Efficiency**: Support the LLM fine-tuning on consumer-grade GPUs.
-- **Versatile**: Support various LLMs, datasets and algorithms, allowing users to choose the most suitable solution for their requirements.
+- **Efficiency**: Support LLM fine-tuning on consumer-grade GPUs. The minimum GPU memory required for 7B LLM fine-tuning is only 15GB, indicating that users can leverage the free resource, *e.g.*, Colab, to fine-tune their custom LLM models. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1yzGeYXayLomNQjLD4vC6wgUHvei3ezt4?usp=sharing)
+- **Versatile**: Support various **LLMs** ([InternLM](https://github.com/InternLM/InternLM), [Llama2](https://github.com/facebookresearch/llama), [Qwen](https://github.com/QwenLM/Qwen-7B), [Baichuan](https://github.com/baichuan-inc)), **datasets** ([MOSS_003_SFT](https://huggingface.co/datasets/fnlp/moss-003-sft-data), [Arxiv GenTitle](https://github.com/WangRongsheng/ChatGenTitle), [OpenOrca](https://huggingface.co/datasets/Open-Orca/OpenOrca), [Alpaca](https://huggingface.co/datasets/tatsu-lab/alpaca), [oasst1](https://huggingface.co/datasets/timdettmers/openassistant-guanaco), [Chinese Medical Dialogue](https://github.com/Toyhom/Chinese-medical-dialogue-data/)) and **algorithms** ([QLoRA](http://arxiv.org/abs/2305.14314), [LoRA](http://arxiv.org/abs/2106.09685)), allowing users to choose the most suitable solution for their requirements.
 - **Compatibility**: Compatible with [DeepSpeed](https://github.com/microsoft/DeepSpeed) and the [HuggingFace](https://huggingface.co) training pipeline, enabling effortless integration and utilization.
-
-> 💥 [MMRazor](https://github.com/open-mmlab/mmrazor) and [MMDeploy](https://github.com/open-mmlab/mmdeploy) teams have also collaborated in developing [LMDeploy](https://github.com/InternLM/lmdeploy), a toolkit for for compressing, deploying, and serving LLM. Welcome to subscribe to stay updated with our latest developments.
 
 ## 🌟 Demos
 
 - QLoRA fine-tune for InternLM-7B [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1yzGeYXayLomNQjLD4vC6wgUHvei3ezt4?usp=sharing)
 - Chat with Llama2-7B-Plugins [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](<>)
-- Use MMChat in HuggingFace training pipeline [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1eBI9yiOkX-t7P-0-t9vS8y1x5KmWrkoU?usp=sharing)
+- Inheriting xTuner into HuggingFace's pipeline [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1eBI9yiOkX-t7P-0-t9vS8y1x5KmWrkoU?usp=sharing)
 
 ## 🔥 Supports
 
@@ -43,10 +41,10 @@ MMChat is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](
   <b>Models</b>
 </td>
 <td>
-  <b>Datasets</b>
+  <b>SFT Datasets</b>
 </td>
 <td>
-  <b>Strategies</b>
+  <b>Parallel Strategies</b>
 </td>
  <td>
   <b>Algorithms</b>
@@ -87,9 +85,9 @@ MMChat is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](
 </td>
 <td>
 <ul>
-  <li>Full parameter fine-tune</li>
-  <li><a href="http://arxiv.org/abs/2106.09685">LoRA</a></li>
   <li><a href="http://arxiv.org/abs/2305.14314">QLoRA</a></li>
+  <li><a href="http://arxiv.org/abs/2106.09685">LoRA</a></li>
+  <li>Full parameter fine-tune</li>
   <li>...</li>
 </ul>
 </td>
@@ -144,8 +142,6 @@ For more usages, please see [chat.md](./docs/en/chat.md).
 
 MMChat supports the efficient fine-tune (*e.g.*, QLoRA) for LLMs.
 
-Taking the QLoRA fine-tuning  as an example, we can start it by
-
 - For example, we can start the QLoRA fine-tuning of InternLM-7B with oasst1 dataset by
 
   ```shell
@@ -167,21 +163,20 @@ For more usages, please see [finetune.md](./docs/en/finetune.md).
   		${PATH_TO_PTH_ADAPTER} \
   		${SAVE_PATH_TO_HF_ADAPTER}
   ```
-
-- **Step 1**, merge the HuggingFace adapter to the pretrained LLM, by
+  or, directly merge adapter to pretrained LLM, by
 
   ```shell
-  python ./tools/model_converters/merge_lora_hf.py \
-      ${NAME_OR_PATH_TO_HF_MODEL} \
-      ${NAME_OR_PATH_TO_HF_ADAPTER} \
-      ${SAVE_PATH}
+  python ./tools/model_converters/merge_adapter.py \
+      ${CONFIG_FILE} \
+      ${PATH_TO_PTH_ADAPTER} \
+      ${SAVE_PATH_TO_MERGED_LLM}
   ```
 
-- **Step 2**, deploy the merged LLM with any other framework, such as [LMDeploy](https://github.com/InternLM/lmdeploy) 🚀.
+- **Step 1**, deploy the merged LLM with any other framework, such as [LMDeploy](https://github.com/InternLM/lmdeploy) 🚀.
 
   ```shell
   pip install lmdeploy
-  python -m lmdeploy.pytorch.chat ${NAME_OR_PATH_TO_HF_MODEL} \
+  python -m lmdeploy.pytorch.chat ${NAME_OR_PATH_TO_LLM} \
       --max_new_tokens 256 \
       --temperture 0.8 \
       --top_p 0.95 \
