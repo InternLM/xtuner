@@ -172,7 +172,7 @@ For more usages, please see [finetune.md](./docs/en/finetune.md).
       --max-shard-size 2GB
   ```
 
-- **Step 1**, deploy the merged LLM with any other framework, such as [LMDeploy](https://github.com/InternLM/lmdeploy) 🚀.
+- **Step 1**, deploy fine-tuned LLM with any other framework, such as [LMDeploy](https://github.com/InternLM/lmdeploy) 🚀.
 
   ```shell
   pip install lmdeploy
