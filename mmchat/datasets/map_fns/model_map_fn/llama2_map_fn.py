@@ -10,7 +10,11 @@ def llama2_map_fn(example):
         'or illegal content. Please ensure that your responses are socially ' \
         'unbiased and positive in nature.'
 
-    instruction = example.get('input', '')
-    prompt = f'{B_INST} {B_SYS} {DEFAULT_SYSTEM_PROMPT} {E_SYS}' \
-             f'{instruction} {E_INST}'
-    return {'input': prompt}
+    instructions = example.get('input', [''])
+    if isinstance(instructions, str):
+        instructions = [instructions]
+    prompts = [
+        f'{B_INST} {B_SYS} {DEFAULT_SYSTEM_PROMPT} {E_SYS}'
+        f'{instruction} {E_INST}' for instruction in instructions
+    ]
+    return {'input': prompts}

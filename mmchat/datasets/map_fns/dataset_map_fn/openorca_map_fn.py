@@ -5,4 +5,7 @@ def openorca_map_fn(example):
               '### Instruction:\n{question}\n\n'
               '### Response: ')
 
-    return {'input': PROMPT.format(**example), 'output': example['response']}
+    return {
+        'input': [PROMPT.format(**example)],
+        'output': [example['response']]
+    }

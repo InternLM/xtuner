@@ -18,6 +18,9 @@ def alpaca_map_fn(example):
     else:
         prompt_template = PROMPT['without_input']
     if example.get('output', '') == '<nooutput>':
-        return {'input': '', 'output': ''}
+        return {'input': [''], 'output': ['']}
     else:
-        return {'input': prompt_template.format(**example)}
+        return {
+            'input': [prompt_template.format(**example)],
+            'output': [example['output']],
+        }

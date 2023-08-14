@@ -4,6 +4,11 @@ def internlm_map_fn(example):
     eoh = '<eoh>'
     eoa = '<eoa>'  # noqa:F841
     assistant = '<|Bot|>'
-    instruction = example.get('input', '')
-    prompt = f'<BOS>{user}:{instruction}{eoh}\n{assistant}:'
-    return {'input': prompt}
+    instructions = example.get('input', [''])
+    if isinstance(instructions, str):
+        instructions = [instructions]
+    prompts = [
+        f'<BOS>{user}:{instruction}{eoh}\n{assistant}:'
+        for instruction in instructions
+    ]
+    return {'input': prompts}
