@@ -12,6 +12,7 @@ from peft import PeftType, get_peft_model, prepare_model_for_kbit_training
 from torch import nn
 
 from mmchat.registry import LLM, MODELS, TOKENIZER
+from .utils import dispatch_fast_forward
 
 
 def traverse_dict(d):
@@ -93,6 +94,8 @@ class SupervisedFinetune(BaseModel):
         self.use_lora = lora is not None
         if self.use_lora:
             self._prepare_for_lora(peft_model)
+
+        dispatch_fast_forward(self.llm)
 
         self._is_init = True
 
