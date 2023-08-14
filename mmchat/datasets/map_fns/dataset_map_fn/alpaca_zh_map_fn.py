@@ -19,6 +19,8 @@ def alpaca_zh_map_fn(example):
         prompt_template = PROMPT['without_input']
 
     return {
-        'input': [prompt_template.format(**example)],
-        'output': [example['output_zh']]
+        'conversation': [{
+            'input': prompt_template.format(**example),
+            'output': example['output_zh']
+        }]
     }

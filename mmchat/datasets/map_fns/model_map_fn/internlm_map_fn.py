@@ -4,11 +4,9 @@ def internlm_map_fn(example):
     eoh = '<eoh>'
     eoa = '<eoa>'  # noqa:F841
     assistant = '<|Bot|>'
-    instructions = example.get('input', [''])
-    if isinstance(instructions, str):
-        instructions = [instructions]
-    prompts = [
-        f'<BOS>{user}:{instruction}{eoh}\n{assistant}:'
-        for instruction in instructions
-    ]
-    return {'input': prompts}
+    conversation = example.get('conversation', [])
+    for single_turn_conversation in conversation:
+        input = single_turn_conversation['input']
+        single_turn_conversation[
+            'input'] = f'<BOS>{user}:{input}{eoh}\n{assistant}:'
+    return {'conversation': conversation}

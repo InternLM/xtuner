@@ -6,6 +6,8 @@ def openorca_map_fn(example):
               '### Response: ')
 
     return {
-        'input': [PROMPT.format(**example)],
-        'output': [example['response']]
+        'conversation': [{
+            'input': PROMPT.format(**example),
+            'output': example['response']
+        }]
     }
