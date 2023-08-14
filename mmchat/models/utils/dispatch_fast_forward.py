@@ -12,7 +12,7 @@ def dispatch_llama_attn_forward(model):
     if digit_version(torch.__version__) < digit_version('2.0.0'):
         # flash attention is only supported after pytorch2.0
         return
-    print_log('dispatch llama attn forward')
+    print_log('dispatch llama attn forward', 'current')
     warnings.warn(
         'Due to the implementation of the PyTorch version of '
         'flash attention, even when the `output_attentions` flag is set to '
