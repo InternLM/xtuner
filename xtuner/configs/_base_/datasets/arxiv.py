@@ -28,7 +28,7 @@ arxiv_dataset = dict(
         'doi', 'report-no', 'categories', 'license', 'abstract', 'versions',
         'update_date', 'authors_parsed'
     ],
-    concat_to_max_length=True)
+    pack_to_max_length=True)
 
 train_dataloader = dict(
     batch_size=1,

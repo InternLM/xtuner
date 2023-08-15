@@ -12,7 +12,7 @@ alpaca = dict(
     max_length=2048,
     map_fn=alpaca_map_fn,
     remove_columns=['instruction', 'text'],
-    concat_to_max_length=True)
+    pack_to_max_length=True)
 
 train_dataloader = dict(
     batch_size=1,

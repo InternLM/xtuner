@@ -11,7 +11,7 @@ oasst1 = dict(
     tokenizer=None,
     max_length=2048,
     map_fn=oasst1_instruction_tuning_map_fn,
-    concat_to_max_length=True)
+    pack_to_max_length=True)
 
 train_dataloader = dict(
     batch_size=1,

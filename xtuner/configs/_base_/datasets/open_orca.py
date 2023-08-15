@@ -12,7 +12,7 @@ orca = dict(
     max_length=2048,
     map_fn=openorca_map_fn,
     remove_columns=['id', 'system_prompt', 'question', 'response'],
-    concat_to_max_length=True)
+    pack_to_max_length=True)
 
 train_dataloader = dict(
     batch_size=1,

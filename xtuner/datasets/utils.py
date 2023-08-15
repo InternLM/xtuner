@@ -68,7 +68,7 @@ def encode_fn(example, tokenizer, max_length, input_with_labels=True):
     return {'input_ids': input_ids, 'labels': labels}
 
 
-class Concatenator:
+class Packer:
     # modified from
     # https://github.com/facebookresearch/llama-recipes/blob/main/ft_datasets/utils.py
 
