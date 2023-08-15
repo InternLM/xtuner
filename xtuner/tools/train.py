@@ -17,6 +17,11 @@ def parse_args():
     parser.add_argument('config', help='config file name or path')
     parser.add_argument('--work-dir', help='the dir to save logs and models')
     parser.add_argument(
+        '--deepspeed',
+        type=str,
+        default=None,
+        help='the path to the .json file for deepspeed')
+    parser.add_argument(
         '--amp',
         action='store_true',
         default=False,
@@ -97,6 +102,32 @@ def main():
                 f'`OptimWrapper` but got {optim_wrapper}.')
             cfg.optim_wrapper.type = 'AmpOptimWrapper'
             cfg.optim_wrapper.loss_scale = 'dynamic'
+    
+    if args.deepspeed:
+        optim_wrapper = cfg.optim_wrapper.type
+        from mmengine.optim import DeepSpeedOptimWrapper
+        if optim_wrapper == DeepSpeedOptimWrapper:
+            print_log(
+                'Deepspeed training is already enabled in your config.',
+                logger='current',
+                level=logging.WARNING)
+        else:
+            assert optim_wrapper == OptimWrapper, (
+                '`--deepspeed` is only supported when the optimizer wrapper '
+                f'type is `OptimWrapper` but got {optim_wrapper}.')
+            optimizer = cfg.optim_wrapper.optimizer
+            gradient_clipping = 1.0
+            if cfg.optim_wrapper.clip_grad.type == 'value':
+                gradient_clipping = cfg.optim_wrapper.clip_grad.clip_value
+            optim_wrapper = dict(type='DeepSpeedOptimWrapper',
+                                 optimizer=optimizer)
+            cfg.__setitem__('optim_wrapper', optim_wrapper)
+            
+            strategy = dict(type='DeepSpeedStrategy',
+                            config=args.deepspeed,
+                            gradient_clipping=gradient_clipping)
+            cfg.__setitem__('strategy', strategy)
+            cfg.runner_type = 'FlexibleRunner'
 
     # enable automatically scaling LR
     if args.auto_scale_lr:
