@@ -10,7 +10,7 @@ from peft import LoraConfig
 from tqdm import tqdm
 from transformers import AutoTokenizer, BitsAndBytesConfig
 
-from mmchat.models import SupervisedFinetune
+from xtuner.models import SupervisedFinetune
 
 
 def get_argument_parser():
@@ -23,7 +23,7 @@ def get_argument_parser():
         '--dataset_cfg_path',
         type=str,
         default='../configs/_base_/datasets/alpaca.py',
-        help='Path to mmchat dataset config')
+        help='Path to xtuner dataset config')
     parser.add_argument(
         '--deepspeed_config',
         type=str,

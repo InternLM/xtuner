@@ -1,13 +1,11 @@
-# MMChat
-
 <div align="center">
 
-[![docs](https://readthedocs.org/projects/opencompass/badge)](https://opencompass.readthedocs.io/en)
-[![license](https://img.shields.io/github/license/InternLM/opencompass.svg)](https://github.com/InternLM/opencompass/blob/main/LICENSE)
+[![docs](https://readthedocs.org/projects/xtuner/badge)](https://xtuner.readthedocs.io/en)
+[![license](https://img.shields.io/github/license/InternLM/xtuner.svg)](https://github.com/InternLM/xtuner/blob/main/LICENSE)
 [![PyPI](https://badge.fury.io/py/opencompass.svg)](https://pypi.org/project/opencompass/)
 
-[📘 Documentation](https://opencompass.readthedocs.io/en/latest/) |
-[🤔 Reporting Issues](https://github.com/InternLM/opencompass/issues/new/choose) |
+[📘 Documentation](https://xtuner.readthedocs.io/en/latest/) |
+[🤔 Reporting Issues](https://github.com/InternLM/xtuner/issues/new/choose) |
 [⚙️ Model Zoo](<>)
 
 English | [简体中文](README_zh-CN.md)
@@ -16,23 +14,21 @@ English | [简体中文](README_zh-CN.md)
 
 ## 📣 News
 
-- **\[2023.08.xx\]** We release XXX, with multiple fine-tuned adapters.
+- **\[2023.08.xx\]** We release xTuner, with multiple fine-tuned adapters.
 
 ## 📖 Introduction
 
-MMChat is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](https://github.com/open-mmlab/mmrazor) and [MMDeploy](https://github.com/open-mmlab/mmdeploy) teams.
+xTuner is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](https://github.com/open-mmlab/mmrazor) and [MMDeploy](https://github.com/open-mmlab/mmdeploy) teams.
 
-- **Efficiency**: Support the LLM fine-tuning on consumer-grade GPUs.
-- **Versatile**: Support various LLMs, datasets and algorithms, allowing users to choose the most suitable solution for their requirements.
+- **Efficiency**: Support LLM fine-tuning on consumer-grade GPUs. The minimum GPU memory required for 7B LLM fine-tuning is only 15GB, indicating that users can leverage the free resource, *e.g.*, Colab, to fine-tune their custom LLM models.
+- **Versatile**: Support various **LLMs** ([InternLM](https://github.com/InternLM/InternLM), [Llama2](https://github.com/facebookresearch/llama), [Qwen](https://github.com/QwenLM/Qwen-7B), [Baichuan](https://github.com/baichuan-inc)), **datasets** ([MOSS_003_SFT](https://huggingface.co/datasets/fnlp/moss-003-sft-data), [Arxiv GenTitle](https://github.com/WangRongsheng/ChatGenTitle), [OpenOrca](https://huggingface.co/datasets/Open-Orca/OpenOrca), [Alpaca](https://huggingface.co/datasets/tatsu-lab/alpaca), [oasst1](https://huggingface.co/datasets/timdettmers/openassistant-guanaco), [Chinese Medical Dialogue](https://github.com/Toyhom/Chinese-medical-dialogue-data/)) and **algorithms** ([QLoRA](http://arxiv.org/abs/2305.14314), [LoRA](http://arxiv.org/abs/2106.09685)), allowing users to choose the most suitable solution for their requirements.
 - **Compatibility**: Compatible with [DeepSpeed](https://github.com/microsoft/DeepSpeed) and the [HuggingFace](https://huggingface.co) training pipeline, enabling effortless integration and utilization.
-
-> 💥 [MMRazor](https://github.com/open-mmlab/mmrazor) and [MMDeploy](https://github.com/open-mmlab/mmdeploy) teams have also collaborated in developing [LMDeploy](https://github.com/InternLM/lmdeploy), a toolkit for for compressing, deploying, and serving LLM. Welcome to subscribe to stay updated with our latest developments.
 
 ## 🌟 Demos
 
 - QLoRA fine-tune for InternLM-7B [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1yzGeYXayLomNQjLD4vC6wgUHvei3ezt4?usp=sharing)
 - Chat with Llama2-7B-Plugins [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](<>)
-- Use MMChat in HuggingFace training pipeline [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1eBI9yiOkX-t7P-0-t9vS8y1x5KmWrkoU?usp=sharing)
+- Integrate xTuner into HuggingFace's pipeline [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1eBI9yiOkX-t7P-0-t9vS8y1x5KmWrkoU?usp=sharing)
 
 ## 🔥 Supports
 
@@ -43,10 +39,10 @@ MMChat is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](
   <b>Models</b>
 </td>
 <td>
-  <b>Datasets</b>
+  <b>SFT Datasets</b>
 </td>
 <td>
-  <b>Strategies</b>
+  <b>Parallel Strategies</b>
 </td>
  <td>
   <b>Algorithms</b>
@@ -87,9 +83,9 @@ MMChat is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](
 </td>
 <td>
 <ul>
-  <li>Full parameter fine-tune</li>
-  <li><a href="http://arxiv.org/abs/2106.09685">LoRA</a></li>
   <li><a href="http://arxiv.org/abs/2305.14314">QLoRA</a></li>
+  <li><a href="http://arxiv.org/abs/2106.09685">LoRA</a></li>
+  <li>Full parameter fine-tune</li>
   <li>...</li>
 </ul>
 </td>
@@ -104,11 +100,11 @@ MMChat is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](
 Below are quick steps for installation:
 
 ```shell
-conda create -n mmchat python=3.10
-conda activate mmchat
-git clone XXX
-cd MMChat
-pip install -v -e .
+conda create -n xtuner python=3.10
+conda activate xtuner
+git clone https://github.com/InternLM/xtuner.git
+cd xtuner
+pip install -e .
 ```
 
 ### Chat [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](<>)
@@ -130,21 +126,19 @@ pip install -v -e .
 </tr>
 </table>
 
-MMChat provides the tools to chat with pretrained / fine-tuned LLMs.
+xTuner provides the tools to chat with pretrained / fine-tuned LLMs.
 
 - For example, we can start the chat with Llama2-7B-Plugins by
 
   ```shell
-  python ./tools/chat_hf.py meta-llama/Llama-2-7b-hf --adapter XXX --bot-name Llama2 --prompt plugins --with-plugins --command-stop-word "<eoc>" --answer-stop-word "<eom>" --no-streamer
+  python ./tools/chat_hf.py meta-llama/Llama-2-7b-hf --adapter XXX --bot-name Llama2 --prompt-template plugins --with-plugins --command-stop-word "<eoc>" --answer-stop-word "<eom>" --no-streamer
   ```
 
 For more usages, please see [chat.md](./docs/en/chat.md).
 
 ### Fine-tune [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1yzGeYXayLomNQjLD4vC6wgUHvei3ezt4?usp=sharing)
 
-MMChat supports the efficient fine-tune (*e.g.*, QLoRA) for LLMs.
-
-Taking the QLoRA fine-tuning  as an example, we can start it by
+xTuner supports the efficient fine-tune (*e.g.*, QLoRA) for LLMs.
 
 - For example, we can start the QLoRA fine-tuning of InternLM-7B with oasst1 dataset by
 
@@ -168,20 +162,21 @@ For more usages, please see [finetune.md](./docs/en/finetune.md).
   		${SAVE_PATH_TO_HF_ADAPTER}
   ```
 
-- **Step 1**, merge the HuggingFace adapter to the pretrained LLM, by
+  or, directly merge pth adapter to pretrained LLM, by
 
   ```shell
-  python ./tools/model_converters/merge_lora_hf.py \
-      ${NAME_OR_PATH_TO_HF_MODEL} \
-      ${NAME_OR_PATH_TO_HF_ADAPTER} \
-      ${SAVE_PATH}
+  python ./tools/model_converters/merge_adapter.py \
+      ${CONFIG_FILE} \
+      ${PATH_TO_PTH_ADAPTER} \
+      ${SAVE_PATH_TO_MERGED_LLM} \
+      --max-shard-size 2GB
   ```
 
-- **Step 2**, deploy the merged LLM with any other framework, such as [LMDeploy](https://github.com/InternLM/lmdeploy) 🚀.
+- **Step 1**, deploy fine-tuned LLM with any other framework, such as [LMDeploy](https://github.com/InternLM/lmdeploy) 🚀.
 
   ```shell
   pip install lmdeploy
-  python -m lmdeploy.pytorch.chat ${NAME_OR_PATH_TO_HF_MODEL} \
+  python -m lmdeploy.pytorch.chat ${NAME_OR_PATH_TO_LLM} \
       --max_new_tokens 256 \
       --temperture 0.8 \
       --top_p 0.95 \
@@ -198,7 +193,7 @@ For more usages, please see [finetune.md](./docs/en/finetune.md).
 
 ## 🤝 Contributing
 
-We appreciate all contributions to XXX. Please refer to [CONTRIBUTING.md](.github/CONTRIBUTING.md) for the contributing guideline.
+We appreciate all contributions to xTuner. Please refer to [CONTRIBUTING.md](.github/CONTRIBUTING.md) for the contributing guideline.
 
 ## 🎖️ Acknowledgement
 

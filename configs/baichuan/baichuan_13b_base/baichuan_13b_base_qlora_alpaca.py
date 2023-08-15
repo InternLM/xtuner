@@ -1,7 +1,7 @@
 from mmengine.config import read_base
 
-from mmchat.engine import LogSampleHook, SampleGenerateHook
-from mmchat.utils import PROMPT_TEMPLATE
+from xtuner.engine import LogSampleHook, SampleGenerateHook
+from xtuner.utils import PROMPT_TEMPLATE
 
 with read_base():
     from ..._base_.datasets.alpaca_enzh import *  # noqa: F401,F403

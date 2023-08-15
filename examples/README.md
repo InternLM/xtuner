@@ -1,4 +1,4 @@
-# How to use MMChat in HuggingFace & DeepSpeed training pipelines
+# How to use xTuner in HuggingFace & DeepSpeed training pipelines
 
 ## Quick run
 
@@ -12,10 +12,10 @@
 
    ```shell
    # HuggingFace training pipeline
-   bash run_train_alpaca-qlora_with_mmchat_hf.sh
+   bash run_train_alpaca-qlora_with_xtuner_hf.sh
 
    # DeepSpeed training pipeline
-   bash run_train_alpaca-qlora_with_mmchat_deepspeed.sh
+   bash run_train_alpaca-qlora_with_xtuner_deepspeed.sh
    ```
 
 3. (optional) whether to use `qlora` / `lora` or not
@@ -38,13 +38,13 @@
 
 ## Training pipeline
 
-If you want to use mmchat for efficient finetuning in your original training pipelines, you just need to change the implement of building `model` and `dataloader`, reserve other parts. Thus you can quickly fine-tune various models with various datasets by changing the relevant configs.
+If you want to use xtuner for efficient finetuning in your original training pipelines, you just need to change the implement of building `model` and `dataloader`, reserve other parts. Thus you can quickly fine-tune various models with various datasets by changing the relevant configs.
 
-## How to build model with MMChat for QLoRA
+## How to build model with xTuner for QLoRA
 
 ```python
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
-from mmchat.models import SupervisedFinetune
+from xtuner.models import SupervisedFinetune
 
 model_name_or_path = 'internlm/internlm-7b'
 
@@ -75,7 +75,7 @@ llm = AutoModelForCausalLM.from_pretrained(
     trust_remote_code=True
 )
 
-# build model with MMChat
+# build model with xTuner
 model = SupervisedFinetune(llm=llm, lora=lora_config, tokenizer=tokenizer)
 
 ```

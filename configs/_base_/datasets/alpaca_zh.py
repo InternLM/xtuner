@@ -1,9 +1,9 @@
 from datasets import load_dataset
 from mmengine.dataset import DefaultSampler
 
-from mmchat.datasets import process_hf_dataset
-from mmchat.datasets.collate_fns import default_collate_fn
-from mmchat.datasets.map_fns import alpaca_zh_map_fn
+from xtuner.datasets import process_hf_dataset
+from xtuner.datasets.collate_fns import default_collate_fn
+from xtuner.datasets.map_fns import alpaca_zh_map_fn
 
 alpaca_zh = dict(
     type=process_hf_dataset,

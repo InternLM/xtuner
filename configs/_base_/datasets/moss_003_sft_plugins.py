@@ -1,7 +1,7 @@
 from mmengine.dataset import DefaultSampler
 
-from mmchat.datasets import MOSSSFTDataset
-from mmchat.datasets.collate_fns import default_collate_fn
+from xtuner.datasets import MOSSSFTDataset
+from xtuner.datasets.collate_fns import default_collate_fn
 
 data_root = './data/'
 

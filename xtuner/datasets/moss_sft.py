@@ -9,7 +9,7 @@ from mmengine.logging import print_log
 from torch.utils.data import Dataset
 from tqdm import tqdm
 
-from mmchat.registry import TOKENIZER
+from xtuner.registry import TOKENIZER
 
 
 class MOSSSFTDataset(Dataset):

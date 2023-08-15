@@ -8,7 +8,7 @@ from data_utils import get_train_dataloader
 from peft import LoraConfig
 from transformers import AutoTokenizer, BitsAndBytesConfig, Trainer
 
-from mmchat.models import SupervisedFinetune
+from xtuner.models import SupervisedFinetune
 
 
 @dataclass

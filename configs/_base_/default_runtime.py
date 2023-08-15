@@ -2,7 +2,7 @@ from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
                             LoggerHook, ParamSchedulerHook)
 
 # defaults to use registries in mmpretrain
-default_scope = 'mmchat'
+default_scope = 'xtuner'
 
 # configure default hooks
 default_hooks = dict(
