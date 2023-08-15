@@ -19,15 +19,20 @@ from xtuner.utils import PROMPT_TEMPLATE
 #######################################################################
 #                          STEP 1  Settings                           #
 #######################################################################
+# path
 pretrained_model_name_or_path = 'internlm/internlm-7b'
 data_path = 'timdettmers/openassistant-guanaco'
+# data
 batch_size = 1
-max_epochs = 3
-lr = 2e-4
-weight_decay = 0.01
-max_norm = 1  # grad clip
 accumulative_counts = 16
 dataloader_num_workers = 0
+max_epochs = 3
+# optim
+optim_type = PagedAdamW32bit
+lr = 2e-4
+betas = (0.9, 0.999)
+weight_decay = 0.01
+max_norm = 1  # grad clip
 
 #######################################################################
 #                      STEP 2  Model & Tokenizer                      #
@@ -83,12 +88,11 @@ train_dataloader = dict(
 #######################################################################
 #                            STEP 5  Scheduler                        #
 #######################################################################
-betas = (0.9, 0.999)
 # optimizer
 optim_wrapper = dict(
     type=AmpOptimWrapper,
     optimizer=dict(
-        type=PagedAdamW32bit, lr=lr, betas=betas, weight_decay=weight_decay),
+        type=optim_type, lr=lr, betas=betas, weight_decay=weight_decay),
     clip_grad=dict(max_norm=max_norm, error_if_nonfinite=False),
     accumulative_counts=accumulative_counts,
     loss_scale='dynamic',
