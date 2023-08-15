@@ -35,17 +35,17 @@ CLI_HELP_MSG = \
             xtuner train $CONFIG
         3-2. Fine-tune LLMs by multiple GPUs:
             NNODES=$NNODES NODE_RANK=$NODE_RANK PORT=$PORT xtuner dist_train $CONFIG $GPUS
-        4-1. Chat with LLMs w/ HuggingFace adapter:
+        4-1. Chat with LLMs with HuggingFace's model and adapter:
             xtuner chat hf $NAME_OR_PATH_TO_HF_MODEL --adapter $NAME_OR_PATH_TO_HF_ADAPTER --prompt-template $PROMPT_TEMPLATE
-        4-2. Chat with LLMs w/ xTuner adapter:
+        4-2. Chat with LLMs with xTuner's config and adapter:
             xtuner chat xtuner $CONFIG --adapter $PATH_TO_PTH_ADAPTER --prompt $PROMPT_TEMPLATE
-        5-1. Convert the pth adapter to HuggingFace adapter:
+        5-1. Convert the pth adapter to HuggingFace's adapter:
             xtuner convert adapter_pth2hf $CONFIG $PATH_TO_PTH_ADAPTER $SAVE_PATH_TO_HF_ADAPTER
-        5-2. Merge the HuggingFace adapter to the pretrained LLM:
+        5-2. Merge the HuggingFace's adapter to the pretrained LLM:
             xtuner convert merge_adapter_hf $NAME_OR_PATH_TO_HF_MODEL $NAME_OR_PATH_TO_HF_ADAPTER $SAVE_PATH
-        5-3. Merge the xTuner adapter to the pretraiend LLM:
+        5-3. Merge the xTuner's adapter to the pretraiend LLM:
             xtuner convert merge_adapter $CONFIG $NAME_OR_PATH_TO_HF_ADAPTER $SAVE_PATH
-        5-4. Split HuggingFace LLM to the smallest sharded one:
+        5-4. Split HuggingFace's LLM to the smallest sharded one:
             xtuner convert split_hf_llm $NAME_OR_PATH_TO_HF_MODEL $SAVE_PATH
         6-1. Preprocess arxiv dataset:
             xtuner preprocess arxiv $SRC_FILE $DST_FILE --start-date $START_DATE --categories $CATEGORIES
@@ -71,13 +71,14 @@ CONVERT_HELP_MSG = \
 
     Some usages for convert: (See more by using -h for specific command!)
 
-        1. Convert the pth adapter to HuggingFace adapter:
+        1. Convert the pth adapter to HuggingFace's adapter:
             xtuner convert adapter_pth2hf $CONFIG $PATH_TO_PTH_ADAPTER $SAVE_PATH_TO_HF_ADAPTER
-        2. Merge the HuggingFace adapter to the pretrained LLM:
+        2. Merge the HuggingFace's adapter to the pretrained LLM:
             xtuner convert merge_adapter_hf $NAME_OR_PATH_TO_HF_MODEL $NAME_OR_PATH_TO_HF_ADAPTER $SAVE_PATH
-        3. Merge the xTuner adapter to the pretraiend LLM:
+        3. Merge the xTuner's
+        adapter to the pretraiend LLM:
             xtuner convert merge_adapter $CONFIG $NAME_OR_PATH_TO_HF_ADAPTER $SAVE_PATH
-        4. Split HuggingFace LLM to the smallest sharded one:
+        4. Split HuggingFace's LLM to the smallest sharded one:
             xtuner convert split_hf_llm $NAME_OR_PATH_TO_HF_MODEL $SAVE_PATH
 
     GitHub: https://github.com/InternLM/xtuner
@@ -115,9 +116,9 @@ CHAT_HELP_MSG = \
 
     Some usages for chat: (See more by using -h for specific command!)
 
-        1. Chat with LLMs w/ HuggingFace adapter:
+        1. Chat with LLMs with HuggingFace's model and adapter:
             xtuner chat hf $NAME_OR_PATH_TO_HF_MODEL --adapter $NAME_OR_PATH_TO_HF_ADAPTER --prompt-template $PROMPT_TEMPLATE
-        2. Chat with LLMs w/ xTuner adapter:
+        2. Chat with LLMs with xTuner's config and adapter:
             xtuner chat xtuner internlm_7b_qlora_alpaca --adapter $PATH_TO_PTH_ADAPTER --prompt $PROMPT_TEMPLATE
 
     GitHub: https://github.com/InternLM/xtuner
