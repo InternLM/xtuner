@@ -123,7 +123,7 @@ custom_hooks = [
         sample_inputs=[
             '请给我介绍五个上海的景点', 'Please tell me five scenic spots in Shanghai'
         ],
-        instruction=PROMPT_TEMPLATE.alpaca.INSTRUCTION_START)
+        instruction=PROMPT_TEMPLATE.openassistant.INSTRUCTION_START)
 ]
 
 # defaults to use registries in xtuner
