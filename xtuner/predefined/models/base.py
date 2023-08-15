@@ -1,5 +1,4 @@
 import torch
-from mmengine.model import BaseDataPreprocessor
 from peft import LoraConfig
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           BitsAndBytesConfig)
@@ -14,7 +13,6 @@ tokenizer = dict(
 
 model_qlora = dict(
     type=SupervisedFinetune,
-    data_preprocessor=dict(type=BaseDataPreprocessor),
     llm=dict(
         type=AutoModelForCausalLM.from_pretrained,
         pretrained_model_name_or_path=None,
@@ -35,5 +33,4 @@ model_qlora = dict(
         lora_alpha=16,
         lora_dropout=0.1,
         bias='none',
-        task_type='CAUSAL_LM'),
-    tokenizer=tokenizer)
+        task_type='CAUSAL_LM'))

@@ -17,7 +17,6 @@ def baichuan_7b_qlora(llm_kwargs={},
     model_cfg = Config(model_qlora_cfg_dict)
     model_cfg.llm.update(llm_kwargs)
     model_cfg.lora.update(lora_kwargs)
-    model_cfg.tokenizer.update(tokenizer_kwargs)
     model = MODELS.build(model_cfg)
     if return_tokenizer:
         tokenizer_cfg = Config(tokenizer_cfg_dict)
@@ -40,7 +39,6 @@ def baichuan_13b_base_qlora(llm_kwargs={},
     model_cfg = Config(model_qlora_cfg_dict)
     model_cfg.llm.update(llm_kwargs)
     model_cfg.lora.update(lora_kwargs)
-    model_cfg.tokenizer.update(tokenizer_kwargs)
     model = MODELS.build(model_cfg)
     if return_tokenizer:
         tokenizer_cfg = Config(tokenizer_cfg_dict)
@@ -63,7 +61,6 @@ def baichuan_13b_chat_qlora(llm_kwargs={},
     model_cfg = Config(model_qlora_cfg_dict)
     model_cfg.llm.update(llm_kwargs)
     model_cfg.lora.update(lora_kwargs)
-    model_cfg.tokenizer.update(tokenizer_kwargs)
     model = MODELS.build(model_cfg)
     if return_tokenizer:
         tokenizer_cfg = Config(tokenizer_cfg_dict)
