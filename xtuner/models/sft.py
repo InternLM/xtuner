@@ -71,19 +71,15 @@ def find_all_linear_names(model):
 
 class SupervisedFinetune(BaseModel):
 
-    def __init__(self,
-                 llm,
-                 data_preprocessor=None,
-                 tokenizer=None,
-                 lora=None,
-                 peft_model=None):
-        super().__init__(data_preprocessor)
+    def __init__(self, llm, tokenizer=None, lora=None, peft_model=None):
+        super().__init__()
         self.llm = self._build_from_cfg_or_module(llm, LLM)
         self.llm.config.use_cache = False
-        if isinstance(tokenizer, dict) or isinstance(
-                tokenizer, Config) or isinstance(tokenizer, ConfigDict):
-            tokenizer = TOKENIZER.build(tokenizer)
-        smart_tokenizer_and_embedding_resize(tokenizer, self.llm)
+        if tokenizer is not None:
+            if isinstance(tokenizer, dict) or isinstance(
+                    tokenizer, Config) or isinstance(tokenizer, ConfigDict):
+                tokenizer = TOKENIZER.build(tokenizer)
+            smart_tokenizer_and_embedding_resize(tokenizer, self.llm)
 
         if isinstance(lora, dict) or isinstance(lora, Config) or isinstance(
                 lora, ConfigDict):
