@@ -7,9 +7,9 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='Merge a lora to model')
+    parser = argparse.ArgumentParser(description='Merge a hf adapter to model')
     parser.add_argument('model_name_or_path', help='model name or path')
-    parser.add_argument('lora_name_or_path', help='lora name or path')
+    parser.add_argument('adapter_name_or_path', help='adapter name or path')
     parser.add_argument(
         'save_dir', help='the directory to save the merged model')
     parser.add_argument('--max-shard-size', type=str, default='2GB')
@@ -29,7 +29,7 @@ def main():
         args.model_name_or_path, trust_remote_code=True)
     model_unmerged = PeftModel.from_pretrained(
         model,
-        args.lora_name_or_path,
+        args.adapter_name_or_path,
         device_map='cpu',
         torch_dtype=torch.float16,
         is_trainable=False)

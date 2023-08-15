@@ -1,20 +1,20 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import argparse
-import os
 
 import torch
 from mmengine.config import Config, DictAction
-from mmengine.utils import mkdir_or_exist
 
-from xtuner.registry import MODELS
+from xtuner.registry import MODELS, TOKENIZER
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='xTuner test a model')
-    parser.add_argument('config', help='test config file path')
+    parser = argparse.ArgumentParser(
+        description='Merge a pth adapter to model')
+    parser.add_argument('config', help='config file path')
     parser.add_argument('adapter_checkpoint', help='adapter checkpoint file')
     parser.add_argument(
-        'save_dir', help='the directory to save the checkpoint')
+        'save_dir', help='the directory to save the merged model')
+    parser.add_argument('--max-shard-size', type=str, default='2GB')
     parser.add_argument(
         '--cfg-options',
         nargs='+',
@@ -37,23 +37,26 @@ def main():
     if args.cfg_options is not None:
         cfg.merge_from_dict(args.cfg_options)
 
-    # load on cpu
+    # load on cpu, with non-quantized
     cfg.model.llm.device_map = 'cpu'
-    if cfg.model.llm.get('quantization_config'):
-        cfg.model.llm.quantization_config.\
-            llm_int8_enable_fp32_cpu_offload = True
-
+    cfg.model.llm.quantization_config = None
+    cfg.model.llm.low_cpu_mem_usage = True
+    torch_dtype = cfg.model.llm.get('torch_dtype', torch.float16)
     model = MODELS.build(cfg.model)
-
+    tokenizer = TOKENIZER.build(cfg.tokenizer)
     adapter_checkpoint = torch.load(
         args.adapter_checkpoint, map_location='cpu')
     model.load_state_dict(adapter_checkpoint['state_dict'], strict=False)
     print(f'Load adapter from {args.adapter_checkpoint}')
 
-    adapter_path = os.path.join(args.save_dir, 'adapter')
-    mkdir_or_exist(adapter_path)
-    model.llm.save_pretrained(adapter_path)
-    print(f'Save to {adapter_path}')
+    model = model.llm
+    model_merged = model.merge_and_unload()
+    for param in model.parameters():
+        param.data = param.data.to(torch_dtype)
+    model_merged.save_pretrained(
+        args.save_dir, max_shard_size=args.max_shard_size)
+    tokenizer.save_pretrained(args.save_dir)
+    print(f'Save to {args.save_dir}')
 
 
 if __name__ == '__main__':

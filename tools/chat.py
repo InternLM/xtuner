@@ -7,13 +7,13 @@ from mmengine.config import Config, DictAction
 from transformers import GenerationConfig
 from utils import get_chat_utils, update_stop_criteria
 
-from mmchat.registry import MODELS, TOKENIZER
-from mmchat.utils import PROMPT_TEMPLATE
+from xtuner.registry import MODELS, TOKENIZER
+from xtuner.utils import PROMPT_TEMPLATE
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description='MMChat chat with a pretrained model')
+        description='xTuner chat with a pretrained model')
     parser.add_argument('config', help='config file path')
     parser.add_argument('--adapter', default=None, help='adapter model')
     parser.add_argument(
@@ -23,7 +23,7 @@ def parse_args():
     parser.add_argument('--command-stop-word', default=None, help='Stop key')
     parser.add_argument('--answer-stop-word', default=None, help='Stop key')
     parser.add_argument(
-        '--prompt',
+        '--prompt-template',
         choices=PROMPT_TEMPLATE.keys(),
         default=None,
         help='Specify a prompt option')
@@ -126,8 +126,8 @@ def main():
 
         if text == 'exit':
             exit(0)
-        if args.prompt is not None:
-            template = PROMPT_TEMPLATE[args.prompt]
+        if args.prompt_template is not None:
+            template = PROMPT_TEMPLATE[args.prompt_template]
             if 'INSTRUCTION_START' in template and n_turn == 0:
                 prompt_text = template['INSTRUCTION_START'].format(
                     input=text, **cfg)
@@ -152,9 +152,22 @@ def main():
                 generate_output[0][len(ids[0]):])
             if streamer is None:
                 print(generate_output_text, end='')
+            try:
+                calculate_open = re.findall(r'- Calculator: (.+)\.',
+                                            inputs)[0] == 'enabled'
+                solve_open = re.findall(r'- Equation solver: (.+)\.',
+                                        inputs)[0] == 'enabled'
+                search_open = re.findall(r'- Web search: (.+)\.',
+                                         inputs)[0] == 'enabled'
+            except Exception:
+                print(f'Wrong prompt:\n{inputs}')
             pattern = r'<\|Commands\|>:(.*?)<eoc>'
             command_text = ', '.join(re.findall(pattern, generate_output_text))
-            extent_text = plugins_api(command_text)
+            extent_text = plugins_api(
+                command_text,
+                calculate_open=calculate_open,
+                solve_open=solve_open,
+                search_open=search_open)
             print(extent_text, end='')
             extent_text_ids = tokenizer.encode(
                 extent_text,

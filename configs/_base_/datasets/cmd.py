@@ -1,9 +1,9 @@
 from datasets import load_dataset
 from mmengine.dataset import DefaultSampler
 
-from mmchat.datasets import process_hf_dataset
-from mmchat.datasets.collate_fns import default_collate_fn
-from mmchat.datasets.map_fns import cmd_map_fn
+from xtuner.datasets import process_hf_dataset
+from xtuner.datasets.collate_fns import default_collate_fn
+from xtuner.datasets.map_fns import cmd_map_fn
 
 data_url = 'https://github.com/Toyhom/Chinese-medical-dialogue-data/raw/master/Data_数据/'  # noqa: E501
 

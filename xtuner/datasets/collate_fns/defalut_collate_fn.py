@@ -4,7 +4,7 @@ from typing import Dict, Sequence
 import torch
 from torch.nn.utils.rnn import pad_sequence
 
-from mmchat.utils import DEFAULT_PAD_TOKEN_INDEX, IGNORE_INDEX
+from xtuner.utils import DEFAULT_PAD_TOKEN_INDEX, IGNORE_INDEX
 
 
 def default_collate_fn(

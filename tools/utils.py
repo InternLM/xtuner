@@ -6,7 +6,7 @@ from transformers import (PreTrainedTokenizerFast, StoppingCriteria,
                           StoppingCriteriaList)
 from transformers.generation.streamers import BaseStreamer
 
-from mmchat.utils import StopWordStoppingCriteria
+from xtuner.utils import StopWordStoppingCriteria
 
 
 def get_base_model(model):

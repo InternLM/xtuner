@@ -1,5 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-"""mmchat provides 21 registry nodes to support using modules across projects.
+"""xtuner provides 21 registry nodes to support using modules across projects.
 Each node is a child of the root registry in MMEngine.
 
 More details can be found at
@@ -38,145 +38,145 @@ __all__ = [
 ]
 
 #######################################################################
-#                         mmchat.engine                           #
+#                         xtuner.engine                           #
 #######################################################################
 
 # Runners like `EpochBasedRunner` and `IterBasedRunner`
 RUNNERS = Registry(
     'runner',
     parent=MMENGINE_RUNNERS,
-    locations=['mmchat.engine'],
+    locations=['xtuner.engine'],
 )
 # Runner constructors that define how to initialize runners
 RUNNER_CONSTRUCTORS = Registry(
     'runner constructor',
     parent=MMENGINE_RUNNER_CONSTRUCTORS,
-    locations=['mmchat.engine'],
+    locations=['xtuner.engine'],
 )
 # Loops which define the training or test process, like `EpochBasedTrainLoop`
 LOOPS = Registry(
     'loop',
     parent=MMENGINE_LOOPS,
-    locations=['mmchat.engine'],
+    locations=['xtuner.engine'],
 )
 # Hooks to add additional functions during running, like `CheckpointHook`
 HOOKS = Registry(
     'hook',
     parent=MMENGINE_HOOKS,
-    locations=['mmchat.engine'],
+    locations=['xtuner.engine'],
 )
 # Log processors to process the scalar log data.
 LOG_PROCESSORS = Registry(
     'log processor',
     parent=MMENGINE_LOG_PROCESSORS,
-    locations=['mmchat.engine'],
+    locations=['xtuner.engine'],
 )
 # Optimizers to optimize the model weights, like `SGD` and `Adam`.
 OPTIMIZERS = Registry(
     'optimizer',
     parent=MMENGINE_OPTIMIZERS,
-    locations=['mmchat.engine'],
+    locations=['xtuner.engine'],
 )
 # Optimizer wrappers to enhance the optimization process.
 OPTIM_WRAPPERS = Registry(
     'optimizer_wrapper',
     parent=MMENGINE_OPTIM_WRAPPERS,
-    locations=['mmchat.engine'],
+    locations=['xtuner.engine'],
 )
 # Optimizer constructors to customize the hyperparameters of optimizers.
 OPTIM_WRAPPER_CONSTRUCTORS = Registry(
     'optimizer wrapper constructor',
     parent=MMENGINE_OPTIM_WRAPPER_CONSTRUCTORS,
-    locations=['mmchat.engine'],
+    locations=['xtuner.engine'],
 )
 # Parameter schedulers to dynamically adjust optimization parameters.
 PARAM_SCHEDULERS = Registry(
     'parameter scheduler',
     parent=MMENGINE_PARAM_SCHEDULERS,
-    locations=['mmchat.engine'],
+    locations=['xtuner.engine'],
 )
 
 #######################################################################
-#                        mmchat.datasets                          #
+#                        xtuner.datasets                          #
 #######################################################################
 
 # Datasets like `ImageNet` and `CIFAR10`.
 DATASETS = Registry(
     'dataset',
     parent=MMENGINE_DATASETS,
-    locations=['mmchat.datasets'],
+    locations=['xtuner.datasets'],
 )
 # Samplers to sample the dataset.
 DATA_SAMPLERS = Registry(
     'data sampler',
     parent=MMENGINE_DATA_SAMPLERS,
-    locations=['mmchat.datasets'],
+    locations=['xtuner.datasets'],
 )
 # Transforms to process the samples from the dataset.
 TRANSFORMS = Registry(
     'transform',
     parent=MMENGINE_TRANSFORMS,
-    locations=['mmchat.datasets'],
+    locations=['xtuner.datasets'],
 )
 
 #######################################################################
-#                         mmchat.models                           #
+#                         xtuner.models                           #
 #######################################################################
 
 # Neural network modules inheriting `nn.Module`.
 MODELS = Registry(
     'model',
     parent=MMENGINE_MODELS,
-    locations=['mmchat.models'],
+    locations=['xtuner.models'],
 )
 # Model wrappers like 'MMDistributedDataParallel'
 MODEL_WRAPPERS = Registry(
     'model_wrapper',
     parent=MMENGINE_MODEL_WRAPPERS,
-    locations=['mmchat.models'],
+    locations=['xtuner.models'],
 )
 # Weight initialization methods like uniform, xavier.
 WEIGHT_INITIALIZERS = Registry(
     'weight initializer',
     parent=MMENGINE_WEIGHT_INITIALIZERS,
-    locations=['mmchat.models'],
+    locations=['xtuner.models'],
 )
 # Batch augmentations like `Mixup` and `CutMix`.
 BATCH_AUGMENTS = Registry(
     'batch augment',
-    locations=['mmchat.models'],
+    locations=['xtuner.models'],
 )
 # Task-specific modules like anchor generators and box coders
 TASK_UTILS = Registry(
     'task util',
     parent=MMENGINE_TASK_UTILS,
-    locations=['mmchat.models'],
+    locations=['xtuner.models'],
 )
 # Tokenizer to encode sequence
 TOKENIZER = Registry(
     'tokenizer',
-    locations=['mmchat.models'],
+    locations=['xtuner.models'],
 )
 
 # Large Language Model
 LLM = Registry(
     'llm',
-    locations=['mmchat.models'],
+    locations=['xtuner.models'],
 )
 
 #######################################################################
-#                       mmchat.evaluation                         #
+#                       xtuner.evaluation                         #
 #######################################################################
 
 # Metrics to evaluate the model prediction results.
 METRICS = Registry(
     'metric',
     parent=MMENGINE_METRICS,
-    locations=['mmchat.evaluation'],
+    locations=['xtuner.evaluation'],
 )
 # Evaluators to define the evaluation process.
 EVALUATORS = Registry(
     'evaluator',
     parent=MMENGINE_EVALUATOR,
-    locations=['mmchat.evaluation'],
+    locations=['xtuner.evaluation'],
 )

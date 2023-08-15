@@ -1,8 +1,8 @@
 from datasets import load_dataset
 from mmengine.dataset import DefaultSampler
 
-from mmchat.datasets import process_hf_dataset
-from mmchat.datasets.collate_fns import mmlu_collate_fn
+from xtuner.datasets import process_hf_dataset
+from xtuner.datasets.collate_fns import mmlu_collate_fn
 
 data_url = 'https://raw.githubusercontent.com/artidoro/qlora/main/data/mmlu/'
 

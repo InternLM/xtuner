@@ -11,7 +11,7 @@ from mmengine.runner import load_checkpoint
 from peft import PeftType, get_peft_model, prepare_model_for_kbit_training
 from torch import nn
 
-from mmchat.registry import LLM, MODELS, TOKENIZER
+from xtuner.registry import LLM, MODELS, TOKENIZER
 from .utils import dispatch_fast_forward
 
 

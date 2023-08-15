@@ -1,7 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from torch.utils.data import ConcatDataset as _ConcatDataset
 
-from mmchat.registry import DATASETS
+from xtuner.registry import DATASETS
 
 
 class ConcatDataset(_ConcatDataset):

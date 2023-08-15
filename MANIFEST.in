@@ -1,5 +1,5 @@
 include requirements/*.txt
-include mmchat/.mim/model-index.yml
-include mmchat/.mim/demo/*/*
-recursive-include mmchat/.mim/configs *.py *.yml
-recursive-include mmchat/.mim/tools *.sh *.py
+include xtuner/.mim/model-index.yml
+include xtuner/.mim/demo/*/*
+recursive-include xtuner/.mim/configs *.py *.yml
+recursive-include xtuner/.mim/tools *.sh *.py

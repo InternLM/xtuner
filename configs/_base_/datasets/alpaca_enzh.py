@@ -1,8 +1,8 @@
 from mmengine.config import read_base
 from mmengine.dataset import DefaultSampler
 
-from mmchat.datasets import ConcatDataset
-from mmchat.datasets.collate_fns import default_collate_fn
+from xtuner.datasets import ConcatDataset
+from xtuner.datasets.collate_fns import default_collate_fn
 
 with read_base():
     from .alpaca import alpaca

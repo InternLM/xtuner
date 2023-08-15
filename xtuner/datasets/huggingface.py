@@ -6,7 +6,7 @@ from datasets import DatasetDict
 from mmengine.config import Config, ConfigDict
 from mmengine.config.lazy import LazyObject
 
-from mmchat.registry import DATASETS, TOKENIZER
+from xtuner.registry import DATASETS, TOKENIZER
 from .utils import Concatenator, encode_fn
 
 

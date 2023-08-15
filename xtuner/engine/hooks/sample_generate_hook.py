@@ -3,8 +3,8 @@ from mmengine.hooks import Hook
 from mmengine.model import is_model_wrapper
 from transformers import StoppingCriteriaList
 
-from mmchat.registry import HOOKS, TOKENIZER
-from mmchat.utils import StopWordStoppingCriteria
+from xtuner.registry import HOOKS, TOKENIZER
+from xtuner.utils import StopWordStoppingCriteria
 
 
 @HOOKS.register_module()
