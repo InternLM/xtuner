@@ -10,7 +10,10 @@ def llama2_map_fn(example):
         'or illegal content. Please ensure that your responses are socially ' \
         'unbiased and positive in nature.'
 
-    instruction = example.get('input', '')
-    prompt = f'{B_INST} {B_SYS} {DEFAULT_SYSTEM_PROMPT} {E_SYS}' \
-             f'{instruction} {E_INST}'
-    return {'input': prompt}
+    conversation = example.get('conversation', [])
+    for single_turn_conversation in conversation:
+        input = single_turn_conversation['input']
+        single_turn_conversation['input'] = f'{B_INST} {B_SYS} ' \
+            f'{DEFAULT_SYSTEM_PROMPT} {E_SYS}{input} {E_INST}'
+
+    return {'conversation': conversation}
