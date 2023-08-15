@@ -6,25 +6,62 @@ from mmchat.utils import IGNORE_INDEX
 
 
 def encode_fn(example, tokenizer, max_length, input_with_labels=True):
+    """We only support the following three scenarios:
+
+    1. Incremental pretraining dataset.
+        example['conversation'] = [
+                {
+                    'input': '',
+                    'output': '### Human: Can you write xxx'
+                }
+            ]
+
+    2. Single-turn conversation dataset.
+        example['conversation'] = [
+                {
+                    'input': 'Give three tips for staying healthy.',
+                    'output': '1.Eat a balanced diet xxx'
+                }
+            ]
+
+    3. Multi-turn conversation dataset.
+        example['conversation'] = [
+                {
+                    'input': 'Give three tips for staying healthy.',
+                    'output': '1.Eat a balanced diet xxx'
+                },
+                {
+                    'input': 'Please expand on the second point.',
+                    'output': 'Here is an expanded explanation of the xxx'
+                }
+            ]
+    """
     encode_kwargs = {}
     if tokenizer.__class__.__name__ == 'QWenTokenizer':
         encode_kwargs['disallowed_special'] = ()
-    input_encode = tokenizer(
-        f"{tokenizer.bos_token}{example['input']}",
-        add_special_tokens=False,
-        **encode_kwargs)
-    if input_with_labels:
-        output_encode = tokenizer(
-            f"{example['output']}{tokenizer.eos_token}",
+
+    is_multi_turn_conversation = len(example['conversation']) > 1
+    if is_multi_turn_conversation:
+        assert input_with_labels
+
+    input_ids, labels = [], []
+    for single_turn_conversation in example['conversation']:
+        input = single_turn_conversation['input']
+        input_encode = tokenizer(
+            f'{tokenizer.bos_token}{input}',
             add_special_tokens=False,
             **encode_kwargs)
-        input_ids = input_encode['input_ids'] + output_encode['input_ids']
-        labels = [IGNORE_INDEX] * len(
-            input_encode['input_ids']) + copy.deepcopy(
-                output_encode['input_ids'])
-    else:
-        input_ids = input_encode['input_ids']
-        labels = [IGNORE_INDEX] * len(input_encode['input_ids'])
+        input_ids += input_encode['input_ids']
+        labels += [IGNORE_INDEX] * len(input_encode['input_ids'])
+        if input_with_labels:
+            output = single_turn_conversation['output']
+            output_encode = tokenizer(
+                f'{output}{tokenizer.eos_token}',
+                add_special_tokens=False,
+                **encode_kwargs)
+            input_ids += output_encode['input_ids']
+            labels += copy.deepcopy(output_encode['input_ids'])
+
     if len(input_ids) > max_length:
         input_ids = input_ids[:max_length]
         labels = labels[:max_length]
