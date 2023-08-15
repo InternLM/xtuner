@@ -9,7 +9,7 @@ PROMPT_TEMPLATE = ConfigDict(
             'descriptions of their abstracts.\n\n'
             '### Descriptions:\n{input}\n\n### Title: '),
         INSTRUCTION='### Descriptions:\n{input}\n\n### Title: '),
-    plugins=dict(
+    moss_sft=dict(
         INSTRUCTION_START=(
             'You are an AI assistant whose name is {bot_name}.\n'
             'Capabilities and tools that {bot_name} can possess.\n'

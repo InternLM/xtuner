@@ -127,7 +127,7 @@ custom_hooks = [
             '一个球体的表面积是384平方厘米，求它的体积。', '今有鸡兔同笼，上有二十头，下有六十二足， 问鸡兔各几何？',
             '介绍一下比尔盖茨'
         ],
-        instruction=PROMPT_TEMPLATE.plugins.INSTRUCTION_START)
+        instruction=PROMPT_TEMPLATE.moss_sft.INSTRUCTION_START)
 ]
 
 # defaults to use registries in xtuner
