@@ -1,13 +1,9 @@
-#######################################################################
-#                            step 1                                 #
-#######################################################################
 import torch
 from bitsandbytes.optim import PagedAdamW32bit
 from datasets import load_dataset
 from mmengine.dataset import DefaultSampler
 from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
                             LoggerHook, ParamSchedulerHook)
-from mmengine.model import BaseDataPreprocessor
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR
 from peft import LoraConfig
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
@@ -15,15 +11,14 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer,
 
 from xtuner.datasets import process_hf_dataset
 from xtuner.datasets.collate_fns import default_collate_fn
-#######################################################################
-#                  Step 2  You have to fill these args.              #
-#######################################################################
-# import the corresponding dataset map function
 from xtuner.datasets.map_fns import oasst1_map_fn
 from xtuner.engine import LogSampleHook, SampleGenerateHook
 from xtuner.models import SupervisedFinetune
 from xtuner.utils import PROMPT_TEMPLATE
 
+#######################################################################
+#                          STEP 1  Settings                           #
+#######################################################################
 pretrained_model_name_or_path = 'internlm/internlm-7b'
 data_path = 'timdettmers/openassistant-guanaco'
 batch_size = 1
@@ -32,10 +27,10 @@ lr = 2e-4
 weight_decay = 0.01
 max_norm = 1  # grad clip
 accumulative_counts = 16
-dataloader_num_workers = 2
+dataloader_num_workers = 0
 
 #######################################################################
-#                         Step 3 Model                            #
+#                      STEP 2  Model & Tokenizer                      #
 #######################################################################
 tokenizer = dict(
     type=AutoTokenizer.from_pretrained,
@@ -45,7 +40,6 @@ tokenizer = dict(
 
 model = dict(
     type=SupervisedFinetune,
-    data_preprocessor=dict(type=BaseDataPreprocessor),
     llm=dict(
         type=AutoModelForCausalLM.from_pretrained,
         pretrained_model_name_or_path=pretrained_model_name_or_path,
@@ -66,11 +60,10 @@ model = dict(
         lora_alpha=16,
         lora_dropout=0.1,
         bias='none',
-        task_type='CAUSAL_LM'),
-    tokenizer=tokenizer)
+        task_type='CAUSAL_LM'))
 
 #######################################################################
-#                         Step 4 Dataset & Dataloader            #
+#                      STEP 4  Dataset & Dataloader                   #
 #######################################################################
 train_dataset = dict(
     type=process_hf_dataset,
@@ -88,7 +81,7 @@ train_dataloader = dict(
     collate_fn=dict(type=default_collate_fn))
 
 #######################################################################
-#                              Step 5 Scheduler                   #
+#                            STEP 5  Scheduler                        #
 #######################################################################
 betas = (0.9, 0.999)
 # optimizer
@@ -113,7 +106,7 @@ param_scheduler = dict(
 train_cfg = dict(by_epoch=True, max_epochs=max_epochs, val_interval=1)
 
 #######################################################################
-#                              Step 6 Runtime                       #
+#                           STEP 6  Runtime                           #
 #######################################################################
 # Log the dialogue periodically during the training process，optional
 custom_hooks = [
@@ -128,23 +121,19 @@ custom_hooks = [
         instruction=PROMPT_TEMPLATE.alpaca.INSTRUCTION_START)
 ]
 
-# defaults to use registries in mmpretrain
+# defaults to use registries in xtuner
 default_scope = 'xtuner'
 
 # configure default hooks
 default_hooks = dict(
     # record the time of every iteration.
     timer=dict(type=IterTimerHook),
-
     # print log every 100 iterations.
     logger=dict(type=LoggerHook, interval=10),
-
     # enable the parameter scheduler.
     param_scheduler=dict(type=ParamSchedulerHook),
-
     # save checkpoint per epoch.
     checkpoint=dict(type=CheckpointHook, interval=1),
-
     # set sampler seed in distributed evrionment.
     sampler_seed=dict(type=DistSamplerSeedHook),
 )
@@ -153,10 +142,8 @@ default_hooks = dict(
 env_cfg = dict(
     # whether to enable cudnn benchmark
     cudnn_benchmark=False,
-
     # set multi process parameters
     mp_cfg=dict(mp_start_method='fork', opencv_num_threads=0),
-
     # set distributed parameters
     dist_cfg=dict(backend='nccl'),
 )
