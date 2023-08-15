@@ -9,7 +9,8 @@ from xtuner.utils import DEFAULT_PAD_TOKEN_INDEX, IGNORE_INDEX
 
 def default_collate_fn(
         instances: Sequence[Dict],
-        pad_index: int = DEFAULT_PAD_TOKEN_INDEX) -> Dict[str, torch.Tensor]:
+        pad_index: int = DEFAULT_PAD_TOKEN_INDEX,
+        return_hf_format: bool = False) -> Dict[str, torch.Tensor]:
     input_ids = []
     labels = []
     for example in instances:
@@ -29,5 +30,8 @@ def default_collate_fn(
         'attention_mask': input_ids.ne(pad_index),
         'labels': labels
     }
-
-    return {'data': data_dict, 'data_samples': None}
+    
+    if return_hf_format:
+        return data_dict
+    else:
+        return {'data': data_dict, 'data_samples': None}
