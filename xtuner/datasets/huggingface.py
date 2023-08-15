@@ -59,7 +59,5 @@ def process_hf_dataset(dataset,
     if pack_to_max_length and split == 'train':
         column_names = list(dataset.column_names)
         dataset = dataset.map(
-            Packer(max_length),
-            batched=True,
-            remove_columns=column_names)
+            Packer(max_length), batched=True, remove_columns=column_names)
     return dataset
