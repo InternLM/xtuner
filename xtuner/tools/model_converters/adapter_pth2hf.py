@@ -13,7 +13,7 @@ from xtuner.registry import MODELS
 def parse_args():
     parser = argparse.ArgumentParser(
         description='Convert the pth adapter to HuggingFace adapter')
-    parser.add_argument('config', help='test config file path')
+    parser.add_argument('config', help='config file name or path')
     parser.add_argument('adapter_checkpoint', help='adapter checkpoint file')
     parser.add_argument(
         'save_dir', help='the directory to save the checkpoint')

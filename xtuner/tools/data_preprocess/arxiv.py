@@ -7,7 +7,7 @@ from datetime import datetime
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('src_file', help='source file path')
-    parser.add_argument('dst_file', help='source file path')
+    parser.add_argument('dst_file', help='destination file path')
     parser.add_argument(
         '--categories',
         nargs='+',

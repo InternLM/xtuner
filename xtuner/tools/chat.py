@@ -16,7 +16,7 @@ from xtuner.utils import PROMPT_TEMPLATE
 def parse_args():
     parser = argparse.ArgumentParser(
         description='Chat with a pretrained model')
-    parser.add_argument('config', help='config file path')
+    parser.add_argument('config', help='config file name or path')
     parser.add_argument('--adapter', default=None, help='adapter model')
     parser.add_argument(
         '--with-plugins',
