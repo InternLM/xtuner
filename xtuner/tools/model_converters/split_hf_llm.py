@@ -11,7 +11,7 @@ from mmengine.utils import mkdir_or_exist
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description='Convert a hugging face model to the smallest sharded one')
+        description='Split a HuggingFace model to the smallest sharded one')
     parser.add_argument('src_dir', help='the directory of the model')
     parser.add_argument('dst_dir', help='the directory to save the new model')
     args = parser.parse_args()

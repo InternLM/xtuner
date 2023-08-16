@@ -9,10 +9,12 @@ from mmengine.logging import print_log
 from mmengine.registry import RUNNERS
 from mmengine.runner import Runner
 
+import xtuner.configs as configs
+
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='Train a detector')
-    parser.add_argument('config', help='train config file path')
+    parser = argparse.ArgumentParser(description='Train LLM')
+    parser.add_argument('config', help='config file name or path')
     parser.add_argument('--work-dir', help='the dir to save logs and models')
     parser.add_argument(
         '--amp',
@@ -56,6 +58,18 @@ def parse_args():
 
 def main():
     args = parse_args()
+
+    # parse config
+    configs_name_path = {
+        name: configs.__dict__[name].__file__
+        for name in configs.__dict__ if not name.startswith('__')
+        and configs.__dict__[name].__file__ is not None
+    }
+    if not os.path.isfile(args.config):
+        try:
+            args.config = configs_name_path[args.config]
+        except KeyError:
+            print(f'Cannot find {args.config}')
 
     # load config
     cfg = Config.fromfile(args.config)

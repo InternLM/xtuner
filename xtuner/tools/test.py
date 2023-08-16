@@ -6,14 +6,14 @@ import os.path as osp
 from mmengine.config import Config, DictAction
 from mmengine.runner import Runner
 
+import xtuner.configs as configs
 from xtuner.registry import RUNNERS
 
 
-# TODO: support fuse_conv_bn and format_only
 def parse_args():
-    parser = argparse.ArgumentParser(description='xTuner test a model')
-    parser.add_argument('config', help='test config file path')
-    parser.add_argument('--checkpoint', help='checkpoint file', default=None)
+    parser = argparse.ArgumentParser(description='Test model')
+    parser.add_argument('config', help='config file name or path')
+    parser.add_argument('--checkpoint', default=None, help='checkpoint file')
     parser.add_argument(
         '--work-dir',
         help='the directory to save the file containing evaluation metrics')
@@ -44,6 +44,18 @@ def parse_args():
 
 def main():
     args = parse_args()
+
+    # parse config
+    configs_name_path = {
+        name: configs.__dict__[name].__file__
+        for name in configs.__dict__ if not name.startswith('__')
+        and configs.__dict__[name].__file__ is not None
+    }
+    if not os.path.isfile(args.config):
+        try:
+            args.config = configs_name_path[args.config]
+        except KeyError:
+            print(f'Cannot find {args.config}')
 
     # load config
     cfg = Config.fromfile(args.config)

@@ -1,23 +1,28 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import argparse
+import os
 import re
 
 import torch
 from mmengine.config import Config, DictAction
 from transformers import GenerationConfig
-from utils import get_chat_utils, update_stop_criteria
 
+import xtuner.configs as configs
 from xtuner.registry import MODELS, TOKENIZER
+from xtuner.tools.utils import get_chat_utils, update_stop_criteria
 from xtuner.utils import PROMPT_TEMPLATE
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description='xTuner chat with a pretrained model')
-    parser.add_argument('config', help='config file path')
+        description='Chat with a pretrained model')
+    parser.add_argument('config', help='config file name or path')
     parser.add_argument('--adapter', default=None, help='adapter model')
     parser.add_argument(
-        '--with-plugins', action='store_true', help='Whether to with plugins')
+        '--with-plugins',
+        nargs='+',
+        choices=['calculate', 'solve', 'search'],
+        help='Specify plugins to use')
     parser.add_argument(
         '--no-streamer', action='store_true', help='Whether to with streamer')
     parser.add_argument('--command-stop-word', default=None, help='Stop key')
@@ -80,10 +85,39 @@ def get_input():
 def main():
     args = parse_args()
 
-    if args.with_plugins:
+    if args.with_plugins is None:
+        inner_thoughts_open = False
+        calculate_open = False
+        solve_open = False
+        search_open = False
+    else:
+        assert args.prompt_template == 'moss_sft'
         from plugins import plugins_api
+        inner_thoughts_open = True
+        calculate_open = 'calculate' in args.with_plugins
+        solve_open = 'solve' in args.with_plugins
+        search_open = 'search' in args.with_plugins
+        # pre-import for api and model preparation
+        if calculate_open:
+            from plugins import calculate  # noqa: F401
+        if solve_open:
+            from plugins import solve  # noqa: F401
+        if search_open:
+            from plugins import search  # noqa: F401
 
     torch.manual_seed(args.seed)
+
+    # parse config
+    configs_name_path = {
+        name: configs.__dict__[name].__file__
+        for name in configs.__dict__ if not name.startswith('__')
+        and configs.__dict__[name].__file__ is not None
+    }
+    if not os.path.isfile(args.config):
+        try:
+            args.config = configs_name_path[args.config]
+        except KeyError:
+            print(f'Cannot find {args.config}')
 
     # load config
     cfg = Config.fromfile(args.config)
@@ -133,6 +167,23 @@ def main():
                     input=text, **cfg)
             else:
                 prompt_text = template['INSTRUCTION'].format(input=text, **cfg)
+            if args.prompt_template == 'moss_sft':
+                if not inner_thoughts_open:
+                    prompt_text.replace('- Inner thoughts: enabled.',
+                                        '- Inner thoughts: disabled.')
+                if not calculate_open:
+                    prompt_text.replace(
+                        '- Calculator: enabled. API: Calculate(expression)',
+                        '- Calculator: disabled.')
+                if not solve_open:
+                    prompt_text.replace(
+                        '- Equation solver: enabled. API: Solve(equation)',
+                        '- Equation solver: disabled.')
+                if not search_open:
+                    prompt_text.replace(
+                        '- Web search: enabled. API: Search(query)',
+                        '- Web search: disabled.')
+
             inputs += prompt_text
         else:
             inputs += text
@@ -142,7 +193,7 @@ def main():
             add_special_tokens=n_turn == 0,
             **encode_kwargs)
         streamer = Streamer(tokenizer) if Streamer is not None else None
-        if args.with_plugins:
+        if args.with_plugins is not None:
             generate_output = model.generate(
                 inputs=ids.cuda(),
                 generation_config=gen_config,
@@ -151,16 +202,8 @@ def main():
             generate_output_text = tokenizer.decode(
                 generate_output[0][len(ids[0]):])
             if streamer is None:
-                print(generate_output_text, end='')
-            try:
-                calculate_open = re.findall(r'- Calculator: (.+)\.',
-                                            inputs)[0] == 'enabled'
-                solve_open = re.findall(r'- Equation solver: (.+)\.',
-                                        inputs)[0] == 'enabled'
-                search_open = re.findall(r'- Web search: (.+)\.',
-                                         inputs)[0] == 'enabled'
-            except Exception:
-                print(f'Wrong prompt:\n{inputs}')
+                end = '' if generate_output_text[-1] == '\n' else '\n'
+                print(generate_output_text, end=end)
             pattern = r'<\|Commands\|>:(.*?)<eoc>'
             command_text = ', '.join(re.findall(pattern, generate_output_text))
             extent_text = plugins_api(
@@ -168,7 +211,8 @@ def main():
                 calculate_open=calculate_open,
                 solve_open=solve_open,
                 search_open=search_open)
-            print(extent_text, end='')
+            end = '' if extent_text[-1] == '\n' else '\n'
+            print(extent_text, end=end)
             extent_text_ids = tokenizer.encode(
                 extent_text,
                 return_tensors='pt',
@@ -183,9 +227,10 @@ def main():
                 streamer=new_streamer,
                 stopping_criteria=answer_stop_cr)
             if streamer is None:
-                print(
-                    tokenizer.decode(generate_output[0][len(new_ids[0]):]),
-                    end='')
+                output_text = tokenizer.decode(
+                    generate_output[0][len(new_ids[0]):])
+                end = '' if output_text[-1] == '\n' else '\n'
+                print(output_text, end=end)
         else:
             generate_output = model.generate(
                 inputs=ids.cuda(),
@@ -193,12 +238,14 @@ def main():
                 streamer=streamer,
                 stopping_criteria=answer_stop_cr)
             if streamer is None:
-                print(
-                    tokenizer.decode(generate_output[0][len(ids[0]):]), end='')
+                output_text = tokenizer.decode(
+                    generate_output[0][len(ids[0]):])
+                end = '' if output_text[-1] == '\n' else '\n'
+                print(output_text, end=end)
         inputs = tokenizer.decode(generate_output[0]) + '\n'
         n_turn += 1
         if len(generate_output[0]) >= args.max_new_tokens:
-            print('Remove the memory for history responses, since '
+            print('Remove the memory of history responses, since '
                   f'it exceeds the length limitation {args.max_new_tokens}.')
             n_turn = 0
             inputs = ''
