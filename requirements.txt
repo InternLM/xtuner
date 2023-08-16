@@ -1,7 +1,8 @@
 beautifulsoup4
 bitsandbytes>=0.40.0
 datasets
-fasttext
+einops
+fasttext-wheel
 mmengine>=0.8.0
 peft>=0.4.0
 scipy
@@ -10,3 +11,4 @@ spacy
 tiktoken
 torch
 transformers
+transformers_stream_generator
