@@ -27,7 +27,9 @@ class SampleGenerateHook(Hook):
             self.stop_criteria.append(
                 StopWordStoppingCriteria(self.tokenizer, stop_word))
 
-    def _generate_samples(self, runner):
+    def _generate_samples(self, runner, max_new_tokens=None):
+        if max_new_tokens is None:
+            max_new_tokens = self.max_new_tokens
         model = runner.model
         if is_model_wrapper(model):
             model = model.module
@@ -41,7 +43,7 @@ class SampleGenerateHook(Hook):
             input_ids = input_ids.to(device)
             generation_output = model.generate(
                 input_ids=input_ids,
-                max_new_tokens=self.max_new_tokens,
+                max_new_tokens=max_new_tokens,
                 stopping_criteria=self.stop_criteria)
             runner.logger.info(
                 f'Sample output:\n'
@@ -49,7 +51,7 @@ class SampleGenerateHook(Hook):
 
     def before_train(self, runner):
         runner.logger.info('before_train in SampleGenerateHook.')
-        self._generate_samples(runner)
+        self._generate_samples(runner, max_new_tokens=50)
 
     def after_train_iter(self,
                          runner,
