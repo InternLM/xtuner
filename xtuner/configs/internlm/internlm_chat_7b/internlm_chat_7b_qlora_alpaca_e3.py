@@ -135,10 +135,10 @@ train_cfg = dict(by_epoch=True, max_epochs=max_epochs, val_interval=1)
 #######################################################################
 # Log the dialogue periodically during the training process，optional
 custom_hooks = [
-    dict(type=LogSampleHook, tokenizer=tokenizer),  # noqa: F405
+    dict(type=LogSampleHook, tokenizer=tokenizer),
     dict(
         type=SampleGenerateHook,
-        tokenizer=tokenizer,  # noqa: F405
+        tokenizer=tokenizer,
         every_n_iters=500,
         sample_inputs=[
             '请给我介绍五个上海的景点', 'Please tell me five scenic spots in Shanghai'
