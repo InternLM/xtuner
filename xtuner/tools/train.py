@@ -105,20 +105,18 @@ def main():
     
     if args.deepspeed:
         optim_wrapper = cfg.optim_wrapper.type
-        from mmengine.optim import DeepSpeedOptimWrapper
+        from mmengine.optim import DeepSpeedOptimWrapper, OptimWrapper
         if optim_wrapper == DeepSpeedOptimWrapper:
             print_log(
                 'Deepspeed training is already enabled in your config.',
                 logger='current',
                 level=logging.WARNING)
         else:
-            assert optim_wrapper == OptimWrapper, (
-                '`--deepspeed` is only supported when the optimizer wrapper '
-                f'type is `OptimWrapper` but got {optim_wrapper}.')
             optimizer = cfg.optim_wrapper.optimizer
             gradient_clipping = 1.0
-            if cfg.optim_wrapper.clip_grad.type == 'value':
-                gradient_clipping = cfg.optim_wrapper.clip_grad.clip_value
+            clip_grad = cfg.optim_wrapper.get('clip_grad', None)
+            if clip_grad and clip_grad.get('max_norm'):
+                gradient_clipping = cfg.optim_wrapper.clip_grad.max_norm
             optim_wrapper = dict(type='DeepSpeedOptimWrapper',
                                  optimizer=optimizer)
             cfg.__setitem__('optim_wrapper', optim_wrapper)
