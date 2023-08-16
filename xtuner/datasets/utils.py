@@ -36,10 +36,12 @@ def encode_fn(example, tokenizer, max_length, input_ids_with_output=True):
                 }
             ]
     """
-    encode_kwargs = {}
     if tokenizer.__class__.__name__ == 'QWenTokenizer':
-        encode_kwargs['disallowed_special'] = ()
-
+        bos_token = ''
+        eos_token = '<|endoftext|>'
+    else:
+        bos_token = tokenizer.bos_token
+        eos_token = tokenizer.eos_token
     is_multi_turn_conversation = len(example['conversation']) > 1
     if is_multi_turn_conversation:
         assert input_ids_with_output
@@ -48,17 +50,13 @@ def encode_fn(example, tokenizer, max_length, input_ids_with_output=True):
     for single_turn_conversation in example['conversation']:
         input = single_turn_conversation['input']
         input_encode = tokenizer(
-            f'{tokenizer.bos_token}{input}',
-            add_special_tokens=False,
-            **encode_kwargs)
+            f'{bos_token}{input}', add_special_tokens=False)
         input_ids += input_encode['input_ids']
         labels += [IGNORE_INDEX] * len(input_encode['input_ids'])
         if input_ids_with_output:
             output = single_turn_conversation['output']
             output_encode = tokenizer(
-                f'{output}{tokenizer.eos_token}',
-                add_special_tokens=False,
-                **encode_kwargs)
+                f'{output}{eos_token}', add_special_tokens=False)
             input_ids += output_encode['input_ids']
             labels += copy.deepcopy(output_encode['input_ids'])
 
