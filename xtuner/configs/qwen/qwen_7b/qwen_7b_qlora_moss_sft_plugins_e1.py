@@ -23,7 +23,7 @@ pretrained_model_name_or_path = 'Qwen/Qwen-7B'
 moss_sft_plugins_path = './data/conversations_with_tools_with_inner_instruction_no_text2image_train_all_random_meta0.5_0.1_0.01_moss_0709.jsonl'  # noqa: E501
 
 # data
-batch_size = 1
+batch_size = 1  # per_device
 accumulative_counts = 16
 dataloader_num_workers = 0
 max_epochs = 1

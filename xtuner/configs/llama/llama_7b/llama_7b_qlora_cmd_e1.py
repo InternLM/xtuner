@@ -30,7 +30,7 @@ all_csv = [
 all_csv = [data_url_or_path + csv for csv in all_csv]
 
 # data
-batch_size = 1
+batch_size = 1  # per_device
 accumulative_counts = 16
 dataloader_num_workers = 0
 max_epochs = 1

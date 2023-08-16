@@ -26,7 +26,7 @@ pretrained_model_name_or_path = 'baichuan-inc/Baichuan-7B'
 data_path = './data/arxiv_postprocess_csAIcsCLcsCV_20200101.json'
 
 # data
-batch_size = 1
+batch_size = 1  # per_device
 accumulative_counts = 16
 dataloader_num_workers = 0
 max_epochs = 3
