@@ -5,7 +5,7 @@ from itertools import chain
 from xtuner.utils import IGNORE_INDEX
 
 
-def encode_fn(example, tokenizer, max_length, input_with_labels=True):
+def encode_fn(example, tokenizer, max_length, input_ids_with_output=True):
     """We only support the following three scenarios:
 
     1. Incremental pretraining dataset.
@@ -36,29 +36,27 @@ def encode_fn(example, tokenizer, max_length, input_with_labels=True):
                 }
             ]
     """
-    encode_kwargs = {}
     if tokenizer.__class__.__name__ == 'QWenTokenizer':
-        encode_kwargs['disallowed_special'] = ()
-
+        bos_token = ''
+        eos_token = '<|endoftext|>'
+    else:
+        bos_token = tokenizer.bos_token
+        eos_token = tokenizer.eos_token
     is_multi_turn_conversation = len(example['conversation']) > 1
     if is_multi_turn_conversation:
-        assert input_with_labels
+        assert input_ids_with_output
 
     input_ids, labels = [], []
     for single_turn_conversation in example['conversation']:
         input = single_turn_conversation['input']
         input_encode = tokenizer(
-            f'{tokenizer.bos_token}{input}',
-            add_special_tokens=False,
-            **encode_kwargs)
+            f'{bos_token}{input}', add_special_tokens=False)
         input_ids += input_encode['input_ids']
         labels += [IGNORE_INDEX] * len(input_encode['input_ids'])
-        if input_with_labels:
+        if input_ids_with_output:
             output = single_turn_conversation['output']
             output_encode = tokenizer(
-                f'{output}{tokenizer.eos_token}',
-                add_special_tokens=False,
-                **encode_kwargs)
+                f'{output}{eos_token}', add_special_tokens=False)
             input_ids += output_encode['input_ids']
             labels += copy.deepcopy(output_encode['input_ids'])
 
@@ -68,7 +66,7 @@ def encode_fn(example, tokenizer, max_length, input_with_labels=True):
     return {'input_ids': input_ids, 'labels': labels}
 
 
-class Concatenator:
+class Packer:
     # modified from
     # https://github.com/facebookresearch/llama-recipes/blob/main/ft_datasets/utils.py
 

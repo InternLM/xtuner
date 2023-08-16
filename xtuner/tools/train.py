@@ -9,7 +9,7 @@ from mmengine.logging import print_log
 from mmengine.registry import RUNNERS
 from mmengine.runner import Runner
 
-import xtuner.configs as configs
+from xtuner.configs import cfgs_name_path
 
 
 def parse_args():
@@ -60,14 +60,9 @@ def main():
     args = parse_args()
 
     # parse config
-    configs_name_path = {
-        name: configs.__dict__[name].__file__
-        for name in configs.__dict__ if not name.startswith('__')
-        and configs.__dict__[name].__file__ is not None
-    }
     if not os.path.isfile(args.config):
         try:
-            args.config = configs_name_path[args.config]
+            args.config = cfgs_name_path[args.config]
         except KeyError:
             print(f'Cannot find {args.config}')
 

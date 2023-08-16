@@ -1,3 +1,4 @@
+# Copyright (c) OpenMMLab. All rights reserved.
 from .internlm_attn import internlm_attn_forward
 from .llama_attn import llama_attn_forward
 
