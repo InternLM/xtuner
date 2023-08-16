@@ -97,11 +97,15 @@ xTuner is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](
 
 ### Installation
 
-Below are quick steps for installation:
+Install xTuner with pip
 
 ```shell
-conda create -n xtuner python=3.10
-conda activate xtuner
+pip install xtuner
+```
+
+or from source
+
+```shell
 git clone https://github.com/InternLM/xtuner.git
 cd xtuner
 pip install -e .
@@ -131,7 +135,7 @@ xTuner provides the tools to chat with pretrained / fine-tuned LLMs.
 - For example, we can start the chat with Llama2-7B-Plugins by
 
   ```shell
-  python ./tools/chat_hf.py meta-llama/Llama-2-7b-hf --adapter XXX --bot-name Llama2 --prompt-template plugins --with-plugins --command-stop-word "<eoc>" --answer-stop-word "<eom>" --no-streamer
+  xtuner chat hf meta-llama/Llama-2-7b-hf --adapter xtuner/Llama-2-7b-qlora-moss-003-sft --bot-name Llama2 --prompt-template moss_sft --with-plugins calculate solve search --command-stop-word "<eoc>" --answer-stop-word "<eom>" --no-streamer
   ```
 
 For more usages, please see [chat.md](./docs/en/chat.md).
@@ -140,33 +144,45 @@ For more usages, please see [chat.md](./docs/en/chat.md).
 
 xTuner supports the efficient fine-tune (*e.g.*, QLoRA) for LLMs.
 
-- For example, we can start the QLoRA fine-tuning of InternLM-7B with oasst1 dataset by
+- **Step 0**, prepare the config. xTuner provides many ready-to-use configs and we can view all configs by
+
+  ```shell
+  xtuner list-cfg
+  ```
+
+  Or, if the provided configs cannot meet the requirements, we can copy the provided config to the specified directory and make modifications by
+
+  ```shell
+  xtuner copy-cfg ${CONFIG_NAME} ${SAVE_DIR}
+  ```
+
+- **Step 1**, start fine-tuning. For example, we can start the QLoRA fine-tuning of InternLM-7B with oasst1 dataset by
 
   ```shell
   # On a single GPU
-  python ./tools/train.py ./configs/internlm/internlm_7b/internlm_7b_qlora_oasst1.py
+  xtuner train internlm_7b_qlora_oasst1
   # On multiple GPUs
-  bash ./tools/dist_train.sh ./configs/internlm/internlm_7b/internlm_7b_qlora_oasst1.py ${GPU_NUM}
+  xtuner dist_train internlm_7b_qlora_oasst1 ${GPU_NUM}
   ```
 
-For more usages, please see [finetune.md](./docs/en/finetune.md).
+  For more usages, please see [finetune.md](./docs/en/finetune.md).
 
 ### Deployment
 
 - **Step 0**, convert the pth adapter to HuggingFace adapter, by
 
   ```shell
-  python ./tools/model_converters/adapter_pth2hf.py \
-  		${CONFIG_FILE} \
-  		${PATH_TO_PTH_ADAPTER} \
-  		${SAVE_PATH_TO_HF_ADAPTER}
+  xtuner convert adapter_pth_2_hf \
+      ${CONFIG} \
+      ${PATH_TO_PTH_ADAPTER} \
+      ${SAVE_PATH_TO_HF_ADAPTER}
   ```
 
   or, directly merge pth adapter to pretrained LLM, by
 
   ```shell
-  python ./tools/model_converters/merge_adapter.py \
-      ${CONFIG_FILE} \
+  xtuner convert merge_adapter \
+      ${CONFIG} \
       ${PATH_TO_PTH_ADAPTER} \
       ${SAVE_PATH_TO_MERGED_LLM} \
       --max-shard-size 2GB
