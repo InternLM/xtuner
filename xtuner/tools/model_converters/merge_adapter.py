@@ -10,8 +10,7 @@ from xtuner.registry import MODELS, TOKENIZER
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(
-        description='Merge a pth adapter to model')
+    parser = argparse.ArgumentParser(description='Merge a pth adapter to LLM')
     parser.add_argument('config', help='config file path')
     parser.add_argument('adapter_checkpoint', help='adapter checkpoint file')
     parser.add_argument(

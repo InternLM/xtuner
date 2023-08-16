@@ -11,7 +11,7 @@ from xtuner.registry import RUNNERS
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='Test a model')
+    parser = argparse.ArgumentParser(description='Test model')
     parser.add_argument('config', help='test config file path')
     parser.add_argument('--checkpoint', default=None, help='checkpoint file')
     parser.add_argument(

@@ -7,7 +7,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='Merge a hf adapter to model')
+    parser = argparse.ArgumentParser(
+        description='Merge a HuggingFace adapter to LLM')
     parser.add_argument('model_name_or_path', help='model name or path')
     parser.add_argument('adapter_name_or_path', help='adapter name or path')
     parser.add_argument(
