@@ -23,17 +23,22 @@ from xtuner.utils import PROMPT_TEMPLATE
 pretrained_model_name_or_path = 'internlm/internlm-chat-7b'
 alpaca_zh_path = 'silk-road/alpaca-data-gpt4-chinese'
 alpaca_en_path = 'tatsu-lab/alpaca'
+
 # data
 batch_size = 1
 accumulative_counts = 16
 dataloader_num_workers = 0
 max_epochs = 3
+
 # optim
 optim_type = PagedAdamW32bit
 lr = 2e-4
 betas = (0.9, 0.999)
 weight_decay = 0.01
 max_norm = 1  # grad clip
+
+# other
+max_length = 2048
 
 #######################################################################
 #                      STEP 2  Model & Tokenizer                      #
@@ -75,7 +80,7 @@ alpaca_en = dict(
     type=process_hf_dataset,
     dataset=dict(type=load_dataset, path=alpaca_en_path),
     tokenizer=tokenizer,
-    max_length=2048,
+    max_length=max_length,
     map_fn=alpaca_map_fn,
     remove_columns=['instruction', 'text'],
     pack_to_max_length=True)
@@ -84,7 +89,7 @@ alpaca_zh = dict(
     type=process_hf_dataset,
     dataset=dict(type=load_dataset, path=alpaca_zh_path),
     tokenizer=tokenizer,
-    max_length=2048,
+    max_length=max_length,
     map_fn=alpaca_zh_map_fn,
     remove_columns=['instruction', 'instruction_zh', 'input_zh', 'output_zh'],
     pack_to_max_length=True)

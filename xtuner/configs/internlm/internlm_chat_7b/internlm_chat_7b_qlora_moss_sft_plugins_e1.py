@@ -18,7 +18,7 @@ from xtuner.utils import PROMPT_TEMPLATE
 #                          STEP 1  Settings                           #
 #######################################################################
 # path
-pretrained_model_name_or_path = 'internlm/internlm-7b'
+pretrained_model_name_or_path = 'internlm/internlm-chat-7b'
 # Download data from https://huggingface.co/datasets/fnlp/moss-003-sft-data
 moss_sft_plugins_path = './data/conversations_with_tools_with_inner_instruction_no_text2image_train_all_random_meta0.5_0.1_0.01_moss_0709.jsonl'  # noqa: E501
 
@@ -27,6 +27,7 @@ batch_size = 1
 accumulative_counts = 16
 dataloader_num_workers = 0
 max_epochs = 1
+
 # optim
 optim_type = PagedAdamW32bit
 lr = 2e-4
@@ -36,7 +37,7 @@ max_norm = 1  # grad clip
 
 # other
 bot_name = 'InternLM'
-
+max_length = 2048
 #######################################################################
 #                      STEP 2  Model & Tokenizer                      #
 #######################################################################
@@ -78,7 +79,7 @@ train_dataset = dict(
     data_file=moss_sft_plugins_path,
     bot_name=bot_name,
     tokenizer=tokenizer,
-    max_length=2048)
+    max_length=max_length)
 
 train_dataloader = dict(
     batch_size=batch_size,

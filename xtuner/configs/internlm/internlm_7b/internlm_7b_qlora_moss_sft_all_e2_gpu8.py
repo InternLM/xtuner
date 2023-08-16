@@ -1,6 +1,5 @@
 import torch
 from bitsandbytes.optim import PagedAdamW32bit
-from datasets import load_dataset
 from mmengine.dataset import DefaultSampler
 from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
                             LoggerHook, ParamSchedulerHook)
@@ -9,9 +8,8 @@ from peft import LoraConfig
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           BitsAndBytesConfig)
 
-from xtuner.datasets import ConcatDataset, process_hf_dataset
+from xtuner.datasets import ConcatDataset, MOSSSFTDataset
 from xtuner.datasets.collate_fns import default_collate_fn
-from xtuner.datasets.map_fns import alpaca_map_fn, alpaca_zh_map_fn
 from xtuner.engine import LogSampleHook, SampleGenerateHook
 from xtuner.models import SupervisedFinetune
 from xtuner.utils import PROMPT_TEMPLATE
@@ -21,13 +19,16 @@ from xtuner.utils import PROMPT_TEMPLATE
 #######################################################################
 # path
 pretrained_model_name_or_path = 'internlm/internlm-7b'
-alpaca_zh_path = 'silk-road/alpaca-data-gpt4-chinese'
-alpaca_en_path = 'tatsu-lab/alpaca'
+# Download data from https://huggingface.co/datasets/fnlp/moss-003-sft-data
+moss_sft_no_plugins_path = './data/moss-003-sft-no-tools.jsonl'
+moss_sft_plugins_path = './data/conversations_with_tools_with_inner_instruction_no_text2image_train_all_random_meta0.5_0.1_0.01_moss_0709.jsonl'  # noqa: E501
+
 # data
-batch_size = 1
-accumulative_counts = 16
-dataloader_num_workers = 0
-max_epochs = 3
+batch_size = 8
+accumulative_counts = 1
+dataloader_num_workers = 2
+max_epochs = 2
+
 # optim
 optim_type = PagedAdamW32bit
 lr = 2e-4
@@ -35,6 +36,9 @@ betas = (0.9, 0.999)
 weight_decay = 0.01
 max_norm = 1  # grad clip
 
+# other
+bot_name = 'InternLM'
+max_length = 2048
 #######################################################################
 #                      STEP 2  Model & Tokenizer                      #
 #######################################################################
@@ -71,27 +75,25 @@ model = dict(
 #######################################################################
 #                      STEP 4  Dataset & Dataloader                   #
 #######################################################################
-alpaca_en = dict(
-    type=process_hf_dataset,
-    dataset=dict(type=load_dataset, path=alpaca_en_path),
+moss_sft_no_plugins = dict(
+    type=MOSSSFTDataset,
+    data_file=moss_sft_no_plugins_path,
+    bot_name=bot_name,
     tokenizer=tokenizer,
-    max_length=2048,
-    map_fn=alpaca_map_fn,
-    remove_columns=['instruction', 'text'],
-    pack_to_max_length=True)
+    max_length=max_length)
 
-alpaca_zh = dict(
-    type=process_hf_dataset,
-    dataset=dict(type=load_dataset, path=alpaca_zh_path),
+moss_sft_plugins = dict(
+    type=MOSSSFTDataset,
+    data_file=moss_sft_plugins_path,
+    bot_name=bot_name,
     tokenizer=tokenizer,
-    max_length=2048,
-    map_fn=alpaca_zh_map_fn,
-    remove_columns=['instruction', 'instruction_zh', 'input_zh', 'output_zh'],
-    pack_to_max_length=True)
+    max_length=max_length)
 
 train_dataset = dict(
     type=ConcatDataset,
-    datasets_cfg=dict(alpaca_en=alpaca_en, alpaca_zh=alpaca_zh))
+    datasets_cfg=dict(
+        moss_sft_no_plugins=moss_sft_no_plugins,
+        moss_sft_plugins=moss_sft_plugins))
 
 train_dataloader = dict(
     batch_size=batch_size,
@@ -135,10 +137,12 @@ custom_hooks = [
         type=SampleGenerateHook,
         tokenizer=tokenizer,  # noqa: F405
         every_n_iters=500,
+        stop_word='<eom>',
         sample_inputs=[
-            '请给我介绍五个上海的景点', 'Please tell me five scenic spots in Shanghai'
+            '一个球体的表面积是384平方厘米，求它的体积。', '今有鸡兔同笼，上有二十头，下有六十二足， 问鸡兔各几何？',
+            '介绍一下比尔盖茨'
         ],
-        instruction=PROMPT_TEMPLATE.alpaca.INSTRUCTION_START)
+        instruction=PROMPT_TEMPLATE.moss_sft.INSTRUCTION_START)
 ]
 
 # defaults to use registries in xtuner

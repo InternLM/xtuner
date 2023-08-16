@@ -11,7 +11,7 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer,
 
 from xtuner.datasets import process_hf_dataset
 from xtuner.datasets.collate_fns import default_collate_fn
-from xtuner.datasets.map_fns import oasst1_map_fn
+from xtuner.datasets.map_fns import openorca_map_fn
 from xtuner.engine import LogSampleHook, SampleGenerateHook
 from xtuner.models import SupervisedFinetune
 from xtuner.utils import PROMPT_TEMPLATE
@@ -20,13 +20,15 @@ from xtuner.utils import PROMPT_TEMPLATE
 #                          STEP 1  Settings                           #
 #######################################################################
 # path
-pretrained_model_name_or_path = 'internlm/internlm-chat-7b'
-data_path = 'timdettmers/openassistant-guanaco'
+pretrained_model_name_or_path = 'internlm/internlm-7b'
+data_path = 'Open-Orca/OpenOrca'
+
 # data
 batch_size = 1
 accumulative_counts = 16
 dataloader_num_workers = 0
-max_epochs = 3
+max_epochs = 1
+
 # optim
 optim_type = PagedAdamW32bit
 lr = 2e-4
@@ -34,6 +36,8 @@ betas = (0.9, 0.999)
 weight_decay = 0.01
 max_norm = 1  # grad clip
 
+# other 
+max_length = 2048
 #######################################################################
 #                      STEP 2  Model & Tokenizer                      #
 #######################################################################
@@ -74,8 +78,9 @@ train_dataset = dict(
     type=process_hf_dataset,
     dataset=dict(type=load_dataset, path=data_path),
     tokenizer=tokenizer,
-    max_length=2048,
-    map_fn=oasst1_map_fn,
+    max_length=max_length,
+    map_fn=openorca_map_fn,
+    remove_columns=['id', 'system_prompt', 'question', 'response'],
     pack_to_max_length=True)
 
 train_dataloader = dict(
@@ -119,12 +124,12 @@ custom_hooks = [
     dict(
         type=SampleGenerateHook,
         tokenizer=tokenizer,  # noqa: F405
-        every_n_iters=500,
-        stop_word='###',
+        every_n_iters=5000,
         sample_inputs=[
-            '请给我介绍五个上海的景点', 'Please tell me five scenic spots in Shanghai'
+            'Please explain AI to me.',
+            'Please tell me five scenic spots in London.'
         ],
-        instruction=PROMPT_TEMPLATE.openassistant.INSTRUCTION_START)
+        instruction=PROMPT_TEMPLATE.alpaca.INSTRUCTION_START)
 ]
 
 # defaults to use registries in xtuner
