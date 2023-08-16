@@ -24,11 +24,14 @@ def get_chat_utils(model):
     base_model = get_base_model(model)
     base_model_name = base_model.__class__.__name__
     is_internlm = 'InternLM' in base_model_name
+    is_qwen = 'QWen' in base_model_name
     no_space = 'InternLM' in base_model_name or 'QWen' in base_model_name or \
         'BaiChuan' in base_model_name
     stop_criteria = StoppingCriteriaList()
     if is_internlm:
         stop_criteria.append(InternLMStoppingCriteria())
+    if is_qwen:
+        stop_criteria.append(QwenStoppingCriteria())
     if no_space:
         return NoSpaceStreamer, stop_criteria
     else:
@@ -114,6 +117,13 @@ class InternLMStoppingCriteria(StoppingCriteria):
 
     def __call__(self, input_ids, *args, **kwargs) -> bool:
         return input_ids[0, -1] in [2, 103028]
+
+
+class QwenStoppingCriteria(StoppingCriteria):
+    """Stopping criteria for HF version of Qwen."""
+
+    def __call__(self, input_ids, *args, **kwargs) -> bool:
+        return input_ids[0, -1] == 151643
 
 
 def update_stop_criteria(base,

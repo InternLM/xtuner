@@ -207,9 +207,9 @@ def cli():
                 ]
                 # remove GPUS arg
                 del args[n_arg + 2]
-                subprocess.run(['python3 -m torch.distributed.launch'] +
+                subprocess.run(['python3', '-m', 'torch.distributed.launch'] +
                                dist_args + [module] + args[n_arg + 1:] +
-                               ['--launcher pytorch'])
+                               ['--launcher', 'pytorch'])
         except Exception as e:
             print_log(f"WARNING: command error: '{e}'!", 'current',
                       logging.WARNING)

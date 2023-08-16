@@ -7,7 +7,7 @@ import torch
 from mmengine.config import Config, DictAction
 from transformers import GenerationConfig
 
-import xtuner.configs as configs
+from xtuner.configs import cfgs_name_path
 from xtuner.registry import MODELS, TOKENIZER
 from xtuner.tools.utils import get_chat_utils, update_stop_criteria
 from xtuner.utils import PROMPT_TEMPLATE
@@ -108,14 +108,9 @@ def main():
     torch.manual_seed(args.seed)
 
     # parse config
-    configs_name_path = {
-        name: configs.__dict__[name].__file__
-        for name in configs.__dict__ if not name.startswith('__')
-        and configs.__dict__[name].__file__ is not None
-    }
     if not os.path.isfile(args.config):
         try:
-            args.config = configs_name_path[args.config]
+            args.config = cfgs_name_path[args.config]
         except KeyError:
             print(f'Cannot find {args.config}')
 
@@ -149,9 +144,6 @@ def main():
         top_p=args.top_p,
         top_k=args.top_k,
     )
-    encode_kwargs = {}
-    if tokenizer.__class__.__name__ == 'QWenTokenizer':
-        encode_kwargs['disallowed_special'] = ()
 
     n_turn = 0
     inputs = ''
@@ -188,10 +180,7 @@ def main():
         else:
             inputs += text
         ids = tokenizer.encode(
-            inputs,
-            return_tensors='pt',
-            add_special_tokens=n_turn == 0,
-            **encode_kwargs)
+            inputs, return_tensors='pt', add_special_tokens=n_turn == 0)
         streamer = Streamer(tokenizer) if Streamer is not None else None
         if args.with_plugins is not None:
             generate_output = model.generate(
@@ -214,10 +203,7 @@ def main():
             end = '' if extent_text[-1] == '\n' else '\n'
             print(extent_text, end=end)
             extent_text_ids = tokenizer.encode(
-                extent_text,
-                return_tensors='pt',
-                add_special_tokens=False,
-                **encode_kwargs)
+                extent_text, return_tensors='pt', add_special_tokens=False)
             new_ids = torch.cat((generate_output, extent_text_ids), dim=1)
             new_streamer = Streamer(
                 tokenizer) if Streamer is not None else None

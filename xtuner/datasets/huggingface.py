@@ -7,7 +7,7 @@ from mmengine.config import Config, ConfigDict
 from mmengine.config.lazy import LazyObject
 
 from xtuner.registry import DATASETS, TOKENIZER
-from .utils import Concatenator, encode_fn
+from .utils import Packer, encode_fn
 
 
 def process_hf_dataset(dataset,
@@ -18,8 +18,8 @@ def process_hf_dataset(dataset,
                        map_fn=None,
                        remove_columns=[],
                        rename_maps=[],
-                       concat_to_max_length=True,
-                       input_with_labels=True):
+                       pack_to_max_length=True,
+                       input_ids_with_output=True):
 
     dataset = DATASETS.build(dataset)
     if isinstance(dataset, DatasetDict):
@@ -55,11 +55,9 @@ def process_hf_dataset(dataset,
             encode_fn,
             tokenizer=tokenizer,
             max_length=max_length,
-            input_with_labels=input_with_labels))
-    if concat_to_max_length and split == 'train':
+            input_ids_with_output=input_ids_with_output))
+    if pack_to_max_length and split == 'train':
         column_names = list(dataset.column_names)
         dataset = dataset.map(
-            Concatenator(max_length),
-            batched=True,
-            remove_columns=column_names)
+            Packer(max_length), batched=True, remove_columns=column_names)
     return dataset

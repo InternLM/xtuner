@@ -133,9 +133,6 @@ def main():
         top_p=args.top_p,
         top_k=args.top_k,
     )
-    encode_kwargs = {}
-    if tokenizer.__class__.__name__ == 'QWenTokenizer':
-        encode_kwargs['disallowed_special'] = ()
 
     n_turn = 0
     inputs = ''
@@ -173,10 +170,7 @@ def main():
         else:
             inputs += text
         ids = tokenizer.encode(
-            inputs,
-            return_tensors='pt',
-            add_special_tokens=n_turn == 0,
-            **encode_kwargs)
+            inputs, return_tensors='pt', add_special_tokens=n_turn == 0)
         streamer = Streamer(tokenizer) if Streamer is not None else None
         if args.with_plugins is not None:
             generate_output = model.generate(
@@ -199,10 +193,7 @@ def main():
             end = '' if extent_text[-1] == '\n' else '\n'
             print(extent_text, end=end)
             extent_text_ids = tokenizer.encode(
-                extent_text,
-                return_tensors='pt',
-                add_special_tokens=False,
-                **encode_kwargs)
+                extent_text, return_tensors='pt', add_special_tokens=False)
             new_ids = torch.cat((generate_output, extent_text_ids), dim=1)
             new_streamer = Streamer(
                 tokenizer) if Streamer is not None else None
