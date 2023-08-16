@@ -2,6 +2,7 @@ from mmengine.config import Config
 from mmengine.dataset import DefaultSampler
 from mmengine.runner import Runner
 from torch.utils.data import ConcatDataset
+from functools import partial
 
 from xtuner.datasets.collate_fns import default_collate_fn
 from .moss_003_sft_no_plugins import moss_003_sft_no_plugins_dataset
@@ -51,5 +52,5 @@ def moss_003_sft_dataset(tokenizer,
     return ds
 
 
-def moss_003_sft_data_collator():
-    return default_collate_fn
+def moss_003_sft_data_collator(return_hf_format=False):
+    return partial(default_collate_fn, return_hf_format=return_hf_format)

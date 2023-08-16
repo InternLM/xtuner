@@ -13,9 +13,11 @@ from xtuner.datasets.map_fns import alpaca_map_fn
 def alpaca_dataloader(tokenizer,
                       batch_size=1,
                       num_workers=0,
-                      path='tatsu-lab/alpaca',
+                      path=None,
                       max_length=2048,
                       concat_to_max_length=True):
+    if path is None:
+        path = 'tatsu-lab/alpaca'
     ds = alpaca_dataset(
         tokenizer,
         path=path,
@@ -33,9 +35,11 @@ def alpaca_dataloader(tokenizer,
 
 
 def alpaca_dataset(tokenizer,
-                   path='tatsu-lab/alpaca',
+                   path=None,
                    max_length=2048,
                    concat_to_max_length=True):
+    if path is None:
+        path = 'tatsu-lab/alpaca'
     ds_cfg = dict(
         type=process_hf_dataset,
         dataset=dict(type=load_dataset, path=path),

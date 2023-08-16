@@ -3,6 +3,7 @@ from mmengine.config import Config
 from mmengine.dataset import DefaultSampler
 from mmengine.registry import DATASETS
 from mmengine.runner import Runner
+from functools import partial
 
 from xtuner.datasets import process_hf_dataset
 from xtuner.datasets.collate_fns import default_collate_fn
@@ -59,5 +60,5 @@ def arxiv_dataset(tokenizer,
     return ds
 
 
-def arxiv_data_collator():
-    return default_collate_fn
+def arxiv_data_collator(return_hf_format=False):
+    return partial(default_collate_fn, return_hf_format=return_hf_format)

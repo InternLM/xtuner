@@ -5,6 +5,17 @@ from typing import Union
 
 @dataclass
 class DefaultTrainingArguments(TrainingArguments):
+    # custom
+    model_name_or_path: str = field(
+        default=None,
+        metadata={"help": "model name or path."},
+    )
+    dataset_name_or_path: str = field(
+        default=None,
+        metadata={"help": "dataset name or path."},
+    )
+    
+    # huggingface 
     default_output_dir = './work_dirs'
     default_bf16 = True
     default_do_train = True
