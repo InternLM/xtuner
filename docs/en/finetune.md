@@ -22,6 +22,8 @@
 
 ## Fine-tune [Llama2](https://github.com/facebookresearch/llama)
 
+> Don't forget to use `huggingface-cli login` and input your access token first to access Llama2! See [here](https://huggingface.co/docs/hub/security-tokens#user-access-tokens) to learn how to obtain your access token.
+
 - Llama2-7B, MOSS-003-SFT **(plugins!)**
 
   ```shell

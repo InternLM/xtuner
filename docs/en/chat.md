@@ -22,9 +22,9 @@
 
 ## Chat with [Llama2](https://github.com/facebookresearch/llama)
 
-- Llama2-7B, MOSS-003-SFT **(plugins!)**
+> Don't forget to use `huggingface-cli login` and input your access token first to access Llama2! See [here](https://huggingface.co/docs/hub/security-tokens#user-access-tokens) to learn how to obtain your access token.
 
-  > Don't forget to use `huggingface-cli login` and input your access token first to access Llama2! See [here](https://huggingface.co/docs/hub/security-tokens#user-access-tokens) to learn how to obtain your access token.
+- Llama2-7B, MOSS-003-SFT **(plugins!)**
 
   ```shell
   xtuner chat hf meta-llama/Llama-2-7b-hf --adapter xtuner/Llama-2-7b-qlora-moss-003-sft --bot-name Llama2 --prompt-template moss_sft --with-plugins calculate solve search --command-stop-word "<eoc>" --answer-stop-word "<eom>" --no-streamer
