@@ -7,7 +7,7 @@ import torch
 from mmengine.config import Config, DictAction
 from transformers import GenerationConfig
 
-import xtuner.configs as configs
+from xtuner.configs import cfgs_name_path
 from xtuner.registry import MODELS, TOKENIZER
 from xtuner.tools.utils import get_chat_utils, update_stop_criteria
 from xtuner.utils import PROMPT_TEMPLATE
@@ -108,14 +108,9 @@ def main():
     torch.manual_seed(args.seed)
 
     # parse config
-    configs_name_path = {
-        name: configs.__dict__[name].__file__
-        for name in configs.__dict__ if not name.startswith('__')
-        and configs.__dict__[name].__file__ is not None
-    }
     if not os.path.isfile(args.config):
         try:
-            args.config = configs_name_path[args.config]
+            args.config = cfgs_name_path[args.config]
         except KeyError:
             print(f'Cannot find {args.config}')
 
