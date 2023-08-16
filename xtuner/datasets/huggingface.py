@@ -19,7 +19,7 @@ def process_hf_dataset(dataset,
                        remove_columns=[],
                        rename_maps=[],
                        pack_to_max_length=True,
-                       input_with_labels=True):
+                       input_ids_with_output=True):
 
     dataset = DATASETS.build(dataset)
     if isinstance(dataset, DatasetDict):
@@ -55,7 +55,7 @@ def process_hf_dataset(dataset,
             encode_fn,
             tokenizer=tokenizer,
             max_length=max_length,
-            input_with_labels=input_with_labels))
+            input_ids_with_output=input_ids_with_output))
     if pack_to_max_length and split == 'train':
         column_names = list(dataset.column_names)
         dataset = dataset.map(

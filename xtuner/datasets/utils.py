@@ -5,7 +5,7 @@ from itertools import chain
 from xtuner.utils import IGNORE_INDEX
 
 
-def encode_fn(example, tokenizer, max_length, input_with_labels=True):
+def encode_fn(example, tokenizer, max_length, input_ids_with_output=True):
     """We only support the following three scenarios:
 
     1. Incremental pretraining dataset.
@@ -42,7 +42,7 @@ def encode_fn(example, tokenizer, max_length, input_with_labels=True):
 
     is_multi_turn_conversation = len(example['conversation']) > 1
     if is_multi_turn_conversation:
-        assert input_with_labels
+        assert input_ids_with_output
 
     input_ids, labels = [], []
     for single_turn_conversation in example['conversation']:
@@ -53,7 +53,7 @@ def encode_fn(example, tokenizer, max_length, input_with_labels=True):
             **encode_kwargs)
         input_ids += input_encode['input_ids']
         labels += [IGNORE_INDEX] * len(input_encode['input_ids'])
-        if input_with_labels:
+        if input_ids_with_output:
             output = single_turn_conversation['output']
             output_encode = tokenizer(
                 f'{output}{tokenizer.eos_token}',
