@@ -13,7 +13,7 @@
     },
     "steps_per_print": 16,
     "gradient_clipping": 1.0,
-    "wall_clock_breakdown": true,
+    "wall_clock_breakdown": false,
     "bf16": {
       "enabled": true
     }
