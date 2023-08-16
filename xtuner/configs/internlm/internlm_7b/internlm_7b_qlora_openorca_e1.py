@@ -36,7 +36,7 @@ betas = (0.9, 0.999)
 weight_decay = 0.01
 max_norm = 1  # grad clip
 
-# other 
+# other
 max_length = 2048
 #######################################################################
 #                      STEP 2  Model & Tokenizer                      #
