@@ -6,12 +6,14 @@ import torch
 from mmengine.config import Config, DictAction
 from mmengine.utils import mkdir_or_exist
 
+import xtuner.configs as configs
 from xtuner.registry import MODELS
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='xTuner test a model')
-    parser.add_argument('config', help='test config file path')
+    parser = argparse.ArgumentParser(
+        description='Convert the pth adapter to HuggingFace adapter')
+    parser.add_argument('config', help='config file name or path')
     parser.add_argument('adapter_checkpoint', help='adapter checkpoint file')
     parser.add_argument(
         'save_dir', help='the directory to save the checkpoint')
@@ -31,6 +33,18 @@ def parse_args():
 
 def main():
     args = parse_args()
+
+    # parse config
+    configs_name_path = {
+        name: configs.__dict__[name].__file__
+        for name in configs.__dict__ if not name.startswith('__')
+        and configs.__dict__[name].__file__ is not None
+    }
+    if not os.path.isfile(args.config):
+        try:
+            args.config = configs_name_path[args.config]
+        except KeyError:
+            print(f'Cannot find {args.config}')
 
     # load config
     cfg = Config.fromfile(args.config)

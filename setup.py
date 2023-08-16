@@ -72,7 +72,7 @@ def parse_requirements(fname='requirements.txt', with_version=True):
                                                      rest.split(';'))
                         info['platform_deps'] = platform_deps
                     else:
-                        version = rest  # NOQA
+                        version = rest
                     info['version'] = (op, version)
             yield info
 
@@ -181,4 +181,5 @@ if __name__ == '__main__':
         python_requires='>=3.7',
         license='Apache License 2.0',
         install_requires=parse_requirements('requirements.txt'),
-        zip_safe=False)
+        zip_safe=False,
+        entry_points={'console_scripts': ['xtuner = xtuner:cli']})

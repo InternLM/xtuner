@@ -1,16 +1,17 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import argparse
+import os
 
 import torch
 from mmengine.config import Config, DictAction
 
+import xtuner.configs as configs
 from xtuner.registry import MODELS, TOKENIZER
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(
-        description='Merge a pth adapter to model')
-    parser.add_argument('config', help='config file path')
+    parser = argparse.ArgumentParser(description='Merge a pth adapter to LLM')
+    parser.add_argument('config', help='config file name or path')
     parser.add_argument('adapter_checkpoint', help='adapter checkpoint file')
     parser.add_argument(
         'save_dir', help='the directory to save the merged model')
@@ -31,6 +32,18 @@ def parse_args():
 
 def main():
     args = parse_args()
+
+    # parse config
+    configs_name_path = {
+        name: configs.__dict__[name].__file__
+        for name in configs.__dict__ if not name.startswith('__')
+        and configs.__dict__[name].__file__ is not None
+    }
+    if not os.path.isfile(args.config):
+        try:
+            args.config = configs_name_path[args.config]
+        except KeyError:
+            print(f'Cannot find {args.config}')
 
     # load config
     cfg = Config.fromfile(args.config)
