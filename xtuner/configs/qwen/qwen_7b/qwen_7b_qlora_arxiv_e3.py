@@ -17,7 +17,7 @@ from xtuner.models import SupervisedFinetune
 from xtuner.utils import PROMPT_TEMPLATE
 
 #######################################################################
-#                          STEP 1  Settings                           #
+#                          PART 1  Settings                           #
 #######################################################################
 # path
 pretrained_model_name_or_path = 'Qwen/Qwen-7B'
@@ -41,7 +41,7 @@ max_norm = 1  # grad clip
 # other
 max_length = 2048
 #######################################################################
-#                      STEP 2  Model & Tokenizer                      #
+#                      PART 2  Model & Tokenizer                      #
 #######################################################################
 tokenizer = dict(
     type=AutoTokenizer.from_pretrained,
@@ -74,7 +74,7 @@ model = dict(
         task_type='CAUSAL_LM'))
 
 #######################################################################
-#                      STEP 4  Dataset & Dataloader                   #
+#                      PART 3  Dataset & Dataloader                   #
 #######################################################################
 train_dataset = dict(
     type=process_hf_dataset,
@@ -98,7 +98,7 @@ train_dataloader = dict(
     collate_fn=dict(type=default_collate_fn))
 
 #######################################################################
-#                            STEP 5  Scheduler                        #
+#                          PART 4  Scheduler                          #
 #######################################################################
 # optimizer
 optim_wrapper = dict(
@@ -123,7 +123,7 @@ param_scheduler = dict(
 train_cfg = dict(by_epoch=True, max_epochs=max_epochs, val_interval=1)
 
 #######################################################################
-#                           STEP 6  Runtime                           #
+#                           PART 5  Runtime                           #
 #######################################################################
 # Log the dialogue periodically during the training process，optional
 custom_hooks = [
