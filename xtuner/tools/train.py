@@ -102,7 +102,7 @@ def main():
                 f'`OptimWrapper` but got {optim_wrapper}.')
             cfg.optim_wrapper.type = 'AmpOptimWrapper'
             cfg.optim_wrapper.loss_scale = 'dynamic'
-    
+
     if args.deepspeed:
         optim_wrapper = cfg.optim_wrapper.type
         from mmengine.optim import DeepSpeedOptimWrapper, OptimWrapper
@@ -117,13 +117,14 @@ def main():
             clip_grad = cfg.optim_wrapper.get('clip_grad', None)
             if clip_grad and clip_grad.get('max_norm'):
                 gradient_clipping = cfg.optim_wrapper.clip_grad.max_norm
-            optim_wrapper = dict(type='DeepSpeedOptimWrapper',
-                                 optimizer=optimizer)
+            optim_wrapper = dict(
+                type='DeepSpeedOptimWrapper', optimizer=optimizer)
             cfg.__setitem__('optim_wrapper', optim_wrapper)
-            
-            strategy = dict(type='DeepSpeedStrategy',
-                            config=args.deepspeed,
-                            gradient_clipping=gradient_clipping)
+
+            strategy = dict(
+                type='DeepSpeedStrategy',
+                config=args.deepspeed,
+                gradient_clipping=gradient_clipping)
             cfg.__setitem__('strategy', strategy)
             cfg.runner_type = 'FlexibleRunner'
 

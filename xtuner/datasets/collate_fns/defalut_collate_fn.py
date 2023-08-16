@@ -30,7 +30,7 @@ def default_collate_fn(
         'attention_mask': input_ids.ne(pad_index),
         'labels': labels
     }
-    
+
     if return_hf_format:
         return data_dict
     else:

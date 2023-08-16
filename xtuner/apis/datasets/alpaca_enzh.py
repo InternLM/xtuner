@@ -1,8 +1,9 @@
+from functools import partial
+
 from mmengine.config import Config
 from mmengine.dataset import DefaultSampler
 from mmengine.runner import Runner
 from torch.utils.data import ConcatDataset
-from functools import partial
 
 from xtuner.datasets.collate_fns import default_collate_fn
 from .alpaca import alpaca_dataset

@@ -6,9 +6,9 @@ from .base import tokenizer as tokenizer_cfg_dict
 
 
 def qwen_7b_qlora(model_name_or_path=None,
-                      quantization_config=None,
-                      lora_config=None,
-                      return_tokenizer=True):
+                  quantization_config=None,
+                  lora_config=None,
+                  return_tokenizer=True):
     if model_name_or_path is None:
         model_name_or_path = 'Qwen/Qwen-7B'
     model_cfg = Config(model_qlora_cfg_dict)
@@ -27,10 +27,11 @@ def qwen_7b_qlora(model_name_or_path=None,
     else:
         return model.llm
 
+
 def qwen_7b_chat_qlora(model_name_or_path=None,
-                      quantization_config=None,
-                      lora_config=None,
-                      return_tokenizer=True):
+                       quantization_config=None,
+                       lora_config=None,
+                       return_tokenizer=True):
     if model_name_or_path is None:
         model_name_or_path = 'Qwen/Qwen-7B-Chat'
     model_cfg = Config(model_qlora_cfg_dict)

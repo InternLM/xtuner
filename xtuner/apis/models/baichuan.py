@@ -4,6 +4,7 @@ from xtuner.registry import MODELS, TOKENIZER
 from .base import model_qlora as model_qlora_cfg_dict
 from .base import tokenizer as tokenizer_cfg_dict
 
+
 def baichuan_7b_qlora(model_name_or_path=None,
                       quantization_config=None,
                       lora_config=None,
@@ -26,10 +27,11 @@ def baichuan_7b_qlora(model_name_or_path=None,
     else:
         return model.llm
 
+
 def baichuan_13b_base_qlora(model_name_or_path=None,
-                      quantization_config=None,
-                      lora_config=None,
-                      return_tokenizer=True):
+                            quantization_config=None,
+                            lora_config=None,
+                            return_tokenizer=True):
     if model_name_or_path is None:
         model_name_or_path = 'baichuan-inc/Baichuan-13B-Base'
     model_cfg = Config(model_qlora_cfg_dict)
@@ -48,10 +50,11 @@ def baichuan_13b_base_qlora(model_name_or_path=None,
     else:
         return model.llm
 
+
 def baichuan_13b_chat_qlora(model_name_or_path=None,
-                      quantization_config=None,
-                      lora_config=None,
-                      return_tokenizer=True):
+                            quantization_config=None,
+                            lora_config=None,
+                            return_tokenizer=True):
     if model_name_or_path is None:
         model_name_or_path = 'baichuan-inc/Baichuan-13B-Chat'
     model_cfg = Config(model_qlora_cfg_dict)

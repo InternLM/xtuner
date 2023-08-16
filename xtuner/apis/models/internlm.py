@@ -27,10 +27,11 @@ def internlm_7b_qlora(model_name_or_path=None,
     else:
         return model.llm
 
+
 def internlm_chat_7b_qlora(model_name_or_path=None,
-                      quantization_config=None,
-                      lora_config=None,
-                      return_tokenizer=True):
+                           quantization_config=None,
+                           lora_config=None,
+                           return_tokenizer=True):
     if model_name_or_path is None:
         model_name_or_path = 'internlm/internlm-chat-7b'
     model_cfg = Config(model_qlora_cfg_dict)

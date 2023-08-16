@@ -1,8 +1,9 @@
+from functools import partial
+
 from mmengine.config import Config
 from mmengine.dataset import DefaultSampler
 from mmengine.registry import DATASETS
 from mmengine.runner import Runner
-from functools import partial
 
 from xtuner.datasets import MOSSSFTDataset
 from xtuner.datasets.collate_fns import default_collate_fn

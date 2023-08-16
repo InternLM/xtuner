@@ -6,9 +6,9 @@ from .base import tokenizer as tokenizer_cfg_dict
 
 
 def llama_7b_qlora(model_name_or_path=None,
-                      quantization_config=None,
-                      lora_config=None,
-                      return_tokenizer=True):
+                   quantization_config=None,
+                   lora_config=None,
+                   return_tokenizer=True):
     if model_name_or_path is None:
         model_name_or_path = 'huggyllama/llama-7b'
     model_cfg = Config(model_qlora_cfg_dict)
@@ -27,10 +27,11 @@ def llama_7b_qlora(model_name_or_path=None,
     else:
         return model.llm
 
+
 def llama2_7b_qlora(model_name_or_path=None,
-                      quantization_config=None,
-                      lora_config=None,
-                      return_tokenizer=True):
+                    quantization_config=None,
+                    lora_config=None,
+                    return_tokenizer=True):
     if model_name_or_path is None:
         model_name_or_path = 'meta-llama/Llama-2-7b-hf'
     model_cfg = Config(model_qlora_cfg_dict)
@@ -49,10 +50,11 @@ def llama2_7b_qlora(model_name_or_path=None,
     else:
         return model.llm
 
+
 def llama2_7b_chat_qlora(model_name_or_path=None,
-                      quantization_config=None,
-                      lora_config=None,
-                      return_tokenizer=True):
+                         quantization_config=None,
+                         lora_config=None,
+                         return_tokenizer=True):
     if model_name_or_path is None:
         model_name_or_path = 'meta-llama/Llama-2-7b-chat-hf'
     model_cfg = Config(model_qlora_cfg_dict)
