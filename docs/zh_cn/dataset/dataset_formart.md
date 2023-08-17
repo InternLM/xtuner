@@ -1,0 +1,184 @@
+# 数据集格式
+
+大语言模型Supervised Finetune（SFT）旨在通过有监督的微调来提高预训练模型在特定任务上的性能。为支持尽可能多的下游任务，xTuner支持了增量预训练、单轮对话、多轮对话三种数据集格式。
+
+- 增量预训练数据集用于提升模型在特定领域或任务的能力。
+- 单轮对话和多轮对话数据集则经常用于指令微调（instruction tuning）阶段，以提升模型回复特定指令的能力。
+
+在指令微调阶段，我们的目标是训练语言模型根据人类指令给出回答。\*\*因此，一般只有Output的回答部分的loss会用于梯度回传，而Input部分（Instruction）的loss则不会用于权重更新。\*\*基于此，我们在对数据集进行预处理的时候引入了"input"和"output"两个字段，"input"字段用于保存不需要计算loss的字段，例如用户指令，而"output"字段则用于保存需要计算loss的字段，例如输入指令对应的groundtruth回答。
+
+为了统一增量预训练、单轮对话和多轮对话三种数据集格式，我们将数据集格式设置为以下形式：
+
+```json
+[{
+    "conversation":[
+        {
+            "input": "xxx",
+            "output": "xxx"
+        }
+    ]
+},
+{
+    "conversation":[
+        {
+            "input": "xxx",
+            "output": "xxx"
+        },
+        {
+            "input": "xxx",
+            "output": "xxx"
+        },
+        ...
+    ]
+}]
+```
+
+在训练过程中，我们会将一条数据中的多组"input"和"output"进行拼接，之后输入模型，并行计算每个位置的loss，但只有"output"部分对应的loss参与梯度回传，如下图所示。
+
+<div  align="center">
+<img src="https://github.com/open-mmlab/mmrazor/assets/41630003/d5d696de-c026-494c-8b95-b1ba4b492939" alt="Image" width="700" />
+</div>
+
+其中\<EOS> token和\<BOS> token用于表示句子或文本的开始和结束。
+
+## 增量预训练数据集格式
+
+由于增量预训练旨在帮助模型学习针对特定下游任务的语言知识和表达能力，因此数据集的全部内容对应的loss都应该用于梯度回传。因此，数据集的"input"为空，而"output"为一整条语料数据。增量预训练任务对应的数据集格式如下所示：
+
+```json
+[{
+    "conversation":[
+        {
+            "input": "",
+            "output": "I am an artificial intelligence (AI) assistant named Puyu. I was created by the Shanghai AI Laboratory and my purpose is to assist users with various tasks through natural language processing technology."
+        },
+    ]
+},
+{
+    "conversation":[
+        {
+            "input": "",
+            "output": "I am an artificial intelligence programmed to assist with various types of tasks, including answering questions, providing information, and performing automated processes."
+        },
+    ]
+}]
+```
+
+<div  align="center">
+<img src="https://github.com/open-mmlab/mmrazor/assets/41630003/f43307b0-09cb-4899-80dd-bfbe2029f550" alt="Image" width="500" />
+</div>
+
+## 单轮对话数据集格式
+
+单轮对话数据集往往由一条指令（或问题）及其对应groundtruth回答组成。由于只有回答部分需要对loss进行回传，因此数据集的"input"字段为输入指令，"output"字段为对应回答。单轮对话数据集格式如下所示：
+
+```json
+[{
+    "conversation":
+        [
+            {
+                "input": "Give three tips for staying healthy.",
+                "output": "1.Eat a balanced diet. 2. Exercise regularly. 3. Get enough sleep."
+            }
+        ]
+},
+{
+    "conversation":
+        [
+            {
+                "input": "How to study English?",
+                "output": "1. Set clear goals. 2. Create a study plan. 3. Build vocabulary. 4. Practice speaking."
+            }
+        ]
+}]
+```
+
+<div  align="center">
+<img src="https://github.com/open-mmlab/mmrazor/assets/41630003/91499b4e-faa2-4e7c-92ee-2fe614a8243f" alt="Image" width="700" />
+</div>
+
+## 多轮对话数据集格式
+
+多轮对话数据集往往由多轮指令（或问题）+ 对应groundtruth回答组成。假设我们现在有一条多轮
+对话数据，内容如下。为方便介绍，对于第n轮对话，我们将User和Assistant对应的输出设为Usern和Assistantn。
+
+```text
+User1：Hello?
+Assistant1：Hello! How can I help you?
+User2：What's the date today?
+Assistant2：Today is Monday, August 14, 2023.
+User3：Thank you!
+Assistant3：You are welcome.
+```
+
+如何使用上述这条多轮对话数据训练大模型？目前有以下两个主流方法。
+
+#### 方法1
+
+User1、Assistant1、User2、Assistant2、User3的文本都视为模型的输入部分，将Assistant3的文本视为模型的预测部分，只有Assistant3部分的loss参与权重更新。
+
+<div  align="center">
+<img src="https://github.com/open-mmlab/mmrazor/assets/41630003/ff4a44c4-43d7-45a7-8749-19b545f90207" alt="Image" width=1100" />
+</div>
+
+这种方法的弊端在于没有充分利用多轮对话的训练数据，因为Assistant1和Assistant2的内容没有参与模型训练，导致训练数据利用率较低。
+
+#### 方法2
+
+将一条多轮对话数据，拆分成多条数据。例如将以上示例拆分成如下三条数据。
+
+<div  align="center">
+<img src="https://github.com/open-mmlab/mmrazor/assets/41630003/c0efbf9b-94bc-46ce-b500-e062c2cb59f7" alt="Image" width=1100" />
+</div>
+
+相比于方法1，方法2可以充分利用每一轮对话的数据，但需要将一条包含n轮对话的数据拆分为n条数据，
+训练效率降低1/n。
+
+#### xTuner方法介绍
+
+xTuner训练多轮对话模型时，采取了一种更加充分高效的方法，如下图所示。
+
+<div  align="center">
+<img src="https://github.com/open-mmlab/mmrazor/assets/41630003/caaac51f-e982-46db-8f68-6ce28f343183" alt="Image" width=1100" />
+</div>
+
+我们将多轮对话进行拼接，之后输入模型，并行计算每个位置的loss，而只有Output部分的loss参与回传。因此xTuner中多轮对话数据集格式如下所示：
+
+```json
+[{
+    "conversation":
+        [
+            {
+                "input": "Hello?",
+                "output": "Hello! How can I help you?"
+            },
+            {
+                "input": "What's the date today?",
+                "output": "Today is Monday, August 14, 2023."
+            },
+            {
+                "input": "Thank you!",
+                "output": "You are welcome."
+            }
+        ]
+},
+{
+    "conversation":
+        [
+            {
+                "input": "Hello?",
+                "output": "Hello! How can I help you?"
+            },
+            {
+                "input": "How's the weather today in Rosso?",
+                "output": "The weather in Rosso on Wednesday, August 16th, is going to be cloudy for most of the day, together with moderate rain around noon."
+            },
+            {
+                "input": "Thank you!",
+                "output": "You are welcome."
+            }
+        ]
+}]
+```
+
+数据集中的"conversation"键对应的值是一个列表，用于保存每一轮对话的指令和实际回答（groundtruth）。为了保持格式统一，增量预训练数据集和单轮对话数据集中的"conversation"键也对应一个列表，只不过该列表的长度为1。而在多轮对话数据集中，"conversation"列表的长度为n，以容纳n轮的对话内容。

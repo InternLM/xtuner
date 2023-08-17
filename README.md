@@ -42,7 +42,7 @@ xTuner is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](
   <b>SFT Datasets</b>
 </td>
 <td>
-  <b>Parallel Strategies</b>
+  <b>Data Pipelines</b>
 </td>
  <td>
   <b>Algorithms</b>
@@ -77,8 +77,10 @@ xTuner is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](
 </td>
 <td>
 <ul>
-  <li>(Distributed) Data Parallel</li>
-  <li><a href="examples">DeepSpeed</a> 🚀</li>
+  <li><a href="docs/zh_cn/dataset/incremental_pretraining.md">Incremental Pretraining</a> </li>
+  <li><a href="docs/zh_cn/dataset/single_turn_conversation.md">Single-Turn Conversation SFT</a> </li>
+  <li><a href="docs/zh_cn/dataset/multi_turn_conversation.md">Multi-Turn Conversation SFT</a> </li>
+  <li><a href="docs/zh_cn/dataset/tool_usage.md">Tool-Usage SFT</a> </li>
 </ul>
 </td>
 <td>
