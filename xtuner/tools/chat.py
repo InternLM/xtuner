@@ -127,8 +127,8 @@ def main():
     tokenizer = TOKENIZER.build(cfg.tokenizer)
 
     if args.adapter is not None:
-        state_dict_key = 'module' if args.is_deepspeed else 'state_dict'
         adapter = torch.load(args.adapter, map_location='cpu')
+        state_dict_key = 'module' if args.is_deepspeed else 'state_dict'
         model.load_state_dict(adapter[state_dict_key], strict=False)
         print(f'Load adapter from {args.adapter}')
 
