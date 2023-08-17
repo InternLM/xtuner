@@ -104,6 +104,11 @@ def main():
             cfg.optim_wrapper.loss_scale = 'dynamic'
 
     if args.deepspeed:
+        try:
+            import deepspeed  # pre-check  # noqa: F401
+        except ImportError:
+            raise ImportError(
+                'deepspeed is not installed properly, please check.')
         optim_wrapper = cfg.optim_wrapper.type
         from mmengine.optim import DeepSpeedOptimWrapper, OptimWrapper
         if optim_wrapper == DeepSpeedOptimWrapper:
