@@ -1,97 +1,17 @@
 # 单轮对话data pipeline
 
-单轮对话指令微调旨在提升模型回复特定指令的能力，其数据处理流程可以分为：
+单轮对话指令微调旨在提升模型回复特定指令的能力，其数据处理流程可以分为以下两部分：
 
 1. 按照相应数据集格式构造数据
 2. 向数据集中插入对话模板（可选）
 
 ## 数据集构建
 
-xTuner已经支持使用以下数据集进行训练：
+xTuner支持使用HuggingFace Hub数据集或自定义数据集进行SFT（Supervised FineTune）。二者的主要区别在于，使用HuggingFace Hub数据集时需要将原始数据映射为xTuner定义的[单轮对话数据格式](./dataset_format.md##单轮对话数据集格式)，而对于自定义数据集则需要用户按照[单轮对话数据格式](./dataset_format.md##单轮对话数据集格式)构造数据集。
 
-- [oasst1](https://huggingface.co/datasets/OpenAssistant/oasst1)：增量预训练数据集，多轮对话指令微调数据集
-- [alpaca](https://huggingface.co/datasets/tatsu-lab/alpaca)：单轮对话指令微调数据集
-- [alpaca_zh](https://huggingface.co/datasets/silk-road/alpaca-data-gpt4-chinese)：单轮对话指令微调数据集
-- [openorca](https://huggingface.co/datasets/Open-Orca/OpenOrca)：单轮对话指令微调数据集
-- [arxiv](https://kaggle.com/datasets/Cornell-University/arxiv)：单轮对话指令微调数据集，数据集中包含arxiv文章摘要与对应标题
-- [cmd](https://github.com/Toyhom/Chinese-medical-dialogue-data/raw/master/Data_数据/)：单轮对话指令微调数据集，数据集中包含医疗相关数据
-- [moss](https://huggingface.co/datasets/fnlp/moss-003-sft-data)：工具使用数据集
+### 使用HuggingFace Hub数据集
 
-若要使用其他已有数据集或自定义数据集进行SFT（Supervised FineTune），可以参考下面的文档。
-
-### 使用其他已有数据集
-
-#### Step1 列出候选模型名字
-
-```bash
-xtuner list-cfg -p internlm
-```
-
-`-p`为模糊查找，若想训练其他模型，可以修改`internlm`为xtuner支持的其他模型名称。
-
-#### Step2 复制config文件
-
-```bash
-xtuner copy-cfg internlm_7b_qlora_oasst1_e3 xtuner/configs/internlm/internlm_7b/
-```
-
-#### Step 3 修改config文件
-
-step2复制得到的config文件如下所示：
-
-```python
-from xtuner.datasets import process_hf_dataset
-from datasets import load_dataset
-################ Modification 1 ###########
-from xtuner.datasets.map_fns import oasst1_map_fn
-############################################
-...
-#######################################################################
-#                          STEP 1  Settings                           #
-#######################################################################
-...
-#######################################################################
-#                      STEP 2  Model & Tokenizer                      #
-#######################################################################
-...
-#######################################################################
-#                      STEP 3  Dataset & Dataloader                   #
-#######################################################################
-train_dataset = dict(
-    type=process_hf_dataset,
-    ################ Modification 2 ###########
-    dataset=dict(type=load_dataset, path=data_path),
-    ############################################
-    tokenizer=tokenizer,
-    max_length=max_length,
-    ################ Modification 3 ###########
-    map_fn=oasst1_map_fn,
-    ############################################
-    pack_to_max_length=True)
-
-train_dataloader = dict(
-    batch_size=batch_size,
-    num_workers=dataloader_num_workers,
-    dataset=train_dataset,
-    sampler=dict(type=DefaultSampler, shuffle=True),
-    collate_fn=dict(type=default_collate_fn))
-#######################################################################
-#                            STEP 4  Scheduler                        #
-#######################################################################
-...
-#######################################################################
-#                           STEP 5  Runtime                           #
-#######################################################################
-...
-```
-
-需要进行以下三点修改：
-
-- 实现map_fn将原始数据集映射为xtuner标准数据集格式，并**在config中import进来**（对应Modification 1）
-- 用import进来的map_fn替换掉`train_dataset`中的map_fn（对应Modification 3）
-- 修改原始数据集路径（对应Modification 2），load_dataset相关操作可以参考[用户文档](https://huggingface.co/docs/datasets/loading)
-
-下面介绍如何实现数据集对应的map_fn。
+#### Step 1 映射原始数据集为标准格式
 
 由于不同数据集的格式各有不同，因此需要将原始数据映射为xTuner定义的[单轮对话数据格式](./dataset_format.md##单轮对话数据集格式)。xTuner支持通过map function来实现格式的映射。下面以[alpaca](https://huggingface.co/datasets/tatsu-lab/alpaca)数据集为例介绍如何实现数据映射。
 
@@ -157,9 +77,57 @@ Dataset({
             }
 ```
 
+#### Step 2 列出候选模型名字
+
+```bash
+xtuner list-cfg -p internlm
+```
+
+`-p`为模糊查找，若想训练其他模型，可以修改`internlm`为xtuner支持的其他模型名称。
+
+#### Step 3 复制config文件
+
+```bash
+xtuner copy-cfg internlm_7b_qlora_oasst1_e3 xtuner/configs/internlm/internlm_7b/
+```
+
+#### Step 4 修改config文件
+
+对step 3复制得到的config文件需要进行如下修改：
+
+1. import Step 1 中实现的map function `alpaca_map_fn`
+2. 用`alpaca_map_fn`替换`train_dataset`中的map_fn
+3. 修改原始数据集路径，load_dataset相关操作可以参考[用户文档](https://huggingface.co/docs/datasets/loading)
+
+```diff
+from xtuner.datasets import process_hf_dataset
+from datasets import load_dataset
++ from xtuner.datasets.map_fns import alpaca_map_fn
+...
+#######################################################################
+#                      STEP 3  Dataset & Dataloader                   #
+#######################################################################
+train_dataset = dict(
+    type=process_hf_dataset,
+-   dataset=dict(type=load_dataset, path=data_path),
++   dataset=dict(type=load_dataset, path='path/to/your/data'),
+    tokenizer=tokenizer,
+    max_length=max_length,
++   map_fn=alpaca_map_fn,
+    pack_to_max_length=True)
+
+train_dataloader = dict(
+    batch_size=batch_size,
+    num_workers=dataloader_num_workers,
+    dataset=train_dataset,
+    sampler=dict(type=DefaultSampler, shuffle=True),
+    collate_fn=dict(type=default_collate_fn))
+...
+```
+
 ### 使用自定义数据集
 
-#### Step1 数据集准备
+#### Step 1 数据集准备
 
 按照xTuner定义的[单轮对话数据格式](./dataset_format.md##单轮对话数据集格式)准备自定义数据：
 
@@ -200,28 +168,19 @@ xtuner copy-cfg internlm_7b_qlora_oasst1_e3 xtuner/configs/internlm/internlm_7b/
 
 #### Step4 修改config文件
 
-修改step2复制得到的config文件中的原始数据集路径（对应Modification 1）即可：
+修改step 3复制得到的config文件中的原始数据集路径即可：
 
-```python
+```diff
 from xtuner.datasets import process_hf_dataset
 from datasets import load_dataset
-...
-#######################################################################
-#                          STEP 1  Settings                           #
-#######################################################################
-...
-#######################################################################
-#                      STEP 2  Model & Tokenizer                      #
-#######################################################################
 ...
 #######################################################################
 #                      STEP 3  Dataset & Dataloader                   #
 #######################################################################
 train_dataset = dict(
     type=process_hf_dataset,
-    ################ Modification 1 ###########
-    dataset=dict(type=load_dataset, path=data_path),
-    ############################################
+-   dataset=dict(type=load_dataset, path=data_path),
++   dataset=dict(type=load_dataset, path='path/to/your/data'),
     tokenizer=tokenizer,
     max_length=max_length,
     map_fn=None,
@@ -233,13 +192,6 @@ train_dataloader = dict(
     dataset=train_dataset,
     sampler=dict(type=DefaultSampler, shuffle=True),
     collate_fn=dict(type=default_collate_fn))
-#######################################################################
-#                            STEP 4  Scheduler                        #
-#######################################################################
-...
-#######################################################################
-#                           STEP 5  Runtime                           #
-#######################################################################
 ...
 ```
 
