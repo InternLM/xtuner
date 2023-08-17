@@ -1,11 +1,9 @@
 beautifulsoup4
 bitsandbytes>=0.40.0
 datasets
-deepspeed
 einops
 fasttext-wheel
 mmengine>=0.8.0
-mpi4py-mpich
 peft>=0.4.0
 scipy
 SentencePiece
