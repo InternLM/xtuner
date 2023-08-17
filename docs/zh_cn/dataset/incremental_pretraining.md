@@ -11,13 +11,13 @@
 
 ## 数据集构建
 
-xTuner支持使用HuggingFace Hub数据集或自定义数据集进行SFT（Supervised FineTune）。二者的主要区别在于，使用HuggingFace Hub数据集时需要将原始数据映射为xTuner定义的[增量预训练数据格式](./dataset_format.md##增量预训练数据集格式)，而对于自定义数据集则需要用户按照[增量预训练数据格式](./dataset_format.md##增量预训练数据集格式)构造数据集。
+xTuner支持使用HuggingFace Hub数据集或自定义数据集进行SFT（Supervised FineTune）。二者的主要区别在于，使用HuggingFace Hub数据集时需要将原始数据映射为xTuner定义的[增量预训练数据格式](./dataset_format.md#增量预训练数据集格式)，而对于自定义数据集则需要用户按照[增量预训练数据格式](./dataset_format.md#增量预训练数据集格式)构造数据集。
 
 ### 使用HuggingFace Hub数据集
 
 #### Step 1 映射原始数据集为标准格式
 
-由于不同数据集的格式各有不同，因此需要将原始数据映射为xTuner定义的[增量预训练数据格式](./dataset_format.md##增量预训练数据集格式)。xTuner支持通过map function来实现格式的映射。下面以[oasst1](https://huggingface.co/datasets/OpenAssistant/oasst1)数据集为例介绍如何实现数据映射。
+由于不同数据集的格式各有不同，因此需要将原始数据映射为xTuner定义的[增量预训练数据格式](./dataset_format.md#增量预训练数据集格式)。xTuner支持通过map function来实现格式的映射。下面以[oasst1](https://huggingface.co/datasets/OpenAssistant/oasst1)数据集为例介绍如何实现数据映射。
 
 oasst1数据集格式如下所示：
 
@@ -32,7 +32,7 @@ Dataset({
 })
 ```
 
-由此可见，oasst1 train dataset有9846行，1列，列名为'text'，'text'这一列正是增量预训练需要用到的文本数据。[增量预训练数据格式](./dataset_format.md##增量预训练数据集格式)中介绍了增量预训练过程中，数据格式应该为：
+由此可见，oasst1 train dataset有9846行，1列，列名为'text'，'text'这一列正是增量预训练需要用到的文本数据。[增量预训练数据格式](./dataset_format.md#增量预训练数据集格式)中介绍了增量预训练过程中，数据格式应该为：
 
 ```json
 [{
@@ -116,7 +116,7 @@ train_dataloader = dict(
 
 #### Step 1 数据准备
 
-按照xTuner定义的[增量预训练数据格式](./dataset_format.md##增量预训练数据集格式)准备自定义数据：
+按照xTuner定义的[增量预训练数据格式](./dataset_format.md#增量预训练数据集格式)准备自定义数据：
 
 ```json
 [

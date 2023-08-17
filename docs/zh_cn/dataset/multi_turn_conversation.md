@@ -7,13 +7,13 @@
 
 ## 数据集构建
 
-xTuner支持使用HuggingFace Hub数据集或自定义数据集进行SFT（Supervised FineTune）。二者的主要区别在于，使用HuggingFace Hub数据集时需要将原始数据映射为xTuner定义的[多轮对话数据格式](./dataset_format.md##多轮对话数据集格式)，而对于自定义数据集则需要用户按照[多轮对话数据格式](./dataset_format.md##多轮对话数据集格式)构造数据集。
+xTuner支持使用HuggingFace Hub数据集或自定义数据集进行SFT（Supervised FineTune）。二者的主要区别在于，使用HuggingFace Hub数据集时需要将原始数据映射为xTuner定义的[多轮对话数据格式](./dataset_format.md#多轮对话数据集格式)，而对于自定义数据集则需要用户按照[多轮对话数据格式](./dataset_format.md#多轮对话数据集格式)构造数据集。
 
 ### 使用HuggingFace Hub数据集
 
 #### Step 1 映射原始数据集为标准格式
 
-由于不同数据集的格式各有不同，因此需要将原始数据映射为xTuner定义的[多轮对话数据格式](./dataset_format.md##多轮对话数据集格式)。xTuner支持通过map function来实现格式的映射。下面以[oasst1](https://huggingface.co/datasets/OpenAssistant/oasst1)数据集为例介绍如何实现数据映射。
+由于不同数据集的格式各有不同，因此需要将原始数据映射为xTuner定义的[多轮对话数据格式](./dataset_format.md#多轮对话数据集格式)。xTuner支持通过map function来实现格式的映射。下面以[oasst1](https://huggingface.co/datasets/OpenAssistant/oasst1)数据集为例介绍如何实现数据映射。
 
 oasst1数据集格式如下所示：
 
@@ -30,7 +30,7 @@ Dataset({
 '### Human: xxx ### Assistant: xxx ###Human: xxx ###Assistant: xxx'
 ```
 
-由此可见，oasst1数据集既可以当做增量预训练数据集让模型学会一些基本的语言知识，又可以在经过一些处理后作为多轮对话数据集培养模型的多轮对话能力。[多轮对话数据格式](./dataset_format.md##多轮对话数据集格式)中介绍了多轮对话指令微调过程中，数据格式应该为：
+由此可见，oasst1数据集既可以当做增量预训练数据集让模型学会一些基本的语言知识，又可以在经过一些处理后作为多轮对话数据集培养模型的多轮对话能力。[多轮对话数据格式](./dataset_format.md#多轮对话数据集格式)中介绍了多轮对话指令微调过程中，数据格式应该为：
 
 ```json
 [
@@ -144,7 +144,7 @@ train_dataloader = dict(
 
 #### Step 1 数据集准备
 
-按照xTuner定义的[多轮对话数据格式](./dataset_format.md##多轮对话数据集格式)准备自定义数据：
+按照xTuner定义的[多轮对话数据格式](./dataset_format.md#多轮对话数据集格式)准备自定义数据：
 
 ```json
 [
