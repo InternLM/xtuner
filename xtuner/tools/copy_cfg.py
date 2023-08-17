@@ -17,10 +17,8 @@ def parse_args():
 
 
 def add_copy_suffix(string):
-    if string.endswith('.py'):
-        return string[:-3] + '_copy.py'
-    else:
-        return string + '_copy'
+    file_name, ext = os.path.splitext(string)
+    return f'{file_name}_copy{ext}'
 
 
 def main():
