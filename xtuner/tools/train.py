@@ -125,7 +125,11 @@ def main():
             optim_wrapper = dict(
                 type='DeepSpeedOptimWrapper', optimizer=optimizer)
             cfg.__setitem__('optim_wrapper', optim_wrapper)
-
+            if not os.path.isfile(args.deepspeed):
+                try:
+                    args.deepspeed = cfgs_name_path[args.deepspeed]
+                except KeyError:
+                    print(f'Cannot find {args.deepspeed}')
             strategy = dict(
                 type='DeepSpeedStrategy',
                 config=args.deepspeed,
