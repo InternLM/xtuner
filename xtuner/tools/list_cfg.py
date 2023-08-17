@@ -1,5 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import argparse
+
 from xtuner.configs import cfgs_name_path
 
 
@@ -8,6 +9,7 @@ def parse_args():
     parser.add_argument('-p', '--pattern', help='Pattern for fuzzy matching')
     args = parser.parse_args()
     return args
+
 
 def main(pattern=None):
     args = parse_args()
