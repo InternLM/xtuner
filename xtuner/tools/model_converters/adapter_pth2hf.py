@@ -18,6 +18,10 @@ def parse_args():
     parser.add_argument(
         'save_dir', help='the directory to save the checkpoint')
     parser.add_argument(
+        '--is-deepspeed',
+        action='store_true',
+        help='whether the adapter is saved from deepspeed')
+    parser.add_argument(
         '--cfg-options',
         nargs='+',
         action=DictAction,
@@ -56,7 +60,8 @@ def main():
 
     adapter_checkpoint = torch.load(
         args.adapter_checkpoint, map_location='cpu')
-    model.load_state_dict(adapter_checkpoint['state_dict'], strict=False)
+    state_dict_key = 'module' if args.is_deepspeed else 'state_dict'
+    model.load_state_dict(adapter_checkpoint[state_dict_key], strict=False)
     print(f'Load adapter from {args.adapter_checkpoint}')
 
     adapter_path = os.path.join(args.save_dir, 'adapter')

@@ -19,6 +19,10 @@ def parse_args():
     parser.add_argument('config', help='config file name or path')
     parser.add_argument('--adapter', default=None, help='adapter model')
     parser.add_argument(
+        '--is-deepspeed',
+        action='store_true',
+        help='whether the adapter is saved from deepspeed')
+    parser.add_argument(
         '--with-plugins',
         nargs='+',
         choices=['calculate', 'solve', 'search'],
@@ -123,8 +127,9 @@ def main():
     tokenizer = TOKENIZER.build(cfg.tokenizer)
 
     if args.adapter is not None:
+        state_dict_key = 'module' if args.is_deepspeed else 'state_dict'
         adapter = torch.load(args.adapter, map_location='cpu')
-        model.load_state_dict(adapter['state_dict'], strict=False)
+        model.load_state_dict(adapter[state_dict_key], strict=False)
         print(f'Load adapter from {args.adapter}')
 
     Streamer, stop_criteria = get_chat_utils(model)
