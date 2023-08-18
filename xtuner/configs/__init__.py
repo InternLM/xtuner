@@ -6,9 +6,10 @@ def get_cfgs_name_path():
     mapping = {}
     for root, dirs, files in os.walk(path):
         for file_ in files:
-            if file_.endswith('.py') and not file_.startswith(
-                    '.') and not file_.startswith('_'):
-                mapping[file_[:-3]] = os.path.join(root, file_)
+            if file_.endswith(
+                ('.py', '.json')
+            ) and not file_.startswith('.') and not file_.startswith('_'):
+                mapping[os.path.splitext(file_)[0]] = os.path.join(root, file_)
     return mapping
 
 

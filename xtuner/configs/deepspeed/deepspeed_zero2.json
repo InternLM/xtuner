@@ -1,0 +1,20 @@
+{
+    "gradient_accumulation_steps": 1,
+    "train_micro_batch_size_per_gpu": 1,
+    "prescale_gradients": false,
+    "zero_allow_untested_optimizer": true,
+    "zero_optimization": {
+      "stage": 2,
+      "contiguous_gradients": false,
+      "allgather_bucket_size": 1e8,
+      "reduce_bucket_size": 1e8,
+      "overlap_comm": true,
+      "reduce_scatter": true
+    },
+    "steps_per_print": 16,
+    "gradient_clipping": 1.0,
+    "wall_clock_breakdown": false,
+    "bf16": {
+      "enabled": true
+    }
+  }
