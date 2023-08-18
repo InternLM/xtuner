@@ -65,7 +65,7 @@ def main():
         try:
             args.config = cfgs_name_path[args.config]
         except KeyError:
-            print(f'Cannot find {args.config}')
+            raise FileNotFoundError(f'Cannot find {args.config}')
 
     # load config
     cfg = Config.fromfile(args.config)
@@ -156,7 +156,8 @@ def main():
                     try:
                         args.deepspeed = cfgs_name_path[args.deepspeed]
                     except KeyError:
-                        print(f'Cannot find {args.deepspeed}')
+                        raise FileNotFoundError(
+                            f'Cannot find {args.deepspeed}')
                 strategy = dict(
                     type='DeepSpeedStrategy',
                     config=args.deepspeed,

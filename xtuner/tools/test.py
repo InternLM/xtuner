@@ -53,7 +53,7 @@ def main():
         try:
             args.config = cfgs_name_path[args.config]
         except KeyError:
-            print(f'Cannot find {args.config}')
+            raise FileNotFoundError(f'Cannot find {args.config}')
 
     # load config
     cfg = Config.fromfile(args.config)
