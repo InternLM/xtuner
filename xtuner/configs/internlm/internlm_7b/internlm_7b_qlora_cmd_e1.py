@@ -44,6 +44,7 @@ max_norm = 1  # grad clip
 
 # other
 max_length = 2048
+generate_test_freq = 500
 #######################################################################
 #                      PART 2  Model & Tokenizer                      #
 #######################################################################
@@ -133,7 +134,7 @@ custom_hooks = [
     dict(
         type=SampleGenerateHook,
         tokenizer=tokenizer,
-        every_n_iters=500,
+        every_n_iters=generate_test_freq,
         sample_inputs=[
             '我有家族遗传性的过敏，请问可以可以献血吗？', '我爷爷有高血压，请问他可以喝咖啡吗？',
             '我女儿今年3岁了，从昨天晚上九点开始腹泻，到现在已经八个小时了，请问应该怎么办？'

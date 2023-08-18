@@ -14,7 +14,10 @@ from xtuner.configs import cfgs_name_path
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train LLM')
-    parser.add_argument('config', help='config file name or path')
+    parser.add_argument(
+        'config',
+        help='config file name or path. Note: Please use the original '
+        'configs, instead of the automatically saved log configs.')
     parser.add_argument('--work-dir', help='the dir to save logs and models')
     parser.add_argument(
         '--deepspeed',
