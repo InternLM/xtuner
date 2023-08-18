@@ -39,6 +39,7 @@ max_norm = 1  # grad clip
 
 # other
 max_length = 2048
+generate_test_freq = 500
 
 #######################################################################
 #                      PART 2  Model & Tokenizer                      #
@@ -139,7 +140,7 @@ custom_hooks = [
     dict(
         type=SampleGenerateHook,
         tokenizer=tokenizer,
-        every_n_iters=500,
+        every_n_iters=generate_test_freq,
         sample_inputs=[
             '请给我介绍五个上海的景点', 'Please tell me five scenic spots in Shanghai'
         ],
