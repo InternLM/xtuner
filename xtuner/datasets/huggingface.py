@@ -18,6 +18,7 @@ def process_hf_dataset(dataset,
                        map_fn=None,
                        remove_columns=[],
                        rename_maps=[],
+                       shuffle_before_pack=True,
                        pack_to_max_length=True,
                        input_ids_with_output=True):
 
@@ -57,6 +58,9 @@ def process_hf_dataset(dataset,
             max_length=max_length,
             input_ids_with_output=input_ids_with_output))
     if pack_to_max_length and split == 'train':
+        if shuffle_before_pack:
+            dataset = dataset.shuffle()
+            dataset = dataset.flatten_indices()
         column_names = list(dataset.column_names)
         dataset = dataset.map(
             Packer(max_length), batched=True, remove_columns=column_names)
