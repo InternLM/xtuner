@@ -1,5 +1,5 @@
 import torch
-from bitsandbytes.optim import PagedAdamW32bit
+from torch.optim import AdamW
 from mmengine.dataset import DefaultSampler
 from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
                             LoggerHook, ParamSchedulerHook)
@@ -30,7 +30,7 @@ dataloader_num_workers = 2
 max_epochs = 2
 
 # optim
-optim_type = PagedAdamW32bit
+optim_type = AdamW
 lr = 2e-4
 betas = (0.9, 0.999)
 weight_decay = 0.01
