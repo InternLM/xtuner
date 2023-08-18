@@ -1,18 +1,20 @@
 <div align="center">
-  <img src="https://github.com/InternLM/lmdeploy/assets/36994684/b8ebeb93-4e5a-4be5-8297-fff2df120a6b" width="600"/>
+  <img src="https://github.com/InternLM/lmdeploy/assets/36994684/0cf8d00f-e86b-40ba-9b54-dc8f1bc6c8d8" width="600"/>
 
-[![license](https://img.shields.io/github/license/InternLM/xtuner.svg)](https://github.com/InternLM/xtuner/blob/main/LICENSE)
-[![PyPI](https://badge.fury.io/py/xtuner.svg)](https://pypi.org/project/xtuner/)
-[![Generic badge](https://img.shields.io/badge/🤗-Huggingface%20Repo-yellow.svg)](https://huggingface.co/xtuner)
+  <br />
+  <br />
 
-[📘 Documentation](https://xtuner.readthedocs.io/en/latest/) |
-[🤔 Reporting Issues](https://github.com/InternLM/xtuner/issues/new/choose) |
-[⚙️ Model Zoo](<>)
-
-English | [简体中文](README_zh-CN.md)
-
-👋 join us on <a href="https://twitter.com/intern_lm" target="_blank">Twitter</a>, <a href="https://discord.gg/xa29JuW87d" target="_blank">Discord</a> and <a href="https://r.vansin.top/?r=internwx" target="_blank">WeChat</a>
-
+  [![license](https://img.shields.io/github/license/InternLM/xtuner.svg)](https://github.com/InternLM/xtuner/blob/main/LICENSE)
+  [![PyPI](https://badge.fury.io/py/xtuner.svg)](https://pypi.org/project/xtuner/)
+  [![Generic badge](https://img.shields.io/badge/🤗-Huggingface%20Repo-yellow.svg)](https://huggingface.co/xtuner)
+  
+  [📘 Documentation](https://xtuner.readthedocs.io/en/latest/) |
+  [🤔 Reporting Issues](https://github.com/InternLM/xtuner/issues/new/choose) |
+  [⚙️ Model Zoo](<>)
+  
+  English | [简体中文](README_zh-CN.md)
+  
+  👋 join us on <a href="https://twitter.com/intern_lm" target="_blank">Twitter</a>, <a href="https://discord.gg/xa29JuW87d" target="_blank">Discord</a> and <a href="https://r.vansin.top/?r=internwx" target="_blank">WeChat</a>
 
 </div>
 
