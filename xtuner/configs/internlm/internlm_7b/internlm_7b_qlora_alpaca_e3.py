@@ -39,6 +39,7 @@ max_norm = 1  # grad clip
 
 # other
 max_length = 2048
+pack_to_max_length = True
 generate_test_freq = 500
 
 #######################################################################
@@ -84,7 +85,8 @@ alpaca_en = dict(
     max_length=max_length,
     map_fn=alpaca_map_fn,
     remove_columns=['instruction', 'text'],
-    pack_to_max_length=True)
+    shuffle_before_pack=True,
+    pack_to_max_length=pack_to_max_length)
 
 alpaca_zh = dict(
     type=process_hf_dataset,
@@ -93,7 +95,8 @@ alpaca_zh = dict(
     max_length=max_length,
     map_fn=alpaca_zh_map_fn,
     remove_columns=['instruction', 'instruction_zh', 'input_zh', 'output_zh'],
-    pack_to_max_length=True)
+    shuffle_before_pack=True,
+    pack_to_max_length=pack_to_max_length)
 
 train_dataset = dict(
     type=ConcatDataset,

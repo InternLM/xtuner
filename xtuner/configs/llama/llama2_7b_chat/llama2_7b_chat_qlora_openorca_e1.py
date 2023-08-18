@@ -38,6 +38,7 @@ max_norm = 1  # grad clip
 
 # other
 max_length = 2048
+pack_to_max_length = True
 generate_test_freq = 5000
 #######################################################################
 #                      PART 2  Model & Tokenizer                      #
@@ -82,7 +83,8 @@ train_dataset = dict(
     max_length=max_length,
     map_fn=openorca_map_fn,
     remove_columns=['id', 'system_prompt', 'question', 'response'],
-    pack_to_max_length=True)
+    shuffle_before_pack=True,
+    pack_to_max_length=pack_to_max_length)
 
 train_dataloader = dict(
     batch_size=batch_size,

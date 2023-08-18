@@ -40,6 +40,7 @@ max_norm = 1  # grad clip
 
 # other
 max_length = 2048
+pack_to_max_length = True
 generate_test_freq = 500
 #######################################################################
 #                      PART 2  Model & Tokenizer                      #
@@ -89,7 +90,8 @@ train_dataset = dict(
         'doi', 'report-no', 'categories', 'license', 'abstract', 'versions',
         'update_date', 'authors_parsed'
     ],
-    pack_to_max_length=True)
+    shuffle_before_pack=True,
+    pack_to_max_length=pack_to_max_length)
 
 train_dataloader = dict(
     batch_size=batch_size,
