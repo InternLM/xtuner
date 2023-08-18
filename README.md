@@ -25,7 +25,7 @@ English | [简体中文](README_zh-CN.md)
 xTuner is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](https://github.com/open-mmlab/mmrazor) and [MMDeploy](https://github.com/open-mmlab/mmdeploy) teams.
 
 - **Efficiency**: Support LLM fine-tuning on consumer-grade GPUs. The minimum GPU memory required for 7B LLM fine-tuning is only **10GB**, indicating that users can use nearly any GPU (even the free resource, *e.g.*, Colab) to fine-tune custom LLMs.
-- **Versatile**: Support various **LLMs** ([InternLM](https://github.com/InternLM/InternLM), [Llama2](https://github.com/facebookresearch/llama), [Qwen](https://github.com/QwenLM/Qwen-7B), [Baichuan](https://github.com/baichuan-inc)), **datasets** ([MOSS_003_SFT](https://huggingface.co/datasets/fnlp/moss-003-sft-data), [Arxiv GenTitle](https://github.com/WangRongsheng/ChatGenTitle), [OpenOrca](https://huggingface.co/datasets/Open-Orca/OpenOrca), [Alpaca](https://huggingface.co/datasets/tatsu-lab/alpaca), [oasst1](https://huggingface.co/datasets/timdettmers/openassistant-guanaco), [Chinese Medical Dialogue](https://github.com/Toyhom/Chinese-medical-dialogue-data/)) and **algorithms** ([QLoRA](http://arxiv.org/abs/2305.14314), [LoRA](http://arxiv.org/abs/2106.09685)), allowing users to choose the most suitable solution for their requirements.
+- **Versatile**: Support various **LLMs** ([InternLM](https://github.com/InternLM/InternLM), [Llama2](https://github.com/facebookresearch/llama), [Qwen](https://github.com/QwenLM/Qwen-7B), [Baichuan](https://github.com/baichuan-inc)), **datasets** ([MOSS_003_SFT](https://huggingface.co/datasets/fnlp/moss-003-sft-data), [Arxiv GenTitle](https://github.com/WangRongsheng/ChatGenTitle), [OpenOrca](https://huggingface.co/datasets/Open-Orca/OpenOrca), [Alpaca](https://huggingface.co/datasets/tatsu-lab/alpaca), [oasst1](https://huggingface.co/datasets/timdettmers/openassistant-guanaco), [Chinese Medical Dialogue](https://github.com/Toyhom/Chinese-medical-dialogue-data)) and **algorithms** ([QLoRA](http://arxiv.org/abs/2305.14314), [LoRA](http://arxiv.org/abs/2106.09685)), allowing users to choose the most suitable solution for their requirements.
 - **Compatibility**: Compatible with [DeepSpeed](https://github.com/microsoft/DeepSpeed) 🚀 and [HuggingFace](https://huggingface.co) 🤗 training pipeline, enabling effortless integration and utilization.
 
 ## 🌟 Demos
@@ -55,27 +55,27 @@ xTuner is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](
 <tr valign="top">
 <td align="left" valign="top">
 <ul>
-  <li><a href="configs/internlm/internlm_7b">InternLM</a></li>
-  <li><a href="configs/internlm/internlm_chat_7b">InternLM-Chat</a></li>
-  <li><a href="configs/llama/llama_7b">Llama</a></li>
-  <li><a href="configs/llama/llama2_7b">Llama2</a></li>
-  <li><a href="configs/llama/llama2_7b_chat">Llama2-Chat</a></li>
-  <li><a href="configs/qwen/qwen_7b">Qwen</a></li>
-  <li><a href="configs/qwen/qwen_7b_chat">Qwen-Chat</a></li>
-  <li><a href="configs/baichuan/baichuan_7b">Baichuan-7B</a></li>
-  <li><a href="configs/baichuan/baichuan_13b_base">Baichuan-13B-Base</a></li>
-  <li><a href="configs/baichuan/baichuan_13b_chat">Baichuan-13B-Chat</a></li>
+  <li><a href="https://github.com/InternLM/InternLM">InternLM</a></li>
+  <li><a href="https://github.com/InternLM/InternLM">InternLM-Chat</a></li>
+  <li><a href="https://github.com/facebookresearch/llama">Llama</a></li>
+  <li><a href="https://github.com/facebookresearch/llama">Llama2</a></li>
+  <li><a href="https://github.com/facebookresearch/llama">Llama2-Chat</a></li>
+  <li><a href="https://github.com/QwenLM/Qwen-7B">Qwen</a></li>
+  <li><a href="https://github.com/QwenLM/Qwen-7B">Qwen-Chat</a></li>
+  <li><a href="https://github.com/baichuan-inc/Baichuan-7B">Baichuan-7B</a></li>
+  <li><a href="https://github.com/baichuan-inc/Baichuan-13B">Baichuan-13B-Base</a></li>
+  <li><a href="https://github.com/baichuan-inc/Baichuan-13B">Baichuan-13B-Chat</a></li>
   <li>...</li>
 </ul>
 </td>
 <td>
 <ul>
-  <li><a href="configs/_base_/datasets/moss_003_sft_all.py">MOSS-003-SFT</a></li>
-  <li><a href="configs/_base_/datasets/arxiv.py">Arxiv GenTitle</a></li>
-  <li><a href="configs/_base_/datasets/open_orca.py">OpenOrca</a></li>
-  <li><a href="configs/_base_/datasets/alpaca.py">Alpaca en</a> / <a href="configs/_base_/datasets/alpaca_zh.py">zh</a></li>
-  <li><a href="configs/_base_/datasets/oasst1.py">oasst1</a></li>
-  <li><a href="configs/_base_/datasets/cmd.py">Chinese Medical Dialogue</a></li>
+  <li><a href="https://huggingface.co/datasets/fnlp/moss-003-sft-data">MOSS-003-SFT</a></li>
+  <li><a href="https://github.com/WangRongsheng/ChatGenTitle">Arxiv GenTitle</a></li>
+  <li><a href="https://huggingface.co/datasets/Open-Orca/OpenOrca">OpenOrca</a></li>
+  <li><a href="https://huggingface.co/datasets/tatsu-lab/alpaca">Alpaca en</a> / <a href="https://huggingface.co/datasets/silk-road/alpaca-data-gpt4-chinese">zh</a></li>
+  <li><a href="https://huggingface.co/datasets/timdettmers/openassistant-guanaco">oasst1</a></li>
+  <li><a href="https://github.com/Toyhom/Chinese-medical-dialogue-data">Chinese Medical Dialogue</a></li>
   <li>...</li>
 </ul>
 </td>
@@ -166,9 +166,9 @@ xTuner supports the efficient fine-tune (*e.g.*, QLoRA) for LLMs.
 
   ```shell
   # On a single GPU
-  xtuner train internlm_7b_qlora_oasst1
+  xtuner train internlm_7b_qlora_oasst1_e3
   # On multiple GPUs
-  xtuner dist_train internlm_7b_qlora_oasst1 ${GPU_NUM}
+  xtuner dist_train internlm_7b_qlora_oasst1_e3 ${GPU_NUM}
   ```
 
   For more usages, please see [finetune.md](./docs/en/finetune.md).
@@ -178,7 +178,7 @@ xTuner supports the efficient fine-tune (*e.g.*, QLoRA) for LLMs.
 - **Step 0**, convert the pth adapter to HuggingFace adapter, by
 
   ```shell
-  xtuner convert adapter_pth_2_hf \
+  xtuner convert adapter_pth2hf \
       ${CONFIG} \
       ${PATH_TO_PTH_ADAPTER} \
       ${SAVE_PATH_TO_HF_ADAPTER}

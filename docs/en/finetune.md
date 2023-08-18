@@ -5,19 +5,19 @@
 - InternLM-7B, Alpaca-enzh
 
   ```shell
-  xtuner train internlm_7b_qlora_alpaca
+  xtuner train internlm_7b_qlora_alpaca_e3
   ```
 
 - InternLM-7B, oasst1
 
   ```shell
-  xtuner train internlm_7b_qlora_oasst1
+  xtuner train internlm_7b_qlora_oasst1_e3
   ```
 
 - InternLM-7B, Arxiv Gentitle
 
   ```shell
-  xtuner train internlm_7b_qlora_arxiv
+  xtuner train internlm_7b_qlora_arxiv_e3
   ```
 
 ## Fine-tune [Llama2](https://github.com/facebookresearch/llama)
@@ -27,20 +27,20 @@
 - Llama2-7B, MOSS-003-SFT **(plugins!)**
 
   ```shell
-  xtuner train llama2_7b_qlora_moss_sft_all
-  xtuner dist_train llama2_7b_qlora_moss_sft_all_gpu8 8  # Recommended!
+  xtuner train llama2_7b_qlora_moss_sft_all_e1
+  xtuner dist_train llama2_7b_qlora_moss_sft_all_gpu8_e2 8  # Recommended!
   ```
 
 - Llama2-7B, MOSS-003-SFT-Plugins **(plugins!)**
 
   ```shell
-  xtuner train llama2_7b_qlora_moss_sft_plugins
+  xtuner train llama2_7b_qlora_moss_sft_plugins_e1
   ```
 
 - Llama2-7B, Arxiv Gentitle
 
   ```shell
-  xtuner train llama2_7b_qlora_arxiv
+  xtuner train llama2_7b_qlora_arxiv_e3
   ```
 
 ## Fine-tune [Qwen](https://github.com/QwenLM)
@@ -48,26 +48,26 @@
 - Qwen-7B, MOSS-003-SFT **(plugins!)**
 
   ```shell
-  xtuner train qwen_7b_qlora_moss_sft_all
-  xtuner dist_train qwen_7b_qlora_moss_sft_all_gpu8 8  # Recommended!
+  xtuner train qwen_7b_qlora_moss_sft_all_e1
+  xtuner dist_train qwen_7b_qlora_moss_sft_all_gpu8_e2 8  # Recommended!
   ```
 
 - Qwen-7B, Alpaca-enzh
 
   ```shell
-  xtuner train qwen_7b_qlora_alpaca
+  xtuner train qwen_7b_qlora_alpaca_e1
   ```
 
 - Qwen-7B, oasst1
 
   ```shell
-  xtuner train qwen_7b_qlora_oasst1
+  xtuner train qwen_7b_qlora_oasst1_e3
   ```
 
 - Qwen-7B, Arxiv Gentitle
 
   ```shell
-  xtuner train qwen_7b_qlora_arxiv
+  xtuner train qwen_7b_qlora_arxiv_e3
   ```
 
 ## Fine-tune [Baichuan](https://github.com/baichuan-inc)
@@ -75,17 +75,17 @@
 - Baichuan-7B, Alpaca-enzh
 
   ```shell
-  xtuner train baichuan_7b_qlora_alpaca
+  xtuner train baichuan_7b_qlora_alpaca_e3
   ```
 
 - Baichuan-7B, oasst1
 
   ```shell
-  xtuner train baichuan_7b_qlora_oasst1
+  xtuner train baichuan_7b_qlora_oasst1_e3
   ```
 
 - Baichuan-7B, Arxiv Gentitle
 
   ```shell
-  xtuner train baichuan_7b_qlora_arxiv
+  xtuner train baichuan_7b_qlora_arxiv_e3
   ```

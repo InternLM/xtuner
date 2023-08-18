@@ -11,7 +11,7 @@
 - InternLM-7B, oasst1
 
   ```shell
-  xtuner chat hf internlm/internlm-7b --adapter xtuner/internlm-7b-qlora-oasst1 --prompt-template openassistant --answer-stop-word "###"
+  xtuner chat hf internlm/internlm-7b --adapter xtuner/internlm-7b-qlora-oasst1 --prompt-template openassistant
   ```
 
 - InternLM-7B, Arxiv Gentitle
@@ -53,7 +53,7 @@
 - Qwen-7B, oasst1
 
   ```shell
-  xtuner chat hf Qwen/Qwen-7B --adapter xtuner/Qwen-7B-qlora-oasst1 --prompt-template openassistant --answer-stop-word "###"
+  xtuner chat hf Qwen/Qwen-7B --adapter xtuner/Qwen-7B-qlora-oasst1 --prompt-template openassistant --answer-stop-word '<|endoftext|>'
   ```
 
 - Qwen-7B, Arxiv Gentitle
@@ -73,7 +73,7 @@
 - Baichuan-7B, oasst1
 
   ```shell
-  xtuner chat hf baichuan-inc/Baichuan-7B --adapter xtuner/Baichuan-7B-qlora-oasst1 --prompt-template openassistant --answer-stop-word "###"
+  xtuner chat hf baichuan-inc/Baichuan-7B --adapter xtuner/Baichuan-7B-qlora-oasst1 --prompt-template openassistant
   ```
 
 - Baichuan-7B, Arxiv Gentitle
