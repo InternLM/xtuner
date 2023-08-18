@@ -17,6 +17,11 @@ def parse_args():
     parser.add_argument('config', help='config file name or path')
     parser.add_argument('--work-dir', help='the dir to save logs and models')
     parser.add_argument(
+        '--deepspeed',
+        type=str,
+        default=None,
+        help='the path to the .json file for deepspeed')
+    parser.add_argument(
         '--amp',
         action='store_true',
         default=False,
@@ -97,6 +102,40 @@ def main():
                 f'`OptimWrapper` but got {optim_wrapper}.')
             cfg.optim_wrapper.type = 'AmpOptimWrapper'
             cfg.optim_wrapper.loss_scale = 'dynamic'
+
+    if args.deepspeed:
+        try:
+            import deepspeed  # pre-check  # noqa: F401
+        except ImportError:
+            raise ImportError(
+                'deepspeed is not installed properly, please check.')
+        optim_wrapper = cfg.optim_wrapper.type
+        from mmengine.optim import DeepSpeedOptimWrapper, OptimWrapper
+        if optim_wrapper == DeepSpeedOptimWrapper:
+            print_log(
+                'Deepspeed training is already enabled in your config.',
+                logger='current',
+                level=logging.WARNING)
+        else:
+            optimizer = cfg.optim_wrapper.optimizer
+            gradient_clipping = 1.0
+            clip_grad = cfg.optim_wrapper.get('clip_grad', None)
+            if clip_grad and clip_grad.get('max_norm'):
+                gradient_clipping = cfg.optim_wrapper.clip_grad.max_norm
+            optim_wrapper = dict(
+                type='DeepSpeedOptimWrapper', optimizer=optimizer)
+            cfg.__setitem__('optim_wrapper', optim_wrapper)
+            if not os.path.isfile(args.deepspeed):
+                try:
+                    args.deepspeed = cfgs_name_path[args.deepspeed]
+                except KeyError:
+                    print(f'Cannot find {args.deepspeed}')
+            strategy = dict(
+                type='DeepSpeedStrategy',
+                config=args.deepspeed,
+                gradient_clipping=gradient_clipping)
+            cfg.__setitem__('strategy', strategy)
+            cfg.runner_type = 'FlexibleRunner'
 
     # enable automatically scaling LR
     if args.auto_scale_lr:
