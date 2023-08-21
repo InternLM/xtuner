@@ -6,7 +6,7 @@ import torch
 from mmengine.config import Config, DictAction
 
 from xtuner.configs import cfgs_name_path
-from xtuner.registry import MODELS, TOKENIZER
+from xtuner.registry import BUILDER
 
 
 def parse_args():
@@ -57,8 +57,8 @@ def main():
     cfg.model.llm.quantization_config = None
     cfg.model.llm.low_cpu_mem_usage = True
     torch_dtype = cfg.model.llm.get('torch_dtype', torch.float16)
-    model = MODELS.build(cfg.model)
-    tokenizer = TOKENIZER.build(cfg.tokenizer)
+    model = BUILDER.build(cfg.model)
+    tokenizer = BUILDER.build(cfg.tokenizer)
     adapter_checkpoint = torch.load(
         args.adapter_checkpoint, map_location='cpu')
     state_dict_key = 'module' if args.is_deepspeed else 'state_dict'

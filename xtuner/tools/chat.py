@@ -8,7 +8,7 @@ from mmengine.config import Config, DictAction
 from transformers import GenerationConfig
 
 from xtuner.configs import cfgs_name_path
-from xtuner.registry import MODELS, TOKENIZER
+from xtuner.registry import BUILDER
 from xtuner.tools.utils import get_chat_utils, update_stop_criteria
 from xtuner.utils import PROMPT_TEMPLATE
 
@@ -126,8 +126,8 @@ def main():
     if args.cfg_options is not None:
         cfg.merge_from_dict(args.cfg_options)
 
-    model = MODELS.build(cfg.model)
-    tokenizer = TOKENIZER.build(cfg.tokenizer)
+    model = BUILDER.build(cfg.model)
+    tokenizer = BUILDER.build(cfg.tokenizer)
 
     if args.adapter is not None:
         adapter = torch.load(args.adapter, map_location='cpu')

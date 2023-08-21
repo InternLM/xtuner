@@ -4,10 +4,10 @@ import os
 import os.path as osp
 
 from mmengine.config import Config, DictAction
+from mmengine.registry import RUNNERS
 from mmengine.runner import Runner
 
 from xtuner.configs import cfgs_name_path
-from xtuner.registry import RUNNERS
 
 
 def parse_args():

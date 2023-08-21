@@ -3,11 +3,10 @@ from mmengine.hooks import Hook
 from mmengine.model import is_model_wrapper
 from transformers import StoppingCriteriaList
 
-from xtuner.registry import HOOKS, TOKENIZER
+from xtuner.registry import BUILDER
 from xtuner.utils import StopWordStoppingCriteria
 
 
-@HOOKS.register_module()
 class SampleGenerateHook(Hook):
 
     def __init__(self,
@@ -21,7 +20,7 @@ class SampleGenerateHook(Hook):
         self.instruction = instruction
         self.every_n_iters = every_n_iters
         self.max_new_tokens = max_new_tokens
-        self.tokenizer = TOKENIZER.build(tokenizer)
+        self.tokenizer = BUILDER.build(tokenizer)
         self.stop_criteria = StoppingCriteriaList()
         if stop_word is not None:
             self.stop_criteria.append(

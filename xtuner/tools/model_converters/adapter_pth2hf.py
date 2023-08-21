@@ -7,7 +7,7 @@ from mmengine.config import Config, DictAction
 from mmengine.utils import mkdir_or_exist
 
 from xtuner.configs import cfgs_name_path
-from xtuner.registry import MODELS
+from xtuner.registry import BUILDER
 
 
 def parse_args():
@@ -59,7 +59,7 @@ def main():
         cfg.model.llm.quantization_config.\
             llm_int8_enable_fp32_cpu_offload = True
 
-    model = MODELS.build(cfg.model)
+    model = BUILDER.build(cfg.model)
 
     adapter_checkpoint = torch.load(
         args.adapter_checkpoint, map_location='cpu')
