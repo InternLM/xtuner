@@ -48,4 +48,20 @@ PROMPT_TEMPLATE = ConfigDict(
     internlm_chat=dict(
         INSTRUCTION_START='<|User|>:{input}<eoh>\n<|Bot|>:',
         INSTRUCTION='<|User|>:{input}<eoh>\n<|Bot|>:'),
+    code_alpaca=dict(
+        INSTRUCTION_START='### Human: {input}\n### Bot: ',
+        INSTRUCTION='### Human: {input}\n### Bot: '),
+    tiny_codes=dict(
+        INSTRUCTION_START='### Human: {input}\n### Bot: ',
+        INSTRUCTION='### Human: {input}\n### Bot: '),
+    colors=dict(
+        INSTRUCTION_START=(
+            'You are a professional color designer. Please provide the '
+            'corresponding colors based on the description of Human.\n'
+            '### Human: {input}\n### Bot: '),
+        INSTRUCTION=('### Human: {input}\n### Bot: ')),
+    lawyer=dict(
+        INSTRUCTION_START=('你现在是一名专业的中国律师，请根据Human的问题给出准确、'
+                           '有理有据的回复。\n\n### Human: {input}\n### Bot: '),
+        INSTRUCTION=('### Human: {input}\n### Bot: ')),
 )
