@@ -15,7 +15,8 @@ from transformers import TrainingArguments
 from xtuner.configs import cfgs_name_path
 from xtuner.datasets.collate_fns import default_collate_fn
 from xtuner.models.fast_forward import dispatch_fast_forward
-from xtuner.models.utils import LoadWoInit, find_all_linear_names
+from xtuner.models.utils import (LoadWoInit, find_all_linear_names,
+                                 traverse_dict)
 from xtuner.registry import BUILDER
 
 
@@ -91,6 +92,7 @@ def main():
         device_map = {'': int(os.environ.get('LOCAL_RANK') or 0)}
         with LoadWoInit():
             cfg.model.device_map = device_map
+            traverse_dict(cfg.model)
             model = BUILDER.build(cfg.model)
         if cfg.get('lora', None):
             lora = BUILDER.build(cfg.lora)
