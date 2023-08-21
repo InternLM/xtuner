@@ -6,13 +6,13 @@ from lagent.actions import GoogleSearch
 from lagent.schema import ActionStatusCode
 
 try:
-    SERPER_KEY = os.environ['SERPER_KEY']
+    SERPER_API_KEY = os.environ['SERPER_API_KEY']
 except Exception:
-    print('Please obtain the `SERPER_KEY` from https://serper.dev and '
-          'set it using `export SERPER_KEY=xxx`.')
+    print('Please obtain the `SERPER_API_KEY` from https://serper.dev and '
+          'set it using `export SERPER_API_KEY=xxx`.')
     sys.exit(1)
 
-search_engine = GoogleSearch(SERPER_KEY)
+search_engine = GoogleSearch(SERPER_API_KEY)
 
 
 def Search(q):
