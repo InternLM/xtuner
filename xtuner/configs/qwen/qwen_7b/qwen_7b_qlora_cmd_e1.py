@@ -145,9 +145,6 @@ custom_hooks = [
         instruction=PROMPT_TEMPLATE.medical.INSTRUCTION_START)
 ]
 
-# defaults to use registries in xtuner
-default_scope = 'xtuner'
-
 # configure default hooks
 default_hooks = dict(
     # record the time of every iteration.
