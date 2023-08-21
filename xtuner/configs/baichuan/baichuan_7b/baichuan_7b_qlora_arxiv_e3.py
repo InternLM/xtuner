@@ -128,7 +128,7 @@ train_cfg = dict(by_epoch=True, max_epochs=max_epochs, val_interval=1)
 #######################################################################
 #                           PART 5  Runtime                           #
 #######################################################################
-# Log the dialogue periodically during the training process，optional
+# Log the dialogue periodically during the training process, optional
 custom_hooks = [
     dict(type=LogSampleHook, tokenizer=tokenizer),
     dict(
