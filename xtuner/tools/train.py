@@ -49,10 +49,10 @@ def parse_args():
         'is allowed.')
     parser.add_argument(
         '--launcher',
-        choices=['none', 'pytorch', 'slurm', 'mpi'],
-        default='none',
+        choices=['pytorch', 'slurm', 'mpi'],
+        default='pytorch',
         help='job launcher')
-    parser.add_argument('--local-rank', type=int, default=0)
+    parser.add_argument('--local_rank', '--local-rank', type=int, default=0)
     args = parser.parse_args()
     return args
 
