@@ -186,7 +186,7 @@ def cli():
                     f"--node_rank={os.environ.get('NODE_RANK', 0)}",
                     f"--nproc_per_node={os.environ.get('NPROC_PER_NODE', 1)}",
                     f"--master_addr={os.environ.get('ADDR', '127.0.0.1')}",
-                    f"--master_port={os.environ.get('PORT', 29500)}"
+                    f"--master_port={os.environ.get('PORT', 0)}"
                 ]
                 subprocess.run(['torchrun'] + torchrun_args + [module] +
                                args[n_arg + 1:])
