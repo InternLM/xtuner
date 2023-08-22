@@ -1,6 +1,6 @@
 from mmengine.config import Config
 
-from xtuner.registry import MODELS, TOKENIZER
+from xtuner.registry import BUILDER
 from .base import model_qlora as model_qlora_cfg_dict
 from .base import tokenizer as tokenizer_cfg_dict
 
@@ -18,11 +18,11 @@ def baichuan_7b_qlora(model_name_or_path=None,
     if lora_config:
         model_cfg.lora = lora_config
 
-    model = MODELS.build(model_cfg)
+    model = BUILDER.build(model_cfg)
     if return_tokenizer:
         tokenizer_cfg = Config(tokenizer_cfg_dict)
         tokenizer_cfg.pretrained_model_name_or_path = model_name_or_path
-        tokenizer = TOKENIZER.build(tokenizer_cfg)
+        tokenizer = BUILDER.build(tokenizer_cfg)
         return model.llm, tokenizer
     else:
         return model.llm
@@ -41,11 +41,11 @@ def baichuan_13b_base_qlora(model_name_or_path=None,
     if lora_config:
         model_cfg.lora = lora_config
 
-    model = MODELS.build(model_cfg)
+    model = BUILDER.build(model_cfg)
     if return_tokenizer:
         tokenizer_cfg = Config(tokenizer_cfg_dict)
         tokenizer_cfg.pretrained_model_name_or_path = model_name_or_path
-        tokenizer = TOKENIZER.build(tokenizer_cfg)
+        tokenizer = BUILDER.build(tokenizer_cfg)
         return model.llm, tokenizer
     else:
         return model.llm
@@ -64,11 +64,11 @@ def baichuan_13b_chat_qlora(model_name_or_path=None,
     if lora_config:
         model_cfg.lora = lora_config
 
-    model = MODELS.build(model_cfg)
+    model = BUILDER.build(model_cfg)
     if return_tokenizer:
         tokenizer_cfg = Config(tokenizer_cfg_dict)
         tokenizer_cfg.pretrained_model_name_or_path = model_name_or_path
-        tokenizer = TOKENIZER.build(tokenizer_cfg)
+        tokenizer = BUILDER.build(tokenizer_cfg)
         return model.llm, tokenizer
     else:
         return model.llm

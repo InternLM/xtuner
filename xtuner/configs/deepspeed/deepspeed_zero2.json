@@ -15,6 +15,6 @@
     "gradient_clipping": 1.0,
     "wall_clock_breakdown": false,
     "bf16": {
-      "enabled": true
+      "enabled": false
     }
   }

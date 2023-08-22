@@ -40,6 +40,7 @@ max_norm = 1  # grad clip
 
 # other
 max_length = 2048
+pack_to_max_length = True
 generate_test_freq = 500
 #######################################################################
 #                      PART 2  Model & Tokenizer                      #
@@ -89,7 +90,8 @@ train_dataset = dict(
         'doi', 'report-no', 'categories', 'license', 'abstract', 'versions',
         'update_date', 'authors_parsed'
     ],
-    pack_to_max_length=True)
+    shuffle_before_pack=True,
+    pack_to_max_length=pack_to_max_length)
 
 train_dataloader = dict(
     batch_size=batch_size,
@@ -126,7 +128,7 @@ train_cfg = dict(by_epoch=True, max_epochs=max_epochs, val_interval=1)
 #######################################################################
 #                           PART 5  Runtime                           #
 #######################################################################
-# Log the dialogue periodically during the training process，optional
+# Log the dialogue periodically during the training process, optional
 custom_hooks = [
     dict(type=LogSampleHook, tokenizer=tokenizer),
     dict(
@@ -171,9 +173,6 @@ custom_hooks = [
         ],
         instruction=PROMPT_TEMPLATE.title.INSTRUCTION_START)
 ]
-
-# defaults to use registries in xtuner
-default_scope = 'xtuner'
 
 # configure default hooks
 default_hooks = dict(

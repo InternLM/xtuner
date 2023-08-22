@@ -30,7 +30,7 @@ def Solve(equations_str):
                     Eq(
                         eval(left.strip(), {}, vars),
                         eval(right.strip(), {}, vars)))
-        solutions = solve(eqs, vars)
+        solutions = solve(eqs, vars, dict=True)
 
         vars_values = {var: [] for var in vars_list}
         if isinstance(solutions, list):

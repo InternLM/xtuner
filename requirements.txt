@@ -1,13 +1,11 @@
-beautifulsoup4
 bitsandbytes>=0.40.0
 datasets
 einops
-fasttext-wheel
+lagent
 mmengine>=0.8.4
 peft>=0.4.0
 scipy
 SentencePiece
-spacy
 tiktoken
 torch
 transformers>=4.31.0
