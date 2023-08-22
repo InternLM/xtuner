@@ -64,4 +64,10 @@ PROMPT_TEMPLATE = ConfigDict(
         INSTRUCTION_START=('你现在是一名专业的中国律师，请根据Human的问题给出准确、'
                            '有理有据的回复。\n\n### Human: {input}\n### Bot: '),
         INSTRUCTION=('### Human: {input}\n### Bot: ')),
+    sql=dict(
+        INSTRUCTION_START=('If you are an expert in SQL, please generate a '
+                           'good SQL Query for Question based on the CREATE '
+                           'TABLE statement.\n'
+                           '### Question: {input}\n### Query: '),
+        INSTRUCTION=('### Question: {input}\n### Query: ')),
 )
