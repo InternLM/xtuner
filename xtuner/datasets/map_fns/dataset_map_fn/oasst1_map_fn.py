@@ -1,25 +1,30 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-def oasst1_map_fn(example):
-    r"""Example before preprocessing: example['text'] = '### Human: Can you
-    explain xxx### Assistant: Sure!xxx### Human: I didn't understand how
-    xxx### Assistant: It has to do with a process xxx.'.
+def oasst1_dataset_map_fn(example):
+    r"""Example before preprocessing:
+        example['text'] = '### Human: Can you explain xxx'
+                          '### Assistant: Sure! xxx'
+                          '### Human: I didn't understand how xxx'
+                          '### Assistant: It has to do with a process xxx.'
 
     Example after preprocessing:
         example['conversation'] = [
             {
-                'input': '### Human: Can you explain xxx',
-                'output': '### Assistant: Sure! xxx'
+                'input': 'Can you explain xxx',
+                'output': 'Sure! xxx'
             },
             {
-                'input': '### Human: I didn't understand how xxx',
-                'output': '### Assistant: It has to do with a process xxx.'
+                'input': 'I didn't understand how xxx',
+                'output': 'It has to do with a process xxx.'
             }
         ]
     """
-    data = [
-        '### ' + sentence.strip()
-        for sentence in example['text'].strip().split('###') if sentence != ''
-    ]
+    data = []
+    for sentence in example['text'].strip().split('###'):
+        sentence = sentence.strip()
+        if sentence[:6] == 'Human:':
+            data.append(sentence[6:].strip())
+        elif sentence[:10] == 'Assistant:':
+            data.append(sentence[10:].strip())
     if len(data) % 2:
         # The last round of conversation solely consists of input
         # without any output.

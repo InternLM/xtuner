@@ -1,13 +1,8 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-def openorca_map_fn(example):
-    PROMPT = ('Below is an instruction that describes a task. '
-              'Write a response that appropriately completes the request.\n\n'
-              '### Instruction:\n{question}\n\n'
-              '### Response: ')
-
+def openorca_dataset_map_fn(example):
     return {
         'conversation': [{
-            'input': PROMPT.format(**example),
+            'input': example['question'],
             'output': example['response']
         }]
     }

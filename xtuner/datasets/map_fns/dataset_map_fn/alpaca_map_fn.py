@@ -1,29 +1,15 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-def alpaca_map_fn(example):
-    PROMPT = {
-        'with_input':
-        ('Below is an instruction that describes a task, paired with an '
-         'input that provides further context. '
-         'Write a response that appropriately completes the request.\n\n'
-         '### Instruction:\n{instruction}\n\n### Input:\n{input}\n\n'
-         '### Response: '),
-        'without_input':
-        ('Below is an instruction that describes a task. '
-         'Write a response that appropriately completes the request.\n\n'
-         '### Instruction:\n{instruction}\n\n'
-         '### Response: ')
-    }
-    if example.get('input', '') != '':
-        prompt_template = PROMPT['with_input']
-    else:
-        prompt_template = PROMPT['without_input']
-
+def alpaca_dataset_map_fn(example):
     if example.get('output', '') == '<nooutput>':
         return {'conversation': [{'input': '', 'output': ''}]}
     else:
+        input = example.get('input', '')
+        instruction = example['instruction']
         return {
             'conversation': [{
-                'input': prompt_template.format(**example),
-                'output': example['output']
+                'input':
+                f'{instruction} {input}' if input != '' else instruction,
+                'output':
+                example['output']
             }]
         }
