@@ -3,12 +3,12 @@ from functools import partial
 from datasets import load_dataset
 from mmengine.config import Config
 from mmengine.dataset import DefaultSampler
-from mmengine.registry import DATASETS
 from mmengine.runner import Runner
 
 from xtuner.datasets import process_hf_dataset
 from xtuner.datasets.collate_fns import default_collate_fn
 from xtuner.datasets.map_fns import alpaca_map_fn
+from xtuner.registry import BUILDER
 
 
 def alpaca_dataloader(tokenizer,
@@ -50,7 +50,7 @@ def alpaca_dataset(tokenizer,
         remove_columns=['instruction', 'text'],
         concat_to_max_length=concat_to_max_length)
     ds_cfg = Config(ds_cfg)
-    ds = DATASETS.build(ds_cfg)
+    ds = BUILDER.build(ds_cfg)
     return ds
 
 

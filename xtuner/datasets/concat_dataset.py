@@ -1,7 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from torch.utils.data import ConcatDataset as _ConcatDataset
 
-from xtuner.registry import DATASETS
+from xtuner.registry import BUILDER
 
 
 class ConcatDataset(_ConcatDataset):
@@ -12,7 +12,7 @@ class ConcatDataset(_ConcatDataset):
         for name, cfg in datasets_cfg.items():
             if datasets_kwargs is not None:
                 cfg.update(datasets_kwargs)
-            datasets.append(DATASETS.build(cfg))
+            datasets.append(BUILDER.build(cfg))
             names.append(name)
         self.names = names
         super().__init__(datasets=datasets)
