@@ -83,10 +83,15 @@ def parse_args():
 
 def get_input():
     """Helper function for getting input from users."""
-
-    print('\ndouble enter to end input >>> ', end='')
     sentinel = ''  # ends when this string is seen
-    return '\n'.join(iter(input, sentinel))
+    result = None
+    while result is None:
+        print('\ndouble enter to end input >>> ', end='')
+        try:
+            result = '\n'.join(iter(input, sentinel))
+        except UnicodeDecodeError:
+            print('Invalid characters detected. Please enter again.')
+    return result
 
 
 def main():
