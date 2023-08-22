@@ -117,7 +117,7 @@ train_cfg = dict(by_epoch=True, max_epochs=max_epochs, val_interval=1)
 #######################################################################
 #                           PART 5  Runtime                           #
 #######################################################################
-# Log the dialogue periodically during the training process，optional
+# Log the dialogue periodically during the training process, optional
 custom_hooks = [
     dict(type=LogSampleHook, tokenizer=tokenizer),
     dict(
@@ -131,9 +131,6 @@ custom_hooks = [
         ],
         instruction=PROMPT_TEMPLATE.moss_sft.INSTRUCTION_START)
 ]
-
-# defaults to use registries in xtuner
-default_scope = 'xtuner'
 
 # configure default hooks
 default_hooks = dict(

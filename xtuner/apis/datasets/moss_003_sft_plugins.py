@@ -2,11 +2,11 @@ from functools import partial
 
 from mmengine.config import Config
 from mmengine.dataset import DefaultSampler
-from mmengine.registry import DATASETS
 from mmengine.runner import Runner
 
 from xtuner.datasets import MOSSSFTDataset
 from xtuner.datasets.collate_fns import default_collate_fn
+from xtuner.registry import BUILDER
 
 
 def moss_003_sft_plugins_dataloader(tokenizer,
@@ -46,7 +46,7 @@ def moss_003_sft_plugins_dataset(tokenizer,
         tokenizer=tokenizer,
         max_length=max_length)
     ds_cfg = Config(ds_cfg)
-    ds = DATASETS.build(ds_cfg)
+    ds = BUILDER.build(ds_cfg)
     return ds
 
 

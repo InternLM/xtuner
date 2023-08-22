@@ -9,7 +9,7 @@ from mmengine.logging import print_log
 from torch.utils.data import Dataset
 from tqdm import tqdm
 
-from xtuner.registry import TOKENIZER
+from xtuner.registry import BUILDER
 
 
 class MOSSSFTDataset(Dataset):
@@ -20,7 +20,7 @@ class MOSSSFTDataset(Dataset):
         self.src_data_file = data_file
         if isinstance(tokenizer, dict) or isinstance(
                 tokenizer, Config) or isinstance(tokenizer, ConfigDict):
-            self.tokenizer = TOKENIZER.build(tokenizer)
+            self.tokenizer = BUILDER.build(tokenizer)
         else:
             self.tokenizer = tokenizer
         self.max_length = max_length

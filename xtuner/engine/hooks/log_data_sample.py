@@ -1,14 +1,13 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from mmengine.hooks import Hook
 
-from xtuner.registry import HOOKS, TOKENIZER
+from xtuner.registry import BUILDER
 
 
-@HOOKS.register_module()
 class LogSampleHook(Hook):
 
     def __init__(self, tokenizer):
-        self.tokenizer = TOKENIZER.build(tokenizer)
+        self.tokenizer = BUILDER.build(tokenizer)
 
     def log(self, runner, dataset, mode='train'):
         runner.logger.info(f'Num {mode} samples {len(dataset)}')
