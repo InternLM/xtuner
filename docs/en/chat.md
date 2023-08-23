@@ -97,12 +97,6 @@
 
 ## Chat with [Baichuan](https://github.com/baichuan-inc)
 
-- Baichuan-7B, Alpaca-enzh
-
-  ```shell
-  xtuner chat hf baichuan-inc/Baichuan-7B --adapter xtuner/Baichuan-7B-qlora-alpaca --prompt-template alpaca
-  ```
-
 - Baichuan-7B, oasst1
 
   ```shell
@@ -113,4 +107,10 @@
 
   ```shell
   xtuner chat hf baichuan-inc/Baichuan-7B --adapter xtuner/Baichuan-7B-qlora-arxiv-gentitle --prompt-template title
+  ```
+
+- Baichuan-7B, Alpaca-enzh
+
+  ```shell
+  xtuner chat hf baichuan-inc/Baichuan-7B --adapter xtuner/Baichuan-7B-qlora-alpaca --prompt-template alpaca
   ```
