@@ -8,7 +8,7 @@ from mmengine.config import Config, DictAction
 from transformers import GenerationConfig
 
 from xtuner.configs import cfgs_name_path
-from xtuner.registry import MODELS, TOKENIZER
+from xtuner.registry import BUILDER
 from xtuner.tools.utils import get_chat_utils, update_stop_criteria
 from xtuner.utils import PROMPT_TEMPLATE
 
@@ -16,7 +16,10 @@ from xtuner.utils import PROMPT_TEMPLATE
 def parse_args():
     parser = argparse.ArgumentParser(
         description='Chat with a pretrained model')
-    parser.add_argument('config', help='config file name or path')
+    parser.add_argument(
+        'config',
+        help='config file name or path. Note: Please use the original '
+        'configs, instead of the automatically saved log configs.')
     parser.add_argument('--adapter', default=None, help='adapter model')
     parser.add_argument(
         '--is-deepspeed',
@@ -80,10 +83,15 @@ def parse_args():
 
 def get_input():
     """Helper function for getting input from users."""
-
-    print('\ndouble enter to end input >>> ', end='')
     sentinel = ''  # ends when this string is seen
-    return '\n'.join(iter(input, sentinel))
+    result = None
+    while result is None:
+        print('\ndouble enter to end input >>> ', end='')
+        try:
+            result = '\n'.join(iter(input, sentinel))
+        except UnicodeDecodeError:
+            print('Invalid characters detected. Please enter again.')
+    return result
 
 
 def main():
@@ -116,19 +124,19 @@ def main():
         try:
             args.config = cfgs_name_path[args.config]
         except KeyError:
-            print(f'Cannot find {args.config}')
+            raise FileNotFoundError(f'Cannot find {args.config}')
 
     # load config
     cfg = Config.fromfile(args.config)
     if args.cfg_options is not None:
         cfg.merge_from_dict(args.cfg_options)
 
-    model = MODELS.build(cfg.model)
-    tokenizer = TOKENIZER.build(cfg.tokenizer)
+    model = BUILDER.build(cfg.model)
+    tokenizer = BUILDER.build(cfg.tokenizer)
 
     if args.adapter is not None:
-        state_dict_key = 'module' if args.is_deepspeed else 'state_dict'
         adapter = torch.load(args.adapter, map_location='cpu')
+        state_dict_key = 'module' if args.is_deepspeed else 'state_dict'
         model.load_state_dict(adapter[state_dict_key], strict=False)
         print(f'Load adapter from {args.adapter}')
 

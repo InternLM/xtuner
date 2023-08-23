@@ -1,89 +1,28 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-import dataclasses
 from collections import OrderedDict
 
-import torch
-import transformers
-from mmengine import print_log
 from mmengine.config import Config, ConfigDict
 from mmengine.model import BaseModel
 from mmengine.runner import load_checkpoint
 from peft import PeftType, get_peft_model, prepare_model_for_kbit_training
 from torch import nn
 
-from xtuner.registry import LLM, MODELS, TOKENIZER
-from .utils import dispatch_fast_forward
-
-
-def traverse_dict(d):
-    if isinstance(d, dict):
-        for key, value in d.items():
-            if isinstance(value, dict):
-                if 'type' in value and dataclasses.is_dataclass(value['type']):
-                    builder = value.pop('type')
-                    new_value = builder(**value)
-                    d[key] = new_value
-                    print_log(f'{key} convert to {builder}')
-                else:
-                    traverse_dict(value)
-    elif isinstance(d, list):
-        for element in d:
-            traverse_dict(element)
-
-
-def smart_tokenizer_and_embedding_resize(
-    tokenizer: transformers.PreTrainedTokenizer,
-    model: transformers.PreTrainedModel,
-):
-    """Resize tokenizer and embedding.
-
-    Note: This is the unoptimized version that may make your embedding size
-    not be divisible by 64.
-    """
-    model_vocab_size = model.get_output_embeddings().weight.size(0)
-    model.resize_token_embeddings(len(tokenizer))
-    num_new_tokens = len(tokenizer) - model_vocab_size
-
-    if num_new_tokens > 0:
-        input_embeddings = model.get_input_embeddings().weight.data
-        output_embeddings = model.get_output_embeddings().weight.data
-
-        input_embeddings_avg = input_embeddings[:-num_new_tokens].mean(
-            dim=0, keepdim=True)
-        output_embeddings_avg = output_embeddings[:-num_new_tokens].mean(
-            dim=0, keepdim=True)
-
-        input_embeddings[-num_new_tokens:] = input_embeddings_avg
-        output_embeddings[-num_new_tokens:] = output_embeddings_avg
-
-
-def find_all_linear_names(model):
-    lora_module_names = set()
-    for name, module in model.named_modules():
-        if isinstance(module, torch.nn.Linear):
-            names = name.split('.')
-            lora_module_names.add(names[0] if len(names) == 1 else names[-1])
-
-    if 'lm_head' in lora_module_names:  # needed for 16-bit
-        lora_module_names.remove('lm_head')
-    return list(lora_module_names)
+from xtuner.registry import BUILDER
+from .fast_forward import dispatch_fast_forward
+from .utils import LoadWoInit, find_all_linear_names, traverse_dict
 
 
 class SupervisedFinetune(BaseModel):
 
-    def __init__(self, llm, tokenizer=None, lora=None, peft_model=None):
+    def __init__(self, llm, lora=None, peft_model=None):
         super().__init__()
-        self.llm = self._build_from_cfg_or_module(llm, LLM)
+        with LoadWoInit():
+            self.llm = self._build_from_cfg_or_module(llm)
         self.llm.config.use_cache = False
-        if tokenizer is not None:
-            if isinstance(tokenizer, dict) or isinstance(
-                    tokenizer, Config) or isinstance(tokenizer, ConfigDict):
-                tokenizer = TOKENIZER.build(tokenizer)
-            smart_tokenizer_and_embedding_resize(tokenizer, self.llm)
 
         if isinstance(lora, dict) or isinstance(lora, Config) or isinstance(
                 lora, ConfigDict):
-            self.lora = MODELS.build(lora)
+            self.lora = BUILDER.build(lora)
         else:
             self.lora = lora
         self.peft_model = peft_model
@@ -108,12 +47,12 @@ class SupervisedFinetune(BaseModel):
     def init_weights(self):
         pass
 
-    def _build_from_cfg_or_module(self, cfg_or_mod, registry):
+    def _build_from_cfg_or_module(self, cfg_or_mod):
         if isinstance(cfg_or_mod, nn.Module):
             return cfg_or_mod
         elif isinstance(cfg_or_mod, dict):
             traverse_dict(cfg_or_mod)
-            return registry.build(cfg_or_mod)
+            return BUILDER.build(cfg_or_mod)
         else:
             raise NotImplementedError
 

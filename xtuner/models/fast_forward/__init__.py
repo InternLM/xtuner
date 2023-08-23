@@ -6,7 +6,8 @@ import torch
 from mmengine import print_log
 from mmengine.utils import digit_version
 
-from .fast_forward import internlm_attn_forward, llama_attn_forward
+from .internlm_attn import internlm_attn_forward
+from .llama_attn import llama_attn_forward
 
 
 def dispatch_llama_attn_forward(model):
@@ -40,3 +41,6 @@ def dispatch_internlm_attn_forward(model):
 def dispatch_fast_forward(model):
     dispatch_llama_attn_forward(model)
     dispatch_internlm_attn_forward(model)
+
+
+__all__ = ['dispatch_fast_forward']

@@ -1,5 +1,6 @@
 import logging
 import os
+import random
 import subprocess
 import sys
 
@@ -12,8 +13,8 @@ from xtuner.tools.model_converters import (adapter_pth2hf, merge_adapter,
                                            merge_adapter_hf, split_hf_llm)
 
 # Define valid modes
-MODES = ('list-cfg', 'copy-cfg', 'train', 'dist_train', 'test', 'chat',
-         'convert', 'preprocess')
+MODES = ('list-cfg', 'copy-cfg', 'train', 'test', 'chat', 'convert',
+         'preprocess')
 
 CLI_HELP_MSG = \
     f"""
@@ -34,7 +35,7 @@ CLI_HELP_MSG = \
         3-1. Fine-tune LLMs by a single GPU:
             xtuner train $CONFIG
         3-2. Fine-tune LLMs by multiple GPUs:
-            NNODES=$NNODES NODE_RANK=$NODE_RANK PORT=$PORT xtuner dist_train $CONFIG $GPUS
+            NPROC_PER_NODE=$NGPUS NNODES=$NNODES NODE_RANK=$NODE_RANK PORT=$PORT ADDR=$ADDR xtuner dist_train $CONFIG $GPUS
         4-1. Chat with LLMs with HuggingFace's model and adapter:
             xtuner chat hf $NAME_OR_PATH_TO_HF_MODEL --adapter $NAME_OR_PATH_TO_HF_ADAPTER --prompt-template $PROMPT_TEMPLATE
         4-2. Chat with LLMs with xTuner's config and adapter:
@@ -162,8 +163,6 @@ modes = {
     }
 }
 
-dist_modes = {'dist_train': train.__file__}
-
 
 def cli():
     args = sys.argv[1:]
@@ -183,33 +182,20 @@ def cli():
             if callable(module):
                 module()
             else:
-                subprocess.run(['python3', module] + args[n_arg + 1:])
-        except Exception as e:
-            print_log(f"WARNING: command error: '{e}'!", 'current',
-                      logging.WARNING)
-            print_log(CLI_HELP_MSG, 'current', logging.WARNING)
-            return
-    elif args[0].lower() in dist_modes:
-        try:
-            module = dist_modes[args[0].lower()]
-            n_arg = 0
-            while not isinstance(module, str) and not callable(module):
-                n_arg += 1
-                module = module[args[n_arg].lower()]
-            if callable(module):
-                module()
-            else:
-                dist_args = [
+                port = os.environ.get('PORT', None)
+                if port is None:
+                    port = random.randint(20000, 29999)
+                    print_log(f'Use random port: {port}', 'current',
+                              logging.WARNING)
+                torchrun_args = [
                     f"--nnodes={os.environ.get('NNODES', 1)}",
                     f"--node_rank={os.environ.get('NODE_RANK', 0)}",
-                    f'--nproc_per_node={args[n_arg + 2]}',
-                    f"--master_port={os.environ.get('PORT', 29500)}"
+                    f"--nproc_per_node={os.environ.get('NPROC_PER_NODE', 1)}",
+                    f"--master_addr={os.environ.get('ADDR', '127.0.0.1')}",
+                    f'--master_port={port}'
                 ]
-                # remove GPUS arg
-                del args[n_arg + 2]
-                subprocess.run(['python3', '-m', 'torch.distributed.launch'] +
-                               dist_args + [module] + args[n_arg + 1:] +
-                               ['--launcher', 'pytorch'])
+                subprocess.run(['torchrun'] + torchrun_args + [module] +
+                               args[n_arg + 1:])
         except Exception as e:
             print_log(f"WARNING: command error: '{e}'!", 'current',
                       logging.WARNING)

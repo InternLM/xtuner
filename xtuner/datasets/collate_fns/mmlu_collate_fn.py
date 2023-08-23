@@ -7,9 +7,9 @@ from torch.nn.utils.rnn import pad_sequence
 from xtuner.utils import DEFAULT_PAD_TOKEN_INDEX, IGNORE_INDEX
 
 
-def mmlu_collate_fn(
-        instances: Sequence[Dict],
-        pad_index: int = DEFAULT_PAD_TOKEN_INDEX) -> Dict[str, torch.Tensor]:
+def mmlu_collate_fn(instances: Sequence[Dict],
+                    pad_index: int = DEFAULT_PAD_TOKEN_INDEX,
+                    return_hf_format: bool = False) -> Dict[str, torch.Tensor]:
     input_ids = []
     labels = []
     data_samples = {'labels': [], 'subjects': []}
@@ -33,4 +33,7 @@ def mmlu_collate_fn(
         'labels': labels
     }
 
-    return {'data': data_dict, 'data_samples': data_samples}
+    if return_hf_format:
+        return data_dict
+    else:
+        return {'data': data_dict, 'data_samples': None}
