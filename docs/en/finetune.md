@@ -1,6 +1,6 @@
 # Fine-tune the pretrained LLMs
 
-## Fine-tune [InternLM](https://github.com/InternLM/InternLM)
+## QLoRA Fine-tune [InternLM](https://github.com/InternLM/InternLM)
 
 - InternLM-7B, oasst1
 
@@ -51,7 +51,7 @@
   ```
 
 
-## Fine-tune [Llama2](https://github.com/facebookresearch/llama)
+## QLoRA Fine-tune [Llama2](https://github.com/facebookresearch/llama)
 
 > Don't forget to use `huggingface-cli login` and input your access token first to access Llama2! See [here](https://huggingface.co/docs/hub/security-tokens#user-access-tokens) to learn how to obtain your access token.
 
@@ -68,7 +68,7 @@
   xtuner train llama2_7b_qlora_arxiv_e3
   ```
 
-## Fine-tune [Qwen](https://github.com/QwenLM)
+## QLoRA Fine-tune [Qwen](https://github.com/QwenLM)
 
 - Qwen-7B, MOSS-003-SFT **(plugins!)**
 
@@ -96,7 +96,7 @@
   ```
 
 
-## Fine-tune [Baichuan](https://github.com/baichuan-inc)
+## QLoRA Fine-tune [Baichuan](https://github.com/baichuan-inc)
 
 - Baichuan-7B, oasst1
 
