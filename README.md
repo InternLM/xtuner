@@ -170,7 +170,7 @@ XTuner supports the efficient fine-tune (*e.g.*, QLoRA) for LLMs.
   # On a single GPU
   xtuner train internlm_7b_qlora_oasst1_e3
   # On multiple GPUs
-  xtuner dist_train internlm_7b_qlora_oasst1_e3 ${GPU_NUM}
+  NPROC_PER_NODE=${GPU_NUM} xtuner train internlm_7b_qlora_oasst1_e3
   ```
 
   For more usages, please see [finetune.md](./docs/en/finetune.md).
