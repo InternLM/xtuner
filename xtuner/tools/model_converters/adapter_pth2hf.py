@@ -1,6 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import argparse
 import os
+import shutil
 
 import torch
 from mmengine.config import Config, DictAction
@@ -67,10 +68,11 @@ def main():
     model.load_state_dict(adapter_checkpoint[state_dict_key], strict=False)
     print(f'Load adapter from {args.adapter_checkpoint}')
 
-    adapter_path = os.path.join(args.save_dir, 'adapter')
-    mkdir_or_exist(adapter_path)
-    model.llm.save_pretrained(adapter_path)
-    print(f'Save to {adapter_path}')
+    mkdir_or_exist(args.save_dir)
+    model.llm.save_pretrained(args.save_dir)
+    shutil.copyfile(args.config, os.path.join(args.save_dir,
+                                              'xtuner_config.py'))
+    print(f'Save to {args.save_dir}')
 
 
 if __name__ == '__main__':
