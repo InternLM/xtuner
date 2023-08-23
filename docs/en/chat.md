@@ -38,7 +38,7 @@
   xtuner chat hf internlm/internlm-7b --adapter xtuner/internlm-7b-qlora-lawyer --prompt-template lawyer
   ```
 
-- InternLM-7B, Open-platypus
+- InternLM-7B, Open-Platypus
 
   ```shell
   xtuner chat hf internlm/internlm-7b --adapter xtuner/internlm-7b-qlora-open-platypus --prompt-template alpaca
