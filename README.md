@@ -91,7 +91,6 @@ XTuner is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](
   <li><a href="http://arxiv.org/abs/2305.14314">QLoRA</a></li>
   <li><a href="http://arxiv.org/abs/2106.09685">LoRA</a></li>
   <li>Full parameter fine-tune</li>
-  <li>...</li>
 </ul>
 </td>
 </tr>
