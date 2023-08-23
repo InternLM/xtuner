@@ -106,7 +106,7 @@
 - Baichuan-7B, Arxiv Gentitle
 
   ```shell
-  xtuner chat hf baichuan-inc/Baichuan-7B --adapter xtuner/Baichuan-7B-qlora-arxiv-gentitle --prompt-template title
+  xtuner chat hf baichuan-inc/Baichuan-7B --adapter xtuner/Baichuan-7B-qlora-arxiv-gentitle --prompt-template title --no-streamer
   ```
 
 - Baichuan-7B, Alpaca
