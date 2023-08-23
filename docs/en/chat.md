@@ -2,12 +2,6 @@
 
 ## Chat with [InternLM](https://github.com/InternLM/InternLM)
 
-- InternLM-7B, Open-platypus
-
-  ```shell
-  xtuner chat hf internlm/internlm-7b --adapter xtuner/internlm-7b-qlora-open-platypus --prompt-template alpaca
-  ```
-
 - InternLM-7B, Alpaca
 
   ```shell
@@ -50,6 +44,11 @@
   xtuner chat hf internlm/internlm-7b --adapter xtuner/internlm-7b-qlora-lawyer --prompt-template lawyer
   ```
 
+- InternLM-7B, Open-platypus
+
+  ```shell
+  xtuner chat hf internlm/internlm-7b --adapter xtuner/internlm-7b-qlora-open-platypus --prompt-template alpaca
+  ```
 
 ## Chat with [Llama2](https://github.com/facebookresearch/llama)
 
