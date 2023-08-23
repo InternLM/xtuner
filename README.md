@@ -26,9 +26,9 @@ XTuner is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](
 
 ## 🌟 Demos
 
-- QLoRA fine-tune for InternLM-7B [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1yzGeYXayLomNQjLD4vC6wgUHvei3ezt4?usp=sharing)
-- Chat with Llama2-7B-moss-003-sft (plugins!) [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](<>)
-- Integrate XTuner into HuggingFace's pipeline [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1eBI9yiOkX-t7P-0-t9vS8y1x5KmWrkoU?usp=sharing)
+- QLoRA Fine-tune [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1yzGeYXayLomNQjLD4vC6wgUHvei3ezt4?usp=sharing)
+- Plugin-based Chat [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](<>)
+- Ready-to-use models and datasets from XTuner API [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1eBI9yiOkX-t7P-0-t9vS8y1x5KmWrkoU?usp=sharing)
 
 ## 🔥 Supports
 
