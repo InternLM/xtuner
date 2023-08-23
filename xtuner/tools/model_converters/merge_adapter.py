@@ -6,16 +6,23 @@ import torch
 from mmengine.config import Config, DictAction
 
 from xtuner.configs import cfgs_name_path
-from xtuner.registry import MODELS, TOKENIZER
+from xtuner.registry import BUILDER
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Merge a pth adapter to LLM')
-    parser.add_argument('config', help='config file name or path')
+    parser.add_argument(
+        'config',
+        help='config file name or path. Note: Please use the original '
+        'configs, instead of the automatically saved log configs.')
     parser.add_argument('adapter_checkpoint', help='adapter checkpoint file')
     parser.add_argument(
         'save_dir', help='the directory to save the merged model')
     parser.add_argument('--max-shard-size', type=str, default='2GB')
+    parser.add_argument(
+        '--is-deepspeed',
+        action='store_true',
+        help='whether the adapter is saved from deepspeed')
     parser.add_argument(
         '--cfg-options',
         nargs='+',
@@ -38,7 +45,7 @@ def main():
         try:
             args.config = cfgs_name_path[args.config]
         except KeyError:
-            print(f'Cannot find {args.config}')
+            raise FileNotFoundError(f'Cannot find {args.config}')
 
     # load config
     cfg = Config.fromfile(args.config)
@@ -50,11 +57,12 @@ def main():
     cfg.model.llm.quantization_config = None
     cfg.model.llm.low_cpu_mem_usage = True
     torch_dtype = cfg.model.llm.get('torch_dtype', torch.float16)
-    model = MODELS.build(cfg.model)
-    tokenizer = TOKENIZER.build(cfg.tokenizer)
+    model = BUILDER.build(cfg.model)
+    tokenizer = BUILDER.build(cfg.tokenizer)
     adapter_checkpoint = torch.load(
         args.adapter_checkpoint, map_location='cpu')
-    model.load_state_dict(adapter_checkpoint['state_dict'], strict=False)
+    state_dict_key = 'module' if args.is_deepspeed else 'state_dict'
+    model.load_state_dict(adapter_checkpoint[state_dict_key], strict=False)
     print(f'Load adapter from {args.adapter_checkpoint}')
 
     model = model.llm

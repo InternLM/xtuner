@@ -8,10 +8,9 @@ from mmengine.logging import print_log
 from rich.console import Console
 from rich.table import Table
 
-from xtuner.registry import METRICS, TOKENIZER
+from xtuner.registry import BUILDER
 
 
-@METRICS.register_module()
 class MMLUMetric(BaseMetric):
     METAINFO = {
         'subcategories': {
@@ -91,7 +90,7 @@ class MMLUMetric(BaseMetric):
 
     def __init__(self, tokenizer, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        tokenizer = TOKENIZER.build(tokenizer)
+        tokenizer = BUILDER.build(tokenizer)
         self.abcd_idx = [
             tokenizer('A', add_special_tokens=False).input_ids[0],
             tokenizer('B', add_special_tokens=False).input_ids[0],

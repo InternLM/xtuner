@@ -4,15 +4,18 @@ import os
 import os.path as osp
 
 from mmengine.config import Config, DictAction
+from mmengine.registry import RUNNERS
 from mmengine.runner import Runner
 
 from xtuner.configs import cfgs_name_path
-from xtuner.registry import RUNNERS
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Test model')
-    parser.add_argument('config', help='config file name or path')
+    parser.add_argument(
+        'config',
+        help='config file name or path. Note: Please use the original '
+        'configs, instead of the automatically saved log configs.')
     parser.add_argument('--checkpoint', default=None, help='checkpoint file')
     parser.add_argument(
         '--work-dir',
@@ -29,12 +32,9 @@ def parse_args():
         'is allowed.')
     parser.add_argument(
         '--launcher',
-        choices=['none', 'pytorch', 'slurm', 'mpi'],
-        default='none',
+        choices=['pytorch', 'slurm', 'mpi'],
+        default='pytorch',
         help='job launcher')
-    # When using PyTorch version >= 2.0.0, the `torch.distributed.launch`
-    # will pass the `--local-rank` parameter to `tools/train.py` instead
-    # of `--local_rank`.
     parser.add_argument('--local_rank', '--local-rank', type=int, default=0)
     args = parser.parse_args()
     if 'LOCAL_RANK' not in os.environ:
@@ -50,7 +50,7 @@ def main():
         try:
             args.config = cfgs_name_path[args.config]
         except KeyError:
-            print(f'Cannot find {args.config}')
+            raise FileNotFoundError(f'Cannot find {args.config}')
 
     # load config
     cfg = Config.fromfile(args.config)

@@ -38,6 +38,8 @@ max_norm = 1  # grad clip
 
 # other
 max_length = 2048
+pack_to_max_length = True
+generate_test_freq = 5000
 #######################################################################
 #                      PART 2  Model & Tokenizer                      #
 #######################################################################
@@ -81,7 +83,8 @@ train_dataset = dict(
     max_length=max_length,
     map_fn=openorca_map_fn,
     remove_columns=['id', 'system_prompt', 'question', 'response'],
-    pack_to_max_length=True)
+    shuffle_before_pack=True,
+    pack_to_max_length=pack_to_max_length)
 
 train_dataloader = dict(
     batch_size=batch_size,
@@ -118,13 +121,13 @@ train_cfg = dict(by_epoch=True, max_epochs=max_epochs, val_interval=1)
 #######################################################################
 #                           PART 5  Runtime                           #
 #######################################################################
-# Log the dialogue periodically during the training process，optional
+# Log the dialogue periodically during the training process, optional
 custom_hooks = [
     dict(type=LogSampleHook, tokenizer=tokenizer),
     dict(
         type=SampleGenerateHook,
         tokenizer=tokenizer,
-        every_n_iters=5000,
+        every_n_iters=generate_test_freq,
         stop_word='<|endoftext|>',
         sample_inputs=[
             'Please explain AI to me.',
@@ -132,9 +135,6 @@ custom_hooks = [
         ],
         instruction=PROMPT_TEMPLATE.alpaca.INSTRUCTION_START)
 ]
-
-# defaults to use registries in xtuner
-default_scope = 'xtuner'
 
 # configure default hooks
 default_hooks = dict(

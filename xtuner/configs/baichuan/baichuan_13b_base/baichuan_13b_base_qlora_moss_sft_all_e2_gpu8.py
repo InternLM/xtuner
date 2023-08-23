@@ -1,10 +1,10 @@
 import torch
-from bitsandbytes.optim import PagedAdamW32bit
 from mmengine.dataset import DefaultSampler
 from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
                             LoggerHook, ParamSchedulerHook)
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR
 from peft import LoraConfig
+from torch.optim import AdamW
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           BitsAndBytesConfig)
 
@@ -30,7 +30,7 @@ dataloader_num_workers = 2
 max_epochs = 2
 
 # optim
-optim_type = PagedAdamW32bit
+optim_type = AdamW
 lr = 2e-4
 betas = (0.9, 0.999)
 weight_decay = 0.01
@@ -39,6 +39,7 @@ max_norm = 1  # grad clip
 # other
 bot_name = 'Baichuan'
 max_length = 2048
+generate_test_freq = 500
 #######################################################################
 #                      PART 2  Model & Tokenizer                      #
 #######################################################################
@@ -130,13 +131,13 @@ train_cfg = dict(by_epoch=True, max_epochs=max_epochs, val_interval=1)
 #######################################################################
 #                           PART 5  Runtime                           #
 #######################################################################
-# Log the dialogue periodically during the training process，optional
+# Log the dialogue periodically during the training process, optional
 custom_hooks = [
     dict(type=LogSampleHook, tokenizer=tokenizer),
     dict(
         type=SampleGenerateHook,
         tokenizer=tokenizer,
-        every_n_iters=500,
+        every_n_iters=generate_test_freq,
         stop_word='<eom>',
         sample_inputs=[
             '一个球体的表面积是384平方厘米，求它的体积。', '今有鸡兔同笼，上有二十头，下有六十二足， 问鸡兔各几何？',
@@ -144,9 +145,6 @@ custom_hooks = [
         ],
         instruction=PROMPT_TEMPLATE.moss_sft.INSTRUCTION_START)
 ]
-
-# defaults to use registries in xtuner
-default_scope = 'xtuner'
 
 # configure default hooks
 default_hooks = dict(
