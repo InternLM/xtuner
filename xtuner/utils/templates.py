@@ -33,9 +33,9 @@ PROMPT_TEMPLATE = ConfigDict(
         INSTRUCTION_START='### Human: {input}\n### Assistant: ',
         INSTRUCTION='### Human: {input}\n### Assistant: '),
     medical=dict(
-        INSTRUCTION_START=(
-            '请从一名专业医生的角度，对下述医学问题给出安全、可靠的回答。\n\n问：{input}\n\n答：'),
-        INSTRUCTION='问：{input}\n\n答：'),
+        INSTRUCTION_START=('如果你是一名医生，请根据患者的描述回答医学问题。\n\n### Input: {input}\n\n'
+                           '### Response: '),
+        INSTRUCTION='### Input: {input}\n\n### Response: '),
     llama_2_chat=dict(
         INSTRUCTION_START=(
             '[INST] <<SYS>>\n You are a helpful, respectful and honest '
@@ -48,13 +48,10 @@ PROMPT_TEMPLATE = ConfigDict(
     internlm_chat=dict(
         INSTRUCTION_START='<|User|>:{input}<eoh>\n<|Bot|>:',
         INSTRUCTION='<|User|>:{input}<eoh>\n<|Bot|>:'),
-    code_alpaca=dict(
+    coder=dict(
         INSTRUCTION_START='### Human: {input}\n### Bot: ',
         INSTRUCTION='### Human: {input}\n### Bot: '),
-    tiny_codes=dict(
-        INSTRUCTION_START='### Human: {input}\n### Bot: ',
-        INSTRUCTION='### Human: {input}\n### Bot: '),
-    colors=dict(
+    colorist=dict(
         INSTRUCTION_START=(
             'You are a professional color designer. Please provide the '
             'corresponding colors based on the description of Human.\n'

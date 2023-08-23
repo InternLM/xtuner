@@ -16,12 +16,13 @@ def arxiv_dataloader(tokenizer,
                      num_workers=0,
                      data_file=None,
                      max_length=2048,
-                     concat_to_max_length=True):
+                     pack_to_max_length=True):
     ds = arxiv_dataset(
         tokenizer,
         data_file=data_file,
         max_length=max_length,
-        concat_to_max_length=concat_to_max_length)
+        shuffle_before_pack=True,
+        pack_to_max_length=pack_to_max_length)
     dl_cfg = dict(
         batch_size=batch_size,
         num_workers=num_workers,
@@ -36,7 +37,7 @@ def arxiv_dataloader(tokenizer,
 def arxiv_dataset(tokenizer,
                   data_file=None,
                   max_length=2048,
-                  concat_to_max_length=True):
+                  pack_to_max_length=True):
     # 1. Download data from https://kaggle.com/datasets/Cornell-University/arxiv  # noqa: E501
     # 2. Process data with `./tools/data_preprocess/arxiv.py`
     if data_file is None:
@@ -54,7 +55,8 @@ def arxiv_dataset(tokenizer,
             'doi', 'report-no', 'categories', 'license', 'abstract',
             'versions', 'update_date', 'authors_parsed'
         ],
-        concat_to_max_length=concat_to_max_length)
+        shuffle_before_pack=True,
+        pack_to_max_length=pack_to_max_length)
 
     ds_cfg = Config(ds_cfg)
     ds = BUILDER.build(ds_cfg)

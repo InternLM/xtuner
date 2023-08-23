@@ -11,7 +11,7 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer,
 
 from xtuner.datasets import process_hf_dataset
 from xtuner.datasets.collate_fns import default_collate_fn
-from xtuner.datasets.map_fns import colors_map_fn
+from xtuner.datasets.map_fns import medical_map_fn
 from xtuner.engine import LogSampleHook, SampleGenerateHook
 from xtuner.models import SupervisedFinetune
 from xtuner.utils import PROMPT_TEMPLATE
@@ -20,14 +20,15 @@ from xtuner.utils import PROMPT_TEMPLATE
 #                          PART 1  Settings                           #
 #######################################################################
 # path
-pretrained_model_name_or_path = 'internlm/internlm-7b'
-data_path = 'burkelibbey/colors'
+pretrained_model_name_or_path = 'baichuan-inc/Baichuan-7B'
+data_path = 'shibing624/medical'
+data_config_name = 'finetune'
 
 # data
 batch_size = 1  # per_device
 accumulative_counts = 16
 dataloader_num_workers = 0
-max_epochs = 5
+max_epochs = 1
 
 # optim
 optim_type = PagedAdamW32bit
@@ -39,7 +40,7 @@ max_norm = 1  # grad clip
 # other
 max_length = 2048
 pack_to_max_length = True
-generate_test_freq = 200
+generate_test_freq = 500
 #######################################################################
 #                      PART 2  Model & Tokenizer                      #
 #######################################################################
@@ -78,10 +79,10 @@ model = dict(
 #######################################################################
 train_dataset = dict(
     type=process_hf_dataset,
-    dataset=dict(type=load_dataset, path=data_path),
+    dataset=dict(type=load_dataset, path=data_path, name=data_config_name),
     tokenizer=tokenizer,
     max_length=max_length,
-    map_fn=colors_map_fn,
+    map_fn=medical_map_fn,
     shuffle_before_pack=True,
     pack_to_max_length=pack_to_max_length)
 
@@ -128,9 +129,10 @@ custom_hooks = [
         tokenizer=tokenizer,
         every_n_iters=generate_test_freq,
         sample_inputs=[
-            '请给我一个像天空一样清澈透明的蓝色。', 'Please give me a clear blue like the sky.'
+            '我有家族遗传性的过敏，请问可以可以献血吗？', '我爷爷有高血压，请问他可以喝咖啡吗？',
+            '我女儿今年3岁了，从昨天晚上九点开始腹泻，到现在已经八个小时了，请问应该怎么办？'
         ],
-        instruction=PROMPT_TEMPLATE.colors.INSTRUCTION_START)
+        instruction=PROMPT_TEMPLATE.medical.INSTRUCTION_START)
 ]
 
 # configure default hooks

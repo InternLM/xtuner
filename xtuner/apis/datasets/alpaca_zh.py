@@ -16,14 +16,15 @@ def alpaca_zh_dataloader(tokenizer,
                          num_workers=0,
                          path=None,
                          max_length=2048,
-                         concat_to_max_length=True):
+                         pack_to_max_length=True):
     if path is None:
         path = 'silk-road/alpaca-data-gpt4-chinese'
     ds = alpaca_zh_dataset(
         tokenizer,
         path=path,
         max_length=max_length,
-        concat_to_max_length=concat_to_max_length)
+        shuffle_before_pack=True,
+        pack_to_max_length=pack_to_max_length)
     dl_cfg = dict(
         batch_size=batch_size,
         num_workers=num_workers,
@@ -38,7 +39,7 @@ def alpaca_zh_dataloader(tokenizer,
 def alpaca_zh_dataset(tokenizer,
                       path=None,
                       max_length=2048,
-                      concat_to_max_length=True):
+                      pack_to_max_length=True):
     if path is None:
         path = 'silk-road/alpaca-data-gpt4-chinese'
     ds_cfg = dict(
@@ -50,7 +51,8 @@ def alpaca_zh_dataset(tokenizer,
         remove_columns=[
             'instruction', 'instruction_zh', 'input_zh', 'output_zh'
         ],
-        concat_to_max_length=concat_to_max_length)
+        shuffle_before_pack=True,
+        pack_to_max_length=pack_to_max_length)
     ds_cfg = Config(ds_cfg)
     ds = BUILDER.build(ds_cfg)
     return ds
