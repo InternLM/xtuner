@@ -65,7 +65,7 @@
 - Llama2-7B, Arxiv Gentitle
 
   ```shell
-  xtuner chat hf meta-llama/Llama-2-7b-hf --adapter xtuner/Llama-2-7b-qlora-arxiv-gentitle --prompt-template title --no-streamer
+  xtuner chat hf meta-llama/Llama-2-7b-hf --adapter xtuner/Llama-2-7b-qlora-arxiv-gentitle --prompt-template title
   ```
 
 ## Chat with [Qwen](https://github.com/QwenLM)
