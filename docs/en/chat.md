@@ -2,30 +2,6 @@
 
 ## Chat with [InternLM](https://github.com/InternLM/InternLM)
 
-- InternLM-7B, Coder
-
-  ```shell
-  xtuner chat hf internlm/internlm-7b --adapter xtuner/internlm-7b-qlora-coder --prompt-template coder
-  ```
-
-- InternLM-7B, Colorist
-
-  ```shell
-  xtuner chat hf internlm/internlm-7b --adapter xtuner/internlm-7b-qlora-colorist --prompt-template colorist
-  ```
-
-- InternLM-7B, SQL
-
-  ```shell
-  xtuner chat hf internlm/internlm-7b --adapter xtuner/internlm-7b-qlora-sql --prompt-template sql
-  ```
-
-- InternLM-7B, Lawyer
-
-  ```shell
-  xtuner chat hf internlm/internlm-7b --adapter xtuner/internlm-7b-qlora-lawyer --prompt-template lawyer
-  ```
-
 - InternLM-7B, Open-platypus
 
   ```shell
@@ -48,6 +24,30 @@
 
   ```shell
   xtuner chat hf internlm/internlm-7b --adapter xtuner/internlm-7b-qlora-arxiv-gentitle --prompt-template title
+  ```
+
+- InternLM-7B, Colorist
+
+  ```shell
+  xtuner chat hf internlm/internlm-7b --adapter xtuner/internlm-7b-qlora-colorist --prompt-template colorist
+  ```
+
+- InternLM-7B, Coder
+
+  ```shell
+  xtuner chat hf internlm/internlm-7b --adapter xtuner/internlm-7b-qlora-coder --prompt-template coder
+  ```
+
+- InternLM-7B, SQL
+
+  ```shell
+  xtuner chat hf internlm/internlm-7b --adapter xtuner/internlm-7b-qlora-sql --prompt-template sql
+  ```
+
+- InternLM-7B, Lawyer
+
+  ```shell
+  xtuner chat hf internlm/internlm-7b --adapter xtuner/internlm-7b-qlora-lawyer --prompt-template lawyer
   ```
 
 
