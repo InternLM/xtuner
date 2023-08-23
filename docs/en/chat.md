@@ -58,6 +58,7 @@
 - Llama2-7B, MOSS-003-SFT **(plugins!)**
 
   ```shell
+  export SERPER_API_KEY="xxx"  # Please get the key from https://serper.dev to support google search!
   xtuner chat hf meta-llama/Llama-2-7b-hf --adapter xtuner/Llama-2-7b-qlora-moss-003-sft --bot-name Llama2 --prompt-template moss_sft --with-plugins calculate solve search --command-stop-word "<eoc>" --answer-stop-word "<eom>" --no-streamer
   ```
 
@@ -72,13 +73,8 @@
 - Qwen-7B, MOSS-003-SFT **(plugins!)**
 
   ```shell
+  export SERPER_API_KEY="xxx"  # Please get the key from https://serper.dev to support google search!
   xtuner chat hf Qwen/Qwen-7B --adapter xtuner/Qwen-7B-qlora-moss-003-sft --bot-name Qwen --prompt-template moss_sft --with-plugins calculate solve search --command-stop-word "<eoc>" --answer-stop-word "<eom>"
-  ```
-
-- Qwen-7B, Alpaca-enzh
-
-  ```shell
-  xtuner chat hf Qwen/Qwen-7B --adapter xtuner/Qwen-7B-qlora-alpaca --prompt-template alpaca --answer-stop-word '<|endoftext|>'
   ```
 
 - Qwen-7B, oasst1
@@ -91,6 +87,12 @@
 
   ```shell
   xtuner chat hf Qwen/Qwen-7B --adapter xtuner/Qwen-7B-qlora-arxiv-gentitle --prompt-template title --answer-stop-word '<|endoftext|>'
+  ```
+
+- Qwen-7B, Alpaca-enzh
+
+  ```shell
+  xtuner chat hf Qwen/Qwen-7B --adapter xtuner/Qwen-7B-qlora-alpaca --prompt-template alpaca --answer-stop-word '<|endoftext|>'
   ```
 
 ## Chat with [Baichuan](https://github.com/baichuan-inc)
