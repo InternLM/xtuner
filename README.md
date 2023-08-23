@@ -2,13 +2,13 @@
   <img src="https://github.com/InternLM/lmdeploy/assets/36994684/0cf8d00f-e86b-40ba-9b54-dc8f1bc6c8d8" width="600"/>
   <br /><br />
 
-  [![license](https://img.shields.io/github/license/InternLM/xtuner.svg)](https://github.com/InternLM/xtuner/blob/main/LICENSE)
-  [![PyPI](https://badge.fury.io/py/xtuner.svg)](https://pypi.org/project/xtuner/)
-  [![Generic badge](https://img.shields.io/badge/🤗%20Huggingface-Model-yellow.svg)](https://huggingface.co/xtuner)
-  
-  English | [简体中文](README_zh-CN.md)
-  
-  👋 join us on <a href="https://twitter.com/intern_lm" target="_blank">Twitter</a>, <a href="https://discord.gg/xa29JuW87d" target="_blank">Discord</a> and <a href="https://r.vansin.top/?r=internwx" target="_blank">WeChat</a>
+[![license](https://img.shields.io/github/license/InternLM/xtuner.svg)](https://github.com/InternLM/xtuner/blob/main/LICENSE)
+[![PyPI](https://badge.fury.io/py/xtuner.svg)](https://pypi.org/project/xtuner/)
+[![Generic badge](https://img.shields.io/badge/🤗%20Huggingface-Model-yellow.svg)](https://huggingface.co/xtuner)
+
+English | [简体中文](README_zh-CN.md)
+
+👋 join us on <a href="https://twitter.com/intern_lm" target="_blank">Twitter</a>, <a href="https://discord.gg/xa29JuW87d" target="_blank">Discord</a> and <a href="https://r.vansin.top/?r=internwx" target="_blank">WeChat</a>
 
 </div>
 
