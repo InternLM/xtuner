@@ -89,7 +89,7 @@
   xtuner chat hf Qwen/Qwen-7B --adapter xtuner/Qwen-7B-qlora-arxiv-gentitle --prompt-template title --answer-stop-word '<|endoftext|>'
   ```
 
-- Qwen-7B, Alpaca-enzh
+- Qwen-7B, Alpaca
 
   ```shell
   xtuner chat hf Qwen/Qwen-7B --adapter xtuner/Qwen-7B-qlora-alpaca --prompt-template alpaca --answer-stop-word '<|endoftext|>'
@@ -109,7 +109,7 @@
   xtuner chat hf baichuan-inc/Baichuan-7B --adapter xtuner/Baichuan-7B-qlora-arxiv-gentitle --prompt-template title
   ```
 
-- Baichuan-7B, Alpaca-enzh
+- Baichuan-7B, Alpaca
 
   ```shell
   xtuner chat hf baichuan-inc/Baichuan-7B --adapter xtuner/Baichuan-7B-qlora-alpaca --prompt-template alpaca
