@@ -11,7 +11,7 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer,
 
 from xtuner.datasets import process_hf_dataset
 from xtuner.datasets.collate_fns import default_collate_fn
-from xtuner.datasets.map_fns import cmd_map_fn
+from xtuner.datasets.map_fns import medical_map_fn
 from xtuner.engine import LogSampleHook, SampleGenerateHook
 from xtuner.models import SupervisedFinetune
 from xtuner.utils import PROMPT_TEMPLATE
@@ -20,14 +20,9 @@ from xtuner.utils import PROMPT_TEMPLATE
 #                          PART 1  Settings                           #
 #######################################################################
 # path
-pretrained_model_name_or_path = 'internlm/internlm-chat-7b'
-data_url_or_path = 'https://github.com/Toyhom/Chinese-medical-dialogue-data/raw/master/Data_数据/'  # noqa: E501
-all_csv = [
-    'Andriatria_男科/男科5-13000.csv', 'IM_内科/内科5000-33000.csv',
-    'OAGD_妇产科/妇产科6-28000.csv', 'Oncology_肿瘤科/肿瘤科5-10000.csv',
-    'Pediatric_儿科/儿科5-14000.csv', 'Surgical_外科/外科5-14000.csv'
-]
-all_csv = [data_url_or_path + csv for csv in all_csv]
+pretrained_model_name_or_path = 'baichuan-inc/Baichuan-13B-Chat'
+data_path = 'shibing624/medical'
+data_config_name = 'finetune'
 
 # data
 batch_size = 1  # per_device
@@ -84,14 +79,10 @@ model = dict(
 #######################################################################
 train_dataset = dict(
     type=process_hf_dataset,
-    dataset=dict(
-        type=load_dataset,
-        path='csv',
-        data_files=dict(train=all_csv),
-        encoding='GB18030'),
+    dataset=dict(type=load_dataset, path=data_path, name=data_config_name),
     tokenizer=tokenizer,
     max_length=max_length,
-    map_fn=cmd_map_fn,
+    map_fn=medical_map_fn,
     shuffle_before_pack=True,
     pack_to_max_length=pack_to_max_length)
 

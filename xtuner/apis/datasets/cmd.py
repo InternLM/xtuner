@@ -7,7 +7,7 @@ from mmengine.runner import Runner
 
 from xtuner.datasets import process_hf_dataset
 from xtuner.datasets.collate_fns import default_collate_fn
-from xtuner.datasets.map_fns import cmd_map_fn
+from xtuner.datasets.map_fns import medical_map_fn
 from xtuner.registry import BUILDER
 
 
@@ -53,7 +53,7 @@ def cmd_dataset(tokenizer, max_length=2048, concat_to_max_length=True):
             encoding='GB18030'),
         tokenizer=tokenizer,
         max_length=max_length,
-        map_fn=cmd_map_fn,
+        map_fn=medical_map_fn,
         concat_to_max_length=concat_to_max_length)
 
     ds_cfg = Config(ds_cfg)

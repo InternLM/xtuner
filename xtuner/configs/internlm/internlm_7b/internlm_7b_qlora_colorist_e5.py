@@ -11,7 +11,7 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer,
 
 from xtuner.datasets import process_hf_dataset
 from xtuner.datasets.collate_fns import default_collate_fn
-from xtuner.datasets.map_fns import cmd_map_fn
+from xtuner.datasets.map_fns import colors_map_fn
 from xtuner.engine import LogSampleHook, SampleGenerateHook
 from xtuner.models import SupervisedFinetune
 from xtuner.utils import PROMPT_TEMPLATE
@@ -21,19 +21,13 @@ from xtuner.utils import PROMPT_TEMPLATE
 #######################################################################
 # path
 pretrained_model_name_or_path = 'internlm/internlm-7b'
-data_url_or_path = 'https://github.com/Toyhom/Chinese-medical-dialogue-data/raw/master/Data_数据/'  # noqa: E501
-all_csv = [
-    'Andriatria_男科/男科5-13000.csv', 'IM_内科/内科5000-33000.csv',
-    'OAGD_妇产科/妇产科6-28000.csv', 'Oncology_肿瘤科/肿瘤科5-10000.csv',
-    'Pediatric_儿科/儿科5-14000.csv', 'Surgical_外科/外科5-14000.csv'
-]
-all_csv = [data_url_or_path + csv for csv in all_csv]
+data_path = 'burkelibbey/colors'
 
 # data
 batch_size = 1  # per_device
 accumulative_counts = 16
 dataloader_num_workers = 0
-max_epochs = 1
+max_epochs = 5
 
 # optim
 optim_type = PagedAdamW32bit
@@ -45,7 +39,7 @@ max_norm = 1  # grad clip
 # other
 max_length = 2048
 pack_to_max_length = True
-generate_test_freq = 500
+generate_test_freq = 200
 #######################################################################
 #                      PART 2  Model & Tokenizer                      #
 #######################################################################
@@ -84,14 +78,10 @@ model = dict(
 #######################################################################
 train_dataset = dict(
     type=process_hf_dataset,
-    dataset=dict(
-        type=load_dataset,
-        path='csv',
-        data_files=dict(train=all_csv),
-        encoding='GB18030'),
+    dataset=dict(type=load_dataset, path=data_path),
     tokenizer=tokenizer,
     max_length=max_length,
-    map_fn=cmd_map_fn,
+    map_fn=colors_map_fn,
     shuffle_before_pack=True,
     pack_to_max_length=pack_to_max_length)
 
@@ -138,10 +128,9 @@ custom_hooks = [
         tokenizer=tokenizer,
         every_n_iters=generate_test_freq,
         sample_inputs=[
-            '我有家族遗传性的过敏，请问可以可以献血吗？', '我爷爷有高血压，请问他可以喝咖啡吗？',
-            '我女儿今年3岁了，从昨天晚上九点开始腹泻，到现在已经八个小时了，请问应该怎么办？'
+            '请给我一个像天空一样清澈透明的蓝色。', 'Please give me a clear blue like the sky.'
         ],
-        instruction=PROMPT_TEMPLATE.medical.INSTRUCTION_START)
+        instruction=PROMPT_TEMPLATE.colorist.INSTRUCTION_START)
 ]
 
 # configure default hooks
