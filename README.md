@@ -83,10 +83,10 @@ XTuner is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](
 </td>
 <td>
 <ul>
-  <li><a href="docs/zh_cn/dataset/incremental_pretraining.md">Incremental Pretraining</a> </li>
-  <li><a href="docs/zh_cn/dataset/single_turn_conversation.md">Single-Turn Conversation SFT</a> </li>
-  <li><a href="docs/zh_cn/dataset/multi_turn_conversation.md">Multi-Turn Conversation SFT</a> </li>
-  <li><a href="docs/zh_cn/dataset/tool_usage.md">Tool-Usage SFT</a> </li>
+  <li><a href="docs/zh_cn/dataset/incremental_pretraining.md">Incremental Pre-training</a> </li>
+  <li><a href="docs/zh_cn/dataset/single_turn_conversation.md">Single-turn Conversation SFT</a> </li>
+  <li><a href="docs/zh_cn/dataset/multi_turn_conversation.md">Multi-turn Conversation SFT</a> </li>
+  <li><a href="docs/zh_cn/dataset/tool_usage.md">Tool-usage SFT</a> </li>
 </ul>
 </td>
 <td>
