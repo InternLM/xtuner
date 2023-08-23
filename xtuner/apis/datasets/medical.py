@@ -7,21 +7,21 @@ from mmengine.runner import Runner
 
 from xtuner.datasets import process_hf_dataset
 from xtuner.datasets.collate_fns import default_collate_fn
-from xtuner.datasets.map_fns import openorca_map_fn
+from xtuner.datasets.map_fns import medical_map_fn
 from xtuner.registry import BUILDER
 
 
-def openorca_dataloader(tokenizer,
-                        batch_size=1,
-                        num_workers=0,
-                        path=None,
-                        max_length=2048,
-                        pack_to_max_length=True):
+def medical_dataloader(tokenizer,
+                       batch_size=1,
+                       num_workers=0,
+                       path=None,
+                       data_config_name='finetune',
+                       max_length=2048,
+                       pack_to_max_length=True):
     if path is None:
-        path = 'Open-Orca/OpenOrca'
-    ds = openorca_dataset(
+        path = 'shibing624/medical'
+    ds = medical_dataset(
         tokenizer,
-        path=path,
         max_length=max_length,
         shuffle_before_pack=True,
         pack_to_max_length=pack_to_max_length)
@@ -37,19 +37,19 @@ def openorca_dataloader(tokenizer,
     return dl
 
 
-def openorca_dataset(tokenizer,
-                     path=None,
-                     max_length=2048,
-                     pack_to_max_length=True):
+def medical_dataset(tokenizer,
+                    path=None,
+                    data_config_name='finetune',
+                    max_length=2048,
+                    pack_to_max_length=True):
     if path is None:
-        path = 'Open-Orca/OpenOrca'
+        path = 'shibing624/medical'
     ds_cfg = dict(
         type=process_hf_dataset,
-        dataset=dict(type=load_dataset, path=path),
+        dataset=dict(type=load_dataset, path=path, name=data_config_name),
         tokenizer=tokenizer,
         max_length=max_length,
-        map_fn=openorca_map_fn,
-        remove_columns=['id', 'system_prompt', 'question', 'response'],
+        map_fn=medical_map_fn,
         shuffle_before_pack=True,
         pack_to_max_length=pack_to_max_length)
 
@@ -58,5 +58,5 @@ def openorca_dataset(tokenizer,
     return ds
 
 
-def openorca_data_collator(return_hf_format=False):
+def medical_data_collator(return_hf_format=False):
     return partial(default_collate_fn, return_hf_format=return_hf_format)
