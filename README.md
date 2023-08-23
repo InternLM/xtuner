@@ -20,11 +20,11 @@ English | [简体中文](README_zh-CN.md)
 
 ## 📣 News
 
-- **\[2023.08.xx\]** We release xTuner, with multiple fine-tuned adapters.
+- **\[2023.08.xx\]** We release XTuner, with multiple fine-tuned adapters.
 
 ## 📖 Introduction
 
-xTuner is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](https://github.com/open-mmlab/mmrazor) and [MMDeploy](https://github.com/open-mmlab/mmdeploy) teams.
+XTuner is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](https://github.com/open-mmlab/mmrazor) and [MMDeploy](https://github.com/open-mmlab/mmdeploy) teams.
 
 - **Efficiency**: Support LLM fine-tuning on consumer-grade GPUs. The minimum GPU memory required for 7B LLM fine-tuning is only **10GB**, indicating that users can use nearly any GPU (even the free resource, *e.g.*, Colab) to fine-tune custom LLMs.
 - **Versatile**: Support various **LLMs** ([InternLM](https://github.com/InternLM/InternLM), [Llama2](https://github.com/facebookresearch/llama), [Qwen](https://github.com/QwenLM/Qwen-7B), [Baichuan](https://github.com/baichuan-inc)), **datasets** ([MOSS_003_SFT](https://huggingface.co/datasets/fnlp/moss-003-sft-data), [Arxiv GenTitle](https://github.com/WangRongsheng/ChatGenTitle), [OpenOrca](https://huggingface.co/datasets/Open-Orca/OpenOrca), [Alpaca](https://huggingface.co/datasets/tatsu-lab/alpaca), [oasst1](https://huggingface.co/datasets/timdettmers/openassistant-guanaco), [Chinese Medical Dialogue](https://github.com/Toyhom/Chinese-medical-dialogue-data)) and **algorithms** ([QLoRA](http://arxiv.org/abs/2305.14314), [LoRA](http://arxiv.org/abs/2106.09685)), allowing users to choose the most suitable solution for their requirements.
@@ -34,7 +34,7 @@ xTuner is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](
 
 - QLoRA fine-tune for InternLM-7B [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1yzGeYXayLomNQjLD4vC6wgUHvei3ezt4?usp=sharing)
 - Chat with Llama2-7B-Plugins [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](<>)
-- Integrate xTuner into HuggingFace's pipeline [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1eBI9yiOkX-t7P-0-t9vS8y1x5KmWrkoU?usp=sharing)
+- Integrate XTuner into HuggingFace's pipeline [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1eBI9yiOkX-t7P-0-t9vS8y1x5KmWrkoU?usp=sharing)
 
 ## 🔥 Supports
 
@@ -105,7 +105,7 @@ xTuner is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](
 
 ### Installation
 
-Install xTuner with pip
+Install XTuner with pip
 
 ```shell
 pip install xtuner
@@ -138,7 +138,7 @@ pip install -e .
 </tr>
 </table>
 
-xTuner provides the tools to chat with pretrained / fine-tuned LLMs.
+XTuner provides the tools to chat with pretrained / fine-tuned LLMs.
 
 - For example, we can start the chat with Llama2-7B-Plugins by
 
@@ -150,9 +150,9 @@ For more usages, please see [chat.md](./docs/en/chat.md).
 
 ### Fine-tune [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1yzGeYXayLomNQjLD4vC6wgUHvei3ezt4?usp=sharing)
 
-xTuner supports the efficient fine-tune (*e.g.*, QLoRA) for LLMs.
+XTuner supports the efficient fine-tune (*e.g.*, QLoRA) for LLMs.
 
-- **Step 0**, prepare the config. xTuner provides many ready-to-use configs and we can view all configs by
+- **Step 0**, prepare the config. XTuner provides many ready-to-use configs and we can view all configs by
 
   ```shell
   xtuner list-cfg
@@ -217,7 +217,7 @@ xTuner supports the efficient fine-tune (*e.g.*, QLoRA) for LLMs.
 
 ## 🤝 Contributing
 
-We appreciate all contributions to xTuner. Please refer to [CONTRIBUTING.md](.github/CONTRIBUTING.md) for the contributing guideline.
+We appreciate all contributions to XTuner. Please refer to [CONTRIBUTING.md](.github/CONTRIBUTING.md) for the contributing guideline.
 
 ## 🎖️ Acknowledgement
 
