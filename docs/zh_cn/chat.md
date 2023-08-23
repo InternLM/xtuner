@@ -52,9 +52,9 @@
 
 ## 与微调后的 [Llama2](https://github.com/facebookresearch/llama) 对话
 
-> 在使用 Llama2 之前，请先使用 \`huggingface-cli login\`\` 输入你的访问令牌（access token）！查看[这里](https://huggingface.co/docs/hub/security-tokens#user-access-tokens)了解如何获取访问令牌（access token）。
+> 在使用 Llama2 之前，请先使用 `huggingface-cli login` 输入你的访问令牌（access token）！点击[这里](https://huggingface.co/docs/hub/security-tokens#user-access-tokens)了解如何获取访问令牌。
 
-- Llama2-7B, MOSS-003-SFT **(插件！)**
+- Llama2-7B, MOSS-003-SFT **（支持调用插件）**
 
   ```shell
   export SERPER_API_KEY="xxx"  # 请从 https://serper.dev 获得API_KEY，以此支持谷歌搜索！
@@ -69,7 +69,7 @@
 
 ## 与微调后的 [Qwen](https://github.com/QwenLM) 对话
 
-- Qwen-7B, MOSS-003-SFT **(插件！)**
+- Qwen-7B, MOSS-003-SFT **（支持调用插件）**
 
   ```shell
   export SERPER_API_KEY="xxx"  # 请从 https://serper.dev 获得API_KEY，以此支持谷歌搜索！
