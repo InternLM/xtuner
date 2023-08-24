@@ -11,6 +11,14 @@
     "reduce_bucket_size": 3e8,
     "overlap_comm": true,
     "reduce_scatter": true,
+    "offload_optimizer": {
+      "device": "cpu",
+      "pin_memory": true
+    },
+    "offload_param": {
+      "device": "cpu",
+      "pin_memory": true
+    },
     "stage3_gather_16bit_weights_on_model_save": true
   },
   "fp16": {
