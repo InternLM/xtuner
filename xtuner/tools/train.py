@@ -150,9 +150,6 @@ def main():
                     except KeyError:
                         raise FileNotFoundError(
                             f'Cannot find {args.deepspeed}')
-                optimizer = cfg.optim_wrapper.optimizer
-                optim_wrapper = dict(
-                    type='DeepSpeedOptimWrapper', optimizer=optimizer)
                 with open(args.deepspeed) as f:
                     ds_cfg = json.load(f)
 
@@ -200,8 +197,11 @@ def main():
                     gradient_accumulation_steps=grad_accum,
                     train_micro_batch_size_per_gpu=train_bs,
                     gradient_clipping=grad_clip)
-                cfg.__setitem__('optim_wrapper', optim_wrapper)
                 cfg.__setitem__('strategy', strategy)
+                optim_wrapper = dict(
+                    type='DeepSpeedOptimWrapper',
+                    optimizer=cfg.optim_wrapper.optimizer)
+                cfg.__setitem__('optim_wrapper', optim_wrapper)
                 cfg.runner_type = 'FlexibleRunner'
 
         # resume is determined in this priority: resume from > auto_resume
