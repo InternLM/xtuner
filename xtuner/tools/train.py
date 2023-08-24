@@ -95,14 +95,14 @@ def main():
             cfg.model.device_map = device_map
             traverse_dict(cfg.model)
             model = BUILDER.build(cfg.model)
+        model.config.use_cache = False
         if cfg.get('lora', None):
             lora = BUILDER.build(cfg.lora)
-        model.config.use_cache = False
-        model = prepare_model_for_kbit_training(model)
-        if lora.target_modules is None:
-            modules = find_all_linear_names(model)
-            lora.target_modules = modules
-        model = get_peft_model(model, lora)
+            model = prepare_model_for_kbit_training(model)
+            if lora.target_modules is None:
+                modules = find_all_linear_names(model)
+                lora.target_modules = modules
+            model = get_peft_model(model, lora)
         dispatch_fast_forward(model)
         # build dataset
         train_dataset = BUILDER.build(cfg.train_dataset)
