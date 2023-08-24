@@ -1,5 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import argparse
+import json
 import logging
 import os
 import os.path as osp
@@ -137,32 +138,70 @@ def main():
                 raise ImportError(
                     'deepspeed is not installed properly, please check.')
             optim_wrapper = cfg.optim_wrapper.type
-            from mmengine.optim import DeepSpeedOptimWrapper
-            if optim_wrapper == DeepSpeedOptimWrapper:
+            if optim_wrapper == 'DeepSpeedOptimWrapper':
                 print_log(
                     'Deepspeed training is already enabled in your config.',
                     logger='current',
                     level=logging.WARNING)
             else:
-                optimizer = cfg.optim_wrapper.optimizer
-                gradient_clipping = 1.0
-                clip_grad = cfg.optim_wrapper.get('clip_grad', None)
-                if clip_grad and clip_grad.get('max_norm'):
-                    gradient_clipping = cfg.optim_wrapper.clip_grad.max_norm
-                optim_wrapper = dict(
-                    type='DeepSpeedOptimWrapper', optimizer=optimizer)
-                cfg.__setitem__('optim_wrapper', optim_wrapper)
                 if not os.path.isfile(args.deepspeed):
                     try:
                         args.deepspeed = cfgs_name_path[args.deepspeed]
                     except KeyError:
                         raise FileNotFoundError(
                             f'Cannot find {args.deepspeed}')
+                with open(args.deepspeed) as f:
+                    ds_cfg = json.load(f)
+
+                ds_grad_accum = ds_cfg.get('gradient_accumulation_steps',
+                                           'auto')
+                mm_grad_accum = cfg.optim_wrapper.get('accumulative_counts', 1)
+                if ds_grad_accum != 'auto' and ds_grad_accum != mm_grad_accum:
+                    print_log(('Mismatch on gradient_accumulation_steps: '
+                               f'MMEngine {mm_grad_accum}, '
+                               f'Deepspeed {ds_grad_accum}. '
+                               f'Set to {mm_grad_accum}'),
+                              logger='current',
+                              level=logging.WARNING)
+                grad_accum = mm_grad_accum
+
+                ds_train_bs = ds_cfg.get('train_micro_batch_size_per_gpu',
+                                         'auto')
+                mm_train_bs = cfg.train_dataloader.batch_size
+                if ds_train_bs != 'auto' and ds_train_bs != mm_train_bs:
+                    print_log(
+                        ('Mismatch on train_micro_batch_size_per_gpu: '
+                         f'MMEngine {mm_train_bs}, Deepspeed {ds_train_bs}. '
+                         f'Set to {mm_train_bs}'),
+                        logger='current',
+                        level=logging.WARNING)
+                train_bs = cfg.train_dataloader.batch_size
+
+                ds_grad_clip = ds_cfg.get('gradient_clipping', 'auto')
+                clip_grad = cfg.optim_wrapper.get('clip_grad', None)
+                if clip_grad and clip_grad.get('max_norm'):
+                    mm_max_norm = cfg.optim_wrapper.clip_grad.max_norm
+                else:
+                    mm_max_norm = 1.0
+                if ds_grad_clip != 'auto' and ds_grad_clip != mm_max_norm:
+                    print_log(
+                        ('Mismatch on gradient_clipping: '
+                         f'MMEngine {mm_max_norm}, Deepspeed {ds_grad_clip}. '
+                         f'Set to {mm_max_norm}'),
+                        logger='current',
+                        level=logging.WARNING)
+                grad_clip = mm_max_norm
                 strategy = dict(
                     type='DeepSpeedStrategy',
                     config=args.deepspeed,
-                    gradient_clipping=gradient_clipping)
+                    gradient_accumulation_steps=grad_accum,
+                    train_micro_batch_size_per_gpu=train_bs,
+                    gradient_clipping=grad_clip)
                 cfg.__setitem__('strategy', strategy)
+                optim_wrapper = dict(
+                    type='DeepSpeedOptimWrapper',
+                    optimizer=cfg.optim_wrapper.optimizer)
+                cfg.__setitem__('optim_wrapper', optim_wrapper)
                 cfg.runner_type = 'FlexibleRunner'
 
         # resume is determined in this priority: resume from > auto_resume
