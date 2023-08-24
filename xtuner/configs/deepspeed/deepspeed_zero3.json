@@ -4,10 +4,10 @@
   "gradient_clipping": "auto",
   "zero_allow_untested_optimizer": true,
   "zero_optimization": {
-    "stage": 2,
+    "stage": 3,
     "contiguous_gradients": false,
-    "allgather_bucket_size": 1e8,
-    "reduce_bucket_size": 1e8,
+    "allgather_bucket_size": 3e8,
+    "reduce_bucket_size": 3e8,
     "overlap_comm": true,
     "reduce_scatter": true
   },
