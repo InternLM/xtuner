@@ -1,12 +1,10 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-def sql_dataset_map_fn(example):
-    PROMPT = (
-        'If you are an expert in SQL, please generate a good SQL Query for '
-        'Question based on the CREATE TABLE statement.\n'
-        '### Question: {context}\n{question}\n### Query: ')
+def sql_map_fn(example):
+    context = example['context']
+    question = example['question']
     return {
         'conversation': [{
-            'input': PROMPT.format(**example),
+            'input': f'{context}\n{question}',
             'output': example['answer']
         }]
     }

@@ -1,5 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-def openorca_dataset_map_fn(example):
+def openorca_map_fn(example):
     return {
         'conversation': [{
             'input': example['question'],

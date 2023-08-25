@@ -1,5 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-def alpaca_zh_dataset_map_fn(example):
+def alpaca_zh_map_fn(example):
     input = example.get('input_zh', '')
     instruction = example['instruction_zh']
 

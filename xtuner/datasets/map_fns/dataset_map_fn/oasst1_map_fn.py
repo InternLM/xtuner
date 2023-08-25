@@ -1,5 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-def oasst1_dataset_map_fn(example):
+def oasst1_map_fn(example):
     r"""Example before preprocessing:
         example['text'] = '### Human: Can you explain xxx'
                           '### Assistant: Sure! xxx'

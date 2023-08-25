@@ -1,5 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-def alpaca_dataset_map_fn(example):
+def alpaca_map_fn(example):
     if example.get('output', '') == '<nooutput>':
         return {'conversation': [{'input': '', 'output': ''}]}
     else:
