@@ -13,6 +13,7 @@
     "reduce_scatter": true,
     "stage3_gather_16bit_weights_on_model_save": true
   },
+  "low_cpu_mem_usage": false,
   "fp16": {
     "enabled": true,
     "initial_scale_power": 16

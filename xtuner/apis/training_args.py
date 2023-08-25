@@ -4,6 +4,8 @@ from typing import Union
 from transformers import TrainingArguments
 from transformers.trainer_utils import IntervalStrategy, SchedulerType
 
+__all__ = ['DefaultTrainingArguments']
+
 
 @dataclass
 class DefaultTrainingArguments(TrainingArguments):
@@ -19,7 +21,6 @@ class DefaultTrainingArguments(TrainingArguments):
 
     # huggingface
     default_output_dir = './work_dirs'
-    default_bf16 = True
     default_do_train = True
     default_per_device_train_batch_size = 1
     default_learning_rate = 2e-5
@@ -32,15 +33,6 @@ class DefaultTrainingArguments(TrainingArguments):
         metadata={
             'help': ('The output directory where the model predictions and '
                      'checkpoints will be written.')
-        })
-    bf16: bool = field(
-        default=default_bf16,
-        metadata={
-            'help':
-            ('Whether to use bf16 (mixed) precision instead of 32-bit. '
-             'Requires Ampere or higher NVIDIA architecture or using '
-             'CPU (no_cuda). This is an experimental API and it may '
-             'change.')
         })
     do_train: bool = field(
         default=default_do_train,
