@@ -14,7 +14,11 @@ from .utils import LoadWoInit, find_all_linear_names, traverse_dict
 
 class SupervisedFinetune(BaseModel):
 
-    def __init__(self, llm, lora=None, peft_model=None):
+    def __init__(self,
+                 llm,
+                 lora=None,
+                 peft_model=None,
+                 use_gradient_checkpointing=True):
         super().__init__()
         with LoadWoInit():
             self.llm = self._build_from_cfg_or_module(llm)
@@ -28,14 +32,31 @@ class SupervisedFinetune(BaseModel):
         self.peft_model = peft_model
         self.use_lora = lora is not None
         if self.use_lora:
-            self._prepare_for_lora(peft_model)
+            self._prepare_for_lora(peft_model, use_gradient_checkpointing)
+        elif use_gradient_checkpointing:
+            # For backward compatibility
+            if hasattr(self.llm, 'enable_input_require_grads'):
+                self.llm.enable_input_require_grads()
+            else:
+
+                def make_inputs_require_grad(module, input, output):
+                    output.requires_grad_(True)
+
+                self.llm.get_input_embeddings().register_forward_hook(
+                    make_inputs_require_grad)
+
+            # enable gradient checkpointing for memory efficiency
+            self.llm.gradient_checkpointing_enable()
 
         dispatch_fast_forward(self.llm)
 
         self._is_init = True
 
-    def _prepare_for_lora(self, peft_model=None):
-        self.llm = prepare_model_for_kbit_training(self.llm)
+    def _prepare_for_lora(self,
+                          peft_model=None,
+                          use_gradient_checkpointing=True):
+        self.llm = prepare_model_for_kbit_training(self.llm,
+                                                   use_gradient_checkpointing)
         if self.lora.target_modules is None:
             modules = find_all_linear_names(self.llm)
             self.lora.target_modules = modules
