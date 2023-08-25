@@ -20,7 +20,7 @@ from xtuner.utils import PROMPT_TEMPLATE
 #                          PART 1  Settings                           #
 #######################################################################
 # path
-pretrained_model_name_or_path = '/nvme/share_data/llama-7b'
+pretrained_model_name_or_path = 'huggyllama/llama-7b'
 alpaca_zh_path = 'silk-road/alpaca-data-gpt4-chinese'
 alpaca_en_path = 'tatsu-lab/alpaca'
 
