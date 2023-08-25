@@ -24,6 +24,7 @@ pretrained_model_name_or_path = 'huggyllama/llama-7b'
 data_path = 'timdettmers/openassistant-guanaco'
 
 # data
+prompt_template = PROMPT_TEMPLATE.openassistant
 batch_size = 1  # per_device
 accumulative_counts = 16
 dataloader_num_workers = 0
@@ -36,10 +37,13 @@ betas = (0.9, 0.999)
 weight_decay = 0.01
 max_norm = 1  # grad clip
 
+# Assess the progress of the model's training via interactive dialogue.
+evaluation_freq = 500
+human_inputs = ['请给我介绍五个上海的景点', 'Please tell me five scenic spots in Shanghai']
+
 # other
 max_length = 2048
 pack_to_max_length = True
-generate_test_freq = 500
 #######################################################################
 #                      PART 2  Model & Tokenizer                      #
 #######################################################################
@@ -81,7 +85,9 @@ train_dataset = dict(
     dataset=dict(type=load_dataset, path=data_path),
     tokenizer=tokenizer,
     max_length=max_length,
-    map_fn=oasst1_map_fn,
+    dataset_map_fn=oasst1_map_fn,
+    prompt_template=prompt_template,
+    remove_unused_columns=True,
     shuffle_before_pack=True,
     pack_to_max_length=pack_to_max_length)
 
@@ -126,11 +132,9 @@ custom_hooks = [
     dict(
         type=SampleGenerateHook,
         tokenizer=tokenizer,
-        every_n_iters=generate_test_freq,
-        sample_inputs=[
-            '请给我介绍五个上海的景点', 'Please tell me five scenic spots in Shanghai'
-        ],
-        instruction=PROMPT_TEMPLATE.openassistant.INSTRUCTION_START)
+        every_n_iters=evaluation_freq,
+        sample_inputs=human_inputs,
+        instruction=prompt_template.INSTRUCTION_START)
 ]
 
 # configure default hooks
