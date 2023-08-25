@@ -3,13 +3,15 @@
   "train_micro_batch_size_per_gpu": "auto",
   "gradient_clipping": "auto",
   "zero_allow_untested_optimizer": true,
+  "zero_force_ds_cpu_optimizer": false,
   "zero_optimization": {
-    "stage": 2,
+    "stage": 3,
     "contiguous_gradients": false,
-    "allgather_bucket_size": 1e8,
-    "reduce_bucket_size": 1e8,
+    "allgather_bucket_size": 3e8,
+    "reduce_bucket_size": 3e8,
     "overlap_comm": true,
-    "reduce_scatter": true
+    "reduce_scatter": true,
+    "stage3_gather_16bit_weights_on_model_save": true
   },
   "fp16": {
     "enabled": true,

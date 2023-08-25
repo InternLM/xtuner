@@ -83,9 +83,6 @@ class SupervisedFinetune(BaseModel):
         loss_dict = {'loss': outputs.loss}
         return loss_dict
 
-    def generate(self, *args, **kwargs):
-        return self.llm.generate(*args, **kwargs)
-
     def state_dict(self, destination=None, prefix='', keep_vars=False):
 
         def get_peft_model_state_dict(model,

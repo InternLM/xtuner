@@ -16,13 +16,14 @@ def alpaca_enzh_dataloader(tokenizer,
                            path_en='tatsu-lab/alpaca',
                            path_zh='silk-road/alpaca-data-gpt4-chinese',
                            max_length=2048,
-                           concat_to_max_length=True):
+                           pack_to_max_length=True):
     ds = alpaca_enzh_dataset(
         tokenizer,
         path_en=path_en,
         path_zh=path_zh,
         max_length=max_length,
-        concat_to_max_length=concat_to_max_length)
+        shuffle_before_pack=True,
+        pack_to_max_length=pack_to_max_length)
     dl_cfg = dict(
         batch_size=batch_size,
         num_workers=num_workers,
@@ -38,17 +39,19 @@ def alpaca_enzh_dataset(tokenizer,
                         path_en='tatsu-lab/alpaca',
                         path_zh='silk-road/alpaca-data-gpt4-chinese',
                         max_length=2048,
-                        concat_to_max_length=True):
+                        pack_to_max_length=True):
     alpaca = alpaca_dataset(
         tokenizer,
         path=path_en,
         max_length=max_length,
-        concat_to_max_length=concat_to_max_length)
+        shuffle_before_pack=True,
+        pack_to_max_length=pack_to_max_length)
     alpaca_zh = alpaca_zh_dataset(
         tokenizer,
         path=path_zh,
         max_length=max_length,
-        concat_to_max_length=concat_to_max_length)
+        shuffle_before_pack=True,
+        pack_to_max_length=pack_to_max_length)
     ds = ConcatDataset([alpaca, alpaca_zh])
     return ds
 
