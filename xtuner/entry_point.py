@@ -182,20 +182,25 @@ def cli():
             if callable(module):
                 module()
             else:
-                port = os.environ.get('PORT', None)
-                if port is None:
-                    port = random.randint(20000, 29999)
-                    print_log(f'Use random port: {port}', 'current',
-                              logging.WARNING)
-                torchrun_args = [
-                    f"--nnodes={os.environ.get('NNODES', 1)}",
-                    f"--node_rank={os.environ.get('NODE_RANK', 0)}",
-                    f"--nproc_per_node={os.environ.get('NPROC_PER_NODE', 1)}",
-                    f"--master_addr={os.environ.get('ADDR', '127.0.0.1')}",
-                    f'--master_port={port}'
-                ]
-                subprocess.run(['torchrun'] + torchrun_args + [module] +
-                               args[n_arg + 1:])
+                nnodes = os.environ.get('NNODES', 1)
+                nproc_per_node = os.environ.get('NPROC_PER_NODE', 1)
+                if nnodes == 1 and nproc_per_node == 1:
+                    subprocess.run(['python', module] + args[n_arg + 1:])
+                else:
+                    port = os.environ.get('PORT', None)
+                    if port is None:
+                        port = random.randint(20000, 29999)
+                        print_log(f'Use random port: {port}', 'current',
+                                  logging.WARNING)
+                    torchrun_args = [
+                        f'--nnodes={nnodes}',
+                        f"--node_rank={os.environ.get('NODE_RANK', 0)}",
+                        f'--nproc_per_node={nproc_per_node}',
+                        f"--master_addr={os.environ.get('ADDR', '127.0.0.1')}",
+                        f'--master_port={port}'
+                    ]
+                    subprocess.run(['torchrun'] + torchrun_args + [module] +
+                                   args[n_arg + 1:])
         except Exception as e:
             print_log(f"WARNING: command error: '{e}'!", 'current',
                       logging.WARNING)
