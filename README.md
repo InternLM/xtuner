@@ -21,7 +21,7 @@ English | [简体中文](README_zh-CN.md)
 XTuner is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](https://github.com/open-mmlab/mmrazor) and [MMDeploy](https://github.com/open-mmlab/mmdeploy) teams.
 
 - **Efficiency**: Support LLM fine-tuning on consumer-grade GPUs. The minimum GPU memory required for 7B LLM fine-tuning is only **10GB**, indicating that users can use nearly any GPU (even the free resource, *e.g.*, Colab) to fine-tune custom LLMs.
-- **Versatile**: Support various **LLMs** ([InternLM](https://github.com/InternLM/InternLM), [Llama2](https://github.com/facebookresearch/llama), [Qwen](https://github.com/QwenLM/Qwen-7B), [Baichuan](https://github.com/baichuan-inc), ...), **datasets** ([MOSS_003_SFT](https://huggingface.co/datasets/fnlp/moss-003-sft-data), [Colorist](https://huggingface.co/datasets/burkelibbey/colors), [Code Alpaca](https://huggingface.co/datasets/HuggingFaceH4/CodeAlpaca_20K), [Arxiv GenTitle](https://github.com/WangRongsheng/ChatGenTitle), [Chinese Law](https://github.com/LiuHC0428/LAW-GPT), [OpenOrca](https://huggingface.co/datasets/Open-Orca/OpenOrca), ...) and **algorithms** ([QLoRA](http://arxiv.org/abs/2305.14314), [LoRA](http://arxiv.org/abs/2106.09685)), allowing users to choose the most suitable solution for their requirements.
+- **Versatile**: Support various **LLMs** ([InternLM](https://github.com/InternLM/InternLM), [Llama2](https://github.com/facebookresearch/llama), [Qwen](https://github.com/QwenLM/Qwen-7B), [Baichuan](https://github.com/baichuan-inc), ...), **datasets** ([MOSS_003_SFT](https://huggingface.co/datasets/fnlp/moss-003-sft-data), [Colorist](https://huggingface.co/datasets/burkelibbey/colors), [Code Alpaca](https://huggingface.co/datasets/HuggingFaceH4/CodeAlpaca_20K), [Arxiv GenTitle](https://github.com/WangRongsheng/ChatGenTitle), [Chinese Law](https://github.com/LiuHC0428/LAW-GPT), [OpenOrca](https://huggingface.co/datasets/Open-Orca/OpenOrca), [Open-Platypus](https://huggingface.co/datasets/garage-bAInd/Open-Platypus), ...) and **algorithms** ([QLoRA](http://arxiv.org/abs/2305.14314), [LoRA](http://arxiv.org/abs/2106.09685)), allowing users to choose the most suitable solution for their requirements.
 - **Compatibility**: Compatible with [DeepSpeed](https://github.com/microsoft/DeepSpeed) 🚀 and [HuggingFace](https://huggingface.co) 🤗 training pipeline, enabling effortless integration and utilization.
 
 ## 🌟 Demos
@@ -75,6 +75,7 @@ XTuner is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](
   <li><a href="https://huggingface.co/datasets/tatsu-lab/alpaca">Alpaca en</a> / <a href="https://huggingface.co/datasets/silk-road/alpaca-data-gpt4-chinese">zh</a></li>
   <li><a href="https://huggingface.co/datasets/timdettmers/openassistant-guanaco">oasst1</a></li>
   <li><a href="https://huggingface.co/datasets/shibing624/medical">Medical Dialogue</a></li>
+  <li><a href="https://huggingface.co/datasets/garage-bAInd/Open-Platypus">Open-Platypus</a></li>
   <li>...</li>
 </ul>
 </td>
@@ -83,7 +84,6 @@ XTuner is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](
   <li><a href="docs/zh_cn/dataset/incremental_pretraining.md">Incremental Pre-training</a> </li>
   <li><a href="docs/zh_cn/dataset/single_turn_conversation.md">Single-turn Conversation SFT</a> </li>
   <li><a href="docs/zh_cn/dataset/multi_turn_conversation.md">Multi-turn Conversation SFT</a> </li>
-  <li><a href="docs/zh_cn/dataset/tool_usage.md">Tool-usage SFT</a> </li>
 </ul>
 </td>
 <td>
