@@ -120,6 +120,13 @@ if __name__ == '__main__':
         ],
         python_requires='>=3.8',
         license='Apache License 2.0',
-        install_requires=parse_requirements('requirements.txt'),
+        install_requires=parse_requirements('requirements/runtime.txt'),
+        extras_require={
+            'all':
+            parse_requirements('requirements.txt'),
+            'deepspeed':
+            parse_requirements('requirements/runtime.txt') +
+            parse_requirements('requirements/deepspeed.txt')
+        },
         zip_safe=False,
         entry_points={'console_scripts': ['xtuner = xtuner:cli']})
