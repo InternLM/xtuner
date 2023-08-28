@@ -115,7 +115,7 @@ cd xtuner
 pip install -e .
 ```
 
-### 对话 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](<>)
+### 对话 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/144OuTVyT_GvFyDMtlSlTzcxYIfnRsklq?usp=sharing)
 
 <table>
 <tr>
@@ -144,7 +144,7 @@ XTuner 提供与大语言模型对话的工具。
 
 更多示例，请查阅[文档](./docs/zh_cn/chat.md)。
 
-### 微调 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1yzGeYXayLomNQjLD4vC6wgUHvei3ezt4?usp=sharing)
+### 微调 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1QAEZVBfQ7LZURkMUtaq0b-5nEQII9G9Z?usp=sharing)
 
 XTuner 支持微调大语言模型。
 
