@@ -101,13 +101,13 @@ XTuner 是一个轻量级微调大语言模型的工具库，由 [MMRazor](https
 
 ### 安装
 
-使用pip安装XTuner
+使用pip安装XTuner：
 
 ```shell
 pip install xtuner
 ```
 
-或，从源码安装
+或，从源码安装：
 
 ```shell
 git clone https://github.com/InternLM/xtuner.git
@@ -192,7 +192,7 @@ XTuner 支持微调大语言模型。
       --max-shard-size 2GB
   ```
 
-- **步骤 1**，使用任意推理框架部署微调后的大语言模型，例如 [LMDeploy](https://github.com/InternLM/lmdeploy) 🚀。
+- **步骤 1**，使用任意推理框架部署微调后的大语言模型，例如 [LMDeploy](https://github.com/InternLM/lmdeploy) 🚀：
 
   ```shell
   pip install lmdeploy
