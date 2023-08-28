@@ -23,7 +23,7 @@
 - InternLM-7B, Coder
 
   ```shell
-  xtuner chat hf internlm/internlm-7b --adapter xtuner/internlm-7b-qlora-coder --prompt-template coder
+  xtuner chat hf internlm/internlm-7b --adapter xtuner/internlm-7b-qlora-coder --prompt-template code
   ```
 
 - InternLM-7B, SQL
