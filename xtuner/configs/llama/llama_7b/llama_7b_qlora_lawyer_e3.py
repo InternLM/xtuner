@@ -9,11 +9,13 @@ from peft import LoraConfig
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           BitsAndBytesConfig)
 
-from xtuner.dataset import process_hf_dataset
-from xtuner.dataset.collate_fns import default_collate_fn
-from xtuner.dataset.map_fns import arxiv_map_fn, template_map_fn_factory
+from xtuner.datasets import ConcatDataset, process_hf_dataset
+from xtuner.datasets.collate_fns import default_collate_fn
+from xtuner.datasets.map_fns import (crime_kg_assitant_map_fn,
+                                     law_reference_map_fn,
+                                     template_map_fn_factory)
 from xtuner.engine import DatasetInfoHook, EvaluateChatHook
-from xtuner.model import SupervisedFinetune
+from xtuner.models import SupervisedFinetune
 from xtuner.utils import PROMPT_TEMPLATE
 
 #######################################################################
@@ -23,10 +25,10 @@ from xtuner.utils import PROMPT_TEMPLATE
 pretrained_model_name_or_path = 'huggyllama/llama-7b'
 
 # Data
-# 1. Download data from https://kaggle.com/datasets/Cornell-University/arxiv
-# 2. Process data with `./tools/data_preprocess/arxiv.py`
-data_path = './data/arxiv_postprocess_csAIcsCLcsCV_20200101.json'
-prompt_template = PROMPT_TEMPLATE.title
+# download data from https://github.com/LiuHC0428/LAW-GPT
+crime_kg_assitant_path = './data/law/CrimeKgAssitant清洗后_52k.json'
+law_reference_data_path = './data/law/训练数据_带法律依据_92k.json'
+prompt_template = PROMPT_TEMPLATE.lawyer
 max_length = 2048
 pack_to_max_length = True
 
@@ -43,41 +45,7 @@ max_norm = 1  # grad clip
 
 # Evaluate the generation performance during the training
 evaluation_freq = 500
-evaluation_inputs = [
-    ('We present InternLM, a multilingual foundational language '
-     'model with 104B parameters. InternLM is pre-trained on a large '
-     'corpora with 1.6T tokens with a multi-phase progressive '
-     'process, and then fine-tuned to align with human preferences. '
-     'We also developed a training system called Uniscale-LLM for '
-     'efficient large language model training. The evaluation on a '
-     'number of benchmarks shows that InternLM achieves '
-     'state-of-the-art performance in multiple aspects, including '
-     'knowledge understanding, reading comprehension, mathematics, '
-     'and coding. With such well-rounded capabilities, InternLM '
-     'achieves outstanding performances on comprehensive exams, '
-     'including MMLU, AGIEval, C-Eval and GAOKAO-Bench, without '
-     'resorting to external tools. On these benchmarks, InternLM '
-     'not only significantly outperforms open-source models, but '
-     'also obtains superior performance compared to ChatGPT. Also, '
-     'InternLM demonstrates excellent capability of understanding '
-     'Chinese language and Chinese culture, which makes it a '
-     'suitable foundation model to support Chinese-oriented language '
-     'applications. This manuscript gives a detailed study of '
-     'our results, with benchmarks and examples across a diverse '
-     'set of knowledge domains and tasks.'),
-    ('In this work, we develop and release Llama 2, a collection of '
-     'pretrained and fine-tuned large language models (LLMs) ranging '
-     'in scale from 7 billion to 70 billion parameters.\nOur '
-     'fine-tuned LLMs, called LLAMA 2-CHAT, are optimized for '
-     'dialogue use cases. Our models outperform open-source chat '
-     'models on most benchmarks we tested, and based on our human '
-     'evaluations for helpfulness and safety, may be a suitable '
-     'substitute for closedsource models. We provide a detailed '
-     'description of our approach to fine-tuning and safety '
-     'improvements of LLAMA 2-CHAT in order to enable the community '
-     'to build on our work and contribute to the responsible '
-     'development of LLMs.')
-]
+evaluation_inputs = ['请问离婚需要准备什么材料？', '销售鳄鱼皮包违法吗？']
 
 #######################################################################
 #                      PART 2  Model & Tokenizer                      #
@@ -115,18 +83,41 @@ model = dict(
 #######################################################################
 #                      PART 3  Dataset & Dataloader                   #
 #######################################################################
-train_dataset = dict(
+crime_kg_assitant = dict(
     type=process_hf_dataset,
     dataset=dict(
-        type=load_dataset, path='json', data_files=dict(train=data_path)),
+        type=load_dataset,
+        path='json',
+        data_files=dict(train=crime_kg_assitant_path)),
     tokenizer=tokenizer,
     max_length=max_length,
-    dataset_map_fn=arxiv_map_fn,
+    dataset_map_fn=crime_kg_assitant_map_fn,
     template_map_fn=dict(
         type=template_map_fn_factory, template=prompt_template),
     remove_unused_columns=True,
     shuffle_before_pack=True,
     pack_to_max_length=pack_to_max_length)
+
+law_reference_data = dict(
+    type=process_hf_dataset,
+    dataset=dict(
+        type=load_dataset,
+        path='json',
+        data_files=dict(train=law_reference_data_path)),
+    tokenizer=tokenizer,
+    max_length=max_length,
+    dataset_map_fn=law_reference_map_fn,
+    template_map_fn=dict(
+        type=template_map_fn_factory, template=prompt_template),
+    remove_unused_columns=True,
+    shuffle_before_pack=True,
+    pack_to_max_length=pack_to_max_length)
+
+train_dataset = dict(
+    type=ConcatDataset,
+    datasets_cfg=dict(
+        crime_kg_assitant=crime_kg_assitant,
+        law_reference_data=law_reference_data))
 
 train_dataloader = dict(
     batch_size=batch_size,

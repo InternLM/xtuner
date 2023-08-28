@@ -10,36 +10,41 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer,
 
 from xtuner.dataset import ConcatDataset, MOSSSFTDataset
 from xtuner.dataset.collate_fns import default_collate_fn
-from xtuner.engine import LogSampleHook, SampleGenerateHook
+from xtuner.engine import DatasetInfoHook, EvaluateChatHook
 from xtuner.model import SupervisedFinetune
 from xtuner.utils import PROMPT_TEMPLATE
 
 #######################################################################
 #                          PART 1  Settings                           #
 #######################################################################
-# path
+# Model
 pretrained_model_name_or_path = 'huggyllama/llama-7b'
+bot_name = 'Llama'
+
+# Data
 # Download data from https://huggingface.co/datasets/fnlp/moss-003-sft-data
 moss_sft_no_plugins_path = './data/moss-003-sft-no-tools.jsonl'
 moss_sft_plugins_path = './data/conversations_with_tools_with_inner_instruction_no_text2image_train_all_random_meta0.5_0.1_0.01_moss_0709.jsonl'  # noqa: E501
+max_length = 2048
 
-# data
+# Scheduler & Optimizer
 batch_size = 8  # per_device
 accumulative_counts = 1
 dataloader_num_workers = 2
 max_epochs = 2
-
-# optim
 optim_type = AdamW
 lr = 2e-4
 betas = (0.9, 0.999)
-weight_decay = 0.01
+weight_decay = 0
 max_norm = 1  # grad clip
 
-# other
-bot_name = 'Llama'
-max_length = 2048
-generate_test_freq = 500
+# Evaluate the generation performance during the training
+prompt_template = PROMPT_TEMPLATE.moss_sft
+evaluation_freq = 500
+evaluation_inputs = [
+    '一个球体的表面积是384平方厘米，求它的体积。', '今有鸡兔同笼，上有二十头，下有六十二足， 问鸡兔各几何？', '介绍一下比尔盖茨'
+]
+
 #######################################################################
 #                      PART 2  Model & Tokenizer                      #
 #######################################################################
@@ -104,7 +109,7 @@ train_dataloader = dict(
     collate_fn=dict(type=default_collate_fn))
 
 #######################################################################
-#                          PART 4  Scheduler                          #
+#                    PART 4  Scheduler & Optimizer                    #
 #######################################################################
 # optimizer
 optim_wrapper = dict(
@@ -133,17 +138,14 @@ train_cfg = dict(by_epoch=True, max_epochs=max_epochs, val_interval=1)
 #######################################################################
 # Log the dialogue periodically during the training process, optional
 custom_hooks = [
-    dict(type=LogSampleHook, tokenizer=tokenizer),
+    dict(type=DatasetInfoHook, tokenizer=tokenizer),
     dict(
-        type=SampleGenerateHook,
+        type=EvaluateChatHook,
         tokenizer=tokenizer,
-        every_n_iters=generate_test_freq,
+        every_n_iters=evaluation_freq,
         stop_word='<eom>',
-        sample_inputs=[
-            '一个球体的表面积是384平方厘米，求它的体积。', '今有鸡兔同笼，上有二十头，下有六十二足， 问鸡兔各几何？',
-            '介绍一下比尔盖茨'
-        ],
-        instruction=PROMPT_TEMPLATE.moss_sft.INSTRUCTION_START)
+        sample_inputs=evaluation_inputs,
+        instruction=prompt_template.INSTRUCTION_START)
 ]
 
 # configure default hooks
