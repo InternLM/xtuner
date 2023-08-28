@@ -1,6 +1,4 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-
-
 def openai_map_fn(example):
     """
     Example before preprocessing:
