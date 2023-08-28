@@ -85,6 +85,7 @@ def process_hf_dataset(dataset,
         print_log(
             'We have to remove unused columns if '
             '`pack_to_max_length` is set to True.',
+            logger='current',
             level=logging.WARNING)
         remove_unused_columns = True
 
