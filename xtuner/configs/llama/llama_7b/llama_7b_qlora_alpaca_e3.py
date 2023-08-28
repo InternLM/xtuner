@@ -13,7 +13,7 @@ from xtuner.datasets import ConcatDataset, process_hf_dataset
 from xtuner.datasets.collate_fns import default_collate_fn
 from xtuner.datasets.map_fns import (alpaca_map_fn, alpaca_zh_map_fn,
                                      template_map_fn_factory)
-from xtuner.engine import LogSampleHook, SampleGenerateHook
+from xtuner.engine import DatasetInfoHook, EvaluateChatHook
 from xtuner.models import SupervisedFinetune
 from xtuner.utils import PROMPT_TEMPLATE
 
@@ -148,9 +148,9 @@ train_cfg = dict(by_epoch=True, max_epochs=max_epochs, val_interval=1)
 #######################################################################
 # Log the dialogue periodically during the training process, optional
 custom_hooks = [
-    dict(type=LogSampleHook, tokenizer=tokenizer),
+    dict(type=DatasetInfoHook, tokenizer=tokenizer),
     dict(
-        type=SampleGenerateHook,
+        type=EvaluateChatHook,
         tokenizer=tokenizer,
         every_n_iters=evaluation_freq,
         sample_inputs=human_inputs,
