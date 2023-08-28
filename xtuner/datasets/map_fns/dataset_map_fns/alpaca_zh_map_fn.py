@@ -1,10 +1,10 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-def code_alpaca_map_fn(example):
+def alpaca_zh_map_fn(example):
     return {
         'conversation': [{
             'input':
-            '### Human: {prompt}\n### Bot: '.format(**example),
+            '{instruction_zh}\n{input_zh}'.format(**example),
             'output':
-            example['completion']
+            example['output_zh']
         }]
     }

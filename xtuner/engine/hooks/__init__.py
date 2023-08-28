@@ -1,5 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-from .log_data_sample import LogSampleHook
-from .sample_generate_hook import SampleGenerateHook
+from .dataset_info_hook import DatasetInfoHook
+from .evaluate_chat_hook import EvaluateChatHook
 
-__all__ = ['SampleGenerateHook', 'LogSampleHook']
+__all__ = ['EvaluateChatHook', 'DatasetInfoHook']

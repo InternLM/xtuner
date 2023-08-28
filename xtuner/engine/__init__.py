@@ -1,4 +1,4 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-from .hooks import LogSampleHook, SampleGenerateHook
+from .hooks import DatasetInfoHook, EvaluateChatHook
 
-__all__ = ['SampleGenerateHook', 'LogSampleHook']
+__all__ = ['EvaluateChatHook', 'DatasetInfoHook']
