@@ -115,7 +115,7 @@ cd xtuner
 pip install -e .
 ```
 
-### Chat [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](<>)
+### Chat [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/144OuTVyT_GvFyDMtlSlTzcxYIfnRsklq?usp=sharing)
 
 <table>
 <tr>
@@ -144,7 +144,7 @@ XTuner provides tools to chat with pretrained / fine-tuned LLMs.
 
 For more usages, please see [chat.md](./docs/en/chat.md).
 
-### Fine-tune [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1yzGeYXayLomNQjLD4vC6wgUHvei3ezt4?usp=sharing)
+### Fine-tune [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1QAEZVBfQ7LZURkMUtaq0b-5nEQII9G9Z?usp=sharing)
 
 XTuner supports the efficient fine-tune (*e.g.*, QLoRA) for LLMs.
 

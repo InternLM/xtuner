@@ -67,6 +67,12 @@
   xtuner train llama2_7b_qlora_arxiv_e3
   ```
 
+- Llama2-7B, Colorist
+
+  ```shell
+  xtuner train llama2_7b_qlora_colorist_e5
+  ```
+
 ## QLoRA 微调 [Qwen](https://github.com/QwenLM)
 
 - Qwen-7B, MOSS-003-SFT **(插件！)**
