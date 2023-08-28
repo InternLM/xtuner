@@ -200,7 +200,8 @@ def cli():
                         f'--master_port={port}'
                     ]
                     subprocess.run(['torchrun'] + torchrun_args + [module] +
-                                   args[n_arg + 1:])
+                                   args[n_arg + 1:] +
+                                   ['--launcher', 'pytorch'])
         except Exception as e:
             print_log(f"WARNING: command error: '{e}'!", 'current',
                       logging.WARNING)
