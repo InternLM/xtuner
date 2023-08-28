@@ -1,12 +1,13 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import logging
 from functools import partial
 
 import numpy as np
 from datasets import DatasetDict
+from mmengine import print_log
 from mmengine.config import Config, ConfigDict
 
 from xtuner.registry import BUILDER
-from .map_fns import prompt_template_map_fn
 from .utils import Packer, encode_fn
 
 
@@ -14,7 +15,7 @@ def process_hf_dataset(dataset,
                        tokenizer,
                        max_length,
                        dataset_map_fn=None,
-                       prompt_template=None,
+                       template_map_fn=None,
                        max_dataset_length=None,
                        split='train',
                        remove_unused_columns=False,
@@ -22,6 +23,35 @@ def process_hf_dataset(dataset,
                        shuffle_before_pack=True,
                        pack_to_max_length=True,
                        input_ids_with_output=True):
+    """Post-process the dataset loaded from the Hugging Face Hub, or a local
+    dataset.
+
+    Args:
+        dataset: The dataset to be post-processed.
+        tokenizer: The tokenizer processes some raw text as input and outputs
+            an Encoding.
+        max_length: Max length of the sequence.
+        dataset_map_fn: Map the original dataset format to the one defined
+            by xTuner.
+        template_map_fn: Add the prompt template to the dataset
+        max_dataset_length: If the length of the dataset is too long, we can
+            randomly extract `max_dataset_length` from it.
+        split: Which split of the data to load.
+            If `None`, will return a `dict` with all splits (typically
+            `datasets.Split.TRAIN` and `datasets.Split.TEST`).
+            If given, will return a single Dataset.
+        remove_unused_columns: Whether to remove columns from the dataset
+            that are not used during training.
+        rename_maps: Rename the column name of the dataset.
+        shuffle_before_pack: Whether to shuffle the dataset before
+            packing them.
+        pack_to_max_length: Whether to pack the dataset to the `max_length `.
+            This usually improves gpu utilization and therefore reduces
+            training time.
+        input_ids_with_output: Whether to put the groundtruth output
+            corresponding to the question into the dataset. Typically set
+            it to True during training and False during testing.
+    """
 
     dataset = BUILDER.build(dataset)
     if isinstance(dataset, DatasetDict):
@@ -40,27 +70,23 @@ def process_hf_dataset(dataset,
         dataset = dataset.map(dataset_map_fn)
 
     # Add prompt template, such as ### Human: xxx ###Assistant: xxx
-    if prompt_template is not None:
-        assert (hasattr(prompt_template, 'INSTRUCTION_START') and
-                hasattr(prompt_template, 'INSTRUCTION')), \
-                    ('`prompt_template` can be found in '
-                     '`xtuner/utils/templates.py`'
-                     'The `prompt_template` should consist of two distinct '
-                     'keys: `INSTRUCTION_START` and `INSTRUCTION`. '
-                     'The `INSTRUCTION_START` serves as the template for '
-                     'initiating multi-turn dialogues, whereas `INSTRUCTION` '
-                     'applies to templates used in the following rounds of '
-                     'communication.')
-
-        template_map_fn = partial(
-            prompt_template_map_fn, template=prompt_template)
+    if template_map_fn is not None:
+        if isinstance(template_map_fn, dict) or isinstance(
+                template_map_fn, Config) or isinstance(template_map_fn,
+                                                       ConfigDict):
+            template_map_fn = BUILDER.build(template_map_fn)
         dataset = dataset.map(template_map_fn)
 
     for old, new in rename_maps:
         dataset = dataset.rename_column(old, new)
 
     # remove unused columns
-    remove_unused_columns = pack_to_max_length or remove_unused_columns
+    if pack_to_max_length and (not remove_unused_columns):
+        print_log(
+            'We have to remove unused columns if '
+            '`pack_to_max_length` is set to True.',
+            level=logging.WARNING)
+        remove_unused_columns = True
 
     # tokenize
     if isinstance(tokenizer, dict) or isinstance(

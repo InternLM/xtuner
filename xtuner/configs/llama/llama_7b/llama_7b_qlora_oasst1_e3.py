@@ -11,7 +11,7 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer,
 
 from xtuner.datasets import process_hf_dataset
 from xtuner.datasets.collate_fns import default_collate_fn
-from xtuner.datasets.map_fns import oasst1_map_fn
+from xtuner.datasets.map_fns import oasst1_map_fn, template_map_fn_factory
 from xtuner.engine import LogSampleHook, SampleGenerateHook
 from xtuner.models import SupervisedFinetune
 from xtuner.utils import PROMPT_TEMPLATE
@@ -86,7 +86,8 @@ train_dataset = dict(
     tokenizer=tokenizer,
     max_length=max_length,
     dataset_map_fn=oasst1_map_fn,
-    prompt_template=prompt_template,
+    template_map_fn=dict(
+        type=template_map_fn_factory, template=prompt_template),
     remove_unused_columns=True,
     shuffle_before_pack=True,
     pack_to_max_length=pack_to_max_length)
