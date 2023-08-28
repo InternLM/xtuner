@@ -183,23 +183,43 @@ xtuner copy-cfg internlm_7b_qlora_oasst1_e3 .
 
 #### Step 4 修改config文件
 
-修改step 3复制得到的config文件中的原始数据集路径即可：
+对step 3复制得到的config文件需要进行如下修改：
+
+1. 调整原始数据集的路径
+2. 由于数据集格式已经是标准格式了，需要将`train_dataset`中的`dataset_map_fn`置为None
+3. 将`train_dataset`中的`template_map_fn`置为None，因为不需要将对话模板加入至增量预训练数据集中
+4. （可选）设置对话模板以调用`EvaluateChatHook`在训练的各个阶段记录模型的对话结果
 
 ```diff
 from xtuner.datasets import process_hf_dataset
 from datasets import load_dataset
+- from xtuner.datasets.map_fns import oasst1_map_fn, template_map_fn_factory
++ from xtuner.datasets.map_fns import template_map_fn_factory
+...
+#######################################################################
+#                          PART 1  Settings                           #
+#######################################################################
+- data_path = 'timdettmers/openassistant-guanaco'
++ data_path = 'path/to/your/data'
+
++ prompt_template = PROMPT_TEMPLATE.openassistant
 ...
 #######################################################################
 #                      STEP 3  Dataset & Dataloader                   #
 #######################################################################
 train_dataset = dict(
     type=process_hf_dataset,
--   dataset=dict(type=load_dataset, path=data_path),
-+   dataset=dict(type=load_dataset, path='path/to/your/data'),
+    dataset=dict(type=load_dataset, path=data_path),
     tokenizer=tokenizer,
     max_length=max_length,
-    map_fn=None,
-    pack_to_max_length=True)
+-   dataset_map_fn=oasst1_map_fn,
++   dataset_map_fn=oasst1_incremental_map_fn,
+-   template_map_fn=dict(
+-       type=template_map_fn_factory, template=prompt_template),
++   template_map_fn=None,
+    remove_unused_columns=True,
+    shuffle_before_pack=True,
+    pack_to_max_length=pack_to_max_length)
 
 train_dataloader = dict(
     batch_size=batch_size,
