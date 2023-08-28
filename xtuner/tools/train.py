@@ -90,7 +90,7 @@ def main():
         # build training_args
         training_args = BUILDER.build(cfg.training_args)
         # build model
-        device_map = {'': int(os.environ.get('LOCAL_RANK') or 0)}
+        device_map = {'': int(os.environ.get('LOCAL_RANK', args.local_rank))}
         with LoadWoInit():
             cfg.model.device_map = device_map
             traverse_dict(cfg.model)
