@@ -64,8 +64,7 @@ instance/
 .scrapy
 
 # Sphinx documentation
-docs/en/_build/
-docs/zh_cn/_build/
+docs/*/_build/
 
 # PyBuilder
 target/
@@ -103,13 +102,12 @@ venv.bak/
 
 # mypy
 .mypy_cache/
-data/
-data
+
+# custom
+/data
 .vscode
 .idea
 .DS_Store
-
-# custom
 *.pkl
 *.pkl.json
 *.log.json
@@ -120,7 +118,6 @@ work_dirs/
 *.py~
 *.sh~
 
-# mim
-*.mim
-
-/models
+# srun
+*.out
+batchscript-*
