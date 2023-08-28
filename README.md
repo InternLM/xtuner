@@ -14,7 +14,7 @@ English | [简体中文](README_zh-CN.md)
 
 ## 🎉 News
 
-- **\[2023.08.xx\]** We release XTuner, with multiple fine-tuned adapters on [HuggingFace](https://huggingface.co/xtuner).
+- **\[2023.08.xx\]** XTuner is released, with multiple fine-tuned adapters on [HuggingFace](https://huggingface.co/xtuner).
 
 ## 📖 Introduction
 
