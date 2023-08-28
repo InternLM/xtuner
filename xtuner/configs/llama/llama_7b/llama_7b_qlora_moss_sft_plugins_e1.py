@@ -129,8 +129,8 @@ custom_hooks = [
         type=EvaluateChatHook,
         tokenizer=tokenizer,
         every_n_iters=evaluation_freq,
-        stop_word='<eom>',
-        sample_inputs=evaluation_inputs,
+        stop_word='<eoc>',
+        evaluation_inputs=evaluation_inputs,
         instruction=prompt_template.INSTRUCTION_START)
 ]
 

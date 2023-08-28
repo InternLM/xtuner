@@ -137,7 +137,7 @@ custom_hooks = [
         type=EvaluateChatHook,
         tokenizer=tokenizer,
         every_n_iters=evaluation_freq,
-        sample_inputs=evaluation_inputs,
+        evaluation_inputs=evaluation_inputs,
         instruction=prompt_template.INSTRUCTION_START)
 ]
 
