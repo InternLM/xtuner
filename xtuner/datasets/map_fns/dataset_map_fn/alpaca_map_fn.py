@@ -1,6 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 def alpaca_map_fn(example):
-    if example.get('output', '') == '<nooutput>':
+    if example.get('output') == '<nooutput>':
         return {'conversation': [{'input': '', 'output': ''}]}
     else:
         input = example.get('input', '')
