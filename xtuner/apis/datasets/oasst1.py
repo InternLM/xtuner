@@ -16,14 +16,15 @@ def oasst1_dataloader(tokenizer,
                       num_workers=0,
                       path=None,
                       max_length=2048,
-                      concat_to_max_length=True):
+                      pack_to_max_length=True):
     if path is None:
         path = 'timdettmers/openassistant-guanaco'
     ds = oasst1_dataset(
         tokenizer,
         path=path,
         max_length=max_length,
-        concat_to_max_length=concat_to_max_length)
+        shuffle_before_pack=True,
+        pack_to_max_length=pack_to_max_length)
     dl_cfg = dict(
         batch_size=batch_size,
         num_workers=num_workers,
@@ -39,7 +40,7 @@ def oasst1_dataloader(tokenizer,
 def oasst1_dataset(tokenizer,
                    path=None,
                    max_length=2048,
-                   concat_to_max_length=True):
+                   pack_to_max_length=True):
     if path is None:
         path = 'timdettmers/openassistant-guanaco'
     ds_cfg = dict(
@@ -48,7 +49,8 @@ def oasst1_dataset(tokenizer,
         tokenizer=tokenizer,
         max_length=max_length,
         map_fn=oasst1_map_fn,
-        concat_to_max_length=concat_to_max_length)
+        shuffle_before_pack=True,
+        pack_to_max_length=pack_to_max_length)
 
     ds_cfg = Config(ds_cfg)
     ds = BUILDER.build(ds_cfg)

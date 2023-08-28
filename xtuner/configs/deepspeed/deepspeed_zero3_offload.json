@@ -1,0 +1,28 @@
+{
+  "gradient_accumulation_steps": "auto",
+  "train_micro_batch_size_per_gpu": "auto",
+  "gradient_clipping": "auto",
+  "zero_allow_untested_optimizer": true,
+  "zero_force_ds_cpu_optimizer": false,
+  "zero_optimization": {
+    "stage": 3,
+    "contiguous_gradients": false,
+    "allgather_bucket_size": 3e8,
+    "reduce_bucket_size": 3e8,
+    "overlap_comm": true,
+    "reduce_scatter": true,
+    "offload_optimizer": {
+      "device": "cpu",
+      "pin_memory": true
+    },
+    "offload_param": {
+      "device": "cpu",
+      "pin_memory": true
+    },
+    "stage3_gather_16bit_weights_on_model_save": true
+  },
+  "fp16": {
+    "enabled": true,
+    "initial_scale_power": 16
+  }
+}

@@ -134,7 +134,7 @@ custom_hooks = [
              '(e.g., #0066ee) as input and converts it into the corresponding '
              'red, green, and blue (RGB) color component values.')
         ],
-        instruction=PROMPT_TEMPLATE.code.INSTRUCTION_START)
+        instruction=PROMPT_TEMPLATE.coder.INSTRUCTION_START)
 ]
 
 # configure default hooks
