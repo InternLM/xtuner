@@ -1,7 +1,6 @@
 bitsandbytes>=0.40.0
 datasets
 einops
-lagent
 mmengine>=0.8.4
 peft>=0.4.0
 scipy
