@@ -1,4 +1,4 @@
-# How to use xTuner in HuggingFace & DeepSpeed training pipelines
+# How to use XTuner in HuggingFace & DeepSpeed training pipelines
 
 ## Quick run
 
@@ -40,7 +40,7 @@
 
 If you want to use xtuner for efficient finetuning in your original training pipelines, you just need to change the implement of building `model` and `dataloader`, reserve other parts. Thus you can quickly fine-tune various models with various datasets by changing the relevant configs.
 
-## How to build model with xTuner for QLoRA
+## How to build model with XTuner for QLoRA
 
 ```python
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
@@ -75,7 +75,7 @@ llm = AutoModelForCausalLM.from_pretrained(
     trust_remote_code=True
 )
 
-# build model with xTuner
+# build model with XTuner
 model = SupervisedFinetune(llm=llm, lora=lora_config, tokenizer=tokenizer)
 
 ```
