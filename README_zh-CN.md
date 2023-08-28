@@ -8,44 +8,44 @@
 
 [English](README.md) | 简体中文
 
-👋 join us on <a href="https://twitter.com/intern_lm" target="_blank">Twitter</a>, <a href="https://discord.gg/xa29JuW87d" target="_blank">Discord</a> and <a href="https://r.vansin.top/?r=internwx" target="_blank">WeChat</a>
+👋 加入我们：<a href="https://twitter.com/intern_lm" target="_blank">推特</a>、<a href="https://discord.gg/xa29JuW87d" target="_blank">Discord</a>、<a href="https://r.vansin.top/?r=internwx" target="_blank">微信</a>
 
 </div>
 
-## 🎉 News
+## 🎉 更新
 
-- **\[2023.08.xx\]** We release XTuner, with multiple fine-tuned adapters on [HuggingFace](https://huggingface.co/xtuner).
+- **\[2023.08.28\]** XTuner 正式发布！众多微调模型已上传至 [HuggingFace](https://huggingface.co/xtuner)！
 
 ## 📖 Introduction
 
-XTuner is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](https://github.com/open-mmlab/mmrazor) and [MMDeploy](https://github.com/open-mmlab/mmdeploy) teams.
+XTuner 是一个轻量级微调大语言模型的工具库，由 [MMRazor](https://github.com/open-mmlab/mmrazor) 和 [MMDeploy](https://github.com/open-mmlab/mmdeploy) 团队联合开发。
 
-- **Efficiency**: Support LLM fine-tuning on consumer-grade GPUs. The minimum GPU memory required for 7B LLM fine-tuning is only **8GB**, indicating that users can use nearly any GPU (even the free resource, *e.g.*, Colab) to fine-tune custom LLMs.
-- **Versatile**: Support various **LLMs** ([InternLM](https://github.com/InternLM/InternLM), [Llama2](https://github.com/facebookresearch/llama), [Qwen](https://github.com/QwenLM/Qwen-7B), [Baichuan](https://github.com/baichuan-inc), ...), **datasets** ([MOSS_003_SFT](https://huggingface.co/datasets/fnlp/moss-003-sft-data), [Colorist](https://huggingface.co/datasets/burkelibbey/colors), [Code Alpaca](https://huggingface.co/datasets/HuggingFaceH4/CodeAlpaca_20K), [Arxiv GenTitle](https://github.com/WangRongsheng/ChatGenTitle), [Chinese Law](https://github.com/LiuHC0428/LAW-GPT), [OpenOrca](https://huggingface.co/datasets/Open-Orca/OpenOrca), [Open-Platypus](https://huggingface.co/datasets/garage-bAInd/Open-Platypus), ...) and **algorithms** ([QLoRA](http://arxiv.org/abs/2305.14314), [LoRA](http://arxiv.org/abs/2106.09685)), allowing users to choose the most suitable solution for their requirements.
-- **Compatibility**: Compatible with [DeepSpeed](https://github.com/microsoft/DeepSpeed) 🚀 and [HuggingFace](https://huggingface.co) 🤗 training pipeline, enabling effortless integration and utilization.
+- **轻量级**: 支持在消费级显卡上微调大语言模型。对于 7B 参数量，微调所需的最小显存仅为 **8GB**，这使得用户可以使用几乎任何显卡（甚至免费资源，例如Colab）来微调获得自定义大语言模型助手。
+- **多样性**: 支持多种**大语言模型**（[InternLM](https://github.com/InternLM/InternLM)、[Llama2](https://github.com/facebookresearch/llama)、[Qwen](https://github.com/QwenLM/Qwen-7B)、[Baichuan](https://github.com/baichuan-inc), ...），**数据集**（[MOSS_003_SFT](https://huggingface.co/datasets/fnlp/moss-003-sft-data)、[Colorist](https://huggingface.co/datasets/burkelibbey/colors)、[Code Alpaca](https://huggingface.co/datasets/HuggingFaceH4/CodeAlpaca_20K)、[Arxiv GenTitle](https://github.com/WangRongsheng/ChatGenTitle)、[Chinese Law](https://github.com/LiuHC0428/LAW-GPT)、[OpenOrca](https://huggingface.co/datasets/Open-Orca/OpenOrca)、[Open-Platypus](https://huggingface.co/datasets/garage-bAInd/Open-Platypus)，...）和**微调算法**（[QLoRA](http://arxiv.org/abs/2305.14314)、[LoRA](http://arxiv.org/abs/2106.09685)），支撑用户根据自身具体需求选择合适的解决方案。
+- **兼容性**: 兼容 [DeepSpeed](https://github.com/microsoft/DeepSpeed) 🚀 和 [HuggingFace](https://huggingface.co) 🤗 的训练流程，支撑用户无感式集成与使用。
 
-## 🌟 Demos
+## 🌟 示例
 
-- QLoRA Fine-tune [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1QAEZVBfQ7LZURkMUtaq0b-5nEQII9G9Z?usp=sharing)
-- Plugin-based Chat [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/144OuTVyT_GvFyDMtlSlTzcxYIfnRsklq?usp=sharing)
-- Ready-to-use models and datasets from XTuner API [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1eBI9yiOkX-t7P-0-t9vS8y1x5KmWrkoU?usp=sharing)
+- QLoRA 微调 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1QAEZVBfQ7LZURkMUtaq0b-5nEQII9G9Z?usp=sharing)
+- 基于插件的对话 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/144OuTVyT_GvFyDMtlSlTzcxYIfnRsklq?usp=sharing)
+- XTuner APIs所提供的开箱即用的模型与数据集 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1eBI9yiOkX-t7P-0-t9vS8y1x5KmWrkoU?usp=sharing)
 
-## 🔥 Supports
+## 🔥 支持列表
 
 <table>
 <tbody>
 <tr align="center" valign="middle">
 <td>
-  <b>Models</b>
+  <b>模型</b>
 </td>
 <td>
-  <b>SFT Datasets</b>
+  <b>数据集</b>
 </td>
 <td>
-  <b>Data Pipelines</b>
+  <b>数据格式</b>
 </td>
  <td>
-  <b>Algorithms</b>
+  <b>微调算法</b>
 </td>
 </tr>
 <tr valign="top">
@@ -90,24 +90,24 @@ XTuner is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](
 <ul>
   <li><a href="http://arxiv.org/abs/2305.14314">QLoRA</a></li>
   <li><a href="http://arxiv.org/abs/2106.09685">LoRA</a></li>
-  <li>Full parameter fine-tune</li>
+  <li>全量参数微调</li>
 </ul>
 </td>
 </tr>
 </tbody>
 </table>
 
-## 🛠️ Quick Start
+## 🛠️ 快速上手
 
-### Installation
+### 安装
 
-Install XTuner with pip
+使用pip安装XTuner
 
 ```shell
 pip install xtuner
 ```
 
-or from source
+或，从源码安装
 
 ```shell
 git clone https://github.com/InternLM/xtuner.git
@@ -115,11 +115,11 @@ cd xtuner
 pip install -e .
 ```
 
-### Chat [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](<>)
+### 对话 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](<>)
 
 <table>
 <tr>
-  <th colspan="3" align="center">Examples of Plugins-based Chat 🔥🔥🔥</th>
+  <th colspan="3" align="center">基于插件的对话 🔥🔥🔥</th>
 </tr>
 <tr>
 <td>
@@ -134,46 +134,46 @@ pip install -e .
 </tr>
 </table>
 
-XTuner provides tools to chat with pretrained / fine-tuned LLMs.
+XTuner 提供与大语言模型对话的工具。
 
-- For example, we can start the chat with Llama2-7B-Plugins by
+- 例如，与基于插件微调获得的 Llama2-7B-Plugins 对话：
 
   ```shell
   xtuner chat hf meta-llama/Llama-2-7b-hf --adapter xtuner/Llama-2-7b-qlora-moss-003-sft --bot-name Llama2 --prompt-template moss_sft --with-plugins calculate solve search --command-stop-word "<eoc>" --answer-stop-word "<eom>" --no-streamer
   ```
 
-For more usages, please see [chat.md](./docs/en/chat.md).
+更多示例，请查阅[文档](./docs/zh_cn/chat.md)。
 
-### Fine-tune [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1yzGeYXayLomNQjLD4vC6wgUHvei3ezt4?usp=sharing)
+### 微调 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1yzGeYXayLomNQjLD4vC6wgUHvei3ezt4?usp=sharing)
 
-XTuner supports the efficient fine-tune (*e.g.*, QLoRA) for LLMs.
+XTuner 支持微调大语言模型。
 
-- **Step 0**, prepare the config. XTuner provides many ready-to-use configs and we can view all configs by
+- **步骤 0**，准备配置文件。XTuner 提供多个开箱即用的配置文件，用户可以通过下列命令查看：
 
   ```shell
   xtuner list-cfg
   ```
 
-  Or, if the provided configs cannot meet the requirements, please copy the provided config to the specified directory and make specific modifications by
+  或者，如果所提供的配置文件不能满足使用需求，请导出所提供的配置文件并进行相应更改：
 
   ```shell
   xtuner copy-cfg ${CONFIG_NAME} ${SAVE_DIR}
   ```
 
-- **Step 1**, start fine-tuning. For example, we can start the QLoRA fine-tuning of InternLM-7B with oasst1 dataset by
+- **步骤 1**，开始微调。例如，我们可以利用 QLoRA 算法在 oasst1 数据集上微调 InternLM-7B：
 
   ```shell
-  # On a single GPU
+  # 单卡
   xtuner train internlm_7b_qlora_oasst1_e3
-  # On multiple GPUs
+  # 多卡
   NPROC_PER_NODE=${GPU_NUM} xtuner train internlm_7b_qlora_oasst1_e3
   ```
 
-  For more usages, please see [finetune.md](./docs/en/finetune.md).
+  更多示例，请查阅[文档](./docs/zh_cn/finetune.md).
 
-### Deployment
+### 部署
 
-- **Step 0**, convert the pth adapter to HuggingFace adapter, by
+- **步骤 0**，将 pth adapter 转换为 HuggingFace adapter：
 
   ```shell
   xtuner convert adapter_pth2hf \
@@ -182,7 +182,7 @@ XTuner supports the efficient fine-tune (*e.g.*, QLoRA) for LLMs.
       ${SAVE_PATH_TO_HF_ADAPTER}
   ```
 
-  or, directly merge the pth adapter to pretrained LLM, by
+  或者，直接将 pth adapter 合并到大语言模型：
 
   ```shell
   xtuner convert merge_adapter \
@@ -192,7 +192,7 @@ XTuner supports the efficient fine-tune (*e.g.*, QLoRA) for LLMs.
       --max-shard-size 2GB
   ```
 
-- **Step 1**, deploy fine-tuned LLM with any other framework, such as [LMDeploy](https://github.com/InternLM/lmdeploy) 🚀.
+- **步骤 1**，使用任意推理框架部署微调后的大语言模型，例如 [LMDeploy](https://github.com/InternLM/lmdeploy) 🚀。
 
   ```shell
   pip install lmdeploy
@@ -203,22 +203,22 @@ XTuner supports the efficient fine-tune (*e.g.*, QLoRA) for LLMs.
       --seed 0
   ```
 
-  🎯 We are woking closely with [LMDeploy](https://github.com/InternLM/lmdeploy), to implement the deployment of **plugins-based chat**!
+  🎯 我们正在与 [LMDeploy](https://github.com/InternLM/lmdeploy) 紧密合作，以实现基于插件对话的部署！
 
-### Evaluation
+### 评测
 
-- We recommend using [OpenCompass](https://github.com/InternLM/opencompass), a comprehensive and systematic LLM evaluation library, which currently supports 50+ datasets with about 300,000 questions.
+- 推荐使用一站式平台 [OpenCompass](https://github.com/InternLM/opencompass) 来评测大语言模型，其目前已涵盖 50+ 数据集的约 30 万条题目。
 
-## 🤝 Contributing
+## 🤝 贡献指南
 
-We appreciate all contributions to XTuner. Please refer to [CONTRIBUTING.md](.github/CONTRIBUTING.md) for the contributing guideline.
+我们感谢所有的贡献者为改进和提升 XTuner 所作出的努力。请参考[贡献指南](.github/CONTRIBUTING.md)来了解参与项目贡献的相关指引。
 
-## 🎖️ Acknowledgement
+## 🎖️ 致谢
 
 - [Llama 2](https://github.com/facebookresearch/llama)
 - [QLoRA](https://github.com/artidoro/qlora)
 - [LMDeploy](https://github.com/InternLM/lmdeploy)
 
-## License
+## 开源许可证
 
-This project is released under the [Apache License 2.0](LICENSE). Please also adhere to the Licenses of models and datasets being used.
+该项目采用 [Apache License 2.0 开源许可证](LICENSE)。同时，请也遵守所使用的模型与数据集的许可证。
