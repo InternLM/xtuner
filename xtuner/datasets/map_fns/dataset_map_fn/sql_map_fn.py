@@ -3,6 +3,6 @@ def sql_map_fn(example):
     return {
         'conversation': [{
             'input': '{context}\n{question}'.format(**example),
-            'output': '{answer}'.format(**example)
+            'output': example['answer']
         }]
     }
