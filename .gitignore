@@ -121,4 +121,3 @@ work_dirs/
 # srun
 *.out
 batchscript-*
-
