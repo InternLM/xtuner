@@ -67,6 +67,12 @@
   xtuner chat hf meta-llama/Llama-2-7b-hf --adapter xtuner/Llama-2-7b-qlora-arxiv-gentitle --prompt-template title
   ```
 
+- Llama2-7B, Colorist
+
+  ```shell
+  xtuner chat hf meta-llama/Llama-2-7b-hf --adapter xtuner/Llama-2-7b-qlora-colorist --prompt-template colorist
+  ```
+
 ## 与微调后的 [Qwen](https://github.com/QwenLM) 对话
 
 - Qwen-7B, MOSS-003-SFT **（支持调用插件）**
