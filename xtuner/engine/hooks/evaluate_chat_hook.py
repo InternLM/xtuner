@@ -7,7 +7,7 @@ from xtuner.registry import BUILDER
 from xtuner.utils import StopWordStoppingCriteria
 
 
-class SampleGenerateHook(Hook):
+class EvaluateChatHook(Hook):
 
     def __init__(self,
                  tokenizer,
@@ -51,7 +51,7 @@ class SampleGenerateHook(Hook):
                 f'{self.tokenizer.decode(generation_output[0])}\n')
 
     def before_train(self, runner):
-        runner.logger.info('before_train in SampleGenerateHook.')
+        runner.logger.info('before_train in EvaluateChatHook .')
         self._generate_samples(runner, max_new_tokens=50)
 
     def after_train_iter(self,
@@ -62,11 +62,11 @@ class SampleGenerateHook(Hook):
         if self.every_n_iters is None or (batch_idx +
                                           1) % self.every_n_iters != 0:
             return
-        runner.logger.info('after_train_iter in SampleGenerateHook.')
+        runner.logger.info('after_train_iter in EvaluateChatHook .')
         self._generate_samples(runner)
 
     def after_val(self, runner) -> None:
         if self.every_n_iters is not None:
             return
-        runner.logger.info('after_val in SampleGenerateHook.')
+        runner.logger.info('after_val in EvaluateChatHook .')
         self._generate_samples(runner)
