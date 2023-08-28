@@ -23,8 +23,8 @@ def process_hf_dataset(dataset,
                        input_ids_with_output=True):
     if isinstance(dataset, DatasetDict):
         dataset = dataset[split]
-    elif isinstance(dataset, dict) or isinstance(dataset, Config) or isinstance(
-                dataset, ConfigDict):
+    elif isinstance(dataset, dict) or isinstance(
+            dataset, Config) or isinstance(dataset, ConfigDict):
         dataset = BUILDER.build(dataset)
         if isinstance(dataset, DatasetDict):
             dataset = dataset[split]
