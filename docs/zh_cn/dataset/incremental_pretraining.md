@@ -11,7 +11,7 @@
 
 ## 数据集构建
 
-xTuner支持使用HuggingFace Hub数据集或自定义数据集进行SFT（Supervised FineTune）。二者的主要区别在于，使用HuggingFace Hub数据集时需要将原始数据映射为xTuner定义的[增量预训练数据格式](./dataset_format.md#增量预训练数据集格式)，而对于自定义数据集则需要用户按照[增量预训练数据格式](./dataset_format.md#增量预训练数据集格式)构造数据集。
+xTuner支持使用HuggingFace Hub数据集或自定义数据集进行SFT（Supervised FineTune）。二者的主要区别在于，使用HuggingFace Hub数据集时需要将原始数据映射为xTuner定义的[增量预训练数据格式](./dataset_format.md#增量预训练数据集格式)。而对于自定义数据集则推荐用户按照[增量预训练数据格式](./dataset_format.md#增量预训练数据集格式)构造数据集。
 
 ### 使用HuggingFace Hub数据集
 
@@ -48,22 +48,25 @@ Dataset({
 因此，可以通过下面的map function将原始数据映射为标准格式：
 
 ```python
->>> def oasst1_map_fn(example):
-        """
-        >>> train_ds = ds['train'].map(oasst1_map_fn)
-        >>> train_ds
-        Dataset({
-            features: ['text', 'conversation'],
-            num_rows: 9846
-        })
-        >>> train_ds[0]['conversation']
-        [{'input': '', 'output': 'xxx'}]
-        """
-        return {'conversation': [{'input': '', 'output': example['text']}]}
+# 假设将该函数存放在./map_fn.py文件中
+def oasst1_incremental_map_fn(example):
+    """
+    >>> train_ds = ds['train'].map(oasst1_map_fn)
+    >>> train_ds
+    Dataset({
+        features: ['text', 'conversation'],
+        num_rows: 9846
+    })
+    >>> train_ds[0]['conversation']
+    [{'input': '', 'output': 'xxx'}]
+    """
+    return {'conversation': [{'input': '', 'output': example['text']}]}
 
 ```
 
 #### Step 2 列出候选模型名字
+
+xTuner 提供多个开箱即用的配置文件，用户可以通过下列命令查看：
 
 ```bash
 xtuner list-cfg -p internlm
@@ -71,36 +74,59 @@ xtuner list-cfg -p internlm
 
 `-p`为模糊查找，若想训练其他模型，可以修改`internlm`为xtuner支持的其他模型名称。
 
-#### Step 3 复制config文件
+#### Step 3 导出config文件
+
+如果所提供的配置文件不能满足使用需求，请导出所提供的配置文件并进行相应更改：
 
 ```bash
-xtuner copy-cfg internlm_7b_qlora_oasst1_e3 xtuner/configs/internlm/internlm_7b/
+xtuner copy-cfg ${CONFIG_NAME} ${SAVE_DIR}
+```
+
+例如通过下列命令将名为`internlm_7b_qlora_oasst1_e3`的config导出至当前目录下：
+
+```bash
+xtuner copy-cfg internlm_7b_qlora_oasst1_e3 .
 ```
 
 #### Step 4 修改config文件
 
 对step 3复制得到的config文件需要进行如下修改：
 
-1. import Step 1 中实现的map function `oasst1_map_fn`
-2. 用`oasst1_map_fn`替换`train_dataset`中的map_fn
-3. 修改原始数据集路径，load_dataset相关操作可以参考[用户文档](https://huggingface.co/docs/datasets/loading)
+1. import Step 1 中实现的映射函数 `oasst1_incremental_map_fn`
+2. 用`oasst1_incremental_map_fn`替换`train_dataset`中的`dataset_map_fn`
+3. 将`train_dataset`中的`template_map_fn`置为None，因为不需要将对话模板加入至增量预训练数据集中
+4. 调整原始数据集的路径，关于`load_dataset`的相关操作可以参考[用户文档](https://huggingface.co/docs/datasets/loading)
+5. （可选）如果你希望利用 xTuner 提供的`EvaluateChatHook`在训练的各个阶段记录模型的对话结果，你还需要通过`prompt_template = PROMPT_TEMPLATE.openassistant`将对话模板调整为与`oasst1`数据集对应的对话模板。xTuner提供了一系列对话模板，你可以在`xtuner/utils/templates.py`中找到。其中，`INSTRUCTION_START`和`INSTRUCTION`分别代表第一轮对话和后续若干轮对话所使用的对话模板。在`EvaluateChatHook`中只会用到`INSTRUCTION_START`。（注意：由于增量预训练后的模型只具备续写功能，不具备对话功能，因此在 `EvaluateChatHook`打印的对话结果中，模型无法正常停止生成是正常现象。）
 
 ```diff
 from xtuner.datasets import process_hf_dataset
 from datasets import load_dataset
-+ from xtuner.datasets.map_fns import oasst1_map_fn
+- from xtuner.datasets.map_fns import oasst1_map_fn, template_map_fn_factory
++ from xtuner.datasets.map_fns import template_map_fn_factory
++ from map_fn import oasst1_incremental_map_fn
 ...
+#######################################################################
+#                          PART 1  Settings                           #
+#######################################################################
+- data_path = 'timdettmers/openassistant-guanaco'
++ data_path = 'path/to/your/data'
+
++ prompt_template = PROMPT_TEMPLATE.openassistant
 #######################################################################
 #                      STEP 3  Dataset & Dataloader                   #
 #######################################################################
 train_dataset = dict(
     type=process_hf_dataset,
--   dataset=dict(type=load_dataset, path=data_path),
-+   dataset=dict(type=load_dataset, path='path/to/your/data'),
+    dataset=dict(type=load_dataset, path=data_path),
     tokenizer=tokenizer,
     max_length=max_length,
-+   map_fn=oasst1_map_fn,
-    ############################################
+-   dataset_map_fn=oasst1_map_fn,
++   dataset_map_fn=oasst1_incremental_map_fn,
+-   template_map_fn=dict(
+-       type=template_map_fn_factory, template=prompt_template),
++   template_map_fn=None,
+    remove_unused_columns=True,
+    shuffle_before_pack=True,
     pack_to_max_length=True)
 
 train_dataloader = dict(
@@ -113,6 +139,8 @@ train_dataloader = dict(
 ```
 
 ### 使用自定义数据集
+
+在使用自定义数据集进行增量预训练时，我们推荐将数据集构造为xTuner定义的[增量预训练数据格式](./dataset_format.md#增量预训练数据集格式)。若自定义数据集格式为`oasst1`等其他格式，可参考[使用HuggingFace Hub数据集](#使用huggingface-hub数据集)一节。
 
 #### Step 1 数据准备
 
@@ -150,7 +178,7 @@ xtuner list-cfg -p internlm
 #### Step 3 复制config文件
 
 ```bash
-xtuner copy-cfg internlm_7b_qlora_oasst1_e3 xtuner/configs/internlm/internlm_7b/
+xtuner copy-cfg internlm_7b_qlora_oasst1_e3 .
 ```
 
 #### Step 4 修改config文件
