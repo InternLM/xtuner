@@ -14,7 +14,7 @@
 
 ## 🎉 更新
 
-- **\[2023.08.28\]** XTuner 正式发布！众多微调模型已上传至 [HuggingFace](https://huggingface.co/xtuner)！
+- **\[2023.08.XX\]** XTuner 正式发布！众多微调模型已上传至 [HuggingFace](https://huggingface.co/xtuner)！
 
 ## 📖 介绍
 
