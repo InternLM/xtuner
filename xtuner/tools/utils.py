@@ -22,11 +22,12 @@ def get_chat_utils(model):
     if model.__class__.__name__ == 'InferenceEngine':
         model = model.module
     base_model = get_base_model(model)
-    base_model_name = base_model.__class__.__name__
-    is_internlm = 'InternLM' in base_model_name
-    is_qwen = 'QWen' in base_model_name
-    no_space = 'InternLM' in base_model_name or 'QWen' in base_model_name or \
-        'BaiChuan' in base_model_name or 'ChatGLM' in base_model_name
+    base_model_name = base_model.__class__.__name__.lower()
+    is_internlm = 'internlm' in base_model_name
+    is_qwen = 'qwen' in base_model_name
+    is_baichuan = 'baichuan' in base_model_name
+    is_chatglm = 'chatglm' in base_model_name
+    no_space = is_internlm or is_qwen or is_baichuan or is_chatglm
     stop_criteria = StoppingCriteriaList()
     if is_internlm:
         stop_criteria.append(InternLMStoppingCriteria())
