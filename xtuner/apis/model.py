@@ -76,7 +76,7 @@ def build_model(model_name_or_path, return_tokenizer=True):
 
     if return_tokenizer:
         tokenizer = AutoTokenizer.from_pretrained(
-            model_name_or_path, padding_side='right', trust_remote_code=True)
+            model_name_or_path, trust_remote_code=True)
         return model, tokenizer
     else:
         return model
