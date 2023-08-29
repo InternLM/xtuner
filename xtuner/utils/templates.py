@@ -70,4 +70,8 @@ PROMPT_TEMPLATE = ConfigDict(
     chatglm=dict(
         INSTRUCTION_START='[Round {round}]\n\n问：{input}\n\n答：',
         INSTRUCTION='\n\n[Round {round}]\n\n问：{input}\n\n答：'),
+    qwen_chat=dict(
+        INSTRUCTION_START=('\n<|im_start|>user\n{input}<|im_end|>\n<|im_start|>assistant\n'),
+        INSTRUCTION=('\n<|im_start|>user\n{input}<|im_end|>\n<|im_start|>assistant\n')
+    ),
 )
