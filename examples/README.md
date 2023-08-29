@@ -1,4 +1,4 @@
-# How to use xtuner in huggingface training pipeline
+# How to use XTuner in HuggingFace training pipeline
 
 ## Quick run
 
