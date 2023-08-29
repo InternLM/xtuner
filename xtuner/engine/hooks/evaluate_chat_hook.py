@@ -11,12 +11,14 @@ class EvaluateChatHook(Hook):
 
     def __init__(self,
                  tokenizer,
-                 sample_inputs,
+                 evaluation_inputs,
                  instruction=None,
                  every_n_iters=None,
                  max_new_tokens=600,
                  stop_word=None):
-        self.sample_inputs = sample_inputs
+        self.evaluation_inputs = evaluation_inputs
+        if isinstance(self.evaluation_inputs, str):
+            self.evaluation_inputs = [self.evaluation_inputs]
         if instruction == '' or instruction is None:
             instruction = '{input}'
         self.instruction = instruction
@@ -44,7 +46,7 @@ class EvaluateChatHook(Hook):
         model.llm.gradient_checkpointing_disable()
         model.llm.config.use_cache = True
 
-        for sample_input in self.sample_inputs:
+        for sample_input in self.evaluation_inputs:
             inputs = self.instruction.format(
                 input=sample_input, round=1, **runner.cfg)
             input_ids = self.tokenizer(

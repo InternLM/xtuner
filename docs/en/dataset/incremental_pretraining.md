@@ -92,9 +92,9 @@ The following modifications need to be made to the config file copied in Step 3:
 5. (Optional) If you wish to use XTuner's `EvaluateChatHook` to view the model's generation results during training, you also need to turn off `prompt_template` to remove the conversation template. (Note: Since the model only has a continuation function during incremental pre-training and doesn't have the conversation function, the model may not be able to stop generating normally in the dialogue results printed by `EvaluateChatHook`.)
 
 ```diff
-from xtuner.datasets import process_hf_dataset
+from xtuner.dataset import process_hf_dataset
 from datasets import load_dataset
-- from xtuner.datasets.map_fns import oasst1_map_fn, template_map_fn_factory
+- from xtuner.dataset.map_fns import oasst1_map_fn, template_map_fn_factory
 + from map_fn import oasst1_incremental_map_fn
 ...
 #######################################################################
@@ -182,9 +182,9 @@ Modifications need to be made to the config file obtained in Step 3 as follows:
 4. (Optional) Set a chat template to call `EvaluateChatHook` to record the results of the model's dialogues at various stages of training
 
 ```diff
-from xtuner.datasets import process_hf_dataset
+from xtuner.dataset import process_hf_dataset
 from datasets import load_dataset
-- from xtuner.datasets.map_fns import oasst1_map_fn, template_map_fn_factory
+- from xtuner.dataset.map_fns import oasst1_map_fn, template_map_fn_factory
 ...
 #######################################################################
 #                          PART 1  Settings                           #

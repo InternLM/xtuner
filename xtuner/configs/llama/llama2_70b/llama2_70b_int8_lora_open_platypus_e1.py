@@ -1,6 +1,5 @@
 import torch
 from bitsandbytes.optim import PagedAdamW32bit
-# from torch.optim import AdamW
 from datasets import load_dataset
 from mmengine.dataset import DefaultSampler
 from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
@@ -11,35 +10,39 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from xtuner.dataset import process_hf_dataset
 from xtuner.dataset.collate_fns import default_collate_fn
-from xtuner.dataset.map_fns import alpaca_map_fn
-from xtuner.engine import LogSampleHook, SampleGenerateHook
+from xtuner.dataset.map_fns import alpaca_map_fn, template_map_fn_factory
+from xtuner.engine import DatasetInfoHook, EvaluateChatHook
 from xtuner.model import SupervisedFinetune
 from xtuner.utils import PROMPT_TEMPLATE
 
 #######################################################################
 #                          PART 1  Settings                           #
 #######################################################################
-# path
+# Model
 pretrained_model_name_or_path = 'meta-llama/Llama-2-70b-hf'
-data_path = 'garage-bAInd/Open-Platypus'
 
-# data
+# Data
+data_path = 'garage-bAInd/Open-Platypus'
+prompt_template = PROMPT_TEMPLATE.alpaca
+max_length = 2048
+pack_to_max_length = True
+
+# Scheduler & Optimizer
 batch_size = 1  # per_device
 accumulative_counts = 16
 dataloader_num_workers = 0
 max_epochs = 1
-
-# optim
 optim_type = PagedAdamW32bit
 lr = 3e-4
 betas = (0.9, 0.999)
 weight_decay = 0
 max_norm = 1  # grad clip
 
-# other
-max_length = 2048
-pack_to_max_length = True
-generate_test_freq = 500
+# Evaluate the generation performance during the training
+evaluation_freq = 500
+evaluation_inputs = [
+    '请给我介绍五个上海的景点', 'Please tell me five scenic spots in Shanghai'
+]
 
 #######################################################################
 #                      PART 2  Model & Tokenizer                      #
@@ -75,7 +78,10 @@ train_dataset = dict(
     dataset=dict(type=load_dataset, path=data_path),
     tokenizer=tokenizer,
     max_length=max_length,
-    map_fn=alpaca_map_fn,
+    dataset_map_fn=alpaca_map_fn,
+    template_map_fn=dict(
+        type=template_map_fn_factory, template=prompt_template),
+    remove_unused_columns=True,
     shuffle_before_pack=True,
     pack_to_max_length=pack_to_max_length)
 
@@ -87,7 +93,7 @@ train_dataloader = dict(
     collate_fn=dict(type=default_collate_fn))
 
 #######################################################################
-#                          PART 4  Scheduler                          #
+#                    PART 4  Scheduler & Optimizer                    #
 #######################################################################
 # optimizer
 optim_wrapper = dict(
@@ -116,19 +122,14 @@ train_cfg = dict(by_epoch=True, max_epochs=max_epochs, val_interval=1)
 #######################################################################
 # Log the dialogue periodically during the training process, optional
 custom_hooks = [
-    dict(type=LogSampleHook, tokenizer=tokenizer),
+    dict(type=DatasetInfoHook, tokenizer=tokenizer),
     dict(
-        type=SampleGenerateHook,
+        type=EvaluateChatHook,
         tokenizer=tokenizer,
-        every_n_iters=generate_test_freq,
-        sample_inputs=[
-            '请给我介绍五个上海的景点', 'Please tell me five scenic spots in Shanghai'
-        ],
-        instruction=PROMPT_TEMPLATE.alpaca.INSTRUCTION_START)
+        every_n_iters=evaluation_freq,
+        evaluation_inputs=evaluation_inputs,
+        instruction=prompt_template.INSTRUCTION_START)
 ]
-
-# # defaults to use registries in xtuner
-# default_scope = 'xtuner'
 
 # configure default hooks
 default_hooks = dict(
