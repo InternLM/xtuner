@@ -1,19 +1,19 @@
-# 多轮对话 data pipeline
+# Multi-turn Dialogue Data Pipeline
 
-多轮对话指令微调旨在提升模型的多轮对话能力，其数据处理流程可以分为以下两部分：
+The purpose of multi-turn dialogue command fine-tuning is to enhance the model's ability for multi-turn dialogues. The data processing process can be divided into the following two parts:
 
-1. 按照相应数据集格式构造数据
-2. 向数据集中插入对话模板（可选）
+1. Construct data according to the corresponding dataset format
+2. Insert dialogue templates into the dataset (optional)
 
-XTuner 支持使用 HuggingFace Hub 数据集或自定义数据集进行 SFT（Supervised FineTune）。二者的主要区别在于，使用 HuggingFace Hub 数据集时需要将原始数据映射为 XTuner 定义的[多轮对话数据格式](./dataset_format.md#多轮对话数据集格式)，而对于自定义数据集则推荐用户按照[多轮对话数据格式](./dataset_format.md#多轮对话数据集格式)构造数据集。
+XTuner supports the use of HuggingFace Hub datasets or custom datasets for SFT (Supervised FineTune). The main difference between them is that when using the HuggingFace Hub dataset, the original data needs to be mapped to the [multi-turn dialogue data format](./dataset_format.md#multi-turn-dialogue-dataset-format) defined by XTuner. For custom datasets, it is recommended that users construct the dataset according to the [multi-turn dialogue data format](./dataset_format.md#multi-turn-dialogue-dataset-format).
 
-## 使用 HuggingFace Hub 数据集
+## Using Dataset in HuggingFace Hub
 
-### Step 1, 映射原始数据集为标准格式
+### Step 1, Map Original Dataset to Standard Format
 
-由于不同数据集的格式各有不同，因此需要将原始数据映射为 XTuner 定义的[多轮对话数据格式](./dataset_format.md#多轮对话数据集格式)。XTuner 支持通过 map function 来实现格式的映射。下面以 [oasst1](https://huggingface.co/datasets/OpenAssistant/oasst1) 数据集为例介绍如何实现数据映射。
+Since the formats of different datasets vary, the original data needs to be transformed into the [multi-turn dialogue data format](./dataset_format.md#multi-turn-dialogue-dataset-format) defined by XTuner. XTuner supports the use of a map function to achieve format mapping. The following example uses the [oasst1 dataset](https://huggingface.co/datasets/OpenAssistant/oasst1) to illustrate how to implement data mapping.
 
-oasst1 数据集格式如下所示：
+The oasst1 dataset format is as follows:
 
 ```python
 >>> from datasets import load_dataset
@@ -28,7 +28,7 @@ Dataset({
 '### Human: xxx ### Assistant: xxx ###Human: xxx ###Assistant: xxx'
 ```
 
-由此可见，oasst1 数据集既可以当做增量预训练数据集让模型学会一些基本的语言知识，又可以在经过一些处理后作为多轮对话数据集培养模型的多轮对话能力。[多轮对话数据格式](./dataset_format.md#多轮对话数据集格式)中介绍了多轮对话指令微调过程中，数据格式应该为：
+It's clear that the oasst1 dataset can not only be used as an incremental pre-training dataset for the model to learn some basic language knowledge, but also, after some processing, serve as a multi-turn dialogue dataset to cultivate the model's multi-turn conversation capabilities. The [multi-turn dialogue data format](./dataset_format.md#multi-turn-dialogue-dataset-format) introduces that in the fine-tuning process of multi-turn dialogue instructions, the data format should be:
 
 ```json
 [{
@@ -57,10 +57,10 @@ Dataset({
 }]
 ```
 
-因此，可以通过下面的 map function 将原始数据映射为标准格式：
+Therefore, the original data can be mapped to a standard format using the following map function:
 
 ```python
-# 假设将该函数存放在./map_fn.py文件中
+# Suppose the function is stored in ./map_fn.py
 def oasst1_multi_turns_map_fn(example):
     r"""
     Example before preprocessing:
@@ -101,35 +101,35 @@ def oasst1_multi_turns_map_fn(example):
     return {'conversation': conversation}
 ```
 
-### Step 2, 列出候选模型名字
+### Step 2, List Candidate Model Names
 
-XTuner 提供多个开箱即用的配置文件，用户可以通过下列命令查看：
+XTuner provides several ready-to-use configuration files. Users can view them using the following command:
 
 ```bash
 xtuner list-cfg -p internlm
 ```
 
-`-p` 为模糊查找，若想训练其他模型，可以修改 `internlm` 为 XTuner 支持的其他模型名称。
+`-p` is used for fuzzy search. If you want to train other models, you can replace `internlm` with other model names supported by XTuner.
 
-### Step 3, 复制 config 文件
+### Step 3, Export the Config File
 
-如果所提供的配置文件不能满足使用需求，请导出所提供的配置文件并进行相应更改：
+If the provided configuration file does not meet your needs, please export the offered configuration file and make appropriate changes:
 
 ```bash
 xtuner copy-cfg ${CONFIG_NAME} ${SAVE_DIR}
 ```
 
-例如通过下列命令将名为 `internlm_7b_qlora_oasst1_e3` 的 config 导出至当前目录下：
+For example, use the following command to export the config named `internlm_7b_qlora_oasst1_e3` to the current directory:
 
 ```bash
 xtuner copy-cfg internlm_7b_qlora_oasst1_e3 .
 ```
 
-### Step 4, 设置对话模板（可选）
+### Step 4, Set Conversation Templates (Optional)
 
-对话模板是指用于生成对话的预定义模式或结构。这些模板可以包含问句、回答或多轮对话中的不同角色的发言。在训练数据集中加入对话模板有利于模型生成有结构和逻辑的对话，并提供更准确、一致和合理的回答。
+Conversation templates refer to predefined patterns or structures used for generating dialogues. These templates may include questions, answers, or different roles' speeches in multi-turn dialogues. Adding conversation templates to the training dataset helps the model generate structured and logical dialogues and provide more accurate, consistent, and reasonable responses.
 
-不同数据集、不同语言模型可能对应着不同的对话模板。例如，[oasst1](https://huggingface.co/datasets/OpenAssistant/oasst1) 数据集的对话模板如下：
+Different datasets and language models may correspond to different conversation templates. For instance, the conversation template of the [oasst1 dataset](https://huggingface.co/datasets/OpenAssistant/oasst1) is as follows:
 
 ```
 ### Human:
@@ -139,16 +139,16 @@ xxx
 xxx
 ```
 
-XTuner提供了一系列对话模板，你可以在 `xtuner/utils/templates.py` 中找到。其中，`INSTRUCTION_START` 和 `INSTRUCTION` 分别代表第一轮对话和后续若干轮对话所使用的对话模板。
+XTuner provides a series of conversation templates, which you can find in `xtuner/utils/templates.py`. Among them, `INSTRUCTION_START` and `INSTRUCTION` represent the conversation templates used for the first round dialogue and subsequent rounds of dialogues, respectively.
 
-### Step 5, 修改 config 文件
+### Step 5, Modify Config Files
 
-对 Step 3 复制得到的 config 文件需要进行如下修改：
+The config file copied in Step 3 needs to be modified as follows:
 
-1. 导入 Step 1 中实现的 map function `oasst1_multi_turns_map_fn`
-2. 用 `oasst1_multi_turns_map_fn` 替换 `train_dataset` 中的 `dataset_map_fn`
-3. （可选）通过 `prompt_template = PROMPT_TEMPLATE.openassistant` 来设置 `oasst1` 数据集对应的对话模板。
-4. 调整原始数据集的路径，关于 `load_dataset` 的相关操作可以参考[用户文档](https://huggingface.co/docs/datasets/loading)
+1. Import the map function `oasst1_multi_turns_map_fn` implemented in Step 1.
+2. Replace `dataset_map_fn` in `train_dataset` with `oasst1_multi_turns_map_fn`.
+3. (Optional) Set the conversation template corresponding to the `oasst1` dataset via `prompt_template = PROMPT_TEMPLATE.openassistant`.
+4. Adjust the path of the original dataset. You can refer to the [user documentation](https://huggingface.co/docs/datasets/loading) for operations related to `load_dataset`.
 
 ```diff
 from xtuner.datasets import process_hf_dataset
@@ -189,13 +189,13 @@ train_dataloader = dict(
 ...
 ```
 
-## 使用自定义数据集
+## Using Custom Datasets
 
-在使用自定义多轮对话数据集进行指令微调时，我们推荐将数据集构造为 XTuner 定义的[多轮对话数据格式](./dataset_format.md#多轮对话数据集格式)。若自定义数据集格式为 `oasst1` 等其他格式，可参考[使用 HuggingFace Hub 数据集](#使用-huggingface-hub-数据集)一节。
+When using a custom multi-turn dialogue dataset for command fine-tuning, we recommend constructing the dataset in the [multi-turn dialogue data format](./dataset_format.md#multi-turn-dialogue-dataset-format) as defined by XTuner. If the custom dataset format is oasst1 or other formats, you can refer to the section on [Using Datasets in HuggingFace Hub](#using-dataset-in-huggingface-hub).
 
-### Step 1, 数据集准备
+### Step 1, Dataset Preparation
 
-按照 XTuner 定义的[多轮对话数据格式](./dataset_format.md#多轮对话数据集格式)准备自定义数据：
+Prepare your custom data according to the [multi-turn dialogue data format](./dataset_format.md#multi-turn-dialogue-dataset-format) defined by XTuner:
 
 ```json
 [{
@@ -224,31 +224,31 @@ train_dataloader = dict(
 }]
 ```
 
-### Step 2, 列出候选模型名字
+### Step 2, List Candidate Model Names
 
 ```bash
 xtuner list-cfg -p internlm
 ```
 
-`-p` 为模糊查找，若想训练其他模型，可以修改 `internlm` 为 XTuner 支持的其他模型名称。
+`-p` is for fuzzy search. If you want to train other models, you can replace `internlm` with other model names supported by XTuner.
 
-### Step 3, 复制 config 文件
+### Step 3, Export the Config File
 
 ```bash
 xtuner copy-cfg internlm_7b_qlora_oasst1_e3 .
 ```
 
-### Step 4, 设置对话模板（可选）
+### Step 4, Setting Dialogue Template (Optional)
 
-参考[设置对话模板](#step-4-设置对话模板可选)
+Refer to [Setting the Dialogue Template](#step-4-set-conversation-templates-optional).
 
-### Step 5, 修改 config 文件
+### Step 5, Modify Config File
 
-对 Step 3 复制得到的 config 文件需要进行如下修改：
+The config file copied in Step 3 needs to be modified as follows:
 
-1. 调整原始数据集的路径
-2. 由于数据集格式已经是标准格式了，需要将 `train_dataset` 中的 `dataset_map_fn` 置为 None
-3. 设置对话模板
+1. Adjust the path of the original dataset
+2. Since the dataset format is already in the standard format, set `dataset_map_fn` in `train_dataset` to None
+3. Set the dialogue template
 
 ```diff
 from xtuner.datasets import process_hf_dataset

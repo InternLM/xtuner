@@ -91,7 +91,7 @@ xtuner list-cfg -p internlm
 xtuner copy-cfg ${CONFIG_NAME} ${SAVE_DIR}
 ```
 
-例如通过下列命令将名为 `internlm_7b_qlora_oasst1_e3` 的 config 导出至当前目录下：
+例如通过下列命令将名为 `internlm_7b_qlora_alpaca_e3` 的 config 导出至当前目录下：
 
 ```bash
 xtuner copy-cfg internlm_7b_qlora_alpaca_e3 .
@@ -166,7 +166,7 @@ train_dataloader = dict(
 
 ## 使用自定义数据集
 
-在使用自定义数据集进行增量预训练时，我们推荐将数据集构造为XTuner定义的[增量预训练数据格式](./dataset_format.md#增量预训练数据集格式)。若自定义数据集格式为 `alpaca` 等其他格式，可参考[使用 HuggingFace Hub 数据集](#使用huggingface-hub数据集)一节。
+在使用自定义单轮对话数据集进行指令微调时，我们推荐将数据集构造为XTuner定义的[单轮对话数据格式](./dataset_format.md#单轮对话数据集格式)。若自定义数据集格式为 `alpaca` 等其他格式，可参考[使用 HuggingFace Hub 数据集](#使用-huggingface-hub-数据集)一节。
 
 ### Step 1, 数据集准备
 
