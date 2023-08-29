@@ -4,7 +4,7 @@
 
 ## 数据集构建
 
-XTuner支持使用 HuggingFace Hub 数据集或自定义数据集进行 SFT（Supervised FineTune）。二者的主要区别在于，使用 HuggingFace Hub 数据集时需要将原始数据映射为 XTuner 定义的[增量预训练数据格式](./dataset_format.md#增量预训练数据集格式)。而对于自定义数据集则推荐用户按照[增量预训练数据格式](./dataset_format.md#增量预训练数据集格式)构造数据集。
+XTuner 支持使用 HuggingFace Hub 数据集或自定义数据集进行 SFT（Supervised FineTune）。二者的主要区别在于，使用 HuggingFace Hub 数据集时需要将原始数据映射为 XTuner 定义的[增量预训练数据格式](./dataset_format.md#增量预训练数据集格式)。而对于自定义数据集则推荐用户按照[增量预训练数据格式](./dataset_format.md#增量预训练数据集格式)构造数据集。
 
 ### 使用 HuggingFace Hub 数据集
 
