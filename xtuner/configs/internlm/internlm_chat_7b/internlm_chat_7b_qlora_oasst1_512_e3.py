@@ -24,7 +24,7 @@ pretrained_model_name_or_path = 'internlm/internlm-chat-7b'
 
 # Data
 data_path = 'timdettmers/openassistant-guanaco'
-prompt_template = PROMPT_TEMPLATE.openassistant
+prompt_template = PROMPT_TEMPLATE.internlm_chat
 max_length = 512
 pack_to_max_length = False
 

@@ -24,7 +24,7 @@ pretrained_model_name_or_path = 'internlm/internlm-chat-7b'
 
 # Data
 data_path = 'nampdn-ai/tiny-codes'
-prompt_template = PROMPT_TEMPLATE.coder
+prompt_template = PROMPT_TEMPLATE.internlm_chat
 max_length = 2048
 pack_to_max_length = True
 

@@ -24,7 +24,7 @@ pretrained_model_name_or_path = 'internlm/internlm-chat-7b'
 
 # Data
 alpaca_zh_path = 'silk-road/alpaca-data-gpt4-chinese'
-prompt_template = PROMPT_TEMPLATE.alpaca
+prompt_template = PROMPT_TEMPLATE.internlm_chat
 max_length = 2048
 pack_to_max_length = True
 

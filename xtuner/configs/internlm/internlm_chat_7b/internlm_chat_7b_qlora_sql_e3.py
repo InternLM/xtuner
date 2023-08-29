@@ -24,7 +24,7 @@ pretrained_model_name_or_path = 'internlm/internlm-chat-7b'
 
 # Data
 data_path = 'b-mc2/sql-create-context'
-prompt_template = PROMPT_TEMPLATE.sql
+prompt_template = PROMPT_TEMPLATE.internlm_chat
 max_length = 2048
 pack_to_max_length = True
 
