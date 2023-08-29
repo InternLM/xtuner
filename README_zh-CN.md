@@ -56,8 +56,8 @@ XTuner 是一个轻量级微调大语言模型的工具库，由 [MMRazor](https
   <li><a href="https://github.com/facebookresearch/llama">Llama</a></li>
   <li><a href="https://github.com/facebookresearch/llama">Llama2</a></li>
   <li><a href="https://github.com/facebookresearch/llama">Llama2-Chat</a></li>
-  <li><a href="https://huggingface.co/THUDM/chatglm-6b">ChatGLM-6B</a></li>
-  <li><a href="https://huggingface.co/THUDM/chatglm2-6b">ChatGLM2-6B</a></li>
+  <li><a href="https://huggingface.co/THUDM/chatglm-6b">ChatGLM</a></li>
+  <li><a href="https://huggingface.co/THUDM/chatglm2-6b">ChatGLM2</a></li>
   <li><a href="https://github.com/QwenLM/Qwen-7B">Qwen</a></li>
   <li><a href="https://github.com/QwenLM/Qwen-7B">Qwen-Chat</a></li>
   <li><a href="https://github.com/baichuan-inc/Baichuan-7B">Baichuan-7B</a></li>
