@@ -24,7 +24,7 @@ pretrained_model_name_or_path = 'meta-llama/Llama-2-7b-chat-hf'
 
 # Data
 data_path = 'HuggingFaceH4/CodeAlpaca_20K'
-prompt_template = PROMPT_TEMPLATE.coder
+prompt_template = PROMPT_TEMPLATE.llama_2_chat
 max_length = 2048
 pack_to_max_length = True
 
