@@ -92,9 +92,9 @@ xtuner copy-cfg internlm_7b_qlora_oasst1_e3 .
 5. （可选）如果你希望利用 XTuner 提供的 `EvaluateChatHook` 在训练中查看模型的生成结果，你还需要关闭 `prompt_template` 以去除对话模版。（注意：由于增量预训练时的模型只具备续写功能，不具备对话功能，因此在 `EvaluateChatHook`打印的对话结果中，模型可能会无法正常停止生成。）
 
 ```diff
-from xtuner.datasets import process_hf_dataset
+from xtuner.dataset import process_hf_dataset
 from datasets import load_dataset
-- from xtuner.datasets.map_fns import oasst1_map_fn, template_map_fn_factory
+- from xtuner.dataset.map_fns import oasst1_map_fn, template_map_fn_factory
 + from map_fn import oasst1_incremental_map_fn
 ...
 #######################################################################
@@ -182,9 +182,9 @@ xtuner copy-cfg internlm_7b_qlora_oasst1_e3 .
 4. （可选）设置对话模板以调用 `EvaluateChatHook` 在训练的各个阶段记录模型的对话结果
 
 ```diff
-from xtuner.datasets import process_hf_dataset
+from xtuner.dataset import process_hf_dataset
 from datasets import load_dataset
-- from xtuner.datasets.map_fns import oasst1_map_fn, template_map_fn_factory
+- from xtuner.dataset.map_fns import oasst1_map_fn, template_map_fn_factory
 ...
 #######################################################################
 #                          PART 1  Settings                           #

@@ -125,10 +125,10 @@ XTuner提供了一系列对话模板，你可以在 `xtuner/utils/templates.py` 
 4. 调整原始数据集的路径，关于 `load_dataset` 的相关操作可以参考[用户文档](https://huggingface.co/docs/datasets/loading)
 
 ```diff
-from xtuner.datasets import process_hf_dataset
+from xtuner.dataset import process_hf_dataset
 from datasets import load_dataset
-- from xtuner.datasets.map_fns import alpaca_map_fn, template_map_fn_factory
-+ from xtuner.datasets.map_fns import template_map_fn_factory
+- from xtuner.dataset.map_fns import alpaca_map_fn, template_map_fn_factory
++ from xtuner.dataset.map_fns import template_map_fn_factory
 + from .map_fn import alpaca_map_fn
 ...
 #######################################################################
@@ -218,10 +218,10 @@ xtuner copy-cfg internlm_7b_qlora_alpaca_e3 .
 3. 设置对话模板
 
 ```diff
-from xtuner.datasets import process_hf_dataset
+from xtuner.dataset import process_hf_dataset
 from datasets import load_dataset
-- from xtuner.datasets.map_fns import alpaca_map_fn, template_map_fn_factory
-+ from xtuner.datasets.map_fns import template_map_fn_factory
+- from xtuner.dataset.map_fns import alpaca_map_fn, template_map_fn_factory
++ from xtuner.dataset.map_fns import template_map_fn_factory
 ...
 #######################################################################
 #                          PART 1  Settings                           #
