@@ -37,6 +37,13 @@ class EvaluateChatHook(Hook):
 
         device = next(iter(model.parameters())).device
 
+        is_checkpointing =  model.llm.is_gradient_checkpointing
+        use_cache = model.llm.config.use_cache
+
+        # Cast to inference mode
+        model.llm.gradient_checkpointing_disable()
+        model.llm.config.use_cache = True
+
         for sample_input in self.sample_inputs:
             inputs = self.instruction.format(input=sample_input, **runner.cfg)
             input_ids = self.tokenizer(
@@ -49,6 +56,11 @@ class EvaluateChatHook(Hook):
             runner.logger.info(
                 f'Sample output:\n'
                 f'{self.tokenizer.decode(generation_output[0])}\n')
+
+        # Cast to training mode
+        if is_checkpointing:
+            model.llm.gradient_checkpointing_enable()
+        model.llm.config.use_cache = use_cache
 
     def before_train(self, runner):
         runner.logger.info('before_train in EvaluateChatHook .')

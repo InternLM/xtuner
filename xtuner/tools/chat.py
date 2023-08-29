@@ -132,6 +132,10 @@ def main():
         cfg.merge_from_dict(args.cfg_options)
 
     model = BUILDER.build(cfg.model)
+    # Cast to inference mode
+    model.llm.gradient_checkpointing_disable()
+    model.llm.config.use_cache = True
+
     tokenizer = BUILDER.build(cfg.tokenizer)
 
     if args.adapter is not None:
