@@ -37,7 +37,7 @@ class EvaluateChatHook(Hook):
 
         device = next(iter(model.parameters())).device
 
-        is_checkpointing =  model.llm.is_gradient_checkpointing
+        is_checkpointing = model.llm.is_gradient_checkpointing
         use_cache = model.llm.config.use_cache
 
         # Cast to inference mode
