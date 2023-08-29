@@ -1,3 +1,4 @@
+# Copyright (c) OpenMMLab. All rights reserved.
 import torch
 from bitsandbytes.optim import PagedAdamW32bit
 from datasets import load_dataset
