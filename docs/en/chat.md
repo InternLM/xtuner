@@ -44,10 +44,10 @@
   xtuner chat hf internlm/internlm-7b --adapter xtuner/internlm-7b-qlora-open-platypus --prompt-template alpaca
   ```
 
-- InternLM-7B, Alpaca
+- InternLM-7B, Alpaca-enzh
 
   ```shell
-  xtuner chat hf internlm/internlm-7b --adapter xtuner/internlm-7b-qlora-alpaca --prompt-template alpaca
+  xtuner chat hf internlm/internlm-7b --adapter xtuner/internlm-7b-qlora-alpaca-enzh --prompt-template alpaca
   ```
 
 ## Chat with [Llama2](https://github.com/facebookresearch/llama)
@@ -94,10 +94,10 @@
   xtuner chat hf Qwen/Qwen-7B --adapter xtuner/Qwen-7B-qlora-arxiv-gentitle --prompt-template title --answer-stop-word '<|endoftext|>'
   ```
 
-- Qwen-7B, Alpaca
+- Qwen-7B, Alpaca-enzh
 
   ```shell
-  xtuner chat hf Qwen/Qwen-7B --adapter xtuner/Qwen-7B-qlora-alpaca --prompt-template alpaca --answer-stop-word '<|endoftext|>'
+  xtuner chat hf Qwen/Qwen-7B --adapter xtuner/Qwen-7B-qlora-alpaca-enzh --prompt-template alpaca --answer-stop-word '<|endoftext|>'
   ```
 
 ## Chat with [Baichuan](https://github.com/baichuan-inc)
@@ -114,8 +114,8 @@
   xtuner chat hf baichuan-inc/Baichuan-7B --adapter xtuner/Baichuan-7B-qlora-arxiv-gentitle --prompt-template title --no-streamer
   ```
 
-- Baichuan-7B, Alpaca
+- Baichuan-7B, Alpaca-enzh
 
   ```shell
-  xtuner chat hf baichuan-inc/Baichuan-7B --adapter xtuner/Baichuan-7B-qlora-alpaca --prompt-template alpaca
+  xtuner chat hf baichuan-inc/Baichuan-7B --adapter xtuner/Baichuan-7B-qlora-alpaca-enzh --prompt-template alpaca
   ```
