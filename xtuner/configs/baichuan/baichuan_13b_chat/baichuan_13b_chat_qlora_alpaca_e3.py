@@ -24,7 +24,7 @@ pretrained_model_name_or_path = 'baichuan-inc/Baichuan-13B-Chat'
 
 # Data
 alpaca_en_path = 'tatsu-lab/alpaca'
-prompt_template = PROMPT_TEMPLATE.alpaca
+prompt_template = PROMPT_TEMPLATE.baichuan_chat
 max_length = 2048
 pack_to_max_length = True
 
