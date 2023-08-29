@@ -30,7 +30,7 @@ python train_qlora_hf.py \
     # custom training args
     --model_name_or_path internlm/internlm-7b \
     --dataset_name_or_path tatsu-lab/alpaca \
-    # huggingface's default training args
+    # HuggingFace's default training args
     --do_train = True
     --per_device_train_batch_size = 1
     --learning_rate = 2e-5
