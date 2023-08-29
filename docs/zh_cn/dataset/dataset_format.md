@@ -112,7 +112,7 @@ Assistant3：You are welcome.
 
 如何使用上述这条多轮对话数据训练大模型？目前有以下两个主流方法。
 
-### 方法1
+### 方法 1
 
 User1、Assistant1、User2、Assistant2、User3的文本都视为模型的输入部分，将 Assistant3 的文本视为模型的预测部分，只有 Assistant3 部分的 loss 参与权重更新。
 
@@ -122,7 +122,7 @@ User1、Assistant1、User2、Assistant2、User3的文本都视为模型的输入
 
 这种方法的弊端在于没有充分利用多轮对话的训练数据，因为 Assistant1 和 Assistant2 的内容没有参与模型训练，导致训练数据利用率较低。
 
-### 方法2
+### 方法 2
 
 将一条多轮对话数据，拆分成多条数据。例如将以上示例拆分成如下三条数据。
 
