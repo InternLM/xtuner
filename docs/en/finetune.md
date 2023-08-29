@@ -11,7 +11,7 @@
 - InternLM-7B, Arxiv Gentitle
 
   ```shell
-  xtuner train internlm_7b_qlora_arxiv_e3
+  xtuner train internlm_7b_qlora_arxiv_gentitle_e3
   ```
 
 - InternLM-7B, Colorist
@@ -44,10 +44,10 @@
   xtuner train internlm_7b_qlora_open_platypus_e3
   ```
 
-- InternLM-7B, Alpaca
+- InternLM-7B, Alpaca-enzh
 
   ```shell
-  xtuner train internlm_7b_qlora_alpaca_e3
+  xtuner train internlm_7b_qlora_alpaca_enzh_e3
   ```
 
 ## QLoRA Fine-tune [Llama2](https://github.com/facebookresearch/llama)
@@ -64,7 +64,7 @@
 - Llama2-7B, Arxiv Gentitle
 
   ```shell
-  xtuner train llama2_7b_qlora_arxiv_e3
+  xtuner train llama2_7b_qlora_arxiv_gentitle_e3
   ```
 
 - Llama2-7B, Colorist
@@ -91,13 +91,13 @@
 - Qwen-7B, Arxiv Gentitle
 
   ```shell
-  xtuner train qwen_7b_qlora_arxiv_e3
+  xtuner train qwen_7b_qlora_arxiv_gentitle_e3
   ```
 
-- Qwen-7B, Alpaca
+- Qwen-7B, Alpaca-enzh
 
   ```shell
-  xtuner train qwen_7b_qlora_alpaca_e3
+  xtuner train qwen_7b_qlora_alpaca_enzh_e3
   ```
 
 ## QLoRA Fine-tune [Baichuan](https://github.com/baichuan-inc)
@@ -111,11 +111,11 @@
 - Baichuan-7B, Arxiv Gentitle
 
   ```shell
-  xtuner train baichuan_7b_qlora_arxiv_e3
+  xtuner train baichuan_7b_qlora_arxiv_gentitle_e3
   ```
 
-- Baichuan-7B, Alpaca
+- Baichuan-7B, Alpaca-enzh
 
   ```shell
-  xtuner train baichuan_7b_qlora_alpaca_e3
+  xtuner train baichuan_7b_qlora_alpaca_enzh_e3
   ```
