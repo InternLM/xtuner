@@ -1,59 +1,85 @@
 from functools import partial
 
 from datasets import load_dataset
-from mmengine.config import Config
-from mmengine.dataset import DefaultSampler
-from mmengine.runner import Runner
+from torch.utils.data import ConcatDataset
 
-from xtuner.datasets import process_hf_dataset
-from xtuner.datasets.collate_fns import default_collate_fn
-from xtuner.datasets.map_fns import alpaca_map_fn
-from xtuner.registry import BUILDER
+from xtuner.dataset import process_hf_dataset
+from xtuner.dataset.collate_fns import default_collate_fn
+from xtuner.dataset.map_fns import (alpaca_map_fn, alpaca_zh_map_fn,
+                                    template_map_fn_factory)
+from xtuner.utils import PROMPT_TEMPLATE
 
 
-def alpaca_dataloader(tokenizer,
-                      batch_size=1,
-                      num_workers=0,
-                      path=None,
-                      max_length=2048,
-                      pack_to_max_length=True):
-    if path is None:
-        path = 'tatsu-lab/alpaca'
-    ds = alpaca_dataset(
+def alpaca_enzh_dataset(tokenizer,
+                        path_en='tatsu-lab/alpaca',
+                        path_zh='silk-road/alpaca-data-gpt4-chinese',
+                        max_length=2048,
+                        remove_unused_columns=True,
+                        pack_to_max_length=True):
+    alpaca = alpaca_dataset(
         tokenizer,
-        path=path,
+        path=path_en,
         max_length=max_length,
         shuffle_before_pack=True,
+        remove_unused_columns=remove_unused_columns,
         pack_to_max_length=pack_to_max_length)
-    dl_cfg = dict(
-        batch_size=batch_size,
-        num_workers=num_workers,
-        dataset=ds,
-        sampler=dict(type=DefaultSampler, shuffle=True),
-        collate_fn=dict(type=default_collate_fn))
-    dl_cfg = Config(dl_cfg)
-    dl = Runner.build_dataloader(dl_cfg)
-    return dl
+    alpaca_zh = alpaca_zh_dataset(
+        tokenizer,
+        path=path_zh,
+        max_length=max_length,
+        shuffle_before_pack=True,
+        remove_unused_columns=remove_unused_columns,
+        pack_to_max_length=pack_to_max_length)
+    dataset = ConcatDataset([alpaca, alpaca_zh])
+    return dataset
+
+
+def alpaca_enzh_data_collator(return_hf_format=False):
+    return partial(default_collate_fn, return_hf_format=return_hf_format)
+
+
+def alpaca_zh_dataset(tokenizer,
+                      path='silk-road/alpaca-data-gpt4-chinese',
+                      max_length=2048,
+                      remove_unused_columns=True,
+                      pack_to_max_length=True):
+    template_map_fn = template_map_fn_factory(template=PROMPT_TEMPLATE.alpaca)
+    dataset_org = load_dataset(path)
+    dataset = process_hf_dataset(
+        dataset=dataset_org,
+        tokenizer=tokenizer,
+        max_length=max_length,
+        dataset_map_fn=alpaca_zh_map_fn,
+        template_map_fn=template_map_fn,
+        remove_unused_columns=remove_unused_columns,
+        shuffle_before_pack=True,
+        pack_to_max_length=pack_to_max_length)
+
+    return dataset
+
+
+def alpaca_zh_data_collator(return_hf_format=False):
+    return partial(default_collate_fn, return_hf_format=return_hf_format)
 
 
 def alpaca_dataset(tokenizer,
-                   path=None,
+                   path='tatsu-lab/alpaca',
                    max_length=2048,
+                   remove_unused_columns=True,
                    pack_to_max_length=True):
-    if path is None:
-        path = 'tatsu-lab/alpaca'
-    ds_cfg = dict(
-        type=process_hf_dataset,
-        dataset=dict(type=load_dataset, path=path),
+    template_map_fn = template_map_fn_factory(template=PROMPT_TEMPLATE.alpaca)
+    dataset_org = load_dataset(path)
+    dataset = process_hf_dataset(
+        dataset=dataset_org,
         tokenizer=tokenizer,
         max_length=max_length,
-        map_fn=alpaca_map_fn,
-        remove_columns=['instruction', 'text'],
+        dataset_map_fn=alpaca_map_fn,
+        template_map_fn=template_map_fn,
+        remove_unused_columns=remove_unused_columns,
         shuffle_before_pack=True,
         pack_to_max_length=pack_to_max_length)
-    ds_cfg = Config(ds_cfg)
-    ds = BUILDER.build(ds_cfg)
-    return ds
+
+    return dataset
 
 
 def alpaca_data_collator(return_hf_format=False):

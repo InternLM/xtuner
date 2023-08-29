@@ -14,10 +14,9 @@ from peft import get_peft_model, prepare_model_for_kbit_training
 from transformers import TrainingArguments
 
 from xtuner.configs import cfgs_name_path
-from xtuner.datasets.collate_fns import default_collate_fn
-from xtuner.models.fast_forward import dispatch_fast_forward
-from xtuner.models.utils import (LoadWoInit, find_all_linear_names,
-                                 traverse_dict)
+from xtuner.dataset.collate_fns import default_collate_fn
+from xtuner.model.fast_forward import dispatch_fast_forward
+from xtuner.model.utils import LoadWoInit, find_all_linear_names, traverse_dict
 from xtuner.registry import BUILDER
 
 
