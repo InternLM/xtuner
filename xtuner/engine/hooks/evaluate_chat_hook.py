@@ -45,7 +45,8 @@ class EvaluateChatHook(Hook):
         model.llm.config.use_cache = True
 
         for sample_input in self.sample_inputs:
-            inputs = self.instruction.format(input=sample_input, **runner.cfg)
+            inputs = self.instruction.format(
+                input=sample_input, round=1, **runner.cfg)
             input_ids = self.tokenizer(
                 inputs, return_tensors='pt')['input_ids']
             input_ids = input_ids.to(device)
