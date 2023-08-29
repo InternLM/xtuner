@@ -21,8 +21,8 @@
 
 ## How to customize your experiment
 
-the apis of xtuner is compatible with the usage of huggingface's transformers.
-If you want to customize your experiment, you just need to pass in your hyperparameters like huggingface.
+XTuner APIs are compatible with the usage of HuggingFace's transformers.
+If you want to customize your experiment, you just need to pass in your hyperparameters like HuggingFace.
 
 ```
 # training example
