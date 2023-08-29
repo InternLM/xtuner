@@ -9,11 +9,11 @@ from peft import LoraConfig
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           BitsAndBytesConfig)
 
-from xtuner.dataset import process_hf_dataset
-from xtuner.dataset.collate_fns import default_collate_fn
-from xtuner.dataset.map_fns import oasst1_map_fn, template_map_fn_factory
+from xtuner.datasets import process_hf_dataset
+from xtuner.datasets.collate_fns import default_collate_fn
+from xtuner.datasets.map_fns import sql_map_fn, template_map_fn_factory
 from xtuner.engine import DatasetInfoHook, EvaluateChatHook
-from xtuner.model import SupervisedFinetune
+from xtuner.models import SupervisedFinetune
 from xtuner.utils import PROMPT_TEMPLATE
 
 #######################################################################
@@ -23,8 +23,8 @@ from xtuner.utils import PROMPT_TEMPLATE
 pretrained_model_name_or_path = 'meta-llama/Llama-2-7b-chat-hf'
 
 # Data
-data_path = 'timdettmers/openassistant-guanaco'
-prompt_template = PROMPT_TEMPLATE.openassistant
+data_path = 'b-mc2/sql-create-context'
+prompt_template = PROMPT_TEMPLATE.sql
 max_length = 2048
 pack_to_max_length = True
 
@@ -42,7 +42,11 @@ max_norm = 1  # grad clip
 # Evaluate the generation performance during the training
 evaluation_freq = 500
 evaluation_inputs = [
-    '请给我介绍五个上海的景点', 'Please tell me five scenic spots in Shanghai'
+    ('CREATE TABLE station (name VARCHAR, lat VARCHAR, city VARCHAR)\n'
+     'Find the name, latitude, and city of stations with latitude '
+     'above 50.'),
+    ('CREATE TABLE weather (zip_code VARCHAR, mean_visibility_miles '
+     'INTEGER)\n找到mean_visibility_miles最大的zip_code。')
 ]
 
 #######################################################################
@@ -86,7 +90,7 @@ train_dataset = dict(
     dataset=dict(type=load_dataset, path=data_path),
     tokenizer=tokenizer,
     max_length=max_length,
-    dataset_map_fn=oasst1_map_fn,
+    dataset_map_fn=sql_map_fn,
     template_map_fn=dict(
         type=template_map_fn_factory, template=prompt_template),
     remove_unused_columns=True,

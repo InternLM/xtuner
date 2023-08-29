@@ -9,11 +9,11 @@ from peft import LoraConfig
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           BitsAndBytesConfig)
 
-from xtuner.dataset import process_hf_dataset
-from xtuner.dataset.collate_fns import default_collate_fn
-from xtuner.dataset.map_fns import oasst1_map_fn, template_map_fn_factory
+from xtuner.datasets import process_hf_dataset
+from xtuner.datasets.collate_fns import default_collate_fn
+from xtuner.datasets.map_fns import oasst1_map_fn, template_map_fn_factory
 from xtuner.engine import DatasetInfoHook, EvaluateChatHook
-from xtuner.model import SupervisedFinetune
+from xtuner.models import SupervisedFinetune
 from xtuner.utils import PROMPT_TEMPLATE
 
 #######################################################################
@@ -25,8 +25,8 @@ pretrained_model_name_or_path = 'meta-llama/Llama-2-7b-chat-hf'
 # Data
 data_path = 'timdettmers/openassistant-guanaco'
 prompt_template = PROMPT_TEMPLATE.openassistant
-max_length = 2048
-pack_to_max_length = True
+max_length = 512
+pack_to_max_length = False
 
 # Scheduler & Optimizer
 batch_size = 1  # per_device
