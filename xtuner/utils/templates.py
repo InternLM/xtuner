@@ -67,4 +67,10 @@ PROMPT_TEMPLATE = ConfigDict(
                            'TABLE statement.\n'
                            '### Question: {input}\n### Query: '),
         INSTRUCTION=('### Question: {input}\n### Query: ')),
+    wizardlm=dict(
+        INSTRUCTION_START=('A chat between a curious user and an artificial '
+                           'intelligence assistant. The assistant gives '
+                           'helpful, detailed, and polite answers to the '
+                           'user\'s questions. USER: {input} ASSISTANT: '),
+        INSTRUCTION=('USER: {input} ASSISTANT: ')),
 )
