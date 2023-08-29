@@ -9,11 +9,13 @@ from peft import LoraConfig
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           BitsAndBytesConfig)
 
-from xtuner.dataset import process_hf_dataset
-from xtuner.dataset.collate_fns import default_collate_fn
-from xtuner.dataset.map_fns import openorca_map_fn, template_map_fn_factory
+from xtuner.datasets import ConcatDataset, process_hf_dataset
+from xtuner.datasets.collate_fns import default_collate_fn
+from xtuner.datasets.map_fns import (crime_kg_assitant_map_fn,
+                                     law_reference_map_fn,
+                                     template_map_fn_factory)
 from xtuner.engine import DatasetInfoHook, EvaluateChatHook
-from xtuner.model import SupervisedFinetune
+from xtuner.models import SupervisedFinetune
 from xtuner.utils import PROMPT_TEMPLATE
 
 #######################################################################
@@ -23,8 +25,10 @@ from xtuner.utils import PROMPT_TEMPLATE
 pretrained_model_name_or_path = 'Qwen/Qwen-7B'
 
 # Data
-data_path = 'Open-Orca/OpenOrca'
-prompt_template = PROMPT_TEMPLATE.openassistant
+# download data from https://github.com/LiuHC0428/LAW-GPT
+crime_kg_assitant_path = './data/law/CrimeKgAssitant清洗后_52k.json'
+law_reference_data_path = './data/law/训练数据_带法律依据_92k.json'
+prompt_template = PROMPT_TEMPLATE.lawyer
 max_length = 2048
 pack_to_max_length = True
 
@@ -32,7 +36,7 @@ pack_to_max_length = True
 batch_size = 1  # per_device
 accumulative_counts = 16
 dataloader_num_workers = 0
-max_epochs = 1
+max_epochs = 3
 optim_type = PagedAdamW32bit
 lr = 2e-4
 betas = (0.9, 0.999)
@@ -40,10 +44,8 @@ weight_decay = 0
 max_norm = 1  # grad clip
 
 # Evaluate the generation performance during the training
-evaluation_freq = 5000
-evaluation_inputs = [
-    '请给我介绍五个上海的景点', 'Please tell me five scenic spots in Shanghai'
-]
+evaluation_freq = 500
+evaluation_inputs = ['请问离婚需要准备什么材料？', '销售鳄鱼皮包违法吗？']
 
 #######################################################################
 #                      PART 2  Model & Tokenizer                      #
@@ -81,17 +83,41 @@ model = dict(
 #######################################################################
 #                      PART 3  Dataset & Dataloader                   #
 #######################################################################
-train_dataset = dict(
+crime_kg_assitant = dict(
     type=process_hf_dataset,
-    dataset=dict(type=load_dataset, path=data_path),
+    dataset=dict(
+        type=load_dataset,
+        path='json',
+        data_files=dict(train=crime_kg_assitant_path)),
     tokenizer=tokenizer,
     max_length=max_length,
-    dataset_map_fn=openorca_map_fn,
+    dataset_map_fn=crime_kg_assitant_map_fn,
     template_map_fn=dict(
         type=template_map_fn_factory, template=prompt_template),
     remove_unused_columns=True,
     shuffle_before_pack=True,
     pack_to_max_length=pack_to_max_length)
+
+law_reference_data = dict(
+    type=process_hf_dataset,
+    dataset=dict(
+        type=load_dataset,
+        path='json',
+        data_files=dict(train=law_reference_data_path)),
+    tokenizer=tokenizer,
+    max_length=max_length,
+    dataset_map_fn=law_reference_map_fn,
+    template_map_fn=dict(
+        type=template_map_fn_factory, template=prompt_template),
+    remove_unused_columns=True,
+    shuffle_before_pack=True,
+    pack_to_max_length=pack_to_max_length)
+
+train_dataset = dict(
+    type=ConcatDataset,
+    datasets_cfg=dict(
+        crime_kg_assitant=crime_kg_assitant,
+        law_reference_data=law_reference_data))
 
 train_dataloader = dict(
     batch_size=batch_size,

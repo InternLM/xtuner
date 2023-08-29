@@ -9,11 +9,11 @@ from peft import LoraConfig
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           BitsAndBytesConfig)
 
-from xtuner.dataset import process_hf_dataset
-from xtuner.dataset.collate_fns import default_collate_fn
-from xtuner.dataset.map_fns import openorca_map_fn, template_map_fn_factory
+from xtuner.datasets import process_hf_dataset
+from xtuner.datasets.collate_fns import default_collate_fn
+from xtuner.datasets.map_fns import alpaca_map_fn, template_map_fn_factory
 from xtuner.engine import DatasetInfoHook, EvaluateChatHook
-from xtuner.model import SupervisedFinetune
+from xtuner.models import SupervisedFinetune
 from xtuner.utils import PROMPT_TEMPLATE
 
 #######################################################################
@@ -23,8 +23,8 @@ from xtuner.utils import PROMPT_TEMPLATE
 pretrained_model_name_or_path = 'Qwen/Qwen-7B'
 
 # Data
-data_path = 'Open-Orca/OpenOrca'
-prompt_template = PROMPT_TEMPLATE.openassistant
+data_path = 'garage-bAInd/Open-Platypus'
+prompt_template = PROMPT_TEMPLATE.alpaca
 max_length = 2048
 pack_to_max_length = True
 
@@ -32,7 +32,7 @@ pack_to_max_length = True
 batch_size = 1  # per_device
 accumulative_counts = 16
 dataloader_num_workers = 0
-max_epochs = 1
+max_epochs = 3
 optim_type = PagedAdamW32bit
 lr = 2e-4
 betas = (0.9, 0.999)
@@ -40,7 +40,7 @@ weight_decay = 0
 max_norm = 1  # grad clip
 
 # Evaluate the generation performance during the training
-evaluation_freq = 5000
+evaluation_freq = 500
 evaluation_inputs = [
     '请给我介绍五个上海的景点', 'Please tell me five scenic spots in Shanghai'
 ]
@@ -86,7 +86,7 @@ train_dataset = dict(
     dataset=dict(type=load_dataset, path=data_path),
     tokenizer=tokenizer,
     max_length=max_length,
-    dataset_map_fn=openorca_map_fn,
+    dataset_map_fn=alpaca_map_fn,
     template_map_fn=dict(
         type=template_map_fn_factory, template=prompt_template),
     remove_unused_columns=True,

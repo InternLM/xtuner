@@ -9,11 +9,11 @@ from peft import LoraConfig
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           BitsAndBytesConfig)
 
-from xtuner.dataset import process_hf_dataset
-from xtuner.dataset.collate_fns import default_collate_fn
-from xtuner.dataset.map_fns import openorca_map_fn, template_map_fn_factory
+from xtuner.datasets import process_hf_dataset
+from xtuner.datasets.collate_fns import default_collate_fn
+from xtuner.datasets.map_fns import template_map_fn_factory, tiny_codes_map_fn
 from xtuner.engine import DatasetInfoHook, EvaluateChatHook
-from xtuner.model import SupervisedFinetune
+from xtuner.models import SupervisedFinetune
 from xtuner.utils import PROMPT_TEMPLATE
 
 #######################################################################
@@ -23,8 +23,8 @@ from xtuner.utils import PROMPT_TEMPLATE
 pretrained_model_name_or_path = 'Qwen/Qwen-7B'
 
 # Data
-data_path = 'Open-Orca/OpenOrca'
-prompt_template = PROMPT_TEMPLATE.openassistant
+data_path = 'nampdn-ai/tiny-codes'
+prompt_template = PROMPT_TEMPLATE.coder
 max_length = 2048
 pack_to_max_length = True
 
@@ -40,9 +40,13 @@ weight_decay = 0
 max_norm = 1  # grad clip
 
 # Evaluate the generation performance during the training
-evaluation_freq = 5000
+evaluation_freq = 500
 evaluation_inputs = [
-    '请给我介绍五个上海的景点', 'Please tell me five scenic spots in Shanghai'
+    ('写一个Python函数，将十六进制颜色代码（如#0066ee）转换为对应的'
+     '红、绿、蓝（RGB）三个颜色分量值，并以元组的形式返回。'),
+    ('Write a Python function that takes a hexadecimal color code '
+     '(e.g., #0066ee) as input and converts it into the corresponding '
+     'red, green, and blue (RGB) color component values.')
 ]
 
 #######################################################################
@@ -86,7 +90,7 @@ train_dataset = dict(
     dataset=dict(type=load_dataset, path=data_path),
     tokenizer=tokenizer,
     max_length=max_length,
-    dataset_map_fn=openorca_map_fn,
+    dataset_map_fn=tiny_codes_map_fn,
     template_map_fn=dict(
         type=template_map_fn_factory, template=prompt_template),
     remove_unused_columns=True,
