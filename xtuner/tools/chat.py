@@ -22,6 +22,11 @@ def parse_args():
         'configs, instead of the automatically saved log configs.')
     parser.add_argument('--adapter', default=None, help='adapter model')
     parser.add_argument(
+        '--prompt-template',
+        choices=PROMPT_TEMPLATE.keys(),
+        default=None,
+        help='Specify a prompt option')
+    parser.add_argument(
         '--is-deepspeed',
         action='store_true',
         help='whether the adapter is saved from deepspeed')
@@ -34,11 +39,6 @@ def parse_args():
         '--no-streamer', action='store_true', help='Whether to with streamer')
     parser.add_argument('--command-stop-word', default=None, help='Stop key')
     parser.add_argument('--answer-stop-word', default=None, help='Stop key')
-    parser.add_argument(
-        '--prompt-template',
-        choices=PROMPT_TEMPLATE.keys(),
-        default=None,
-        help='Specify a prompt option')
     parser.add_argument(
         '--max-new-tokens',
         type=int,

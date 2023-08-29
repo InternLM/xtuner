@@ -17,6 +17,11 @@ def parse_args():
         'model_name_or_path', help='Hugging Face model name or path')
     parser.add_argument('--adapter', default=None, help='adapter name or path')
     parser.add_argument(
+        '--prompt-template',
+        choices=PROMPT_TEMPLATE.keys(),
+        default=None,
+        help='Specify a prompt option')
+    parser.add_argument(
         '--bot-name', type=str, default='BOT', help='Name for Bot')
     parser.add_argument(
         '--with-plugins',
@@ -27,11 +32,6 @@ def parse_args():
         '--no-streamer', action='store_true', help='Whether to with streamer')
     parser.add_argument('--command-stop-word', default=None, help='Stop key')
     parser.add_argument('--answer-stop-word', default=None, help='Stop key')
-    parser.add_argument(
-        '--prompt-template',
-        choices=PROMPT_TEMPLATE.keys(),
-        default=None,
-        help='Specify a prompt option')
     parser.add_argument(
         '--max-new-tokens',
         type=int,

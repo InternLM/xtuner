@@ -4,7 +4,7 @@ from mmengine.hooks import Hook
 from xtuner.registry import BUILDER
 
 
-class LogSampleHook(Hook):
+class DatasetInfoHook(Hook):
 
     def __init__(self, tokenizer):
         self.tokenizer = BUILDER.build(tokenizer)

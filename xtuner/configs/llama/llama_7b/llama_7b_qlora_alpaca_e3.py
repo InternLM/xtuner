@@ -11,8 +11,9 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer,
 
 from xtuner.dataset import ConcatDataset, process_hf_dataset
 from xtuner.dataset.collate_fns import default_collate_fn
-from xtuner.dataset.map_fns import alpaca_map_fn, alpaca_zh_map_fn
-from xtuner.engine import LogSampleHook, SampleGenerateHook
+from xtuner.dataset.map_fns import (alpaca_map_fn, alpaca_zh_map_fn,
+                                     template_map_fn_factory)
+from xtuner.engine import DatasetInfoHook, EvaluateChatHook
 from xtuner.model import SupervisedFinetune
 from xtuner.utils import PROMPT_TEMPLATE
 
@@ -25,6 +26,7 @@ alpaca_zh_path = 'silk-road/alpaca-data-gpt4-chinese'
 alpaca_en_path = 'tatsu-lab/alpaca'
 
 # data
+prompt_template = PROMPT_TEMPLATE.alpaca
 batch_size = 1  # per_device
 accumulative_counts = 16
 dataloader_num_workers = 0
@@ -37,10 +39,13 @@ betas = (0.9, 0.999)
 weight_decay = 0.01
 max_norm = 1  # grad clip
 
+# Assess the progress of the model's training via interactive dialogue.
+evaluation_freq = 500
+human_inputs = ['请给我介绍五个上海的景点', 'Please tell me five scenic spots in Shanghai']
+
 # other
 max_length = 2048
 pack_to_max_length = True
-generate_test_freq = 500
 
 #######################################################################
 #                      PART 2  Model & Tokenizer                      #
@@ -83,8 +88,10 @@ alpaca_en = dict(
     dataset=dict(type=load_dataset, path=alpaca_en_path),
     tokenizer=tokenizer,
     max_length=max_length,
-    map_fn=alpaca_map_fn,
-    remove_columns=['instruction', 'text'],
+    dataset_map_fn=alpaca_map_fn,
+    template_map_fn=dict(
+        type=template_map_fn_factory, template=prompt_template),
+    remove_unused_columns=True,
     shuffle_before_pack=True,
     pack_to_max_length=pack_to_max_length)
 
@@ -93,8 +100,10 @@ alpaca_zh = dict(
     dataset=dict(type=load_dataset, path=alpaca_zh_path),
     tokenizer=tokenizer,
     max_length=max_length,
-    map_fn=alpaca_zh_map_fn,
-    remove_columns=['instruction', 'instruction_zh', 'input_zh', 'output_zh'],
+    dataset_map_fn=alpaca_zh_map_fn,
+    template_map_fn=dict(
+        type=template_map_fn_factory, template=prompt_template),
+    remove_unused_columns=True,
     shuffle_before_pack=True,
     pack_to_max_length=pack_to_max_length)
 
@@ -139,15 +148,13 @@ train_cfg = dict(by_epoch=True, max_epochs=max_epochs, val_interval=1)
 #######################################################################
 # Log the dialogue periodically during the training process, optional
 custom_hooks = [
-    dict(type=LogSampleHook, tokenizer=tokenizer),
+    dict(type=DatasetInfoHook, tokenizer=tokenizer),
     dict(
-        type=SampleGenerateHook,
+        type=EvaluateChatHook,
         tokenizer=tokenizer,
-        every_n_iters=generate_test_freq,
-        sample_inputs=[
-            '请给我介绍五个上海的景点', 'Please tell me five scenic spots in Shanghai'
-        ],
-        instruction=PROMPT_TEMPLATE.alpaca.INSTRUCTION_START)
+        every_n_iters=evaluation_freq,
+        sample_inputs=human_inputs,
+        instruction=prompt_template.INSTRUCTION_START)
 ]
 
 # configure default hooks

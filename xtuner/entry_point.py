@@ -38,13 +38,13 @@ CLI_HELP_MSG = \
             NPROC_PER_NODE=$NGPUS NNODES=$NNODES NODE_RANK=$NODE_RANK PORT=$PORT ADDR=$ADDR xtuner dist_train $CONFIG $GPUS
         4-1. Chat with LLMs with HuggingFace's model and adapter:
             xtuner chat hf $NAME_OR_PATH_TO_HF_MODEL --adapter $NAME_OR_PATH_TO_HF_ADAPTER --prompt-template $PROMPT_TEMPLATE
-        4-2. Chat with LLMs with xTuner's config and adapter:
+        4-2. Chat with LLMs with XTuner's config and adapter:
             xtuner chat xtuner $CONFIG --adapter $PATH_TO_PTH_ADAPTER --prompt $PROMPT_TEMPLATE
         5-1. Convert the pth adapter to HuggingFace's adapter:
             xtuner convert adapter_pth2hf $CONFIG $PATH_TO_PTH_ADAPTER $SAVE_PATH_TO_HF_ADAPTER
         5-2. Merge the HuggingFace's adapter to the pretrained LLM:
             xtuner convert merge_adapter_hf $NAME_OR_PATH_TO_HF_MODEL $NAME_OR_PATH_TO_HF_ADAPTER $SAVE_PATH
-        5-3. Merge the xTuner's adapter to the pretraiend LLM:
+        5-3. Merge the XTuner's adapter to the pretraiend LLM:
             xtuner convert merge_adapter $CONFIG $NAME_OR_PATH_TO_HF_ADAPTER $SAVE_PATH
         5-4. Split HuggingFace's LLM to the smallest sharded one:
             xtuner convert split_hf_llm $NAME_OR_PATH_TO_HF_MODEL $SAVE_PATH
@@ -76,7 +76,7 @@ CONVERT_HELP_MSG = \
             xtuner convert adapter_pth2hf $CONFIG $PATH_TO_PTH_ADAPTER $SAVE_PATH_TO_HF_ADAPTER
         2. Merge the HuggingFace's adapter to the pretrained LLM:
             xtuner convert merge_adapter_hf $NAME_OR_PATH_TO_HF_MODEL $NAME_OR_PATH_TO_HF_ADAPTER $SAVE_PATH
-        3. Merge the xTuner's
+        3. Merge the XTuner's
         adapter to the pretraiend LLM:
             xtuner convert merge_adapter $CONFIG $NAME_OR_PATH_TO_HF_ADAPTER $SAVE_PATH
         4. Split HuggingFace's LLM to the smallest sharded one:
@@ -119,7 +119,7 @@ CHAT_HELP_MSG = \
 
         1. Chat with LLMs with HuggingFace's model and adapter:
             xtuner chat hf $NAME_OR_PATH_TO_HF_MODEL --adapter $NAME_OR_PATH_TO_HF_ADAPTER --prompt-template $PROMPT_TEMPLATE
-        2. Chat with LLMs with xTuner's config and adapter:
+        2. Chat with LLMs with XTuner's config and adapter:
             xtuner chat xtuner internlm_7b_qlora_alpaca --adapter $PATH_TO_PTH_ADAPTER --prompt $PROMPT_TEMPLATE
 
     GitHub: https://github.com/InternLM/xtuner
@@ -200,7 +200,8 @@ def cli():
                         f'--master_port={port}'
                     ]
                     subprocess.run(['torchrun'] + torchrun_args + [module] +
-                                   args[n_arg + 1:])
+                                   args[n_arg + 1:] +
+                                   ['--launcher', 'pytorch'])
         except Exception as e:
             print_log(f"WARNING: command error: '{e}'!", 'current',
                       logging.WARNING)

@@ -1,34 +1,34 @@
 <div align="center">
+  <img src="https://github.com/InternLM/lmdeploy/assets/36994684/0cf8d00f-e86b-40ba-9b54-dc8f1bc6c8d8" width="600"/>
+  <br /><br />
 
-[![docs](https://readthedocs.org/projects/xtuner/badge)](https://xtuner.readthedocs.io/en)
-[![license](https://img.shields.io/github/license/InternLM/xtuner.svg)](https://github.com/InternLM/xtuner/blob/main/LICENSE)
-[![PyPI](https://badge.fury.io/py/opencompass.svg)](https://pypi.org/project/opencompass/)
-
-[📘 Documentation](https://xtuner.readthedocs.io/en/latest/) |
-[🤔 Reporting Issues](https://github.com/InternLM/xtuner/issues/new/choose) |
-[⚙️ Model Zoo](<>)
+[![license](https://img.shields.io/github/license/InternLM/xtuner.svg)](https://github.com/InternLM/xtuner/LICENSE)
+[![PyPI](https://badge.fury.io/py/xtuner.svg)](https://pypi.org/project/xtuner/)
+[![Generic badge](https://img.shields.io/badge/🤗%20Huggingface-xtuner-yellow.svg)](https://huggingface.co/xtuner)
 
 English | [简体中文](README_zh-CN.md)
 
+👋 join us on <a href="https://twitter.com/intern_lm" target="_blank">Twitter</a>, <a href="https://discord.gg/xa29JuW87d" target="_blank">Discord</a> and <a href="https://r.vansin.top/?r=internwx" target="_blank">WeChat</a>
+
 </div>
 
-## 📣 News
+## 🎉 News
 
-- **\[2023.08.xx\]** We release xTuner, with multiple fine-tuned adapters.
+- **\[2023.08.xx\]** XTuner is released, with multiple fine-tuned adapters on [HuggingFace](https://huggingface.co/xtuner).
 
 ## 📖 Introduction
 
-xTuner is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](https://github.com/open-mmlab/mmrazor) and [MMDeploy](https://github.com/open-mmlab/mmdeploy) teams.
+XTuner is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](https://github.com/open-mmlab/mmrazor) and [MMDeploy](https://github.com/open-mmlab/mmdeploy) teams.
 
-- **Efficiency**: Support LLM fine-tuning on consumer-grade GPUs. The minimum GPU memory required for 7B LLM fine-tuning is only 15GB, indicating that users can leverage the free resource, *e.g.*, Colab, to fine-tune their custom LLM models.
-- **Versatile**: Support various **LLMs** ([InternLM](https://github.com/InternLM/InternLM), [Llama2](https://github.com/facebookresearch/llama), [Qwen](https://github.com/QwenLM/Qwen-7B), [Baichuan](https://github.com/baichuan-inc)), **datasets** ([MOSS_003_SFT](https://huggingface.co/datasets/fnlp/moss-003-sft-data), [Arxiv GenTitle](https://github.com/WangRongsheng/ChatGenTitle), [OpenOrca](https://huggingface.co/datasets/Open-Orca/OpenOrca), [Alpaca](https://huggingface.co/datasets/tatsu-lab/alpaca), [oasst1](https://huggingface.co/datasets/timdettmers/openassistant-guanaco), [Chinese Medical Dialogue](https://github.com/Toyhom/Chinese-medical-dialogue-data/)) and **algorithms** ([QLoRA](http://arxiv.org/abs/2305.14314), [LoRA](http://arxiv.org/abs/2106.09685)), allowing users to choose the most suitable solution for their requirements.
-- **Compatibility**: Compatible with [DeepSpeed](https://github.com/microsoft/DeepSpeed) and the [HuggingFace](https://huggingface.co) training pipeline, enabling effortless integration and utilization.
+- **Efficiency**: Support LLM fine-tuning on consumer-grade GPUs. The minimum GPU memory required for 7B LLM fine-tuning is only **8GB**, indicating that users can use nearly any GPU (even the free resource, *e.g.*, Colab) to fine-tune custom LLMs.
+- **Versatile**: Support various **LLMs** ([InternLM](https://github.com/InternLM/InternLM), [Llama2](https://github.com/facebookresearch/llama), [Qwen](https://github.com/QwenLM/Qwen-7B), [Baichuan](https://github.com/baichuan-inc), ...), **datasets** ([MOSS_003_SFT](https://huggingface.co/datasets/fnlp/moss-003-sft-data), [Colorist](https://huggingface.co/datasets/burkelibbey/colors), [Code Alpaca](https://huggingface.co/datasets/HuggingFaceH4/CodeAlpaca_20K), [Arxiv GenTitle](https://github.com/WangRongsheng/ChatGenTitle), [Chinese Law](https://github.com/LiuHC0428/LAW-GPT), [OpenOrca](https://huggingface.co/datasets/Open-Orca/OpenOrca), [Open-Platypus](https://huggingface.co/datasets/garage-bAInd/Open-Platypus), ...) and **algorithms** ([QLoRA](http://arxiv.org/abs/2305.14314), [LoRA](http://arxiv.org/abs/2106.09685)), allowing users to choose the most suitable solution for their requirements.
+- **Compatibility**: Compatible with [DeepSpeed](https://github.com/microsoft/DeepSpeed) 🚀 and [HuggingFace](https://huggingface.co) 🤗 training pipeline, enabling effortless integration and utilization.
 
 ## 🌟 Demos
 
-- QLoRA fine-tune for InternLM-7B [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1yzGeYXayLomNQjLD4vC6wgUHvei3ezt4?usp=sharing)
-- Chat with Llama2-7B-Plugins [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](<>)
-- Integrate xTuner into HuggingFace's pipeline [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1eBI9yiOkX-t7P-0-t9vS8y1x5KmWrkoU?usp=sharing)
+- QLoRA Fine-tune [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1QAEZVBfQ7LZURkMUtaq0b-5nEQII9G9Z?usp=sharing)
+- Plugin-based Chat [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/144OuTVyT_GvFyDMtlSlTzcxYIfnRsklq?usp=sharing)
+- Ready-to-use models and datasets from XTuner API [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1eBI9yiOkX-t7P-0-t9vS8y1x5KmWrkoU?usp=sharing)
 
 ## 🔥 Supports
 
@@ -42,7 +42,7 @@ xTuner is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](
   <b>SFT Datasets</b>
 </td>
 <td>
-  <b>Parallel Strategies</b>
+  <b>Data Pipelines</b>
 </td>
  <td>
   <b>Algorithms</b>
@@ -51,34 +51,39 @@ xTuner is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](
 <tr valign="top">
 <td align="left" valign="top">
 <ul>
-  <li><a href="configs/internlm/internlm_7b">InternLM</a></li>
-  <li><a href="configs/internlm/internlm_chat_7b">InternLM-Chat</a></li>
-  <li><a href="configs/llama/llama_7b">Llama</a></li>
-  <li><a href="configs/llama/llama2_7b">Llama2</a></li>
-  <li><a href="configs/llama/llama2_7b_chat">Llama2-Chat</a></li>
-  <li><a href="configs/qwen/qwen_7b">Qwen</a></li>
-  <li><a href="configs/qwen/qwen_7b_chat">Qwen-Chat</a></li>
-  <li><a href="configs/baichuan/baichuan_7b">Baichuan-7B</a></li>
-  <li><a href="configs/baichuan/baichuan_13b_base">Baichuan-13B-Base</a></li>
-  <li><a href="configs/baichuan/baichuan_13b_chat">Baichuan-13B-Chat</a></li>
+  <li><a href="https://github.com/InternLM/InternLM">InternLM</a></li>
+  <li><a href="https://github.com/InternLM/InternLM">InternLM-Chat</a></li>
+  <li><a href="https://github.com/facebookresearch/llama">Llama</a></li>
+  <li><a href="https://github.com/facebookresearch/llama">Llama2</a></li>
+  <li><a href="https://github.com/facebookresearch/llama">Llama2-Chat</a></li>
+  <li><a href="https://github.com/QwenLM/Qwen-7B">Qwen</a></li>
+  <li><a href="https://github.com/QwenLM/Qwen-7B">Qwen-Chat</a></li>
+  <li><a href="https://github.com/baichuan-inc/Baichuan-7B">Baichuan-7B</a></li>
+  <li><a href="https://github.com/baichuan-inc/Baichuan-13B">Baichuan-13B-Base</a></li>
+  <li><a href="https://github.com/baichuan-inc/Baichuan-13B">Baichuan-13B-Chat</a></li>
   <li>...</li>
 </ul>
 </td>
 <td>
 <ul>
-  <li><a href="configs/_base_/datasets/moss_003_sft_all.py">MOSS-003-SFT</a></li>
-  <li><a href="configs/_base_/datasets/arxiv.py">Arxiv GenTitle</a></li>
-  <li><a href="configs/_base_/datasets/open_orca.py">OpenOrca</a></li>
-  <li><a href="configs/_base_/datasets/alpaca.py">Alpaca en</a> / <a href="configs/_base_/datasets/alpaca_zh.py">zh</a></li>
-  <li><a href="configs/_base_/datasets/oasst1.py">oasst1</a></li>
-  <li><a href="configs/_base_/datasets/cmd.py">Chinese Medical Dialogue</a></li>
+  <li><a href="https://huggingface.co/datasets/fnlp/moss-003-sft-data">MOSS-003-SFT</a> 🔧</li>
+  <li><a href="https://huggingface.co/datasets/burkelibbey/colors">Colorist</a> 🎨</li>
+  <li><a href="https://huggingface.co/datasets/HuggingFaceH4/CodeAlpaca_20K">Code Alpaca</a></li>
+  <li><a href="https://github.com/WangRongsheng/ChatGenTitle">Arxiv GenTitle</a></li>
+  <li><a href="https://github.com/LiuHC0428/LAW-GPT">Chinese Law</a></li>
+  <li><a href="https://huggingface.co/datasets/Open-Orca/OpenOrca">OpenOrca</a></li>
+  <li><a href="https://huggingface.co/datasets/tatsu-lab/alpaca">Alpaca en</a> / <a href="https://huggingface.co/datasets/silk-road/alpaca-data-gpt4-chinese">zh</a></li>
+  <li><a href="https://huggingface.co/datasets/timdettmers/openassistant-guanaco">oasst1</a></li>
+  <li><a href="https://huggingface.co/datasets/shibing624/medical">Medical Dialogue</a></li>
+  <li><a href="https://huggingface.co/datasets/garage-bAInd/Open-Platypus">Open-Platypus</a></li>
   <li>...</li>
 </ul>
 </td>
 <td>
 <ul>
-  <li>(Distributed) Data Parallel</li>
-  <li><a href="examples">DeepSpeed</a> 🚀</li>
+  <li><a href="docs/zh_cn/dataset/incremental_pretraining.md">Incremental Pre-training</a> </li>
+  <li><a href="docs/zh_cn/dataset/single_turn_conversation.md">Single-turn Conversation SFT</a> </li>
+  <li><a href="docs/zh_cn/dataset/multi_turn_conversation.md">Multi-turn Conversation SFT</a> </li>
 </ul>
 </td>
 <td>
@@ -86,7 +91,6 @@ xTuner is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](
   <li><a href="http://arxiv.org/abs/2305.14314">QLoRA</a></li>
   <li><a href="http://arxiv.org/abs/2106.09685">LoRA</a></li>
   <li>Full parameter fine-tune</li>
-  <li>...</li>
 </ul>
 </td>
 </tr>
@@ -97,7 +101,7 @@ xTuner is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](
 
 ### Installation
 
-Install xTuner with pip
+Install XTuner with pip
 
 ```shell
 pip install xtuner
@@ -111,7 +115,7 @@ cd xtuner
 pip install -e .
 ```
 
-### Chat [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](<>)
+### Chat [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/144OuTVyT_GvFyDMtlSlTzcxYIfnRsklq?usp=sharing)
 
 <table>
 <tr>
@@ -130,7 +134,7 @@ pip install -e .
 </tr>
 </table>
 
-xTuner provides the tools to chat with pretrained / fine-tuned LLMs.
+XTuner provides tools to chat with pretrained / fine-tuned LLMs.
 
 - For example, we can start the chat with Llama2-7B-Plugins by
 
@@ -138,19 +142,19 @@ xTuner provides the tools to chat with pretrained / fine-tuned LLMs.
   xtuner chat hf meta-llama/Llama-2-7b-hf --adapter xtuner/Llama-2-7b-qlora-moss-003-sft --bot-name Llama2 --prompt-template moss_sft --with-plugins calculate solve search --command-stop-word "<eoc>" --answer-stop-word "<eom>" --no-streamer
   ```
 
-For more usages, please see [chat.md](./docs/en/chat.md).
+For more examples, please see [chat.md](./docs/en/chat.md).
 
-### Fine-tune [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1yzGeYXayLomNQjLD4vC6wgUHvei3ezt4?usp=sharing)
+### Fine-tune [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1QAEZVBfQ7LZURkMUtaq0b-5nEQII9G9Z?usp=sharing)
 
-xTuner supports the efficient fine-tune (*e.g.*, QLoRA) for LLMs.
+XTuner supports the efficient fine-tune (*e.g.*, QLoRA) for LLMs.
 
-- **Step 0**, prepare the config. xTuner provides many ready-to-use configs and we can view all configs by
+- **Step 0**, prepare the config. XTuner provides many ready-to-use configs and we can view all configs by
 
   ```shell
   xtuner list-cfg
   ```
 
-  Or, if the provided configs cannot meet the requirements, we can copy the provided config to the specified directory and make modifications by
+  Or, if the provided configs cannot meet the requirements, please copy the provided config to the specified directory and make specific modifications by
 
   ```shell
   xtuner copy-cfg ${CONFIG_NAME} ${SAVE_DIR}
@@ -160,25 +164,26 @@ xTuner supports the efficient fine-tune (*e.g.*, QLoRA) for LLMs.
 
   ```shell
   # On a single GPU
-  xtuner train internlm_7b_qlora_oasst1
+  xtuner train internlm_7b_qlora_oasst1_e3
   # On multiple GPUs
-  xtuner dist_train internlm_7b_qlora_oasst1 ${GPU_NUM}
+  (DIST) NPROC_PER_NODE=${GPU_NUM} xtuner train internlm_7b_qlora_oasst1_e3
+  (SLURM) srun ${SRUN_ARGS} xtuner train internlm_7b_qlora_oasst1_e3 --launcher slurm
   ```
 
-  For more usages, please see [finetune.md](./docs/en/finetune.md).
+  For more examples, please see [finetune.md](./docs/en/finetune.md).
 
 ### Deployment
 
 - **Step 0**, convert the pth adapter to HuggingFace adapter, by
 
   ```shell
-  xtuner convert adapter_pth_2_hf \
+  xtuner convert adapter_pth2hf \
       ${CONFIG} \
       ${PATH_TO_PTH_ADAPTER} \
       ${SAVE_PATH_TO_HF_ADAPTER}
   ```
 
-  or, directly merge pth adapter to pretrained LLM, by
+  or, directly merge the pth adapter to pretrained LLM, by
 
   ```shell
   xtuner convert merge_adapter \
@@ -203,13 +208,11 @@ xTuner supports the efficient fine-tune (*e.g.*, QLoRA) for LLMs.
 
 ### Evaluation
 
-- We recommend using [OpenCompass](https://github.com/InternLM/opencompass),  a comprehensive and systematic LLM evaluation library, which currently supports 50+ datasets with about 300,000 questions.
-
-## 🔜 Roadmap
+- We recommend using [OpenCompass](https://github.com/InternLM/opencompass), a comprehensive and systematic LLM evaluation library, which currently supports 50+ datasets with about 300,000 questions.
 
 ## 🤝 Contributing
 
-We appreciate all contributions to xTuner. Please refer to [CONTRIBUTING.md](.github/CONTRIBUTING.md) for the contributing guideline.
+We appreciate all contributions to XTuner. Please refer to [CONTRIBUTING.md](.github/CONTRIBUTING.md) for the contributing guideline.
 
 ## 🎖️ Acknowledgement
 
