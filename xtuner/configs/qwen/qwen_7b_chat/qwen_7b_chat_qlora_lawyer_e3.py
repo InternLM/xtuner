@@ -28,7 +28,7 @@ pretrained_model_name_or_path = 'Qwen/Qwen-7B-Chat'
 # download data from https://github.com/LiuHC0428/LAW-GPT
 crime_kg_assitant_path = './data/law/CrimeKgAssitant清洗后_52k.json'
 law_reference_data_path = './data/law/训练数据_带法律依据_92k.json'
-prompt_template = PROMPT_TEMPLATE.lawyer
+prompt_template = PROMPT_TEMPLATE.qwen_chat
 max_length = 2048
 pack_to_max_length = True
 

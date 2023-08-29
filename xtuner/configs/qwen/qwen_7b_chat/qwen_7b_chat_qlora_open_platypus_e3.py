@@ -24,7 +24,7 @@ pretrained_model_name_or_path = 'Qwen/Qwen-7B-Chat'
 
 # Data
 data_path = 'garage-bAInd/Open-Platypus'
-prompt_template = PROMPT_TEMPLATE.alpaca
+prompt_template = PROMPT_TEMPLATE.qwen_chat
 max_length = 2048
 pack_to_max_length = True
 

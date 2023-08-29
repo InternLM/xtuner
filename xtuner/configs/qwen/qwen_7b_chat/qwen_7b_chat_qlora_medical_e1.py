@@ -25,7 +25,7 @@ pretrained_model_name_or_path = 'Qwen/Qwen-7B-Chat'
 # Data
 data_path = 'shibing624/medical'
 data_config_name = 'finetune'
-prompt_template = PROMPT_TEMPLATE.medical
+prompt_template = PROMPT_TEMPLATE.qwen_chat
 max_length = 2048
 pack_to_max_length = True
 

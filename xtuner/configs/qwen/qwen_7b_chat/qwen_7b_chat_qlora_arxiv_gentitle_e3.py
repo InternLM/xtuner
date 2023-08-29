@@ -26,7 +26,7 @@ pretrained_model_name_or_path = 'Qwen/Qwen-7B-Chat'
 # 1. Download data from https://kaggle.com/datasets/Cornell-University/arxiv
 # 2. Process data with `./tools/data_preprocess/arxiv.py`
 data_path = './data/arxiv_postprocess_csAIcsCLcsCV_20200101.json'
-prompt_template = PROMPT_TEMPLATE.title
+prompt_template = PROMPT_TEMPLATE.qwen_chat
 max_length = 2048
 pack_to_max_length = True
 
