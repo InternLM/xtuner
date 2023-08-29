@@ -19,7 +19,7 @@ from xtuner.utils import PROMPT_TEMPLATE
 #######################################################################
 # Model
 pretrained_model_name_or_path = 'baichuan-inc/Baichuan-7B'
-bot_name = 'Llama2'
+bot_name = 'Baichuan'
 
 # Data
 # Download data from https://huggingface.co/datasets/fnlp/moss-003-sft-data

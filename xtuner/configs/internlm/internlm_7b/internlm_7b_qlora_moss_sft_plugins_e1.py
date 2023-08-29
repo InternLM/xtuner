@@ -19,7 +19,7 @@ from xtuner.utils import PROMPT_TEMPLATE
 #######################################################################
 # Model
 pretrained_model_name_or_path = 'internlm/internlm-7b'
-bot_name = 'Llama2'
+bot_name = 'InternLM'
 
 # Data
 # Download data from https://huggingface.co/datasets/fnlp/moss-003-sft-data
