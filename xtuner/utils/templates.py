@@ -67,4 +67,7 @@ PROMPT_TEMPLATE = ConfigDict(
                            'TABLE statement.\n'
                            '### Question: {input}\n### Query: '),
         INSTRUCTION=('### Question: {input}\n### Query: ')),
+    chatglm=dict(
+        INSTRUCTION_START='[Round {round}]\n\n问：{input}\n\n答：',
+        INSTRUCTION='\n\n[Round {round}]\n\n问：{input}\n\n答：'),
 )
