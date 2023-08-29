@@ -1,17 +1,19 @@
 import torch
+from bitsandbytes.optim import PagedAdamW32bit
+from datasets import load_dataset
 from mmengine.dataset import DefaultSampler
 from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
                             LoggerHook, ParamSchedulerHook)
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR
 from peft import LoraConfig
-from torch.optim import AdamW
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           BitsAndBytesConfig)
 
-from xtuner.dataset import ConcatDataset, MOSSSFTDataset
-from xtuner.dataset.collate_fns import default_collate_fn
+from xtuner.datasets import process_hf_dataset
+from xtuner.datasets.collate_fns import default_collate_fn
+from xtuner.datasets.map_fns import template_map_fn_factory, tiny_codes_map_fn
 from xtuner.engine import DatasetInfoHook, EvaluateChatHook
-from xtuner.model import SupervisedFinetune
+from xtuner.models import SupervisedFinetune
 from xtuner.utils import PROMPT_TEMPLATE
 
 #######################################################################
@@ -19,30 +21,32 @@ from xtuner.utils import PROMPT_TEMPLATE
 #######################################################################
 # Model
 pretrained_model_name_or_path = 'meta-llama/Llama-2-7b-hf'
-bot_name = 'Llama2'
 
 # Data
-# Download data from https://huggingface.co/datasets/fnlp/moss-003-sft-data
-moss_sft_no_plugins_path = './data/moss-003-sft-no-tools.jsonl'
-moss_sft_plugins_path = './data/conversations_with_tools_with_inner_instruction_no_text2image_train_all_random_meta0.5_0.1_0.01_moss_0709.jsonl'  # noqa: E501
+data_path = 'nampdn-ai/tiny-codes'
+prompt_template = PROMPT_TEMPLATE.coder
 max_length = 2048
+pack_to_max_length = True
 
 # Scheduler & Optimizer
-batch_size = 8  # per_device
-accumulative_counts = 1
-dataloader_num_workers = 2
-max_epochs = 2
-optim_type = AdamW
+batch_size = 1  # per_device
+accumulative_counts = 16
+dataloader_num_workers = 0
+max_epochs = 1
+optim_type = PagedAdamW32bit
 lr = 2e-4
 betas = (0.9, 0.999)
 weight_decay = 0
 max_norm = 1  # grad clip
 
 # Evaluate the generation performance during the training
-prompt_template = PROMPT_TEMPLATE.moss_sft
 evaluation_freq = 500
 evaluation_inputs = [
-    '一个球体的表面积是384平方厘米，求它的体积。', '今有鸡兔同笼，上有二十头，下有六十二足， 问鸡兔各几何？', '介绍一下比尔盖茨'
+    ('写一个Python函数，将十六进制颜色代码（如#0066ee）转换为对应的'
+     '红、绿、蓝（RGB）三个颜色分量值，并以元组的形式返回。'),
+    ('Write a Python function that takes a hexadecimal color code '
+     '(e.g., #0066ee) as input and converts it into the corresponding '
+     'red, green, and blue (RGB) color component values.')
 ]
 
 #######################################################################
@@ -81,25 +85,17 @@ model = dict(
 #######################################################################
 #                      PART 3  Dataset & Dataloader                   #
 #######################################################################
-moss_sft_no_plugins = dict(
-    type=MOSSSFTDataset,
-    data_file=moss_sft_no_plugins_path,
-    bot_name=bot_name,
-    tokenizer=tokenizer,
-    max_length=max_length)
-
-moss_sft_plugins = dict(
-    type=MOSSSFTDataset,
-    data_file=moss_sft_plugins_path,
-    bot_name=bot_name,
-    tokenizer=tokenizer,
-    max_length=max_length)
-
 train_dataset = dict(
-    type=ConcatDataset,
-    datasets_cfg=dict(
-        moss_sft_no_plugins=moss_sft_no_plugins,
-        moss_sft_plugins=moss_sft_plugins))
+    type=process_hf_dataset,
+    dataset=dict(type=load_dataset, path=data_path),
+    tokenizer=tokenizer,
+    max_length=max_length,
+    dataset_map_fn=tiny_codes_map_fn,
+    template_map_fn=dict(
+        type=template_map_fn_factory, template=prompt_template),
+    remove_unused_columns=True,
+    shuffle_before_pack=True,
+    pack_to_max_length=pack_to_max_length)
 
 train_dataloader = dict(
     batch_size=batch_size,
@@ -143,7 +139,6 @@ custom_hooks = [
         type=EvaluateChatHook,
         tokenizer=tokenizer,
         every_n_iters=evaluation_freq,
-        stop_word='<eoc>',
         evaluation_inputs=evaluation_inputs,
         instruction=prompt_template.INSTRUCTION_START)
 ]

@@ -1,17 +1,20 @@
 import torch
+from bitsandbytes.optim import PagedAdamW32bit
+from datasets import load_dataset
 from mmengine.dataset import DefaultSampler
 from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
                             LoggerHook, ParamSchedulerHook)
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR
 from peft import LoraConfig
-from torch.optim import AdamW
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           BitsAndBytesConfig)
 
-from xtuner.dataset import ConcatDataset, MOSSSFTDataset
-from xtuner.dataset.collate_fns import default_collate_fn
+from xtuner.datasets import ConcatDataset, process_hf_dataset
+from xtuner.datasets.collate_fns import default_collate_fn
+from xtuner.datasets.map_fns import (alpaca_map_fn, alpaca_zh_map_fn,
+                                     oasst1_map_fn, template_map_fn_factory)
 from xtuner.engine import DatasetInfoHook, EvaluateChatHook
-from xtuner.model import SupervisedFinetune
+from xtuner.models import SupervisedFinetune
 from xtuner.utils import PROMPT_TEMPLATE
 
 #######################################################################
@@ -19,30 +22,30 @@ from xtuner.utils import PROMPT_TEMPLATE
 #######################################################################
 # Model
 pretrained_model_name_or_path = 'meta-llama/Llama-2-7b-hf'
-bot_name = 'Llama2'
 
 # Data
-# Download data from https://huggingface.co/datasets/fnlp/moss-003-sft-data
-moss_sft_no_plugins_path = './data/moss-003-sft-no-tools.jsonl'
-moss_sft_plugins_path = './data/conversations_with_tools_with_inner_instruction_no_text2image_train_all_random_meta0.5_0.1_0.01_moss_0709.jsonl'  # noqa: E501
+alpaca_zh_path = 'silk-road/alpaca-data-gpt4-chinese'
+alpaca_en_path = 'tatsu-lab/alpaca'
+oasst1_path = 'timdettmers/openassistant-guanaco'
+prompt_template = PROMPT_TEMPLATE.alpaca
 max_length = 2048
+pack_to_max_length = True
 
 # Scheduler & Optimizer
-batch_size = 8  # per_device
-accumulative_counts = 1
-dataloader_num_workers = 2
-max_epochs = 2
-optim_type = AdamW
+batch_size = 1  # per_device
+accumulative_counts = 16
+dataloader_num_workers = 0
+max_epochs = 3
+optim_type = PagedAdamW32bit
 lr = 2e-4
 betas = (0.9, 0.999)
 weight_decay = 0
 max_norm = 1  # grad clip
 
 # Evaluate the generation performance during the training
-prompt_template = PROMPT_TEMPLATE.moss_sft
 evaluation_freq = 500
 evaluation_inputs = [
-    '一个球体的表面积是384平方厘米，求它的体积。', '今有鸡兔同笼，上有二十头，下有六十二足， 问鸡兔各几何？', '介绍一下比尔盖茨'
+    '请给我介绍五个上海的景点', 'Please tell me five scenic spots in Shanghai'
 ]
 
 #######################################################################
@@ -81,25 +84,45 @@ model = dict(
 #######################################################################
 #                      PART 3  Dataset & Dataloader                   #
 #######################################################################
-moss_sft_no_plugins = dict(
-    type=MOSSSFTDataset,
-    data_file=moss_sft_no_plugins_path,
-    bot_name=bot_name,
+alpaca_en = dict(
+    type=process_hf_dataset,
+    dataset=dict(type=load_dataset, path=alpaca_en_path),
     tokenizer=tokenizer,
-    max_length=max_length)
+    max_length=max_length,
+    dataset_map_fn=alpaca_map_fn,
+    template_map_fn=dict(
+        type=template_map_fn_factory, template=prompt_template),
+    remove_unused_columns=True,
+    shuffle_before_pack=True,
+    pack_to_max_length=pack_to_max_length)
 
-moss_sft_plugins = dict(
-    type=MOSSSFTDataset,
-    data_file=moss_sft_plugins_path,
-    bot_name=bot_name,
+alpaca_zh = dict(
+    type=process_hf_dataset,
+    dataset=dict(type=load_dataset, path=alpaca_zh_path),
     tokenizer=tokenizer,
-    max_length=max_length)
+    max_length=max_length,
+    dataset_map_fn=alpaca_zh_map_fn,
+    template_map_fn=dict(
+        type=template_map_fn_factory, template=prompt_template),
+    remove_unused_columns=True,
+    shuffle_before_pack=True,
+    pack_to_max_length=pack_to_max_length)
+
+oasst1 = dict(
+    type=process_hf_dataset,
+    dataset=dict(type=load_dataset, path=oasst1_path),
+    tokenizer=tokenizer,
+    max_length=max_length,
+    dataset_map_fn=oasst1_map_fn,
+    template_map_fn=dict(
+        type=template_map_fn_factory, template=prompt_template),
+    remove_unused_columns=True,
+    shuffle_before_pack=True,
+    pack_to_max_length=pack_to_max_length)
 
 train_dataset = dict(
     type=ConcatDataset,
-    datasets_cfg=dict(
-        moss_sft_no_plugins=moss_sft_no_plugins,
-        moss_sft_plugins=moss_sft_plugins))
+    datasets_cfg=dict(alpaca_en=alpaca_en, alpaca_zh=alpaca_zh, oasst1=oasst1))
 
 train_dataloader = dict(
     batch_size=batch_size,
@@ -143,7 +166,6 @@ custom_hooks = [
         type=EvaluateChatHook,
         tokenizer=tokenizer,
         every_n_iters=evaluation_freq,
-        stop_word='<eoc>',
         evaluation_inputs=evaluation_inputs,
         instruction=prompt_template.INSTRUCTION_START)
 ]
