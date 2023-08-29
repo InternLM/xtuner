@@ -75,4 +75,7 @@ PROMPT_TEMPLATE = ConfigDict(
             '\n<|im_start|>user\n{input}<|im_end|>\n<|im_start|>assistant\n'),
         INSTRUCTION=(
             '\n<|im_start|>user\n{input}<|im_end|>\n<|im_start|>assistant\n')),
+    baichuan_chat=dict(
+        INSTRUCTION_START='<reserved_102>{input}<reserved_103>',
+        INSTRUCTION='<reserved_102>{input}<reserved_103>'),
 )
