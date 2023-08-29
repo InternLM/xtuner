@@ -19,7 +19,7 @@
 
    `--dataset_name_or_path`: specify the dataset name or path to use.
 
-## How to customize your experiment.
+## How to customize your experiment
 
 the apis of xtuner is compatible with the usage of huggingface's transformers.
 If you want to customize your experiment, you just need to pass in your hyperparameters like huggingface.
