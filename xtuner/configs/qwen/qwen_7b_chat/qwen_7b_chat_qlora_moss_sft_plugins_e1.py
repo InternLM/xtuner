@@ -8,10 +8,10 @@ from peft import LoraConfig
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           BitsAndBytesConfig)
 
-from xtuner.datasets import MOSSSFTDataset
-from xtuner.datasets.collate_fns import default_collate_fn
+from xtuner.dataset import MOSSSFTDataset
+from xtuner.dataset.collate_fns import default_collate_fn
 from xtuner.engine import LogSampleHook, SampleGenerateHook
-from xtuner.models import SupervisedFinetune
+from xtuner.model import SupervisedFinetune
 from xtuner.utils import PROMPT_TEMPLATE
 
 #######################################################################

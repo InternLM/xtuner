@@ -53,9 +53,13 @@ def process_hf_dataset(dataset,
             it to True during training and False during testing.
     """
 
-    dataset = BUILDER.build(dataset)
     if isinstance(dataset, DatasetDict):
         dataset = dataset[split]
+    elif isinstance(dataset, dict) or isinstance(
+            dataset, Config) or isinstance(dataset, ConfigDict):
+        dataset = BUILDER.build(dataset)
+        if isinstance(dataset, DatasetDict):
+            dataset = dataset[split]
 
     # sample `max_dataset_length` items from the original dataset to
     # save time consumed by map function

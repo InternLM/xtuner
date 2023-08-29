@@ -4,8 +4,8 @@ from peft import LoraConfig
 from transformers import (AutoModelForCausalLM, AutoTokenizer, Trainer,
                           TrainingArguments)
 
-from xtuner.datasets import process_hf_dataset
-from xtuner.datasets.map_fns import alpaca_map_fn
+from xtuner.dataset import process_hf_dataset
+from xtuner.dataset.map_fns import alpaca_map_fn
 
 framework = 'huggingface'
 pretrained_model_name_or_path = 'meta-llama/Llama-2-70b-hf'
