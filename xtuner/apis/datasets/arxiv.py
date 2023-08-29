@@ -5,12 +5,15 @@ from datasets import load_dataset
 from xtuner.dataset import process_hf_dataset
 from xtuner.dataset.collate_fns import default_collate_fn
 from xtuner.dataset.map_fns import arxiv_map_fn
+from xtuner.utils import PROMPT_TEMPLATE
 
 
 def arxiv_dataset(tokenizer,
                   data_file=None,
                   max_length=2048,
+                  remove_unused_columns=True,
                   pack_to_max_length=True):
+    template_map_fn = PROMPT_TEMPLATE.title
     # 1. Download data from https://kaggle.com/datasets/Cornell-University/arxiv  # noqa: E501
     # 2. Process data with `./tools/data_preprocess/arxiv.py`
     if data_file is None:
@@ -20,12 +23,9 @@ def arxiv_dataset(tokenizer,
         dataset=dataset_org,
         tokenizer=tokenizer,
         max_length=max_length,
-        map_fn=arxiv_map_fn,
-        remove_columns=[
-            'id', 'submitter', 'authors', 'title', 'comments', 'journal-ref',
-            'doi', 'report-no', 'categories', 'license', 'abstract',
-            'versions', 'update_date', 'authors_parsed'
-        ],
+        dataset_map_fn=arxiv_map_fn,
+        template_map_fn=template_map_fn,
+        remove_unused_columns=remove_unused_columns,
         shuffle_before_pack=True,
         pack_to_max_length=pack_to_max_length)
 
