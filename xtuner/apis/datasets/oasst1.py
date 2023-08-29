@@ -4,7 +4,7 @@ from datasets import load_dataset
 
 from xtuner.dataset import process_hf_dataset
 from xtuner.dataset.collate_fns import default_collate_fn
-from xtuner.dataset.map_fns import oasst1_map_fn
+from xtuner.dataset.map_fns import oasst1_map_fn, template_map_fn_factory
 from xtuner.utils import PROMPT_TEMPLATE
 
 
@@ -13,7 +13,8 @@ def oasst1_dataset(tokenizer,
                    max_length=2048,
                    remove_unused_columns=False,
                    pack_to_max_length=True):
-    template_map_fn = PROMPT_TEMPLATE.openassistant
+    template_map_fn = template_map_fn_factory(
+        template=PROMPT_TEMPLATE.openassistant)
     dataset_org = load_dataset(path)
     dataset = process_hf_dataset(
         dataset=dataset_org,

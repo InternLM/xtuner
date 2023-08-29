@@ -26,7 +26,7 @@ class DefaultTrainingArguments(TrainingArguments):
     default_learning_rate = 2e-5
     default_save_strategy = 'epoch'
     default_lr_scheduler_type = 'cosine'
-    default_logging_steps = 1
+    default_logging_steps = 5
 
     output_dir: str = field(
         default=default_output_dir,
