@@ -8,11 +8,11 @@ def template_map_fn(example, template):
         input = single_turn_conversation['input']
         if i == 0:
             single_turn_conversation[
-                'input'] = template.INSTRUCTION_START.format(input=input)
+                'input'] = template.INSTRUCTION_START.format(
+                    input=input, round=i + 1)
         else:
             single_turn_conversation['input'] = template.INSTRUCTION.format(
-                input=input)
-
+                input=input, round=i + 1)
     return {'conversation': conversation}
 
 
