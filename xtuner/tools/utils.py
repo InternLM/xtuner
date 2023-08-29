@@ -26,7 +26,7 @@ def get_chat_utils(model):
     is_internlm = 'InternLM' in base_model_name
     is_qwen = 'QWen' in base_model_name
     no_space = 'InternLM' in base_model_name or 'QWen' in base_model_name or \
-        'BaiChuan' in base_model_name
+        'BaiChuan' in base_model_name or 'ChatGLM' in base_model_name
     stop_criteria = StoppingCriteriaList()
     if is_internlm:
         stop_criteria.append(InternLMStoppingCriteria())
