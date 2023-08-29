@@ -9,12 +9,12 @@ from peft import LoraConfig
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           BitsAndBytesConfig)
 
-from xtuner.datasets import ConcatDataset, process_hf_dataset
-from xtuner.datasets.collate_fns import default_collate_fn
-from xtuner.datasets.map_fns import (alpaca_map_fn, alpaca_zh_map_fn,
-                                     template_map_fn_factory)
+from xtuner.dataset import ConcatDataset, process_hf_dataset
+from xtuner.dataset.collate_fns import default_collate_fn
+from xtuner.dataset.map_fns import (alpaca_map_fn, alpaca_zh_map_fn,
+                                    template_map_fn_factory)
 from xtuner.engine import DatasetInfoHook, EvaluateChatHook
-from xtuner.models import SupervisedFinetune
+from xtuner.model import SupervisedFinetune
 from xtuner.utils import PROMPT_TEMPLATE
 
 #######################################################################

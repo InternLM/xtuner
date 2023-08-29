@@ -151,10 +151,10 @@ The config file copied in Step 3 needs to be modified as follows:
 4. Adjust the path of the original dataset. You can refer to the [user documentation](https://huggingface.co/docs/datasets/loading) for operations related to `load_dataset`.
 
 ```diff
-from xtuner.datasets import process_hf_dataset
+from xtuner.dataset import process_hf_dataset
 from datasets import load_dataset
-- from xtuner.datasets.map_fns import oasst1_map_fn, template_map_fn_factory
-+ from xtuner.datasets.map_fns import template_map_fn_factory
+- from xtuner.dataset.map_fns import oasst1_map_fn, template_map_fn_factory
++ from xtuner.dataset.map_fns import template_map_fn_factory
 + from .map_fn import oasst1_multi_turns_map_fn
 ...
 #######################################################################
@@ -251,10 +251,10 @@ The config file copied in Step 3 needs to be modified as follows:
 3. Set the dialogue template
 
 ```diff
-from xtuner.datasets import process_hf_dataset
+from xtuner.dataset import process_hf_dataset
 from datasets import load_dataset
-- from xtuner.datasets.map_fns import oasst1_map_fn, template_map_fn_factory
-+ from xtuner.datasets.map_fns import template_map_fn_factory
+- from xtuner.dataset.map_fns import oasst1_map_fn, template_map_fn_factory
++ from xtuner.dataset.map_fns import template_map_fn_factory
 ...
 #######################################################################
 #                          PART 1  Settings                           #
