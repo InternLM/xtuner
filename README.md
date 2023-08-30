@@ -115,7 +115,7 @@ XTuner is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](
   pip install 'xtuner[deepspeed]'
   ```
 
-- Install from source
+- Install XTuner from source
 
   ```shell
   git clone https://github.com/InternLM/xtuner.git
