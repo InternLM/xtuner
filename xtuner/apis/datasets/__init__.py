@@ -1,3 +1,4 @@
+# Copyright (c) OpenMMLab. All rights reserved.
 from .alpaca import (alpaca_data_collator, alpaca_dataset,
                      alpaca_enzh_data_collator, alpaca_enzh_dataset,
                      alpaca_zh_data_collator, alpaca_zh_dataset)
