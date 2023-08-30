@@ -116,7 +116,7 @@ XTuner is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](
   ```
 
 - Install from source
-  
+
   ```shell
   git clone https://github.com/InternLM/xtuner.git
   cd xtuner
