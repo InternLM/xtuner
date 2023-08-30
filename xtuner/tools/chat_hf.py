@@ -150,10 +150,10 @@ def main():
             template = PROMPT_TEMPLATE[args.prompt_template]
             if 'INSTRUCTION_START' in template and n_turn == 0:
                 prompt_text = template['INSTRUCTION_START'].format(
-                    input=text, bot_name=args.bot_name)
+                    input=text, round=n_turn + 1, bot_name=args.bot_name)
             else:
                 prompt_text = template['INSTRUCTION'].format(
-                    input=text, bot_name=args.bot_name)
+                    input=text, round=n_turn + 1, bot_name=args.bot_name)
             if args.prompt_template == 'moss_sft':
                 if not inner_thoughts_open:
                     prompt_text.replace('- Inner thoughts: enabled.',
@@ -174,8 +174,7 @@ def main():
             inputs += prompt_text
         else:
             inputs += text
-        ids = tokenizer.encode(
-            inputs, return_tensors='pt', add_special_tokens=n_turn == 0)
+        ids = tokenizer.encode(inputs, return_tensors='pt')
         streamer = Streamer(tokenizer) if Streamer is not None else None
         if args.with_plugins is not None:
             generate_output = model.generate(
@@ -223,7 +222,7 @@ def main():
                     generate_output[0][len(ids[0]):])
                 end = '' if output_text[-1] == '\n' else '\n'
                 print(output_text, end=end)
-        inputs = tokenizer.decode(generate_output[0]) + '\n'
+        inputs = tokenizer.decode(generate_output[0])
         n_turn += 1
         if len(generate_output[0]) >= args.max_new_tokens:
             print('Remove the memory of history responses, since '

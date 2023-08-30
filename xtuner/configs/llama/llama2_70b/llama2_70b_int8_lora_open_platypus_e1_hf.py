@@ -4,14 +4,16 @@ from peft import LoraConfig
 from transformers import (AutoModelForCausalLM, AutoTokenizer, Trainer,
                           TrainingArguments)
 
-from xtuner.datasets import process_hf_dataset
-from xtuner.datasets.map_fns import alpaca_map_fn
+from xtuner.dataset import process_hf_dataset
+from xtuner.dataset.map_fns import alpaca_map_fn, template_map_fn_factory
+from xtuner.utils import PROMPT_TEMPLATE
 
 framework = 'huggingface'
 pretrained_model_name_or_path = 'meta-llama/Llama-2-70b-hf'
 dataset_name_or_path = 'garage-bAInd/Open-Platypus'
 max_length = 2048
 pack_to_max_length = True
+prompt_template = PROMPT_TEMPLATE.alpaca
 
 trainer = Trainer
 
@@ -60,6 +62,9 @@ train_dataset = dict(
     dataset=dict(type=load_dataset, path=dataset_name_or_path),
     tokenizer=tokenizer,
     max_length=max_length,
-    map_fn=alpaca_map_fn,
+    dataset_map_fn=alpaca_map_fn,
+    template_map_fn=dict(
+        type=template_map_fn_factory, template=prompt_template),
+    remove_unused_columns=True,
     shuffle_before_pack=True,
     pack_to_max_length=pack_to_max_length)

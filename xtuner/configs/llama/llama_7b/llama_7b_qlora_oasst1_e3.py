@@ -9,41 +9,42 @@ from peft import LoraConfig
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           BitsAndBytesConfig)
 
-from xtuner.datasets import process_hf_dataset
-from xtuner.datasets.collate_fns import default_collate_fn
-from xtuner.datasets.map_fns import oasst1_map_fn, template_map_fn_factory
+from xtuner.dataset import process_hf_dataset
+from xtuner.dataset.collate_fns import default_collate_fn
+from xtuner.dataset.map_fns import oasst1_map_fn, template_map_fn_factory
 from xtuner.engine import DatasetInfoHook, EvaluateChatHook
-from xtuner.models import SupervisedFinetune
+from xtuner.model import SupervisedFinetune
 from xtuner.utils import PROMPT_TEMPLATE
 
 #######################################################################
 #                          PART 1  Settings                           #
 #######################################################################
-# path
+# Model
 pretrained_model_name_or_path = 'huggyllama/llama-7b'
-data_path = 'timdettmers/openassistant-guanaco'
 
-# data
+# Data
+data_path = 'timdettmers/openassistant-guanaco'
 prompt_template = PROMPT_TEMPLATE.openassistant
+max_length = 2048
+pack_to_max_length = True
+
+# Scheduler & Optimizer
 batch_size = 1  # per_device
 accumulative_counts = 16
 dataloader_num_workers = 0
 max_epochs = 3
-
-# optim
 optim_type = PagedAdamW32bit
 lr = 2e-4
 betas = (0.9, 0.999)
-weight_decay = 0.01
+weight_decay = 0
 max_norm = 1  # grad clip
 
-# Assess the progress of the model's training via interactive dialogue.
+# Evaluate the generation performance during the training
 evaluation_freq = 500
-human_inputs = ['请给我介绍五个上海的景点', 'Please tell me five scenic spots in Shanghai']
+evaluation_inputs = [
+    '请给我介绍五个上海的景点', 'Please tell me five scenic spots in Shanghai'
+]
 
-# other
-max_length = 2048
-pack_to_max_length = True
 #######################################################################
 #                      PART 2  Model & Tokenizer                      #
 #######################################################################
@@ -100,7 +101,7 @@ train_dataloader = dict(
     collate_fn=dict(type=default_collate_fn))
 
 #######################################################################
-#                          PART 4  Scheduler                          #
+#                    PART 4  Scheduler & Optimizer                    #
 #######################################################################
 # optimizer
 optim_wrapper = dict(
@@ -134,7 +135,7 @@ custom_hooks = [
         type=EvaluateChatHook,
         tokenizer=tokenizer,
         every_n_iters=evaluation_freq,
-        sample_inputs=human_inputs,
+        evaluation_inputs=evaluation_inputs,
         instruction=prompt_template.INSTRUCTION_START)
 ]
 

@@ -67,6 +67,17 @@ PROMPT_TEMPLATE = ConfigDict(
                            'TABLE statement.\n'
                            '### Question: {input}\n### Query: '),
         INSTRUCTION=('### Question: {input}\n### Query: ')),
+    chatglm=dict(
+        INSTRUCTION_START='[Round {round}]\n\n问：{input}\n\n答：',
+        INSTRUCTION='\n\n[Round {round}]\n\n问：{input}\n\n答：'),
+    qwen_chat=dict(
+        INSTRUCTION_START=(
+            '\n<|im_start|>user\n{input}<|im_end|>\n<|im_start|>assistant\n'),
+        INSTRUCTION=(
+            '\n<|im_start|>user\n{input}<|im_end|>\n<|im_start|>assistant\n')),
+    baichuan_chat=dict(
+        INSTRUCTION_START='<reserved_102>{input}<reserved_103>',
+        INSTRUCTION='<reserved_102>{input}<reserved_103>'),
     wizardlm=dict(
         INSTRUCTION_START=('A chat between a curious user and an artificial '
                            'intelligence assistant. The assistant gives '

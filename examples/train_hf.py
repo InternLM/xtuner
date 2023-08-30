@@ -2,9 +2,8 @@
 import transformers
 from transformers import Trainer
 
+from xtuner.apis import DefaultTrainingArguments, build_model
 from xtuner.apis.datasets import alpaca_data_collator, alpaca_dataset
-from xtuner.apis.models import internlm_7b_qlora
-from xtuner.apis.training_args import DefaultTrainingArguments
 
 
 def train():
@@ -13,7 +12,7 @@ def train():
     training_args = parser.parse_args_into_dataclasses()[0]
 
     # init model and dataset
-    model, tokenizer = internlm_7b_qlora(
+    model, tokenizer = build_model(
         model_name_or_path=training_args.model_name_or_path,
         return_tokenizer=True)
     train_dataset = alpaca_dataset(

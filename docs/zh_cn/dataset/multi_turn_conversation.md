@@ -151,10 +151,10 @@ XTuner提供了一系列对话模板，你可以在 `xtuner/utils/templates.py` 
 4. 调整原始数据集的路径，关于 `load_dataset` 的相关操作可以参考[用户文档](https://huggingface.co/docs/datasets/loading)
 
 ```diff
-from xtuner.datasets import process_hf_dataset
+from xtuner.dataset import process_hf_dataset
 from datasets import load_dataset
-- from xtuner.datasets.map_fns import oasst1_map_fn, template_map_fn_factory
-+ from xtuner.datasets.map_fns import template_map_fn_factory
+- from xtuner.dataset.map_fns import oasst1_map_fn, template_map_fn_factory
++ from xtuner.dataset.map_fns import template_map_fn_factory
 + from .map_fn import oasst1_multi_turns_map_fn
 ...
 #######################################################################
@@ -191,7 +191,7 @@ train_dataloader = dict(
 
 ## 使用自定义数据集
 
-在使用自定义数据集进行增量预训练时，我们推荐将数据集构造为 XTuner 定义的[增量预训练数据格式](./dataset_format.md#增量预训练数据集格式)。若自定义数据集格式为 `oasst1` 等其他格式，可参考[使用 HuggingFace Hub 数据集](#使用huggingface-hub数据集)一节。
+在使用自定义多轮对话数据集进行指令微调时，我们推荐将数据集构造为 XTuner 定义的[多轮对话数据格式](./dataset_format.md#多轮对话数据集格式)。若自定义数据集格式为 `oasst1` 等其他格式，可参考[使用 HuggingFace Hub 数据集](#使用-huggingface-hub-数据集)一节。
 
 ### Step 1, 数据集准备
 
@@ -251,10 +251,10 @@ xtuner copy-cfg internlm_7b_qlora_oasst1_e3 .
 3. 设置对话模板
 
 ```diff
-from xtuner.datasets import process_hf_dataset
+from xtuner.dataset import process_hf_dataset
 from datasets import load_dataset
-- from xtuner.datasets.map_fns import oasst1_map_fn, template_map_fn_factory
-+ from xtuner.datasets.map_fns import template_map_fn_factory
+- from xtuner.dataset.map_fns import oasst1_map_fn, template_map_fn_factory
++ from xtuner.dataset.map_fns import template_map_fn_factory
 ...
 #######################################################################
 #                          PART 1  Settings                           #

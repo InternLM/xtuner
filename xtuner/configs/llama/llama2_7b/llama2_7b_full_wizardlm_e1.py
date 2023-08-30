@@ -7,28 +7,30 @@ from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR
 from torch.optim import AdamW
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from xtuner.datasets import process_hf_dataset
-from xtuner.datasets.collate_fns import default_collate_fn
-from xtuner.datasets.map_fns import template_map_fn_factory, wizardlm_map_fn
+from xtuner.dataset import process_hf_dataset
+from xtuner.dataset.collate_fns import default_collate_fn
+from xtuner.dataset.map_fns import template_map_fn_factory, wizardlm_map_fn
 from xtuner.engine import DatasetInfoHook, EvaluateChatHook
-from xtuner.models import SupervisedFinetune
+from xtuner.model import SupervisedFinetune
 from xtuner.utils import PROMPT_TEMPLATE
 
 #######################################################################
 #                          PART 1  Settings                           #
 #######################################################################
-# path
+# Model
 pretrained_model_name_or_path = 'meta-llama/Llama-2-7b-hf'
-wizard_lm_path = 'WizardLM/WizardLM_evol_instruct_V2_196k'
 
-# data
+# Data
+wizard_lm_path = 'WizardLM/WizardLM_evol_instruct_V2_196k'
 prompt_template = PROMPT_TEMPLATE.wizardlm
-batch_size = 2  # per_device
-accumulative_counts = 16
-dataloader_num_workers = 0
-max_epochs = 1
+max_length = 2048
+pack_to_max_length = True
 
 # optim
+batch_size = 2  # per_device
+accumulative_counts = 16  # 2bs * 16acc * 4gpu = 128 batchsize
+dataloader_num_workers = 0
+max_epochs = 1
 optim_type = AdamW
 lr = 2e-5
 betas = (0.9, 0.999)
@@ -37,11 +39,9 @@ max_norm = 1  # grad clip
 
 # Assess the progress of the model's training via interactive dialogue.
 evaluation_freq = 200
-human_inputs = ['请给我介绍五个上海的景点', 'Please tell me five scenic spots in Shanghai']
-
-# other
-max_length = 2048
-pack_to_max_length = True
+evaluation_inputs = [
+    '请给我介绍五个上海的景点', 'Please tell me five scenic spots in Shanghai'
+]
 
 #######################################################################
 #                      PART 2  Model & Tokenizer                      #
@@ -117,7 +117,7 @@ custom_hooks = [
         type=EvaluateChatHook,
         tokenizer=tokenizer,
         every_n_iters=evaluation_freq,
-        sample_inputs=human_inputs,
+        evaluation_inputs=evaluation_inputs,
         instruction=prompt_template.INSTRUCTION_START)
 ]
 
