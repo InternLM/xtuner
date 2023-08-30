@@ -1,3 +1,4 @@
+# Copyright (c) OpenMMLab. All rights reserved.
 import torch
 from datasets import load_dataset
 from mmengine.dataset import DefaultSampler
@@ -21,12 +22,12 @@ from xtuner.utils import PROMPT_TEMPLATE
 pretrained_model_name_or_path = 'meta-llama/Llama-2-7b-hf'
 
 # Data
-wizard_lm_path = 'WizardLM/WizardLM_evol_instruct_V2_196k'
+data_path = 'WizardLM/WizardLM_evol_instruct_V2_196k'
 prompt_template = PROMPT_TEMPLATE.wizardlm
 max_length = 2048
 pack_to_max_length = True
 
-# optim
+# Scheduler & Optimizer
 batch_size = 2  # per_device
 accumulative_counts = 16  # 2bs * 16acc * 4gpu = 128 batchsize
 dataloader_num_workers = 0
@@ -37,7 +38,7 @@ betas = (0.9, 0.999)
 weight_decay = 0
 max_norm = 1  # grad clip
 
-# Assess the progress of the model's training via interactive dialogue.
+# Evaluate the generation performance during the training
 evaluation_freq = 200
 evaluation_inputs = [
     '请给我介绍五个上海的景点', 'Please tell me five scenic spots in Shanghai'
@@ -63,9 +64,9 @@ model = dict(
 #######################################################################
 #                      PART 3  Dataset & Dataloader                   #
 #######################################################################
-wizard_lm = dict(
+train_dataset = dict(
     type=process_hf_dataset,
-    dataset=dict(type=load_dataset, path=wizard_lm_path),
+    dataset=dict(type=load_dataset, path=data_path),
     tokenizer=tokenizer,
     max_length=max_length,
     dataset_map_fn=wizardlm_map_fn,
@@ -78,7 +79,7 @@ wizard_lm = dict(
 train_dataloader = dict(
     batch_size=batch_size,
     num_workers=dataloader_num_workers,
-    dataset=wizard_lm,
+    dataset=train_dataset,
     sampler=dict(type=DefaultSampler, shuffle=True),
     collate_fn=dict(type=default_collate_fn))
 
