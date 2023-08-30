@@ -8,7 +8,7 @@
 
 [English](README.md) | 简体中文
 
-👋 加入我们：<a href="https://twitter.com/intern_lm" target="_blank">推特</a>、<a href="https://discord.gg/xa29JuW87d" target="_blank">Discord</a>、<a href="https://r.vansin.top/?r=internwx" target="_blank">微信</a>
+👋 加入我们：<a href="https://twitter.com/intern_lm" target="_blank">推特</a>、<a href="https://discord.gg/xa29JuW87d" target="_blank">Discord</a>、<a href="https://cdn.vansin.top/internlm/xtuner.jpg" target="_blank">微信</a>
 
 </div>
 
