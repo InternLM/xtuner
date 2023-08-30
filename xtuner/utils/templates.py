@@ -78,4 +78,10 @@ PROMPT_TEMPLATE = ConfigDict(
     baichuan_chat=dict(
         INSTRUCTION_START='<reserved_102>{input}<reserved_103>',
         INSTRUCTION='<reserved_102>{input}<reserved_103>'),
+    wizardlm=dict(
+        INSTRUCTION_START=('A chat between a curious user and an artificial '
+                           'intelligence assistant. The assistant gives '
+                           'helpful, detailed, and polite answers to the '
+                           'user\'s questions. USER: {input} ASSISTANT: '),
+        INSTRUCTION=('USER: {input} ASSISTANT: ')),
 )
