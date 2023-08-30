@@ -103,19 +103,25 @@ XTuner 是一个轻量级微调大语言模型的工具库，由 [MMRazor](https
 
 ### 安装
 
-使用pip安装XTuner：
+- 通过 pip 安装 XTuner：
 
-```shell
-pip install xtuner
-```
+  ```shell
+  pip install xtuner
+  ```
 
-或，从源码安装：
+  亦可集成 DeepSpeed 安装：
 
-```shell
-git clone https://github.com/InternLM/xtuner.git
-cd xtuner
-pip install -e .
-```
+  ```shell
+  pip install 'xtuner[deepspeed]'
+  ```
+
+- 从源码安装 XTuner：
+
+  ```shell
+  git clone https://github.com/InternLM/xtuner.git
+  cd xtuner
+  pip install -e '.[all]'
+  ```
 
 ### 对话 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/144OuTVyT_GvFyDMtlSlTzcxYIfnRsklq?usp=sharing)
 
