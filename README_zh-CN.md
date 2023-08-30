@@ -14,14 +14,14 @@
 
 ## 🎉 更新
 
-- **\[2023.08.XX\]** XTuner 正式发布！众多微调模型已上传至 [HuggingFace](https://huggingface.co/xtuner)！
+- **\[2023.08.30\]** XTuner 正式发布！众多微调模型已上传至 [HuggingFace](https://huggingface.co/xtuner)！
 
 ## 📖 介绍
 
 XTuner 是一个轻量级微调大语言模型的工具库，由 [MMRazor](https://github.com/open-mmlab/mmrazor) 和 [MMDeploy](https://github.com/open-mmlab/mmdeploy) 团队联合开发。
 
 - **轻量级**: 支持在消费级显卡上微调大语言模型。对于 7B 参数量，微调所需的最小显存仅为 **8GB**，这使得用户可以使用几乎任何显卡（甚至免费资源，例如Colab）来微调获得自定义大语言模型助手。
-- **多样性**: 支持多种**大语言模型**（[InternLM](https://github.com/InternLM/InternLM)、[Llama2](https://github.com/facebookresearch/llama)、[ChatGLM2](https://huggingface.co/THUDM/chatglm2-6b)、[Qwen](https://github.com/QwenLM/Qwen-7B)、[Baichuan](https://github.com/baichuan-inc), ...），**数据集**（[MOSS_003_SFT](https://huggingface.co/datasets/fnlp/moss-003-sft-data)、[Colorist](https://huggingface.co/datasets/burkelibbey/colors)、[Code Alpaca](https://huggingface.co/datasets/HuggingFaceH4/CodeAlpaca_20K)、[Arxiv GenTitle](https://github.com/WangRongsheng/ChatGenTitle)、[Chinese Law](https://github.com/LiuHC0428/LAW-GPT)、[OpenOrca](https://huggingface.co/datasets/Open-Orca/OpenOrca)、[Open-Platypus](https://huggingface.co/datasets/garage-bAInd/Open-Platypus)，...）和**微调算法**（[QLoRA](http://arxiv.org/abs/2305.14314)、[LoRA](http://arxiv.org/abs/2106.09685)），支撑用户根据自身具体需求选择合适的解决方案。
+- **多样性**: 支持多种**大语言模型**（[InternLM](https://github.com/InternLM/InternLM)、[Llama2](https://github.com/facebookresearch/llama)、[ChatGLM2](https://huggingface.co/THUDM/chatglm2-6b)、[Qwen](https://github.com/QwenLM/Qwen-7B)、[Baichuan](https://github.com/baichuan-inc), ...），**数据集**（[MOSS_003_SFT](https://huggingface.co/datasets/fnlp/moss-003-sft-data), [Alpaca](https://huggingface.co/datasets/tatsu-lab/alpaca), [WizardLM](https://huggingface.co/datasets/WizardLM/WizardLM_evol_instruct_V2_196k), [oasst1](https://huggingface.co/datasets/timdettmers/openassistant-guanaco), [Open-Platypus](https://huggingface.co/datasets/garage-bAInd/Open-Platypus), [Code Alpaca](https://huggingface.co/datasets/HuggingFaceH4/CodeAlpaca_20K), [Colorist](https://huggingface.co/datasets/burkelibbey/colors), ...）和**微调算法**（[QLoRA](http://arxiv.org/abs/2305.14314)、[LoRA](http://arxiv.org/abs/2106.09685)），支撑用户根据自身具体需求选择合适的解决方案。
 - **兼容性**: 兼容 [DeepSpeed](https://github.com/microsoft/DeepSpeed) 🚀 和 [HuggingFace](https://huggingface.co) 🤗 的训练流程，支撑用户无感式集成与使用。
 
 ## 🌟 示例
@@ -68,15 +68,16 @@ XTuner 是一个轻量级微调大语言模型的工具库，由 [MMRazor](https
 <td>
 <ul>
   <li><a href="https://huggingface.co/datasets/fnlp/moss-003-sft-data">MOSS-003-SFT</a> 🔧</li>
-  <li><a href="https://huggingface.co/datasets/burkelibbey/colors">Colorist</a> 🎨</li>
+  <li><a href="https://huggingface.co/datasets/tatsu-lab/alpaca">Alpaca en</a> / <a href="https://huggingface.co/datasets/silk-road/alpaca-data-gpt4-chinese">zh</a></li>
+  <li><a href="https://huggingface.co/datasets/WizardLM/WizardLM_evol_instruct_V2_196k">WizardLM</a></li>
+  <li><a href="https://huggingface.co/datasets/timdettmers/openassistant-guanaco">oasst1</a></li>
+  <li><a href="https://huggingface.co/datasets/garage-bAInd/Open-Platypus">Open-Platypus</a></li>
   <li><a href="https://huggingface.co/datasets/HuggingFaceH4/CodeAlpaca_20K">Code Alpaca</a></li>
+  <li><a href="https://huggingface.co/datasets/burkelibbey/colors">Colorist</a> 🎨</li>
   <li><a href="https://github.com/WangRongsheng/ChatGenTitle">Arxiv GenTitle</a></li>
   <li><a href="https://github.com/LiuHC0428/LAW-GPT">Chinese Law</a></li>
   <li><a href="https://huggingface.co/datasets/Open-Orca/OpenOrca">OpenOrca</a></li>
-  <li><a href="https://huggingface.co/datasets/tatsu-lab/alpaca">Alpaca en</a> / <a href="https://huggingface.co/datasets/silk-road/alpaca-data-gpt4-chinese">zh</a></li>
-  <li><a href="https://huggingface.co/datasets/timdettmers/openassistant-guanaco">oasst1</a></li>
   <li><a href="https://huggingface.co/datasets/shibing624/medical">Medical Dialogue</a></li>
-  <li><a href="https://huggingface.co/datasets/garage-bAInd/Open-Platypus">Open-Platypus</a></li>
   <li>...</li>
 </ul>
 </td>
