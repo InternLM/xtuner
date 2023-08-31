@@ -28,6 +28,8 @@ pretrained_model_name_or_path = 'bigcode/starcoder'
 data_path = 'ArmelR/stack-exchange-instruction'
 prompt_template = PROMPT_TEMPLATE.stack_exchange
 max_length = 2048
+# randomly select 20000 samples from the original dataset
+max_dataset_length = 20000
 pack_to_max_length = True
 
 # Scheduler & Optimizer
@@ -96,7 +98,7 @@ train_dataset = dict(
     dataset_map_fn=stack_exchange_map_fn,
     template_map_fn=dict(
         type=template_map_fn_factory, template=prompt_template),
-    max_dataset_length=20000,
+    max_dataset_length=max_dataset_length,
     remove_unused_columns=True,
     shuffle_before_pack=True,
     pack_to_max_length=pack_to_max_length)
