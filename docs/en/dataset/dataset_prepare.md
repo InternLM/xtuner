@@ -10,7 +10,7 @@ For datasets on HuggingFace Hub, such as [alpaca](https://huggingface.co/dataset
 
 Arxiv dataset is not released on HuggingFace Hub, but users can download it from Kaggle.
 
-**Step 0**, download raw data from https://kaggle.com/datasets/Cornell-University/arxiv
+**Step 0**, download raw data from https://kaggle.com/datasets/Cornell-University/arxiv.
 
 **Step 1**, process data by `xtuner preprocess arxiv ${DOWNLOADED_DATA} ${SAVE_DATA_PATH} [optional arguments]`
 
@@ -25,7 +25,7 @@ xtuner preprocess arxiv ${DOWNLOADED_DATA} ${SAVE_DATA_PATH} --categories cs.AI 
 
 ### MOSS-003-SFT
 
-MOSS-003-SFT dataset can be downloaded from https://huggingface.co/datasets/fnlp/moss-003-sft-data
+MOSS-003-SFT dataset can be downloaded from https://huggingface.co/datasets/fnlp/moss-003-sft-data.
 
 **Step 0**, download data
 
