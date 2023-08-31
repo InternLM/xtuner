@@ -48,4 +48,4 @@ unzip moss-003-sft-with-tools-no-text2image.zip
 
 Chinese Lawyer 数据集有两个子数据集，它们可以在 https://github.com/LiuHC0428/LAW-GPT 下载。
 
-所有的 lawyer 配置文件都假设数据集路径为 `./data/CrimeKgAssitant清洗后_52k.json` 和 `./data/训练数据_带法律依据_92k.json`。用户可以移动并重命名数据，或者在配置文件中重新设置数据路径。
+所有的 Chinese Lawyer 配置文件都假设数据集路径为 `./data/CrimeKgAssitant清洗后_52k.json` 和 `./data/训练数据_带法律依据_92k.json`。用户可以移动并重命名数据，或者在配置文件中重新设置数据路径。
