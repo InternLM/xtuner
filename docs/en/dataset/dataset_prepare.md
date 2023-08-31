@@ -14,7 +14,7 @@ Arxiv dataset is not released on HuggingFace Hub, but users can download it from
 
 **Step 1**, process data by `xtuner preprocess arxiv ${DOWNLOADED_DATA} ${SAVE_DATA_PATH} [optional arguments]`
 
-For example, get all cs.AI, cs.CL, cs.CV paper from 2020-01-01 to now:
+For example, get all `cs.AI`, `cs.CL`, `cs.CV` papers from `2020-01-01`:
 
 ```shell
 xtuner preprocess arxiv ${DOWNLOADED_DATA} ${SAVE_DATA_PATH} --categories cs.AI cs.CL cs.CV --start-date 2020-01-01
