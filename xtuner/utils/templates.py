@@ -86,4 +86,5 @@ PROMPT_TEMPLATE = ConfigDict(
         INSTRUCTION=('USER: {input} ASSISTANT: ')),
     stack_exchange=dict(
         INSTRUCTION_START='Question: {input}\n\nAnswer: ',
-        INSTRUCTION='Question: {input}\n\nAnswer: '))
+        INSTRUCTION='Question: {input}\n\nAnswer: '),
+)
