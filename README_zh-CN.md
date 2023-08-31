@@ -150,11 +150,11 @@ XTuner 提供与大语言模型对话的工具。
   xtuner chat hf meta-llama/Llama-2-7b-hf --adapter xtuner/Llama-2-7b-qlora-moss-003-sft --bot-name Llama2 --prompt-template moss_sft --with-plugins calculate solve search --command-stop-word "<eoc>" --answer-stop-word "<eom>" --no-streamer
   ```
 
-更多示例，请查阅[文档](./docs/zh_cn/chat.md)。
+更多示例，请查阅[文档](./docs/zh_cn/user_guides/chat.md)。
 
 ### 微调 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1QAEZVBfQ7LZURkMUtaq0b-5nEQII9G9Z?usp=sharing)
 
-XTuner 支持微调大语言模型。
+XTuner 支持微调大语言模型。数据集预处理指南请查阅[文档](./docs/zh_cn/user_guides/dataset_prepare.md)。
 
 - **步骤 0**，准备配置文件。XTuner 提供多个开箱即用的配置文件，用户可以通过下列命令查看：
 
@@ -177,7 +177,7 @@ XTuner 支持微调大语言模型。
   NPROC_PER_NODE=${GPU_NUM} xtuner train internlm_7b_qlora_oasst1_e3
   ```
 
-  更多示例，请查阅[文档](./docs/zh_cn/finetune.md).
+  更多示例，请查阅[文档](./docs/zh_cn/user_guides/finetune.md).
 
 ### 部署
 
