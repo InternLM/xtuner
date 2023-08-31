@@ -12,7 +12,7 @@ Arxiv 数据集并未在 HuggingFace Hub上发布，但是可以在 Kaggle 上�
 
 **步骤 0**，从 https://kaggle.com/datasets/Cornell-University/arxiv 下载原始数据。
 
-**步骤 1**，使用 `xtuner preprocess arxiv ${DOWNLOADED_DATA} ${SAVE_DATA_PATH} [optional arguments]` 命令处理数据
+**步骤 1**，使用 `xtuner preprocess arxiv ${DOWNLOADED_DATA} ${SAVE_DATA_PATH} [optional arguments]` 命令处理数据。
 
 例如，提取从 `2020-01-01` 起的所有 `cs.AI`、`cs.CL`、`cs.CV` 论文：
 
@@ -26,7 +26,7 @@ xtuner preprocess arxiv ${DOWNLOADED_DATA} ${SAVE_DATA_PATH} --categories cs.AI 
 
 MOSS-003-SFT 数据集可以在 https://huggingface.co/datasets/fnlp/moss-003-sft-data 下载。
 
-**步骤 0**，下载数据
+**步骤 0**，下载数据。
 
 ```shell
 # 确保已经安装 git-lfs (https://git-lfs.com)
@@ -34,7 +34,7 @@ git lfs install
 git clone https://huggingface.co/datasets/fnlp/moss-003-sft-data
 ```
 
-**步骤 1**，解压缩
+**步骤 1**，解压缩。
 
 ```shell
 cd moss-003-sft-data

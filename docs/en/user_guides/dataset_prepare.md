@@ -12,7 +12,7 @@ Arxiv dataset is not released on HuggingFace Hub, but you can download it from K
 
 **Step 0**, download raw data from https://kaggle.com/datasets/Cornell-University/arxiv.
 
-**Step 1**, process data by `xtuner preprocess arxiv ${DOWNLOADED_DATA} ${SAVE_DATA_PATH} [optional arguments]`
+**Step 1**, process data by `xtuner preprocess arxiv ${DOWNLOADED_DATA} ${SAVE_DATA_PATH} [optional arguments]`.
 
 For example, get all `cs.AI`, `cs.CL`, `cs.CV` papers from `2020-01-01`:
 
@@ -26,7 +26,7 @@ xtuner preprocess arxiv ${DOWNLOADED_DATA} ${SAVE_DATA_PATH} --categories cs.AI 
 
 MOSS-003-SFT dataset can be downloaded from https://huggingface.co/datasets/fnlp/moss-003-sft-data.
 
-**Step 0**, download data
+**Step 0**, download data.
 
 ```shell
 # Make sure you have git-lfs installed (https://git-lfs.com)
@@ -34,7 +34,7 @@ git lfs install
 git clone https://huggingface.co/datasets/fnlp/moss-003-sft-data
 ```
 
-**Step 1**, unzip
+**Step 1**, unzip.
 
 ```shell
 cd moss-003-sft-data
