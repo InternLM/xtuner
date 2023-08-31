@@ -84,4 +84,6 @@ PROMPT_TEMPLATE = ConfigDict(
                            'helpful, detailed, and polite answers to the '
                            'user\'s questions. USER: {input} ASSISTANT: '),
         INSTRUCTION=('USER: {input} ASSISTANT: ')),
-)
+    stack_exchange=dict(
+        INSTRUCTION_START='Question: {input}\n\nAnswer: ',
+        INSTRUCTION='Question: {input}\n\nAnswer: '))
