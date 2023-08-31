@@ -25,8 +25,8 @@ pretrained_model_name_or_path = 'huggyllama/llama-7b'
 
 # Data
 # 1. Download data from https://kaggle.com/datasets/Cornell-University/arxiv
-# 2. Process data with `./tools/data_preprocess/arxiv.py`
-data_path = './data/arxiv_postprocess_csAIcsCLcsCV_20200101.json'
+# 2. Process data by `xtuner preprocess arxiv ${DOWNLOADED_DATA} ./data/arxiv_data.json [optional arguments]`  # noqa: E501
+data_path = './data/arxiv_data.json'
 prompt_template = PROMPT_TEMPLATE.title
 max_length = 2048
 pack_to_max_length = True
