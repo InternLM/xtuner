@@ -2,13 +2,13 @@
 
 ## HuggingFace datasets
 
-For datasets on HuggingFace Hub, such as [alpaca](https://huggingface.co/datasets/tatsu-lab/alpaca), users can quickly utilize them. For more details, please refer to [single_turn_conversation.md](./single_turn_conversation.md) and [multi_turn_conversation.md](./multi_turn_conversation.md).
+For datasets on HuggingFace Hub, such as [alpaca](https://huggingface.co/datasets/tatsu-lab/alpaca), you can quickly utilize them. For more details, please refer to [single_turn_conversation.md](./single_turn_conversation.md) and [multi_turn_conversation.md](./multi_turn_conversation.md).
 
 ## Others
 
 ### Arxiv Gentitle
 
-Arxiv dataset is not released on HuggingFace Hub, but users can download it from Kaggle.
+Arxiv dataset is not released on HuggingFace Hub, but you can download it from Kaggle.
 
 **Step 0**, download raw data from https://kaggle.com/datasets/Cornell-University/arxiv.
 

@@ -150,11 +150,11 @@ XTuner provides tools to chat with pretrained / fine-tuned LLMs.
   xtuner chat hf meta-llama/Llama-2-7b-hf --adapter xtuner/Llama-2-7b-qlora-moss-003-sft --bot-name Llama2 --prompt-template moss_sft --with-plugins calculate solve search --command-stop-word "<eoc>" --answer-stop-word "<eom>" --no-streamer
   ```
 
-For more examples, please see [chat.md](./docs/en/chat.md).
+For more examples, please see [chat.md](./docs/en/user_guides/chat.md).
 
 ### Fine-tune [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1QAEZVBfQ7LZURkMUtaq0b-5nEQII9G9Z?usp=sharing)
 
-XTuner supports the efficient fine-tune (*e.g.*, QLoRA) for LLMs.
+XTuner supports the efficient fine-tune (*e.g.*, QLoRA) for LLMs. Dataset prepare guides can be found on [dataset_prepare.md](./docs/en/user_guides/dataset_prepare.md).
 
 - **Step 0**, prepare the config. XTuner provides many ready-to-use configs and we can view all configs by
 
@@ -178,7 +178,7 @@ XTuner supports the efficient fine-tune (*e.g.*, QLoRA) for LLMs.
   (SLURM) srun ${SRUN_ARGS} xtuner train internlm_7b_qlora_oasst1_e3 --launcher slurm
   ```
 
-  For more examples, please see [finetune.md](./docs/en/finetune.md).
+  For more examples, please see [finetune.md](./docs/en/user_guides/finetune.md).
 
 ### Deployment
 
