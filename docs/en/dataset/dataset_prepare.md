@@ -38,6 +38,9 @@ git clone https://huggingface.co/datasets/fnlp/moss-003-sft-data
 **Step 1**, unzip
 
 ```shell
+cd moss-003-sft-data
+unzip moss-003-sft-no-tools.jsonl.zip
+unzip moss-003-sft-with-tools-no-text2image.zip
 ```
 
 **Step 2**, all moss-003-sft configs assume the dataset path to be `./data/moss-003-sft-no-tools.jsonl` and `./data/conversations_with_tools_with_inner_instruction_no_text2image_train_all_random_meta0.5_0.1_0.01_moss_0709.jsonl`. You can move and rename your data, or make changes to these configs.
