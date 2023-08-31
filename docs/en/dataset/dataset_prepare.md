@@ -22,7 +22,6 @@ xtuner preprocess arxiv ${DOWNLOADED_DATA} ${SAVE_DATA_PATH} --categories cs.AI 
 
 **Step 2**, all Arixv Gentitle configs assume the dataset path to be `./data/arxiv_data.json`. You can move and rename your data, or make changes to these configs.
 
-
 ### MOSS-003-SFT
 
 MOSS-003-SFT dataset can be downloaded from https://huggingface.co/datasets/fnlp/moss-003-sft-data.
