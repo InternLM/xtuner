@@ -260,7 +260,7 @@ from datasets import load_dataset
 #                          PART 1  Settings                           #
 #######################################################################
 - data_path = 'timdettmers/openassistant-guanaco'
-+ data_path = 'path/to/your/data'
++ data_path = 'path/to/your/json/data'
 
 + prompt_template = PROMPT_TEMPLATE.openassistant
 ...
@@ -269,7 +269,9 @@ from datasets import load_dataset
 #######################################################################
 train_dataset = dict(
     type=process_hf_dataset,
-    dataset=dict(type=load_dataset, path=data_path),
+-   dataset=dict(type=load_dataset, path=data_path),
++   dataset=dict(
++       type=load_dataset, path='json', data_files=dict(train=data_path)),
     tokenizer=tokenizer,
     max_length=max_length,
 +   dataset_map_fn=None,

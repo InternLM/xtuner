@@ -228,7 +228,7 @@ from datasets import load_dataset
 #######################################################################
 - alpaca_zh_path = 'silk-road/alpaca-data-gpt4-chinese'
 - alpaca_en_path = 'tatsu-lab/alpaca'
-+ data_path = 'path/to/your/data'
++ data_path = 'path/to/your/json/data'
 
 + prompt_template = PROMPT_TEMPLATE.alpaca
 #######################################################################
@@ -236,7 +236,9 @@ from datasets import load_dataset
 #######################################################################
 train_dataset = dict(
     type=process_hf_dataset,
-    dataset=dict(type=load_dataset, path=data_path),
+-   dataset=dict(type=load_dataset, path=data_path),
++   dataset=dict(
++       type=load_dataset, path='json', data_files=dict(train=data_path)),
     tokenizer=tokenizer,
     max_length=max_length,
 +   dataset_map_fn=None,
