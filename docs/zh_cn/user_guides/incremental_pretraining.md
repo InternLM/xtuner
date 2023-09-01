@@ -191,14 +191,16 @@ from datasets import load_dataset
 #######################################################################
 - data_path = 'timdettmers/openassistant-guanaco'
 - prompt_template = PROMPT_TEMPLATE.openassistant
-+ data_path = 'path/to/your/data'
++ data_path = 'path/to/your/json/data'
 ...
 #######################################################################
 #                      STEP 3  Dataset & Dataloader                   #
 #######################################################################
 train_dataset = dict(
     type=process_hf_dataset,
-    dataset=dict(type=load_dataset, path=data_path),
+-   dataset=dict(type=load_dataset, path=data_path),
++   dataset=dict(
++       type=load_dataset, path='json', data_files=dict(train=data_path)),
     tokenizer=tokenizer,
     max_length=max_length,
 -   dataset_map_fn=oasst1_map_fn,
