@@ -123,35 +123,6 @@ XTuner is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](
   pip install -e '.[all]'
   ```
 
-### Chat [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/144OuTVyT_GvFyDMtlSlTzcxYIfnRsklq?usp=sharing)
-
-<table>
-<tr>
-  <th colspan="3" align="center">Examples of Plugins-based Chat 🔥🔥🔥</th>
-</tr>
-<tr>
-<td>
-<a><img src="https://github.com/InternLM/lmdeploy/assets/36994684/7c429d98-7630-4539-8aff-c89094826f8c"></a>
-</td>
-<td>
-<a><img src="https://github.com/InternLM/lmdeploy/assets/36994684/05d02906-5a82-45bc-b4e3-2cc32d473b2c"></a>
-</td>
-<td>
-<a><img src="https://github.com/InternLM/lmdeploy/assets/36994684/80395303-997a-47f2-b7d2-d585034df683"></a>
-</td>
-</tr>
-</table>
-
-XTuner provides tools to chat with pretrained / fine-tuned LLMs.
-
-- For example, we can start the chat with Llama2-7B-Plugins by
-
-  ```shell
-  xtuner chat meta-llama/Llama-2-7b-hf --adapter xtuner/Llama-2-7b-qlora-moss-003-sft --bot-name Llama2 --prompt-template moss_sft --with-plugins calculate solve search --command-stop-word "<eoc>" --answer-stop-word "<eom>" --no-streamer
-  ```
-
-For more examples, please see [chat.md](./docs/en/user_guides/chat.md).
-
 ### Fine-tune [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1QAEZVBfQ7LZURkMUtaq0b-5nEQII9G9Z?usp=sharing)
 
 XTuner supports the efficient fine-tune (*e.g.*, QLoRA) for LLMs. Dataset prepare guides can be found on [dataset_prepare.md](./docs/en/user_guides/dataset_prepare.md).
@@ -180,7 +151,7 @@ XTuner supports the efficient fine-tune (*e.g.*, QLoRA) for LLMs. Dataset prepar
 
   For more examples, please see [finetune.md](./docs/en/user_guides/finetune.md).
 
-- **Step 2** (optional), convert the pth adapter to HuggingFace adapter, by
+- **Step 2**, convert the pth adapter to HuggingFace adapter, by
 
   ```shell
   xtuner convert adapter_pth2hf \
@@ -188,6 +159,35 @@ XTuner supports the efficient fine-tune (*e.g.*, QLoRA) for LLMs. Dataset prepar
       ${PATH_TO_PTH_ADAPTER} \
       ${SAVE_PATH_TO_HF_ADAPTER}
   ```
+
+### Chat [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/144OuTVyT_GvFyDMtlSlTzcxYIfnRsklq?usp=sharing)
+
+<table>
+<tr>
+  <th colspan="3" align="center">Examples of Plugins-based Chat 🔥🔥🔥</th>
+</tr>
+<tr>
+<td>
+<a><img src="https://github.com/InternLM/lmdeploy/assets/36994684/7c429d98-7630-4539-8aff-c89094826f8c"></a>
+</td>
+<td>
+<a><img src="https://github.com/InternLM/lmdeploy/assets/36994684/05d02906-5a82-45bc-b4e3-2cc32d473b2c"></a>
+</td>
+<td>
+<a><img src="https://github.com/InternLM/lmdeploy/assets/36994684/80395303-997a-47f2-b7d2-d585034df683"></a>
+</td>
+</tr>
+</table>
+
+XTuner provides tools to chat with pretrained / fine-tuned LLMs.
+
+- For example, we can start the chat with Llama2-7B-Plugins by
+
+  ```shell
+  xtuner chat meta-llama/Llama-2-7b-hf --adapter xtuner/Llama-2-7b-qlora-moss-003-sft --bot-name Llama2 --prompt-template moss_sft --with-plugins calculate solve search --command-stop-word "<eoc>" --answer-stop-word "<eom>" --no-streamer
+  ```
+
+For more examples, please see [chat.md](./docs/en/user_guides/chat.md).
 
 ### Deployment
 

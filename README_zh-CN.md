@@ -123,6 +123,42 @@ XTuner 是一个轻量级微调大语言模型的工具库，由 [MMRazor](https
   pip install -e '.[all]'
   ```
 
+### 微调 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1QAEZVBfQ7LZURkMUtaq0b-5nEQII9G9Z?usp=sharing)
+
+XTuner 支持微调大语言模型。数据集预处理指南请查阅[文档](./docs/zh_cn/user_guides/dataset_prepare.md)。
+
+- **步骤 0**，准备配置文件。XTuner 提供多个开箱即用的配置文件，用户可以通过下列命令查看：
+
+  ```shell
+  xtuner list-cfg
+  ```
+
+  或者，如果所提供的配置文件不能满足使用需求，请导出所提供的配置文件并进行相应更改：
+
+  ```shell
+  xtuner copy-cfg ${CONFIG_NAME} ${SAVE_DIR}
+  ```
+
+- **步骤 1**，开始微调。例如，我们可以利用 QLoRA 算法在 oasst1 数据集上微调 InternLM-7B：
+
+  ```shell
+  # 单卡
+  xtuner train internlm_7b_qlora_oasst1_e3
+  # 多卡
+  NPROC_PER_NODE=${GPU_NUM} xtuner train internlm_7b_qlora_oasst1_e3
+  ```
+
+  更多示例，请查阅[文档](./docs/zh_cn/user_guides/finetune.md)。
+
+- **步骤 2**，将 pth adapter 转换为 HuggingFace adapter：
+
+  ```shell
+  xtuner convert adapter_pth2hf \
+      ${CONFIG} \
+      ${PATH_TO_PTH_ADAPTER} \
+      ${SAVE_PATH_TO_HF_ADAPTER}
+  ```
+
 ### 对话 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/144OuTVyT_GvFyDMtlSlTzcxYIfnRsklq?usp=sharing)
 
 <table>
@@ -151,42 +187,6 @@ XTuner 提供与大语言模型对话的工具。
   ```
 
 更多示例，请查阅[文档](./docs/zh_cn/user_guides/chat.md)。
-
-### 微调 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1QAEZVBfQ7LZURkMUtaq0b-5nEQII9G9Z?usp=sharing)
-
-XTuner 支持微调大语言模型。数据集预处理指南请查阅[文档](./docs/zh_cn/user_guides/dataset_prepare.md)。
-
-- **步骤 0**，准备配置文件。XTuner 提供多个开箱即用的配置文件，用户可以通过下列命令查看：
-
-  ```shell
-  xtuner list-cfg
-  ```
-
-  或者，如果所提供的配置文件不能满足使用需求，请导出所提供的配置文件并进行相应更改：
-
-  ```shell
-  xtuner copy-cfg ${CONFIG_NAME} ${SAVE_DIR}
-  ```
-
-- **步骤 1**，开始微调。例如，我们可以利用 QLoRA 算法在 oasst1 数据集上微调 InternLM-7B：
-
-  ```shell
-  # 单卡
-  xtuner train internlm_7b_qlora_oasst1_e3
-  # 多卡
-  NPROC_PER_NODE=${GPU_NUM} xtuner train internlm_7b_qlora_oasst1_e3
-  ```
-
-  更多示例，请查阅[文档](./docs/zh_cn/user_guides/finetune.md)。
-
-- **步骤 2**（可选），将 pth adapter 转换为 HuggingFace adapter：
-
-  ```shell
-  xtuner convert adapter_pth2hf \
-      ${CONFIG} \
-      ${PATH_TO_PTH_ADAPTER} \
-      ${SAVE_PATH_TO_HF_ADAPTER}
-  ```
 
 ### 部署
 
