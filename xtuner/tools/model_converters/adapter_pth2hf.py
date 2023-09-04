@@ -54,18 +54,12 @@ def main():
     if args.cfg_options is not None:
         cfg.merge_from_dict(args.cfg_options)
 
-    # load on cpu
-    cfg.model.llm.device_map = 'cpu'
-    if cfg.model.llm.get('quantization_config'):
-        cfg.model.llm.quantization_config.\
-            llm_int8_enable_fp32_cpu_offload = True
-
     model = BUILDER.build(cfg.model)
 
-    adapter_checkpoint = torch.load(
-        args.adapter_checkpoint, map_location='cpu')
-    state_dict_key = 'module' if args.is_deepspeed else 'state_dict'
-    model.load_state_dict(adapter_checkpoint[state_dict_key], strict=False)
+    state_dict = torch.load(args.adapter_checkpoint, map_location='cpu')
+    if not args.is_deepspeed:
+        state_dict = state_dict['state_dict']
+    model.load_state_dict(state_dict, strict=False)
     print(f'Load adapter from {args.adapter_checkpoint}')
 
     mkdir_or_exist(args.save_dir)

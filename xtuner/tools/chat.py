@@ -1,35 +1,46 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import argparse
-import os
 import re
 
 import torch
-from mmengine.config import Config, DictAction
-from transformers import GenerationConfig
+from peft import PeftModel
+from transformers import (AutoModelForCausalLM, AutoTokenizer,
+                          BitsAndBytesConfig, GenerationConfig)
 
-from xtuner.configs import cfgs_name_path
-from xtuner.registry import BUILDER
 from xtuner.tools.utils import get_chat_utils, update_stop_criteria
 from xtuner.utils import PROMPT_TEMPLATE
 
 
+def remove_prefix(state_dict, prefix):
+    new_state_dict = {}
+    for key, value in state_dict.items():
+        if key.startswith(prefix):
+            new_key = key[len(prefix):]
+            new_state_dict[new_key] = value
+        else:
+            new_state_dict[key] = value
+    return new_state_dict
+
+
 def parse_args():
-    parser = argparse.ArgumentParser(
-        description='Chat with a pretrained model')
+    parser = argparse.ArgumentParser(description='Chat with a HF model')
     parser.add_argument(
-        'config',
-        help='config file name or path. Note: Please use the original '
-        'configs, instead of the automatically saved log configs.')
-    parser.add_argument('--adapter', default=None, help='adapter model')
+        'model_name_or_path', help='Hugging Face model name or path')
+    parser.add_argument('--pretrained', default=None, help='pretrained path')
+    parser.add_argument('--adapter', default=None, help='adapter name or path')
     parser.add_argument(
         '--prompt-template',
         choices=PROMPT_TEMPLATE.keys(),
         default=None,
         help='Specify a prompt option')
     parser.add_argument(
-        '--is-deepspeed',
-        action='store_true',
-        help='whether the adapter is saved from deepspeed')
+        '--bits',
+        type=int,
+        choices=[4, 8, None],
+        default=None,
+        help='LLM bits')
+    parser.add_argument(
+        '--bot-name', type=str, default='BOT', help='Name for Bot')
     parser.add_argument(
         '--with-plugins',
         nargs='+',
@@ -67,16 +78,6 @@ def parse_args():
         type=int,
         default=0,
         help='Random seed for reproducible text generation')
-    parser.add_argument(
-        '--cfg-options',
-        nargs='+',
-        action=DictAction,
-        help='override some settings in the used config, the key-value pair '
-        'in xxx=yyy format will be merged into config file. If the value to '
-        'be overwritten is a list, it should be like key="[a,b]" or key=a,b '
-        'It also allows nested list/tuple values, e.g. key="[(a,b),(c,d)]" '
-        'Note that the quotation marks are necessary and that no white space '
-        'is allowed.')
     args = parser.parse_args()
     return args
 
@@ -119,29 +120,36 @@ def main():
 
     torch.manual_seed(args.seed)
 
-    # parse config
-    if not os.path.isfile(args.config):
-        try:
-            args.config = cfgs_name_path[args.config]
-        except KeyError:
-            raise FileNotFoundError(f'Cannot find {args.config}')
-
-    # load config
-    cfg = Config.fromfile(args.config)
-    if args.cfg_options is not None:
-        cfg.merge_from_dict(args.cfg_options)
-
-    model = BUILDER.build(cfg.model)
-    # Cast to inference mode
-    model.llm.gradient_checkpointing_disable()
-    model.llm.config.use_cache = True
-
-    tokenizer = BUILDER.build(cfg.tokenizer)
-
+    # build model
+    quantization_config = None
+    load_in_8bit = False
+    if args.bits == 4:
+        quantization_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            load_in_8bit=False,
+            llm_int8_threshold=6.0,
+            llm_int8_has_fp16_weight=False,
+            bnb_4bit_compute_dtype=torch.float16,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type='nf4')
+    elif args.bits == 8:
+        load_in_8bit = True
+    assert args.pretrained is None or args.bits is None
+    model = AutoModelForCausalLM.from_pretrained(
+        args.model_name_or_path,
+        quantization_config=quantization_config,
+        load_in_8bit=load_in_8bit,
+        device_map='auto',
+        trust_remote_code=True)
+    if args.pretrained is not None:
+        pretrained_ckpt = torch.load(args.pretrained, map_location='cpu')
+        pretrained_ckpt = remove_prefix(pretrained_ckpt, 'llm.')
+        model.load_state_dict(pretrained_ckpt)
+        print(f'Load pretrained weight from {args.pretrained}')
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.model_name_or_path, trust_remote_code=True)
     if args.adapter is not None:
-        adapter = torch.load(args.adapter, map_location='cpu')
-        state_dict_key = 'module' if args.is_deepspeed else 'state_dict'
-        model.load_state_dict(adapter[state_dict_key], strict=False)
+        model = PeftModel.from_pretrained(model, args.adapter)
         print(f'Load adapter from {args.adapter}')
 
     Streamer, stop_criteria = get_chat_utils(model)
@@ -173,10 +181,10 @@ def main():
             template = PROMPT_TEMPLATE[args.prompt_template]
             if 'INSTRUCTION_START' in template and n_turn == 0:
                 prompt_text = template['INSTRUCTION_START'].format(
-                    input=text, round=n_turn + 1, **cfg)
+                    input=text, round=n_turn + 1, bot_name=args.bot_name)
             else:
                 prompt_text = template['INSTRUCTION'].format(
-                    input=text, round=n_turn + 1, **cfg)
+                    input=text, round=n_turn + 1, bot_name=args.bot_name)
             if args.prompt_template == 'moss_sft':
                 if not inner_thoughts_open:
                     prompt_text.replace('- Inner thoughts: enabled.',
