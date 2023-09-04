@@ -147,7 +147,7 @@ XTuner provides tools to chat with pretrained / fine-tuned LLMs.
 - For example, we can start the chat with Llama2-7B-Plugins by
 
   ```shell
-    xtuner chat meta-llama/Llama-2-7b-hf --adapter xtuner/Llama-2-7b-qlora-moss-003-sft --bot-name Llama2 --prompt-template moss_sft --with-plugins calculate solve search --command-stop-word "<eoc>" --answer-stop-word "<eom>" --no-streamer
+  xtuner chat meta-llama/Llama-2-7b-hf --adapter xtuner/Llama-2-7b-qlora-moss-003-sft --bot-name Llama2 --prompt-template moss_sft --with-plugins calculate solve search --command-stop-word "<eoc>" --answer-stop-word "<eom>" --no-streamer
   ```
 
 For more examples, please see [chat.md](./docs/en/user_guides/chat.md).

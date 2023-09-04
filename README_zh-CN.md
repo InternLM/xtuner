@@ -147,7 +147,7 @@ XTuner 提供与大语言模型对话的工具。
 - 例如，与基于插件微调获得的 Llama2-7B-Plugins 对话：
 
   ```shell
-    xtuner chat meta-llama/Llama-2-7b-hf --adapter xtuner/Llama-2-7b-qlora-moss-003-sft --bot-name Llama2 --prompt-template moss_sft --with-plugins calculate solve search --command-stop-word "<eoc>" --answer-stop-word "<eom>" --no-streamer
+  xtuner chat meta-llama/Llama-2-7b-hf --adapter xtuner/Llama-2-7b-qlora-moss-003-sft --bot-name Llama2 --prompt-template moss_sft --with-plugins calculate solve search --command-stop-word "<eoc>" --answer-stop-word "<eom>" --no-streamer
   ```
 
 更多示例，请查阅[文档](./docs/zh_cn/user_guides/chat.md)。
