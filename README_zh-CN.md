@@ -177,11 +177,9 @@ XTuner 支持微调大语言模型。数据集预处理指南请查阅[文档](.
   NPROC_PER_NODE=${GPU_NUM} xtuner train internlm_7b_qlora_oasst1_e3
   ```
 
-  更多示例，请查阅[文档](./docs/zh_cn/user_guides/finetune.md).
+  更多示例，请查阅[文档](./docs/zh_cn/user_guides/finetune.md)。
 
-### 部署
-
-- **步骤 0**，将 pth adapter 转换为 HuggingFace adapter：
+- **步骤 2**（可选），将 pth adapter 转换为 HuggingFace adapter：
 
   ```shell
   xtuner convert adapter_pth2hf \
@@ -190,11 +188,13 @@ XTuner 支持微调大语言模型。数据集预处理指南请查阅[文档](.
       ${SAVE_PATH_TO_HF_ADAPTER}
   ```
 
-  或者，直接将 pth adapter 合并到大语言模型：
+### 部署
+
+- **步骤 0**，将 HuggingFace adapter 合并到大语言模型：
 
   ```shell
   xtuner convert merge_adapter \
-      ${CONFIG} \
+      ${NAME_OR_PATH_TO_LLM} \
       ${PATH_TO_PTH_ADAPTER} \
       ${SAVE_PATH_TO_MERGED_LLM} \
       --max-shard-size 2GB

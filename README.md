@@ -180,9 +180,7 @@ XTuner supports the efficient fine-tune (*e.g.*, QLoRA) for LLMs. Dataset prepar
 
   For more examples, please see [finetune.md](./docs/en/user_guides/finetune.md).
 
-### Deployment
-
-- **Step 0**, convert the pth adapter to HuggingFace adapter, by
+- **Step 2** (optional), convert the pth adapter to HuggingFace adapter, by
 
   ```shell
   xtuner convert adapter_pth2hf \
@@ -191,12 +189,14 @@ XTuner supports the efficient fine-tune (*e.g.*, QLoRA) for LLMs. Dataset prepar
       ${SAVE_PATH_TO_HF_ADAPTER}
   ```
 
-  or, directly merge the pth adapter to pretrained LLM, by
+### Deployment
+
+- **Step 0**, merge the HuggingFace adapter to pretrained LLM, by
 
   ```shell
   xtuner convert merge_adapter \
-      ${CONFIG} \
-      ${PATH_TO_PTH_ADAPTER} \
+      ${NAME_OR_PATH_TO_LLM} \
+      ${PATH_TO_ADAPTER} \
       ${SAVE_PATH_TO_MERGED_LLM} \
       --max-shard-size 2GB
   ```
