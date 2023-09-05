@@ -46,7 +46,7 @@ PROMPT_TEMPLATE = ConfigDict(
             'nature. \n<</SYS>>\n\n{input} [/INST]'),
         INSTRUCTION='[INST] {input} [/INST]'),
     code_llama_chat=dict(
-        INSTRUCTION_START=('[INST] {input} [/INST]'),
+        INSTRUCTION_START='[INST] {input} [/INST]',
         INSTRUCTION='[INST] {input} [/INST]',
     ),
     internlm_chat=dict(
