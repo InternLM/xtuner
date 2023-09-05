@@ -176,7 +176,7 @@ XTuner supports the efficient fine-tune (*e.g.*, QLoRA) for LLMs. Dataset prepar
 
   For more examples, please see [finetune.md](./docs/en/user_guides/finetune.md).
 
-- **Step 2**, convert the saved PTH model to HuggingFace model, by
+- **Step 2**, convert the saved PTH model (if using DeepSpeed, it will be a directory) to HuggingFace model, by
 
   ```shell
   xtuner convert pth_to_hf ${CONFIG} ${PATH_TO_PTH_MODEL} ${SAVE_PATH_TO_HF_MODEL}
