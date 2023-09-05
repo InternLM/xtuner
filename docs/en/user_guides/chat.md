@@ -119,3 +119,11 @@
   ```shell
   xtuner chat baichuan-inc/Baichuan-7B --adapter xtuner/Baichuan-7B-qlora-alpaca-enzh --prompt-template alpaca
   ```
+
+  ## Chat with [CodeLlama](https://github.com/facebookresearch/codellama)
+
+- CodeLlama-7B, Instruct
+
+  ```shell
+  xtuner chat codellama/CodeLlama-7b-Instruct-hf --prompt-template code_llama_chat
+  ```
