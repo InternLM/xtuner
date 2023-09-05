@@ -1,7 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from mmengine.hooks import Hook
 from mmengine.model import is_model_wrapper
-from transformers import StoppingCriteriaList
+from transformers import GenerationConfig, StoppingCriteriaList
 
 from xtuner.registry import BUILDER
 from xtuner.utils import StopWordStoppingCriteria
@@ -26,6 +26,18 @@ class EvaluateChatHook(Hook):
         self.max_new_tokens = max_new_tokens
         self.tokenizer = BUILDER.build(tokenizer)
         self.stop_criteria = StoppingCriteriaList()
+        # default generation config
+        self.gen_config = GenerationConfig(
+            max_new_tokens=max_new_tokens,
+            do_sample=True,
+            temperature=0.1,
+            top_p=0.75,
+            top_k=40,
+            eos_token_id=self.tokenizer.eos_token_id,
+            pad_token_id=self.tokenizer.pad_token_id
+            if self.tokenizer.pad_token_id is not None else
+            self.tokenizer.eos_token_id,
+        )
         if stop_word is not None:
             self.stop_criteria.append(
                 StopWordStoppingCriteria(self.tokenizer, stop_word))
@@ -55,6 +67,7 @@ class EvaluateChatHook(Hook):
             generation_output = model.generate(
                 input_ids=input_ids,
                 max_new_tokens=max_new_tokens,
+                generation_config=self.gen_config,
                 stopping_criteria=self.stop_criteria)
             runner.logger.info(
                 f'Sample output:\n'

@@ -45,6 +45,10 @@ PROMPT_TEMPLATE = ConfigDict(
             'ensure that your responses are socially unbiased and positive in '
             'nature. \n<</SYS>>\n\n{input} [/INST]'),
         INSTRUCTION='[INST] {input} [/INST]'),
+    code_llama_chat=dict(
+        INSTRUCTION_START='[INST] {input} [/INST]',
+        INSTRUCTION='[INST] {input} [/INST]',
+    ),
     internlm_chat=dict(
         INSTRUCTION_START='<|User|>:{input}<eoh>\n<|Bot|>:',
         INSTRUCTION='<|User|>:{input}<eoh>\n<|Bot|>:'),
