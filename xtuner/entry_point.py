@@ -10,7 +10,7 @@ from mmengine.logging import print_log
 import xtuner
 from xtuner.tools import chat, copy_cfg, list_cfg, test, train
 from xtuner.tools.data_preprocess import arxiv as arxiv_preprocess
-from xtuner.tools.model_converters import merge, pth2hf, split
+from xtuner.tools.model_converters import merge, pth_to_hf, split
 
 # Define valid modes
 MODES = ('list-cfg', 'copy-cfg', 'train', 'test', 'chat', 'convert',
@@ -39,7 +39,7 @@ CLI_HELP_MSG = \
         4. Chat with LLMs with HuggingFace's model and adapter:
             xtuner chat $NAME_OR_PATH_TO_LLM --adapter $NAME_OR_PATH_TO_ADAPTER --prompt-template $PROMPT_TEMPLATE
         5-1. Convert the pth model to HuggingFace's model:
-            xtuner convert pth2hf $CONFIG $PATH_TO_PTH_MODEL $SAVE_PATH_TO_HF_MODEL
+            xtuner convert pth_to_hf $CONFIG $PATH_TO_PTH_MODEL $SAVE_PATH_TO_HF_MODEL
         5-2. Merge the HuggingFace's adapter to the pretrained LLM:
             xtuner convert merge $NAME_OR_PATH_TO_LLM $NAME_OR_PATH_TO_ADAPTER $SAVE_PATH
         5-3. Split HuggingFace's LLM to the smallest sharded one:
@@ -69,7 +69,7 @@ CONVERT_HELP_MSG = \
     Some usages for convert: (See more by using -h for specific command!)
 
         1. Convert the pth model to HuggingFace's model:
-            xtuner convert pth2hf $CONFIG $PATH_TO_PTH_MODEL $SAVE_PATH_TO_HF_MODEL
+            xtuner convert pth_to_hf $CONFIG $PATH_TO_PTH_MODEL $SAVE_PATH_TO_HF_MODEL
         2. Merge the HuggingFace's adapter to the pretrained LLM:
             xtuner convert merge $NAME_OR_PATH_TO_LLM $NAME_OR_PATH_TO_ADAPTER $SAVE_PATH
         3. Split HuggingFace's LLM to the smallest sharded one:
@@ -116,7 +116,7 @@ modes = {
     'test': test.__file__,
     'chat': chat.__file__,
     'convert': {
-        'pth2hf': pth2hf.__file__,
+        'pth_to_hf': pth_to_hf.__file__,
         'merge': merge.__file__,
         'split': split.__file__,
         '--help': lambda: print_log(CONVERT_HELP_MSG, 'current'),
