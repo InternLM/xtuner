@@ -32,7 +32,7 @@ XTuner is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](
 
   <table>
   <tr>
-    <th colspan="3" align="center">Examples of Plugins-based Chat 🔥🔥🔥</th>
+    <th colspan="3" align="center">Examples of Plugin-based Chat 🔥🔥🔥</th>
   </tr>
   <tr>
   <td>
@@ -220,7 +220,7 @@ For more examples, please see [chat.md](./docs/en/user_guides/chat.md).
       --seed 0
   ```
 
-  🎯 We are woking closely with [LMDeploy](https://github.com/InternLM/lmdeploy), to implement the deployment of **plugins-based chat**!
+  🎯 We are woking closely with [LMDeploy](https://github.com/InternLM/lmdeploy), to implement the deployment of **plugin-based chat**!
 
 ### Evaluation
 
