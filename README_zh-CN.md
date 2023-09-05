@@ -26,9 +26,28 @@ XTuner 是一个轻量级微调大语言模型的工具库，由 [MMRazor](https
 
 ## 🌟 示例
 
-- QLoRA 微调 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1QAEZVBfQ7LZURkMUtaq0b-5nEQII9G9Z?usp=sharing)
-- 基于插件的对话 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/144OuTVyT_GvFyDMtlSlTzcxYIfnRsklq?usp=sharing)
 - XTuner APIs所提供的开箱即用的模型与数据集 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1eBI9yiOkX-t7P-0-t9vS8y1x5KmWrkoU?usp=sharing)
+
+- QLoRA 微调 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1QAEZVBfQ7LZURkMUtaq0b-5nEQII9G9Z?usp=sharing)
+
+- 基于插件的对话 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/144OuTVyT_GvFyDMtlSlTzcxYIfnRsklq?usp=sharing)
+
+  <table>
+  <tr>
+    <th colspan="3" align="center">基于插件的对话 🔥🔥🔥</th>
+  </tr>
+  <tr>
+  <td>
+  <a><img src="https://github.com/InternLM/lmdeploy/assets/36994684/7c429d98-7630-4539-8aff-c89094826f8c"></a>
+  </td>
+  <td>
+  <a><img src="https://github.com/InternLM/lmdeploy/assets/36994684/05d02906-5a82-45bc-b4e3-2cc32d473b2c"></a>
+  </td>
+  <td>
+  <a><img src="https://github.com/InternLM/lmdeploy/assets/36994684/80395303-997a-47f2-b7d2-d585034df683"></a>
+  </td>
+  </tr>
+  </table>
 
 ## 🔥 支持列表
 
@@ -123,35 +142,6 @@ XTuner 是一个轻量级微调大语言模型的工具库，由 [MMRazor](https
   pip install -e '.[all]'
   ```
 
-### 对话 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/144OuTVyT_GvFyDMtlSlTzcxYIfnRsklq?usp=sharing)
-
-<table>
-<tr>
-  <th colspan="3" align="center">基于插件的对话 🔥🔥🔥</th>
-</tr>
-<tr>
-<td>
-<a><img src="https://github.com/InternLM/lmdeploy/assets/36994684/7c429d98-7630-4539-8aff-c89094826f8c"></a>
-</td>
-<td>
-<a><img src="https://github.com/InternLM/lmdeploy/assets/36994684/05d02906-5a82-45bc-b4e3-2cc32d473b2c"></a>
-</td>
-<td>
-<a><img src="https://github.com/InternLM/lmdeploy/assets/36994684/80395303-997a-47f2-b7d2-d585034df683"></a>
-</td>
-</tr>
-</table>
-
-XTuner 提供与大语言模型对话的工具。
-
-- 例如，与基于插件微调获得的 Llama2-7B-Plugins 对话：
-
-  ```shell
-  xtuner chat hf meta-llama/Llama-2-7b-hf --adapter xtuner/Llama-2-7b-qlora-moss-003-sft --bot-name Llama2 --prompt-template moss_sft --with-plugins calculate solve search --command-stop-word "<eoc>" --answer-stop-word "<eom>" --no-streamer
-  ```
-
-更多示例，请查阅[文档](./docs/zh_cn/user_guides/chat.md)。
-
 ### 微调 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1QAEZVBfQ7LZURkMUtaq0b-5nEQII9G9Z?usp=sharing)
 
 XTuner 支持微调大语言模型。数据集预处理指南请查阅[文档](./docs/zh_cn/user_guides/dataset_prepare.md)。
@@ -165,10 +155,16 @@ XTuner 支持微调大语言模型。数据集预处理指南请查阅[文档](.
   或者，如果所提供的配置文件不能满足使用需求，请导出所提供的配置文件并进行相应更改：
 
   ```shell
-  xtuner copy-cfg ${CONFIG_NAME} ${SAVE_DIR}
+  xtuner copy-cfg ${CONFIG_NAME} ${SAVE_PATH}
   ```
 
-- **步骤 1**，开始微调。例如，我们可以利用 QLoRA 算法在 oasst1 数据集上微调 InternLM-7B：
+- **步骤 1**，开始微调。
+
+  ```shell
+  xtuner train ${CONFIG_NAME_OR_PATH}
+  ```
+
+  例如，我们可以利用 QLoRA 算法在 oasst1 数据集上微调 InternLM-7B：
 
   ```shell
   # 单卡
@@ -177,26 +173,39 @@ XTuner 支持微调大语言模型。数据集预处理指南请查阅[文档](.
   NPROC_PER_NODE=${GPU_NUM} xtuner train internlm_7b_qlora_oasst1_e3
   ```
 
-  更多示例，请查阅[文档](./docs/zh_cn/user_guides/finetune.md).
+  更多示例，请查阅[文档](./docs/zh_cn/user_guides/finetune.md)。
+
+- **步骤 2**，将保存的 PTH 模型（如果使用的DeepSpeed，则将会是一个文件夹）转换为 HuggingFace 模型：
+
+  ```shell
+  xtuner convert pth_to_hf ${CONFIG_NAME_OR_PATH} ${PTH} ${SAVE_PATH}
+  ```
+
+### 对话 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/144OuTVyT_GvFyDMtlSlTzcxYIfnRsklq?usp=sharing)
+
+XTuner 提供与大语言模型对话的工具。
+
+```shell
+xtuner chat ${NAME_OR_PATH_TO_LLM} --adapter {NAME_OR_PATH_TO_ADAPTER} [optional arguments]
+```
+
+例如，与 Llama2-7b + MOSS-003-SFT adapter 对话：
+
+```shell
+xtuner chat meta-llama/Llama-2-7b-hf --adapter xtuner/Llama-2-7b-qlora-moss-003-sft --bot-name Llama2 --prompt-template moss_sft --with-plugins calculate solve search --command-stop-word "<eoc>" --answer-stop-word "<eom>" --no-streamer
+```
+
+更多示例，请查阅[文档](./docs/zh_cn/user_guides/chat.md)。
 
 ### 部署
 
-- **步骤 0**，将 pth adapter 转换为 HuggingFace adapter：
-
-  ```shell
-  xtuner convert adapter_pth2hf \
-      ${CONFIG} \
-      ${PATH_TO_PTH_ADAPTER} \
-      ${SAVE_PATH_TO_HF_ADAPTER}
-  ```
-
-  或者，直接将 pth adapter 合并到大语言模型：
+- **步骤 0**，将 HuggingFace adapter 合并到大语言模型：
 
   ```shell
   xtuner convert merge_adapter \
-      ${CONFIG} \
-      ${PATH_TO_PTH_ADAPTER} \
-      ${SAVE_PATH_TO_MERGED_LLM} \
+      ${NAME_OR_PATH_TO_LLM} \
+      ${NAME_OR_PATH_TO_ADAPTER} \
+      ${SAVE_PATH} \
       --max-shard-size 2GB
   ```
 
@@ -210,6 +219,8 @@ XTuner 支持微调大语言模型。数据集预处理指南请查阅[文档](.
       --top_p 0.95 \
       --seed 0
   ```
+
+  🔥 追求速度更快、显存占用更低的推理？欢迎体验 [LMDeploy](https://github.com/InternLM/lmdeploy) 提供的 4-bit 量化！使用指南请见[文档](https://github.com/InternLM/lmdeploy/tree/main#quantization)。
 
   🎯 我们正在与 [LMDeploy](https://github.com/InternLM/lmdeploy) 紧密合作，以实现基于插件对话的部署！
 
