@@ -13,7 +13,12 @@ def parse_args():
     parser.add_argument('adapter_name_or_path', help='adapter name or path')
     parser.add_argument(
         'save_dir', help='the directory to save the merged model')
-    parser.add_argument('--max-shard-size', type=str, default='2GB')
+    parser.add_argument(
+        '--max-shard-size',
+        type=str,
+        default='2GB',
+        help='Only applicable for LLM. The maximum size for '
+        'each sharded checkpoint.')
     args = parser.parse_args()
     return args
 
