@@ -221,6 +221,8 @@ For more examples, please see [chat.md](./docs/en/user_guides/chat.md).
       --seed 0
   ```
 
+  🔥 Seeking efficient inference with less GPU memory? Try 4-bit quantization from [LMDeploy](https://github.com/InternLM/lmdeploy)! For more details, see [here](https://github.com/InternLM/lmdeploy/tree/main#quantization).
+
   🎯 We are woking closely with [LMDeploy](https://github.com/InternLM/lmdeploy), to implement the deployment of **plugin-based chat**!
 
 ### Evaluation
