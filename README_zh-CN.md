@@ -155,7 +155,7 @@ XTuner 支持微调大语言模型。数据集预处理指南请查阅[文档](.
   或者，如果所提供的配置文件不能满足使用需求，请导出所提供的配置文件并进行相应更改：
 
   ```shell
-  xtuner copy-cfg ${CONFIG_NAME} ${SAVE_DIR}
+  xtuner copy-cfg ${CONFIG_NAME} ${SAVE_PATH}
   ```
 
 - **步骤 1**，开始微调。
