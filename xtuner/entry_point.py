@@ -36,14 +36,14 @@ CLI_HELP_MSG = \
             xtuner train $CONFIG
         3-2. Fine-tune LLMs by multiple GPUs:
             NPROC_PER_NODE=$NGPUS NNODES=$NNODES NODE_RANK=$NODE_RANK PORT=$PORT ADDR=$ADDR xtuner dist_train $CONFIG $GPUS
-        4. Chat with LLMs with HuggingFace's model and adapter:
-            xtuner chat $NAME_OR_PATH_TO_LLM --adapter $NAME_OR_PATH_TO_ADAPTER --prompt-template $PROMPT_TEMPLATE
-        5-1. Convert the pth model to HuggingFace's model:
+        4-1. Convert the pth model to HuggingFace's model:
             xtuner convert pth_to_hf $CONFIG $PATH_TO_PTH_MODEL $SAVE_PATH_TO_HF_MODEL
-        5-2. Merge the HuggingFace's adapter to the pretrained LLM:
+        4-2. Merge the HuggingFace's adapter to the pretrained LLM:
             xtuner convert merge $NAME_OR_PATH_TO_LLM $NAME_OR_PATH_TO_ADAPTER $SAVE_PATH
-        5-3. Split HuggingFace's LLM to the smallest sharded one:
+        4-3. Split HuggingFace's LLM to the smallest sharded one:
             xtuner convert split $NAME_OR_PATH_TO_LLM $SAVE_PATH
+        5. Chat with LLMs with HuggingFace's model and adapter:
+            xtuner chat $NAME_OR_PATH_TO_LLM --adapter $NAME_OR_PATH_TO_ADAPTER --prompt-template $PROMPT_TEMPLATE
         6-1. Preprocess arxiv dataset:
             xtuner preprocess arxiv $SRC_FILE $DST_FILE --start-date $START_DATE --categories $CATEGORIES
 
