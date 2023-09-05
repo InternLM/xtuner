@@ -178,7 +178,7 @@ XTuner 支持微调大语言模型。数据集预处理指南请查阅[文档](.
 - **步骤 2**，将保存的 PTH 模型（如果使用的DeepSpeed，则将会是一个文件夹）转换为 HuggingFace 模型：
 
   ```shell
-  xtuner convert pth_to_hf ${CONFIG} ${PTH} ${SAVE_PATH}
+  xtuner convert pth_to_hf ${CONFIG_NAME_OR_PATH} ${PTH} ${SAVE_PATH}
   ```
 
 ### 对话 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/144OuTVyT_GvFyDMtlSlTzcxYIfnRsklq?usp=sharing)
