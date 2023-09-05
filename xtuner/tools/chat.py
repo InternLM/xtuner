@@ -26,7 +26,6 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Chat with a HF model')
     parser.add_argument(
         'model_name_or_path', help='Hugging Face model name or path')
-    parser.add_argument('--pretrained', default=None, help='pretrained path')
     parser.add_argument('--adapter', default=None, help='adapter name or path')
     parser.add_argument(
         '--prompt-template',
@@ -134,18 +133,12 @@ def main():
             bnb_4bit_quant_type='nf4')
     elif args.bits == 8:
         load_in_8bit = True
-    assert args.pretrained is None or args.bits is None
     model = AutoModelForCausalLM.from_pretrained(
         args.model_name_or_path,
         quantization_config=quantization_config,
         load_in_8bit=load_in_8bit,
         device_map='auto',
         trust_remote_code=True)
-    if args.pretrained is not None:
-        pretrained_ckpt = torch.load(args.pretrained, map_location='cpu')
-        pretrained_ckpt = remove_prefix(pretrained_ckpt, 'llm.')
-        model.load_state_dict(pretrained_ckpt)
-        print(f'Load pretrained weight from {args.pretrained}')
     tokenizer = AutoTokenizer.from_pretrained(
         args.model_name_or_path, trust_remote_code=True)
     if args.adapter is not None:

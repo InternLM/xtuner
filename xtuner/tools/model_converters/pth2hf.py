@@ -5,7 +5,6 @@ import shutil
 
 import torch
 from mmengine.config import Config, DictAction
-from mmengine.utils import mkdir_or_exist
 
 from xtuner.configs import cfgs_name_path
 from xtuner.registry import BUILDER
@@ -13,18 +12,14 @@ from xtuner.registry import BUILDER
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description='Convert the pth adapter to HuggingFace adapter')
+        description='Convert the pth model to HuggingFace model')
     parser.add_argument(
         'config',
         help='config file name or path. Note: Please use the original '
         'configs, instead of the automatically saved log configs.')
-    parser.add_argument('adapter_checkpoint', help='adapter checkpoint file')
+    parser.add_argument('pth_model', help='pth model file')
     parser.add_argument(
-        'save_dir', help='the directory to save the checkpoint')
-    parser.add_argument(
-        '--is-deepspeed',
-        action='store_true',
-        help='whether the adapter is saved from deepspeed')
+        'save_dir', help='the directory to save HuggingFace model')
     parser.add_argument(
         '--cfg-options',
         nargs='+',
@@ -37,6 +32,29 @@ def parse_args():
         'is allowed.')
     args = parser.parse_args()
     return args
+
+
+def guess_load_checkpoint(pth_model):
+    if os.path.isfile(pth_model):
+        state_dict = torch.load(pth_model, map_location='cpu')
+        if 'state_dict' in state_dict:
+            state_dict = state_dict['state_dict']
+    elif os.path.isdir(pth_model):
+        try:
+            from deepspeed.utils.zero_to_fp32 import \
+                get_fp32_state_dict_from_zero_checkpoint
+        except ImportError:
+            raise ImportError(
+                'The provided PTH model appears to be a DeepSpeed checkpoint. '
+                'However, DeepSpeed library is not detected in current '
+                'environment. This suggests that DeepSpeed may not be '
+                'installed or is incorrectly configured. Please verify your '
+                'setup.')
+        state_dict = get_fp32_state_dict_from_zero_checkpoint(
+            os.path.dirname(pth_model), os.path.basename(pth_model))
+    else:
+        raise FileNotFoundError(f'Cannot find {pth_model}')
+    return state_dict
 
 
 def main():
@@ -56,17 +74,19 @@ def main():
 
     model = BUILDER.build(cfg.model)
 
-    state_dict = torch.load(args.adapter_checkpoint, map_location='cpu')
-    if not args.is_deepspeed:
-        state_dict = state_dict['state_dict']
+    state_dict = guess_load_checkpoint(args.pth_model)
     model.load_state_dict(state_dict, strict=False)
-    print(f'Load adapter from {args.adapter_checkpoint}')
+    print(f'Load PTH model from {args.pth_model}')
 
-    mkdir_or_exist(args.save_dir)
+    print(f'Saving HuggingFace model to {args.save_dir}')
     model.llm.save_pretrained(args.save_dir)
+    if 'PeftModel' not in model.llm.__class__.__name__:
+        print(f'Saving HuggingFace tokenizer to {args.save_dir}')
+        tokenizer = BUILDER.build(cfg.tokenizer)
+        tokenizer.save_pretrained(args.save_dir)
     shutil.copyfile(args.config, os.path.join(args.save_dir,
                                               'xtuner_config.py'))
-    print(f'Save to {args.save_dir}')
+    print('All done!')
 
 
 if __name__ == '__main__':
