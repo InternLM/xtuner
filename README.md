@@ -155,7 +155,7 @@ XTuner supports the efficient fine-tune (*e.g.*, QLoRA) for LLMs. Dataset prepar
   Or, if the provided configs cannot meet the requirements, please copy the provided config to the specified directory and make specific modifications by
 
   ```shell
-  xtuner copy-cfg ${CONFIG_NAME} ${SAVE_DIR}
+  xtuner copy-cfg ${CONFIG_NAME} ${SAVE_PATH}
   ```
 
 - **Step 1**, start fine-tuning.
@@ -179,7 +179,7 @@ XTuner supports the efficient fine-tune (*e.g.*, QLoRA) for LLMs. Dataset prepar
 - **Step 2**, convert the saved PTH model (if using DeepSpeed, it will be a directory) to HuggingFace model, by
 
   ```shell
-  xtuner convert pth_to_hf ${CONFIG} ${PATH_TO_PTH_MODEL} ${SAVE_PATH_TO_HF_MODEL}
+  xtuner convert pth_to_hf ${CONFIG} ${PTH} ${SAVE_PATH}
   ```
 
 ### Chat [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/144OuTVyT_GvFyDMtlSlTzcxYIfnRsklq?usp=sharing)
@@ -206,7 +206,7 @@ For more examples, please see [chat.md](./docs/en/user_guides/chat.md).
   xtuner convert merge_adapter \
       ${NAME_OR_PATH_TO_LLM} \
       ${NAME_OR_PATH_TO_ADAPTER} \
-      ${SAVE_PATH_TO_MERGED_LLM} \
+      ${SAVE_PATH} \
       --max-shard-size 2GB
   ```
 
