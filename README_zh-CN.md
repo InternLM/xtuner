@@ -175,7 +175,7 @@ XTuner 支持微调大语言模型。数据集预处理指南请查阅[文档](.
 
   更多示例，请查阅[文档](./docs/zh_cn/user_guides/finetune.md)。
 
-- **步骤 2**，将保存的 PTH 模型转换为 HuggingFace 模型：
+- **步骤 2**，将保存的 PTH 模型（如果使用的DeepSpeed，则将会是一个文件夹）转换为 HuggingFace 模型：
 
   ```shell
   xtuner convert pth_to_hf ${CONFIG} ${PATH_TO_PTH_MODEL} ${SAVE_PATH_TO_HF_MODEL}
