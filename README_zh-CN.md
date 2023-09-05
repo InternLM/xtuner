@@ -27,9 +27,11 @@ XTuner 是一个轻量级微调大语言模型的工具库，由 [MMRazor](https
 ## 🌟 示例
 
 - XTuner APIs所提供的开箱即用的模型与数据集 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1eBI9yiOkX-t7P-0-t9vS8y1x5KmWrkoU?usp=sharing)
+
 - QLoRA 微调 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1QAEZVBfQ7LZURkMUtaq0b-5nEQII9G9Z?usp=sharing)
+
 - 基于插件的对话 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/144OuTVyT_GvFyDMtlSlTzcxYIfnRsklq?usp=sharing)
-    
+
   <table>
   <tr>
     <th colspan="3" align="center">基于插件的对话 🔥🔥🔥</th>
@@ -46,7 +48,6 @@ XTuner 是一个轻量级微调大语言模型的工具库，由 [MMRazor](https
   </td>
   </tr>
   </table>
-
 
 ## 🔥 支持列表
 
@@ -162,7 +163,7 @@ XTuner 支持微调大语言模型。数据集预处理指南请查阅[文档](.
   ```shell
   xtuner train ${CONFIG_NAME_OR_PATH}
   ```
-  
+
   例如，我们可以利用 QLoRA 算法在 oasst1 数据集上微调 InternLM-7B：
 
   ```shell

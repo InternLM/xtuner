@@ -27,7 +27,9 @@ XTuner is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](
 ## 🌟 Demos
 
 - Ready-to-use models and datasets from XTuner API [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1eBI9yiOkX-t7P-0-t9vS8y1x5KmWrkoU?usp=sharing)
+
 - QLoRA Fine-tune [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1QAEZVBfQ7LZURkMUtaq0b-5nEQII9G9Z?usp=sharing)
+
 - Plugin-based Chat [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/144OuTVyT_GvFyDMtlSlTzcxYIfnRsklq?usp=sharing)
 
   <table>
@@ -46,7 +48,6 @@ XTuner is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](
   </td>
   </tr>
   </table>
-
 
 ## 🔥 Supports
 
