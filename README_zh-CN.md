@@ -219,6 +219,7 @@ xtuner chat meta-llama/Llama-2-7b-hf --adapter xtuner/Llama-2-7b-qlora-moss-003-
       --top_p 0.95 \
       --seed 0
   ```
+  🔥 追求速度更快、显存占用更低的推理？欢迎体验 [LMDeploy](https://github.com/InternLM/lmdeploy) 提供的 4-bit 量化！使用指南请见[文档](https://github.com/InternLM/lmdeploy/tree/main#quantization)。
 
   🎯 我们正在与 [LMDeploy](https://github.com/InternLM/lmdeploy) 紧密合作，以实现基于插件对话的部署！
 
