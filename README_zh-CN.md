@@ -14,6 +14,7 @@
 
 ## 🎉 更新
 
+- **\[2023.09.06\]** 支持 [Baichuan2](https://huggingface.co/baichuan-inc) 系列模型训练！快速尝试：`xtuner train baichuan2_7b_base_qlora_oasst1_e3`！
 - **\[2023.08.30\]** XTuner 正式发布！众多微调模型已上传至 [HuggingFace](https://huggingface.co/xtuner)！
 
 ## 📖 介绍
