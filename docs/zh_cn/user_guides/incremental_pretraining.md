@@ -95,7 +95,9 @@ xtuner copy-cfg internlm_7b_qlora_oasst1_e3 .
 from xtuner.dataset import process_hf_dataset
 from datasets import load_dataset
 - from xtuner.dataset.map_fns import oasst1_map_fn, template_map_fn_factory
-+ from map_fn import oasst1_incremental_map_fn
++ from mmengine.config import read_base
++ with read_base():
++     from .map_fn import oasst1_incremental_map_fn
 ...
 #######################################################################
 #                          PART 1  Settings                           #
@@ -126,6 +128,21 @@ train_dataloader = dict(
     dataset=train_dataset,
     sampler=dict(type=DefaultSampler, shuffle=True),
     collate_fn=dict(type=default_collate_fn))
+...
+#######################################################################
+#                           PART 5  Runtime                           #
+#######################################################################
+# Log the dialogue periodically during the training process, optional
+custom_hooks = [
+    dict(type=DatasetInfoHook, tokenizer=tokenizer),
+    dict(
+        type=EvaluateChatHook,
+        tokenizer=tokenizer,
+        every_n_iters=evaluation_freq,
+        evaluation_inputs=evaluation_inputs,
+-       instruction=prompt_template.INSTRUCTION_START)
++   )
+]
 ...
 ```
 
@@ -204,7 +221,7 @@ train_dataset = dict(
     tokenizer=tokenizer,
     max_length=max_length,
 -   dataset_map_fn=oasst1_map_fn,
-+   dataset_map_fn=oasst1_incremental_map_fn,
++   dataset_map_fn=None,
 -   template_map_fn=dict(
 -       type=template_map_fn_factory, template=prompt_template),
 +   template_map_fn=None,
@@ -218,5 +235,20 @@ train_dataloader = dict(
     dataset=train_dataset,
     sampler=dict(type=DefaultSampler, shuffle=True),
     collate_fn=dict(type=default_collate_fn))
+...
+#######################################################################
+#                           PART 5  Runtime                           #
+#######################################################################
+# Log the dialogue periodically during the training process, optional
+custom_hooks = [
+    dict(type=DatasetInfoHook, tokenizer=tokenizer),
+    dict(
+        type=EvaluateChatHook,
+        tokenizer=tokenizer,
+        every_n_iters=evaluation_freq,
+        evaluation_inputs=evaluation_inputs,
+-       instruction=prompt_template.INSTRUCTION_START)
++   )
+]
 ...
 ```

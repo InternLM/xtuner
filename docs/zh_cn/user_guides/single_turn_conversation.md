@@ -129,7 +129,9 @@ from xtuner.dataset import process_hf_dataset
 from datasets import load_dataset
 - from xtuner.dataset.map_fns import alpaca_map_fn, template_map_fn_factory
 + from xtuner.dataset.map_fns import template_map_fn_factory
-+ from .map_fn import alpaca_map_fn
++ from mmengine.config import read_base
++ with read_base():
++     from .map_fn import alpaca_map_fn
 ...
 #######################################################################
 #                          PART 1  Settings                           #
