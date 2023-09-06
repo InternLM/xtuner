@@ -72,20 +72,12 @@ XTuner is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](
 <td align="left" valign="top">
 <ul>
   <li><a href="https://huggingface.co/internlm/internlm-7b">InternLM</a></li>
-  <li><a href="https://huggingface.co/internlm/internlm-chat-7b">InternLM-Chat</a></li>
   <li><a href="https://huggingface.co/meta-llama">Llama</a></li>
   <li><a href="https://huggingface.co/meta-llama">Llama2</a></li>
-  <li><a href="https://huggingface.co/meta-llama">Llama2-Chat</a></li>
   <li><a href="https://huggingface.co/THUDM/chatglm2-6b">ChatGLM2</a></li>
   <li><a href="https://huggingface.co/Qwen/Qwen-7B">Qwen</a></li>
-  <li><a href="https://huggingface.co/Qwen/Qwen-7B-Chat">Qwen-Chat</a></li>
-  <li><a href="https://huggingface.co/baichuan-inc/Baichuan-7B">Baichuan-7B</a></li>
-  <li><a href="https://huggingface.co/baichuan-inc/Baichuan-13B-Base">Baichuan-13B-Base</a></li>
-  <li><a href="https://huggingface.co/baichuan-inc/Baichuan-13B-Chat">Baichuan-13B-Chat</a></li>
-  <li><a href="https://huggingface.co/baichuan-inc/Baichuan2-7B-Base">Baichuan2-7B-Base</a></li>
-  <li><a href="https://huggingface.co/baichuan-inc/Baichuan2-7B-Chat">Baichuan2-7B-Chat</a></li>
-  <li><a href="https://huggingface.co/baichuan-inc/Baichuan2-13B-Base">Baichuan2-13B-Base</a></li>
-  <li><a href="https://huggingface.co/baichuan-inc/Baichuan2-13B-Chat">Baichuan2-13B-Chat</a></li>
+  <li><a href="https://huggingface.co/baichuan-inc/Baichuan-7B">Baichuan</a></li>
+  <li><a href="https://huggingface.co/baichuan-inc/Baichuan2-7B-Base">Baichuan2</a></li>
   <li>...</li>
 </ul>
 </td>
