@@ -14,6 +14,7 @@ English | [简体中文](README_zh-CN.md)
 
 ## 🎉 News
 
+- **\[2023.09.06\]** Support the training of [Baichuan2](https://huggingface.co/baichuan-inc) models! Try it out by `xtuner train baichuan2_7b_base_qlora_oasst1_e3`!
 - **\[2023.08.30\]** XTuner is released, with multiple fine-tuned adapters on [HuggingFace](https://huggingface.co/xtuner).
 
 ## 📖 Introduction
