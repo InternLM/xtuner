@@ -191,6 +191,16 @@ train_dataloader = dict(
 ...
 ```
 
+#### Step 6, 打印数据集（可选）
+
+在修改配置文件后，可以打印处理后数据集的第一条数据，以验证数据集是否正确构建。
+
+```bash
+xtuner log-processed-dataset $CONFIG
+```
+
+其中 `$CONFIG` 是 Step 5 修改过的 config 的文件路径。
+
 ## 使用自定义数据集
 
 在使用自定义多轮对话数据集进行指令微调时，我们推荐将数据集构造为 XTuner 定义的[多轮对话数据格式](./dataset_format.md#多轮对话数据集格式)。若自定义数据集格式为 `oasst1` 等其他格式，可参考[使用 HuggingFace Hub 数据集](#使用-huggingface-hub-数据集)一节。
@@ -291,3 +301,13 @@ train_dataloader = dict(
     collate_fn=dict(type=default_collate_fn))
 ...
 ```
+
+#### Step 6, 打印数据集（可选）
+
+在修改配置文件后，可以打印处理后数据集的第一条数据，以验证数据集是否正确构建。
+
+```bash
+xtuner log-processed-dataset $CONFIG
+```
+
+其中 `$CONFIG` 是 Step 5 修改过的 config 的文件路径。

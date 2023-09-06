@@ -146,6 +146,16 @@ custom_hooks = [
 ...
 ```
 
+#### Step 5, 打印数据集（可选）
+
+在修改配置文件后，可以打印处理后数据集的第一条数据，以验证数据集是否正确构建。
+
+```bash
+xtuner log-processed-dataset $CONFIG
+```
+
+其中 `$CONFIG` 是 Step 4 修改过的 config 的文件路径。
+
 ### 使用自定义数据集
 
 在使用自定义数据集进行增量预训练时，我们推荐将数据集构造为 XTuner 定义的[增量预训练数据格式](./dataset_format.md#增量预训练数据集格式)。若自定义数据集格式为 `oasst1` 等其他格式，可参考[使用HuggingFace Hub数据集](#使用huggingface-hub数据集)一节。
@@ -252,3 +262,13 @@ custom_hooks = [
 ]
 ...
 ```
+
+#### Step 5, 打印数据集（可选）
+
+在修改配置文件后，可以打印处理后数据集的第一条数据，以验证数据集是否正确构建。
+
+```bash
+xtuner log-processed-dataset $CONFIG
+```
+
+其中 `$CONFIG` 是 Step 4 修改过的 config 的文件路径。

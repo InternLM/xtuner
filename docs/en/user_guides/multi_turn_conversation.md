@@ -191,6 +191,16 @@ train_dataloader = dict(
 ...
 ```
 
+#### Step 6, Log Processed Dataset (Optional)
+
+After modifying the config file, you can print the first data of the processed dataset to verify whether the dataset has been constructed correctly.
+
+```bash
+xtuner log-processed-dataset $CONFIG
+```
+
+`$CONFIG` represents the file path of the modified configuration file in Step 5.
+
 ## Using Custom Datasets
 
 When using a custom multi-turn dialogue dataset for command fine-tuning, we recommend constructing the dataset in the [multi-turn dialogue data format](./dataset_format.md#multi-turn-dialogue-dataset-format) as defined by XTuner. If the custom dataset format is oasst1 or other formats, you can refer to the section on [Using Datasets in HuggingFace Hub](#using-dataset-in-huggingface-hub).
@@ -291,3 +301,13 @@ train_dataloader = dict(
     collate_fn=dict(type=default_collate_fn))
 ...
 ```
+
+#### Step 6, Log Processed Dataset (Optional)
+
+After modifying the config file, you can print the first data of the processed dataset to verify whether the dataset has been constructed correctly.
+
+```bash
+xtuner log-processed-dataset $CONFIG
+```
+
+`$CONFIG` represents the file path of the modified configuration file in Step 5.

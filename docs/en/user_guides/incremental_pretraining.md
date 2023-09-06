@@ -146,6 +146,16 @@ custom_hooks = [
 ...
 ```
 
+#### Step 5, Log Processed Dataset (Optional)
+
+After modifying the config file, you can print the first data of the processed dataset to verify whether the dataset has been constructed correctly.
+
+```bash
+xtuner log-processed-dataset $CONFIG
+```
+
+`$CONFIG` represents the file path of the modified configuration file in Step 4.
+
 ### Using Custom Datasets
 
 When using custom datasets for incremental pre-training, we recommend constructing the dataset according to the [incremental pre-training data format](./dataset_format.md#incremental-pre-training-dataset-format) defined by XTuner. If the custom dataset is in other formats such as oasst1, refer to the section on [Using Dataset in HuggingFace Hub](#using-dataset-in-huggingface-hub).
@@ -252,3 +262,13 @@ custom_hooks = [
 ]
 ...
 ```
+
+#### Step 5, Log Processed Dataset (Optional)
+
+After modifying the config file, you can print the first data of the processed dataset to verify whether the dataset has been constructed correctly.
+
+```bash
+xtuner log-processed-dataset $CONFIG
+```
+
+`$CONFIG` represents the file path of the modified configuration file in Step 4.
