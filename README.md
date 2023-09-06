@@ -83,6 +83,9 @@ XTuner is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](
   <li><a href="https://huggingface.co/baichuan-inc/Baichuan-13B-Base">Baichuan-13B-Base</a></li>
   <li><a href="https://huggingface.co/baichuan-inc/Baichuan-13B-Chat">Baichuan-13B-Chat</a></li>
   <li><a href="https://huggingface.co/baichuan-inc/Baichuan2-7B-Base">Baichuan2-7B-Base</a></li>
+  <li><a href="https://huggingface.co/baichuan-inc/Baichuan2-7B-Chat">Baichuan2-7B-Chat</a></li>
+  <li><a href="https://huggingface.co/baichuan-inc/Baichuan2-13B-Base">Baichuan2-13B-Base</a></li>
+  <li><a href="https://huggingface.co/baichuan-inc/Baichuan2-13B-Chat">Baichuan2-13B-Chat</a></li>
   <li>...</li>
 </ul>
 </td>
