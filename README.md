@@ -21,7 +21,7 @@ English | [简体中文](README_zh-CN.md)
 XTuner is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](https://github.com/open-mmlab/mmrazor) and [MMDeploy](https://github.com/open-mmlab/mmdeploy) teams.
 
 - **Efficiency**: Support LLM fine-tuning on consumer-grade GPUs. The minimum GPU memory required for 7B LLM fine-tuning is only **8GB**, indicating that users can use nearly any GPU (even the free resource, *e.g.*, Colab) to fine-tune custom LLMs.
-- **Versatile**: Support various **LLMs** ([InternLM](https://github.com/InternLM/InternLM), [Llama2](https://github.com/facebookresearch/llama), [ChatGLM2](https://huggingface.co/THUDM/chatglm2-6b), [Qwen](https://github.com/QwenLM/Qwen-7B), [Baichuan](https://github.com/baichuan-inc), ...), **datasets** ([MOSS_003_SFT](https://huggingface.co/datasets/fnlp/moss-003-sft-data), [Alpaca](https://huggingface.co/datasets/tatsu-lab/alpaca), [WizardLM](https://huggingface.co/datasets/WizardLM/WizardLM_evol_instruct_V2_196k), [oasst1](https://huggingface.co/datasets/timdettmers/openassistant-guanaco), [Open-Platypus](https://huggingface.co/datasets/garage-bAInd/Open-Platypus), [Code Alpaca](https://huggingface.co/datasets/HuggingFaceH4/CodeAlpaca_20K), [Colorist](https://huggingface.co/datasets/burkelibbey/colors), ...) and **algorithms** ([QLoRA](http://arxiv.org/abs/2305.14314), [LoRA](http://arxiv.org/abs/2106.09685)), allowing users to choose the most suitable solution for their requirements.
+- **Versatile**: Support various **LLMs** ([InternLM](https://github.com/InternLM/InternLM), [Llama2](https://github.com/facebookresearch/llama), [ChatGLM2](https://huggingface.co/THUDM/chatglm2-6b), [Qwen](https://github.com/QwenLM/Qwen-7B), [Baichuan2](https://github.com/baichuan-inc), ...), **datasets** ([MOSS_003_SFT](https://huggingface.co/datasets/fnlp/moss-003-sft-data), [Alpaca](https://huggingface.co/datasets/tatsu-lab/alpaca), [WizardLM](https://huggingface.co/datasets/WizardLM/WizardLM_evol_instruct_V2_196k), [oasst1](https://huggingface.co/datasets/timdettmers/openassistant-guanaco), [Open-Platypus](https://huggingface.co/datasets/garage-bAInd/Open-Platypus), [Code Alpaca](https://huggingface.co/datasets/HuggingFaceH4/CodeAlpaca_20K), [Colorist](https://huggingface.co/datasets/burkelibbey/colors), ...) and **algorithms** ([QLoRA](http://arxiv.org/abs/2305.14314), [LoRA](http://arxiv.org/abs/2106.09685)), allowing users to choose the most suitable solution for their requirements.
 - **Compatibility**: Compatible with [DeepSpeed](https://github.com/microsoft/DeepSpeed) 🚀 and [HuggingFace](https://huggingface.co) 🤗 training pipeline, enabling effortless integration and utilization.
 
 ## 🌟 Demos
@@ -70,17 +70,18 @@ XTuner is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](
 <tr valign="top">
 <td align="left" valign="top">
 <ul>
-  <li><a href="https://github.com/InternLM/InternLM">InternLM</a></li>
-  <li><a href="https://github.com/InternLM/InternLM">InternLM-Chat</a></li>
-  <li><a href="https://github.com/facebookresearch/llama">Llama</a></li>
-  <li><a href="https://github.com/facebookresearch/llama">Llama2</a></li>
-  <li><a href="https://github.com/facebookresearch/llama">Llama2-Chat</a></li>
+  <li><a href="https://huggingface.co/internlm/internlm-7b">InternLM</a></li>
+  <li><a href="https://huggingface.co/internlm/internlm-chat-7b">InternLM-Chat</a></li>
+  <li><a href="https://huggingface.co/meta-llama">Llama</a></li>
+  <li><a href="https://huggingface.co/meta-llama">Llama2</a></li>
+  <li><a href="https://huggingface.co/meta-llama">Llama2-Chat</a></li>
   <li><a href="https://huggingface.co/THUDM/chatglm2-6b">ChatGLM2</a></li>
-  <li><a href="https://github.com/QwenLM/Qwen-7B">Qwen</a></li>
-  <li><a href="https://github.com/QwenLM/Qwen-7B">Qwen-Chat</a></li>
-  <li><a href="https://github.com/baichuan-inc/Baichuan-7B">Baichuan-7B</a></li>
-  <li><a href="https://github.com/baichuan-inc/Baichuan-13B">Baichuan-13B-Base</a></li>
-  <li><a href="https://github.com/baichuan-inc/Baichuan-13B">Baichuan-13B-Chat</a></li>
+  <li><a href="https://huggingface.co/Qwen/Qwen-7B">Qwen</a></li>
+  <li><a href="https://huggingface.co/Qwen/Qwen-7B-Chat">Qwen-Chat</a></li>
+  <li><a href="https://huggingface.co/baichuan-inc/Baichuan-7B">Baichuan-7B</a></li>
+  <li><a href="https://huggingface.co/baichuan-inc/Baichuan-13B-Base">Baichuan-13B-Base</a></li>
+  <li><a href="https://huggingface.co/baichuan-inc/Baichuan-13B-Chat">Baichuan-13B-Chat</a></li>
+  <li><a href="https://huggingface.co/baichuan-inc/Baichuan2-7B-Base">Baichuan2-7B-Base</a></li>
   <li>...</li>
 </ul>
 </td>
