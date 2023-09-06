@@ -33,6 +33,13 @@ class SupervisedFinetune(BaseModel):
         self.use_lora = lora is not None
         if self.use_lora:
             self._prepare_for_lora(peft_model, use_gradient_checkpointing)
+            try:
+                # for BaiChuan2, set first_flag to False to disable weight init
+                if self.llm.base_model.model.__class__.__name__.lower(
+                ) == 'BaichuanForCausalLM'.lower():
+                    self.llm.base_model.model.lm_head.first_flag = False
+            except Exception:
+                pass
         elif use_gradient_checkpointing:
             # For backward compatibility
             if hasattr(self.llm, 'enable_input_require_grads'):
