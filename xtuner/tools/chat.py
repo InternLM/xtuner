@@ -144,6 +144,7 @@ def main():
     if args.adapter is not None:
         model = PeftModel.from_pretrained(model, args.adapter)
         print(f'Load adapter from {args.adapter}')
+    model.eval()
 
     Streamer, stop_criteria = get_chat_utils(model)
     if args.no_streamer:
