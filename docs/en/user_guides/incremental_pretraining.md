@@ -151,7 +151,7 @@ custom_hooks = [
 After modifying the config file, you can print the first data of the processed dataset to verify whether the dataset has been constructed correctly.
 
 ```bash
-xtuner log-processed-dataset $CONFIG
+xtuner log-dataset $CONFIG
 ```
 
 `$CONFIG` represents the file path of the modified configuration file in Step 4.
@@ -263,12 +263,12 @@ custom_hooks = [
 ...
 ```
 
-#### Step 5, Log Processed Dataset (Optional)
+#### Step 5, Check custom Dataset (Optional)
 
-After modifying the config file, you can print the first data of the processed dataset to verify whether the dataset has been constructed correctly.
+After modifying the config file, you can execute the 'xtuner/tools/check_custom_dataset.py' script to verify the correct construction of the dataset.
 
 ```bash
-xtuner log-processed-dataset $CONFIG
+xtuner check-custom-dataset $CONFIG
 ```
 
 `$CONFIG` represents the file path of the modified configuration file in Step 4.

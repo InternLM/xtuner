@@ -151,7 +151,7 @@ custom_hooks = [
 在修改配置文件后，可以打印处理后数据集的第一条数据，以验证数据集是否正确构建。
 
 ```bash
-xtuner log-processed-dataset $CONFIG
+xtuner log-dataset $CONFIG
 ```
 
 其中 `$CONFIG` 是 Step 4 修改过的 config 的文件路径。
@@ -263,12 +263,12 @@ custom_hooks = [
 ...
 ```
 
-#### Step 5, 打印数据集（可选）
+#### Step 5, 检查数据集（可选）
 
-在修改配置文件后，可以打印处理后数据集的第一条数据，以验证数据集是否正确构建。
+在修改配置文件后，可以运行`xtuner/tools/check_custom_dataset.py`脚本验证数据集是否正确构建。
 
 ```bash
-xtuner log-processed-dataset $CONFIG
+xtuner check-custom-dataset $CONFIG
 ```
 
 其中 `$CONFIG` 是 Step 4 修改过的 config 的文件路径。
