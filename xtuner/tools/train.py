@@ -5,6 +5,7 @@ import logging
 import os
 import os.path as osp
 from functools import partial
+from types import FunctionType
 
 from mmengine.config import Config, DictAction
 from mmengine.logging import print_log
@@ -17,7 +18,7 @@ from xtuner.configs import cfgs_name_path
 from xtuner.dataset.collate_fns import default_collate_fn
 from xtuner.model.fast_forward import dispatch_fast_forward
 from xtuner.model.utils import LoadWoInit, find_all_linear_names, traverse_dict
-from xtuner.registry import BUILDER
+from xtuner.registry import BUILDER, MAP_FUNC
 
 
 def parse_args():
@@ -57,6 +58,21 @@ def parse_args():
     return args
 
 
+def register_function(cfg_dict):
+    if isinstance(cfg_dict, dict):
+        for key, value in dict.items(cfg_dict):
+            if isinstance(value, FunctionType):
+                value_str = str(value)
+                if value_str not in MAP_FUNC:
+                    MAP_FUNC.register_module(module=value, name=value_str)
+                cfg_dict[key] = value_str
+            else:
+                register_function(value)
+    elif isinstance(cfg_dict, (list, tuple)):
+        for value in cfg_dict:
+            register_function(value)
+
+
 def main():
     args = parse_args()
 
@@ -72,6 +88,10 @@ def main():
 
     if args.cfg_options is not None:
         cfg.merge_from_dict(args.cfg_options)
+
+    # register FunctionType object in cfg to `MAP_FUNC` Registry and
+    # change these FunctionType object to str
+    register_function(cfg._cfg_dict)
 
     if cfg.get('framework', 'mmengine').lower() == 'huggingface':
         # set default training_args
