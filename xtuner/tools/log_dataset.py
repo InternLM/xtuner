@@ -7,7 +7,7 @@ from xtuner.registry import BUILDER
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='Chat with a HF model')
+    parser = argparse.ArgumentParser(description='Log processed dataset.')
     parser.add_argument(
         'config',
         help='config file name or path. Note: Please use the original '
