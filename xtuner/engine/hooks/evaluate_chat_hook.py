@@ -57,6 +57,7 @@ class EvaluateChatHook(Hook):
         # Cast to inference mode
         model.llm.gradient_checkpointing_disable()
         model.llm.config.use_cache = True
+        model.eval()
 
         for sample_input in self.evaluation_inputs:
             inputs = self.instruction.format(
@@ -77,6 +78,7 @@ class EvaluateChatHook(Hook):
         if is_checkpointing:
             model.llm.gradient_checkpointing_enable()
         model.llm.config.use_cache = use_cache
+        model.train()
 
     def before_train(self, runner):
         runner.logger.info('before_train in EvaluateChatHook .')
