@@ -15,7 +15,7 @@ from transformers import TrainingArguments
 
 from xtuner.configs import cfgs_name_path
 from xtuner.dataset.collate_fns import default_collate_fn
-from xtuner.model.fast_forward import dispatch_fast_forward
+from xtuner.model.modules import dispatch_modules
 from xtuner.model.utils import LoadWoInit, find_all_linear_names, traverse_dict
 from xtuner.registry import BUILDER
 
@@ -95,6 +95,7 @@ def main():
             traverse_dict(cfg.model)
             model = BUILDER.build(cfg.model)
         model.config.use_cache = False
+        dispatch_modules(model)
         if cfg.get('lora', None):
             lora = BUILDER.build(cfg.lora)
             model = prepare_model_for_kbit_training(model)
@@ -102,7 +103,7 @@ def main():
                 modules = find_all_linear_names(model)
                 lora.target_modules = modules
             model = get_peft_model(model, lora)
-        dispatch_fast_forward(model)
+
         # build dataset
         train_dataset = BUILDER.build(cfg.train_dataset)
         data_collator = partial(default_collate_fn, return_hf_format=True)
