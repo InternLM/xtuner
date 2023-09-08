@@ -155,7 +155,9 @@ from xtuner.dataset import process_hf_dataset
 from datasets import load_dataset
 - from xtuner.dataset.map_fns import oasst1_map_fn, template_map_fn_factory
 + from xtuner.dataset.map_fns import template_map_fn_factory
-+ from .map_fn import oasst1_multi_turns_map_fn
++ from mmengine.config import read_base
++ with read_base():
++     from .map_fn import oasst1_multi_turns_map_fn
 ...
 #######################################################################
 #                          PART 1  Settings                           #
@@ -188,6 +190,16 @@ train_dataloader = dict(
     collate_fn=dict(type=default_collate_fn))
 ...
 ```
+
+#### Step 6, Log Processed Dataset (Optional)
+
+After modifying the config file, you can print the first data of the processed dataset to verify whether the dataset has been constructed correctly.
+
+```bash
+xtuner log-dataset $CONFIG
+```
+
+`$CONFIG` represents the file path of the modified configuration file in Step 5.
 
 ## Using Custom Datasets
 
@@ -260,7 +272,7 @@ from datasets import load_dataset
 #                          PART 1  Settings                           #
 #######################################################################
 - data_path = 'timdettmers/openassistant-guanaco'
-+ data_path = 'path/to/your/data'
++ data_path = 'path/to/your/json/data'
 
 + prompt_template = PROMPT_TEMPLATE.openassistant
 ...
@@ -269,7 +281,9 @@ from datasets import load_dataset
 #######################################################################
 train_dataset = dict(
     type=process_hf_dataset,
-    dataset=dict(type=load_dataset, path=data_path),
+-   dataset=dict(type=load_dataset, path=data_path),
++   dataset=dict(
++       type=load_dataset, path='json', data_files=dict(train=data_path)),
     tokenizer=tokenizer,
     max_length=max_length,
 +   dataset_map_fn=None,
@@ -287,3 +301,13 @@ train_dataloader = dict(
     collate_fn=dict(type=default_collate_fn))
 ...
 ```
+
+#### Step 6, Check Processed Dataset (Optional)
+
+After modifying the config file, you can execute the 'xtuner/tools/check_custom_dataset.py' script to verify the correct construction of the dataset.
+
+```bash
+xtuner check-custom-dataset $CONFIG
+```
+
+`$CONFIG` represents the file path of the modified configuration file in Step 5.

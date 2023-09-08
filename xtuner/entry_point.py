@@ -8,13 +8,14 @@ import sys
 from mmengine.logging import print_log
 
 import xtuner
-from xtuner.tools import chat, copy_cfg, list_cfg, test, train
+from xtuner.tools import (chat, check_custom_dataset, copy_cfg, list_cfg,
+                          log_dataset, test, train)
 from xtuner.tools.data_preprocess import arxiv as arxiv_preprocess
 from xtuner.tools.model_converters import merge, pth_to_hf, split
 
 # Define valid modes
-MODES = ('list-cfg', 'copy-cfg', 'train', 'test', 'chat', 'convert',
-         'preprocess')
+MODES = ('list-cfg', 'copy-cfg', 'log-dataset', 'check-custom-dataset',
+         'train', 'test', 'chat', 'convert', 'preprocess')
 
 CLI_HELP_MSG = \
     f"""
@@ -46,6 +47,10 @@ CLI_HELP_MSG = \
             xtuner chat $NAME_OR_PATH_TO_LLM --adapter $NAME_OR_PATH_TO_ADAPTER --prompt-template $PROMPT_TEMPLATE
         6-1. Preprocess arxiv dataset:
             xtuner preprocess arxiv $SRC_FILE $DST_FILE --start-date $START_DATE --categories $CATEGORIES
+        7-1. Log processed dataset:
+            xtuner log-dataset $CONFIG
+        7-2. Verify the correctness of the config file for the custom dataset.
+            xtuner check-custom-dataset
 
     Run special commands:
 
@@ -112,6 +117,8 @@ special = {
 modes = {
     'list-cfg': list_cfg.__file__,
     'copy-cfg': copy_cfg.__file__,
+    'log-dataset': log_dataset.__file__,
+    'check-custom-dataset': check_custom_dataset.__file__,
     'train': train.__file__,
     'test': test.__file__,
     'chat': chat.__file__,
