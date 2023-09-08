@@ -2,12 +2,14 @@
 import argparse
 import os
 import os.path as osp
+from types import FunctionType
 
 from mmengine.config import Config, DictAction
 from mmengine.registry import RUNNERS
 from mmengine.runner import Runner
 
 from xtuner.configs import cfgs_name_path
+from xtuner.registry import MAP_FUNC
 
 
 def parse_args():
@@ -42,6 +44,21 @@ def parse_args():
     return args
 
 
+def register_function(cfg_dict):
+    if isinstance(cfg_dict, dict):
+        for key, value in dict.items(cfg_dict):
+            if isinstance(value, FunctionType):
+                value_str = str(value)
+                if value_str not in MAP_FUNC:
+                    MAP_FUNC.register_module(module=value, name=value_str)
+                cfg_dict[key] = value_str
+            else:
+                register_function(value)
+    elif isinstance(cfg_dict, (list, tuple)):
+        for value in cfg_dict:
+            register_function(value)
+
+
 def main():
     args = parse_args()
 
@@ -57,6 +74,10 @@ def main():
     cfg.launcher = args.launcher
     if args.cfg_options is not None:
         cfg.merge_from_dict(args.cfg_options)
+
+    # register FunctionType object in cfg to `MAP_FUNC` Registry and
+    # change these FunctionType object to str
+    register_function(cfg._cfg_dict)
 
     # work_dir is determined in this priority: CLI > segment in file > filename
     if args.work_dir is not None:
