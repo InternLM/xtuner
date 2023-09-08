@@ -155,7 +155,9 @@ from xtuner.dataset import process_hf_dataset
 from datasets import load_dataset
 - from xtuner.dataset.map_fns import oasst1_map_fn, template_map_fn_factory
 + from xtuner.dataset.map_fns import template_map_fn_factory
-+ from .map_fn import oasst1_multi_turns_map_fn
++ from mmengine.config import read_base
++ with read_base():
++     from .map_fn import oasst1_multi_turns_map_fn
 ...
 #######################################################################
 #                          PART 1  Settings                           #
@@ -188,6 +190,16 @@ train_dataloader = dict(
     collate_fn=dict(type=default_collate_fn))
 ...
 ```
+
+#### Step 6, 打印数据集（可选）
+
+在修改配置文件后，可以打印处理后数据集的第一条数据，以验证数据集是否正确构建。
+
+```bash
+xtuner log-dataset $CONFIG
+```
+
+其中 `$CONFIG` 是 Step 5 修改过的 config 的文件路径。
 
 ## 使用自定义数据集
 
@@ -289,3 +301,13 @@ train_dataloader = dict(
     collate_fn=dict(type=default_collate_fn))
 ...
 ```
+
+#### Step 6, 检查数据集（可选）
+
+在修改配置文件后，可以运行`xtuner/tools/check_custom_dataset.py`脚本验证数据集是否正确构建。
+
+```bash
+xtuner check-custom-dataset $CONFIG
+```
+
+其中 `$CONFIG` 是 Step 5 修改过的 config 的文件路径。

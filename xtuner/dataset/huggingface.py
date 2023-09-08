@@ -7,7 +7,7 @@ from datasets import DatasetDict
 from mmengine import print_log
 from mmengine.config import Config, ConfigDict
 
-from xtuner.registry import BUILDER
+from xtuner.registry import BUILDER, MAP_FUNC
 from .utils import Packer, encode_fn
 
 
@@ -71,6 +71,9 @@ def process_hf_dataset(dataset,
 
     # Extract the useful data for training from the original dataset.
     if dataset_map_fn is not None:
+        if isinstance(dataset_map_fn, str):
+            dataset_map_fn = MAP_FUNC.get(dataset_map_fn)
+
         dataset = dataset.map(dataset_map_fn)
 
     # Add prompt template, such as ### Human: xxx ###Assistant: xxx
