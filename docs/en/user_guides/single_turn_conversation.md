@@ -136,7 +136,6 @@ from datasets import load_dataset
 #######################################################################
 #                          PART 1  Settings                           #
 #######################################################################
-- alpaca_zh_path = 'silk-road/alpaca-data-gpt4-chinese'
 - alpaca_en_path = 'tatsu-lab/alpaca'
 + data_path = 'path/to/your/data'
 
@@ -178,7 +177,73 @@ xtuner log-dataset $CONFIG
 
 ## Using Custom Datasets
 
-When using a custom single-turn dialogue dataset for command fine-tuning, we recommend constructing the dataset in the [single-turn dialogue data format](./dataset_format.md#single-turn-dialogue-dataset-format) as defined by XTuner. If the custom dataset format is oasst1 or other formats, you can refer to the section on [Using Datasets in HuggingFace Hub](#using-dataset-in-huggingface-hub).
+### Using Alpaca Format Custom Datasets
+
+If the data format of the custom dataset meets the 'alpaca' format, you can refer to the following steps for SFT training.
+
+#### Step 1, List Candidate Model Names
+
+```bash
+xtuner list-cfg -p internlm
+```
+
+`-p` is for fuzzy search. If you want to train other models, you can replace `internlm` with other model names supported by XTuner.
+
+#### Step 2, Export the Config File
+
+```bash
+xtuner copy-cfg internlm_7b_qlora_alpaca_e3 .
+```
+
+#### Step 3, Setting Dialogue Template (Optional)
+
+Refer to [Setting the Dialogue Template](#step-4-set-conversation-templates-optional).
+
+#### Step 4, Modify Config File
+
+The config copied in Step 2 needs to be modified as follows:
+
+```diff
+from xtuner.dataset import process_hf_dataset
+from datasets import load_dataset
+from xtuner.dataset.map_fns import alpaca_map_fn, template_map_fn_factory
+from xtuner.utils import PROMPT_TEMPLATE
+...
+#######################################################################
+#                          PART 1  Settings                           #
+#######################################################################
+- alpaca_en_path = 'tatsu-lab/alpaca'
++ data_path = 'path/to/your/json/data'
+
+prompt_template = PROMPT_TEMPLATE.alpaca
+...
+#######################################################################
+#                      STEP 3  Dataset & Dataloader                   #
+#######################################################################
+train_dataset = dict(
+    type=process_hf_dataset,
+-   dataset=dict(type=load_dataset, path=data_path),
++   dataset=dict(
++       type=load_dataset, path='json', data_files=dict(train=data_path)),
+    tokenizer=tokenizer,
+    max_length=max_length,
+    dataset_map_fn=alpaca_map_fn,
+    template_map_fn=dict(
+        type=template_map_fn_factory, template=prompt_template),
+    remove_unused_columns=True,
+    shuffle_before_pack=True,
+    pack_to_max_length=pack_to_max_length)
+
+train_dataloader = dict(
+    batch_size=batch_size,
+    num_workers=dataloader_num_workers,
+    dataset=train_dataset,
+    sampler=dict(type=DefaultSampler, shuffle=True),
+    collate_fn=dict(type=default_collate_fn))
+...
+```
+
+### Using Other Format Custom Datasets
 
 ### Step 1, Dataset Preparation
 
@@ -238,7 +303,6 @@ from datasets import load_dataset
 #######################################################################
 #                          PART 1  Settings                           #
 #######################################################################
-- alpaca_zh_path = 'silk-road/alpaca-data-gpt4-chinese'
 - alpaca_en_path = 'tatsu-lab/alpaca'
 + data_path = 'path/to/your/json/data'
 

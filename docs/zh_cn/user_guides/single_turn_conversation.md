@@ -136,7 +136,6 @@ from datasets import load_dataset
 #######################################################################
 #                          PART 1  Settings                           #
 #######################################################################
-- alpaca_zh_path = 'silk-road/alpaca-data-gpt4-chinese'
 - alpaca_en_path = 'tatsu-lab/alpaca'
 + data_path = 'path/to/your/data'
 
@@ -178,9 +177,83 @@ xtuner log-dataset $CONFIG
 
 ## 使用自定义数据集
 
-在使用自定义单轮对话数据集进行指令微调时，我们推荐将数据集构造为XTuner定义的[单轮对话数据格式](./dataset_format.md#单轮对话数据集格式)。若自定义数据集格式为 `alpaca` 等其他格式，可参考[使用 HuggingFace Hub 数据集](#使用-huggingface-hub-数据集)一节。
+### 使用 Alpaca 格式自定义数据集
 
-### Step 1, 数据集准备
+若自定义数据集的数据格式满足`alpaca`格式，可以参考以下步骤进行 SFT 训练。
+
+#### Step 1，列出候选模型名字
+
+XTuner 提供多个开箱即用的配置文件，用户可以通过下列命令查看：
+
+```bash
+xtuner list-cfg -p internlm
+```
+
+`-p` 为模糊查找，若想训练其他模型，可以修改 `internlm` 为 XTuner 支持的其他模型名称（如`baichuan`、`llama`）。
+
+#### Step 2, 复制 config 文件
+
+```bash
+xtuner copy-cfg ${CONFIG_NAME} ${SAVE_DIR}
+```
+
+例如通过下列命令将名为 `internlm_7b_qlora_alpaca_e3` 的 config 导出至当前目录下：
+
+```bash
+xtuner copy-cfg internlm_7b_qlora_alpaca_e3 .
+```
+
+#### Step 3, 设置对话模板（可选）
+
+参考[设置对话模板](#step-4-设置对话模板可选)
+
+#### Step 4, 修改 config 文件
+
+对 Step 3 复制得到的 config 文件需要进行如下修改：
+
+```diff
+from xtuner.dataset import process_hf_dataset
+from datasets import load_dataset
+from xtuner.dataset.map_fns import alpaca_map_fn, template_map_fn_factory
+from xtuner.utils import PROMPT_TEMPLATE
+...
+#######################################################################
+#                          PART 1  Settings                           #
+#######################################################################
+- alpaca_en_path = 'tatsu-lab/alpaca'
++ data_path = 'path/to/your/json/data'
+
+prompt_template = PROMPT_TEMPLATE.alpaca
+...
+#######################################################################
+#                      STEP 3  Dataset & Dataloader                   #
+#######################################################################
+train_dataset = dict(
+    type=process_hf_dataset,
+-   dataset=dict(type=load_dataset, path=data_path),
++   dataset=dict(
++       type=load_dataset, path='json', data_files=dict(train=data_path)),
+    tokenizer=tokenizer,
+    max_length=max_length,
+    dataset_map_fn=alpaca_map_fn,
+    template_map_fn=dict(
+        type=template_map_fn_factory, template=prompt_template),
+    remove_unused_columns=True,
+    shuffle_before_pack=True,
+    pack_to_max_length=pack_to_max_length)
+
+train_dataloader = dict(
+    batch_size=batch_size,
+    num_workers=dataloader_num_workers,
+    dataset=train_dataset,
+    sampler=dict(type=DefaultSampler, shuffle=True),
+    collate_fn=dict(type=default_collate_fn))
+...
+```
+
+### 使用其他格式自定义数据集
+
+#### Step 1, 数据集准备
 
 按照 XTuner 定义的[单轮对话数据格式](./dataset_format.md#单轮对话数据集格式)准备自定义数据：
 
@@ -203,7 +276,7 @@ xtuner log-dataset $CONFIG
 }]
 ```
 
-### Step 2, 列出候选模型名字
+#### Step 2, 列出候选模型名字
 
 ```bash
 xtuner list-cfg -p internlm
@@ -211,17 +284,17 @@ xtuner list-cfg -p internlm
 
 `-p` 为模糊查找，若想训练其他模型，可以修改 `internlm` 为 XTuner 支持的其他模型名称。
 
-### Step 3, 复制 config 文件
+#### Step 3, 复制 config 文件
 
 ```bash
 xtuner copy-cfg internlm_7b_qlora_alpaca_e3 .
 ```
 
-### Step 4, 设置对话模板（可选）
+#### Step 4, 设置对话模板（可选）
 
 参考[设置对话模板](#step-4-设置对话模板可选)
 
-### Step 5, 修改 config 文件
+#### Step 5, 修改 config 文件
 
 对 Step 3 复制得到的 config 文件需要进行如下修改：
 
@@ -238,7 +311,6 @@ from datasets import load_dataset
 #######################################################################
 #                          PART 1  Settings                           #
 #######################################################################
-- alpaca_zh_path = 'silk-road/alpaca-data-gpt4-chinese'
 - alpaca_en_path = 'tatsu-lab/alpaca'
 + data_path = 'path/to/your/json/data'
 
