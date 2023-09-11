@@ -199,7 +199,7 @@ xtuner chat meta-llama/Llama-2-7b-hf --adapter xtuner/Llama-2-7b-qlora-moss-003-
 - **步骤 0**，将 HuggingFace adapter 合并到大语言模型：
 
   ```shell
-  xtuner convert merge_adapter \
+  xtuner convert merge \
       ${NAME_OR_PATH_TO_LLM} \
       ${NAME_OR_PATH_TO_ADAPTER} \
       ${SAVE_PATH} \
