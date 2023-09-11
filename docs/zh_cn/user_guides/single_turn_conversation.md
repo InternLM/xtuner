@@ -5,7 +5,11 @@
 1. 按照相应数据集格式构造数据
 2. 向数据集中插入对话模板（可选）
 
-XTuner 支持使用 HuggingFace Hub 数据集或自定义数据集进行 SFT（Supervised FineTune）。二者的主要区别在于，使用 HuggingFace Hub 数据集时需要将原始数据映射为 XTuner 定义的[单轮对话数据格式](./dataset_format.md#单轮对话数据集格式)，而对于自定义数据集则推荐用户按照[单轮对话数据格式](./dataset_format.md#单轮对话数据集格式)构造数据集。
+XTuner 支持使用 HuggingFace Hub 数据集、Alpaca 格式的自定义数据集以及其他格式的自定义数据集进行 SFT（Supervised FineTune）。三者的主要区别在于：
+
+1. 使用 HuggingFace Hub 数据集时需要将原始数据映射为 XTuner 定义的[单轮对话数据格式](./dataset_format.md#单轮对话数据集格式)；
+2. 使用 Alpaca 格式的自定义数据集时，需要保证自定义数据集至少包含'instruction', 'input', 'output'三列；
+3. 对于自定义数据集则推荐用户按照[单轮对话数据格式](./dataset_format.md#单轮对话数据集格式)构造数据集，**这会大幅度缩小数据预处理所消耗的时间**。
 
 ## 使用 HuggingFace Hub 数据集
 
@@ -197,7 +201,7 @@ xtuner list-cfg -p internlm
 xtuner copy-cfg ${CONFIG_NAME} ${SAVE_DIR}
 ```
 
-例如通过下列命令将名为 `internlm_7b_qlora_alpaca_e3` 的 config 导出至当前目录下：
+由于自定义数据集满足 Alpaca 格式，因此`CONFIG_NAME`应该从 Step 1 列出的候选模型名字中选择与 Alpaca 相关的。例如通过下列命令将名为 `internlm_7b_qlora_alpaca_e3` 的 config 导出至当前目录下：
 
 ```bash
 xtuner copy-cfg internlm_7b_qlora_alpaca_e3 .

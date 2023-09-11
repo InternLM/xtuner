@@ -5,7 +5,11 @@ Single-turn dialogue instruction fine-tuning aims to enhance the model's ability
 1. Construct data according to the corresponding dataset format
 2. Insert dialogue templates into the dataset (optional)
 
-XTuner supports using HuggingFace Hub datasets or custom datasets for SFT (Supervised FineTune). The main difference between them is that when using the HuggingFace Hub dataset, the original data needs to be mapped to the XTuner-defined [single-turn dialogue data format](./dataset_format.md#single-turn-dialogue-dataset-format), whereas for custom datasets, it is recommended that users construct the dataset according to the single-turn dialogue data format.
+XTuner offers support for utilizing HuggingFace Hub datasets, Alpaca-Format custom datasets, or other format custom datasets for SFT (Supervised FineTune). The main differences between these options are as follows:
+
+1. When using the HuggingFace Hub dataset for SFT, it is necessary to map the original data to the XTuner-defined [single-turn dialogue data format](./dataset_format.md#single-turn-dialogue-dataset-format)
+2. When utilizing Alpaca-Format custom datasets for SFT, it is crucial to ensure that the custom dataset includes a minimum of three columns: 'instruction', 'input', and 'output'.
+3. When working with other custom datasets for SFT, it is recommended that users construct the dataset according to the single-turn dialogue data format. This is highly beneficial as it significantly reduces the time required for data preprocessing.
 
 ## Using Dataset in HuggingFace Hub
 
@@ -190,6 +194,12 @@ xtuner list-cfg -p internlm
 `-p` is for fuzzy search. If you want to train other models, you can replace `internlm` with other model names supported by XTuner.
 
 #### Step 2, Export the Config File
+
+```bash
+xtuner copy-cfg ${CONFIG_NAME} ${SAVE_DIR}
+```
+
+As the custom dataset follows the Alpaca format, 'CONFIG_NAME' should select the ALPACA-related candidate model names listed in Step 1. For example, execute the following command to export the 'internlm_7b_qlora_alpaca_e3' config to the current directory:
 
 ```bash
 xtuner copy-cfg internlm_7b_qlora_alpaca_e3 .
