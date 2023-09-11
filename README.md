@@ -200,7 +200,7 @@ For more examples, please see [chat.md](./docs/en/user_guides/chat.md).
 - **Step 0**, merge the HuggingFace adapter to pretrained LLM, by
 
   ```shell
-  xtuner convert merge_adapter \
+  xtuner convert merge \
       ${NAME_OR_PATH_TO_LLM} \
       ${NAME_OR_PATH_TO_ADAPTER} \
       ${SAVE_PATH} \
