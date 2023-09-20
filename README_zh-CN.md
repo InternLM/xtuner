@@ -13,6 +13,7 @@
 </div>
 
 ## 🎉 更新
+
 - **\[2023.09.20\]** 支持 [InternLM-20B](https://huggingface.co/internlm) 系列模型！
 - **\[2023.09.06\]** 支持 [Baichuan2](https://huggingface.co/baichuan-inc) 系列模型！
 - **\[2023.08.30\]** XTuner 正式发布！众多微调模型已上传至 [HuggingFace](https://huggingface.co/xtuner)！
