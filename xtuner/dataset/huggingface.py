@@ -96,6 +96,9 @@ def process_hf_dataset(dataset,
             level=logging.WARNING)
         remove_unused_columns = True
 
+    # remove invalid data
+    dataset = dataset.filter(lambda example: len(example['conversation']) > 0)
+
     # tokenize
     if isinstance(tokenizer, dict) or isinstance(
             tokenizer, Config) or isinstance(tokenizer, ConfigDict):
