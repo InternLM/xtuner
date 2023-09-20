@@ -12,7 +12,7 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer,
 
 from xtuner.dataset import process_hf_dataset
 from xtuner.dataset.collate_fns import default_collate_fn
-from xtuner.dataset.map_fns import oasst1_map_fn, template_map_fn_factory
+from xtuner.dataset.map_fns import arxiv_map_fn, template_map_fn_factory
 from xtuner.engine import DatasetInfoHook, EvaluateChatHook
 from xtuner.model import SupervisedFinetune
 from xtuner.utils import PROMPT_TEMPLATE
@@ -21,13 +21,15 @@ from xtuner.utils import PROMPT_TEMPLATE
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-pretrained_model_name_or_path = 'internlm/internlm-20b-base'
+pretrained_model_name_or_path = 'internlm/internlm-20b'
 
 # Data
-data_path = 'timdettmers/openassistant-guanaco'
-prompt_template = PROMPT_TEMPLATE.openassistant
-max_length = 512
-pack_to_max_length = False
+# 1. Download data from https://kaggle.com/datasets/Cornell-University/arxiv
+# 2. Process data by `xtuner preprocess arxiv ${DOWNLOADED_DATA} ./data/arxiv_data.json [optional arguments]`  # noqa: E501
+data_path = './data/arxiv_data.json'
+prompt_template = PROMPT_TEMPLATE.title
+max_length = 2048
+pack_to_max_length = True
 
 # Scheduler & Optimizer
 batch_size = 1  # per_device
@@ -43,7 +45,39 @@ max_norm = 1  # grad clip
 # Evaluate the generation performance during the training
 evaluation_freq = 500
 evaluation_inputs = [
-    '请给我介绍五个上海的景点', 'Please tell me five scenic spots in Shanghai'
+    ('We present InternLM, a multilingual foundational language '
+     'model with 104B parameters. InternLM is pre-trained on a large '
+     'corpora with 1.6T tokens with a multi-phase progressive '
+     'process, and then fine-tuned to align with human preferences. '
+     'We also developed a training system called Uniscale-LLM for '
+     'efficient large language model training. The evaluation on a '
+     'number of benchmarks shows that InternLM achieves '
+     'state-of-the-art performance in multiple aspects, including '
+     'knowledge understanding, reading comprehension, mathematics, '
+     'and coding. With such well-rounded capabilities, InternLM '
+     'achieves outstanding performances on comprehensive exams, '
+     'including MMLU, AGIEval, C-Eval and GAOKAO-Bench, without '
+     'resorting to external tools. On these benchmarks, InternLM '
+     'not only significantly outperforms open-source models, but '
+     'also obtains superior performance compared to ChatGPT. Also, '
+     'InternLM demonstrates excellent capability of understanding '
+     'Chinese language and Chinese culture, which makes it a '
+     'suitable foundation model to support Chinese-oriented language '
+     'applications. This manuscript gives a detailed study of '
+     'our results, with benchmarks and examples across a diverse '
+     'set of knowledge domains and tasks.'),
+    ('In this work, we develop and release Llama 2, a collection of '
+     'pretrained and fine-tuned large language models (LLMs) ranging '
+     'in scale from 7 billion to 70 billion parameters.\nOur '
+     'fine-tuned LLMs, called LLAMA 2-CHAT, are optimized for '
+     'dialogue use cases. Our models outperform open-source chat '
+     'models on most benchmarks we tested, and based on our human '
+     'evaluations for helpfulness and safety, may be a suitable '
+     'substitute for closedsource models. We provide a detailed '
+     'description of our approach to fine-tuning and safety '
+     'improvements of LLAMA 2-CHAT in order to enable the community '
+     'to build on our work and contribute to the responsible '
+     'development of LLMs.')
 ]
 
 #######################################################################
@@ -84,10 +118,11 @@ model = dict(
 #######################################################################
 train_dataset = dict(
     type=process_hf_dataset,
-    dataset=dict(type=load_dataset, path=data_path),
+    dataset=dict(
+        type=load_dataset, path='json', data_files=dict(train=data_path)),
     tokenizer=tokenizer,
     max_length=max_length,
-    dataset_map_fn=oasst1_map_fn,
+    dataset_map_fn=arxiv_map_fn,
     template_map_fn=dict(
         type=template_map_fn_factory, template=prompt_template),
     remove_unused_columns=True,

@@ -21,7 +21,7 @@ from xtuner.utils import PROMPT_TEMPLATE
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-pretrained_model_name_or_path = 'internlm/internlm-20b-base'
+pretrained_model_name_or_path = 'internlm/internlm-20b'
 
 # Data
 data_path = 'garage-bAInd/Open-Platypus'

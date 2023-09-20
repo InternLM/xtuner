@@ -12,7 +12,7 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer,
 
 from xtuner.dataset import process_hf_dataset
 from xtuner.dataset.collate_fns import default_collate_fn
-from xtuner.dataset.map_fns import colors_map_fn, template_map_fn_factory
+from xtuner.dataset.map_fns import alpaca_zh_map_fn, template_map_fn_factory
 from xtuner.engine import DatasetInfoHook, EvaluateChatHook
 from xtuner.model import SupervisedFinetune
 from xtuner.utils import PROMPT_TEMPLATE
@@ -21,11 +21,11 @@ from xtuner.utils import PROMPT_TEMPLATE
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-pretrained_model_name_or_path = 'internlm/internlm-20b-base'
+pretrained_model_name_or_path = 'internlm/internlm-20b'
 
 # Data
-data_path = 'burkelibbey/colors'
-prompt_template = PROMPT_TEMPLATE.colorist
+alpaca_zh_path = 'silk-road/alpaca-data-gpt4-chinese'
+prompt_template = PROMPT_TEMPLATE.alpaca
 max_length = 2048
 pack_to_max_length = True
 
@@ -33,7 +33,7 @@ pack_to_max_length = True
 batch_size = 1  # per_device
 accumulative_counts = 16
 dataloader_num_workers = 0
-max_epochs = 5
+max_epochs = 3
 optim_type = PagedAdamW32bit
 lr = 2e-4
 betas = (0.9, 0.999)
@@ -41,9 +41,9 @@ weight_decay = 0
 max_norm = 1  # grad clip
 
 # Evaluate the generation performance during the training
-evaluation_freq = 200
+evaluation_freq = 500
 evaluation_inputs = [
-    '请给我一个像天空一样清澈透明的蓝色。', 'Please give me a clear blue like the sky.'
+    '请给我介绍五个上海的景点', 'Please tell me five scenic spots in Shanghai'
 ]
 
 #######################################################################
@@ -82,12 +82,12 @@ model = dict(
 #######################################################################
 #                      PART 3  Dataset & Dataloader                   #
 #######################################################################
-train_dataset = dict(
+alpaca_zh = dict(
     type=process_hf_dataset,
-    dataset=dict(type=load_dataset, path=data_path),
+    dataset=dict(type=load_dataset, path=alpaca_zh_path),
     tokenizer=tokenizer,
     max_length=max_length,
-    dataset_map_fn=colors_map_fn,
+    dataset_map_fn=alpaca_zh_map_fn,
     template_map_fn=dict(
         type=template_map_fn_factory, template=prompt_template),
     remove_unused_columns=True,
@@ -97,7 +97,7 @@ train_dataset = dict(
 train_dataloader = dict(
     batch_size=batch_size,
     num_workers=dataloader_num_workers,
-    dataset=train_dataset,
+    dataset=alpaca_zh,
     sampler=dict(type=DefaultSampler, shuffle=True),
     collate_fn=dict(type=default_collate_fn))
 

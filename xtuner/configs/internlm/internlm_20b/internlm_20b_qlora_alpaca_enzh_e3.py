@@ -22,7 +22,7 @@ from xtuner.utils import PROMPT_TEMPLATE
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-pretrained_model_name_or_path = 'internlm/internlm-20b-base'
+pretrained_model_name_or_path = 'internlm/internlm-20b'
 
 # Data
 alpaca_zh_path = 'silk-road/alpaca-data-gpt4-chinese'
