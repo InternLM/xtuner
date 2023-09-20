@@ -21,7 +21,7 @@ from xtuner.utils import PROMPT_TEMPLATE
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-pretrained_model_name_or_path = 'internlm/internlm-20b-chat'
+pretrained_model_name_or_path = 'internlm/internlm-chat-20b'
 
 # Data
 data_path = 'HuggingFaceH4/CodeAlpaca_20K'
