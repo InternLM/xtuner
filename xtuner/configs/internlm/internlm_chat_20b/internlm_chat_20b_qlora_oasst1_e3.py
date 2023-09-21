@@ -10,10 +10,9 @@ from peft import LoraConfig
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           BitsAndBytesConfig)
 
-from xtuner.dataset import ConcatDataset, process_hf_dataset
+from xtuner.dataset import process_hf_dataset
 from xtuner.dataset.collate_fns import default_collate_fn
-from xtuner.dataset.map_fns import (alpaca_map_fn, alpaca_zh_map_fn,
-                                    template_map_fn_factory)
+from xtuner.dataset.map_fns import oasst1_map_fn, template_map_fn_factory
 from xtuner.engine import DatasetInfoHook, EvaluateChatHook
 from xtuner.model import SupervisedFinetune
 from xtuner.utils import PROMPT_TEMPLATE
@@ -22,11 +21,10 @@ from xtuner.utils import PROMPT_TEMPLATE
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-pretrained_model_name_or_path = 'internlm/internlm-20b-chat'
+pretrained_model_name_or_path = 'internlm/internlm-chat-20b'
 
 # Data
-alpaca_zh_path = 'silk-road/alpaca-data-gpt4-chinese'
-alpaca_en_path = 'tatsu-lab/alpaca'
+data_path = 'timdettmers/openassistant-guanaco'
 prompt_template = prompt_template = PROMPT_TEMPLATE.internlm_chat
 max_length = 2048
 pack_to_max_length = True
@@ -84,33 +82,17 @@ model = dict(
 #######################################################################
 #                      PART 3  Dataset & Dataloader                   #
 #######################################################################
-alpaca_en = dict(
-    type=process_hf_dataset,
-    dataset=dict(type=load_dataset, path=alpaca_en_path),
-    tokenizer=tokenizer,
-    max_length=max_length,
-    dataset_map_fn=alpaca_map_fn,
-    template_map_fn=dict(
-        type=template_map_fn_factory, template=prompt_template),
-    remove_unused_columns=True,
-    shuffle_before_pack=True,
-    pack_to_max_length=pack_to_max_length)
-
-alpaca_zh = dict(
-    type=process_hf_dataset,
-    dataset=dict(type=load_dataset, path=alpaca_zh_path),
-    tokenizer=tokenizer,
-    max_length=max_length,
-    dataset_map_fn=alpaca_zh_map_fn,
-    template_map_fn=dict(
-        type=template_map_fn_factory, template=prompt_template),
-    remove_unused_columns=True,
-    shuffle_before_pack=True,
-    pack_to_max_length=pack_to_max_length)
-
 train_dataset = dict(
-    type=ConcatDataset,
-    datasets_cfg=dict(alpaca_en=alpaca_en, alpaca_zh=alpaca_zh))
+    type=process_hf_dataset,
+    dataset=dict(type=load_dataset, path=data_path),
+    tokenizer=tokenizer,
+    max_length=max_length,
+    dataset_map_fn=oasst1_map_fn,
+    template_map_fn=dict(
+        type=template_map_fn_factory, template=prompt_template),
+    remove_unused_columns=True,
+    shuffle_before_pack=True,
+    pack_to_max_length=pack_to_max_length)
 
 train_dataloader = dict(
     batch_size=batch_size,
