@@ -29,21 +29,22 @@ def main():
         args.model_name_or_path,
         torch_dtype=torch.float16,
         low_cpu_mem_usage=True,
-        device_map='cpu',
+        device_map='auto',
         trust_remote_code=True)
     tokenizer = AutoTokenizer.from_pretrained(
         args.model_name_or_path, trust_remote_code=True)
     model_unmerged = PeftModel.from_pretrained(
         model,
         args.adapter_name_or_path,
-        device_map='cpu',
+        device_map='auto',
         torch_dtype=torch.float16,
         is_trainable=False)
     model_merged = model_unmerged.merge_and_unload()
+    print(f'Saving to {args.save_dir}...')
     model_merged.save_pretrained(
         args.save_dir, max_shard_size=args.max_shard_size)
     tokenizer.save_pretrained(args.save_dir)
-    print(f'Save to {args.save_dir}')
+    print('All done!')
 
 
 if __name__ == '__main__':
