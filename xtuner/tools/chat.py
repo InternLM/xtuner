@@ -50,6 +50,11 @@ def parse_args():
     parser.add_argument('--command-stop-word', default=None, help='Stop key')
     parser.add_argument('--answer-stop-word', default=None, help='Stop key')
     parser.add_argument(
+        '--offload-folder',
+        default=None,
+        help='The folder in which to offload the model weights (or where the '
+        'model weights are already offloaded).')
+    parser.add_argument(
         '--max-new-tokens',
         type=int,
         default=2048,
@@ -138,11 +143,13 @@ def main():
         quantization_config=quantization_config,
         load_in_8bit=load_in_8bit,
         device_map='auto',
+        offload_folder=args.offload_folder,
         trust_remote_code=True)
     tokenizer = AutoTokenizer.from_pretrained(
         args.model_name_or_path, trust_remote_code=True)
     if args.adapter is not None:
-        model = PeftModel.from_pretrained(model, args.adapter)
+        model = PeftModel.from_pretrained(
+            model, args.adapter, offload_folder=args.offload_folder)
         print(f'Load adapter from {args.adapter}')
     model.eval()
 
