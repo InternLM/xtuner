@@ -174,7 +174,7 @@ def main():
     while True:
         text = get_input()
         while text.strip() == 'RESET':
-            print('Log: The memory of history responses have been removed!')
+            print('Log: History responses have been removed!')
             n_turn = 0
             inputs = ''
             text = get_input()
