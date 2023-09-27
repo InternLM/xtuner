@@ -91,7 +91,9 @@ def get_input():
     sentinel = ''  # ends when this string is seen
     result = None
     while result is None:
-        print('\ndouble enter to end input >>> ', end='')
+        print(('\ndouble enter to end input (EXIT: exit chat, '
+               'RESET: reset history) >>> '),
+              end='')
         try:
             result = '\n'.join(iter(input, sentinel))
         except UnicodeDecodeError:
@@ -178,8 +180,13 @@ def main():
     inputs = ''
     while True:
         text = get_input()
-
-        if text == 'exit':
+        while text.strip() == 'RESET':
+            print('Log: History responses have been removed!')
+            n_turn = 0
+            inputs = ''
+            text = get_input()
+        if text.strip() == 'EXIT':
+            print('Log: Exit!')
             exit(0)
         if args.prompt_template is not None:
             template = PROMPT_TEMPLATE[args.prompt_template]
