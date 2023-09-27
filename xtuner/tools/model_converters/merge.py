@@ -19,6 +19,11 @@ def parse_args():
         default='2GB',
         help='Only applicable for LLM. The maximum size for '
         'each sharded checkpoint.')
+    parser.add_argument(
+        '--offload-folder',
+        default=None,
+        help='The folder in which to offload the model weights (or where '
+        'the model weights are already offloaded).')
     args = parser.parse_args()
     return args
 
@@ -30,6 +35,7 @@ def main():
         torch_dtype=torch.float16,
         low_cpu_mem_usage=True,
         device_map='auto',
+        offload_folder=args.offload_folder,
         trust_remote_code=True)
     tokenizer = AutoTokenizer.from_pretrained(
         args.model_name_or_path, trust_remote_code=True)
@@ -38,6 +44,7 @@ def main():
         args.adapter_name_or_path,
         device_map='auto',
         torch_dtype=torch.float16,
+        offload_folder=args.offload_folder,
         is_trainable=False)
     model_merged = model_unmerged.merge_and_unload()
     print(f'Saving to {args.save_dir}...')
