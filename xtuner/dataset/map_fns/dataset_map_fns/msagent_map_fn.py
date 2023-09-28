@@ -15,7 +15,7 @@ def replace_think(match):
                                                     '').replace('\n', '')
     think_json = json.loads(think_text)
     out_text += (f"Action:{think_json['api_name']}\n"
-                 "Action Input:{think_json['parameters']}\n")
+                 f"Action Input:{think_json['parameters']}\n")
     return out_text
 
 
