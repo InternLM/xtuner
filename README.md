@@ -120,6 +120,13 @@ XTuner is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](
 
 ### Installation
 
+- It is recommended to build a Python-3.10 virtual environment using conda
+
+  ```bash
+  conda create --name xtuner-env python=3.10 -y
+  conda activate xtuner-env
+  ```
+
 - Install XTuner via pip
 
   ```shell
