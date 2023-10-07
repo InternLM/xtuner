@@ -48,7 +48,7 @@ def extract_json_objects(text, decoder=json.JSONDecoder()):
     return results
 
 
-def msagent_map_fn(example):
+def msagent_react_map_fn(example):
     text = eval(example['conversations'])
     conversation = []
     input_text = ''

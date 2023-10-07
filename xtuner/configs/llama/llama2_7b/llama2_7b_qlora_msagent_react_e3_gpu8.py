@@ -12,7 +12,7 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer,
 
 from xtuner.dataset import process_ms_dataset
 from xtuner.dataset.collate_fns import default_collate_fn
-from xtuner.dataset.map_fns import msagent_map_fn
+from xtuner.dataset.map_fns import msagent_react_map_fn
 from xtuner.engine import DatasetInfoHook, EvaluateChatHook
 from xtuner.model import SupervisedFinetune
 
@@ -20,7 +20,7 @@ from xtuner.model import SupervisedFinetune
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-pretrained_model_name_or_path = 'internlm/internlm-20b'
+pretrained_model_name_or_path = 'meta-llama/Llama-2-7b-hf'
 
 # Data
 data_path = 'damo/MSAgent-Bench'
@@ -105,7 +105,7 @@ train_dataset = dict(
     dataset=dict(type=MsDataset.load, dataset_name=data_path),
     tokenizer=tokenizer,
     max_length=max_length,
-    dataset_map_fn=msagent_map_fn,
+    dataset_map_fn=msagent_react_map_fn,
     remove_unused_columns=True,
     shuffle_before_pack=True,
     pack_to_max_length=pack_to_max_length)
