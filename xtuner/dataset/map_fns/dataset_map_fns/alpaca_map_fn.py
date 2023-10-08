@@ -1,7 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-ALPACA_SYSTEM = (
-    'Below is an instruction that describes a task. '
-    'Write a response that appropriately completes the request.\n')
+from xtuner.utils import TASK_TEMPLATE
 
 
 def alpaca_map_fn(example):
@@ -10,7 +8,7 @@ def alpaca_map_fn(example):
     else:
         return {
             'conversation': [{
-                'system': ALPACA_SYSTEM,
+                'system': TASK_TEMPLATE.alpaca,
                 'input': f"{example['instruction']}\n{example['input']}",
                 'output': example['output']
             }]

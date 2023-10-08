@@ -1,13 +1,11 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-ALPACA_SYSTEM = (
-    'Below is an instruction that describes a task. '
-    'Write a response that appropriately completes the request.\n')
+from xtuner.utils import TASK_TEMPLATE
 
 
 def alpaca_zh_map_fn(example):
     return {
         'conversation': [{
-            'system': ALPACA_SYSTEM,
+            'system': TASK_TEMPLATE.alpaca,
             'input': f"{example['instruction_zh']}\n{example['input_zh']}",
             'output': example['output_zh']
         }]
