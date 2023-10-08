@@ -29,7 +29,7 @@ pretrained_model_name_or_path = 'internlm/internlm-7b'
 # download data from https://github.com/LiuHC0428/LAW-GPT
 crime_kg_assitant_path = './data/CrimeKgAssitant清洗后_52k.json'
 law_reference_data_path = './data/训练数据_带法律依据_92k.json'
-prompt_template = PROMPT_TEMPLATE.lawyer
+prompt_template = PROMPT_TEMPLATE.internlm_chat
 max_length = 2048
 pack_to_max_length = True
 
@@ -163,7 +163,7 @@ custom_hooks = [
         tokenizer=tokenizer,
         every_n_iters=evaluation_freq,
         evaluation_inputs=evaluation_inputs,
-        instruction=prompt_template.INSTRUCTION_START)
+        instruction=prompt_template.INSTRUCTION)
 ]
 
 # configure default hooks

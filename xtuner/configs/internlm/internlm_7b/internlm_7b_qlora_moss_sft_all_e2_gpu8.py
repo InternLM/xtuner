@@ -146,7 +146,7 @@ custom_hooks = [
         every_n_iters=evaluation_freq,
         stop_word='<eoc>',
         evaluation_inputs=evaluation_inputs,
-        instruction=prompt_template.INSTRUCTION_START)
+        instruction=prompt_template.INSTRUCTION)
 ]
 
 # configure default hooks

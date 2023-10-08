@@ -25,7 +25,7 @@ pretrained_model_name_or_path = 'internlm/internlm-7b'
 alpaca_zh_path = 'silk-road/alpaca-data-gpt4-chinese'
 alpaca_en_path = 'tatsu-lab/alpaca'
 oasst1_path = 'timdettmers/openassistant-guanaco'
-prompt_template = PROMPT_TEMPLATE.alpaca
+prompt_template = PROMPT_TEMPLATE.internlm_chat
 max_length = 2048
 pack_to_max_length = True
 
@@ -147,7 +147,7 @@ custom_hooks = [
         tokenizer=tokenizer,
         every_n_iters=evaluation_freq,
         evaluation_inputs=evaluation_inputs,
-        instruction=prompt_template.INSTRUCTION_START)
+        instruction=prompt_template.INSTRUCTION)
 ]
 
 # configure default hooks

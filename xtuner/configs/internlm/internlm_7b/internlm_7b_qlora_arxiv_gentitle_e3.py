@@ -27,7 +27,7 @@ pretrained_model_name_or_path = 'internlm/internlm-7b'
 # 1. Download data from https://kaggle.com/datasets/Cornell-University/arxiv
 # 2. Process data by `xtuner preprocess arxiv ${DOWNLOADED_DATA} ./data/arxiv_data.json [optional arguments]`  # noqa: E501
 data_path = './data/arxiv_data.json'
-prompt_template = PROMPT_TEMPLATE.title
+prompt_template = PROMPT_TEMPLATE.internlm_chat
 max_length = 2048
 pack_to_max_length = True
 
@@ -172,7 +172,7 @@ custom_hooks = [
         tokenizer=tokenizer,
         every_n_iters=evaluation_freq,
         evaluation_inputs=evaluation_inputs,
-        instruction=prompt_template.INSTRUCTION_START)
+        instruction=prompt_template.INSTRUCTION)
 ]
 
 # configure default hooks
