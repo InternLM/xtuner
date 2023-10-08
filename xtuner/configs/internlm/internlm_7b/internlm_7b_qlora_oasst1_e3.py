@@ -137,7 +137,8 @@ custom_hooks = [
         tokenizer=tokenizer,
         every_n_iters=evaluation_freq,
         evaluation_inputs=evaluation_inputs,
-        instruction=prompt_template.INSTRUCTION)
+        system='',
+        prompt_template=prompt_template)
 ]
 
 # configure default hooks
