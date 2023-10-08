@@ -25,7 +25,8 @@ class EvaluateChatHook(Hook):
         else:
             instruction = prompt_template.get('INSTRUCTION', '{input}')
             if system != '':
-                system = prompt_template.get('SYSTEM', f'{system}\n')
+                system = prompt_template.get(
+                    'SYSTEM', '{system}\n').format(system=system)
         self.instruction = instruction
         self.system = system
         self.every_n_iters = every_n_iters
@@ -87,7 +88,7 @@ class EvaluateChatHook(Hook):
         model.train()
 
     def before_train(self, runner):
-        runner.logger.info('before_train in EvaluateChatHook .')
+        runner.logger.info('before_train in EvaluateChatHook.')
         self._generate_samples(runner, max_new_tokens=50)
 
     def after_train_iter(self,
@@ -98,11 +99,19 @@ class EvaluateChatHook(Hook):
         if self.every_n_iters is None or (batch_idx +
                                           1) % self.every_n_iters != 0:
             return
-        runner.logger.info('after_train_iter in EvaluateChatHook .')
+        runner.logger.info('after_train_iter in EvaluateChatHook.')
+        self._generate_samples(runner)
+
+    def after_train(self,
+                    runner,
+                    batch_idx: int,
+                    data_batch=None,
+                    outputs=None) -> None:
+        runner.logger.info('after_train in EvaluateChatHook.')
         self._generate_samples(runner)
 
     def after_val(self, runner) -> None:
         if self.every_n_iters is not None:
             return
-        runner.logger.info('after_val in EvaluateChatHook .')
+        runner.logger.info('after_val in EvaluateChatHook.')
         self._generate_samples(runner)
