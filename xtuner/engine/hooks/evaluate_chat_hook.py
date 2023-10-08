@@ -102,11 +102,7 @@ class EvaluateChatHook(Hook):
         runner.logger.info('after_train_iter in EvaluateChatHook.')
         self._generate_samples(runner)
 
-    def after_train(self,
-                    runner,
-                    batch_idx: int,
-                    data_batch=None,
-                    outputs=None) -> None:
+    def after_train(self, runner):
         runner.logger.info('after_train in EvaluateChatHook.')
         self._generate_samples(runner)
 
