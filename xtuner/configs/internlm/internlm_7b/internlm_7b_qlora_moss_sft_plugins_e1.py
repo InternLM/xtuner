@@ -13,7 +13,7 @@ from xtuner.dataset import MOSSSFTDataset
 from xtuner.dataset.collate_fns import default_collate_fn
 from xtuner.engine import DatasetInfoHook, EvaluateChatHook
 from xtuner.model import SupervisedFinetune
-from xtuner.utils import PROMPT_TEMPLATE
+from xtuner.utils import PROMPT_TEMPLATE, TASK_PROMPT
 
 #######################################################################
 #                          PART 1  Settings                           #
@@ -39,7 +39,8 @@ weight_decay = 0
 max_norm = 1  # grad clip
 
 # Evaluate the generation performance during the training
-prompt_template = PROMPT_TEMPLATE.moss_sft
+SYSTEM = TASK_PROMPT.moss_sft
+INSTRUCTION = PROMPT_TEMPLATE.moss_sft.INSTRUCTION
 evaluation_freq = 500
 evaluation_inputs = [
     '一个球体的表面积是384平方厘米，求它的体积。', '今有鸡兔同笼，上有二十头，下有六十二足， 问鸡兔各几何？', '介绍一下比尔盖茨'
@@ -132,7 +133,7 @@ custom_hooks = [
         every_n_iters=evaluation_freq,
         stop_word='<eoc>',
         evaluation_inputs=evaluation_inputs,
-        instruction=prompt_template.INSTRUCTION)
+        instruction=SYSTEM + INSTRUCTION)
 ]
 
 # configure default hooks
