@@ -38,7 +38,7 @@ PROMPT_TEMPLATE = ConfigDict(
         INSTRUCTION=('USER: {input} ASSISTANT: ')),
 )
 
-TASK_PROMPT = ConfigDict(
+TASK_TEMPLATE = ConfigDict(
     moss_sft=('You are an AI assistant whose name is {bot_name}.\n'
               'Capabilities and tools that {bot_name} can possess.\n'
               '- Inner thoughts: enabled.\n'
@@ -53,9 +53,11 @@ TASK_PROMPT = ConfigDict(
     arxiv_gentile=('If you are an expert in writing papers, please generate '
                    "a good paper title for this paper based on other authors' "
                    'descriptions of their abstracts.\n'),
+    colorist=('You are a professional color designer. Please provide the '
+              'corresponding colors based on the description of Human.\n'),
     coder=('You are a professional programer. Please provide the '
            'corresponding code based on the description of Human.\n'),
-    lawyer='你现在是一名专业的中国律师，请根据Human的问题给出准确、有理有据的回复。\n',
+    lawyer='你现在是一名专业的中国律师，请根据用户的问题给出准确、有理有据的回复。\n',
     medical='如果你是一名医生，请根据患者的描述回答医学问题。\n',
     sql=('If you are an expert in SQL, please generate a good SQL Query '
          'for Question based on the CREATE TABLE statement.\n'),
