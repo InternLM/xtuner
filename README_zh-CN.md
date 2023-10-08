@@ -120,6 +120,13 @@ XTuner 是一个轻量级微调大语言模型的工具库，由 [MMRazor](https
 
 ### 安装
 
+- 推荐使用 conda 先构建一个 Python-3.10 的虚拟环境
+
+  ```bash
+  conda create --name xtuner-env python=3.10 -y
+  conda activate xtuner-env
+  ```
+
 - 通过 pip 安装 XTuner：
 
   ```shell
