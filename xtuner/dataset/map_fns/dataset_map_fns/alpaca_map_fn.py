@@ -1,6 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-ALPACA_SYSTEM = ('Below is an instruction that describes a task. '
-                 'Write a response that appropriately completes the request.')
+ALPACA_SYSTEM = (
+    'Below is an instruction that describes a task. '
+    'Write a response that appropriately completes the request.\n')
 
 
 def alpaca_map_fn(example):

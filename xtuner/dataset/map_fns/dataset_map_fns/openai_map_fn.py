@@ -12,30 +12,33 @@ def openai_map_fn(example):
     Example after preprocessing:
         example["conversation"] = [
             {
-                "input": "You are an assistant that occasionally misspells
-                    words. Tell me a story.",
+                "system": "You are an assistant that occasionally misspells
+                    words.",
+                "input": "Tell me a story.",
                 "output": "One day a student went to schoool."
             }
         ]
     """
     messages = example['messages']
-    if len(messages) == 0:
-        return {'conversation': [{'input': '', 'output': ''}]}
-    if messages[0]['role'] == 'system':
-        messages[1][
-            'content'] = messages[0]['content'] + ' ' + messages[1]['content']
-        messages = messages[1:]
-    if len(messages) % 2:
-        # The last round of conversation solely consists of input
-        # without any output.
-        # Discard the input part of the last round, as this part is ignored in
-        # the loss calculation.
-        messages.pop()
+    system = ''
+    input = ''
     conversation = []
-    for i in range(0, len(messages), 2):
-        single_turn_conversation = {
-            'input': messages[i]['content'],
-            'output': messages[i + 1]['content']
-        }
-        conversation.append(single_turn_conversation)
+    while messages and messages[0]['role'] == 'assistant':
+        # Skip the first one if it is from assistant
+        messages = messages[1:]
+    for msg in messages:
+        if msg['role'] == 'system':
+            system = msg['content']
+        elif msg['role'] == 'user':
+            input += msg['content']
+        elif msg['role'] == 'assistant':
+            conversation.append({
+                'system': system,
+                'input': input,
+                'output': msg['content']
+            })
+            system = ''
+            input = ''
+        else:
+            raise NotImplementedError
     return {'conversation': conversation}
