@@ -55,8 +55,8 @@ class SupervisedFinetune(BaseModel):
     def _prepare_for_lora(self,
                           peft_model=None,
                           use_activation_checkpointing=True):
-        self.llm = prepare_model_for_kbit_training(self.llm,
-                                                   use_activation_checkpointing)
+        self.llm = prepare_model_for_kbit_training(
+            self.llm, use_activation_checkpointing)
         if self.lora.target_modules is None:
             modules = find_all_linear_names(self.llm)
             self.lora.target_modules = modules
