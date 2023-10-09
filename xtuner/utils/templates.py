@@ -2,11 +2,14 @@
 from mmengine.config import ConfigDict
 
 PROMPT_TEMPLATE = ConfigDict(
+    default=dict(
+        SYSTEM='<|System|>:{system}\n',
+        INSTRUCTION='<|User|>:{input}\n<|Bot|>:'),
     internlm_chat=dict(
         SYSTEM='<|System|>:{system}\n',
         INSTRUCTION='<|User|>:{input}<eoh>\n<|Bot|>:'),
     moss_sft=dict(SYSTEM='{system}\n', INSTRUCTION='<|Human|>: {input}<eoh>'),
-    llama_2_chat=dict(
+    llama2_chat=dict(
         SYSTEM=(
             '[INST] <<SYS>>\n You are a helpful, respectful and honest '
             'assistant. Always answer as helpfully as possible, while being '
