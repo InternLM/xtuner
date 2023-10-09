@@ -138,7 +138,7 @@ custom_hooks = [
         tokenizer=tokenizer,
         every_n_iters=evaluation_freq,
         evaluation_inputs=evaluation_inputs,
-        system='',
+        system=SYSTEM,
         prompt_template=prompt_template)
 ]
 
