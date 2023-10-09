@@ -25,16 +25,7 @@ class SupervisedFinetune(BaseModel):
         self.llm.config.use_cache = False
         dispatch_modules(self.llm)
 
-        if isinstance(lora, dict) or isinstance(lora, Config) or isinstance(
-                lora, ConfigDict):
-            self.lora = BUILDER.build(lora)
-        else:
-            self.lora = lora
-        self.peft_model = peft_model
-        self.use_lora = lora is not None
-        if self.use_lora:
-            self._prepare_for_lora(peft_model, use_gradient_checkpointing)
-        elif use_gradient_checkpointing:
+        if use_gradient_checkpointing:
             # For backward compatibility
             if hasattr(self.llm, 'enable_input_require_grads'):
                 self.llm.enable_input_require_grads()
@@ -48,6 +39,16 @@ class SupervisedFinetune(BaseModel):
 
             # enable gradient checkpointing for memory efficiency
             self.llm.gradient_checkpointing_enable()
+
+        if isinstance(lora, dict) or isinstance(lora, Config) or isinstance(
+                lora, ConfigDict):
+            self.lora = BUILDER.build(lora)
+        else:
+            self.lora = lora
+        self.peft_model = peft_model
+        self.use_lora = lora is not None
+        if self.use_lora:
+            self._prepare_for_lora(peft_model, use_gradient_checkpointing)
 
         self._is_init = True
 
