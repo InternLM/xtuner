@@ -13,7 +13,7 @@ from xtuner.dataset import ConcatDataset, MOSSSFTDataset
 from xtuner.dataset.collate_fns import default_collate_fn
 from xtuner.engine import DatasetInfoHook, EvaluateChatHook
 from xtuner.model import SupervisedFinetune
-from xtuner.utils import PROMPT_TEMPLATE
+from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
 
 #######################################################################
 #                          PART 1  Settings                           #
@@ -40,6 +40,7 @@ weight_decay = 0
 max_norm = 1  # grad clip
 
 # Evaluate the generation performance during the training
+SYSTEM = SYSTEM_TEMPLATE.moss_sft
 prompt_template = PROMPT_TEMPLATE.moss_sft
 evaluation_freq = 500
 evaluation_inputs = [
@@ -146,7 +147,8 @@ custom_hooks = [
         every_n_iters=evaluation_freq,
         stop_word='<eoc>',
         evaluation_inputs=evaluation_inputs,
-        instruction=prompt_template.INSTRUCTION_START)
+        system=SYSTEM,
+        prompt_template=prompt_template)
 ]
 
 # configure default hooks

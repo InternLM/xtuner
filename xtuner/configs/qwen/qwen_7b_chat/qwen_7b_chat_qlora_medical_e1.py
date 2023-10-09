@@ -15,7 +15,7 @@ from xtuner.dataset.collate_fns import default_collate_fn
 from xtuner.dataset.map_fns import medical_map_fn, template_map_fn_factory
 from xtuner.engine import DatasetInfoHook, EvaluateChatHook
 from xtuner.model import SupervisedFinetune
-from xtuner.utils import PROMPT_TEMPLATE
+from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
 
 #######################################################################
 #                          PART 1  Settings                           #
@@ -43,6 +43,7 @@ max_norm = 1  # grad clip
 
 # Evaluate the generation performance during the training
 evaluation_freq = 500
+SYSTEM = SYSTEM_TEMPLATE.medical
 evaluation_inputs = [
     '我有家族遗传性的过敏，请问可以可以献血吗？', '我爷爷有高血压，请问他可以喝咖啡吗？',
     '我女儿今年3岁了，从昨天晚上九点开始腹泻，到现在已经八个小时了，请问应该怎么办？'
@@ -140,7 +141,8 @@ custom_hooks = [
         every_n_iters=evaluation_freq,
         stop_word='<|im_end|>',
         evaluation_inputs=evaluation_inputs,
-        instruction=prompt_template.INSTRUCTION_START)
+        system=SYSTEM,
+        prompt_template=prompt_template)
 ]
 
 # configure default hooks
