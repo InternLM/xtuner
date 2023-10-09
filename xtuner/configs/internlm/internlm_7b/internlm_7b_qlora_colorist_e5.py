@@ -15,7 +15,7 @@ from xtuner.dataset.collate_fns import default_collate_fn
 from xtuner.dataset.map_fns import colors_map_fn, template_map_fn_factory
 from xtuner.engine import DatasetInfoHook, EvaluateChatHook
 from xtuner.model import SupervisedFinetune
-from xtuner.utils import PROMPT_TEMPLATE, TASK_TEMPLATE
+from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
 
 #######################################################################
 #                          PART 1  Settings                           #
@@ -42,7 +42,7 @@ max_norm = 1  # grad clip
 
 # Evaluate the generation performance during the training
 evaluation_freq = 200
-SYSTEM = TASK_TEMPLATE.colorist
+SYSTEM = SYSTEM_TEMPLATE.colorist
 evaluation_inputs = [
     '请给我一个像天空一样清澈透明的蓝色。', 'Please give me a clear blue like the sky.'
 ]

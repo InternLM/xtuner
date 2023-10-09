@@ -15,7 +15,7 @@ from xtuner.dataset.collate_fns import default_collate_fn
 from xtuner.dataset.map_fns import arxiv_map_fn, template_map_fn_factory
 from xtuner.engine import DatasetInfoHook, EvaluateChatHook
 from xtuner.model import SupervisedFinetune
-from xtuner.utils import PROMPT_TEMPLATE, TASK_TEMPLATE
+from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
 
 #######################################################################
 #                          PART 1  Settings                           #
@@ -44,7 +44,7 @@ max_norm = 1  # grad clip
 
 # Evaluate the generation performance during the training
 evaluation_freq = 500
-SYSTEM = TASK_TEMPLATE.arxiv_gentile
+SYSTEM = SYSTEM_TEMPLATE.arxiv_gentile
 evaluation_inputs = [
     ('We present InternLM, a multilingual foundational language '
      'model with 104B parameters. InternLM is pre-trained on a large '

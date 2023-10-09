@@ -38,7 +38,7 @@ PROMPT_TEMPLATE = ConfigDict(
         INSTRUCTION=('USER: {input} ASSISTANT: ')),
 )
 
-TASK_TEMPLATE = ConfigDict(
+SYSTEM_TEMPLATE = ConfigDict(
     moss_sft=('You are an AI assistant whose name is {bot_name}.\n'
               'Capabilities and tools that {bot_name} can possess.\n'
               '- Inner thoughts: enabled.\n'

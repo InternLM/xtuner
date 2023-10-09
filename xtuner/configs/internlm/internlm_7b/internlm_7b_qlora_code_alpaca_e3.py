@@ -15,7 +15,7 @@ from xtuner.dataset.collate_fns import default_collate_fn
 from xtuner.dataset.map_fns import code_alpaca_map_fn, template_map_fn_factory
 from xtuner.engine import DatasetInfoHook, EvaluateChatHook
 from xtuner.model import SupervisedFinetune
-from xtuner.utils import PROMPT_TEMPLATE, TASK_TEMPLATE
+from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
 
 #######################################################################
 #                          PART 1  Settings                           #
@@ -42,7 +42,7 @@ max_norm = 1  # grad clip
 
 # Evaluate the generation performance during the training
 evaluation_freq = 100
-SYSTEM = TASK_TEMPLATE.coder
+SYSTEM = SYSTEM_TEMPLATE.coder
 evaluation_inputs = [
     ('写一个Python函数，将十六进制颜色代码（如#0066ee）转换为对应的'
      '红、绿、蓝（RGB）三个颜色分量值，并以元组的形式返回。'),

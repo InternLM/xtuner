@@ -17,7 +17,7 @@ from xtuner.dataset.map_fns import (crime_kg_assitant_map_fn,
                                     template_map_fn_factory)
 from xtuner.engine import DatasetInfoHook, EvaluateChatHook
 from xtuner.model import SupervisedFinetune
-from xtuner.utils import PROMPT_TEMPLATE, TASK_TEMPLATE
+from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
 
 #######################################################################
 #                          PART 1  Settings                           #
@@ -46,7 +46,7 @@ max_norm = 1  # grad clip
 
 # Evaluate the generation performance during the training
 evaluation_freq = 500
-SYSTEM = TASK_TEMPLATE.lawyer
+SYSTEM = SYSTEM_TEMPLATE.lawyer
 evaluation_inputs = ['请问离婚需要准备什么材料？', '销售鳄鱼皮包违法吗？']
 
 #######################################################################
