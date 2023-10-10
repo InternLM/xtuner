@@ -27,7 +27,6 @@
             "output": "xxx"
         },
         {
-            "system": "xxx",
             "input": "xxx",
             "output": "xxx"
         }
@@ -38,7 +37,7 @@
 在训练过程中，我们会将一条数据中的多组 "system"、"input" 和 "output" 进行拼接，之后输入模型，并行计算每个位置的 loss ，但只有 "output" 部分对应的 loss 参与梯度回传，如下图所示。
 
 <div  align="center">
-<img src="https://github.com/open-mmlab/mmrazor/assets/41630003/d5d696de-c026-494c-8b95-b1ba4b492939" alt="Image" width="700" />
+<img src="https://github.com/LZHgrla/xtuner/assets/36994684/5ac1ef47-e7e3-43c3-b6b5-5df1aceef970" alt="Image" width="700" />
 </div>
 
 其中 \<EOS> token 和 \<BOS> token 用于表示句子或文本的开始和结束。
@@ -98,7 +97,7 @@
 ```
 
 <div  align="center">
-<img src="https://github.com/open-mmlab/mmrazor/assets/41630003/91499b4e-faa2-4e7c-92ee-2fe614a8243f" alt="Image" width="700" />
+<img src="https://github.com/LZHgrla/xtuner/assets/36994684/6eed31aa-70e4-47c7-bfdb-20fa7a1312ea" alt="Image" width="700" />
 </div>
 
 ## 多轮对话数据集格式
@@ -123,7 +122,7 @@ Assistant3：You are welcome.
 System、User1、Assistant1、User2、Assistant2、User3的文本都视为模型的输入部分，将 Assistant3 的文本视为模型的预测部分，只有 Assistant3 部分的 loss 参与权重更新。
 
 <div  align="center">
-<img src="https://github.com/open-mmlab/mmrazor/assets/41630003/ff4a44c4-43d7-45a7-8749-19b545f90207" alt="Image" width=1100" />
+<img src="https://github.com/LZHgrla/xtuner/assets/36994684/ce869cd5-c1ca-4bc8-9bc3-14f63abb7a5f" alt="Image" width=1100" />
 </div>
 
 这种方法的弊端在于没有充分利用多轮对话的训练数据，因为 Assistant1 和 Assistant2 的内容没有参与模型训练，导致训练数据利用率较低。
@@ -133,7 +132,7 @@ System、User1、Assistant1、User2、Assistant2、User3的文本都视为模型
 将一条多轮对话数据，拆分成多条数据。例如将以上示例拆分成如下三条数据。
 
 <div  align="center">
-<img src="https://github.com/open-mmlab/mmrazor/assets/41630003/c0efbf9b-94bc-46ce-b500-e062c2cb59f7" alt="Image" width=1100" />
+<img src="https://github.com/LZHgrla/xtuner/assets/36994684/9fd714fc-20bd-4d4c-a4cf-3f95712f1db8" alt="Image" width=1100" />
 </div>
 
 相比于方法1，方法2可以充分利用每一轮对话的数据，但需要将一条包含 n 轮对话的数据拆分为 n 条数据，
@@ -144,7 +143,7 @@ System、User1、Assistant1、User2、Assistant2、User3的文本都视为模型
 XTuner 训练多轮对话模型时，采取了一种更加充分高效的方法，如下图所示。
 
 <div align="center">
-<img src="https://github.com/open-mmlab/mmrazor/assets/41630003/caaac51f-e982-46db-8f68-6ce28f343183" alt="Image" width=1100" />
+<img src="https://github.com/LZHgrla/xtuner/assets/36994684/ec67b610-a3b2-4fa7-91ad-a9a235fdb820" alt="Image" width=1100" />
 </div>
 
 我们将多轮对话进行拼接，之后输入模型，并行计算每个位置的 loss，而只有 Output 部分的 loss 参与回传。因此 XTuner 中多轮对话数据集格式如下所示：
