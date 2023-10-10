@@ -194,7 +194,15 @@ XTuner 提供与大语言模型对话的工具。
 xtuner chat ${NAME_OR_PATH_TO_LLM} --adapter {NAME_OR_PATH_TO_ADAPTER} [optional arguments]
 ```
 
-例如，与 Llama2-7b + MOSS-003-SFT adapter 对话：
+例如：
+
+与 InternLM-7B + Alpaca adapter 对话：
+
+```shell
+xtuner chat internlm/internlm-7b --adapter xtuner/internlm-7b-qlora-alpaca --prompt-template internlm_chat --system-template alpaca
+```
+
+与 Llama2-7b + MOSS-003-SFT adapter 对话：
 
 ```shell
 xtuner chat meta-llama/Llama-2-7b-hf --adapter xtuner/Llama-2-7b-qlora-moss-003-sft --bot-name Llama2 --prompt-template moss_sft --system-template moss_sft --with-plugins calculate solve search --command-stop-word "<eoc>" --answer-stop-word "<eom>" --no-streamer
