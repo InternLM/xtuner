@@ -1,5 +1,8 @@
 # Multi-turn Dialogue Data Pipeline
 
+- [Using Dataset in HuggingFace Hub](#using-dataset-in-huggingface-hub)
+- [Using Custom Datasets](#using-custom-datasets)
+
 The purpose of multi-turn dialogue command fine-tuning is to enhance the model's ability for multi-turn dialogues.
 
 XTuner supports the use of HuggingFace Hub datasets or custom datasets for SFT (Supervised FineTune). The main difference between them is that when using the HuggingFace Hub dataset, the original data needs to be mapped to the [multi-turn dialogue data format](./dataset_format.md#multi-turn-dialogue-dataset-format) defined by XTuner. For custom datasets, it is recommended that users construct the dataset according to the [multi-turn dialogue data format](./dataset_format.md#multi-turn-dialogue-dataset-format).

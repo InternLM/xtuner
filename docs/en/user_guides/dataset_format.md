@@ -1,5 +1,12 @@
 # Dataset Format
 
+- [Incremental Pre-training Dataset Format](#incremental-pre-training-dataset-format)
+- [Single-turn Dialogue Dataset Format](#single-turn-dialogue-dataset-format)
+- [Multi-turn Dialogue Dataset Format](#multi-turn-dialogue-dataset-format)
+  - [Method 1](#method-1)
+  - [Method 2](#method-2)
+  - [Method in XTuner](#method-in-xtuner)
+
 The Supervised Finetune (SFT) of large language models aims to improve the performance of pre-trained models on specific tasks through supervised fine-tuning. To support as many downstream tasks as possible, XTuner supports three dataset formats: incremental pre-training, single-turn dialogue, and multi-turn dialogue.
 
 - The incremental pre-training dataset is used to enhance the model's capabilities in a specific domain or task.

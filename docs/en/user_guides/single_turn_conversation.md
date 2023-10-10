@@ -1,5 +1,10 @@
 # Single-turn Dialogue Data Pipeline
 
+- [Using Dataset in HuggingFace Hub](#using-dataset-in-huggingface-hub)
+- [Using Custom Datasets](#using-custom-datasets)
+  - [Using Alpaca Format Custom Datasets](#using-alpaca-format-custom-datasets)
+  - [Using Other Format Custom Datasets](#using-other-format-custom-datasets)
+
 Single-turn dialogue instruction fine-tuning aims to enhance the model's ability to respond to specific instructions.
 
 XTuner offers support for utilizing HuggingFace Hub datasets, Alpaca-Format custom datasets, or other format custom datasets for SFT (Supervised FineTune). The main differences between these options are as follows:

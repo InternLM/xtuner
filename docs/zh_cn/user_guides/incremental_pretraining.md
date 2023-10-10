@@ -1,14 +1,15 @@
 # 增量预训练 data pipeline
 
-增量预训练旨在提升模型在特定领域或任务的能力。
+- [使用 HuggingFace Hub 数据集](#使用-huggingface-hub-数据集)
+- [使用自定义数据集](#使用自定义数据集)
 
-## 数据集构建
+增量预训练旨在提升模型在特定领域或任务的能力。
 
 XTuner 支持使用 HuggingFace Hub 数据集或自定义数据集进行 SFT（Supervised FineTune）。二者的主要区别在于，使用 HuggingFace Hub 数据集时需要将原始数据映射为 XTuner 定义的[增量预训练数据格式](./dataset_format.md#增量预训练数据集格式)。而对于自定义数据集则推荐用户按照[增量预训练数据格式](./dataset_format.md#增量预训练数据集格式)构造数据集。
 
-### 使用 HuggingFace Hub 数据集
+## 使用 HuggingFace Hub 数据集
 
-#### Step 1, 映射原始数据集为标准格式
+### Step 1, 映射原始数据集为标准格式
 
 由于不同数据集的格式各有不同，因此需要将原始数据映射为 XTuner 定义的[增量预训练数据格式](./dataset_format.md#增量预训练数据集格式)。XTuner 支持通过 map function 来实现格式的映射。下面以 [oasst1](https://huggingface.co/datasets/OpenAssistant/oasst1) 数据集为例介绍如何实现数据映射。
 
@@ -57,7 +58,7 @@ def custom_map_fn(example):
 
 ```
 
-#### Step 2, 列出候选模型名字
+### Step 2, 列出候选模型名字
 
 XTuner 提供多个开箱即用的配置文件，用户可以通过下列命令查看：
 
@@ -67,7 +68,7 @@ xtuner list-cfg -p internlm
 
 `-p`为模糊查找，若想训练其他模型，可以修改`internlm`为 XTuner 支持的其他模型名称。
 
-#### Step 3, 导出 config 文件
+### Step 3, 导出 config 文件
 
 如果所提供的配置文件不能满足使用需求，请导出所提供的配置文件并进行相应更改：
 
@@ -81,7 +82,7 @@ xtuner copy-cfg ${CONFIG_NAME} ${SAVE_DIR}
 xtuner copy-cfg internlm_7b_qlora_oasst1_e3 .
 ```
 
-#### Step 4, 修改 config 文件
+### Step 4, 修改 config 文件
 
 对 Step 3 复制得到的 config 文件需要进行如下修改：
 
@@ -139,7 +140,7 @@ custom_hooks = [
 ...
 ```
 
-#### Step 5, 检查数据集（可选）
+### Step 5, 检查数据集（可选）
 
 在修改配置文件后，可以运行`xtuner/tools/check_custom_dataset.py`脚本验证数据集是否正确构建。
 
@@ -149,11 +150,11 @@ xtuner check-custom-dataset $CONFIG
 
 其中 `$CONFIG` 是 Step 4 修改过的 config 的文件路径。
 
-### 使用自定义数据集
+## 使用自定义数据集
 
 在使用自定义数据集进行增量预训练时，我们推荐将数据集构造为 XTuner 定义的[增量预训练数据格式](./dataset_format.md#增量预训练数据集格式)。若自定义数据集格式为 `oasst1` 等其他格式，可参考[使用HuggingFace Hub数据集](#使用huggingface-hub数据集)一节。
 
-#### Step 1, 数据准备
+### Step 1, 数据准备
 
 按照 XTuner 定义的[增量预训练数据格式](./dataset_format.md#增量预训练数据集格式)准备自定义数据：
 
@@ -178,7 +179,7 @@ xtuner check-custom-dataset $CONFIG
 ]
 ```
 
-#### Step 2, 列出候选模型名字
+### Step 2, 列出候选模型名字
 
 ```bash
 xtuner list-cfg -p internlm
@@ -186,13 +187,13 @@ xtuner list-cfg -p internlm
 
 `-p` 为模糊查找，若想训练其他模型，可以修改 `internlm` 为 XTuner 支持的其他模型名称。
 
-#### Step 3, 复制 config 文件
+### Step 3, 复制 config 文件
 
 ```bash
 xtuner copy-cfg internlm_7b_qlora_oasst1_e3 .
 ```
 
-#### Step 4, 修改 config 文件
+### Step 4, 修改 config 文件
 
 对 Step 3 复制得到的 config 文件需要进行如下修改：
 
@@ -249,7 +250,7 @@ custom_hooks = [
 ...
 ```
 
-#### Step 5, 检查数据集（可选）
+### Step 5, 检查数据集（可选）
 
 在修改配置文件后，可以运行`xtuner/tools/check_custom_dataset.py`脚本验证数据集是否正确构建。
 

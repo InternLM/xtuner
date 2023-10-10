@@ -1,14 +1,15 @@
 # Incremental Pre-training Data Pipeline
 
-Incremental pre-training aims to enhance the model's capability in a specific domain or task.
+- [Using Dataset in HuggingFace Hub](#using-dataset-in-huggingface-hub)
+- [Using Custom Datasets](#using-custom-datasets)
 
-## Dataset Construction
+Incremental pre-training aims to enhance the model's capability in a specific domain or task.
 
 XTuner supports using HuggingFace Hub datasets or custom datasets for SFT (Supervised FineTune). The main difference between them is that when using HuggingFace Hub datasets, it is necessary to map the original data to the [incremental pre-training data format](./dataset_format.md#incremental-pre-training-dataset-format)defined by XTuner. For custom datasets, users are recommended to construct the dataset according to the [incremental pre-training data format](./dataset_format.md#incremental-pre-training-dataset-format).
 
-### Using Dataset in HuggingFace Hub
+## Using Dataset in HuggingFace Hub
 
-#### Step 1, Map Original Dataset to Standard Format
+### Step 1, Map Original Dataset to Standard Format
 
 Since different datasets have different formats, it is necessary to map the original data to the [incremental pre-training data format](./dataset_format.md#incremental-pre-training-dataset-format) defined by XTuner. XTuner supports the implementation of format mapping through the map function. The following uses the [oasst1 dataset](https://huggingface.co/datasets/OpenAssistant/oasst1) as an example to explain how to implement data mapping.
 
@@ -57,7 +58,7 @@ def custom_map_fn(example):
 
 ```
 
-#### Step 2, List Candidate Model Names
+### Step 2, List Candidate Model Names
 
 XTuner provides several ready-to-use configuration files. Users can view them with the following command:
 
@@ -67,7 +68,7 @@ xtuner list-cfg -p internlm
 
 `-p` is used for fuzzy search. If you want to train other models, you can replace internlm with other model names supported by XTuner.
 
-#### Step 3, Export the Config File
+### Step 3, Export the Config File
 
 If the provided configuration file does not meet your needs, please export the provided configuration file and make corresponding changes:
 
@@ -81,7 +82,7 @@ For example, you can export the config named \`internlm_7b_qlora_oasst1_e3\`\` t
 xtuner copy-cfg internlm_7b_qlora_oasst1_e3 .
 ```
 
-#### Step 4, Modify the Config File
+### Step 4, Modify the Config File
 
 The following modifications need to be made to the config file copied in Step 3:
 
@@ -139,7 +140,7 @@ custom_hooks = [
 ...
 ```
 
-#### Step 5, Check custom Dataset (Optional)
+### Step 5, Check custom Dataset (Optional)
 
 After modifying the config file, you can execute the 'xtuner/tools/check_custom_dataset.py' script to verify the correct construction of the dataset.
 
@@ -149,11 +150,11 @@ xtuner check-custom-dataset $CONFIG
 
 `$CONFIG` represents the file path of the modified configuration file in Step 4.
 
-### Using Custom Datasets
+## Using Custom Datasets
 
 When using custom datasets for incremental pre-training, we recommend constructing the dataset according to the [incremental pre-training data format](./dataset_format.md#incremental-pre-training-dataset-format) defined by XTuner. If the custom dataset is in other formats such as oasst1, refer to the section on [Using Dataset in HuggingFace Hub](#using-dataset-in-huggingface-hub).
 
-#### Step 1, Data Preparation
+### Step 1, Data Preparation
 
 Prepare custom data according to the [incremental pre-training data format](./dataset_format.md#incremental-pre-training-dataset-format) defined by XTuner:
 
@@ -178,7 +179,7 @@ Prepare custom data according to the [incremental pre-training data format](./da
 ]
 ```
 
-#### Step 2, List Candidate Model Names
+### Step 2, List Candidate Model Names
 
 ```bash
 xtuner list-cfg -p internlm
@@ -186,13 +187,13 @@ xtuner list-cfg -p internlm
 
 The `-p` option is for fuzzy search. If you want to train other models, you can replace internlm with the name of any other model supported by XTuner.
 
-#### Step 3, Export the Config File
+### Step 3, Export the Config File
 
 ```bash
 xtuner copy-cfg internlm_7b_qlora_oasst1_e3 .
 ```
 
-#### Step 4, Modify the config file
+### Step 4, Modify the config file
 
 Modifications need to be made to the config file obtained in Step 3 as follows:
 
@@ -249,7 +250,7 @@ custom_hooks = [
 ...
 ```
 
-#### Step 5, Check custom Dataset (Optional)
+### Step 5, Check custom Dataset (Optional)
 
 After modifying the config file, you can execute the 'xtuner/tools/check_custom_dataset.py' script to verify the correct construction of the dataset.
 

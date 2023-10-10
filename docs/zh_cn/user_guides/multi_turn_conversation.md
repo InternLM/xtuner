@@ -1,5 +1,8 @@
 # 多轮对话 data pipeline
 
+- [使用 HuggingFace Hub 数据集](#使用-huggingface-hub-数据集)
+- [使用自定义数据集](#使用自定义数据集)
+
 多轮对话指令微调旨在提升模型的多轮对话能力，在数据处理阶段需要将原始数据转换为XTuner支持的数据集格式。
 
 XTuner 支持使用 HuggingFace Hub 数据集或自定义数据集进行 SFT（Supervised FineTune）。二者的主要区别在于，使用 HuggingFace Hub 数据集时需要将原始数据映射为 XTuner 定义的[多轮对话数据格式](./dataset_format.md#多轮对话数据集格式)，而对于自定义数据集则推荐用户按照[多轮对话数据格式](./dataset_format.md#多轮对话数据集格式)构造数据集。

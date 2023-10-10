@@ -1,5 +1,10 @@
 # 单轮对话 data pipeline
 
+- [使用 HuggingFace Hub 数据集](#使用-huggingface-hub-数据集)
+- [使用自定义数据集](#使用自定义数据集)
+  - [使用 Alpaca 格式的自定义数据集](#使用-alpaca-格式的自定义数据集)
+  - [使用其他格式自定义数据集](#使用其他格式自定义数据集)
+
 单轮对话指令微调旨在提升模型回复特定指令的能力，在数据处理阶段需要将原始数据转换为XTuner支持的数据集格式。
 
 XTuner 支持使用 HuggingFace Hub 数据集、Alpaca 格式的自定义数据集以及其他格式的自定义数据集进行 SFT（Supervised FineTune）。三者的主要区别在于：
