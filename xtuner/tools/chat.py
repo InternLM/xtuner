@@ -118,7 +118,7 @@ def main():
         solve_open = False
         search_open = False
     else:
-        assert args.prompt_template == args.systen_template == 'moss_sft'
+        assert args.prompt_template == args.system_template == 'moss_sft'
         from plugins import plugins_api
         inner_thoughts_open = True
         calculate_open = 'calculate' in args.with_plugins
