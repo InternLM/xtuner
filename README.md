@@ -197,10 +197,10 @@ xtuner chat ${NAME_OR_PATH_TO_LLM} --adapter {NAME_OR_PATH_TO_ADAPTER} [optional
 
 For example, we can start the chat with 
 
-InternLM-7B with adapter trained from Alpaca:
+InternLM-7B with adapter trained from Alpaca-enzh:
 
 ```shell
-xtuner chat internlm/internlm-7b --adapter xtuner/internlm-7b-qlora-alpaca --prompt-template internlm_chat --system-template alpaca
+xtuner chat internlm/internlm-7b --adapter xtuner/internlm-7b-qlora-alpaca-enzh --prompt-template internlm_chat --system-template alpaca
 ```
 
 Llama2-7b with adapter trained from MOSS-003-SFT:
