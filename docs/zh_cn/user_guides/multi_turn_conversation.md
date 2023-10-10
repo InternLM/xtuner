@@ -63,7 +63,7 @@ Dataset({
 
 ```python
 # 假设将该函数存放在./map_fn.py文件中
-SYSTEM_OASST1 = ''  # oasst1 does not set the system text 
+SYSTEM_OASST1 = ''  # oasst1 does not set the system text
 def custom_map_fn(example):
     r"""
     Example before preprocessing:
