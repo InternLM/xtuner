@@ -195,7 +195,7 @@ XTuner provides tools to chat with pretrained / fine-tuned LLMs.
 xtuner chat ${NAME_OR_PATH_TO_LLM} --adapter {NAME_OR_PATH_TO_ADAPTER} [optional arguments]
 ```
 
-For example, we can start the chat with 
+For example, we can start the chat with
 
 InternLM-7B with adapter trained from Alpaca-enzh:
 
