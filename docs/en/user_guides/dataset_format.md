@@ -98,7 +98,7 @@ The single-turn dialogue dataset typically consists of a single instruction (or 
 
 ## Multi-turn Dialogue Dataset Format
 
-The multi-turn dialogue dataset typically consists of multiple rounds of instructions (or questions) and their corresponding GroundTruth answers. Suppose we have a piece of multi-turn dialogue data. For ease of introduction, for the nth round of dialogue, we set the output corresponding to User and Assistant as Usern and Assistantn.
+The multi-turn dialogue dataset typically consists of multiple rounds of instructions (or questions) and their corresponding GroundTruth answers. Suppose we have a piece of multi-turn dialogue data. For ease of introduction, for the nth round of dialogue, we set the output corresponding to User and Assistant as UserN and AssistantN.
 
 ```text
 User1：Hello?
