@@ -232,7 +232,6 @@ train_dataset = dict(
 [{
     "conversation":[
         {
-
             "system": "xxx",
             "input": "xxx",
             "output": "xxx"

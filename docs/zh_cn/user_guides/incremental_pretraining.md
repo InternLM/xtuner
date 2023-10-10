@@ -42,7 +42,7 @@ Dataset({
 
 ```python
 # 假设将该函数存放在./map_fn.py文件中
-def oasst1_incremental_map_fn(example):
+def custom_map_fn(example):
     """
     >>> train_ds = ds['train'].map(oasst1_map_fn)
     >>> train_ds
@@ -85,11 +85,11 @@ xtuner copy-cfg internlm_7b_qlora_oasst1_e3 .
 
 对 Step 3 复制得到的 config 文件需要进行如下修改：
 
-1. 导入 Step 1 中实现的映射函数 `oasst1_incremental_map_fn`
-2. 使用 `oasst1_incremental_map_fn` 替换 `train_dataset` 中的 `dataset_map_fn`
+1. 导入 Step 1 中实现的映射函数 `custom_map_fn`
+2. 使用 `custom_map_fn` 替换 `train_dataset` 中的 `oasst1_map_fn`
 3. 将 `train_dataset` 中的 `template_map_fn` 置为None（因为无需将对话模板加入至增量预训练数据集中）
 4. 调整原始数据集的路径，关于 `load_dataset` 的相关操作可以参考[用户文档](https://huggingface.co/docs/datasets/loading)
-5. （可选）如果你希望利用 XTuner 提供的 `EvaluateChatHook` 在训练中查看模型的生成结果，你还需要关闭 `prompt_template` 以去除对话模版。（注意：由于增量预训练时的模型只具备续写功能，不具备对话功能，因此在 `EvaluateChatHook`打印的对话结果中，模型可能会无法正常停止生成。）
+5. 关闭 `EvaluateChatHook`。由于增量预训练时的模型只具备续写功能，不具备对话功能，如果开启 `EvaluateChatHook`打印对话结果的话，模型会无法正常停止生成。
 
 ```diff
 from xtuner.dataset import process_hf_dataset
@@ -97,13 +97,13 @@ from datasets import load_dataset
 - from xtuner.dataset.map_fns import oasst1_map_fn, template_map_fn_factory
 + from mmengine.config import read_base
 + with read_base():
-+     from .map_fn import oasst1_incremental_map_fn
++     from .map_fn import custom_map_fn
 ...
 #######################################################################
 #                          PART 1  Settings                           #
 #######################################################################
 - data_path = 'timdettmers/openassistant-guanaco'
-- prompt_template = PROMPT_TEMPLATE.openassistant
+- prompt_template = PROMPT_TEMPLATE.internlm_chat
 + data_path = 'path/to/your/data'
 #######################################################################
 #                      STEP 3  Dataset & Dataloader                   #
@@ -114,20 +114,13 @@ train_dataset = dict(
     tokenizer=tokenizer,
     max_length=max_length,
 -   dataset_map_fn=oasst1_map_fn,
-+   dataset_map_fn=oasst1_incremental_map_fn,
++   dataset_map_fn=custom_map_fn,
 -   template_map_fn=dict(
 -       type=template_map_fn_factory, template=prompt_template),
 +   template_map_fn=None,
     remove_unused_columns=True,
     shuffle_before_pack=True,
     pack_to_max_length=pack_to_max_length)
-
-train_dataloader = dict(
-    batch_size=batch_size,
-    num_workers=dataloader_num_workers,
-    dataset=train_dataset,
-    sampler=dict(type=DefaultSampler, shuffle=True),
-    collate_fn=dict(type=default_collate_fn))
 ...
 #######################################################################
 #                           PART 5  Runtime                           #
@@ -135,23 +128,23 @@ train_dataloader = dict(
 # Log the dialogue periodically during the training process, optional
 custom_hooks = [
     dict(type=DatasetInfoHook, tokenizer=tokenizer),
-    dict(
-        type=EvaluateChatHook,
-        tokenizer=tokenizer,
-        every_n_iters=evaluation_freq,
-        evaluation_inputs=evaluation_inputs,
--       instruction=prompt_template.INSTRUCTION_START)
-+   )
+-   dict(
+-       type=EvaluateChatHook,
+-       tokenizer=tokenizer,
+-       every_n_iters=evaluation_freq,
+-       evaluation_inputs=evaluation_inputs,
+-       system=SYSTEM,
+-       instruction=prompt_template.INSTRUCTION)
 ]
 ...
 ```
 
-#### Step 5, 打印数据集（可选）
+#### Step 4, 检查数据集（可选）
 
-在修改配置文件后，可以打印处理后数据集的第一条数据，以验证数据集是否正确构建。
+在修改配置文件后，可以运行`xtuner/tools/check_custom_dataset.py`脚本验证数据集是否正确构建。
 
 ```bash
-xtuner log-dataset $CONFIG
+xtuner check-custom-dataset $CONFIG
 ```
 
 其中 `$CONFIG` 是 Step 4 修改过的 config 的文件路径。
@@ -191,7 +184,7 @@ xtuner log-dataset $CONFIG
 xtuner list-cfg -p internlm
 ```
 
-`-p`为模糊查找，若想训练其他模型，可以修改 `internlm` 为 XTuner 支持的其他模型名称。
+`-p` 为模糊查找，若想训练其他模型，可以修改 `internlm` 为 XTuner 支持的其他模型名称。
 
 #### Step 3, 复制 config 文件
 
@@ -206,7 +199,7 @@ xtuner copy-cfg internlm_7b_qlora_oasst1_e3 .
 1. 调整原始数据集的路径
 2. 由于数据集格式已经是标准格式了，需要将 `train_dataset` 中的 `dataset_map_fn` 置为None
 3. 将 `train_dataset` 中的 `template_map_fn` 置为None，因为不需要将对话模板加入至增量预训练数据集中
-4. （可选）设置对话模板以调用 `EvaluateChatHook` 在训练的各个阶段记录模型的对话结果
+4. 关闭 `EvaluateChatHook`。由于增量预训练时的模型只具备续写功能，不具备对话功能，如果开启 `EvaluateChatHook`打印对话结果的话，模型会无法正常停止生成。
 
 ```diff
 from xtuner.dataset import process_hf_dataset
@@ -238,13 +231,6 @@ train_dataset = dict(
     remove_unused_columns=True,
     shuffle_before_pack=True,
     pack_to_max_length=pack_to_max_length)
-
-train_dataloader = dict(
-    batch_size=batch_size,
-    num_workers=dataloader_num_workers,
-    dataset=train_dataset,
-    sampler=dict(type=DefaultSampler, shuffle=True),
-    collate_fn=dict(type=default_collate_fn))
 ...
 #######################################################################
 #                           PART 5  Runtime                           #
@@ -252,13 +238,13 @@ train_dataloader = dict(
 # Log the dialogue periodically during the training process, optional
 custom_hooks = [
     dict(type=DatasetInfoHook, tokenizer=tokenizer),
-    dict(
-        type=EvaluateChatHook,
-        tokenizer=tokenizer,
-        every_n_iters=evaluation_freq,
-        evaluation_inputs=evaluation_inputs,
--       instruction=prompt_template.INSTRUCTION_START)
-+   )
+-   dict(
+-       type=EvaluateChatHook,
+-       tokenizer=tokenizer,
+-       every_n_iters=evaluation_freq,
+-       evaluation_inputs=evaluation_inputs,
+-       system=SYSTEM,
+-       instruction=prompt_template.INSTRUCTION)
 ]
 ...
 ```
