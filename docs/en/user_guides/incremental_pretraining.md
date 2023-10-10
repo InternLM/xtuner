@@ -42,7 +42,7 @@ Therefore, you can map the original data to the standard format using the follow
 
 ```python
 # Suppose the function is stored in ./map_fn.py
-def oasst1_incremental_map_fn(example):
+def custom_map_fn(example):
     """
     >>> train_ds = ds['train'].map(oasst1_map_fn)
     >>> train_ds
@@ -86,10 +86,10 @@ xtuner copy-cfg internlm_7b_qlora_oasst1_e3 .
 The following modifications need to be made to the config file copied in Step 3:
 
 1. Import the mapping function `oasst1_incremental_map_fn` implemented in Step 1.
-2. Replace the `dataset_map_fn` in `train_dataset` with `oasst1_incremental_map_fn`.
-3. Set the `template_map_fn` in `train_dataset` to None (because there is no need to add the dialogue template to the incremental pre-training dataset).
+2. Replace the `dataset_map_fn` in `train_dataset` with `custom_map_fn`.
+3. Set the `template_map_fn` in `train_dataset` to \`None\`\` (because there is no need to add the dialogue template to the incremental pre-training dataset).
 4. Adjust the path of the original dataset. For operations related to `load_dataset`, refer to the [user document](https://huggingface.co/docs/datasets/loading).
-5. (Optional) If you wish to use XTuner's `EvaluateChatHook` to view the model's generation results during training, you also need to turn off `prompt_template` to remove the conversation template. (Note: Since the model only has a continuation function during incremental pre-training and doesn't have the conversation function, the model may not be able to stop generating normally in the dialogue results printed by `EvaluateChatHook`.)
+5. Close the `EvaluateChatHook`, since the model only has a continuation function during incremental pre-training and doesn't have the conversation function.
 
 ```diff
 from xtuner.dataset import process_hf_dataset
@@ -97,13 +97,13 @@ from datasets import load_dataset
 - from xtuner.dataset.map_fns import oasst1_map_fn, template_map_fn_factory
 + from mmengine.config import read_base
 + with read_base():
-+     from .map_fn import oasst1_incremental_map_fn
++     from .map_fn import custom_map_fn
 ...
 #######################################################################
 #                          PART 1  Settings                           #
 #######################################################################
 - data_path = 'timdettmers/openassistant-guanaco'
-- prompt_template = PROMPT_TEMPLATE.openassistant
+- prompt_template = PROMPT_TEMPLATE.internlm_chat
 + data_path = 'path/to/your/data'
 #######################################################################
 #                      STEP 3  Dataset & Dataloader                   #
@@ -114,20 +114,13 @@ train_dataset = dict(
     tokenizer=tokenizer,
     max_length=max_length,
 -   dataset_map_fn=oasst1_map_fn,
-+   dataset_map_fn=oasst1_incremental_map_fn,
++   dataset_map_fn=custom_map_fn,
 -   template_map_fn=dict(
 -       type=template_map_fn_factory, template=prompt_template),
 +   template_map_fn=None,
     remove_unused_columns=True,
     shuffle_before_pack=True,
     pack_to_max_length=pack_to_max_length)
-
-train_dataloader = dict(
-    batch_size=batch_size,
-    num_workers=dataloader_num_workers,
-    dataset=train_dataset,
-    sampler=dict(type=DefaultSampler, shuffle=True),
-    collate_fn=dict(type=default_collate_fn))
 ...
 #######################################################################
 #                           PART 5  Runtime                           #
@@ -135,23 +128,23 @@ train_dataloader = dict(
 # Log the dialogue periodically during the training process, optional
 custom_hooks = [
     dict(type=DatasetInfoHook, tokenizer=tokenizer),
-    dict(
-        type=EvaluateChatHook,
-        tokenizer=tokenizer,
-        every_n_iters=evaluation_freq,
-        evaluation_inputs=evaluation_inputs,
--       instruction=prompt_template.INSTRUCTION_START)
-+   )
+-   dict(
+-       type=EvaluateChatHook,
+-       tokenizer=tokenizer,
+-       every_n_iters=evaluation_freq,
+-       evaluation_inputs=evaluation_inputs,
+-       system=SYSTEM,
+-       instruction=prompt_template.INSTRUCTION)
 ]
 ...
 ```
 
-#### Step 5, Log Processed Dataset (Optional)
+#### Step 5, Check custom Dataset (Optional)
 
-After modifying the config file, you can print the first data of the processed dataset to verify whether the dataset has been constructed correctly.
+After modifying the config file, you can execute the 'xtuner/tools/check_custom_dataset.py' script to verify the correct construction of the dataset.
 
 ```bash
-xtuner log-dataset $CONFIG
+xtuner check-custom-dataset $CONFIG
 ```
 
 `$CONFIG` represents the file path of the modified configuration file in Step 4.
@@ -204,9 +197,9 @@ xtuner copy-cfg internlm_7b_qlora_oasst1_e3 .
 Modifications need to be made to the config file obtained in Step 3 as follows:
 
 1. Adjust the path of the original dataset
-2. Since the dataset format is already standardized, set `dataset_map_fn` in `train_dataset` to None
-3. Set `template_map_fn` in `train_dataset` to None, because there is no need to add conversation templates to the incremental pre-training dataset
-4. (Optional) Set a chat template to call `EvaluateChatHook` to record the results of the model's dialogues at various stages of training
+2. Since the dataset format is already standardized, set `dataset_map_fn` in `train_dataset` to `None`
+3. Set `template_map_fn` in `train_dataset` to `None`, because there is no need to add conversation templates to the incremental pre-training dataset
+4. Close the `EvaluateChatHook`, since the model only has a continuation function during incremental pre-training and doesn't have the conversation function.
 
 ```diff
 from xtuner.dataset import process_hf_dataset
@@ -238,13 +231,6 @@ train_dataset = dict(
     remove_unused_columns=True,
     shuffle_before_pack=True,
     pack_to_max_length=pack_to_max_length)
-
-train_dataloader = dict(
-    batch_size=batch_size,
-    num_workers=dataloader_num_workers,
-    dataset=train_dataset,
-    sampler=dict(type=DefaultSampler, shuffle=True),
-    collate_fn=dict(type=default_collate_fn))
 ...
 #######################################################################
 #                           PART 5  Runtime                           #
@@ -252,13 +238,13 @@ train_dataloader = dict(
 # Log the dialogue periodically during the training process, optional
 custom_hooks = [
     dict(type=DatasetInfoHook, tokenizer=tokenizer),
-    dict(
-        type=EvaluateChatHook,
-        tokenizer=tokenizer,
-        every_n_iters=evaluation_freq,
-        evaluation_inputs=evaluation_inputs,
--       instruction=prompt_template.INSTRUCTION_START)
-+   )
+-   dict(
+-       type=EvaluateChatHook,
+-       tokenizer=tokenizer,
+-       every_n_iters=evaluation_freq,
+-       evaluation_inputs=evaluation_inputs,
+-       system=SYSTEM,
+-       instruction=prompt_template.INSTRUCTION)
 ]
 ...
 ```

@@ -86,7 +86,7 @@ xtuner copy-cfg internlm_7b_qlora_oasst1_e3 .
 对 Step 3 复制得到的 config 文件需要进行如下修改：
 
 1. 导入 Step 1 中实现的映射函数 `custom_map_fn`
-2. 使用 `custom_map_fn` 替换 `train_dataset` 中的 `oasst1_map_fn`
+2. 使用 `custom_map_fn` 替换 `train_dataset` 中的 `dataset_map_fn`
 3. 将 `train_dataset` 中的 `template_map_fn` 置为None（因为无需将对话模板加入至增量预训练数据集中）
 4. 调整原始数据集的路径，关于 `load_dataset` 的相关操作可以参考[用户文档](https://huggingface.co/docs/datasets/loading)
 5. 关闭 `EvaluateChatHook`。由于增量预训练时的模型只具备续写功能，不具备对话功能，如果开启 `EvaluateChatHook`打印对话结果的话，模型会无法正常停止生成。
@@ -139,7 +139,7 @@ custom_hooks = [
 ...
 ```
 
-#### Step 4, 检查数据集（可选）
+#### Step 5, 检查数据集（可选）
 
 在修改配置文件后，可以运行`xtuner/tools/check_custom_dataset.py`脚本验证数据集是否正确构建。
 
@@ -197,8 +197,8 @@ xtuner copy-cfg internlm_7b_qlora_oasst1_e3 .
 对 Step 3 复制得到的 config 文件需要进行如下修改：
 
 1. 调整原始数据集的路径
-2. 由于数据集格式已经是标准格式了，需要将 `train_dataset` 中的 `dataset_map_fn` 置为None
-3. 将 `train_dataset` 中的 `template_map_fn` 置为None，因为不需要将对话模板加入至增量预训练数据集中
+2. 由于数据集格式已经是标准格式了，需要将 `train_dataset` 中的 `dataset_map_fn` 置为 `None`
+3. 将 `train_dataset` 中的 `template_map_fn` 置为 `None`，因为不需要将对话模板加入至增量预训练数据集中
 4. 关闭 `EvaluateChatHook`。由于增量预训练时的模型只具备续写功能，不具备对话功能，如果开启 `EvaluateChatHook`打印对话结果的话，模型会无法正常停止生成。
 
 ```diff

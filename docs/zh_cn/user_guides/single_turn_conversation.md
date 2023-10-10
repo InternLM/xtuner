@@ -1,9 +1,6 @@
 # 单轮对话 data pipeline
 
-单轮对话指令微调旨在提升模型回复特定指令的能力，其数据处理流程可以分为以下两部分：
-
-1. 按照相应数据集格式构造数据
-2. 向数据集中插入对话模板（可选）
+单轮对话指令微调旨在提升模型回复特定指令的能力，在数据处理阶段需要将原始数据转换为XTuner支持的数据集格式。
 
 XTuner 支持使用 HuggingFace Hub 数据集、Alpaca 格式的自定义数据集以及其他格式的自定义数据集进行 SFT（Supervised FineTune）。三者的主要区别在于：
 
@@ -111,7 +108,7 @@ xtuner copy-cfg internlm_7b_qlora_alpaca_e3 .
 对 Step 3 复制得到的 config 文件需要进行如下修改：
 
 1. 导入 Step 1 中实现的映射函数 `custom_map_fn`
-2. 用 `custom_map_fn` 替换 `train_dataset` 中的 `alpaca_map_fn`
+2. 用 `custom_map_fn` 替换 `train_dataset` 中的 `dataset_map_fn`
 3. 调整原始数据集的路径，关于 `load_dataset` 的相关操作可以参考[用户文档](https://huggingface.co/docs/datasets/loading)
 
 ```diff
@@ -147,7 +144,7 @@ train_dataset = dict(
 ...
 ```
 
-#### Step 5, 检查数据集（可选）
+### Step 5, 检查数据集（可选）
 
 在修改配置文件后，可以运行`xtuner/tools/check_custom_dataset.py`脚本验证数据集是否正确构建。
 
@@ -268,7 +265,7 @@ xtuner copy-cfg internlm_7b_qlora_alpaca_e3 .
 对 Step 3 复制得到的 config 文件需要进行如下修改：
 
 1. 调整原始数据集的路径
-2. 由于数据集格式已经是标准格式了，需要将 `train_dataset` 中的 `dataset_map_fn` 置为 None
+2. 由于数据集格式已经是标准格式了，需要将 `train_dataset` 中的 `dataset_map_fn` 置为 `None`
 
 ```diff
 from xtuner.dataset import process_hf_dataset
