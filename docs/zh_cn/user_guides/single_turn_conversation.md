@@ -36,6 +36,7 @@ Dataset({
 [{
     "conversation":[
         {
+            "system": "xxx",
             "input": "xxx",
             "output": "xxx"
         }
@@ -44,6 +45,7 @@ Dataset({
 {
     "conversation":[
         {
+            "system": "xxx",
             "input": "xxx",
             "output": "xxx"
         }
@@ -55,7 +57,9 @@ Dataset({
 
 ```python
 # 假设将该函数存放在./map_fn.py文件中
-def alpaca_map_fn(example):
+SYSTEM_ALPACA = ('Below is an instruction that describes a task. '
+                 'Write a response that appropriately completes the request.\n')
+def custom_map_fn(example):
     """
     >>> train_ds = ds['train'].map(alpaca_map_fn)
     >>> train_ds
@@ -64,14 +68,15 @@ def alpaca_map_fn(example):
         num_rows: 52002
     })
     >>> train_ds[0]['conversation']
-    [{'input': 'xxx', 'output': 'xxx'}]
+    [{'system': 'xxx', 'input': 'xxx', 'output': 'xxx'}]
     """
-    if example.get('output', '') == '<nooutput>':
-        return {'conversation': [{'input': '', 'output': ''}]}
+    if example.get('output') == '<nooutput>':
+        return {'conversation': []}
     else:
         return {
             'conversation': [{
-                'input': example['input'],
+                'system': SYSTEM_ALPACA,
+                'input': f"{example['instruction']}\n{example['input']}",
                 'output': example['output']
             }]
         }
@@ -101,32 +106,13 @@ xtuner copy-cfg ${CONFIG_NAME} ${SAVE_DIR}
 xtuner copy-cfg internlm_7b_qlora_alpaca_e3 .
 ```
 
-### Step 4 设置对话模板（可选）
+### Step 4, 修改 config 文件
 
-对话模板是指用于生成对话的预定义模式或结构。这些模板可以包含问句、回答或多轮对话中的不同角色的发言。在训练数据集中加入对话模板有利于模型生成有结构和逻辑的对话，并提供更准确、一致和合理的回答。
+对 Step 3 复制得到的 config 文件需要进行如下修改：
 
-不同数据集、不同语言模型可能对应着不同的对话模板。例如，[alpaca](https://huggingface.co/datasets/tatsu-lab/alpaca) 数据集的对话模板如下：
-
-```
-Below is an instruction that describes a task. Write a response that appropriately completes the request.
-
-### Instruction:
-xxx
-
-### Assistant:
-xxx
-```
-
-XTuner提供了一系列对话模板，你可以在 `xtuner/utils/templates.py` 中找到。其中，`INSTRUCTION_START` 和 `INSTRUCTION` 分别代表第一轮对话和后续若干轮对话所使用的对话模板。在单轮对话数据集（如 `alpaca`）中只会用到 `INSTRUCTION_START`。
-
-### Step 5, 修改 config 文件
-
-对Step 3 复制得到的 config 文件需要进行如下修改：
-
-1. 导入 Step 1 中实现的映射函数 `alpaca_map_fn`
-2. 用 `alpaca_map_fn` 替换 `train_dataset` 中的 `dataset_map_fn`
-3. （可选）通过 `prompt_template = PROMPT_TEMPLATE.alpaca` 来设置 `alpaca` 数据集对应的对话模板。
-4. 调整原始数据集的路径，关于 `load_dataset` 的相关操作可以参考[用户文档](https://huggingface.co/docs/datasets/loading)
+1. 导入 Step 1 中实现的映射函数 `custom_map_fn`
+2. 用 `custom_map_fn` 替换 `train_dataset` 中的 `alpaca_map_fn`
+3. 调整原始数据集的路径，关于 `load_dataset` 的相关操作可以参考[用户文档](https://huggingface.co/docs/datasets/loading)
 
 ```diff
 from xtuner.dataset import process_hf_dataset
@@ -135,15 +121,13 @@ from datasets import load_dataset
 + from xtuner.dataset.map_fns import template_map_fn_factory
 + from mmengine.config import read_base
 + with read_base():
-+     from .map_fn import alpaca_map_fn
++     from .map_fn import custom_map_fn
 ...
 #######################################################################
 #                          PART 1  Settings                           #
 #######################################################################
-- alpaca_en_path = 'tatsu-lab/alpaca'
+- data_path = 'tatsu-lab/alpaca'
 + data_path = 'path/to/your/data'
-
-+ prompt_template = PROMPT_TEMPLATE.alpaca
 ...
 #######################################################################
 #                      STEP 3  Dataset & Dataloader                   #
@@ -153,35 +137,29 @@ train_dataset = dict(
     dataset=dict(type=load_dataset, path=data_path),
     tokenizer=tokenizer,
     max_length=max_length,
-+   dataset_map_fn=alpaca_map_fn,
-+   template_map_fn=dict(
-+       type=template_map_fn_factory, template=prompt_template),
+-   dataset_map_fn=alpaca_map_fn,
++   dataset_map_fn=custom_map_fn,
+    template_map_fn=dict(
+        type=template_map_fn_factory, template=prompt_template),
     remove_unused_columns=True,
     shuffle_before_pack=True,
     pack_to_max_length=pack_to_max_length)
-
-train_dataloader = dict(
-    batch_size=batch_size,
-    num_workers=dataloader_num_workers,
-    dataset=train_dataset,
-    sampler=dict(type=DefaultSampler, shuffle=True),
-    collate_fn=dict(type=default_collate_fn))
 ...
 ```
 
-#### Step 6, 打印数据集（可选）
+#### Step 5, 检查数据集（可选）
 
-在修改配置文件后，可以打印处理后数据集的第一条数据，以验证数据集是否正确构建。
+在修改配置文件后，可以运行`xtuner/tools/check_custom_dataset.py`脚本验证数据集是否正确构建。
 
 ```bash
-xtuner log-dataset $CONFIG
+xtuner check-custom-dataset $CONFIG
 ```
 
-其中 `$CONFIG` 是 Step 5 修改过的 config 的文件路径。
+其中 `$CONFIG` 是 Step 4 修改过的 config 的文件路径。
 
 ## 使用自定义数据集
 
-### 使用 Alpaca 格式自定义数据集
+### 使用 Alpaca 格式的自定义数据集
 
 若自定义数据集的数据格式满足`alpaca`格式，可以参考以下步骤进行 SFT 训练。
 
@@ -207,13 +185,9 @@ xtuner copy-cfg ${CONFIG_NAME} ${SAVE_DIR}
 xtuner copy-cfg internlm_7b_qlora_alpaca_e3 .
 ```
 
-#### Step 3, 设置对话模板（可选）
+#### Step 3, 修改 config 文件
 
-参考[设置对话模板](#step-4-设置对话模板可选)
-
-#### Step 4, 修改 config 文件
-
-对 Step 3 复制得到的 config 文件需要进行如下修改：
+对 Step 2 复制得到的 config 文件需要进行如下修改：
 
 ```diff
 from xtuner.dataset import process_hf_dataset
@@ -224,7 +198,7 @@ from xtuner.utils import PROMPT_TEMPLATE
 #######################################################################
 #                          PART 1  Settings                           #
 #######################################################################
-- alpaca_en_path = 'tatsu-lab/alpaca'
+- data_path = 'tatsu-lab/alpaca'
 + data_path = 'path/to/your/json/data'
 
 prompt_template = PROMPT_TEMPLATE.alpaca
@@ -245,13 +219,6 @@ train_dataset = dict(
     remove_unused_columns=True,
     shuffle_before_pack=True,
     pack_to_max_length=pack_to_max_length)
-
-train_dataloader = dict(
-    batch_size=batch_size,
-    num_workers=dataloader_num_workers,
-    dataset=train_dataset,
-    sampler=dict(type=DefaultSampler, shuffle=True),
-    collate_fn=dict(type=default_collate_fn))
 ...
 ```
 
@@ -265,6 +232,8 @@ train_dataloader = dict(
 [{
     "conversation":[
         {
+
+            "system": "xxx",
             "input": "xxx",
             "output": "xxx"
         }
@@ -273,6 +242,7 @@ train_dataloader = dict(
 {
     "conversation":[
         {
+            "system": "xxx",
             "input": "xxx",
             "output": "xxx"
         }
@@ -294,17 +264,12 @@ xtuner list-cfg -p internlm
 xtuner copy-cfg internlm_7b_qlora_alpaca_e3 .
 ```
 
-#### Step 4, 设置对话模板（可选）
-
-参考[设置对话模板](#step-4-设置对话模板可选)
-
-#### Step 5, 修改 config 文件
+#### Step 4, 修改 config 文件
 
 对 Step 3 复制得到的 config 文件需要进行如下修改：
 
 1. 调整原始数据集的路径
 2. 由于数据集格式已经是标准格式了，需要将 `train_dataset` 中的 `dataset_map_fn` 置为 None
-3. 设置对话模板
 
 ```diff
 from xtuner.dataset import process_hf_dataset
@@ -315,10 +280,9 @@ from datasets import load_dataset
 #######################################################################
 #                          PART 1  Settings                           #
 #######################################################################
-- alpaca_en_path = 'tatsu-lab/alpaca'
+- data_path = 'tatsu-lab/alpaca'
 + data_path = 'path/to/your/json/data'
-
-+ prompt_template = PROMPT_TEMPLATE.alpaca
+...
 #######################################################################
 #                      STEP 3  Dataset & Dataloader                   #
 #######################################################################
@@ -329,23 +293,17 @@ train_dataset = dict(
 +       type=load_dataset, path='json', data_files=dict(train=data_path)),
     tokenizer=tokenizer,
     max_length=max_length,
+-   dataset_map_fn=alpaca_map_fn,
 +   dataset_map_fn=None,
-+   template_map_fn=dict(
-+       type=template_map_fn_factory, template=prompt_template),
+    template_map_fn=dict(
+        type=template_map_fn_factory, template=prompt_template),
     remove_unused_columns=True,
     shuffle_before_pack=True,
     pack_to_max_length=pack_to_max_length)
-
-train_dataloader = dict(
-    batch_size=batch_size,
-    num_workers=dataloader_num_workers,
-    dataset=train_dataset,
-    sampler=dict(type=DefaultSampler, shuffle=True),
-    collate_fn=dict(type=default_collate_fn))
 ...
 ```
 
-#### Step 6, 检查数据集（可选）
+#### Step 5, 检查数据集（可选）
 
 在修改配置文件后，可以运行`xtuner/tools/check_custom_dataset.py`脚本验证数据集是否正确构建。
 
@@ -353,4 +311,4 @@ train_dataloader = dict(
 xtuner check-custom-dataset $CONFIG
 ```
 
-其中 `$CONFIG` 是 Step 5 修改过的 config 的文件路径。
+其中 `$CONFIG` 是 Step 4 修改过的 config 的文件路径。
