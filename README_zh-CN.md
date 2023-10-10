@@ -196,10 +196,10 @@ xtuner chat ${NAME_OR_PATH_TO_LLM} --adapter {NAME_OR_PATH_TO_ADAPTER} [optional
 
 例如：
 
-与 InternLM-7B + Alpaca adapter 对话：
+与 InternLM-7B + Alpaca-enzh adapter 对话：
 
 ```shell
-xtuner chat internlm/internlm-7b --adapter xtuner/internlm-7b-qlora-alpaca --prompt-template internlm_chat --system-template alpaca
+xtuner chat internlm/internlm-7b --adapter xtuner/internlm-7b-qlora-alpaca-enzh --prompt-template internlm_chat --system-template alpaca
 ```
 
 与 Llama2-7b + MOSS-003-SFT adapter 对话：
