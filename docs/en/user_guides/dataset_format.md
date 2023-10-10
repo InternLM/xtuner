@@ -5,7 +5,7 @@ The Supervised Finetune (SFT) of large language models aims to improve the perfo
 - The incremental pre-training dataset is used to enhance the model's capabilities in a specific domain or task.
 - Single-turn and multi-turn dialogue datasets are often used in the instruction tuning stage to enhance the model's ability to respond to specific instructions.
 
-In the instruction tuning phase, our goal is to train the language model to answer based on human instructions. **Therefore, generally only the loss of the response part (Output) is used for gradient backpropagation, while the loss of the instruction part (Input) is not used for weight updates.** Based on this, we introduce "input" and "output" fields when preprocessing the dataset. The "input" field is used to save fields that do not need to compute loss, such as user instructions, whereas the "output" field is used to save fields that do need to compute loss, such as the GroundTruth answers corresponding to input instructions.
+In the instruction tuning phase, our goal is to train the language model to answer based on human instructions. **Therefore, generally only the loss of the response part (Output) is used for gradient backpropagation, while the loss of the instruction part (System, Input) is not used for weight updates.** Based on this, we introduce "system", "input" and "output" fields when preprocessing the dataset. The "system", "input" fields are used to save fields that do not need to compute loss, such as system and user instructions, whereas the "output" field is used to save fields that do need to compute loss, such as the GroundTruth answers corresponding to input instructions.
 
 To unify the incremental pre-training, single-turn dialogue, and multi-turn dialogue dataset formats, we set the dataset format to the following form:
 
@@ -13,6 +13,7 @@ To unify the incremental pre-training, single-turn dialogue, and multi-turn dial
 [{
     "conversation":[
         {
+            "system": "xxx",
             "input": "xxx",
             "output": "xxx"
         }
@@ -21,10 +22,12 @@ To unify the incremental pre-training, single-turn dialogue, and multi-turn dial
 {
     "conversation":[
         {
+            "system": "xxx",
             "input": "xxx",
             "output": "xxx"
         },
         {
+            "system": "xxx",
             "input": "xxx",
             "output": "xxx"
         }
@@ -32,7 +35,7 @@ To unify the incremental pre-training, single-turn dialogue, and multi-turn dial
 }]
 ```
 
-Throughout the training phase, we amalgamate several "input" and "output" pairs from a single data instance, which we then feed into the model. Loss is computed concurrently at each position, yet only the loss associated with the "output" component participates in the gradient backpropagation process. This process is elucidated in the figure below.
+Throughout the training phase, we amalgamate several "system", "input" and "output" pairs from a single data instance, which we then feed into the model. Loss is computed concurrently at each position, yet only the loss associated with the "output" component participates in the gradient backpropagation process. This process is elucidated in the figure below.
 
 <div  align="center">
 <img src="https://github.com/open-mmlab/mmrazor/assets/41630003/d5d696de-c026-494c-8b95-b1ba4b492939" alt="Image" width="700" />
@@ -42,12 +45,13 @@ Note that the <EOS> token and <BOS> token are used to indicate the start and end
 
 ## Incremental Pre-training Dataset Format
 
-As incremental pre-training is intended to help the model learn language knowledge and expressive abilities tailored for specific downstream tasks, the loss corresponding to the entire content of the dataset should be used for gradient backpropagation. Therefore, the "input" of the dataset is left empty, while the "output" consists of an entire piece of corpus data. The dataset format corresponding to the incremental pre-training task is shown as follows:
+As incremental pre-training is intended to help the model learn language knowledge and expressive abilities tailored for specific downstream tasks, the loss corresponding to the entire content of the dataset should be used for gradient backpropagation. Therefore, the "system" and "input" of the dataset are left empty, while the "output" consists of an entire piece of corpus data. The dataset format corresponding to the incremental pre-training task is shown as follows:
 
 ```json
 [{
     "conversation":[
         {
+            "system": "",
             "input": "",
             "output": "I am an artificial intelligence (AI) assistant named Puyu. I was created by the Shanghai AI Laboratory and my purpose is to assist users with various tasks through natural language processing technology."
         }
@@ -56,6 +60,7 @@ As incremental pre-training is intended to help the model learn language knowled
 {
     "conversation":[
         {
+            "system": "",
             "input": "",
             "output": "I am an artificial intelligence programmed to assist with various types of tasks, including answering questions, providing information, and performing automated processes."
         }
@@ -69,13 +74,14 @@ As incremental pre-training is intended to help the model learn language knowled
 
 ## Single-turn Dialogue Dataset Format
 
-The single-turn dialogue dataset typically consists of a single instruction (or question) and its corresponding GroundTruth answer. Since only the answer part should be used for gradient backpropagation, the "input" field of the dataset is the input instruction, and the "output" field is the corresponding answer. The format of the single-turn dialogue dataset is shown as follows:
+The single-turn dialogue dataset typically consists of a single instruction (or question) and its corresponding GroundTruth answer. Since only the answer part should be used for gradient backpropagation, the "system" and "input" fields of the dataset are the input instruction, and the "output" field is the corresponding answer. The format of the single-turn dialogue dataset is shown as follows:
 
 ```json
 [{
     "conversation":
         [
             {
+                "system": "You are an AI asssistant."
                 "input": "Give three tips for staying healthy.",
                 "output": "1.Eat a balanced diet. 2. Exercise regularly. 3. Get enough sleep."
             }
@@ -85,6 +91,7 @@ The single-turn dialogue dataset typically consists of a single instruction (or 
     "conversation":
         [
             {
+                "system": "You are an AI asssistant."
                 "input": "How to study English?",
                 "output": "1. Set clear goals. 2. Create a study plan. 3. Build vocabulary. 4. Practice speaking."
             }
@@ -101,6 +108,7 @@ The single-turn dialogue dataset typically consists of a single instruction (or 
 The multi-turn dialogue dataset typically consists of multiple rounds of instructions (or questions) and their corresponding GroundTruth answers. Suppose we have a piece of multi-turn dialogue data. For ease of introduction, for the nth round of dialogue, we set the output corresponding to User and Assistant as UserN and AssistantN.
 
 ```text
+System: You are an AI asssistant.
 User1：Hello?
 Assistant1：Hello! How can I help you?
 User2：What's the date today?
@@ -113,7 +121,7 @@ How can we use the above multi-turn dialogue data to train large models? Current
 
 ### Method 1
 
-The text of User1, Assistant1, User2, Assistant2, and User3 is all considered as the input part of the model, while the text of Assistant3 is viewed as the prediction part of the model. Only the loss from the Assistant3 part is involved in the weight update.
+The text of System, User1, Assistant1, User2, Assistant2, and User3 is all considered as the input part of the model, while the text of Assistant3 is viewed as the prediction part of the model. Only the loss from the Assistant3 part is involved in the weight update.
 
 <div  align="center">
 <img src="https://github.com/open-mmlab/mmrazor/assets/41630003/ff4a44c4-43d7-45a7-8749-19b545f90207" alt="Image" width=1100" />
@@ -145,6 +153,7 @@ We concatenate multi-turn dialogues, then input them into the model. The loss at
 [{
     "conversation":[
         {
+            "system": "You are an AI asssistant."
             "input": "Hello?",
             "output": "Hello! How can I help you?"
         },
@@ -161,6 +170,7 @@ We concatenate multi-turn dialogues, then input them into the model. The loss at
 {
     "conversation":[
         {
+            "system": "You are an AI asssistant."
             "input": "Hello?",
             "output": "Hello! How can I help you?"
         },
