@@ -78,24 +78,22 @@
 
 ```json
 [{
-    "conversation":
-        [
-            {
-                "system": "You are an AI asssistant."
-                "input": "Give three tips for staying healthy.",
-                "output": "1.Eat a balanced diet. 2. Exercise regularly. 3. Get enough sleep."
-            }
-        ]
+    "conversation":[
+        {
+            "system": "You are an AI asssistant."
+            "input": "Give three tips for staying healthy.",
+            "output": "1.Eat a balanced diet. 2. Exercise regularly. 3. Get enough sleep."
+        }
+    ]
 },
 {
-    "conversation":
-        [
-            {
-                "system": "You are an AI asssistant."
-                "input": "How to study English?",
-                "output": "1. Set clear goals. 2. Create a study plan. 3. Build vocabulary. 4. Practice speaking."
-            }
-        ]
+    "conversation":[
+        {
+            "system": "You are an AI asssistant."
+            "input": "How to study English?",
+            "output": "1. Set clear goals. 2. Create a study plan. 3. Build vocabulary. 4. Practice speaking."
+        }
+    ]
 }]
 ```
 
