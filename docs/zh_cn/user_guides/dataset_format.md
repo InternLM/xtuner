@@ -99,7 +99,7 @@
 ## 多轮对话数据集格式
 
 多轮对话数据集往往由多轮指令（或问题）+ 对应 GroundTruth 回答组成。假设我们现在有一条多轮对话数据，内容如下。
-为方便介绍，对于第 n 轮对话，我们将 User 和 Assistant 对应的输出设为 Usern 和 Assistantn。
+为方便介绍，对于第 n 轮对话，我们将 User 和 Assistant 对应的输出设为 UserN 和 AssistantN。
 
 ```text
 User1：Hello?
