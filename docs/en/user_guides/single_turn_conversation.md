@@ -62,16 +62,6 @@ Therefore, the original data can be mapped to a standard format using the follow
 SYSTEM_ALPACA = ('Below is an instruction that describes a task. '
                  'Write a response that appropriately completes the request.\n')
 def custom_map_fn(example):
-    """
-    >>> train_ds = ds['train'].map(alpaca_map_fn)
-    >>> train_ds
-    Dataset({
-        features: ['instruction', 'input', 'output', 'text', 'conversation'],
-        num_rows: 52002
-    })
-    >>> train_ds[0]['conversation']
-    [{'system': 'xxx', 'input': 'xxx', 'output': 'xxx'}]
-    """
     if example.get('output') == '<nooutput>':
         return {'conversation': []}
     else:
@@ -200,8 +190,6 @@ from xtuner.utils import PROMPT_TEMPLATE
 #######################################################################
 - data_path = 'tatsu-lab/alpaca'
 + data_path = 'path/to/your/json/data'
-
-prompt_template = PROMPT_TEMPLATE.alpaca
 ...
 #######################################################################
 #                      STEP 3  Dataset & Dataloader                   #
