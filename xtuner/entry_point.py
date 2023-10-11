@@ -44,7 +44,7 @@ CLI_HELP_MSG = \
         4-3. Split HuggingFace's LLM to the smallest sharded one:
             xtuner convert split $NAME_OR_PATH_TO_LLM $SAVE_PATH
         5. Chat with LLMs with HuggingFace's model and adapter:
-            xtuner chat $NAME_OR_PATH_TO_LLM --adapter $NAME_OR_PATH_TO_ADAPTER --prompt-template $PROMPT_TEMPLATE
+            xtuner chat $NAME_OR_PATH_TO_LLM --adapter $NAME_OR_PATH_TO_ADAPTER --prompt-template $PROMPT_TEMPLATE --system-template $SYSTEM_TEMPLATE
         6-1. Preprocess arxiv dataset:
             xtuner preprocess arxiv $SRC_FILE $DST_FILE --start-date $START_DATE --categories $CATEGORIES
         7-1. Log processed dataset:
