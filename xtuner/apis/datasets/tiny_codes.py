@@ -12,9 +12,10 @@ from xtuner.utils import PROMPT_TEMPLATE
 def tiny_codes_dataset(tokenizer,
                        path='nampdn-ai/tiny-codes',
                        max_length=2048,
+                       prompt_template=PROMPT_TEMPLATE.default,
                        remove_unused_columns=True,
                        pack_to_max_length=True):
-    template_map_fn = template_map_fn_factory(template=PROMPT_TEMPLATE.coder)
+    template_map_fn = template_map_fn_factory(template=prompt_template)
     dataset_org = load_dataset(path)
     dataset = process_hf_dataset(
         dataset=dataset_org,

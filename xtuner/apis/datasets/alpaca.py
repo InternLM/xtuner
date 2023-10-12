@@ -15,12 +15,14 @@ def alpaca_enzh_dataset(tokenizer,
                         path_en='tatsu-lab/alpaca',
                         path_zh='silk-road/alpaca-data-gpt4-chinese',
                         max_length=2048,
+                        prompt_template=PROMPT_TEMPLATE.default,
                         remove_unused_columns=True,
                         pack_to_max_length=True):
     alpaca = alpaca_dataset(
         tokenizer,
         path=path_en,
         max_length=max_length,
+        prompt_template=prompt_template,
         shuffle_before_pack=True,
         remove_unused_columns=remove_unused_columns,
         pack_to_max_length=pack_to_max_length)
@@ -28,6 +30,7 @@ def alpaca_enzh_dataset(tokenizer,
         tokenizer,
         path=path_zh,
         max_length=max_length,
+        prompt_template=prompt_template,
         shuffle_before_pack=True,
         remove_unused_columns=remove_unused_columns,
         pack_to_max_length=pack_to_max_length)
@@ -42,9 +45,10 @@ def alpaca_enzh_data_collator(return_hf_format=False):
 def alpaca_zh_dataset(tokenizer,
                       path='silk-road/alpaca-data-gpt4-chinese',
                       max_length=2048,
+                      prompt_template=PROMPT_TEMPLATE.default,
                       remove_unused_columns=True,
                       pack_to_max_length=True):
-    template_map_fn = template_map_fn_factory(template=PROMPT_TEMPLATE.alpaca)
+    template_map_fn = template_map_fn_factory(template=prompt_template)
     dataset_org = load_dataset(path)
     dataset = process_hf_dataset(
         dataset=dataset_org,
@@ -66,9 +70,10 @@ def alpaca_zh_data_collator(return_hf_format=False):
 def alpaca_dataset(tokenizer,
                    path='tatsu-lab/alpaca',
                    max_length=2048,
+                   prompt_template=PROMPT_TEMPLATE.default,
                    remove_unused_columns=True,
                    pack_to_max_length=True):
-    template_map_fn = template_map_fn_factory(template=PROMPT_TEMPLATE.alpaca)
+    template_map_fn = template_map_fn_factory(template=prompt_template)
     dataset_org = load_dataset(path)
     dataset = process_hf_dataset(
         dataset=dataset_org,

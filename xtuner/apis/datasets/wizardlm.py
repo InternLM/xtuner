@@ -12,10 +12,10 @@ from xtuner.utils import PROMPT_TEMPLATE
 def wizardlm_dataset(tokenizer,
                      path='WizardLM/WizardLM_evol_instruct_V2_196k',
                      max_length=2048,
+                     prompt_template=PROMPT_TEMPLATE.default,
                      remove_unused_columns=False,
                      pack_to_max_length=True):
-    template_map_fn = template_map_fn_factory(
-        template=PROMPT_TEMPLATE.wizardlm)
+    template_map_fn = template_map_fn_factory(template=prompt_template)
     dataset_org = load_dataset(path)
     dataset = process_hf_dataset(
         dataset=dataset_org,
