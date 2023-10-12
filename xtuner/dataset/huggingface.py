@@ -76,7 +76,8 @@ def process_hf_dataset(dataset,
 
         dataset = dataset.map(dataset_map_fn)
 
-    # Add prompt template, such as ### Human: xxx ###Assistant: xxx
+    # Add prompt template, such as <|System|>: xxx <|User|>: xxx <|Bot|>: xxx
+
     if template_map_fn is not None:
         if isinstance(template_map_fn, dict) or isinstance(
                 template_map_fn, Config) or isinstance(template_map_fn,
