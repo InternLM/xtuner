@@ -51,10 +51,11 @@ def extract_json_objects(text, decoder=json.JSONDecoder()):
 def msagent_react_map_fn(example):
     text = eval(example['conversations'])
     conversation = []
+    system_text = ''
     input_text = ''
     for t in text:
         if t['from'] == 'system':
-            input_text += """<|System|>:你是一个可以调用外部工具的助手，可以使用的工具包括：\n"""
+            system_text += """你是一个可以调用外部工具的助手，可以使用的工具包括：\n"""
             json_objects = extract_json_objects(t['value'])
             api_dict = {}
             for obj in json_objects:
@@ -67,8 +68,8 @@ def msagent_react_map_fn(example):
                     api_dict[obj['name']] += f'\n输入参数: {params}'
                 except Exception:
                     pass
-            input_text += f'{api_dict}\n'
-            input_text += f"""
+            system_text += f'{api_dict}\n'
+            system_text += f"""
                 如果使用工具请遵循以下格式回复：\n```\n
                 Thought:思考你当前步骤需要解决什么问题，是否需要使用工具\n
                 Action:工具名称，你的工具必须从 [{str(list(api_dict.keys()))}] 选择\n
@@ -78,9 +79,8 @@ def msagent_react_map_fn(example):
                 Thought:给出最终答案的思考过程\n
                 Final Answer:最终答案\n```\n开始!\n"""
         elif t['from'] == 'user':
-            input_text += f"<|User|>:{t['value']}\n\n"
+            input_text += f"{t['value']}\n"
         elif t['from'] == 'assistant':
-            input_text += '<|Bot|>:'
             output = t['value']
             output_response = None
             try:
@@ -96,7 +96,12 @@ def msagent_react_map_fn(example):
                 output = f'Final Answer:{output}\n'
             else:
                 output = f'{output}\n'
-            conversation.append({'input': input_text, 'output': output})
+            conversation.append({
+                'system': system_text,
+                'input': input_text,
+                'output': output
+            })
+            system_text = ''
             input_text = ''
             if output_response is not None:
                 try:
@@ -108,10 +113,9 @@ def msagent_react_map_fn(example):
                     if 'Final Answer:' in output_response:
                         output_response, output_answer = output_response.split(
                             'Final Answer:')
-                        output_response = '<|System|>:' + output_response
                         output_answer = 'Final Answer:' + output_answer
                         conversation.append({
-                            'input': output_response,
+                            'system': output_response,
                             'output': output_answer
                         })
                 except Exception:
