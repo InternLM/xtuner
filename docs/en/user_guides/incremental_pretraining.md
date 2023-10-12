@@ -211,7 +211,7 @@ from datasets import load_dataset
 #                          PART 1  Settings                           #
 #######################################################################
 - data_path = 'timdettmers/openassistant-guanaco'
-- prompt_template = PROMPT_TEMPLATE.openassistant
+- prompt_template = PROMPT_TEMPLATE.internlm_chat
 + data_path = 'path/to/your/json/data'
 ...
 #######################################################################
