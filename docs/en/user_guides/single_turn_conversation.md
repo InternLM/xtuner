@@ -1,9 +1,11 @@
 # Single-turn Dialogue Data Pipeline
 
-Single-turn dialogue instruction fine-tuning aims to enhance the model's ability to respond to specific instructions. Its data processing flow can be divided into the following two parts:
+- [Using Dataset in HuggingFace Hub](#using-dataset-in-huggingface-hub)
+- [Using Custom Datasets](#using-custom-datasets)
+  - [Using Alpaca Format Custom Datasets](#using-alpaca-format-custom-datasets)
+  - [Using Other Format Custom Datasets](#using-other-format-custom-datasets)
 
-1. Construct data according to the corresponding dataset format
-2. Insert dialogue templates into the dataset (optional)
+Single-turn dialogue instruction fine-tuning aims to enhance the model's ability to respond to specific instructions.
 
 XTuner offers support for utilizing HuggingFace Hub datasets, Alpaca-Format custom datasets, or other format custom datasets for SFT (Supervised FineTune). The main differences between these options are as follows:
 
@@ -36,6 +38,7 @@ The "Alpaca Train" dataset comprises 52,002 records, organized into four distinc
 [{
     "conversation":[
         {
+            "system": "xxx",
             "input": "xxx",
             "output": "xxx"
         }
@@ -44,6 +47,7 @@ The "Alpaca Train" dataset comprises 52,002 records, organized into four distinc
 {
     "conversation":[
         {
+            "system": "xxx",
             "input": "xxx",
             "output": "xxx"
         }
@@ -55,23 +59,16 @@ Therefore, the original data can be mapped to a standard format using the follow
 
 ```python
 # Suppose the function is stored in ./map_fn.py
-def alpaca_map_fn(example):
-    """
-    >>> train_ds = ds['train'].map(alpaca_map_fn)
-    >>> train_ds
-    Dataset({
-        features: ['instruction', 'input', 'output', 'text', 'conversation'],
-        num_rows: 52002
-    })
-    >>> train_ds[0]['conversation']
-    [{'input': 'xxx', 'output': 'xxx'}]
-    """
-    if example.get('output', '') == '<nooutput>':
-        return {'conversation': [{'input': '', 'output': ''}]}
+SYSTEM_ALPACA = ('Below is an instruction that describes a task. '
+                 'Write a response that appropriately completes the request.\n')
+def custom_map_fn(example):
+    if example.get('output') == '<nooutput>':
+        return {'conversation': []}
     else:
         return {
             'conversation': [{
-                'input': example['input'],
+                'system': SYSTEM_ALPACA,
+                'input': f"{example['instruction']}\n{example['input']}",
                 'output': example['output']
             }]
         }
@@ -101,32 +98,13 @@ For example, use the following command to export the config named `internlm_7b_q
 xtuner copy-cfg internlm_7b_qlora_alpaca_e3 .
 ```
 
-### Step 4, Set Conversation Templates (Optional)
-
-Conversation templates refer to predefined patterns or structures used for generating dialogues. These templates may include questions, answers, or different roles' speeches in multi-turn dialogues. Adding conversation templates to the training dataset helps the model generate structured and logical dialogues and provide more accurate, consistent, and reasonable responses.
-
-Different datasets and language models may correspond to different conversation templates. For instance, the conversation template of the [alpaca dataset](https://huggingface.co/datasets/tatsu-lab/alpaca) is as follows:
-
-```
-Below is an instruction that describes a task. Write a response that appropriately completes the request.
-
-### Instruction:
-xxx
-
-### Assistant:
-xxx
-```
-
-XTuner provides a series of conversation templates, which you can find in `xtuner/utils/templates.py`. Among them, `INSTRUCTION_START` and `INSTRUCTION` represent the conversation templates used for the first round dialogue and subsequent rounds of dialogues, respectively. Only `INSTRUCTION_START` is used in a single-turn conversation dataset such as `alpaca`.
-
-### Step 5, Modify Config Files
+### Step 4, Modify Config Files
 
 The config file copied in Step 3 needs to be modified as follows:
 
-1. Import the map function `alpaca_map_fn` implemented in Step 1.
-2. Replace `dataset_map_fn` in `train_dataset` with `alpaca_map_fn`.
-3. (Optional) Set the conversation template corresponding to the `alpaca` dataset via `prompt_template = PROMPT_TEMPLATE.alpaca`.
-4. Adjust the path of the original dataset. You can refer to the [user documentation](https://huggingface.co/docs/datasets/loading) for operations related to `load_dataset`.
+1. Import the map function `custom_map_fn` implemented in Step 1.
+2. Replace `dataset_map_fn` in `train_dataset` with `custom_map_fn`.
+3. Adjust the path of the original dataset. You can refer to the [user documentation](https://huggingface.co/docs/datasets/loading) for operations related to `load_dataset`.
 
 ```diff
 from xtuner.dataset import process_hf_dataset
@@ -135,15 +113,13 @@ from datasets import load_dataset
 + from xtuner.dataset.map_fns import template_map_fn_factory
 + from mmengine.config import read_base
 + with read_base():
-+     from .map_fn import alpaca_map_fn
++     from .map_fn import custom_map_fn
 ...
 #######################################################################
 #                          PART 1  Settings                           #
 #######################################################################
-- alpaca_en_path = 'tatsu-lab/alpaca'
+- data_path = 'tatsu-lab/alpaca'
 + data_path = 'path/to/your/data'
-
-+ prompt_template = PROMPT_TEMPLATE.alpaca
 ...
 #######################################################################
 #                      STEP 3  Dataset & Dataloader                   #
@@ -153,31 +129,25 @@ train_dataset = dict(
     dataset=dict(type=load_dataset, path=data_path),
     tokenizer=tokenizer,
     max_length=max_length,
-+   dataset_map_fn=alpaca_map_fn,
-+   template_map_fn=dict(
-+       type=template_map_fn_factory, template=prompt_template),
+-   dataset_map_fn=alpaca_map_fn,
++   dataset_map_fn=custom_map_fn,
+    template_map_fn=dict(
+        type=template_map_fn_factory, template=prompt_template),
     remove_unused_columns=True,
     shuffle_before_pack=True,
     pack_to_max_length=pack_to_max_length)
-
-train_dataloader = dict(
-    batch_size=batch_size,
-    num_workers=dataloader_num_workers,
-    dataset=train_dataset,
-    sampler=dict(type=DefaultSampler, shuffle=True),
-    collate_fn=dict(type=default_collate_fn))
 ...
 ```
 
-#### Step 6, Log Processed Dataset (Optional)
+### Step 5, Check custom Dataset (Optional)
 
-After modifying the config file, you can print the first data of the processed dataset to verify whether the dataset has been constructed correctly.
+After modifying the config file, you can execute the 'xtuner/tools/check_custom_dataset.py' script to verify the correct construction of the dataset.
 
 ```bash
-xtuner log-dataset $CONFIG
+xtuner check-custom-dataset $CONFIG
 ```
 
-`$CONFIG` represents the file path of the modified configuration file in Step 5.
+`$CONFIG` represents the file path of the modified configuration file in Step 4.
 
 ## Using Custom Datasets
 
@@ -205,11 +175,7 @@ As the custom dataset follows the Alpaca format, 'CONFIG_NAME' should select the
 xtuner copy-cfg internlm_7b_qlora_alpaca_e3 .
 ```
 
-#### Step 3, Setting Dialogue Template (Optional)
-
-Refer to [Setting the Dialogue Template](#step-4-set-conversation-templates-optional).
-
-#### Step 4, Modify Config File
+#### Step 3, Modify Config File
 
 The config copied in Step 2 needs to be modified as follows:
 
@@ -222,10 +188,8 @@ from xtuner.utils import PROMPT_TEMPLATE
 #######################################################################
 #                          PART 1  Settings                           #
 #######################################################################
-- alpaca_en_path = 'tatsu-lab/alpaca'
+- data_path = 'tatsu-lab/alpaca'
 + data_path = 'path/to/your/json/data'
-
-prompt_template = PROMPT_TEMPLATE.alpaca
 ...
 #######################################################################
 #                      STEP 3  Dataset & Dataloader                   #
@@ -243,19 +207,12 @@ train_dataset = dict(
     remove_unused_columns=True,
     shuffle_before_pack=True,
     pack_to_max_length=pack_to_max_length)
-
-train_dataloader = dict(
-    batch_size=batch_size,
-    num_workers=dataloader_num_workers,
-    dataset=train_dataset,
-    sampler=dict(type=DefaultSampler, shuffle=True),
-    collate_fn=dict(type=default_collate_fn))
 ...
 ```
 
 ### Using Other Format Custom Datasets
 
-### Step 1, Dataset Preparation
+#### Step 1, Dataset Preparation
 
 Prepare your custom data according to the [single-turn dialogue data format](./dataset_format.md#single-turn-dialogue-dataset-format) defined by XTuner:
 
@@ -263,6 +220,7 @@ Prepare your custom data according to the [single-turn dialogue data format](./d
 [{
     "conversation":[
         {
+            "system": "xxx",
             "input": "xxx",
             "output": "xxx"
         }
@@ -271,6 +229,7 @@ Prepare your custom data according to the [single-turn dialogue data format](./d
 {
     "conversation":[
         {
+            "system": "xxx",
             "input": "xxx",
             "output": "xxx"
         }
@@ -278,7 +237,7 @@ Prepare your custom data according to the [single-turn dialogue data format](./d
 }]
 ```
 
-### Step 2, List Candidate Model Names
+#### Step 2, List Candidate Model Names
 
 ```bash
 xtuner list-cfg -p internlm
@@ -286,23 +245,18 @@ xtuner list-cfg -p internlm
 
 `-p` is for fuzzy search. If you want to train other models, you can replace `internlm` with other model names supported by XTuner.
 
-### Step 3, Export the Config File
+#### Step 3, Export the Config File
 
 ```bash
 xtuner copy-cfg internlm_7b_qlora_alpaca_e3 .
 ```
 
-### Step 4, Setting Dialogue Template (Optional)
-
-Refer to [Setting the Dialogue Template](#step-4-set-conversation-templates-optional).
-
-### Step 5, Modify Config File
+#### Step 4, Modify Config File
 
 The config file copied in Step 3 needs to be modified as follows:
 
 1. Adjust the path of the original dataset
-2. Since the dataset format is already in the standard format, set `dataset_map_fn` in `train_dataset` to None
-3. Set the dialogue template
+2. Since the dataset format is already in the standard format, set `dataset_map_fn` in `train_dataset` to `None`
 
 ```diff
 from xtuner.dataset import process_hf_dataset
@@ -313,10 +267,9 @@ from datasets import load_dataset
 #######################################################################
 #                          PART 1  Settings                           #
 #######################################################################
-- alpaca_en_path = 'tatsu-lab/alpaca'
+- data_path = 'tatsu-lab/alpaca'
 + data_path = 'path/to/your/json/data'
-
-+ prompt_template = PROMPT_TEMPLATE.alpaca
+...
 #######################################################################
 #                      STEP 3  Dataset & Dataloader                   #
 #######################################################################
@@ -327,23 +280,17 @@ train_dataset = dict(
 +       type=load_dataset, path='json', data_files=dict(train=data_path)),
     tokenizer=tokenizer,
     max_length=max_length,
+-   dataset_map_fn=alpaca_map_fn,
 +   dataset_map_fn=None,
-+   template_map_fn=dict(
-+       type=template_map_fn_factory, template=prompt_template),
+    template_map_fn=dict(
+        type=template_map_fn_factory, template=prompt_template),
     remove_unused_columns=True,
     shuffle_before_pack=True,
     pack_to_max_length=pack_to_max_length)
-
-train_dataloader = dict(
-    batch_size=batch_size,
-    num_workers=dataloader_num_workers,
-    dataset=train_dataset,
-    sampler=dict(type=DefaultSampler, shuffle=True),
-    collate_fn=dict(type=default_collate_fn))
 ...
 ```
 
-#### Step 6, Check Processed Dataset (Optional)
+#### Step 5, Check custom Dataset (Optional)
 
 After modifying the config file, you can execute the 'xtuner/tools/check_custom_dataset.py' script to verify the correct construction of the dataset.
 
@@ -351,4 +298,4 @@ After modifying the config file, you can execute the 'xtuner/tools/check_custom_
 xtuner check-custom-dataset $CONFIG
 ```
 
-`$CONFIG` represents the file path of the modified configuration file in Step 5.
+`$CONFIG` represents the file path of the modified configuration file in Step 4.

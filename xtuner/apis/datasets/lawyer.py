@@ -16,18 +16,21 @@ def lawyer_dataset(tokenizer,
                    crime_data_file=None,
                    reference_data_file=None,
                    max_length=2048,
+                   prompt_template=PROMPT_TEMPLATE.default,
                    remove_unused_columns=True,
                    pack_to_max_length=True):
     crime_dataset = lawyer_crime_dataset(
         tokenizer,
         data_file=crime_data_file,
         max_length=max_length,
+        prompt_template=prompt_template,
         remove_unused_columns=remove_unused_columns,
         pack_to_max_length=pack_to_max_length)
     reference_dataset = lawyer_reference_dataset(
         tokenizer,
         data_file=reference_data_file,
         max_length=max_length,
+        prompt_template=prompt_template,
         remove_unused_columns=remove_unused_columns,
         pack_to_max_length=pack_to_max_length)
     dataset = ConcatDataset([crime_dataset, reference_dataset])
@@ -41,9 +44,10 @@ def lawyer_data_collator(return_hf_format=False):
 def lawyer_crime_dataset(tokenizer,
                          data_file=None,
                          max_length=2048,
+                         prompt_template=PROMPT_TEMPLATE.default,
                          remove_unused_columns=True,
                          pack_to_max_length=True):
-    template_map_fn = template_map_fn_factory(template=PROMPT_TEMPLATE.lawyer)
+    template_map_fn = template_map_fn_factory(template=prompt_template)
     # Download data from https://github.com/LiuHC0428/LAW-GPT  # noqa: E501
     if data_file is None:
         data_file = './data/law/CrimeKgAssitant清洗后_52k.json'
@@ -68,9 +72,10 @@ def lawyer_crime_data_collator(return_hf_format=False):
 def lawyer_reference_dataset(tokenizer,
                              data_file=None,
                              max_length=2048,
+                             prompt_template=PROMPT_TEMPLATE.default,
                              remove_unused_columns=True,
                              pack_to_max_length=True):
-    template_map_fn = template_map_fn_factory(template=PROMPT_TEMPLATE.lawyer)
+    template_map_fn = template_map_fn_factory(template=prompt_template)
     # Download data from https://github.com/LiuHC0428/LAW-GPT  # noqa: E501
     if data_file is None:
         data_file = './data/law/训练数据_带法律依据_92k.json'

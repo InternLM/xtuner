@@ -26,7 +26,7 @@ pretrained_model_name_or_path = 'bigcode/starcoder'
 
 # Data
 data_path = 'ArmelR/stack-exchange-instruction'
-prompt_template = PROMPT_TEMPLATE.stack_exchange
+prompt_template = PROMPT_TEMPLATE.default
 max_length = 2048
 # randomly select 20000 samples from the original dataset
 max_dataset_length = 20000
@@ -45,6 +45,7 @@ max_norm = 1  # grad clip
 
 # Evaluate the generation performance during the training
 evaluation_freq = 200
+SYSTEM = ''
 evaluation_inputs = [
     'from typing import List def has_close_elements(numbers: List[float], threshold: float) -> bool: """ Check if in given list of numbers, are any two numbers closer to each other than given threshold. >>> has_close_elements([1.0, 2.0, 3.0], 0.5) False >>> has_close_elements([1.0, 2.8, 3.0, 4.0, 5.0, 2.0], 0.3) True """'  # noqa: E501
 ]
@@ -146,7 +147,8 @@ custom_hooks = [
         tokenizer=tokenizer,
         every_n_iters=evaluation_freq,
         evaluation_inputs=evaluation_inputs,
-        instruction=prompt_template.INSTRUCTION_START)
+        system=SYSTEM,
+        prompt_template=prompt_template)
 ]
 
 # configure default hooks
