@@ -8,7 +8,7 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           BitsAndBytesConfig, GenerationConfig)
 
 from xtuner.tools.utils import get_chat_utils, update_stop_criteria
-from xtuner.utils import PROMPT_TEMPLATE
+from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
 
 
 def remove_prefix(state_dict, prefix):
@@ -30,8 +30,16 @@ def parse_args():
     parser.add_argument(
         '--prompt-template',
         choices=PROMPT_TEMPLATE.keys(),
+        default=PROMPT_TEMPLATE.default,
+        help='Specify a prompt template')
+    system_group = parser.add_mutually_exclusive_group()
+    system_group.add_argument(
+        '--system', default=None, help='Specify the system text')
+    system_group.add_argument(
+        '--system-template',
+        choices=SYSTEM_TEMPLATE.keys(),
         default=None,
-        help='Specify a prompt option')
+        help='Specify a system template')
     parser.add_argument(
         '--bits',
         type=int,
@@ -110,7 +118,7 @@ def main():
         solve_open = False
         search_open = False
     else:
-        assert args.prompt_template == 'moss_sft'
+        assert args.prompt_template == args.system_template == 'moss_sft'
         from plugins import plugins_api
         inner_thoughts_open = True
         calculate_open = 'calculate' in args.with_plugins
@@ -188,34 +196,41 @@ def main():
         if text.strip() == 'EXIT':
             print('Log: Exit!')
             exit(0)
-        if args.prompt_template is not None:
-            template = PROMPT_TEMPLATE[args.prompt_template]
-            if 'INSTRUCTION_START' in template and n_turn == 0:
-                prompt_text = template['INSTRUCTION_START'].format(
-                    input=text, round=n_turn + 1, bot_name=args.bot_name)
-            else:
-                prompt_text = template['INSTRUCTION'].format(
-                    input=text, round=n_turn + 1, bot_name=args.bot_name)
-            if args.prompt_template == 'moss_sft':
-                if not inner_thoughts_open:
-                    prompt_text.replace('- Inner thoughts: enabled.',
-                                        '- Inner thoughts: disabled.')
-                if not calculate_open:
-                    prompt_text.replace(
-                        '- Calculator: enabled. API: Calculate(expression)',
-                        '- Calculator: disabled.')
-                if not solve_open:
-                    prompt_text.replace(
-                        '- Equation solver: enabled. API: Solve(equation)',
-                        '- Equation solver: disabled.')
-                if not search_open:
-                    prompt_text.replace(
-                        '- Web search: enabled. API: Search(query)',
-                        '- Web search: disabled.')
 
-            inputs += prompt_text
-        else:
-            inputs += text
+        template = PROMPT_TEMPLATE[args.prompt_template]
+        prompt_text = ''
+        if 'SYSTEM' in template and n_turn == 0:
+            system_text = None
+            if args.system_template is not None:
+                system_text = SYSTEM_TEMPLATE[args.system_template].format(
+                    round=n_turn + 1, bot_name=args.bot_name)
+            elif args.system is not None:
+                system_text = args.system
+            if system_text is not None:
+                prompt_text += template['SYSTEM'].format(
+                    system=system_text,
+                    round=n_turn + 1,
+                    bot_name=args.bot_name)
+        prompt_text += template['INSTRUCTION'].format(
+            input=text, round=n_turn + 1, bot_name=args.bot_name)
+        if args.prompt_template == args.system_template == 'moss_sft':
+            if not inner_thoughts_open:
+                prompt_text.replace('- Inner thoughts: enabled.',
+                                    '- Inner thoughts: disabled.')
+            if not calculate_open:
+                prompt_text.replace(
+                    '- Calculator: enabled. API: Calculate(expression)',
+                    '- Calculator: disabled.')
+            if not solve_open:
+                prompt_text.replace(
+                    '- Equation solver: enabled. API: Solve(equation)',
+                    '- Equation solver: disabled.')
+            if not search_open:
+                prompt_text.replace(
+                    '- Web search: enabled. API: Search(query)',
+                    '- Web search: disabled.')
+
+        inputs += prompt_text
         ids = tokenizer.encode(inputs, return_tensors='pt')
         streamer = Streamer(tokenizer) if Streamer is not None else None
         if args.with_plugins is not None:

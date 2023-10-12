@@ -195,10 +195,18 @@ XTuner provides tools to chat with pretrained / fine-tuned LLMs.
 xtuner chat ${NAME_OR_PATH_TO_LLM} --adapter {NAME_OR_PATH_TO_ADAPTER} [optional arguments]
 ```
 
-For example, we can start the chat with Llama2-7b with adapter trained from MOSS-003-SFT by
+For example, we can start the chat with
+
+InternLM-7B with adapter trained from Alpaca-enzh:
 
 ```shell
-xtuner chat meta-llama/Llama-2-7b-hf --adapter xtuner/Llama-2-7b-qlora-moss-003-sft --bot-name Llama2 --prompt-template moss_sft --with-plugins calculate solve search --command-stop-word "<eoc>" --answer-stop-word "<eom>" --no-streamer
+xtuner chat internlm/internlm-7b --adapter xtuner/internlm-7b-qlora-alpaca-enzh --prompt-template internlm_chat --system-template alpaca
+```
+
+Llama2-7b with adapter trained from MOSS-003-SFT:
+
+```shell
+xtuner chat meta-llama/Llama-2-7b-hf --adapter xtuner/Llama-2-7b-qlora-moss-003-sft --bot-name Llama2 --prompt-template moss_sft --system-template moss_sft --with-plugins calculate solve search --command-stop-word "<eoc>" --answer-stop-word "<eom>" --no-streamer
 ```
 
 For more examples, please see [chat.md](./docs/en/user_guides/chat.md).

@@ -22,7 +22,7 @@ pretrained_model_name_or_path = 'meta-llama/Llama-2-7b-hf'
 
 # Data
 data_path = 'WizardLM/WizardLM_evol_instruct_V2_196k'
-prompt_template = PROMPT_TEMPLATE.wizardlm
+prompt_template = PROMPT_TEMPLATE.llama2_chat
 max_length = 2048
 pack_to_max_length = True
 
@@ -39,6 +39,7 @@ max_norm = 1  # grad clip
 
 # Evaluate the generation performance during the training
 evaluation_freq = 200
+SYSTEM = ''
 evaluation_inputs = [
     '请给我介绍五个上海的景点', 'Please tell me five scenic spots in Shanghai'
 ]
@@ -117,7 +118,8 @@ custom_hooks = [
         tokenizer=tokenizer,
         every_n_iters=evaluation_freq,
         evaluation_inputs=evaluation_inputs,
-        instruction=prompt_template.INSTRUCTION_START)
+        system=SYSTEM,
+        prompt_template=prompt_template)
 ]
 
 # configure default hooks

@@ -1,5 +1,11 @@
 # 数据集准备
 
+- [HuggingFace 数据集](#huggingface-数据集)
+- [其他](#其他)
+  - [Arxiv Gentitle 生成题目](#arxiv-gentitle-生成题目)
+  - [MOSS-003-SFT](#moss-003-sft)
+  - [Chinese Lawyer](#chinese-lawyer)
+
 ## HuggingFace 数据集
 
 针对 HuggingFace Hub 中的数据集，比如 [alpaca](https://huggingface.co/datasets/tatsu-lab/alpaca)，用户可以快速使用它们。更多使用指南请参照[单轮对话文档](./single_turn_conversation.md)和[多轮对话文档](./multi_turn_conversation.md)。
