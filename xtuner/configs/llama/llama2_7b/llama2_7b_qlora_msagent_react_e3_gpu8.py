@@ -12,9 +12,11 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer,
 
 from xtuner.dataset import process_ms_dataset
 from xtuner.dataset.collate_fns import default_collate_fn
-from xtuner.dataset.map_fns import msagent_react_map_fn
+from xtuner.dataset.map_fns import (msagent_react_map_fn,
+                                    template_map_fn_factory)
 from xtuner.engine import DatasetInfoHook, EvaluateChatHook
 from xtuner.model import SupervisedFinetune
+from xtuner.utils import PROMPT_TEMPLATE
 
 #######################################################################
 #                          PART 1  Settings                           #
@@ -24,6 +26,7 @@ pretrained_model_name_or_path = 'meta-llama/Llama-2-7b-hf'
 
 # Data
 data_path = 'damo/MSAgent-Bench'
+prompt_template = PROMPT_TEMPLATE.default
 max_length = 2048
 pack_to_max_length = False
 
@@ -40,29 +43,27 @@ max_norm = 1  # grad clip
 
 # Evaluate the generation performance during the training
 evaluation_freq = 500
-evaluation_inputs = [
-    ('<|System|>:你是一个可以调用外部工具的助手，可以使用的工具包括：\n'
-     "{\'GoogleSearch\': \'一个可以从谷歌搜索结果的API。\\n"
-     '当你需要对于一个特定问题找到简短明了的回答时，可以使用它。\\n'
-     "输入应该是一个搜索查询。\\n\\n输入参数:{'query': '搜索查询'}\',"
-     "\'PythonInterpreter\': \"用来执行Python代码。代码必须是一个函数，\\n"
-     "函数名必须得是 \'solution\'，代码对应你的思考过程。代码实例格式如下：\\n"
-     '```python\\n# import 依赖包\\nimport xxx\\ndef solution():'
-     '\\n    # 初始化一些变量\\n    variable_names_with_real_meaning = xxx'
-     '\\n    # 步骤一\\n    mid_variable = func(variable_names_with_real_meaning)'
-     '\\n    # 步骤 x\\n    mid_variable = func(mid_variable)\\n    # 最后结果'
-     '\\n    final_answer =  func(mid_variable)\\n    return final_answer'
-     "\\n```\\n输入参数:{'command': '需要执行的代码'}\"}\n"
-     '如果使用工具请遵循以下格式回复：\n```\n'
-     'Thought:思考你当前步骤需要解决什么问题，是否需要使用工具\n'
-     "Action:工具名称，你的工具必须从 [[\'GoogleSearch\', \'PythonInterpreter\']] 选择"
-     '\nAction Input:工具输入参数\n```\n工具返回按照以下格式回复：\n'
-     '```\nResponse:调用工具后的结果\n```'
-     '\n如果你已经知道了答案，或者你不需要工具，请遵循以下格式回复\n```'
-     '\nThought:给出最终答案的思考过程\nFinal Answer:最终答案\n```\n开始!\n'
-     '<|User|>:上海明天天气怎么样？\n'
-     '<|Bot|>:')
-]
+SYSTEM = (
+    '你是一个可以调用外部工具的助手，可以使用的工具包括：\n'
+    "{{\'GoogleSearch\': \'一个可以从谷歌搜索结果的API。\\n"
+    '当你需要对于一个特定问题找到简短明了的回答时，可以使用它。\\n'
+    "输入应该是一个搜索查询。\\n\\n\',"
+    "\'PythonInterpreter\': \"用来执行Python代码。代码必须是一个函数，\\n"
+    "函数名必须得是 \'solution\'，代码对应你的思考过程。代码实例格式如下：\\n"
+    '```python\\n# import 依赖包\\nimport xxx\\ndef solution():'
+    '\\n    # 初始化一些变量\\n    variable_names_with_real_meaning = xxx'
+    '\\n    # 步骤一\\n    mid_variable = func(variable_names_with_real_meaning)'
+    '\\n    # 步骤 x\\n    mid_variable = func(mid_variable)\\n    # 最后结果'
+    '\\n    final_answer =  func(mid_variable)\\n    return final_answer'
+    "\\n```\\n\"}}\n"
+    '如果使用工具请遵循以下格式回复：\n```\n'
+    'Thought:思考你当前步骤需要解决什么问题，是否需要使用工具\n'
+    "Action:工具名称，你的工具必须从 [[\'GoogleSearch\', \'PythonInterpreter\']] 选择"
+    '\nAction Input:工具输入参数\n```\n工具返回按照以下格式回复：\n'
+    '```\nResponse:调用工具后的结果\n```'
+    '\n如果你已经知道了答案，或者你不需要工具，请遵循以下格式回复\n```'
+    '\nThought:给出最终答案的思考过程\nFinal Answer:最终答案\n```\n开始!\n')
+evaluation_inputs = ['上海明天天气怎么样？']
 
 #######################################################################
 #                      PART 2  Model & Tokenizer                      #
@@ -106,6 +107,8 @@ train_dataset = dict(
     tokenizer=tokenizer,
     max_length=max_length,
     dataset_map_fn=msagent_react_map_fn,
+    template_map_fn=dict(
+        type=template_map_fn_factory, template=prompt_template),
     remove_unused_columns=True,
     shuffle_before_pack=True,
     pack_to_max_length=pack_to_max_length)
@@ -152,7 +155,9 @@ custom_hooks = [
         type=EvaluateChatHook,
         tokenizer=tokenizer,
         every_n_iters=evaluation_freq,
-        evaluation_inputs=evaluation_inputs)
+        evaluation_inputs=evaluation_inputs,
+        system=SYSTEM,
+        prompt_template=prompt_template)
 ]
 
 # configure default hooks
