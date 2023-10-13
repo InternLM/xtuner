@@ -117,14 +117,33 @@ def main():
     args = parse_args()
     torch.manual_seed(args.seed)
 
+    # model_kwargs
+    quantization_config = None
+    load_in_8bit = False
+    if args.bits == 4:
+        quantization_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            load_in_8bit=False,
+            llm_int8_threshold=6.0,
+            llm_int8_has_fp16_weight=False,
+            bnb_4bit_compute_dtype=torch.float16,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type='nf4')
+    elif args.bits == 8:
+        load_in_8bit = True
+    model_kwargs = {
+        'quantization_config': quantization_config,
+        'load_in_8bit': load_in_8bit,
+        'device_map': 'auto',
+        'offload_folder': args.offload_folder,
+        'trust_remote_code': True
+    }
     if args.lagent:
         from lagent.actions import ActionExecutor, GoogleSearch
-        from lagent.agents import ReAct
+        from lagent.agents import (CALL_PROTOCOL_CN, FORCE_STOP_PROMPT_CN,
+                                   ReAct, ReActProtocol)
         from lagent.llms import HFTransformerCasualLM
 
-        assert args.adapter is None, ('lagent does not support the external '
-                                      'adapter, please merge the model first!')
-        assert args.bits is None, 'lagent does not support quantized LLM'
         try:
             SERPER_API_KEY = os.environ['SERPER_API_KEY']
         except Exception:
@@ -132,12 +151,19 @@ def main():
                   'and set it using `export SERPER_API_KEY=xxx`.')
             sys.exit(1)
 
-        llm = HFTransformerCasualLM(args.model_name_or_path)
+        llm = HFTransformerCasualLM(
+            args.model_name_or_path, model_kwargs=model_kwargs)
+        if args.adapter is not None:
+            llm.model = PeftModel.from_pretrained(
+                llm.model, args.adapter, offload_folder=args.offload_folder)
+            print(f'Load adapter from {args.adapter}')
         search_tool = GoogleSearch(api_key=SERPER_API_KEY)
         chatbot = ReAct(
             llm=llm,
             action_executor=ActionExecutor(actions=[search_tool]),
-        )
+            protocol=ReActProtocol(
+                call_protocol=CALL_PROTOCOL_CN,
+                force_stop=FORCE_STOP_PROMPT_CN))
         while True:
             text = get_input()
             while text.strip() == 'RESET':
@@ -171,26 +197,8 @@ def main():
             if search_open:
                 from plugins import search  # noqa: F401
         # build model
-        quantization_config = None
-        load_in_8bit = False
-        if args.bits == 4:
-            quantization_config = BitsAndBytesConfig(
-                load_in_4bit=True,
-                load_in_8bit=False,
-                llm_int8_threshold=6.0,
-                llm_int8_has_fp16_weight=False,
-                bnb_4bit_compute_dtype=torch.float16,
-                bnb_4bit_use_double_quant=True,
-                bnb_4bit_quant_type='nf4')
-        elif args.bits == 8:
-            load_in_8bit = True
-        model = AutoModelForCausalLM.from_pretrained(
-            args.model_name_or_path,
-            quantization_config=quantization_config,
-            load_in_8bit=load_in_8bit,
-            device_map='auto',
-            offload_folder=args.offload_folder,
-            trust_remote_code=True)
+        model = AutoModelForCausalLM.from_pretrained(args.model_name_or_path,
+                                                     **model_kwargs)
         tokenizer = AutoTokenizer.from_pretrained(
             args.model_name_or_path, trust_remote_code=True)
         if args.adapter is not None:
