@@ -2,6 +2,7 @@ bitsandbytes>=0.40.0
 datasets
 einops
 mmengine>=0.8.4
+modelscope
 peft>=0.4.0
 scipy
 SentencePiece
