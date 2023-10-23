@@ -14,10 +14,7 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description='Verify the correctness of the config file for the '
         'custom dataset.')
-    parser.add_argument(
-        'config',
-        help='config file name or path. Note: Please use the original '
-        'configs, instead of the automatically saved log configs.')
+    parser.add_argument('config', help='config file name or path.')
     args = parser.parse_args()
     return args
 
