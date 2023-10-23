@@ -38,8 +38,7 @@ def encode_fn(example, tokenizer, max_length, input_ids_with_output=True):
     """
     if tokenizer.__class__.__name__ == 'QWenTokenizer':
         bos_token_id = []
-        eos_token_id = tokenizer.encode(
-            '<|endoftext|>', add_special_tokens=False)
+        eos_token_id = tokenizer.eos_token_id
     elif tokenizer.__class__.__name__ == 'ChatGLMTokenizer':
         bos_token_id = []
         eos_token_id = tokenizer.eos_token_id

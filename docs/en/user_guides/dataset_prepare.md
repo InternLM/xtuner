@@ -1,5 +1,11 @@
 # Dataset Prepare
 
+- [HuggingFace datasets](#huggingface-datasets)
+- [Others](#others)
+  - [Arxiv Gentitle](#arxiv-gentitle)
+  - [MOSS-003-SFT](#moss-003-sft)
+  - [Chinese Lawyer](#chinese-lawyer)
+
 ## HuggingFace datasets
 
 For datasets on HuggingFace Hub, such as [alpaca](https://huggingface.co/datasets/tatsu-lab/alpaca), you can quickly utilize them. For more details, please refer to [single_turn_conversation.md](./single_turn_conversation.md) and [multi_turn_conversation.md](./multi_turn_conversation.md).

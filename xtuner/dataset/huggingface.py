@@ -76,7 +76,7 @@ def process_hf_dataset(dataset,
 
         dataset = dataset.map(dataset_map_fn)
 
-    # Add prompt template, such as ### Human: xxx ###Assistant: xxx
+    # Add prompt template, such as <|System|>: xxx <|User|>: xxx <|Bot|>: xxx
     if template_map_fn is not None:
         if isinstance(template_map_fn, dict) or isinstance(
                 template_map_fn, Config) or isinstance(template_map_fn,
@@ -95,6 +95,9 @@ def process_hf_dataset(dataset,
             logger='current',
             level=logging.WARNING)
         remove_unused_columns = True
+
+    # remove invalid data
+    dataset = dataset.filter(lambda example: len(example['conversation']) > 0)
 
     # tokenize
     if isinstance(tokenizer, dict) or isinstance(

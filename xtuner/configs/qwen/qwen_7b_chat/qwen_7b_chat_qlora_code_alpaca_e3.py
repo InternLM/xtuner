@@ -15,7 +15,7 @@ from xtuner.dataset.collate_fns import default_collate_fn
 from xtuner.dataset.map_fns import code_alpaca_map_fn, template_map_fn_factory
 from xtuner.engine import DatasetInfoHook, EvaluateChatHook
 from xtuner.model import SupervisedFinetune
-from xtuner.utils import PROMPT_TEMPLATE
+from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
 
 #######################################################################
 #                          PART 1  Settings                           #
@@ -42,6 +42,7 @@ max_norm = 1  # grad clip
 
 # Evaluate the generation performance during the training
 evaluation_freq = 100
+SYSTEM = SYSTEM_TEMPLATE.coder
 evaluation_inputs = [
     ('写一个Python函数，将十六进制颜色代码（如#0066ee）转换为对应的'
      '红、绿、蓝（RGB）三个颜色分量值，并以元组的形式返回。'),
@@ -57,7 +58,8 @@ tokenizer = dict(
     type=AutoTokenizer.from_pretrained,
     pretrained_model_name_or_path=pretrained_model_name_or_path,
     trust_remote_code=True,
-    padding_side='right')
+    padding_side='right',
+    eos_token='<|im_end|>')
 
 model = dict(
     type=SupervisedFinetune,
@@ -142,7 +144,8 @@ custom_hooks = [
         every_n_iters=evaluation_freq,
         stop_word='<|im_end|>',
         evaluation_inputs=evaluation_inputs,
-        instruction=prompt_template.INSTRUCTION_START)
+        system=SYSTEM,
+        prompt_template=prompt_template)
 ]
 
 # configure default hooks

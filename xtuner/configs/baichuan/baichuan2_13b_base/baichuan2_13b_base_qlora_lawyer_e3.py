@@ -17,7 +17,7 @@ from xtuner.dataset.map_fns import (crime_kg_assitant_map_fn,
                                     template_map_fn_factory)
 from xtuner.engine import DatasetInfoHook, EvaluateChatHook
 from xtuner.model import SupervisedFinetune
-from xtuner.utils import PROMPT_TEMPLATE
+from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
 
 #######################################################################
 #                          PART 1  Settings                           #
@@ -29,7 +29,7 @@ pretrained_model_name_or_path = 'baichuan-inc/Baichuan2-13B-Base'
 # download data from https://github.com/LiuHC0428/LAW-GPT
 crime_kg_assitant_path = './data/CrimeKgAssitant清洗后_52k.json'
 law_reference_data_path = './data/训练数据_带法律依据_92k.json'
-prompt_template = PROMPT_TEMPLATE.lawyer
+prompt_template = PROMPT_TEMPLATE.baichuan2_chat
 max_length = 2048
 pack_to_max_length = True
 
@@ -46,6 +46,7 @@ max_norm = 1  # grad clip
 
 # Evaluate the generation performance during the training
 evaluation_freq = 500
+SYSTEM = SYSTEM_TEMPLATE.lawyer
 evaluation_inputs = ['请问离婚需要准备什么材料？', '销售鳄鱼皮包违法吗？']
 
 #######################################################################
@@ -163,7 +164,8 @@ custom_hooks = [
         tokenizer=tokenizer,
         every_n_iters=evaluation_freq,
         evaluation_inputs=evaluation_inputs,
-        instruction=prompt_template.INSTRUCTION_START)
+        system=SYSTEM,
+        prompt_template=prompt_template)
 ]
 
 # configure default hooks

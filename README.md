@@ -84,6 +84,7 @@ XTuner is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](
 </td>
 <td>
 <ul>
+  <li><a href="https://modelscope.cn/datasets/damo/MSAgent-Bench">MSAgent-Bench</a></li>
   <li><a href="https://huggingface.co/datasets/fnlp/moss-003-sft-data">MOSS-003-SFT</a> 🔧</li>
   <li><a href="https://huggingface.co/datasets/tatsu-lab/alpaca">Alpaca en</a> / <a href="https://huggingface.co/datasets/silk-road/alpaca-data-gpt4-chinese">zh</a></li>
   <li><a href="https://huggingface.co/datasets/WizardLM/WizardLM_evol_instruct_V2_196k">WizardLM</a></li>
@@ -119,6 +120,13 @@ XTuner is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](
 ## 🛠️ Quick Start
 
 ### Installation
+
+- It is recommended to build a Python-3.10 virtual environment using conda
+
+  ```bash
+  conda create --name xtuner-env python=3.10 -y
+  conda activate xtuner-env
+  ```
 
 - Install XTuner via pip
 
@@ -188,10 +196,18 @@ XTuner provides tools to chat with pretrained / fine-tuned LLMs.
 xtuner chat ${NAME_OR_PATH_TO_LLM} --adapter {NAME_OR_PATH_TO_ADAPTER} [optional arguments]
 ```
 
-For example, we can start the chat with Llama2-7b with adapter trained from MOSS-003-SFT by
+For example, we can start the chat with
+
+InternLM-7B with adapter trained from Alpaca-enzh:
 
 ```shell
-xtuner chat meta-llama/Llama-2-7b-hf --adapter xtuner/Llama-2-7b-qlora-moss-003-sft --bot-name Llama2 --prompt-template moss_sft --with-plugins calculate solve search --command-stop-word "<eoc>" --answer-stop-word "<eom>" --no-streamer
+xtuner chat internlm/internlm-7b --adapter xtuner/internlm-7b-qlora-alpaca-enzh --prompt-template internlm_chat --system-template alpaca
+```
+
+Llama2-7b with adapter trained from MOSS-003-SFT:
+
+```shell
+xtuner chat meta-llama/Llama-2-7b-hf --adapter xtuner/Llama-2-7b-qlora-moss-003-sft --bot-name Llama2 --prompt-template moss_sft --system-template moss_sft --with-plugins calculate solve search --command-stop-word "<eoc>" --answer-stop-word "<eom>" --no-streamer
 ```
 
 For more examples, please see [chat.md](./docs/en/user_guides/chat.md).
