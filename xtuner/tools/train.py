@@ -106,10 +106,24 @@ def main():
             cfg.training_args.output_dir = osp.join(
                 './work_dirs',
                 osp.splitext(osp.basename(args.config))[0])
+        # enable deepspeed
+        if args.deepspeed:
+            if not os.path.isfile(args.deepspeed):
+                try:
+                    args.deepspeed = cfgs_name_path[args.deepspeed]
+                except KeyError:
+                    raise FileNotFoundError(f'Cannot find {args.deepspeed}')
+            cfg.training_args.deepspeed = args.deepspeed
+        if cfg.training_args.get('deepspeed'):
+            device_map = None
+        else:
+            # Data Parallel
+            device_map = {
+                '': int(os.environ.get('LOCAL_RANK', args.local_rank))
+            }
         # build training_args
         training_args = BUILDER.build(cfg.training_args)
         # build model
-        device_map = {'': int(os.environ.get('LOCAL_RANK', args.local_rank))}
         with LoadWoInit():
             cfg.model.device_map = device_map
             traverse_dict(cfg.model)
