@@ -1,22 +1,29 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-import dataclasses
-
 import torch
 from mmengine import print_log
+from mmengine.utils.misc import get_object_from_string
 from torch import nn
+
+
+def set_obj_dtype(d):
+    for key, value in d.items():
+        if value in ['torch.float16', 'torch.float32', 'torch.bfloat16']:
+            d[key] = getattr(torch, value.split('.')[-1])
 
 
 def traverse_dict(d):
     if isinstance(d, dict):
+        set_obj_dtype(d)
         for key, value in d.items():
             if isinstance(value, dict):
-                if 'type' in value and dataclasses.is_dataclass(value['type']):
+                traverse_dict(value)
+                if 'type' in value:
                     builder = value.pop('type')
+                    if isinstance(builder, str):
+                        builder = get_object_from_string(builder)
                     new_value = builder(**value)
                     d[key] = new_value
                     print_log(f'{key} convert to {builder}')
-                else:
-                    traverse_dict(value)
     elif isinstance(d, list):
         for element in d:
             traverse_dict(element)

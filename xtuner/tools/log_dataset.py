@@ -8,10 +8,7 @@ from xtuner.registry import BUILDER
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Log processed dataset.')
-    parser.add_argument(
-        'config',
-        help='config file name or path. Note: Please use the original '
-        'configs, instead of the automatically saved log configs.')
+    parser.add_argument('config', help='config file name or path.')
     args = parser.parse_args()
     return args
 
