@@ -14,7 +14,7 @@ English | [简体中文](README_zh-CN.md)
 
 ## 🎉 News
 
-- **\[2023/10\]** Support [MSAgent-Bench](https://modelscope.cn/datasets/damo/MSAgent-Bench) dataset!
+- **\[2023/10\]** Support [MSAgent-Bench](https://modelscope.cn/datasets/damo/MSAgent-Bench) dataset, and the fine-tuned LLMs can be applied by [Lagent](https://github.com/InternLM/lagent)!
 - **\[2023/10\]** Refactor the data processing to accommodate `system` context!
 - **\[2023/09\]** Support [InternLM-20B](https://huggingface.co/internlm) models!
 - **\[2023/09\]** Support [Baichuan2](https://huggingface.co/baichuan-inc) models!

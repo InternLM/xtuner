@@ -14,7 +14,7 @@
 
 ## 🎉 更新
 
-- **\[2023/10\]** 支持 [MSAgent-Bench](https://modelscope.cn/datasets/damo/MSAgent-Bench) 数据集！
+- **\[2023/10\]** 支持 [MSAgent-Bench](https://modelscope.cn/datasets/damo/MSAgent-Bench) 数据集，并且微调所得大语言模型可应用至 [Lagent](https://github.com/InternLM/lagent) 框架！
 - **\[2023/10\]** 重构数据处理逻辑以兼容 `system` 字段！
 - **\[2023/09\]** 支持 [InternLM-20B](https://huggingface.co/internlm) 系列模型！
 - **\[2023/09\]** 支持 [Baichuan2](https://huggingface.co/baichuan-inc) 系列模型！
