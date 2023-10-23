@@ -14,6 +14,7 @@ English | [简体中文](README_zh-CN.md)
 
 ## 🎉 News
 
+- **\[2023.10.23\]** Support [MSAgent-Bench](https://modelscope.cn/datasets/damo/MSAgent-Bench) dataset! Refactor the data processing to accommodate `system` context!
 - **\[2023.09.20\]** Support [InternLM-20B](https://huggingface.co/internlm) models!
 - **\[2023.09.06\]** Support [Baichuan2](https://huggingface.co/baichuan-inc) models!
 - **\[2023.08.30\]** XTuner is released, with multiple fine-tuned adapters on [HuggingFace](https://huggingface.co/xtuner).
