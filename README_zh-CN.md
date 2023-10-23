@@ -14,10 +14,11 @@
 
 ## 🎉 更新
 
-- **\[2023.10.23\]** 支持 [MSAgent-Bench](https://modelscope.cn/datasets/damo/MSAgent-Bench) 数据集！重构数据处理逻辑以兼容 `system` 字段！
-- **\[2023.09.20\]** 支持 [InternLM-20B](https://huggingface.co/internlm) 系列模型！
-- **\[2023.09.06\]** 支持 [Baichuan2](https://huggingface.co/baichuan-inc) 系列模型！
-- **\[2023.08.30\]** XTuner 正式发布！众多微调模型已上传至 [HuggingFace](https://huggingface.co/xtuner)！
+- **\[2023.10\]** 支持 [MSAgent-Bench](https://modelscope.cn/datasets/damo/MSAgent-Bench) 数据集！
+- **\[2023.10\]** 重构数据处理逻辑以兼容 `system` 字段！
+- **\[2023.09\]** 支持 [InternLM-20B](https://huggingface.co/internlm) 系列模型！
+- **\[2023.09\]** 支持 [Baichuan2](https://huggingface.co/baichuan-inc) 系列模型！
+- **\[2023.08\]** XTuner 正式发布！众多微调模型已上传至 [HuggingFace](https://huggingface.co/xtuner)！
 
 ## 📖 介绍
 
