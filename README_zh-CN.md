@@ -28,7 +28,7 @@ XTuner 是一个轻量级微调大语言模型的工具库，由 [MMRazor](https
 
 ## 🌟 示例
 
-- XTuner APIs所提供的开箱即用的模型与数据集 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1eBI9yiOkX-t7P-0-t9vS8y1x5KmWrkoU?usp=sharing)
+- XTuner APIs所提供的开箱即用的模型与数据集 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/17CSO7T8q6KePuvu684IiHl6_id-CjPjh?usp=sharing)
 
 - QLoRA 微调 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1QAEZVBfQ7LZURkMUtaq0b-5nEQII9G9Z?usp=sharing)
 
