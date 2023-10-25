@@ -15,7 +15,7 @@
 ## 🎉 更新
 
 - **\[2023/10\]** 支持 [MSAgent-Bench](https://modelscope.cn/datasets/damo/MSAgent-Bench) 数据集，并且微调所得大语言模型可应用至 [Lagent](https://github.com/InternLM/lagent) 框架！
-- **\[2023/10\]** 重构数据处理逻辑以兼容 `system` 字段！
+- **\[2023/10\]** 优化数据处理逻辑以兼容 `system` 字段，相关细节请查阅[文档](docs/zh_cn/user_guides/dataset_format.md)！
 - **\[2023/09\]** 支持 [InternLM-20B](https://huggingface.co/internlm) 系列模型！
 - **\[2023/09\]** 支持 [Baichuan2](https://huggingface.co/baichuan-inc) 系列模型！
 - **\[2023/08\]** XTuner 正式发布！众多微调模型已上传至 [HuggingFace](https://huggingface.co/xtuner)！
