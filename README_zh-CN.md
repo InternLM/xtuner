@@ -14,9 +14,11 @@
 
 ## 🎉 更新
 
-- **\[2023.09.20\]** 支持 [InternLM-20B](https://huggingface.co/internlm) 系列模型！
-- **\[2023.09.06\]** 支持 [Baichuan2](https://huggingface.co/baichuan-inc) 系列模型！
-- **\[2023.08.30\]** XTuner 正式发布！众多微调模型已上传至 [HuggingFace](https://huggingface.co/xtuner)！
+- **\[2023/10\]** 支持 [MSAgent-Bench](https://modelscope.cn/datasets/damo/MSAgent-Bench) 数据集，并且微调所得大语言模型可应用至 [Lagent](https://github.com/InternLM/lagent) 框架！
+- **\[2023/10\]** 优化数据处理逻辑以兼容 `system` 字段，相关细节请查阅[文档](docs/zh_cn/user_guides/dataset_format.md)！
+- **\[2023/09\]** 支持 [InternLM-20B](https://huggingface.co/internlm) 系列模型！
+- **\[2023/09\]** 支持 [Baichuan2](https://huggingface.co/baichuan-inc) 系列模型！
+- **\[2023/08\]** XTuner 正式发布！众多微调模型已上传至 [HuggingFace](https://huggingface.co/xtuner)！
 
 ## 📖 介绍
 
@@ -28,7 +30,7 @@ XTuner 是一个轻量级微调大语言模型的工具库，由 [MMRazor](https
 
 ## 🌟 示例
 
-- XTuner APIs所提供的开箱即用的模型与数据集 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1eBI9yiOkX-t7P-0-t9vS8y1x5KmWrkoU?usp=sharing)
+- XTuner APIs所提供的开箱即用的模型与数据集 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/17CSO7T8q6KePuvu684IiHl6_id-CjPjh?usp=sharing)
 
 - QLoRA 微调 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1QAEZVBfQ7LZURkMUtaq0b-5nEQII9G9Z?usp=sharing)
 
