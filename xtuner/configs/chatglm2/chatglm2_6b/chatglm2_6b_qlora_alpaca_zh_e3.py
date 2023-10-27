@@ -25,7 +25,7 @@ pretrained_model_name_or_path = 'THUDM/chatglm2-6b'
 
 # Data
 alpaca_zh_path = 'silk-road/alpaca-data-gpt4-chinese'
-prompt_template = PROMPT_TEMPLATE.chatglm
+prompt_template = PROMPT_TEMPLATE.chatglm2
 max_length = 2048
 pack_to_max_length = True
 

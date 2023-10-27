@@ -20,7 +20,7 @@ PROMPT_TEMPLATE = ConfigDict(
         INSTRUCTION='[INST] {input} [/INST]'),
     code_llama_chat=dict(
         SYSTEM='{system}\n', INSTRUCTION='[INST] {input} [/INST]'),
-    chatglm=dict(
+    chatglm2=dict(
         SYSTEM='{system}\n',
         INSTRUCTION='\n\n[Round {round}]\n\n问：{input}\n\n答：'),
     qwen_chat=dict(

@@ -26,7 +26,7 @@ pretrained_model_name_or_path = 'THUDM/chatglm2-6b'
 # Data
 data_path = 'shibing624/medical'
 data_config_name = 'finetune'
-prompt_template = PROMPT_TEMPLATE.chatglm
+prompt_template = PROMPT_TEMPLATE.chatglm2
 max_length = 2048
 pack_to_max_length = True
 
