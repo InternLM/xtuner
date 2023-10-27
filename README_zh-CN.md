@@ -14,6 +14,7 @@
 
 ## 🎉 更新
 
+- **\[2023/10\]** 支持 [ChatGLM3-6B-Base](https://huggingface.co/THUDM/chatglm3-6b-base) 模型！
 - **\[2023/10\]** 支持 [MSAgent-Bench](https://modelscope.cn/datasets/damo/MSAgent-Bench) 数据集，并且微调所得大语言模型可应用至 [Lagent](https://github.com/InternLM/lagent) 框架！
 - **\[2023/10\]** 优化数据处理逻辑以兼容 `system` 字段，相关细节请查阅[文档](docs/zh_cn/user_guides/dataset_format.md)！
 - **\[2023/09\]** 支持 [InternLM-20B](https://huggingface.co/internlm) 系列模型！
@@ -25,7 +26,7 @@
 XTuner 是一个轻量级微调大语言模型的工具库，由 [MMRazor](https://github.com/open-mmlab/mmrazor) 和 [MMDeploy](https://github.com/open-mmlab/mmdeploy) 团队联合开发。
 
 - **轻量级**: 支持在消费级显卡上微调大语言模型。对于 7B 参数量，微调所需的最小显存仅为 **8GB**，这使得用户可以使用几乎任何显卡（甚至免费资源，例如Colab）来微调获得自定义大语言模型助手。
-- **多样性**: 支持多种**大语言模型**（[InternLM](https://huggingface.co/internlm)、[Llama2](https://huggingface.co/meta-llama)、[ChatGLM2](https://huggingface.co/THUDM/chatglm2-6b)、[Qwen](https://huggingface.co/Qwen)、[Baichuan2](https://huggingface.co/baichuan-inc), ...），**数据集**（[MOSS_003_SFT](https://huggingface.co/datasets/fnlp/moss-003-sft-data), [Alpaca](https://huggingface.co/datasets/tatsu-lab/alpaca), [WizardLM](https://huggingface.co/datasets/WizardLM/WizardLM_evol_instruct_V2_196k), [oasst1](https://huggingface.co/datasets/timdettmers/openassistant-guanaco), [Open-Platypus](https://huggingface.co/datasets/garage-bAInd/Open-Platypus), [Code Alpaca](https://huggingface.co/datasets/HuggingFaceH4/CodeAlpaca_20K), [Colorist](https://huggingface.co/datasets/burkelibbey/colors), ...）和**微调算法**（[QLoRA](http://arxiv.org/abs/2305.14314)、[LoRA](http://arxiv.org/abs/2106.09685)），支撑用户根据自身具体需求选择合适的解决方案。
+- **多样性**: 支持多种**大语言模型**（[InternLM](https://huggingface.co/internlm)、[Llama2](https://huggingface.co/meta-llama)、[ChatGLM](https://huggingface.co/THUDM)、[Qwen](https://huggingface.co/Qwen)、[Baichuan2](https://huggingface.co/baichuan-inc), ...），**数据集**（[MOSS_003_SFT](https://huggingface.co/datasets/fnlp/moss-003-sft-data), [Alpaca](https://huggingface.co/datasets/tatsu-lab/alpaca), [WizardLM](https://huggingface.co/datasets/WizardLM/WizardLM_evol_instruct_V2_196k), [oasst1](https://huggingface.co/datasets/timdettmers/openassistant-guanaco), [Open-Platypus](https://huggingface.co/datasets/garage-bAInd/Open-Platypus), [Code Alpaca](https://huggingface.co/datasets/HuggingFaceH4/CodeAlpaca_20K), [Colorist](https://huggingface.co/datasets/burkelibbey/colors), ...）和**微调算法**（[QLoRA](http://arxiv.org/abs/2305.14314)、[LoRA](http://arxiv.org/abs/2106.09685)），支撑用户根据自身具体需求选择合适的解决方案。
 - **兼容性**: 兼容 [DeepSpeed](https://github.com/microsoft/DeepSpeed) 🚀 和 [HuggingFace](https://huggingface.co) 🤗 的训练流程，支撑用户无感式集成与使用。
 
 ## 🌟 示例
@@ -78,6 +79,7 @@ XTuner 是一个轻量级微调大语言模型的工具库，由 [MMRazor](https
   <li><a href="https://huggingface.co/meta-llama">Llama</a></li>
   <li><a href="https://huggingface.co/meta-llama">Llama2</a></li>
   <li><a href="https://huggingface.co/THUDM/chatglm2-6b">ChatGLM2</a></li>
+  <li><a href="https://huggingface.co/THUDM/chatglm3-6b-base">ChatGLM3</a></li>
   <li><a href="https://huggingface.co/Qwen/Qwen-7B">Qwen</a></li>
   <li><a href="https://huggingface.co/baichuan-inc/Baichuan-7B">Baichuan</a></li>
   <li><a href="https://huggingface.co/baichuan-inc/Baichuan2-7B-Base">Baichuan2</a></li>
