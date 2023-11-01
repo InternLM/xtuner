@@ -35,7 +35,9 @@ class EvaluateChatHook(Hook):
             if len(self.evaluation_images) == 1:
                 self.evaluation_images = [self.evaluation_images[0]] * len(
                     self.evaluation_inputs)
-
+            self.evaluation_images = [
+                load_image(img) for img in self.evaluation_images
+            ]
         if prompt_template is None:
             instruction = '{input}'
         else:
@@ -86,9 +88,8 @@ class EvaluateChatHook(Hook):
         if self.evaluation_images is not None:
             for sample_image, sample_input in zip(self.evaluation_images,
                                                   self.evaluation_inputs):
-                image = load_image(sample_image)
                 image = expand2square(
-                    image,
+                    sample_image,
                     tuple(int(x * 255) for x in self.processor.image_mean))
                 image = self.processor.preprocess(
                     image, return_tensors='pt')['pixel_values'][0]
