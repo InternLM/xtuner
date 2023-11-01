@@ -12,20 +12,20 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer,
 
 from xtuner.dataset import process_hf_dataset
 from xtuner.dataset.collate_fns import default_collate_fn
-from xtuner.dataset.map_fns import colors_map_fn, template_map_fn_factory
+from xtuner.dataset.map_fns import openorca_map_fn, template_map_fn_factory
 from xtuner.engine import DatasetInfoHook, EvaluateChatHook
 from xtuner.model import SupervisedFinetune
-from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
+from xtuner.utils import PROMPT_TEMPLATE
 
 #######################################################################
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-pretrained_model_name_or_path = 'THUDM/chatglm2-6b'
+pretrained_model_name_or_path = 'THUDM/chatglm3-6b-base'
 
 # Data
-data_path = 'burkelibbey/colors'
-prompt_template = PROMPT_TEMPLATE.chatglm
+data_path = 'Open-Orca/OpenOrca'
+prompt_template = PROMPT_TEMPLATE.default
 max_length = 2048
 pack_to_max_length = True
 
@@ -33,7 +33,7 @@ pack_to_max_length = True
 batch_size = 1  # per_device
 accumulative_counts = 16
 dataloader_num_workers = 0
-max_epochs = 5
+max_epochs = 1
 optim_type = PagedAdamW32bit
 lr = 2e-4
 betas = (0.9, 0.999)
@@ -41,10 +41,10 @@ weight_decay = 0
 max_norm = 1  # grad clip
 
 # Evaluate the generation performance during the training
-evaluation_freq = 200
-SYSTEM = SYSTEM_TEMPLATE.colorist
+evaluation_freq = 5000
+SYSTEM = ''
 evaluation_inputs = [
-    '请给我一个像天空一样清澈透明的蓝色。', 'Please give me a clear blue like the sky.'
+    '请给我介绍五个上海的景点', 'Please tell me five scenic spots in Shanghai'
 ]
 
 #######################################################################
@@ -88,7 +88,7 @@ train_dataset = dict(
     dataset=dict(type=load_dataset, path=data_path),
     tokenizer=tokenizer,
     max_length=max_length,
-    dataset_map_fn=colors_map_fn,
+    dataset_map_fn=openorca_map_fn,
     template_map_fn=dict(
         type=template_map_fn_factory, template=prompt_template),
     remove_unused_columns=True,
