@@ -6,23 +6,24 @@ import numpy as np
 from datasets import DatasetDict
 from mmengine import print_log
 from mmengine.config import Config, ConfigDict
+from torch import distributed as dist
 
 from xtuner.registry import BUILDER, MAP_FUNC
 from .utils import Packer, encode_fn
 
 
-def process_hf_dataset(dataset,
-                       tokenizer,
-                       max_length,
-                       dataset_map_fn=None,
-                       template_map_fn=None,
-                       max_dataset_length=None,
-                       split='train',
-                       remove_unused_columns=False,
-                       rename_maps=[],
-                       shuffle_before_pack=True,
-                       pack_to_max_length=True,
-                       input_ids_with_output=True):
+def process(dataset,
+            tokenizer,
+            max_length,
+            dataset_map_fn=None,
+            template_map_fn=None,
+            max_dataset_length=None,
+            split='train',
+            remove_unused_columns=False,
+            rename_maps=[],
+            shuffle_before_pack=True,
+            pack_to_max_length=True,
+            input_ids_with_output=True):
     """Post-process the dataset loaded from the Hugging Face Hub, or a local
     dataset.
 
@@ -120,3 +121,16 @@ def process_hf_dataset(dataset,
         dataset = dataset.map(Packer(max_length), batched=True)
 
     return dataset
+
+
+def process_hf_dataset(*args, **kwargs):
+    if not (dist.is_available() and dist.is_initialized()):
+        return process(*args, **kwargs)
+
+    if dist.get_rank() == 0:
+        dataset = process(*args, **kwargs)
+        objects = [dataset]
+    else:
+        objects = [None]
+    dist.broadcast_object_list(objects, src=0)
+    return objects[0]
