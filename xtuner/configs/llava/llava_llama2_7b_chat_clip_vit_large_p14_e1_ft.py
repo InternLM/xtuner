@@ -43,7 +43,7 @@ max_norm = 1  # grad clip
 # Evaluate the generation performance during the training
 evaluation_freq = 500
 SYSTEM = ''
-evaluation_images = './xtuner/configs/llava/cloud.png'
+evaluation_images = 'https://llava-vl.github.io/static/images/view.jpg'
 evaluation_inputs = ['请描述一下这张照片', 'Please describe this picture']
 
 #######################################################################
