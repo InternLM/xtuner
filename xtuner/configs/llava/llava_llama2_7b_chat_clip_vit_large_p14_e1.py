@@ -19,7 +19,7 @@ from xtuner.utils import PROMPT_TEMPLATE
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-llm_name_or_path = 'meta-llama/Llama-2-7b-hf'
+llm_name_or_path = '/mnt/140/llama2/huggingface/llama-2-7b-chat'
 visual_encoder_name_or_path = 'openai/clip-vit-large-patch14'
 
 # Data

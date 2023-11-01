@@ -19,9 +19,9 @@ from xtuner.utils import PROMPT_TEMPLATE
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-llm_name_or_path = 'meta-llama/Llama-2-7b-hf'
+llm_name_or_path = '/mnt/140/llama2/huggingface/llama-2-7b-chat'
 visual_encoder_name_or_path = 'openai/clip-vit-large-patch14'
-projector_pth = './work_dirs/llava_llama2_7b_chat_clip_vit_large_p14_e1/epoch_1.pth'  # noqa: E501
+projector_pth = '/mnt/174/linzhihao/llava/llama_2_7b/epoch_1.pth'  # noqa: E501
 
 # Data
 data_path = './data/llava_data/LLaVA-Instruct-150K/llava_v1_5_mix665k.json'
