@@ -50,6 +50,7 @@ def llama_attn_forward(
     past_key_value: Optional[Tuple[torch.Tensor]] = None,
     output_attentions: bool = False,
     use_cache: bool = False,
+    **kwargs
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor],
            Optional[Tuple[torch.Tensor]]]:
     # Modified from https://github.com/huggingface/transformers/blob/8968fface4e804f380391d880f569578b84b4121/src/transformers/models/llama/modeling_llama.py#L281  # noqa:E501

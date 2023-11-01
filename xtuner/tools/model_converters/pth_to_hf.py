@@ -3,10 +3,10 @@ import argparse
 import os
 import shutil
 
-import torch
 from mmengine.config import Config, DictAction
 
 from xtuner.configs import cfgs_name_path
+from xtuner.model.utils import guess_load_checkpoint
 from xtuner.registry import BUILDER
 
 
@@ -39,29 +39,6 @@ def parse_args():
         'is allowed.')
     args = parser.parse_args()
     return args
-
-
-def guess_load_checkpoint(pth_model):
-    if os.path.isfile(pth_model):
-        state_dict = torch.load(pth_model, map_location='cpu')
-        if 'state_dict' in state_dict:
-            state_dict = state_dict['state_dict']
-    elif os.path.isdir(pth_model):
-        try:
-            from deepspeed.utils.zero_to_fp32 import \
-                get_fp32_state_dict_from_zero_checkpoint
-        except ImportError:
-            raise ImportError(
-                'The provided PTH model appears to be a DeepSpeed checkpoint. '
-                'However, DeepSpeed library is not detected in current '
-                'environment. This suggests that DeepSpeed may not be '
-                'installed or is incorrectly configured. Please verify your '
-                'setup.')
-        state_dict = get_fp32_state_dict_from_zero_checkpoint(
-            os.path.dirname(pth_model), os.path.basename(pth_model))
-    else:
-        raise FileNotFoundError(f'Cannot find {pth_model}')
-    return state_dict
 
 
 def main():

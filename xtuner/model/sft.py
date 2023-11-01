@@ -4,12 +4,14 @@ from collections import OrderedDict
 from mmengine.config import Config, ConfigDict
 from mmengine.model import BaseModel
 from mmengine.runner import load_checkpoint
-from peft import PeftType, get_peft_model, prepare_model_for_kbit_training
+from peft import get_peft_model, prepare_model_for_kbit_training
 from torch import nn
 
-from xtuner.registry import BUILDER
+from ..registry import BUILDER
 from .modules import dispatch_modules
-from .utils import LoadWoInit, find_all_linear_names, traverse_dict
+from .utils import (LoadWoInit, find_all_linear_names,
+                    get_peft_model_state_dict, make_inputs_require_grad,
+                    traverse_dict)
 
 
 class SupervisedFinetune(BaseModel):
@@ -30,15 +32,11 @@ class SupervisedFinetune(BaseModel):
             if hasattr(self.llm, 'enable_input_require_grads'):
                 self.llm.enable_input_require_grads()
             else:
-
-                def make_inputs_require_grad(module, input, output):
-                    output.requires_grad_(True)
-
                 self.llm.get_input_embeddings().register_forward_hook(
                     make_inputs_require_grad)
 
             # enable gradient checkpointing for memory efficiency
-            self.llm.gradient_checkpointing_enable()
+            self.gradient_checkpointing_enable()
 
         if isinstance(lora, dict) or isinstance(lora, Config) or isinstance(
                 lora, ConfigDict):
@@ -51,6 +49,18 @@ class SupervisedFinetune(BaseModel):
             self._prepare_for_lora(peft_model, use_activation_checkpointing)
 
         self._is_init = True
+
+    def gradient_checkpointing_enable(self):
+        self.activation_checkpointing_enable()
+
+    def activation_checkpointing_enable(self):
+        self.llm.gradient_checkpointing_enable()
+
+    def gradient_checkpointing_disable(self):
+        self.activation_checkpointing_disable()
+
+    def activation_checkpointing_disable(self):
+        self.llm.gradient_checkpointing_disable()
 
     def _prepare_for_lora(self,
                           peft_model=None,
@@ -104,62 +114,10 @@ class SupervisedFinetune(BaseModel):
         loss_dict = {'loss': outputs.loss}
         return loss_dict
 
-    def state_dict(self, destination=None, prefix='', keep_vars=False):
-
-        def get_peft_model_state_dict(model,
-                                      state_dict=None,
-                                      adapter_name='default'):
-            # Modified from `https://github.com/huggingface/peft/blob/main/src
-            # /peft/utils/save_and_load.py`
-
-            config = model.peft_config[adapter_name]
-            if state_dict is None:
-                state_dict = model.state_dict()
-            if config.peft_type == PeftType.LORA:
-                # adapted from `https://github.com/microsoft/LoRA/blob/main/
-                # loralib/utils.py`
-                # to be used directly with the state dict which is necessary
-                # when using DeepSpeed or FSDP
-                bias = config.bias
-                if bias == 'none':
-                    to_return = {
-                        k: state_dict[k]
-                        for k in state_dict if 'lora_' in k
-                    }
-                elif bias == 'all':
-                    to_return = {
-                        k: state_dict[k]
-                        for k in state_dict if 'lora_' in k or 'bias' in k
-                    }
-                elif bias == 'lora_only':
-                    to_return = {}
-                    for k in state_dict:
-                        if 'lora_' in k:
-                            to_return[k] = state_dict[k]
-                            bias_name = k.split('lora_')[0] + 'bias'
-                            if bias_name in state_dict:
-                                to_return[bias_name] = state_dict[bias_name]
-                else:
-                    raise NotImplementedError
-                to_return = {
-                    k: v
-                    for k, v in to_return.items()
-                    if (('lora_' in k and adapter_name in k) or ('bias' in k))
-                }
-            else:
-                # Currently we only support lora
-                raise NotImplementedError
-            if model.modules_to_save is not None:
-                for key, value in state_dict.items():
-                    if any(f'{module_name}.modules_to_save.{adapter_name}' in
-                           key for module_name in model.modules_to_save):
-                        to_return[key] = value
-
-            return to_return
-
+    def state_dict(self, *args, **kwargs):
+        state_dict = super().state_dict(*args, **kwargs)
         if not self.use_lora:
-            return super().state_dict()
-        state_dict = super().state_dict()
+            return state_dict
         to_return = get_peft_model_state_dict(self.llm, state_dict=state_dict)
         return OrderedDict(to_return)
 

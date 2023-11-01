@@ -11,7 +11,7 @@
     "overlap_comm": true,
     "reduce_scatter": true
   },
-  "fp16": {
+  "bf16": {
     "enabled": true,
     "initial_scale_power": 16
   }

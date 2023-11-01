@@ -6,6 +6,7 @@ from .code_alpaca_map_fn import code_alpaca_map_fn
 from .colors_map_fn import colors_map_fn
 from .crime_kg_assitant_map_fn import crime_kg_assitant_map_fn
 from .law_reference_map_fn import law_reference_map_fn
+from .llava_map_fn import llava_map_fn
 from .medical_map_fn import medical_map_fn
 from .msagent_map_fn import msagent_react_map_fn
 from .oasst1_map_fn import oasst1_map_fn
@@ -21,5 +22,6 @@ __all__ = [
     'medical_map_fn', 'openorca_map_fn', 'code_alpaca_map_fn',
     'tiny_codes_map_fn', 'colors_map_fn', 'law_reference_map_fn',
     'crime_kg_assitant_map_fn', 'sql_map_fn', 'openai_map_fn',
-    'wizardlm_map_fn', 'stack_exchange_map_fn', 'msagent_react_map_fn'
+    'wizardlm_map_fn', 'stack_exchange_map_fn', 'msagent_react_map_fn',
+    'llava_map_fn'
 ]

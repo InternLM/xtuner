@@ -7,7 +7,7 @@ from datasets import DatasetDict
 from mmengine import print_log
 from mmengine.config import Config, ConfigDict
 
-from xtuner.registry import BUILDER, MAP_FUNC
+from ..registry import BUILDER, MAP_FUNC
 from .utils import Packer, encode_fn
 
 
@@ -22,7 +22,8 @@ def process_hf_dataset(dataset,
                        rename_maps=[],
                        shuffle_before_pack=True,
                        pack_to_max_length=True,
-                       input_ids_with_output=True):
+                       input_ids_with_output=True,
+                       with_image_token=False):
     """Post-process the dataset loaded from the Hugging Face Hub, or a local
     dataset.
 
@@ -51,6 +52,9 @@ def process_hf_dataset(dataset,
         input_ids_with_output: Whether to put the groundtruth output
             corresponding to the question into the dataset. Typically set
             it to True during training and False during testing.
+        with_image_token: Whether to convert DEFAULT_IMAGE_TOKEN to
+            IMAGE_TOKEN_INDEX. Typically set it to True during the training
+            of VLLM.
     """
 
     if isinstance(dataset, DatasetDict):
@@ -108,6 +112,7 @@ def process_hf_dataset(dataset,
             encode_fn,
             tokenizer=tokenizer,
             max_length=max_length,
+            with_image_token=with_image_token,
             input_ids_with_output=input_ids_with_output),
         remove_columns=list(dataset.column_names)
         if remove_unused_columns else None)
