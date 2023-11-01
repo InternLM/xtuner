@@ -2,10 +2,9 @@
 import torch
 from mmengine.hooks import Hook
 from mmengine.model import is_model_wrapper
-from PIL import Image
 from transformers import GenerationConfig, StoppingCriteriaList
 
-from xtuner.dataset.utils import expand2square
+from xtuner.dataset.utils import expand2square, load_image
 from xtuner.model.utils import prepare_inputs_labels_for_multimodal
 from xtuner.registry import BUILDER
 from xtuner.utils import (DEFAULT_IMAGE_TOKEN, IMAGE_TOKEN_INDEX,
@@ -87,7 +86,7 @@ class EvaluateChatHook(Hook):
         if self.evaluation_images is not None:
             for sample_image, sample_input in zip(self.evaluation_images,
                                                   self.evaluation_inputs):
-                image = Image.open(sample_image).convert('RGB')
+                image = load_image(sample_image)
                 image = expand2square(
                     image,
                     tuple(int(x * 255) for x in self.processor.image_mean))

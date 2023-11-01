@@ -3,12 +3,11 @@ import argparse
 
 import torch
 from peft import PeftModel
-from PIL import Image
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           BitsAndBytesConfig, CLIPImageProcessor,
                           CLIPVisionModel, GenerationConfig)
 
-from xtuner.dataset.utils import expand2square
+from xtuner.dataset.utils import expand2square, load_image
 from xtuner.model import MLPProjector
 from xtuner.model.utils import prepare_inputs_labels_for_multimodal
 from xtuner.tools.utils import get_chat_utils
@@ -229,7 +228,7 @@ def main():
     # llm.prepare_inputs_for_generation = prepare_inputs_for_generation
 
     if args.image is not None:
-        image = Image.open(args.image).convert('RGB')
+        image = load_image(args.image)
         image = expand2square(
             image, tuple(int(x * 255) for x in processor.image_mean))
         image = processor.preprocess(
