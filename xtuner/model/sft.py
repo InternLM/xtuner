@@ -51,6 +51,14 @@ class SupervisedFinetune(BaseModel):
             self._prepare_for_lora(peft_model, use_activation_checkpointing)
 
         self._is_init = True
+        self._model_numel = self._get_model_numel()
+
+    @property
+    def model_numel(self):
+        return self._model_numel
+
+    def _get_model_numel(self):
+        return sum(p.numel() for p in self.llm.parameters())
 
     def _prepare_for_lora(self,
                           peft_model=None,
