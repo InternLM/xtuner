@@ -43,7 +43,8 @@ class LLaVAModel(BaseModel):
             visual_hidden_size=self.visual_encoder.config.hidden_size,
             llm_hidden_size=self.llm.config.hidden_size,
             depth=projector_depth)
-        self.projector = ProjectorModel(projector_config)
+        self.projector = ProjectorModel(projector_config).to(
+            self.visual_encoder.dtype)
 
         if projector_pth is not None:
             projector_state_dict = guess_load_checkpoint(projector_pth)
