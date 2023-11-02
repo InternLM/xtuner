@@ -8,7 +8,7 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           CLIPVisionModel, GenerationConfig)
 
 from xtuner.dataset.utils import expand2square, load_image
-from xtuner.model import MLPProjector
+from xtuner.model import ProjectorModel
 from xtuner.model.utils import prepare_inputs_labels_for_multimodal
 from xtuner.tools.utils import get_chat_utils
 from xtuner.utils import (DEFAULT_IMAGE_TOKEN, IMAGE_TOKEN_INDEX,
@@ -34,10 +34,7 @@ def parse_args():
     parser.add_argument(
         '--visual-encoder', default=None, help='visual encoder name or path')
     parser.add_argument(
-        '--projector-type', default=None, help='projector type')
-    parser.add_argument('--llm-weight', default=None, help='llm weight')
-    parser.add_argument(
-        '--projector-weight', default=None, help='projector weight')
+        '--projector', default=None, help='projector name or path')
     parser.add_argument('--image', default=None, help='image')
 
     parser.add_argument(
@@ -125,58 +122,11 @@ def get_input():
     return result
 
 
-# def prepare_inputs_for_generation(
-#     self,
-#     input_ids,
-#     past_key_values=None,
-#     attention_mask=None,
-#     inputs_embeds=None,
-#     **kwargs
-# ):
-#     if past_key_values:
-#         input_ids = input_ids[:, -1:]
-
-#     position_ids = kwargs.get("position_ids", None)
-#     if attention_mask is not None and position_ids is None:
-#         # create position_ids on the fly for batch generation
-#         position_ids = attention_mask.long().cumsum(-1) - 1
-#         position_ids.masked_fill_(attention_mask == 0, 1)
-#         if past_key_values:
-#             position_ids = position_ids[:, -1].unsqueeze(-1)
-
-#     # if `inputs_embeds` are passed, we only want to use them in
-#     # the 1st generation step
-#     if inputs_embeds is not None and past_key_values is None:
-#         model_inputs = {"inputs_embeds": inputs_embeds}
-#     else:
-#         model_inputs = {"input_ids": input_ids}
-
-#     model_inputs.update(
-#         {
-#             "position_ids": position_ids,
-#             "past_key_values": past_key_values,
-#             "use_cache": kwargs.get("use_cache"),
-#             "attention_mask": attention_mask,
-#             "images": kwargs.get("images", None)
-#         }
-#     )
-#     return model_inputs
-
-# def forward(self, *args, **kwargs):
-#     if kwargs.get('pixel_values', None) is not None:
-#         visual_outputs = self.visual_encoder(
-#             kwargs['pixel_values'], output_hidden_states=True)
-#         pixel_values = self.projector(
-#             visual_outputs.hidden_states[self.visual_select_layer][:, 1:])
-#         kwargs['pixel_values'] = pixel_values
-#         kwargs = self.prepare_inputs_labels_for_multimodal(**kwargs)
-
-
 def main():
     args = parse_args()
     torch.manual_seed(args.seed)
 
-    # model_kwargs
+    # build llm
     quantization_config = None
     load_in_8bit = False
     if args.bits == 4:
@@ -197,7 +147,6 @@ def main():
         'offload_folder': args.offload_folder,
         'trust_remote_code': True
     }
-    # build model
     llm = AutoModelForCausalLM.from_pretrained(args.model_name_or_path,
                                                **model_kwargs)
     tokenizer = AutoTokenizer.from_pretrained(
@@ -206,18 +155,14 @@ def main():
         llm = PeftModel.from_pretrained(
             llm, args.adapter, offload_folder=args.offload_folder)
         print(f'Load adapter from {args.adapter}')
+
+    # build visual_encoder
     visual_encoder = CLIPVisionModel.from_pretrained(args.visual_encoder)
     processor = CLIPImageProcessor.from_pretrained(args.visual_encoder)
-    # TODO
-    projector = MLPProjector(visual_encoder.config.hidden_size,
-                             llm.config.hidden_size)
-    print(f'Load projector weight from {args.projector_weight}!')
-    projector_state_dict = torch.load(args.projector_weight)
-    projector.load_state_dict(projector_state_dict)
-    if args.llm_weight is not None:
-        print(f'Load projector weight from {args.llm_weight}!')
-        llm_state_dict = torch.load(args.llm_weight)
-        llm.load_state_dict(llm_state_dict)
+
+    # build projector
+    projector = ProjectorModel.from_pretrained(args.projector)
+
     llm.cuda()
     visual_encoder.cuda()
     projector.cuda()
@@ -225,15 +170,13 @@ def main():
     visual_encoder.eval()
     projector.eval()
 
-    # llm.prepare_inputs_for_generation = prepare_inputs_for_generation
-
     if args.image is not None:
         image = load_image(args.image)
         image = expand2square(
             image, tuple(int(x * 255) for x in processor.image_mean))
         image = processor.preprocess(
             image, return_tensors='pt')['pixel_values'][0]
-        image = image.cuda()
+        image = image.cuda().unsqueeze(0)
 
     Streamer, stop_criteria = get_chat_utils(llm)
     if args.no_streamer:
@@ -294,14 +237,13 @@ def main():
             ids.extend(cur_chunk_encode['input_ids'])
             if idx != len(chunk_encode) - 1:
                 ids.append(IMAGE_TOKEN_INDEX)
-        ids = torch.tensor(ids).cuda()
+        ids = torch.tensor(ids).cuda().unsqueeze(0)
 
-        visual_outputs = visual_encoder(
-            image.unsqueeze(0), output_hidden_states=True)
+        visual_outputs = visual_encoder(image, output_hidden_states=True)
         pixel_values = projector(visual_outputs.hidden_states[-2][:, 1:])
 
         mm_inputs = prepare_inputs_labels_for_multimodal(
-            llm=llm, input_ids=ids.unsqueeze(0), pixel_values=pixel_values)
+            llm=llm, input_ids=ids, pixel_values=pixel_values)
 
         streamer = Streamer(tokenizer) if Streamer is not None else None
         generate_output = llm.generate(
@@ -311,7 +253,7 @@ def main():
             bos_token_id=tokenizer.bos_token_id,
             stopping_criteria=stop_criteria)
         if streamer is None:
-            output_text = tokenizer.decode(generate_output[0][len(ids[0]):])
+            output_text = tokenizer.decode(generate_output[0])
             end = '' if output_text[-1] == '\n' else '\n'
             print(output_text, end=end)
         inputs += tokenizer.decode(generate_output[0])
