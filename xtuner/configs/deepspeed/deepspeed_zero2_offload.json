@@ -6,18 +6,17 @@
   "zero_force_ds_cpu_optimizer": false,
   "zero_optimization": {
     "stage": 2,
-    "contiguous_gradients": false,
-    "allgather_bucket_size": 1e8,
-    "reduce_bucket_size": 1e8,
     "overlap_comm": true,
-    "reduce_scatter": true,
     "offload_optimizer": {
       "device": "cpu",
       "pin_memory": true
     }
   },
   "fp16": {
-    "enabled": true,
+    "enabled": "auto",
     "initial_scale_power": 16
+  },
+  "bf16": {
+    "enabled": "auto"
   }
 }

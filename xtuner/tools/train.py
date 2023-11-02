@@ -19,6 +19,7 @@ from xtuner.dataset.collate_fns import default_collate_fn
 from xtuner.model.modules import dispatch_modules
 from xtuner.model.utils import LoadWoInit, find_all_linear_names, traverse_dict
 from xtuner.registry import BUILDER, MAP_FUNC
+from xtuner.tools.utils import auto_dtype_of_deepspeed_config
 
 
 def parse_args():
@@ -222,9 +223,10 @@ def main():
                         logger='current',
                         level=logging.WARNING)
                 grad_clip = mm_max_norm
+                ds_cfg = auto_dtype_of_deepspeed_config(ds_cfg)
                 strategy = dict(
                     type='DeepSpeedStrategy',
-                    config=args.deepspeed,
+                    config=ds_cfg,
                     gradient_accumulation_steps=grad_accum,
                     train_micro_batch_size_per_gpu=train_bs,
                     gradient_clipping=grad_clip,
