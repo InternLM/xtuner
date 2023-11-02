@@ -37,6 +37,8 @@ def parse_args():
     parser.add_argument(
         '--visual-encoder', default=None, help='visual encoder name or path')
     parser.add_argument(
+        '--visual-select-layer', default=-2, help='visual select layer')
+    parser.add_argument(
         '--projector', default=None, help='projector name or path')
     parser.add_argument('--image', default=None, help='image')
     parser.add_argument(
@@ -382,8 +384,9 @@ def main():
 
                 visual_outputs = visual_encoder(
                     image, output_hidden_states=True)
-                pixel_values = projector(visual_outputs.hidden_states[-2][:,
-                                                                          1:])
+                pixel_values = projector(
+                    visual_outputs.hidden_states[args.visual_select_layer][:,
+                                                                           1:])
                 mm_inputs = prepare_inputs_labels_for_multimodal(
                     llm=llm, input_ids=ids, pixel_values=pixel_values)
 
