@@ -69,13 +69,22 @@ def main():
     if cfg.model.get('llm') and (not cfg.model.get('freeze_llm', False)
                                  or cfg.model.get('lora')
                                  or cfg.model.get('llm_lora')):
-        llm_path = os.path.join(args.save_dir, 'llm')
-        print(f'Saving LLM to {llm_path}')
-        model.llm.save_pretrained(llm_path, max_shard_size=args.max_shard_size)
-        if 'PeftModel' not in model.llm.__class__.__name__:
+        if not (cfg.model.get('visual_encoder')
+                or hasattr(model, 'projector')):
+            llm_path = args.save_dir
+        elif 'PeftModel' in model.llm.__class__.__name__:
+            llm_path = os.path.join(args.save_dir, 'adapter')
+        else:
+            llm_path = os.path.join(args.save_dir, 'llm')
+        if 'PeftModel' in model.llm.__class__.__name__:
+            print(f'Saving adapter to {llm_path}')
+        else:
             print(f'Saving LLM tokenizer to {llm_path}')
             tokenizer = BUILDER.build(cfg.tokenizer)
             tokenizer.save_pretrained(llm_path)
+            print(f'Saving LLM to {llm_path}')
+        model.llm.save_pretrained(llm_path, max_shard_size=args.max_shard_size)
+
     if cfg.model.get('visual_encoder') and not cfg.model.get(
             'freeze_visual_encoder', False):
         visual_encoder_path = os.path.join(args.save_dir, 'visual_encoder')
