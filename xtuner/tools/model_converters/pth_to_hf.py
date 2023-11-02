@@ -63,16 +63,32 @@ def main():
     print(f'Load PTH model from {args.pth_model}')
 
     if not args.fp32:
-        print('Convert weights to float16')
+        print('Convert LLM to float16')
         model.llm.half()
 
-    print(f'Saving HuggingFace model to {args.save_dir}')
-    model.llm.save_pretrained(
-        args.save_dir, max_shard_size=args.max_shard_size)
-    if 'PeftModel' not in model.llm.__class__.__name__:
-        print(f'Saving HuggingFace tokenizer to {args.save_dir}')
-        tokenizer = BUILDER.build(cfg.tokenizer)
-        tokenizer.save_pretrained(args.save_dir)
+    if cfg.model.get('llm') and not cfg.model.get('freeze_llm', False):
+        llm_path = os.path.join(args.save_dir, 'llm')
+        print(f'Saving LLM to {llm_path}')
+        model.llm.save_pretrained(llm_path, max_shard_size=args.max_shard_size)
+        if 'PeftModel' not in model.llm.__class__.__name__:
+            print(f'Saving LLM tokenizer to {llm_path}')
+            tokenizer = BUILDER.build(cfg.tokenizer)
+            tokenizer.save_pretrained(llm_path)
+    if cfg.model.get('visual_encoder') and not cfg.model.get(
+            'freeze_visual_encoder', False):
+        visual_encoder_path = os.path.join(args.save_dir, 'visual_encoder')
+        print(f'Saving visual_encoder to {visual_encoder_path}')
+        model.visual_encoder.save_pretrained(
+            visual_encoder_path, max_shard_size=args.max_shard_size)
+        print(f'Saving visual_encoder processor to {visual_encoder_path}')
+        processor = BUILDER.build(cfg.processor)
+        processor.save_pretrained(visual_encoder_path)
+    if hasattr(model, 'projector'):
+        projector_path = os.path.join(args.save_dir, 'projector')
+        print(f'Saving projector to {projector_path}')
+        model.projector.save_pretrained(
+            projector_path, max_shard_size=args.max_shard_size)
+
     shutil.copyfile(args.config, os.path.join(args.save_dir,
                                               'xtuner_config.py'))
     print('All done!')
