@@ -66,7 +66,9 @@ def main():
         print('Convert LLM to float16')
         model.llm.half()
 
-    if cfg.model.get('llm') and not cfg.model.get('freeze_llm', False):
+    if cfg.model.get('llm') and (not cfg.model.get('freeze_llm', False)
+                                 or cfg.model.get('lora')
+                                 or cfg.model.get('llm_lora')):
         llm_path = os.path.join(args.save_dir, 'llm')
         print(f'Saving LLM to {llm_path}')
         model.llm.save_pretrained(llm_path, max_shard_size=args.max_shard_size)
