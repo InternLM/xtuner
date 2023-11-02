@@ -6,16 +6,14 @@
   "zero_force_ds_cpu_optimizer": false,
   "zero_optimization": {
     "stage": 3,
-    "contiguous_gradients": false,
-    "allgather_bucket_size": 3e8,
-    "reduce_bucket_size": 3e8,
     "overlap_comm": true,
-    "reduce_scatter": true,
     "stage3_gather_16bit_weights_on_model_save": true
   },
-  "low_cpu_mem_usage": false,
   "fp16": {
-    "enabled": true,
+    "enabled": "auto",
     "initial_scale_power": 16
+  },
+  "bf16": {
+    "enabled": "auto"
   }
 }
