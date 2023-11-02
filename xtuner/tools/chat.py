@@ -7,10 +7,15 @@ import sys
 import torch
 from peft import PeftModel
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
-                          BitsAndBytesConfig, GenerationConfig)
+                          BitsAndBytesConfig, CLIPImageProcessor,
+                          CLIPVisionModel, GenerationConfig)
 
+from xtuner.dataset.utils import expand2square, load_image
+from xtuner.model import ProjectorModel
+from xtuner.model.utils import prepare_inputs_labels_for_multimodal
 from xtuner.tools.utils import get_chat_utils, update_stop_criteria
-from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
+from xtuner.utils import (DEFAULT_IMAGE_TOKEN, IMAGE_TOKEN_INDEX,
+                          PROMPT_TEMPLATE, SYSTEM_TEMPLATE)
 
 
 def remove_prefix(state_dict, prefix):
@@ -29,6 +34,11 @@ def parse_args():
     parser.add_argument(
         'model_name_or_path', help='Hugging Face model name or path')
     parser.add_argument('--adapter', default=None, help='adapter name or path')
+    parser.add_argument(
+        '--visual-encoder', default=None, help='visual encoder name or path')
+    parser.add_argument(
+        '--projector', default=None, help='projector name or path')
+    parser.add_argument('--image', default=None, help='image')
     parser.add_argument(
         '--prompt-template',
         choices=PROMPT_TEMPLATE.keys(),
@@ -117,7 +127,7 @@ def main():
     args = parse_args()
     torch.manual_seed(args.seed)
 
-    # model_kwargs
+    # build llm
     quantization_config = None
     load_in_8bit = False
     if args.bits == 4:
@@ -196,18 +206,39 @@ def main():
                 from plugins import solve  # noqa: F401
             if search_open:
                 from plugins import search  # noqa: F401
-        # build model
-        model = AutoModelForCausalLM.from_pretrained(args.model_name_or_path,
-                                                     **model_kwargs)
+        # build llm
+        llm = AutoModelForCausalLM.from_pretrained(args.model_name_or_path,
+                                                   **model_kwargs)
         tokenizer = AutoTokenizer.from_pretrained(
             args.model_name_or_path, trust_remote_code=True)
         if args.adapter is not None:
-            model = PeftModel.from_pretrained(
-                model, args.adapter, offload_folder=args.offload_folder)
+            llm = PeftModel.from_pretrained(
+                llm, args.adapter, offload_folder=args.offload_folder)
             print(f'Load adapter from {args.adapter}')
-        model.eval()
+        llm.eval()
+        # build visual_encoder
+        if args.visual_encoder is not None:
+            visual_encoder = CLIPVisionModel.from_pretrained(
+                args.visual_encoder)
+            processor = CLIPImageProcessor.from_pretrained(args.visual_encoder)
+            visual_encoder.cuda()
+            visual_encoder.eval()
 
-        Streamer, stop_criteria = get_chat_utils(model)
+        # build projector
+        if args.projector is not None:
+            projector = ProjectorModel.from_pretrained(args.projector)
+            projector.cuda()
+            projector.eval()
+
+        if args.image is not None:
+            image = load_image(args.image)
+            image = expand2square(
+                image, tuple(int(x * 255) for x in processor.image_mean))
+            image = processor.preprocess(
+                image, return_tensors='pt')['pixel_values'][0]
+            image = image.cuda().unsqueeze(0)
+
+        Streamer, stop_criteria = get_chat_utils(llm)
         if args.no_streamer:
             Streamer = None
 
@@ -240,6 +271,9 @@ def main():
             if text.strip() == 'EXIT':
                 print('Log: Exit!')
                 exit(0)
+
+            if args.image is not None and n_turn == 0:
+                text = DEFAULT_IMAGE_TOKEN + '\n' + text
 
             template = PROMPT_TEMPLATE[args.prompt_template]
             prompt_text = ''
@@ -275,56 +309,97 @@ def main():
                         '- Web search: disabled.')
 
             inputs += prompt_text
-            ids = tokenizer.encode(inputs, return_tensors='pt')
-            streamer = Streamer(tokenizer) if Streamer is not None else None
-            if args.with_plugins is not None:
-                generate_output = model.generate(
-                    inputs=ids.cuda(),
-                    generation_config=gen_config,
-                    streamer=streamer,
-                    stopping_criteria=command_stop_cr).cpu()
-                generate_output_text = tokenizer.decode(
-                    generate_output[0][len(ids[0]):])
-                if streamer is None:
-                    end = '' if generate_output_text[-1] == '\n' else '\n'
-                    print(generate_output_text, end=end)
-                pattern = r'<\|Commands\|>:(.*?)<eoc>'
-                command_text = ', '.join(
-                    re.findall(pattern, generate_output_text))
-                extent_text = plugins_api(
-                    command_text,
-                    calculate_open=calculate_open,
-                    solve_open=solve_open,
-                    search_open=search_open)
-                end = '' if extent_text[-1] == '\n' else '\n'
-                print(extent_text, end=end)
-                extent_text_ids = tokenizer.encode(
-                    extent_text, return_tensors='pt', add_special_tokens=False)
-                new_ids = torch.cat((generate_output, extent_text_ids), dim=1)
-                new_streamer = Streamer(
+            if args.image is None:
+                ids = tokenizer.encode(inputs, return_tensors='pt')
+                streamer = Streamer(
                     tokenizer) if Streamer is not None else None
-                generate_output = model.generate(
-                    inputs=new_ids.cuda(),
-                    generation_config=gen_config,
-                    streamer=new_streamer,
-                    stopping_criteria=answer_stop_cr)
-                if streamer is None:
-                    output_text = tokenizer.decode(
-                        generate_output[0][len(new_ids[0]):])
-                    end = '' if output_text[-1] == '\n' else '\n'
-                    print(output_text, end=end)
+                if args.with_plugins is not None:
+                    generate_output = llm.generate(
+                        inputs=ids.cuda(),
+                        generation_config=gen_config,
+                        streamer=streamer,
+                        stopping_criteria=command_stop_cr).cpu()
+                    generate_output_text = tokenizer.decode(
+                        generate_output[0][len(ids[0]):])
+                    if streamer is None:
+                        end = '' if generate_output_text[-1] == '\n' else '\n'
+                        print(generate_output_text, end=end)
+                    pattern = r'<\|Commands\|>:(.*?)<eoc>'
+                    command_text = ', '.join(
+                        re.findall(pattern, generate_output_text))
+                    extent_text = plugins_api(
+                        command_text,
+                        calculate_open=calculate_open,
+                        solve_open=solve_open,
+                        search_open=search_open)
+                    end = '' if extent_text[-1] == '\n' else '\n'
+                    print(extent_text, end=end)
+                    extent_text_ids = tokenizer.encode(
+                        extent_text,
+                        return_tensors='pt',
+                        add_special_tokens=False)
+                    new_ids = torch.cat((generate_output, extent_text_ids),
+                                        dim=1)
+                    new_streamer = Streamer(
+                        tokenizer) if Streamer is not None else None
+                    generate_output = llm.generate(
+                        inputs=new_ids.cuda(),
+                        generation_config=gen_config,
+                        streamer=new_streamer,
+                        stopping_criteria=answer_stop_cr)
+                    if streamer is None:
+                        output_text = tokenizer.decode(
+                            generate_output[0][len(new_ids[0]):])
+                        end = '' if output_text[-1] == '\n' else '\n'
+                        print(output_text, end=end)
+                else:
+                    generate_output = llm.generate(
+                        inputs=ids.cuda(),
+                        generation_config=gen_config,
+                        streamer=streamer,
+                        stopping_criteria=answer_stop_cr)
+                    if streamer is None:
+                        output_text = tokenizer.decode(
+                            generate_output[0][len(ids[0]):])
+                        end = '' if output_text[-1] == '\n' else '\n'
+                        print(output_text, end=end)
+                inputs = tokenizer.decode(generate_output[0])
             else:
-                generate_output = model.generate(
-                    inputs=ids.cuda(),
+                chunk_encode = []
+                for idx, chunk in enumerate(inputs.split(DEFAULT_IMAGE_TOKEN)):
+                    if idx == 0:
+                        cur_encode = tokenizer(chunk)
+                    else:
+                        cur_encode = tokenizer(chunk, add_special_tokens=False)
+                    chunk_encode.append(cur_encode)
+                assert len(chunk_encode) == 2
+                ids = []
+                for idx, cur_chunk_encode in enumerate(chunk_encode):
+                    ids.extend(cur_chunk_encode['input_ids'])
+                    if idx != len(chunk_encode) - 1:
+                        ids.append(IMAGE_TOKEN_INDEX)
+                ids = torch.tensor(ids).cuda().unsqueeze(0)
+
+                visual_outputs = visual_encoder(
+                    image, output_hidden_states=True)
+                pixel_values = projector(visual_outputs.hidden_states[-2][:,
+                                                                          1:])
+                mm_inputs = prepare_inputs_labels_for_multimodal(
+                    llm=llm, input_ids=ids, pixel_values=pixel_values)
+
+                streamer = Streamer(
+                    tokenizer) if Streamer is not None else None
+                generate_output = llm.generate(
+                    **mm_inputs,
                     generation_config=gen_config,
                     streamer=streamer,
+                    bos_token_id=tokenizer.bos_token_id,
                     stopping_criteria=answer_stop_cr)
                 if streamer is None:
-                    output_text = tokenizer.decode(
-                        generate_output[0][len(ids[0]):])
+                    output_text = tokenizer.decode(generate_output[0])
                     end = '' if output_text[-1] == '\n' else '\n'
                     print(output_text, end=end)
-            inputs = tokenizer.decode(generate_output[0])
+                inputs += tokenizer.decode(generate_output[0])
             n_turn += 1
             if len(generate_output[0]) >= args.max_new_tokens:
                 print(
