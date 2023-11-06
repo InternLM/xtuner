@@ -120,8 +120,6 @@ val_mmlu_fs = dict(
     dataset=mmlu_fs_dataset,
     tokenizer=tokenizer,
     dataset_map_fn=default_map_fn,
-    template_map_fn=dict(
-        type=template_map_fn_factory, template=prompt_template),
     max_length=max_length,
     input_ids_with_output=False,
     pack_to_max_length=False,
@@ -142,8 +140,6 @@ test_mmlu_fs = dict(
     dataset=mmlu_fs_dataset,
     tokenizer=tokenizer,
     dataset_map_fn=default_map_fn,
-    template_map_fn=dict(
-        type=template_map_fn_factory, template=prompt_template),
     max_length=max_length,
     input_ids_with_output=False,
     pack_to_max_length=False,
