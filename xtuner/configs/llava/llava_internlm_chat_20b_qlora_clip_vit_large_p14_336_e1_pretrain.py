@@ -5,8 +5,10 @@ from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
                             LoggerHook, ParamSchedulerHook)
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR
 from torch.optim import AdamW
+from peft import LoraConfig
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
-                          CLIPImageProcessor, CLIPVisionModel)
+                          CLIPImageProcessor, CLIPVisionModel,
+                          BitsAndBytesConfig)
 
 from xtuner.dataset import LLaVADataset
 from xtuner.dataset.collate_fns import default_collate_fn
@@ -19,14 +21,14 @@ from xtuner.utils import PROMPT_TEMPLATE
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-llm_name_or_path = '/mnt/140/llama2/huggingface/llama-2-7b-chat'
-visual_encoder_name_or_path = 'openai/clip-vit-large-patch14'
+llm_name_or_path = '/mnt/141/internlm-20b-chat'
+visual_encoder_name_or_path = '/mnt/174/clip-vit-large-patch14-336'
 
 # Data
 data_path = './data/llava_data/LLaVA-Pretrain/blip_laion_cc_sbu_558k.json'
 image_folder = './data/llava_data/LLaVA-Pretrain/images'
-prompt_template = PROMPT_TEMPLATE.llama2_chat
-max_length = 2048
+prompt_template = PROMPT_TEMPLATE.internlm_chat
+max_length = int(2048 - (336 / 14) ** 2 + 1)
 
 # Scheduler & Optimizer
 batch_size = 32  # per_device
@@ -34,7 +36,7 @@ accumulative_counts = 1
 dataloader_num_workers = 4
 max_epochs = 1
 optim_type = AdamW
-lr = 1e-3
+lr = 2e-4
 betas = (0.9, 0.999)
 weight_decay = 0
 max_norm = 1  # grad clip
@@ -67,7 +69,23 @@ model = dict(
         type=AutoModelForCausalLM.from_pretrained,
         pretrained_model_name_or_path=llm_name_or_path,
         trust_remote_code=True,
-        torch_dtype=torch.float32),
+        torch_dtype=torch.float16,
+        quantization_config=dict(
+            type=BitsAndBytesConfig,
+            load_in_4bit=True,
+            load_in_8bit=False,
+            llm_int8_threshold=6.0,
+            llm_int8_has_fp16_weight=False,
+            bnb_4bit_compute_dtype=torch.float16,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type='nf4')),
+    llm_lora=dict(
+        type=LoraConfig,
+        r=64,
+        lora_alpha=16,
+        lora_dropout=0.1,
+        bias='none',
+        task_type='CAUSAL_LM'),
     visual_encoder=dict(
         type=CLIPVisionModel.from_pretrained,
         pretrained_model_name_or_path=visual_encoder_name_or_path))

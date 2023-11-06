@@ -5,10 +5,12 @@ from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
                             LoggerHook, ParamSchedulerHook)
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR
 from torch.optim import AdamW
+from peft import LoraConfig
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
-                          CLIPImageProcessor, CLIPVisionModel)
+                          CLIPImageProcessor, CLIPVisionModel,
+                          BitsAndBytesConfig)
 
-from xtuner.dataset import LLaVADataset
+from xtuner.dataset import LLaVADataset, ConcatDataset
 from xtuner.dataset.collate_fns import default_collate_fn
 from xtuner.dataset.map_fns import llava_map_fn, template_map_fn_factory
 from xtuner.engine import DatasetInfoHook, EvaluateChatHook
@@ -19,23 +21,26 @@ from xtuner.utils import PROMPT_TEMPLATE
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-llm_name_or_path = '/mnt/140/llama2/huggingface/llama-2-7b-chat'
-visual_encoder_name_or_path = 'openai/clip-vit-large-patch14'
-projector_pth = '/mnt/174/linzhihao/llava/llama_2_7b/epoch_1.pth'  # noqa: E501
+llm_name_or_path = '/mnt/141/internlm-20b-chat'
+visual_encoder_name_or_path = '/mnt/174/clip-vit-large-patch14-336'
+pretrained_pth = '/mnt/174/linzhihao/llava_internlm_chat_20b_qlora_clip_vit_large_p14_336_e1_pretrain/epoch_1.pth'
 
 # Data
 data_path = './data/llava_data/LLaVA-Instruct-150K/llava_v1_5_mix665k.json'
 image_folder = './data/llava_data/llava_images'
-prompt_template = PROMPT_TEMPLATE.llama2_chat
-max_length = 2048
+llava_zh_data_path = './data/llava_data/llava_zh/llava_instruct_150k_zh.json'
+llava_zh_image_folder = './data/llava_data/llava_images/coco/train2017'
+
+prompt_template = PROMPT_TEMPLATE.internlm_chat
+max_length = int(2048 - (336 / 14) ** 2 + 1)
 
 # Scheduler & Optimizer
-batch_size = 16  # per_device
-accumulative_counts = 1
-dataloader_num_workers = 4
+batch_size = 8  # per_device
+accumulative_counts = 4
+dataloader_num_workers = 2
 max_epochs = 1
 optim_type = AdamW
-lr = 2e-5
+lr = 2e-4
 betas = (0.9, 0.999)
 weight_decay = 0
 max_norm = 1  # grad clip
@@ -62,14 +67,30 @@ processor = dict(
 
 model = dict(
     type=LLaVAModel,
-    freeze_llm=False,
+    freeze_llm=True,
     freeze_visual_encoder=True,
-    projector_pth=projector_pth,
+    pretrained_pth=pretrained_pth,
     llm=dict(
         type=AutoModelForCausalLM.from_pretrained,
         pretrained_model_name_or_path=llm_name_or_path,
         trust_remote_code=True,
-        torch_dtype=torch.float32),
+        torch_dtype=torch.float16,
+        quantization_config=dict(
+            type=BitsAndBytesConfig,
+            load_in_4bit=True,
+            load_in_8bit=False,
+            llm_int8_threshold=6.0,
+            llm_int8_has_fp16_weight=False,
+            bnb_4bit_compute_dtype=torch.float16,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type='nf4')),
+    llm_lora=dict(
+        type=LoraConfig,
+        r=64,
+        lora_alpha=16,
+        lora_dropout=0.1,
+        bias='none',
+        task_type='CAUSAL_LM'),
     visual_encoder=dict(
         type=CLIPVisionModel.from_pretrained,
         pretrained_model_name_or_path=visual_encoder_name_or_path))
@@ -89,10 +110,26 @@ llava_dataset = dict(
     max_length=max_length,
     image_aspect_ratio='pad')
 
+llava_zh_dataset = dict(
+    type=LLaVADataset,
+    data_path=llava_zh_data_path,
+    image_folder=llava_zh_image_folder,
+    tokenizer=tokenizer,
+    processor=processor,
+    dataset_map_fn=llava_map_fn,
+    template_map_fn=dict(
+        type=template_map_fn_factory, template=prompt_template),
+    max_length=max_length,
+    image_aspect_ratio='pad')
+
+train_dataset = dict(
+    type=ConcatDataset,
+    datasets_cfg=dict(llava=llava_dataset, llava_zh=llava_zh_dataset))
+
 train_dataloader = dict(
     batch_size=batch_size,
     num_workers=dataloader_num_workers,
-    dataset=llava_dataset,
+    dataset=train_dataset,
     sampler=dict(type=DefaultSampler, shuffle=True),
     collate_fn=dict(type=default_collate_fn))
 
