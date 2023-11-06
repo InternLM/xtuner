@@ -24,7 +24,7 @@ class LLaVAModel(BaseModel):
                  freeze_llm=False,
                  freeze_visual_encoder=False,
                  visual_select_layer=-2,
-                 projector_pth=None,
+                 pretrained_pth=None,
                  projector_depth=2,
                  llm_lora=None,
                  peft_model=None,
@@ -45,12 +45,6 @@ class LLaVAModel(BaseModel):
             depth=projector_depth)
         self.projector = ProjectorModel(projector_config).to(
             self.visual_encoder.dtype)
-
-        if projector_pth is not None:
-            projector_state_dict = guess_load_checkpoint(projector_pth)
-
-            self.load_state_dict(projector_state_dict, strict=False)
-            print(f'Load projector weight from {projector_pth}')
 
         if self.freeze_llm:
             self.llm.requires_grad_(False)
@@ -83,6 +77,12 @@ class LLaVAModel(BaseModel):
         self.use_lora = llm_lora is not None
         if self.use_lora:
             self._prepare_for_lora(peft_model, use_activation_checkpointing)
+
+        if pretrained_pth is not None:
+            pretrained_state_dict = guess_load_checkpoint(pretrained_pth)
+
+            self.load_state_dict(pretrained_state_dict, strict=False)
+            print(f'Load pretrained weight from {pretrained_pth}')
 
         self.visual_select_layer = visual_select_layer
 
