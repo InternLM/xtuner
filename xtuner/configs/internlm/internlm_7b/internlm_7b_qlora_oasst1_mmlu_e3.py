@@ -32,6 +32,7 @@ max_length = 2048
 pack_to_max_length = True
 
 # Val/Test data
+# Download from https://github.com/artidoro/qlora/tree/main/data/mmlu
 mmlu_data_root = './data/mmlu/'
 
 # Scheduler & Optimizer
