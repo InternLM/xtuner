@@ -241,38 +241,41 @@ def main():
                 print('Log: Exit!')
                 exit(0)
 
-            template = PROMPT_TEMPLATE[args.prompt_template]
+            template = None
             prompt_text = ''
-            if 'SYSTEM' in template and n_turn == 0:
-                system_text = None
-                if args.system_template is not None:
-                    system_text = SYSTEM_TEMPLATE[args.system_template].format(
-                        round=n_turn + 1, bot_name=args.bot_name)
-                elif args.system is not None:
-                    system_text = args.system
-                if system_text is not None:
-                    prompt_text += template['SYSTEM'].format(
-                        system=system_text,
-                        round=n_turn + 1,
-                        bot_name=args.bot_name)
-            prompt_text += template['INSTRUCTION'].format(
-                input=text, round=n_turn + 1, bot_name=args.bot_name)
-            if args.prompt_template == args.system_template == 'moss_sft':
-                if not inner_thoughts_open:
-                    prompt_text.replace('- Inner thoughts: enabled.',
-                                        '- Inner thoughts: disabled.')
-                if not calculate_open:
-                    prompt_text.replace(
-                        '- Calculator: enabled. API: Calculate(expression)',
-                        '- Calculator: disabled.')
-                if not solve_open:
-                    prompt_text.replace(
-                        '- Equation solver: enabled. API: Solve(equation)',
-                        '- Equation solver: disabled.')
-                if not search_open:
-                    prompt_text.replace(
-                        '- Web search: enabled. API: Search(query)',
-                        '- Web search: disabled.')
+            if args.prompt_template:
+                template = PROMPT_TEMPLATE[args.prompt_template]
+            if template is not None:
+                if 'SYSTEM' in template and n_turn == 0:
+                    system_text = None
+                    if args.system_template is not None:
+                        system_text = SYSTEM_TEMPLATE[args.system_template].format(
+                            round=n_turn + 1, bot_name=args.bot_name)
+                    elif args.system is not None:
+                        system_text = args.system
+                    if system_text is not None:
+                        prompt_text += template['SYSTEM'].format(
+                            system=system_text,
+                            round=n_turn + 1,
+                            bot_name=args.bot_name)
+                prompt_text += template['INSTRUCTION'].format(
+                    input=text, round=n_turn + 1, bot_name=args.bot_name)
+                if args.prompt_template == args.system_template == 'moss_sft':
+                    if not inner_thoughts_open:
+                        prompt_text.replace('- Inner thoughts: enabled.',
+                                            '- Inner thoughts: disabled.')
+                    if not calculate_open:
+                        prompt_text.replace(
+                            '- Calculator: enabled. API: Calculate(expression)',
+                            '- Calculator: disabled.')
+                    if not solve_open:
+                        prompt_text.replace(
+                            '- Equation solver: enabled. API: Solve(equation)',
+                            '- Equation solver: disabled.')
+                    if not search_open:
+                        prompt_text.replace(
+                            '- Web search: enabled. API: Search(query)',
+                            '- Web search: disabled.')
 
             inputs += prompt_text
             ids = tokenizer.encode(inputs, return_tensors='pt')

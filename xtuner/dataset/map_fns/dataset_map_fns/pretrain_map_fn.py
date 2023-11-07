@@ -1,5 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-def completion_map_fn(example):
+def pretrain_map_fn(example):
     r"""Example before preprocessing:
         example['text'] = 'xxx'
 
