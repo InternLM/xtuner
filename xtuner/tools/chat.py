@@ -166,9 +166,9 @@ def main():
         llm = HFTransformerCasualLM(
             args.model_name_or_path, model_kwargs=model_kwargs)
         if args.adapter is not None:
+            print(f'Loading adapter from {args.adapter}...')
             llm.model = PeftModel.from_pretrained(
                 llm.model, args.adapter, offload_folder=args.offload_folder)
-            print(f'Load adapter from {args.adapter}')
         search_tool = GoogleSearch(api_key=SERPER_API_KEY)
         chatbot = ReAct(
             llm=llm,
