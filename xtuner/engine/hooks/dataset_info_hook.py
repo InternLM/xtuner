@@ -14,7 +14,7 @@ class DatasetInfoHook(Hook):
         runner.logger.info(f'{mode} example:')
         runner.logger.info(self.tokenizer.decode(dataset[0]['input_ids']))
 
-    def before_run(self, runner) -> None:
+    def before_train(self, runner) -> None:
         do_train = runner.train_loop is not None
         do_eval = runner.val_loop is not None
         do_test = runner.test_loop is not None
@@ -27,3 +27,11 @@ class DatasetInfoHook(Hook):
         if do_test:
             test_dataset = runner.test_dataloader.dataset
             self.log(runner, test_dataset, mode='test')
+
+    def before_val(self, runner) -> None:
+        eval_dataset = runner.val_dataloader.dataset
+        self.log(runner, eval_dataset, mode='eval')
+
+    def before_test(self, runner) -> None:
+        test_dataset = runner.test_dataloader.dataset
+        self.log(runner, test_dataset, mode='test')
