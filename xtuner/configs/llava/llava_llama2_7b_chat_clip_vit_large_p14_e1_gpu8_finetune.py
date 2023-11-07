@@ -22,14 +22,14 @@ from xtuner.utils import PROMPT_TEMPLATE
 llm_name_or_path = 'meta-llama/Llama-2-7b-chat-hf'
 visual_encoder_name_or_path = 'openai/clip-vit-large-patch14'
 # Specify the pretrained pth
-pretrained_pth = './work_dirs/llava_llama2_7b_chat_clip_vit_large_p14_e1_gpu8_pretrain/epoch_1.pth'
+pretrained_pth = './work_dirs/llava_llama2_7b_chat_clip_vit_large_p14_e1_gpu8_pretrain/epoch_1.pth'  # noqa: E501
 
 # Data
 llava_data_root = './data/llava_data/'
 data_path = llava_data_root + 'LLaVA-Instruct-150K/llava_v1_5_mix665k.json'
 image_folder = llava_data_root + 'llava_images'
 prompt_template = PROMPT_TEMPLATE.llama2_chat
-max_length = int(2048 - (224 / 14) ** 2 + 1)
+max_length = int(2048 - (224 / 14)**2 + 1)
 
 # Scheduler & Optimizer
 batch_size = 16  # per_device

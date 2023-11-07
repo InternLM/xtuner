@@ -4,11 +4,11 @@ from mmengine.dataset import DefaultSampler
 from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
                             LoggerHook, ParamSchedulerHook)
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR
-from torch.optim import AdamW
 from peft import LoraConfig
+from torch.optim import AdamW
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
-                          CLIPImageProcessor, CLIPVisionModel,
-                          BitsAndBytesConfig)
+                          BitsAndBytesConfig, CLIPImageProcessor,
+                          CLIPVisionModel)
 
 from xtuner.dataset import LLaVADataset
 from xtuner.dataset.collate_fns import default_collate_fn
@@ -29,7 +29,7 @@ llava_data_root = './data/llava_data/'
 data_path = llava_data_root + 'LLaVA-Pretrain/blip_laion_cc_sbu_558k.json'
 image_folder = llava_data_root + 'LLaVA-Pretrain/images'
 prompt_template = PROMPT_TEMPLATE.internlm_chat
-max_length = int(2048 - (224 / 14) ** 2 + 1)
+max_length = int(2048 - (224 / 14)**2 + 1)
 
 # Scheduler & Optimizer
 batch_size = 32  # per_device

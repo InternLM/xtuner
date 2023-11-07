@@ -4,13 +4,13 @@ from mmengine.dataset import DefaultSampler
 from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
                             LoggerHook, ParamSchedulerHook)
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR
-from torch.optim import AdamW
 from peft import LoraConfig
+from torch.optim import AdamW
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
-                          CLIPImageProcessor, CLIPVisionModel,
-                          BitsAndBytesConfig)
+                          BitsAndBytesConfig, CLIPImageProcessor,
+                          CLIPVisionModel)
 
-from xtuner.dataset import LLaVADataset, ConcatDataset
+from xtuner.dataset import ConcatDataset, LLaVADataset
 from xtuner.dataset.collate_fns import default_collate_fn
 from xtuner.dataset.map_fns import llava_map_fn, template_map_fn_factory
 from xtuner.engine import DatasetInfoHook, EvaluateChatHook
@@ -24,7 +24,7 @@ from xtuner.utils import PROMPT_TEMPLATE
 llm_name_or_path = 'internlm/internlm-chat-20b'
 visual_encoder_name_or_path = 'openai/clip-vit-large-patch14-336'
 # Specify the pretrained pth
-pretrained_pth = './work_dirs/llava_internlm_chat_20b_qlora_clip_vit_large_p14_336_e1_gpu8_pretrain/epoch_1.pth'
+pretrained_pth = './work_dirs/llava_internlm_chat_20b_qlora_clip_vit_large_p14_336_e1_gpu8_pretrain/epoch_1.pth'  # noqa: E501
 
 # Data
 llava_data_root = './data/llava_data/'
@@ -34,7 +34,7 @@ llava_zh_data_path = llava_data_root + 'llava_zh/llava_instruct_150k_zh.json'
 llava_zh_image_folder = llava_data_root + 'llava_images/coco/train2017'
 
 prompt_template = PROMPT_TEMPLATE.internlm_chat
-max_length = int(2048 - (336 / 14) ** 2 + 1)
+max_length = int(2048 - (336 / 14)**2 + 1)
 
 # Scheduler & Optimizer
 batch_size = 8  # per_device
