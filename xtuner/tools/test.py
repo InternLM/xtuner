@@ -4,12 +4,36 @@ import os
 import os.path as osp
 from types import FunctionType
 
+import torch
 from mmengine.config import Config, DictAction
 from mmengine.registry import RUNNERS
 from mmengine.runner import Runner
 
 from xtuner.configs import cfgs_name_path
 from xtuner.registry import MAP_FUNC
+
+
+def guess_load_checkpoint(pth_model):
+    if os.path.isfile(pth_model):
+        state_dict = torch.load(pth_model, map_location='cpu')
+        if 'state_dict' in state_dict:
+            state_dict = state_dict['state_dict']
+    elif os.path.isdir(pth_model):
+        try:
+            from deepspeed.utils.zero_to_fp32 import \
+                get_fp32_state_dict_from_zero_checkpoint
+        except ImportError:
+            raise ImportError(
+                'The provided PTH model appears to be a DeepSpeed checkpoint. '
+                'However, DeepSpeed library is not detected in current '
+                'environment. This suggests that DeepSpeed may not be '
+                'installed or is incorrectly configured. Please verify your '
+                'setup.')
+        state_dict = get_fp32_state_dict_from_zero_checkpoint(
+            os.path.dirname(pth_model), os.path.basename(pth_model))
+    else:
+        raise FileNotFoundError(f'Cannot find {pth_model}')
+    return state_dict
 
 
 def parse_args():
@@ -85,9 +109,6 @@ def main():
         cfg.work_dir = osp.join('./work_dirs',
                                 osp.splitext(osp.basename(args.config))[0])
 
-    if args.checkpoint is not None:
-        cfg.load_from = args.checkpoint
-
     # build the runner from config
     if 'runner_type' not in cfg:
         # build the default runner
@@ -96,6 +117,10 @@ def main():
         # build customized runner from the registry
         # if 'runner_type' is set in the cfg
         runner = RUNNERS.build(cfg)
+
+    state_dict = guess_load_checkpoint(args.checkpoint)
+    runner.model.load_state_dict(state_dict, strict=False)
+    runner.logger.info(f'Load checkpoint from {args.checkpoint}')
 
     # start testing
     runner.test()
