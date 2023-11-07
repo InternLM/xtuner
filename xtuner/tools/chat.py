@@ -239,6 +239,9 @@ def main():
             image = processor.preprocess(
                 image, return_tensors='pt')['pixel_values'][0]
             image = image.cuda().unsqueeze(0)
+            visual_outputs = visual_encoder(image, output_hidden_states=True)
+            pixel_values = projector(
+                visual_outputs.hidden_states[args.visual_select_layer][:, 1:])
 
         Streamer, stop_criteria = get_chat_utils(llm)
         if args.no_streamer:
@@ -381,12 +384,6 @@ def main():
                     if idx != len(chunk_encode) - 1:
                         ids.append(IMAGE_TOKEN_INDEX)
                 ids = torch.tensor(ids).cuda().unsqueeze(0)
-
-                visual_outputs = visual_encoder(
-                    image, output_hidden_states=True)
-                pixel_values = projector(
-                    visual_outputs.hidden_states[args.visual_select_layer][:,
-                                                                           1:])
                 mm_inputs = prepare_inputs_labels_for_multimodal(
                     llm=llm, input_ids=ids, pixel_values=pixel_values)
 
