@@ -7,14 +7,16 @@ from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
                             LoggerHook, ParamSchedulerHook)
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR
 from peft import LoraConfig
-from transformers import (AutoModelForCausalLM, AutoTokenizer,
+from transformers import (MistralForCausalLM, LlamaTokenizer,
                           BitsAndBytesConfig)
 
 from xtuner.dataset import process_hf_dataset
 from xtuner.dataset.collate_fns import default_collate_fn
-from xtuner.dataset.map_fns import completion_map_fn
-from xtuner.engine import DatasetInfoHook
+from xtuner.dataset.map_fns import pretrain_map_fn
+from xtuner.engine import DatasetInfoHook, EvaluateChatHook
 from xtuner.model import SupervisedFinetune
+from xtuner.utils import PROMPT_TEMPLATE
+
 
 #######################################################################
 #                          PART 1  Settings                           #
@@ -24,6 +26,7 @@ pretrained_model_name_or_path = 'mistralai/Mistral-7B-v0.1'
 
 # Data
 data_path = 'Skywork/SkyPile-150B'
+prompt_template = PROMPT_TEMPLATE.pretrain
 max_length = 2048
 pack_to_max_length = True
 
@@ -31,18 +34,24 @@ pack_to_max_length = True
 batch_size = 1  # per_device
 accumulative_counts = 16
 dataloader_num_workers = 0
-max_epochs = 3
+max_epochs = 1
 optim_type = PagedAdamW32bit
 lr = 2e-4
 betas = (0.9, 0.999)
 weight_decay = 0
 max_norm = 1  # grad clip
 
+# Evaluate the generation performance during the training
+evaluation_freq = 500
+evaluation_inputs = [
+    '上海的景点有'
+]
+
 #######################################################################
 #                      PART 2  Model & Tokenizer                      #
 #######################################################################
 tokenizer = dict(
-    type=AutoTokenizer.from_pretrained,
+    type=LlamaTokenizer.from_pretrained,
     pretrained_model_name_or_path=pretrained_model_name_or_path,
     trust_remote_code=True,
     padding_side='right')
@@ -50,7 +59,7 @@ tokenizer = dict(
 model = dict(
     type=SupervisedFinetune,
     llm=dict(
-        type=AutoModelForCausalLM.from_pretrained,
+        type=MistralForCausalLM.from_pretrained,
         pretrained_model_name_or_path=pretrained_model_name_or_path,
         trust_remote_code=True,
         torch_dtype=torch.float16,
@@ -67,7 +76,7 @@ model = dict(
         type=LoraConfig,
         r=64,
         lora_alpha=16,
-        lora_dropout=0.1,
+        lora_dropout=0.05,
         bias='none',
         task_type='CAUSAL_LM'))
 
@@ -79,7 +88,7 @@ train_dataset = dict(
     dataset=dict(type=load_dataset, path=data_path),
     tokenizer=tokenizer,
     max_length=max_length,
-    dataset_map_fn=completion_map_fn,
+    dataset_map_fn=pretrain_map_fn,
     template_map_fn=None,
     remove_unused_columns=True,
     shuffle_before_pack=True,
@@ -120,9 +129,15 @@ train_cfg = dict(by_epoch=True, max_epochs=max_epochs, val_interval=1)
 #######################################################################
 #                           PART 5  Runtime                           #
 #######################################################################
-# Log the dialogue periodically during the training process, optional
 custom_hooks = [
     dict(type=DatasetInfoHook, tokenizer=tokenizer),
+    dict(
+        type=EvaluateChatHook,
+        tokenizer=tokenizer,
+        every_n_iters=evaluation_freq,
+        evaluation_inputs=evaluation_inputs,
+        prompt_template=prompt_template,
+        max_new_tokens=100)
 ]
 
 # configure default hooks
