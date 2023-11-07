@@ -10,7 +10,7 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           CLIPImageProcessor, CLIPVisionModel,
                           BitsAndBytesConfig)
 
-from xtuner.dataset import LLaVADataset
+from xtuner.dataset import LLaVADataset, ConcatDataset
 from xtuner.dataset.collate_fns import default_collate_fn
 from xtuner.dataset.map_fns import llava_map_fn, template_map_fn_factory
 from xtuner.engine import DatasetInfoHook, EvaluateChatHook
@@ -21,19 +21,25 @@ from xtuner.utils import PROMPT_TEMPLATE
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-llm_name_or_path = '/mnt/141/internlm-20b-chat'
-visual_encoder_name_or_path = '/mnt/174/clip-vit-large-patch14-336'
+llm_name_or_path = 'internlm/internlm-chat-20b'
+visual_encoder_name_or_path = 'openai/clip-vit-large-patch14-336'
+# Specify the pretrained pth
+pretrained_pth = './work_dirs/llava_internlm_chat_20b_qlora_clip_vit_large_p14_336_e1_gpu8_pretrain/epoch_1.pth'
 
 # Data
-data_path = './data/llava_data/LLaVA-Pretrain/blip_laion_cc_sbu_558k.json'
-image_folder = './data/llava_data/LLaVA-Pretrain/images'
+llava_data_root = './data/llava_data/'
+data_path = llava_data_root + 'LLaVA-Instruct-150K/llava_v1_5_mix665k.json'
+image_folder = llava_data_root + 'llava_images'
+llava_zh_data_path = llava_data_root + 'llava_zh/llava_instruct_150k_zh.json'
+llava_zh_image_folder = llava_data_root + 'llava_images/coco/train2017'
+
 prompt_template = PROMPT_TEMPLATE.internlm_chat
 max_length = int(2048 - (336 / 14) ** 2 + 1)
 
 # Scheduler & Optimizer
-batch_size = 32  # per_device
-accumulative_counts = 1
-dataloader_num_workers = 4
+batch_size = 8  # per_device
+accumulative_counts = 4
+dataloader_num_workers = 2
 max_epochs = 1
 optim_type = AdamW
 lr = 2e-4
@@ -65,6 +71,7 @@ model = dict(
     type=LLaVAModel,
     freeze_llm=True,
     freeze_visual_encoder=True,
+    pretrained_pth=pretrained_pth,
     llm=dict(
         type=AutoModelForCausalLM.from_pretrained,
         pretrained_model_name_or_path=llm_name_or_path,
@@ -105,10 +112,26 @@ llava_dataset = dict(
     max_length=max_length,
     image_aspect_ratio='pad')
 
+llava_zh_dataset = dict(
+    type=LLaVADataset,
+    data_path=llava_zh_data_path,
+    image_folder=llava_zh_image_folder,
+    tokenizer=tokenizer,
+    processor=processor,
+    dataset_map_fn=llava_map_fn,
+    template_map_fn=dict(
+        type=template_map_fn_factory, template=prompt_template),
+    max_length=max_length,
+    image_aspect_ratio='pad')
+
+train_dataset = dict(
+    type=ConcatDataset,
+    datasets_cfg=dict(llava=llava_dataset, llava_zh=llava_zh_dataset))
+
 train_dataloader = dict(
     batch_size=batch_size,
     num_workers=dataloader_num_workers,
-    dataset=llava_dataset,
+    dataset=train_dataset,
     sampler=dict(type=DefaultSampler, shuffle=True),
     collate_fn=dict(type=default_collate_fn))
 
