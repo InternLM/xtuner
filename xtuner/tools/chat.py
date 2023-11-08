@@ -32,7 +32,7 @@ def parse_args():
     parser.add_argument(
         '--prompt-template',
         choices=PROMPT_TEMPLATE.keys(),
-        default=PROMPT_TEMPLATE.default,
+        default=None,
         help='Specify a prompt template')
     system_group = parser.add_mutually_exclusive_group()
     system_group.add_argument(
@@ -241,11 +241,9 @@ def main():
                 print('Log: Exit!')
                 exit(0)
 
-            template = None
-            prompt_text = ''
             if args.prompt_template:
+                prompt_text = ''
                 template = PROMPT_TEMPLATE[args.prompt_template]
-            if template is not None:
                 if 'SYSTEM' in template and n_turn == 0:
                     system_text = None
                     if args.system_template is not None:
@@ -276,7 +274,8 @@ def main():
                         prompt_text.replace(
                             '- Web search: enabled. API: Search(query)',
                             '- Web search: disabled.')
-
+            else:
+                prompt_text = text
             inputs += prompt_text
             ids = tokenizer.encode(inputs, return_tensors='pt')
             streamer = Streamer(tokenizer) if Streamer is not None else None
