@@ -7,15 +7,13 @@ from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
                             LoggerHook, ParamSchedulerHook)
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR
 from peft import LoraConfig
-from transformers import (MistralForCausalLM, LlamaTokenizer,
-                          BitsAndBytesConfig)
+from transformers import BitsAndBytesConfig, LlamaTokenizer, MistralForCausalLM
 
 from xtuner.dataset import process_hf_dataset
 from xtuner.dataset.collate_fns import default_collate_fn
 from xtuner.dataset.map_fns import pretrain_map_fn
 from xtuner.engine import DatasetInfoHook, EvaluateChatHook
 from xtuner.model import SupervisedFinetune
-
 
 #######################################################################
 #                          PART 1  Settings                           #
@@ -41,9 +39,7 @@ max_norm = 1  # grad clip
 
 # Evaluate the generation performance during the training
 evaluation_freq = 500
-evaluation_inputs = [
-    '上海的景点有'
-]
+evaluation_inputs = ['上海的景点有']
 
 #######################################################################
 #                      PART 2  Model & Tokenizer                      #

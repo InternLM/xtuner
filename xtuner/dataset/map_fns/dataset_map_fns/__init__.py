@@ -11,11 +11,11 @@ from .msagent_map_fn import msagent_react_map_fn
 from .oasst1_map_fn import oasst1_map_fn
 from .openai_map_fn import openai_map_fn
 from .openorca_map_fn import openorca_map_fn
+from .pretrain_map_fn import pretrain_map_fn
 from .sql_map_fn import sql_map_fn
 from .stack_exchange_map_fn import stack_exchange_map_fn
 from .tiny_codes_map_fn import tiny_codes_map_fn
 from .wizardlm_map_fn import wizardlm_map_fn
-from .pretrain_map_fn import pretrain_map_fn
 
 __all__ = [
     'alpaca_map_fn', 'alpaca_zh_map_fn', 'oasst1_map_fn', 'arxiv_map_fn',

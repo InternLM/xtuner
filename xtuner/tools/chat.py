@@ -247,8 +247,9 @@ def main():
                 if 'SYSTEM' in template and n_turn == 0:
                     system_text = None
                     if args.system_template is not None:
-                        system_text = SYSTEM_TEMPLATE[args.system_template].format(
-                            round=n_turn + 1, bot_name=args.bot_name)
+                        system_text = SYSTEM_TEMPLATE[
+                            args.system_template].format(
+                                round=n_turn + 1, bot_name=args.bot_name)
                     elif args.system is not None:
                         system_text = args.system
                     if system_text is not None:
@@ -263,9 +264,9 @@ def main():
                         prompt_text.replace('- Inner thoughts: enabled.',
                                             '- Inner thoughts: disabled.')
                     if not calculate_open:
-                        prompt_text.replace(
-                            '- Calculator: enabled. API: Calculate(expression)',
-                            '- Calculator: disabled.')
+                        prompt_text.replace(('- Calculator: enabled. API: '
+                                             'Calculate(expression)'),
+                                            '- Calculator: disabled.')
                     if not solve_open:
                         prompt_text.replace(
                             '- Equation solver: enabled. API: Solve(equation)',
