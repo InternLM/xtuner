@@ -5,6 +5,7 @@
   - [Arxiv Gentitle 生成题目](#arxiv-gentitle-生成题目)
   - [MOSS-003-SFT](#moss-003-sft)
   - [Chinese Lawyer](#chinese-lawyer)
+  - [LLaVA dataset](#llava-dataset)
 
 ## HuggingFace 数据集
 
