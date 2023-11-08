@@ -136,7 +136,6 @@ custom_hooks = [
         tokenizer=tokenizer,
         every_n_iters=evaluation_freq,
         evaluation_inputs=evaluation_inputs,
-        prompt_template=prompt_template,
         max_new_tokens=100)
 ]
 
