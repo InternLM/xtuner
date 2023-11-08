@@ -8,7 +8,7 @@ from mmengine import print_log
 from mmengine.config import Config, ConfigDict
 from mmengine.utils.misc import get_object_from_string
 
-from ..registry import BUILDER, MAP_FUNC
+from xtuner.registry import BUILDER, MAP_FUNC
 from .utils import Packer, encode_fn
 
 

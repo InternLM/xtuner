@@ -9,7 +9,7 @@ from mmengine.config import Config, ConfigDict
 from PIL import Image
 from torch.utils.data import Dataset
 
-from ..registry import BUILDER
+from xtuner.registry import BUILDER
 from .huggingface import process_hf_dataset
 from .utils import expand2square
 

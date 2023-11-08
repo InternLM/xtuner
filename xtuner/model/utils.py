@@ -9,7 +9,7 @@ from peft import PeftType
 from torch import nn
 from transformers import PreTrainedModel
 
-from ..utils import IGNORE_INDEX, IMAGE_TOKEN_INDEX
+from xtuner.utils import IGNORE_INDEX, IMAGE_TOKEN_INDEX
 
 
 def set_obj_dtype(d):

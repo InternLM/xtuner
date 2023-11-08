@@ -6,7 +6,7 @@ from itertools import chain
 import requests
 from PIL import Image
 
-from ..utils import DEFAULT_IMAGE_TOKEN, IGNORE_INDEX, IMAGE_TOKEN_INDEX
+from xtuner.utils import DEFAULT_IMAGE_TOKEN, IGNORE_INDEX, IMAGE_TOKEN_INDEX
 
 
 def encode_fn(example,

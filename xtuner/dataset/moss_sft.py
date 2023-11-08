@@ -9,7 +9,7 @@ from mmengine.logging import print_log
 from torch.utils.data import Dataset
 from tqdm import tqdm
 
-from ..registry import BUILDER
+from xtuner.registry import BUILDER
 
 
 class MOSSSFTDataset(Dataset):

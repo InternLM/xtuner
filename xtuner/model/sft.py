@@ -7,7 +7,7 @@ from mmengine.runner import load_checkpoint
 from peft import get_peft_model, prepare_model_for_kbit_training
 from torch import nn
 
-from ..registry import BUILDER
+from xtuner.registry import BUILDER
 from .modules import dispatch_modules
 from .utils import (LoadWoInit, find_all_linear_names,
                     get_peft_model_state_dict, make_inputs_require_grad,
