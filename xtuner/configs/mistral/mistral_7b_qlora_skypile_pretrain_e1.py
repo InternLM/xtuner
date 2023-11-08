@@ -25,7 +25,6 @@ pretrained_model_name_or_path = 'mistralai/Mistral-7B-v0.1'
 
 # Data
 data_path = 'Skywork/SkyPile-150B'
-prompt_template = PROMPT_TEMPLATE.pretrain
 max_length = 2048
 pack_to_max_length = True
 
