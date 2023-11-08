@@ -6,6 +6,7 @@ import numpy as np
 from datasets import DatasetDict
 from mmengine import print_log
 from mmengine.config import Config, ConfigDict
+from mmengine.utils.misc import get_object_from_string
 
 from ..registry import BUILDER, MAP_FUNC
 from .utils import Packer, encode_fn
@@ -76,7 +77,14 @@ def process_hf_dataset(dataset,
     # Extract the useful data for training from the original dataset.
     if dataset_map_fn is not None:
         if isinstance(dataset_map_fn, str):
-            dataset_map_fn = MAP_FUNC.get(dataset_map_fn)
+            map_fn_obj = MAP_FUNC.get(
+                dataset_map_fn) or get_object_from_string(dataset_map_fn)
+            if map_fn_obj is not None:
+                dataset_map_fn = map_fn_obj
+            else:
+                raise TypeError('dataset_map_fn must be a function or a '
+                                "registered function's string in MAP_FUNC, "
+                                f"but got a string of '{dataset_map_fn}'")
 
         dataset = dataset.map(dataset_map_fn)
 

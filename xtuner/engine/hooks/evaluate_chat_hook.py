@@ -2,6 +2,7 @@
 import torch
 from mmengine.hooks import Hook
 from mmengine.model import is_model_wrapper
+from mmengine.utils.misc import get_object_from_string
 from transformers import GenerationConfig, StoppingCriteriaList
 
 from xtuner.dataset.utils import expand2square, load_image
@@ -41,6 +42,8 @@ class EvaluateChatHook(Hook):
         if prompt_template is None:
             instruction = '{input}'
         else:
+            if isinstance(prompt_template, str):  # for resume
+                prompt_template = get_object_from_string(prompt_template)
             instruction = prompt_template.get('INSTRUCTION', '{input}')
             if system != '':
                 system = prompt_template.get(
