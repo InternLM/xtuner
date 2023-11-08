@@ -6,12 +6,11 @@ import sys
 
 import torch
 from peft import PeftModel
-from transformers import (AutoModelForCausalLM, AutoTokenizer,
+from transformers import (AutoModel, AutoModelForCausalLM, AutoTokenizer,
                           BitsAndBytesConfig, CLIPImageProcessor,
                           CLIPVisionModel, GenerationConfig)
 
 from xtuner.dataset.utils import expand2square, load_image
-from xtuner.model import ProjectorModel
 from xtuner.model.utils import prepare_inputs_labels_for_multimodal
 from xtuner.tools.utils import get_chat_utils, update_stop_criteria
 from xtuner.utils import (DEFAULT_IMAGE_TOKEN, IMAGE_TOKEN_INDEX,
@@ -228,7 +227,7 @@ def main():
 
         # build projector
         if args.projector is not None:
-            projector = ProjectorModel.from_pretrained(args.projector)
+            projector = AutoModel.from_pretrained(args.projector)
             projector.cuda()
             projector.eval()
 
