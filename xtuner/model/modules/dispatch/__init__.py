@@ -80,3 +80,6 @@ def dispatch_modules(model):
         dispath_baichuan2_norm_head_forward(model)
         dispath_baichuan_7b_attn_forward(model)
         dispath_baichuan_13b_attn_forward(model)
+
+
+__all__ = ['dispatch_modules']
