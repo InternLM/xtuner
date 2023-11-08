@@ -117,14 +117,15 @@ git clone https://huggingface.co/datasets/liuhaotian/LLaVA-Pretrain
 
 2. Image data
 
-- COCO (coco): [train2017](http://images.cocodataset.org/zips/train2017.zip)
+   1. COCO (coco): [train2017](http://images.cocodataset.org/zips/train2017.zip)
 
-- GQA (gqa): [images](https://downloads.cs.stanford.edu/nlp/data/gqa/images.zip)
+   2. GQA (gqa): [images](https://downloads.cs.stanford.edu/nlp/data/gqa/images.zip)
 
-- OCR-VQA (ocr_vqa): [download script](https://drive.google.com/drive/folders/1_GYPY5UkUy7HIcR0zq3ZCFgeZN7BAfm_?usp=sharing)
+   3. OCR-VQA (ocr_vqa): [download script](https://drive.google.com/drive/folders/1_GYPY5UkUy7HIcR0zq3ZCFgeZN7BAfm_?usp=sharing)
 
-  - ⚠️ Modify the name of OCR-VQA's images to keep the extension as `.jpg`!
+   4. ⚠️ Modify the name of OCR-VQA's images to keep the extension as `.jpg`!
 
+   ````
     ```shell
     #!/bin/bash
     ocr_vqa_path="<your-directory-path>"
@@ -137,7 +138,8 @@ git clone https://huggingface.co/datasets/liuhaotian/LLaVA-Pretrain
         fi
     done
     ```
+   ````
 
-- TextVQA (textvqa): [train_val_images](https://dl.fbaipublicfiles.com/textvqa/images/train_val_images.zip)
+   4. TextVQA (textvqa): [train_val_images](https://dl.fbaipublicfiles.com/textvqa/images/train_val_images.zip)
 
-- VisualGenome (VG): [part1](https://cs.stanford.edu/people/rak248/VG_100K_2/images.zip), [part2](https://cs.stanford.edu/people/rak248/VG_100K_2/images2.zip)
+   5. VisualGenome (VG): [part1](https://cs.stanford.edu/people/rak248/VG_100K_2/images.zip), [part2](https://cs.stanford.edu/people/rak248/VG_100K_2/images2.zip)
