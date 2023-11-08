@@ -123,22 +123,20 @@ git clone https://huggingface.co/datasets/liuhaotian/LLaVA-Pretrain
 
    3. OCR-VQA (ocr_vqa): [download script](https://drive.google.com/drive/folders/1_GYPY5UkUy7HIcR0zq3ZCFgeZN7BAfm_?usp=sharing)
 
-   4. ⚠️ Modify the name of OCR-VQA's images to keep the extension as `.jpg`!
+      1. ⚠️ Modify the name of OCR-VQA's images to keep the extension as `.jpg`!
 
-   ````
-    ```shell
-    #!/bin/bash
-    ocr_vqa_path="<your-directory-path>"
+      ```shell
+      #!/bin/bash
+      ocr_vqa_path="<your-directory-path>"
 
-    find "$target_dir" -type f | while read file; do
-        extension="${file##*.}"
-        if [ "$extension" != "jpg" ]
-        then
-            cp -- "$file" "${file%.*}.jpg"
-        fi
-    done
-    ```
-   ````
+      find "$target_dir" -type f | while read file; do
+          extension="${file##*.}"
+          if [ "$extension" != "jpg" ]
+          then
+              cp -- "$file" "${file%.*}.jpg"
+          fi
+      done
+      ```
 
    4. TextVQA (textvqa): [train_val_images](https://dl.fbaipublicfiles.com/textvqa/images/train_val_images.zip)
 
