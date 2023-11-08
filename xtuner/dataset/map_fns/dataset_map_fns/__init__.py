@@ -12,6 +12,7 @@ from .msagent_map_fn import msagent_react_map_fn
 from .oasst1_map_fn import oasst1_map_fn
 from .openai_map_fn import openai_map_fn
 from .openorca_map_fn import openorca_map_fn
+from .pretrain_map_fn import pretrain_map_fn
 from .sql_map_fn import sql_map_fn
 from .stack_exchange_map_fn import stack_exchange_map_fn
 from .tiny_codes_map_fn import tiny_codes_map_fn
@@ -23,5 +24,5 @@ __all__ = [
     'tiny_codes_map_fn', 'colors_map_fn', 'law_reference_map_fn',
     'crime_kg_assitant_map_fn', 'sql_map_fn', 'openai_map_fn',
     'wizardlm_map_fn', 'stack_exchange_map_fn', 'msagent_react_map_fn',
-    'default_map_fn'
+    'default_map_fn', 'pretrain_map_fn'
 ]
