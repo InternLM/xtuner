@@ -42,7 +42,6 @@ PROMPT_TEMPLATE = ConfigDict(
                 'helpful, detailed, and polite answers to the '
                 'user\'s questions. {system}\n'),
         INSTRUCTION=('USER: {input} ASSISTANT: ')),
-    pretrain=None,
 )
 
 SYSTEM_TEMPLATE = ConfigDict(
