@@ -55,3 +55,88 @@ unzip moss-003-sft-with-tools-no-text2image.zip
 Chinese Lawyer 数据集有两个子数据集，它们可以在 https://github.com/LiuHC0428/LAW-GPT 下载。
 
 所有的 Chinese Lawyer 配置文件都假设数据集路径为 `./data/CrimeKgAssitant清洗后_52k.json` 和 `./data/训练数据_带法律依据_92k.json`。用户可以移动并重命名数据，或者在配置文件中重新设置数据路径。
+
+### LLaVA dataset
+
+#### 文件结构
+
+```
+./data/llava_data
+├── LLaVA-Pretrain
+│   ├── blip_laion_cc_sbu_558k.json
+│   ├── blip_laion_cc_sbu_558k_meta.json
+│   └── images
+├── LLaVA-Instruct-150K
+│   └── llava_v1_5_mix665k.json
+├── llava_zh
+│   └── llava_instruct_150k_zh.json
+└── llava_images
+    ├── coco
+    │   └── train2017
+    ├── gqa
+    │   └── images
+    ├── ocr_vqa
+    │   └── images
+    ├── textvqa
+    │   └── train_images
+    └── vg
+        ├── VG_100K
+        └── VG_100K_2
+```
+
+#### 预训练 Pretrain
+
+LLaVA-Pretrain
+
+```shell
+# Make sure you have git-lfs installed (https://git-lfs.com)
+git lfs install
+git clone https://huggingface.co/datasets/liuhaotian/LLaVA-Pretrain
+```
+
+#### 微调 Finetune
+
+1. 文本数据
+
+   1. LLaVA-Instruct-150K
+
+      ```shell
+      # Make sure you have git-lfs installed (https://git-lfs.com)
+      git lfs install
+      git clone https://huggingface.co/datasets/liuhaotian/LLaVA-Instruct-150K
+      ```
+
+   2. llava_zh
+
+      ```shell
+      # Make sure you have git-lfs installed (https://git-lfs.com)
+      git lfs install
+      git clone https://huggingface.co/datasets/openbmb/llava_zh
+      ```
+
+2. 图片数据
+
+- COCO (coco): [train2017](http://images.cocodataset.org/zips/train2017.zip)
+
+- GQA (gqa): [images](https://downloads.cs.stanford.edu/nlp/data/gqa/images.zip)
+
+- OCR-VQA (ocr_vqa): [download script](https://drive.google.com/drive/folders/1_GYPY5UkUy7HIcR0zq3ZCFgeZN7BAfm_?usp=sharing)
+
+  - ⚠️ OCR-VQA 所下载的图片命名需要进行修改，以确保所有图片后缀为 `.jpg`！
+
+    ```shell
+    #!/bin/bash
+    ocr_vqa_path="<your-directory-path>"
+
+    find "$target_dir" -type f | while read file; do
+        extension="${file##*.}"
+        if [ "$extension" != "jpg" ]
+        then
+            cp -- "$file" "${file%.*}.jpg"
+        fi
+    done
+    ```
+
+- TextVQA (textvqa): [train_val_images](https://dl.fbaipublicfiles.com/textvqa/images/train_val_images.zip)
+
+- VisualGenome (VG): [part1](https://cs.stanford.edu/people/rak248/VG_100K_2/images.zip), [part2](https://cs.stanford.edu/people/rak248/VG_100K_2/images2.zip)
