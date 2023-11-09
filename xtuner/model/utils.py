@@ -128,6 +128,7 @@ def get_peft_model_state_dict(model, state_dict=None, adapter_name='default'):
     return to_return
 
 
+# Modified from https://github.com/haotian-liu/LLaVA/blob/8467850a63aa0d6f47aa150c53aca4751f0d3d14/llava/model/llava_arch.py#L99  # noqa: E501
 def prepare_inputs_labels_for_multimodal(
         llm: PreTrainedModel,
         input_ids: torch.LongTensor = None,
