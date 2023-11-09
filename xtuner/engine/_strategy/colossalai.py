@@ -67,11 +67,11 @@ class ColossalAIStrategy(MMEngineColossalAIStrategy):
             if isinstance(self.booster.plugin, (GeminiPlugin, HybridParallelPlugin))
             else nullcontext()
         )
-        print(1)
+        # print(1)
         pretrained_model_name_or_path = model.llm.pretrained_model_name_or_path
-        # with init_ctx:
-        model = self.build_model(model)
-        print(2)
+        with init_ctx:
+            model = self.build_model(model)
+        # print(2)
 
         # optim_wrapper is required by booster
         if optim_wrapper is not None and isinstance(optim_wrapper, dict):
@@ -91,7 +91,7 @@ class ColossalAIStrategy(MMEngineColossalAIStrategy):
             optim_wrapper = self.build_optim_wrapper(optim_wrapper, model)
             optim_wrapper.booster = self.booster
 
-        print(3)
+        # print(3)
         if optim_wrapper is not None:
             self.model, self.optim_wrapper = self._wrap(
                 model, optim_wrapper)  # type: ignore
@@ -99,7 +99,7 @@ class ColossalAIStrategy(MMEngineColossalAIStrategy):
             self.model = self._wrap(model)  # type: ignore
         # TODO: Check whether `compile` is compatible with colossalai.
 
-        print(4)
+        # print(4)
         if param_scheduler is not None:
             self.param_schedulers = self.build_param_scheduler(
                 param_scheduler, optim_wrapper)  # type: ignore
@@ -118,9 +118,9 @@ class ColossalAIStrategy(MMEngineColossalAIStrategy):
                 self.optim_wrapper.initialize_count_status(  # type: ignore
                     self.model, 0, self.dispatch_kwargs['max_iters'])
         
-        print(5)
+        # print(5)
         self.booster.load_model(self.model.model_wrapper, pretrained_model_name_or_path)
-        print(6)
+        # print(6)
 
         self._prepared = True
         return self._prepared_components()
