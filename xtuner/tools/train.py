@@ -70,6 +70,26 @@ def register_function(cfg_dict):
             register_function(value)
 
 
+import torch
+def auto_dtype_of_deepspeed_config(ds_config):
+    if ds_config.get('fp16') and not ds_config.get('bf16'):
+        if ds_config.get('fp16').get('enabled') == 'auto':
+            ds_config['fp16']['enabled'] = torch.cuda.is_available()
+    elif not ds_config.get('fp16') and ds_config.get('bf16'):
+        if ds_config.get('bf16').get('enabled') == 'auto':
+            ds_config['bf16']['enabled'] = torch.cuda.is_bf16_supported()
+    elif ds_config.get('fp16') and ds_config.get('bf16'):
+        if ds_config.get('fp16').get('enabled') == 'auto':
+            ds_config['fp16']['enabled'] = torch.cuda.is_available()
+        if ds_config.get('bf16').get('enabled') == 'auto':
+            ds_config['bf16']['enabled'] = torch.cuda.is_bf16_supported()
+        if (ds_config['fp16']['enabled'] is True
+                and ds_config['bf16']['enabled'] is True):
+            ds_config['fp16']['enabled'] = False
+            ds_config['bf16']['enabled'] = True
+    return ds_config
+
+
 def main():
     args = parse_args()
 
@@ -222,9 +242,10 @@ def main():
                         logger='current',
                         level=logging.WARNING)
                 grad_clip = mm_max_norm
+                ds_cfg = auto_dtype_of_deepspeed_config(ds_cfg)
                 strategy = dict(
                     type='DeepSpeedStrategy',
-                    config=args.deepspeed,
+                    config=ds_cfg,
                     gradient_accumulation_steps=grad_accum,
                     train_micro_batch_size_per_gpu=train_bs,
                     gradient_clipping=grad_clip)

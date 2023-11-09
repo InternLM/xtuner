@@ -10,12 +10,27 @@ from .baichuan import (baichuan2_norm_head_forward, baichuan_7b_attn_forward,
                        baichuan_13b_attn_forward)
 from .internlm import internlm_attn_forward
 from .llama import llama_attn_forward
+from .llama2 import llama_flash_attention, rms_norm_forward
 
 NO_ATTN_WEIGHTS_MSG = (
     'Due to the implementation of the PyTorch version of flash attention, '
     'even when the `output_attentions` flag is set to True, it is not '
     'possible to return the `attn_weights`.')
 
+
+def dispatch_llama2_rmsnorm_forward(model):
+    print_log('dispatch llama2 rmsnorm forward', 'current')
+    for module in model.modules():
+        if type(module).__name__ == 'LlamaRMSNorm':
+            module.forward = types.MethodType(rms_norm_forward, module)
+
+
+def dispatch_llama2_attn_forward(model):
+    print_log('dispatch llama2 attn forward', 'current')
+    print_log(NO_ATTN_WEIGHTS_MSG, 'current', logging.WARNING)
+    for module in model.modules():
+        if type(module).__name__ == 'LlamaAttention':
+            module.forward = types.MethodType(llama_flash_attention, module)
 
 def dispatch_llama_attn_forward(model):
     if digit_version(torch.__version__) < digit_version('2.0.0'):
@@ -75,7 +90,9 @@ def dispatch_modules(model):
     if 'internlm' in model_name:
         dispatch_internlm_attn_forward(model)
     if 'llama' in model_name:
-        dispatch_llama_attn_forward(model)
+        # dispatch_llama_attn_forward(model)
+        dispatch_llama2_attn_forward(model)
+        dispatch_llama2_rmsnorm_forward(model)
     if 'baichuan' in model_name:
         dispath_baichuan2_norm_head_forward(model)
         dispath_baichuan_7b_attn_forward(model)
