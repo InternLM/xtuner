@@ -82,9 +82,9 @@ model = dict(
             bnb_4bit_quant_type='nf4')),
     llm_lora=dict(
         type=LoraConfig,
-        r=64,
-        lora_alpha=16,
-        lora_dropout=0.1,
+        r=128,
+        lora_alpha=256,
+        lora_dropout=0.05,
         bias='none',
         task_type='CAUSAL_LM'),
     visual_encoder=dict(
@@ -121,6 +121,7 @@ optim_wrapper = dict(
     type=AmpOptimWrapper,
     optimizer=dict(
         type=optim_type, lr=lr, betas=betas, weight_decay=weight_decay),
+    paramwise_cfg=dict(custom_keys={'projector': dict(lr_mult=0.1)}),
     clip_grad=dict(max_norm=max_norm, error_if_nonfinite=False),
     accumulative_counts=accumulative_counts,
     loss_scale='dynamic',
