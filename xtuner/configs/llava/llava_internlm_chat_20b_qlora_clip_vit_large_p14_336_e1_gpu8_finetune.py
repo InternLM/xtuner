@@ -34,7 +34,7 @@ llava_zh_data_path = llava_data_root + 'llava_zh/llava_instruct_150k_zh.json'
 llava_zh_image_folder = llava_data_root + 'llava_images/coco/train2017'
 
 prompt_template = PROMPT_TEMPLATE.internlm_chat
-max_length = int(2048 - (336 / 14)**2 + 1)
+max_length = int(4096 - (336 / 14)**2)
 
 # Scheduler & Optimizer
 batch_size = 8  # per_device
