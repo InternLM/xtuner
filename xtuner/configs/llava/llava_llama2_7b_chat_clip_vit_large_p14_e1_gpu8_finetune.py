@@ -29,7 +29,7 @@ llava_data_root = './data/llava_data/'
 data_path = llava_data_root + 'LLaVA-Instruct-150K/llava_v1_5_mix665k.json'
 image_folder = llava_data_root + 'llava_images'
 prompt_template = PROMPT_TEMPLATE.llama2_chat
-max_length = int(2048 - (224 / 14)**2 + 1)
+max_length = int(4096 - (224 / 14)**2)
 
 # Scheduler & Optimizer
 batch_size = 16  # per_device
