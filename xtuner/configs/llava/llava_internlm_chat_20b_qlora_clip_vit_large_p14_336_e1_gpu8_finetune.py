@@ -34,15 +34,16 @@ llava_zh_data_path = llava_data_root + 'llava_zh/llava_instruct_150k_zh.json'
 llava_zh_image_folder = llava_data_root + 'llava_images/coco/train2017'
 
 prompt_template = PROMPT_TEMPLATE.internlm_chat
-max_length = int(4096 - (336 / 14)**2)
+max_length = int(2048 - (336 / 14)**2)
 
 # Scheduler & Optimizer
 batch_size = 8  # per_device
 accumulative_counts = 2
-dataloader_num_workers = 2
+dataloader_num_workers = 0
 max_epochs = 1
 optim_type = AdamW
 lr = 2e-4
+lr_projector = 2e-5
 betas = (0.9, 0.999)
 weight_decay = 0
 max_norm = 1  # grad clip
@@ -143,7 +144,8 @@ optim_wrapper = dict(
     type=AmpOptimWrapper,
     optimizer=dict(
         type=optim_type, lr=lr, betas=betas, weight_decay=weight_decay),
-    paramwise_cfg=dict(custom_keys={'projector': dict(lr_mult=0.1)}),
+    paramwise_cfg=dict(
+        custom_keys={'projector': dict(lr_mult=lr_projector / lr)}),
     clip_grad=dict(max_norm=max_norm, error_if_nonfinite=False),
     accumulative_counts=accumulative_counts,
     loss_scale='dynamic',
@@ -153,7 +155,7 @@ optim_wrapper = dict(
 # More information: https://github.com/open-mmlab/mmengine/blob/main/docs/en/tutorials/param_scheduler.md  # noqa: E501
 param_scheduler = dict(
     type=CosineAnnealingLR,
-    eta_min=lr * 0.1,
+    eta_min=0.,
     by_epoch=True,
     T_max=max_epochs,
     convert_to_iter_based=True)

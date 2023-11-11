@@ -32,7 +32,7 @@ max_length = int(4096 - (224 / 14)**2)
 # Scheduler & Optimizer
 batch_size = 32  # per_device
 accumulative_counts = 1
-dataloader_num_workers = 4
+dataloader_num_workers = 0
 max_epochs = 1
 optim_type = AdamW
 lr = 1e-3
@@ -112,7 +112,7 @@ optim_wrapper = dict(
 # More information: https://github.com/open-mmlab/mmengine/blob/main/docs/en/tutorials/param_scheduler.md  # noqa: E501
 param_scheduler = dict(
     type=CosineAnnealingLR,
-    eta_min=lr * 0.1,
+    eta_min=0.,
     by_epoch=True,
     T_max=max_epochs,
     convert_to_iter_based=True)
