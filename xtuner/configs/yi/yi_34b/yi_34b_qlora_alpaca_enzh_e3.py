@@ -1,6 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import torch
-from torch.optim import AdamW
+from torch.optim import PagedAdamW32bit
 from datasets import load_dataset
 from mmengine.dataset import DefaultSampler
 from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
@@ -32,10 +32,10 @@ pack_to_max_length = True
 
 # Scheduler & Optimizer
 batch_size = 1  # per_device
-accumulative_counts = 4
-dataloader_num_workers = 4
+accumulative_counts = 16
+dataloader_num_workers = 0
 max_epochs = 3
-optim_type = AdamW
+optim_type = PagedAdamW32bit
 lr = 2e-4
 betas = (0.9, 0.999)
 weight_decay = 0
