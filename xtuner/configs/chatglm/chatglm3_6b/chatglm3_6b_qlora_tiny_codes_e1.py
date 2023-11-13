@@ -12,7 +12,7 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer,
 
 from xtuner.dataset import process_hf_dataset
 from xtuner.dataset.collate_fns import default_collate_fn
-from xtuner.dataset.map_fns import alpaca_map_fn, template_map_fn_factory
+from xtuner.dataset.map_fns import template_map_fn_factory, tiny_codes_map_fn
 from xtuner.engine import DatasetInfoHook, EvaluateChatHook
 from xtuner.model import SupervisedFinetune
 from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
@@ -21,10 +21,10 @@ from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-pretrained_model_name_or_path = 'THUDM/chatglm3-6b-base'
+pretrained_model_name_or_path = 'THUDM/chatglm3-6b'
 
 # Data
-data_path = 'garage-bAInd/Open-Platypus'
+data_path = 'nampdn-ai/tiny-codes'
 prompt_template = PROMPT_TEMPLATE.chatglm3
 max_length = 2048
 pack_to_max_length = True
@@ -33,7 +33,7 @@ pack_to_max_length = True
 batch_size = 1  # per_device
 accumulative_counts = 16
 dataloader_num_workers = 0
-max_epochs = 3
+max_epochs = 1
 optim_type = PagedAdamW32bit
 lr = 2e-4
 betas = (0.9, 0.999)
@@ -42,9 +42,13 @@ max_norm = 1  # grad clip
 
 # Evaluate the generation performance during the training
 evaluation_freq = 500
-SYSTEM = SYSTEM_TEMPLATE.alpaca
+SYSTEM = SYSTEM_TEMPLATE.coder
 evaluation_inputs = [
-    '请给我介绍五个上海的景点', 'Please tell me five scenic spots in Shanghai'
+    ('写一个Python函数，将十六进制颜色代码（如#0066ee）转换为对应的'
+     '红、绿、蓝（RGB）三个颜色分量值，并以元组的形式返回。'),
+    ('Write a Python function that takes a hexadecimal color code '
+     '(e.g., #0066ee) as input and converts it into the corresponding '
+     'red, green, and blue (RGB) color component values.')
 ]
 
 #######################################################################
@@ -89,7 +93,7 @@ train_dataset = dict(
     dataset=dict(type=load_dataset, path=data_path),
     tokenizer=tokenizer,
     max_length=max_length,
-    dataset_map_fn=alpaca_map_fn,
+    dataset_map_fn=tiny_codes_map_fn,
     template_map_fn=dict(
         type=template_map_fn_factory, template=prompt_template),
     remove_unused_columns=True,

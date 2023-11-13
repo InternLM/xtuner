@@ -27,7 +27,7 @@ pretrained_model_name_or_path = 'THUDM/chatglm3-6b-base'
 # Data
 alpaca_zh_path = 'silk-road/alpaca-data-gpt4-chinese'
 alpaca_en_path = 'tatsu-lab/alpaca'
-prompt_template = PROMPT_TEMPLATE.default
+prompt_template = PROMPT_TEMPLATE.chatglm3
 max_length = 2048
 pack_to_max_length = True
 
@@ -56,6 +56,7 @@ tokenizer = dict(
     type=AutoTokenizer.from_pretrained,
     pretrained_model_name_or_path=pretrained_model_name_or_path,
     trust_remote_code=True,
+    encode_special_tokens=True,
     padding_side='left')
 
 model = dict(

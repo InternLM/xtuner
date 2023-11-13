@@ -21,7 +21,7 @@ from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-pretrained_model_name_or_path = 'THUDM/chatglm3-6b-base'
+pretrained_model_name_or_path = 'THUDM/chatglm3-6b'
 
 # Data
 data_path = 'garage-bAInd/Open-Platypus'
