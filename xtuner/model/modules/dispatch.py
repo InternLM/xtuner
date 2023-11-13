@@ -10,6 +10,7 @@ from .baichuan import (baichuan2_norm_head_forward, baichuan_7b_attn_forward,
                        baichuan_13b_attn_forward)
 from .internlm import internlm_attn_forward
 from .llama import llama_attn_forward
+from .yi import yi_attn_forward
 
 NO_ATTN_WEIGHTS_MSG = (
     'Due to the implementation of the PyTorch version of flash attention, '
@@ -68,6 +69,17 @@ def dispath_baichuan_13b_attn_forward(model):
         if type(module).__name__ == 'BaichuanAttention':
             module.forward = types.MethodType(baichuan_13b_attn_forward,
                                               module)
+            
+
+def dispatch_yi_attn_forward(model):
+    if digit_version(torch.__version__) < digit_version('2.0.0'):
+        # flash attention is only supported after pytorch2.0
+        return
+    print_log('dispatch yi attn forward', 'current')
+    print_log(NO_ATTN_WEIGHTS_MSG, 'current', logging.WARNING)
+    for module in model.modules():
+        if type(module).__name__ == 'YiAttention':
+            module.forward = types.MethodType(yi_attn_forward, module)
 
 
 def dispatch_modules(model):
@@ -80,3 +92,6 @@ def dispatch_modules(model):
         dispath_baichuan2_norm_head_forward(model)
         dispath_baichuan_7b_attn_forward(model)
         dispath_baichuan_13b_attn_forward(model)
+    if 'yi' in model_name:
+        dispatch_yi_attn_forward(model)
+        
