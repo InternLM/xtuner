@@ -12,6 +12,9 @@ PROMPT_TEMPLATE = ConfigDict(
         SYSTEM='<|System|>:{system}\n',
         INSTRUCTION='<|User|>:{input}<eoh>\n<|Bot|>:'),
     moss_sft=dict(SYSTEM='{system}\n', INSTRUCTION='<|Human|>: {input}<eoh>'),
+    yi=dict(
+        SYSTEM='<|system|>\n{system}\n',
+        INSTRUCTION='<|user|>\n{input}\n<|assistant|>\n'),
     llama2_chat=dict(
         SYSTEM=(
             '[INST] <<SYS>>\n You are a helpful, respectful and honest '
