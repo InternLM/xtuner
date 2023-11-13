@@ -40,7 +40,7 @@ def encode_fn(example, tokenizer, max_length, input_ids_with_output=True):
         bos_token_id = []
         eos_token_id = tokenizer.eos_token_id
     elif tokenizer.__class__.__name__ == 'ChatGLMTokenizer':
-        bos_token_id = []
+        bos_token_id = [64790, 64792]
         eos_token_id = tokenizer.eos_token_id
     else:
         bos_token_id = tokenizer.bos_token_id
