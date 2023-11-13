@@ -200,7 +200,9 @@ def main():
         model = AutoModelForCausalLM.from_pretrained(args.model_name_or_path,
                                                      **model_kwargs)
         tokenizer = AutoTokenizer.from_pretrained(
-            args.model_name_or_path, trust_remote_code=True)
+            args.model_name_or_path,
+            trust_remote_code=True,
+            encode_special_tokens=True)
         if args.adapter is not None:
             model = PeftModel.from_pretrained(
                 model, args.adapter, offload_folder=args.offload_folder)
