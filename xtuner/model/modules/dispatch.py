@@ -69,7 +69,7 @@ def dispath_baichuan_13b_attn_forward(model):
         if type(module).__name__ == 'BaichuanAttention':
             module.forward = types.MethodType(baichuan_13b_attn_forward,
                                               module)
-            
+
 
 def dispatch_yi_attn_forward(model):
     if digit_version(torch.__version__) < digit_version('2.0.0'):
@@ -94,4 +94,3 @@ def dispatch_modules(model):
         dispath_baichuan_13b_attn_forward(model)
     if 'yi' in model_name:
         dispatch_yi_attn_forward(model)
-        

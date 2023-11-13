@@ -78,11 +78,11 @@ def yi_attn_forward(
         value_states = torch.cat([past_key_value[1], value_states], dim=2)
 
     past_key_value = (key_states, value_states) if use_cache else None
-    
+
     # repeat k/v heads if n_kv_heads < n_heads
     key_states = repeat_kv(key_states, self.num_key_value_groups)
     value_states = repeat_kv(value_states, self.num_key_value_groups)
-    
+
     # use flash attention implemented by pytorch
     attn_output = F.scaled_dot_product_attention(
         query_states, key_states, value_states, attn_mask=attention_mask)
