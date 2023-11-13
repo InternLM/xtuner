@@ -21,7 +21,7 @@ from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-pretrained_model_name_or_path = '01-ai/Yi-6B'
+pretrained_model_name_or_path = '01-ai/Yi-34B'
 
 # Data
 alpaca_zh_path = 'silk-road/alpaca-data-gpt4-chinese'
