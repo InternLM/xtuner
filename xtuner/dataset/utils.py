@@ -1,5 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import base64
 import copy
+import io
 from io import BytesIO
 from itertools import chain
 
@@ -150,4 +152,10 @@ def load_image(image_file):
         image = Image.open(BytesIO(response.content)).convert('RGB')
     else:
         image = Image.open(image_file).convert('RGB')
+    return image
+
+
+def decode_base64_to_image(base64_string):
+    image_data = base64.b64decode(base64_string)
+    image = Image.open(io.BytesIO(image_data))
     return image
