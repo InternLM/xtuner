@@ -27,7 +27,7 @@ pretrained_model_name_or_path = 'THUDM/chatglm3-6b-base'
 # 1. Download data from https://kaggle.com/datasets/Cornell-University/arxiv
 # 2. Process data by `xtuner preprocess arxiv ${DOWNLOADED_DATA} ./data/arxiv_data.json [optional arguments]`  # noqa: E501
 data_path = './data/arxiv_data.json'
-prompt_template = PROMPT_TEMPLATE.default
+prompt_template = PROMPT_TEMPLATE.chatglm3
 max_length = 2048
 pack_to_max_length = True
 
@@ -88,6 +88,7 @@ tokenizer = dict(
     type=AutoTokenizer.from_pretrained,
     pretrained_model_name_or_path=pretrained_model_name_or_path,
     trust_remote_code=True,
+    encode_special_tokens=True,
     padding_side='left')
 
 model = dict(

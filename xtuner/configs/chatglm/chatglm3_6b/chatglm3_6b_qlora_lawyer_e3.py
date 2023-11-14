@@ -10,9 +10,11 @@ from peft import LoraConfig
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           BitsAndBytesConfig)
 
-from xtuner.dataset import process_hf_dataset
+from xtuner.dataset import ConcatDataset, process_hf_dataset
 from xtuner.dataset.collate_fns import default_collate_fn
-from xtuner.dataset.map_fns import alpaca_map_fn, template_map_fn_factory
+from xtuner.dataset.map_fns import (crime_kg_assitant_map_fn,
+                                    law_reference_map_fn,
+                                    template_map_fn_factory)
 from xtuner.engine import DatasetInfoHook, EvaluateChatHook
 from xtuner.model import SupervisedFinetune
 from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
@@ -21,10 +23,12 @@ from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-pretrained_model_name_or_path = 'THUDM/chatglm3-6b-base'
+pretrained_model_name_or_path = 'THUDM/chatglm3-6b'
 
 # Data
-data_path = 'garage-bAInd/Open-Platypus'
+# download data from https://github.com/LiuHC0428/LAW-GPT
+crime_kg_assitant_path = './data/CrimeKgAssitant清洗后_52k.json'
+law_reference_data_path = './data/训练数据_带法律依据_92k.json'
 prompt_template = PROMPT_TEMPLATE.chatglm3
 max_length = 2048
 pack_to_max_length = True
@@ -42,10 +46,8 @@ max_norm = 1  # grad clip
 
 # Evaluate the generation performance during the training
 evaluation_freq = 500
-SYSTEM = SYSTEM_TEMPLATE.alpaca
-evaluation_inputs = [
-    '请给我介绍五个上海的景点', 'Please tell me five scenic spots in Shanghai'
-]
+SYSTEM = SYSTEM_TEMPLATE.lawyer
+evaluation_inputs = ['请问离婚需要准备什么材料？', '销售鳄鱼皮包违法吗？']
 
 #######################################################################
 #                      PART 2  Model & Tokenizer                      #
@@ -84,17 +86,41 @@ model = dict(
 #######################################################################
 #                      PART 3  Dataset & Dataloader                   #
 #######################################################################
-train_dataset = dict(
+crime_kg_assitant = dict(
     type=process_hf_dataset,
-    dataset=dict(type=load_dataset, path=data_path),
+    dataset=dict(
+        type=load_dataset,
+        path='json',
+        data_files=dict(train=crime_kg_assitant_path)),
     tokenizer=tokenizer,
     max_length=max_length,
-    dataset_map_fn=alpaca_map_fn,
+    dataset_map_fn=crime_kg_assitant_map_fn,
     template_map_fn=dict(
         type=template_map_fn_factory, template=prompt_template),
     remove_unused_columns=True,
     shuffle_before_pack=True,
     pack_to_max_length=pack_to_max_length)
+
+law_reference_data = dict(
+    type=process_hf_dataset,
+    dataset=dict(
+        type=load_dataset,
+        path='json',
+        data_files=dict(train=law_reference_data_path)),
+    tokenizer=tokenizer,
+    max_length=max_length,
+    dataset_map_fn=law_reference_map_fn,
+    template_map_fn=dict(
+        type=template_map_fn_factory, template=prompt_template),
+    remove_unused_columns=True,
+    shuffle_before_pack=True,
+    pack_to_max_length=pack_to_max_length)
+
+train_dataset = dict(
+    type=ConcatDataset,
+    datasets_cfg=dict(
+        crime_kg_assitant=crime_kg_assitant,
+        law_reference_data=law_reference_data))
 
 train_dataloader = dict(
     batch_size=batch_size,

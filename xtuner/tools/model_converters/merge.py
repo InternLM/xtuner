@@ -38,7 +38,9 @@ def main():
         offload_folder=args.offload_folder,
         trust_remote_code=True)
     tokenizer = AutoTokenizer.from_pretrained(
-        args.model_name_or_path, trust_remote_code=True)
+        args.model_name_or_path,
+        trust_remote_code=True,
+        encode_special_tokens=True)
     model_unmerged = PeftModel.from_pretrained(
         model,
         args.adapter_name_or_path,

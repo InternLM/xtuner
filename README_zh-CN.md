@@ -14,7 +14,7 @@
 
 ## 🎉 更新
 
-- **\[2023/10\]** 支持 [ChatGLM3-6B-Base](https://huggingface.co/THUDM/chatglm3-6b-base) 模型！
+- **\[2023/10\]** 支持 [ChatGLM3-6B](https://huggingface.co/THUDM/chatglm3-6b) 模型！
 - **\[2023/10\]** 支持 [MSAgent-Bench](https://modelscope.cn/datasets/damo/MSAgent-Bench) 数据集，并且微调所得大语言模型可应用至 [Lagent](https://github.com/InternLM/lagent) 框架！
 - **\[2023/10\]** 优化数据处理逻辑以兼容 `system` 字段，相关细节请查阅[文档](docs/zh_cn/user_guides/dataset_format.md)！
 - **\[2023/09\]** 支持 [InternLM-20B](https://huggingface.co/internlm) 系列模型！
@@ -79,7 +79,7 @@ XTuner 是一个轻量级微调大语言模型的工具库，由 [MMRazor](https
   <li><a href="https://huggingface.co/meta-llama">Llama</a></li>
   <li><a href="https://huggingface.co/meta-llama">Llama2</a></li>
   <li><a href="https://huggingface.co/THUDM/chatglm2-6b">ChatGLM2</a></li>
-  <li><a href="https://huggingface.co/THUDM/chatglm3-6b-base">ChatGLM3</a></li>
+  <li><a href="https://huggingface.co/THUDM/chatglm3-6b">ChatGLM3</a></li>
   <li><a href="https://huggingface.co/Qwen/Qwen-7B">Qwen</a></li>
   <li><a href="https://huggingface.co/baichuan-inc/Baichuan-7B">Baichuan</a></li>
   <li><a href="https://huggingface.co/baichuan-inc/Baichuan2-7B-Base">Baichuan2</a></li>
