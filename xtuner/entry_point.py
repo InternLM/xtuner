@@ -9,13 +9,13 @@ from mmengine.logging import print_log
 
 import xtuner
 from xtuner.tools import (chat, check_custom_dataset, copy_cfg, list_cfg,
-                          log_dataset, test, train)
+                          log_dataset, mmbench, test, train)
 from xtuner.tools.data_preprocess import arxiv as arxiv_preprocess
 from xtuner.tools.model_converters import merge, pth_to_hf, split
 
 # Define valid modes
 MODES = ('list-cfg', 'copy-cfg', 'log-dataset', 'check-custom-dataset',
-         'train', 'test', 'chat', 'convert', 'preprocess')
+         'train', 'test', 'chat', 'convert', 'preprocess', 'mmbench')
 
 CLI_HELP_MSG = \
     f"""
@@ -40,19 +40,21 @@ CLI_HELP_MSG = \
         4-1. Convert the pth model to HuggingFace's model:
             xtuner convert pth_to_hf $CONFIG $PATH_TO_PTH_MODEL $SAVE_PATH_TO_HF_MODEL
         4-2. Merge the HuggingFace's adapter to the pretrained LLM:
-            xtuner convert merge $NAME_OR_PATH_TO_LLM $NAME_OR_PATH_TO_ADAPTER $SAVE_PATH
+            xtuner convert merge $LLM $ADAPTER $SAVE_PATH
         4-3. Split HuggingFace's LLM to the smallest sharded one:
-            xtuner convert split $NAME_OR_PATH_TO_LLM $SAVE_PATH
+            xtuner convert split $LLM $SAVE_PATH
         5-1. Chat with LLMs with HuggingFace's model and adapter:
-            xtuner chat $NAME_OR_PATH_TO_LLM --adapter $NAME_OR_PATH_TO_ADAPTER --prompt-template $PROMPT_TEMPLATE --system-template $SYSTEM_TEMPLATE
+            xtuner chat $LLM --adapter $ADAPTER --prompt-template $PROMPT_TEMPLATE --system-template $SYSTEM_TEMPLATE
         5-2. Chat with VLLMs with HuggingFace's model and adapter:
-            xtuner chat $NAME_OR_PATH_TO_LLM --adapter $NAME_OR_PATH_TO_ADAPTER --image $IMAGE --visual-encoder $VISUAL_ENCODER --projector $PROJECTOR --prompt-template $PROMPT_TEMPLATE --system-template $SYSTEM_TEMPLATE
+            xtuner chat $LLM --adapter $ADAPTER --image $IMAGE --visual-encoder $VISUAL_ENCODER --projector $PROJECTOR --prompt-template $PROMPT_TEMPLATE --system-template $SYSTEM_TEMPLATE
         6-1. Preprocess arxiv dataset:
             xtuner preprocess arxiv $SRC_FILE $DST_FILE --start-date $START_DATE --categories $CATEGORIES
         7-1. Log processed dataset:
             xtuner log-dataset $CONFIG
         7-2. Verify the correctness of the config file for the custom dataset.
             xtuner check-custom-dataset
+        8. MMBench evaluation
+            xtuner mmbench $LLM --adapter $ADAPTER --visual-encoder $VISUAL_ENCODER --projector $PROJECTOR --prompt-template $PROMPT_TEMPLATE --data-path $MMBENCH_DATA_PATH
 
     Run special commands:
 
@@ -78,9 +80,9 @@ CONVERT_HELP_MSG = \
         1. Convert the pth model to HuggingFace's model:
             xtuner convert pth_to_hf $CONFIG $PATH_TO_PTH_MODEL $SAVE_PATH_TO_HF_MODEL
         2. Merge the HuggingFace's adapter to the pretrained LLM:
-            xtuner convert merge $NAME_OR_PATH_TO_LLM $NAME_OR_PATH_TO_ADAPTER $SAVE_PATH
+            xtuner convert merge $LLM $ADAPTER $SAVE_PATH
         3. Split HuggingFace's LLM to the smallest sharded one:
-            xtuner convert split $NAME_OR_PATH_TO_LLM $SAVE_PATH
+            xtuner convert split $LLM $SAVE_PATH
 
     GitHub: https://github.com/InternLM/xtuner
     """  # noqa: E501
@@ -124,6 +126,7 @@ modes = {
     'train': train.__file__,
     'test': test.__file__,
     'chat': chat.__file__,
+    'mmbench': mmbench.__file__,
     'convert': {
         'pth_to_hf': pth_to_hf.__file__,
         'merge': merge.__file__,

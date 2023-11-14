@@ -25,7 +25,7 @@ from xtuner.utils import (DEFAULT_IMAGE_TOKEN, IMAGE_TOKEN_INDEX,
 
 def parse_args():
     parser = argparse.ArgumentParser(description='MMBench')
-    parser.add_argument('--llm', help='Hugging Face model name or path')
+    parser.add_argument('llm', help='Hugging Face model name or path')
     parser.add_argument('--data-path', default=None, help='data path')
     parser.add_argument('--work-dir', help='the dir to save results')
     parser.add_argument('--adapter', default=None, help='adapter name or path')
