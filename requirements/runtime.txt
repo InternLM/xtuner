@@ -4,6 +4,7 @@ einops
 lagent>=0.1.2
 mmengine>=0.9.1
 modelscope
+openpyxl
 peft>=0.4.0
 scipy
 SentencePiece
