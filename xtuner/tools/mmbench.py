@@ -1,5 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import argparse
+import json
 import os.path as osp
 import re
 import time
@@ -25,7 +26,7 @@ from xtuner.utils import (DEFAULT_IMAGE_TOKEN, IMAGE_TOKEN_INDEX,
 
 def parse_args():
     parser = argparse.ArgumentParser(description='MMBench')
-    parser.add_argument('llm', help='Hugging Face model name or path')
+    parser.add_argument('--llm', help='Hugging Face model name or path')
     parser.add_argument('--data-path', default=None, help='data path')
     parser.add_argument('--work-dir', help='the dir to save results')
     parser.add_argument('--adapter', default=None, help='adapter name or path')
@@ -98,7 +99,6 @@ class MMBenchDataset(Dataset):
         self.split = 'dev' if 'answer' in self.df.iloc[0].keys() else 'test'
 
     def __len__(self):
-        return 10
         return len(self.df)
 
     def __getitem__(self, idx):
@@ -157,11 +157,14 @@ def main():
     timestamp = time.strftime('%Y%m%d_%H%M%S', time.localtime(time.time()))
     save_dir = osp.join(save_dir, timestamp)
     mkdir_or_exist(osp.abspath(save_dir))
-    save_path = osp.join(save_dir, 'mmbench_result.xlsx')
+    results_path = osp.join(save_dir, 'mmbench_result.xlsx')
     print('=======================================================')
     print(f'Dataset path: {osp.abspath(args.data_path)}\n'
-          f'Results will be saved to {osp.abspath(save_path)}')
+          f'Results will be saved to {osp.abspath(save_dir)}')
     print('=======================================================')
+    args_path = osp.join(save_dir, 'args.txt')
+    with open(args_path, 'w') as f:
+        json.dump(args.__dict__, f, indent=2)
 
     # build llm
     quantization_config = None
@@ -296,7 +299,7 @@ def main():
         results.append(cur_result)
 
     df = pd.DataFrame(results)
-    with pd.ExcelWriter(save_path, engine='openpyxl') as writer:
+    with pd.ExcelWriter(results_path, engine='openpyxl') as writer:
         df.to_excel(writer, index=False)
     if dataset.split == 'dev':
         all_l2_category = set(df['l2-category'])
