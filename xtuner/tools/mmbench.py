@@ -157,12 +157,13 @@ def main():
     timestamp = time.strftime('%Y%m%d_%H%M%S', time.localtime(time.time()))
     save_dir = osp.join(save_dir, timestamp)
     mkdir_or_exist(osp.abspath(save_dir))
-    results_path = osp.join(save_dir, 'mmbench_result.xlsx')
     print('=======================================================')
     print(f'Dataset path: {osp.abspath(args.data_path)}\n'
           f'Results will be saved to {osp.abspath(save_dir)}')
     print('=======================================================')
-    args_path = osp.join(save_dir, 'args.txt')
+    results_xlsx_path = osp.join(save_dir, 'mmbench_result.xlsx')
+    results_json_path = osp.join(save_dir, 'mmbench_result.json')
+    args_path = osp.join(save_dir, 'args.json')
     with open(args_path, 'w') as f:
         json.dump(args.__dict__, f, indent=2)
 
@@ -299,9 +300,11 @@ def main():
         results.append(cur_result)
 
     df = pd.DataFrame(results)
-    with pd.ExcelWriter(results_path, engine='openpyxl') as writer:
+    with pd.ExcelWriter(results_xlsx_path, engine='openpyxl') as writer:
         df.to_excel(writer, index=False)
+
     if dataset.split == 'dev':
+        results_dict = {}
         all_l2_category = set(df['l2-category'])
         table = Table(title=f' MMBench ({args.data_path}) ')
         console = Console()
@@ -313,14 +316,21 @@ def main():
                 cat_df['answer'] == cat_df['prediction']) / len(cat_df) * 100
             cat_name = ' '.join(cat.split('_')).title()
             table.add_row(cat_name, f'{cat_acc:.1f}')
+            results_dict[cat_name] = f'{cat_acc:.1f}'
         table.add_section()
         average_acc = sum(df['answer'] == df['prediction']) / len(df) * 100
         table.add_row('Average', f'{average_acc:.1f}')
+        results_dict['Average'] = f'{average_acc:.1f}'
         with console.capture() as capture:
             console.print(table, end='')
         print('\n' + capture.get())
-
-    print('All done!')
+        with open(results_json_path, 'w') as f:
+            json.dump(results_dict, f, indent=2)
+        print('Note: Please be cautious if you use the results in papers. '
+              'This result is computed by traditional 1-pass top-1 accuracy '
+              'evaluation and is not by Circular Evaluation')
+    else:
+        print('All done!')
 
 
 if __name__ == '__main__':
