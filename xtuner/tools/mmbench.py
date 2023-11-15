@@ -5,6 +5,7 @@ import os.path as osp
 import re
 import time
 
+import numpy as np
 import pandas as pd
 import torch
 import tqdm
@@ -62,7 +63,7 @@ def parse_args():
     parser.add_argument(
         '--max-new-tokens',
         type=int,
-        default=10,
+        default=100,
         help='Maximum number of new tokens allowed in generated text')
     parser.add_argument(
         '--temperature',
@@ -92,11 +93,28 @@ def parse_args():
 
 
 class MMBenchDataset(Dataset):
+    ABBRS = {
+        'coarse_perception': 'CP',
+        'finegrained_perception (instance-level)': 'FP-S',
+        'finegrained_perception (cross-instance)': 'FP-C',
+        'logic_reasoning': 'LR',
+        'relation_reasoning': 'RR',
+        'attribute_reasoning': 'AR',
+        'sketch_reasoning': 'Sketch Reasoning',
+        'scenery_building': 'Scenery & Building',
+        'food_clothes': 'Food & Clothes',
+        'historical_figure': 'Historical Figure',
+        'traditional_show': 'Traditional Show',
+        'calligraphy_painting': 'Calligraphy Painting',
+        'cultural_relic': 'Cultural Relic'
+    }
 
     def __init__(self, data_file, sys_prompt='There are several options:'):
+        self.data_file = data_file
         self.df = pd.read_csv(data_file, sep='\t')
         self.sys_prompt = sys_prompt
         self.split = 'dev' if 'answer' in self.df.iloc[0].keys() else 'test'
+        self.has_l2_catetory = 'l2-catetory' in self.df.columns.to_list()
 
     def __len__(self):
         return len(self.df)
@@ -109,7 +127,6 @@ class MMBenchDataset(Dataset):
         answer = self.df.iloc[idx]['answer'] if 'answer' in self.df.iloc[
             0].keys() else None
         catetory = self.df.iloc[idx]['category']
-        l2_catetory = self.df.iloc[idx]['l2-category']
 
         option_candidate = ['A', 'B', 'C', 'D', 'E']
         options = {
@@ -128,11 +145,12 @@ class MMBenchDataset(Dataset):
             'answer': answer,
             'options': options_prompt,
             'category': catetory,
-            'l2-category': l2_catetory,
             'options_dict': options,
             'index': index,
             'context': hint,
         }
+        if self.has_l2_catetory:
+            data.update({'l2-category': self.df.iloc[idx]['l2-category']})
         return data
 
     def load_from_df(self, idx, key):
@@ -140,6 +158,102 @@ class MMBenchDataset(Dataset):
             return self.df.iloc[idx][key]
         else:
             return None
+
+    def eval_result(self, result_df, show=True):
+
+        def calc_acc(df, group='category'):
+            assert group in ['overall', 'category', 'l2-category']
+            if group == 'overall':
+                return {'Average': np.mean(df['hit'])}
+            else:
+                res = {}
+                abilities = list(set(df[group]))
+                abilities.sort()
+                for ab in abilities:
+                    sub_df = df[df[group] == ab]
+                    ab = self.ABBRS[ab] if ab in self.ABBRS else ab
+                    res[ab] = np.mean(sub_df['hit'])
+            return res
+
+        def eval_sub_data(sub_data, answer_map):
+            lt = len(sub_data)
+            for i in range(lt):
+                item = sub_data.iloc[i]
+                match = re.search(r'([A-D]+)', item['prediction'])
+                pred = match.group(1) if match else ''
+                gt = answer_map[item['index']]
+                if gt != pred:
+                    return 0
+            return 1
+
+        def show_result(ret_json):
+            table = Table(title=f' MMBench ({self.data_file}) ')
+            console = Console()
+            table.add_column('Category', justify='left')
+            table.add_column('Accuracy (%)', justify='right')
+            average = ret_json.pop('Average') * 100
+            table.add_row('Average', f'{average:.1f}')
+            table.add_section()
+            for cat_name, cat_acc in ret_json.items():
+                table.add_row(cat_name, f'{cat_acc * 100:.1f}')
+            with console.capture() as capture:
+                console.print(table, end='')
+            print('\n' + capture.get())
+            print('Note: Please be cautious if you use the results in papers, '
+                  "since we don't use ChatGPT as a helper for choice "
+                  'extraction')
+
+        data = result_df.sort_values(by='index')
+        data['prediction'] = [str(x) for x in data['prediction']]
+        for k in data.keys():
+            data[k.lower() if k not in 'ABCD' else k] = data.pop(k)
+
+        data_main = data[data['index'] < int(1e6)]
+        cate_map = {
+            i: c
+            for i, c in zip(self.df['index'], self.df['category'])
+        }
+        if self.has_l2_catetory:
+            l2_cate_map = {
+                i: c
+                for i, c in zip(self.df['index'], self.df['l2-category'])
+            }
+        answer_map = {
+            i: c
+            for i, c in zip(self.df['index'], self.df['answer'])
+        }
+
+        lt = len(data_main)
+        hit, tot = 0, 0
+        result = {}
+        for i in range(lt):
+            item_main = data_main.iloc[i]
+            idx = item_main['index']
+            assert idx not in result
+            sub_data = data[data['index'] % int(1e6) == idx]
+            ret = eval_sub_data(sub_data, answer_map)
+            result[idx] = ret
+            hit += ret
+            tot += 1
+
+        indices = data_main['index']
+        data_main = data_main.copy()
+        data_main['hit'] = [result[i] for i in indices]
+        main_idx = data_main['index']
+        data_main['category'] = [cate_map[i] for i in main_idx]
+
+        ret_json = calc_acc(data_main, 'overall')
+
+        if self.has_l2_catetory:
+            data_main['l2-category'] = [l2_cate_map[i] for i in main_idx]
+            l2 = calc_acc(data_main, 'l2-category')
+            ret_json.update(l2)
+        else:
+            leaf = calc_acc(data_main, 'category')
+            ret_json.update(leaf)
+        if show:
+            show_result(ret_json)
+        return ret_json
 
 
 def main():
@@ -236,12 +350,12 @@ def main():
 
         text = DEFAULT_IMAGE_TOKEN + '\n' + text
 
+        if args.system is not None:
+            text = text + '\n' + args.system
+
         if args.prompt_template:
             prompt_text = ''
             template = PROMPT_TEMPLATE[args.prompt_template]
-            if 'SYSTEM' in template and args.system is not None:
-                prompt_text += template['SYSTEM'].format(
-                    system=args.system, round=1, bot_name=args.bot_name)
             prompt_text += template['INSTRUCTION'].format(
                 input=text, round=1, bot_name=args.bot_name)
         else:
@@ -282,9 +396,7 @@ def main():
             bos_token_id=tokenizer.bos_token_id,
             stopping_criteria=stop_criteria)
 
-        output_text = tokenizer.decode(generate_output[0])
-        match = re.search(r'([A-D]+)', output_text)
-        predict = match.group(1) if match else ''
+        predict = tokenizer.decode(generate_output[0])
 
         cur_result = {}
         cur_result['question'] = data_sample.get('question')
@@ -299,36 +411,14 @@ def main():
         cur_result['answer'] = data_sample.get('answer')
         results.append(cur_result)
 
-    df = pd.DataFrame(results)
+    results_df = pd.DataFrame(results)
     with pd.ExcelWriter(results_xlsx_path, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False)
+        results_df.to_excel(writer, index=False)
 
     if dataset.split == 'dev':
-        results_dict = {}
-        all_l2_category = set(df['l2-category'])
-        table = Table(title=f' MMBench ({args.data_path}) ')
-        console = Console()
-        table.add_column('L2 Category', justify='left')
-        table.add_column('Accuracy (%)', justify='right')
-        for cat in all_l2_category:
-            cat_df = df[df['l2-category'] == cat]
-            cat_acc = sum(
-                cat_df['answer'] == cat_df['prediction']) / len(cat_df) * 100
-            cat_name = ' '.join(cat.split('_')).title()
-            table.add_row(cat_name, f'{cat_acc:.1f}')
-            results_dict[cat_name] = f'{cat_acc:.1f}'
-        table.add_section()
-        average_acc = sum(df['answer'] == df['prediction']) / len(df) * 100
-        table.add_row('Average', f'{average_acc:.1f}')
-        results_dict['Average'] = f'{average_acc:.1f}'
-        with console.capture() as capture:
-            console.print(table, end='')
-        print('\n' + capture.get())
+        results_dict = dataset.eval_result(results_df, show=True)
         with open(results_json_path, 'w') as f:
             json.dump(results_dict, f, indent=2)
-        print('Note: Please be cautious if you use the results in papers. '
-              'This result is computed by traditional 1-pass top-1 accuracy '
-              'evaluation and is not by Circular Evaluation')
     else:
         print('All done!')
 
