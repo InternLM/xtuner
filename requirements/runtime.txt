@@ -1,6 +1,7 @@
 bitsandbytes>=0.40.0
 datasets
 einops
+fsspec<=2023.6.0
 lagent>=0.1.2
 mmengine>=0.9.1
 modelscope

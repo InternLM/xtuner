@@ -36,4 +36,4 @@ def mmlu_collate_fn(instances: Sequence[Dict],
     if return_hf_format:
         return data_dict
     else:
-        return {'data': data_dict, 'data_samples': None}
+        return {'data': data_dict, 'data_samples': data_samples}

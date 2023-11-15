@@ -154,7 +154,7 @@ optim_wrapper = dict(
 # More information: https://github.com/open-mmlab/mmengine/blob/main/docs/en/tutorials/param_scheduler.md  # noqa: E501
 param_scheduler = dict(
     type=CosineAnnealingLR,
-    eta_min=lr * 0.1,
+    eta_min=0.0,
     by_epoch=True,
     T_max=max_epochs,
     convert_to_iter_based=True)

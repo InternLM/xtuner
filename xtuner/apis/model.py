@@ -41,7 +41,9 @@ def build_qlora_model(model_name_or_path,
 
     if return_tokenizer:
         tokenizer = AutoTokenizer.from_pretrained(
-            model_name_or_path, trust_remote_code=True)
+            model_name_or_path,
+            trust_remote_code=True,
+            encode_special_tokens=True)
         return model.llm, tokenizer
     else:
         return model.llm
@@ -65,7 +67,9 @@ def build_lora_model(model_name_or_path,
 
     if return_tokenizer:
         tokenizer = AutoTokenizer.from_pretrained(
-            model_name_or_path, trust_remote_code=True)
+            model_name_or_path,
+            trust_remote_code=True,
+            encode_special_tokens=True)
         return model.llm, tokenizer
     else:
         return model.llm
@@ -77,7 +81,9 @@ def build_model(model_name_or_path, return_tokenizer=True):
 
     if return_tokenizer:
         tokenizer = AutoTokenizer.from_pretrained(
-            model_name_or_path, trust_remote_code=True)
+            model_name_or_path,
+            trust_remote_code=True,
+            encode_special_tokens=True)
         return model, tokenizer
     else:
         return model
