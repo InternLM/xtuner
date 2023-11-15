@@ -114,7 +114,7 @@ class MMBenchDataset(Dataset):
         self.df = pd.read_csv(data_file, sep='\t')
         self.sys_prompt = sys_prompt
         self.split = 'dev' if 'answer' in self.df.iloc[0].keys() else 'test'
-        self.has_l2_catetory = 'l2-catetory' in self.df.columns.to_list()
+        self.has_l2_category = 'l2-category' in self.df.columns.to_list()
 
     def __len__(self):
         return len(self.df)
@@ -126,7 +126,7 @@ class MMBenchDataset(Dataset):
         question = self.df.iloc[idx]['question']
         answer = self.df.iloc[idx]['answer'] if 'answer' in self.df.iloc[
             0].keys() else None
-        catetory = self.df.iloc[idx]['category']
+        category = self.df.iloc[idx]['category']
 
         option_candidate = ['A', 'B', 'C', 'D', 'E']
         options = {
@@ -144,12 +144,12 @@ class MMBenchDataset(Dataset):
             'question': question,
             'answer': answer,
             'options': options_prompt,
-            'category': catetory,
+            'category': category,
             'options_dict': options,
             'index': index,
             'context': hint,
         }
-        if self.has_l2_catetory:
+        if self.has_l2_category:
             data.update({'l2-category': self.df.iloc[idx]['l2-category']})
         return data
 
@@ -164,7 +164,7 @@ class MMBenchDataset(Dataset):
         def calc_acc(df, group='category'):
             assert group in ['overall', 'category', 'l2-category']
             if group == 'overall':
-                return {'Average': np.mean(df['hit'])}
+                res = {'Average': np.mean(df['hit'])}
             else:
                 res = {}
                 abilities = list(set(df[group]))
@@ -187,14 +187,15 @@ class MMBenchDataset(Dataset):
             return 1
 
         def show_result(ret_json):
+            show_dict = ret_json.copy()
             table = Table(title=f' MMBench ({self.data_file}) ')
             console = Console()
             table.add_column('Category', justify='left')
             table.add_column('Accuracy (%)', justify='right')
-            average = ret_json.pop('Average') * 100
+            average = show_dict.pop('Average') * 100
             table.add_row('Average', f'{average:.1f}')
             table.add_section()
-            for cat_name, cat_acc in ret_json.items():
+            for cat_name, cat_acc in show_dict.items():
                 table.add_row(cat_name, f'{cat_acc * 100:.1f}')
             with console.capture() as capture:
                 console.print(table, end='')
@@ -213,7 +214,7 @@ class MMBenchDataset(Dataset):
             i: c
             for i, c in zip(self.df['index'], self.df['category'])
         }
-        if self.has_l2_catetory:
+        if self.has_l2_category:
             l2_cate_map = {
                 i: c
                 for i, c in zip(self.df['index'], self.df['l2-category'])
@@ -244,7 +245,7 @@ class MMBenchDataset(Dataset):
 
         ret_json = calc_acc(data_main, 'overall')
 
-        if self.has_l2_catetory:
+        if self.has_l2_category:
             data_main['l2-category'] = [l2_cate_map[i] for i in main_idx]
             l2 = calc_acc(data_main, 'l2-category')
             ret_json.update(l2)
