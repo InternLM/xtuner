@@ -14,7 +14,7 @@ English | [简体中文](README_zh-CN.md)
 
 ## 🎉 News
 
-- **\[2023/10\]** Support [ChatGLM3-6B](https://huggingface.co/THUDM/chatglm3-6b) model!
+- **\[2023/11\]** Support [ChatGLM3-6B](https://huggingface.co/THUDM/chatglm3-6b) model!
 - **\[2023/10\]** Support [MSAgent-Bench](https://modelscope.cn/datasets/damo/MSAgent-Bench) dataset, and the fine-tuned LLMs can be applied by [Lagent](https://github.com/InternLM/lagent)!
 - **\[2023/10\]** Optimize the data processing to accommodate `system` context. More information can be found on [Docs](docs/en/user_guides/dataset_format.md)!
 - **\[2023/09\]** Support [InternLM-20B](https://huggingface.co/internlm) models!
