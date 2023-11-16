@@ -1,5 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-import os
+import os.path as osp
 from typing import List, Optional
 
 import torch
@@ -292,11 +292,11 @@ def make_inputs_require_grad(module, input, output):
 
 
 def guess_load_checkpoint(pth_model):
-    if os.path.isfile(pth_model):
+    if osp.isfile(pth_model):
         state_dict = torch.load(pth_model, map_location='cpu')
         if 'state_dict' in state_dict:
             state_dict = state_dict['state_dict']
-    elif os.path.isdir(pth_model):
+    elif osp.isdir(pth_model):
         try:
             from deepspeed.utils.zero_to_fp32 import \
                 get_fp32_state_dict_from_zero_checkpoint
@@ -308,7 +308,7 @@ def guess_load_checkpoint(pth_model):
                 'installed or is incorrectly configured. Please verify your '
                 'setup.')
         state_dict = get_fp32_state_dict_from_zero_checkpoint(
-            os.path.dirname(pth_model), os.path.basename(pth_model))
+            osp.dirname(pth_model), osp.basename(pth_model))
     else:
         raise FileNotFoundError(f'Cannot find {pth_model}')
     return state_dict
