@@ -1,10 +1,12 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import argparse
 import os
+import os.path as osp
 import re
 import sys
 
 import torch
+from huggingface_hub import snapshot_download
 from peft import PeftModel
 from transformers import (AutoModel, AutoModelForCausalLM, AutoTokenizer,
                           BitsAndBytesConfig, CLIPImageProcessor,
@@ -32,13 +34,15 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Chat with a HF model')
     parser.add_argument(
         'model_name_or_path', help='Hugging Face model name or path')
-    parser.add_argument('--adapter', default=None, help='adapter name or path')
+    adapter_group = parser.add_mutually_exclusive_group()
+    adapter_group.add_argument(
+        '--adapter', default=None, help='adapter name or path')
+    adapter_group.add_argument(
+        '--llava', default=None, help='llava name or path')
     parser.add_argument(
         '--visual-encoder', default=None, help='visual encoder name or path')
     parser.add_argument(
         '--visual-select-layer', default=-2, help='visual select layer')
-    parser.add_argument(
-        '--projector', default=None, help='projector name or path')
     parser.add_argument('--image', default=None, help='image')
     parser.add_argument(
         '--prompt-template',
@@ -218,6 +222,23 @@ def main():
             llm = PeftModel.from_pretrained(
                 llm, args.adapter, offload_folder=args.offload_folder)
             print(f'Load adapter from {args.adapter}')
+        if args.llava is not None:
+            llava_path = snapshot_download(
+                repo_id=args.llava) if not osp.isdir(
+                    args.llava) else args.llava
+            # load adapter
+            if 'adapter' in os.listdir(llava_path):
+                adapter_path = osp.join(llava_path, 'adapter')
+                llm = PeftModel.from_pretrained(
+                    llm, adapter_path, offload_folder=args.offload_folder)
+                print(f'Load LLM adapter from {args.llava}')
+            # build projector
+            projector_path = osp.join(llava_path, 'projector')
+            projector = AutoModel.from_pretrained(projector_path)
+            print(f'Load projector from {args.llava}')
+            projector.cuda()
+            projector.eval()
+
         llm.eval()
         # build visual_encoder
         if args.visual_encoder is not None:
@@ -226,12 +247,6 @@ def main():
             processor = CLIPImageProcessor.from_pretrained(args.visual_encoder)
             visual_encoder.cuda()
             visual_encoder.eval()
-
-        # build projector
-        if args.projector is not None:
-            projector = AutoModel.from_pretrained(args.projector)
-            projector.cuda()
-            projector.eval()
 
         if args.image is not None:
             image = load_image(args.image)
