@@ -1,6 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import argparse
-import os
+import os.path as osp
 import shutil
 
 from mmengine.config import Config, DictAction
@@ -45,7 +45,7 @@ def main():
     args = parse_args()
 
     # parse config
-    if not os.path.isfile(args.config):
+    if not osp.isfile(args.config):
         try:
             args.config = cfgs_name_path[args.config]
         except KeyError:
@@ -55,6 +55,9 @@ def main():
     cfg = Config.fromfile(args.config)
     if args.cfg_options is not None:
         cfg.merge_from_dict(args.cfg_options)
+
+    if 'LLaVAModel' in cfg.model.type:
+        cfg.model.pretrained_pth = None
 
     model = BUILDER.build(cfg.model)
 
@@ -66,16 +69,38 @@ def main():
         print('Convert LLM to float16')
         model.llm.half()
 
-    if cfg.model.get('llm') and (not cfg.model.get('freeze_llm', False)
-                                 or cfg.model.get('lora')
-                                 or cfg.model.get('llm_lora')):
-        if not (cfg.model.get('visual_encoder')
-                or hasattr(model, 'projector')):
-            llm_path = args.save_dir
-        elif 'PeftModel' in model.llm.__class__.__name__:
-            llm_path = os.path.join(args.save_dir, 'adapter')
-        else:
-            llm_path = os.path.join(args.save_dir, 'llm')
+    if 'LLaVAModel' in cfg.model.type:
+        if cfg.model.get('llm') and (not cfg.model.get('freeze_llm', False)
+                                     or cfg.model.get('lora')
+                                     or cfg.model.get('llm_lora')):
+            if 'PeftModel' in model.llm.__class__.__name__:
+                llm_path = osp.join(args.save_dir, 'adapter')
+                print(f'Saving adapter to {llm_path}')
+            else:
+                llm_path = args.save_dir
+                print(f'Saving LLM tokenizer to {llm_path}')
+                tokenizer = BUILDER.build(cfg.tokenizer)
+                tokenizer.save_pretrained(llm_path)
+                print(f'Saving LLM to {llm_path}')
+            model.llm.save_pretrained(
+                llm_path, max_shard_size=args.max_shard_size)
+
+        if cfg.model.get('visual_encoder') and not cfg.model.get(
+                'freeze_visual_encoder', False):
+            visual_encoder_path = osp.join(args.save_dir, 'visual_encoder')
+            print(f'Saving visual_encoder to {visual_encoder_path}')
+            model.visual_encoder.save_pretrained(
+                visual_encoder_path, max_shard_size=args.max_shard_size)
+            print(f'Saving visual_encoder processor to {visual_encoder_path}')
+            processor = BUILDER.build(cfg.processor)
+            processor.save_pretrained(visual_encoder_path)
+        if hasattr(model, 'projector'):
+            projector_path = osp.join(args.save_dir, 'projector')
+            print(f'Saving projector to {projector_path}')
+            model.projector.save_pretrained(
+                projector_path, max_shard_size=args.max_shard_size)
+    else:
+        llm_path = args.save_dir
         if 'PeftModel' in model.llm.__class__.__name__:
             print(f'Saving adapter to {llm_path}')
         else:
@@ -85,23 +110,7 @@ def main():
             print(f'Saving LLM to {llm_path}')
         model.llm.save_pretrained(llm_path, max_shard_size=args.max_shard_size)
 
-    if cfg.model.get('visual_encoder') and not cfg.model.get(
-            'freeze_visual_encoder', False):
-        visual_encoder_path = os.path.join(args.save_dir, 'visual_encoder')
-        print(f'Saving visual_encoder to {visual_encoder_path}')
-        model.visual_encoder.save_pretrained(
-            visual_encoder_path, max_shard_size=args.max_shard_size)
-        print(f'Saving visual_encoder processor to {visual_encoder_path}')
-        processor = BUILDER.build(cfg.processor)
-        processor.save_pretrained(visual_encoder_path)
-    if hasattr(model, 'projector'):
-        projector_path = os.path.join(args.save_dir, 'projector')
-        print(f'Saving projector to {projector_path}')
-        model.projector.save_pretrained(
-            projector_path, max_shard_size=args.max_shard_size)
-
-    shutil.copyfile(args.config, os.path.join(args.save_dir,
-                                              'xtuner_config.py'))
+    shutil.copyfile(args.config, osp.join(args.save_dir, 'xtuner_config.py'))
     print('All done!')
 
 
