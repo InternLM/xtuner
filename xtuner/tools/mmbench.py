@@ -29,7 +29,8 @@ from xtuner.utils import (DEFAULT_IMAGE_TOKEN, IMAGE_TOKEN_INDEX,
 
 def parse_args():
     parser = argparse.ArgumentParser(description='MMBench')
-    parser.add_argument('--llm', help='Hugging Face model name or path')
+    parser.add_argument(
+        'model_name_or_path', help='Hugging Face model name or path')
     parser.add_argument('--data-path', default=None, help='data path')
     parser.add_argument('--work-dir', help='the dir to save results')
     parser.add_argument('--llava', default=None, help='llava name or path')
@@ -305,9 +306,12 @@ def main():
     }
 
     # build llm
-    llm = AutoModelForCausalLM.from_pretrained(args.llm, **model_kwargs)
+    llm = AutoModelForCausalLM.from_pretrained(args.model_name_or_path,
+                                               **model_kwargs)
     tokenizer = AutoTokenizer.from_pretrained(
-        args.llm, trust_remote_code=True, encode_special_tokens=True)
+        args.model_name_or_path,
+        trust_remote_code=True,
+        encode_special_tokens=True)
 
     llava_path = snapshot_download(
         repo_id=args.llava) if not osp.isdir(args.llava) else args.llava
