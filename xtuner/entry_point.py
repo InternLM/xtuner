@@ -45,8 +45,8 @@ CLI_HELP_MSG = \
             xtuner convert split $LLM $SAVE_PATH
         5-1. Chat with LLMs with HuggingFace's model and adapter:
             xtuner chat $LLM --adapter $ADAPTER --prompt-template $PROMPT_TEMPLATE --system-template $SYSTEM_TEMPLATE
-        5-2. Chat with VLLMs with HuggingFace's model and adapter:
-            xtuner chat $LLM --adapter $ADAPTER --image $IMAGE --visual-encoder $VISUAL_ENCODER --projector $PROJECTOR --prompt-template $PROMPT_TEMPLATE --system-template $SYSTEM_TEMPLATE
+        5-2. Chat with VLLMs with HuggingFace's model and LLaVA:
+            xtuner chat $LLM --llava $LLAVA --visual-encoder $VISUAL_ENCODER --image $IMAGE --prompt-template $PROMPT_TEMPLATE --system-template $SYSTEM_TEMPLATE
         6-1. Preprocess arxiv dataset:
             xtuner preprocess arxiv $SRC_FILE $DST_FILE --start-date $START_DATE --categories $CATEGORIES
         7-1. Log processed dataset:
@@ -54,7 +54,7 @@ CLI_HELP_MSG = \
         7-2. Verify the correctness of the config file for the custom dataset.
             xtuner check-custom-dataset
         8. MMBench evaluation
-            xtuner mmbench --llm $LLM --adapter $ADAPTER --visual-encoder $VISUAL_ENCODER --projector $PROJECTOR --prompt-template $PROMPT_TEMPLATE --data-path $MMBENCH_DATA_PATH
+            xtuner mmbench $LLM --llava $LLAVA --visual-encoder $VISUAL_ENCODER --prompt-template $PROMPT_TEMPLATE --data-path $MMBENCH_DATA_PATH
 
     Run special commands:
 
