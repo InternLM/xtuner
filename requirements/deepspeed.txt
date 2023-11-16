@@ -1,2 +1,2 @@
-deepspeed
+deepspeed>=0.12.3
 mpi4py-mpich
