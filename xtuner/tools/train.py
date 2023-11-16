@@ -229,7 +229,8 @@ def main():
                     config=ds_cfg,
                     gradient_accumulation_steps=grad_accum,
                     train_micro_batch_size_per_gpu=train_bs,
-                    gradient_clipping=grad_clip)
+                    gradient_clipping=grad_clip,
+                    exclude_frozen_parameters=True)
                 cfg.__setitem__('strategy', strategy)
                 optim_wrapper = dict(
                     type='DeepSpeedOptimWrapper',

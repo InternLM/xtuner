@@ -178,13 +178,15 @@ XTuner supports the efficient fine-tune (*e.g.*, QLoRA) for LLMs. Dataset prepar
 
   ```shell
   # On a single GPU
-  xtuner train internlm_7b_qlora_oasst1_e3
+  xtuner train internlm_7b_qlora_oasst1_e3 --deepspeed deepspeed_zero2
   # On multiple GPUs
-  (DIST) NPROC_PER_NODE=${GPU_NUM} xtuner train internlm_7b_qlora_oasst1_e3
-  (SLURM) srun ${SRUN_ARGS} xtuner train internlm_7b_qlora_oasst1_e3 --launcher slurm
+  (DIST) NPROC_PER_NODE=${GPU_NUM} xtuner train internlm_7b_qlora_oasst1_e3 --deepspeed deepspeed_zero2
+  (SLURM) srun ${SRUN_ARGS} xtuner train internlm_7b_qlora_oasst1_e3 --launcher slurm --deepspeed deepspeed_zero2
   ```
 
-  For more examples, please see [finetune.md](./docs/en/user_guides/finetune.md).
+  - `--deepspeed` means using [DeepSpeed](https://github.com/microsoft/DeepSpeed) 🚀 to optimize the training. XTuner comes with several integrated strategies including ZeRO-1, ZeRO-2, and ZeRO-3. If you wish to disable this feature, simply remove this argument.
+
+  - For more examples, please see [finetune.md](./docs/en/user_guides/finetune.md).
 
 - **Step 2**, convert the saved PTH model (if using DeepSpeed, it will be a directory) to HuggingFace model, by
 
@@ -240,8 +242,6 @@ For more examples, please see [chat.md](./docs/en/user_guides/chat.md).
   ```
 
   🔥 Seeking efficient inference with less GPU memory? Try 4-bit quantization from [LMDeploy](https://github.com/InternLM/lmdeploy)! For more details, see [here](https://github.com/InternLM/lmdeploy/tree/main#quantization).
-
-  🎯 We are woking closely with [LMDeploy](https://github.com/InternLM/lmdeploy), to implement the deployment of **plugin-based chat**!
 
 ### Evaluation
 
