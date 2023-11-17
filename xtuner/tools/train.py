@@ -16,6 +16,7 @@ from transformers import TrainingArguments
 
 from xtuner.configs import cfgs_name_path
 from xtuner.dataset.collate_fns import default_collate_fn
+from xtuner.engine import DeepSpeedStrategy
 from xtuner.model.modules import dispatch_modules
 from xtuner.model.utils import LoadWoInit, find_all_linear_names, traverse_dict
 from xtuner.registry import BUILDER, MAP_FUNC
@@ -225,7 +226,7 @@ def main():
                 grad_clip = mm_max_norm
                 ds_cfg = auto_dtype_of_deepspeed_config(ds_cfg)
                 strategy = dict(
-                    type='DeepSpeedStrategy',
+                    type=DeepSpeedStrategy,
                     config=ds_cfg,
                     gradient_accumulation_steps=grad_accum,
                     train_micro_batch_size_per_gpu=train_bs,
