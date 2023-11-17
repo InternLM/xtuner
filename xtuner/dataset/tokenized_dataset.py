@@ -37,7 +37,10 @@ def process(dataset_folder=None,
             pack_to_max_length=False,
             num_proc=32):
     if cached_folder is not None:
-        return load_from_disk(cached_folder)
+        try:
+            return load_from_disk(cached_folder)
+        except FileNotFoundError:
+            pass
     
     assert dataset_folder is not None
     ds = []

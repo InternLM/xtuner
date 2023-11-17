@@ -23,7 +23,8 @@ pretrained_model_name_or_path = '/mnt/petrelfs/share_data/internlm-7b'
 
 # Data
 dataset_folder = '/mnt/petrelfs/share_data/zhangwenwei/data/llm/maibao_kaoshi_7_5_v0213_8k_rc8_nowm/train/cn'
-cached_folder = '/mnt/hwfile/caoweihan/projects/xtuner/maibao_kaoshi_7_5_v0213_8k_rc8_nowm/packed_processed_dataset'
+# cached_folder = '/mnt/hwfile/caoweihan/projects/xtuner/maibao_kaoshi_7_5_v0213_8k_rc8_nowm/packed_processed_dataset'
+cached_folder = '/mnt/hwfile/caoweihan/projects/xtuner/maibao_kaoshi_7_5_v0213_8k_rc8_nowm_debug/packed_processed_dataset'
 prompt_template = PROMPT_TEMPLATE.internlm_chat
 max_length = 8192
 pack_to_max_length = True
@@ -72,7 +73,7 @@ train_dataset = dict(
     cached_folder=cached_folder,
     max_length=max_length,
     pack_to_max_length=pack_to_max_length,
-    num_proc=64)
+    num_proc=96)
 
 train_dataloader = dict(
     batch_size=batch_size,

@@ -72,7 +72,7 @@ train_dataset = dict(
     cached_folder=cached_folder,
     max_length=max_length,
     pack_to_max_length=pack_to_max_length,
-    num_proc=64)
+    num_proc=96)
 
 train_dataloader = dict(
     batch_size=batch_size,
