@@ -11,12 +11,12 @@ from mmengine.config import Config, DictAction
 from mmengine.logging import print_log
 from mmengine.registry import RUNNERS
 from mmengine.runner import Runner
+from mmengine.utils import digit_version
 from peft import get_peft_model, prepare_model_for_kbit_training
 from transformers import TrainingArguments
 
 from xtuner.configs import cfgs_name_path
 from xtuner.dataset.collate_fns import default_collate_fn
-from xtuner.engine import DeepSpeedStrategy
 from xtuner.model.modules import dispatch_modules
 from xtuner.model.utils import LoadWoInit, find_all_linear_names, traverse_dict
 from xtuner.registry import BUILDER, MAP_FUNC
@@ -166,10 +166,16 @@ def main():
 
         if args.deepspeed:
             try:
-                import deepspeed  # pre-check  # noqa: F401
+                import deepspeed
             except ImportError:
                 raise ImportError(
                     'deepspeed is not installed properly, please check.')
+            if digit_version(deepspeed.__version__) < digit_version('0.12.3'):
+                print_log(
+                    'Kindly update your DeepSpeed version to 0.12.3 or '
+                    'higher.',
+                    logger='current',
+                    level=logging.WARNING)
             optim_wrapper = cfg.optim_wrapper.type
             if optim_wrapper == 'DeepSpeedOptimWrapper':
                 print_log(
@@ -225,13 +231,15 @@ def main():
                         level=logging.WARNING)
                 grad_clip = mm_max_norm
                 ds_cfg = auto_dtype_of_deepspeed_config(ds_cfg)
+                exclude_frozen_parameters = True if digit_version(
+                    deepspeed.__version__) >= digit_version('0.10.1') else None
                 strategy = dict(
-                    type=DeepSpeedStrategy,
+                    type='xtuner.DeepSpeedStrategy',
                     config=ds_cfg,
                     gradient_accumulation_steps=grad_accum,
                     train_micro_batch_size_per_gpu=train_bs,
                     gradient_clipping=grad_clip,
-                    exclude_frozen_parameters=True)
+                    exclude_frozen_parameters=exclude_frozen_parameters)
                 cfg.__setitem__('strategy', strategy)
                 optim_wrapper = dict(
                     type='DeepSpeedOptimWrapper',
