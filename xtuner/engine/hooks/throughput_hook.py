@@ -13,22 +13,12 @@ class ThroughputHook(Hook):
     priority = 'BELOW_NORMAL'
 
     def __init__(self,
-                #  batch_size,
-                #  max_length,
-                #  tp_size=1,
-                #  pp_size=1,
                  use_activation_checkpointing=None,
-                #  seq_len=None,
                  hidden_size=None,
                  num_layers=None,
                 vocab_size=None,
-                # global_batch_size=None,
                 mlp_ratio=None):
-        # self.batch_size = batch_size
-        # self.max_length = max_length
-        # self.mp_world_size = tp_size * pp_size
         self.use_activation_checkpointing = use_activation_checkpointing
-        # self.seq_len = seq_len
         self.hidden_size = hidden_size
         self.num_layers = num_layers
         self.vocab_size = vocab_size
@@ -65,19 +55,16 @@ class ThroughputHook(Hook):
                          batch_idx: int,
                          data_batch: DATA_BATCH = None,
                          outputs: Optional[dict] = None) -> None:
+        """
+        Calc flops based on the paper of Megatron 
+        https://deepakn94.github.io/assets/papers/megatron-sc21.pdf
+        """
 
-        # if is_model_wrapper(runner.model):
-        #     model_numel = runner.model.module.model_numel
-        # else:
-        #     model_numel = runner.model.model_numel
         batch_size, sequence_len = self._get_batch_size_and_sequence_len(
             data_batch)
 
         message_hub = runner.message_hub
         iter_time = message_hub.get_scalar('train/time').current()
-        # if self.use_activation_checkpointing is None:
-        #     self.use_activation_checkpointing = \
-        #         self._guess_use_activation_checkpointing(runner.model)
         
         flops_per_iteration = (
             (3 + int(self.use_activation_checkpointing))
@@ -87,9 +74,6 @@ class ThroughputHook(Hook):
             )
         ) * self.num_layers + 6 * batch_size * sequence_len * self.hidden_size * self.vocab_size
 
-        # flops = batch_size * sequence_len * model_numel * 2 * (
-        #     3 + int(self.use_activation_checkpointing))
-        avg_tflops_per_gpu = flops_per_iteration / 1e12 / (iter_time +
-                                             1e-12) #/ self.mp_world_size
+        avg_tflops_per_gpu = flops_per_iteration / 1e12 / (iter_time + 1e-12)
 
         message_hub.update_scalar('train/tflops', avg_tflops_per_gpu)

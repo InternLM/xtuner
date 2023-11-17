@@ -11,6 +11,8 @@ from xtuner.registry import BUILDER
 from .modules import dispatch_modules
 from .utils import LoadWoInit, find_all_linear_names, traverse_dict
 
+from mmengine import MessageHub
+
 
 class SupervisedFinetune(BaseModel):
 
@@ -86,6 +88,8 @@ class SupervisedFinetune(BaseModel):
             raise NotImplementedError
 
     def forward(self, data, data_samples=None, mode='loss'):
+
+        message_hub = MessageHub.get_instance('for_flash_attn')
 
         if mode == 'loss':
             return self.compute_loss(data, data_samples)

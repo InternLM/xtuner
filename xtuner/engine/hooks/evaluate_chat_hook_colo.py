@@ -51,8 +51,6 @@ def _sample(
     **model_kwargs,
 ) -> torch.Tensor:
     max_length = input_ids.size(1) + max_new_tokens
-    # if input_ids.size(1) >= max_length:
-    #     return input_ids
 
     logits_processor = _prepare_logits_processor(top_k, top_p, temperature)
     unfinished_sequences = input_ids.new(input_ids.shape[0]).fill_(1)
@@ -95,12 +93,10 @@ def _sample(
 def generate(
     model,
     input_ids: torch.Tensor,
-    # tokenizer: PreTrainedTokenizer,
     generation_config: GenerationConfig,
     prepare_inputs_fn: Optional[Callable[[torch.Tensor, Any], dict]] = None,
     update_model_kwargs_fn: Optional[Callable[[dict, Any], dict]] = None,
     **kwargs,
-    # **model_kwargs,
 ) -> torch.Tensor:
     generation_config = copy.deepcopy(generation_config)
     model_kwargs = generation_config.update(**kwargs)

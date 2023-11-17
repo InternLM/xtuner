@@ -19,6 +19,7 @@ from xtuner.dataset.collate_fns import default_collate_fn
 from xtuner.model.modules import dispatch_modules
 from xtuner.model.utils import LoadWoInit, find_all_linear_names, traverse_dict
 from xtuner.registry import BUILDER, MAP_FUNC
+import torch.distributed as dist
 
 
 def parse_args():
@@ -185,6 +186,7 @@ def main():
         if args.deepspeed:
             try:
                 import deepspeed  # pre-check  # noqa: F401
+                from transformers.integrations.deepspeed import HfDeepSpeedConfig
             except ImportError:
                 raise ImportError(
                     'deepspeed is not installed properly, please check.')
@@ -243,6 +245,12 @@ def main():
                         level=logging.WARNING)
                 grad_clip = mm_max_norm
                 ds_cfg = auto_dtype_of_deepspeed_config(ds_cfg)
+                ds_cfg['gradient_clipping'] = grad_clip
+                ds_cfg['gradient_accumulation_steps'] = grad_accum
+                ds_cfg['train_micro_batch_size_per_gpu'] = train_bs
+                config = HfDeepSpeedConfig(ds_cfg)
+                # print(ds_cfg)
+                # assert False
                 strategy = dict(
                     type='DeepSpeedStrategy',
                     config=ds_cfg,

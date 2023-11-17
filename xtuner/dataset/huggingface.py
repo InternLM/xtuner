@@ -23,7 +23,8 @@ def process(dataset,
             rename_maps=[],
             shuffle_before_pack=True,
             pack_to_max_length=True,
-            input_ids_with_output=True):
+            input_ids_with_output=True,
+            map_num_proc=32):
     """Post-process the dataset loaded from the Hugging Face Hub, or a local
     dataset.
 
@@ -52,6 +53,7 @@ def process(dataset,
         input_ids_with_output: Whether to put the groundtruth output
             corresponding to the question into the dataset. Typically set
             it to True during training and False during testing.
+        map_num_proc: Max number of processes when mapping the dataset.
     """
 
     if isinstance(dataset, DatasetDict):
@@ -75,7 +77,7 @@ def process(dataset,
         if isinstance(dataset_map_fn, str):
             dataset_map_fn = MAP_FUNC.get(dataset_map_fn)
 
-        dataset = dataset.map(dataset_map_fn)
+        dataset = dataset.map(dataset_map_fn, num_proc=map_num_proc)
 
     # Add prompt template, such as <|System|>: xxx <|User|>: xxx <|Bot|>: xxx
     if template_map_fn is not None:
@@ -83,7 +85,7 @@ def process(dataset,
                 template_map_fn, Config) or isinstance(template_map_fn,
                                                        ConfigDict):
             template_map_fn = BUILDER.build(template_map_fn)
-        dataset = dataset.map(template_map_fn)
+        dataset = dataset.map(template_map_fn, num_proc=map_num_proc)
 
     for old, new in rename_maps:
         dataset = dataset.rename_column(old, new)
@@ -111,14 +113,14 @@ def process(dataset,
             max_length=max_length,
             input_ids_with_output=input_ids_with_output),
         remove_columns=list(dataset.column_names)
-        if remove_unused_columns else None)
+        if remove_unused_columns else None, num_proc=map_num_proc)
 
     # pack to max length
     if pack_to_max_length and split == 'train':
         if shuffle_before_pack:
             dataset = dataset.shuffle()
             dataset = dataset.flatten_indices()
-        dataset = dataset.map(Packer(max_length), batched=True)
+        dataset = dataset.map(Packer(max_length), batched=True, num_proc=map_num_proc)
 
     return dataset
 
