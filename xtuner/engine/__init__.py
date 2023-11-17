@@ -1,4 +1,8 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-from .hooks import DatasetInfoHook, EvaluateChatHook
+from ._strategy import DeepSpeedStrategy
+from .hooks import DatasetInfoHook, EvaluateChatHook, ThroughputHook
 
-__all__ = ['EvaluateChatHook', 'DatasetInfoHook']
+__all__ = [
+    'EvaluateChatHook', 'DatasetInfoHook', 'ThroughputHook',
+    'DeepSpeedStrategy'
+]

@@ -10,7 +10,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from xtuner.dataset import process_hf_dataset
 from xtuner.dataset.collate_fns import default_collate_fn
 from xtuner.dataset.map_fns import template_map_fn_factory, wizardlm_map_fn
-from xtuner.engine import DatasetInfoHook, EvaluateChatHook
+from xtuner.engine import DatasetInfoHook, EvaluateChatHook, ThroughputHook
 from xtuner.model import SupervisedFinetune
 from xtuner.utils import PROMPT_TEMPLATE
 
@@ -119,7 +119,8 @@ custom_hooks = [
         every_n_iters=evaluation_freq,
         evaluation_inputs=evaluation_inputs,
         system=SYSTEM,
-        prompt_template=prompt_template)
+        prompt_template=prompt_template),
+    dict(type=ThroughputHook)
 ]
 
 # configure default hooks

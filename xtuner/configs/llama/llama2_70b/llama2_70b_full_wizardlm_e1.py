@@ -9,26 +9,26 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from xtuner.dataset import process_hf_dataset
 from xtuner.dataset.collate_fns import default_collate_fn
-from xtuner.dataset.map_fns import alpaca_map_fn, template_map_fn_factory
+from xtuner.dataset.map_fns import template_map_fn_factory, wizardlm_map_fn
 from xtuner.engine import DatasetInfoHook, EvaluateChatHook, ThroughputHook
 from xtuner.model import SupervisedFinetune
-from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
+from xtuner.utils import PROMPT_TEMPLATE
 
 #######################################################################
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-pretrained_model_name_or_path = 'internlm/internlm-7b'
+pretrained_model_name_or_path = 'meta-llama/Llama-2-70b-hf'
 
 # Data
-alpaca_en_path = 'tatsu-lab/alpaca'
-prompt_template = PROMPT_TEMPLATE.internlm_chat
+data_path = 'WizardLM/WizardLM_evol_instruct_V2_196k'
+prompt_template = PROMPT_TEMPLATE.llama2_chat
 max_length = 2048
 pack_to_max_length = True
 
 # Scheduler & Optimizer
 batch_size = 1  # per_device
-accumulative_counts = 16
+accumulative_counts = 4  # 1bs * 4acc * 32gpu = 128 batchsize
 dataloader_num_workers = 0
 max_epochs = 3
 optim_type = AdamW
@@ -39,13 +39,13 @@ max_norm = 1  # grad clip
 
 # Evaluate the generation performance during the training
 evaluation_freq = 500
-SYSTEM = SYSTEM_TEMPLATE.alpaca
+SYSTEM = ''
 evaluation_inputs = [
     '请给我介绍五个上海的景点', 'Please tell me five scenic spots in Shanghai'
 ]
 
 #######################################################################
-#                      PART 2  Model & Tokenizer                      #
+#                      PART 2  Model & Tokenizer                      #q
 #######################################################################
 tokenizer = dict(
     type=AutoTokenizer.from_pretrained,
@@ -59,15 +59,16 @@ model = dict(
         type=AutoModelForCausalLM.from_pretrained,
         pretrained_model_name_or_path=pretrained_model_name_or_path,
         trust_remote_code=True))
+
 #######################################################################
 #                      PART 3  Dataset & Dataloader                   #
 #######################################################################
-alpaca_en = dict(
+train_dataset = dict(
     type=process_hf_dataset,
-    dataset=dict(type=load_dataset, path=alpaca_en_path),
+    dataset=dict(type=load_dataset, path=data_path),
     tokenizer=tokenizer,
     max_length=max_length,
-    dataset_map_fn=alpaca_map_fn,
+    dataset_map_fn=wizardlm_map_fn,
     template_map_fn=dict(
         type=template_map_fn_factory, template=prompt_template),
     remove_unused_columns=True,
@@ -77,7 +78,7 @@ alpaca_en = dict(
 train_dataloader = dict(
     batch_size=batch_size,
     num_workers=dataloader_num_workers,
-    dataset=alpaca_en,
+    dataset=train_dataset,
     sampler=dict(type=DefaultSampler, shuffle=True),
     collate_fn=dict(type=default_collate_fn))
 
@@ -92,13 +93,13 @@ optim_wrapper = dict(
     clip_grad=dict(max_norm=max_norm, error_if_nonfinite=False),
     accumulative_counts=accumulative_counts,
     loss_scale='dynamic',
-    dtype='float16')
+)
 
 # learning policy
 # More information: https://github.com/open-mmlab/mmengine/blob/main/docs/en/tutorials/param_scheduler.md  # noqa: E501
 param_scheduler = dict(
     type=CosineAnnealingLR,
-    eta_min=0.0,
+    eta_min=lr * 0.1,
     by_epoch=True,
     T_max=max_epochs,
     convert_to_iter_based=True)
