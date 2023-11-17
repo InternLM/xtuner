@@ -171,11 +171,9 @@ def main():
                 raise ImportError(
                     'deepspeed is not installed properly, please check.')
             if digit_version(deepspeed.__version__) < digit_version('0.12.3'):
-                print_log(
-                    'Kindly update your DeepSpeed version to 0.12.3 or '
-                    'higher.',
-                    logger='current',
-                    level=logging.WARNING)
+                raise RuntimeError('Please upgrade your DeepSpeed version '
+                                   'by using the command pip install '
+                                   '`deepspeed>=0.12.3`')
             optim_wrapper = cfg.optim_wrapper.type
             if optim_wrapper == 'DeepSpeedOptimWrapper':
                 print_log(
