@@ -21,26 +21,24 @@ from xtuner.utils import PROMPT_TEMPLATE
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-llm_name_or_path = 'meta-llama/Llama-2-7b-chat-hf'
+llm_name_or_path = 'lmsys/vicuna-7b-v1.5'
 visual_encoder_name_or_path = 'openai/clip-vit-large-patch14'
-# Specify the pretrained pth
-pretrained_pth = './work_dirs/llava_llama2_7b_chat_qlora_clip_vit_large_p14_e1_gpu8_pretrain/epoch_1.pth'  # noqa: E501
 
 # Data
 llava_data_root = './data/llava_data/'
-data_path = llava_data_root + 'LLaVA-Instruct-150K/llava_v1_5_mix665k.json'
-image_folder = llava_data_root + 'llava_images'
-prompt_template = PROMPT_TEMPLATE.llama2_chat
+data_path = llava_data_root + 'LLaVA-Pretrain/blip_laion_cc_sbu_558k.json'
+image_folder = llava_data_root + 'LLaVA-Pretrain/images'
+prompt_template = PROMPT_TEMPLATE.vicuna
 max_length = int(2048 - (224 / 14)**2)
 
 # Scheduler & Optimizer
-batch_size = 16  # per_device
+batch_size = 32  # per_device
 accumulative_counts = 1
 dataloader_num_workers = 0
 max_epochs = 1
 optim_type = AdamW
 lr = 2e-4
-lr_projector = 2e-5
+lr_projector = 1e-3
 betas = (0.9, 0.999)
 weight_decay = 0
 max_norm = 1  # grad clip
@@ -69,7 +67,6 @@ model = dict(
     type=LLaVAModel,
     freeze_llm=True,
     freeze_visual_encoder=True,
-    pretrained_pth=pretrained_pth,
     llm=dict(
         type=AutoModelForCausalLM.from_pretrained,
         pretrained_model_name_or_path=llm_name_or_path,
