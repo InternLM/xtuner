@@ -1,4 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import warnings
 from typing import Optional, Tuple
 
 import torch
@@ -50,10 +51,15 @@ def llama_attn_forward(
     past_key_value: Optional[Tuple[torch.Tensor]] = None,
     output_attentions: bool = False,
     use_cache: bool = False,
+    **kwargs,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor],
            Optional[Tuple[torch.Tensor]]]:
-    # Modified from https://github.com/huggingface/transformers/blob/8968fface4e804f380391d880f569578b84b4121/src/transformers/models/llama/modeling_llama.py#L281  # noqa:E501
+    # Modified from https://github.com/huggingface/transformers/blob/ced9fd86f55ebb6b656c273f6e23f8ba50652f83/src/transformers/models/llama/modeling_llama.py#L331  # noqa:E501
 
+    if 'padding_mask' in kwargs:
+        warnings.warn('Passing `padding_mask` is deprecated and will be '
+                      'removed in v4.37. Please make sure use '
+                      '`attention_mask` instead.`')
     bsz, q_len, _ = hidden_states.size()
 
     if self.config.pretraining_tp > 1:
