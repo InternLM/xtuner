@@ -12,6 +12,15 @@ from .internlm import internlm_attn_forward
 from .llama import llama_attn_forward
 from .yi import yi_attn_forward
 
+SUPPORT_TRITON = False
+
+try:
+    import triton  # pre-check # noqa: F401
+    import triton.language as tl  # pre-check # noqa: F401
+    SUPPORT_TRITON = True
+except ImportError:
+    pass
+
 NO_ATTN_WEIGHTS_MSG = (
     'Due to the implementation of the PyTorch version of flash attention, '
     'even when the `output_attentions` flag is set to True, it is not '
@@ -19,14 +28,22 @@ NO_ATTN_WEIGHTS_MSG = (
 
 
 def dispatch_llama_attn_forward(model):
-    if digit_version(torch.__version__) < digit_version('2.0.0'):
-        # flash attention is only supported after pytorch2.0
-        return
     print_log('dispatch llama attn forward', 'current')
     print_log(NO_ATTN_WEIGHTS_MSG, 'current', logging.WARNING)
     for module in model.modules():
         if type(module).__name__ == 'LlamaAttention':
             module.forward = types.MethodType(llama_attn_forward, module)
+
+
+def dispatch_llama_rmsnorm_forward(model):
+    if not SUPPORT_TRITON:
+        return
+    # from .triton_kernels import rms_norm_forward
+    from .llama import rms_norm_forward
+    print_log('dispatch llama rmsnorm forward', 'current')
+    for module in model.modules():
+        if type(module).__name__ == 'LlamaRMSNorm':
+            module.forward = types.MethodType(rms_norm_forward, module)
 
 
 def dispatch_internlm_attn_forward(model):
@@ -38,6 +55,16 @@ def dispatch_internlm_attn_forward(model):
     for module in model.modules():
         if type(module).__name__ == 'InternLMAttention':
             module.forward = types.MethodType(internlm_attn_forward, module)
+
+
+def dispatch_internlm_rmsnorm_forward(model):
+    if not SUPPORT_TRITON:
+        return
+    from .triton_kernels import rms_norm_forward
+    print_log('dispatch internlm rmsnorm forward', 'current')
+    for module in model.modules():
+        if type(module).__name__ == 'InternLMRMSNorm':
+            module.forward = types.MethodType(rms_norm_forward, module)
 
 
 def dispath_baichuan2_norm_head_forward(model):
@@ -86,8 +113,10 @@ def dispatch_modules(model):
     model_name = model.__class__.__name__.lower()
     if 'internlm' in model_name:
         dispatch_internlm_attn_forward(model)
+        dispatch_internlm_rmsnorm_forward(model)
     if 'llama' in model_name:
         dispatch_llama_attn_forward(model)
+        dispatch_llama_rmsnorm_forward(model)
     if 'baichuan' in model_name:
         dispath_baichuan2_norm_head_forward(model)
         dispath_baichuan_7b_attn_forward(model)
