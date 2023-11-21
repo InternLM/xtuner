@@ -1,38 +1,25 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-import copy
 import os
-from functools import partial
+import tempfile
 
-import numpy as np
 from datasets import concatenate_datasets, load_dataset, load_from_disk
 from mmengine import print_log
 from torch import distributed as dist
 from tqdm import tqdm
 
-from xtuner.utils import IGNORE_INDEX
-from .utils import Packer
+from .utils import InternLMPacker
 
 
-def add_labels(example, max_length):
-    tokens = example['tokens'][:max_length]
-    labels = copy.deepcopy(tokens)
-    tokens = list(np.abs(np.array(tokens)))
-    labels = np.array(labels)
-    labels[labels < 0] = IGNORE_INDEX
-    labels = list(labels)
-    return {'input_ids': tokens, 'labels': labels}
-
-
-def process(dataset_folder=None,
-            cached_folder=None,
+def process(dataset_folder,
             max_length=2048,
             split='train',
             shuffle_before_pack=True,
             pack_to_max_length=False,
-            map_num_proc=32):
-    if cached_folder is not None:
+            map_num_proc=32,
+            tmpdir=None):
+    if tmpdir is not None:
         try:
-            return load_from_disk(cached_folder)
+            return load_from_disk(tmpdir)
         except FileNotFoundError:
             pass
 
@@ -45,10 +32,7 @@ def process(dataset_folder=None,
                 ds.append(load_dataset('json', data_files=fp)[split])
     dataset = concatenate_datasets(ds)
     print_log(f'Find {len(dataset)} samples.', 'current')
-    dataset = dataset.map(
-        partial(add_labels, max_length=max_length),
-        remove_columns=list(dataset.column_names),
-        map_num_proc=map_num_proc)
+    dataset = dataset.rename_column('tokens', 'input_ids')
 
     # pack to max length
     if pack_to_max_length:
@@ -56,14 +40,13 @@ def process(dataset_folder=None,
             dataset = dataset.shuffle()
             dataset = dataset.flatten_indices()
         dataset = dataset.map(
-            Packer(max_length), batched=True, map_num_proc=map_num_proc)
+            InternLMPacker(max_length), batched=True, num_proc=map_num_proc)
         print_log(
             f'After packing to {max_length}, '
             f'the length of dataset is {len(dataset)}.', 'current')
 
-    dataset.save_to_disk(cached_folder)
-    print_log(f'Processed dataset has been saved in {cached_folder}.',
-              'current')
+    if tmpdir is not None:
+        dataset.save_to_disk(tmpdir)
 
     return dataset
 
@@ -72,11 +55,13 @@ def process_internlm_dataset(*args, **kwargs):
     if not (dist.is_available() and dist.is_initialized()):
         return process(*args, **kwargs)
 
-    if dist.get_rank() == 0:
-        dataset = process(*args, **kwargs)
+    with tempfile.TemporaryDirectory(dir='./') as tmpdir:
+        if dist.get_rank() == 0:
+            dataset = process(*args, tmpdir=tmpdir, **kwargs)
+        dist.barrier()
 
-    dist.barrier()
-    if dist.get_rank() != 0:
-        # load processed dataset from `cached_folder`
-        dataset = process(*args, **kwargs)
+        if dist.get_rank() != 0:
+            # load processed dataset from `cached_folder`
+            dataset = process(*args, tmpdir=tmpdir, **kwargs)
+
     return dataset
