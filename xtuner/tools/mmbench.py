@@ -409,8 +409,8 @@ def main():
             bos_token_id=tokenizer.bos_token_id,
             stopping_criteria=stop_criteria)
 
-        predict = tokenizer.decode(generate_output[0])
-
+        predict = tokenizer.decode(
+            generate_output[0], skip_special_tokens=True)
         cur_result = {}
         cur_result['question'] = data_sample.get('question')
         cur_result.update(data_sample.get('options_dict'))
