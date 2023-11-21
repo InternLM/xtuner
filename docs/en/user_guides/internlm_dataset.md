@@ -11,7 +11,7 @@ Among them, tokens with negative values are not involved in the calculation of l
 
 ## 接口介绍
 
-To train the InternLM-Chat model in Xtuner, you need to convert the original data format into the XTuner standard dataset format. The core function for processing the InternLM format dataset is as follows:
+To train the InternLM-Chat model in XTuner, you need to convert the original data format into the XTuner standard dataset format. The core function for processing the InternLM format dataset is as follows:
 
 ```python
 def process(dataset_folder=None,
@@ -46,7 +46,7 @@ from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR
 from torch.optim import AdamW
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from xtuner.dataset import process_tokenized_dataset
+from xtuner.dataset import process_internlm_dataset
 from xtuner.dataset.collate_fns import default_collate_fn
 from xtuner.engine import DatasetInfoHook, ThroughputHook, EvaluateChatHook
 from xtuner.model import SupervisedFinetune
@@ -108,7 +108,7 @@ model = dict(
 #                      PART 3  Dataset & Dataloader                   #
 #######################################################################
 train_dataset = dict(
-    type=process_tokenized_dataset,
+    type=process_internlm_dataset,
     dataset_folder=dataset_folder,
     cached_folder=cached_folder,
     max_length=max_length,

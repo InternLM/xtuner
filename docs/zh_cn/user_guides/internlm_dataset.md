@@ -11,7 +11,7 @@ Internlm 训练数据集是已经被 tokenized 过的，格式如下所示：
 
 ## 接口介绍
 
-为了在 Xtuner 中训练 InternLM-Chat 模型，需要将原数据格式转换为 XTuner 标准数据集格式。处理 InternLM 格式数据集的核心函数如下：
+为了在 XTuner 中训练 InternLM-Chat 模型，需要将原数据格式转换为 XTuner 标准数据集格式。处理 InternLM 格式数据集的核心函数如下：
 
 ```python
 def process(dataset_folder=None,
@@ -46,7 +46,7 @@ from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR
 from torch.optim import AdamW
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from xtuner.dataset import process_tokenized_dataset
+from xtuner.dataset import process_internlm_dataset
 from xtuner.dataset.collate_fns import default_collate_fn
 from xtuner.engine import DatasetInfoHook, ThroughputHook, EvaluateChatHook
 from xtuner.model import SupervisedFinetune
@@ -108,7 +108,7 @@ model = dict(
 #                      PART 3  Dataset & Dataloader                   #
 #######################################################################
 train_dataset = dict(
-    type=process_tokenized_dataset,
+    type=process_internlm_dataset,
     dataset_folder=dataset_folder,
     cached_folder=cached_folder,
     max_length=max_length,
