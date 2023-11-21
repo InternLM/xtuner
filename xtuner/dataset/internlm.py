@@ -29,7 +29,7 @@ def process(dataset_folder=None,
             split='train',
             shuffle_before_pack=True,
             pack_to_max_length=False,
-            num_proc=32):
+            map_num_proc=32):
     if cached_folder is not None:
         try:
             return load_from_disk(cached_folder)
@@ -48,7 +48,7 @@ def process(dataset_folder=None,
     dataset = dataset.map(
         partial(add_labels, max_length=max_length),
         remove_columns=list(dataset.column_names),
-        num_proc=num_proc)
+        map_num_proc=map_num_proc)
 
     # pack to max length
     if pack_to_max_length:
@@ -56,7 +56,7 @@ def process(dataset_folder=None,
             dataset = dataset.shuffle()
             dataset = dataset.flatten_indices()
         dataset = dataset.map(
-            Packer(max_length), batched=True, num_proc=num_proc)
+            Packer(max_length), batched=True, map_num_proc=map_num_proc)
         print_log(
             f'After packing to {max_length}, '
             f'the length of dataset is {len(dataset)}.', 'current')

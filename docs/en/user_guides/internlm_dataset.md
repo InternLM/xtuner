@@ -20,7 +20,7 @@ def process(dataset_folder=None,
             pack_to_max_length=False,
             max_length=2048,
             shuffle_before_pack=True,
-            num_proc=32):
+            map_num_proc=32):
     ......
 ```
 
@@ -32,7 +32,7 @@ Where:
 4. pack_to_max_length: Whether to concatenate multiple pieces of data into one piece of data for training.
 5. max_length: Indicates that the data processing process will pack multiple training data into a piece of data with a length of max_length. Only effective when pack_to_max_length=True.
 6. shuffle_before_pack: Whether to shuffle the dataset before packing, generally the default True can be used. Only effective when pack_to_max_length=True.
-7. num_proc: Use multi-process for data processing. Depending on the situation, the value of num_proc can be increased, and it can be set to 96 on a cluster.
+7. map_num_proc: Use multi-process for data processing. Depending on the situation, the value of map_num_proc can be increased, and it can be set to 96 on a cluster.
 
 ## Tutorial
 
@@ -66,7 +66,7 @@ pretrained_model_name_or_path = 'internlm/internlm-7b'
 + cached_folder = '/path/to/cache/your/processed/dataset'
 max_length = 2048
 pack_to_max_length = True
-num_proc = 96
+map_num_proc = 96
 
 # Scheduler & Optimizer
 batch_size = 1  # per_device
@@ -113,7 +113,7 @@ train_dataset = dict(
     cached_folder=cached_folder,
     max_length=max_length,
     pack_to_max_length=pack_to_max_length,
-    num_proc=num_proc)
+    map_num_proc=map_num_proc)
 
 train_dataloader = dict(
     batch_size=batch_size,

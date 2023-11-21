@@ -20,7 +20,7 @@ def process(dataset_folder=None,
             pack_to_max_length=False,
             max_length=2048,
             shuffle_before_pack=True,
-            num_proc=32):
+            map_num_proc=32):
     ......
 ```
 
@@ -32,7 +32,7 @@ def process(dataset_folder=None,
 4. pack_to_max_length：是否将多条数据拼接为一条数据进行训练。
 5. max_length：表示数据处理过程会将多条训练数据 pack 成一条长度为max_length 的数据。只有当pack_to_max_length=True时生效。
 6. shuffle_before_pack：在pack前是否对数据集进行shuffle，一般使用默认的True即可。只有当pack_to_max_length=True时生效。
-7. num_proc：启用多进程进行数据处理，可根据情况增加 num_proc 的数值，集群上可以设为 96 。
+7. num_proc：启用多进程进行数据处理，可根据情况增加 map_num_proc 的数值，集群上可以设为 96 。
 
 ## 使用教程
 
@@ -66,7 +66,7 @@ pretrained_model_name_or_path = 'internlm/internlm-7b'
 + cached_folder = '/path/to/cache/your/processed/dataset'
 max_length = 2048
 pack_to_max_length = True
-num_proc = 96
+map_num_proc = 96
 
 # Scheduler & Optimizer
 batch_size = 1  # per_device
@@ -113,7 +113,7 @@ train_dataset = dict(
     cached_folder=cached_folder,
     max_length=max_length,
     pack_to_max_length=pack_to_max_length,
-    num_proc=num_proc)
+    map_num_proc=map_num_proc)
 
 train_dataloader = dict(
     batch_size=batch_size,
