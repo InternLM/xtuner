@@ -38,8 +38,7 @@ def dispatch_llama_attn_forward(model):
 def dispatch_llama_rmsnorm_forward(model):
     if not SUPPORT_TRITON:
         return
-    # from .triton_kernels import rms_norm_forward
-    from .llama import rms_norm_forward
+    from .triton_kernels import rms_norm_forward
     print_log('dispatch llama rmsnorm forward', 'current')
     for module in model.modules():
         if type(module).__name__ == 'LlamaRMSNorm':
