@@ -1,5 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import os
+import shutil
 import tempfile
 
 from datasets import concatenate_datasets, load_dataset, load_from_disk
@@ -55,13 +56,20 @@ def process_internlm_dataset(*args, **kwargs):
     if not (dist.is_available() and dist.is_initialized()):
         return process(*args, **kwargs)
 
-    with tempfile.TemporaryDirectory(dir='./') as tmpdir:
-        if dist.get_rank() == 0:
-            dataset = process(*args, tmpdir=tmpdir, **kwargs)
-        dist.barrier()
+    if dist.get_rank() == 0:
+        tmpdir = tempfile.TemporaryDirectory(dir='./')
+        dataset = process(*args, tmpdir=tmpdir.name, **kwargs)
+        objects = [tmpdir.name]
+    else:
+        objects = [None]
+    dist.broadcast_object_list(objects, src=0)
 
-        if dist.get_rank() != 0:
-            # load processed dataset from `cached_folder`
-            dataset = process(*args, tmpdir=tmpdir, **kwargs)
+    if dist.get_rank() != 0:
+        # load processed dataset from `cached_folder`
+        dataset = process(*args, tmpdir=objects[0], **kwargs)
+
+    dist.barrier()
+    if dist.get_rank() == 0:
+        shutil.rmtree(tmpdir.name)
 
     return dataset
