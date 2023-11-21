@@ -16,5 +16,6 @@ class DeepSpeedStrategy(MMEngineDeepSpeedStrategy):
         # hard code for deepspeed zero3
         # When utilizing Zero3, the model isn't allocated to CUDA within the
         # `deepspeed.initialize` process.
+        assert hasattr(wrapper.model, 'data_preprocessor')
         wrapper.model.data_preprocessor.cuda()
         return wrapper
