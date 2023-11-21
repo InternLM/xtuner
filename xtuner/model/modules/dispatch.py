@@ -12,8 +12,27 @@ from .internlm import internlm_attn_forward
 from .llama import llama_attn_forward
 from .yi import yi_attn_forward
 
-SUPPORT_TRITON = False
+SUPPORT_FLASH1 = digit_version(torch.__version__) >= digit_version('2.0.0')
+SUPPORT_XFORMERS = False
+SUPPORT_FLASH2 = False
 
+try:
+    import xformers.ops as xops  # pre-check # noqa: F401
+
+    SUPPORT_XFORMERS = True
+except ImportError:
+    pass
+
+try:
+    from flash_attn import flash_attn_func  # pre-check # noqa: F401
+
+    SUPPORT_FLASH2 = True
+except ImportError:
+    pass
+
+SUPPORT_FLASH = SUPPORT_FLASH1 or SUPPORT_FLASH2 or SUPPORT_XFORMERS
+
+SUPPORT_TRITON = False
 try:
     import triton  # pre-check # noqa: F401
     import triton.language as tl  # pre-check # noqa: F401
@@ -28,6 +47,8 @@ NO_ATTN_WEIGHTS_MSG = (
 
 
 def dispatch_llama_attn_forward(model):
+    if not SUPPORT_FLASH:
+        return
     print_log('dispatch llama attn forward', 'current')
     print_log(NO_ATTN_WEIGHTS_MSG, 'current', logging.WARNING)
     for module in model.modules():
@@ -46,8 +67,7 @@ def dispatch_llama_rmsnorm_forward(model):
 
 
 def dispatch_internlm_attn_forward(model):
-    if digit_version(torch.__version__) < digit_version('2.0.0'):
-        # flash attention is only supported after pytorch2.0
+    if not SUPPORT_FLASH:
         return
     print_log('dispatch internlm attn forward', 'current')
     print_log(NO_ATTN_WEIGHTS_MSG, 'current', logging.WARNING)
@@ -75,8 +95,7 @@ def dispath_baichuan2_norm_head_forward(model):
 
 
 def dispath_baichuan_7b_attn_forward(model):
-    if digit_version(torch.__version__) < digit_version('2.0.0'):
-        # flash attention is only supported after pytorch2.0
+    if not SUPPORT_FLASH:
         return
     print_log('dispatch baichuan2-7B attn forward', 'current')
     print_log(NO_ATTN_WEIGHTS_MSG, 'current', logging.WARNING)
@@ -86,8 +105,7 @@ def dispath_baichuan_7b_attn_forward(model):
 
 
 def dispath_baichuan_13b_attn_forward(model):
-    if digit_version(torch.__version__) < digit_version('2.0.0'):
-        # flash attention is only supported after pytorch2.0
+    if not SUPPORT_FLASH:
         return
     print_log('dispatch baichuan2-13B attn forward', 'current')
     print_log(NO_ATTN_WEIGHTS_MSG, 'current', logging.WARNING)
@@ -98,8 +116,7 @@ def dispath_baichuan_13b_attn_forward(model):
 
 
 def dispatch_yi_attn_forward(model):
-    if digit_version(torch.__version__) < digit_version('2.0.0'):
-        # flash attention is only supported after pytorch2.0
+    if not SUPPORT_FLASH:
         return
     print_log('dispatch yi attn forward', 'current')
     print_log(NO_ATTN_WEIGHTS_MSG, 'current', logging.WARNING)

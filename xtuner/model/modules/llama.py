@@ -103,20 +103,25 @@ def llama_attn_forward(
     key_states = repeat_kv(key_states, self.num_key_value_groups)
     value_states = repeat_kv(value_states, self.num_key_value_groups)
 
-    # q, k, v is [B, H, S, K] and xformers need [B, S, H, K].
-    # returns [B, S, H, K]
-    query_states = query_states.transpose(1, 2)
-    key_states = key_states.transpose(1, 2)
-    value_states = value_states.transpose(1, 2)
-    if SUPPORT_FLASH2:
-        attn_output = flash_attn_func(
-            query_states, key_states, value_states, causal=True)
+    if SUPPORT_FLASH2 or SUPPORT_XFORMERS:
+        # q, k, v is [B, H, S, K] and xformers need [B, S, H, K].
+        # returns [B, S, H, K]
+        query_states = query_states.transpose(1, 2)
+        key_states = key_states.transpose(1, 2)
+        value_states = value_states.transpose(1, 2)
+        if SUPPORT_FLASH2:
+            attn_output = flash_attn_func(
+                query_states, key_states, value_states, causal=True)
+        else:
+            attn_output = xops.memory_efficient_attention(
+                query_states,
+                key_states,
+                value_states,
+                attn_bias=xops.LowerTriangularMask())
     else:
-        attn_output = xops.memory_efficient_attention(
-            query_states,
-            key_states,
-            value_states,
-            attn_bias=xops.LowerTriangularMask())
+        attn_output = F.scaled_dot_product_attention(
+            query_states, key_states, value_states, attn_mask=attention_mask)
+        attn_output = attn_output.transpose(1, 2)
 
     attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
 
