@@ -120,7 +120,7 @@ def process(dataset,
     if pack_to_max_length and split == 'train':
         if shuffle_before_pack:
             dataset = dataset.shuffle()
-            dataset = dataset.flatten_indices()
+            dataset = dataset.flatten_indices(num_proc=map_num_proc)
         dataset = dataset.map(
             Packer(max_length), batched=True, num_proc=map_num_proc)
 
