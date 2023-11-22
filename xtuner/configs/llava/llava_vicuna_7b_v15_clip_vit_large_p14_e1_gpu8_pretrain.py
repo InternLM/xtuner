@@ -43,7 +43,9 @@ warmup_ratio = 0.03
 
 # Evaluate the generation performance during the training
 evaluation_freq = 500
-SYSTEM = ''
+SYSTEM = ('A chat between a curious user and an artificial intelligence '
+          'assistant. The assistant gives helpful, detailed, and polite '
+          'answers to the user\'s questions.')
 evaluation_images = 'https://llava-vl.github.io/static/images/view.jpg'
 evaluation_inputs = ['请描述一下这张照片', 'Please describe this picture']
 
