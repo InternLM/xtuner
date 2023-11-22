@@ -26,13 +26,13 @@ def process(dataset_folder=None,
 
 其中：
 
-1. dataset_folder：表示训练数据集所在路径，路径下的所有以 `.bin` 结尾的文件都会被当做训练数据。由于处理后的数据会被缓存下来，因此**只有第一次处理原始数据的时候才需要提供 dataset_folder 这一字段**。
-2. cached_folder：表示处理后的数据缓存至 cached_folder 文件夹下。
-3. split：通过hf datasets 读取的数据集通常是一个 DatasetDict ，需要通过split变量拿到对应的Dataset，一般使用默认值 train 即可
-4. pack_to_max_length：是否将多条数据拼接为一条数据进行训练。
-5. max_length：表示数据处理过程会将多条训练数据 pack 成一条长度为max_length 的数据。只有当pack_to_max_length=True时生效。
-6. shuffle_before_pack：在pack前是否对数据集进行shuffle，一般使用默认的True即可。只有当pack_to_max_length=True时生效。
-7. num_proc：启用多进程进行数据处理，可根据情况增加 map_num_proc 的数值，集群上可以设为 96 。
+1. `dataset_folder`：表示训练数据集所在路径，路径下的所有以 `.bin` 结尾的文件都会被当做训练数据。由于处理后的数据会被缓存下来，因此**只有第一次处理原始数据的时候才需要提供 dataset_folder 这一字段**。
+2. `cached_folder`：表示处理后的数据缓存至 cached_folder 文件夹下。
+3. `split`：通过hf datasets 读取的数据集通常是一个 DatasetDict ，需要通过split变量拿到对应的Dataset，一般使用默认值 train 即可
+4. `pack_to_max_length`：是否将多条数据拼接为一条数据进行训练。
+5. `max_length`：表示数据处理过程会将多条训练数据 pack 成一条长度为max_length 的数据。只有当pack_to_max_length=True时生效。
+6. `shuffle_before_pack`：在pack前是否对数据集进行shuffle，一般使用默认的True即可。只有当pack_to_max_length=True时生效。
+7. `map_num_proc`：启用多进程进行数据处理，可根据情况增加 map_num_proc 的数值，集群上可以设为 96 。
 
 ## 使用教程
 
