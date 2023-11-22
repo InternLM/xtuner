@@ -9,7 +9,7 @@ The InternLM training dataset is already tokenized, and is formatted as follows:
 
 Among them, tokens with negative values are not involved in the calculation of loss during the training process.
 
-## 接口介绍
+## Interface Introduction
 
 To train the InternLM-Chat model in XTuner, you need to convert the original data format into the XTuner standard dataset format. The core function for processing the InternLM format dataset is as follows:
 
