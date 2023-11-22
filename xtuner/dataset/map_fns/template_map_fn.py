@@ -19,6 +19,9 @@ def template_map_fn(example, template):
         if system != '' and system is not None:
             system = template.SYSTEM.format(system=system)
             input_text = system + input_text
+        elif template.get('KEEP_SYSTEM', False):
+            system = template.SYSTEM.format(system='')
+            input_text = system + input_text
         single_turn_conversation['input'] = input_text + instruction_postfix
     return {'conversation': conversation}
 

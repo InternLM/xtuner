@@ -13,6 +13,7 @@ PROMPT_TEMPLATE = ConfigDict(
         INSTRUCTION='<|User|>:{input}<eoh>\n<|Bot|>:'),
     moss_sft=dict(SYSTEM='{system}\n', INSTRUCTION='<|Human|>: {input}<eoh>'),
     llama2_chat=dict(
+        KEEP_SYSTEM=True,
         SYSTEM=(
             '[INST] <<SYS>>\n You are a helpful, respectful and honest '
             'assistant. Always answer as helpfully as possible, while being '
@@ -40,12 +41,14 @@ PROMPT_TEMPLATE = ConfigDict(
         SYSTEM='{system}\n',
         INSTRUCTION='<reserved_106>{input}<reserved_107>'),
     wizardlm=dict(
+        KEEP_SYSTEM=True,
         SYSTEM=('A chat between a curious user and an artificial '
                 'intelligence assistant. The assistant gives '
                 'helpful, detailed, and polite answers to the '
                 'user\'s questions. {system}\n'),
         INSTRUCTION=('USER: {input} ASSISTANT: ')),
     vicuna=dict(
+        KEEP_SYSTEM=True,
         SYSTEM=('A chat between a curious user and an artificial '
                 'intelligence assistant. The assistant gives '
                 'helpful, detailed, and polite answers to the '

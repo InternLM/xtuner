@@ -307,6 +307,8 @@ def main():
                                 round=n_turn + 1, bot_name=args.bot_name)
                     elif args.system is not None:
                         system_text = args.system
+                    elif template.get('KEEP_SYSTEM', False):
+                        system_text = ''
                     if system_text is not None:
                         prompt_text += template['SYSTEM'].format(
                             system=system_text,
@@ -333,6 +335,9 @@ def main():
             else:
                 prompt_text = text
             inputs += prompt_text
+            print('*******************')
+            print(inputs)
+            print('*******************')
             if args.image is None:
                 ids = tokenizer.encode(inputs, return_tensors='pt')
                 streamer = Streamer(
