@@ -12,7 +12,8 @@ class DatasetInfoHook(Hook):
     def log(self, runner, dataset, mode='train'):
         runner.logger.info(f'Num {mode} samples {len(dataset)}')
         runner.logger.info(f'{mode} example:')
-        runner.logger.info(self.tokenizer.decode(dataset[0]['input_ids']))
+        input_ids = [abs(x) for x in dataset[0]['input_ids']]
+        runner.logger.info(self.tokenizer.decode(input_ids))
 
     def before_train(self, runner) -> None:
         do_train = runner.train_loop is not None
