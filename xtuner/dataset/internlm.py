@@ -6,7 +6,7 @@ from mmengine import print_log
 from torch import distributed as dist
 from tqdm import tqdm
 
-from .utils import InternLMPacker
+from .utils import InternRepoPacker
 
 
 def process(dataset_folder,
@@ -33,7 +33,7 @@ def process(dataset_folder,
             dataset = dataset.shuffle()
             dataset = dataset.flatten_indices(num_proc=map_num_proc)
         dataset = dataset.map(
-            InternLMPacker(max_length), batched=True, num_proc=map_num_proc)
+            InternRepoPacker(max_length), batched=True, num_proc=map_num_proc)
         print_log(
             f'After packing to {max_length}, '
             f'the length of dataset is {len(dataset)}.', 'current')
@@ -41,7 +41,26 @@ def process(dataset_folder,
     return dataset
 
 
-def process_internlm_dataset(*args, **kwargs):
+def process_intern_repo_dataset(*args, **kwargs):
+    """Post-process the dataset in InternLM repo
+    (https://github.com/InternLM/InternLM) format.
+
+    The training dataset of InternLM is pre-tokenized, and is formatted as
+    follows:
+
+    ```
+    {"tokens": [1, -333, -352, -1621, ..., 103028, 13, 2]}
+    {"tokens": [1, -333, -352, -1621, ..., 103028, 13, 2]}
+    ```
+
+    Among them, tokens with negative values are not involved in the calculation
+    of loss during the training process.
+
+    Note:
+        This function is specifically designed for processing data in the
+        internlm format. However, it should not be misconstrued as a tool for
+        training the internlm model.
+    """
     if not (dist.is_available() and dist.is_initialized()):
         return process(*args, **kwargs)
 

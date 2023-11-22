@@ -1,3 +1,5 @@
+**Note: The primary aim of this document is to provide detailed instructions on how to train models based on the data format provided by the InternLM repository, rather than to train the InternLM model itself.**
+
 ## Dataset Format
 
 The training dataset of [InternLM](https://github.com/InternLM/InternLM) is pre-tokenized, and is formatted as follows:
@@ -14,8 +16,7 @@ Among them, tokens with negative values are not involved in the calculation of l
 To train the InternLM-Chat model in XTuner, you need to convert the original data format into the XTuner standard dataset format. The core function for processing the InternLM format dataset is as follows:
 
 ```python
-def process(dataset_folder=None,
-            cached_folder=None,
+def process(dataset_folder,
             split='train',
             pack_to_max_length=False,
             max_length=2048,
@@ -26,13 +27,12 @@ def process(dataset_folder=None,
 
 Where:
 
-1. `dataset_folder`: Indicates the path where the training dataset is located. All files ending with `.bin` in the path will be used as training data. Because the processed data will be cached, **this field needs to be provided only the first time when processing the original data**.
-2. `cached_folder`: Indicates that the processed data is cached in the cached_folder folder.
-3. `split`: The dataset read through hf datasets is usually a DatasetDict. The corresponding Dataset is obtained through the split variable. The default value 'train' can generally be used.
-4. `pack_to_max_length`: Whether to concatenate multiple pieces of data into one piece of data for training.
-5. `max_length`: Indicates that the data processing process will pack multiple training data into a piece of data with a length of max_length. Only effective when pack_to_max_length=True.
-6. `shuffle_before_pack`: Whether to shuffle the dataset before packing, generally the default True can be used. Only effective when pack_to_max_length=True.
-7. `map_num_proc`: Use multi-process for data processing. Depending on the situation, the value of map_num_proc can be increased, and it can be set to 96 on a cluster.
+1. `dataset_folder`: Indicates the path where the training dataset is located. All files ending with `.bin` in the path will be used as training data.
+2. `split`: The dataset read through hf datasets is usually a DatasetDict. The corresponding Dataset is obtained through the split variable. The default value 'train' can generally be used.
+3. `pack_to_max_length`: Whether to concatenate multiple pieces of data into one piece of data for training.
+4. `max_length`: Indicates that the data processing process will pack multiple training data into a piece of data with a length of max_length. Only effective when pack_to_max_length=True.
+5. `shuffle_before_pack`: Whether to shuffle the dataset before packing, generally the default True can be used. Only effective when pack_to_max_length=True.
+6. `map_num_proc`: Use multi-process for data processing. Depending on the situation, the value of map_num_proc can be increased, and it can be set to 96 on a cluster.
 
 ## Tutorial
 

@@ -7,7 +7,7 @@ from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR
 from torch.optim import AdamW
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from xtuner.dataset import process_internlm_dataset
+from xtuner.dataset import process_intern_repo_dataset
 from xtuner.dataset.collate_fns import internlm_collate_fn
 from xtuner.engine import DatasetInfoHook, ThroughputHook
 from xtuner.model import SupervisedFinetune
@@ -57,7 +57,7 @@ model = dict(
 #                      PART 3  Dataset & Dataloader                   #
 #######################################################################
 train_dataset = dict(
-    type=process_internlm_dataset,
+    type=process_intern_repo_dataset,
     dataset_folder=dataset_folder,
     max_length=max_length,
     pack_to_max_length=pack_to_max_length,

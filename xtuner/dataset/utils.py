@@ -79,16 +79,12 @@ class Packer:
     def __init__(self, chunk_size=2048):
         self.chunk_size = chunk_size
         self.residual = {'input_ids': [], 'labels': []}
-        self.residual_cumulative_len = [0]
 
     def __call__(self, batch):
         concatenated_samples = {
             k: v + list(chain(*batch[k]))
             for k, v in self.residual.items()
         }
-        for input_id in batch['input_ids']:
-            self.residual_cumulative_len.append(
-                self.residual_cumulative_len[-1] + len(input_id))
 
         total_length = len(concatenated_samples[list(
             concatenated_samples.keys())[0]])
@@ -114,7 +110,9 @@ class Packer:
         return result
 
 
-class InternLMPacker:
+class InternRepoPacker:
+    """Only used for packing data in InternLM repo
+    (https://github.com/InternLM/InternLM) format."""
 
     def __init__(self, chunk_size=2048):
         self.chunk_size = chunk_size
