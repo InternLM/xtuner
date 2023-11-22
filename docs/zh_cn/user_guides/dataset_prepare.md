@@ -92,7 +92,7 @@ LLaVA-Pretrain
 ```shell
 # Make sure you have git-lfs installed (https://git-lfs.com)
 git lfs install
-git clone https://huggingface.co/datasets/liuhaotian/LLaVA-Pretrain
+git clone https://huggingface.co/datasets/liuhaotian/LLaVA-Pretrain --depth=1
 ```
 
 #### 微调 Finetune
@@ -104,7 +104,7 @@ git clone https://huggingface.co/datasets/liuhaotian/LLaVA-Pretrain
       ```shell
       # Make sure you have git-lfs installed (https://git-lfs.com)
       git lfs install
-      git clone https://huggingface.co/datasets/liuhaotian/LLaVA-Instruct-150K
+      git clone https://huggingface.co/datasets/liuhaotian/LLaVA-Instruct-150K --depth=1
       ```
 
    2. llava_zh
@@ -112,7 +112,7 @@ git clone https://huggingface.co/datasets/liuhaotian/LLaVA-Pretrain
       ```shell
       # Make sure you have git-lfs installed (https://git-lfs.com)
       git lfs install
-      git clone https://huggingface.co/datasets/openbmb/llava_zh
+      git clone https://huggingface.co/datasets/openbmb/llava_zh --depth=1
       ```
 
 2. 图片数据
