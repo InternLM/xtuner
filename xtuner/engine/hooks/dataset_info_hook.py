@@ -20,13 +20,18 @@ def split_list(lst, value):
 
 class DatasetInfoHook(Hook):
 
-    def __init__(self, tokenizer):
+    def __init__(self, tokenizer, is_intern_repo_dataset=False):
         self.tokenizer = BUILDER.build(tokenizer)
+        self.is_intern_repo_dataset = is_intern_repo_dataset
 
     def log(self, runner, dataset, mode='train'):
         runner.logger.info(f'Num {mode} samples {len(dataset)}')
         runner.logger.info(f'{mode} example:')
-        input_ids = split_list(dataset[0]['input_ids'], IMAGE_TOKEN_INDEX)
+        input_ids = dataset[0]['input_ids']
+        if self.is_intern_repo_dataset:
+            input_ids = [abs(x) for x in input_ids]
+        # Try to split list to be compatible with IMAGE token
+        input_ids = split_list(input_ids, IMAGE_TOKEN_INDEX)
         text = ''
         for idx, ids in enumerate(input_ids):
             text += self.tokenizer.decode(ids)

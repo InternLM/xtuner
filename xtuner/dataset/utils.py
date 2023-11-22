@@ -131,6 +131,35 @@ class Packer:
 
         return result
 
+class InternRepoPacker:
+    """Only used for packing data in InternLM repo
+    (https://github.com/InternLM/InternLM) format."""
+
+    def __init__(self, chunk_size=2048):
+        self.chunk_size = chunk_size
+        self.residual = []
+
+    def __call__(self, batch):
+        concatenated_samples = self.residual + list(chain(*batch['input_ids']))
+
+        total_length = len(concatenated_samples)
+
+        if total_length >= self.chunk_size:
+            chunk_num = total_length // self.chunk_size
+            input_ids = [
+                concatenated_samples[i:i + self.chunk_size]
+                for i in range(0, chunk_num * self.chunk_size, self.chunk_size)
+            ]
+            result = {'input_ids': input_ids}
+            self.residual = concatenated_samples[(chunk_num *
+                                                  self.chunk_size):]
+        else:
+            input_ids = [concatenated_samples]
+            result = {'input_ids': input_ids}
+            self.residual = []
+
+        return result
+
 
 def expand2square(pil_img, background_color):
     width, height = pil_img.size
