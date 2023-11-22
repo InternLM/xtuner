@@ -3,7 +3,7 @@ import torch
 from mmengine.dataset import DefaultSampler
 from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
                             LoggerHook, ParamSchedulerHook)
-from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR
+from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR, LinearLR
 from peft import LoraConfig
 from torch.optim import AdamW
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
@@ -47,6 +47,7 @@ lr_projector = 2e-5
 betas = (0.9, 0.999)
 weight_decay = 0
 max_norm = 1  # grad clip
+warmup_ratio = 0.03
 
 # Evaluate the generation performance during the training
 evaluation_freq = 500
@@ -153,12 +154,21 @@ optim_wrapper = dict(
 
 # learning policy
 # More information: https://github.com/open-mmlab/mmengine/blob/main/docs/en/tutorials/param_scheduler.md  # noqa: E501
-param_scheduler = dict(
-    type=CosineAnnealingLR,
-    eta_min=0.,
-    by_epoch=True,
-    T_max=max_epochs,
-    convert_to_iter_based=True)
+param_scheduler = [
+    dict(type=LinearLR,
+         start_factor=1e-5,
+         by_epoch=True,
+         begin=0,
+         end=warmup_ratio * max_epochs,
+         convert_to_iter_based=True),
+    dict(
+        type=CosineAnnealingLR,
+        eta_min=0.0,
+        by_epoch=True,
+        begin=warmup_ratio * max_epochs,
+        T_max=max_epochs,
+        convert_to_iter_based=True)
+]
 
 # train, val, test setting
 train_cfg = dict(by_epoch=True, max_epochs=max_epochs, val_interval=1)
