@@ -13,7 +13,7 @@ Among them, tokens with negative values are not involved in the calculation of l
 
 ## Interface Introduction
 
-To train the InternLM-Chat model in XTuner, you need to convert the original data format into the XTuner standard dataset format. The core function for processing the InternLM format dataset is as follows:
+To train with InternLM format data in XTuner, you need to convert the original data format into the XTuner standard dataset format. The core function for processing the InternLM format dataset is as follows:
 
 ```python
 def process(dataset_folder,
@@ -32,7 +32,7 @@ Where:
 3. `pack_to_max_length`: Whether to concatenate multiple pieces of data into one piece of data for training.
 4. `max_length`: Indicates that the data processing process will pack multiple training data into a piece of data with a length of max_length. Only effective when pack_to_max_length=True.
 5. `shuffle_before_pack`: Whether to shuffle the dataset before packing, generally the default True can be used. Only effective when pack_to_max_length=True.
-6. `map_num_proc`: Use multi-process for data processing. Depending on the situation, the value of map_num_proc can be increased, and it can be set to 96 on a cluster.
+6. `map_num_proc`: Use multi-process for data processing. Depending on the situation, the value of map_num_proc can be increased.
 
 ## Tutorial
 

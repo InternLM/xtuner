@@ -13,7 +13,7 @@
 
 ## 接口介绍
 
-为了在 XTuner 中训练 InternLM-Chat 模型，需要将原数据格式转换为 XTuner 标准数据集格式。处理 InternLM 格式数据集的核心函数如下：
+为了在 XTuner 中使用 InternLM 格式的数据进行训练，需要将原数据格式转换为 XTuner 标准数据集格式。处理 InternLM 格式数据集的核心函数如下：
 
 ```python
 def process(dataset_folder,
@@ -32,7 +32,7 @@ def process(dataset_folder,
 3. `pack_to_max_length`：是否将多条数据拼接为一条数据进行训练。
 4. `max_length`：表示数据处理过程会将多条训练数据 pack 成一条长度为max_length 的数据。只有当pack_to_max_length=True时生效。
 5. `shuffle_before_pack`：在pack前是否对数据集进行shuffle，一般使用默认的True即可。只有当pack_to_max_length=True时生效。
-6. `map_num_proc`：启用多进程进行数据处理，可根据情况增加 map_num_proc 的数值，集群上可以设为 96 。
+6. `map_num_proc`：启用多进程进行数据处理，可根据情况增加 map_num_proc 的数值。
 
 ## 使用教程
 
