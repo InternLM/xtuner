@@ -8,7 +8,7 @@ from torch.optim import AdamW
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from xtuner.dataset import process_intern_repo_dataset
-from xtuner.dataset.collate_fns import internlm_collate_fn
+from xtuner.dataset.collate_fns import intern_repo_collate_fn
 from xtuner.engine import DatasetInfoHook, ThroughputHook
 from xtuner.model import SupervisedFinetune
 from xtuner.utils import PROMPT_TEMPLATE
@@ -68,7 +68,7 @@ train_dataloader = dict(
     num_workers=dataloader_num_workers,
     dataset=train_dataset,
     sampler=dict(type=DefaultSampler, shuffle=True),
-    collate_fn=dict(type=internlm_collate_fn))
+    collate_fn=dict(type=intern_repo_collate_fn))
 
 #######################################################################
 #                    PART 4  Scheduler & Optimizer                    #
