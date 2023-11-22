@@ -335,9 +335,6 @@ def main():
             else:
                 prompt_text = text
             inputs += prompt_text
-            print('*******************')
-            print(inputs)
-            print('*******************')
             if args.image is None:
                 ids = tokenizer.encode(inputs, return_tensors='pt')
                 streamer = Streamer(
