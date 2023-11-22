@@ -1,6 +1,6 @@
 ## Dataset Format
 
-The InternLM training dataset is already tokenized, and is formatted as follows:
+The training dataset of [InternLM](https://github.com/InternLM/InternLM) is pre-tokenized, and is formatted as follows:
 
 ```
 {"tokens": [1, -333, -352, -1621, ..., 103028, 13, 2]}
