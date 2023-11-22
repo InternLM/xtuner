@@ -131,6 +131,7 @@ class Packer:
 
         return result
 
+
 class InternRepoPacker:
     """Only used for packing data in InternLM repo
     (https://github.com/InternLM/InternLM) format."""

@@ -100,7 +100,9 @@ train_cfg = dict(by_epoch=True, max_epochs=max_epochs, val_interval=1)
 #######################################################################
 # Log the dialogue periodically during the training process, optional
 custom_hooks = [
-    dict(type=DatasetInfoHook, tokenizer=tokenizer, is_intern_repo_dataset=True),
+    dict(
+        type=DatasetInfoHook, tokenizer=tokenizer,
+        is_intern_repo_dataset=True),
     dict(type=ThroughputHook)
 ]
 
