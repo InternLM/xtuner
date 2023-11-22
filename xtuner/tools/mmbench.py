@@ -67,24 +67,6 @@ def parse_args():
         default=100,
         help='Maximum number of new tokens allowed in generated text')
     parser.add_argument(
-        '--temperature',
-        type=float,
-        default=0.1,
-        help='The value used to modulate the next token probabilities.')
-    parser.add_argument(
-        '--top-k',
-        type=int,
-        default=40,
-        help='The number of highest probability vocabulary tokens to '
-        'keep for top-k-filtering.')
-    parser.add_argument(
-        '--top-p',
-        type=float,
-        default=0.75,
-        help='If set to float < 1, only the smallest set of most probable '
-        'tokens with probabilities that add up to top_p or higher are '
-        'kept for generation.')
-    parser.add_argument(
         '--seed',
         type=int,
         default=0,
@@ -341,10 +323,7 @@ def main():
 
     gen_config = GenerationConfig(
         max_new_tokens=args.max_new_tokens,
-        do_sample=args.temperature > 0,
-        temperature=args.temperature,
-        top_p=args.top_p,
-        top_k=args.top_k,
+        do_sample=False,
         eos_token_id=tokenizer.eos_token_id,
         pad_token_id=tokenizer.pad_token_id
         if tokenizer.pad_token_id is not None else tokenizer.eos_token_id,
@@ -410,7 +389,7 @@ def main():
             stopping_criteria=stop_criteria)
 
         predict = tokenizer.decode(
-            generate_output[0], skip_special_tokens=True)
+            generate_output[0], skip_special_tokens=True).strip()
         cur_result = {}
         cur_result['question'] = data_sample.get('question')
         cur_result.update(data_sample.get('options_dict'))
