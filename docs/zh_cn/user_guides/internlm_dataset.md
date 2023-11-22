@@ -1,6 +1,6 @@
 ## 数据集格式
 
-Internlm 训练数据集是已经被 tokenized 过的，格式如下所示：
+[InternLM](https://github.com/InternLM/InternLM) 仓库所使用的训练数据集会被预先 token 化，格式如下所示：
 
 ```
 {"tokens": [1, -333, -352, -1621, ..., 103028, 13, 2]}
