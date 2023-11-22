@@ -45,7 +45,7 @@ PROMPT_TEMPLATE = ConfigDict(
                 'helpful, detailed, and polite answers to the '
                 'user\'s questions. {system}\n'),
         INSTRUCTION=('USER: {input} ASSISTANT: ')),
-    wizard_coder=dict(
+    wizardcoder=dict(
         SYSTEM=(
             'Below is an instruction that describes a task. '
             'Write a response that appropriately completes the request.\n\n'
