@@ -46,14 +46,14 @@ PROMPT_TEMPLATE = ConfigDict(
                 'intelligence assistant. The assistant gives '
                 'helpful, detailed, and polite answers to the '
                 'user\'s questions. {system}\n'),
-        INSTRUCTION=('USER: {input} ASSISTANT: ')),
+        INSTRUCTION=('USER: {input} ASSISTANT:')),
     vicuna=dict(
         KEEP_SYSTEM=True,
         SYSTEM=('A chat between a curious user and an artificial '
                 'intelligence assistant. The assistant gives '
                 'helpful, detailed, and polite answers to the '
                 'user\'s questions. {system}\n'),
-        INSTRUCTION=('USER: {input} ASSISTANT: ')),
+        INSTRUCTION=('USER: {input} ASSISTANT:')),
 )
 
 SYSTEM_TEMPLATE = ConfigDict(
