@@ -8,6 +8,7 @@ from functools import partial
 from types import FunctionType
 
 from mmengine.config import Config, DictAction
+from mmengine.config.lazy import LazyObject
 from mmengine.logging import print_log
 from mmengine.registry import RUNNERS
 from mmengine.runner import Runner
@@ -232,7 +233,7 @@ def main():
                 exclude_frozen_parameters = True if digit_version(
                     deepspeed.__version__) >= digit_version('0.10.1') else None
                 strategy = dict(
-                    type='xtuner.DeepSpeedStrategy',
+                    type=LazyObject('xtuner.engine', 'DeepSpeedStrategy'),
                     config=ds_cfg,
                     gradient_accumulation_steps=grad_accum,
                     train_micro_batch_size_per_gpu=train_bs,
