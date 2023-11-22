@@ -38,10 +38,10 @@ def process(dataset_folder,
 
 ### Step 1, 导出模板 config 文件
 
-可以通过下列命令将名为 internlm_7b_full_internlm_dataset_template 的 config 导出至当前目录下：
+可以通过下列命令将名为 internlm_7b_full_intern_repo_dataset_template 的 config 导出至当前目录下：
 
 ```
-xtuner copy-cfg internlm_7b_full_internlm_dataset_template .
+xtuner copy-cfg internlm_7b_full_intern_repo_dataset_template .
 ```
 
 ### Step 2, 修改模板 config 文件
@@ -68,5 +68,5 @@ pack_to_max_length = True
 ### Step 3, 启动训练
 
 ```
-srun ${SRUN_ARGS} xtuner train internlm_7b_full_internlm_dataset_template --launcher slurm --deepspeed deepspeed_zero3
+srun ${SRUN_ARGS} xtuner train internlm_7b_full_intern_repo_dataset_template --launcher slurm --deepspeed deepspeed_zero3
 ```

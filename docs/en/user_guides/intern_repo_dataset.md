@@ -38,10 +38,10 @@ Where:
 
 ### Step 1, Export the Template Config File
 
-you can export the config named \`internlm_7b_full_internlm_dataset_template\`\` to the current directory using the following command:
+you can export the config named \`internlm_7b_full_intern_repo_dataset_template\`\` to the current directory using the following command:
 
 ```bash
-xtuner copy-cfg internlm_7b_full_internlm_dataset_template .
+xtuner copy-cfg internlm_7b_full_intern_repo_dataset_template .
 ```
 
 ### Step 2, Modify the Template Config File
@@ -68,5 +68,5 @@ pack_to_max_length = True
 ### Step 3, Start training
 
 ```
-srun ${SRUN_ARGS} xtuner train internlm_7b_full_internlm_dataset_template --launcher slurm --deepspeed deepspeed_zero3
+srun ${SRUN_ARGS} xtuner train internlm_7b_full_intern_repo_dataset_template --launcher slurm --deepspeed deepspeed_zero3
 ```
