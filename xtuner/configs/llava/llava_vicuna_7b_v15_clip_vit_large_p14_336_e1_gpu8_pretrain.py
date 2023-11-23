@@ -34,6 +34,7 @@ dataloader_num_workers = 0
 max_epochs = 1
 optim_type = AdamW
 lr = 1e-3
+lr_projector = 1e-3
 betas = (0.9, 0.999)
 weight_decay = 0
 max_norm = 1  # grad clip
@@ -101,6 +102,8 @@ optim_wrapper = dict(
     type=AmpOptimWrapper,
     optimizer=dict(
         type=optim_type, lr=lr, betas=betas, weight_decay=weight_decay),
+    paramwise_cfg=dict(
+        custom_keys={'projector': dict(lr_mult=lr_projector / lr)}),
     clip_grad=dict(max_norm=max_norm, error_if_nonfinite=False),
     accumulative_counts=accumulative_counts,
     loss_scale='dynamic',
