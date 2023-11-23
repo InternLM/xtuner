@@ -1,4 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import torch.distributed as dist
+from mmengine import MessageHub
 from mmengine.hooks import Hook
 from mmengine.model import is_model_wrapper
 from transformers import GenerationConfig, StoppingCriteriaList
@@ -50,6 +52,12 @@ class EvaluateChatHook(Hook):
                 StopWordStoppingCriteria(self.tokenizer, stop_word))
 
     def _generate_samples(self, runner, max_new_tokens=None):
+
+        message_hub = MessageHub.get_instance('for_flash_attn')
+        rank = dist.get_rank()
+        message_hub.update_info(f'cumulative_len_rank_{rank}', None)
+        message_hub.update_info(f'indexes_rank_{rank}', None)
+        message_hub.update_info(f'max_seqlen_rank_{rank}', None)
         if max_new_tokens is None:
             max_new_tokens = self.max_new_tokens
         model = runner.model

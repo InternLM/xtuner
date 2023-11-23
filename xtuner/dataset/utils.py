@@ -2,6 +2,8 @@
 import copy
 from itertools import chain
 
+import numpy as np
+
 from xtuner.utils import IGNORE_INDEX
 
 
@@ -117,9 +119,13 @@ class InternRepoPacker:
     def __init__(self, chunk_size=2048):
         self.chunk_size = chunk_size
         self.residual = []
+        self.residual_cumulative_len = [0]
 
     def __call__(self, batch):
         concatenated_samples = self.residual + list(chain(*batch['input_ids']))
+        for input_id in batch['input_ids']:
+            self.residual_cumulative_len.append(
+                self.residual_cumulative_len[-1] + len(input_id))
 
         total_length = len(concatenated_samples)
 
@@ -132,9 +138,49 @@ class InternRepoPacker:
             result = {'input_ids': input_ids}
             self.residual = concatenated_samples[(chunk_num *
                                                   self.chunk_size):]
+
+            ptr_l = 0
+            cumulative_len = []
+            for chunk_idx in range(chunk_num):
+                length_train = (chunk_idx + 1) * self.chunk_size
+                ptr_r = np.searchsorted(
+                    self.residual_cumulative_len, length_train, side='left')
+                if self.residual_cumulative_len[ptr_r] == length_train:
+                    cumulative_len_cur = self.residual_cumulative_len[
+                        ptr_l:ptr_r + 1]
+                    ptr_l = ptr_r + 1
+                else:
+                    cumulative_len_cur = self.residual_cumulative_len[
+                        ptr_l:ptr_r] + [length_train]
+                    ptr_l = ptr_r
+                cumulative_len_cur = [
+                    num - chunk_idx * self.chunk_size
+                    for num in cumulative_len_cur
+                ]
+                if cumulative_len_cur[0] != 0:
+                    cumulative_len_cur = [0] + cumulative_len_cur
+
+                cumulative_len.append(cumulative_len_cur)
+            result['cumulative_len'] = cumulative_len
+
+            self.residual_cumulative_len = [
+                num - length_train
+                for num in self.residual_cumulative_len[ptr_l:]
+            ]
+            if len(self.residual_cumulative_len) == 0:
+                self.residual_cumulative_len = [0]
+            elif self.residual_cumulative_len[0] != 0:
+                self.residual_cumulative_len = [
+                    0
+                ] + self.residual_cumulative_len
         else:
-            input_ids = [concatenated_samples]
-            result = {'input_ids': input_ids}
+            # input_ids = [concatenated_samples]
+            # result = {'input_ids': input_ids}
+            # result['cumulative_len'] = [self.residual_cumulative_len]
+
+            # Make sure the length of each packed data is equal to chunk_size
+            result = {}
             self.residual = []
+            self.residual_cumulative_len = [0]
 
         return result

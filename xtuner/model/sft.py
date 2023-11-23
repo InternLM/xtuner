@@ -1,6 +1,8 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from collections import OrderedDict
 
+import torch.distributed as dist
+from mmengine import MessageHub
 from mmengine.config import Config, ConfigDict
 from mmengine.model import BaseModel
 from mmengine.runner import load_checkpoint
@@ -18,7 +20,8 @@ class SupervisedFinetune(BaseModel):
                  llm,
                  lora=None,
                  peft_model=None,
-                 use_activation_checkpointing=True):
+                 use_activation_checkpointing=True,
+                 use_local_attn=True):
         super().__init__()
         with LoadWoInit():
             self.llm = self._build_from_cfg_or_module(llm)
@@ -51,6 +54,7 @@ class SupervisedFinetune(BaseModel):
             self._prepare_for_lora(peft_model, use_activation_checkpointing)
 
         self._is_init = True
+        self.use_local_attn = use_local_attn
 
     def _prepare_for_lora(self,
                           peft_model=None,
@@ -78,6 +82,20 @@ class SupervisedFinetune(BaseModel):
             raise NotImplementedError
 
     def forward(self, data, data_samples=None, mode='loss'):
+
+        if self.use_local_attn:
+            message_hub = MessageHub.get_instance('for_flash_attn')
+            rank = dist.get_rank()
+            message_hub.update_info(f'cumulative_len_rank_{rank}',
+                                    data.pop('cumulative_len'))
+            message_hub.update_info(f'indexes_rank_{rank}',
+                                    data.pop('indexes'))
+            message_hub.update_info(f'max_seqlen_rank_{rank}',
+                                    data.pop('max_seqlen'))
+        else:
+            data.pop('cumulative_len')
+            data.pop('indexes')
+            data.pop('max_seqlen')
 
         if mode == 'loss':
             return self.compute_loss(data, data_samples)

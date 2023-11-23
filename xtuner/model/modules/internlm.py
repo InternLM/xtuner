@@ -2,7 +2,9 @@
 from typing import Optional, Tuple
 
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
+from mmengine import MessageHub
 
 SUPPORT_XFORMERS = False
 SUPPORT_FLASH2 = False
@@ -14,7 +16,7 @@ except ImportError:
     pass
 
 try:
-    from flash_attn import flash_attn_func
+    from flash_attn import flash_attn_func, flash_attn_varlen_func
 
     SUPPORT_FLASH2 = True
 except ImportError:
@@ -50,8 +52,18 @@ def internlm_attn_forward(
     use_cache: bool = False,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor],
            Optional[Tuple[torch.Tensor]]]:
+
+    message_hub = MessageHub.get_instance('for_flash_attn')
+    rank = dist.get_rank()
+    cumulative_len = message_hub.get_info(f'cumulative_len_rank_{rank}')
+    indexes = message_hub.get_info(f'indexes_rank_{rank}')
+    max_seqlen = message_hub.get_info(f'max_seqlen_rank_{rank}')
+    use_local_attn = cumulative_len is not None
     # Modified from https://huggingface.co/internlm/internlm-7b/blob/939a68c0dc1bd5f35b63c87d44af05ce33379061/modeling_internlm.py#L161  # noqa:E501
     bsz, q_len, _ = hidden_states.size()
+
+    if use_local_attn:
+        assert len(cumulative_len) == bsz and cumulative_len[0][-1] == q_len
 
     query_states = self.q_proj(hidden_states).view(bsz, q_len, self.num_heads,
                                                    self.head_dim).transpose(
@@ -67,8 +79,9 @@ def internlm_attn_forward(
     if past_key_value is not None:
         kv_seq_len += past_key_value[0].shape[-2]
     cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
-    query_states, key_states = apply_rotary_pos_emb(query_states, key_states,
-                                                    cos, sin, position_ids)
+    query_states, key_states = apply_rotary_pos_emb(
+        query_states, key_states, cos, sin,
+        indexes if use_local_attn else position_ids)
     # [bsz, nh, t, hd]
 
     if past_key_value is not None:
@@ -78,6 +91,7 @@ def internlm_attn_forward(
 
     past_key_value = (key_states, value_states) if use_cache else None
 
+    assert SUPPORT_FLASH2
     if SUPPORT_FLASH2 or SUPPORT_XFORMERS:
         # q, k, v is [B, H, S, K] and xformers need [B, S, H, K].
         # returns [B, S, H, K]
@@ -85,8 +99,28 @@ def internlm_attn_forward(
         key_states = key_states.transpose(1, 2)
         value_states = value_states.transpose(1, 2)
         if SUPPORT_FLASH2:
-            attn_output = flash_attn_func(
-                query_states, key_states, value_states, causal=True)
+            if use_local_attn:
+                q_unpad, k_unpad, v_unpad = query_states.flatten(
+                    0, 1), key_states.flatten(0,
+                                              1), value_states.flatten(0, 1)
+                for i in range(1, bsz):
+                    cumulative_len[i] += q_len * i
+                cumulative_len = torch.cat(cumulative_len, dim=0)
+                attn_output = flash_attn_varlen_func(
+                    q_unpad,
+                    k_unpad,
+                    v_unpad,
+                    cumulative_len,
+                    cumulative_len,
+                    max_seqlen,
+                    max_seqlen,
+                    0,
+                    return_attn_probs=False,
+                    causal=True,
+                )
+            else:
+                attn_output = flash_attn_func(
+                    query_states, key_states, value_states, causal=True)
         else:
             attn_output = xops.memory_efficient_attention(
                 query_states,
