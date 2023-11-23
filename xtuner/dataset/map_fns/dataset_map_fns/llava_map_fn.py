@@ -2,7 +2,27 @@
 from xtuner.utils import DEFAULT_IMAGE_TOKEN
 
 
-def llava_map_fn(example):
+def llava_pretrain_map_fn(example):
+    # input contains the DEFAULT_IMAGE_TOKEN only
+    messages = example['conversations']
+    input = ''
+    conversation = []
+    while messages and messages[0]['from'] == 'gpt':
+        # Skip the first one if it is from gpt
+        messages = messages[1:]
+    for msg in messages:
+        if msg['from'] == 'human':
+            assert DEFAULT_IMAGE_TOKEN in msg['value']
+            input += DEFAULT_IMAGE_TOKEN
+        elif msg['from'] == 'gpt':
+            conversation.append({'input': input, 'output': msg['value']})
+            input = ''
+        else:
+            raise NotImplementedError
+    return {'conversation': conversation}
+
+
+def llava_finetune_map_fn(example):
     messages = example['conversations']
     input = ''
     conversation = []
@@ -19,11 +39,7 @@ def llava_map_fn(example):
             input += msg['value']
 
         elif msg['from'] == 'gpt':
-            conversation.append({
-                'system': '',
-                'input': input,
-                'output': msg['value']
-            })
+            conversation.append({'input': input, 'output': msg['value']})
             input = ''
         else:
             raise NotImplementedError

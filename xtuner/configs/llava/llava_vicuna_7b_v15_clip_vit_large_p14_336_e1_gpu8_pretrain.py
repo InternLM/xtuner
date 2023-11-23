@@ -10,10 +10,9 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer,
 
 from xtuner.dataset import LLaVADataset
 from xtuner.dataset.collate_fns import default_collate_fn
-from xtuner.dataset.map_fns import llava_map_fn, template_map_fn_factory
+from xtuner.dataset.map_fns import llava_pretrain_map_fn
 from xtuner.engine import DatasetInfoHook, EvaluateChatHook
 from xtuner.model import LLaVAModel
-from xtuner.utils import PROMPT_TEMPLATE
 
 #######################################################################
 #                          PART 1  Settings                           #
@@ -26,7 +25,6 @@ visual_encoder_name_or_path = 'openai/clip-vit-large-patch14-336'
 llava_data_root = './data/llava_data/'
 data_path = llava_data_root + 'LLaVA-Pretrain/blip_laion_cc_sbu_558k.json'
 image_folder = llava_data_root + 'LLaVA-Pretrain/images'
-prompt_template = PROMPT_TEMPLATE.vicuna
 max_length = int(2048 - (336 / 14)**2)
 
 # Scheduler & Optimizer
@@ -43,11 +41,9 @@ warmup_ratio = 0.03
 
 # Evaluate the generation performance during the training
 evaluation_freq = 500
-SYSTEM = ('A chat between a curious user and an artificial intelligence '
-          'assistant. The assistant gives helpful, detailed, and polite '
-          'answers to the user\'s questions.')
+SYSTEM = ''
 evaluation_images = 'https://llava-vl.github.io/static/images/view.jpg'
-evaluation_inputs = ['请描述一下这张照片', 'Please describe this picture']
+evaluation_inputs = ['']  # Keep empty strings during pretrain
 
 #######################################################################
 #                 PART 2  Model & Tokenizer & Processor               #
@@ -85,9 +81,8 @@ llava_dataset = dict(
     image_folder=image_folder,
     tokenizer=tokenizer,
     processor=processor,
-    dataset_map_fn=llava_map_fn,
-    template_map_fn=dict(
-        type=template_map_fn_factory, template=prompt_template),
+    dataset_map_fn=llava_pretrain_map_fn,
+    template_map_fn=None,
     max_length=max_length,
     image_aspect_ratio='pad')
 
@@ -146,8 +141,7 @@ custom_hooks = [
         every_n_iters=evaluation_freq,
         evaluation_inputs=evaluation_inputs,
         evaluation_images=evaluation_images,
-        system=SYSTEM,
-        prompt_template=prompt_template)
+        system=SYSTEM)
 ]
 
 # configure default hooks
