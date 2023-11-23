@@ -87,7 +87,7 @@ def main():
         if cfg.model.get('visual_encoder') and (
                 not cfg.model.get('freeze_visual_encoder', False)
                 or cfg.model.get('visual_encoder_lora')):
-            if 'PeftModel' in model.llm.__class__.__name__:
+            if 'PeftModel' in model.visual_encoder.__class__.__name__:
                 visual_encoder_path = osp.join(args.save_dir,
                                                'visual_encoder_adapter')
                 print(
