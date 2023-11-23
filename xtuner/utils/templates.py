@@ -47,6 +47,13 @@ PROMPT_TEMPLATE = ConfigDict(
                 'helpful, detailed, and polite answers to the '
                 'user\'s questions. {system}\n'),
         INSTRUCTION=('USER: {input} ASSISTANT:')),
+    wizardcoder=dict(
+        KEEP_SYSTEM=True,
+        SYSTEM=(
+            'Below is an instruction that describes a task. '
+            'Write a response that appropriately completes the request.\n\n'
+            '{system}\n'),
+        INSTRUCTION=('### Instruction:\n{input}\n\n### Response:')),
     vicuna=dict(
         KEEP_SYSTEM=True,
         SYSTEM=('A chat between a curious user and an artificial '
