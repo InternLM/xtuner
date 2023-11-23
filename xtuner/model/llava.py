@@ -11,8 +11,7 @@ from .modules import ProjectorConfig, ProjectorModel, dispatch_modules
 from .utils import (LoadWoInit, find_all_linear_names,
                     get_peft_model_state_dict, guess_load_checkpoint,
                     make_inputs_require_grad,
-                    prepare_inputs_labels_for_multimodal,
-                    print_peft_model_trainable_parameters, traverse_dict)
+                    prepare_inputs_labels_for_multimodal, traverse_dict)
 
 
 class LLaVAModel(BaseModel):
@@ -102,7 +101,6 @@ class LLaVAModel(BaseModel):
             modules = find_all_linear_names(self.llm)
             lora_config.target_modules = modules
         self.llm = get_peft_model(self.llm, lora_config)
-        print_peft_model_trainable_parameters(self.llm)
 
     def _prepare_visual_encoder_for_lora(self,
                                          lora_config,
@@ -112,7 +110,6 @@ class LLaVAModel(BaseModel):
             modules = find_all_linear_names(self.visual_encoder)
             lora_config.target_modules = modules
         self.visual_encoder = get_peft_model(self.visual_encoder, lora_config)
-        print_peft_model_trainable_parameters(self.visual_encoder)
 
     def gradient_checkpointing_enable(self):
         self.activation_checkpointing_enable()
