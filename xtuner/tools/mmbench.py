@@ -44,10 +44,7 @@ def parse_args():
         default=None,
         help='Specify a prompt template')
     parser.add_argument(
-        '--system',
-        default=("Answer with the option's letter from the given "
-                 'choices directly.'),
-        help='Specify the system text')
+        '--language', type=str, help='test language', default='en')
     parser.add_argument(
         '--bits',
         type=int,
@@ -342,8 +339,11 @@ def main():
 
         text = DEFAULT_IMAGE_TOKEN + '\n' + text
 
-        if args.system is not None:
-            text = text + '\n' + args.system
+        if args.language == 'cn':
+            text = text + '\n' + '请直接回答选项字母。'
+        else:
+            text = text + '\n' + ("Answer with the option's letter from the "
+                                  'given choices directly.')
 
         if args.prompt_template:
             prompt_text = ''
