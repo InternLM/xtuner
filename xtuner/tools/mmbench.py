@@ -291,30 +291,47 @@ def main():
         args.model_name_or_path,
         trust_remote_code=True,
         encode_special_tokens=True)
+    print(f'Load LLM from {args.model_name_or_path}')
 
     llava_path = snapshot_download(
         repo_id=args.llava) if not osp.isdir(args.llava) else args.llava
 
+    # build visual_encoder
+    if 'visual_encoder' in os.listdir(llava_path):
+        assert args.visual_encoder is None, (
+            "Please don't specify the `--visual-encoder` since passed "
+            '`--llava` contains a visual encoder!')
+        visual_encoder_path = osp.join(llava_path, 'visual_encoder')
+    else:
+        assert args.visual_encoder is not None, (
+            'Please specify the `--visual-encoder`!')
+        visual_encoder_path = args.visual_encoder
+    visual_encoder = CLIPVisionModel.from_pretrained(visual_encoder_path)
+    processor = CLIPImageProcessor.from_pretrained(visual_encoder_path)
+    print(f'Load visual_encoder from {visual_encoder_path}')
+
     # load adapter
-    if 'adapter' in os.listdir(llava_path):
-        adapter_path = osp.join(llava_path, 'adapter')
+    if 'llm_adapter' in os.listdir(llava_path):
+        adapter_path = osp.join(llava_path, 'llm_adapter')
         llm = PeftModel.from_pretrained(
             llm, adapter_path, offload_folder=args.offload_folder)
         print(f'Load LLM adapter from {args.llava}')
-    llm.eval()
+    if 'visual_encoder_adapter' in os.listdir(llava_path):
+        adapter_path = osp.join(llava_path, 'visual_encoder_adapter')
+        visual_encoder = PeftModel.from_pretrained(
+            visual_encoder, adapter_path, offload_folder=args.offload_folder)
+        print(f'Load visual_encoder adapter from {args.llava}')
 
     # build projector
     projector_path = osp.join(llava_path, 'projector')
     projector = AutoModel.from_pretrained(projector_path)
     print(f'Load projector from {args.llava}')
+
     projector.cuda()
     projector.eval()
-
-    # build visual_encoder
-    visual_encoder = CLIPVisionModel.from_pretrained(args.visual_encoder)
-    processor = CLIPImageProcessor.from_pretrained(args.visual_encoder)
     visual_encoder.cuda()
     visual_encoder.eval()
+    llm.eval()
 
     _, stop_criteria = get_chat_utils(llm)
 

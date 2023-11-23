@@ -71,11 +71,10 @@ def main():
 
     if 'LLaVAModel' in cfg.model.type:
         if cfg.model.get('llm') and (not cfg.model.get('freeze_llm', False)
-                                     or cfg.model.get('lora')
                                      or cfg.model.get('llm_lora')):
             if 'PeftModel' in model.llm.__class__.__name__:
-                llm_path = osp.join(args.save_dir, 'adapter')
-                print(f'Saving adapter to {llm_path}')
+                llm_path = osp.join(args.save_dir, 'llm_adapter')
+                print(f'Saving LLM adapter to {llm_path}')
             else:
                 llm_path = args.save_dir
                 print(f'Saving LLM tokenizer to {llm_path}')
@@ -85,15 +84,25 @@ def main():
             model.llm.save_pretrained(
                 llm_path, max_shard_size=args.max_shard_size)
 
-        if cfg.model.get('visual_encoder') and not cfg.model.get(
-                'freeze_visual_encoder', False):
-            visual_encoder_path = osp.join(args.save_dir, 'visual_encoder')
-            print(f'Saving visual_encoder to {visual_encoder_path}')
+        if cfg.model.get('visual_encoder') and (
+                not cfg.model.get('freeze_visual_encoder', False)
+                or cfg.model.get('visual_encoder_lora')):
+            if 'PeftModel' in model.llm.__class__.__name__:
+                visual_encoder_path = osp.join(args.save_dir,
+                                               'visual_encoder_adapter')
+                print(
+                    f'Saving visual_encoder adapter to {visual_encoder_path}')
+            else:
+                visual_encoder_path = osp.join(args.save_dir, 'visual_encoder')
+                print(
+                    f'Saving visual_encoder processor to {visual_encoder_path}'
+                )
+                processor = BUILDER.build(cfg.processor)
+                processor.save_pretrained(visual_encoder_path)
+                print(f'Saving visual_encoder to {visual_encoder_path}')
             model.visual_encoder.save_pretrained(
                 visual_encoder_path, max_shard_size=args.max_shard_size)
-            print(f'Saving visual_encoder processor to {visual_encoder_path}')
-            processor = BUILDER.build(cfg.processor)
-            processor.save_pretrained(visual_encoder_path)
+
         if hasattr(model, 'projector'):
             projector_path = osp.join(args.save_dir, 'projector')
             print(f'Saving projector to {projector_path}')

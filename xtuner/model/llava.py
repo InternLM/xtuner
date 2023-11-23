@@ -4,7 +4,6 @@ from collections import OrderedDict
 import torch.nn as nn
 from mmengine.config import Config, ConfigDict
 from mmengine.model import BaseModel
-from mmengine.runner import load_checkpoint
 from peft import get_peft_model, prepare_model_for_kbit_training
 
 from xtuner.registry import BUILDER
@@ -12,7 +11,8 @@ from .modules import ProjectorConfig, ProjectorModel, dispatch_modules
 from .utils import (LoadWoInit, find_all_linear_names,
                     get_peft_model_state_dict, guess_load_checkpoint,
                     make_inputs_require_grad,
-                    prepare_inputs_labels_for_multimodal, traverse_dict)
+                    prepare_inputs_labels_for_multimodal,
+                    print_peft_model_trainable_parameters, traverse_dict)
 
 
 class LLaVAModel(BaseModel):
@@ -26,7 +26,7 @@ class LLaVAModel(BaseModel):
                  pretrained_pth=None,
                  projector_depth=2,
                  llm_lora=None,
-                 peft_model=None,
+                 visual_encoder_lora=None,
                  use_activation_checkpointing=True):
         super().__init__()
         self.freeze_llm = freeze_llm
@@ -67,15 +67,14 @@ class LLaVAModel(BaseModel):
             # enable gradient (activation) checkpointing for memory efficiency
             self.gradient_checkpointing_enable()
 
-        if isinstance(llm_lora, dict) or isinstance(
-                llm_lora, Config) or isinstance(llm_lora, ConfigDict):
-            self.llm_lora = BUILDER.build(llm_lora)
-        else:
-            self.llm_lora = llm_lora
-        self.peft_model = peft_model
-        self.use_lora = llm_lora is not None
-        if self.use_lora:
-            self._prepare_for_lora(peft_model, use_activation_checkpointing)
+        self.use_llm_lora = llm_lora is not None
+        self.use_visual_encoder_lora = visual_encoder_lora is not None
+
+        if self.use_llm_lora:
+            self._prepare_llm_for_lora(llm_lora, use_activation_checkpointing)
+        if self.use_visual_encoder_lora:
+            self._prepare_visual_encoder_for_lora(
+                visual_encoder_lora, use_activation_checkpointing)
 
         if pretrained_pth is not None:
             pretrained_state_dict = guess_load_checkpoint(pretrained_pth)
@@ -86,6 +85,34 @@ class LLaVAModel(BaseModel):
         self.visual_select_layer = visual_select_layer
 
         self._is_init = True
+
+    def _parse_lora_config(self, lora_config):
+        if isinstance(lora_config, dict) or isinstance(
+                lora_config, Config) or isinstance(lora_config, ConfigDict):
+            lora_config = BUILDER.build(lora_config)
+        return lora_config
+
+    def _prepare_llm_for_lora(self,
+                              lora_config,
+                              use_activation_checkpointing=True):
+        lora_config = self._parse_lora_config(lora_config)
+        self.llm = prepare_model_for_kbit_training(
+            self.llm, use_activation_checkpointing)
+        if lora_config.target_modules is None:
+            modules = find_all_linear_names(self.llm)
+            lora_config.target_modules = modules
+        self.llm = get_peft_model(self.llm, lora_config)
+        print_peft_model_trainable_parameters(self.llm)
+
+    def _prepare_visual_encoder_for_lora(self,
+                                         lora_config,
+                                         use_activation_checkpointing=True):
+        lora_config = self._parse_lora_config(lora_config)
+        if lora_config.target_modules is None:
+            modules = find_all_linear_names(self.visual_encoder)
+            lora_config.target_modules = modules
+        self.visual_encoder = get_peft_model(self.visual_encoder, lora_config)
+        print_peft_model_trainable_parameters(self.visual_encoder)
 
     def gradient_checkpointing_enable(self):
         self.activation_checkpointing_enable()
@@ -103,33 +130,24 @@ class LLaVAModel(BaseModel):
         self.visual_encoder.gradient_checkpointing_disable()
         self.projector.gradient_checkpointing_disable()
 
-    def _prepare_for_lora(self,
-                          peft_model=None,
-                          use_activation_checkpointing=True):
-        self.llm = prepare_model_for_kbit_training(
-            self.llm, use_activation_checkpointing)
-        if self.llm_lora.target_modules is None:
-            modules = find_all_linear_names(self.llm)
-            self.llm_lora.target_modules = modules
-
-        self.llm = get_peft_model(self.llm, self.llm_lora)
-        if peft_model is not None:
-            _ = load_checkpoint(self, peft_model)
-
     def init_weights(self):
         pass
 
     def state_dict(self, *args, **kwargs):
         state_dict = super().state_dict(*args, **kwargs)
-        # Step 1. With VisualEncoder
         to_return = OrderedDict()
-        if not self.freeze_visual_encoder:
+        # Step 1. visual_encoder
+        if self.use_visual_encoder_lora:
+            to_return.update(
+                get_peft_model_state_dict(
+                    self.visual_encoder, state_dict=state_dict))
+        elif not self.freeze_visual_encoder:
             to_return.update({
                 k: v
                 for k, v in state_dict.items() if 'visual_encoder.' in k
             })
-        # Step 2. With LLM
-        if self.use_lora:
+        # Step 2. LLM
+        if self.use_llm_lora:
             to_return.update(
                 get_peft_model_state_dict(self.llm, state_dict=state_dict))
         elif not self.freeze_llm:

@@ -312,3 +312,11 @@ def guess_load_checkpoint(pth_model):
     else:
         raise FileNotFoundError(f'Cannot find {pth_model}')
     return state_dict
+
+
+def print_peft_model_trainable_parameters(model):
+    trainable_params, all_param = model.get_nb_trainable_parameters()
+    print_log(
+        f'{model.base_model.model.__class__.__name__}. trainable params: '
+        f'{trainable_params:,d} || all params: {all_param:,d} || '
+        f'trainable%: {100 * trainable_params / all_param}', 'current')
