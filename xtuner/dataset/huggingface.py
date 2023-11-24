@@ -118,7 +118,7 @@ def process(dataset,
 
     # remove data that does not have the valid labels.
     dataset = dataset.filter(
-        lambda example: not all(label < 0 for label in example['labels']))
+        lambda example: any(label >= 0 for label in example['labels']))
 
     # pack to max length
     if pack_to_max_length and split == 'train':
