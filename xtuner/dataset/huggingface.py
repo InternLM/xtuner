@@ -116,13 +116,10 @@ def process(dataset,
         if remove_unused_columns else None,
         num_proc=map_num_proc)
 
-    # checks if all elements of labels are negative
+    # remove data that does not have the valid labels.
+    dataset = dataset.filter(
+        lambda example: not all(label < 0 for label in example['labels']))
 
-    def filter_out_all_negative_labels(example):
-        return not all(label < 0 for label in example['labels'])
-
-    # After tokenizer, filter out data that does not exist in output
-    dataset = dataset.filter(filter_out_all_negative_labels)
     # pack to max length
     if pack_to_max_length and split == 'train':
         if shuffle_before_pack:
