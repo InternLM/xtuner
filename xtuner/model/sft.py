@@ -93,9 +93,9 @@ class SupervisedFinetune(BaseModel):
             message_hub.update_info(f'max_seqlen_rank_{rank}',
                                     data.pop('max_seqlen'))
         else:
-            data.pop('cumulative_len')
-            data.pop('indexes')
-            data.pop('max_seqlen')
+            data.pop('cumulative_len', None)
+            data.pop('indexes', None)
+            data.pop('max_seqlen', None)
 
         if mode == 'loss':
             return self.compute_loss(data, data_samples)
