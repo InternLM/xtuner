@@ -63,7 +63,7 @@ def encode_fn(example,
     if is_multi_turn_conversation:
         assert input_ids_with_output
 
-    input_ids, labels = [], []
+    input_ids, labels = [bos_token_id], [IGNORE_INDEX]
     for single_turn_conversation in example['conversation']:
         input = single_turn_conversation['input']
         if DEFAULT_IMAGE_TOKEN in input and with_image_token:
@@ -79,9 +79,8 @@ def encode_fn(example,
                     input_encode['input_ids'].append(IMAGE_TOKEN_INDEX)
         else:
             input_encode = tokenizer(f'{input}', add_special_tokens=False)
-        input_ids += bos_token_id + input_encode['input_ids']
-        labels += [IGNORE_INDEX] * (
-            len(bos_token_id + input_encode['input_ids']))
+        input_ids += input_encode['input_ids']
+        labels += [IGNORE_INDEX] * len(input_encode['input_ids'])
         if input_ids_with_output:
             output = single_turn_conversation['output']
             output_encode = tokenizer(f'{output}', add_special_tokens=False)
