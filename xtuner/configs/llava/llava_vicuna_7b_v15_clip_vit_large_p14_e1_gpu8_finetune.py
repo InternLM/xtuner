@@ -94,7 +94,7 @@ llava_dataset = dict(
     template_map_fn=dict(
         type=template_map_fn_factory, template=prompt_template),
     max_length=max_length,
-    image_aspect_ratio='pad')
+    pad_image_to_square=True)
 
 train_dataloader = dict(
     batch_size=batch_size,

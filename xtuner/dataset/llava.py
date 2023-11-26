@@ -25,7 +25,7 @@ class LLaVADataset(Dataset):
                  dataset_map_fn=None,
                  template_map_fn=None,
                  max_length=2048,
-                 image_aspect_ratio='pad'):
+                 pad_image_to_square=False):
         super().__init__()
 
         json_data = json.load(open(data_path))
@@ -51,7 +51,7 @@ class LLaVADataset(Dataset):
             self.processor = BUILDER.build(processor)
         else:
             self.processor = processor
-        self.image_aspect_ratio = image_aspect_ratio
+        self.pad_image_to_square = pad_image_to_square
 
     def __len__(self):
         return len(self.text_data)
@@ -62,7 +62,7 @@ class LLaVADataset(Dataset):
             image_file = data_dict['image']
             image = Image.open(os.path.join(self.image_folder,
                                             image_file)).convert('RGB')
-            if self.image_aspect_ratio == 'pad':
+            if self.pad_image_to_square:
                 image = expand2square(
                     image,
                     tuple(int(x * 255) for x in self.processor.image_mean))
