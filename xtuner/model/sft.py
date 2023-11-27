@@ -1,6 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from collections import OrderedDict
 
+import torch
 import torch.distributed as dist
 from mmengine import MessageHub
 from mmengine.config import Config, ConfigDict
@@ -8,6 +9,7 @@ from mmengine.model import BaseModel
 from mmengine.runner import load_checkpoint
 from peft import PeftType, get_peft_model, prepare_model_for_kbit_training
 from torch import nn
+from transformers import AutoConfig, AutoModelForCausalLM
 
 from xtuner.registry import BUILDER
 from .modules import dispatch_modules
@@ -24,7 +26,22 @@ class SupervisedFinetune(BaseModel):
                  use_local_attn=True):
         super().__init__()
         with LoadWoInit():
-            self.llm = self._build_from_cfg_or_module(llm)
+            if 'internlm' in llm.pretrained_model_name_or_path:
+                hf_config = AutoConfig.from_pretrained(
+                    llm.pretrained_model_name_or_path,
+                    torch_dtype=torch.bfloat16,
+                    trust_remote_code=True)
+                assert hf_config.rms_norm_eps == 1e-6
+                hf_config.rms_norm_eps = 1e-5
+                print('set rms_norm_eps to 1e-5')
+                self.llm = AutoModelForCausalLM.from_pretrained(
+                    torch_dtype=torch.bfloat16,
+                    pretrained_model_name_or_path=llm.
+                    pretrained_model_name_or_path,
+                    trust_remote_code=True,
+                    config=hf_config)
+            else:
+                self.llm = self._build_from_cfg_or_module(llm)
         self.llm.config.use_cache = False
         dispatch_modules(self.llm)
 
