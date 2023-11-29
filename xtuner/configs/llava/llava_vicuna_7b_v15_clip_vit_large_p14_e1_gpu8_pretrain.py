@@ -27,6 +27,7 @@ visual_encoder_name_or_path = 'openai/clip-vit-large-patch14'
 llava_data_root = './data/llava_data/'
 data_path = llava_data_root + 'LLaVA-Pretrain/blip_laion_cc_sbu_558k.json'
 image_folder = llava_data_root + 'LLaVA-Pretrain/images'
+prompt_template = PROMPT_TEMPLATE.vicuna
 max_length = 2048
 
 # Scheduler & Optimizer
