@@ -14,6 +14,7 @@ from xtuner.dataset.map_fns import (llava_finetune_map_fn,
                                     template_map_fn_factory)
 from xtuner.engine import DatasetInfoHook, EvaluateChatHook
 from xtuner.model import LLaVAModel
+from xtuner.utils import PROMPT_TEMPLATE
 
 #######################################################################
 #                          PART 1  Settings                           #
