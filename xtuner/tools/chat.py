@@ -35,7 +35,7 @@ def parse_args():
     parser.add_argument(
         '--torch-dtype',
         default='fp16',
-        choices=['fp16', 'bf16', 'fp32', 'auto'],
+        choices=TORCH_DTYPE_MAP.keys(),
         help='Override the default `torch.dtype` and load the model under '
         'a specific `dtype`.')
     parser.add_argument(
