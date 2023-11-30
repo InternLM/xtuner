@@ -12,6 +12,9 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer,
 from xtuner.tools.utils import get_chat_utils, update_stop_criteria
 from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
 
+TORCH_DTYPE_MAP = dict(
+    fp16=torch.float16, bf16=torch.bfloat16, fp32=torch.float32, auto='auto')
+
 
 def remove_prefix(state_dict, prefix):
     new_state_dict = {}
@@ -29,6 +32,12 @@ def parse_args():
     parser.add_argument(
         'model_name_or_path', help='Hugging Face model name or path')
     parser.add_argument('--adapter', default=None, help='adapter name or path')
+    parser.add_argument(
+        '--torch-dtype',
+        default='fp16',
+        choices=['fp16', 'bf16', 'fp32', 'auto'],
+        help='Override the default `torch.dtype` and load the model under '
+        'a specific `dtype`.')
     parser.add_argument(
         '--prompt-template',
         choices=PROMPT_TEMPLATE.keys(),
@@ -136,7 +145,8 @@ def main():
         'load_in_8bit': load_in_8bit,
         'device_map': 'auto',
         'offload_folder': args.offload_folder,
-        'trust_remote_code': True
+        'trust_remote_code': True,
+        'torch_dtype': TORCH_DTYPE_MAP[args.torch_dtype]
     }
     if args.lagent:
         from lagent.actions import ActionExecutor, GoogleSearch
@@ -197,8 +207,8 @@ def main():
             if search_open:
                 from plugins import search  # noqa: F401
         # build model
-        model = AutoModelForCausalLM.from_pretrained(
-            args.model_name_or_path, torch_dtype='auto', **model_kwargs)
+        model = AutoModelForCausalLM.from_pretrained(args.model_name_or_path,
+                                                     **model_kwargs)
         tokenizer = AutoTokenizer.from_pretrained(
             args.model_name_or_path, trust_remote_code=True)
         if args.adapter is not None:
