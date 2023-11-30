@@ -128,158 +128,155 @@ def get_peft_model_state_dict(model, state_dict=None, adapter_name='default'):
     return to_return
 
 
-# Modified from https://github.com/haotian-liu/LLaVA/blob/8467850a63aa0d6f47aa150c53aca4751f0d3d14/llava/model/llava_arch.py#L99  # noqa: E501
+# Modified from https://github.com/haotian-liu/LLaVA/blob/82fc5e0e5f4393a4c26851fa32c69ab37ea3b146/llava/model/llava_arch.py#L99  # noqa: E501
 def prepare_inputs_labels_for_multimodal(
         llm: PreTrainedModel,
         input_ids: torch.LongTensor = None,
+        position_ids: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         past_key_values: Optional[List[torch.FloatTensor]] = None,
         labels: Optional[torch.LongTensor] = None,
         pixel_values: Optional[torch.FloatTensor] = None):
-    if pixel_values is None or input_ids.shape[1] == 1:
-        if (past_key_values is not None and pixel_values is not None
-                and input_ids.shape[1] == 1):
-            attention_mask = torch.ones(
-                (attention_mask.shape[0],
-                 past_key_values[-1][-1].shape[-2] + 1),
-                dtype=attention_mask.dtype,
-                device=attention_mask.device,
-            )
-        return input_ids, attention_mask, past_key_values, None, labels
+    if pixel_values is None:
+        return {
+            'input_ids': input_ids,
+            'position_ids': position_ids,
+            'attention_mask': attention_mask,
+            'past_key_values': past_key_values,
+            'inputs_embeds': None,
+            'labels': labels
+        }
+
+    _labels = labels
+    _position_ids = position_ids
+    _attention_mask = attention_mask
+    if attention_mask is None:
+        attention_mask = torch.ones_like(input_ids, dtype=torch.bool)
+    else:
+        attention_mask = attention_mask.bool()
+    if position_ids is None:
+        position_ids = torch.arange(
+            0, input_ids.shape[1], dtype=torch.long, device=input_ids.device)
+    if labels is None:
+        labels = torch.full_like(input_ids, IGNORE_INDEX)
+
+    # remove the padding using attention_mask -- TODO: double check
+    input_ids = [
+        cur_input_ids[cur_attention_mask]
+        for cur_input_ids, cur_attention_mask in zip(input_ids, attention_mask)
+    ]
+    labels = [
+        cur_labels[cur_attention_mask]
+        for cur_labels, cur_attention_mask in zip(labels, attention_mask)
+    ]
 
     new_inputs_embeds = []
-    new_labels = [] if labels is not None else None
+    new_labels = []
     cur_image_idx = 0
     for batch_idx, cur_input_ids in enumerate(input_ids):
-        if (cur_input_ids == IMAGE_TOKEN_INDEX).sum() == 0:
-            cur_inputs_embeds = llm.get_input_embeddings()(cur_input_ids)
+        num_images = (cur_input_ids == IMAGE_TOKEN_INDEX).sum()
+        if num_images == 0:
+            cur_pixel_values = pixel_values[cur_image_idx]
+            cur_inputs_embeds_1 = llm.get_input_embeddings()(cur_input_ids)
+            cur_inputs_embeds = torch.cat(
+                [cur_inputs_embeds_1, cur_pixel_values[0:0]], dim=0)
             new_inputs_embeds.append(cur_inputs_embeds)
-            if labels is not None:
-                new_labels.append(labels[batch_idx])
+            new_labels.append(labels[batch_idx])
             cur_image_idx += 1
             continue
-        image_token_indices = torch.where(
-            cur_input_ids == IMAGE_TOKEN_INDEX)[0]
+
+        image_token_indices = [-1] + torch.where(
+            cur_input_ids == IMAGE_TOKEN_INDEX)[0].tolist() + [
+                cur_input_ids.shape[0]
+            ]
+        cur_input_ids_noim = []
+        cur_labels = labels[batch_idx]
+        cur_labels_noim = []
+        for i in range(len(image_token_indices) - 1):
+            cur_input_ids_noim.append(cur_input_ids[image_token_indices[i] +
+                                                    1:image_token_indices[i +
+                                                                          1]])
+            cur_labels_noim.append(cur_labels[image_token_indices[i] +
+                                              1:image_token_indices[i + 1]])
+        split_sizes = [x.shape[0] for x in cur_labels_noim]
+        cur_inputs_embeds = llm.get_input_embeddings()(
+            torch.cat(cur_input_ids_noim))
+        cur_inputs_embeds_no_im = torch.split(
+            cur_inputs_embeds, split_sizes, dim=0)
         cur_new_inputs_embeds = []
-        if labels is not None:
-            cur_labels = labels[batch_idx]
-            cur_new_labels = []
-            assert cur_labels.shape == cur_input_ids.shape
-        while image_token_indices.numel() > 0:
-            cur_pixel_values = pixel_values[cur_image_idx]
-            image_token_start = image_token_indices[0]
-            cur_new_inputs_embeds.append(llm.get_input_embeddings()(
-                cur_input_ids[:image_token_start]))
-            cur_new_inputs_embeds.append(cur_pixel_values)
-            if labels is not None:
-                cur_new_labels.append(cur_labels[:image_token_start])
+        cur_new_labels = []
+
+        for i in range(num_images + 1):
+            cur_new_inputs_embeds.append(cur_inputs_embeds_no_im[i])
+            cur_new_labels.append(cur_labels_noim[i])
+            if i < num_images:
+                cur_pixel_values = pixel_values[cur_image_idx]
+                cur_image_idx += 1
+                cur_new_inputs_embeds.append(cur_pixel_values)
                 cur_new_labels.append(
                     torch.full((cur_pixel_values.shape[0], ),
                                IGNORE_INDEX,
-                               device=labels.device,
-                               dtype=labels.dtype))
-                cur_labels = cur_labels[image_token_start + 1:]
-            cur_image_idx += 1
-            cur_input_ids = cur_input_ids[image_token_start + 1:]
-            image_token_indices = torch.where(
-                cur_input_ids == IMAGE_TOKEN_INDEX)[0]
-        if cur_input_ids.numel() > 0:
-            cur_new_inputs_embeds.append(
-                llm.get_input_embeddings()(cur_input_ids))
-            if labels is not None:
-                cur_new_labels.append(cur_labels)
-        cur_new_inputs_embeds = [
-            x.to(device=llm.device) for x in cur_new_inputs_embeds
-        ]
-        cur_new_inputs_embeds = torch.cat(cur_new_inputs_embeds, dim=0)
+                               device=cur_labels.device,
+                               dtype=cur_labels.dtype))
+
+        cur_new_inputs_embeds = torch.cat(cur_new_inputs_embeds)
+        cur_new_labels = torch.cat(cur_new_labels)
+
         new_inputs_embeds.append(cur_new_inputs_embeds)
-        if labels is not None:
-            cur_new_labels = torch.cat(cur_new_labels, dim=0)
-            new_labels.append(cur_new_labels)
+        new_labels.append(cur_new_labels)
 
-    if any(x.shape != new_inputs_embeds[0].shape for x in new_inputs_embeds):
-        max_len = max(x.shape[0] for x in new_inputs_embeds)
+    # Combine them
+    max_len = max(x.shape[0] for x in new_inputs_embeds)
+    batch_size = len(new_inputs_embeds)
 
-        new_inputs_embeds_align = []
-        for cur_new_embed in new_inputs_embeds:
-            cur_new_embed = torch.cat(
-                (
-                    cur_new_embed,
-                    torch.zeros(
-                        (max_len - cur_new_embed.shape[0],
-                         cur_new_embed.shape[1]),
-                        dtype=cur_new_embed.dtype,
-                        device=cur_new_embed.device,
-                    ),
-                ),
-                dim=0,
-            )
-            new_inputs_embeds_align.append(cur_new_embed)
-        new_inputs_embeds = torch.stack(new_inputs_embeds_align, dim=0)
+    new_inputs_embeds_padded = []
+    new_labels_padded = torch.full((batch_size, max_len),
+                                   IGNORE_INDEX,
+                                   dtype=new_labels[0].dtype,
+                                   device=new_labels[0].device)
+    attention_mask = torch.zeros((batch_size, max_len),
+                                 dtype=attention_mask.dtype,
+                                 device=attention_mask.device)
+    position_ids = torch.zeros((batch_size, max_len),
+                               dtype=position_ids.dtype,
+                               device=position_ids.device)
 
-        if labels is not None:
-            new_labels_align = []
-            _new_labels = new_labels
-            for cur_new_label in new_labels:
-                cur_new_label = torch.cat(
-                    (
-                        cur_new_label,
-                        torch.full(
-                            (max_len - cur_new_label.shape[0], ),
-                            IGNORE_INDEX,
-                            dtype=cur_new_label.dtype,
-                            device=cur_new_label.device,
-                        ),
-                    ),
-                    dim=0,
-                )
-                new_labels_align.append(cur_new_label)
-            new_labels = torch.stack(new_labels_align, dim=0)
+    for i, (cur_new_embed,
+            cur_new_labels) in enumerate(zip(new_inputs_embeds, new_labels)):
+        cur_len = cur_new_embed.shape[0]
+        new_inputs_embeds_padded.append(
+            torch.cat((cur_new_embed,
+                       torch.zeros((max_len - cur_len, cur_new_embed.shape[1]),
+                                   dtype=cur_new_embed.dtype,
+                                   device=cur_new_embed.device)),
+                      dim=0))
+        if cur_len > 0:
+            new_labels_padded[i, :cur_len] = cur_new_labels
+            attention_mask[i, :cur_len] = True
+            position_ids[i, :cur_len] = torch.arange(
+                0,
+                cur_len,
+                dtype=position_ids.dtype,
+                device=position_ids.device)
 
-        if attention_mask is not None:
-            new_attention_mask = []
-            for (cur_attention_mask, cur_new_labels,
-                 cur_new_labels_align) in zip(attention_mask, _new_labels,
-                                              new_labels):
-                new_attn_mask_pad_left = torch.full(
-                    (cur_new_labels.shape[0] - labels.shape[1], ),
-                    True,
-                    dtype=attention_mask.dtype,
-                    device=attention_mask.device,
-                )
-                new_attn_mask_pad_right = torch.full(
-                    (cur_new_labels_align.shape[0] -
-                     cur_new_labels.shape[0], ),
-                    False,
-                    dtype=attention_mask.dtype,
-                    device=attention_mask.device,
-                )
-                cur_new_attention_mask = torch.cat(
-                    (new_attn_mask_pad_left, cur_attention_mask,
-                     new_attn_mask_pad_right),
-                    dim=0)
-                new_attention_mask.append(cur_new_attention_mask)
-            attention_mask = torch.stack(new_attention_mask, dim=0)
-            assert attention_mask.shape == new_labels.shape
+    new_inputs_embeds = torch.stack(new_inputs_embeds_padded, dim=0)
+
+    if _labels is None:
+        new_labels = None
     else:
-        new_inputs_embeds = torch.stack(new_inputs_embeds, dim=0)
-        if labels is not None:
-            new_labels = torch.stack(new_labels, dim=0)
+        new_labels = new_labels_padded
 
-        if attention_mask is not None:
-            new_attn_mask_pad_left = torch.full(
-                (attention_mask.shape[0],
-                 new_inputs_embeds.shape[1] - input_ids.shape[1]),
-                True,
-                dtype=attention_mask.dtype,
-                device=attention_mask.device,
-            )
-            attention_mask = torch.cat(
-                (new_attn_mask_pad_left, attention_mask), dim=1)
-            assert attention_mask.shape == new_inputs_embeds.shape[:2]
+    if _attention_mask is None:
+        attention_mask = None
+    else:
+        attention_mask = attention_mask.to(dtype=_attention_mask.dtype)
+
+    if _position_ids is None:
+        position_ids = None
 
     return {
         'input_ids': None,
+        'position_ids': position_ids,
         'attention_mask': attention_mask,
         'past_key_values': past_key_values,
         'inputs_embeds': new_inputs_embeds,
