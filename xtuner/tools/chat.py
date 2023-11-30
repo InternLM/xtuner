@@ -197,8 +197,8 @@ def main():
             if search_open:
                 from plugins import search  # noqa: F401
         # build model
-        model = AutoModelForCausalLM.from_pretrained(args.model_name_or_path,
-                                                     **model_kwargs)
+        model = AutoModelForCausalLM.from_pretrained(
+            args.model_name_or_path, torch_dtype='auto', **model_kwargs)
         tokenizer = AutoTokenizer.from_pretrained(
             args.model_name_or_path, trust_remote_code=True)
         if args.adapter is not None:
