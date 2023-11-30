@@ -86,6 +86,37 @@ def dispatch_internlm_rmsnorm_forward(model):
             module.forward = types.MethodType(rms_norm_forward, module)
 
 
+def replace_internlm_rmsnorm_with_apex(model):
+    print_log('replace internlm rmsnorm with apex', 'current')
+    from apex.normalization.fused_layer_norm import MixedFusedRMSNorm
+
+    def traverse(module):
+        for name, child in module.named_children():
+            if type(child).__name__ == 'InternLMRMSNorm':
+                child_new = MixedFusedRMSNorm(child.weight.shape[0]).to(device=child.weight.device, dtype=child.weight.dtype)
+                child_new.weight.data = child.weight.data
+                setattr(module, name, child_new)
+            else:
+                traverse(child)
+    
+    traverse(model)
+
+
+def replace_internlm_rote(model):
+    print_log('replace internlm rope', 'current')
+    from .internlm import RotaryEmbedding
+    def traverse(module):
+        for name, child in module.named_children():
+            if type(child).__name__ == 'InternLMRotaryEmbedding':
+                dim_model = child.inv_freq.shape[0] * 2
+                child_new = RotaryEmbedding(dim_model).to(device=child.device, dtype=child.weight.dtype)
+                setattr(module, name, child_new)
+            else:
+                traverse(child)
+    
+    traverse(model)
+
+
 def dispath_baichuan2_norm_head_forward(model):
     print_log('dispatch baichuan2 NormHead forward', 'current')
     for module in model.modules():
@@ -129,7 +160,9 @@ def dispatch_modules(model):
     model_name = model.__class__.__name__.lower()
     if 'internlm' in model_name:
         dispatch_internlm_attn_forward(model)
-        dispatch_internlm_rmsnorm_forward(model)
+        # replace_internlm_rmsnorm_with_apex(model)
+        # dispatch_internlm_rmsnorm_forward(model)
+        # replace_internlm_rote(model)
     if 'llama' in model_name:
         dispatch_llama_attn_forward(model)
         dispatch_llama_rmsnorm_forward(model)

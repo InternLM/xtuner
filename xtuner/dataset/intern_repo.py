@@ -1,7 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import os
 
-from datasets import concatenate_datasets, load_dataset
+from datasets import concatenate_datasets, load_dataset, load_from_disk
 from mmengine import print_log
 from torch import distributed as dist
 from tqdm import tqdm
@@ -15,6 +15,7 @@ def process(dataset_folder,
             shuffle_before_pack=True,
             pack_to_max_length=False,
             map_num_proc=32):
+    return load_from_disk('/mnt/petrelfs/caoweihan/projects/xtuner/wenwei_dataset/packed_dataset')
 
     ds = []
     for root, dirs, files in os.walk(dataset_folder, followlinks=True):
