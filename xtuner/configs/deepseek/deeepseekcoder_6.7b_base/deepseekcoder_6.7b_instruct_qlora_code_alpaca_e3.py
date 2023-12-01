@@ -21,7 +21,7 @@ from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-pretrained_model_name_or_path = 'Qwen/Qwen-1_8B'
+pretrained_model_name_or_path = 'deepseek-ai/deepseek-coder-6.7b-base'
 
 # Data
 data_path = 'HuggingFaceH4/CodeAlpaca_20K'
