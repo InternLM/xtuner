@@ -1,6 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import torch
-from mmengine.dataset import DefaultSampler
 from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
                             LoggerHook, ParamSchedulerHook)
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR, LinearLR
@@ -12,6 +11,7 @@ from xtuner.dataset import LLaVADataset
 from xtuner.dataset.collate_fns import default_collate_fn
 from xtuner.dataset.map_fns import (llava_finetune_map_fn,
                                     template_map_fn_factory)
+from xtuner.dataset.samplers import LengthGroupedSampler
 from xtuner.engine import DatasetInfoHook, EvaluateChatHook
 from xtuner.model import LLaVAModel
 from xtuner.utils import PROMPT_TEMPLATE
@@ -46,9 +46,7 @@ warmup_ratio = 0.03
 
 # Evaluate the generation performance during the training
 evaluation_freq = 500
-SYSTEM = ('A chat between a curious user and an artificial intelligence '
-          'assistant. The assistant gives helpful, detailed, and polite '
-          'answers to the user\'s questions.')
+SYSTEM = ''
 evaluation_images = 'https://llava-vl.github.io/static/images/view.jpg'
 evaluation_inputs = ['请描述一下这张照片', 'Please describe this picture']
 
@@ -99,7 +97,10 @@ train_dataloader = dict(
     batch_size=batch_size,
     num_workers=dataloader_num_workers,
     dataset=llava_dataset,
-    sampler=dict(type=DefaultSampler, shuffle=True),
+    sampler=dict(
+        type=LengthGroupedSampler,
+        length_property='modality_length',
+        per_device_batch_size=batch_size * accumulative_counts),
     collate_fn=dict(type=default_collate_fn))
 
 #######################################################################
