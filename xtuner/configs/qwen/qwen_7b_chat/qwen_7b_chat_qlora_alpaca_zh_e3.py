@@ -24,7 +24,7 @@ from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
 pretrained_model_name_or_path = 'Qwen/Qwen-7B-Chat'
 
 # Data
-alpaca_zh_path = 'Qwen/Qwen-7B-Chat'
+alpaca_zh_path = 'silk-road/alpaca-data-gpt4-chinese'
 prompt_template = PROMPT_TEMPLATE.qwen_chat
 max_length = 2048
 pack_to_max_length = True
