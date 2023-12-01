@@ -53,6 +53,16 @@ class LLaVADataset(Dataset):
             self.processor = processor
         self.pad_image_to_square = pad_image_to_square
 
+    @property
+    def modality_length(self):
+        length_list = []
+        for data_dict in self.text_data:
+            cur_len = len(data_dict['input_ids'])
+            if data_dict.get('image', None) is None:
+                cur_len = -cur_len
+            length_list.append(cur_len)
+        return length_list
+
     def __len__(self):
         return len(self.text_data)
 

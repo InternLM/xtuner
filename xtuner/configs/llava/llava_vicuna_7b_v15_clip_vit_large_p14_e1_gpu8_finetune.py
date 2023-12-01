@@ -1,6 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import torch
-from mmengine.dataset import DefaultSampler
 from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
                             LoggerHook, ParamSchedulerHook)
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR, LinearLR
@@ -12,6 +11,7 @@ from xtuner.dataset import LLaVADataset
 from xtuner.dataset.collate_fns import default_collate_fn
 from xtuner.dataset.map_fns import (llava_finetune_map_fn,
                                     template_map_fn_factory)
+from xtuner.dataset.samplers import LengthGroupedSampler
 from xtuner.engine import DatasetInfoHook, EvaluateChatHook
 from xtuner.model import LLaVAModel
 from xtuner.utils import PROMPT_TEMPLATE
@@ -99,7 +99,10 @@ train_dataloader = dict(
     batch_size=batch_size,
     num_workers=dataloader_num_workers,
     dataset=llava_dataset,
-    sampler=dict(type=DefaultSampler, shuffle=True),
+    sampler=dict(
+        type=LengthGroupedSampler,
+        length_property='modality_length',
+        per_device_batch_size=batch_size * accumulative_counts),
     collate_fn=dict(type=default_collate_fn))
 
 #######################################################################
