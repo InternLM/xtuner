@@ -365,9 +365,6 @@ def main():
         if args.prompt_template:
             prompt_text = ''
             template = PROMPT_TEMPLATE[args.prompt_template]
-            if template.get('KEEP_SYSTEM', False):
-                prompt_text += template['SYSTEM'].format(
-                    system='', round=1, bot_name=args.bot_name)
             prompt_text += template['INSTRUCTION'].format(
                 input=text, round=1, bot_name=args.bot_name)
         else:
