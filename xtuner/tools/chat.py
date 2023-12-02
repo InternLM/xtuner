@@ -249,7 +249,8 @@ def main():
                     'Please specify the `--visual-encoder`!')
                 visual_encoder_path = args.visual_encoder
             visual_encoder = CLIPVisionModel.from_pretrained(
-                visual_encoder_path)
+                visual_encoder_path,
+                torch_dtype=TORCH_DTYPE_MAP[args.torch_dtype])
             processor = CLIPImageProcessor.from_pretrained(visual_encoder_path)
             print(f'Load visual_encoder from {visual_encoder_path}')
 
@@ -269,7 +270,8 @@ def main():
 
             # build projector
             projector_path = osp.join(llava_path, 'projector')
-            projector = AutoModel.from_pretrained(projector_path)
+            projector = AutoModel.from_pretrained(
+                projector_path, torch_dtype=TORCH_DTYPE_MAP[args.torch_dtype])
             print(f'Load projector from {args.llava}')
 
             projector.cuda()

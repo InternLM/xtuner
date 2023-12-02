@@ -26,6 +26,9 @@ from xtuner.tools.utils import get_chat_utils
 from xtuner.utils import (DEFAULT_IMAGE_TOKEN, IMAGE_TOKEN_INDEX,
                           PROMPT_TEMPLATE)
 
+TORCH_DTYPE_MAP = dict(
+    fp16=torch.float16, bf16=torch.bfloat16, fp32=torch.float32, auto='auto')
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description='MMBench')
@@ -45,6 +48,12 @@ def parse_args():
         help='Specify a prompt template')
     parser.add_argument(
         '--language', type=str, help='test language', default='en')
+    parser.add_argument(
+        '--torch-dtype',
+        default='fp16',
+        choices=TORCH_DTYPE_MAP.keys(),
+        help='Override the default `torch.dtype` and load the model under '
+        'a specific `dtype`.')
     parser.add_argument(
         '--bits',
         type=int,
@@ -281,7 +290,8 @@ def main():
         'load_in_8bit': load_in_8bit,
         'device_map': 'auto',
         'offload_folder': args.offload_folder,
-        'trust_remote_code': True
+        'trust_remote_code': True,
+        'torch_dtype': TORCH_DTYPE_MAP[args.torch_dtype]
     }
 
     # build llm
@@ -306,7 +316,8 @@ def main():
         assert args.visual_encoder is not None, (
             'Please specify the `--visual-encoder`!')
         visual_encoder_path = args.visual_encoder
-    visual_encoder = CLIPVisionModel.from_pretrained(visual_encoder_path)
+    visual_encoder = CLIPVisionModel.from_pretrained(
+        visual_encoder_path, torch_dtype=TORCH_DTYPE_MAP[args.torch_dtype])
     processor = CLIPImageProcessor.from_pretrained(visual_encoder_path)
     print(f'Load visual_encoder from {visual_encoder_path}')
 
@@ -324,7 +335,8 @@ def main():
 
     # build projector
     projector_path = osp.join(llava_path, 'projector')
-    projector = AutoModel.from_pretrained(projector_path)
+    projector = AutoModel.from_pretrained(
+        projector_path, torch_dtype=TORCH_DTYPE_MAP[args.torch_dtype])
     print(f'Load projector from {args.llava}')
 
     projector.cuda()
