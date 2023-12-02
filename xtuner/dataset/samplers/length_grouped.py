@@ -98,10 +98,10 @@ class LengthGroupedSampler(Sampler):
 
         total_batch_size = per_device_batch_size * self.world_size
         if mega_batch_mult is None:
-            # Default for mega_batch_mult: 10 or the number to get 4
+            # Default for mega_batch_mult: 50 or the number to get 4
             # megabatches, whichever is smaller.
             mega_batch_mult = min(
-                len(self.dataset) // (total_batch_size * 4), 10)
+                len(self.dataset) // (total_batch_size * 4), 50)
             # Just in case, for tiny datasets
             if mega_batch_mult == 0:
                 mega_batch_mult = 1
