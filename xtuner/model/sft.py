@@ -108,30 +108,29 @@ class SupervisedFinetune(BaseModel):
         if self.use_local_attn:
             message_hub = MessageHub.get_instance('for_flash_attn')
             rank = dist.get_rank()
-            saved_dict = torch.load(f'/mnt/petrelfs/caoweihan/projects/train_internlm/saved/rank_{rank}_cnt_0.pth', map_location='cpu')
-            cu_seqlens = saved_dict['cu_seqlens'].cuda()
-            cu_seqlens = [cu_seqlens[0]]
-            input_ids = saved_dict['input_ids'].cuda()
-            indexes = saved_dict['indexes'].cuda()
-            max_seqlen = indexes.max().item() + 1
-            data['input_ids'].data = input_ids.data
-            # data['input_ids'] = input_ids.to(data['input_ids'].device)
-            message_hub.update_info(f'cumulative_len_rank_{rank}',
-                                    cu_seqlens)
-            message_hub.update_info(f'indexes_rank_{rank}',
-                                    indexes)
-            message_hub.update_info(f'max_seqlen_rank_{rank}',
-                                    max_seqlen)
-            data.pop('cumulative_len')
-            data.pop('indexes')
-            data.pop('max_seqlen')
-
+            # saved_dict = torch.load(f'/mnt/petrelfs/caoweihan/projects/train_internlm/saved/rank_{rank}_cnt_0.pth', map_location='cpu')
+            # cu_seqlens = saved_dict['cu_seqlens'].cuda()
+            # cu_seqlens = [cu_seqlens[0]]
+            # input_ids = saved_dict['input_ids'].cuda()
+            # indexes = saved_dict['indexes'].cuda()
+            # max_seqlen = indexes.max().item() + 1
+            # data['input_ids'].data = input_ids.data
             # message_hub.update_info(f'cumulative_len_rank_{rank}',
-            #                         data.pop('cumulative_len'))
+            #                         cu_seqlens)
             # message_hub.update_info(f'indexes_rank_{rank}',
-            #                         data.pop('indexes'))
+            #                         indexes)
             # message_hub.update_info(f'max_seqlen_rank_{rank}',
-            #                         data.pop('max_seqlen'))
+            #                         max_seqlen)
+            # data.pop('cumulative_len')
+            # data.pop('indexes')
+            # data.pop('max_seqlen')
+
+            message_hub.update_info(f'cumulative_len_rank_{rank}',
+                                    data.pop('cumulative_len'))
+            message_hub.update_info(f'indexes_rank_{rank}',
+                                    data.pop('indexes'))
+            message_hub.update_info(f'max_seqlen_rank_{rank}',
+                                    data.pop('max_seqlen'))
         else:
             data.pop('cumulative_len', None)
             data.pop('indexes', None)
@@ -159,10 +158,10 @@ class SupervisedFinetune(BaseModel):
 
     def compute_loss(self, data, data_samples=None):
         outputs = self.llm(**data)
-        rank = dist.get_rank()
-        torch.save(dict(outputs), f'./saved/rank_{rank}_cnt_0_out.pth')
+        # rank = dist.get_rank()
+        # torch.save(dict(outputs), f'./saved/rank_{rank}_cnt_0_out.pth')
         loss_dict = {'loss': outputs.loss}
-        assert False
+        # assert False
         return loss_dict
 
     def state_dict(self, destination=None, prefix='', keep_vars=False):
