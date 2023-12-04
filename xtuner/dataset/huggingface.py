@@ -112,7 +112,9 @@ def process(dataset,
         remove_unused_columns = True
 
     # remove invalid data
-    dataset = dataset.filter(lambda example: len(example['conversation']) > 0)
+    dataset = dataset.filter(
+        lambda example: len(example['conversation']) > 0,
+        num_proc=map_num_proc)
 
     # tokenize
     if isinstance(tokenizer, dict) or isinstance(
@@ -131,7 +133,8 @@ def process(dataset,
 
     # remove data that does not have the valid labels.
     dataset = dataset.filter(
-        lambda example: any(label >= 0 for label in example['labels']))
+        lambda example: any(label >= 0 for label in example['labels']),
+        num_proc=map_num_proc)
 
     # pack to max length
     if pack_to_max_length and split == 'train':
@@ -140,6 +143,9 @@ def process(dataset,
             dataset = dataset.flatten_indices(num_proc=map_num_proc)
         dataset = dataset.map(
             Packer(max_length), batched=True, num_proc=map_num_proc)
+
+    # add 'length'
+    setattr(dataset, 'length', [len(i['input_ids']) for i in dataset])
 
     return dataset
 
