@@ -175,19 +175,34 @@ def internlm_attn_forward(
     # Modified from https://huggingface.co/internlm/internlm-7b/blob/939a68c0dc1bd5f35b63c87d44af05ce33379061/modeling_internlm.py#L161  # noqa:E501
     bsz, q_len, _ = hidden_states.size()
     assert bsz == 1
+    assert use_local_attn
 
     if use_local_attn:
         assert len(cumulative_len) == bsz and cumulative_len[0][-1] == q_len
+        
+    
+    weight = torch.cat([self.q_proj.weight, self.k_proj.weight, self.v_proj.weight], dim=0)
+    bias = torch.cat([self.q_proj.bias, self.k_proj.bias, self.v_proj.bias], dim=0) if self.q_proj.bias is not None else None
+    qkv = F.linear(hidden_states, weight, bias)
+    qkv = qkv.reshape(bsz, q_len, 3, self.num_heads, self.head_dim)
+    q, k, v = qkv[:, :, 0], qkv[:, :, 1], qkv[:, :, 2]
+    query_states = q.transpose(1, 2)
+    key_states = k.transpose(1, 2)
+    value_states = v.transpose(1, 2)
 
-    query_states = self.q_proj(hidden_states).view(bsz, q_len, self.num_heads,
-                                                   self.head_dim).transpose(
-                                                       1, 2)
-    key_states = self.k_proj(hidden_states).view(bsz, q_len, self.num_heads,
-                                                 self.head_dim).transpose(
-                                                     1, 2)
-    value_states = self.v_proj(hidden_states).view(bsz, q_len, self.num_heads,
-                                                   self.head_dim).transpose(
-                                                       1, 2)
+    # torch.save(query_states, f'./saved/rank_{rank}_q.pth')
+    # torch.save(key_states, f'./saved/rank_{rank}_k.pth')
+    # torch.save(value_states, f'./saved/rank_{rank}_v.pth')
+
+    # query_states = self.q_proj(hidden_states).view(bsz, q_len, self.num_heads,
+    #                                                self.head_dim).transpose(
+    #                                                    1, 2)
+    # key_states = self.k_proj(hidden_states).view(bsz, q_len, self.num_heads,
+    #                                              self.head_dim).transpose(
+    #                                                  1, 2)
+    # value_states = self.v_proj(hidden_states).view(bsz, q_len, self.num_heads,
+    #                                                self.head_dim).transpose(
+    #                                                    1, 2)
 
     kv_seq_len = key_states.shape[-2]
     if past_key_value is not None:
