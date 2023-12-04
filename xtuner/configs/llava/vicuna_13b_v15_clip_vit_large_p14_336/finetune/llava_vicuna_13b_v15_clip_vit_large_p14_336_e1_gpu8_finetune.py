@@ -23,7 +23,7 @@ from xtuner.utils import PROMPT_TEMPLATE
 llm_name_or_path = 'lmsys/vicuna-13b-v1.5'
 visual_encoder_name_or_path = 'openai/clip-vit-large-patch14-336'
 # Specify the pretrained pth
-pretrained_pth = './work_dirs/llava_vicuna_7b_v15_clip_vit_large_p14_336_e1_gpu8_pretrain/epoch_1.pth'  # noqa: E501
+pretrained_pth = './work_dirs/llava_vicuna_13b_v15_clip_vit_large_p14_336_e1_gpu8_pretrain/epoch_1.pth'  # noqa: E501
 
 # Data
 llava_data_root = './data/llava_data/'

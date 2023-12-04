@@ -25,7 +25,7 @@ from xtuner.utils import PROMPT_TEMPLATE
 llm_name_or_path = 'internlm/internlm-chat-20b'
 visual_encoder_name_or_path = 'openai/clip-vit-large-patch14-336'
 # Specify the pretrained pth
-pretrained_pth = './work_dirs/llava_internlm_chat_7b_clip_vit_large_p14_336_e1_gpu8_pretrain/epoch_1.pth'  # noqa: E501
+pretrained_pth = './work_dirs/llava_internlm_chat_20b_clip_vit_large_p14_336_e1_gpu8_pretrain/epoch_1.pth'  # noqa: E501
 
 # Data
 llava_data_root = './data/llava_data/'
