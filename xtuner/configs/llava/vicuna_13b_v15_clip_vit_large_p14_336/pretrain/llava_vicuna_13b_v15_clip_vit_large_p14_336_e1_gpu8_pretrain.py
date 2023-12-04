@@ -1,49 +1,40 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import torch
+from mmengine.dataset import DefaultSampler
 from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
                             LoggerHook, ParamSchedulerHook)
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR, LinearLR
-from peft import LoraConfig
 from torch.optim import AdamW
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           BitsAndBytesConfig, CLIPImageProcessor,
                           CLIPVisionModel)
 
-from xtuner.dataset import ConcatDataset, LLaVADataset
+from xtuner.dataset import LLaVADataset
 from xtuner.dataset.collate_fns import default_collate_fn
-from xtuner.dataset.map_fns import (llava_finetune_map_fn,
-                                    template_map_fn_factory)
-from xtuner.dataset.samplers import LengthGroupedSampler
+from xtuner.dataset.map_fns import llava_pretrain_map_fn
 from xtuner.engine import DatasetInfoHook, EvaluateChatHook
 from xtuner.model import LLaVAModel
-from xtuner.utils import PROMPT_TEMPLATE
 
 #######################################################################
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-llm_name_or_path = 'internlm/internlm-chat-7b'
+llm_name_or_path = 'lmsys/vicuna-13b-v1.5'
 visual_encoder_name_or_path = 'openai/clip-vit-large-patch14-336'
-# Specify the pretrained pth
-pretrained_pth = './work_dirs/llava_internlm_chat_7b_clip_vit_large_p14_336_e1_gpu8_pretrain/epoch_1.pth'  # noqa: E501
 
 # Data
 llava_data_root = './data/llava_data/'
-data_path = llava_data_root + 'LLaVA-Instruct-150K/llava_v1_5_mix665k.json'
-image_folder = llava_data_root + 'llava_images'
-llava_zh_data_path = llava_data_root + 'llava_zh/llava_instruct_150k_zh.json'
-llava_zh_image_folder = llava_data_root + 'llava_images/coco/train2017'
-
-prompt_template = PROMPT_TEMPLATE.internlm_chat
+data_path = llava_data_root + 'LLaVA-Pretrain/blip_laion_cc_sbu_558k.json'
+image_folder = llava_data_root + 'LLaVA-Pretrain/images'
 max_length = int(2048 - (336 / 14)**2)
 
 # Scheduler & Optimizer
-batch_size = 16  # per_device
+batch_size = 32  # per_device
 accumulative_counts = 1
 dataloader_num_workers = 0
 max_epochs = 1
 optim_type = AdamW
-lr = 2e-4
+lr = 1e-3
 betas = (0.9, 0.999)
 weight_decay = 0
 max_norm = 1  # grad clip
@@ -53,7 +44,7 @@ warmup_ratio = 0.03
 evaluation_freq = 500
 SYSTEM = ''
 evaluation_images = 'https://llava-vl.github.io/static/images/view.jpg'
-evaluation_inputs = ['请描述一下这张照片', 'Please describe this picture']
+evaluation_inputs = ['']  # Keep empty strings during pretrain
 
 #######################################################################
 #                 PART 2  Model & Tokenizer & Processor               #
@@ -73,7 +64,6 @@ model = dict(
     type=LLaVAModel,
     freeze_llm=True,
     freeze_visual_encoder=True,
-    pretrained_pth=pretrained_pth,
     llm=dict(
         type=AutoModelForCausalLM.from_pretrained,
         pretrained_model_name_or_path=llm_name_or_path,
@@ -88,13 +78,6 @@ model = dict(
             bnb_4bit_compute_dtype=torch.float16,
             bnb_4bit_use_double_quant=True,
             bnb_4bit_quant_type='nf4')),
-    llm_lora=dict(
-        type=LoraConfig,
-        r=256,
-        lora_alpha=256,
-        lora_dropout=0.05,
-        bias='none',
-        task_type='CAUSAL_LM'),
     visual_encoder=dict(
         type=CLIPVisionModel.from_pretrained,
         pretrained_model_name_or_path=visual_encoder_name_or_path))
@@ -108,36 +91,16 @@ llava_dataset = dict(
     image_folder=image_folder,
     tokenizer=tokenizer,
     processor=processor,
-    dataset_map_fn=llava_finetune_map_fn,
-    template_map_fn=dict(
-        type=template_map_fn_factory, template=prompt_template),
+    dataset_map_fn=llava_pretrain_map_fn,
+    template_map_fn=None,
     max_length=max_length,
-    pad_image_to_square=True)
-
-llava_zh_dataset = dict(
-    type=LLaVADataset,
-    data_path=llava_zh_data_path,
-    image_folder=llava_zh_image_folder,
-    tokenizer=tokenizer,
-    processor=processor,
-    dataset_map_fn=llava_finetune_map_fn,
-    template_map_fn=dict(
-        type=template_map_fn_factory, template=prompt_template),
-    max_length=max_length,
-    pad_image_to_square=True)
-
-train_dataset = dict(
-    type=ConcatDataset,
-    datasets_cfg=dict(llava=llava_dataset, llava_zh=llava_zh_dataset))
+    pad_image_to_square=False)
 
 train_dataloader = dict(
     batch_size=batch_size,
     num_workers=dataloader_num_workers,
-    dataset=train_dataset,
-    sampler=dict(
-        type=LengthGroupedSampler,
-        length_property='modality_length',
-        per_device_batch_size=batch_size * accumulative_counts),
+    dataset=llava_dataset,
+    sampler=dict(type=DefaultSampler, shuffle=True),
     collate_fn=dict(type=default_collate_fn))
 
 #######################################################################
@@ -188,8 +151,7 @@ custom_hooks = [
         every_n_iters=evaluation_freq,
         evaluation_inputs=evaluation_inputs,
         evaluation_images=evaluation_images,
-        system=SYSTEM,
-        prompt_template=prompt_template)
+        system=SYSTEM)
 ]
 
 # configure default hooks
