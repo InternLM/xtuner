@@ -1,18 +1,17 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import torch
-from mmengine.dataset import DefaultSampler
 from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
                             LoggerHook, ParamSchedulerHook)
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR, LinearLR
-from peft import LoraConfig
 from torch.optim import AdamW
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
-                          BitsAndBytesConfig, CLIPImageProcessor,
-                          CLIPVisionModel)
+                          CLIPImageProcessor, CLIPVisionModel)
 
-from xtuner.dataset import LLaVADataset
+from xtuner.dataset import ConcatDataset, LLaVADataset
 from xtuner.dataset.collate_fns import default_collate_fn
-from xtuner.dataset.map_fns import llava_map_fn, template_map_fn_factory
+from xtuner.dataset.map_fns import (llava_finetune_map_fn,
+                                    template_map_fn_factory)
+from xtuner.dataset.samplers import LengthGroupedSampler
 from xtuner.engine import DatasetInfoHook, EvaluateChatHook
 from xtuner.model import LLaVAModel
 from xtuner.utils import PROMPT_TEMPLATE
@@ -21,24 +20,28 @@ from xtuner.utils import PROMPT_TEMPLATE
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-llm_name_or_path = 'meta-llama/Llama-2-7b-chat-hf'
-visual_encoder_name_or_path = 'openai/clip-vit-large-patch14'
+llm_name_or_path = 'internlm/internlm-chat-7b'
+visual_encoder_name_or_path = 'openai/clip-vit-large-patch14-336'
+# Specify the pretrained pth
+pretrained_pth = './work_dirs/llava_internlm_chat_7b_clip_vit_large_p14_336_e1_gpu8_pretrain/epoch_1.pth'  # noqa: E501
 
 # Data
 llava_data_root = './data/llava_data/'
-data_path = llava_data_root + 'LLaVA-Pretrain/blip_laion_cc_sbu_558k.json'
-image_folder = llava_data_root + 'LLaVA-Pretrain/images'
-prompt_template = PROMPT_TEMPLATE.llama2_chat
-max_length = int(2048 - (224 / 14)**2)
+data_path = llava_data_root + 'LLaVA-Instruct-150K/llava_v1_5_mix665k.json'
+image_folder = llava_data_root + 'llava_images'
+llava_zh_data_path = llava_data_root + 'llava_zh/llava_instruct_150k_zh.json'
+llava_zh_image_folder = llava_data_root + 'llava_images/coco/train2017'
+
+prompt_template = PROMPT_TEMPLATE.internlm_chat
+max_length = int(2048 - (336 / 14)**2)
 
 # Scheduler & Optimizer
-batch_size = 32  # per_device
+batch_size = 16  # per_device
 accumulative_counts = 1
 dataloader_num_workers = 0
 max_epochs = 1
 optim_type = AdamW
-lr = 2e-4
-lr_projector = 1e-3
+lr = 2e-5
 betas = (0.9, 0.999)
 weight_decay = 0
 max_norm = 1  # grad clip
@@ -66,29 +69,14 @@ processor = dict(
 
 model = dict(
     type=LLaVAModel,
-    freeze_llm=True,
+    freeze_llm=False,
     freeze_visual_encoder=True,
+    pretrained_pth=pretrained_pth,
     llm=dict(
         type=AutoModelForCausalLM.from_pretrained,
         pretrained_model_name_or_path=llm_name_or_path,
         trust_remote_code=True,
-        torch_dtype=torch.float16,
-        quantization_config=dict(
-            type=BitsAndBytesConfig,
-            load_in_4bit=True,
-            load_in_8bit=False,
-            llm_int8_threshold=6.0,
-            llm_int8_has_fp16_weight=False,
-            bnb_4bit_compute_dtype=torch.float16,
-            bnb_4bit_use_double_quant=True,
-            bnb_4bit_quant_type='nf4')),
-    llm_lora=dict(
-        type=LoraConfig,
-        r=128,
-        lora_alpha=256,
-        lora_dropout=0.05,
-        bias='none',
-        task_type='CAUSAL_LM'),
+        torch_dtype=torch.float32),
     visual_encoder=dict(
         type=CLIPVisionModel.from_pretrained,
         pretrained_model_name_or_path=visual_encoder_name_or_path))
@@ -102,17 +90,36 @@ llava_dataset = dict(
     image_folder=image_folder,
     tokenizer=tokenizer,
     processor=processor,
-    dataset_map_fn=llava_map_fn,
+    dataset_map_fn=llava_finetune_map_fn,
     template_map_fn=dict(
         type=template_map_fn_factory, template=prompt_template),
     max_length=max_length,
-    image_aspect_ratio='pad')
+    pad_image_to_square=True)
+
+llava_zh_dataset = dict(
+    type=LLaVADataset,
+    data_path=llava_zh_data_path,
+    image_folder=llava_zh_image_folder,
+    tokenizer=tokenizer,
+    processor=processor,
+    dataset_map_fn=llava_finetune_map_fn,
+    template_map_fn=dict(
+        type=template_map_fn_factory, template=prompt_template),
+    max_length=max_length,
+    pad_image_to_square=True)
+
+train_dataset = dict(
+    type=ConcatDataset,
+    datasets_cfg=dict(llava=llava_dataset, llava_zh=llava_zh_dataset))
 
 train_dataloader = dict(
     batch_size=batch_size,
     num_workers=dataloader_num_workers,
-    dataset=llava_dataset,
-    sampler=dict(type=DefaultSampler, shuffle=True),
+    dataset=train_dataset,
+    sampler=dict(
+        type=LengthGroupedSampler,
+        length_property='modality_length',
+        per_device_batch_size=batch_size * accumulative_counts),
     collate_fn=dict(type=default_collate_fn))
 
 #######################################################################
@@ -123,8 +130,6 @@ optim_wrapper = dict(
     type=AmpOptimWrapper,
     optimizer=dict(
         type=optim_type, lr=lr, betas=betas, weight_decay=weight_decay),
-    paramwise_cfg=dict(
-        custom_keys={'projector': dict(lr_mult=lr_projector / lr)}),
     clip_grad=dict(max_norm=max_norm, error_if_nonfinite=False),
     accumulative_counts=accumulative_counts,
     loss_scale='dynamic',

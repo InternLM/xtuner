@@ -6,28 +6,27 @@ from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR, LinearLR
 from torch.optim import AdamW
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
-                          CLIPImageProcessor, CLIPVisionModel)
+                          BitsAndBytesConfig, CLIPImageProcessor,
+                          CLIPVisionModel)
 
 from xtuner.dataset import LLaVADataset
 from xtuner.dataset.collate_fns import default_collate_fn
-from xtuner.dataset.map_fns import llava_map_fn, template_map_fn_factory
+from xtuner.dataset.map_fns import llava_pretrain_map_fn
 from xtuner.engine import DatasetInfoHook, EvaluateChatHook
 from xtuner.model import LLaVAModel
-from xtuner.utils import PROMPT_TEMPLATE
 
 #######################################################################
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
 llm_name_or_path = 'internlm/internlm-chat-7b'
-visual_encoder_name_or_path = 'openai/clip-vit-large-patch14'
+visual_encoder_name_or_path = 'openai/clip-vit-large-patch14-336'
 
 # Data
 llava_data_root = './data/llava_data/'
 data_path = llava_data_root + 'LLaVA-Pretrain/blip_laion_cc_sbu_558k.json'
 image_folder = llava_data_root + 'LLaVA-Pretrain/images'
-prompt_template = PROMPT_TEMPLATE.internlm_chat
-max_length = int(2048 - (224 / 14)**2)
+max_length = int(2048 - (336 / 14)**2)
 
 # Scheduler & Optimizer
 batch_size = 32  # per_device
@@ -45,7 +44,7 @@ warmup_ratio = 0.03
 evaluation_freq = 500
 SYSTEM = ''
 evaluation_images = 'https://llava-vl.github.io/static/images/view.jpg'
-evaluation_inputs = ['请描述一下这张照片', 'Please describe this picture']
+evaluation_inputs = ['']  # Keep empty strings during pretrain
 
 #######################################################################
 #                 PART 2  Model & Tokenizer & Processor               #
@@ -69,7 +68,16 @@ model = dict(
         type=AutoModelForCausalLM.from_pretrained,
         pretrained_model_name_or_path=llm_name_or_path,
         trust_remote_code=True,
-        torch_dtype=torch.float32),
+        torch_dtype=torch.float16,
+        quantization_config=dict(
+            type=BitsAndBytesConfig,
+            load_in_4bit=True,
+            load_in_8bit=False,
+            llm_int8_threshold=6.0,
+            llm_int8_has_fp16_weight=False,
+            bnb_4bit_compute_dtype=torch.float16,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type='nf4')),
     visual_encoder=dict(
         type=CLIPVisionModel.from_pretrained,
         pretrained_model_name_or_path=visual_encoder_name_or_path))
@@ -83,11 +91,10 @@ llava_dataset = dict(
     image_folder=image_folder,
     tokenizer=tokenizer,
     processor=processor,
-    dataset_map_fn=llava_map_fn,
-    template_map_fn=dict(
-        type=template_map_fn_factory, template=prompt_template),
+    dataset_map_fn=llava_pretrain_map_fn,
+    template_map_fn=None,
     max_length=max_length,
-    image_aspect_ratio='pad')
+    pad_image_to_square=False)
 
 train_dataloader = dict(
     batch_size=batch_size,
@@ -127,6 +134,7 @@ param_scheduler = [
         T_max=max_epochs,
         convert_to_iter_based=True)
 ]
+
 # train, val, test setting
 train_cfg = dict(by_epoch=True, max_epochs=max_epochs, val_interval=1)
 
@@ -143,8 +151,7 @@ custom_hooks = [
         every_n_iters=evaluation_freq,
         evaluation_inputs=evaluation_inputs,
         evaluation_images=evaluation_images,
-        system=SYSTEM,
-        prompt_template=prompt_template)
+        system=SYSTEM)
 ]
 
 # configure default hooks
