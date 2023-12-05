@@ -21,9 +21,9 @@ def intern_repo_collate_fn(
         cur_input_ids = torch.tensor(example['input_ids'])
         cur_labels = copy.deepcopy(cur_input_ids)
         # 多个数据拼接在一起的时候，要避免前一句话的<\s>的label是<s>，所以在做pack的时候
-        # 把<s>的值设为了特殊值-1000，在做label的时候会把-1000改为-100，而做input_ids
-        # 的时候需要将-1000还原为<s>对应的token id，也就是1
-        cur_input_ids[cur_input_ids == -1000] = 1
+        # 把<s>的值设为了特殊值-100000000，在做label的时候会把-100000000改为-100，而做input_ids
+        # 的时候需要将-100000000还原为<s>对应的token id，也就是1
+        cur_input_ids[cur_input_ids == -100000000] = 1
         cur_input_ids = cur_input_ids.abs()
         cur_labels[cur_labels < 0] = IGNORE_INDEX
         input_ids.append(cur_input_ids)
