@@ -15,12 +15,12 @@ def process(dataset_folder,
             shuffle_before_pack=True,
             pack_to_max_length=False,
             map_num_proc=32):
-    return load_from_disk('/mnt/petrelfs/caoweihan/projects/xtuner/wenwei_dataset/packed_dataset')
+    return load_from_disk('/mnt/petrelfs/caoweihan/projects/xtuner/wenwei_dataset_fix_packer')
 
     ds = []
     for root, dirs, files in os.walk(dataset_folder, followlinks=True):
         for fn in tqdm(sorted(files), total=len(files), leave=False):
-            if fn.endswith('.bin'):
+            if fn.endswith('.bin') and fn == 'calculate_format_datum_max_num.bin':
                 fp = os.path.join(root, fn)
                 ds.append(load_dataset('json', data_files=fp)[split])
 
@@ -34,7 +34,7 @@ def process(dataset_folder,
             dataset = dataset.shuffle()
             dataset = dataset.flatten_indices(num_proc=map_num_proc)
         dataset = dataset.map(
-            InternRepoPacker(max_length), batched=True, num_proc=map_num_proc)
+            InternRepoPacker(max_length), batched=True, num_proc=map_num_proc, load_from_cache_file=False)
         print_log(
             f'After packing to {max_length}, '
             f'the length of dataset is {len(dataset)}.', 'current')

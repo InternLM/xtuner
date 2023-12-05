@@ -77,6 +77,7 @@ class SupervisedFinetune(BaseModel):
 
         self._is_init = True
         self.use_local_attn = use_local_attn
+        # self.cnt = 0
 
     def _prepare_for_lora(self,
                           peft_model=None,
@@ -104,11 +105,19 @@ class SupervisedFinetune(BaseModel):
             raise NotImplementedError
 
     def forward(self, data, data_samples=None, mode='loss'):
+        # if self.cnt == 1:
+        #     rank = dist.get_rank()
+        #     if rank == 0:
+        #         torch.save(self.llm.state_dict(), 'saved/iter1.pth')
+        #     else:
+        #         import time
+        #         time.sleep(200)
+        #     assert False
 
         if self.use_local_attn:
             message_hub = MessageHub.get_instance('for_flash_attn')
             rank = dist.get_rank()
-            # saved_dict = torch.load(f'/mnt/petrelfs/caoweihan/projects/train_internlm/saved/rank_{rank}_cnt_0.pth', map_location='cpu')
+            # saved_dict = torch.load(f'/mnt/petrelfs/caoweihan/projects/train_internlm/saved/rank_{rank}_model_in.pth', map_location='cpu')
             # cu_seqlens = saved_dict['cu_seqlens'].cuda()
             # cu_seqlens = [cu_seqlens[0]]
             # input_ids = saved_dict['input_ids'].cuda()
@@ -135,6 +144,7 @@ class SupervisedFinetune(BaseModel):
             data.pop('cumulative_len', None)
             data.pop('indexes', None)
             data.pop('max_seqlen', None)
+        # self.cnt += 1
 
         if mode == 'loss':
             return self.compute_loss(data, data_samples)
@@ -157,9 +167,18 @@ class SupervisedFinetune(BaseModel):
         return logits_dict
 
     def compute_loss(self, data, data_samples=None):
+        # rank = dist.get_rank()
+        # shift_labels = torch.load(f'/mnt/petrelfs/caoweihan/projects/train_internlm/saved/rank_{rank}_shift_labels.pth', map_location='cpu')
+        # shift_labels = shift_labels[:-1]
+        # shift_labels = torch.cat([torch.tensor([-100], dtype=shift_labels.dtype, device=shift_labels.device), shift_labels])
+        # data['labels'] = shift_labels.to(dtype=data['labels'].dtype, device=data['labels'].device).reshape(1, -1)
         outputs = self.llm(**data)
         # rank = dist.get_rank()
-        # torch.save(dict(outputs), f'./saved/rank_{rank}_cnt_0_out.pth')
+        # torch.save(dict(outputs), f'./saved/rank_{rank}_model_out.pth')
+        # import time
+        # time.sleep(0.5)
+        # torch.save(data['labels'], f'./saved/rank_{rank}_labels.pth')
+        # time.sleep(3)
         loss_dict = {'loss': outputs.loss}
         # assert False
         return loss_dict

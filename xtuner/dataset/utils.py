@@ -122,7 +122,14 @@ class InternRepoPacker:
         self.residual_cumulative_len = [0]
 
     def __call__(self, batch):
-        concatenated_samples = self.residual + list(chain(*batch['input_ids']))
+        concatenated_samples = copy.deepcopy(self.residual)
+        for input_ids in batch['input_ids']:
+            assert input_ids[0] == 1 and input_ids[1] < 0
+            input_ids[0] = -1000
+            assert isinstance(input_ids, list)
+            concatenated_samples += input_ids
+
+        # concatenated_samples = self.residual + list(chain(*batch['input_ids']))
         for input_id in batch['input_ids']:
             self.residual_cumulative_len.append(
                 self.residual_cumulative_len[-1] + len(input_id))
