@@ -125,7 +125,7 @@ class InternRepoPacker:
         concatenated_samples = copy.deepcopy(self.residual)
         for input_ids in batch['input_ids']:
             assert input_ids[0] == 1 and input_ids[1] < 0
-            input_ids[0] = -1000
+            input_ids[0] = -100000000
             assert isinstance(input_ids, list)
             concatenated_samples += input_ids
 

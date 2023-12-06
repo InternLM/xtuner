@@ -23,7 +23,8 @@ class SupervisedFinetune(BaseModel):
                  lora=None,
                  peft_model=None,
                  use_activation_checkpointing=True,
-                 use_local_attn=True):
+                 use_local_attn=True,
+                 debug=False):
         super().__init__()
         with LoadWoInit():
             if 'internlm' in llm.pretrained_model_name_or_path:
@@ -77,7 +78,8 @@ class SupervisedFinetune(BaseModel):
 
         self._is_init = True
         self.use_local_attn = use_local_attn
-        # self.cnt = 0
+        self.cnt = 0
+        self.debug = debug
 
     def _prepare_for_lora(self,
                           peft_model=None,
@@ -105,14 +107,14 @@ class SupervisedFinetune(BaseModel):
             raise NotImplementedError
 
     def forward(self, data, data_samples=None, mode='loss'):
-        # if self.cnt == 1:
-        #     rank = dist.get_rank()
-        #     if rank == 0:
-        #         torch.save(self.llm.state_dict(), 'saved/iter1.pth')
-        #     else:
-        #         import time
-        #         time.sleep(200)
-        #     assert False
+        if self.debug and self.cnt == 1:
+            rank = dist.get_rank()
+            if rank == 0:
+                torch.save(self.llm.state_dict(), 'saved/iter1.pth')
+            else:
+                import time
+                time.sleep(200)
+            assert False
 
         if self.use_local_attn:
             message_hub = MessageHub.get_instance('for_flash_attn')
@@ -144,7 +146,7 @@ class SupervisedFinetune(BaseModel):
             data.pop('cumulative_len', None)
             data.pop('indexes', None)
             data.pop('max_seqlen', None)
-        # self.cnt += 1
+        self.cnt += 1
 
         if mode == 'loss':
             return self.compute_loss(data, data_samples)
@@ -173,12 +175,13 @@ class SupervisedFinetune(BaseModel):
         # shift_labels = torch.cat([torch.tensor([-100], dtype=shift_labels.dtype, device=shift_labels.device), shift_labels])
         # data['labels'] = shift_labels.to(dtype=data['labels'].dtype, device=data['labels'].device).reshape(1, -1)
         outputs = self.llm(**data)
-        # rank = dist.get_rank()
-        # torch.save(dict(outputs), f'./saved/rank_{rank}_model_out.pth')
-        # import time
-        # time.sleep(0.5)
-        # torch.save(data['labels'], f'./saved/rank_{rank}_labels.pth')
-        # time.sleep(3)
+        if self.debug:
+            rank = dist.get_rank()
+            torch.save(dict(outputs), f'./saved/rank_{rank}_model_out.pth')
+            import time
+            # time.sleep(0.5)
+            # torch.save(data['labels'], f'./saved/rank_{rank}_labels.pth')
+            time.sleep(3)
         loss_dict = {'loss': outputs.loss}
         # assert False
         return loss_dict

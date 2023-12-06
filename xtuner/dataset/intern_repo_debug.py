@@ -15,13 +15,11 @@ def process(dataset_folder,
             shuffle_before_pack=True,
             pack_to_max_length=False,
             map_num_proc=32):
-    map_num_proc = 1
-    return load_from_disk('/mnt/petrelfs/share_data/gaojianfei/wenwei_dataset_fix_packer_proc1')
 
     ds = []
     for root, dirs, files in os.walk(dataset_folder, followlinks=True):
         for fn in tqdm(sorted(files), total=len(files), leave=False):
-            if fn.endswith('.bin'):# and fn == 'calculate_format_datum_max_num.bin':
+            if fn.endswith('.bin') and fn == 'calculate_format_datum_max_num.bin':
                 fp = os.path.join(root, fn)
                 ds.append(load_dataset('json', data_files=fp)[split])
 
@@ -40,11 +38,10 @@ def process(dataset_folder,
             f'After packing to {max_length}, '
             f'the length of dataset is {len(dataset)}.', 'current')
 
-    dataset.save_to_disk('wenwei_dataset_fix_packer')
     return dataset
 
 
-def process_intern_repo_dataset(*args, **kwargs):
+def process_intern_repo_dataset_debug(*args, **kwargs):
     """Post-process the dataset in InternLM repo
     (https://github.com/InternLM/InternLM) format.
 

@@ -175,7 +175,7 @@ def internlm_attn_forward(
     # Modified from https://huggingface.co/internlm/internlm-7b/blob/939a68c0dc1bd5f35b63c87d44af05ce33379061/modeling_internlm.py#L161  # noqa:E501
     bsz, q_len, _ = hidden_states.size()
     assert bsz == 1
-    assert use_local_attn
+    assert SUPPORT_FLASH2
 
     if use_local_attn:
         assert len(cumulative_len) == bsz and cumulative_len[0][-1] == q_len
