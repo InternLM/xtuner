@@ -7,7 +7,7 @@ from torch.optim import AdamW
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           CLIPImageProcessor, CLIPVisionModel)
 
-from xtuner.dataset import ConcatDataset, LLaVADataset
+from xtuner.dataset import LLaVADataset
 from xtuner.dataset.collate_fns import default_collate_fn
 from xtuner.dataset.map_fns import (llava_finetune_map_fn,
                                     template_map_fn_factory)
@@ -29,9 +29,6 @@ pretrained_pth = './work_dirs/llava_internlm_chat_7b_clip_vit_large_p14_336_e1_g
 llava_data_root = './data/llava_data/'
 data_path = llava_data_root + 'LLaVA-Instruct-150K/llava_v1_5_mix665k.json'
 image_folder = llava_data_root + 'llava_images'
-llava_zh_data_path = llava_data_root + 'llava_zh/llava_instruct_150k_zh.json'
-llava_zh_image_folder = llava_data_root + 'llava_images/coco/train2017'
-
 prompt_template = PROMPT_TEMPLATE.internlm_chat
 max_length = int(2048 - (336 / 14)**2)
 
@@ -96,26 +93,10 @@ llava_dataset = dict(
     max_length=max_length,
     pad_image_to_square=True)
 
-llava_zh_dataset = dict(
-    type=LLaVADataset,
-    data_path=llava_zh_data_path,
-    image_folder=llava_zh_image_folder,
-    tokenizer=tokenizer,
-    processor=processor,
-    dataset_map_fn=llava_finetune_map_fn,
-    template_map_fn=dict(
-        type=template_map_fn_factory, template=prompt_template),
-    max_length=max_length,
-    pad_image_to_square=True)
-
-train_dataset = dict(
-    type=ConcatDataset,
-    datasets_cfg=dict(llava=llava_dataset, llava_zh=llava_zh_dataset))
-
 train_dataloader = dict(
     batch_size=batch_size,
     num_workers=dataloader_num_workers,
-    dataset=train_dataset,
+    dataset=llava_dataset,
     sampler=dict(
         type=LengthGroupedSampler,
         length_property='modality_length',
