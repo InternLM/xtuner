@@ -14,7 +14,7 @@
 
 ## 🎉 更新
 
-- **\[2023/12\]** 🔥 支持多模态 VLLM（[LLaVA-v1.5](https://github.com/haotian-liu/LLaVA)）预训练和指令微调！快速开始请查阅此[文档]()及发布的 LLaVA-InternLM 模型（[HuggingFace](https://huggingface.co/xtuner) / [ModelScope](https://modelscope.cn/organization/xtuner)）！
+- **\[2023/12\]** 🔥 支持多模态 VLLM（[LLaVA-v1.5](https://github.com/haotian-liu/LLaVA)）预训练和指令微调！快速开始请查阅此[文档](<>)及发布的 LLaVA-InternLM 模型（[HuggingFace](https://huggingface.co/xtuner) / [ModelScope](https://modelscope.cn/organization/xtuner)）！
 - **\[2023/11\]** 支持 [ChatGLM3-6B](https://huggingface.co/THUDM/chatglm3-6b) 模型！
 - **\[2023/10\]** 支持 [MSAgent-Bench](https://modelscope.cn/datasets/damo/MSAgent-Bench) 数据集，并且微调所得大语言模型可应用至 [Lagent](https://github.com/InternLM/lagent) 框架！
 - **\[2023/10\]** 优化数据处理逻辑以兼容 `system` 字段，相关细节请查阅[文档](docs/zh_cn/user_guides/dataset_format.md)！
