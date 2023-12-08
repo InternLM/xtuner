@@ -22,7 +22,7 @@ from xtuner.model.modules import dispatch_modules
 from xtuner.model.utils import LoadWoInit, find_all_linear_names, traverse_dict
 from xtuner.registry import BUILDER, MAP_FUNC
 from xtuner.tools.utils import auto_dtype_of_deepspeed_config
-
+import pdb
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train LLM')
@@ -129,6 +129,12 @@ def main():
             traverse_dict(cfg.model)
             model = BUILDER.build(cfg.model)
         model.config.use_cache = False
+        
+        # add pad token
+        model_path = cfg.model.llm.pretrained_model_name_or_path
+        model.generation_config = GenerationConfig.from_pretrained(model_path)
+        model.generation_config.pad_token_id = model.generation_config.eos_token_id
+
         dispatch_modules(model)
         if cfg.get('lora', None):
             lora = BUILDER.build(cfg.lora)

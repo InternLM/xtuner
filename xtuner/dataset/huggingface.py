@@ -55,7 +55,6 @@ def process(dataset,
             it to True during training and False during testing.
         map_num_proc: Max number of processes when mapping the dataset.
     """
-
     if isinstance(dataset, DatasetDict):
         dataset = dataset[split]
     elif isinstance(dataset, dict) or isinstance(
