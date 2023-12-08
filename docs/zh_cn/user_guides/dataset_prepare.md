@@ -69,8 +69,6 @@ Chinese Lawyer 数据集有两个子数据集，它们可以在 https://github.c
 │   └── images
 ├── LLaVA-Instruct-150K
 │   └── llava_v1_5_mix665k.json
-├── llava_zh
-│   └── llava_instruct_150k_zh.json
 └── llava_images
     ├── coco
     │   └── train2017
@@ -105,14 +103,6 @@ git clone https://huggingface.co/datasets/liuhaotian/LLaVA-Pretrain --depth=1
       # Make sure you have git-lfs installed (https://git-lfs.com)
       git lfs install
       git clone https://huggingface.co/datasets/liuhaotian/LLaVA-Instruct-150K --depth=1
-      ```
-
-   2. llava_zh
-
-      ```shell
-      # Make sure you have git-lfs installed (https://git-lfs.com)
-      git lfs install
-      git clone https://huggingface.co/datasets/openbmb/llava_zh --depth=1
       ```
 
 2. 图片数据
