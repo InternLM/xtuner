@@ -11,7 +11,7 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer,
 
 from xtuner.dataset import LLaVADataset
 from xtuner.dataset.collate_fns import default_collate_fn
-from xtuner.dataset.map_fns import llava_pretrain_map_fn
+from xtuner.dataset.map_fns import llava_image_only_map_fn
 from xtuner.engine import DatasetInfoHook, EvaluateChatHook
 from xtuner.model import LLaVAModel
 
@@ -91,7 +91,7 @@ llava_dataset = dict(
     image_folder=image_folder,
     tokenizer=tokenizer,
     processor=processor,
-    dataset_map_fn=llava_pretrain_map_fn,
+    dataset_map_fn=llava_image_only_map_fn,
     template_map_fn=None,
     max_length=max_length,
     pad_image_to_square=False)
