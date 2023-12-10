@@ -2,7 +2,7 @@
 from xtuner.utils import DEFAULT_IMAGE_TOKEN
 
 
-def llava_pretrain_map_fn(example):
+def llava_image_only_map_fn(example):
     # input contains the DEFAULT_IMAGE_TOKEN only
     messages = example['conversations']
     input = ''
@@ -22,7 +22,7 @@ def llava_pretrain_map_fn(example):
     return {'conversation': conversation}
 
 
-def llava_finetune_map_fn(example):
+def llava_map_fn(example):
     messages = example['conversations']
     input = ''
     conversation = []
