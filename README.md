@@ -262,6 +262,17 @@ We appreciate all contributions to XTuner. Please refer to [CONTRIBUTING.md](.gi
 - [LMDeploy](https://github.com/InternLM/lmdeploy)
 - [LLaVA](https://github.com/haotian-liu/LLaVA)
 
+## 🖊️ Citation
+
+```bibtex
+@misc{2023xtuner,
+    title={XTuner: A Toolkit for Efficiently Fine-tuning LLM},
+    author={XTuner Contributors},
+    howpublished = {\url{https://github.com/InternLM/xtuner}},
+    year={2023}
+}
+```
+
 ## License
 
 This project is released under the [Apache License 2.0](LICENSE). Please also adhere to the Licenses of models and datasets being used.

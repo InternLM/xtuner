@@ -262,6 +262,17 @@ xtuner chat meta-llama/Llama-2-7b-hf --adapter xtuner/Llama-2-7b-qlora-moss-003-
 - [LMDeploy](https://github.com/InternLM/lmdeploy)
 - [LLaVA](https://github.com/haotian-liu/LLaVA)
 
+## 🖊️ 引用
+
+```bibtex
+@misc{2023xtuner,
+    title={XTuner: A Toolkit for Efficiently Fine-tuning LLM},
+    author={XTuner Contributors},
+    howpublished = {\url{https://github.com/InternLM/xtuner}},
+    year={2023}
+}
+```
+
 ## 开源许可证
 
 该项目采用 [Apache License 2.0 开源许可证](LICENSE)。同时，请遵守所使用的模型与数据集的许可证。
