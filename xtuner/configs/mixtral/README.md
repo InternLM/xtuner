@@ -24,9 +24,9 @@ xtuner train mixtral_8x7b_qlora_oasst1_internlm_template_e3 --deepspeed deepspee
 ```
 
 
-## Full Parameters Finetune
+## Full Parameter Finetune
 
-Full parameters finetune needs 32 A100-80G
+Full parameter finetune needs 32 A100-80G
 
 ### slurm
 ```bash
