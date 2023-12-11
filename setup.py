@@ -126,7 +126,10 @@ if __name__ == '__main__':
             parse_requirements('requirements.txt'),
             'deepspeed':
             parse_requirements('requirements/runtime.txt') +
-            parse_requirements('requirements/deepspeed.txt')
+            parse_requirements('requirements/deepspeed.txt'),
+            'modelscope':
+            parse_requirements('requirements/runtime.txt') +
+            parse_requirements('requirements/modelscope.txt'),
         },
         zip_safe=False,
         entry_points={'console_scripts': ['xtuner = xtuner:cli']})

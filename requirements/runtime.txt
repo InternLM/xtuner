@@ -1,14 +1,12 @@
 bitsandbytes>=0.40.0
 datasets
 einops
-fsspec<=2023.6.0
 lagent>=0.1.2
-mmengine>=0.9.1
-modelscope
+mmengine>=0.10.1
 peft>=0.4.0
 scipy
 SentencePiece
 tiktoken
 torch
-transformers>=4.32.1,<=4.34.0
+transformers>=4.32.1,!=4.34.1,!=4.35.0,!=4.35.1,!=4.35.2
 transformers_stream_generator
