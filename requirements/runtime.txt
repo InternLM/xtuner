@@ -9,5 +9,5 @@ scipy
 SentencePiece
 tiktoken
 torch
-transformers>=4.32.1,<=4.34.0
+transformers>=4.32.1,!=4.34.1,!=4.35.0,!=4.35.1,!=4.35.2
 transformers_stream_generator
