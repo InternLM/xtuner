@@ -5,6 +5,9 @@
 [![license](https://img.shields.io/github/license/InternLM/xtuner.svg)](https://github.com/InternLM/xtuner/blob/main/LICENSE)
 [![PyPI](https://badge.fury.io/py/xtuner.svg)](https://pypi.org/project/xtuner/)
 [![Generic badge](https://img.shields.io/badge/🤗%20Huggingface-xtuner-yellow.svg)](https://huggingface.co/xtuner)
+[![Generic badge](https://img.shields.io/badge/🤖%20ModelScope-xtuner-yellow.svg)](https://www.modelscope.cn/organization/xtuner)
+
+
 
 [English](README.md) | 简体中文
 
