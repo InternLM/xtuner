@@ -217,7 +217,7 @@ def main():
 
                 ds_grad_clip = ds_cfg.get('gradient_clipping', 'auto')
                 clip_grad = cfg.optim_wrapper.get('clip_grad', None)
-                if clip_grad and clip_grad.get('max_norm'):
+                if clip_grad and clip_grad.get('max_norm', None) is not None:
                     mm_max_norm = cfg.optim_wrapper.clip_grad.max_norm
                 else:
                     mm_max_norm = 1.0
