@@ -14,6 +14,7 @@
 
 ## 🎉 更新
 
+- **\[2023/12\]** 🔥 支持 [Mixtral 8x7b](https://huggingface.co/DiscoResearch/mixtral-7b-8expert) 模型!
 - **\[2023/11\]** 支持 [ChatGLM3-6B](https://huggingface.co/THUDM/chatglm3-6b) 模型！
 - **\[2023/10\]** 支持 [MSAgent-Bench](https://modelscope.cn/datasets/damo/MSAgent-Bench) 数据集，并且微调所得大语言模型可应用至 [Lagent](https://github.com/InternLM/lagent) 框架！
 - **\[2023/10\]** 优化数据处理逻辑以兼容 `system` 字段，相关细节请查阅[文档](docs/zh_cn/user_guides/dataset_format.md)！
@@ -83,6 +84,7 @@ XTuner 是一个轻量级微调大语言模型的工具库，由 [MMRazor](https
   <li><a href="https://huggingface.co/Qwen/Qwen-7B">Qwen</a></li>
   <li><a href="https://huggingface.co/baichuan-inc/Baichuan-7B">Baichuan</a></li>
   <li><a href="https://huggingface.co/baichuan-inc/Baichuan2-7B-Base">Baichuan2</a></li>
+  <li><a href="https://huggingface.co/DiscoResearch/mixtral-7b-8expert">Mixtral 8x7b</a></li>
   <li>...</li>
 </ul>
 </td>
