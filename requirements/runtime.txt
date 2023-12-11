@@ -1,5 +1,5 @@
 bitsandbytes>=0.40.0
-datasets@git+https://github.com/huggingface/datasets
+datasets
 einops
 lagent>=0.1.2
 mmengine>=0.10.1
