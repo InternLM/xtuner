@@ -59,7 +59,7 @@ tokenizer = dict(
     pretrained_model_name_or_path=pretrained_model_name_or_path,
     trust_remote_code=True,
     padding_side='right',
-    eos_token='<|endoftext|>')
+    eos_token='<|im_end|>')
 
 model = dict(
     type=SupervisedFinetune,
@@ -142,7 +142,7 @@ custom_hooks = [
         type=EvaluateChatHook,
         tokenizer=tokenizer,
         every_n_iters=evaluation_freq,
-        stop_word='<|endoftext|>',
+        stop_word='<|im_end|>',
         evaluation_inputs=evaluation_inputs,
         system=SYSTEM,
         prompt_template=prompt_template)
