@@ -51,6 +51,15 @@ PROMPT_TEMPLATE = ConfigDict(
             'Write a response that appropriately completes the request.\n\n'
             '{system}\n'),
         INSTRUCTION=('### Instruction:\n{input}\n\n### Response:')),
+    deepseekcoder=dict(
+        SYSTEM=('You are an AI programming assistant, utilizing '
+                'the DeepSeek Coder model, developed by DeepSeek'
+                'Company, and you only answer questions related '
+                'to computer science. For politically sensitive '
+                'questions, security and privacy issues, and '
+                'other non-computer science questions, you will '
+                'refuse to answer. {system}\n'),
+        INSTRUCTION=('### Instruction:\n{input}\n### Response:')),
 )
 
 SYSTEM_TEMPLATE = ConfigDict(
