@@ -43,7 +43,7 @@ NPROC_PER_NODE=8 NNODES=4 PORT=29600 ADDR=$NODE_0_ADDR NODE_RANK=0 xtuner train 
 NPROC_PER_NODE=8 NNODES=4 PORT=29600 ADDR=$NODE_0_ADDR NODE_RANK=1 xtuner train mixtral_8x7b_full_oasst1_internlm_template_e3 --deepspeed deepspeed_zero3
 
 # excuete on node 2
-NPROC_PER_NODE=8 NNODES=4 PORT=29600 ADDR=$NODE_0_ADDR NODE_RANK=1 xtuner train mixtral_8x7b_full_oasst1_internlm_template_e3 --deepspeed deepspeed_zero3
+NPROC_PER_NODE=8 NNODES=4 PORT=29600 ADDR=$NODE_0_ADDR NODE_RANK=2 xtuner train mixtral_8x7b_full_oasst1_internlm_template_e3 --deepspeed deepspeed_zero3
 
 # excuete on node 3
 NPROC_PER_NODE=8 NNODES=4 PORT=29600 ADDR=$NODE_0_ADDR NODE_RANK=3 xtuner train mixtral_8x7b_full_oasst1_internlm_template_e3 --deepspeed deepspeed_zero3
