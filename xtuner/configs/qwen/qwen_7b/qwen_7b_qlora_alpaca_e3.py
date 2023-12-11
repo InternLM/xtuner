@@ -21,10 +21,10 @@ from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-pretrained_model_name_or_path = '/public/home/lvshuhang/model_space/workspace/Qwen_Qwen-72B'
+pretrained_model_name_or_path = 'Qwen/Qwen-7B'
 
 # Data
-alpaca_en_path = '/public/home/lvshuhang/xtuner/train_data/TED_xtuner_muti_conversation/SFT'
+alpaca_en_path = 'tatsu-lab/alpaca'
 prompt_template = PROMPT_TEMPLATE.qwen_chat
 max_length = 2048
 pack_to_max_length = True
