@@ -63,7 +63,6 @@ model = dict(
     use_local_attn=use_local_attn,
     llm=dict(
         type=AutoModelForCausalLM.from_pretrained,
-        torch_dtype=torch.bfloat16,
         pretrained_model_name_or_path=pretrained_model_name_or_path,
         trust_remote_code=True))
 
@@ -120,13 +119,13 @@ train_cfg = dict(by_epoch=True, max_epochs=max_epochs, val_interval=1)
 # Log the dialogue periodically during the training process, optional
 custom_hooks = [
     dict(type=DatasetInfoHook, tokenizer=tokenizer),
-    dict(
-        type=EvaluateChatHook,
-        tokenizer=tokenizer,
-        every_n_iters=evaluation_freq,
-        evaluation_inputs=evaluation_inputs,
-        system=SYSTEM,
-        prompt_template=prompt_template),
+    # dict(
+    #     type=EvaluateChatHook,
+    #     tokenizer=tokenizer,
+    #     every_n_iters=evaluation_freq,
+    #     evaluation_inputs=evaluation_inputs,
+    #     system=SYSTEM,
+    #     prompt_template=prompt_template),
     dict(
         type=ThroughputHook
     )

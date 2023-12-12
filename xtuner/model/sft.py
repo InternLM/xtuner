@@ -107,7 +107,7 @@ class SupervisedFinetune(BaseModel):
             raise NotImplementedError
 
     def forward(self, data, data_samples=None, mode='loss'):
-        if self.debug and self.cnt == 1:
+        if self.debug and self.cnt == 2:
             rank = dist.get_rank()
             if rank == 0:
                 torch.save(self.llm.state_dict(), 'saved/iter1.pth')
@@ -177,11 +177,15 @@ class SupervisedFinetune(BaseModel):
         outputs = self.llm(**data)
         if self.debug:
             rank = dist.get_rank()
-            torch.save(dict(outputs), f'./saved/rank_{rank}_model_out.pth')
-            import time
-            # time.sleep(0.5)
-            # torch.save(data['labels'], f'./saved/rank_{rank}_labels.pth')
-            time.sleep(3)
+            if not hasattr(self, 'loss_cnt'):
+                self.loss_cnt = 1
+            else:
+                self.loss_cnt += 1
+            torch.save(outputs.loss, f'./saved/rank_{rank}_loss_cnt_{self.loss_cnt}.pth')
+        #     import time
+        #     # time.sleep(0.5)
+        #     # torch.save(data['labels'], f'./saved/rank_{rank}_labels.pth')
+        #     time.sleep(3)
         loss_dict = {'loss': outputs.loss}
         # assert False
         return loss_dict
