@@ -5,6 +5,7 @@
 [![license](https://img.shields.io/github/license/InternLM/xtuner.svg)](https://github.com/InternLM/xtuner/blob/main/LICENSE)
 [![PyPI](https://badge.fury.io/py/xtuner.svg)](https://pypi.org/project/xtuner/)
 [![Generic badge](https://img.shields.io/badge/🤗%20Huggingface-xtuner-yellow.svg)](https://huggingface.co/xtuner)
+[![Generic badge](https://img.shields.io/badge/🤖%20ModelScope-xtuner-yellow.svg)](https://www.modelscope.cn/organization/xtuner)
 
 English | [简体中文](README_zh-CN.md)
 
@@ -14,6 +15,7 @@ English | [简体中文](README_zh-CN.md)
 
 ## 🎉 News
 
+- **\[2023/12\]** 🔥 Support [Mixtral 8x7b](https://huggingface.co/DiscoResearch/mixtral-7b-8expert) model! To get started, please check out the [docs](xtuner/configs/mixtral/README.md)!
 - **\[2023/11\]** Support [ChatGLM3-6B](https://huggingface.co/THUDM/chatglm3-6b) model!
 - **\[2023/10\]** Support [MSAgent-Bench](https://modelscope.cn/datasets/damo/MSAgent-Bench) dataset, and the fine-tuned LLMs can be applied by [Lagent](https://github.com/InternLM/lagent)!
 - **\[2023/10\]** Optimize the data processing to accommodate `system` context. More information can be found on [Docs](docs/en/user_guides/dataset_format.md)!
@@ -83,6 +85,7 @@ XTuner is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](
   <li><a href="https://huggingface.co/Qwen/Qwen-7B">Qwen</a></li>
   <li><a href="https://huggingface.co/baichuan-inc/Baichuan-7B">Baichuan</a></li>
   <li><a href="https://huggingface.co/baichuan-inc/Baichuan2-7B-Base">Baichuan2</a></li>
+  <li><a href="https://huggingface.co/DiscoResearch/mixtral-7b-8expert">Mixtral 8x7b</a></li>
   <li>...</li>
 </ul>
 </td>
