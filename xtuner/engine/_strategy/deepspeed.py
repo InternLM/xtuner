@@ -1,5 +1,7 @@
 from mmengine._strategy import DeepSpeedStrategy as MMEngineDeepSpeedStrategy
 
+from xtuner.utils.fileio import patch_fileio
+
 
 class DeepSpeedStrategy(MMEngineDeepSpeedStrategy):
 
@@ -18,3 +20,15 @@ class DeepSpeedStrategy(MMEngineDeepSpeedStrategy):
         # `deepspeed.initialize` process.
         wrapper.model.data_preprocessor.cuda()
         return wrapper
+
+    def save_checkpoint(self, *args, **kwargs) -> None:
+        with patch_fileio():
+            super().save_checkpoint(self, *args, **kwargs)
+
+    def load_checkpoint(self, *args, **kwargs) -> None:
+        with patch_fileio():
+            super().load_checkpoint(self, *args, **kwargs)
+
+    def resume(self, *args, **kwargs) -> None:
+        with patch_fileio():
+            super().resume(self, *args, **kwargs)
