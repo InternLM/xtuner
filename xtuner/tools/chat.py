@@ -132,6 +132,7 @@ def main():
     elif args.bits == 8:
         load_in_8bit = True
     model_kwargs = {
+        'torch_dtype': 'auto',
         'quantization_config': quantization_config,
         'load_in_8bit': load_in_8bit,
         'device_map': 'auto',
