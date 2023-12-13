@@ -25,7 +25,7 @@ def process(dataset_folder,
 
     # dataset = concatenate_datasets(ds)
     # dataset = load_dataset('json', data_files='/mnt/petrelfs/share_data/caoweihan/maibao_kaoshi_7_5_v0213_8k_rc8_nowm/train/cn/calculate_format_datum_max_num.bin')[split]
-    dataset = load_dataset('json', data_files='/mnt/petrelfs/share_data/caoweihan/maibao_kaoshi_7_5_v0213_8k_rc8_nowm/train/cn/calculate_format_datum_random.bin')[split]
+    dataset = load_dataset('json', data_files='/mnt/petrelfs/share_data/caoweihan/maibao_kaoshi_7_5_v0213_8k_rc8_nowm/train/cn/long_seq_data.bin')[split]
     print_log(f'Find {len(dataset)} samples.', 'current')
     dataset = dataset.rename_column('tokens', 'input_ids')
 

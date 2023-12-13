@@ -181,11 +181,9 @@ class SupervisedFinetune(BaseModel):
                 self.loss_cnt = 1
             else:
                 self.loss_cnt += 1
-            torch.save(outputs.loss, f'./saved/rank_{rank}_loss_cnt_{self.loss_cnt}.pth')
-        #     import time
-        #     # time.sleep(0.5)
-        #     # torch.save(data['labels'], f'./saved/rank_{rank}_labels.pth')
-        #     time.sleep(3)
+            torch.save(outputs.loss, f'./saved/rank_{rank}_loss_cnt_{self.loss_cnt}_insft.pth')
+        #     torch.save(outputs.logits, f'./saved/rank_{rank}_logits_cnt_{self.loss_cnt}.pth')
+
         loss_dict = {'loss': outputs.loss}
         # assert False
         return loss_dict

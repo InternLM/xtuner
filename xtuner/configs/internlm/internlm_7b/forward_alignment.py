@@ -20,7 +20,7 @@ from deepspeed.ops.adam import FusedAdam
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-pretrained_model_name_or_path = '/mnt/petrelfs/share_data/caoweihan/internlm_base_hf'
+pretrained_model_name_or_path = '/mnt/petrelfs/share_data/gaojianfei/internlm_base_hf_fix_convert'
 use_local_attn = True
 
 # Data

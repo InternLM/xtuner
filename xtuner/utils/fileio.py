@@ -160,20 +160,24 @@ def patch_hf_auto_from_pretrained():
     if hasattr(patch_hf_auto_from_pretrained, '_patched'):
         return
 
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 
     ori_auto_model_method = AutoModelForCausalLM.from_pretrained
     ori_auto_tok_method = AutoTokenizer.from_pretrained
+    ori_auto_config_method = AutoConfig.from_pretrained
 
     AutoModelForCausalLM._from_pretrained = ori_auto_model_method
     AutoTokenizer._from_pretrained = ori_auto_tok_method
+    AutoConfig._from_pretrained = ori_auto_config_method
 
     @classmethod
     def from_pretrained(cls, *args, **kwargs):
         with patch_fileio():
-            cls._from_pretrained(*args, **kwargs)
+            out = cls._from_pretrained(*args, **kwargs)
+        return out
 
     AutoModelForCausalLM.from_pretrained = from_pretrained
     AutoTokenizer.from_pretrained = from_pretrained
+    AutoConfig.from_pretrained = from_pretrained
 
     patch_hf_auto_from_pretrained._patched = True

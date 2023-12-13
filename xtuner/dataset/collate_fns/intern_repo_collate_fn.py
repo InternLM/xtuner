@@ -18,8 +18,11 @@ def intern_repo_collate_fn(
     indexes = []
     max_seqlen = 0
     for example in instances:
+        next_token = example['next_token']
+        next_token = torch.tensor([next_token])
         cur_input_ids = torch.tensor(example['input_ids'])
-        cur_labels = copy.deepcopy(cur_input_ids)
+        cur_labels = torch.cat([cur_input_ids[1:], next_token], dim=0)
+        # cur_labels = copy.deepcopy(cur_input_ids[1:])
         # 多个数据拼接在一起的时候，要避免前一句话的<\s>的label是<s>，所以在做pack的时候
         # 把<s>的值设为了特殊值-100000000，在做label的时候会把-100000000改为-100，而做input_ids
         # 的时候需要将-100000000还原为<s>对应的token id，也就是1

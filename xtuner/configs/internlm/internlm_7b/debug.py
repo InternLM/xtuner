@@ -20,7 +20,7 @@ from deepspeed.ops.adam import FusedAdam
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-pretrained_model_name_or_path = '/mnt/petrelfs/share_data/caoweihan/internlm_base_hf'
+pretrained_model_name_or_path = '/mnt/petrelfs/share_data/gaojianfei/internlm_base_hf_fix_convert'
 use_local_attn = True
 
 # Data
@@ -31,7 +31,7 @@ pack_to_max_length = True
 
 # Scheduler & Optimizer
 batch_size = 1  # per_device
-accumulative_counts = 1  # 2bs * 16acc * 4gpu = 128 batchsize
+accumulative_counts = 2  # 2bs * 16acc * 4gpu = 128 batchsize
 dataloader_num_workers = 0
 max_epochs = 1
 optim_type = AdamW

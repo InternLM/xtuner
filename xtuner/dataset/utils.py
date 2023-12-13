@@ -145,6 +145,12 @@ class InternRepoPacker:
             result = {'input_ids': input_ids}
             self.residual = concatenated_samples[(chunk_num *
                                                   self.chunk_size):]
+            
+            next_token = [
+                concatenated_samples[i + self.chunk_size + 1] if i + self.chunk_size + 1 < len(concatenated_samples) else -100
+                for i in range(0, chunk_num * self.chunk_size, self.chunk_size)
+            ]
+            result['next_token'] = next_token
 
             ptr_l = 0
             cumulative_len = []
