@@ -26,7 +26,6 @@ from typing import List, Optional, Tuple, Union
 
 import torch
 import torch.utils.checkpoint
-import torch.nn.functional as F
 from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from transformers.activations import ACT2FN
@@ -48,7 +47,6 @@ from .configuration_internlm import InternLMConfig
 from apex.normalization.fused_layer_norm import MixedFusedRMSNorm as InternLMRMSNorm
 from flash_attn import flash_attn_func
 from flash_attn.layers.rotary import apply_rotary_emb_func
-import torch.distributed as dist
 
 logger = logging.get_logger(__name__)
 
@@ -135,7 +133,6 @@ class InternLMRotaryEmbedding(torch.nn.Module):
 
     def _update_cos_sin_cache(self, x, indexes):
         """x: (batch, seqlen, nheads, headdim) or (batch, seqlen, 3, nheads, headdim)"""
-
         if not isinstance(indexes, int):
             seqlen = indexes.max().item() + 1
         else:
@@ -144,13 +141,6 @@ class InternLMRotaryEmbedding(torch.nn.Module):
         # or if we're on a new device (possibly due to tracing for instance)
         if seqlen > self._seq_len_cached or self._cos_cached.device != x.device or self._cos_cached.dtype != x.dtype:
             self._seq_len_cached = seqlen
-
-            ################
-            self._cos_cached = torch.load('/mnt/petrelfs/caoweihan/projects/train_internlm/saved/rank_0_cos_cached.pth', map_location='cpu').to(dtype=x.dtype, device=x.device)
-            self._sin_cached = torch.load('/mnt/petrelfs/caoweihan/projects/train_internlm/saved/rank_0_sin_cached.pth', map_location='cpu').to(dtype=x.dtype, device=x.device)
-            return
-            #########
-
             t = torch.arange(seqlen, device=x.device, dtype=self.inv_freq.dtype)
             # Don't do einsum, it converts fp32 to fp16
             # freqs = torch.einsum("i,j->ij", t, self.inv_freq)
@@ -305,12 +295,6 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids):
     return q_embed, k_embed
 
 
-def Silu(w1_o, w2_o):
-    return F.silu(w1_o) * w2_o
-
-Silu = torch.jit.script(Silu)
-
-
 class InternLMMLP(nn.Module):
     def __init__(
         self,
@@ -325,8 +309,7 @@ class InternLMMLP(nn.Module):
         self.act_fn = ACT2FN[hidden_act]
 
     def forward(self, x):
-        return self.down_proj(Silu(self.gate_proj(x), self.up_proj(x)))
-        # return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
 
 
 class InternLMAttention(nn.Module):
@@ -352,7 +335,6 @@ class InternLMAttention(nn.Module):
         self.rotary_emb = self._init_rope()
 
     def _init_rope(self):
-        # fixme
         self.config.rotary["type"] = "origin"
         if self.config.rotary["type"] == "origin":
             self.rotary_emb = InternLMRotaryEmbedding(
@@ -958,7 +940,7 @@ class InternLMForCausalLM(InternLMPreTrainedModel):
         if not return_dict:
             output = (logits,) + outputs[1:]
             return (loss,) + output if loss is not None else output
-        
+
         return CausalLMOutputWithPast(
             loss=loss,
             logits=logits,

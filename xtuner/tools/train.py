@@ -171,10 +171,10 @@ def main():
             except ImportError:
                 raise ImportError(
                     'deepspeed is not installed properly, please check.')
-            if digit_version(deepspeed.__version__) < digit_version('0.12.3'):
-                raise RuntimeError('Please upgrade your DeepSpeed version '
-                                   'by using the command pip install '
-                                   '`deepspeed>=0.12.3`')
+            # if digit_version(deepspeed.__version__) < digit_version('0.12.3'):
+            #     raise RuntimeError('Please upgrade your DeepSpeed version '
+            #                        'by using the command pip install '
+            #                        '`deepspeed>=0.12.3`')
             optim_wrapper = cfg.optim_wrapper.type
             if optim_wrapper == 'DeepSpeedOptimWrapper':
                 print_log(
@@ -217,7 +217,8 @@ def main():
 
                 ds_grad_clip = ds_cfg.get('gradient_clipping', 'auto')
                 clip_grad = cfg.optim_wrapper.get('clip_grad', None)
-                if clip_grad and clip_grad.get('max_norm'):
+                if clip_grad and hasattr(clip_grad, 'max_norm'):
+                # clip_grad.get('max_norm'):
                     mm_max_norm = cfg.optim_wrapper.clip_grad.max_norm
                 else:
                     mm_max_norm = 1.0

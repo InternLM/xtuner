@@ -16,14 +16,16 @@ def process(dataset_folder,
             pack_to_max_length=False,
             map_num_proc=32):
 
-    ds = []
-    for root, dirs, files in os.walk(dataset_folder, followlinks=True):
-        for fn in tqdm(sorted(files), total=len(files), leave=False):
-            if fn.endswith('.bin') and fn == 'calculate_format_datum_max_num.bin':
-                fp = os.path.join(root, fn)
-                ds.append(load_dataset('json', data_files=fp)[split])
+    # ds = []
+    # for root, dirs, files in os.walk(dataset_folder, followlinks=True):
+    #     for fn in tqdm(sorted(files), total=len(files), leave=False):
+    #         if fn.endswith('.bin') and fn == 'calculate_format_datum_max_num.bin':
+    #             fp = os.path.join(root, fn)
+    #             ds.append(load_dataset('json', data_files=fp)[split])
 
-    dataset = concatenate_datasets(ds)
+    # dataset = concatenate_datasets(ds)
+    # dataset = load_dataset('json', data_files='/mnt/petrelfs/share_data/caoweihan/maibao_kaoshi_7_5_v0213_8k_rc8_nowm/train/cn/calculate_format_datum_max_num.bin')[split]
+    dataset = load_dataset('json', data_files='/mnt/petrelfs/share_data/caoweihan/maibao_kaoshi_7_5_v0213_8k_rc8_nowm/train/cn/calculate_format_datum_random.bin')[split]
     print_log(f'Find {len(dataset)} samples.', 'current')
     dataset = dataset.rename_column('tokens', 'input_ids')
 

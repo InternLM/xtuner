@@ -37,8 +37,8 @@ max_epochs = 1
 optim_type = AdamW
 lr = 4e-5
 betas = (0.9, 0.95)
-weight_decay = 0#0.01
-max_norm = .0  # grad clip
+weight_decay = 0.01
+max_norm = 0  # grad clip
 total_iters = 9667
 warm_up_ratio = 0.025
 
