@@ -46,7 +46,7 @@ warmup_ratio = 0.03
 evaluation_freq = 500
 SYSTEM = ''
 evaluation_images = 'https://llava-vl.github.io/static/images/view.jpg'
-evaluation_inputs = ['']  # Keep empty strings during pretrain
+evaluation_inputs = ['请描述一下这张照片', 'Please describe this picture']
 
 #######################################################################
 #                 PART 2  Model & Tokenizer & Processor               #

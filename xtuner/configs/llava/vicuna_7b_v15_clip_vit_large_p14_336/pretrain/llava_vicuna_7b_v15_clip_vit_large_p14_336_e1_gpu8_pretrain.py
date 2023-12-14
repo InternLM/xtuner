@@ -11,9 +11,10 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer,
 
 from xtuner.dataset import LLaVADataset
 from xtuner.dataset.collate_fns import default_collate_fn
-from xtuner.dataset.map_fns import llava_image_only_map_fn
+from xtuner.dataset.map_fns import llava_map_fn, template_map_fn_factory
 from xtuner.engine import DatasetInfoHook, EvaluateChatHook
 from xtuner.model import LLaVAModel
+from xtuner.utils import PROMPT_TEMPLATE
 
 #######################################################################
 #                          PART 1  Settings                           #
@@ -26,6 +27,7 @@ visual_encoder_name_or_path = 'openai/clip-vit-large-patch14-336'
 llava_data_root = './data/llava_data/'
 data_path = llava_data_root + 'LLaVA-Pretrain/blip_laion_cc_sbu_558k.json'
 image_folder = llava_data_root + 'LLaVA-Pretrain/images'
+prompt_template = PROMPT_TEMPLATE.vicuna
 max_length = int(2048 - (336 / 14)**2)
 
 # Scheduler & Optimizer
@@ -44,7 +46,7 @@ warmup_ratio = 0.03
 evaluation_freq = 500
 SYSTEM = ''
 evaluation_images = 'https://llava-vl.github.io/static/images/view.jpg'
-evaluation_inputs = ['']  # Keep empty strings during pretrain
+evaluation_inputs = ['请描述一下这张照片', 'Please describe this picture']
 
 #######################################################################
 #                 PART 2  Model & Tokenizer & Processor               #
@@ -91,8 +93,9 @@ llava_dataset = dict(
     image_folder=image_folder,
     tokenizer=tokenizer,
     processor=processor,
-    dataset_map_fn=llava_image_only_map_fn,
-    template_map_fn=None,
+    dataset_map_fn=llava_map_fn,
+    template_map_fn=dict(
+        type=template_map_fn_factory, template=prompt_template),
     max_length=max_length,
     pad_image_to_square=False)
 
@@ -151,7 +154,8 @@ custom_hooks = [
         every_n_iters=evaluation_freq,
         evaluation_inputs=evaluation_inputs,
         evaluation_images=evaluation_images,
-        system=SYSTEM)
+        system=SYSTEM,
+        prompt_template=prompt_template)
 ]
 
 # configure default hooks
