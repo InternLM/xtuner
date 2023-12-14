@@ -103,7 +103,7 @@ param_scheduler = [
         type='LinearLR', start_factor=1/40, by_epoch=False, begin=0, end=total_iters * warm_up_ratio),
     dict(
         type=CosineAnnealingLR,
-        eta_min=lr * 0.1,
+        eta_min=lr * 0.15,
         by_epoch=True,
         T_max=max_epochs,
         convert_to_iter_based=True)
