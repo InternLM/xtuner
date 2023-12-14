@@ -16,7 +16,7 @@ def process(dataset_folder,
             pack_to_max_length=False,
             map_num_proc=32):
     map_num_proc = 1
-    return load_from_disk('/mnt/petrelfs/share_data/gaojianfei/wenwei_dataset_fix_packer_proc1')
+    return load_from_disk('/mnt/petrelfs/share_data/gaojianfei/wenwei_dataset_fix_labels')
 
     ds = []
     for root, dirs, files in os.walk(dataset_folder, followlinks=True):

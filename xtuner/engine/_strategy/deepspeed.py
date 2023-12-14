@@ -21,14 +21,14 @@ class DeepSpeedStrategy(MMEngineDeepSpeedStrategy):
         wrapper.model.data_preprocessor.cuda()
         return wrapper
 
-    def save_checkpoint(self, *args, **kwargs) -> None:
-        with patch_fileio():
-            super().save_checkpoint(self, *args, **kwargs)
+    # def save_checkpoint(self, *args, **kwargs) -> None:
+    #     with patch_fileio():
+    #         super().save_checkpoint(self, *args, **kwargs)
 
-    def load_checkpoint(self, *args, **kwargs) -> None:
-        with patch_fileio():
-            super().load_checkpoint(self, *args, **kwargs)
+    # def load_checkpoint(self, *args, **kwargs) -> None:
+    #     with patch_fileio():
+    #         super().load_checkpoint(self, *args, **kwargs)
 
-    def resume(self, *args, **kwargs) -> None:
-        with patch_fileio():
-            super().resume(self, *args, **kwargs)
+    # def resume(self, *args, **kwargs) -> None:
+    #     with patch_fileio():
+    #         super().resume(self, *args, **kwargs)
