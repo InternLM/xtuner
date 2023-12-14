@@ -1,5 +1,6 @@
 from mmengine._strategy import DeepSpeedStrategy as MMEngineDeepSpeedStrategy
 
+from xtuner import DEEPSPEED_PETREL_ON
 from xtuner.utils.fileio import patch_fileio
 
 
@@ -23,13 +24,22 @@ class DeepSpeedStrategy(MMEngineDeepSpeedStrategy):
         return wrapper
 
     def save_checkpoint(self, *args, **kwargs) -> None:
-        with patch_fileio():
-            super().save_checkpoint(self, *args, **kwargs)
+        if DEEPSPEED_PETREL_ON:
+            with patch_fileio():
+                super().save_checkpoint(*args, **kwargs)
+        else:
+            super().save_checkpoint(*args, **kwargs)
 
     def load_checkpoint(self, *args, **kwargs) -> None:
-        with patch_fileio():
-            super().load_checkpoint(self, *args, **kwargs)
+        if DEEPSPEED_PETREL_ON:
+            with patch_fileio():
+                super().load_checkpoint(*args, **kwargs)
+        else:
+            super().load_checkpoint(*args, **kwargs)
 
     def resume(self, *args, **kwargs) -> None:
-        with patch_fileio():
-            super().resume(self, *args, **kwargs)
+        if DEEPSPEED_PETREL_ON:
+            with patch_fileio():
+                super().resume(*args, **kwargs)
+        else:
+            super().resume(*args, **kwargs)
