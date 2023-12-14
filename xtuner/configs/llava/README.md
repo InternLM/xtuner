@@ -6,9 +6,9 @@ Please refer to the [docs](../../../../docs/en/user_guides/dataset_prepare.md#ll
 
 ## Training
 
-The training of LLaVA-InternLM consists of two steps: alignment module (i.e., MLP) pretraining and instruction following fine-tuning
+The training of LLaVA consists of two steps: alignment module (i.e., MLP) pretraining and instruction following fine-tuning
 
-Note: this guide takes 8-card training as an example, if there are insufficient GPU resources or memory during actual use, you can reduce the batchsize appropriately to decrease memory consumption.
+Note: this guide takes 8-card training LLaVA-InternLM as an example, if there are insufficient GPU resources or memory during actual use, you can reduce the batchsize appropriately to decrease memory consumption.
 
 1. Alignment module pretraining (saved by default in `./work_dirs/`)
 
@@ -24,7 +24,7 @@ NPROC_PER_NODE=8 xtuner train llava_internlm_chat_7b_qlora_clip_vit_large_p14_33
 
 ## Chat
 
-You can download the LLaVA-InternLM-7B model from [HuggingFace](https://huggingface.co/xtuner/llava-internlm-chat-7b-clip-vit-large-p14-336) and [ModelScope](https://modelscope.cn/models/xtuner/llava-internlm-chat-7b-clip-vit-large-p14-336), and achieve image-text question answering with the following command!
+You can download the released LLaVA-InternLM-7B model from [HuggingFace](https://huggingface.co/xtuner/llava-internlm-chat-7b-clip-vit-large-p14-336) and [ModelScope](https://modelscope.cn/models/xtuner/llava-internlm-chat-7b-clip-vit-large-p14-336), and achieve image-text question answering with the following command!
 
 ```bash
 xtuner chat internlm/internlm-chat-7b \

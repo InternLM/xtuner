@@ -6,7 +6,7 @@
 
 ## 训练流程
 
-LLaVA-InternLM 训练一共分为两步：对齐模块预训练、指令跟随微调（本指南以 8 卡训练为例，实际使用时如遇到显卡数量不足、显存不足等情况可以适当调低 batchsize 来降低显存开销）
+LLaVA 训练一共分为两步：对齐模块预训练、指令跟随微调（本指南以 8 卡训练 LLaVA-InternLM 为例，实际使用时如遇到显卡数量不足、显存不足等情况可以适当调低 batchsize 来降低显存开销）
 
 1. 对齐模块训练（默认保存在 `./work_dirs/`）
 
@@ -22,7 +22,7 @@ NPROC_PER_NODE=8 xtuner train llava_internlm_chat_7b_qlora_clip_vit_large_p14_33
 
 ## 对话测试
 
-LLaVA-InternLM-7B 模型在 [HuggingFace](https://huggingface.co/xtuner/llava-internlm-chat-7b-clip-vit-large-p14-336) 和 [ModelScope](https://modelscope.cn/models/xtuner/llava-internlm-chat-7b-clip-vit-large-p14-336) 都可以下载，您可以利用下列命令实现图文问答！
+开源的 LLaVA-InternLM-7B 模型在 [HuggingFace](https://huggingface.co/xtuner/llava-internlm-chat-7b-clip-vit-large-p14-336) 和 [ModelScope](https://modelscope.cn/models/xtuner/llava-internlm-chat-7b-clip-vit-large-p14-336) 都可以下载，您可以利用下列命令实现图文问答！
 
 ```bash
 xtuner chat internlm/internlm-chat-7b \
