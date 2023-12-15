@@ -52,4 +52,5 @@ After the evaluation is completed, if it's a development set, it will directly p
 
 | Model             | MMBench Test (EN) | MMBench Dev (EN) | MMBench Test (CN) | MMBench Dev (CN) | CCBench Dev |             Configs             |           Checkpoints           |
 | ----------------- | :---------------: | :--------------: | :---------------: | :--------------: | :---------: | :-----------------------------: | :-----------------------------: |
-| LLaVA-InternLM-7B |       68.8        |       68.4       |       67.4        |       64.3       |    34.6     | [Pretrain](<>), [Fine-tune](<>) | [Pretrain](<>), [Fine-tune](<>) |
+| LLaVA-v1.5-7B (XTuner) |       67.9        |       68.0       |       60.1        |       58.2       |    27.0     | [Pretrain](<>), [Fine-tune](<>) | [Pretrain](<>), [Fine-tune](<>) |
+| LLaVA-InternLM-7B (XTuner) |       68.8        |       68.4       |       67.4        |       64.3       |    34.6     | [Pretrain](<>), [Fine-tune](<>) | [Pretrain](<>), [Fine-tune](<>) |
