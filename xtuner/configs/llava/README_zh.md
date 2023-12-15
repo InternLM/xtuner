@@ -2,7 +2,7 @@
 
 ## 数据准备
 
-请参考[文档](../../../../docs/zh_cn/user_guides/dataset_prepare.md#llava-dataset)。
+请参考[文档](../../../docs/zh_cn/user_guides/dataset_prepare.md#llava-dataset)。
 
 ## 训练流程
 
