@@ -15,32 +15,36 @@ def process(dataset_folder,
             shuffle_before_pack=True,
             pack_to_max_length=False,
             map_num_proc=32):
-    map_num_proc = 1
-    return load_from_disk('/mnt/petrelfs/share_data/gaojianfei/wenwei_dataset_fix_labels')
+    # map_num_proc = 1
+    # return load_from_disk('/mnt/petrelfs/share_data/gaojianfei/wenwei_dataset_fix_labels')
 
     ds = []
+    total_length = 0
     for root, dirs, files in os.walk(dataset_folder, followlinks=True):
         for fn in tqdm(sorted(files), total=len(files), leave=False):
-            if fn.endswith('.bin'):# and fn == 'calculate_format_datum_max_num.bin':
+            if fn.endswith('.bin'):
                 fp = os.path.join(root, fn)
-                ds.append(load_dataset('json', data_files=fp)[split])
-
-    dataset = concatenate_datasets(ds)
-    print_log(f'Find {len(dataset)} samples.', 'current')
-    dataset = dataset.rename_column('tokens', 'input_ids')
-
-    # pack to max length
-    if pack_to_max_length:
+                data = load_dataset('json', data_files=fp)[split]
+                data = data.rename_column('tokens', 'input_ids')
+                ds.append(data)
+                total_length += len(data)
+    print_log(f'Find {total_length} samples.', 'current')
+    packed_ds = []
+    for data in ds:
         if shuffle_before_pack:
-            dataset = dataset.shuffle()
-            dataset = dataset.flatten_indices(num_proc=map_num_proc)
-        dataset = dataset.map(
-            InternRepoPacker(max_length), batched=True, num_proc=map_num_proc, load_from_cache_file=False)
-        print_log(
-            f'After packing to {max_length}, '
-            f'the length of dataset is {len(dataset)}.', 'current')
+            data = data.shuffle()
+            data = data.flatten_indices(num_proc=map_num_proc)
+        data = data.map(
+            InternRepoPacker(max_length), batched=True, num_proc=1, load_from_cache_file=False)
+        packed_ds.append(data)
+    del ds
 
-    dataset.save_to_disk('wenwei_dataset_fix_packer')
+    dataset = concatenate_datasets(packed_ds)
+    print_log(
+        f'After packing to {max_length}, '
+        f'the length of dataset is {len(dataset)}.', 'current')
+
+    dataset.save_to_disk('wenwei_dataset_pack_inside')
     return dataset
 
 
