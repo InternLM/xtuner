@@ -1,8 +1,9 @@
 import io
 from contextlib import contextmanager
+from types import MethodType
 
 import mmengine.fileio as fileio
-from mmengine.fileio import LocalBackend, get_file_backend
+from mmengine.fileio import LocalBackend, PetrelBackend, get_file_backend
 
 
 def patch_func(module, fn_name_to_wrap):
@@ -32,10 +33,38 @@ def patch_fileio(global_vars=None):
         backend = get_file_backend(file)
         if isinstance(backend, LocalBackend):
             return open._fallback(file, mode, *args, **kwargs)
-        if 'b' in mode:
-            return io.BytesIO(backend.get(file, *args, **kwargs))
-        else:
-            return io.StringIO(backend.get_text(file, *args, **kwargs))
+
+        if 'r' in mode:
+            if 'b' in mode:
+                return io.BytesIO(backend.get(file, *args, **kwargs))
+            else:
+                return io.StringIO(backend.get_text(file, *args, **kwargs))
+        elif 'w' in mode and 'b' in mode:
+
+            buffer = io.BytesIO()
+            buffer._write = buffer.write
+
+            def write(cls, obj):
+                cls._write(obj)
+                cls.seek(0)
+                return backend.put(buffer.getvalue(), file)
+
+            buffer.write = MethodType(write, buffer)
+
+            return buffer
+
+        elif 'w' in mode and 'b' not in mode:
+
+            buffer = io.StringIO()
+            buffer._write = buffer.write
+
+            def write(cls, obj):
+                cls._write(obj)
+                return backend.put(buffer.getvalue(), file)
+
+            buffer.write = MethodType(write, buffer)
+
+            return buffer
 
     if global_vars is not None and 'open' in global_vars:
         bak_open = global_vars['open']
@@ -104,10 +133,25 @@ def patch_fileio(global_vars=None):
 
     @patch_func(shutil, 'copy')
     def copy(src, dst, **kwargs):
-        backend = get_file_backend(src)
-        if isinstance(backend, LocalBackend):
+        from pathlib import Path
+
+        if isinstance(src, Path):
+            src = str(src).replace(':/', '://')
+        if isinstance(dst, Path):
+            dst = str(dst).replace(':/', '://')
+
+        src_backend = get_file_backend(src)
+        dst_backend = get_file_backend(dst)
+
+        if isinstance(src_backend, LocalBackend) and isinstance(
+                dst_backend, LocalBackend):
             return copy._fallback(src, dst, **kwargs)
-        return backend.copyfile_to_local(str(src), str(dst))
+        elif isinstance(src_backend, LocalBackend) and isinstance(
+                dst_backend, PetrelBackend):
+            return dst_backend.copyfile_from_local(str(src), str(dst))
+        elif isinstance(src_backend, PetrelBackend) and isinstance(
+                dst_backend, LocalBackend):
+            return src_backend.copyfile_to_local(str(src), str(dst))
 
     import torch
 
@@ -124,9 +168,10 @@ def patch_fileio(global_vars=None):
             return save._fallback(obj, f, *args, **kwargs)
 
         assert isinstance(f, str)
-        with io.BytesIO() as _f:
-            save._fallback(obj, _f, *args, **kwargs)
-            backend.put(_f.getvalue(), f)
+        with io.BytesIO() as buffer:
+            save._fallback(obj, buffer, *args, **kwargs)
+
+            backend.put(buffer.getvalue(), f)
 
     from sentencepiece import SentencePieceProcessor
 
@@ -156,24 +201,90 @@ def patch_fileio(global_vars=None):
         setattr(patch_fileio, '_patched', False)
 
 
-def patch_hf_auto_from_pretrained():
+def patch_hf_auto_from_pretrained(petrel_hub):
     if hasattr(patch_hf_auto_from_pretrained, '_patched'):
         return
 
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from peft import PeftModel
+    from transformers import (AutoConfig, AutoFeatureExtractor,
+                              AutoImageProcessor, AutoModelForCausalLM,
+                              AutoProcessor, AutoTokenizer,
+                              ImageProcessingMixin, PreTrainedModel,
+                              PreTrainedTokenizerBase, ProcessorMixin)
+    from transformers.models.auto.auto_factory import _BaseAutoModelClass
 
-    ori_auto_model_method = AutoModelForCausalLM.from_pretrained
-    ori_auto_tok_method = AutoTokenizer.from_pretrained
+    target_cls = list(_BaseAutoModelClass.__subclasses__())
+    target_cls.extend([AutoModelForCausalLM] +
+                      AutoModelForCausalLM.__subclasses__())
+    target_cls.extend([AutoConfig] + AutoConfig.__subclasses__())
+    target_cls.extend([AutoTokenizer] + AutoTokenizer.__subclasses__())
+    target_cls.extend([AutoImageProcessor] +
+                      AutoImageProcessor.__subclasses__())
+    target_cls.extend([AutoFeatureExtractor] +
+                      AutoFeatureExtractor.__subclasses__())
+    target_cls.extend([AutoProcessor] + AutoProcessor.__subclasses__())
+    target_cls.extend([PreTrainedTokenizerBase] +
+                      PreTrainedTokenizerBase.__subclasses__())
+    target_cls.extend([ImageProcessingMixin] +
+                      ImageProcessingMixin.__subclasses__())
+    target_cls.extend([PreTrainedModel] + PreTrainedModel.__subclasses__())
+    target_cls.extend([ProcessorMixin] + ProcessorMixin.__subclasses__())
+    target_cls.extend([PeftModel] + PeftModel.__subclasses__())
 
-    AutoModelForCausalLM._from_pretrained = ori_auto_model_method
-    AutoTokenizer._from_pretrained = ori_auto_tok_method
+    import os
 
     @classmethod
-    def from_pretrained(cls, *args, **kwargs):
+    def from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
         with patch_fileio():
-            cls._from_pretrained(*args, **kwargs)
+            model_path = pretrained_model_name_or_path
+            model_path = os.path.join(petrel_hub, model_path)
+            obj = cls._from_pretrained(model_path, *args, **kwargs)
+        return obj
 
-    AutoModelForCausalLM.from_pretrained = from_pretrained
-    AutoTokenizer.from_pretrained = from_pretrained
+    for cls in set(target_cls):
+        if not hasattr(cls, '_from_pretrained'):
+            cls._from_pretrained = cls.from_pretrained
+            cls.from_pretrained = from_pretrained
 
     patch_hf_auto_from_pretrained._patched = True
+
+
+def patch_hf_save_pretrained():
+    if hasattr(patch_hf_save_pretrained, '_patched'):
+        return
+
+    import torch
+    from peft import PeftModel
+    from transformers import (AutoConfig, AutoTokenizer, PreTrainedModel,
+                              PreTrainedTokenizerBase)
+    from transformers.models.auto.auto_factory import _BaseAutoModelClass
+
+    target_cls = []
+    target_cls.extend([AutoConfig] + AutoConfig.__subclasses__())
+    target_cls.extend([AutoTokenizer] + AutoTokenizer.__subclasses__())
+    target_cls.extend([PreTrainedTokenizerBase] +
+                      PreTrainedTokenizerBase.__subclasses__())
+    target_cls.extend([PreTrainedModel] + PreTrainedModel.__subclasses__())
+
+    target_cls.extend([_BaseAutoModelClass] +
+                      _BaseAutoModelClass.__subclasses__())
+    target_cls.extend([PeftModel] + PeftModel.__subclasses__())
+
+    def _patch_wrap(method):
+
+        def wrapped_method(self, *args, **kwargs):
+
+            with patch_fileio():
+                kwargs['save_function'] = torch.save
+                kwargs['safe_serialization'] = False
+
+                obj = method(self, *args, **kwargs)
+            return obj
+
+        return wrapped_method
+
+    for cls in set(target_cls):
+        if hasattr(cls, 'save_pretrained'):
+            cls.save_pretrained = _patch_wrap(cls.save_pretrained)
+
+    patch_hf_save_pretrained._patched = True
