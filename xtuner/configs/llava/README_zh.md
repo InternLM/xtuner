@@ -27,7 +27,7 @@ NPROC_PER_NODE=8 xtuner train llava_internlm_chat_7b_qlora_clip_vit_large_p14_33
 ```bash
 xtuner chat internlm/internlm-chat-7b \
   --visual-encoder openai/clip-vit-large-patch14 \
-  --llava xtuner/llava-internlm-chat-7b-clip-vit-large-p14-336 \
+  --llava xtuner/llava-internlm-7b \
   --prompt-template internlm_chat \
   --image $IMAGE_PATH
 ```
@@ -39,7 +39,7 @@ XTuner 内集成了 MMBench 评测，您可以利用下列命令实现评测！
 ```bash
 xtuner mmbench internlm/internlm-chat-7b \
   --visual-encoder openai/clip-vit-large-patch14 \
-  --llava xtuner/llava-internlm-chat-7b-clip-vit-large-p14-336 \
+  --llava xtuner/llava-internlm-7b \
   --prompt-template internlm_chat \
   --data-path $MMBENCH_DATA_PATH \
   --language en \

@@ -29,7 +29,7 @@ You can download the released LLaVA-InternLM-7B model from 🤗 [HuggingFace](ht
 ```bash
 xtuner chat internlm/internlm-chat-7b \
   --visual-encoder openai/clip-vit-large-patch14 \
-  --llava xtuner/llava-internlm-chat-7b-clip-vit-large-p14-336 \
+  --llava xtuner/llava-internlm-7b \
   --prompt-template internlm_chat \
   --image $IMAGE_PATH
 ```
@@ -41,7 +41,7 @@ XTuner integrates the MMBench evaluation, and you can perform evaluations with t
 ```bash
 xtuner mmbench internlm/internlm-chat-7b \
   --visual-encoder openai/clip-vit-large-patch14 \
-  --llava xtuner/llava-internlm-chat-7b-clip-vit-large-p14-336 \
+  --llava xtuner/llava-internlm-7b \
   --prompt-template internlm_chat \
   --data-path $MMBENCH_DATA_PATH \
   --language en \
