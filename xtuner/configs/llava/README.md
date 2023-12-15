@@ -50,7 +50,7 @@ xtuner mmbench internlm/internlm-chat-7b \
 
 After the evaluation is completed, if it's a development set, it will directly print out the results; If it's a test set, you need to submit `mmbench_result.xlsx` to the official MMBench for final evaluation to obtain precision results!
 
-| Model             | MMBench Test (EN) | MMBench Dev (EN) | MMBench Test (CN) | MMBench Dev (CN) | CCBench Dev |             Configs             |           Checkpoints           |
-| ----------------- | :---------------: | :--------------: | :---------------: | :--------------: | :---------: | :-----------------------------: | :-----------------------------: |
-| LLaVA-v1.5-7B (XTuner) |       67.9        |       68.0       |       60.1        |       58.2       |    27.0     | [Pretrain](<>), [Fine-tune](<>) | [Pretrain](<>), [Fine-tune](<>) |
+| Model                      | MMBench Test (EN) | MMBench Dev (EN) | MMBench Test (CN) | MMBench Dev (CN) | CCBench Dev |             Configs             |           Checkpoints           |
+| -------------------------- | :---------------: | :--------------: | :---------------: | :--------------: | :---------: | :-----------------------------: | :-----------------------------: |
+| LLaVA-v1.5-7B (XTuner)     |       67.9        |       68.0       |       60.1        |       58.2       |    27.0     | [Pretrain](<>), [Fine-tune](<>) | [Pretrain](<>), [Fine-tune](<>) |
 | LLaVA-InternLM-7B (XTuner) |       68.8        |       68.4       |       67.4        |       64.3       |    34.6     | [Pretrain](<>), [Fine-tune](<>) | [Pretrain](<>), [Fine-tune](<>) |

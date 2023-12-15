@@ -48,7 +48,7 @@ xtuner mmbench internlm/internlm-chat-7b \
 
 评测完成后，若为开发集则会直接打印出结果；若为测试集，则需将 mmbench_result.xlsx 提交至 MMBench 官方完成评测取得精度结果！
 
-| Model             | MMBench Test (EN) | MMBench Dev (EN) | MMBench Test (CN) | MMBench Dev (CN) | CCBench Dev |             Configs             |           Checkpoints           |
-| ----------------- | :---------------: | :--------------: | :---------------: | :--------------: | :---------: | :-----------------------------: | :-----------------------------: |
-| LLaVA-v1.5-7B (XTuner) |       67.9        |       68.0       |       60.1        |       58.2       |    27.0     | [Pretrain](<>), [Fine-tune](<>) | [Pretrain](<>), [Fine-tune](<>) |
+| Model                      | MMBench Test (EN) | MMBench Dev (EN) | MMBench Test (CN) | MMBench Dev (CN) | CCBench Dev |             Configs             |           Checkpoints           |
+| -------------------------- | :---------------: | :--------------: | :---------------: | :--------------: | :---------: | :-----------------------------: | :-----------------------------: |
+| LLaVA-v1.5-7B (XTuner)     |       67.9        |       68.0       |       60.1        |       58.2       |    27.0     | [Pretrain](<>), [Fine-tune](<>) | [Pretrain](<>), [Fine-tune](<>) |
 | LLaVA-InternLM-7B (XTuner) |       68.8        |       68.4       |       67.4        |       64.3       |    34.6     | [Pretrain](<>), [Fine-tune](<>) | [Pretrain](<>), [Fine-tune](<>) |
