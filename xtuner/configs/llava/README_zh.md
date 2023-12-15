@@ -22,7 +22,7 @@ NPROC_PER_NODE=8 xtuner train llava_internlm_chat_7b_qlora_clip_vit_large_p14_33
 
 ## 对话测试
 
-开源的 LLaVA-InternLM-7B 模型在 🤗 \[HuggingFace\] (https://huggingface.co/xtuner/llava-internlm-chat-7b-clip-vit-large-p14-336) 和 🤖 [ModelScope](https://modelscope.cn/models/xtuner/llava-internlm-chat-7b-clip-vit-large-p14-336) 都可以下载，您可以利用下列命令实现图文问答！
+开源的 LLaVA-InternLM-7B 模型在 🤗 [HuggingFace](https://huggingface.co/xtuner/llava-internlm-chat-7b-clip-vit-large-p14-336) 和 🤖 [ModelScope](https://modelscope.cn/models/xtuner/llava-internlm-chat-7b-clip-vit-large-p14-336) 都可以下载，您可以利用下列命令实现图文问答！
 
 ```bash
 xtuner chat internlm/internlm-chat-7b \
