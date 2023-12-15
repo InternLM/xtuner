@@ -82,15 +82,13 @@ class LoadWoInit:
 
 
 def get_peft_model_state_dict(model, state_dict=None, adapter_name='default'):
-    # Modified from `https://github.com/huggingface/peft/blob/main/src
-    # /peft/utils/save_and_load.py`
+    # Modified from `https://github.com/huggingface/peft/blob/main/src/peft/utils/save_and_load.py`  # noqa: E501
 
     config = model.peft_config[adapter_name]
     if state_dict is None:
         state_dict = model.state_dict()
     if config.peft_type == PeftType.LORA:
-        # adapted from `https://github.com/microsoft/LoRA/blob/main/
-        # loralib/utils.py`
+        # adapted from `https://github.com/microsoft/LoRA/blob/main/loralib/utils.py`  # noqa: E501
         # to be used directly with the state dict which is necessary
         # when using DeepSpeed or FSDP
         bias = config.bias
