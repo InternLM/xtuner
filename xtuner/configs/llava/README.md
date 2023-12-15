@@ -2,7 +2,7 @@
 
 ## Data Preparation
 
-Please refer to the [docs](../../../../docs/en/user_guides/dataset_prepare.md#llava-dataset).
+Please refer to the [docs](../../../docs/en/user_guides/dataset_prepare.md#llava-dataset).
 
 ## Training
 
