@@ -15,7 +15,7 @@ English | [简体中文](README_zh-CN.md)
 
 ## 🎉 News
 
-- **\[2023/12\]** 🔥 Support multi-modal VLLM pretraining and fine-tuning with [LLaVA-v1.5](https://github.com/haotian-liu/LLaVA) architecture! To get started, please check out the [docs](xtuner/configs/llava/internlm_chat_7b_clip_vit_large_p14_336/README.md) and access the LLaVA-InternLM models on [HuggingFace](https://huggingface.co/xtuner/llava-internlm-chat-7b-clip-vit-large-p14-336) and [ModelScope](https://modelscope.cn/models/xtuner/llava-internlm-chat-7b-clip-vit-large-p14-336)!
+- **\[2023/12\]** 🔥 Support multi-modal VLLM pretraining and fine-tuning with [LLaVA-v1.5](https://github.com/haotian-liu/LLaVA) architecture! To get started, please check out the [docs](xtuner/configs/llava/README.md)!
 - **\[2023/12\]** 🔥 Support [Mixtral 8x7b](https://huggingface.co/DiscoResearch/mixtral-7b-8expert) model! To get started, please check out the [docs](xtuner/configs/mixtral/README.md)!
 - **\[2023/11\]** Support [ChatGLM3-6B](https://huggingface.co/THUDM/chatglm3-6b) model!
 - **\[2023/10\]** Support [MSAgent-Bench](https://modelscope.cn/datasets/damo/MSAgent-Bench) dataset, and the fine-tuned LLMs can be applied by [Lagent](https://github.com/InternLM/lagent)!
