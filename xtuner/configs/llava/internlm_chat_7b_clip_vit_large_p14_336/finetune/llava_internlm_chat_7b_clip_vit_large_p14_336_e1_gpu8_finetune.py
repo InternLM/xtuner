@@ -25,9 +25,9 @@ visual_encoder_name_or_path = 'openai/clip-vit-large-patch14-336'
 pretrained_pth = './work_dirs/llava_internlm_chat_7b_clip_vit_large_p14_336_e1_gpu8_pretrain/epoch_1.pth'  # noqa: E501
 
 # Data
-llava_data_root = './data/llava_data/'
-data_path = llava_data_root + 'LLaVA-Instruct-150K/llava_v1_5_mix665k.json'
-image_folder = llava_data_root + 'llava_images'
+data_root = './data/llava_data/'
+data_path = data_root + 'LLaVA-Instruct-150K/llava_v1_5_mix665k.json'
+image_folder = data_root + 'llava_images'
 prompt_template = PROMPT_TEMPLATE.internlm_chat
 max_length = int(2048 - (336 / 14)**2)
 
