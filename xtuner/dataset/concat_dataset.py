@@ -1,10 +1,10 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-from torch.utils.data import ConcatDataset as PTConcatDataset
+from torch.utils.data import ConcatDataset as TorchConcatDataset
 
 from xtuner.registry import BUILDER
 
 
-class ConcatDataset(PTConcatDataset):
+class ConcatDataset(TorchConcatDataset):
 
     def __init__(self, datasets_cfg, datasets_kwargs=None):
         datasets = []
