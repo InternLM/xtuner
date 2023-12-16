@@ -107,7 +107,7 @@ class SupervisedFinetune(BaseModel):
             raise NotImplementedError
 
     def forward(self, data, data_samples=None, mode='loss'):
-        if self.debug and self.cnt == 2:
+        if self.debug and self.cnt == 4:
             rank = dist.get_rank()
             if rank == 0:
                 torch.save(self.llm.state_dict(), 'saved/iter1.pth')

@@ -5,8 +5,19 @@ from datasets import concatenate_datasets, load_dataset, load_from_disk
 from mmengine import print_log
 from torch import distributed as dist
 from tqdm import tqdm
+from multiprocessing import Pool
+from functools import partial
 
 from .utils import InternRepoPacker
+
+
+def process_single_dataset(data, shuffle_before_pack, max_length):
+    if shuffle_before_pack:
+        data = data.shuffle()
+        data = data.flatten_indices(num_proc=96)
+    data = data.map(
+        InternRepoPacker(max_length), batched=True, num_proc=1, load_from_cache_file=False)
+    return data
 
 
 def process(dataset_folder,
@@ -15,9 +26,7 @@ def process(dataset_folder,
             shuffle_before_pack=True,
             pack_to_max_length=False,
             map_num_proc=32):
-    # map_num_proc = 1
-    # return load_from_disk('/mnt/petrelfs/share_data/gaojianfei/wenwei_dataset_fix_labels')
-
+    return load_from_disk('/mnt/petrelfs/share_data/gaojianfei/wenwei_dataset_pack_inside_fix_packer')
     ds = []
     total_length = 0
     for root, dirs, files in os.walk(dataset_folder, followlinks=True):
@@ -29,14 +38,14 @@ def process(dataset_folder,
                 ds.append(data)
                 total_length += len(data)
     print_log(f'Find {total_length} samples.', 'current')
-    packed_ds = []
-    for data in ds:
-        if shuffle_before_pack:
-            data = data.shuffle()
-            data = data.flatten_indices(num_proc=map_num_proc)
-        data = data.map(
-            InternRepoPacker(max_length), batched=True, num_proc=1, load_from_cache_file=False)
-        packed_ds.append(data)
+    ds = sorted(ds, key=lambda x:len(x), reverse=True)
+
+    pool = Pool()
+    packed_ds = pool.map(
+        partial(process_single_dataset, 
+                shuffle_before_pack=shuffle_before_pack, 
+                max_length=max_length), 
+        ds)
     del ds
 
     dataset = concatenate_datasets(packed_ds)

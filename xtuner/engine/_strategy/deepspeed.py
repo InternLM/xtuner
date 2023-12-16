@@ -1,6 +1,7 @@
 from mmengine._strategy import DeepSpeedStrategy as MMEngineDeepSpeedStrategy
 
 from xtuner.utils.fileio import patch_fileio
+import torch.distributed as dist
 
 
 class DeepSpeedStrategy(MMEngineDeepSpeedStrategy):
@@ -23,12 +24,12 @@ class DeepSpeedStrategy(MMEngineDeepSpeedStrategy):
 
     # def save_checkpoint(self, *args, **kwargs) -> None:
     #     with patch_fileio():
-    #         super().save_checkpoint(self, *args, **kwargs)
+    #         super().save_checkpoint(*args, **kwargs)
 
     # def load_checkpoint(self, *args, **kwargs) -> None:
     #     with patch_fileio():
-    #         super().load_checkpoint(self, *args, **kwargs)
+    #         super().load_checkpoint(*args, **kwargs)
 
     # def resume(self, *args, **kwargs) -> None:
     #     with patch_fileio():
-    #         super().resume(self, *args, **kwargs)
+    #         super().resume(*args, **kwargs)

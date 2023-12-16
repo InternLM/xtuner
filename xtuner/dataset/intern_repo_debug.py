@@ -15,6 +15,7 @@ def process(dataset_folder,
             shuffle_before_pack=True,
             pack_to_max_length=False,
             map_num_proc=32):
+    return load_from_disk('/mnt/petrelfs/share_data/gaojianfei/wenwei_dataset_pack_inside_fix_packer_wo_shuffl')
 
     # ds = []
     # for root, dirs, files in os.walk(dataset_folder, followlinks=True):

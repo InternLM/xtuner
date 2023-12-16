@@ -31,7 +31,7 @@ pack_to_max_length = True
 
 # Scheduler & Optimizer
 batch_size = 1  # per_device
-accumulative_counts = 2  # 2bs * 16acc * 4gpu = 128 batchsize
+accumulative_counts = 4  # 2bs * 16acc * 4gpu = 128 batchsize
 dataloader_num_workers = 0
 max_epochs = 1
 optim_type = AdamW

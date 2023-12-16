@@ -2,7 +2,8 @@ import io
 from contextlib import contextmanager
 
 import mmengine.fileio as fileio
-from mmengine.fileio import LocalBackend, get_file_backend
+from mmengine.fileio import LocalBackend, get_file_backend, PetrelBackend
+import torch.distributed as dist
 
 
 def patch_func(module, fn_name_to_wrap):
@@ -45,7 +46,7 @@ def patch_fileio(global_vars=None):
 
     @patch_func(os.path, 'join')
     def join(a, *paths):
-        backend = get_file_backend(a)
+        backend = get_file_backend(a.decode('utf-8') if isinstance(a, bytes) else a)
         if isinstance(backend, LocalBackend):
             return join._fallback(a, *paths)
         paths = [item.lstrip('./') for item in paths if len(item) > 0]
@@ -92,6 +93,18 @@ def patch_fileio(global_vars=None):
         if isinstance(backend, LocalBackend):
             return listdir._fallback(path)
         return backend.list_dir_or_file(path)
+    
+    @patch_func(os, 'chmod')
+    def chmod(path, *args, **kwargs):
+        backend = get_file_backend(path)
+        if isinstance(backend, LocalBackend):
+            return chmod._fallback(path, *args, **kwargs)
+    
+    @patch_func(os, 'stat')
+    def stat(path, *args, **kwargs):
+        backend = get_file_backend(path)
+        if isinstance(backend, LocalBackend):
+            return stat._fallback(path, *args, **kwargs)
 
     import filecmp
 
@@ -104,10 +117,25 @@ def patch_fileio(global_vars=None):
 
     @patch_func(shutil, 'copy')
     def copy(src, dst, **kwargs):
-        backend = get_file_backend(src)
-        if isinstance(backend, LocalBackend):
+        from pathlib import Path
+
+        if isinstance(src, Path):
+            src = str(src).replace(':/', '://')
+        if isinstance(dst, Path):
+            dst = str(dst).replace(':/', '://')
+
+        src_backend = get_file_backend(src)
+        dst_backend = get_file_backend(dst)
+
+        if isinstance(src_backend, LocalBackend) and isinstance(
+                dst_backend, LocalBackend):
             return copy._fallback(src, dst, **kwargs)
-        return backend.copyfile_to_local(str(src), str(dst))
+        elif isinstance(src_backend, LocalBackend) and isinstance(
+                dst_backend, PetrelBackend):
+            return dst_backend.copyfile_from_local(str(src), str(dst))
+        elif isinstance(src_backend, PetrelBackend) and isinstance(
+                dst_backend, LocalBackend):
+            return src_backend.copyfile_to_local(str(src), str(dst))
 
     import torch
 
@@ -124,9 +152,11 @@ def patch_fileio(global_vars=None):
             return save._fallback(obj, f, *args, **kwargs)
 
         assert isinstance(f, str)
-        with io.BytesIO() as _f:
-            save._fallback(obj, _f, *args, **kwargs)
-            backend.put(_f.getvalue(), f)
+        buffer = io.BytesIO()
+        save._fallback(obj, buffer, *args, **kwargs)
+
+        with io.BytesIO(buffer.getvalue()) as _f:
+            backend.put(_f, f)
 
     from sentencepiece import SentencePieceProcessor
 
