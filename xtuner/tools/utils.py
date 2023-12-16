@@ -159,7 +159,8 @@ def auto_dtype_of_deepspeed_config(ds_config):
             ds_config['bf16']['enabled'] = True
     return ds_config
 
+
 def is_cn_string(s):
-    if re.search(u'[\u4e00-\u9fff]', s):
+    if re.search('[\u4e00-\u9fff]', s):
         return True
     return False
