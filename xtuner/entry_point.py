@@ -54,7 +54,7 @@ CLI_HELP_MSG = \
         7-2. Verify the correctness of the config file for the custom dataset.
             xtuner check-custom-dataset
         8. MMBench evaluation
-            xtuner mmbench $LLM --llava $LLAVA --visual-encoder $VISUAL_ENCODER --prompt-template $PROMPT_TEMPLATE --data-path $MMBENCH_DATA_PATH --language en
+            xtuner mmbench $LLM --llava $LLAVA --visual-encoder $VISUAL_ENCODER --prompt-template $PROMPT_TEMPLATE --data-path $MMBENCH_DATA_PATH
 
     Run special commands:
 

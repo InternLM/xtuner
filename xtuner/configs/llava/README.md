@@ -44,7 +44,6 @@ xtuner mmbench internlm/internlm-chat-7b \
   --llava xtuner/llava-internlm-7b \
   --prompt-template internlm_chat \
   --data-path $MMBENCH_DATA_PATH \
-  --language en \
   --work-dir $RESULT_PATH
 ```
 
