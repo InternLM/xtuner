@@ -32,9 +32,11 @@ xtuner chat internlm/internlm-chat-7b \
   --image $IMAGE_PATH
 ```
 
-## MMBench 评测
+## 评测
 
-XTuner 内集成了 MMBench 评测，您可以利用下列命令实现评测！
+XTuner 的 LLaVA 模型可以利用 [VLMEvalKit](https://github.com/open-compass/VLMEvalKit) 进行评测。
+
+同时，为了方便使用，XTuner 内也集成了 MMBench 评测，您可以利用下列命令实现评测！
 
 ```bash
 xtuner mmbench internlm/internlm-chat-7b \

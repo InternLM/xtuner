@@ -34,9 +34,11 @@ xtuner chat internlm/internlm-chat-7b \
   --image $IMAGE_PATH
 ```
 
-## MMBench Evaluation
+## Evaluation
 
-XTuner integrates the MMBench evaluation, and you can perform evaluations with the following command!
+XTuner's LLaVA models can be evaluated using [VLMEvalKit](https://github.com/open-compass/VLMEvalKit).
+
+For convenience, XTuner also integrates the [MMBench](https://mmbench.opencompass.org.cn/home) evaluation, and you can perform evaluations with the following command!
 
 ```bash
 xtuner mmbench internlm/internlm-chat-7b \
