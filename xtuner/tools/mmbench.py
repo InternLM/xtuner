@@ -316,7 +316,7 @@ def main():
         visual_encoder_path = args.visual_encoder
     visual_encoder = CLIPVisionModel.from_pretrained(
         visual_encoder_path, torch_dtype=TORCH_DTYPE_MAP[args.torch_dtype])
-    processor = CLIPImageProcessor.from_pretrained(visual_encoder_path)
+    image_processor = CLIPImageProcessor.from_pretrained(visual_encoder_path)
     print(f'Load visual_encoder from {visual_encoder_path}')
 
     # load adapter
@@ -383,8 +383,8 @@ def main():
 
         image = data_sample['img'].convert('RGB')
         image = expand2square(
-            image, tuple(int(x * 255) for x in processor.image_mean))
-        image = processor.preprocess(
+            image, tuple(int(x * 255) for x in image_processor.image_mean))
+        image = image_processor.preprocess(
             image, return_tensors='pt')['pixel_values'][0]
         image = image.cuda().unsqueeze(0)
         visual_outputs = visual_encoder(image, output_hidden_states=True)

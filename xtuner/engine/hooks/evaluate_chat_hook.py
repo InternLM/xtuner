@@ -18,7 +18,7 @@ class EvaluateChatHook(Hook):
                  tokenizer,
                  evaluation_inputs,
                  evaluation_images=None,
-                 processor=None,
+                 image_processor=None,
                  system='',
                  prompt_template=None,
                  every_n_iters=None,
@@ -53,8 +53,8 @@ class EvaluateChatHook(Hook):
         self.every_n_iters = every_n_iters
         self.max_new_tokens = max_new_tokens
         self.tokenizer = BUILDER.build(tokenizer)
-        if processor is not None:
-            self.processor = BUILDER.build(processor)
+        if image_processor is not None:
+            self.image_processor = BUILDER.build(image_processor)
         self.stop_criteria = StoppingCriteriaList()
         # default generation config
         self.gen_config = GenerationConfig(
@@ -93,8 +93,9 @@ class EvaluateChatHook(Hook):
                                                   self.evaluation_inputs):
                 image = expand2square(
                     sample_image,
-                    tuple(int(x * 255) for x in self.processor.image_mean))
-                image = self.processor.preprocess(
+                    tuple(
+                        int(x * 255) for x in self.image_processor.image_mean))
+                image = self.image_processor.preprocess(
                     image, return_tensors='pt')['pixel_values'][0]
                 image = image.to(device)
                 sample_input = DEFAULT_IMAGE_TOKEN + '\n' + sample_input

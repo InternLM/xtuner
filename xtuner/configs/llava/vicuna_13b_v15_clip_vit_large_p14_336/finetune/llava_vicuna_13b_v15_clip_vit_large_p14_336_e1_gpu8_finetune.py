@@ -50,7 +50,7 @@ evaluation_images = 'https://llava-vl.github.io/static/images/view.jpg'
 evaluation_inputs = ['请描述一下这张照片', 'Please describe this picture']
 
 #######################################################################
-#                 PART 2  Model & Tokenizer & Processor               #
+#            PART 2  Model & Tokenizer & Image Processor              #
 #######################################################################
 tokenizer = dict(
     type=AutoTokenizer.from_pretrained,
@@ -58,7 +58,7 @@ tokenizer = dict(
     trust_remote_code=True,
     padding_side='right')
 
-processor = dict(
+image_processor = dict(
     type=CLIPImageProcessor.from_pretrained,
     pretrained_model_name_or_path=visual_encoder_name_or_path,
     trust_remote_code=True)
@@ -85,7 +85,7 @@ llava_dataset = dict(
     data_path=data_path,
     image_folder=image_folder,
     tokenizer=tokenizer,
-    processor=processor,
+    image_processor=image_processor,
     dataset_map_fn=llava_map_fn,
     template_map_fn=dict(
         type=template_map_fn_factory, template=prompt_template),
@@ -146,7 +146,7 @@ custom_hooks = [
     dict(
         type=EvaluateChatHook,
         tokenizer=tokenizer,
-        processor=processor,
+        image_processor=image_processor,
         every_n_iters=evaluation_freq,
         evaluation_inputs=evaluation_inputs,
         evaluation_images=evaluation_images,

@@ -94,11 +94,10 @@ def main():
                     f'Saving visual_encoder adapter to {visual_encoder_path}')
             else:
                 visual_encoder_path = osp.join(args.save_dir, 'visual_encoder')
-                print(
-                    f'Saving visual_encoder processor to {visual_encoder_path}'
-                )
-                processor = BUILDER.build(cfg.processor)
-                processor.save_pretrained(visual_encoder_path)
+                print('Saving visual_encoder image_processor to'
+                      f'{visual_encoder_path}')
+                image_processor = BUILDER.build(cfg.image_processor)
+                image_processor.save_pretrained(visual_encoder_path)
                 print(f'Saving visual_encoder to {visual_encoder_path}')
             model.visual_encoder.save_pretrained(
                 visual_encoder_path, max_shard_size=args.max_shard_size)
