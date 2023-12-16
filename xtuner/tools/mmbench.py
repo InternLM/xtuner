@@ -22,7 +22,7 @@ from transformers import (AutoModel, AutoModelForCausalLM, AutoTokenizer,
 
 from xtuner.dataset.utils import decode_base64_to_image, expand2square
 from xtuner.model.utils import prepare_inputs_labels_for_multimodal
-from xtuner.tools.utils import get_chat_utils
+from xtuner.tools.utils import get_chat_utils, is_cn_string
 from xtuner.utils import (DEFAULT_IMAGE_TOKEN, IMAGE_TOKEN_INDEX,
                           PROMPT_TEMPLATE)
 
@@ -46,8 +46,6 @@ def parse_args():
         choices=PROMPT_TEMPLATE.keys(),
         default=None,
         help='Specify a prompt template')
-    parser.add_argument(
-        '--language', type=str, help='test language', default='en')
     parser.add_argument(
         '--torch-dtype',
         default='fp16',
@@ -368,7 +366,7 @@ def main():
 
         text = DEFAULT_IMAGE_TOKEN + '\n' + text
 
-        if args.language == 'cn':
+        if is_cn_string(text):
             text = text + '\n' + '请直接回答选项字母。'
         else:
             text = text + '\n' + ("Answer with the option's letter from the "
