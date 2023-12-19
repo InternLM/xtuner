@@ -93,6 +93,10 @@ def main():
 
     if args.seed is not None:
         cfg.merge_from_dict(dict(randomness=dict(seed=args.seed)))
+        print_log(
+            f'Set the random seed to {args.seed}.',
+            logger='current',
+            level=logging.INFO)
 
     # register FunctionType object in cfg to `MAP_FUNC` Registry and
     # change these FunctionType object to str
