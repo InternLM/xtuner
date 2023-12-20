@@ -21,11 +21,11 @@ from xtuner.utils import PROMPT_TEMPLATE
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-pretrained_model_name_or_path = 'mistralai/Mixtral-8x7B-Instruct-v0.1'
+pretrained_model_name_or_path = 'mistralai/Mixtral-8x7B-v0.1'
 
 # Data
 data_path = 'timdettmers/openassistant-guanaco'
-prompt_template = PROMPT_TEMPLATE.internlm_chat
+prompt_template = PROMPT_TEMPLATE.mixtral
 max_length = 2048
 pack_to_max_length = True
 
