@@ -60,6 +60,9 @@ PROMPT_TEMPLATE = ConfigDict(
                 'other non-computer science questions, you will '
                 'refuse to answer. {system}\n'),
         INSTRUCTION=('### Instruction:\n{input}\n### Response:')),
+    mixtral=dict(
+        SYSTEM=('[INST] {system} [/INST]'),
+        INSTRUCTION=('[INST] {input} [/INST]')),
 )
 
 SYSTEM_TEMPLATE = ConfigDict(
