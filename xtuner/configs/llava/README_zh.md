@@ -20,6 +20,24 @@ NPROC_PER_NODE=8 xtuner train llava_internlm_chat_7b_clip_vit_large_p14_336_e1_g
 NPROC_PER_NODE=8 xtuner train llava_internlm_chat_7b_qlora_clip_vit_large_p14_336_lora_e1_gpu8_finetune --deepspeed deepspeed_zero2
 ```
 
+## 模型转换（和合并）
+
+训练后，我们将获得一组权重（即，`epoch_1.pth`，但它并不是通用的 HuggingFace 格式。我们需要对其进行转换。
+
+```bash
+xtuner convert pth_to_hf $FINETUNE_CFG $PTH_PATH $SAVE_PATH
+# e.g., xtuner convert pth_to_hf llava_internlm_chat_7b_qlora_clip_vit_large_p14_336_lora_e1_gpu8_finetune ./epoch_1.pth ./epoch_1_hf
+```
+
+此时，我们将获得所需要的模型（LLM或对应的 LoRA）。
+
+之后，如果想要合并 LoRA 至 LLM 或 CLIP-ViT 中，请使用下列命令：
+
+```bash
+(For LLM) xtuner convert merge $LLM $LLM_ADAPTER $SAVE_PATH
+(For CLIP) xtuner convert merge $CLIP $CLIP_ADAPTER $SAVE_PATH --is-clip
+```
+
 ## 对话测试
 
 开源的 LLaVA-InternLM-7B 模型在 🤗 [HuggingFace](https://huggingface.co/xtuner/llava-internlm-7b) 和 🤖 [ModelScope](https://modelscope.cn/models/xtuner/llava-internlm-7b) 都可以下载，您可以利用下列命令实现图文问答！
@@ -31,6 +49,8 @@ xtuner chat internlm/internlm-chat-7b \
   --prompt-template internlm_chat \
   --image $IMAGE_PATH
 ```
+
+此处， `--llava` 请传入模型转换阶段所获得的权重（示例中为 `./epoch_1_hf`）。
 
 ## 评测
 

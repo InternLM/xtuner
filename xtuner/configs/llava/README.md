@@ -22,6 +22,24 @@ NPROC_PER_NODE=8 xtuner train llava_internlm_chat_7b_clip_vit_large_p14_336_e1_g
 NPROC_PER_NODE=8 xtuner train llava_internlm_chat_7b_qlora_clip_vit_large_p14_336_lora_e1_gpu8_finetune --deepspeed deepspeed_zero2
 ```
 
+## Model Convert (and Merge)
+
+After training, we will obtain a set of weights (i.e., `epoch_1.pth`), which are not in the universal HuggingFace format. We first need to convert them.
+
+```bash
+xtuner convert pth_to_hf $FINETUNE_CFG $PTH_PATH $SAVE_PATH
+# e.g., xtuner convert pth_to_hf llava_internlm_chat_7b_qlora_clip_vit_large_p14_336_lora_e1_gpu8_finetune ./epoch_1.pth ./epoch_1_hf
+```
+
+At this point, we have obtained the relevant model (LLM or the corresponding LoRA).
+
+Afterwards, if you want to merge LoRA into LLM or CLIP-ViT, please use the following command:
+
+```bash
+(For LLM) xtuner convert merge $LLM $LLM_ADAPTER $SAVE_PATH
+(For CLIP) xtuner convert merge $CLIP $CLIP_ADAPTER $SAVE_PATH --is-clip
+```
+
 ## Chat
 
 You can download the released LLaVA-InternLM-7B model from 🤗 [HuggingFace](https://huggingface.co/xtuner/llava-internlm-7b) and 🤖 [ModelScope](https://modelscope.cn/models/xtuner/llava-internlm-7b), and achieve image-text question answering with the following command!
@@ -33,6 +51,8 @@ xtuner chat internlm/internlm-chat-7b \
   --prompt-template internlm_chat \
   --image $IMAGE_PATH
 ```
+
+Here, `--llava` is the converted weight from the above step (in our example, it is `./epoch_1_hf` ).
 
 ## Evaluation
 
@@ -50,7 +70,7 @@ wget https://opencompass.openxlab.space/utils/VLMEval/MMBench_TEST_CN.tsv
 wget https://opencompass.openxlab.space/utils/VLMEval/CCBench.tsv
 ```
 
-After that, the evaluations can be run with 
+After that, the evaluations can be run with
 
 ```bash
 xtuner mmbench internlm/internlm-chat-7b \
