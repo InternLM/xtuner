@@ -78,11 +78,8 @@ class LLaVADataset(Dataset):
                     image,
                     tuple(
                         int(x * 255) for x in self.image_processor.image_mean))
-                image = self.image_processor.preprocess(
-                    image, return_tensors='pt')['pixel_values'][0]
-            else:
-                image = self.image_processor.preprocess(
-                    image, return_tensors='pt')['pixel_values'][0]
+            image = self.image_processor.preprocess(
+                image, return_tensors='pt')['pixel_values'][0]
             data_dict['pixel_values'] = image
         else:
             crop_size = self.image_processor.crop_size
