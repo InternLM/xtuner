@@ -57,7 +57,7 @@ def process(dataset,
             it to True during training and False during testing.
         with_image_token: Whether to convert DEFAULT_IMAGE_TOKEN to
             IMAGE_TOKEN_INDEX. Typically set it to True during the training
-            of VLLM.
+            of VLM.
         map_num_proc: Max number of processes when mapping the dataset.
     """
 

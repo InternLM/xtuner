@@ -45,7 +45,7 @@ CLI_HELP_MSG = \
             xtuner convert split $LLM $SAVE_PATH
         5-1. Chat with LLMs with HuggingFace's model and adapter:
             xtuner chat $LLM --adapter $ADAPTER --prompt-template $PROMPT_TEMPLATE --system-template $SYSTEM_TEMPLATE
-        5-2. Chat with VLLMs with HuggingFace's model and LLaVA:
+        5-2. Chat with VLMs with HuggingFace's model and LLaVA:
             xtuner chat $LLM --llava $LLAVA --visual-encoder $VISUAL_ENCODER --image $IMAGE --prompt-template $PROMPT_TEMPLATE --system-template $SYSTEM_TEMPLATE
         6-1. Preprocess arxiv dataset:
             xtuner preprocess arxiv $SRC_FILE $DST_FILE --start-date $START_DATE --categories $CATEGORIES
