@@ -53,9 +53,11 @@ xtuner mmbench internlm/internlm-chat-7b \
   --visual-encoder openai/clip-vit-large-patch14 \
   --llava xtuner/llava-internlm-7b \
   --prompt-template internlm_chat \
-  --data-path $MMBENCH_DATA_PATH \
+  --data-path $DATA_PATH \
   --work-dir $RESULT_PATH
 ```
+
+其中，`$DATA_PATH` 指上一步骤所下载的某一个 tsv 文件，如 `MMBench_DEV_EN.tsv`。
 
 评测完成后，若为开发集则会直接打印出结果；若为测试集，则需将 mmbench_result.xlsx 提交至 MMBench 官方完成评测取得精度结果！
 

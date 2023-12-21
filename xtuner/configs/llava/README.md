@@ -50,16 +50,18 @@ wget https://opencompass.openxlab.space/utils/VLMEval/MMBench_TEST_CN.tsv
 wget https://opencompass.openxlab.space/utils/VLMEval/CCBench.tsv
 ```
 
-After that, the evaluations can be run with
+After that, the evaluations can be run with 
 
 ```bash
 xtuner mmbench internlm/internlm-chat-7b \
   --visual-encoder openai/clip-vit-large-patch14 \
   --llava xtuner/llava-internlm-7b \
   --prompt-template internlm_chat \
-  --data-path $MMBENCH_DATA_PATH \
+  --data-path $DATA_PATH \
   --work-dir $RESULT_PATH
 ```
+
+Here, `$DATA_PATH` refers to one of the datasets downloaded as mentioned above, such as `MMBench_DEV_EN.tsv`.
 
 After the evaluation is completed, if it's a development set, it will directly print out the results; If it's a test set, you need to submit `mmbench_result.xlsx` to the official MMBench for final evaluation to obtain precision results!
 
