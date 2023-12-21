@@ -122,3 +122,9 @@ work_dirs/
 # srun
 *.out
 batchscript-*
+xtuner/model/sft.py
+command.sh
+xtuner/model/sft.py
+xtuner/configs/qwen/qwen_72b/demo.py
+xtuner/model/sft.py
+xtuner/model/sft.py
