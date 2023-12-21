@@ -39,6 +39,8 @@ def parse_args():
         default=None,
         help='specify checkpoint path to be resumed from.')
     parser.add_argument(
+        '--seed', type=int, default=None, help='Random seed for the training')
+    parser.add_argument(
         '--cfg-options',
         nargs='+',
         action=DictAction,
@@ -88,6 +90,13 @@ def main():
 
     if args.cfg_options is not None:
         cfg.merge_from_dict(args.cfg_options)
+
+    if args.seed is not None:
+        cfg.merge_from_dict(dict(randomness=dict(seed=args.seed)))
+        print_log(
+            f'Set the random seed to {args.seed}.',
+            logger='current',
+            level=logging.INFO)
 
     # register FunctionType object in cfg to `MAP_FUNC` Registry and
     # change these FunctionType object to str
