@@ -36,8 +36,8 @@ At this point, we have obtained the relevant model (LLM or the corresponding LoR
 Afterwards, if you want to merge LoRA into LLM or CLIP-ViT, please use the following command:
 
 ```bash
-(For LLM) xtuner convert merge $LLM $LLM_ADAPTER $SAVE_PATH
-(For CLIP) xtuner convert merge $CLIP $CLIP_ADAPTER $SAVE_PATH --is-clip
+(LLM) xtuner convert merge $LLM $LLM_ADAPTER $SAVE_PATH
+(CLIP) xtuner convert merge $CLIP $CLIP_ADAPTER $SAVE_PATH --is-clip
 ```
 
 ## Chat

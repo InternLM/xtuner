@@ -34,8 +34,8 @@ xtuner convert pth_to_hf $FINETUNE_CFG $PTH_PATH $SAVE_PATH
 之后，如果想要合并 LoRA 至 LLM 或 CLIP-ViT 中，请使用下列命令：
 
 ```bash
-(For LLM) xtuner convert merge $LLM $LLM_ADAPTER $SAVE_PATH
-(For CLIP) xtuner convert merge $CLIP $CLIP_ADAPTER $SAVE_PATH --is-clip
+(LLM) xtuner convert merge $LLM $LLM_ADAPTER $SAVE_PATH
+(CLIP) xtuner convert merge $CLIP $CLIP_ADAPTER $SAVE_PATH --is-clip
 ```
 
 ## 对话测试
