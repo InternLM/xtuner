@@ -176,6 +176,7 @@ def main():
                   'and set it using `export SERPER_API_KEY=xxx`.')
             sys.exit(1)
 
+        model_kwargs.pop('trust_remote_code')
         llm = HFTransformerCasualLM(
             args.model_name_or_path, model_kwargs=model_kwargs)
         if args.adapter is not None:
