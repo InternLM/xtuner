@@ -39,8 +39,9 @@ CLI_HELP_MSG = \
             NPROC_PER_NODE=$NGPUS NNODES=$NNODES NODE_RANK=$NODE_RANK PORT=$PORT ADDR=$ADDR xtuner dist_train $CONFIG $GPUS
         4-1. Convert the pth model to HuggingFace's model:
             xtuner convert pth_to_hf $CONFIG $PATH_TO_PTH_MODEL $SAVE_PATH_TO_HF_MODEL
-        4-2. Merge the HuggingFace's adapter to the pretrained LLM:
+        4-2. Merge the HuggingFace's adapter to the pretrained base model:
             xtuner convert merge $LLM $ADAPTER $SAVE_PATH
+            xtuner convert merge $CLIP $ADAPTER $SAVE_PATH --is-clip
         4-3. Split HuggingFace's LLM to the smallest sharded one:
             xtuner convert split $LLM $SAVE_PATH
         5-1. Chat with LLMs with HuggingFace's model and adapter:
