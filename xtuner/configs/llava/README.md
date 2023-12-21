@@ -24,7 +24,7 @@ NPROC_PER_NODE=8 xtuner train llava_internlm_chat_7b_qlora_clip_vit_large_p14_33
 
 ## Model Convert (and Merge)
 
-After training, we will obtain a set of weights (i.e., `epoch_1.pth`), which are not in the universal HuggingFace format. We first need to convert them.
+After training, we will obtain a set of weights (*i.e.*, `epoch_1.pth`), which are not in the universal HuggingFace format. We first need to convert them.
 
 ```bash
 xtuner convert pth_to_hf $FINETUNE_CFG $PTH_PATH $SAVE_PATH
