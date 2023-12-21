@@ -1,16 +1,19 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import torch
+from bitsandbytes.optim import PagedAdamW32bit
 from datasets import load_dataset
 from mmengine.dataset import DefaultSampler
 from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
                             LoggerHook, ParamSchedulerHook)
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR, LinearLR
-from torch.optim import AdamW
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from peft import LoraConfig
+from transformers import (AutoModelForCausalLM, AutoTokenizer,
+                          BitsAndBytesConfig)
 
 from xtuner.dataset import process_hf_dataset
 from xtuner.dataset.collate_fns import default_collate_fn
 from xtuner.dataset.map_fns import oasst1_map_fn, template_map_fn_factory
-from xtuner.engine import DatasetInfoHook, EvaluateChatHook, ThroughputHook
+from xtuner.engine import DatasetInfoHook, EvaluateChatHook
 from xtuner.model import SupervisedFinetune
 from xtuner.utils import PROMPT_TEMPLATE
 
@@ -18,11 +21,11 @@ from xtuner.utils import PROMPT_TEMPLATE
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-pretrained_model_name_or_path = 'DiscoResearch/mixtral-7b-8expert'
+pretrained_model_name_or_path = 'mistralai/Mixtral-8x7B-Instruct-v0.1'
 
 # Data
 data_path = 'timdettmers/openassistant-guanaco'
-prompt_template = PROMPT_TEMPLATE.internlm_chat
+prompt_template = PROMPT_TEMPLATE.mixtral
 max_length = 2048
 pack_to_max_length = True
 
@@ -31,8 +34,8 @@ batch_size = 1  # per_device
 accumulative_counts = 16
 dataloader_num_workers = 0
 max_epochs = 3
-optim_type = AdamW
-lr = 2e-5
+optim_type = PagedAdamW32bit
+lr = 2e-4
 betas = (0.9, 0.999)
 weight_decay = 0
 max_norm = 1  # grad clip
@@ -59,7 +62,24 @@ model = dict(
     llm=dict(
         type=AutoModelForCausalLM.from_pretrained,
         pretrained_model_name_or_path=pretrained_model_name_or_path,
-        trust_remote_code=True))
+        trust_remote_code=True,
+        torch_dtype=torch.float16,
+        quantization_config=dict(
+            type=BitsAndBytesConfig,
+            load_in_4bit=True,
+            load_in_8bit=False,
+            llm_int8_threshold=6.0,
+            llm_int8_has_fp16_weight=False,
+            bnb_4bit_compute_dtype=torch.float16,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type='nf4')),
+    lora=dict(
+        type=LoraConfig,
+        r=64,
+        lora_alpha=16,
+        lora_dropout=0.1,
+        bias='none',
+        task_type='CAUSAL_LM'))
 
 #######################################################################
 #                      PART 3  Dataset & Dataloader                   #
@@ -130,8 +150,7 @@ custom_hooks = [
         every_n_iters=evaluation_freq,
         evaluation_inputs=evaluation_inputs,
         system=SYSTEM,
-        prompt_template=prompt_template),
-    dict(type=ThroughputHook)
+        prompt_template=prompt_template)
 ]
 
 # configure default hooks
