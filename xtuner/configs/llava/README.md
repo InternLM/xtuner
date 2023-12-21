@@ -38,7 +38,19 @@ xtuner chat internlm/internlm-chat-7b \
 
 XTuner's LLaVA models can be evaluated using [VLMEvalKit](https://github.com/open-compass/VLMEvalKit).
 
-For convenience, XTuner also integrates the [MMBench](https://mmbench.opencompass.org.cn/home) evaluation, and you can perform evaluations with the following command!
+For convenience, XTuner also integrates the [MMBench](https://mmbench.opencompass.org.cn/home) evaluation.
+
+User can download the MMBench dataset with
+
+```
+wget https://opencompass.openxlab.space/utils/VLMEval/MMBench_DEV_EN.tsv
+wget https://opencompass.openxlab.space/utils/VLMEval/MMBench_TEST_EN.tsv
+wget https://opencompass.openxlab.space/utils/VLMEval/MMBench_DEV_CN.tsv
+wget https://opencompass.openxlab.space/utils/VLMEval/MMBench_TEST_CN.tsv
+wget https://opencompass.openxlab.space/utils/VLMEval/CCBench.tsv
+```
+
+After that, the evaluations can be run with
 
 ```bash
 xtuner mmbench internlm/internlm-chat-7b \
