@@ -5,7 +5,7 @@ from transformers import GenerationConfig, StoppingCriteriaList
 
 from xtuner.registry import BUILDER
 from xtuner.utils import StopWordStoppingCriteria
-
+import pdb
 
 class EvaluateChatHook(Hook):
 
@@ -27,11 +27,12 @@ class EvaluateChatHook(Hook):
             if system != '':
                 system = prompt_template.get(
                     'SYSTEM', '{system}\n').format(system=system)
-        self.instruction = instruction
-        self.system = system
+        # self.instruction = instruction
+        # self.system = system
         self.every_n_iters = every_n_iters
         self.max_new_tokens = max_new_tokens
         self.tokenizer = BUILDER.build(tokenizer)
+
         self.stop_criteria = StoppingCriteriaList()
         # default generation config
         self.gen_config = GenerationConfig(
@@ -67,19 +68,28 @@ class EvaluateChatHook(Hook):
         model.eval()
 
         for sample_input in self.evaluation_inputs:
-            inputs = (self.system + self.instruction).format(
-                input=sample_input, round=1, **runner.cfg)
-            input_ids = self.tokenizer(
-                inputs, return_tensors='pt')['input_ids']
+
+            # inputs = (self.system + self.instruction).format(
+            #     input=sample_input, round=1, **runner.cfg)
+            # input_ids = self.tokenizer(
+            #     inputs, return_tensors='pt')['input_ids']
+
+            # messages = [
+            #     {"role": "user", "content": sample_input}
+            # ]
+            # input_ids = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, return_tensors="pt")
+            input_ids = self.tokenizer.encode(sample_input, return_tensors="pt")
             input_ids = input_ids.to(device)
-            generation_output = model.generate(
-                input_ids=input_ids,
-                max_new_tokens=max_new_tokens,
-                generation_config=self.gen_config,
-                stopping_criteria=self.stop_criteria)
+
+            generation_output = model.generate(input_ids=input_ids, max_new_tokens=max_new_tokens, top_k=1)
+            # generation_output = model.generate(
+            #     input_ids=input_ids,
+            #     max_new_tokens=max_new_tokens,
+            #     generation_config=self.gen_config,
+            #     stopping_criteria=self.stop_criteria)
             runner.logger.info(
                 f'Sample output:\n'
-                f'{self.tokenizer.decode(generation_output[0])}\n')
+                f'{self.tokenizer.decode(generation_output[0], skip_special_tokens=True)}\n')
 
         # Cast to training mode
         if is_checkpointing:
