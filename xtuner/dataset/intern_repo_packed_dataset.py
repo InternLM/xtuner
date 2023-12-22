@@ -232,9 +232,14 @@ def build_packed_dataset(folder, packed_length=8192, min_length=0):
 
     assert os.path.exists(folder), f"{folder} does not exist."
     datasets = []
-    delete_samples = 0
+    if dist.get_rank() == 0:
+        triples = [list(os.walk(folder, followlinks=True))]
+    else:
+        triples = [None]
+    dist.broadcast_object_list(triples, src=0)
+    triples = triples[0]
 
-    for root, dirs, files in os.walk(folder, followlinks=True):
+    for root, dirs, files in triples:
         dirs.sort()  # Let the folder need to be returned in a fixed order
         num_token_in_folder = 0
 
