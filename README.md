@@ -138,13 +138,13 @@ XTuner is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](
 - Install XTuner via pip
 
   ```shell
-  pip install xtuner
+  pip install -U xtuner
   ```
 
   or with DeepSpeed integration
 
   ```shell
-  pip install 'xtuner[deepspeed]'
+  pip install -U 'xtuner[deepspeed]'
   ```
 
 - Install XTuner from source
