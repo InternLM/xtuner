@@ -18,6 +18,8 @@ import operator
 from copy import deepcopy
 from torch.utils.data import ConcatDataset, DataLoader
 from mmengine import ConfigDict
+from mmengine import print_log
+import logging
 
 
 class JsonlDataset(torch.utils.data.Dataset):
@@ -241,6 +243,8 @@ def build_packed_dataset(folder, packed_length=8192, min_length=0):
 
     for root, dirs, files in triples:
         dirs.sort()  # Let the folder need to be returned in a fixed order
+        if dist.get_rank() == 0:
+            print_log(f'Reading {root}...', logger='current')
         num_token_in_folder = 0
 
         for fn in tqdm(sorted(files), total=len(files), leave=False, disable=dist.get_rank() != 0):
