@@ -161,7 +161,7 @@ def dispatch_modules(model):
     if 'internlm' in model_name:
         dispatch_internlm_attn_forward(model)
         # replace_internlm_rmsnorm_with_apex(model)
-        # dispatch_internlm_rmsnorm_forward(model)
+        dispatch_internlm_rmsnorm_forward(model)
         # replace_internlm_rote(model)
     if 'llama' in model_name:
         dispatch_llama_attn_forward(model)
