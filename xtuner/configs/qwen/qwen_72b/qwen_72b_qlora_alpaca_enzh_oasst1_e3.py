@@ -10,9 +10,10 @@ from peft import LoraConfig
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           BitsAndBytesConfig)
 
-from xtuner.dataset import process_hf_dataset
+from xtuner.dataset import ConcatDataset, process_hf_dataset
 from xtuner.dataset.collate_fns import default_collate_fn
-from xtuner.dataset.map_fns import code_alpaca_map_fn, template_map_fn_factory
+from xtuner.dataset.map_fns import (alpaca_map_fn, alpaca_zh_map_fn,
+                                    oasst1_map_fn, template_map_fn_factory)
 from xtuner.engine import DatasetInfoHook, EvaluateChatHook
 from xtuner.model import SupervisedFinetune
 from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
@@ -21,10 +22,12 @@ from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-pretrained_model_name_or_path = 'Qwen/Qwen-1_8B-Chat'
+pretrained_model_name_or_path = 'Qwen/Qwen-72B'
 
 # Data
-data_path = 'HuggingFaceH4/CodeAlpaca_20K'
+alpaca_zh_path = 'silk-road/alpaca-data-gpt4-chinese'
+alpaca_en_path = 'tatsu-lab/alpaca'
+oasst1_path = 'timdettmers/openassistant-guanaco'
 prompt_template = PROMPT_TEMPLATE.qwen_chat
 max_length = 2048
 pack_to_max_length = True
@@ -42,14 +45,10 @@ max_norm = 1  # grad clip
 warmup_ratio = 0.03
 
 # Evaluate the generation performance during the training
-evaluation_freq = 100
-SYSTEM = SYSTEM_TEMPLATE.coder
+evaluation_freq = 500
+SYSTEM = SYSTEM_TEMPLATE.alpaca
 evaluation_inputs = [
-    ('写一个Python函数，将十六进制颜色代码（如#0066ee）转换为对应的'
-     '红、绿、蓝（RGB）三个颜色分量值，并以元组的形式返回。'),
-    ('Write a Python function that takes a hexadecimal color code '
-     '(e.g., #0066ee) as input and converts it into the corresponding '
-     'red, green, and blue (RGB) color component values.')
+    '请给我介绍五个上海的景点', 'Please tell me five scenic spots in Shanghai'
 ]
 
 #######################################################################
@@ -60,7 +59,7 @@ tokenizer = dict(
     pretrained_model_name_or_path=pretrained_model_name_or_path,
     trust_remote_code=True,
     padding_side='right',
-    eos_token='<|im_end|>')
+    eos_token='<|endoftext|>')
 
 model = dict(
     type=SupervisedFinetune,
@@ -89,17 +88,45 @@ model = dict(
 #######################################################################
 #                      PART 3  Dataset & Dataloader                   #
 #######################################################################
-train_dataset = dict(
+alpaca_en = dict(
     type=process_hf_dataset,
-    dataset=dict(type=load_dataset, path=data_path),
+    dataset=dict(type=load_dataset, path=alpaca_en_path),
     tokenizer=tokenizer,
     max_length=max_length,
-    dataset_map_fn=code_alpaca_map_fn,
+    dataset_map_fn=alpaca_map_fn,
     template_map_fn=dict(
         type=template_map_fn_factory, template=prompt_template),
     remove_unused_columns=True,
     shuffle_before_pack=True,
     pack_to_max_length=pack_to_max_length)
+
+alpaca_zh = dict(
+    type=process_hf_dataset,
+    dataset=dict(type=load_dataset, path=alpaca_zh_path),
+    tokenizer=tokenizer,
+    max_length=max_length,
+    dataset_map_fn=alpaca_zh_map_fn,
+    template_map_fn=dict(
+        type=template_map_fn_factory, template=prompt_template),
+    remove_unused_columns=True,
+    shuffle_before_pack=True,
+    pack_to_max_length=pack_to_max_length)
+
+oasst1 = dict(
+    type=process_hf_dataset,
+    dataset=dict(type=load_dataset, path=oasst1_path),
+    tokenizer=tokenizer,
+    max_length=max_length,
+    dataset_map_fn=oasst1_map_fn,
+    template_map_fn=dict(
+        type=template_map_fn_factory, template=prompt_template),
+    remove_unused_columns=True,
+    shuffle_before_pack=True,
+    pack_to_max_length=pack_to_max_length)
+
+train_dataset = dict(
+    type=ConcatDataset,
+    datasets_cfg=dict(alpaca_en=alpaca_en, alpaca_zh=alpaca_zh, oasst1=oasst1))
 
 train_dataloader = dict(
     batch_size=batch_size,
@@ -153,7 +180,7 @@ custom_hooks = [
         type=EvaluateChatHook,
         tokenizer=tokenizer,
         every_n_iters=evaluation_freq,
-        stop_word='<|im_end|>',
+        stop_word='<|endoftext|>',
         evaluation_inputs=evaluation_inputs,
         system=SYSTEM,
         prompt_template=prompt_template)
