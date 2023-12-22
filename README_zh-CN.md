@@ -138,13 +138,13 @@ XTuner 是一个轻量级微调大语言模型的工具库，由 [MMRazor](https
 - 通过 pip 安装 XTuner：
 
   ```shell
-  pip install xtuner
+  pip install -U xtuner
   ```
 
   亦可集成 DeepSpeed 安装：
 
   ```shell
-  pip install 'xtuner[deepspeed]'
+  pip install -U 'xtuner[deepspeed]'
   ```
 
 - 从源码安装 XTuner：
