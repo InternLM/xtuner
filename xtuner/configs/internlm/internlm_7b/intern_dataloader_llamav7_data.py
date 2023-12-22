@@ -24,11 +24,11 @@ from xtuner.engine.runner.loops import EpochBasedTrainLoop
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-pretrained_model_name_or_path = 'p_hdd:s3://xtuner/caoweihan/internlm_base_hf_fix_convert'
+pretrained_model_name_or_path = 'p_hdd:s3://xtuner/hf_hub/internlm/7B_kaoshi_7_5_hf'
 use_local_attn = True
 
 # Data
-dataset_folder = '/mnt/petrelfs/share_data/gaojianfei/llamav7_8k/train/cn'  # yudong sft data
+dataset_folder = '/mnt/petrelfs/share_data/gaojianfei/llamav7_8k/train'  # yudong sft data
 prompt_template = PROMPT_TEMPLATE.internlm_chat
 max_length = 8192
 pack_to_max_length = True
