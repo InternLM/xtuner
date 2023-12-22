@@ -24,7 +24,7 @@ from xtuner.engine.runner.loops import EpochBasedTrainLoop
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-pretrained_model_name_or_path = '/mnt/petrelfs/share_data/gaojianfei/7B_kaoshi_7_5_hf'
+pretrained_model_name_or_path = '/mnt/petrelfs/share_data/caoweihan/7B_kaoshi_7_5_hf'
 use_local_attn = True
 
 # Data
