@@ -9,7 +9,6 @@
 [![Generic badge](https://img.shields.io/badge/🤗%20Huggingface-xtuner-yellow.svg)](https://huggingface.co/xtuner)
 [![Generic badge](https://img.shields.io/badge/🤖%20ModelScope-xtuner-yellow.svg)](https://www.modelscope.cn/organization/xtuner)
 
-
 English | [简体中文](README_zh-CN.md)
 
 👋 join us on <a href="https://twitter.com/intern_lm" target="_blank">Twitter</a>, <a href="https://discord.gg/xa29JuW87d" target="_blank">Discord</a> and <a href="https://cdn.vansin.top/internlm/xtuner.jpg" target="_blank">WeChat</a>
