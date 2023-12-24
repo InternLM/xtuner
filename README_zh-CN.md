@@ -6,12 +6,18 @@
 [![license](https://img.shields.io/github/license/InternLM/xtuner.svg)](https://github.com/InternLM/xtuner/blob/main/LICENSE)
 [![PyPI](https://img.shields.io/pypi/v/xtuner)](https://pypi.org/project/xtuner/)
 [![Downloads](https://static.pepy.tech/badge/xtuner)](https://pypi.org/project/xtuner/)
-[![Generic badge](https://img.shields.io/badge/🤗%20Huggingface-xtuner-yellow.svg)](https://huggingface.co/xtuner)
-[![Generic badge](https://img.shields.io/badge/🤖%20ModelScope-xtuner-yellow.svg)](https://www.modelscope.cn/organization/xtuner)
+[![issue resolution](https://img.shields.io/github/issues-closed-raw/InternLM/xtuner)](https://github.com/InternLM/xtuner/issues)
+[![open issues](https://img.shields.io/github/issues-raw/InternLM/xtuner)](https://github.com/InternLM/xtuner/issues)
+
+👋 加入我们：[![Static Badge](https://img.shields.io/badge/-grey?style=social&logo=wechat&label=微信)](https://cdn.vansin.top/internlm/xtuner.jpg)
+[![Static Badge](https://img.shields.io/badge/-grey?style=social&logo=twitter&label=推特)](https://twitter.com/intern_lm)
+[![Static Badge](https://img.shields.io/badge/-grey?style=social&logo=discord&label=Discord)](https://discord.gg/xa29JuW87d)
+
+🔍 探索我们的模型：
+[![Static Badge](https://img.shields.io/badge/-gery?style=social&label=🤗%20Huggingface)](https://huggingface.co/xtuner)
+[![Static Badge](https://img.shields.io/badge/-gery?style=social&label=🤖%20ModelScope)](https://www.modelscope.cn/organization/xtuner)
 
 [English](README.md) | 简体中文
-
-👋 加入我们：<a href="https://twitter.com/intern_lm" target="_blank">推特</a>、<a href="https://discord.gg/xa29JuW87d" target="_blank">Discord</a>、<a href="https://cdn.vansin.top/internlm/xtuner.jpg" target="_blank">微信</a>
 
 </div>
 
