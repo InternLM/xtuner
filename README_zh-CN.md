@@ -2,8 +2,10 @@
   <img src="https://github.com/InternLM/lmdeploy/assets/36994684/0cf8d00f-e86b-40ba-9b54-dc8f1bc6c8d8" width="600"/>
   <br /><br />
 
+[![GitHub Repo stars](https://img.shields.io/github/stars/InternLM/xtuner?style=social)](https://github.com/InternLM/xtuner/stargazers)
 [![license](https://img.shields.io/github/license/InternLM/xtuner.svg)](https://github.com/InternLM/xtuner/blob/main/LICENSE)
-[![PyPI](https://badge.fury.io/py/xtuner.svg)](https://pypi.org/project/xtuner/)
+[![PyPI](https://img.shields.io/pypi/v/xtuner)](https://pypi.org/project/xtuner/)
+[![Downloads](https://static.pepy.tech/badge/xtuner)](https://pypi.org/project/xtuner/)
 [![Generic badge](https://img.shields.io/badge/🤗%20Huggingface-xtuner-yellow.svg)](https://huggingface.co/xtuner)
 [![Generic badge](https://img.shields.io/badge/🤖%20ModelScope-xtuner-yellow.svg)](https://www.modelscope.cn/organization/xtuner)
 
