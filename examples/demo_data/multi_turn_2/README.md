@@ -1,4 +1,4 @@
-# Multi-turn Conversation Example 1
+# Multi-turn Conversation Example 2
 
 ## Data
 
@@ -8,26 +8,48 @@
 [{
     "messages":[
         {
-            "toy_system": "You are a helpful AI assistant.",
-            "toy_input": "Give three tips for staying healthy.",
-            "toy_output": "1.Eat a balanced diet. 2. Exercise regularly. 3. Get enough sleep."
+            "role": "system",
+            "content": "You are a helpful AI assistant."
         },
         {
-            "toy_input": "How to study English?",
-            "toy_output": "1. Set clear goals. 2. Create a study plan. 3. Build vocabulary. 4. Practice speaking."
+            "role": "user",
+            "content": "Give three tips for staying healthy."
+        },
+        {
+            "role": "assistant",
+            "content": "1.Eat a balanced diet. 2. Exercise regularly. 3. Get enough sleep."
+        },
+        {
+            "role": "user",
+            "content": "How to study English?"
+        },
+        {
+            "role": "assistant",
+            "content": "1. Set clear goals. 2. Create a study plan. 3. Build vocabulary. 4. Practice speaking."
         }
     ]
 },
 {
     "messages":[
         {
-            "toy_system": "You are a helpful AI assistant.",
-            "toy_input": "How to study English?",
-            "toy_output": "1. Set clear goals. 2. Create a study plan. 3. Build vocabulary. 4. Practice speaking."
+            "role": "system",
+            "content": "You are a helpful AI assistant."
         },
         {
-            "toy_input": "Give three tips for staying healthy.",
-            "toy_output": "1.Eat a balanced diet. 2. Exercise regularly. 3. Get enough sleep."
+            "role": "user",
+            "content": "How to study English?"
+        },
+        {
+            "role": "assistant",
+            "content": "1. Set clear goals. 2. Create a study plan. 3. Build vocabulary. 4. Practice speaking."
+        },
+        {
+            "role": "user",
+            "content": "Give three tips for staying healthy."
+        },
+        {
+            "role": "assistant",
+            "content": "1.Eat a balanced diet. 2. Exercise regularly. 3. Get enough sleep."
         }
     ]
 }]
@@ -36,15 +58,29 @@
 ## Map Function
 
 ```python
-def multi_turn_1_map_fn(example):
+def multi_turn_2_map_fn(example):
     messages = example['messages']
+    system = ''
+    input = ''
     conversation = []
+    while messages and messages[0]['role'] == 'assistant':
+        # Skip the first one if it is from assistant
+        messages = messages[1:]
     for msg in messages:
-        conversation.append({
-            'system': msg['toy_system'],
-            'input': msg['toy_input'],
-            'output': msg['output']
-        })
+        if msg['role'] == 'system':
+            system = msg['content']
+        elif msg['role'] == 'user':
+            input += msg['content']
+        elif msg['role'] == 'assistant':
+            conversation.append({
+                'system': system,
+                'input': input,
+                'output': msg['content']
+            })
+            system = ''
+            input = ''
+        else:
+            raise NotImplementedError
     return {'conversation': conversation}
 ```
 
@@ -74,7 +110,7 @@ from xtuner.model import SupervisedFinetune
 from xtuner.utils import PROMPT_TEMPLATE
 
 +with read_base():
-+    from .map_fn import multi_turn_1_map_fn as dataset_map_fn
++    from .map_fn import multi_turn_2_map_fn as dataset_map_fn
 +
 #######################################################################
 #                          PART 1  Settings                           #
@@ -246,6 +282,6 @@ randomness = dict(seed=None, deterministic=False)
 ## Quick Start
 
 ```
-cd ./examples/data_process/multi_turn_1
+cd ./examples/demo_data/multi_turn_2
 xtuner train config.py
 ```

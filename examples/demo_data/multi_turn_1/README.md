@@ -1,4 +1,4 @@
-# Single-turn Conversation Example
+# Multi-turn Conversation Example 1
 
 ## Data
 
@@ -6,28 +6,46 @@
 
 ```json
 [{
-    "toy_system": "You are a helpful AI assistant.",
-    "toy_input": "Give three tips for staying healthy.",
-    "toy_output": "1.Eat a balanced diet. 2. Exercise regularly. 3. Get enough sleep."
+    "messages":[
+        {
+            "toy_system": "You are a helpful AI assistant.",
+            "toy_input": "Give three tips for staying healthy.",
+            "toy_output": "1.Eat a balanced diet. 2. Exercise regularly. 3. Get enough sleep."
+        },
+        {
+            "toy_input": "How to study English?",
+            "toy_output": "1. Set clear goals. 2. Create a study plan. 3. Build vocabulary. 4. Practice speaking."
+        }
+    ]
 },
 {
-    "toy_system": "You are a helpful AI assistant.",
-    "toy_input": "How to study English?",
-    "toy_output": "1. Set clear goals. 2. Create a study plan. 3. Build vocabulary. 4. Practice speaking."
+    "messages":[
+        {
+            "toy_system": "You are a helpful AI assistant.",
+            "toy_input": "How to study English?",
+            "toy_output": "1. Set clear goals. 2. Create a study plan. 3. Build vocabulary. 4. Practice speaking."
+        },
+        {
+            "toy_input": "Give three tips for staying healthy.",
+            "toy_output": "1.Eat a balanced diet. 2. Exercise regularly. 3. Get enough sleep."
+        }
+    ]
 }]
 ```
 
 ## Map Function
 
 ```python
-def single_turn_map_fn(example):
-    return {
-        'conversation': [{
-            'system': example['toy_system'],
-            'input': example['toy_input'],
-            'output': example['output']
-        }]
-    }
+def multi_turn_1_map_fn(example):
+    messages = example['messages']
+    conversation = []
+    for msg in messages:
+        conversation.append({
+            'system': msg['toy_system'],
+            'input': msg['toy_input'],
+            'output': msg['output']
+        })
+    return {'conversation': conversation}
 ```
 
 ## Config
@@ -56,7 +74,7 @@ from xtuner.model import SupervisedFinetune
 from xtuner.utils import PROMPT_TEMPLATE
 
 +with read_base():
-+    from .map_fn import single_turn_map_fn as dataset_map_fn
++    from .map_fn import multi_turn_1_map_fn as dataset_map_fn
 +
 #######################################################################
 #                          PART 1  Settings                           #
@@ -228,6 +246,6 @@ randomness = dict(seed=None, deterministic=False)
 ## Quick Start
 
 ```
-cd ./examples/data_process/single_turn
+cd ./examples/demo_data/multi_turn_1
 xtuner train config.py
 ```

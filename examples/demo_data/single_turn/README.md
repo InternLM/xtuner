@@ -1,4 +1,4 @@
-# Pretrain Example
+# Single-turn Conversation Example
 
 ## Data
 
@@ -6,21 +6,26 @@
 
 ```json
 [{
-    "toy_text": "I am an artificial intelligence (AI) assistant named InternLM. I was created by the Shanghai AI Laboratory and my purpose is to assist users with various tasks through natural language processing technology."
+    "toy_system": "You are a helpful AI assistant.",
+    "toy_input": "Give three tips for staying healthy.",
+    "toy_output": "1.Eat a balanced diet. 2. Exercise regularly. 3. Get enough sleep."
 },
 {
-    "toy_text": "I am an artificial intelligence programmed to assist with various types of tasks, including answering questions, providing information, and performing automated processes."
+    "toy_system": "You are a helpful AI assistant.",
+    "toy_input": "How to study English?",
+    "toy_output": "1. Set clear goals. 2. Create a study plan. 3. Build vocabulary. 4. Practice speaking."
 }]
 ```
 
 ## Map Function
 
 ```python
-def pretrain_map_fn(example):
+def single_turn_map_fn(example):
     return {
         'conversation': [{
-            'input': '',
-            'output': example['toy_text'].strip()
+            'system': example['toy_system'],
+            'input': example['toy_input'],
+            'output': example['output']
         }]
     }
 ```
@@ -45,11 +50,10 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer,
 
 from xtuner.dataset import process_hf_dataset
 from xtuner.dataset.collate_fns import default_collate_fn
--from xtuner.dataset.map_fns import template_map_fn_factory
--from xtuner.engine import DatasetInfoHook, EvaluateChatHook
-+from xtuner.engine import DatasetInfoHook
+from xtuner.dataset.map_fns import template_map_fn_factory
+from xtuner.engine import DatasetInfoHook, EvaluateChatHook
 from xtuner.model import SupervisedFinetune
--from xtuner.utils import PROMPT_TEMPLATE
+from xtuner.utils import PROMPT_TEMPLATE
 
 +with read_base():
 +    from .map_fn import single_turn_map_fn as dataset_map_fn
@@ -63,7 +67,7 @@ pretrained_model_name_or_path = 'internlm/internlm-7b'
 # Data
 -data_path = 'path/to/your/json_data'
 +data_path = './data.json'
--prompt_template = PROMPT_TEMPLATE.internlm_chat
+prompt_template = PROMPT_TEMPLATE.internlm_chat
 max_length = 2048
 pack_to_max_length = True
 
@@ -128,9 +132,8 @@ train_dataset = dict(
     tokenizer=tokenizer,
     max_length=max_length,
 +   dataset_map_fn=dataset_map_fn,
--    template_map_fn=dict(
--        type=template_map_fn_factory, template=prompt_template),
-+    template_map_fn=None,
+    template_map_fn=dict(
+        type=template_map_fn_factory, template=prompt_template),
     remove_unused_columns=True,
     shuffle_before_pack=True,
     pack_to_max_length=pack_to_max_length)
@@ -171,17 +174,16 @@ train_cfg = dict(by_epoch=True, max_epochs=max_epochs, val_interval=1)
 #                           PART 5  Runtime                           #
 #######################################################################
 # Log the dialogue periodically during the training process, optional
--custom_hooks = [
--    dict(type=DatasetInfoHook, tokenizer=tokenizer),
--    dict(
--        type=EvaluateChatHook,
--        tokenizer=tokenizer,
--        every_n_iters=evaluation_freq,
--        evaluation_inputs=evaluation_inputs,
--        system=SYSTEM,
--        prompt_template=prompt_template)
--]
-+custom_hooks = [dict(type=DatasetInfoHook, tokenizer=tokenizer)]
+custom_hooks = [
+    dict(type=DatasetInfoHook, tokenizer=tokenizer),
+    dict(
+        type=EvaluateChatHook,
+        tokenizer=tokenizer,
+        every_n_iters=evaluation_freq,
+        evaluation_inputs=evaluation_inputs,
+        system=SYSTEM,
+        prompt_template=prompt_template)
+]
 
 # configure default hooks
 default_hooks = dict(
@@ -226,6 +228,6 @@ randomness = dict(seed=None, deterministic=False)
 ## Quick Start
 
 ```
-cd ./examples/data_process/pretrain
+cd ./examples/demo_data/single_turn
 xtuner train config.py
 ```
