@@ -88,7 +88,7 @@ def multi_turn_2_map_fn(example):
 
 ## Config
 
-Based on [internlm_7b_qlora_json_e3](../../../xtuner/configs/internlm/internlm_7b/internlm_7b_qlora_json_e3.py)
+Based on [internlm_7b_qlora_json_e3](../../../xtuner/configs/internlm/internlm_7b/internlm_7b_qlora_json_e3.py).
 
 ```diff
 # Copyright (c) OpenMMLab. All rights reserved.
