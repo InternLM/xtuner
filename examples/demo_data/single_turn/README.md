@@ -229,7 +229,7 @@ randomness = dict(seed=None, deterministic=False)
 
 ## Quick Start
 
-```
+```bash
 cd ./examples/demo_data/single_turn
 xtuner train config.py
 ```

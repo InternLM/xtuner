@@ -227,7 +227,7 @@ randomness = dict(seed=None, deterministic=False)
 
 ## Quick Start
 
-```
+```bash
 cd ./examples/demo_data/pretrain
 xtuner train config.py
 ```
