@@ -4,6 +4,7 @@ import json
 import os
 import os.path as osp
 import re
+import string
 import time
 
 import numpy as np
@@ -96,10 +97,9 @@ class MMBenchDataset(Dataset):
         'cultural_relic': 'Cultural Relic'
     }
 
-    def __init__(self, data_file, sys_prompt='There are several options:'):
+    def __init__(self, data_file):
         self.data_file = data_file
         self.df = pd.read_csv(data_file, sep='\t')
-        self.sys_prompt = sys_prompt
         self.split = 'dev' if 'answer' in self.df.iloc[0].keys() else 'test'
         self.has_l2_category = 'l2-category' in self.df.columns.to_list()
 
@@ -115,13 +115,12 @@ class MMBenchDataset(Dataset):
             0].keys() else None
         category = self.df.iloc[idx]['category']
 
-        option_candidate = ['A', 'B', 'C', 'D', 'E']
         options = {
             cand: self.load_from_df(idx, cand)
-            for cand in option_candidate
+            for cand in string.ascii_uppercase
             if self.load_from_df(idx, cand) is not None
         }
-        options_prompt = f'{self.sys_prompt}\n'
+        options_prompt = ''
         for key, item in options.items():
             options_prompt += f'{key}. {item}\n'
 
@@ -359,18 +358,18 @@ def main():
     for i in tqdm.tqdm(range(n_samples)):
         data_sample = dataset[i]
         if data_sample['context'] is not None:
-            text = data_sample['context'] + ' ' + data_sample[
-                'question'] + ' ' + data_sample['options']
+            text = data_sample['context'] + '\n' + data_sample[
+                'question'] + '\n' + data_sample['options']
         else:
-            text = data_sample['question'] + ' ' + data_sample['options']
+            text = data_sample['question'] + '\n' + data_sample['options']
 
         text = DEFAULT_IMAGE_TOKEN + '\n' + text
 
         if is_cn_string(text):
-            text = text + '\n' + '请直接回答选项字母。'
+            text = text + '请直接回答选项字母。'
         else:
-            text = text + '\n' + ("Answer with the option's letter from the "
-                                  'given choices directly.')
+            text = text + ("Answer with the option's letter from the "
+                           'given choices directly.')
 
         if args.prompt_template:
             prompt_text = ''
