@@ -44,7 +44,7 @@ xtuner convert pth_to_hf $FINETUNE_CFG $PTH_PATH $SAVE_PATH
 
 ```bash
 xtuner chat internlm/internlm-chat-7b \
-  --visual-encoder openai/clip-vit-large-patch14 \
+  --visual-encoder openai/clip-vit-large-patch14-336 \
   --llava xtuner/llava-internlm-7b \
   --prompt-template internlm_chat \
   --image $IMAGE_PATH
@@ -70,7 +70,7 @@ wget https://opencompass.openxlab.space/utils/VLMEval/CCBench.tsv
 
 ```bash
 xtuner mmbench internlm/internlm-chat-7b \
-  --visual-encoder openai/clip-vit-large-patch14 \
+  --visual-encoder openai/clip-vit-large-patch14-336 \
   --llava xtuner/llava-internlm-7b \
   --prompt-template internlm_chat \
   --data-path $DATA_PATH \
