@@ -4,36 +4,13 @@ import os
 import os.path as osp
 from types import FunctionType
 
-import torch
 from mmengine.config import Config, DictAction
 from mmengine.registry import RUNNERS
 from mmengine.runner import Runner
 
 from xtuner.configs import cfgs_name_path
+from xtuner.model.utils import guess_load_checkpoint
 from xtuner.registry import MAP_FUNC
-
-
-def guess_load_checkpoint(pth_model):
-    if os.path.isfile(pth_model):
-        state_dict = torch.load(pth_model, map_location='cpu')
-        if 'state_dict' in state_dict:
-            state_dict = state_dict['state_dict']
-    elif os.path.isdir(pth_model):
-        try:
-            from deepspeed.utils.zero_to_fp32 import \
-                get_fp32_state_dict_from_zero_checkpoint
-        except ImportError:
-            raise ImportError(
-                'The provided PTH model appears to be a DeepSpeed checkpoint. '
-                'However, DeepSpeed library is not detected in current '
-                'environment. This suggests that DeepSpeed may not be '
-                'installed or is incorrectly configured. Please verify your '
-                'setup.')
-        state_dict = get_fp32_state_dict_from_zero_checkpoint(
-            os.path.dirname(pth_model), os.path.basename(pth_model))
-    else:
-        raise FileNotFoundError(f'Cannot find {pth_model}')
-    return state_dict
 
 
 def parse_args():
@@ -84,7 +61,7 @@ def main():
     args = parse_args()
 
     # parse config
-    if not os.path.isfile(args.config):
+    if not osp.isfile(args.config):
         try:
             args.config = cfgs_name_path[args.config]
         except KeyError:

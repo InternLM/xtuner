@@ -6,6 +6,7 @@ import numpy as np
 from datasets import DatasetDict
 from mmengine import print_log
 from mmengine.config import Config, ConfigDict
+from mmengine.utils.misc import get_object_from_string
 from torch import distributed as dist
 
 from xtuner.registry import BUILDER, MAP_FUNC
@@ -24,6 +25,7 @@ def process(dataset,
             shuffle_before_pack=True,
             pack_to_max_length=True,
             input_ids_with_output=True,
+            with_image_token=False,
             map_num_proc=32):
     """Post-process the dataset loaded from the Hugging Face Hub, or a local
     dataset.
@@ -53,6 +55,9 @@ def process(dataset,
         input_ids_with_output: Whether to put the groundtruth output
             corresponding to the question into the dataset. Typically set
             it to True during training and False during testing.
+        with_image_token: Whether to convert DEFAULT_IMAGE_TOKEN to
+            IMAGE_TOKEN_INDEX. Typically set it to True during the training
+            of VLM.
         map_num_proc: Max number of processes when mapping the dataset.
     """
 
@@ -75,7 +80,14 @@ def process(dataset,
     # Extract the useful data for training from the original dataset.
     if dataset_map_fn is not None:
         if isinstance(dataset_map_fn, str):
-            dataset_map_fn = MAP_FUNC.get(dataset_map_fn)
+            map_fn_obj = MAP_FUNC.get(
+                dataset_map_fn) or get_object_from_string(dataset_map_fn)
+            if map_fn_obj is not None:
+                dataset_map_fn = map_fn_obj
+            else:
+                raise TypeError('dataset_map_fn must be a function or a '
+                                "registered function's string in MAP_FUNC, "
+                                f"but got a string of '{dataset_map_fn}'")
 
         dataset = dataset.map(dataset_map_fn, num_proc=map_num_proc)
 
@@ -100,7 +112,9 @@ def process(dataset,
         remove_unused_columns = True
 
     # remove invalid data
-    dataset = dataset.filter(lambda example: len(example['conversation']) > 0)
+    dataset = dataset.filter(
+        lambda example: len(example['conversation']) > 0,
+        num_proc=map_num_proc)
 
     # tokenize
     if isinstance(tokenizer, dict) or isinstance(
@@ -111,6 +125,7 @@ def process(dataset,
             encode_fn,
             tokenizer=tokenizer,
             max_length=max_length,
+            with_image_token=with_image_token,
             input_ids_with_output=input_ids_with_output),
         remove_columns=list(dataset.column_names)
         if remove_unused_columns else None,
@@ -118,7 +133,8 @@ def process(dataset,
 
     # remove data that does not have the valid labels.
     dataset = dataset.filter(
-        lambda example: any(label >= 0 for label in example['labels']))
+        lambda example: any(label >= 0 for label in example['labels']),
+        num_proc=map_num_proc)
 
     # pack to max length
     if pack_to_max_length and split == 'train':
@@ -127,6 +143,9 @@ def process(dataset,
             dataset = dataset.flatten_indices(num_proc=map_num_proc)
         dataset = dataset.map(
             Packer(max_length), batched=True, num_proc=map_num_proc)
+
+    # add 'length'
+    setattr(dataset, 'length', [len(i['input_ids']) for i in dataset])
 
     return dataset
 

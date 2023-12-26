@@ -1,11 +1,21 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import base64
 import copy
+import io
+from io import BytesIO
 from itertools import chain
 
-from xtuner.utils import IGNORE_INDEX
+import requests
+from PIL import Image
+
+from xtuner.utils import DEFAULT_IMAGE_TOKEN, IGNORE_INDEX, IMAGE_TOKEN_INDEX
 
 
-def encode_fn(example, tokenizer, max_length, input_ids_with_output=True):
+def encode_fn(example,
+              tokenizer,
+              max_length,
+              input_ids_with_output=True,
+              with_image_token=False):
     """We only support the following three scenarios:
 
     1. Incremental pretraining dataset.
@@ -56,7 +66,19 @@ def encode_fn(example, tokenizer, max_length, input_ids_with_output=True):
     input_ids, labels = [], []
     for single_turn_conversation in example['conversation']:
         input = single_turn_conversation['input']
-        input_encode = tokenizer(f'{input}', add_special_tokens=False)
+        if DEFAULT_IMAGE_TOKEN in input and with_image_token:
+            chunk_encode = [
+                tokenizer(chunk, add_special_tokens=False)
+                for chunk in input.split('<image>')
+            ]
+            assert len(chunk_encode) == 2
+            input_encode = {'input_ids': []}
+            for idx, cur_chunk_encode in enumerate(chunk_encode):
+                input_encode['input_ids'].extend(cur_chunk_encode['input_ids'])
+                if idx != len(chunk_encode) - 1:
+                    input_encode['input_ids'].append(IMAGE_TOKEN_INDEX)
+        else:
+            input_encode = tokenizer(f'{input}', add_special_tokens=False)
         input_ids += bos_token_id + input_encode['input_ids']
         labels += [IGNORE_INDEX] * (
             len(bos_token_id + input_encode['input_ids']))
@@ -138,3 +160,32 @@ class InternRepoPacker:
             self.residual = []
 
         return result
+
+
+def expand2square(pil_img, background_color):
+    width, height = pil_img.size
+    if width == height:
+        return pil_img
+    elif width > height:
+        result = Image.new(pil_img.mode, (width, width), background_color)
+        result.paste(pil_img, (0, (width - height) // 2))
+        return result
+    else:
+        result = Image.new(pil_img.mode, (height, height), background_color)
+        result.paste(pil_img, ((height - width) // 2, 0))
+        return result
+
+
+def load_image(image_file):
+    if image_file.startswith('http://') or image_file.startswith('https://'):
+        response = requests.get(image_file)
+        image = Image.open(BytesIO(response.content)).convert('RGB')
+    else:
+        image = Image.open(image_file).convert('RGB')
+    return image
+
+
+def decode_base64_to_image(base64_string):
+    image_data = base64.b64decode(base64_string)
+    image = Image.open(io.BytesIO(image_data))
+    return image
