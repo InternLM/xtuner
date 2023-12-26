@@ -1,11 +1,11 @@
-# Minimum 0.40.0 to support 4-bit inference, see https://github.com/TimDettmers/bitsandbytes/releases/tag/0.40.0
-bitsandbytes>=0.40.0
+# Minimum 0.40.0.post4 to fix some 4-bit precision bugs
+bitsandbytes>=0.40.0.post4
 # Minimum 2.16.0 to fix some bugs, see https://github.com/huggingface/datasets/pull/6444
 datasets>=2.16.0
 einops
 # Minimum 0.1.2 to fix some bugs, see https://github.com/InternLM/lagent/pull/44
 lagent>=0.1.2
-# Minimum 0.10.1 to support `exclude_frozen_parameters` for `DeepSpeedStrategy`,
+# Minimum 0.10.1 to support exclude_frozen_parameters for DeepSpeedStrategy,
 # see https://github.com/open-mmlab/mmengine/pull/1415, https://github.com/open-mmlab/mmengine/pull/1424
 mmengine>=0.10.1
 openpyxl
