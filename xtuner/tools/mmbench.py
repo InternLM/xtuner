@@ -105,7 +105,9 @@ class MMBenchDataset(Dataset):
 
     def get_image(self, image):
         while len(image) < 16:
-            image = self.df.iloc[int(image)]['image']
+            image = self.df[self.df['index'] == int(image)]['image'].values
+            assert len(image) == 1
+            image = image[0]
         image = decode_base64_to_image(image)
         return image
 
