@@ -3,6 +3,9 @@
 ## Install
 
 ```bash
+# Install the latest xtuner
+pip install -U 'xtuner[deepspeed]'
+
 # Mixtral requires the latest version of transformers.
 pip install git+https://github.com/huggingface/transformers.git
 
