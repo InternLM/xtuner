@@ -1,10 +1,10 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-from torch.utils.data import ConcatDataset as _ConcatDataset
+from torch.utils.data import ConcatDataset as TorchConcatDataset
 
 from xtuner.registry import BUILDER
 
 
-class ConcatDataset(_ConcatDataset):
+class ConcatDataset(TorchConcatDataset):
 
     def __init__(self, datasets_cfg, datasets_kwargs=None):
         datasets = []
@@ -24,3 +24,9 @@ class ConcatDataset(_ConcatDataset):
             for name, dataset in zip(self.names, self.datasets)
         ])
         return main_str
+
+    def __getattr__(self, name: str):
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            return [getattr(dataset, name) for dataset in self.datasets]

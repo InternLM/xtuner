@@ -23,6 +23,7 @@
 
 ## 🎉 更新
 
+- **\[2023/12\]** 🔥 支持多模态模型 VLM（[LLaVA-v1.5](https://github.com/haotian-liu/LLaVA)）预训练和指令微调！快速开始请查阅此[文档](xtuner/configs/llava/README_zh.md)！
 - **\[2023/12\]** 🔥 支持 [Mixtral 8x7b](https://huggingface.co/mistralai/Mixtral-8x7B-Instruct-v0.1) 模型！快速开始请查阅此[文档](xtuner/configs/mixtral/README.md)！
 - **\[2023/11\]** 支持 [ChatGLM3-6B](https://huggingface.co/THUDM/chatglm3-6b) 模型！
 - **\[2023/10\]** 支持 [MSAgent-Bench](https://modelscope.cn/datasets/damo/MSAgent-Bench) 数据集，并且微调所得大语言模型可应用至 [Lagent](https://github.com/InternLM/lagent) 框架！
@@ -267,6 +268,18 @@ xtuner chat meta-llama/Llama-2-7b-hf --adapter xtuner/Llama-2-7b-qlora-moss-003-
 - [Llama 2](https://github.com/facebookresearch/llama)
 - [QLoRA](https://github.com/artidoro/qlora)
 - [LMDeploy](https://github.com/InternLM/lmdeploy)
+- [LLaVA](https://github.com/haotian-liu/LLaVA)
+
+## 🖊️ 引用
+
+```bibtex
+@misc{2023xtuner,
+    title={XTuner: A Toolkit for Efficiently Fine-tuning LLM},
+    author={XTuner Contributors},
+    howpublished = {\url{https://github.com/InternLM/xtuner}},
+    year={2023}
+}
+```
 
 ## 开源许可证
 

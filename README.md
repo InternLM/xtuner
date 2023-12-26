@@ -23,7 +23,8 @@ English | [简体中文](README_zh-CN.md)
 
 ## 🎉 News
 
-- **\[2023/12\]** 🔥 Support [Mixtral 8x7b](https://huggingface.co/mistralai/Mixtral-8x7B-Instruct-v0.1) model! To get started, please check out the [docs](xtuner/configs/mixtral/README.md)!
+- **\[2023/12\]** 🔥 Support multi-modal VLM pretraining and fine-tuning with [LLaVA-v1.5](https://github.com/haotian-liu/LLaVA) architecture! Click [here](xtuner/configs/llava/README.md) for details!
+- **\[2023/12\]** 🔥 Support [Mixtral 8x7b](https://huggingface.co/mistralai/Mixtral-8x7B-Instruct-v0.1) model! Click [here](xtuner/configs/mixtral/README.md) for details!
 - **\[2023/11\]** Support [ChatGLM3-6B](https://huggingface.co/THUDM/chatglm3-6b) model!
 - **\[2023/10\]** Support [MSAgent-Bench](https://modelscope.cn/datasets/damo/MSAgent-Bench) dataset, and the fine-tuned LLMs can be applied by [Lagent](https://github.com/InternLM/lagent)!
 - **\[2023/10\]** Optimize the data processing to accommodate `system` context. More information can be found on [Docs](docs/en/user_guides/dataset_format.md)!
@@ -267,6 +268,18 @@ We appreciate all contributions to XTuner. Please refer to [CONTRIBUTING.md](.gi
 - [Llama 2](https://github.com/facebookresearch/llama)
 - [QLoRA](https://github.com/artidoro/qlora)
 - [LMDeploy](https://github.com/InternLM/lmdeploy)
+- [LLaVA](https://github.com/haotian-liu/LLaVA)
+
+## 🖊️ Citation
+
+```bibtex
+@misc{2023xtuner,
+    title={XTuner: A Toolkit for Efficiently Fine-tuning LLM},
+    author={XTuner Contributors},
+    howpublished = {\url{https://github.com/InternLM/xtuner}},
+    year={2023}
+}
+```
 
 ## License
 

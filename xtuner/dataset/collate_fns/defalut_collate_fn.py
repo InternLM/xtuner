@@ -13,9 +13,14 @@ def default_collate_fn(
         return_hf_format: bool = False) -> Dict[str, torch.Tensor]:
     input_ids = []
     labels = []
+    has_image = any(inst.get('pixel_values') is not None for inst in instances)
+    if has_image:
+        pixel_values = []
     for example in instances:
         input_ids.append(torch.tensor(example['input_ids']))
         labels.append(torch.tensor(example['labels']))
+        if has_image:
+            pixel_values.append(example['pixel_values'])
     if len(instances) > 1:
         input_ids = pad_sequence(
             input_ids, batch_first=True, padding_value=pad_index)
@@ -30,6 +35,9 @@ def default_collate_fn(
         'attention_mask': input_ids.ne(pad_index),
         'labels': labels
     }
+    if has_image:
+        pixel_values = torch.stack(pixel_values)
+        data_dict['pixel_values'] = pixel_values
 
     if return_hf_format:
         return data_dict

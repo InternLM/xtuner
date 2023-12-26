@@ -94,3 +94,6 @@ def dispatch_modules(model):
         dispath_baichuan_13b_attn_forward(model)
     if 'yi' in model_name:
         dispatch_yi_attn_forward(model)
+
+
+__all__ = ['dispatch_modules']
