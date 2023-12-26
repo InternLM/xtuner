@@ -8,6 +8,8 @@
 
 LLaVA 训练一共分为两步：对齐模块预训练、指令跟随微调（本指南以 8 卡训练 LLaVA-InternLM 为例，实际使用时如遇到显卡数量不足、显存不足等情况可以适当调低 batchsize 来降低显存开销）
 
+预训练的 Projector 默认保存在 `./work_dirs/llava_internlm_chat_7b_clip_vit_large_p14_336_e1_gpu8_pretrain/epoch_1.pth`，并且指令微调阶段将默认在此路径载入 Projector 权重。
+
 1. 对齐模块训练（默认保存在 `./work_dirs/`）
 
 ```bash

@@ -8,7 +8,7 @@ Please refer to the [docs](../../../docs/en/user_guides/dataset_prepare.md#llava
 
 The training of LLaVA consists of two steps: alignment module (i.e., MLP) pretraining and instruction following fine-tuning
 
-Note: this guide takes 8-card training LLaVA-InternLM as an example, if there are insufficient GPU resources or memory during actual use, you can reduce the batchsize appropriately to decrease memory consumption.
+Note: this guide takes 8-card training LLaVA-InternLM as an example, if there are insufficient GPU resources or memory during actual use, you can reduce the batchsize appropriately to decrease memory consumption. The Pretrained projector is saved and loaded by default in `./work_dirs/llava_internlm_chat_7b_clip_vit_large_p14_336_e1_gpu8_pretrain/epoch_1.pth`.
 
 1. Alignment module pretraining (saved by default in `./work_dirs/`)
 
