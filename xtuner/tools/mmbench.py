@@ -103,13 +103,19 @@ class MMBenchDataset(Dataset):
         self.split = 'dev' if 'answer' in self.df.iloc[0].keys() else 'test'
         self.has_l2_category = 'l2-category' in self.df.columns.to_list()
 
+    def get_image(self, image):
+        while len(image) < 16:
+            image = self.df.iloc[int(image)]['image']
+        image = decode_base64_to_image(image)
+        return image
+
     def __len__(self):
         return len(self.df)
 
     def __getitem__(self, idx):
         index = self.df.iloc[idx]['index']
         image = self.df.iloc[idx]['image']
-        image = decode_base64_to_image(image)
+        image = self.get_image(image)
         question = self.df.iloc[idx]['question']
         answer = self.df.iloc[idx]['answer'] if 'answer' in self.df.iloc[
             0].keys() else None
