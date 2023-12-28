@@ -85,7 +85,7 @@ Here, `$DATA_PATH` refers to one of the datasets downloaded as mentioned above, 
 
 After the evaluation is completed, if it's a development set, it will directly print out the results; If it's a test set, you need to submit `mmbench_result.xlsx` to the official MMBench for final evaluation to obtain precision results!
 
-## Result
+## Results
 
 XTuner primarily promotes the LLM-QLoRA / ViT-LoRA LLaVA architecture, and the evaluation results on various datasets are as follows:
 
