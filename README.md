@@ -2,20 +2,29 @@
   <img src="https://github.com/InternLM/lmdeploy/assets/36994684/0cf8d00f-e86b-40ba-9b54-dc8f1bc6c8d8" width="600"/>
   <br /><br />
 
+[![GitHub Repo stars](https://img.shields.io/github/stars/InternLM/xtuner?style=social)](https://github.com/InternLM/xtuner/stargazers)
 [![license](https://img.shields.io/github/license/InternLM/xtuner.svg)](https://github.com/InternLM/xtuner/blob/main/LICENSE)
-[![PyPI](https://badge.fury.io/py/xtuner.svg)](https://pypi.org/project/xtuner/)
-[![Generic badge](https://img.shields.io/badge/🤗%20Huggingface-xtuner-yellow.svg)](https://huggingface.co/xtuner)
-[![Generic badge](https://img.shields.io/badge/🤖%20ModelScope-xtuner-yellow.svg)](https://www.modelscope.cn/organization/xtuner)
+[![PyPI](https://img.shields.io/pypi/v/xtuner)](https://pypi.org/project/xtuner/)
+[![Downloads](https://static.pepy.tech/badge/xtuner)](https://pypi.org/project/xtuner/)
+[![issue resolution](https://img.shields.io/github/issues-closed-raw/InternLM/xtuner)](https://github.com/InternLM/xtuner/issues)
+[![open issues](https://img.shields.io/github/issues-raw/InternLM/xtuner)](https://github.com/InternLM/xtuner/issues)
+
+👋 join us on [![Static Badge](https://img.shields.io/badge/-grey?style=social&logo=wechat&label=WeChat)](https://cdn.vansin.top/internlm/xtuner.jpg)
+[![Static Badge](https://img.shields.io/badge/-grey?style=social&logo=twitter&label=Twitter)](https://twitter.com/intern_lm)
+[![Static Badge](https://img.shields.io/badge/-grey?style=social&logo=discord&label=Discord)](https://discord.gg/xa29JuW87d)
+
+🔍 Explore our models on
+[![Static Badge](https://img.shields.io/badge/-gery?style=social&label=🤗%20Huggingface)](https://huggingface.co/xtuner)
+[![Static Badge](https://img.shields.io/badge/-gery?style=social&label=🤖%20ModelScope)](https://www.modelscope.cn/organization/xtuner)
 
 English | [简体中文](README_zh-CN.md)
-
-👋 join us on <a href="https://twitter.com/intern_lm" target="_blank">Twitter</a>, <a href="https://discord.gg/xa29JuW87d" target="_blank">Discord</a> and <a href="https://cdn.vansin.top/internlm/xtuner.jpg" target="_blank">WeChat</a>
 
 </div>
 
 ## 🎉 News
 
-- **\[2023/12\]** 🔥 Support [Mixtral 8x7b](https://huggingface.co/mistralai/Mixtral-8x7B-Instruct-v0.1) model! To get started, please check out the [docs](xtuner/configs/mixtral/README.md)!
+- **\[2023/12\]** 🔥 Support multi-modal VLM pretraining and fine-tuning with [LLaVA-v1.5](https://github.com/haotian-liu/LLaVA) architecture! Click [here](xtuner/configs/llava/README.md) for details!
+- **\[2023/12\]** 🔥 Support [Mixtral 8x7b](https://huggingface.co/mistralai/Mixtral-8x7B-Instruct-v0.1) model! Click [here](xtuner/configs/mixtral/README.md) for details!
 - **\[2023/11\]** Support [ChatGLM3-6B](https://huggingface.co/THUDM/chatglm3-6b) model!
 - **\[2023/10\]** Support [MSAgent-Bench](https://modelscope.cn/datasets/damo/MSAgent-Bench) dataset, and the fine-tuned LLMs can be applied by [Lagent](https://github.com/InternLM/lagent)!
 - **\[2023/10\]** Optimize the data processing to accommodate `system` context. More information can be found on [Docs](docs/en/user_guides/dataset_format.md)!
@@ -138,13 +147,13 @@ XTuner is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](
 - Install XTuner via pip
 
   ```shell
-  pip install xtuner
+  pip install -U xtuner
   ```
 
   or with DeepSpeed integration
 
   ```shell
-  pip install 'xtuner[deepspeed]'
+  pip install -U 'xtuner[deepspeed]'
   ```
 
 - Install XTuner from source
@@ -259,6 +268,18 @@ We appreciate all contributions to XTuner. Please refer to [CONTRIBUTING.md](.gi
 - [Llama 2](https://github.com/facebookresearch/llama)
 - [QLoRA](https://github.com/artidoro/qlora)
 - [LMDeploy](https://github.com/InternLM/lmdeploy)
+- [LLaVA](https://github.com/haotian-liu/LLaVA)
+
+## 🖊️ Citation
+
+```bibtex
+@misc{2023xtuner,
+    title={XTuner: A Toolkit for Efficiently Fine-tuning LLM},
+    author={XTuner Contributors},
+    howpublished = {\url{https://github.com/InternLM/xtuner}},
+    year={2023}
+}
+```
 
 ## License
 

@@ -1,12 +1,12 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import argparse
-import os
+import os.path as osp
 import shutil
 
-import torch
 from mmengine.config import Config, DictAction
 
 from xtuner.configs import cfgs_name_path
+from xtuner.model.utils import guess_load_checkpoint
 from xtuner.registry import BUILDER
 
 
@@ -41,34 +41,11 @@ def parse_args():
     return args
 
 
-def guess_load_checkpoint(pth_model):
-    if os.path.isfile(pth_model):
-        state_dict = torch.load(pth_model, map_location='cpu')
-        if 'state_dict' in state_dict:
-            state_dict = state_dict['state_dict']
-    elif os.path.isdir(pth_model):
-        try:
-            from deepspeed.utils.zero_to_fp32 import \
-                get_fp32_state_dict_from_zero_checkpoint
-        except ImportError:
-            raise ImportError(
-                'The provided PTH model appears to be a DeepSpeed checkpoint. '
-                'However, DeepSpeed library is not detected in current '
-                'environment. This suggests that DeepSpeed may not be '
-                'installed or is incorrectly configured. Please verify your '
-                'setup.')
-        state_dict = get_fp32_state_dict_from_zero_checkpoint(
-            os.path.dirname(pth_model), os.path.basename(pth_model))
-    else:
-        raise FileNotFoundError(f'Cannot find {pth_model}')
-    return state_dict
-
-
 def main():
     args = parse_args()
 
     # parse config
-    if not os.path.isfile(args.config):
+    if not osp.isfile(args.config):
         try:
             args.config = cfgs_name_path[args.config]
         except KeyError:
@@ -79,6 +56,10 @@ def main():
     if args.cfg_options is not None:
         cfg.merge_from_dict(args.cfg_options)
 
+    if (isinstance(cfg.model.type, str) and 'LLaVAModel'
+            in cfg.model.type) or 'LLaVAModel' == cfg.model.type.__name__:
+        cfg.model.pretrained_pth = None
+
     model = BUILDER.build(cfg.model)
 
     state_dict = guess_load_checkpoint(args.pth_model)
@@ -86,18 +67,60 @@ def main():
     print(f'Load PTH model from {args.pth_model}')
 
     if not args.fp32:
-        print('Convert weights to float16')
+        print('Convert LLM to float16')
         model.llm.half()
 
-    print(f'Saving HuggingFace model to {args.save_dir}')
-    model.llm.save_pretrained(
-        args.save_dir, max_shard_size=args.max_shard_size)
-    if 'PeftModel' not in model.llm.__class__.__name__:
-        print(f'Saving HuggingFace tokenizer to {args.save_dir}')
-        tokenizer = BUILDER.build(cfg.tokenizer)
-        tokenizer.save_pretrained(args.save_dir)
-    shutil.copyfile(args.config, os.path.join(args.save_dir,
-                                              'xtuner_config.py'))
+    if (isinstance(cfg.model.type, str) and 'LLaVAModel'
+            in cfg.model.type) or 'LLaVAModel' == cfg.model.type.__name__:
+        if cfg.model.get('llm') and (not cfg.model.get('freeze_llm', False)
+                                     or cfg.model.get('llm_lora')):
+            if 'PeftModel' in model.llm.__class__.__name__:
+                llm_path = osp.join(args.save_dir, 'llm_adapter')
+                print(f'Saving LLM adapter to {llm_path}')
+            else:
+                llm_path = args.save_dir
+                print(f'Saving LLM tokenizer to {llm_path}')
+                tokenizer = BUILDER.build(cfg.tokenizer)
+                tokenizer.save_pretrained(llm_path)
+                print(f'Saving LLM to {llm_path}')
+            model.llm.save_pretrained(
+                llm_path, max_shard_size=args.max_shard_size)
+
+        if cfg.model.get('visual_encoder') and (
+                not cfg.model.get('freeze_visual_encoder', False)
+                or cfg.model.get('visual_encoder_lora')):
+            if 'PeftModel' in model.visual_encoder.__class__.__name__:
+                visual_encoder_path = osp.join(args.save_dir,
+                                               'visual_encoder_adapter')
+                print(
+                    f'Saving visual_encoder adapter to {visual_encoder_path}')
+            else:
+                visual_encoder_path = osp.join(args.save_dir, 'visual_encoder')
+                print('Saving visual_encoder image_processor to'
+                      f'{visual_encoder_path}')
+                image_processor = BUILDER.build(cfg.image_processor)
+                image_processor.save_pretrained(visual_encoder_path)
+                print(f'Saving visual_encoder to {visual_encoder_path}')
+            model.visual_encoder.save_pretrained(
+                visual_encoder_path, max_shard_size=args.max_shard_size)
+
+        if hasattr(model, 'projector'):
+            projector_path = osp.join(args.save_dir, 'projector')
+            print(f'Saving projector to {projector_path}')
+            model.projector.save_pretrained(
+                projector_path, max_shard_size=args.max_shard_size)
+    else:
+        llm_path = args.save_dir
+        if 'PeftModel' in model.llm.__class__.__name__:
+            print(f'Saving adapter to {llm_path}')
+        else:
+            print(f'Saving LLM tokenizer to {llm_path}')
+            tokenizer = BUILDER.build(cfg.tokenizer)
+            tokenizer.save_pretrained(llm_path)
+            print(f'Saving LLM to {llm_path}')
+        model.llm.save_pretrained(llm_path, max_shard_size=args.max_shard_size)
+
+    shutil.copyfile(args.config, osp.join(args.save_dir, 'xtuner_config.py'))
     print('All done!')
 
 

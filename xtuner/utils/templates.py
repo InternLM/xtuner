@@ -19,7 +19,7 @@ PROMPT_TEMPLATE = ConfigDict(
             'safe. Your answers should not include any harmful, unethical, '
             'racist, sexist, toxic, dangerous, or illegal content. Please '
             'ensure that your responses are socially unbiased and positive in '
-            'nature.\n{system}\n<</SYS>>\n [/INST]'),
+            'nature.\n{system}\n<</SYS>>\n [/INST] '),
         INSTRUCTION='[INST] {input} [/INST]'),
     code_llama_chat=dict(
         SYSTEM='{system}\n', INSTRUCTION='[INST] {input} [/INST]'),
@@ -43,14 +43,20 @@ PROMPT_TEMPLATE = ConfigDict(
         SYSTEM=('A chat between a curious user and an artificial '
                 'intelligence assistant. The assistant gives '
                 'helpful, detailed, and polite answers to the '
-                'user\'s questions. {system}\n'),
-        INSTRUCTION=('USER: {input} ASSISTANT: ')),
+                'user\'s questions. {system}\n '),
+        INSTRUCTION=('USER: {input} ASSISTANT:')),
     wizardcoder=dict(
         SYSTEM=(
             'Below is an instruction that describes a task. '
             'Write a response that appropriately completes the request.\n\n'
-            '{system}\n'),
+            '{system}\n '),
         INSTRUCTION=('### Instruction:\n{input}\n\n### Response:')),
+    vicuna=dict(
+        SYSTEM=('A chat between a curious user and an artificial '
+                'intelligence assistant. The assistant gives '
+                'helpful, detailed, and polite answers to the '
+                'user\'s questions. {system}\n '),
+        INSTRUCTION=('USER: {input} ASSISTANT:')),
     deepseekcoder=dict(
         SYSTEM=('You are an AI programming assistant, utilizing '
                 'the DeepSeek Coder model, developed by DeepSeek'

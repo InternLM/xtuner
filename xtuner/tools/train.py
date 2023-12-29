@@ -79,7 +79,7 @@ def main():
     args = parse_args()
 
     # parse config
-    if not os.path.isfile(args.config):
+    if not osp.isfile(args.config):
         try:
             args.config = cfgs_name_path[args.config]
         except KeyError:
@@ -117,7 +117,7 @@ def main():
                 osp.splitext(osp.basename(args.config))[0])
         # enable deepspeed
         if args.deepspeed:
-            if not os.path.isfile(args.deepspeed):
+            if not osp.isfile(args.deepspeed):
                 try:
                     args.deepspeed = cfgs_name_path[args.deepspeed]
                 except KeyError:
@@ -191,7 +191,7 @@ def main():
                     logger='current',
                     level=logging.WARNING)
             else:
-                if not os.path.isfile(args.deepspeed):
+                if not osp.isfile(args.deepspeed):
                     try:
                         args.deepspeed = cfgs_name_path[args.deepspeed]
                     except KeyError:

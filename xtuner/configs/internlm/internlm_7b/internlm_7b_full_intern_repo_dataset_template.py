@@ -3,7 +3,7 @@ import torch
 from mmengine.dataset import DefaultSampler
 from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
                             LoggerHook, ParamSchedulerHook)
-from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR
+from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR, LinearLR
 from torch.optim import AdamW
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -35,6 +35,7 @@ lr = 4e-5
 betas = (0.9, 0.95)
 weight_decay = 0.01
 max_norm = 1  # grad clip
+warmup_ratio = 0.03
 
 #######################################################################
 #                      PART 2  Model & Tokenizer                      #
@@ -85,12 +86,22 @@ optim_wrapper = dict(
 
 # learning policy
 # More information: https://github.com/open-mmlab/mmengine/blob/main/docs/en/tutorials/param_scheduler.md  # noqa: E501
-param_scheduler = dict(
-    type=CosineAnnealingLR,
-    eta_min=lr * 0.1,
-    by_epoch=True,
-    T_max=max_epochs,
-    convert_to_iter_based=True)
+param_scheduler = [
+    dict(
+        type=LinearLR,
+        start_factor=1e-5,
+        by_epoch=True,
+        begin=0,
+        end=warmup_ratio * max_epochs,
+        convert_to_iter_based=True),
+    dict(
+        type=CosineAnnealingLR,
+        eta_min=0.0,
+        by_epoch=True,
+        begin=warmup_ratio * max_epochs,
+        T_max=max_epochs,
+        convert_to_iter_based=True)
+]
 
 # train, val, test setting
 train_cfg = dict(by_epoch=True, max_epochs=max_epochs, val_interval=1)
@@ -100,7 +111,9 @@ train_cfg = dict(by_epoch=True, max_epochs=max_epochs, val_interval=1)
 #######################################################################
 # Log the dialogue periodically during the training process, optional
 custom_hooks = [
-    dict(type=DatasetInfoHook, tokenizer=tokenizer),
+    dict(
+        type=DatasetInfoHook, tokenizer=tokenizer,
+        is_intern_repo_dataset=True),
     dict(type=ThroughputHook)
 ]
 

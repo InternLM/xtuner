@@ -1,6 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import argparse
-import os
+import os.path as osp
 import shutil
 
 from mmengine.utils import mkdir_or_exist
@@ -17,7 +17,7 @@ def parse_args():
 
 
 def add_copy_suffix(string):
-    file_name, ext = os.path.splitext(string)
+    file_name, ext = osp.splitext(string)
     return f'{file_name}_copy{ext}'
 
 
@@ -25,8 +25,8 @@ def main():
     args = parse_args()
     mkdir_or_exist(args.save_dir)
     config_path = cfgs_name_path[args.config_name]
-    save_path = os.path.join(args.save_dir,
-                             add_copy_suffix(os.path.basename(config_path)))
+    save_path = osp.join(args.save_dir,
+                         add_copy_suffix(osp.basename(config_path)))
     shutil.copyfile(config_path, save_path)
     print(f'Copy to {save_path}')
 
