@@ -15,7 +15,7 @@ from xtuner.model import SupervisedFinetune
 from xtuner.utils import PROMPT_TEMPLATE
 import torch
 from deepspeed.ops.adam import FusedAdam
-from xtuner.dataset.intern_repo_packed_dataset import build_packed_dataset, StaticBatchSampler, packed_collate_fn
+from xtuner.dataset.intern_repo_packed_dataset import build_packed_dataset, packed_collate_fn
 from xtuner.dataset.intern_repo_packed_dataset import DefaultSampler
 from torch.utils.data import BatchSampler
 from xtuner.engine.runner.loops import EpochBasedTrainLoop

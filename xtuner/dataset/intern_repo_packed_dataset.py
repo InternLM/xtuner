@@ -136,7 +136,6 @@ class PackedDataset(torch.utils.data.Dataset):
     def __init__(
         self,
         dataset,
-        # lengths,
         packed_length: int = 8192,
         seed: int = DEFAULT_SEED
     ):
@@ -152,8 +151,6 @@ class PackedDataset(torch.utils.data.Dataset):
         self.shuffled_samples_len = list(map(self.lengths.__getitem__, shuffled_indices))
         self.shuffled_accumulated_samples_len = list(it.accumulate(self.shuffled_samples_len, operator.add))
         self.num_tokens = sum(self.lengths)
-        # breakpoint()
-        # print(self.shuffled_samples_len)
     
     def __len__(self):
         return self.num_tokens // self.packed_length
@@ -188,14 +185,9 @@ class PackedDataset(torch.utils.data.Dataset):
             chunk = sample["tokens"][begin_token_id:]
             pack.extend(chunk)
             _labels = deepcopy(chunk)
-            _labels = list(_labels[1:]) + [-100]
+            # _labels = list(_labels[1:]) + [-100]
             assert len(_labels) == len(chunk), (_labels, chunk)
             labels.extend(_labels)
-            # num_new_samples, tokens_left = divmod(len(chunk), self.max_length_per_sample)
-            # for _ in range(num_new_samples):
-            #     cu_seqlens.append(cu_seqlens[-1] + self.max_length_per_sample)
-            #     indexes.extend(list(range(self.max_length_per_sample)))
-            # if tokens_left > 0:
             cu_seqlens.append(cu_seqlens[-1] + len(chunk))
             indexes.extend(list(range(len(chunk))))
             begin_sample_idx = begin_sample_idx + 1
@@ -206,19 +198,14 @@ class PackedDataset(torch.utils.data.Dataset):
         chunk = sample["tokens"][begin_token_id:end_token_id]  # fragement of a sample
         pack.extend(chunk)
         _labels = deepcopy(chunk)
-        if end_token_id == len(sample["tokens"]):
-            _labels = list(_labels[1:]) + [-100]
-        else:
-            if end_token_id > len(sample["tokens"]):
-                print(f"end_token_id {end_token_id}, len of sample {len(sample['tokens'])}")
-            _labels = list(_labels[1:]) + [sample["tokens"][end_token_id]]
+        # if end_token_id == len(sample["tokens"]):
+        #     _labels = list(_labels[1:]) + [-100]
+        # else:
+        #     if end_token_id > len(sample["tokens"]):
+        #         print(f"end_token_id {end_token_id}, len of sample {len(sample['tokens'])}")
+        #     _labels = list(_labels[1:]) + [sample["tokens"][end_token_id]]
         assert len(_labels) == len(chunk), (_labels, chunk)
         labels.extend(_labels)
-        # num_new_samples, tokens_left = divmod(len(chunk), self.max_length_per_sample)
-        # for _ in range(num_new_samples):
-        #     cu_seqlens.append(cu_seqlens[-1] + self.max_length_per_sample)
-        #     indexes.extend(list(range(self.max_length_per_sample)))
-        # if tokens_left > 0:
         cu_seqlens.append(cu_seqlens[-1] + len(chunk))
         indexes.extend(list(range(len(chunk))))
 
@@ -240,6 +227,7 @@ def build_packed_dataset(folder, packed_length=8192, min_length=0):
         triples = [None]
     dist.broadcast_object_list(triples, src=0)
     triples = triples[0]
+    # triples = [('/cpfs01/shared/public/gaojianfei/datasets/llamav7_8k/train', ['cn'], []), ('/cpfs01/shared/public/gaojianfei/datasets/llamav7_8k/train/cn', ['gsm8k_chat', 'rewoo', 'firefly_split_chat_format', 'gorilla_huggingface', 'gorilla_torchhub', 'safety_response', 'flan2022_sampling_each256_niv2_zh_chat_format', 'coigv03_01_chat_format_safety_filtered_v1', 'poem_chat_format', 'government_department_safety_filtered_v1', 'lima_chat_format_safety_filtered_v1', 'dolly_chat_format_safety_filtered_v1', 'zephyr_ultrafeedback_clean_filtered', 'puyu_stylize', 'gorilla_tensorflow', 'flan_v2_official_chat_format_512_safety_filtered_v1', 'char_x10_chat_format', 'openai_summary', 'math3000_calculate_solve_thought', 'greeting_x10', 'ruozhibax10', 'moss_emotion_v2', 'emoji_chat_format', 'ministry_of_foreign_affairs_safety_filtered_v1', 'moss_math_code_debug', 'state_council_policy_safety_filtered_v1', 'pj_characters_x10', 'moss_math_code', 'self_critique_answer_no_critique', 'self_critique_refine_critique', 'puyu_chat_format_v2', 'zephyr_ultrachat_200k_filtered', 'self_critique_qa', 'math3000_calculate_solve_wo_thought', 'lab_info', 'WizardLM', 'chinese_sensitive_v1', 'data_reflow', 'gsm8k_pot', 'toolbench_safety_filtered_v1', 'self_critique_gen_qa', 'gmath', 'gaokao_essay_safety_filtered_v1', 'chinese_poetry_10x', 'unnatural_instructions_chat_format', 'self_critique_refine_answer', 'moss_no_moss_chat_fudan_format_safety_filtered_v1', 'leetcode_filter_chat_refined', 'math3000_solve_wo_thought_wo_answer', 'EvolCode_v4x_r2_0', 'stackoverflow_selected_python_chat_format', 'rolebench_w_sys_filtered', 'share_gpt_v6_chat_format_safety_filtered_v1'], []), ('/cpfs01/shared/public/gaojianfei/datasets/llamav7_8k/train/cn/gsm8k_chat', [], ['train_socratic.bin.meta', 'train_socratic.bin']), ('/cpfs01/shared/public/gaojianfei/datasets/llamav7_8k/train/cn/rewoo', [], ['mix_insft_2k.bin', 'mix_insft_2k.bin.meta']), ('/cpfs01/shared/public/gaojianfei/datasets/llamav7_8k/train/cn/firefly_split_chat_format', [], ['Program_chat.bin', 'ProductDesc_chat.bin.meta', 'JinYongGeneration_chat.bin', 'TextMatching_chat.bin', 'Couplet_chat.bin.meta', 'KeywordRecognition_chat.bin', 'NER_chat.bin', 'ProductDesc_chat.bin', 'MRC_chat.bin', 'Cot_chat.bin', 'ClassicalChinese_chat.bin', 'OpenQA_chat.bin.meta', 'ClassicalChinese_chat.bin.meta', 'AncientPoem_chat.bin', 'SentimentAnalyze_chat.bin', 'TextMatching_chat.bin.meta', 'JinYongGeneration_chat.bin.meta', 'Summary_chat.bin.meta', 'NER_chat.bin.meta', 'OpenQA_chat.bin', 'MRC_chat.bin.meta', 'MusicComment_chat.bin.meta', 'StoryGeneration_chat.bin', 'TextCorrection_chat.bin.meta', 'Summary_chat.bin', 'Composition_chat.bin', 'AncientPoem_chat.bin.meta', 'TextCorrection_chat.bin', 'Composition_chat.bin.meta', 'StoryGeneration_chat.bin.meta', 'Translation_chat.bin.meta', 'Dictionary_chat.bin.meta', 'ProseGeneration_chat.bin', 'Cot_chat.bin.meta', 'Translation_chat.bin', 'NLI_chat.bin', 'Dictionary_chat.bin', 'LyricGeneration_chat.bin', 'KeywordRecognition_chat.bin.meta', 'NLI_chat.bin.meta', 'ProseGeneration_chat.bin.meta', 'SentimentAnalyze_chat.bin.meta', 'Couplet_chat.bin', 'LyricGeneration_chat.bin.meta', 'MusicComment_chat.bin', 'Program_chat.bin.meta']), ('/cpfs01/shared/public/gaojianfei/datasets/llamav7_8k/train/cn/gorilla_huggingface', [], ['huggingface_train.bin.meta', 'huggingface_train.bin']), ('/cpfs01/shared/public/gaojianfei/datasets/llamav7_8k/train/cn/gorilla_torchhub', [], ['torchhub_train.bin.meta', 'torchhub_train.bin']), ('/cpfs01/shared/public/gaojianfei/datasets/llamav7_8k/train/cn/safety_response', [], ['safety_response.bin', 'safety_response.bin.meta']), ('/cpfs01/shared/public/gaojianfei/datasets/llamav7_8k/train/cn/flan2022_sampling_each256_niv2_zh_chat_format', [], ['chat_format_niv2_zh.bin', 'chat_format_niv2_zh.bin.meta']), ('/cpfs01/shared/public/gaojianfei/datasets/llamav7_8k/train/cn/coigv03_01_chat_format_safety_filtered_v1', [], ['exam_chat.bin.meta', 'leetcode_chat_clean_v3.bin.meta', 'leetcode_chat_clean_v3.bin', 'cmcc_safety_filterd.bin', 'exam_chat.bin', 'cmcc_safety_filterd.bin.meta', 'human1_chat_format.bin', 'human1_chat_format.bin.meta']), ('/cpfs01/shared/public/gaojianfei/datasets/llamav7_8k/train/cn/poem_chat_format', [], ['poem_chat_format.bin.meta', 'poem_chat_format.bin']), ('/cpfs01/shared/public/gaojianfei/datasets/llamav7_8k/train/cn/government_department_safety_filtered_v1', [], ['zhengfu_qa_v3.bin.meta', 'zhengfu_qa_v3.bin']), ('/cpfs01/shared/public/gaojianfei/datasets/llamav7_8k/train/cn/lima_chat_format_safety_filtered_v1', [], ['lima_chat_format.bin.meta', 'lima_chat_format.bin']), ('/cpfs01/shared/public/gaojianfei/datasets/llamav7_8k/train/cn/dolly_chat_format_safety_filtered_v1', [], ['dolly.bin', 'dolly.bin.meta']), ('/cpfs01/shared/public/gaojianfei/datasets/llamav7_8k/train/cn/zephyr_ultrafeedback_clean_filtered', [], ['zephyr-ultrafeedback_sft_test_clean.bin', 'zephyr-ultrafeedback_sft_train_clean.bin', 'zephyr-ultrafeedback_sft_test_clean.bin.meta', 'zephyr-ultrafeedback_sft_train_clean.bin.meta']), ('/cpfs01/shared/public/gaojianfei/datasets/llamav7_8k/train/cn/puyu_stylize', [], ['puyu_stylize_processd2.bin', 'puyu_stylize_processd2.bin.meta']), ('/cpfs01/shared/public/gaojianfei/datasets/llamav7_8k/train/cn/gorilla_tensorflow', [], ['tensorflow_train.bin', 'tensorflow_train.bin.meta']), ('/cpfs01/shared/public/gaojianfei/datasets/llamav7_8k/train/cn/flan_v2_official_chat_format_512_safety_filtered_v1', [], ['flan2021.bin', 't0.bin.meta', 'dialog.bin.meta', 'niv2.bin', 'niv2.bin.meta', 't0.bin', 'cot.bin.meta', 'cot.bin', 'dialog.bin', 'flan2021.bin.meta']), ('/cpfs01/shared/public/gaojianfei/datasets/llamav7_8k/train/cn/char_x10_chat_format', [], ['char_x10_chat_format.bin', 'char_x10_chat_format.bin.meta']), ('/cpfs01/shared/public/gaojianfei/datasets/llamav7_8k/train/cn/openai_summary', [], ['tldr_3_filtered_train.bin', 'tldr_3_filtered_train.bin.meta']), ('/cpfs01/shared/public/gaojianfei/datasets/llamav7_8k/train/cn/math3000_calculate_solve_thought', [], ['calculate_solve_thought.bin', 'calculate_solve_thought.bin.meta']), ('/cpfs01/shared/public/gaojianfei/datasets/llamav7_8k/train/cn/greeting_x10', [], ['greeting_x10.bin', 'greeting_x10.bin.meta']), ('/cpfs01/shared/public/gaojianfei/datasets/llamav7_8k/train/cn/ruozhibax10', [], ['ruozhiba_aug.bin.meta', 'ruozhiba_aug.bin']), ('/cpfs01/shared/public/gaojianfei/datasets/llamav7_8k/train/cn/moss_emotion_v2', [], ['moss_emotion.bin.meta', 'moss_emotion.bin']), ('/cpfs01/shared/public/gaojianfei/datasets/llamav7_8k/train/cn/emoji_chat_format', [], ['emoji_chat_format.bin.meta', 'emoji_chat_format.bin']), ('/cpfs01/shared/public/gaojianfei/datasets/llamav7_8k/train/cn/ministry_of_foreign_affairs_safety_filtered_v1', [], ['waijiaobu_qa_v3.bin', 'waijiaobu_qa_v3.bin.meta']), ('/cpfs01/shared/public/gaojianfei/datasets/llamav7_8k/train/cn/moss_math_code_debug', [], ['c_s_format_datum_code_error.bin.meta', 'c_s_format_datum_code_error.bin']), ('/cpfs01/shared/public/gaojianfei/datasets/llamav7_8k/train/cn/state_council_policy_safety_filtered_v1', [], ['guowuyuan_qa_v3.bin', 'guowuyuan_qa_v3.bin.meta']), ('/cpfs01/shared/public/gaojianfei/datasets/llamav7_8k/train/cn/pj_characters_x10', [], ['pj_characters_x10.bin.meta', 'pj_characters_x10.bin']), ('/cpfs01/shared/public/gaojianfei/datasets/llamav7_8k/train/cn/moss_math_code', [], ['calculate_format_datum_random.bin.meta', 'solve_format_datum.bin', 'calculate_format_datum_max_num.bin.meta', 'calculate_format_datum_random.bin', 'solve_format_datum.bin.meta', 'calculate_format_datum_max_num.bin']), ('/cpfs01/shared/public/gaojianfei/datasets/llamav7_8k/train/cn/self_critique_answer_no_critique', [], ['base_train_20.bin.meta', 'base_train_20.bin']), ('/cpfs01/shared/public/gaojianfei/datasets/llamav7_8k/train/cn/self_critique_refine_critique', [], ['helpfulness_train.bin.meta', 'helpfulness_train.bin']), ('/cpfs01/shared/public/gaojianfei/datasets/llamav7_8k/train/cn/puyu_chat_format_v2', [], ['puyu_chat_format_v2.bin', 'puyu_chat_format_v2.bin.meta']), ('/cpfs01/shared/public/gaojianfei/datasets/llamav7_8k/train/cn/zephyr_ultrachat_200k_filtered', [], ['zephyr-ultrachat-200k_sft_test.bin', 'zephyr-ultrachat-200k_sft_test.bin.meta', 'zephyr-ultrachat-200k_sft_train.bin', 'zephyr-ultrachat-200k_sft_train.bin.meta']), ('/cpfs01/shared/public/gaojianfei/datasets/llamav7_8k/train/cn/self_critique_qa', [], ['base_train_50.bin', 'base_train_50.bin.meta']), ('/cpfs01/shared/public/gaojianfei/datasets/llamav7_8k/train/cn/math3000_calculate_solve_wo_thought', [], ['merge_calculate_solve_wo_thought.bin.meta', 'merge_calculate_solve_wo_thought.bin']), ('/cpfs01/shared/public/gaojianfei/datasets/llamav7_8k/train/cn/lab_info', [], ['lab_info.bin.meta', 'lab_info.bin']), ('/cpfs01/shared/public/gaojianfei/datasets/llamav7_8k/train/cn/WizardLM', [], ['alpaca_evol_instruct_70k.bin.meta', 'alpaca_evol_instruct_70k.bin']), ('/cpfs01/shared/public/gaojianfei/datasets/llamav7_8k/train/cn/chinese_sensitive_v1', [], ['sensitive_word_qa_5w.bin.meta', 'red_team_chat_format_0808-0822_refine_2x.bin', 'red_team_chat_format_0808-0822_refine_2x.bin.meta', 'sensitive_word_qa_5w.bin', '18k_sensitive_refinev2_pos2en1cn_qmark_aug_2x_insertpos_addmeta.bin.meta', '18k_sensitive_refinev2_pos2en1cn_qmark_aug_2x_insertpos_addmeta.bin']), ('/cpfs01/shared/public/gaojianfei/datasets/llamav7_8k/train/cn/data_reflow', [], ['both_bad_aug.bin.meta', 'gpt4_better_aug.bin', 'both_good_aug.bin.meta', 'both_good_aug.bin', 'both_bad_aug.bin', 'gpt4_better_aug.bin.meta']), ('/cpfs01/shared/public/gaojianfei/datasets/llamav7_8k/train/cn/gsm8k_pot', [], ['gsm-train-5k-correct-processed.bin', 'gsm-train-5k-correct-processed.bin.meta']), ('/cpfs01/shared/public/gaojianfei/datasets/llamav7_8k/train/cn/toolbench_safety_filtered_v1', [], ['database_1k.bin', 'weather_10k.bin.meta', 'database_1k.bin.meta', 'map_7k.bin', 'bing_search_33k.bin.meta', 'google_places_5k.bin.meta', 'translation_10k.bin', 'meta_analysis_2k_single_tool.bin', 'arxiv_6k.bin.meta', 'chemical_10k.bin.meta', 'wolframalpha_17k.bin.meta', 'weather_10k.bin', 'google_places_5k.bin', 'meta_analysis_2k_single_tool.bin.meta', 'translation_10k.bin.meta', 'chemical_10k.bin', 'stock_10k.bin.meta', 'arxiv_6k.bin', 'bing_search_33k.bin', 'map_7k.bin.meta', 'stock_10k.bin', 'wolframalpha_17k.bin']), ('/cpfs01/shared/public/gaojianfei/datasets/llamav7_8k/train/cn/self_critique_gen_qa', [], ['base_train_30.bin.meta', 'base_train_30.bin']), ('/cpfs01/shared/public/gaojianfei/datasets/llamav7_8k/train/cn/gmath', [], ['gmath.bin.meta', 'gmath.bin']), ('/cpfs01/shared/public/gaojianfei/datasets/llamav7_8k/train/cn/gaokao_essay_safety_filtered_v1', [], ['gaokao_essay.bin.meta', 'gaokao_essay.bin']), ('/cpfs01/shared/public/gaojianfei/datasets/llamav7_8k/train/cn/chinese_poetry_10x', [], ['chinese-poetry-10x.bin.meta', 'chinese-poetry-10x.bin']), ('/cpfs01/shared/public/gaojianfei/datasets/llamav7_8k/train/cn/unnatural_instructions_chat_format', [], ['full_data.bin.meta', 'full_data.bin']), ('/cpfs01/shared/public/gaojianfei/datasets/llamav7_8k/train/cn/self_critique_refine_answer', [], ['critiques_train.bin.meta', 'critiques_train.bin']), ('/cpfs01/shared/public/gaojianfei/datasets/llamav7_8k/train/cn/moss_no_moss_chat_fudan_format_safety_filtered_v1', [], ['moss_v1_code.bin', 'moss_v1_continue.bin', 'moss_v1_honest.bin.meta', 'moss_v1_awesome_zh.bin', 'moss_v1_harmless_en.bin', 'moss_v1_writing.bin.meta', 'moss_v1_switching.bin', 'moss_v1_advice.bin.meta', 'moss_v1_harmless_zh_china-related_gpt4_fix_qmark_aug.bin.meta', 'moss_v1_harmless_zh_non-chinarelated.bin.meta', 'moss_v1_rp.bin.meta', 'moss_v1_harmless_zh_non-chinarelated.bin', 'moss_v1_code.bin.meta', 'moss_v1_harmless_en.bin.meta', 'moss_v1_rp.bin', 'moss_v1_continue.bin.meta', 'moss_v1_honest.bin', 'moss_v1_awesome_en.bin', 'moss_v1_awesome_zh.bin.meta', 'moss_v1_harmless_zh_china-related_gpt4_fix_qmark_aug.bin', 'moss_v1_awesome_en.bin.meta', 'moss_v1_advice.bin', 'moss_v1_writing.bin', 'moss_v1_switching.bin.meta']), ('/cpfs01/shared/public/gaojianfei/datasets/llamav7_8k/train/cn/leetcode_filter_chat_refined', [], ['leetcode_filter_chat_refined.bin.meta', 'leetcode_filter_chat_refined.bin']), ('/cpfs01/shared/public/gaojianfei/datasets/llamav7_8k/train/cn/math3000_solve_wo_thought_wo_answer', [], ['solve_wo_thought_wo_answer.bin', 'solve_wo_thought_wo_answer.bin.meta']), ('/cpfs01/shared/public/gaojianfei/datasets/llamav7_8k/train/cn/EvolCode_v4x_r2_0', [], ['polishedcode-v4.x-r2.bin.meta', 'polishedcode-v4.x-r2.bin']), ('/cpfs01/shared/public/gaojianfei/datasets/llamav7_8k/train/cn/stackoverflow_selected_python_chat_format', [], ['stackoverflow_selected_python_chat_format.bin.meta', 'stackoverflow_selected_python_chat_format.bin']), ('/cpfs01/shared/public/gaojianfei/datasets/llamav7_8k/train/cn/rolebench_w_sys_filtered', [], ['rolebench-zh_general_train.bin.meta', 'rolebench-zh_role_specific_train.bin', 'rolebench-eng_instruction-generalization_general_train.bin.meta', 'rolebench-eng_role-generalization_general_train.bin', 'rolebench-zh_role_specific_train.bin.meta', 'rolebench-eng_instruction-generalization_role_specific_train.bin.meta', 'rolebench-eng_role-generalization_general_train.bin.meta', 'rolebench-eng_instruction-generalization_general_train.bin', 'rolebench-eng_role-generalization_role_specific_train.bin.meta', 'rolebench-eng_instruction-generalization_role_specific_train.bin', 'rolebench-eng_role-generalization_role_specific_train.bin', 'rolebench-zh_general_train.bin']), ('/cpfs01/shared/public/gaojianfei/datasets/llamav7_8k/train/cn/share_gpt_v6_chat_format_safety_filtered_v1', [], ['share_gpt_v6.bin', 'share_gpt_v6.bin.meta'])]
 
     for root, dirs, files in triples:
         dirs.sort()  # Let the folder need to be returned in a fixed order
@@ -256,10 +244,6 @@ def build_packed_dataset(folder, packed_length=8192, min_length=0):
                 if len(ds) == 0:
                     continue
 
-                # if hasattr(ds, "old_length"):
-                #     delete_samples += ds.old_length - len(ds)
-                
-
                 ds = PackedDataset(ds, packed_length)
 
                 num_token_in_folder += len(ds) * packed_length
@@ -268,17 +252,6 @@ def build_packed_dataset(folder, packed_length=8192, min_length=0):
     dataset = ConcatDataset(datasets=datasets)
 
     return dataset
-
-# def build_packed_dataset(*args, **kwargs):
-#     if not (dist.is_available() and dist.is_initialized()):
-#         return process(*args, **kwargs)
-#     if dist.get_rank() == 0:
-#         dataset = process(*args, **kwargs)
-#         objects = [dataset]
-#     else:
-#         objects = [None]
-#     dist.broadcast_object_list(objects, src=0)
-#     return objects[0]
 
 
 from torch.utils.data import Sampler

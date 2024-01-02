@@ -8,7 +8,7 @@ from mmengine.utils import digit_version
 
 from .baichuan import (baichuan2_norm_head_forward, baichuan_7b_attn_forward,
                        baichuan_13b_attn_forward)
-from .internlm import internlm_attn_forward
+# from .internlm import internlm_attn_forward
 from .llama import llama_attn_forward
 from .yi import yi_attn_forward
 
@@ -62,11 +62,13 @@ def dispatch_llama_rmsnorm_forward(model):
     from .triton_kernels import rms_norm_forward
     print_log('dispatch llama rmsnorm forward', 'current')
     for module in model.modules():
-        if type(module).__name__ == 'LlamaRMSNorm':
+        if type(module).__name__ == 'MixedFusedRMSNorm':
             module.forward = types.MethodType(rms_norm_forward, module)
 
 
 def dispatch_internlm_attn_forward(model):
+    from xtuner.model.modules.internlm_refactor import internlm_attn_forward
+    
     if not SUPPORT_FLASH:
         return
     print_log('dispatch internlm attn forward', 'current')
@@ -80,36 +82,21 @@ def dispatch_internlm_rmsnorm_forward(model):
     if not SUPPORT_TRITON:
         return
     from .triton_kernels import rms_norm_forward
-    print_log('dispatch internlm rmsnorm forward', 'current')
     for module in model.modules():
         if type(module).__name__ == 'InternLMRMSNorm':
+            print_log('dispatch internlm rmsnorm forward', 'current')
             module.forward = types.MethodType(rms_norm_forward, module)
 
 
-def replace_internlm_rmsnorm_with_apex(model):
-    print_log('replace internlm rmsnorm with apex', 'current')
-    from apex.normalization.fused_layer_norm import MixedFusedRMSNorm
-
-    def traverse(module):
-        for name, child in module.named_children():
-            if type(child).__name__ == 'InternLMRMSNorm':
-                child_new = MixedFusedRMSNorm(child.weight.shape[0]).to(device=child.weight.device, dtype=child.weight.dtype)
-                child_new.weight.data = child.weight.data
-                setattr(module, name, child_new)
-            else:
-                traverse(child)
-    
-    traverse(model)
-
-
 def replace_internlm_rote(model):
-    print_log('replace internlm rope', 'current')
-    from .internlm import RotaryEmbedding
+    from xtuner.model.modules.internlm_refactor import InternLMRotaryEmbedding
+
     def traverse(module):
         for name, child in module.named_children():
             if type(child).__name__ == 'InternLMRotaryEmbedding':
+                print_log('replace internlm rope', 'current')
                 dim_model = child.inv_freq.shape[0] * 2
-                child_new = RotaryEmbedding(dim_model).to(device=child.device, dtype=child.weight.dtype)
+                child_new = InternLMRotaryEmbedding(dim_model, child.max_seq_len_cached).to(device=child.inv_freq.device, dtype=child.inv_freq.dtype)
                 setattr(module, name, child_new)
             else:
                 traverse(child)
@@ -160,9 +147,8 @@ def dispatch_modules(model):
     model_name = model.__class__.__name__.lower()
     if 'internlm' in model_name:
         dispatch_internlm_attn_forward(model)
-        # replace_internlm_rmsnorm_with_apex(model)
         dispatch_internlm_rmsnorm_forward(model)
-        # replace_internlm_rote(model)
+        replace_internlm_rote(model)
     if 'llama' in model_name:
         dispatch_llama_attn_forward(model)
         dispatch_llama_rmsnorm_forward(model)
