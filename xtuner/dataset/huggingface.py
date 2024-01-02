@@ -131,10 +131,11 @@ def process(dataset,
         if remove_unused_columns else None,
         num_proc=map_num_proc)
 
-    # remove data that does not have the valid labels.
-    dataset = dataset.filter(
-        lambda example: any(label >= 0 for label in example['labels']),
-        num_proc=map_num_proc)
+    if input_ids_with_output:
+        # remove data that does not have the valid labels.
+        dataset = dataset.filter(
+            lambda example: any(label >= 0 for label in example['labels']),
+            num_proc=map_num_proc)
 
     # pack to max length
     if pack_to_max_length and split == 'train':
