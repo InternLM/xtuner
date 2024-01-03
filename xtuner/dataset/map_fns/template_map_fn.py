@@ -16,6 +16,18 @@ def template_map_fn(example, template):
             system = template.SYSTEM.format(system=system)
             input_text = system + input_text
         single_turn_conversation['input'] = input_text
+
+        if template.get('POSTFIX', None):
+            output_text = single_turn_conversation.get('output', '')
+            output_text += template.POSTFIX
+            single_turn_conversation['output'] = output_text
+
+        # Last turn or POSTFIX_AS_EOS == False
+        single_turn_conversation['need_eos_token'] = (
+            i == len(conversation) - 1
+            or not template.get('POSTFIX_AS_EOS', False))
+        single_turn_conversation['sep'] = template.get('SEP', '')
+
     return {'conversation': conversation}
 
 
