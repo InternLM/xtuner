@@ -29,7 +29,7 @@ pretrained_model_name_or_path = 'THUDM/chatglm3-6b-base'
 # download data from https://github.com/LiuHC0428/LAW-GPT
 crime_kg_assitant_path = './data/CrimeKgAssitant清洗后_52k.json'
 law_reference_data_path = './data/训练数据_带法律依据_92k.json'
-prompt_template = PROMPT_TEMPLATE.chatglm3
+prompt_template = PROMPT_TEMPLATE.default
 max_length = 2048
 pack_to_max_length = True
 

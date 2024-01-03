@@ -29,7 +29,7 @@ pretrained_model_name_or_path = 'Qwen/Qwen-7B'
 # download data from https://github.com/LiuHC0428/LAW-GPT
 crime_kg_assitant_path = './data/CrimeKgAssitant清洗后_52k.json'
 law_reference_data_path = './data/训练数据_带法律依据_92k.json'
-prompt_template = PROMPT_TEMPLATE.qwen_chat
+prompt_template = PROMPT_TEMPLATE.default
 max_length = 2048
 pack_to_max_length = True
 
@@ -175,7 +175,6 @@ custom_hooks = [
         type=EvaluateChatHook,
         tokenizer=tokenizer,
         every_n_iters=evaluation_freq,
-        stop_word='<|endoftext|>',
         evaluation_inputs=evaluation_inputs,
         system=SYSTEM,
         prompt_template=prompt_template)

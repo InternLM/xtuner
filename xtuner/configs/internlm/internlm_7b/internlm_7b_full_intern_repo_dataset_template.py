@@ -21,7 +21,7 @@ pretrained_model_name_or_path = 'internlm/internlm-7b'
 
 # Data
 dataset_folder = '/path/to/your/dataset'
-prompt_template = PROMPT_TEMPLATE.internlm_chat
+prompt_template = PROMPT_TEMPLATE.default
 max_length = 2048
 pack_to_max_length = True
 
