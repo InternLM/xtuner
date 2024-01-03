@@ -22,10 +22,9 @@ def template_map_fn(example, template):
             output_text += template.POSTFIX
             single_turn_conversation['output'] = output_text
 
-        # Last turn or POSTFIX_AS_EOS == False
-        single_turn_conversation['need_eos_token'] = (
-            i == len(conversation) - 1
-            or not template.get('POSTFIX_AS_EOS', False))
+        # POSTFIX_AS_EOS is False ==> need_eos_token is True
+        single_turn_conversation['need_eos_token'] = \
+            not template.get('POSTFIX_AS_EOS', False)
         single_turn_conversation['sep'] = template.get('SEP', '')
 
     return {'conversation': conversation}
