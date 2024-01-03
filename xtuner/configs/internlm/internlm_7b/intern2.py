@@ -24,26 +24,26 @@ from xtuner.engine.runner.loops import EpochBasedTrainLoop
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-pretrained_model_name_or_path = '/mnt/petrelfs/share_data/caoweihan/7B_kaoshi_7_5_hf'
+pretrained_model_name_or_path = '/mnt/petrelfs/share_data/caoweihan/official_Ampere_7B_1_0_0'
 use_local_attn = True
 
 # Data
-dataset_folder = '/mnt/inspurfs/share_data/zhangwenwei/data/llm/v0.15.0_delivery/training/llamav7_8k'  # yudong sft data
+dataset_folder = '/mnt/petrelfs/share_data/zhangwenwei/data/llm/delivery_ft-0.17/v0.17.0rc8_32k/training/chatml_llamav13_32k/train'  # yudong sft data
 prompt_template = PROMPT_TEMPLATE.internlm_chat
-max_length = 8192
+max_length = 32768
 pack_to_max_length = True
 
 # Scheduler & Optimizer
 batch_size = 1  # per_device
-accumulative_counts = 4  # 2bs * 16acc * 4gpu = 128 batchsize
-dataloader_num_workers = 0
+accumulative_counts = 1  # 2bs * 16acc * 4gpu = 128 batchsize
+dataloader_num_workers = 4
 max_epochs = 1
 optim_type = AdamW
 lr = 4e-5
 betas = (0.9, 0.95)
 weight_decay = 0.01
 max_norm = 1  # grad clip
-total_iters = 3669
+total_iters = 3755
 warm_up_ratio = 0.025
 
 # Evaluate the generation performance during the training
@@ -140,7 +140,7 @@ default_hooks = dict(
     # record the time of every iteration.
     timer=dict(type=IterTimerHook),
     # print log every 100 iterations.
-    logger=dict(type=LoggerHook, interval=10),
+    logger=dict(type=LoggerHook, interval=1),
     # enable the parameter scheduler.
     param_scheduler=dict(type=ParamSchedulerHook),
     # save checkpoint per epoch.
@@ -174,4 +174,4 @@ resume = False
 # Defaults to use random seed and disable `deterministic`
 randomness = dict(seed=None, deterministic=False)
 
-log_processor = dict(mean_pattern=r'.*(loss|time|data_time|grad_norm|tflops).*')
+log_processor = dict(window_size=1, mean_pattern=r'.*(loss|time|data_time|grad_norm|tflops).*')

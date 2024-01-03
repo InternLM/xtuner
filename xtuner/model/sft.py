@@ -14,6 +14,7 @@ from transformers import AutoConfig, AutoModelForCausalLM
 from xtuner.registry import BUILDER
 from .modules import dispatch_modules
 from .utils import LoadWoInit, find_all_linear_names, traverse_dict
+from mmengine import print_log
 
 
 class SupervisedFinetune(BaseModel):
@@ -32,12 +33,12 @@ class SupervisedFinetune(BaseModel):
                 llm.pretrained_model_name_or_path,
                 torch_dtype=torch.bfloat16,
                 trust_remote_code=True)
-            assert hf_config.rms_norm_eps == 1e-6
-            hf_config.rms_norm_eps = 1e-5
-            print('set rms_norm_eps to 1e-5')
+            # assert hf_config.rms_norm_eps == 1e-6
+            # hf_config.rms_norm_eps = 1e-5
+            # print('set rms_norm_eps to 1e-5')
             assert hf_config.rotary['type'] == "dynamic"
             hf_config.rotary['type'] = "origin"
-            print('set rotary type to origin')
+            print_log('set rotary type to origin', 'current')
             self.llm = AutoModelForCausalLM.from_pretrained(
                 torch_dtype=torch.bfloat16,
                 pretrained_model_name_or_path=llm.pretrained_model_name_or_path,

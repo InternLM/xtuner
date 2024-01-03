@@ -18,11 +18,16 @@ class EpochBasedTrainLoop(MMEngineEpochBasedTrainLoop):
         data_batch_cur['data'] = data_cur
         return data_batch_cur
     
+    def _get_micro_batch_size(self, data_batch):
+        assert set(data_batch.keys()) == set(['data', 'data_samples'])
+        return len(data_batch['data']['max_seqlen'])
+    
     def run_iter(self, idx, data_batch) -> None:
         self.runner.call_hook(
             'before_train_iter', batch_idx=idx, data_batch=data_batch)
         
-        for i in range(4):
+        micro_batch_size = self._get_micro_batch_size(data_batch)
+        for i in range(micro_batch_size):
             outputs = self.runner.model.train_step(
                 self._get_micro_batch(data_batch, i), optim_wrapper=self.runner.optim_wrapper)
         
