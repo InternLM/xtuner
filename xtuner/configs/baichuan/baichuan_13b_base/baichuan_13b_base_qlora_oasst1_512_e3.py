@@ -25,7 +25,7 @@ pretrained_model_name_or_path = 'baichuan-inc/Baichuan-13B-Base'
 
 # Data
 data_path = 'timdettmers/openassistant-guanaco'
-prompt_template = PROMPT_TEMPLATE.baichuan_chat
+prompt_template = PROMPT_TEMPLATE.default
 max_length = 512
 pack_to_max_length = False
 

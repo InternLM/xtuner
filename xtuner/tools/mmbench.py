@@ -23,7 +23,7 @@ from transformers import (AutoModel, AutoModelForCausalLM, AutoTokenizer,
 
 from xtuner.dataset.utils import decode_base64_to_image, expand2square
 from xtuner.model.utils import prepare_inputs_labels_for_multimodal
-from xtuner.tools.utils import get_chat_utils, is_cn_string
+from xtuner.tools.utils import is_cn_string
 from xtuner.utils import (DEFAULT_IMAGE_TOKEN, IMAGE_TOKEN_INDEX,
                           PROMPT_TEMPLATE)
 
@@ -350,8 +350,6 @@ def main():
     visual_encoder.eval()
     llm.eval()
 
-    _, stop_criteria = get_chat_utils(llm)
-
     gen_config = GenerationConfig(
         max_new_tokens=args.max_new_tokens,
         do_sample=False,
@@ -401,14 +399,14 @@ def main():
         chunk_encode = []
         for idx, chunk in enumerate(inputs.split(DEFAULT_IMAGE_TOKEN)):
             if idx == 0:
-                cur_encode = tokenizer(chunk)
+                cur_encode = tokenizer.encode(chunk)
             else:
-                cur_encode = tokenizer(chunk, add_special_tokens=False)
+                cur_encode = tokenizer.encode(chunk, add_special_tokens=False)
             chunk_encode.append(cur_encode)
         assert len(chunk_encode) == 2
         ids = []
         for idx, cur_chunk_encode in enumerate(chunk_encode):
-            ids.extend(cur_chunk_encode['input_ids'])
+            ids.extend(cur_chunk_encode)
             if idx != len(chunk_encode) - 1:
                 ids.append(IMAGE_TOKEN_INDEX)
         ids = torch.tensor(ids).cuda().unsqueeze(0)
@@ -419,8 +417,7 @@ def main():
             **mm_inputs,
             generation_config=gen_config,
             streamer=None,
-            bos_token_id=tokenizer.bos_token_id,
-            stopping_criteria=stop_criteria)
+            bos_token_id=tokenizer.bos_token_id)
 
         predict = tokenizer.decode(
             generate_output[0], skip_special_tokens=True).strip()

@@ -27,7 +27,7 @@ pretrained_model_name_or_path = 'Qwen/Qwen-7B'
 # 1. Download data from https://kaggle.com/datasets/Cornell-University/arxiv
 # 2. Process data by `xtuner preprocess arxiv ${DOWNLOADED_DATA} ./data/arxiv_data.json [optional arguments]`  # noqa: E501
 data_path = './data/arxiv_data.json'
-prompt_template = PROMPT_TEMPLATE.qwen_chat
+prompt_template = PROMPT_TEMPLATE.default
 max_length = 2048
 pack_to_max_length = True
 
@@ -184,7 +184,6 @@ custom_hooks = [
         type=EvaluateChatHook,
         tokenizer=tokenizer,
         every_n_iters=evaluation_freq,
-        stop_word='<|endoftext|>',
         evaluation_inputs=evaluation_inputs,
         system=SYSTEM,
         prompt_template=prompt_template)

@@ -25,7 +25,7 @@ pretrained_model_name_or_path = 'baichuan-inc/Baichuan2-13B-Base'
 
 # Data
 data_path = 'burkelibbey/colors'
-prompt_template = PROMPT_TEMPLATE.baichuan2_chat
+prompt_template = PROMPT_TEMPLATE.default
 max_length = 2048
 pack_to_max_length = True
 

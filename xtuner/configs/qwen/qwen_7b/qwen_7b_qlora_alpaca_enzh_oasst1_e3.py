@@ -28,7 +28,7 @@ pretrained_model_name_or_path = 'Qwen/Qwen-7B'
 alpaca_zh_path = 'silk-road/alpaca-data-gpt4-chinese'
 alpaca_en_path = 'tatsu-lab/alpaca'
 oasst1_path = 'timdettmers/openassistant-guanaco'
-prompt_template = PROMPT_TEMPLATE.qwen_chat
+prompt_template = PROMPT_TEMPLATE.default
 max_length = 2048
 pack_to_max_length = True
 
@@ -180,7 +180,6 @@ custom_hooks = [
         type=EvaluateChatHook,
         tokenizer=tokenizer,
         every_n_iters=evaluation_freq,
-        stop_word='<|endoftext|>',
         evaluation_inputs=evaluation_inputs,
         system=SYSTEM,
         prompt_template=prompt_template)

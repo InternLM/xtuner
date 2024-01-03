@@ -26,7 +26,7 @@ pretrained_model_name_or_path = 'baichuan-inc/Baichuan-13B-Base'
 # Data
 data_path = 'shibing624/medical'
 data_config_name = 'finetune'
-prompt_template = PROMPT_TEMPLATE.baichuan_chat
+prompt_template = PROMPT_TEMPLATE.default
 max_length = 2048
 pack_to_max_length = True
 

@@ -27,7 +27,7 @@ pretrained_model_name_or_path = 'internlm/internlm-20b'
 # 1. Download data from https://kaggle.com/datasets/Cornell-University/arxiv
 # 2. Process data by `xtuner preprocess arxiv ${DOWNLOADED_DATA} ./data/arxiv_data.json [optional arguments]`  # noqa: E501
 data_path = './data/arxiv_data.json'
-prompt_template = PROMPT_TEMPLATE.internlm_chat
+prompt_template = PROMPT_TEMPLATE.default
 max_length = 2048
 pack_to_max_length = True
 

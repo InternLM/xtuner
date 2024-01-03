@@ -25,7 +25,7 @@ pretrained_model_name_or_path = 'meta-llama/Llama-2-7b-hf'
 
 # Data
 data_path = 'burkelibbey/colors'
-prompt_template = PROMPT_TEMPLATE.llama2_chat
+prompt_template = PROMPT_TEMPLATE.default
 max_length = 2048
 pack_to_max_length = True
 

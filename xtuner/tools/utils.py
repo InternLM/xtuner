@@ -1,10 +1,8 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-import copy
 import re
 
 import torch
-from transformers import (PreTrainedTokenizerFast, StoppingCriteria,
-                          StoppingCriteriaList)
+from transformers import PreTrainedTokenizerFast, StoppingCriteriaList
 from transformers.generation.streamers import BaseStreamer
 
 from xtuner.utils import StopWordStoppingCriteria
@@ -18,8 +16,7 @@ def get_base_model(model):
     return model
 
 
-def get_chat_utils(model):
-    """Get utils by model type."""
+def get_streamer(model):
     if model.__class__.__name__ == 'InferenceEngine':
         model = model.module
     base_model = get_base_model(model)
@@ -29,15 +26,10 @@ def get_chat_utils(model):
     is_baichuan = 'baichuan' in base_model_name
     is_chatglm = 'chatglm' in base_model_name
     no_space = is_internlm or is_qwen or is_baichuan or is_chatglm
-    stop_criteria = StoppingCriteriaList()
-    if is_internlm:
-        stop_criteria.append(InternLMStoppingCriteria())
-    if is_qwen:
-        stop_criteria.append(QwenStoppingCriteria())
     if no_space:
-        return NoSpaceStreamer, stop_criteria
+        return NoSpaceStreamer
     else:
-        return DecodeOutputStreamer, stop_criteria
+        return DecodeOutputStreamer
 
 
 class DecodeOutputStreamer(BaseStreamer):
@@ -114,31 +106,14 @@ class NoSpaceStreamer(DecodeOutputStreamer):
         return tok
 
 
-class InternLMStoppingCriteria(StoppingCriteria):
-    """Stopping criteria for HF version of InternLM."""
-
-    def __call__(self, input_ids, *args, **kwargs) -> bool:
-        return input_ids[0, -1] in [2, 103028]
-
-
-class QwenStoppingCriteria(StoppingCriteria):
-    """Stopping criteria for HF version of Qwen."""
-
-    def __call__(self, input_ids, *args, **kwargs) -> bool:
-        return input_ids[0, -1] in [151643, 151644, 151645]
-
-
-def update_stop_criteria(base,
-                         tokenizer,
-                         command_stop_word=None,
-                         answer_stop_word=None):
-    command = copy.deepcopy(base)
-    answer = copy.deepcopy(base)
-    if command_stop_word is not None:
-        command.append(StopWordStoppingCriteria(tokenizer, command_stop_word))
-    if answer_stop_word is not None:
-        answer.append(StopWordStoppingCriteria(tokenizer, answer_stop_word))
-    return command, answer
+def get_stop_criteria(
+    tokenizer,
+    stop_words=[],
+):
+    stop_criteria = StoppingCriteriaList()
+    for word in stop_words:
+        stop_criteria.append(StopWordStoppingCriteria(tokenizer, word))
+    return stop_criteria
 
 
 def auto_dtype_of_deepspeed_config(ds_config):
