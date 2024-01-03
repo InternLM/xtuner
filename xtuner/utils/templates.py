@@ -7,13 +7,9 @@ from mmengine.config import ConfigDict
 # Note: [] means having supervised loss during the fine-tuning
 PROMPT_TEMPLATE = ConfigDict(
     default=dict(
-        SYSTEM=('<|im_start|>system\n{system}<|im_end|>\n'),
-        INSTRUCTION=(
-            '<|im_start|>user\n{input}<|im_end|>\n<|im_start|>assistant\n'),
-        POSTFIX='<|im_end|>',
-        POSTFIX_AS_EOS=True,
-        SEP='\n',
-        STOP_WORDS=['<|im_end|>']),
+        SYSTEM='<|System|>:{system}\n',
+        INSTRUCTION='<|User|>:{input}\n<|Bot|>:',
+        SEP='\n'),
     zephyr=dict(
         SYSTEM='<|system|>\n{system}\n',
         INSTRUCTION='<|user|>\n{input}\n<|assistant|>\n',
@@ -96,11 +92,7 @@ PROMPT_TEMPLATE = ConfigDict(
                 'other non-computer science questions, you will '
                 'refuse to answer. {system}\n'),
         INSTRUCTION=('### Instruction:\n{input}\n### Response:\n'),
-        POSTFIX='<|EOT|>',
-        POSTFIX_AS_EOS=True,
-        SEP='\n',
-        STOP_WORDS=['<|EOT|>'],
-    ),
+        SEP='\n'),
     mistral=dict(
         SYSTEM=('[INST] {system} [/INST]'),
         INSTRUCTION=('[INST] {input} [/INST]'),
