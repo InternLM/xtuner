@@ -130,12 +130,16 @@ def replace_internlm_rote(model):
 def replace_internlm2_rote(model):
     from xtuner.model.modules.internlm2 import InternLM2RotaryEmbedding
 
+    rotary_base = model.config.rotary["base"]
+    # fixme
+    rotary_base = 1000000
+
     def traverse(module):
         for name, child in module.named_children():
             if type(child).__name__ == 'InternLM2RotaryEmbedding':
                 print_log('replace internlm2 rope', 'current')
                 dim_model = child.inv_freq.shape[0] * 2
-                child_new = InternLM2RotaryEmbedding(dim_model, child.max_seq_len_cached).to(device=child.inv_freq.device, dtype=child.inv_freq.dtype)
+                child_new = InternLM2RotaryEmbedding(dim_model, child.max_seq_len_cached, rotary_base).to(device=child.inv_freq.device, dtype=child.inv_freq.dtype)
                 setattr(module, name, child_new)
             else:
                 traverse(child)
