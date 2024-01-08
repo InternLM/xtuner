@@ -117,10 +117,7 @@ law_reference_data = dict(
     pack_to_max_length=pack_to_max_length)
 
 train_dataset = dict(
-    type=ConcatDataset,
-    datasets_cfg=dict(
-        crime_kg_assitant=crime_kg_assitant,
-        law_reference_data=law_reference_data))
+    type=ConcatDataset, datasets=[crime_kg_assitant, law_reference_data])
 
 train_dataloader = dict(
     batch_size=batch_size,

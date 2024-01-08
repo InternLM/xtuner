@@ -4,6 +4,7 @@ from typing import Iterator, Optional, Sized
 
 import torch
 from mmengine.dist import get_dist_info, sync_random_seed
+from torch.utils.data import ConcatDataset as TorchConcatDataset
 from torch.utils.data import Sampler
 
 
@@ -106,10 +107,15 @@ class LengthGroupedSampler(Sampler):
             if mega_batch_mult == 0:
                 mega_batch_mult = 1
         self.group_batch_size = mega_batch_mult * total_batch_size
-        self.length = getattr(self.dataset, length_property)
+
+        if isinstance(self.dataset, TorchConcatDataset):
+            length = []
+            for sub_dataset in self.dataset.datasets:
+                length.extend(getattr(sub_dataset, length_property))
+            self.length = length
+        else:
+            self.length = getattr(self.dataset, length_property)
         assert isinstance(self.length, (list, tuple))
-        if isinstance(self.length[0], (list, tuple)):
-            self.length = [i for one_length in self.length for i in one_length]
 
         self.total_batch_size = total_batch_size
 
