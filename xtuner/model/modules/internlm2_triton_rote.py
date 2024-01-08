@@ -5,18 +5,9 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 from mmengine import MessageHub
-# from .triton_kernels import ApplyRotaryEmb
-from flash_attn.layers.rotary import ApplyRotaryEmb as LegacyApplyRotaryEmb
-legacy_apply_rotary_embed = LegacyApplyRotaryEmb.apply
+from .triton_kernels import apply_rotary_emb
 
-SUPPORT_XFORMERS = False
 SUPPORT_FLASH2 = False
-try:
-    import xformers.ops as xops
-
-    SUPPORT_XFORMERS = True
-except ImportError:
-    pass
 
 try:
     from flash_attn import flash_attn_func, flash_attn_varlen_func
@@ -33,14 +24,11 @@ class InternLM2RotaryEmbedding(torch.nn.Module):
     def __init__(self, dim, max_position_embeddings=2048, base=1000000, device=None):
         super().__init__()
         self.inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float().to(device) / dim))
-        # self.register_buffer("inv_freq", inv_freq, persistent=False)
 
         # Build here to make `torch.jit.trace` work.
         self.max_seq_len_cached = max_position_embeddings
         t = torch.arange(self.max_seq_len_cached, device=self.inv_freq.device, dtype=self.inv_freq.dtype)
         freqs = torch.einsum("i,j->ij", t, self.inv_freq)
-        # Different from paper, but it uses a different permutation in order to obtain the same calculation
-        # emb = torch.cat((freqs, freqs), dim=-1)
         self.cos_cached = freqs.cos()[:, :]
         self.sin_cached = freqs.sin()[:, :]
 
@@ -60,26 +48,6 @@ class InternLM2RotaryEmbedding(torch.nn.Module):
             self.cos_cached[:seq_len, ...],
             self.sin_cached[:seq_len, ...],
         )
-
-
-
-def rotate_half(x):
-    """Rotates half the hidden dims of the input."""
-    x1 = x[..., :x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2:]
-    return torch.cat((-x2, x1), dim=-1)
-
-
-def apply_rotary_pos_emb(q, k, cos, sin, position_ids):
-    # The first two dimensions of cos and sin are always 1, so we can
-    # `squeeze` them.
-    # cos = cos.squeeze(1).squeeze(0)  # [seq_len, dim]
-    # sin = sin.squeeze(1).squeeze(0)  # [seq_len, dim]
-    cos = cos[position_ids].unsqueeze(1)  # [bs, 1, seq_len, dim]
-    sin = sin[position_ids].unsqueeze(1)  # [bs, 1, seq_len, dim]
-    q_embed = (q * cos) + (rotate_half(q) * sin)
-    k_embed = (k * cos) + (rotate_half(k) * sin)
-    return q_embed, k_embed
 
 
 def internlm2_attn_forward(
@@ -103,12 +71,6 @@ def internlm2_attn_forward(
     bsz, q_len, _ = hidden_states.size()
     assert bsz == 1
     assert SUPPORT_FLASH2
-
-
-    # if use_local_attn:
-    # assert len(cumulative_len) == bsz and cumulative_len[0][-1] == q_len
-    # with open('debug2.txt', 'a') as f:
-    #     f.write(f'out: name = {self.name}, rank = {rank}, cumulative_len = {cumulative_len} \n')
     
     qkv_states = self.wqkv(hidden_states)
     qkv_states = rearrange(
@@ -123,34 +85,33 @@ def internlm2_attn_forward(
     key_states = qkv_states[..., -2, :]
     value_states = qkv_states[..., -1, :]
 
-    query_states = query_states.transpose(1, 2)
-    key_states = key_states.transpose(1, 2)
+    # query_states = query_states.transpose(1, 2)
+    # key_states = key_states.transpose(1, 2)
     value_states = value_states.transpose(1, 2)
 
-    kv_seq_len = key_states.shape[-2]
+    kv_seq_len = key_states.shape[-3]
     if past_key_value is not None:
         kv_seq_len += past_key_value[0].shape[-2]
     
     cos, sin = self.rotary_emb(value_states, max_seqlen) if use_local_attn else self.rotary_emb(value_states, kv_seq_len)
     if use_local_attn:
-        query_states = legacy_apply_rotary_embed(query_states.transpose(1, 2), cos[indexes].squeeze(0), sin[indexes].squeeze(0)).transpose(1, 2)
-        key_states = legacy_apply_rotary_embed(key_states.transpose(1, 2), cos[indexes].squeeze(0), sin[indexes].squeeze(0)).transpose(1, 2)
+        query_states = apply_rotary_emb(query_states, cos[indexes].squeeze(0), sin[indexes].squeeze(0)).transpose(1, 2)
+        key_states = apply_rotary_emb(key_states, cos[indexes].squeeze(0), sin[indexes].squeeze(0)).transpose(1, 2)
     elif past_key_value is None:
         # training without local attn or context decoding
-        query_states = legacy_apply_rotary_embed(query_states.transpose(1, 2), cos, sin).transpose(1, 2)
-        key_states = legacy_apply_rotary_embed(key_states.transpose(1, 2), cos, sin).transpose(1, 2)
+        query_states = apply_rotary_emb(query_states, cos, sin).transpose(1, 2)
+        key_states = apply_rotary_emb(key_states, cos, sin).transpose(1, 2)
         # query_states = ApplyRotaryEmb.apply(query_states, cos, sin, False, 0, None, kv_seq_len)
         # key_states = ApplyRotaryEmb.apply(key_states, cos, sin, False, 0, None, kv_seq_len)
     else:
         # generating
         begin = past_key_value[0].shape[-2]
         end = kv_seq_len
-        query_states = legacy_apply_rotary_embed(query_states.transpose(1, 2), cos[begin:end], sin[begin:end]).transpose(1, 2)
-        key_states = legacy_apply_rotary_embed(key_states.transpose(1, 2), cos[begin:end], sin[begin:end]).transpose(1, 2)
+        query_states = apply_rotary_emb(query_states, cos[begin:end], sin[begin:end]).transpose(1, 2)
+        key_states = apply_rotary_emb(key_states, cos[begin:end], sin[begin:end]).transpose(1, 2)
         # query_states = ApplyRotaryEmb.apply(query_states, cos, sin, False, kv_seq_len, None, 1)
         # key_states = ApplyRotaryEmb.apply(key_states, cos, sin, False, kv_seq_len, None, 1)
-    
-    # query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, indexes if use_local_attn else position_ids)
+
     # [bsz, nh, t, hd]
 
     if past_key_value is not None:
