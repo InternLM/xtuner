@@ -91,6 +91,19 @@ def dispatch_internlm2_attn_forward(model):
             module.forward = types.MethodType(internlm2_attn_forward, module)
 
 
+def dispatch_internlm2_attn_forward_triton_rote(model):
+    from xtuner.model.modules.internlm2_triton_rote import internlm2_attn_forward
+    
+    if not SUPPORT_FLASH:
+        return
+    
+    print_log(NO_ATTN_WEIGHTS_MSG, 'current', logging.WARNING)
+    for module in model.modules():
+        if type(module).__name__ == 'InternLM2Attention':
+            print_log('dispatch internlm2 attn forward triton rote', 'current')
+            module.forward = types.MethodType(internlm2_attn_forward, module)
+
+
 def dispatch_internlm_rmsnorm_forward(model):
     if not SUPPORT_TRITON:
         return
@@ -129,6 +142,26 @@ def replace_internlm_rote(model):
 
 def replace_internlm2_rote(model):
     from xtuner.model.modules.internlm2 import InternLM2RotaryEmbedding
+
+    rotary_base = model.config.rotary["base"]
+    # fixme
+    rotary_base = 1000000
+
+    def traverse(module):
+        for name, child in module.named_children():
+            if type(child).__name__ == 'InternLM2RotaryEmbedding':
+                print_log('replace internlm2 rope', 'current')
+                dim_model = child.inv_freq.shape[0] * 2
+                child_new = InternLM2RotaryEmbedding(dim_model, child.max_seq_len_cached, rotary_base).to(device=child.inv_freq.device, dtype=child.inv_freq.dtype)
+                setattr(module, name, child_new)
+            else:
+                traverse(child)
+    
+    traverse(model)
+
+
+def replace_internlm2_rote_triton_rote(model):
+    from xtuner.model.modules.internlm2_triton_rote import InternLM2RotaryEmbedding
 
     rotary_base = model.config.rotary["base"]
     # fixme
@@ -189,9 +222,11 @@ def dispatch_yi_attn_forward(model):
 def dispatch_modules(model):
     model_name = model.__class__.__name__.lower()
     if 'internlm2' in model_name:
-        dispatch_internlm2_attn_forward(model)
+        # dispatch_internlm2_attn_forward(model)
+        dispatch_internlm2_attn_forward_triton_rote(model)
         dispatch_internlm2_rmsnorm_forward(model)
-        replace_internlm2_rote(model)
+        # replace_internlm2_rote(model)
+        replace_internlm2_rote_triton_rote(model)
     elif 'internlm' in model_name:
         dispatch_internlm_attn_forward(model)
         dispatch_internlm_rmsnorm_forward(model)
