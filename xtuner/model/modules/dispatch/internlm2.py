@@ -1,9 +1,11 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import warnings
 from typing import Optional, Tuple
 
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
+from einops import rearrange
 from mmengine import MessageHub
 
 from .triton_kernels import apply_rotary_emb
@@ -18,12 +20,12 @@ except ImportError:
     pass
 
 
-class InternLMRotaryEmbedding(torch.nn.Module):
+class InternLM2RotaryEmbedding(torch.nn.Module):
 
     def __init__(self,
                  dim,
                  max_position_embeddings=2048,
-                 base=10000,
+                 base=1000000,
                  device=None):
         super().__init__()
         self.inv_freq = 1.0 / (
@@ -69,14 +71,41 @@ def rotate_half(x):
 
 
 def apply_rotary_pos_emb(q, k, cos, sin, position_ids):
-    cos = cos[position_ids].unsqueeze(1)  # [bs, 1, seq_len, dim]
-    sin = sin[position_ids].unsqueeze(1)  # [bs, 1, seq_len, dim]
-    q_embed = (q * cos) + (rotate_half(q) * sin)
-    k_embed = (k * cos) + (rotate_half(k) * sin)
+    cos = cos.unsqueeze(0).unsqueeze(0).expand(len(position_ids), -1, -1, -1)
+    sin = sin.unsqueeze(0).unsqueeze(0).expand(len(position_ids), -1, -1, -1)
+    # print(q.shape, cos.shape, rotate_half(q).shape)
+    if q.size(2) == 1:
+        q_embed = (q * cos[:, :, -1, :]) + (rotate_half(q) * sin[:, :, -1, :])
+    else:
+        q_embed = (q * cos) + (rotate_half(q) * sin)
+
+    if k.size(2) == 1:
+        k_embed = (k * cos[:, :, -1, :]) + (rotate_half(k) * sin[:, :, -1, :])
+    else:
+        k_embed = (k * cos) + (rotate_half(k) * sin)
+
     return q_embed, k_embed
 
 
-def internlm_attn_forward(
+def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
+    """This is the equivalent of torch.repeat_interleave(x, dim=1,
+    repeats=n_rep).
+
+    The hidden states go from (batch, num_key_value_heads, seqlen, head_dim) to
+    (batch, num_attention_heads, seqlen, head_dim)
+    """
+    batch, num_key_value_heads, slen, head_dim = hidden_states.shape
+    if n_rep == 1:
+        return hidden_states
+    hidden_states = hidden_states[:, :,
+                                  None, :, :].expand(batch,
+                                                     num_key_value_heads,
+                                                     n_rep, slen, head_dim)
+    return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen,
+                                 head_dim)
+
+
+def internlm2_attn_forward(
     self,
     hidden_states: torch.Tensor,
     attention_mask: Optional[torch.Tensor] = None,
@@ -84,20 +113,33 @@ def internlm_attn_forward(
     past_key_value: Optional[Tuple[torch.Tensor]] = None,
     output_attentions: bool = False,
     use_cache: bool = False,
+    **kwargs,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor],
            Optional[Tuple[torch.Tensor]]]:
-    # Modified from https://huggingface.co/internlm/internlm-7b/blob/939a68c0dc1bd5f35b63c87d44af05ce33379061/modeling_internlm.py#L161  # noqa:E501
+    if 'padding_mask' in kwargs:
+        warnings.warn(
+            'Passing `padding_mask` is deprecated and will be removed in v4.37'
+            'Please make sure use `attention_mask` instead.`')
+
     bsz, q_len, _ = hidden_states.size()
 
-    query_states = self.q_proj(hidden_states).view(bsz, q_len, self.num_heads,
-                                                   self.head_dim).transpose(
-                                                       1, 2)
-    key_states = self.k_proj(hidden_states).view(bsz, q_len, self.num_heads,
-                                                 self.head_dim).transpose(
-                                                     1, 2)
-    value_states = self.v_proj(hidden_states).view(bsz, q_len, self.num_heads,
-                                                   self.head_dim).transpose(
-                                                       1, 2)
+    qkv_states = self.wqkv(hidden_states)
+
+    qkv_states = rearrange(
+        qkv_states,
+        'b q (h gs d) -> b q h gs d',
+        gs=2 + self.num_key_value_groups,
+        d=self.head_dim,
+    )
+
+    query_states = qkv_states[..., :self.num_key_value_groups, :]
+    query_states = rearrange(query_states, 'b q h gs d -> b q (h gs) d')
+    key_states = qkv_states[..., -2, :]
+    value_states = qkv_states[..., -1, :]
+
+    query_states = query_states.transpose(1, 2)
+    key_states = key_states.transpose(1, 2)
+    value_states = value_states.transpose(1, 2)
 
     kv_seq_len = key_states.shape[-2]
     if past_key_value is not None:
@@ -105,7 +147,6 @@ def internlm_attn_forward(
     cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
     query_states, key_states = apply_rotary_pos_emb(query_states, key_states,
                                                     cos, sin, position_ids)
-    # [bsz, nh, t, hd]
 
     if past_key_value is not None:
         # reuse k, v, self_attention
@@ -114,14 +155,17 @@ def internlm_attn_forward(
 
     past_key_value = (key_states, value_states) if use_cache else None
 
+    key_states = repeat_kv(key_states, self.num_key_value_groups)
+    value_states = repeat_kv(value_states, self.num_key_value_groups)
+
     # use flash attention implemented by pytorch
     attn_output = F.scaled_dot_product_attention(
         query_states, key_states, value_states, attn_mask=attention_mask)
 
-    attn_output = attn_output.transpose(1, 2)
+    attn_output = attn_output.transpose(1, 2).contiguous()
     attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
 
-    attn_output = self.o_proj(attn_output)
+    attn_output = self.wo(attn_output)
 
     # Due to the implementation of the PyTorch version of flash attention,
     # even when the output_attentions flag is set to True, it is not possible
@@ -129,7 +173,7 @@ def internlm_attn_forward(
     return attn_output, None, past_key_value
 
 
-def internlm_local_attn_forward(
+def internlm2_local_attn_forward(
     self,
     hidden_states: torch.Tensor,
     attention_mask: Optional[torch.Tensor] = None,
@@ -151,15 +195,22 @@ def internlm_local_attn_forward(
     assert is_training == (cumulative_len is not None)
 
     bsz, q_len, _ = hidden_states.size()
+
     assert bsz == 1, (f'If utilizing local attention, the batch size should be'
                       f' set to 1, but got {bsz}')
 
-    query_states = self.q_proj(hidden_states).view(bsz, q_len, self.num_heads,
-                                                   self.head_dim)
-    key_states = self.k_proj(hidden_states).view(bsz, q_len, self.num_heads,
-                                                 self.head_dim)
-    value_states = self.v_proj(hidden_states).view(bsz, q_len, self.num_heads,
-                                                   self.head_dim)
+    qkv_states = self.wqkv(hidden_states)
+    qkv_states = rearrange(
+        qkv_states,
+        'b q (h gs d) -> b q h gs d',
+        gs=2 + self.num_key_value_groups,
+        d=self.head_dim,
+    )
+
+    query_states = qkv_states[..., :self.num_key_value_groups, :]
+    query_states = rearrange(query_states, 'b q h gs d -> b q (h gs) d')
+    key_states = qkv_states[..., -2, :]
+    value_states = qkv_states[..., -1, :]
 
     kv_seq_len = key_states.shape[-3]
     if past_key_value is not None:
@@ -212,7 +263,7 @@ def internlm_local_attn_forward(
 
     attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
 
-    attn_output = self.o_proj(attn_output)
+    attn_output = self.wo(attn_output)
 
     # Due to the implementation of the PyTorch version of flash attention,
     # even when the output_attentions flag is set to True, it is not possible
