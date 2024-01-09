@@ -11,6 +11,10 @@ PROMPT_TEMPLATE = ConfigDict(
     internlm_chat=dict(
         SYSTEM='<|System|>:{system}\n',
         INSTRUCTION='<|User|>:{input}<eoh>\n<|Bot|>:'),
+    internlm2_chat=dict(
+        SYSTEM='<|System|>:{system}\n',
+        INSTRUCTION=('[UNUSED_TOKEN_146]user\n{input}[UNUSED_TOKEN_145]\n'
+                     '[UNUSED_TOKEN_146]assistant\n')),
     moss_sft=dict(SYSTEM='{system}\n', INSTRUCTION='<|Human|>: {input}<eoh>'),
     llama2_chat=dict(
         SYSTEM=(
