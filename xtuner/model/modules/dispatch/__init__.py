@@ -114,7 +114,9 @@ def replace_internlm_rote(model):
 
     def traverse(module):
         for name, child in module.named_children():
-            if type(child).__name__ == 'InternLMRotaryEmbedding':
+            if type(child).__name__ in (
+                    'InternLMRotaryEmbedding',
+                    'InternLMDynamicNTKScalingRotaryEmbedding'):
                 print_log('replace internlm rope', 'current')
                 dim_model = child.inv_freq.shape[0] * 2
                 child_new = InternLMRotaryEmbedding(
