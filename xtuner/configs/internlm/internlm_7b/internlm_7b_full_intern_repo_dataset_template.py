@@ -18,11 +18,11 @@ from xtuner.utils import PROMPT_TEMPLATE
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-pretrained_model_name_or_path = '/path/to/your/base/model'  # noqa: E501
+pretrained_model_name_or_path = '/path/to/your/base/model'
 use_local_attn = True
 
 # Data
-dataset_folder = '/path/to/your/train/dataset'  # noqa: E501
+dataset_folder = '/path/to/your/train/dataset'
 prompt_template = PROMPT_TEMPLATE.internlm2_chat
 max_length = 32768
 pack_to_max_length = True
@@ -37,7 +37,6 @@ lr = 4e-5
 betas = (0.9, 0.95)
 weight_decay = 0.01
 max_norm = 1  # grad clip
-total_iters = 3749
 warm_up_ratio = 0.025
 
 # Evaluate the generation performance during the training
@@ -106,11 +105,13 @@ param_scheduler = [
         start_factor=1 / 40,
         by_epoch=False,
         begin=0,
-        end=total_iters * warm_up_ratio),
+        end=warm_up_ratio * max_epochs,
+        convert_to_iter_based=True),
     dict(
         type=CosineAnnealingLR,
         eta_min=lr * 0.15,
         by_epoch=True,
+        begin=warm_up_ratio * max_epochs,
         T_max=max_epochs,
         convert_to_iter_based=True)
 ]
