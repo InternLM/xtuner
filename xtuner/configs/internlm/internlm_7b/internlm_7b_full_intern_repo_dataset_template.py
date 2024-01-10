@@ -6,8 +6,8 @@ from torch.optim import AdamW
 from torch.utils.data import BatchSampler
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from xtuner.dataset import process_intern_repo_dataset
 from xtuner.dataset.collate_fns import intern_repo_collate_fn
+from xtuner.dataset.intern_repo import process_intern_repo_dataset
 from xtuner.dataset.samplers import InternlmRepoSampler
 from xtuner.engine import (DatasetInfoHook, EvaluateChatHook,
                            LocalAttnArgsToMessageHubHook, ThroughputHook)
@@ -18,30 +18,30 @@ from xtuner.utils import PROMPT_TEMPLATE
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-pretrained_model_name_or_path = '/path/to/your/base/model'
+pretrained_model_name_or_path = '/path/to/your/base/model'  # noqa: E501
 use_local_attn = True
 
 # Data
-dataset_folder = '/path/to/your/train/dataset'
-prompt_template = PROMPT_TEMPLATE.internlm_chat
-max_length = 8192
+dataset_folder = '/path/to/your/train/dataset'  # noqa: E501
+prompt_template = PROMPT_TEMPLATE.internlm2_chat
+max_length = 32768
 pack_to_max_length = True
 
 # Scheduler & Optimizer
 batch_size = 1  # per_device
-accumulative_counts = 4  # 1bs * 4acc * 32gpu = 128 batchsize
-dataloader_num_workers = 0
+accumulative_counts = 1  # 1bs * 1acc * 64gpu = 64 batchsize
+dataloader_num_workers = 4
 max_epochs = 1
 optim_type = AdamW
 lr = 4e-5
 betas = (0.9, 0.95)
 weight_decay = 0.01
 max_norm = 1  # grad clip
-total_iters = 3669
+total_iters = 3749
 warm_up_ratio = 0.025
 
 # Evaluate the generation performance during the training
-evaluation_freq = 2000
+evaluation_freq = 500
 SYSTEM = ''
 evaluation_inputs = [
     '请给我介绍五个上海的景点', 'Please tell me five scenic spots in Shanghai'
@@ -177,4 +177,4 @@ resume = False
 randomness = dict(seed=None, deterministic=False)
 
 log_processor = dict(
-    mean_pattern=r'.*(loss|time|data_time|grad_norm|tflops).*')
+    window_size=1, mean_pattern=r'.*(loss|time|data_time|grad_norm|tflops).*')
