@@ -18,11 +18,11 @@ from xtuner.utils import PROMPT_TEMPLATE
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-pretrained_model_name_or_path = '/mnt/petrelfs/share_data/caoweihan/official_Ampere_7B_1_0_0'  # noqa: E501
+pretrained_model_name_or_path = '/path/to/your/base/model'  # noqa: E501
 use_local_attn = True
 
 # Data
-dataset_folder = '/mnt/petrelfs/share_data/zhangwenwei/data/llm/delivery_ft-0.17/v0.17.0rc8_32k/training/chatml_llamav13_32k/train'  # noqa: E501
+dataset_folder = '/path/to/your/train/dataset'  # noqa: E501
 prompt_template = PROMPT_TEMPLATE.internlm2_chat
 max_length = 32768
 pack_to_max_length = True
@@ -41,7 +41,7 @@ total_iters = 3749
 warm_up_ratio = 0.025
 
 # Evaluate the generation performance during the training
-evaluation_freq = 200
+evaluation_freq = 500
 SYSTEM = ''
 evaluation_inputs = [
     '请给我介绍五个上海的景点', 'Please tell me five scenic spots in Shanghai'

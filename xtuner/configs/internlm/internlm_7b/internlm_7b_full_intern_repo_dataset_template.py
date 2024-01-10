@@ -1,15 +1,16 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-import torch
-from mmengine.dataset import DefaultSampler
 from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
                             LoggerHook, ParamSchedulerHook)
-from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR, LinearLR
+from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR
 from torch.optim import AdamW
+from torch.utils.data import BatchSampler
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from xtuner.dataset import process_intern_repo_dataset
 from xtuner.dataset.collate_fns import intern_repo_collate_fn
-from xtuner.engine import DatasetInfoHook, ThroughputHook
+from xtuner.dataset.samplers import InternlmRepoSampler
+from xtuner.engine import (DatasetInfoHook, EvaluateChatHook,
+                           LocalAttnArgsToMessageHubHook, ThroughputHook)
 from xtuner.model import SupervisedFinetune
 from xtuner.utils import PROMPT_TEMPLATE
 
@@ -17,17 +18,18 @@ from xtuner.utils import PROMPT_TEMPLATE
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-pretrained_model_name_or_path = 'internlm/internlm-7b'
+pretrained_model_name_or_path = '/path/to/your/base/model'
+use_local_attn = True
 
 # Data
-dataset_folder = '/path/to/your/dataset'
+dataset_folder = '/path/to/your/train/dataset'
 prompt_template = PROMPT_TEMPLATE.internlm_chat
-max_length = 2048
+max_length = 8192
 pack_to_max_length = True
 
 # Scheduler & Optimizer
-batch_size = 2  # per_device
-accumulative_counts = 4  # 2bs * 4acc * 32gpu = 256 batchsize
+batch_size = 1  # per_device
+accumulative_counts = 4  # 1bs * 4acc * 32gpu = 128 batchsize
 dataloader_num_workers = 0
 max_epochs = 1
 optim_type = AdamW
@@ -35,7 +37,15 @@ lr = 4e-5
 betas = (0.9, 0.95)
 weight_decay = 0.01
 max_norm = 1  # grad clip
-warmup_ratio = 0.03
+total_iters = 3669
+warm_up_ratio = 0.025
+
+# Evaluate the generation performance during the training
+evaluation_freq = 2000
+SYSTEM = ''
+evaluation_inputs = [
+    '请给我介绍五个上海的景点', 'Please tell me five scenic spots in Shanghai'
+]
 
 #######################################################################
 #                      PART 2  Model & Tokenizer                      #
@@ -48,9 +58,9 @@ tokenizer = dict(
 
 model = dict(
     type=SupervisedFinetune,
+    use_local_attn=use_local_attn,
     llm=dict(
         type=AutoModelForCausalLM.from_pretrained,
-        torch_dtype=torch.bfloat16,
         pretrained_model_name_or_path=pretrained_model_name_or_path,
         trust_remote_code=True))
 
@@ -59,17 +69,21 @@ model = dict(
 #######################################################################
 train_dataset = dict(
     type=process_intern_repo_dataset,
-    dataset_folder=dataset_folder,
-    max_length=max_length,
-    pack_to_max_length=pack_to_max_length,
-    map_num_proc=96)
+    folder=dataset_folder,
+    packed_length=max_length,
+    min_length=0,
+    seed=1024)
 
 train_dataloader = dict(
     batch_size=batch_size,
     num_workers=dataloader_num_workers,
     dataset=train_dataset,
-    sampler=dict(type=DefaultSampler, shuffle=True),
-    collate_fn=dict(type=intern_repo_collate_fn))
+    sampler=dict(type=InternlmRepoSampler, shuffle=True, seed=1024),
+    batch_sampler=dict(type=BatchSampler, drop_last=True, batch_size=1),
+    collate_fn=dict(
+        type=intern_repo_collate_fn,
+        packed_length=max_length,
+        use_local_attn=use_local_attn))
 
 #######################################################################
 #                    PART 4  Scheduler & Optimizer                    #
@@ -88,17 +102,15 @@ optim_wrapper = dict(
 # More information: https://github.com/open-mmlab/mmengine/blob/main/docs/en/tutorials/param_scheduler.md  # noqa: E501
 param_scheduler = [
     dict(
-        type=LinearLR,
-        start_factor=1e-5,
-        by_epoch=True,
+        type='LinearLR',
+        start_factor=1 / 40,
+        by_epoch=False,
         begin=0,
-        end=warmup_ratio * max_epochs,
-        convert_to_iter_based=True),
+        end=total_iters * warm_up_ratio),
     dict(
         type=CosineAnnealingLR,
-        eta_min=0.0,
+        eta_min=lr * 0.15,
         by_epoch=True,
-        begin=warmup_ratio * max_epochs,
         T_max=max_epochs,
         convert_to_iter_based=True)
 ]
@@ -114,7 +126,15 @@ custom_hooks = [
     dict(
         type=DatasetInfoHook, tokenizer=tokenizer,
         is_intern_repo_dataset=True),
-    dict(type=ThroughputHook)
+    dict(
+        type=EvaluateChatHook,
+        tokenizer=tokenizer,
+        every_n_iters=evaluation_freq,
+        evaluation_inputs=evaluation_inputs,
+        system=SYSTEM,
+        prompt_template=prompt_template),
+    dict(type=ThroughputHook),
+    dict(type=LocalAttnArgsToMessageHubHook, )
 ]
 
 # configure default hooks
@@ -122,7 +142,7 @@ default_hooks = dict(
     # record the time of every iteration.
     timer=dict(type=IterTimerHook),
     # print log every 100 iterations.
-    logger=dict(type=LoggerHook, interval=10),
+    logger=dict(type=LoggerHook, interval=1),
     # enable the parameter scheduler.
     param_scheduler=dict(type=ParamSchedulerHook),
     # save checkpoint per epoch.
