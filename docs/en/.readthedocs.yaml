@@ -11,3 +11,6 @@ formats:
 python:
   install:
     - requirements: requirements/docs.txt
+
+sphinx:
+  configuration: docs/en/conf.py
