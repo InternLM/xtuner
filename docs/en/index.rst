@@ -81,7 +81,3 @@ Documentation
    :caption: Models
 
    models/supported.md
-   
-
-
-
