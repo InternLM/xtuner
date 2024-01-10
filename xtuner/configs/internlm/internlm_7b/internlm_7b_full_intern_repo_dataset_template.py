@@ -103,7 +103,7 @@ param_scheduler = [
     dict(
         type='LinearLR',
         start_factor=1 / 40,
-        by_epoch=False,
+        by_epoch=True,
         begin=0,
         end=warm_up_ratio * max_epochs,
         convert_to_iter_based=True),
