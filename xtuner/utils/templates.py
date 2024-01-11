@@ -105,11 +105,11 @@ PROMPT_TEMPLATE = ConfigDict(
         INSTRUCTION=('### Instruction:\n{input}\n### Response:\n'),
         SEP='\n'),
     mistral=dict(
-        SYSTEM=('[INST] {system} [/INST]'),
+        SYSTEM=('[INST] {system} [/INST]\n'),
         INSTRUCTION=('[INST] {input} [/INST]'),
         SEP='\n'),
     mixtral=dict(
-        SYSTEM=('[INST] {system} [/INST]'),
+        SYSTEM=('[INST] {system} [/INST]\n'),
         INSTRUCTION=('[INST] {input} [/INST]'),
         SEP='\n'),
 )
