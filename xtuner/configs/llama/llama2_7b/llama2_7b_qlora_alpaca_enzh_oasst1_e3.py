@@ -28,7 +28,7 @@ pretrained_model_name_or_path = 'meta-llama/Llama-2-7b-hf'
 alpaca_zh_path = 'silk-road/alpaca-data-gpt4-chinese'
 alpaca_en_path = 'tatsu-lab/alpaca'
 oasst1_path = 'timdettmers/openassistant-guanaco'
-prompt_template = PROMPT_TEMPLATE.default
+prompt_template = PROMPT_TEMPLATE.llama2_chat
 max_length = 2048
 pack_to_max_length = True
 

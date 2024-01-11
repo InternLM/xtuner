@@ -59,7 +59,8 @@ tokenizer = dict(
     type=AutoTokenizer.from_pretrained,
     pretrained_model_name_or_path=pretrained_model_name_or_path,
     trust_remote_code=True,
-    padding_side='right')
+    padding_side='right',
+    eos_token='<|EOT|>')
 
 model = dict(
     type=SupervisedFinetune,
@@ -152,6 +153,7 @@ custom_hooks = [
         type=EvaluateChatHook,
         tokenizer=tokenizer,
         every_n_iters=evaluation_freq,
+        stop_word='<|EOT|>',
         evaluation_inputs=evaluation_inputs,
         system=SYSTEM,
         prompt_template=prompt_template)

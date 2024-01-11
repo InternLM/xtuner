@@ -25,7 +25,7 @@ pretrained_model_name_or_path = 'Qwen/Qwen-1_8B'
 
 # Data
 alpaca_zh_path = 'silk-road/alpaca-data-gpt4-chinese'
-prompt_template = PROMPT_TEMPLATE.default
+prompt_template = PROMPT_TEMPLATE.qwen_chat
 max_length = 2048
 pack_to_max_length = True
 
@@ -149,6 +149,7 @@ custom_hooks = [
         type=EvaluateChatHook,
         tokenizer=tokenizer,
         every_n_iters=evaluation_freq,
+        stop_word='<|endoftext|>',
         evaluation_inputs=evaluation_inputs,
         system=SYSTEM,
         prompt_template=prompt_template)

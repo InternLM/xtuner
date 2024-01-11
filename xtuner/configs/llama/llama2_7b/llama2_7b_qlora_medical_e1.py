@@ -26,7 +26,7 @@ pretrained_model_name_or_path = 'meta-llama/Llama-2-7b-hf'
 # Data
 data_path = 'shibing624/medical'
 data_config_name = 'finetune'
-prompt_template = PROMPT_TEMPLATE.default
+prompt_template = PROMPT_TEMPLATE.llama2_chat
 max_length = 2048
 pack_to_max_length = True
 

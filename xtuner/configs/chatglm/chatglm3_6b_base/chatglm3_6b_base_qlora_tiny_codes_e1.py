@@ -25,7 +25,7 @@ pretrained_model_name_or_path = 'THUDM/chatglm3-6b-base'
 
 # Data
 data_path = 'nampdn-ai/tiny-codes'
-prompt_template = PROMPT_TEMPLATE.default
+prompt_template = PROMPT_TEMPLATE.chatglm3
 max_length = 2048
 pack_to_max_length = True
 

@@ -28,7 +28,7 @@ pretrained_model_name_or_path = 'THUDM/chatglm3-6b-base'
 alpaca_zh_path = 'silk-road/alpaca-data-gpt4-chinese'
 alpaca_en_path = 'tatsu-lab/alpaca'
 oasst1_path = 'timdettmers/openassistant-guanaco'
-prompt_template = PROMPT_TEMPLATE.default
+prompt_template = PROMPT_TEMPLATE.chatglm3
 max_length = 2048
 pack_to_max_length = True
 

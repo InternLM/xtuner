@@ -24,7 +24,7 @@ pretrained_model_name_or_path = 'meta-llama/Llama-2-70b-hf'
 
 # Data
 data_path = 'garage-bAInd/Open-Platypus'
-prompt_template = PROMPT_TEMPLATE.default
+prompt_template = PROMPT_TEMPLATE.llama2_chat
 max_length = 2048
 pack_to_max_length = True
 
