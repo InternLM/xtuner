@@ -21,11 +21,11 @@ from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-pretrained_model_name_or_path = 'deepseek-ai/deepseek-coder-6.7b-base'
+pretrained_model_name_or_path = 'deepseek-ai/deepseek-coder-6.7b-instruct'
 
 # Data
 data_path = 'HuggingFaceH4/CodeAlpaca_20K'
-prompt_template = PROMPT_TEMPLATE.deepseekcoder
+prompt_template = PROMPT_TEMPLATE.deepseek_coder
 max_length = 2048
 pack_to_max_length = True
 
