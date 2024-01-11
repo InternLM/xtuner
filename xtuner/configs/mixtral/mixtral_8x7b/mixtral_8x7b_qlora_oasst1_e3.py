@@ -78,6 +78,9 @@ model = dict(
         r=64,
         lora_alpha=16,
         lora_dropout=0.1,
+        target_modules=[
+            'q_proj', 'k_proj', 'v_proj', 'o_proj', 'w1', 'w2', 'w3'
+        ],
         bias='none',
         task_type='CAUSAL_LM'))
 
