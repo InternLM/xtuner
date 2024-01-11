@@ -83,7 +83,7 @@ PROMPT_TEMPLATE = ConfigDict(
                 'user\'s questions. {system}\n '),
         INSTRUCTION=('USER: {input} ASSISTANT:'),
         SEP='\n'),
-    deepseekcoder=dict(
+    deepseek_coder=dict(
         SYSTEM=('You are an AI programming assistant, utilizing '
                 'the DeepSeek Coder model, developed by DeepSeek'
                 'Company, and you only answer questions related '
