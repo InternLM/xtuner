@@ -1,4 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import warnings
+
 import torch
 from mmengine.hooks import Hook
 from mmengine.model import is_model_wrapper
@@ -23,6 +25,7 @@ class EvaluateChatHook(Hook):
                  prompt_template=None,
                  every_n_iters=None,
                  max_new_tokens=600,
+                 stop_word=None,
                  stop_words=[]):
         self.evaluation_inputs = evaluation_inputs
         if isinstance(self.evaluation_inputs, str):
@@ -49,6 +52,12 @@ class EvaluateChatHook(Hook):
                 system = prompt_template.get(
                     'SYSTEM', '{system}\n').format(system=system)
             stop_words += prompt_template.get('STOP_WORDS', [])
+        if stop_word is not None:
+            # TODO: deprecation, v0.3.0
+            warnings.warn(
+                ('The `stop_word` argument is deprecated and will be removed '
+                 'in v0.3.0, use `stop_words` instead.'), DeprecationWarning)
+            stop_words.append(stop_word)
         self.instruction = instruction
         self.system = system
         self.every_n_iters = every_n_iters
