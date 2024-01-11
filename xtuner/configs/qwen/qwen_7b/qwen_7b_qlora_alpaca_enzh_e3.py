@@ -111,9 +111,7 @@ alpaca_zh = dict(
     shuffle_before_pack=True,
     pack_to_max_length=pack_to_max_length)
 
-train_dataset = dict(
-    type=ConcatDataset,
-    datasets_cfg=dict(alpaca_en=alpaca_en, alpaca_zh=alpaca_zh))
+train_dataset = dict(type=ConcatDataset, datasets=[alpaca_en, alpaca_zh])
 
 train_dataloader = dict(
     batch_size=batch_size,
