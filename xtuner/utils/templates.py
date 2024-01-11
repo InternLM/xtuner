@@ -93,6 +93,17 @@ PROMPT_TEMPLATE = ConfigDict(
                 'refuse to answer. {system}\n'),
         INSTRUCTION=('### Instruction:\n{input}\n### Response:\n'),
         SEP='\n'),
+    # TODO: deprecation, v0.2.0
+    deepseekcoder=dict(
+        SYSTEM=('You are an AI programming assistant, utilizing '
+                'the DeepSeek Coder model, developed by DeepSeek'
+                'Company, and you only answer questions related '
+                'to computer science. For politically sensitive '
+                'questions, security and privacy issues, and '
+                'other non-computer science questions, you will '
+                'refuse to answer. {system}\n'),
+        INSTRUCTION=('### Instruction:\n{input}\n### Response:\n'),
+        SEP='\n'),
     mistral=dict(
         SYSTEM=('[INST] {system} [/INST]'),
         INSTRUCTION=('[INST] {input} [/INST]'),
