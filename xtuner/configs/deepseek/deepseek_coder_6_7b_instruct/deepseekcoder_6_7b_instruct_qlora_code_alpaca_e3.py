@@ -21,11 +21,11 @@ from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-pretrained_model_name_or_path = 'deepseek-ai/deepseek-coder-6.7b-base'
+pretrained_model_name_or_path = 'deepseek-ai/deepseek-coder-6.7b-instruct'
 
 # Data
 data_path = 'HuggingFaceH4/CodeAlpaca_20K'
-prompt_template = PROMPT_TEMPLATE.deepseekcoder
+prompt_template = PROMPT_TEMPLATE.deepseek_coder
 max_length = 2048
 pack_to_max_length = True
 
@@ -59,8 +59,7 @@ tokenizer = dict(
     type=AutoTokenizer.from_pretrained,
     pretrained_model_name_or_path=pretrained_model_name_or_path,
     trust_remote_code=True,
-    padding_side='right',
-    eos_token='<|EOT|>')
+    padding_side='right')
 
 model = dict(
     type=SupervisedFinetune,
@@ -153,7 +152,6 @@ custom_hooks = [
         type=EvaluateChatHook,
         tokenizer=tokenizer,
         every_n_iters=evaluation_freq,
-        stop_word='<|EOT|>',
         evaluation_inputs=evaluation_inputs,
         system=SYSTEM,
         prompt_template=prompt_template)
