@@ -104,6 +104,10 @@ PROMPT_TEMPLATE = ConfigDict(
                 'refuse to answer. {system}\n'),
         INSTRUCTION=('### Instruction:\n{input}\n### Response:\n'),
         SEP='\n'),
+    deepseek_moe=dict(
+        SYSTEM=('[INST] {system} [/INST]\n'),
+        INSTRUCTION=('[INST] {input} [/INST]'),
+        SEP='\n'),
     mistral=dict(
         SYSTEM=('[INST] {system} [/INST]\n'),
         INSTRUCTION=('[INST] {input} [/INST]'),
