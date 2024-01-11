@@ -87,5 +87,7 @@ internlm_chat=dict(
 | 01-ai/Yi-6B                              | default         |
 | 01-ai/Yi-34B                             | default         |
 | HuggingFaceH4/zephyr-7b-beta             | zephyr          |
+| deepseek-ai/deepseek-moe-16b-base        | deepseek_moe    |
+| deepseek-ai/deepseek-moe-16b-chat        | deepseek_moe    |
 
 \*: The official template has special tokens (like `<|im_start|>`, `<|im_end|>`) that were not trained during the pre-training phase. Therefore, these models utilize the `default` template.
