@@ -17,14 +17,14 @@ def template_map_fn(example, template):
             input_text = system + input_text
         single_turn_conversation['input'] = input_text
 
-        if template.get('POSTFIX', None):
+        if template.get('SUFFIX', None):
             output_text = single_turn_conversation.get('output', '')
-            output_text += template.POSTFIX
+            output_text += template.SUFFIX
             single_turn_conversation['output'] = output_text
 
-        # POSTFIX_AS_EOS is False ==> need_eos_token is True
+        # SUFFIX_AS_EOS is False ==> need_eos_token is True
         single_turn_conversation['need_eos_token'] = \
-            not template.get('POSTFIX_AS_EOS', False)
+            not template.get('SUFFIX_AS_EOS', False)
         single_turn_conversation['sep'] = template.get('SEP', '')
 
     return {'conversation': conversation}

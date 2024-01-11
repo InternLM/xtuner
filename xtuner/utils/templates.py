@@ -1,8 +1,8 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from mmengine.config import ConfigDict
 
-# - Turn 0: SYSTEM + INSTRUCTION, [output + POSTFIX], SEP
-# - Turn 1: INSTRUCTION, [output + POSTFIX], SEP
+# - Turn 0: SYSTEM + INSTRUCTION, [output + SUFFIX], SEP
+# - Turn 1: INSTRUCTION, [output + SUFFIX], SEP
 # - Turn ...
 # Note: [] means having supervised loss during the fine-tuning
 PROMPT_TEMPLATE = ConfigDict(
@@ -17,8 +17,8 @@ PROMPT_TEMPLATE = ConfigDict(
     internlm_chat=dict(
         SYSTEM='<|System|>:{system}\n',
         INSTRUCTION='<|User|>:{input}<eoh>\n<|Bot|>:',
-        POSTFIX='<eoa>',
-        POSTFIX_AS_EOS=True,
+        SUFFIX='<eoa>',
+        SUFFIX_AS_EOS=True,
         SEP='\n',
         STOP_WORDS=['<eoa>']),
     moss_sft=dict(
@@ -50,8 +50,8 @@ PROMPT_TEMPLATE = ConfigDict(
         SYSTEM=('\n<|im_start|>system\n{system}<|im_end|>'),
         INSTRUCTION=(
             '\n<|im_start|>user\n{input}<|im_end|>\n<|im_start|>assistant\n'),
-        POSTFIX='<|im_end|>',
-        POSTFIX_AS_EOS=True,
+        SUFFIX='<|im_end|>',
+        SUFFIX_AS_EOS=True,
         SEP='\n',
         STOP_WORDS=['<|im_end|>', '<|endoftext|>']),
     baichuan_chat=dict(
