@@ -431,7 +431,6 @@ def main():
 
         predict = tokenizer.decode(
             generate_output[0], skip_special_tokens=True).strip()
-        print(predict)
         cur_result = {}
         cur_result['question'] = data_sample.get('question')
         cur_result.update(data_sample.get('options_dict'))
