@@ -50,7 +50,42 @@ internlm_chat=dict(
 
 ## Choosing the prompt template
 
-In configs provided by XTuner, the chat model uses the same template as the original dialogue, while the base models all utilize the `default` template.
+| Model                                    | Prompt Template |
+| ---------------------------------------- | --------------- |
+| baichuan-inc/Baichuan-7B                 | default\*       |
+| baichuan-inc/Baichuan-13B-Base           | default\*       |
+| baichuan-inc/Baichuan-13B-Chat           | baichuan_chat   |
+| baichuan-inc/Baichuan2-7B-Base           | default\*       |
+| baichuan-inc/Baichuan2-7B-Chat           | baichuan2_chat  |
+| baichuan-inc/Baichuan2-13B-Base          | default\*       |
+| baichuan-inc/Baichuan2-13B-Chat          | baichuan2_chat  |
+| THUDM/chatglm2-6b                        | chatglm2        |
+| THUDM/chatglm3-6b                        | chatglm3        |
+| THUDM/chatglm3-6b-base                   | chatglm3        |
+| deepseek-ai/deepseek-coder-6.7b-base     | deepseek_coder  |
+| deepseek-ai/deepseek-coder-6.7b-instruct | deepseek_coder  |
+| internlm/internlm-7b                     | default\*       |
+| internlm/internlm-20b                    | default\*       |
+| internlm/internlm-chat-7b                | internlm_chat   |
+| internlm/internlm-chat-20b               | internlm_chat   |
+| huggyllama/llama-7b                      | default         |
+| meta-llama/Llama-2-7b-hf                 | llama2_chat     |
+| meta-llama/Llama-2-7b-chat-hf            | llama2_chat     |
+| meta-llama/Llama-2-70b-hf                | llama2_chat     |
+| lmsys/vicuna-7b-v1.5                     | vicuna          |
+| lmsys/vicuna-13b-v1.5                    | vicuna          |
+| mistralai/Mistral-7B-v0.1                | mistral         |
+| mistralai/Mixtral-8x7B-v0.1              | mixtral         |
+| mistralai/Mixtral-8x7B-Instruct-v0.1     | mixtral         |
+| Qwen/Qwen-1_8B                           | default\*       |
+| Qwen/Qwen-1_8B-Chat                      | qwen_chat       |
+| Qwen/Qwen-7B                             | default\*       |
+| Qwen/Qwen-7B-Chat                        | qwen_chat       |
+| Qwen/Qwen-72B                            | default\*       |
+| Qwen/Qwen-72B-Chat                       | qwen_chat       |
+| bigcode/starcoder                        | default         |
+| 01-ai/Yi-6B                              | default         |
+| 01-ai/Yi-34B                             | default         |
+| HuggingFaceH4/zephyr-7b-beta             | zephyr          |
 
-The base model uses the default template rather than the original dialogue template. This decision was made because in certain models (*e.g.*, Qwen), there may exist special tokens (like `<|im_start|>`, `<|im_end|>`) within the dialogue template that were not trained during the pre-training phase. In such cases, if LoRA fine-tuning is employed, both the `embed_tokens` and the `lm_head` layers are frozen by default, preventing the learning of these special tokens.
-Therefore, the base models all utilize the `default` template.
+\*: The official template has special tokens (like `<|im_start|>`, `<|im_end|>`) that were not trained during the pre-training phase. Therefore, these models utilize the `default` template.

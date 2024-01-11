@@ -45,6 +45,42 @@ internlm_chat=dict(
 
 ## 模版的选择
 
-在 XTuner 提供的配置文件中，默认情况 Chat 模型将使用模型官方的对话模版，而 Base 模型则使用 `default` 模版。
+| 模型                                     | 对话模版       |
+| ---------------------------------------- | -------------- |
+| baichuan-inc/Baichuan-7B                 | default\*      |
+| baichuan-inc/Baichuan-13B-Base           | default\*      |
+| baichuan-inc/Baichuan-13B-Chat           | baichuan_chat  |
+| baichuan-inc/Baichuan2-7B-Base           | default\*      |
+| baichuan-inc/Baichuan2-7B-Chat           | baichuan2_chat |
+| baichuan-inc/Baichuan2-13B-Base          | default\*      |
+| baichuan-inc/Baichuan2-13B-Chat          | baichuan2_chat |
+| THUDM/chatglm2-6b                        | chatglm2       |
+| THUDM/chatglm3-6b                        | chatglm3       |
+| THUDM/chatglm3-6b-base                   | chatglm3       |
+| deepseek-ai/deepseek-coder-6.7b-base     | deepseek_coder |
+| deepseek-ai/deepseek-coder-6.7b-instruct | deepseek_coder |
+| internlm/internlm-7b                     | default\*      |
+| internlm/internlm-20b                    | default\*      |
+| internlm/internlm-chat-7b                | internlm_chat  |
+| internlm/internlm-chat-20b               | internlm_chat  |
+| huggyllama/llama-7b                      | default        |
+| meta-llama/Llama-2-7b-hf                 | llama2_chat    |
+| meta-llama/Llama-2-7b-chat-hf            | llama2_chat    |
+| meta-llama/Llama-2-70b-hf                | llama2_chat    |
+| lmsys/vicuna-7b-v1.5                     | vicuna         |
+| lmsys/vicuna-13b-v1.5                    | vicuna         |
+| mistralai/Mistral-7B-v0.1                | mistral        |
+| mistralai/Mixtral-8x7B-v0.1              | mixtral        |
+| mistralai/Mixtral-8x7B-Instruct-v0.1     | mixtral        |
+| Qwen/Qwen-1_8B                           | default\*      |
+| Qwen/Qwen-1_8B-Chat                      | qwen_chat      |
+| Qwen/Qwen-7B                             | default\*      |
+| Qwen/Qwen-7B-Chat                        | qwen_chat      |
+| Qwen/Qwen-72B                            | default\*      |
+| Qwen/Qwen-72B-Chat                       | qwen_chat      |
+| bigcode/starcoder                        | default        |
+| 01-ai/Yi-6B                              | default        |
+| 01-ai/Yi-34B                             | default        |
+| HuggingFaceH4/zephyr-7b-beta             | zephyr         |
 
-一种理想状况是，Base 模型也使用与 Chat 模型对应的模版，但是 XTuner 并没有那么做。这是因为在部分模型（如 Qwen）中，对话模版中存在特殊 token（比如 `<|im_start|>`, `<|im_end|>`），这类特殊 token 在预训练阶段并未得到训练。此时，如果使用 LoRA 进行微调，则在默认情况下 `embed_tokens` 和 `lm_head` 层均被冻结，无法学习这类特殊 token。因此，XTuner 在 Base 模型中选择使用 `default` 模版。
+\*: 官方对话模版中存在特殊 token（比如 `<|im_start|>`, `<|im_end|>`），这类特殊 token 在预训练阶段并未得到训练。故，使用 `default` 模版。
