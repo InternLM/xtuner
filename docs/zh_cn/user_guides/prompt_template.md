@@ -42,3 +42,9 @@ internlm_chat=dict(
 <|User|>:{input}<eoh>
 <|Bot|>:{output}<eoa>
 ```
+
+## 模版的选择
+
+在 XTuner 提供的配置文件中，默认情况 Chat 模型将使用模型官方的对话模版，而 Base 模型则使用 `default` 模版。
+
+一种理想状况是，Base 模型也使用与 Chat 模型对应的模版，但是 XTuner 并没有那么做。这是因为在部分模型（如 Qwen）中，对话模版中存在特殊 token（比如 `<|im_start|>`, `<|im_end|>`），这类特殊 token 在预训练阶段并未得到训练。此时，如果使用 LoRA 进行微调，则在默认情况下 `embed_tokens` 和 `lm_head` 层均被冻结，无法学习这类特殊 token。因此，XTuner 在 Base 模型中选择使用 `default` 模版。
