@@ -49,6 +49,8 @@ def encode_fn(example,
     if tokenizer.__class__.__name__ == 'QWenTokenizer':
         bos_token_id = []
         eos_token_id = tokenizer.eos_token_id
+        assert eos_token_id is not None, \
+            'Please set eos_token for Qwen tokenizer!'
     elif tokenizer.__class__.__name__ == 'ChatGLMTokenizer':
         bos_token_id = [64790, 64792]
         eos_token_id = tokenizer.eos_token_id
@@ -64,29 +66,46 @@ def encode_fn(example,
         assert input_ids_with_output
 
     input_ids, labels = [], []
+    next_needs_bos_token = True
     for single_turn_conversation in example['conversation']:
         input = single_turn_conversation['input']
         if DEFAULT_IMAGE_TOKEN in input and with_image_token:
             chunk_encode = [
-                tokenizer(chunk, add_special_tokens=False)
+                tokenizer.encode(chunk, add_special_tokens=False)
                 for chunk in input.split('<image>')
             ]
             assert len(chunk_encode) == 2
-            input_encode = {'input_ids': []}
+            input_encode = []
             for idx, cur_chunk_encode in enumerate(chunk_encode):
-                input_encode['input_ids'].extend(cur_chunk_encode['input_ids'])
+                input_encode.extend(cur_chunk_encode)
                 if idx != len(chunk_encode) - 1:
-                    input_encode['input_ids'].append(IMAGE_TOKEN_INDEX)
+                    input_encode.append(IMAGE_TOKEN_INDEX)
         else:
-            input_encode = tokenizer(f'{input}', add_special_tokens=False)
-        input_ids += bos_token_id + input_encode['input_ids']
-        labels += [IGNORE_INDEX] * (
-            len(bos_token_id + input_encode['input_ids']))
+            input_encode = tokenizer.encode(input, add_special_tokens=False)
+        if next_needs_bos_token:
+            input_ids += bos_token_id
+            labels += [IGNORE_INDEX] * len(bos_token_id)
+        input_ids += input_encode
+        labels += [IGNORE_INDEX] * len(input_encode)
         if input_ids_with_output:
+            # Add output (with loss)
             output = single_turn_conversation['output']
-            output_encode = tokenizer(f'{output}', add_special_tokens=False)
-            input_ids += output_encode['input_ids'] + eos_token_id
-            labels += copy.deepcopy(output_encode['input_ids'] + eos_token_id)
+            output_encode = tokenizer.encode(output, add_special_tokens=False)
+            input_ids += output_encode
+            labels += copy.deepcopy(output_encode)
+            # Add EOS_TOKEN (with loss)
+            if single_turn_conversation['need_eos_token']:
+                next_needs_bos_token = True
+                input_ids += eos_token_id
+                labels += copy.deepcopy(eos_token_id)
+            else:
+                next_needs_bos_token = False
+            # Add SEP (without loss)
+            sep = single_turn_conversation['sep']
+            if sep != '':
+                sep_encode = tokenizer.encode(sep, add_special_tokens=False)
+                input_ids += sep_encode
+                labels += [IGNORE_INDEX] * len(sep_encode)
 
     if len(input_ids) > max_length:
         input_ids = input_ids[:max_length]

@@ -25,7 +25,7 @@ pretrained_model_name_or_path = 'baichuan-inc/Baichuan-7B'
 
 # Data
 alpaca_zh_path = 'silk-road/alpaca-data-gpt4-chinese'
-prompt_template = PROMPT_TEMPLATE.baichuan_chat
+prompt_template = PROMPT_TEMPLATE.default
 max_length = 2048
 pack_to_max_length = True
 
