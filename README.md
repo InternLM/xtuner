@@ -225,7 +225,7 @@ xtuner chat internlm/internlm-7b --adapter xtuner/internlm-7b-qlora-alpaca-enzh 
 Llama2-7b with adapter trained from MOSS-003-SFT:
 
 ```shell
-xtuner chat meta-llama/Llama-2-7b-hf --adapter xtuner/Llama-2-7b-qlora-moss-003-sft --bot-name Llama2 --prompt-template moss_sft --system-template moss_sft --with-plugins calculate solve search --command-stop-word "<eoc>" --answer-stop-word "<eom>" --no-streamer
+xtuner chat meta-llama/Llama-2-7b-hf --adapter xtuner/Llama-2-7b-qlora-moss-003-sft --bot-name Llama2 --prompt-template moss_sft --system-template moss_sft --with-plugins calculate solve search --no-streamer
 ```
 
 For more examples, please see [chat.md](./docs/en/user_guides/chat.md).
