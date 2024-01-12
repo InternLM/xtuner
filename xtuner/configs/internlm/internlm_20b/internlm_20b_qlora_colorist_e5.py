@@ -25,7 +25,7 @@ pretrained_model_name_or_path = 'internlm/internlm-20b'
 
 # Data
 data_path = 'burkelibbey/colors'
-prompt_template = PROMPT_TEMPLATE.internlm_chat
+prompt_template = PROMPT_TEMPLATE.default
 max_length = 2048
 pack_to_max_length = True
 
