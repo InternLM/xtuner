@@ -117,38 +117,56 @@ class Packer:
     # modified from
     # https://github.com/facebookresearch/llama-recipes/blob/main/ft_datasets/utils.py
 
-    def __init__(self, chunk_size=2048):
+    def __init__(self, chunk_size=2048, ensure_full_turn=False):
         self.chunk_size = chunk_size
+        self.ensure_full_turn = ensure_full_turn
         self.residual = {'input_ids': [], 'labels': []}
 
     def __call__(self, batch):
-        concatenated_samples = {
+        concatenated = {
             k: v + list(chain(*batch[k]))
             for k, v in self.residual.items()
         }
-
-        total_length = len(concatenated_samples[list(
-            concatenated_samples.keys())[0]])
+        total_length = len(concatenated['input_ids'])
+        result = {k: [] for k in concatenated.keys()}
 
         if total_length >= self.chunk_size:
-            chunk_num = total_length // self.chunk_size
-            result = {
-                k: [
-                    v[i:i + self.chunk_size]
-                    for i in range(0, chunk_num *
-                                   self.chunk_size, self.chunk_size)
-                ]
-                for k, v in concatenated_samples.items()
-            }
-            self.residual = {
-                k: v[(chunk_num * self.chunk_size):]
-                for k, v in concatenated_samples.items()
-            }
+            self._process_chunks(concatenated, result, total_length)
         else:
-            result = {k: [v] for k, v in concatenated_samples.items()}
-            self.residual = {k: [] for k in concatenated_samples.keys()}
+            for k, v in concatenated.items():
+                result[k].append(v)
+                self.residual[k] = []
 
         return result
+
+    def _process_chunks(self, concatenated, result, total_length):
+        chunk_num = total_length // self.chunk_size
+
+        for i in range(chunk_num):
+            start = i * self.chunk_size
+            end = start + self.chunk_size
+            chunk = {k: v[start:end] for k, v in concatenated.items()}
+
+            if self.ensure_full_turn and i < chunk_num - 1:
+                self._check_and_adjust_for_full_turn(end, concatenated, chunk)
+
+            for k, v in chunk.items():
+                result[k].append(v)
+
+        self.residual = {
+            k: v[chunk_num * self.chunk_size:]
+            for k, v in concatenated.items()
+        }
+
+    def _check_and_adjust_for_full_turn(self, end, concatenated, chunk):
+        next_start = end
+        next_chunk_len = len(concatenated['input_ids'])
+        next_end = min(next_start + self.chunk_size, next_chunk_len)
+
+        next_chunk = concatenated['input_ids'][next_start:next_end]
+        if next_chunk and next_chunk[0] == IGNORE_INDEX:
+            chunk['input_ids'][-1] = IGNORE_INDEX
+            chunk['labels'][-1] = IGNORE_INDEX
 
 
 class InternRepoPacker:
