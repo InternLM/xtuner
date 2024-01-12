@@ -23,7 +23,7 @@ from transformers import (AutoModel, AutoModelForCausalLM, AutoTokenizer,
 
 from xtuner.dataset.utils import decode_base64_to_image, expand2square
 from xtuner.model.utils import prepare_inputs_labels_for_multimodal
-from xtuner.tools.utils import is_cn_string
+from xtuner.tools.utils import get_stop_criteria, is_cn_string
 from xtuner.utils import (DEFAULT_IMAGE_TOKEN, IMAGE_TOKEN_INDEX,
                           PROMPT_TEMPLATE)
 
@@ -47,6 +47,8 @@ def parse_args():
         choices=PROMPT_TEMPLATE.keys(),
         default=None,
         help='Specify a prompt template')
+    parser.add_argument(
+        '--stop-words', nargs='+', type=str, default=[], help='Stop words')
     parser.add_argument(
         '--torch-dtype',
         default='fp16',
@@ -350,6 +352,13 @@ def main():
     visual_encoder.eval()
     llm.eval()
 
+    stop_words = args.stop_words
+    if args.prompt_template:
+        template = PROMPT_TEMPLATE[args.prompt_template]
+        stop_words += template.get('STOP_WORDS', [])
+    stop_criteria = get_stop_criteria(
+        tokenizer=tokenizer, stop_words=stop_words)
+
     gen_config = GenerationConfig(
         max_new_tokens=args.max_new_tokens,
         do_sample=False,
@@ -417,7 +426,8 @@ def main():
             **mm_inputs,
             generation_config=gen_config,
             streamer=None,
-            bos_token_id=tokenizer.bos_token_id)
+            bos_token_id=tokenizer.bos_token_id,
+            stopping_criteria=stop_criteria)
 
         predict = tokenizer.decode(
             generate_output[0], skip_special_tokens=True).strip()
