@@ -1,14 +1,11 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-import torch
-from bitsandbytes.optim import PagedAdamW32bit
 from datasets import load_dataset
 from mmengine.dataset import DefaultSampler
 from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
                             LoggerHook, ParamSchedulerHook)
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR, LinearLR
-from peft import LoraConfig
-from transformers import (AutoModelForCausalLM, AutoTokenizer,
-                          BitsAndBytesConfig)
+from torch.optim import AdamW
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from xtuner.dataset import process_hf_dataset
 from xtuner.dataset.collate_fns import default_collate_fn
@@ -21,11 +18,11 @@ from xtuner.utils import PROMPT_TEMPLATE
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-pretrained_model_name_or_path = 'mistralai/Mixtral-8x7B-v0.1'
+pretrained_model_name_or_path = 'deepseek-ai/deepseek-moe-16b-base'
 
 # Data
 data_path = 'timdettmers/openassistant-guanaco'
-prompt_template = PROMPT_TEMPLATE.mixtral
+prompt_template = PROMPT_TEMPLATE.deepseek_moe
 max_length = 2048
 pack_to_max_length = True
 
@@ -34,8 +31,8 @@ batch_size = 1  # per_device
 accumulative_counts = 16
 dataloader_num_workers = 0
 max_epochs = 3
-optim_type = PagedAdamW32bit
-lr = 2e-4
+optim_type = AdamW
+lr = 2e-5
 betas = (0.9, 0.999)
 weight_decay = 0
 max_norm = 1  # grad clip
@@ -62,27 +59,7 @@ model = dict(
     llm=dict(
         type=AutoModelForCausalLM.from_pretrained,
         pretrained_model_name_or_path=pretrained_model_name_or_path,
-        trust_remote_code=True,
-        torch_dtype=torch.float16,
-        quantization_config=dict(
-            type=BitsAndBytesConfig,
-            load_in_4bit=True,
-            load_in_8bit=False,
-            llm_int8_threshold=6.0,
-            llm_int8_has_fp16_weight=False,
-            bnb_4bit_compute_dtype=torch.float16,
-            bnb_4bit_use_double_quant=True,
-            bnb_4bit_quant_type='nf4')),
-    lora=dict(
-        type=LoraConfig,
-        r=64,
-        lora_alpha=16,
-        lora_dropout=0.1,
-        target_modules=[
-            'q_proj', 'k_proj', 'v_proj', 'o_proj', 'w1', 'w2', 'w3'
-        ],
-        bias='none',
-        task_type='CAUSAL_LM'))
+        trust_remote_code=True))
 
 #######################################################################
 #                      PART 3  Dataset & Dataloader                   #

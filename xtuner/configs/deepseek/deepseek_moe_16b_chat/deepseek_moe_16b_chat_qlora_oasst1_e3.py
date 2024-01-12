@@ -21,11 +21,11 @@ from xtuner.utils import PROMPT_TEMPLATE
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-pretrained_model_name_or_path = 'mistralai/Mixtral-8x7B-v0.1'
+pretrained_model_name_or_path = 'deepseek-ai/deepseek-moe-16b-chat'
 
 # Data
 data_path = 'timdettmers/openassistant-guanaco'
-prompt_template = PROMPT_TEMPLATE.mixtral
+prompt_template = PROMPT_TEMPLATE.deepseek_moe
 max_length = 2048
 pack_to_max_length = True
 
@@ -75,12 +75,9 @@ model = dict(
             bnb_4bit_quant_type='nf4')),
     lora=dict(
         type=LoraConfig,
-        r=64,
+        r=16,
         lora_alpha=16,
-        lora_dropout=0.1,
-        target_modules=[
-            'q_proj', 'k_proj', 'v_proj', 'o_proj', 'w1', 'w2', 'w3'
-        ],
+        lora_dropout=0.05,
         bias='none',
         task_type='CAUSAL_LM'))
 
