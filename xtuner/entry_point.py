@@ -48,8 +48,8 @@ CLI_HELP_MSG = \
             xtuner preprocess arxiv $SRC_FILE $DST_FILE --start-date $START_DATE --categories $CATEGORIES
         7-1. Log processed dataset:
             xtuner log-dataset $CONFIG
-        7-2. Verify the correctness of the config file for the custom dataset.
-            xtuner check-custom-dataset
+        7-2. Verify the correctness of the config file for the custom dataset:
+            xtuner check-custom-dataset $CONFIG
         8. MMBench evaluation
             xtuner mmbench $LLM --llava $LLAVA --visual-encoder $VISUAL_ENCODER --prompt-template $PROMPT_TEMPLATE --data-path $MMBENCH_DATA_PATH
 
