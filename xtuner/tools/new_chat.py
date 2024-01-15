@@ -78,9 +78,14 @@ def parse_args():
     gen_group.add_argument(
         '--stop-words', nargs='+', type=str, default=[], help='Stop words')
     gen_group.add_argument(
+        '--max-length',
+        type=int,
+        default=4096,
+        help='Maximum number of new tokens allowed in generated text')
+    gen_group.add_argument(
         '--max-new-tokens',
         type=int,
-        default=2048,
+        default=512,
         help='Maximum number of new tokens allowed in generated text')
     gen_group.add_argument(
         '--temperature',
@@ -176,33 +181,34 @@ def build_bot(args):
     elif use_moss and use_lmdeploy:
         from xtuner.bot import LMDeployMossBot
         return LMDeployMossBot(args.bot_name, args.model_name_or_path,
-                               chat_template, system_template,
+                               chat_template, system_template, args.max_length,
                                args.max_new_tokens, args.temperature,
                                args.top_k, args.top_p, args.repetition_penalty,
                                args.stop_words, args.seed, args.logn_attn,
-                               args.dynamic_ntk, args.rope_scaling_factor,
-                               args.moss_plugins)
+                               args.rope_scaling_factor, args.moss_plugins)
     elif use_moss and not use_lmdeploy:
         from xtuner.bot import HFMossBot
         return HFMossBot(args.bot_name, args.model_name_or_path, args.adapter,
                          args.bits, chat_template, system_template,
-                         args.max_new_tokens, args.temperature, args.top_k,
-                         args.top_p, args.repetition_penalty, args.stop_words,
+                         args.max_length, args.max_new_tokens,
+                         args.temperature, args.top_k, args.top_p,
+                         args.repetition_penalty, args.stop_words,
                          args.moss_plugins)
     elif use_lagent + use_moss + use_llava == 0 and use_lmdeploy:
         from xtuner.bot import LMDeployChatBot
         return LMDeployChatBot(args.bot_name, args.model_name_or_path,
-                               chat_template, system_template,
+                               chat_template, system_template, args.max_length,
                                args.max_new_tokens, args.temperature,
                                args.top_k, args.top_p, args.repetition_penalty,
                                args.stop_words, args.seed, args.logn_attn,
-                               args.dynamic_ntk, args.rope_scaling_factor)
+                               args.rope_scaling_factor)
     elif use_lagent + use_moss + use_llava == 0 and not use_lmdeploy:
         from xtuner.bot import HFChatBot
         return HFChatBot(args.bot_name, args.model_name_or_path, args.adapter,
                          args.bits, chat_template, system_template,
-                         args.max_new_tokens, args.temperature, args.top_k,
-                         args.top_p, args.repetition_penalty, args.stop_words)
+                         args.max_length, args.max_new_tokens,
+                         args.temperature, args.top_k, args.top_p,
+                         args.repetition_penalty, args.stop_words)
     else:
         raise NotImplementedError
 

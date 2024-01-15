@@ -118,7 +118,8 @@ class HFChatBot(BaseChatBot):
         bits=None,
         chat_template=None,
         system_template=None,
-        max_new_tokens=2048,
+        max_new_tokens=512,
+        max_length=4096,
         temperature=0.1,
         top_k=40,
         top_p=0.75,
@@ -131,6 +132,7 @@ class HFChatBot(BaseChatBot):
             model_name_or_path, adapter, bits)
 
         self._generation_config = GenerationConfig(
+            max_length=max_length,
             max_new_tokens=max_new_tokens,
             do_sample=temperature > 0,
             temperature=temperature,
@@ -220,7 +222,7 @@ class HFChatBot(BaseChatBot):
         return outputs
 
 
-class LMDeployChatBot():
+class LMDeployChatBot(BaseChatBot):
     # TODO support tp
     def __init__(
         self,
@@ -228,7 +230,8 @@ class LMDeployChatBot():
         model_name_or_path,
         chat_template=None,
         system_template=None,
-        max_new_tokens=2048,
+        max_length=4096,
+        max_new_tokens=256,
         temperature=0.1,
         top_k=40,
         top_p=0.75,
@@ -236,7 +239,6 @@ class LMDeployChatBot():
         stop_words=[],
         seed=None,
         use_logn_attn=False,
-        use_dynamic_ntk=False,
         rope_scaling_factor=0.0,
         max_batch_size=1,
     ) -> None:
@@ -256,12 +258,13 @@ class LMDeployChatBot():
         )
 
         backend_config = TurbomindEngineConfig(
-            session_len=max_new_tokens,
+            model_name='base',
+            session_len=max_length,
             max_batch_size=max_batch_size,
             rope_scaling_factor=rope_scaling_factor,
-            use_dynamic_ntk=use_dynamic_ntk,
             use_logn_attn=use_logn_attn)
-        self.pipeline = pipeline(model_name_or_path, backend_config)
+        self.pipeline = pipeline(
+            model_name_or_path, backend_config=backend_config)
 
     @property
     def generation_config(self):
@@ -273,8 +276,7 @@ class LMDeployChatBot():
             generation_config = self.generation_config
 
         output = self.pipeline([text], gen_config=generation_config)
-
-        return output
+        return output[0]
 
     def predict(self, texts, generation_config=None, repeat=1):
 
