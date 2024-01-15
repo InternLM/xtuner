@@ -58,7 +58,7 @@ def main():
 
     model_name = cfg.model.type if isinstance(cfg.model.type,
                                               str) else cfg.model.type.__name__
-    if 'LLaVAModel' == model_name:
+    if 'LLaVAModel' in model_name:
         cfg.model.pretrained_pth = None
 
     model = BUILDER.build(cfg.model)
@@ -71,7 +71,7 @@ def main():
         print('Convert LLM to float16')
         model.llm.half()
 
-    if 'LLaVAModel' == model_name:
+    if 'LLaVAModel' in model_name:
         if cfg.model.get('llm') and (not cfg.model.get('freeze_llm', False)
                                      or cfg.model.get('llm_lora')):
             if 'PeftModel' in model.llm.__class__.__name__:
