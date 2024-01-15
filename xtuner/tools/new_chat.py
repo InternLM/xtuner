@@ -80,7 +80,7 @@ def parse_args():
     gen_group.add_argument(
         '--max-length',
         type=int,
-        default=4096,
+        default=2048,
         help='Maximum number of new tokens allowed in generated text')
     gen_group.add_argument(
         '--max-new-tokens',
@@ -119,6 +119,8 @@ def parse_args():
         help='Random seed for reproducible text generation')
 
     parser.add_argument('--predict', type=str)
+    parser.add_argument('--results', type=str, default='results.csv')
+
     parser.add_argument('--predict-repeat', type=int)
     parser.add_argument('--batch-size', type=int, default=1)
 
@@ -237,8 +239,16 @@ def main():
     bot = build_bot(args)
 
     if args.predict:
+        from datasets import load_dataset
+        dataset = load_dataset('text', data_files=args.predict)['train']
+        texts = dataset['text']
         chat_instance = bot.create_instance()
 
+        for i in range(args.predict_repeat):
+            preds = chat_instance.predict(texts, args.system)
+            dataset = dataset.add_column(f'response_{i}', preds)
+        dataset.to_csv(args.results)
+        print(f'Results saved in {args.results}')
     else:
         chat_instance = bot.create_instance()
         interactive_chat(chat_instance, args.system)

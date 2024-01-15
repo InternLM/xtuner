@@ -64,10 +64,10 @@ class ChatInstance():
         self.num_turns += 1
         return output
 
-    def predict(self, texts, system=None, generation_config=None):
+    def predict(self, texts, system=None, generation_config=None, repeat=1):
 
         templated_texts = [self.apply_template(t, system) for t in texts]
-        outputs = self.bot.predict(templated_texts, generation_config)
+        outputs = self.bot.predict(templated_texts, generation_config, repeat)
         return outputs
 
 
@@ -217,7 +217,7 @@ class HFChatBot(BaseChatBot):
             item = []
             for r in range(repeat):
                 item.append(self.generate(text, generation_config))
-            outputs.append(item)
+            outputs.append(item[0])
 
         return outputs
 
@@ -283,7 +283,9 @@ class LMDeployChatBot(BaseChatBot):
         if generation_config is None:
             generation_config = self.generation_config
 
-        # TODO support repeat > 1
-        outputs = self.pipeline(texts, gen_config=generation_config)
+        ori_n = generation_config.n
+        generation_config.n = repeat
 
+        outputs = self.pipeline(texts, gen_config=generation_config)
+        generation_config.n = ori_n
         return outputs
