@@ -26,7 +26,7 @@ def process(dataset,
             pack_to_max_length=True,
             input_ids_with_output=True,
             with_image_token=False,
-            map_num_proc=32):
+            map_num_proc=1):
     """Post-process the dataset loaded from the Hugging Face Hub, or a local
     dataset.
 
@@ -60,8 +60,8 @@ def process(dataset,
             of VLM.
         map_num_proc: Max number of processes when mapping the dataset.
     """
-
     if isinstance(dataset, DatasetDict):
+        print("Available splits in the dataset:", dataset.keys())
         dataset = dataset[split]
     elif isinstance(dataset, dict) or isinstance(
             dataset, Config) or isinstance(dataset, ConfigDict):

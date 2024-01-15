@@ -16,36 +16,6 @@ def encode_fn(example,
               max_length,
               input_ids_with_output=True,
               with_image_token=False):
-    """We only support the following three scenarios:
-
-    1. Incremental pretraining dataset.
-        example['conversation'] = [
-                {
-                    'input': '',
-                    'output': '### Human: Can you write xxx'
-                }
-            ]
-
-    2. Single-turn conversation dataset.
-        example['conversation'] = [
-                {
-                    'input': 'Give three tips for staying healthy.',
-                    'output': '1.Eat a balanced diet xxx'
-                }
-            ]
-
-    3. Multi-turn conversation dataset.
-        example['conversation'] = [
-                {
-                    'input': 'Give three tips for staying healthy.',
-                    'output': '1.Eat a balanced diet xxx'
-                },
-                {
-                    'input': 'Please expand on the second point.',
-                    'output': 'Here is an expanded explanation of the xxx'
-                }
-            ]
-    """
     if tokenizer.__class__.__name__ == 'QWenTokenizer':
         bos_token_id = []
         eos_token_id = tokenizer.eos_token_id
@@ -64,8 +34,13 @@ def encode_fn(example,
         assert input_ids_with_output
 
     input_ids, labels = [], []
-    for single_turn_conversation in example['conversation']:
+    is_last_turn_handled = False  # 在函数开始处初始化变量    
+    for idx, single_turn_conversation in enumerate(example['conversation']):
+        # 判断是否为最后一轮对话
+        is_last_turn = idx == len(example['conversation']) - 1
         input = single_turn_conversation['input']
+
+        # 处理带有图片标记的输入
         if DEFAULT_IMAGE_TOKEN in input and with_image_token:
             chunk_encode = [
                 tokenizer(chunk, add_special_tokens=False)
@@ -79,76 +54,78 @@ def encode_fn(example,
                     input_encode['input_ids'].append(IMAGE_TOKEN_INDEX)
         else:
             input_encode = tokenizer(f'{input}', add_special_tokens=False)
+
+        # 添加开始标记和编码后的输入
         input_ids += bos_token_id + input_encode['input_ids']
-        labels += [IGNORE_INDEX] * (
-            len(bos_token_id + input_encode['input_ids']))
+        labels += [IGNORE_INDEX] * (len(bos_token_id + input_encode['input_ids']))
+
+        # 判断最后一轮对话的 "input" 部分长度是否等于 max_length
+        # 检查添加这轮对话后长度是否超过 max_length
+        if len(input_ids) + len(bos_token_id) + len(input_encode['input_ids']) > max_length:
+            # 如果是最后一轮，设置标志
+            is_last_turn_handled = is_last_turn
+            break
+
+        # 处理输出
         if input_ids_with_output:
             output = single_turn_conversation['output']
             output_encode = tokenizer(f'{output}', add_special_tokens=False)
             input_ids += output_encode['input_ids'] + eos_token_id
-            labels += copy.deepcopy(output_encode['input_ids'] + eos_token_id)
+            labels += output_encode['input_ids'] + eos_token_id
 
+    # 处理超过最大长度的输入
     if len(input_ids) > max_length:
         input_ids = input_ids[:max_length]
         labels = labels[:max_length]
-    return {'input_ids': input_ids, 'labels': labels}
+
+    return {'input_ids': input_ids, 'labels': labels, 'is_last_turn_handled': is_last_turn_handled}
 
 
 class Packer:
     # modified from
     # https://github.com/facebookresearch/llama-recipes/blob/main/ft_datasets/utils.py
 
-    def __init__(self, chunk_size=2048, ensure_full_turn=False):
+    def __init__(self, chunk_size=2048):
         self.chunk_size = chunk_size
-        self.ensure_full_turn = ensure_full_turn
         self.residual = {'input_ids': [], 'labels': []}
 
     def __call__(self, batch):
-        concatenated = {
-            k: v + list(chain(*batch[k]))
+        # 处理残留的部分和当前批次
+        concatenated_samples = {
+            k: v + list(chain(*[example[k] for example in batch]))
             for k, v in self.residual.items()
         }
-        total_length = len(concatenated['input_ids'])
-        result = {k: [] for k in concatenated.keys()}
+
+        # 检查最后一轮对话是否被处理
+        is_last_turn_handled = any(example['is_last_turn_handled'] for example in batch)
+
+        total_length = len(concatenated_samples['input_ids'])
 
         if total_length >= self.chunk_size:
-            self._process_chunks(concatenated, result, total_length)
+            chunk_num = total_length // self.chunk_size
+            result = {
+                k: [
+                    v[i:i + self.chunk_size]
+                    for i in range(0, chunk_num * self.chunk_size, self.chunk_size)
+                ] for k, v in concatenated_samples.items()
+            }
+
+            if is_last_turn_handled:
+                # 如果最后一轮对话恰好等于 max_length，处理特殊情况
+                last_input_ids = batch[-1]['input_ids']
+                last_labels = batch[-1]['labels']
+                self.residual = {'input_ids': last_input_ids, 'labels': last_labels}
+            else:
+                # 正常情况下的残留处理
+                self.residual = {
+                    k: v[(chunk_num * self.chunk_size):]
+                    for k, v in concatenated_samples.items()
+                }
         else:
-            for k, v in concatenated.items():
-                result[k].append(v)
-                self.residual[k] = []
-
+            result = {k: [v] for k, v in concatenated_samples.items()}
+            self.residual = {k: [] for k in concatenated_samples.keys()}
+        print("Current residual:", self.residual)      
         return result
-
-    def _process_chunks(self, concatenated, result, total_length):
-        chunk_num = total_length // self.chunk_size
-
-        for i in range(chunk_num):
-            start = i * self.chunk_size
-            end = start + self.chunk_size
-            chunk = {k: v[start:end] for k, v in concatenated.items()}
-
-            if self.ensure_full_turn and i < chunk_num - 1:
-                self._check_and_adjust_for_full_turn(end, concatenated, chunk)
-
-            for k, v in chunk.items():
-                result[k].append(v)
-
-        self.residual = {
-            k: v[chunk_num * self.chunk_size:]
-            for k, v in concatenated.items()
-        }
-
-    def _check_and_adjust_for_full_turn(self, end, concatenated, chunk):
-        next_start = end
-        next_chunk_len = len(concatenated['input_ids'])
-        next_end = min(next_start + self.chunk_size, next_chunk_len)
-
-        next_chunk = concatenated['input_ids'][next_start:next_end]
-        if next_chunk and next_chunk[0] == IGNORE_INDEX:
-            chunk['input_ids'][-1] = IGNORE_INDEX
-            chunk['labels'][-1] = IGNORE_INDEX
-
 
 class InternRepoPacker:
     """Only used for packing data in InternLM repo
