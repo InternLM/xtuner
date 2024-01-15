@@ -1,12 +1,12 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import torch
-from bitsandbytes.optim import PagedAdamW32bit
 from mmengine.dataset import DefaultSampler
 from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
                             LoggerHook, ParamSchedulerHook)
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR, LinearLR
 from modelscope.msdatasets import MsDataset
 from peft import LoraConfig
+from torch.optim import AdamW
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           BitsAndBytesConfig)
 
@@ -35,7 +35,7 @@ batch_size = 8  # per_device
 accumulative_counts = 1
 dataloader_num_workers = 2
 max_epochs = 3
-optim_type = PagedAdamW32bit
+optim_type = AdamW
 lr = 2e-4
 betas = (0.9, 0.999)
 weight_decay = 0
