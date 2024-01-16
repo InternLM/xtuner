@@ -40,7 +40,7 @@ XTuner is an efficient, flexible and full-featured toolkit for fine-tuning large
 
 **Efficient**
 
-- Support LLM, VLM pre-training / fine-tuning on almost all GPUs. XTuner is capable of fine-tuning InternLM2-7B on a single 8GB GPU, as well as multi-node fine-tuning of models exceeding 70B.
+- Support LLM, VLM pre-training / fine-tuning on almost all GPUs. XTuner is capable of fine-tuning 7B LLM on a single 8GB GPU, as well as multi-node fine-tuning of models exceeding 70B.
 - Automatically dispatch high-performance operators such as FlashAttention and Triton kernels to increase training throughput.
 - Compatible with [DeepSpeed](https://github.com/microsoft/DeepSpeed) 🚀, easily utilizing a variety of ZeRO optimization techniques.
 
