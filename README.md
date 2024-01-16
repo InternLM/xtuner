@@ -40,21 +40,21 @@ XTuner is an efficient, flexible and full-featured toolkit for fine-tuning large
 
 **Efficient**
 
-- Support LLM, VLM pre-training / fine-tuning on almost all GPUs. XTuner is capable of fine-tuning InternLM2-7B on a single 8GB GPU, as well as multi-node fine-tuning of models exceeding 70B.
+- Support LLM, VLM pre-training / fine-tuning on almost all GPUs. XTuner is capable of fine-tuning 7B LLM on a single 8GB GPU, as well as multi-node fine-tuning of models exceeding 70B.
 - Automatically dispatch high-performance operators such as FlashAttention and Triton kernels to increase training throughput.
 - Compatible with [DeepSpeed](https://github.com/microsoft/DeepSpeed) 🚀, easily utilizing a variety of ZeRO optimization techniques.
 
 **Flexible**
 
 - Support various LLMs ([InternLM](https://huggingface.co/internlm), [Mixtral-8x7B](https://huggingface.co/mistralai), [Llama2](https://huggingface.co/meta-llama), [ChatGLM](https://huggingface.co/THUDM), [Qwen](https://huggingface.co/Qwen), [Baichuan](https://huggingface.co/baichuan-inc), ...).
-- Support VLM ([LLaVA](https://github.com/haotian-liu/LLaVA)). The performance of [LLaVA-InternLM2-7B](https://huggingface.co/xtuner/llava-internlm2-7b) is outstanding.
+- Support VLM ([LLaVA](https://github.com/haotian-liu/LLaVA)). The performance of [LLaVA-InternLM2-20B](https://huggingface.co/xtuner/llava-internlm2-20b) is outstanding.
 - Well-designed data pipeline, accommodating datasets in any format, including but not limited to open-source and custom formats.
 - Support various training algorithms ([QLoRA](http://arxiv.org/abs/2305.14314), [LoRA](http://arxiv.org/abs/2106.09685), full-parameter fune-tune), allowing users to choose the most suitable solution for their requirements.
 
 **Full-featured**
 
 - Support continuous pre-training, instruction fine-tuning, and agent fine-tuning.
-- Support chatting with large models with pre-defined template.
+- Support chatting with large models with pre-defined templates.
 - The output models can seamlessly integrate with deployment and server toolkit ([LMDeploy](https://github.com/InternLM/lmdeploy)), and large-scale evaluation toolkit ([OpenCompass](https://github.com/open-compass/opencompass), [VLMEvalKit](https://github.com/open-compass/VLMEvalKit)).
 
 ## 🌟 Demos
