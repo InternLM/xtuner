@@ -3,7 +3,7 @@ from abc import abstractmethod
 import torch
 from peft import PeftModel
 from tqdm import tqdm
-from transformers import (AutoModelForCausalLM, AutoTokenizer,
+from transformers import (AutoConfig, AutoModelForCausalLM, AutoTokenizer,
                           BitsAndBytesConfig, GenerationConfig)
 
 from xtuner.model.utils import LoadWoInit
@@ -222,6 +222,23 @@ class HFChatBot(BaseChatBot):
         return outputs
 
 
+TURBOMIND_SUPPORTED = [
+    'InternLMForCausalLM',
+    'QWenLMHeadModel',
+    'BaiChuanForCausalLM',  # Baichuan 7B
+    'BaichuanForCausalLM',  # Baichuan2 7B
+    'LlamaForCausalLM',
+]
+
+PYTORCH_SUPPORTED = [
+    'InternLMForCausalLM',
+    'QWenLMHeadModel',
+    'BaiChuanForCausalLM',  # Baichuan 7B
+    'BaichuanForCausalLM',  # Baichuan2 7B
+    'LlamaForCausalLM',
+]
+
+
 class LMDeployChatBot(BaseChatBot):
     # TODO support tp
     def __init__(
@@ -247,7 +264,8 @@ class LMDeployChatBot(BaseChatBot):
         stop_words += chat_template.get('STOP_WORDS', [])
 
         from lmdeploy import pipeline
-        from lmdeploy.messages import GenerationConfig, TurbomindEngineConfig
+        from lmdeploy.messages import (GenerationConfig, PytorchEngineConfig,
+                                       TurbomindEngineConfig)
         self._generation_config = GenerationConfig(
             max_new_tokens=max_new_tokens,
             temperature=temperature,
@@ -257,12 +275,26 @@ class LMDeployChatBot(BaseChatBot):
             stop_words=stop_words,
         )
 
-        backend_config = TurbomindEngineConfig(
-            model_name='base',
-            session_len=max_length,
-            max_batch_size=max_batch_size,
-            rope_scaling_factor=rope_scaling_factor,
-            use_logn_attn=use_logn_attn)
+        hf_config = AutoConfig.from_pretrained(model_name_or_path)
+        hf_cls = hf_config.architectures[0]
+        if hf_cls in TURBOMIND_SUPPORTED:
+
+            backend_config = TurbomindEngineConfig(
+                model_name='base',
+                session_len=max_length,
+                max_batch_size=max_batch_size,
+                rope_scaling_factor=rope_scaling_factor,
+                use_logn_attn=use_logn_attn)
+        elif hf_cls in TURBOMIND_SUPPORTED:
+            backend_config = PytorchEngineConfig(
+                model_name='base',
+                session_len=max_length,
+                max_batch_size=max_batch_size,
+                rope_scaling_factor=rope_scaling_factor,
+                use_logn_attn=use_logn_attn)
+        else:
+            raise NotImplementedError
+
         self.pipeline = pipeline(
             model_name_or_path, backend_config=backend_config)
 
@@ -289,3 +321,63 @@ class LMDeployChatBot(BaseChatBot):
         outputs = self.pipeline(texts, gen_config=generation_config)
         generation_config.n = ori_n
         return outputs
+
+
+class vLLMChatBot(BaseChatBot):
+    # TODO support tp
+    def __init__(
+        self,
+        bot_name,
+        model_name_or_path,
+        chat_template=None,
+        system_template=None,
+        max_length=4096,
+        max_new_tokens=256,
+        temperature=0.1,
+        top_k=40,
+        top_p=0.75,
+        repetition_penalty=1.0,
+        stop_words=[],
+        seed=None,
+        use_logn_attn=False,
+        rope_scaling_factor=0.0,
+        max_batch_size=1,
+    ) -> None:
+        super().__init__(bot_name, chat_template, system_template)
+
+        stop_words += chat_template.get('STOP_WORDS', [])
+
+        from vllm import LLM, SamplingParams
+        self._generation_config = SamplingParams(
+            max_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            repetition_penalty=repetition_penalty,
+            stop=stop_words,
+        )
+        self.pipeline = LLM(model_name_or_path, trust_remote_code=True)
+
+    @property
+    def generation_config(self):
+        return self._generation_config
+
+    def generate(self, text, generation_config=None):
+
+        if generation_config is None:
+            generation_config = self.generation_config
+
+        output = self.pipeline.generate([text], generation_config)
+        return output[0].outputs[0].text
+
+    def predict(self, texts, generation_config=None, repeat=1):
+
+        if generation_config is None:
+            generation_config = self.generation_config
+
+        ori_n = generation_config.n
+        generation_config.n = repeat
+
+        outputs = self.pipeline(texts, gen_config=generation_config)
+        generation_config.n = ori_n
+        return [o.outputs[0].text for o in outputs]

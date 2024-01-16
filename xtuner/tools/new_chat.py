@@ -33,6 +33,10 @@ def parse_args():
     lmdeploy_spec_group.add_argument(
         '--rope_scaling_factor', type=float, default=0.0, help='')
 
+    vllm_group = parser.add_argument_group()
+    vllm_group.add_argument(
+        '--vllm', action='store_true', help='Whether to use vLLM')
+
     llava_spec_group = parser.add_argument_group()
     llava_spec_group.add_argument(
         '--llava', default=None, help='llava name or path')
@@ -63,6 +67,11 @@ def parse_args():
         '--bot-name', type=str, default='BOT', help='Name for Bot')
     bot_spec_group.add_argument(
         '--prompt-template',
+        choices=PROMPT_TEMPLATE.keys(),
+        default=None,
+        help='Specify a prompt template')
+    bot_spec_group.add_argument(
+        '--chat-template',
         choices=PROMPT_TEMPLATE.keys(),
         default=None,
         help='Specify a prompt template')
@@ -119,12 +128,16 @@ def parse_args():
         help='Random seed for reproducible text generation')
 
     parser.add_argument('--predict', type=str)
-    parser.add_argument('--results', type=str, default='results.csv')
+    parser.add_argument('--results', type=str, default='results.xlsx')
 
     parser.add_argument('--predict-repeat', type=int)
     parser.add_argument('--batch-size', type=int, default=1)
 
     args = parser.parse_args()
+
+    if args.prompt_template and args.chat_template:
+        # TODO depercated warning
+        pass
 
     if args.moss_plugins and args.with_plugins:
         # TODO depercated warning
@@ -167,52 +180,79 @@ def build_bot(args):
     use_llava = args.llava is not None
     use_moss = args.moss_plugins is not None
     use_lmdeploy = args.lmdeploy
+    use_vllm = args.vllm
 
     if use_lagent + use_moss + use_llava > 1:
+        raise RuntimeError
+
+    if use_vllm + use_lmdeploy > 1:
         raise RuntimeError
 
     chat_template = PROMPT_TEMPLATE[args.prompt_template]
     # system_template = SYSTEM_TEMPLATE[args.system_template]
     system_template = None
 
-    if use_lagent and use_lmdeploy:
-        raise NotImplementedError
-    elif use_lagent and not use_lmdeploy:
-        from xtuner.bot import HFReActBot
-        return HFReActBot(args.model_name_or_path, args.adapter, args.bits)
-    elif use_moss and use_lmdeploy:
-        from xtuner.bot import LMDeployMossBot
-        return LMDeployMossBot(args.bot_name, args.model_name_or_path,
-                               chat_template, system_template, args.max_length,
-                               args.max_new_tokens, args.temperature,
-                               args.top_k, args.top_p, args.repetition_penalty,
-                               args.stop_words, args.seed, args.logn_attn,
-                               args.rope_scaling_factor, args.moss_plugins)
-    elif use_moss and not use_lmdeploy:
-        from xtuner.bot import HFMossBot
-        return HFMossBot(args.bot_name, args.model_name_or_path, args.adapter,
-                         args.bits, chat_template, system_template,
-                         args.max_length, args.max_new_tokens,
-                         args.temperature, args.top_k, args.top_p,
-                         args.repetition_penalty, args.stop_words,
-                         args.moss_plugins)
-    elif use_lagent + use_moss + use_llava == 0 and use_lmdeploy:
-        from xtuner.bot import LMDeployChatBot
-        return LMDeployChatBot(args.bot_name, args.model_name_or_path,
+    if use_lmdeploy:
+        if use_lagent:
+            raise NotImplementedError
+        elif use_moss:
+            from xtuner.bot import LMDeployMossBot
+            return LMDeployMossBot(args.bot_name, args.model_name_or_path,
+                                   chat_template, system_template,
+                                   args.max_length, args.max_new_tokens,
+                                   args.temperature, args.top_k, args.top_p,
+                                   args.repetition_penalty, args.stop_words,
+                                   args.seed, args.logn_attn,
+                                   args.rope_scaling_factor, args.moss_plugins)
+        elif use_llava:
+            raise NotImplementedError
+        else:
+            from xtuner.bot import LMDeployChatBot
+            return LMDeployChatBot(args.bot_name, args.model_name_or_path,
+                                   chat_template, system_template,
+                                   args.max_length, args.max_new_tokens,
+                                   args.temperature, args.top_k, args.top_p,
+                                   args.repetition_penalty, args.stop_words,
+                                   args.seed, args.logn_attn,
+                                   args.rope_scaling_factor)
+    elif use_vllm:
+        if use_lagent:
+            raise NotImplementedError
+        elif use_moss:
+            # TODO
+            pass
+        elif use_llava:
+            raise NotImplementedError
+        else:
+            from xtuner.bot import vLLMChatBot
+            return vLLMChatBot(args.bot_name, args.model_name_or_path,
                                chat_template, system_template, args.max_length,
                                args.max_new_tokens, args.temperature,
                                args.top_k, args.top_p, args.repetition_penalty,
                                args.stop_words, args.seed, args.logn_attn,
                                args.rope_scaling_factor)
-    elif use_lagent + use_moss + use_llava == 0 and not use_lmdeploy:
-        from xtuner.bot import HFChatBot
-        return HFChatBot(args.bot_name, args.model_name_or_path, args.adapter,
-                         args.bits, chat_template, system_template,
-                         args.max_length, args.max_new_tokens,
-                         args.temperature, args.top_k, args.top_p,
-                         args.repetition_penalty, args.stop_words)
     else:
-        raise NotImplementedError
+        if use_lagent:
+            from xtuner.bot import HFReActBot
+            return HFReActBot(args.model_name_or_path, args.adapter, args.bits)
+        elif use_moss:
+            from xtuner.bot import HFMossBot
+            return HFMossBot(args.bot_name, args.model_name_or_path,
+                             args.adapter, args.bits, chat_template,
+                             system_template, args.max_length,
+                             args.max_new_tokens, args.temperature, args.top_k,
+                             args.top_p, args.repetition_penalty,
+                             args.stop_words, args.moss_plugins)
+        elif use_llava:
+            raise NotImplementedError
+        else:
+            from xtuner.bot import HFChatBot
+            return HFChatBot(args.bot_name, args.model_name_or_path,
+                             args.adapter, args.bits, chat_template,
+                             system_template, args.max_length,
+                             args.max_new_tokens, args.temperature, args.top_k,
+                             args.top_p, args.repetition_penalty,
+                             args.stop_words)
 
 
 def interactive_chat(bot, system):
@@ -247,7 +287,10 @@ def main():
         for i in range(args.predict_repeat):
             preds = chat_instance.predict(texts, args.system)
             dataset = dataset.add_column(f'response_{i}', preds)
-        dataset.to_csv(args.results)
+
+        df = dataset.to_pandas()
+        sheet_name = 'lmdeploy' if args.lmdeploy else 'huggingface'
+        df.to_excel(args.results, sheet_name)
         print(f'Results saved in {args.results}')
     else:
         chat_instance = bot.create_instance()
