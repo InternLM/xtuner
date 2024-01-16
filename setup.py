@@ -99,7 +99,8 @@ if __name__ == '__main__':
     setup(
         name='xtuner',
         version=get_version(),
-        description='A toolkit for efficiently fine-tuning LLM',
+        description=('An efficient, flexible and full-featured toolkit for '
+                     'fine-tuning large models'),
         long_description=readme(),
         long_description_content_type='text/markdown',
         author='XTuner Contributors',
