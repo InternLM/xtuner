@@ -48,10 +48,14 @@ def dispatch_llama_attn_forward(model):
 
 
 def dispatch_internlm_attn_forward(model, use_local_attn):
-    from .internlm import internlm_attn_forward, internlm_local_attn_forward
-
     if not SUPPORT_FLASH:
         return
+    if use_local_attn:
+        assert SUPPORT_FLASH2 and SUPPORT_TRITON, \
+            'flash_attn and triton is required if you want to use local_attn.'
+
+    from .internlm import internlm_attn_forward, internlm_local_attn_forward
+
     print_log(NO_ATTN_WEIGHTS_MSG, 'current', logging.WARNING)
     for module in model.modules():
         if type(module).__name__ == 'InternLMAttention':
@@ -66,9 +70,11 @@ def dispatch_internlm_attn_forward(model, use_local_attn):
 
 
 def dispatch_internlm2_attn_forward(model, use_local_attn):
-    if not (SUPPORT_FLASH and SUPPORT_TRITON):
-        raise ModuleNotFoundError(
-            'flash_attn and triton is required if you want to use local_attn.')
+    if not SUPPORT_FLASH:
+        return
+    if use_local_attn:
+        assert SUPPORT_FLASH2 and SUPPORT_TRITON, \
+            'flash_attn and triton is required if you want to use local_attn.'
 
     from .internlm2 import internlm2_attn_forward, internlm2_local_attn_forward
 
@@ -133,9 +139,7 @@ def replace_internlm_rote(model):
 def replace_internlm2_rote(model):
     from .internlm2 import InternLM2RotaryEmbedding
 
-    rotary_base = model.config.rotary['base']
-    # fixme
-    rotary_base = 1000000
+    rotary_base = model.config.rope_theta
 
     def traverse(module):
         for name, child in module.named_children():
