@@ -54,7 +54,7 @@ XTuner is an efficient, flexible and full-featured toolkit for fine-tuning large
 **Full-featured**
 
 - Support continuous pre-training, instruction fine-tuning, and agent fine-tuning.
-- Support chatting with large models with pre-defined template.
+- Support chatting with large models with pre-defined templates.
 - The output models can seamlessly integrate with deployment and server toolkit ([LMDeploy](https://github.com/InternLM/lmdeploy)), and large-scale evaluation toolkit ([OpenCompass](https://github.com/open-compass/opencompass), [VLMEvalKit](https://github.com/open-compass/VLMEvalKit)).
 
 ## 🌟 Demos
