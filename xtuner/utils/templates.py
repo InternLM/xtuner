@@ -21,6 +21,14 @@ PROMPT_TEMPLATE = ConfigDict(
         SUFFIX_AS_EOS=True,
         SEP='\n',
         STOP_WORDS=['<eoa>']),
+    internlm2_chat=dict(
+        SYSTEM='[UNUSED_TOKEN_146]system\n{system}[UNUSED_TOKEN_145]\n',
+        INSTRUCTION=('[UNUSED_TOKEN_146]user\n{input}[UNUSED_TOKEN_145]\n'
+                     '[UNUSED_TOKEN_146]assistant\n'),
+        SUFFIX='[UNUSED_TOKEN_145]',
+        SUFFIX_AS_EOS=True,
+        SEP='\n',
+        STOP_WORDS=['[UNUSED_TOKEN_145]']),
     moss_sft=dict(
         SYSTEM='{system}\n',
         INSTRUCTION='<|Human|>: {input}<eoh>\n',
