@@ -197,6 +197,7 @@ XTuner supports the efficient fine-tune (*e.g.*, QLoRA) for LLMs. Dataset prepar
 
   ```shell
   xtuner copy-cfg ${CONFIG_NAME} ${SAVE_PATH}
+  vi ${SAVE_PATH}/${CONFIG_NAME}_copy.py
   ```
 
 - **Step 1**, start fine-tuning.
@@ -205,14 +206,14 @@ XTuner supports the efficient fine-tune (*e.g.*, QLoRA) for LLMs. Dataset prepar
   xtuner train ${CONFIG_NAME_OR_PATH}
   ```
 
-  For example, we can start the QLoRA fine-tuning of InternLM-7B with oasst1 dataset by
+  For example, we can start the QLoRA fine-tuning of InternLM2-Chat-7B with oasst1 dataset by
 
   ```shell
   # On a single GPU
-  xtuner train internlm_7b_qlora_oasst1_e3 --deepspeed deepspeed_zero2
+  xtuner train internlm2_chat_7b_qlora_oasst1_e3 --deepspeed deepspeed_zero2
   # On multiple GPUs
-  (DIST) NPROC_PER_NODE=${GPU_NUM} xtuner train internlm_7b_qlora_oasst1_e3 --deepspeed deepspeed_zero2
-  (SLURM) srun ${SRUN_ARGS} xtuner train internlm_7b_qlora_oasst1_e3 --launcher slurm --deepspeed deepspeed_zero2
+  (DIST) NPROC_PER_NODE=${GPU_NUM} xtuner train internlm2_chat_7b_qlora_oasst1_e3 --deepspeed deepspeed_zero2
+  (SLURM) srun ${SRUN_ARGS} xtuner train internlm2_chat_7b_qlora_oasst1_e3 --launcher slurm --deepspeed deepspeed_zero2
   ```
 
   - `--deepspeed` means using [DeepSpeed](https://github.com/microsoft/DeepSpeed) 🚀 to optimize the training. XTuner comes with several integrated strategies including ZeRO-1, ZeRO-2, and ZeRO-3. If you wish to disable this feature, simply remove this argument.
@@ -235,16 +236,16 @@ xtuner chat ${NAME_OR_PATH_TO_LLM} --adapter {NAME_OR_PATH_TO_ADAPTER} [optional
 
 For example, we can start the chat with
 
-InternLM-7B with adapter trained from Alpaca-enzh:
+InternLM2-Chat-7B with adapter trained from oasst1 dataset:
 
 ```shell
-xtuner chat internlm/internlm-7b --adapter xtuner/internlm-7b-qlora-alpaca-enzh --prompt-template internlm_chat --system-template alpaca
+xtuner chat internlm/internlm2-chat-7b --adapter xtuner/internlm2-chat-7b-qlora-oasst1 --prompt-template internlm2_chat
 ```
 
-Llama2-7b with adapter trained from MOSS-003-SFT:
+LLaVA-InternLM2-7B:
 
 ```shell
-xtuner chat meta-llama/Llama-2-7b-hf --adapter xtuner/Llama-2-7b-qlora-moss-003-sft --bot-name Llama2 --prompt-template moss_sft --system-template moss_sft --with-plugins calculate solve search --no-streamer
+xtuner chat internlm/internlm2-chat-7b --visual-encoder openai/clip-vit-large-patch14-336 --llava xtuner/llava-internlm2-7b --prompt-template internlm2_chat --image $IMAGE_PATH
 ```
 
 For more examples, please see [chat.md](./docs/en/user_guides/chat.md).
