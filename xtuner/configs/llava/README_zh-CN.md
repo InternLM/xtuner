@@ -1,5 +1,7 @@
 # LLaVA 全流程
 
+[English](./README.md) | 简体中文
+
 ## 结果
 
 XTuner 推荐使用基于 LLM-QLoRA / ViT-LoRA 的 LLaVA 架构，其在各个数据集的评测结果如下：
