@@ -100,7 +100,7 @@ def encode_fn(example,
                 labels += copy.deepcopy(eos_token_id)
             else:
                 next_needs_bos_token = False
-            # Add SEP (without loss)
+            # Add sep (without loss)
             sep = single_turn_conversation['sep']
             if sep != '':
                 sep_encode = tokenizer.encode(sep, add_special_tokens=False)

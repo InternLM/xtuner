@@ -355,7 +355,7 @@ def main():
     stop_words = args.stop_words
     if args.prompt_template:
         template = PROMPT_TEMPLATE[args.prompt_template]
-        stop_words += template.get('STOP_WORDS', [])
+        stop_words += template.stop_words
     stop_criteria = get_stop_criteria(
         tokenizer=tokenizer, stop_words=stop_words)
 
@@ -389,7 +389,7 @@ def main():
         if args.prompt_template:
             prompt_text = ''
             template = PROMPT_TEMPLATE[args.prompt_template]
-            prompt_text += template['INSTRUCTION'].format(
+            prompt_text += template.instruction.format(
                 input=text, round=1, bot_name=args.bot_name)
         else:
             prompt_text = text

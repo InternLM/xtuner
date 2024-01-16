@@ -10,22 +10,21 @@ def template_map_fn(example, template):
         input = single_turn_conversation.get('input', '')
         if input is None:
             input = ''
-        input_text = template.INSTRUCTION.format(input=input, round=i + 1)
+        input_text = template.instruction.format(input=input, round=i + 1)
         system = single_turn_conversation.get('system', '')
         if system != '' and system is not None:
-            system = template.SYSTEM.format(system=system)
+            system = template.system.format(system=system)
             input_text = system + input_text
         single_turn_conversation['input'] = input_text
 
-        if template.get('SUFFIX', None):
+        if template.suffix is not None:
             output_text = single_turn_conversation.get('output', '')
-            output_text += template.SUFFIX
+            output_text += template.suffix
             single_turn_conversation['output'] = output_text
 
-        # SUFFIX_AS_EOS is False ==> need_eos_token is True
-        single_turn_conversation['need_eos_token'] = \
-            not template.get('SUFFIX_AS_EOS', False)
-        single_turn_conversation['sep'] = template.get('SEP', '')
+        # suffix_as_eos is False ==> need_eos_token is True
+        single_turn_conversation['need_eos_token'] = not template.suffix_as_eos
+        single_turn_conversation['sep'] = template.sep
 
     return {'conversation': conversation}
 

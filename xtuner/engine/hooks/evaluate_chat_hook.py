@@ -47,11 +47,10 @@ class EvaluateChatHook(Hook):
         else:
             if isinstance(prompt_template, str):  # for resume
                 prompt_template = get_object_from_string(prompt_template)
-            instruction = prompt_template.get('INSTRUCTION', '{input}')
+            instruction = prompt_template.instruction
             if system != '':
-                system = prompt_template.get(
-                    'SYSTEM', '{system}\n').format(system=system)
-            stop_words += prompt_template.get('STOP_WORDS', [])
+                system = prompt_template.system.format(system=system)
+            stop_words += prompt_template.stop_words
         if stop_word is not None:
             # TODO: deprecation, v0.3.0
             warnings.warn(

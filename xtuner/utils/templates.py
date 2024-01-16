@@ -1,121 +1,135 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+from dataclasses import dataclass
+from typing import List, Tuple
+
 from mmengine.config import ConfigDict
 
-# - Turn 0: SYSTEM + INSTRUCTION, [output + SUFFIX], SEP
-# - Turn 1: INSTRUCTION, [output + SUFFIX], SEP
+
+@dataclass
+class PromptTemplateConfig:
+    system: str
+    instruction: str
+    suffix: str = ''
+    suffix_as_eos: bool = False
+    sep: str = ''
+    stop_words: Tuple[str] or List[str] = ()
+
+
+# - Turn 0: system + instruction, [output + suffix], sep
+# - Turn 1: instruction, [output + suffix], sep
 # - Turn ...
 # Note: [] means having supervised loss during the fine-tuning
 PROMPT_TEMPLATE = ConfigDict(
-    default=dict(
-        SYSTEM='<|System|>:{system}\n',
-        INSTRUCTION='<|User|>:{input}\n<|Bot|>:',
-        SEP='\n'),
-    zephyr=dict(
-        SYSTEM='<|system|>\n{system}\n',
-        INSTRUCTION='<|user|>\n{input}\n<|assistant|>\n',
-        SEP='\n'),
-    internlm_chat=dict(
-        SYSTEM='<|System|>:{system}\n',
-        INSTRUCTION='<|User|>:{input}<eoh>\n<|Bot|>:',
-        SUFFIX='<eoa>',
-        SUFFIX_AS_EOS=True,
-        SEP='\n',
-        STOP_WORDS=['<eoa>']),
-    moss_sft=dict(
-        SYSTEM='{system}\n',
-        INSTRUCTION='<|Human|>: {input}<eoh>\n',
-        SEP='\n',
-        STOP_WORDS=['<eoc>', '<eom>']),
-    llama2_chat=dict(
-        SYSTEM=(
+    default=PromptTemplateConfig(
+        system='<|System|>:{system}\n',
+        instruction='<|User|>:{input}\n<|Bot|>:',
+        sep='\n'),
+    zephyr=PromptTemplateConfig(
+        system='<|system|>\n{system}\n',
+        instruction='<|user|>\n{input}\n<|assistant|>\n',
+        sep='\n'),
+    internlm_chat=PromptTemplateConfig(
+        system='<|System|>:{system}\n',
+        instruction='<|User|>:{input}<eoh>\n<|Bot|>:',
+        suffix='<eoa>',
+        suffix_as_eos=True,
+        sep='\n',
+        stop_words=['<eoa>']),
+    moss_sft=PromptTemplateConfig(
+        system='{system}\n',
+        instruction='<|Human|>: {input}<eoh>\n',
+        sep='\n',
+        stop_words=['<eoc>', '<eom>']),
+    llama2_chat=PromptTemplateConfig(
+        system=(
             '[INST] <<SYS>>\n You are a helpful, respectful and honest '
             'assistant. Always answer as helpfully as possible, while being '
             'safe. Your answers should not include any harmful, unethical, '
             'racist, sexist, toxic, dangerous, or illegal content. Please '
             'ensure that your responses are socially unbiased and positive in '
             'nature.\n{system}\n<</SYS>>\n [/INST] '),
-        INSTRUCTION='[INST] {input} [/INST]',
-        SEP='\n'),
-    code_llama_chat=dict(
-        SYSTEM='{system}\n', INSTRUCTION='[INST] {input} [/INST]'),
-    chatglm2=dict(
-        SYSTEM='{system}\n',
-        INSTRUCTION='[Round {round}]\n\n问：{input}\n\n答：',
-        SEP='\n\n'),
-    chatglm3=dict(
-        SYSTEM='<|system|>\n{system}',
-        INSTRUCTION='<|user|>\n{input}<|assistant|>\n',
-        SEP='\n'),
-    qwen_chat=dict(
-        SYSTEM=('\n<|im_start|>system\n{system}<|im_end|>'),
-        INSTRUCTION=(
+        instruction='[INST] {input} [/INST]',
+        sep='\n'),
+    code_llama_chat=PromptTemplateConfig(
+        system='{system}\n', instruction='[INST] {input} [/INST]'),
+    chatglm2=PromptTemplateConfig(
+        system='{system}\n',
+        instruction='[Round {round}]\n\n问：{input}\n\n答：',
+        sep='\n\n'),
+    chatglm3=PromptTemplateConfig(
+        system='<|system|>\n{system}',
+        instruction='<|user|>\n{input}<|assistant|>\n',
+        sep='\n'),
+    qwen_chat=PromptTemplateConfig(
+        system=('\n<|im_start|>system\n{system}<|im_end|>'),
+        instruction=(
             '\n<|im_start|>user\n{input}<|im_end|>\n<|im_start|>assistant\n'),
-        SUFFIX='<|im_end|>',
-        SUFFIX_AS_EOS=True,
-        SEP='\n',
-        STOP_WORDS=['<|im_end|>', '<|endoftext|>']),
-    baichuan_chat=dict(
-        SYSTEM='{system}\n',
-        INSTRUCTION='<reserved_102>{input}<reserved_103>',
-        SEP='\n'),
-    baichuan2_chat=dict(
-        SYSTEM='{system}\n',
-        INSTRUCTION='<reserved_106>{input}<reserved_107>',
-        SEP='\n'),
-    wizardlm=dict(
-        SYSTEM=('A chat between a curious user and an artificial '
+        suffix='<|im_end|>',
+        suffix_as_eos=True,
+        sep='\n',
+        stop_words=['<|im_end|>', '<|endoftext|>']),
+    baichuan_chat=PromptTemplateConfig(
+        system='{system}\n',
+        instruction='<reserved_102>{input}<reserved_103>',
+        sep='\n'),
+    baichuan2_chat=PromptTemplateConfig(
+        system='{system}\n',
+        instruction='<reserved_106>{input}<reserved_107>',
+        sep='\n'),
+    wizardlm=PromptTemplateConfig(
+        system=('A chat between a curious user and an artificial '
                 'intelligence assistant. The assistant gives '
                 'helpful, detailed, and polite answers to the '
                 'user\'s questions. {system}\n '),
-        INSTRUCTION=('USER: {input} ASSISTANT:'),
-        SEP='\n'),
-    wizardcoder=dict(
-        SYSTEM=(
+        instruction=('USER: {input} ASSISTANT:'),
+        sep='\n'),
+    wizardcoder=PromptTemplateConfig(
+        system=(
             'Below is an instruction that describes a task. '
             'Write a response that appropriately completes the request.\n\n'
             '{system}\n '),
-        INSTRUCTION=('### Instruction:\n{input}\n\n### Response:'),
-        SEP='\n\n'),
-    vicuna=dict(
-        SYSTEM=('A chat between a curious user and an artificial '
+        instruction=('### Instruction:\n{input}\n\n### Response:'),
+        sep='\n\n'),
+    vicuna=PromptTemplateConfig(
+        system=('A chat between a curious user and an artificial '
                 'intelligence assistant. The assistant gives '
                 'helpful, detailed, and polite answers to the '
                 'user\'s questions. {system}\n '),
-        INSTRUCTION=('USER: {input} ASSISTANT:'),
-        SEP='\n'),
-    deepseek_coder=dict(
-        SYSTEM=('You are an AI programming assistant, utilizing '
+        instruction=('USER: {input} ASSISTANT:'),
+        sep='\n'),
+    deepseek_coder=PromptTemplateConfig(
+        system=('You are an AI programming assistant, utilizing '
                 'the DeepSeek Coder model, developed by DeepSeek'
                 'Company, and you only answer questions related '
                 'to computer science. For politically sensitive '
                 'questions, security and privacy issues, and '
                 'other non-computer science questions, you will '
                 'refuse to answer. {system}\n'),
-        INSTRUCTION=('### Instruction:\n{input}\n### Response:\n'),
-        SEP='\n'),
+        instruction=('### Instruction:\n{input}\n### Response:\n'),
+        sep='\n'),
     # TODO: deprecation, v0.2.0
-    deepseekcoder=dict(
-        SYSTEM=('You are an AI programming assistant, utilizing '
+    deepseekcoder=PromptTemplateConfig(
+        system=('You are an AI programming assistant, utilizing '
                 'the DeepSeek Coder model, developed by DeepSeek'
                 'Company, and you only answer questions related '
                 'to computer science. For politically sensitive '
                 'questions, security and privacy issues, and '
                 'other non-computer science questions, you will '
                 'refuse to answer. {system}\n'),
-        INSTRUCTION=('### Instruction:\n{input}\n### Response:\n'),
-        SEP='\n'),
-    deepseek_moe=dict(
-        SYSTEM=('[INST] {system} [/INST]\n'),
-        INSTRUCTION=('[INST] {input} [/INST]'),
-        SEP='\n'),
-    mistral=dict(
-        SYSTEM=('[INST] {system} [/INST]\n'),
-        INSTRUCTION=('[INST] {input} [/INST]'),
-        SEP='\n'),
-    mixtral=dict(
-        SYSTEM=('[INST] {system} [/INST]\n'),
-        INSTRUCTION=('[INST] {input} [/INST]'),
-        SEP='\n'),
+        instruction=('### Instruction:\n{input}\n### Response:\n'),
+        sep='\n'),
+    deepseek_moe=PromptTemplateConfig(
+        system=('[INST] {system} [/INST]\n'),
+        instruction=('[INST] {input} [/INST]'),
+        sep='\n'),
+    mistral=PromptTemplateConfig(
+        system=('[INST] {system} [/INST]\n'),
+        instruction=('[INST] {input} [/INST]'),
+        sep='\n'),
+    mixtral=PromptTemplateConfig(
+        system=('[INST] {system} [/INST]\n'),
+        instruction=('[INST] {input} [/INST]'),
+        sep='\n'),
 )
 
 SYSTEM_TEMPLATE = ConfigDict(

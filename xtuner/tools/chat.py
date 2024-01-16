@@ -298,8 +298,8 @@ def main():
         sep = ''
         if args.prompt_template:
             template = PROMPT_TEMPLATE[args.prompt_template]
-            stop_words += template.get('STOP_WORDS', [])
-            sep = template.get('SEP', '')
+            stop_words += template.stop_words
+            sep = template.sep
         stop_criteria = get_stop_criteria(
             tokenizer=tokenizer, stop_words=stop_words)
 
@@ -338,7 +338,7 @@ def main():
             if args.prompt_template:
                 prompt_text = ''
                 template = PROMPT_TEMPLATE[args.prompt_template]
-                if 'SYSTEM' in template and n_turn == 0:
+                if n_turn == 0:
                     system_text = None
                     if args.system_template is not None:
                         system_text = SYSTEM_TEMPLATE[
@@ -347,11 +347,11 @@ def main():
                     elif args.system is not None:
                         system_text = args.system
                     if system_text is not None:
-                        prompt_text += template['SYSTEM'].format(
+                        prompt_text += template.system.format(
                             system=system_text,
                             round=n_turn + 1,
                             bot_name=args.bot_name)
-                prompt_text += template['INSTRUCTION'].format(
+                prompt_text += template.instruction.format(
                     input=text, round=n_turn + 1, bot_name=args.bot_name)
                 if args.prompt_template == args.system_template == 'moss_sft':
                     if not inner_thoughts_open:
