@@ -5,13 +5,13 @@
 ```python
 # Copyright (c) OpenMMLab. All rights reserved.
 import torch
-from bitsandbytes.optim import PagedAdamW32bit
 from datasets import load_dataset
 from mmengine.dataset import DefaultSampler
 from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
                             LoggerHook, ParamSchedulerHook)
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR
 from peft import LoraConfig
+from torch.optim import AdamW
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           BitsAndBytesConfig)
 
@@ -39,7 +39,7 @@ batch_size = 1  # per_device  # 每个设备的样本个数
 accumulative_counts = 16  # 梯度累计数
 dataloader_num_workers = 0  # dataloader worker 数
 max_epochs = 3  # 训练迭代代数
-optim_type = PagedAdamW32bit  # 优化器
+optim_type = AdamW  # 优化器
 lr = 2e-4  # 学习率
 betas = (0.9, 0.999)  # AdamW 优化器 betas
 weight_decay = 0  # 权重衰减
