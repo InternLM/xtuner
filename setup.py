@@ -118,7 +118,8 @@ if __name__ == '__main__':
             'Programming Language :: Python :: 3.10',
             'Topic :: Utilities',
         ],
-        python_requires='>=3.8',
+        # Python maximum version <3.11, to support mpi4py-mpich
+        python_requires='>=3.8, <3.11',
         license='Apache License 2.0',
         install_requires=parse_requirements('requirements/runtime.txt'),
         extras_require={
