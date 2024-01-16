@@ -88,7 +88,8 @@ XTuner is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](
 <tr valign="top">
 <td align="left" valign="top">
 <ul>
-  <li><a href="https://huggingface.co/internlm/internlm-7b">InternLM</a></li>
+  <li><a href="https://huggingface.co/internlm">InternLM2</a></li>
+  <li><a href="https://huggingface.co/internlm">InternLM</a></li>
   <li><a href="https://huggingface.co/meta-llama">Llama</a></li>
   <li><a href="https://huggingface.co/meta-llama">Llama2</a></li>
   <li><a href="https://huggingface.co/THUDM/chatglm2-6b">ChatGLM2</a></li>
