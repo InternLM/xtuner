@@ -84,5 +84,9 @@ internlm_chat=dict(
 | HuggingFaceH4/zephyr-7b-beta             | zephyr         |
 | deepseek-ai/deepseek-moe-16b-base        | deepseek_moe   |
 | deepseek-ai/deepseek-moe-16b-chat        | deepseek_moe   |
+| internlm/internlm2-7b                    | default\*      |
+| internlm/internlm2-20b                   | default\*      |
+| internlm/internlm2-chat-7b               | internlm2_chat |
+| internlm/internlm2-chat-20b              | internlm2_chat |
 
 \*: 官方对话模版中存在特殊 token（比如 `<|im_start|>`、`<|im_end|>`），这类特殊 token 在预训练阶段并未得到训练。故，使用 `default` 模版。
