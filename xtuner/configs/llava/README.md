@@ -1,5 +1,7 @@
 # LLaVA Full Pipeline
 
+English | [简体中文](./README_zh-CN.md)
+
 ## Results
 
 XTuner primarily promotes the LLM-QLoRA / ViT-LoRA LLaVA architecture, and the evaluation results on various datasets are as follows:
