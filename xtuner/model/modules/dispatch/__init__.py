@@ -8,7 +8,6 @@ from mmengine.utils import digit_version
 
 from .baichuan import (baichuan2_norm_head_forward, baichuan_7b_attn_forward,
                        baichuan_13b_attn_forward)
-from .llama import llama_attn_forward
 from .yi import yi_attn_forward
 
 SUPPORT_FLASH1 = digit_version(torch.__version__) >= digit_version('2.0.0')
@@ -37,14 +36,36 @@ NO_ATTN_WEIGHTS_MSG = (
     'possible to return the `attn_weights`.')
 
 
-def dispatch_llama_attn_forward(model):
+def dispatch_llama_attn_forward(model, use_local_attn):
     if not SUPPORT_FLASH:
         return
-    print_log('dispatch llama attn forward', 'current')
+    if use_local_attn:
+        assert SUPPORT_FLASH2 and SUPPORT_TRITON, \
+            'flash_attn and triton is required if you want to use local_attn.'
+    from .llama import llama_attn_forward, llama_local_attn_forward
+
     print_log(NO_ATTN_WEIGHTS_MSG, 'current', logging.WARNING)
     for module in model.modules():
         if type(module).__name__ == 'LlamaAttention':
-            module.forward = types.MethodType(llama_attn_forward, module)
+            if use_local_attn:
+                print_log('dispatch llama local attn forward', 'current')
+                module.forward = types.MethodType(llama_local_attn_forward,
+                                                  module)
+            else:
+                print_log('dispatch llama attn forward', 'current')
+                module.forward = types.MethodType(llama_attn_forward, module)
+
+
+def dispatch_llama_rmsnorm_forward(model):
+    if not SUPPORT_TRITON:
+        return
+
+    from .triton_kernels import rms_norm_forward
+
+    for module in model.modules():
+        if type(module).__name__ == 'LlamaRMSNorm':
+            print_log('dispatch llama rmsnorm forward', 'current')
+            module.forward = types.MethodType(rms_norm_forward, module)
 
 
 def dispatch_internlm_attn_forward(model, use_local_attn):
@@ -212,7 +233,8 @@ def dispatch_modules(model, use_local_attn=False):
         dispatch_internlm_rmsnorm_forward(model)
         replace_internlm_rote(model)
     elif 'llama' in model_name:
-        dispatch_llama_attn_forward(model)
+        dispatch_llama_attn_forward(model, use_local_attn)
+        dispatch_llama_rmsnorm_forward(model)
     elif 'baichuan' in model_name:
         dispath_baichuan2_norm_head_forward(model)
         dispath_baichuan_7b_attn_forward(model)
