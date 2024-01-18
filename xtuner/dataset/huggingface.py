@@ -151,8 +151,8 @@ def process(dataset,
     return dataset
 
 
-def process_hf_dataset(master_only=True, *args, **kwargs):
-    if master_only and dist.is_available() and dist.is_initialized():
+def process_hf_dataset(broadcast_from_master=True, *args, **kwargs):
+    if broadcast_from_master and dist.is_available() and dist.is_initialized():
         if dist.get_rank() == 0:
             dataset = process(*args, **kwargs)
             objects = [dataset]
