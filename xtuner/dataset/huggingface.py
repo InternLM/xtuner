@@ -151,14 +151,15 @@ def process(dataset,
     return dataset
 
 
-def process_hf_dataset(*args, **kwargs):
-    if not (dist.is_available() and dist.is_initialized()):
-        return process(*args, **kwargs)
-
-    if dist.get_rank() == 0:
-        dataset = process(*args, **kwargs)
-        objects = [dataset]
+def process_hf_dataset(master_only=True, *args, **kwargs):
+    if master_only and dist.is_available() and dist.is_initialized():
+        if dist.get_rank() == 0:
+            dataset = process(*args, **kwargs)
+            objects = [dataset]
+        else:
+            objects = [None]
+        dist.broadcast_object_list(objects, src=0)
+        dataset = objects[0]
     else:
-        objects = [None]
-    dist.broadcast_object_list(objects, src=0)
-    return objects[0]
+        dataset = process(*args, **kwargs)
+    return dataset
