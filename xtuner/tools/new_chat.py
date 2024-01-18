@@ -3,6 +3,7 @@ import argparse
 
 import torch
 
+from xtuner.chat import GenerationConfig
 from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
 
 
@@ -127,6 +128,11 @@ def parse_args():
         default=0,
         help='Random seed for reproducible text generation')
 
+    parser.add_argument(
+        '--serve', action='store_true', help='Whether to serve')
+    parser.add_argument('--port', type=str)
+
+    parser.add_argument('--openai-api-key', type=str)
     parser.add_argument('--predict', type=str)
     parser.add_argument('--results', type=str, default='results.xlsx')
 
@@ -176,86 +182,58 @@ def get_input():
 
 def build_bot(args):
 
-    use_lagent = args.lagent
-    use_llava = args.llava is not None
-    use_moss = args.moss_plugins is not None
     use_lmdeploy = args.lmdeploy
     use_vllm = args.vllm
-
-    if use_lagent + use_moss + use_llava > 1:
-        raise RuntimeError
+    use_openai_api = ':' in args.model_name_or_path
 
     if use_vllm + use_lmdeploy > 1:
         raise RuntimeError
 
+    if use_lmdeploy:
+        from xtuner.chat import LMDeployBot
+        return LMDeployBot(args.model_name_or_path, args.batch_size,
+                           args.max_length, args.logn_attn,
+                           args.rope_scaling_factor)
+
+    elif use_vllm:
+        from xtuner.chat import VllmBot
+        return VllmBot(args.model_name_or_path, args.max_length,
+                       args.logn_attn, args.rope_scaling_factor)
+    elif use_openai_api:
+        from xtuner.chat import OpenaiBot
+        return OpenaiBot(args.model_name_or_path, args.openai_api_key)
+
+    else:
+
+        from xtuner.chat import HFBot
+        return HFBot(args.model_name_or_path, args.adapter, args.bits)
+
+
+def build_chat_instance(bot, args):
+    use_lagent = args.lagent
+    use_llava = args.llava is not None
+    use_moss = args.moss_plugins is not None
+
     chat_template = PROMPT_TEMPLATE[args.prompt_template]
     # system_template = SYSTEM_TEMPLATE[args.system_template]
     system_template = None
+    if use_lagent + use_moss + use_llava > 1:
+        raise RuntimeError
 
-    if use_lmdeploy:
-        if use_lagent:
-            raise NotImplementedError
-        elif use_moss:
-            from xtuner.bot import LMDeployMossBot
-            return LMDeployMossBot(args.bot_name, args.model_name_or_path,
-                                   chat_template, system_template,
-                                   args.max_length, args.max_new_tokens,
-                                   args.temperature, args.top_k, args.top_p,
-                                   args.repetition_penalty, args.stop_words,
-                                   args.seed, args.logn_attn,
-                                   args.rope_scaling_factor, args.moss_plugins)
-        elif use_llava:
-            raise NotImplementedError
-        else:
-            from xtuner.bot import LMDeployChatBot
-            return LMDeployChatBot(args.bot_name, args.model_name_or_path,
-                                   chat_template, system_template,
-                                   args.max_length, args.max_new_tokens,
-                                   args.temperature, args.top_k, args.top_p,
-                                   args.repetition_penalty, args.stop_words,
-                                   args.seed, args.logn_attn,
-                                   args.rope_scaling_factor)
-    elif use_vllm:
-        if use_lagent:
-            raise NotImplementedError
-        elif use_moss:
-            # TODO
-            pass
-        elif use_llava:
-            raise NotImplementedError
-        else:
-            from xtuner.bot import vLLMChatBot
-            return vLLMChatBot(args.bot_name, args.model_name_or_path,
-                               chat_template, system_template, args.max_length,
-                               args.max_new_tokens, args.temperature,
-                               args.top_k, args.top_p, args.repetition_penalty,
-                               args.stop_words, args.seed, args.logn_attn,
-                               args.rope_scaling_factor)
+    if use_lagent:
+        # TODO
+        pass
+    elif use_moss:
+        # TODO
+        pass
+    elif use_llava:
+        pass
     else:
-        if use_lagent:
-            from xtuner.bot import HFReActBot
-            return HFReActBot(args.model_name_or_path, args.adapter, args.bits)
-        elif use_moss:
-            from xtuner.bot import HFMossBot
-            return HFMossBot(args.bot_name, args.model_name_or_path,
-                             args.adapter, args.bits, chat_template,
-                             system_template, args.max_length,
-                             args.max_new_tokens, args.temperature, args.top_k,
-                             args.top_p, args.repetition_penalty,
-                             args.stop_words, args.moss_plugins)
-        elif use_llava:
-            raise NotImplementedError
-        else:
-            from xtuner.bot import HFChatBot
-            return HFChatBot(args.bot_name, args.model_name_or_path,
-                             args.adapter, args.bits, chat_template,
-                             system_template, args.max_length,
-                             args.max_new_tokens, args.temperature, args.top_k,
-                             args.top_p, args.repetition_penalty,
-                             args.stop_words)
+        from xtuner.chat import BaseChat
+        return BaseChat(bot, args.bot_name, chat_template, system_template)
 
 
-def interactive_chat(bot, system):
+def interactive_chat(bot, system, gen_config):
 
     while True:
         text = get_input()
@@ -268,7 +246,7 @@ def interactive_chat(bot, system):
             print('Log: Exit!')
             exit(0)
 
-        response = bot.chat(text, system)
+        response = bot.chat(text, system, gen_config)
         print(response, system)
 
 
@@ -276,9 +254,8 @@ def main():
     args = parse_args()
     torch.manual_seed(args.seed)
 
-    bot = build_bot(args)
-
     if args.predict:
+        bot = build_bot(args)
         from datasets import load_dataset
         dataset = load_dataset('text', data_files=args.predict)['train']
         texts = dataset['text']
@@ -289,12 +266,40 @@ def main():
             dataset = dataset.add_column(f'response_{i}', preds)
 
         df = dataset.to_pandas()
-        sheet_name = 'lmdeploy' if args.lmdeploy else 'huggingface'
+
+        if args.lmdeploy:
+            sheet_name = 'lmdeploy'
+        elif args.vllm:
+            sheet_name = 'vllm'
+        else:
+            sheet_name = 'huggingface'
+
         df.to_excel(args.results, sheet_name)
         print(f'Results saved in {args.results}')
+
+    elif args.serve:
+
+        if args.lmdeploy:
+            from xtuner.chat import run_lmdeploy_server
+            run_lmdeploy_server(args.model_name_or_path, args.batch_size,
+                                args.max_length)
+        elif args.vllm:
+            from xtuner.chat import run_vllm_server
+            run_vllm_server(args.model_name_or_path)
     else:
-        chat_instance = bot.create_instance()
-        interactive_chat(chat_instance, args.system)
+        bot = build_bot(args)
+        instance = build_chat_instance(bot, args)
+
+        gen_config = GenerationConfig(
+            max_new_tokens=args.max_new_tokens,
+            temperature=args.temperature,
+            top_k=args.top_k,
+            top_p=args.top_p,
+            repetition_penalty=args.repetition_penalty,
+            stop_words=args.stop_words,
+            seed=args.seed,
+        )
+        interactive_chat(instance, args.system, gen_config)
 
 
 if __name__ == '__main__':
