@@ -46,7 +46,8 @@ def dispatch_llama_attn_forward(model, use_local_attn):
 
     print_log(NO_ATTN_WEIGHTS_MSG, 'current', logging.WARNING)
     for module in model.modules():
-        if type(module).__name__ == 'LlamaAttention':
+        if type(module).__name__ in ('LlamaAttention', 'LlamaFlashAttention2',
+                                     'LlamaSdpaAttention'):
             if use_local_attn:
                 print_log('dispatch llama local attn forward', 'current')
                 module.forward = types.MethodType(llama_local_attn_forward,
