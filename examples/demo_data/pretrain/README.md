@@ -34,7 +34,6 @@ Based on [internlm_7b_qlora_json_e3](../../../xtuner/configs/internlm/internlm_7
 ```diff
 # Copyright (c) OpenMMLab. All rights reserved.
 import torch
-from bitsandbytes.optim import PagedAdamW32bit
 from datasets import load_dataset
 + from mmengine.config import read_base
 from mmengine.dataset import DefaultSampler
@@ -42,6 +41,7 @@ from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
                             LoggerHook, ParamSchedulerHook)
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR
 from peft import LoraConfig
+from torch.optim import AdamW
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           BitsAndBytesConfig)
 
@@ -65,7 +65,7 @@ pretrained_model_name_or_path = 'internlm/internlm-7b'
 # Data
 -data_path = 'path/to/your/json_data'
 +data_path = './data.json'
--prompt_template = PROMPT_TEMPLATE.internlm_chat
+-prompt_template = PROMPT_TEMPLATE.default
 max_length = 2048
 pack_to_max_length = True
 
@@ -74,7 +74,7 @@ batch_size = 1  # per_device
 accumulative_counts = 16
 dataloader_num_workers = 0
 max_epochs = 3
-optim_type = PagedAdamW32bit
+optim_type = AdamW
 lr = 2e-4
 betas = (0.9, 0.999)
 weight_decay = 0
