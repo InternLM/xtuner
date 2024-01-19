@@ -14,6 +14,48 @@ class PromptTemplateConfig:
     sep: str = ''
     stop_words: Tuple[str] or List[str] = ()
 
+    @staticmethod
+    def is_valid_text(text):
+        return text != '' and text is not None
+
+    def build_prompt(self, system_text, instruction_text, **kwargs):
+        text = ''
+        if self.is_valid_text(system_text):
+            text += self.system.format(system=system_text, **kwargs)
+        text += self.instruction.format(input=instruction_text, **kwargs)
+        return text
+
+    def build_conversation(self, conversation):
+        new_conversation = []
+        for i, single_turn in enumerate(conversation):
+            system_data = single_turn.get('system', '')
+            input_data = single_turn.get('input', '')
+            if input_data is None:
+                input_data = ''
+            output_data = single_turn.get('output', '')
+
+            input_text = ''
+            if self.is_valid_text(system_data):
+                input_text += self.system.format(system=system_data)
+            input_text += self.instruction.format(
+                input=input_data, round=i + 1)
+
+            output_text = ''
+            output_text += output_data
+            if self.is_valid_text(output_data):
+                output_text += self.suffix
+
+            # suffix_as_eos is False ==> need_eos_token is True
+            need_eos_token = not self.suffix_as_eos
+
+            new_conversation.append({
+                'input': input_text,
+                'output': output_text,
+                'need_eos_token': need_eos_token,
+                'sep': self.sep
+            })
+        return new_conversation
+
 
 # - Turn 0: system + instruction, [output + suffix], sep
 # - Turn 1: instruction, [output + suffix], sep
@@ -35,7 +77,7 @@ PROMPT_TEMPLATE = ConfigDict(
         suffix_as_eos=True,
         sep='\n',
         stop_words=['<eoa>']),
-    internlm2_chat=dict(
+    internlm2_chat=PromptTemplateConfig(
         system='<|im_start|>system\n{system}<|im_end|>\n',
         instruction=('<|im_start|>user\n{input}<|im_end|>\n'
                      '<|im_start|>assistant\n'),
