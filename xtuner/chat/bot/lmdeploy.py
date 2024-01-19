@@ -60,7 +60,7 @@ class LMDeployBot(BaseBot):
         self.pipeline = pipeline(
             model_name_or_path, backend_config=backend_config)
 
-    def generate(self, text, gen_config=GenerationConfig()):
+    def generate(self, text, gen_config=None):
 
         from lmdeploy.messages import GenerationConfig as LMGenerationConfig
         lm_gen_config = LMGenerationConfig(
@@ -69,13 +69,13 @@ class LMDeployBot(BaseBot):
             top_k=gen_config.top_k,
             top_p=gen_config.top_p,
             repetition_penalty=gen_config.repetition_penalty,
-            seed=gen_config.seed,
+            random_seed=gen_config.seed,
         )
 
         output = self.pipeline([text], gen_config=lm_gen_config)
-        return output[0]
+        return output[0].text
 
-    def predict(self, texts, gen_config=GenerationConfig(), repeat=1):
+    def predict(self, texts, gen_config=None, repeat=1):
 
         from lmdeploy.messages import GenerationConfig as LMGenerationConfig
         lm_gen_config = LMGenerationConfig(
@@ -119,7 +119,7 @@ class SLoraBot(BaseBot):
         self.pipeline = pipeline(
             model_name_or_path, backend_config=backend_config)
 
-    def generate(self, text, gen_config=GenerationConfig()):
+    def generate(self, text, gen_config=None):
 
         from lmdeploy.messages import GenerationConfig as LMGenerationConfig
         lm_gen_config = LMGenerationConfig(
@@ -134,7 +134,7 @@ class SLoraBot(BaseBot):
         output = self.pipeline([text], gen_config=lm_gen_config)
         return output[0]
 
-    def predict(self, texts, gen_config=GenerationConfig(), repeat=1):
+    def predict(self, texts, gen_config=None, repeat=1):
 
         from lmdeploy.messages import GenerationConfig as LMGenerationConfig
         lm_gen_config = LMGenerationConfig(

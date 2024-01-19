@@ -4,7 +4,7 @@ import argparse
 import torch
 
 from xtuner.chat import GenerationConfig
-from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
+from xtuner.chat.templates import CHAT_TEMPLATE, SYSTEM_TEMPLATE
 
 
 def parse_args():
@@ -68,25 +68,18 @@ def parse_args():
         '--bot-name', type=str, default='BOT', help='Name for Bot')
     bot_spec_group.add_argument(
         '--prompt-template',
-        choices=PROMPT_TEMPLATE.keys(),
+        choices=CHAT_TEMPLATE.keys(),
         default=None,
         help='Specify a prompt template')
     bot_spec_group.add_argument(
         '--chat-template',
-        choices=PROMPT_TEMPLATE.keys(),
+        choices=CHAT_TEMPLATE.keys(),
         default=None,
         help='Specify a prompt template')
     bot_spec_group.add_argument(
         '--system', default=None, help='Specify the system text')
-    bot_spec_group.add_argument(
-        '--system-template',
-        choices=SYSTEM_TEMPLATE.keys(),
-        default=None,
-        help='Specify a system template')
 
     gen_group = parser.add_argument_group()
-    gen_group.add_argument(
-        '--stop-words', nargs='+', type=str, default=[], help='Stop words')
     gen_group.add_argument(
         '--max-length',
         type=int,
@@ -214,9 +207,8 @@ def build_chat_instance(bot, args):
     use_llava = args.llava is not None
     use_moss = args.moss_plugins is not None
 
-    chat_template = PROMPT_TEMPLATE[args.prompt_template]
-    # system_template = SYSTEM_TEMPLATE[args.system_template]
-    system_template = None
+    chat_template = CHAT_TEMPLATE[args.prompt_template]
+
     if use_lagent + use_moss + use_llava > 1:
         raise RuntimeError
 
@@ -230,7 +222,7 @@ def build_chat_instance(bot, args):
         pass
     else:
         from xtuner.chat import BaseChat
-        return BaseChat(bot, args.bot_name, chat_template, system_template)
+        return BaseChat(bot, args.bot_name, chat_template)
 
 
 def interactive_chat(bot, system, gen_config):
@@ -247,7 +239,7 @@ def interactive_chat(bot, system, gen_config):
             exit(0)
 
         response = bot.chat(text, system, gen_config)
-        print(response, system)
+        print(response)
 
 
 def main():
@@ -296,7 +288,7 @@ def main():
             top_k=args.top_k,
             top_p=args.top_p,
             repetition_penalty=args.repetition_penalty,
-            stop_words=args.stop_words,
+            stop_words=[],
             seed=args.seed,
         )
         interactive_chat(instance, args.system, gen_config)

@@ -39,7 +39,8 @@ class HFBot(BaseBot):
         self.llm, self.tokenizer = self.build_components(
             model_name_or_path, adapter, bits)
 
-        self._generation_config = GenerationConfig(
+        from transformers import GenerationConfig as HFGenerationConfig
+        self._generation_config = HFGenerationConfig(
             eos_token_id=self.tokenizer.eos_token_id,
             pad_token_id=self.tokenizer.pad_token_id
             if self.tokenizer.pad_token_id is not None else
@@ -89,7 +90,7 @@ class HFBot(BaseBot):
     def generation_config(self):
         return self._generation_config
 
-    def generate(self, text, gen_config=GenerationConfig()):
+    def generate(self, text, gen_config=None):
 
         ids = self.tokenizer.encode(text, return_tensors='pt')
 
@@ -116,7 +117,7 @@ class HFBot(BaseBot):
 
         return output
 
-    def predict(self, texts, generation_config=GenerationConfig(), repeat=1):
+    def predict(self, texts, generation_config=None, repeat=1):
 
         outputs = []
         for text in tqdm(texts):

@@ -9,6 +9,6 @@ class GenerationConfig():
     temperature: float = field(default=0.1)
     top_k: int = field(default=40)
     top_p: float = field(default=0.75)
-    repetition_penalty: float = field(1.0)
-    stop_words: list[str] = field(default=[])
+    repetition_penalty: float = field(default=1.0)
+    stop_words: list = field(default_factory=[])
     seed: Optional[int] = field(default=None)

@@ -3,7 +3,11 @@ from xtuner.chat.utils import GenerationConfig
 
 class BaseChat():
 
-    def __init__(self, bot, bot_name, chat_template, system_template) -> None:
+    def __init__(self,
+                 bot,
+                 bot_name,
+                 chat_template=None,
+                 system_template=None) -> None:
 
         self.chat_template = chat_template
         self.system_template = system_template
@@ -43,12 +47,19 @@ class BaseChat():
             input=text, round=self.num_turns + 1, bot_name=self.bot_name)
         return prompt_text
 
-    def chat(self, text, system=None, gen_config=GenerationConfig()):
+    def chat(self, text, system=None, gen_config=None):
 
-        templated_text = self.apply_template(text, system)
-        self.history_text += templated_text
+        if gen_config is None:
+            gen_config = GenerationConfig()
 
-        gen_config.stop_words.extend(self.chat_template.stop_words)
+        if self.chat_template is None:
+            self.history_text += text
+        else:
+            templated_text = self.apply_template(text, system)
+            self.history_text += templated_text
+
+        stop_words = getattr(self.chat_template, 'stop_words', [])
+        gen_config.stop_words.extend(stop_words)
         output = self.bot.generate(self.history_text, gen_config)
         self.history_text += output
 
@@ -56,7 +67,7 @@ class BaseChat():
         self.num_turns += 1
         return output
 
-    def completion(self, text, system=None, gen_config=GenerationConfig()):
+    def completion(self, text, system=None, gen_config=None):
 
         self.history_text += text
 

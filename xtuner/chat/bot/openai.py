@@ -19,7 +19,7 @@ class OpenaiBot(BaseBot):
     def default_gen_config(self):
         return {}
 
-    def generate(self, text, gen_config=GenerationConfig()):
+    def generate(self, text, gen_config=None):
 
         openai_gen_config = dict(
             max_tokens=gen_config.max_new_tokens,

@@ -14,7 +14,7 @@ class VllmBot(BaseBot):
         from vllm import LLM
         self.pipeline = LLM(model_name_or_path, trust_remote_code=True)
 
-    def generate(self, text, gen_config=GenerationConfig()):
+    def generate(self, text, gen_config=None):
         from vllm import SamplingParams
         vllm_gen_config = SamplingParams(
             max_tokens=gen_config.max_new_tokens,
@@ -28,7 +28,7 @@ class VllmBot(BaseBot):
         output = self.pipeline.generate([text], **vllm_gen_config)
         return output[0].outputs[0].text
 
-    def predict(self, texts, gen_config=GenerationConfig(), repeat=1):
+    def predict(self, texts, gen_config=None, repeat=1):
 
         from vllm import SamplingParams
         vllm_gen_config = SamplingParams(
