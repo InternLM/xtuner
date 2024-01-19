@@ -13,6 +13,10 @@ from xtuner.registry import BUILDER, MAP_FUNC
 from .utils import Packer, encode_fn
 
 
+def get_lengths(example):
+    return {'length': len(example['input_ids'])}
+
+
 def process(dataset,
             tokenizer,
             max_length,
@@ -146,7 +150,7 @@ def process(dataset,
             Packer(max_length), batched=True, num_proc=map_num_proc)
 
     # add 'length'
-    setattr(dataset, 'length', [len(i['input_ids']) for i in dataset])
+    dataset = dataset.map(get_lengths, num_proc=map_num_proc)
 
     return dataset
 

@@ -24,11 +24,8 @@ def intern_repo_collate_fn(instances: Sequence[Dict],
             f'length of a sample should be equal to packed_length, '
             f"but got {len(example['labels'])} and {packed_length})")
 
-        input_ids_per_sample = [abs(w) for w in example['input_ids']]
-        labels_per_sample = [w if w > 0 else -100 for w in example['labels']]
-
-        input_ids.append(torch.LongTensor(input_ids_per_sample))
-        labels.append(torch.LongTensor(labels_per_sample))
+        input_ids.append(torch.LongTensor(example['input_ids']))
+        labels.append(torch.LongTensor(example['labels']))
         if use_local_attn:
             cumulative_len.append(torch.IntTensor(example['cumulative_len']))
             indexes.append(torch.LongTensor(example['indexes']))
@@ -41,8 +38,9 @@ def intern_repo_collate_fn(instances: Sequence[Dict],
 
     if use_local_attn:
         indexes = torch.stack(indexes, dim=0)
-        max_seqlen = (cumulative_len[0][1:] -
-                      cumulative_len[0][:-1]).max().item()
+        max_seqlen = (
+            cumulative_len[0][1:] -  # noqa: W504
+            cumulative_len[0][:-1]).max().item()
         data_dict = {
             'input_ids': input_ids,
             'cumulative_len': cumulative_len,

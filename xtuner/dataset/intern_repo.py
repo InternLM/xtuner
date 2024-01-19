@@ -5,7 +5,6 @@ import mmap
 import operator
 import os
 import threading
-from copy import deepcopy
 from pathlib import Path
 
 import numpy as np
@@ -16,6 +15,8 @@ from torch import distributed as dist
 from torch.utils.data import ConcatDataset
 from tqdm import tqdm
 
+from xtuner.registry import BUILDER
+
 
 class JsonlDataset(torch.utils.data.Dataset):
     """
@@ -24,11 +25,11 @@ class JsonlDataset(torch.utils.data.Dataset):
     One-line-per-document of the form:
     ```
     {
-        "tokens": List[int],
+        "input_ids": List[int],
+        "labels": List[int]
     }
     ```
 
-    Note that only the "tokens" key is used.
     """
 
     def __init__(self, path: str, min_length=50):
@@ -50,14 +51,12 @@ class JsonlDataset(torch.utils.data.Dataset):
             print(f'Cannot load file {self.meta}...')
             raise e
         self.offsets = meta[:, 0]
-        self.lengths = meta[:, -1]
+        self.length = meta[:, -1]
 
         if min_length > 0:
-            mask = self.lengths >= min_length
-            self.old_lengths = self.lengths.copy()
-            self.old_length = len(self.offsets)
+            mask = self.length >= min_length
             self.offsets = self.offsets[mask]
-            self.lengths = self.lengths[mask]
+            self.length = self.length[mask]
 
     def __getitem__(self, idx):
         f = self._get_mmap()
@@ -66,7 +65,12 @@ class JsonlDataset(torch.utils.data.Dataset):
         item = f.readline().decode('utf-8')
         try:
             item = json.loads(item)
-            item['length'] = len(item['tokens'])  # add a length info
+            item['input_ids'] = item['tokens']
+            del item['tokens']
+            labels = [x if x > 0 else -100 for x in item['input_ids']]
+            item['input_ids'] = [abs(x) for x in item['input_ids']]
+            item['labels'] = labels
+            item['length'] = len(item['input_ids'])  # add a length info
         except Exception as err:
             raise json.decoder.JSONDecodeError(
                 doc=self.path,
@@ -133,23 +137,23 @@ class PackedDataset(torch.utils.data.Dataset):
         self.dataset = dataset
         self.packed_length = packed_length
         if isinstance(dataset, JsonlDataset):
-            self.lengths = dataset.lengths
+            self.length = dataset.length
         elif isinstance(dataset, Dataset):
-            assert 'lengths' in dataset.column_names
-            self.lengths = dataset['lengths']
+            assert 'length' in dataset.column_names
+            self.length = dataset['length']
         else:
             raise NotImplementedError
         self.seed = seed
 
         rng = np.random.RandomState(self.seed)
-        shuffled_indices = np.arange(len(self.lengths))
+        shuffled_indices = np.arange(len(self.length))
         rng.shuffle(shuffled_indices)
-        self.shuffled_indices = shuffled_indices
+        self.shuffled_indices = shuffled_indices.tolist()
         self.shuffled_samples_len = list(
-            map(self.lengths.__getitem__, shuffled_indices))
+            map(self.length.__getitem__, shuffled_indices))
         self.shuffled_accumulated_samples_len = list(
             it.accumulate(self.shuffled_samples_len, operator.add))
-        self.num_tokens = sum(self.lengths)
+        self.num_tokens = sum(self.length)
 
     def __len__(self):
         return self.num_tokens // self.packed_length
@@ -165,17 +169,19 @@ class PackedDataset(torch.utils.data.Dataset):
         begin_sample_idx, begin_token_id = 0, 0
         if pack_idx > 0:
             begin_sample_idx = self.search_sample_index(pack_idx - 1)
+            # The position where the previous packed data ends
             begin_token_id = self.shuffled_samples_len[begin_sample_idx] - (
-                self.shuffled_accumulated_samples_len[begin_sample_idx] -
-                (pack_idx) * self.packed_length
-            )  # 前一条packed数据结束的位置是那条数据的第几个token
+                self.shuffled_accumulated_samples_len[begin_sample_idx]
+                -  # noqa: W504,W503
+                (pack_idx) * self.packed_length)
             if begin_token_id == self.shuffled_samples_len[begin_sample_idx]:
                 begin_sample_idx += 1
                 begin_token_id = 0
 
         end_sample_idx = self.search_sample_index(pack_idx)
         end_token_id = self.shuffled_samples_len[end_sample_idx] - (
-            self.shuffled_accumulated_samples_len[end_sample_idx] -
+            self.shuffled_accumulated_samples_len[end_sample_idx]
+            -  # noqa: W504,W503
             (pack_idx + 1) * self.packed_length)
         return begin_sample_idx, begin_token_id, end_sample_idx, end_token_id
 
@@ -186,9 +192,10 @@ class PackedDataset(torch.utils.data.Dataset):
         while begin_sample_idx < end_sample_idx:
             sample_idx = self.shuffled_indices[begin_sample_idx]
             sample = self.dataset[sample_idx]
-            chunk = sample['tokens'][begin_token_id:]
+            chunk = sample['input_ids'][begin_token_id:]
             pack.extend(chunk)
-            _labels = deepcopy(chunk)
+            _labels = sample['labels'][begin_token_id:]
+            # _labels = deepcopy(chunk)
             assert len(_labels) == len(chunk), (_labels, chunk)
             labels.extend(_labels)
             cumulative_len.append(cumulative_len[-1] + len(chunk))
@@ -198,10 +205,11 @@ class PackedDataset(torch.utils.data.Dataset):
 
         sample_idx = self.shuffled_indices[end_sample_idx]
         sample = self.dataset[sample_idx]
-        chunk = sample['tokens'][begin_token_id:
-                                 end_token_id]  # fragment of a sample
+        chunk = sample['input_ids'][begin_token_id:
+                                    end_token_id]  # fragment of a sample
+        _labels = sample['labels'][begin_token_id:end_token_id]
         pack.extend(chunk)
-        _labels = deepcopy(chunk)
+        # _labels = deepcopy(chunk)
         assert len(_labels) == len(chunk), (_labels, chunk)
         labels.extend(_labels)
         cumulative_len.append(cumulative_len[-1] + len(chunk))
@@ -220,6 +228,63 @@ class PackedDataset(torch.utils.data.Dataset):
             item)
         return self.build_pack(pos_before, token_id_before, pos_after,
                                token_id_after)
+
+
+def load_intern_repo_dataset(folder, min_length=0):
+    assert os.path.exists(folder), f'{folder} does not exist.'
+    datasets = []
+
+    for root, dirs, files in os.walk(folder, followlinks=True):
+        dirs.sort()
+        print_log(f'Reading {root}...', logger='current')
+
+        for fn in tqdm(
+                sorted(files),
+                total=len(files),
+                leave=False,
+                disable=dist.get_rank() != 0):
+            if fn.endswith('.bin'):
+                fp = os.path.join(root, fn)
+                ds = JsonlDataset(fp, min_length=min_length)
+
+                if len(ds) == 0:
+                    continue
+                datasets.append(ds)
+
+    return datasets
+
+
+def build_packed_dataset_rank0(dataset_cfg, packed_length=8192, seed=1024):
+    if isinstance(dataset_cfg, dict):
+        datasets = BUILDER.build(dataset_cfg)
+    else:
+        datasets = dataset_cfg
+
+    if not isinstance(datasets, list):
+        datasets = [datasets]
+
+    packed_datasets = []
+
+    for dataset in datasets:
+        ds = PackedDataset(dataset, packed_length, seed=seed)
+        packed_datasets.append(ds)
+
+    dataset = ConcatDataset(datasets=packed_datasets)
+
+    return dataset
+
+
+def build_packed_dataset(*args, **kwargs):
+    if not (dist.is_available() and dist.is_initialized()):
+        return build_packed_dataset_rank0(*args, **kwargs)
+
+    if dist.get_rank() == 0:
+        dataset = build_packed_dataset_rank0(*args, **kwargs)
+        objects = [dataset]
+    else:
+        objects = [None]
+    dist.broadcast_object_list(objects, src=0)
+    return objects[0]
 
 
 def process_intern_repo_dataset(folder,
