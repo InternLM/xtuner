@@ -36,13 +36,13 @@ PROMPT_TEMPLATE = ConfigDict(
         sep='\n',
         stop_words=['<eoa>']),
     internlm2_chat=dict(
-        system='[UNUSED_TOKEN_146]system\n{system}[UNUSED_TOKEN_145]\n',
-        instruction=('[UNUSED_TOKEN_146]user\n{input}[UNUSED_TOKEN_145]\n'
-                     '[UNUSED_TOKEN_146]assistant\n'),
-        suffix='[UNUSED_TOKEN_145]',
+        system='<|im_start|>system\n{system}<|im_end|>\n',
+        instruction=('<|im_start|>user\n{input}<|im_end|>\n'
+                     '<|im_start|>assistant\n'),
+        suffix='<|im_end|>',
         suffix_as_eos=True,
         sep='\n',
-        stop_words=['[UNUSED_TOKEN_145]']),
+        stop_words=['<|im_end|>']),
     moss_sft=PromptTemplateConfig(
         system='{system}\n',
         instruction='<|Human|>: {input}<eoh>\n',

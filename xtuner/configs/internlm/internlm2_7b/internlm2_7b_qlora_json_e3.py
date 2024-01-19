@@ -1,68 +1,10 @@
-# Multi-turn Conversation Example 1
-
-## Data
-
-`./data.json`
-
-```json
-[{
-    "messages":[
-        {
-            "toy_system": "You are a helpful AI assistant.",
-            "toy_input": "Give three tips for staying healthy.",
-            "toy_output": "1.Eat a balanced diet. 2. Exercise regularly. 3. Get enough sleep."
-        },
-        {
-            "toy_input": "How to study English?",
-            "toy_output": "1. Set clear goals. 2. Create a study plan. 3. Build vocabulary. 4. Practice speaking."
-        }
-    ]
-},
-{
-    "messages":[
-        {
-            "toy_system": "You are a helpful AI assistant.",
-            "toy_input": "How to study English?",
-            "toy_output": "1. Set clear goals. 2. Create a study plan. 3. Build vocabulary. 4. Practice speaking."
-        },
-        {
-            "toy_input": "Give three tips for staying healthy.",
-            "toy_output": "1.Eat a balanced diet. 2. Exercise regularly. 3. Get enough sleep."
-        }
-    ]
-}]
-```
-
-## Map Function
-
-`./map_fn.py`
-
-```python
-def multi_turn_1_map_fn(example):
-    messages = example['messages']
-    conversation = []
-    for msg in messages:
-        conversation.append({
-            'system': msg['toy_system'],
-            'input': msg['toy_input'],
-            'output': msg['output']
-        })
-    return {'conversation': conversation}
-```
-
-## Config
-
-Based on [internlm_7b_qlora_json_e3](../../../xtuner/configs/internlm/internlm_7b/internlm_7b_qlora_json_e3.py).
-
-```diff
 # Copyright (c) OpenMMLab. All rights reserved.
 import torch
 from datasets import load_dataset
-+ from mmengine.config import read_base
 from mmengine.dataset import DefaultSampler
 from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
                             LoggerHook, ParamSchedulerHook)
-from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR
+from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR, LinearLR
 from peft import LoraConfig
 from torch.optim import AdamW
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
@@ -75,18 +17,14 @@ from xtuner.engine import DatasetInfoHook, EvaluateChatHook
 from xtuner.model import SupervisedFinetune
 from xtuner.utils import PROMPT_TEMPLATE
 
-+with read_base():
-+    from .map_fn import multi_turn_1_map_fn as dataset_map_fn
-+
 #######################################################################
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-pretrained_model_name_or_path = 'internlm/internlm-7b'
+pretrained_model_name_or_path = 'internlm/internlm2-7b'
 
 # Data
--data_path = 'path/to/your/json_data'
-+data_path = './data.json'
+data_path = 'path/to/your/json_data'
 prompt_template = PROMPT_TEMPLATE.default
 max_length = 2048
 pack_to_max_length = True
@@ -101,6 +39,7 @@ lr = 2e-4
 betas = (0.9, 0.999)
 weight_decay = 0
 max_norm = 1  # grad clip
+warmup_ratio = 0.03
 
 # Evaluate the generation performance during the training
 evaluation_freq = 500
@@ -151,7 +90,6 @@ train_dataset = dict(
         type=load_dataset, path='json', data_files=dict(train=data_path)),
     tokenizer=tokenizer,
     max_length=max_length,
-+   dataset_map_fn=dataset_map_fn,
     template_map_fn=dict(
         type=template_map_fn_factory, template=prompt_template),
     remove_unused_columns=True,
@@ -180,12 +118,22 @@ optim_wrapper = dict(
 
 # learning policy
 # More information: https://github.com/open-mmlab/mmengine/blob/main/docs/en/tutorials/param_scheduler.md  # noqa: E501
-param_scheduler = dict(
-    type=CosineAnnealingLR,
-    eta_min=0.0,
-    by_epoch=True,
-    T_max=max_epochs,
-    convert_to_iter_based=True)
+param_scheduler = [
+    dict(
+        type=LinearLR,
+        start_factor=1e-5,
+        by_epoch=True,
+        begin=0,
+        end=warmup_ratio * max_epochs,
+        convert_to_iter_based=True),
+    dict(
+        type=CosineAnnealingLR,
+        eta_min=0.0,
+        by_epoch=True,
+        begin=warmup_ratio * max_epochs,
+        T_max=max_epochs,
+        convert_to_iter_based=True)
+]
 
 # train, val, test setting
 train_cfg = dict(by_epoch=True, max_epochs=max_epochs, val_interval=1)
@@ -243,11 +191,3 @@ resume = False
 
 # Defaults to use random seed and disable `deterministic`
 randomness = dict(seed=None, deterministic=False)
-```
-
-## Quick Start
-
-```bash
-cd ./examples/demo_data/multi_turn_1
-xtuner train config.py
-```
