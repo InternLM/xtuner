@@ -4,7 +4,7 @@ import argparse
 import torch
 
 from xtuner.chat import GenerationConfig
-from xtuner.chat.templates import CHAT_TEMPLATE, SYSTEM_TEMPLATE
+from xtuner.chat.templates import CHAT_TEMPLATE
 
 
 def parse_args():

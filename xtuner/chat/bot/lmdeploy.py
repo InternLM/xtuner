@@ -60,7 +60,7 @@ class LMDeployBot(BaseBot):
         self.pipeline = pipeline(
             model_name_or_path, backend_config=backend_config)
 
-    def generate(self, text, gen_config=None):
+    def generate(self, text, gen_config: GenerationConfig = None):
 
         from lmdeploy.messages import GenerationConfig as LMGenerationConfig
         lm_gen_config = LMGenerationConfig(
@@ -75,7 +75,7 @@ class LMDeployBot(BaseBot):
         output = self.pipeline([text], gen_config=lm_gen_config)
         return output[0].text
 
-    def predict(self, texts, gen_config=None, repeat=1):
+    def predict(self, texts, gen_config: GenerationConfig = None, repeat=1):
 
         from lmdeploy.messages import GenerationConfig as LMGenerationConfig
         lm_gen_config = LMGenerationConfig(

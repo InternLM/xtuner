@@ -90,13 +90,14 @@ class HFBot(BaseBot):
     def generation_config(self):
         return self._generation_config
 
-    def generate(self, text, gen_config=None):
+    def generate(self, text, gen_config: GenerationConfig = None):
 
         ids = self.tokenizer.encode(text, return_tensors='pt')
 
         from transformers import GenerationConfig as HFGenerationConfig
         hf_gen_config = HFGenerationConfig(
             max_new_tokens=gen_config.max_new_tokens,
+            do_sample=gen_config.temperature > 0,
             temperature=gen_config.temperature,
             top_k=gen_config.top_k,
             top_p=gen_config.top_p,
@@ -117,7 +118,10 @@ class HFBot(BaseBot):
 
         return output
 
-    def predict(self, texts, generation_config=None, repeat=1):
+    def predict(self,
+                texts,
+                generation_config: GenerationConfig = None,
+                repeat=1):
 
         outputs = []
         for text in tqdm(texts):

@@ -28,7 +28,7 @@ class VllmBot(BaseBot):
         output = self.pipeline.generate([text], **vllm_gen_config)
         return output[0].outputs[0].text
 
-    def predict(self, texts, gen_config=None, repeat=1):
+    def predict(self, texts, gen_config: GenerationConfig = None, repeat=1):
 
         from vllm import SamplingParams
         vllm_gen_config = SamplingParams(

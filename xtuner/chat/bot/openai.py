@@ -19,7 +19,7 @@ class OpenaiBot(BaseBot):
     def default_gen_config(self):
         return {}
 
-    def generate(self, text, gen_config=None):
+    def generate(self, text, gen_config: GenerationConfig = None):
 
         openai_gen_config = dict(
             max_tokens=gen_config.max_new_tokens,
@@ -33,7 +33,7 @@ class OpenaiBot(BaseBot):
         output = self.client.completions.create(text, **openai_gen_config)
         return output
 
-    def predict(self, texts, gen_config=None, repeat=1):
+    def predict(self, texts, gen_config: GenerationConfig = None, repeat=1):
 
         openai_gen_config = dict(
             n=repeat,
