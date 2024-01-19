@@ -80,6 +80,151 @@ python -m torch.distributed.launch \
 
 ```
 
+### Step 4，转模型
+
+deepspeed 转 hf：
+
+```
+python xtuner/tools/model_converters/pth_to_hf.py /src/model/path /hf/dst/model/path
+```
+
+hf 转 Turbomind：
+
+```
+lmdeploy convert internlm2-chat-7b /hf/dst/model/path --dst-path /turbomind/dst/model/path
+```
+
+### Step 4，Turbomind 评测
+
+使用内部版 [Opencompass](https://gitlab.pjlab.org.cn/openmmlab/bigmodel/opencompass) 的 ca949db74502a68c8a900afdf751c584fb7c7655 这个 commit id 进行评测。在 `configs/sft_cfg/7B/Ampere_chatml_v053/` 目录下添加如下 config ：
+
+```diff
+import os.path as osp
+from copy import deepcopy
+
+from mmengine.config import read_base
+
+with read_base():
+    # datasets
+    from ...dataset_collections.medium_chat_sft_v053 import \
+        base_datasets, longtext_datasets, math_agent_datasets, cibench_datasets, plugin_eval_datasets
+    # summarizer
+    from ...summarizers.medium_chat_sft_v053 import summarizer
+    # clusters
+    from ...clusters.slurm_llmit2 import infer, eval
+    # lark robot
+    from ...lark import lark_bot_url
+    # base models cfg
+    from .base_model.base_model_turbomind import base_model_cfg, base_longtext_model_cfg, base_agent_llm_cfg, base_math_agent_cfg, \
+        base_cibench_agent_cfg, base_plugin_eval_model_cfg
+
+# ------------------ change here ↓ ------------------
+models_path = [
++     '/path/to/turbomind_model'
+]
+
+# users can set `auto`, `spot`, or `reserved`. Defaults to `auto`.
+infer['runner']['quotatype'] = 'auto'
+infer['runner']['max_num_workers'] = 32
+infer['runner']['partition'] = 'llmit2'
+
+eval['runner']['quotatype'] = 'auto'
+eval['runner']['max_num_workers'] = 64
+eval['runner']['partition'] = 'llmit2'
+# ------------------ change end ------------------
+
+# ------------------ default settings ↓ ------------------
+# careful to change the following settings
+
+# add different eval models
+base_models = []
+longtext_models = []
+math_agent_models = []
+cibench_agent_models = []
+plugin_eval_models = []
+for model_path in models_path:
+    if model_path.endswith('/'):
+        model_path = model_path[:-1]
+    abbr = osp.split(osp.split(model_path)[0])[-1]
+    ckpt_iter = osp.split(model_path)[-1]
+
+    summarizer_abbr = f"{abbr}@{ckpt_iter}"
+
+    tmp_base_model_cfg = deepcopy(base_model_cfg)
+    tmp_base_model_cfg['abbr'] = f"{abbr}@{ckpt_iter}"
+    tmp_base_model_cfg['summarizer_abbr'] = summarizer_abbr
+    tmp_base_model_cfg['path'] = model_path
+
+    # process base model
+    base_models.append(tmp_base_model_cfg)
+
+    # process longtext model
+    tmp_longtext_model_cfg = deepcopy(base_longtext_model_cfg)
+    tmp_longtext_model_cfg['abbr'] = f"{abbr}@{ckpt_iter}-longtext"
+    tmp_longtext_model_cfg['summarizer_abbr'] = summarizer_abbr
+    tmp_longtext_model_cfg['path'] = model_path
+    longtext_models.append(tmp_longtext_model_cfg)
+
+    # set agent model cfg
+    tmp_agent_llm_cfg = deepcopy(base_agent_llm_cfg)
+    tmp_agent_llm_cfg['path'] = model_path
+
+    # process math agent model
+    tmp_math_agent_cfg = deepcopy(base_math_agent_cfg)
+    tmp_math_agent_cfg['abbr'] = f"{abbr}@{ckpt_iter}-math-react"
+    tmp_math_agent_cfg['summarizer_abbr'] = summarizer_abbr
+    tmp_math_agent_cfg['llm'] = tmp_agent_llm_cfg
+    math_agent_models.append(tmp_math_agent_cfg)
+
+    # process cibench agent model
+    tmp_cibench_agent_cfg = deepcopy(base_cibench_agent_cfg)
+    tmp_cibench_agent_cfg['abbr'] = f"{abbr}@{ckpt_iter}-cibench-react"
+    tmp_cibench_agent_cfg['summarizer_abbr'] = summarizer_abbr
+    tmp_cibench_agent_cfg['llm'] = tmp_agent_llm_cfg
+    cibench_agent_models.append(tmp_cibench_agent_cfg)
+
+    # process plugin eval model
+    tmp_plugin_eval_model_cfg = deepcopy(base_plugin_eval_model_cfg)
+    tmp_plugin_eval_model_cfg['abbr'] = f"{abbr}@{ckpt_iter}-plugin-eval"
+    tmp_plugin_eval_model_cfg['summarizer_abbr'] = summarizer_abbr
+    tmp_plugin_eval_model_cfg['path'] = model_path
+    plugin_eval_models.append(tmp_plugin_eval_model_cfg)
+
+del tmp_base_model_cfg, tmp_longtext_model_cfg, tmp_agent_llm_cfg, \
+    tmp_math_agent_cfg, tmp_cibench_agent_cfg, tmp_plugin_eval_model_cfg
+
+# set all models
+model_dataset_combinations = []
+models = []
+datasets = []
+
+# The agent test is relatively slow, so they placed first.
+# process longtext datasets
+model_dataset_combinations.append(dict(models=longtext_models, datasets=longtext_datasets))
+models.extend(longtext_models)
+datasets.extend(longtext_datasets)
+# process math agent datasets
+model_dataset_combinations.append(dict(models=math_agent_models, datasets=math_agent_datasets))
+models.extend(math_agent_models)
+datasets.extend(math_agent_datasets)
+# process cibench agent datasets
+model_dataset_combinations.append(dict(models=cibench_agent_models, datasets=cibench_datasets))
+models.extend(cibench_agent_models)
+datasets.extend(cibench_datasets)
+# process plugin eval datasets
+model_dataset_combinations.append(dict(models=plugin_eval_models, datasets=plugin_eval_datasets))
+models.extend(plugin_eval_models)
+datasets.extend(plugin_eval_datasets)
+
+# process base datasets
+model_dataset_combinations.append(dict(models=base_models, datasets=base_datasets))
+models.extend(base_models)
+datasets.extend(base_datasets)
+
+# ------------------ default settings end ------------------
+
+```
+
 ## 数据集格式
 
 [InternLM](https://github.com/InternLM/InternLM) 仓库所使用的训练数据集会被预先 token 化，格式如下所示：
