@@ -96,6 +96,8 @@ lmdeploy convert internlm2-chat-7b /hf/dst/model/path --dst-path /turbomind/dst/
 
 ### Step 4，Turbomind 评测
 
+评测前需要按照[Opencompass 使用文档](https://aicarrier.feishu.cn/wiki/PR28wWg3tiY2xCkuysccRBNenIf#RNcbdEVZ9oulPQxFz9gcOxwjnff)准备环境。
+
 使用内部版 [Opencompass](https://gitlab.pjlab.org.cn/openmmlab/bigmodel/opencompass) 的 ca949db74502a68c8a900afdf751c584fb7c7655 这个 commit id 进行评测。在 `configs/sft_cfg/7B/Ampere_chatml_v053/` 目录下添加如下 config ：
 
 ```diff
