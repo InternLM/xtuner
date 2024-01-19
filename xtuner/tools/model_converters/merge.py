@@ -57,7 +57,8 @@ def main():
         model,
         args.adapter_name_or_path,
         device_map=args.device,
-        is_trainable=False)
+        is_trainable=False,
+        trust_remote_code=True)
     model_merged = model_unmerged.merge_and_unload()
     print(f'Saving to {args.save_dir}...')
     model_merged.save_pretrained(

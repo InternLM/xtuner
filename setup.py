@@ -99,7 +99,8 @@ if __name__ == '__main__':
     setup(
         name='xtuner',
         version=get_version(),
-        description='A toolkit for efficiently fine-tuning LLM',
+        description=('An efficient, flexible and full-featured toolkit for '
+                     'fine-tuning large models'),
         long_description=readme(),
         long_description_content_type='text/markdown',
         author='XTuner Contributors',
@@ -118,7 +119,8 @@ if __name__ == '__main__':
             'Programming Language :: Python :: 3.10',
             'Topic :: Utilities',
         ],
-        python_requires='>=3.8',
+        # Python maximum version <3.11, to support mpi4py-mpich
+        python_requires='>=3.8, <3.11',
         license='Apache License 2.0',
         install_requires=parse_requirements('requirements/runtime.txt'),
         extras_require={

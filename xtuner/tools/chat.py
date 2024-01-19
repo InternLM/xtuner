@@ -182,7 +182,10 @@ def main():
         if args.adapter is not None:
             print(f'Loading adapter from {args.adapter}...')
             llm.model = PeftModel.from_pretrained(
-                llm.model, args.adapter, offload_folder=args.offload_folder)
+                llm.model,
+                args.adapter,
+                offload_folder=args.offload_folder,
+                trust_remote_code=True)
         search_tool = GoogleSearch(api_key=SERPER_API_KEY)
         chatbot = ReAct(
             llm=llm,
@@ -232,7 +235,10 @@ def main():
         print(f'Load LLM from {args.model_name_or_path}')
         if args.adapter is not None:
             llm = PeftModel.from_pretrained(
-                llm, args.adapter, offload_folder=args.offload_folder)
+                llm,
+                args.adapter,
+                offload_folder=args.offload_folder,
+                trust_remote_code=True)
             print(f'Load adapter from {args.adapter}')
         if args.llava is not None:
             llava_path = snapshot_download(
@@ -260,7 +266,10 @@ def main():
             if 'llm_adapter' in os.listdir(llava_path):
                 adapter_path = osp.join(llava_path, 'llm_adapter')
                 llm = PeftModel.from_pretrained(
-                    llm, adapter_path, offload_folder=args.offload_folder)
+                    llm,
+                    adapter_path,
+                    offload_folder=args.offload_folder,
+                    trust_remote_code=True)
                 print(f'Load LLM adapter from {args.llava}')
             if 'visual_encoder_adapter' in os.listdir(llava_path):
                 adapter_path = osp.join(llava_path, 'visual_encoder_adapter')
@@ -273,7 +282,9 @@ def main():
             # build projector
             projector_path = osp.join(llava_path, 'projector')
             projector = AutoModel.from_pretrained(
-                projector_path, torch_dtype=TORCH_DTYPE_MAP[args.torch_dtype])
+                projector_path,
+                torch_dtype=TORCH_DTYPE_MAP[args.torch_dtype],
+                trust_remote_code=True)
             print(f'Load projector from {args.llava}')
 
             projector.cuda()
