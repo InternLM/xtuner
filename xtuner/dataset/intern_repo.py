@@ -195,7 +195,6 @@ class PackedDataset(torch.utils.data.Dataset):
             chunk = sample['input_ids'][begin_token_id:]
             pack.extend(chunk)
             _labels = sample['labels'][begin_token_id:]
-            # _labels = deepcopy(chunk)
             assert len(_labels) == len(chunk), (_labels, chunk)
             labels.extend(_labels)
             cumulative_len.append(cumulative_len[-1] + len(chunk))
@@ -209,7 +208,6 @@ class PackedDataset(torch.utils.data.Dataset):
                                     end_token_id]  # fragment of a sample
         _labels = sample['labels'][begin_token_id:end_token_id]
         pack.extend(chunk)
-        # _labels = deepcopy(chunk)
         assert len(_labels) == len(chunk), (_labels, chunk)
         labels.extend(_labels)
         cumulative_len.append(cumulative_len[-1] + len(chunk))
