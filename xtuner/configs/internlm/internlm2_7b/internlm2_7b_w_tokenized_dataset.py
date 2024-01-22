@@ -72,7 +72,8 @@ train_dataset = dict(
     dataset_cfg=dict(
         type=load_intern_repo_tokenized_dataset,
         folder=dataset_folder,
-        min_length=0),
+        min_length=0,
+        file_type='.bin'),
     packed_length=max_length,
     seed=1024)
 

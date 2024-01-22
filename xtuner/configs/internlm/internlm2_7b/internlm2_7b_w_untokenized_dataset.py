@@ -24,7 +24,7 @@ pretrained_model_name_or_path = '/mnt/petrelfs/share_data/caoweihan/official_Amp
 use_local_attn = True
 
 # Data
-dataset_folder = '/mnt/petrelfs/share_data/caoweihan/v1_sample_with_legal_cate_hf'  # noqa: E501
+dataset_folder = '/mnt/petrelfs/share_data/caoweihan/v1_sample_with_legal_cate'  # noqa: E501
 prompt_template = PROMPT_TEMPLATE.internlm2_chat
 max_length = 32768
 pack_to_max_length = True
@@ -72,12 +72,12 @@ train_dataset = dict(
     type=build_packed_dataset,
     dataset_cfg=dict(
         type=load_intern_repo_untokenized_dataset,
-        folder='/mnt/petrelfs/share_data/caoweihan/v1_sample_with_legal_cate',
+        folder=dataset_folder,
         tokenizer=tokenizer,
         max_length=max_length,
         template_map_fn=dict(
             type=template_map_fn_factory, template=prompt_template),
-    ),
+        file_type='.json'),
     packed_length=max_length,
     seed=1024)
 

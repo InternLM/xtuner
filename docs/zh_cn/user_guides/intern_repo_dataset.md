@@ -1,18 +1,20 @@
 **注意：本文档的主要目标是详细说明如何根据 InternLM 仓库所提供的数据格式进行模型训练，而非如何训练 InternLM 模型。**
 
+# 使用 tokenized 数据集进行训练
+
 ## 使用教程
 
 ### Step 1, 导出模板 config 文件
 
-可以通过下列命令将名为 internlm_7b_full_intern_repo_dataset_template 的 config 导出至当前目录下：
+可以通过下列命令将名为 internlm2_7b_w_tokenized_dataset 的 config 导出至当前目录下：
 
 ```
-xtuner copy-cfg internlm_7b_full_intern_repo_dataset_template .
+xtuner copy-cfg internlm2_7b_w_tokenized_dataset .
 ```
 
 ### Step 2, 修改模板 config 文件
 
-只需修改 Config 文件中上述接口对应部分即可。
+修改 Config 文件中上述接口对应部分。
 
 ```diff
 ...
@@ -21,22 +23,60 @@ xtuner copy-cfg internlm_7b_full_intern_repo_dataset_template .
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-pretrained_model_name_or_path = 'internlm/internlm-7b'
+- pretrained_model_name_or_path = '/mnt/petrelfs/share_data/caoweihan/official_Ampere_7B_1_0_0'  # noqa: E501
++ pretrained_model_name_or_path = 'internlm/internlm-7b'
+use_local_attn = True
 
 # Data
-- dataset_folder = '/path/to/your/dataset'
+- dataset_folder = '/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train'  # noqa: E501
 + dataset_folder = '/real/dataset/path'
-max_length = 2048
+prompt_template = PROMPT_TEMPLATE.internlm2_chat
+max_length = 32768
 pack_to_max_length = True
 ...
 ```
 
-### Step 3, 启动训练
+### Step 3，获取数据顺序 （可选）
+
+运行下面的代码可获取数据顺序，并存为 txt 文件：
+
+```
+python xtuner/tools/get_data_order.py \
+    --data-folder /path/to/your/data \
+    --save-folder /folder/to/save/data/order \
+    --file-type .bin
+```
+
+其中，`--file-type .bin` 表示需要获取所有以 `.bin` 为结尾的文件的顺序。
+
+同时，需要修改 Step 2 中的 Config 文件，并设置数据顺序文件路径：
+
+```diff
+...
+#######################################################################
+#                      PART 3  Dataset & Dataloader                   #
+#######################################################################
+train_dataset = dict(
+    type=build_packed_dataset,
+    dataset_cfg=dict(
+        type=load_intern_repo_tokenized_dataset,
++       data_order_path='/folder/to/save/data/order/'+'data_order.txt',
+        folder=dataset_folder,
+        min_length=0,
++       file_type='.bin'
+    ),
+    packed_length=max_length,
+    seed=1024)
+```
+
+其中，`file_type='.bin'` 表示给定路径中的所有以 `.bin` 结尾的文件为数据文件。
+
+### Step 4, 启动训练
 
 在 slurm 集群调度系统中可以通过以下命令启动训练：
 
 ```
-srun ${SRUN_ARGS} xtuner train internlm_7b_full_intern_repo_dataset_template_copy.py --launcher slurm --deepspeed deepspeed_zero1
+srun ${SRUN_ARGS} xtuner train internlm2_7b_w_tokenized_dataset_copy.py --launcher slurm --deepspeed deepspeed_zero1
 ```
 
 在阿里云 DLC 中可通过以下命令启动训练：
@@ -73,19 +113,19 @@ python -m torch.distributed.launch \
     --nnodes=${WORLD_SIZE} \
     --node_rank=${RANK} \
     xtuner/tools/train.py \
-    internlm_7b_full_intern_repo_dataset_template_copy.py \
+    internlm2_7b_w_tokenized_dataset_copy.py \
     --deepspeed deepspeed_zero1 \
     --launcher pytorch \
     --work-dir work_dirs/${EXP_NAME}
 
 ```
 
-### Step 4，转模型
+### Step 5，转模型
 
 deepspeed 转 hf：
 
 ```
-python xtuner/tools/model_converters/pth_to_hf.py /src/model/path /hf/dst/model/path
+python xtuner/tools/model_converters/pth_to_hf.py internlm2_7b_w_tokenized_dataset_copy.py /src/model/path /hf/dst/model/path
 ```
 
 hf 转 Turbomind：
@@ -94,7 +134,7 @@ hf 转 Turbomind：
 lmdeploy convert internlm2-chat-7b /hf/dst/model/path --dst-path /turbomind/dst/model/path
 ```
 
-### Step 4，Turbomind 评测
+### Step 6，Turbomind 评测
 
 评测前需要按照[Opencompass 使用文档](https://aicarrier.feishu.cn/wiki/PR28wWg3tiY2xCkuysccRBNenIf#RNcbdEVZ9oulPQxFz9gcOxwjnff)准备环境。
 
@@ -237,3 +277,115 @@ datasets.extend(base_datasets)
 ```
 
 其中，数值为负数的 tokens 在训练过程中不参与 loss 计算。
+
+# 使用 untokenized 数据集进行训练
+
+## 使用教程
+
+### Step 1, 导出模板 config 文件
+
+可以通过下列命令将名为 internlm2_7b_w_untokenized_dataset 的 config 导出至当前目录下：
+
+```
+xtuner copy-cfg internlm2_7b_w_untokenized_dataset .
+```
+
+### Step 2, 修改模板 config 文件
+
+修改 Config 文件中上述接口对应部分。
+
+```diff
+...
+
+#######################################################################
+#                          PART 1  Settings                           #
+#######################################################################
+# Model
+- pretrained_model_name_or_path = '/mnt/petrelfs/share_data/caoweihan/official_Ampere_7B_1_0_0'  # noqa: E501
++ pretrained_model_name_or_path = 'internlm/internlm-7b'
+use_local_attn = True
+
+# Data
+- dataset_folder = '/mnt/petrelfs/share_data/caoweihan/v1_sample_with_legal_cate'  # noqa: E501
++ dataset_folder = '/real/dataset/path'
+prompt_template = PROMPT_TEMPLATE.internlm2_chat
+max_length = 32768
+pack_to_max_length = True
+...
+```
+
+### Step 3，获取数据顺序 （可选）
+
+运行下面的代码可获取数据顺序，并存为 txt 文件：
+
+```
+python xtuner/tools/get_data_order.py \
+    --data-folder /path/to/your/data \
+    --save-folder /folder/to/save/data/order \
+    --file-type .json
+```
+
+其中，`--file-type .json` 表示需要获取所有以 `.json` 为结尾的文件的顺序。
+
+同时，需要修改 Step 2 中的 Config 文件，并设置数据顺序文件路径：
+
+```diff
+...
+#######################################################################
+#                      PART 3  Dataset & Dataloader                   #
+#######################################################################
+train_dataset = dict(
+    type=build_packed_dataset,
+    dataset_cfg=dict(
+        type=load_intern_repo_tokenized_dataset,
++       data_order_path='/folder/to/save/data/order/'+'data_order.txt',
+        folder=dataset_folder,
+        min_length=0,
++       file_type='.json'
+    ),
+    packed_length=max_length,
+    seed=1024)
+```
+
+其中，`file_type='.json'` 表示给定路径中的所有以 `.json` 结尾的文件为数据文件。
+
+### Step 4，离线 token 化并处理原数据集 （可选）
+
+对于大数据集，将原始数据集 token 化，并添加对话模板的过程可能较为耗时，因此可以先离线处理好，每次使用时直接读取处理好的数据集。
+
+运行以下代码对原始数据集进行离线处理：
+
+```
+python xtuner/tools/process_intern_repo_untokenized_datasets.py \
+    --data-folder /path/to/your/data \
+    --save-folder /folder/to/save/processed/data \
+    --tokenizer-path pretrained_model_name_or_path \
+    --prompt-template internlm2_chat
+```
+
+其中 `pretrained_model_name_or_path` 同 `from_pretrained` 接口中的 `pretrained_model_name_or_path`，`--prompt-template` 表示对话模板的种类，其他可选对话模板可参考 [templates](https://github.com/HIT-cwh/xtuner/blob/support_internlm_sft/xtuner/utils/templates.py#L4-L79)。
+
+同时，需要修改 Step 2 中的 Config 文件，并设置存放离线处理后的数据集路径：
+
+```diff
+...
+#######################################################################
+#                      PART 3  Dataset & Dataloader                   #
+#######################################################################
+train_dataset = dict(
+    type=build_packed_dataset,
+    dataset_cfg=dict(
+        type=load_intern_repo_untokenized_dataset,
++       processed_dataset_dict_path=/folder/to/save/processed/data,
+-       folder=dataset_folder,
+-       tokenizer=tokenizer,
+-       max_length=max_length,
+-       template_map_fn=dict(
+-           type=template_map_fn_factory, template=prompt_template),
+    ),
+    packed_length=max_length,
+    seed=1024)
+...
+```
+
+### Step 4, 5, 6, 7，同上
