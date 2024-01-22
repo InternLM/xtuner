@@ -22,7 +22,7 @@ from xtuner.engine.runner import TrainLoop
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-pretrained_model_name_or_path = '/mnt/140/InternLM/internlm2-chat-7b'
+pretrained_model_name_or_path = 'internlm/internlm2-chat-7b'
 
 # Data
 data_path = 'timdettmers/openassistant-guanaco'
