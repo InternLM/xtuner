@@ -14,9 +14,9 @@ from xtuner.dataset import process_hf_dataset
 from xtuner.dataset.collate_fns import default_collate_fn
 from xtuner.dataset.map_fns import oasst1_map_fn, template_map_fn_factory
 from xtuner.engine import DatasetInfoHook, EvaluateChatHook
+from xtuner.engine.runner import TrainLoop
 from xtuner.model import SupervisedFinetune
 from xtuner.utils import PROMPT_TEMPLATE
-from xtuner.engine.runner import TrainLoop
 
 #######################################################################
 #                          PART 1  Settings                           #
@@ -164,7 +164,8 @@ default_hooks = dict(
     # enable the parameter scheduler.
     param_scheduler=dict(type=ParamSchedulerHook),
     # save checkpoint per epoch.
-    checkpoint=dict(type=CheckpointHook, by_epoch=False, interval=save_interval),
+    checkpoint=dict(
+        type=CheckpointHook, by_epoch=False, interval=save_interval),
     # set sampler seed in distributed evrionment.
     sampler_seed=dict(type=DistSamplerSeedHook),
 )
