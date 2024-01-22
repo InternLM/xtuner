@@ -49,7 +49,7 @@ warmup_ratio = 0.03  # warmup
 
 # Save
 save_steps = 500  # 保存间隔
-save_total_limit = -1  # 最大保存 checkpoint 个数，-1 表示无限制
+save_total_limit = 2  # 最大保存 checkpoint 个数，-1 表示无限制
 
 # Evaluate the generation performance during the training
 evaluation_freq = 500  # 验证对话效果频率
