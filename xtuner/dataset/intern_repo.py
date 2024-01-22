@@ -1,4 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import ast
 import itertools as it
 import json
 import mmap
@@ -9,13 +10,15 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from datasets import Dataset
+from datasets import Dataset, load_dataset, load_from_disk
 from mmengine import print_log
 from torch import distributed as dist
 from torch.utils.data import ConcatDataset
 from tqdm import tqdm
 
+from xtuner.dataset.map_fns import openai_map_fn
 from xtuner.registry import BUILDER
+from .huggingface import process
 
 
 class JsonlDataset(torch.utils.data.Dataset):
@@ -228,28 +231,99 @@ class PackedDataset(torch.utils.data.Dataset):
                                token_id_after)
 
 
-def load_intern_repo_dataset(folder, min_length=0):
+def load_intern_repo_tokenized_dataset(folder,
+                                       min_length=0,
+                                       data_order_path=None,
+                                       file_type='.bin'):
     assert os.path.exists(folder), f'{folder} does not exist.'
     datasets = []
 
-    triples = [('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train', ['cn'], []), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn', ['chinese_sensitive_v1', 'code2question', 'code_library_10k_import_ds1000', 'long_alpaca', 'self_critique_answer_no_critique', 'self_critique_refine_answer', 'dolly_chat_format_safety_filtered_v1', 'firefly_split_chat_format', 'flan2022_sampling_each256_niv2_zh_chat_format', 'hallucination', 'self_critique_gen_qa', 'stackoverflow_selected_python_chat_format', 'zephyr_ultrachat_200k_filtered', 'know_saraswati_cot', 'pj_characters_x10', 'zephyr_ultrafeedback_clean_filtered', 'emoji_chat_format', 'gmath', 'kaggle_cn', 'kaggle_en', 'lab_info', 'lima_chat_format_safety_filtered_v1', 'merged_math', 'moss_emotion_v2', 'msagent', 'WizardLM', 'char_x10_chat_format', 'coigv03_01_chat_format_safety_filtered_v1', 'government_department_safety_filtered_v1', 'greeting_x10', 'leetcode_filter_chat_refined', 'puyu_stylize', 'data_reflow', 'flan_v2_official_chat_format_512_safety_filtered_v1', 'math_coder_v0_2', 'open_file', 'ruozhibax10', 'safety_response', 'share_gpt_v6_chat_format_safety_filtered_v1', 'slimorca_dedup', 'ultrafeedback_critique', 'chinese_poetry_10x', 'EvolCode_v4x_r2_0', 'gsm8k_chat', 'ministry_of_foreign_affairs_safety_filtered_v1', 'no_robots', 'openai_summary', 'poem_chat_format', 'rolebench_w_sys_filtered', 'state_council_policy_safety_filtered_v1', 'unnatural_instructions_chat_format', 'code_library_ds1000', 'gaokao_essay_safety_filtered_v1', 'long_qlora', 'moss_no_moss_chat_fudan_format_safety_filtered_v1', 'puyu_chat_format_v2', 'self_critique_qa', 'self_critique_refine_critique', 'toolbench_0830'], []), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/chinese_sensitive_v1', [], ['18k_sensitive_refinev2_pos2en1cn_qmark_aug_2x_insertpos_addmeta.bin.meta', 'red_team_chat_format_0808-0822_refine_2x.bin', 'red_team_chat_format_0808-0822_refine_2x.bin.meta', '18k_sensitive_refinev2_pos2en1cn_qmark_aug_2x_insertpos_addmeta.bin', 'sensitive_word_qa_5w.bin', 'sensitive_word_qa_5w.bin.meta']), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/code2question', [], ['c_s_format_datum_code.bin', 'c_s_format_datum_code.bin.meta']), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/code_library_10k_import_ds1000', [], ['code_library_10k_import_ds1000.bin', 'code_library_10k_import_ds1000.bin.meta']), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/long_alpaca', [], ['LongAlpaca-12k.bin', 'LongAlpaca-12k.bin.meta']), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/self_critique_answer_no_critique', [], ['base_train_20.bin', 'base_train_20.bin.meta']), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/self_critique_refine_answer', [], ['critiques_train.bin.meta', 'critiques_train.bin']), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/dolly_chat_format_safety_filtered_v1', [], ['dolly.bin', 'dolly.bin.meta']), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/firefly_split_chat_format', [], ['AncientPoem_chat.bin', 'Composition_chat.bin', 'Couplet_chat.bin', 'Cot_chat.bin', 'MusicComment_chat.bin', 'KeywordRecognition_chat.bin', 'Program_chat.bin.meta', 'StoryGeneration_chat.bin.meta', 'ProseGeneration_chat.bin.meta', 'OpenQA_chat.bin', 'StoryGeneration_chat.bin', 'ClassicalChinese_chat.bin', 'TextCorrection_chat.bin', 'ProseGeneration_chat.bin', 'Composition_chat.bin.meta', 'Summary_chat.bin.meta', 'ClassicalChinese_chat.bin.meta', 'Cot_chat.bin.meta', 'JinYongGeneration_chat.bin', 'AncientPoem_chat.bin.meta', 'NER_chat.bin.meta', 'MRC_chat.bin.meta', 'Couplet_chat.bin.meta', 'TextCorrection_chat.bin.meta', 'ProductDesc_chat.bin', 'Summary_chat.bin', 'TextMatching_chat.bin', 'Translation_chat.bin', 'LyricGeneration_chat.bin', 'Dictionary_chat.bin', 'SentimentAnalyze_chat.bin', 'NLI_chat.bin.meta', 'Program_chat.bin', 'NER_chat.bin', 'NLI_chat.bin', 'OpenQA_chat.bin.meta', 'ProductDesc_chat.bin.meta', 'MRC_chat.bin', 'TextMatching_chat.bin.meta', 'Dictionary_chat.bin.meta', 'MusicComment_chat.bin.meta', 'Translation_chat.bin.meta', 'LyricGeneration_chat.bin.meta', 'JinYongGeneration_chat.bin.meta', 'KeywordRecognition_chat.bin.meta', 'SentimentAnalyze_chat.bin.meta']), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/flan2022_sampling_each256_niv2_zh_chat_format', [], ['chat_format_niv2_zh.bin', 'chat_format_niv2_zh.bin.meta']), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/hallucination', [], ['event1_0_answer_with_doc_16384_zh_0_name.bin', 'event1_0_subjective_zh_0.bin', 'person2_0_subjective_zh_0.bin', 'person1_0_answer_with_doc_16384_zh_0_name.bin', 'person1_1_question_16384_zh_0.bin', 'thing1_0_answerable_16384_zh_0.bin', 'thing1_1_answer_with_doc_16384_zh_0_name.bin', 'location1_0_answer_with_doc_16384_zh_0_name.bin', 'person2_0_faithful_answer_zh_0_name.bin', 'person2_1_annotate_16384_zh_1_answer.bin.meta', 'event1_1_answer_with_doc_16384_zh_0_name.bin.meta', 'person1_0_subjective_zh_0.bin.meta', 'person2_0_faithful_answer_zh_0_name.bin.meta', 'event1_0_faithful_answer_zh_0_name.bin.meta', 'thing1_0_best_question_zh_0.bin.meta', 'event1_0_answerable_16384_zh_0.bin', 'thing1_1_question_16384_zh_0.bin', 'location1_1_question_16384_zh_0.bin', 'person1_1_best_question_zh_0.bin', 'event1_1_subjective_zh_0.bin', 'person2_0_answerable_16384_zh_0.bin', 'person2_1_subjective_zh_0.bin', 'event1_1_best_question_zh_0.bin', 'person1_0_faithful_answer_zh_0_name.bin', 'location1_0_faithful_answer_zh_0_name.bin.meta', 'person1_1_answer_with_doc_16384_zh_0_name.bin.meta', 'person1_1_faithful_answer_zh_0_name.bin.meta', 'person2_0_question_16384_zh_0.bin.meta', 'person2_0_best_question_zh_0.bin.meta', 'thing1_0_answerable_16384_zh_0.bin.meta', 'thing1_1_answer_with_doc_16384_zh_0_name.bin.meta', 'location1_0_answerable_16384_zh_0.bin.meta', 'location1_0_best_question_zh_0.bin.meta', 'location1_1_answerable_16384_zh_0.bin.meta', 'person1_0_question_16384_zh_0.bin.meta', 'thing1_1_answerable_16384_zh_0.bin.meta', 'thing1_1_faithful_answer_zh_0_name.bin.meta', 'location1_0_subjective_zh_0.bin', 'person1_0_best_question_zh_0.bin', 'person1_1_faithful_answer_zh_0_name.bin', 'event1_0_best_question_zh_0.bin', 'event1_0_annotate_16384_zh_1_answer.bin', 'event1_1_annotate_16384_zh_1_answer.bin', 'person1_0_question_16384_zh_0.bin', 'thing1_1_answerable_16384_zh_0.bin', 'person2_0_subjective_zh_0.bin.meta', 'location1_1_best_question_zh_0.bin.meta', 'location1_1_question_16384_zh_0.bin.meta', 'location1_1_subjective_zh_0.bin.meta', 'person2_1_best_question_zh_0.bin.meta', 'person2_1_answer_with_doc_16384_zh_0_name.bin.meta', 'event1_1_answerable_16384_zh_0.bin', 'person2_0_annotate_16384_zh_1_answer.bin', 'person2_1_annotate_16384_zh_1_answer.bin', 'person2_1_faithful_answer_zh_0_name.bin', 'thing1_0_question_16384_zh_0.bin', 'location1_1_subjective_zh_0.bin', 'location1_0_question_16384_zh_0.bin', 'person1_0_annotate_16384_zh_1_answer.bin', 'person1_1_annotate_16384_zh_1_answer.bin', 'person2_0_answer_with_doc_16384_zh_0_name.bin', 'person2_1_answerable_16384_zh_0.bin', 'event1_0_question_16384_zh_0.bin.meta', 'event1_0_subjective_zh_0.bin.meta', 'location1_1_annotate_16384_zh_1_answer.bin.meta', 'thing1_1_best_question_zh_0.bin.meta', 'thing1_1_question_16384_zh_0.bin.meta', 'thing1_0_annotate_16384_zh_1_answer.bin.meta', 'event1_1_annotate_16384_zh_1_answer.bin.meta', 'location1_0_answer_with_doc_16384_zh_0_name.bin.meta', 'person1_1_annotate_16384_zh_1_answer.bin.meta', 'thing1_1_subjective_zh_0.bin.meta', 'event1_0_question_16384_zh_0.bin', 'location1_1_best_question_zh_0.bin', 'person2_1_question_16384_zh_0.bin', 'thing1_0_subjective_zh_0.bin', 'location1_1_faithful_answer_zh_0_name.bin', 'event1_0_answer_with_doc_16384_zh_0_name.bin.meta', 'event1_1_faithful_answer_zh_0_name.bin.meta', 'person1_0_answerable_16384_zh_0.bin.meta', 'person1_0_best_question_zh_0.bin.meta', 'person1_1_subjective_zh_0.bin.meta', 'person2_1_faithful_answer_zh_0_name.bin.meta', 'person2_1_question_16384_zh_0.bin.meta', 'person1_1_answerable_16384_zh_0.bin.meta', 'person1_1_question_16384_zh_0.bin.meta', 'person2_0_answerable_16384_zh_0.bin.meta', 'person2_1_answerable_16384_zh_0.bin.meta', 'event1_1_best_question_zh_0.bin.meta', 'person1_1_answerable_16384_zh_0.bin', 'thing1_1_best_question_zh_0.bin', 'location1_1_answerable_16384_zh_0.bin', 'person2_1_best_question_zh_0.bin', 'thing1_1_subjective_zh_0.bin', 'event1_0_faithful_answer_zh_0_name.bin', 'person2_1_answer_with_doc_16384_zh_0_name.bin', 'thing1_1_faithful_answer_zh_0_name.bin', 'event1_1_answerable_16384_zh_0.bin.meta', 'location1_0_annotate_16384_zh_1_answer.bin.meta', 'thing1_0_faithful_answer_zh_0_name.bin.meta', 'person1_0_answer_with_doc_16384_zh_0_name.bin.meta', 'event1_0_answerable_16384_zh_0.bin.meta', 'thing1_0_answer_with_doc_16384_zh_0_name.bin.meta', 'thing1_1_annotate_16384_zh_1_answer.bin.meta', 'event1_0_annotate_16384_zh_1_answer.bin.meta', 'person1_0_annotate_16384_zh_1_answer.bin.meta', 'location1_1_faithful_answer_zh_0_name.bin.meta', 'person1_0_faithful_answer_zh_0_name.bin.meta', 'event1_1_faithful_answer_zh_0_name.bin', 'location1_0_annotate_16384_zh_1_answer.bin', 'location1_1_annotate_16384_zh_1_answer.bin', 'person1_1_answer_with_doc_16384_zh_0_name.bin', 'person2_0_question_16384_zh_0.bin', 'thing1_0_faithful_answer_zh_0_name.bin', 'event1_1_answer_with_doc_16384_zh_0_name.bin', 'person1_1_subjective_zh_0.bin', 'event1_1_question_16384_zh_0.bin', 'person2_0_best_question_zh_0.bin', 'thing1_0_annotate_16384_zh_1_answer.bin', 'thing1_0_answer_with_doc_16384_zh_0_name.bin', 'thing1_1_annotate_16384_zh_1_answer.bin', 'location1_1_answer_with_doc_16384_zh_0_name.bin', 'thing1_0_best_question_zh_0.bin', 'location1_0_subjective_zh_0.bin.meta', 'person2_0_annotate_16384_zh_1_answer.bin.meta', 'thing1_0_question_16384_zh_0.bin.meta', 'event1_1_question_16384_zh_0.bin.meta', 'person2_1_subjective_zh_0.bin.meta', 'person2_0_answer_with_doc_16384_zh_0_name.bin.meta', 'location1_0_faithful_answer_zh_0_name.bin', 'person1_0_answerable_16384_zh_0.bin', 'person1_0_subjective_zh_0.bin', 'location1_0_answerable_16384_zh_0.bin', 'location1_0_best_question_zh_0.bin', 'event1_0_best_question_zh_0.bin.meta', 'thing1_0_subjective_zh_0.bin.meta', 'person1_1_best_question_zh_0.bin.meta', 'event1_1_subjective_zh_0.bin.meta', 'location1_0_question_16384_zh_0.bin.meta', 'location1_1_answer_with_doc_16384_zh_0_name.bin.meta']), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/self_critique_gen_qa', [], ['base_train_30.bin', 'base_train_30.bin.meta']), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/stackoverflow_selected_python_chat_format', [], ['stackoverflow_selected_python_chat_format.bin.meta', 'stackoverflow_selected_python_chat_format.bin']), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/zephyr_ultrachat_200k_filtered', [], ['zephyr-ultrachat-200k_sft_test.bin.meta', 'zephyr-ultrachat-200k_sft_test.bin', 'zephyr-ultrachat-200k_sft_train.bin', 'zephyr-ultrachat-200k_sft_train.bin.meta']), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/know_saraswati_cot', [], ['know_saraswati_cot.bin.meta', 'know_saraswati_cot.bin']), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/pj_characters_x10', [], ['pj_characters_x10.bin', 'pj_characters_x10.bin.meta']), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/zephyr_ultrafeedback_clean_filtered', [], ['zephyr-ultrafeedback_sft_test_clean.bin', 'zephyr-ultrafeedback_sft_train_clean.bin', 'zephyr-ultrafeedback_sft_train_clean.bin.meta', 'zephyr-ultrafeedback_sft_test_clean.bin.meta']), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/emoji_chat_format', [], ['emoji_chat_format.bin.meta', 'emoji_chat_format.bin']), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/gmath', [], ['gmath.bin', 'gmath.bin.meta']), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/kaggle_cn', [], ['info.bin', 'info.bin.meta']), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/kaggle_en', [], ['info.bin', 'info.bin.meta']), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/lab_info', [], ['lab_info.bin.meta', 'lab_info.bin']), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/lima_chat_format_safety_filtered_v1', [], ['lima_chat_format.bin.meta', 'lima_chat_format.bin']), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/merged_math', [], ['merged_data_20231207.bin.meta', 'merged_data_20231207.bin']), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/moss_emotion_v2', [], ['moss_emotion.bin.meta', 'moss_emotion.bin']), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/msagent', [], ['chatml_train.bin', 'dev.bin.meta', 'train.bin.meta', 'train.bin', 'dev.bin', 'chatml_dev.bin', 'chatml_dev.bin.meta', 'chatml_train.bin.meta']), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/WizardLM', [], ['alpaca_evol_instruct_70k.bin.meta', 'alpaca_evol_instruct_70k.bin']), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/char_x10_chat_format', [], ['char_x10_chat_format.bin', 'char_x10_chat_format.bin.meta']), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/coigv03_01_chat_format_safety_filtered_v1', [], ['exam_chat.bin.meta', 'cmcc_safety_filterd.bin', 'human1_chat_format.bin', 'leetcode_chat_clean_v3.bin', 'human1_chat_format.bin.meta', 'leetcode_chat_clean_v3.bin.meta', 'cmcc_safety_filterd.bin.meta', 'exam_chat.bin']), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/government_department_safety_filtered_v1', [], ['zhengfu_qa_v3.bin', 'zhengfu_qa_v3.bin.meta']), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/greeting_x10', [], ['greeting_x10.bin.meta', 'greeting_x10.bin']), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/leetcode_filter_chat_refined', [], ['leetcode_filter_chat_refined.bin', 'leetcode_filter_chat_refined.bin.meta']), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/puyu_stylize', [], ['puyu_stylize_processd2.bin', 'puyu_stylize_processd2.bin.meta']), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/data_reflow', [], ['both_bad_aug.bin.meta', 'both_bad_aug.bin', 'gpt4_better_aug.bin', 'both_good_aug.bin.meta', 'both_good_aug.bin', 'gpt4_better_aug.bin.meta']), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/flan_v2_official_chat_format_512_safety_filtered_v1', [], ['niv2.bin', 'dialog.bin', 'flan2021.bin', 't0.bin', 'cot.bin', 'cot.bin.meta', 't0.bin.meta', 'dialog.bin.meta', 'flan2021.bin.meta', 'niv2.bin.meta']), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/math_coder_v0_2', [], ['math_ci.bin.meta', 'math_ci_cp2.bin.meta', 'gsm8k_ci.bin', 'gsm8k_ci.bin.meta', 'gsm8k_ci_cp1.bin.meta', 'gsm8k_ci_cp2.bin', 'math_ci_cp1.bin', 'math_ci_cp1.bin.meta', 'gsm8k_ci_cp2.bin.meta', 'gsm8k_ci_cp1.bin', 'math_ci.bin', 'math_ci_cp2.bin']), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/open_file', [], ['file_open_instruction_chat.bin', 'file_open_instruction_chat.bin.meta']), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/ruozhibax10', [], ['ruozhiba_aug.bin.meta', 'ruozhiba_aug.bin']), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/safety_response', [], ['safety_response.bin', 'safety_response.bin.meta']), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/share_gpt_v6_chat_format_safety_filtered_v1', [], ['share_gpt_v6.bin.meta', 'share_gpt_v6.bin']), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/slimorca_dedup', [], ['slim_orca_dedup_filtered.bin.meta', 'slim_orca_dedup_filtered.bin']), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/ultrafeedback_critique', [], ['false_qa.bin', 'sharegpt.bin.meta', 'ultrachat.bin.meta', 'truthful_qa.bin', 'sharegpt.bin', 'flan.bin.meta', 'evol_instruct.bin', 'ultrachat.bin', 'evol_instruct.bin.meta', 'false_qa.bin.meta', 'flan.bin', 'truthful_qa.bin.meta']), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/chinese_poetry_10x', [], ['chinese-poetry-10x.bin.meta', 'chinese-poetry-10x.bin']), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/EvolCode_v4x_r2_0', [], ['polishedcode-v4.x-r2.bin.meta', 'polishedcode-v4.x-r2.bin']), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/gsm8k_chat', [], ['train_socratic.bin', 'train_socratic.bin.meta']), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/ministry_of_foreign_affairs_safety_filtered_v1', [], ['waijiaobu_qa_v3.bin.meta', 'waijiaobu_qa_v3.bin']), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/no_robots', [], ['no_robots_train_filtered.bin', 'no_robots_test_filtered.bin', 'no_robots_test_filtered.bin.meta', 'no_robots_train_filtered.bin.meta']), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/openai_summary', [], ['tldr_3_filtered_train.bin.meta', 'tldr_3_filtered_train.bin']), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/poem_chat_format', [], ['poem_chat_format.bin.meta', 'poem_chat_format.bin']), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/rolebench_w_sys_filtered', [], ['rolebench-eng_role-generalization_general_train.bin', 'rolebench-zh_general_train.bin', 'rolebench-eng_role-generalization_role_specific_train.bin.meta', 'rolebench-eng_instruction-generalization_general_train.bin', 'rolebench-eng_role-generalization_general_train.bin.meta', 'rolebench-eng_instruction-generalization_role_specific_train.bin', 'rolebench-eng_instruction-generalization_role_specific_train.bin.meta', 'rolebench-eng_role-generalization_role_specific_train.bin', 'rolebench-eng_instruction-generalization_general_train.bin.meta', 'rolebench-zh_general_train.bin.meta', 'rolebench-zh_role_specific_train.bin.meta', 'rolebench-zh_role_specific_train.bin']), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/state_council_policy_safety_filtered_v1', [], ['guowuyuan_qa_v3.bin.meta', 'guowuyuan_qa_v3.bin']), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/unnatural_instructions_chat_format', [], ['full_data.bin', 'full_data.bin.meta']), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/code_library_ds1000', [], ['code_library_ds1000.bin.meta', 'code_library_ds1000.bin']), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/gaokao_essay_safety_filtered_v1', [], ['gaokao_essay.bin', 'gaokao_essay.bin.meta']), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/long_qlora', [], ['LongQLoRA-SFT-Data-39k.bin.meta', 'LongQLoRA-SFT-Data-39k.bin']), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/moss_no_moss_chat_fudan_format_safety_filtered_v1', [], ['moss_v1_honest.bin', 'moss_v1_harmless_en.bin', 'moss_v1_harmless_zh_china-related_gpt4_fix_qmark_aug.bin.meta', 'moss_v1_switching.bin', 'moss_v1_awesome_en.bin', 'moss_v1_code.bin.meta', 'moss_v1_rp.bin.meta', 'moss_v1_continue.bin.meta', 'moss_v1_harmless_zh_china-related_gpt4_fix_qmark_aug.bin', 'moss_v1_honest.bin.meta', 'moss_v1_awesome_zh.bin.meta', 'moss_v1_harmless_en.bin.meta', 'moss_v1_advice.bin', 'moss_v1_awesome_en.bin.meta', 'moss_v1_advice.bin.meta', 'moss_v1_continue.bin', 'moss_v1_switching.bin.meta', 'moss_v1_awesome_zh.bin', 'moss_v1_code.bin', 'moss_v1_rp.bin', 'moss_v1_harmless_zh_non-chinarelated.bin', 'moss_v1_writing.bin', 'moss_v1_harmless_zh_non-chinarelated.bin.meta', 'moss_v1_writing.bin.meta']), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/puyu_chat_format_v2', [], ['puyu_chat_format_v2.bin', 'puyu_chat_format_v2.bin.meta']), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/self_critique_qa', [], ['base_train_50.bin.meta', 'base_train_50.bin']), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/self_critique_refine_critique', [], ['helpfulness_train.bin.meta', 'helpfulness_train.bin']), ('/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train/cn/toolbench_0830', [], ['toolllama_G123_dfs_train.bin', 'toolllama_G123_dfs_eval.bin', 'toolllama_G1_retrieve_random_mix_chatml_train.bin', 'toolllama_G1_retrieve_random_mix_chatml_train.bin.meta', 'toolllama_G1_retrieve_random_mix_train.bin.meta', 'toolllama_G123_dfs_eval.bin.meta', 'toolllama_G123_dfs_train.bin.meta', 'toolllama_G1_retrieve_random_mix_chatml_test.bin', 'toolllama_G123_dfs_chatml_eval.bin', 'toolllama_G123_dfs_chatml_eval.bin.meta', 'toolllama_G1_retrieve_random_mix_train.bin', 'toolllama_G1_retrieve_random_mix_test.bin', 'toolllama_G123_dfs_chatml_train.bin', 'toolllama_G1_retrieve_random_mix_chatml_test.bin.meta', 'toolllama_G1_retrieve_random_mix_test.bin.meta', 'toolllama_G123_dfs_chatml_train.bin.meta'])]
+    if data_order_path is not None:
+        data_order = load_dataset(
+            'text', data_files=data_order_path, split='train')['text']
+        for i, fp in enumerate(data_order):
+            data_order[i] = os.path.join(folder, fp)
+    else:
+        triples = list(os.walk(folder, followlinks=True))
+        data_order = []
+        for root, dirs, files in triples:
+            dirs.sort()
+            for fn in sorted(files):
+                if fn.endswith(file_type):
+                    fp = os.path.join(root, fn)
+                    data_order.append(fp)
 
-    for root, dirs, files in triples:
-        dirs.sort()
-        print_log(f'Reading {root}...', logger='current')
+    for fp in data_order:
+        print_log(f'Reading {fp}...', logger='current')
+        ds = JsonlDataset(fp, min_length=min_length)
 
-        for fn in tqdm(
-                sorted(files),
-                total=len(files),
-                leave=False,
-                disable=dist.get_rank() != 0):
-            if fn.endswith('.bin'):
-                fp = os.path.join(root, fn)
-                ds = JsonlDataset(fp, min_length=min_length)
+        if len(ds) == 0:
+            continue
+        datasets.append(ds)
 
-                if len(ds) == 0:
-                    continue
-                datasets.append(ds)
+    return datasets
+
+
+def load_intern_repo_untokenized_dataset(processed_dataset_dict_path=None,
+                                         folder=None,
+                                         tokenizer=None,
+                                         max_length=None,
+                                         template_map_fn=None,
+                                         data_order_path=None,
+                                         file_type='.json'):
+
+    assert processed_dataset_dict_path or (folder and tokenizer and max_length)
+
+    if processed_dataset_dict_path is not None:
+        ds = load_from_disk(processed_dataset_dict_path)
+        datasets = []
+        for key, data in ds.items():
+            datasets.append((key, data))
+        datasets = sorted(datasets, key=lambda x: int(x[0]))
+        datasets = [x[1] for x in datasets]
+        return datasets
+
+    assert os.path.exists(folder), f'{folder} does not exist.'
+    datasets = []
+
+    if data_order_path is not None:
+        data_order = load_dataset(
+            'text', data_files=data_order_path, split='train')['text']
+        for i, fp in enumerate(data_order):
+            data_order[i] = os.path.join(folder, fp)
+    else:
+        triples = list(os.walk(folder, followlinks=True))
+        data_order = []
+        for root, dirs, files in triples:
+            dirs.sort()
+            for fn in sorted(files):
+                if fn.endswith(file_type):
+                    fp = os.path.join(root, fn)
+                    data_order.append(fp)
+
+    for fp in data_order:
+        print_log(f'Reading {fp}...', logger='current')
+        dataset = []
+        with open(fp) as file:
+            lines = file.readlines()
+            for line in lines:
+                line = ast.literal_eval(line)
+                dataset.append({'messages': line})
+        dataset = Dataset.from_list(dataset)
+        dataset = process(
+            dataset,
+            tokenizer,
+            max_length,
+            dataset_map_fn=openai_map_fn,
+            template_map_fn=template_map_fn,
+            remove_unused_columns=True,
+            pack_to_max_length=False,
+            map_num_proc=32)
+
+        if len(dataset) == 0:
+            continue
+
+        datasets.append(dataset)
 
     return datasets
 

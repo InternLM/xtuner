@@ -7,7 +7,8 @@ from torch.utils.data import BatchSampler
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from xtuner.dataset.collate_fns import intern_repo_collate_fn
-from xtuner.dataset.intern_repo import process_intern_repo_dataset, build_packed_dataset, load_intern_repo_dataset
+from xtuner.dataset.intern_repo import (build_packed_dataset,
+                                        load_intern_repo_tokenized_dataset)
 from xtuner.dataset.samplers import InternlmRepoSampler
 from xtuner.engine import (DatasetInfoHook, EvaluateChatHook,
                            LocalAttnArgsToMessageHubHook, ThroughputHook)
@@ -69,13 +70,11 @@ model = dict(
 train_dataset = dict(
     type=build_packed_dataset,
     dataset_cfg=dict(
-        type=load_intern_repo_dataset,
+        type=load_intern_repo_tokenized_dataset,
         folder=dataset_folder,
-        min_length=0
-    ),
+        min_length=0),
     packed_length=max_length,
-    seed=1024
-)
+    seed=1024)
 # train_dataset = dict(
 #     type=process_intern_repo_dataset,
 #     folder=dataset_folder,

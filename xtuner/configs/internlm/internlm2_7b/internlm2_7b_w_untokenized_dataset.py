@@ -1,5 +1,4 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-from datasets import load_dataset
 from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
                             LoggerHook, ParamSchedulerHook)
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR
@@ -8,9 +7,9 @@ from torch.utils.data import BatchSampler
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from xtuner.dataset.collate_fns import intern_repo_collate_fn
-from xtuner.dataset.huggingface import process
-from xtuner.dataset.intern_repo import build_packed_dataset
-from xtuner.dataset.map_fns import default_map_fn, template_map_fn_factory
+from xtuner.dataset.intern_repo import (build_packed_dataset,
+                                        load_intern_repo_untokenized_dataset)
+from xtuner.dataset.map_fns import template_map_fn_factory
 from xtuner.dataset.samplers import InternlmRepoSampler
 from xtuner.engine import (DatasetInfoHook, EvaluateChatHook,
                            LocalAttnArgsToMessageHubHook, ThroughputHook)
@@ -72,14 +71,10 @@ model = dict(
 train_dataset = dict(
     type=build_packed_dataset,
     dataset_cfg=dict(
-        type=process,
-        dataset=dict(type=load_dataset, path='json', data_dir=dataset_folder),
+        type=load_intern_repo_untokenized_dataset,
+        folder='/mnt/petrelfs/share_data/caoweihan/v1_sample_with_legal_cate',
         tokenizer=tokenizer,
         max_length=max_length,
-        remove_unused_columns=True,
-        pack_to_max_length=False,
-        map_num_proc=96,
-        dataset_map_fn=default_map_fn,
         template_map_fn=dict(
             type=template_map_fn_factory, template=prompt_template),
     ),
