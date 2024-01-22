@@ -40,7 +40,7 @@ warmup_ratio = 0.03
 
 # Save
 save_steps = 500
-save_total_limit = -1  # -1 means unlimited
+save_total_limit = 2  # Maximum checkpoints to keep (-1 means unlimited)
 
 #######################################################################
 #                      PART 2  Model & Tokenizer                      #
