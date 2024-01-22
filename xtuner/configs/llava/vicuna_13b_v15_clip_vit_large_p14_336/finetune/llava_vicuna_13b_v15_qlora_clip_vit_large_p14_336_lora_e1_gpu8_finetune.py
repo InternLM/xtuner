@@ -13,7 +13,7 @@ from xtuner.dataset import LLaVADataset
 from xtuner.dataset.collate_fns import default_collate_fn
 from xtuner.dataset.map_fns import llava_map_fn, template_map_fn_factory
 from xtuner.dataset.samplers import LengthGroupedSampler
-from xtuner.engine import DatasetInfoHook, EvaluateChatHook
+from xtuner.engine.hooks import DatasetInfoHook, EvaluateChatHook
 from xtuner.engine.runner import TrainLoop
 from xtuner.model import LLaVAModel
 from xtuner.utils import PROMPT_TEMPLATE

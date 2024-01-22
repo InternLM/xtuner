@@ -13,7 +13,7 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer,
 
 from xtuner.dataset import process_hf_dataset
 from xtuner.dataset.collate_fns import default_collate_fn
-from xtuner.engine import DatasetInfoHook
+from xtuner.engine.hooks import DatasetInfoHook
 from xtuner.engine.runner import TrainLoop
 from xtuner.model import SupervisedFinetune
 

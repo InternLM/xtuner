@@ -15,7 +15,7 @@ from xtuner.dataset.collate_fns import default_collate_fn
 from xtuner.dataset.map_fns import (crime_kg_assitant_map_fn,
                                     law_reference_map_fn,
                                     template_map_fn_factory)
-from xtuner.engine import DatasetInfoHook, EvaluateChatHook
+from xtuner.engine.hooks import DatasetInfoHook, EvaluateChatHook
 from xtuner.engine.runner import TrainLoop
 from xtuner.model import SupervisedFinetune
 from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE

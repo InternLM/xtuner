@@ -9,7 +9,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from xtuner.dataset import process_intern_repo_dataset
 from xtuner.dataset.collate_fns import intern_repo_collate_fn
-from xtuner.engine import DatasetInfoHook, ThroughputHook
+from xtuner.engine.hooks import DatasetInfoHook, ThroughputHook
 from xtuner.engine.runner import TrainLoop
 from xtuner.model import SupervisedFinetune
 from xtuner.utils import PROMPT_TEMPLATE

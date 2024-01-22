@@ -12,7 +12,7 @@ from transformers import BitsAndBytesConfig, LlamaTokenizer, MistralForCausalLM
 from xtuner.dataset import process_hf_dataset
 from xtuner.dataset.collate_fns import default_collate_fn
 from xtuner.dataset.map_fns import pretrain_map_fn
-from xtuner.engine import DatasetInfoHook, EvaluateChatHook
+from xtuner.engine.hooks import DatasetInfoHook, EvaluateChatHook
 from xtuner.engine.runner import TrainLoop
 from xtuner.model import SupervisedFinetune
 
