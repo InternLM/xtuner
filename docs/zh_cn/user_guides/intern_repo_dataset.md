@@ -36,6 +36,32 @@ pack_to_max_length = True
 ...
 ```
 
+在使用 DeepSpeed 训练模型时，如需在保存 checkpoint 时只保存模型权重，而不保存优化器状态，可参考以下步骤：
+
+1. 安装 特定分支的 mmengine
+
+```
+pip install git+https://github.com/LZHgrla/mmengine.git@lzh/ds_save
+```
+
+2. 修改 Config 文件，CheckpointHook 增加 save_optimizer=False
+
+```diff
+default_hooks = dict(
+    # record the time of every iteration.
+    timer=dict(type=IterTimerHook),
+    # print log every 100 iterations.
+    logger=dict(type=LoggerHook, interval=1),
+    # enable the parameter scheduler.
+    param_scheduler=dict(type=ParamSchedulerHook),
+    # save checkpoint per epoch.
+-   checkpoint=dict(type=CheckpointHook, interval=1),
++   checkpoint=dict(type=CheckpointHook, save_optimizer=False, interval=1),
+    # set sampler seed in distributed evrionment.
+    sampler_seed=dict(type=DistSamplerSeedHook),
+)
+```
+
 ### Step 3，获取数据顺序 （可选）
 
 运行下面的代码可获取数据顺序，并存为 txt 文件：
