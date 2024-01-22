@@ -35,13 +35,16 @@ batch_size = 1  # per_device
 accumulative_counts = 16
 dataloader_num_workers = 0
 max_epochs = 3
-save_interval = 500
 optim_type = AdamW
 lr = 2e-4
 betas = (0.9, 0.999)
 weight_decay = 0
 max_norm = 1  # grad clip
 warmup_ratio = 0.03
+
+# Save
+save_interval = 500
+max_keep_ckpts = -1  # -1 means unlimited
 
 # Evaluate the generation performance during the training
 evaluation_freq = 500
@@ -165,7 +168,10 @@ default_hooks = dict(
     param_scheduler=dict(type=ParamSchedulerHook),
     # save checkpoint per epoch.
     checkpoint=dict(
-        type=CheckpointHook, by_epoch=False, interval=save_interval),
+        type=CheckpointHook,
+        by_epoch=False,
+        interval=save_interval,
+        max_keep_ckpts=max_keep_ckpts),
     # set sampler seed in distributed evrionment.
     sampler_seed=dict(type=DistSamplerSeedHook),
 )
