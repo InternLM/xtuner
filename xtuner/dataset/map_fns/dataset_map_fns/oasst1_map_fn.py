@@ -36,3 +36,24 @@ def oasst1_map_fn(example):
         single_turn_conversation = {'input': data[i], 'output': data[i + 1]}
         conversation.append(single_turn_conversation)
     return {'conversation': conversation}
+
+
+def oasst1_map_fn_v2(example):
+    data = []
+    for sentence in example['text'].strip().split('###'):
+        sentence = sentence.strip()
+        if sentence[:6] == 'Human:':
+            data.append(sentence[6:].strip())
+        elif sentence[:10] == 'Assistant:':
+            data.append(sentence[10:].strip())
+    if len(data) % 2:
+        # The last round of conversation solely consists of input
+        # without any output.
+        # Discard the input part of the last round, as this part is ignored in
+        # the loss calculation.
+        data.pop()
+    messages = []
+    for i in range(0, len(data), 2):
+        messages.append({'role': 'user', 'content': data[i]})
+        messages.append({'role': 'assistant', 'content': data[i + 1]})
+    return {'messages': messages}
