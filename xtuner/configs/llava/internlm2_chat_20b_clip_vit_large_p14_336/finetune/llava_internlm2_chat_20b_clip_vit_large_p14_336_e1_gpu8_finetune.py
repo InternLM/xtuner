@@ -23,7 +23,7 @@ from xtuner.utils import PROMPT_TEMPLATE
 llm_name_or_path = 'internlm/internlm2-chat-20b'
 visual_encoder_name_or_path = 'openai/clip-vit-large-patch14-336'
 # Specify the pretrained pth
-pretrained_pth = './work_dirs/llava_internlm2_chat_20b_clip_vit_large_p14_336_e1_gpu8_pretrain/epoch_1.pth'  # noqa: E501
+pretrained_pth = './work_dirs/llava_internlm2_chat_20b_clip_vit_large_p14_336_e1_gpu8_pretrain/iter_2181.pth'  # noqa: E501
 
 # Data
 data_root = './data/llava_data/'
@@ -47,7 +47,7 @@ warmup_ratio = 0.03
 
 # Save
 save_steps = 500
-save_total_limit = -1  # -1 means unlimited
+save_total_limit = 2
 
 # Evaluate the generation performance during the training
 evaluation_freq = 500
