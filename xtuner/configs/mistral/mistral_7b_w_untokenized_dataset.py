@@ -1,8 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-import torch
 from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
                             LoggerHook, ParamSchedulerHook)
-from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR, LinearLR
+from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR
 from torch.optim import AdamW
 from torch.utils.data import BatchSampler
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -26,24 +25,24 @@ use_local_attn = True
 
 # Data
 dataset_folder = '/mnt/petrelfs/share_data/caoweihan/v1_sample_with_legal_cate'
-max_length = 2048
-pack_to_max_length = True
 prompt_template = PROMPT_TEMPLATE.mistral
+max_length = 32768
+pack_to_max_length = True
 
 # Scheduler & Optimizer
 batch_size = 1  # per_device
-accumulative_counts = 4
+accumulative_counts = 1
 dataloader_num_workers = 0
 max_epochs = 1
 optim_type = AdamW
-lr = 2e-5
-betas = (0.9, 0.999)
-weight_decay = 0
+lr = 4e-5
+betas = (0.9, 0.95)
+weight_decay = 0.01
 max_norm = 1  # grad clip
-warmup_ratio = 0.03
+warm_up_ratio = 0.025
 
 # Evaluate the generation performance during the training
-evaluation_freq = 50
+evaluation_freq = 500
 SYSTEM = ''
 evaluation_inputs = [
     '请给我介绍五个上海的景点', 'Please tell me five scenic spots in Shanghai'
@@ -60,13 +59,12 @@ tokenizer = dict(
 
 model = dict(
     type=SupervisedFinetune,
-    use_local_attn=False,
+    use_local_attn=use_local_attn,
     llm=dict(
         type=AutoModelForCausalLM.from_pretrained,
         pretrained_model_name_or_path=pretrained_model_name_or_path,
         trust_remote_code=True,
-        attn_implementation='flash_attention_2',
-        torch_dtype=torch.bfloat16))
+        attn_implementation='flash_attention_2'))
 
 #######################################################################
 #                      PART 3  Dataset & Dataloader                   #
@@ -105,24 +103,23 @@ optim_wrapper = dict(
         type=optim_type, lr=lr, betas=betas, weight_decay=weight_decay),
     clip_grad=dict(max_norm=max_norm, error_if_nonfinite=False),
     accumulative_counts=accumulative_counts,
-    loss_scale='dynamic',
-    dtype='float16')
+    loss_scale='dynamic')
 
 # learning policy
 # More information: https://github.com/open-mmlab/mmengine/blob/main/docs/en/tutorials/param_scheduler.md  # noqa: E501
 param_scheduler = [
     dict(
-        type=LinearLR,
-        start_factor=1e-5,
+        type='LinearLR',
+        start_factor=1 / 40,
         by_epoch=True,
         begin=0,
-        end=warmup_ratio * max_epochs,
+        end=warm_up_ratio * max_epochs,
         convert_to_iter_based=True),
     dict(
         type=CosineAnnealingLR,
-        eta_min=0.0,
+        eta_min=lr * 0.15,
         by_epoch=True,
-        begin=warmup_ratio * max_epochs,
+        begin=warm_up_ratio * max_epochs,
         T_max=max_epochs,
         convert_to_iter_based=True)
 ]
@@ -134,7 +131,9 @@ train_cfg = dict(by_epoch=True, max_epochs=max_epochs, val_interval=1)
 #                           PART 5  Runtime                           #
 #######################################################################
 custom_hooks = [
-    dict(type=DatasetInfoHook, tokenizer=tokenizer),
+    dict(
+        type=DatasetInfoHook, tokenizer=tokenizer,
+        is_intern_repo_dataset=True),
     dict(
         type=EvaluateChatHook,
         tokenizer=tokenizer,
@@ -151,11 +150,11 @@ default_hooks = dict(
     # record the time of every iteration.
     timer=dict(type=IterTimerHook),
     # print log every 100 iterations.
-    logger=dict(type=LoggerHook, interval=10),
+    logger=dict(type=LoggerHook, interval=1),
     # enable the parameter scheduler.
     param_scheduler=dict(type=ParamSchedulerHook),
     # save checkpoint per epoch.
-    checkpoint=dict(type=CheckpointHook, interval=-1),
+    checkpoint=dict(type=CheckpointHook, interval=1),
     # set sampler seed in distributed evrionment.
     sampler_seed=dict(type=DistSamplerSeedHook),
 )
@@ -184,3 +183,6 @@ resume = False
 
 # Defaults to use random seed and disable `deterministic`
 randomness = dict(seed=None, deterministic=False)
+
+log_processor = dict(
+    window_size=1, mean_pattern=r'.*(loss|time|data_time|grad_norm|tflops).*')
