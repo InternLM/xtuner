@@ -1,6 +1,5 @@
 import io
 from contextlib import contextmanager
-from types import MethodType
 
 import mmengine.fileio as fileio
 from mmengine.fileio import LocalBackend, PetrelBackend, get_file_backend
@@ -33,38 +32,10 @@ def patch_fileio(global_vars=None):
         backend = get_file_backend(file)
         if isinstance(backend, LocalBackend):
             return open._fallback(file, mode, *args, **kwargs)
-
-        if 'r' in mode:
-            if 'b' in mode:
-                return io.BytesIO(backend.get(file, *args, **kwargs))
-            else:
-                return io.StringIO(backend.get_text(file, *args, **kwargs))
-        elif 'w' in mode and 'b' in mode:
-
-            buffer = io.BytesIO()
-            buffer._write = buffer.write
-
-            def write(cls, obj):
-                cls._write(obj)
-                cls.seek(0)
-                return backend.put(buffer.getvalue(), file)
-
-            buffer.write = MethodType(write, buffer)
-
-            return buffer
-
-        elif 'w' in mode and 'b' not in mode:
-
-            buffer = io.StringIO()
-            buffer._write = buffer.write
-
-            def write(cls, obj):
-                cls._write(obj)
-                return backend.put(buffer.getvalue(), file)
-
-            buffer.write = MethodType(write, buffer)
-
-            return buffer
+        if 'b' in mode:
+            return io.BytesIO(backend.get(file, *args, **kwargs))
+        else:
+            return io.StringIO(backend.get_text(file, *args, **kwargs))
 
     if global_vars is not None and 'open' in global_vars:
         bak_open = global_vars['open']
@@ -74,7 +45,8 @@ def patch_fileio(global_vars=None):
 
     @patch_func(os.path, 'join')
     def join(a, *paths):
-        backend = get_file_backend(a)
+        backend = get_file_backend(
+            a.decode('utf-8') if isinstance(a, bytes) else a)
         if isinstance(backend, LocalBackend):
             return join._fallback(a, *paths)
         paths = [item.lstrip('./') for item in paths if len(item) > 0]
@@ -122,6 +94,49 @@ def patch_fileio(global_vars=None):
             return listdir._fallback(path)
         return backend.list_dir_or_file(path)
 
+    @patch_func(os, 'chmod')
+    def chmod(path, *args, **kwargs):
+        backend = get_file_backend(path)
+        if isinstance(backend, LocalBackend):
+            return chmod._fallback(path, *args, **kwargs)
+
+    @patch_func(os, 'stat')
+    def stat(path, *args, **kwargs):
+        backend = get_file_backend(path)
+        if isinstance(backend, LocalBackend):
+            return stat._fallback(path, *args, **kwargs)
+
+    import glob as glob_pkg
+
+    @patch_func(glob_pkg, 'glob')
+    def glob(pathname, *, recursive=False):
+        backend = get_file_backend(pathname)
+        if isinstance(backend, LocalBackend):
+            return glob._fallback(pathname, recursive=recursive)
+
+        if pathname.endswith('*_optim_states.pt'):
+            import os
+            pathname = os.path.split(pathname)[0]
+            files = backend.list_dir_or_file(pathname, recursive=recursive)
+            files = [
+                os.path.join(pathname, f) for f in files
+                if f.endswith('_optim_states.pt')
+            ]
+        elif pathname.endswith('*_model_states.pt'):
+            import os
+            pathname = os.path.split(pathname)[0]
+            files = backend.list_dir_or_file(pathname, recursive=recursive)
+            files = [
+                os.path.join(pathname, f) for f in files
+                if f.endswith('_model_states.pt')
+            ]
+        elif '*' in pathname:
+            raise NotImplementedError
+        else:
+            files = backend.list_dir_or_file(pathname, recursive=recursive)
+
+        return files
+
     import filecmp
 
     @patch_func(filecmp, 'cmp')
@@ -167,11 +182,23 @@ def patch_fileio(global_vars=None):
         if isinstance(backend, LocalBackend):
             return save._fallback(obj, f, *args, **kwargs)
 
-        assert isinstance(f, str)
         with io.BytesIO() as buffer:
             save._fallback(obj, buffer, *args, **kwargs)
+            buffer.seek(0)
+            backend.put(buffer, f)
 
-            backend.put(buffer.getvalue(), f)
+        # from tempfile import TemporaryDirectory
+        # import os
+        # with TemporaryDirectory(dir='/dev/shm') as tmpdir:
+        #     suffix = os.path.split(f)[-1]
+        #     tmppath = os.path.join._fallback(tmpdir, suffix)
+        #     from mmengine import print_log
+        #     print_log('write to tmp dir', logger='current')
+        #     save._fallback(obj, tmppath, *args, **kwargs)
+        #     print_log('write to ceph', logger='current')
+
+        #     with open(tmppath, 'rb') as buffer:
+        #         backend.put(buffer, f)
 
     from sentencepiece import SentencePieceProcessor
 
@@ -288,3 +315,31 @@ def patch_hf_save_pretrained():
             cls.save_pretrained = _patch_wrap(cls.save_pretrained)
 
     patch_hf_save_pretrained._patched = True
+
+
+def patch_deepspeed_engine():
+    if hasattr(patch_deepspeed_engine, '_patched'):
+        return
+
+    def _copy_recovery_script(self, save_path):
+        import os
+        from shutil import copyfile
+
+        from deepspeed.utils import zero_to_fp32
+        from mmengine import PetrelBackend, get_file_backend
+        script = 'zero_to_fp32.py'
+
+        src = zero_to_fp32.__file__
+        dst = os.path.join(save_path, script)
+
+        backend = get_file_backend(save_path)
+        if isinstance(backend, PetrelBackend):
+            backend.copyfile_from_local(src, dst)
+        else:
+            copyfile(src, dst)
+            self._change_recovery_script_permissions(dst)
+
+    from deepspeed.runtime.engine import DeepSpeedEngine
+    DeepSpeedEngine._copy_recovery_script = _copy_recovery_script
+
+    patch_deepspeed_engine._patched = True

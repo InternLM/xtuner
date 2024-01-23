@@ -5,6 +5,7 @@ import shutil
 
 import torch
 from mmengine.config import Config, DictAction
+from mmengine.fileio import PetrelBackend, get_file_backend
 
 from xtuner.configs import cfgs_name_path
 from xtuner.registry import BUILDER
@@ -81,7 +82,14 @@ def main():
 
     model = BUILDER.build(cfg.model)
 
-    state_dict = guess_load_checkpoint(args.pth_model)
+    backend = get_file_backend(args.pth_model)
+    if isinstance(backend, PetrelBackend):
+        from xtuner.utils.fileio import patch_fileio
+        with patch_fileio():
+            state_dict = guess_load_checkpoint(args.pth_model)
+    else:
+        state_dict = guess_load_checkpoint(args.pth_model)
+
     model.load_state_dict(state_dict, strict=False)
     print(f'Load PTH model from {args.pth_model}')
 

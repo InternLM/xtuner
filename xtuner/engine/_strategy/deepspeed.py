@@ -1,6 +1,6 @@
 from mmengine._strategy import DeepSpeedStrategy as MMEngineDeepSpeedStrategy
 
-from xtuner import DEEPSPEED_PETREL_ON
+from xtuner import DS_CEPH_DIR
 from xtuner.utils.fileio import patch_fileio
 
 
@@ -24,22 +24,31 @@ class DeepSpeedStrategy(MMEngineDeepSpeedStrategy):
         return wrapper
 
     def save_checkpoint(self, *args, **kwargs) -> None:
-        if DEEPSPEED_PETREL_ON:
+        if DS_CEPH_DIR:
+            from os import path as osp
+            work_dir_prefix = osp.split(self.work_dir)[0]
+
+            filename = kwargs['filename'].replace(work_dir_prefix, DS_CEPH_DIR)
+            kwargs['filename'] = filename
             with patch_fileio():
                 super().save_checkpoint(*args, **kwargs)
         else:
             super().save_checkpoint(*args, **kwargs)
 
     def load_checkpoint(self, *args, **kwargs) -> None:
-        if DEEPSPEED_PETREL_ON:
+        if DS_CEPH_DIR:
+
             with patch_fileio():
-                super().load_checkpoint(*args, **kwargs)
+                checkpoint = super().load_checkpoint(*args, **kwargs)
         else:
-            super().load_checkpoint(*args, **kwargs)
+            checkpoint = super().load_checkpoint(*args, **kwargs)
+        return checkpoint
 
     def resume(self, *args, **kwargs) -> None:
-        if DEEPSPEED_PETREL_ON:
+        if DS_CEPH_DIR:
+
             with patch_fileio():
-                super().resume(*args, **kwargs)
+                checkpoint = super().resume(*args, **kwargs)
         else:
-            super().resume(*args, **kwargs)
+            checkpoint = super().resume(*args, **kwargs)
+        return checkpoint
