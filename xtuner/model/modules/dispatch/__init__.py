@@ -223,6 +223,57 @@ def dispatch_yi_attn_forward(model):
             module.forward = types.MethodType(yi_attn_forward, module)
 
 
+def dispatch_mistral_attn_forward(model, use_local_attn):
+    if (not SUPPORT_FLASH) or (not use_local_attn):
+        return
+    if use_local_attn:
+        assert SUPPORT_FLASH2 and SUPPORT_TRITON, \
+            'flash_attn and triton is required if you want to use local_attn.'
+
+    from .mistral import mistral_local_attn_forward
+
+    print_log(NO_ATTN_WEIGHTS_MSG, 'current', logging.WARNING)
+    for module in model.modules():
+        if type(module).__name__ in ('MistralAttention',
+                                     'MistralFlashAttention2'):
+            print_log('dispatch mistral local attn forward', 'current')
+            module.forward = types.MethodType(mistral_local_attn_forward,
+                                              module)
+
+
+def dispatch_mistral_rmsnorm_forward(model):
+    if not SUPPORT_TRITON:
+        return
+
+    from .triton_kernels import rms_norm_forward
+
+    for module in model.modules():
+        if type(module).__name__ == 'MistralRMSNorm':
+            print_log('dispatch mistral rmsnorm forward', 'current')
+            module.forward = types.MethodType(rms_norm_forward, module)
+
+
+def replace_mistral_rote(model):
+    from .mistral import MistralRotaryEmbedding
+
+    rotary_base = model.config.rope_theta
+
+    def traverse(module):
+        for name, child in module.named_children():
+            if type(child).__name__ == 'MistralRotaryEmbedding':
+                print_log('replace mistral rope', 'current')
+                dim_model = child.inv_freq.shape[0] * 2
+                child_new = MistralRotaryEmbedding(
+                    dim_model, child.max_seq_len_cached, rotary_base).to(
+                        device=child.inv_freq.device,
+                        dtype=child.inv_freq.dtype)
+                setattr(module, name, child_new)
+            else:
+                traverse(child)
+
+    traverse(model)
+
+
 def dispatch_modules(model, use_local_attn=False):
     model_name = model.__class__.__name__.lower()
     if 'internlm2' in model_name:
@@ -242,6 +293,10 @@ def dispatch_modules(model, use_local_attn=False):
         dispath_baichuan_13b_attn_forward(model)
     elif 'yi' in model_name:
         dispatch_yi_attn_forward(model)
+    elif 'mistral' in model_name:
+        dispatch_mistral_attn_forward(model, use_local_attn)
+        dispatch_mistral_rmsnorm_forward(model)
+        replace_mistral_rote(model)
 
 
 __all__ = ['dispatch_modules']
