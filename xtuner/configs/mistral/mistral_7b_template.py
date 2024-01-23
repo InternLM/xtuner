@@ -1,6 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import torch
-from datasets import load_dataset
 from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
                             LoggerHook, ParamSchedulerHook)
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR, LinearLR
@@ -9,9 +8,9 @@ from torch.utils.data import BatchSampler
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from xtuner.dataset.collate_fns import intern_repo_collate_fn
-from xtuner.dataset.huggingface import process
-from xtuner.dataset.intern_repo import build_packed_dataset
-from xtuner.dataset.map_fns import oasst1_map_fn, template_map_fn_factory
+from xtuner.dataset.intern_repo import (build_packed_dataset,
+                                        load_intern_repo_untokenized_dataset)
+from xtuner.dataset.map_fns import template_map_fn_factory
 from xtuner.dataset.samplers import InternlmRepoSampler
 from xtuner.engine import (DatasetInfoHook, EvaluateChatHook,
                            LocalAttnArgsToMessageHubHook, ThroughputHook)
@@ -26,7 +25,7 @@ pretrained_model_name_or_path = '/mnt/petrelfs/share_data/basemodel/checkpoints/
 use_local_attn = True
 
 # Data
-data_path = 'timdettmers/openassistant-guanaco'
+dataset_folder = '/mnt/petrelfs/share_data/caoweihan/v1_sample_with_legal_cate'
 max_length = 2048
 pack_to_max_length = True
 prompt_template = PROMPT_TEMPLATE.mistral
@@ -72,26 +71,16 @@ model = dict(
 #######################################################################
 #                      PART 3  Dataset & Dataloader                   #
 #######################################################################
-# train_dataset = dict(
-#     type=build_packed_dataset,
-#     dataset_cfg=dict(
-#         type=load_intern_repo_untokenized_dataset,
-#         processed_dataset_dict_path='/mnt/petrelfs/caoweihan/projects/xtuner/mistral_processed'),
-#     packed_length=max_length,
-#     seed=1024)
-
 train_dataset = dict(
     type=build_packed_dataset,
     dataset_cfg=dict(
-        type=process,
-        dataset=dict(type=load_dataset, path=data_path),
+        type=load_intern_repo_untokenized_dataset,
+        folder=dataset_folder,
         tokenizer=tokenizer,
         max_length=max_length,
-        dataset_map_fn=oasst1_map_fn,
         template_map_fn=dict(
             type=template_map_fn_factory, template=prompt_template),
-        remove_unused_columns=True,
-        pack_to_max_length=False),
+        file_type='.json'),
     packed_length=max_length,
     seed=1024)
 
