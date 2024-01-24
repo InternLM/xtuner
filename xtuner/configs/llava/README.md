@@ -29,7 +29,7 @@ Please refer to the [docs](../../../docs/en/user_guides/dataset_prepare.md#llava
 
 The training of LLaVA consists of two steps: alignment module (i.e., MLP) pretraining and instruction following fine-tuning
 
-Note: this guide takes 8-card training LLaVA-InternLM as an example, if there are insufficient GPU resources or memory during actual use, you can reduce the batchsize appropriately to decrease memory consumption. The Pretrained projector is saved and re-loaded by default in `./work_dirs/llava_internlm_chat_7b_clip_vit_large_p14_336_e1_gpu8_pretrain/epoch_1.pth`.
+Note: this guide takes 8-card training LLaVA-InternLM as an example, if there are insufficient GPU resources or memory during actual use, you can reduce the batchsize appropriately to decrease memory consumption. The Pretrained projector is saved and re-loaded by default in `./work_dirs/llava_internlm_chat_7b_clip_vit_large_p14_336_e1_gpu8_pretrain/iter_2181.pth`.
 
 1. Alignment module pretraining (saved by default in `./work_dirs/`)
 
@@ -45,11 +45,11 @@ NPROC_PER_NODE=8 xtuner train llava_internlm_chat_7b_qlora_clip_vit_large_p14_33
 
 ## Model Convert (and Merge)
 
-After training, we will obtain a set of weights (*i.e.*, `epoch_1.pth`), which are not in the universal HuggingFace format. We first need to convert them.
+After training, we will obtain a set of weights (*i.e.*, `iter_xxx.pth`), which are not in the universal HuggingFace format. We first need to convert them.
 
 ```bash
 xtuner convert pth_to_hf $FINETUNE_CFG $PTH_PATH $SAVE_PATH
-# e.g., xtuner convert pth_to_hf llava_internlm_chat_7b_qlora_clip_vit_large_p14_336_lora_e1_gpu8_finetune ./epoch_1.pth ./epoch_1_hf
+# e.g., xtuner convert pth_to_hf llava_internlm_chat_7b_qlora_clip_vit_large_p14_336_lora_e1_gpu8_finetune ./iter_5198.pth ./iter_5198_hf
 ```
 
 At this point, we have obtained the relevant model (LLM or the corresponding LoRA).

@@ -29,7 +29,7 @@ XTuner 推荐使用基于 LLM-QLoRA / ViT-LoRA 的 LLaVA 架构，其在各个�
 
 LLaVA 训练一共分为两步：对齐模块预训练、指令跟随微调（本指南以 8 卡训练 LLaVA-InternLM 为例，实际使用时如遇到显卡数量不足、显存不足等情况可以适当调低 batchsize 来降低显存开销）
 
-预训练的 Projector 默认保存在 `./work_dirs/llava_internlm_chat_7b_clip_vit_large_p14_336_e1_gpu8_pretrain/epoch_1.pth`，并且指令微调阶段将默认在此路径载入 Projector 权重。
+预训练的 Projector 默认保存在 `./work_dirs/llava_internlm_chat_7b_clip_vit_large_p14_336_e1_gpu8_pretrain`，并且指令微调阶段将默认在此路径载入 Projector 权重 （`iter_2181.pth`）。
 
 1. 对齐模块训练（默认保存在 `./work_dirs/`）
 
@@ -45,11 +45,11 @@ NPROC_PER_NODE=8 xtuner train llava_internlm_chat_7b_qlora_clip_vit_large_p14_33
 
 ## 模型转换（和合并）
 
-训练后，我们将获得一组权重（即，`epoch_1.pth`，但它并不是通用的 HuggingFace 格式。我们需要对其进行转换。
+训练后，我们将获得一组权重（即，`iter_xxx.pth`，但它并不是通用的 HuggingFace 格式。我们需要对其进行转换。
 
 ```bash
 xtuner convert pth_to_hf $FINETUNE_CFG $PTH_PATH $SAVE_PATH
-# e.g., xtuner convert pth_to_hf llava_internlm_chat_7b_qlora_clip_vit_large_p14_336_lora_e1_gpu8_finetune ./epoch_1.pth ./epoch_1_hf
+# e.g., xtuner convert pth_to_hf llava_internlm_chat_7b_qlora_clip_vit_large_p14_336_lora_e1_gpu8_finetune ./iter_5198.pth ./iter_5198_hf
 ```
 
 此时，我们将获得所需要的模型（LLM或对应的 LoRA）。
