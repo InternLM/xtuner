@@ -8,10 +8,6 @@ import sys
 from mmengine.logging import print_log
 
 import xtuner
-from xtuner.tools import (chat, check_custom_dataset, copy_cfg, list_cfg,
-                          log_dataset, mmbench, test, train)
-from xtuner.tools.data_preprocess import arxiv as arxiv_preprocess
-from xtuner.tools.model_converters import merge, pth_to_hf, split
 
 # Define valid modes
 MODES = ('list-cfg', 'copy-cfg', 'log-dataset', 'check-custom-dataset',
@@ -52,9 +48,9 @@ CLI_HELP_MSG = \
             xtuner preprocess arxiv $SRC_FILE $DST_FILE --start-date $START_DATE --categories $CATEGORIES
         7-1. Log processed dataset:
             xtuner log-dataset $CONFIG
-        7-2. Verify the correctness of the config file for the custom dataset.
-            xtuner check-custom-dataset
-        8. MMBench evaluation
+        7-2. Verify the correctness of the config file for the custom dataset:
+            xtuner check-custom-dataset $CONFIG
+        8. MMBench evaluation:
             xtuner mmbench $LLM --llava $LLAVA --visual-encoder $VISUAL_ENCODER --prompt-template $PROMPT_TEMPLATE --data-path $MMBENCH_DATA_PATH
 
     Run special commands:
@@ -119,28 +115,103 @@ special = {
        for k, v in special.items()}
 }
 
+
+def list_cfg():
+    from xtuner.tools import list_cfg
+    return list_cfg.__file__
+
+
+def copy_cfg():
+    from xtuner.tools import copy_cfg
+    return copy_cfg.__file__
+
+
+def log_dataset():
+    from xtuner.tools import log_dataset
+    return log_dataset.__file__
+
+
+def check_custom_dataset():
+    from xtuner.tools import check_custom_dataset
+    return check_custom_dataset.__file__
+
+
+def train():
+    from xtuner.tools import train
+    return train.__file__
+
+
+def test():
+    from xtuner.tools import test
+    return test.__file__
+
+
+def chat():
+    from xtuner.tools import chat
+    return chat.__file__
+
+
+def mmbench():
+    from xtuner.tools import mmbench
+    return mmbench.__file__
+
+
+def pth_to_hf():
+    from xtuner.tools.model_converters import pth_to_hf
+    return pth_to_hf.__file__
+
+
+def merge():
+    from xtuner.tools.model_converters import merge
+    return merge.__file__
+
+
+def split():
+    from xtuner.tools.model_converters import split
+    return split.__file__
+
+
+def arxiv_preprocess():
+    from xtuner.tools.data_preprocess import arxiv as arxiv_preprocess
+    return arxiv_preprocess.__file__
+
+
+def convert_help_msg():
+    print_log(CONVERT_HELP_MSG, 'current')
+
+
+def preprocess_help_msg():
+    print_log(PREPROCESS_HELP_MSG, 'current')
+
+
 modes = {
-    'list-cfg': list_cfg.__file__,
-    'copy-cfg': copy_cfg.__file__,
-    'log-dataset': log_dataset.__file__,
-    'check-custom-dataset': check_custom_dataset.__file__,
-    'train': train.__file__,
-    'test': test.__file__,
-    'chat': chat.__file__,
-    'mmbench': mmbench.__file__,
+    'list-cfg': list_cfg,
+    'copy-cfg': copy_cfg,
+    'log-dataset': log_dataset,
+    'check-custom-dataset': check_custom_dataset,
+    'train': train,
+    'test': test,
+    'chat': chat,
+    'mmbench': mmbench,
     'convert': {
-        'pth_to_hf': pth_to_hf.__file__,
-        'merge': merge.__file__,
-        'split': split.__file__,
-        '--help': lambda: print_log(CONVERT_HELP_MSG, 'current'),
-        '-h': lambda: print_log(CONVERT_HELP_MSG, 'current')
+        'pth_to_hf': pth_to_hf,
+        'merge': merge,
+        'split': split,
+        '--help': convert_help_msg,
+        '-h': convert_help_msg
     },
     'preprocess': {
-        'arxiv': arxiv_preprocess.__file__,
-        '--help': lambda: print_log(PREPROCESS_HELP_MSG, 'current'),
-        '-h': lambda: print_log(PREPROCESS_HELP_MSG, 'current')
+        'arxiv': arxiv_preprocess,
+        '--help': preprocess_help_msg,
+        '-h': preprocess_help_msg
     }
 }
+
+HELP_FUNCS = [preprocess_help_msg, convert_help_msg]
+MAP_FILE_FUNCS = [
+    list_cfg, copy_cfg, log_dataset, check_custom_dataset, train, test, chat,
+    mmbench, pth_to_hf, merge, split, arxiv_preprocess
+]
 
 
 def cli():
@@ -153,18 +224,24 @@ def cli():
         return
     elif args[0].lower() in modes:
         try:
-            module = modes[args[0].lower()]
+            fn_or_dict = modes[args[0].lower()]
             n_arg = 0
-            while not isinstance(module, str) and not callable(module):
+
+            if isinstance(fn_or_dict, dict):
                 n_arg += 1
-                module = module[args[n_arg].lower()]
-            if callable(module):
-                module()
+                fn = fn_or_dict[args[n_arg].lower()]
+            else:
+                fn = fn_or_dict
+
+            assert callable(fn)
+
+            if fn in HELP_FUNCS:
+                fn()
             else:
                 nnodes = os.environ.get('NNODES', 1)
                 nproc_per_node = os.environ.get('NPROC_PER_NODE', 1)
                 if nnodes == 1 and nproc_per_node == 1:
-                    subprocess.run(['python', module] + args[n_arg + 1:])
+                    subprocess.run(['python', fn()] + args[n_arg + 1:])
                 else:
                     port = os.environ.get('PORT', None)
                     if port is None:
@@ -178,7 +255,7 @@ def cli():
                         f"--master_addr={os.environ.get('ADDR', '127.0.0.1')}",
                         f'--master_port={port}'
                     ]
-                    subprocess.run(['torchrun'] + torchrun_args + [module] +
+                    subprocess.run(['torchrun'] + torchrun_args + [fn()] +
                                    args[n_arg + 1:] +
                                    ['--launcher', 'pytorch'])
         except Exception as e:

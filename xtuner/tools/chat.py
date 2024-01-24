@@ -14,7 +14,7 @@ from transformers import (AutoModel, AutoModelForCausalLM, AutoTokenizer,
 
 from xtuner.dataset.utils import expand2square, load_image
 from xtuner.model.utils import prepare_inputs_labels_for_multimodal
-from xtuner.tools.utils import get_chat_utils, update_stop_criteria
+from xtuner.tools.utils import get_stop_criteria, get_streamer
 from xtuner.utils import (DEFAULT_IMAGE_TOKEN, IMAGE_TOKEN_INDEX,
                           PROMPT_TEMPLATE, SYSTEM_TEMPLATE)
 
@@ -83,8 +83,8 @@ def parse_args():
         '--no-streamer', action='store_true', help='Whether to with streamer')
     parser.add_argument(
         '--lagent', action='store_true', help='Whether to use lagent')
-    parser.add_argument('--command-stop-word', default=None, help='Stop key')
-    parser.add_argument('--answer-stop-word', default=None, help='Stop key')
+    parser.add_argument(
+        '--stop-words', nargs='+', type=str, default=[], help='Stop words')
     parser.add_argument(
         '--offload-folder',
         default=None,
@@ -113,6 +113,11 @@ def parse_args():
         help='If set to float < 1, only the smallest set of most probable '
         'tokens with probabilities that add up to top_p or higher are '
         'kept for generation.')
+    parser.add_argument(
+        '--repetition-penalty',
+        type=float,
+        default=1.0,
+        help='The parameter for repetition penalty. 1.0 means no penalty.')
     parser.add_argument(
         '--seed',
         type=int,
@@ -182,7 +187,10 @@ def main():
         if args.adapter is not None:
             print(f'Loading adapter from {args.adapter}...')
             llm.model = PeftModel.from_pretrained(
-                llm.model, args.adapter, offload_folder=args.offload_folder)
+                llm.model,
+                args.adapter,
+                offload_folder=args.offload_folder,
+                trust_remote_code=True)
         search_tool = GoogleSearch(api_key=SERPER_API_KEY)
         chatbot = ReAct(
             llm=llm,
@@ -232,7 +240,10 @@ def main():
         print(f'Load LLM from {args.model_name_or_path}')
         if args.adapter is not None:
             llm = PeftModel.from_pretrained(
-                llm, args.adapter, offload_folder=args.offload_folder)
+                llm,
+                args.adapter,
+                offload_folder=args.offload_folder,
+                trust_remote_code=True)
             print(f'Load adapter from {args.adapter}')
         if args.llava is not None:
             llava_path = snapshot_download(
@@ -260,7 +271,10 @@ def main():
             if 'llm_adapter' in os.listdir(llava_path):
                 adapter_path = osp.join(llava_path, 'llm_adapter')
                 llm = PeftModel.from_pretrained(
-                    llm, adapter_path, offload_folder=args.offload_folder)
+                    llm,
+                    adapter_path,
+                    offload_folder=args.offload_folder,
+                    trust_remote_code=True)
                 print(f'Load LLM adapter from {args.llava}')
             if 'visual_encoder_adapter' in os.listdir(llava_path):
                 adapter_path = osp.join(llava_path, 'visual_encoder_adapter')
@@ -273,7 +287,9 @@ def main():
             # build projector
             projector_path = osp.join(llava_path, 'projector')
             projector = AutoModel.from_pretrained(
-                projector_path, torch_dtype=TORCH_DTYPE_MAP[args.torch_dtype])
+                projector_path,
+                torch_dtype=TORCH_DTYPE_MAP[args.torch_dtype],
+                trust_remote_code=True)
             print(f'Load projector from {args.llava}')
 
             projector.cuda()
@@ -294,15 +310,19 @@ def main():
             pixel_values = projector(
                 visual_outputs.hidden_states[args.visual_select_layer][:, 1:])
 
-        Streamer, stop_criteria = get_chat_utils(llm)
+        stop_words = args.stop_words
+        sep = ''
+        if args.prompt_template:
+            template = PROMPT_TEMPLATE[args.prompt_template]
+            stop_words += template.get('STOP_WORDS', [])
+            sep = template.get('SEP', '')
+        stop_criteria = get_stop_criteria(
+            tokenizer=tokenizer, stop_words=stop_words)
+
         if args.no_streamer:
             Streamer = None
-
-        command_stop_cr, answer_stop_cr = update_stop_criteria(
-            base=stop_criteria,
-            tokenizer=tokenizer,
-            command_stop_word=args.command_stop_word,
-            answer_stop_word=args.answer_stop_word)
+        else:
+            Streamer = get_streamer(llm)
 
         gen_config = GenerationConfig(
             max_new_tokens=args.max_new_tokens,
@@ -310,6 +330,7 @@ def main():
             temperature=args.temperature,
             top_p=args.top_p,
             top_k=args.top_k,
+            repetition_penalty=args.repetition_penalty,
             eos_token_id=tokenizer.eos_token_id,
             pad_token_id=tokenizer.pad_token_id
             if tokenizer.pad_token_id is not None else tokenizer.eos_token_id,
@@ -369,7 +390,11 @@ def main():
                 prompt_text = text
             inputs += prompt_text
             if args.image is None:
-                ids = tokenizer.encode(inputs, return_tensors='pt')
+                if n_turn == 0:
+                    ids = tokenizer.encode(inputs, return_tensors='pt')
+                else:
+                    ids = tokenizer.encode(
+                        inputs, return_tensors='pt', add_special_tokens=False)
                 streamer = Streamer(
                     tokenizer) if Streamer is not None else None
                 if args.with_plugins is not None:
@@ -377,7 +402,7 @@ def main():
                         inputs=ids.cuda(),
                         generation_config=gen_config,
                         streamer=streamer,
-                        stopping_criteria=command_stop_cr).cpu()
+                        stopping_criteria=stop_criteria).cpu()
                     generate_output_text = tokenizer.decode(
                         generate_output[0][len(ids[0]):])
                     if streamer is None:
@@ -405,7 +430,7 @@ def main():
                         inputs=new_ids.cuda(),
                         generation_config=gen_config,
                         streamer=new_streamer,
-                        stopping_criteria=answer_stop_cr)
+                        stopping_criteria=stop_criteria)
                     if streamer is None:
                         output_text = tokenizer.decode(
                             generate_output[0][len(new_ids[0]):])
@@ -416,7 +441,7 @@ def main():
                         inputs=ids.cuda(),
                         generation_config=gen_config,
                         streamer=streamer,
-                        stopping_criteria=answer_stop_cr)
+                        stopping_criteria=stop_criteria)
                     if streamer is None:
                         output_text = tokenizer.decode(
                             generate_output[0][len(ids[0]):])
@@ -426,15 +451,16 @@ def main():
             else:
                 chunk_encode = []
                 for idx, chunk in enumerate(inputs.split(DEFAULT_IMAGE_TOKEN)):
-                    if idx == 0:
-                        cur_encode = tokenizer(chunk)
+                    if idx == 0 and n_turn == 0:
+                        cur_encode = tokenizer.encode(chunk)
                     else:
-                        cur_encode = tokenizer(chunk, add_special_tokens=False)
+                        cur_encode = tokenizer.encode(
+                            chunk, add_special_tokens=False)
                     chunk_encode.append(cur_encode)
                 assert len(chunk_encode) == 2
                 ids = []
                 for idx, cur_chunk_encode in enumerate(chunk_encode):
-                    ids.extend(cur_chunk_encode['input_ids'])
+                    ids.extend(cur_chunk_encode)
                     if idx != len(chunk_encode) - 1:
                         ids.append(IMAGE_TOKEN_INDEX)
                 ids = torch.tensor(ids).cuda().unsqueeze(0)
@@ -448,13 +474,14 @@ def main():
                     generation_config=gen_config,
                     streamer=streamer,
                     bos_token_id=tokenizer.bos_token_id,
-                    stopping_criteria=answer_stop_cr)
+                    stopping_criteria=stop_criteria)
                 if streamer is None:
                     output_text = tokenizer.decode(generate_output[0])
                     end = '' if output_text[-1] == '\n' else '\n'
                     print(output_text, end=end)
                 inputs += tokenizer.decode(generate_output[0])
             n_turn += 1
+            inputs += sep
             if len(generate_output[0]) >= args.max_new_tokens:
                 print(
                     'Remove the memory of history responses, since '

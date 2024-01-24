@@ -1,55 +1,56 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import torch
-from bitsandbytes.optim import PagedAdamW32bit
 from datasets import load_dataset
 from mmengine.dataset import DefaultSampler
 from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
                             LoggerHook, ParamSchedulerHook)
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR, LinearLR
 from peft import LoraConfig
+from torch.optim import AdamW
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           BitsAndBytesConfig)
 
 from xtuner.dataset import process_hf_dataset
 from xtuner.dataset.collate_fns import default_collate_fn
-from xtuner.dataset.map_fns import code_alpaca_map_fn, template_map_fn_factory
-from xtuner.engine import DatasetInfoHook, EvaluateChatHook
+from xtuner.dataset.map_fns import oasst1_map_fn, template_map_fn_factory
+from xtuner.engine.hooks import DatasetInfoHook, EvaluateChatHook
+from xtuner.engine.runner import TrainLoop
 from xtuner.model import SupervisedFinetune
-from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
+from xtuner.utils import PROMPT_TEMPLATE
 
 #######################################################################
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-pretrained_model_name_or_path = 'deepseek-ai/deepseek-coder-6.7b-base'
+pretrained_model_name_or_path = 'internlm/internlm2-chat-7b'
 
 # Data
-data_path = 'HuggingFaceH4/CodeAlpaca_20K'
-prompt_template = PROMPT_TEMPLATE.deepseekcoder
-max_length = 2048
-pack_to_max_length = True
+data_path = 'timdettmers/openassistant-guanaco'
+prompt_template = PROMPT_TEMPLATE.internlm2_chat
+max_length = 512
+pack_to_max_length = False
 
 # Scheduler & Optimizer
 batch_size = 1  # per_device
 accumulative_counts = 16
 dataloader_num_workers = 0
 max_epochs = 3
-optim_type = PagedAdamW32bit
+optim_type = AdamW
 lr = 2e-4
 betas = (0.9, 0.999)
 weight_decay = 0
 max_norm = 1  # grad clip
 warmup_ratio = 0.03
 
+# Save
+save_steps = 500
+save_total_limit = 2  # Maximum checkpoints to keep (-1 means unlimited)
+
 # Evaluate the generation performance during the training
-evaluation_freq = 100
-SYSTEM = SYSTEM_TEMPLATE.coder
+evaluation_freq = 500
+SYSTEM = ''
 evaluation_inputs = [
-    ('写一个Python函数，将十六进制颜色代码（如#0066ee）转换为对应的'
-     '红、绿、蓝（RGB）三个颜色分量值，并以元组的形式返回。'),
-    ('Write a Python function that takes a hexadecimal color code '
-     '(e.g., #0066ee) as input and converts it into the corresponding '
-     'red, green, and blue (RGB) color component values.')
+    '请给我介绍五个上海的景点', 'Please tell me five scenic spots in Shanghai'
 ]
 
 #######################################################################
@@ -59,8 +60,7 @@ tokenizer = dict(
     type=AutoTokenizer.from_pretrained,
     pretrained_model_name_or_path=pretrained_model_name_or_path,
     trust_remote_code=True,
-    padding_side='right',
-    eos_token='<|EOT|>')
+    padding_side='right')
 
 model = dict(
     type=SupervisedFinetune,
@@ -94,7 +94,7 @@ train_dataset = dict(
     dataset=dict(type=load_dataset, path=data_path),
     tokenizer=tokenizer,
     max_length=max_length,
-    dataset_map_fn=code_alpaca_map_fn,
+    dataset_map_fn=oasst1_map_fn,
     template_map_fn=dict(
         type=template_map_fn_factory, template=prompt_template),
     remove_unused_columns=True,
@@ -141,7 +141,7 @@ param_scheduler = [
 ]
 
 # train, val, test setting
-train_cfg = dict(by_epoch=True, max_epochs=max_epochs, val_interval=1)
+train_cfg = dict(type=TrainLoop, max_epochs=max_epochs)
 
 #######################################################################
 #                           PART 5  Runtime                           #
@@ -153,7 +153,6 @@ custom_hooks = [
         type=EvaluateChatHook,
         tokenizer=tokenizer,
         every_n_iters=evaluation_freq,
-        stop_word='<|EOT|>',
         evaluation_inputs=evaluation_inputs,
         system=SYSTEM,
         prompt_template=prompt_template)
@@ -163,12 +162,16 @@ custom_hooks = [
 default_hooks = dict(
     # record the time of every iteration.
     timer=dict(type=IterTimerHook),
-    # print log every 100 iterations.
-    logger=dict(type=LoggerHook, interval=10),
+    # print log every 10 iterations.
+    logger=dict(type=LoggerHook, log_metric_by_epoch=False, interval=10),
     # enable the parameter scheduler.
     param_scheduler=dict(type=ParamSchedulerHook),
-    # save checkpoint per epoch.
-    checkpoint=dict(type=CheckpointHook, interval=1),
+    # save checkpoint per `save_steps`.
+    checkpoint=dict(
+        type=CheckpointHook,
+        by_epoch=False,
+        interval=save_steps,
+        max_keep_ckpts=save_total_limit),
     # set sampler seed in distributed evrionment.
     sampler_seed=dict(type=DistSamplerSeedHook),
 )
@@ -197,3 +200,6 @@ resume = False
 
 # Defaults to use random seed and disable `deterministic`
 randomness = dict(seed=None, deterministic=False)
+
+# set log processor
+log_processor = dict(by_epoch=False)
