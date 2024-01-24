@@ -278,7 +278,7 @@ def main():
         rank, world_size = get_dist_info()
         torch.cuda.set_device(rank)
     else:
-        rank = 1
+        rank = 0
         world_size = 1
 
     # build llm
