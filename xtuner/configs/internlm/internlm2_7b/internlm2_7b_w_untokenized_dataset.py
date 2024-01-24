@@ -11,8 +11,8 @@ from xtuner.dataset.intern_repo import (build_packed_dataset,
                                         load_intern_repo_untokenized_dataset)
 from xtuner.dataset.map_fns import template_map_fn_factory
 from xtuner.dataset.samplers import InternlmRepoSampler
-from xtuner.engine import (DatasetInfoHook, EvaluateChatHook,
-                           LocalAttnArgsToMessageHubHook, ThroughputHook)
+from xtuner.engine import (DatasetInfoHook, EvaluateChatHook, ThroughputHook,
+                           VarlenAttnArgsToMessageHubHook)
 from xtuner.engine.runner import TrainLoop
 from xtuner.model import SupervisedFinetune
 from xtuner.utils import PROMPT_TEMPLATE
@@ -148,7 +148,7 @@ custom_hooks = [
         system=SYSTEM,
         prompt_template=prompt_template),
     dict(type=ThroughputHook),
-    dict(type=LocalAttnArgsToMessageHubHook, )
+    dict(type=VarlenAttnArgsToMessageHubHook, )
 ]
 
 # configure default hooks

@@ -10,8 +10,8 @@ from xtuner.dataset.collate_fns import intern_repo_collate_fn
 from xtuner.dataset.intern_repo import (build_packed_dataset,
                                         load_intern_repo_tokenized_dataset)
 from xtuner.dataset.samplers import InternlmRepoSampler
-from xtuner.engine import (DatasetInfoHook, EvaluateChatHook,
-                           LocalAttnArgsToMessageHubHook, ThroughputHook)
+from xtuner.engine import (DatasetInfoHook, EvaluateChatHook, ThroughputHook,
+                           VarlenAttnArgsToMessageHubHook)
 from xtuner.engine.runner import TrainLoop
 from xtuner.model import SupervisedFinetune
 from xtuner.utils import PROMPT_TEMPLATE
@@ -144,7 +144,7 @@ custom_hooks = [
         system=SYSTEM,
         prompt_template=prompt_template),
     dict(type=ThroughputHook),
-    dict(type=LocalAttnArgsToMessageHubHook, )
+    dict(type=VarlenAttnArgsToMessageHubHook, )
 ]
 
 # configure default hooks

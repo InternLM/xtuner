@@ -1,10 +1,10 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from ._strategy import DeepSpeedStrategy
-from .hooks import (DatasetInfoHook, EvaluateChatHook,
-                    LocalAttnArgsToMessageHubHook, ThroughputHook)
+from .hooks import (DatasetInfoHook, EvaluateChatHook, ThroughputHook,
+                    VarlenAttnArgsToMessageHubHook)
 from .runner import TrainLoop
 
 __all__ = [
     'EvaluateChatHook', 'DatasetInfoHook', 'ThroughputHook',
-    'LocalAttnArgsToMessageHubHook', 'DeepSpeedStrategy', 'TrainLoop'
+    'VarlenAttnArgsToMessageHubHook', 'DeepSpeedStrategy', 'TrainLoop'
 ]

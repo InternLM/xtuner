@@ -9,7 +9,7 @@ from mmengine.hooks import Hook
 DATA_BATCH = Optional[Union[dict, tuple, list]]
 
 
-class LocalAttnArgsToMessageHubHook(Hook):
+class VarlenAttnArgsToMessageHubHook(Hook):
 
     args = ('cumulative_len', 'indexes', 'max_seqlen')
 
