@@ -23,7 +23,7 @@ from transformers import (AutoModel, AutoModelForCausalLM, AutoTokenizer,
 
 from xtuner.dataset.utils import decode_base64_to_image, expand2square
 from xtuner.model.utils import prepare_inputs_labels_for_multimodal
-from xtuner.tools.utils import get_chat_utils, is_cn_string
+from xtuner.tools.utils import get_stop_criteria, is_cn_string
 from xtuner.utils import (DEFAULT_IMAGE_TOKEN, IMAGE_TOKEN_INDEX,
                           PROMPT_TEMPLATE)
 
@@ -47,6 +47,8 @@ def parse_args():
         choices=PROMPT_TEMPLATE.keys(),
         default=None,
         help='Specify a prompt template')
+    parser.add_argument(
+        '--stop-words', nargs='+', type=str, default=[], help='Stop words')
     parser.add_argument(
         '--torch-dtype',
         default='fp16',
@@ -330,18 +332,26 @@ def main():
     if 'llm_adapter' in os.listdir(llava_path):
         adapter_path = osp.join(llava_path, 'llm_adapter')
         llm = PeftModel.from_pretrained(
-            llm, adapter_path, offload_folder=args.offload_folder)
+            llm,
+            adapter_path,
+            offload_folder=args.offload_folder,
+            trust_remote_code=True)
         print(f'Load LLM adapter from {args.llava}')
     if 'visual_encoder_adapter' in os.listdir(llava_path):
         adapter_path = osp.join(llava_path, 'visual_encoder_adapter')
         visual_encoder = PeftModel.from_pretrained(
-            visual_encoder, adapter_path, offload_folder=args.offload_folder)
+            visual_encoder,
+            adapter_path,
+            offload_folder=args.offload_folder,
+            trust_remote_code=True)
         print(f'Load visual_encoder adapter from {args.llava}')
 
     # build projector
     projector_path = osp.join(llava_path, 'projector')
     projector = AutoModel.from_pretrained(
-        projector_path, torch_dtype=TORCH_DTYPE_MAP[args.torch_dtype])
+        projector_path,
+        torch_dtype=TORCH_DTYPE_MAP[args.torch_dtype],
+        trust_remote_code=True)
     print(f'Load projector from {args.llava}')
 
     projector.cuda()
@@ -350,7 +360,12 @@ def main():
     visual_encoder.eval()
     llm.eval()
 
-    _, stop_criteria = get_chat_utils(llm)
+    stop_words = args.stop_words
+    if args.prompt_template:
+        template = PROMPT_TEMPLATE[args.prompt_template]
+        stop_words += template.get('STOP_WORDS', [])
+    stop_criteria = get_stop_criteria(
+        tokenizer=tokenizer, stop_words=stop_words)
 
     gen_config = GenerationConfig(
         max_new_tokens=args.max_new_tokens,
@@ -401,14 +416,14 @@ def main():
         chunk_encode = []
         for idx, chunk in enumerate(inputs.split(DEFAULT_IMAGE_TOKEN)):
             if idx == 0:
-                cur_encode = tokenizer(chunk)
+                cur_encode = tokenizer.encode(chunk)
             else:
-                cur_encode = tokenizer(chunk, add_special_tokens=False)
+                cur_encode = tokenizer.encode(chunk, add_special_tokens=False)
             chunk_encode.append(cur_encode)
         assert len(chunk_encode) == 2
         ids = []
         for idx, cur_chunk_encode in enumerate(chunk_encode):
-            ids.extend(cur_chunk_encode['input_ids'])
+            ids.extend(cur_chunk_encode)
             if idx != len(chunk_encode) - 1:
                 ids.append(IMAGE_TOKEN_INDEX)
         ids = torch.tensor(ids).cuda().unsqueeze(0)

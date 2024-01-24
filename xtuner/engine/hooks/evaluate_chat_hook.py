@@ -1,4 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import warnings
+
 import torch
 from mmengine.hooks import Hook
 from mmengine.model import is_model_wrapper
@@ -25,7 +27,8 @@ class EvaluateChatHook(Hook):
                  prompt_template=None,
                  every_n_iters=None,
                  max_new_tokens=600,
-                 stop_word=None):
+                 stop_word=None,
+                 stop_words=[]):
         self.evaluation_inputs = evaluation_inputs
         if isinstance(self.evaluation_inputs, str):
             self.evaluation_inputs = [self.evaluation_inputs]
@@ -50,6 +53,13 @@ class EvaluateChatHook(Hook):
             if system != '':
                 system = prompt_template.get(
                     'SYSTEM', '{system}\n').format(system=system)
+            stop_words += prompt_template.get('STOP_WORDS', [])
+        if stop_word is not None:
+            # TODO: deprecation, v0.3.0
+            warnings.warn(
+                ('The `stop_word` argument is deprecated and will be removed '
+                 'in v0.3.0, use `stop_words` instead.'), DeprecationWarning)
+            stop_words.append(stop_word)
         self.instruction = instruction
         self.system = system
         self.every_n_iters = every_n_iters
@@ -70,9 +80,10 @@ class EvaluateChatHook(Hook):
             if self.tokenizer.pad_token_id is not None else
             self.tokenizer.eos_token_id,
         )
-        if stop_word is not None:
+        self.stop_criteria = StoppingCriteriaList()
+        for word in stop_words:
             self.stop_criteria.append(
-                StopWordStoppingCriteria(self.tokenizer, stop_word))
+                StopWordStoppingCriteria(self.tokenizer, word))
 
     def _generate_samples(self, runner, max_new_tokens=None):
         if max_new_tokens is None:
@@ -106,15 +117,15 @@ class EvaluateChatHook(Hook):
                 chunk_encode = []
                 for idx, chunk in enumerate(inputs.split(DEFAULT_IMAGE_TOKEN)):
                     if idx == 0:
-                        cur_encode = self.tokenizer(chunk)
+                        cur_encode = self.tokenizer.encode(chunk)
                     else:
-                        cur_encode = self.tokenizer(
+                        cur_encode = self.tokenizer.encode(
                             chunk, add_special_tokens=False)
                     chunk_encode.append(cur_encode)
                 assert len(chunk_encode) == 2
                 input_ids = []
                 for idx, cur_chunk_encode in enumerate(chunk_encode):
-                    input_ids.extend(cur_chunk_encode['input_ids'])
+                    input_ids.extend(cur_chunk_encode)
                     if idx != len(chunk_encode) - 1:
                         input_ids.append(IMAGE_TOKEN_INDEX)
                 input_ids = torch.tensor(input_ids).to(device)
@@ -142,8 +153,7 @@ class EvaluateChatHook(Hook):
             for sample_input in self.evaluation_inputs:
                 inputs = (self.system + self.instruction).format(
                     input=sample_input, round=1, **runner.cfg)
-                input_ids = self.tokenizer(
-                    inputs, return_tensors='pt')['input_ids']
+                input_ids = self.tokenizer.encode(inputs, return_tensors='pt')
                 input_ids = input_ids.to(device)
                 generation_output = model.generate(
                     input_ids=input_ids,
@@ -169,8 +179,8 @@ class EvaluateChatHook(Hook):
                          batch_idx: int,
                          data_batch=None,
                          outputs=None) -> None:
-        if self.every_n_iters is None or (batch_idx +
-                                          1) % self.every_n_iters != 0:
+        if (self.every_n_iters is None or batch_idx == 0
+                or batch_idx % self.every_n_iters != 0):
             return
         runner.logger.info('after_train_iter in EvaluateChatHook.')
         self._generate_samples(runner)

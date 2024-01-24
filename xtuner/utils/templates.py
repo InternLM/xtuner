@@ -1,21 +1,39 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from mmengine.config import ConfigDict
 
+# - Turn 0: SYSTEM + INSTRUCTION, [output + SUFFIX], SEP
+# - Turn 1: INSTRUCTION, [output + SUFFIX], SEP
+# - Turn ...
+# Note: [] means having supervised loss during the fine-tuning
 PROMPT_TEMPLATE = ConfigDict(
     default=dict(
         SYSTEM='<|System|>:{system}\n',
-        INSTRUCTION='<|User|>:{input}\n<|Bot|>:'),
+        INSTRUCTION='<|User|>:{input}\n<|Bot|>:',
+        SEP='\n'),
     zephyr=dict(
         SYSTEM='<|system|>\n{system}\n',
-        INSTRUCTION='<|user|>\n{input}\n<|assistant|>\n'),
+        INSTRUCTION='<|user|>\n{input}\n<|assistant|>\n',
+        SEP='\n'),
     internlm_chat=dict(
         SYSTEM='<|System|>:{system}\n',
-        INSTRUCTION='<|User|>:{input}<eoh>\n<|Bot|>:'),
+        INSTRUCTION='<|User|>:{input}<eoh>\n<|Bot|>:',
+        SUFFIX='<eoa>',
+        SUFFIX_AS_EOS=True,
+        SEP='\n',
+        STOP_WORDS=['<eoa>']),
     internlm2_chat=dict(
-        SYSTEM='<|System|>:{system}\n',
-        INSTRUCTION=('[UNUSED_TOKEN_146]user\n{input}[UNUSED_TOKEN_145]\n'
-                     '[UNUSED_TOKEN_146]assistant\n')),
-    moss_sft=dict(SYSTEM='{system}\n', INSTRUCTION='<|Human|>: {input}<eoh>'),
+        SYSTEM='<|im_start|>system\n{system}<|im_end|>\n',
+        INSTRUCTION=('<|im_start|>user\n{input}<|im_end|>\n'
+                     '<|im_start|>assistant\n'),
+        SUFFIX='<|im_end|>',
+        SUFFIX_AS_EOS=True,
+        SEP='\n',
+        STOP_WORDS=['<|im_end|>']),
+    moss_sft=dict(
+        SYSTEM='{system}\n',
+        INSTRUCTION='<|Human|>: {input}<eoh>\n',
+        SEP='\n',
+        STOP_WORDS=['<eoc>', '<eom>']),
     llama2_chat=dict(
         SYSTEM=(
             '[INST] <<SYS>>\n You are a helpful, respectful and honest '
@@ -24,43 +42,66 @@ PROMPT_TEMPLATE = ConfigDict(
             'racist, sexist, toxic, dangerous, or illegal content. Please '
             'ensure that your responses are socially unbiased and positive in '
             'nature.\n{system}\n<</SYS>>\n [/INST] '),
-        INSTRUCTION='[INST] {input} [/INST]'),
+        INSTRUCTION='[INST] {input} [/INST]',
+        SEP='\n'),
     code_llama_chat=dict(
         SYSTEM='{system}\n', INSTRUCTION='[INST] {input} [/INST]'),
     chatglm2=dict(
         SYSTEM='{system}\n',
-        INSTRUCTION='\n\n[Round {round}]\n\n问：{input}\n\n答：'),
+        INSTRUCTION='[Round {round}]\n\n问：{input}\n\n答：',
+        SEP='\n\n'),
     chatglm3=dict(
         SYSTEM='<|system|>\n{system}',
-        INSTRUCTION='<|user|>\n{input}<|assistant|>\n'),
+        INSTRUCTION='<|user|>\n{input}<|assistant|>\n',
+        SEP='\n'),
     qwen_chat=dict(
         SYSTEM=('\n<|im_start|>system\n{system}<|im_end|>'),
         INSTRUCTION=(
-            '\n<|im_start|>user\n{input}<|im_end|>\n<|im_start|>assistant\n')),
+            '\n<|im_start|>user\n{input}<|im_end|>\n<|im_start|>assistant\n'),
+        SUFFIX='<|im_end|>',
+        SUFFIX_AS_EOS=True,
+        SEP='\n',
+        STOP_WORDS=['<|im_end|>', '<|endoftext|>']),
     baichuan_chat=dict(
         SYSTEM='{system}\n',
-        INSTRUCTION='<reserved_102>{input}<reserved_103>'),
+        INSTRUCTION='<reserved_102>{input}<reserved_103>',
+        SEP='\n'),
     baichuan2_chat=dict(
         SYSTEM='{system}\n',
-        INSTRUCTION='<reserved_106>{input}<reserved_107>'),
+        INSTRUCTION='<reserved_106>{input}<reserved_107>',
+        SEP='\n'),
     wizardlm=dict(
         SYSTEM=('A chat between a curious user and an artificial '
                 'intelligence assistant. The assistant gives '
                 'helpful, detailed, and polite answers to the '
                 'user\'s questions. {system}\n '),
-        INSTRUCTION=('USER: {input} ASSISTANT:')),
+        INSTRUCTION=('USER: {input} ASSISTANT:'),
+        SEP='\n'),
     wizardcoder=dict(
         SYSTEM=(
             'Below is an instruction that describes a task. '
             'Write a response that appropriately completes the request.\n\n'
             '{system}\n '),
-        INSTRUCTION=('### Instruction:\n{input}\n\n### Response:')),
+        INSTRUCTION=('### Instruction:\n{input}\n\n### Response:'),
+        SEP='\n\n'),
     vicuna=dict(
         SYSTEM=('A chat between a curious user and an artificial '
                 'intelligence assistant. The assistant gives '
                 'helpful, detailed, and polite answers to the '
                 'user\'s questions. {system}\n '),
-        INSTRUCTION=('USER: {input} ASSISTANT:')),
+        INSTRUCTION=('USER: {input} ASSISTANT:'),
+        SEP='\n'),
+    deepseek_coder=dict(
+        SYSTEM=('You are an AI programming assistant, utilizing '
+                'the DeepSeek Coder model, developed by DeepSeek'
+                'Company, and you only answer questions related '
+                'to computer science. For politically sensitive '
+                'questions, security and privacy issues, and '
+                'other non-computer science questions, you will '
+                'refuse to answer. {system}\n'),
+        INSTRUCTION=('### Instruction:\n{input}\n### Response:\n'),
+        SEP='\n'),
+    # TODO: deprecation, v0.2.0
     deepseekcoder=dict(
         SYSTEM=('You are an AI programming assistant, utilizing '
                 'the DeepSeek Coder model, developed by DeepSeek'
@@ -69,13 +110,20 @@ PROMPT_TEMPLATE = ConfigDict(
                 'questions, security and privacy issues, and '
                 'other non-computer science questions, you will '
                 'refuse to answer. {system}\n'),
-        INSTRUCTION=('### Instruction:\n{input}\n### Response:')),
+        INSTRUCTION=('### Instruction:\n{input}\n### Response:\n'),
+        SEP='\n'),
+    deepseek_moe=dict(
+        SYSTEM=('[INST] {system} [/INST]\n'),
+        INSTRUCTION=('[INST] {input} [/INST]'),
+        SEP='\n'),
     mistral=dict(
-        SYSTEM=('[INST] {system} [/INST]'),
-        INSTRUCTION=('[INST] {input} [/INST]')),
+        SYSTEM=('[INST] {system} [/INST]\n'),
+        INSTRUCTION=('[INST] {input} [/INST]'),
+        SEP='\n'),
     mixtral=dict(
-        SYSTEM=('[INST] {system} [/INST]'),
-        INSTRUCTION=('[INST] {input} [/INST]')),
+        SYSTEM=('[INST] {system} [/INST]\n'),
+        INSTRUCTION=('[INST] {input} [/INST]'),
+        SEP='\n'),
 )
 
 SYSTEM_TEMPLATE = ConfigDict(
