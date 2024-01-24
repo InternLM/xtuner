@@ -72,7 +72,7 @@ def encode_fn(example,
         if DEFAULT_IMAGE_TOKEN in input and with_image_token:
             chunk_encode = [
                 tokenizer.encode(chunk, add_special_tokens=False)
-                for chunk in input.split('<image>')
+                for chunk in input.split(DEFAULT_IMAGE_TOKEN)
             ]
             assert len(chunk_encode) == 2
             input_encode = []
