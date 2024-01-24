@@ -126,7 +126,10 @@ def main():
             tokenizer = BUILDER.build(cfg.tokenizer)
             tokenizer.save_pretrained(llm_path)
             print(f'Saving LLM to {llm_path}')
-        model.llm.save_pretrained(llm_path, max_shard_size=args.max_shard_size)
+        model.llm.save_pretrained(
+            llm_path,
+            max_shard_size=args.max_shard_size,
+            safe_serialization=False)
 
     shutil.copyfile(args.config, osp.join(args.save_dir, 'xtuner_config.py'))
     print('All done!')
