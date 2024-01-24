@@ -408,7 +408,7 @@ def main():
 
     per_rank_ids = range(per_rank_samples * rank,
                          min(n_samples, per_rank_samples * (rank + 1)))
-    for i in tqdm.tqdm(per_rank_ids, desc=f'Rank {rank}:'):
+    for i in tqdm.tqdm(per_rank_ids, desc=f'Rank {rank}'):
         data_sample = dataset[i]
         if data_sample['context'] is not None:
             text = data_sample['context'] + '\n' + data_sample[
