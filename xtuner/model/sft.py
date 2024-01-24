@@ -21,12 +21,12 @@ class SupervisedFinetune(BaseModel):
                  lora=None,
                  peft_model=None,
                  use_activation_checkpointing=True,
-                 use_local_attn=False):
+                 use_varlen_attn=False):
         super().__init__()
         with LoadWoInit():
             self.llm = self._build_from_cfg_or_module(llm)
         self.llm.config.use_cache = False
-        dispatch_modules(self.llm, use_local_attn=use_local_attn)
+        dispatch_modules(self.llm, use_varlen_attn=use_varlen_attn)
 
         if use_activation_checkpointing:
             # For backward compatibility
@@ -51,9 +51,9 @@ class SupervisedFinetune(BaseModel):
 
         self._is_init = True
         # Determines whether to calculate attention based on the
-        # seq_len dimension (use_local_attn = False) or the actual length of
+        # seq_len dimension (use_varlen_attn = False) or the actual length of
         # the sequence.
-        self.use_local_attn = use_local_attn
+        self.use_varlen_attn = use_varlen_attn
 
     def gradient_checkpointing_enable(self):
         self.activation_checkpointing_enable()
@@ -94,8 +94,8 @@ class SupervisedFinetune(BaseModel):
 
     def forward(self, data, data_samples=None, mode='loss'):
 
-        # if self.use_local_attn:
-        #     message_hub = MessageHub.get_instance('local_attn_args')
+        # if self.use_varlen_attn:
+        #     message_hub = MessageHub.get_instance('varlen_attn_args')
         #     rank = dist.get_rank()
         #     message_hub.update_info(f'cumulative_len_rank_{rank}',
         #                             data.pop('cumulative_len'))

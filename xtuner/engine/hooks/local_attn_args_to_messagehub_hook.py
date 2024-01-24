@@ -30,7 +30,7 @@ class LocalAttnArgsToMessageHubHook(Hook):
                           batch_idx: int,
                           data_batch: dict = None) -> None:
         rank = dist.get_rank()
-        message_hub = MessageHub.get_instance('local_attn_args')
+        message_hub = MessageHub.get_instance('varlen_attn_args')
 
         assert 'data' in data_batch.keys()
         data = data_batch['data']
@@ -46,7 +46,7 @@ class LocalAttnArgsToMessageHubHook(Hook):
                          data_batch: DATA_BATCH = None,
                          outputs: Optional[dict] = None) -> None:
         rank = dist.get_rank()
-        message_hub = MessageHub.get_instance('local_attn_args')
+        message_hub = MessageHub.get_instance('varlen_attn_args')
 
         for arg in self.args:
             message_hub.update_info(f'{arg}_rank_{rank}', None)

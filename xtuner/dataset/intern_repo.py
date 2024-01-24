@@ -14,7 +14,6 @@ from datasets import Dataset, load_dataset, load_from_disk
 from mmengine import print_log
 from torch import distributed as dist
 from torch.utils.data import ConcatDataset
-from tqdm import tqdm
 
 from xtuner.dataset.map_fns import openai_map_fn
 from xtuner.registry import BUILDER
@@ -359,45 +358,3 @@ def build_packed_dataset(*args, **kwargs):
         objects = [None]
     dist.broadcast_object_list(objects, src=0)
     return objects[0]
-
-
-def process_intern_repo_dataset(folder,
-                                packed_length=8192,
-                                min_length=0,
-                                seed=1024):
-
-    assert os.path.exists(folder), f'{folder} does not exist.'
-    datasets = []
-    if dist.get_rank() == 0:
-        triples = [list(os.walk(folder, followlinks=True))]
-    else:
-        triples = [None]
-    dist.broadcast_object_list(triples, src=0)
-    triples = triples[0]
-
-    for root, dirs, files in triples:
-        dirs.sort()  # Let the folder need to be returned in a fixed order
-        if dist.get_rank() == 0:
-            print_log(f'Reading {root}...', logger='current')
-        num_token_in_folder = 0
-
-        for fn in tqdm(
-                sorted(files),
-                total=len(files),
-                leave=False,
-                disable=dist.get_rank() != 0):
-            if fn.endswith('.bin'):
-                fp = os.path.join(root, fn)
-                ds = JsonlDataset(fp, min_length=min_length)
-
-                if len(ds) == 0:
-                    continue
-
-                ds = PackedDataset(ds, packed_length, seed=seed)
-
-                num_token_in_folder += len(ds) * packed_length
-                datasets.append(ds)
-
-    dataset = ConcatDataset(datasets=datasets)
-
-    return dataset

@@ -173,7 +173,7 @@ def internlm2_attn_forward(
     return attn_output, None, past_key_value
 
 
-def internlm2_local_attn_forward(
+def internlm2_varlen_attn_forward(
     self,
     hidden_states: torch.Tensor,
     attention_mask: Optional[torch.Tensor] = None,
@@ -187,7 +187,7 @@ def internlm2_local_attn_forward(
 
     is_training = self.training
 
-    message_hub = MessageHub.get_instance('local_attn_args')
+    message_hub = MessageHub.get_instance('varlen_attn_args')
     rank = dist.get_rank()
     cumulative_len = message_hub.get_info(f'cumulative_len_rank_{rank}')
     indexes = message_hub.get_info(f'indexes_rank_{rank}')

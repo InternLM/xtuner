@@ -7,10 +7,10 @@ import torch
 def intern_repo_collate_fn(instances: Sequence[Dict],
                            packed_length: int,
                            return_hf_format: bool = False,
-                           use_local_attn: bool = True):
+                           use_varlen_attn: bool = True):
 
     input_ids, labels = [], []
-    if use_local_attn:
+    if use_varlen_attn:
         cumulative_len, indexes = [], []
         assert len(instances) == 1, (
             f'If utilizing local attention, the batch size should be'
@@ -26,7 +26,7 @@ def intern_repo_collate_fn(instances: Sequence[Dict],
 
         input_ids.append(torch.LongTensor(example['input_ids']))
         labels.append(torch.LongTensor(example['labels']))
-        if use_local_attn:
+        if use_varlen_attn:
             cumulative_len.append(torch.IntTensor(example['cumulative_len']))
             indexes.append(torch.LongTensor(example['indexes']))
 
@@ -36,7 +36,7 @@ def intern_repo_collate_fn(instances: Sequence[Dict],
     assert input_ids.shape[1] == packed_length, (input_ids.shape[1],
                                                  packed_length)
 
-    if use_local_attn:
+    if use_varlen_attn:
         indexes = torch.stack(indexes, dim=0)
         max_seqlen = (
             cumulative_len[0][1:] -  # noqa: W504

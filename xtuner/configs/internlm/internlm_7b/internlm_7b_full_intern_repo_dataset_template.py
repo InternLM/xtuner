@@ -21,7 +21,7 @@ from xtuner.utils import PROMPT_TEMPLATE
 #######################################################################
 # Model
 pretrained_model_name_or_path = '/path/to/your/base/model'
-use_local_attn = True
+use_varlen_attn = True
 
 # Data
 dataset_folder = '/path/to/your/train/dataset'
@@ -63,7 +63,7 @@ tokenizer = dict(
 
 model = dict(
     type=SupervisedFinetune,
-    use_local_attn=use_local_attn,
+    use_varlen_attn=use_varlen_attn,
     llm=dict(
         type=AutoModelForCausalLM.from_pretrained,
         pretrained_model_name_or_path=pretrained_model_name_or_path,
@@ -91,7 +91,7 @@ train_dataloader = dict(
     collate_fn=dict(
         type=intern_repo_collate_fn,
         packed_length=max_length,
-        use_local_attn=use_local_attn))
+        use_varlen_attn=use_varlen_attn))
 
 #######################################################################
 #                    PART 4  Scheduler & Optimizer                    #

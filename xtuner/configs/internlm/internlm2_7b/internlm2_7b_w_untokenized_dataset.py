@@ -22,7 +22,7 @@ from xtuner.utils import PROMPT_TEMPLATE
 #######################################################################
 # Model
 pretrained_model_name_or_path = '/mnt/petrelfs/share_data/caoweihan/official_Ampere_7B_1_0_0'  # noqa: E501
-use_local_attn = True
+use_varlen_attn = True
 
 # Data
 dataset_folder = '/mnt/petrelfs/share_data/caoweihan/v1_sample_with_legal_cate'  # noqa: E501
@@ -64,7 +64,7 @@ tokenizer = dict(
 
 model = dict(
     type=SupervisedFinetune,
-    use_local_attn=use_local_attn,
+    use_varlen_attn=use_varlen_attn,
     llm=dict(
         type=AutoModelForCausalLM.from_pretrained,
         pretrained_model_name_or_path=pretrained_model_name_or_path,
@@ -95,7 +95,7 @@ train_dataloader = dict(
     collate_fn=dict(
         type=intern_repo_collate_fn,
         packed_length=max_length,
-        use_local_attn=use_local_attn))
+        use_varlen_attn=use_varlen_attn))
 
 #######################################################################
 #                    PART 4  Scheduler & Optimizer                    #

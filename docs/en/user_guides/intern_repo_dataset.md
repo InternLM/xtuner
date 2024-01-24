@@ -22,7 +22,7 @@ You only need to modify the corresponding part of the above interface in the Con
 #######################################################################
 # Model
 pretrained_model_name_or_path = 'internlm/internlm-7b'
-use_local_attn = True
+use_varlen_attn = True
 
 # Data
 - dataset_folder = '/path/to/your/dataset'
