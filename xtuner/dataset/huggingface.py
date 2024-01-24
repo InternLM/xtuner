@@ -28,6 +28,7 @@ def process(dataset,
             rename_maps=[],
             shuffle_before_pack=True,
             pack_to_max_length=True,
+            use_varlen_attn=False,
             input_ids_with_output=True,
             with_image_token=False,
             map_num_proc=32):
@@ -56,6 +57,9 @@ def process(dataset,
         pack_to_max_length: Whether to pack the dataset to the `max_length `.
             This usually improves gpu utilization and therefore reduces
             training time.
+        use_varlen_attn: If use_varlen_attn is True, we calculate attention
+            the actual length of the sequence rather than the actual length
+            of the sequence
         input_ids_with_output: Whether to put the groundtruth output
             corresponding to the question into the dataset. Typically set
             it to True during training and False during testing.
@@ -147,7 +151,9 @@ def process(dataset,
             dataset = dataset.shuffle()
             dataset = dataset.flatten_indices(num_proc=map_num_proc)
         dataset = dataset.map(
-            Packer(max_length), batched=True, num_proc=map_num_proc)
+            Packer(max_length, use_varlen_attn=use_varlen_attn),
+            batched=True,
+            num_proc=map_num_proc)
 
     # add 'length'
     dataset = dataset.map(get_lengths, num_proc=map_num_proc)

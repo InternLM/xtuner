@@ -164,6 +164,18 @@ class Packer:
 
         return cumulative_len
 
+    def get_indexes(self, cumulative_len):
+        indexes = []
+        for cumulative_len_cur in cumulative_len:
+            index_cur = []
+            for i in range(len(cumulative_len_cur) - 1):
+                index_cur.extend(
+                    list(
+                        range(cumulative_len_cur[i + 1] -  # noqa: W504
+                              cumulative_len_cur[i])))
+            indexes.append(index_cur)
+        return indexes
+
     def __call__(self, batch):
         concatenated_samples = {
             k: v + list(chain(*batch[k]))
@@ -196,17 +208,23 @@ class Packer:
             }
 
             if self.use_varlen_attn:
-                result['cumulative_len'] = self.get_cumulative_len(chunk_num)
+                cumulative_len = self.get_cumulative_len(chunk_num)
+                result['cumulative_len'] = cumulative_len
+                result['indexes'] = self.get_indexes(cumulative_len)
         else:
             if self.drop_last:
                 result = {k: [] for k, v in concatenated_samples.items()}
             else:
                 result = {k: [v] for k, v in concatenated_samples.items()}
+
             self.residual = {k: [] for k in concatenated_samples.keys()}
+
             if self.use_varlen_attn:
                 result['cumulative_len'] = [] if self.drop_last else [
                     self.residual_cumulative_len
                 ]
+                result['indexes'] = [] if self.drop_last else self.get_indexes(
+                    [self.residual_cumulative_len])
                 self.residual_cumulative_len = [0]
 
         return result
