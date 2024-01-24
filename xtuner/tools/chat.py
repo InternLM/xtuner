@@ -114,6 +114,11 @@ def parse_args():
         'tokens with probabilities that add up to top_p or higher are '
         'kept for generation.')
     parser.add_argument(
+        '--repetition-penalty',
+        type=float,
+        default=1.0,
+        help='The parameter for repetition penalty. 1.0 means no penalty.')
+    parser.add_argument(
         '--seed',
         type=int,
         default=0,
@@ -325,6 +330,7 @@ def main():
             temperature=args.temperature,
             top_p=args.top_p,
             top_k=args.top_k,
+            repetition_penalty=args.repetition_penalty,
             eos_token_id=tokenizer.eos_token_id,
             pad_token_id=tokenizer.pad_token_id
             if tokenizer.pad_token_id is not None else tokenizer.eos_token_id,

@@ -187,8 +187,8 @@ class EvaluateChatHook(Hook):
                          batch_idx: int,
                          data_batch=None,
                          outputs=None) -> None:
-        if self.every_n_iters is None or (batch_idx +
-                                          1) % self.every_n_iters != 0:
+        if (self.every_n_iters is None or batch_idx == 0
+                or batch_idx % self.every_n_iters != 0):
             return
         runner.logger.info('after_train_iter in EvaluateChatHook.')
         self._generate_samples(runner)
