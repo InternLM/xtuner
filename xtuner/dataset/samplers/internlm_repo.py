@@ -1,7 +1,8 @@
+import warnings
 from typing import Iterator, Optional, Sized
 
 import numpy as np
-from mmengine.dist import get_dist_info, sync_random_seed
+from mmengine.dist import get_dist_info
 from torch.utils.data import Sampler
 
 
@@ -11,15 +12,16 @@ class InternlmRepoSampler(Sampler):
                  dataset: Sized,
                  shuffle: bool = True,
                  seed: Optional[int] = None) -> None:
+        if seed is not None and seed != 1024:
+            warnings.warn('For alignment accuracy, seed in InternlmRepoSampler'
+                          'must be set to 1024.')
         rank, world_size = get_dist_info()
         self.rank = rank
         self.world_size = world_size
 
         self.dataset = dataset
         self.shuffle = shuffle
-        if seed is None:
-            seed = sync_random_seed()
-        self.seed = seed
+        self.seed = 1024
         self.epoch = 0
 
         self.num_samples = len(self.dataset) // world_size
