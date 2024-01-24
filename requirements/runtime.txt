@@ -7,7 +7,7 @@ einops
 lagent>=0.1.2
 # Minimum 0.10.1 to support exclude_frozen_parameters for DeepSpeedStrategy,
 # see https://github.com/open-mmlab/mmengine/pull/1415, https://github.com/open-mmlab/mmengine/pull/1424
-mmengine>=0.10.1
+mmengine>=0.10.3
 openpyxl
 # Minimum 0.4.0 to support QLoRA, see https://github.com/huggingface/peft/pull/476
 peft>=0.4.0
