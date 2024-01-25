@@ -6,7 +6,7 @@ from torch.optim import AdamW
 from torch.utils.data import BatchSampler
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from xtuner.dataset.collate_fns import intern_repo_collate_fn
+from xtuner.dataset.collate_fns import default_collate_fn
 from xtuner.dataset.intern_repo import (build_packed_dataset,
                                         load_intern_repo_tokenized_dataset)
 from xtuner.dataset.samplers import InternlmRepoSampler
@@ -88,10 +88,7 @@ train_dataloader = dict(
     dataset=train_dataset,
     sampler=dict(type=InternlmRepoSampler, shuffle=True, seed=1024),
     batch_sampler=dict(type=BatchSampler, drop_last=True, batch_size=1),
-    collate_fn=dict(
-        type=intern_repo_collate_fn,
-        packed_length=max_length,
-        use_varlen_attn=use_varlen_attn))
+    collate_fn=dict(type=default_collate_fn, use_varlen_attn=use_varlen_attn))
 
 #######################################################################
 #                    PART 4  Scheduler & Optimizer                    #
