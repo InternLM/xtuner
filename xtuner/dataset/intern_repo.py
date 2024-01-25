@@ -141,8 +141,11 @@ class PackedDataset(torch.utils.data.Dataset):
         if isinstance(dataset, JsonlDataset):
             self.length = dataset.length
         elif isinstance(dataset, Dataset):
-            assert 'length' in dataset.column_names
-            self.length = dataset['length']
+            if hasattr(dataset, 'length'):
+                length = dataset.length
+            else:
+                length = [len(i['input_ids']) for i in dataset]
+            self.length = length
         else:
             raise NotImplementedError
         self.seed = seed

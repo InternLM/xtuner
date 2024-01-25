@@ -37,11 +37,12 @@ NO_ATTN_WEIGHTS_MSG = (
 
 
 def dispatch_llama_attn_forward(model, use_varlen_attn):
-    if not SUPPORT_FLASH:
-        return
     if use_varlen_attn:
         assert SUPPORT_FLASH2 and SUPPORT_TRITON, \
             'flash_attn and triton is required if you want to use varlen_attn.'
+    elif not SUPPORT_FLASH1:
+        return
+
     from .llama import llama_attn_forward, llama_varlen_attn_forward
 
     print_log(NO_ATTN_WEIGHTS_MSG, 'current', logging.WARNING)
@@ -70,11 +71,11 @@ def dispatch_llama_rmsnorm_forward(model):
 
 
 def dispatch_internlm_attn_forward(model, use_varlen_attn):
-    if not SUPPORT_FLASH:
-        return
     if use_varlen_attn:
         assert SUPPORT_FLASH2 and SUPPORT_TRITON, \
             'flash_attn and triton is required if you want to use varlen_attn.'
+    elif not SUPPORT_FLASH1:
+        return
 
     from .internlm import internlm_attn_forward, internlm_varlen_attn_forward
 
@@ -92,11 +93,11 @@ def dispatch_internlm_attn_forward(model, use_varlen_attn):
 
 
 def dispatch_internlm2_attn_forward(model, use_varlen_attn):
-    if not SUPPORT_FLASH:
-        return
     if use_varlen_attn:
         assert SUPPORT_FLASH2 and SUPPORT_TRITON, \
             'flash_attn and triton is required if you want to use varlen_attn.'
+    elif not SUPPORT_FLASH1:
+        return
 
     from .internlm2 import (internlm2_attn_forward,
                             internlm2_varlen_attn_forward)

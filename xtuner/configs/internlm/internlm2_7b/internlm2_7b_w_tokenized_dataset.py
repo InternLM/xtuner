@@ -22,7 +22,6 @@ from xtuner.utils import PROMPT_TEMPLATE
 # Model
 pretrained_model_name_or_path = '/mnt/petrelfs/share_data/caoweihan/official_Ampere_7B_1_0_0'  # noqa: E501
 use_varlen_attn = True
-use_varlen_attn = False
 
 # Data
 dataset_folder = '/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train'  # noqa: E501
@@ -64,7 +63,6 @@ tokenizer = dict(
 
 model = dict(
     type=SupervisedFinetune,
-    use_varlen_attn=use_varlen_attn,
     use_varlen_attn=use_varlen_attn,
     llm=dict(
         type=AutoModelForCausalLM.from_pretrained,
