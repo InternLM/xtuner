@@ -1,11 +1,11 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-import torch
 from dataclasses import dataclass
 
 from mmengine.config import ConfigDict
 from transformers import AutoTokenizer
 
 from xtuner.utils import PromptTemplateConfig
+
 
 @dataclass
 class AgentPromptTemplateConfig(PromptTemplateConfig):
@@ -24,67 +24,75 @@ class AgentPromptTemplateConfig(PromptTemplateConfig):
         n_turn = 1
         for data_idx, data in enumerate(messages_original):
             role_original = data.get('role')
-            meta_type = data.get('type')
-            file_info = data.get('file')
-            action_info = data.get('action')
             content_original = data.get('content')
+            extra = data.get('extra')
             if role_original == 'system':
                 role = 'system'
-                content = self.system.format(system=content_original)
-            elif role_original == 'system_with_meta':
-                role = 'system'
-                if meta_type == 'interpreter':
-                    content = self.system_with_meta.format(
-                        system=content_original, meta=self.interpreter_token)
-                elif meta_type == 'plugin':
-                    content = self.system_with_meta.format(
-                        system=content_original, meta=self.plugin_token)
+                if extra is None:
+                    content = self.system.format(system=content_original)
                 else:
-                    raise NotImplementedError
-            elif role_original == 'user_with_file':
-                assert file_info is not None
-                role = 'user'
-                content = self.instruction_with_file.format(
-                    input=content_original, file=file_info, round=n_turn)
-                n_turn += 1
-            elif role_original == 'user':
-                role = 'user'
-                content = self.instruction.format(
-                    input=content_original, round=n_turn)
-                n_turn += 1
-            elif role_original == 'assistant_with_action':
-                role = 'assistant'
-                assert action_info is not None
-                content = content_original + '\n' + self.action_start_token
-                if meta_type == 'interpreter':
-                    content += self.interpreter_token + '\n'
-                elif meta_type == 'plugin':
-                    content += self.plugin_token + '\n'
-                else:
-                    raise NotImplementedError
-                content += action_info + self.action_end_token + '\n'
-                if self.suffix != '':
-                    content += self.suffix
-            elif role_original == 'assistant':
-                role = 'assistant'
-                content = content_original
-                if self.suffix != '':
-                    content += self.suffix
-            elif role_original == 'environment_with_meta':
-                role = 'system'
-                if meta_type == 'interpreter':
-                    content = self.environment_with_meta.format(
-                        environment=content_original,
-                        meta=self.interpreter_token)
-                elif meta_type == 'plugin':
-                    content = self.environment_with_meta.format(
-                        environment=content_original, meta=self.plugin_token)
-                else:
-                    raise NotImplementedError
+                    meta_type = extra.get('meta_type')
+                    if meta_type == 'interpreter':
+                        content = self.system_with_meta.format(
+                            system=content_original,
+                            meta=self.interpreter_token)
+                    elif meta_type == 'plugin':
+                        content = self.system_with_meta.format(
+                            system=content_original, meta=self.plugin_token)
+                    else:
+                        raise NotImplementedError
             elif role_original == 'environment':
                 role = 'system'
-                content = self.environment_with_meta.format(
-                    environment=content_original)
+                if extra is None:
+                    content = self.environment.format(
+                        environment=content_original)
+                else:
+                    meta_type = extra.get('meta_type')
+                    if meta_type == 'interpreter':
+                        content = self.environment_with_meta.format(
+                            environment=content_original,
+                            meta=self.interpreter_token)
+                    elif meta_type == 'plugin':
+                        content = self.environment_with_meta.format(
+                            environment=content_original,
+                            meta=self.plugin_token)
+                    else:
+                        raise NotImplementedError
+            elif role_original == 'user':
+                role = 'user'
+                if extra is None:
+                    content = self.instruction.format(
+                        input=content_original, round=n_turn)
+                else:
+                    upload_type = extra.get('upload_type')
+                    upload_content = extra.get('upload_content')
+                    assert upload_content is not None
+                    if upload_type == 'file':
+                        content = self.instruction_with_file.format(
+                            input=content_original,
+                            file=upload_content,
+                            round=n_turn)
+                    else:
+                        raise NotImplementedError
+                n_turn += 1
+            elif role_original == 'assistant':
+                role = 'assistant'
+                if extra is None:
+                    content = content_original
+                else:
+                    action_type = extra.get('action_type')
+                    action_content = extra.get('action_content')
+                    assert action_content is not None
+                    content = content_original + '\n' + self.action_start_token
+                    if action_type == 'interpreter':
+                        content += self.interpreter_token + '\n'
+                    elif action_type == 'plugin':
+                        content += self.plugin_token + '\n'
+                    else:
+                        raise NotImplementedError
+                    content += action_content + self.action_end_token + '\n'
+                if self.suffix != '':
+                    content += self.suffix
             else:
                 raise NotImplementedError
             messages.append({'role': role, 'content': content})
@@ -108,38 +116,48 @@ AGENT_PROMPT_TEMPLATE = ConfigDict(
         sep='\n',
         stop_words=['<|im_end|>', '<|action_end|>']), )
 
-
 data = [{
-    "messages":[
+    "messages": [
         {
             "role": "system",
             "content": "你是书生浦语2，一个无害的人工智能助手"
         },
         {
-            "role": "system_with_meta",
-            "type": "interpreter",
-            "content": "YOUR_INTERPRETER, YOUR_INTERPRETER, YOUR_INTERPRETER, YOUR_INTERPRETER"
+            "role": "system",
+            "content": "YOUR_INTERPRETER, YOUR_INTERPRETER, YOUR_INTERPRETER, YOUR_INTERPRETER",
+            "extra": {
+                "meta_type": "interpreter"
+            }
         },
         {
-            "role": "system_with_meta",
-            "type": "plugin",
-            "content": "YOUR_PLUGIN, YOUR_PLUGIN, YOUR_PLUGIN, YOUR_PLUGIN"
+            "role": "system",
+            "content": "YOUR_PLUGIN, YOUR_PLUGIN, YOUR_PLUGIN, YOUR_PLUGIN",
+            "extra": {
+                "meta_type": "plugin"
+            }
         },
         {
-            "role": "user_with_file",
+            "role": "user",
             "content": "请帮我对该数据集进行数据处理并可视化。",
-            "file": "[{\"path\": \"data.csv\", size='10K'}]"
+            "extra": {
+                "upload_type": "file",
+                "upload_content": "[{\"path\": \"data.csv\", size=\"10K\"}]"
+            }
         },
         {
-            "role": "assistant_with_action",
-            "type": "interpreter",
+            "role": "assistant",
             "content": "我已经帮您处理了数据并进行了可视化。",
-            "action": "YOUR_CODE, YOUR_CODE, YOUR_CODE, YOUR_CODE"
+            "extra": {
+                "action_type": "interpreter",
+                "action_content": "YOUR_CODE, YOUR_CODE, YOUR_CODE, YOUR_CODE"
+            }
         },
         {
-            "role": "environment_with_meta",
-            "type": "interpreter",
-            "content": "![image](xxx.png)"
+            "role": "environment",
+            "content": "![image](xxx.png)",
+            "extra": {
+                "meta_type": "interpreter"
+            }
         },
         {
             "role": "assistant",
@@ -151,28 +169,31 @@ data = [{
         },
         {
             "role": "assistant",
-            "content": "我使用的是Python的Plotly库来创建一个极坐标图，以展示风向与降雨量之间的关系。代码中首先创建了一个Plotly的Figure对象。接着，我添加了两个`Scatterpolar`追踪。第一个追踪展示的是上午9点的风向与降雨量的平均值的关系，第二个追踪展示的是下午3点的风向与降雨量的平均值的关系。在这两个追踪中，`r`参数代表降雨量的平均值，`theta`参数代表风向。`fill='toself'`表示图形以自身为边界进行填充。然后我更新了图表的布局，隐藏了径向轴，添加了图例，设置了标题和标题字体，选择了暗色主题，并设定了图表的背景色、宽度和高度。最后，使用`fig.show()`展示了图表。"
+            "content": "我使用的是Python的Plotly库来创建一个极坐标图，以展示风向与降雨量之间的关系。代码中首先创建了一个Plotly的Figure对象。接着，我添加了两个`Scatterpolar`追踪。第一个追踪展示的是上午9点的风向与降雨量的平均值的关系，第二个追踪展示的是下午3点的风向与降雨量的平均值的关系。在这两个追踪中，`r`参数代表降雨量的平均值，`theta`参数代表风向。`fill=\"toself\"`表示图形以自身为边界进行填充。然后我更新了图表的布局，隐藏了径向轴，添加了图例，设置了标题和标题字体，选择了暗色主题，并设定了图表的背景色、宽度和高度。最后，使用`fig.show()`展示了图表。"
         },
         {
             "role": "user",
             "content": "我想了解今天上海的天气"
         },
         {
-            "role": "assistant_with_action",
-            "type": "plugin",
+            "role": "assistant",
             "content": "好的，我将为你查询上海的天气。",
-            "action": "{\"name\": \"get_current_weather\", \"parameters\": {\"location\": \"Shanghai\"}}"
+            "extra": {
+                "action_type": "plugin",
+                "action_content": "{\"name\": \"get_current_weather\", \"parameters\": {\"location\": \"Shanghai\"}}"
+            }
         },
         {
-            "role": "environment_with_meta",
-            "type": "plugin",
-            "content": "{\"temperature\": 22}"
+            "role": "environment",
+            "content": "{\"temperature\": 22}",
+            "extra": {
+                "meta_type": "plugin"
+            }
         },
         {
             "role": "assistant",
             "content": "上海的天气是 22 摄氏度"
-        }
-    ]
+        }]
 }]
 
 
