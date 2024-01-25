@@ -115,8 +115,7 @@ def encode_fn(example,
 
 
 class Packer:
-    """Only used for packing data in InternLM repo
-    (https://github.com/InternLM/InternLM) format."""
+    """Pack multiple pieces of data into one."""
 
     def __init__(self,
                  chunk_size=2048,

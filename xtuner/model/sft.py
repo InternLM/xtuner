@@ -94,20 +94,6 @@ class SupervisedFinetune(BaseModel):
 
     def forward(self, data, data_samples=None, mode='loss'):
 
-        # if self.use_varlen_attn:
-        #     message_hub = MessageHub.get_instance('varlen_attn_args')
-        #     rank = dist.get_rank()
-        #     message_hub.update_info(f'cumulative_len_rank_{rank}',
-        #                             data.pop('cumulative_len'))
-        #     message_hub.update_info(f'indexes_rank_{rank}',
-        #                             data.pop('indexes'))
-        #     message_hub.update_info(f'max_seqlen_rank_{rank}',
-        #                             data.pop('max_seqlen'))
-        # else:
-        #     data.pop('cumulative_len', None)
-        #     data.pop('indexes', None)
-        #     data.pop('max_seqlen', None)
-
         if mode == 'loss':
             return self.compute_loss(data, data_samples)
         elif mode == 'predict':
