@@ -25,13 +25,13 @@ use_varlen_attn = True
 
 # Data
 dataset_folder = '/path/to/your/train/dataset'
-prompt_template = PROMPT_TEMPLATE.internlm2_chat
-max_length = 32768
+prompt_template = PROMPT_TEMPLATE.internlm_chat
+max_length = 8192
 pack_to_max_length = True
 
 # Scheduler & Optimizer
 batch_size = 1  # per_device
-accumulative_counts = 1  # 1bs * 1acc * 64gpu = 64 batchsize
+accumulative_counts = 4  # 1bs * 4acc * 32gpu = 128 batchsize
 dataloader_num_workers = 4
 max_epochs = 1
 optim_type = AdamW
@@ -140,9 +140,11 @@ custom_hooks = [
         evaluation_inputs=evaluation_inputs,
         system=SYSTEM,
         prompt_template=prompt_template),
-    dict(type=ThroughputHook),
-    dict(type=VarlenAttnArgsToMessageHubHook, )
+    dict(type=ThroughputHook)
 ]
+
+if use_varlen_attn:
+    custom_hooks += [dict(type=VarlenAttnArgsToMessageHubHook)]
 
 # configure default hooks
 default_hooks = dict(

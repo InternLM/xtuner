@@ -145,9 +145,11 @@ custom_hooks = [
         evaluation_inputs=evaluation_inputs,
         system=SYSTEM,
         prompt_template=prompt_template),
-    dict(type=ThroughputHook),
-    dict(type=VarlenAttnArgsToMessageHubHook, )
+    dict(type=ThroughputHook)
 ]
+
+if use_varlen_attn:
+    custom_hooks += [dict(type=VarlenAttnArgsToMessageHubHook)]
 
 # configure default hooks
 default_hooks = dict(
