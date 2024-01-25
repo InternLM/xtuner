@@ -68,6 +68,10 @@ def process(dataset,
             of VLM.
         map_num_proc: Max number of processes when mapping the dataset.
     """
+    if use_varlen_attn:
+        assert pack_to_max_length, \
+            '`pack_to_max_length` in `process_hf_dataset` should be set to ' \
+            'True if `use_varlen_attn` is True.'
 
     if isinstance(dataset, DatasetDict):
         dataset = dataset[split]
