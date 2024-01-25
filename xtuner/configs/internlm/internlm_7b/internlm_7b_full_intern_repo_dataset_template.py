@@ -22,6 +22,7 @@ from xtuner.utils import PROMPT_TEMPLATE
 # Model
 pretrained_model_name_or_path = '/path/to/your/base/model'
 use_varlen_attn = True
+use_varlen_attn = False
 
 # Data
 dataset_folder = '/path/to/your/train/dataset'
@@ -63,6 +64,7 @@ tokenizer = dict(
 
 model = dict(
     type=SupervisedFinetune,
+    use_varlen_attn=use_varlen_attn,
     use_varlen_attn=use_varlen_attn,
     llm=dict(
         type=AutoModelForCausalLM.from_pretrained,

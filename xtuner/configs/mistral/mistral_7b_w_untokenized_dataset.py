@@ -24,6 +24,7 @@ from xtuner.utils import PROMPT_TEMPLATE
 # Model
 pretrained_model_name_or_path = '/mnt/petrelfs/share_data/basemodel/checkpoints/llm/hf_hub/models--mistralai--Mistral-7B-v0.1/snapshots/5e9c98b96d071dce59368012254c55b0ec6f8658'  # noqa: E501
 use_varlen_attn = True
+use_varlen_attn = False
 
 # Data
 dataset_folder = '/mnt/petrelfs/share_data/caoweihan/v1_sample_with_legal_cate'
@@ -65,6 +66,7 @@ tokenizer = dict(
 
 model = dict(
     type=SupervisedFinetune,
+    use_varlen_attn=use_varlen_attn,
     use_varlen_attn=use_varlen_attn,
     llm=dict(
         type=AutoModelForCausalLM.from_pretrained,
