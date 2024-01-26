@@ -58,7 +58,11 @@ def parse_args():
         help='Which prompt template need to be added to the dataset. '
         f'The available choices are {PROMPT_TEMPLATE.keys()}')
     parser.add_argument(
-        '--max_length', default=32768, help='Max sequence length.')
+        '--max-length', default=32768, help='Max sequence length.')
+    parser.add_argument(
+        '--pack-to-max-length',
+        action='store_true',
+        help='Whether to pack the dataset to the `max_length `.')
     parser.add_argument(
         '--file-type',
         default='.json',
@@ -79,6 +83,7 @@ def parse_args():
 def process_one(fp,
                 tokenizer,
                 max_length,
+                pack_to_max_length,
                 dataset_map_fn=None,
                 template_map_fn=None,
                 is_ftdp=False):
@@ -101,7 +106,7 @@ def process_one(fp,
         dataset_map_fn=dataset_map_fn,
         template_map_fn=template_map_fn,
         remove_unused_columns=True,
-        pack_to_max_length=False,
+        pack_to_max_length=pack_to_max_length,
         map_num_proc=32)
     return fp, dataset
 
@@ -109,6 +114,7 @@ def process_one(fp,
 def process_untokenized_dataset(folder,
                                 tokenizer,
                                 max_length,
+                                pack_to_max_length,
                                 dataset_map_fn,
                                 prompt_template,
                                 data_order_path=None,
@@ -140,6 +146,7 @@ def process_untokenized_dataset(folder,
         process_one,
         tokenizer=tokenizer,
         max_length=max_length,
+        pack_to_max_length=pack_to_max_length,
         dataset_map_fn=dataset_map_fn,
         template_map_fn=template_map_fn,
         is_ftdp=is_ftdp)
@@ -165,6 +172,7 @@ if __name__ == '__main__':
         args.data_folder,
         tokenizer,
         args.max_length,
+        args.pack_to_max_length,
         DATASET_FORMAT_MAPPING[args.dataset_format]
         if args.dataset_format is not None else None,
         PROMPT_TEMPLATE[args.prompt_template],
