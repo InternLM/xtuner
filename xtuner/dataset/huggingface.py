@@ -17,9 +17,88 @@ def get_lengths(example):
     return {'length': len(example['input_ids'])}
 
 
+def build_origin_dataset(dataset, split):
+    if isinstance(dataset, DatasetDict):
+        if split is None:
+            dataset = concatenate_datasets(dataset.values())
+        else:
+            dataset = dataset[split]
+    elif isinstance(dataset, dict) or isinstance(
+            dataset, Config) or isinstance(dataset, ConfigDict):
+        dataset = BUILDER.build(dataset)
+        if isinstance(dataset, DatasetDict):
+            if split is None:
+                dataset = concatenate_datasets(dataset.values())
+            else:
+                dataset = dataset[split]
+    return dataset
+
+
+def map_dataset(dataset, dataset_map_fn, map_num_proc):
+    if isinstance(dataset_map_fn, str):
+        map_fn_obj = MAP_FUNC.get(dataset_map_fn) or get_object_from_string(
+            dataset_map_fn)
+        if map_fn_obj is not None:
+            dataset_map_fn = map_fn_obj
+        else:
+            raise TypeError('dataset_map_fn must be a function or a '
+                            "registered function's string in MAP_FUNC, "
+                            f"but got a string of '{dataset_map_fn}'")
+
+    dataset = dataset.map(dataset_map_fn, num_proc=map_num_proc)
+    return dataset
+
+
+def add_template_to_dataset(dataset, template_map_fn, map_num_proc):
+    if isinstance(template_map_fn,
+                  dict) or isinstance(template_map_fn, Config) or isinstance(
+                      template_map_fn, ConfigDict):
+        template_map_fn = BUILDER.build(template_map_fn)
+    dataset = dataset.map(template_map_fn, num_proc=map_num_proc)
+    # remove invalid data
+    dataset = dataset.filter(
+        lambda example: len(example['conversation']) > 0,
+        num_proc=map_num_proc)
+    return dataset
+
+
+def tokenize_dataset(dataset, tokenizer, max_length, with_image_token,
+                     input_ids_with_output, remove_unused_columns,
+                     map_num_proc):
+    assert (tokenizer is not None) and (max_length is not None), \
+        f'({tokenizer}, {max_length})'
+    if isinstance(tokenizer, dict) or isinstance(
+            tokenizer, Config) or isinstance(tokenizer, ConfigDict):
+        tokenizer = BUILDER.build(tokenizer)
+    dataset = dataset.map(
+        partial(
+            encode_fn,
+            tokenizer=tokenizer,
+            max_length=max_length,
+            with_image_token=with_image_token,
+            input_ids_with_output=input_ids_with_output),
+        remove_columns=list(dataset.column_names)
+        if remove_unused_columns else None,
+        num_proc=map_num_proc)
+    return dataset
+
+
+def pack_dataset(dataset, max_length, use_varlen_attn, shuffle_before_pack,
+                 map_num_proc):
+    if shuffle_before_pack:
+        dataset = dataset.shuffle()
+        dataset = dataset.flatten_indices(num_proc=map_num_proc)
+    dataset = dataset.map(
+        Packer(max_length, use_varlen_attn=use_varlen_attn),
+        batched=True,
+        num_proc=map_num_proc)
+    return dataset
+
+
 def process(dataset,
-            tokenizer,
-            max_length,
+            do_dataset_tokenization=True,
+            tokenizer=None,
+            max_length=None,
             dataset_map_fn=None,
             template_map_fn=None,
             max_dataset_length=None,
@@ -37,9 +116,14 @@ def process(dataset,
 
     Args:
         dataset: The dataset to be post-processed.
+        do_dataset_tokenization: Whether the dataset need to be tokenized
+            in this function. Default to True.
         tokenizer: The tokenizer processes some raw text as input and outputs
-            an Encoding.
-        max_length: Max length of the sequence.
+            an Encoding. If `do_dataset_tokenization` is True, this argument
+            should not be None. Default to None.
+        max_length: Max length of the sequence. If `do_dataset_tokenization`
+            or `pack_to_max_length` is True, this argument should not be None.
+            Default to None.
         dataset_map_fn: Map the original dataset format to the one defined
             by xTuner.
         template_map_fn: Add the prompt template to the dataset
@@ -73,20 +157,12 @@ def process(dataset,
         assert pack_to_max_length, \
             '`pack_to_max_length` in `process_hf_dataset` should be set to ' \
             'True if `use_varlen_attn` is True.'
+    if pack_to_max_length:
+        assert split == 'train' or split is None, \
+            ('`split` should be `train` or `None` if `pack_to_max_length` is '
+             f'True, but got {split}.')
 
-    if isinstance(dataset, DatasetDict):
-        if split is None:
-            dataset = concatenate_datasets(dataset.values())
-        else:
-            dataset = dataset[split]
-    elif isinstance(dataset, dict) or isinstance(
-            dataset, Config) or isinstance(dataset, ConfigDict):
-        dataset = BUILDER.build(dataset)
-        if isinstance(dataset, DatasetDict):
-            if split is None:
-                dataset = concatenate_datasets(dataset.values())
-            else:
-                dataset = dataset[split]
+    dataset = build_origin_dataset(dataset, split)
 
     # sample `max_dataset_length` items from the original dataset to
     # save time consumed by map function
@@ -98,25 +174,12 @@ def process(dataset,
 
     # Extract the useful data for training from the original dataset.
     if dataset_map_fn is not None:
-        if isinstance(dataset_map_fn, str):
-            map_fn_obj = MAP_FUNC.get(
-                dataset_map_fn) or get_object_from_string(dataset_map_fn)
-            if map_fn_obj is not None:
-                dataset_map_fn = map_fn_obj
-            else:
-                raise TypeError('dataset_map_fn must be a function or a '
-                                "registered function's string in MAP_FUNC, "
-                                f"but got a string of '{dataset_map_fn}'")
-
-        dataset = dataset.map(dataset_map_fn, num_proc=map_num_proc)
+        dataset = map_dataset(dataset, dataset_map_fn, map_num_proc)
 
     # Add prompt template, such as <|System|>: xxx <|User|>: xxx <|Bot|>: xxx
     if template_map_fn is not None:
-        if isinstance(template_map_fn, dict) or isinstance(
-                template_map_fn, Config) or isinstance(template_map_fn,
-                                                       ConfigDict):
-            template_map_fn = BUILDER.build(template_map_fn)
-        dataset = dataset.map(template_map_fn, num_proc=map_num_proc)
+        dataset = add_template_to_dataset(dataset, template_map_fn,
+                                          map_num_proc)
 
     for old, new in rename_maps:
         dataset = dataset.rename_column(old, new)
@@ -130,25 +193,12 @@ def process(dataset,
             level=logging.WARNING)
         remove_unused_columns = True
 
-    # remove invalid data
-    dataset = dataset.filter(
-        lambda example: len(example['conversation']) > 0,
-        num_proc=map_num_proc)
-
-    # tokenize
-    if isinstance(tokenizer, dict) or isinstance(
-            tokenizer, Config) or isinstance(tokenizer, ConfigDict):
-        tokenizer = BUILDER.build(tokenizer)
-    dataset = dataset.map(
-        partial(
-            encode_fn,
-            tokenizer=tokenizer,
-            max_length=max_length,
-            with_image_token=with_image_token,
-            input_ids_with_output=input_ids_with_output),
-        remove_columns=list(dataset.column_names)
-        if remove_unused_columns else None,
-        num_proc=map_num_proc)
+    if do_dataset_tokenization:
+        dataset = tokenize_dataset(dataset, tokenizer, max_length,
+                                   with_image_token, input_ids_with_output,
+                                   remove_unused_columns, map_num_proc)
+    else:
+        assert {'input_ids', 'labels'}.issubset(dataset.column_names)
 
     if input_ids_with_output:
         # remove data that does not have the valid labels.
@@ -157,14 +207,9 @@ def process(dataset,
             num_proc=map_num_proc)
 
     # pack to max length
-    if pack_to_max_length and split == 'train':
-        if shuffle_before_pack:
-            dataset = dataset.shuffle()
-            dataset = dataset.flatten_indices(num_proc=map_num_proc)
-        dataset = dataset.map(
-            Packer(max_length, use_varlen_attn=use_varlen_attn),
-            batched=True,
-            num_proc=map_num_proc)
+    if pack_to_max_length:
+        dataset = pack_dataset(dataset, max_length, use_varlen_attn,
+                               shuffle_before_pack, map_num_proc)
 
     # add 'length'
     dataset = dataset.map(get_lengths, num_proc=map_num_proc)

@@ -96,8 +96,8 @@ def process_one(fp,
         dataset = dataset['train']
     dataset = process(
         dataset,
-        tokenizer,
-        max_length,
+        tokenizer=tokenizer,
+        max_length=max_length,
         dataset_map_fn=dataset_map_fn,
         template_map_fn=template_map_fn,
         remove_unused_columns=True,
@@ -144,12 +144,13 @@ def process_untokenized_dataset(folder,
         template_map_fn=template_map_fn,
         is_ftdp=is_ftdp)
     out = pool.map(process_single, data_order)
-    for idx, (key, val) in enumerate(out):
-        assert data_order[idx] == key
-        datasets_dict[str(idx)] = val
-    datasets_dict = DatasetDict(datasets_dict)
     pool.close()
     pool.join()
+    for idx, (key, dataset) in enumerate(out):
+        assert data_order[idx] == key
+        dataset = dataset.remove_columns('length')
+        datasets_dict[str(idx)] = dataset
+    datasets_dict = DatasetDict(datasets_dict)
     return datasets_dict
 
 
