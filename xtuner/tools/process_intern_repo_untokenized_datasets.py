@@ -11,19 +11,32 @@ from mmengine import ConfigDict
 from transformers import AutoTokenizer
 
 from xtuner.dataset.huggingface import process
-from xtuner.dataset.map_fns import openai_map_fn, template_map_fn_factory
+from xtuner.dataset.map_fns import (DATASET_FORMAT_MAPPING,
+                                    template_map_fn_factory)
 from xtuner.utils import PROMPT_TEMPLATE
 
 # ignore FutureWarning in hf datasets
 warnings.simplefilter(action='ignore', category=FutureWarning)
 """
+ftdp dataset:
 srun -p llm_razor --quotatype=auto --gres=gpu:1 --ntasks=1 \
     --ntasks-per-node=1 --cpus-per-task=5 --kill-on-bad-exit=1 \
-    python xtuner/tools/process_intern_repo_untokenized_datasets.py \
-        --data-folder /mnt/petrelfs/share_data/caoweihan/v1_sample_with_legal_cate \
+    python xtuner/tools/process_untokenized_datasets.py \
+        --data-folder /path/to/data/folder \
         --save-folder ./processed \
-        --tokenizer-path /mnt/petrelfs/share_data/caoweihan/official_Ampere_7B_1_0_0 \
-        --prompt-template internlm2_chat
+        --tokenizer-path pretrained_model_name_or_path \
+        --prompt-template internlm2_chat \
+        --dataset-format openai \
+        --is-ftdp
+
+normal json dataset:
+srun -p llm_razor --quotatype=auto --gres=gpu:1 --ntasks=1 \
+    --ntasks-per-node=1 --cpus-per-task=5 --kill-on-bad-exit=1 \
+    python xtuner/tools/process_untokenized_datasets.py \
+    --data-folder /path/to/data/folder \
+    --save-folder ./processed \
+    --tokenizer-path pretrained_model_name_or_path \
+    --prompt-template internlm2_chat
 """
 
 
@@ -33,6 +46,12 @@ def parse_args():
     parser.add_argument('--save-folder', help='The folder to save data order.')
     parser.add_argument(
         '--tokenizer-path', help='The path to the hf tokenizer.')
+    parser.add_argument(
+        '--dataset-format',
+        choices=DATASET_FORMAT_MAPPING.keys(),
+        default=None,
+        help='Which dataset format is this data. '
+        f'The available choices are {DATASET_FORMAT_MAPPING.keys()}')
     parser.add_argument(
         '--prompt-template',
         choices=PROMPT_TEMPLATE.keys(),
@@ -44,37 +63,57 @@ def parse_args():
         '--file-type',
         default='.json',
         help='We want to get the order of the file in this type.')
+    parser.add_argument(
+        '--is-ftdp',
+        action='store_true',
+        help='Whether it is in ftdp data format')
+    parser.add_argument(
+        '--data-order-path',
+        default=None,
+        help=('The path to a txt file which contains the a list of data path.'
+              ' It can be obtain by xtuner/tools/get_data_order.py script.'))
     args = parser.parse_args()
     return args
 
 
-def process_one(fp, tokenizer, max_length, template_map_fn=None):
+def process_one(fp,
+                tokenizer,
+                max_length,
+                dataset_map_fn=None,
+                template_map_fn=None,
+                is_ftdp=False):
     dataset = []
-    with open(fp) as file:
-        lines = file.readlines()
-        for line in lines:
-            line = ast.literal_eval(line)
-            dataset.append({'messages': line})
-    dataset = Dataset.from_list(dataset)
+    if is_ftdp:
+        with open(fp) as file:
+            lines = file.readlines()
+            for line in lines:
+                line = ast.literal_eval(line)
+                dataset.append({'messages': line})
+        dataset = Dataset.from_list(dataset)
+    else:
+        # load formal json data
+        dataset = load_dataset('json', data_files=fp)
+        dataset = dataset['train']
     dataset = process(
         dataset,
         tokenizer,
         max_length,
-        dataset_map_fn=openai_map_fn,
+        dataset_map_fn=dataset_map_fn,
         template_map_fn=template_map_fn,
         remove_unused_columns=True,
         pack_to_max_length=False,
         map_num_proc=32)
-    # fn = fp.replace('/', '__').replace('.', '_')
     return fp, dataset
 
 
-def process_intern_repo_untokenized_dataset(folder,
-                                            tokenizer,
-                                            max_length,
-                                            prompt_template,
-                                            data_order_path=None,
-                                            file_type='.json'):
+def process_untokenized_dataset(folder,
+                                tokenizer,
+                                max_length,
+                                dataset_map_fn,
+                                prompt_template,
+                                data_order_path=None,
+                                file_type='.json',
+                                is_ftdp=False):
     assert os.path.exists(folder), f'{folder} does not exist.'
     datasets_dict = {}
 
@@ -92,7 +131,7 @@ def process_intern_repo_untokenized_dataset(folder,
                 if fn.endswith(file_type):
                     fp = os.path.join(root, fn)
                     data_order.append(fp)
-    print(data_order)
+    print('All file path: ', data_order)
 
     pool = multiprocessing.Pool(processes=multiprocessing.cpu_count())
     template_map_fn = ConfigDict(
@@ -101,7 +140,9 @@ def process_intern_repo_untokenized_dataset(folder,
         process_one,
         tokenizer=tokenizer,
         max_length=max_length,
-        template_map_fn=template_map_fn)
+        dataset_map_fn=dataset_map_fn,
+        template_map_fn=template_map_fn,
+        is_ftdp=is_ftdp)
     out = pool.map(process_single, data_order)
     for idx, (key, val) in enumerate(out):
         assert data_order[idx] == key
@@ -119,10 +160,14 @@ if __name__ == '__main__':
         pretrained_model_name_or_path=args.tokenizer_path,
         trust_remote_code=True,
         padding_side='right')
-    datasets_dict = process_intern_repo_untokenized_dataset(
+    datasets_dict = process_untokenized_dataset(
         args.data_folder,
         tokenizer,
         args.max_length,
+        DATASET_FORMAT_MAPPING[args.dataset_format]
+        if args.dataset_format is not None else None,
         PROMPT_TEMPLATE[args.prompt_template],
-        file_type=args.file_type)
+        data_order_path=args.data_order_path,
+        file_type=args.file_type,
+        is_ftdp=args.is_ftdp)
     datasets_dict.save_to_disk(args.save_folder)
