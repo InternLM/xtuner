@@ -34,6 +34,7 @@
    :maxdepth: 2
    :caption: 开始使用
 
+   get_started/overview.md
    get_started/installation.md
    get_started/quickstart.md
 

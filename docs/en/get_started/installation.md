@@ -1,5 +1,7 @@
 ### Installation
 
+In this section, we will show you how to install XTuner.
+
 - It is recommended to build a Python-3.10 virtual environment using conda
 
   ```bash
