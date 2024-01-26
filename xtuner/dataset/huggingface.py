@@ -3,7 +3,7 @@ import logging
 from functools import partial
 
 import numpy as np
-from datasets import DatasetDict
+from datasets import DatasetDict, concatenate_datasets
 from mmengine import print_log
 from mmengine.config import Config, ConfigDict
 from mmengine.utils.misc import get_object_from_string
@@ -46,8 +46,9 @@ def process(dataset,
         max_dataset_length: If the length of the dataset is too long, we can
             randomly extract `max_dataset_length` from it.
         split: Which split of the data to load.
-            If `None`, will return a `dict` with all splits (typically
-            `datasets.Split.TRAIN` and `datasets.Split.TEST`).
+            If `None`, will return a single concatenated dataset with all
+            splits (typically `datasets.Split.TRAIN` and
+            `datasets.Split.TEST`).
             If given, will return a single Dataset.
         remove_unused_columns: Whether to remove columns from the dataset
             that are not used during training.
@@ -74,12 +75,18 @@ def process(dataset,
             'True if `use_varlen_attn` is True.'
 
     if isinstance(dataset, DatasetDict):
-        dataset = dataset[split]
+        if split is None:
+            dataset = concatenate_datasets(dataset.values())
+        else:
+            dataset = dataset[split]
     elif isinstance(dataset, dict) or isinstance(
             dataset, Config) or isinstance(dataset, ConfigDict):
         dataset = BUILDER.build(dataset)
         if isinstance(dataset, DatasetDict):
-            dataset = dataset[split]
+            if split is None:
+                dataset = concatenate_datasets(dataset.values())
+            else:
+                dataset = dataset[split]
 
     # sample `max_dataset_length` items from the original dataset to
     # save time consumed by map function
