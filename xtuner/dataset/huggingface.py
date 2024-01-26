@@ -160,7 +160,8 @@ def process(dataset,
             num_proc=map_num_proc)
 
     # add 'length'
-    setattr(dataset, 'length', [len(i['input_ids']) for i in dataset])
+    dataset = dataset.map(get_lengths, num_proc=map_num_proc)
+    setattr(dataset, 'length', dataset['length'])
 
     return dataset
 
