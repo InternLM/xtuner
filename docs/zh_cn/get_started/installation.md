@@ -44,7 +44,7 @@ pip install -e '.[all]'
 
 为了验证 XTuner 是否安装正确，我们将使用命令打印配置文件。
 
-**打印配置文件** 在命令行中使用 `xtuner list-cfg` 命令验证是否能打印配置文件
+**打印配置文件：** 在命令行中使用 `xtuner list-cfg` 命令验证是否能打印配置文件。
 
 ```shell
 xtuner list-cfg
