@@ -21,7 +21,7 @@ from xtuner.utils import PROMPT_TEMPLATE
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-pretrained_model_name_or_path = '/mnt/petrelfs/share_data/caoweihan/official_Ampere_7B_1_0_0'  # noqa: E501
+pretrained_model_name_or_path = 'internlm/internlm2-7b'
 use_varlen_attn = True
 
 # Data
@@ -77,6 +77,7 @@ train_dataset = dict(
     type=build_packed_dataset,
     dataset_cfg=dict(
         type=load_intern_repo_untokenized_dataset,
+        data_order_path=None,
         folder=dataset_folder,
         tokenizer=tokenizer,
         max_length=max_length,

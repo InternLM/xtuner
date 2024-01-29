@@ -20,7 +20,7 @@ from xtuner.utils import PROMPT_TEMPLATE
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-pretrained_model_name_or_path = '/mnt/petrelfs/share_data/caoweihan/official_Ampere_7B_1_0_0'  # noqa: E501
+pretrained_model_name_or_path = 'internlm/internlm2-7b'
 use_varlen_attn = True
 
 # Data
@@ -42,7 +42,7 @@ max_norm = 1  # grad clip
 warm_up_ratio = 0.025
 
 # Save
-save_steps = 20
+save_steps = 500
 save_total_limit = 2  # Maximum checkpoints to keep (-1 means unlimited)
 
 # Evaluate the generation performance during the training
@@ -76,6 +76,7 @@ train_dataset = dict(
     type=build_packed_dataset,
     dataset_cfg=dict(
         type=load_intern_repo_tokenized_dataset,
+        data_order_path=None,
         folder=dataset_folder,
         min_length=0,
         file_type='.bin'),
