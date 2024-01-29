@@ -1,5 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import logging
+import os
+from datetime import timedelta
 from functools import partial
 
 import numpy as np
@@ -227,5 +229,8 @@ def process_hf_dataset(*args, **kwargs):
         objects = [dataset]
     else:
         objects = [None]
+    xtuner_dataset_timeout = timedelta(
+        minutes=int(os.getenv('XTUNER_DATASET_TIMEOUT', default=30)))
+    dist.monitored_barrier(timeout=xtuner_dataset_timeout)
     dist.broadcast_object_list(objects, src=0)
     return objects[0]
