@@ -33,8 +33,8 @@ prompt_template = PROMPT_TEMPLATE.internlm2_chat
 max_length = int(2048 - (336 / 14)**2)
 
 # Scheduler & Optimizer
-batch_size = 8  # per_device
-accumulative_counts = 2
+batch_size = 4  # per_device
+accumulative_counts = 4
 
 dataloader_num_workers = 0
 max_epochs = 1
