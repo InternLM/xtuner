@@ -116,7 +116,7 @@ def process(dataset,
         dataset = dataset.filter(
             lambda example: len(example['conversation']) > 0,
             num_proc=map_num_proc)
-    if 'messages' in dataset.column_names:
+    elif 'messages' in dataset.column_names:
         dataset = dataset.filter(
             lambda example: len(example['messages']) > 0,
             num_proc=map_num_proc)
