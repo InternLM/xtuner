@@ -6,6 +6,7 @@ from tqdm import tqdm
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           BitsAndBytesConfig)
 
+from xtuner.chat.streamer import HFTextIteratorStreamer, HFTextStreamer
 from xtuner.chat.utils import GenerationConfig
 from xtuner.model.utils import LoadWoInit
 from xtuner.tools.utils import get_stop_criteria
@@ -18,7 +19,11 @@ class BaseBot():
         pass
 
     @abstractmethod
-    def generate(self, inputs, generation_config=None):
+    def create_streamer(self, iterable=False):
+        pass
+
+    @abstractmethod
+    def generate(self, inputs, streamer=None, generation_config=None):
         pass
 
     @abstractmethod
@@ -86,11 +91,20 @@ class HFBot(BaseBot):
         model.eval()
         return model, tokenizer
 
+    def create_streamer(self, iterable=False):
+        if iterable:
+            return HFTextIteratorStreamer(self.tokenizer, skip_prompt=True)
+        else:
+            return HFTextStreamer(self.tokenizer, skip_prompt=True)
+
     @property
     def generation_config(self):
         return self._generation_config
 
-    def generate(self, text, gen_config: GenerationConfig = None):
+    def generate(self,
+                 text,
+                 streamer=None,
+                 gen_config: GenerationConfig = None):
 
         ids = self.tokenizer.encode(text, return_tensors='pt')
 
@@ -111,11 +125,11 @@ class HFBot(BaseBot):
 
         generate_output = self.llm.generate(
             inputs=ids.cuda(),
+            streamer=streamer,
             generation_config=hf_gen_config,
             stopping_criteria=stop_criteria)
 
         output = self.tokenizer.decode(generate_output[0][len(ids[0]):])
-
         return output
 
     def predict(self,

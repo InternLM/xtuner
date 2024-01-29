@@ -1,5 +1,7 @@
 from transformers import AutoConfig
 
+from xtuner.chat.streamer import (LMDeployTextIteratorStreamer,
+                                  LMDeployTextStreamer)
 from xtuner.chat.utils import GenerationConfig
 from .base import BaseBot
 
@@ -60,7 +62,17 @@ class LMDeployBot(BaseBot):
         self.pipeline = pipeline(
             model_name_or_path, backend_config=backend_config)
 
-    def generate(self, text, gen_config: GenerationConfig = None):
+    def create_streamer(self, iterable=False):
+
+        if iterable:
+            raise LMDeployTextIteratorStreamer()
+        else:
+            return LMDeployTextStreamer()
+
+    def generate(self,
+                 text,
+                 streamer=None,
+                 gen_config: GenerationConfig = None):
 
         from lmdeploy.messages import GenerationConfig as LMGenerationConfig
         lm_gen_config = LMGenerationConfig(
@@ -72,8 +84,19 @@ class LMDeployBot(BaseBot):
             random_seed=gen_config.seed,
         )
 
-        output = self.pipeline([text], gen_config=lm_gen_config)
-        return output[0].text
+        generator = self.pipeline.generate(text, 0, gen_config=lm_gen_config)
+        results = []
+
+        async def _streaming_generate():
+            async for output in generator:
+                results.append(output.response)
+                streamer.put(output.response)
+            streamer.end()
+
+        import asyncio
+        asyncio.run(_streaming_generate())
+
+        return ''.join(results)
 
     def predict(self, texts, gen_config: GenerationConfig = None, repeat=1):
 

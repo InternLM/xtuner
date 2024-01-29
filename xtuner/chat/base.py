@@ -47,7 +47,7 @@ class BaseChat():
             input=text, round=self.num_turns + 1, bot_name=self.bot_name)
         return prompt_text
 
-    def chat(self, text, system=None, gen_config=None):
+    def chat(self, text, system=None, streamer=None, gen_config=None):
 
         if gen_config is None:
             gen_config = GenerationConfig()
@@ -58,9 +58,9 @@ class BaseChat():
             templated_text = self.apply_template(text, system)
             self.history_text += templated_text
 
-        stop_words = getattr(self.chat_template, 'stop_words', [])
+        stop_words = getattr(self.chat_template, 'STOP_WORDS', [])
         gen_config.stop_words.extend(stop_words)
-        output = self.bot.generate(self.history_text, gen_config)
+        output = self.bot.generate(self.history_text, streamer, gen_config)
         self.history_text += output
 
         self.history_text += self.chat_template.get('SEP', '')

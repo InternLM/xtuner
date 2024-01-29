@@ -225,7 +225,7 @@ def build_chat_instance(bot, args):
         return BaseChat(bot, args.bot_name, chat_template)
 
 
-def interactive_chat(bot, system, gen_config):
+def interactive_chat(bot, system, streamer, gen_config):
 
     while True:
         text = get_input()
@@ -238,8 +238,18 @@ def interactive_chat(bot, system, gen_config):
             print('Log: Exit!')
             exit(0)
 
-        response = bot.chat(text, system, gen_config)
-        print(response)
+        from threading import Thread
+        chat_kwargs = dict(
+            text=text, system=system, streamer=streamer, gen_config=gen_config)
+        thread = Thread(target=bot.chat, kwargs=chat_kwargs)
+        thread.start()
+
+        for new_text in streamer:
+            print(new_text, flush=True, end='')
+
+        # _ = bot.chat(text, system, streamer, gen_config)
+
+        # print(response)
 
 
 def main():
@@ -280,6 +290,7 @@ def main():
             run_vllm_server(args.model_name_or_path)
     else:
         bot = build_bot(args)
+
         instance = build_chat_instance(bot, args)
 
         gen_config = GenerationConfig(
@@ -291,7 +302,8 @@ def main():
             stop_words=[],
             seed=args.seed,
         )
-        interactive_chat(instance, args.system, gen_config)
+        streamer = bot.create_streamer(iterable=True)
+        interactive_chat(instance, args.system, streamer, gen_config)
 
 
 if __name__ == '__main__':
