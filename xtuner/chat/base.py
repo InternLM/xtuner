@@ -5,7 +5,7 @@ class BaseChat():
 
     def __init__(self,
                  bot,
-                 bot_name,
+                 bot_name=None,
                  chat_template=None,
                  system_template=None) -> None:
 
@@ -15,72 +15,54 @@ class BaseChat():
         self.bot = bot
 
         self.num_turns = 0
-        self.history_text = ''
+        self.history = []
 
     def reset_history(self):
 
         self.num_turns = 0
-        self.history_text = ''
+        self.history = []
 
-    def apply_template(self, text, system=None):
+    def apply_template(self, messages):
 
-        prompt_text = ''
+        messages = self.chat_template.template_map_fn_v2(messages)
 
-        if 'SYSTEM' in self.chat_template and self.num_turns == 0:
-            system_text = None
-            if self.system_template is not None:
-                system_text = self.system_template.format(
-                    round=self.num_turns + 1, bot_name=self.bot_name)
-            elif system is not None:
-                system_text = system
-            if system_text is not None:
-                prompt_text += self.system_template.format(
-                    system=system_text,
-                    round=self.num_turns + 1,
-                    bot_name=self.bot_name)
-                prompt_text += self.chat_template['INSTRUCTION'].format(
-                    input=text,
-                    round=self.num_turns + 1,
-                    bot_name=self.bot_name)
+        return ''.join([msg['content'] for msg in messages])
 
-        prompt_text += self.chat_template['INSTRUCTION'].format(
-            input=text, round=self.num_turns + 1, bot_name=self.bot_name)
-        return prompt_text
+    def update_history(self, role, content):
+
+        self.history.append({'role': role, 'content': content})
 
     def chat(self, text, system=None, streamer=None, gen_config=None):
+
+        assert self.chat_template
+
+        if self.num_turns == 0 and system:
+            self.update_history('system', system)
+
+        self.update_history('user', text)
 
         if gen_config is None:
             gen_config = GenerationConfig()
 
-        if self.chat_template is None:
-            self.history_text += text
-        else:
-            templated_text = self.apply_template(text, system)
-            self.history_text += templated_text
-
-        stop_words = getattr(self.chat_template, 'STOP_WORDS', [])
-        gen_config.stop_words.extend(stop_words)
-        output = self.bot.generate(self.history_text, streamer, gen_config)
-        self.history_text += output
-
-        self.history_text += self.chat_template.get('SEP', '')
-        self.num_turns += 1
-        return output
-
-    def completion(self, text, system=None, gen_config=None):
-
-        self.history_text += text
+        prompt = self.apply_template(self.history)
 
         gen_config.stop_words.extend(self.chat_template.stop_words)
-        output = self.bot.generate(self.history_text, gen_config)
-        self.history_text += output
+        output = self.bot.generate(prompt, streamer, gen_config)
+        self.update_history('assistant', output)
 
-        self.history_text += self.chat_template.get('SEP', '')
         self.num_turns += 1
         return output
 
     def predict(self, texts, system=None, generation_config=None, repeat=1):
 
-        templated_texts = [self.apply_template(t, system) for t in texts]
-        outputs = self.bot.predict(templated_texts, generation_config, repeat)
+        prompts = []
+        for text in texts:
+            msg = []
+            if system:
+                msg.append({'role': 'system', 'content': system})
+
+            msg.append({'role': 'user', 'content': text})
+            prompts.append(self.apply_template(msg))
+
+        outputs = self.bot.predict(prompts, generation_config, repeat)
         return outputs

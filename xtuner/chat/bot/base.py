@@ -141,7 +141,7 @@ class HFBot(BaseBot):
         for text in tqdm(texts):
             item = []
             for r in range(repeat):
-                item.append(self.generate(text, generation_config))
+                item.append(self.generate(text, None, generation_config))
             outputs.append(item[0])
 
         return outputs

@@ -4,7 +4,7 @@ import argparse
 import torch
 
 from xtuner.chat import GenerationConfig
-from xtuner.chat.templates import CHAT_TEMPLATE
+from xtuner.chat.template import CHAT_TEMPLATE
 
 
 def parse_args():
@@ -129,7 +129,7 @@ def parse_args():
     parser.add_argument('--predict', type=str)
     parser.add_argument('--results', type=str, default='results.xlsx')
 
-    parser.add_argument('--predict-repeat', type=int)
+    parser.add_argument('--predict-repeat', type=int, default=1)
     parser.add_argument('--batch-size', type=int, default=1)
 
     args = parser.parse_args()
@@ -258,13 +258,24 @@ def main():
 
     if args.predict:
         bot = build_bot(args)
+        instance = build_chat_instance(bot, args)
+
+        gen_config = GenerationConfig(
+            max_new_tokens=args.max_new_tokens,
+            temperature=args.temperature,
+            top_k=args.top_k,
+            top_p=args.top_p,
+            repetition_penalty=args.repetition_penalty,
+            stop_words=[],
+            seed=args.seed,
+        )
+
         from datasets import load_dataset
         dataset = load_dataset('text', data_files=args.predict)['train']
         texts = dataset['text']
-        chat_instance = bot.create_instance()
 
         for i in range(args.predict_repeat):
-            preds = chat_instance.predict(texts, args.system)
+            preds = instance.predict(texts, args.system, gen_config)
             dataset = dataset.add_column(f'response_{i}', preds)
 
         df = dataset.to_pandas()

@@ -65,7 +65,7 @@ class LMDeployBot(BaseBot):
     def create_streamer(self, iterable=False):
 
         if iterable:
-            raise LMDeployTextIteratorStreamer()
+            return LMDeployTextIteratorStreamer()
         else:
             return LMDeployTextStreamer()
 
@@ -108,7 +108,7 @@ class LMDeployBot(BaseBot):
             top_k=gen_config.top_k,
             top_p=gen_config.top_p,
             repetition_penalty=gen_config.repetition_penalty,
-            seed=gen_config.seed,
+            random_seed=gen_config.seed,
         )
 
         outputs = self.pipeline(texts, gen_config=lm_gen_config)
