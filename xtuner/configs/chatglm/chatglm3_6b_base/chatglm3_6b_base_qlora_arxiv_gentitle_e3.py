@@ -13,7 +13,8 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer,
 from xtuner.dataset import process_hf_dataset
 from xtuner.dataset.collate_fns import default_collate_fn
 from xtuner.dataset.map_fns import arxiv_map_fn, template_map_fn_factory
-from xtuner.engine.hooks import DatasetInfoHook, EvaluateChatHook
+from xtuner.engine.hooks import (DatasetInfoHook, EvaluateChatHook,
+                                 VarlenAttnArgsToMessageHubHook)
 from xtuner.engine.runner import TrainLoop
 from xtuner.model import SupervisedFinetune
 from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
@@ -23,6 +24,7 @@ from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
 #######################################################################
 # Model
 pretrained_model_name_or_path = 'THUDM/chatglm3-6b-base'
+use_varlen_attn = False
 
 # Data
 # 1. Download data from https://kaggle.com/datasets/Cornell-University/arxiv
@@ -99,6 +101,7 @@ tokenizer = dict(
 
 model = dict(
     type=SupervisedFinetune,
+    use_varlen_attn=use_varlen_attn,
     llm=dict(
         type=AutoModelForCausalLM.from_pretrained,
         pretrained_model_name_or_path=pretrained_model_name_or_path,
@@ -135,14 +138,15 @@ train_dataset = dict(
         type=template_map_fn_factory, template=prompt_template),
     remove_unused_columns=True,
     shuffle_before_pack=True,
-    pack_to_max_length=pack_to_max_length)
+    pack_to_max_length=pack_to_max_length,
+    use_varlen_attn=use_varlen_attn)
 
 train_dataloader = dict(
     batch_size=batch_size,
     num_workers=dataloader_num_workers,
     dataset=train_dataset,
     sampler=dict(type=DefaultSampler, shuffle=True),
-    collate_fn=dict(type=default_collate_fn))
+    collate_fn=dict(type=default_collate_fn, use_varlen_attn=use_varlen_attn))
 
 #######################################################################
 #                    PART 4  Scheduler & Optimizer                    #
@@ -193,6 +197,9 @@ custom_hooks = [
         system=SYSTEM,
         prompt_template=prompt_template)
 ]
+
+if use_varlen_attn:
+    custom_hooks += [dict(type=VarlenAttnArgsToMessageHubHook)]
 
 # configure default hooks
 default_hooks = dict(

@@ -16,6 +16,8 @@ from xtuner.utils import (DEFAULT_IMAGE_TOKEN, IMAGE_TOKEN_INDEX,
 
 class EvaluateChatHook(Hook):
 
+    priority = 'LOW'
+
     def __init__(self,
                  tokenizer,
                  evaluation_inputs,

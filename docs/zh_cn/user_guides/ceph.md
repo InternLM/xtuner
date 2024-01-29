@@ -8,7 +8,6 @@
 
 ### 暂不支持的功能
 
-- `--endpoint-url` 不可用
 - 训练时从 Ceph 加载 Huggingface 模型， 与 `zero3` 加载权重冲突
 - HuggingFace `save_pretrained` 保存至 Ceph， 逻辑过于复杂，没办法 patch
 

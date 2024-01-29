@@ -12,7 +12,8 @@ from transformers import BitsAndBytesConfig, LlamaTokenizer, MistralForCausalLM
 from xtuner.dataset import process_hf_dataset
 from xtuner.dataset.collate_fns import default_collate_fn
 from xtuner.dataset.map_fns import pretrain_map_fn
-from xtuner.engine.hooks import DatasetInfoHook, EvaluateChatHook
+from xtuner.engine.hooks import (DatasetInfoHook, EvaluateChatHook,
+                                 VarlenAttnArgsToMessageHubHook)
 from xtuner.engine.runner import TrainLoop
 from xtuner.model import SupervisedFinetune
 
@@ -21,6 +22,7 @@ from xtuner.model import SupervisedFinetune
 #######################################################################
 # Model
 pretrained_model_name_or_path = 'mistralai/Mistral-7B-v0.1'
+use_varlen_attn = False
 
 # Data
 data_path = 'Skywork/SkyPile-150B'
@@ -58,6 +60,7 @@ tokenizer = dict(
 
 model = dict(
     type=SupervisedFinetune,
+    use_varlen_attn=use_varlen_attn,
     llm=dict(
         type=MistralForCausalLM.from_pretrained,
         pretrained_model_name_or_path=pretrained_model_name_or_path,
@@ -92,14 +95,15 @@ train_dataset = dict(
     template_map_fn=None,
     remove_unused_columns=True,
     shuffle_before_pack=True,
-    pack_to_max_length=pack_to_max_length)
+    pack_to_max_length=pack_to_max_length,
+    use_varlen_attn=use_varlen_attn)
 
 train_dataloader = dict(
     batch_size=batch_size,
     num_workers=dataloader_num_workers,
     dataset=train_dataset,
     sampler=dict(type=DefaultSampler, shuffle=True),
-    collate_fn=dict(type=default_collate_fn))
+    collate_fn=dict(type=default_collate_fn, use_varlen_attn=use_varlen_attn))
 
 #######################################################################
 #                    PART 4  Scheduler & Optimizer                    #
@@ -148,6 +152,9 @@ custom_hooks = [
         evaluation_inputs=evaluation_inputs,
         max_new_tokens=100)
 ]
+
+if use_varlen_attn:
+    custom_hooks += [dict(type=VarlenAttnArgsToMessageHubHook)]
 
 # configure default hooks
 default_hooks = dict(

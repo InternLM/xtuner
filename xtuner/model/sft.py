@@ -20,12 +20,13 @@ class SupervisedFinetune(BaseModel):
                  llm,
                  lora=None,
                  peft_model=None,
-                 use_activation_checkpointing=True):
+                 use_activation_checkpointing=True,
+                 use_varlen_attn=False):
         super().__init__()
         with LoadWoInit():
             self.llm = self._build_from_cfg_or_module(llm)
         self.llm.config.use_cache = False
-        dispatch_modules(self.llm)
+        dispatch_modules(self.llm, use_varlen_attn=use_varlen_attn)
 
         if use_activation_checkpointing:
             # For backward compatibility
@@ -49,6 +50,10 @@ class SupervisedFinetune(BaseModel):
             self._prepare_for_lora(peft_model, use_activation_checkpointing)
 
         self._is_init = True
+        # Determines whether to calculate attention based on the
+        # seq_len dimension (use_varlen_attn = False) or the actual length of
+        # the sequence.
+        self.use_varlen_attn = use_varlen_attn
 
     def gradient_checkpointing_enable(self):
         self.activation_checkpointing_enable()
