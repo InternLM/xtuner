@@ -18,7 +18,6 @@ def process(dataset,
             max_length,
             dataset_map_fn=None,
             template_map_fn=None,
-            prompt_template=None,
             max_dataset_length=None,
             split='train',
             remove_unused_columns=False,
@@ -62,8 +61,6 @@ def process(dataset,
         map_num_proc: Max number of processes when mapping the dataset.
     """
 
-    assert template_map_fn is None or prompt_template is None
-
     if isinstance(dataset, DatasetDict):
         dataset = dataset[split]
     elif isinstance(dataset, dict) or isinstance(
@@ -105,21 +102,11 @@ def process(dataset,
                                                        ConfigDict):
             template_map_fn = BUILDER.build(template_map_fn)
         dataset = dataset.map(template_map_fn, num_proc=map_num_proc)
-    elif prompt_template is not None:
-        if isinstance(prompt_template, str):  # for resume
-            prompt_template = get_object_from_string(prompt_template)
-        dataset = dataset.map(
-            prompt_template.template_map_fn_v2, num_proc=map_num_proc)
 
     # remove invalid data
-    if 'conversation' in dataset.column_names:
-        dataset = dataset.filter(
-            lambda example: len(example['conversation']) > 0,
-            num_proc=map_num_proc)
-    elif 'messages' in dataset.column_names:
-        dataset = dataset.filter(
-            lambda example: len(example['messages']) > 0,
-            num_proc=map_num_proc)
+    dataset = dataset.filter(
+        lambda example: len(example['conversation']) > 0,
+        num_proc=map_num_proc)
 
     # remove unused columns
     if pack_to_max_length and (not remove_unused_columns):
@@ -134,14 +121,10 @@ def process(dataset,
     if isinstance(tokenizer, dict) or isinstance(
             tokenizer, Config) or isinstance(tokenizer, ConfigDict):
         tokenizer = BUILDER.build(tokenizer)
-    if prompt_template is None or ('messages' not in dataset.column_names
-                                   and 'conversation' in dataset.column_names):
-        encode_map_fn = encode_fn
-    else:
-        encode_map_fn = prompt_template.encode_map_fn
+
     dataset = dataset.map(
         partial(
-            encode_map_fn,
+            encode_fn,
             tokenizer=tokenizer,
             max_length=max_length,
             with_image_token=with_image_token,
