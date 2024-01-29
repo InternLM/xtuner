@@ -1,19 +1,20 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import torch
-from bitsandbytes.optim import PagedAdamW32bit
 from datasets import load_dataset
 from mmengine.dataset import DefaultSampler
 from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
                             LoggerHook, ParamSchedulerHook)
-from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR
+from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR, LinearLR
 from peft import LoraConfig
+from torch.optim import AdamW
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           BitsAndBytesConfig)
 
 from xtuner.dataset import process_hf_dataset
 from xtuner.dataset.collate_fns import default_collate_fn
 from xtuner.dataset.map_fns import template_map_fn_factory
-from xtuner.engine import DatasetInfoHook, EvaluateChatHook
+from xtuner.engine.hooks import DatasetInfoHook, EvaluateChatHook
+from xtuner.engine.runner import TrainLoop
 from xtuner.model import SupervisedFinetune
 from xtuner.utils import PROMPT_TEMPLATE
 
@@ -25,7 +26,7 @@ pretrained_model_name_or_path = 'internlm/internlm-7b'
 
 # Data
 data_path = 'path/to/your/json_data'
-prompt_template = PROMPT_TEMPLATE.internlm_chat
+prompt_template = PROMPT_TEMPLATE.default
 max_length = 2048
 pack_to_max_length = True
 
@@ -34,11 +35,16 @@ batch_size = 1  # per_device
 accumulative_counts = 16
 dataloader_num_workers = 0
 max_epochs = 3
-optim_type = PagedAdamW32bit
+optim_type = AdamW
 lr = 2e-4
 betas = (0.9, 0.999)
 weight_decay = 0
 max_norm = 1  # grad clip
+warmup_ratio = 0.03
+
+# Save
+save_steps = 500
+save_total_limit = 2  # Maximum checkpoints to keep (-1 means unlimited)
 
 # Evaluate the generation performance during the training
 evaluation_freq = 500
@@ -117,15 +123,25 @@ optim_wrapper = dict(
 
 # learning policy
 # More information: https://github.com/open-mmlab/mmengine/blob/main/docs/en/tutorials/param_scheduler.md  # noqa: E501
-param_scheduler = dict(
-    type=CosineAnnealingLR,
-    eta_min=0.0,
-    by_epoch=True,
-    T_max=max_epochs,
-    convert_to_iter_based=True)
+param_scheduler = [
+    dict(
+        type=LinearLR,
+        start_factor=1e-5,
+        by_epoch=True,
+        begin=0,
+        end=warmup_ratio * max_epochs,
+        convert_to_iter_based=True),
+    dict(
+        type=CosineAnnealingLR,
+        eta_min=0.0,
+        by_epoch=True,
+        begin=warmup_ratio * max_epochs,
+        T_max=max_epochs,
+        convert_to_iter_based=True)
+]
 
 # train, val, test setting
-train_cfg = dict(by_epoch=True, max_epochs=max_epochs, val_interval=1)
+train_cfg = dict(type=TrainLoop, max_epochs=max_epochs)
 
 #######################################################################
 #                           PART 5  Runtime                           #
@@ -146,12 +162,16 @@ custom_hooks = [
 default_hooks = dict(
     # record the time of every iteration.
     timer=dict(type=IterTimerHook),
-    # print log every 100 iterations.
-    logger=dict(type=LoggerHook, interval=10),
+    # print log every 10 iterations.
+    logger=dict(type=LoggerHook, log_metric_by_epoch=False, interval=10),
     # enable the parameter scheduler.
     param_scheduler=dict(type=ParamSchedulerHook),
-    # save checkpoint per epoch.
-    checkpoint=dict(type=CheckpointHook, interval=1),
+    # save checkpoint per `save_steps`.
+    checkpoint=dict(
+        type=CheckpointHook,
+        by_epoch=False,
+        interval=save_steps,
+        max_keep_ckpts=save_total_limit),
     # set sampler seed in distributed evrionment.
     sampler_seed=dict(type=DistSamplerSeedHook),
 )
@@ -180,3 +200,6 @@ resume = False
 
 # Defaults to use random seed and disable `deterministic`
 randomness = dict(seed=None, deterministic=False)
+
+# set log processor
+log_processor = dict(by_epoch=False)

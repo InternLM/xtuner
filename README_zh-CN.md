@@ -23,9 +23,9 @@
 
 ## 🎉 更新
 
-- **\[2024/01\]** 支持 [InternLM2](https://huggingface.co/deepseek-ai/deepseek-moe-16b-chat) 模型！同时，最新版的多模态大模型 [LLaVA-Internlm2-7B](https://huggingface.co/xtuner/llava-internlm2-7b)/[20B](https://huggingface.co/xtuner/llava-internlm2-20b) 发布，其表现出强大的性能！
+- **\[2024/01\]** 支持 [InternLM2](https://huggingface.co/internlm) 模型！同时，最新版的多模态大模型 [LLaVA-Internlm2-7B](https://huggingface.co/xtuner/llava-internlm2-7b) / [20B](https://huggingface.co/xtuner/llava-internlm2-20b) 发布，其表现出强大的性能！
 - **\[2024/01\]** 支持 [DeepSeek-MoE](https://huggingface.co/deepseek-ai/deepseek-moe-16b-chat) 模型！20GB 显存即可实现 QLoRA 微调，4x80GB 即可实现全参数微调。快速开始请查阅相关[配置文件](xtuner/configs/deepseek/)！
-- **\[2023/12\]** 🔥 支持多模态模型 VLM（[LLaVA-v1.5](https://github.com/haotian-liu/LLaVA)）预训练和指令微调！快速开始请查阅此[文档](xtuner/configs/llava/README_zh.md)！
+- **\[2023/12\]** 🔥 支持多模态模型 VLM（[LLaVA-v1.5](https://github.com/haotian-liu/LLaVA)）预训练和指令微调！快速开始请查阅此[文档](xtuner/configs/llava/README_zh-CN.md)！
 - **\[2023/12\]** 🔥 支持 [Mixtral 8x7B](https://huggingface.co/mistralai/Mixtral-8x7B-Instruct-v0.1) 模型！快速开始请查阅此[文档](xtuner/configs/mixtral/README.md)！
 - **\[2023/11\]** 支持 [ChatGLM3-6B](https://huggingface.co/THUDM/chatglm3-6b) 模型！
 - **\[2023/10\]** 支持 [MSAgent-Bench](https://modelscope.cn/datasets/damo/MSAgent-Bench) 数据集，并且微调所得大语言模型可应用至 [Lagent](https://github.com/InternLM/lagent) 框架！
@@ -36,11 +36,26 @@
 
 ## 📖 介绍
 
-XTuner 是一个轻量级微调大语言模型的工具库，由 [MMRazor](https://github.com/open-mmlab/mmrazor) 和 [MMDeploy](https://github.com/open-mmlab/mmdeploy) 团队联合开发。
+XTuner 是一个高效、灵活、全能的轻量化大模型微调工具库。
 
-- **轻量级**: 支持在消费级显卡上微调大语言模型。对于 7B 参数量，微调所需的最小显存仅为 **8GB**，这使得用户可以使用几乎任何显卡（甚至免费资源，例如Colab）来微调获得自定义大语言模型助手。
-- **多样性**: 支持多种**大语言模型**（[InternLM](https://huggingface.co/internlm)、[Llama2](https://huggingface.co/meta-llama)、[ChatGLM](https://huggingface.co/THUDM)、[Qwen](https://huggingface.co/Qwen)、[Baichuan2](https://huggingface.co/baichuan-inc), ...），**数据集**（[MOSS_003_SFT](https://huggingface.co/datasets/fnlp/moss-003-sft-data), [Alpaca](https://huggingface.co/datasets/tatsu-lab/alpaca), [WizardLM](https://huggingface.co/datasets/WizardLM/WizardLM_evol_instruct_V2_196k), [oasst1](https://huggingface.co/datasets/timdettmers/openassistant-guanaco), [Open-Platypus](https://huggingface.co/datasets/garage-bAInd/Open-Platypus), [Code Alpaca](https://huggingface.co/datasets/HuggingFaceH4/CodeAlpaca_20K), [Colorist](https://huggingface.co/datasets/burkelibbey/colors), ...）和**微调算法**（[QLoRA](http://arxiv.org/abs/2305.14314)、[LoRA](http://arxiv.org/abs/2106.09685)），支撑用户根据自身具体需求选择合适的解决方案。
-- **兼容性**: 兼容 [DeepSpeed](https://github.com/microsoft/DeepSpeed) 🚀 和 [HuggingFace](https://huggingface.co) 🤗 的训练流程，支撑用户无感式集成与使用。
+**高效**
+
+- 支持大语言模型 LLM、多模态图文模型 VLM 的预训练及轻量级微调。XTuner 支持在 8GB 显存下微调 7B 模型，同时也支持多节点跨设备微调更大尺度模型（70B+）。
+- 自动分发高性能算子（如 FlashAttention、Triton kernels 等）以加速训练吞吐。
+- 兼容 [DeepSpeed](https://github.com/microsoft/DeepSpeed) 🚀，轻松应用各种 ZeRO 训练优化策略。
+
+**灵活**
+
+- 支持多种大语言模型，包括但不限于 [InternLM](https://huggingface.co/internlm)、[Mixtral-8x7B](https://huggingface.co/mistralai)、[Llama2](https://huggingface.co/meta-llama)、[ChatGLM](https://huggingface.co/THUDM)、[Qwen](https://huggingface.co/Qwen)、[Baichuan](https://huggingface.co/baichuan-inc)。
+- 支持多模态图文模型 LLaVA 的预训练与微调。利用 XTuner 训得模型 [LLaVA-InternLM2-20B](https://huggingface.co/xtuner/llava-internlm2-20b) 表现优异。
+- 精心设计的数据管道，兼容任意数据格式，开源数据或自定义数据皆可快速上手。
+- 支持 [QLoRA](http://arxiv.org/abs/2305.14314)、[LoRA](http://arxiv.org/abs/2106.09685)、全量参数微调等多种微调算法，支撑用户根据具体需求作出最优选择。
+
+**全能**
+
+- 支持增量预训练、指令微调与 Agent 微调。
+- 预定义众多开源对话模版，支持与开源或训练所得模型进行对话。
+- 训练所得模型可无缝接入部署工具库 [LMDeploy](https://github.com/InternLM/lmdeploy)、大规模评测工具库 [OpenCompass](https://github.com/open-compass/opencompass) 及 [VLMEvalKit](https://github.com/open-compass/VLMEvalKit)。
 
 ## 🌟 示例
 
@@ -88,7 +103,8 @@ XTuner 是一个轻量级微调大语言模型的工具库，由 [MMRazor](https
 <tr valign="top">
 <td align="left" valign="top">
 <ul>
-  <li><a href="https://huggingface.co/internlm/internlm-7b">InternLM</a></li>
+  <li><a href="https://huggingface.co/internlm">InternLM2</a></li>
+  <li><a href="https://huggingface.co/internlm">InternLM</a></li>
   <li><a href="https://huggingface.co/meta-llama">Llama</a></li>
   <li><a href="https://huggingface.co/meta-llama">Llama2</a></li>
   <li><a href="https://huggingface.co/THUDM/chatglm2-6b">ChatGLM2</a></li>
@@ -181,6 +197,7 @@ XTuner 支持微调大语言模型。数据集预处理指南请查阅[文档](.
 
   ```shell
   xtuner copy-cfg ${CONFIG_NAME} ${SAVE_PATH}
+  vi ${SAVE_PATH}/${CONFIG_NAME}_copy.py
   ```
 
 - **步骤 1**，开始微调。
@@ -189,14 +206,14 @@ XTuner 支持微调大语言模型。数据集预处理指南请查阅[文档](.
   xtuner train ${CONFIG_NAME_OR_PATH}
   ```
 
-  例如，我们可以利用 QLoRA 算法在 oasst1 数据集上微调 InternLM-7B：
+  例如，我们可以利用 QLoRA 算法在 oasst1 数据集上微调 InternLM2-Chat-7B：
 
   ```shell
   # 单卡
-  xtuner train internlm_7b_qlora_oasst1_e3 --deepspeed deepspeed_zero2
+  xtuner train internlm2_chat_7b_qlora_oasst1_e3 --deepspeed deepspeed_zero2
   # 多卡
-  (DIST) NPROC_PER_NODE=${GPU_NUM} xtuner train internlm_7b_qlora_oasst1_e3 --deepspeed deepspeed_zero2
-  (SLURM) srun ${SRUN_ARGS} xtuner train internlm_7b_qlora_oasst1_e3 --launcher slurm --deepspeed deepspeed_zero2
+  (DIST) NPROC_PER_NODE=${GPU_NUM} xtuner train internlm2_chat_7b_qlora_oasst1_e3 --deepspeed deepspeed_zero2
+  (SLURM) srun ${SRUN_ARGS} xtuner train internlm2_chat_7b_qlora_oasst1_e3 --launcher slurm --deepspeed deepspeed_zero2
   ```
 
   - `--deepspeed` 表示使用 [DeepSpeed](https://github.com/microsoft/DeepSpeed) 🚀 来优化训练过程。XTuner 内置了多种策略，包括 ZeRO-1、ZeRO-2、ZeRO-3 等。如果用户期望关闭此功能，请直接移除此参数。
@@ -219,16 +236,16 @@ xtuner chat ${NAME_OR_PATH_TO_LLM} --adapter {NAME_OR_PATH_TO_ADAPTER} [optional
 
 例如：
 
-与 InternLM-7B + Alpaca-enzh adapter 对话：
+与 InternLM2-Chat-7B, oasst1 adapter 对话：
 
 ```shell
-xtuner chat internlm/internlm-7b --adapter xtuner/internlm-7b-qlora-alpaca-enzh --prompt-template internlm_chat --system-template alpaca
+xtuner chat internlm/internlm2-chat-7b --adapter xtuner/internlm2-chat-7b-qlora-oasst1 --prompt-template internlm2_chat
 ```
 
-与 Llama2-7b + MOSS-003-SFT adapter 对话：
+与 LLaVA-InternLM2-7B 对话：
 
 ```shell
-xtuner chat meta-llama/Llama-2-7b-hf --adapter xtuner/Llama-2-7b-qlora-moss-003-sft --bot-name Llama2 --prompt-template moss_sft --system-template moss_sft --with-plugins calculate solve search --no-streamer
+xtuner chat internlm/internlm2-chat-7b --visual-encoder openai/clip-vit-large-patch14-336 --llava xtuner/llava-internlm2-7b --prompt-template internlm2_chat --image $IMAGE_PATH
 ```
 
 更多示例，请查阅[文档](./docs/zh_cn/user_guides/chat.md)。

@@ -332,18 +332,26 @@ def main():
     if 'llm_adapter' in os.listdir(llava_path):
         adapter_path = osp.join(llava_path, 'llm_adapter')
         llm = PeftModel.from_pretrained(
-            llm, adapter_path, offload_folder=args.offload_folder)
+            llm,
+            adapter_path,
+            offload_folder=args.offload_folder,
+            trust_remote_code=True)
         print(f'Load LLM adapter from {args.llava}')
     if 'visual_encoder_adapter' in os.listdir(llava_path):
         adapter_path = osp.join(llava_path, 'visual_encoder_adapter')
         visual_encoder = PeftModel.from_pretrained(
-            visual_encoder, adapter_path, offload_folder=args.offload_folder)
+            visual_encoder,
+            adapter_path,
+            offload_folder=args.offload_folder,
+            trust_remote_code=True)
         print(f'Load visual_encoder adapter from {args.llava}')
 
     # build projector
     projector_path = osp.join(llava_path, 'projector')
     projector = AutoModel.from_pretrained(
-        projector_path, torch_dtype=TORCH_DTYPE_MAP[args.torch_dtype])
+        projector_path,
+        torch_dtype=TORCH_DTYPE_MAP[args.torch_dtype],
+        trust_remote_code=True)
     print(f'Load projector from {args.llava}')
 
     projector.cuda()
@@ -355,7 +363,7 @@ def main():
     stop_words = args.stop_words
     if args.prompt_template:
         template = PROMPT_TEMPLATE[args.prompt_template]
-        stop_words += template.get('STOP_WORDS', [])
+        stop_words += template.stop_words
     stop_criteria = get_stop_criteria(
         tokenizer=tokenizer, stop_words=stop_words)
 
@@ -389,7 +397,7 @@ def main():
         if args.prompt_template:
             prompt_text = ''
             template = PROMPT_TEMPLATE[args.prompt_template]
-            prompt_text += template['INSTRUCTION'].format(
+            prompt_text += template.instruction.format(
                 input=text, round=1, bot_name=args.bot_name)
         else:
             prompt_text = text

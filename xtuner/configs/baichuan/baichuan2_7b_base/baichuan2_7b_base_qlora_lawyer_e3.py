@@ -15,7 +15,8 @@ from xtuner.dataset.collate_fns import default_collate_fn
 from xtuner.dataset.map_fns import (crime_kg_assitant_map_fn,
                                     law_reference_map_fn,
                                     template_map_fn_factory)
-from xtuner.engine import DatasetInfoHook, EvaluateChatHook
+from xtuner.engine.hooks import DatasetInfoHook, EvaluateChatHook
+from xtuner.engine.runner import TrainLoop
 from xtuner.model import SupervisedFinetune
 from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
 
@@ -44,6 +45,10 @@ betas = (0.9, 0.999)
 weight_decay = 0
 max_norm = 1  # grad clip
 warmup_ratio = 0.03
+
+# Save
+save_steps = 500
+save_total_limit = 2  # Maximum checkpoints to keep (-1 means unlimited)
 
 # Evaluate the generation performance during the training
 evaluation_freq = 500
@@ -159,7 +164,7 @@ param_scheduler = [
 ]
 
 # train, val, test setting
-train_cfg = dict(by_epoch=True, max_epochs=max_epochs, val_interval=1)
+train_cfg = dict(type=TrainLoop, max_epochs=max_epochs)
 
 #######################################################################
 #                           PART 5  Runtime                           #
@@ -180,12 +185,16 @@ custom_hooks = [
 default_hooks = dict(
     # record the time of every iteration.
     timer=dict(type=IterTimerHook),
-    # print log every 100 iterations.
-    logger=dict(type=LoggerHook, interval=10),
+    # print log every 10 iterations.
+    logger=dict(type=LoggerHook, log_metric_by_epoch=False, interval=10),
     # enable the parameter scheduler.
     param_scheduler=dict(type=ParamSchedulerHook),
-    # save checkpoint per epoch.
-    checkpoint=dict(type=CheckpointHook, interval=1),
+    # save checkpoint per `save_steps`.
+    checkpoint=dict(
+        type=CheckpointHook,
+        by_epoch=False,
+        interval=save_steps,
+        max_keep_ckpts=save_total_limit),
     # set sampler seed in distributed evrionment.
     sampler_seed=dict(type=DistSamplerSeedHook),
 )
@@ -214,3 +223,6 @@ resume = False
 
 # Defaults to use random seed and disable `deterministic`
 randomness = dict(seed=None, deterministic=False)
+
+# set log processor
+log_processor = dict(by_epoch=False)

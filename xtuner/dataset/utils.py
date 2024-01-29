@@ -72,7 +72,7 @@ def encode_fn(example,
         if DEFAULT_IMAGE_TOKEN in input and with_image_token:
             chunk_encode = [
                 tokenizer.encode(chunk, add_special_tokens=False)
-                for chunk in input.split('<image>')
+                for chunk in input.split(DEFAULT_IMAGE_TOKEN)
             ]
             assert len(chunk_encode) == 2
             input_encode = []
@@ -90,9 +90,11 @@ def encode_fn(example,
         if input_ids_with_output:
             # Add output (with loss)
             output = single_turn_conversation['output']
-            output_encode = tokenizer.encode(output, add_special_tokens=False)
-            input_ids += output_encode
-            labels += copy.deepcopy(output_encode)
+            if output != '':
+                output_encode = tokenizer.encode(
+                    output, add_special_tokens=False)
+                input_ids += output_encode
+                labels += copy.deepcopy(output_encode)
             # Add EOS_TOKEN (with loss)
             if single_turn_conversation['need_eos_token']:
                 next_needs_bos_token = True
@@ -100,7 +102,7 @@ def encode_fn(example,
                 labels += copy.deepcopy(eos_token_id)
             else:
                 next_needs_bos_token = False
-            # Add SEP (without loss)
+            # Add sep (without loss)
             sep = single_turn_conversation['sep']
             if sep != '':
                 sep_encode = tokenizer.encode(sep, add_special_tokens=False)

@@ -13,3 +13,20 @@ def alpaca_map_fn(example):
                 'output': example['output']
             }]
         }
+
+
+def alpaca_map_fn_v2(example):
+    messages = []
+    if example.get('output') == '<nooutput>':
+        return {'messages': []}
+    else:
+
+        messages.append({'role': 'system', 'content': SYSTEM_TEMPLATE.alpaca})
+        messages.append({
+            'role':
+            'user',
+            'content':
+            f"{example['instruction']}\n{example['input']}"
+        })
+        messages.append({'role': 'assistant', 'content': example['output']})
+        return {'messages': messages}

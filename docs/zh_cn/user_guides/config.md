@@ -18,7 +18,8 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer,
 from xtuner.dataset import process_hf_dataset
 from xtuner.dataset.collate_fns import default_collate_fn
 from xtuner.dataset.map_fns import oasst1_map_fn, template_map_fn_factory
-from xtuner.engine import DatasetInfoHook, EvaluateChatHook
+from xtuner.engine.hooks import DatasetInfoHook, EvaluateChatHook
+from xtuner.engine.runner import TrainLoop
 from xtuner.model import SupervisedFinetune
 from xtuner.utils import PROMPT_TEMPLATE
 
@@ -44,6 +45,11 @@ lr = 2e-4  # 学习率
 betas = (0.9, 0.999)  # AdamW 优化器 betas
 weight_decay = 0  # 权重衰减
 max_norm = 1  # grad clip  # 梯度裁剪
+warmup_ratio = 0.03  # warmup
+
+# Save
+save_steps = 500  # 保存间隔
+save_total_limit = 2  # 最大保存 checkpoint 个数，-1 表示无限制
 
 # Evaluate the generation performance during the training
 evaluation_freq = 500  # 验证对话效果频率
@@ -122,15 +128,25 @@ optim_wrapper = dict(
 
 # learning policy
 # More information: https://github.com/open-mmlab/mmengine/blob/main/docs/en/tutorials/param_scheduler.md  # noqa: E501
-param_scheduler = dict(  # 学习率 scheduler 配置
-    type=CosineAnnealingLR,
-    eta_min=0.0,
-    by_epoch=True,
-    T_max=max_epochs,
-    convert_to_iter_based=True)
+param_scheduler = [
+    dict(
+        type=LinearLR,  # warmup 阶段
+        start_factor=1e-5,
+        by_epoch=True,
+        begin=0,
+        end=warmup_ratio * max_epochs,
+        convert_to_iter_based=True),
+    dict(
+        type=CosineAnnealingLR,  # Cosine 学习率策略
+        eta_min=0.0,
+        by_epoch=True,
+        begin=warmup_ratio * max_epochs,
+        T_max=max_epochs,
+        convert_to_iter_based=True)
+]
 
 # train, val, test setting
-train_cfg = dict(by_epoch=True, max_epochs=max_epochs, val_interval=1)  # 基于 epoch 训练，而非 iter
+train_cfg = dict(type=TrainLoop, max_epochs=max_epochs)  # 设置 train loop
 
 #######################################################################
 #                           PART 5  Runtime                           #
@@ -153,12 +169,16 @@ custom_hooks = [
 default_hooks = dict(
     # record the time of every iteration.
     timer=dict(type=IterTimerHook),
-    # print log every 100 iterations.
-    logger=dict(type=LoggerHook, interval=10),
+    # print log every 10 iterations.
+    logger=dict(type=LoggerHook, log_metric_by_epoch=False, interval=10),
     # enable the parameter scheduler.
     param_scheduler=dict(type=ParamSchedulerHook),
-    # save checkpoint per epoch.
-    checkpoint=dict(type=CheckpointHook, interval=1),
+    # save checkpoint per `save_steps`.
+    checkpoint=dict(
+        type=CheckpointHook,
+        by_epoch=False,
+        interval=save_steps,
+        max_keep_ckpts=save_total_limit),
     # set sampler seed in distributed evrionment.
     sampler_seed=dict(type=DistSamplerSeedHook),
 )
@@ -187,5 +207,8 @@ resume = False
 
 # Defaults to use random seed and disable `deterministic`
 randomness = dict(seed=None, deterministic=False)
+
+# set log processor
+log_processor = dict(by_epoch=False)
 
 ```

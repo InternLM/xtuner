@@ -23,7 +23,7 @@ English | [简体中文](README_zh-CN.md)
 
 ## 🎉 News
 
-- **\[2024/01\]** Support [InternLM2](https://huggingface.co/deepseek-ai/deepseek-moe-16b-chat) models! The latest VLM [LLaVA-Internlm2-7B](https://huggingface.co/xtuner/llava-internlm2-7b)/[20B](https://huggingface.co/xtuner/llava-internlm2-20b) models are released, with impressive performance!
+- **\[2024/01\]** Support [InternLM2](https://huggingface.co/internlm) models! The latest VLM [LLaVA-Internlm2-7B](https://huggingface.co/xtuner/llava-internlm2-7b) / [20B](https://huggingface.co/xtuner/llava-internlm2-20b) models are released, with impressive performance!
 - **\[2024/01\]** Support [DeepSeek-MoE](https://huggingface.co/deepseek-ai/deepseek-moe-16b-chat) models! 20GB GPU memory is enough for QLoRA fine-tuning, and 4x80GB for full-parameter fine-tuning. Click [here](xtuner/configs/deepseek/) for details!
 - **\[2023/12\]** 🔥 Support multi-modal VLM pretraining and fine-tuning with [LLaVA-v1.5](https://github.com/haotian-liu/LLaVA) architecture! Click [here](xtuner/configs/llava/README.md) for details!
 - **\[2023/12\]** 🔥 Support [Mixtral 8x7B](https://huggingface.co/mistralai/Mixtral-8x7B-Instruct-v0.1) models! Click [here](xtuner/configs/mixtral/README.md) for details!
@@ -36,11 +36,26 @@ English | [简体中文](README_zh-CN.md)
 
 ## 📖 Introduction
 
-XTuner is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](https://github.com/open-mmlab/mmrazor) and [MMDeploy](https://github.com/open-mmlab/mmdeploy) teams.
+XTuner is an efficient, flexible and full-featured toolkit for fine-tuning large models.
 
-- **Efficiency**: Support LLM fine-tuning on consumer-grade GPUs. The minimum GPU memory required for 7B LLM fine-tuning is only **8GB**, indicating that users can use nearly any GPU (even the free resource, *e.g.*, Colab) to fine-tune custom LLMs.
-- **Versatile**: Support various **LLMs** ([InternLM](https://huggingface.co/internlm), [Llama2](https://huggingface.co/meta-llama), [ChatGLM](https://huggingface.co/THUDM), [Qwen](https://huggingface.co/Qwen), [Baichuan2](https://huggingface.co/baichuan-inc), ...), **datasets** ([MOSS_003_SFT](https://huggingface.co/datasets/fnlp/moss-003-sft-data), [Alpaca](https://huggingface.co/datasets/tatsu-lab/alpaca), [WizardLM](https://huggingface.co/datasets/WizardLM/WizardLM_evol_instruct_V2_196k), [oasst1](https://huggingface.co/datasets/timdettmers/openassistant-guanaco), [Open-Platypus](https://huggingface.co/datasets/garage-bAInd/Open-Platypus), [Code Alpaca](https://huggingface.co/datasets/HuggingFaceH4/CodeAlpaca_20K), [Colorist](https://huggingface.co/datasets/burkelibbey/colors), ...) and **algorithms** ([QLoRA](http://arxiv.org/abs/2305.14314), [LoRA](http://arxiv.org/abs/2106.09685)), allowing users to choose the most suitable solution for their requirements.
-- **Compatibility**: Compatible with [DeepSpeed](https://github.com/microsoft/DeepSpeed) 🚀 and [HuggingFace](https://huggingface.co) 🤗 training pipeline, enabling effortless integration and utilization.
+**Efficient**
+
+- Support LLM, VLM pre-training / fine-tuning on almost all GPUs. XTuner is capable of fine-tuning 7B LLM on a single 8GB GPU, as well as multi-node fine-tuning of models exceeding 70B.
+- Automatically dispatch high-performance operators such as FlashAttention and Triton kernels to increase training throughput.
+- Compatible with [DeepSpeed](https://github.com/microsoft/DeepSpeed) 🚀, easily utilizing a variety of ZeRO optimization techniques.
+
+**Flexible**
+
+- Support various LLMs ([InternLM](https://huggingface.co/internlm), [Mixtral-8x7B](https://huggingface.co/mistralai), [Llama2](https://huggingface.co/meta-llama), [ChatGLM](https://huggingface.co/THUDM), [Qwen](https://huggingface.co/Qwen), [Baichuan](https://huggingface.co/baichuan-inc), ...).
+- Support VLM ([LLaVA](https://github.com/haotian-liu/LLaVA)). The performance of [LLaVA-InternLM2-20B](https://huggingface.co/xtuner/llava-internlm2-20b) is outstanding.
+- Well-designed data pipeline, accommodating datasets in any format, including but not limited to open-source and custom formats.
+- Support various training algorithms ([QLoRA](http://arxiv.org/abs/2305.14314), [LoRA](http://arxiv.org/abs/2106.09685), full-parameter fune-tune), allowing users to choose the most suitable solution for their requirements.
+
+**Full-featured**
+
+- Support continuous pre-training, instruction fine-tuning, and agent fine-tuning.
+- Support chatting with large models with pre-defined templates.
+- The output models can seamlessly integrate with deployment and server toolkit ([LMDeploy](https://github.com/InternLM/lmdeploy)), and large-scale evaluation toolkit ([OpenCompass](https://github.com/open-compass/opencompass), [VLMEvalKit](https://github.com/open-compass/VLMEvalKit)).
 
 ## 🌟 Demos
 
@@ -88,7 +103,8 @@ XTuner is a toolkit for efficiently fine-tuning LLM, developed by the [MMRazor](
 <tr valign="top">
 <td align="left" valign="top">
 <ul>
-  <li><a href="https://huggingface.co/internlm/internlm-7b">InternLM</a></li>
+  <li><a href="https://huggingface.co/internlm">InternLM2</a></li>
+  <li><a href="https://huggingface.co/internlm">InternLM</a></li>
   <li><a href="https://huggingface.co/meta-llama">Llama</a></li>
   <li><a href="https://huggingface.co/meta-llama">Llama2</a></li>
   <li><a href="https://huggingface.co/THUDM/chatglm2-6b">ChatGLM2</a></li>
@@ -181,6 +197,7 @@ XTuner supports the efficient fine-tune (*e.g.*, QLoRA) for LLMs. Dataset prepar
 
   ```shell
   xtuner copy-cfg ${CONFIG_NAME} ${SAVE_PATH}
+  vi ${SAVE_PATH}/${CONFIG_NAME}_copy.py
   ```
 
 - **Step 1**, start fine-tuning.
@@ -189,14 +206,14 @@ XTuner supports the efficient fine-tune (*e.g.*, QLoRA) for LLMs. Dataset prepar
   xtuner train ${CONFIG_NAME_OR_PATH}
   ```
 
-  For example, we can start the QLoRA fine-tuning of InternLM-7B with oasst1 dataset by
+  For example, we can start the QLoRA fine-tuning of InternLM2-Chat-7B with oasst1 dataset by
 
   ```shell
   # On a single GPU
-  xtuner train internlm_7b_qlora_oasst1_e3 --deepspeed deepspeed_zero2
+  xtuner train internlm2_chat_7b_qlora_oasst1_e3 --deepspeed deepspeed_zero2
   # On multiple GPUs
-  (DIST) NPROC_PER_NODE=${GPU_NUM} xtuner train internlm_7b_qlora_oasst1_e3 --deepspeed deepspeed_zero2
-  (SLURM) srun ${SRUN_ARGS} xtuner train internlm_7b_qlora_oasst1_e3 --launcher slurm --deepspeed deepspeed_zero2
+  (DIST) NPROC_PER_NODE=${GPU_NUM} xtuner train internlm2_chat_7b_qlora_oasst1_e3 --deepspeed deepspeed_zero2
+  (SLURM) srun ${SRUN_ARGS} xtuner train internlm2_chat_7b_qlora_oasst1_e3 --launcher slurm --deepspeed deepspeed_zero2
   ```
 
   - `--deepspeed` means using [DeepSpeed](https://github.com/microsoft/DeepSpeed) 🚀 to optimize the training. XTuner comes with several integrated strategies including ZeRO-1, ZeRO-2, and ZeRO-3. If you wish to disable this feature, simply remove this argument.
@@ -219,16 +236,16 @@ xtuner chat ${NAME_OR_PATH_TO_LLM} --adapter {NAME_OR_PATH_TO_ADAPTER} [optional
 
 For example, we can start the chat with
 
-InternLM-7B with adapter trained from Alpaca-enzh:
+InternLM2-Chat-7B with adapter trained from oasst1 dataset:
 
 ```shell
-xtuner chat internlm/internlm-7b --adapter xtuner/internlm-7b-qlora-alpaca-enzh --prompt-template internlm_chat --system-template alpaca
+xtuner chat internlm/internlm2-chat-7b --adapter xtuner/internlm2-chat-7b-qlora-oasst1 --prompt-template internlm2_chat
 ```
 
-Llama2-7b with adapter trained from MOSS-003-SFT:
+LLaVA-InternLM2-7B:
 
 ```shell
-xtuner chat meta-llama/Llama-2-7b-hf --adapter xtuner/Llama-2-7b-qlora-moss-003-sft --bot-name Llama2 --prompt-template moss_sft --system-template moss_sft --with-plugins calculate solve search --no-streamer
+xtuner chat internlm/internlm2-chat-7b --visual-encoder openai/clip-vit-large-patch14-336 --llava xtuner/llava-internlm2-7b --prompt-template internlm2_chat --image $IMAGE_PATH
 ```
 
 For more examples, please see [chat.md](./docs/en/user_guides/chat.md).

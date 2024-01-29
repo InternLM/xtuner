@@ -42,30 +42,32 @@ class EvaluateChatHook(Hook):
             self.evaluation_images = [
                 load_image(img) for img in self.evaluation_images
             ]
-        if prompt_template is None:
-            instruction = '{input}'
-        else:
-            if isinstance(prompt_template, str):  # for resume
-                prompt_template = get_object_from_string(prompt_template)
-            instruction = prompt_template.get('INSTRUCTION', '{input}')
-            if system != '':
-                system = prompt_template.get(
-                    'SYSTEM', '{system}\n').format(system=system)
-            stop_words += prompt_template.get('STOP_WORDS', [])
+
+        self.system = system
+        if isinstance(prompt_template, str):  # for resume
+            prompt_template = get_object_from_string(prompt_template)
+        self.prompt_template = prompt_template
+        self.every_n_iters = every_n_iters
+        self.max_new_tokens = max_new_tokens
+        self.tokenizer = BUILDER.build(tokenizer)
+        if image_processor is not None:
+            self.image_processor = BUILDER.build(image_processor)
+
         if stop_word is not None:
             # TODO: deprecation, v0.3.0
             warnings.warn(
                 ('The `stop_word` argument is deprecated and will be removed '
                  'in v0.3.0, use `stop_words` instead.'), DeprecationWarning)
             stop_words.append(stop_word)
-        self.instruction = instruction
-        self.system = system
-        self.every_n_iters = every_n_iters
-        self.max_new_tokens = max_new_tokens
-        self.tokenizer = BUILDER.build(tokenizer)
-        if image_processor is not None:
-            self.image_processor = BUILDER.build(image_processor)
+
+        if self.prompt_template is not None:
+            stop_words += self.prompt_template.stop_words
+
         self.stop_criteria = StoppingCriteriaList()
+        for word in stop_words:
+            self.stop_criteria.append(
+                StopWordStoppingCriteria(self.tokenizer, word))
+
         # default generation config
         self.gen_config = GenerationConfig(
             max_new_tokens=max_new_tokens,
@@ -78,10 +80,6 @@ class EvaluateChatHook(Hook):
             if self.tokenizer.pad_token_id is not None else
             self.tokenizer.eos_token_id,
         )
-        self.stop_criteria = StoppingCriteriaList()
-        for word in stop_words:
-            self.stop_criteria.append(
-                StopWordStoppingCriteria(self.tokenizer, word))
 
     def _generate_samples(self, runner, max_new_tokens=None):
         if max_new_tokens is None:
@@ -110,8 +108,14 @@ class EvaluateChatHook(Hook):
                     image, return_tensors='pt')['pixel_values'][0]
                 image = image.to(device)
                 sample_input = DEFAULT_IMAGE_TOKEN + '\n' + sample_input
-                inputs = (self.system + self.instruction).format(
-                    input=sample_input, round=1, **runner.cfg)
+                if self.prompt_template is None:
+                    inputs = self.system + '\n' + sample_input
+                else:
+                    inputs = self.prompt_template.build_prompt(
+                        system_text=self.system,
+                        instruction_text=sample_input,
+                        round=1,
+                        **runner.cfg)
                 chunk_encode = []
                 for idx, chunk in enumerate(inputs.split(DEFAULT_IMAGE_TOKEN)):
                     if idx == 0:
@@ -149,8 +153,14 @@ class EvaluateChatHook(Hook):
                 )
         else:
             for sample_input in self.evaluation_inputs:
-                inputs = (self.system + self.instruction).format(
-                    input=sample_input, round=1, **runner.cfg)
+                if self.prompt_template is None:
+                    inputs = self.system + '\n' + sample_input
+                else:
+                    inputs = self.prompt_template.build_prompt(
+                        system_text=self.system,
+                        instruction_text=sample_input,
+                        round=1,
+                        **runner.cfg)
                 input_ids = self.tokenizer.encode(inputs, return_tensors='pt')
                 input_ids = input_ids.to(device)
                 generation_output = model.generate(
@@ -177,8 +187,8 @@ class EvaluateChatHook(Hook):
                          batch_idx: int,
                          data_batch=None,
                          outputs=None) -> None:
-        if self.every_n_iters is None or (batch_idx +
-                                          1) % self.every_n_iters != 0:
+        if (self.every_n_iters is None or batch_idx == 0
+                or batch_idx % self.every_n_iters != 0):
             return
         runner.logger.info('after_train_iter in EvaluateChatHook.')
         self._generate_samples(runner)
