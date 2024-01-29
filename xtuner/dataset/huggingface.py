@@ -103,11 +103,6 @@ def process(dataset,
             template_map_fn = BUILDER.build(template_map_fn)
         dataset = dataset.map(template_map_fn, num_proc=map_num_proc)
 
-    # remove invalid data
-    dataset = dataset.filter(
-        lambda example: len(example['conversation']) > 0,
-        num_proc=map_num_proc)
-
     # remove unused columns
     if pack_to_max_length and (not remove_unused_columns):
         print_log(
@@ -117,11 +112,15 @@ def process(dataset,
             level=logging.WARNING)
         remove_unused_columns = True
 
+    # remove invalid data
+    dataset = dataset.filter(
+        lambda example: len(example['conversation']) > 0,
+        num_proc=map_num_proc)
+
     # tokenize
     if isinstance(tokenizer, dict) or isinstance(
             tokenizer, Config) or isinstance(tokenizer, ConfigDict):
         tokenizer = BUILDER.build(tokenizer)
-
     dataset = dataset.map(
         partial(
             encode_fn,
