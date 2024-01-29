@@ -402,7 +402,7 @@ python xtuner/tools/process_untokenized_datasets.py \
     --is-ftdp
 ```
 
-其中 `pretrained_model_name_or_path` 同 `from_pretrained` 接口中的 `pretrained_model_name_or_path`，`--prompt-template` 表示对话模板的种类，其他可选对话模板可参考 [templates](https://github.com/HIT-cwh/xtuner/blob/support_internlm_sft/xtuner/utils/templates.py#L4-L79)。由于 untokenized internlm repo 格式的数据集（别名 ftdp 格式）满足 `openai` 数据格式，即：
+其中 `pretrained_model_name_or_path` 同 `from_pretrained` 接口中的 `pretrained_model_name_or_path`，`--prompt-template` 表示对话模板的种类，其他可选对话模板可参考 [templates](https://github.com/InternLM/xtuner/blob/main/docs/zh_cn/user_guides/prompt_template.md)。由于 untokenized internlm repo 格式的数据集（别名 ftdp 格式）满足 `openai` 数据格式，即：
 
 ```
 [
