@@ -62,6 +62,8 @@ class LMDeployBot(BaseBot):
         self.pipeline = pipeline(
             model_name_or_path, backend_config=backend_config)
 
+        self.session_id = 0
+
     def create_streamer(self, iterable=False):
 
         if iterable:
@@ -84,7 +86,9 @@ class LMDeployBot(BaseBot):
             random_seed=gen_config.seed,
         )
 
-        generator = self.pipeline.generate(text, 0, gen_config=lm_gen_config)
+        self.session_id += 1
+        generator = self.pipeline.generate(
+            text, self.session_id, gen_config=lm_gen_config)
         results = []
 
         async def _streaming_generate():

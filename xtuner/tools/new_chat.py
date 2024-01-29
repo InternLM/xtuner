@@ -45,7 +45,7 @@ def parse_args():
         '--visual-encoder', default=None, help='visual encoder name or path')
     llava_spec_group.add_argument(
         '--visual-select-layer', default=-2, help='visual select layer')
-    llava_spec_group.add_argument('--image', default=None, help='image')
+    llava_spec_group.add_argument('--image', type=str, help='image')
 
     lagent_spec_group = parser.add_argument_group()
     lagent_spec_group.add_argument(
@@ -197,9 +197,17 @@ def build_bot(args):
         return OpenaiBot(args.model_name_or_path, args.openai_api_key)
 
     else:
+        if args.llava and args.image:
+            from xtuner.chat import HFLlavaBot
+            return HFLlavaBot(
+                args.model_name_or_path,
+                args.llava,
+                args.visual_encoder,
+                bits=args.bits)
 
-        from xtuner.chat import HFBot
-        return HFBot(args.model_name_or_path, args.adapter, args.bits)
+        else:
+            from xtuner.chat import HFBot
+            return HFBot(args.model_name_or_path, args.adapter, args.bits)
 
 
 def build_chat_instance(bot, args):
@@ -219,7 +227,8 @@ def build_chat_instance(bot, args):
         # TODO
         pass
     elif use_llava:
-        pass
+        from xtuner.chat import LlavaChat
+        return LlavaChat(bot, args.image, args.bot_name, chat_template)
     else:
         from xtuner.chat import BaseChat
         return BaseChat(bot, args.bot_name, chat_template)
@@ -238,18 +247,7 @@ def interactive_chat(bot, system, streamer, gen_config):
             print('Log: Exit!')
             exit(0)
 
-        from threading import Thread
-        chat_kwargs = dict(
-            text=text, system=system, streamer=streamer, gen_config=gen_config)
-        thread = Thread(target=bot.chat, kwargs=chat_kwargs)
-        thread.start()
-
-        for new_text in streamer:
-            print(new_text, flush=True, end='')
-
-        # _ = bot.chat(text, system, streamer, gen_config)
-
-        # print(response)
+        _ = bot.chat(text, system, streamer, gen_config)
 
 
 def main():
@@ -313,7 +311,7 @@ def main():
             stop_words=[],
             seed=args.seed,
         )
-        streamer = bot.create_streamer(iterable=True)
+        streamer = bot.create_streamer()
         interactive_chat(instance, args.system, streamer, gen_config)
 
 
