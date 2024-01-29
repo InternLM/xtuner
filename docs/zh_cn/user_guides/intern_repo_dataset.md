@@ -23,8 +23,7 @@ xtuner copy-cfg internlm2_7b_w_tokenized_dataset .
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-- pretrained_model_name_or_path = '/mnt/petrelfs/share_data/caoweihan/official_Ampere_7B_1_0_0'  # noqa: E501
-+ pretrained_model_name_or_path = 'internlm/internlm-7b'
+pretrained_model_name_or_path = 'internlm/internlm2-7b'
 use_varlen_attn = True
 
 # Data
@@ -55,8 +54,12 @@ default_hooks = dict(
     # enable the parameter scheduler.
     param_scheduler=dict(type=ParamSchedulerHook),
     # save checkpoint per epoch.
--   checkpoint=dict(type=CheckpointHook, interval=1),
-+   checkpoint=dict(type=CheckpointHook, save_optimizer=False, interval=1),
+   checkpoint=dict(
+        type=CheckpointHook,
++       save_optimizer=False,
+        by_epoch=False,
+        interval=save_steps,
+        max_keep_ckpts=save_total_limit),
     # set sampler seed in distributed evrionment.
     sampler_seed=dict(type=DistSamplerSeedHook),
 )
@@ -72,12 +75,21 @@ default_hooks = dict(
 python xtuner/tools/get_data_order.py \
     --data-folder /path/to/your/data \
     --save-folder /folder/to/save/data/order \
+    --file-type ${file_type}
+```
+
+其中，`--file-type ${file_type}` 表示需要统计所有以 `${file_type}` 为文件名后缀的文件的顺序。
+
+例如，需要获取 `/path/to/your/data` 路径下所有以 `.bin` 结尾的文件的顺序，并保存在当前路径下，那么上述命令需要改为：
+
+```
+python xtuner/tools/get_data_order.py \
+    --data-folder /path/to/your/data \
+    --save-folder . \
     --file-type .bin
 ```
 
-其中，`--file-type .bin` 表示需要获取所有以 `.bin` 为结尾的文件的顺序。
-
-同时，需要修改 Step 2 中的 Config 文件，并设置数据顺序文件路径：
+同时，需要进一步修改 Step 2 中的 Config 文件，并设置数据顺序文件路径：
 
 ```diff
 ...
@@ -88,16 +100,15 @@ train_dataset = dict(
     type=build_packed_dataset,
     dataset_cfg=dict(
         type=load_intern_repo_tokenized_dataset,
+-       data_order_path=None,
 +       data_order_path='/folder/to/save/data/order/'+'data_order.txt',
         folder=dataset_folder,
         min_length=0,
-+       file_type='.bin'
+        file_type='.bin'
     ),
     packed_length=max_length,
     seed=1024)
 ```
-
-其中，`file_type='.bin'` 表示给定路径中的所有以 `.bin` 结尾的文件为数据文件。
 
 ### Step 4, 启动训练
 
@@ -129,21 +140,19 @@ source ~/.bashrc
 + cd /path/to/xtuner
 + conda activate conda_env_name
 
+export NPROC_PER_NODE=${KUBERNETES_CONTAINER_RESOURCE_GPU}
+export PORT=${MASTER_PORT}
+export NNODES=${WORLD_SIZE}
+export NODE_RANK=${RANK}
+export ADDR=${MASTER_ADDR}
+
 echo ${KUBERNETES_CONTAINER_RESOURCE_GPU}
 echo ${WORLD_SIZE}
 echo ${MASTER_PORT}
 echo ${MASTER_ADDR}
 echo ${RANK}
-python -m torch.distributed.launch \
-    --nproc_per_node=${KUBERNETES_CONTAINER_RESOURCE_GPU} \
-    --master_addr=${MASTER_ADDR} \
-    --master_port=${MASTER_PORT} \
-    --nnodes=${WORLD_SIZE} \
-    --node_rank=${RANK} \
-    xtuner/tools/train.py \
-    internlm2_7b_w_tokenized_dataset_copy.py \
+xtuner train internlm2_7b_w_tokenized_dataset_copy.py \
     --deepspeed deepspeed_zero1 \
-    --launcher pytorch \
     --work-dir work_dirs/${EXP_NAME}
 
 ```
@@ -329,8 +338,7 @@ xtuner copy-cfg internlm2_7b_w_untokenized_dataset .
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-- pretrained_model_name_or_path = '/mnt/petrelfs/share_data/caoweihan/official_Ampere_7B_1_0_0'  # noqa: E501
-+ pretrained_model_name_or_path = 'internlm/internlm-7b'
+pretrained_model_name_or_path = 'internlm/internlm2-7b'
 use_varlen_attn = True
 
 # Data
@@ -365,17 +373,18 @@ python xtuner/tools/get_data_order.py \
 train_dataset = dict(
     type=build_packed_dataset,
     dataset_cfg=dict(
-        type=load_intern_repo_tokenized_dataset,
+        type=load_intern_repo_untokenized_dataset,
+-       data_order_path=None,
 +       data_order_path='/folder/to/save/data/order/'+'data_order.txt',
         folder=dataset_folder,
-        min_length=0,
-+       file_type='.json'
-    ),
+        tokenizer=tokenizer,
+        max_length=max_length,
+        template_map_fn=dict(
+            type=template_map_fn_factory, template=prompt_template),
+        file_type='.json'),
     packed_length=max_length,
     seed=1024)
 ```
-
-其中，`file_type='.json'` 表示给定路径中的所有以 `.json` 结尾的文件为数据文件。
 
 ### Step 4，离线 token 化并处理原数据集 （可选）
 
@@ -384,16 +393,34 @@ train_dataset = dict(
 运行以下代码对原始数据集进行离线处理：
 
 ```
-python xtuner/tools/process_intern_repo_untokenized_datasets.py \
-    --data-folder /path/to/your/data \
-    --save-folder /folder/to/save/processed/data \
+python xtuner/tools/process_untokenized_datasets.py \
+    --data-folder /path/to/data/folder \
+    --save-folder ./processed \
     --tokenizer-path pretrained_model_name_or_path \
-    --prompt-template internlm2_chat
+    --prompt-template internlm2_chat \
+    --dataset-format openai \
+    --is-ftdp
 ```
 
-其中 `pretrained_model_name_or_path` 同 `from_pretrained` 接口中的 `pretrained_model_name_or_path`，`--prompt-template` 表示对话模板的种类，其他可选对话模板可参考 [templates](https://github.com/HIT-cwh/xtuner/blob/support_internlm_sft/xtuner/utils/templates.py#L4-L79)。
+其中 `pretrained_model_name_or_path` 同 `from_pretrained` 接口中的 `pretrained_model_name_or_path`，`--prompt-template` 表示对话模板的种类，其他可选对话模板可参考 [templates](https://github.com/HIT-cwh/xtuner/blob/support_internlm_sft/xtuner/utils/templates.py#L4-L79)。由于 untokenized internlm repo 格式的数据集（别名 ftdp 格式）满足 `openai` 数据格式，即：
 
-同时，需要修改 Step 2 中的 Config 文件，并设置存放离线处理后的数据集路径：
+```
+[
+    {
+        'role': 'user',
+        'content': 'xxx'
+    },
+    {
+        'role': 'assistant',
+        'content': 'xxx'
+    },
+    ...
+]
+```
+
+因此，上述命令中 `--dataset-format` 一项设为 `openai`。
+
+使用离线处理好的数据集进行训练，需要额外修改 Step 2 中的 Config 文件，并设置存放离线处理后的数据集路径：
 
 ```diff
 ...
@@ -405,15 +432,47 @@ train_dataset = dict(
     dataset_cfg=dict(
         type=load_intern_repo_untokenized_dataset,
 +       processed_dataset_dict_path=/folder/to/save/processed/data,
+-       data_order_path=None,
 -       folder=dataset_folder,
 -       tokenizer=tokenizer,
 -       max_length=max_length,
 -       template_map_fn=dict(
 -           type=template_map_fn_factory, template=prompt_template),
-    ),
+-       file_type='.json'),
     packed_length=max_length,
     seed=1024)
 ...
 ```
 
 ### Step 4, 5, 6, 7，同上
+
+## 数据集格式
+
+untokenized internlm repo 格式的数据集（别名 ftdp 格式）满足以下格式：
+
+```
+[
+    {
+        'role': 'user',
+        'content': 'xxx'
+    },
+    {
+        'role': 'assistant',
+        'content': 'xxx'
+    },
+    ...
+]
+[
+    {
+        'role': 'user',
+        'content': 'xxx'
+    },
+    {
+        'role': 'assistant',
+        'content': 'xxx'
+    },
+    ...
+]
+```
+
+其中 user 对应的内容在训练过程中不参与 loss 的计算。
