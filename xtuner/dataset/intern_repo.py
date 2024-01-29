@@ -314,8 +314,8 @@ def load_intern_repo_untokenized_dataset(processed_dataset_dict_path=None,
         dataset = Dataset.from_list(dataset)
         dataset = process(
             dataset,
-            tokenizer,
-            max_length,
+            tokenizer=tokenizer,
+            max_length=max_length,
             dataset_map_fn=openai_map_fn,
             template_map_fn=template_map_fn,
             remove_unused_columns=True,
