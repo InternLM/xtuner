@@ -1,11 +1,8 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-import copy
 from dataclasses import dataclass
 from typing import List, Tuple
 
 from mmengine.config import ConfigDict
-
-from xtuner.utils import DEFAULT_IMAGE_TOKEN, IGNORE_INDEX, IMAGE_TOKEN_INDEX
 
 
 @dataclass
