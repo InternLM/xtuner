@@ -24,8 +24,10 @@ class PromptTemplateConfig:
         for data_idx, data in enumerate(messages):
             role = data['role']
             content = data['content']
-            if role == 'system' and self.is_valid_text(content):
-                text += self.system.format(system=content, **kwargs)
+
+            if role == 'system':
+                if self.is_valid_text(content):
+                    text += self.system.format(system=content, **kwargs)
             elif role == 'user':
                 text += self.instruction.format(
                     input=content, round=n_turn, **kwargs)
