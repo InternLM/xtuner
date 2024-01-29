@@ -96,14 +96,14 @@ def encode_fn(example,
                 input_ids += output_encode
                 labels += copy.deepcopy(output_encode)
             # Add EOS_TOKEN (with loss)
-            if single_turn_conversation['need_eos_token']:
+            if single_turn_conversation.get('need_eos_token', True):
                 next_needs_bos_token = True
                 input_ids += eos_token_id
                 labels += copy.deepcopy(eos_token_id)
             else:
                 next_needs_bos_token = False
             # Add sep (without loss)
-            sep = single_turn_conversation['sep']
+            sep = single_turn_conversation.get('sep', '')
             if sep != '':
                 sep_encode = tokenizer.encode(sep, add_special_tokens=False)
                 input_ids += sep_encode
