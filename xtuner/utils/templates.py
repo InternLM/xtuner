@@ -18,11 +18,24 @@ class PromptTemplateConfig:
     def is_valid_text(text):
         return text != '' and text is not None
 
-    def build_prompt(self, system_text, instruction_text, **kwargs):
+    def build_prompt(self, messages, **kwargs):
         text = ''
-        if self.is_valid_text(system_text):
-            text += self.system.format(system=system_text, **kwargs)
-        text += self.instruction.format(input=instruction_text, **kwargs)
+        n_turn = 1
+        for data_idx, data in enumerate(messages):
+            role = data['role']
+            content = data['content']
+            if role == 'system' and self.is_valid_text(content):
+                text += self.system.format(system=content, **kwargs)
+            elif role == 'user':
+                text += self.instruction.format(
+                    input=content, round=n_turn, **kwargs)
+                n_turn += 1
+            elif role == 'assistant':
+                text += content
+                if self.suffix != '':
+                    text += self.suffix
+            else:
+                raise NotImplementedError
         return text
 
     def template_map_fn(self, example):

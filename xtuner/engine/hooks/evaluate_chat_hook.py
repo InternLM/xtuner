@@ -111,11 +111,15 @@ class EvaluateChatHook(Hook):
                 if self.prompt_template is None:
                     inputs = self.system + '\n' + sample_input
                 else:
+                    messages = [{
+                        'role': 'system',
+                        'content': self.system
+                    }, {
+                        'role': 'user',
+                        'content': sample_input
+                    }]
                     inputs = self.prompt_template.build_prompt(
-                        system_text=self.system,
-                        instruction_text=sample_input,
-                        round=1,
-                        **runner.cfg)
+                        messages=messages, **runner.cfg)
                 chunk_encode = []
                 for idx, chunk in enumerate(inputs.split(DEFAULT_IMAGE_TOKEN)):
                     if idx == 0:
@@ -156,11 +160,15 @@ class EvaluateChatHook(Hook):
                 if self.prompt_template is None:
                     inputs = self.system + '\n' + sample_input
                 else:
+                    messages = [{
+                        'role': 'system',
+                        'content': self.system
+                    }, {
+                        'role': 'user',
+                        'content': sample_input
+                    }]
                     inputs = self.prompt_template.build_prompt(
-                        system_text=self.system,
-                        instruction_text=sample_input,
-                        round=1,
-                        **runner.cfg)
+                        messages=messages, **runner.cfg)
                 input_ids = self.tokenizer.encode(inputs, return_tensors='pt')
                 input_ids = input_ids.to(device)
                 generation_output = model.generate(
