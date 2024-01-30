@@ -57,7 +57,11 @@ def default_collate_fn(instances: Sequence[Dict],
             'max_seqlen': max_seqlen
         }
     else:
-        data_dict = {'input_ids': input_ids, 'labels': labels}
+        data_dict = {
+            'input_ids': input_ids,
+            'attention_mask': input_ids.ne(pad_index),
+            'labels': labels
+        }
 
     if has_image:
         pixel_values = torch.stack(pixel_values)
