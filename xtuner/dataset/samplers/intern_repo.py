@@ -1,7 +1,9 @@
+import logging
 import warnings
 from typing import Iterator, Optional, Sized
 
 import numpy as np
+from mmengine import print_log
 from mmengine.dist import get_dist_info
 from torch.utils.data import Sampler
 
@@ -61,3 +63,16 @@ class InternRepoSampler(Sampler):
             epoch (int): Epoch number.
         """
         self.epoch = epoch
+
+
+class InternlmRepoSampler(InternRepoSampler):
+
+    def __init__(self,
+                 dataset: Sized,
+                 shuffle: bool = True,
+                 seed: Optional[int] = None) -> None:
+        super().__init__(dataset, shuffle, seed)
+        print_log(('InternlmRepoSampler will be deprecated in the future.'
+                   'Please use InternRepoSampler instead.'),
+                  logger='current',
+                  level=logging.WARNING)
