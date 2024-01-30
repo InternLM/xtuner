@@ -1,19 +1,21 @@
+import logging
 import warnings
 from typing import Iterator, Optional, Sized
 
 import numpy as np
+from mmengine import print_log
 from mmengine.dist import get_dist_info
 from torch.utils.data import Sampler
 
 
-class InternlmRepoSampler(Sampler):
+class InternRepoSampler(Sampler):
 
     def __init__(self,
                  dataset: Sized,
                  shuffle: bool = True,
                  seed: Optional[int] = None) -> None:
         if seed is not None and seed != 1024:
-            warnings.warn('For alignment accuracy, seed in InternlmRepoSampler'
+            warnings.warn('For alignment accuracy, seed in InternRepoSampler'
                           'must be set to 1024.')
         rank, world_size = get_dist_info()
         self.rank = rank
@@ -61,3 +63,16 @@ class InternlmRepoSampler(Sampler):
             epoch (int): Epoch number.
         """
         self.epoch = epoch
+
+
+class InternlmRepoSampler(InternRepoSampler):
+
+    def __init__(self,
+                 dataset: Sized,
+                 shuffle: bool = True,
+                 seed: Optional[int] = None) -> None:
+        super().__init__(dataset, shuffle, seed)
+        print_log(('InternlmRepoSampler will be deprecated in the future.'
+                   'Please use InternRepoSampler instead.'),
+                  logger='current',
+                  level=logging.WARNING)

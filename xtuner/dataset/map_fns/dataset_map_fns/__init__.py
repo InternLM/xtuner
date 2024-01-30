@@ -24,6 +24,7 @@ DATASET_FORMAT_MAPPING = dict(
     alpaca_zh=alpaca_zh_map_fn,
     arxiv=arxiv_map_fn,
     code_alpaca=code_alpaca_map_fn,
+    colors=colors_map_fn,
     crime_kg_assitan=crime_kg_assitant_map_fn,
     default=default_map_fn,
     law_reference=law_reference_map_fn,
