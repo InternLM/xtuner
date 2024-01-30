@@ -11,7 +11,8 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer,
 
 from xtuner.dataset import MOSSSFTDataset
 from xtuner.dataset.collate_fns import default_collate_fn
-from xtuner.engine.hooks import DatasetInfoHook, EvaluateChatHook
+from xtuner.engine.hooks import (DatasetInfoHook, EvaluateChatHook,
+                                 VarlenAttnArgsToMessageHubHook)
 from xtuner.engine.runner import TrainLoop
 from xtuner.model import SupervisedFinetune
 from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
@@ -22,6 +23,7 @@ from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
 # Model
 pretrained_model_name_or_path = 'huggyllama/llama-7b'
 bot_name = 'Llama'
+use_varlen_attn = False
 
 # Data
 # Download data from https://huggingface.co/datasets/fnlp/moss-003-sft-data
@@ -63,6 +65,7 @@ tokenizer = dict(
 
 model = dict(
     type=SupervisedFinetune,
+    use_varlen_attn=use_varlen_attn,
     llm=dict(
         type=AutoModelForCausalLM.from_pretrained,
         pretrained_model_name_or_path=pretrained_model_name_or_path,
@@ -100,7 +103,7 @@ train_dataloader = dict(
     num_workers=dataloader_num_workers,
     dataset=train_dataset,
     sampler=dict(type=DefaultSampler, shuffle=True),
-    collate_fn=dict(type=default_collate_fn))
+    collate_fn=dict(type=default_collate_fn, use_varlen_attn=use_varlen_attn))
 
 #######################################################################
 #                    PART 4  Scheduler & Optimizer                    #
@@ -152,6 +155,9 @@ custom_hooks = [
         system=SYSTEM,
         prompt_template=prompt_template)
 ]
+
+if use_varlen_attn:
+    custom_hooks += [dict(type=VarlenAttnArgsToMessageHubHook)]
 
 # configure default hooks
 default_hooks = dict(
