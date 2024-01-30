@@ -6,14 +6,14 @@ from mmengine.dist import get_dist_info
 from torch.utils.data import Sampler
 
 
-class InternlmRepoSampler(Sampler):
+class InternRepoSampler(Sampler):
 
     def __init__(self,
                  dataset: Sized,
                  shuffle: bool = True,
                  seed: Optional[int] = None) -> None:
         if seed is not None and seed != 1024:
-            warnings.warn('For alignment accuracy, seed in InternlmRepoSampler'
+            warnings.warn('For alignment accuracy, seed in InternRepoSampler'
                           'must be set to 1024.')
         rank, world_size = get_dist_info()
         self.rank = rank
