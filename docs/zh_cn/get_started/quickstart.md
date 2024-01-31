@@ -25,6 +25,11 @@ python -c "from modelscope import snapshot_download; snapshot_download('Shanghai
 
 在完成下载后，便可以开始准备微调数据集了。
 
+此处附上 HuggingFace 链接与 ModelScope 链接：
+
+- HuggingFace 链接位于：https://huggingface.co/internlm/internlm2-chat-7b
+- ModelScope 链接位于：https://modelscope.cn/models/Shanghai_AI_Laboratory/internlm2-chat-7b/summary
+
 ## 准备微调数据集
 
 由于相同的问题，因此我们从 ModelScope 下载所需要的微调数据集。
@@ -32,6 +37,11 @@ python -c "from modelscope import snapshot_download; snapshot_download('Shanghai
 ```bash
 git clone https://www.modelscope.cn/datasets/fanqiNO1/colors.git
 ```
+
+此处附上 HuggingFace 链接与 ModelScope 链接：
+
+- HuggingFace 链接位于：https://huggingface.co/datasets/burkelibbey/colors
+- ModelScope 链接位于：https://modelscope.cn/datasets/fanqiNO1/colors
 
 ## 准备配置文件
 
