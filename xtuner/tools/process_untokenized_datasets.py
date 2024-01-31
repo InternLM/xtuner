@@ -26,8 +26,7 @@ srun -p llm_razor --quotatype=auto --gres=gpu:1 --ntasks=1 \
         --save-folder ./processed \
         --tokenizer-path pretrained_model_name_or_path \
         --prompt-template internlm2_chat \
-        --dataset-format openai \
-        --is-ftdp
+        --dataset-format ftdp
 
 normal json dataset:
 srun -p llm_razor --quotatype=auto --gres=gpu:1 --ntasks=1 \
@@ -48,10 +47,11 @@ def parse_args():
         '--tokenizer-path', help='The path to the hf tokenizer.')
     parser.add_argument(
         '--dataset-format',
-        choices=DATASET_FORMAT_MAPPING.keys(),
+        choices=list(DATASET_FORMAT_MAPPING.keys()) + ['ftdp'],
         default=None,
         help='Which dataset format is this data. '
-        f'The available choices are {DATASET_FORMAT_MAPPING.keys()}')
+        f"The available choices are {list(DATASET_FORMAT_MAPPING.keys()) + ['ftdp']}"
+    )
     parser.add_argument(
         '--prompt-template',
         choices=PROMPT_TEMPLATE.keys(),
@@ -67,10 +67,6 @@ def parse_args():
         '--file-type',
         default='.json',
         help='We want to get the order of the file in this type.')
-    parser.add_argument(
-        '--is-ftdp',
-        action='store_true',
-        help='Whether it is in ftdp data format')
     parser.add_argument(
         '--data-order-path',
         default=None,
@@ -168,15 +164,22 @@ if __name__ == '__main__':
         pretrained_model_name_or_path=args.tokenizer_path,
         trust_remote_code=True,
         padding_side='right')
+
+    if args.dataset_format is None:
+        dataset_map_fn = None
+    elif args.dataset_format == 'ftdp':
+        dataset_map_fn = DATASET_FORMAT_MAPPING['openai']
+    else:
+        dataset_map_fn = DATASET_FORMAT_MAPPING[args.dataset_format]
+
     datasets_dict = process_untokenized_dataset(
         args.data_folder,
         tokenizer,
         args.max_length,
         args.pack_to_max_length,
-        DATASET_FORMAT_MAPPING[args.dataset_format]
-        if args.dataset_format is not None else None,
+        dataset_map_fn,
         PROMPT_TEMPLATE[args.prompt_template],
         data_order_path=args.data_order_path,
         file_type=args.file_type,
-        is_ftdp=args.is_ftdp)
+        is_ftdp=args.dataset_format == 'ftdp')
     datasets_dict.save_to_disk(args.save_folder)
