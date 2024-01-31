@@ -35,7 +35,7 @@ git clone https://www.modelscope.cn/datasets/fanqiNO1/colors.git
 
 ## 准备配置文件
 
-XTuner 提供了多个开箱即用的配置文件，可以通过 xtuner list-cfg 查看。我们执行如下指令，以复制一个配置文件到当前目录。
+XTuner 提供了多个开箱即用的配置文件，可以通过 `xtuner list-cfg` 查看。我们执行如下指令，以复制一个配置文件到当前目录。
 
 ```bash
 xtuner copy-cfg internlm2_7b_qlora_colorist_e5 .
@@ -151,7 +151,7 @@ srun ${SRUN_ARGS} xtuner train internlm2_7b_qlora_colorist_e5_copy.py --launcher
 01/29 21:39:40 - mmengine - INFO - Iter(train) [100/720]  lr: 1.9426e-04  eta: 0:28:09  time: 2.7383  data_time: 0.0070  memory: 13969  loss: 1.9819  grad_norm: 0.9127
 ```
 
-在训练开始前，可以看到模型的输出是这样的：
+在训练开始前，可以看到模型的输出如下所示：
 
 ```text
 2024/01/29 21:34:58 - mmengine - INFO - before_train in EvaluateChatHook.
@@ -174,7 +174,7 @@ Please give me a clear blue like the sky.<|im_end|>
 The color you're describing is a clear, bright blue that resembles the color of the sky on a sunny day. This color is often referred to as "sky blue" or "cerulean blue." Here are some specific color codes and names that
 ```
 
-而在训练完全完成后，可以观察到模型的输出是这样的：
+而在训练完全完成后，可以观察到模型的输出如下所示：
 
 ```text
 2024/01/29 22:08:07 - mmengine - INFO - Sample output:
@@ -196,7 +196,7 @@ Please give me a clear blue like the sky.<|im_end|>
 #0066dd<|im_end|>
 ```
 
-模型输出的颜色是这样的：
+模型输出的颜色如下所示：
 
 - 天空一样清澈透明的蓝色：![天空一样清澈透明的蓝色](https://img.shields.io/badge/天空一样清澈透明的蓝色-1099EE)
 - A clear blue like the sky: ![A clear blue like the sky](https://img.shields.io/badge/A_clear_blue_like_the_sky-0066DD)
@@ -250,7 +250,7 @@ xtuner chat work_dirs/internlm2_7b_qlora_colorist_e5_copy/merged\
                 --system-template colorist
 ```
 
-其中 `work_dirs/internlm2_7b_qlora_colorist_e5_copy/merged` 是合并后的权重路径，`--prompt-template internlm2_chat` 指定了对话模板为 InternLM2-Chat，`--system-template colorist` 则是指定了与模型对话时的 System Prompt 为colorist 数据集所要求的模板。
+其中 `work_dirs/internlm2_7b_qlora_colorist_e5_copy/merged` 是合并后的权重路径，`--prompt-template internlm2_chat` 指定了对话模板为 InternLM2-Chat，`--system-template colorist` 则是指定了与模型对话时的 System Prompt 为 Colorist 数据集所要求的模板。
 
 以下是一个例子：
 
@@ -260,4 +260,6 @@ double enter to end input (EXIT: exit chat, RESET: reset history) >>> 宁静而�
 #66ccff<|im_end|>
 ```
 
-其颜色是这样的：宁静而又相当明亮的浅天蓝色，介于天蓝色和婴儿蓝之间，因其亮度而带有一丝轻微的荧光感。：![#66ccff](https://img.shields.io/badge/宁静而又相当明亮的浅天蓝色，介于天蓝色和婴儿蓝之间，因其亮度而带有一丝轻微的荧光感。-66CCFF)
+其颜色如下所示：
+
+宁静而又相当明亮的浅天蓝色，介于天蓝色和婴儿蓝之间，因其亮度而带有一丝轻微的荧光感。：![#66ccff](https://img.shields.io/badge/宁静而又相当明亮的浅天蓝色，介于天蓝色和婴儿蓝之间，因其亮度而带有一丝轻微的荧光感。-66CCFF)
