@@ -4,13 +4,13 @@
 
 在成功安装 XTuner 后，便可以开始进行模型的微调。在本节中，我们将演示如何使用 XTuner，应用 QLoRA 算法在 Colorist 数据集上微调 InternLM2-Chat-7B。
 
-Colorist 数据集是一个根据颜色描述提供颜色选择与建议的数据集，经过该数据集微调的模型可以做到根据用户对于颜色的描述，从而给出16进制下的颜色编码，如用户输入“宁静而又相当明亮的浅天蓝色，介于天蓝色和婴儿蓝之间，因其亮度而带有一丝轻微的荧光感。”，模型输出<font color=#66ccff>#66ccff</font>，该颜色很符合用户的描述。以下是该数据集的几条样例数据：
+Colorist 数据集是一个根据颜色描述提供颜色选择与建议的数据集，经过该数据集微调的模型可以做到根据用户对于颜色的描述，从而给出16进制下的颜色编码，如用户输入“宁静而又相当明亮的浅天蓝色，介于天蓝色和婴儿蓝之间，因其亮度而带有一丝轻微的荧光感。”，模型输出 ![#66ccff](https://img.shields.io/badge/%2366ccff-66CCFF)，该颜色很符合用户的描述。以下是该数据集的几条样例数据：
 
-| 英文描述                                                                                                                                                                                                                         | 中文描述                                                                                                                         | 颜色                               |
-| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------- |
-| Light Sky Blue: A calming, fairly bright color that falls between sky blue and baby blue, with a hint of slight fluorescence due to its brightness.                                                                              | 浅天蓝色：一种介于天蓝和婴儿蓝之间的平和、相当明亮的颜色，由于明亮而带有一丝轻微的荧光。                                         | <font color=#66ccff>#66ccff</font> |
-| Bright red: This is a very vibrant, saturated and vivid shade of red, resembling the color of ripe apples or fresh blood. It is as red as you can get on a standard RGB color palette, with no elements of either blue or green. | 鲜红色： 这是一种非常鲜艳、饱和、生动的红色，类似成熟苹果或新鲜血液的颜色。它是标准 RGB 调色板上的红色，不含任何蓝色或绿色元素。 | <font color=#ee0000>#ee0000</font> |
-| Bright Turquoise: This color mixes the freshness of bright green with the tranquility of light blue, leading to a vibrant shade of turquoise. It is reminiscent of tropical waters.                                              | 明亮的绿松石色：这种颜色融合了鲜绿色的清新和淡蓝色的宁静，呈现出一种充满活力的绿松石色调。它让人联想到热带水域。                 | <font color=#00ffcc>#00ffcc</font> |
+| 英文描述                                                                                                                                                                                                                         | 中文描述                                                                                                                         | 颜色                                                               |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| Light Sky Blue: A calming, fairly bright color that falls between sky blue and baby blue, with a hint of slight fluorescence due to its brightness.                                                                              | 浅天蓝色：一种介于天蓝和婴儿蓝之间的平和、相当明亮的颜色，由于明亮而带有一丝轻微的荧光。                                         | #66ccff: ![#66ccff](https://img.shields.io/badge/%2366ccff-66CCFF) |
+| Bright red: This is a very vibrant, saturated and vivid shade of red, resembling the color of ripe apples or fresh blood. It is as red as you can get on a standard RGB color palette, with no elements of either blue or green. | 鲜红色： 这是一种非常鲜艳、饱和、生动的红色，类似成熟苹果或新鲜血液的颜色。它是标准 RGB 调色板上的红色，不含任何蓝色或绿色元素。 | #ee0000: ![#ee0000](https://img.shields.io/badge/%23ee0000-EE0000) |
+| Bright Turquoise: This color mixes the freshness of bright green with the tranquility of light blue, leading to a vibrant shade of turquoise. It is reminiscent of tropical waters.                                              | 明亮的绿松石色：这种颜色融合了鲜绿色的清新和淡蓝色的宁静，呈现出一种充满活力的绿松石色调。它让人联想到热带水域。                 | #00ffcc: ![#00ffcc](https://img.shields.io/badge/%2300ffcc-00FFCC) |
 
 ## 准备模型权重
 
@@ -198,8 +198,8 @@ Please give me a clear blue like the sky.<|im_end|>
 
 模型输出的颜色是这样的：
 
-- <font color=#1099ee>天空一样清澈透明的蓝色</font>
-- <font color=#0066dd>A clear blue like the sky</font>
+- 天空一样清澈透明的蓝色：![天空一样清澈透明的蓝色](https://img.shields.io/badge/天空一样清澈透明的蓝色-1099EE)
+- A clear blue like the sky: ![A clear blue like the sky](https://img.shields.io/badge/A_clear_blue_like_the_sky-0066DD)
 
 不难发现，模型在经过训练后，其输出已经完全与数据集内容所对齐了。
 
@@ -260,4 +260,4 @@ double enter to end input (EXIT: exit chat, RESET: reset history) >>> 宁静而�
 #66ccff<|im_end|>
 ```
 
-其颜色是这样的：<font color=#66ccff>宁静而又相当明亮的浅天蓝色，介于天蓝色和婴儿蓝之间，因其亮度而带有一丝轻微的荧光感。</font>
+其颜色是这样的：宁静而又相当明亮的浅天蓝色，介于天蓝色和婴儿蓝之间，因其亮度而带有一丝轻微的荧光感。：![#66ccff](https://img.shields.io/badge/宁静而又相当明亮的浅天蓝色，介于天蓝色和婴儿蓝之间，因其亮度而带有一丝轻微的荧光感。-66CCFF)
