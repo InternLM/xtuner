@@ -155,14 +155,21 @@ def internlm2_attn_forward(
 
     past_key_value = (key_states, value_states) if use_cache else None
 
-    key_states = repeat_kv(key_states, self.num_key_value_groups)
-    value_states = repeat_kv(value_states, self.num_key_value_groups)
+    if SUPPORT_FLASH2:
+        query_states = query_states.transpose(1, 2)
+        key_states = key_states.transpose(1, 2)
+        value_states = value_states.transpose(1, 2)
+        attn_output = flash_attn_func(
+            query_states, key_states, value_states, causal=True)
+        attn_output = attn_output.contiguous()
+    else:
+        key_states = repeat_kv(key_states, self.num_key_value_groups)
+        value_states = repeat_kv(value_states, self.num_key_value_groups)
+        # use flash attention implemented by pytorch
+        attn_output = F.scaled_dot_product_attention(
+            query_states, key_states, value_states, attn_mask=attention_mask)
+        attn_output = attn_output.transpose(1, 2).contiguous()
 
-    # use flash attention implemented by pytorch
-    attn_output = F.scaled_dot_product_attention(
-        query_states, key_states, value_states, attn_mask=attention_mask)
-
-    attn_output = attn_output.transpose(1, 2).contiguous()
     attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
 
     attn_output = self.wo(attn_output)
