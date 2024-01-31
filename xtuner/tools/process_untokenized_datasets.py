@@ -49,9 +49,8 @@ def parse_args():
         '--dataset-format',
         choices=list(DATASET_FORMAT_MAPPING.keys()) + ['ftdp'],
         default=None,
-        help='Which dataset format is this data. '
-        f"The available choices are {list(DATASET_FORMAT_MAPPING.keys()) + ['ftdp']}"
-    )
+        help='Which dataset format is this data. The available choices are '
+        f"{list(DATASET_FORMAT_MAPPING.keys()) + ['ftdp']}. ")
     parser.add_argument(
         '--prompt-template',
         choices=PROMPT_TEMPLATE.keys(),
