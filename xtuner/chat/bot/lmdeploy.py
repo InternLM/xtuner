@@ -87,15 +87,20 @@ class LMDeployBot(BaseBot):
         )
 
         self.session_id += 1
+
         generator = self.pipeline.generate(
             text, self.session_id, gen_config=lm_gen_config)
+
         results = []
 
         async def _streaming_generate():
             async for output in generator:
                 results.append(output.response)
-                streamer.put(output.response)
-            streamer.end()
+                if streamer:
+                    streamer.put(output.response)
+
+            if streamer:
+                streamer.end()
 
         import asyncio
         asyncio.run(_streaming_generate())
