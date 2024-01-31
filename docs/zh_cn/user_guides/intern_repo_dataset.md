@@ -398,11 +398,10 @@ python xtuner/tools/process_untokenized_datasets.py \
     --save-folder ./processed \
     --tokenizer-path pretrained_model_name_or_path \
     --prompt-template internlm2_chat \
-    --dataset-format openai \
-    --is-ftdp
+    --dataset-format ftdp
 ```
 
-其中 `pretrained_model_name_or_path` 同 `from_pretrained` 接口中的 `pretrained_model_name_or_path`，`--prompt-template` 表示对话模板的种类，其他可选对话模板可参考 [templates](https://github.com/InternLM/xtuner/blob/main/docs/zh_cn/user_guides/prompt_template.md)。由于 untokenized internlm repo 格式的数据集（别名 ftdp 格式）满足 `openai` 数据格式，即：
+其中 `pretrained_model_name_or_path` 同 `from_pretrained` 接口中的 `pretrained_model_name_or_path`，`--prompt-template` 表示对话模板的种类，其他可选对话模板可参考 [templates](https://github.com/InternLM/xtuner/blob/main/docs/zh_cn/user_guides/prompt_template.md)。untokenized internlm repo 格式的数据集（别名 ftdp 格式）满足以下格式：
 
 ```
 [
@@ -418,7 +417,7 @@ python xtuner/tools/process_untokenized_datasets.py \
 ]
 ```
 
-因此，上述命令中 `--dataset-format` 一项设为 `openai`。
+`--dataset-format` 一项需要设为 `ftdp`。
 
 使用离线处理好的数据集进行训练，需要额外修改 Step 2 中的 Config 文件，并设置存放离线处理后的数据集路径：
 

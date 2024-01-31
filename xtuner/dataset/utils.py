@@ -121,8 +121,6 @@ class Packer:
                  chunk_size=2048,
                  use_varlen_attn=False,
                  drop_last=False):
-        use_varlen_attn = True
-        drop_last = True
         self.chunk_size = chunk_size
         self.residual = {'input_ids': [], 'labels': []}
         self.use_varlen_attn = use_varlen_attn
