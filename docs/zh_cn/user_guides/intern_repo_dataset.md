@@ -27,7 +27,7 @@ pretrained_model_name_or_path = 'internlm/internlm2-7b'
 use_varlen_attn = True
 
 # Data
-- dataset_folder = '/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train'  # noqa: E501
+- dataset_folder = '/path/to/sft/data/folder'  # noqa: E501
 + dataset_folder = '/real/dataset/path'
 prompt_template = PROMPT_TEMPLATE.internlm2_chat
 max_length = 32768
