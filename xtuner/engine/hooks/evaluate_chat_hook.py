@@ -1,4 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import os
 import warnings
 
 import torch
@@ -85,12 +86,24 @@ class EvaluateChatHook(Hook):
             self.stop_criteria.append(
                 StopWordStoppingCriteria(self.tokenizer, word))
 
-    def _generate_samples(self, runner, max_new_tokens=None):
+    def _save_eval_output(self, runner, eval_outputs):
+        save_path = os.path.join(runner.log_dir, 'vis_data',
+                                 f'eval_outputs_iter_{runner.iter}.txt')
+        with open(save_path, 'w') as f:
+            for i, output in enumerate(eval_outputs):
+                f.write(f'Eval output {i + 1}:\n{output}\n\n')
+
+    def _generate_samples(self,
+                          runner,
+                          max_new_tokens=None,
+                          save_eval_output=False):
         if max_new_tokens is None:
             max_new_tokens = self.max_new_tokens
         model = runner.model
         if is_model_wrapper(model):
             model = model.module
+        if save_eval_output:
+            eval_outputs = []
 
         device = next(iter(model.parameters())).device
 
@@ -145,10 +158,11 @@ class EvaluateChatHook(Hook):
                     generation_config=self.gen_config,
                     bos_token_id=self.tokenizer.bos_token_id,
                     stopping_criteria=self.stop_criteria)
-                runner.logger.info(
-                    f'Sample output:\n'
-                    f'{inputs + self.tokenizer.decode(generation_output[0])}\n'
-                )
+                generation_output = self.tokenizer.decode(generation_output[0])
+                runner.logger.info(f'Sample output:\n'
+                                   f'{inputs + generation_output}\n')
+                if save_eval_output:
+                    eval_outputs.append(f'{inputs + generation_output}\n')
         else:
             for sample_input in self.evaluation_inputs:
                 inputs = (self.system + self.instruction).format(
@@ -160,9 +174,13 @@ class EvaluateChatHook(Hook):
                     max_new_tokens=max_new_tokens,
                     generation_config=self.gen_config,
                     stopping_criteria=self.stop_criteria)
-                runner.logger.info(
-                    f'Sample output:\n'
-                    f'{self.tokenizer.decode(generation_output[0])}\n')
+                generation_output = self.tokenizer.decode(generation_output[0])
+                runner.logger.info(f'Sample output:\n{generation_output}\n')
+                if save_eval_output:
+                    eval_outputs.append(f'{inputs + generation_output}\n')
+
+        if save_eval_output:
+            self._save_eval_output(runner, eval_outputs)
 
         # Cast to training mode
         if is_checkpointing:
@@ -180,10 +198,18 @@ class EvaluateChatHook(Hook):
                          data_batch=None,
                          outputs=None) -> None:
         if (self.every_n_iters is None or batch_idx == 0
-                or batch_idx % self.every_n_iters != 0):
+                or (batch_idx + 1) % self.every_n_iters != 0):
             return
         runner.logger.info('after_train_iter in EvaluateChatHook.')
-        self._generate_samples(runner)
+        save_eval_output = False
+        try:
+            save_ckpt_freq = runner.cfg.default_hooks.checkpoint.interval
+            if (runner.iter + 1) % save_ckpt_freq == 0:
+                save_eval_output = True
+        except KeyError:
+            pass
+        self._generate_samples(runner, save_eval_output=save_eval_output)
+        assert False
 
     def after_train(self, runner):
         runner.logger.info('after_train in EvaluateChatHook.')
