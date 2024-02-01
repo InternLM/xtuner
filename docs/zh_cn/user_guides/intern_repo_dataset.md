@@ -37,10 +37,10 @@ pack_to_max_length = True
 
 在使用 DeepSpeed 训练模型时，如需在保存 checkpoint 时只保存模型权重，而不保存优化器状态，可参考以下步骤：
 
-1. 安装 特定分支的 mmengine
+1. 确保 mmengine 版本大于等于 0.10.3
 
 ```
-pip install git+https://github.com/LZHgrla/mmengine.git@lzh/ds_save
+pip install 'mmengine>=0.10.3'
 ```
 
 2. 修改 Config 文件，CheckpointHook 增加 save_optimizer=False
