@@ -124,7 +124,7 @@ param_scheduler = [
         eta_min=lr * 0.15,
         by_epoch=True,
         begin=warm_up_ratio * max_epochs,
-        T_max=max_epochs,
+        end=max_epochs,
         convert_to_iter_based=True)
 ]
 
