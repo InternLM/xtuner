@@ -1,6 +1,4 @@
-from transformers import TextIteratorStreamer as HFTextIteratorStreamer
-from transformers import TextStreamer as HFTextStreamer
-
+from .huggingface import HFTextIteratorStreamer, HFTextStreamer
 from .lmdeploy import LMDeployTextIteratorStreamer, LMDeployTextStreamer
 
 __all__ = [

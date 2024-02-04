@@ -20,6 +20,9 @@ class LlavaChat(BaseChat):
 
         self.history.append({'role': role, 'content': content})
 
+    def create_streamer(self, chat_template=None, iterable=False):
+        return self.bot.create_streamer(self.chat_template, iterable=iterable)
+
     def reset_history(self):
 
         self.num_turns = 0

@@ -311,7 +311,7 @@ def main():
             stop_words=[],
             seed=args.seed,
         )
-        streamer = bot.create_streamer()
+        streamer = instance.create_streamer()
         interactive_chat(instance, args.system, streamer, gen_config)
 
 

@@ -32,6 +32,9 @@ class BaseChat():
 
         self.history.append({'role': role, 'content': content})
 
+    def create_streamer(self, iterable=False):
+        return self.bot.create_streamer(self.chat_template, iterable=iterable)
+
     def chat(self, text, system=None, streamer=None, gen_config=None):
 
         assert self.chat_template
@@ -53,7 +56,12 @@ class BaseChat():
         self.num_turns += 1
         return output
 
-    def predict(self, texts, system=None, generation_config=None, repeat=1):
+    def predict(self, texts, system=None, gen_config=None, repeat=1):
+
+        if gen_config is None:
+            gen_config = GenerationConfig()
+
+        gen_config.stop_words.extend(self.chat_template.stop_words)
 
         prompts = []
         for text in texts:
@@ -64,5 +72,5 @@ class BaseChat():
             msg.append({'role': 'user', 'content': text})
             prompts.append(self.apply_template(msg))
 
-        outputs = self.bot.predict(prompts, generation_config, repeat)
+        outputs = self.bot.predict(prompts, gen_config, repeat)
         return outputs

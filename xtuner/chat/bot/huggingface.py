@@ -78,11 +78,13 @@ class HFBot(BaseBot):
         model.eval()
         return model, tokenizer
 
-    def create_streamer(self, iterable=False):
+    def create_streamer(self, chat_template=None, iterable=False):
         if iterable:
-            return HFTextIteratorStreamer(self.tokenizer, skip_prompt=True)
+            return HFTextIteratorStreamer(
+                self.tokenizer, skip_prompt=True, chat_template=chat_template)
         else:
-            return HFTextStreamer(self.tokenizer, skip_prompt=True)
+            return HFTextStreamer(
+                self.tokenizer, skip_prompt=True, chat_template=chat_template)
 
     @property
     def generation_config(self):
@@ -116,7 +118,12 @@ class HFBot(BaseBot):
             generation_config=hf_gen_config,
             stopping_criteria=stop_criteria)
 
-        output = self.tokenizer.decode(generate_output[0][len(ids[0]):])
+        output = self.tokenizer.decode(
+            generate_output[0][len(ids[0]):], skip_special_tokens=True)
+
+        for word in stop_words:
+            output = output.rstrip(word)
+
         return output
 
     def predict(self,
@@ -164,11 +171,13 @@ class HFLlavaBot(BaseBot):
             self.tokenizer.eos_token_id,
         )
 
-    def create_streamer(self, iterable=False):
+    def create_streamer(self, chat_template=None, iterable=False):
         if iterable:
-            return HFTextIteratorStreamer(self.tokenizer, skip_prompt=True)
+            return HFTextIteratorStreamer(
+                self.tokenizer, skip_prompt=True, chat_template=chat_template)
         else:
-            return HFTextStreamer(self.tokenizer, skip_prompt=True)
+            return HFTextStreamer(
+                self.tokenizer, skip_prompt=True, chat_template=chat_template)
 
     @property
     def generation_config(self):
@@ -312,6 +321,10 @@ class HFLlavaBot(BaseBot):
             bos_token_id=self.tokenizer.bos_token_id,
             stopping_criteria=stop_criteria)
 
-        output = self.tokenizer.decode(generate_output[0])
+        output = self.tokenizer.decode(
+            generate_output[0], skip_special_tokens=True)
+
+        for word in stop_words:
+            output = output.rstrip(word)
 
         return output
