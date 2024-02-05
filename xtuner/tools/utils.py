@@ -22,7 +22,7 @@ def get_streamer(model):
         model = model.module
     base_model = get_base_model(model)
     base_model_name = base_model.__class__.__name__.lower()
-    is_internlm = 'internlm' in base_model_name
+    is_internlm = ('internlm' in base_model_name) and ('internlm2' not in base_model_name)
     is_qwen = 'qwen' in base_model_name
     is_baichuan = 'baichuan' in base_model_name
     is_chatglm = 'chatglm' in base_model_name
