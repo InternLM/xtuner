@@ -33,7 +33,10 @@ def default_collate_fn(instances: Sequence[Dict],
             indexes.append(torch.LongTensor(example['indexes']))
 
         if has_image:
-            pixel_values.append(example['pixel_values'])
+            if isinstance(example['pixel_values'], list):
+                pixel_values.extend(example['pixel_values'])
+            else:
+                pixel_values.append(example['pixel_values'])
 
     if len(instances) > 1:
         input_ids = pad_sequence(

@@ -21,13 +21,14 @@ class LLaVADataset(Dataset):
                  image_folder,
                  tokenizer,
                  image_processor,
+                 per_image_length,
                  max_dataset_length=None,
                  dataset_map_fn=None,
                  template_map_fn=None,
                  max_length=2048,
                  pad_image_to_square=False):
         super().__init__()
-
+        self.per_image_length = per_image_length
         json_data = json.load(open(data_path))
         for idx in range(len(json_data)):
             if isinstance(json_data[idx]['id'], int):
@@ -43,7 +44,8 @@ class LLaVADataset(Dataset):
             max_dataset_length=max_dataset_length,
             remove_unused_columns=False,
             pack_to_max_length=False,
-            with_image_token=True)
+            with_image_token=True,
+            per_image_length=self.per_image_length)
 
         self.image_folder = image_folder
         if isinstance(image_processor, dict) or isinstance(
@@ -61,6 +63,8 @@ class LLaVADataset(Dataset):
             cur_len = len(data_dict['input_ids'])
             if data_dict.get('image', None) is None:
                 cur_len = -cur_len
+            else:
+                cur_len = cur_len - 1 + self.per_image_length
             length_list.append(cur_len)
         return length_list
 
