@@ -397,13 +397,17 @@ xtuner copy-cfg mistral_7b_w_tokenized_dataset .
 #######################################################################
 # Model
 pretrained_model_name_or_path = 'mistralai/Mistral-7B-v0.1'
+# 已经使用 Internlm2 的对话模板覆盖了 Mistral 的原有模板，new tokenizer 中已经
+# 添加了 Internlm2 对话模板中的特殊字符。
+# 请参考 docs/zh_cn/user_guides/finetune_custom_dataset.md
 - tokenizer_path = '/new/tokenizer/path'
 + tokenizer_path = '/path/to/save/new/tokenizer'
 use_varlen_attn = True
 
 # Data
 - dataset_folder = '/path/to/sft/data/folder'
-+ dataset_folder = '/path/to/tokenized/data'
++ dataset_folder = '/path/to/tokenized/data/chatml_llamav13_32k/train'
+# 已经使用 Internlm2 的对话模板覆盖了 Mistral 的原有模板
 prompt_template = PROMPT_TEMPLATE.internlm2_chat
 max_length = 32768
 pack_to_max_length = True
