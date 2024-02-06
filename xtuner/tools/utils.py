@@ -22,8 +22,7 @@ def get_streamer(model):
     # TODO: deprecation, v0.3.0
     warnings.warn(
         ('`get_streamer` is deprecated and will be removed in v0.3.0, '
-         "use `transformers`'s `TextStreamer` instead."),
-        DeprecationWarning)
+         "use `transformers`'s `TextStreamer` instead."), DeprecationWarning)
     if model.__class__.__name__ == 'InferenceEngine':
         model = model.module
     base_model = get_base_model(model)
