@@ -1,5 +1,4 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-import ast
 import itertools as it
 import json
 import mmap
@@ -309,7 +308,7 @@ def load_intern_repo_untokenized_dataset(processed_dataset_dict_path=None,
         with open(fp) as file:
             lines = file.readlines()
             for line in lines:
-                line = ast.literal_eval(line)
+                line = json.loads(line)
                 dataset.append({'messages': line})
         dataset = Dataset.from_list(dataset)
         dataset = process(
