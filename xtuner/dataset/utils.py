@@ -47,7 +47,9 @@ def encode_fn(example,
                 }
             ]
     """
-    if tokenizer.__class__.__name__ == 'QWenTokenizer':
+    if tokenizer.__class__.__name__ in [
+            'QWenTokenizer', 'QWen2Tokenizer', 'Qwen2TokenizerFast'
+    ]:
         bos_token_id = []
         eos_token_id = tokenizer.eos_token_id
         assert eos_token_id is not None, \
