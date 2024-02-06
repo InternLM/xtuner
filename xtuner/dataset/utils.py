@@ -89,16 +89,24 @@ def encode_fn(example,
         input_ids += input_encode
         labels += [IGNORE_INDEX] * len(input_encode)
         if input_ids_with_output:
-            # Add output (with loss)
+            # Add output
+            output_with_loss = single_turn_conversation.get(
+                'output_with_loss', True)
             output = single_turn_conversation['output']
             output_encode = tokenizer.encode(output, add_special_tokens=False)
             input_ids += output_encode
-            labels += copy.deepcopy(output_encode)
+            if output_with_loss:
+                labels += copy.deepcopy(output_encode)
+            else:
+                labels += [IGNORE_INDEX] * len(output_encode)
             # Add EOS_TOKEN (with loss)
             if single_turn_conversation.get('need_eos_token', True):
                 next_needs_bos_token = True
                 input_ids += eos_token_id
-                labels += copy.deepcopy(eos_token_id)
+                if output_with_loss:
+                    labels += copy.deepcopy(eos_token_id)
+                else:
+                    labels += [IGNORE_INDEX] * len(eos_token_id)
             else:
                 next_needs_bos_token = False
             # Add SEP (without loss)
