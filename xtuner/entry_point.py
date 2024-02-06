@@ -52,6 +52,7 @@ CLI_HELP_MSG = \
             xtuner check-custom-dataset $CONFIG
         8. MMBench evaluation:
             xtuner mmbench $LLM --llava $LLAVA --visual-encoder $VISUAL_ENCODER --prompt-template $PROMPT_TEMPLATE --data-path $MMBENCH_DATA_PATH
+        9. List all dataset formats which are supported in XTuner
 
     Run special commands:
 
@@ -114,6 +115,11 @@ special = {
     **{f'--{k}': v
        for k, v in special.items()}
 }
+
+
+def list_dataset_format():
+    from xtuner.tools import list_dataset_format
+    return list_dataset_format.__file__
 
 
 def list_cfg():
@@ -204,13 +210,14 @@ modes = {
         'arxiv': arxiv_preprocess,
         '--help': preprocess_help_msg,
         '-h': preprocess_help_msg
-    }
+    },
+    'list-dataset-format': list_dataset_format
 }
 
 HELP_FUNCS = [preprocess_help_msg, convert_help_msg]
 MAP_FILE_FUNCS = [
     list_cfg, copy_cfg, log_dataset, check_custom_dataset, train, test, chat,
-    mmbench, pth_to_hf, merge, split, arxiv_preprocess
+    mmbench, pth_to_hf, merge, split, arxiv_preprocess, list_dataset_format
 ]
 
 
