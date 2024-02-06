@@ -6,12 +6,37 @@ from mmengine.model import BaseModel
 from mmengine.runner import load_checkpoint
 from peft import get_peft_model, prepare_model_for_kbit_training
 from torch import nn
+from transformers import PreTrainedModel, PreTrainedTokenizer
 
 from xtuner.registry import BUILDER
 from .modules import dispatch_modules
 from .utils import (LoadWoInit, find_all_linear_names,
                     get_peft_model_state_dict, make_inputs_require_grad,
                     traverse_dict)
+
+
+def smart_tokenizer_and_embedding_resize(
+    tokenizer: PreTrainedTokenizer,
+    model: PreTrainedModel,
+):
+    """Resize embedding."""
+    model_vocab_size = model.get_output_embeddings().weight.size(0)
+    model.resize_token_embeddings(len(tokenizer))
+    num_new_tokens = len(tokenizer) - model_vocab_size
+
+    if num_new_tokens > 0:
+        input_embeddings = model.get_input_embeddings().weight.data
+        output_embeddings = model.get_output_embeddings().weight.data
+
+        input_embeddings_avg = input_embeddings[:-num_new_tokens].mean(
+            dim=0, keepdim=True)
+        output_embeddings_avg = output_embeddings[:-num_new_tokens].mean(
+            dim=0, keepdim=True)
+
+        input_embeddings[-num_new_tokens:] = input_embeddings_avg
+        output_embeddings[-num_new_tokens:] = output_embeddings_avg
+    elif num_new_tokens < 0:
+        raise RuntimeError
 
 
 class SupervisedFinetune(BaseModel):
@@ -21,10 +46,17 @@ class SupervisedFinetune(BaseModel):
                  lora=None,
                  peft_model=None,
                  use_activation_checkpointing=True,
-                 use_varlen_attn=False):
+                 use_varlen_attn=False,
+                 tokenizer=None):
         super().__init__()
         with LoadWoInit():
             self.llm = self._build_from_cfg_or_module(llm)
+
+        if tokenizer is not None:
+            if isinstance(tokenizer, dict):
+                tokenizer = BUILDER.build(tokenizer)
+            smart_tokenizer_and_embedding_resize(tokenizer, self.llm)
+
         self.llm.config.use_cache = False
         dispatch_modules(self.llm, use_varlen_attn=use_varlen_attn)
 
