@@ -75,8 +75,8 @@ pretrained_model_name_or_path = 'internlm/internlm2-7b'
 use_varlen_attn = True
 
 # Data
-- dataset_folder = '/path/to/sft/data/folder/chatml_llamav13_32k/train'
-+ dataset_folder = '/path/to/tokenized/data'
+- dataset_folder = '/path/to/sft/data/folder'
++ dataset_folder = '/path/to/tokenized/data/chatml_llamav13_32k/train'
 prompt_template = PROMPT_TEMPLATE.internlm2_chat
 max_length = 32768
 pack_to_max_length = True
