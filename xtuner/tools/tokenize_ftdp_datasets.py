@@ -268,9 +268,9 @@ def chatml_format(
     return token_ids, len(token_ids)
 
 
-def write_bin_meta_bin(path, filename, samples, cn_or_en):
-    train_path = osp.join(path, f'train/{cn_or_en}/')
-    valid_path = osp.join(path, f'valid/{cn_or_en}/')
+def write_bin_meta_bin(path, dataset_name, filename, samples):
+    train_path = osp.join(path, f'train/cn/{dataset_name}')
+    valid_path = osp.join(path, f'valid/cn/{dataset_name}')
     train_dir = Path(train_path)
     valid_dir = Path(valid_path)
     train_dir.mkdir(exist_ok=True, parents=True)
@@ -326,16 +326,22 @@ def tokenize_and_save(tokenizer, processed_dir, tokenized_dir):
     all_valid_samples = 0
 
     for filename in list_dir_or_file(data_dir, recursive=True, list_dir=False):
-        saved_dir = osp.join(tokenized_save_dir, osp.dirname(filename))
+        file_path = os.path.join(data_dir, filename)
+        if '/processed/' not in file_path:
+            continue
+        assert '.jsonl' in filename
+
+        # dataset name such as char_x10_chat_format
+        dataset_name = filename.split(os.sep)[0]
+
         # Hardcode here to skip tokenizing the file if it already exists
         # (Refactor the `write_bin_meta_bin`!).
-        train_f = osp.join(saved_dir, 'train', 'cn',
+        train_f = osp.join(tokenized_save_dir, 'train', 'cn', dataset_name,
                            f'{osp.splitext(osp.basename(filename))[0]}.bin')
         if osp.isfile(train_f):
             print(f'{train_f} already exists, skip it')
             continue
 
-        file_path = os.path.join(data_dir, filename)
         tokenize_fun = partial(
             chatml_format,
             tokenizer=tokenizer,
@@ -356,10 +362,10 @@ def tokenize_and_save(tokenizer, processed_dir, tokenized_dir):
             samples.append(sample)
 
         train_tokens, valid_tokens, train_samples, valid_samples = write_bin_meta_bin(  # noqa E501
-            path=saved_dir,
+            path=tokenized_save_dir,
+            dataset_name=dataset_name,
             samples=samples,
-            filename=osp.splitext(osp.basename(filename))[0],
-            cn_or_en='cn')
+            filename=osp.splitext(osp.basename(filename))[0])
         if train_tokens is None:
             print(f'{osp.splitext(osp.basename(filename))[0]} already '
                   'exists, skip it')
