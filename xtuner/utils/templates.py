@@ -55,9 +55,9 @@ PROMPT_TEMPLATE = ConfigDict(
         INSTRUCTION='<|user|>\n{input}<|assistant|>\n',
         SEP='\n'),
     qwen_chat=dict(
-        SYSTEM=('\n<|im_start|>system\n{system}<|im_end|>'),
-        INSTRUCTION=(
-            '\n<|im_start|>user\n{input}<|im_end|>\n<|im_start|>assistant\n'),
+        SYSTEM=('<|im_start|>system\n{system}<|im_end|>\n'),
+        INSTRUCTION=('<|im_start|>user\n{input}<|im_end|>\n'
+                     '<|im_start|>assistant\n'),
         SUFFIX='<|im_end|>',
         SUFFIX_AS_EOS=True,
         SEP='\n',

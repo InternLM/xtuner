@@ -11,10 +11,11 @@ from peft import PeftModel
 from transformers import (AutoModel, AutoModelForCausalLM, AutoTokenizer,
                           BitsAndBytesConfig, CLIPImageProcessor,
                           CLIPVisionModel, GenerationConfig)
+from transformers.generation.streamers import TextStreamer
 
 from xtuner.dataset.utils import expand2square, load_image
 from xtuner.model.utils import prepare_inputs_labels_for_multimodal
-from xtuner.tools.utils import get_stop_criteria, get_streamer
+from xtuner.tools.utils import get_stop_criteria
 from xtuner.utils import (DEFAULT_IMAGE_TOKEN, IMAGE_TOKEN_INDEX,
                           PROMPT_TEMPLATE, SYSTEM_TEMPLATE)
 
@@ -320,9 +321,9 @@ def main():
             tokenizer=tokenizer, stop_words=stop_words)
 
         if args.no_streamer:
-            Streamer = None
+            streamer = None
         else:
-            Streamer = get_streamer(llm)
+            streamer = TextStreamer(tokenizer, skip_prompt=True)
 
         gen_config = GenerationConfig(
             max_new_tokens=args.max_new_tokens,
@@ -395,8 +396,7 @@ def main():
                 else:
                     ids = tokenizer.encode(
                         inputs, return_tensors='pt', add_special_tokens=False)
-                streamer = Streamer(
-                    tokenizer) if Streamer is not None else None
+
                 if args.with_plugins is not None:
                     generate_output = llm.generate(
                         inputs=ids.cuda(),
@@ -424,12 +424,11 @@ def main():
                         add_special_tokens=False)
                     new_ids = torch.cat((generate_output, extent_text_ids),
                                         dim=1)
-                    new_streamer = Streamer(
-                        tokenizer) if Streamer is not None else None
+
                     generate_output = llm.generate(
                         inputs=new_ids.cuda(),
                         generation_config=gen_config,
-                        streamer=new_streamer,
+                        streamer=streamer,
                         stopping_criteria=stop_criteria)
                     if streamer is None:
                         output_text = tokenizer.decode(
@@ -467,8 +466,6 @@ def main():
                 mm_inputs = prepare_inputs_labels_for_multimodal(
                     llm=llm, input_ids=ids, pixel_values=pixel_values)
 
-                streamer = Streamer(
-                    tokenizer) if Streamer is not None else None
                 generate_output = llm.generate(
                     **mm_inputs,
                     generation_config=gen_config,
