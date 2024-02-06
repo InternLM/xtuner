@@ -12,6 +12,27 @@ from PIL import Image
 from xtuner.utils import DEFAULT_IMAGE_TOKEN, IGNORE_INDEX, IMAGE_TOKEN_INDEX
 
 
+def get_bos_eos_token_ids(tokenizer):
+    if tokenizer.__class__.__name__ in [
+            'QWenTokenizer', 'QWen2Tokenizer', 'Qwen2TokenizerFast'
+    ]:
+        bos_token_id = []
+        eos_token_id = tokenizer.eos_token_id
+        assert eos_token_id is not None, \
+            'Please set eos_token for Qwen tokenizer!'
+    elif tokenizer.__class__.__name__ == 'ChatGLMTokenizer':
+        bos_token_id = [64790, 64792]
+        eos_token_id = tokenizer.eos_token_id
+    else:
+        bos_token_id = tokenizer.bos_token_id
+        eos_token_id = tokenizer.eos_token_id
+    if isinstance(bos_token_id, int):
+        bos_token_id = [bos_token_id]
+    if isinstance(eos_token_id, int):
+        eos_token_id = [eos_token_id]
+    return bos_token_id, eos_token_id
+
+
 def encode_fn(example,
               tokenizer,
               max_length,
@@ -47,21 +68,7 @@ def encode_fn(example,
                 }
             ]
     """
-    if tokenizer.__class__.__name__ == 'QWenTokenizer':
-        bos_token_id = []
-        eos_token_id = tokenizer.eos_token_id
-        assert eos_token_id is not None, \
-            'Please set eos_token for Qwen tokenizer!'
-    elif tokenizer.__class__.__name__ == 'ChatGLMTokenizer':
-        bos_token_id = [64790, 64792]
-        eos_token_id = tokenizer.eos_token_id
-    else:
-        bos_token_id = tokenizer.bos_token_id
-        eos_token_id = tokenizer.eos_token_id
-    if isinstance(bos_token_id, int):
-        bos_token_id = [bos_token_id]
-    if isinstance(eos_token_id, int):
-        eos_token_id = [eos_token_id]
+    bos_token_id, eos_token_id = get_bos_eos_token_ids(tokenizer)
     is_multi_turn_conversation = len(example['conversation']) > 1
     if is_multi_turn_conversation:
         assert input_ids_with_output
@@ -89,16 +96,24 @@ def encode_fn(example,
         input_ids += input_encode
         labels += [IGNORE_INDEX] * len(input_encode)
         if input_ids_with_output:
-            # Add output (with loss)
+            # Add output
+            output_with_loss = single_turn_conversation.get(
+                'output_with_loss', True)
             output = single_turn_conversation['output']
             output_encode = tokenizer.encode(output, add_special_tokens=False)
             input_ids += output_encode
-            labels += copy.deepcopy(output_encode)
+            if output_with_loss:
+                labels += copy.deepcopy(output_encode)
+            else:
+                labels += [IGNORE_INDEX] * len(output_encode)
             # Add EOS_TOKEN (with loss)
             if single_turn_conversation.get('need_eos_token', True):
                 next_needs_bos_token = True
                 input_ids += eos_token_id
-                labels += copy.deepcopy(eos_token_id)
+                if output_with_loss:
+                    labels += copy.deepcopy(eos_token_id)
+                else:
+                    labels += [IGNORE_INDEX] * len(eos_token_id)
             else:
                 next_needs_bos_token = False
             # Add SEP (without loss)

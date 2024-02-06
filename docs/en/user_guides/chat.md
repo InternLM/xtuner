@@ -13,13 +13,13 @@
 - InternLM-7B, Arxiv Gentitle
 
   ```shell
-  xtuner chat internlm/internlm-7b --adapter xtuner/internlm-7b-qlora-arxiv-gentitle --prompt-template internlm_chat --system-prompt arxiv_gentile
+  xtuner chat internlm/internlm-7b --adapter xtuner/internlm-7b-qlora-arxiv-gentitle --prompt-template internlm_chat --system-template arxiv_gentile
   ```
 
 - InternLM-7B, Colorist
 
   ```shell
-  xtuner chat internlm/internlm-7b --adapter xtuner/internlm-7b-qlora-colorist --prompt-template internlm_chat --system-prompt colorist
+  xtuner chat internlm/internlm-7b --adapter xtuner/internlm-7b-qlora-colorist --prompt-template internlm_chat --system-template colorist
   ```
 
 - InternLM-7B, Alpaca-enzh
@@ -60,13 +60,13 @@
 - InternLM-20B, Arxiv Gentitle
 
   ```shell
-  xtuner chat internlm/internlm-20b --adapter xtuner/internlm-20b-qlora-arxiv-gentitle --prompt-template internlm_chat --system-prompt arxiv_gentile
+  xtuner chat internlm/internlm-20b --adapter xtuner/internlm-20b-qlora-arxiv-gentitle --prompt-template internlm_chat --system-template arxiv_gentile
   ```
 
 - InternLM-20B, Colorist
 
   ```shell
-  xtuner chat internlm/internlm-20b --adapter xtuner/internlm-20b-qlora-colorist --prompt-template internlm_chat --system-prompt colorist
+  xtuner chat internlm/internlm-20b --adapter xtuner/internlm-20b-qlora-colorist --prompt-template internlm_chat --system-template colorist
   ```
 
 - InternLM-20B, Alpaca-enzh
