@@ -1,6 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import os.path as osp
 import re
+import warnings
 
 import torch
 from transformers import PreTrainedTokenizerFast, StoppingCriteriaList
@@ -18,6 +19,10 @@ def get_base_model(model):
 
 
 def get_streamer(model):
+    # TODO: deprecation, v0.3.0
+    warnings.warn(
+        ('`get_streamer` is deprecated and will be removed in v0.3.0, '
+         "use `transformers`'s `TextStreamer` instead."), DeprecationWarning)
     if model.__class__.__name__ == 'InferenceEngine':
         model = model.module
     base_model = get_base_model(model)
@@ -38,6 +43,10 @@ class DecodeOutputStreamer(BaseStreamer):
 
     def __init__(self, tokenizer, skip_prompt=True) -> None:
         super().__init__()
+        # TODO: deprecation, v0.3.0
+        warnings.warn(
+            '`DecodeOutputStreamer` is deprecated and will be '
+            'removed in v0.3.0.', DeprecationWarning)
         self.tokenizer = tokenizer
         self.skip_prompt = skip_prompt
         self.gen_len = 0
@@ -92,6 +101,10 @@ class NoSpaceStreamer(DecodeOutputStreamer):
 
     def __init__(self, tokenizer, skip_prompt=True) -> None:
         BaseStreamer().__init__()
+        # TODO: deprecation, v0.3.0
+        warnings.warn(
+            '`NoSpaceStreamer` is deprecated and will be '
+            'removed in v0.3.0.', DeprecationWarning)
         self.tokenizer = tokenizer
         self.skip_prompt = skip_prompt
         self.gen_len = 0
