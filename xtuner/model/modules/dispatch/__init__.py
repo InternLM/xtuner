@@ -1,5 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import logging
+import os
 import types
 
 import torch
@@ -25,13 +26,17 @@ except ImportError:
 
 SUPPORT_FLASH = SUPPORT_FLASH1 or SUPPORT_FLASH2
 
+USE_TRITON_KERNEL = bool(os.getenv('USE_TRITON_KERNEL', default=0))
 SUPPORT_TRITON = False
 try:
     import triton  # pre-check # noqa: F401
     import triton.language as tl  # pre-check # noqa: F401
     SUPPORT_TRITON = True
 except ImportError:
-    pass
+    if USE_TRITON_KERNEL:
+        raise RuntimeError(
+            'USE_TRITON_KERNEL is set to 1, but triton has not been installed.'
+            ' Run `pip install triton==2.1.0` to install triton.')
 
 NO_ATTN_WEIGHTS_MSG = (
     'Due to the implementation of the PyTorch version of flash attention, '
@@ -294,15 +299,18 @@ def dispatch_modules(model, use_varlen_attn=False):
     model_name = model.__class__.__name__.lower()
     if 'internlm2' in model_name:
         dispatch_internlm2_attn_forward(model, use_varlen_attn)
-        dispatch_internlm2_rmsnorm_forward(model)
+        if USE_TRITON_KERNEL:
+            dispatch_internlm2_rmsnorm_forward(model)
         replace_internlm2_rote(model)
     elif 'internlm' in model_name:
         dispatch_internlm_attn_forward(model, use_varlen_attn)
-        dispatch_internlm_rmsnorm_forward(model)
+        if USE_TRITON_KERNEL:
+            dispatch_internlm_rmsnorm_forward(model)
         replace_internlm_rote(model)
     elif 'llama' in model_name:
         dispatch_llama_attn_forward(model, use_varlen_attn)
-        dispatch_llama_rmsnorm_forward(model)
+        if USE_TRITON_KERNEL:
+            dispatch_llama_rmsnorm_forward(model)
     elif 'baichuan' in model_name:
         dispath_baichuan2_norm_head_forward(model)
         dispath_baichuan_7b_attn_forward(model)
@@ -311,7 +319,8 @@ def dispatch_modules(model, use_varlen_attn=False):
         dispatch_yi_attn_forward(model)
     elif 'mistral' in model_name:
         dispatch_mistral_attn_forward(model, use_varlen_attn)
-        dispatch_mistral_rmsnorm_forward(model)
+        if USE_TRITON_KERNEL:
+            dispatch_mistral_rmsnorm_forward(model)
         replace_mistral_rote(model)
 
 
