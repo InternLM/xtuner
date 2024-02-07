@@ -3,6 +3,7 @@ import logging
 import types
 
 import torch
+import transformers
 from mmengine import print_log
 from mmengine.utils import digit_version
 
@@ -10,6 +11,8 @@ from .baichuan import (baichuan2_norm_head_forward, baichuan_7b_attn_forward,
                        baichuan_13b_attn_forward)
 from .yi import yi_attn_forward
 
+IS_LOW_VERSION_TRANSFORMERS = digit_version(
+    transformers.__version__) < digit_version('4.36')
 SUPPORT_FLASH1 = digit_version(torch.__version__) >= digit_version('2.0.0')
 SUPPORT_FLASH2 = False
 
@@ -43,19 +46,30 @@ def dispatch_llama_attn_forward(model, use_varlen_attn):
     elif not SUPPORT_FLASH:
         return
 
-    from .llama import llama_attn_forward, llama_varlen_attn_forward
+    from .llama import (llama_attn_forward, llama_attn_forward_legacy,
+                        llama_varlen_attn_forward,
+                        llama_varlen_attn_forward_legacy)
 
     print_log(NO_ATTN_WEIGHTS_MSG, 'current', logging.WARNING)
     for module in model.modules():
         if type(module).__name__ in ('LlamaAttention', 'LlamaFlashAttention2',
                                      'LlamaSdpaAttention'):
             if use_varlen_attn:
-                print_log('dispatch llama local attn forward', 'current')
-                module.forward = types.MethodType(llama_varlen_attn_forward,
-                                                  module)
+                print_log('dispatch llama varlen attn forward', 'current')
+                if IS_LOW_VERSION_TRANSFORMERS:
+                    module.forward = types.MethodType(
+                        llama_varlen_attn_forward_legacy, module)
+                else:
+                    module.forward = types.MethodType(
+                        llama_varlen_attn_forward, module)
             else:
                 print_log('dispatch llama attn forward', 'current')
-                module.forward = types.MethodType(llama_attn_forward, module)
+                if IS_LOW_VERSION_TRANSFORMERS:
+                    module.forward = types.MethodType(
+                        llama_attn_forward_legacy, module)
+                else:
+                    module.forward = types.MethodType(llama_attn_forward,
+                                                      module)
 
 
 def dispatch_llama_rmsnorm_forward(model):
@@ -83,7 +97,7 @@ def dispatch_internlm_attn_forward(model, use_varlen_attn):
     for module in model.modules():
         if type(module).__name__ == 'InternLMAttention':
             if use_varlen_attn:
-                print_log('dispatch internlm local attn forward', 'current')
+                print_log('dispatch internlm varlen attn forward', 'current')
                 module.forward = types.MethodType(internlm_varlen_attn_forward,
                                                   module)
             else:
@@ -106,7 +120,7 @@ def dispatch_internlm2_attn_forward(model, use_varlen_attn):
     for module in model.modules():
         if type(module).__name__ == 'InternLM2Attention':
             if use_varlen_attn:
-                print_log('dispatch internlm2 local attn forward', 'current')
+                print_log('dispatch internlm2 varlen attn forward', 'current')
                 module.forward = types.MethodType(
                     internlm2_varlen_attn_forward, module)
             else:
@@ -238,7 +252,7 @@ def dispatch_mistral_attn_forward(model, use_varlen_attn):
     for module in model.modules():
         if type(module).__name__ in ('MistralAttention',
                                      'MistralFlashAttention2'):
-            print_log('dispatch mistral local attn forward', 'current')
+            print_log('dispatch mistral varlen attn forward', 'current')
             module.forward = types.MethodType(mistral_varlen_attn_forward,
                                               module)
 
