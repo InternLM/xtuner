@@ -186,8 +186,8 @@ def llama_attn_forward(
     # Modified from https://github.com/huggingface/transformers/blob/ced9fd86f55ebb6b656c273f6e23f8ba50652f83/src/transformers/models/llama/modeling_llama.py#L331  # noqa:E501
     if 'padding_mask' in kwargs:
         warnings.warn(
-            'Passing `padding_mask` is deprecated and will be removed in v4.37. Please make sure use `attention_mask` instead.`'
-        )
+            'Passing `padding_mask` is deprecated and will be removed in '
+            'v4.37. Please make sure use `attention_mask` instead.`')
 
     bsz, q_len, _ = hidden_states.size()
 
@@ -234,8 +234,10 @@ def llama_attn_forward(
     if past_key_value is not None:
         if self.layer_idx is None:
             raise ValueError(
-                f'The cache structure has changed since version v4.36. If you are using {self.__class__.__name__} '
-                'for auto-regressive decoding with k/v caching, please make sure to initialize the attention class '
+                'The cache structure has changed since version v4.36. '
+                f'If you are using {self.__class__.__name__} '
+                'for auto-regressive decoding with k/v caching, '
+                'please make sure to initialize the attention class '
                 'with a layer index.')
         kv_seq_len += past_key_value.get_usable_length(kv_seq_len,
                                                        self.layer_idx)
@@ -487,8 +489,10 @@ def llama_varlen_attn_forward(
     if past_key_value is not None:
         if self.layer_idx is None:
             raise ValueError(
-                f'The cache structure has changed since version v4.36. If you are using {self.__class__.__name__} '
-                'for auto-regressive decoding with k/v caching, please make sure to initialize the attention class '
+                'The cache structure has changed since version v4.36. '
+                f'If you are using {self.__class__.__name__} '
+                'for auto-regressive decoding with k/v caching, '
+                'please make sure to initialize the attention class '
                 'with a layer index.')
         kv_seq_len += past_key_value.get_usable_length(kv_seq_len,
                                                        self.layer_idx)
