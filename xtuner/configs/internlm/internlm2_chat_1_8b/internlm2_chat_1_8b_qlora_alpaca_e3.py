@@ -1,27 +1,33 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import torch
 from datasets import load_dataset
 from mmengine.dataset import DefaultSampler
 from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
                             LoggerHook, ParamSchedulerHook)
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR, LinearLR
+from peft import LoraConfig
 from torch.optim import AdamW
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import (AutoModelForCausalLM, AutoTokenizer,
+                          BitsAndBytesConfig)
 
 from xtuner.dataset import process_hf_dataset
 from xtuner.dataset.collate_fns import default_collate_fn
 from xtuner.dataset.map_fns import alpaca_map_fn, template_map_fn_factory
-from xtuner.engine import DatasetInfoHook, EvaluateChatHook, ThroughputHook
+from xtuner.engine.hooks import (DatasetInfoHook, EvaluateChatHook,
+                                 VarlenAttnArgsToMessageHubHook)
+from xtuner.engine.runner import TrainLoop
 from xtuner.model import SupervisedFinetune
-from xtuner.utils import PROMPT_TEMPLATE
+from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
 
 #######################################################################
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-pretrained_model_name_or_path = 'internlm/internlm2-chat-1_8b-sft'
+pretrained_model_name_or_path = 'internlm/internlm2-chat-1_8b'
+use_varlen_attn = False
 
 # Data
-data_path = 'tatsu-lab/alpaca'
+alpaca_en_path = 'tatsu-lab/alpaca'
 prompt_template = PROMPT_TEMPLATE.internlm2_chat
 max_length = 2048
 pack_to_max_length = True
@@ -32,15 +38,19 @@ accumulative_counts = 16
 dataloader_num_workers = 0
 max_epochs = 3
 optim_type = AdamW
-lr = 2e-5
+lr = 2e-4
 betas = (0.9, 0.999)
 weight_decay = 0
 max_norm = 1  # grad clip
 warmup_ratio = 0.03
 
+# Save
+save_steps = 500
+save_total_limit = 2  # Maximum checkpoints to keep (-1 means unlimited)
+
 # Evaluate the generation performance during the training
 evaluation_freq = 500
-SYSTEM = ''
+SYSTEM = SYSTEM_TEMPLATE.alpaca
 evaluation_inputs = [
     '请给我介绍五个上海的景点', 'Please tell me five scenic spots in Shanghai'
 ]
@@ -56,17 +66,35 @@ tokenizer = dict(
 
 model = dict(
     type=SupervisedFinetune,
+    use_varlen_attn=use_varlen_attn,
     llm=dict(
         type=AutoModelForCausalLM.from_pretrained,
         pretrained_model_name_or_path=pretrained_model_name_or_path,
-        trust_remote_code=True))
+        trust_remote_code=True,
+        torch_dtype=torch.float16,
+        quantization_config=dict(
+            type=BitsAndBytesConfig,
+            load_in_4bit=True,
+            load_in_8bit=False,
+            llm_int8_threshold=6.0,
+            llm_int8_has_fp16_weight=False,
+            bnb_4bit_compute_dtype=torch.float16,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type='nf4')),
+    lora=dict(
+        type=LoraConfig,
+        r=64,
+        lora_alpha=16,
+        lora_dropout=0.1,
+        bias='none',
+        task_type='CAUSAL_LM'))
 
 #######################################################################
 #                      PART 3  Dataset & Dataloader                   #
 #######################################################################
-train_dataset = dict(
+alpaca_en = dict(
     type=process_hf_dataset,
-    dataset=dict(type=load_dataset, path=data_path),
+    dataset=dict(type=load_dataset, path=alpaca_en_path),
     tokenizer=tokenizer,
     max_length=max_length,
     dataset_map_fn=alpaca_map_fn,
@@ -74,14 +102,15 @@ train_dataset = dict(
         type=template_map_fn_factory, template=prompt_template),
     remove_unused_columns=True,
     shuffle_before_pack=True,
-    pack_to_max_length=pack_to_max_length)
+    pack_to_max_length=pack_to_max_length,
+    use_varlen_attn=use_varlen_attn)
 
 train_dataloader = dict(
     batch_size=batch_size,
     num_workers=dataloader_num_workers,
-    dataset=train_dataset,
+    dataset=alpaca_en,
     sampler=dict(type=DefaultSampler, shuffle=True),
-    collate_fn=dict(type=default_collate_fn))
+    collate_fn=dict(type=default_collate_fn, use_varlen_attn=use_varlen_attn))
 
 #######################################################################
 #                    PART 4  Scheduler & Optimizer                    #
@@ -111,12 +140,12 @@ param_scheduler = [
         eta_min=0.0,
         by_epoch=True,
         begin=warmup_ratio * max_epochs,
-        T_max=max_epochs,
+        end=max_epochs,
         convert_to_iter_based=True)
 ]
 
 # train, val, test setting
-train_cfg = dict(by_epoch=True, max_epochs=max_epochs, val_interval=1)
+train_cfg = dict(type=TrainLoop, max_epochs=max_epochs)
 
 #######################################################################
 #                           PART 5  Runtime                           #
@@ -130,20 +159,26 @@ custom_hooks = [
         every_n_iters=evaluation_freq,
         evaluation_inputs=evaluation_inputs,
         system=SYSTEM,
-        prompt_template=prompt_template),
-    dict(type=ThroughputHook)
+        prompt_template=prompt_template)
 ]
+
+if use_varlen_attn:
+    custom_hooks += [dict(type=VarlenAttnArgsToMessageHubHook)]
 
 # configure default hooks
 default_hooks = dict(
     # record the time of every iteration.
     timer=dict(type=IterTimerHook),
-    # print log every 100 iterations.
-    logger=dict(type=LoggerHook, interval=10),
+    # print log every 10 iterations.
+    logger=dict(type=LoggerHook, log_metric_by_epoch=False, interval=10),
     # enable the parameter scheduler.
     param_scheduler=dict(type=ParamSchedulerHook),
-    # save checkpoint per epoch.
-    checkpoint=dict(type=CheckpointHook, interval=1),
+    # save checkpoint per `save_steps`.
+    checkpoint=dict(
+        type=CheckpointHook,
+        by_epoch=False,
+        interval=save_steps,
+        max_keep_ckpts=save_total_limit),
     # set sampler seed in distributed evrionment.
     sampler_seed=dict(type=DistSamplerSeedHook),
 )
@@ -172,3 +207,6 @@ resume = False
 
 # Defaults to use random seed and disable `deterministic`
 randomness = dict(seed=None, deterministic=False)
+
+# set log processor
+log_processor = dict(by_epoch=False)
