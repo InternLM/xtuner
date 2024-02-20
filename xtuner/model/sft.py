@@ -1,12 +1,15 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from collections import OrderedDict
+from contextlib import nullcontext
 
+from mmengine import print_log
 from mmengine.config import Config, ConfigDict
 from mmengine.model import BaseModel
 from mmengine.runner import load_checkpoint
 from peft import get_peft_model, prepare_model_for_kbit_training
 from torch import nn
 from transformers import PreTrainedModel, PreTrainedTokenizer
+from transformers.integrations import is_deepspeed_zero3_enabled
 
 from xtuner.registry import BUILDER
 from .modules import dispatch_modules
@@ -20,23 +23,42 @@ def smart_tokenizer_and_embedding_resize(
     model: PreTrainedModel,
 ):
     """Resize embedding."""
-    model_vocab_size = model.get_output_embeddings().weight.size(0)
-    model.resize_token_embeddings(len(tokenizer))
-    num_new_tokens = len(tokenizer) - model_vocab_size
+    if is_deepspeed_zero3_enabled():
+        import deepspeed
 
-    if num_new_tokens > 0:
-        input_embeddings = model.get_input_embeddings().weight.data
-        output_embeddings = model.get_output_embeddings().weight.data
+        params = [model.get_input_embeddings().weight]
+        if model.get_output_embeddings(
+        ) is not None and not model.config.tie_word_embeddings:
+            params.append(model.get_output_embeddings().weight)
 
-        input_embeddings_avg = input_embeddings[:-num_new_tokens].mean(
-            dim=0, keepdim=True)
-        output_embeddings_avg = output_embeddings[:-num_new_tokens].mean(
-            dim=0, keepdim=True)
+        context_maybe_zero3 = deepspeed.zero.GatheredParameters(
+            params, modifier_rank=0)
+    else:
+        context_maybe_zero3 = nullcontext()
 
-        input_embeddings[-num_new_tokens:] = input_embeddings_avg
-        output_embeddings[-num_new_tokens:] = output_embeddings_avg
-    elif num_new_tokens < 0:
-        raise RuntimeError
+    with context_maybe_zero3:
+        current_embedding_size = model.get_input_embeddings().weight.size(0)
+
+    if len(tokenizer) > current_embedding_size:
+        assert isinstance(model.get_output_embeddings(), nn.Linear)
+
+        model.resize_token_embeddings(len(tokenizer), pad_to_multiple_of=64)
+        with context_maybe_zero3:
+            num_new_tokens = len(tokenizer) - current_embedding_size
+            input_embeddings = model.get_input_embeddings().weight.data
+            output_embeddings = model.get_output_embeddings().weight.data
+
+            input_embeddings_avg = input_embeddings[:-num_new_tokens].mean(
+                dim=0, keepdim=True)
+            output_embeddings_avg = output_embeddings[:-num_new_tokens].mean(
+                dim=0, keepdim=True)
+
+            input_embeddings[-num_new_tokens:] = input_embeddings_avg
+            output_embeddings[-num_new_tokens:] = output_embeddings_avg
+
+        print_log(
+            f'Resized token embeddings from {current_embedding_size} to {len(tokenizer)}.',
+            'current')
 
 
 class SupervisedFinetune(BaseModel):
