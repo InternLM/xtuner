@@ -57,8 +57,8 @@ def smart_tokenizer_and_embedding_resize(
             output_embeddings[-num_new_tokens:] = output_embeddings_avg
 
         print_log(
-            f'Resized token embeddings from {current_embedding_size} to {len(tokenizer)}.',
-            'current')
+            f'Resized token embeddings from {current_embedding_size} to '
+            f'{len(tokenizer)}.', 'current')
 
 
 class SupervisedFinetune(BaseModel):
