@@ -1,12 +1,11 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import argparse
 import re
-import time
 
 import torch
 import tqdm
 from mmengine import Config
-from mmengine.dist import get_dist_info, init_dist
+from mmengine.dist import get_dist_info, init_dist, master_only
 from mmengine.utils.dl_utils import set_multi_processing
 from torch import distributed as dist
 from torch.utils.data import DataLoader, DistributedSampler
@@ -50,10 +49,26 @@ def merge_outputs(otuputs):
     return new_dict
 
 
+@master_only
+def master_print(msg):
+    print(msg)
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description='Refcoco Eval')
     parser.add_argument('--config', help='Path of model config.')
     parser.add_argument('--pth-path', default=None, help='Model pth path')
+    parser.add_argument(
+        '--data-path',
+        default='data/llava_data/RefCOCOJson/eval_data/refcoco_testA.json',
+        help='Data path',
+    )
+    parser.add_argument(
+        '--image-path',
+        default='data/llava_data/llava_images/',
+        help='Data path',
+    )
+    parser.add_argument('--launcher', default='none', help='Launcher type')
     args = parser.parse_args()
     return args
 
@@ -90,9 +105,10 @@ def eval_iou(answers):
     right = 0
     for answer in answers:
         bbox = answer['bbox']
+        bbox = RefCOCOJsonEvalDataset.normalize_bbox(bbox, answer['height'],
+                                                     answer['width'])
         answer = [int(x) for x in re.findall(r'\d+', answer['ans'])]
         iou = computeIoU(answer, bbox)
-        print(bbox, answer)
         if iou > 0.5:
             right += 1
     return right / len(answers)
@@ -102,7 +118,6 @@ def eval_iou(answers):
 def main():
     # init
     args = parse_args()
-    torch.manual_seed(args.seed)
     if args.launcher != 'none':
         set_multi_processing(distributed=True)
         init_dist(args.launcher)
@@ -117,18 +132,18 @@ def main():
     config = Config.fromfile(args.config)
 
     # load model
-    model = load_model(config, args.pth_path)
+    model = load_model(config, args.pth_path).to(device)
     model.eval()
     tokenizer = BUILDER.build(config.tokenizer)
 
     # dataset
     dataset = RefCOCOJsonEvalDataset(
-        data_path='data/llava_data/RefCOCOJson/eval_data/refcoco_testA.json',
-        image_folder='data/llava_data/llava_images/coco/train2017/',
+        data_path=args.data_path,
+        image_folder=args.image_path,
         tokenizer=tokenizer,
         image_processor=CLIPImageProcessor.from_pretrained(
             'openai/clip-vit-large-patch14-336'),
-        max_dataset_length=None,
+        max_dataset_length=32,
         dataset_map_fn=llava_map_fn,
         template_map_fn=dict(
             type=template_map_fn_factory, template=PROMPT_TEMPLATE.vicuna),
@@ -155,7 +170,6 @@ def main():
     # generation
     answers = []
     for i, data in tqdm.tqdm(enumerate(loader), desc=f'Rank {rank}'):
-        t0 = time.time()
         # prepare inputs
         inputs = data['conversation'][0]['input'][0]
         chunk_encode = []
@@ -198,12 +212,12 @@ def main():
             'ans': answer,
             'id': data['id'][0],
             'bbox': torch.tensor(data['bbox']).tolist(),
+            'height': data['height'],
+            'width': data['width'],
         })
-        if i % 100 == 0:
-            print(f'{i}/{len(dataset)}: {time.time()-t0}, {answer}')
     merged_outputs = merge_outputs(answers)
     acc = eval_iou(merged_outputs)
-    print(f'Acc: {acc}')
+    master_print(f'Acc: {acc}')
 
 
 if __name__ == '__main__':
