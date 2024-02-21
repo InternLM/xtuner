@@ -178,15 +178,9 @@ class RefCOCOJsonEvalDataset(RefCOCOJsonDataset):
 
     def reformat_data(self, json_data):
         for sample in json_data:
-            # reformat bbox
-            sample['bbox'] = self.normalize_bbox(sample['bbox'],
-                                                 sample['height'],
-                                                 sample['width'])
-            sample.pop('height')
-            sample.pop('width')
             # reformat img_id
             img_id = sample['img_id'].split('_')[-2]
-            sample['image'] = img_id + '.jpg'
+            sample['image'] = 'coco/train2017/' + img_id + '.jpg'
             sample['id'] = f"{img_id}-{sample['sents']}"
         return super().reformat_data(json_data)
 
