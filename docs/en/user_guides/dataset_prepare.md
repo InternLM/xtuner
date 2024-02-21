@@ -131,3 +131,36 @@ git clone https://huggingface.co/datasets/liuhaotian/LLaVA-Pretrain --depth=1
    4. TextVQA (textvqa): [train_val_images](https://dl.fbaipublicfiles.com/textvqa/images/train_val_images.zip)
 
    5. VisualGenome (VG): [part1](https://cs.stanford.edu/people/rak248/VG_100K_2/images.zip), [part2](https://cs.stanford.edu/people/rak248/VG_100K_2/images2.zip)
+
+### RefCOCO dataset
+
+#### File structure
+
+```
+
+./data
+├── refcoco_annotations
+│   ├── refcoco
+│   │   ├── instances.json
+│   │   ├── refs(google).p
+│   │   └── refs(unc).p
+│   ├── refcoco+
+│   │   ├── instances.json
+│   │   └── refs(unc).p
+│   └── refcocog
+│       ├── instances.json
+│       ├── refs(google).p
+│       └─── refs(und).p
+├── coco_images
+|    ├── *.jpg
+...
+```
+
+Download the RefCOCO, RefCOCO+, RefCOCOg annotation files using below links.
+Both of coco train 2017 and 2014 are valid for coco_images.
+
+| Image source |                                        Download path                                         |
+| ------------ | :------------------------------------------------------------------------------------------: |
+| RefCOCO      | <a href="https://bvisionweb1.cs.unc.edu/licheng/referit/data/refcoco.zip"> annotations </a>  |
+| RefCOCO+     | <a href="https://bvisionweb1.cs.unc.edu/licheng/referit/data/refcoco+.zip"> annotations </a> |
+| RefCOCOg     | <a href="https://bvisionweb1.cs.unc.edu/licheng/referit/data/refcocog.zip"> annotations </a> |
