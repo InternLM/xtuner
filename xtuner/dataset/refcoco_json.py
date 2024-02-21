@@ -223,10 +223,9 @@ class InvRefCOCOJsonDataset(RefCOCOJsonDataset):
                 'value': ''
             },
         ]
-        bbox_str = '{{<{}><{}><{}><{}>}}'.format(data['bbox'][0],
-                                                 data['bbox'][1],
-                                                 data['bbox'][2],
-                                                 data['bbox'][3])
+        bbox = cls.normalize_bbox(data['bbox'], data['height'], data['width'])
+        bbox_str = '{{<{}><{}><{}><{}>}}'.format(bbox[0], bbox[1], bbox[2],
+                                                 bbox[3])
         instruction = instruction_template.format(bbox_str)
         answer = data['sents']
 
