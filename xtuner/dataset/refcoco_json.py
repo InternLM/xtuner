@@ -138,10 +138,9 @@ class RefCOCOJsonDataset(LLaVADataset):
         ]
 
         instruction = instruction_template.format(data['sents'])
-        answer = '{{<{}><{}><{}><{}>}}'.format(data['bbox'][0],
-                                               data['bbox'][1],
-                                               data['bbox'][2],
-                                               data['bbox'][3])
+        bbox = cls.normalize_bbox(data['bbox'], data['height'], data['width'])
+        answer = '{{<{}><{}><{}><{}>}}'.format(bbox[0], bbox[1], bbox[2],
+                                               bbox[3])
         conversation[0]['value'] = instruction + '\n<image>'
         conversation[1]['value'] = answer
         return conversation
@@ -168,16 +167,17 @@ class RefCOCOJsonDataset(LLaVADataset):
             bbox = refer.getRefBox(ref['ref_id'])
 
             image = Image.open(image_path + '/' + image_id + '.jpg')
-            bbox = cls.normalize_bbox(bbox, image.height, image.width)
 
             for sent in sents:
                 sent_id = '_'.join(sent.split(' '))
                 data_id = f'{dataset}-{splitBy}-{image_id}-{sent_id}'
                 data_item = {
                     'id': data_id,
-                    'image': image_id + '.jpg',
+                    'image': 'coco/train2017/' + image_id + '.jpg',
                     'sents': sent,
                     'bbox': bbox,
+                    'height': image.height,
+                    'width': image.width
                 }
                 if data_id in data:
                     duplicate_data[data_id].append(data_item)
