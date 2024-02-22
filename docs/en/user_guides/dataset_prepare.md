@@ -1,11 +1,17 @@
 # Dataset Prepare
 
-- [HuggingFace datasets](#huggingface-datasets)
-- [Others](#others)
-  - [Arxiv Gentitle](#arxiv-gentitle)
-  - [MOSS-003-SFT](#moss-003-sft)
-  - [Chinese Lawyer](#chinese-lawyer)
-  - [LLaVA dataset](#llava-dataset)
+- [Dataset Prepare](#dataset-prepare)
+  - [HuggingFace datasets](#huggingface-datasets)
+  - [Others](#others)
+    - [Arxiv Gentitle](#arxiv-gentitle)
+    - [MOSS-003-SFT](#moss-003-sft)
+    - [Chinese Lawyer](#chinese-lawyer)
+    - [LLaVA dataset](#llava-dataset)
+      - [File structure](#file-structure)
+      - [Pretrain](#pretrain)
+      - [Finetune](#finetune)
+    - [RefCOCO dataset](#refcoco-dataset)
+      - [File structure](#file-structure-1)
 
 ## HuggingFace datasets
 
@@ -164,3 +170,13 @@ Both of coco train 2017 and 2014 are valid for coco_images.
 | RefCOCO      | <a href="https://bvisionweb1.cs.unc.edu/licheng/referit/data/refcoco.zip"> annotations </a>  |
 | RefCOCO+     | <a href="https://bvisionweb1.cs.unc.edu/licheng/referit/data/refcoco+.zip"> annotations </a> |
 | RefCOCOg     | <a href="https://bvisionweb1.cs.unc.edu/licheng/referit/data/refcocog.zip"> annotations </a> |
+
+After downloading the annotations, unzip the files and place them in the `./data/refcoco_annotations` directory.
+Then, we convert the annotations to json format using the below command. This command saves the converted json files in the `./data/llava_data/RefCOCOJson/` directory.
+
+```shell
+python xtuner/tools/convert_refcoco.py
+--ann-path data/refcoco_annotations # your annotation path
+--image-path data/llava_data/llava_images/coco/train2017
+--save-path data/llava_data/RefCOCOJson/
+```

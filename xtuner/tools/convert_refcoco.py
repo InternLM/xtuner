@@ -9,7 +9,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         '--ann-path',
-        default='data/refcoco/refcoco_annotations',
+        default='data/refcoco_annotations',
         help='Refcoco annotation path',
     )
     parser.add_argument(
