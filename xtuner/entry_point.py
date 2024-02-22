@@ -11,7 +11,8 @@ import xtuner
 
 # Define valid modes
 MODES = ('list-cfg', 'copy-cfg', 'log-dataset', 'check-custom-dataset',
-         'train', 'test', 'chat', 'convert', 'preprocess', 'mmbench')
+         'train', 'test', 'chat', 'convert', 'preprocess', 'mmbench',
+         'eval_refcoco')
 
 CLI_HELP_MSG = \
     f"""
@@ -52,6 +53,8 @@ CLI_HELP_MSG = \
             xtuner check-custom-dataset $CONFIG
         8. MMBench evaluation:
             xtuner mmbench $LLM --llava $LLAVA --visual-encoder $VISUAL_ENCODER --prompt-template $PROMPT_TEMPLATE --data-path $MMBENCH_DATA_PATH
+        8. Refcoco evaluation:
+            xtuner eval_refcoco $LLM --llava $LLAVA --visual-encoder $VISUAL_ENCODER --prompt-template $PROMPT_TEMPLATE --data-path $REFCOCO_DATA_PATH
 
     Run special commands:
 
@@ -184,6 +187,11 @@ def preprocess_help_msg():
     print_log(PREPROCESS_HELP_MSG, 'current')
 
 
+def eval_refcoco():
+    from xtuner.tools import eval_refcoco
+    return eval_refcoco.__file__
+
+
 modes = {
     'list-cfg': list_cfg,
     'copy-cfg': copy_cfg,
@@ -204,13 +212,14 @@ modes = {
         'arxiv': arxiv_preprocess,
         '--help': preprocess_help_msg,
         '-h': preprocess_help_msg
-    }
+    },
+    'eval_refcoco': eval_refcoco
 }
 
 HELP_FUNCS = [preprocess_help_msg, convert_help_msg]
 MAP_FILE_FUNCS = [
     list_cfg, copy_cfg, log_dataset, check_custom_dataset, train, test, chat,
-    mmbench, pth_to_hf, merge, split, arxiv_preprocess
+    mmbench, pth_to_hf, merge, split, arxiv_preprocess, eval_refcoco
 ]
 
 
