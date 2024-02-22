@@ -130,10 +130,13 @@ def eval_iou(answers):
         bbox = answer['bbox']
         bbox = RefCOCOJsonEvalDataset.normalize_bbox(bbox, answer['height'],
                                                      answer['width'])
-        answer = [int(x) for x in re.findall(r'\d+', answer['ans'])]
-        iou = computeIoU(answer, bbox)
-        if iou > 0.5:
-            right += 1
+        answer_bbox = [int(x) for x in re.findall(r'\d+', answer['ans'])]
+        if len(answer_bbox) == 4:
+            iou = computeIoU(answer_bbox, bbox)
+            if iou > 0.5:
+                right += 1
+        else:
+            print('Error format sample: ', answer)
     return right / len(answers)
 
 
@@ -314,7 +317,7 @@ def main():
     # dataset
     dataset = RefCOCOJsonEvalDataset(
         data_path=args.data_path,
-        image_folder=args.image_path,
+        image_folder='data/llava_data/llava_images/',
         tokenizer=tokenizer,
         image_processor=image_processor,
         max_dataset_length=32,
