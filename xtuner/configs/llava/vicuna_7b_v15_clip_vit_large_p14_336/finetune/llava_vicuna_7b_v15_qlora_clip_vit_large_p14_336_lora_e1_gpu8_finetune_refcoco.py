@@ -34,7 +34,7 @@ pretrained_pth = (
 # Data
 data_root = './data/llava_data/'
 data_path = data_root + 'LLaVA-Instruct-150K/llava_v1_5_mix665k.json'
-refcoco_path = data_root + 'data/llava_data/RefCOCOJson/train.json'
+refcoco_path = data_root + 'RefCOCOJson/train.json'
 image_folder = data_root + 'llava_images'
 prompt_template = PROMPT_TEMPLATE.vicuna
 max_length = int(2048 - (336 / 14)**2)
@@ -216,17 +216,17 @@ train_cfg = dict(type=TrainLoop, max_epochs=max_epochs)
 # Log the dialogue periodically during the training process, optional
 custom_hooks = [
     dict(type=DatasetInfoHook, tokenizer=tokenizer),
-    # dict(
-    #     type=EvaluateChatHook,
-    #     tokenizer=tokenizer,
-    #     image_processor=image_processor,
-    #     every_n_iters=evaluation_freq,
-    #     evaluation_inputs=evaluation_inputs,
-    #     evaluation_images=evaluation_images,
-    #     system=SYSTEM,
-    #     prompt_template=prompt_template,
-    #     max_new_tokens=20,
-    # ),
+    dict(
+        type=EvaluateChatHook,
+        tokenizer=tokenizer,
+        image_processor=image_processor,
+        every_n_iters=evaluation_freq,
+        evaluation_inputs=evaluation_inputs,
+        evaluation_images=evaluation_images,
+        system=SYSTEM,
+        prompt_template=prompt_template,
+        max_new_tokens=20,
+    ),
 ]
 
 # configure default hooks
