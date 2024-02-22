@@ -320,7 +320,7 @@ def main():
         image_folder='data/llava_data/llava_images/',
         tokenizer=tokenizer,
         image_processor=image_processor,
-        max_dataset_length=32,
+        max_dataset_length=None,
         dataset_map_fn=llava_map_fn,
         template_map_fn=dict(
             type=template_map_fn_factory, template=PROMPT_TEMPLATE.vicuna),
