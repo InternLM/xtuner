@@ -107,5 +107,9 @@ internlm_chat=dict(
 | Qwen/Qwen1.5-14B-Chat                    | qwen_chat       |
 | Qwen/Qwen1.5-72B                         | default\*       |
 | Qwen/Qwen1.5-72B-Chat                    | qwen_chat       |
+| google/gemma-2b                          | default\*       |
+| google/gemma-2b-it                       | gemma\*         |
+| google/gemma-7b                          | default\*       |
+| google/gemma-7b-it                       | gemma\*         |
 
 \*: The official template has special tokens (like `<|im_start|>`, `<|im_end|>`) that were not trained during the pre-training phase. Therefore, these models utilize the `default` template.
