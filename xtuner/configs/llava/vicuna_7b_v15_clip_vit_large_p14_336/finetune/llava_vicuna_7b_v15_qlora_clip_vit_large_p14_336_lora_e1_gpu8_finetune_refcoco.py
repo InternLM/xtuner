@@ -15,7 +15,7 @@ from xtuner.dataset.map_fns import llava_map_fn, template_map_fn_factory
 from xtuner.dataset.refcoco_json import (InvRefCOCOJsonDataset,
                                          RefCOCOJsonDataset)
 from xtuner.dataset.samplers import LengthGroupedSampler
-from xtuner.engine.hooks import DatasetInfoHook, EvaluateChatHook  # noqa: F401
+from xtuner.engine.hooks import DatasetInfoHook, EvaluateChatHook
 from xtuner.engine.runner import TrainLoop
 from xtuner.model import LLaVAModel
 from xtuner.utils import PROMPT_TEMPLATE
@@ -27,9 +27,7 @@ from xtuner.utils import PROMPT_TEMPLATE
 llm_name_or_path = 'lmsys/vicuna-7b-v1.5'
 visual_encoder_name_or_path = 'openai/clip-vit-large-patch14-336'
 # Specify the pretrained pth
-pretrained_pth = (
-    'work_dirs/models--xtuner--llava-v1.5-7b-xtuner-pretrain/epoch_1.pth'  # noqa: E501
-)
+pretrained_pth = './work_dirs/llava_vicuna_7b_v15_clip_vit_large_p14_336_e1_gpu8_pretrain/iter_2181.pth'  # noqa: E501
 
 # Data
 data_root = './data/llava_data/'
@@ -68,14 +66,12 @@ tokenizer = dict(
     type=AutoTokenizer.from_pretrained,
     pretrained_model_name_or_path=llm_name_or_path,
     trust_remote_code=True,
-    padding_side='right',
-)
+    padding_side='right')
 
 image_processor = dict(
     type=CLIPImageProcessor.from_pretrained,
     pretrained_model_name_or_path=visual_encoder_name_or_path,
-    trust_remote_code=True,
-)
+    trust_remote_code=True)
 
 model = dict(
     type=LLaVAModel,
@@ -95,24 +91,19 @@ model = dict(
             llm_int8_has_fp16_weight=False,
             bnb_4bit_compute_dtype=torch.float16,
             bnb_4bit_use_double_quant=True,
-            bnb_4bit_quant_type='nf4',
-        ),
-    ),
+            bnb_4bit_quant_type='nf4')),
     llm_lora=dict(
         type=LoraConfig,
         r=512,
         lora_alpha=256,
         lora_dropout=0.05,
         bias='none',
-        task_type='CAUSAL_LM',
-    ),
+        task_type='CAUSAL_LM'),
     visual_encoder=dict(
         type=CLIPVisionModel.from_pretrained,
-        pretrained_model_name_or_path=visual_encoder_name_or_path,
-    ),
+        pretrained_model_name_or_path=visual_encoder_name_or_path),
     visual_encoder_lora=dict(
-        type=LoraConfig, r=64, lora_alpha=16, lora_dropout=0.05, bias='none'),
-)
+        type=LoraConfig, r=64, lora_alpha=16, lora_dropout=0.05, bias='none'))
 
 #######################################################################
 #                      PART 3  Dataset & Dataloader                   #
@@ -167,10 +158,8 @@ train_dataloader = dict(
     sampler=dict(
         type=LengthGroupedSampler,
         length_property='modality_length',
-        per_device_batch_size=batch_size * accumulative_counts,
-    ),
-    collate_fn=dict(type=default_collate_fn),
-)
+        per_device_batch_size=batch_size * accumulative_counts),
+    collate_fn=dict(type=default_collate_fn))
 
 #######################################################################
 #                    PART 4  Scheduler & Optimizer                    #
@@ -183,8 +172,7 @@ optim_wrapper = dict(
     clip_grad=dict(max_norm=max_norm, error_if_nonfinite=False),
     accumulative_counts=accumulative_counts,
     loss_scale='dynamic',
-    dtype='float16',
-)
+    dtype='float16')
 
 # learning policy
 # More information: https://github.com/open-mmlab/mmengine/blob/main/docs/en/tutorials/param_scheduler.md  # noqa: E501
@@ -195,16 +183,14 @@ param_scheduler = [
         by_epoch=True,
         begin=0,
         end=warmup_ratio * max_epochs,
-        convert_to_iter_based=True,
-    ),
+        convert_to_iter_based=True),
     dict(
         type=CosineAnnealingLR,
         eta_min=0.0,
         by_epoch=True,
         begin=warmup_ratio * max_epochs,
         end=max_epochs,
-        convert_to_iter_based=True,
-    ),
+        convert_to_iter_based=True)
 ]
 
 # train, val, test setting
@@ -224,9 +210,7 @@ custom_hooks = [
         evaluation_inputs=evaluation_inputs,
         evaluation_images=evaluation_images,
         system=SYSTEM,
-        prompt_template=prompt_template,
-        max_new_tokens=20,
-    ),
+        prompt_template=prompt_template)
 ]
 
 # configure default hooks
@@ -242,8 +226,7 @@ default_hooks = dict(
         type=CheckpointHook,
         by_epoch=False,
         interval=save_steps,
-        max_keep_ckpts=save_total_limit,
-    ),
+        max_keep_ckpts=save_total_limit),
     # set sampler seed in distributed evrionment.
     sampler_seed=dict(type=DistSamplerSeedHook),
 )
