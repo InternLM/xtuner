@@ -23,16 +23,17 @@
 
 ## 🎉 更新
 
-- **\[2024/02\]** 支持 [Qwen1.5](https://qwenlm.github.io/blog/qwen1.5/) 模型！
-- **\[2024/01\]** 支持 [InternLM2](https://huggingface.co/internlm) 模型！同时，最新版的多模态大模型 [LLaVA-Internlm2-7B](https://huggingface.co/xtuner/llava-internlm2-7b) / [20B](https://huggingface.co/xtuner/llava-internlm2-20b) 发布，其表现出强大的性能！
+- **\[2024/02\]** 支持 [Gemma](xtuner/configs/gemma) 模型！
+- **\[2024/02\]** 支持 [Qwen1.5](xtuner/configs/qwen/qwen1_5) 模型！
+- **\[2024/01\]** 支持 [InternLM2](xtuner/configs/internlm) 模型！同时，最新版的多模态大模型 [LLaVA-Internlm2-7B](https://huggingface.co/xtuner/llava-internlm2-7b) / [20B](https://huggingface.co/xtuner/llava-internlm2-20b) 发布，其表现出强大的性能！
 - **\[2024/01\]** 支持 [DeepSeek-MoE](https://huggingface.co/deepseek-ai/deepseek-moe-16b-chat) 模型！20GB 显存即可实现 QLoRA 微调，4x80GB 即可实现全参数微调。快速开始请查阅相关[配置文件](xtuner/configs/deepseek/)！
 - **\[2023/12\]** 🔥 支持多模态模型 VLM（[LLaVA-v1.5](https://github.com/haotian-liu/LLaVA)）预训练和指令微调！快速开始请查阅此[文档](xtuner/configs/llava/README_zh-CN.md)！
 - **\[2023/12\]** 🔥 支持 [Mixtral 8x7B](https://huggingface.co/mistralai/Mixtral-8x7B-Instruct-v0.1) 模型！快速开始请查阅此[文档](xtuner/configs/mixtral/README.md)！
-- **\[2023/11\]** 支持 [ChatGLM3-6B](https://huggingface.co/THUDM/chatglm3-6b) 模型！
+- **\[2023/11\]** 支持 [ChatGLM3-6B](xtuner/configs/chatglm) 模型！
 - **\[2023/10\]** 支持 [MSAgent-Bench](https://modelscope.cn/datasets/damo/MSAgent-Bench) 数据集，并且微调所得大语言模型可应用至 [Lagent](https://github.com/InternLM/lagent) 框架！
 - **\[2023/10\]** 优化数据处理逻辑以兼容 `system` 字段，相关细节请查阅[文档](docs/zh_cn/user_guides/dataset_format.md)！
-- **\[2023/09\]** 支持 [InternLM-20B](https://huggingface.co/internlm) 系列模型！
-- **\[2023/09\]** 支持 [Baichuan2](https://huggingface.co/baichuan-inc) 系列模型！
+- **\[2023/09\]** 支持 [InternLM-20B](xtuner/configs/internlm) 系列模型！
+- **\[2023/09\]** 支持 [Baichuan2](xtuner/configs/baichuan) 系列模型！
 - **\[2023/08\]** XTuner 正式发布！众多微调模型已上传至 [HuggingFace](https://huggingface.co/xtuner)！
 
 ## 📖 介绍
@@ -115,6 +116,7 @@ XTuner 是一个高效、灵活、全能的轻量化大模型微调工具库。
   <li><a href="https://huggingface.co/baichuan-inc/Baichuan2-7B-Base">Baichuan2</a></li>
   <li><a href="https://huggingface.co/mistralai/Mixtral-8x7B-Instruct-v0.1">Mixtral 8x7B</a></li>
   <li><a href="https://huggingface.co/deepseek-ai/deepseek-moe-16b-chat">DeepSeek MoE</a></li>
+  <li><a href="https://huggingface.co/google">Gemma</a></li>
   <li>...</li>
 </ul>
 </td>

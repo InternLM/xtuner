@@ -11,7 +11,6 @@ from xtuner.dataset import process_hf_dataset
 from xtuner.dataset.collate_fns import default_collate_fn
 from xtuner.dataset.map_fns import alpaca_map_fn, template_map_fn_factory
 from xtuner.engine.hooks import (DatasetInfoHook, EvaluateChatHook,
-                                 ThroughputHook,
                                  VarlenAttnArgsToMessageHubHook)
 from xtuner.engine.runner import TrainLoop
 from xtuner.model import SupervisedFinetune
@@ -31,12 +30,12 @@ max_length = 2048
 pack_to_max_length = True
 
 # Scheduler & Optimizer
-batch_size = 2  # per_device
+batch_size = 1  # per_device
 accumulative_counts = 16
 dataloader_num_workers = 0
 max_epochs = 3
 optim_type = AdamW
-lr = 2e-4
+lr = 2e-5
 betas = (0.9, 0.999)
 weight_decay = 0
 max_norm = 1  # grad clip
@@ -140,8 +139,7 @@ custom_hooks = [
         every_n_iters=evaluation_freq,
         evaluation_inputs=evaluation_inputs,
         system=SYSTEM,
-        prompt_template=prompt_template),
-    dict(type=ThroughputHook)
+        prompt_template=prompt_template)
 ]
 
 if use_varlen_attn:
