@@ -124,6 +124,14 @@ PROMPT_TEMPLATE = ConfigDict(
         SYSTEM=('[INST] {system} [/INST]\n'),
         INSTRUCTION=('[INST] {input} [/INST]'),
         SEP='\n'),
+    gemma=dict(
+        SYSTEM=('<start_of_turn>model\n{system}<end_of_turn>\n'),
+        INSTRUCTION=('<start_of_turn>user\n{input}<end_of_turn>\n'
+                     '<start_of_turn>model\n'),
+        SUFFIX='<end_of_turn>',
+        SUFFIX_AS_EOS=False,
+        SEP='\n',
+        STOP_WORDS=['<end_of_turn>']),
 )
 
 SYSTEM_TEMPLATE = ConfigDict(

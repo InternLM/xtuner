@@ -102,5 +102,9 @@ internlm_chat=dict(
 | Qwen/Qwen1.5-14B-Chat                    | qwen_chat      |
 | Qwen/Qwen1.5-72B                         | default\*      |
 | Qwen/Qwen1.5-72B-Chat                    | qwen_chat      |
+| google/gemma-2b                          | default\*      |
+| google/gemma-2b-it                       | gemma\*        |
+| google/gemma-7b                          | default\*      |
+| google/gemma-7b-it                       | gemma\*        |
 
 \*: 官方对话模版中存在特殊 token（比如 `<|im_start|>`、`<|im_end|>`），这类特殊 token 在预训练阶段并未得到训练。故，使用 `default` 模版。
