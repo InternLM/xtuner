@@ -108,6 +108,9 @@ model = dict(
 #######################################################################
 #                      PART 3  Dataset & Dataloader                   #
 #######################################################################
+
+# The refcoco and inv_refcoco datasets have more than 30w items
+# we limit their length for balance with the llava dataset.
 refcoco_dataset = dict(
     type=RefCOCOJsonDataset,
     data_path=refcoco_path,
