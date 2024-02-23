@@ -23,7 +23,7 @@ from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-pretrained_model_name_or_path = 'meta-llama/Llama-2-7b-hf'
+pretrained_model_name_or_path = 'google/gemma-7b'
 use_varlen_attn = False
 
 # Data

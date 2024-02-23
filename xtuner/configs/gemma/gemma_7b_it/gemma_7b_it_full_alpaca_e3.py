@@ -21,22 +21,22 @@ from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-pretrained_model_name_or_path = 'google/gemma-7b'
+pretrained_model_name_or_path = 'google/gemma-7b-it'
 use_varlen_attn = False
 
 # Data
-data_path = 'tatsu-lab/alpaca'
+alpaca_en_path = 'tatsu-lab/alpaca'
 prompt_template = PROMPT_TEMPLATE.gemma
 max_length = 2048
 pack_to_max_length = True
 
 # Scheduler & Optimizer
 batch_size = 2  # per_device
-accumulative_counts = 16  # 2bs * 16acc * 4gpu = 128 batchsize
+accumulative_counts = 16
 dataloader_num_workers = 0
 max_epochs = 3
 optim_type = AdamW
-lr = 2e-5
+lr = 2e-4
 betas = (0.9, 0.999)
 weight_decay = 0
 max_norm = 1  # grad clip
@@ -47,7 +47,7 @@ save_steps = 500
 save_total_limit = 2  # Maximum checkpoints to keep (-1 means unlimited)
 
 # Evaluate the generation performance during the training
-evaluation_freq = 200
+evaluation_freq = 500
 SYSTEM = SYSTEM_TEMPLATE.alpaca
 evaluation_inputs = [
     '请给我介绍五个上海的景点', 'Please tell me five scenic spots in Shanghai'
@@ -75,7 +75,7 @@ model = dict(
 #######################################################################
 alpaca_en = dict(
     type=process_hf_dataset,
-    dataset=dict(type=load_dataset, path=data_path),
+    dataset=dict(type=load_dataset, path=alpaca_en_path),
     tokenizer=tokenizer,
     max_length=max_length,
     dataset_map_fn=alpaca_map_fn,
