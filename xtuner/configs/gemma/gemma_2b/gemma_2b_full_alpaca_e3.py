@@ -20,7 +20,7 @@ from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-pretrained_model_name_or_path = 'google/gemma-2b' # required transformers>=4.38.1
+pretrained_model_name_or_path = 'google/gemma-2b'  # require transformers>=4.38.1  # noqa: E501
 use_varlen_attn = False
 
 # Data
