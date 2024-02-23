@@ -134,7 +134,7 @@ inv_refcoco_dataset = dict(
     pad_image_to_square=True,
     max_dataset_length=70000,
 )
-mix_llava_dataset = dict(
+llava_dataset = dict(
     type=LLaVADataset,
     data_path=data_path,
     image_folder=image_folder,
@@ -146,15 +146,15 @@ mix_llava_dataset = dict(
     max_length=max_length,
     pad_image_to_square=True,
 )
-llava_dataset = dict(
+train_dataset = dict(
     type=ConcatDataset,
-    datasets=[refcoco_dataset, inv_refcoco_dataset, mix_llava_dataset],
+    datasets=[refcoco_dataset, inv_refcoco_dataset, llava_dataset],
 )
 
 train_dataloader = dict(
     batch_size=batch_size,
     num_workers=dataloader_num_workers,
-    dataset=llava_dataset,
+    dataset=train_dataset,
     sampler=dict(
         type=LengthGroupedSampler,
         length_property='modality_length',
