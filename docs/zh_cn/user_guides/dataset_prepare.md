@@ -175,8 +175,6 @@ Coco 2017 与 Coco 2014 都可以作为coco的图片数据。
 然后，我们使用以下命令将注释转换为json格式。此命令将转换后的json文件保存在 `./data/llava_data/RefCOCOJson/` 目录中。
 
 ```shell
-python xtuner/tools/convert_refcoco.py
---ann-path data/refcoco_annotations # your annotation path
---image-path data/llava_data/llava_images/coco/train2017
---save-path data/llava_data/RefCOCOJson/
+xtuner preprocess refcoco --ann-path $RefCOCO_ANN_PATH --image-path $COCO_IMAGE_PATH \
+--save-path $SAVE_PATH # ./data/llava_data/RefCOCOJson/
 ```

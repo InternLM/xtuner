@@ -175,8 +175,6 @@ After downloading the annotations, unzip the files and place them in the `./data
 Then, we convert the annotations to json format using the below command. This command saves the converted json files in the `./data/llava_data/RefCOCOJson/` directory.
 
 ```shell
-python xtuner/tools/convert_refcoco.py
---ann-path data/refcoco_annotations # your annotation path
---image-path data/llava_data/llava_images/coco/train2017
---save-path data/llava_data/RefCOCOJson/
+xtuner preprocess refcoco --ann-path $RefCOCO_ANN_PATH --image-path $COCO_IMAGE_PATH \
+--save-path $SAVE_PATH # ./data/llava_data/RefCOCOJson/
 ```
