@@ -16,7 +16,7 @@
     },
 ...
 ]
-For detailed data format, please refer to https://github.com/InternLM/xtuner/blob/main/docs/en/user_guides/dataset_format.md
+Please refer to https://github.com/InternLM/xtuner/blob/main/docs/en/user_guides/dataset_format.md for details.
 """
 import torch
 from datasets import load_dataset
