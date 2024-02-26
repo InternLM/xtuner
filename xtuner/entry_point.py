@@ -55,7 +55,7 @@ CLI_HELP_MSG = \
             xtuner check-custom-dataset $CONFIG
         8. MMBench evaluation:
             xtuner mmbench $LLM --llava $LLAVA --visual-encoder $VISUAL_ENCODER --prompt-template $PROMPT_TEMPLATE --data-path $MMBENCH_DATA_PATH
-        8. Refcoco evaluation:
+        9. Refcoco evaluation:
             xtuner eval_refcoco $LLM --llava $LLAVA --visual-encoder $VISUAL_ENCODER --prompt-template $PROMPT_TEMPLATE --data-path $REFCOCO_DATA_PATH
 
     Run special commands:
