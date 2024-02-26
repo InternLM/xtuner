@@ -16,8 +16,7 @@
     },
 ...
 ]
-If the data format does not meet the preceding requirements, modify it by
-referring to https://github.com/HIT-cwh/xtuner/blob/support_ftdp/docs/zh_cn/user_guides/finetune_custom_dataset.md#step-2-%E4%BF%AE%E6%94%B9%E6%A8%A1%E6%9D%BF-config-%E6%96%87%E4%BB%B6-1
+For detailed data format, please refer to https://github.com/InternLM/xtuner/blob/main/docs/en/user_guides/dataset_format.md
 """
 from datasets import load_dataset
 from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,

@@ -1,4 +1,23 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+"""Data format:
+[
+    {
+        "conversation": [
+            {
+                "system": "",
+                "input": "xxx",
+                "output": "xxx"
+            },
+            {
+                "input": "xxx",
+                "output": "xxx"
+            }
+        ]
+    },
+...
+]
+For detailed data format, please refer to https://github.com/InternLM/xtuner/blob/main/docs/en/user_guides/dataset_format.md
+"""
 from datasets import load_dataset
 from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
                             LoggerHook, ParamSchedulerHook)
