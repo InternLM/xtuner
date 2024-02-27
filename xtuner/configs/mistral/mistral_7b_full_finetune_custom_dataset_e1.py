@@ -17,7 +17,7 @@
 ...
 ]
 Please refer to https://github.com/InternLM/xtuner/blob/main/docs/en/user_guides/dataset_format.md for details.
-"""
+"""  # noqa: E501
 import torch
 from datasets import load_dataset
 from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
