@@ -212,4 +212,9 @@ rms_norm = RMSNorm.apply
 
 
 def rms_norm_forward(self, hidden_states):
+    if (hidden_states.device == torch.device('cpu')
+            or self.weight.device == torch.device('cpu')):
+        raise RuntimeError(
+            'Can not use triton kernels on cpu. Please set `USE_TRITON_KERNEL`'
+            ' environment variable to 0 before training.')
     return rms_norm(hidden_states, self.weight, self.variance_epsilon)
