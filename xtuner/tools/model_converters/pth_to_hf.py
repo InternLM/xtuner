@@ -21,7 +21,7 @@ def parse_args():
     parser.add_argument(
         '--fp32',
         action='store_true',
-        help='Save as fp32. If not set, fp16 will be used by default.')
+        help='Save LLM in fp32. If not set, fp16 will be used by default.')
     parser.add_argument(
         '--max-shard-size',
         type=str,
@@ -75,10 +75,6 @@ def main():
     model.load_state_dict(state_dict, strict=False)
     print(f'Load PTH model from {args.pth_model}')
 
-    if not args.fp32:
-        print('Convert LLM to float16')
-        model.llm.half()
-
     if 'LLaVAModel' in model_name:
         if cfg.model.get('llm') and (not cfg.model.get('freeze_llm', False)
                                      or cfg.model.get('llm_lora')):
@@ -91,6 +87,9 @@ def main():
                 tokenizer = BUILDER.build(cfg.tokenizer)
                 tokenizer.save_pretrained(llm_path)
                 print(f'Saving LLM to {llm_path}')
+            if not args.fp32:
+                print('Convert LLM to float16')
+                model.llm.half()
             model.llm.save_pretrained(
                 llm_path, max_shard_size=args.max_shard_size)
 
@@ -126,6 +125,9 @@ def main():
             tokenizer = BUILDER.build(cfg.tokenizer)
             tokenizer.save_pretrained(llm_path)
             print(f'Saving LLM to {llm_path}')
+        if not args.fp32:
+            print('Convert LLM to float16')
+            model.llm.half()
         model.llm.save_pretrained(
             llm_path,
             max_shard_size=args.max_shard_size,
