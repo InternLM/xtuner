@@ -7,7 +7,7 @@ from .intern_repo import (build_packed_dataset,
                           load_intern_repo_tokenized_dataset,
                           load_intern_repo_untokenized_dataset)
 from .llava import LLaVADataset
-from .mimicit import MIMICIT_CGD_Dataset
+from .mimicit import MIMICITDataset
 from .modelscope import process_ms_dataset
 from .moss_sft import MOSSSFTDataset
 from .refcoco_json import (InvRefCOCOJsonDataset, RefCOCOJsonDataset,
@@ -24,5 +24,5 @@ __all__ = [
     'load_intern_repo_tokenized_dataset',
     'load_intern_repo_untokenized_dataset', 'build_packed_dataset',
     'RefCOCOJsonDataset', 'RefCOCOJsonEvalDataset', 'InvRefCOCOJsonDataset',
-    'MIMICIT_CGD_Dataset'
+    'MIMICITDataset'
 ]

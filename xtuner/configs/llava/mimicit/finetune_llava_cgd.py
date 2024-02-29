@@ -7,7 +7,7 @@ from torch.optim import AdamW
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           CLIPImageProcessor, CLIPVisionModel)
 
-from xtuner.dataset import ConcatDataset, LLaVADataset, MIMICIT_CGD_Dataset
+from xtuner.dataset import ConcatDataset, LLaVADataset, MIMICITDataset
 from xtuner.dataset.collate_fns import default_collate_fn
 from xtuner.dataset.map_fns import (llava_map_fn, mimicit_map_fn,
                                     template_map_fn_factory)
@@ -106,7 +106,7 @@ llava_dataset = dict(
     pad_image_to_square=True)
 
 cgd_dataset = dict(
-    type=MIMICIT_CGD_Dataset,
+    type=MIMICITDataset,
     instruction_json=cgd_instruction_json,
     use_coco_image=use_coco_image,
     coco_image_path=coco_image_path,

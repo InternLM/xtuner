@@ -41,7 +41,7 @@ def combine_related_instructions(data):
     return data_new
 
 
-class MIMICIT_CGD_Dataset(Dataset):
+class MIMICITDataset(Dataset):
 
     def __init__(self,
                  tokenizer,
