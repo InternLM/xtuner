@@ -11,12 +11,13 @@
 - 训练所得模型可无缝接入部署工具库 LMDeploy、大规模评测工具库 OpenCompass 及 VLMEvalKit。为大型语言模型微调提供一个全面且用户友好的解决方案。
 
 ## XTuner 的工作流程
+
 我们可以通过以下这张图，简单的了解一下 XTuner 的整体运作流程。
 ![image](https://github.com/Jianfeng777/xtuner/assets/108343727/d538dd88-20f7-49cf-a84a-62669c03cb79)
 
 整个工作流程分为以下四个步骤：
 1. **前期准备**：
-   - 首先，根据任务的不同，我们需要明确微调目标，进行数据采集，并将数据转换为 XTuner 所支持的格式类型。这部分需要大家自行完成，当然我们假如只是体验的话仅需要使用官方支持的数据集即可。
+   - 首先，根据任务的不同，我们需要明确微调目标，进行数据采集，并将数据转换为 XTuner 所支持的格式类型。
    - 然后我们还需要根据自己的硬件条件选择合适的微调方法和合适的基座模型。不同的基座模型对显存的需求都不太一样，模型参数越大，微调所需要显存就越多。而在微调方法中，对显存需求最小的就是 QLoRA（最少 8GB 即可运行），而显存需求最大的则是全量微调。
 
 2. **配置文件的创建及修改**：
@@ -28,11 +29,11 @@
 3. **模型训练**：
    - 修改配置文件后，我就可以使用 `xtuner train` 命令启动训练。
    - 除此之外我们还可以设置特定参数优化训练，如启用 deepspeed，以及设置训练文件的保存路径。
-   - 假如意外的中断了训练，还可以通过加上 `--resume {checkpoint_path}` 的方式进行模型续训。具体可看下面的指令详解。
+   - 假如意外的中断了训练，还可以通过加上 `--resume {checkpoint_path}` 的方式进行模型续训。
 
-4. **模型转换、测试及部署**：
+4. **模型转换、整合、测试及部署**：
    - 在完成训练后，找到对应的训练文件并执行 `xtuner convert pth_to_hf` 命令，就可以将转换模型格式为 huggingface 格式。
-   - 对于 LoRA 类的模型而言，则需要执行 `xtuner convert merge` 命令将 adapter 层与原模型进行合并。
+   - 对于 LoRA 类的模型而言，由于微调出来的是一个额外的 adapter 层而不是完整的模型，因此还需要执行 `xtuner convert merge` 命令将 adapter 层与原模型进行合并。对于全量微调模型而言，则只需要转换即可使用。
    - 转换完成后，我们就可以以转换后的文件路径并使用 `xtuner chat` 命令启动模型进行性能测试。
    - 除此之外，我们还可以在安装 LMDeploy 后通过 `python -m lmdeploy.pytorch.chat` 命令进行模型部署，即使用 TurboMind 进行推理。
 
@@ -41,75 +42,71 @@
 
 ## XTuner 的核心模块
 
-### apis
-- 提供了部分给第三方连接的接口（目前正在开发）
+1. **Configs**：
+   - 存放着不同模型、不同数据集以及微调方法的配置文件。
+   - 可以自行从 huggingface 上下载模型和数据集后进行一键启动。
 
-### Configs
-- 存放着不同模型、不同数据集以及微调方法的配置文件
-- 可以自行从 huggingface 上下载模型和数据集后进行一键启动
+2. **Dataset**：
+   - 在 `map_fns` 下存放了支持的数据集的映射规则。
+   - 在 `collate_fns` 下存放了关于数据整理函数部分的内容。
+   - 提供了用于存放和加载不同来源数据集的函数和类。
 
-### Dataset
-- 在`map_fns`下存放了支持的数据集的映射规则
-- 在`collate_fns`下存放了关于数据整理函数部分的内容
-- 提供了用于存放和加载不同来源数据集的函数和类
+3. **Engine**：
+   - `hooks` 中展示了哪些信息将会在哪个阶段下在终端被打印出来。
 
-### Engine
-- `hooks`中展示了哪些信息将会哪个阶段下在终端被打印出来。
-
-### Evaluation
-- `metric`中展示了XTuer所支持的一种评测数据集MMLU的格式，我们可以通过`XTuner test`进行调用
-
-### Model
-- `modules`中存放了对部分模型的优化策略，可以非侵入式地对模型进行修改。
-
-### Tools
-- 这里面是XTuner中的核心工具箱，里面存放了我们常用的打印config文件（`list_cfg`）、复制config文件(`copy_cfg`)、训练(`train`)以及对话(`chat`)等等。
-- 在`model_converters`中也提供了模型转换以及切分的脚本
-- 在`plugin`中提供了部分工具调用的函数
-
+4. **Tools**：
+   - 这里面是 XTuner 中的核心工具箱，里面存放了我们常用的指令，包括了打印 config 文件 `list_cfg`、复制 config 文件 `copy_cfg`、训练 `train` 以及对话 `chat` 等等。
+   - 在 `model_converters` 中也提供了模型转换、整合以及切分的脚本。
+   - 在 `plugin` 中提供了部分工具调用的函数。
 
 ## XTuner 当前支持的模型、数据集及微调方法
 
 ### 支持的大语言模型
-XTuner目前支持以下大语言模型，可支持所有huggingface格式的大语言模型：
-- `baichuan`
-- `chatglm`
-- `internlm`
-- `llama`
-- `llava`
-- `mistral`
-- `mixtral`
-- `qwen`
-- `yi`
-- `starcoder`
-- `zephyr`
-- ...
 
-### 支持的数据集格式
-XTuner目前支持以下数据集格式：
-- `alpaca`
-- `alpaca_zh`
-- `code_alpaca`
-- `arxiv`
-- `colors`
-- `crime_kg_assistant`
-- `law_reference`
-- `llava`
-- `medical`
-- `msagent`
-- `oasst1`
-- `openai`
-- `openorca`
-- `pretrain`
-- `sql`
-- `stack_exchange`
-- `tiny_codes`
-- `wizardlm`
-- ...
+1. **支持的大语言模型**
 
-### 支持的微调方法
-XTuner目前支持以下微调方法：
-- `QLora`
-- `Lora`
-- `Full`
-- ...
+   XTuner 目前支持以下大语言模型，可支持所有 huggingface 格式的大语言模型：
+   - `baichuan`
+   - `chatglm`
+   - `internlm`
+   - `llama`
+   - `llava`
+   - `mistral`
+   - `mixtral`
+   - `qwen`
+   - `yi`
+   - `starcoder`
+   - `zephyr`
+   - ...
+
+2. **支持的数据集格式**
+
+   XTuner 目前支持以下数据集格式：
+   - `alpaca`
+   - `alpaca_zh`
+   - `code_alpaca`
+   - `arxiv`
+   - `colors`
+   - `crime_kg_assistant`
+   - `law_reference`
+   - `llava`
+   - `medical`
+   - `msagent`
+   - `oasst1`
+   - `openai`
+   - `openorca`
+   - `pretrain`
+   - `sql`
+   - `stack_exchange`
+   - `tiny_codes`
+   - `wizardlm`
+   - ...
+
+3. **支持的微调方法**
+
+   XTuner 目前支持以下微调方法：
+   - `QLoRA`
+   - `LoRA`
+   - `Full`
+   - ...
+
