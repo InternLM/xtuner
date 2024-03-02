@@ -4,7 +4,7 @@
 
 在成功安装 XTuner 后，便可以开始进行模型的微调。在本节中，我们将演示如何使用 XTuner，应用 QLoRA 算法在 Colorist 数据集上微调 InternLM2-Chat-7B。
 
-Colorist 数据集是一个根据颜色描述提供颜色选择与建议的数据集，经过该数据集微调的模型可以做到根据用户对于颜色的描述，从而给出16进制下的颜色编码，如用户输入“宁静而又相当明亮的浅天蓝色，介于天蓝色和婴儿蓝之间，因其亮度而带有一丝轻微的荧光感。”，模型输出 ![#66ccff](https://img.shields.io/badge/%2366ccff-66CCFF)，该颜色很符合用户的描述。以下是该数据集的几条样例数据：
+Colorist 数据集（[HuggingFace 链接](https://huggingface.co/datasets/burkelibbey/colors)；[ModelScope 链接](https://www.modelscope.cn/datasets/fanqiNO1/colors/summary)）是一个根据颜色描述提供颜色选择与建议的数据集，经过该数据集微调的模型可以做到根据用户对于颜色的描述，从而给出16进制下的颜色编码，如用户输入“宁静而又相当明亮的浅天蓝色，介于天蓝色和婴儿蓝之间，因其亮度而带有一丝轻微的荧光感。”，模型输出 ![#66ccff](https://img.shields.io/badge/%2366ccff-66CCFF)，该颜色很符合用户的描述。以下是该数据集的几条样例数据：
 
 | 英文描述                                                                                                                                                                                                                         | 中文描述                                                                                                                         | 颜色                                                               |
 | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
@@ -14,10 +14,26 @@ Colorist 数据集是一个根据颜色描述提供颜色选择与建议的数�
 
 ## 准备模型权重
 
-在微调模型前，首先要准备待微调模型的权重。由于 XTuner 默认从 HuggingFace 拉取模型权重，这可能会导致下载过程不稳定、下载速度过慢等问题，因此我们选择从 ModelScope 下载 InternLM2-Chat-7B 的权重。
+在微调模型前，首先要准备待微调模型的权重。
+
+### 从 HuggingFace 下载
 
 ```bash
-pip install modelscope
+pip install -U huggingface_hub
+
+# 拉取模型至 Shanghai_AI_Laboratory/internlm2-chat-7b
+huggingface-cli download internlm/internlm2-chat-7b \
+                            --local-dir Shanghai_AI_Laboratory/internlm2-chat-7b \
+                            --local-dir-use-symlinks False \
+                            --resume-download
+```
+
+### 从 ModelScope 下载
+
+由于从 HuggingFace 拉取模型权重，可能存在下载过程不稳定、下载速度过慢等问题。因此在下载过程遇到网络问题时，我们则可以选择从 ModelScope 下载 InternLM2-Chat-7B 的权重。
+
+```bash
+pip install -U modelscope
 
 # 拉取模型至当前目录
 python -c "from modelscope import snapshot_download; snapshot_download('Shanghai_AI_Laboratory/internlm2-chat-7b', cache_dir='.')"
@@ -32,7 +48,17 @@ python -c "from modelscope import snapshot_download; snapshot_download('Shanghai
 
 ## 准备微调数据集
 
-由于相同的问题，因此我们从 ModelScope 下载所需要的微调数据集。
+接下来，我们需要准备微调数据集。
+
+### 从 HuggingFace 下载
+
+```bash
+git clone https://huggingface.co/datasets/burkelibbey/colors
+```
+
+### 从 ModelScope 下载
+
+由于相同的问题，因此我们可以选择从 ModelScope 下载所需要的微调数据集。
 
 ```bash
 git clone https://www.modelscope.cn/datasets/fanqiNO1/colors.git
@@ -99,19 +125,19 @@ xtuner copy-cfg internlm2_7b_qlora_colorist_e5 .
 在这一步中，我们需要修改待微调模型路径和数据路径为本地路径，并且修改数据集加载方式。
 此外，由于复制得到的配置文件是基于基座（Base）模型的，所以还需要修改 `prompt_template` 以适配对话（Chat）模型。
 
-```python
+```diff
 #######################################################################
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-# pretrained_model_name_or_path = 'internlm/internlm2-7b'
-pretrained_model_name_or_path = './Shanghai_AI_Laboratory/internlm2-chat-7b'
+- pretrained_model_name_or_path = 'internlm/internlm2-7b'
++ pretrained_model_name_or_path = './Shanghai_AI_Laboratory/internlm2-chat-7b'
 
 # Data
-# data_path = 'burkelibbey/colors'
-data_path = './colors/train.jsonl'
-# prompt_template = PROMPT_TEMPLATE.default
-prompt_template = PROMPT_TEMPLATE.internlm2_chat
+- data_path = 'burkelibbey/colors'
++ data_path = './colors/train.jsonl'
+- prompt_template = PROMPT_TEMPLATE.default
++ prompt_template = PROMPT_TEMPLATE.internlm2_chat
 
 ...
 #######################################################################
@@ -119,8 +145,8 @@ prompt_template = PROMPT_TEMPLATE.internlm2_chat
 #######################################################################
 train_dataset = dict(
     type=process_hf_dataset,
-    # dataset=dict(type=load_dataset, path=data_path),
-    dataset=dict(type=load_dataset, path='json', data_files=dict(train=data_path)),
+-   dataset=dict(type=load_dataset, path=data_path),
++   dataset=dict(type=load_dataset, path='json', data_files=dict(train=data_path)),
     tokenizer=tokenizer,
     max_length=max_length,
     dataset_map_fn=colors_map_fn,
@@ -138,12 +164,12 @@ train_dataset = dict(
 在完成上述操作后，便可以使用下面的指令启动微调任务了。
 
 ```bash
-# 单张 GPU
-xtuner train internlm2_7b_qlora_colorist_e5_copy.py
+# 单机单卡
+xtuner train ./internlm2_7b_qlora_colorist_e5_copy.py
 # 单机多卡
-NPROC_PER_NODE=${GPU_NUM} xtuner train internlm2_7b_qlora_colorist_e5_copy.py
+NPROC_PER_NODE=${GPU_NUM} xtuner train ./internlm2_7b_qlora_colorist_e5_copy.py
 # slurm 情况
-srun ${SRUN_ARGS} xtuner train internlm2_7b_qlora_colorist_e5_copy.py --launcher slurm
+srun ${SRUN_ARGS} xtuner train ./internlm2_7b_qlora_colorist_e5_copy.py --launcher slurm
 ```
 
 正确输出的训练日志应类似如下所示：
@@ -215,19 +241,19 @@ Please give me a clear blue like the sky.<|im_end|>
 
 ## 模型转换 + LoRA 合并
 
-在训练完成后，我们会得到几个 pth 文件，这些文件存储了 QLoRA 算法训练过程所更新的参数，而非模型的全部参数。因此我们需要将这些 pth 文件转换为 hf 格式，并合并入原始权重中。
+在训练完成后，我们会得到几个 `.pth` 文件，这些文件存储了 QLoRA 算法训练过程所更新的参数，而**不是**模型的全部参数。因此我们需要将这些 `.pth` 文件转换为 HuggingFace 格式，并合并入原始的语言模型权重中。
 
 ### 模型转换
 
-XTuner 已经集成好了转换为 hf 格式的功能，我们只需要执行
+XTuner 已经集成好了将模型转换为 HuggingFace 格式的工具，我们只需要执行
 
 ```bash
 # 创建存放 hf 格式参数的目录
 mkdir work_dirs/internlm2_7b_qlora_colorist_e5_copy/iter_720_hf
 
 # 转换格式
-xtuner convert pth_to_hf internlm2_7b_qlora_colorist_e5_copy.py\
-                            work_dirs/internlm2_7b_qlora_colorist_e5_copy/iter_720.pth\
+xtuner convert pth_to_hf internlm2_7b_qlora_colorist_e5_copy.py \
+                            work_dirs/internlm2_7b_qlora_colorist_e5_copy/iter_720.pth \
                             work_dirs/internlm2_7b_qlora_colorist_e5_copy/iter_720_hf
 ```
 
@@ -235,16 +261,16 @@ xtuner convert pth_to_hf internlm2_7b_qlora_colorist_e5_copy.py\
 
 ### LoRA 合并
 
-XTuner 也已经集成好了合并权重的功能，我们只需执行如下指令：
+XTuner 也已经集成好了合并 LoRA 权重的工具，我们只需执行如下指令：
 
 ```bash
 # 创建存放合并后的参数的目录
 mkdir work_dirs/internlm2_7b_qlora_colorist_e5_copy/merged
 
 # 合并参数
-xtuner convert merge Shanghai_AI_Laboratory/internlm2-chat-7b\
-                        work_dirs/internlm2_7b_qlora_colorist_e5_copy/iter_720_hf\
-                        work_dirs/internlm2_7b_qlora_colorist_e5_copy/merged\
+xtuner convert merge Shanghai_AI_Laboratory/internlm2-chat-7b \
+                        work_dirs/internlm2_7b_qlora_colorist_e5_copy/iter_720_hf \
+                        work_dirs/internlm2_7b_qlora_colorist_e5_copy/merged \
                         --max-shard-size 2GB
 ```
 
@@ -252,11 +278,20 @@ xtuner convert merge Shanghai_AI_Laboratory/internlm2-chat-7b\
 
 ## 与模型对话
 
-在合并权重后，为了更好地体会到模型的能力，XTuner 也集成了与合并后的模型对话的功能。通过如下命令，便可以启动一个与模型对话的简易 Demo。
+在合并权重后，为了更好地体会到模型的能力，XTuner 也集成了与模型对话的工具。通过如下命令，便可以启动一个与模型对话的简易 Demo。
 
 ```bash
-xtuner chat work_dirs/internlm2_7b_qlora_colorist_e5_copy/merged\
-                --prompt-template internlm2_chat\
+xtuner chat work_dirs/internlm2_7b_qlora_colorist_e5_copy/merged \
+                --prompt-template internlm2_chat \
+                --system-template colorist
+```
+
+当然，我们也可以选择不合并权重，而是直接与 LLM + LoRA Adapter 进行对话，我们只需要执行如下指令：
+
+```bash
+xtuner chat Shanghai_AI_Laboratory/internlm2-chat-7b
+                --adapter work_dirs/internlm2_7b_qlora_colorist_e5_copy/iter_720_hf \
+                --prompt-template internlm2_chat \
                 --system-template colorist
 ```
 

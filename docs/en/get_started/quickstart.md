@@ -4,7 +4,7 @@ In this section, we will show you how to use XTuner to fine-tune a model to help
 
 After installing XTuner successfully, we can start fine-tuning the model. In this section, we will demonstrate how to use XTuner to apply the QLoRA algorithm to fine-tune InternLM2-Chat-7B on the Colorist dataset.
 
-The Colorist dataset is a dataset that provides color choices and suggestions based on color descriptions. A model fine-tuned on this dataset can be used to give a hexadecimal color code based on the user's description of the color. For example, when the user enters "a calming but fairly bright light sky blue, between sky blue and baby blue, with a hint of fluorescence due to its brightness", the model will output ![#66ccff](https://img.shields.io/badge/%2366ccff-66CCFF), which matches the user's description. There are a few sample data from this dataset:
+The Colorist dataset ([HuggingFace link](https://huggingface.co/datasets/burkelibbey/colors); [ModelScope link](https://www.modelscope.cn/datasets/fanqiNO1/colors/summary)) is a dataset that provides color choices and suggestions based on color descriptions. A model fine-tuned on this dataset can be used to give a hexadecimal color code based on the user's description of the color. For example, when the user enters "a calming but fairly bright light sky blue, between sky blue and baby blue, with a hint of fluorescence due to its brightness", the model will output ![#66ccff](https://img.shields.io/badge/%2366ccff-66CCFF), which matches the user's description. There are a few sample data from this dataset:
 
 | Enligsh Description                                                                                                                                                                                                              | Chinese Description                                                                                                              | Color                                                              |
 | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
@@ -14,10 +14,26 @@ The Colorist dataset is a dataset that provides color choices and suggestions ba
 
 ## Prepare the model weights
 
-Before fine-tuning the model, we first need to prepare the weights of the model. Since XTuner pulls model weights from HuggingFace by default, which may lead to an unstable download process, slow download speed and other problems, we choose to download the weights of InternLM2-Chat-7B from ModelScope.
+Before fine-tuning the model, we first need to prepare the weights of the model.
+
+### Download from HuggingFace
 
 ```bash
-pip install modelscope
+pip install -U huggingface_hub
+
+# Download the model weights to Shanghai_AI_Laboratory/internlm2-chat-7b
+huggingface-cli download internlm/internlm2-chat-7b \
+                            --local-dir Shanghai_AI_Laboratory/internlm2-chat-7b \
+                            --local-dir-use-symlinks False \
+                            --resume-download
+```
+
+### Download from ModelScope
+
+Since pulling model weights from HuggingFace may lead to an unstable download process, slow download speed and other problems, we can choose to download the weights of InternLM2-Chat-7B from ModelScope when experiencing network issues.
+
+```bash
+pip install -U modelscope
 
 # Download the model weights to the current directory
 python -c "from modelscope import snapshot_download; snapshot_download('Shanghai_AI_Laboratory/internlm2-chat-7b', cache_dir='.')"
@@ -32,7 +48,15 @@ The HuggingFace link and ModelScope link are attached here:
 
 ## Prepare the fine-tuning dataset
 
-Due to the same reason, we choose to download the dataset from ModelScope.
+### Download from HuggingFace
+
+```bash
+git clone https://huggingface.co/datasets/burkelibbey/colors
+```
+
+### Download from ModelScope
+
+Due to the same reason, we can choose to download the dataset from ModelScope.
 
 ```bash
 git clone https://www.modelscope.cn/datasets/fanqiNO1/colors.git
@@ -99,19 +123,19 @@ The directory structure at this point should look like this:
 In this step, we need to modify the model path and dataset path to local paths and modify the dataset loading method.
 In addition, since the copied config is based on the Base model, we also need to modify the `prompt_template` to adapt to the Chat model.
 
-```python
+```diff
 #######################################################################
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-# pretrained_model_name_or_path = 'internlm/internlm2-7b'
-pretrained_model_name_or_path = './Shanghai_AI_Laboratory/internlm2-chat-7b'
+- pretrained_model_name_or_path = 'internlm/internlm2-7b'
++ pretrained_model_name_or_path = './Shanghai_AI_Laboratory/internlm2-chat-7b'
 
 # Data
-# data_path = 'burkelibbey/colors'
-data_path = './colors/train.jsonl'
-# prompt_template = PROMPT_TEMPLATE.default
-prompt_template = PROMPT_TEMPLATE.internlm2_chat
+- data_path = 'burkelibbey/colors'
++ data_path = './colors/train.jsonl'
+- prompt_template = PROMPT_TEMPLATE.default
++ prompt_template = PROMPT_TEMPLATE.internlm2_chat
 
 ...
 #######################################################################
@@ -119,8 +143,8 @@ prompt_template = PROMPT_TEMPLATE.internlm2_chat
 #######################################################################
 train_dataset = dict(
     type=process_hf_dataset,
-    # dataset=dict(type=load_dataset, path=data_path),
-    dataset=dict(type=load_dataset, path='json', data_files=dict(train=data_path)),
+-   dataset=dict(type=load_dataset, path=data_path),
++   dataset=dict(type=load_dataset, path='json', data_files=dict(train=data_path)),
     tokenizer=tokenizer,
     max_length=max_length,
     dataset_map_fn=colors_map_fn,
@@ -139,11 +163,11 @@ Once having done the above steps, we can start fine-tuning using the following c
 
 ```bash
 # Single GPU
-xtuner train internlm2_7b_qlora_colorist_e5_copy.py
+xtuner train ./internlm2_7b_qlora_colorist_e5_copy.py
 # Multiple GPUs
-NPROC_PER_NODE=${GPU_NUM} xtuner train internlm2_7b_qlora_colorist_e5_copy.py
+NPROC_PER_NODE=${GPU_NUM} xtuner train ./internlm2_7b_qlora_colorist_e5_copy.py
 # Slurm
-srun ${SRUN_ARGS} xtuner train internlm2_7b_qlora_colorist_e5_copy.py --launcher slurm
+srun ${SRUN_ARGS} xtuner train ./internlm2_7b_qlora_colorist_e5_copy.py --launcher slurm
 ```
 
 The correct training log may look similar to the one shown below:
@@ -215,36 +239,36 @@ It is clear that the output of the model after training has been fully aligned w
 
 # Model Convert + LoRA Merge
 
-After training, we will get several pth files that do **not** contain all the parameters of the model, but store the parameters updated by the training process of the QLoRA algorithm. Therefore, we need to convert these pth files to hf format and merge them into the original weights.
+After training, we will get several `.pth` files that do **NOT** contain all the parameters of the model, but store the parameters updated by the training process of the QLoRA algorithm. Therefore, we need to convert these `.pth` files to HuggingFace format and merge them into the original LLM weights.
 
 ### Model Convert
 
-XTuner has already integrated the function of converting the model to hf format. We can use the following command to convert the model.
+XTuner has already integrated the tool of converting the model to HuggingFace format. We can use the following command to convert the model.
 
 ```bash
 # Create the directory to store parameters in hf format
 mkdir work_dirs/internlm2_7b_qlora_colorist_e5_copy/iter_720_hf
 
 # Convert the model to hf format
-xtuner convert pth_to_hf internlm2_7b_qlora_colorist_e5_copy.py\
-                            work_dirs/internlm2_7b_qlora_colorist_e5_copy/iter_720.pth\
+xtuner convert pth_to_hf internlm2_7b_qlora_colorist_e5_copy.py \
+                            work_dirs/internlm2_7b_qlora_colorist_e5_copy/iter_720.pth \
                             work_dirs/internlm2_7b_qlora_colorist_e5_copy/iter_720_hf
 ```
 
-This command will convert `work_dirs/internlm2_7b_qlora_colorist_e5_copy/iter_720.pth` to hf format based on the contents of the config `internlm2_7b_qlora_colorist_e5_copy/iter_720.pth` and will save it in `work_dirs/internlm2_7b_qlora_colorist_e5_copy/iter_720_hf`.
+This command will convert `work_dirs/internlm2_7b_qlora_colorist_e5_copy/iter_720.pth` to hf format based on the contents of the config `internlm2_7b_qlora_colorist_e5_copy.py` and will save it in `work_dirs/internlm2_7b_qlora_colorist_e5_copy/iter_720_hf`.
 
 ### LoRA Merge
 
-XTuner has also integrated the function of merging weights, we just need to execute the following command:
+XTuner has also integrated the tool of merging LoRA weights, we just need to execute the following command:
 
 ```bash
 # Create the directory to store the merged weights
 mkdir work_dirs/internlm2_7b_qlora_colorist_e5_copy/merged
 
 # Merge the weights
-xtuner convert merge Shanghai_AI_Laboratory/internlm2-chat-7b\
-                        work_dirs/internlm2_7b_qlora_colorist_e5_copy/iter_720_hf\
-                        work_dirs/internlm2_7b_qlora_colorist_e5_copy/merged\
+xtuner convert merge Shanghai_AI_Laboratory/internlm2-chat-7b \
+                        work_dirs/internlm2_7b_qlora_colorist_e5_copy/iter_720_hf \
+                        work_dirs/internlm2_7b_qlora_colorist_e5_copy/merged \
                         --max-shard-size 2GB
 ```
 
@@ -252,11 +276,20 @@ Similar to the command above, this command will read the original parameter path
 
 ## Chat with the model
 
-To better appreciate the model's capabilities after merging the weights, we can chat with the model. XTuner also integrates the function of chatting with the merged model. We can start a simple demo to chat with the model with the following command:
+To better appreciate the model's capabilities after merging the weights, we can chat with the model. XTuner also integrates the tool of chatting with models. We can start a simple demo to chat with the model with the following command:
 
 ```bash
-xtuner chat work_dirs/internlm2_7b_qlora_colorist_e5_copy/merged\
-                --prompt-template internlm2_chat\
+xtuner chat work_dirs/internlm2_7b_qlora_colorist_e5_copy/merged \
+                --prompt-template internlm2_chat \
+                --system-template colorist
+```
+
+Of course, we can also choose not to merge the weights and instead chat directly with the LLM + LoRA Adapter, we just need to execute the following command:
+
+```bash
+xtuner chat Shanghai_AI_Laboratory/internlm2-chat-7b
+                --adapter work_dirs/internlm2_7b_qlora_colorist_e5_copy/iter_720_hf \
+                --prompt-template internlm2_chat \
                 --system-template colorist
 ```
 
