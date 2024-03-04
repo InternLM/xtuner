@@ -4,7 +4,8 @@ import re
 import warnings
 
 import torch
-from transformers import StoppingCriteriaList
+from transformers import PreTrainedTokenizerFast, StoppingCriteriaList
+from transformers.generation.streamers import BaseStreamer
 
 from xtuner.utils import StopWordStoppingCriteria
 
