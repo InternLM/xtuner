@@ -33,8 +33,8 @@ prompt_template = PROMPT_TEMPLATE.internlm2_chat
 max_length = int(2048 - (336 / 14)**2)
 
 # Scheduler & Optimizer
-batch_size = 8  # per_device
-accumulative_counts = 2
+batch_size = 4  # per_device
+accumulative_counts = 4
 
 dataloader_num_workers = 0
 max_epochs = 1
@@ -136,7 +136,7 @@ param_scheduler = [
         eta_min=0.0,
         by_epoch=True,
         begin=warmup_ratio * max_epochs,
-        T_max=max_epochs,
+        end=max_epochs,
         convert_to_iter_based=True)
 ]
 

@@ -1,5 +1,4 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-from xtuner.utils import SYSTEM_TEMPLATE
 
 
 def alpaca_map_fn(example):
@@ -8,7 +7,6 @@ def alpaca_map_fn(example):
     else:
         return {
             'conversation': [{
-                'system': SYSTEM_TEMPLATE.alpaca,
                 'input': f"{example['instruction']}\n{example['input']}",
                 'output': example['output']
             }]

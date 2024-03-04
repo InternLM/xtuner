@@ -89,9 +89,27 @@ internlm_chat=dict(
 | HuggingFaceH4/zephyr-7b-beta             | zephyr          |
 | deepseek-ai/deepseek-moe-16b-base        | deepseek_moe    |
 | deepseek-ai/deepseek-moe-16b-chat        | deepseek_moe    |
+| internlm/internlm2-1_8b                  | default\*       |
 | internlm/internlm2-7b                    | default\*       |
 | internlm/internlm2-20b                   | default\*       |
+| internlm/internlm2-chat-1_8b             | internlm2_chat  |
 | internlm/internlm2-chat-7b               | internlm2_chat  |
 | internlm/internlm2-chat-20b              | internlm2_chat  |
+| Qwen/Qwen1.5-0.5B                        | default\*       |
+| Qwen/Qwen1.5-0.5B-Chat                   | qwen_chat       |
+| Qwen/Qwen1.5-1.8B                        | default\*       |
+| Qwen/Qwen1.5-1.8B-Chat                   | qwen_chat       |
+| Qwen/Qwen1.5-4B                          | default\*       |
+| Qwen/Qwen1.5-4B-Chat                     | qwen_chat       |
+| Qwen/Qwen1.5-7B                          | default\*       |
+| Qwen/Qwen1.5-7B-Chat                     | qwen_chat       |
+| Qwen/Qwen1.5-14B                         | default\*       |
+| Qwen/Qwen1.5-14B-Chat                    | qwen_chat       |
+| Qwen/Qwen1.5-72B                         | default\*       |
+| Qwen/Qwen1.5-72B-Chat                    | qwen_chat       |
+| google/gemma-2b                          | default\*       |
+| google/gemma-2b-it                       | gemma\*         |
+| google/gemma-7b                          | default\*       |
+| google/gemma-7b-it                       | gemma\*         |
 
 \*: The official template has special tokens (like `<|im_start|>`, `<|im_end|>`) that were not trained during the pre-training phase. Therefore, these models utilize the `default` template.

@@ -166,7 +166,15 @@ def main():
                 level=logging.INFO)
         elif args.resume is not None:
             # Use resumed seed
-            resumed_seed = get_seed_from_checkpoint(args.resume)
+            from mmengine.fileio import PetrelBackend, get_file_backend
+
+            from xtuner.utils.fileio import patch_fileio
+            backend = get_file_backend(args.resume)
+            if isinstance(backend, PetrelBackend):
+                with patch_fileio():
+                    resumed_seed = get_seed_from_checkpoint(args.resume)
+            else:
+                resumed_seed = get_seed_from_checkpoint(args.resume)
             cfg.merge_from_dict(dict(randomness=dict(seed=resumed_seed)))
             if args.seed is not None and args.seed != resumed_seed:
                 print_log(

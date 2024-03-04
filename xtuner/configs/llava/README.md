@@ -105,3 +105,16 @@ xtuner mmbench internlm/internlm-chat-7b \
 Here, `$DATA_PATH` refers to one of the datasets downloaded as mentioned above, such as `MMBench_DEV_EN.tsv`.
 
 After the evaluation is completed, if it's a development set, it will directly print out the results; If it's a test set, you need to submit `mmbench_result.xlsx` to the official MMBench for final evaluation to obtain precision results!
+
+### Refcoco
+
+To evaluate your model with refcoco, you need download the evaluation data files in [link](https://github.com/Vision-CAIR/MiniGPT-4/tree/main/eval_scripts/eval_data). Second, you can use following command to evaluate your model.
+
+```bash
+xtuner eval_refcoco lmsys/vicuna-7b-v1.5 \
+  --visual-encoder openai/clip-vit-large-patch14-336 \
+  --llava $LLAVA_PATH \
+  --prompt-template internlm_chat \
+  --data-path $DATA_PATH \
+  --work-dir $RESULT_PATH
+```
