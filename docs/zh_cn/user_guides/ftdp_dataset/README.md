@@ -1,11 +1,9 @@
-本文介绍了常见的 6 种使用场景：
+本节介绍了常见的 4 种使用 ftdp 数据集训练的使用场景：
 
 - [Case 1](Case1.md)
-- [Case 2](#case-2)
-- [Case 3](#case-3)
-- [Case 4](#case-4)
-- [Case 5](#case-5)
-- [Case 6](#case-6)
+- [Case 2](Case2.md)
+- [Case 3](Case3.md)
+- [Case 4](Case4.md)
 
 请先参考下方流程图，选择自己的使用场景。
 
@@ -22,7 +20,4 @@ graph TD;
     G -->|是| H[尚不支持]
     G -->|否| I[Case 3]
     B -->|是| J[Case 4]
-    A -->|否| K{离线处理数据集}
-    K -->|是| L[Case 5]
-    K -->|否| M[Case 6]
 ```
