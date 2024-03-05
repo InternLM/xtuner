@@ -5,20 +5,21 @@ import io
 from io import BytesIO
 from itertools import chain
 
+import numpy as np
 import requests
 from PIL import Image
 
-from xtuner.utils import DEFAULT_IMAGE_TOKEN, IGNORE_INDEX, IMAGE_TOKEN_INDEX
+from xtuner.utils import DEFAULT_IMAGE_TOKEN, IGNORE_INDEX, IMAGE_TOKEN_INDEX,DEFAULT_PAD_TOKEN_INDEX
 
 
-def encode_fn(example,
-              tokenizer,
-              max_length,
-              input_ids_with_output=True,
-              with_image_token=False):
-    if tokenizer.__class__.__name__ == 'QWenTokenizer':
+def get_bos_eos_token_ids(tokenizer):
+    if tokenizer.__class__.__name__ in [
+            'QWenTokenizer', 'QWen2Tokenizer', 'Qwen2TokenizerFast'
+    ]:
         bos_token_id = []
         eos_token_id = tokenizer.eos_token_id
+        assert eos_token_id is not None, \
+            'Please set eos_token for Qwen tokenizer!'
     elif tokenizer.__class__.__name__ == 'ChatGLMTokenizer':
         bos_token_id = [64790, 64792]
         eos_token_id = tokenizer.eos_token_id
@@ -29,130 +30,225 @@ def encode_fn(example,
         bos_token_id = [bos_token_id]
     if isinstance(eos_token_id, int):
         eos_token_id = [eos_token_id]
+    return bos_token_id, eos_token_id
+
+
+def encode_fn(example,
+              tokenizer,
+              max_length,
+              input_ids_with_output=True,
+              with_image_token=False):
+    """We only support the following three scenarios:
+
+    1. Incremental pretraining dataset.
+        example['conversation'] = [
+                {
+                    'input': '',
+                    'output': '### Human: Can you write xxx'
+                }
+            ]
+
+    2. Single-turn conversation dataset.
+        example['conversation'] = [
+                {
+                    'input': 'Give three tips for staying healthy.',
+                    'output': '1.Eat a balanced diet xxx'
+                }
+            ]
+
+    3. Multi-turn conversation dataset.
+        example['conversation'] = [
+                {
+                    'input': 'Give three tips for staying healthy.',
+                    'output': '1.Eat a balanced diet xxx'
+                },
+                {
+                    'input': 'Please expand on the second point.',
+                    'output': 'Here is an expanded explanation of the xxx'
+                }
+            ]
+    """
+    bos_token_id, eos_token_id = get_bos_eos_token_ids(tokenizer)
     is_multi_turn_conversation = len(example['conversation']) > 1
     if is_multi_turn_conversation:
         assert input_ids_with_output
 
     input_ids, labels = [], []
-    is_last_turn_handled = False  # 在函数开始处初始化变量    
-    for idx, single_turn_conversation in enumerate(example['conversation']):
-        # 判断是否为最后一轮对话
-        is_last_turn = idx == len(example['conversation']) - 1
+    next_needs_bos_token = True
+    for single_turn_conversation in example['conversation']:
         input = single_turn_conversation['input']
-
-        # 处理带有图片标记的输入
         if DEFAULT_IMAGE_TOKEN in input and with_image_token:
             chunk_encode = [
-                tokenizer(chunk, add_special_tokens=False)
-                for chunk in input.split('<image>')
+                tokenizer.encode(chunk, add_special_tokens=False)
+                for chunk in input.split(DEFAULT_IMAGE_TOKEN)
             ]
             assert len(chunk_encode) == 2
-            input_encode = {'input_ids': []}
+            input_encode = []
             for idx, cur_chunk_encode in enumerate(chunk_encode):
-                input_encode['input_ids'].extend(cur_chunk_encode['input_ids'])
+                input_encode.extend(cur_chunk_encode)
                 if idx != len(chunk_encode) - 1:
-                    input_encode['input_ids'].append(IMAGE_TOKEN_INDEX)
+                    input_encode.append(IMAGE_TOKEN_INDEX)
         else:
-            input_encode = tokenizer(f'{input}', add_special_tokens=False)
-
-        # 添加开始标记和编码后的输入
-        input_ids += bos_token_id + input_encode['input_ids']
-        labels += [IGNORE_INDEX] * (len(bos_token_id + input_encode['input_ids']))
-
-        # 判断最后一轮对话的 "input" 部分长度是否等于 max_length
-        # 检查添加这轮对话后长度是否超过 max_length
-        if len(input_ids) + len(bos_token_id) + len(input_encode['input_ids']) > max_length:
-            # 如果是最后一轮，设置标志
-            is_last_turn_handled = is_last_turn
-            break
-
-        # 处理输出
+            input_encode = tokenizer.encode(input, add_special_tokens=False)
+        if next_needs_bos_token:
+            input_ids += bos_token_id
+            labels += [IGNORE_INDEX] * len(bos_token_id)
+        input_ids += input_encode
+        labels += [IGNORE_INDEX] * len(input_encode)
         if input_ids_with_output:
+            # Add output
+            output_with_loss = single_turn_conversation.get(
+                'output_with_loss', True)
             output = single_turn_conversation['output']
-            output_encode = tokenizer(f'{output}', add_special_tokens=False)
-            input_ids += output_encode['input_ids'] + eos_token_id
-            labels += output_encode['input_ids'] + eos_token_id
+            output_encode = tokenizer.encode(output, add_special_tokens=False)
+            input_ids += output_encode
+            if output_with_loss:
+                labels += copy.deepcopy(output_encode)
+            else:
+                labels += [IGNORE_INDEX] * len(output_encode)
+            # Add EOS_TOKEN (with loss)
+            if single_turn_conversation.get('need_eos_token', True):
+                next_needs_bos_token = True
+                input_ids += eos_token_id
+                if output_with_loss:
+                    labels += copy.deepcopy(eos_token_id)
+                else:
+                    labels += [IGNORE_INDEX] * len(eos_token_id)
+            else:
+                next_needs_bos_token = False
+            # Add SEP (without loss)
+            sep = single_turn_conversation.get('sep', '')
+            if sep != '':
+                sep_encode = tokenizer.encode(sep, add_special_tokens=False)
+                input_ids += sep_encode
+                labels += [IGNORE_INDEX] * len(sep_encode)
 
-    # 处理超过最大长度的输入
     if len(input_ids) > max_length:
         input_ids = input_ids[:max_length]
         labels = labels[:max_length]
-
-    return {'input_ids': input_ids, 'labels': labels, 'is_last_turn_handled': is_last_turn_handled}
+    return {'input_ids': input_ids, 'labels': labels}
 
 
 class Packer:
-    # modified from
-    # https://github.com/facebookresearch/llama-recipes/blob/main/ft_datasets/utils.py
+    """Pack multiple pieces of data into one."""
 
-    def __init__(self, chunk_size=2048):
+    def __init__(self,
+                 chunk_size=2048,
+                 use_varlen_attn=False,
+                 drop_last=False):
         self.chunk_size = chunk_size
         self.residual = {'input_ids': [], 'labels': []}
+        self.use_varlen_attn = use_varlen_attn
+        self.drop_last = drop_last
+        if use_varlen_attn:
+            self.residual_cumulative_len = [0]
+
+    def get_cumulative_len(self, chunk_num):
+        ptr_l = 0
+        cumulative_len = []
+        for chunk_idx in range(chunk_num):
+            length_train = (chunk_idx + 1) * self.chunk_size
+            ptr_r = np.searchsorted(
+                self.residual_cumulative_len, length_train, side='left')
+            if self.residual_cumulative_len[ptr_r] == length_train:
+                cumulative_len_cur = \
+                    self.residual_cumulative_len[ptr_l:ptr_r + 1]
+                ptr_l = ptr_r + 1
+            else:
+                cumulative_len_cur = self.residual_cumulative_len[
+                    ptr_l:ptr_r] + [length_train]
+                ptr_l = ptr_r
+            cumulative_len_cur = [
+                num - chunk_idx * self.chunk_size for num in cumulative_len_cur
+            ]
+            if cumulative_len_cur[0] != 0:
+                cumulative_len_cur = [0] + cumulative_len_cur
+
+            cumulative_len.append(cumulative_len_cur)
+
+        self.residual_cumulative_len = [
+            num - length_train for num in self.residual_cumulative_len[ptr_l:]
+        ]
+        if len(self.residual_cumulative_len) == 0:
+            self.residual_cumulative_len = [0]
+        elif self.residual_cumulative_len[0] != 0:
+            self.residual_cumulative_len = [0] + self.residual_cumulative_len
+
+        return cumulative_len
+
+    def get_indexes(self, cumulative_len):
+        indexes = []
+        for cumulative_len_cur in cumulative_len:
+            index_cur = []
+            for i in range(len(cumulative_len_cur) - 1):
+                index_cur.extend(
+                    list(
+                        range(cumulative_len_cur[i + 1] -  # noqa: W504
+                              cumulative_len_cur[i])))
+            indexes.append(index_cur)
+        return indexes
 
     def __call__(self, batch):
-        # 处理残留的部分和当前批次
         concatenated_samples = {
-            k: v + list(chain(*[example[k] for example in batch]))
+            k: v + list(chain(*batch[k]))
             for k, v in self.residual.items()
         }
 
-        # 检查最后一轮对话是否被处理
-        is_last_turn_handled = any(example['is_last_turn_handled'] for example in batch)
+        if self.use_varlen_attn:
+            for input_id in batch['input_ids']:
+                self.residual_cumulative_len.append(
+                    self.residual_cumulative_len[-1] + len(input_id))
 
-        total_length = len(concatenated_samples['input_ids'])
+        total_length = len(concatenated_samples[list(
+            concatenated_samples.keys())[0]])
 
         if total_length >= self.chunk_size:
             chunk_num = total_length // self.chunk_size
             result = {
-                k: [
-                    v[i:i + self.chunk_size]
-                    for i in range(0, chunk_num * self.chunk_size, self.chunk_size)
-                ] for k, v in concatenated_samples.items()
+                k: [] for k in concatenated_samples.keys()
             }
 
-            if is_last_turn_handled:
-                # 如果最后一轮对话恰好等于 max_length，处理特殊情况
-                last_input_ids = batch[-1]['input_ids']
-                last_labels = batch[-1]['labels']
-                self.residual = {'input_ids': last_input_ids, 'labels': last_labels}
+            # 遍历每个chunk
+            for i in range(chunk_num):
+                start_idx = i * self.chunk_size
+                end_idx = start_idx + self.chunk_size
+                
+                # 判断切割点是否位于input_ids部分
+                if end_idx > total_length - len(concatenated_samples['input_ids'][-1]) and end_idx < total_length:
+                    # 如果是，且input_ids部分达到max_length，则在该点前插入padding
+                    padding_length = self.max_length - (end_idx - (total_length - len(concatenated_samples['input_ids'][-1])))
+                    padding = [DEFAULT_PAD_TOKEN_INDEX] * padding_length
+                    result['input_ids'].append(padding + concatenated_samples['input_ids'][start_idx - padding_length:end_idx])
+                    result['labels'].append(padding + concatenated_samples['labels'][start_idx - padding_length:end_idx])
+                else:
+                    result['input_ids'].append(concatenated_samples['input_ids'][start_idx:end_idx])
+                    result['labels'].append(concatenated_samples['labels'][start_idx:end_idx])
+
+            # 处理残余部分
+            self.residual = {
+                'input_ids': concatenated_samples['input_ids'][chunk_num * self.chunk_size:],
+                'labels': concatenated_samples['labels'][chunk_num * self.chunk_size:]
+            }
+
+            if self.use_varlen_attn:
+                cumulative_len = self.get_cumulative_len(chunk_num)
+                result['cumulative_len'] = cumulative_len
+                result['indexes'] = self.get_indexes(cumulative_len)
+        else:
+            if self.drop_last:
+                result = {k: [] for k, v in concatenated_samples.items()}
             else:
-                # 正常情况下的残留处理
-                self.residual = {
-                    k: v[(chunk_num * self.chunk_size):]
-                    for k, v in concatenated_samples.items()
-                }
-        else:
-            result = {k: [v] for k, v in concatenated_samples.items()}
+                result = {k: [v] for k, v in concatenated_samples.items()}
+
             self.residual = {k: [] for k in concatenated_samples.keys()}
-        print("Current residual:", self.residual)      
-        return result
 
-class InternRepoPacker:
-    """Only used for packing data in InternLM repo
-    (https://github.com/InternLM/InternLM) format."""
-
-    def __init__(self, chunk_size=2048):
-        self.chunk_size = chunk_size
-        self.residual = []
-
-    def __call__(self, batch):
-        concatenated_samples = self.residual + list(chain(*batch['input_ids']))
-
-        total_length = len(concatenated_samples)
-
-        if total_length >= self.chunk_size:
-            chunk_num = total_length // self.chunk_size
-            input_ids = [
-                concatenated_samples[i:i + self.chunk_size]
-                for i in range(0, chunk_num * self.chunk_size, self.chunk_size)
-            ]
-            result = {'input_ids': input_ids}
-            self.residual = concatenated_samples[(chunk_num *
-                                                  self.chunk_size):]
-        else:
-            input_ids = [concatenated_samples]
-            result = {'input_ids': input_ids}
-            self.residual = []
+            if self.use_varlen_attn:
+                result['cumulative_len'] = [] if self.drop_last else [
+                    self.residual_cumulative_len
+                ]
+                result['indexes'] = [] if self.drop_last else self.get_indexes(
+                    [self.residual_cumulative_len])
+                self.residual_cumulative_len = [0]
 
         return result
 
