@@ -94,8 +94,8 @@ class MIMICITDataset(Dataset):
             if data_dict.get('image_ids', None) is None:
                 cur_len = -cur_len
             else:
-                cur_len = cur_len - 1 + self.per_image_length * len(
-                    data_dict['image_ids'])
+                n_images = len(data_dict['image_ids'])
+                cur_len = cur_len - n_images + self.per_image_length * n_images
             length_list.append(cur_len)
         return length_list
 

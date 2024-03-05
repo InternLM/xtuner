@@ -64,7 +64,11 @@ class LLaVADataset(Dataset):
             if data_dict.get('image', None) is None:
                 cur_len = -cur_len
             else:
-                cur_len = cur_len - 1 + self.per_image_length
+                if isinstance(data_dict.get('image', None), str):
+                    n_images = 1
+                else:
+                    n_images = len(data_dict.get('image', None))
+                cur_len = cur_len - n_images + self.per_image_length * n_images
             length_list.append(cur_len)
         return length_list
 
@@ -74,17 +78,23 @@ class LLaVADataset(Dataset):
     def __getitem__(self, index):
         data_dict = self.text_data[index]
         if data_dict.get('image', None) is not None:
-            image_file = data_dict['image']
-            image = Image.open(os.path.join(self.image_folder,
-                                            image_file)).convert('RGB')
-            if self.pad_image_to_square:
-                image = expand2square(
-                    image,
-                    tuple(
-                        int(x * 255) for x in self.image_processor.image_mean))
-            image = self.image_processor.preprocess(
-                image, return_tensors='pt')['pixel_values'][0]
-            data_dict['pixel_values'] = image
+            image_list = data_dict['image']
+            if isinstance(image_list, str):
+                image_list = [image_list]
+            images = []
+            for image_file in image_list:
+                image = Image.open(
+                    os.path.join(self.image_folder, image_file)).convert('RGB')
+                if self.pad_image_to_square:
+                    image = expand2square(
+                        image,
+                        tuple(
+                            int(x * 255)
+                            for x in self.image_processor.image_mean))
+                image = self.image_processor.preprocess(
+                    image, return_tensors='pt')['pixel_values'][0]
+                images.append(image)
+            data_dict['pixel_values'] = images
         else:
             crop_size = self.image_processor.crop_size
             data_dict['pixel_values'] = torch.zeros(3, crop_size['height'],
