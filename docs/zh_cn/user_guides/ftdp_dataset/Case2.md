@@ -1,4 +1,4 @@
-# Case 2
+# 使用 Processed 数据集训练非 InternLM2 模型
 
 使用尚未 token 化的 ftdp 数据训练其他模型（以 Mistral 为例），且需要用 Internlm2 对话模板覆盖原有对话模板以便让模型掌握 agent 、tool 能力。
 

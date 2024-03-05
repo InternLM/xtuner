@@ -1,4 +1,4 @@
-# Case 1
+# 使用 Processed 数据集训练 InternLM2
 
 使用尚未 token 化的 ftdp 数据训练 Internlm2 模型的场景。
 
