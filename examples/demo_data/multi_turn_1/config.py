@@ -131,7 +131,7 @@ param_scheduler = dict(
     type=CosineAnnealingLR,
     eta_min=0.0,
     by_epoch=True,
-    T_max=max_epochs,
+    end=max_epochs,
     convert_to_iter_based=True)
 
 # train, val, test setting

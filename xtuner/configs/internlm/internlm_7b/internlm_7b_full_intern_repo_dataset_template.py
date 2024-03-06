@@ -9,7 +9,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from xtuner.dataset.collate_fns import default_collate_fn
 from xtuner.dataset.intern_repo import (build_packed_dataset,
                                         load_intern_repo_tokenized_dataset)
-from xtuner.dataset.samplers import InternlmRepoSampler
+from xtuner.dataset.samplers import InternRepoSampler
 from xtuner.engine import (DatasetInfoHook, EvaluateChatHook, ThroughputHook,
                            VarlenAttnArgsToMessageHubHook)
 from xtuner.engine.runner import TrainLoop
@@ -86,7 +86,7 @@ train_dataloader = dict(
     batch_size=batch_size,
     num_workers=dataloader_num_workers,
     dataset=train_dataset,
-    sampler=dict(type=InternlmRepoSampler, shuffle=True, seed=1024),
+    sampler=dict(type=InternRepoSampler, shuffle=True, seed=1024),
     batch_sampler=dict(type=BatchSampler, drop_last=True, batch_size=1),
     collate_fn=dict(type=default_collate_fn, use_varlen_attn=use_varlen_attn))
 
@@ -118,7 +118,7 @@ param_scheduler = [
         eta_min=lr * 0.15,
         by_epoch=True,
         begin=warm_up_ratio * max_epochs,
-        T_max=max_epochs,
+        end=max_epochs,
         convert_to_iter_based=True)
 ]
 

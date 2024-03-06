@@ -11,7 +11,8 @@ import xtuner
 
 # Define valid modes
 MODES = ('list-cfg', 'copy-cfg', 'log-dataset', 'check-custom-dataset',
-         'train', 'test', 'chat', 'convert', 'preprocess', 'mmbench')
+         'train', 'test', 'chat', 'convert', 'preprocess', 'mmbench',
+         'eval_refcoco')
 
 CLI_HELP_MSG = \
     f"""
@@ -46,12 +47,16 @@ CLI_HELP_MSG = \
             xtuner chat $LLM --llava $LLAVA --visual-encoder $VISUAL_ENCODER --image $IMAGE --prompt-template $PROMPT_TEMPLATE --system-template $SYSTEM_TEMPLATE
         6-1. Preprocess arxiv dataset:
             xtuner preprocess arxiv $SRC_FILE $DST_FILE --start-date $START_DATE --categories $CATEGORIES
+        6-2. Preprocess refcoco dataset:
+            xtuner preprocess refcoco --ann-path $RefCOCO_ANN_PATH --image-path $COCO_IMAGE_PATH --save-path $SAVE_PATH
         7-1. Log processed dataset:
             xtuner log-dataset $CONFIG
         7-2. Verify the correctness of the config file for the custom dataset:
             xtuner check-custom-dataset $CONFIG
         8. MMBench evaluation:
             xtuner mmbench $LLM --llava $LLAVA --visual-encoder $VISUAL_ENCODER --prompt-template $PROMPT_TEMPLATE --data-path $MMBENCH_DATA_PATH
+        9. Refcoco evaluation:
+            xtuner eval_refcoco $LLM --llava $LLAVA --visual-encoder $VISUAL_ENCODER --prompt-template $PROMPT_TEMPLATE --data-path $REFCOCO_DATA_PATH
 
     Run special commands:
 
@@ -99,6 +104,8 @@ PREPROCESS_HELP_MSG = \
 
         1. Preprocess arxiv dataset:
             xtuner preprocess arxiv $SRC_FILE $DST_FILE --start-date $START_DATE --categories $CATEGORIES
+        2. Preprocess refcoco dataset:
+            xtuner preprocess refcoco --ann-path $RefCOCO_ANN_PATH --image-path $COCO_IMAGE_PATH --save-path $SAVE_PATH
 
     GitHub: https://github.com/InternLM/xtuner
     """  # noqa: E501
@@ -176,12 +183,22 @@ def arxiv_preprocess():
     return arxiv_preprocess.__file__
 
 
+def convert_refcoco():
+    from xtuner.tools.data_preprocess import convert_refcoco
+    return convert_refcoco.__file__
+
+
 def convert_help_msg():
     print_log(CONVERT_HELP_MSG, 'current')
 
 
 def preprocess_help_msg():
     print_log(PREPROCESS_HELP_MSG, 'current')
+
+
+def eval_refcoco():
+    from xtuner.tools import eval_refcoco
+    return eval_refcoco.__file__
 
 
 modes = {
@@ -202,15 +219,18 @@ modes = {
     },
     'preprocess': {
         'arxiv': arxiv_preprocess,
+        'refcoco': convert_refcoco,
         '--help': preprocess_help_msg,
         '-h': preprocess_help_msg
-    }
+    },
+    'eval_refcoco': eval_refcoco
 }
 
 HELP_FUNCS = [preprocess_help_msg, convert_help_msg]
 MAP_FILE_FUNCS = [
     list_cfg, copy_cfg, log_dataset, check_custom_dataset, train, test, chat,
-    mmbench, pth_to_hf, merge, split, arxiv_preprocess
+    mmbench, pth_to_hf, merge, split, arxiv_preprocess, eval_refcoco,
+    convert_refcoco
 ]
 
 

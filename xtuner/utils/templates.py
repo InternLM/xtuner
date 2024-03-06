@@ -85,13 +85,6 @@ PROMPT_TEMPLATE = ConfigDict(
         suffix_as_eos=False,
         sep='\n',
         stop_words=[]),
-    pretrain=PromptTemplateConfig(
-        system='{system}',
-        instruction='{input}',
-        suffix='',
-        suffix_as_eos=False,
-        sep='',
-        stop_words=[]),
     zephyr=PromptTemplateConfig(
         system='<|system|>\n{system}\n',
         instruction='<|user|>\n{input}\n<|assistant|>\n',
@@ -156,9 +149,9 @@ PROMPT_TEMPLATE = ConfigDict(
         sep='\n',
         stop_words=[]),
     qwen_chat=PromptTemplateConfig(
-        system=('\n<|im_start|>system\n{system}<|im_end|>'),
-        instruction=(
-            '\n<|im_start|>user\n{input}<|im_end|>\n<|im_start|>assistant\n'),
+        system=('<|im_start|>system\n{system}<|im_end|>\n'),
+        instruction=('<|im_start|>user\n{input}<|im_end|>\n'
+                     '<|im_start|>assistant\n'),
         suffix='<|im_end|>',
         suffix_as_eos=True,
         sep='\n',
@@ -255,6 +248,14 @@ PROMPT_TEMPLATE = ConfigDict(
         suffix_as_eos=False,
         sep='\n',
         stop_words=[]),
+    gemma=PromptTemplateConfig(
+        system=('<start_of_turn>model\n{system}<end_of_turn>\n'),
+        instruction=('<start_of_turn>user\n{input}<end_of_turn>\n'
+                     '<start_of_turn>model\n'),
+        suffix='<end_of_turn>',
+        suffix_as_eos=False,
+        sep='\n',
+        stop_words=['<end_of_turn>']),
 )
 
 SYSTEM_TEMPLATE = ConfigDict(

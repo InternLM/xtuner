@@ -1,8 +1,10 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import logging
+import os
 import types
 
 import torch
+import transformers
 from mmengine import print_log
 from mmengine.utils import digit_version
 
@@ -10,6 +12,8 @@ from .baichuan import (baichuan2_norm_head_forward, baichuan_7b_attn_forward,
                        baichuan_13b_attn_forward)
 from .yi import yi_attn_forward
 
+IS_LOW_VERSION_TRANSFORMERS = digit_version(
+    transformers.__version__) < digit_version('4.36')
 SUPPORT_FLASH1 = digit_version(torch.__version__) >= digit_version('2.0.0')
 SUPPORT_FLASH2 = False
 
@@ -22,13 +26,17 @@ except ImportError:
 
 SUPPORT_FLASH = SUPPORT_FLASH1 or SUPPORT_FLASH2
 
+USE_TRITON_KERNEL = bool(os.getenv('USE_TRITON_KERNEL', default=0))
 SUPPORT_TRITON = False
 try:
     import triton  # pre-check # noqa: F401
     import triton.language as tl  # pre-check # noqa: F401
     SUPPORT_TRITON = True
 except ImportError:
-    pass
+    if USE_TRITON_KERNEL:
+        raise RuntimeError(
+            'USE_TRITON_KERNEL is set to 1, but triton has not been installed.'
+            ' Run `pip install triton==2.1.0` to install triton.')
 
 NO_ATTN_WEIGHTS_MSG = (
     'Due to the implementation of the PyTorch version of flash attention, '
@@ -40,22 +48,33 @@ def dispatch_llama_attn_forward(model, use_varlen_attn):
     if use_varlen_attn:
         assert SUPPORT_FLASH2 and SUPPORT_TRITON, \
             'flash_attn and triton is required if you want to use varlen_attn.'
-    elif not SUPPORT_FLASH1:
+    elif not SUPPORT_FLASH:
         return
 
-    from .llama import llama_attn_forward, llama_varlen_attn_forward
+    from .llama import (llama_attn_forward, llama_attn_forward_legacy,
+                        llama_varlen_attn_forward,
+                        llama_varlen_attn_forward_legacy)
 
     print_log(NO_ATTN_WEIGHTS_MSG, 'current', logging.WARNING)
     for module in model.modules():
         if type(module).__name__ in ('LlamaAttention', 'LlamaFlashAttention2',
                                      'LlamaSdpaAttention'):
             if use_varlen_attn:
-                print_log('dispatch llama local attn forward', 'current')
-                module.forward = types.MethodType(llama_varlen_attn_forward,
-                                                  module)
+                print_log('dispatch llama varlen attn forward', 'current')
+                if IS_LOW_VERSION_TRANSFORMERS:
+                    module.forward = types.MethodType(
+                        llama_varlen_attn_forward_legacy, module)
+                else:
+                    module.forward = types.MethodType(
+                        llama_varlen_attn_forward, module)
             else:
                 print_log('dispatch llama attn forward', 'current')
-                module.forward = types.MethodType(llama_attn_forward, module)
+                if IS_LOW_VERSION_TRANSFORMERS:
+                    module.forward = types.MethodType(
+                        llama_attn_forward_legacy, module)
+                else:
+                    module.forward = types.MethodType(llama_attn_forward,
+                                                      module)
 
 
 def dispatch_llama_rmsnorm_forward(model):
@@ -74,7 +93,7 @@ def dispatch_internlm_attn_forward(model, use_varlen_attn):
     if use_varlen_attn:
         assert SUPPORT_FLASH2 and SUPPORT_TRITON, \
             'flash_attn and triton is required if you want to use varlen_attn.'
-    elif not SUPPORT_FLASH1:
+    elif not SUPPORT_FLASH:
         return
 
     from .internlm import internlm_attn_forward, internlm_varlen_attn_forward
@@ -83,7 +102,7 @@ def dispatch_internlm_attn_forward(model, use_varlen_attn):
     for module in model.modules():
         if type(module).__name__ == 'InternLMAttention':
             if use_varlen_attn:
-                print_log('dispatch internlm local attn forward', 'current')
+                print_log('dispatch internlm varlen attn forward', 'current')
                 module.forward = types.MethodType(internlm_varlen_attn_forward,
                                                   module)
             else:
@@ -96,7 +115,7 @@ def dispatch_internlm2_attn_forward(model, use_varlen_attn):
     if use_varlen_attn:
         assert SUPPORT_FLASH2 and SUPPORT_TRITON, \
             'flash_attn and triton is required if you want to use varlen_attn.'
-    elif not SUPPORT_FLASH1:
+    elif not SUPPORT_FLASH:
         return
 
     from .internlm2 import (internlm2_attn_forward,
@@ -106,7 +125,7 @@ def dispatch_internlm2_attn_forward(model, use_varlen_attn):
     for module in model.modules():
         if type(module).__name__ == 'InternLM2Attention':
             if use_varlen_attn:
-                print_log('dispatch internlm2 local attn forward', 'current')
+                print_log('dispatch internlm2 varlen attn forward', 'current')
                 module.forward = types.MethodType(
                     internlm2_varlen_attn_forward, module)
             else:
@@ -163,8 +182,7 @@ def replace_internlm_rote(model):
 def replace_internlm2_rote(model):
     from .internlm2 import InternLM2RotaryEmbedding
 
-    # rotary_base = model.config.rope_theta
-    rotary_base = 1000000
+    rotary_base = model.config.rope_theta
 
     def traverse(module):
         for name, child in module.named_children():
@@ -239,7 +257,7 @@ def dispatch_mistral_attn_forward(model, use_varlen_attn):
     for module in model.modules():
         if type(module).__name__ in ('MistralAttention',
                                      'MistralFlashAttention2'):
-            print_log('dispatch mistral local attn forward', 'current')
+            print_log('dispatch mistral varlen attn forward', 'current')
             module.forward = types.MethodType(mistral_varlen_attn_forward,
                                               module)
 
@@ -281,15 +299,18 @@ def dispatch_modules(model, use_varlen_attn=False):
     model_name = model.__class__.__name__.lower()
     if 'internlm2' in model_name:
         dispatch_internlm2_attn_forward(model, use_varlen_attn)
-        dispatch_internlm2_rmsnorm_forward(model)
+        if USE_TRITON_KERNEL:
+            dispatch_internlm2_rmsnorm_forward(model)
         replace_internlm2_rote(model)
     elif 'internlm' in model_name:
         dispatch_internlm_attn_forward(model, use_varlen_attn)
-        dispatch_internlm_rmsnorm_forward(model)
+        if USE_TRITON_KERNEL:
+            dispatch_internlm_rmsnorm_forward(model)
         replace_internlm_rote(model)
     elif 'llama' in model_name:
         dispatch_llama_attn_forward(model, use_varlen_attn)
-        dispatch_llama_rmsnorm_forward(model)
+        if USE_TRITON_KERNEL:
+            dispatch_llama_rmsnorm_forward(model)
     elif 'baichuan' in model_name:
         dispath_baichuan2_norm_head_forward(model)
         dispath_baichuan_7b_attn_forward(model)
@@ -298,7 +319,8 @@ def dispatch_modules(model, use_varlen_attn=False):
         dispatch_yi_attn_forward(model)
     elif 'mistral' in model_name:
         dispatch_mistral_attn_forward(model, use_varlen_attn)
-        dispatch_mistral_rmsnorm_forward(model)
+        if USE_TRITON_KERNEL:
+            dispatch_mistral_rmsnorm_forward(model)
         replace_mistral_rote(model)
 
 

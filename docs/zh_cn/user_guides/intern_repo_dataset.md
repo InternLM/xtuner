@@ -27,7 +27,7 @@ pretrained_model_name_or_path = 'internlm/internlm2-7b'
 use_varlen_attn = True
 
 # Data
-- dataset_folder = '/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train'  # noqa: E501
+- dataset_folder = '/path/to/sft/data/folder'  # noqa: E501
 + dataset_folder = '/real/dataset/path'
 prompt_template = PROMPT_TEMPLATE.internlm2_chat
 max_length = 32768
@@ -37,10 +37,10 @@ pack_to_max_length = True
 
 在使用 DeepSpeed 训练模型时，如需在保存 checkpoint 时只保存模型权重，而不保存优化器状态，可参考以下步骤：
 
-1. 安装 特定分支的 mmengine
+1. 确保 mmengine 版本大于等于 0.10.3
 
 ```
-pip install git+https://github.com/LZHgrla/mmengine.git@lzh/ds_save
+pip install 'mmengine>=0.10.3'
 ```
 
 2. 修改 Config 文件，CheckpointHook 增加 save_optimizer=False
@@ -398,11 +398,10 @@ python xtuner/tools/process_untokenized_datasets.py \
     --save-folder ./processed \
     --tokenizer-path pretrained_model_name_or_path \
     --prompt-template internlm2_chat \
-    --dataset-format openai \
-    --is-ftdp
+    --dataset-format ftdp
 ```
 
-其中 `pretrained_model_name_or_path` 同 `from_pretrained` 接口中的 `pretrained_model_name_or_path`，`--prompt-template` 表示对话模板的种类，其他可选对话模板可参考 [templates](https://github.com/InternLM/xtuner/blob/main/docs/zh_cn/user_guides/prompt_template.md)。由于 untokenized internlm repo 格式的数据集（别名 ftdp 格式）满足 `openai` 数据格式，即：
+其中 `pretrained_model_name_or_path` 同 `from_pretrained` 接口中的 `pretrained_model_name_or_path`，`--prompt-template` 表示对话模板的种类，其他可选对话模板可参考 [templates](https://github.com/InternLM/xtuner/blob/main/docs/zh_cn/user_guides/prompt_template.md)。untokenized internlm repo 格式的数据集（别名 ftdp 格式）满足以下格式：
 
 ```
 [
@@ -418,7 +417,7 @@ python xtuner/tools/process_untokenized_datasets.py \
 ]
 ```
 
-因此，上述命令中 `--dataset-format` 一项设为 `openai`。
+`--dataset-format` 一项需要设为 `ftdp`。
 
 使用离线处理好的数据集进行训练，需要额外修改 Step 2 中的 Config 文件，并设置存放离线处理后的数据集路径：
 
