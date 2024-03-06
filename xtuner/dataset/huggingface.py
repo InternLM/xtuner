@@ -1,7 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-import warnings
 import logging
 import os
+import warnings
 from datetime import timedelta
 from functools import partial
 
@@ -161,6 +161,7 @@ def process(dataset,
         dataset_map_fn: Map the original dataset format to the one defined
             by xTuner.
         template_map_fn: Add the prompt template to the dataset
+        prompt_template: The prompt_template used to training model.
         max_dataset_length: If the length of the dataset is too long, we can
             randomly extract `max_dataset_length` from it.
         split: Which split of the data to load.
@@ -306,7 +307,8 @@ def process_hf_dataset(dataset,
             Default to None.
         dataset_map_fn: Map the original dataset format to the one defined
             by xTuner.
-        template_map_fn: Add the prompt template to the dataset
+        template_map_fn: Add the prompt template to the dataset.
+        prompt_template: The prompt_template used to training model.
         max_dataset_length: If the length of the dataset is too long, we can
             randomly extract `max_dataset_length` from it.
         split: Which split of the data to load.
