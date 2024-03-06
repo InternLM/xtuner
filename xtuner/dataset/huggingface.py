@@ -1,4 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import warnings
 import logging
 import os
 from datetime import timedelta
@@ -51,7 +52,7 @@ def map_dataset(dataset, dataset_map_fn, map_num_proc):
     return dataset
 
 
-def add_template_to_dataset(dataset, template_map_fn, map_num_proc):
+def add_template_to_dataset_legacy(dataset, template_map_fn, map_num_proc):
     if isinstance(template_map_fn,
                   dict) or isinstance(template_map_fn, Config) or isinstance(
                       template_map_fn, ConfigDict):
@@ -64,9 +65,18 @@ def add_template_to_dataset(dataset, template_map_fn, map_num_proc):
     return dataset
 
 
-def tokenize_dataset(dataset, tokenizer, max_length, with_image_token,
-                     input_ids_with_output, remove_unused_columns,
-                     map_num_proc):
+def add_template_to_dataset(dataset, prompt_template, map_num_proc):
+    dataset = dataset.map(
+        prompt_template.template_map_fn, num_proc=map_num_proc)
+    # remove invalid data
+    dataset = dataset.filter(
+        lambda example: len(example['messages']) > 0, num_proc=map_num_proc)
+    return dataset
+
+
+def tokenize_dataset_legacy(dataset, tokenizer, max_length, with_image_token,
+                            input_ids_with_output, remove_unused_columns,
+                            map_num_proc):
     assert (tokenizer is not None) and (max_length is not None), \
         f'({tokenizer}, {max_length})'
     if isinstance(tokenizer, dict) or isinstance(
@@ -75,6 +85,27 @@ def tokenize_dataset(dataset, tokenizer, max_length, with_image_token,
     dataset = dataset.map(
         partial(
             encode_fn,
+            tokenizer=tokenizer,
+            max_length=max_length,
+            with_image_token=with_image_token,
+            input_ids_with_output=input_ids_with_output),
+        remove_columns=list(dataset.column_names)
+        if remove_unused_columns else None,
+        num_proc=map_num_proc)
+    return dataset
+
+
+def tokenize_dataset(dataset, tokenizer, prompt_template, max_length,
+                     with_image_token, input_ids_with_output,
+                     remove_unused_columns, map_num_proc):
+    assert (tokenizer is not None) and (max_length is not None), \
+        f'({tokenizer}, {max_length})'
+    if isinstance(tokenizer, dict) or isinstance(
+            tokenizer, Config) or isinstance(tokenizer, ConfigDict):
+        tokenizer = BUILDER.build(tokenizer)
+    dataset = dataset.map(
+        partial(
+            prompt_template.encode_map_fn,
             tokenizer=tokenizer,
             max_length=max_length,
             with_image_token=with_image_token,
@@ -103,6 +134,7 @@ def process(dataset,
             max_length=None,
             dataset_map_fn=None,
             template_map_fn=None,
+            prompt_template=None,
             max_dataset_length=None,
             split='train',
             remove_unused_columns=False,
@@ -164,6 +196,16 @@ def process(dataset,
             ('`split` should be `train` or `None` if `pack_to_max_length` is '
              f'True, but got {split}.')
 
+    assert template_map_fn is None or prompt_template is None
+    if isinstance(prompt_template, str):  # for resume
+        prompt_template = get_object_from_string(prompt_template)
+
+    if template_map_fn is not None:
+        # TODO: deprecation, v0.3.0
+        warnings.warn('The `template_map_fn` argument is deprecated and '
+                      'will be removed in v0.3.0. Please pass '
+                      '`prompt_template` to specify the template.')
+
     dataset = build_origin_dataset(dataset, split)
 
     # Sample `max_dataset_length` items from the original dataset to
@@ -184,7 +226,10 @@ def process(dataset,
 
     # Add prompt template, such as <|System|>: xxx <|User|>: xxx <|Bot|>: xxx
     if template_map_fn is not None:
-        dataset = add_template_to_dataset(dataset, template_map_fn,
+        dataset = add_template_to_dataset_legacy(dataset, template_map_fn,
+                                                 map_num_proc)
+    elif prompt_template is not None:
+        dataset = add_template_to_dataset(dataset, prompt_template,
                                           map_num_proc)
 
     # Remove unused columns
@@ -197,9 +242,17 @@ def process(dataset,
         remove_unused_columns = True
 
     if do_dataset_tokenization:
-        dataset = tokenize_dataset(dataset, tokenizer, max_length,
-                                   with_image_token, input_ids_with_output,
-                                   remove_unused_columns, map_num_proc)
+        if prompt_template is not None:
+            dataset = tokenize_dataset(dataset, tokenizer, prompt_template,
+                                       max_length, with_image_token,
+                                       input_ids_with_output,
+                                       remove_unused_columns, map_num_proc)
+        else:
+            dataset = tokenize_dataset_legacy(dataset, tokenizer, max_length,
+                                              with_image_token,
+                                              input_ids_with_output,
+                                              remove_unused_columns,
+                                              map_num_proc)
     else:
         assert {'input_ids', 'labels'}.issubset(dataset.column_names)
 
@@ -227,6 +280,7 @@ def process_hf_dataset(dataset,
                        max_length=None,
                        dataset_map_fn=None,
                        template_map_fn=None,
+                       prompt_template=None,
                        max_dataset_length=None,
                        split='train',
                        remove_unused_columns=False,
@@ -286,6 +340,7 @@ def process_hf_dataset(dataset,
         max_length=max_length,
         dataset_map_fn=dataset_map_fn,
         template_map_fn=template_map_fn,
+        prompt_template=prompt_template,
         max_dataset_length=max_dataset_length,
         split=split,
         remove_unused_columns=remove_unused_columns,
