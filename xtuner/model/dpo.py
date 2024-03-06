@@ -1,6 +1,9 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from collections import OrderedDict
 
+import torch
+import torch.nn.functional as F
+
 from mmengine.config import Config, ConfigDict
 from mmengine.model import BaseModel
 from mmengine.runner import load_checkpoint
@@ -11,14 +14,13 @@ from xtuner.registry import BUILDER
 from .modules import dispatch_modules
 from .utils import (LoadWoInit, find_all_linear_names,
                     get_peft_model_state_dict, make_inputs_require_grad,
-                    traverse_dict)
-
+                    traverse_dict, create_reference_model)
 
 class DPO(BaseModel):
 
     def __init__(self,
                  llm,
-                 ref_llm=None,
+                 beta = 0.1,
                  lora=None,
                  peft_model=None,
                  use_activation_checkpointing=True,
@@ -27,6 +29,7 @@ class DPO(BaseModel):
         with LoadWoInit():
             self.llm = self._build_from_cfg_or_module(llm)
         self.llm.config.use_cache = False
+        self.beta = beta
         dispatch_modules(self.llm, use_varlen_attn=use_varlen_attn)
 
         if use_activation_checkpointing:
@@ -56,8 +59,8 @@ class DPO(BaseModel):
         # the sequence.
         self.use_varlen_attn = use_varlen_attn
         
-        # TODO: Add ref model and ref model config
-        self.ref_llm = None
+        # TODO: a more feasible way to set ref_model. Now the ref_model is a deepcopy of self.llm
+        self.ref_model = create_reference_model(self.llm)
 
     def gradient_checkpointing_enable(self):
         self.activation_checkpointing_enable()
@@ -117,10 +120,43 @@ class DPO(BaseModel):
         outputs = self.llm(**data)
         logits_dict = [{'logits': logits} for logits in outputs.logits]
         return logits_dict
+    
 
     def compute_loss(self, data, data_samples=None):
-        # TODO
-        pass
+        len_chosen = data["input_ids"].shape[0] // 2
+        
+        all_logits = self.llm(**data).logits
+        all_ref_logits = self.ref_model(**data).logits
+        
+        labels = data["labels"]
+        labels[labels == -100] = 0
+        loss_mask = labels != 0
+        
+        per_token_logps = torch.gather(all_logits.log_softmax(-1), dim=2, index=labels.unsqueeze(2)).squeeze(2)
+        per_ref_token_logps = torch.gather(all_ref_logits.log_softmax(-1), dim=2, index=labels.unsqueeze(2)).squeeze(2)
+        
+        all_logps = (per_token_logps * loss_mask).sum(-1) / loss_mask.sum(-1)
+        all_ref_logps = (per_ref_token_logps * loss_mask).sum(-1) / loss_mask.sum(-1)   
+        
+        policy_chosen_logps = all_logps[:len_chosen]
+        policy_rejected_logps = all_logps[len_chosen:]
+        reference_chosen_logps = all_ref_logps[:len_chosen]
+        reference_rejected_logps = all_ref_logps[len_chosen:]
+        
+        pi_logratios = policy_chosen_logps - policy_rejected_logps
+        ref_logratios = reference_chosen_logps - reference_rejected_logps
+        
+        logits = pi_logratios - ref_logratios
+        loss = -F.logsigmoid(self.beta * logits)
+        chosen_rewards = self.beta * (policy_chosen_logps - reference_chosen_logps)
+        rejected_rewards = self.beta * (policy_rejected_logps - reference_rejected_logps)
+        
+        loss_dict = {
+            'loss': loss, 
+            'chosen_rewards': chosen_rewards,
+            'rejected_rewards': rejected_rewards
+        }
+        return loss_dict
 
     def state_dict(self, *args, **kwargs):
         state_dict = super().state_dict(*args, **kwargs)
