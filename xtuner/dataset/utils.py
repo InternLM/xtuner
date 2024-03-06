@@ -101,8 +101,8 @@ def encode_fn(example,
                 'output_with_loss', True)
             output = single_turn_conversation['output']
             if output != '':
-                output_encode = tokenizer.encode(output,
-                                                 add_special_tokens=False)
+                output_encode = tokenizer.encode(
+                    output, add_special_tokens=False)
                 input_ids += output_encode
                 if output_with_loss:
                     labels += copy.deepcopy(output_encode)

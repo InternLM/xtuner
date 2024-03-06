@@ -101,11 +101,10 @@ class EvaluateChatHook(Hook):
             eval_outputs = []
 
         for sample_image, sample_input in zip(self.evaluation_images,
-                                                  self.evaluation_inputs):
+                                              self.evaluation_inputs):
             image = expand2square(
                 sample_image,
-                tuple(
-                    int(x * 255) for x in self.image_processor.image_mean))
+                tuple(int(x * 255) for x in self.image_processor.image_mean))
             image = self.image_processor.preprocess(
                 image, return_tensors='pt')['pixel_values'][0]
             image = image.to(device)
@@ -139,8 +138,8 @@ class EvaluateChatHook(Hook):
             input_ids = torch.tensor(input_ids).to(device)
             visual_outputs = model.visual_encoder(
                 image.unsqueeze(0), output_hidden_states=True)
-            pixel_values = model.projector(visual_outputs.hidden_states[
-                model.visual_select_layer][:, 1:])
+            pixel_values = model.projector(
+                visual_outputs.hidden_states[model.visual_select_layer][:, 1:])
 
             mm_inputs = prepare_inputs_labels_for_multimodal(
                 llm=model.llm,
