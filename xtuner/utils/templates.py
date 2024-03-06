@@ -1,18 +1,24 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-from dataclasses import dataclass
 from typing import List, Tuple
 
 from mmengine.config import ConfigDict
 
 
-@dataclass
 class PromptTemplateConfig:
-    system: str
-    instruction: str
-    suffix: str
-    suffix_as_eos: bool
-    sep: str
-    stop_words: Tuple[str] or List[str]
+
+    def __init__(self,
+                 system: str = '{system}',
+                 instruction: str = '{input}',
+                 suffix: str = '',
+                 suffix_as_eos: bool = False,
+                 sep: str = '',
+                 stop_words: Tuple[str] or List[str] = []):
+        self.system = system
+        self.instruction = instruction
+        self.suffix = suffix
+        self.suffix_as_eos = suffix_as_eos
+        self.sep = sep
+        self.stop_words = stop_words
 
     @staticmethod
     def is_valid_text(text):
@@ -33,14 +39,12 @@ class PromptTemplateConfig:
                     input=content, round=n_turn, **kwargs)
                 n_turn += 1
             elif role == 'assistant':
-                text += content
-                if self.suffix != '':
-                    text += self.suffix
+                text += content + self.suffix
             else:
                 raise NotImplementedError
         return text
 
-    def template_map_fn(self, example):
+    def template_map_fn_legacy(self, example):
         conversation_original = example['conversation']
         conversation = []
         for i, single_turn in enumerate(conversation_original):
@@ -56,19 +60,17 @@ class PromptTemplateConfig:
             input_text += self.instruction.format(
                 input=input_data, round=i + 1)
 
-            output_text = ''
-            output_text += output_data
+            output_text = output_data
             if self.is_valid_text(output_data):
                 output_text += self.suffix
 
             # suffix_as_eos is False ==> need_eos_token is True
             need_eos_token = not self.suffix_as_eos
-            sep = self.sep if i < len(conversation_original) - 1 else ''
             conversation.append({
                 'input': input_text,
                 'output': output_text,
                 'need_eos_token': need_eos_token,
-                'sep': sep
+                'sep': self.sep
             })
         return {'conversation': conversation}
 
