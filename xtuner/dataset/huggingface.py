@@ -221,9 +221,83 @@ def process(dataset,
     return dataset
 
 
-def process_hf_dataset(*args, **kwargs):
+def process_hf_dataset(dataset,
+                       do_dataset_tokenization=True,
+                       tokenizer=None,
+                       max_length=None,
+                       dataset_map_fn=None,
+                       template_map_fn=None,
+                       max_dataset_length=None,
+                       split='train',
+                       remove_unused_columns=False,
+                       rename_maps=[],
+                       shuffle_before_pack=True,
+                       pack_to_max_length=True,
+                       use_varlen_attn=False,
+                       input_ids_with_output=True,
+                       with_image_token=False,
+                       map_num_proc=32):
+    """Post-process the dataset loaded from the Hugging Face Hub, or a local
+    dataset.
+
+    Args:
+        dataset: The dataset to be post-processed.
+        do_dataset_tokenization: Whether the dataset need to be tokenized
+            in this function. Default to True.
+        tokenizer: The tokenizer processes some raw text as input and outputs
+            an Encoding. If `do_dataset_tokenization` is True, this argument
+            should not be None. Default to None.
+        max_length: Max length of the sequence. If `do_dataset_tokenization`
+            or `pack_to_max_length` is True, this argument should not be None.
+            Default to None.
+        dataset_map_fn: Map the original dataset format to the one defined
+            by xTuner.
+        template_map_fn: Add the prompt template to the dataset
+        max_dataset_length: If the length of the dataset is too long, we can
+            randomly extract `max_dataset_length` from it.
+        split: Which split of the data to load.
+            If `None`, will return a single concatenated dataset with all
+            splits (typically `datasets.Split.TRAIN` and
+            `datasets.Split.TEST`).
+            If given, will return a single Dataset.
+        remove_unused_columns: Whether to remove columns from the dataset
+            that are not used during training.
+        rename_maps: Rename the column name of the dataset.
+        shuffle_before_pack: Whether to shuffle the dataset before
+            packing them.
+        pack_to_max_length: Whether to pack the dataset to the `max_length `.
+            This usually improves gpu utilization and therefore reduces
+            training time.
+        use_varlen_attn: If use_varlen_attn is True, we calculate attention
+            the actual length of the sequence rather than the actual length
+            of the sequence
+        input_ids_with_output: Whether to put the groundtruth output
+            corresponding to the question into the dataset. Typically set
+            it to True during training and False during testing.
+        with_image_token: Whether to convert DEFAULT_IMAGE_TOKEN to
+            IMAGE_TOKEN_INDEX. Typically set it to True during the training
+            of VLM.
+        map_num_proc: Max number of processes when mapping the dataset.
+    """
+    kwargs = dict(
+        dataset=dataset,
+        do_dataset_tokenization=do_dataset_tokenization,
+        tokenizer=tokenizer,
+        max_length=max_length,
+        dataset_map_fn=dataset_map_fn,
+        template_map_fn=template_map_fn,
+        max_dataset_length=max_dataset_length,
+        split=split,
+        remove_unused_columns=remove_unused_columns,
+        rename_maps=rename_maps,
+        shuffle_before_pack=shuffle_before_pack,
+        pack_to_max_length=pack_to_max_length,
+        use_varlen_attn=use_varlen_attn,
+        input_ids_with_output=input_ids_with_output,
+        with_image_token=with_image_token,
+        map_num_proc=map_num_proc)
     if not (dist.is_available() and dist.is_initialized()):
-        return process(*args, **kwargs)
+        return process(**kwargs)
 
     xtuner_dataset_timeout = timedelta(
         minutes=int(os.getenv('XTUNER_DATASET_TIMEOUT', default=30)))
@@ -233,7 +307,7 @@ def process_hf_dataset(*args, **kwargs):
     group_gloo = dist.new_group(backend='gloo', timeout=xtuner_dataset_timeout)
 
     if dist.get_rank() == 0:
-        dataset = process(*args, **kwargs)
+        dataset = process(**kwargs)
         objects = [dataset]
     else:
         objects = [None]

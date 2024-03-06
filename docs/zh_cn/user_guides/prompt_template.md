@@ -19,7 +19,7 @@ internlm_chat=dict(
 - `SUFFIX`：表示“指令”字段的后缀，将会追加在每一轮问答的“回答”后面。通常，这也是一个特殊的结束符号。默认是空串`''`。
 - `SUFFIX_AS_EOS`：表示上述后缀是否作为结束符号。如果为 `True`，则会取代 `tokenizer` 的 `eos_token`，否则，仍会使用 `tokenizer` 的 `eos_token` 表示结束符号。默认是 `False`。
 - `SEP`：用于间隔多轮对话，将会追加在 `INSTRUCTION` 和 `SUFFIX` 后面。默认是空串`''`。
-- `STOP_WORDS`：用于指明结束词，该信息将被用在文本生成阶段。值得注意的是，`tokenizer` 的 `eos_token` 会被自动添加到 `STOP_WORDS`，而无序手动配置。
+- `STOP_WORDS`：用于指明结束词，该信息将被用在文本生成阶段。值得注意的是，`tokenizer` 的 `eos_token` 会被自动添加到 `STOP_WORDS`，而无需手动配置。
 
 ## 结果
 
