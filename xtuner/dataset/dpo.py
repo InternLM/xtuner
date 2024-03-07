@@ -32,5 +32,5 @@ class DPODataset(Dataset):
         pass
 
     def __getitem__(self, index):
-        # TODO
+        # TODO(lsh) 对于DPO数据集，分词编码返回预处理过的data_dict
         pass
