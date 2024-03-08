@@ -1,4 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import copy
 from collections import OrderedDict
 from contextlib import nullcontext
 
@@ -8,9 +9,12 @@ from mmengine.model import BaseModel
 from mmengine.runner import load_checkpoint
 from peft import get_peft_model, prepare_model_for_kbit_training
 from torch import nn
-from transformers import PreTrainedModel, PreTrainedTokenizer
+from transformers import (AutoConfig, AutoModelForCausalLM, PreTrainedModel,
+                          PreTrainedTokenizer)
 from transformers.integrations import is_deepspeed_zero3_enabled
 
+from xtuner.engine.sequence_parallel import (get_sequence_parallel_world_size,
+                                             reduce_sequence_parallel_loss)
 from xtuner.registry import BUILDER
 from .modules import dispatch_modules
 from .utils import (LoadWoInit, find_all_linear_names,
@@ -69,10 +73,34 @@ class SupervisedFinetune(BaseModel):
                  peft_model=None,
                  use_activation_checkpointing=True,
                  use_varlen_attn=False,
-                 tokenizer=None):
+                 tokenizer=None,
+                 max_position_embeddings=None):
         super().__init__()
+        # todo: hardcode
+        llm_cfg = copy.deepcopy(llm)
+        pretrained_model_name_or_path = llm_cfg.pop(
+            'pretrained_model_name_or_path')
+        llm_cfg.pop('type')
+        if max_position_embeddings is not None:
+            config = AutoConfig.from_pretrained(pretrained_model_name_or_path,
+                                                **llm_cfg)
+            origin_max_position_embeddings = config.max_position_embeddings
+            if max_position_embeddings > origin_max_position_embeddings:
+                config.rope_scaling = {
+                    'type':
+                    'linear',
+                    'factor':
+                    max_position_embeddings / origin_max_position_embeddings
+                }
+            # hardcode for internlm2
+            config.attn_implementation = 'flash_attention_2'
+        else:
+            config = None
+
         with LoadWoInit():
-            self.llm = self._build_from_cfg_or_module(llm)
+            self.llm = AutoModelForCausalLM.from_pretrained(
+                pretrained_model_name_or_path, config=config, **llm_cfg)
+            # self.llm = self._build_from_cfg_or_module(llm)
 
         if tokenizer is not None:
             if isinstance(tokenizer, dict):
@@ -168,10 +196,20 @@ class SupervisedFinetune(BaseModel):
         logits_dict = [{'logits': logits} for logits in outputs.logits]
         return logits_dict
 
-    def compute_loss(self, data, data_samples=None):
+    def compute_sequence_parallel_loss(self, data):
         outputs = self.llm(**data)
-        loss_dict = {'loss': outputs.loss}
-        return loss_dict
+        labels = data['labels']
+        num_tokens = (labels != -100).sum()
+        loss = reduce_sequence_parallel_loss(outputs.loss, num_tokens)
+        return {'loss': loss}
+
+    def compute_loss(self, data, data_samples=None):
+        if get_sequence_parallel_world_size() > 1:
+            return self.compute_sequence_parallel_loss(data)
+        else:
+            outputs = self.llm(**data)
+            loss_dict = {'loss': outputs.loss}
+            return loss_dict
 
     def state_dict(self, *args, **kwargs):
         state_dict = super().state_dict(*args, **kwargs)
