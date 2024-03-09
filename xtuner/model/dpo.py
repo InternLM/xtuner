@@ -125,7 +125,7 @@ class DPO(BaseModel):
     def compute_loss(self, data, data_samples=None):
         #TODO(lsh) 根据dataset.dpo中__getitem__ 编码data格式来进行修改
 
-        len_chosen = data["input_ids"].shape[0] // 2
+        len_chosen = data["len_chosen"] # data: {'input_ids': input_ids, 'labels': labels,'len_chosen': len_chosen}
         assert len_chosen != 0 # batch为1 len_chosen会为0 引发后续计算错误
         all_logits = self.llm(**data).logits
         all_ref_logits = self.ref_model(**data).logits
