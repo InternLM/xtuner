@@ -215,6 +215,24 @@ class EvaluateChatHook(Hook):
         runner.logger.info('before_train in EvaluateChatHook.')
         self._generate_samples(runner, max_new_tokens=50)
 
+    def _is_save_checkpoint(self, runner):
+        hooks = runner.hooks
+        checkpoint_hook = None
+        for hook in hooks:
+            if type(hook).__name__ == 'CheckpointHook':
+                checkpoint_hook = hook
+                break
+        if checkpoint_hook is None or checkpoint_hook.by_epoch:
+            return False
+
+        if checkpoint_hook.every_n_train_iters(
+            runner, checkpoint_hook.interval, checkpoint_hook.save_begin) or \
+                (checkpoint_hook.save_last and
+                 checkpoint_hook.is_last_train_iter(runner)):
+            return True
+
+        return False
+
     def after_train_iter(self,
                          runner,
                          batch_idx: int,
@@ -223,12 +241,7 @@ class EvaluateChatHook(Hook):
         if self.every_n_iters is None:
             return
 
-        save_eval_output = False
-        try:
-            save_ckpt_freq = runner.cfg.default_hooks.checkpoint.interval
-            save_eval_output = self.every_n_train_iters(runner, save_ckpt_freq)
-        except KeyError:
-            pass
+        save_eval_output = self._is_save_checkpoint(runner)
 
         do_chat = (
             save_eval_output
