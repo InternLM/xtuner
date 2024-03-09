@@ -103,3 +103,16 @@ xtuner mmbench internlm/internlm-chat-7b \
 其中，`$DATA_PATH` 指上一步骤所下载的某一个 tsv 文件，如 `MMBench_DEV_EN.tsv`。
 
 评测完成后，若为开发集则会直接打印出结果；若为测试集，则需将 mmbench_result.xlsx 提交至 MMBench 官方完成评测取得精度结果！
+
+### Refcoco
+
+若您想要评测 Refcoco 数据集，您需要下载评测数据文件 [链接](https://github.com/Vision-CAIR/MiniGPT-4/tree/main/eval_scripts/eval_data). 之后，您可以利用下列命令实现评测：
+
+```bash
+xtuner eval_refcoco lmsys/vicuna-7b-v1.5 \
+  --visual-encoder openai/clip-vit-large-patch14-336 \
+  --llava $LLAVA_PATH \
+  --prompt-template internlm_chat \
+  --data-path $DATA_PATH \
+  --work-dir $RESULT_PATH
+```

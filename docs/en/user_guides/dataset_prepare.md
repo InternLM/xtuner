@@ -1,11 +1,17 @@
 # Dataset Prepare
 
-- [HuggingFace datasets](#huggingface-datasets)
-- [Others](#others)
-  - [Arxiv Gentitle](#arxiv-gentitle)
-  - [MOSS-003-SFT](#moss-003-sft)
-  - [Chinese Lawyer](#chinese-lawyer)
-  - [LLaVA dataset](#llava-dataset)
+- [Dataset Prepare](#dataset-prepare)
+  - [HuggingFace datasets](#huggingface-datasets)
+  - [Others](#others)
+    - [Arxiv Gentitle](#arxiv-gentitle)
+    - [MOSS-003-SFT](#moss-003-sft)
+    - [Chinese Lawyer](#chinese-lawyer)
+    - [LLaVA dataset](#llava-dataset)
+      - [File structure](#file-structure)
+      - [Pretrain](#pretrain)
+      - [Finetune](#finetune)
+    - [RefCOCO dataset](#refcoco-dataset)
+      - [File structure](#file-structure-1)
 
 ## HuggingFace datasets
 
@@ -131,3 +137,44 @@ git clone https://huggingface.co/datasets/liuhaotian/LLaVA-Pretrain --depth=1
    4. TextVQA (textvqa): [train_val_images](https://dl.fbaipublicfiles.com/textvqa/images/train_val_images.zip)
 
    5. VisualGenome (VG): [part1](https://cs.stanford.edu/people/rak248/VG_100K_2/images.zip), [part2](https://cs.stanford.edu/people/rak248/VG_100K_2/images2.zip)
+
+### RefCOCO dataset
+
+#### File structure
+
+```
+
+./data
+├── refcoco_annotations
+│   ├── refcoco
+│   │   ├── instances.json
+│   │   ├── refs(google).p
+│   │   └── refs(unc).p
+│   ├── refcoco+
+│   │   ├── instances.json
+│   │   └── refs(unc).p
+│   └── refcocog
+│       ├── instances.json
+│       ├── refs(google).p
+│       └─── refs(und).p
+├── coco_images
+|    ├── *.jpg
+...
+```
+
+Download the RefCOCO, RefCOCO+, RefCOCOg annotation files using below links.
+Both of coco train 2017 and 2014 are valid for coco_images.
+
+| Image source |                                        Download path                                         |
+| ------------ | :------------------------------------------------------------------------------------------: |
+| RefCOCO      | <a href="https://bvisionweb1.cs.unc.edu/licheng/referit/data/refcoco.zip"> annotations </a>  |
+| RefCOCO+     | <a href="https://bvisionweb1.cs.unc.edu/licheng/referit/data/refcoco+.zip"> annotations </a> |
+| RefCOCOg     | <a href="https://bvisionweb1.cs.unc.edu/licheng/referit/data/refcocog.zip"> annotations </a> |
+
+After downloading the annotations, unzip the files and place them in the `./data/refcoco_annotations` directory.
+Then, we convert the annotations to json format using the below command. This command saves the converted json files in the `./data/llava_data/RefCOCOJson/` directory.
+
+```shell
+xtuner preprocess refcoco --ann-path $RefCOCO_ANN_PATH --image-path $COCO_IMAGE_PATH \
+--save-path $SAVE_PATH # ./data/llava_data/RefCOCOJson/
+```
