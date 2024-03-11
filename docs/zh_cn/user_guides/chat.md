@@ -13,13 +13,13 @@
 - InternLM-7B, Arxiv Gentitle
 
   ```shell
-  xtuner chat internlm/internlm-7b --adapter xtuner/internlm-7b-qlora-arxiv-gentitle --prompt-template internlm_chat --system-prompt arxiv_gentile
+  xtuner chat internlm/internlm-7b --adapter xtuner/internlm-7b-qlora-arxiv-gentitle --prompt-template internlm_chat --system-template arxiv_gentile
   ```
 
 - InternLM-7B, Colorist
 
   ```shell
-  xtuner chat internlm/internlm-7b --adapter xtuner/internlm-7b-qlora-colorist --prompt-template internlm_chat --system-prompt colorist
+  xtuner chat internlm/internlm-7b --adapter xtuner/internlm-7b-qlora-colorist --prompt-template internlm_chat --system-template colorist
   ```
 
 - InternLM-7B, Alpaca-enzh
@@ -60,13 +60,13 @@
 - InternLM-20B, Arxiv Gentitle
 
   ```shell
-  xtuner chat internlm/internlm-20b --adapter xtuner/internlm-20b-qlora-arxiv-gentitle --prompt-template internlm_chat --system-prompt arxiv_gentile
+  xtuner chat internlm/internlm-20b --adapter xtuner/internlm-20b-qlora-arxiv-gentitle --prompt-template internlm_chat --system-template arxiv_gentile
   ```
 
 - InternLM-20B, Colorist
 
   ```shell
-  xtuner chat internlm/internlm-20b --adapter xtuner/internlm-20b-qlora-colorist --prompt-template internlm_chat --system-prompt colorist
+  xtuner chat internlm/internlm-20b --adapter xtuner/internlm-20b-qlora-colorist --prompt-template internlm_chat --system-template colorist
   ```
 
 - InternLM-20B, Alpaca-enzh
@@ -106,7 +106,7 @@
 
   ```shell
   export SERPER_API_KEY="xxx"  # 请从 https://serper.dev 获得 API_KEY，以此支持谷歌搜索！
-  xtuner chat meta-llama/Llama-2-7b-hf --adapter xtuner/Llama-2-7b-qlora-moss-003-sft --bot-name Llama2 --prompt-template moss_sft --system-template moss_sft --with-plugins calculate solve search --command-stop-word "<eoc>" --answer-stop-word "<eom>" --no-streamer
+  xtuner chat meta-llama/Llama-2-7b-hf --adapter xtuner/Llama-2-7b-qlora-moss-003-sft --bot-name Llama2 --prompt-template moss_sft --system-template moss_sft --with-plugins calculate solve search --no-streamer
   ```
 
 - Llama-2-7B, MSAgent **（支持 Lagent ReAct）**
@@ -124,5 +124,5 @@
 
   ```shell
   export SERPER_API_KEY="xxx"  # 请从 https://serper.dev 获得API_KEY，以此支持谷歌搜索！
-  xtuner chat Qwen/Qwen-7B --adapter xtuner/Qwen-7B-qlora-moss-003-sft --bot-name Qwen --prompt-template moss_sft --system-template moss_sft --with-plugins calculate solve search --command-stop-word "<eoc>" --answer-stop-word "<eom>"
+  xtuner chat Qwen/Qwen-7B --adapter xtuner/Qwen-7B-qlora-moss-003-sft --bot-name Qwen --prompt-template moss_sft --system-template moss_sft --with-plugins calculate solve search
   ```

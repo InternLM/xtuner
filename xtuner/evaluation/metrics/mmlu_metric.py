@@ -92,10 +92,10 @@ class MMLUMetric(BaseMetric):
         super().__init__(*args, **kwargs)
         tokenizer = BUILDER.build(tokenizer)
         self.abcd_idx = [
-            tokenizer('A', add_special_tokens=False).input_ids[0],
-            tokenizer('B', add_special_tokens=False).input_ids[0],
-            tokenizer('C', add_special_tokens=False).input_ids[0],
-            tokenizer('D', add_special_tokens=False).input_ids[0],
+            tokenizer.encode('A', add_special_tokens=False)[0],
+            tokenizer.encode('B', add_special_tokens=False)[0],
+            tokenizer.encode('C', add_special_tokens=False)[0],
+            tokenizer.encode('D', add_special_tokens=False)[0],
         ]
 
     @staticmethod

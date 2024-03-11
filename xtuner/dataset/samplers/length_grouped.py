@@ -90,7 +90,9 @@ class LengthGroupedSampler(Sampler):
         self.round_up = round_up
 
         if self.round_up:
-            self.num_samples = math.ceil(len(self.dataset) / world_size)
+            num_iters = math.ceil(
+                len(self.dataset) / world_size / per_device_batch_size)
+            self.num_samples = num_iters * per_device_batch_size
             self.total_size = self.num_samples * self.world_size
         else:
             self.num_samples = math.ceil(
