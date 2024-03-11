@@ -34,8 +34,8 @@ image_grid_pinpoints = [[336, 672], [672, 336], [672, 672], [1008, 336], [336, 1
 max_length = 4096
 
 # Scheduler & Optimizer
-batch_size = 32  # per_device
-accumulative_counts = 1
+batch_size = 16  # per_device, 32-OOM
+accumulative_counts = 2
 dataloader_num_workers = 4
 max_epochs = 1
 optim_type = AdamW
