@@ -1,4 +1,4 @@
-# Mixtral 8x7b
+# Mixtral 8x7B
 
 ## Install
 

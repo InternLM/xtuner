@@ -10,7 +10,10 @@ DATA_BATCH = Optional[Union[dict, tuple, list]]
 
 
 class ThroughputHook(Hook):
-    priority = 'BELOW_NORMAL'
+
+    # priority must be higher than LoggerHook (50) and lower than
+    # IterTimerHook (60)
+    priority = 55
 
     def __init__(self,
                  use_activation_checkpointing=None,

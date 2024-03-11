@@ -14,7 +14,7 @@ pretrained_model_name_or_path = 'internlm/internlm-7b'
 dataset_name_or_path = 'timdettmers/openassistant-guanaco'
 max_length = 2048
 pack_to_max_length = True
-prompt_template = PROMPT_TEMPLATE.internlm_chat
+prompt_template = PROMPT_TEMPLATE.default
 
 trainer = Trainer
 

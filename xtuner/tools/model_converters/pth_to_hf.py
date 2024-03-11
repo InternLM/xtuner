@@ -4,6 +4,7 @@ import os.path as osp
 import shutil
 
 from mmengine.config import Config, DictAction
+from mmengine.fileio import PetrelBackend, get_file_backend
 
 from xtuner.configs import cfgs_name_path
 from xtuner.model.utils import guess_load_checkpoint
@@ -20,7 +21,7 @@ def parse_args():
     parser.add_argument(
         '--fp32',
         action='store_true',
-        help='Save as fp32. If not set, fp16 will be used by default.')
+        help='Save LLM in fp32. If not set, fp16 will be used by default.')
     parser.add_argument(
         '--max-shard-size',
         type=str,
@@ -56,22 +57,25 @@ def main():
     if args.cfg_options is not None:
         cfg.merge_from_dict(args.cfg_options)
 
-    if (isinstance(cfg.model.type, str) and 'LLaVAModel'
-            in cfg.model.type) or 'LLaVAModel' == cfg.model.type.__name__:
+    model_name = cfg.model.type if isinstance(cfg.model.type,
+                                              str) else cfg.model.type.__name__
+    if 'LLaVAModel' in model_name:
         cfg.model.pretrained_pth = None
 
     model = BUILDER.build(cfg.model)
 
-    state_dict = guess_load_checkpoint(args.pth_model)
+    backend = get_file_backend(args.pth_model)
+    if isinstance(backend, PetrelBackend):
+        from xtuner.utils.fileio import patch_fileio
+        with patch_fileio():
+            state_dict = guess_load_checkpoint(args.pth_model)
+    else:
+        state_dict = guess_load_checkpoint(args.pth_model)
+
     model.load_state_dict(state_dict, strict=False)
     print(f'Load PTH model from {args.pth_model}')
 
-    if not args.fp32:
-        print('Convert LLM to float16')
-        model.llm.half()
-
-    if (isinstance(cfg.model.type, str) and 'LLaVAModel'
-            in cfg.model.type) or 'LLaVAModel' == cfg.model.type.__name__:
+    if 'LLaVAModel' in model_name:
         if cfg.model.get('llm') and (not cfg.model.get('freeze_llm', False)
                                      or cfg.model.get('llm_lora')):
             if 'PeftModel' in model.llm.__class__.__name__:
@@ -83,6 +87,9 @@ def main():
                 tokenizer = BUILDER.build(cfg.tokenizer)
                 tokenizer.save_pretrained(llm_path)
                 print(f'Saving LLM to {llm_path}')
+            if not args.fp32:
+                print('Convert LLM to float16')
+                model.llm.half()
             model.llm.save_pretrained(
                 llm_path, max_shard_size=args.max_shard_size)
 
@@ -118,7 +125,13 @@ def main():
             tokenizer = BUILDER.build(cfg.tokenizer)
             tokenizer.save_pretrained(llm_path)
             print(f'Saving LLM to {llm_path}')
-        model.llm.save_pretrained(llm_path, max_shard_size=args.max_shard_size)
+        if not args.fp32:
+            print('Convert LLM to float16')
+            model.llm.half()
+        model.llm.save_pretrained(
+            llm_path,
+            max_shard_size=args.max_shard_size,
+            safe_serialization=False)
 
     shutil.copyfile(args.config, osp.join(args.save_dir, 'xtuner_config.py'))
     print('All done!')

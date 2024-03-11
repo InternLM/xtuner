@@ -1,6 +1,9 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from mmengine._strategy import DeepSpeedStrategy as MMEngineDeepSpeedStrategy
 
+from xtuner import DS_CEPH_DIR
+from xtuner.utils.fileio import patch_fileio
+
 
 class DeepSpeedStrategy(MMEngineDeepSpeedStrategy):
 
@@ -20,3 +23,33 @@ class DeepSpeedStrategy(MMEngineDeepSpeedStrategy):
         assert hasattr(wrapper.model, 'data_preprocessor')
         wrapper.model.data_preprocessor.cuda()
         return wrapper
+
+    def save_checkpoint(self, *args, **kwargs) -> None:
+        if DS_CEPH_DIR:
+            from os import path as osp
+            work_dir_prefix = osp.split(self.work_dir)[0]
+
+            filename = kwargs['filename'].replace(work_dir_prefix, DS_CEPH_DIR)
+            kwargs['filename'] = filename
+            with patch_fileio():
+                super().save_checkpoint(*args, **kwargs)
+        else:
+            super().save_checkpoint(*args, **kwargs)
+
+    def load_checkpoint(self, *args, **kwargs) -> None:
+        if DS_CEPH_DIR:
+
+            with patch_fileio():
+                checkpoint = super().load_checkpoint(*args, **kwargs)
+        else:
+            checkpoint = super().load_checkpoint(*args, **kwargs)
+        return checkpoint
+
+    def resume(self, *args, **kwargs) -> None:
+        if DS_CEPH_DIR:
+
+            with patch_fileio():
+                checkpoint = super().resume(*args, **kwargs)
+        else:
+            checkpoint = super().resume(*args, **kwargs)
+        return checkpoint
