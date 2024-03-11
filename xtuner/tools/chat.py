@@ -4,6 +4,7 @@ import os
 import os.path as osp
 import re
 import sys
+import warnings
 
 import torch
 from huggingface_hub import snapshot_download
@@ -47,8 +48,9 @@ def parse_args():
         '--visual-encoder', default=None, help='visual encoder name or path')
     parser.add_argument(
         '--visual-select-layer', default=-2, help='visual select layer')
-    parser.add_argument('--image', default=None, help='image')
-    parser.add_argument('--images', nargs='+', default=[], help='images')
+    images_group = parser.add_mutually_exclusive_group()
+    images_group.add_argument('--image', default=None, help='image')
+    images_group.add_argument('--images', nargs='+', default=[], help='images')
     parser.add_argument(
         '--torch-dtype',
         default='fp16',
@@ -302,21 +304,29 @@ def main():
         llm.eval()
 
         if args.image is not None:
-            assert args.images is None
+            # TODO: deprecation, v0.2.0
+            warnings.warn(
+                ('The `image` argument is deprecated and will be removed '
+                 'in v0.2.0, use `images` instead.'), DeprecationWarning)
+            assert len(args.images) == 0
             args.images = [args.image]
-        pixel_values_list = []
-        for image in args.images:
-            image = load_image(image)
-            image = expand2square(
-                image, tuple(int(x * 255) for x in image_processor.image_mean))
-            image = image_processor.preprocess(
-                image, return_tensors='pt')['pixel_values'][0]
-            image = image.cuda().unsqueeze(0)
-            visual_outputs = visual_encoder(image, output_hidden_states=True)
-            pixel_values = projector(
-                visual_outputs.hidden_states[args.visual_select_layer][:, 1:])
-            pixel_values_list.append(pixel_values)
-        pixel_values = torch.cat(pixel_values_list, dim=0)
+        if len(args.images) > 0:
+            pixel_values_list = []
+            for image in args.images:
+                image = load_image(image)
+                image = expand2square(
+                    image,
+                    tuple(int(x * 255) for x in image_processor.image_mean))
+                image = image_processor.preprocess(
+                    image, return_tensors='pt')['pixel_values'][0]
+                image = image.cuda().unsqueeze(0)
+                visual_outputs = visual_encoder(
+                    image, output_hidden_states=True)
+                pixel_values = projector(
+                    visual_outputs.hidden_states[args.visual_select_layer][:,
+                                                                           1:])
+                pixel_values_list.append(pixel_values)
+            pixel_values = torch.cat(pixel_values_list, dim=0)
         stop_words = args.stop_words
         sep = ''
         if args.prompt_template:
@@ -356,7 +366,7 @@ def main():
                 print('Log: Exit!')
                 exit(0)
 
-            if args.images is not None and n_turn == 0:
+            if len(args.images) > 0 and n_turn == 0:
                 text = '\n'.join([DEFAULT_IMAGE_TOKEN] * len(args.images) +
                                  [text])
 
@@ -397,7 +407,7 @@ def main():
             else:
                 prompt_text = text
             inputs += prompt_text
-            if args.images is None:
+            if len(args.images) > 0:
                 if n_turn == 0:
                     ids = tokenizer.encode(inputs, return_tensors='pt')
                 else:
