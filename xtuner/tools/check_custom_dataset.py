@@ -52,6 +52,7 @@ def main():
     max_length = train_dataset.max_length
     dataset_map_fn = train_dataset.get('dataset_map_fn', None)
     template_map_fn = train_dataset.get('template_map_fn', None)
+    prompt_template = train_dataset.get('prompt_template', None)
     max_dataset_length = train_dataset.get('max_dataset_length', 10)
     split = train_dataset.get('split', 'train')
     remove_unused_columns = train_dataset.get('remove_unused_columns', False)
@@ -115,6 +116,8 @@ def main():
     if template_map_fn is not None:
         template_map_fn = BUILDER.build(template_map_fn)
         dataset = dataset.map(template_map_fn)
+    elif prompt_template is not None:
+        dataset = dataset.map(prompt_template.template_map_fn)
 
     print('#' * 20 + '   dataset after adding templates   ' + '#' * 20)
     print(dataset[0]['conversation'])
