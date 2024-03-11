@@ -1,6 +1,6 @@
 # 准备预训练模型权重
 
-本节将以下载 internlm-chat-7b 为例，介绍如何快速下载预训练模型的权重。
+本节将以下载 internlm2-chat-7b 为例，介绍如何快速下载预训练模型的权重。
 
 ## 方法 1：利用 `snapshot_download`
 
