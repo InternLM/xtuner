@@ -1,9 +1,9 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import torch
+
 from xtuner.dataset.utils import process_anyres_image
 from xtuner.model.utils import prepare_inputs_labels_for_multimodal
-from xtuner.utils import (DEFAULT_IMAGE_TOKEN, IMAGE_TOKEN_INDEX)
-
+from xtuner.utils import DEFAULT_IMAGE_TOKEN, IMAGE_TOKEN_INDEX
 from .evaluate_chat_hook import EvaluateChatHook
 
 
@@ -27,7 +27,8 @@ class AnyShapeEvaluateChatHook(EvaluateChatHook):
 
             orig_size = sample_image.size
             # n,c,h,w
-            image = process_anyres_image(sample_image, self.image_processor, self.image_grid_pinpoints)
+            image = process_anyres_image(sample_image, self.image_processor,
+                                         self.image_grid_pinpoints)
 
             image = image.to(device)
             sample_input = DEFAULT_IMAGE_TOKEN + '\n' + sample_input
@@ -49,8 +50,11 @@ class AnyShapeEvaluateChatHook(EvaluateChatHook):
                     input_ids.append(IMAGE_TOKEN_INDEX)
             input_ids = torch.tensor(input_ids).to(device)
 
-            image_features = model.preprocess_for_pixel_values(
-                {'pixel_values': image.unsqueeze(0), 'orig_sizes': [orig_size]})
+            image_features = model.preprocess_for_pixel_values({
+                'pixel_values':
+                image.unsqueeze(0),
+                'orig_sizes': [orig_size]
+            })
 
             mm_inputs = prepare_inputs_labels_for_multimodal(
                 llm=model.llm,

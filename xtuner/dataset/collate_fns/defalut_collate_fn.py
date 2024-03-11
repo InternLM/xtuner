@@ -46,8 +46,8 @@ def default_collate_fn(instances: Sequence[Dict],
     if use_varlen_attn:
         indexes = torch.stack(indexes, dim=0)
         max_seqlen = (
-                cumulative_len[0][1:] -  # noqa: W504
-                cumulative_len[0][:-1]).max().item()
+            cumulative_len[0][1:] -  # noqa: W504
+            cumulative_len[0][:-1]).max().item()
         data_dict = {
             'input_ids': input_ids,
             'cumulative_len': cumulative_len,
@@ -113,8 +113,8 @@ def anyshape_llava_collate_fn(instances: Sequence[Dict],
     if use_varlen_attn:
         indexes = torch.stack(indexes, dim=0)
         max_seqlen = (
-                cumulative_len[0][1:] -  # noqa: W504
-                cumulative_len[0][:-1]).max().item()
+            cumulative_len[0][1:] -  # noqa: W504
+            cumulative_len[0][:-1]).max().item()
         data_dict = {
             'input_ids': input_ids,
             'cumulative_len': cumulative_len,

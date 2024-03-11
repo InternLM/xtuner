@@ -2,13 +2,13 @@
 import base64
 import copy
 import io
+import math
 from io import BytesIO
 from itertools import chain
-import math
-import torch
 
 import numpy as np
 import requests
+import torch
 from PIL import Image
 
 from xtuner.utils import DEFAULT_IMAGE_TOKEN, IGNORE_INDEX, IMAGE_TOKEN_INDEX
@@ -275,13 +275,14 @@ def decode_base64_to_image(base64_string):
 
 # ref: https://github.com/haotian-liu/LLaVA
 def select_best_resolution(original_size, possible_resolutions):
-    """
-    Selects the best resolution from a list of possible resolutions based on the original size.
+    """Selects the best resolution from a list of possible resolutions based on
+    the original size.
 
     Args:
-        original_size (tuple): The original size of the image in the format (width, height).
-        possible_resolutions (list): A list of possible resolutions in the format
-            [(width1, height1), (width2, height2), ...].
+        original_size (tuple): The original size of the image in the format
+            (width, height).
+        possible_resolutions (list): A list of possible resolutions in
+            the format [(width1, height1), (width2, height2), ...].
 
     Returns:
         tuple: The best fit resolution in the format (width, height).
@@ -293,12 +294,15 @@ def select_best_resolution(original_size, possible_resolutions):
 
     for width, height in possible_resolutions:
         scale = min(width / original_width, height / original_height)
-        downscaled_width, downscaled_height = int(original_width * scale), int(original_height * scale)
-        effective_resolution = min(downscaled_width * downscaled_height, original_width * original_height)
+        downscaled_width, downscaled_height = int(original_width * scale), int(
+            original_height * scale)
+        effective_resolution = min(downscaled_width * downscaled_height,
+                                   original_width * original_height)
         wasted_resolution = (width * height) - effective_resolution
 
         if effective_resolution > max_effective_resolution or (
-                effective_resolution == max_effective_resolution and wasted_resolution < min_wasted_resolution):
+                effective_resolution == max_effective_resolution
+                and wasted_resolution < min_wasted_resolution):
             max_effective_resolution = effective_resolution
             min_wasted_resolution = wasted_resolution
             best_fit = (width, height)
@@ -307,12 +311,13 @@ def select_best_resolution(original_size, possible_resolutions):
 
 
 def resize_and_pad_image(image, target_resolution):
-    """
-    Resize and pad an image to a target resolution while maintaining aspect ratio.
+    """Resize and pad an image to a target resolution while maintaining aspect
+    ratio.
 
     Args:
         image (PIL.Image.Image): The input image.
-        target_resolution (tuple): The target resolution (width, height) of the image.
+        target_resolution (tuple): The target resolution (width, height) of
+            the image.
 
     Returns:
         PIL.Image.Image: The resized and padded image.
@@ -342,8 +347,7 @@ def resize_and_pad_image(image, target_resolution):
 
 
 def divide_to_patches(image, patch_size):
-    """
-    Divides an image into patches of a specified size.
+    """Divides an image into patches of a specified size.
 
     Args:
         image (PIL.Image.Image): The input image.
@@ -364,13 +368,13 @@ def divide_to_patches(image, patch_size):
 
 
 def process_anyres_image(image, processor, possible_resolutions):
-    """
-    Process an image with variable resolutions.
+    """Process an image with variable resolutions.
 
     Args:
         image (PIL.Image.Image): The input image to be processed.
         processor: The image processor object.
-        possible_resolutions (str): A string representation of a list of possible resolutions.
+        possible_resolutions (str): A string representation of a list of
+            possible resolutions.
 
     Returns:
         torch.Tensor: A tensor containing the processed image patches.
@@ -380,21 +384,27 @@ def process_anyres_image(image, processor, possible_resolutions):
 
     patches = divide_to_patches(image_padded, processor.crop_size['height'])
 
-    image_original_resize = image.resize((processor.size['shortest_edge'], processor.size['shortest_edge']))
+    image_original_resize = image.resize(
+        (processor.size['shortest_edge'], processor.size['shortest_edge']))
 
     image_patches = [image_original_resize] + patches
-    image_patches = [processor.preprocess(image_patch, return_tensors='pt')['pixel_values'][0]
-                     for image_patch in image_patches]
+    image_patches = [
+        processor.preprocess(image_patch,
+                             return_tensors='pt')['pixel_values'][0]
+        for image_patch in image_patches
+    ]
     return torch.stack(image_patches, dim=0)
 
 
 def get_anyres_image_grid_shape(image_size, possible_resolutions, patch_size):
-    """
-    Calculate the shape of the image patch grid after the preprocessing for images of any resolution.
+    """Calculate the shape of the image patch grid after the preprocessing for
+    images of any resolution.
 
     Args:
-        image_size (tuple): The size of the input image in the format (width, height).
-        possible_resolutions (list): A string representation of a list of possible resolutions.
+        image_size (tuple): The size of the input image in the format
+            (width, height).
+        possible_resolutions (list): A string representation of a list of
+            possible resolutions.
         patch_size (int): The size of each image patch.
 
     Returns:
@@ -403,9 +413,9 @@ def get_anyres_image_grid_shape(image_size, possible_resolutions, patch_size):
     width, height = select_best_resolution(image_size, possible_resolutions)
     return width // patch_size, height // patch_size
 
+
 def unpad_image(tensor, original_size):
-    """
-    Unpads a PyTorch tensor of a padded and resized image.
+    """Unpads a PyTorch tensor of a padded and resized image.
 
     Args:
     tensor (torch.Tensor): The image tensor, assumed to be in CxHxW format.

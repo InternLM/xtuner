@@ -318,4 +318,3 @@ def truncate_dict(tensor_dict, max_length):
         else:
             truncated_dict[key] = value
     return truncated_dict
-

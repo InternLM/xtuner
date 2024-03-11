@@ -1,13 +1,14 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import warnings
+from collections import OrderedDict
+
 import torch
 import torch.nn as nn
+
+from ..dataset.utils import get_anyres_image_grid_shape, unpad_image
+from .llava import LLaVAModel
 from .utils import (get_peft_model_state_dict,
                     prepare_inputs_labels_for_multimodal, truncate_dict)
-
-from .llava import LLaVAModel
-from ..dataset.utils import get_anyres_image_grid_shape, unpad_image
-from collections import OrderedDict
-import warnings
 
 
 class AnyShapeLLaVAModel(LLaVAModel):
@@ -15,11 +16,11 @@ class AnyShapeLLaVAModel(LLaVAModel):
     def __init__(self, image_grid_pinpoints, *args, max_length=4096, **kwargs):
         super().__init__(*args, **kwargs)
         self.image_newline = nn.Parameter(
-            torch.empty(self.llm.config.hidden_size, dtype=self.visual_encoder.dtype)
-        )
+            torch.randn(
+                self.llm.config.hidden_size, dtype=self.visual_encoder.dtype))
         self.image_grid_pinpoints = image_grid_pinpoints
-        self.mm_patch_merge_type = "spatial_unpad"
-        self.image_aspect_ratio = "anyres"
+        self.mm_patch_merge_type = 'spatial_unpad'
+        self.image_aspect_ratio = 'anyres'
         self.max_length = max_length
 
     def state_dict(self, *args, **kwargs):
@@ -62,7 +63,9 @@ class AnyShapeLLaVAModel(LLaVAModel):
 
         if type(pixel_values) is list or pixel_values.ndim == 5:
             if type(pixel_values) is list:
-                pixel_values = [x.unsqueeze(0) if x.ndim == 3 else x for x in pixel_values]
+                pixel_values = [
+                    x.unsqueeze(0) if x.ndim == 3 else x for x in pixel_values
+                ]
             # b*n, c, h, w
             concat_images = torch.cat([image for image in pixel_values], dim=0)
         else:
@@ -81,42 +84,50 @@ class AnyShapeLLaVAModel(LLaVAModel):
             if image_feature.shape[0] > 1:
                 base_image_feature = image_feature[0]
                 image_feature = image_feature[1:]
-                height = width = self.visual_encoder.config.image_size // self.visual_encoder.config.patch_size
+                height = width = self.visual_encoder.config.image_size \
+                    // self.visual_encoder.config.patch_size
                 assert height * width == base_image_feature.shape[0]
                 if self.image_aspect_ratio == 'anyres':
-                    num_patch_width, num_patch_height = get_anyres_image_grid_shape(orig_sizes[image_idx],
-                                                                                    self.image_grid_pinpoints,
-                                                                                    self.visual_encoder.config.image_size)
-                    image_feature = image_feature.view(num_patch_height, num_patch_width, height, width, -1)
+                    num_patch = get_anyres_image_grid_shape(
+                        orig_sizes[image_idx], self.image_grid_pinpoints,
+                        self.visual_encoder.config.image_size)
+                    num_patch_width, num_patch_height = num_patch
+                    image_feature = image_feature.view(num_patch_height,
+                                                       num_patch_width, height,
+                                                       width, -1)
                 else:
                     raise NotImplementedError
 
                 if 'unpad' in self.mm_patch_merge_type:
-                    image_feature = image_feature.permute(4, 0, 2, 1, 3).contiguous()
+                    image_feature = image_feature.permute(4, 0, 2, 1,
+                                                          3).contiguous()
                     image_feature = image_feature.flatten(1, 2).flatten(2, 3)
-                    image_feature = unpad_image(image_feature, orig_sizes[image_idx])
-                    image_feature = torch.cat((
-                        image_feature,
-                        self.image_newline[:, None, None].expand(*image_feature.shape[:-1], 1)
-                    ), dim=-1)
+                    image_feature = unpad_image(image_feature,
+                                                orig_sizes[image_idx])
+                    image_feature = torch.cat(
+                        (image_feature,
+                         self.image_newline[:, None, None].expand(
+                             *image_feature.shape[:-1], 1)),
+                        dim=-1)
                     image_feature = image_feature.flatten(1, 2).transpose(0, 1)
                 else:
-                    image_feature = image_feature.permute(0, 2, 1, 3, 4).contiguous()
+                    image_feature = image_feature.permute(0, 2, 1, 3,
+                                                          4).contiguous()
                     image_feature = image_feature.flatten(0, 3)
-                image_feature = torch.cat((base_image_feature, image_feature), dim=0)
+                image_feature = torch.cat((base_image_feature, image_feature),
+                                          dim=0)
             else:
                 image_feature = image_feature[0]
                 if 'unpad' in self.mm_patch_merge_type:
-                    image_feature = torch.cat((
-                        image_feature,
-                        self.image_newline[None]
-                    ), dim=0)
+                    image_feature = torch.cat(
+                        (image_feature, self.image_newline[None]), dim=0)
             new_image_feature.append(image_feature)
         return new_image_feature
 
     def forward(self, data, data_samples=None, mode='loss'):
         if 'pixel_values' in data:
-            new_image_feature = self.preprocess_for_pixel_values(data, data_samples)
+            new_image_feature = self.preprocess_for_pixel_values(
+                data, data_samples)
             data['pixel_values'] = new_image_feature
             del data['orig_sizes']
             data = prepare_inputs_labels_for_multimodal(llm=self.llm, **data)
@@ -128,8 +139,9 @@ class AnyShapeLLaVAModel(LLaVAModel):
                 seq_len = data['input_ids'].shape[1]
 
             if seq_len > self.max_length:
-                warnings.warn(f"Input length {seq_len} is longer than the maximum length {self.max_length}. "
-                              f"Truncating the input.")
+                warnings.warn(
+                    f'Input length {seq_len} is longer than the '
+                    f'maximum length {self.max_length}. Truncating the input.')
                 data = truncate_dict(data, self.max_length)
 
         if mode == 'loss':

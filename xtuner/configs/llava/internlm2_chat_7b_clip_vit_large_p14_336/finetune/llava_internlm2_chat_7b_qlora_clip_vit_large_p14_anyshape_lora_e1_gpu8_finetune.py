@@ -13,7 +13,7 @@ from xtuner.dataset import AnyShapeLLaVADataset
 from xtuner.dataset.collate_fns import anyshape_llava_collate_fn
 from xtuner.dataset.map_fns import llava_map_fn, template_map_fn_factory
 from xtuner.dataset.samplers import LengthGroupedSampler
-from xtuner.engine.hooks import DatasetInfoHook, AnyShapeEvaluateChatHook
+from xtuner.engine.hooks import AnyShapeEvaluateChatHook, DatasetInfoHook
 from xtuner.engine.runner import TrainLoop
 from xtuner.model import AnyShapeLLaVAModel
 from xtuner.utils import PROMPT_TEMPLATE
@@ -32,12 +32,13 @@ data_root = './data/llava_data/'
 data_path = data_root + 'LLaVA-Instruct-150K/llava_v1_5_mix665k.json'
 image_folder = data_root + 'llava_images'
 prompt_template = PROMPT_TEMPLATE.internlm2_chat
-image_grid_pinpoints = [[336, 672], [672, 336], [672, 672], [1008, 336], [336, 1008]]
+image_grid_pinpoints = [[336, 672], [672, 336], [672, 672], [1008, 336],
+                        [336, 1008]]
 max_length = 4096
 
 # Scheduler & Optimizer
-batch_size = 16  # per_device
-accumulative_counts = 1
+batch_size = 8  # per_device
+accumulative_counts = 2
 dataloader_num_workers = 4
 max_epochs = 1
 optim_type = AdamW

@@ -90,7 +90,7 @@ class LLaVADataset(Dataset):
 
 class AnyShapeLLaVADataset(LLaVADataset):
 
-    def __init__(self, image_grid_pinpoints, *args,  **kwargs):
+    def __init__(self, image_grid_pinpoints, *args, **kwargs):
         self.image_grid_pinpoints = image_grid_pinpoints
         super().__init__(*args, **kwargs)
 
@@ -103,10 +103,12 @@ class AnyShapeLLaVADataset(LLaVADataset):
             orig_size = image.size
             # use to remove padding
             data_dict['orig_size'] = orig_size
-            image = process_anyres_image(image, self.image_processor, self.image_grid_pinpoints)
+            image = process_anyres_image(image, self.image_processor,
+                                         self.image_grid_pinpoints)
             data_dict['pixel_values'] = image
         else:
             crop_size = self.image_processor.crop_size
             data_dict['orig_size'] = crop_size
-            data_dict['pixel_values'] = torch.zeros(1, 3, crop_size['height'], crop_size['width'])
+            data_dict['pixel_values'] = torch.zeros(1, 3, crop_size['height'],
+                                                    crop_size['width'])
         return data_dict

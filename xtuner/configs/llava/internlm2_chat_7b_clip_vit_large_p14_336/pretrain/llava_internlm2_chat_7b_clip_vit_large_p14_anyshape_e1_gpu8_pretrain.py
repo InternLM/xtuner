@@ -12,7 +12,7 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer,
 from xtuner.dataset import AnyShapeLLaVADataset
 from xtuner.dataset.collate_fns import anyshape_llava_collate_fn
 from xtuner.dataset.map_fns import llava_map_fn, template_map_fn_factory
-from xtuner.engine.hooks import DatasetInfoHook, AnyShapeEvaluateChatHook
+from xtuner.engine.hooks import AnyShapeEvaluateChatHook, DatasetInfoHook
 from xtuner.engine.runner import TrainLoop
 from xtuner.model import AnyShapeLLaVAModel
 from xtuner.utils import PROMPT_TEMPLATE
@@ -30,7 +30,8 @@ data_path = data_root + 'LLaVA-Pretrain/blip_laion_cc_sbu_558k.json'
 image_folder = data_root + 'LLaVA-Pretrain/images'
 prompt_template = PROMPT_TEMPLATE.internlm2_chat
 
-image_grid_pinpoints = [[336, 672], [672, 336], [672, 672], [1008, 336], [336, 1008]]
+image_grid_pinpoints = [[336, 672], [672, 336], [672, 672], [1008, 336],
+                        [336, 1008]]
 max_length = 4096
 
 # Scheduler & Optimizer
