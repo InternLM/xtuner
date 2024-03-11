@@ -125,7 +125,8 @@ PROMPT_TEMPLATE = ConfigDict(
         INSTRUCTION=('[INST] {input} [/INST]'),
         SEP='\n'),
     gemma=dict(
-        SYSTEM=('<start_of_turn>model\n{system}<end_of_turn>\n'),
+        # `system` field is extended by xtuner
+        SYSTEM=('<start_of_turn>system\n{system}<end_of_turn>\n'),
         INSTRUCTION=('<start_of_turn>user\n{input}<end_of_turn>\n'
                      '<start_of_turn>model\n'),
         SUFFIX='<end_of_turn>',
