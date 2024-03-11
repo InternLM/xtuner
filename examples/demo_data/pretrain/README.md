@@ -1,5 +1,8 @@
 # Pretrain Example
 
+> \[!IMPORTANT\]
+> Data must be used in conjunction with the corresponding map_fn.
+
 ## Data
 
 `./data.json`
