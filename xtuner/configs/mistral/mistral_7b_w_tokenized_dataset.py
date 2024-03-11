@@ -1,110 +1,51 @@
-# Multi-turn Conversation Example 1
-
-> \[!IMPORTANT\]
-> Data must be used in conjunction with the corresponding map_fn.
-
-## Data
-
-`./data.json`
-
-```json
-[{
-    "messages":[
-        {
-            "toy_system": "You are a helpful AI assistant.",
-            "toy_input": "Give three tips for staying healthy.",
-            "toy_output": "1.Eat a balanced diet. 2. Exercise regularly. 3. Get enough sleep."
-        },
-        {
-            "toy_input": "How to study English?",
-            "toy_output": "1. Set clear goals. 2. Create a study plan. 3. Build vocabulary. 4. Practice speaking."
-        }
-    ]
-},
-{
-    "messages":[
-        {
-            "toy_system": "You are a helpful AI assistant.",
-            "toy_input": "How to study English?",
-            "toy_output": "1. Set clear goals. 2. Create a study plan. 3. Build vocabulary. 4. Practice speaking."
-        },
-        {
-            "toy_input": "Give three tips for staying healthy.",
-            "toy_output": "1.Eat a balanced diet. 2. Exercise regularly. 3. Get enough sleep."
-        }
-    ]
-}]
-```
-
-## Map Function
-
-`./map_fn.py`
-
-```python
-def multi_turn_1_map_fn(example):
-    messages = example['messages']
-    conversation = []
-    for msg in messages:
-        conversation.append({
-            'system': msg['toy_system'],
-            'input': msg['toy_input'],
-            'output': msg['output']
-        })
-    return {'conversation': conversation}
-```
-
-## Config
-
-Based on [internlm_7b_qlora_json_e3](../../../xtuner/configs/internlm/internlm_7b/internlm_7b_qlora_json_e3.py).
-
-```diff
 # Copyright (c) OpenMMLab. All rights reserved.
 import torch
-from datasets import load_dataset
-+ from mmengine.config import read_base
-from mmengine.dataset import DefaultSampler
 from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
                             LoggerHook, ParamSchedulerHook)
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR
-from peft import LoraConfig
 from torch.optim import AdamW
-from transformers import (AutoModelForCausalLM, AutoTokenizer,
-                          BitsAndBytesConfig)
+from torch.utils.data import BatchSampler
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from xtuner.dataset import process_hf_dataset
 from xtuner.dataset.collate_fns import default_collate_fn
-from xtuner.dataset.map_fns import template_map_fn_factory
-from xtuner.engine.hooks import DatasetInfoHook, EvaluateChatHook
+from xtuner.dataset.intern_repo import (build_packed_dataset,
+                                        load_intern_repo_tokenized_dataset)
+from xtuner.dataset.samplers import InternRepoSampler
+from xtuner.engine import (DatasetInfoHook, EvaluateChatHook, ThroughputHook,
+                           VarlenAttnArgsToMessageHubHook)
 from xtuner.engine.runner import TrainLoop
 from xtuner.model import SupervisedFinetune
 from xtuner.utils import PROMPT_TEMPLATE
 
-+with read_base():
-+    from .map_fn import multi_turn_1_map_fn as dataset_map_fn
-+
 #######################################################################
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-pretrained_model_name_or_path = 'internlm/internlm-7b'
+pretrained_model_name_or_path = 'mistralai/Mistral-7B-v0.1'
+# 已经使用 Internlm2 的对话模板覆盖了 Mistral 的原有模板，new tokenizer 中已经
+# 添加了 Internlm2 对话模板中的特殊字符。
+# 请参考 docs/zh_cn/user_guides/finetune_custom_dataset.md
+tokenizer_path = '/new/tokenizer/path'
+use_varlen_attn = True
 
 # Data
--data_path = 'path/to/your/json_data'
-+data_path = './data.json'
-prompt_template = PROMPT_TEMPLATE.default
-max_length = 2048
+dataset_folder = '/path/to/sft/data/folder'
+# 已经使用 Internlm2 的对话模板覆盖了 Mistral 的原有模板
+prompt_template = PROMPT_TEMPLATE.internlm2_chat
+max_length = 32768
 pack_to_max_length = True
 
 # Scheduler & Optimizer
 batch_size = 1  # per_device
-accumulative_counts = 16
+accumulative_counts = 1
 dataloader_num_workers = 0
-max_epochs = 3
+max_epochs = 1
 optim_type = AdamW
-lr = 2e-4
-betas = (0.9, 0.999)
-weight_decay = 0
+lr = 4e-5
+betas = (0.9, 0.95)
+weight_decay = 0.01
 max_norm = 1  # grad clip
+warm_up_ratio = 0.025
 
 # Save
 save_steps = 500
@@ -122,56 +63,42 @@ evaluation_inputs = [
 #######################################################################
 tokenizer = dict(
     type=AutoTokenizer.from_pretrained,
-    pretrained_model_name_or_path=pretrained_model_name_or_path,
+    pretrained_model_name_or_path=tokenizer_path,
     trust_remote_code=True,
     padding_side='right')
 
 model = dict(
     type=SupervisedFinetune,
+    use_varlen_attn=use_varlen_attn,
+    tokenizer=tokenizer,
     llm=dict(
         type=AutoModelForCausalLM.from_pretrained,
         pretrained_model_name_or_path=pretrained_model_name_or_path,
         trust_remote_code=True,
-        torch_dtype=torch.float16,
-        quantization_config=dict(
-            type=BitsAndBytesConfig,
-            load_in_4bit=True,
-            load_in_8bit=False,
-            llm_int8_threshold=6.0,
-            llm_int8_has_fp16_weight=False,
-            bnb_4bit_compute_dtype=torch.float16,
-            bnb_4bit_use_double_quant=True,
-            bnb_4bit_quant_type='nf4')),
-    lora=dict(
-        type=LoraConfig,
-        r=64,
-        lora_alpha=16,
-        lora_dropout=0.1,
-        bias='none',
-        task_type='CAUSAL_LM'))
+        torch_dtype=torch.bfloat16,
+        attn_implementation='flash_attention_2'))
 
 #######################################################################
 #                      PART 3  Dataset & Dataloader                   #
 #######################################################################
 train_dataset = dict(
-    type=process_hf_dataset,
-    dataset=dict(
-        type=load_dataset, path='json', data_files=dict(train=data_path)),
-    tokenizer=tokenizer,
-    max_length=max_length,
-+   dataset_map_fn=dataset_map_fn,
-    template_map_fn=dict(
-        type=template_map_fn_factory, template=prompt_template),
-    remove_unused_columns=True,
-    shuffle_before_pack=True,
-    pack_to_max_length=pack_to_max_length)
+    type=build_packed_dataset,
+    dataset_cfg=dict(
+        type=load_intern_repo_tokenized_dataset,
+        data_order_path=None,
+        folder=dataset_folder,
+        min_length=0,
+        file_type='.bin'),
+    packed_length=max_length,
+    seed=1024)
 
 train_dataloader = dict(
     batch_size=batch_size,
     num_workers=dataloader_num_workers,
     dataset=train_dataset,
-    sampler=dict(type=DefaultSampler, shuffle=True),
-    collate_fn=dict(type=default_collate_fn))
+    sampler=dict(type=InternRepoSampler, shuffle=True, seed=1024),
+    batch_sampler=dict(type=BatchSampler, drop_last=True, batch_size=1),
+    collate_fn=dict(type=default_collate_fn, use_varlen_attn=use_varlen_attn))
 
 #######################################################################
 #                    PART 4  Scheduler & Optimizer                    #
@@ -183,17 +110,26 @@ optim_wrapper = dict(
         type=optim_type, lr=lr, betas=betas, weight_decay=weight_decay),
     clip_grad=dict(max_norm=max_norm, error_if_nonfinite=False),
     accumulative_counts=accumulative_counts,
-    loss_scale='dynamic',
-    dtype='float16')
+    loss_scale='dynamic')
 
 # learning policy
 # More information: https://github.com/open-mmlab/mmengine/blob/main/docs/en/tutorials/param_scheduler.md  # noqa: E501
-param_scheduler = dict(
-    type=CosineAnnealingLR,
-    eta_min=0.0,
-    by_epoch=True,
-    end=max_epochs,
-    convert_to_iter_based=True)
+param_scheduler = [
+    dict(
+        type='LinearLR',
+        start_factor=1 / 40,
+        by_epoch=True,
+        begin=0,
+        end=warm_up_ratio * max_epochs,
+        convert_to_iter_based=True),
+    dict(
+        type=CosineAnnealingLR,
+        eta_min=lr * 0.15,
+        by_epoch=True,
+        begin=warm_up_ratio * max_epochs,
+        end=max_epochs,
+        convert_to_iter_based=True)
+]
 
 # train, val, test setting
 train_cfg = dict(type=TrainLoop, max_epochs=max_epochs)
@@ -201,24 +137,29 @@ train_cfg = dict(type=TrainLoop, max_epochs=max_epochs)
 #######################################################################
 #                           PART 5  Runtime                           #
 #######################################################################
-# Log the dialogue periodically during the training process, optional
 custom_hooks = [
-    dict(type=DatasetInfoHook, tokenizer=tokenizer),
+    dict(
+        type=DatasetInfoHook, tokenizer=tokenizer,
+        is_intern_repo_dataset=True),
     dict(
         type=EvaluateChatHook,
         tokenizer=tokenizer,
         every_n_iters=evaluation_freq,
         evaluation_inputs=evaluation_inputs,
         system=SYSTEM,
-        prompt_template=prompt_template)
+        prompt_template=prompt_template),
+    dict(type=ThroughputHook)
 ]
+
+if use_varlen_attn:
+    custom_hooks += [dict(type=VarlenAttnArgsToMessageHubHook)]
 
 # configure default hooks
 default_hooks = dict(
     # record the time of every iteration.
     timer=dict(type=IterTimerHook),
-    # print log every 10 iterations.
-    logger=dict(type=LoggerHook, log_metric_by_epoch=False, interval=10),
+    # print log every 100 iterations.
+    logger=dict(type=LoggerHook, log_metric_by_epoch=False, interval=1),
     # enable the parameter scheduler.
     param_scheduler=dict(type=ParamSchedulerHook),
     # save checkpoint per `save_steps`.
@@ -256,13 +197,7 @@ resume = False
 # Defaults to use random seed and disable `deterministic`
 randomness = dict(seed=None, deterministic=False)
 
-# set log processor
-log_processor = dict(by_epoch=False)
-```
-
-## Quick Start
-
-```bash
-cd ./examples/demo_data/multi_turn_1
-xtuner train config.py
-```
+log_processor = dict(
+    by_epoch=False,
+    window_size=1,
+    mean_pattern=r'.*(loss|time|data_time|grad_norm|tflops).*')

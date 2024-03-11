@@ -25,6 +25,8 @@ def save_data_order(data_folder, save_folder, file_type='.bin'):
         for fn in sorted(files):
             if fn.endswith(file_type):
                 fp = os.path.join(root, fn)
+                # Using relative paths so that you can get the same result
+                # on different clusters
                 fp = fp.replace(data_folder, '')[1:]
                 data_order.append(fp)
 
