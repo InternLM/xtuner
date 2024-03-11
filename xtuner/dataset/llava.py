@@ -61,13 +61,14 @@ class LLaVADataset(Dataset):
         length_list = []
         for data_dict in self.text_data:
             cur_len = len(data_dict['input_ids'])
-            if data_dict.get('image', None) is None:
+            image = data_dict.get('image', None)
+            if image is None:
                 cur_len = -cur_len
             else:
-                if isinstance(data_dict.get('image', None), str):
+                if isinstance(image, str):
                     n_images = 1
                 else:
-                    n_images = len(data_dict.get('image', None))
+                    n_images = len(image)
                 cur_len = cur_len - n_images + self.per_image_length * n_images
             length_list.append(cur_len)
         return length_list
