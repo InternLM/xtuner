@@ -11,7 +11,10 @@ from xtuner.dataset import ConcatDataset, process_hf_dataset
 from xtuner.dataset.collate_fns import default_collate_fn
 from xtuner.dataset.map_fns import (alpaca_map_fn, alpaca_zh_map_fn,
                                     oasst1_map_fn, template_map_fn_factory)
-from xtuner.engine import DatasetInfoHook, EvaluateChatHook, ThroughputHook
+from xtuner.engine.hooks import (DatasetInfoHook, EvaluateChatHook,
+                                 ThroughputHook,
+                                 VarlenAttnArgsToMessageHubHook)
+from xtuner.engine.runner import TrainLoop
 from xtuner.model import SupervisedFinetune
 from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
 
@@ -20,6 +23,7 @@ from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
 #######################################################################
 # Model
 pretrained_model_name_or_path = 'internlm/internlm-7b'
+use_varlen_attn = False
 
 # Data
 alpaca_zh_path = 'silk-road/alpaca-data-gpt4-chinese'
@@ -41,6 +45,10 @@ weight_decay = 0
 max_norm = 1  # grad clip
 warmup_ratio = 0.03
 
+# Save
+save_steps = 500
+save_total_limit = 2  # Maximum checkpoints to keep (-1 means unlimited)
+
 # Evaluate the generation performance during the training
 evaluation_freq = 500
 SYSTEM = SYSTEM_TEMPLATE.alpaca
@@ -59,6 +67,7 @@ tokenizer = dict(
 
 model = dict(
     type=SupervisedFinetune,
+    use_varlen_attn=use_varlen_attn,
     llm=dict(
         type=AutoModelForCausalLM.from_pretrained,
         pretrained_model_name_or_path=pretrained_model_name_or_path,
@@ -76,7 +85,8 @@ alpaca_en = dict(
         type=template_map_fn_factory, template=prompt_template),
     remove_unused_columns=True,
     shuffle_before_pack=True,
-    pack_to_max_length=pack_to_max_length)
+    pack_to_max_length=pack_to_max_length,
+    use_varlen_attn=use_varlen_attn)
 
 alpaca_zh = dict(
     type=process_hf_dataset,
@@ -88,7 +98,8 @@ alpaca_zh = dict(
         type=template_map_fn_factory, template=prompt_template),
     remove_unused_columns=True,
     shuffle_before_pack=True,
-    pack_to_max_length=pack_to_max_length)
+    pack_to_max_length=pack_to_max_length,
+    use_varlen_attn=use_varlen_attn)
 
 oasst1 = dict(
     type=process_hf_dataset,
@@ -100,7 +111,8 @@ oasst1 = dict(
         type=template_map_fn_factory, template=prompt_template),
     remove_unused_columns=True,
     shuffle_before_pack=True,
-    pack_to_max_length=pack_to_max_length)
+    pack_to_max_length=pack_to_max_length,
+    use_varlen_attn=use_varlen_attn)
 
 train_dataset = dict(
     type=ConcatDataset, datasets=[alpaca_en, alpaca_zh, oasst1])
@@ -110,7 +122,7 @@ train_dataloader = dict(
     num_workers=dataloader_num_workers,
     dataset=train_dataset,
     sampler=dict(type=DefaultSampler, shuffle=True),
-    collate_fn=dict(type=default_collate_fn))
+    collate_fn=dict(type=default_collate_fn, use_varlen_attn=use_varlen_attn))
 
 #######################################################################
 #                    PART 4  Scheduler & Optimizer                    #
@@ -140,12 +152,12 @@ param_scheduler = [
         eta_min=0.0,
         by_epoch=True,
         begin=warmup_ratio * max_epochs,
-        T_max=max_epochs,
+        end=max_epochs,
         convert_to_iter_based=True)
 ]
 
 # train, val, test setting
-train_cfg = dict(by_epoch=True, max_epochs=max_epochs, val_interval=1)
+train_cfg = dict(type=TrainLoop, max_epochs=max_epochs)
 
 #######################################################################
 #                           PART 5  Runtime                           #
@@ -163,16 +175,23 @@ custom_hooks = [
     dict(type=ThroughputHook)
 ]
 
+if use_varlen_attn:
+    custom_hooks += [dict(type=VarlenAttnArgsToMessageHubHook)]
+
 # configure default hooks
 default_hooks = dict(
     # record the time of every iteration.
     timer=dict(type=IterTimerHook),
-    # print log every 100 iterations.
-    logger=dict(type=LoggerHook, interval=10),
+    # print log every 10 iterations.
+    logger=dict(type=LoggerHook, log_metric_by_epoch=False, interval=10),
     # enable the parameter scheduler.
     param_scheduler=dict(type=ParamSchedulerHook),
-    # save checkpoint per epoch.
-    checkpoint=dict(type=CheckpointHook, interval=1),
+    # save checkpoint per `save_steps`.
+    checkpoint=dict(
+        type=CheckpointHook,
+        by_epoch=False,
+        interval=save_steps,
+        max_keep_ckpts=save_total_limit),
     # set sampler seed in distributed evrionment.
     sampler_seed=dict(type=DistSamplerSeedHook),
 )
@@ -201,3 +220,6 @@ resume = False
 
 # Defaults to use random seed and disable `deterministic`
 randomness = dict(seed=None, deterministic=False)
+
+# set log processor
+log_processor = dict(by_epoch=False)

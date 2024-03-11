@@ -21,7 +21,8 @@ from xtuner.dataset.collate_fns import default_collate_fn
 from xtuner.model.modules import dispatch_modules
 from xtuner.model.utils import LoadWoInit, find_all_linear_names, traverse_dict
 from xtuner.registry import BUILDER, MAP_FUNC
-from xtuner.tools.utils import auto_dtype_of_deepspeed_config
+from xtuner.tools.utils import (auto_dtype_of_deepspeed_config,
+                                get_seed_from_checkpoint)
 
 
 def parse_args():
@@ -91,13 +92,6 @@ def main():
     if args.cfg_options is not None:
         cfg.merge_from_dict(args.cfg_options)
 
-    if args.seed is not None:
-        cfg.merge_from_dict(dict(randomness=dict(seed=args.seed)))
-        print_log(
-            f'Set the random seed to {args.seed}.',
-            logger='current',
-            level=logging.INFO)
-
     # register FunctionType object in cfg to `MAP_FUNC` Registry and
     # change these FunctionType object to str
     register_function(cfg._cfg_dict)
@@ -106,6 +100,8 @@ def main():
         # set default training_args
         if cfg.get('training_args', None) is None:
             cfg.training_args = dict(type=TrainingArguments)
+        if args.seed is not None:
+            cfg.training_args.seed = args.seed
         # set work_dir
         if args.work_dir is not None:
             # update configs according to CLI args if args.work_dir is not None
@@ -161,6 +157,40 @@ def main():
         trainer.save_state()
         trainer.save_model(output_dir=training_args.output_dir)
     else:
+        if args.seed is not None and args.resume is None:
+            # Use args.seed
+            cfg.merge_from_dict(dict(randomness=dict(seed=args.seed)))
+            print_log(
+                f'Set the random seed to {args.seed}.',
+                logger='current',
+                level=logging.INFO)
+        elif args.resume is not None:
+            # Use resumed seed
+            from mmengine.fileio import PetrelBackend, get_file_backend
+
+            from xtuner.utils.fileio import patch_fileio
+            backend = get_file_backend(args.resume)
+            if isinstance(backend, PetrelBackend):
+                with patch_fileio():
+                    resumed_seed = get_seed_from_checkpoint(args.resume)
+            else:
+                resumed_seed = get_seed_from_checkpoint(args.resume)
+            cfg.merge_from_dict(dict(randomness=dict(seed=resumed_seed)))
+            if args.seed is not None and args.seed != resumed_seed:
+                print_log(
+                    (f'The value of random seed in resume checkpoint '
+                     f'"{args.resume}" is different from the value in '
+                     f'arguments. The resumed seed is {resumed_seed}, while '
+                     f'the input argument seed is {args.seed}. Using the '
+                     f'resumed seed {resumed_seed}.'),
+                    logger='current',
+                    level=logging.WARNING)
+            else:
+                print_log(
+                    f'Set the random seed to {resumed_seed}.',
+                    logger='current',
+                    level=logging.INFO)
+
         if 'LOCAL_RANK' not in os.environ:
             os.environ['LOCAL_RANK'] = str(args.local_rank)
         cfg.launcher = args.launcher

@@ -1,0 +1,10 @@
+[{
+    "toy_system": "You are a helpful AI assistant.",
+    "toy_input": "Give three tips for staying healthy.",
+    "toy_output": "1.Eat a balanced diet. 2. Exercise regularly. 3. Get enough sleep."
+},
+{
+    "toy_system": "You are a helpful AI assistant.",
+    "toy_input": "How to study English?",
+    "toy_output": "1. Set clear goals. 2. Create a study plan. 3. Build vocabulary. 4. Practice speaking."
+}]
