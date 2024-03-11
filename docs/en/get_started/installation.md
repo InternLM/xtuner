@@ -30,7 +30,6 @@ Case b: Install XTuner with DeepSpeed integration:
 pip install -U 'xtuner[deepspeed]'
 ```
 
-
 Case c: Install XTuner from the source code:
 
 ```shell
