@@ -50,7 +50,7 @@ class AnyShapeEvaluateChatHook(EvaluateChatHook):
             input_ids = torch.tensor(input_ids).to(device)
 
             image_features = model.preprocess_for_pixel_values(
-                {'pixel_values': image.unsqueeze(0), 'orig_size': [orig_size]})
+                {'pixel_values': image.unsqueeze(0), 'orig_sizes': [orig_size]})
 
             mm_inputs = prepare_inputs_labels_for_multimodal(
                 llm=model.llm,

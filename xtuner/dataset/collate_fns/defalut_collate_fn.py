@@ -135,7 +135,7 @@ def anyshape_llava_collate_fn(instances: Sequence[Dict],
             pixel_values = torch.stack(pixel_values, dim=0)
         data_dict['pixel_values'] = pixel_values
         if orig_sizes[0] is not None:
-            data_dict['orig_sizes'] = pixel_values
+            data_dict['orig_sizes'] = orig_sizes
 
     if return_hf_format:
         return data_dict

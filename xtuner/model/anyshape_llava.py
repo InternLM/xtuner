@@ -81,7 +81,7 @@ class AnyShapeLLaVAModel(LLaVAModel):
             if image_feature.shape[0] > 1:
                 base_image_feature = image_feature[0]
                 image_feature = image_feature[1:]
-                height = width = self.visual_encoder.num_patches_per_side
+                height = width = self.visual_encoder.config.image_size // self.visual_encoder.config.patch_size
                 assert height * width == base_image_feature.shape[0]
                 if self.image_aspect_ratio == 'anyres':
                     num_patch_width, num_patch_height = get_anyres_image_grid_shape(orig_sizes[image_idx],
@@ -118,6 +118,7 @@ class AnyShapeLLaVAModel(LLaVAModel):
         if 'pixel_values' in data:
             new_image_feature = self.preprocess_for_pixel_values(data, data_samples)
             data['pixel_values'] = new_image_feature
+            del data['orig_sizes']
             data = prepare_inputs_labels_for_multimodal(llm=self.llm, **data)
 
             inputs_embeds = data['inputs_embeds']
