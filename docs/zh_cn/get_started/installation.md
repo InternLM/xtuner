@@ -30,7 +30,6 @@ pip install -U xtuner
 pip install -U 'xtuner[deepspeed]'
 ```
 
-
 方案 c：从源码安装 XTuner：
 
 ```shell
