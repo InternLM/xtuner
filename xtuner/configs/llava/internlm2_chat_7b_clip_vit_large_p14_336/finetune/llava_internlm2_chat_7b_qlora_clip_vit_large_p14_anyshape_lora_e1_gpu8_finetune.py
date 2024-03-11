@@ -33,7 +33,7 @@ data_path = data_root + 'LLaVA-Instruct-150K/llava_v1_5_mix665k.json'
 image_folder = data_root + 'llava_images'
 prompt_template = PROMPT_TEMPLATE.internlm2_chat
 image_grid_pinpoints = [[336, 672], [672, 336], [672, 672], [1008, 336], [336, 1008]]
-max_length = None
+max_length = 4096
 
 # Scheduler & Optimizer
 batch_size = 16  # per_device
@@ -77,6 +77,7 @@ model = dict(
     freeze_visual_encoder=True,
     pretrained_pth=pretrained_pth,
     image_grid_pinpoints=image_grid_pinpoints,
+    max_length=max_length,
     llm=dict(
         type=AutoModelForCausalLM.from_pretrained,
         pretrained_model_name_or_path=llm_name_or_path,

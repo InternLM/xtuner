@@ -2,16 +2,17 @@
 import torch
 import torch.nn as nn
 from .utils import (get_peft_model_state_dict,
-                    prepare_inputs_labels_for_multimodal)
+                    prepare_inputs_labels_for_multimodal, truncate_dict)
 
 from .llava import LLaVAModel
 from ..dataset.utils import get_anyres_image_grid_shape, unpad_image
 from collections import OrderedDict
+import warnings
 
 
 class AnyShapeLLaVAModel(LLaVAModel):
 
-    def __init__(self, image_grid_pinpoints, *args, **kwargs):
+    def __init__(self, image_grid_pinpoints, *args, max_length=4096, **kwargs):
         super().__init__(*args, **kwargs)
         self.image_newline = nn.Parameter(
             torch.empty(self.llm.config.hidden_size, dtype=self.visual_encoder.dtype)
@@ -19,6 +20,7 @@ class AnyShapeLLaVAModel(LLaVAModel):
         self.image_grid_pinpoints = image_grid_pinpoints
         self.mm_patch_merge_type = "spatial_unpad"
         self.image_aspect_ratio = "anyres"
+        self.max_length = max_length
 
     def state_dict(self, *args, **kwargs):
         state_dict = super(LLaVAModel, self).state_dict(*args, **kwargs)
@@ -117,6 +119,17 @@ class AnyShapeLLaVAModel(LLaVAModel):
             new_image_feature = self.preprocess_for_pixel_values(data, data_samples)
             data['pixel_values'] = new_image_feature
             data = prepare_inputs_labels_for_multimodal(llm=self.llm, **data)
+
+            inputs_embeds = data['inputs_embeds']
+            if inputs_embeds is not None:
+                seq_len = inputs_embeds.shape[1]
+            else:
+                seq_len = data['input_ids'].shape[1]
+
+            if seq_len > self.max_length:
+                warnings.warn(f"Input length {seq_len} is longer than the maximum length {self.max_length}. "
+                              f"Truncating the input.")
+                data = truncate_dict(data, self.max_length)
 
         if mode == 'loss':
             return self.compute_loss(data, data_samples)

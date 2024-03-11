@@ -31,7 +31,7 @@ image_folder = data_root + 'LLaVA-Pretrain/images'
 prompt_template = PROMPT_TEMPLATE.internlm2_chat
 
 image_grid_pinpoints = [[336, 672], [672, 336], [672, 672], [1008, 336], [336, 1008]]
-max_length = None
+max_length = 4096
 
 # Scheduler & Optimizer
 batch_size = 32  # per_device
