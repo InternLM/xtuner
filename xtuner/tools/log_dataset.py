@@ -26,6 +26,8 @@ def main():
 
     print('#' * 20 + '   text   ' + '#' * 20)
     print(tokenizer.decode(train_dataset[0]['input_ids']))
+    print('#' * 20 + '   labels(masked text)   ' + '#' * 20)
+    print(tokenizer.decode([i for i in train_dataset[0]['labels'] if i != -100]))
     print('#' * 20 + '   input_ids   ' + '#' * 20)
     print(train_dataset[0]['input_ids'])
     print('#' * 20 + '   labels   ' + '#' * 20)
