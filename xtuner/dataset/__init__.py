@@ -7,7 +7,6 @@ from .intern_repo import (build_packed_dataset,
                           load_intern_repo_tokenized_dataset,
                           load_intern_repo_untokenized_dataset)
 from .llava import LLaVADataset
-from .mimicit import MIMICITDataset
 from .modelscope import process_ms_dataset
 from .moss_sft import MOSSSFTDataset
 from .refcoco_json import (InvRefCOCOJsonDataset, RefCOCOJsonDataset,
@@ -23,6 +22,5 @@ __all__ = [
     'decode_base64_to_image', 'load_image', 'process_ms_dataset',
     'load_intern_repo_tokenized_dataset',
     'load_intern_repo_untokenized_dataset', 'build_packed_dataset',
-    'RefCOCOJsonDataset', 'RefCOCOJsonEvalDataset', 'InvRefCOCOJsonDataset',
-    'MIMICITDataset'
+    'RefCOCOJsonDataset', 'RefCOCOJsonEvalDataset', 'InvRefCOCOJsonDataset'
 ]
