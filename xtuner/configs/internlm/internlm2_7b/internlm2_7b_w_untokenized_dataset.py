@@ -31,7 +31,10 @@ max_length = 32768
 pack_to_max_length = True
 
 # Scheduler & Optimizer
-batch_size = 1  # per_device, set to 1 if `use_varlen_attn` = True
+# batch size per device, set to 1 if `use_varlen_attn` = True
+# To clarify, enlarging the batch size essentially enlarges the `max_length`.
+# For example, doubling the max length is tantamount to doubling the batch size
+batch_size = 1
 accumulative_counts = 1  # 1bs * 1acc * 64gpu = 64 batchsize
 dataloader_num_workers = 4
 max_epochs = 1
