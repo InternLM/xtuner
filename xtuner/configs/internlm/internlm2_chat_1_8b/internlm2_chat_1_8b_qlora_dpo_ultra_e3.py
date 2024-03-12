@@ -12,11 +12,11 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer,
 
 from xtuner.dataset import process_hf_dataset
 from xtuner.dataset.collate_fns import default_collate_fn
-from xtuner.dataset.map_fns import alpaca_map_fn, template_map_fn_factory
+from xtuner.dataset.map_fns import dpo_map_fn, template_map_fn_factory
 from xtuner.engine.hooks import (DatasetInfoHook, EvaluateChatHook,
                                  VarlenAttnArgsToMessageHubHook)
 from xtuner.engine.runner import TrainLoop
-from xtuner.model import SupervisedFinetune, DPO
+from xtuner.model import DPO
 from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
 
 #######################################################################
@@ -27,11 +27,10 @@ pretrained_model_name_or_path = 'internlm/internlm2-chat-1_8b'
 use_varlen_attn = False
 
 # Data
-# ultra_path = 'HuggingFaceH4/ultrachat_200k'
-alpaca_en_path = 'tatsu-lab/alpaca'
+orca_dpo_path = 'Intel/orca_dpo_pairs'
 prompt_template = PROMPT_TEMPLATE.internlm2_chat
-max_length = 2048
-pack_to_max_length = True
+max_length = 256
+pack_to_max_length = False
 
 # Scheduler & Optimizer
 batch_size = 1  # per_device
@@ -65,33 +64,6 @@ tokenizer = dict(
     trust_remote_code=True,
     padding_side='right')
 
-model = dict(
-    type=DPO, # TODO
-    # type = SupervisedFinetune,
-    use_varlen_attn=use_varlen_attn,
-    llm=dict(
-        type=AutoModelForCausalLM.from_pretrained,
-        pretrained_model_name_or_path=pretrained_model_name_or_path,
-        trust_remote_code=True,
-        torch_dtype=torch.float16,
-        quantization_config=dict(
-            type=BitsAndBytesConfig,
-            load_in_4bit=True,
-            load_in_8bit=False,
-            llm_int8_threshold=6.0,
-            llm_int8_has_fp16_weight=False,
-            bnb_4bit_compute_dtype=torch.float16,
-            bnb_4bit_use_double_quant=True,
-            bnb_4bit_quant_type='nf4')),
-    lora=dict(
-        type=LoraConfig,
-        r=64,
-        lora_alpha=16,
-        lora_dropout=0.1,
-        bias='none',
-        task_type='CAUSAL_LM'))
-
-# lora
 # model = dict(
 #     type=DPO, # TODO
 #     # type = SupervisedFinetune,
@@ -100,7 +72,16 @@ model = dict(
 #         type=AutoModelForCausalLM.from_pretrained,
 #         pretrained_model_name_or_path=pretrained_model_name_or_path,
 #         trust_remote_code=True,
-#         torch_dtype=torch.float16),
+#         torch_dtype=torch.float16,
+#         quantization_config=dict(
+#             type=BitsAndBytesConfig,
+#             load_in_4bit=True,
+#             load_in_8bit=False,
+#             llm_int8_threshold=6.0,
+#             llm_int8_has_fp16_weight=False,
+#             bnb_4bit_compute_dtype=torch.float16,
+#             bnb_4bit_use_double_quant=True,
+#             bnb_4bit_quant_type='nf4')),
 #     lora=dict(
 #         type=LoraConfig,
 #         r=64,
@@ -108,6 +89,24 @@ model = dict(
 #         lora_dropout=0.1,
 #         bias='none',
 #         task_type='CAUSAL_LM'))
+
+# lora
+model = dict(
+    type=DPO, # TODO
+    # type = SupervisedFinetune,
+    use_varlen_attn=use_varlen_attn,
+    llm=dict(
+        type=AutoModelForCausalLM.from_pretrained,
+        pretrained_model_name_or_path=pretrained_model_name_or_path,
+        trust_remote_code=True,
+        torch_dtype=torch.float16),
+    lora=dict(
+        type=LoraConfig,
+        r=64,
+        lora_alpha=16,
+        lora_dropout=0.1,
+        bias='none',
+        task_type='CAUSAL_LM'))
 
 # model = dict(
 #     type=DPO,
@@ -120,23 +119,25 @@ model = dict(
 #######################################################################
 #                      PART 3  Dataset & Dataloader                   #
 #######################################################################
-alpaca_en = dict(
+orca_dpo = dict(
     type=process_hf_dataset,
-    dataset=dict(type=load_dataset, path=alpaca_en_path),
+    dataset=dict(type=load_dataset, path=orca_dpo_path),
     tokenizer=tokenizer,
     max_length=max_length,
-    dataset_map_fn=alpaca_map_fn,
+    dataset_map_fn=dpo_map_fn,
     template_map_fn=dict(
         type=template_map_fn_factory, template=prompt_template),
     remove_unused_columns=True,
     shuffle_before_pack=True,
     pack_to_max_length=pack_to_max_length,
-    use_varlen_attn=use_varlen_attn)
+    use_varlen_attn=use_varlen_attn,
+    max_dataset_length=5000,
+    with_dpo=True)
 
 train_dataloader = dict(
     batch_size=batch_size,
     num_workers=dataloader_num_workers,
-    dataset=alpaca_en,
+    dataset=orca_dpo,
     sampler=dict(type=DefaultSampler, shuffle=True),
     collate_fn=dict(type=default_collate_fn, use_varlen_attn=use_varlen_attn))
 

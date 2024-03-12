@@ -5,7 +5,7 @@ from datetime import timedelta
 from functools import partial
 
 import numpy as np
-from datasets import DatasetDict, concatenate_datasets
+from datasets import Dataset, DatasetDict, concatenate_datasets
 from mmengine import print_log
 from mmengine.config import Config, ConfigDict
 from mmengine.utils.misc import get_object_from_string
@@ -17,6 +17,9 @@ from .utils import Packer, encode_fn
 
 def get_lengths(example):
     return {'length': len(example['input_ids'])}
+
+def get_dpo_lengths(example):
+    return {'length': len(example['input_chosen_ids'])}
 
 
 def build_origin_dataset(dataset, split):
@@ -112,6 +115,7 @@ def process(dataset,
             use_varlen_attn=False,
             input_ids_with_output=True,
             with_image_token=False,
+            with_dpo=False,
             map_num_proc=32):
     """Post-process the dataset loaded from the Hugging Face Hub, or a local
     dataset.
@@ -153,6 +157,7 @@ def process(dataset,
         with_image_token: Whether to convert DEFAULT_IMAGE_TOKEN to
             IMAGE_TOKEN_INDEX. Typically set it to True during the training
             of VLM.
+        with_dpo: Whether to process the dataset for DPO.
         map_num_proc: Max number of processes when mapping the dataset.
     """
     if use_varlen_attn:
@@ -177,17 +182,37 @@ def process(dataset,
     # Extract the useful data for training from the original dataset.
     if dataset_map_fn is not None:
         dataset = map_dataset(dataset, dataset_map_fn, map_num_proc)
+        if with_dpo:
+            chosen_data = dataset.map(
+                lambda example: {'conversation': [{'system': example['system'],
+                                 'input': example['prompt'],
+                                 'output': example['chosen']}]}, num_proc=map_num_proc)
+            rejected_data = dataset.map(
+                lambda example: {'conversation': [{'system': example['system'],
+                                 'input': example['prompt'],
+                                 'output': example['rejected']}]}, num_proc=map_num_proc)
+            
 
     # Add prompt template, such as <|System|>: xxx <|User|>: xxx <|Bot|>: xxx
     if template_map_fn is not None:
-        dataset = add_template_to_dataset(dataset, template_map_fn,
-                                          map_num_proc)
+        if not with_dpo:
+            dataset = add_template_to_dataset(dataset, template_map_fn,
+                                            map_num_proc)
+        else:
+            chosen_data = add_template_to_dataset(chosen_data, template_map_fn,
+                                            map_num_proc)
+            rejected_data = add_template_to_dataset(rejected_data, template_map_fn,
+                                            map_num_proc)
 
     for old, new in rename_maps:
-        dataset = dataset.rename_column(old, new)
+        if not with_dpo:
+            dataset = dataset.rename_column(old, new)
+        else:
+            chosen_data = chosen_data.rename_column(old, new)
+            rejected_data = rejected_data.rename_column(old, new)
 
     # remove unused columns
-    if pack_to_max_length and (not remove_unused_columns):
+    if pack_to_max_length and (not remove_unused_columns) and not with_dpo:
         print_log(
             'We have to remove unused columns if '
             '`pack_to_max_length` is set to True.',
@@ -196,25 +221,45 @@ def process(dataset,
         remove_unused_columns = True
 
     if do_dataset_tokenization:
-        dataset = tokenize_dataset(dataset, tokenizer, max_length,
-                                   with_image_token, input_ids_with_output,
-                                   remove_unused_columns, map_num_proc)
+        if not with_dpo:
+            dataset = tokenize_dataset(dataset, tokenizer, max_length,
+                                    with_image_token, input_ids_with_output,
+                                    remove_unused_columns, map_num_proc)
+        else:
+            chosen_data = tokenize_dataset(chosen_data, tokenizer, max_length,
+                                    with_image_token, input_ids_with_output,
+                                    remove_unused_columns, map_num_proc)
+            rejected_data = tokenize_dataset(rejected_data, tokenizer, max_length,
+                                    with_image_token, input_ids_with_output,
+                                    remove_unused_columns, map_num_proc)
+            
+            dataset = Dataset.from_dict({
+                'input_chosen_ids': chosen_data['input_ids'],
+                'chosen_labels': chosen_data['labels'],
+                'input_reject_ids': rejected_data['input_ids'],
+                'reject_labels': rejected_data['labels'],
+            })
+            
+            
     else:
         assert {'input_ids', 'labels'}.issubset(dataset.column_names)
 
-    if input_ids_with_output:
+    if input_ids_with_output and not with_dpo:
         # remove data that does not have the valid labels.
         dataset = dataset.filter(
             lambda example: any(label >= 0 for label in example['labels']),
             num_proc=map_num_proc)
 
     # pack to max length
-    if pack_to_max_length:
+    if pack_to_max_length and not with_dpo:
         dataset = pack_dataset(dataset, max_length, use_varlen_attn,
                                shuffle_before_pack, map_num_proc)
 
     # add 'length'
-    dataset = dataset.map(get_lengths, num_proc=map_num_proc)
+    if with_dpo:
+        dataset = dataset.map(get_dpo_lengths, num_proc=map_num_proc)
+    else:
+        dataset = dataset.map(get_lengths, num_proc=map_num_proc)
     setattr(dataset, 'length', dataset['length'])
 
     return dataset
@@ -235,6 +280,7 @@ def process_hf_dataset(dataset,
                        use_varlen_attn=False,
                        input_ids_with_output=True,
                        with_image_token=False,
+                       with_dpo=False,
                        map_num_proc=32):
     """Post-process the dataset loaded from the Hugging Face Hub, or a local
     dataset.
@@ -276,6 +322,7 @@ def process_hf_dataset(dataset,
         with_image_token: Whether to convert DEFAULT_IMAGE_TOKEN to
             IMAGE_TOKEN_INDEX. Typically set it to True during the training
             of VLM.
+        with_dpo: Whether to process the dataset for DPO.
         map_num_proc: Max number of processes when mapping the dataset.
     """
     kwargs = dict(
@@ -294,6 +341,7 @@ def process_hf_dataset(dataset,
         use_varlen_attn=use_varlen_attn,
         input_ids_with_output=input_ids_with_output,
         with_image_token=with_image_token,
+        with_dpo=with_dpo,
         map_num_proc=map_num_proc)
     if not (dist.is_available() and dist.is_initialized()):
         return process(**kwargs)

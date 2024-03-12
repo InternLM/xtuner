@@ -123,10 +123,24 @@ class DPO(BaseModel):
     
 
     def compute_loss(self, data, data_samples=None):
-        #TODO(lsh) 根据dataset.dpo中__getitem__ 编码data格式来进行修改
-
-        len_chosen = data["len_chosen"] # data: {'input_ids': input_ids, 'labels': labels,'len_chosen': len_chosen}
-        assert len_chosen != 0 # batch为1 len_chosen会为0 引发后续计算错误
+        # concat chosen and rejected samples
+        # need to pad torch.cat([data["input_chosen_ids"], data["input_reject_ids"]
+        max_len = max(data["input_chosen_ids"].shape[1], data["input_reject_ids"].shape[1])
+        data["input_chosen_ids"] = F.pad(data["input_chosen_ids"], (0, max_len - data["input_chosen_ids"].shape[1]), value=-100)
+        data["input_reject_ids"] = F.pad(data["input_reject_ids"], (0, max_len - data["input_reject_ids"].shape[1]), value=-100)
+        print(data["input_chosen_ids"].shape, data["input_reject_ids"].shape)
+        len_chosen = data["input_chosen_ids"].shape[0]
+        print(len_chosen)
+        data["chosen_attention_mask"] = data["input_chosen_ids"].ne(-100)
+        data["reject_attention_mask"] = data["input_reject_ids"].ne(-100)
+        data["chosen_labels"] = F.pad(data["chosen_labels"], (0, max_len - data["chosen_labels"].shape[1]), value=-100)
+        data["reject_labels"] = F.pad(data["reject_labels"], (0, max_len - data["reject_labels"].shape[1]), value=-100)
+        data = {
+            "input_ids": torch.cat([data["input_chosen_ids"], data["input_reject_ids"]], dim=0),
+            "attention_mask": torch.cat([data["chosen_attention_mask"], data["reject_attention_mask"]], dim=0),
+            "labels": torch.cat([data["chosen_labels"], data["reject_labels"]], dim=0)
+        }
+        
         all_logits = self.llm(**data).logits
         all_ref_logits = self.ref_model(**data).logits
         
