@@ -36,7 +36,7 @@ max_length = 32768
 pack_to_max_length = True
 
 # Scheduler & Optimizer
-batch_size = 1  # per_device
+batch_size = 1  # per_device, set to 1 if `use_varlen_attn` = True
 accumulative_counts = 1
 dataloader_num_workers = 0
 max_epochs = 1
@@ -97,7 +97,8 @@ train_dataloader = dict(
     num_workers=dataloader_num_workers,
     dataset=train_dataset,
     sampler=dict(type=InternRepoSampler, shuffle=True, seed=1024),
-    batch_sampler=dict(type=BatchSampler, drop_last=True, batch_size=1),
+    batch_sampler=dict(
+        type=BatchSampler, drop_last=True, batch_size=batch_size),
     collate_fn=dict(type=default_collate_fn, use_varlen_attn=use_varlen_attn))
 
 #######################################################################
