@@ -51,7 +51,9 @@ def extract_json_objects(text, decoder=json.JSONDecoder()):
 
 
 def msagent_react_map_fn(example):
-    text = eval(example['conversations'])
+    text = example['conversations']
+    if isinstance(text, str):
+        text = eval(text)
     conversation = []
     system_text = ''
     input_text = ''
