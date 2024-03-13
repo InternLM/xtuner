@@ -12,8 +12,8 @@ from torch import nn
 from transformers import AutoConfig, PreTrainedModel, PreTrainedTokenizer
 from transformers.integrations import is_deepspeed_zero3_enabled
 
-from xtuner.engine.sequence_parallel import (get_sequence_parallel_world_size,
-                                             reduce_sequence_parallel_loss)
+from xtuner.parallel.sequence import (get_sequence_parallel_world_size,
+                                      reduce_sequence_parallel_loss)
 from xtuner.registry import BUILDER
 from .modules import dispatch_modules
 from .utils import (LoadWoInit, find_all_linear_names,

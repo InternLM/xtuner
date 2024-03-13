@@ -61,8 +61,8 @@ def pre_process_for_sequence_parallel_attn(query_states, key_states,
     n_head = query_states.shape[2]
     assert n_head % sequence_parallel_world_size == 0, \
         ('The number of attention heads should be divisible by '
-        f'sequence_parallel_world_size. But got n_head = {n_head} and '
-        f'sequence_parallel_world_size = {sequence_parallel_world_size}.')
+         f'sequence_parallel_world_size. But got n_head = {n_head} and '
+         f'sequence_parallel_world_size = {sequence_parallel_world_size}.')
 
     # (b, s // sp_world_size, nd, dim) -> (b, s, nd // sp_world_size, dim)
     query_states = _SeqAllToAll.apply(query_states, False)
@@ -85,7 +85,8 @@ def sequence_parallel_wrapper(local_attn):
         training = kwargs.pop('training', True)
         if get_sequence_parallel_world_size() > 1 and training:
             query_states, key_states, value_states = \
-                pre_process_for_sequence_parallel_attn(query_states, key_states, value_states)
+                pre_process_for_sequence_parallel_attn(
+                    query_states, key_states, value_states)
 
         out = local_attn(query_states, key_states, value_states, *args,
                          **kwargs)

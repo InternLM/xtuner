@@ -96,9 +96,9 @@ def check_cfg(cfg):
         if max_length is not None:
             assert max_length % sequence_parallel == 0, \
                 ('When using varlen attention, `max_length` should be evenly '
-                'divided by sequence parallel world size, but got '
-                f'max_length = {max_length} and sequence_parallel = '
-                f'{sequence_parallel}')
+                 'divided by sequence parallel world size, but got '
+                 f'max_length = {max_length} and sequence_parallel = '
+                 f'{sequence_parallel}')
 
 
 def main():

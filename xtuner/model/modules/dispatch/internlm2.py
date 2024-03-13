@@ -8,7 +8,7 @@ import torch.nn.functional as F
 from einops import rearrange
 from mmengine import MessageHub
 
-from xtuner.engine.sequence_parallel import sequence_parallel_wrapper
+from xtuner.parallel.sequence import sequence_parallel_wrapper
 from .triton_kernels import apply_rotary_emb
 from .utils import upad_qkv
 
@@ -185,8 +185,9 @@ def flash_attn_w_mask(
         causal,
         dropout_rate=0.0):
     batch_size, q_len = query_states.shape[:2]
-    query_states, key_states, value_states, indices_q, cu_seq_lens, max_seq_lens = upad_qkv(
-        query_states, key_states, value_states, attention_mask, q_len)
+    query_states, key_states, value_states, indices_q, \
+        cu_seq_lens, max_seq_lens = upad_qkv(
+            query_states, key_states, value_states, attention_mask, q_len)
 
     cu_seqlens_q, cu_seqlens_k = cu_seq_lens
     max_seqlen_in_batch_q, max_seqlen_in_batch_k = max_seq_lens
@@ -251,7 +252,7 @@ def internlm2_attn_forward(
 ):
     if 'padding_mask' in kwargs:
         warnings.warn(
-            'Passing `padding_mask` is deprecated and will be removed in v4.37. '
+            'Passing `padding_mask` is deprecated and will be removed in v4.37.'
             'Please make sure use `attention_mask` instead.`')
 
         # overwrite attention_mask with padding_mask

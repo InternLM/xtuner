@@ -6,8 +6,8 @@ import numpy as np
 from mmengine import print_log
 from torch.utils.data import Sampler
 
-from xtuner.engine.sequence_parallel import (get_data_parallel_rank,
-                                             get_data_parallel_world_size)
+from xtuner.parallel.sequence import (get_data_parallel_rank,
+                                      get_data_parallel_world_size)
 
 
 class InternRepoSampler(Sampler):

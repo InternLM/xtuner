@@ -4,7 +4,7 @@ from typing import Optional
 from mmengine._strategy import DeepSpeedStrategy as MMEngineDeepSpeedStrategy
 
 from xtuner import DS_CEPH_DIR
-from xtuner.engine.sequence_parallel import init_sequence_parallel
+from xtuner.parallel.sequence import init_sequence_parallel
 from xtuner.utils.fileio import patch_fileio
 
 

@@ -8,7 +8,7 @@ import torch.nn.functional as F
 from mmengine import MessageHub
 from transformers.utils import logging
 
-from xtuner.engine.sequence_parallel import sequence_parallel_wrapper
+from xtuner.parallel.sequence import sequence_parallel_wrapper
 from .triton_kernels import apply_rotary_emb
 from .utils import upad_qkv
 
@@ -103,8 +103,9 @@ def flash_attn_w_mask(
         causal,
         dropout_rate=0.0):
     batch_size, q_len = query_states.shape[:2]
-    query_states, key_states, value_states, indices_q, cu_seq_lens, max_seq_lens = upad_qkv(
-        query_states, key_states, value_states, attention_mask, q_len)
+    query_states, key_states, value_states, indices_q, \
+        cu_seq_lens, max_seq_lens = upad_qkv(
+            query_states, key_states, value_states, attention_mask, q_len)
 
     cu_seqlens_q, cu_seqlens_k = cu_seq_lens
     max_seqlen_in_batch_q, max_seqlen_in_batch_k = max_seq_lens
@@ -300,8 +301,8 @@ def llama_attn_forward(
     # LlamaFlashAttention2 attention does not support output_attentions
     if 'padding_mask' in kwargs:
         warnings.warn(
-            'Passing `padding_mask` is deprecated and will be removed in v4.37. Please make sure use `attention_mask` instead.`'
-        )
+            'Passing `padding_mask` is deprecated and will be removed in v4.37.'
+            ' Please make sure use `attention_mask` instead.`')
 
         # overwrite attention_mask with padding_mask
         attention_mask = kwargs.pop('padding_mask')
@@ -343,7 +344,9 @@ def llama_attn_forward(
         key_states, value_states = past_key_value.update(
             key_states, value_states, self.layer_idx, cache_kwargs)
 
-    # TODO: These transpose are quite inefficient but Flash Attention requires the layout [batch_size, sequence_length, num_heads, head_dim]. We would need to refactor the KV cache
+    # TODO: These transpose are quite inefficient but Flash Attention
+    # requires the layout [batch_size, sequence_length, num_heads, head_dim].
+    # We would need to refactor the KV cache
     # to be able to avoid many of these transpose/reshape/view.
     query_states = query_states.transpose(1, 2)
     key_states = key_states.transpose(1, 2)
@@ -351,11 +354,12 @@ def llama_attn_forward(
 
     dropout_rate = self.attention_dropout if self.training else 0.0
 
-    # In PEFT, usually we cast the layer norms in float32 for training stability reasons
-    # therefore the input hidden states gets silently casted in float32. Hence, we need
-    # cast them back in the correct dtype just to be sure everything works as expected.
-    # This might slowdown training & inference so it is recommended to not cast the LayerNorms
-    # in fp32. (LlamaRMSNorm handles it correctly)
+    # In PEFT, usually we cast the layer norms in float32 for training
+    # stability reasons, therefore the input hidden states gets silently
+    # casted in float32. Hence, we need cast them back in the correct dtype
+    # just to be sure everything works as expected.
+    # This might slowdown training & inference so it is recommended to not
+    # cast the LayerNorms in fp32. (LlamaRMSNorm handles it correctly)
     input_dtype = query_states.dtype
     if input_dtype == torch.float32:
         # Handle the case where the model is quantized
@@ -365,8 +369,9 @@ def llama_attn_forward(
             target_dtype = self.q_proj.weight.dtype
 
         logger.warning_once(
-            f'The input hidden states seems to be silently casted in float32, this might be related to'
-            f' the fact you have upcasted embedding or layer norm layers in float32. We will cast back the input in'
+            f'The input hidden states seems to be silently casted in float32, '
+            f'this might be related to the fact you have upcasted embedding '
+            f'or layer norm layers in float32. We will cast back the input in'
             f' {target_dtype}.')
 
         query_states = query_states.to(target_dtype)
@@ -377,7 +382,9 @@ def llama_attn_forward(
     if not self._flash_attn_uses_top_left_mask:
         causal = self.is_causal
     else:
-        # TODO: Remove the `q_len != 1` check once Flash Attention for RoCm is bumped to 2.1. For details, please see the comment in LlamaFlashAttention2 __init__.
+        # TODO: Remove the `q_len != 1` check once Flash Attention for RoCm
+        # is bumped to 2.1. For details, please see the comment in
+        # LlamaFlashAttention2 __init__.
         causal = self.is_causal and q_len != 1
 
     if attention_mask is not None:

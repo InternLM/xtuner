@@ -180,7 +180,7 @@ def replace_internlm_rote(model):
     traverse(model)
 
 
-def replace_internlm2_rote(model, max_position_embeddings=None):
+def replace_internlm2_rote(model):
     from .internlm2 import InternLM2RotaryEmbedding
 
     rotary_base = model.config.rope_theta
@@ -192,23 +192,6 @@ def replace_internlm2_rote(model, max_position_embeddings=None):
                     'InternLM2LinearScalingRotaryEmbedding',
                     'InternLM2DynamicNTKScalingRotaryEmbedding'):
                 dim_model = child.inv_freq.shape[0] * 2
-                # ori_max_position_embeddings = child.max_position_embeddings
-                # if (max_position_embeddings is not None and
-                #     max_position_embeddings > ori_max_position_embeddings):
-                #     print_log(
-                #         'replace internlm2 rope with '
-                #         'InternLM2LinearScalingRotaryEmbedding',
-                #         'current')
-                #     scaling_factor = max_position_embeddings / ori_max_position_embeddings
-                #     child_new = InternLM2LinearScalingRotaryEmbedding(
-                #         dim_model, ori_max_position_embeddings,
-                #         rotary_base, scaling_factor=scaling_factor).to(
-                #             device=child.inv_freq.device,
-                #             dtype=child.inv_freq.dtype)
-                # else:
-                #     print_log(
-                #         'replace internlm2 rope with InternLM2RotaryEmbedding',
-                #         'current')
                 child_new = InternLM2RotaryEmbedding(
                     dim_model, child.max_position_embeddings, rotary_base).to(
                         device=child.inv_freq.device,

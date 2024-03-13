@@ -17,9 +17,8 @@ def init_sequence_parallel(sequence_parallel_size: int = 1):
     # enable_ds_sequence_parallel = sequence_parallel_size > 1
     # if enable_ds_sequence_parallel:
     if world_size % sequence_parallel_size != 0:
-        raise RuntimeError(
-            f'world_size ({world_size}) is not divisible by sequence_parallel_size {sequence_parallel_size}'
-        )
+        raise RuntimeError(f'world_size ({world_size}) is not divisible by '
+                           f'sequence_parallel_size {sequence_parallel_size}')
 
     num_sequence_parallel_groups: int = world_size // sequence_parallel_size
 
@@ -37,7 +36,8 @@ def init_sequence_parallel(sequence_parallel_size: int = 1):
             _SEQUENCE_PARALLEL_GROUP = group
 
     global _DATA_PARALLEL_GROUP
-    assert _DATA_PARALLEL_GROUP is None, 'data parallel group is already initialized'
+    assert _DATA_PARALLEL_GROUP is None, \
+        'data parallel group is already initialized'
     all_data_parallel_group_ranks = []
     start_rank = 0
     end_rank = world_size
@@ -76,7 +76,8 @@ def get_sequence_parallel_rank():
 
 def get_data_parallel_group():
     """Get the data parallel group the caller rank belongs to."""
-    assert _DATA_PARALLEL_GROUP is not None, 'data parallel group is not initialized'
+    assert _DATA_PARALLEL_GROUP is not None, \
+        'data parallel group is not initialized'
     return _DATA_PARALLEL_GROUP
 
 

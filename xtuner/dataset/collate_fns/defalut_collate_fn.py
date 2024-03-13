@@ -4,9 +4,9 @@ from typing import Dict, Sequence
 import torch
 from torch.nn.utils.rnn import pad_sequence
 
-from xtuner.engine.sequence_parallel import (get_sequence_parallel_world_size,
-                                             pad_for_sequence_parallel,
-                                             split_for_sequence_parallel)
+from xtuner.parallel.sequence import (get_sequence_parallel_world_size,
+                                      pad_for_sequence_parallel,
+                                      split_for_sequence_parallel)
 from xtuner.utils import DEFAULT_PAD_TOKEN_INDEX, IGNORE_INDEX
 
 
@@ -57,7 +57,8 @@ def default_collate_fn(instances: Sequence[Dict],
         position_ids = attention_mask.long().cumsum(-1) - 1
 
     input_ids, labels, position_ids, attention_mask = \
-        pad_for_sequence_parallel(input_ids, labels, position_ids, attention_mask)
+        pad_for_sequence_parallel(input_ids, labels, position_ids,
+                                  attention_mask)
 
     # attention mask should not be split
     input_ids, labels, position_ids = split_for_sequence_parallel(

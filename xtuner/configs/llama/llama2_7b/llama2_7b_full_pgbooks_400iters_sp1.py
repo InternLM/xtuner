@@ -1,23 +1,19 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import torch
 from datasets import load_dataset
-from mmengine.dataset import DefaultSampler
 from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
                             LoggerHook, ParamSchedulerHook)
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR, LinearLR
 from torch.optim import AdamW
-from torch.utils.data import BatchSampler
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from xtuner.dataset import process_hf_dataset
 from xtuner.dataset.collate_fns import default_collate_fn
-from xtuner.dataset.map_fns import alpaca_map_fn, template_map_fn_factory
-from xtuner.dataset.samplers import InternRepoSampler
-from xtuner.engine.hooks import (DatasetInfoHook, EvaluateChatHook,
-                                 ThroughputHook,
+from xtuner.engine.hooks import (DatasetInfoHook, ThroughputHook,
                                  VarlenAttnArgsToMessageHubHook)
 from xtuner.engine.runner import TrainLoop
 from xtuner.model import SupervisedFinetune
+from xtuner.parallel.sequence import SequenceParallelSampler
 from xtuner.utils import PROMPT_TEMPLATE
 
 #######################################################################
@@ -58,15 +54,8 @@ max_norm = 1  # grad clip
 warmup_ratio = 0.05
 
 # Save
-save_steps = 5000
+save_steps = 500
 save_total_limit = 1  # Maximum checkpoints to keep (-1 means unlimited)
-
-# Evaluate the generation performance during the training
-# evaluation_freq = 100
-# SYSTEM = ''
-# evaluation_inputs = [
-#     '请给我介绍五个上海的景点', 'Please tell me five scenic spots in Shanghai'
-# ]
 
 #######################################################################
 #                      PART 2  Model & Tokenizer                      #
@@ -107,8 +96,7 @@ train_dataloader = dict(
     batch_size=batch_size,
     num_workers=dataloader_num_workers,
     dataset=train_dataset,
-    sampler=dict(type=InternRepoSampler, shuffle=True, seed=1024),
-    batch_sampler=dict(type=BatchSampler, drop_last=True, batch_size=1),
+    sampler=dict(type=SequenceParallelSampler, seed=1024),
     collate_fn=dict(type=default_collate_fn, use_varlen_attn=use_varlen_attn))
 
 #######################################################################
