@@ -5,7 +5,7 @@
 > \[!IMPORTANT\]
 > 若 HuggingFace 访问受限，请优先考虑使用 ModelScope 进行下载
 
-## [推荐] 方法 1：利用 `snapshot_download`
+## \[推荐\] 方法 1：利用 `snapshot_download`
 
 `huggingface_hub.snapshot_download` 支持下载特定的 HuggingFace Hub 模型权重，并且允许多线程。您可以利用下列代码并行下载模型权重：
 
@@ -24,12 +24,12 @@ snapshot_download(
 
   - ```python
     from modelscope import snapshot_download
-    
+
     snapshot_download(
         model_id='Shanghai_AI_Laboratory/internlm2-chat-7b',
         cache_dir='./internlm2-chat-7b')
     ```
-    
+
   - 注：`modelscope.snapshot_download` 不支持多线程并行下载。
 
 ## 方法 2：利用 Git LFS
@@ -70,13 +70,13 @@ export HF_HUB_CACHE=YOUR_CACHE_PATH
 
   - ```python
     from modelscope import AutoModelForCausalLM, AutoTokenizer
-    
+
     model = AutoModelForCausalLM.from_pretrained('Shanghai_AI_Laboratory/internlm2-chat-7b', trust_remote_code=True)
     tokenizer = AutoTokenizer.from_pretrained('Shanghai_AI_Laboratory/internlm2-chat-7b', trust_remote_code=True)
     ```
 
   - 此时模型将会下载至 ModelScope 的 cache 路径中（默认为`~/.cache/modelscope/hub`）。若要修改默认存储路径，需要修改相关环境变量：
-  
+
     ```shell
     export MODELSCOPE_CACHE=YOUR_CACHE_PATH
     ```
