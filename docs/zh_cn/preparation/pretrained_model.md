@@ -1,25 +1,35 @@
 # 准备预训练模型权重
 
-本节将以下载 internlm2-chat-7b 为例，介绍如何快速下载预训练模型的权重。
+`HuggingFace` 和 `ModelScope` 提供了多种下载预训练模型权重的方法，本节将以下载 internlm2-chat-7b 为例，介绍如何快速下载预训练模型的权重。
 
-## 方法 1：利用 `snapshot_download`
+> \[!IMPORTANT\]
+> 若 HuggingFace 访问受限，请优先考虑使用 ModelScope 进行下载
+
+## [推荐] 方法 1：利用 `snapshot_download`
 
 `huggingface_hub.snapshot_download` 支持下载特定的 HuggingFace Hub 模型权重，并且允许多线程。您可以利用下列代码并行下载模型权重：
 
 ```python
 from huggingface_hub import snapshot_download
 
-snapshot_download(repo_id='internlm/internlm2-chat-7b', max_workers=20)
+snapshot_download(
+    repo_id='internlm/internlm2-chat-7b',
+    local_dir='./internlm2-chat-7b',
+    max_workers=20)
 ```
+
+其中，`repo_id` 表示模型在 HuggingFace Hub 的名字、`local_dir` 表示期望存储到的本地路径、`max_workers` 表示下载的最大并行数。
 
 - ModelScope?
 
   - ```python
     from modelscope import snapshot_download
-
-    snapshot_download(model_id='Shanghai_AI_Laboratory/internlm2-chat-7b')
+    
+    snapshot_download(
+        model_id='Shanghai_AI_Laboratory/internlm2-chat-7b',
+        cache_dir='./internlm2-chat-7b')
     ```
-
+    
   - 注：`modelscope.snapshot_download` 不支持多线程并行下载。
 
 ## 方法 2：利用 Git LFS
@@ -28,9 +38,9 @@ HuggingFace 和 ModelScope 的远程模型仓库就是一个由 Git LFS 管理�
 
 ```shell
 git lfs install
-# For HuggingFace
+# From HuggingFace
 git clone https://huggingface.co/internlm/internlm2-chat-7b
-# For ModelScope
+# From ModelScope
 git clone https://www.modelscope.cn/Shanghai_AI_Laboratory/internlm2-chat-7b.git
 ```
 
@@ -45,7 +55,14 @@ model = AutoModelForCausalLM.from_pretrained('internlm/internlm2-chat-7b', trust
 tokenizer = AutoTokenizer.from_pretrained('internlm/internlm2-chat-7b', trust_remote_code=True)
 ```
 
-此时模型将会下载至 HuggingFace 的 cache 路径中（默认为`~/.cache/huggingface`）。
+此时模型将会下载至 HuggingFace 的 cache 路径中（默认为`~/.cache/huggingface/hub`）。
+
+若要修改默认存储路径，需要修改相关环境变量：
+
+```shell
+export TRANSFORMERS_CACHE=YOUR_CACHE_PATH
+export HF_HUB_CACHE=YOUR_CACHE_PATH
+```
 
 - ModelScope?
 
@@ -53,9 +70,13 @@ tokenizer = AutoTokenizer.from_pretrained('internlm/internlm2-chat-7b', trust_re
 
   - ```python
     from modelscope import AutoModelForCausalLM, AutoTokenizer
-
+    
     model = AutoModelForCausalLM.from_pretrained('Shanghai_AI_Laboratory/internlm2-chat-7b', trust_remote_code=True)
     tokenizer = AutoTokenizer.from_pretrained('Shanghai_AI_Laboratory/internlm2-chat-7b', trust_remote_code=True)
     ```
 
-  - 此时模型将会下载至 ModelScope 的 cache 路径中（默认为`~/.cache/modelscope/hub`）
+  - 此时模型将会下载至 ModelScope 的 cache 路径中（默认为`~/.cache/modelscope/hub`）。若要修改默认存储路径，需要修改相关环境变量：
+  
+    ```shell
+    export MODELSCOPE_CACHE=YOUR_CACHE_PATH
+    ```
