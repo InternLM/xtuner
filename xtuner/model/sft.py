@@ -1,8 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-import copy
+import math
 from collections import OrderedDict
 from contextlib import nullcontext
-import math
 
 from mmengine import print_log
 from mmengine.config import Config, ConfigDict
@@ -10,8 +9,7 @@ from mmengine.model import BaseModel
 from mmengine.runner import load_checkpoint
 from peft import get_peft_model, prepare_model_for_kbit_training
 from torch import nn
-from transformers import (AutoConfig, AutoModelForCausalLM, PreTrainedModel,
-                          PreTrainedTokenizer)
+from transformers import AutoConfig, PreTrainedModel, PreTrainedTokenizer
 from transformers.integrations import is_deepspeed_zero3_enabled
 
 from xtuner.engine.sequence_parallel import (get_sequence_parallel_world_size,
@@ -77,31 +75,9 @@ class SupervisedFinetune(BaseModel):
                  tokenizer=None,
                  max_position_embeddings=None):
         super().__init__()
-        # todo: hardcode
-        # llm_cfg = copy.deepcopy(llm)
-        # pretrained_model_name_or_path = llm_cfg.pop(
-        #     'pretrained_model_name_or_path')
-        # llm_cfg.pop('type')
-        # if max_position_embeddings is not None:
-        #     config = AutoConfig.from_pretrained(pretrained_model_name_or_path,
-        #                                         **llm_cfg)
-        #     origin_max_position_embeddings = config.max_position_embeddings
-        #     if max_position_embeddings > origin_max_position_embeddings:
-        #         config.rope_scaling = {
-        #             'type':
-        #             'linear',
-        #             'factor':
-        #             max_position_embeddings / origin_max_position_embeddings
-        #         }
-        #     # hardcode for internlm2
-        #     config.attn_implementation = 'flash_attention_2'
-        # else:
-        #     config = None
-
         with LoadWoInit():
-            # self.llm = AutoModelForCausalLM.from_pretrained(
-            #     pretrained_model_name_or_path, config=config, **llm_cfg)
-            self.llm = self._build_from_cfg_or_module(llm, max_position_embeddings)
+            self.llm = self._build_from_cfg_or_module(llm,
+                                                      max_position_embeddings)
 
         if tokenizer is not None:
             if isinstance(tokenizer, dict):
@@ -170,25 +146,32 @@ class SupervisedFinetune(BaseModel):
         pretrained_model_name_or_path = cfg.pretrained_model_name_or_path
         config = AutoConfig.from_pretrained(pretrained_model_name_or_path)
 
-        orig_rope_scaling = getattr(config, "rope_scaling", None)
+        orig_rope_scaling = getattr(config, 'rope_scaling', None)
         if orig_rope_scaling is None:
-            orig_rope_scaling = {"factor": 1}
-        
-        orig_rope_scaling_factor = orig_rope_scaling["factor"] if "factor" in orig_rope_scaling.keys() else 1
-        orig_ctx_len = getattr(config, "max_position_embeddings", None)
+            orig_rope_scaling = {'factor': 1}
+
+        orig_rope_scaling_factor = orig_rope_scaling[
+            'factor'] if 'factor' in orig_rope_scaling.keys() else 1
+        orig_ctx_len = getattr(config, 'max_position_embeddings', None)
         if orig_ctx_len:
             orig_ctx_len *= orig_rope_scaling_factor
             if max_position_embeddings > orig_ctx_len:
-                scaling_factor = float(math.ceil(max_position_embeddings / orig_ctx_len))
-                config.rope_scaling = {"type": "linear", "factor": scaling_factor}
-        
+                scaling_factor = float(
+                    math.ceil(max_position_embeddings / orig_ctx_len))
+                config.rope_scaling = {
+                    'type': 'linear',
+                    'factor': scaling_factor
+                }
+
         # hardcode for internlm2
         config.attn_implementation = 'flash_attention_2'
-        
+
         cfg.config = config
         return cfg
 
-    def _build_from_cfg_or_module(self, cfg_or_mod, max_position_embeddings=None):
+    def _build_from_cfg_or_module(self,
+                                  cfg_or_mod,
+                                  max_position_embeddings=None):
         if isinstance(cfg_or_mod, nn.Module):
             return cfg_or_mod
         elif isinstance(cfg_or_mod, dict):
