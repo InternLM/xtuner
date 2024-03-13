@@ -319,7 +319,7 @@ def dispatch_modules(model, use_varlen_attn=False):
         dispatch_internlm2_attn_forward(model, use_varlen_attn)
         if USE_TRITON_KERNEL:
             dispatch_internlm2_rmsnorm_forward(model)
-        # replace_internlm2_rote(model, max_position_embeddings)
+        # replace_internlm2_rote(model)
     elif 'internlm' in model_name:
         dispatch_internlm_attn_forward(model, use_varlen_attn)
         if USE_TRITON_KERNEL:

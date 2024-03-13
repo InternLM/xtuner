@@ -2,6 +2,7 @@
 import copy
 from collections import OrderedDict
 from contextlib import nullcontext
+import math
 
 from mmengine import print_log
 from mmengine.config import Config, ConfigDict
@@ -77,30 +78,30 @@ class SupervisedFinetune(BaseModel):
                  max_position_embeddings=None):
         super().__init__()
         # todo: hardcode
-        llm_cfg = copy.deepcopy(llm)
-        pretrained_model_name_or_path = llm_cfg.pop(
-            'pretrained_model_name_or_path')
-        llm_cfg.pop('type')
-        if max_position_embeddings is not None:
-            config = AutoConfig.from_pretrained(pretrained_model_name_or_path,
-                                                **llm_cfg)
-            origin_max_position_embeddings = config.max_position_embeddings
-            if max_position_embeddings > origin_max_position_embeddings:
-                config.rope_scaling = {
-                    'type':
-                    'linear',
-                    'factor':
-                    max_position_embeddings / origin_max_position_embeddings
-                }
-            # hardcode for internlm2
-            config.attn_implementation = 'flash_attention_2'
-        else:
-            config = None
+        # llm_cfg = copy.deepcopy(llm)
+        # pretrained_model_name_or_path = llm_cfg.pop(
+        #     'pretrained_model_name_or_path')
+        # llm_cfg.pop('type')
+        # if max_position_embeddings is not None:
+        #     config = AutoConfig.from_pretrained(pretrained_model_name_or_path,
+        #                                         **llm_cfg)
+        #     origin_max_position_embeddings = config.max_position_embeddings
+        #     if max_position_embeddings > origin_max_position_embeddings:
+        #         config.rope_scaling = {
+        #             'type':
+        #             'linear',
+        #             'factor':
+        #             max_position_embeddings / origin_max_position_embeddings
+        #         }
+        #     # hardcode for internlm2
+        #     config.attn_implementation = 'flash_attention_2'
+        # else:
+        #     config = None
 
         with LoadWoInit():
-            self.llm = AutoModelForCausalLM.from_pretrained(
-                pretrained_model_name_or_path, config=config, **llm_cfg)
-            # self.llm = self._build_from_cfg_or_module(llm)
+            # self.llm = AutoModelForCausalLM.from_pretrained(
+            #     pretrained_model_name_or_path, config=config, **llm_cfg)
+            self.llm = self._build_from_cfg_or_module(llm, max_position_embeddings)
 
         if tokenizer is not None:
             if isinstance(tokenizer, dict):
@@ -165,11 +166,36 @@ class SupervisedFinetune(BaseModel):
     def init_weights(self):
         pass
 
-    def _build_from_cfg_or_module(self, cfg_or_mod):
+    def _prepare_for_long_context_training(self, cfg, max_position_embeddings):
+        pretrained_model_name_or_path = cfg.pretrained_model_name_or_path
+        config = AutoConfig.from_pretrained(pretrained_model_name_or_path)
+
+        orig_rope_scaling = getattr(config, "rope_scaling", None)
+        if orig_rope_scaling is None:
+            orig_rope_scaling = {"factor": 1}
+        
+        orig_rope_scaling_factor = orig_rope_scaling["factor"] if "factor" in orig_rope_scaling.keys() else 1
+        orig_ctx_len = getattr(config, "max_position_embeddings", None)
+        if orig_ctx_len:
+            orig_ctx_len *= orig_rope_scaling_factor
+            if max_position_embeddings > orig_ctx_len:
+                scaling_factor = float(math.ceil(max_position_embeddings / orig_ctx_len))
+                config.rope_scaling = {"type": "linear", "factor": scaling_factor}
+        
+        # hardcode for internlm2
+        config.attn_implementation = 'flash_attention_2'
+        
+        cfg.config = config
+        return cfg
+
+    def _build_from_cfg_or_module(self, cfg_or_mod, max_position_embeddings=None):
         if isinstance(cfg_or_mod, nn.Module):
             return cfg_or_mod
         elif isinstance(cfg_or_mod, dict):
             traverse_dict(cfg_or_mod)
+            if max_position_embeddings is not None:
+                cfg_or_mod = self._prepare_for_long_context_training(
+                    cfg_or_mod, max_position_embeddings)
             return BUILDER.build(cfg_or_mod)
         else:
             raise NotImplementedError
