@@ -12,10 +12,7 @@
 ```python
 from huggingface_hub import snapshot_download
 
-snapshot_download(
-    repo_id='internlm/internlm2-chat-7b',
-    local_dir='./internlm2-chat-7b',
-    max_workers=20)
+snapshot_download(repo_id='internlm/internlm2-chat-7b', local_dir='./internlm2-chat-7b', max_workers=20)
 ```
 
 其中，`repo_id` 表示模型在 HuggingFace Hub 的名字、`local_dir` 表示期望存储到的本地路径、`max_workers` 表示下载的最大并行数。
@@ -25,9 +22,7 @@ snapshot_download(
   - ```python
     from modelscope import snapshot_download
 
-    snapshot_download(
-        model_id='Shanghai_AI_Laboratory/internlm2-chat-7b',
-        cache_dir='./internlm2-chat-7b')
+    snapshot_download(model_id='Shanghai_AI_Laboratory/internlm2-chat-7b', cache_dir='./internlm2-chat-7b')
     ```
 
   - 注：`modelscope.snapshot_download` 不支持多线程并行下载。
