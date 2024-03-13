@@ -51,8 +51,8 @@ def upad_qkv(query_layer, key_layer, value_layer, attention_mask,
     else:
         # The -q_len: slice assumes left padding.
         attention_mask = attention_mask[:, -query_length:]
-        query_layer, indices_q, cu_seqlens_q, max_seqlen_in_batch_q = unpad_input(
-            query_layer, attention_mask)
+        query_layer, indices_q, cu_seqlens_q, max_seqlen_in_batch_q = \
+            unpad_input(query_layer, attention_mask)
 
     return (
         query_layer,

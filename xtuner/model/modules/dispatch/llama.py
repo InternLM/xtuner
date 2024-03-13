@@ -301,7 +301,7 @@ def llama_attn_forward(
     # LlamaFlashAttention2 attention does not support output_attentions
     if 'padding_mask' in kwargs:
         warnings.warn(
-            'Passing `padding_mask` is deprecated and will be removed in v4.37.'
+            'Passing `padding_mask` is deprecated and will be removed in v4.37'
             ' Please make sure use `attention_mask` instead.`')
 
         # overwrite attention_mask with padding_mask
