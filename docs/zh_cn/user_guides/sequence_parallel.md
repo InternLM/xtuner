@@ -39,7 +39,7 @@ XTuner 中的序列并行设计思路参考了 DeepSpeed 的工作 [DeepSpeed Ul
 
 ### Step 1 修改 config 文件
 
-在 config 中修改 `sequence_parallel_size` 字段即可调整 $sequence\\_parallel\\_world\\_size$ 。同时若想保证与不使用序列并行的训练效果类似，需要同步增大梯度累积的数值为原来的 $sequence\\_parallel\\_world\\_size$ 倍，因为在使用序列并行训练时，$data\\_parallel\\_world\\_size$ 降为了原来的 $\frac{1}{sequence\\_parallel\\_world\\_size}$。
+在 config 中修改 `sequence_parallel_size` 字段即可调整 $sequence\\_parallel\\_world\\_size$ 。同时若想保证与不使用序列并行的训练效果类似，需要同步增大梯度累积的数值为原来的 $sequence\\_parallel\\_world\\_size$ 倍，因为在使用序列并行训练时， $data\\_parallel\\_world\\_size$ 降为了原来的 $\frac{1}{sequence\\_parallel\\_world\\_size}$。
 
 **注：需要保证所使用的 GPU 总数可以被 `sequence_parallel_size` 整除。**
 
