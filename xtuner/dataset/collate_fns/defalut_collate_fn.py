@@ -34,7 +34,7 @@ def default_collate_fn(instances: Sequence[Dict],
         labels.append(torch.LongTensor(example['labels']))
         if use_varlen_attn:
             cumulative_len.append(torch.IntTensor(example['cumulative_len']))
-            position_ids.append(torch.LongTensor(example['indexes']))
+            position_ids.append(torch.LongTensor(example['position_ids']))
 
         if has_image:
             pixel_values.append(example['pixel_values'])
@@ -71,7 +71,7 @@ def default_collate_fn(instances: Sequence[Dict],
         data_dict = {
             'input_ids': input_ids,
             'cumulative_len': cumulative_len,
-            'indexes': position_ids,
+            'position_ids': position_ids,
             'labels': labels,
             'max_seqlen': max_seqlen
         }

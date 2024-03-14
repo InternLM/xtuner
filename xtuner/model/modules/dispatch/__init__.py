@@ -191,6 +191,7 @@ def replace_internlm2_rote(model):
                     'InternLM2RotaryEmbedding',
                     'InternLM2LinearScalingRotaryEmbedding',
                     'InternLM2DynamicNTKScalingRotaryEmbedding'):
+                print_log('replace internlm2 rope', 'current')
                 dim_model = child.inv_freq.shape[0] * 2
                 child_new = InternLM2RotaryEmbedding(
                     dim_model, child.max_position_embeddings, rotary_base).to(
@@ -302,7 +303,7 @@ def dispatch_modules(model, use_varlen_attn=False):
         dispatch_internlm2_attn_forward(model, use_varlen_attn)
         if USE_TRITON_KERNEL:
             dispatch_internlm2_rmsnorm_forward(model)
-        # replace_internlm2_rote(model)
+        replace_internlm2_rote(model)
     elif 'internlm' in model_name:
         dispatch_internlm_attn_forward(model, use_varlen_attn)
         if USE_TRITON_KERNEL:

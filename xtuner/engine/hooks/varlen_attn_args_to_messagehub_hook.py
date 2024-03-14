@@ -11,7 +11,7 @@ DATA_BATCH = Optional[Union[dict, tuple, list]]
 
 class VarlenAttnArgsToMessageHubHook(Hook):
 
-    args = ('cumulative_len', 'indexes', 'max_seqlen')
+    args = ('cumulative_len', 'max_seqlen')
 
     def cast_data(self, data):
         if isinstance(data, Mapping):
