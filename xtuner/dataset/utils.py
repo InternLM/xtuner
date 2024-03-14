@@ -34,6 +34,27 @@ def get_bos_eos_token_ids(tokenizer):
     return bos_token_id, eos_token_id
 
 
+def get_bos_eos_token_ids(tokenizer):
+    if tokenizer.__class__.__name__ in [
+            'QWenTokenizer', 'QWen2Tokenizer', 'Qwen2TokenizerFast'
+    ]:
+        bos_token_id = []
+        eos_token_id = tokenizer.eos_token_id
+        assert eos_token_id is not None, \
+            'Please set eos_token for Qwen tokenizer!'
+    elif tokenizer.__class__.__name__ == 'ChatGLMTokenizer':
+        bos_token_id = [64790, 64792]
+        eos_token_id = tokenizer.eos_token_id
+    else:
+        bos_token_id = tokenizer.bos_token_id
+        eos_token_id = tokenizer.eos_token_id
+    if isinstance(bos_token_id, int):
+        bos_token_id = [bos_token_id]
+    if isinstance(eos_token_id, int):
+        eos_token_id = [eos_token_id]
+    return bos_token_id, eos_token_id
+
+
 def encode_fn(example,
               tokenizer,
               max_length,
@@ -205,41 +226,19 @@ class Packer:
 
         if total_length >= self.chunk_size:
             chunk_num = total_length // self.chunk_size
-            result = {k: [] for k in concatenated_samples.keys()}
-
-            # 遍历每个chunk
-            for i in range(chunk_num):
-                start_idx = i * self.chunk_size
-                end_idx = start_idx + self.chunk_size
-
-                # 判断切割点是否位于input_ids部分
-                if end_idx > total_length - len(concatenated_samples[
-                        'input_ids'][-1]) and end_idx < total_length:
-                    # 如果是，且input_ids部分达到max_length，则在该点前插入padding
-                    padding_length = self.max_length - (
-                        end_idx - (total_length -
-                                   len(concatenated_samples['input_ids'][-1])))
-                    padding = [DEFAULT_PAD_TOKEN_INDEX] * padding_length
-                    result['input_ids'].append(
-                        padding + concatenated_samples['input_ids']
-                        [start_idx - padding_length:end_idx])
-                    result['labels'].append(
-                        padding +
-                        concatenated_samples['labels'][start_idx -
-                                                       padding_length:end_idx])
-                else:
-                    result['input_ids'].append(
-                        concatenated_samples['input_ids'][start_idx:end_idx])
-                    result['labels'].append(
-                        concatenated_samples['labels'][start_idx:end_idx])
-
-            # 处理残余部分
+            result = {
+                k: [
+                    v[i:i + self.chunk_size] for i in range(
+                        0,
+                        chunk_num *  # noqa: W504
+                        self.chunk_size,
+                        self.chunk_size)
+                ]
+                for k, v in concatenated_samples.items()
+            }
             self.residual = {
-                'input_ids':
-                concatenated_samples['input_ids'][chunk_num *
-                                                  self.chunk_size:],
-                'labels':
-                concatenated_samples['labels'][chunk_num * self.chunk_size:]
+                k: v[(chunk_num * self.chunk_size):]
+                for k, v in concatenated_samples.items()
             }
 
             if self.use_varlen_attn:

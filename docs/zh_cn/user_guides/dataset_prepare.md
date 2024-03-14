@@ -1,11 +1,17 @@
 # 数据集准备
 
-- [HuggingFace 数据集](#huggingface-数据集)
-- [其他](#其他)
-  - [Arxiv Gentitle 生成题目](#arxiv-gentitle-生成题目)
-  - [MOSS-003-SFT](#moss-003-sft)
-  - [Chinese Lawyer](#chinese-lawyer)
-  - [LLaVA dataset](#llava-dataset)
+- [数据集准备](#数据集准备)
+  - [HuggingFace 数据集](#huggingface-数据集)
+  - [其他](#其他)
+    - [Arxiv Gentitle 生成题目](#arxiv-gentitle-生成题目)
+    - [MOSS-003-SFT](#moss-003-sft)
+    - [Chinese Lawyer](#chinese-lawyer)
+    - [LLaVA dataset](#llava-dataset)
+      - [文件结构](#文件结构)
+      - [预训练 Pretrain](#预训练-pretrain)
+      - [微调 Finetune](#微调-finetune)
+    - [RefCOCO dataset](#refcoco-dataset)
+      - [文件结构](#文件结构-1)
 
 ## HuggingFace 数据集
 
@@ -131,3 +137,44 @@ git clone https://huggingface.co/datasets/liuhaotian/LLaVA-Pretrain --depth=1
    4. TextVQA (textvqa): [train_val_images](https://dl.fbaipublicfiles.com/textvqa/images/train_val_images.zip)
 
    5. VisualGenome (VG): [part1](https://cs.stanford.edu/people/rak248/VG_100K_2/images.zip), [part2](https://cs.stanford.edu/people/rak248/VG_100K_2/images2.zip)
+
+### RefCOCO dataset
+
+#### 文件结构
+
+```
+
+./data
+├── refcoco_annotations
+│   ├── refcoco
+│   │   ├── instances.json
+│   │   ├── refs(google).p
+│   │   └── refs(unc).p
+│   ├── refcoco+
+│   │   ├── instances.json
+│   │   └── refs(unc).p
+│   └── refcocog
+│       ├── instances.json
+│       ├── refs(google).p
+│       └─── refs(und).p
+├── coco_images
+|    ├── *.jpg
+...
+```
+
+下载以下链接中的 RefCOCO、RefCOCO+、RefCOCOg文件。
+Coco 2017 与 Coco 2014 都可以作为coco的图片数据。
+
+| Image source |                                        Download path                                         |
+| ------------ | :------------------------------------------------------------------------------------------: |
+| RefCOCO      | <a href="https://bvisionweb1.cs.unc.edu/licheng/referit/data/refcoco.zip"> annotations </a>  |
+| RefCOCO+     | <a href="https://bvisionweb1.cs.unc.edu/licheng/referit/data/refcoco+.zip"> annotations </a> |
+| RefCOCOg     | <a href="https://bvisionweb1.cs.unc.edu/licheng/referit/data/refcocog.zip"> annotations </a> |
+
+在下载完refcoco相关数据文件后，解压文件并将它们放在 `./data/refcoco_annotations` 目录中。
+然后，我们使用以下命令将注释转换为json格式。此命令将转换后的json文件保存在 `./data/llava_data/RefCOCOJson/` 目录中。
+
+```shell
+xtuner preprocess refcoco --ann-path $RefCOCO_ANN_PATH --image-path $COCO_IMAGE_PATH \
+--save-path $SAVE_PATH # ./data/llava_data/RefCOCOJson/
+```

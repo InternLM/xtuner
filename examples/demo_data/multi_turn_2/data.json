@@ -1,0 +1,48 @@
+[{
+    "messages":[
+        {
+            "role": "system",
+            "content": "You are a helpful AI assistant."
+        },
+        {
+            "role": "user",
+            "content": "Give three tips for staying healthy."
+        },
+        {
+            "role": "assistant",
+            "content": "1.Eat a balanced diet. 2. Exercise regularly. 3. Get enough sleep."
+        },
+        {
+            "role": "user",
+            "content": "How to study English?"
+        },
+        {
+            "role": "assistant",
+            "content": "1. Set clear goals. 2. Create a study plan. 3. Build vocabulary. 4. Practice speaking."
+        }
+    ]
+},
+{
+    "messages":[
+        {
+            "role": "system",
+            "content": "You are a helpful AI assistant."
+        },
+        {
+            "role": "user",
+            "content": "How to study English?"
+        },
+        {
+            "role": "assistant",
+            "content": "1. Set clear goals. 2. Create a study plan. 3. Build vocabulary. 4. Practice speaking."
+        },
+        {
+            "role": "user",
+            "content": "Give three tips for staying healthy."
+        },
+        {
+            "role": "assistant",
+            "content": "1.Eat a balanced diet. 2. Exercise regularly. 3. Get enough sleep."
+        }
+    ]
+}]
