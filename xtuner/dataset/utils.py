@@ -9,7 +9,8 @@ import numpy as np
 import requests
 from PIL import Image
 
-from xtuner.utils import DEFAULT_IMAGE_TOKEN, IGNORE_INDEX, IMAGE_TOKEN_INDEX,DEFAULT_PAD_TOKEN_INDEX
+from xtuner.utils import (DEFAULT_IMAGE_TOKEN, DEFAULT_PAD_TOKEN_INDEX,
+                          IGNORE_INDEX, IMAGE_TOKEN_INDEX)
 
 
 def get_bos_eos_token_ids(tokenizer):
@@ -204,30 +205,41 @@ class Packer:
 
         if total_length >= self.chunk_size:
             chunk_num = total_length // self.chunk_size
-            result = {
-                k: [] for k in concatenated_samples.keys()
-            }
+            result = {k: [] for k in concatenated_samples.keys()}
 
             # 遍历每个chunk
             for i in range(chunk_num):
                 start_idx = i * self.chunk_size
                 end_idx = start_idx + self.chunk_size
-                
+
                 # 判断切割点是否位于input_ids部分
-                if end_idx > total_length - len(concatenated_samples['input_ids'][-1]) and end_idx < total_length:
+                if end_idx > total_length - len(concatenated_samples[
+                        'input_ids'][-1]) and end_idx < total_length:
                     # 如果是，且input_ids部分达到max_length，则在该点前插入padding
-                    padding_length = self.max_length - (end_idx - (total_length - len(concatenated_samples['input_ids'][-1])))
+                    padding_length = self.max_length - (
+                        end_idx - (total_length -
+                                   len(concatenated_samples['input_ids'][-1])))
                     padding = [DEFAULT_PAD_TOKEN_INDEX] * padding_length
-                    result['input_ids'].append(padding + concatenated_samples['input_ids'][start_idx - padding_length:end_idx])
-                    result['labels'].append(padding + concatenated_samples['labels'][start_idx - padding_length:end_idx])
+                    result['input_ids'].append(
+                        padding + concatenated_samples['input_ids']
+                        [start_idx - padding_length:end_idx])
+                    result['labels'].append(
+                        padding +
+                        concatenated_samples['labels'][start_idx -
+                                                       padding_length:end_idx])
                 else:
-                    result['input_ids'].append(concatenated_samples['input_ids'][start_idx:end_idx])
-                    result['labels'].append(concatenated_samples['labels'][start_idx:end_idx])
+                    result['input_ids'].append(
+                        concatenated_samples['input_ids'][start_idx:end_idx])
+                    result['labels'].append(
+                        concatenated_samples['labels'][start_idx:end_idx])
 
             # 处理残余部分
             self.residual = {
-                'input_ids': concatenated_samples['input_ids'][chunk_num * self.chunk_size:],
-                'labels': concatenated_samples['labels'][chunk_num * self.chunk_size:]
+                'input_ids':
+                concatenated_samples['input_ids'][chunk_num *
+                                                  self.chunk_size:],
+                'labels':
+                concatenated_samples['labels'][chunk_num * self.chunk_size:]
             }
 
             if self.use_varlen_attn:

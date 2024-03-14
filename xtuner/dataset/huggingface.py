@@ -61,7 +61,6 @@ def process(dataset,
         map_num_proc: Max number of processes when mapping the dataset.
     """
     if isinstance(dataset, DatasetDict):
-        print("Available splits in the dataset:", dataset.keys())
         dataset = dataset[split]
     elif isinstance(dataset, dict) or isinstance(
             dataset, Config) or isinstance(dataset, ConfigDict):
