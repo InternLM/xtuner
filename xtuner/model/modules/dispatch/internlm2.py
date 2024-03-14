@@ -68,56 +68,6 @@ class InternLM2RotaryEmbedding(torch.nn.Module):
         )
 
 
-class InternLM2LinearScalingRotaryEmbedding(torch.nn.Module):
-
-    def __init__(self,
-                 dim,
-                 max_position_embeddings=2048,
-                 base=1000000,
-                 device=None,
-                 scaling_factor=1.0):
-        super().__init__()
-        self.scaling_factor = scaling_factor
-        self.dim = dim
-        self.max_position_embeddings = max_position_embeddings
-        self.base = base
-        self.inv_freq = 1.0 / (
-            base**(torch.arange(0, dim, 2).float().to(device) / dim))
-
-        # Build here to make `torch.jit.trace` work.
-        self.max_seq_len_cached = max_position_embeddings
-        t = torch.arange(
-            self.max_seq_len_cached,
-            device=self.inv_freq.device,
-            dtype=self.inv_freq.dtype)
-        t = t / self.scaling_factor
-        freqs = torch.einsum('i,j->ij', t, self.inv_freq)
-        emb = torch.cat((freqs, freqs), dim=-1)
-        self.cos_cached = emb.cos()
-        self.sin_cached = emb.sin()
-
-    def forward(self, x, seq_len):
-        # x: [bs, num_attention_heads, seq_len, head_size]
-        if (seq_len > self.max_seq_len_cached
-                or self.cos_cached.device != x.device
-                or self.cos_cached.dtype != x.dtype):
-            self.max_seq_len_cached = seq_len
-            assert self.inv_freq.dtype == torch.float32
-            t = torch.arange(
-                self.max_seq_len_cached,
-                device=x.device,
-                dtype=self.inv_freq.dtype)
-            t = t / self.scaling_factor
-            freqs = torch.einsum('i,j->ij', t, self.inv_freq.to(t.device))
-            emb = torch.cat((freqs, freqs), dim=-1).to(x.device)
-            self.cos_cached = emb.cos().to(x.dtype)
-            self.sin_cached = emb.sin().to(x.dtype)
-        return (
-            self.cos_cached[:seq_len, ...],
-            self.sin_cached[:seq_len, ...],
-        )
-
-
 def rotate_half(x):
     """Rotates half the hidden dims of the input."""
     x1 = x[..., :x.shape[-1] // 2]
