@@ -41,10 +41,7 @@ Documentation
    :caption: Preparation
 
    preparation/pretrained_model.md
-   preparation/custom_sft_dataset.md
-   preparation/custom_pretrain_dataset.md
-   preparation/custom_agent_dataset.md
-   preparation/open_source_dataset.md
+   preparation/prompt_template.md
 
 .. toctree::
    :maxdepth: 2
