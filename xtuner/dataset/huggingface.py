@@ -112,7 +112,7 @@ def process(dataset,
             use_varlen_attn=False,
             input_ids_with_output=True,
             with_image_token=False,
-            map_num_proc=1):
+            map_num_proc=32):
     """Post-process the dataset loaded from the Hugging Face Hub, or a local
     dataset.
 
@@ -165,6 +165,7 @@ def process(dataset,
              f'True, but got {split}.')
 
     dataset = build_origin_dataset(dataset, split)
+
     # sample `max_dataset_length` items from the original dataset to
     # save time consumed by map function
     if max_dataset_length is not None:

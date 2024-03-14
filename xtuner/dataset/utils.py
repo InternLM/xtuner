@@ -9,29 +9,7 @@ import numpy as np
 import requests
 from PIL import Image
 
-from xtuner.utils import (DEFAULT_IMAGE_TOKEN, DEFAULT_PAD_TOKEN_INDEX,
-                          IGNORE_INDEX, IMAGE_TOKEN_INDEX)
-
-
-def get_bos_eos_token_ids(tokenizer):
-    if tokenizer.__class__.__name__ in [
-            'QWenTokenizer', 'QWen2Tokenizer', 'Qwen2TokenizerFast'
-    ]:
-        bos_token_id = []
-        eos_token_id = tokenizer.eos_token_id
-        assert eos_token_id is not None, \
-            'Please set eos_token for Qwen tokenizer!'
-    elif tokenizer.__class__.__name__ == 'ChatGLMTokenizer':
-        bos_token_id = [64790, 64792]
-        eos_token_id = tokenizer.eos_token_id
-    else:
-        bos_token_id = tokenizer.bos_token_id
-        eos_token_id = tokenizer.eos_token_id
-    if isinstance(bos_token_id, int):
-        bos_token_id = [bos_token_id]
-    if isinstance(eos_token_id, int):
-        eos_token_id = [eos_token_id]
-    return bos_token_id, eos_token_id
+from xtuner.utils import DEFAULT_IMAGE_TOKEN, IGNORE_INDEX, IMAGE_TOKEN_INDEX
 
 
 def get_bos_eos_token_ids(tokenizer):
