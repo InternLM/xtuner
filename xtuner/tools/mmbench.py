@@ -401,7 +401,7 @@ def main():
         print('=======================================================')
 
         args_path = osp.join(save_dir, 'args.json')
-        with open(args_path, 'w') as f:
+        with open(args_path, 'w', encoding='utf-8') as f:
             json.dump(args.__dict__, f, indent=2)
 
     results_xlsx_path = osp.join(save_dir, 'mmbench_result.xlsx')
@@ -499,7 +499,7 @@ def main():
 
         if dataset.split == 'dev':
             results_dict = dataset.eval_result(results_df, show=True)
-            with open(results_json_path, 'w') as f:
+            with open(results_json_path, 'w', encoding='utf-8') as f:
                 json.dump(results_dict, f, indent=2)
         else:
             print('All done!')
