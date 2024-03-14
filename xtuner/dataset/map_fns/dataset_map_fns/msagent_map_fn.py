@@ -54,7 +54,7 @@ def msagent_react_map_fn(example):
     text = example['conversations']
     if isinstance(text, str):
         text = eval(text)
-    if len(text) < 2:
+    if len(text) < 2:  # Filter out invalid data
         return {'conversation': []}
     conversation = []
     system_text = ''
