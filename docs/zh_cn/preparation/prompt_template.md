@@ -63,7 +63,7 @@ YYYYYYYYYYYYYYYYYYYYYYYY<|im_end|>
 ZZZZZZZZZZZZZZZZZZZZZZZZ<|im_end|>
 ```
 
-**多轮对话**
+**多轮**
 
 ```
 <|im_start|>system
