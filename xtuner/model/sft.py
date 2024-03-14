@@ -3,6 +3,7 @@ import math
 from collections import OrderedDict
 from contextlib import nullcontext
 
+import torch
 from mmengine import print_log
 from mmengine.config import Config, ConfigDict
 from mmengine.model import BaseModel
@@ -16,6 +17,7 @@ from xtuner.parallel.sequence import (get_sequence_parallel_world_size,
                                       reduce_sequence_parallel_loss)
 from xtuner.registry import BUILDER
 from .modules import dispatch_modules
+from .modules.dispatch import SUPPORT_FLASH2
 from .utils import (LoadWoInit, find_all_linear_names,
                     get_peft_model_state_dict, make_inputs_require_grad,
                     traverse_dict)
@@ -177,6 +179,10 @@ class SupervisedFinetune(BaseModel):
             return cfg_or_mod
         elif isinstance(cfg_or_mod, dict):
             traverse_dict(cfg_or_mod)
+            if SUPPORT_FLASH2:
+                cfg_or_mod.torch_dtype = torch.bfloat16 \
+                    if torch.cuda.is_bf16_supported() else torch.float16
+                cfg_or_mod.attn_implementation = 'flash_attention_2'
             if max_position_embeddings is not None:
                 cfg_or_mod = self._prepare_for_long_context_training(
                     cfg_or_mod, max_position_embeddings)
