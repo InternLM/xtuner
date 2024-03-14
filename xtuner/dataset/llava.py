@@ -21,13 +21,14 @@ class LLaVADataset(Dataset):
                  image_folder,
                  tokenizer,
                  image_processor,
+                 per_image_length,
                  max_dataset_length=None,
                  dataset_map_fn=None,
                  template_map_fn=None,
                  max_length=2048,
                  pad_image_to_square=False):
         super().__init__()
-
+        self.per_image_length = per_image_length
         json_data = json.load(open(data_path))
         for idx in range(len(json_data)):
             if isinstance(json_data[idx]['id'], int):
@@ -43,7 +44,8 @@ class LLaVADataset(Dataset):
             max_dataset_length=max_dataset_length,
             remove_unused_columns=False,
             pack_to_max_length=False,
-            with_image_token=True)
+            with_image_token=True,
+            per_image_length=self.per_image_length)
 
         self.image_folder = image_folder
         if isinstance(image_processor, dict) or isinstance(
@@ -59,8 +61,15 @@ class LLaVADataset(Dataset):
         length_list = []
         for data_dict in self.text_data:
             cur_len = len(data_dict['input_ids'])
-            if data_dict.get('image', None) is None:
+            image = data_dict.get('image', None)
+            if image is None:
                 cur_len = -cur_len
+            else:
+                if isinstance(image, str):
+                    n_images = 1
+                else:
+                    n_images = len(image)
+                cur_len = cur_len - n_images + self.per_image_length * n_images
             length_list.append(cur_len)
         return length_list
 
@@ -70,17 +79,23 @@ class LLaVADataset(Dataset):
     def __getitem__(self, index):
         data_dict = self.text_data[index]
         if data_dict.get('image', None) is not None:
-            image_file = data_dict['image']
-            image = Image.open(os.path.join(self.image_folder,
-                                            image_file)).convert('RGB')
-            if self.pad_image_to_square:
-                image = expand2square(
-                    image,
-                    tuple(
-                        int(x * 255) for x in self.image_processor.image_mean))
-            image = self.image_processor.preprocess(
-                image, return_tensors='pt')['pixel_values'][0]
-            data_dict['pixel_values'] = image
+            image_list = data_dict['image']
+            if isinstance(image_list, str):
+                image_list = [image_list]
+            images = []
+            for image_file in image_list:
+                image = Image.open(
+                    os.path.join(self.image_folder, image_file)).convert('RGB')
+                if self.pad_image_to_square:
+                    image = expand2square(
+                        image,
+                        tuple(
+                            int(x * 255)
+                            for x in self.image_processor.image_mean))
+                image = self.image_processor.preprocess(
+                    image, return_tensors='pt')['pixel_values'][0]
+                images.append(image)
+            data_dict['pixel_values'] = images
         else:
             crop_size = self.image_processor.crop_size
             data_dict['pixel_values'] = torch.zeros(3, crop_size['height'],

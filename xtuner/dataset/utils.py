@@ -37,7 +37,8 @@ def encode_fn(example,
               tokenizer,
               max_length,
               input_ids_with_output=True,
-              with_image_token=False):
+              with_image_token=False,
+              per_image_length=0):
     """We only support the following three scenarios:
 
     1. Incremental pretraining dataset.
@@ -74,6 +75,7 @@ def encode_fn(example,
         assert input_ids_with_output
 
     input_ids, labels = [], []
+    n_images = 0
     next_needs_bos_token = True
     for single_turn_conversation in example['conversation']:
         input = single_turn_conversation['input']
@@ -82,7 +84,7 @@ def encode_fn(example,
                 tokenizer.encode(chunk, add_special_tokens=False)
                 for chunk in input.split(DEFAULT_IMAGE_TOKEN)
             ]
-            assert len(chunk_encode) == 2
+            n_images += len(chunk_encode) - 1
             input_encode = []
             for idx, cur_chunk_encode in enumerate(chunk_encode):
                 input_encode.extend(cur_chunk_encode)
@@ -123,9 +125,8 @@ def encode_fn(example,
                 input_ids += sep_encode
                 labels += [IGNORE_INDEX] * len(sep_encode)
 
-    if len(input_ids) > max_length:
-        input_ids = input_ids[:max_length]
-        labels = labels[:max_length]
+    input_ids = input_ids[:max_length - n_images * per_image_length]
+    labels = labels[:max_length - n_images * per_image_length]
     return {'input_ids': input_ids, 'labels': labels}
 
 

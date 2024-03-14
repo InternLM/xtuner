@@ -30,7 +30,8 @@ data_root = './data/llava_data/'
 data_path = data_root + 'LLaVA-Instruct-150K/llava_v1_5_mix665k.json'
 image_folder = data_root + 'llava_images'
 prompt_template = PROMPT_TEMPLATE.vicuna
-max_length = int(2048 - (336 / 14)**2)
+max_length = 2048
+per_image_length = int(336 / 14)**2  # inferred from the visual encoder
 
 # Scheduler & Optimizer
 batch_size = 16  # per_device
@@ -95,6 +96,7 @@ llava_dataset = dict(
     template_map_fn=dict(
         type=template_map_fn_factory, template=prompt_template),
     max_length=max_length,
+    per_image_length=per_image_length,
     pad_image_to_square=True)
 
 train_dataloader = dict(
