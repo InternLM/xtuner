@@ -144,7 +144,8 @@ class SupervisedFinetune(BaseModel):
 
     def _prepare_for_long_context_training(self, cfg, max_position_embeddings):
         pretrained_model_name_or_path = cfg.pretrained_model_name_or_path
-        config = AutoConfig.from_pretrained(pretrained_model_name_or_path)
+        config = AutoConfig.from_pretrained(
+            pretrained_model_name_or_path, trust_remote_code=True)
 
         orig_rope_scaling = getattr(config, 'rope_scaling', None)
         if orig_rope_scaling is None:
