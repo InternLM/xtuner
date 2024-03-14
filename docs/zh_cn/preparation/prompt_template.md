@@ -24,7 +24,7 @@
 
 XTuner 对现有大多数大语言模型的对话模版进行了实现，并集成在 `xtuner.utils.PROMPT_TEMPLATE` 内，用户可以直接使用。
 
-现已支持的对话模版有：`internlm_chat`、`internlm_chat2`、`gemma`、`mistral`、`mixtral`、`qwen_chat`、`chatglm2`、`chatglm3`、`baichuan_chat`、`baichuan2_chat`、`deepseek_moe`、`deepseek_coder`、`vicuna`、`default` 等等。
+现已支持的对话模版有：`internlm_chat`、`internlm2_chat`、`gemma`、`mistral`、`mixtral`、`qwen_chat`、`chatglm2`、`chatglm3`、`baichuan_chat`、`baichuan2_chat`、`deepseek_moe`、`deepseek_coder`、`vicuna`、`default` 等等。
 
 ### 代码结构
 
@@ -84,7 +84,7 @@ ZZZZZZZZZZZZZZZZZZZZZZZZ<|im_end|>
 
 - 微调 chat 模型
 
-  - 使用模型所对应的对话模版，如 `internlm2-chat` 使用 `internlm_chat`、`Qwen-Chat` 使用 `qwen_chat`。
+  - 使用模型所对应的对话模版，如 `internlm2-chat` 使用 `internlm2_chat`、`Qwen-Chat` 使用 `qwen_chat`。
 
 - 微调 base 模型
 
