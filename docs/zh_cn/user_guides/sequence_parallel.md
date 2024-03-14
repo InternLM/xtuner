@@ -20,7 +20,7 @@ XTuner 中的序列并行设计思路参考了 DeepSpeed 的工作 [DeepSpeed Ul
 
 另外，现有的序列并行方法普遍存在较多的代码侵入式修改，易用性和维护性都要大打折扣。同时也不满足 XTuner 基于 transformers 算法库或 Huggingface Hub 上的开源模型直接进行训练的要求。
 
-为了解决上述长序列训练带来的问题，XTuner 采用了一种简单、易用且高效的序列并行算法。由于 Transformer 结构较为规整，除 attention 计算外，其他计算过程中 token 之间不会互相影响（即每个 token 的计算是独立的），这一条件为序列并行提供了有利条件。在每一轮训练迭代开始，我们将每个样本在序列维度上分割并派发给参与的 GPU 。在计算 attention 前，需要对已分割的、shape 为 $(bs, \frac{total\_seq\_len}{sequence\_parallel\_world\_size}, n\_head, head\_dim)$ 的 Query、Key、Value 执行 *all-to-all 通信*操作，以得到 shape 为 $(bs, total\_seq\_len, \frac{n\_head}{sequence\_parallel\_world\_size}, head\_dim)$的 QKV Tensors。这使得参与序列并行的 GPU 可以并行计算不同的注意力头。最后，还需要使用另一个 *all-to-all* 操作以重新在序列维度上进行切分，得到 shape 为 $(bs, \frac{total\_seq\_len}{sequence\_parallel\_world\_size}, n\_head, head\_dim)$ 的 attention output。
+为了解决上述长序列训练带来的问题，XTuner 采用了一种简单、易用且高效的序列并行算法。由于 Transformer 结构较为规整，除 attention 计算外，其他计算过程中 token 之间不会互相影响（即每个 token 的计算是独立的），这一条件为序列并行提供了有利条件。在每一轮训练迭代开始，我们将每个样本在序列维度上分割并派发给参与的 GPU 。在计算 attention 前，需要对已分割的、shape 为 $(bs, \frac{total\\_seq\\_len}{sequence\\_parallel\\_world\\_size}, n\\_head, head\\_dim)$ 的 Query、Key、Value 执行 *all-to-all 通信*操作，以得到 shape 为 $(bs, total\\_seq\\_len, \frac{n\\_head}{sequence\\_parallel\\_world\\_size}, head\\_dim)$的 QKV Tensors。这使得参与序列并行的 GPU 可以并行计算不同的注意力头。最后，还需要使用另一个 *all-to-all* 操作以重新在序列维度上进行切分，得到 shape 为 $(bs, \frac{total\\_seq\\_len}{sequence\\_parallel\\_world\\_size}, n\\_head, head\\_dim)$ 的 attention output。
 
 进一步，为了提升算法的可迁移性，XTuner 中抽象出了序列并行所必须的五个 API 接口：
 - 序列并行分布式环境初始化 (init_sequence_parallel)
@@ -39,7 +39,7 @@ XTuner 中的序列并行设计思路参考了 DeepSpeed 的工作 [DeepSpeed Ul
 
 ### Step 1 修改 config 文件
 
-在 config 中修改 `sequence_parallel_size` 字段即可调整 $sequence\_parallel\_world\_size$ 。同时若想保证与不使用序列并行的训练效果类似，需要同步增大梯度累积的数值为原来的 $sequence\_parallel\_world\_size$ 倍，因为在使用序列并行训练时，$data\_parallel\_world\_size$ 降为了原来的 $\frac{1}{sequence\_parallel\_world\_size}$。
+在 config 中修改 `sequence_parallel_size` 字段即可调整 $sequence\\_parallel\\_world\\_size$ 。同时若想保证与不使用序列并行的训练效果类似，需要同步增大梯度累积的数值为原来的 $sequence\\_parallel\\_world\\_size$ 倍，因为在使用序列并行训练时，$data\\_parallel\\_world\\_size$ 降为了原来的 $\frac{1}{sequence\\_parallel\\_world\\_size}$。
 
 **注：需要保证所使用的 GPU 总数可以被 `sequence_parallel_size` 整除。**
 
@@ -83,9 +83,9 @@ model = dict(
 
 ### 序列并行分布式环境初始化
 
-由于序列并行算法会将长序列切分为 $sequence\_parallel\_world\_size$ 块，并将每个子序列分发给对应的 GPU 独立进行计算。因此需要在训练开始前初始化序列并行分布式环境，以指定哪几块 GPU 共同负责一个长序列输入的计算。
+由于序列并行算法会将长序列切分为 $sequence\\_parallel\\_world\\_size$ 块，并将每个子序列分发给对应的 GPU 独立进行计算。因此需要在训练开始前初始化序列并行分布式环境，以指定哪几块 GPU 共同负责一个长序列输入的计算。
 
-一个 $sequence\_parallel\_world\_size = 4$ 的示例如下：
+一个 $sequence\\_parallel\\_world\\_size = 4$ 的示例如下：
 
 ```python
 # We have to initialize the distributed training environment first.
@@ -101,7 +101,7 @@ init_sequence_parallel(sequence_parallel_world_size)
 
 ### Data Sampler 适配序列并行
 
-在使用序列并行后，Dataloader 的采样策略需要进一步调整。例如当 $sequence\_parallel\_world\_size = 4$ 时，4 块 GPU 从 Dataloader 拿到的数据需要是完全一样的。
+在使用序列并行后，Dataloader 的采样策略需要进一步调整。例如当 $sequence\\_parallel\\_world\\_size = 4$ 时，4 块 GPU 从 Dataloader 拿到的数据需要是完全一样的。
 
 在构建 Dataloader 时搭配 XTuner 中提供的 SequenceParallelSampler 使用即可：
 
@@ -114,7 +114,7 @@ dataloader = DataLoader(
 
 ### 数据 Pad 与切分
 
-由于每条训练数据的长度可能不尽相同，我们需要将数据进行 Pad 以使得序列长度可以被 $sequence\_parallel\_world\_size$ 整除，这样一条长数据才能被均等地分发给不同的 GPU 上。
+由于每条训练数据的长度可能不尽相同，我们需要将数据进行 Pad 以使得序列长度可以被 $sequence\\_parallel\\_world\\_size$ 整除，这样一条长数据才能被均等地分发给不同的 GPU 上。
 
 训练过程中需要被 Pad 的 Tensor 往往有 input_ids, labels, position_ids, attention_mask 四个，pad 的过程可以通过以下方式实现：
 
