@@ -19,7 +19,7 @@ When aligned completely with the official training settings, the results are as 
 | Model         | Framework | MMBench Test (EN) | MMBench Dev (EN) | MMBench Test (CN) | MMBench Dev (CN) | CCBench Dev | MME  | SEEDBench_IMG | MMVet |                                                                    Configs                                                                     |
 | :------------ | :-------: | :---------------: | :--------------: | :---------------: | :--------------: | :---------: | :--: | :-----------: | :---: | :--------------------------------------------------------------------------------------------------------------------------------------------: |
 | LLaVA-v1.5-7B | Official  |       65.2        |       63.0       |       57.3        |       57.4       |    25.2     | 1775 |     65.6      | 32.7  |                                                                       -                                                                        |
-| LLaVA-v1.5-7B |  XTuner   |       68.6        |       68.0       |       61.5        |       61.4       |    26.5     | 1786 |     65.8      | 31.4  | [Pretrain](./llava_v15_official/7b/llava_v15_official_7b_pretrain.py) / [Fine-tune](./llava_v15_official/7b/llava_v15_official_7b_finetune.py) |
+| LLaVA-v1.5-7B |  XTuner   |       68.6        |       68.0       |       61.5        |       61.4       |    26.5     | 1786 |     65.8      | 31.4  | [Pretrain](./official/llava_v15_7b/llava_v15_7b_pretrain.py) / [Fine-tune](./official/llava_v15_7b/llava_v15_7b_finetune.py) |
 
 ## Data Preparation
 

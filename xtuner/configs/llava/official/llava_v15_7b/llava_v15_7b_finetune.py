@@ -19,10 +19,10 @@ from xtuner.utils import PROMPT_TEMPLATE
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-llm_name_or_path = 'lmsys/vicuna-13b-v1.5'
+llm_name_or_path = 'lmsys/vicuna-7b-v1.5'
 visual_encoder_name_or_path = 'openai/clip-vit-large-patch14-336'
 # Specify the pretrained pth
-pretrained_pth = './work_dirs/llava_v15_13b_official_pretrain/iter_2181.pth'
+pretrained_pth = './work_dirs/llava_v15_7b_pretrain/iter_2181.pth'
 
 # Data
 data_root = './data/llava_data/'
