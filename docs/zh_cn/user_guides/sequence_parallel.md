@@ -53,6 +53,14 @@ XTuner 中的序列并行设计思路参考了 DeepSpeed 的工作 [DeepSpeed Ul
 
 - accumulative_counts = 1
 + accumulative_counts = 4  # accumulative_counts = accumulative_counts * sequence_parallel_size
+
+#######################################################################
+#                      PART 3  Dataset & Dataloader                   #
+#######################################################################
+train_dataloader = dict(
+-   sampler=dict(type=DefaultSampler, shuffle=True),
++   sampler=dict(type=SequenceParallelSampler, seed=1024, shuffle=True),
+    ...)
 ```
 
 另外，若需要进一步拓展模型的长文本处理能力，需要进一步修改 config 中的 `max_position_embeddings` 字段：
@@ -66,14 +74,6 @@ XTuner 中的序列并行设计思路参考了 DeepSpeed 的工作 [DeepSpeed Ul
 model = dict(
     type=SupervisedFinetune,
 +   max_position_embeddings = max_position_embeddings,
-    ...)
-
-#######################################################################
-#                      PART 3  Dataset & Dataloader                   #
-#######################################################################
-train_dataloader = dict(
--   sampler=dict(type=DefaultSampler, shuffle=True),
-+   sampler=dict(type=SequenceParallelSampler, seed=1024, shuffle=True),
     ...)
 ```
 
