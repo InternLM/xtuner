@@ -16,10 +16,10 @@ def default_collate_fn(instances: Sequence[Dict],
                        use_varlen_attn: bool = False):
     seq_parallel_world_size = get_sequence_parallel_world_size()
 
-    input_ids, labels, position_ids = [], [], []
+    input_ids, labels = [], []
     has_image = any(inst.get('pixel_values') is not None for inst in instances)
     if use_varlen_attn:
-        cumulative_len = []
+        position_ids, cumulative_len = [], []
         assert len(instances) == 1, (
             f'If utilizing varlen attention, the batch size should be'
             f' set to 1, but got {len(instances)}')
