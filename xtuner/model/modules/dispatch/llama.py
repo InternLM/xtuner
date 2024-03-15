@@ -387,6 +387,10 @@ def llama_attn_forward(
         # LlamaFlashAttention2 __init__.
         causal = self.is_causal and q_len != 1
 
+    # repeat kv for sequence parallel
+    key_states = repeat_kv_bshd(key_states, self.num_key_value_groups)
+    value_states = repeat_kv_bshd(value_states, self.num_key_value_groups)
+
     if attention_mask is not None:
         attn_output = flash_attn_w_mask(
             query_states,
