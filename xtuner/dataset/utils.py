@@ -235,9 +235,8 @@ class Packer:
                 result['cumulative_len'] = [] if self.drop_last else [
                     self.residual_cumulative_len
                 ]
-                result[
-                    'position_ids'] = [] if self.drop_last else self.get_position_ids(
-                        [self.residual_cumulative_len])
+                result['position_ids'] = [] if self.drop_last \
+                    else self.get_position_ids([self.residual_cumulative_len])
                 self.residual_cumulative_len = [0]
 
         return result
