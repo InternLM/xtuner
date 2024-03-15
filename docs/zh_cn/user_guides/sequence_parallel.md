@@ -63,7 +63,7 @@ train_dataloader = dict(
     ...)
 ```
 
-另外，若需要进一步拓展模型的长文本处理能力，需要进一步修改 config 中的 `max_position_embeddings` 字段：
+另外，若需要进一步拓展模型的长文本处理能力，需要进一步修改 config 中的 `max_position_embeddings` 字段。例如需要将模型的上下文长度拓展为 64K 时，可进行如下修改：
 
 ```diff
 + max_position_embeddings = 65536
