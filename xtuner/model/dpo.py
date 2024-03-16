@@ -3,7 +3,6 @@ from collections import OrderedDict
 
 import torch
 import torch.nn.functional as F
-
 from mmengine.config import Config, ConfigDict
 from mmengine.model import BaseModel
 from mmengine.runner import load_checkpoint
@@ -12,15 +11,16 @@ from torch import nn
 
 from xtuner.registry import BUILDER
 from .modules import dispatch_modules
-from .utils import (LoadWoInit, find_all_linear_names,
+from .utils import (LoadWoInit, create_reference_model, find_all_linear_names,
                     get_peft_model_state_dict, make_inputs_require_grad,
-                    traverse_dict, create_reference_model)
+                    traverse_dict)
+
 
 class DPO(BaseModel):
 
     def __init__(self,
                  llm,
-                 beta = 0.1,
+                 beta=0.1,
                  lora=None,
                  peft_model=None,
                  use_activation_checkpointing=True,
@@ -58,8 +58,8 @@ class DPO(BaseModel):
         # seq_len dimension (use_varlen_attn = False) or the actual length of
         # the sequence.
         self.use_varlen_attn = use_varlen_attn
-        
-        # TODO: a more feasible way to set ref_model. Now the ref_model is a deepcopy of self.llm
+        # TODO: a more feasible way to set ref_model.
+        # Now the ref_model is a deepcopy of self.llm
         self.ref_model = create_reference_model(self.llm)
 
     def gradient_checkpointing_enable(self):
@@ -120,55 +120,46 @@ class DPO(BaseModel):
         outputs = self.llm(**data)
         logits_dict = [{'logits': logits} for logits in outputs.logits]
         return logits_dict
-    
 
     def compute_loss(self, data, data_samples=None):
-        # concat chosen and rejected samples
-        # need to pad torch.cat([data["input_chosen_ids"], data["input_reject_ids"]
-        max_len = max(data["input_chosen_ids"].shape[1], data["input_reject_ids"].shape[1])
-        data["input_chosen_ids"] = F.pad(data["input_chosen_ids"], (0, max_len - data["input_chosen_ids"].shape[1]), value=-100)
-        data["input_reject_ids"] = F.pad(data["input_reject_ids"], (0, max_len - data["input_reject_ids"].shape[1]), value=-100)
-        print(data["input_chosen_ids"].shape, data["input_reject_ids"].shape)
-        len_chosen = data["input_chosen_ids"].shape[0]
-        print(len_chosen)
-        data["chosen_attention_mask"] = data["input_chosen_ids"].ne(-100)
-        data["reject_attention_mask"] = data["input_reject_ids"].ne(-100)
-        data["chosen_labels"] = F.pad(data["chosen_labels"], (0, max_len - data["chosen_labels"].shape[1]), value=-100)
-        data["reject_labels"] = F.pad(data["reject_labels"], (0, max_len - data["reject_labels"].shape[1]), value=-100)
-        data = {
-            "input_ids": torch.cat([data["input_chosen_ids"], data["input_reject_ids"]], dim=0),
-            "attention_mask": torch.cat([data["chosen_attention_mask"], data["reject_attention_mask"]], dim=0),
-            "labels": torch.cat([data["chosen_labels"], data["reject_labels"]], dim=0)
-        }
-        
+        len_chosen = len(data['input_ids']) // 2
+        assert len_chosen > 0
+
         all_logits = self.llm(**data).logits
         all_ref_logits = self.ref_model(**data).logits
-        
-        labels = data["labels"]
+
+        labels = data['labels']
         labels[labels == -100] = 0
         loss_mask = labels != 0
-        
-        per_token_logps = torch.gather(all_logits.log_softmax(-1), dim=2, index=labels.unsqueeze(2)).squeeze(2)
-        per_ref_token_logps = torch.gather(all_ref_logits.log_softmax(-1), dim=2, index=labels.unsqueeze(2)).squeeze(2)
-        
+
+        per_token_logps = torch.gather(
+            all_logits.log_softmax(-1), dim=2,
+            index=labels.unsqueeze(2)).squeeze(2)
+        per_ref_token_logps = torch.gather(
+            all_ref_logits.log_softmax(-1), dim=2,
+            index=labels.unsqueeze(2)).squeeze(2)
+
         all_logps = (per_token_logps * loss_mask).sum(-1) / loss_mask.sum(-1)
-        all_ref_logps = (per_ref_token_logps * loss_mask).sum(-1) / loss_mask.sum(-1)   
-        
+        all_ref_logps = (per_ref_token_logps *
+                         loss_mask).sum(-1) / loss_mask.sum(-1)
+
         policy_chosen_logps = all_logps[:len_chosen]
         policy_rejected_logps = all_logps[len_chosen:]
         reference_chosen_logps = all_ref_logps[:len_chosen]
         reference_rejected_logps = all_ref_logps[len_chosen:]
-        
+
         pi_logratios = policy_chosen_logps - policy_rejected_logps
         ref_logratios = reference_chosen_logps - reference_rejected_logps
-        
+
         logits = pi_logratios - ref_logratios
         loss = -F.logsigmoid(self.beta * logits)
-        chosen_rewards = self.beta * (policy_chosen_logps - reference_chosen_logps)
-        rejected_rewards = self.beta * (policy_rejected_logps - reference_rejected_logps)
-        
+        chosen_rewards = self.beta * (
+            policy_chosen_logps - reference_chosen_logps)
+        rejected_rewards = self.beta * (
+            policy_rejected_logps - reference_rejected_logps)
+
         loss_dict = {
-            'loss': loss, 
+            'loss': loss,
             'chosen_rewards': chosen_rewards,
             'rejected_rewards': rejected_rewards
         }

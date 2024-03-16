@@ -7,8 +7,7 @@ from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR, LinearLR
 from peft import LoraConfig
 from torch.optim import AdamW
-from transformers import (AutoModelForCausalLM, AutoTokenizer,
-                          BitsAndBytesConfig)
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from xtuner.dataset import process_hf_dataset
 from xtuner.dataset.collate_fns import default_collate_fn
@@ -25,6 +24,7 @@ from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
 # Model
 pretrained_model_name_or_path = 'internlm/internlm2-chat-1_8b'
 use_varlen_attn = False
+use_dpo = True
 
 # Data
 orca_dpo_path = 'Intel/orca_dpo_pairs'
@@ -92,7 +92,7 @@ tokenizer = dict(
 
 # lora
 model = dict(
-    type=DPO, # TODO
+    type=DPO,  # TODO
     # type = SupervisedFinetune,
     use_varlen_attn=use_varlen_attn,
     llm=dict(
@@ -139,7 +139,10 @@ train_dataloader = dict(
     num_workers=dataloader_num_workers,
     dataset=orca_dpo,
     sampler=dict(type=DefaultSampler, shuffle=True),
-    collate_fn=dict(type=default_collate_fn, use_varlen_attn=use_varlen_attn))
+    collate_fn=dict(
+        type=default_collate_fn,
+        use_varlen_attn=use_varlen_attn,
+        use_dpo=use_dpo))
 
 #######################################################################
 #                    PART 4  Scheduler & Optimizer                    #
