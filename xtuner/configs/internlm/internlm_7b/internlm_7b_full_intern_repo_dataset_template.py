@@ -30,7 +30,10 @@ max_length = 8192
 pack_to_max_length = True
 
 # Scheduler & Optimizer
-batch_size = 1  # per_device
+# batch size per device, set to 1 if `use_varlen_attn` = True
+# To clarify, enlarging the batch size essentially enlarges the `max_length`.
+# For example, doubling the max length is tantamount to doubling the batch size
+batch_size = 1
 accumulative_counts = 4  # 1bs * 4acc * 32gpu = 128 batchsize
 dataloader_num_workers = 4
 max_epochs = 1
@@ -87,7 +90,8 @@ train_dataloader = dict(
     num_workers=dataloader_num_workers,
     dataset=train_dataset,
     sampler=dict(type=InternRepoSampler, shuffle=True, seed=1024),
-    batch_sampler=dict(type=BatchSampler, drop_last=True, batch_size=1),
+    batch_sampler=dict(
+        type=BatchSampler, drop_last=True, batch_size=batch_size),
     collate_fn=dict(type=default_collate_fn, use_varlen_attn=use_varlen_attn))
 
 #######################################################################
