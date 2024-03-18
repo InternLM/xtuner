@@ -7,6 +7,8 @@
 
 ## \[推荐\] 方法 1：利用 `snapshot_download`
 
+### HuggingFace
+
 `huggingface_hub.snapshot_download` 支持下载特定的 HuggingFace Hub 模型权重，并且允许多线程。您可以利用下列代码并行下载模型权重：
 
 ```python
@@ -29,15 +31,17 @@ snapshot_download(repo_id='internlm/internlm2-chat-7b', local_dir='./internlm2-c
 
 3. 关于环境变量的更多用法，可阅读 [这里](https://huggingface.co/docs/huggingface_hub/main/en/package_reference/environment_variables)。
 
-### ModelScope?
+### ModelScope
 
-`modelscope.snapshot_download` 提供了类似的接口，您可以利用下列命令下载模型：
+`modelscope.snapshot_download` 支持下载指定的模型权重，您可以利用下列命令下载模型：
 
 ```python
 from modelscope import snapshot_download
 
 snapshot_download(model_id='Shanghai_AI_Laboratory/internlm2-chat-7b', cache_dir='./internlm2-chat-7b')
 ```
+
+其中，`model_id` 表示模型在 ModelScope 模型库的名字、`cache_dir` 表示期望存储到的本地路径。
 
 **注意事项**
 
@@ -67,6 +71,8 @@ git clone https://www.modelscope.cn/Shanghai_AI_Laboratory/internlm2-chat-7b.git
 
 `AutoModelForCausalLM.from_pretrained` 在初始化模型时，将尝试连接远程仓库并自动下载模型权重。因此，您可以执行下列代码下载您的模型权重：
 
+### HuggingFace
+
 ```python
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -82,9 +88,7 @@ tokenizer = AutoTokenizer.from_pretrained('internlm/internlm2-chat-7b', trust_re
 export HF_HOME=XXXX   # 默认为 `~/.cache/huggingface/`
 ```
 
-### ModelScope?
-
-如果您期望从 ModelScope 下载模型，可以使用 `modelscope` 库所提供的模型接口。
+### ModelScope
 
 ```python
 from modelscope import AutoModelForCausalLM, AutoTokenizer
