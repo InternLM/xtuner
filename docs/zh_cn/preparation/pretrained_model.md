@@ -17,6 +17,9 @@ snapshot_download(repo_id='internlm/internlm2-chat-7b', local_dir='./internlm2-c
 
 其中，`repo_id` 表示模型在 HuggingFace Hub 的名字、`local_dir` 表示期望存储到的本地路径、`max_workers` 表示下载的最大并行数。
 
+如果觉得下载较慢（例如无法达到最大带宽），可以尝试设置 `export HF_HUB_ENABLE_HF_TRANSFER=1` 以获得更高的下载速度。
+关于 `huggingface_hub` 的更多用法可阅读 [这里](https://huggingface.co/docs/huggingface_hub/v0.20.2/package_reference/environment_variables#hfhubenablehftransfer)。
+
 - ModelScope?
 
   - ```python
