@@ -19,28 +19,37 @@ snapshot_download(repo_id='internlm/internlm2-chat-7b', local_dir='./internlm2-c
 
 **注意事项**
 
-1. 如果未指定 `local_dir`，则默认下载至 HuggingFace 的 cache 路径中（默认为`~/.cache/huggingface/hub`）。
-
-   若要修改默认存储路径，需要修改相关环境变量：
+1. 如果未指定 `local_dir`，则将下载至 HuggingFace 的默认 cache 路径中（`~/.cache/huggingface/hub`）。若要修改默认 cache 路径，需要修改相关环境变量：
 
    ```shell
-   export TRANSFORMERS_CACHE=YOUR_CACHE_PATH
-   export HF_HUB_CACHE=YOUR_CACHE_PATH
+   export HF_HOME=XXXX  # 默认为 `~/.cache/huggingface/`
    ```
 
-2. 如果觉得下载较慢（例如无法达到最大带宽等情况），可以尝试设置 `export HF_HUB_ENABLE_HF_TRANSFER=1` 以获得更高的下载速度。关于 `huggingface_hub` 的更多用法可阅读 [这里](https://huggingface.co/docs/huggingface_hub/v0.20.2/package_reference/environment_variables#hfhubenablehftransfer)。
+2. 如果觉得下载较慢（例如无法达到最大带宽等情况），可以尝试设置 `export HF_HUB_ENABLE_HF_TRANSFER=1` 以获得更高的下载速度。
+
+3. 关于环境变量的更多用法，可阅读 [这里](https://huggingface.co/docs/huggingface_hub/main/en/package_reference/environment_variables)。
 
 ### ModelScope?
 
 `modelscope.snapshot_download` 提供了类似的接口，您可以利用下列命令下载模型：
 
-- ```python
-  from modelscope import snapshot_download
+```python
+from modelscope import snapshot_download
 
-  snapshot_download(model_id='Shanghai_AI_Laboratory/internlm2-chat-7b', cache_dir='./internlm2-chat-7b')
-  ```
+snapshot_download(model_id='Shanghai_AI_Laboratory/internlm2-chat-7b', cache_dir='./internlm2-chat-7b')
+```
 
-- 注：`modelscope.snapshot_download` 不支持多线程并行下载。
+**注意事项**
+
+1. 如果未指定 `cache_dir`，则将下载至 ModelScope 的默认 cache 路径中（`~/.cache/huggingface/hub`）。
+
+   若要修改默认 cache 路径，需要修改相关环境变量：
+
+   ```shell
+   export MODELSCOPE_CACHE=XXXX  # 默认为 ~/.cache/modelscope/hub/
+   ```
+
+2. `modelscope.snapshot_download` 不支持多线程并行下载。
 
 ## 方法 2：利用 Git LFS
 
@@ -70,8 +79,7 @@ tokenizer = AutoTokenizer.from_pretrained('internlm/internlm2-chat-7b', trust_re
 若要修改默认存储路径，需要修改相关环境变量：
 
 ```shell
-export TRANSFORMERS_CACHE=YOUR_CACHE_PATH
-export HF_HUB_CACHE=YOUR_CACHE_PATH
+export HF_HOME=XXXX   # 默认为 `~/.cache/huggingface/`
 ```
 
 ### ModelScope?
@@ -88,5 +96,5 @@ tokenizer = AutoTokenizer.from_pretrained('Shanghai_AI_Laboratory/internlm2-chat
 此时模型将会下载至 ModelScope 的 cache 路径中（默认为`~/.cache/modelscope/hub`）。若要修改默认存储路径，需要修改相关环境变量：
 
 ```shell
-export MODELSCOPE_CACHE=YOUR_CACHE_PATH
+export MODELSCOPE_CACHE=XXXX  # 默认为 ~/.cache/modelscope/hub/
 ```
