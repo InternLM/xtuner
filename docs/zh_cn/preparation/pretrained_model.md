@@ -69,7 +69,7 @@ git clone https://www.modelscope.cn/Shanghai_AI_Laboratory/internlm2-chat-7b.git
 
 ## 方法 3：利用 `AutoModelForCausalLM.from_pretrained`
 
-`AutoModelForCausalLM.from_pretrained` 在初始化模型时，将尝试连接远程仓库并自动下载模型权重。因此，您可以执行下列代码下载您的模型权重：
+`AutoModelForCausalLM.from_pretrained` 在初始化模型时，将尝试连接远程仓库并自动下载模型权重。因此，我们可以利用这一特性下载模型权重。
 
 ### HuggingFace
 
