@@ -17,18 +17,30 @@ snapshot_download(repo_id='internlm/internlm2-chat-7b', local_dir='./internlm2-c
 
 其中，`repo_id` 表示模型在 HuggingFace Hub 的名字、`local_dir` 表示期望存储到的本地路径、`max_workers` 表示下载的最大并行数。
 
-如果觉得下载较慢（例如无法达到最大带宽），可以尝试设置 `export HF_HUB_ENABLE_HF_TRANSFER=1` 以获得更高的下载速度。
-关于 `huggingface_hub` 的更多用法可阅读 [这里](https://huggingface.co/docs/huggingface_hub/v0.20.2/package_reference/environment_variables#hfhubenablehftransfer)。
+**注意事项**
 
-- ModelScope?
+1. 如果未指定 `local_dir`，则默认下载至 HuggingFace 的 cache 路径中（默认为`~/.cache/huggingface/hub`）。
 
-  - ```python
-    from modelscope import snapshot_download
+   若要修改默认存储路径，需要修改相关环境变量：
 
-    snapshot_download(model_id='Shanghai_AI_Laboratory/internlm2-chat-7b', cache_dir='./internlm2-chat-7b')
-    ```
+   ```shell
+   export TRANSFORMERS_CACHE=YOUR_CACHE_PATH
+   export HF_HUB_CACHE=YOUR_CACHE_PATH
+   ```
 
-  - 注：`modelscope.snapshot_download` 不支持多线程并行下载。
+2. 如果觉得下载较慢（例如无法达到最大带宽等情况），可以尝试设置 `export HF_HUB_ENABLE_HF_TRANSFER=1` 以获得更高的下载速度。关于 `huggingface_hub` 的更多用法可阅读 [这里](https://huggingface.co/docs/huggingface_hub/v0.20.2/package_reference/environment_variables#hfhubenablehftransfer)。
+
+### ModelScope?
+
+`modelscope.snapshot_download` 提供了类似的接口，您可以利用下列命令下载模型：
+
+- ```python
+  from modelscope import snapshot_download
+
+  snapshot_download(model_id='Shanghai_AI_Laboratory/internlm2-chat-7b', cache_dir='./internlm2-chat-7b')
+  ```
+
+- 注：`modelscope.snapshot_download` 不支持多线程并行下载。
 
 ## 方法 2：利用 Git LFS
 
@@ -62,19 +74,19 @@ export TRANSFORMERS_CACHE=YOUR_CACHE_PATH
 export HF_HUB_CACHE=YOUR_CACHE_PATH
 ```
 
-- ModelScope?
+### ModelScope?
 
-  - 如果您期望从 ModelScope 下载模型，可以使用 `modelscope` 库所提供的模型接口。
+如果您期望从 ModelScope 下载模型，可以使用 `modelscope` 库所提供的模型接口。
 
-  - ```python
-    from modelscope import AutoModelForCausalLM, AutoTokenizer
+```python
+from modelscope import AutoModelForCausalLM, AutoTokenizer
 
-    model = AutoModelForCausalLM.from_pretrained('Shanghai_AI_Laboratory/internlm2-chat-7b', trust_remote_code=True)
-    tokenizer = AutoTokenizer.from_pretrained('Shanghai_AI_Laboratory/internlm2-chat-7b', trust_remote_code=True)
-    ```
+model = AutoModelForCausalLM.from_pretrained('Shanghai_AI_Laboratory/internlm2-chat-7b', trust_remote_code=True)
+tokenizer = AutoTokenizer.from_pretrained('Shanghai_AI_Laboratory/internlm2-chat-7b', trust_remote_code=True)
+```
 
-  - 此时模型将会下载至 ModelScope 的 cache 路径中（默认为`~/.cache/modelscope/hub`）。若要修改默认存储路径，需要修改相关环境变量：
+此时模型将会下载至 ModelScope 的 cache 路径中（默认为`~/.cache/modelscope/hub`）。若要修改默认存储路径，需要修改相关环境变量：
 
-    ```shell
-    export MODELSCOPE_CACHE=YOUR_CACHE_PATH
-    ```
+```shell
+export MODELSCOPE_CACHE=YOUR_CACHE_PATH
+```
