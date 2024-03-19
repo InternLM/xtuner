@@ -289,7 +289,8 @@ def llama_varlen_attn_forward(
     past_key_value = getattr(self, 'past_key_value', past_key_value)
 
     if past_key_value is not None:
-        # sin and cos are specific to RoPE models; cache_position needed for the static cache
+        # sin and cos are specific to RoPE models;
+        # cache_position needed for the static cache
         cache_kwargs = {
             'sin': sin,
             'cos': cos,
