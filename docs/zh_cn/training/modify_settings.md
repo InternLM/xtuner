@@ -234,6 +234,77 @@ log_processor = dict(by_epoch=False)
 - 使用 ModelScope 模型？
   - 如果使用 ModelScope 的模型，建议首先参考 [文档](../preparation/pretrained_model.md) 将其下载至本地，并修改`pretrained_model_name_or_path`。
 
+### 微调类型
+
+XTuner 提供的 config 以 QLoRA 微调为主，但并不意味着 XTuner 仅支持 QLoRA 微调。用户可以通过修改配置文件中的 `model` 来决定微调类型。
+
+- 全量微调
+
+  ```python
+  model = dict(
+      ......
+      llm=dict(
+          type=AutoModelForCausalLM.from_pretrained,
+          pretrained_model_name_or_path=pretrained_model_name_or_path,
+          trust_remote_code=True,
+          torch_dtype=torch.float16,
+          quantization_config=None),
+      lora=None,
+      ......)
+  ```
+
+- LoRA 微调
+
+  ```python
+  model = dict(
+      ......
+      llm=dict(
+          type=AutoModelForCausalLM.from_pretrained,
+          pretrained_model_name_or_path=pretrained_model_name_or_path,
+          trust_remote_code=True,
+          torch_dtype=torch.float16,
+          quantization_config=None),
+      lora=dict(
+          type=LoraConfig,
+          r=64,
+          lora_alpha=16,
+          lora_dropout=0.1,
+          bias='none',
+          task_type='CAUSAL_LM'),
+      ......)
+  ```
+
+- QLoRA 微调
+
+  > 注意：QLoRA 微调与 DeepSpeed ZeRO-3 不兼容；如需使用 DeepSpeed，请使用 ZeRO-1 或 ZeRO-2。
+
+  ```python
+  model = dict(
+      ......
+      llm=dict(
+          type=AutoModelForCausalLM.from_pretrained,
+          pretrained_model_name_or_path=pretrained_model_name_or_path,
+          trust_remote_code=True,
+          torch_dtype=torch.float16,
+          quantization_config=dict(
+              type=BitsAndBytesConfig,
+              load_in_4bit=True,
+              load_in_8bit=False,
+              llm_int8_threshold=6.0,
+              llm_int8_has_fp16_weight=False,
+              bnb_4bit_compute_dtype=torch.float16,
+              bnb_4bit_use_double_quant=True,
+              bnb_4bit_quant_type='nf4')),
+      lora=dict(
+          type=LoraConfig,
+          r=64,
+          lora_alpha=16,
+          lora_dropout=0.1,
+          bias='none',
+          task_type='CAUSAL_LM'),
+      ......)
+  ```
+
 ### 数据集
 
 请参考相关文档 \[TODO\]
