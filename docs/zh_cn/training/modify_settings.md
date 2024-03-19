@@ -236,7 +236,7 @@ log_processor = dict(by_epoch=False)
 
 ### 数据集
 
-请参考相关文档 [TODO]
+请参考相关文档 \[TODO\]
 
 ### 优化器
 
@@ -266,7 +266,7 @@ xtuner train ${CONFIG}
 
 ### DeepSpeed
 
-XTuner 的 DeepSpeed 优化由启动命令决定，而非配置文件。用户可以参考下列命令启动 DeepSpeed 优化：
+XTuner 的 DeepSpeed 优化由启动命令决定，而非配置文件。用户可以参考下列命令启用 DeepSpeed 优化：
 
 ```shell
 xtuner train ${CONFIG} --deepspeed ${DS_CONFIG}
