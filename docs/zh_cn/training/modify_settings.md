@@ -1,6 +1,6 @@
 # 修改训练配置
 
-XTuner 的训练由 MMEngine 的训练器提供支持，用户可以通过修改配置文件 （config）中的特定参数，来修改对应的训练配置。以 [internlm2_chat_7b_qlora_oasst1_e3](https://github.com/InternLM/xtuner/blob/main/xtuner/configs/internlm/internlm2_chat_7b/internlm2_chat_7b_qlora_oasst1_e3.py) 为例，本节将首先速览配置文件中各个参数的含义，之后讲解常见配置的修改方式。
+XTuner 的训练由 MMEngine 的训练器提供支持，用户可以通过修改配置文件（config）中的特定参数，来修改对应的训练配置。以 [internlm2_chat_7b_qlora_oasst1_e3](https://github.com/InternLM/xtuner/blob/main/xtuner/configs/internlm/internlm2_chat_7b/internlm2_chat_7b_qlora_oasst1_e3.py) 为例，本节将首先速览配置文件中各个参数的含义，之后讲解常见配置的修改方式。
 
 ## 配置文件速览
 
