@@ -1,0 +1,41 @@
+[
+    {
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": "image1.jpg"
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": "image2.jpg"
+                    },
+                    {
+                        "type": "text", 
+                        "text": "What are the colors of the bus in the first image?"
+                    }
+                ]
+            },
+
+            {
+                "role": "assistant",
+                "content": "The bus in the image is white and red."
+            },
+
+            {
+                "role": "user",
+                "content": "Where is the cat positioned in the second image?"
+            },
+
+            {
+                "role": "assistant",
+                "content": "The cat is positioned on top of the back of the couch in the living room."
+            }
+
+        ]
+    }
+]
+
+    

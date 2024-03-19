@@ -1,0 +1,54 @@
+[
+    {
+        "messages": [
+            {
+                "role": "user",
+                "content": "I want to know today's weather in Shanghai"
+            },
+
+            {
+                "role": "assistant",
+                "content": "Sure, I will search for the weather of Shanghai.",
+                "function_call": {
+                    "name": "get_current_weather",
+                    "parameters": {
+                        "location": "Shanghai"
+                    }
+                }
+            },
+
+            {
+                "role": "function",
+                "name": "get_current_weather",
+                "content": "{'temperature': 22}"
+            },
+            {
+                "role": "assistant",
+                "content": "The weather in Shanghai is 22 celsius"
+            }
+
+
+        ],
+
+        "functions": [
+            {
+                "name": "get_current_weather",
+                "description": "Get the current weather in a given location",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "location": {
+                            "type": "string",
+                            "description": "The city and state, e.g. San Francisco, CA",
+                            "unit": {"type": "string"}
+                        },
+                        "required": ["location"]
+                    }
+                }
+            }
+        ]
+    }
+    
+]
+
+    
