@@ -238,7 +238,7 @@ log_processor = dict(by_epoch=False)
 
 XTuner 内置的配置文件以 QLoRA 微调为主，但并不意味着 XTuner 仅支持 QLoRA 微调。用户可以通过修改配置文件中的 `model` 来决定微调类型。
 
-- 全量微调
+- 全参数微调
 
   ```python
   model = dict(
