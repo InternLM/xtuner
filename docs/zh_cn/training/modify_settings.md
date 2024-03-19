@@ -6,7 +6,7 @@ XTuner 的训练由 MMEngine 的训练器提供支持，用户可以通过修改
 
 XTuner 使用 MMEngine 的「纯 Python 风格的配置文件」，直接利用 `import` 机制使用一些类或函数。
 
->  如果您期望深入了解 MMEngine 「纯 Python 风格的配置文件」的特性、优势，请参考 [这里](https://mmengine.readthedocs.io/zh-cn/latest/advanced_tutorials/config.html#python-beta)。
+> 如果您期望深入了解 MMEngine 「纯 Python 风格的配置文件」的特性、优势，请参考 [这里](https://mmengine.readthedocs.io/zh-cn/latest/advanced_tutorials/config.html#python-beta)。
 
 ```python
 # Copyright (c) OpenMMLab. All rights reserved.
@@ -232,11 +232,11 @@ log_processor = dict(by_epoch=False)
 - 使用其他 LLM 模型？
   - 修改 `pretrained_model_name_or_path`，其将应用至 `model.llm` 和 `tokenizer` 的初始化中。
 - 使用 ModelScope 模型？
-  - 如果使用 ModelScope 的模型，建议首先参考 [文档]() 将其下载至本地，并修改`pretrained_model_name_or_path`。
+  - 如果使用 ModelScope 的模型，建议首先参考 [文档](../preparation/pretrained_model.md) 将其下载至本地，并修改`pretrained_model_name_or_path`。
 
 ### 数据集
 
-请参考相关文档
+请参考相关文档 [TODO]
 
 ### 优化器
 
@@ -281,4 +281,3 @@ xtuner train ${CONFIG} --deepspeed [deepspeed_zero1,deepspeed_zero2,deepspeed_ze
 ### 其他
 
 如有遗漏或特定需求，欢迎提出 [issue](https://github.com/InternLM/xtuner/issues) 讨论。
-
