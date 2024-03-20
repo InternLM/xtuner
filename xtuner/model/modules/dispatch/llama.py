@@ -39,7 +39,7 @@ def llama_attn_forward(
     cache_position: Optional[torch.LongTensor] = None,
     **kwargs,
 ):
-    # Modified from https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/modeling_llama.py#L422  # noqa:E501
+    # Modified from https://github.com/huggingface/transformers/blob/66ce9593fdb8e340df546ddd0774eb444f17a12c/src/transformers/models/llama/modeling_llama.py#L422  # noqa:E501
     output_attentions = False
 
     bsz, q_len, _ = hidden_states.size()
@@ -75,28 +75,29 @@ def llama_attn_forward(
         key_states, value_states = past_key_value.update(
             key_states, value_states, self.layer_idx, cache_kwargs)
 
-    # In PEFT, usually we cast the layer norms in float32 for training
-    # stability reasons therefore the input hidden states gets silently casted
-    # in float32. Hence, we need cast them back in the correct dtype just to
-    # be sure everything works as expected.
-    # This might slowdown training & inference so it is recommended to not cast
-    # the LayerNorms in fp32. (LlamaRMSNorm handles it correctly)
-
-    input_dtype = query_states.dtype
-    if input_dtype == torch.float32:
-        if torch.is_autocast_enabled():
-            target_dtype = torch.get_autocast_gpu_dtype()
-        # Handle the case where the model is quantized
-        elif hasattr(self.config, '_pre_quantization_dtype'):
-            target_dtype = self.config._pre_quantization_dtype
-        else:
-            target_dtype = self.q_proj.weight.dtype
-
-        query_states = query_states.to(target_dtype)
-        key_states = key_states.to(target_dtype)
-        value_states = value_states.to(target_dtype)
-
     if SUPPORT_FLASH2:
+
+        # In PEFT, usually we cast the layer norms in float32 for training
+        # stability reasons therefore the input hidden states gets silently casted
+        # in float32. Hence, we need cast them back in the correct dtype just to
+        # be sure everything works as expected.
+        # This might slowdown training & inference so it is recommended to not cast
+        # the LayerNorms in fp32. (LlamaRMSNorm handles it correctly)
+
+        input_dtype = query_states.dtype
+        if input_dtype == torch.float32:
+            if torch.is_autocast_enabled():
+                target_dtype = torch.get_autocast_gpu_dtype()
+            # Handle the case where the model is quantized
+            elif hasattr(self.config, '_pre_quantization_dtype'):
+                target_dtype = self.config._pre_quantization_dtype
+            else:
+                target_dtype = self.q_proj.weight.dtype
+
+            query_states = query_states.to(target_dtype)
+            key_states = key_states.to(target_dtype)
+            value_states = value_states.to(target_dtype)
+
         query_states = query_states.transpose(1, 2)
         key_states = key_states.transpose(1, 2)
         value_states = value_states.transpose(1, 2)
