@@ -10,9 +10,12 @@ from xtuner.utils import DEFAULT_PAD_TOKEN_INDEX, IGNORE_INDEX
 def default_collate_fn(instances: Sequence[Dict],
                        pad_index: int = DEFAULT_PAD_TOKEN_INDEX,
                        return_hf_format: bool = False,
-                       use_varlen_attn: bool = False):
+                       use_varlen_attn: bool = False,
+                       use_dpo: bool = False):
 
     input_ids, labels = [], []
+    input_chosen_ids, chosen_labels = [], []
+    input_reject_ids, reject_labels = [], []
     has_image = any(inst.get('pixel_values') is not None for inst in instances)
     if use_varlen_attn:
         cumulative_len, indexes = [], []
@@ -26,8 +29,17 @@ def default_collate_fn(instances: Sequence[Dict],
         pixel_values = []
 
     for example in instances:
-        input_ids.append(torch.LongTensor(example['input_ids']))
-        labels.append(torch.LongTensor(example['labels']))
+        if use_dpo:
+            input_chosen_ids.append(
+                torch.LongTensor(example['input_chosen_ids']))
+            chosen_labels.append(torch.LongTensor(example['chosen_labels']))
+            input_reject_ids.append(
+                torch.LongTensor(example['input_reject_ids']))
+            reject_labels.append(torch.LongTensor(example['reject_labels']))
+        else:
+            input_ids.append(torch.LongTensor(example['input_ids']))
+            labels.append(torch.LongTensor(example['labels']))
+
         if use_varlen_attn:
             cumulative_len.append(torch.IntTensor(example['cumulative_len']))
             indexes.append(torch.LongTensor(example['indexes']))
@@ -35,7 +47,11 @@ def default_collate_fn(instances: Sequence[Dict],
         if has_image:
             pixel_values.append(example['pixel_values'])
 
-    if len(instances) > 1:
+    if use_dpo:
+        input_ids = input_chosen_ids + input_reject_ids
+        labels = chosen_labels + reject_labels
+
+    if len(input_ids) > 1:
         input_ids = pad_sequence(
             input_ids, batch_first=True, padding_value=pad_index)
         labels = pad_sequence(

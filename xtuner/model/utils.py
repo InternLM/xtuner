@@ -8,6 +8,8 @@ from mmengine.utils.misc import get_object_from_string
 from peft import PeftType
 from torch import nn
 from transformers import PreTrainedModel
+from transformers.integrations.deepspeed import is_deepspeed_zero3_enabled
+from copy import deepcopy
 
 from xtuner.utils import IGNORE_INDEX, IMAGE_TOKEN_INDEX
 
@@ -307,3 +309,18 @@ def guess_load_checkpoint(pth_model):
     else:
         raise FileNotFoundError(f'Cannot find {pth_model}')
     return state_dict
+
+def create_reference_model(model):
+    if is_deepspeed_zero3_enabled():
+        raise ValueError(
+            "DeepSpeed ZeRO-3 is enabled and is not compatible with `create_reference_model()`. Please instantiate your reference model directly with `AutoCausalLM.from_pretrained()`."
+        )
+
+    parameter_names = [n for n, _ in model.named_parameters()]
+    ref_model = deepcopy(model)
+
+    # if no layers are shared, return copy of model
+    for param_name in parameter_names:
+        param = ref_model.get_parameter(param_name)
+        param.requires_grad = False
+    return ref_model.eval()
