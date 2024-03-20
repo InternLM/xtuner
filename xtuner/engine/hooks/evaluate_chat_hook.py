@@ -89,7 +89,7 @@ class EvaluateChatHook(Hook):
     def _save_eval_output(self, runner, eval_outputs):
         save_path = os.path.join(runner.log_dir, 'vis_data',
                                  f'eval_outputs_iter_{runner.iter}.txt')
-        with open(save_path, 'w') as f:
+        with open(save_path, 'w', encoding='utf-8') as f:
             for i, output in enumerate(eval_outputs):
                 f.write(f'Eval output {i + 1}:\n{output}\n\n')
 
@@ -129,7 +129,8 @@ class EvaluateChatHook(Hook):
                     input_ids.append(IMAGE_TOKEN_INDEX)
             input_ids = torch.tensor(input_ids).to(device)
             visual_outputs = model.visual_encoder(
-                image.unsqueeze(0), output_hidden_states=True)
+                image.unsqueeze(0).to(model.visual_encoder.dtype),
+                output_hidden_states=True)
             pixel_values = model.projector(
                 visual_outputs.hidden_states[model.visual_select_layer][:, 1:])
 

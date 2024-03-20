@@ -1,68 +1,47 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-"""Data format:
-[
-    {
-        "conversation": [
-            {
-                "system": "",
-                "input": "xxx",
-                "output": "xxx"
-            },
-            {
-                "input": "xxx",
-                "output": "xxx"
-            }
-        ]
-    },
-...
-]
-Please refer to https://github.com/InternLM/xtuner/blob/main/docs/en/user_guides/dataset_format.md for details.
-"""  # noqa: E501
-from datasets import load_dataset
 from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
                             LoggerHook, ParamSchedulerHook)
-from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR
+from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR, LinearLR
 from torch.optim import AdamW
-from torch.utils.data import BatchSampler
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import (AutoModelForCausalLM, AutoTokenizer,
+                          CLIPImageProcessor, CLIPVisionModel)
 
-from xtuner.dataset import process_hf_dataset
+from xtuner.dataset import LLaVADataset
 from xtuner.dataset.collate_fns import default_collate_fn
-from xtuner.dataset.map_fns import template_map_fn_factory
-from xtuner.dataset.samplers import InternRepoSampler
-from xtuner.engine import (DatasetInfoHook, EvaluateChatHook, ThroughputHook,
-                           VarlenAttnArgsToMessageHubHook)
+from xtuner.dataset.map_fns import llava_map_fn, template_map_fn_factory
+from xtuner.dataset.samplers import LengthGroupedSampler
+from xtuner.engine.hooks import DatasetInfoHook, EvaluateChatHook
 from xtuner.engine.runner import TrainLoop
-from xtuner.model import SupervisedFinetune
+from xtuner.model import LLaVAModel
 from xtuner.utils import PROMPT_TEMPLATE
 
 #######################################################################
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-pretrained_model_name_or_path = 'internlm/internlm2-chat-20b'
-use_varlen_attn = True
+llm_name_or_path = 'lmsys/vicuna-13b-v1.5'
+visual_encoder_name_or_path = 'openai/clip-vit-large-patch14-336'
+# Specify the pretrained pth
+pretrained_pth = './work_dirs/llava_v15_13b_pretrain/iter_2181.pth'
 
 # Data
-data_files = ['/path/to/json/file.json']
-prompt_template = PROMPT_TEMPLATE.internlm2_chat
-max_length = 32768
-pack_to_max_length = True
+data_root = './data/llava_data/'
+data_path = data_root + 'LLaVA-Instruct-150K/llava_v1_5_mix665k.json'
+image_folder = data_root + 'llava_images'
+prompt_template = PROMPT_TEMPLATE.vicuna
+max_length = int(2048 - (336 / 14)**2)
 
 # Scheduler & Optimizer
-# batch size per device, set to 1 if `use_varlen_attn` = True
-# To clarify, enlarging the batch size essentially enlarges the `max_length`.
-# For example, doubling the max length is tantamount to doubling the batch size
-batch_size = 1
-accumulative_counts = 1  # 1bs * 1acc * 64gpu = 64 batchsize
-dataloader_num_workers = 4
+batch_size = 16  # per_device
+accumulative_counts = 1
+dataloader_num_workers = 0
 max_epochs = 1
 optim_type = AdamW
-lr = 4e-5
-betas = (0.9, 0.95)
-weight_decay = 0.01
+lr = 2e-5
+betas = (0.9, 0.999)
+weight_decay = 0
 max_norm = 1  # grad clip
-warm_up_ratio = 0.025
+warmup_ratio = 0.03
 
 # Save
 save_steps = 500
@@ -71,51 +50,60 @@ save_total_limit = 2  # Maximum checkpoints to keep (-1 means unlimited)
 # Evaluate the generation performance during the training
 evaluation_freq = 500
 SYSTEM = ''
-evaluation_inputs = [
-    '请给我介绍五个上海的景点', 'Please tell me five scenic spots in Shanghai'
-]
+evaluation_images = 'https://llava-vl.github.io/static/images/view.jpg'
+evaluation_inputs = ['请描述一下这张照片', 'Please describe this picture']
 
 #######################################################################
-#                      PART 2  Model & Tokenizer                      #
+#            PART 2  Model & Tokenizer & Image Processor              #
 #######################################################################
 tokenizer = dict(
     type=AutoTokenizer.from_pretrained,
-    pretrained_model_name_or_path=pretrained_model_name_or_path,
+    pretrained_model_name_or_path=llm_name_or_path,
     trust_remote_code=True,
     padding_side='right')
 
+image_processor = dict(
+    type=CLIPImageProcessor.from_pretrained,
+    pretrained_model_name_or_path=visual_encoder_name_or_path,
+    trust_remote_code=True)
+
 model = dict(
-    type=SupervisedFinetune,
-    use_varlen_attn=use_varlen_attn,
+    type=LLaVAModel,
+    freeze_llm=False,
+    freeze_visual_encoder=True,
+    pretrained_pth=pretrained_pth,
     llm=dict(
         type=AutoModelForCausalLM.from_pretrained,
-        pretrained_model_name_or_path=pretrained_model_name_or_path,
-        trust_remote_code=True))
+        pretrained_model_name_or_path=llm_name_or_path,
+        trust_remote_code=True),
+    visual_encoder=dict(
+        type=CLIPVisionModel.from_pretrained,
+        pretrained_model_name_or_path=visual_encoder_name_or_path))
 
 #######################################################################
 #                      PART 3  Dataset & Dataloader                   #
 #######################################################################
-train_dataset = dict(
-    type=process_hf_dataset,
-    use_varlen_attn=use_varlen_attn,
-    dataset=dict(type=load_dataset, path='json', data_files=data_files),
+llava_dataset = dict(
+    type=LLaVADataset,
+    data_path=data_path,
+    image_folder=image_folder,
     tokenizer=tokenizer,
-    max_length=max_length,
-    dataset_map_fn=None,
+    image_processor=image_processor,
+    dataset_map_fn=llava_map_fn,
     template_map_fn=dict(
         type=template_map_fn_factory, template=prompt_template),
-    remove_unused_columns=True,
-    shuffle_before_pack=True,
-    pack_to_max_length=pack_to_max_length)
+    max_length=max_length,
+    pad_image_to_square=True)
 
 train_dataloader = dict(
     batch_size=batch_size,
     num_workers=dataloader_num_workers,
-    dataset=train_dataset,
-    sampler=dict(type=InternRepoSampler, shuffle=True, seed=1024),
-    batch_sampler=dict(
-        type=BatchSampler, drop_last=True, batch_size=batch_size),
-    collate_fn=dict(type=default_collate_fn, use_varlen_attn=use_varlen_attn))
+    dataset=llava_dataset,
+    sampler=dict(
+        type=LengthGroupedSampler,
+        length_property='modality_length',
+        per_device_batch_size=batch_size * accumulative_counts),
+    collate_fn=dict(type=default_collate_fn))
 
 #######################################################################
 #                    PART 4  Scheduler & Optimizer                    #
@@ -128,23 +116,23 @@ optim_wrapper = dict(
     clip_grad=dict(max_norm=max_norm, error_if_nonfinite=False),
     accumulative_counts=accumulative_counts,
     loss_scale='dynamic',
-)
+    dtype='float16')
 
 # learning policy
 # More information: https://github.com/open-mmlab/mmengine/blob/main/docs/en/tutorials/param_scheduler.md  # noqa: E501
 param_scheduler = [
     dict(
-        type='LinearLR',
-        start_factor=1 / 40,
+        type=LinearLR,
+        start_factor=1e-5,
         by_epoch=True,
         begin=0,
-        end=warm_up_ratio * max_epochs,
+        end=warmup_ratio * max_epochs,
         convert_to_iter_based=True),
     dict(
         type=CosineAnnealingLR,
-        eta_min=lr * 0.15,
+        eta_min=0.0,
         by_epoch=True,
-        begin=warm_up_ratio * max_epochs,
+        begin=warmup_ratio * max_epochs,
         end=max_epochs,
         convert_to_iter_based=True)
 ]
@@ -157,28 +145,24 @@ train_cfg = dict(type=TrainLoop, max_epochs=max_epochs)
 #######################################################################
 # Log the dialogue periodically during the training process, optional
 custom_hooks = [
-    dict(
-        type=DatasetInfoHook, tokenizer=tokenizer,
-        is_intern_repo_dataset=True),
+    dict(type=DatasetInfoHook, tokenizer=tokenizer),
     dict(
         type=EvaluateChatHook,
         tokenizer=tokenizer,
+        image_processor=image_processor,
         every_n_iters=evaluation_freq,
         evaluation_inputs=evaluation_inputs,
+        evaluation_images=evaluation_images,
         system=SYSTEM,
-        prompt_template=prompt_template),
-    dict(type=ThroughputHook)
+        prompt_template=prompt_template)
 ]
-
-if use_varlen_attn:
-    custom_hooks += [dict(type=VarlenAttnArgsToMessageHubHook)]
 
 # configure default hooks
 default_hooks = dict(
     # record the time of every iteration.
     timer=dict(type=IterTimerHook),
-    # print log every 100 iterations.
-    logger=dict(type=LoggerHook, log_metric_by_epoch=False, interval=1),
+    # print log every 10 iterations.
+    logger=dict(type=LoggerHook, log_metric_by_epoch=False, interval=10),
     # enable the parameter scheduler.
     param_scheduler=dict(type=ParamSchedulerHook),
     # save checkpoint per `save_steps`.
@@ -216,7 +200,5 @@ resume = False
 # Defaults to use random seed and disable `deterministic`
 randomness = dict(seed=None, deterministic=False)
 
-log_processor = dict(
-    by_epoch=False,
-    window_size=1,
-    mean_pattern=r'.*(loss|time|data_time|grad_norm|tflops).*')
+# set log processor
+log_processor = dict(by_epoch=False)

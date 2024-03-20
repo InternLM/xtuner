@@ -2,6 +2,11 @@
 
 English | [简体中文](./README_zh-CN.md)
 
+## Configs
+
+- `./${LLM}_${ViT}/` contains configs that align with LLaVA-InternLM settings (*i.e.*, using LoRA / QLoRA).
+- `./official/` contains configs that align with LLaVA official settings.
+
 ## Results
 
 XTuner primarily promotes the LLM-QLoRA / ViT-LoRA LLaVA architecture, and the evaluation results on various datasets are as follows:
@@ -16,10 +21,10 @@ XTuner primarily promotes the LLM-QLoRA / ViT-LoRA LLaVA architecture, and the e
 
 When aligned completely with the official training settings, the results are as follows:
 
-| Model         | Framework | MMBench Test (EN) | MMBench Dev (EN) | MMBench Test (CN) | MMBench Dev (CN) | CCBench Dev | MME  | SEEDBench_IMG | MMVet |                                                                                                                         Configs                                                                                                                          |
-| :------------ | :-------: | :---------------: | :--------------: | :---------------: | :--------------: | :---------: | :--: | :-----------: | :---: | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------: |
-| LLaVA-v1.5-7B | Official  |       65.2        |       63.0       |       57.3        |       57.4       |    25.2     | 1775 |     65.6      | 32.7  |                                                                                                                            -                                                                                                                             |
-| LLaVA-v1.5-7B |  XTuner   |       68.6        |       68.0       |       61.5        |       61.4       |    26.5     | 1786 |     65.8      | 31.4  | [Pretrain](./vicuna_7b_v15_clip_vit_large_p14_336/pretrain/llava_vicuna_7b_v15_clip_vit_large_p14_336_e1_gpu8_pretrain.py) / [Fine-tune](./vicuna_7b_v15_clip_vit_large_p14_336/finetune/llava_vicuna_7b_v15_clip_vit_large_p14_336_e1_gpu8_finetune.py) |
+| Model         | Framework | MMBench Test (EN) | MMBench Dev (EN) | MMBench Test (CN) | MMBench Dev (CN) | CCBench Dev | MME  | SEEDBench_IMG | MMVet |                                                           Configs                                                            |
+| :------------ | :-------: | :---------------: | :--------------: | :---------------: | :--------------: | :---------: | :--: | :-----------: | :---: | :--------------------------------------------------------------------------------------------------------------------------: |
+| LLaVA-v1.5-7B | Official  |       65.2        |       63.0       |       57.3        |       57.4       |    25.2     | 1775 |     65.6      | 32.7  |                                                              -                                                               |
+| LLaVA-v1.5-7B |  XTuner   |       68.6        |       68.0       |       61.5        |       61.4       |    26.5     | 1786 |     65.8      | 31.4  | [Pretrain](./official/llava_v15_7b/llava_v15_7b_pretrain.py) / [Fine-tune](./official/llava_v15_7b/llava_v15_7b_finetune.py) |
 
 ## Data Preparation
 
@@ -29,18 +34,18 @@ Please refer to the [docs](../../../docs/en/user_guides/dataset_prepare.md#llava
 
 The training of LLaVA consists of two steps: alignment module (i.e., MLP) pretraining and instruction following fine-tuning
 
-Note: this guide takes 8-card training LLaVA-InternLM as an example, if there are insufficient GPU resources or memory during actual use, you can reduce the batchsize appropriately to decrease memory consumption. The Pretrained projector is saved and re-loaded by default in `./work_dirs/llava_internlm_chat_7b_clip_vit_large_p14_336_e1_gpu8_pretrain/iter_2181.pth`.
+Note: this guide takes 8-card training LLaVA-InternLM2-7B as an example, if there are insufficient GPU resources or memory during actual use, you can reduce the batchsize appropriately to decrease memory consumption. The Pretrained projector is saved and re-loaded by default in `./work_dirs/llava_internlm2_chat_7b_clip_vit_large_p14_336_e1_gpu8_pretrain/iter_2181.pth`.
 
 1. Alignment module pretraining (saved by default in `./work_dirs/`)
 
 ```bash
-NPROC_PER_NODE=8 xtuner train llava_internlm_chat_7b_clip_vit_large_p14_336_e1_gpu8_pretrain --deepspeed deepspeed_zero2
+NPROC_PER_NODE=8 xtuner train llava_internlm2_chat_7b_clip_vit_large_p14_336_e1_gpu8_pretrain --deepspeed deepspeed_zero2
 ```
 
 2. Instruction following fine-tuning (saved by default in `./work_dirs/`)
 
 ```bash
-NPROC_PER_NODE=8 xtuner train llava_internlm_chat_7b_qlora_clip_vit_large_p14_336_lora_e1_gpu8_finetune --deepspeed deepspeed_zero2
+NPROC_PER_NODE=8 xtuner train llava_internlm2_chat_7b_qlora_clip_vit_large_p14_336_lora_e1_gpu8_finetune --deepspeed deepspeed_zero2
 ```
 
 ## Model Convert (and Merge)
@@ -49,7 +54,7 @@ After training, we will obtain a set of weights (*i.e.*, `iter_xxx.pth`), which 
 
 ```bash
 xtuner convert pth_to_hf $FINETUNE_CFG $PTH_PATH $SAVE_PATH
-# e.g., xtuner convert pth_to_hf llava_internlm_chat_7b_qlora_clip_vit_large_p14_336_lora_e1_gpu8_finetune ./iter_5198.pth ./iter_5198_hf
+# e.g., xtuner convert pth_to_hf llava_internlm2_chat_7b_qlora_clip_vit_large_p14_336_lora_e1_gpu8_finetune ./iter_5198.pth ./iter_5198_hf
 ```
 
 At this point, we have obtained the relevant model (LLM or the corresponding LoRA).
@@ -63,17 +68,17 @@ Afterwards, if you want to merge LoRA into LLM or CLIP-ViT, please use the follo
 
 ## Chat
 
-You can download the released LLaVA-InternLM-7B model from 🤗 [HuggingFace](https://huggingface.co/xtuner/llava-internlm-7b) and 🤖 [ModelScope](https://modelscope.cn/models/xtuner/llava-internlm-7b), and achieve image-text question answering with the following command!
+You can download the released LLaVA-InternLM2-7B model from 🤗 [HuggingFace](https://huggingface.co/xtuner/llava-internlm2-7b) or 🤖 [ModelScope](https://modelscope.cn/models/xtuner/llava-internlm2-7b), and achieve image-text question answering with the following command!
 
 ```bash
-xtuner chat internlm/internlm-chat-7b \
+xtuner chat internlm/internlm2-chat-7b \
   --visual-encoder openai/clip-vit-large-patch14-336 \
-  --llava xtuner/llava-internlm-7b \
-  --prompt-template internlm_chat \
+  --llava xtuner/llava-internlm2-7b \
+  --prompt-template internlm2_chat \
   --image $IMAGE_PATH
 ```
 
-Here, `--llava` is the converted weight from the above step (in our example, it is `./epoch_1_hf` ).
+Here, `--llava` is the converted weight from the above step (in our example, it is `./iter_5198_hf` ).
 
 ## Evaluation
 
@@ -94,10 +99,10 @@ wget https://opencompass.openxlab.space/utils/VLMEval/CCBench.tsv
 After that, the evaluations can be run with
 
 ```bash
-xtuner mmbench internlm/internlm-chat-7b \
+xtuner mmbench internlm/internlm2-chat-7b \
   --visual-encoder openai/clip-vit-large-patch14-336 \
-  --llava xtuner/llava-internlm-7b \
-  --prompt-template internlm_chat \
+  --llava xtuner/llava-internlm2-7b \
+  --prompt-template internlm2_chat \
   --data-path $DATA_PATH \
   --work-dir $RESULT_PATH
 ```
@@ -111,10 +116,10 @@ After the evaluation is completed, if it's a development set, it will directly p
 To evaluate your model with refcoco, you need download the evaluation data files in [link](https://github.com/Vision-CAIR/MiniGPT-4/tree/main/eval_scripts/eval_data). Second, you can use following command to evaluate your model.
 
 ```bash
-xtuner eval_refcoco lmsys/vicuna-7b-v1.5 \
-  --visual-encoder openai/clip-vit-large-patch14-336 \
+xtuner eval_refcoco $LLM \
+  --visual-encoder $VISUAL_ENCODER \
   --llava $LLAVA_PATH \
-  --prompt-template internlm_chat \
+  --prompt-template $PROMPT_TEMPLATE \
   --data-path $DATA_PATH \
   --work-dir $RESULT_PATH
 ```
