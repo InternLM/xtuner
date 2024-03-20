@@ -169,7 +169,8 @@ class LLaVAModel(BaseModel):
     def forward(self, data, data_samples=None, mode='loss'):
         if 'pixel_values' in data:
             visual_outputs = self.visual_encoder(
-                data['pixel_values'], output_hidden_states=True)
+                data['pixel_values'].to(self.visual_encoder.dtype),
+                output_hidden_states=True)
             pixel_values = self.projector(
                 visual_outputs.hidden_states[self.visual_select_layer][:, 1:])
             data['pixel_values'] = pixel_values
