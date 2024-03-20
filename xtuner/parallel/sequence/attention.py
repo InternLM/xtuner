@@ -83,7 +83,10 @@ def sequence_parallel_wrapper(local_attn):
     def sequence_parallel_attn(query_states, key_states, value_states, *args,
                                **kwargs):
         training = kwargs.pop('training', True)
-        if get_sequence_parallel_world_size() > 1 and training:
+        enable_sequence_parallel = (
+            dist.is_initialized() and get_sequence_parallel_world_size() > 1
+            and training)
+        if enable_sequence_parallel:
             query_states, key_states, value_states = \
                 pre_process_for_sequence_parallel_attn(
                     query_states, key_states, value_states)
@@ -91,7 +94,7 @@ def sequence_parallel_wrapper(local_attn):
         out = local_attn(query_states, key_states, value_states, *args,
                          **kwargs)
 
-        if get_sequence_parallel_world_size() > 1 and training:
+        if enable_sequence_parallel:
             out = post_process_for_sequence_parallel_attn(out).contiguous()
 
         return out
