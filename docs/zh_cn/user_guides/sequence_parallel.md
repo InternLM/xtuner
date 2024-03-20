@@ -20,18 +20,18 @@ XTuner 中的序列并行设计思路参考了 DeepSpeed 的工作 [DeepSpeed Ul
 
 另外，现有的序列并行方法普遍存在较多的代码侵入式修改，易用性和维护性都要大打折扣。同时也不满足 XTuner 基于 transformers 算法库或 Huggingface Hub 上的开源模型直接进行训练的要求。
 
-为了解决上述长序列训练带来的问题，XTuner 采用了一种简单、易用且高效的序列并行算法。由于 Transformer 结构较为规整，除 attention 计算外，其他计算过程中 token 之间不会互相影响（即每个 token 的计算是独立的），这一条件为序列并行提供了有利条件。下图展示了序列并行的核心设计。设由 P 个 GPUs 共同计算一个长度为 N 的长序列，在 Attention 计算的第一阶段，长度为 N / P 的子序列会通过线性层投影为 Query、Key、Value。接下来， QKV Tensor 会在参与序列并行计算的多个 GPUs 之间通过高度优化的 all-to-all 通信算子汇聚，得到序列长度为 N ，但更少注意力头的子序列。注意力计算后，通过另一个 all-to-all 通信算子将其转换为长度为 N / P 的子序列，进行后续计算。
+<div align="center">
+  <img src="https://github.com/InternLM/xtuner/assets/41630003/0b791458-40bd-4dc6-aaf5-ff891fcc112a" width="1000"/>
+  <br /><br />
+</div>
+
+为了解决上述长序列训练带来的问题，XTuner 采用了一种简单、易用且高效的序列并行算法。由于 Transformer 结构较为规整，除 attention 计算外，其他计算过程中 token 之间不会互相影响（即每个 token 的计算是独立的），这一条件为序列并行提供了有利条件。上图展示了序列并行的核心设计。设由 P 个 GPUs 共同计算一个长度为 N 的长序列，在 Attention 计算的第一阶段，长度为 N / P 的子序列会通过线性层投影为 Query、Key、Value。接下来， QKV Tensor 会在参与序列并行计算的多个 GPUs 之间通过高度优化的 all-to-all 通信算子汇聚，得到序列长度为 N ，但更少注意力头的子序列。注意力计算后，通过另一个 all-to-all 通信算子将其转换为长度为 N / P 的子序列，进行后续计算。
 
 总体而言，XTuner 的序列并行算法具有以下关键特性：
 
 * 支持全量训练**超过百万个token**的序列
 * 支持百 B 级模型训练：XTuner 的序列并行不仅支持长序列训练，还可结合 zero3 显存优化策略训练大尺寸模型
 * 完全通用的序列并行 **API 抽象**
-
-<div align="center">
-  <img src="https://github.com/InternLM/xtuner/assets/41630003/0b791458-40bd-4dc6-aaf5-ff891fcc112a" width="1000"/>
-  <br /><br />
-</div>
 
 ## 使用 XTuner 进行序列并行训练
 
