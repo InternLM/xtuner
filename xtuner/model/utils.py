@@ -307,3 +307,14 @@ def guess_load_checkpoint(pth_model):
     else:
         raise FileNotFoundError(f'Cannot find {pth_model}')
     return state_dict
+
+
+def truncate_dict(tensor_dict, max_length):
+    truncated_dict = {}
+    for key, value in tensor_dict.items():
+        if isinstance(value, torch.Tensor) and value is not None:
+            truncated_value = value[:, :max_length]
+            truncated_dict[key] = truncated_value
+        else:
+            truncated_dict[key] = value
+    return truncated_dict
