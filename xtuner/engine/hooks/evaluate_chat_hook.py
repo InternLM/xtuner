@@ -129,7 +129,8 @@ class EvaluateChatHook(Hook):
                     input_ids.append(IMAGE_TOKEN_INDEX)
             input_ids = torch.tensor(input_ids).to(device)
             visual_outputs = model.visual_encoder(
-                image.unsqueeze(0), output_hidden_states=True)
+                image.unsqueeze(0).to(model.visual_encoder.dtype),
+                output_hidden_states=True)
             pixel_values = model.projector(
                 visual_outputs.hidden_states[model.visual_select_layer][:, 1:])
 
