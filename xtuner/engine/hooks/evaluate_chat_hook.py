@@ -70,6 +70,7 @@ class EvaluateChatHook(Hook):
         if image_processor is not None:
             self.image_processor = BUILDER.build(image_processor)
         self.stop_criteria = StoppingCriteriaList()
+
         # default generation config
         default_generation_kwargs = dict(
             max_new_tokens=max_new_tokens,
@@ -83,6 +84,7 @@ class EvaluateChatHook(Hook):
             self.tokenizer.eos_token_id)
         default_generation_kwargs.update(generation_kwargs)
         self.gen_config = GenerationConfig(**default_generation_kwargs)
+
         self.stop_criteria = StoppingCriteriaList()
         for word in stop_words:
             self.stop_criteria.append(
