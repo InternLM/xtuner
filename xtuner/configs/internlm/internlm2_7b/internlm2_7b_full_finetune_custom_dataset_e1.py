@@ -42,6 +42,7 @@ from xtuner.utils import PROMPT_TEMPLATE
 # Model
 pretrained_model_name_or_path = 'internlm/internlm2-7b'
 use_varlen_attn = True
+sequence_parallel_size = 1
 
 # Data
 data_files = ['/path/to/json/file.json']

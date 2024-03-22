@@ -1,18 +1,23 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import math
 from collections import OrderedDict
 from contextlib import nullcontext
 
+import torch
 from mmengine import print_log
 from mmengine.config import Config, ConfigDict
 from mmengine.model import BaseModel
 from mmengine.runner import load_checkpoint
 from peft import get_peft_model, prepare_model_for_kbit_training
 from torch import nn
-from transformers import PreTrainedModel, PreTrainedTokenizer
+from transformers import AutoConfig, PreTrainedModel, PreTrainedTokenizer
 from transformers.integrations import is_deepspeed_zero3_enabled
 
+from xtuner.parallel.sequence import (get_sequence_parallel_world_size,
+                                      reduce_sequence_parallel_loss)
 from xtuner.registry import BUILDER
 from .modules import dispatch_modules
+from .modules.dispatch import SUPPORT_FLASH2
 from .utils import (LoadWoInit, find_all_linear_names,
                     get_peft_model_state_dict, make_inputs_require_grad,
                     traverse_dict)
@@ -69,10 +74,12 @@ class SupervisedFinetune(BaseModel):
                  peft_model=None,
                  use_activation_checkpointing=True,
                  use_varlen_attn=False,
-                 tokenizer=None):
+                 tokenizer=None,
+                 max_position_embeddings=None):
         super().__init__()
         with LoadWoInit():
-            self.llm = self._build_from_cfg_or_module(llm)
+            self.llm = self._build_from_cfg_or_module(llm,
+                                                      max_position_embeddings)
 
         if tokenizer is not None:
             if isinstance(tokenizer, dict):
@@ -137,11 +144,48 @@ class SupervisedFinetune(BaseModel):
     def init_weights(self):
         pass
 
-    def _build_from_cfg_or_module(self, cfg_or_mod):
+    def _prepare_for_long_context_training(self, cfg, max_position_embeddings):
+        pretrained_model_name_or_path = cfg.pretrained_model_name_or_path
+        config = AutoConfig.from_pretrained(
+            pretrained_model_name_or_path, trust_remote_code=True)
+
+        orig_rope_scaling = getattr(config, 'rope_scaling', None)
+        if orig_rope_scaling is None:
+            orig_rope_scaling = {'factor': 1}
+
+        orig_rope_scaling_factor = orig_rope_scaling[
+            'factor'] if 'factor' in orig_rope_scaling.keys() else 1
+        orig_ctx_len = getattr(config, 'max_position_embeddings', None)
+        if orig_ctx_len:
+            orig_ctx_len *= orig_rope_scaling_factor
+            if max_position_embeddings > orig_ctx_len:
+                scaling_factor = float(
+                    math.ceil(max_position_embeddings / orig_ctx_len))
+                config.rope_scaling = {
+                    'type': 'linear',
+                    'factor': scaling_factor
+                }
+
+        # hardcode for internlm2
+        config.attn_implementation = 'flash_attention_2'
+
+        cfg.config = config
+        return cfg
+
+    def _build_from_cfg_or_module(self,
+                                  cfg_or_mod,
+                                  max_position_embeddings=None):
         if isinstance(cfg_or_mod, nn.Module):
             return cfg_or_mod
         elif isinstance(cfg_or_mod, dict):
             traverse_dict(cfg_or_mod)
+            if SUPPORT_FLASH2:
+                cfg_or_mod.torch_dtype = torch.bfloat16 \
+                    if torch.cuda.is_bf16_supported() else torch.float16
+                cfg_or_mod.attn_implementation = 'flash_attention_2'
+            if max_position_embeddings is not None:
+                cfg_or_mod = self._prepare_for_long_context_training(
+                    cfg_or_mod, max_position_embeddings)
             return BUILDER.build(cfg_or_mod)
         else:
             raise NotImplementedError
@@ -168,10 +212,20 @@ class SupervisedFinetune(BaseModel):
         logits_dict = [{'logits': logits} for logits in outputs.logits]
         return logits_dict
 
-    def compute_loss(self, data, data_samples=None):
+    def compute_sequence_parallel_loss(self, data):
         outputs = self.llm(**data)
-        loss_dict = {'loss': outputs.loss}
-        return loss_dict
+        labels = data['labels']
+        num_tokens = (labels != -100).sum()
+        loss = reduce_sequence_parallel_loss(outputs.loss, num_tokens)
+        return {'loss': loss}
+
+    def compute_loss(self, data, data_samples=None):
+        if get_sequence_parallel_world_size() > 1:
+            return self.compute_sequence_parallel_loss(data)
+        else:
+            outputs = self.llm(**data)
+            loss_dict = {'loss': outputs.loss}
+            return loss_dict
 
     def state_dict(self, *args, **kwargs):
         state_dict = super().state_dict(*args, **kwargs)

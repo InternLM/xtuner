@@ -1,13 +1,16 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import os.path as osp
+from contextlib import nullcontext
 from typing import List, Optional
 
 import torch
 from mmengine import print_log
 from mmengine.utils.misc import get_object_from_string
-from peft import PeftType
+from peft import (LoraConfig, PeftModel, PeftType, get_peft_model,
+                  prepare_model_for_kbit_training)
 from torch import nn
-from transformers import PreTrainedModel
+from transformers import PreTrainedModel, PreTrainedTokenizer
+from transformers.integrations import is_deepspeed_zero3_enabled
 
 from xtuner.utils import IGNORE_INDEX, IMAGE_TOKEN_INDEX
 
@@ -48,6 +51,34 @@ def find_all_linear_names(model):
     if 'output_layer' in lora_module_names:  # needed for 16-bit
         lora_module_names.remove('output_layer')
     return list(lora_module_names)
+
+
+def collect_linear_suffix_names(model: torch.nn.Module,
+                                exclude: list[str] = []) -> list[str]:
+    """Collect suffix names of nn.Linear modules from a PyTorch model.
+
+    Args:
+        model: The PyTorch model.
+        exclude: A list of keys to be excluded from the collected
+            suffix names. Default: ['lm_head', 'output_layer'].
+
+    Returns:
+        A list of collected suffix names after excluding specified keys.
+    """
+    suffix_names = set()
+
+    # Iterate through all named modules in the model
+    for name, module in model.named_modules():
+        # Check if the module is an instance of nn.Linear
+        if isinstance(module, torch.nn.Linear):
+            names = name.split('.')
+            suffix_names.add(names[0] if len(names) == 1 else names[-1])
+
+    # Remove exclude_keys from the collected suffix_names
+    for key in exclude:
+        suffix_names.remove(key)
+
+    return list(suffix_names)
 
 
 class LoadWoInit:
@@ -286,6 +317,73 @@ def make_inputs_require_grad(module, input, output):
     output.requires_grad_(True)
 
 
+def prepare_for_llm_lora(model: PreTrainedModel,
+                         lora_config: LoraConfig,
+                         gradient_checkpointing: bool = True) -> PeftModel:
+    model = prepare_model_for_kbit_training(model, gradient_checkpointing)
+    if lora_config.target_modules is None:
+        modules = collect_linear_suffix_names(model, exclude=['output'])
+        lora_config.target_modules = modules
+
+    model = get_peft_model(model, lora_config)
+    return model
+
+
+def prepare_for_vision_lora(model: PreTrainedModel,
+                            lora_config: LoraConfig,
+                            gradient_checkpointing: bool = True) -> PeftModel:
+
+    if lora_config.target_modules is None:
+        modules = collect_linear_suffix_names(model)
+        lora_config.target_modules = modules
+
+    model = get_peft_model(model, lora_config)
+    return model
+
+
+def smart_tokenizer_and_embedding_resize(
+    tokenizer: PreTrainedTokenizer,
+    model: PreTrainedModel,
+):
+    """Resize embedding."""
+    if is_deepspeed_zero3_enabled():
+        import deepspeed
+
+        params = [model.get_input_embeddings().weight]
+        if model.get_output_embeddings(
+        ) is not None and not model.config.tie_word_embeddings:
+            params.append(model.get_output_embeddings().weight)
+
+        context_maybe_zero3 = deepspeed.zero.GatheredParameters(
+            params, modifier_rank=0)
+    else:
+        context_maybe_zero3 = nullcontext()
+
+    with context_maybe_zero3:
+        current_embedding_size = model.get_input_embeddings().weight.size(0)
+
+    if len(tokenizer) > current_embedding_size:
+        assert isinstance(model.get_output_embeddings(), nn.Linear)
+
+        model.resize_token_embeddings(len(tokenizer), pad_to_multiple_of=64)
+        with context_maybe_zero3:
+            num_new_tokens = len(tokenizer) - current_embedding_size
+            input_embeddings = model.get_input_embeddings().weight.data
+            output_embeddings = model.get_output_embeddings().weight.data
+
+            input_embeddings_avg = input_embeddings[:-num_new_tokens].mean(
+                dim=0, keepdim=True)
+            output_embeddings_avg = output_embeddings[:-num_new_tokens].mean(
+                dim=0, keepdim=True)
+
+            input_embeddings[-num_new_tokens:] = input_embeddings_avg
+            output_embeddings[-num_new_tokens:] = output_embeddings_avg
+
+        print_log(
+            f'Resized token embeddings from {current_embedding_size} to '
+            f'{len(tokenizer)}.', 'current')
+
+
 def guess_load_checkpoint(pth_model):
     if osp.isfile(pth_model):
         state_dict = torch.load(pth_model, map_location='cpu')
@@ -307,3 +405,19 @@ def guess_load_checkpoint(pth_model):
     else:
         raise FileNotFoundError(f'Cannot find {pth_model}')
     return state_dict
+
+
+def enable_hf_model_gradient_checkpointing(model: PreTrainedModel) -> None:
+    # For backward compatibility
+    if hasattr(model, 'enable_input_require_grads'):
+        model.enable_input_require_grads()
+    else:
+
+        def make_inputs_require_grad(module, input, output):
+            output.requires_grad_(True)
+
+        model.get_input_embeddings().register_forward_hook(
+            make_inputs_require_grad)
+
+    # enable gradient checkpointing for memory efficiency
+    model.gradient_checkpointing_enable()
