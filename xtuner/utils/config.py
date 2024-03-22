@@ -124,7 +124,7 @@ def build_from_cfg_or_obj(cfg_or_obj: Union[dict, OBJ_T],
             raise TypeError(
                 f'Expect an object of {accept}, but there is an object of '
                 f'{type(obj)}.')
-        return BUILDER.build(cfg_or_obj)
+        return obj
 
     else:
         raise TypeError(f'cfg_or_obj must be a dict, or {accept}, but got '

@@ -4,8 +4,9 @@ from collections import OrderedDict
 import torch
 from mmengine.model import BaseModel
 from peft import LoraConfig
+from mmengine import print_log
 from torch import nn
-
+import math
 from xtuner.registry import BUILDER
 from xtuner.utils.config import build_from_cfg_or_obj
 from .modules import ProjectorConfig, ProjectorModel, dispatch_modules
@@ -13,8 +14,8 @@ from .utils import (LoadWoInit, enable_hf_model_gradient_checkpointing,
                     get_peft_model_state_dict, prepare_for_llm_lora,
                     prepare_for_vision_lora,
                     smart_tokenizer_and_embedding_resize)
-
-
+import torch.distributed as dist
+from mmengine import runner
 class HybridFinetune(BaseModel):
 
     def __init__(
@@ -106,46 +107,117 @@ class HybridFinetune(BaseModel):
         """Overload parent class method, only support training."""
 
         if mode == 'loss':
-            return self.compute_loss(data, data_samples)
+            return self.compute_loss(data)
         else:
             raise NotImplementedError(
                 f"{type(self)}'s forward is only supported for use during "
                 'training. If you want to get predictions or chat, please '
                 "directly use `llm`'s forward.")
 
-    def compute_loss(self, data, data_samples=None):
+    
+    
+    def _get_vision_embeds_and_ranges(self, data):
+        
+        input_ids = data['input_ids']
+        pixel_values = data['pixel_values']
+        img_rngs = data['image_ranges']
+        img_belongs = data['image_belongs']
+        
+        bs, tokens = input_ids.shape
+        
+        img_embeds = []
+        ranges_in_flat_batch = []
+
+        if pixel_values is not None:
+            assert isinstance(pixel_values, torch.Tensor)
+            assert len(img_rngs) == len(img_belongs) == pixel_values.size(0)
+                
+            batch_total_imgs = len(img_rngs)
+            
+            visual_outputs = self.visual_encoder(
+                pixel_values, output_hidden_states=True)
+            features = self.projector(
+                visual_outputs.hidden_states[self.visual_select_layer][:, 1:])
+            batch_total_imgs, actual_img_tokens, _ = features.shape
+            
+            
+            for i in range(batch_total_imgs):
+                img_start, img_end = img_rngs[i]
+                expect_img_tokens = img_end - img_start
+                img_emb = features[i]
+                img_bs_ind = img_belongs[i]
+                
+                if actual_img_tokens == expect_img_tokens:
+                    img_embeds.append(img_emb)
+                elif not actual_img_tokens == expect_img_tokens and img_start == 0:
+                    img_embeds.append(img_emb[actual_img_tokens-img_end:])
+                elif not actual_img_tokens == expect_img_tokens and img_end == tokens:
+                    img_embeds.append(img_emb[:expect_img_tokens])
+                else:
+                    raise RuntimeError
+                
+                flat_offset = tokens * img_bs_ind
+                
+                left = flat_offset + img_start
+                right = flat_offset + img_end
+                ranges_in_flat_batch.append((left, right))
+                
+        return img_embeds, ranges_in_flat_batch
+                
+    
+    def _insert_mm_embeddings(self, flat_embeds, mm_embeds, ranges):
+        
+        assert len(mm_embeds) == len(ranges)
+        if len(mm_embeds) == 0:
+            return flat_embeds
+        
+        chunk_embeds = []
+        chunk_sizes = []
+        mm_chunk_ids = []
+        
+        cursor = 0
+        _empty_embeds = torch.zeros_like(flat_embeds)
+        for (start, end), emb in zip(ranges, mm_embeds):
+            _empty_embeds[start: end] += emb
+            # if start - cursor > 0:
+            #     chunk_sizes.append(start - cursor)
+            #     cursor = start
+        
+            # mm_chunk_ids.append(len(chunk_sizes))
+            
+            
+            # chunk_embeds.append(emb)
+            # chunk_sizes.append(end - start)
+            # cursor = end
+        
+        # tokens = flat_embeds.size(0)
+        # if sum(chunk_sizes) < tokens :
+        #     chunk_sizes.append(tokens - sum(chunk_sizes))
+        
+        # chunk_embs = list(torch.split(flat_embeds, chunk_sizes))
+        # for ind, mm_emb in zip(mm_chunk_ids, mm_embeds) :
+        #     chunk_embs[ind] = mm_emb
+        
+        # flat_embeds = torch.cat(chunk_embs, dim=0)
+        flat_embeds = flat_embeds * (_empty_embeds == 0)
+         
+        return flat_embeds + _empty_embeds
+    
+    def compute_loss(self, data):
 
         input_ids = data['input_ids']
         labels = data['labels']
         position_ids = data['position_ids']
         attention_mask = data['attention_mask']
-        pixel_values = data['pixel_values']
-        img_rngs = data['image_ranges']
-        img_belong = data['image_belong']
-
+        
         input_embeds = self.llm.get_input_embeddings()(input_ids)
-
-        if pixel_values is not None:
-            visual_outputs = self.visual_encoder(
-                pixel_values, output_hidden_states=True)
-            img_embeds = self.projector(
-                visual_outputs.hidden_states[self.visual_select_layer][:, 1:])
-
-            empty_embs = torch.zeros_like(input_embeds)
-            for emb, rng, b_id in zip(img_embeds, img_rngs, img_belong):
-                left, right = rng
-                if emb.size(0) == right - left:
-                    empty_embs[b_id, left:right, :] = emb
-                elif not emb.size(0) == right - left and left == 0:
-                    empty_embs[b_id, left:right, :] = emb[-right:]
-                elif not emb.size(
-                        0) == right - left and right == empty_embs.size(1):
-                    empty_embs[b_id, left:right, :] = emb[:right - left]
-                else:
-                    breakpoint()
-
-            non_img_mask = (empty_embs == 0)
-            input_embeds = input_embeds * non_img_mask + empty_embs
+        
+        bs, tokens, dim = input_embeds.shape
+        flat_embeds = input_embeds.flatten(0,1)
+        
+        img_embs, flat_bs_img_rngs = self._get_vision_embeds_and_ranges(data)
+        flat_embeds = self._insert_mm_embeddings(flat_embeds, img_embs, flat_bs_img_rngs)
+        input_embeds = flat_embeds.reshape(bs, tokens, dim)
 
         outputs = self.llm(
             input_ids=None,
@@ -153,7 +225,7 @@ class HybridFinetune(BaseModel):
             attention_mask=attention_mask,
             inputs_embeds=input_embeds,
             labels=labels)
-
+        
         loss_dict = {'loss': outputs.loss}
         return loss_dict
 
