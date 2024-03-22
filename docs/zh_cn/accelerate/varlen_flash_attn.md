@@ -16,25 +16,25 @@
 > \[!IMPORTANT\]
 > 使用变长注意力需要首先安装 [flash attn](https://github.com/Dao-AILab/flash-attention) （参考 [flash attn 安装](https://github.com/Dao-AILab/flash-attention?tab=readme-ov-file#installation-and-features) ）
 
-|   模型    | Variable Length Flash Attention |
-| :-------: | :-----------------------------: |
-| baichuan  |  :negative_squared_cross_mark:  |
-|  chatglm  |  :negative_squared_cross_mark:  |
-| deepseek  |       :white_check_mark:        |
-|   gemma   |  :negative_squared_cross_mark:  |
-| internlm  |       :white_check_mark:        |
-|   llama   |       :white_check_mark:        |
-|  mistral  |       :white_check_mark:        |
-|   qwen    |       :white_check_mark:        |
-| starcoder |  :negative_squared_cross_mark:  |
-|    yi     |       :white_check_mark:        |
-|  zephyr   |       :white_check_mark:        |
+|     模型     | Variable Length Flash Attention |
+| :----------: | :-----------------------------: |
+| baichuan 1/2 |               :x:               |
+| chatglm 2/3  |               :x:               |
+|   deepseek   |       :white_check_mark:        |
+|    gemma     |               :x:               |
+| internlm 1/2 |       :white_check_mark:        |
+|   llama 2    |       :white_check_mark:        |
+|   mistral    |       :white_check_mark:        |
+|  qwen 1/1.5  |               :x:               |
+|  starcoder   |               :x:               |
+|      yi      |       :white_check_mark:        |
+|    zephyr    |       :white_check_mark:        |
 
 ## 在 XTuner 中使用变长注意力机制
 
 ### Step 1, 安装 flash_attn
 
-XTuner 中实现的变长注意力需要依赖 Flash Attention 2，可通过以下命令安装：
+XTuner 中实现的变长注意力需要依赖 Flash Attention 2，可通过以下命令安装（需要 cuda）：
 
 ```bash
 MAX_JOBS=4 pip install flash-attn --no-build-isolation
