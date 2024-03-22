@@ -33,6 +33,22 @@ XTuner 中的序列并行设计思路参考了 DeepSpeed 的工作 [DeepSpeed Ul
 - 支持百 B 级模型训练：XTuner 的序列并行不仅支持长序列训练，还可结合 zero3 显存优化策略训练大尺寸模型
 - 完全通用的序列并行 **API 抽象**
 
+## XTuner 序列并行支持情况
+
+|     模型     | Variable Length Flash Attention |
+| :----------: | :-----------------------------: |
+| baichuan 1/2 |               :x:               |
+| chatglm 2/3  |               :x:               |
+|   deepseek   |       :white_check_mark:        |
+|    gemma     |               :x:               |
+|  internlm 2  |       :white_check_mark:        |
+|   llama 2    |       :white_check_mark:        |
+|   mistral    |               :x:               |
+|  qwen 1/1.5  |               :x:               |
+|  starcoder   |               :x:               |
+|      yi      |       :white_check_mark:        |
+|    zephyr    |       :white_check_mark:        |
+
 ## 使用 XTuner 进行序列并行训练
 
 ### Step 1 修改 config 文件
