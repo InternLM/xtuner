@@ -4,8 +4,10 @@ from typing import Iterator, Optional, Sized
 
 import numpy as np
 from mmengine import print_log
-from mmengine.dist import get_dist_info
 from torch.utils.data import Sampler
+
+from xtuner.parallel.sequence import (get_data_parallel_rank,
+                                      get_data_parallel_world_size)
 
 
 class InternRepoSampler(Sampler):
@@ -17,7 +19,8 @@ class InternRepoSampler(Sampler):
         if seed is not None and seed != 1024:
             warnings.warn('For alignment accuracy, seed in InternRepoSampler'
                           'must be set to 1024.')
-        rank, world_size = get_dist_info()
+        world_size = get_data_parallel_world_size()
+        rank = get_data_parallel_rank()
         self.rank = rank
         self.world_size = world_size
 
