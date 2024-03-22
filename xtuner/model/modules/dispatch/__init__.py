@@ -123,7 +123,8 @@ def dispatch_internlm2_attn_forward(model, use_varlen_attn):
 
     print_log(NO_ATTN_WEIGHTS_MSG, 'current', logging.WARNING)
     for module in model.modules():
-        if type(module).__name__ == 'InternLM2Attention':
+        if type(module).__name__ in ('InternLM2Attention',
+                                     'InternLM2FlashAttention2'):
             if use_varlen_attn:
                 print_log('dispatch internlm2 varlen attn forward', 'current')
                 module.forward = types.MethodType(
@@ -188,11 +189,12 @@ def replace_internlm2_rote(model):
         for name, child in module.named_children():
             if type(child).__name__ in (
                     'InternLM2RotaryEmbedding',
+                    'InternLM2LinearScalingRotaryEmbedding',
                     'InternLM2DynamicNTKScalingRotaryEmbedding'):
                 print_log('replace internlm2 rope', 'current')
                 dim_model = child.inv_freq.shape[0] * 2
                 child_new = InternLM2RotaryEmbedding(
-                    dim_model, child.max_seq_len_cached, rotary_base).to(
+                    dim_model, child.max_position_embeddings, rotary_base).to(
                         device=child.inv_freq.device,
                         dtype=child.inv_freq.dtype)
                 setattr(module, name, child_new)
@@ -301,12 +303,12 @@ def dispatch_modules(model, use_varlen_attn=False):
         dispatch_internlm2_attn_forward(model, use_varlen_attn)
         if USE_TRITON_KERNEL:
             dispatch_internlm2_rmsnorm_forward(model)
-        replace_internlm2_rote(model)
+        # replace_internlm2_rote(model)
     elif 'internlm' in model_name:
         dispatch_internlm_attn_forward(model, use_varlen_attn)
         if USE_TRITON_KERNEL:
             dispatch_internlm_rmsnorm_forward(model)
-        replace_internlm_rote(model)
+        # replace_internlm_rote(model)
     elif 'llama' in model_name:
         dispatch_llama_attn_forward(model, use_varlen_attn)
         if USE_TRITON_KERNEL:
