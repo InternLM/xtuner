@@ -73,7 +73,20 @@ def oasst1_map_fn(example):
 
 通过代码可以看到，`oasst1_map_fn` 对原数据中的 `text` 字段进行处理，进而构造了一个 `conversation` 字段，以此确保了后续数据处理流程的统一。
 
-XTuner 内置了众多 map_fn （[这里](https://github.com/InternLM/xtuner/tree/main/xtuner/dataset/map_fns/dataset_map_fns)），可以满足大多数开源数据集的需要；但是，如果部分开源数据集依赖特殊的 map_fn，则需要用户自行开发 map_fn，实现字段格式的对齐。
+XTuner 内置了众多 map_fn （[这里](https://github.com/InternLM/xtuner/tree/main/xtuner/dataset/map_fns/dataset_map_fns)），可以满足大多数开源数据集的需要。此处我们罗列一些常用 map_fn 及其对应的原始字段和参考数据集：
+
+| map_fn                                                                                                                          | 原始字段                                            | 参考数据集                                                                                                         |
+| :------------------------------------------------------------------------------------------------------------------------------ | :-------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| [alpaca_map_fn](https://github.com/InternLM/xtuner/blob/main/xtuner/dataset/map_fns/dataset_map_fns/alpaca_map_fn.py)           | \['instruction',  'input', 'output', ...\]          | [tatsu-lab/alpaca](https://huggingface.co/datasets/tatsu-lab/alpaca)                                               |
+| [alpaca_zh_map_fn](https://github.com/InternLM/xtuner/blob/main/xtuner/dataset/map_fns/dataset_map_fns/alpaca_zh_map_fn.py)     | \['instruction_zh',  'input_zh', 'output_zh', ...\] | [silk-road/alpaca-data-gpt4-chinese](https://huggingface.co/datasets/silk-road/alpaca-data-gpt4-chinese)           |
+| [oasst1_map_fn](https://github.com/InternLM/xtuner/blob/main/xtuner/dataset/map_fns/dataset_map_fns/oasst1_map_fn.py)           | \['text'\]                                          | [timdettmers/openassistant-guanaco](https://huggingface.co/datasets/timdettmers/openassistant-guanaco)             |
+| [openai_map_fn](https://github.com/InternLM/xtuner/blob/main/xtuner/dataset/map_fns/dataset_map_fns/openai_map_fn.py)           | \['messages',  ...\]                                | [DavidLanz/fine_tuning_datraset_4_openai](https://huggingface.co/datasets/DavidLanz/fine_tuning_datraset_4_openai) |
+| [code_alpaca_map_fn](https://github.com/InternLM/xtuner/blob/main/xtuner/dataset/map_fns/dataset_map_fns/code_alpaca_map_fn.py) | \['prompt',  'completion'\]                         | [HuggingFaceH4/CodeAlpaca_20K](https://huggingface.co/datasets/HuggingFaceH4/CodeAlpaca_20K)                       |
+| [medical_map_fn](https://github.com/InternLM/xtuner/blob/main/xtuner/dataset/map_fns/dataset_map_fns/medical_map_fn.py)         | \['instruction',  'input', 'output', ...\]          | [shibing624/medical](https://huggingface.co/datasets/shibing624/medical)                                           |
+| [tiny_codes_map_fn](https://github.com/InternLM/xtuner/blob/main/xtuner/dataset/map_fns/dataset_map_fns/tiny_codes_map_fn.py)   | \['prompt',  'response', ...\]                      | [nampdn-ai/tiny-codes](https://huggingface.co/datasets/nampdn-ai/tiny-codes)                                       |
+| [default_map_fn](https://github.com/InternLM/xtuner/blob/main/xtuner/dataset/map_fns/dataset_map_fns/default_map_fn.py)         | \['input',  'output'\]                              | -                                                                                                                  |
+
+值得注意的是，如果部分开源数据集依赖特殊的 map_fn，则需要用户自行参照以提供的 map_fn 进行自定义开发，实现字段格式的对齐。
 
 ## 训练
 
@@ -85,11 +98,13 @@ XTuner 内置了众多 map_fn （[这里](https://github.com/InternLM/xtuner/tre
   xtuner train ./config.py --deepspeed deepspeed_zero2
   ```
 
+````
+
 - 单机多卡
 
   ```shell
   NPROC_PER_NODE=${GPU_NUM} xtuner train ./config.py --deepspeed deepspeed_zero2
-  ```
+````
 
 - 多机多卡（以 2 * 8 GPUs 为例）
 
