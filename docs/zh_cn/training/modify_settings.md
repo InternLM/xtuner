@@ -322,7 +322,23 @@ XTuner 内置的配置文件以 QLoRA 微调为主，但并不意味着 XTuner �
 ### 迭代次数
 
 - 调整迭代次数？
-  - 修改 `max_epochs` 字段
+  - 修改 `max_epochs` 参数。
+
+### 保存间隔
+
+- 调整保存间隔？
+  - 修改 `save_steps` 参数。
+- 调整最大保存 checkpoint 个数？
+  - 修改 `save_total_limit` 参数。
+
+### 训练间对话评测
+
+- 调整对话评测间隔？
+  - 修改 `evaluation_freq` 参数。
+- 调整对话评测的 system 字段？
+  - 修改 `SYSTEM` 参数。
+- 调整对话评测的测试指令？
+  - 修改 `evaluation_inputs` 参数。
 
 ### GPU 数
 
