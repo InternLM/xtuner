@@ -63,14 +63,15 @@ class _PackDataset(torch.utils.data.Dataset):
         filter_rngs = self._flat_shfl_acc_img_rngs[left:right]
 
         inner_rngs = []
-        for rng in filter_rngs:
+        inner_urls = []
+        for url, rng in zip(filter_urls, filter_rngs):
             inner_left = max(begin, rng[0]) - begin
             inner_right = min(end, rng[1]) - begin
 
             if inner_right - inner_left > 0:
                 inner_rngs.append([inner_left, inner_right])
-
-        return filter_urls, inner_rngs
+                inner_urls.append(url)
+        return inner_urls, inner_rngs
 
     def _pack_ids_and_labels_in_range(self, begin, end):
 
@@ -98,6 +99,7 @@ class _PackDataset(torch.utils.data.Dataset):
             trunc_ids.extend(ori_input_ids[inner_l:inner_r])
             trunc_labels.extend(ori_labels[inner_l:inner_r])
 
+        cumulative_len.append(self.max_length)
         return trunc_ids, trunc_labels, cumulative_len, position_ids
 
     def __len__(self):

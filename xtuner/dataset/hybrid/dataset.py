@@ -257,8 +257,8 @@ class HybridDataset(torch.utils.data.Dataset):
 
     def filter_non_labels_data(self, dataset):
 
-        filter_fn = lambda item: any(item['labels'][i] >= 0 for i in range(
-            self.max_length))  # noqa: E501, E731
+        def filter_fn(item):
+            return any(item['labels'][i] >= 0 for i in range(self.max_length))
 
         ori_samples = len(dataset)
         with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
@@ -281,9 +281,12 @@ class HybridDataset(torch.utils.data.Dataset):
 
     def analysis_image_samples(self, dataset):
 
-        img_sample_counter = lambda item: len(item['image_urls']
-                                              ) > 0  # noqa: E501, E731
-        img_counter = lambda item: len(item['image_urls'])  # noqa: E501, E731
+        def img_sample_counter(item):
+            return len(item['image_urls']) > 0
+
+        def img_counter(item):
+            return len(item['image_urls'])
+
 
         with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
             images = list(
@@ -307,9 +310,11 @@ class HybridDataset(torch.utils.data.Dataset):
 
     def analysis_tokens_labels(self, dataset):
 
-        label_counter = lambda item: sum([1 for i in item['labels']
-                                          if i >= 0])  # noqa: E501, E731
-        token_counter = lambda item: len(item['input_ids'])
+        def label_counter(item):
+            return sum([1 for i in item['labels'] if i >= 0])
+
+        def token_counter(item):
+            return len(item['input_ids'])
 
         with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
             tokens = list(
@@ -398,10 +403,8 @@ if __name__ == '__main__':
         assistant='{assistant}<|im_end|>\n',
         stop_words=['<|im_end|>'],
         image_token='<image>',
-        function_call=
-        '{assistant}<|action_start|><|plugin|>\n{function_call}<|action_end|><|im_end|>\n',  # noqa: E501
-        function_result=
-        '<|im_start|>environment name=<|plugin|>\n{function_result}<|im_end|>\n<|im_start|>assistant\n',  # noqa: E501
+        function_call='{assistant}<|action_start|><|plugin|>\n{function_call}<|action_end|><|im_end|>\n',  # noqa: E501, E251
+        function_result='<|im_start|>environment name=<|plugin|>\n{function_result}<|im_end|>\n<|im_start|>assistant\n',  # noqa: E501, E251
         functions='<|im_start|>system name=<|plugin|>\n{functions}<|im_end|>\n'
     )
 
@@ -410,8 +413,9 @@ if __name__ == '__main__':
         trust_remote_code=True,
     )
 
-    from xtuner.dataset.hybrid.mappings import (
-        insert_img_pad_tokens, llava_to_openai, openai_to_raw_training)
+    from xtuner.dataset.hybrid.mappings import (insert_img_pad_tokens,
+                                                llava_to_openai,
+                                                openai_to_raw_training)
 
     data_dir = './llava_data/LLaVA-Instruct-150K/'
     image_dir = './llava_data/llava_images/'
@@ -421,14 +425,16 @@ if __name__ == '__main__':
         'internlm/internlm2-chat-1_8b',
         chat_template,
         sample_ratio=1,
-        max_length=32*1024,
+        max_length=32 * 1024,
         data_dir=data_dir,
         data_files=data_files,
         image_dir=image_dir,
         image_processor=processor,
         pack_to_max_length=True,
         mappings=[
-            llava_to_openai, openai_to_raw_training, insert_img_pad_tokens,
+            llava_to_openai,
+            openai_to_raw_training,
+            insert_img_pad_tokens,
         ],
         num_workers=4)
 
@@ -439,13 +445,15 @@ if __name__ == '__main__':
         'internlm/internlm2-chat-1_8b',
         chat_template,
         sample_ratio=1,
-        max_length=32*1024,
+        max_length=32 * 1024,
         data_cached='cached_llava',
         image_dir=image_dir,
         image_processor=processor,
         pack_to_max_length=True,
         mappings=[
-            llava_to_openai, openai_to_raw_training, insert_img_pad_tokens,
+            llava_to_openai,
+            openai_to_raw_training,
+            insert_img_pad_tokens,
         ],
         num_workers=4)
     print(dataset[0])

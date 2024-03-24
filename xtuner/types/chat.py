@@ -101,8 +101,7 @@ class CodeInterpreterCallMsg(BaseModel):
     def apply_chat_template(self, chat_template: HybridChatTemplate) -> str:
 
         return chat_template.decorate_code_interpreter_call(
-                    self.content, self.conde_interpreter_call)
-
+            self.content, self.conde_interpreter_call)
 
 
 class CodeInterpreterResultMsg(BaseModel):
@@ -112,8 +111,6 @@ class CodeInterpreterResultMsg(BaseModel):
 
     def apply_chat_template(self, chat_template: HybridChatTemplate) -> str:
         return chat_template.decorate_code_internpreter_result(self.content)
-
-
 
 
 class Functions(BaseModel):
@@ -132,7 +129,6 @@ class Functions(BaseModel):
     name: str
     description: Union[str, Dict]
     parameters: Union[str, Dict]
-    
 
 
 class CodeInterpreter(BaseModel):
@@ -150,8 +146,6 @@ class CodeInterpreter(BaseModel):
 
     name: str
     description: Union[str, Dict]
-    
-
 
 
 HybridChatMsgType = Union[ChatMsg, FunctionCallMsg, FunctionResultMsg]

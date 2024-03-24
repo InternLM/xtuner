@@ -18,7 +18,7 @@ def hybrid_collate_fn(instances: Sequence[Dict],
     image_ranges = []
     image_belongs = []
     position_ids = []
-    
+
     for i, data in enumerate(instances):
         input_ids.append(torch.LongTensor(data['input_ids']))
         labels.append(torch.LongTensor(data['labels']))
@@ -27,16 +27,15 @@ def hybrid_collate_fn(instances: Sequence[Dict],
         if 'cumulative_len' in data:
             cumulative_len.append(torch.IntTensor(data['cumulative_len']))
 
-        
         _values = data['pixel_values']
         _ranges = data['image_ranges']
-        
+
         assert len(_values) == len(_ranges)
         for v, rng in zip(_values, _ranges):
             pixel_values.append(v)
             image_ranges.append(rng)
             image_belongs.append(i)
-            
+
     if len(pixel_values) > 0:
         assert len(image_ranges) > 0
         assert len(image_belongs) > 0
@@ -53,7 +52,8 @@ def hybrid_collate_fn(instances: Sequence[Dict],
             input_ids, batch_first=True, padding_value=pad_index)
         labels = pad_sequence(
             labels, batch_first=True, padding_value=IGNORE_INDEX)
-        position_ids = pad_sequence(position_ids, batch_first=True, padding_value=0)
+        position_ids = pad_sequence(
+            position_ids, batch_first=True, padding_value=0)
     else:
         input_ids = torch.stack(input_ids)
         labels = torch.stack(labels)
@@ -73,7 +73,6 @@ def hybrid_collate_fn(instances: Sequence[Dict],
         'image_ranges': image_ranges,
         'image_belongs': image_belongs
     }
-    
 
     if return_hf_format:
         return data_dict
