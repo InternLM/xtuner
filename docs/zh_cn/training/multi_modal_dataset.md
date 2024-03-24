@@ -171,7 +171,7 @@ xtuner chat internlm/internlm2-chat-7b \
 
 注意事项
 
-1. 如果 LLM 为全参数微调，请将 `internlm/internlm2-chat-7b` 替换为转换后所得到的模型，示例中为 `./iter_5198_hf`。
+- `xtuner chat` 的第一个参数为 LLM 路径或 HuggingFace Hub ID。如果训练阶段 LLM 使用的是 LoRA / QLoRA 微调，则此参数请传入基础 LLM，如 `internlm/internlm2-chat-7b`；如果使用的是全参数微调，则此参数请传入转换（`xtuner convert pth_to_hf`）所得到的模型权重，如 `./iter_5198_hf`。
 
 ## 评测
 
@@ -198,6 +198,34 @@ xtuner mmbench internlm/internlm2-chat-7b \
   --work-dir $RESULT_PATH
 ```
 
-其中，`$DATA_PATH` 指上一步骤所下载的某一个 tsv 文件，如 `MMBench_DEV_EN.tsv`。
+注意事项
+
+- `xtuner mmbench` 的第一个参数为 LLM 路径或 HuggingFace Hub ID。如果训练阶段 LLM 使用的是 LoRA / QLoRA 微调，则此参数请传入基础 LLM，如 `internlm/internlm2-chat-7b`；如果使用的是全参数微调，则此参数请传入转换（`xtuner convert pth_to_hf`）所得到的模型权重，如 `./iter_5198_hf`。
+- `$DATA_PATH` 指上一步骤所下载的某一个 tsv 文件，如 `MMBench_DEV_EN.tsv`。
 
 评测完成后，若为开发集则会直接打印出结果；若为测试集，则需将 `mmbench_result.xlsx` 提交至 [MMBench 官方](https://mmbench.opencompass.org.cn/home) 完成评测取得精度结果。
+
+## FAQ
+
+### 如何更换 LLM？
+
+修改 LLM 的方式与训练单模态的大语言模型类似。
+
+1. 修改配置文件中的 `llm_name_or_path` 参数至您期望使用的 LLM，例如 `internlm/internlm2-chat-20b`等。
+2. 修改配置文件中的 `prompt_template` 参数，与您所选择的 LLM 保持对齐。具体选择可参考 [这里](https://github.com/InternLM/xtuner/blob/main/docs/zh_cn/preparation/prompt_template.md)。
+
+### ValueError: `bos_token_id` has to be defined when no `input_ids` are provided.
+
+这是由于老版本 `transformers` 的 LLM `generate` 接口在接受 `inputs_embeds` 输入时，必须传入有效的 `bos_token_id`。结合 PR [transformers#29772](https://github.com/huggingface/transformers/pull/29772) 后可以解决这一问题。
+
+在该 PR 被 merge 前，您可以安装 fork 版本的 transformers 来解决这一问题：
+
+```shell
+pip install git+https://github.com/LZHgrla/transformers.git@lzh/fix_bos_token_id
+```
+
+该 PR 被 merge 后，您可以直接从源码安装主分支 transofmrers 来解决这一问题：
+
+```shell
+pip install git+https://github.com/huggingface/transformers.git
+```
