@@ -231,6 +231,7 @@ log_processor = dict(by_epoch=False)
 
 - 使用其他 LLM 模型？
   - 修改 `pretrained_model_name_or_path`，其将应用至 `model.llm` 和 `tokenizer` 的初始化中。
+  - 修改 `prompt_template` 以适配所选择的 LLM。
 - 使用 ModelScope 模型？
   - 如果使用 ModelScope 的模型，建议首先参考 [文档](../preparation/pretrained_model.md) 将其下载至本地，并修改`pretrained_model_name_or_path`。
 
