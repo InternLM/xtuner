@@ -29,7 +29,7 @@ xtuner train internlm2_chat_7b_qlora_oasst1_e3 --deepspeed deepspeed_zero2
 ```
 
 > \[!IMPORTANT\]
-> QLoRA 算法不能与 DeepSpeed ZeRO3 同时使用。
+> 由于 DeepSpeed ZeRO 策略尚未适配 QLoRA 算法需要用到的 [bitsandbytes](https://github.com/TimDettmers/bitsandbytes) 中的量化模块，因此 QLoRA 算法不能与 DeepSpeed ZeRO3 同时使用。
 
 ## 使用自定义的 DeepSpeed 配置
 
