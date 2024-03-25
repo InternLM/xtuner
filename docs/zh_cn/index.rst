@@ -59,6 +59,7 @@
    training/multi_modal_dataset.md
    training/open_source_dataset.md
    training/accelerate.md
+   training/hyper_parameters.md
 
 .. toctree::
    :maxdepth: 2
