@@ -1,6 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from datasets import load_dataset
-from mmengine.dataset import DefaultSampler
 from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
                             LoggerHook, ParamSchedulerHook)
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR, LinearLR
@@ -14,6 +13,7 @@ from xtuner.dataset.map_fns import (alpaca_map_fn, alpaca_zh_map_fn,
 from xtuner.engine.hooks import ThroughputHook, VarlenAttnArgsToMessageHubHook
 from xtuner.engine.runner import TrainLoop
 from xtuner.model import SupervisedFinetune
+from xtuner.parallel.sequence import SequenceParallelSampler
 from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
 
 #######################################################################
@@ -106,7 +106,7 @@ train_dataloader = dict(
     batch_size=batch_size,
     num_workers=dataloader_num_workers,
     dataset=train_dataset,
-    sampler=dict(type=DefaultSampler, shuffle=True),
+    sampler=dict(type=SequenceParallelSampler, seed=1024),
     collate_fn=dict(type=default_collate_fn, use_varlen_attn=use_varlen_attn))
 
 #######################################################################
