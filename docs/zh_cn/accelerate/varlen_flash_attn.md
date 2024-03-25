@@ -8,7 +8,7 @@
 
 <div align="center">
   <img src="https://github.com/InternLM/InternLM/assets/41630003/7e0c6a02-a970-4bd3-a10b-8341720bf654" width="600"/>
-  <br /><br />
+  <br />变长注意力计算原理（拷贝自 https://github.com/InternLM/InternEvo/blob/develop/doc/usage.md）<br />
 </div>
 
 ## XTuner 变长注意力支持情况
