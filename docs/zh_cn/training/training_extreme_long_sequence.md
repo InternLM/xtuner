@@ -30,7 +30,7 @@ XTuner 中的序列并行设计思路参考了 DeepSpeed 的工作 [DeepSpeed Ul
 总体而言，XTuner 的序列并行算法具有以下关键特性：
 
 - 支持全量训练**超过百万个token**的序列
-- 支持百 B 级模型训练：XTuner 的序列并行不仅支持长序列训练，还可结合 zero3 显存优化策略训练大尺寸模型
+- 支持百 B 级模型训练：XTuner 的序列并行不仅支持长序列训练，还可结合 ZeRO3 显存优化策略训练大尺寸模型
 - 完全通用的序列并行 **API 抽象**
 
 ## XTuner 序列并行支持情况
@@ -48,6 +48,8 @@ XTuner 中的序列并行设计思路参考了 DeepSpeed 的工作 [DeepSpeed Ul
 |  starcoder   |        :x:         |
 |      yi      | :white_check_mark: |
 |    zephyr    | :white_check_mark: |
+
+其他模型的序列并行功能尚在开发中。
 
 ## 使用 XTuner 进行序列并行训练
 
