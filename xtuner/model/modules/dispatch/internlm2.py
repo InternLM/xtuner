@@ -156,6 +156,7 @@ def flash_attn_w_mask(
     return attn_output
 
 
+@sequence_parallel_wrapper
 def flash_attn1_pytorch(query_states, key_states, value_states, *args,
                         **kwargs):
     # hacky: pytorch flash attn need (bs, n_head, seq_len, h_dim)
