@@ -62,8 +62,6 @@ XTuner 中的序列并行设计思路参考了 DeepSpeed 的工作 [DeepSpeed Ul
 > \[!IMPORTANT\]
 > 需要保证所使用的 GPU 总数以及注意力头数 (`num_attention_heads` 而非 `num_key_value_heads`) 可以被 `sequence_parallel_size` 整除。
 
-**注：需要保证所使用的 GPU 总数可以被 `sequence_parallel_size` 整除。**
-
 ```diff
 + from xtuner.parallel.sequence import SequenceParallelSampler
 
@@ -71,6 +69,14 @@ XTuner 中的序列并行设计思路参考了 DeepSpeed 的工作 [DeepSpeed Ul
 + sequence_parallel_size = 4  # take `sequence_parallel_size = 4`` as an example
 
 - accumulative_counts = 1
+# Suppose I aim to employ a training strategy using a batch size per device
+# of 1 with a maximum length of `max_length` on N GPUs.
+# Upon setting the sequence parallelism dimension to `SP`,
+# the accumulative counts have to be adjusted to `SP` times the original value.
+# This modification is essential to assure training equivalence,
+# as the sequence of `max_length` length will be segmented into `SP` parts,
+# with each part being allocated to its respective GPU among the `SP` GPUs
+# for parallelized training.
 + accumulative_counts = 4  # accumulative_counts = accumulative_counts * sequence_parallel_size
 
 #######################################################################
@@ -78,7 +84,7 @@ XTuner 中的序列并行设计思路参考了 DeepSpeed 的工作 [DeepSpeed Ul
 #######################################################################
 train_dataloader = dict(
 -   sampler=dict(type=DefaultSampler, shuffle=True),
-+   sampler=dict(type=SequenceParallelSampler, seed=1024, shuffle=True),
++   sampler=dict(type=SequenceParallelSampler, shuffle=True),
     ...)
 ```
 
