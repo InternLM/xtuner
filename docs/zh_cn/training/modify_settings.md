@@ -35,7 +35,7 @@ from xtuner.utils import PROMPT_TEMPLATE
 #######################################################################
 # Model
 pretrained_model_name_or_path = 'internlm/internlm2-chat-7b'  # 设置 LLM 路径或 HuggingFace Hub ID
-use_varlen_attn = False  # 是否使用 vallen_attention，具体可参考 [TODO]
+use_varlen_attn = False  # 是否使用 varlen_attention，具体可参考 [TODO]
 
 # Data
 data_path = 'timdettmers/openassistant-guanaco'  # 设置 dataset 路径或 HuggingFace Hub ID，以用于 datasets.load_dataset
