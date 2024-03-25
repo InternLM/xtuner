@@ -16,7 +16,7 @@ Flash Attention (Flash Attention 2) 是一种用于加速 Transformer 模型中 
 |      yi      | :white_check_mark: |
 |    zephyr    | :white_check_mark: |
 
-**XTuner 会根据运行环境自动控制 Flash Attention 的使用情况：**
+**XTuner 会根据运行环境自动控制 Flash Attention 的使用情况 (见 [dispatch_modules](https://github.com/InternLM/xtuner/blob/59834032c82d39994c13252aea9b00011d1b2457/xtuner/model/sft.py#L90))：**
 
 | 环境                                                                                                 | Flash Attention 使用情况 |
 | ---------------------------------------------------------------------------------------------------- | ------------------------ |

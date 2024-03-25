@@ -38,4 +38,4 @@ train_dataset = dict(
     ...)
 ```
 
-若不想使用数据拼接，在 config 中将 `pack_to_max_length` 设为 False 即可。同时，XTuner 支持一种数据集采样策略 (`LengthGroupedSampler`)，在不使用数据拼接策略时可以保证在一个 batch 中的数据长度尽可能接近，以减少 Pad 对计算资源的浪费。详细用法请参考 [LengthGroupedSampler 文档 todo](#)
+若不想使用数据拼接，在 config 中将 `pack_to_max_length` 设为 False 即可，此时 config 中的 `max_length` 字段表示单条数据最长的 token 数，整个 batch 会被 pad 成当前 batch 内最长的一条数据的长度。同时，XTuner 支持一种数据集采样策略 (`LengthGroupedSampler`)，在不使用数据拼接策略时可以保证在一个 batch 中的数据长度尽可能接近，以减少 Pad 对计算资源的浪费。详细用法请参考 [LengthGroupedSampler 文档](../training/length_grouped_sampler.md)
