@@ -73,3 +73,5 @@ def pack_dataset(dataset, max_length, use_varlen_attn, shuffle_before_pack,
     )
     return dataset
 ```
+
+由于 Alpaca 数据量较小，因此做了第一处修改将数据集大小扩大了 6 倍，以保证拥有足够的训练 iter 数（保证速度测试的稳定性）。另外，由于 Alpaca 数据集每条数据的长度较短，因此在数据拼接的时候做了第二处修改以保证拥有足够多的数据，足以拼接为 `max_length` 最大长度。
