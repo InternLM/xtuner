@@ -83,7 +83,7 @@ pretrained_model_name_or_path = 'internlm/internlm-7b'
 ```
 
 > \[!IMPORTANT\]
-> 需要注意，当设置 `use_varlen_attn = True` 后，请确保 `batch_size` 被设置为 1，且 `pack_to_max_length` 被设置为 True。
+> 需要注意，当设置 `use_varlen_attn = True` 后，`batch_size = 2, max_length = 2k` 的配置与 `batch_size = 1, max_length = 4k` 的配置训练行为是近似的，因此 XTuner 目前只支持了 `batch_size = 1` 的情况。另外，`use_varlen_attn = True` 时 `pack_to_max_length` 也需设置为 True。
 
 ### Step 5, 开始训练
 
