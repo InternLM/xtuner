@@ -28,12 +28,21 @@ sequence_parallel_size = 8
 alpaca_zh_path = 'silk-road/alpaca-data-gpt4-chinese'
 alpaca_en_path = 'tatsu-lab/alpaca'
 prompt_template = PROMPT_TEMPLATE.llama2_chat
-max_length = 131072
+max_length = 131072  # 128k
 pack_to_max_length = True
 
 # Scheduler & Optimizer
 batch_size = 1  # per_device
-accumulative_counts = 8  # accumulative_counts = 1 * sequence_parallel_size
+# Suppose I aim to employ a training strategy using a batch size per device
+# of 1 with a maximum length of `max_length` on N GPUs.
+# Upon setting the sequence parallelism dimension to `SP`,
+# the accumulative counts have to be adjusted to `SP` times the original value.
+# This modification is essential to assure training equivalence,
+# as the sequence of `max_length` length will be segmented into `SP` parts,
+# with each part being allocated to its respective GPU among the `SP` GPUs
+# for parallelized training.
+# bs = 32 gpus * 1 batch_size_per_device * 8 acc / 8 sequence parallel
+accumulative_counts = 8
 dataloader_num_workers = 4
 max_epochs = 3
 optim_type = AdamW

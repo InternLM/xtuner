@@ -33,7 +33,16 @@ pack_to_max_length = True
 
 # Scheduler & Optimizer
 batch_size = 1  # per_device
-accumulative_counts = 1  # accumulative_counts = 1 * sequence_parallel_size
+# Suppose I aim to employ a training strategy using a batch size per device
+# of 1 with a maximum length of `max_length` on N GPUs.
+# Upon setting the sequence parallelism dimension to `SP`,
+# the accumulative counts have to be adjusted to `SP` times the original value.
+# This modification is essential to assure training equivalence,
+# as the sequence of `max_length` length will be segmented into `SP` parts,
+# with each part being allocated to its respective GPU among the `SP` GPUs
+# for parallelized training.
+# bs = 32 gpus * 1 batch_size_per_device * 1 acc / 1 sequence parallel
+accumulative_counts = 1
 dataloader_num_workers = 4
 max_epochs = 3
 optim_type = AdamW
