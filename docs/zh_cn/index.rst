@@ -60,7 +60,6 @@
    training/open_source_dataset.md
    training/accelerate.md
    training/training_extreme_long_sequence.md
-   training/test.rst
 
 .. toctree::
    :maxdepth: 2
