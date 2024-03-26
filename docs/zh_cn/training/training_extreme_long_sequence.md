@@ -4,6 +4,8 @@
 
 </div>
 
+![image](https://github.com/InternLM/xtuner/assets/41630003/b67da9f0-4cdf-49b0-bc45-7624ab3bb24e)
+
 XTuner 中的序列并行设计思路参考了 DeepSpeed 的工作 [DeepSpeed Ulysses](https://arxiv.org/abs/2309.14509)，并加以优化，以达到直接基于 transformers 算法库或 Huggingface Hub 上的开源模型训练 1M 以上超长序列的目标。
 
 ## 简介
@@ -41,6 +43,8 @@ XTuner 中的序列并行设计思路参考了 DeepSpeed 的工作 [DeepSpeed Ul
 
 ## XTuner 序列并行支持情况
 
+<div align="center">
+
 |     模型     |  序列并行支持情况  |
 | :----------: | :----------------: |
 | baichuan 1/2 |        :x:         |
@@ -54,6 +58,8 @@ XTuner 中的序列并行设计思路参考了 DeepSpeed 的工作 [DeepSpeed Ul
 |  starcoder   |        :x:         |
 |      yi      | :white_check_mark: |
 |    zephyr    | :white_check_mark: |
+
+</div>
 
 其他模型的序列并行功能尚在开发中。
 
