@@ -14,24 +14,30 @@ XTuner 中的序列并行设计思路参考了 DeepSpeed 的工作 [DeepSpeed Ul
 
 对于科学AI来说，长序列同样至关重要，它为更好地理解结构生物学、医疗保健、气候和天气预测以及大分子模拟打开了大门。
 
-然而，尽管序列长度的重要性不断增长，XTuner 现有的显存优化策略（如 zero 系列），却不足以解决大模型、长序列训练问题。
+然而，尽管序列长度的重要性不断增长，XTuner 现有的显存优化策略（如 ZeRO 系列），却不足以解决大模型、长序列训练问题。如表 1 所示，使用 ZeRO-3 显存优化策略训练超长序列时，单纯增加 GPU 数量无法解决超长序列带来的 OOM  问题。这是因为，随着序列长度增大，训练过程中的显存开销主要来自单个 Transformer Layer 的激活值，而非模型参数。而 ZeRO-3 显存优化策略主要优化的是模型参数带来的显存占用。
 
 同时，受限于通信效率，现有的许多序列并行方法也不够高效。
 
 另外，现有的序列并行方法普遍存在较多的代码侵入式修改，易用性和维护性都要大打折扣。同时也不满足 XTuner 基于 transformers 算法库或 Huggingface Hub 上的开源模型直接进行训练的要求。
-
-<div align="center">
-  <img src="https://github.com/InternLM/xtuner/assets/41630003/0b791458-40bd-4dc6-aaf5-ff891fcc112a" width="1000"/>
-  <br /><br />
-</div>
-
-为了解决上述长序列训练带来的问题，XTuner 采用了一种简单、易用且高效的序列并行算法。由于 Transformer 结构较为规整，除 attention 计算外，其他计算过程中 token 之间不会互相影响（即每个 token 的计算是独立的），这一条件为序列并行提供了有利条件。上图展示了序列并行的核心设计。设由 P 个 GPUs 共同计算一个长度为 N 的长序列，在 Attention 计算的第一阶段，长度为 N / P 的子序列会通过线性层投影为 Query、Key、Value。接下来， QKV Tensor 会在参与序列并行计算的多个 GPUs 之间通过高度优化的 all-to-all 通信算子汇聚，得到序列长度为 N ，但更少注意力头的子序列。注意力计算后，通过另一个 all-to-all 通信算子将其转换为长度为 N / P 的子序列，进行后续计算。
 
 总体而言，XTuner 的序列并行算法具有以下关键特性：
 
 - 支持全量训练**超过百万个token**的序列
 - 支持百 B 级模型训练：XTuner 的序列并行不仅支持长序列训练，还可结合 ZeRO3 显存优化策略训练大尺寸模型
 - 完全通用的序列并行 **API 抽象**
+
+<div align="center">
+
+**表 1 不同序列长度时，使用 ZeRO-3 训练 yi-34B 模型的训练情况**
+
+| sequence parallel size | Model  |  ZeRO  | GPU number | Tokens per second |
+| :--------------------: | :----: | :----: | :--------: | :---------------: |
+|           1            | yi-34B | ZeRO-3 |     16     |        OOM        |
+|           1            | yi-34B | ZeRO-3 |     32     |        OOM        |
+|           1            | yi-34B | ZeRO-3 |     64     |        OOM        |
+|           8            | yi-34B | ZeRO-3 |     16     |       418.5       |
+
+</div>
 
 ## XTuner 序列并行支持情况
 
@@ -116,7 +122,7 @@ model = dict(
 
 ## 序列并行 API 抽象
 
-为了提升算法的可迁移性，XTuner 中抽象出了序列并行所必须的五个 API 接口：
+为了方便在其他 repo 中使用序列并行策略，XTuner 中抽象出了序列并行所必须的五个 API 接口：
 
 - 序列并行分布式环境初始化 (init_sequence_parallel)
 - 适配序列并行的 Data Sampler (SequenceParallelSampler)
