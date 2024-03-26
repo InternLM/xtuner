@@ -1,6 +1,6 @@
 # 使用 Processed 数据集训练 InternLM2
 
-使用尚未 token 化的 ftdp 数据训练 Internlm2 模型的场景。
+使用尚未 token 化的 ftdp 数据训练 InternLM2 模型的场景。
 
 ## Step 1, 离线处理数据集
 
@@ -37,13 +37,13 @@ python xtuner/tools/tokenize_ftdp_datasets.py \
 
 ## Step 2, 导出模板 config 文件
 
-XTuner 中目前提供了训练 Internlm2 的模板 config，使用命令：
+XTuner 中目前提供了训练 InternLM2 的模板 config，使用命令：
 
 ```
 xtuner copy-cfg internlm2_7b_w_tokenized_dataset .
 ```
 
-可将训练 Internlm2 的模板 config 导出至当前目录下。
+可将训练 InternLM2 的模板 config 导出至当前目录下。
 
 ## Step 3, 修改模板 config 文件
 
@@ -98,7 +98,8 @@ default_hooks = dict(
 )
 ```
 
-需要注意，经过以上设置后，训练过程不可 resume 。
+> \[!IMPORTANT\]
+> 需要注意，经过以上设置后，训练过程不可 resume 。
 
 ## Step 4, 获取数据顺序 （可选）
 

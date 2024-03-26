@@ -1,6 +1,52 @@
-# 模型
+# 总览
 
-XTuner 支持基于 Huggingface Hub 上的模型进行训练，如下修改 config 内容即可切换模型：
+XTuner 可以复现 InternEvo (train_internlm) 仓库训练得到的开源模型 internlm/internlm2-chat-7b 的训练精度。
+
+下面是 XTuner 和 InternEvo (train_internlm) 在 `v0.17.0rc8_32k` SFT 数据集上训练 `Ampere_7B_1_0_0` 基座模型的结果对比：
+
+|        能力类别        | xtuner | internevo |
+| :--------------------: | :----: | :-------: |
+| 全数据集平均(无智能体) | 56.44  |   55.26   |
+|  全维度平均(无智能体)  | 49.58  |   48.96   |
+|     语言 Language      | 64.77  |   62.41   |
+|     知识 Knowledge     | 52.24  |   52.52   |
+|     推理 Reasoning     |  65.5  |   63.91   |
+|    数学 Mathematics    | 30.95  |   30.26   |
+|      代码 Coding       | 38.91  |   41.06   |
+|    长文本 LongEval     | 45.09  |   43.62   |
+|      智能体 Agent      | 44.85  |   43.97   |
+|      数学题智能体      |   37   |   37.19   |
+|        CIBench         | 79.07  |   69.78   |
+|       PluginEval       | 65.57  |   65.62   |
+
+T 集群 64 GPUs 的训练时间对比如下：
+
+|   xtuner    | internevo  |
+| :---------: | :--------: |
+| 15 h 55 min | 16h 09 min |
+
+注：使用 XTuner 提供的序列并行算法可以进一步提升训练速度，使用方式请参考 [序列并行文档](../training/training_extreme_long_sequence.md) 。
+
+在从 InternEvo (train_internlm) 向 XTuner 迁移的过程中，我们需要关注模型、数据以及训练策略这三个方面的适配问题。后续内容将详细阐述如何进行适配。
+
+# 适配
+
+## 模型
+
+InternEvo 在训练时读取和保存的模型权重满足以下目录结构（以 tp2pp2 为例）：
+
+```
+|-- root
+    |-- model_config.pt
+    |-- model_tp0_pp0.pt
+    |-- model_tp0_pp1.pt
+    |-- model_tp1_pp0.pt
+    |-- model_tp1_pp1.pt
+```
+
+其中，`model_config.pt` 保存模型权重的一些 meta 信息，其余 4 个 checkpoint 则分别保存 4 组 GPUs 上的模型权重。因此，InternEvo 训练过程中要求读取预训练权重的 tp、pp 策略与训练使用的 tp、pp 策略一致才能正常读取预训练权重进行训练。
+
+XTuner 支持基于 Huggingface Hub 上的模型进行训练，如下修改 config 内容即可将基座模型从 internlm2-7b 切换为 internlm2-20b：
 
 ```diff
 #######################################################################
@@ -12,7 +58,7 @@ XTuner 支持基于 Huggingface Hub 上的模型进行训练，如下修改 conf
 
 ```
 
-# 数据
+## 数据
 
 InternEvo 在训练过程中通常会把多条数据拼接为一个特定的最大长度，随后输入模型训练。其配置往往满足以下形式：
 
@@ -70,11 +116,17 @@ train_dataset = dict(
 > \[!IMPORTANT\]
 > 需要注意，由于训练数据喂给模型的先后顺序可能对训练结果造成影响，因此建议不要轻易修改上述配置中的 `seed` 选项。同时，可参考[文档todo](./ftdp_dataset/Case4.md#step-3-获取数据顺序-可选)进一步固定数据顺序。
 
-# 训练策略
+## 训练策略
 
-## 变长注意力 (Variable Length Flash Attention)
+### 变长注意力 (Variable Length Flash Attention)
 
-InternEvo 通过设置[数据配置](https://github.com/InternLM/InternEvo/blob/develop/doc/usage.md#%E6%95%B0%E6%8D%AE%E9%85%8D%E7%BD%AE)中的 `pack_sample_into_one` 参数为 False 来使用“变长注意力机制”（见下图右侧）。
+InternEvo 通过设置 [数据配置](https://github.com/InternLM/InternEvo/blob/77c3b46bfe51f6bc245c4aba98639221b8618372/doc/usage.md#%E6%95%B0%E6%8D%AE%E9%85%8D%E7%BD%AE) 中的 `pack_sample_into_one` 参数为 False 来使用“变长注意力机制”（见下图右侧）。
+
+```python
+data = dict(
+    pack_sample_into_one=False,
+    ...)
+```
 
 <div align="center">
   <img src="https://github.com/InternLM/InternEvo/blob/develop/doc/imgs/pack_into_one.png?raw=true" width="800"/>
@@ -98,7 +150,7 @@ pretrained_model_name_or_path = 'internlm/internlm2-7b'
 > \[!IMPORTANT\]
 > 需要注意，当设置 `use_varlen_attn = True` 后，请确保 `batch_size` 被设置为 1，且 `pack_to_max_length` 被设置为 True。
 
-## batch_size 与 accumulative_counts
+### batch_size 与 accumulative_counts
 
 在 InternEvo 的配置中，与 batch_size 和 accumulative_counts 相关的配置有如下几个：
 
@@ -133,9 +185,9 @@ data = dict(
 + max_epochs = MAX_EPOCHS
 ```
 
-## 并行训练
+### 并行训练
 
-### ZeRO 系列显存优化
+#### ZeRO 系列显存优化
 
 XTuner 支持使用 ZeRO 系列显存优化降低训练过程中的显存消耗：
 
@@ -149,23 +201,32 @@ XTuner 支持使用 ZeRO 系列显存优化降低训练过程中的显存消耗�
 
 - `--deepspeed` 表示使用 [DeepSpeed](https://github.com/microsoft/DeepSpeed) 🚀 来优化训练过程。XTuner 内置了多种策略，包括 ZeRO-1、ZeRO-2、ZeRO-3 。
 
-### 序列并行
+#### 序列并行
 
 InternEvo 中支持了 Data Parallel、Tensor Parallel、Pipeline Parallel 和 Sequence Parallel 四种并行策略。XTuner 目前支持了 Data Parallel 和 Sequence Parallel 两种并行策略，可满足基本全部的训练需求（搭配 zero3 显存优化策略可支持 70B 模型 256K 上下文训练）。
 
-假定 InternEvo 训练过程中：tp_world_size = TP, pp_world_size = PP, sequence_parallel = True。则在 XTuner 的配置文件中进行如下修改可保证训练行为一致：
+假定 InternEvo 训练过程中：tp_world_size = TP, pp_world_size = PP, sequence_parallel = True。则训练的 global_batch_size 满足以下计算公式:
+
+```
+# 多除的一个 TP 是因为启用了 sequence parallel
+global_batch_size = num_gpus * batch_size_per_device * gradient_accumulate / TP / PP / TP
+```
+
+需要注意的是，internlm2-chat 的训练过程中通常启用了 [“变长注意力”](#变长注意力-variable-length-flash-attention) 策略，此时 `单卡 batch size 等于 2，拼接数据集至最大长度 2k` 的配置与 `单卡 batch size 等于 1，拼接数据集至最大长度 4k` 的配置训练行为是近似的，因此 XTuner 目前只支持了 `batch_size_per_device = 1` 的情况。因此，若想使用 XTuner 训练时保证 global_batch_size 与 InternEvo 一致，需要在配置文件中综合调整 `gradient_accumulate` 和 `sequence_parallel_size` 两项的数值：
 
 ```diff
 + from xtuner.parallel.sequence import SequenceParallelSampler
 
-+ sequence_parallel_size = TP * PP
++ sequence_parallel_size = SP
+- accumulative_counts = 1  # 1bs * 1acc * 64gpu = 64 batchsize
++ accumulative_counts = TP * PP * TP / SP
 
 #######################################################################
 #                      PART 3  Dataset & Dataloader                   #
 #######################################################################
 train_dataloader = dict(
 -   sampler=dict(type=DefaultSampler, shuffle=True),
-+   sampler=dict(type=SequenceParallelSampler, seed=1024, shuffle=True),
++   sampler=dict(type=SequenceParallelSampler, shuffle=True),
     ...)
 ```
 

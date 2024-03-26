@@ -65,7 +65,8 @@ default_hooks = dict(
 )
 ```
 
-需要注意，经过以上设置后，训练过程不可 resume 。
+> \[!IMPORTANT\]
+> 需要注意，经过以上设置后，训练过程不可 resume 。
 
 ## Step 3, 获取数据顺序 （可选）
 

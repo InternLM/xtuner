@@ -7,7 +7,7 @@ ftdp 是一个闭源的处理数据工具，开源社区用户可以忽略此文
 - [Case 3: 使用 Processed 普通对话数据集训任意模型](Case3.md)
 - [Case 4: 使用 Tokenized 数据集训练 InternLM2](Case4.md)
 
-请先参考下方流程图，选择自己的使用场景。
+请先参考下方流程图，选择自己的使用场景。其中，开源版 internlm2-chat 模型所使用的训练数据集对应流程图中的 Case 4。
 
 ```mermaid
 graph TD;
