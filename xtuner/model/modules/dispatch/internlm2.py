@@ -174,7 +174,7 @@ def varlen_flash_attn(query_states, key_states, value_states, cumulative_len,
                       max_seqlen):
     q_unpad, k_unpad, v_unpad = query_states.flatten(0, 1), key_states.flatten(
         0, 1), value_states.flatten(0, 1)
-    cumulative_len = torch.cat(cumulative_len, dim=0)
+
     attn_output = flash_attn_varlen_func(
         q_unpad,
         k_unpad,
