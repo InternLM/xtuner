@@ -72,9 +72,14 @@ def tokenize_dataset(dataset, tokenizer, max_length, with_image_token,
     if isinstance(tokenizer, dict) or isinstance(
             tokenizer, Config) or isinstance(tokenizer, ConfigDict):
         tokenizer = BUILDER.build(tokenizer)
+    if prompt_template is None or ('messages' not in dataset.column_names
+                                   and 'conversation' in dataset.column_names):
+        encode_map_fn = encode_fn
+    else:
+        encode_map_fn = prompt_template.encode_map_fn
     dataset = dataset.map(
         partial(
-            encode_fn,
+            encode_map_fn,
             tokenizer=tokenizer,
             max_length=max_length,
             with_image_token=with_image_token,
