@@ -6,7 +6,7 @@ from .chat_template import HybridChatTemplate
 
 
 class TextContentItem(BaseModel):
-    type: Literal['text']
+    type: Literal['text'] = 'text'
     text: str
 
     def apply_chat_template(self, chat_template: HybridChatTemplate) -> str:
@@ -14,7 +14,7 @@ class TextContentItem(BaseModel):
 
 
 class ImageContentItem(BaseModel):
-    type: Literal['image_url']
+    type: Literal['image_url'] = 'image_url'
     image_url: str
 
     def apply_chat_template(self, chat_template: HybridChatTemplate) -> str:
