@@ -61,8 +61,8 @@ XTuner 中的序列并行设计思路参考了 DeepSpeed 的工作 [DeepSpeed Ul
 
 ### Step 1 修改 config 文件
 
-1. 在 config 中修改 `sequence_parallel_size` 字段即可调整 $sequence\\\_parallel\\\_world\\\_size$ 。
-2. 同时若想保证与不使用序列并行的训练效果类似，需要同步增大梯度累积的数值为原来的 $sequence\\\_parallel\\\_world\\\_size$ 倍，因为在使用序列并行训练时， $data\\\_parallel\\\_world\\\_size$ 降为了原来的 $\\frac{1}{sequence\\\_parallel\\\_world\\\_size}$。
+1. 在 config 中修改 `sequence_parallel_size` 字段即可调整 `sequence_parallel_world_size` 。
+2. 同时若想保证与不使用序列并行的训练效果类似，需要同步增大梯度累积的数值为原来的 `sequence_parallel_world_size` 倍，因为在使用序列并行训练时， $data\\\_parallel\\\_world\\\_size$ 降为了原来的 $\\frac{1}{sequence\\\_parallel\\\_world\\\_size}$。
 3. 替换 DefaultSampler 为支持序列并行的 SequenceParallelSampler。
 
 > \[!IMPORTANT\]
@@ -132,9 +132,9 @@ model = dict(
 
 ### 序列并行分布式环境初始化
 
-由于序列并行算法会将长序列切分为 $sequence\\\_parallel\\\_world\\\_size$ 块，并将每个子序列分发给对应的 GPU 独立进行计算。因此需要在训练开始前初始化序列并行分布式环境，以指定哪几块 GPU 共同负责一个长序列输入的计算。
+由于序列并行算法会将长序列切分为 `sequence_parallel_world_size` 块，并将每个子序列分发给对应的 GPU 独立进行计算。因此需要在训练开始前初始化序列并行分布式环境，以指定哪几块 GPU 共同负责一个长序列输入的计算。
 
-一个 $sequence\\\_parallel\\\_world\\\_size = 4$ 的示例如下：
+一个 `sequence_parallel_world_size = 4` 的示例如下：
 
 ```python
 # We have to initialize the distributed training environment first.
@@ -150,7 +150,7 @@ init_sequence_parallel(sequence_parallel_world_size)
 
 ### Data Sampler 适配序列并行
 
-在使用序列并行后，Dataloader 的采样策略需要进一步调整。例如当 $sequence\\\_parallel\\\_world\\\_size = 4$ 时，4 块 GPU 从 Dataloader 拿到的数据需要是完全一样的。
+在使用序列并行后，Dataloader 的采样策略需要进一步调整。例如当 `sequence_parallel_world_size = 4` 时，4 块 GPU 从 Dataloader 拿到的数据需要是完全一样的。
 
 在构建 Dataloader 时搭配 XTuner 中提供的 SequenceParallelSampler 使用即可：
 
@@ -163,7 +163,7 @@ dataloader = DataLoader(
 
 ### 数据 Pad 与切分
 
-由于每条训练数据的长度可能不尽相同，我们需要将数据进行 Pad 以使得序列长度可以被 $sequence\\\_parallel\\\_world\\\_size$ 整除，这样一条长数据才能被均等地分发给不同的 GPU 上。
+由于每条训练数据的长度可能不尽相同，我们需要将数据进行 Pad 以使得序列长度可以被 `sequence_parallel_world_size` 整除，这样一条长数据才能被均等地分发给不同的 GPU 上。
 
 训练过程中需要被 Pad 的 Tensor 往往有 input_ids, labels, position_ids, attention_mask 四个，pad 的过程可以通过以下方式实现：
 
@@ -195,7 +195,7 @@ input_ids, labels, position_ids = split_for_sequence_parallel(
 
 在 Attention 的计算过程中，序列中的不同 token 是不能独立运算的，但不同的 attention head 之间的计算却是独立的。因此，如[第一节](#简介)所述，需要在计算 Attention 前后（即 qkv_proj 后和 o_proj 前）分别插入一个 *all-to-all* 操作。
 
-XTuner 提供了 dispatch_modules 接口以支持修改模型 Attention 的计算方式：
+XTuner 提供了 `dispatch_modules` 接口以支持修改模型 Attention 的计算方式：
 
 ```python
 from xtuner.model.modules import dispatch_modules
