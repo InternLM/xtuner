@@ -2,11 +2,17 @@
 
 ## 在线数据处理
 
+XTuner 默认采用在线数据预处理的策略，这样可以降低用户使用门槛，以达到“开箱即用”的要求。然而，在线数据处理的弊端在于，当数据集过大时，数据处理过程耗时相对较多，可能会触发 `nccl timeout` 报错。
+
+### 为什么会出现 `nccl timeout`
+
 使用 XTuner 训练模型时，在训练开始前会首先通过 [process_hf_dataset](https://github.com/InternLM/xtuner/blob/32e3e5f0581998fd84f30f8a1847554a287c161a/xtuner/dataset/huggingface.py#L222) 函数对整个训练集进行数据预处理，得到模型训练所需要的 `input_ids`, `labels` 等数据。
 
 由于数据预处理操作是一个 CPU 任务，因此在分布式训练过程中，如果多个 rank 各自执行预处理任务，会造成 CPU 资源抢占，拖慢数据处理速度。因此 XTuner 中采用的策略是统一由 rank0 处理，完成后通过 `torch.distributed.broadcast_object_list` 接口广播至其他 rank。这样，不同 rank 就会得到一份完全一样的数据集。
 
 然而，当使用 `nccl` 通信策略时，`torch.distributed.broadcast_object_list` 广播操作的超时时间与 `nccl` 通信超时时间相同（默认为 30 分钟）。当训练数据集较大时，rank0 可能无法在 30 分钟内处理完全部数据，这样就会导致 `nccl timeout` 报错。若修改 `nccl` 通信超时时间，则除数据预处理外的其他涉及 `nccl` 通信的超时时间设置都会被修改。
+
+### 解决方案
 
 为解决上述问题，可以在训练开始前设置环境变量 `XTUNER_DATASET_TIMEOUT` 为一个更大的数（默认为 30 分钟超时，可以酌情将其调大，如：120）：
 
