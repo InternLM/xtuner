@@ -85,7 +85,7 @@ data = dict(
     |   |   |-- data2.bin.meta
 ```
 
-在 XTuner 中实现在线数据集拼接策略需要参考 `xtuner/configs/internlm/internlm2_7b/internlm2_7b_w_tokenized_dataset.py` 文件中的配置：
+在 XTuner 中实现在线数据集拼接策略需要参考 `xtuner/configs/internlm/internlm2_7b/internlm2_7b_w_internevo_dataset.py` 文件中的配置：
 
 ```diff
 #######################################################################
@@ -172,7 +172,7 @@ data = dict(
 2. `total_steps` 在 XTuner 中可以不手动指定，可通过 `max_epochs` 指定。
 3. XTuner 目前只支持 `micro_bsz = 1` 。
 
-为对齐以上配置，可参考 XTuner 中 `xtuner/configs/internlm/internlm2_7b/internlm2_7b_w_tokenized_dataset.py` 文件中的配置，并进行如下修改：
+为对齐以上配置，可参考 XTuner 中 `xtuner/configs/internlm/internlm2_7b/internlm2_7b_w_internevo_dataset.py` 文件中的配置，并进行如下修改：
 
 ```diff
 #######################################################################
