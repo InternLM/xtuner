@@ -30,6 +30,9 @@ XTuner 默认采用在线数据预处理的策略，这样可以降低用户使�
 
 第一小节介绍如何针对纯语言模型训练所使用的文本数据进行离线处理，第二小节将会介绍如何离线处理 Llava 训练数据。
 
+> \[!IMPORTANT\]
+> 当切换了 tokenizer 或修改了数据处理中的超参数（如：单条数据的最大长度 `max_length`等）时，需要重新离线处理数据，否则可能会出现意料不到的问题。
+
 ### 语言模型训练数据离线处理
 
 为便于介绍，本节以 [internlm2_7b_qlora_alpaca_e3.py](https://github.com/InternLM/xtuner/blob/main/xtuner/configs/internlm/internlm2_7b/internlm2_7b_qlora_alpaca_e3.py) 配置文件为基础，介绍如何离线处理数据集，并使用离线处理的数据集进行训练。
