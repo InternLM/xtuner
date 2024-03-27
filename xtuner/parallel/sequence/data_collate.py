@@ -59,6 +59,9 @@ def pad_for_sequence_parallel(tokens,
 
 def split_for_sequence_parallel(tokens, labels=None, position_ids=None):
     seq_parallel_world_size = get_sequence_parallel_world_size()
+    if seq_parallel_world_size == 1:
+        return tokens, labels, position_ids
+
     seq_parallel_world_rank = get_sequence_parallel_rank()
     seq_len = tokens.size(1)
     assert seq_len % seq_parallel_world_size == 0
