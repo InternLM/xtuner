@@ -1,1 +1,1 @@
-# Preparing pretrained model
+# Prepare pretrained model
