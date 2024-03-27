@@ -43,6 +43,9 @@ XTuner 中的序列并行设计思路参考了 DeepSpeed 的工作 [DeepSpeed Ul
 
 ## XTuner 序列并行支持情况
 
+> \[!IMPORTANT\]
+> 使用序列并行策略需要首先安装 [flash attn](https://github.com/Dao-AILab/flash-attention) （参考 [flash attn 安装](https://github.com/Dao-AILab/flash-attention?tab=readme-ov-file#installation-and-features) ，安装过程需要 cuda）
+
 <div align="center">
 
 |     模型     |  序列并行支持情况  |
