@@ -199,10 +199,9 @@ def process(dataset,
         dataset = tokenize_dataset(dataset, tokenizer, max_length,
                                    with_image_token, input_ids_with_output,
                                    remove_unused_columns, map_num_proc)
-    else:
-        assert {'input_ids', 'labels'}.issubset(dataset.column_names)
 
     if input_ids_with_output:
+        assert {'input_ids', 'labels'}.issubset(dataset.column_names)
         # remove data that does not have the valid labels.
         dataset = dataset.filter(
             lambda example: any(label >= 0 for label in example['labels']),

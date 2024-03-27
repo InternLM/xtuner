@@ -1,13 +1,19 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+from typing import Optional
+
 from mmengine._strategy import DeepSpeedStrategy as MMEngineDeepSpeedStrategy
 
 from xtuner import DS_CEPH_DIR
+from xtuner.parallel.sequence import init_sequence_parallel
 from xtuner.utils.fileio import patch_fileio
 
 
 class DeepSpeedStrategy(MMEngineDeepSpeedStrategy):
 
     def __init__(self, *args, **kwargs):
+        sequence_parallel_size = kwargs.pop('sequence_parallel_size', 1)
+        self.sequence_parallel_size = sequence_parallel_size
+
         super().__init__(*args, **kwargs)
 
         from transformers.integrations.deepspeed import HfDeepSpeedConfig
@@ -53,3 +59,12 @@ class DeepSpeedStrategy(MMEngineDeepSpeedStrategy):
         else:
             checkpoint = super().resume(*args, **kwargs)
         return checkpoint
+
+    def _setup_distributed(  # type: ignore
+        self,
+        launcher: Optional[str] = None,
+        backend: str = 'nccl',
+        **kwargs,
+    ):
+        super()._setup_distributed(launcher, backend, **kwargs)
+        init_sequence_parallel(self.sequence_parallel_size)

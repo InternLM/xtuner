@@ -42,7 +42,7 @@ from xtuner.utils import PROMPT_TEMPLATE
 # Model
 pretrained_model_name_or_path = 'internlm/internlm2-7b'
 use_varlen_attn = True
-sequence_parallel_size = 1
+sequence_parallel_size = 4
 
 # Data
 data_files = ['/path/to/json/file.json']
@@ -51,11 +51,9 @@ max_length = 32768
 pack_to_max_length = True
 
 # Scheduler & Optimizer
-# batch size per device, set to 1 if `use_varlen_attn` = True
-# To clarify, enlarging the batch size essentially enlarges the `max_length`.
-# For example, doubling the max length is tantamount to doubling the batch size
-batch_size = 1
-accumulative_counts = 1  # 1bs * 1acc * 64gpu = 64 batchsize
+batch_size = 1  # per_device
+# accumulative_counts = accumulative_counts * sequence_parallel_size
+accumulative_counts = 4
 dataloader_num_workers = 4
 max_epochs = 1
 optim_type = AdamW
@@ -114,8 +112,7 @@ train_dataloader = dict(
     num_workers=dataloader_num_workers,
     dataset=train_dataset,
     sampler=dict(type=InternRepoSampler, shuffle=True, seed=1024),
-    batch_sampler=dict(
-        type=BatchSampler, drop_last=True, batch_size=batch_size),
+    batch_sampler=dict(type=BatchSampler, drop_last=True, batch_size=1),
     collate_fn=dict(type=default_collate_fn, use_varlen_attn=use_varlen_attn))
 
 #######################################################################
