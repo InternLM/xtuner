@@ -28,11 +28,15 @@ XTuner 默认采用在线数据预处理的策略，这样可以降低用户使�
 
 当训练数据量非常大时，每次训练的时候都先在线处理数据可能会极为耗时。我们可以先对原始数据进行离线处理并保存至本地，随后的多次训练可以读入本地离线处理好的数据后直接开始训练。
 
+第一小节介绍如何针对纯语言模型训练所使用的文本数据进行离线处理，第二小节将会介绍如何离线处理 Llava 训练数据。
+
+### 语言模型训练数据离线处理
+
 为便于介绍，本节以 [internlm2_7b_qlora_alpaca_e3.py](https://github.com/InternLM/xtuner/blob/main/xtuner/configs/internlm/internlm2_7b/internlm2_7b_qlora_alpaca_e3.py) 配置文件为基础，介绍如何离线处理数据集，并使用离线处理的数据集进行训练。
 
-### Step 1, 导出目标 config 文件
+#### Step 1, 导出目标 config 文件
 
-`internlm2_7b_qlora_alpaca_e3.py` 配置文件是 XTuner 提供的使用 QLora 算法在 Alpaca 数据集上微调 Internlm2-7B 模型的配置文件。通过以下命令可以将该 config 拷贝至当前目录下：
+`internlm2_7b_qlora_alpaca_e3.py` 是 XTuner 提供的使用 QLora 算法在 Alpaca 数据集上微调 Internlm2-7B 模型的配置文件。通过以下命令可以将该 config 拷贝至当前目录下：
 
 ```
 xtuner copy-cfg internlm2_7b_qlora_alpaca_e3 .
@@ -40,7 +44,7 @@ xtuner copy-cfg internlm2_7b_qlora_alpaca_e3 .
 
 执行以上命令后，当前目录下会新增一个名为 `internlm2_7b_qlora_alpaca_e3_copy.py` 的配置文件（与 [internlm2_7b_qlora_alpaca_e3.py](https://github.com/InternLM/xtuner/blob/main/xtuner/configs/internlm/internlm2_7b/internlm2_7b_qlora_alpaca_e3.py) 完全一样）。
 
-### Step 2, 离线处理数据集
+#### Step 2, 离线处理数据集
 
 使用以下命令可离线预处理原始数据：
 
@@ -55,7 +59,7 @@ python xtuner/tools/process_untokenized_datasets.py \
 > \[!IMPORTANT\]
 > 上述命令会在 internlm2_7b_qlora_alpaca_e3_copy.py 同级目录下新建一个 internlm2_7b_qlora_alpaca_e3_copy_modified.py 文件，后续训练中需要使用该配置文件，而非 internlm2_7b_qlora_alpaca_e3_copy.py。
 
-### Step 3, 启动训练
+#### Step 3, 启动训练
 
 **注意，训练中需要使用 Step 2 新生成的 internlm2_7b_qlora_alpaca_e3_copy_modified.py 文件，而非 internlm2_7b_qlora_alpaca_e3_copy.py 文件。**
 
@@ -65,4 +69,64 @@ python xtuner/tools/process_untokenized_datasets.py \
 # On multiple GPUs
 (DIST) NPROC_PER_NODE=${GPU_NUM} xtuner train internlm2_7b_qlora_alpaca_e3_copy_modified.py --deepspeed deepspeed_zero1
 (SLURM)  srun ${SRUN_ARGS} xtuner train internlm2_7b_qlora_alpaca_e3_copy_modified.py --launcher slurm --deepspeed deepspeed_zero1
+```
+
+### Llava 训练数据离线处理
+
+为便于介绍，本节以 [llava_internlm2_chat_7b_clip_vit_large_p14_336_e1_gpu8_pretrain.py](https://github.com/InternLM/xtuner/blob/main/xtuner/configs/llava/internlm2_chat_7b_clip_vit_large_p14_336/pretrain/llava_internlm2_chat_7b_clip_vit_large_p14_336_e1_gpu8_pretrain.py) 配置文件为基础，介绍如何离线处理数据集，并使用离线处理的数据集进行训练。
+
+#### Step 1, 导出目标 config 文件
+
+`llava_internlm2_chat_7b_clip_vit_large_p14_336_e1_gpu8_pretrain.py` 是 XTuner 提供的基于 internlm2-chat-7b 训练 Llava 模型配置文件。可以通过以下命令将该 config 拷贝至当前目录下：
+
+```
+xtuner copy-cfg llava_internlm2_chat_7b_clip_vit_large_p14_336_e1_gpu8_pretrain .
+```
+
+执行以上命令后，当前目录下会新增一个名为 `llava_internlm2_chat_7b_clip_vit_large_p14_336_e1_gpu8_pretrain_copy.py` 的配置文件（与 [llava_internlm2_chat_7b_clip_vit_large_p14_336_e1_gpu8_pretrain.py](https://github.com/InternLM/xtuner/blob/main/xtuner/configs/llava/internlm2_chat_7b_clip_vit_large_p14_336/pretrain/llava_internlm2_chat_7b_clip_vit_large_p14_336_e1_gpu8_pretrain.py) 完全一样）。
+
+#### Step 2, 离线处理数据集
+
+使用以下命令可离线预处理原始数据：
+
+```
+python xtuner/tools/process_untokenized_llava_data.py llava_internlm2_chat_7b_clip_vit_large_p14_336_e1_gpu8_pretrain_copy.py \
+    --save-folder /folder/to/save/processed/llava/data
+```
+
+处理后可以读取离线处理后的数据集查看是否符合预期：
+
+```python
+from datasets import load_from_disk
+ds = load_from_disk('/folder/to/save/processed/llava/data')
+print(ds)
+```
+
+#### Step 3, 修改 config 文件
+
+修改 config 文件以便程序运行时直接读取预处理的 Llava 数据：
+
+```diff
+#######################################################################
+#                      PART 3  Dataset & Dataloader                   #
+#######################################################################
+llava_dataset = dict(
+-   data_path=data_path,
+-   tokenizer=tokenizer,
++   offline_processed_text_folder=/folder/to/save/processed/llava/data
+    ...)
+```
+
+其中，`/folder/to/save/processed/llava/data` 为 Step 2 保存的离线处理数据路径。
+
+#### Step 4，开始训练
+
+使用 Step 3 修改得到的 config 训练即可：
+
+```bash
+# On a single GPU
+xtuner train llava_internlm2_chat_7b_clip_vit_large_p14_336_e1_gpu8_pretrain_copy.py --deepspeed deepspeed_zero2
+# On multiple GPUs
+(DIST) NPROC_PER_NODE=${GPU_NUM} xtuner train llava_internlm2_chat_7b_clip_vit_large_p14_336_e1_gpu8_pretrain_copy.py --deepspeed deepspeed_zero2
+(SLURM) srun ${SRUN_ARGS} xtuner train llava_internlm2_chat_7b_clip_vit_large_p14_336_e1_gpu8_pretrain_copy.py --launcher slurm --deepspeed deepspeed_zero2
 ```
