@@ -29,7 +29,8 @@ class EvaluateChatHook(Hook):
                  every_n_iters=None,
                  max_new_tokens=600,
                  stop_word=None,
-                 stop_words=[]):
+                 stop_words=[],
+                 generation_kwargs={}):
         self.evaluation_inputs = evaluation_inputs
         if isinstance(self.evaluation_inputs, str):
             self.evaluation_inputs = [self.evaluation_inputs]
@@ -69,8 +70,9 @@ class EvaluateChatHook(Hook):
         if image_processor is not None:
             self.image_processor = BUILDER.build(image_processor)
         self.stop_criteria = StoppingCriteriaList()
+
         # default generation config
-        self.gen_config = GenerationConfig(
+        default_generation_kwargs = dict(
             max_new_tokens=max_new_tokens,
             do_sample=True,
             temperature=0.1,
@@ -79,8 +81,10 @@ class EvaluateChatHook(Hook):
             eos_token_id=self.tokenizer.eos_token_id,
             pad_token_id=self.tokenizer.pad_token_id
             if self.tokenizer.pad_token_id is not None else
-            self.tokenizer.eos_token_id,
-        )
+            self.tokenizer.eos_token_id)
+        default_generation_kwargs.update(generation_kwargs)
+        self.gen_config = GenerationConfig(**default_generation_kwargs)
+
         self.stop_criteria = StoppingCriteriaList()
         for word in stop_words:
             self.stop_criteria.append(
