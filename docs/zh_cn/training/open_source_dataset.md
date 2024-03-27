@@ -98,13 +98,11 @@ def oasst1_map_fn(example):
   xtuner train ./config.py --deepspeed deepspeed_zero2
   ```
 
-````
-
 - 单机多卡
 
   ```shell
   NPROC_PER_NODE=${GPU_NUM} xtuner train ./config.py --deepspeed deepspeed_zero2
-````
+  ```
 
 - 多机多卡（以 2 * 8 GPUs 为例）
 
