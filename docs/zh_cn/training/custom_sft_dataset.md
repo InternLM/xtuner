@@ -4,7 +4,7 @@ XTuner 支持使用自定义数据集进行指令微调，为便于介绍，本�
 
 ## 数据准备
 
-如果用户期望使用自定义数据集进行指令微调，需要提前将数据集整理为以下格式：
+XTuner 采用 [OpenAI SFT 数据集格式](https://platform.openai.com/docs/guides/fine-tuning/preparing-your-dataset) 作为统一的自定义数据集格式。每条数据除了 OpenAI 标准格式中的 `role` 字段和 `content` 字段外，XTuner 还额外扩充了一个 `loss` 字段，用于控制某轮 `assistant` 的输出不计算 loss。详细格式如下：
 
 ```json
 [{
