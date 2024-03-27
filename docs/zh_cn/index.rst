@@ -83,3 +83,14 @@
    :caption: 模型
 
    models/supported.md
+
+.. toctree::
+   :maxdepth: 2
+   :caption: InternEvo 迁移
+
+   internevo_migration/internevo_migration.md
+   internevo_migration/ftdp_dataset/README.md
+   internevo_migration/ftdp_dataset/Case1.md
+   internevo_migration/ftdp_dataset/Case2.md
+   internevo_migration/ftdp_dataset/Case3.md
+   internevo_migration/ftdp_dataset/Case4.md
