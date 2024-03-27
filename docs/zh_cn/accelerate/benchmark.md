@@ -17,11 +17,11 @@
 
 ## 速度
 
-![image](https://github.com/InternLM/xtuner/assets/41630003/5206f467-b261-4a5b-a421-f77e787743c1)
+![llama2_7b](https://github.com/InternLM/xtuner/assets/41630003/e67035a3-91f8-43c0-96ab-b0eefdefd966)
 
-![image](https://github.com/InternLM/xtuner/assets/41630003/6d8a9028-60f2-44ee-8908-e352474efb73)
+![yi_34b](https://github.com/InternLM/xtuner/assets/41630003/b00c2a51-cf7d-4ac7-aed8-68e7943f1740)
 
-![image](https://github.com/InternLM/xtuner/assets/41630003/19d31b41-c691-414e-ac36-380caab6bc68)
+![llama2_70b](https://github.com/InternLM/xtuner/assets/41630003/fdc6b829-a17b-4106-8adf-8c5201d8e74f)
 
 |        |   模型    | GPU 数量 | 上下文长度 | 速度 (tokens per second) |                                                               训练 config                                                                |
 | :----: | :-------: | :------: | :--------: | :----------------------: | :--------------------------------------------------------------------------------------------------------------------------------------: |
