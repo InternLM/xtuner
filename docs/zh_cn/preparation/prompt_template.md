@@ -93,9 +93,11 @@ ZZZZZZZZZZZZZZZZZZZZZZZZ<|im_end|>
 
   - 全量微调：任选对话模版，优先使用 chat 版模型所对应的对话模版或默认对话模版 `default`。
 
+    - 注：使用 chat 版模型所对应的对话模版请留意下方 “小贴士” 。
+
   - LoRA / QLoRA 微调：使用默认对话模版 `default`。这是由于 LoRA / QLoRA 微调默认会关闭 `embed_tokens` 和 `lm_head` 的训练，此时如果引入未学习过的特殊 token（如对话模版中的 `<|im_start|>`），则会影响模型的训练。
 
-    - 注：通过修改 `LoraConfig` 可以引入 `embed_tokens` 和 `lm_head` 的训练（会增大显存需求），进而支持任选对话模版
+    - 注：通过修改 `LoraConfig` 可以引入 `embed_tokens` 和 `lm_head` 的训练（会增大显存需求），进而支持任选对话模版（使用 chat 版模型所对应的对话模版请留意下方 “小贴士” ）
 
       ```diff
       lora=dict(
@@ -107,6 +109,19 @@ ZZZZZZZZZZZZZZZZZZZZZZZZ<|im_end|>
       +   modules_to_save=['embed_tokens', 'lm_head']  # 请确保与模型中所使用的参数名一致
           task_type='CAUSAL_LM')
       ```
+
+**小贴士**
+
+- 大多数的 base 模型所使用的 tokenizer 中不包含 chat 模型对话模板中所使用的特殊 token 编码（例如 [internlm2 chat](https://huggingface.co/internlm/internlm2-chat-1_8b/blob/ecccbb5c87079ad84e5788baa55dd6e21a9c614d/tokenizer_config.json#L29-L85) 和 [internlm2 base](https://huggingface.co/internlm/internlm2-1_8b/blob/main/tokenizer_config.json)）。因此，如果要微调 base 模型并配合使用 chat 版对话模版，需确保在 Config 中及后续全流程使用 chat 版模型的 tokenizer。Config 中修改 tokenizer 的方式为：
+
+  ```diff
+  tokenizer = dict(
+      type=AutoTokenizer.from_pretrained,
+  -   pretrained_model_name_or_path=pretrained_model_name_or_path,
+  +   pretrained_model_name_or_path='PATH_TO_CHAT_LLM_TOKENIZER',
+      trust_remote_code=True,
+      padding_side='right')
+  ```
 
 ## 如何自定义对话模版？
 
