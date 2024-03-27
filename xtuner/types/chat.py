@@ -1,4 +1,4 @@
-from typing import Dict, List, Literal, Union
+from typing import Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel
 
@@ -9,7 +9,7 @@ class TextContentItem(BaseModel):
     type: Literal['text']
     text: str
 
-    def format_content(self, chat_template: HybridChatTemplate) -> str:
+    def apply_chat_template(self, chat_template: HybridChatTemplate) -> str:
         return self.text
 
 
@@ -17,8 +17,16 @@ class ImageContentItem(BaseModel):
     type: Literal['image_url']
     image_url: str
 
-    def format_content(self, chat_template: HybridChatTemplate) -> str:
+    def apply_chat_template(self, chat_template: HybridChatTemplate) -> str:
         return chat_template.image_token
+
+
+class FileContentItem(BaseModel):
+    type: Literal['file_url']
+    file_url: str
+
+    def apply_chat_template(self, chat_template: HybridChatTemplate) -> str:
+        return self.file_url
 
 
 MultModalContentType = Union[TextContentItem, ImageContentItem]
@@ -28,6 +36,7 @@ ContentType = Union[str, List[MultModalContentType]]
 class ChatMsg(BaseModel):
     role: Literal['assistant', 'user', 'system']
     content: ContentType
+    files: List[Union[str, Dict]] = []
 
     def collect_img_urls(self) -> List[str]:
         img_urls = []
@@ -45,16 +54,20 @@ class ChatMsg(BaseModel):
             text = ''
             for i, item in enumerate(self.content):
                 if i == 0:
-                    text += item.format_content(chat_template)
+                    text += item.apply_chat_template(chat_template)
                 else:
-                    text += '\n' + item.format_content(chat_template)
+                    text += '\n' + item.apply_chat_template(chat_template)
         else:
             raise NotImplementedError
 
         if self.role == 'system':
             prompt = chat_template.decorate_system(text)
         elif self.role == 'user':
+            if len(self.files) > 0:
+                stop_word = chat_template.stop_words[0]
+                text += f'\n{stop_word}\n{chat_template.decorate_files(self.files)}'
             prompt = chat_template.decorate_user(text)
+
         elif self.role == 'assistant':
             prompt = chat_template.decorate_assistant(text)
         else:
@@ -105,50 +118,22 @@ class CodeInterpreterCallMsg(BaseModel):
 
 
 class CodeInterpreterResultMsg(BaseModel):
-    role: Literal['function']
-    name: str
+    role: Literal['code_interpreter']
     content: Union[str, Dict]
 
     def apply_chat_template(self, chat_template: HybridChatTemplate) -> str:
-        return chat_template.decorate_code_internpreter_result(self.content)
+        return chat_template.decorate_code_interpreter_result(self.content)
 
 
 class Functions(BaseModel):
-
-    # class Parameters(BaseModel):
-
-    #     class Property(BaseModel):
-    #         type: str
-    #         description: str
-    #         enum: Optional[List] = None
-
-    #     type: Literal['object']
-    #     properties: Dict[str, Property]
-    #     required: List[str]
 
     name: str
     description: Union[str, Dict]
     parameters: Union[str, Dict]
 
 
-class CodeInterpreter(BaseModel):
-
-    # class Parameters(BaseModel):
-
-    #     class Property(BaseModel):
-    #         type: str
-    #         description: str
-    #         enum: Optional[List] = None
-
-    #     type: Literal['object']
-    #     properties: Dict[str, Property]
-    #     required: List[str]
-
-    name: str
-    description: Union[str, Dict]
-
-
-HybridChatMsgType = Union[ChatMsg, FunctionCallMsg, FunctionResultMsg]
+HybridChatMsgType = Union[ChatMsg, FunctionCallMsg, FunctionResultMsg,
+                          CodeInterpreterCallMsg, CodeInterpreterResultMsg]
 
 
 class HybridChatMessages(BaseModel):
@@ -156,6 +141,7 @@ class HybridChatMessages(BaseModel):
     messages: List[HybridChatMsgType] = []
     # images: List[Image.Image] = []
     functions: List[Functions] = []
+    code_interpreter: Optional[str] = None
 
     # TODO (pppppM) add audio and video
 
@@ -171,6 +157,10 @@ class HybridChatMessages(BaseModel):
     def apply_chat_template(self, chat_template: HybridChatTemplate) -> str:
 
         prompt = ''
+
+        if self.code_interpreter:
+            prompt += chat_template.decorate_functions(self.code_interpreter)
+
         if len(self.functions) > 0:
 
             functions = [func.model_dump() for func in self.functions]

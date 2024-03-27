@@ -287,7 +287,6 @@ class HybridDataset(torch.utils.data.Dataset):
         def img_counter(item):
             return len(item['image_urls'])
 
-
         with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
             images = list(
                 tqdm(
@@ -403,8 +402,10 @@ if __name__ == '__main__':
         assistant='{assistant}<|im_end|>\n',
         stop_words=['<|im_end|>'],
         image_token='<image>',
-        function_call='{assistant}<|action_start|><|plugin|>\n{function_call}<|action_end|><|im_end|>\n',  # noqa: E501, E251
-        function_result='<|im_start|>environment name=<|plugin|>\n{function_result}<|im_end|>\n<|im_start|>assistant\n',  # noqa: E501, E251
+        function_call=
+        '{assistant}<|action_start|><|plugin|>\n{function_call}<|action_end|><|im_end|>\n',  # noqa: E501, E251
+        function_result=
+        '<|im_start|>environment name=<|plugin|>\n{function_result}<|im_end|>\n<|im_start|>assistant\n',  # noqa: E501, E251
         functions='<|im_start|>system name=<|plugin|>\n{functions}<|im_end|>\n'
     )
 

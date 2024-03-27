@@ -20,7 +20,10 @@ class HybridChatTemplate(BaseModel):
     image_token_index: int = -100
 
     # Agent Chat
+
     # Interpreter and function related strings
+    files: Optional[str] = None
+
     functions: Optional[str] = None  # Function description format
     function_call: Optional[str] = None  # Function call format
     function_result: Optional[str] = None  # Function result format
@@ -52,6 +55,10 @@ class HybridChatTemplate(BaseModel):
         """Decorate text with the `user` template."""
         return self.user.format(user=text)
 
+    def decorate_files(self, text: str) -> str:
+        """Decorate text with the `functions` template."""
+        return self.files.format(files=text)
+
     def decorate_functions(self, text: str) -> str:
         """Decorate text with the `functions` template."""
         return self.functions.format(functions=text)
@@ -68,9 +75,10 @@ class HybridChatTemplate(BaseModel):
         """Decorate text with the `code_interpreter` template."""
         return self.code_interpreter.format(code_interpreter=text)
 
-    def decorate_code_interpreter_call(self, text: str) -> str:
+    def decorate_code_interpreter_call(self, text: str, func: str) -> str:
         """Decorate text with the `code_interpreter_call` template."""
-        return self.code_interpreter_call.format(code_interpreter_call=text)
+        return self.code_interpreter_call.format(
+            assistant=text, code_interpreter_call=func)
 
     def decorate_code_interpreter_result(self, text: str) -> str:
         """Decorate text with the `code_interpreter_result` template."""
@@ -164,9 +172,13 @@ class HybridChatTemplate(BaseModel):
 
         If not, raises a ValueError.
         """
-        if v is not None and '{code_interpreter_call}' not in v:
-            raise ValueError('code_interpreter_call must contain the keyword '
-                             "'{code_interpreter_call}'")
+        if (v is not None and '{code_interpreter_call}' not in v
+                and '{assistant}' not in v):
+            raise ValueError('code_interpreter_call must contain the keywords '
+                             "'{assistant}' and '{code_interpreter_call}'")
+        if v is not None and '{assistant}' not in v:
+            raise ValueError('code_interpreter_call must contain the keywords '
+                             "'{assistant}' and '{code_interpreter_call}'")
         return v
 
     @field_validator('code_interpreter_result')

@@ -13,7 +13,7 @@
                         "image_url": "image2.jpg"
                     },
                     {
-                        "type": "text", 
+                        "type": "text",
                         "text": "What are the colors of the bus in the first image?"
                     }
                 ]
@@ -37,5 +37,3 @@
         ]
     }
 ]
-
-    

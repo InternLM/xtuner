@@ -8,8 +8,9 @@ from transformers.tokenization_utils import PreTrainedTokenizer
 
 from xtuner.utils import IGNORE_INDEX
 from xtuner.utils.tokenizer import get_bos_token_ids
-from .chat import (ChatMsg, FunctionCallMsg, FunctionResultMsg, Functions,
-                   ImageContentItem, TextContentItem)
+from .chat import (ChatMsg, CodeInterpreterCallMsg, CodeInterpreterResultMsg,
+                   FileContentItem, FunctionCallMsg, FunctionResultMsg,
+                   Functions, ImageContentItem, TextContentItem)
 from .chat_template import HybridChatTemplate
 
 
@@ -125,6 +126,40 @@ class TrainingFunctionResultMsg(FunctionResultMsg):
         return {'input_ids': token_ids, 'labels': label_ids}
 
 
+class TrainingCodeInterpreterCallMsg(CodeInterpreterCallMsg):
+    loss: bool = True
+
+    def tokenize(self, tokenizer, chat_template: HybridChatTemplate):
+
+        decorated = self.apply_chat_template(chat_template)
+
+        token_ids = tokenizer.encode(decorated, add_special_tokens=False)
+
+        if self.loss:
+            label_ids = copy.deepcopy(token_ids)
+        else:
+            label_ids = [IGNORE_INDEX] * len(token_ids)
+
+        return {'input_ids': token_ids, 'labels': label_ids}
+
+
+class TrainingCodeInterpreterResultMsg(CodeInterpreterResultMsg):
+    loss: bool = False
+
+    def tokenize(self, tokenizer, chat_template: HybridChatTemplate):
+
+        decorated = self.apply_chat_template(chat_template)
+
+        token_ids = tokenizer.encode(decorated, add_special_tokens=False)
+
+        if self.loss:
+            label_ids = copy.deepcopy(token_ids)
+        else:
+            label_ids = [IGNORE_INDEX] * len(token_ids)
+
+        return {'input_ids': token_ids, 'labels': label_ids}
+
+
 class RawTrainingData(BaseModel):
 
     input_ids: List[int]
@@ -148,12 +183,15 @@ class ProcessedTrainingData(BaseModel):
 
 
 TraingHybridMessageType = Union[TrainingChatMsg, TrainingFunctionCallMsg,
-                                TrainingFunctionResultMsg]
+                                TrainingFunctionResultMsg,
+                                TrainingCodeInterpreterCallMsg,
+                                TrainingCodeInterpreterResultMsg]
 
 
 class TrainingHybridChatMessages(BaseModel):
     messages: List[TraingHybridMessageType]
     functions: Optional[List[Functions]] = None
+    code_interpreter: Optional[str] = None
 
     @classmethod
     def from_dict(cls, item) -> 'TrainingHybridChatMessages':
@@ -187,6 +225,12 @@ class TrainingHybridChatMessages(BaseModel):
                 messages.append(msg)
                 continue
 
+            if _role == 'code_interpreter':
+                msg_factory = TrainingCodeInterpreterResultMsg
+                msg = msg_factory(role=_role, content=_content)
+                messages.append(msg)
+                continue
+
             if isinstance(_content, list):
 
                 content = []
@@ -202,6 +246,10 @@ class TrainingHybridChatMessages(BaseModel):
                         _url = c_item['image_url']
                         content.append(
                             ImageContentItem(type=_type, image_url=_url))
+                    elif _type == 'file_url':
+                        assert 'file_url' in c_item
+                        _url = c_item['file_url']
+                        content.append(FileContentItem(file_url=_url))
                     else:
                         raise NotImplementedError
 
@@ -215,12 +263,24 @@ class TrainingHybridChatMessages(BaseModel):
                     role=_role, content=_content, function_call=_call)
                 messages.append(msg)
                 continue
+            elif isinstance(_content, str) and 'code_interpreter' in _msg:
+                _call = _msg['function_call']
+                msg = TrainingCodeInterpreterCallMsg(
+                    role=_role, content=_content, code_interpreter_call=_call)
+                messages.append(msg)
+                continue
 
             if isinstance(_content, str):
+                # breakpoint()
                 msg = TrainingChatMsg(role=_role, content=_content)
                 messages.append(msg)
 
             # TODO (pppppM) add format warning
+
+        if 'code_interpreter' in item:
+
+            assert isinstance(item['code_interpreter'], str)
+            code_interpreter = item['code_interpreter']
 
         if 'functions' in item:
             _functions = item['functions']
@@ -240,7 +300,10 @@ class TrainingHybridChatMessages(BaseModel):
                     name=_name, description=_desc, parameters=_params)
                 functions.append(func)
 
-        return cls(messages=messages, functions=functions)
+        return cls(
+            messages=messages,
+            functions=functions,
+            code_interpreter=code_interpreter)
 
     def collect_img_urls(self) -> List[str]:
         img_urls = []
@@ -262,7 +325,10 @@ class TrainingHybridChatMessages(BaseModel):
             prompt += chat_template.decorate_functions(functions)
 
         for msg in self.messages:
-            prompt += msg.apply_chat_template(chat_template)
+            if msg.role == 'system':
+                prompt = msg.apply_chat_template(chat_template) + prompt
+            else:
+                prompt += msg.apply_chat_template(chat_template)
 
         return prompt
 

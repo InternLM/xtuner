@@ -4,10 +4,8 @@ from mmengine.dataset import DefaultSampler
 from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
                             LoggerHook, ParamSchedulerHook)
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR, LinearLR
-
 from torch.optim import AdamW
 from transformers import AutoModelForCausalLM, AutoTokenizer
-                         
 
 from xtuner.dataset.hybrid import HybridDataset, hybrid_collate_fn
 from xtuner.dataset.hybrid.mappings import openai_to_raw_training
@@ -74,7 +72,6 @@ tokenizer = dict(
     trust_remote_code=True,
     padding_side='right')
 
-
 model = dict(
     type=HybridFinetune,
     llm=dict(
@@ -95,7 +92,7 @@ llava_dataset = dict(
     chat_template=chat_template,
     max_length=max_length,
     pack_to_max_length=True,
-    num_workers = dataloader_num_workers,
+    num_workers=dataloader_num_workers,
     mappings=[openai_to_raw_training])
 
 train_dataloader = dict(

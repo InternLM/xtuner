@@ -4,9 +4,11 @@ from mmengine.dataset import DefaultSampler
 from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
                             LoggerHook, ParamSchedulerHook)
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR, LinearLR
+from peft import LoraConfig
 from torch.optim import AdamW
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
-                          CLIPImageProcessor, CLIPVisionModel)
+                          BitsAndBytesConfig, CLIPImageProcessor,
+                          CLIPVisionModel)
 
 from xtuner.dataset.hybrid import HybridDataset, hybrid_collate_fn
 from xtuner.dataset.hybrid.mappings import (insert_img_pad_tokens,
@@ -21,15 +23,17 @@ from xtuner.types import HybridChatTemplate
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
+# llm_name_or_path = '/mnt/petrelfs/share_data/basemodel/checkpoints/llm/hf_hub/models--internlm--internlm2-chat-1_8b/snapshots/aa8a7450c2227a3b6733b3c6fe33fefbb2ca54f9/'
 llm_name_or_path = '/mnt/petrelfs/share_data/linzhihao/model/models--internlm--internlm2-chat-7b/snapshots/2292b86b21cb856642782cebed0a453997453b1f/'
 visual_encoder_name_or_path = 'openai/clip-vit-large-patch14-336'
+use_varlen_attn = False
 # Specify the pretrained pth
 pretrained_pth = None
 # Data
 data_dir = './llava_data/'
 data_files = ['LLaVA-Instruct-150K/llava_v1_5_mix665k.json']
 image_dir = data_dir + 'llava_images'
-max_length = 1024 * 32
+max_length = 1024 * 2
 
 # Chat Template
 chat_template = dict(
@@ -46,12 +50,12 @@ chat_template = dict(
     functions='<|im_start|>system name=<|plugin|>\n{functions}<|im_end|>\n')
 
 # Scheduler & Optimizer
-batch_size = 1  # per_device
+batch_size = 16  # per_device
 accumulative_counts = 1
-dataloader_num_workers = 4
+dataloader_num_workers = 0
 max_epochs = 1
 optim_type = AdamW
-lr = 2e-4
+lr = 0
 betas = (0.9, 0.999)
 weight_decay = 0
 max_norm = 1  # grad clip
@@ -86,14 +90,34 @@ model = dict(
     freeze_llm=False,
     freeze_visual_encoder=True,
     pretrained_pth=pretrained_pth,
+    use_varlen_attn=use_varlen_attn,
     llm=dict(
         type=AutoModelForCausalLM.from_pretrained,
         pretrained_model_name_or_path=llm_name_or_path,
         trust_remote_code=True,
-        torch_dtype=torch.float16),
+        torch_dtype=torch.bfloat16,
+        attn_implementation='flash_attention_2',
+        quantization_config=dict(
+            type=BitsAndBytesConfig,
+            load_in_4bit=True,
+            load_in_8bit=False,
+            llm_int8_threshold=6.0,
+            llm_int8_has_fp16_weight=False,
+            bnb_4bit_compute_dtype=torch.float16,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type='nf4')),
+    llm_lora=dict(
+        type=LoraConfig,
+        r=512,
+        lora_alpha=256,
+        lora_dropout=0.05,
+        bias='none',
+        task_type='CAUSAL_LM'),
     visual_encoder=dict(
         type=CLIPVisionModel.from_pretrained,
-        pretrained_model_name_or_path=visual_encoder_name_or_path))
+        pretrained_model_name_or_path=visual_encoder_name_or_path),
+    visual_encoder_lora=dict(
+        type=LoraConfig, r=64, lora_alpha=16, lora_dropout=0.05, bias='none'))
 
 #######################################################################
 #                      PART 3  Dataset & Dataloader                   #
@@ -102,16 +126,16 @@ llava_dataset = dict(
     type=HybridDataset,
     data_dir=data_dir,
     data_files=data_files,
-    data_cached='cached_llava',
+    # data_cached='cached_llava',
     image_dir=image_dir,
-    sample_ratio=1,
+    sample_ratio=0.1,
     tokenizer=tokenizer,
     chat_template=chat_template,
     image_processor=image_processor,
     pad_img_to_squared=True,
     max_length=max_length,
-    pack_to_max_length=True,
-    num_workers=dataloader_num_workers,
+    pack_to_max_length=False,
+    num_workers=4,
     mappings=[
         llava_to_openai,
         openai_to_raw_training,
@@ -120,7 +144,7 @@ llava_dataset = dict(
 
 train_dataloader = dict(
     batch_size=batch_size,
-    num_workers=dataloader_num_workers,
+    num_workers=4,
     dataset=llava_dataset,
     sampler=dict(type=DefaultSampler, shuffle=True),
     collate_fn=dict(type=hybrid_collate_fn))
@@ -182,7 +206,7 @@ default_hooks = dict(
     # record the time of every iteration.
     timer=dict(type=IterTimerHook),
     # print log every 10 iterations.
-    logger=dict(type=LoggerHook, log_metric_by_epoch=False, interval=10),
+    logger=dict(type=LoggerHook, log_metric_by_epoch=False, interval=1),
     # enable the parameter scheduler.
     param_scheduler=dict(type=ParamSchedulerHook),
     # save checkpoint per `save_steps`.
