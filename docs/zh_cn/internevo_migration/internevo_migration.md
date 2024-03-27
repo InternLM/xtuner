@@ -2,7 +2,7 @@
 
 XTuner 可以复现 InternEvo (train_internlm) 仓库训练得到的开源模型 internlm/internlm2-chat-7b 的训练精度。
 
-下面是 XTuner 和 InternEvo (train_internlm) 在 `v0.17.0rc8_32k` SFT 数据集上训练 `Ampere_7B_1_0_0` 基座模型的结果对比：
+下面是 XTuner 和 InternEvo (train_internlm) 在相同数据集上训练相同基座模型的训练结果对比：
 
 |        能力类别        | xtuner | internevo |
 | :--------------------: | :----: | :-------: |
@@ -19,7 +19,7 @@ XTuner 可以复现 InternEvo (train_internlm) 仓库训练得到的开源模型
 |        CIBench         | 79.07  |   69.78   |
 |       PluginEval       | 65.57  |   65.62   |
 
-T 集群 64 GPUs 的训练时间对比如下：
+64 * A100 的训练时间对比如下：
 
 |   xtuner    | internevo  |
 | :---------: | :--------: |
