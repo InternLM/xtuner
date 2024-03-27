@@ -59,8 +59,11 @@ def get_sequence_parallel_world_size():
     global _SEQUENCE_PARALLEL_WORLD_SIZE
     if _SEQUENCE_PARALLEL_WORLD_SIZE is not None:
         return _SEQUENCE_PARALLEL_WORLD_SIZE
-    _SEQUENCE_PARALLEL_WORLD_SIZE = dist.get_world_size(
-        group=get_sequence_parallel_group())
+    if not dist.is_initialized():
+        _SEQUENCE_PARALLEL_WORLD_SIZE = 1
+    else:
+        _SEQUENCE_PARALLEL_WORLD_SIZE = dist.get_world_size(
+            group=get_sequence_parallel_group())
     return _SEQUENCE_PARALLEL_WORLD_SIZE
 
 
@@ -69,8 +72,11 @@ def get_sequence_parallel_rank():
     global _SEQUENCE_PARALLEL_RANK
     if _SEQUENCE_PARALLEL_RANK is not None:
         return _SEQUENCE_PARALLEL_RANK
-    _SEQUENCE_PARALLEL_RANK = dist.get_rank(
-        group=get_sequence_parallel_group())
+    if not dist.is_initialized():
+        _SEQUENCE_PARALLEL_RANK = 0
+    else:
+        _SEQUENCE_PARALLEL_RANK = dist.get_rank(
+            group=get_sequence_parallel_group())
     return _SEQUENCE_PARALLEL_RANK
 
 
@@ -86,8 +92,11 @@ def get_data_parallel_world_size():
     global _DATA_PARALLEL_WORLD_SIZE
     if _DATA_PARALLEL_WORLD_SIZE is not None:
         return _DATA_PARALLEL_WORLD_SIZE
-    _DATA_PARALLEL_WORLD_SIZE = dist.get_world_size(
-        group=get_data_parallel_group())
+    if not dist.is_initialized():
+        _DATA_PARALLEL_WORLD_SIZE = 1
+    else:
+        _DATA_PARALLEL_WORLD_SIZE = dist.get_world_size(
+            group=get_data_parallel_group())
     return _DATA_PARALLEL_WORLD_SIZE
 
 
@@ -96,5 +105,8 @@ def get_data_parallel_rank():
     global _DATA_PARALLEL_RANK
     if _DATA_PARALLEL_RANK is not None:
         return _DATA_PARALLEL_RANK
-    _DATA_PARALLEL_RANK = dist.get_rank(group=get_data_parallel_group())
+    if not dist.is_initialized():
+        _DATA_PARALLEL_RANK = 0
+    else:
+        _DATA_PARALLEL_RANK = dist.get_rank(group=get_data_parallel_group())
     return _DATA_PARALLEL_RANK
