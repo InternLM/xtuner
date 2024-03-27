@@ -366,6 +366,13 @@ XTuner 内置了多个 DeepSpeed 配置文件（即命令中的 `${DS_CONFIG}`�
 xtuner train ${CONFIG} --deepspeed [deepspeed_zero1,deepspeed_zero2,deepspeed_zero2_offload,deepspeed_zero3,deepspeed_zero3_offload]
 ```
 
+部分参数会在 DeepSpeed Config 和 XTuner Config 中重复定义（例如 batch size等）。此时相关配置会以 XTuner Config 为准：
+
+- `gradient_accumulation_steps` 会被 XTuner Config 中的 `accumulative_counts` 设置覆盖。
+- `train_micro_batch_size_per_gpu` 会被 XTuner Config 中的 `train_dataloader.batch_size` 设置覆盖。
+- `gradient_clipping` 会被 XTuner Config 中的 `optim_wrapper.clip_grad.max_norm` 设置覆盖。
+- XTuner 会根据所使用的 GPU 架构自动选择 `fp16` 或 `bf16` 训练。
+
 ### 其他
 
 如有遗漏或特定需求，欢迎提出 [issue](https://github.com/InternLM/xtuner/issues) 讨论。
