@@ -78,8 +78,9 @@ class SupervisedFinetune(BaseModel):
                  max_position_embeddings=None):
         super().__init__()
         with LoadWoInit():
-            self.llm = self._build_from_cfg_or_module(llm,
-                                                      max_position_embeddings)
+            if isinstance(llm, dict):
+                llm = self._dispatch_lm_model_cfg(llm, max_position_embeddings)
+            self.llm = self._build_from_cfg_or_module(llm)
 
         if tokenizer is not None:
             if isinstance(tokenizer, dict):
@@ -145,33 +146,35 @@ class SupervisedFinetune(BaseModel):
         pass
 
     @staticmethod
-    def _prepare_for_long_context_training(config, max_position_embeddings):
+    def _prepare_for_long_context_training(cfg, llm_cfg,
+                                           max_position_embeddings):
 
-        orig_rope_scaling = getattr(config, 'rope_scaling', None)
+        orig_rope_scaling = getattr(llm_cfg, 'rope_scaling', None)
         if orig_rope_scaling is None:
             orig_rope_scaling = {'factor': 1}
 
         orig_rope_scaling_factor = orig_rope_scaling[
             'factor'] if 'factor' in orig_rope_scaling.keys() else 1
-        orig_ctx_len = getattr(config, 'max_position_embeddings', None)
+        orig_ctx_len = getattr(llm_cfg, 'max_position_embeddings', None)
         if orig_ctx_len:
             orig_ctx_len *= orig_rope_scaling_factor
             if max_position_embeddings > orig_ctx_len:
                 scaling_factor = float(
                     math.ceil(max_position_embeddings / orig_ctx_len))
-                config.rope_scaling = {
+                llm_cfg.rope_scaling = {
                     'type': 'linear',
                     'factor': scaling_factor
                 }
 
         # hardcode for internlm2
-        config.attn_implementation = 'flash_attention_2'
+        llm_cfg.attn_implementation = 'flash_attention_2'
+        cfg.config = llm_cfg
 
-        return config
+        return cfg, llm_cfg
 
     @staticmethod
-    def _prepare_for_flash_attn(config):
-        cls_name = type(config).__name__
+    def _prepare_for_flash_attn(cfg, llm_cfg):
+        cls_name = type(llm_cfg).__name__
         SUPPORT_SDPA_ATTN = ('LlamaConfig', 'GemmaConfig', 'MistralConfig',
                              'MixtralConfig', 'Qwen2Config',
                              'Starcoder2Config', 'Starcoder2Config')
@@ -180,34 +183,30 @@ class SupervisedFinetune(BaseModel):
                                'Starcoder2Config', 'Starcoder2Config')
 
         if SUPPORT_FLASH2 and cls_name in SUPPORT_FLASH_ATTN2:
-            config.torch_dtype = torch.bfloat16 \
+            cfg.torch_dtype = torch.bfloat16 \
                 if torch.cuda.is_bf16_supported() else torch.float16
-            config.attn_implementation = 'flash_attention_2'
+            cfg.attn_implementation = 'flash_attention_2'
         elif SUPPORT_FLASH1 and cls_name in SUPPORT_SDPA_ATTN:
-            config.attn_implementation = 'sdpa'
+            cfg.attn_implementation = 'sdpa'
 
-        return config
+        return cfg, llm_cfg
 
-    def _dispatch_cfg(self, cfg, max_position_embeddings=None):
+    def _dispatch_lm_model_cfg(self, cfg, max_position_embeddings=None):
         pretrained_model_name_or_path = cfg.pretrained_model_name_or_path
-        config = AutoConfig.from_pretrained(
+        llm_cfg = AutoConfig.from_pretrained(
             pretrained_model_name_or_path, trust_remote_code=True)
-        config = self._prepare_for_flash_attn(config)
+        cfg, llm_cfg = self._prepare_for_flash_attn(cfg, llm_cfg)
         if max_position_embeddings is not None:
-            config = self._prepare_for_long_context_training(
-                config, max_position_embeddings)
-        cfg.config = config
+            cfg, llm_cfg = self._prepare_for_long_context_training(
+                cfg, llm_cfg, max_position_embeddings)
         return cfg
 
-    def _build_from_cfg_or_module(self,
-                                  cfg_or_mod,
-                                  max_position_embeddings=None):
+    def _build_from_cfg_or_module(self, cfg_or_mod):
         if isinstance(cfg_or_mod, nn.Module):
             return cfg_or_mod
         elif isinstance(cfg_or_mod, dict):
             traverse_dict(cfg_or_mod)
-            cfg = self._dispatch_cfg(cfg_or_mod, max_position_embeddings)
-            return BUILDER.build(cfg)
+            return BUILDER.build(cfg_or_mod)
         else:
             raise NotImplementedError
 
