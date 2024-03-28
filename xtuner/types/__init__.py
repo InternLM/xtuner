@@ -1,6 +1,8 @@
+from .chat import HybridChatMessages
 from .chat_template import HybridChatTemplate
 from .train import RawTrainingData, TrainingHybridChatMessages
 
 __all__ = [
-    'HybridChatTemplate', 'RawTrainingData', 'TrainingHybridChatMessages'
+    'HybridChatTemplate', 'RawTrainingData', 'TrainingHybridChatMessages',
+    'HybridChatMessages'
 ]

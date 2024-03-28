@@ -1,107 +1,142 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from collections import OrderedDict
+from typing import Dict, Optional, Union
 
 import torch
 import torch.distributed as dist
 from mmengine.model import BaseModel
 from peft import LoraConfig
 from torch import nn
+from transformers import PreTrainedModel, PreTrainedTokenizer
 
 from xtuner.registry import BUILDER
+from xtuner.types import HybridChatMessages, HybridChatTemplate
 from xtuner.utils.config import build_from_cfg_or_obj
-from .modules import ProjectorConfig, ProjectorModel, dispatch_modules
-from .utils import (LoadWoInit, enable_hf_model_gradient_checkpointing,
-                    get_peft_model_state_dict, prepare_for_llm_lora,
-                    prepare_for_vision_lora,
-                    smart_tokenizer_and_embedding_resize)
+from .base import BaseTune
+from .encoders import EncoderWrapper
+from .modules import ProjectorConfig, dispatch_modules
+from .utils import (LoadWoInit, get_peft_model_state_dict,
+                    prepare_for_llm_lora, smart_tokenizer_and_embedding_resize)
 
 
-class HybridFinetune(BaseModel):
+class HybridFinetune(BaseTune):
 
     def __init__(
         self,
-        llm,
-        visual_encoder=None,
-        visual_select_layer=-2,
-        projector_depth=2,
-        pretrained_pth=None,
-        tokenizer=None,
-        llm_lora=None,
-        visual_encoder_lora=None,
-        freeze_llm=False,
-        freeze_visual_encoder=False,
-        use_activation_checkpointing=True,
-        use_varlen_attn=False,
+        llm: Union[PreTrainedModel, Dict],
+        tokenizer: Union[PreTrainedTokenizer, Dict],
+        chat_template: HybridChatTemplate,
+        visual_encoder: Optional[Union[EncoderWrapper, Dict]] = None,
+        audio_encoder: Optional[Union[EncoderWrapper, Dict]] = None,
+        video_encoder: Optional[Union[EncoderWrapper, Dict]] = None,
+        proj_depth: int = 2,
+        llm_lora: Optional[Union[LoraConfig, Dict]] = None,
+        freeze_llm: bool = False,
+        use_gradient_checkpointing: bool = True,
+        use_varlen_attn: bool = False,
     ):
         super().__init__()
+
+        tokenizer = build_from_cfg_or_obj(
+            tokenizer, accept=PreTrainedTokenizer)
+        smart_tokenizer_and_embedding_resize(tokenizer, self.llm)
+        self._tokenizer: PreTrainedModel = tokenizer
+
+        self._chat_template = chat_template
 
         # Build the base language model without initialization.
         # This will greatly reduce the time to build the model.
         with LoadWoInit():
-            self.llm = build_from_cfg_or_obj(llm, nn.Module)
-            if visual_encoder:
-                visual_encoder = build_from_cfg_or_obj(visual_encoder,
-                                                       nn.Module)
-            self.visual_encoder = visual_encoder
-            self.visual_select_layer = visual_select_layer
-        self.llm.config.use_cache = False
-        dispatch_modules(self.llm, use_varlen_attn=use_varlen_attn)
-
-        if tokenizer is not None:
-            if isinstance(tokenizer, dict):
-                tokenizer = BUILDER.build(tokenizer)
-            smart_tokenizer_and_embedding_resize(tokenizer, self.llm)
-
-        projector_config = ProjectorConfig(
-            visual_hidden_size=self.visual_encoder.config.hidden_size,
-            llm_hidden_size=self.llm.config.hidden_size,
-            depth=projector_depth)
-        self.projector = ProjectorModel(projector_config).to(
-            self.visual_encoder.dtype)
+            self._llm: PreTrainedModel = build_from_cfg_or_obj(llm, nn.Module)
+            self._llm.config.use_cache = False
 
         self.freeze_llm = freeze_llm
-        self.freeze_visual_encoder = freeze_visual_encoder
         if self.freeze_llm:
             self.llm.requires_grad_(False)
-        if self.freeze_visual_encoder:
-            self.visual_encoder.requires_grad_(False)
 
-        if use_activation_checkpointing:
-            # For backward compatibility
-            enable_hf_model_gradient_checkpointing(self.llm)
-            enable_hf_model_gradient_checkpointing(self.visual_encoder)
-
-            self.projector.enable_input_require_grads()
-            self.projector.gradient_checkpointing_enable()
-
-        self.use_llm_lora = llm_lora is not None
-        self.use_visual_encoder_lora = visual_encoder_lora is not None
-
+        self.with_lora = llm_lora is not None
         # Prepare the model for LoRA if specified
-        if self.use_llm_lora:
+        if self.with_lora:
             lora_conf = build_from_cfg_or_obj(llm_lora, accept=LoraConfig)
-            self.llm = prepare_for_llm_lora(self.llm, lora_conf,
-                                            use_activation_checkpointing)
-
-        if self.use_visual_encoder_lora:
-            lora_conf = build_from_cfg_or_obj(
-                visual_encoder_lora, accept=LoraConfig)
-            self.visual_encoder = prepare_for_vision_lora(
-                self.visual_encoder, lora_conf, use_activation_checkpointing)
-        self._is_init = True
+            self.llm = prepare_for_llm_lora(self.llm, lora_conf)
 
         # Determines whether to calculate attention based on the
         # seq_len dimension (use_varlen_attn = False) or the actual length of
         # the sequence.
         self.use_varlen_attn = use_varlen_attn
+        dispatch_modules(self.llm, use_varlen_attn=use_varlen_attn)
 
-    def init_weights(self):
-        """Parent class method.
+        if visual_encoder:
+            visual_encoder = build_from_cfg_or_obj(visual_encoder,
+                                                   EncoderWrapper)
+            self.visual_encoder: EncoderWrapper = visual_encoder
+            _proj_config = ProjectorConfig(
+                visual_hidden_size=self.visual_encoder.hidden_size,
+                llm_hidden_size=self.llm.config.hidden_size,
+                depth=proj_depth)
 
-        To avoid overwriting the loaded weights, overload it to an empty
-        function.
-        """
-        pass
+            self.visual_encoder.post_init_proj(_proj_config)
+        else:
+            self.visual_encoder = None
+
+        if audio_encoder:
+            audio_encoder = build_from_cfg_or_obj(audio_encoder,
+                                                  EncoderWrapper)
+            self.audio_encoder: EncoderWrapper = audio_encoder
+            _proj_config = ProjectorConfig(
+                visual_hidden_size=self.audio_encoder.hidden_size,
+                llm_hidden_size=self.llm.config.hidden_size,
+                depth=proj_depth)
+
+            self.audio_encoder.post_init_proj(_proj_config)
+        else:
+            self.audio_encoder = None
+
+        if video_encoder:
+            video_encoder = build_from_cfg_or_obj(video_encoder,
+                                                  EncoderWrapper)
+            self.video_encoder: EncoderWrapper = video_encoder
+            _proj_config = ProjectorConfig(
+                visual_hidden_size=self.video_encoder.hidden_size,
+                llm_hidden_size=self.llm.config.hidden_size,
+                depth=proj_depth)
+
+            self.video_encoder.post_init_proj(_proj_config)
+        else:
+            self.video_encoder = None
+
+        if use_gradient_checkpointing:
+            self.gradient_checkpointing_enable()
+
+        self.avoid_override_weights()
+
+    @property
+    def llm(self) -> PreTrainedModel:
+        return self._llm
+
+    @property
+    def tokenizer(self) -> PreTrainedTokenizer:
+        return self._tokenizer
+
+    @property
+    def chat_template(self) -> HybridChatTemplate:
+        return self._chat_template
+
+    def gradient_checkpointing_enable(self):
+        # For backward compatibility
+        if hasattr(self.llm, 'enable_input_require_grads'):
+            self.llm.enable_input_require_grads()
+        else:
+
+            def make_inputs_require_grad(module, input, output):
+                output.requires_grad_(True)
+
+            self.llm.get_input_embeddings().register_forward_hook(
+                make_inputs_require_grad)
+
+        # enable gradient checkpointing for memory efficiency
+        self.llm.gradient_checkpointing_enable()
+        self.visual_encoder.gradient_checkpointing_enable()
 
     def forward(self, data, data_samples=None, mode='loss'):
         """Overload parent class method, only support training."""
@@ -132,10 +167,7 @@ class HybridFinetune(BaseModel):
 
             batch_total_imgs = len(img_rngs)
 
-            visual_outputs = self.visual_encoder(
-                pixel_values, output_hidden_states=True)
-            features = self.projector(
-                visual_outputs.hidden_states[self.visual_select_layer][:, 1:])
+            features = self.visual_encoder(pixel_values)
             batch_total_imgs, real_img_tokens, _ = features.shape
 
             for i in range(batch_total_imgs):
@@ -144,12 +176,12 @@ class HybridFinetune(BaseModel):
                 img_emb = features[i]
                 img_bs_ind = img_belongs[i]
 
+                # pack 导致的截断
                 if real_img_tokens == exp_img_tokens:
                     img_embeds.append(img_emb)
-                elif not real_img_tokens == exp_img_tokens and img_start == 0:
+                elif real_img_tokens != exp_img_tokens and img_start == 0:
                     img_embeds.append(img_emb[real_img_tokens - img_end:])
-                elif (not real_img_tokens == exp_img_tokens
-                      and img_end == tokens):
+                elif (real_img_tokens != exp_img_tokens and img_end == tokens):
                     img_embeds.append(img_emb[:exp_img_tokens])
                 else:
                     raise RuntimeError
@@ -176,13 +208,8 @@ class HybridFinetune(BaseModel):
 
         return flat_embeds + _empty_embeds
 
-    def compute_loss(self, data):
-
+    def _compute_postion_ids(self, data):
         input_ids = data['input_ids']
-        labels = data['labels']
-        # position_ids = data['position_ids']
-        attention_mask = data['attention_mask']
-        # breakpoint()
         bs, tokens = input_ids.shape
         if self.use_varlen_attn:
             assert bs == 1
@@ -206,12 +233,23 @@ class HybridFinetune(BaseModel):
 
             position_ids = torch.arange(0, tokens).unsqueeze(0).repeat(bs, 1)
 
+    def compute_loss(self, data):
+
+        input_ids = data['input_ids']
+        labels = data['labels']
+        attention_mask = data['attention_mask']
+
+        bs, tokens = input_ids.shape
+        position_ids = self._compute_postion_ids(data)
+
         input_embeds = self.llm.get_input_embeddings()(input_ids)
 
         bs, tokens, dim = input_embeds.shape
         flat_embeds = input_embeds.flatten(0, 1)
 
         img_embs, flat_bs_img_rngs = self._get_vision_embeds_and_ranges(data)
+        # audio_embs, flat_bs_img_rngs = self._get_vision_embeds_and_ranges(data)
+        # video_embs, flat_bs_img_rngs = self._get_vision_embeds_and_ranges(data)
         flat_embeds = self._insert_mm_embeddings(flat_embeds, img_embs,
                                                  flat_bs_img_rngs)
         input_embeds = flat_embeds.reshape(bs, tokens, dim)
@@ -229,32 +267,22 @@ class HybridFinetune(BaseModel):
     def state_dict(self, *args, **kwargs):
         state_dict = super().state_dict(*args, **kwargs)
         to_return = OrderedDict()
-        # Step 1. visual_encoder
-        if self.use_visual_encoder_lora:
-            to_return.update(
-                get_peft_model_state_dict(
-                    self.visual_encoder, state_dict=state_dict))
-        elif not self.freeze_visual_encoder:
-            to_return.update({
-                k: v
-                for k, v in state_dict.items() if 'visual_encoder.' in k
-            })
-        # Step 2. LLM
+
+        # Step 1. LLM
         if self.use_llm_lora:
             to_return.update(
                 get_peft_model_state_dict(self.llm, state_dict=state_dict))
         elif not self.freeze_llm:
             to_return.update(
                 {k: v
-                 for k, v in state_dict.items() if 'llm.' in k})
-        # Step 3. Projector
+                 for k, v in state_dict.items() if '_llm.' in k})
+
+        # Step 2. Visual Encoder
         to_return.update(
             {k: v
-             for k, v in state_dict.items() if 'projector.' in k})
+             for k, v in state_dict.items() if 'visual_encoder.' in k})
         return to_return
 
-    def __getattr__(self, name: str):
-        try:
-            return super().__getattr__(name)
-        except AttributeError:
-            return getattr(self.llm, name)
+    def chat(self, messages: HybridChatMessages, sample_params, streamer):
+
+        prompt = messages.apply_chat_template(self.chat_template)
