@@ -17,11 +17,13 @@
 
 ## 速度
 
-![llama2_7b](https://github.com/InternLM/xtuner/assets/41630003/e67035a3-91f8-43c0-96ab-b0eefdefd966)
+![llama2_7b](https://github.com/InternLM/xtuner/assets/41630003/c272a178-1e09-455e-8a23-28c2f2f3fd1c)
 
-![yi_34b](https://github.com/InternLM/xtuner/assets/41630003/b00c2a51-cf7d-4ac7-aed8-68e7943f1740)
+![yi_34b](https://github.com/InternLM/xtuner/assets/41630003/e718c123-6e52-49fb-ac68-1ae40facd538)
 
-![llama2_70b](https://github.com/InternLM/xtuner/assets/41630003/fdc6b829-a17b-4106-8adf-8c5201d8e74f)
+![llama2_70b](https://github.com/InternLM/xtuner/assets/41630003/28ec4c0e-7dec-4804-bd60-7c448fa8749c)
+
+<div align="center">
 
 |        |   模型    | GPU 数量 | 上下文长度 | 速度 (tokens per second) |                                                               训练 config                                                                |
 | :----: | :-------: | :------: | :--------: | :----------------------: | :--------------------------------------------------------------------------------------------------------------------------------------: |
@@ -44,6 +46,8 @@
 | XTuner | Llama2-70B |    32    |    32k     |        **227.6**         |   [llama2_70b_full_alpaca_enzh_32k_sp4.py](../../../xtuner/configs/llama_speed_benchmark/llama2_70b/llama2_70b_full_alpaca_enzh_32k_sp4.py)   |
 | XTuner | Llama2-70B |    32    |    128k    |        **175.6**         |  [llama2_70b_full_alpaca_enzh_128k_sp8.py](../../../xtuner/configs/llama_speed_benchmark/llama2_70b/llama2_70b_full_alpaca_enzh_128k_sp8.py)  |
 | XTuner | Llama2-70B |    32    |    256k    |        **108.8**         | [llama2_70b_full_alpaca_enzh_256k_sp16.py](../../../xtuner/configs/llama_speed_benchmark/llama2_70b/llama2_70b_full_alpaca_enzh_256k_sp16.py) |
+
+</div>
 
 注：所有实验都会将 Alpaca 数据集拼接为最大长度。由于 Alpaca 数据集所含 token 数较少，无法拼接成超长序列（如 1M 长度），因此当序列长度较长时，会对 XTuner 代码进行如下修改：
 
