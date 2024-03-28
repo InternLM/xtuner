@@ -17,7 +17,7 @@ from xtuner.parallel.sequence import (get_sequence_parallel_world_size,
                                       reduce_sequence_parallel_loss)
 from xtuner.registry import BUILDER
 from .modules import dispatch_modules
-from .modules.dispatch import SUPPORT_FLASH2
+from .modules.dispatch import SUPPORT_FLASH1, SUPPORT_FLASH2
 from .utils import (LoadWoInit, find_all_linear_names,
                     get_peft_model_state_dict, make_inputs_require_grad,
                     traverse_dict)
@@ -144,10 +144,8 @@ class SupervisedFinetune(BaseModel):
     def init_weights(self):
         pass
 
-    def _prepare_for_long_context_training(self, cfg, max_position_embeddings):
-        pretrained_model_name_or_path = cfg.pretrained_model_name_or_path
-        config = AutoConfig.from_pretrained(
-            pretrained_model_name_or_path, trust_remote_code=True)
+    @staticmethod
+    def _prepare_for_long_context_training(config, max_position_embeddings):
 
         orig_rope_scaling = getattr(config, 'rope_scaling', None)
         if orig_rope_scaling is None:
@@ -169,6 +167,35 @@ class SupervisedFinetune(BaseModel):
         # hardcode for internlm2
         config.attn_implementation = 'flash_attention_2'
 
+        return config
+
+    @staticmethod
+    def _prepare_for_flash_attn(config):
+        cls_name = type(config).__name__
+        SUPPORT_SDPA_ATTN = ('LlamaConfig', 'GemmaConfig', 'MistralConfig',
+                             'MixtralConfig', 'Qwen2Config',
+                             'Starcoder2Config', 'Starcoder2Config')
+        SUPPORT_FLASH_ATTN2 = ('InternLM2Config', 'LlamaConfig', 'GemmaConfig',
+                               'MistralConfig', 'MixtralConfig', 'Qwen2Config',
+                               'Starcoder2Config', 'Starcoder2Config')
+
+        if SUPPORT_FLASH2 and cls_name in SUPPORT_FLASH_ATTN2:
+            config.torch_dtype = torch.bfloat16 \
+                if torch.cuda.is_bf16_supported() else torch.float16
+            config.attn_implementation = 'flash_attention_2'
+        elif SUPPORT_FLASH1 and cls_name in SUPPORT_SDPA_ATTN:
+            config.attn_implementation = 'sdpa'
+
+        return config
+
+    def _dispatch_cfg(self, cfg, max_position_embeddings=None):
+        pretrained_model_name_or_path = cfg.pretrained_model_name_or_path
+        config = AutoConfig.from_pretrained(
+            pretrained_model_name_or_path, trust_remote_code=True)
+        config = self._prepare_for_flash_attn(config)
+        if max_position_embeddings is not None:
+            config = self._prepare_for_long_context_training(
+                config, max_position_embeddings)
         cfg.config = config
         return cfg
 
@@ -179,14 +206,8 @@ class SupervisedFinetune(BaseModel):
             return cfg_or_mod
         elif isinstance(cfg_or_mod, dict):
             traverse_dict(cfg_or_mod)
-            if SUPPORT_FLASH2:
-                cfg_or_mod.torch_dtype = torch.bfloat16 \
-                    if torch.cuda.is_bf16_supported() else torch.float16
-                cfg_or_mod.attn_implementation = 'flash_attention_2'
-            if max_position_embeddings is not None:
-                cfg_or_mod = self._prepare_for_long_context_training(
-                    cfg_or_mod, max_position_embeddings)
-            return BUILDER.build(cfg_or_mod)
+            cfg = self._dispatch_cfg(cfg_or_mod, max_position_embeddings)
+            return BUILDER.build(cfg)
         else:
             raise NotImplementedError
 
