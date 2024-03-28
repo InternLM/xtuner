@@ -48,7 +48,7 @@ def dispatch_llama_attn_forward(model, use_varlen_attn):
     if use_varlen_attn:
         assert SUPPORT_FLASH2 and SUPPORT_TRITON, \
             'flash_attn and triton is required if you want to use varlen_attn.'
-    elif not SUPPORT_FLASH:
+    elif not SUPPORT_FLASH2:
         return
 
     from .llama import (llama_attn_forward, llama_attn_forward_legacy,
@@ -57,8 +57,10 @@ def dispatch_llama_attn_forward(model, use_varlen_attn):
 
     print_log(NO_ATTN_WEIGHTS_MSG, 'current', logging.WARNING)
     for module in model.modules():
-        if type(module).__name__ in ('LlamaAttention', 'LlamaFlashAttention2',
-                                     'LlamaSdpaAttention'):
+        # Do not need to dispatch if
+        # type(module).__name__ == 'LlamaSdpaAttention', as flash_attn is
+        # required when using sequence parallel
+        if type(module).__name__ in ('LlamaAttention', 'LlamaFlashAttention2'):
             if use_varlen_attn:
                 print_log('dispatch llama varlen attn forward', 'current')
                 if IS_LOW_VERSION_TRANSFORMERS:

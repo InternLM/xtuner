@@ -157,19 +157,6 @@ def flash_attn_w_mask(
 
 
 @sequence_parallel_wrapper
-def flash_attn1_pytorch(query_states, key_states, value_states, *args,
-                        **kwargs):
-    # hacky: pytorch flash attn need (bs, n_head, seq_len, h_dim)
-    query_states = query_states.transpose(1, 2)
-    key_states = key_states.transpose(1, 2)
-    value_states = value_states.transpose(1, 2)
-    attn_output = F.scaled_dot_product_attention(query_states, key_states,
-                                                 value_states, *args, **kwargs)
-    attn_output = attn_output.transpose(1, 2)
-    return attn_output
-
-
-@sequence_parallel_wrapper
 def varlen_flash_attn(query_states, key_states, value_states, cumulative_len,
                       max_seqlen):
     q_unpad, k_unpad, v_unpad = query_states.flatten(0, 1), key_states.flatten(
@@ -251,12 +238,12 @@ def internlm2_attn_forward(
     key_states = repeat_kv(key_states, self.num_key_value_groups)
     value_states = repeat_kv(value_states, self.num_key_value_groups)
 
-    # flash attn 2 need (bs, seq_len, nhead, h_dim)
-    query_states = query_states.transpose(1, 2)
-    key_states = key_states.transpose(1, 2)
-    value_states = value_states.transpose(1, 2)
-
     if SUPPORT_FLASH2:
+        # flash attn 2 need (bs, seq_len, nhead, h_dim)
+        query_states = query_states.transpose(1, 2)
+        key_states = key_states.transpose(1, 2)
+        value_states = value_states.transpose(1, 2)
+
         causal = self.is_causal and q_len != 1
 
         if attention_mask is not None:
@@ -276,12 +263,10 @@ def internlm2_attn_forward(
                 training=self.training)
     else:
         # use flash attention implemented by pytorch
-        attn_output = flash_attn1_pytorch(
-            query_states,
-            key_states,
-            value_states,
-            attn_mask=attention_mask,
-            training=self.training)
+        # do not support sequence parallel
+        attn_output = F.scaled_dot_product_attention(
+            query_states, key_states, value_states, attn_mask=attention_mask)
+        attn_output = attn_output.transpose(1, 2)
 
     attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
     attn_output = self.wo(attn_output)

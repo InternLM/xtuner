@@ -19,6 +19,7 @@ from transformers import TrainingArguments
 from xtuner.configs import cfgs_name_path
 from xtuner.dataset.collate_fns import default_collate_fn
 from xtuner.model.modules import dispatch_modules
+from xtuner.model.modules.dispatch import SUPPORT_FLASH2
 from xtuner.model.utils import LoadWoInit, find_all_linear_names, traverse_dict
 from xtuner.registry import BUILDER, MAP_FUNC
 from xtuner.tools.utils import (auto_dtype_of_deepspeed_config,
@@ -99,6 +100,10 @@ def check_cfg(cfg):
                  'divided by sequence parallel world size, but got '
                  f'max_length = {max_length} and sequence_parallel = '
                  f'{sequence_parallel}')
+
+    if getattr(cfg, 'sequence_parallel_size', 1) > 1:
+        assert SUPPORT_FLASH2, ('`flash_attn` is required if you want to use '
+                                'sequence parallel.')
 
 
 def main():

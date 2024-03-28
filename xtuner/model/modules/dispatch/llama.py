@@ -4,7 +4,6 @@ from typing import Optional, Tuple
 
 import torch
 import torch.distributed as dist
-import torch.nn.functional as F
 from mmengine import MessageHub
 from transformers.models.llama.modeling_llama import (apply_rotary_pos_emb,
                                                       repeat_kv)
@@ -87,19 +86,6 @@ def flash_attn_w_mask(
 
 
 @sequence_parallel_wrapper
-def flash_attn1_pytorch(query_states, key_states, value_states, *args,
-                        **kwargs):
-    # hacky: pytorch flash attn need (bs, n_head, seq_len, h_dim)
-    query_states = query_states.transpose(1, 2)
-    key_states = key_states.transpose(1, 2)
-    value_states = value_states.transpose(1, 2)
-    attn_output = F.scaled_dot_product_attention(query_states, key_states,
-                                                 value_states, *args, **kwargs)
-    attn_output = attn_output.transpose(1, 2)
-    return attn_output
-
-
-@sequence_parallel_wrapper
 def varlen_flash_attn(query_states,
                       key_states,
                       value_states,
@@ -171,75 +157,64 @@ def llama_attn_forward(
         key_states, value_states = past_key_value.update(
             key_states, value_states, self.layer_idx, cache_kwargs)
 
-    if SUPPORT_FLASH2:
+    key_states = repeat_kv(key_states, self.num_key_value_groups)
+    value_states = repeat_kv(value_states, self.num_key_value_groups)
 
-        # In PEFT, usually we cast the layer norms in float32 for training
-        # stability reasons therefore the input hidden states gets silently
-        # casted in float32. Hence, we need cast them back in the correct dtype
-        # just to be sure everything works as expected.
-        # This might slowdown training & inference so it is recommended to not
-        # cast the LayerNorms in fp32. (LlamaRMSNorm handles it correctly)
+    assert SUPPORT_FLASH2
+    query_states = query_states.transpose(1, 2)
+    key_states = key_states.transpose(1, 2)
+    value_states = value_states.transpose(1, 2)
 
-        input_dtype = query_states.dtype
-        if input_dtype == torch.float32:
-            if torch.is_autocast_enabled():
-                target_dtype = torch.get_autocast_gpu_dtype()
-            # Handle the case where the model is quantized
-            elif hasattr(self.config, '_pre_quantization_dtype'):
-                target_dtype = self.config._pre_quantization_dtype
-            else:
-                target_dtype = self.q_proj.weight.dtype
+    # In PEFT, usually we cast the layer norms in float32 for training
+    # stability reasons therefore the input hidden states gets silently
+    # casted in float32. Hence, we need cast them back in the correct dtype
+    # just to be sure everything works as expected.
+    # This might slowdown training & inference so it is recommended to not
+    # cast the LayerNorms in fp32. (LlamaRMSNorm handles it correctly)
 
-            query_states = query_states.to(target_dtype)
-            key_states = key_states.to(target_dtype)
-            value_states = value_states.to(target_dtype)
-
-        query_states = query_states.transpose(1, 2)
-        key_states = key_states.transpose(1, 2)
-        value_states = value_states.transpose(1, 2)
-
-        dropout_rate = self.attention_dropout if self.training else 0.0
-
-        if is_flash_attn_greater_or_equal_2_10():
-            causal = self.is_causal
+    input_dtype = query_states.dtype
+    if input_dtype == torch.float32:
+        if torch.is_autocast_enabled():
+            target_dtype = torch.get_autocast_gpu_dtype()
+        # Handle the case where the model is quantized
+        elif hasattr(self.config, '_pre_quantization_dtype'):
+            target_dtype = self.config._pre_quantization_dtype
         else:
-            # TODO: Remove the `q_len != 1` check once Flash Attention for RoCm
-            # is bumped to 2.1. For details, please see the comment in
-            # LlamaFlashAttention2 __init__.
-            causal = self.is_causal and q_len != 1
+            target_dtype = self.q_proj.weight.dtype
 
-        # repeat kv for sequence parallel
-        key_states = repeat_kv_bshd(key_states, self.num_key_value_groups)
-        value_states = repeat_kv_bshd(value_states, self.num_key_value_groups)
+        query_states = query_states.to(target_dtype)
+        key_states = key_states.to(target_dtype)
+        value_states = value_states.to(target_dtype)
 
-        if attention_mask is not None:
-            attn_output = flash_attn_w_mask(
-                query_states,
-                key_states,
-                value_states,
-                attention_mask,
-                causal,
-                dropout_rate,
-                training=self.training)
-        else:
-            attn_output = flash_attn_wo_mask(
-                query_states,
-                key_states,
-                value_states,
-                causal,
-                dropout_rate,
-                training=self.training)
+    dropout_rate = self.attention_dropout if self.training else 0.0
+
+    if is_flash_attn_greater_or_equal_2_10():
+        causal = self.is_causal
     else:
-        # repeat k/v heads if n_kv_heads < n_heads
-        key_states = repeat_kv(key_states, self.num_key_value_groups)
-        value_states = repeat_kv(value_states, self.num_key_value_groups)
-        # use flash attention implemented by pytorch
-        attn_output = F.scaled_dot_product_attention(
-            query_states, key_states, value_states, attn_mask=attention_mask)
-        attn_output = attn_output.transpose(1, 2).contiguous()
+        # TODO: Remove the `q_len != 1` check once Flash Attention for RoCm
+        # is bumped to 2.1. For details, please see the comment in
+        # LlamaFlashAttention2 __init__.
+        causal = self.is_causal and q_len != 1
 
-    attn_output = attn_output.reshape(bsz, q_len,
-                                      self.hidden_size).contiguous()
+    if attention_mask is not None:
+        attn_output = flash_attn_w_mask(
+            query_states,
+            key_states,
+            value_states,
+            attention_mask,
+            causal,
+            dropout_rate,
+            training=self.training)
+    else:
+        attn_output = flash_attn_wo_mask(
+            query_states,
+            key_states,
+            value_states,
+            causal,
+            dropout_rate,
+            training=self.training)
+
+    attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
     attn_output = self.o_proj(attn_output)
 
     if not output_attentions:
@@ -303,72 +278,62 @@ def llama_attn_forward_legacy(
         key_states, value_states = past_key_value.update(
             key_states, value_states, self.layer_idx, cache_kwargs)
 
-    if SUPPORT_FLASH2:
+    key_states = repeat_kv(key_states, self.num_key_value_groups)
+    value_states = repeat_kv(value_states, self.num_key_value_groups)
 
-        # In PEFT, usually we cast the layer norms in float32 for training
-        # stability reasons therefore the input hidden states gets silently
-        # casted in float32. Hence, we need cast them back in the correct dtype
-        # just to be sure everything works as expected.
-        # This might slowdown training & inference so it is recommended to not
-        # cast the LayerNorms in fp32. (LlamaRMSNorm handles it correctly)
+    assert SUPPORT_FLASH2
+    query_states = query_states.transpose(1, 2)
+    key_states = key_states.transpose(1, 2)
+    value_states = value_states.transpose(1, 2)
 
-        input_dtype = query_states.dtype
-        if input_dtype == torch.float32:
-            if torch.is_autocast_enabled():
-                target_dtype = torch.get_autocast_gpu_dtype()
-            # Handle the case where the model is quantized
-            elif hasattr(self.config, '_pre_quantization_dtype'):
-                target_dtype = self.config._pre_quantization_dtype
-            else:
-                target_dtype = self.q_proj.weight.dtype
+    # In PEFT, usually we cast the layer norms in float32 for training
+    # stability reasons therefore the input hidden states gets silently
+    # casted in float32. Hence, we need cast them back in the correct dtype
+    # just to be sure everything works as expected.
+    # This might slowdown training & inference so it is recommended to not
+    # cast the LayerNorms in fp32. (LlamaRMSNorm handles it correctly)
 
-            query_states = query_states.to(target_dtype)
-            key_states = key_states.to(target_dtype)
-            value_states = value_states.to(target_dtype)
-
-        query_states = query_states.transpose(1, 2)
-        key_states = key_states.transpose(1, 2)
-        value_states = value_states.transpose(1, 2)
-
-        dropout_rate = self.attention_dropout if self.training else 0.0
-
-        if is_flash_attn_greater_or_equal_2_10():
-            causal = self.is_causal
+    input_dtype = query_states.dtype
+    if input_dtype == torch.float32:
+        if torch.is_autocast_enabled():
+            target_dtype = torch.get_autocast_gpu_dtype()
+        # Handle the case where the model is quantized
+        elif hasattr(self.config, '_pre_quantization_dtype'):
+            target_dtype = self.config._pre_quantization_dtype
         else:
-            # TODO: Remove the `q_len != 1` check once Flash Attention for RoCm
-            # is bumped to 2.1. For details, please see the comment in
-            # LlamaFlashAttention2 __init__.
-            causal = self.is_causal and q_len != 1
+            target_dtype = self.q_proj.weight.dtype
 
-        # repeat kv for sequence parallel
-        key_states = repeat_kv_bshd(key_states, self.num_key_value_groups)
-        value_states = repeat_kv_bshd(value_states, self.num_key_value_groups)
+        query_states = query_states.to(target_dtype)
+        key_states = key_states.to(target_dtype)
+        value_states = value_states.to(target_dtype)
 
-        if attention_mask is not None:
-            attn_output = flash_attn_w_mask(
-                query_states,
-                key_states,
-                value_states,
-                attention_mask,
-                causal,
-                dropout_rate,
-                training=self.training)
-        else:
-            attn_output = flash_attn_wo_mask(
-                query_states,
-                key_states,
-                value_states,
-                causal,
-                dropout_rate,
-                training=self.training)
+    dropout_rate = self.attention_dropout if self.training else 0.0
+
+    if is_flash_attn_greater_or_equal_2_10():
+        causal = self.is_causal
     else:
-        # repeat k/v heads if n_kv_heads < n_heads
-        key_states = repeat_kv(key_states, self.num_key_value_groups)
-        value_states = repeat_kv(value_states, self.num_key_value_groups)
-        # use flash attention implemented by pytorch
-        attn_output = F.scaled_dot_product_attention(
-            query_states, key_states, value_states, attn_mask=attention_mask)
-        attn_output = attn_output.transpose(1, 2).contiguous()
+        # TODO: Remove the `q_len != 1` check once Flash Attention for RoCm
+        # is bumped to 2.1. For details, please see the comment in
+        # LlamaFlashAttention2 __init__.
+        causal = self.is_causal and q_len != 1
+
+    if attention_mask is not None:
+        attn_output = flash_attn_w_mask(
+            query_states,
+            key_states,
+            value_states,
+            attention_mask,
+            causal,
+            dropout_rate,
+            training=self.training)
+    else:
+        attn_output = flash_attn_wo_mask(
+            query_states,
+            key_states,
+            value_states,
+            causal,
+            dropout_rate,
+            training=self.training)
 
     attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
     attn_output = self.o_proj(attn_output)
