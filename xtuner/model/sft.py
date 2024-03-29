@@ -206,13 +206,6 @@ class SupervisedFinetune(BaseModel):
             return cfg_or_mod
         elif isinstance(cfg_or_mod, dict):
             traverse_dict(cfg_or_mod)
-            if SUPPORT_FLASH2:
-                cfg_or_mod.torch_dtype = torch.bfloat16 \
-                    if torch.cuda.is_bf16_supported() else torch.float16
-                cfg_or_mod.attn_implementation = 'flash_attention_2'
-            if max_position_embeddings is not None:
-                cfg_or_mod = self._prepare_for_long_context_training(
-                    cfg_or_mod, max_position_embeddings)
             return BUILDER.build(cfg_or_mod)
         else:
             raise NotImplementedError

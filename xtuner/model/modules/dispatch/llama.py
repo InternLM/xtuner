@@ -234,16 +234,11 @@ def llama_attn_forward_legacy(
     **kwargs,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor],
            Optional[Tuple[torch.Tensor]]]:
-    # LlamaFlashAttention2 attention does not support output_attentions
+    # Modified from https://github.com/huggingface/transformers/blob/ced9fd86f55ebb6b656c273f6e23f8ba50652f83/src/transformers/models/llama/modeling_llama.py#L331  # noqa:E501
     if 'padding_mask' in kwargs:
         warnings.warn(
-            'Passing `padding_mask` is deprecated and will be removed in v4.37'
-            ' Please make sure use `attention_mask` instead.`')
-
-        # overwrite attention_mask with padding_mask
-        attention_mask = kwargs.pop('padding_mask')
-
-    output_attentions = False
+            'Passing `padding_mask` is deprecated and will be removed in '
+            'v4.37. Please make sure use `attention_mask` instead.`')
 
     bsz, q_len, _ = hidden_states.size()
 
@@ -251,9 +246,6 @@ def llama_attn_forward_legacy(
     key_states = self.k_proj(hidden_states)
     value_states = self.v_proj(hidden_states)
 
-    # Flash attention requires the input to have the shape
-    # batch_size x seq_length x head_dim x hidden_dim
-    # therefore we just need to keep the original shape
     query_states = query_states.view(bsz, q_len, self.num_heads,
                                      self.head_dim).transpose(1, 2)
     key_states = key_states.view(bsz, q_len, self.num_key_value_heads,
@@ -263,6 +255,13 @@ def llama_attn_forward_legacy(
 
     kv_seq_len = key_states.shape[-2]
     if past_key_value is not None:
+        if self.layer_idx is None:
+            raise ValueError(
+                'The cache structure has changed since version v4.36. '
+                f'If you are using {self.__class__.__name__} '
+                'for auto-regressive decoding with k/v caching, '
+                'please make sure to initialize the attention class '
+                'with a layer index.')
         kv_seq_len += past_key_value.get_usable_length(kv_seq_len,
                                                        self.layer_idx)
     assert position_ids is not None
@@ -281,10 +280,6 @@ def llama_attn_forward_legacy(
 
     key_states = repeat_kv(key_states, self.num_key_value_groups)
     value_states = repeat_kv(value_states, self.num_key_value_groups)
-
-    # repeat kv for sequence parallel
-    key_states = repeat_kv_bshd(key_states, self.num_key_value_groups)
-    value_states = repeat_kv_bshd(value_states, self.num_key_value_groups)
 
     assert SUPPORT_FLASH2
     query_states = query_states.transpose(1, 2)
