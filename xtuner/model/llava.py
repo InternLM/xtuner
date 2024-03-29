@@ -7,7 +7,7 @@ import torch.nn as nn
 from mmengine.config import Config, ConfigDict
 from mmengine.model import BaseModel
 from peft import get_peft_model, prepare_model_for_kbit_training
-from transformers import AutoConfig
+from transformers import AutoConfig, GenerationConfig
 
 from xtuner.registry import BUILDER
 from .modules import ProjectorConfig, ProjectorModel, dispatch_modules
@@ -16,6 +16,10 @@ from .utils import (LoadWoInit, find_all_linear_names,
                     get_peft_model_state_dict, guess_load_checkpoint,
                     make_inputs_require_grad,
                     prepare_inputs_labels_for_multimodal, traverse_dict)
+from xtuner.tools.utils import get_stop_criteria
+from xtuner.dataset.utils import expand2square, load_image
+from xtuner.utils import (DEFAULT_IMAGE_TOKEN, IMAGE_TOKEN_INDEX,
+                          StopWordStoppingCriteria)
 
 
 class LLaVAModel(BaseModel):
@@ -31,7 +35,10 @@ class LLaVAModel(BaseModel):
                  llm_lora=None,
                  visual_encoder_lora=None,
                  use_activation_checkpointing=True,
-                 max_position_embeddings=None):
+                 max_position_embeddings=None,
+                 image_processor=None,
+                 tokenizer=None,
+                 template=None):
         super().__init__()
         self.freeze_llm = freeze_llm
         self.freeze_visual_encoder = freeze_visual_encoder
@@ -57,6 +64,7 @@ class LLaVAModel(BaseModel):
         if self.freeze_visual_encoder:
             self.visual_encoder.requires_grad_(False)
 
+        self.use_activation_checkpointing = use_activation_checkpointing
         if use_activation_checkpointing:
             # For backward compatibility
             if hasattr(self.llm, 'enable_input_require_grads'):
@@ -93,6 +101,15 @@ class LLaVAModel(BaseModel):
 
         self._is_init = True
 
+        self.tokenizer = tokenizer
+        if tokenizer is not None:
+            self.tokenizer = BUILDER.build(tokenizer)
+        self.image_processor = image_processor
+        if image_processor is not None:
+            self.image_processor = BUILDER.build(image_processor)
+        self.template = template
+
+
     def _parse_lora_config(self, lora_config):
         if isinstance(lora_config, dict) or isinstance(
                 lora_config, Config) or isinstance(lora_config, ConfigDict):
@@ -120,15 +137,17 @@ class LLaVAModel(BaseModel):
         self.visual_encoder = get_peft_model(self.visual_encoder, lora_config)
 
     def gradient_checkpointing_enable(self):
-        self.activation_checkpointing_enable()
+        if self.use_activation_checkpointing:
+            self.activation_checkpointing_enable()
+
+    def gradient_checkpointing_disable(self):
+        if self.use_activation_checkpointing:
+            self.activation_checkpointing_disable()
 
     def activation_checkpointing_enable(self):
         self.llm.gradient_checkpointing_enable()
         self.visual_encoder.gradient_checkpointing_enable()
         self.projector.gradient_checkpointing_enable()
-
-    def gradient_checkpointing_disable(self):
-        self.activation_checkpointing_disable()
 
     def activation_checkpointing_disable(self):
         self.llm.gradient_checkpointing_disable()
@@ -230,7 +249,7 @@ class LLaVAModel(BaseModel):
         else:
             raise NotImplementedError
 
-    def forward(self, data, data_samples=None, mode='loss'):
+    def _prepare_data_for_llm(self, data):
         if 'pixel_values' in data:
             visual_outputs = self.visual_encoder(
                 data['pixel_values'].to(self.visual_encoder.dtype),
@@ -239,34 +258,109 @@ class LLaVAModel(BaseModel):
                 visual_outputs.hidden_states[self.visual_select_layer][:, 1:])
             data['pixel_values'] = pixel_values
             data = prepare_inputs_labels_for_multimodal(llm=self.llm, **data)
+        return data
+
+    def forward(self, data, data_samples=None, mode='loss'):
+        data = self._prepare_data_for_llm(data)
 
         if mode == 'loss':
             return self.compute_loss(data, data_samples)
-        elif mode == 'predict':
-            return self.predict(data, data_samples)
-        elif mode == 'tensor':
-            return self._forward(data, data_samples)
+        elif mode == 'predict' or mode == 'generate':
+            return self.generate(data, data_samples)
+        elif mode == 'chat':
+            return self.chat(data)
         else:
             raise NotImplementedError
-
-    def _forward(self, data, data_samples=None):
-
-        outputs = self.llm(**data)
-
-        return outputs
-
-    def predict(self, data, data_samples=None):
-        outputs = self.llm(**data)
-        logits_dict = [{'logits': logits} for logits in outputs.logits]
-        return logits_dict
 
     def compute_loss(self, data, data_samples=None):
         outputs = self.llm(**data)
         loss_dict = {'loss': outputs.loss}
         return loss_dict
 
-    def __getattr__(self, name: str):
-        try:
-            return super().__getattr__(name)
-        except AttributeError:
-            return getattr(self.llm, name)
+    def preparing_for_generation(self, metainfo: dict = None):
+        default_generation_kwargs = dict(
+            max_new_tokens=100,
+            do_sample=False,
+            eos_token_id=self.tokenizer.eos_token_id,
+            pad_token_id=self.tokenizer.pad_token_id
+            if self.tokenizer.pad_token_id is not None else
+            self.tokenizer.eos_token_id)
+        default_generation_kwargs.update(metainfo.get('generation_kwargs', {}))
+        self.gen_config = GenerationConfig(**default_generation_kwargs)
+
+        stop_words = []
+        stop_words += self.template.get('STOP_WORDS', [])
+        stop_criteria = get_stop_criteria(
+            tokenizer=self.tokenizer, stop_words=stop_words)
+        self.stop_criteria = stop_criteria
+
+    def generate(self, data, data_samples=None):
+        # TODO: It is the direct output of the dataset without going through the dataloader.
+        input_ids = data['input_ids'].unsqueeze(0).to(self.visual_encoder.device)
+        data['input_ids'] = input_ids
+        pixel_values = data['pixel_values'].unsqueeze(0).to(self.visual_encoder.device)
+        data['pixel_values'] = pixel_values
+
+        mm_inputs = self._prepare_data_for_llm(data)
+        generate_output = self.llm.generate(
+            **mm_inputs,
+            generation_config=self.gen_config,
+            streamer=None,
+            bos_token_id=self.tokenizer.bos_token_id,
+            stopping_criteria=self.stop_criteria)
+
+        prediction = self.tokenizer.decode(
+            generate_output[0], skip_special_tokens=True).strip()
+
+        return dict(prediction=prediction)
+
+    def chat(self, data, system=''):
+        # single image and single text mode
+        instruction = self.template.get('INSTRUCTION', '{input}')
+
+        sample_image = data['img']
+        sample_input = data['text']
+
+        image = expand2square(
+            sample_image,
+            tuple(int(x * 255) for x in self.image_processor.image_mean))
+        image = self.image_processor.preprocess(
+            image, return_tensors='pt')['pixel_values'][0]
+        image = image.to(self.visual_encoder.device)
+        sample_input = DEFAULT_IMAGE_TOKEN + '\n' + sample_input
+        if system != '':
+            system = self.template.get(
+                'SYSTEM', '{system}\n').format(system=system)
+
+        inputs = (system + instruction).format(input=sample_input, round=1)
+        chunk_encode = []
+        for idx, chunk in enumerate(inputs.split(DEFAULT_IMAGE_TOKEN)):
+            if idx == 0:
+                cur_encode = self.tokenizer.encode(chunk)
+            else:
+                cur_encode = self.tokenizer.encode(
+                    chunk, add_special_tokens=False)
+            chunk_encode.append(cur_encode)
+        assert len(chunk_encode) == 2
+        input_ids = []
+        for idx, cur_chunk_encode in enumerate(chunk_encode):
+            input_ids.extend(cur_chunk_encode)
+            if idx != len(chunk_encode) - 1:
+                input_ids.append(IMAGE_TOKEN_INDEX)
+        input_ids = torch.tensor(input_ids).to(self.visual_encoder.device)
+
+        data['input_ids'] = input_ids.unsqueeze(0)
+        data['pixel_values'] = image.unsqueeze(0)
+
+        mm_inputs = self._prepare_data_for_llm(data)
+        generate_output = self.llm.generate(
+            **mm_inputs,
+            generation_config=self.gen_config,
+            streamer=None,
+            bos_token_id=self.tokenizer.bos_token_id,
+            stopping_criteria=self.stop_criteria)
+
+        prediction = self.tokenizer.decode(
+            generate_output[0], skip_special_tokens=True).strip()
+
+        return dict(prediction=prediction, inputs=inputs)

@@ -2,7 +2,16 @@
 from typing import Dict, Optional, Union
 
 from mmengine.runner import IterBasedTrainLoop
+from mmengine.runner import ValLoop as MMENGINE_ValLoop
+from mmengine.runner import TestLoop as MMENGINE_TestLoop
 from torch.utils.data import DataLoader
+from typing import Sequence
+from mmengine.dist import broadcast_object_list, is_main_process, get_world_size, get_rank,barrier, collect_results
+from xtuner.registry import BUILDER
+import math
+from tqdm import tqdm
+import torch
+from mmengine.runner.amp import autocast
 
 
 class TrainLoop(IterBasedTrainLoop):
@@ -38,3 +47,183 @@ class TrainLoop(IterBasedTrainLoop):
                 raise NotImplementedError
         super().__init__(
             runner=runner, dataloader=dataloader, max_iters=iters, **kwargs)
+
+
+class ValLoop(MMENGINE_ValLoop):
+    def __init__(self,
+                 runner,
+                 dataloader=None,
+                 evaluator=None,
+                 fp16: bool = False,
+                 select_metric='first') -> None:
+        self._runner = runner
+        self.fp16 = fp16
+        self.select_metric = select_metric
+        self.datasets = dataloader['dataset']
+        if not isinstance(self.datasets, Sequence):
+            self.datasets = [self.datasets]
+
+    @property
+    def runner(self):
+        return self._runner
+
+    def _build_dataset(self, dataset_cfg):
+        if is_main_process():
+            dataset = BUILDER.build(dataset_cfg)
+            objects = [dataset]
+        else:
+            objects = [None]
+        dataset = broadcast_object_list(objects)[0]
+        return dataset
+
+    def run(self) -> dict:
+        """Launch validation."""
+        self.runner.call_hook('before_val')
+        self.runner.call_hook('before_val_epoch')
+        self.runner.model.gradient_checkpointing_disable()
+        self.runner.model.eval()
+
+        rank = get_rank()
+        metrics = []
+        for _, dataset_cfg in enumerate(self.datasets):
+            dataset = self._build_dataset(dataset_cfg)
+            assert len(dataset) > 0, 'The dataset is empty'
+
+            self.runner.model.preparing_for_generation(dataset.get('metainfo', None))
+
+            results = []
+            n_samples = len(dataset)
+            per_rank_samples = math.ceil(n_samples / get_world_size())
+            per_rank_ids = range(per_rank_samples * rank,
+                                 min(n_samples, per_rank_samples * (rank + 1)))
+            for idx in tqdm(per_rank_ids, desc=f'Rank {rank}'):
+                data_batch = dataset[idx]
+                self.run_iter(idx, data_batch, results)
+
+            barrier()
+            results = collect_results(results, len(dataset))
+
+            if is_main_process():
+                metric = dataset.evaluate(results, self.runner.work_dir)
+                objects = [metric]
+            else:
+                objects = [None]
+            metric = broadcast_object_list(objects)[0]
+            metrics.append(metric)
+            del dataset
+
+        # select metrics
+        if self.select_metric == 'first':
+            metrics = metrics[0]
+        else:
+            raise NotImplementedError
+
+        self.runner.call_hook('after_val_epoch', metrics=metrics)
+        self.runner.call_hook('after_val')
+        self.runner.model.gradient_checkpointing_enable()
+        self.runner.model.train()
+        return metrics
+
+    @torch.no_grad()
+    def run_iter(self, idx, data_batch: Sequence[dict], results: list):
+        """Iterate one mini-batch.
+
+        Args:
+            data_batch (Sequence[dict]): Batch of data
+                from dataloader.
+        """
+        assert 'img_id' in data_batch, 'img_id is required in data_batch. ' \
+                                       'The __getitem__ function in the dataset must ' \
+                                       'return a dictionary with the img_id.'
+        prediction = {'img_id': data_batch['img_id']}
+
+        self.runner.call_hook(
+            'before_val_iter', batch_idx=idx, data_batch=data_batch)
+
+        # outputs should be sequence of BaseDataElement
+        with autocast(enabled=self.fp16):
+            outputs = self.runner.model.val_step(data_batch)
+        prediction['prediction'] = outputs['prediction']
+        results.append(prediction)
+
+        self.runner.call_hook(
+            'after_val_iter',
+            batch_idx=idx,
+            data_batch=data_batch,
+            outputs=outputs)
+
+
+class TestLoop(ValLoop):
+    def run(self) -> dict:
+        """Launch validation."""
+        self.runner.call_hook('before_test')
+        self.runner.call_hook('before_test_epoch')
+        self.runner.model.gradient_checkpointing_disable()
+        self.runner.model.eval()
+
+        rank = get_rank()
+        metrics = []
+        for _, dataset_cfg in enumerate(self.datasets):
+            dataset = self._build_dataset(dataset_cfg)
+            assert len(dataset) > 0, 'The dataset is empty'
+
+            results = []
+            n_samples = len(dataset)
+            per_rank_samples = math.ceil(n_samples / get_world_size())
+            per_rank_ids = range(per_rank_samples * rank,
+                                 min(n_samples, per_rank_samples * (rank + 1)))
+            for idx in tqdm(per_rank_ids, desc=f'Rank {rank}'):
+                data_batch = dataset[idx]
+                self.run_iter(idx, data_batch, results)
+
+            barrier()
+            results = collect_results(results, len(dataset))
+
+            if is_main_process():
+                metric = dataset.evaluate(results, self.runner.work_dir)
+                objects = [metric]
+            else:
+                objects = [None]
+            metric = broadcast_object_list(objects)[0]
+            metrics.append(metric)
+            del dataset
+
+        # select metrics
+        if self.select_metric == 'first':
+            metrics = metrics[0]
+        else:
+            raise NotImplementedError
+        self.runner.call_hook('after_test_epoch', metrics=metrics)
+        self.runner.call_hook('after_test')
+
+        self.runner.model.gradient_checkpointing_enable()
+        self.runner.model.train()
+        return metrics
+
+    @torch.no_grad()
+    def run_iter(self, idx, data_batch: Sequence[dict], results: list):
+        """Iterate one mini-batch.
+
+        Args:
+            data_batch (Sequence[dict]): Batch of data
+                from dataloader.
+        """
+        assert 'img_id' in data_batch, 'img_id is required in data_batch. ' \
+                                       'The __getitem__ function in the dataset must ' \
+                                       'return a dictionary with the img_id.'
+        prediction = {'img_id': data_batch['img_id']}
+
+        self.runner.call_hook(
+            'before_test_iter', batch_idx=idx, data_batch=data_batch)
+
+        # outputs should be sequence of BaseDataElement
+        with autocast(enabled=self.fp16):
+            outputs = self.runner.model.val_step(data_batch)
+        prediction.update(outputs)
+        results.append(prediction)
+
+        self.runner.call_hook(
+            'after_test_iter',
+            batch_idx=idx,
+            data_batch=data_batch,
+            outputs=outputs)
