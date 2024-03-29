@@ -15,6 +15,7 @@ from xtuner.engine.runner import TrainLoop, ValLoop, TestLoop
 from xtuner.utils import PROMPT_TEMPLATE
 from xtuner.model import LLaVAModel
 from xtuner.dataset.evaluation import MMELLaVADataset, MultipleChoiceLLaVADataset
+from xtuner.dataset import ConcatDataset
 
 #######################################################################
 #                          PART 1  Settings                           #
@@ -70,6 +71,7 @@ model = dict(
     type=LLaVAModel,
     tokenizer=tokenizer,
     template=prompt_template,
+    image_processor=image_processor,
     freeze_llm=True,
     freeze_visual_encoder=True,
     llm=dict(
@@ -202,14 +204,15 @@ randomness = dict(seed=None, deterministic=False)
 log_processor = dict(by_epoch=False)
 
 # ==================== val and test cfg =======================
-val_dataset = dict(
-    type=MMELLaVADataset,
-    data_file='/mnt/petrelfs/huanghaian/code/xtuner/LMUData/MME.tsv',
-    image_folder='/mnt/petrelfs/share_data/duanhaodong/data/mme/MME_Benchmark_release',
-    prompt_template=PROMPT_TEMPLATE.vicuna,
-    tokenizer=tokenizer,
-    image_processor=image_processor,
-    pad_image_to_square=True)
+val_dataset = [
+    dict(
+        type=MMELLaVADataset,
+        data_file='/mnt/petrelfs/huanghaian/code/xtuner/LMUData/MME.tsv',
+        image_folder='/mnt/petrelfs/share_data/duanhaodong/data/mme/MME_Benchmark_release',
+        prompt_template=PROMPT_TEMPLATE.vicuna,
+        tokenizer=tokenizer,
+        image_processor=image_processor,
+        pad_image_to_square=True)]
 
 test_dataset = [
     dict(
@@ -229,14 +232,24 @@ test_dataset = [
         pad_image_to_square=True)
 ]
 
-# TODO: We are not currently using val_dataloader and val_evaluator,
-# only utilizing val_dataset.
-val_dataloader = dict(dataset=val_dataset)
+# TODO: We are not currently using val_evaluator
+# Don't support num_workers > 0
+val_dataloader = dict(
+    batch_size=1,
+    num_workers=0,
+    drop_last=False,
+    sampler=dict(type=DefaultSampler, shuffle=False),
+    dataset=dict(type=ConcatDataset, datasets=val_dataset))
 val_evaluator = dict()
 val_cfg = dict(type=ValLoop)
 
-# TODO: We are not currently using test_dataloader and test_evaluator,
-# only utilizing test_dataset.
-test_dataloader = dict(dataset=test_dataset)
+# TODO: We are not currently using test_evaluator
+test_dataloader = dict(
+    batch_size=1,
+    num_workers=0,
+    drop_last=False,
+    sampler=dict(type=DefaultSampler, shuffle=False),
+    dataset=dict(type=ConcatDataset, datasets=test_dataset))
 test_evaluator = val_evaluator
 test_cfg = dict(type=TestLoop, select_metric='first')
+

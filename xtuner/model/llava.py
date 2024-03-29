@@ -261,9 +261,8 @@ class LLaVAModel(BaseModel):
         return data
 
     def forward(self, data, data_samples=None, mode='loss'):
-        data = self._prepare_data_for_llm(data)
-
         if mode == 'loss':
+            data = self._prepare_data_for_llm(data)
             return self.compute_loss(data, data_samples)
         elif mode == 'predict' or mode == 'generate':
             return self.generate(data, data_samples)
@@ -318,7 +317,7 @@ class LLaVAModel(BaseModel):
         # single image and single text mode
         instruction = self.template.get('INSTRUCTION', '{input}')
 
-        sample_image = data['img']
+        sample_image = data['image']
         sample_input = data['text']
 
         image = expand2square(

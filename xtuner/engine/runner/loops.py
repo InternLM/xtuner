@@ -50,31 +50,12 @@ class TrainLoop(IterBasedTrainLoop):
 
 
 class ValLoop(MMENGINE_ValLoop):
-    def __init__(self,
-                 runner,
-                 dataloader=None,
-                 evaluator=None,
-                 fp16: bool = False,
-                 select_metric='first') -> None:
+    def __init__(self, runner, dataloader=None, evaluator=None, fp16: bool = False, select_metric='first') -> None:
+        # must be concatset
+        super(MMENGINE_ValLoop, self).__init__(runner, dataloader)
         self._runner = runner
         self.fp16 = fp16
         self.select_metric = select_metric
-        self.datasets = dataloader['dataset']
-        if not isinstance(self.datasets, Sequence):
-            self.datasets = [self.datasets]
-
-    @property
-    def runner(self):
-        return self._runner
-
-    def _build_dataset(self, dataset_cfg):
-        if is_main_process():
-            dataset = BUILDER.build(dataset_cfg)
-            objects = [dataset]
-        else:
-            objects = [None]
-        dataset = broadcast_object_list(objects)[0]
-        return dataset
 
     def run(self) -> dict:
         """Launch validation."""
@@ -85,11 +66,8 @@ class ValLoop(MMENGINE_ValLoop):
 
         rank = get_rank()
         metrics = []
-        for _, dataset_cfg in enumerate(self.datasets):
-            dataset = self._build_dataset(dataset_cfg)
-            assert len(dataset) > 0, 'The dataset is empty'
-
-            self.runner.model.preparing_for_generation(dataset.get('metainfo', None))
+        for _, dataset in enumerate(self.dataloader.datasets):
+            self.runner.model.preparing_for_generation(dataset.metainfo)
 
             results = []
             n_samples = len(dataset)
@@ -108,7 +86,8 @@ class ValLoop(MMENGINE_ValLoop):
                 objects = [metric]
             else:
                 objects = [None]
-            metric = broadcast_object_list(objects)[0]
+            broadcast_object_list(objects)
+            metric = objects[0]
             metrics.append(metric)
             del dataset
 
@@ -142,7 +121,7 @@ class ValLoop(MMENGINE_ValLoop):
 
         # outputs should be sequence of BaseDataElement
         with autocast(enabled=self.fp16):
-            outputs = self.runner.model.val_step(data_batch)
+            outputs = self.runner.model.val_step({'data': data_batch})
         prediction['prediction'] = outputs['prediction']
         results.append(prediction)
 
@@ -167,6 +146,8 @@ class TestLoop(ValLoop):
             dataset = self._build_dataset(dataset_cfg)
             assert len(dataset) > 0, 'The dataset is empty'
 
+            self.runner.model.preparing_for_generation(dataset.metainfo)
+
             results = []
             n_samples = len(dataset)
             per_rank_samples = math.ceil(n_samples / get_world_size())
@@ -184,7 +165,8 @@ class TestLoop(ValLoop):
                 objects = [metric]
             else:
                 objects = [None]
-            metric = broadcast_object_list(objects)[0]
+            broadcast_object_list(objects)
+            metric = objects[0]
             metrics.append(metric)
             del dataset
 
@@ -218,7 +200,7 @@ class TestLoop(ValLoop):
 
         # outputs should be sequence of BaseDataElement
         with autocast(enabled=self.fp16):
-            outputs = self.runner.model.val_step(data_batch)
+            outputs = self.runner.model.val_step({'data': data_batch})
         prediction.update(outputs)
         results.append(prediction)
 

@@ -54,6 +54,16 @@ class BaseEvalDataset(Dataset):
                 cls_metainfo[k] = v
         return cls_metainfo
 
+    @property
+    def metainfo(self) -> dict:
+        """Get meta information of dataset.
+
+        Returns:
+            dict: meta information collected from ``BaseDataset.METAINFO``,
+            annotation file and metainfo argument during instantiation.
+        """
+        return copy.deepcopy(self._metainfo)
+
     @abstractmethod
     def evaluate(self, results, work_dir):
         pass
