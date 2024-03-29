@@ -24,15 +24,6 @@ os.environ['TOKENIZERS_PARALLELISM'] = 'true'
 
 @map_protocol(
     input_keys=dict(input_ids=list),
-    added_keys=dict(tokens=int),
-)
-def _register_tokens(data, tokenizer=None, chat_template=None):
-    data['tokens'] = len(data['input_ids'])
-    return data
-
-
-@map_protocol(
-    input_keys=dict(input_ids=list),
     added_keys=dict(cumulative_len=list),
 )
 def _register_cumulative_len(data, tokenizer=None, chat_template=None):
@@ -41,34 +32,17 @@ def _register_cumulative_len(data, tokenizer=None, chat_template=None):
 
 
 @map_protocol(
-    input_keys=dict(input_ids=list),
-    added_keys=dict(position_ids=list),
-)
-def _register_position_ids(data, tokenizer=None, chat_template=None):
-    data['position_ids'] = [i for i in range(len(data['input_ids']))]
-    return data
-
-
-@map_protocol(
     input_keys=dict(
-        input_ids=list,
-        labels=list,
-        tokens=int,
-        position_ids=list,
-        cumulative_len=list),
+        input_ids=list, labels=list, num_tokens=int, cumulative_len=list),
     output_keys=dict(
-        input_ids=list,
-        labels=list,
-        tokens=int,
-        position_ids=list,
-        cumulative_len=list))
+        input_ids=list, labels=list, num_tokens=int, cumulative_len=list))
 def _check_mapped_data(item, tokenizer=None, chat_template=None):
     assert isinstance(item['input_ids'][0], int)
     assert isinstance(item['labels'][0], int)
     return item
 
 
-class ChatDataset(torch.utils.data.Dataset):
+class TextDataset(torch.utils.data.Dataset):
     """"""
 
     def __init__(self,
@@ -76,7 +50,7 @@ class ChatDataset(torch.utils.data.Dataset):
                  chat_template: Union[Dict, ChatTemplate],
                  sample_ratio: int = 1.0,
                  max_length: int = 2048,
-                 pack_to_max_length: bool = False,
+                 pack_to_max_length: bool = True,
                  num_workers: int = 8,
                  mappings: Union[Callable, List[Callable]] = [],
                  data_dir: Optional[str] = None,
@@ -100,8 +74,6 @@ class ChatDataset(torch.utils.data.Dataset):
         self.pack_to_max_length = pack_to_max_length
 
         mappings.append(_register_cumulative_len)
-        mappings.append(_register_position_ids)
-        mappings.append(_register_tokens)
         mappings.append(_check_mapped_data)
         map_fn = map_sequential(mappings)
         self.map_fn = partial(
@@ -206,7 +178,7 @@ class ChatDataset(torch.utils.data.Dataset):
     def filter_non_labels_data(self, dataset):
 
         def filter_fn(item):
-            return any(item['labels'][i] >= 0 for i in range(self.max_length))
+            return any(label >= 0 for label in item['labels'])
 
         ori_samples = len(dataset)
         with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
@@ -303,7 +275,7 @@ if __name__ == '__main__':
     image_dir = './llava_data/llava_images/'
     data_files = 'llava_v1_5_mix665k.json'
 
-    dataset = ChatDataset(
+    dataset = TextDataset(
         'internlm/internlm2-chat-1_8b',
         chat_template,
         sample_ratio=1,
@@ -317,7 +289,7 @@ if __name__ == '__main__':
     print(dataset[0])
 
     dataset.cache('cached_llava')
-    dataset = ChatDataset(
+    dataset = TextDataset(
         'internlm/internlm2-chat-1_8b',
         chat_template,
         sample_ratio=1,
@@ -333,12 +305,12 @@ if __name__ == '__main__':
     from mmengine.dataset import DefaultSampler
     from torch.utils.data import DataLoader
 
-    from xtuner.dataset.hybrid.collate import chat_collate_fn
+    from xtuner.dataset.hybrid.collate import text_collate_fn
     loader = DataLoader(
         dataset,
         4,
         num_workers=0,
-        collate_fn=chat_collate_fn,
+        collate_fn=text_collate_fn,
         sampler=DefaultSampler(dataset, shuffle=True))
 
     for data in tqdm(loader):

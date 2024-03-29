@@ -58,7 +58,7 @@ def map_sequential(mappings: List[Callable]):
 
 @map_protocol(
     input_keys=dict(messages=list),
-    output_keys=dict(input_ids=list, labels=list, image_urls=list),
+    output_keys=dict(input_ids=list, labels=list),
 )
 def openai_to_raw_training(item: dict, tokenizer, chat_template) -> Dict:
 

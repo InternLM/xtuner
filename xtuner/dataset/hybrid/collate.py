@@ -7,7 +7,7 @@ from torch.nn.utils.rnn import pad_sequence
 from xtuner.utils import DEFAULT_PAD_TOKEN_INDEX, IGNORE_INDEX
 
 
-def chat_collate_fn(instances: Sequence[Dict],
+def text_collate_fn(instances: Sequence[Dict],
                     pad_index: int = DEFAULT_PAD_TOKEN_INDEX,
                     return_hf_format: bool = False):
 

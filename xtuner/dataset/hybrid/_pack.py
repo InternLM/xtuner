@@ -15,7 +15,7 @@ class _PackDataset(torch.utils.data.Dataset):
         # unpack dataset
         self.dataset = dataset
 
-        self._ori_lens = dataset['tokens']
+        self._ori_lens = dataset['num_tokens']
 
         self._num_packed_samples = sum(self._ori_lens) // self.max_length
 
@@ -74,7 +74,7 @@ class _PackDataset(torch.utils.data.Dataset):
         packed = {
             'input_ids': packed_ids,
             'labels': packed_labels,
-            'tokens': self.max_length,
+            'num_tokens': self.max_length,
             'cumulative_len': cumulative_len,
             'position_ids': position_ids
         }

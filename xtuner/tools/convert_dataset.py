@@ -1,9 +1,12 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import argparse
+import json
 import math
 import os.path as osp
+from datetime import datetime
 
 from datasets import load_dataset
+from mmengine import mkdir_or_exist
 from tqdm import tqdm
 
 from xtuner.dataset.converters import ConverterMap
@@ -38,19 +41,25 @@ def main():
     converted = dataset.map(converter.convert, num_proc=args.num_proc)['train']
 
     num_shards = math.ceil(len(converted) / args.shard_size)
-    digits = len(str(abs(num_shards)))
-    for i in tqdm(range(num_shards), desc='Save'):
+    num_digits = len(str(abs(num_shards)))
+    timestamp = datetime.now().strftime('%Y%m%d%H%M')
+    mkdir_or_exist(args.save_dir)
 
-        shard_name = f'shard-{i+1:0{digits}}-of-{num_shards:0{digits}}.json'
+    for i in tqdm(range(num_shards), desc='Save'):
+        _t = timestamp
+        _d = num_digits
+        shard_name = f'{_t}-shard-{i+1:0{_d}}-of-{num_shards:0{_d}}.json'
         save_path = osp.join(args.save_dir, shard_name)
 
         begin = i * args.shard_size
         end = min((i + 1) * args.shard_size, len(converted))
 
-        converted.select(range(begin, end)).to_json(save_path)
+        shard = converted.select(range(begin, end)).to_list()
+        with open(save_path, 'w') as f:
+            json.dump(shard, f)
 
     print(f'Converted {len(converted)} pieces of data in {args.format} format '
-          'and saved them in save_dir.')
+          f'and saved them in {args.save_dir}.')
 
 
 if __name__ == '__main__':

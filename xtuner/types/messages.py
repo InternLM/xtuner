@@ -1,5 +1,5 @@
 import copy
-from typing import Dict, List, Literal
+from typing import Dict, List, Literal, Optional
 
 from pydantic import BaseModel
 from transformers import PreTrainedTokenizer
@@ -13,7 +13,7 @@ class ChatMsg(BaseModel):
 
     role: Literal['assistant', 'user', 'system']
     content: str
-    loss: bool = False
+    loss: Optional[bool] = None
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -106,6 +106,7 @@ class ChatMessages(BaseModel):
         training_data = {
             'input_ids': input_ids,
             'labels': labels,
+            'num_tokens': len(input_ids)
         }
         return training_data
 

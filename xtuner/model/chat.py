@@ -8,7 +8,8 @@ import torch.distributed as dist
 from accelerate import load_checkpoint_in_model
 from peft import LoraConfig
 from torch import nn
-from transformers import GenerationConfig, PreTrainedModel, PreTrainedTokenizer
+from transformers import (GenerationConfig, PreTrainedModel,
+                          PreTrainedTokenizer, PreTrainedTokenizerFast)
 
 from xtuner.chat.streamer import HFTextIteratorStreamer, HFTextStreamer
 from xtuner.model.utils import guess_load_checkpoint
@@ -45,7 +46,7 @@ class ChatFinetune(BaseTune):
             self._llm.config.use_cache = False
 
         tokenizer = build_from_cfg_or_obj(
-            tokenizer, accept=PreTrainedTokenizer)
+            tokenizer, accept=(PreTrainedTokenizer, PreTrainedTokenizerFast))
         smart_tokenizer_and_embedding_resize(tokenizer, self.llm)
         self._tokenizer: PreTrainedModel = tokenizer
 
