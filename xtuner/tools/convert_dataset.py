@@ -39,12 +39,13 @@ def main():
 
     num_shards = math.ceil(len(converted) / args.shard_size)
     digits = len(str(abs(num_shards)))
-    for shard in tqdm(range(num_shards), desc='Save'):
-        shard_name = f'shard-{shard:0{digits}}-of-{num_shards:0{digits}}.json'
+    for i in tqdm(range(num_shards), desc='Save'):
+
+        shard_name = f'shard-{i+1:0{digits}}-of-{num_shards:0{digits}}.json'
         save_path = osp.join(args.save_dir, shard_name)
 
-        begin = shard * args.shard_size
-        end = min((shard + 1) * args.shard_size, len(converted))
+        begin = i * args.shard_size
+        end = min((i + 1) * args.shard_size, len(converted))
 
         converted.select(range(begin, end)).to_json(save_path)
 
