@@ -3,13 +3,10 @@ from typing import Dict, Optional, Union
 
 from mmengine.runner import IterBasedTrainLoop
 from mmengine.runner import ValLoop as MMENGINE_ValLoop
-from mmengine.runner import TestLoop as MMENGINE_TestLoop
 from torch.utils.data import DataLoader
 from typing import Sequence
-from mmengine.dist import broadcast_object_list, is_main_process, get_world_size, get_rank,barrier, collect_results
-from xtuner.registry import BUILDER
+from mmengine.dist import broadcast_object_list, is_main_process, get_world_size, get_rank, barrier, collect_results
 import math
-from tqdm import tqdm
 import torch
 from mmengine.runner.amp import autocast
 
@@ -59,6 +56,7 @@ class ValLoop(MMENGINE_ValLoop):
 
     def run(self) -> dict:
         """Launch validation."""
+        self.runner.logger.info('==================== Start val loop ===================')
         self.runner.call_hook('before_val')
         self.runner.call_hook('before_val_epoch')
         self.runner.model.gradient_checkpointing_disable()
@@ -66,6 +64,7 @@ class ValLoop(MMENGINE_ValLoop):
 
         rank = get_rank()
         metrics = []
+
         for _, dataset in enumerate(self.dataloader.dataset.datasets):
             self.runner.model.preparing_for_generation(dataset.metainfo)
 
@@ -79,8 +78,9 @@ class ValLoop(MMENGINE_ValLoop):
                 self.run_iter(idx, data_batch, results)
 
             barrier()
+            self.runner.logger.info('==================== Start collect results ===================')
             results = collect_results(results, len(dataset))
-
+            self.runner.logger.info('========= Starting the evaluation of a data ===========')
             if is_main_process():
                 metric = dataset.evaluate(results, self.runner.work_dir)
                 objects = [metric]
@@ -96,6 +96,7 @@ class ValLoop(MMENGINE_ValLoop):
         else:
             raise NotImplementedError
 
+        self.runner.logger.info('================ Ending val loop ================')
         self.runner.call_hook('after_val_epoch', metrics=metrics)
         self.runner.call_hook('after_val')
         self.runner.model.gradient_checkpointing_enable()
@@ -134,6 +135,7 @@ class ValLoop(MMENGINE_ValLoop):
 class TestLoop(ValLoop):
     def run(self) -> dict:
         """Launch validation."""
+        self.runner.logger.info('==================== Start test loop ===================')
         self.runner.call_hook('before_test')
         self.runner.call_hook('before_test_epoch')
         self.runner.model.gradient_checkpointing_disable()
@@ -154,7 +156,9 @@ class TestLoop(ValLoop):
                 self.run_iter(idx, data_batch, results)
 
             barrier()
+            self.runner.logger.info('==================== Start collect results ===================')
             results = collect_results(results, len(dataset))
+            self.runner.logger.info('========= Starting the evaluation of a data ===========')
 
             if is_main_process():
                 metric = dataset.evaluate(results, self.runner.work_dir)
@@ -172,7 +176,7 @@ class TestLoop(ValLoop):
             raise NotImplementedError
         self.runner.call_hook('after_test_epoch', metrics=metrics)
         self.runner.call_hook('after_test')
-
+        self.runner.logger.info('================ Ending test loop ================')
         self.runner.model.gradient_checkpointing_enable()
         self.runner.model.train()
         return metrics
