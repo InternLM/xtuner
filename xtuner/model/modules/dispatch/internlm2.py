@@ -156,24 +156,11 @@ def flash_attn_w_mask(
     return attn_output
 
 
-def flash_attn1_pytorch(query_states, key_states, value_states, *args,
-                        **kwargs):
-    # hacky: pytorch flash attn need (bs, n_head, seq_len, h_dim)
-    query_states = query_states.transpose(1, 2)
-    key_states = key_states.transpose(1, 2)
-    value_states = value_states.transpose(1, 2)
-    attn_output = F.scaled_dot_product_attention(query_states, key_states,
-                                                 value_states, *args, **kwargs)
-    attn_output = attn_output.transpose(1, 2)
-    return attn_output
-
-
 @sequence_parallel_wrapper
 def varlen_flash_attn(query_states, key_states, value_states, cumulative_len,
                       max_seqlen):
     q_unpad, k_unpad, v_unpad = query_states.flatten(0, 1), key_states.flatten(
         0, 1), value_states.flatten(0, 1)
-
     attn_output = flash_attn_varlen_func(
         q_unpad,
         k_unpad,
@@ -251,12 +238,12 @@ def internlm2_attn_forward(
     key_states = repeat_kv(key_states, self.num_key_value_groups)
     value_states = repeat_kv(value_states, self.num_key_value_groups)
 
-    # flash attn 2 need (bs, seq_len, nhead, h_dim)
-    query_states = query_states.transpose(1, 2)
-    key_states = key_states.transpose(1, 2)
-    value_states = value_states.transpose(1, 2)
-
     if SUPPORT_FLASH2:
+        # flash attn 2 need (bs, seq_len, nhead, h_dim)
+        query_states = query_states.transpose(1, 2)
+        key_states = key_states.transpose(1, 2)
+        value_states = value_states.transpose(1, 2)
+
         causal = self.is_causal and q_len != 1
 
         if attention_mask is not None:
@@ -276,12 +263,10 @@ def internlm2_attn_forward(
                 training=self.training)
     else:
         # use flash attention implemented by pytorch
-        attn_output = flash_attn1_pytorch(
-            query_states,
-            key_states,
-            value_states,
-            attn_mask=attention_mask,
-            training=self.training)
+        # do not support sequence parallel
+        attn_output = F.scaled_dot_product_attention(
+            query_states, key_states, value_states, attn_mask=attention_mask)
+        attn_output = attn_output.transpose(1, 2)
 
     attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
     attn_output = self.wo(attn_output)
@@ -309,7 +294,6 @@ def internlm2_varlen_attn_forward(
     message_hub = MessageHub.get_instance('varlen_attn_args')
     rank = dist.get_rank()
     cumulative_len = message_hub.get_info(f'cumulative_len_rank_{rank}')
-    # position_ids = message_hub.get_info(f'position_ids_rank_{rank}')
     max_seqlen = message_hub.get_info(f'max_seqlen_rank_{rank}')
     assert is_training == (cumulative_len is not None)
 
