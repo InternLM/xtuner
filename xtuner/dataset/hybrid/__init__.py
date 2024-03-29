@@ -1,11 +1,11 @@
-from .collate import hybrid_collate_fn
-from .dataset import HybridDataset
+from .collate import chat_collate_fn
+from .dataset import ChatDataset
 from .mappings import (insert_img_pad_tokens, llava_to_openai, map_protocol,
                        map_sequential, openai_to_raw_training)
 
 __all__ = [
-    'hybrid_collate_fn',
-    'HybridDataset',
+    'chat_collate_fn',
+    'ChatDataset',
     'insert_img_pad_tokens',
     'llava_to_openai',
     'map_protocol',

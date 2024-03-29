@@ -4,11 +4,10 @@ from typing import List, Optional, Union
 
 from lmdeploy.utils import get_logger
 
-from xtuner.types import HybridChatMessages, HybridChatTemplate, SampleParams
+from xtuner.types import ChatMessages, ChatTemplate, SampleParams
 from ...streamer import LMDeployTextIteratorStreamer, LMDeployTextStreamer
 from ..base import BaseBackend
-from ._encoder import _AsyncEncoderWrapper
-from ._engine import _MMAsyncEngine
+from ._engine import _AsyncEngine
 
 os.environ['TM_LOG_LEVEL'] = 'ERROR'
 logger = get_logger('lmdeploy')
@@ -19,27 +18,16 @@ _StreamerType = Union[LMDeployTextStreamer, LMDeployTextIteratorStreamer]
 
 class LMDeployBackend(BaseBackend):
 
-    def __init__(self,
-                 chat_template,
-                 llm_name_or_path,
-                 vision_encoder=None) -> None:
+    def __init__(self, chat_template, llm_name_or_path) -> None:
         super().__init__()
 
-        if vision_encoder:
-            encoder = _AsyncEncoderWrapper(vision_encoder)
-        else:
-            encoder = None
-
-        self._engine = _MMAsyncEngine(
-            chat_template,
-            encoder=encoder,
-            model_path=llm_name_or_path,
-            model_name='base')
+        self._engine = _AsyncEngine(
+            chat_template, model_path=llm_name_or_path, model_name='base')
 
         self._chat_template = chat_template
 
     @property
-    def chat_template(self) -> HybridChatTemplate:
+    def chat_template(self) -> ChatTemplate:
         return self._chat_template
 
     def create_streamer(self, iterable=False):
@@ -49,8 +37,7 @@ class LMDeployBackend(BaseBackend):
         else:
             return LMDeployTextStreamer()
 
-    def parse_sample_params(self,
-                            params: SampleParams) -> 'LMGenerationConfig':
+    def parse_sample_params(self, params: SampleParams):
 
         if params is None:
             params = SampleParams()
@@ -71,7 +58,7 @@ class LMDeployBackend(BaseBackend):
         return lmd_gen_config
 
     def chat(self,
-             messages: HybridChatMessages,
+             messages: ChatMessages,
              streamer: Optional[_StreamerType] = None,
              sample_params: Optional[SampleParams] = None):
 
@@ -97,7 +84,7 @@ class LMDeployBackend(BaseBackend):
         return response
 
     def batch_infer(self,
-                    messages: List[HybridChatMessages],
+                    messages: List[ChatMessages],
                     sample_params: Optional[SampleParams] = None):
 
         lmd_gen_config = self.parse_sample_params(sample_params)

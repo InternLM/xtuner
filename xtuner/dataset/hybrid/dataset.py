@@ -10,16 +10,13 @@ from typing import Callable, Dict, List, Optional, Union
 import torch
 from datasets import Dataset, load_from_disk
 from mmengine import print_log
-from PIL import Image
 from torch import distributed as dist
-from torch import nn
 from tqdm import tqdm
 
 from xtuner.dataset.hybrid._pack import _PackDataset
 from xtuner.dataset.hybrid.mappings import map_protocol, map_sequential
-from xtuner.dataset.utils import expand2square
 from xtuner.registry import BUILDER
-from xtuner.types import HybridChatTemplate
+from xtuner.types import ChatTemplate
 from xtuner.utils import build_tokenizer
 
 os.environ['TOKENIZERS_PARALLELISM'] = 'true'
@@ -53,63 +50,30 @@ def _register_position_ids(data, tokenizer=None, chat_template=None):
 
 
 @map_protocol(
-    added_keys=dict(image_ranges=list), )
-def _register_empty_img_ranges(data, tokenizer=None, chat_template=None):
-    if 'image_ranges' not in data:
-        data['image_ranges'] = []
-    return data
-
-
-@map_protocol(
     input_keys=dict(
         input_ids=list,
         labels=list,
         tokens=int,
-        image_urls=list,
-        image_ranges=list,
         position_ids=list,
         cumulative_len=list),
     output_keys=dict(
         input_ids=list,
         labels=list,
         tokens=int,
-        image_urls=list,
-        image_ranges=list,
         position_ids=list,
         cumulative_len=list))
 def _check_mapped_data(item, tokenizer=None, chat_template=None):
     assert isinstance(item['input_ids'][0], int)
     assert isinstance(item['labels'][0], int)
-
-    if len(item['image_urls']) > 0:
-        assert isinstance(item['image_urls'][0], str)
-
-    if len(item['image_ranges']) > 0:
-        assert isinstance(item['image_ranges'][0], list)
-        assert isinstance(item['image_ranges'][0][0], int)
-
     return item
 
 
-class HybridDataset(torch.utils.data.Dataset):
-    """
-    Args:
-        tokenizer: The tokenizer processes some raw text as input and outputs
-            an Encoding.
-        max_length: Max length of the sequence.
-        pack_to_max_length: Whether to pack the dataset to the `max_length `.
-            This usually improves gpu utilization and therefore reduces
-            training time.
-        shuffle_before_pack: Whether to shuffle the dataset before
-            packing them.
-        use_varlen_attn: If use_varlen_attn is True, we calculate attention
-            the actual length of the sequence rather than the actual length
-            of the sequence
-    """
+class ChatDataset(torch.utils.data.Dataset):
+    """"""
 
     def __init__(self,
                  tokenizer,
-                 chat_template: Union[Dict, HybridChatTemplate],
+                 chat_template: Union[Dict, ChatTemplate],
                  sample_ratio: int = 1.0,
                  max_length: int = 2048,
                  pack_to_max_length: bool = False,
@@ -117,33 +81,19 @@ class HybridDataset(torch.utils.data.Dataset):
                  mappings: Union[Callable, List[Callable]] = [],
                  data_dir: Optional[str] = None,
                  data_files: Optional[Union[str, List[str]]] = None,
-                 data_cached: Optional[str] = None,
-                 image_dir: Optional[str] = None,
-                 image_processor: Optional[nn.Module] = None,
-                 pad_img_to_squared: bool = True):
+                 data_cached: Optional[str] = None):
         super().__init__()
 
         assert data_dir or data_files or data_cached
 
         self.tokenizer = build_tokenizer(tokenizer)
 
-        if isinstance(chat_template, HybridChatTemplate):
+        if isinstance(chat_template, ChatTemplate):
             self.chat_template = chat_template
         elif isinstance(chat_template, dict):
             self.chat_template = BUILDER.build(chat_template)
         else:
             raise TypeError
-
-        if isinstance(image_processor, dict):
-            image_processor = BUILDER.build(image_processor)
-        self.image_processor = image_processor
-
-        if image_dir:
-            self.image_dir = Path(image_dir)
-        else:
-            self.image_dir = Path('')
-
-        self.pad_img_to_squared = pad_img_to_squared
 
         self.sample_ratio = sample_ratio
         self.max_length = max_length
@@ -152,7 +102,6 @@ class HybridDataset(torch.utils.data.Dataset):
         mappings.append(_register_cumulative_len)
         mappings.append(_register_position_ids)
         mappings.append(_register_tokens)
-        mappings.append(_register_empty_img_ranges)
         mappings.append(_check_mapped_data)
         map_fn = map_sequential(mappings)
         self.map_fn = partial(
@@ -231,7 +180,6 @@ class HybridDataset(torch.utils.data.Dataset):
         dataset = self.filter_non_labels_data(dataset)
 
         self.analysis_tokens_labels(dataset)
-        self.analysis_image_samples(dataset)
 
         dataset = Dataset.from_list(dataset)
 
@@ -279,34 +227,6 @@ class HybridDataset(torch.utils.data.Dataset):
             logger='current')
         return new_dataset
 
-    def analysis_image_samples(self, dataset):
-
-        def img_sample_counter(item):
-            return len(item['image_urls']) > 0
-
-        def img_counter(item):
-            return len(item['image_urls'])
-
-        with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
-            images = list(
-                tqdm(
-                    executor.map(img_counter, dataset),
-                    desc='Count Images',
-                    total=len(dataset)))
-
-            samples = list(
-                tqdm(
-                    executor.map(img_sample_counter, dataset),
-                    desc='Count Contain Image Samples',
-                    total=len(dataset)))
-
-        num_images = sum(images)
-        num_samples = sum(samples)
-        print_log(
-            f'There are a total of {num_samples} samples with images, '
-            f'amounting to {num_images} images.',
-            logger='current')
-
     def analysis_tokens_labels(self, dataset):
 
         def label_counter(item):
@@ -346,7 +266,6 @@ class HybridDataset(torch.utils.data.Dataset):
         hf_dataset.save_to_disk(cache_dir)
 
         dset_conf = {
-            'image_dir': str(self.image_dir),
             'data_files': self.data_files,
             'max_length': self.max_length,
             'chat_template': self.chat_template.model_dump(),
@@ -358,21 +277,6 @@ class HybridDataset(torch.utils.data.Dataset):
             json.dump(dset_conf, f)
 
         self.tokenizer.save_pretrained(cache_dir / 'tokenizer')
-        self.image_processor.save_pretrained(cache_dir / 'image_processor')
-
-    def load_image(self, url):
-        image_file = self.image_dir / url
-        image = Image.open(image_file).convert('RGB')
-
-        if self.pad_img_to_squared:
-            background = tuple(
-                int(x * 255) for x in self.image_processor.image_mean)
-            image = expand2square(image, background)
-
-        image = self.image_processor.preprocess(
-            image, return_tensors='pt')['pixel_values'][0]
-
-        return image
 
     def __len__(self):
         return len(self.dataset)
@@ -381,80 +285,47 @@ class HybridDataset(torch.utils.data.Dataset):
 
         data = self.dataset[item]
 
-        pixel_values = []
-        for url in data['image_urls']:
-            image = self.load_image(url)
-
-            pixel_values.append(image)
-
-        data['pixel_values'] = pixel_values
-
         return data
 
 
 if __name__ == '__main__':
 
-    from transformers import CLIPImageProcessor
-
-    chat_template = HybridChatTemplate(
+    chat_template = ChatTemplate(
         system='<|im_start|>system\n{system}<|im_end|>\n',
         user='<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n',
         assistant='{assistant}<|im_end|>\n',
         stop_words=['<|im_end|>'],
-        image_token='<image>',
-        function_call=
-        '{assistant}<|action_start|><|plugin|>\n{function_call}<|action_end|><|im_end|>\n',  # noqa: E501, E251
-        function_result=
-        '<|im_start|>environment name=<|plugin|>\n{function_result}<|im_end|>\n<|im_start|>assistant\n',  # noqa: E501, E251
-        functions='<|im_start|>system name=<|plugin|>\n{functions}<|im_end|>\n'
     )
 
-    processor = CLIPImageProcessor.from_pretrained(
-        'openai/clip-vit-large-patch14-336',
-        trust_remote_code=True,
-    )
-
-    from xtuner.dataset.hybrid.mappings import (insert_img_pad_tokens,
-                                                llava_to_openai,
-                                                openai_to_raw_training)
+    from xtuner.dataset.hybrid.mappings import openai_to_raw_training
 
     data_dir = './llava_data/LLaVA-Instruct-150K/'
     image_dir = './llava_data/llava_images/'
     data_files = 'llava_v1_5_mix665k.json'
 
-    dataset = HybridDataset(
+    dataset = ChatDataset(
         'internlm/internlm2-chat-1_8b',
         chat_template,
         sample_ratio=1,
         max_length=32 * 1024,
         data_dir=data_dir,
         data_files=data_files,
-        image_dir=image_dir,
-        image_processor=processor,
         pack_to_max_length=True,
-        mappings=[
-            llava_to_openai,
-            openai_to_raw_training,
-            insert_img_pad_tokens,
-        ],
+        mappings=[openai_to_raw_training],
         num_workers=4)
 
     print(dataset[0])
 
     dataset.cache('cached_llava')
-    dataset = HybridDataset(
+    dataset = ChatDataset(
         'internlm/internlm2-chat-1_8b',
         chat_template,
         sample_ratio=1,
         max_length=32 * 1024,
         data_cached='cached_llava',
-        image_dir=image_dir,
-        image_processor=processor,
         pack_to_max_length=True,
         mappings=[
-            llava_to_openai,
             openai_to_raw_training,
-            insert_img_pad_tokens,
         ],
         num_workers=4)
     print(dataset[0])
@@ -462,12 +333,12 @@ if __name__ == '__main__':
     from mmengine.dataset import DefaultSampler
     from torch.utils.data import DataLoader
 
-    from xtuner.dataset.hybrid.collate import hybrid_collate_fn
+    from xtuner.dataset.hybrid.collate import chat_collate_fn
     loader = DataLoader(
         dataset,
         4,
         num_workers=0,
-        collate_fn=hybrid_collate_fn,
+        collate_fn=chat_collate_fn,
         sampler=DefaultSampler(dataset, shuffle=True))
 
     for data in tqdm(loader):

@@ -1,39 +1,35 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-from abc import abstractclassmethod, abstractmethod
+from abc import abstractmethod
 
 from mmengine.model import BaseModel
 
-from xtuner.types import HybridChatMessages, HybridChatTemplate
+from xtuner.types import (ChatBackendProtocol, ChatMessages, ChatTemplate,
+                          SampleParams)
 
 
-class BaseTune(BaseModel):
+class BaseTune(BaseModel, ChatBackendProtocol):
 
-    def __init__():
+    def __init__(self):
         super().__init__()
 
     def init_weights(self):
-        """Parent class method.
-
-        To avoid overwriting the loaded weights, overload it to an empty
-        function.
-        """
         pass
 
     def avoid_override_weights(self):
         self._is_init = True
 
-    @abstractmethod
     @property
-    def chat_template(self) -> HybridChatTemplate:
+    @abstractmethod
+    def chat_template(self) -> ChatTemplate:
         pass
 
-    @abstractmethod
     @property
+    @abstractmethod
     def llm(self):
         pass
 
-    @abstractmethod
     @property
+    @abstractmethod
     def tokenizer(self):
         pass
 
@@ -41,31 +37,22 @@ class BaseTune(BaseModel):
     def gradient_checkpointing_enable(self):
         pass
 
-    def forward(self, data, data_samples=None, mode='loss'):
-        """Overload parent class method, only support training."""
-
-        if mode == 'loss':
-            return self.compute_loss(data)
-        else:
-            raise NotImplementedError(
-                f"{type(self)}'s forward is only supported for use during "
-                'training. If you want to get predictions or chat, please '
-                "directly use `llm`'s forward.")
-
     @abstractmethod
-    def chat(self, messages: HybridChatMessages, sample_params, streamer):
+    def chat(self, messages: ChatMessages, sample_params: SampleParams,
+             streamer):
         pass
 
     @abstractmethod
-    def save_checkpoint(self, *args, **kwargs):
+    def batch_infer(self, messages: ChatMessages, sample_params: SampleParams,
+                    streamer):
         pass
 
     @abstractmethod
-    def load_checkpoint(self, *args, **kwargs) -> 'BaseTune':
+    def save_checkpoint(self, save_dir: str, to_hub: bool = False):
         pass
 
-    def __getattr__(self, name: str):
-        try:
-            return super().__getattr__(name)
-        except AttributeError:
-            return getattr(self.llm, name)
+    @abstractmethod
+    def load_checkpoint(self,
+                        ckpt_dir: str,
+                        from_hub: bool = False) -> 'BaseTune':
+        pass

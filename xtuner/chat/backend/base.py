@@ -1,26 +1,30 @@
 from abc import abstractmethod
+from typing import List, Optional
 
-from xtuner.types import HybridChatTemplate
+from xtuner.chat.streamer import SteamerType
+from xtuner.types import (ChatBackendProtocol, ChatMessages, ChatTemplate,
+                          SampleParams)
 
 
-class BaseBackend():
+class BaseBackend(ChatBackendProtocol):
 
     @property
-    def chat_template(self) -> HybridChatTemplate:
+    def chat_template(self) -> ChatTemplate:
         pass
 
     @abstractmethod
-    def create_streamer(self, iterable=False):
+    def create_streamer(self, iterable: bool = False) -> SteamerType:
         pass
 
     @abstractmethod
-    def chat(self, messages, streamer=None, generation_config=None):
+    def chat(self,
+             messages: ChatMessages,
+             sample_params: Optional[SampleParams] = None,
+             streamer: Optional[SteamerType] = None):
         pass
 
-    # @abstractmethod
-    # def response_with_function_call(self, response: str):
-    #     pass
-
-    # @abstractmethod
-    # def response_with_code_interpreter(self, response: str):
-    #     pass
+    @abstractmethod
+    def batch_infer(self,
+                    messages: List[ChatMessages],
+                    sample_params: Optional[SampleParams] = None):
+        pass
