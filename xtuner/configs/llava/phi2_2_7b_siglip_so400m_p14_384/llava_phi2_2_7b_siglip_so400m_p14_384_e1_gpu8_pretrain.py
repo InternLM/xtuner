@@ -212,7 +212,15 @@ val_dataset = [
         prompt_template=PROMPT_TEMPLATE.vicuna,
         tokenizer=tokenizer,
         image_processor=image_processor,
-        pad_image_to_square=True)]
+        pad_image_to_square=True),
+    dict(
+        type=MultipleChoiceLLaVADataset,
+        data_file='/mnt/petrelfs/huanghaian/code/xtuner/LMUData/MMBench_DEV_EN.tsv',
+        prompt_template=PROMPT_TEMPLATE.vicuna,
+        tokenizer=tokenizer,
+        image_processor=image_processor,
+        pad_image_to_square=True)
+]
 
 test_dataset = [
     dict(

@@ -66,7 +66,7 @@ class ValLoop(MMENGINE_ValLoop):
 
         rank = get_rank()
         metrics = []
-        for _, dataset in enumerate(self.dataloader.datasets):
+        for _, dataset in enumerate(self.dataloader.dataset.datasets):
             self.runner.model.preparing_for_generation(dataset.metainfo)
 
             results = []
@@ -74,7 +74,7 @@ class ValLoop(MMENGINE_ValLoop):
             per_rank_samples = math.ceil(n_samples / get_world_size())
             per_rank_ids = range(per_rank_samples * rank,
                                  min(n_samples, per_rank_samples * (rank + 1)))
-            for idx in tqdm(per_rank_ids, desc=f'Rank {rank}'):
+            for idx in per_rank_ids:
                 data_batch = dataset[idx]
                 self.run_iter(idx, data_batch, results)
 
@@ -89,7 +89,6 @@ class ValLoop(MMENGINE_ValLoop):
             broadcast_object_list(objects)
             metric = objects[0]
             metrics.append(metric)
-            del dataset
 
         # select metrics
         if self.select_metric == 'first':
@@ -142,10 +141,7 @@ class TestLoop(ValLoop):
 
         rank = get_rank()
         metrics = []
-        for _, dataset_cfg in enumerate(self.datasets):
-            dataset = self._build_dataset(dataset_cfg)
-            assert len(dataset) > 0, 'The dataset is empty'
-
+        for _, dataset in enumerate(self.dataloader.dataset.datasets):
             self.runner.model.preparing_for_generation(dataset.metainfo)
 
             results = []
@@ -153,7 +149,7 @@ class TestLoop(ValLoop):
             per_rank_samples = math.ceil(n_samples / get_world_size())
             per_rank_ids = range(per_rank_samples * rank,
                                  min(n_samples, per_rank_samples * (rank + 1)))
-            for idx in tqdm(per_rank_ids, desc=f'Rank {rank}'):
+            for idx in per_rank_ids:
                 data_batch = dataset[idx]
                 self.run_iter(idx, data_batch, results)
 
@@ -168,7 +164,6 @@ class TestLoop(ValLoop):
             broadcast_object_list(objects)
             metric = objects[0]
             metrics.append(metric)
-            del dataset
 
         # select metrics
         if self.select_metric == 'first':

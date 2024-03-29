@@ -46,19 +46,17 @@ class DatasetInfoHook(Hook):
         if do_train:
             train_dataset = runner.train_dataloader.dataset
             self.log(runner, train_dataset, mode='train')
-        if do_eval and hasattr(runner, 'val_dataloader'):
+        if do_eval:
             eval_dataset = runner.val_dataloader.dataset
             self.log(runner, eval_dataset, mode='eval')
-        if do_test and hasattr(runner, 'test_dataloader'):
+        if do_test:
             test_dataset = runner.test_dataloader.dataset
             self.log(runner, test_dataset, mode='test')
 
     def before_val(self, runner) -> None:
-        if hasattr(runner, 'val_dataloader'):
-            eval_dataset = runner.val_dataloader.dataset
-            self.log(runner, eval_dataset, mode='eval')
+        eval_dataset = runner.val_dataloader.dataset
+        self.log(runner, eval_dataset, mode='eval')
 
     def before_test(self, runner) -> None:
-        if hasattr(runner, 'test_dataloader'):
-            test_dataset = runner.test_dataloader.dataset
-            self.log(runner, test_dataset, mode='test')
+        test_dataset = runner.test_dataloader.dataset
+        self.log(runner, test_dataset, mode='test')
