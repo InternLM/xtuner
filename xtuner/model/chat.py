@@ -8,6 +8,7 @@ import torch.distributed as dist
 from accelerate import load_checkpoint_in_model
 from peft import LoraConfig
 from torch import nn
+from torch.nn.utils.rnn import pad_sequence
 from transformers import (GenerationConfig, PreTrainedModel,
                           PreTrainedTokenizer, PreTrainedTokenizerFast)
 
@@ -15,15 +16,16 @@ from xtuner.chat.streamer import HFTextIteratorStreamer, HFTextStreamer
 from xtuner.model.utils import guess_load_checkpoint
 from xtuner.tools.utils import get_stop_criteria
 from xtuner.types import ChatMessages, ChatTemplate, SampleParams
+from xtuner.utils import DEFAULT_PAD_TOKEN_INDEX, IGNORE_INDEX
 from xtuner.utils.config import build_from_cfg_or_obj
 from .auto import download_model_from_hub
-from .base import BaseTune
+from .base import BaseAlgorithm
 from .modules import dispatch_modules
 from .utils import (LoadWoInit, get_peft_model_state_dict,
                     prepare_for_llm_lora, smart_tokenizer_and_embedding_resize)
 
 
-class ChatFinetune(BaseTune):
+class TextFinetune(BaseAlgorithm):
 
     def __init__(
         self,
@@ -223,7 +225,7 @@ class ChatFinetune(BaseTune):
 
     def save_checkpoint(self,
                         save_dir: str,
-                        to_hub: bool = True) -> 'ChatFinetune':
+                        to_hub: bool = True) -> 'TextFinetune':
 
         if to_hub:
             self.llm.save_pretrained(save_dir, safe_serialization=False)
@@ -232,7 +234,7 @@ class ChatFinetune(BaseTune):
 
     def load_checkpoint(self,
                         ckpt_dir: str,
-                        from_hub: bool = False) -> BaseTune:
+                        from_hub: bool = False) -> BaseAlgorithm:
 
         if from_hub:
             ckpt_dir = download_model_from_hub(ckpt_dir, from_hub)
@@ -242,3 +244,40 @@ class ChatFinetune(BaseTune):
         else:
             state_dict = guess_load_checkpoint(ckpt_dir)
             self.load_state_dict(state_dict)
+
+    @classmethod
+    def dataloader_collate_fn(cls, instances):
+
+        pad_index = DEFAULT_PAD_TOKEN_INDEX
+
+        input_ids = []
+        labels = []
+        cumulative_len = []
+
+        for i, data in enumerate(instances):
+            input_ids.append(torch.LongTensor(data['input_ids']))
+            labels.append(torch.LongTensor(data['labels']))
+
+            if 'cumulative_len' in data:
+                cumulative_len.append(torch.IntTensor(data['cumulative_len']))
+
+        if len(instances) > 1:
+            input_ids = pad_sequence(
+                input_ids, batch_first=True, padding_value=pad_index)
+            labels = pad_sequence(
+                labels, batch_first=True, padding_value=IGNORE_INDEX)
+        else:
+            input_ids = torch.stack(input_ids)
+            labels = torch.stack(labels)
+
+        if len(cumulative_len) == 0:
+            cumulative_len = None
+
+        data_dict = {
+            'input_ids': input_ids,
+            'attention_mask': input_ids.ne(pad_index),
+            'labels': labels,
+            'cumulative_len': cumulative_len,
+        }
+
+        return {'data': data_dict, 'data_samples': None}

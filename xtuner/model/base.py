@@ -1,13 +1,12 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-from abc import abstractmethod
+from abc import abstractclassmethod, abstractmethod
 
 from mmengine.model import BaseModel
 
-from xtuner.types import (ChatBackendProtocol, ChatMessages, ChatTemplate,
-                          SampleParams)
+from xtuner.types import ChatBackendProtocol, ChatMessages, SampleParams
 
 
-class BaseTune(BaseModel, ChatBackendProtocol):
+class BaseAlgorithm(BaseModel, ChatBackendProtocol):
 
     def __init__(self):
         super().__init__()
@@ -17,21 +16,6 @@ class BaseTune(BaseModel, ChatBackendProtocol):
 
     def avoid_override_weights(self):
         self._is_init = True
-
-    @property
-    @abstractmethod
-    def chat_template(self) -> ChatTemplate:
-        pass
-
-    @property
-    @abstractmethod
-    def llm(self):
-        pass
-
-    @property
-    @abstractmethod
-    def tokenizer(self):
-        pass
 
     @abstractmethod
     def gradient_checkpointing_enable(self):
@@ -54,5 +38,14 @@ class BaseTune(BaseModel, ChatBackendProtocol):
     @abstractmethod
     def load_checkpoint(self,
                         ckpt_dir: str,
-                        from_hub: bool = False) -> 'BaseTune':
+                        from_hub: bool = False) -> 'BaseAlgorithm':
         pass
+
+    @abstractclassmethod
+    def dataloader_collate_fn(cls, data):
+        pass
+
+
+class BaseTune(BaseAlgorithm):
+
+    pass

@@ -1,5 +1,4 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-from datasets import load_dataset
 from mmengine.dataset import DefaultSampler
 from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
                             LoggerHook, ParamSchedulerHook)
@@ -7,11 +6,9 @@ from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR, LinearLR
 from torch.optim import AdamW
 from transformers import AutoTokenizer
 
-from xtuner.dataset.hybrid import (TextDataset, openai_to_raw_training,
-                                   text_collate_fn)
-from xtuner.engine.hooks import DatasetInfoHook, EvaluateChatHook
+from xtuner.dataset.hybrid import TextDataset, openai_to_raw_training
 from xtuner.engine.runner import TrainLoop
-from xtuner.model import AutoModelForCausalLM, ChatFinetune
+from xtuner.model import AutoModelForCausalLM, TextFinetune
 from xtuner.types import ChatTemplate
 
 #######################################################################
@@ -58,7 +55,7 @@ chat_template = dict(
 #                      PART 2  Model & Tokenizer                      #
 #######################################################################
 model = dict(
-    type=ChatFinetune,
+    type=TextFinetune,
     tokenizer=tokenizer,
     chat_template=chat_template,
     llm=dict(
@@ -83,7 +80,7 @@ train_dataloader = dict(
     num_workers=dataloader_num_workers,
     dataset=dataset,
     sampler=dict(type=DefaultSampler, shuffle=True),
-    collate_fn=text_collate_fn)
+    collate_fn=TextFinetune.dataloader_collate_fn)
 
 #######################################################################
 #                    PART 4  Scheduler & Optimizer                    #

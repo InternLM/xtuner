@@ -8,7 +8,7 @@ from transformers import AutoConfig as HfAutoConfig
 from transformers import AutoModelForCausalLM as HfAutoModelForCausalLM
 from transformers import BitsAndBytesConfig
 
-from xtuner.model.base import BaseTune
+from xtuner.model.base import BaseAlgorithm
 from xtuner.model.modules.dispatch import SUPPORT_FLASH1, SUPPORT_FLASH2
 from xtuner.registry import BUILDER
 
@@ -34,7 +34,7 @@ class AutoXTunerModel():
     def from_config(self, config: Union[str, Dict]):
         if isinstance(config, str):
             config = Config.fromfile(config)
-        model: BaseTune = BUILDER.build(config.model)
+        model: BaseAlgorithm = BUILDER.build(config.model)
         return model
 
     @classmethod
@@ -48,7 +48,7 @@ class AutoXTunerModel():
             raise RuntimeError
 
         config = Config.fromfile(config[0])
-        model: BaseTune = BUILDER.build(config.model)
+        model: BaseAlgorithm = BUILDER.build(config.model)
         model.load_checkpoint(checkpoint)
         print_log(f'Auto loaded from {checkpoint}.', logger='current')
 
@@ -70,13 +70,13 @@ class AutoXTunerModel():
             else:
                 raise RuntimeError
 
-            model: BaseTune = BUILDER.build(config.model)
+            model: BaseAlgorithm = BUILDER.build(config.model)
             model.load_checkpoint(checkpoint, from_hub)
             print_log(f'Auto loaded from {checkpoint}.', logger='current')
 
         elif checkpoint.endswith('.pth'):
             config = Config.fromfile(config)
-            model: BaseTune = BUILDER.build(config.model)
+            model: BaseAlgorithm = BUILDER.build(config.model)
             model.load_checkpoint(checkpoint)
             print_log(f'Auto loaded from {checkpoint}.', logger='current')
         elif os.path.isdir(checkpoint):
@@ -152,13 +152,13 @@ if __name__ == '__main__':
 
     from transformers import AutoTokenizer
 
-    from xtuner.model import ChatFinetune
+    from xtuner.model import TextFinetune
     from xtuner.types import ChatMessages, ChatTemplate
 
     model_name = 'internlm/internlm2-chat-1_8b'
 
     config = dict(
-        type=ChatFinetune,
+        type=TextFinetune,
         tokenizer=dict(
             type=AutoTokenizer.from_pretrained,
             pretrained_model_name_or_path=model_name,
