@@ -45,13 +45,13 @@ class TextFinetune(BaseAlgorithm):
         # Build the base language model without initialization.
         # This will greatly reduce the time to build the model.
         with LoadWoInit():
-            self._llm: PreTrainedModel = build_from_cfg_or_obj(llm, nn.Module)
-            self._llm.config.use_cache = False
+            self.llm: PreTrainedModel = build_from_cfg_or_obj(llm, nn.Module)
+            self.llm.config.use_cache = False
 
         tokenizer = build_from_cfg_or_obj(
             tokenizer, accept=(PreTrainedTokenizer, PreTrainedTokenizerFast))
         smart_tokenizer_and_embedding_resize(tokenizer, self.llm)
-        self._tokenizer: PreTrainedModel = tokenizer
+        self.tokenizer: PreTrainedModel = tokenizer
 
         self.with_lora = llm_lora is not None
         # Prepare the model for LoRA if specified
@@ -68,18 +68,8 @@ class TextFinetune(BaseAlgorithm):
         if use_gradient_checkpointing:
             self.gradient_checkpointing_enable()
 
-        self.avoid_override_weights()
-
     @property
-    def llm(self) -> PreTrainedModel:
-        return self._llm
-
-    @property
-    def tokenizer(self) -> PreTrainedTokenizer:
-        return self._tokenizer
-
-    @property
-    def chat_template(self) -> ChatTemplate:
+    def chat_template(self):
         return self._chat_template
 
     def gradient_checkpointing_enable(self):

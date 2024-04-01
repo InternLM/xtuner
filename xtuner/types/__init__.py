@@ -1,11 +1,11 @@
 from .chat_backend import ChatBackendProtocol
 from .chat_template import ChatTemplate
-from .messages import ChatMessages, ChatMsg
+from .messages import BaseMessages, ChatMessages
 from .sample_params import SampleParams
 
 __all__ = [
     'ChatBackendProtocol',
-    'ChatMsg',
+    'BaseMessages',
     'ChatMessages',
     'ChatTemplate',
     'SampleParams',

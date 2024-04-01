@@ -7,6 +7,7 @@ from transformers import PreTrainedTokenizer
 from xtuner.types.chat_template import ChatTemplate
 from xtuner.utils import IGNORE_INDEX
 from xtuner.utils.tokenizer import get_bos_token_ids
+from .base import BaseMessages
 
 
 class ChatMsg(BaseModel):
@@ -66,7 +67,7 @@ class ChatMsg(BaseModel):
         }
 
 
-class ChatMessages(BaseModel):
+class ChatMessages(BaseMessages):
 
     messages: List[ChatMsg]
 
