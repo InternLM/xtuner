@@ -11,6 +11,7 @@ from mmengine.runner import Runner
 from xtuner.configs import cfgs_name_path
 from xtuner.model.utils import guess_load_checkpoint
 from xtuner.registry import MAP_FUNC
+from mmengine.model import is_model_wrapper
 
 
 def parse_args():
@@ -96,7 +97,11 @@ def main():
         runner = RUNNERS.build(cfg)
 
     state_dict = guess_load_checkpoint(args.checkpoint)
-    runner.model.load_state_dict(state_dict, strict=False)
+
+    if is_model_wrapper(runner.model):
+        runner.model.module.load_state_dict(state_dict, strict=False)
+    else:
+        runner.model.load_state_dict(state_dict, strict=False)
     runner.logger.info(f'Load checkpoint from {args.checkpoint}')
 
     # start testing

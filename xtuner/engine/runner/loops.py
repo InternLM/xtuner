@@ -50,7 +50,7 @@ class TrainLoop(IterBasedTrainLoop):
 
 
 class ValLoop(MMENGINE_ValLoop):
-    def __init__(self, runner, dataloader=None, evaluator=None, torch_dtype=None, select_metric='first') -> None:
+    def __init__(self, runner, dataloader=None, evaluator=None, torch_dtype='fp16', select_metric='first') -> None:
         # must be concatset
         super(MMENGINE_ValLoop, self).__init__(runner, dataloader)
         self._runner = runner
