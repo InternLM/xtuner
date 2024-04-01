@@ -75,7 +75,8 @@ class ValLoop(MMENGINE_ValLoop):
 
         rank = get_rank()
         metrics = []
-
+        # Ensure that eta and log are displayed correctly.
+        current_run_total_ids = 0
         for _, dataset in enumerate(self.dataloader.dataset.datasets):
             model.preparing_for_generation(dataset.metainfo)
 
@@ -86,7 +87,8 @@ class ValLoop(MMENGINE_ValLoop):
                                  min(n_samples, per_rank_samples * (rank + 1)))
             for idx in per_rank_ids:
                 data_batch = dataset[idx]
-                self.run_iter(idx, data_batch, results)
+                self.run_iter(current_run_total_ids, data_batch, results)
+                current_run_total_ids += 1
 
             barrier()
             self.runner.logger.info('==================== Start collect results ===================')
@@ -163,6 +165,8 @@ class TestLoop(ValLoop):
 
         rank = get_rank()
         metrics = []
+        # Ensure that eta and log are displayed correctly.
+        current_run_total_ids = 0
         for _, dataset in enumerate(self.dataloader.dataset.datasets):
             model.preparing_for_generation(dataset.metainfo)
 
@@ -173,7 +177,8 @@ class TestLoop(ValLoop):
                                  min(n_samples, per_rank_samples * (rank + 1)))
             for idx in per_rank_ids:
                 data_batch = dataset[idx]
-                self.run_iter(idx, data_batch, results)
+                self.run_iter(current_run_total_ids, data_batch, results)
+                current_run_total_ids += 1
 
             barrier()
             self.runner.logger.info('==================== Start collect results ===================')
