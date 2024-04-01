@@ -8,7 +8,10 @@ from typing import Sequence
 from mmengine.dist import broadcast_object_list, is_main_process, get_world_size, get_rank, barrier, collect_results
 import math
 import torch
-from mmengine.runner.amp import autocast
+from mmengine.model import is_model_wrapper
+
+TORCH_DTYPE_MAP = dict(
+    fp16=torch.float16, bf16=torch.bfloat16, fp32=torch.float32, auto='auto')
 
 
 class TrainLoop(IterBasedTrainLoop):
@@ -47,11 +50,13 @@ class TrainLoop(IterBasedTrainLoop):
 
 
 class ValLoop(MMENGINE_ValLoop):
-    def __init__(self, runner, dataloader=None, evaluator=None, fp16: bool = False, select_metric='first') -> None:
+    def __init__(self, runner, dataloader=None, evaluator=None, torch_dtype=None, select_metric='first') -> None:
         # must be concatset
         super(MMENGINE_ValLoop, self).__init__(runner, dataloader)
         self._runner = runner
-        self.fp16 = fp16
+        self.torch_dtype = torch_dtype
+        if torch_dtype is not None:
+            self.torch_dtype = TORCH_DTYPE_MAP[torch_dtype]
         self.select_metric = select_metric
 
     def run(self) -> dict:
@@ -59,14 +64,20 @@ class ValLoop(MMENGINE_ValLoop):
         self.runner.logger.info('==================== Start val loop ===================')
         self.runner.call_hook('before_val')
         self.runner.call_hook('before_val_epoch')
-        self.runner.model.gradient_checkpointing_disable()
-        self.runner.model.eval()
+
+        if is_model_wrapper(self.runner.model):
+            model = self.runner.model.module
+        else:
+            model = self.runner.model
+
+        model.gradient_checkpointing_disable()
+        model.eval()
 
         rank = get_rank()
         metrics = []
 
         for _, dataset in enumerate(self.dataloader.dataset.datasets):
-            self.runner.model.preparing_for_generation(dataset.metainfo)
+            model.preparing_for_generation(dataset.metainfo)
 
             results = []
             n_samples = len(dataset)
@@ -99,8 +110,8 @@ class ValLoop(MMENGINE_ValLoop):
         self.runner.logger.info('================ Ending val loop ================')
         self.runner.call_hook('after_val_epoch', metrics=metrics)
         self.runner.call_hook('after_val')
-        self.runner.model.gradient_checkpointing_enable()
-        self.runner.model.train()
+        model.gradient_checkpointing_enable()
+        model.train()
         return metrics
 
     @torch.no_grad()
@@ -120,8 +131,7 @@ class ValLoop(MMENGINE_ValLoop):
             'before_val_iter', batch_idx=idx, data_batch=data_batch)
 
         # outputs should be sequence of BaseDataElement
-        with autocast(enabled=self.fp16):
-            outputs = self.runner.model.val_step({'data': data_batch})
+        outputs = self.runner.model.val_step({'data': data_batch})
         prediction['prediction'] = outputs['prediction']
         results.append(prediction)
 
@@ -138,13 +148,23 @@ class TestLoop(ValLoop):
         self.runner.logger.info('==================== Start test loop ===================')
         self.runner.call_hook('before_test')
         self.runner.call_hook('before_test_epoch')
-        self.runner.model.gradient_checkpointing_disable()
-        self.runner.model.eval()
+
+        if is_model_wrapper(self.runner.model):
+            model = self.runner.model.module
+        else:
+            model = self.runner.model
+
+        model.gradient_checkpointing_disable()
+        model.eval()
+
+        if self.torch_dtype is not None:
+            self.runner.logger.info(f'Convert model dtype to {self.torch_dtype}')
+            model.to(self.torch_dtype)
 
         rank = get_rank()
         metrics = []
         for _, dataset in enumerate(self.dataloader.dataset.datasets):
-            self.runner.model.preparing_for_generation(dataset.metainfo)
+            model.preparing_for_generation(dataset.metainfo)
 
             results = []
             n_samples = len(dataset)
@@ -177,8 +197,8 @@ class TestLoop(ValLoop):
         self.runner.call_hook('after_test_epoch', metrics=metrics)
         self.runner.call_hook('after_test')
         self.runner.logger.info('================ Ending test loop ================')
-        self.runner.model.gradient_checkpointing_enable()
-        self.runner.model.train()
+        model.gradient_checkpointing_enable()
+        model.train()
         return metrics
 
     @torch.no_grad()
@@ -198,8 +218,7 @@ class TestLoop(ValLoop):
             'before_test_iter', batch_idx=idx, data_batch=data_batch)
 
         # outputs should be sequence of BaseDataElement
-        with autocast(enabled=self.fp16):
-            outputs = self.runner.model.val_step({'data': data_batch})
+        outputs = self.runner.model.val_step({'data': data_batch})
         prediction.update(outputs)
         results.append(prediction)
 
