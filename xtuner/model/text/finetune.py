@@ -18,11 +18,12 @@ from xtuner.tools.utils import get_stop_criteria
 from xtuner.types import ChatMessages, ChatTemplate, SampleParams
 from xtuner.utils import DEFAULT_PAD_TOKEN_INDEX, IGNORE_INDEX
 from xtuner.utils.config import build_from_cfg_or_obj
-from .auto import download_model_from_hub
-from .base import BaseAlgorithm
-from .modules import dispatch_modules
-from .utils import (LoadWoInit, get_peft_model_state_dict,
-                    prepare_for_llm_lora, smart_tokenizer_and_embedding_resize)
+from ..auto import download_model_from_hub
+from ..base import BaseAlgorithm
+from ..modules import dispatch_modules
+from ..utils import (LoadWoInit, get_peft_model_state_dict,
+                     prepare_for_llm_lora,
+                     smart_tokenizer_and_embedding_resize)
 
 
 class TextFinetune(BaseAlgorithm):

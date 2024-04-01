@@ -1,9 +1,9 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 
 from .auto import AutoModelForCausalLM, AutoXTunerModel
-from .chat import TextFinetune
 from .llava import LLaVAModel
 from .sft import SupervisedFinetune
+from .text import TextFinetune
 
 __all__ = [
     'AutoModelForCausalLM', 'AutoXTunerModel', 'TextFinetune',
