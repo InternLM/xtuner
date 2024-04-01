@@ -1,6 +1,6 @@
 # 使用自定义的指令微调数据集训练(LLM)
 
-XTuner 支持使用自定义数据集进行指令微调，为便于介绍，本节以 [internlm2_chat_7b_qlora_custom_dataset_e1.py](https://github.com/InternLM/xtuner/blob/main/xtuner/configs/custom_dataset/internlm/internlm2_chat_7b_qlora_custom_dataset_e1.py) 配置文件为基础进行介绍。
+XTuner 支持使用自定义数据集进行指令微调，为便于介绍，本节以 [internlm2_chat_7b_qlora_custom_sft_e1.py](https://github.com/InternLM/xtuner/blob/main/xtuner/configs/custom_dataset/sft/internlm/internlm2_chat_7b_qlora_custom_sft_e1.py) 配置文件为基础进行介绍。
 
 ## 数据准备
 
@@ -31,15 +31,15 @@ XTuner 采用 [OpenAI SFT 数据集格式](https://platform.openai.com/docs/guid
 
 ### Step 1, 导出 config
 
-`xtuner/configs/custom_dataset` 目录下有所有 XTuner 支持的模型在自定义数据集下使用 QLora 算法训练的模板 config。可以通过 `xtuner list-cfg -p custom_dataset` 命令来查看候选 config。下面以 [internlm2_chat_7b_qlora_custom_dataset_e1.py](https://github.com/InternLM/xtuner/blob/main/xtuner/configs/custom_dataset/internlm/internlm2_chat_7b_qlora_custom_dataset_e1.py) 为例展开介绍。
+`xtuner/configs/custom_dataset/sft` 目录下有所有 XTuner 支持的模型在自定义数据集下使用 QLora 算法训练的模板 config。可以通过 `xtuner list-cfg -p custom_sft` 命令来查看候选 config。下面以 [internlm2_chat_7b_qlora_custom_sft_e1.py](https://github.com/InternLM/xtuner/blob/main/xtuner/configs/custom_dataset/sft/internlm/internlm2_chat_7b_qlora_custom_sft_e1.py) 为例展开介绍。
 
-可以通过以下命令将 `internlm2_chat_7b_qlora_custom_dataset_e1.py` 导出至当前目录下：
+可以通过以下命令将 `internlm2_chat_7b_qlora_custom_sft_e1.py` 导出至当前目录下：
 
 ```
-xtuner copy-cfg internlm2_chat_7b_qlora_custom_dataset_e1 .
+xtuner copy-cfg internlm2_chat_7b_qlora_custom_sft_e1 .
 ```
 
-当前目录下会存在一个新 config `internlm2_chat_7b_qlora_custom_dataset_e1_copy.py` 。
+当前目录下会存在一个新 config `internlm2_chat_7b_qlora_custom_sft_e1_copy.py` 。
 
 ### Step 2, 修改 config
 
@@ -47,7 +47,7 @@ xtuner copy-cfg internlm2_chat_7b_qlora_custom_dataset_e1 .
 
 ```diff
 - data_files = ['/path/to/json/file.json']
-+ data_files = ['/path/to/custom_dataset1.json', '/path/to/custom_dataset2.json', ...]
++ data_files = ['/path/to/custom_sft1.json', '/path/to/custom_sft2.json', ...]
 ```
 
 若期望使用某个目录下所有的 json 文件作为训练数据集，可做如下修改：
@@ -58,7 +58,7 @@ xtuner copy-cfg internlm2_chat_7b_qlora_custom_dataset_e1 .
 #######################################################################
 # Data
 - data_files = ['/path/to/json/file.json']
-+ data_dir = '/dir/to/custom_dataset'
++ data_dir = '/dir/to/custom_sft'
 
 #######################################################################
 #                      PART 3  Dataset & Dataloader                   #
@@ -139,7 +139,7 @@ model = dict(
 ### Step 3, 开始训练
 
 ```bash
-NPROC_PER_NODE=8 xtuner train internlm2_chat_7b_qlora_custom_dataset_e1_copy.py --deepspeed deepspeed_zero1
+NPROC_PER_NODE=8 xtuner train internlm2_chat_7b_qlora_custom_sft_e1_copy.py --deepspeed deepspeed_zero1
 ```
 
 训得模型将默认保存在 `./work_dirs/`，用户可以通过命令  `xtuner train --work-dir ${SAVE_PATH}` 指定保存路径。
@@ -150,7 +150,7 @@ NPROC_PER_NODE=8 xtuner train internlm2_chat_7b_qlora_custom_dataset_e1_copy.py 
 
 ```bash
 xtuner convert pth_to_hf ${FINETUNE_CFG} ${PTH_PATH} ${SAVE_PATH}
-# 例如：xtuner convert pth_to_hf internlm2_chat_7b_qlora_custom_dataset_e1_copy.py ./iter_2000.pth ./iter_2000_hf
+# 例如：xtuner convert pth_to_hf internlm2_chat_7b_qlora_custom_sft_e1_copy.py ./iter_2000.pth ./iter_2000_hf
 ```
 
 ## 对话
@@ -162,7 +162,7 @@ xtuner chat ${NAME_OR_PATH_TO_LLM} --adapter {NAME_OR_PATH_TO_ADAPTER} --prompt-
 # 例如：xtuner chat internlm/internlm2-7b --adapter ./iter_2000_hf --prompt-template internlm2_chat
 ```
 
-其中 ${PROMPT_TEMPLATE} 表示模型的对话模板，需要与训练用的 config 中的 `prompt_template` 字段保持一致，例如 `internlm2_chat_7b_qlora_custom_dataset_e1_copy.py` 中的设置为：
+其中 ${PROMPT_TEMPLATE} 表示模型的对话模板，需要与训练用的 config 中的 `prompt_template` 字段保持一致，例如 `internlm2_chat_7b_qlora_custom_sft_e1_copy.py` 中的设置为：
 
 ```python
 prompt_template = PROMPT_TEMPLATE.internlm2_chat
