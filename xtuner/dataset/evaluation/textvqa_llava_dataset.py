@@ -59,7 +59,7 @@ class TextVQALLaVADataset(BaseEvalDataset):
         return len(self.data)
 
     def __getitem__(self, idx):
-        data_dict = {'id': idx}
+        data_dict = {'img_id': idx}
         line = self.data[idx]
         image_file = line["image"]
         qs = line["text"]
@@ -106,7 +106,7 @@ class TextVQALLaVADataset(BaseEvalDataset):
         ans_file = open(answers_file, "w")
 
         for pred_dict in result:
-            idx = pred_dict["id"]
+            idx = pred_dict["img_id"]
             gt_data = self.data[idx]
 
             ans_file.write(json.dumps({"question_id": gt_data['question_id'],

@@ -92,7 +92,7 @@ class POPELLaVADataset(BaseEvalDataset):
                 category = self.name[data_idx]
                 assert answer in ['yes', 'no']
                 data = {
-                    'id': idx,
+                    'img_id': idx,
                     'index': index,
                     'img': image_path,
                     'question': question,
@@ -105,7 +105,7 @@ class POPELLaVADataset(BaseEvalDataset):
 
     def __getitem__(self, idx):
         data = self.data[idx]
-        data_dict = {'id': data['id']}
+        data_dict = {'img_id': data['img_id']}
 
         text = data['question']
         text = DEFAULT_IMAGE_TOKEN + '\n' + text
@@ -146,10 +146,10 @@ class POPELLaVADataset(BaseEvalDataset):
 
     @master_only
     def evaluate(self, result, work_dir, show=True):
-        orig_index = [x['id'] for x in self.data]
+        orig_index = [x['img_id'] for x in self.data]
         results = []
         for pred_dict in result:
-            index = pred_dict['id']
+            index = pred_dict['img_id']
             new_index = orig_index.index(index)
             filtered_rows = self.data[new_index]
             cur_result = {}
