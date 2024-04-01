@@ -244,11 +244,21 @@ def process(dataset,
     else:
         assert {'input_ids', 'labels'}.issubset(dataset.column_names)
 
-    if input_ids_with_output and not with_dpo:
+    if input_ids_with_output:
         # remove data that does not have the valid labels.
-        dataset = dataset.filter(
-            lambda example: any(label >= 0 for label in example['labels']),
-            num_proc=map_num_proc)
+        if with_dpo:
+            dataset = dataset.filter(
+                lambda example: any(label >= 0 for label in example['chosen_labels']),
+                num_proc=map_num_proc)
+            dataset = dataset.filter(
+                lambda example: any(label >= 0 for label in example['reject_labels']),
+                num_proc=map_num_proc)
+        else:
+            dataset = dataset.filter(
+                lambda example: any(label >= 0 for label in example['labels']),
+                num_proc=map_num_proc)
+        
+        
 
     # pack to max length
     if pack_to_max_length and not with_dpo:

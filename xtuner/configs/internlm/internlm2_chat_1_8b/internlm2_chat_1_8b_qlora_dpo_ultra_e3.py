@@ -29,7 +29,7 @@ use_dpo = True
 # Data
 orca_dpo_path = 'Intel/orca_dpo_pairs'
 prompt_template = PROMPT_TEMPLATE.internlm2_chat
-max_length = 256
+max_length = 2048
 pack_to_max_length = False
 
 # Scheduler & Optimizer
@@ -91,30 +91,30 @@ tokenizer = dict(
 #         task_type='CAUSAL_LM'))
 
 # lora
-model = dict(
-    type=DPO,  # TODO
-    # type = SupervisedFinetune,
-    use_varlen_attn=use_varlen_attn,
-    llm=dict(
-        type=AutoModelForCausalLM.from_pretrained,
-        pretrained_model_name_or_path=pretrained_model_name_or_path,
-        trust_remote_code=True,
-        torch_dtype=torch.float16),
-    lora=dict(
-        type=LoraConfig,
-        r=64,
-        lora_alpha=16,
-        lora_dropout=0.1,
-        bias='none',
-        task_type='CAUSAL_LM'))
-
 # model = dict(
-#     type=DPO,
+#     type=DPO,  # TODO
+#     # type = SupervisedFinetune,
 #     use_varlen_attn=use_varlen_attn,
 #     llm=dict(
 #         type=AutoModelForCausalLM.from_pretrained,
 #         pretrained_model_name_or_path=pretrained_model_name_or_path,
-#         trust_remote_code=True))
+#         trust_remote_code=True,
+#         torch_dtype=torch.float16),
+#     lora=dict(
+#         type=LoraConfig,
+#         r=64,
+#         lora_alpha=16,
+#         lora_dropout=0.1,
+#         bias='none',
+#         task_type='CAUSAL_LM'))
+
+model = dict(
+    type=DPO,
+    use_varlen_attn=use_varlen_attn,
+    llm=dict(
+        type=AutoModelForCausalLM.from_pretrained,
+        pretrained_model_name_or_path=pretrained_model_name_or_path,
+        trust_remote_code=True))
 
 #######################################################################
 #                      PART 3  Dataset & Dataloader                   #

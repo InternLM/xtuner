@@ -126,7 +126,8 @@ class DPO(BaseModel):
         assert len_chosen > 0
 
         all_logits = self.llm(**data).logits
-        all_ref_logits = self.ref_model(**data).logits
+        with torch.no_grad():
+            all_ref_logits = self.ref_model(**data).logits
 
         labels = data['labels']
         labels[labels == -100] = 0
