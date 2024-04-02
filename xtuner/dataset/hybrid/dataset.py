@@ -1,110 +1,38 @@
+import functools
 import json
 import os
 import random
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
-from functools import partial
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Union
+from typing import Dict, List, Optional, Union
 
 import torch
 from datasets import Dataset, load_from_disk
 from mmengine import print_log
+from mmengine.dist import master_only
 from torch import distributed as dist
 from tqdm import tqdm
+from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
 from xtuner.dataset.hybrid._pack import _PackDataset
-from xtuner.dataset.hybrid.mappings import map_protocol, map_sequential
-from xtuner.registry import BUILDER
-from xtuner.types import ChatTemplate
-from xtuner.utils import build_tokenizer
+from xtuner.types import ChatMessages, ChatTemplate
+from xtuner.utils.config import build_from_cfg_or_obj
 
+_TokenizerType = Union[PreTrainedTokenizer, PreTrainedTokenizerFast]
+
+# HACK If not set to true, multithreaded tokenization cannot be carried out,
+# but transformers do not recommend setting it to true.
 os.environ['TOKENIZERS_PARALLELISM'] = 'true'
 
 
-@map_protocol(
-    input_keys=dict(input_ids=list),
-    added_keys=dict(cumulative_len=list),
-)
-def _register_cumulative_len(data, tokenizer=None, chat_template=None):
-    data['cumulative_len'] = [0, len(data['input_ids'])]
-    return data
+def master_only_load(load_fn):
 
-
-@map_protocol(
-    input_keys=dict(
-        input_ids=list, labels=list, num_tokens=int, cumulative_len=list),
-    output_keys=dict(
-        input_ids=list, labels=list, num_tokens=int, cumulative_len=list))
-def _check_mapped_data(item, tokenizer=None, chat_template=None):
-    assert isinstance(item['input_ids'][0], int)
-    assert isinstance(item['labels'][0], int)
-    return item
-
-
-class TextDataset(torch.utils.data.Dataset):
-    """"""
-
-    def __init__(self,
-                 tokenizer,
-                 chat_template: Union[Dict, ChatTemplate],
-                 sample_ratio: int = 1.0,
-                 max_length: int = 2048,
-                 pack_to_max_length: bool = True,
-                 num_workers: int = 8,
-                 mappings: Union[Callable, List[Callable]] = [],
-                 data_dir: Optional[str] = None,
-                 data_files: Optional[Union[str, List[str]]] = None,
-                 data_cached: Optional[str] = None):
-        super().__init__()
-
-        assert data_dir or data_files or data_cached
-
-        self.tokenizer = build_tokenizer(tokenizer)
-
-        if isinstance(chat_template, ChatTemplate):
-            self.chat_template = chat_template
-        elif isinstance(chat_template, dict):
-            self.chat_template = BUILDER.build(chat_template)
-        else:
-            raise TypeError
-
-        self.sample_ratio = sample_ratio
-        self.max_length = max_length
-        self.pack_to_max_length = pack_to_max_length
-
-        mappings.append(_register_cumulative_len)
-        mappings.append(_check_mapped_data)
-        map_fn = map_sequential(mappings)
-        self.map_fn = partial(
-            map_fn, tokenizer=self.tokenizer, chat_template=self.chat_template)
-
-        self.num_workers = num_workers
-        if data_cached:
-            self.data_dir = data_dir
-            self.data_files = data_files
-            self.data_cached = data_cached
-        else:
-            data_dir = Path(data_dir)
-            if data_files is None:
-                data_files = [str(f) for f in data_dir.rglob('*.json')]
-            elif isinstance(data_files, list):
-                data_files = [str(data_dir / Path(f)) for f in data_files]
-            elif isinstance(data_files, str):
-                data_files = [str(data_dir / data_files)]
-            else:
-                raise TypeError
-
-            self.data_dir = str(data_dir)
-            self.data_files = data_files
-            self.data_cached = data_cached
-
-        self.dataset = self.build_dataset()
-
-    def build_dataset(self):
+    @functools.wraps(load_fn)
+    def wrapper(*args, **kwargs):
 
         if not (dist.is_available() and dist.is_initialized()):
-            return self._build_dataset()
+            return load_fn(*args, **kwargs)
 
         timeout = timedelta(
             minutes=int(os.getenv('XTUNER_DATASET_TIMEOUT', default=30)))
@@ -113,7 +41,7 @@ class TextDataset(torch.utils.data.Dataset):
         gloo_group = dist.new_group(backend='gloo', timeout=timeout)
 
         if dist.get_rank() == 0:
-            dataset = self._build_dataset()
+            dataset = load_fn(*args, **kwargs)
             objects = [dataset]
         else:
             objects = [None]
@@ -123,16 +51,266 @@ class TextDataset(torch.utils.data.Dataset):
 
         return objects[0]
 
-    def _build_dataset(self):
+    return wrapper
 
-        if self.data_cached:
-            dataset = load_from_disk(self.data_cached)
-            if self.pack_to_max_length:
-                dataset = self._pack_dataset(dataset)
-            return dataset
 
+class TextDataset(torch.utils.data.Dataset):
+    """A high-performance dataset designed for LLM instruction finetuning.
+
+    Capable of supporting ultra-large-scale training, and can enhance training
+    efficiency.
+
+    The following features are provided for extremely large datasets:
+
+        1. Distributed Load and Multi-thread Process the Dataset
+
+            In the traditional data-parallel training process, each rank loads
+            and processes the same dataset independently, which involves a
+            large amount of redundant operations. Moreover, ranks compete for
+            resources with each other, resulting in very low efficiency of
+            data loading and processing.
+
+            To address this situation, `TextDataset` loads and processes the
+            dataset only on rank 0 and then broadcasts the processed dataset
+            to other ranks, avoiding repeated loading on all ranks. When
+            loading and processing data, multi-threading is also enabled to
+            speed up, significantly improving the efficiency of dataset
+            loading.
+
+            This feature is default, developers need no special settings.
+
+        2. Cached Dataset
+
+            Even though the loading and processing of datasets can be speed up
+            via distributed and multi-threaded methods, the process might
+            still be time-consuming. For cases where the same dataset is used
+            for training multiple times, it is possible to cache the processed
+            dataset during the first training. This way, there's no need to
+            reprocess the data for subsequent training.
+
+            This feature requires developers to set `cache_dir`. During the
+            first training, the processed dataset will be automatically cached
+            to the directory specified by `cache_dir`. Subsequent training
+            will automatically load data from the `cache_dir` path.
+
+
+        3. Packed Dataset
+
+            In the batch training, the length of each piece of data varies.
+            The traditional method pads shorter data within a batch to match
+            the length of the longest data. This leads to a wastage of
+            computing resources due to pad tokens. Additionally, the maximum
+            length of each batch tends to fluctuate, making it challenging to
+            maintain a high level of GPU utilization.
+
+            To address this issue, `TextDataset` takes multiple pieces of
+            unevenly sized raw data and concatenates them up to `max_length`.
+            The last concatenated piece of raw data, if it exceeds the max
+            length with its cumulative length, is cut off. The portion
+            exceeding the maximum length is used as the beginning of the next
+            piece of packed data.
+
+            When using this feature, developer need to set `pack_to_max_length`
+            to True.
+
+            Each packed data can compute attention within each original data,
+            or treat it as a whole data to compute attention, which can be
+            controlled in the `model` by `use_varlen_attn`.
+
+
+    The required input dataset format for each piece of data is as follows：
+    ```
+    {
+        "messages" : [
+            {"role" : "user", "content" : "Hello"},
+            {"role" : "assistant", "content" : "Hello!"},
+            {"role" : "user", "content" : "Who are you?"},
+            {"role" : "assistant", "content" : "I'm an AI assistant."}
+        ]
+    }
+    ```
+    For a more detailed introduction on dataset format, you can refer to the
+    XTuner documentation.
+
+    For common dataset formats, we also provide corresponding conversion
+    scripts, refer to the XTuner documentation.
+
+    Note:
+       If your dataset is not in the aforementioned format, and it's
+       inconvenient to convert to that format, you can inherit `TextDataset`
+       and override the `tokenize_dataset` method if you want to use the
+       high-performance data processing features of XTuner.
+
+    Args:
+        tokenizer (_TokenizerType):
+            The original data is a dict composed of strings, which needs
+            to be tokenized before it can be trained. The tokenizer must be
+            consistent with the one used in the model being trained.
+        chat_template (dict | ChatTemplate):
+            Different models correspond to different chat template. If it is
+            a dict, it will be considered in the style of MMEngine config and
+            will be built accordingly. Ultimately, a ChatTemplate instance
+            will be obtained.
+        sample_ratio (float):
+            Control over-sampling or under-sampling of the dataset, 2 means
+            over-sampling the dataset to double its original size,
+            0.5 means under-sampling the dataset to half its original size.
+            Default is 1.
+        max_length (int):
+            The maximum length of a single data in the dataset. When
+            `pack_to_max_length` is False, data exceeding the `max_length`
+            will be truncated, only preserving the first `max_length` tokens.
+            Default is 2048.
+        pack_to_max_length (bool):
+            If True, multiple data will be packed to form a new dataset. Each
+            data in the packed dataset has a length of `max_length`. Default
+            is True.
+        num_proc (int):
+            The number of threads used when processing dataset. Default is 8.
+        cache_dir (str):
+            The cache path of the dataset. When the path points to an existing
+            cached dataset, it will directly load the cached dataset, and the
+            settings of `data_dir` and `data_files` will become invalid. When
+            the path does not point to a cached dataset, the processed data
+            will be cached to this path. Default is None.
+        data_files (List[str]):
+            The paths of several json files. When `data_dir` is None, it will
+            directly load files according to the addresses in `data_files`;
+            when `data_dir` is not None, the file paths in `data_files` should
+            be relative paths under `data_dir`. When `cache_dir` is not None,
+            and `cache_dir` points to a cached dataset, the settings of
+            `data_files` become invalid. Default is None.
+        data_dir (str):
+            When `data_files` is None, it will load all json files in
+            `data_dir` and its several tiers of sub-directories; when
+            `data_files` is not None, only json files in `data_files` are
+            loaded. When `cache_dir` is not None, and `cache_dir` points
+            to a  cached dataset, the setting of `data_dir` become invalid.
+            Default is None.
+    """
+
+    def __init__(self,
+                 tokenizer: _TokenizerType,
+                 chat_template: Union[Dict, ChatTemplate],
+                 sample_ratio: float = 1.0,
+                 max_length: int = 2048,
+                 pack_to_max_length: bool = True,
+                 num_proc: int = 8,
+                 data_dir: Optional[str] = None,
+                 data_files: Optional[Union[str, List[str]]] = None,
+                 cache_dir: Optional[str] = None):
+        super().__init__()
+
+        self.tokenizer = build_from_cfg_or_obj(
+            tokenizer, accept=(PreTrainedTokenizer, PreTrainedTokenizerFast))
+
+        self.chat_template = build_from_cfg_or_obj(
+            chat_template, accept=ChatTemplate)
+
+        self.sample_ratio = sample_ratio
+        self.max_length = max_length
+        self.pack_to_max_length = pack_to_max_length
+
+        self.num_workers = num_proc
+        self.dataset = self.load_dataset(data_dir, data_files, cache_dir)
+
+        # When the cache_dir is set and there isn't a cached dataset in it,
+        # the tokenized dataset will be cached to the cache_dir.
+        if cache_dir and not self.is_cached(cache_dir):
+            self.cache_dataset(cache_dir)
+
+    def load_dataset(
+            self,
+            data_dir: Optional[str] = None,
+            data_files: Optional[List[str]] = None,
+            cache_dir: Optional[str] = None) -> Union[Dataset, _PackDataset]:
+        """Load multiple JSON files, or the cached tokenized dataset.
+
+        Args:
+            data_dir (str):
+                When `data_files` is None, it will load all json files in
+                `data_dir` and its several tiers of sub-directories; when
+                `data_files` is not None, only json files in `data_files` are
+                loaded. When `cache_dir` is not None, and `cache_dir` points
+                to a  cached dataset, the setting of `data_dir` become invalid.
+                Default is None.
+            data_files (List[str]):
+                The paths of several json files. When `data_dir` is None, it
+                will directly load files according to the addresses in
+                `data_files`; when `data_dir` is not None, the file paths in
+                `data_files` should be relative paths under `data_dir`. When
+                `cache_dir` is not None, and `cache_dir` points to a cached
+                dataset, the settings of `data_files` become invalid. Default
+                is None.
+            cache_dir (str):
+                The cache path of the dataset. When the path points to an
+                existing cached dataset, it will directly load the cached
+                dataset, and the settings of `data_dir` and `data_files` will
+                become invalid. When the path does not point to a cached
+                dataset, the processed data will be cached to this path.
+                Default is None.
+            map_fn (Callable):
+                The map function of the dataset.
+
+        Raises:
+            RuntimeError:
+                When the dataset is not cached, `data_files` and `data_dir`
+                cannot be None at the same time.
+            TypeError:
+                If `data_files` is not None, it should be a str or a list
+                of str.
+
+        Returns:
+            datasets.Dataset or _PackDataset:
+                If `pack_to_max_length` is True, the returned will be the
+                processed(tokenized) dataset, using `datasets.Dataset` for
+                easy caching and data packing.
+                If `pack_to_max_length` is False, the returned will be the
+                packed dataset.
+        """
+        if self.is_cached(cache_dir):
+            print_log(
+                f'{cache_dir} is cached dataset that will be loaded '
+                'directly; `data_files` and `data_dir` will become'
+                'invalid.',
+                logger='current')
+
+            return self._load_cached_dataset(cache_dir=cache_dir)
+        else:
+            if not (data_dir or data_files):
+                raise RuntimeError('When the dataset is not cached, '
+                                   '`data_files` and `data_dir` cannot be '
+                                   'None at the same time.')
+            data_dir = Path(data_dir)
+            if data_files is None:
+                data_files = [str(f) for f in data_dir.rglob('*.json')]
+            elif isinstance(data_files, list):
+                data_files = [str(data_dir / Path(f)) for f in data_files]
+            elif isinstance(data_files, str):
+                data_files = [str(data_dir / data_files)]
+            else:
+                raise TypeError('`data_files` should be a str or a list of '
+                                f'str, not {type(data_dir)}.')
+
+            self.data_files = data_files
+            return self._load_json_dataset(files=data_files)
+
+    @master_only_load
+    def _load_cached_dataset(self,
+                             cache_dir: str) -> Union[Dataset, _PackDataset]:
+        """Load the cached dataset."""
+
+        dataset = load_from_disk(cache_dir)
+        if self.pack_to_max_length:
+            dataset = self._pack_dataset(dataset)
+        return dataset
+
+    @master_only_load
+    def _load_json_dataset(self,
+                           files: List[str]) -> Union[Dataset, _PackDataset]:
+        """Load several json files and map them into a trainable format."""
         dataset = []
-        for file in self.data_files:
+        for file in files:
             dataset.extend(json.load(open(file)))
             print_log(f'Loaded json data from {file}', logger='current')
 
@@ -142,12 +320,7 @@ class TextDataset(torch.utils.data.Dataset):
             print_log(
                 f'Randomly selected {num_samples} samples', logger='current')
 
-        with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
-            dataset = list(
-                tqdm(
-                    executor.map(self.map_fn, dataset),
-                    desc='Map Dataset',
-                    total=len(dataset)))
+        dataset = self.tokenize_dataset(dataset)
 
         dataset = self.filter_non_labels_data(dataset)
 
@@ -160,8 +333,57 @@ class TextDataset(torch.utils.data.Dataset):
 
         return dataset
 
-    def _pack_dataset(self, dataset):
+    def tokenize_dataset(self, dataset: List[dict]) -> List[dict]:
+        """Tokenize the dataset and convert it into a trainable format.
 
+        In the `tokenize_dataset` method, you need to define how to convert
+        the raw data to the correct prompts (taking note of chat templates)
+        and tokenize them; you need to define the label for each token, with
+        the labels of the part that doesn't need to calculate loss set to -100.
+
+        The labels don't need to be offset, it will be offset when the model
+        calculates loss, meaning the label of each token should be itself.
+
+
+         Args:
+             dataset (List[dict]):  The untokenized dataset.
+
+         Note:
+             The input must be a native Python list of dict, not
+             `datasets.Dataset`, otherwise multithreaded data filtering will be
+             slow.
+
+         Returns:
+             List[dict]:
+                 Each dict in the list must contain two keys: `input_ids` and
+                 `labels`. Both are lists of int, and they should have equal
+                 lengths.
+        """
+
+        def openai_to_raw_training(item: dict) -> Dict:
+
+            data = ChatMessages.from_dict(item)
+            data = data.tokenize(self.tokenizer, self.chat_template)
+
+            return data
+
+        with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
+            dataset = list(
+                tqdm(
+                    executor.map(openai_to_raw_training, dataset),
+                    desc='Map Dataset',
+                    total=len(dataset)))
+        return dataset
+
+    def _pack_dataset(self, dataset) -> _PackDataset:
+        """Pack the processed(tokenized) dataset.
+
+        Args:
+            dataset (datasets.Dataset): The processed(tokenized) dataset.
+
+        Returns:
+            _PackDataset: Pack multiple data until reaching the max length.
+        """
         unpacked_samples = len(dataset)
         dataset = _PackDataset(dataset, self.max_length)
         packed_samples = len(dataset)
@@ -175,7 +397,24 @@ class TextDataset(torch.utils.data.Dataset):
             logger='current')
         return dataset
 
-    def filter_non_labels_data(self, dataset):
+    def filter_non_labels_data(self, dataset: List[dict]) -> List[dict]:
+        """Filter the data which all labels are ignore.
+
+        Note:
+            If all the labels for a data are ignore, it will result in a NAN
+            loss value during training.
+
+        Args:
+            dataset (List[dict]):  The processed(tokenized) dataset.
+
+        Note:
+            The input must be a native Python list of dict, not
+            `datasets.Dataset`, otherwise multithreaded data filtering will be
+            slow.
+
+        Returns:
+            List[dict]: Filtered Dataset
+        """
 
         def filter_fn(item):
             return any(label >= 0 for label in item['labels'])
@@ -199,7 +438,17 @@ class TextDataset(torch.utils.data.Dataset):
             logger='current')
         return new_dataset
 
-    def analysis_tokens_labels(self, dataset):
+    def analysis_tokens_labels(self, dataset: List[dict]) -> List[str]:
+        """Count the total number of tokens in the dataset, and the number of
+        tokens for which loss needs to be calculated.
+
+        Args:
+            dataset (List[dict]):  The processed(tokenized) dataset.
+
+        Note:
+            The input must be a native Python list of dict, not
+            `datasets.Dataset`, otherwise multithreaded counting will be slow.
+        """
 
         def label_counter(item):
             return sum([1 for i in item['labels'] if i >= 0])
@@ -227,13 +476,19 @@ class TextDataset(torch.utils.data.Dataset):
             f'of which {num_labels} tokens need loss calculation.',
             logger='current')
 
-    def cache(self, cache_dir: str):
+    @master_only
+    def cache_dataset(self, cache_dir: str):
+        """Cache the processed(tokenized) dataset."""
+
         cache_dir = Path(cache_dir)
 
         if self.pack_to_max_length:
-            hf_dataset = Dataset.from_list(self.dataset.dataset)
+            # The packed dataset can't be cached, only the dataset before
+            # #packing can be cached.
+            # The cached dataset will be re-packed after loading.
+            hf_dataset = self.dataset.dataset
         else:
-            hf_dataset = Dataset.from_list(self.dataset)
+            hf_dataset = self.dataset
 
         hf_dataset.save_to_disk(cache_dir)
 
@@ -245,18 +500,66 @@ class TextDataset(torch.utils.data.Dataset):
             'tokenizer': type(self.tokenizer).__name__,
         }
 
-        with open(cache_dir / 'dataset_configuration.json', 'w') as f:
+        with open(cache_dir / 'xtuner_dataset_conf.json', 'w') as f:
             json.dump(dset_conf, f)
 
-        self.tokenizer.save_pretrained(cache_dir / 'tokenizer')
+        print_log(
+            f'The processed dataset is cached in the {cache_dir}.',
+            logger='current')
 
-    def __len__(self):
+    def is_cached(self, cache_dir: Optional[str]) -> bool:
+        """Determine whether the path is a cached dataset path."""
+
+        if cache_dir is None:
+            return False
+
+        if os.path.isdir(cache_dir):
+            dset_config = os.path.join(cache_dir, 'xtuner_dataset_conf.json')
+            if os.path.exists(dset_config):
+                return True
+            else:
+                return False
+        else:
+            return False
+
+    def __len__(self) -> int:
+        """Get the length of the dataset.
+
+        Note:
+           If pack_to_max_length is True, the length might be much less than
+           the original dataset.
+
+        Returns:
+            int: The length of the dataset.
+        """
         return len(self.dataset)
 
     def __getitem__(self, item: int) -> Dict[str, List]:
+        """Return the corresponding data according to the index.
 
+        Note:
+            If the developer changes the returned data format, the
+            `collate_fn` of the dataloader also needs to be modified
+            accordingly. XTuner defines `collate_fn` in the model, because the
+            data format returned by `collate_fn` is heavily dependent on model
+            training.
+
+        Returns:
+            Dict[str, List]:
+                The returned should be a dict, and must include two keys:
+                `input_ids` and `labels`. Both are lists of int, and they
+                should have equal lengths.
+
+                If `pack_to_max_length` is True, there should also be a key
+                named `cumulative_len`, which records the cumulative length of
+                each data being packed. For example, if three pieces of data
+                are packed into one, with the respective lengths of 2, 4, and
+                6, then the corresponding `cumulative_len` is [0, 2, 6, 12].
+
+                The length of `cumulative_len` should be the number of packed
+                data plus 1.
+        """
         data = self.dataset[item]
-
         return data
 
 
@@ -284,7 +587,7 @@ if __name__ == '__main__':
         data_files=data_files,
         pack_to_max_length=True,
         mappings=[openai_to_raw_training],
-        num_workers=4)
+        num_proc=4)
 
     print(dataset[0])
 
@@ -294,12 +597,12 @@ if __name__ == '__main__':
         chat_template,
         sample_ratio=1,
         max_length=32 * 1024,
-        data_cached='cached_llava',
+        cache_dir='cached_llava',
         pack_to_max_length=True,
         mappings=[
             openai_to_raw_training,
         ],
-        num_workers=4)
+        num_proc=4)
     print(dataset[0])
 
     from mmengine.dataset import DefaultSampler
