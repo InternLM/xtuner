@@ -18,6 +18,7 @@ from xtuner.engine.hooks import (DatasetInfoHook, EvaluateChatHook,
                                  VarlenAttnArgsToMessageHubHook)
 from xtuner.engine.runner import TrainLoop
 from xtuner.model import SupervisedFinetune
+from xtuner.parallel.sequence import SequenceParallelSampler
 from xtuner.utils import PROMPT_TEMPLATE
 
 #######################################################################
@@ -32,6 +33,9 @@ data_path = 'damo/MSAgent-Bench'
 prompt_template = PROMPT_TEMPLATE.default
 max_length = 2048
 pack_to_max_length = False
+
+# parallel
+sequence_parallel_size = 1
 
 # Scheduler & Optimizer
 batch_size = 8  # per_device
@@ -123,11 +127,13 @@ train_dataset = dict(
     pack_to_max_length=pack_to_max_length,
     use_varlen_attn=use_varlen_attn)
 
+sampler = dict(type=SequenceParallelSampler) \
+    if sequence_parallel_size > 1 else dict(type=DefaultSampler)
 train_dataloader = dict(
     batch_size=batch_size,
     num_workers=dataloader_num_workers,
     dataset=train_dataset,
-    sampler=dict(type=DefaultSampler, shuffle=True),
+    sampler=sampler,
     collate_fn=dict(type=default_collate_fn, use_varlen_attn=use_varlen_attn))
 
 #######################################################################
