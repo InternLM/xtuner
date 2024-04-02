@@ -18,8 +18,9 @@ tiktoken
 # limit pytorch version <= 2.1.2 as there may be some bugs in triton 2.2
 torch<=2.1.2
 torchvision<=0.16.2
-# Minimum 4.34.0 to support added_tokens_decoder of tokenizer
-# Exclude 4.34.1, 4.35.0, 4.35.1, 4.35.2 to avoid BC-break,
-# see https://github.com/huggingface/transformers/pull/27020, https://github.com/huggingface/transformers/pull/27073
-transformers>=4.34.0,!=4.34.1,!=4.35.0,!=4.35.1,!=4.35.2
+# Minimum 4.36.0 to support `Cache` data structure used by KV Cache
+# Registering a causal mask in `LlamaModel` is not friendly for very large
+# `max_position_embeddings`. Refer to
+# https://github.com/huggingface/transformers/blob/v4.38.0/src/transformers/models/llama/modeling_llama.py#L921-L923
+transformers>=4.36.0,!=4.38.0,!=4.38.1,!=4.38.2
 transformers_stream_generator

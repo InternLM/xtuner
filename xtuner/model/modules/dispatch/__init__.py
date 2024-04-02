@@ -13,7 +13,7 @@ from .baichuan import (baichuan2_norm_head_forward, baichuan_7b_attn_forward,
 from .yi import yi_attn_forward
 
 IS_LOW_VERSION_TRANSFORMERS = digit_version(
-    transformers.__version__) < digit_version('4.36')
+    transformers.__version__) < digit_version('4.38')
 SUPPORT_FLASH1 = digit_version(torch.__version__) >= digit_version('2.0.0')
 SUPPORT_FLASH2 = False
 
@@ -48,7 +48,7 @@ def dispatch_llama_attn_forward(model, use_varlen_attn):
     if use_varlen_attn:
         assert SUPPORT_FLASH2 and SUPPORT_TRITON, \
             'flash_attn and triton is required if you want to use varlen_attn.'
-    elif not SUPPORT_FLASH:
+    elif not SUPPORT_FLASH2:
         return
 
     from .llama import (llama_attn_forward, llama_attn_forward_legacy,
@@ -57,8 +57,10 @@ def dispatch_llama_attn_forward(model, use_varlen_attn):
 
     print_log(NO_ATTN_WEIGHTS_MSG, 'current', logging.WARNING)
     for module in model.modules():
-        if type(module).__name__ in ('LlamaAttention', 'LlamaFlashAttention2',
-                                     'LlamaSdpaAttention'):
+        # Do not need to dispatch if
+        # type(module).__name__ == 'LlamaSdpaAttention', as flash_attn is
+        # required when using sequence parallel
+        if type(module).__name__ in ('LlamaAttention', 'LlamaFlashAttention2'):
             if use_varlen_attn:
                 print_log('dispatch llama varlen attn forward', 'current')
                 if IS_LOW_VERSION_TRANSFORMERS:
@@ -123,7 +125,8 @@ def dispatch_internlm2_attn_forward(model, use_varlen_attn):
 
     print_log(NO_ATTN_WEIGHTS_MSG, 'current', logging.WARNING)
     for module in model.modules():
-        if type(module).__name__ == 'InternLM2Attention':
+        if type(module).__name__ in ('InternLM2Attention',
+                                     'InternLM2FlashAttention2'):
             if use_varlen_attn:
                 print_log('dispatch internlm2 varlen attn forward', 'current')
                 module.forward = types.MethodType(
@@ -188,11 +191,12 @@ def replace_internlm2_rote(model):
         for name, child in module.named_children():
             if type(child).__name__ in (
                     'InternLM2RotaryEmbedding',
+                    'InternLM2LinearScalingRotaryEmbedding',
                     'InternLM2DynamicNTKScalingRotaryEmbedding'):
                 print_log('replace internlm2 rope', 'current')
                 dim_model = child.inv_freq.shape[0] * 2
                 child_new = InternLM2RotaryEmbedding(
-                    dim_model, child.max_seq_len_cached, rotary_base).to(
+                    dim_model, child.max_position_embeddings, rotary_base).to(
                         device=child.inv_freq.device,
                         dtype=child.inv_freq.dtype)
                 setattr(module, name, child_new)
