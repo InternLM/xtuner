@@ -46,4 +46,4 @@ max_position_embeddings
 
 在使用序列并行策略训练超长序列时，`sequence_parallel_size` 个 GPUs 会共同计算一条长序列。而 `accumulative_counts` 则用于控制模型参数更新的频率。
 
-假设需要在 N 块 GPUs 上执行 `batch_size_per_device = 1, max_length = 128k` 的训练策略。当设置序列并行维度为 `sequence_parallel_size` 后，为了保证训练的等价性，`accumulative_counts` 需要设置为原来的 `sequence_parallel_size` 倍，因为 128k 长度的序列会被切分为 `sequence_parallel_size` 份后分发给 `sequence_parallel_size` 个 GPUs 进行训练，`data_parallel_world_size` 会变为原来的 $\\frac{1}{`sequence_parallel_size`}$。
+假设需要在 N 块 GPUs 上执行 `batch_size_per_device = 1, max_length = 128k` 的训练策略。当设置序列并行维度为 `sequence_parallel_size` 后，为了保证训练的等价性，`accumulative_counts` 需要设置为原来的 `sequence_parallel_size` 倍，因为 128k 长度的序列会被切分为 `sequence_parallel_size` 份后分发给 `sequence_parallel_size` 个 GPUs 进行训练，`data_parallel_world_size` 会变为原来的 :math:`\frac{1}{sequence_parallel_size}`。

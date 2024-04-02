@@ -19,9 +19,9 @@ ZeRO 策略将模型训练阶段，每张卡中显存内容分为两类：
 
 **ZeRO 策略只优化模型状态显存占用，** 包含 ZeRO-1、ZeRO-2 和 ZeRO-3 三种策略，从 ZeRO-1 到 ZeRO-3 优化等级越来越高。
 
-- ZeRO-1 策略针对优化器状态进行分片，模型参数和梯度仍旧是每张卡保持一份，此时，每张卡的模型状态所需显存是 :math:`4x + \\frac{12x}{N}` （ N 为 GPU 数目）
-- ZeRO-2 策略针对模型梯度进行分片，模型参数仍旧是每张卡保持一份，此时，每张卡的模型状态所需显存是 :math:`2x + \\frac{14x}{N}` （ N 为 GPU 数目）
-- ZeRO-3 策略针对型参数进行分片，此时每张卡的模型状态所需显存是 :math:`\\frac{16x}{N}` （ N 为 GPU 数目）
+- ZeRO-1 策略针对优化器状态进行分片，模型参数和梯度仍旧是每张卡保持一份，此时，每张卡的模型状态所需显存是 :math:`4x + \frac{12x}{N}` （ N 为 GPU 数目）
+- ZeRO-2 策略针对模型梯度进行分片，模型参数仍旧是每张卡保持一份，此时，每张卡的模型状态所需显存是 :math:`2x + \frac{14x}{N}` （ N 为 GPU 数目）
+- ZeRO-3 策略针对型参数进行分片，此时每张卡的模型状态所需显存是 :math:`\frac{16x}{N}` （ N 为 GPU 数目）
 
 由于不同的优化方案不会影响模型训练结果，因此在不会导致 OOM 的前提下，建议使用优化等级较低的 ZeRO 策略。
 
@@ -30,7 +30,7 @@ ZeRO 策略将模型训练阶段，每张卡中显存内容分为两类：
 
 `DeepSpeed <https://github.com/microsoft/DeepSpeed>`_ 是一个开源的深度学习优化库，旨在简化并加速大规模模型的训练。
 
-XTuner 支持一键启动 DeepSpeed 进行训练，只需在启动命令后插入 `--deepspeed deepspeed_zero2(deepspeed_zero1 or deepspeed_zero3)` 即可：
+XTuner 支持一键启动 DeepSpeed 进行训练，只需在启动命令后插入 `--deepspeed deepspeed_zero2 (deepspeed_zero1 or deepspeed_zero3)` 即可：
 
 .. code-block:: bash
 

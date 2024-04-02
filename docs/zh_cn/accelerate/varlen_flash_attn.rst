@@ -6,7 +6,7 @@
 简介
 --------------------
 
-:ref:`pack_to_max_length` 一节中，我们讨论了“数据集拼接”策略对模型训练效率的显著提升。
+:ref:`数据拼接` 一节中，我们讨论了“数据集拼接”策略对模型训练效率的显著提升。
 理论上，数据集拼接可能会对注意力（Attention）机制的计算过程产生影响。这是因为，在未采用数据拼接策略的情况下，
 每条数据在计算注意力时仅与自身相关联。然而，当采用数据拼接策略后，由多条短数据拼接成的长数据在计算注意力时会相互关联。
 以一个由若干短数据拼接成长度为 4096 的数据为例，如果不采用变长注意力机制，在注意力计算阶段，每个 token 将会关注全部 4096 个 tokens ，如图左侧所示。
@@ -136,7 +136,7 @@ Step 5, 开始训练
     (DIST) NPROC_PER_NODE=${GPU_NUM} xtuner train internlm_7b_full_oasst1_e3_copy.py --deepspeed deepspeed_zero1
     (SLURM) srun ${SRUN_ARGS} xtuner train internlm_7b_full_oasst1_e3_copy.py --launcher slurm --deepspeed deepspeed_zero1
 
-- `--deepspeed` 表示使用 `DeepSpeed <https://github.com/microsoft/DeepSpeed> ` 🚀 来优化训练过程。若未安装 DeepSpeed ，可通过 `pip install deepspeed>=0.12.3` 进行安装。XTuner 内置了多种策略，包括 ZeRO-1、ZeRO-2、ZeRO-3 等。如果用户期望关闭此功能，请直接移除此参数。
+- `--deepspeed` 表示使用 `DeepSpeed <https://github.com/microsoft/DeepSpeed>`_ 🚀 来优化训练过程。若未安装 DeepSpeed ，可通过 `pip install deepspeed>=0.12.3` 进行安装。XTuner 内置了多种策略，包括 ZeRO-1、ZeRO-2、ZeRO-3 等。如果用户期望关闭此功能，请直接移除此参数。
 
 Step 6, 模型转换
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^

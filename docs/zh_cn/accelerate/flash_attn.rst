@@ -35,7 +35,7 @@ Flash Attention (Flash Attention 2) 是一种用于加速 Transformer 模型中 
     - ✅
 
 .. note::
-    XTuner 会根据运行环境自动控制 Flash Attention 的使用情况 (见 [dispatch_modules](https://github.com/InternLM/xtuner/blob/59834032c82d39994c13252aea9b00011d1b2457/xtuner/model/sft.py#L90))：
+    XTuner 会根据运行环境自动控制 Flash Attention 的使用情况 (见 `dispatch_modules <https://github.com/InternLM/xtuner/blob/59834032c82d39994c13252aea9b00011d1b2457/xtuner/model/sft.py#L90>`_)：
 
     .. list-table::
       :widths: 50 50
@@ -53,4 +53,4 @@ Flash Attention (Flash Attention 2) 是一种用于加速 Transformer 模型中 
         - Flash Attention 2
 
 .. note::
-    使用 XTuner 训练 QWen1/1.5 时若想使用 Flash Attention 加速，需要先安装 `flash attn <https://github.com/Dao-AILab/flash-attention>`_（参考 `flash attn 安装 <https://github.com/Dao-AILab/flash-attention?tab=readme-ov-file#installation-and-features>`_，需要 cuda ）
+    使用 XTuner 训练 QWen1/1.5 时若想使用 Flash Attention 加速，需要先安装 `flash attn <https://github.com/Dao-AILab/flash-attention>`_ （参考 `flash attn 安装 <https://github.com/Dao-AILab/flash-attention?tab=readme-ov-file#installation-and-features>`_，需要 cuda ）
