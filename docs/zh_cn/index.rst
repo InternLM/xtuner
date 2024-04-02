@@ -63,7 +63,7 @@
    :maxdepth: 2
    :caption: 加速训练
 
-   accelerate/deepspeed.md
+   accelerate/deepspeed.rst
    accelerate/pack_to_max_length.rst
    accelerate/flash_attn.rst
    accelerate/varlen_flash_attn.md
