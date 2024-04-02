@@ -142,13 +142,13 @@ oasst1 = dict(
 train_dataset = dict(
     type=ConcatDataset, datasets=[alpaca_en, alpaca_zh, oasst1])
 
-sampler = dict(type=SequenceParallelSampler) \
-    if sequence_parallel_size > 1 else dict(type=DefaultSampler)
+sampler = SequenceParallelSampler \
+    if sequence_parallel_size > 1 else DefaultSampler
 train_dataloader = dict(
     batch_size=batch_size,
     num_workers=dataloader_num_workers,
     dataset=train_dataset,
-    sampler=sampler,
+    sampler=dict(type=sampler, shuffle=True),
     collate_fn=dict(type=default_collate_fn, use_varlen_attn=use_varlen_attn))
 
 #######################################################################
