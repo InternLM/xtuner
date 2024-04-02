@@ -42,7 +42,6 @@ from xtuner.utils import PROMPT_TEMPLATE
 # Model
 pretrained_model_name_or_path = 'internlm/internlm2-7b'
 use_varlen_attn = True
-sequence_parallel_size = 4
 
 # Data
 data_files = ['/path/to/json/file.json']
@@ -50,10 +49,14 @@ prompt_template = PROMPT_TEMPLATE.internlm2_chat
 max_length = 32768
 pack_to_max_length = True
 
+# parallel
+sequence_parallel_size = 4
+
 # Scheduler & Optimizer
 batch_size = 1  # per_device
 # accumulative_counts = accumulative_counts * sequence_parallel_size
-accumulative_counts = 4
+accumulative_counts = 1
+accumulative_counts *= sequence_parallel_size
 dataloader_num_workers = 4
 max_epochs = 1
 optim_type = AdamW
