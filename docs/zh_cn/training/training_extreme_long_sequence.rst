@@ -133,27 +133,27 @@ XTuner 序列并行支持情况
   * - 模型
     - 序列并行支持情况
   * - baichuan 1/2
-    -
+    - ❌
   * - chatglm 2/3
-    -
+    - ❌
   * - deepseek
-    - ✅︎
+    - ✅
   * - gemma
-    -
+    - ❌
   * - internlm 2
-    - ✅︎
+    - ✅
   * - llama 2
-    - ✅︎
+    - ✅
   * - mistral
-    -
+    - ❌
   * - qwen 1/1.5
-    -
+    - ❌
   * - starcoder
-    -
+    - ❌
   * - yi
-    - ✅︎
+    - ✅
   * - zephyr
-    - ✅︎
+    - ✅
 
 其他模型的序列并行功能尚在开发中。
 
