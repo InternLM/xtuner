@@ -67,7 +67,7 @@
    accelerate/pack_to_max_length.rst
    accelerate/flash_attn.rst
    accelerate/varlen_flash_attn.rst
-   accelerate/hyper_parameters.md
+   accelerate/hyper_parameters.rst
    accelerate/benchmark.md
 
 .. toctree::
