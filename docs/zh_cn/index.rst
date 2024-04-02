@@ -65,7 +65,7 @@
 
    accelerate/deepspeed.md
    accelerate/pack_to_max_length.rst
-   accelerate/flash_attn.md
+   accelerate/flash_attn.rst
    accelerate/varlen_flash_attn.md
    accelerate/hyper_parameters.md
    accelerate/benchmark.md
