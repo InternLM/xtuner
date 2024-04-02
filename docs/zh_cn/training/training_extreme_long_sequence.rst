@@ -29,7 +29,7 @@ XTuner 的序列并行算法具有以下关键特性：
 **表 1 不同序列长度时，使用 ZeRO-3 训练 128k 上下文 yi-34B 模型的训练情况**
 
 .. list-table::
-  :widths: 5 25 50 25 25
+  :widths: 25 15 10 15 25
   :header-rows: 1
 
   * - Sequence Parallel Size
@@ -62,7 +62,7 @@ XTuner 的序列并行算法具有以下关键特性：
 为解决长序列训练过程中的显存问题，Megatron-LM 团队和 DeepSpeed 团队分别提出了两种序列并行算法，通过对长序列进行切分的方法来降低单 GPU 上计算的序列长度。XTuner 中的序列并行设计思路参考了 DeepSpeed 的工作 `DeepSpeed Ulysses <https://arxiv.org/abs/2309.14509>`_，并加以优化， **以实现一键开启序列并行策略** 。三者的对比如下：
 
 .. list-table::
-  :widths: 25 25 50 5
+  :widths: 25 25 50 25
   :header-rows: 1
 
   * -
