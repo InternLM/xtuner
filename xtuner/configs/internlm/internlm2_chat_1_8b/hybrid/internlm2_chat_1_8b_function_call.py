@@ -5,26 +5,24 @@ from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
                             LoggerHook, ParamSchedulerHook)
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR, LinearLR
 from torch.optim import AdamW
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoTokenizer
 
 from xtuner.dataset.hybrid import HybridDataset, hybrid_collate_fn
 from xtuner.dataset.hybrid.mappings import openai_to_raw_training
 from xtuner.engine.hooks import DatasetInfoHook
 from xtuner.engine.runner import TrainLoop
-from xtuner.model import HybridFinetune
+from xtuner.model import AgentFinetune, AutoModelForCausalLM
 from xtuner.types import HybridChatTemplate
 
 #######################################################################
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-llm_name_or_path = '/mnt/petrelfs/share_data/linzhihao/model/models--internlm--internlm2-chat-7b/snapshots/2292b86b21cb856642782cebed0a453997453b1f/'
-visual_encoder_name_or_path = 'openai/clip-vit-large-patch14-336'
-# Specify the pretrained pth
-pretrained_pth = None
+llm_name_or_path = '/mnt/petrelfs/share_data/basemodel/checkpoints/llm/hf_hub/models--internlm--internlm2-chat-1_8b/snapshots/aa8a7450c2227a3b6733b3c6fe33fefbb2ca54f9/'
+
 # Data
 data_dir = './'
-data_files = ['function_call.json']
+data_files = ['agentlego.json']
 max_length = 2048
 
 # Chat Template
@@ -57,12 +55,6 @@ warmup_ratio = 0.03
 save_steps = 500
 save_total_limit = 2  # Maximum checkpoints to keep (-1 means unlimited)
 
-# Evaluate the generation performance during the training
-evaluation_freq = 500
-SYSTEM = ''
-evaluation_images = 'https://llava-vl.github.io/static/images/view.jpg'
-evaluation_inputs = ['请描述一下这张照片', 'Please describe this picture']
-
 #######################################################################
 #            PART 2  Model & Tokenizer & Image Processor              #
 #######################################################################
@@ -73,7 +65,7 @@ tokenizer = dict(
     padding_side='right')
 
 model = dict(
-    type=HybridFinetune,
+    type=AgentFinetune,
     llm=dict(
         type=AutoModelForCausalLM.from_pretrained,
         pretrained_model_name_or_path=llm_name_or_path,
@@ -83,7 +75,7 @@ model = dict(
 #######################################################################
 #                      PART 3  Dataset & Dataloader                   #
 #######################################################################
-llava_dataset = dict(
+dataset = dict(
     type=HybridDataset,
     data_dir=data_dir,
     data_files=data_files,
@@ -92,13 +84,13 @@ llava_dataset = dict(
     chat_template=chat_template,
     max_length=max_length,
     pack_to_max_length=True,
-    num_workers=dataloader_num_workers,
+    num_workers=4,
     mappings=[openai_to_raw_training])
 
 train_dataloader = dict(
     batch_size=batch_size,
     num_workers=dataloader_num_workers,
-    dataset=llava_dataset,
+    dataset=dataset,
     sampler=dict(type=DefaultSampler, shuffle=True),
     collate_fn=dict(type=hybrid_collate_fn))
 
