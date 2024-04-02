@@ -21,7 +21,7 @@ from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
 #######################################################################
 # Model
 pretrained_model_name_or_path = 'meta-llama/Llama-2-70b-hf'
-use_varlen_attn = True
+use_varlen_attn = False
 sequence_parallel_size = 1
 
 # Data
@@ -51,6 +51,7 @@ betas = (0.9, 0.999)
 weight_decay = 0
 max_norm = 1  # grad clip
 warmup_ratio = 0.03
+log_interval = 1
 
 # Save
 save_steps = -1  # speed only
@@ -167,7 +168,8 @@ default_hooks = dict(
     # record the time of every iteration.
     timer=dict(type=IterTimerHook),
     # print log every 10 iterations.
-    logger=dict(type=LoggerHook, log_metric_by_epoch=False, interval=1),
+    logger=dict(
+        type=LoggerHook, log_metric_by_epoch=False, interval=log_interval),
     # enable the parameter scheduler.
     param_scheduler=dict(type=ParamSchedulerHook),
     # save checkpoint per `save_steps`.
@@ -207,4 +209,4 @@ resume = False
 randomness = dict(seed=None, deterministic=False)
 
 # set log processor
-log_processor = dict(by_epoch=False)
+log_processor = dict(by_epoch=False, window_size=log_interval)

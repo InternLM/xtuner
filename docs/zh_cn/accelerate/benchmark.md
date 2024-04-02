@@ -17,35 +17,36 @@
 
 ## 速度
 
-![llama2_7b](https://github.com/InternLM/xtuner/assets/41630003/c272a178-1e09-455e-8a23-28c2f2f3fd1c)
+![image](https://github.com/InternLM/xtuner/assets/41630003/c9c05dbd-0806-4fb2-9da9-62f04b150f7c)
 
-![yi_34b](https://github.com/InternLM/xtuner/assets/41630003/e718c123-6e52-49fb-ac68-1ae40facd538)
+![image](https://github.com/InternLM/xtuner/assets/41630003/3ef6308c-595b-4624-b56d-a8737a1f2261)
 
-![llama2_70b](https://github.com/InternLM/xtuner/assets/41630003/28ec4c0e-7dec-4804-bd60-7c448fa8749c)
+![image](https://github.com/InternLM/xtuner/assets/41630003/ba16368e-e5f7-41eb-89ed-1140a8633134)
 
 <div align="center">
 
-|        |   模型    | GPU 数量 | 上下文长度 | 速度 (tokens per second) |                                                               训练 config                                                                |
-| :----: | :-------: | :------: | :--------: | :----------------------: | :--------------------------------------------------------------------------------------------------------------------------------------: |
-| XTuner | Llama2-7B |    8     |     8k     |        **3593.0**        |   [llama2_7b_full_alpaca_enzh_8k_sp1.py](../../../xtuner/configs/llama_speed_benchmark/llama2_7b/llama2_7b_full_alpaca_enzh_8k_sp1.py)   |
-| XTuner | Llama2-7B |    8     |    32k     |        **3864.2**        |  [llama2_7b_full_alpaca_enzh_32k_sp1.py](../../../xtuner/configs/llama_speed_benchmark/llama2_7b/llama2_7b_full_alpaca_enzh_32k_sp1.py)  |
-| XTuner | Llama2-7B |    8     |    128k    |        **3108.9**        | [llama2_7b_full_alpaca_enzh_128k_sp8.py](../../../xtuner/configs/llama_speed_benchmark/llama2_7b/llama2_7b_full_alpaca_enzh_128k_sp8.py) |
-| XTuner | Llama2-7B |    8     |    256k    |        **2250.4**        | [llama2_7b_full_alpaca_enzh_256k_sp8.py](../../../xtuner/configs/llama_speed_benchmark/llama2_7b/llama2_7b_full_alpaca_enzh_256k_sp8.py) |
-| XTuner | Llama2-7B |    32    |     1M     |        **714.5**         |  [llama2_7b_full_alpaca_enzh_1M_sp16.py](../../../xtuner/configs/llama_speed_benchmark/llama2_7b/llama2_7b_full_alpaca_enzh_1M_sp16.py)  |
+|        |   模型    | GPU 数量 | 上下文长度 | 速度 (tokens per second) | 吞吐量  (TFLOPs) |                                                               训练 config                                                                |
+| :----: | :-------: | :------: | :--------: | :----------------------: | :--------------: | :--------------------------------------------------------------------------------------------------------------------------------------: |
+| XTuner | Llama2-7B |    8     |     8k     |        **3028.3**        |    **185.3**     |   [llama2_7b_full_alpaca_enzh_8k_sp1.py](../../../xtuner/configs/llama_speed_benchmark/llama2_7b/llama2_7b_full_alpaca_enzh_8k_sp1.py)   |
+| XTuner | Llama2-7B |    8     |    32k     |        **2234.2**        |    **193.0**     |  [llama2_7b_full_alpaca_enzh_32k_sp1.py](../../../xtuner/configs/llama_speed_benchmark/llama2_7b/llama2_7b_full_alpaca_enzh_32k_sp1.py)  |
+| XTuner | Llama2-7B |    8     |    128k    |        **948.6**         |    **180.3**     | [llama2_7b_full_alpaca_enzh_128k_sp8.py](../../../xtuner/configs/llama_speed_benchmark/llama2_7b/llama2_7b_full_alpaca_enzh_128k_sp8.py) |
+| XTuner | Llama2-7B |    8     |    256k    |        **540.1**         |    **176.9**     | [llama2_7b_full_alpaca_enzh_256k_sp8.py](../../../xtuner/configs/llama_speed_benchmark/llama2_7b/llama2_7b_full_alpaca_enzh_256k_sp8.py) |
+| XTuner | Llama2-7B |    32    |     1M     |        **133.6**         |    **153.9**     |  [llama2_7b_full_alpaca_enzh_1M_sp16.py](../../../xtuner/configs/llama_speed_benchmark/llama2_7b/llama2_7b_full_alpaca_enzh_1M_sp16.py)  |
 
-|        |    模型     | GPU 数量 | 上下文长度 | 速度 (tokens per second) |                                                                训练 config                                                                |
-| :----: | :---------: | :------: | :--------: | :----------------------: | :---------------------------------------------------------------------------------------------------------------------------------------: |
-| XTuner | Yi-34B-200K |    32    |     8k     |        **472.7**         |   [yi_34b_200k_full_alpaca_enzh_8k_sp1.py](../../../xtuner/configs/llama_speed_benchmark/yi_34b/yi_34b_200k_full_alpaca_enzh_8k_sp1.py)   |
-| XTuner | Yi-34B-200K |    32    |    32k     |        **555.4**         |  [yi_34b_200k_full_alpaca_enzh_32k_sp2.py](../../../xtuner/configs/llama_speed_benchmark/yi_34b/yi_34b_200k_full_alpaca_enzh_32k_sp2.py)  |
-| XTuner | Yi-34B-200K |    32    |    128k    |        **625.8**         | [yi_34b_200k_full_alpaca_enzh_128k_sp8.py](../../../xtuner/configs/llama_speed_benchmark/yi_34b/yi_34b_200k_full_alpaca_enzh_128k_sp8.py) |
-| XTuner | Yi-34B-200K |    32    |    256k    |        **357.4**         | [yi_34b_200k_full_alpaca_enzh_256k_sp8.py](../../../xtuner/configs/llama_speed_benchmark/yi_34b/yi_34b_200k_full_alpaca_enzh_256k_sp8.py) |
+|        |    模型     | GPU 数量 | 上下文长度 | 速度 (tokens per second) | 吞吐量  (TFLOPs) |                                                                训练 config                                                                |
+| :----: | :---------: | :------: | :--------: | :----------------------: | :--------------: | :---------------------------------------------------------------------------------------------------------------------------------------: |
+| XTuner | Yi-34B-200K |    32    |     8k     |        **485.1**         |    **165.6**     |   [yi_34b_200k_full_alpaca_enzh_8k_sp1.py](../../../xtuner/configs/llama_speed_benchmark/yi_34b/yi_34b_200k_full_alpaca_enzh_8k_sp1.py)   |
+| XTuner | Yi-34B-200K |    32    |    32k     |        **491.5**         |    **209.1**     |  [yi_34b_200k_full_alpaca_enzh_32k_sp2.py](../../../xtuner/configs/llama_speed_benchmark/yi_34b/yi_34b_200k_full_alpaca_enzh_32k_sp2.py)  |
+| XTuner | Yi-34B-200K |    32    |    128k    |        **251.1**         |    **191.8**     | [yi_34b_200k_full_alpaca_enzh_128k_sp8.py](../../../xtuner/configs/llama_speed_benchmark/yi_34b/yi_34b_200k_full_alpaca_enzh_128k_sp8.py) |
+| XTuner | Yi-34B-200K |    32    |    256k    |        **119.7**         |    **145.3**     | [yi_34b_200k_full_alpaca_enzh_256k_sp8.py](../../../xtuner/configs/llama_speed_benchmark/yi_34b/yi_34b_200k_full_alpaca_enzh_256k_sp8.py) |
 
-|        |    模型    | GPU 数量 | 上下文长度 | 速度 (tokens per second) |                                                                  训练 config                                                                  |
-| :----: | :--------: | :------: | :--------: | :----------------------: | :-------------------------------------------------------------------------------------------------------------------------------------------: |
-| XTuner | Llama2-70B |    32    |     8k     |        **216.3**         |    [llama2_70b_full_alpaca_enzh_8k_sp1.py](../../../xtuner/configs/llama_speed_benchmark/llama2_70b/llama2_70b_full_alpaca_enzh_8k_sp1.py)    |
-| XTuner | Llama2-70B |    32    |    32k     |        **227.6**         |   [llama2_70b_full_alpaca_enzh_32k_sp4.py](../../../xtuner/configs/llama_speed_benchmark/llama2_70b/llama2_70b_full_alpaca_enzh_32k_sp4.py)   |
-| XTuner | Llama2-70B |    32    |    128k    |        **175.6**         |  [llama2_70b_full_alpaca_enzh_128k_sp8.py](../../../xtuner/configs/llama_speed_benchmark/llama2_70b/llama2_70b_full_alpaca_enzh_128k_sp8.py)  |
-| XTuner | Llama2-70B |    32    |    256k    |        **108.8**         | [llama2_70b_full_alpaca_enzh_256k_sp16.py](../../../xtuner/configs/llama_speed_benchmark/llama2_70b/llama2_70b_full_alpaca_enzh_256k_sp16.py) |
+|        |    模型    | GPU 数量 | 上下文长度 | 速度 (tokens per second) | 吞吐量  (TFLOPs) |                                                                  训练 config                                                                  |
+| :----: | :--------: | :------: | :--------: | :----------------------: | :--------------: | :-------------------------------------------------------------------------------------------------------------------------------------------: |
+| XTuner | Llama2-70B |    32    |     8k     |        **216.8**         |    **144.7**     |    [llama2_70b_full_alpaca_enzh_8k_sp1.py](../../../xtuner/configs/llama_speed_benchmark/llama2_70b/llama2_70b_full_alpaca_enzh_8k_sp1.py)    |
+| XTuner | Llama2-70B |    32    |    32k     |        **300.9**         |    **239.6**     |   [llama2_70b_full_alpaca_enzh_32k_sp4.py](../../../xtuner/configs/llama_speed_benchmark/llama2_70b/llama2_70b_full_alpaca_enzh_32k_sp4.py)   |
+| XTuner | Llama2-70B |    32    |    128k    |        **144.7**         |    **189.7**     |  [llama2_70b_full_alpaca_enzh_128k_sp8.py](../../../xtuner/configs/llama_speed_benchmark/llama2_70b/llama2_70b_full_alpaca_enzh_128k_sp8.py)  |
+| XTuner | Llama2-70B |    32    |    256k    |         **63.8**         |    **127.6**     | [llama2_70b_full_alpaca_enzh_256k_sp16.py](../../../xtuner/configs/llama_speed_benchmark/llama2_70b/llama2_70b_full_alpaca_enzh_256k_sp16.py) |
+| XTuner | Llama2-70B |    64    |     1M     |         **21.8**         |    **133.5**     |   [llama2_70b_full_alpaca_enzh_1M_sp64.py](../../../xtuner/configs/llama_speed_benchmark/llama2_70b/llama2_70b_full_alpaca_enzh_1M_sp64.py)   |
 
 </div>
 
