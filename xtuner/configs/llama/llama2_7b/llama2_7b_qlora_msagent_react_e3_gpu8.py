@@ -40,6 +40,7 @@ sequence_parallel_size = 1
 # Scheduler & Optimizer
 batch_size = 8  # per_device
 accumulative_counts = 1
+accumulative_counts *= sequence_parallel_size
 dataloader_num_workers = 2
 max_epochs = 3
 optim_type = AdamW
