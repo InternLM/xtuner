@@ -212,6 +212,7 @@ class TrainingHybridChatMessages(BaseModel):
         _messages = item['messages']
         messages = []
         functions = None
+        code_interpreter = None
 
         for _msg in _messages:
             assert 'role' in _msg and 'content' in _msg
