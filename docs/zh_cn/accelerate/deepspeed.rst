@@ -55,10 +55,10 @@ XTuner 支持一键启动 DeepSpeed 进行训练，只需在启动命令后插�
 
 XTuner 支持使用自定义 DeepSpeed 配置进行训练。但需要注意，以下配置 DeepSpeed config 会被 XTuner config 中对应字段覆盖：
 
-1. `gradient_accumulation_steps` 会被 XTuner config 中的 `accumulative_counts` 设置覆盖；
-2. `train_micro_batch_size_per_gpu` 会被 XTuner config 中的 `train_dataloader.batch_size` 设置覆盖；
-3. `gradient_clipping` 会被 XTuner config 中的 `optim_wrapper.clip_grad.max_norm` 设置覆盖；
-4. XTuner 会根据所使用的 GPU 架构自动选择 `fp16` 或 `bf16` 训练。
+1. ``gradient_accumulation_steps`` 会被 XTuner config 中的 ``accumulative_counts`` 设置覆盖；
+2. ``train_micro_batch_size_per_gpu`` 会被 XTuner config 中的 ``train_dataloader.batch_size`` 设置覆盖；
+3. ``gradient_clipping`` 会被 XTuner config 中的 ``optim_wrapper.clip_grad.max_norm`` 设置覆盖；
+4. XTuner 会根据所使用的 GPU 架构自动选择 ``fp16`` 或 ``bf16`` 训练。
 
 可使用以下命令使用自定义 DeepSpeed 配置文件（需要是一个 json 文件）：
 

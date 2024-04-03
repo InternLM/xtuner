@@ -68,7 +68,7 @@
    accelerate/flash_attn.rst
    accelerate/varlen_flash_attn.rst
    accelerate/hyper_parameters.rst
-   accelerate/benchmark.md
+   accelerate/benchmark.rst
 
 .. toctree::
    :maxdepth: 2

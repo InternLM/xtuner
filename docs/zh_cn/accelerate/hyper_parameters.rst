@@ -5,22 +5,22 @@
 
 本节将会列举一些在 XTuner 训练过程往往需要搭配设置的超参数，并列举他们搭配使用时各个超参数的含义。
 
-:code:`max_length`, :code:`pack_to_max_length`, :code:`use_varlen_attn` 和 :code:`max_position_embeddings`
+``max_length``, ``pack_to_max_length``, ``use_varlen_attn`` 和 ``max_position_embeddings``
 ----------------------
 
 max_length
 ^^^^^^^^^^^^^^^^^^^
 
-:code:`max_length` 表示在数据预处理过程中，单条数据长度超过 :code:`max_length` 的部分会被截断，基本所有实验都会设置该项。
+``max_length`` 表示在数据预处理过程中，单条数据长度超过 ``max_length`` 的部分会被截断，基本所有实验都会设置该项。
 
 pack_to_max_length
 ^^^^^^^^^^^^^^^^^^^^^
 
-:code:`pack_to_max_length` 用于配置是否进行 :ref:`数据集拼接 <pack_to_max_length>`_。
+``pack_to_max_length`` 用于配置是否进行 :ref:`数据集拼接 <pack_to_max_length>`_。
 
-:code:`pack_to_max_length = True` 表示在数据预处理过程中将多条短数据拼接为一条长度为 :code:`max_length` 的长数据，该配置可以大幅提升训练速度。
+``pack_to_max_length = True`` 表示在数据预处理过程中将多条短数据拼接为一条长度为 ``max_length`` 的长数据，该配置可以大幅提升训练速度。
 
-若 :code:`pack_to_max_length = False`，则推荐将 :code:`batch_size` 适度调大以保证训练的稳定性。
+若 ``pack_to_max_length = False``，则推荐将 ``batch_size`` 适度调大以保证训练的稳定性。
 
 use_varlen_attn
 ^^^^^^^^^^^^^^^^^^^^^
@@ -34,16 +34,16 @@ use_varlen_attn
 max_position_embeddings
 ^^^^^^^^^^^^^^^^^^^^^
 
-当需要扩展模型上下文窗口的大小时，需要将 `max_position_embeddings` 设置为期望的上下文长度。 **需要保证 `max_position_embeddings` 不大于 `max_length`。**
+当需要扩展模型上下文窗口的大小时，需要将 ``max_position_embeddings`` 设置为期望的上下文长度。 **需要保证 ``max_position_embeddings`` 不大于 ``max_length``。**\
 
 假设需要将 Llama2-7B 模型支持的上下文长度自 4k 拓展为 32k：
 
-1. 若训练数据集中存在较多长度接近 32k 的数据，则推荐 `max_length = 32k, pack_to_max_length = False, use_varlen_attn = False, max_position_embeddings = 32k` 这一配置
-2. 若训练数据集中长度接近 32k 的数据量较少甚至没有时，则推荐 `max_length = 32k, pack_to_max_length = True, use_varlen_attn = False, max_position_embeddings = 32k` 这一配置
+1. 若训练数据集中存在较多长度接近 32k 的数据，则推荐 ``max_length = 32k, pack_to_max_length = False, use_varlen_attn = False, max_position_embeddings = 32k`` 这一配置
+2. 若训练数据集中长度接近 32k 的数据量较少甚至没有时，则推荐 ``max_length = 32k, pack_to_max_length = True, use_varlen_attn = False, max_position_embeddings = 32k`` 这一配置
 
-`sequence_parallel_size` 和 `accumulative_counts`
+``sequence_parallel_size`` 和 ``accumulative_counts``
 ----------------------
 
-在使用序列并行策略训练超长序列时，`sequence_parallel_size` 个 GPUs 会共同计算一条长序列。而 `accumulative_counts` 则用于控制模型参数更新的频率。
+在使用序列并行策略训练超长序列时， ``sequence_parallel_size`` 个 GPUs 会共同计算一条长序列。而 ``accumulative_counts`` 则用于控制模型参数更新的频率。
 
-假设需要在 N 块 GPUs 上执行 `batch_size_per_device = 1, max_length = 128k` 的训练策略。当设置序列并行维度为 `sequence_parallel_size` 后，为了保证训练的等价性，`accumulative_counts` 需要设置为原来的 `sequence_parallel_size` 倍，因为 128k 长度的序列会被切分为 `sequence_parallel_size` 份后分发给 `sequence_parallel_size` 个 GPUs 进行训练，`data_parallel_world_size` 会变为原来的 :math:`\frac{1}{sequence_parallel_size}`。
+假设需要在 N 块 GPUs 上执行 ``batch_size_per_device = 1, max_length = 128k`` 的训练策略。当设置序列并行维度为 ``sequence_parallel_size`` 后，为了保证训练的等价性，``accumulative_counts`` 需要设置为原来的 ``sequence_parallel_size`` 倍，因为 128k 长度的序列会被切分为 ``sequence_parallel_size`` 份后分发给 ``sequence_parallel_size`` 个 GPUs 进行训练， ``data_parallel_world_size`` 会变为原来的 :math:`\frac{1}{sequence_parallel_size}`。
