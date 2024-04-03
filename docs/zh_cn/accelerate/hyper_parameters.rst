@@ -16,7 +16,7 @@ max_length
 pack_to_max_length
 ^^^^^^^^^^^^^^^^^^^^^
 
-``pack_to_max_length`` 用于配置是否进行\ `数据集拼接 <../accelerate/pack_to_max_length.rst>`__\ 。
+``pack_to_max_length`` 用于配置是否进行\ `数据集拼接 <pack_to_max_length>`__\ 。
 
 ``pack_to_max_length = True`` 表示在数据预处理过程中将多条短数据拼接为一条长度为 ``max_length`` 的长数据，该配置可以大幅提升训练速度。
 
@@ -25,7 +25,7 @@ pack_to_max_length
 use_varlen_attn
 ^^^^^^^^^^^^^^^^^^^^^
 
-``use_varlen_attn`` 用于配置是否在训练过程中使用\ `变长注意力机制 <../accelerate/varlen_flash_attn.rst>`__\ 。
+``use_varlen_attn`` 用于配置是否在训练过程中使用\ `变长注意力机制 <varlen_flash_attn>`__\ 。
 
 当 ``use_varlen_attn = True`` 时，要求 ``pack_to_max_length`` 也要设置为 True。在此情况下，每个 token 在注意力计算阶段仅会关注其所在短数据中的所有 tokens （而非整个序列）。
 
