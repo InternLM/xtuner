@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.abspath('../..'))
 
 # -- Project information -----------------------------------------------------
 
-project = 'uner'
+project = 'XTuner'
 copyright = '2024, XTuner Contributors'
 author = 'XTuner Contributors'
 
