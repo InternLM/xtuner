@@ -94,11 +94,12 @@ Step 2, 离线处理数据集
 这里的第一个参数为 Step 1 中修改过的 config
 文件，第二个参数为预处理过的数据集的保存路径。
 
-   | [!IMPORTANT]
-   | 上述命令会在 internlm2_7b_qlora_alpaca_e3_copy.py
-     同级目录下新建一个 internlm2_7b_qlora_alpaca_e3_copy_modified.py
-     文件，后续训练中需要使用该配置文件，而非
-     internlm2_7b_qlora_alpaca_e3_copy.py。
+.. note::
+
+    上述命令会在 internlm2_7b_qlora_alpaca_e3_copy.py
+    同级目录下新建一个 internlm2_7b_qlora_alpaca_e3_copy_modified.py
+    文件，后续训练中需要使用该配置文件，而非
+    ``internlm2_7b_qlora_alpaca_e3_copy.py`` 。
 
 Step 3, 启动训练
 ^^^^^^^^^^^^^^^^
