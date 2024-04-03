@@ -54,7 +54,7 @@
 
    training/modify_settings.md
    training/custom_sft_dataset.md
-   training/custom_pretrain_dataset.md
+   training/custom_pretrain_dataset.rst
    training/custom_agent_dataset.md
    training/multi_modal_dataset.md
    training/open_source_dataset.md
