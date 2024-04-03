@@ -1,5 +1,8 @@
+InternEvo 迁移
+==============
+
 总览
-====
+-----------
 
 XTuner 可以复现 InternEvo (train_internlm) 仓库训练得到的开源模型
 internlm/internlm2-chat-7b 的训练精度。
@@ -66,10 +69,10 @@ xtuner      internevo
 迁移的过程中，我们需要关注模型、数据以及训练策略这三个方面的适配问题。后续内容将详细阐述如何进行适配。
 
 适配
-====
+---------
 
 模型
-----
+~~~~
 
 InternEvo 在训练时读取和保存的模型权重满足以下目录结构（以 tp2pp2
 为例）：
@@ -101,7 +104,7 @@ XTuner 支持基于 Huggingface Hub 上的模型进行训练，如下修改 conf
    + pretrained_model_name_or_path = 'internlm/internlm2-20b'
 
 数据
-----
+~~~~
 
 InternEvo
 在训练过程中通常会把多条数据拼接为一个特定的最大长度，随后输入模型训练。其配置往往满足以下形式：
@@ -163,14 +166,13 @@ InternEvo
 
 .. note::
 
-    需要注意，由于训练数据喂给模型的先后顺序可能对训练结果造成影响，因此建议不要轻易修改上述配置中的
-     ``seed`` 选项。同时，可参考 \ :ref:`获取数据顺序 <case4-step3>` \ 进一步固定数据顺序。
+    需要注意，由于训练数据喂给模型的先后顺序可能对训练结果造成影响，因此建议不要轻易修改上述配置中的 ``seed`` 选项。同时，可参考 \ :ref:`获取数据顺序 <case4-step3>` \ 进一步固定数据顺序。
 
 训练策略
---------
+~~~~~~~~
 
 变长注意力 (Variable Length Flash Attention)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 InternEvo 通过设置
 `数据配置 <https://github.com/InternLM/InternEvo/blob/77c3b46bfe51f6bc245c4aba98639221b8618372/doc/usage.md#%E6%95%B0%E6%8D%AE%E9%85%8D%E7%BD%AE>`__
@@ -215,7 +217,7 @@ True，即可保证训练行为与 InternEvo 一致：
 .. _batchsize-与-accumulativecounts:
 
 batch_size 与 accumulative_counts
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 在 InternEvo 的配置中，与 batch_size 和 accumulative_counts
 相关的配置有如下几个：
@@ -258,10 +260,10 @@ batch_size 与 accumulative_counts
    + max_epochs = MAX_EPOCHS
 
 并行训练
-~~~~~~~~
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 ZeRO 系列显存优化
-^^^^^^^^^^^^^^^^^
+'''''''''''''''''
 
 XTuner 支持使用 ZeRO 系列显存优化降低训练过程中的显存消耗：
 
@@ -278,7 +280,7 @@ XTuner 支持使用 ZeRO 系列显存优化降低训练过程中的显存消耗�
    来优化训练过程。XTuner 内置了多种策略，包括 ZeRO-1、ZeRO-2、ZeRO-3 。
 
 序列并行
-^^^^^^^^
+''''''''
 
 InternEvo 中支持了 Data Parallel、Tensor Parallel、Pipeline Parallel 和
 Sequence Parallel 四种并行策略。XTuner 目前支持了 Data Parallel 和
