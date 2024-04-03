@@ -11,16 +11,16 @@
 max_length
 ^^^^^^^^^^^^^^^^^^^
 
-`max_length` 表示在数据预处理过程中，单条数据长度超过 `max_length` 的部分会被截断，基本所有实验都会设置该项。
+:code:`max_length` 表示在数据预处理过程中，单条数据长度超过 :code:`max_length` 的部分会被截断，基本所有实验都会设置该项。
 
 pack_to_max_length
 ^^^^^^^^^^^^^^^^^^^^^
 
-`pack_to_max_length` 用于配置是否进行 `数据集拼接 <../accelerate/pack_to_max_length.md>`_。
+:code:`pack_to_max_length` 用于配置是否进行 :ref:`数据集拼接 <pack_to_max_length>`_。
 
-`pack_to_max_length = True` 表示在数据预处理过程中将多条短数据拼接为一条长度为 `max_length` 的长数据，该配置可以大幅提升训练速度。
+:code:`pack_to_max_length = True` 表示在数据预处理过程中将多条短数据拼接为一条长度为 :code:`max_length` 的长数据，该配置可以大幅提升训练速度。
 
-若 `pack_to_max_length = False`，则推荐将 `batch_size` 适度调大以保证训练的稳定性。
+若 :code:`pack_to_max_length = False`，则推荐将 :code:`batch_size` 适度调大以保证训练的稳定性。
 
 use_varlen_attn
 ^^^^^^^^^^^^^^^^^^^^^
