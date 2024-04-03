@@ -5,7 +5,7 @@
 
 本节将会列举一些在 XTuner 训练过程往往需要搭配设置的超参数，并列举他们搭配使用时各个超参数的含义。
 
-`max_length`, `pack_to_max_length`, `use_varlen_attn` 和 `max_position_embeddings`
+:code:`max_length`, :code:`pack_to_max_length`, :code:`use_varlen_attn` 和 :code:`max_position_embeddings`
 ----------------------
 
 max_length
