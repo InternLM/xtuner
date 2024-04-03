@@ -239,6 +239,14 @@ def internlm2_attn_forward(
     value_states = repeat_kv(value_states, self.num_key_value_groups)
 
     if SUPPORT_FLASH2:
+        # the shape of attention_mask used by flash_attn and
+        # F.scaled_dot_product_attention are different
+        assert attention_mask is None or attention_mask.ndim == 2, \
+            ('When using flash_attn, attention_mask.ndim should equal to 2.'
+             f'But got attention_mask.shape = {attention_mask.shape}.'
+             'We can pass the `attn_implementation="flash_attention_2"` flag '
+             'to `.from_pretrained` method when instantiating a Internlm2 '
+             'model.')
         # flash attn 2 need (bs, seq_len, nhead, h_dim)
         query_states = query_states.transpose(1, 2)
         key_states = key_states.transpose(1, 2)
