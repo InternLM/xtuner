@@ -1,7 +1,8 @@
 docutils==0.16.0
-myst-parser
+myst-parser == 2.0.0
 -e git+https://github.com/InternLM/pytorch_sphinx_theme.git#egg=pytorch_sphinx_theme
-sphinx==4.0.2
+sphinx == 6.2.1
 sphinx-argparse
-sphinx-copybutton
+sphinx-book-theme == 1.0.1
+sphinx-copybutton == 0.5.2
 sphinx_markdown_tables
