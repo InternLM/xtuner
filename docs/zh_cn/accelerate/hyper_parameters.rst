@@ -16,7 +16,7 @@ max_length
 pack_to_max_length
 ^^^^^^^^^^^^^^^^^^^^^
 
-``pack_to_max_length`` 用于配置是否进行\ `数据集拼接 <pack_to_max_length>`__\ 。
+``pack_to_max_length`` 用于配置是否进行\ `数据集拼接 <pack_to_max_length.html>`__\ 。
 
 ``pack_to_max_length = True`` 表示在数据预处理过程中将多条短数据拼接为一条长度为 ``max_length`` 的长数据，该配置可以大幅提升训练速度。
 
