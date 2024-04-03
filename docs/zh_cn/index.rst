@@ -42,7 +42,7 @@
    :maxdepth: 2
    :caption: 准备
 
-   preparation/pretrained_model.md
+   preparation/pretrained_model.rst
    preparation/custom_sft_dataset.md
    preparation/custom_pretrain_dataset.md
    preparation/custom_agent_dataset.md
@@ -56,7 +56,7 @@
    training/custom_sft_dataset.md
    training/custom_pretrain_dataset.md
    training/custom_agent_dataset.md
-   training/multi_modal_dataset.md
+   training/multi_modal_dataset.rst
    training/open_source_dataset.md
    training/accelerate.md
 
