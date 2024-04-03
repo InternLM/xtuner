@@ -25,7 +25,7 @@ pack_to_max_length
 use_varlen_attn
 ^^^^^^^^^^^^^^^^^^^^^
 
-``use_varlen_attn`` 用于配置是否在训练过程中使用\ `变长注意力机制 <varlen_flash_attn>`__\ 。
+``use_varlen_attn`` 用于配置是否在训练过程中使用\ `变长注意力机制 <varlen_flash_attn.html>`__\ 。
 
 当 ``use_varlen_attn = True`` 时，要求 ``pack_to_max_length`` 也要设置为 True。在此情况下，每个 token 在注意力计算阶段仅会关注其所在短数据中的所有 tokens （而非整个序列）。
 
