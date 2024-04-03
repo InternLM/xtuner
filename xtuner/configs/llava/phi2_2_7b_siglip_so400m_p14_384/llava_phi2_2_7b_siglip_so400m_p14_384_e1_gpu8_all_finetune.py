@@ -7,7 +7,7 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           SiglipImageProcessor, SiglipVisionModel)
 
 from xtuner.dataset import LLaVADataset
-from xtuner.dataset.collate_fns import default_collate_fn
+from xtuner.dataset.collate_fns import mm_collate_fn
 from xtuner.dataset.map_fns import llava_map_fn, template_map_fn_factory
 from xtuner.dataset.samplers import LengthGroupedSampler
 from xtuner.engine.hooks import DatasetInfoHook, EvaluateChatHook
@@ -251,13 +251,15 @@ test_dataset = [
 
 # TODO: We are not currently using val_evaluator
 # Don't support num_workers > 0
+# TODO: We are not currently using val_evaluator
+# Don't support num_workers > 0
 val_dataloader = dict(
     batch_size=1,
     num_workers=0,
     drop_last=False,
     sampler=dict(type=DefaultSampler, shuffle=False),
     dataset=dict(type=ConcatDataset, datasets=val_dataset),
-    collate_fn=dict(type=default_collate_fn))
+    collate_fn=dict(type=mm_collate_fn, extra_collate_keys=['img_id']))
 val_evaluator = dict()
 val_cfg = dict(type=ValLoop)
 
@@ -268,7 +270,8 @@ test_dataloader = dict(
     drop_last=False,
     sampler=dict(type=DefaultSampler, shuffle=False),
     dataset=dict(type=ConcatDataset, datasets=test_dataset),
-    collate_fn=dict(type=default_collate_fn)
+    collate_fn=dict(type=mm_collate_fn, extra_collate_keys=['img_id'])
 )
+
 test_evaluator = val_evaluator
 test_cfg = dict(type=TestLoop, select_metric='first')
