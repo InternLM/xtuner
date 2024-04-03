@@ -53,7 +53,7 @@
    :caption: 训练
 
    training/modify_settings.md
-   training/custom_sft_dataset.md
+   training/custom_sft_dataset.rst
    training/custom_pretrain_dataset.md
    training/custom_agent_dataset.md
    training/multi_modal_dataset.md
