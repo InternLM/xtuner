@@ -6,7 +6,7 @@
 简介
 --------------------
 
-:ref:`数据拼接` 一节中，我们讨论了“数据集拼接”策略对模型训练效率的显著提升。
+:ref:`数据拼接 <pack_to_max_length>`_\ 一节中，我们讨论了“数据集拼接”策略对模型训练效率的显著提升。
 理论上，数据集拼接可能会对注意力（Attention）机制的计算过程产生影响。这是因为，在未采用数据拼接策略的情况下，
 每条数据在计算注意力时仅与自身相关联。然而，当采用数据拼接策略后，由多条短数据拼接成的长数据在计算注意力时会相互关联。
 以一个由若干短数据拼接成长度为 4096 的数据为例，如果不采用变长注意力机制，在注意力计算阶段，每个 token 将会关注全部 4096 个 tokens ，如图左侧所示。
@@ -80,7 +80,7 @@ XTuner 提供多个开箱即用的配置文件，用户可以通过下列命令�
 
     xtuner list-cfg -p internlm
 
-`-p` 为模糊查找，若想训练其他模型，可以修改 `internlm` 为 XTuner 支持的其他模型名称。
+``-p`` 为模糊查找，若想训练其他模型，可以修改 ``internlm`` 为 XTuner 支持的其他模型名称。
 
 Step 3, 复制 config 文件
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -91,7 +91,7 @@ Step 3, 复制 config 文件
 
     xtuner copy-cfg ${CONFIG_NAME} ${SAVE_DIR}
 
-例如通过下列命令将名为 `internlm_7b_full_oasst1_e3` 的 config 导出至当前目录下：
+例如通过下列命令将名为 ``internlm_7b_full_oasst1_e3`` 的 config 导出至当前目录下：
 
 .. code-block:: bash
 
@@ -100,7 +100,7 @@ Step 3, 复制 config 文件
 Step 4, 修改 config 文件
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-将 Step 3 复制得到的 config 文件中的 `use_varlen_attn` 属性由 False 改为 True 即可激活变长注意力训练机制：
+将 Step 3 复制得到的 config 文件中的 ``use_varlen_attn`` 属性由 False 改为 True 即可激活变长注意力训练机制：
 
 .. code-block:: diff
 
@@ -116,8 +116,8 @@ Step 4, 修改 config 文件
 
 .. note::
 
-    需要注意，当设置 `use_varlen_attn = True` 后，`batch_size = 2, max_length = 2k` 的配置与 `batch_size = 1, max_length = 4k` 的配置训练行为是近似的，
-    因此 XTuner 目前只支持了 `batch_size = 1` 的情况。另外，`use_varlen_attn = True` 时 `pack_to_max_length` 也需设置为 True。
+    需要注意，当设置 ``use_varlen_attn = True`` 后， ``batch_size = 2, max_length = 2k`` 的配置与 ``batch_size = 1, max_length = 4k`` 的配置训练行为是近似的，
+    因此 XTuner 目前只支持了 ``batch_size = 1`` 的情况。另外， ``use_varlen_attn = True`` 时 ``pack_to_max_length`` 也需设置为 True。
 
 Step 5, 开始训练
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -136,7 +136,7 @@ Step 5, 开始训练
     (DIST) NPROC_PER_NODE=${GPU_NUM} xtuner train internlm_7b_full_oasst1_e3_copy.py --deepspeed deepspeed_zero1
     (SLURM) srun ${SRUN_ARGS} xtuner train internlm_7b_full_oasst1_e3_copy.py --launcher slurm --deepspeed deepspeed_zero1
 
-- `--deepspeed` 表示使用 `DeepSpeed <https://github.com/microsoft/DeepSpeed>`_ 🚀 来优化训练过程。若未安装 DeepSpeed ，可通过 `pip install deepspeed>=0.12.3` 进行安装。XTuner 内置了多种策略，包括 ZeRO-1、ZeRO-2、ZeRO-3 等。如果用户期望关闭此功能，请直接移除此参数。
+- `--deepspeed` 表示使用 `DeepSpeed <https://github.com/microsoft/DeepSpeed>`_ 🚀 来优化训练过程。若未安装 DeepSpeed ，可通过 ``pip install deepspeed>=0.12.3`` 进行安装。XTuner 内置了多种策略，包括 ZeRO-1、ZeRO-2、ZeRO-3 等。如果用户期望关闭此功能，请直接移除此参数。
 
 Step 6, 模型转换
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -153,4 +153,4 @@ Step 6, 模型转换
 
     xtuner convert pth_to_hf internlm_7b_full_oasst1_e3_copy.py ${PTH} ${SAVE_PATH}
 
-其中 `${PTH}` 为训练权重保存的路径，若未指定，默认保存在 `./work_dirs/internlm_7b_full_oasst1_e3_copy` 路径下。
+其中 ``${PTH}`` 为训练权重保存的路径，若未指定，默认保存在 ``./work_dirs/internlm_7b_full_oasst1_e3_copy`` 路径下。

@@ -30,7 +30,7 @@ ZeRO 策略将模型训练阶段，每张卡中显存内容分为两类：
 
 `DeepSpeed <https://github.com/microsoft/DeepSpeed>`_ 是一个开源的深度学习优化库，旨在简化并加速大规模模型的训练。
 
-XTuner 支持一键启动 DeepSpeed 进行训练，只需在启动命令后插入 `--deepspeed deepspeed_zero2 (deepspeed_zero1 or deepspeed_zero3)` 即可：
+XTuner 支持一键启动 DeepSpeed 进行训练，只需在启动命令后插入 ``--deepspeed deepspeed_zero2 (deepspeed_zero1 or deepspeed_zero3)`` 即可：
 
 .. code-block:: bash
 
