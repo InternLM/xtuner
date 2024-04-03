@@ -17,7 +17,7 @@ LLaVA 开源数据集准备
 数据文件结构
 ^^^^^^^^^^^^
 
-.. code:: 
+.. code::
 
    ./data/llava_data
    ├── LLaVA-Pretrain
@@ -233,7 +233,7 @@ XTuner 的 LLaVA 模型可以利用
 同时，为了方便使用，XTuner 内也集成了 MMBench
 评测，您可以通过下列命令下载 MMBench 评测数据集：
 
-.. code:: 
+.. code::
 
    wget https://opencompass.openxlab.space/utils/VLMEval/MMBench_DEV_EN.tsv
    wget https://opencompass.openxlab.space/utils/VLMEval/MMBench_TEST_EN.tsv

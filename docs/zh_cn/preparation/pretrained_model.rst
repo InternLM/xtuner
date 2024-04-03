@@ -5,7 +5,6 @@
 提供了多种下载预训练模型权重的方法，本节将以下载 internlm2-chat-7b
 为例，介绍如何快速下载预训练模型的权重。
 
-   | [!IMPORTANT]
    | 若 HuggingFace 访问受限，请优先考虑使用 ModelScope 进行下载
 
 .. _推荐-方法-1利用-snapshotdownload:

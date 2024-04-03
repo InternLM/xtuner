@@ -45,7 +45,7 @@ Step 1, 导出 config
 可以通过以下命令将 ``internlm2_7b_full_custom_pretrain_e1.py``
 导出至当前目录下：
 
-.. code:: 
+.. code::
 
    xtuner copy-cfg internlm2_7b_full_custom_pretrain_e1 .
 

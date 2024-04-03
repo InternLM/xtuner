@@ -86,7 +86,7 @@ XTuner 的工作流程
       TurboMind 进行推理。
 
 | 以下是每一步具体的指令应用：
-| 
+|
 
 XTuner 的核心模块
 -----------------
@@ -210,4 +210,3 @@ XTuner 当前支持的模型、数据集及微调方法
    -  ...
 
 .. |image1| image:: https://github.com/Jianfeng777/xtuner/assets/108343727/d538dd88-20f7-49cf-a84a-62669c03cb79
-
