@@ -87,6 +87,9 @@ def default_collate_fn(instances: Sequence[Dict],
         pixel_values = torch.stack(pixel_values)
         data_dict['pixel_values'] = pixel_values
 
+    # add img_id for eval if exists
+    img_ids = [example.get('img_id', 0) for example in instances]
+    data_dict['img_id'] = img_ids
     if return_hf_format:
         return data_dict
     else:

@@ -276,7 +276,8 @@ val_dataloader = dict(
     num_workers=0,
     drop_last=False,
     sampler=dict(type=DefaultSampler, shuffle=False),
-    dataset=dict(type=ConcatDataset, datasets=val_dataset))
+    dataset=dict(type=ConcatDataset, datasets=val_dataset),
+    collate_fn=dict(type=default_collate_fn))
 val_evaluator = dict()
 val_cfg = dict(type=ValLoop)
 
@@ -286,6 +287,8 @@ test_dataloader = dict(
     num_workers=0,
     drop_last=False,
     sampler=dict(type=DefaultSampler, shuffle=False),
-    dataset=dict(type=ConcatDataset, datasets=test_dataset))
+    dataset=dict(type=ConcatDataset, datasets=test_dataset),
+    collate_fn=dict(type=default_collate_fn)
+)
 test_evaluator = val_evaluator
 test_cfg = dict(type=TestLoop, select_metric='first')

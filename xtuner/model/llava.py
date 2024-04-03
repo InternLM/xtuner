@@ -265,6 +265,7 @@ class LLaVAModel(BaseModel):
             data = self._prepare_data_for_llm(data)
             return self.compute_loss(data, data_samples)
         elif mode == 'predict' or mode == 'generate':
+            data = self._prepare_data_for_llm(data)
             return self.generate(data, data_samples)
         elif mode == 'chat':
             return self.chat(data)
@@ -294,15 +295,8 @@ class LLaVAModel(BaseModel):
         self.stop_criteria = stop_criteria
 
     def generate(self, data, data_samples=None):
-        # TODO: It is the direct output of the dataset without going through the dataloader.
-        input_ids = data['input_ids'].unsqueeze(0).to(self.visual_encoder.device)
-        data['input_ids'] = input_ids
-        pixel_values = data['pixel_values'].unsqueeze(0).to(self.visual_encoder.device)
-        data['pixel_values'] = pixel_values
-
-        mm_inputs = self._prepare_data_for_llm(data)
         generate_output = self.llm.generate(
-            **mm_inputs,
+            **data,
             generation_config=self.gen_config,
             streamer=None,
             bos_token_id=self.tokenizer.bos_token_id,

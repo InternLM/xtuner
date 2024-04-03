@@ -50,9 +50,10 @@ class TrainLoop(IterBasedTrainLoop):
 
 
 class ValLoop(MMENGINE_ValLoop):
-    def __init__(self, runner, dataloader=None, evaluator=None, torch_dtype='fp16', select_metric='first') -> None:
+    def __init__(self, runner, dataloader, evaluator=None, torch_dtype='fp16', select_metric='first') -> None:
         # must be concatset
         super(MMENGINE_ValLoop, self).__init__(runner, dataloader)
+        self.collate_fn = self.dataloader.collate_fn
         self._runner = runner
         self.torch_dtype = torch_dtype
         if torch_dtype is not None:
@@ -87,6 +88,8 @@ class ValLoop(MMENGINE_ValLoop):
                                  min(n_samples, per_rank_samples * (rank + 1)))
             for idx in per_rank_ids:
                 data_batch = dataset[idx]
+                # TODO: Only bs=1 is currently supported temporarily
+                data_batch = self.collate_fn([data_batch])
                 self.run_iter(current_run_total_ids, data_batch, results)
                 current_run_total_ids += 1
 
@@ -124,17 +127,17 @@ class ValLoop(MMENGINE_ValLoop):
             data_batch (Sequence[dict]): Batch of data
                 from dataloader.
         """
-        assert 'img_id' in data_batch, 'img_id is required in data_batch. ' \
-                                       'The __getitem__ function in the dataset must ' \
-                                       'return a dictionary with the img_id.'
-        prediction = {'img_id': data_batch['img_id']}
+        assert 'img_id' in data_batch['data'], 'img_id is required in data_batch. ' \
+                                               'The __getitem__ function in the dataset must ' \
+                                               'return a dictionary with the img_id.'
+        prediction = {'img_id': data_batch['data']['img_id'][0]}
 
         self.runner.call_hook(
             'before_val_iter', batch_idx=idx, data_batch=data_batch)
 
         # outputs should be sequence of BaseDataElement
-        outputs = self.runner.model.val_step({'data': data_batch})
-        prediction['prediction'] = outputs['prediction']
+        outputs = self.runner.model.val_step(data_batch)
+        prediction.update(outputs)
         results.append(prediction)
 
         self.runner.call_hook(
@@ -177,6 +180,8 @@ class TestLoop(ValLoop):
                                  min(n_samples, per_rank_samples * (rank + 1)))
             for idx in per_rank_ids:
                 data_batch = dataset[idx]
+                # TODO: Only bs=1 is currently supported temporarily
+                data_batch = self.collate_fn([data_batch])
                 self.run_iter(current_run_total_ids, data_batch, results)
                 current_run_total_ids += 1
 
@@ -214,16 +219,16 @@ class TestLoop(ValLoop):
             data_batch (Sequence[dict]): Batch of data
                 from dataloader.
         """
-        assert 'img_id' in data_batch, 'img_id is required in data_batch. ' \
-                                       'The __getitem__ function in the dataset must ' \
-                                       'return a dictionary with the img_id.'
-        prediction = {'img_id': data_batch['img_id']}
+        assert 'img_id' in data_batch['data'], 'img_id is required in data_batch. ' \
+                                               'The __getitem__ function in the dataset must ' \
+                                               'return a dictionary with the img_id.'
+        prediction = {'img_id': data_batch['data']['img_id'][0]}
 
         self.runner.call_hook(
             'before_test_iter', batch_idx=idx, data_batch=data_batch)
 
         # outputs should be sequence of BaseDataElement
-        outputs = self.runner.model.val_step({'data': data_batch})
+        outputs = self.runner.model.val_step(data_batch)
         prediction.update(outputs)
         results.append(prediction)
 
