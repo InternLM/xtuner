@@ -19,9 +19,9 @@ sys.path.insert(0, os.path.abspath('../..'))
 
 # -- Project information -----------------------------------------------------
 
-project = 'xtuner'
-copyright = '2024, xtuner contributors'
-author = 'xtuner contributors'
+project = 'uner'
+copyright = '2024, XTuner Contributors'
+author = 'XTuner Contributors'
 
 # The full version, including alpha/beta/rc tags
 version_file = '../../xtuner/version.py'
