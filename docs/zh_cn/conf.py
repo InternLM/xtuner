@@ -67,7 +67,7 @@ copybutton_prompt_is_regexp = True
 # a list of builtin themes.
 #
 html_theme = 'sphinx_book_theme'
-language = 'zh_CN'
+html_logo = '_static/image/logo.png'
 html_theme_options = {
     'path_to_docs': 'docs/zh_cn',
     'repository_url': 'https://github.com/InternLM/xtuner',
