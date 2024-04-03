@@ -43,7 +43,7 @@
    :caption: 准备
 
    preparation/pretrained_model.md
-   preparation/prompt_template.md
+   preparation/prompt_template.rst
 
 .. toctree::
    :maxdepth: 2
