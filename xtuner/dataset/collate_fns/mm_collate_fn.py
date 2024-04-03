@@ -26,7 +26,6 @@ def mm_collate_fn(instances: Sequence[Dict],
         input_ids.append(torch.LongTensor(data['input_ids']))
         if mode == 'train':
             labels.append(torch.LongTensor(data['labels']))
-            position_ids.append(torch.IntTensor(data['position_ids']))
 
         if 'cumulative_len' in data:
             cumulative_len.append(torch.IntTensor(data['cumulative_len']))
@@ -39,13 +38,14 @@ def mm_collate_fn(instances: Sequence[Dict],
             input_ids, batch_first=True, padding_value=pad_index)
         labels = pad_sequence(
             labels, batch_first=True, padding_value=IGNORE_INDEX)
-        position_ids = pad_sequence(
-            position_ids, batch_first=True, padding_value=0)
     else:
         input_ids = torch.stack(input_ids)
         if mode == 'train':
             labels = torch.stack(labels)
-            position_ids = torch.stack(position_ids)
+
+    if mode == 'train':
+        attention_mask = input_ids.ne(pad_index)
+        position_ids = attention_mask.long().cumsum(-1) - 1
 
     if len(cumulative_len) == 0:
         cumulative_len = None
@@ -54,7 +54,7 @@ def mm_collate_fn(instances: Sequence[Dict],
         data_dict = {
             'input_ids': input_ids,
             'position_ids': position_ids,
-            'attention_mask': input_ids.ne(pad_index),
+            'attention_mask': attention_mask,
             'labels': labels,
             'cumulative_len': cumulative_len,
         }
