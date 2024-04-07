@@ -8,14 +8,12 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           SiglipImageProcessor, SiglipVisionModel)
 
 from xtuner.dataset import LLaVADataset
-from xtuner.dataset.collate_fns import default_collate_fn
+from xtuner.dataset.collate_fns import mm_collate_fn
 from xtuner.dataset.map_fns import llava_map_fn, template_map_fn_factory
 from xtuner.engine.hooks import DatasetInfoHook, EvaluateChatHook
-from xtuner.engine.runner import TrainLoop, ValLoop, TestLoop
+from xtuner.engine.runner import TrainLoop
 from xtuner.utils import PROMPT_TEMPLATE
 from xtuner.model import LLaVAModel
-from xtuner.dataset.evaluation import MMELLaVADataset, MultipleChoiceLLaVADataset
-from xtuner.dataset import ConcatDataset
 
 #######################################################################
 #                          PART 1  Settings                           #
@@ -103,7 +101,7 @@ train_dataloader = dict(
     pin_memory=True,
     dataset=llava_dataset,
     sampler=dict(type=DefaultSampler, shuffle=True),
-    collate_fn=dict(type=default_collate_fn))
+    collate_fn=dict(type=mm_collate_fn))
 
 #######################################################################
 #                    PART 4  Scheduler & Optimizer                    #
