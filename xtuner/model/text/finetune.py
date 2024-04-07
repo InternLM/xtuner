@@ -1,5 +1,4 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-
 from collections import OrderedDict
 from typing import Dict, List, Optional, Union
 

@@ -1,3 +1,4 @@
+# Copyright (c) OpenMMLab. All rights reserved.
 import functools
 import json
 import os
@@ -270,8 +271,8 @@ class TextDataset(torch.utils.data.Dataset):
         """
         if self.is_cached(cache_dir):
             print_log(
-                f'{cache_dir} is cached dataset that will be loaded '
-                'directly; `data_files` and `data_dir` will become'
+                f'{cache_dir} is a cached dataset that will be loaded '
+                'directly; `data_files` and `data_dir` will become '
                 'invalid.',
                 logger='current')
 
@@ -359,7 +360,7 @@ class TextDataset(torch.utils.data.Dataset):
                  `labels` and `num_tokens`.
                  `input_ids` and `labels` are lists of int, and they should
                  have equal lengths.
-                 `num_tokens` is an integer，the length of `input_ids`.
+                 `num_tokens` is an integer, the length of `input_ids`.
         """
 
         def openai_to_raw_training(item: dict) -> Dict:
@@ -574,48 +575,27 @@ if __name__ == '__main__':
         stop_words=['<|im_end|>'],
     )
 
-    from xtuner.dataset.hybrid.mappings import openai_to_raw_training
-
-    data_dir = './llava_data/LLaVA-Instruct-150K/'
-    image_dir = './llava_data/llava_images/'
-    data_files = 'llava_v1_5_mix665k.json'
-
     dataset = TextDataset(
         'internlm/internlm2-chat-1_8b',
         chat_template,
         sample_ratio=1,
         max_length=32 * 1024,
-        data_dir=data_dir,
-        data_files=data_files,
+        data_dir='converted_alpaca',
+        cache_dir='cached_alpaca',
         pack_to_max_length=True,
-        mappings=[openai_to_raw_training],
         num_proc=4)
 
-    print(dataset[0])
-
-    dataset.cache('cached_llava')
-    dataset = TextDataset(
-        'internlm/internlm2-chat-1_8b',
-        chat_template,
-        sample_ratio=1,
-        max_length=32 * 1024,
-        cache_dir='cached_llava',
-        pack_to_max_length=True,
-        mappings=[
-            openai_to_raw_training,
-        ],
-        num_proc=4)
     print(dataset[0])
 
     from mmengine.dataset import DefaultSampler
     from torch.utils.data import DataLoader
 
-    from xtuner.dataset.hybrid.collate import text_collate_fn
+    from xtuner.model import TextFinetune
     loader = DataLoader(
         dataset,
         4,
         num_workers=0,
-        collate_fn=text_collate_fn,
+        collate_fn=TextFinetune.dataloader_collate_fn,
         sampler=DefaultSampler(dataset, shuffle=True))
 
     for data in tqdm(loader):
