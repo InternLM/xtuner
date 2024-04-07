@@ -355,9 +355,11 @@ class TextDataset(torch.utils.data.Dataset):
 
          Returns:
              List[dict]:
-                 Each dict in the list must contain two keys: `input_ids` and
-                 `labels`. Both are lists of int, and they should have equal
-                 lengths.
+                 Each dict in the list must contain three keys: `input_ids`,
+                 `labels` and `num_tokens`.
+                 `input_ids` and `labels` are lists of int, and they should
+                 have equal lengths.
+                 `num_tokens` is an integer，the length of `input_ids`.
         """
 
         def openai_to_raw_training(item: dict) -> Dict:
