@@ -7,6 +7,7 @@ from torch.optim import AdamW
 from transformers import AutoTokenizer
 
 from xtuner.dataset.hybrid import TextDataset
+from xtuner.engine.hooks import ChatHook
 from xtuner.engine.runner import TrainLoop
 from xtuner.model import AutoModelForCausalLM, TextFinetune
 from xtuner.types import ChatTemplate
@@ -121,7 +122,7 @@ train_cfg = dict(type=TrainLoop, max_epochs=max_epochs)
 #                           PART 5  Runtime                           #
 #######################################################################
 # Log the dialogue periodically during the training process, optional
-custom_hooks = []
+custom_hooks = [dict(type=ChatHook, prompts=['请介绍五个上海的景点'], every_n_iters=10)]
 
 # configure default hooks
 default_hooks = dict(

@@ -183,9 +183,14 @@ class TextFinetune(BaseAlgorithm):
                 chat_template=self.chat_template)
 
     def chat(self,
-             messages: ChatMessages,
+             prompt_or_messages: Union[str, ChatMessages],
              sample_params: Optional[SampleParams] = None,
-             streamer=None):
+             streamer=None) -> str:
+
+        if isinstance(prompt_or_messages, str):
+            messages = ChatMessages.from_str(prompt_or_messages)
+        else:
+            messages = prompt_or_messages
 
         prompt = messages.get_prompt(self.chat_template)
         ids = self.tokenizer.encode(prompt, return_tensors='pt')
@@ -209,9 +214,13 @@ class TextFinetune(BaseAlgorithm):
 
         return output
 
-    def batch_infer(self, messages: List[ChatMessages],
-                    sample_params: SampleParams):
-        pass
+    def batch_infer(self, prompt_or_messages_list: Union[List[str],
+                                                         List[ChatMessages]],
+                    sample_params: SampleParams) -> List[str]:
+        responses = []
+        for p in prompt_or_messages_list:
+            responses.append(self.chat(p, sample_params))
+        return responses
 
     def save_checkpoint(self,
                         save_dir: str,

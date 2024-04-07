@@ -1,4 +1,4 @@
-from typing import List, Optional, Protocol
+from typing import List, Optional, Protocol, Union
 
 from xtuner.chat.streamer import SteamerType
 from xtuner.types.chat_template import ChatTemplate
@@ -16,13 +16,14 @@ class ChatBackendProtocol(Protocol):
         ...
 
     def chat(self,
-             messages: ChatMessages,
+             prompt_or_messages: Union[str, ChatMessages],
              sample_params: Optional[SampleParams] = None,
-             streamer: Optional[SteamerType] = None):
+             streamer: Optional[SteamerType] = None) -> str:
         ...
 
     def batch_infer(self,
-                    messages: List[ChatMessages],
+                    prompt_or_messages_list: Union[List[str],
+                                                   List[ChatMessages]],
                     sample_params: Optional[SampleParams] = None,
-                    streamer: Optional[SteamerType] = None):
+                    streamer: Optional[SteamerType] = None) -> List[str]:
         ...

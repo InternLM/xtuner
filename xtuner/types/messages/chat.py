@@ -112,6 +112,12 @@ class ChatMessages(BaseMessages):
         return training_data
 
     @classmethod
+    def from_str(cls, prompt: str) -> 'ChatMessages':
+
+        msg = ChatMsg(role='user', content=prompt)
+        return cls(messages=[msg])
+
+    @classmethod
     def from_dict(cls, item: dict) -> 'ChatMessages':
         '''
         item

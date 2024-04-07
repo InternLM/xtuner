@@ -1,6 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from abc import abstractclassmethod, abstractmethod
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Union
 
 from mmengine.model import BaseModel
 
@@ -119,7 +119,7 @@ class BaseAlgorithm(BaseModel, ChatBackendProtocol):
 
     @abstractmethod
     def chat(self,
-             messages: BaseMessages,
+             prompt_or_messages: Union[str, BaseMessages],
              sample_params: Optional[SampleParams] = None,
              streamer: Optional[SteamerType] = None) -> str:
         """Define the action when receiving a chat message.
@@ -128,8 +128,8 @@ class BaseAlgorithm(BaseModel, ChatBackendProtocol):
         easier integration with other modules of XTuner."
 
         Args:
-            messages (BaseMessages):
-                History of Dialogues in OpenAI Format
+            prompt_or_messages (str | BaseMessages):
+                Prompt or messages in OpenAI Format
             sample_params (SampleParams | None):
                 The hyperparameters controlling the generation results of the
                 model, if set to None, the model will generate according to
@@ -144,8 +144,10 @@ class BaseAlgorithm(BaseModel, ChatBackendProtocol):
         """
 
     @abstractmethod
-    def batch_infer(self, messages: List[BaseMessages],
-                    sample_params: SampleParams, streamer: Any) -> List[str]:
+    def batch_infer(self,
+                    prompt_or_messages_list: Union[str, BaseMessages],
+                    sample_params: Optional[SampleParams] = None,
+                    streamer: Optional[SteamerType] = None) -> List[str]:
         """Define the batch inference routine.
 
         This interface should be consistent with `ChatBackendProtocol` for
@@ -159,8 +161,8 @@ class BaseAlgorithm(BaseModel, ChatBackendProtocol):
             converted to `GenerationConfig`.
 
         Args:
-            messages (List[BaseMessages]):
-                Multiple historical dialogues in OpenAI format.
+            prompt_or_messages_list (Union[str, BaseMessages]):
+                Multiple messages in OpenAI format or multiple prompts;
             sample_params (SampleParams | None):
                 The hyperparameters controlling the generation results of the
                 model, if set to None, the model will generate according to
