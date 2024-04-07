@@ -196,6 +196,15 @@ def llama_attn_forward(
         # LlamaFlashAttention2 __init__.
         causal = self.is_causal and q_len != 1
 
+    # the shape of attention_mask used by flash_attn and
+    # F.scaled_dot_product_attention are different
+    assert attention_mask is None or attention_mask.ndim == 2, \
+        ('When using flash_attn, attention_mask.ndim should equal to 2.'
+            f'But got attention_mask.shape = {attention_mask.shape}.'
+            'We can pass the `attn_implementation="flash_attention_2"` flag '
+            'to `.from_pretrained` method when instantiating a Internlm2 '
+            'model.')
+
     if attention_mask is not None:
         attn_output = flash_attn_w_mask(
             query_states,
@@ -316,6 +325,15 @@ def llama_attn_forward_legacy(
         # is bumped to 2.1. For details, please see the comment in
         # LlamaFlashAttention2 __init__.
         causal = self.is_causal and q_len != 1
+
+    # the shape of attention_mask used by flash_attn and
+    # F.scaled_dot_product_attention are different
+    assert attention_mask is None or attention_mask.ndim == 2, \
+        ('When using flash_attn, attention_mask.ndim should equal to 2.'
+            f'But got attention_mask.shape = {attention_mask.shape}.'
+            'We can pass the `attn_implementation="flash_attention_2"` flag '
+            'to `.from_pretrained` method when instantiating a Internlm2 '
+            'model.')
 
     if attention_mask is not None:
         attn_output = flash_attn_w_mask(
