@@ -147,7 +147,6 @@ class BaseAlgorithm(BaseModel, ChatBackendProtocol):
             The response of the model to the input messages should be a string.
         """
 
-    @abstractmethod
     def batch_infer(self,
                     prompt_or_messages_list: Union[str, BaseMessages],
                     sample_params: Optional[SampleParams] = None,
@@ -180,6 +179,11 @@ class BaseAlgorithm(BaseModel, ChatBackendProtocol):
             The model responds to multiple messages, the result should be a
             list of strings.
         """
+        raise NotImplementedError(f'{type(self)} has not implemented the '
+                                  '`batch_infer` interface. Please refer to '
+                                  'the interface conventions in '
+                                  '`ChatBackendProtocol` and implement the '
+                                  f'`batch_infer` interface in {type(self)}')
 
     @abstractmethod
     def save_checkpoint(self, save_dir: str, to_hub: bool = True) -> None:
