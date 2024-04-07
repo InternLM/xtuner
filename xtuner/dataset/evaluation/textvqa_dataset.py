@@ -2,17 +2,14 @@ import os
 import os.path as osp
 import re
 
-import torch
 from .base_eval_dataset import BaseEvalDataset
 
-from xtuner.utils import (DEFAULT_IMAGE_TOKEN, IMAGE_TOKEN_INDEX)
 from xtuner.registry import BUILDER
 import json
-from PIL import Image
-from xtuner.dataset.utils import expand2square
 from mmengine.dist import (master_only)
 from .textvqa_utils import TextVQAAccuracyEvaluator
 from mmengine.logging import print_log
+from ..llava_proxy_eval_dataset import LLaVAProxyEvalDataset
 
 
 def prompt_processor(prompt):
@@ -33,9 +30,12 @@ def prompt_processor(prompt):
     return question.lower()
 
 
-class TextVQALLaVADataset(BaseEvalDataset):
+class TextVQADataset(BaseEvalDataset):
+    METAINFO: dict = dict(name='textvqa')
+
     def __init__(self, data_file, ann_file, image_folder, prompt_template, image_processor, tokenizer,
-                 pad_image_to_square=True, use_system=False, metainfo=None):
+                 pad_image_to_square=True, use_system=False, metainfo=None,
+                 proxy_eval_dataset=dict(type=LLaVAProxyEvalDataset)):
         super().__init__(metainfo)
         self.use_system = use_system
         self.data_file = data_file
@@ -52,52 +52,23 @@ class TextVQALLaVADataset(BaseEvalDataset):
         self.results_path = os.path.splitext(os.path.basename(data_file))[0] + '-results.jsonl'
         self.data = self.load_data_list()
 
+        proxy_eval_dataset['eval_dataset'] = self
+        self.proxy_eval_dataset = BUILDER.build(proxy_eval_dataset)
+
     def load_data_list(self):
-        return [json.loads(q) for q in open(os.path.expanduser(self.data_file), "r")]
+        data = [json.loads(q) for q in open(os.path.expanduser(self.data_file), "r")]
+        for i, d in enumerate(data):
+            d['img_id'] = i
+            d['image_path'] = d['image']
+            d['question'] = d['text']
+        return data
 
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, idx):
-        data_dict = {'img_id': idx}
-        line = self.data[idx]
-        image_file = line["image"]
-        qs = line["text"]
-
-        text = DEFAULT_IMAGE_TOKEN + '\n' + qs
-
-        if self.use_system:
-            inputs = self.template.get('SYSTEM', '{system}').format(system='')
-        else:
-            inputs = ''
-        inputs += self.template['INSTRUCTION'].format(input=text, round=1)
-
-        chunk_encode = []
-        for idx, chunk in enumerate(inputs.split(DEFAULT_IMAGE_TOKEN)):
-            if idx == 0:
-                cur_encode = self.tokenizer.encode(chunk)
-            else:
-                cur_encode = self.tokenizer.encode(chunk, add_special_tokens=False)
-            chunk_encode.append(cur_encode)
-        assert len(chunk_encode) == 2
-        ids = []
-        for idx, cur_chunk_encode in enumerate(chunk_encode):
-            ids.extend(cur_chunk_encode)
-            if idx != len(chunk_encode) - 1:
-                ids.append(IMAGE_TOKEN_INDEX)
-        ids = torch.tensor(ids)
-        data_dict['input_ids'] = ids
-
-        image = Image.open(os.path.join(self.image_folder, image_file)).convert('RGB')
-        if self.pad_image_to_square:
-            image = expand2square(
-                image,
-                tuple(
-                    int(x * 255) for x in self.image_processor.image_mean))
-        image = self.image_processor.preprocess(
-            image, return_tensors='pt')['pixel_values'][0]
-        data_dict['pixel_values'] = image
-
+        data = self.data[idx]
+        data_dict = self.proxy_eval_dataset.getitem(idx, data)
         return data_dict
 
     @master_only

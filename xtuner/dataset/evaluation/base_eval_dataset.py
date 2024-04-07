@@ -11,7 +11,7 @@ from abc import abstractmethod
 
 class BaseEvalDataset(Dataset):
 
-    METAINFO: dict = dict()
+    METAINFO: dict = dict(name='default')
 
     def __init__(self, metainfo: Union[Mapping, Config, None] = None):
         self._metainfo = self._load_metainfo(copy.deepcopy(metainfo))

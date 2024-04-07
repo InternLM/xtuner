@@ -1,7 +1,7 @@
-from .mme_llava_dataset import MMELLaVADataset
-from .multiple_choice_llava_dataset import MultipleChoiceLLaVADataset
-from .pope_llava_dataset import POPELLaVADataset
-from .hallusion_llava_dataset import HallusionLLaVADataset
-from .textvqa_llava_dataset import TextVQALLaVADataset
+from .mme_dataset import MMEDataset
+from .multiple_choice_dataset import MultipleChoiceDataset
+from .pope_dataset import POPEDataset
+from .hallusion_dataset import HallusionDataset
+from .textvqa_dataset import TextVQADataset
 
-__all__ = ['MMELLaVADataset', 'MultipleChoiceLLaVADataset', 'POPELLaVADataset', 'HallusionLLaVADataset', 'TextVQALLaVADataset']
+__all__ = ['MMEDataset', 'MultipleChoiceDataset', 'POPEDataset', 'HallusionDataset', 'TextVQADataset']
