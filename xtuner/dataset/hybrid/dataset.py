@@ -250,8 +250,6 @@ class TextDataset(torch.utils.data.Dataset):
                 become invalid. When the path does not point to a cached
                 dataset, the processed data will be cached to this path.
                 Default is None.
-            map_fn (Callable):
-                The map function of the dataset.
 
         Raises:
             RuntimeError:

@@ -86,6 +86,9 @@ class TextFinetune(BaseAlgorithm):
         # enable gradient checkpointing for memory efficiency
         self.llm.gradient_checkpointing_enable()
 
+    def gradient_checkpointing_disable(self):
+        self.llm.gradient_checkpointing_disable()
+
     def forward(self, data, data_samples=None, mode='loss'):
         """Overload parent class method, only support training."""
 

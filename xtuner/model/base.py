@@ -118,6 +118,10 @@ class BaseAlgorithm(BaseModel, ChatBackendProtocol):
         """Define how to enable gradient checkpointing."""
 
     @abstractmethod
+    def gradient_checkpointing_disable(self) -> None:
+        """Define how to disable gradient checkpointing."""
+
+    @abstractmethod
     def chat(self,
              prompt_or_messages: Union[str, BaseMessages],
              sample_params: Optional[SampleParams] = None,
