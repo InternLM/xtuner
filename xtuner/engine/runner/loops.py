@@ -207,8 +207,8 @@ class TestLoop(ValLoop):
         self.runner.call_hook('after_test_epoch', metrics=metrics)
         self.runner.call_hook('after_test')
         self.runner.logger.info('================ Ending test loop ================')
-        model.gradient_checkpointing_enable()
-        model.train()
+        # model.gradient_checkpointing_enable()
+        # model.train()
         return metrics
 
     @torch.no_grad()
