@@ -254,8 +254,13 @@ class LLaVAModel(BaseModel):
             visual_outputs = self.visual_encoder(
                 data['pixel_values'].to(self.visual_encoder.dtype),
                 output_hidden_states=True)
-            pixel_values = self.projector(
-                visual_outputs.hidden_states[self.visual_select_layer][:, 1:])
+            if type(self.visual_encoder).__name__ == 'CLIPVisionModel':
+                visual_outputs = visual_outputs.hidden_states[self.visual_select_layer][:, 1:]
+            elif type(self.visual_encoder).__name__ == 'SiglipVisionModel':
+                visual_outputs = visual_outputs.hidden_states[self.visual_select_layer]
+            else:
+                raise NotImplementedError
+            pixel_values = self.projector(visual_outputs)
             data['pixel_values'] = pixel_values
             data = prepare_inputs_labels_for_multimodal(llm=self.llm, **data)
         return data

@@ -14,7 +14,7 @@ from xtuner.engine.hooks import DatasetInfoHook, EvaluateChatHook
 from xtuner.model import LLaVAModel
 from xtuner.utils import PROMPT_TEMPLATE
 from xtuner.dataset.evaluation import MMEDataset, MultipleChoiceDataset, POPEDataset, \
-    HallusionDataset, TextVQADataset
+    HallusionDataset, TextVQADataset, GQADataset
 from xtuner.dataset import ConcatDataset
 from xtuner.engine.runner import TrainLoop, ValLoop, TestLoop
 from mmengine.dataset import DefaultSampler
@@ -318,7 +318,16 @@ test_dataset = [
         prompt_template=PROMPT_TEMPLATE.vicuna,
         tokenizer=tokenizer,
         image_processor=image_processor,
-        pad_image_to_square=True)
+        pad_image_to_square=True),
+    dict(
+        type=GQADataset,
+        question_file='/mnt/petrelfs/share_data/zhaoxiangyu/gqa_llava_eval/llava_gqa_testdev_balanced.jsonl',
+        gt_file='/mnt/petrelfs/share_data/zhaoxiangyu/gqa_llava_eval/testdev_balanced_questions.json',
+        image_folder='/mnt/petrelfs/share_data/basemodel/dataset/multimodality/gqa/images',
+        prompt_template=PROMPT_TEMPLATE.vicuna,
+        tokenizer=tokenizer,
+        image_processor=image_processor,
+        pad_image_to_square=True),
 ]
 
 # TODO: We are not currently using val_evaluator
