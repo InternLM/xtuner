@@ -155,7 +155,7 @@ input_ids, labels, position_ids = split_for_sequence_parallel(
     input_ids, labels, position_ids)
 ```
 
-以上两步在 xtuner/dataset/collate_fns/defalut_collate_fn.py 中实现。
+以上两步在 xtuner/dataset/collate_fns/default_collate_fn.py 中实现。
 
 ### Attention 适配序列并行
 
