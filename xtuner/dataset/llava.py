@@ -13,7 +13,7 @@ from torch.utils.data import Dataset
 
 from xtuner.registry import BUILDER
 from .huggingface import process_hf_dataset
-from .utils import expand2square
+from .utils import expand2square, process_anyres_image
 
 
 class LLaVADataset(Dataset):
@@ -104,4 +104,37 @@ class LLaVADataset(Dataset):
                 crop_size = self.image_processor.size
             data_dict['pixel_values'] = torch.zeros(3, crop_size['height'],
                                                     crop_size['width'])
+        return data_dict
+
+
+class AnyResLLaVADataset(LLaVADataset):
+
+    def __init__(self, image_grid_pinpoints, *args, **kwargs):
+        self.image_grid_pinpoints = image_grid_pinpoints
+        super().__init__(*args, **kwargs)
+        # TODO: Assuming they are all squares.
+        if hasattr(self.image_processor, 'crop_size'):
+            self._crop_size = self.image_processor.crop_size
+        else:
+            self._crop_size = self.image_processor.size
+        self._patch_size = self._crop_size['height']
+        self._shortest_edge = self._crop_size['height']
+
+    def __getitem__(self, index):
+        data_dict = self.text_data[index]
+        if data_dict.get('image', None) is not None:
+            image_file = data_dict['image']
+            image = Image.open(os.path.join(self.image_folder,
+                                            image_file)).convert('RGB')
+            orig_size = image.size
+            # use to remove padding
+            data_dict['orig_size'] = orig_size
+            image = process_anyres_image(image, self.image_processor,
+                                         self.image_grid_pinpoints,
+                                         self._patch_size, self._shortest_edge)
+            data_dict['pixel_values'] = image
+        else:
+            data_dict['orig_size'] = self._crop_size
+            data_dict['pixel_values'] = torch.zeros(1, 3, self._crop_size['height'],
+                                                    self._crop_size['width'])
         return data_dict

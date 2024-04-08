@@ -64,7 +64,10 @@ def mm_collate_fn(instances: Sequence[Dict],
         }
 
     if has_image:
-        pixel_values = torch.stack(pixel_values)
+        # if all images have the same size, stack them into a single tensor
+        # else, keep them as a list of tensors
+        if all(x.shape == pixel_values[0].shape for x in pixel_values):
+            pixel_values = torch.stack(pixel_values, dim=0)
         data_dict['pixel_values'] = pixel_values
 
     if extra_collate_keys is not None:
