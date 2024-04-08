@@ -112,7 +112,7 @@ class GQADataset(BaseEvalDataset):
 
         evaluator = eval_gqa(questions=self.gt_file, predictions=prediction_file)
         print_log('============================================', 'current')
-        metrics = evaluator.forward()
+        scores = evaluator.forward()
         print_log('============================================', 'current')
         print_log(f'GQA successfully finished evaluating', 'current')
-        return metrics
+        return scores

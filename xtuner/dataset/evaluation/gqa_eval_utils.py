@@ -287,7 +287,7 @@ class eval_gqa():
                         title=tName, score=scores[m][t][0], suffix="%", amount=scores[m][t][1]
                     )
                     , 'current')
-        return metrics
+        return scores
 
     def loadFile(self, name):
         # load standard json file
