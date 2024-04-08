@@ -56,7 +56,7 @@ class LLaVAProxyEvalDataset:
         data_dict['input_ids'] = ids
 
         # 3 process image
-        if self.eval_ds.metainfo['name'] in ['mme', 'textvqa']:
+        if self.eval_ds.metainfo['name'] in ['mme', 'textvqa', 'gqa']:
             # MMEDataset or TextVQADataset
             image = Image.open(os.path.join(self.eval_ds.image_folder,
                                             data['image_path'])).convert('RGB')
