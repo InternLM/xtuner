@@ -11,20 +11,21 @@ from xtuner.dataset.collate_fns import mm_collate_fn
 from xtuner.dataset.map_fns import llava_map_fn, template_map_fn_factory
 from xtuner.dataset.samplers import LengthGroupedSampler
 from xtuner.engine.hooks import DatasetInfoHook, EvaluateChatHook
-from xtuner.model import LLaVAModel
+from xtuner.model import AnyResLLaVAModel
 from xtuner.utils import PROMPT_TEMPLATE
 from xtuner.dataset.evaluation import MMEDataset, MultipleChoiceDataset, POPEDataset, \
-    HallusionDataset, TextVQADataset
+    HallusionDataset, TextVQADataset, GQADataset
 from xtuner.dataset import ConcatDataset
 from xtuner.engine.runner import TrainLoop, ValLoop, TestLoop
 from mmengine.dataset import DefaultSampler
+from xtuner.dataset import AnyResLLaVAProxyEvalDataset
 
 #######################################################################
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-llm_name_or_path = 'microsoft/phi-2'
-visual_encoder_name_or_path = 'google/siglip-so400m-patch14-384'
+llm_name_or_path = '/mnt/petrelfs/share_data/huanghaian/model/phi-2'
+visual_encoder_name_or_path = '/mnt/petrelfs/share_data/huanghaian/model/siglip-so400m-patch14-384'
 # Specify the pretrained pth
 pretrained_pth = 'work_dirs/llava_phi2_2_7b_siglip_so400m_p14_384_e1_gpu8_pretrain/iter_2181.pth'
 
@@ -55,7 +56,10 @@ save_total_limit = 2  # Maximum checkpoints to keep (-1 means unlimited)
 evaluation_freq = 500
 SYSTEM = ''
 evaluation_images = 'https://llava-vl.github.io/static/images/view.jpg'
-evaluation_inputs = ['请描述一下这张照片', 'Please describe this picture']
+evaluation_inputs = ['Please describe this picture']
+
+image_grid_pinpoints = [[384, 768], [768, 384], [768, 768], [1152, 384],
+                        [384, 1152]]
 
 #######################################################################
 #            PART 2  Model & Tokenizer & Image Processor              #
@@ -72,9 +76,11 @@ image_processor = dict(
     trust_remote_code=True)
 
 model = dict(
-    type=LLaVAModel,
+    type=AnyResLLaVAModel,
     freeze_llm=False,
-    freeze_visual_encoder=True,
+    freeze_visual_encoder=False,
+    image_grid_pinpoints=image_grid_pinpoints,
+    token_merge_ratio=4,
     pretrained_pth=pretrained_pth,
     tokenizer=tokenizer,
     template=prompt_template,
@@ -92,7 +98,8 @@ model = dict(
 #######################################################################
 llava_dataset = dict(
     type=AnyResLLaVADataset,
-    offline_processed_text_folder=None,
+    image_grid_pinpoints=image_grid_pinpoints,
+    offline_processed_text_folder='/mnt/petrelfs/huanghaian/code/xtuner/phi2_2_7b_finetune',
     data_path=data_path,
     image_folder=image_folder,
     tokenizer=tokenizer,
@@ -156,15 +163,15 @@ train_cfg = dict(type=TrainLoop, max_epochs=max_epochs, val_interval=save_steps)
 # Log the dialogue periodically during the training process, optional
 custom_hooks = [
     dict(type=DatasetInfoHook, tokenizer=tokenizer),
-    dict(
-        type=EvaluateChatHook,
-        tokenizer=tokenizer,
-        image_processor=image_processor,
-        every_n_iters=evaluation_freq,
-        evaluation_inputs=evaluation_inputs,
-        evaluation_images=evaluation_images,
-        system=SYSTEM,
-        prompt_template=prompt_template)
+    # dict(
+    #     type=EvaluateChatHook,
+    #     tokenizer=tokenizer,
+    #     image_processor=image_processor,
+    #     every_n_iters=evaluation_freq,
+    #     evaluation_inputs=evaluation_inputs,
+    #     evaluation_images=evaluation_images,
+    #     system=SYSTEM,
+    #     prompt_template=prompt_template)
 ]
 
 # configure default hooks
@@ -218,24 +225,21 @@ log_processor = dict(by_epoch=False)
 val_dataset = [
     dict(
         type=MMEDataset,
+        proxy_eval_dataset=dict(type=AnyResLLaVAProxyEvalDataset,
+                                image_grid_pinpoints=image_grid_pinpoints),
         data_file='/mnt/petrelfs/huanghaian/code/xtuner/LMUData/MME.tsv',
         image_folder='/mnt/petrelfs/share_data/duanhaodong/data/mme/MME_Benchmark_release',
         prompt_template=PROMPT_TEMPLATE.vicuna,
         tokenizer=tokenizer,
         image_processor=image_processor,
-        pad_image_to_square=True),
-    # dict(
-    #     type=MultipleChoiceDataset,
-    #     data_file='/mnt/petrelfs/huanghaian/code/xtuner/LMUData/MMBench_DEV_EN.tsv',
-    #     prompt_template=PROMPT_TEMPLATE.vicuna,
-    #     tokenizer=tokenizer,
-    #     image_processor=image_processor,
-    #     pad_image_to_square=True)
+        pad_image_to_square=True)
 ]
 
 test_dataset = [
     dict(
         type=MultipleChoiceDataset,
+        proxy_eval_dataset=dict(type=AnyResLLaVAProxyEvalDataset,
+                                image_grid_pinpoints=image_grid_pinpoints),
         data_file='/mnt/petrelfs/huanghaian/code/xtuner/LMUData/MMBench_DEV_EN.tsv',
         prompt_template=PROMPT_TEMPLATE.vicuna,
         tokenizer=tokenizer,
@@ -243,6 +247,8 @@ test_dataset = [
         pad_image_to_square=True),
     dict(
         type=MultipleChoiceDataset,
+        proxy_eval_dataset=dict(type=AnyResLLaVAProxyEvalDataset,
+                                image_grid_pinpoints=image_grid_pinpoints),
         data_file='/mnt/petrelfs/huanghaian/code/xtuner/LMUData/MMBench_TEST_EN.tsv',
         prompt_template=PROMPT_TEMPLATE.vicuna,
         tokenizer=tokenizer,
@@ -250,6 +256,8 @@ test_dataset = [
         pad_image_to_square=True),
     dict(
         type=MultipleChoiceDataset,
+        proxy_eval_dataset=dict(type=AnyResLLaVAProxyEvalDataset,
+                                image_grid_pinpoints=image_grid_pinpoints),
         data_file='/mnt/petrelfs/huanghaian/code/xtuner/LMUData/SEEDBench_IMG.tsv',
         prompt_template=PROMPT_TEMPLATE.vicuna,
         tokenizer=tokenizer,
@@ -257,6 +265,8 @@ test_dataset = [
         pad_image_to_square=True),
     dict(
         type=MultipleChoiceDataset,
+        proxy_eval_dataset=dict(type=AnyResLLaVAProxyEvalDataset,
+                                image_grid_pinpoints=image_grid_pinpoints),
         data_file='/mnt/petrelfs/huanghaian/code/xtuner/LMUData/ScienceQA_VAL.tsv',
         prompt_template=PROMPT_TEMPLATE.vicuna,
         tokenizer=tokenizer,
@@ -264,6 +274,8 @@ test_dataset = [
         pad_image_to_square=True),
     dict(
         type=MultipleChoiceDataset,
+        proxy_eval_dataset=dict(type=AnyResLLaVAProxyEvalDataset,
+                                image_grid_pinpoints=image_grid_pinpoints),
         data_file='/mnt/petrelfs/huanghaian/code/xtuner/LMUData/ScienceQA_TEST.tsv',
         prompt_template=PROMPT_TEMPLATE.vicuna,
         tokenizer=tokenizer,
@@ -271,6 +283,8 @@ test_dataset = [
         pad_image_to_square=True),
     dict(
         type=MultipleChoiceDataset,
+        proxy_eval_dataset=dict(type=AnyResLLaVAProxyEvalDataset,
+                                image_grid_pinpoints=image_grid_pinpoints),
         data_file='/mnt/petrelfs/huanghaian/code/xtuner/LMUData/MMMU_DEV_VAL.tsv',
         prompt_template=PROMPT_TEMPLATE.vicuna,
         tokenizer=tokenizer,
@@ -278,6 +292,8 @@ test_dataset = [
         pad_image_to_square=True),
     dict(
         type=MultipleChoiceDataset,
+        proxy_eval_dataset=dict(type=AnyResLLaVAProxyEvalDataset,
+                                image_grid_pinpoints=image_grid_pinpoints),
         data_file='/mnt/petrelfs/huanghaian/code/xtuner/LMUData/AI2D_TEST.tsv',
         prompt_template=PROMPT_TEMPLATE.vicuna,
         tokenizer=tokenizer,
@@ -285,6 +301,8 @@ test_dataset = [
         pad_image_to_square=True),
     dict(
         type=TextVQADataset,
+        proxy_eval_dataset=dict(type=AnyResLLaVAProxyEvalDataset,
+                                image_grid_pinpoints=image_grid_pinpoints),
         data_file='/mnt/petrelfs/share_data/huanghaian/orig_llava_eval/textvqa/llava_textvqa_val_v051_ocr.jsonl',
         ann_file='/mnt/petrelfs/share_data/huanghaian/text_vqa/TextVQA_0.5.1_val.json',
         image_folder='/mnt/petrelfs/share_data/huanghaian/text_vqa/train_images',
@@ -294,6 +312,8 @@ test_dataset = [
         pad_image_to_square=True),
     dict(
         type=MMEDataset,
+        proxy_eval_dataset=dict(type=AnyResLLaVAProxyEvalDataset,
+                                image_grid_pinpoints=image_grid_pinpoints),
         data_file='/mnt/petrelfs/huanghaian/code/xtuner/LMUData/MME.tsv',
         image_folder='/mnt/petrelfs/share_data/duanhaodong/data/mme/MME_Benchmark_release',
         prompt_template=PROMPT_TEMPLATE.vicuna,
@@ -303,6 +323,8 @@ test_dataset = [
         pad_image_to_square=True),
     dict(
         type=HallusionDataset,
+        proxy_eval_dataset=dict(type=AnyResLLaVAProxyEvalDataset,
+                                image_grid_pinpoints=image_grid_pinpoints),
         data_file='/mnt/petrelfs/huanghaian/code/xtuner/LMUData/HallusionBench.tsv',
         prompt_template=PROMPT_TEMPLATE.vicuna,
         tokenizer=tokenizer,
@@ -310,6 +332,8 @@ test_dataset = [
         pad_image_to_square=True),
     dict(
         type=POPEDataset,
+        proxy_eval_dataset=dict(type=AnyResLLaVAProxyEvalDataset,
+                                image_grid_pinpoints=image_grid_pinpoints),
         data_file=[
             '/mnt/petrelfs/share_data/linzhihao/dataset/POPE/coco_pope_adversarial.json',
             '/mnt/petrelfs/share_data/linzhihao/dataset/POPE/coco_pope_popular.json',
@@ -319,7 +343,18 @@ test_dataset = [
         prompt_template=PROMPT_TEMPLATE.vicuna,
         tokenizer=tokenizer,
         image_processor=image_processor,
-        pad_image_to_square=True)
+        pad_image_to_square=True),
+    dict(
+        type=GQADataset,
+        proxy_eval_dataset=dict(type=AnyResLLaVAProxyEvalDataset,
+                                image_grid_pinpoints=image_grid_pinpoints),
+        question_file='/mnt/petrelfs/share_data/zhaoxiangyu/gqa_llava_eval/llava_gqa_testdev_balanced.jsonl',
+        gt_file='/mnt/petrelfs/share_data/zhaoxiangyu/gqa_llava_eval/testdev_balanced_questions.json',
+        image_folder='/mnt/petrelfs/share_data/basemodel/dataset/multimodality/gqa/images',
+        prompt_template=PROMPT_TEMPLATE.vicuna,
+        tokenizer=tokenizer,
+        image_processor=image_processor,
+        pad_image_to_square=True),
 ]
 
 # TODO: We are not currently using val_evaluator
@@ -330,7 +365,7 @@ val_dataloader = dict(
     drop_last=False,
     sampler=dict(type=DefaultSampler, shuffle=False),
     dataset=dict(type=ConcatDataset, datasets=val_dataset),
-    collate_fn=dict(type=mm_collate_fn, extra_collate_keys=['img_id']))
+    collate_fn=dict(type=mm_collate_fn, extra_collate_keys=['img_id', 'orig_size']))
 val_evaluator = dict()
 val_cfg = dict(type=ValLoop)
 
@@ -341,7 +376,7 @@ test_dataloader = dict(
     drop_last=False,
     sampler=dict(type=DefaultSampler, shuffle=False),
     dataset=dict(type=ConcatDataset, datasets=test_dataset),
-    collate_fn=dict(type=mm_collate_fn, extra_collate_keys=['img_id'])
+    collate_fn=dict(type=mm_collate_fn, extra_collate_keys=['img_id', 'orig_size'])
 )
 
 test_evaluator = val_evaluator

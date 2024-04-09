@@ -1,5 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from .llava import LLaVAModel
 from .sft import SupervisedFinetune
+from .anyres_llava import AnyResLLaVAModel
 
-__all__ = ['SupervisedFinetune', 'LLaVAModel']
+__all__ = ['SupervisedFinetune', 'LLaVAModel', 'AnyResLLaVAModel']
