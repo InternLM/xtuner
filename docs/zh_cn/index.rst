@@ -58,6 +58,8 @@
    training/custom_agent_dataset.md
    training/multi_modal_dataset.rst
    training/open_source_dataset.md
+   training/visualization.rst
+   training/accelerate.md
    
 .. toctree::
    :maxdepth: 2
