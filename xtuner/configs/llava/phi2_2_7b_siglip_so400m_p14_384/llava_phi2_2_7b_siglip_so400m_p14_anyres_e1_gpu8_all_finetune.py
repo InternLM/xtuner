@@ -27,7 +27,7 @@ from xtuner.dataset import AnyResLLaVAProxyEvalDataset
 llm_name_or_path = '/mnt/petrelfs/share_data/huanghaian/model/phi-2'
 visual_encoder_name_or_path = '/mnt/petrelfs/share_data/huanghaian/model/siglip-so400m-patch14-384'
 # Specify the pretrained pth
-pretrained_pth = 'work_dirs/llava_phi2_2_7b_siglip_so400m_p14_384_e1_gpu8_pretrain/iter_2181.pth'
+pretrained_pth = 'work_dirs/llava_phi2_2_7b_siglip_so400m_p14_anyres_e1_gpu8_pretrain/iter_2181.pth'
 
 # Data
 data_root = '/mnt/petrelfs/share_data/huanghaian/llava_data/'
@@ -99,7 +99,7 @@ model = dict(
 llava_dataset = dict(
     type=AnyResLLaVADataset,
     image_grid_pinpoints=image_grid_pinpoints,
-    offline_processed_text_folder='/mnt/petrelfs/huanghaian/code/xtuner/phi2_2_7b_llava_pretrain',
+    offline_processed_text_folder='/mnt/petrelfs/huanghaian/code/xtuner/phi2_2_7b_finetune',
     data_path=data_path,
     image_folder=image_folder,
     tokenizer=tokenizer,
