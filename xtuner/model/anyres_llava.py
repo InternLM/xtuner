@@ -56,7 +56,6 @@ class AnyResLLaVAModel(LLaVAModel):
                 depth=projector_depth)
         self.projector = ProjectorModel(projector_config).to(
             self.visual_encoder.dtype)
-        print(self.projector,'=======================================================')
 
         if self.freeze_llm:
             self.llm.requires_grad_(False)
@@ -193,7 +192,6 @@ class AnyResLLaVAModel(LLaVAModel):
         image_features = torch.split(image_features, split_sizes, dim=0)
 
         new_image_feature = []
-        # 由于进行了 token merge，因此 unpad 操作不再需要
         if self.token_merge_ratio == 1:
             for image_idx, image_feature in enumerate(image_features):
                 if image_feature.shape[0] > 1:
@@ -238,6 +236,7 @@ class AnyResLLaVAModel(LLaVAModel):
                             (image_feature, self.image_newline[None]), dim=0)
                 new_image_feature.append(image_feature)
         else:
+            # 由于进行了 token merge，unpad 操作不好弄，暂时不支持
             new_image_feature = []
             for image_idx, image_feature in enumerate(image_features):
                 if image_feature.shape[0] > 1:

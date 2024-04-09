@@ -338,6 +338,7 @@ def resize_and_pad_image(image, target_resolution):
     # Resize the image
     resized_image = image.resize((new_width, new_height))
 
+    # TODO: 应该是填充均值，而且后续应该考虑 padding
     new_image = Image.new('RGB', (target_width, target_height), (0, 0, 0))
     paste_x = (target_width - new_width) // 2
     paste_y = (target_height - new_height) // 2
@@ -384,6 +385,7 @@ def process_anyres_image(image, processor, possible_resolutions, patch_size, sho
 
     patches = divide_to_patches(image_padded, patch_size)
 
+    # 这里直接 resize，所以后续不用考虑 padding
     image_original_resize = image.resize((shortest_edge, shortest_edge))
 
     image_patches = [image_original_resize] + patches
