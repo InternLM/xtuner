@@ -65,11 +65,15 @@ def dispatch_llama_attn_forward(model, use_varlen_attn):
             if use_varlen_attn:
                 if print_flag:
                     print_log('dispatch llama varlen attn forward', 'current')
-                forward_func = llama_varlen_attn_forward_legacy if IS_LOW_VERSION_TRANSFORMERS else llama_varlen_attn_forward
+                forward_func = (
+                    llama_varlen_attn_forward_legacy if
+                    IS_LOW_VERSION_TRANSFORMERS else llama_varlen_attn_forward)
             else:
                 if print_flag:
                     print_log('dispatch llama attn forward', 'current')
-                forward_func = llama_attn_forward_legacy if IS_LOW_VERSION_TRANSFORMERS else llama_attn_forward
+                forward_func = (
+                    llama_attn_forward_legacy
+                    if IS_LOW_VERSION_TRANSFORMERS else llama_attn_forward)
             module.forward = types.MethodType(forward_func, module)
             print_flag = False
 
