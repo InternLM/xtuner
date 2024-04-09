@@ -12,6 +12,8 @@ from .utils import (LoadWoInit,
                     make_inputs_require_grad,
                     prepare_inputs_labels_for_multimodal)
 
+import torch.nn as nn
+
 
 class AnyResLLaVAModel(LLaVAModel):
 
@@ -108,8 +110,9 @@ class AnyResLLaVAModel(LLaVAModel):
         self.template = template
 
         self.token_merge_ratio = token_merge_ratio
-        self.image_newline = torch.randn(
-            self.llm.config.hidden_size, dtype=self.visual_encoder.dtype)
+        self.image_newline = nn.Parameter(
+            torch.randn(
+                self.llm.config.hidden_size, dtype=self.visual_encoder.dtype))
         self.image_grid_pinpoints = image_grid_pinpoints
         # self.mm_patch_merge_type = 'spatial_unpad'
         self.image_aspect_ratio = 'anyres'
