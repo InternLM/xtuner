@@ -122,7 +122,9 @@ train_cfg = dict(type=TrainLoop, max_epochs=max_epochs)
 #                           PART 5  Runtime                           #
 #######################################################################
 # Log the dialogue periodically during the training process, optional
-custom_hooks = [dict(type=ChatHook, prompts=['请介绍五个上海的景点'], every_n_iters=10)]
+custom_hooks = [
+    dict(type=ChatHook, prompts=['请介绍五个上海的景点'], every_n_iters=1000)
+]
 
 # configure default hooks
 default_hooks = dict(

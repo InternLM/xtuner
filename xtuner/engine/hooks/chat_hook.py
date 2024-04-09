@@ -34,6 +34,7 @@ class ChatHook(Hook):
         responses = model.batch_infer(self.evaluation_inputs,
                                       self.sample_params)
 
+        runner.logger.info(f'(ChatHook Generating...')
         for question, answer in zip(self.evaluation_inputs, responses):
             runner.logger.info(f'(ChatHook {position}){question}')
             runner.logger.info(f'(ChatHook {position}){answer}')

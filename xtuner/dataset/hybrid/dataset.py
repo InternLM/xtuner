@@ -341,7 +341,8 @@ class TextDataset(torch.utils.data.Dataset):
         the labels of the part that doesn't need to calculate loss set to -100.
 
         The labels don't need to be offset, it will be offset when the model
-        calculates loss, meaning the label of each token should be itself.
+        calculates loss, meaning the label of each token should be itself or
+        -100.
 
 
          Args:

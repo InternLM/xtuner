@@ -1,10 +1,13 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import os
+import shutil
 from collections import OrderedDict
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Literal, Optional, Union
 
 import torch
 import torch.distributed as dist
 from accelerate import load_checkpoint_in_model
+from mmengine import Config
 from peft import LoraConfig
 from torch import nn
 from torch.nn.utils.rnn import pad_sequence
@@ -12,7 +15,7 @@ from transformers import (GenerationConfig, PreTrainedModel,
                           PreTrainedTokenizer, PreTrainedTokenizerFast)
 
 from xtuner.chat.streamer import HFTextIteratorStreamer, HFTextStreamer
-from xtuner.model.utils import guess_load_checkpoint
+from xtuner.registry import BUILDER
 from xtuner.tools.utils import get_stop_criteria
 from xtuner.types import ChatMessages, ChatTemplate, SampleParams
 from xtuner.utils import DEFAULT_PAD_TOKEN_INDEX, IGNORE_INDEX
@@ -100,32 +103,6 @@ class TextFinetune(BaseAlgorithm):
                 'training. If you want to get predictions or chat, please '
                 "directly use `llm`'s forward.")
 
-    def _compute_postion_ids(self, data):
-        input_ids = data['input_ids']
-        bs, tokens = input_ids.shape
-        if self.use_varlen_attn:
-            # TODO(pppppM) support bs>1 when use varlen attn
-            assert bs == 1
-
-            cumulative_len = data['cumulative_len'][0]
-            max_seqlen = (cumulative_len[1:] - cumulative_len[:-1]).max()
-
-            position_ids = []
-            for i in range(1, len(cumulative_len)):
-                chunk_tokens = cumulative_len[i] - cumulative_len[i - 1]
-                position_ids.append(torch.arange(chunk_tokens))
-            position_ids = torch.cat(position_ids, dim=0).unsqueeze(0)
-
-            from mmengine import MessageHub
-            rank = dist.get_rank()
-            message_hub = MessageHub.get_instance('varlen_attn_args')
-            message_hub.update_info(f'cumulative_len_rank_{rank}',
-                                    cumulative_len)
-            message_hub.update_info(f'max_seqlen_rank_{rank}', max_seqlen)
-        else:
-
-            position_ids = torch.arange(0, tokens).unsqueeze(0).repeat(bs, 1)
-
     def compute_loss(self, data):
 
         input_ids = data['input_ids']
@@ -133,6 +110,9 @@ class TextFinetune(BaseAlgorithm):
         attention_mask = data['attention_mask']
 
         position_ids = self._compute_postion_ids(data)
+
+        if self.use_varlen_attn:
+            self._send_msg_to_dispatched_model(data)
 
         outputs = self.llm(
             input_ids=input_ids,
@@ -142,6 +122,37 @@ class TextFinetune(BaseAlgorithm):
 
         loss_dict = {'loss': outputs.loss}
         return loss_dict
+
+    def _compute_postion_ids(self, data):
+        input_ids = data['input_ids']
+        bs, tokens = input_ids.shape
+        if self.use_varlen_attn:
+            # TODO(pppppM) support bs>1 when use varlen attn
+            assert bs == 1
+
+            cumulative_len = data['cumulative_len'][0]
+            position_ids = []
+            for i in range(1, len(cumulative_len)):
+                chunk_tokens = cumulative_len[i] - cumulative_len[i - 1]
+                position_ids.append(torch.arange(chunk_tokens))
+            position_ids = torch.cat(position_ids, dim=0).unsqueeze(0)
+        else:
+
+            position_ids = torch.arange(0, tokens).unsqueeze(0).repeat(bs, 1)
+        return position_ids
+
+    def _send_msg_to_dispatched_model(self, data):
+
+        # TODO(pppppM) support bs>1 when use varlen attn
+        assert len(data['cumulative_len']) == 1
+        cumulative_len = data['cumulative_len'][0]
+        max_seqlen = (cumulative_len[1:] - cumulative_len[:-1]).max()
+
+        from mmengine import MessageHub
+        rank = dist.get_rank()
+        message_hub = MessageHub.get_instance('varlen_attn_args')
+        message_hub.update_info(f'cumulative_len_rank_{rank}', cumulative_len)
+        message_hub.update_info(f'max_seqlen_rank_{rank}', max_seqlen)
 
     def state_dict(self, *args, **kwargs):
         state_dict = super().state_dict(*args, **kwargs)
@@ -225,27 +236,49 @@ class TextFinetune(BaseAlgorithm):
             responses.append(self.chat(p, sample_params))
         return responses
 
-    def save_checkpoint(self,
-                        save_dir: str,
-                        to_hub: bool = True) -> 'TextFinetune':
+    def save_pretrained(self, save_dir: str, config: str) -> 'TextFinetune':
 
-        if to_hub:
-            self.llm.save_pretrained(save_dir, safe_serialization=False)
+        self.llm.save_pretrained(save_dir, safe_serialization=False)
+        self.tokenizer.save_pretrained(save_dir)
+
+        shutil.copy(config, os.path.join(save_dir, 'xtuner_config.py'))
+
+    @classmethod
+    def from_pretrained(
+            cls, checkpoint: str, config: str,
+            from_hub: Literal['huggingface', 'modelscope']) -> 'TextFinetune':
+        checkpoint = download_model_from_hub(checkpoint, from_hub)
+
+        llm_conf = os.path.join(checkpoint, 'config.json')
+        xtunr_conf = os.path.join(checkpoint, 'xtuner_config.py')
+        tok_conf = os.path.join(checkpoint, 'tokenizer_config.json')
+
+        has_llm = os.path.exists(llm_conf)
+        has_conf = os.path.exists(xtunr_conf)
+        has_tok = os.path.exists(tok_conf)
+
+        if config and has_conf:
+            # TODO add warning
+            config = config
+        elif config and not has_conf:
+            config = config
+        elif not config and has_conf:
+            config = xtunr_conf
         else:
-            raise NotImplementedError
+            raise RuntimeError
 
-    def load_checkpoint(self,
-                        ckpt_dir: str,
-                        from_hub: bool = False) -> BaseAlgorithm:
+        config = Config.fromfile(config)
 
-        if from_hub:
-            ckpt_dir = download_model_from_hub(ckpt_dir, from_hub)
+        if has_tok:
+            config.model.tokenizer.pretrained_model_name_or_path = checkpoint
 
-            load_checkpoint_in_model(self.llm, ckpt_dir)
+        if has_llm:
+            config.model.llm.pretrained_model_name_or_path = checkpoint
 
-        else:
-            state_dict = guess_load_checkpoint(ckpt_dir)
-            self.load_state_dict(state_dict)
+        model: TextFinetune = BUILDER.build(config.model)
+        load_checkpoint_in_model(model.llm, checkpoint)
+
+        return model
 
     @classmethod
     def dataloader_collate_fn(cls, instances):

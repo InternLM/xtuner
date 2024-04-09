@@ -36,10 +36,10 @@ class _PackDataset(torch.utils.data.Dataset):
 
         # Shuffle the order of the original dataset
         # The packing will proceed according to the order after shuffle.
-        # For example,
-        #   shfl_inds = [3, 1, 2, 0],
-        #   self._ori_lens[3] + self._ori_lens[1] = max_length,
-        #   self._ori_lens[2] + self._ori_lens[0] = max_length,
+        # Assume the following conditions hold:
+        #   (1) shfl_inds = [3, 1, 2, 0]
+        #   (2) self._ori_lens[3] + self._ori_lens[1] = max_length
+        #   (3) self._ori_lens[2] + self._ori_lens[0] = max_length
         # Ultimately, dataset[3] and dataset[1] will be combined into a new
         # data, and dataset[2] and dataset[0] will be combined into a new data.
         inds = [i for i in range(len(self.dataset))]

@@ -1,7 +1,9 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-from abc import abstractclassmethod, abstractmethod
-from typing import Dict, List, Optional, Sequence, Union
+import logging
+from abc import abstractclassmethod
+from typing import Dict, List, Literal, Optional, Sequence, Union
 
+from mmengine import print_log
 from mmengine.model import BaseModel
 
 from xtuner.chat.streamer import SteamerType
@@ -33,62 +35,6 @@ class BaseAlgorithm(BaseModel, ChatBackendProtocol):
         model initialization, you can call the `enable_init_weights()`
         provided by the base class and implement the corresponding
         initialization logic in `init_weights()`
-
-    To unify training and inference, this class includes the following seven
-    abstract interfaces:
-
-    1. `dataloader_collate_fn`
-    This is one of the arguments of `torch.utils.data.Dataloader`, mainly used
-    for data preprocessing.
-    To clearly illustrate the data format of each algorithm's input, XTuner
-    makes `collate_fn` a mandatory method that each algorithm must implement.
-    It should be noted that this method is a `classmethod`, which can be
-    called without instantiating an object.
-
-    2. `gradient_checkpointing_enable`:
-    This is a memory-reducing technique that clears activations of specific
-    layers and recomputes them during a backward pass. When developing a new
-    algorithm, developers should implement the logic of enabling gradient
-    checkpointing according to the used model.
-    If you do not want to use this feature, you can also define an empty
-    function, but this way can consume a large amount of memory when training
-    LLM models.
-
-    3. `save_checkpoint`
-    This defines how to save the weights of the trained model, supporting both
-    HuggingFace format (to_hub=True) and ordinary PTH format (to_hub=False).
-    If the algorithm only need one format, then the other format should throw
-    a NotImplementedError.
-    Please note this method does not change the format of checkpoints saved
-    during the training process as these checkpoints are more complex
-    including optimizer states.
-    If you want to save to the checkpoint in this format, you need to load the
-    model and specifically call this method.
-
-    4. `load_checkpoint`
-    This defines how to load the checkpoints saved by the `save_checkpoint`
-    method, supporting both HuggingFace format (from_hub=True) and normal
-    PTH format (from_hub=False).
-    This method will not be called during the training process, but it will be
-    called when `AutoXTuner.from_pretrained` is used. If this method is not
-    implemented, the model cannot be automatically loaded.
-
-    5. `chat`
-    When developing a new algorithm, you must define how to converse with a
-    trained model, whether for accuracy testing or model deployment. To ensure
-    generality, the interface arguments should follow the
-    `xtuern.types.ChatBackendProtocol`.
-    If there's no need for XTuner's toolchain, you can directly throw a
-    `NotImplementedError`.
-
-    6. `get_logits`
-    Obtain the logits corresponding to a `messages`; if there's no need for
-    related functions that require logits (visualization, API server, etc.),
-    you can directly throw a `NotImplementedError`.
-
-    7. `batch_infer`
-    Define how a trained model handles batch data. If the related function is
-    not needed, you can directly throw a `NotImplementedError`.
     """
 
     def __init__(self) -> None:
@@ -113,15 +59,31 @@ class BaseAlgorithm(BaseModel, ChatBackendProtocol):
         weight."""
         self._is_init = False
 
-    @abstractmethod
     def gradient_checkpointing_enable(self) -> None:
-        """Define how to enable gradient checkpointing."""
+        """Define how to enable gradient checkpointing.
 
-    @abstractmethod
+        Note:
+            When overloading this method, correspondingly overload
+            `gradient_checkpointing_disable`.
+        """
+
+        msg = (f'{type(self)} has not implemented '
+               '`gradient_checkpoint_enable()`, which may consume a lot of '
+               'GPU memory. If you want to reduce GPU memory usage, please '
+               f'override `gradient_checkpoint_enable()` in {type(self)}.')
+        print_log(msg, logger='current', level=logging.WARNING)
+
     def gradient_checkpointing_disable(self) -> None:
-        """Define how to disable gradient checkpointing."""
+        """Define how to disable gradient checkpointing.
 
-    @abstractmethod
+        Note:
+            When overloading this method, correspondingly overload
+            `gradient_checkpointing_enable`.
+        """
+        msg = (f'{type(self)} has not implemented '
+               '`gradient_checkpoint_disable()`.')
+        print_log(msg, logger='current', level=logging.WARNING)
+
     def chat(self,
              prompt_or_messages: Union[str, BaseMessages],
              sample_params: Optional[SampleParams] = None,
@@ -146,6 +108,12 @@ class BaseAlgorithm(BaseModel, ChatBackendProtocol):
         Returns:
             The response of the model to the input messages should be a string.
         """
+
+        raise NotImplementedError(f'{type(self)} has not implemented the '
+                                  '`chat` interface. Please refer to '
+                                  'the interface conventions in '
+                                  '`ChatBackendProtocol` and implement the '
+                                  f'`chat` interface in {type(self)}')
 
     def batch_infer(self,
                     prompt_or_messages_list: Union[str, BaseMessages],
@@ -185,20 +153,81 @@ class BaseAlgorithm(BaseModel, ChatBackendProtocol):
                                   '`ChatBackendProtocol` and implement the '
                                   f'`batch_infer` interface in {type(self)}')
 
-    @abstractmethod
-    def save_checkpoint(self, save_dir: str, to_hub: bool = True) -> None:
-        """Define how to save a Checkpoint.
+    def save_pretrained(self, save_dir: str, config: str):
+        """Define how to save a model that can be loaded with `from_pretrained`
+
+        Note:
+            Unlike checkpoints, `save pretrained` does not require the saving
+            of information such as the optimizer's state.
+
+        Note:
+            The `save_pretrained` and `from_pretrained` depend on each other,
+            there are no strict requirements, they just need to be mutually
+            compatible.
+
+        Note:
+            `save_pretrained` and `from_pretrained` are meant to unify the
+            interface, making it convenient to automatically load the model
+            through `AutoXTuner.from_pretrained`. If these methods are not
+            implemented, it won't affect the training-related features. If
+            this feature isn't needed, there is no need to override this
+            method.
 
         Args:
-            save_dir (str): Directory where the checkpoint is saved".
-            to_hub (bool):
-                If True, the checkpoint should be saved in the
-                Huggingface format.
-                If False, the checkpoint should be saved in the standard
-                PyTorch .pth format. Default is True.
+            save_dir (str): Directory where the model is saved.
+            config (str): The path of the config file used during training.
         """
 
-    def load_training_checkpoint(self, ckpt_dir: str):
+        raise NotImplementedError(f'{type(self)} has not implemented the '
+                                  '`save_pretrained` interface. Please refer '
+                                  'to the interface conventions in '
+                                  '`BaseAlgorithm` and implement the '
+                                  '`save_pretrained` interface in '
+                                  f'{type(self)}')
+
+    @classmethod
+    def from_pretrained(
+        self,
+        model_path_or_id: str,
+        config: Optional[str] = None,
+        from_hub: Literal['huggingface',
+                          'modelscope'] = 'huggingface') -> None:
+        """Define how to load a model saved with `save_pretrained`.
+
+        Note:
+            The `save_pretrained` and `from_pretrained` depend on each other,
+            there are no strict requirements, they just need to be mutually
+            compatible.
+
+        Note:
+            `save_pretrained` and `from_pretrained` are meant to unify the
+            interface, making it convenient to automatically load the model
+            through `AutoXTuner.from_pretrained`. If these methods are not
+            implemented, it won't affect the training-related features. If
+            this feature isn't needed, there is no need to override this
+            method.
+
+        Args:
+            model_path_or_id (str): The model id or model path.
+            config (str | None): The config path. Default is None.
+            from_hub (str): The model hosting hub, modelscope, or huggingface.
+                Default is huggingface.
+
+        Raises:
+            RuntimeError:
+                When model_path_or_id does not contain the xtuner's config
+                file and the input config is None, a RuntimeError should be
+                thrown.
+        """
+
+        raise NotImplementedError(f'{type(self)} has not implemented the '
+                                  '`from_pretrained` interface. Please refer '
+                                  'to the interface conventions in '
+                                  '`BaseAlgorithm` and implement the '
+                                  '`from_pretrained` interface in '
+                                  f'{type(self)}')
+
+    def load_checkpoint(self, checkpoint: str):
         """Load the checkpoint in the XTuner training process.
 
         Because different parallel strategies (Pytorch DDP or DeepSpeed
@@ -216,38 +245,8 @@ class BaseAlgorithm(BaseModel, ChatBackendProtocol):
             save a checkpoint that only includes the model weights using
             `save_checkpoint`.
         """
-        state_dict = guess_load_checkpoint(ckpt_dir)
+        state_dict = guess_load_checkpoint(checkpoint)
         self.load_state_dict(state_dict)
-
-    @abstractmethod
-    def load_checkpoint(self,
-                        ckpt_dir: str,
-                        from_hub: bool = False) -> 'BaseAlgorithm':
-        """Define how to load a checkpoint saved by `save_checkpoint`.
-
-        Args:
-            ckpt_dir (str):
-                The directory where the checkpoint file is located.
-            from_hub (bool):
-                If True, the checkpoint will be loaded in the storage format
-                used when to_hub is True in `save_checkpoint`.
-                If False, the checkpoint will be loaded in the storage format
-                used when to_hub is False in `save_checkpoint`.
-
-        Note:
-            When `from_hub` is set to False, it's necessary to be compatible
-            with the checkpoint generated during XTuner training. To
-            facilitate development, a `load_training_checkpoint` interface is
-            provided in the base class.
-
-        Note:
-            It is important to note that during the training process, the
-            checkpoint saves the optimizer state, which can result in file
-            sizes multiple times larger than the model weights. To facilitate
-            delivery or share the trained model with the community, you should
-            save a checkpoint that only includes the model weights using
-            `save_checkpoint`.
-        """
 
     @abstractclassmethod
     def dataloader_collate_fn(cls, instances: Sequence) -> Dict:
@@ -262,6 +261,17 @@ class BaseAlgorithm(BaseModel, ChatBackendProtocol):
         training-relevant content, such as `input_ids` and `labels`;
         `data_samples` can be some record-type data, convenient for logging or
         visual analysis, such as the prompt of the original data, etc.
+
+        Note:
+            This is one of the arguments of `torch.utils.data.Dataloader`,
+            mainly used for data preprocessing.
+
+            To clearly illustrate the data format of each algorithm's input,
+            XTuner makes `collate_fn` as an abstract method that each
+            algorithm must implement.
+
+            It should be noted that this method is a `classmethod`, which can
+            be called without instantiating an object.
 
         Args:
             instances: The original data fetched from the dataloader. The

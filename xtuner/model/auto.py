@@ -1,8 +1,9 @@
 import os
-from typing import Dict, Optional, Union
+from typing import Dict, Literal, Optional, Union
 
 import torch
 from mmengine import Config, print_log
+from mmengine.config.lazy import LazyAttr
 from mmengine.runner import find_latest_checkpoint
 from transformers import AutoConfig as HfAutoConfig
 from transformers import AutoModelForCausalLM as HfAutoModelForCausalLM
@@ -31,7 +32,7 @@ def download_model_from_hub(model_name_or_path, from_hub: str = 'huggingface'):
 class AutoXTunerModel():
 
     @classmethod
-    def from_config(self, config: Union[str, Dict]):
+    def from_config(self, config: str):
         if isinstance(config, str):
             config = Config.fromfile(config)
         model: BaseAlgorithm = BUILDER.build(config.model)
@@ -53,38 +54,36 @@ class AutoXTunerModel():
         print_log(f'Auto loaded from {checkpoint}.', logger='current')
 
     @classmethod
-    def from_pretrained(cls,
-                        checkpoint: str,
-                        config: Optional[str] = None,
-                        from_hub: bool = False):
-        config = Config.fromfile(config)
+    def from_pretrained(
+        cls,
+        checkpoint: str,
+        config: Optional[str] = None,
+        from_hub: Literal['huggingface', 'modelscope'] = 'huggingface'
+    ) -> BaseAlgorithm:
+        checkpoint = download_model_from_hub(checkpoint, from_hub)
+        xtunr_conf = os.path.join(checkpoint, 'xtuner_config.py')
+        has_conf = os.path.exists(xtunr_conf)
 
-        # Huggingface format
-        if from_hub:
-            checkpoint = download_model_from_hub(checkpoint, from_hub)
-
-            if os.path.exists(os.path.join(checkpoint, 'config.py')):
-                config = Config.fromfile(os.path.join(checkpoint, 'config.py'))
-            elif config is not None:
-                config = config = Config.fromfile(config)
-            else:
-                raise RuntimeError
-
-            model: BaseAlgorithm = BUILDER.build(config.model)
-            model.load_checkpoint(checkpoint, from_hub)
-            print_log(f'Auto loaded from {checkpoint}.', logger='current')
-
-        elif checkpoint.endswith('.pth'):
-            config = Config.fromfile(config)
-            model: BaseAlgorithm = BUILDER.build(config.model)
-            model.load_checkpoint(checkpoint)
-            print_log(f'Auto loaded from {checkpoint}.', logger='current')
-        elif os.path.isdir(checkpoint):
-            model = cls._from_mmengine_work_dir(checkpoint)
+        if config and has_conf:
+            # TODO add warning
+            conf_path = config
+        elif config and not has_conf:
+            conf_path = config
+        elif not config and has_conf:
+            conf_path = xtunr_conf
         else:
             raise RuntimeError
 
-        return model
+        config = Config.fromfile(conf_path)
+
+        model_cls = config.model.type
+        if isinstance(model_cls, LazyAttr):
+            model_cls = model_cls.build()
+
+        if not issubclass(model_cls, BaseAlgorithm):
+            raise TypeError
+
+        return model_cls.from_pretrained(checkpoint, conf_path, from_hub)
 
 
 class AutoModelForCausalLM:
@@ -150,45 +149,12 @@ class AutoModelForCausalLM:
 
 if __name__ == '__main__':
 
-    from transformers import AutoTokenizer
-
-    from xtuner.model import TextFinetune
-    from xtuner.types import ChatMessages, ChatTemplate
-
-    model_name = 'internlm/internlm2-chat-1_8b'
-
-    config = dict(
-        type=TextFinetune,
-        tokenizer=dict(
-            type=AutoTokenizer.from_pretrained,
-            pretrained_model_name_or_path=model_name,
-            trust_remote_code=True,
-            padding_side='right'),
-        chat_template=dict(
-            type=ChatTemplate,
-            system='<|im_start|>system\n{system}<|im_end|>\n',
-            user='<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n',
-            assistant='{assistant}<|im_end|>\n',
-            stop_words=['<|im_end|>']),
-        llm=dict(
-            type=AutoModelForCausalLM.from_pretrained,
-            pretrained_model_name_or_path=model_name,
-            trust_remote_code=True))
-
+    config = 'xtuner/configs/internlm/internlm2_chat_1_8b/example.py'
     model = AutoXTunerModel.from_config(config)
-
-    data = {
-        'messages': [
-            {
-                'role': 'user',
-                'content': 'hello'
-            },
-        ]
-    }
-
-    messages = ChatMessages.from_dict(data)
-
+    model.save_pretrained('test_saved', config)
     model.cuda()
-    response = model.chat(messages)
+    print(model.chat('Hello'))
 
-    print(response)
+    model = AutoXTunerModel.from_pretrained('test_saved')
+    model.cuda()
+    print(model.chat('Hello'))
