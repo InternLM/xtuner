@@ -1,8 +1,8 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-import torch
 from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
                             LoggerHook, ParamSchedulerHook)
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR, LinearLR
+from peft import LoraConfig
 from torch.optim import AdamW
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           CLIPImageProcessor, CLIPVisionModel)
@@ -20,10 +20,10 @@ from xtuner.utils import PROMPT_TEMPLATE
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-llm_name_or_path = 'lmsys/vicuna-13b-v1.5'
+llm_name_or_path = 'lmsys/vicuna-7b-v1.5'
 visual_encoder_name_or_path = 'openai/clip-vit-large-patch14-336'
 # Specify the pretrained pth
-pretrained_pth = './work_dirs/llava_vicuna_13b_v15_clip_vit_large_p14_336_e1_gpu8_pretrain/iter_2181.pth'  # noqa: E501
+pretrained_pth = './work_dirs/llava_v15_7b_pretrain/iter_2181.pth'
 
 # Data
 data_root = './data/llava_data/'
@@ -38,7 +38,7 @@ accumulative_counts = 1
 dataloader_num_workers = 0
 max_epochs = 1
 optim_type = AdamW
-lr = 2e-5
+lr = 2e-4
 betas = (0.9, 0.999)
 weight_decay = 0
 max_norm = 1  # grad clip
@@ -76,8 +76,14 @@ model = dict(
     llm=dict(
         type=AutoModelForCausalLM.from_pretrained,
         pretrained_model_name_or_path=llm_name_or_path,
-        trust_remote_code=True,
-        torch_dtype=torch.float32),
+        trust_remote_code=True),
+    llm_lora=dict(
+        type=LoraConfig,
+        r=128,
+        lora_alpha=256,
+        lora_dropout=0.05,
+        bias='none',
+        task_type='CAUSAL_LM'),
     visual_encoder=dict(
         type=CLIPVisionModel.from_pretrained,
         pretrained_model_name_or_path=visual_encoder_name_or_path))

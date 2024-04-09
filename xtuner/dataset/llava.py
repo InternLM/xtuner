@@ -1,10 +1,12 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import json
+import logging
 import os
 
 import torch
 from datasets import Dataset as HFDataset
-from datasets import DatasetDict
+from datasets import DatasetDict, load_from_disk
+from mmengine import print_log
 from mmengine.config import Config, ConfigDict
 from PIL import Image
 from torch.utils.data import Dataset
@@ -17,10 +19,11 @@ from .utils import expand2square
 class LLaVADataset(Dataset):
 
     def __init__(self,
-                 data_path,
                  image_folder,
-                 tokenizer,
                  image_processor,
+                 data_path=None,
+                 tokenizer=None,
+                 offline_processed_text_folder=None,
                  max_dataset_length=None,
                  dataset_map_fn=None,
                  template_map_fn=None,
@@ -28,22 +31,35 @@ class LLaVADataset(Dataset):
                  pad_image_to_square=False):
         super().__init__()
 
-        json_data = json.load(open(data_path))
-        for idx in range(len(json_data)):
-            if isinstance(json_data[idx]['id'], int):
-                json_data[idx]['id'] = str(json_data[idx]['id'])
-        json_data = DatasetDict({'train': HFDataset.from_list(json_data)})
-        self.text_data = process_hf_dataset(
-            dataset=json_data,
-            tokenizer=tokenizer,
-            max_length=max_length,
-            dataset_map_fn=dataset_map_fn,
-            template_map_fn=template_map_fn,
-            split='train',
-            max_dataset_length=max_dataset_length,
-            remove_unused_columns=False,
-            pack_to_max_length=False,
-            with_image_token=True)
+        assert offline_processed_text_folder or (data_path and tokenizer)
+        if offline_processed_text_folder and data_path:
+            print_log(
+                'Both `offline_processed_text_folder` and '
+                '`data_path` are set, and we load dataset from'
+                '`offline_processed_text_folder` '
+                f'({offline_processed_text_folder})',
+                logger='current',
+                level=logging.WARNING)
+
+        if offline_processed_text_folder is not None:
+            self.text_data = load_from_disk(offline_processed_text_folder)
+        else:
+            json_data = json.load(open(data_path))
+            for idx in range(len(json_data)):
+                if isinstance(json_data[idx]['id'], int):
+                    json_data[idx]['id'] = str(json_data[idx]['id'])
+            json_data = DatasetDict({'train': HFDataset.from_list(json_data)})
+            self.text_data = process_hf_dataset(
+                dataset=json_data,
+                tokenizer=tokenizer,
+                max_length=max_length,
+                dataset_map_fn=dataset_map_fn,
+                template_map_fn=template_map_fn,
+                split='train',
+                max_dataset_length=max_dataset_length,
+                remove_unused_columns=False,
+                pack_to_max_length=False,
+                with_image_token=True)
 
         self.image_folder = image_folder
         if isinstance(image_processor, dict) or isinstance(
@@ -82,7 +98,10 @@ class LLaVADataset(Dataset):
                 image, return_tensors='pt')['pixel_values'][0]
             data_dict['pixel_values'] = image
         else:
-            crop_size = self.image_processor.crop_size
+            if hasattr(self.image_processor, 'crop_size'):
+                crop_size = self.image_processor.crop_size
+            else:
+                crop_size = self.image_processor.size
             data_dict['pixel_values'] = torch.zeros(3, crop_size['height'],
                                                     crop_size['width'])
         return data_dict

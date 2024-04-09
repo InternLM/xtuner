@@ -19,6 +19,7 @@ from xtuner.engine.hooks import (DatasetInfoHook, EvaluateChatHook,
                                  VarlenAttnArgsToMessageHubHook)
 from xtuner.engine.runner import TrainLoop
 from xtuner.model import SupervisedFinetune
+from xtuner.parallel.sequence import SequenceParallelSampler
 from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
 
 #######################################################################
@@ -36,9 +37,13 @@ prompt_template = PROMPT_TEMPLATE.internlm2_chat
 max_length = 2048
 pack_to_max_length = True
 
+# parallel
+sequence_parallel_size = 1
+
 # Scheduler & Optimizer
 batch_size = 1  # per_device
 accumulative_counts = 16
+accumulative_counts *= sequence_parallel_size
 dataloader_num_workers = 0
 max_epochs = 3
 optim_type = AdamW
@@ -129,11 +134,13 @@ law_reference_data = dict(
 train_dataset = dict(
     type=ConcatDataset, datasets=[crime_kg_assitant, law_reference_data])
 
+sampler = SequenceParallelSampler \
+    if sequence_parallel_size > 1 else DefaultSampler
 train_dataloader = dict(
     batch_size=batch_size,
     num_workers=dataloader_num_workers,
     dataset=train_dataset,
-    sampler=dict(type=DefaultSampler, shuffle=True),
+    sampler=dict(type=sampler, shuffle=True),
     collate_fn=dict(type=default_collate_fn, use_varlen_attn=use_varlen_attn))
 
 #######################################################################

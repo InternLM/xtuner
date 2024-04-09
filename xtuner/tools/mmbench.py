@@ -401,7 +401,7 @@ def main():
         print('=======================================================')
 
         args_path = osp.join(save_dir, 'args.json')
-        with open(args_path, 'w') as f:
+        with open(args_path, 'w', encoding='utf-8') as f:
             json.dump(args.__dict__, f, indent=2)
 
     results_xlsx_path = osp.join(save_dir, 'mmbench_result.xlsx')
@@ -445,7 +445,7 @@ def main():
             image, tuple(int(x * 255) for x in image_processor.image_mean))
         image = image_processor.preprocess(
             image, return_tensors='pt')['pixel_values'][0]
-        image = image.cuda().unsqueeze(0)
+        image = image.cuda().unsqueeze(0).to(visual_encoder.dtype)
         visual_outputs = visual_encoder(image, output_hidden_states=True)
         pixel_values = projector(
             visual_outputs.hidden_states[args.visual_select_layer][:, 1:])
@@ -499,7 +499,7 @@ def main():
 
         if dataset.split == 'dev':
             results_dict = dataset.eval_result(results_df, show=True)
-            with open(results_json_path, 'w') as f:
+            with open(results_json_path, 'w', encoding='utf-8') as f:
                 json.dump(results_dict, f, indent=2)
         else:
             print('All done!')

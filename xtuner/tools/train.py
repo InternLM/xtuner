@@ -19,6 +19,7 @@ from transformers import TrainingArguments
 from xtuner.configs import cfgs_name_path
 from xtuner.dataset.collate_fns import default_collate_fn
 from xtuner.model.modules import dispatch_modules
+from xtuner.model.modules.dispatch import SUPPORT_FLASH2
 from xtuner.model.utils import LoadWoInit, find_all_linear_names, traverse_dict
 from xtuner.registry import BUILDER, MAP_FUNC
 from xtuner.tools.utils import (auto_dtype_of_deepspeed_config,
@@ -76,6 +77,35 @@ def register_function(cfg_dict):
             register_function(value)
 
 
+def check_cfg(cfg):
+    if getattr(cfg, 'use_varlen_attn',
+               False) and cfg.train_dataloader.batch_size > 1:
+        raise NotImplementedError(
+            f'If utilizing varlen attention, the batch size should be'
+            f' set to 1, but got {cfg.train_dataloader.batch_size}')
+
+    if getattr(cfg, 'use_varlen_attn', False) and (not getattr(
+            cfg.train_dataloader.dataset, 'pack_to_max_length', True)):
+        raise AssertionError(
+            'When using varlen attention, `pack_to_max_length`'
+            'should be set to True, but got use_varlen_attn = True and '
+            'pack_to_max_length = False.')
+
+    if getattr(cfg, 'use_varlen_attn', False):
+        sequence_parallel = getattr(cfg, 'sequence_parallel', 1)
+        max_length = getattr(cfg.train_dataloader.dataset, 'max_length', None)
+        if max_length is not None:
+            assert max_length % sequence_parallel == 0, \
+                ('When using varlen attention, `max_length` should be evenly '
+                 'divided by sequence parallel world size, but got '
+                 f'max_length = {max_length} and sequence_parallel = '
+                 f'{sequence_parallel}')
+
+    if getattr(cfg, 'sequence_parallel_size', 1) > 1:
+        assert SUPPORT_FLASH2, ('`flash_attn` is required if you want to use '
+                                'sequence parallel.')
+
+
 def main():
     args = parse_args()
 
@@ -95,6 +125,8 @@ def main():
     # register FunctionType object in cfg to `MAP_FUNC` Registry and
     # change these FunctionType object to str
     register_function(cfg._cfg_dict)
+
+    check_cfg(cfg)
 
     if cfg.get('framework', 'mmengine').lower() == 'huggingface':
         # set default training_args
@@ -277,7 +309,10 @@ def main():
                     gradient_accumulation_steps=grad_accum,
                     train_micro_batch_size_per_gpu=train_bs,
                     gradient_clipping=grad_clip,
-                    exclude_frozen_parameters=exclude_frozen_parameters)
+                    exclude_frozen_parameters=exclude_frozen_parameters,
+                    sequence_parallel_size=getattr(cfg,
+                                                   'sequence_parallel_size',
+                                                   1))
                 cfg.__setitem__('strategy', strategy)
                 optim_wrapper = dict(
                     type='DeepSpeedOptimWrapper',
