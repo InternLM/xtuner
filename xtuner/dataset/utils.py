@@ -75,7 +75,7 @@ def encode_fn(example,
         assert input_ids_with_output
 
     input_ids, labels = [], []
-    next_needs_bos_token = False
+    next_needs_bos_token = True
     for single_turn_conversation in example['conversation']:
         input = single_turn_conversation['input']
         if DEFAULT_IMAGE_TOKEN in input and with_image_token:
