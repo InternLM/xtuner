@@ -169,7 +169,7 @@ class AnyResLLaVAModel(LLaVAModel):
 
         # b*n, 27*27, d
         visual_outputs = self.visual_encoder(
-            concat_images, output_hidden_states=True).to(self.visual_encoder.dtype)
+            concat_images.to(self.visual_encoder.dtype), output_hidden_states=True)
         if type(self.visual_encoder).__name__ == 'CLIPVisionModel':
             visual_outputs = visual_outputs.hidden_states[self.visual_select_layer][:, 1:]
         elif type(self.visual_encoder).__name__ == 'SiglipVisionModel':
