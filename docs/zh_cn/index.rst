@@ -58,8 +58,18 @@
    training/custom_agent_dataset.md
    training/multi_modal_dataset.rst
    training/open_source_dataset.md
+   
+.. toctree::
+   :maxdepth: 2
+   :caption: 加速训练
+
+   accelerate/deepspeed.rst
+   accelerate/pack_to_max_length.rst
+   accelerate/flash_attn.rst
+   accelerate/varlen_flash_attn.rst
+   accelerate/hyper_parameters.rst
+   accelerate/benchmark.rst
    training/train_on_large_scale_dataset.rst
-   training/accelerate.md
 
 .. toctree::
    :maxdepth: 2
