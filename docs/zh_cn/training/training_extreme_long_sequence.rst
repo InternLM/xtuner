@@ -14,8 +14,8 @@
 
 XTuner 的序列并行算法具有以下关键特性：
 
-- 支持全量训练 **超过百万个 tokens ** 的超长序列
-- 支持 **百 B 级 **模型训练：XTuner 的序列并行不仅支持长序列训练，还可结合 ZeRO3 显存优化策略训练大尺寸模型
+- 支持全量训练 **超过百万个 tokens** 的超长序列
+- 支持 **百 B 级** 模型训练：XTuner 的序列并行不仅支持长序列训练，还可结合 ZeRO3 显存优化策略训练大尺寸模型
 - 开箱即用：可直接训练 Transformers 算法库内和 HF Hub 上的模型
 - 完全通用的序列并行 API 抽象
 
@@ -26,7 +26,11 @@ XTuner 的序列并行算法具有以下关键特性：
 
 尽管序列长度的重要性不断增长，XTuner 现有的显存优化策略（如 ZeRO 系列），却不足以解决大模型、长序列训练问题。如表 1 所示，随着序列长度增大，训练过程中的显存开销主要来自激活值而非模型状态，因此使用 ZeRO-3 显存优化策略训练超长序列时，单纯增加 GPU 数量无法解决超长序列带来的 OOM 问题。
 
-**表 1 不同序列长度时，使用 ZeRO-3 训练 128k 上下文 yi-34B 模型的训练情况**
+.. raw:: html
+
+    <p align="center">
+        <b>表 1 不同序列长度时，使用 ZeRO-3 训练 128k 上下文 yi-34B 模型的训练情况</b>
+    </p>
 
 .. list-table::
   :widths: 25 15 10 15 25
@@ -61,8 +65,14 @@ XTuner 的序列并行算法具有以下关键特性：
 
 为解决长序列训练过程中的显存问题，Megatron-LM 团队和 DeepSpeed 团队分别提出了两种序列并行算法，通过对长序列进行切分的方法来降低单 GPU 上计算的序列长度。XTuner 中的序列并行设计思路参考了 DeepSpeed 的工作 `DeepSpeed Ulysses <https://arxiv.org/abs/2309.14509>`_，并加以优化， **以实现一键开启序列并行策略** 。三者的对比如下：
 
+.. raw:: html
+
+    <p align="center">
+        <b>表 2 XTuner 与 Megatron-LM、DeepSpeed Ulysses 的序列并行实现对比</b>
+    </p>
+
 .. list-table::
-  :widths: 25 25 50 25
+  :widths: 25 50 50 25
   :header-rows: 1
 
   * -
@@ -96,7 +106,7 @@ XTuner 中的序列并行设计思路参考了 DeepSpeed 的工作 `DeepSpeed Ul
 .. raw:: html
 
     <p align="center">
-        ** 图 1 序列并行实现方案 **
+        <b>图 1 序列并行实现方案</b>
     </p>
 
 图 1 展示了序列并行策略的实现方案。由于 Transformer 结构较为规整，除 attention 计算外，其他计算过程中 token 之间不会互相影响（即每个 token 的计算是独立的），这一条件为序列并行提供了有利条件。上图展示了序列并行的核心设计。设由 P 个 GPUs 共同计算一个长度为 N 的长序列，在 Attention 计算的第一阶段，长度为 N / P 的子序列会通过线性层投影为 Query、Key、Value。接下来， QKV Tensor 会在参与序列并行计算的多个 GPUs 之间通过高度优化的 all-to-all 通信算子汇聚，得到序列长度为 N ，但更少注意力头的子序列。注意力计算后，通过另一个 all-to-all 通信算子将其转换为长度为 N / P 的子序列，进行后续计算。伪代码如下所示。
@@ -125,6 +135,13 @@ XTuner 序列并行支持情况
 
 .. note::
     使用序列并行策略需要首先安装 `flash attn <https://github.com/Dao-AILab/flash-attention>`_ （参考 `flash attn 安装 <https://github.com/Dao-AILab/flash-attention?tab=readme-ov-file#installation-and-features>`_ ，安装过程需要 cuda）
+
+    且要求 PyTorch 版本 >= 1.13.1 且 != 2.1 （PyTorch 2.1 loss 计算异常，如下图所示）
+    .. raw:: html
+
+    <p align="center">
+        <img src="https://github.com/InternLM/xtuner/assets/41630003/bdf73386-e7f2-4696-ac0a-48541d4e37d5" alt="XTuner"/>
+    </p>
 
 .. list-table::
   :widths: 25 25
