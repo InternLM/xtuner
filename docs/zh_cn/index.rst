@@ -68,6 +68,7 @@
    accelerate/hyper_parameters.rst
    accelerate/benchmark.rst
    training/train_on_large_scale_dataset.rst
+   training/training_extreme_long_sequence.rst
 
 .. toctree::
    :maxdepth: 2
