@@ -1,5 +1,5 @@
 import os
-from typing import Dict, Literal, Optional, Union
+from typing import Literal, Optional
 
 import torch
 from mmengine import Config, print_log
@@ -14,22 +14,25 @@ from xtuner.model.modules.dispatch import SUPPORT_FLASH1, SUPPORT_FLASH2
 from xtuner.registry import BUILDER
 
 
-def download_model_from_hub(model_name_or_path, from_hub: str = 'huggingface'):
+def download_model_from_hub(model_name_or_path: str,
+                            from_hub: Literal['huggingface',
+                                              'modelscope'] = 'huggingface'):
     if os.path.isdir(model_name_or_path):
         model_name_or_path = model_name_or_path
-    elif from_hub == 'huggingface' or from_hub is True:
+    elif from_hub == 'huggingface':
         from huggingface_hub import snapshot_download
         model_name_or_path = snapshot_download(repo_id=model_name_or_path)
     elif from_hub == 'modelscope':
         from modelscope import snapshot_download
         model_name_or_path = snapshot_download(model_id=model_name_or_path)
     else:
+        # TODO support openxlab
         raise NotImplementedError
 
     return model_name_or_path
 
 
-class AutoXTunerModel():
+class AutoAlgorithm():
 
     @classmethod
     def from_config(self, config: str):
@@ -39,12 +42,12 @@ class AutoXTunerModel():
         return model
 
     @classmethod
-    def _from_mmengine_work_dir(cls, work_dir: str):
+    def from_workdir(cls, workdir: str):
 
-        config = [f for f in os.listdir(work_dir) if f.endswith('.py')]
+        config = [f for f in os.listdir(workdir) if f.endswith('.py')]
         assert len(config) == 1
 
-        checkpoint = find_latest_checkpoint(work_dir)
+        checkpoint = find_latest_checkpoint(workdir)
         if checkpoint is None:
             raise RuntimeError
 
@@ -61,8 +64,8 @@ class AutoXTunerModel():
         from_hub: Literal['huggingface', 'modelscope'] = 'huggingface'
     ) -> BaseAlgorithm:
         checkpoint = download_model_from_hub(checkpoint, from_hub)
-        xtunr_conf = os.path.join(checkpoint, 'xtuner_config.py')
-        has_conf = os.path.exists(xtunr_conf)
+        xtuner_conf = os.path.join(checkpoint, 'xtuner_config.py')
+        has_conf = os.path.exists(xtuner_conf)
 
         if config and has_conf:
             # TODO add warning
@@ -70,7 +73,7 @@ class AutoXTunerModel():
         elif config and not has_conf:
             conf_path = config
         elif not config and has_conf:
-            conf_path = xtunr_conf
+            conf_path = xtuner_conf
         else:
             raise RuntimeError
 
@@ -150,11 +153,11 @@ class AutoModelForCausalLM:
 if __name__ == '__main__':
 
     config = 'xtuner/configs/internlm/internlm2_chat_1_8b/example.py'
-    model = AutoXTunerModel.from_config(config)
+    model = AutoAlgorithm.from_config(config)
     model.save_pretrained('test_saved', config)
     model.cuda()
     print(model.chat('Hello'))
 
-    model = AutoXTunerModel.from_pretrained('test_saved')
+    model = AutoAlgorithm.from_pretrained('test_saved')
     model.cuda()
     print(model.chat('Hello'))
