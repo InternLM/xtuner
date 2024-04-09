@@ -129,13 +129,13 @@ XTuner 序列并行支持情况
 .. raw:: html
 
     <p align="center">
-        <img src="https://github.com/InternLM/xtuner/assets/41630003/bdf73386-e7f2-4696-ac0a-48541d4e37d5" alt="XTuner"/>
+        <img src="https://github.com/InternLM/xtuner/assets/41630003/0a9fd60e-51dc-4650-ba60-8cf2ba8f773a" alt="XTuner" width="60%" />
     </p>
 
 .. raw:: html
 
     <p align="center">
-        <b>图 2 当序列并行度设为 2 时，使用不同 PyTorch 版本在 Alpaca 数据集上训练 Llama2-7B 时的 loss 下降情况</b>
+        <b>图 2 当序列并行度设为 2 时，使用不同 PyTorch 版本在 Alpaca 数据集上训练 32k 上下文 Llama2-7B 时的 loss 下降情况</b>
     </p>
 
 .. list-table::
