@@ -247,7 +247,7 @@ class AnyResLLaVAModel(LLaVAModel):
                     base_image_feature = image_feature[0]
                     # 183,d
                     base_image_feature = torch.cat(
-                        (base_image_feature, self.image_newline[None]), dim=1)
+                        (base_image_feature, self.image_newline[None]), dim=0)
 
                     # n, 182, d
                     image_feature = image_feature[1:]
@@ -268,7 +268,7 @@ class AnyResLLaVAModel(LLaVAModel):
                     image_feature = image_feature[0]
                     # 183,d
                     image_feature = torch.cat(
-                        (image_feature, self.image_newline[None]), dim=1)
+                        (image_feature, self.image_newline[None]), dim=0)
 
                 new_image_feature.append(image_feature)
         return new_image_feature
