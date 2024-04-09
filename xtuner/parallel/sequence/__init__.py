@@ -1,7 +1,9 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from mmengine.dist import init_dist
 
-from .attention import sequence_parallel_wrapper
+from .attention import (post_process_for_sequence_parallel_attn,
+                        pre_process_for_sequence_parallel_attn,
+                        sequence_parallel_wrapper)
 from .data_collate import (pad_for_sequence_parallel,
                            split_for_sequence_parallel)
 from .reduce_loss import reduce_sequence_parallel_loss
@@ -15,7 +17,8 @@ from .setup_distributed import (get_data_parallel_group,
                                 init_sequence_parallel)
 
 __all__ = [
-    'sequence_parallel_wrapper', 'pad_for_sequence_parallel',
+    'sequence_parallel_wrapper', 'pre_process_for_sequence_parallel_attn',
+    'post_process_for_sequence_parallel_attn', 'pad_for_sequence_parallel',
     'split_for_sequence_parallel', 'SequenceParallelSampler',
     'init_sequence_parallel', 'get_sequence_parallel_group',
     'get_sequence_parallel_world_size', 'get_sequence_parallel_rank',
