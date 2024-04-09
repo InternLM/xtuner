@@ -58,6 +58,7 @@
    training/custom_agent_dataset.md
    training/multi_modal_dataset.rst
    training/open_source_dataset.md
+   training/train_on_large_scale_dataset.rst
    training/accelerate.md
 
 .. toctree::
