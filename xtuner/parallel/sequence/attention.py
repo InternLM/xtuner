@@ -9,50 +9,67 @@ from .setup_distributed import (get_sequence_parallel_group,
                                 get_sequence_parallel_world_size)
 
 
-def all_to_all_scatter_nhead(input):
-    # bs, seq, nhead, dim ==>
-    # bs, seq * sp_world_size, nhead / sp_world_size, dim
-    sp_world_size = get_sequence_parallel_world_size()
-    sp_group = get_sequence_parallel_group()
-    bs, seq, nhead, dim = input.shape
-    input_t = input.reshape(bs, seq, sp_world_size, nhead // sp_world_size,
-                            dim)
-    input_t = input_t.permute(2, 0, 1, 3, 4).contiguous()
-    output = torch.empty_like(input_t)
-    dist.all_to_all_single(output, input_t, group=sp_group)
-    output = output.transpose(0, 1)
-    return output.reshape(bs, seq * sp_world_size, nhead // sp_world_size, dim)
+def _all_to_all(
+    input: Tensor,
+    world_size: int,
+    group: dist.ProcessGroup,
+    scatter_dim: int,
+    gather_dim: int,
+):
+    input_list = [
+        t.contiguous()
+        for t in torch.tensor_split(input, world_size, scatter_dim)
+    ]
+    output_list = [torch.empty_like(input_list[0]) for _ in range(world_size)]
+    dist.all_to_all(output_list, input_list, group=group)
+    return torch.cat(output_list, dim=gather_dim).contiguous()
 
 
-def all_to_all_scatter_seq(input):
-    # bs, seq * sp_world_size, nhead / sp_world_size, dim ==>
-    # bs, seq, nhead, dim
-    sp_world_size = get_sequence_parallel_world_size()
-    sp_group = get_sequence_parallel_group()
-    bs, seq, nhead, dim = input.shape
-    input_t = input.reshape(bs, sp_world_size, seq // sp_world_size, nhead,
-                            dim)
-    input_t = input_t.transpose(0, 1).contiguous()
-    output = torch.empty_like(input_t)
-    dist.all_to_all_single(output, input_t, group=sp_group)
-    output = output.permute(1, 2, 0, 3, 4)
-    return output.reshape(bs, seq // sp_world_size, nhead * sp_world_size, dim)
+class _AllToAll(torch.autograd.Function):
+    """All-to-all communication.
 
-
-class _SeqAllToAll(torch.autograd.Function):
+    Args:
+        input: input matrix
+        process_group: communication group
+        scatter_dim: scatter dimension
+        gather_dim: gather dimension
+    """
 
     @staticmethod
-    def forward(ctx: Any, input: Tensor, scatter_seq) -> Tensor:
-        ctx.scatter_seq = scatter_seq
-        ctx.input_shape = input.shape
-        if scatter_seq:
-            return all_to_all_scatter_seq(input)
-        return all_to_all_scatter_nhead(input)
+    def forward(ctx: Any, input: Tensor, process_group: dist.ProcessGroup,
+                scatter_dim: int, gather_dim: int):
+        ctx.process_group = process_group
+        ctx.scatter_dim = scatter_dim
+        ctx.gather_dim = gather_dim
+        ctx.world_size = dist.get_world_size(process_group)
+        output = _all_to_all(input, ctx.world_size, process_group, scatter_dim,
+                             gather_dim)
+        return output
 
     @staticmethod
-    def backward(ctx: Any, *grad_output: Tensor) -> Tuple[Tensor, None]:
-        grad = _SeqAllToAll.apply(*grad_output, not ctx.scatter_seq)
-        return (grad, None)
+    def backward(ctx: Any, grad_output: Tensor) -> Tuple:
+        grad_output = _all_to_all(
+            grad_output,
+            ctx.world_size,
+            ctx.process_group,
+            ctx.gather_dim,
+            ctx.scatter_dim,
+        )
+        return (
+            grad_output,
+            None,
+            None,
+            None,
+        )
+
+
+def all_to_all(
+    input: Tensor,
+    process_group: dist.ProcessGroup,
+    scatter_dim: int = 2,
+    gather_dim: int = 1,
+):
+    return _AllToAll.apply(input, process_group, scatter_dim, gather_dim)
 
 
 def pre_process_for_sequence_parallel_attn(query_states, key_states,
@@ -65,16 +82,18 @@ def pre_process_for_sequence_parallel_attn(query_states, key_states,
          f'sequence_parallel_world_size = {sequence_parallel_world_size}.')
 
     # (b, s // sp_world_size, nd, dim) -> (b, s, nd // sp_world_size, dim)
-    query_states = _SeqAllToAll.apply(query_states, False)
-    key_states = _SeqAllToAll.apply(key_states, False)
-    value_states = _SeqAllToAll.apply(value_states, False)
+    sequence_parallel_group = get_sequence_parallel_group()
+    query_states = all_to_all(query_states, sequence_parallel_group, 2, 1)
+    key_states = all_to_all(key_states, sequence_parallel_group, 2, 1)
+    value_states = all_to_all(value_states, sequence_parallel_group, 2, 1)
 
     return query_states, key_states, value_states
 
 
 def post_process_for_sequence_parallel_attn(attn_output):
     # (b, s, nd // sp_world_size, dim) -> (b, s // sp_world_size, nd, dim)
-    output = _SeqAllToAll.apply(attn_output, True)
+    sequence_parallel_group = get_sequence_parallel_group()
+    output = all_to_all(attn_output, sequence_parallel_group, 1, 2)
     return output
 
 
