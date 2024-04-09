@@ -26,13 +26,7 @@ XTuner 的序列并行算法具有以下关键特性：
 
 尽管序列长度的重要性不断增长，XTuner 现有的显存优化策略（如 ZeRO 系列），却不足以解决大模型、长序列训练问题。如表 1 所示，随着序列长度增大，训练过程中的显存开销主要来自激活值而非模型状态，因此使用 ZeRO-3 显存优化策略训练超长序列时，单纯增加 GPU 数量无法解决超长序列带来的 OOM 问题。
 
-.. raw:: html
-
-    <p align="center">
-        <b>表 1 不同序列长度时，使用 ZeRO-3 训练 128k 上下文 yi-34B 模型的训练情况</b>
-    </p>
-
-.. list-table::
+.. list-table:: **表 1 不同序列长度时，使用 ZeRO-3 训练 128k 上下文 yi-34B 模型的训练情况**
   :widths: 25 15 10 15 25
   :header-rows: 1
 
@@ -65,13 +59,7 @@ XTuner 的序列并行算法具有以下关键特性：
 
 为解决长序列训练过程中的显存问题，Megatron-LM 团队和 DeepSpeed 团队分别提出了两种序列并行算法，通过对长序列进行切分的方法来降低单 GPU 上计算的序列长度。XTuner 中的序列并行设计思路参考了 DeepSpeed 的工作 `DeepSpeed Ulysses <https://arxiv.org/abs/2309.14509>`_，并加以优化， **以实现一键开启序列并行策略** 。三者的对比如下：
 
-.. raw:: html
-
-    <p align="center">
-        <b>表 2 XTuner 与 Megatron-LM、DeepSpeed Ulysses 的序列并行实现对比</b>
-    </p>
-
-.. list-table::
+.. list-table:: **表 2 XTuner 与 Megatron-LM、DeepSpeed Ulysses 的序列并行实现对比**
   :widths: 25 50 50 25
   :header-rows: 1
 
@@ -138,10 +126,16 @@ XTuner 序列并行支持情况
 
     且要求 PyTorch 版本 >= 1.13.1 且 != 2.1 （PyTorch 2.1 loss 计算异常，如下图所示）
 
-    .. raw:: html
+.. raw:: html
 
     <p align="center">
         <img src="https://github.com/InternLM/xtuner/assets/41630003/bdf73386-e7f2-4696-ac0a-48541d4e37d5" alt="XTuner"/>
+    </p>
+
+.. raw:: html
+
+    <p align="center">
+        <b>图 2 当序列并行度设为 2 时，使用不同 PyTorch 版本在 Alpaca 数据集上训练 Llama2-7B 时的 loss 下降情况</b>
     </p>
 
 .. list-table::
