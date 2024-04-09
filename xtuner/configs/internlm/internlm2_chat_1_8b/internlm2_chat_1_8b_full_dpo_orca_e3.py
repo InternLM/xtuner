@@ -39,7 +39,7 @@ accumulative_counts = 16
 dataloader_num_workers = 0
 max_epochs = 3
 optim_type = AdamW
-lr = 2e-4
+lr = 2e-5
 betas = (0.9, 0.999)
 weight_decay = 0
 max_norm = 1  # grad clip
@@ -66,56 +66,12 @@ tokenizer = dict(
     padding_side='right')
 
 model = dict(
-    type=DPO, # TODO
-    # type = SupervisedFinetune,
+    type=DPO,
     use_varlen_attn=use_varlen_attn,
     llm=dict(
         type=AutoModelForCausalLM.from_pretrained,
         pretrained_model_name_or_path=pretrained_model_name_or_path,
-        trust_remote_code=True,
-        torch_dtype=torch.float16,
-        quantization_config=dict(
-            type=BitsAndBytesConfig,
-            load_in_4bit=True,
-            load_in_8bit=False,
-            llm_int8_threshold=6.0,
-            llm_int8_has_fp16_weight=False,
-            bnb_4bit_compute_dtype=torch.float16,
-            bnb_4bit_use_double_quant=True,
-            bnb_4bit_quant_type='nf4')),
-    lora=dict(
-        type=LoraConfig,
-        r=64,
-        lora_alpha=16,
-        lora_dropout=0.1,
-        bias='none',
-        task_type='CAUSAL_LM'))
-
-# lora
-# model = dict(
-#     type=DPO,  # TODO
-#     # type = SupervisedFinetune,
-#     use_varlen_attn=use_varlen_attn,
-#     llm=dict(
-#         type=AutoModelForCausalLM.from_pretrained,
-#         pretrained_model_name_or_path=pretrained_model_name_or_path,
-#         trust_remote_code=True,
-#         torch_dtype=torch.float16),
-#     lora=dict(
-#         type=LoraConfig,
-#         r=64,
-#         lora_alpha=16,
-#         lora_dropout=0.1,
-#         bias='none',
-#         task_type='CAUSAL_LM'))
-
-# model = dict(
-#     type=DPO,
-#     use_varlen_attn=use_varlen_attn,
-#     llm=dict(
-#         type=AutoModelForCausalLM.from_pretrained,
-#         pretrained_model_name_or_path=pretrained_model_name_or_path,
-#         trust_remote_code=True))
+        trust_remote_code=True))
 
 #######################################################################
 #                      PART 3  Dataset & Dataloader                   #
@@ -132,7 +88,6 @@ orca_dpo = dict(
     shuffle_before_pack=True,
     pack_to_max_length=pack_to_max_length,
     use_varlen_attn=use_varlen_attn,
-    max_dataset_length=5000,
     with_dpo=True)
 
 train_dataloader = dict(

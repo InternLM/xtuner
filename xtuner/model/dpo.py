@@ -20,6 +20,7 @@ class DPO(BaseModel):
 
     def __init__(self,
                  llm,
+                 ref_llm=None,
                  beta=0.1,
                  lora=None,
                  peft_model=None,
@@ -28,6 +29,7 @@ class DPO(BaseModel):
         super().__init__()
         with LoadWoInit():
             self.llm = self._build_from_cfg_or_module(llm)
+        self.ref_llm = ref_llm
         self.llm.config.use_cache = False
         self.beta = beta
         dispatch_modules(self.llm, use_varlen_attn=use_varlen_attn)
@@ -50,17 +52,17 @@ class DPO(BaseModel):
             self.lora = lora
         self.peft_model = peft_model
         self.use_lora = lora is not None
+        # TODO: a more feasible way to set ref_llm.
         if self.use_lora:
             self._prepare_for_lora(peft_model, use_activation_checkpointing)
+        else:
+            self.ref_llm = create_reference_model(self.llm)
 
         self._is_init = True
         # Determines whether to calculate attention based on the
         # seq_len dimension (use_varlen_attn = False) or the actual length of
         # the sequence.
         self.use_varlen_attn = use_varlen_attn
-        # TODO: a more feasible way to set ref_model.
-        # Now the ref_model is a deepcopy of self.llm
-        self.ref_model = create_reference_model(self.llm)
 
     def gradient_checkpointing_enable(self):
         self.activation_checkpointing_enable()
@@ -127,7 +129,11 @@ class DPO(BaseModel):
 
         all_logits = self.llm(**data).logits
         with torch.no_grad():
-            all_ref_logits = self.ref_model(**data).logits
+            if self.ref_llm is None:
+                with self.llm.disable_adapter():
+                    all_ref_logits = self.llm(**data).logits
+            else:
+                all_ref_logits = self.ref_llm(**data).logits
 
         labels = data['labels']
         labels[labels == -100] = 0
