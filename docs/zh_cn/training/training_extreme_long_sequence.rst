@@ -137,6 +137,7 @@ XTuner 序列并行支持情况
     使用序列并行策略需要首先安装 `flash attn <https://github.com/Dao-AILab/flash-attention>`_ （参考 `flash attn 安装 <https://github.com/Dao-AILab/flash-attention?tab=readme-ov-file#installation-and-features>`_ ，安装过程需要 cuda）
 
     且要求 PyTorch 版本 >= 1.13.1 且 != 2.1 （PyTorch 2.1 loss 计算异常，如下图所示）
+
     .. raw:: html
 
     <p align="center">
