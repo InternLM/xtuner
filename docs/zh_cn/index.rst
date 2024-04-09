@@ -34,15 +34,15 @@
    :maxdepth: 2
    :caption: 开始使用
 
-   get_started/overview.md
-   get_started/installation.md
-   get_started/quickstart.md
+   get_started/overview.rst
+   get_started/installation.rst
+   get_started/quickstart.rst
 
 .. toctree::
    :maxdepth: 2
    :caption: 准备
 
-   preparation/pretrained_model.md
+   preparation/pretrained_model.rst
    preparation/custom_sft_dataset.md
    preparation/custom_pretrain_dataset.md
    preparation/custom_agent_dataset.md
@@ -52,13 +52,13 @@
    :maxdepth: 2
    :caption: 训练
 
-   training/modify_settings.md
+   training/modify_settings.rst
    training/custom_sft_dataset.md
-   training/custom_pretrain_dataset.md
+   training/custom_pretrain_dataset.rst
    training/custom_agent_dataset.md
-   training/multi_modal_dataset.md
+   training/multi_modal_dataset.rst
    training/open_source_dataset.md
-
+   
 .. toctree::
    :maxdepth: 2
    :caption: 加速训练
@@ -69,6 +69,7 @@
    accelerate/varlen_flash_attn.rst
    accelerate/hyper_parameters.rst
    accelerate/benchmark.rst
+   training/train_on_large_scale_dataset.rst
 
 .. toctree::
    :maxdepth: 2
@@ -93,3 +94,14 @@
    :caption: 模型
 
    models/supported.md
+
+.. toctree::
+   :maxdepth: 2
+   :caption: InternEvo 迁移
+
+   internevo_migration/internevo_migration.rst
+   internevo_migration/ftdp_dataset/README.md
+   internevo_migration/ftdp_dataset/Case1.rst
+   internevo_migration/ftdp_dataset/Case2.rst
+   internevo_migration/ftdp_dataset/Case3.rst
+   internevo_migration/ftdp_dataset/Case4.rst
