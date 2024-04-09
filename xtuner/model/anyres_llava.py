@@ -108,8 +108,8 @@ class AnyResLLaVAModel(LLaVAModel):
         self.template = template
 
         self.token_merge_ratio = token_merge_ratio
-        # self.image_newline = torch.randn(
-        #     self.llm.config.hidden_size, dtype=self.visual_encoder.dtype)
+        self.image_newline = torch.randn(
+            self.llm.config.hidden_size, dtype=self.visual_encoder.dtype)
         self.image_grid_pinpoints = image_grid_pinpoints
         # self.mm_patch_merge_type = 'spatial_unpad'
         self.image_aspect_ratio = 'anyres'
@@ -244,11 +244,24 @@ class AnyResLLaVAModel(LLaVAModel):
                     base_image_feature = image_feature[0]
                     # n, 182, d
                     image_feature = image_feature[1:]
-                    # n*182,d
+
+                    # n,182+1, d
+                    image_feature = torch.cat(
+                        (image_feature,
+                         self.image_newline[None, None].expand(
+                             image_feature.shape[0], 1, image_feature.shape[-1])),
+                        dim=1)
+
+                    # n*183,d
                     image_feature = image_feature.flatten(0, 1)
                     image_feature = torch.cat((base_image_feature, image_feature), dim=0)
                     new_image_feature.append(image_feature)
                 else:
+                    # 182, d
                     image_feature = image_feature[0]
+                    # 183,d
+                    image_feature = torch.cat(
+                        (image_feature, self.image_newline[None]), dim=1)
+
                 new_image_feature.append(image_feature)
         return new_image_feature

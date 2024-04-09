@@ -77,7 +77,9 @@ class AnyResLLaVAProxyEvalDataset:
         data_dict['orig_size'] = orig_size
         image = process_anyres_image(image, self.eval_ds.image_processor,
                                      self.image_grid_pinpoints,
-                                     self._patch_size, self._shortest_edge)
+                                     self._patch_size, self._shortest_edge,
+                                     pad_mean=tuple(int(x * 255) for x in self.eval_ds.image_processor.image_mean),
+                                     orig_img_pad_to_square=self.eval_ds.pad_image_to_square)
         data_dict['pixel_values'] = image
 
         return data_dict

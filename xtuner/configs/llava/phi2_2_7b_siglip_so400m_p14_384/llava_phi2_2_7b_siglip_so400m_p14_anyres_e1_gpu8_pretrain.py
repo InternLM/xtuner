@@ -95,6 +95,7 @@ model = dict(
 #######################################################################
 llava_dataset = dict(
     type=AnyResLLaVADataset,
+    pad_image_to_square=True,  # change this
     image_grid_pinpoints=image_grid_pinpoints,
     offline_processed_text_folder='/mnt/petrelfs/huanghaian/code/xtuner/phi2_2_7b_llava_pretrain',
     data_path=data_path,

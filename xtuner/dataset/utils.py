@@ -75,7 +75,7 @@ def encode_fn(example,
         assert input_ids_with_output
 
     input_ids, labels = [], []
-    next_needs_bos_token = True
+    next_needs_bos_token = False
     for single_turn_conversation in example['conversation']:
         input = single_turn_conversation['input']
         if DEFAULT_IMAGE_TOKEN in input and with_image_token:
@@ -310,7 +310,7 @@ def select_best_resolution(original_size, possible_resolutions):
     return best_fit
 
 
-def resize_and_pad_image(image, target_resolution):
+def resize_and_pad_image(image, target_resolution,pad_mean):
     """Resize and pad an image to a target resolution while maintaining aspect
     ratio.
 
@@ -338,10 +338,10 @@ def resize_and_pad_image(image, target_resolution):
     # Resize the image
     resized_image = image.resize((new_width, new_height))
 
-    # TODO: 应该是填充均值，而且后续应该考虑 padding
-    new_image = Image.new('RGB', (target_width, target_height), (0, 0, 0))
+    new_image = Image.new('RGB', (target_width, target_height), pad_mean)
     paste_x = (target_width - new_width) // 2
     paste_y = (target_height - new_height) // 2
+    # 居中 padding
     new_image.paste(resized_image, (paste_x, paste_y))
 
     return new_image
@@ -368,7 +368,7 @@ def divide_to_patches(image, patch_size):
     return patches
 
 
-def process_anyres_image(image, processor, possible_resolutions, patch_size, shortest_edge):
+def process_anyres_image(image, processor, possible_resolutions, patch_size, shortest_edge, pad_mean=(0, 0, 0), orig_img_pad_to_square=False):
     """Process an image with variable resolutions.
 
     Args:
@@ -381,11 +381,14 @@ def process_anyres_image(image, processor, possible_resolutions, patch_size, sho
         torch.Tensor: A tensor containing the processed image patches.
     """
     best_resolution = select_best_resolution(image.size, possible_resolutions)
-    image_padded = resize_and_pad_image(image, best_resolution)
+    image_padded = resize_and_pad_image(image, best_resolution, pad_mean)
 
     patches = divide_to_patches(image_padded, patch_size)
 
-    # 这里直接 resize，所以后续不用考虑 padding
+    if orig_img_pad_to_square:
+        # 不是居中 padding
+        image = expand2square(image, pad_mean)
+
     image_original_resize = image.resize((shortest_edge, shortest_edge))
 
     image_patches = [image_original_resize] + patches
