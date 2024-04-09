@@ -245,6 +245,10 @@ class AnyResLLaVAModel(LLaVAModel):
                 if image_feature.shape[0] > 1:
                     # 182, d
                     base_image_feature = image_feature[0]
+                    # 183,d
+                    base_image_feature = torch.cat(
+                        (base_image_feature, self.image_newline[None]), dim=1)
+
                     # n, 182, d
                     image_feature = image_feature[1:]
 
