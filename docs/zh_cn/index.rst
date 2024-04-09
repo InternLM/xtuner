@@ -52,7 +52,7 @@
    :maxdepth: 2
    :caption: 训练
 
-   training/modify_settings.md
+   training/modify_settings.rst
    training/custom_sft_dataset.md
    training/custom_pretrain_dataset.rst
    training/custom_agent_dataset.md
