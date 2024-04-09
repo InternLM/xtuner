@@ -124,20 +124,6 @@ XTuner 序列并行支持情况
 .. note::
     使用序列并行策略需要首先安装 `flash attn <https://github.com/Dao-AILab/flash-attention>`_ （参考 `flash attn 安装 <https://github.com/Dao-AILab/flash-attention?tab=readme-ov-file#installation-and-features>`_ ，安装过程需要 cuda）
 
-    且要求 PyTorch 版本 >= 1.13.1 且 != 2.1 （PyTorch 2.1 loss 计算异常，如下图所示）
-
-.. raw:: html
-
-    <p align="center">
-        <img src="https://github.com/InternLM/xtuner/assets/41630003/0a9fd60e-51dc-4650-ba60-8cf2ba8f773a" alt="XTuner" width="60%" />
-    </p>
-
-.. raw:: html
-
-    <p align="center">
-        <b>图 2 当序列并行度设为 2 时，使用不同 PyTorch 版本在 Alpaca 数据集上训练 32k 上下文 Llama2-7B 时的 loss 下降情况</b>
-    </p>
-
 .. list-table::
   :widths: 25 25
   :header-rows: 1
