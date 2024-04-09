@@ -7,7 +7,6 @@ import os.path as osp
 from functools import partial
 from types import FunctionType
 
-import torch
 from mmengine.config import Config, DictAction
 from mmengine.config.lazy import LazyObject
 from mmengine.logging import print_log
@@ -105,11 +104,6 @@ def check_cfg(cfg):
     if getattr(cfg, 'sequence_parallel_size', 1) > 1:
         assert SUPPORT_FLASH2, ('`flash_attn` is required if you want to use '
                                 'sequence parallel.')
-
-        assert not ((digit_version('2.1.0') <= digit_version(torch.__version__)
-                     <= digit_version('2.1.2')),
-                    'Sequence parallel with PyTorch 2.1 may lead to strange'
-                    'precision problems')
 
 
 def main():
