@@ -57,22 +57,15 @@ def pad_for_sequence_parallel(tokens,
     return tokens, labels, position_ids, attention_mask
 
 
-def split_for_sequence_parallel(tokens, labels=None, position_ids=None):
+def split_for_sequence_parallel(tensor, split_dim):
     seq_parallel_world_size = get_sequence_parallel_world_size()
     if seq_parallel_world_size == 1:
-        return tokens, labels, position_ids
+        return tensor
 
-    seq_parallel_world_rank = get_sequence_parallel_rank()
-    seq_len = tokens.size(1)
+    seq_parallel_rank = get_sequence_parallel_rank()
+    seq_len = tensor.shape[split_dim]
     assert seq_len % seq_parallel_world_size == 0
     sub_seq_len = seq_len // seq_parallel_world_size
-    sub_seq_start = seq_parallel_world_rank * sub_seq_len
-    sub_seq_end = (seq_parallel_world_rank + 1) * sub_seq_len
 
-    tokens = tokens[:, sub_seq_start:sub_seq_end]
-    if labels is not None:
-        labels = labels[:, sub_seq_start:sub_seq_end]
-    if position_ids is not None:
-        position_ids = position_ids[:, sub_seq_start:sub_seq_end]
-
-    return tokens, labels, position_ids
+    slices = torch.split(tensor, sub_seq_len, dim=split_dim)
+    return slices[seq_parallel_rank]

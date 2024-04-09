@@ -61,8 +61,10 @@ def default_collate_fn(instances: Sequence[Dict],
                                   attention_mask)
 
     # attention mask should not be split
-    input_ids, labels, position_ids = split_for_sequence_parallel(
-        input_ids, labels, position_ids)
+    # `split_dim` is 1 as the shape of tensor is (bs, seq_len, dim)
+    input_ids = split_for_sequence_parallel(input_ids, split_dim=1)
+    labels = split_for_sequence_parallel(labels, split_dim=1)
+    position_ids = split_for_sequence_parallel(position_ids, split_dim=1)
 
     if use_varlen_attn:
         max_seqlen = (

@@ -151,8 +151,10 @@ Pad 后，我们需要对长序列均等切分：
 ```python
 from xtuner.parallel.sequence import split_for_sequence_parallel
 # attention mask should not be split
-input_ids, labels, position_ids = split_for_sequence_parallel(
-    input_ids, labels, position_ids)
+# `split_dim` is 1 as the shape of tensor is (bs, seq_len, dim)
+input_ids = split_for_sequence_parallel(input_ids, split_dim=1)
+labels = split_for_sequence_parallel(labels, split_dim=1)
+position_ids = split_for_sequence_parallel(position_ids, split_dim=1)
 ```
 
 以上两步在 xtuner/dataset/collate_fns/default_collate_fn.py 中实现。
