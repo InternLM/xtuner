@@ -44,7 +44,7 @@ class AnyResLLaVAModel(LLaVAModel):
         self.llm.config.use_cache = False
         dispatch_modules(self.llm)
 
-        if token_merge_ratio != 1:
+        if token_merge_ratio == -1:
             projector_config = ProjectorConfig(
                 visual_hidden_size=self.visual_encoder.config.hidden_size,
                 llm_hidden_size=self.llm.config.hidden_size,
@@ -53,10 +53,10 @@ class AnyResLLaVAModel(LLaVAModel):
             projector_config = ProjectorConfig(
                 visual_hidden_size=self.visual_encoder.config.hidden_size * token_merge_ratio,
                 llm_hidden_size=self.llm.config.hidden_size,
-                depth=projector_depth,
-                llm_hidden_size_ratio=1)
+                depth=projector_depth)
         self.projector = ProjectorModel(projector_config).to(
             self.visual_encoder.dtype)
+        print(self.projector,'=======================================================')
 
         if self.freeze_llm:
             self.llm.requires_grad_(False)
@@ -184,7 +184,7 @@ class AnyResLLaVAModel(LLaVAModel):
             if pn == 27 * 27:
                 # 直接减掉最后 1 个 token，减掉点，确保能被整除
                 visual_outputs = visual_outputs[:, :-1]
-                visual_outputs = visual_outputs.view(bs, (pn-1) // self.token_merge_ratio, int(hs * 4))
+                visual_outputs = visual_outputs.reshape(bs, (pn-1) // self.token_merge_ratio, int(hs * 4))
 
         # b*n, 182, d
         image_features = self.projector(visual_outputs)
