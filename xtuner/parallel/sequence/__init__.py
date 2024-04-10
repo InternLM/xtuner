@@ -4,8 +4,11 @@ from mmengine.dist import init_dist
 from .attention import (post_process_for_sequence_parallel_attn,
                         pre_process_for_sequence_parallel_attn,
                         sequence_parallel_wrapper)
-from .data_collate import (pad_for_sequence_parallel,
-                           split_for_sequence_parallel)
+from .communications import (all_to_all, gather_for_sequence_parallel,
+                             gather_forward_split_backward,
+                             split_for_sequence_parallel,
+                             split_forward_gather_backward)
+from .data_collate import pad_for_sequence_parallel
 from .reduce_loss import reduce_sequence_parallel_loss
 from .sampler import SequenceParallelSampler
 from .setup_distributed import (get_data_parallel_group,
@@ -23,5 +26,7 @@ __all__ = [
     'init_sequence_parallel', 'get_sequence_parallel_group',
     'get_sequence_parallel_world_size', 'get_sequence_parallel_rank',
     'get_data_parallel_group', 'get_data_parallel_world_size',
-    'get_data_parallel_rank', 'reduce_sequence_parallel_loss', 'init_dist'
+    'get_data_parallel_rank', 'reduce_sequence_parallel_loss', 'init_dist',
+    'all_to_all', 'gather_for_sequence_parallel',
+    'split_forward_gather_backward', 'gather_forward_split_backward'
 ]
