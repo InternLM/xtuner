@@ -280,7 +280,7 @@ FAQ
 
 2. 修改配置文件中的 ``prompt_template`` 参数，与您所选择的 LLM
    保持对齐。具体选择可参考
-   `这里 <https://github.com/InternLM/xtuner/blob/main/docs/zh_cn/preparation/prompt_template.md>`__\ 。
+   \ :ref:`对话模版文档 <prompt_template>` \ 。
 
 .. _valueerror-bostokenid-has-to-be-defined-when-no-inputids-are-provided:
 

@@ -33,6 +33,7 @@ Documentation
    :maxdepth: 2
    :caption: Get Started
 
+   get_started/overview.md
    get_started/installation.md
    get_started/quickstart.md
 
@@ -40,20 +41,34 @@ Documentation
    :maxdepth: 2
    :caption: Preparation
 
-   preparation/pretrained_model.md
-   preparation/prompt_template.md
+   preparation/pretrained_model.rst
+   preparation/prompt_template.rst
 
 .. toctree::
    :maxdepth: 2
    :caption: Training
 
-   training/modify_settings.md
-   training/custom_sft_dataset.md
-   training/custom_pretrain_dataset.md
-   training/custom_agent_dataset.md
-   training/multi_modal_dataset.md
-   training/open_source_dataset.md
-   training/accelerate.md
+   training/modify_settings.rst
+   training/custom_sft_dataset.rst
+   training/custom_pretrain_dataset.rst
+   training/custom_agent_dataset.rst
+   training/multi_modal_dataset.rst
+   training/open_source_dataset.rst
+   training/visualization.rst
+
+.. toctree::
+   :maxdepth: 2
+   :caption: Acceleration
+
+   acceleration/deepspeed.rst
+   acceleration/pack_to_max_length.rst
+   acceleration/flash_attn.rst
+   acceleration/varlen_flash_attn.rst
+   acceleration/hyper_parameters.rst
+   acceleration/length_grouped_sampler.rst
+   acceleration/train_large_scale_dataset.rst
+   acceleration/train_extreme_long_sequence.rst
+   acceleration/benchmark.rst
 
 .. toctree::
    :maxdepth: 2
@@ -78,3 +93,14 @@ Documentation
    :caption: Models
 
    models/supported.md
+
+.. toctree::
+   :maxdepth: 2
+   :caption: InternEvo Migration
+
+   internevo_migration/internevo_migration.rst
+   internevo_migration/ftdp_dataset/ftdp.rst
+   internevo_migration/ftdp_dataset/Case1.rst
+   internevo_migration/ftdp_dataset/Case2.rst
+   internevo_migration/ftdp_dataset/Case3.rst
+   internevo_migration/ftdp_dataset/Case4.rst
