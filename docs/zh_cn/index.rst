@@ -60,15 +60,15 @@
    :maxdepth: 2
    :caption: 加速训练
 
-   accelerate/deepspeed.rst
-   accelerate/pack_to_max_length.rst
-   accelerate/flash_attn.rst
-   accelerate/varlen_flash_attn.rst
-   accelerate/hyper_parameters.rst
-   accelerate/length_grouped_sampler.rst
-   accelerate/train_large_scale_dataset.rst
-   accelerate/train_extreme_long_sequence.rst
-   accelerate/benchmark.rst
+   acceleration/deepspeed.rst
+   acceleration/pack_to_max_length.rst
+   acceleration/flash_attn.rst
+   acceleration/varlen_flash_attn.rst
+   acceleration/hyper_parameters.rst
+   acceleration/length_grouped_sampler.rst
+   acceleration/train_large_scale_dataset.rst
+   acceleration/train_extreme_long_sequence.rst
+   acceleration/benchmark.rst
 
 .. toctree::
    :maxdepth: 2
