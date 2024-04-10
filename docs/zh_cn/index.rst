@@ -27,7 +27,6 @@
 
 
 
-
 文档
 -------------
 .. toctree::
@@ -52,7 +51,7 @@
    training/modify_settings.rst
    training/custom_sft_dataset.rst
    training/custom_pretrain_dataset.rst
-   training/custom_agent_dataset.md
+   training/custom_agent_dataset.rst
    training/multi_modal_dataset.rst
    training/open_source_dataset.rst
    training/visualization.rst
