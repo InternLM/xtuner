@@ -63,7 +63,7 @@ xtuner      internevo
 =========== ==========
 
 注：使用 XTuner 提供的序列并行算法可以进一步提升训练速度，使用方式请参考
-\ :ref:`序列并行文档 <training_extreme_long_sequence>` \ 。
+\ :ref:`序列并行文档 <train_extreme_long_sequence>` \ 。
 
 在从 InternEvo (train_internlm) 向 XTuner
 迁移的过程中，我们需要关注模型、数据以及训练策略这三个方面的适配问题。后续内容将详细阐述如何进行适配。
@@ -320,4 +320,4 @@ global_batch_size 与 InternEvo 一致，需要在配置文件中综合调整
        ...)
 
 XTuner 序列并行的详细用法请参考
-\ :ref:`序列并行文档 <training_extreme_long_sequence>` \  。
+\ :ref:`序列并行文档 <train_extreme_long_sequence>` \  。

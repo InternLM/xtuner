@@ -1,4 +1,4 @@
-.. _training_extreme_long_sequence:
+.. _train_extreme_long_sequence:
 
 序列并行：训练极长序列大模型的系统优化
 ===============================
