@@ -205,11 +205,12 @@ Step 2 开始训练
 序列并行 API 抽象
 ----------------------
 
-为了方便在其他 repo 中使用序列并行策略，XTuner 中抽象出了序列并行所必须的五个 API 接口：
+为了方便在其他 repo 中使用序列并行策略，XTuner 中抽象出了序列并行所必须的六个 API 接口：
 
 - 序列并行分布式环境初始化 (init_sequence_parallel)
 - 适配序列并行的 Data Sampler (SequenceParallelSampler)
-- 数据 Pad 与切分 (pad_for_sequence_parallel, split_for_sequence_parallel)
+- 数据 Pad (pad_for_sequence_parallel)
+- 数据切分 (split_for_sequence_parallel)
 - 适配序列并行的 Attention (dispatch_modules)
 - reduce loss 以正确打印训练损失 (reduce_sequence_parallel_loss)
 
@@ -246,7 +247,7 @@ Data Sampler 适配序列并行
         train_dataset, sampler=SequenceParallelSampler(train_dataset),
         **other_dataloader_params)
 
-数据 Pad 与切分
+数据 Pad
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 由于每条训练数据的长度可能不尽相同，我们需要将数据进行 Pad 以使得序列长度可以被 `sequence_parallel_world_size` 整除，这样一条长数据才能被均等地分发给不同的 GPU 上。
@@ -266,16 +267,23 @@ Data Sampler 适配序列并行
     input_ids, labels, position_ids, _ = pad_for_sequence_parallel(
         input_ids, labels, position_ids)
 
-Pad 后，我们需要对长序列均等切分：
+以上过程在 `xtuner/dataset/collate_fns/defalut_collate_fn.py` 中实现。
+
+数据切分
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+在传入给 Transformer 模型前，我们需要对长序列均等切分：
 
 .. code-block:: python
 
     from xtuner.parallel.sequence import split_for_sequence_parallel
     # attention mask should not be split
-    input_ids, labels, position_ids = split_for_sequence_parallel(
-        input_ids, labels, position_ids)
+    # `split_dim` is 1 as the shape of tensor is (bs, seq_len, ...)
+    input_ids = split_for_sequence_parallel(input_ids, split_dim=1)
+    labels = split_for_sequence_parallel(labels, split_dim=1)
+    position_ids = split_for_sequence_parallel(position_ids, split_dim=1)
 
-以上两步在 `xtuner/dataset/collate_fns/defalut_collate_fn.py` 中实现。
+以上过程在 `xtuner/model/sft.py` 中实现。
 
 Attention 适配序列并行
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
