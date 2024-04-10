@@ -95,12 +95,12 @@ Documentation
    models/supported.md
 
 .. toctree::
-   :maxdepth: 3
+   :maxdepth: 2
    :caption: InternEvo Migration
 
    internevo_migration/internevo_migration.rst
    internevo_migration/ftdp_dataset/ftdp.rst
-      internevo_migration/ftdp_dataset/Case1.rst
-      internevo_migration/ftdp_dataset/Case2.rst
-      internevo_migration/ftdp_dataset/Case3.rst
-      internevo_migration/ftdp_dataset/Case4.rst
+   internevo_migration/ftdp_dataset/Case1.rst
+   internevo_migration/ftdp_dataset/Case2.rst
+   internevo_migration/ftdp_dataset/Case3.rst
+   internevo_migration/ftdp_dataset/Case4.rst
