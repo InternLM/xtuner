@@ -26,7 +26,7 @@
    </p>
 
    <p style="text-align:center">
-   <a href="/en/"> {English}</a>
+   <a href="/en/"> English</a> | 简体中文
    </p>
 
 文档

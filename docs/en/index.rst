@@ -26,7 +26,7 @@ Welcome to XTuner's documentation!
    </p>
 
    <p style="text-align:center">
-   English | :ref:`简体中文 <../zh_cn/index>`
+   English | <a href="/zh_cn/"> 简体中文</a>
    </p>
 
 
