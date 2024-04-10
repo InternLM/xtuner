@@ -56,7 +56,7 @@
    training/multi_modal_dataset.rst
    training/open_source_dataset.rst
    training/visualization.rst
-   
+
 .. toctree::
    :maxdepth: 2
    :caption: 加速训练
@@ -66,9 +66,10 @@
    accelerate/flash_attn.rst
    accelerate/varlen_flash_attn.rst
    accelerate/hyper_parameters.rst
+   accelerate/length_grouped_sampler.rst
+   accelerate/train_large_scale_dataset.rst
+   accelerate/train_extreme_long_sequence.rst
    accelerate/benchmark.rst
-   training/train_on_large_scale_dataset.rst
-   training/training_extreme_long_sequence.rst
 
 .. toctree::
    :maxdepth: 2

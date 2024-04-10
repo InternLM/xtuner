@@ -44,13 +44,13 @@ XTuner 使用 MMEngine 的「纯 Python 风格的配置文件」，直接利用 
    #######################################################################
    # Model
    pretrained_model_name_or_path = 'internlm/internlm2-chat-7b'  # 设置 LLM 路径或 HuggingFace Hub ID
-   use_varlen_attn = False  # 是否使用 varlen_attention，具体可参考 [TODO]
+   use_varlen_attn = False  # 是否使用 varlen_attention
 
    # Data
    data_path = 'timdettmers/openassistant-guanaco'  # 设置 dataset 路径或 HuggingFace Hub ID，以用于 datasets.load_dataset
    prompt_template = PROMPT_TEMPLATE.internlm2_chat  # 设置对话模版
    max_length = 2048  # 设置训练数据截断长度
-   pack_to_max_length = True  # 是否将多条样本打包为一条最长长度的样本，具体可参考 [TODO]
+   pack_to_max_length = True  # 是否将多条样本打包为一条最长长度的样本
 
    # Scheduler & Optimizer
    batch_size = 1  # per_device  # 每个设备的样本个数
@@ -329,7 +329,7 @@ XTuner 内置的配置文件以 QLoRA 微调为主，但并不意味着 XTuner �
 数据集
 ~~~~~~
 
-请参考相关文档 [TODO]
+请参考 `训练` 章节文档。
 
 优化器
 ~~~~~~
