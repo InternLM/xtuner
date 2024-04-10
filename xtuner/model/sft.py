@@ -244,7 +244,7 @@ class SupervisedFinetune(BaseModel):
                 data[key] = split_for_sequence_parallel(val, split_dim=1)
         return data
 
-    def compute_sequence_parallel_loss(self, data):
+    def _compute_sequence_parallel_loss(self, data):
         data = self._split_for_sequence_parallel(data)
         outputs = self.llm(**data)
         labels = data['labels']
@@ -254,7 +254,7 @@ class SupervisedFinetune(BaseModel):
 
     def compute_loss(self, data, data_samples=None):
         if get_sequence_parallel_world_size() > 1:
-            return self.compute_sequence_parallel_loss(data)
+            return self._compute_sequence_parallel_loss(data)
         else:
             outputs = self.llm(**data)
             loss_dict = {'loss': outputs.loss}
