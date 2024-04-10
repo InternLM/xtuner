@@ -26,7 +26,7 @@
    </p>
 
    <p style="text-align:center">
-   :ref:`English <../en/index>` | 简体中文
+   <a href="/en/"> {English}</a>
    </p>
 
 文档
