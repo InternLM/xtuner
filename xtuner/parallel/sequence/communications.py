@@ -84,8 +84,8 @@ def split_for_sequence_parallel(
     rank = dist.get_rank(process_group)
     dim_size = input.size(split_dim)
     assert dim_size % world_size == 0, (
-        f'The dimension to split ({dim_size}) is not a multiple of world size ({world_size}), '
-        f'cannot split tensor evenly')
+        f'The dimension to split ({dim_size}) is not a multiple of '
+        f'world size ({world_size}), cannot split tensor evenly')
 
     tensor_list = torch.split(input, dim_size // world_size, dim=split_dim)
     output = tensor_list[rank].contiguous()
