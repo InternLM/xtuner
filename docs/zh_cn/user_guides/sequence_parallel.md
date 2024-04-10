@@ -156,10 +156,10 @@ input_ids, labels, position_ids, _ = pad_for_sequence_parallel(
 ```python
 from xtuner.parallel.sequence import split_for_sequence_parallel
 # attention mask should not be split
-# `split_dim` is 1 as the shape of tensor is (bs, seq_len, ...)
-input_ids = split_for_sequence_parallel(input_ids, split_dim=1)
-labels = split_for_sequence_parallel(labels, split_dim=1)
-position_ids = split_for_sequence_parallel(position_ids, split_dim=1)
+# `dim` is 1 as the shape of tensor is (bs, seq_len, ...)
+input_ids = split_for_sequence_parallel(input_ids, dim=1)
+labels = split_for_sequence_parallel(labels, dim=1)
+position_ids = split_for_sequence_parallel(position_ids, dim=1)
 ```
 
 以上过程在 `xtuner/model/sft.py` 中实现。
