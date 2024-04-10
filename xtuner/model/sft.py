@@ -14,7 +14,8 @@ from transformers import AutoConfig, PreTrainedModel, PreTrainedTokenizer
 from transformers.integrations import is_deepspeed_zero3_enabled
 
 from xtuner.parallel.sequence import (get_sequence_parallel_world_size,
-                                      reduce_sequence_parallel_loss)
+                                      reduce_sequence_parallel_loss,
+                                      split_for_sequence_parallel)
 from xtuner.registry import BUILDER
 from .modules import dispatch_modules
 from .modules.dispatch import SUPPORT_FLASH1, SUPPORT_FLASH2
@@ -232,7 +233,19 @@ class SupervisedFinetune(BaseModel):
         logits_dict = [{'logits': logits} for logits in outputs.logits]
         return logits_dict
 
+    @staticmethod
+    def _split_for_sequence_parallel(data):
+        # attention mask should not be split
+        ARGS_NEED_TO_SPLIT = ('input_ids', 'labels', 'position_ids')
+        for key in ARGS_NEED_TO_SPLIT:
+            val = data.get(key, None)
+            if val is not None:
+                # `split_dim` is 1 as the shape of tensor is (bs, seq_len, ...)
+                data[key] = split_for_sequence_parallel(val, split_dim=1)
+        return data
+
     def compute_sequence_parallel_loss(self, data):
+        data = self._split_for_sequence_parallel(data)
         outputs = self.llm(**data)
         labels = data['labels']
         num_tokens = (labels != -100).sum()

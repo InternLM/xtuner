@@ -2,8 +2,7 @@
 import torch
 
 from xtuner.utils import DEFAULT_PAD_TOKEN_INDEX, IGNORE_INDEX
-from .setup_distributed import (get_sequence_parallel_rank,
-                                get_sequence_parallel_world_size)
+from .setup_distributed import get_sequence_parallel_world_size
 
 
 def pad_for_sequence_parallel(tokens,
@@ -55,17 +54,3 @@ def pad_for_sequence_parallel(tokens,
         attention_mask = torch.cat([attention_mask, pad], dim=1)
 
     return tokens, labels, position_ids, attention_mask
-
-
-def split_for_sequence_parallel(tensor, split_dim):
-    seq_parallel_world_size = get_sequence_parallel_world_size()
-    if seq_parallel_world_size == 1:
-        return tensor
-
-    seq_parallel_rank = get_sequence_parallel_rank()
-    seq_len = tensor.shape[split_dim]
-    assert seq_len % seq_parallel_world_size == 0
-    sub_seq_len = seq_len // seq_parallel_world_size
-
-    slices = torch.split(tensor, sub_seq_len, dim=split_dim)
-    return slices[seq_parallel_rank]

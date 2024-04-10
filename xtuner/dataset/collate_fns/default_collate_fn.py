@@ -5,8 +5,7 @@ import torch
 from torch.nn.utils.rnn import pad_sequence
 
 from xtuner.parallel.sequence import (get_sequence_parallel_world_size,
-                                      pad_for_sequence_parallel,
-                                      split_for_sequence_parallel)
+                                      pad_for_sequence_parallel)
 from xtuner.utils import DEFAULT_PAD_TOKEN_INDEX, IGNORE_INDEX
 
 
@@ -59,12 +58,6 @@ def default_collate_fn(instances: Sequence[Dict],
     input_ids, labels, position_ids, attention_mask = \
         pad_for_sequence_parallel(input_ids, labels, position_ids,
                                   attention_mask)
-
-    # attention mask should not be split
-    # `split_dim` is 1 as the shape of tensor is (bs, seq_len, dim)
-    input_ids = split_for_sequence_parallel(input_ids, split_dim=1)
-    labels = split_for_sequence_parallel(labels, split_dim=1)
-    position_ids = split_for_sequence_parallel(position_ids, split_dim=1)
 
     if use_varlen_attn:
         max_seqlen = (
