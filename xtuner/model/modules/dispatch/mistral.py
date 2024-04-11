@@ -84,7 +84,6 @@ def mistral_varlen_attn_forward(
     message_hub = MessageHub.get_instance('varlen_attn_args')
     rank = dist.get_rank()
     cumulative_len = message_hub.get_info(f'cumulative_len_rank_{rank}')
-    # position_ids = message_hub.get_info(f'position_ids_rank_{rank}')
     max_seqlen = message_hub.get_info(f'max_seqlen_rank_{rank}')
 
     assert is_training == (cumulative_len is not None) == (
@@ -221,7 +220,6 @@ def mistral_varlen_attn_forward(
     if is_training:
         q_unpad, k_unpad, v_unpad = query_states.flatten(
             0, 1), key_states.flatten(0, 1), value_states.flatten(0, 1)
-        cumulative_len = torch.cat(cumulative_len, dim=0)
         attn_output = flash_attn_varlen_func(
             q_unpad,
             k_unpad,
