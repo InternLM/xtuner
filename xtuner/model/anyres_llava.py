@@ -186,12 +186,30 @@ class AnyResLLaVAModel(LLaVAModel):
         if self.token_merge_ratio != 1:
             # 27 不是偶数，不能被整除，需要 hard code 处理下
             if pn == 27 * 27:
-                # 直接减掉最后 1 个 token，减掉点，确保能被整除
-                visual_outputs = visual_outputs[:, :-1]
                 if self.merge_type == 'simple':
-                    visual_outputs = visual_outputs.reshape(bs, (pn-1) // self.token_merge_ratio, int(hs * 4))
+                    # 直接减掉最后 1 个 token，减掉点，确保能被整除
+                    visual_outputs = visual_outputs[:, :-1]
+                    visual_outputs = visual_outputs.reshape(bs, (pn - 1) // self.token_merge_ratio, int(hs * 4))
                 else:
-                    visual_outputs = self._merge_tokens(visual_outputs, self.token_merge_ratio)
+                    # 只能补 token 了
+                    h_ratio = w_ratio = int(self.token_merge_ratio ** 0.5)
+                    visual_outputs = visual_outputs.reshape(bs, 27, 27, -1)
+                    # pad 为 28*28
+                    visual_outputs = torch.cat(
+                        (visual_outputs, torch.zeros(bs, 1, 27, hs, device=visual_outputs.device,dtype=visual_outputs.dtype)), dim=1)
+                    visual_outputs = torch.cat(
+                        (visual_outputs, torch.zeros(bs, 28, 1, hs, device=visual_outputs.device,dtype=visual_outputs.dtype)), dim=2)
+
+                    # B, H, W // w_r, C * w_r
+                    visual_outputs = visual_outputs.view(bs, 28, 28 // w_ratio, hs * w_ratio)
+                    # B, W // w_r, H, C * w_r
+                    visual_outputs = visual_outputs.permute(0, 2, 1, 3).contiguous()
+                    # B, W // w_r, H // h_r, C * w_r * h_r
+                    visual_outputs = visual_outputs.view(bs, 28 // w_ratio, 28 // h_ratio,
+                                         hs * w_ratio * h_ratio)
+                    # B, W * H // w_r // h_r, C * w_r * h_r
+                    visual_outputs = visual_outputs.view(bs, 28 * 28 // w_ratio // h_ratio,
+                                         hs * w_ratio * h_ratio).contiguous()
 
         # b*n, 182, d
         image_features = self.projector(visual_outputs)
