@@ -1,6 +1,5 @@
 docutils
 myst-parser==2.0.0
--e git+https://github.com/InternLM/pytorch_sphinx_theme.git#egg=pytorch_sphinx_theme
 sphinx==6.2.1
 sphinx-argparse
 sphinx-book-theme==1.0.1

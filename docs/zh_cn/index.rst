@@ -27,7 +27,6 @@
 
 
 
-
 文档
 -------------
 .. toctree::
@@ -52,23 +51,24 @@
    training/modify_settings.rst
    training/custom_sft_dataset.rst
    training/custom_pretrain_dataset.rst
-   training/custom_agent_dataset.md
+   training/custom_agent_dataset.rst
    training/multi_modal_dataset.rst
    training/open_source_dataset.rst
    training/visualization.rst
-   
+
 .. toctree::
    :maxdepth: 2
    :caption: 加速训练
 
-   accelerate/deepspeed.rst
-   accelerate/pack_to_max_length.rst
-   accelerate/flash_attn.rst
-   accelerate/varlen_flash_attn.rst
-   accelerate/hyper_parameters.rst
-   accelerate/benchmark.rst
-   training/train_on_large_scale_dataset.rst
-   training/training_extreme_long_sequence.rst
+   acceleration/deepspeed.rst
+   acceleration/pack_to_max_length.rst
+   acceleration/flash_attn.rst
+   acceleration/varlen_flash_attn.rst
+   acceleration/hyper_parameters.rst
+   acceleration/length_grouped_sampler.rst
+   acceleration/train_large_scale_dataset.rst
+   acceleration/train_extreme_long_sequence.rst
+   acceleration/benchmark.rst
 
 .. toctree::
    :maxdepth: 2
@@ -99,7 +99,7 @@
    :caption: InternEvo 迁移
 
    internevo_migration/internevo_migration.rst
-   internevo_migration/ftdp_dataset/README.md
+   internevo_migration/ftdp_dataset/ftdp.md
    internevo_migration/ftdp_dataset/Case1.rst
    internevo_migration/ftdp_dataset/Case2.rst
    internevo_migration/ftdp_dataset/Case3.rst

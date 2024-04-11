@@ -302,6 +302,7 @@ log_processor = dict(by_epoch=False)
 cd ./examples/demo_data/multi_turn_2
 xtuner train config.py
 ```
+
 # Multi-turn Conversation Example 2
 
 ## Data

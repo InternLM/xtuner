@@ -1,3 +1,5 @@
+.. _train_large_scale_dataset:
+
 大规模数据集训练
 ================
 
