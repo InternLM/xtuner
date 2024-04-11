@@ -190,8 +190,9 @@ class BaseAlgorithm(BaseModel, ChatBackendProtocol):
         self,
         model_path_or_id: str,
         config: Optional[str] = None,
-        from_hub: Literal['huggingface',
-                          'modelscope'] = 'huggingface') -> None:
+        from_hub: Literal['huggingface', 'modelscope'] = 'huggingface',
+        cache_dir: Optional[str] = None,
+    ) -> None:
         """Define how to load a model saved with `save_pretrained`.
 
         Note:
@@ -212,6 +213,11 @@ class BaseAlgorithm(BaseModel, ChatBackendProtocol):
             config (str | None): The config path. Default is None.
             from_hub (str): The model hosting hub, modelscope, or huggingface.
                 Default is huggingface.
+            cache_dir (str | None):
+                The save path when downloading the model. If it is None, it
+                will be stored in the default location of the HUB. For
+                Huggingface, it's ~/.cache/huggingface/hub, for ModelScope,
+                it's ~/.cache/modelscope/hub.
 
         Raises:
             RuntimeError:

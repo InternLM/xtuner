@@ -7,7 +7,7 @@ from typing import Dict, List, Literal, Optional, Union
 import torch
 import torch.distributed as dist
 from accelerate import load_checkpoint_in_model
-from mmengine import Config
+from mmengine import Config, print_log
 from peft import LoraConfig
 from torch import nn
 from torch.nn.utils.rnn import pad_sequence
@@ -244,39 +244,59 @@ class TextFinetune(BaseAlgorithm):
         shutil.copy(config, os.path.join(save_dir, 'xtuner_config.py'))
 
     @classmethod
-    def from_pretrained(
-            cls, checkpoint: str, config: str,
-            from_hub: Literal['huggingface', 'modelscope']) -> 'TextFinetune':
-        checkpoint = download_model_from_hub(checkpoint, from_hub)
+    def from_pretrained(cls,
+                        model_name_or_path: str,
+                        config: str,
+                        from_hub: Literal['huggingface', 'modelscope'],
+                        cache_dir: Optional[str] = None) -> 'TextFinetune':
+        """Automatically load models from local storage or the HUB.
 
-        llm_conf = os.path.join(checkpoint, 'config.json')
-        xtunr_conf = os.path.join(checkpoint, 'xtuner_config.py')
-        tok_conf = os.path.join(checkpoint, 'tokenizer_config.json')
+        Args:
+            model_name_or_path (str): The model name, model path or repo id.
+            config (str | None): The config path. Default is None.
+            from_hub (str): The model hosting hub, modelscope, or huggingface.
+                Default is huggingface.
+            cache_dir (str | None):
+                The save path when downloading the model. If it is None, it
+                will be stored in the default location of the HUB. For
+                Huggingface, it's ~/.cache/huggingface/hub, for ModelScope,
+                it's ~/.cache/modelscope/hub.
+        """
+        model_name_or_path = download_model_from_hub(model_name_or_path,
+                                                     from_hub, cache_dir)
+
+        llm_conf = os.path.join(model_name_or_path, 'config.json')
+        xtuner_conf = os.path.join(model_name_or_path, 'xtuner_config.py')
+        tok_conf = os.path.join(model_name_or_path, 'tokenizer_config.json')
 
         has_llm = os.path.exists(llm_conf)
-        has_conf = os.path.exists(xtunr_conf)
+        has_conf = os.path.exists(xtuner_conf)
         has_tok = os.path.exists(tok_conf)
 
-        if config and has_conf:
-            # TODO add warning
-            config = config
-        elif config and not has_conf:
-            config = config
+        if config:
+            conf_path = config
+            print_log(
+                'A config has been detected as input, the model will be '
+                'built with priority using the provided config'
+                f'({config})',
+                logger='current')
         elif not config and has_conf:
-            config = xtunr_conf
+            conf_path = xtuner_conf
         else:
-            raise RuntimeError
+            raise RuntimeError('`xtuner_config.py` was not found in '
+                               '{model_name_or_path}, please input a config '
+                               'path.')
 
-        config = Config.fromfile(config)
+        config = Config.fromfile(conf_path)
 
         if has_tok:
-            config.model.tokenizer.pretrained_model_name_or_path = checkpoint
+            config.model.tokenizer.pretrained_model_name_or_path = model_name_or_path
 
         if has_llm:
-            config.model.llm.pretrained_model_name_or_path = checkpoint
+            config.model.llm.pretrained_model_name_or_path = model_name_or_path
 
         model: TextFinetune = BUILDER.build(config.model)
-        load_checkpoint_in_model(model.llm, checkpoint)
+        load_checkpoint_in_model(model.llm, model_name_or_path)
 
         return model
 
