@@ -58,35 +58,35 @@
     - 8k
     - 3028.3
     - 185.3
-    - `llama2_70b_full_alpaca_enzh_8k_sp1.py <https://github.com/InternLM/xtuner/tree/main/xtuner/configs/llama_speed_benchmark/llama2_7b/llama2_7b_full_alpaca_enzh_8k_sp1.py>`_
+    - `llama2_70b_full_alpaca_enzh_8k_sp1.py <https://github.com/InternLM/xtuner/tree/main/benchmark/llama2_7b/llama2_7b_full_alpaca_enzh_8k_sp1.py>`_
   * - XTuner
     - Llama2-7B
     - 8
     - 32k
     - 2234.2
     - 193.0
-    - `llama2_7b_full_alpaca_enzh_32k_sp1.py <https://github.com/InternLM/xtuner/tree/main/xtuner/configs/llama_speed_benchmark/llama2_7b/llama2_7b_full_alpaca_enzh_32k_sp1.py>`_
+    - `llama2_7b_full_alpaca_enzh_32k_sp1.py <https://github.com/InternLM/xtuner/tree/main/benchmark/llama2_7b/llama2_7b_full_alpaca_enzh_32k_sp1.py>`_
   * - XTuner
     - Llama2-7B
     - 8
     - 128k
     - 948.6
     - 180.3
-    - `llama2_7b_full_alpaca_enzh_128k_sp8.py <https://github.com/InternLM/xtuner/tree/main/xtuner/configs/llama_speed_benchmark/llama2_7b/llama2_7b_full_alpaca_enzh_128k_sp8.py>`_
+    - `llama2_7b_full_alpaca_enzh_128k_sp8.py <https://github.com/InternLM/xtuner/tree/main/benchmark/llama2_7b/llama2_7b_full_alpaca_enzh_128k_sp8.py>`_
   * - XTuner
     - Llama2-7B
     - 8
     - 256k
     - 540.1
     - 176.9
-    - `llama2_7b_full_alpaca_enzh_256k_sp8.py <https://github.com/InternLM/xtuner/tree/main/xtuner/configs/llama_speed_benchmark/llama2_7b/llama2_7b_full_alpaca_enzh_256k_sp8.py>`_
+    - `llama2_7b_full_alpaca_enzh_256k_sp8.py <https://github.com/InternLM/xtuner/tree/main/benchmark/llama2_7b/llama2_7b_full_alpaca_enzh_256k_sp8.py>`_
   * - XTuner
     - Llama2-7B
     - 8
     - 1M
     - 133.6
     - 153.9
-    - `llama2_7b_full_alpaca_enzh_1M_sp16.py <https://github.com/InternLM/xtuner/tree/main/xtuner/configs/llama_speed_benchmark/llama2_7b/llama2_7b_full_alpaca_enzh_1M_sp16.py>`_
+    - `llama2_7b_full_alpaca_enzh_1M_sp16.py <https://github.com/InternLM/xtuner/tree/main/benchmark/llama2_7b/llama2_7b_full_alpaca_enzh_1M_sp16.py>`_
 
 .. list-table::
   :widths: 15 15 15 20 20 20 50
@@ -105,28 +105,28 @@
     - 8k
     - 485.1
     - 165.6
-    - `yi_34b_200k_full_alpaca_enzh_8k_sp1.py <https://github.com/InternLM/xtuner/tree/main/xtuner/configs/llama_speed_benchmark/yi_34b/yi_34b_200k_full_alpaca_enzh_8k_sp1.py>`_
+    - `yi_34b_200k_full_alpaca_enzh_8k_sp1.py <https://github.com/InternLM/xtuner/tree/main/benchmark/yi_34b/yi_34b_200k_full_alpaca_enzh_8k_sp1.py>`_
   * - XTuner
     - Yi-34B-200K
     - 32
     - 32k
     - 491.5
     - 209.1
-    - `yi_34b_200k_full_alpaca_enzh_32k_sp2.py <https://github.com/InternLM/xtuner/tree/main/xtuner/configs/llama_speed_benchmark/yi_34b/yi_34b_200k_full_alpaca_enzh_32k_sp2.py>`_
+    - `yi_34b_200k_full_alpaca_enzh_32k_sp2.py <https://github.com/InternLM/xtuner/tree/main/benchmark/yi_34b/yi_34b_200k_full_alpaca_enzh_32k_sp2.py>`_
   * - XTuner
     - Yi-34B-200K
     - 32
     - 128k
     - 251.1
     - 191.8
-    - `yi_34b_200k_full_alpaca_enzh_128k_sp8.py <https://github.com/InternLM/xtuner/tree/main/xtuner/configs/llama_speed_benchmark/yi_34b/yi_34b_200k_full_alpaca_enzh_128k_sp8.py>`_
+    - `yi_34b_200k_full_alpaca_enzh_128k_sp8.py <https://github.com/InternLM/xtuner/tree/main/benchmark/yi_34b/yi_34b_200k_full_alpaca_enzh_128k_sp8.py>`_
   * - XTuner
     - Yi-34B-200K
     - 32
     - 256k
     - 119.7
     - 145.3
-    - `yi_34b_200k_full_alpaca_enzh_256k_sp8.py <https://github.com/InternLM/xtuner/tree/main/xtuner/configs/llama_speed_benchmark/yi_34b/yi_34b_200k_full_alpaca_enzh_256k_sp8.py>`_
+    - `yi_34b_200k_full_alpaca_enzh_256k_sp8.py <https://github.com/InternLM/xtuner/tree/main/benchmark/yi_34b/yi_34b_200k_full_alpaca_enzh_256k_sp8.py>`_
 
 .. list-table::
   :widths: 15 15 15 20 20 20 50
@@ -145,35 +145,35 @@
     - 8k
     - 216.8
     - 144.7
-    - `llama2_70b_full_alpaca_enzh_8k_sp1.py <https://github.com/InternLM/xtuner/tree/main/xtuner/configs/llama_speed_benchmark/llama2_70b/llama2_70b_full_alpaca_enzh_8k_sp1.py>`_
+    - `llama2_70b_full_alpaca_enzh_8k_sp1.py <https://github.com/InternLM/xtuner/tree/main/benchmark/llama2_70b/llama2_70b_full_alpaca_enzh_8k_sp1.py>`_
   * - XTuner
     - Llama2-70B
     - 32
     - 32k
     - 300.9
     - 239.6
-    - `llama2_70b_full_alpaca_enzh_32k_sp4.py <https://github.com/InternLM/xtuner/tree/main/xtuner/configs/llama_speed_benchmark/llama2_70b/llama2_70b_full_alpaca_enzh_32k_sp4.py>`_
+    - `llama2_70b_full_alpaca_enzh_32k_sp4.py <https://github.com/InternLM/xtuner/tree/main/benchmark/llama2_70b/llama2_70b_full_alpaca_enzh_32k_sp4.py>`_
   * - XTuner
     - Llama2-70B
     - 32
     - 128k
     - 144.7
     - 189.7
-    - `llama2_70b_full_alpaca_enzh_128k_sp8.py <https://github.com/InternLM/xtuner/tree/main/xtuner/configs/llama_speed_benchmark/llama2_70b/llama2_70b_full_alpaca_enzh_128k_sp8.py>`_
+    - `llama2_70b_full_alpaca_enzh_128k_sp8.py <https://github.com/InternLM/xtuner/tree/main/benchmark/llama2_70b/llama2_70b_full_alpaca_enzh_128k_sp8.py>`_
   * - XTuner
     - Llama2-70B
     - 32
     - 256k
     - 63.8
     - 127.6
-    - `llama2_70b_full_alpaca_enzh_256k_sp16.py <https://github.com/InternLM/xtuner/tree/main/xtuner/configs/llama_speed_benchmark/llama2_70b/llama2_70b_full_alpaca_enzh_256k_sp16.py>`_
+    - `llama2_70b_full_alpaca_enzh_256k_sp16.py <https://github.com/InternLM/xtuner/tree/main/benchmark/llama2_70b/llama2_70b_full_alpaca_enzh_256k_sp16.py>`_
   * - XTuner
     - Llama2-70B
     - 64
     - 1M
     - 21.8
     - 133.5
-    - `llama2_70b_full_alpaca_enzh_1M_sp64.py <https://github.com/InternLM/xtuner/tree/main/xtuner/configs/llama_speed_benchmark/llama2_70b/llama2_70b_full_alpaca_enzh_1M_sp64.py>`_
+    - `llama2_70b_full_alpaca_enzh_1M_sp64.py <https://github.com/InternLM/xtuner/tree/main/benchmark/llama2_70b/llama2_70b_full_alpaca_enzh_1M_sp64.py>`_
 
 注：所有实验都会将 Alpaca 数据集拼接为最大长度。由于 Alpaca 数据集所含
 token 数较少，无法拼接成超长序列（如 1M
