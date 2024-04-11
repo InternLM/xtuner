@@ -32,10 +32,12 @@ class AnyResLLaVAModel(LLaVAModel):
                  tokenizer=None,
                  template=None,
                  image_grid_pinpoints=None,
+                 merge_type='simple',  # or pixel_shuffle
                  token_merge_ratio=4):
         super(LLaVAModel, self).__init__()
         self.freeze_llm = freeze_llm
         self.freeze_visual_encoder = freeze_visual_encoder
+        self.merge_type = merge_type
         with LoadWoInit():
             if isinstance(llm, dict):
                 llm = self._dispatch_lm_model_cfg(llm, max_position_embeddings)
@@ -186,7 +188,10 @@ class AnyResLLaVAModel(LLaVAModel):
             if pn == 27 * 27:
                 # 直接减掉最后 1 个 token，减掉点，确保能被整除
                 visual_outputs = visual_outputs[:, :-1]
-                visual_outputs = visual_outputs.reshape(bs, (pn-1) // self.token_merge_ratio, int(hs * 4))
+                if self.merge_type == 'simple':
+                    visual_outputs = visual_outputs.reshape(bs, (pn-1) // self.token_merge_ratio, int(hs * 4))
+                else:
+                    visual_outputs = self._merge_tokens(visual_outputs, self.token_merge_ratio)
 
         # b*n, 182, d
         image_features = self.projector(visual_outputs)
