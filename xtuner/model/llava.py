@@ -30,6 +30,7 @@ class LLaVAModel(BaseModel):
                  freeze_llm=False,
                  freeze_visual_encoder=False,
                  visual_select_layer=-2,
+                 token_merge_ratio=1,
                  pretrained_pth=None,
                  projector_depth=2,
                  llm_lora=None,
@@ -52,8 +53,12 @@ class LLaVAModel(BaseModel):
         self.llm.config.use_cache = False
         dispatch_modules(self.llm)
 
+        assert int(token_merge_ratio**0.5)**2 == token_merge_ratio, \
+            '`token_merge_ratio` must be a square number.'
+        self.token_merge_ratio = int(token_merge_ratio)
+
         projector_config = ProjectorConfig(
-            visual_hidden_size=self.visual_encoder.config.hidden_size,
+            visual_hidden_size=self.visual_encoder.config.hidden_size * token_merge_ratio,
             llm_hidden_size=self.llm.config.hidden_size,
             depth=projector_depth)
         self.projector = ProjectorModel(projector_config).to(
@@ -249,18 +254,50 @@ class LLaVAModel(BaseModel):
         else:
             raise NotImplementedError
 
+    @staticmethod
+    def _merge_tokens(tokens, token_merge_ratio):
+        if token_merge_ratio > 1:
+            # B, N, C
+            b, n, c = tokens.shape
+            h = w = int(n ** 0.5)
+            h_ratio = w_ratio = int(token_merge_ratio ** 0.5)
+            assert h * w == n
+            assert n % token_merge_ratio == 0, 'The number of visual tokens is not divisible by `token_merge_ratio`.'
+            # B, H, W, C
+            tokens = tokens.view(b, h, w, c)
+            # B, H, W // w_r, C * w_r
+            tokens = tokens.view(b, h, w // w_ratio, c * w_ratio)
+            # B, W // w_r, H, C * w_r
+            tokens = tokens.permute(0, 2, 1, 3).contiguous()
+            # B, W // w_r, H // h_r, C * w_r * h_r
+            tokens = tokens.view(b, w // w_ratio, h // h_ratio, 
+                                 c * w_ratio * h_ratio)
+            # B, W * H // w_r // h_r, C * w_r * h_r
+            tokens = tokens.view(b, w * h // w_ratio // h_ratio, 
+                                 c * w_ratio * h_ratio)
+        return tokens
+
+    @staticmethod
+    def _get_model_class_name(model):
+        base_model = model
+        if model.__class__.__name__ == 'PeftModel':
+            base_model = model.base_model.model
+        else:
+            base_model = model
+        return base_model.__class__.__name__
+
     def _prepare_data_for_llm(self, data):
         if 'pixel_values' in data:
             visual_outputs = self.visual_encoder(
                 data['pixel_values'].to(self.visual_encoder.dtype),
                 output_hidden_states=True)
-            if type(self.visual_encoder).__name__ == 'CLIPVisionModel':
-                visual_outputs = visual_outputs.hidden_states[self.visual_select_layer][:, 1:]
-            elif type(self.visual_encoder).__name__ == 'SiglipVisionModel':
-                visual_outputs = visual_outputs.hidden_states[self.visual_select_layer]
-            else:
-                raise NotImplementedError
+            visual_outputs = visual_outputs.hidden_states[self.visual_select_layer]
+
+            if self._get_model_class_name(self.visual_encoder) != 'SiglipVisionModel':
+                visual_outputs = visual_outputs[:, 1:]
+            visual_outputs = self._merge_tokens(visual_outputs, self.token_merge_ratio)
             pixel_values = self.projector(visual_outputs)
+
             data['pixel_values'] = pixel_values
             data = prepare_inputs_labels_for_multimodal(llm=self.llm, **data)
         return data
