@@ -19,19 +19,22 @@ except ImportError:
 
 
 class OpenCLIPVisionTower(nn.Module):
-    def __init__(self, vision_tower, optimize_vision_tower_aux=False, delay_load=False):
+    def __init__(self, vision_tower, vision_tower_path, optimize_vision_tower_aux=False, delay_load=False):
         super().__init__()
 
         self.is_loaded = False
         self.vision_tower_name = vision_tower
-        self.vision_config = json.load(open(os.path.join(vision_tower, 'open_clip_config.json'), 'r'))
+        self.vision_tower_path = vision_tower_path
+        self.vision_config = json.load(
+            open(os.path.join(self.vision_tower_path, 'open_clip_config.json'), 'r')
+        )
         self.is_optimize = optimize_vision_tower_aux
 
         if not delay_load:
             self.load_model()
 
     def load_model(self):
-        ckpt_path = os.path.join(self.vision_tower_name, 'open_clip_pytorch_model.bin')
+        ckpt_path = os.path.join(self.vision_tower_path, 'open_clip_pytorch_model.bin')
         if 'convnext' in self.vision_tower_name:
             if 'large' in self.vision_tower_name and 'd-320' in self.vision_tower_name:
                 self.model_type = 'convnext_large_d_320'
