@@ -60,10 +60,10 @@ class OpenCLIPVisionTower(nn.Module):
 
         # self.vision_stages.requires_grad_(False)
 
-    def gradient_checkpointing_enabled(self):
+    def activation_checkpointing_enable(self):
         self.clip_model.set_grad_checkpointing(True)
 
-    def gradient_checkpointing_disabled(self):
+    def activation_checkpointing_disable(self):
         self.clip_model.set_grad_checkpointing(False)
 
     def forward(self, images):
@@ -102,7 +102,7 @@ class OpenCLIPVisionTower(nn.Module):
         results = {}    
         x = self.clip_model.vision_stem(images)
         for _idx in range(len(self.vision_stages)):
-            x =  self.clip_model.vision_stages[_idx](x)
+            x = self.clip_model.vision_stages[_idx](x)
             results[f'stage_{_idx}'] = x
         return results
 

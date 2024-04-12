@@ -39,11 +39,13 @@ class MiniGeminiModel(LLaVAModel):
 
     def activation_checkpointing_disable(self):
         super().activation_checkpointing_disable()
-        self.visual_encoder_aux.gradient_checkpointing_disable()
+        if hasattr(self, 'visual_encoder_aux'):
+            self.visual_encoder_aux.activation_checkpointing_disable()
 
     def activation_checkpointing_enable(self):
         super().activation_checkpointing_enable()
-        self.visual_encoder_aux.gradient_checkpointing_enable()
+        if hasattr(self, 'visual_encoder_aux'):
+            self.visual_encoder_aux.activation_checkpointing_enable()
 
     def state_dict(self, *args, **kwargs):
         state_dict = super().state_dict(*args, **kwargs)
@@ -88,7 +90,7 @@ class MiniGeminiModel(LLaVAModel):
             visual_outputs = self.visual_encoder(
                 data['pixel_values'].to(self.visual_encoder.dtype),
                 output_hidden_states=True)
-            visual_outputs = visual_outputs.hidden_states[self.visual_select_layer]
+            visual_outputs = visual_outputs.hidden_states[self.visual_select_layer].bf16()
 
             if self._get_model_class_name(self.visual_encoder) != 'SiglipVisionModel':
                 visual_outputs = visual_outputs[:, 1:]
@@ -121,9 +123,16 @@ class MiniGeminiModel(LLaVAModel):
         embed_query = self.vlm_uni_query_projector(images)
         embed_aux = self.vlm_uni_aux_projector(images_aux)
         embed_value = self.vlm_uni_val_projector(images_aux)
+        # TODO siglip+convnext 在第一次 forward 后正常，但是 embed_att 会出现 nan
+        # TODO 导致第二次迭代时候 embed_value 会出现 nan，无法训练
+        # TODO 怀疑是特征不匹配，即使全部转换为 fp32 也会出现 nan, 需要进一步排查
         embed_att = embed_query[:, :, None] @ (embed_aux.transpose(-1, -2) / (embed_aux.shape[-1] ** 0.5))
+        # print('=xxxx=', torch.any(torch.isnan(embed_query)).item(),
+        #       torch.any(torch.isnan(embed_aux)).item(),
+        #       torch.any(torch.isnan(embed_value)).item(),
+        #       torch.any(torch.isnan(embed_att)).item())
         embed_att = embed_att.nan_to_num()
         embed_feat = (embed_att.softmax(-1) @ embed_value).mean(2)
-
+        # print('=xxcccxx=', torch.any(torch.isnan(embed_feat)).item())
         image_features = images + embed_feat
         return image_features
