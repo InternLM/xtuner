@@ -30,12 +30,11 @@ class MiniGeminiModel(LLaVAModel):
                                                    nn.Linear(mm_hidden_size_aux,
                                                              mm_hidden_size))
 
-        if pretrained_pth is not None and not self.freeze_visual_encoder:
+        if pretrained_pth is not None:
             pretrained_state_dict = guess_load_checkpoint(pretrained_pth)
 
-            # to load convnext model
             self.load_state_dict(pretrained_state_dict, strict=False)
-            print(f'=======Load pretrained weight from {pretrained_pth}')
+            print(f'Load pretrained weight from {pretrained_pth}')
 
     def activation_checkpointing_disable(self):
         super().activation_checkpointing_disable()

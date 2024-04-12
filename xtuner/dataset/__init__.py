@@ -15,6 +15,7 @@ from .utils import decode_base64_to_image, expand2square, load_image
 from .llava_proxy_eval_dataset import LLaVAProxyEvalDataset
 from .anyres_llava_proxy_eval_dataset import AnyResLLaVAProxyEvalDataset
 from .mini_gemini_dataset import MiniGeminiDataset
+from .mini_gemini_proxy_eval_dataset import MiniGeminiProxyEvalDataset
 
 # ignore FutureWarning in hf datasets
 warnings.simplefilter(action='ignore', category=FutureWarning)
@@ -38,5 +39,6 @@ __all__ = [
     'AnyResLLaVADataset',
     'LLaVAProxyEvalDataset',
     'AnyResLLaVAProxyEvalDataset',
-    'MiniGeminiDataset'
+    'MiniGeminiDataset',
+    'MiniGeminiProxyEvalDataset'
 ]
