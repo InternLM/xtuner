@@ -16,7 +16,7 @@ class MiniGeminiDataset(LLaVADataset):
         self._model_name = type(self.image_processor).__name__
 
         if self._model_name == 'CLIPImageProcessor':
-            self.crop_size_raw = self.image_processor.size.copy()
+            self.crop_size_raw = self.image_processor.crop_size.copy()
             self.image_processor.crop_size['height'] = image_size_aux
             self.image_processor.crop_size['width'] = image_size_aux
             self.image_processor.size['shortest_edge'] = image_size_aux
