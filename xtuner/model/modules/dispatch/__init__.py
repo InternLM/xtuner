@@ -249,11 +249,11 @@ def dispatch_yi_attn_forward(model):
 
 
 def dispatch_mistral_attn_forward(model, use_varlen_attn):
-    if (not SUPPORT_FLASH) or (not use_varlen_attn):
-        return
     if use_varlen_attn:
         assert SUPPORT_FLASH2 and SUPPORT_TRITON, \
             'flash_attn and triton is required if you want to use varlen_attn.'
+    elif not SUPPORT_FLASH2:
+        return
 
     from .mistral import mistral_attn_forward, mistral_varlen_attn_forward
 

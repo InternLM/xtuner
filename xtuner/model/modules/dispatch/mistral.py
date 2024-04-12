@@ -11,6 +11,7 @@ from transformers.cache_utils import Cache
 from transformers.models.mistral.modeling_mistral import (apply_rotary_pos_emb,
                                                           repeat_kv)
 
+from xtuner.parallel.sequence import get_sequence_parallel_world_size
 from xtuner.parallel.sequence.attention import (
     post_process_for_sequence_parallel_attn,
     pre_process_for_sequence_parallel_attn)
@@ -206,8 +207,13 @@ def mistral_attn_forward(
     key_states = key_states.transpose(1, 2)
     value_states = value_states.transpose(1, 2)
 
-    query_states, key_states, value_states = pre_process_for_sequence_parallel_attn(
-        query_states, key_states, value_states)
+    enable_sequence_parallel = (
+        dist.is_initialized() and get_sequence_parallel_world_size() > 1
+        and self.training)
+    if enable_sequence_parallel:
+        query_states, key_states, value_states = \
+            pre_process_for_sequence_parallel_attn(
+                query_states, key_states, value_states)
 
     attn_output = self._flash_attention_forward(
         query_states,
@@ -219,7 +225,8 @@ def mistral_attn_forward(
         use_sliding_windows=use_sliding_windows,
     )
 
-    attn_output = post_process_for_sequence_parallel_attn(attn_output)
+    if enable_sequence_parallel:
+        attn_output = post_process_for_sequence_parallel_attn(attn_output)
 
     attn_output = attn_output.reshape(bsz, q_len,
                                       self.hidden_size).contiguous()
@@ -387,7 +394,7 @@ def mistral_varlen_attn_forward(
             cumulative_len,
             max_seqlen,
             causal=causal,
-            dropout_rate=dropout_rate,
+            dropout_p=dropout_rate,
             window_size=window_size,
             training=True)
     else:
@@ -396,7 +403,7 @@ def mistral_varlen_attn_forward(
             key_states,
             value_states,
             causal=causal,
-            dropout_rate=0.,
+            dropout_p=dropout_rate,
             window_size=window_size,
             training=False)
 
