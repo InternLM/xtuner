@@ -420,6 +420,10 @@ def llama_varlen_attn_forward(
     key_states = key_states.transpose(1, 2)
     value_states = value_states.transpose(1, 2)
 
+    # repeat kv for sequence parallel
+    key_states = repeat_kv_bshd(key_states, self.num_key_value_groups)
+    value_states = repeat_kv_bshd(value_states, self.num_key_value_groups)
+
     dropout_rate = self.attention_dropout if self.training else 0.0
 
     # In PEFT, usually we cast the layer norms in float32 for training

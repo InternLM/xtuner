@@ -255,7 +255,7 @@ def dispatch_mistral_attn_forward(model, use_varlen_attn):
         assert SUPPORT_FLASH2 and SUPPORT_TRITON, \
             'flash_attn and triton is required if you want to use varlen_attn.'
 
-    from .mistral import mistral_varlen_attn_forward
+    from .mistral import mistral_attn_forward, mistral_varlen_attn_forward
 
     print_log(NO_ATTN_WEIGHTS_MSG, 'current', logging.WARNING)
     for module in model.modules():
@@ -263,9 +263,13 @@ def dispatch_mistral_attn_forward(model, use_varlen_attn):
                                      'MistralFlashAttention2',
                                      'MixtralAttention',
                                      'MixtralFlashAttention2'):
-            print_log('dispatch mistral varlen attn forward', 'current')
-            module.forward = types.MethodType(mistral_varlen_attn_forward,
-                                              module)
+            if use_varlen_attn:
+                print_log('dispatch mistral varlen attn forward', 'current')
+                module.forward = types.MethodType(mistral_varlen_attn_forward,
+                                                  module)
+            else:
+                print_log('dispatch mistral attn forward', 'current')
+                module.forward = types.MethodType(mistral_attn_forward, module)
 
 
 def dispatch_mistral_rmsnorm_forward(model):
