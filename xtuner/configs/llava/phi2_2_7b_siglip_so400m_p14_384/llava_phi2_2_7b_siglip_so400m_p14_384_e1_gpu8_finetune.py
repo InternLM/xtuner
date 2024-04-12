@@ -321,8 +321,8 @@ test_dataset = [
         pad_image_to_square=True),
     dict(
         type=GQADataset,
-        question_file='/mnt/petrelfs/share_data/zhaoxiangyu/gqa_llava_eval/llava_gqa_testdev_balanced.jsonl',
-        gt_file='/mnt/petrelfs/share_data/zhaoxiangyu/gqa_llava_eval/testdev_balanced_questions.json',
+        data_file='/mnt/petrelfs/share_data/zhaoxiangyu/gqa_llava_eval/llava_gqa_testdev_balanced.jsonl',
+        ann_file='/mnt/petrelfs/share_data/zhaoxiangyu/gqa_llava_eval/testdev_balanced_questions.json',
         image_folder='/mnt/petrelfs/share_data/basemodel/dataset/multimodality/gqa/images',
         prompt_template=PROMPT_TEMPLATE.vicuna,
         tokenizer=tokenizer,

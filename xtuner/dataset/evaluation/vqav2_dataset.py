@@ -7,43 +7,45 @@ from xtuner.dataset.evaluation.base_eval_dataset import BaseEvalDataset
 from xtuner.registry import BUILDER
 from mmengine.logging import print_log
 from xtuner.dataset.llava_proxy_eval_dataset import LLaVAProxyEvalDataset
-from .gqa_eval_utils import eval_gqa
+from .vqav2_utils import EvalAIAnswerProcessor
 
 
-class GQADataset(BaseEvalDataset):
-    METAINFO: dict = dict(name='gqa')
+class VQAv2Dataset(BaseEvalDataset):
+
+    METAINFO: dict = dict(name='vqa_v2')
 
     def __init__(
-            self,
-            data_file,
-            ann_file,
-            image_folder,
-            prompt_template,
-            image_processor,
-            tokenizer,
-            pad_image_to_square=True,
-            use_system=False,
-            for_llava_prompt=False,
-            metainfo=None,
-            proxy_eval_dataset=dict(type=LLaVAProxyEvalDataset),
+        self,
+        data_file,
+        test_file,
+        image_folder,
+        prompt_template,
+        image_processor,
+        tokenizer,
+        pad_image_to_square=True,
+        use_system=False,
+        for_llava_prompt=False,
+        metainfo=None,
+        proxy_eval_dataset=dict(type=LLaVAProxyEvalDataset),
     ):
         super().__init__(metainfo)
         self.data_file = data_file
-        self.ann_file = ann_file
-        # Save detailed information for easy viewing
-        self.answer_file = 'answer_gqa_results.jsonl'
-        # solely for evaluation purposes
-        self.prediction_file = 'pred_gqa_results.jsonl'
-
+        self.test_file = test_file
         self.image_folder = image_folder
+        # Save detailed information for easy viewing
+        self.answer_file = 'answer_vqav2_results.jsonl'
+        # solely for evaluation purposes
+        self.prediction_file = 'pred_vqav2_results.jsonl'
+        self.answer_processor = EvalAIAnswerProcessor()
+
         self.use_system = use_system
         self.for_llava_prompt = for_llava_prompt
-        template = prompt_template
-        self.template = template
+        self.template = prompt_template
+        self.pad_image_to_square = pad_image_to_square
 
         self.tokenizer = BUILDER.build(tokenizer)
         self.image_processor = BUILDER.build(image_processor)
-        self.pad_image_to_square = pad_image_to_square
+
         self.data = self.load_data_list()
 
         proxy_eval_dataset['eval_dataset'] = self
@@ -67,6 +69,7 @@ class GQADataset(BaseEvalDataset):
                 'category': category,
             }
             data_list.append(data)
+
         return data_list
 
     def __len__(self):
@@ -99,20 +102,38 @@ class GQADataset(BaseEvalDataset):
             )
         ans_file.close()
 
-        all_preds = []
+        results = []
+        error_line = 0
         for line_idx, line in enumerate(open(answers_file)):
-            res = json.loads(line)
-            question_id = res['question_id']
-            text = res['text'].rstrip('.').lower()
-            all_preds.append({"questionId": question_id, "prediction": text})
+            try:
+                results.append(json.loads(line))
+            except:
+                error_line += 1
+
+        results = {x['question_id']: x['text'] for x in results}
+        test_split = [json.loads(line) for line in open(self.test_file)]
+
+        all_answers = []
+
+        for x in test_split:
+            if x['question_id'] not in results:
+                all_answers.append({
+                    'question_id': x['question_id'],
+                    'answer': ''
+                })
+            else:
+                all_answers.append({
+                    'question_id': x['question_id'],
+                    'answer': self.answer_processor(results[x['question_id']])
+                })
 
         prediction_file = osp.join(work_dir, self.prediction_file)
         with open(prediction_file, 'w') as f:
-            json.dump(all_preds, f)
+            json.dump(all_answers, f)
 
-        evaluator = eval_gqa(questions=self.ann_file, predictions=prediction_file)
         print_log('============================================', 'current')
-        scores = evaluator.forward()
+        print(f'total results: {len(results)}, total split: {len(test_split)}, error_line: {error_line}')
+        print_log(f'Please submit the generated {prediction_file} file to the official server for evaluation.',
+                  'current')
         print_log('============================================', 'current')
-        print_log(f'GQA successfully finished evaluating', 'current')
-        return scores
+        return {'acc': 0}

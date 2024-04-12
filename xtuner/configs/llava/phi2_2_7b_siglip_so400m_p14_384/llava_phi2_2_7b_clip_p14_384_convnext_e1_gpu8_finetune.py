@@ -14,7 +14,7 @@ from xtuner.engine.hooks import DatasetInfoHook, EvaluateChatHook
 from xtuner.model import MiniGeminiModel
 from xtuner.utils import PROMPT_TEMPLATE
 from xtuner.dataset.evaluation import MMEDataset, MultipleChoiceDataset, POPEDataset, \
-    HallusionDataset, TextVQADataset, GQADataset
+    HallusionDataset, TextVQADataset, GQADataset, VQAv2Dataset
 from xtuner.dataset import ConcatDataset
 from xtuner.engine.runner import TrainLoop, ValLoop, TestLoop
 from mmengine.dataset import DefaultSampler
@@ -252,14 +252,6 @@ test_dataset = [
     dict(
         type=MultipleChoiceDataset,
         proxy_eval_dataset=dict(type=MiniGeminiProxyEvalDataset, image_size_aux=image_size_aux),
-        data_file='/mnt/petrelfs/huanghaian/code/xtuner/LMUData/MMBench_TEST_EN.tsv',
-        prompt_template=PROMPT_TEMPLATE.vicuna,
-        tokenizer=tokenizer,
-        image_processor=image_processor,
-        pad_image_to_square=True),
-    dict(
-        type=MultipleChoiceDataset,
-        proxy_eval_dataset=dict(type=MiniGeminiProxyEvalDataset, image_size_aux=image_size_aux),
         data_file='/mnt/petrelfs/huanghaian/code/xtuner/LMUData/SEEDBench_IMG.tsv',
         prompt_template=PROMPT_TEMPLATE.vicuna,
         tokenizer=tokenizer,
@@ -341,13 +333,40 @@ test_dataset = [
     dict(
         type=GQADataset,
         proxy_eval_dataset=dict(type=MiniGeminiProxyEvalDataset, image_size_aux=image_size_aux),
-        question_file='/mnt/petrelfs/share_data/zhaoxiangyu/gqa_llava_eval/llava_gqa_testdev_balanced.jsonl',
-        gt_file='/mnt/petrelfs/share_data/zhaoxiangyu/gqa_llava_eval/testdev_balanced_questions.json',
+        data_file='/mnt/petrelfs/share_data/zhaoxiangyu/gqa_llava_eval/llava_gqa_testdev_balanced.jsonl',
+        ann_file='/mnt/petrelfs/share_data/zhaoxiangyu/gqa_llava_eval/testdev_balanced_questions.json',
         image_folder='/mnt/petrelfs/share_data/basemodel/dataset/multimodality/gqa/images',
         prompt_template=PROMPT_TEMPLATE.vicuna,
         tokenizer=tokenizer,
         image_processor=image_processor,
         pad_image_to_square=True),
+    dict(
+        type=MultipleChoiceDataset,
+        data_file='/mnt/petrelfs/share_data/zhaoxiangyu/datasets--Lin-Chen--MMStar/snapshots/mmstar/MMStar.tsv',
+        prompt_template=PROMPT_TEMPLATE.vicuna,
+        tokenizer=tokenizer,
+        image_processor=image_processor,
+        pad_image_to_square=True),
+    # 以下两个需要提交服务器进行在线评测
+    dict(
+        type=MultipleChoiceDataset,
+        proxy_eval_dataset=dict(type=MiniGeminiProxyEvalDataset, image_size_aux=image_size_aux),
+        data_file='/mnt/petrelfs/huanghaian/code/xtuner/LMUData/MMBench_TEST_EN.tsv',
+        prompt_template=PROMPT_TEMPLATE.vicuna,
+        tokenizer=tokenizer,
+        image_processor=image_processor,
+        pad_image_to_square=True),
+    # vqav2 图片大概是 12w，推理要很久
+    # dict(
+    #     type=VQAv2Dataset,
+    #     data_file='/mnt/petrelfs/share_data/zhaoxiangyu/vqav2_llava_eval/llava_vqav2_mscoco_test-dev2015.jsonl',
+    #     test_file='/mnt/petrelfs/share_data/zhaoxiangyu/vqav2_llava_eval/llava_vqav2_mscoco_test2015.jsonl',
+    #     image_folder='/mnt/petrelfs/share_data/zhaoxiangyu/vqav2_test2015',
+    #     prompt_template=PROMPT_TEMPLATE.vicuna,
+    #     tokenizer=tokenizer,
+    #     image_processor=image_processor,
+    #     pad_image_to_square=True,
+    # ),
 ]
 
 # TODO: We are not currently using val_evaluator
