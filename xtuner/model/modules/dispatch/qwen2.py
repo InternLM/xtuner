@@ -5,18 +5,16 @@ from typing import Optional
 
 import torch
 import torch.distributed as dist
-import torch.nn as nn
 from mmengine import MessageHub
 from transformers.cache_utils import Cache
-from transformers.models.mistral.modeling_mistral import (apply_rotary_pos_emb,
-                                                          repeat_kv)
+from transformers.models.qwen2.modeling_qwen2 import (apply_rotary_pos_emb,
+                                                      repeat_kv)
 
 from xtuner.parallel.sequence import get_sequence_parallel_world_size
 from xtuner.parallel.sequence.attention import (
     post_process_for_sequence_parallel_attn,
     pre_process_for_sequence_parallel_attn)
 from .attention import flash_attn_wo_mask, varlen_flash_attn
-from .triton_kernels import apply_rotary_emb
 
 SUPPORT_FLASH2 = False
 
@@ -29,67 +27,7 @@ except ImportError:
     pass
 
 
-class MistralRotaryEmbedding(nn.Module):
-
-    def __init__(self,
-                 dim,
-                 max_position_embeddings=2048,
-                 base=10000,
-                 device=None):
-        super().__init__()
-
-        self.dim = dim
-        self.max_position_embeddings = max_position_embeddings
-        self.base = base
-        self.inv_freq = 1.0 / (
-            base**(torch.arange(0, self.dim, 2).float().to(device) / self.dim))
-
-        # Build here to make `torch.jit.trace` work.
-        self._set_cos_sin_cache(
-            seq_len=max_position_embeddings,
-            device=self.inv_freq.device,
-            dtype=torch.get_default_dtype())
-
-    def _set_cos_sin_cache(self, seq_len, device, dtype):
-        self.max_seq_len_cached = seq_len
-        t = torch.arange(
-            self.max_seq_len_cached, device=device, dtype=self.inv_freq.dtype)
-        freqs = torch.einsum('i,j->ij', t, self.inv_freq.to(device))
-        # Different from paper, but it uses a different permutation
-        # in order to obtain the same calculation
-        emb = torch.cat((freqs, freqs), dim=-1).to(device)
-        self.cos_cached = emb.cos().to(dtype)
-        self.sin_cached = emb.sin().to(dtype)
-
-    def forward(self, x, seq_len=None):
-        # x: [bs, num_attention_heads, seq_len, head_size]
-        if (seq_len > self.max_seq_len_cached
-                or self.cos_cached.device != x.device  # noqa: W503
-                or self.cos_cached.dtype != x.dtype):  # noqa: W503
-            self._set_cos_sin_cache(
-                seq_len=seq_len, device=x.device, dtype=x.dtype)
-
-        return (
-            self.cos_cached[:seq_len].to(dtype=x.dtype),
-            self.sin_cached[:seq_len].to(dtype=x.dtype),
-        )
-
-
-def repeat_kv_bshd(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
-    """The hidden states go from (batch, seqlen, num_key_value_heads, head_dim)
-    to (batch, seqlen, num_attention_heads, head_dim)"""
-    batch, slen, num_key_value_heads, head_dim = hidden_states.shape
-    if n_rep == 1:
-        return hidden_states
-    hidden_states = hidden_states[:, :, :,
-                                  None, :].expand(batch, slen,
-                                                  num_key_value_heads, n_rep,
-                                                  head_dim)
-    return hidden_states.reshape(batch, slen, num_key_value_heads * n_rep,
-                                 head_dim)
-
-
-def mistral_attn_forward(
+def qwen2_attn_forward(
     self,
     hidden_states: torch.Tensor,
     attention_mask: Optional[torch.Tensor] = None,
@@ -132,18 +70,17 @@ def mistral_attn_forward(
                                                        self.layer_idx)
 
     assert position_ids is not None
-    if self.training:
-        cos, sin = self.rotary_emb(
-            value_states, seq_len=position_ids.max() + 1)
-    else:
-        cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
+    rotary_seq_len = max(kv_seq_len, position_ids.max().item() + 1)
+    cos, sin = self.rotary_emb(value_states, seq_len=rotary_seq_len)
+
     query_states, key_states = apply_rotary_pos_emb(query_states, key_states,
                                                     cos, sin, position_ids)
 
     use_sliding_windows = (
         _flash_supports_window_size
         and getattr(self.config, 'sliding_window', None) is not None
-        and kv_seq_len > self.config.sliding_window)
+        and kv_seq_len > self.config.sliding_window
+        and self.config.use_sliding_window)
 
     if past_key_value is not None:
         # Activate slicing cache only if the config has a value
@@ -187,7 +124,7 @@ def mistral_attn_forward(
     # casted in float32. Hence, we need cast them back in the correct dtype
     # just to be sure everything works as expected.
     # This might slowdown training & inference so it is recommended to not
-    # cast the LayerNorms in fp32. (LlamaRMSNorm handles it correctly)
+    # cast the LayerNorms in fp32.
     input_dtype = query_states.dtype
     if input_dtype == torch.float32:
         if torch.is_autocast_enabled():
@@ -228,8 +165,7 @@ def mistral_attn_forward(
     if enable_sequence_parallel:
         attn_output = post_process_for_sequence_parallel_attn(attn_output)
 
-    attn_output = attn_output.reshape(bsz, q_len,
-                                      self.hidden_size).contiguous()
+    attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
     attn_output = self.o_proj(attn_output)
 
     if not output_attentions:
@@ -238,7 +174,7 @@ def mistral_attn_forward(
     return attn_output, attn_weights, past_key_value
 
 
-def mistral_varlen_attn_forward(
+def qwen2_varlen_attn_forward(
     self,
     hidden_states: torch.Tensor,
     attention_mask: Optional[torch.Tensor] = None,
@@ -266,27 +202,19 @@ def mistral_varlen_attn_forward(
         # overwrite attention_mask with padding_mask
         attention_mask = kwargs.pop('padding_mask')
     bsz, q_len, _ = hidden_states.size()
-    assert bsz == 1, (f'If utilizing local attention, the batch size should be'
-                      f' set to 1, but got {bsz}')
-    # attention_mask is set to None if no padding token in input_ids
-    assert attention_mask is None
 
     query_states = self.q_proj(hidden_states)
     key_states = self.k_proj(hidden_states)
     value_states = self.v_proj(hidden_states)
 
-    query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim)
+    query_states = query_states.view(bsz, q_len, self.num_heads,
+                                     self.head_dim).transpose(1, 2)
     key_states = key_states.view(bsz, q_len, self.num_key_value_heads,
-                                 self.head_dim)
+                                 self.head_dim).transpose(1, 2)
     value_states = value_states.view(bsz, q_len, self.num_key_value_heads,
-                                     self.head_dim)
+                                     self.head_dim).transpose(1, 2)
 
-    assert _flash_supports_window_size, \
-        ('The current flash attention version does not support sliding window '
-         'attention, for a more memory efficient implementation make sure '
-         'to upgrade flash-attn library.')
-
-    kv_seq_len = key_states.shape[-3]
+    kv_seq_len = key_states.shape[-2]
     if past_key_value is not None:
         if self.layer_idx is None:
             raise ValueError(
@@ -298,30 +226,20 @@ def mistral_varlen_attn_forward(
         kv_seq_len += past_key_value.get_usable_length(kv_seq_len,
                                                        self.layer_idx)
 
-    if is_training:
-        cos, sin = self.rotary_emb(value_states, max_seqlen)
-        query_states = apply_rotary_emb(query_states,
-                                        cos[position_ids].squeeze(0),
-                                        sin[position_ids].squeeze(0))
-        key_states = apply_rotary_emb(key_states, cos[position_ids].squeeze(0),
-                                      sin[position_ids].squeeze(0))
-    else:
-        query_states = query_states.transpose(1, 2)
-        key_states = key_states.transpose(1, 2)
-        value_states = value_states.transpose(1, 2)
-        # Because the input can be padded, the absolute sequence length
-        # depends on the max position id.
-        rotary_seq_len = max(kv_seq_len, position_ids[:, -1].max().item() + 1)
-        cos, sin = self.rotary_emb(value_states, seq_len=rotary_seq_len)
-        query_states, key_states = apply_rotary_pos_emb(
-            query_states, key_states, cos, sin, position_ids)
+    assert position_ids is not None
+    rotary_seq_len = max(kv_seq_len, position_ids[:, -1].max().item()) + 1
+    cos, sin = self.rotary_emb(value_states, seq_len=rotary_seq_len)
 
+    query_states, key_states = apply_rotary_pos_emb(query_states, key_states,
+                                                    cos, sin, position_ids)
+
+    if past_key_value is not None:
         # Activate slicing cache only if the config has a value
         # `sliding_windows` attribute
         cache_has_contents = past_key_value.get_seq_length(self.layer_idx) > 0
         if (getattr(self.config, 'sliding_window', None) is not None
-                and kv_seq_len > self.config.sliding_window  # noqa: W503
-                and cache_has_contents):  # noqa: W503
+                and kv_seq_len > self.config.sliding_window
+                and cache_has_contents):
             slicing_tokens = 1 - self.config.sliding_window
 
             past_key = past_key_value[self.layer_idx][0]
@@ -346,13 +264,10 @@ def mistral_varlen_attn_forward(
         cache_kwargs = {'sin': sin, 'cos': cos}  # Specific to RoPE models
         key_states, value_states = past_key_value.update(
             key_states, value_states, self.layer_idx, cache_kwargs)
-        query_states = query_states.transpose(1, 2)
-        key_states = key_states.transpose(1, 2)
-        value_states = value_states.transpose(1, 2)
 
-    # repeat kv for sequence parallel
-    key_states = repeat_kv_bshd(key_states, self.num_key_value_groups)
-    value_states = repeat_kv_bshd(value_states, self.num_key_value_groups)
+    # repeat k/v heads if n_kv_heads < n_heads for sequence parallel
+    key_states = repeat_kv(key_states, self.num_key_value_groups)
+    value_states = repeat_kv(value_states, self.num_key_value_groups)
     dropout_rate = 0.0 if not self.training else self.attention_dropout
 
     # In PEFT, usually we cast the layer norms in float32 for
@@ -373,19 +288,31 @@ def mistral_varlen_attn_forward(
         key_states = key_states.to(target_dtype)
         value_states = value_states.to(target_dtype)
 
+    # Reashape to the expected shape for Flash Attention
+    query_states = query_states.transpose(1, 2)
+    key_states = key_states.transpose(1, 2)
+    value_states = value_states.transpose(1, 2)
+
     # ----------------- flash attention forward ------------------------#
+
     if not self._flash_attn_uses_top_left_mask:
         causal = self.is_causal
     else:
         causal = self.is_causal and q_len != 1
 
     use_sliding_windows = (
-        _flash_supports_window_size and  # noqa: W504
-        getattr(self.config, 'sliding_window', None) is not None  # noqa: W503
-        and kv_seq_len > self.config.sliding_window)  # noqa: W503
+        _flash_supports_window_size
+        and getattr(self.config, 'sliding_window', None) is not None
+        and kv_seq_len > self.config.sliding_window
+        and self.config.use_sliding_window)
+    # Decide whether to use SWA or not by layer index.
+    if use_sliding_windows and self.layer_idx >= self.config.max_window_layers:
+        use_sliding_windows = False
+
     window_size = (self.config.sliding_window,
                    self.config.sliding_window) if use_sliding_windows else (-1,
                                                                             -1)
+
     if is_training:
         attn_output = varlen_flash_attn(
             query_states,
@@ -409,8 +336,7 @@ def mistral_varlen_attn_forward(
 
     # ---------------- flash attention forward end ------------------- #
 
-    attn_output = attn_output.reshape(bsz, q_len,
-                                      self.hidden_size).contiguous()
+    attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
     attn_output = self.o_proj(attn_output)
 
     if not output_attentions:

@@ -54,7 +54,8 @@ def default_collate_fn(instances: Sequence[Dict],
         position_ids = torch.stack(position_ids, dim=0)
     else:
         attention_mask = input_ids.ne(pad_index)
-        position_ids = attention_mask.long().cumsum(-1) - 1
+        bs, seq_len = input_ids.shape
+        position_ids = torch.arange(seq_len).unsqueeze(0).long().repeat(bs, 1)
 
     input_ids, labels, position_ids, attention_mask = \
         pad_for_sequence_parallel(input_ids, labels, position_ids,
