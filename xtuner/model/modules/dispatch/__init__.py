@@ -249,21 +249,27 @@ def dispatch_yi_attn_forward(model):
 
 
 def dispatch_mistral_attn_forward(model, use_varlen_attn):
-    if (not SUPPORT_FLASH) or (not use_varlen_attn):
-        return
     if use_varlen_attn:
         assert SUPPORT_FLASH2 and SUPPORT_TRITON, \
             'flash_attn and triton is required if you want to use varlen_attn.'
+    elif not SUPPORT_FLASH2:
+        return
 
-    from .mistral import mistral_varlen_attn_forward
+    from .mistral import mistral_attn_forward, mistral_varlen_attn_forward
 
     print_log(NO_ATTN_WEIGHTS_MSG, 'current', logging.WARNING)
     for module in model.modules():
         if type(module).__name__ in ('MistralAttention',
-                                     'MistralFlashAttention2'):
-            print_log('dispatch mistral varlen attn forward', 'current')
-            module.forward = types.MethodType(mistral_varlen_attn_forward,
-                                              module)
+                                     'MistralFlashAttention2',
+                                     'MixtralAttention',
+                                     'MixtralFlashAttention2'):
+            if use_varlen_attn:
+                print_log('dispatch mistral varlen attn forward', 'current')
+                module.forward = types.MethodType(mistral_varlen_attn_forward,
+                                                  module)
+            else:
+                print_log('dispatch mistral attn forward', 'current')
+                module.forward = types.MethodType(mistral_attn_forward, module)
 
 
 def dispatch_mistral_rmsnorm_forward(model):
@@ -273,7 +279,7 @@ def dispatch_mistral_rmsnorm_forward(model):
     from .triton_kernels import rms_norm_forward
 
     for module in model.modules():
-        if type(module).__name__ == 'MistralRMSNorm':
+        if type(module).__name__ in ('MistralRMSNorm', 'MixtralRMSNorm'):
             print_log('dispatch mistral rmsnorm forward', 'current')
             module.forward = types.MethodType(rms_norm_forward, module)
 
@@ -285,7 +291,8 @@ def replace_mistral_rote(model):
 
     def traverse(module):
         for name, child in module.named_children():
-            if type(child).__name__ == 'MistralRotaryEmbedding':
+            if type(child).__name__ in ('MistralRotaryEmbedding',
+                                        'MixtralRotaryEmbedding'):
                 print_log('replace mistral rope', 'current')
                 dim_model = child.inv_freq.shape[0] * 2
                 child_new = MistralRotaryEmbedding(
@@ -321,7 +328,7 @@ def dispatch_modules(model, use_varlen_attn=False):
         dispath_baichuan_13b_attn_forward(model)
     elif 'yi' in model_name:
         dispatch_yi_attn_forward(model)
-    elif 'mistral' in model_name:
+    elif ('mistral' in model_name) or ('mixtral' in model_name):
         dispatch_mistral_attn_forward(model, use_varlen_attn)
         if USE_TRITON_KERNEL:
             dispatch_mistral_rmsnorm_forward(model)
