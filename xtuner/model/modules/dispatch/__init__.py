@@ -306,6 +306,39 @@ def replace_mistral_rote(model):
     traverse(model)
 
 
+def dispatch_qwen2_attn_forward(model, use_varlen_attn):
+    if use_varlen_attn:
+        assert SUPPORT_FLASH2 and SUPPORT_TRITON, \
+            'flash_attn and triton is required if you want to use varlen_attn.'
+    elif not SUPPORT_FLASH2:
+        return
+
+    from .qwen2 import qwen2_attn_forward, qwen2_varlen_attn_forward
+
+    print_log(NO_ATTN_WEIGHTS_MSG, 'current', logging.WARNING)
+    for module in model.modules():
+        if type(module).__name__ in ('Qwen2Attention', 'Qwen2FlashAttention2'):
+            if use_varlen_attn:
+                print_log('dispatch qwen2 varlen attn forward', 'current')
+                module.forward = types.MethodType(qwen2_varlen_attn_forward,
+                                                  module)
+            else:
+                print_log('dispatch qwen2 attn forward', 'current')
+                module.forward = types.MethodType(qwen2_attn_forward, module)
+
+
+def dispatch_qwen2_rmsnorm_forward(model):
+    if not SUPPORT_TRITON:
+        return
+
+    from .triton_kernels import rms_norm_forward
+
+    for module in model.modules():
+        if type(module).__name__ == 'Qwen2RMSNorm':
+            print_log('dispatch qwen2 rmsnorm forward', 'current')
+            module.forward = types.MethodType(rms_norm_forward, module)
+
+
 def dispatch_modules(model, use_varlen_attn=False):
     model_name = model.__class__.__name__.lower()
     if 'internlm2' in model_name:
@@ -333,6 +366,10 @@ def dispatch_modules(model, use_varlen_attn=False):
         if USE_TRITON_KERNEL:
             dispatch_mistral_rmsnorm_forward(model)
         replace_mistral_rote(model)
+    elif 'qwen2' in model_name:
+        dispatch_qwen2_attn_forward(model, use_varlen_attn)
+        if USE_TRITON_KERNEL:
+            dispatch_qwen2_rmsnorm_forward(model)
 
 
 __all__ = ['dispatch_modules']
