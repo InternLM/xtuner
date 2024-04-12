@@ -59,15 +59,15 @@ class OpenCLIPVisionTower(nn.Module):
         # self.vision_stem = clip_model.visual.trunk.stem
         # self.vision_stages = clip_model.visual.trunk.stages
 
-        self.clip_model.vision_stem.requires_grad_(False)
+        self.clip_model.visual.trunk.stem.requires_grad_(False)
 
         # self.vision_stages.requires_grad_(False)
 
     def activation_checkpointing_enable(self):
-        self.clip_model.set_grad_checkpointing(True)
+        self.clip_model.visual.set_grad_checkpointing(True)
 
     def activation_checkpointing_disable(self):
-        self.clip_model.set_grad_checkpointing(False)
+        self.clip_model.visual.set_grad_checkpointing(False)
 
     def forward(self, images):
         if type(images) is list:
@@ -93,19 +93,19 @@ class OpenCLIPVisionTower(nn.Module):
             if _stage == 'stage_0':
                 result_cat.append(results[_stage].contiguous())
             else:
-                result_cat.append(F.interpolate(results[_stage].float().contiguous() , 
-                                                size=target_size, 
-                                                mode='bilinear', 
+                result_cat.append(F.interpolate(results[_stage].float().contiguous() ,
+                                                size=target_size,
+                                                mode='bilinear',
                                                 align_corners=False).to(dtype=results[_stage].dtype))
         result_cat = torch.cat(result_cat, dim=1)
 
         return result_cat.contiguous()
 
     def basic_forward(self, images):
-        results = {}    
-        x = self.clip_model.vision_stem(images)
-        for _idx in range(len(self.vision_stages)):
-            x = self.clip_model.vision_stages[_idx](x)
+        results = {}
+        x = self.clip_model.visual.trunk.stem(images)
+        for _idx in range(len(self.clip_model.visual.trunk.stages)):
+            x =  self.clip_model.visual.trunk.stages[_idx](x)
             results[f'stage_{_idx}'] = x
         return results
 
@@ -115,11 +115,11 @@ class OpenCLIPVisionTower(nn.Module):
 
     @property
     def dtype(self):
-        return self.vision_stem[0].weight.dtype
+        return self.clip_model.visual.trunk.stem[0].weight.dtype
 
     @property
     def device(self):
-        return self.vision_stem[0].weight.device
+        return self.clip_model.visual.trunk.stem[0].weight.device
 
     @property
     def config(self):
