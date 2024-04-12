@@ -342,6 +342,7 @@ test_dataset = [
         pad_image_to_square=True),
     dict(
         type=MultipleChoiceDataset,
+        proxy_eval_dataset=dict(type=MiniGeminiProxyEvalDataset, image_size_aux=image_size_aux),
         data_file='/mnt/petrelfs/share_data/zhaoxiangyu/datasets--Lin-Chen--MMStar/snapshots/mmstar/MMStar.tsv',
         prompt_template=PROMPT_TEMPLATE.vicuna,
         tokenizer=tokenizer,
@@ -359,6 +360,7 @@ test_dataset = [
     # vqav2 图片大概是 12w，推理要很久
     # dict(
     #     type=VQAv2Dataset,
+    #     proxy_eval_dataset = dict(type=MiniGeminiProxyEvalDataset, image_size_aux=image_size_aux),
     #     data_file='/mnt/petrelfs/share_data/zhaoxiangyu/vqav2_llava_eval/llava_vqav2_mscoco_test-dev2015.jsonl',
     #     test_file='/mnt/petrelfs/share_data/zhaoxiangyu/vqav2_llava_eval/llava_vqav2_mscoco_test2015.jsonl',
     #     image_folder='/mnt/petrelfs/share_data/zhaoxiangyu/vqav2_test2015',
