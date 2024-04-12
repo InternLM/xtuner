@@ -70,11 +70,8 @@ class MiniGeminiDataset(LLaVADataset):
                 image_aux = torch.tensor(image_aux).permute(2, 0, 1)
                 data_dict['pixel_values_aux'] = image_aux
         else:
-            if hasattr(self.image_processor, 'crop_size'):
-                crop_size = self.image_processor.crop_size
-            else:
-                crop_size = self.image_processor.size
-            data_dict['pixel_values'] = torch.zeros(3, crop_size['height'],
-                                                    crop_size['width'])
             data_dict['pixel_values_aux'] = torch.zeros(3, self.image_size_aux, self.image_size_aux)
+            if self._model_name == 'CLIPImageProcessor':
+                data_dict['pixel_values'] = torch.zeros(3, self.crop_size_raw['height'],
+                                                        self.crop_size_raw['width'])
         return data_dict
