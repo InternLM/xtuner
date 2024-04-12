@@ -50,9 +50,11 @@ NPROC_PER_NODE=8 NNODES=2 PORT=29600 ADDR=$NODE_0_ADDR NODE_RANK=1 xtuner train 
 
 ### Speed
 
+16 * A100 80G:
+
 |    Model     | Sequence Length | Use Varlen Attn | Sequence Parallel World Size | Tokens per Second |
 | :----------: | :-------------: | :-------------: | :--------------------------: | :---------------: |
 | mixtral_8x7b |       32k       |      False      |              1               |       853.7       |
 | mixtral_8x7b |       32k       |      True       |              1               |       910.1       |
 | mixtral_8x7b |       32k       |      False      |              2               |       635.2       |
-| mixtral_8x7b |       32k       |      True       |              2               |      单元格3      |
+| mixtral_8x7b |       32k       |      True       |              2               |       650.9       |
