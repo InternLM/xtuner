@@ -22,6 +22,8 @@ class DPO(BaseModel):
                  llm,
                  ref_llm=None,
                  beta=0.1,
+                 loss_type='sigmoid',
+                 label_smoothing=0.0,
                  lora=None,
                  peft_model=None,
                  use_activation_checkpointing=True,
@@ -30,6 +32,8 @@ class DPO(BaseModel):
         with LoadWoInit():
             self.llm = self._build_from_cfg_or_module(llm)
         self.ref_llm = ref_llm
+        self.loss_type = loss_type
+        self.label_smoothing = label_smoothing
         self.llm.config.use_cache = False
         self.beta = beta
         dispatch_modules(self.llm, use_varlen_attn=use_varlen_attn)
@@ -159,7 +163,35 @@ class DPO(BaseModel):
         ref_logratios = reference_chosen_logps - reference_rejected_logps
 
         logits = pi_logratios - ref_logratios
-        loss = -F.logsigmoid(self.beta * logits)
+        if self.loss_type == "sigmoid":
+            loss = (
+                -F.logsigmoid(self.beta * logits) * (1 - self.label_smoothing)
+                - F.logsigmoid(-self.beta * logits) * self.label_smoothing
+            )
+        elif self.loss_type == "hinge":
+            loss = torch.relu(1 - self.beta * logits)
+        elif self.loss_type == "ipo":
+            # eqn (17) of the paper where beta is the regularization parameter for the IPO loss, denoted by tau in the paper.
+            loss = (logits - 1 / (2 * self.beta)) ** 2
+        elif self.loss_type == "kto_pair":
+            # eqn (7) of the HALOs paper
+            chosen_KL = (policy_chosen_logps - reference_chosen_logps).mean().clamp(min=0)
+            rejected_KL = (policy_rejected_logps - reference_rejected_logps).mean().clamp(min=0)
+
+            chosen_logratios = policy_chosen_logps - reference_chosen_logps
+            rejected_logratios = policy_rejected_logps - reference_rejected_logps
+            # As described in the KTO report, the KL term for chosen (rejected) is estimated using the rejected (chosen) half.
+            loss = torch.cat(
+                (
+                    1 - F.sigmoid(self.beta * (chosen_logratios - rejected_KL)),
+                    1 - F.sigmoid(self.beta * (chosen_KL - rejected_logratios)),
+                ),
+                0,
+            )
+        else:
+            raise ValueError(
+                f"Unknown loss type: {self.loss_type}. Should be one of ['sigmoid', 'hinge', 'ipo', 'kto_pair']"
+            )
         chosen_rewards = self.beta * (
             policy_chosen_logps - reference_chosen_logps)
         rejected_rewards = self.beta * (
