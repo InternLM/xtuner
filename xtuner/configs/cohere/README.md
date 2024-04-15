@@ -11,9 +11,6 @@ pip install git+https://github.com/huggingface/transformers.git
 
 # Sequence parallel requires flash-attn
 pip install flash-attn
-
-# install the latest transformers
-pip install -U transformers
 ```
 
 ## Full Parameter Fine-tune
