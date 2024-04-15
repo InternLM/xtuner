@@ -129,10 +129,12 @@ class BaseTrainDataset(torch.utils.data.Dataset):
             a dict, it will be considered in the style of MMEngine config and
             will be built accordingly. Ultimately, a ChatTemplate instance
             will be obtained.
-        sample_ratio (float):
+        sample_ratio (float | list):
             Control over-sampling or under-sampling of the dataset, 2 means
             over-sampling the dataset to double its original size,
-            0.5 means under-sampling the dataset to half its original size.
+            0.5 means under-sampling the dataset to half its original size. If
+            you want to set different sampling ratios for data in `data_files`,
+            you can pass in a list that is equal in length to `data_files`.
             Default is 1.
         max_length (int):
             The maximum length of a single data in the dataset. When
@@ -170,7 +172,7 @@ class BaseTrainDataset(torch.utils.data.Dataset):
     def __init__(self,
                  tokenizer: _TokenizerType,
                  chat_template: Union[Dict, ChatTemplate],
-                 sample_ratio: float = 1.0,
+                 sample_ratio: Union[float, List[float]] = 1.0,
                  max_length: int = 2048,
                  pack_to_max_length: bool = True,
                  num_proc: int = 8,
@@ -185,7 +187,14 @@ class BaseTrainDataset(torch.utils.data.Dataset):
         self.chat_template = build_from_cfg_or_obj(
             chat_template, accept=ChatTemplate)
 
+        if isinstance(sample_ratio, (list, tuple)):
+            if len(sample_ratio) != len(data_files):
+                raise ValueError('The length of `sample_ratio`'
+                                 f'({len(sample_ratio)}) should be the same '
+                                 'as the length of `data_files`'
+                                 f'({len(data_files)})')
         self.sample_ratio = sample_ratio
+
         self.max_length = max_length
         self.pack_to_max_length = pack_to_max_length
 
@@ -252,11 +261,8 @@ class BaseTrainDataset(torch.utils.data.Dataset):
                 logger='current')
 
             return self._load_cached_dataset(cache_dir=cache_dir)
-        else:
-            if not (data_dir or data_files):
-                raise RuntimeError('When the dataset is not cached, '
-                                   '`data_files` and `data_dir` cannot be '
-                                   'None at the same time.')
+        elif data_dir is not None:
+
             data_dir = Path(data_dir)
             if data_files is None:
                 # TODO support other format
@@ -267,10 +273,34 @@ class BaseTrainDataset(torch.utils.data.Dataset):
                 data_files = [str(data_dir / data_files)]
             else:
                 raise TypeError('`data_files` should be a str or a list of '
-                                f'str, not {type(data_dir)}.')
+                                f'str, not {type(data_files)}.')
 
             self.data_files = data_files
             return self._load_json_dataset(files=data_files)
+        elif data_dir is None:
+            if data_files is None:
+                raise RuntimeError('When the dataset is not cached, '
+                                   '`data_files` and `data_dir` cannot be '
+                                   'None at the same time.')
+
+            if isinstance(data_files, list):
+                for file in data_files:
+                    if not os.path.exists(file):
+                        raise FileNotFoundError(f'{file} does not exist, '
+                                                'please check `data_files`.')
+            elif isinstance(data_files, str):
+                if not os.path.exists(file):
+                    raise FileNotFoundError(f'{file} does not exist, please '
+                                            'check `data_files`.')
+                data_files = [data_files]
+            else:
+                raise TypeError('`data_files` should be a str or a list of '
+                                f'str, not {type(data_files)}.')
+
+            self.data_files = data_files
+            return self._load_json_dataset(files=data_files)
+        else:
+            raise NotImplementedError
 
     @master_only_load
     def _load_cached_dataset(self,
@@ -287,15 +317,23 @@ class BaseTrainDataset(torch.utils.data.Dataset):
                            files: List[str]) -> Union[Dataset, _PackDataset]:
         """Load several json files and map them into a trainable format."""
         dataset = []
-        for file in files:
-            dataset.extend(load(file))
-            print_log(f'Loaded json data from {file}', logger='current')
 
-        if self.sample_ratio < 1:
-            num_samples = int(self.sample_ratio * len(dataset))
-            dataset = random.sample(dataset, num_samples)
+        if isinstance(self.sample_ratio, float):
+            ratios = [self.sample_ratio] * len(files)
+        else:
+            ratios = self.sample_ratio
+
+        for ratio, file in zip(ratios, files):
+            shard_dataset = load(file)
+            ori_samples = len(shard_dataset)
+            target_samples = int(ratio * ori_samples)
+            dataset.extend(random.choices(shard_dataset, k=target_samples))
             print_log(
-                f'Randomly selected {num_samples} samples', logger='current')
+                f'Loaded json data from {file}, '
+                f'originally {ori_samples} samples, '
+                f'random sampled to {target_samples} samples, '
+                f'sample ratio {ratio}',
+                logger='current')
 
         dataset = self.tokenize_dataset(dataset)
 

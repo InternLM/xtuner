@@ -72,8 +72,14 @@ dataset = dict(
     type=TextTrainDataset,
     tokenizer=tokenizer,
     chat_template=chat_template,
-    data_dir='converted_alpaca',
-    cache_dir='cached_alpaca',
+    # data_dir='converted_alpaca',
+    data_files=[
+        'converted_alpaca/202404121913-shard-2-of-3.json',
+        'converted_alpaca/202404121913-shard-3-of-3.json',
+        'converted_alpaca/202404121913-shard-1-of-3.json'
+    ],
+    sample_ratio=[2, 3, 1],
+    # cache_dir='cached_alpaca',
     max_length=max_length,
     pack_to_max_length=pack_to_max_length)
 train_dataloader = dict(
