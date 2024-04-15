@@ -74,7 +74,7 @@ def all_to_all(
         enable automatic differentiation of the all-to-all operation.
 
     Args:
-        input: The input tensor for which all-to-all communication is performed.
+        input: The input tensor for which all-to-all communication is performed
         sp_group: The sequence parallel process group.
         scatter_dim: The dimension along which the input tensor is scattered
             (default: 2).

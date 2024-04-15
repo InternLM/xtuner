@@ -1,7 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import torch.distributed as dist
 
-from .communications import all_to_all
+from .comm import all_to_all
 from .setup_distributed import (get_sequence_parallel_group,
                                 get_sequence_parallel_world_size)
 
