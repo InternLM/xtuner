@@ -54,7 +54,7 @@ class BaseAlgorithm(BaseModel, ChatBackendProtocol):
         """
         pass
 
-    def enable_init_weights(self) -> None:
+    def init_weights_enable(self) -> None:
         """Set the `_is_init` flag to False to enable initializing the
         weight."""
         self._is_init = False
