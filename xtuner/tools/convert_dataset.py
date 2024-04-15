@@ -20,6 +20,9 @@ def parse_args():
     parser.add_argument(
         '--save-dir', help='Save dir of the converted dataset.')
     parser.add_argument(
+        '--data-dir', help='Reference all the files in a directory')
+    parser.add_argument('--data-files', help='Path(s) to source data file(s).')
+    parser.add_argument(
         '--shard-size',
         type=int,
         default=20000,
@@ -36,7 +39,8 @@ def parse_args():
 def main():
     args = parse_args()
 
-    dataset = load_dataset(path=args.path)
+    dataset = load_dataset(
+        path=args.path, data_dir=args.data_dir, data_files=args.data_files)
     converter = ConverterMap[args.format]
     converted = dataset.map(converter.convert, num_proc=args.num_proc)['train']
 
