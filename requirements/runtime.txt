@@ -15,9 +15,8 @@ scikit-image
 scipy
 SentencePiece
 tiktoken
-# limit pytorch version <= 2.1.2 as there may be some bugs in triton 2.2
-torch<=2.1.2
-torchvision<=0.16.2
+torch
+torchvision
 # Minimum 4.36.0 to support `Cache` data structure used by KV Cache
 # Registering a causal mask in `LlamaModel` is not friendly for very large
 # `max_position_embeddings`. Refer to
