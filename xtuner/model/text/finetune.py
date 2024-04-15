@@ -290,7 +290,7 @@ class TextFinetune(BaseAlgorithm):
         config = Config.fromfile(conf_path)
 
         if has_tok:
-            config.model.tokenizer.pretrained_model_name_or_path = model_name_or_path
+            config.model.tokenizer.pretrained_model_name_or_path = model_name_or_path  # noqa: E501
 
         if has_llm:
             config.model.llm.pretrained_model_name_or_path = model_name_or_path

@@ -1,9 +1,11 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-from .dataset import TextDataset
+from .base import BaseTrainDataset
 from .mappings import map_protocol, map_sequential, openai_to_raw_training
+from .text import TextTrainDataset
 
 __all__ = [
-    'TextDataset',
+    'BaseTrainDataset',
+    'TextTrainDataset',
     'map_protocol',
     'map_sequential',
     'openai_to_raw_training',

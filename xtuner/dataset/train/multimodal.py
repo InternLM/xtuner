@@ -7,10 +7,10 @@ from tqdm import tqdm
 from transformers import CLIPImageProcessor
 
 from xtuner.dataset.utils import expand2square
-from .dataset import TextDataset
+from .dataset import TrainDataset
 
 
-class LlavaDataset(TextDataset):
+class LlavaDataset(TrainDataset):
 
     def __init__(self, image_dir: str, pad_img_to_squared: bool, *args,
                  **kwargs):

@@ -1,8 +1,9 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import functools
-import json
+import logging
 import os
 import random
+from abc import abstractmethod
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from pathlib import Path
@@ -10,13 +11,13 @@ from typing import Dict, List, Optional, Union
 
 import torch
 from datasets import Dataset, load_from_disk
-from mmengine import print_log
+from mmengine import dump, load, print_log
 from mmengine.dist import master_only
 from torch import distributed as dist
 from tqdm import tqdm
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
-from xtuner.dataset.hybrid._pack import _PackDataset
+from xtuner.dataset.train._pack import _PackDataset
 from xtuner.types import ChatMessages, ChatTemplate
 from xtuner.utils.config import build_from_cfg_or_obj
 
@@ -55,7 +56,7 @@ def master_only_load(load_fn):
     return wrapper
 
 
-class TextDataset(torch.utils.data.Dataset):
+class BaseTrainDataset(torch.utils.data.Dataset):
     """A high-performance dataset designed for LLM instruction finetuning.
 
     Capable of supporting ultra-large-scale training, and can enhance training
@@ -117,30 +118,6 @@ class TextDataset(torch.utils.data.Dataset):
             Each packed data can compute attention within each original data,
             or treat it as a whole data to compute attention, which can be
             controlled in the `model` by `use_varlen_attn`.
-
-
-    The required input dataset format for each piece of data is as follows：
-    ```
-    {
-        "messages" : [
-            {"role" : "user", "content" : "Hello"},
-            {"role" : "assistant", "content" : "Hello!"},
-            {"role" : "user", "content" : "Who are you?"},
-            {"role" : "assistant", "content" : "I'm an AI assistant."}
-        ]
-    }
-    ```
-    For a more detailed introduction on dataset format, you can refer to the
-    XTuner documentation.
-
-    For common dataset formats, we also provide corresponding conversion
-    scripts, refer to the XTuner documentation.
-
-    Note:
-       If your dataset is not in the aforementioned format, and it's
-       inconvenient to convert to that format, you can inherit `TextDataset`
-       and override the `tokenize_dataset` method if you want to use the
-       high-performance data processing features of XTuner.
 
     Args:
         tokenizer (_TokenizerType):
@@ -282,6 +259,7 @@ class TextDataset(torch.utils.data.Dataset):
                                    'None at the same time.')
             data_dir = Path(data_dir)
             if data_files is None:
+                # TODO support other format
                 data_files = [str(f) for f in data_dir.rglob('*.json')]
             elif isinstance(data_files, list):
                 data_files = [str(data_dir / Path(f)) for f in data_files]
@@ -310,7 +288,7 @@ class TextDataset(torch.utils.data.Dataset):
         """Load several json files and map them into a trainable format."""
         dataset = []
         for file in files:
-            dataset.extend(json.load(open(file)))
+            dataset.extend(load(file))
             print_log(f'Loaded json data from {file}', logger='current')
 
         if self.sample_ratio < 1:
@@ -332,6 +310,7 @@ class TextDataset(torch.utils.data.Dataset):
 
         return dataset
 
+    @abstractmethod
     def tokenize_dataset(self, dataset: List[dict]) -> List[dict]:
         """Tokenize the dataset and convert it into a trainable format.
 
@@ -362,19 +341,16 @@ class TextDataset(torch.utils.data.Dataset):
                  `num_tokens` is an integer, the length of `input_ids`.
         """
 
-        def openai_to_raw_training(item: dict) -> Dict:
+        def openai_to_training(item: dict) -> Dict:
 
             data = ChatMessages.from_dict(item)
             data = data.tokenize(self.tokenizer, self.chat_template)
 
             return data
 
-        with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
-            dataset = list(
-                tqdm(
-                    executor.map(openai_to_raw_training, dataset),
-                    desc='Map Dataset',
-                    total=len(dataset)))
+        dataset = self.multi_thread_map(openai_to_training, dataset,
+                                        'Tokenize Dataset')
+
         return dataset
 
     def _pack_dataset(self, dataset) -> _PackDataset:
@@ -422,13 +398,8 @@ class TextDataset(torch.utils.data.Dataset):
             return any(label >= 0 for label in item['labels'])
 
         ori_samples = len(dataset)
-        with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
-            results = list(
-                tqdm(
-                    executor.map(filter_fn, dataset),
-                    desc='Filter Dataset',
-                    total=len(dataset)))
 
+        results = self.multi_thread_map(filter_fn, dataset, 'Filter Dataset')
         new_dataset = [x for x, passed in zip(dataset, results) if passed]
 
         new_samples = len(new_dataset)
@@ -458,18 +429,8 @@ class TextDataset(torch.utils.data.Dataset):
         def token_counter(item):
             return len(item['input_ids'])
 
-        with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
-            tokens = list(
-                tqdm(
-                    executor.map(token_counter, dataset),
-                    desc='Count Tokens',
-                    total=len(dataset)))
-
-            labels = list(
-                tqdm(
-                    executor.map(label_counter, dataset),
-                    desc='Count Labels',
-                    total=len(dataset)))
+        tokens = self.multi_thread_map(token_counter, dataset, 'Count Tokens')
+        labels = self.multi_thread_map(label_counter, dataset, 'Count Labels')
 
         num_tokens = sum(tokens)
         num_labels = sum(labels)
@@ -478,11 +439,20 @@ class TextDataset(torch.utils.data.Dataset):
             f'of which {num_labels} tokens need loss calculation.',
             logger='current')
 
+    def multi_thread_map(self, map_fn, dataset, desc):
+
+        with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
+            results = list(
+                tqdm(
+                    executor.map(map_fn, dataset),
+                    desc=desc,
+                    total=len(dataset)))
+
+        return results
+
     @master_only
     def cache_dataset(self, cache_dir: str):
         """Cache the processed(tokenized) dataset."""
-
-        cache_dir = Path(cache_dir)
 
         if self.pack_to_max_length:
             # The packed dataset can't be cached, only the dataset before
@@ -502,8 +472,7 @@ class TextDataset(torch.utils.data.Dataset):
             'tokenizer': type(self.tokenizer).__name__,
         }
 
-        with open(cache_dir / 'xtuner_dataset_conf.json', 'w') as f:
-            json.dump(dset_conf, f)
+        dump(dset_conf, os.path.join(cache_dir, 'xtuner_dataset_conf.json'))
 
         print_log(
             f'The processed dataset is cached in the {cache_dir}.',
@@ -518,6 +487,17 @@ class TextDataset(torch.utils.data.Dataset):
         if os.path.isdir(cache_dir):
             dset_config = os.path.join(cache_dir, 'xtuner_dataset_conf.json')
             if os.path.exists(dset_config):
+                conf = load(dset_config)
+                cache_tok = conf['tokenizer']
+                cur_tok = type(self.tokenizer).__name__
+                if cache_tok != cur_tok:
+                    print_log(
+                        f'The tokenizer({cache_tok}) used by the cached '
+                        'dataset is different from the tokenizer'
+                        f'({cur_tok}) you set, which may lead to '
+                        'training errors.',
+                        logger='current',
+                        level=logging.WARNING)
                 return True
             else:
                 return False
@@ -574,7 +554,7 @@ if __name__ == '__main__':
         stop_words=['<|im_end|>'],
     )
 
-    dataset = TextDataset(
+    dataset = BaseTrainDataset(
         'internlm/internlm2-chat-1_8b',
         chat_template,
         sample_ratio=1,

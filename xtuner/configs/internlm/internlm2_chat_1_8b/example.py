@@ -6,7 +6,7 @@ from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR, LinearLR
 from torch.optim import AdamW
 from transformers import AutoTokenizer
 
-from xtuner.dataset.hybrid import TextDataset
+from xtuner.dataset.train import TextTrainDataset
 from xtuner.engine.hooks import ChatHook
 from xtuner.engine.runner import TrainLoop
 from xtuner.model import AutoModelForCausalLM, TextFinetune
@@ -69,7 +69,7 @@ model = dict(
 #######################################################################
 
 dataset = dict(
-    type=TextDataset,
+    type=TextTrainDataset,
     tokenizer=tokenizer,
     chat_template=chat_template,
     data_dir='converted_alpaca',
