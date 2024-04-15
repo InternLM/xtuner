@@ -41,8 +41,8 @@ NPROC_PER_NODE=8 NNODES=8 PORT=29600 ADDR=$NODE_0_ADDR NODE_RANK=1 xtuner train 
 
 16 * A100 80G:
 
-|    Model    | Sequence Length | GPUs Number | Sequence Parallel World Size | Tokens per Second |
-| :---------: | :-------------: | :---------: | :--------------------------: | :---------------: |
-| Cohere_100b |      128k       |     64      |              32              |       97.3        |
-| Cohere_100b |      128k       |     128     |              16              |       102.1       |
-| Cohere_100b |      128k       |     256     |              16              |       101.3       |
+|    Model    | Sequence Length | GPUs Number | Sequence Parallel World Size | Tokens per Second | TFLOPs |
+| :---------: | :-------------: | :---------: | :--------------------------: | :---------------: | :----: |
+| Cohere_100b |      128k       |     64      |              32              |       97.3        | 173.4  |
+| Cohere_100b |      128k       |     128     |              16              |       102.1       | 182.7  |
+| Cohere_100b |      128k       |     256     |              16              |       101.3       | 181.3  |
