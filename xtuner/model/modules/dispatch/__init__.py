@@ -306,6 +306,34 @@ def replace_mistral_rote(model):
     traverse(model)
 
 
+def dispatch_cohere_attn_forward(model, use_varlen_attn):
+    if use_varlen_attn:
+        raise NotImplementedError
+    elif not SUPPORT_FLASH2:
+        return
+
+    from .cohere import cohere_attn_forward
+
+    print_log(NO_ATTN_WEIGHTS_MSG, 'current', logging.WARNING)
+    for module in model.modules():
+        # Do not need to dispatch if
+        # type(module).__name__ == 'CohereSdpaAttention', as flash_attn is
+        # required when using sequence parallel
+        if type(module).__name__ in ('CohereAttention',
+                                     'CohereFlashAttention2'):
+            print_log('dispatch cohere attn forward', 'current')
+            module.forward = types.MethodType(cohere_attn_forward, module)
+
+
+def dispatch_cohere_layernorm_forward(model):
+    from .triton_kernels import layer_norm_forward
+
+    for module in model.modules():
+        if type(module).__name__ == 'CohereLayerNorm':
+            print_log('dispatch cohere layernorm forward', 'current')
+            module.forward = types.MethodType(layer_norm_forward, module)
+
+
 def dispatch_qwen2_attn_forward(model, use_varlen_attn):
     if use_varlen_attn:
         assert SUPPORT_FLASH2 and SUPPORT_TRITON, \
@@ -366,6 +394,9 @@ def dispatch_modules(model, use_varlen_attn=False):
         if USE_TRITON_KERNEL:
             dispatch_mistral_rmsnorm_forward(model)
         replace_mistral_rote(model)
+    elif 'cohere' in model_name:
+        dispatch_cohere_attn_forward(model, use_varlen_attn)
+        dispatch_cohere_layernorm_forward(model)
     elif 'qwen2' in model_name:
         dispatch_qwen2_attn_forward(model, use_varlen_attn)
         if USE_TRITON_KERNEL:
