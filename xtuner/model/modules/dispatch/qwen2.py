@@ -227,7 +227,7 @@ def qwen2_varlen_attn_forward(
                                                        self.layer_idx)
 
     assert position_ids is not None
-    rotary_seq_len = max(kv_seq_len, position_ids[:, -1].max().item()) + 1
+    rotary_seq_len = max(kv_seq_len, position_ids[:, -1].max().item() + 1)
     cos, sin = self.rotary_emb(value_states, seq_len=rotary_seq_len)
 
     query_states, key_states = apply_rotary_pos_emb(query_states, key_states,
