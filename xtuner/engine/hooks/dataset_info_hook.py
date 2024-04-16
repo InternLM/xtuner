@@ -9,7 +9,7 @@ def split_list(lst, value):
     res = []
     tmp_res = []
     for i in lst:
-        if tmp_res and i == value:
+        if i == value:
             res.append(tmp_res)
             tmp_res = []
         else:
