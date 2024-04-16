@@ -15,6 +15,11 @@ from transformers import (GenerationConfig, PreTrainedModel,
                           PreTrainedTokenizer, PreTrainedTokenizerFast)
 
 from xtuner.chat.streamer import HFTextIteratorStreamer, HFTextStreamer
+from xtuner.parallel.sequence import (get_sequence_parallel_group,
+                                      get_sequence_parallel_world_size,
+                                      pad_for_sequence_parallel,
+                                      reduce_sequence_parallel_loss,
+                                      split_for_sequence_parallel)
 from xtuner.registry import BUILDER
 from xtuner.tools.utils import get_stop_criteria
 from xtuner.types import ChatMessages, ChatTemplate, SampleParams
@@ -103,16 +108,42 @@ class TextFinetune(BaseAlgorithm):
                 'training. If you want to get predictions or chat, please '
                 "directly use `llm`'s forward.")
 
+    def _compute_sequence_parallel_loss(self, input_ids, labels,
+                                        attention_mask, position_ids):
+
+        sp_group = get_sequence_parallel_group()
+        # `dim` is 1 as the shape of tensor is (bs, seq_len, ...)
+        input_ids = split_for_sequence_parallel(
+            input_ids, dim=1, sp_group=sp_group)
+        labels = split_for_sequence_parallel(labels, dim=1, sp_group=sp_group)
+        position_ids = split_for_sequence_parallel(
+            position_ids, dim=1, sp_group=sp_group)
+
+        outputs = self.llm(
+            input_ids=input_ids,
+            position_ids=position_ids,
+            attention_mask=attention_mask,
+            labels=labels)
+
+        num_tokens = (labels != IGNORE_INDEX).sum()
+        loss = reduce_sequence_parallel_loss(outputs.loss, num_tokens)
+        return {'loss': loss}
+
     def compute_loss(self, data):
 
         input_ids = data['input_ids']
         labels = data['labels']
-        attention_mask = data['attention_mask']
+        # attention_mask = data['attention_mask']
+        attention_mask = data.get('attention_mask', None)
 
         position_ids = self._compute_postion_ids(data)
 
         if self.use_varlen_attn:
             self._send_msg_to_dispatched_model(data)
+
+        if get_sequence_parallel_world_size() > 1:
+            return self._compute_sequence_parallel_loss(
+                input_ids, labels, attention_mask, position_ids)
 
         outputs = self.llm(
             input_ids=input_ids,
@@ -316,6 +347,7 @@ class TextFinetune(BaseAlgorithm):
             if 'cumulative_len' in data:
                 cumulative_len.append(torch.IntTensor(data['cumulative_len']))
 
+        ori_length = [len(ids) for ids in input_ids]
         if len(instances) > 1:
             input_ids = pad_sequence(
                 input_ids, batch_first=True, padding_value=pad_index)
@@ -328,6 +360,16 @@ class TextFinetune(BaseAlgorithm):
         if len(cumulative_len) == 0:
             cumulative_len = None
 
+        # Some tokenizers have the same eos token and pad token, so input_ids
+        # cannot be masked directly based on the pad token id.
+        attention_mask = torch.zeros_like(input_ids).bool()
+        for i in ori_length:
+            attention_mask[:i] = True
+
+        input_ids, labels, _, attention_mask = \
+            pad_for_sequence_parallel(input_ids, labels, None,
+                                      attention_mask)
+
         data_dict = {
             'input_ids': input_ids,
             'attention_mask': input_ids.ne(pad_index),
@@ -336,3 +378,9 @@ class TextFinetune(BaseAlgorithm):
         }
 
         return {'data': data_dict, 'data_samples': None}
+
+    def __getattr__(self, name: str):
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            return getattr(self.llm, name)
