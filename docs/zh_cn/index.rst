@@ -68,6 +68,7 @@
    acceleration/length_grouped_sampler.rst
    acceleration/train_large_scale_dataset.rst
    acceleration/train_extreme_long_sequence.rst
+   acceleration/triton_kernels.rst
    acceleration/benchmark.rst
 
 .. toctree::
