@@ -15,7 +15,6 @@ from xtuner.parallel.sequence.attention import (
     post_process_for_sequence_parallel_attn,
     pre_process_for_sequence_parallel_attn)
 from .attention import flash_attn_wo_mask, varlen_flash_attn
-from .triton_kernels import apply_rotary_emb
 
 SUPPORT_FLASH2 = False
 
