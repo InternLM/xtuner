@@ -19,6 +19,45 @@
 RMS Norm Triton Kernel
 ------------------------
 
+RMS Norm Triton Kernel 支持情况
+~~~~~~~~~~~
+
+.. list-table::
+  :widths: 25 50
+  :header-rows: 1
+
+  * - 模型
+    - 支持情况
+  * - internlm 1/2
+    - ✅
+  * - llama 2
+    - ✅
+  * - mistral
+    - ✅
+  * - mixtral
+    - ✅
+  * - qwen 1/1.5
+    - ✅
+  * - starcoder
+    - ✅
+  * - yi
+    - ✅
+  * - zephyr
+    - ✅
+  * - deepseek
+    - ✅
+  * - baichuan 1/2
+    - ❌
+  * - chatglm 2/3
+    - ❌
+  * - gemma
+    - ❌
+  * - cohere (no RMS Norm)
+    - ❌
+
+加速情况
+~~~~~~~~~~~
+
 下表展示了 Qwen 1.5 0.5B 在 Alpaca 数据集上的训练效率对比：
 
 .. list-table::
