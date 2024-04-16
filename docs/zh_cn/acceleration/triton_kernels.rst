@@ -20,7 +20,7 @@ RMS Norm Triton Kernel
 ------------------------
 
 RMS Norm Triton Kernel 支持情况
-~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. list-table::
   :widths: 25 50
@@ -54,6 +54,7 @@ RMS Norm Triton Kernel 支持情况
     - ❌
   * - cohere (no RMS Norm)
     - ❌
+
 
 加速情况
 ~~~~~~~~~~~
