@@ -23,6 +23,7 @@
 
 ## 🎉 更新
 
+- **\[2024/04\]** 支持序列并行训练策略以实现语言模型超长上下文训练！\[[文档](https://xtuner.readthedocs.io/zh-cn/latest/acceleration/train_extreme_long_sequence.html)\] \[[速度基准](https://xtuner.readthedocs.io/zh-cn/latest/acceleration/benchmark.html)\]
 - **\[2024/02\]** 支持 [Gemma](xtuner/configs/gemma) 模型！
 - **\[2024/02\]** 支持 [Qwen1.5](xtuner/configs/qwen/qwen1_5) 模型！
 - **\[2024/01\]** 支持 [InternLM2](xtuner/configs/internlm) 模型！同时，最新版的多模态大模型 [LLaVA-Internlm2-7B](https://huggingface.co/xtuner/llava-internlm2-7b) / [20B](https://huggingface.co/xtuner/llava-internlm2-20b) 发布，其表现出强大的性能！
