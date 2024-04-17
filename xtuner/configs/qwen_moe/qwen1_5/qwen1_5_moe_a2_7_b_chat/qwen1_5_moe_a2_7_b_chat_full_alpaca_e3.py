@@ -7,28 +7,30 @@ from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR, LinearLR
 from torch.optim import AdamW
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from xtuner.dataset import process_hf_dataset
+from xtuner.dataset import ConcatDataset, process_hf_dataset
 from xtuner.dataset.collate_fns import default_collate_fn
-from xtuner.dataset.map_fns import oasst1_map_fn, template_map_fn_factory
+from xtuner.dataset.map_fns import (alpaca_map_fn, alpaca_zh_map_fn,
+                                    template_map_fn_factory)
 from xtuner.engine.hooks import (DatasetInfoHook, EvaluateChatHook,
                                  ThroughputHook,
                                  VarlenAttnArgsToMessageHubHook)
 from xtuner.engine.runner import TrainLoop
 from xtuner.model import SupervisedFinetune
 from xtuner.parallel.sequence import SequenceParallelSampler
-from xtuner.utils import PROMPT_TEMPLATE
+from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
 
 #######################################################################
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-pretrained_model_name_or_path = 'mistralai/Mixtral-8x7B-Instruct-v0.1'
+pretrained_model_name_or_path = 'Qwen/Qwen1.5-MoE-A2.7B-Chat'
 use_varlen_attn = False
 
 # Data
-data_path = 'timdettmers/openassistant-guanaco'
-prompt_template = PROMPT_TEMPLATE.mixtral
-max_length = 2048
+alpaca_zh_path = 'silk-road/alpaca-data-gpt4-chinese'
+alpaca_en_path = 'tatsu-lab/alpaca'
+prompt_template = PROMPT_TEMPLATE.qwen_chat
+max_length = 32768
 pack_to_max_length = True
 
 # parallel
@@ -36,7 +38,7 @@ sequence_parallel_size = 1
 
 # Scheduler & Optimizer
 batch_size = 1  # per_device
-accumulative_counts = 16
+accumulative_counts = 1
 accumulative_counts *= sequence_parallel_size
 dataloader_num_workers = 0
 max_epochs = 3
@@ -52,8 +54,8 @@ save_steps = 500
 save_total_limit = 2  # Maximum checkpoints to keep (-1 means unlimited)
 
 # Evaluate the generation performance during the training
-evaluation_freq = 500
-SYSTEM = ''
+evaluation_freq = 50
+SYSTEM = SYSTEM_TEMPLATE.alpaca
 evaluation_inputs = [
     '请给我介绍五个上海的景点', 'Please tell me five scenic spots in Shanghai'
 ]
@@ -78,18 +80,33 @@ model = dict(
 #######################################################################
 #                      PART 3  Dataset & Dataloader                   #
 #######################################################################
-train_dataset = dict(
+alpaca_en = dict(
     type=process_hf_dataset,
-    dataset=dict(type=load_dataset, path=data_path),
+    dataset=dict(type=load_dataset, path=alpaca_en_path),
     tokenizer=tokenizer,
     max_length=max_length,
-    dataset_map_fn=oasst1_map_fn,
+    dataset_map_fn=alpaca_map_fn,
     template_map_fn=dict(
         type=template_map_fn_factory, template=prompt_template),
     remove_unused_columns=True,
-    shuffle_before_pack=True,
+    shuffle_before_pack=False,
     pack_to_max_length=pack_to_max_length,
     use_varlen_attn=use_varlen_attn)
+
+alpaca_zh = dict(
+    type=process_hf_dataset,
+    dataset=dict(type=load_dataset, path=alpaca_zh_path),
+    tokenizer=tokenizer,
+    max_length=max_length,
+    dataset_map_fn=alpaca_zh_map_fn,
+    template_map_fn=dict(
+        type=template_map_fn_factory, template=prompt_template),
+    remove_unused_columns=True,
+    shuffle_before_pack=False,
+    pack_to_max_length=pack_to_max_length,
+    use_varlen_attn=use_varlen_attn)
+
+train_dataset = dict(type=ConcatDataset, datasets=[alpaca_en, alpaca_zh])
 
 sampler = SequenceParallelSampler \
     if sequence_parallel_size > 1 else DefaultSampler
@@ -149,7 +166,7 @@ custom_hooks = [
         evaluation_inputs=evaluation_inputs,
         system=SYSTEM,
         prompt_template=prompt_template),
-    dict(type=ThroughputHook)
+    dict(type=ThroughputHook),
 ]
 
 if use_varlen_attn:
@@ -160,14 +177,15 @@ default_hooks = dict(
     # record the time of every iteration.
     timer=dict(type=IterTimerHook),
     # print log every 10 iterations.
-    logger=dict(type=LoggerHook, log_metric_by_epoch=False, interval=10),
+    logger=dict(type=LoggerHook, log_metric_by_epoch=False, interval=1),
     # enable the parameter scheduler.
     param_scheduler=dict(type=ParamSchedulerHook),
     # save checkpoint per `save_steps`.
     checkpoint=dict(
         type=CheckpointHook,
         by_epoch=False,
-        interval=save_steps,
+        interval=-1,
+        save_last=False,
         max_keep_ckpts=save_total_limit),
     # set sampler seed in distributed evrionment.
     sampler_seed=dict(type=DistSamplerSeedHook),
@@ -199,4 +217,4 @@ resume = False
 randomness = dict(seed=None, deterministic=False)
 
 # set log processor
-log_processor = dict(by_epoch=False)
+log_processor = dict(by_epoch=False, window_size=1)
