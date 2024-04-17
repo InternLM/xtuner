@@ -185,8 +185,9 @@ class SupervisedFinetune(BaseModel):
                                'Starcoder2Config', 'Starcoder2Config')
 
         if SUPPORT_FLASH2 and cls_name in SUPPORT_FLASH_ATTN2:
-            cfg.torch_dtype = torch.bfloat16 \
-                if torch.cuda.is_bf16_supported() else torch.float16
+            cfg.torch_dtype = torch.bfloat16 if (
+                torch.cuda.is_available() and torch.cuda.is_bf16_supported()) \
+                else torch.float16
             cfg.attn_implementation = 'flash_attention_2'
         elif SUPPORT_FLASH1 and cls_name in SUPPORT_SDPA_ATTN:
             cfg.attn_implementation = 'sdpa'
