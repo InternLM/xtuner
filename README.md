@@ -24,7 +24,7 @@ English | [简体中文](README_zh-CN.md)
 
 ## 🎉 News
 
-- **\[2024/04\]** Support Sequence Parallel for enabling highly efficient and scalable LLM training with extremely long sequence lengths! \[[Usage](https://xtuner.readthedocs.io/zh-cn/latest/acceleration/train_extreme_long_sequence.html)\] \[[Speed Benchmark](https://xtuner.readthedocs.io/zh-cn/latest/acceleration/benchmark.html)\]
+- **\[2024/04\]** Support Sequence Parallel for enabling highly efficient and scalable LLM training with extremely long sequence lengths! \[[Usage](https://github.com/InternLM/xtuner/blob/docs/docs/zh_cn/acceleration/train_extreme_long_sequence.rst)\] \[[Speed Benchmark](https://github.com/InternLM/xtuner/blob/docs/docs/zh_cn/acceleration/benchmark.rst)\]
 - **\[2024/02\]** Support [Gemma](xtuner/configs/gemma) models!
 - **\[2024/02\]** Support [Qwen1.5](xtuner/configs/qwen/qwen1_5) models!
 - **\[2024/01\]** Support [InternLM2](xtuner/configs/internlm) models! The latest VLM [LLaVA-Internlm2-7B](https://huggingface.co/xtuner/llava-internlm2-7b) / [20B](https://huggingface.co/xtuner/llava-internlm2-20b) models are released, with impressive performance!
