@@ -1,6 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import torch
 from datasets import load_dataset
+from mmengine.dataset import DefaultSampler
 from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
                             LoggerHook, ParamSchedulerHook)
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR, LinearLR
@@ -41,9 +42,13 @@ max_length = 65536
 max_position_embeddings = 65536
 pack_to_max_length = False
 
+# parallel
+sequence_parallel_size = 1
+
 # Scheduler & Optimizer
 batch_size = 1  # per_device
 accumulative_counts = 8
+accumulative_counts *= sequence_parallel_size
 dataloader_num_workers = 0
 max_epochs = 1
 optim_type = AdamW
@@ -92,11 +97,13 @@ train_dataset = dict(
     pack_to_max_length=pack_to_max_length,
     use_varlen_attn=use_varlen_attn)
 
+sampler = SequenceParallelSampler \
+    if sequence_parallel_size > 1 else DefaultSampler
 train_dataloader = dict(
     batch_size=batch_size,
     num_workers=dataloader_num_workers,
     dataset=train_dataset,
-    sampler=dict(type=SequenceParallelSampler, seed=1024),
+    sampler=dict(type=sampler, shuffle=True),
     collate_fn=dict(type=default_collate_fn, use_varlen_attn=use_varlen_attn))
 
 #######################################################################

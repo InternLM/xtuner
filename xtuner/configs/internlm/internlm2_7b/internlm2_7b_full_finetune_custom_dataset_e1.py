@@ -42,7 +42,6 @@ from xtuner.utils import PROMPT_TEMPLATE
 # Model
 pretrained_model_name_or_path = 'internlm/internlm2-7b'
 use_varlen_attn = True
-sequence_parallel_size = 1
 
 # Data
 data_files = ['/path/to/json/file.json']
@@ -50,12 +49,16 @@ prompt_template = PROMPT_TEMPLATE.internlm2_chat
 max_length = 32768
 pack_to_max_length = True
 
+# parallel
+sequence_parallel_size = 1
+
 # Scheduler & Optimizer
 # batch size per device, set to 1 if `use_varlen_attn` = True
 # To clarify, enlarging the batch size essentially enlarges the `max_length`.
 # For example, doubling the max length is tantamount to doubling the batch size
 batch_size = 1
 accumulative_counts = 1  # 1bs * 1acc * 64gpu = 64 batchsize
+accumulative_counts *= sequence_parallel_size
 dataloader_num_workers = 4
 max_epochs = 1
 optim_type = AdamW
