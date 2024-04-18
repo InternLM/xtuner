@@ -15,12 +15,13 @@ from .modules.dispatch import SUPPORT_FLASH1, SUPPORT_FLASH2
 from .utils import (LoadWoInit, find_all_linear_names,
                     get_peft_model_state_dict, guess_load_checkpoint,
                     make_inputs_require_grad,
-                    prepare_inputs_labels_for_multimodal, traverse_dict)
+                    prepare_inputs_labels_for_multimodal, traverse_dict, s2_forward)
 from xtuner.tools.utils import get_stop_criteria
 from xtuner.dataset.utils import expand2square, load_image
 from xtuner.utils import (DEFAULT_IMAGE_TOKEN, IMAGE_TOKEN_INDEX,
                           StopWordStoppingCriteria)
-
+from functools import reduce
+from mmengine.logging import print_log
 
 class LLaVAModel(BaseModel):
 
@@ -31,6 +32,7 @@ class LLaVAModel(BaseModel):
                  freeze_visual_encoder=False,
                  visual_select_layer=-2,
                  token_merge_ratio=1,
+                 s2_scales=None,  # [1, 2] or [1,2,3]
                  pretrained_pth=None,
                  projector_depth=2,
                  llm_lora=None,
@@ -41,6 +43,7 @@ class LLaVAModel(BaseModel):
                  tokenizer=None,
                  template=None):
         super().__init__()
+        self.s2_scales = s2_scales
         self.freeze_llm = freeze_llm
         self.freeze_visual_encoder = freeze_visual_encoder
         with LoadWoInit():
@@ -57,8 +60,15 @@ class LLaVAModel(BaseModel):
             '`token_merge_ratio` must be a square number.'
         self.token_merge_ratio = int(token_merge_ratio)
 
+        visual_hidden_size = self.visual_encoder.config.hidden_size * token_merge_ratio
+        self.s2_scales = s2_scales
+        if s2_scales is not None:
+            assert 1 in s2_scales, 'The scale of the original image must be included.'
+            total_scales = reduce(lambda x, y: x * y, s2_scales)
+            visual_hidden_size = visual_hidden_size * total_scales
+
         projector_config = ProjectorConfig(
-            visual_hidden_size=self.visual_encoder.config.hidden_size * token_merge_ratio,
+            visual_hidden_size=visual_hidden_size,
             llm_hidden_size=self.llm.config.hidden_size,
             depth=projector_depth)
         self.projector = ProjectorModel(projector_config).to(
@@ -112,8 +122,16 @@ class LLaVAModel(BaseModel):
         self.image_processor = image_processor
         if image_processor is not None:
             self.image_processor = BUILDER.build(image_processor)
-        self.template = template
 
+        if s2_scales is not None:
+            if hasattr(self.image_processor, 'crop_size'):
+                orig_img_size = self.image_processor.crop_size['height']
+            else:
+                orig_img_size = self.image_processor.size['height']
+            self.s2_img_sizes = [int(orig_img_size * scale) for scale in s2_scales]
+
+        self.template = template
+        print_log(self, logger='current')
 
     def _parse_lora_config(self, lora_config):
         if isinstance(lora_config, dict) or isinstance(
@@ -279,23 +297,28 @@ class LLaVAModel(BaseModel):
 
     @staticmethod
     def _get_model_class_name(model):
-        base_model = model
         if model.__class__.__name__ == 'PeftModel':
             base_model = model.base_model.model
         else:
             base_model = model
         return base_model.__class__.__name__
 
+    def __forward_feature(self, images):
+        visual_outputs = self.visual_encoder(images.to(self.visual_encoder.dtype), output_hidden_states=True)
+        visual_outputs = visual_outputs.hidden_states[self.visual_select_layer]
+        if self._get_model_class_name(self.visual_encoder) != 'SiglipVisionModel':
+            visual_outputs = visual_outputs[:, 1:]
+        return visual_outputs
+
     def _prepare_data_for_llm(self, data):
         if 'pixel_values' in data:
-            visual_outputs = self.visual_encoder(
-                data['pixel_values'].to(self.visual_encoder.dtype),
-                output_hidden_states=True)
-            visual_outputs = visual_outputs.hidden_states[self.visual_select_layer]
+            if self.s2_scales is None:
+                visual_outputs = self.__forward_feature(data['pixel_values'])
+                visual_outputs = self._merge_tokens(visual_outputs, self.token_merge_ratio)
+            else:
+                visual_outputs = s2_forward(self.__forward_feature, data['pixel_values'],
+                                            img_sizes=self.s2_img_sizes)
 
-            if self._get_model_class_name(self.visual_encoder) != 'SiglipVisionModel':
-                visual_outputs = visual_outputs[:, 1:]
-            visual_outputs = self._merge_tokens(visual_outputs, self.token_merge_ratio)
             pixel_values = self.projector(visual_outputs)
 
             data['pixel_values'] = pixel_values

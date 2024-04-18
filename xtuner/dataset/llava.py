@@ -28,6 +28,7 @@ class LLaVADataset(Dataset):
                  dataset_map_fn=None,
                  template_map_fn=None,
                  max_length=2048,
+                 s2_scales=None,  # [1, 2] or [1,2,3]
                  pad_image_to_square=False):
         super().__init__()
 
@@ -69,6 +70,17 @@ class LLaVADataset(Dataset):
         else:
             self.image_processor = image_processor
         self.pad_image_to_square = pad_image_to_square
+
+        self.max_s2_scale = s2_scales
+        if s2_scales is not None:
+            self.max_s2_scale = max(s2_scales)
+            if hasattr(self.image_processor, 'crop_size'):
+                self.image_processor.crop_size['height'] *= self.max_s2_scale
+                self.image_processor.crop_size['width'] *= self.max_s2_scale
+                self.image_processor.size['shortest_edge'] *= self.max_s2_scale
+            else:
+                self.image_processor.size['height'] *= self.max_s2_scale
+                self.image_processor.size['width'] *= self.max_s2_scale
 
     @property
     def modality_length(self):
