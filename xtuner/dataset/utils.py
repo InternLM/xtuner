@@ -91,9 +91,9 @@ def encode_fn(example,
                     input_encode.append(IMAGE_TOKEN_INDEX)
         else:
             input_encode = tokenizer.encode(input, add_special_tokens=False)
-        if next_needs_bos_token:
-            input_ids += bos_token_id
-            labels += [IGNORE_INDEX] * len(bos_token_id)
+        # if next_needs_bos_token:
+        #     input_ids += bos_token_id
+        #     labels += [IGNORE_INDEX] * len(bos_token_id)
         input_ids += input_encode
         labels += [IGNORE_INDEX] * len(input_encode)
         if input_ids_with_output:

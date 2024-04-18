@@ -142,6 +142,10 @@ PROMPT_TEMPLATE = ConfigDict(
         SUFFIX='<|END_OF_TURN_TOKEN|>',
         SUFFIX_AS_EOS=True,
         STOP_WORDS=['<|END_OF_TURN_TOKEN|>']),
+    plain=dict(
+        SYSTEM='',
+        INSTRUCTION='USER: {input} ASSISTANT:',
+        SEP=''),
 )
 
 SYSTEM_TEMPLATE = ConfigDict(

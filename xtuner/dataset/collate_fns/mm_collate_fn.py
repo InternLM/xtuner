@@ -33,6 +33,7 @@ def mm_collate_fn(instances: Sequence[Dict],
         if has_image:
             pixel_values.append(data['pixel_values'])
 
+    ori_length = [len(ids) for ids in input_ids]
     if len(instances) > 1:
         input_ids = pad_sequence(
             input_ids, batch_first=True, padding_value=pad_index)
@@ -43,9 +44,15 @@ def mm_collate_fn(instances: Sequence[Dict],
         if mode == 'train':
             labels = torch.stack(labels)
 
+    # Some tokenizers have the same eos token and pad token, so input_ids
+    # cannot be masked directly based on the pad token id.
+    attention_mask = torch.zeros_like(input_ids).bool()
+    for i in ori_length:
+         attention_mask[:i] = True
+
     if mode == 'train':
-        attention_mask = input_ids.ne(pad_index)
-        position_ids = attention_mask.long().cumsum(-1) - 1
+        bs, seq_len = input_ids.shape
+        position_ids = torch.arange(seq_len).unsqueeze(0).long().repeat(bs, 1)
 
     if len(cumulative_len) == 0:
         cumulative_len = None

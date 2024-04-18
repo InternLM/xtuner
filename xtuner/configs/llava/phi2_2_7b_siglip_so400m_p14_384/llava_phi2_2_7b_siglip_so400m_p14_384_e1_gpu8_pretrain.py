@@ -19,11 +19,11 @@ from xtuner.model import LLaVAModel
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-llm_name_or_path = 'microsoft/phi-2'
-visual_encoder_name_or_path = 'google/siglip-so400m-patch14-384'
+llm_name_or_path = '/mnt/petrelfs/share_data/huanghaian/model/phi-2'
+visual_encoder_name_or_path = '/mnt/petrelfs/share_data/huanghaian/model/siglip-so400m-patch14-384'
 
 # Data
-data_root = './data/llava_data/'
+data_root = '/mnt/petrelfs/share_data/huanghaian/llava_data/'
 data_path = data_root + 'LLaVA-Pretrain/blip_laion_cc_sbu_558k.json'
 image_folder = data_root + 'LLaVA-Pretrain/images'
 prompt_template = PROMPT_TEMPLATE.vicuna
@@ -42,14 +42,14 @@ max_norm = 1  # grad clip
 warmup_ratio = 0.03
 
 # Save
-save_steps = 500
-save_total_limit = 2  # Maximum checkpoints to keep (-1 means unlimited)
+save_steps = 1000
+save_total_limit = 1  # Maximum checkpoints to keep (-1 means unlimited)
 
 # Evaluate the generation performance during the training
-evaluation_freq = 500
+evaluation_freq = 1000
 SYSTEM = ''
 evaluation_images = 'https://llava-vl.github.io/static/images/view.jpg'
-evaluation_inputs = ['请描述一下这张照片', 'Please describe this picture']
+evaluation_inputs = ['Please describe this picture']
 
 #######################################################################
 #            PART 2  Model & Tokenizer & Image Processor              #
@@ -85,6 +85,7 @@ model = dict(
 #######################################################################
 llava_dataset = dict(
     type=LLaVADataset,
+    offline_processed_text_folder='/mnt/petrelfs/huanghaian/code/xtuner/phi2_2_7b_llava_pretrain',
     data_path=data_path,
     image_folder=image_folder,
     tokenizer=tokenizer,

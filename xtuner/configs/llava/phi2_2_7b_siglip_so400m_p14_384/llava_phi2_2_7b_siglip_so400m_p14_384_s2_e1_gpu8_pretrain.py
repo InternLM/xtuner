@@ -14,7 +14,6 @@ from xtuner.engine.hooks import DatasetInfoHook, EvaluateChatHook
 from xtuner.engine.runner import TrainLoop
 from xtuner.utils import PROMPT_TEMPLATE
 from xtuner.model import LLaVAModel
-import torch
 
 #######################################################################
 #                          PART 1  Settings                           #
@@ -27,7 +26,7 @@ visual_encoder_name_or_path = '/mnt/petrelfs/share_data/huanghaian/model/siglip-
 data_root = '/mnt/petrelfs/share_data/huanghaian/llava_data/'
 data_path = data_root + 'LLaVA-Pretrain/blip_laion_cc_sbu_558k.json'
 image_folder = data_root + 'LLaVA-Pretrain/images'
-prompt_template = PROMPT_TEMPLATE.vicuna
+prompt_template = PROMPT_TEMPLATE.plain
 max_length = int(2048 - (384 // 14) ** 2)
 s2_scales = [1, 2]
 
@@ -75,10 +74,9 @@ model = dict(
     image_processor=image_processor,
     freeze_llm=True,
     freeze_visual_encoder=True,
+    # phi2 不能用 flash attention, Loss 下降趋势不正常， fp16 推理也有潜在风险
     llm=dict(
         type=AutoModelForCausalLM.from_pretrained,
-        torch_dtype=torch.bfloat16,
-        attn_implementation="flash_attention_2",
         pretrained_model_name_or_path=llm_name_or_path,
         trust_remote_code=True),
     visual_encoder=dict(
