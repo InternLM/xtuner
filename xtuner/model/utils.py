@@ -293,8 +293,8 @@ def guess_load_checkpoint(pth_model):
             state_dict = state_dict['state_dict']
     elif osp.isdir(pth_model):
         try:
-            from deepspeed.utils.zero_to_fp32 import \
-                get_fp32_state_dict_from_zero_checkpoint
+            from xtuner.utils.zero_to_any_dtype import \
+                get_state_dict_from_zero_checkpoint
         except ImportError:
             raise ImportError(
                 'The provided PTH model appears to be a DeepSpeed checkpoint. '
@@ -302,7 +302,7 @@ def guess_load_checkpoint(pth_model):
                 'environment. This suggests that DeepSpeed may not be '
                 'installed or is incorrectly configured. Please verify your '
                 'setup.')
-        state_dict = get_fp32_state_dict_from_zero_checkpoint(
+        state_dict = get_state_dict_from_zero_checkpoint(
             osp.dirname(pth_model), osp.basename(pth_model))
     else:
         raise FileNotFoundError(f'Cannot find {pth_model}')
