@@ -128,6 +128,7 @@ class LLaVAModel(BaseModel):
                 orig_img_size = self.image_processor.crop_size['height']
             else:
                 orig_img_size = self.image_processor.size['height']
+            self.orig_img_size = orig_img_size
             self.s2_img_sizes = [int(orig_img_size * scale) for scale in s2_scales]
 
         self.template = template
@@ -317,7 +318,8 @@ class LLaVAModel(BaseModel):
                 visual_outputs = self._merge_tokens(visual_outputs, self.token_merge_ratio)
             else:
                 visual_outputs = s2_forward(self.__forward_feature, data['pixel_values'],
-                                            img_sizes=self.s2_img_sizes)
+                                            img_sizes=self.s2_img_sizes,
+                                            max_split_size=self.orig_img_size)
 
             pixel_values = self.projector(visual_outputs)
 
