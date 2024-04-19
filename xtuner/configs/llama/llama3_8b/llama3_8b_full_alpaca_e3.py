@@ -26,7 +26,7 @@ use_varlen_attn = False
 
 # Data
 alpaca_en_path = 'tatsu-lab/alpaca'
-prompt_template = PROMPT_TEMPLATE.default
+prompt_template = PROMPT_TEMPLATE.llama3_chat
 max_length = 2048
 pack_to_max_length = True
 
