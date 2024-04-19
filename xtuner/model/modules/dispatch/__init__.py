@@ -14,7 +14,7 @@ from .yi import yi_attn_forward
 
 IS_LOW_VERSION_TRANSFORMERS = digit_version(
     transformers.__version__) < digit_version('4.38')
-SUPPORT_FLASH1 = digit_version(torch.__version__) >= digit_version('2.0.0')
+SUPPORT_FLASH1 = digit_version(torch.__version__) >= digit_version('2.1.1')
 SUPPORT_FLASH2 = False
 
 try:
