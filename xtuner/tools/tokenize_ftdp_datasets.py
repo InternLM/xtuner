@@ -203,7 +203,7 @@ def chatml_format(
             ]:
                 new_message.append(message)
                 continue
-            role_cfg = getattr(roles_cfg, message['role'])
+            role_cfg = roles_cfg[message['role']]
             begin = format_begin(role_cfg, message)
             new_content = begin + message['content'] + role_cfg['end']
             if role_cfg.get('fallback_role'):
