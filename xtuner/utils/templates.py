@@ -147,11 +147,13 @@ PROMPT_TEMPLATE = ConfigDict(
         INSTRUCTION='USER: {input} ASSISTANT:',
         SEP=''),
     llama3_chat=dict(
-        SYSTEM=(
-            '<|start_header_id|>system<|end_header_id|>\n\n{system}<|eot_id|>'),
-        INSTRUCTION='<|start_header_id|>user<|end_header_id|>\n\n'
-                    '{input}<|eot_id|><|start_header_id|>assistant<|end_header_id|>',
-        SEP='\n\n',
+        SYSTEM=('<|start_header_id|>system<|end_header_id|>\n\n'
+                '{system}<|eot_id|>'),
+        INSTRUCTION=(
+            '<|start_header_id|>user<|end_header_id|>\n\n{input}<|eot_id|>'
+            '<|start_header_id|>assistant<|end_header_id|>\n\n'),
+        SUFFIX='<|eot_id|>',
+        SUFFIX_AS_EOS=True,
         STOP_WORDS=['<|eot_id|>']),
 )
 
