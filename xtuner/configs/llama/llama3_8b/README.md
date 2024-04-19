@@ -1,4 +1,4 @@
-# Llama3 7B
+# Llama3 8B
 
 ## Install
 
