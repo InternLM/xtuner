@@ -41,7 +41,6 @@ srun ${SRUN_ARGS} xtuner train llama3_8b_instruct_full_alpaca_e3 --launcher slur
 | Llama3 8B |       8k        |     2      | ZeRO-3 |         2         |      1037.0       |  76.8  |
 | Llama3 8B |       8k        |     4      | ZeRO-3 |         1         |      2331.3       | 172.6  |
 | Llama3 8B |       8k        |     8      | ZeRO-3 |         1         |      2771.2       | 205.1  |
-| Llama3 8B |       8k        |     16     | ZeRO-3 |         1         |      2127.2       | 157.5  |
 
 |   Model   | Sequence Length | GPU Number |  ZeRO  | Sequence Parallel | Tokens per Second | TFLOPs |
 | :-------: | :-------------: | :--------: | :----: | :---------------: | :---------------: | :----: |
