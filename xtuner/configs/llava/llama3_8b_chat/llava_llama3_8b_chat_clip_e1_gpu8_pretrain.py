@@ -47,7 +47,7 @@ save_total_limit = 1  # Maximum checkpoints to keep (-1 means unlimited)
 
 # Evaluate the generation performance during the training
 evaluation_freq = 1000
-SYSTEM = 'You are a pirate chatbot who always responds in pirate speak!'
+SYSTEM = ''
 evaluation_images = 'https://llava-vl.github.io/static/images/view.jpg'
 evaluation_inputs = ['Please describe this picture']
 
@@ -92,7 +92,7 @@ llava_dataset = dict(
     image_processor=image_processor,
     dataset_map_fn=llava_map_fn,
     template_map_fn=dict(
-        type=template_map_fn_factory, template=prompt_template, global_system=SYSTEM),
+        type=template_map_fn_factory, template=prompt_template),
     max_length=max_length,
     pad_image_to_square=False)
 
