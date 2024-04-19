@@ -24,7 +24,7 @@ English | [简体中文](README_zh-CN.md)
 
 ## 🎉 News
 
-- **\[2024/04\]** Support [Llama3](xtuner/configs/llama) models!
+- **\[2024/04\]** Support [Llama 3](xtuner/configs/llama) models!
 - **\[2024/04\]** Support Sequence Parallel for enabling highly efficient and scalable LLM training with extremely long sequence lengths! \[[Usage](https://github.com/InternLM/xtuner/blob/docs/docs/zh_cn/acceleration/train_extreme_long_sequence.rst)\] \[[Speed Benchmark](https://github.com/InternLM/xtuner/blob/docs/docs/zh_cn/acceleration/benchmark.rst)\]
 - **\[2024/02\]** Support [Gemma](xtuner/configs/gemma) models!
 - **\[2024/02\]** Support [Qwen1.5](xtuner/configs/qwen/qwen1_5) models!
