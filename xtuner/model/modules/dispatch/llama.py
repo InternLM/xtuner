@@ -9,18 +9,9 @@ from transformers.models.llama.modeling_llama import (apply_rotary_pos_emb,
                                                       repeat_kv)
 from transformers.utils import is_flash_attn_greater_or_equal_2_10
 
-from xtuner.parallel.sequence import sequence_parallel_wrapper
+from .attention import (SUPPORT_FLASH2, flash_attn_w_mask, flash_attn_wo_mask,
+                        varlen_flash_attn)
 from .triton_kernels import apply_rotary_emb
-from .utils import upad_qkv
-
-SUPPORT_FLASH2 = False
-
-try:
-    from flash_attn import flash_attn_func, flash_attn_varlen_func
-    from flash_attn.bert_padding import pad_input
-    SUPPORT_FLASH2 = True
-except ImportError:
-    pass
 
 try:
     from transformers.cache_utils import Cache
@@ -42,72 +33,6 @@ def repeat_kv_bshd(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
                                                   head_dim)
     return hidden_states.reshape(batch, slen, num_key_value_heads * n_rep,
                                  head_dim)
-
-
-@sequence_parallel_wrapper
-def flash_attn_wo_mask(query_states,
-                       key_states,
-                       value_states,
-                       causal,
-                       dropout_rate=0.0):
-    attn_output = flash_attn_func(
-        query_states, key_states, value_states, dropout_rate, causal=causal)
-    return attn_output
-
-
-@sequence_parallel_wrapper
-def flash_attn_w_mask(
-        query_states,  # bs, q_len, nhead, h_dim
-        key_states,
-        value_states,
-        attention_mask,
-        causal,
-        dropout_rate=0.0):
-    batch_size, q_len = query_states.shape[:2]
-    query_states, key_states, value_states, indices_q, \
-        cu_seq_lens, max_seq_lens = upad_qkv(
-            query_states, key_states, value_states, attention_mask, q_len)
-
-    cu_seqlens_q, cu_seqlens_k = cu_seq_lens
-    max_seqlen_in_batch_q, max_seqlen_in_batch_k = max_seq_lens
-    attn_output_unpad = flash_attn_varlen_func(
-        query_states,
-        key_states,
-        value_states,
-        cu_seqlens_q=cu_seqlens_q,
-        cu_seqlens_k=cu_seqlens_k,
-        max_seqlen_q=max_seqlen_in_batch_q,
-        max_seqlen_k=max_seqlen_in_batch_k,
-        dropout_p=dropout_rate,
-        causal=causal,
-    )
-    attn_output = pad_input(attn_output_unpad, indices_q, batch_size, q_len)
-    return attn_output
-
-
-@sequence_parallel_wrapper
-def varlen_flash_attn(query_states,
-                      key_states,
-                      value_states,
-                      cumulative_len,
-                      max_seqlen,
-                      dropout_rate=0.):
-    q_unpad, k_unpad, v_unpad = query_states.flatten(0, 1), key_states.flatten(
-        0, 1), value_states.flatten(0, 1)
-    attn_output = flash_attn_varlen_func(
-        q_unpad,
-        k_unpad,
-        v_unpad,
-        cumulative_len,
-        cumulative_len,
-        max_seqlen,
-        max_seqlen,
-        dropout_p=dropout_rate,
-        return_attn_probs=False,
-        causal=True,
-    )
-    attn_output = attn_output.unsqueeze(0)
-    return attn_output
 
 
 def llama_attn_forward(
@@ -211,16 +136,16 @@ def llama_attn_forward(
             key_states,
             value_states,
             attention_mask,
-            causal,
-            dropout_rate,
+            causal=causal,
+            dropout_p=dropout_rate,
             training=self.training)
     else:
         attn_output = flash_attn_wo_mask(
             query_states,
             key_states,
             value_states,
-            causal,
-            dropout_rate,
+            causal=causal,
+            dropout_p=dropout_rate,
             training=self.training)
 
     attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
@@ -340,17 +265,17 @@ def llama_attn_forward_legacy(
             query_states,
             key_states,
             value_states,
-            attention_mask,
-            causal,
-            dropout_rate,
+            attention_mask=attention_mask,
+            causal=causal,
+            dropout_p=dropout_rate,
             training=self.training)
     else:
         attn_output = flash_attn_wo_mask(
             query_states,
             key_states,
             value_states,
-            causal,
-            dropout_rate,
+            causal=causal,
+            dropout_p=dropout_rate,
             training=self.training)
 
     attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
@@ -420,6 +345,10 @@ def llama_varlen_attn_forward(
     key_states = key_states.transpose(1, 2)
     value_states = value_states.transpose(1, 2)
 
+    # repeat kv for sequence parallel
+    key_states = repeat_kv_bshd(key_states, self.num_key_value_groups)
+    value_states = repeat_kv_bshd(value_states, self.num_key_value_groups)
+
     dropout_rate = self.attention_dropout if self.training else 0.0
 
     # In PEFT, usually we cast the layer norms in float32 for training
@@ -451,7 +380,8 @@ def llama_varlen_attn_forward(
             value_states,
             cumulative_len,
             max_seqlen,
-            dropout_rate=dropout_rate)
+            causal=True,
+            dropout_p=dropout_rate)
     else:
         attn_output = flash_attn_wo_mask(
             query_states,
@@ -573,14 +503,15 @@ def llama_varlen_attn_forward_legacy(
             value_states,
             cumulative_len,
             max_seqlen,
-            dropout_rate=dropout_rate)
+            causal=True,
+            dropout_p=dropout_rate)
     else:
         attn_output = flash_attn_wo_mask(
             query_states,
             key_states,
             value_states,
             causal=True,
-            dropout_rate=dropout_rate,
+            dropout_p=dropout_rate,
             training=False)
 
     attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)

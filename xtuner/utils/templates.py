@@ -133,6 +133,15 @@ PROMPT_TEMPLATE = ConfigDict(
         SUFFIX_AS_EOS=False,
         SEP='\n',
         STOP_WORDS=['<end_of_turn>']),
+    cohere_chat=dict(
+        SYSTEM=('<|START_OF_TURN_TOKEN|><|SYSTEM_TOKEN|>{system}'
+                '<|END_OF_TURN_TOKEN|>'),
+        INSTRUCTION=(
+            '<|START_OF_TURN_TOKEN|><|USER_TOKEN|>{input}<|END_OF_TURN_TOKEN|>'
+            '<|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>'),
+        SUFFIX='<|END_OF_TURN_TOKEN|>',
+        SUFFIX_AS_EOS=True,
+        STOP_WORDS=['<|END_OF_TURN_TOKEN|>']),
 )
 
 SYSTEM_TEMPLATE = ConfigDict(
