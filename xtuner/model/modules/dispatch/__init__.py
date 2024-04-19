@@ -14,6 +14,8 @@ from .yi import yi_attn_forward
 
 IS_LOW_VERSION_TRANSFORMERS = digit_version(
     transformers.__version__) < digit_version('4.38')
+# Transformers requires torch version >= 2.1.1 when using Torch SDPA.
+# Refer to https://github.com/huggingface/transformers/blob/caa5c65db1f4db617cdac2ad667ba62edf94dd98/src/transformers/modeling_utils.py#L1611  # noqa: E501
 SUPPORT_FLASH1 = digit_version(torch.__version__) >= digit_version('2.1.1')
 SUPPORT_FLASH2 = False
 
