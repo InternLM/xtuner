@@ -24,6 +24,8 @@ English | [简体中文](README_zh-CN.md)
 
 ## 🎉 News
 
+- **\[2024/04\]** Support [Llama 3](xtuner/configs/llama) models!
+- **\[2024/04\]** Support Sequence Parallel for enabling highly efficient and scalable LLM training with extremely long sequence lengths! \[[Usage](https://github.com/InternLM/xtuner/blob/docs/docs/zh_cn/acceleration/train_extreme_long_sequence.rst)\] \[[Speed Benchmark](https://github.com/InternLM/xtuner/blob/docs/docs/zh_cn/acceleration/benchmark.rst)\]
 - **\[2024/02\]** Support [Gemma](xtuner/configs/gemma) models!
 - **\[2024/02\]** Support [Qwen1.5](xtuner/configs/qwen/qwen1_5) models!
 - **\[2024/01\]** Support [InternLM2](xtuner/configs/internlm) models! The latest VLM [LLaVA-Internlm2-7B](https://huggingface.co/xtuner/llava-internlm2-7b) / [20B](https://huggingface.co/xtuner/llava-internlm2-20b) models are released, with impressive performance!
@@ -49,7 +51,7 @@ XTuner is an efficient, flexible and full-featured toolkit for fine-tuning large
 
 **Flexible**
 
-- Support various LLMs ([InternLM](https://huggingface.co/internlm), [Mixtral-8x7B](https://huggingface.co/mistralai), [Llama2](https://huggingface.co/meta-llama), [ChatGLM](https://huggingface.co/THUDM), [Qwen](https://huggingface.co/Qwen), [Baichuan](https://huggingface.co/baichuan-inc), ...).
+- Support various LLMs ([InternLM](https://huggingface.co/internlm), [Mixtral-8x7B](https://huggingface.co/mistralai), [Llama 2](https://huggingface.co/meta-llama), [ChatGLM](https://huggingface.co/THUDM), [Qwen](https://huggingface.co/Qwen), [Baichuan](https://huggingface.co/baichuan-inc), ...).
 - Support VLM ([LLaVA](https://github.com/haotian-liu/LLaVA)). The performance of [LLaVA-InternLM2-20B](https://huggingface.co/xtuner/llava-internlm2-20b) is outstanding.
 - Well-designed data pipeline, accommodating datasets in any format, including but not limited to open-source and custom formats.
 - Support various training algorithms ([QLoRA](http://arxiv.org/abs/2305.14314), [LoRA](http://arxiv.org/abs/2106.09685), full-parameter fune-tune), allowing users to choose the most suitable solution for their requirements.
@@ -109,7 +111,7 @@ XTuner is an efficient, flexible and full-featured toolkit for fine-tuning large
   <li><a href="https://huggingface.co/internlm">InternLM2</a></li>
   <li><a href="https://huggingface.co/internlm">InternLM</a></li>
   <li><a href="https://huggingface.co/meta-llama">Llama</a></li>
-  <li><a href="https://huggingface.co/meta-llama">Llama2</a></li>
+  <li><a href="https://huggingface.co/meta-llama">Llama 2</a></li>
   <li><a href="https://huggingface.co/THUDM/chatglm2-6b">ChatGLM2</a></li>
   <li><a href="https://huggingface.co/THUDM/chatglm3-6b">ChatGLM3</a></li>
   <li><a href="https://huggingface.co/Qwen/Qwen-7B">Qwen</a></li>

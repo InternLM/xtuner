@@ -23,6 +23,8 @@
 
 ## 🎉 更新
 
+- **\[2024/04\]** 支持 [Llama 3](xtuner/configs/llama) 模型！
+- **\[2024/04\]** 支持序列并行训练策略以实现语言模型超长上下文训练！\[[文档](https://github.com/InternLM/xtuner/blob/docs/docs/zh_cn/acceleration/train_extreme_long_sequence.rst)\] \[[速度基准](https://github.com/InternLM/xtuner/blob/docs/docs/zh_cn/acceleration/benchmark.rst)\]
 - **\[2024/02\]** 支持 [Gemma](xtuner/configs/gemma) 模型！
 - **\[2024/02\]** 支持 [Qwen1.5](xtuner/configs/qwen/qwen1_5) 模型！
 - **\[2024/01\]** 支持 [InternLM2](xtuner/configs/internlm) 模型！同时，最新版的多模态大模型 [LLaVA-Internlm2-7B](https://huggingface.co/xtuner/llava-internlm2-7b) / [20B](https://huggingface.co/xtuner/llava-internlm2-20b) 发布，其表现出强大的性能！
@@ -48,7 +50,7 @@ XTuner 是一个高效、灵活、全能的轻量化大模型微调工具库。
 
 **灵活**
 
-- 支持多种大语言模型，包括但不限于 [InternLM](https://huggingface.co/internlm)、[Mixtral-8x7B](https://huggingface.co/mistralai)、[Llama2](https://huggingface.co/meta-llama)、[ChatGLM](https://huggingface.co/THUDM)、[Qwen](https://huggingface.co/Qwen)、[Baichuan](https://huggingface.co/baichuan-inc)。
+- 支持多种大语言模型，包括但不限于 [InternLM](https://huggingface.co/internlm)、[Mixtral-8x7B](https://huggingface.co/mistralai)、[Llama 2](https://huggingface.co/meta-llama)、[ChatGLM](https://huggingface.co/THUDM)、[Qwen](https://huggingface.co/Qwen)、[Baichuan](https://huggingface.co/baichuan-inc)。
 - 支持多模态图文模型 LLaVA 的预训练与微调。利用 XTuner 训得模型 [LLaVA-InternLM2-20B](https://huggingface.co/xtuner/llava-internlm2-20b) 表现优异。
 - 精心设计的数据管道，兼容任意数据格式，开源数据或自定义数据皆可快速上手。
 - 支持 [QLoRA](http://arxiv.org/abs/2305.14314)、[LoRA](http://arxiv.org/abs/2106.09685)、全量参数微调等多种微调算法，支撑用户根据具体需求作出最优选择。
@@ -108,7 +110,7 @@ XTuner 是一个高效、灵活、全能的轻量化大模型微调工具库。
   <li><a href="https://huggingface.co/internlm">InternLM2</a></li>
   <li><a href="https://huggingface.co/internlm">InternLM</a></li>
   <li><a href="https://huggingface.co/meta-llama">Llama</a></li>
-  <li><a href="https://huggingface.co/meta-llama">Llama2</a></li>
+  <li><a href="https://huggingface.co/meta-llama">Llama 2</a></li>
   <li><a href="https://huggingface.co/THUDM/chatglm2-6b">ChatGLM2</a></li>
   <li><a href="https://huggingface.co/THUDM/chatglm3-6b">ChatGLM3</a></li>
   <li><a href="https://huggingface.co/Qwen/Qwen-7B">Qwen</a></li>
