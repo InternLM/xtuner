@@ -268,9 +268,35 @@ xtuner convert pth_to_hf $FINETUNE_CFG $PTH_PATH $SAVE_PATH
 ```
 
 At this point, we have obtained the relevant model (LLM or the corresponding LoRA).
+If you use the default configuration of LLaVA-Llama-3-8B, you will obtain the following file structure after converting.
+It includes the full-finetuned LLM weights, projector weights, and LoRA weights of the visual encoder.
 
 ```
-
+./iter_39620_hf
+├── config.json
+├── generation_config.json
+├── model-00001-of-00009.safetensors
+├── model-00002-of-00009.safetensors
+├── model-00003-of-00009.safetensors
+├── model-00004-of-00009.safetensors
+├── model-00005-of-00009.safetensors
+├── model-00006-of-00009.safetensors
+├── model-00007-of-00009.safetensors
+├── model-00008-of-00009.safetensors
+├── model-00009-of-00009.safetensors
+├── model.safetensors.index.json
+├── projector
+│   ├── config.json
+│   ├── configuration_projector.py
+│   ├── modeling_projector.py
+│   └── model.safetensors
+├── special_tokens_map.json
+├── tokenizer_config.json
+├── tokenizer.json  # Tokenizer
+└── visual_encoder_adapter
+    ├── adapter_config.json
+    ├── adapter_model.safetensors
+    └── README.md
 ```
 
 ## Chat
