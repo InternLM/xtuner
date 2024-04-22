@@ -70,7 +70,7 @@ image_processor = dict(
 
 model = dict(
     type=LLaVAModel,
-    freeze_llm=False,
+    freeze_llm=True,
     freeze_visual_encoder=True,
     pretrained_pth=pretrained_pth,
     llm=dict(
