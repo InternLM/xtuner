@@ -29,11 +29,11 @@ data_root = './data/llava_data/'
 data_path = data_root + 'LLaVA-Instruct-150K/llava_v1_5_mix665k.json'
 image_folder = data_root + 'llava_images'
 prompt_template = PROMPT_TEMPLATE.llama3_chat
-max_length = int(4096 - (336 / 14)**2)
+max_length = int(2048 - (336 / 14)**2)
 
 # Scheduler & Optimizer
-batch_size = 4  # per_device
-accumulative_counts = 4
+batch_size = 8  # per_device
+accumulative_counts = 2
 dataloader_num_workers = 0
 max_epochs = 1
 optim_type = AdamW

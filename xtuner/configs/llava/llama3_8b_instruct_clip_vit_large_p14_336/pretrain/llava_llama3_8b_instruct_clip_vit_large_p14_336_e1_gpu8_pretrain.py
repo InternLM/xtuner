@@ -27,7 +27,7 @@ data_root = './data/llava_data/'
 data_path = data_root + 'LLaVA-Pretrain/blip_laion_cc_sbu_558k.json'
 image_folder = data_root + 'LLaVA-Pretrain/images'
 prompt_template = PROMPT_TEMPLATE.llama3_chat
-max_length = int(4096 - (336 / 14)**2)
+max_length = int(2048 - (336 / 14)**2)
 
 # Scheduler & Optimizer
 batch_size = 32  # per_device
