@@ -292,7 +292,7 @@ It includes the full-finetuned LLM weights, projector weights, and LoRA weights 
 │   └── model.safetensors
 ├── special_tokens_map.json
 ├── tokenizer_config.json
-├── tokenizer.json  # Tokenizer
+├── tokenizer.json
 └── visual_encoder_adapter
     ├── adapter_config.json
     ├── adapter_model.safetensors
