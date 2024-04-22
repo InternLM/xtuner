@@ -16,6 +16,15 @@ from .huggingface import process_hf_dataset
 from .utils import expand2square
 
 
+def load_jsonl(json_file):
+    with open(json_file) as f:
+        lines = f.readlines()
+    data = []
+    for line in lines:
+        data.append(json.loads(line))
+    return data
+
+
 class LLaVADataset(Dataset):
 
     def __init__(self,
@@ -44,7 +53,13 @@ class LLaVADataset(Dataset):
         if offline_processed_text_folder is not None:
             self.text_data = load_from_disk(offline_processed_text_folder)
         else:
-            json_data = json.load(open(data_path))
+            if data_path.endswith('.json'):
+                json_data = json.load(open(data_path))
+            elif data_path.endswith('.jsonl'):
+                json_data = load_jsonl(data_path)
+            else:
+                raise NotImplementedError
+
             for idx in range(len(json_data)):
                 if isinstance(json_data[idx]['id'], int):
                     json_data[idx]['id'] = str(json_data[idx]['id'])

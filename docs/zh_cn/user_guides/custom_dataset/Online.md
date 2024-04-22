@@ -89,7 +89,7 @@ srun ${SRUN_ARGS} xtuner train internlm2_7b_full_finetune_custom_dataset_e1_copy
 srun ${SRUN_ARGS} xtuner train internlm2_7b_w_tokenized_dataset_copy.py --launcher slurm --deepspeed deepspeed_zero3
 ```
 
-若训练数据集较大，可能需要在训练前设置环境变量 `XTUNER_DATASET_TIMEOUT` 为一个更大的数（默认为 30 分钟超时，可以酌情将其调大，如：120）：
+若训练数据集较大，可能需要在训练前设置环境变量 `XTUNER_DATASET_TIMEOUT` 为一个更大的数（默认为 60 分钟超时，可以酌情将其调大，如：120）：
 
 ```
 XTUNER_DATASET_TIMEOUT=120 srun ${SRUN_ARGS} xtuner train internlm2_7b_full_finetune_custom_dataset_e1_copy.py --launcher slurm --deepspeed deepspeed_zero1

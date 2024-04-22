@@ -23,15 +23,15 @@ llm_name_or_path = 'meta-llama/Meta-Llama-3-8B-Instruct'
 visual_encoder_name_or_path = 'openai/clip-vit-large-patch14-336'
 
 # Data
-data_root = './data/llava_data/'
-data_path = data_root + 'LLaVA-Pretrain/blip_laion_cc_sbu_558k.json'
-image_folder = data_root + 'LLaVA-Pretrain/images'
+data_root = './data/sharegpt4v/'
+data_path = data_root + 'share-captioner_coco_lcs_sam_1246k_1107.json'
+image_folder = data_root + 'data'
 prompt_template = PROMPT_TEMPLATE.llama3_chat
 max_length = int(4096 - (336 / 14)**2)
 
 # Scheduler & Optimizer
-batch_size = 32  # per_device
-accumulative_counts = 1
+batch_size = 16  # per_device
+accumulative_counts = 2
 dataloader_num_workers = 0
 max_epochs = 1
 optim_type = AdamW
@@ -42,11 +42,11 @@ max_norm = 1  # grad clip
 warmup_ratio = 0.03
 
 # Save
-save_steps = 500
+save_steps = 1000
 save_total_limit = 2  # Maximum checkpoints to keep (-1 means unlimited)
 
 # Evaluate the generation performance during the training
-evaluation_freq = 500
+evaluation_freq = 1000
 SYSTEM = ''
 evaluation_images = 'https://llava-vl.github.io/static/images/view.jpg'
 evaluation_inputs = ['请描述一下这张照片', 'Please describe this picture']
