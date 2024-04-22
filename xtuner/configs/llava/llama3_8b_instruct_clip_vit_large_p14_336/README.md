@@ -1,4 +1,4 @@
-# LLaVA-Llama3-8B
+# LLaVA-Llama-3-8B
 
 ## Results
 
