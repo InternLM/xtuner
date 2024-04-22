@@ -238,7 +238,7 @@ NPROC_PER_NODE=8 xtuner train llava_llama3_8b_instruct_clip_vit_large_p14_336_e1
 NPROC_PER_NODE=8 xtuner train llava_llama3_8b_instruct_full_clip_vit_large_p14_336_lora_e1_gpu8_finetune --deepspeed deepspeed_zero2 --seed 1234
 ```
 
-### LLaVA-LLama-3-8B-v1_1 (Recommended)
+### LLaVA-LLama-3-8B-v1.1 (Recommended)
 
 1. Pretrain (saved by default in `./work_dirs/llava_llama3_8b_instruct_clip_vit_large_p14_336_e1_gpu8_sharegpt4v_pretrain/`)
 
