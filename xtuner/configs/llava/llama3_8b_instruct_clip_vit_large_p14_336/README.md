@@ -334,6 +334,6 @@ xtuner mmbench ./iter_39620_hf \
   --work-dir $RESULT_PATH
 ```
 
-Here, `$DATA_PATH` refers to one of the datasets downloaded as mentioned above, such as `MMBench_DEV_EN.tsv`. `./iter_39620_hf` is the converted weight from the above step or our released [LLaVA-Llama-3-8B](https://huggingface.co/xtuner/llava-llama-3-8b) and [LLaVA-Llama-3-8B-v1-1](https://huggingface.co/xtuner/llava-llama-3-8b-v1_1) models.
+Here, `$DATA_PATH` refers to one of the datasets downloaded as mentioned above, such as `MMBench_DEV_EN.tsv`. `./iter_39620_hf` is the converted weight from the above step or our released [LLaVA-Llama-3-8B](https://huggingface.co/xtuner/llava-llama-3-8b) and [LLaVA-Llama-3-8B-v1.1](https://huggingface.co/xtuner/llava-llama-3-8b-v1_1) models.
 
 After the evaluation is completed, if it's a development set, it will directly print out the results; If it's a test set, you need to submit `mmbench_result.xlsx` to the official MMBench for final evaluation to obtain precision results!
