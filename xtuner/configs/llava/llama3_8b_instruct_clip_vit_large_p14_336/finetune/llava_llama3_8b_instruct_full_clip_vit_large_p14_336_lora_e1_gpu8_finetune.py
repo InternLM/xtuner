@@ -2,6 +2,7 @@
 from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
                             LoggerHook, ParamSchedulerHook)
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR, LinearLR
+from peft import LoraConfig
 from torch.optim import AdamW
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           CLIPImageProcessor, CLIPVisionModel)
@@ -78,7 +79,9 @@ model = dict(
         trust_remote_code=True),
     visual_encoder=dict(
         type=CLIPVisionModel.from_pretrained,
-        pretrained_model_name_or_path=visual_encoder_name_or_path))
+        pretrained_model_name_or_path=visual_encoder_name_or_path),
+    visual_encoder_lora=dict(
+        type=LoraConfig, r=64, lora_alpha=16, lora_dropout=0.05, bias='none'))
 
 #######################################################################
 #                      PART 3  Dataset & Dataloader                   #

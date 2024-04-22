@@ -25,7 +25,8 @@ from transformers import (AutoModel, AutoModelForCausalLM, AutoTokenizer,
                           BitsAndBytesConfig, CLIPImageProcessor,
                           CLIPVisionModel, GenerationConfig)
 
-from xtuner.dataset.utils import decode_base64_to_image, expand2square
+from xtuner.dataset.utils import (decode_base64_to_image, expand2square,
+                                  get_bos_eos_token_ids)
 from xtuner.model.utils import LoadWoInit, prepare_inputs_labels_for_multimodal
 from xtuner.tools.utils import get_stop_criteria, is_cn_string
 from xtuner.utils import (DEFAULT_IMAGE_TOKEN, IMAGE_TOKEN_INDEX,
@@ -314,6 +315,7 @@ def main():
         args.model_name_or_path,
         trust_remote_code=True,
         encode_special_tokens=True)
+    bos_token_id, _ = get_bos_eos_token_ids(tokenizer)
     master_print(f'Load LLM from {args.model_name_or_path}')
 
     llava_path = snapshot_download(
@@ -458,7 +460,10 @@ def main():
                 cur_encode = tokenizer.encode(chunk, add_special_tokens=False)
             chunk_encode.append(cur_encode)
         assert len(chunk_encode) == 2
-        ids = []
+
+        # TODO: Auto-detect whether to prepend a bos_token_id at the beginning.
+        ids = bos_token_id.copy()
+
         for idx, cur_chunk_encode in enumerate(chunk_encode):
             ids.extend(cur_chunk_encode)
             if idx != len(chunk_encode) - 1:
