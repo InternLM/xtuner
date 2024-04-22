@@ -3,7 +3,7 @@
 ## Results
 
 <div  align="center">
-<img src="https://github.com/InternLM/xtuner/assets/36994684/276bab73-4055-4b9f-bc75-ec68b847f6a4" alt="Image" width=500" />
+<img src="https://github.com/InternLM/xtuner/assets/36994684/a157638c-3500-44ed-bfab-d8d8249f91bb" alt="Image" width=500" />
 </div>
 
 | Model                 | MMBench Test (EN) | MMBench Test (CN) | CCBench Dev | MMMU  Val | SEED-IMG | AI2D Test | ScienceQA Test | HallusionBench aAcc | POPE | GQA  | TextVQA |   MME    | MMStar |                                                                                                        Configs                                                                                                         |                                                                   Pretrained Projector Checkpoints                                                                   |                                                            Fine-tuned LLaVA Checkpoints                                                            |
@@ -305,7 +305,7 @@ xtuner chat ./iter_39620_hf \
   --image $IMAGE_PATH
 ```
 
-Here, `./iter_39620_hf` is the converted weight from the above step or our released [LLaVA-Llama-3-8B](<>) and [LLaVA-Llama-3-8B-v1-1](<>) models.
+Here, `./iter_39620_hf` is the converted weight from the above step or our [LLaVA-Llama-3-8B](https://huggingface.co/xtuner/llava-llama-3-8b) and [LLaVA-Llama-3-8B-v1.1](https://huggingface.co/xtuner/llava-llama-3-8b-v1_1) models.
 
 ## Evaluation
 
