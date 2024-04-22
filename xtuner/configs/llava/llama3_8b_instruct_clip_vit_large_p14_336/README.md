@@ -252,6 +252,22 @@ NPROC_PER_NODE=8 xtuner train llava_llama3_8b_instruct_clip_vit_large_p14_336_e1
 NPROC_PER_NODE=8 xtuner train llava_llama3_8b_instruct_full_clip_vit_large_p14_336_lora_e1_gpu8_internvl_finetune --deepspeed deepspeed_zero2 --seed 1024
 ```
 
+### Singlg card?
+
+XTuner also supports single-card training for LLaVA-Llama-3-8B (Youth Edition), requiring only a single card with 20GB to complete the entire process of multi-modal training.
+
+1. Pretrain (saved by default in `./work_dirs/llava_llama3_8b_instruct_quant_clip_vit_large_p14_336_e1_gpu1_pretrain/`)
+
+```bash
+xtuner train llava_llama3_8b_instruct_quant_clip_vit_large_p14_336_e1_gpu1_pretrain --deepspeed deepspeed_zero2 --seed 1024
+```
+
+2. Fine-tune (saved by default in `./work_dirs/llava_llama3_8b_instruct_qlora_clip_vit_large_p14_336_e1_gpu1_finetune/`)
+
+```bash
+xtuner train llava_llama3_8b_instruct_qlora_clip_vit_large_p14_336_e1_gpu1_finetune --deepspeed deepspeed_zero2 --seed 1024
+```
+
 ## Model Convert (and Merge)
 
 After training, we will obtain a set of weights (*i.e.*, `iter_xxx.pth`), which are not in the universal HuggingFace format. We first need to convert them.
