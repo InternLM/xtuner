@@ -2,7 +2,6 @@
 
 ## Results
 
-
 | Model                        | MMBench Test (EN) | MMBench Dev (EN) | MMBench Test (CN) | MMBench Dev (CN) | CCBench Dev | MME  | SEEDBench_IMG | MMVet | MMMU Dev | MathVista MiniTest | HallusionBench aAcc |                                                                                                                                         Configs                                                                                                                                         | Pretrained Projector Checkpoints                                                                                                                                     |                                                            Fine-tuned LLaVA Checkpoints                                                            |
 | :--------------------------- | :---------------: | :--------------: | :---------------: | :--------------: | :---------: | :--: | :-----------: | :---: | :------: | :----------------: | :-----------------: | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------: | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------: |
 | LLaVA-v1.5-7B (XTuner)       |       67.7        |       69.2       |       61.0        |       59.7       |    28.4     | 1716 |     66.4      | 32.2  |   33.7   |        24.2        |        46.2         |           [Pretrain](./vicuna_7b_v15_clip_vit_large_p14_336/pretrain/llava_vicuna_7b_v15_clip_vit_large_p14_336_e1_gpu8_pretrain.py) / [Fine-tune](./vicuna_7b_v15_clip_vit_large_p14_336/finetune/llava_vicuna_7b_v15_qlora_clip_vit_large_p14_336_lora_e1_gpu8_finetune.py)           | 🤗 [HuggingFace](https://huggingface.co/xtuner/llava-v1.5-7b-xtuner-pretrain) / 🤖 [ModelScope](https://modelscope.cn/models/xtuner/llava-v1.5-7b-xtuner-pretrain)   |  🤗 [HuggingFace](https://huggingface.co/xtuner/llava-v1.5-7b-xtuner) / 🤖 [ModelScope](https://modelscope.cn/models/xtuner/llava-v1.5-7b-xtuner)  |
@@ -10,7 +9,6 @@
 | LLaVA-InternLM-7B (XTuner)   |       69.0        |       68.5       |       66.7        |       63.8       |    37.3     | 1637 |     65.7      | 32.4  |   36.9   |        26.3        |        49.1         |     [Pretrain](./internlm_chat_7b_clip_vit_large_p14_336/pretrain/llava_internlm_chat_7b_clip_vit_large_p14_336_e1_gpu8_pretrain.py) / [Fine-tune](./internlm_chat_7b_clip_vit_large_p14_336/finetune/llava_internlm_chat_7b_qlora_clip_vit_large_p14_336_lora_e1_gpu8_finetune.py)     | 🤗 [HuggingFace](https://huggingface.co/xtuner/llava-internlm-7b-pretrain) / 🤖 [ModelScope](https://modelscope.cn/models/xtuner/llava-internlm-7b-pretrain)         |     🤗 [HuggingFace](https://huggingface.co/xtuner/llava-internlm-7b) / 🤖 [ModelScope](https://modelscope.cn/models/xtuner/llava-internlm-7b)     |
 | LLaVA-InternLM2-7B (XTuner)  |       73.3        |       74.6       |       71.7        |       72.0       |    42.5     | 1700 |     71.2      | 35.9  |   40.1   |        25.5        |        46.8         |   [Pretrain](./internlm2_chat_7b_clip_vit_large_p14_336/pretrain/llava_internlm2_chat_7b_clip_vit_large_p14_336_e1_gpu8_pretrain.py) / [Fine-tune](./internlm2_chat_7b_clip_vit_large_p14_336/finetune/llava_internlm2_chat_7b_qlora_clip_vit_large_p14_336_lora_e1_gpu8_finetune.py)   | 🤗 [HuggingFace](https://huggingface.co/xtuner/llava-internlm2-7b-pretrain) / 🤖 [ModelScope](https://modelscope.cn/models/xtuner/llava-internlm2-7b-pretrain)       |    🤗 [HuggingFace](https://huggingface.co/xtuner/llava-internlm2-7b) / 🤖 [ModelScope](https://modelscope.cn/models/xtuner/llava-internlm2-7b)    |
 | LLaVA-InternLM2-20B (XTuner) |       75.1        |       73.5       |       73.7        |       72.8       |    46.3     | 1868 |     70.2      | 37.2  |   39.4   |        24.6        |        47.7         | [Pretrain](./internlm2_chat_20b_clip_vit_large_p14_336/pretrain/llava_internlm2_chat_20b_clip_vit_large_p14_336_e1_gpu8_pretrain.py) / [Fine-tune](./internlm2_chat_20b_clip_vit_large_p14_336/finetune/llava_internlm2_chat_20b_qlora_clip_vit_large_p14_336_lora_e1_gpu8_finetune.py) | 🤗 [HuggingFace](https://huggingface.co/xtuner/llava-internlm2-20b-pretrain) / 🤖 [ModelScope](https://modelscope.cn/models/xtuner/llava-internlm2-20b-pretrain)     |   🤗 [HuggingFace](https://huggingface.co/xtuner/llava-internlm2-20b) / 🤖 [ModelScope](https://modelscope.cn/models/xtuner/llava-internlm2-20b)   |
-
 
 ## Data Preparation
 
@@ -89,7 +87,6 @@ git clone https://huggingface.co/datasets/liuhaotian/LLaVA-Pretrain --depth=1
 
    5. VisualGenome (VG): [part1](https://cs.stanford.edu/people/rak248/VG_100K_2/images.zip), [part2](https://cs.stanford.edu/people/rak248/VG_100K_2/images2.zip)
 
-
 ### ShareGPT4V dataset
 
 > Reference: https://github.com/InternLM/InternLM-XComposer/blob/main/projects/ShareGPT4V/docs/Data.md
@@ -124,14 +121,13 @@ git clone https://huggingface.co/datasets/liuhaotian/LLaVA-Pretrain --depth=1
 
 #### Download
 
-
 1. Text data
 
-    ```shell
-    wget https://huggingface.co/datasets/Lin-Chen/ShareGPT4V/blob/main/sharegpt4v_instruct_gpt4-vision_cap100k.json
-    wget https://huggingface.co/datasets/Lin-Chen/ShareGPT4V/blob/main/share-captioner_coco_lcs_sam_1246k_1107.json
-    wget https://huggingface.co/datasets/Lin-Chen/ShareGPT4V/blob/main/sharegpt4v_mix665k_cap23k_coco-ap9k_lcs3k_sam9k_div2k.json
-    ```
+   ```shell
+   wget https://huggingface.co/datasets/Lin-Chen/ShareGPT4V/blob/main/sharegpt4v_instruct_gpt4-vision_cap100k.json
+   wget https://huggingface.co/datasets/Lin-Chen/ShareGPT4V/blob/main/share-captioner_coco_lcs_sam_1246k_1107.json
+   wget https://huggingface.co/datasets/Lin-Chen/ShareGPT4V/blob/main/sharegpt4v_mix665k_cap23k_coco-ap9k_lcs3k_sam9k_div2k.json
+   ```
 
 2. Image data
 
@@ -146,7 +142,6 @@ git clone https://huggingface.co/datasets/liuhaotian/LLaVA-Pretrain --depth=1
    5. WikiArt (wikiart): [download url](https://drive.google.com/file/d/1FxB2Nw-vWUcTUSI_dBpPIykb-uGYoEqV/view?usp=share_link)
 
    6. llava, coco , gqa, ocr_vqa, textvqa, vg: Please refer to the preparation of LLaVA dataset.
-
 
 ### InternVL-SFT
 
@@ -200,13 +195,12 @@ git clone https://huggingface.co/datasets/liuhaotian/LLaVA-Pretrain --depth=1
 
 #### Download
 
-
 1. Text data
 
-    ```shell
-    wget https://huggingface.co/OpenGVLab/InternVL/resolve/main/playground.zip
-    unzip ./playground.zip
-    ```
+   ```shell
+   wget https://huggingface.co/OpenGVLab/InternVL/resolve/main/playground.zip
+   unzip ./playground.zip
+   ```
 
 2. Image data
 
@@ -225,7 +219,6 @@ git clone https://huggingface.co/datasets/liuhaotian/LLaVA-Pretrain --depth=1
    7. llava, coco, gqa, ocr_vqa, textvqa, vg: Please refer to the preparation of LLaVA dataset.
 
    8. sam, share_textvqa, web-celebrity, web-landmark, wikiart: Please refer to the preparation of ShareGPT4V dataset.
-
 
 ## Training
 
@@ -256,7 +249,6 @@ NPROC_PER_NODE=8 xtuner train llava_llama3_8b_instruct_clip_vit_large_p14_336_e1
 ```bash
 NPROC_PER_NODE=8 xtuner train llava_llama3_8b_instruct_full_clip_vit_large_p14_336_lora_e1_gpu8_internvl_finetune --deepspeed deepspeed_zero2 --seed 1234
 ```
-
 
 ## Model Convert (and Merge)
 
@@ -311,14 +303,13 @@ xtuner chat ./iter_39620_hf \
   --image $IMAGE_PATH
 ```
 
-Here, `./iter_39620_hf` is the converted weight from the above step or our released [LLaVA-Llama-3-8B]() and [LLaVA-Llama-3-8B-v1-1]() models.
+Here, `./iter_39620_hf` is the converted weight from the above step or our released [LLaVA-Llama-3-8B](<>) and [LLaVA-Llama-3-8B-v1-1](<>) models.
 
 ## Evaluation
 
-Comming soon!
+Coming soon!
 
 Now, we can use `xtuner mmbench` to conduct the [MMBench](https://mmbench.opencompass.org.cn/home) evaluation.
-
 
 1. Download the MMBench dataset with
 
@@ -341,6 +332,6 @@ xtuner mmbench ./iter_39620_hf \
   --work-dir $RESULT_PATH
 ```
 
-Here, `$DATA_PATH` refers to one of the datasets downloaded as mentioned above, such as `MMBench_DEV_EN.tsv`. `./iter_39620_hf` is the converted weight from the above step or our released [LLaVA-Llama-3-8B]() and [LLaVA-Llama-3-8B-v1-1]() models.
+Here, `$DATA_PATH` refers to one of the datasets downloaded as mentioned above, such as `MMBench_DEV_EN.tsv`. `./iter_39620_hf` is the converted weight from the above step or our released [LLaVA-Llama-3-8B](<>) and [LLaVA-Llama-3-8B-v1-1](<>) models.
 
 After the evaluation is completed, if it's a development set, it will directly print out the results; If it's a test set, you need to submit `mmbench_result.xlsx` to the official MMBench for final evaluation to obtain precision results!
