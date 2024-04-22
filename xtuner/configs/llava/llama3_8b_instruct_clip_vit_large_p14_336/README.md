@@ -195,7 +195,7 @@ git clone https://huggingface.co/datasets/liuhaotian/LLaVA-Pretrain --depth=1
     ├── share_textvqa -> ../../sharegpt4v/data/share_textvqa
     ├── web-celebrity -> ../../sharegpt4v/data/web-celebrity
     ├── web-landmark -> ../../sharegpt4v/data/web-landmark
-    ├── wikiart -> ../../sharegpt4v/data/wikiart
+    └── wikiart -> ../../sharegpt4v/data/wikiart
 ```
 
 #### Download
