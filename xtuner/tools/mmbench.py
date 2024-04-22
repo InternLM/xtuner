@@ -331,13 +331,13 @@ def main():
             'Please specify the `--visual-encoder`!')
         visual_encoder_path = args.visual_encoder
     with LoadWoInit():
-        if 'clip' in visual_encoder_path:
+        if 'clip' in visual_encoder_path.lower():
             visual_encoder = CLIPVisionModel.from_pretrained(
                 visual_encoder_path,
                 torch_dtype=TORCH_DTYPE_MAP[args.torch_dtype])
             image_processor = CLIPImageProcessor.from_pretrained(
                 visual_encoder_path)
-        elif 'siglip' in visual_encoder_path:
+        elif 'siglip' in visual_encoder_path.lower():
             visual_encoder = SiglipVisionModel.from_pretrained(
                 visual_encoder_path,
                 torch_dtype=TORCH_DTYPE_MAP[args.torch_dtype])
