@@ -269,11 +269,8 @@ xtuner convert pth_to_hf $FINETUNE_CFG $PTH_PATH $SAVE_PATH
 
 At this point, we have obtained the relevant model (LLM or the corresponding LoRA).
 
-Afterwards, if you want to merge LoRA into LLM or CLIP-ViT, please use the following command:
+```
 
-```bash
-(LLM) xtuner convert merge $LLM $LLM_ADAPTER $SAVE_PATH
-(CLIP) xtuner convert merge $CLIP $CLIP_ADAPTER $SAVE_PATH --is-clip
 ```
 
 ## Chat
@@ -281,14 +278,14 @@ Afterwards, if you want to merge LoRA into LLM or CLIP-ViT, please use the follo
 We can achieve image-text question answering with the following command!
 
 ```bash
-xtuner chat meta-llama/Meta-Llama-3-8B-Instruct \
+xtuner chat ./iter_39620_hf \
   --visual-encoder openai/clip-vit-large-patch14-336 \
   --llava ./iter_39620_hf \
   --prompt-template llama3_chat \
   --image $IMAGE_PATH
 ```
 
-Here, `--llava` is the converted weight from the above step or our released [LLaVA-Llama-3-8B]() and [LLaVA-Llama-3-8B-v1-1]() models.
+Here, `./iter_39620_hf` is the converted weight from the above step or our released [LLaVA-Llama-3-8B]() and [LLaVA-Llama-3-8B-v1-1]() models.
 
 ## Evaluation
 
@@ -310,7 +307,7 @@ wget https://opencompass.openxlab.space/utils/VLMEval/CCBench.tsv
 2. Evaluate models with
 
 ```bash
-xtuner mmbench meta-llama/Meta-Llama-3-8B-Instruct \
+xtuner mmbench ./iter_39620_hf \
   --visual-encoder openai/clip-vit-large-patch14-336 \
   --llava ./iter_39620_hf \
   --prompt-template llama3_chat \
@@ -318,6 +315,6 @@ xtuner mmbench meta-llama/Meta-Llama-3-8B-Instruct \
   --work-dir $RESULT_PATH
 ```
 
-Here, `$DATA_PATH` refers to one of the datasets downloaded as mentioned above, such as `MMBench_DEV_EN.tsv`. `--llava` is the converted weight from the above step or our released [LLaVA-Llama-3-8B]() and [LLaVA-Llama-3-8B-v1-1]() models.
+Here, `$DATA_PATH` refers to one of the datasets downloaded as mentioned above, such as `MMBench_DEV_EN.tsv`. `./iter_39620_hf` is the converted weight from the above step or our released [LLaVA-Llama-3-8B]() and [LLaVA-Llama-3-8B-v1-1]() models.
 
 After the evaluation is completed, if it's a development set, it will directly print out the results; If it's a test set, you need to submit `mmbench_result.xlsx` to the official MMBench for final evaluation to obtain precision results!
