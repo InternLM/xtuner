@@ -229,13 +229,13 @@ git clone https://huggingface.co/datasets/liuhaotian/LLaVA-Pretrain --depth=1
 1. Pretrain (saved by default in `./work_dirs/llava_llama3_8b_instruct_clip_vit_large_p14_336_e1_gpu8_pretrain/`)
 
 ```bash
-NPROC_PER_NODE=8 xtuner train llava_llama3_8b_instruct_clip_vit_large_p14_336_e1_gpu8_pretrain --deepspeed deepspeed_zero2 --seed 1234
+NPROC_PER_NODE=8 xtuner train llava_llama3_8b_instruct_clip_vit_large_p14_336_e1_gpu8_pretrain --deepspeed deepspeed_zero2 --seed 1024
 ```
 
 2. Fine-tune (saved by default in `./work_dirs/llava_llama3_8b_instruct_full_clip_vit_large_p14_336_lora_e1_gpu8_finetune/`)
 
 ```bash
-NPROC_PER_NODE=8 xtuner train llava_llama3_8b_instruct_full_clip_vit_large_p14_336_lora_e1_gpu8_finetune --deepspeed deepspeed_zero2 --seed 1234
+NPROC_PER_NODE=8 xtuner train llava_llama3_8b_instruct_full_clip_vit_large_p14_336_lora_e1_gpu8_finetune --deepspeed deepspeed_zero2 --seed 1024
 ```
 
 ### LLaVA-LLama-3-8B-v1.1 (Recommended)
@@ -243,13 +243,13 @@ NPROC_PER_NODE=8 xtuner train llava_llama3_8b_instruct_full_clip_vit_large_p14_3
 1. Pretrain (saved by default in `./work_dirs/llava_llama3_8b_instruct_clip_vit_large_p14_336_e1_gpu8_sharegpt4v_pretrain/`)
 
 ```bash
-NPROC_PER_NODE=8 xtuner train llava_llama3_8b_instruct_clip_vit_large_p14_336_e1_gpu8_sharegpt4v_pretrain --deepspeed deepspeed_zero2 --seed 1234
+NPROC_PER_NODE=8 xtuner train llava_llama3_8b_instruct_clip_vit_large_p14_336_e1_gpu8_sharegpt4v_pretrain --deepspeed deepspeed_zero2 --seed 1024
 ```
 
 2. Fine-tune (saved by default in `./work_dirs/llava_llama3_8b_instruct_full_clip_vit_large_p14_336_lora_e1_gpu8_internvl_finetune/`)
 
 ```bash
-NPROC_PER_NODE=8 xtuner train llava_llama3_8b_instruct_full_clip_vit_large_p14_336_lora_e1_gpu8_internvl_finetune --deepspeed deepspeed_zero2 --seed 1234
+NPROC_PER_NODE=8 xtuner train llava_llama3_8b_instruct_full_clip_vit_large_p14_336_lora_e1_gpu8_internvl_finetune --deepspeed deepspeed_zero2 --seed 1024
 ```
 
 ## Model Convert (and Merge)
