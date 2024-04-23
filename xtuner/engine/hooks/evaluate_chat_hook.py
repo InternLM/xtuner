@@ -90,6 +90,8 @@ class EvaluateChatHook(Hook):
             self.stop_criteria.append(
                 StopWordStoppingCriteria(self.tokenizer, word))
 
+        self.is_first_run = True
+
     def _save_eval_output(self, runner, eval_outputs):
         save_path = os.path.join(runner.log_dir, 'vis_data',
                                  f'eval_outputs_iter_{runner.iter}.txt')
@@ -196,6 +198,13 @@ class EvaluateChatHook(Hook):
             model = model.module
 
         device = next(iter(model.parameters())).device
+
+        if self.is_first_run:
+            # hardcode for qlora DeepSpeed ZeRO3, put buffers and QuantState to
+            # device
+            model.to(device)
+            self.is_first_run = False
+
         is_checkpointing = model.llm.is_gradient_checkpointing
         use_cache = model.llm.config.use_cache
 

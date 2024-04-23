@@ -195,7 +195,25 @@ class SupervisedFinetune(BaseModel):
 
         return cfg, llm_cfg
 
+    @staticmethod
+    def _prepare_for_qlora_zero3(cfg):
+        if (not is_deepspeed_zero3_enabled()) or (not hasattr(
+                cfg, 'quantization_config')):
+            return cfg
+
+        torch_dtype = torch.bfloat16 if (
+            torch.cuda.is_available() and torch.cuda.is_bf16_supported()) \
+            else torch.float16
+
+        cfg.torch_dtype = torch_dtype
+        quantization_config = cfg.quantization_config
+        quantization_config.bnb_4bit_compute_dtype = torch_dtype
+        quantization_config.bnb_4bit_quant_storage = torch_dtype
+
+        return cfg
+
     def _dispatch_lm_model_cfg(self, cfg, max_position_embeddings=None):
+        cfg = self._prepare_for_qlora_zero3(cfg)
         pretrained_model_name_or_path = cfg.pretrained_model_name_or_path
         llm_cfg = AutoConfig.from_pretrained(
             pretrained_model_name_or_path, trust_remote_code=True)
