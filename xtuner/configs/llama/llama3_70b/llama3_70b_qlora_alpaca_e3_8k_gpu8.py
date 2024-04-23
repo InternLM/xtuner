@@ -38,7 +38,7 @@ sequence_parallel_size = 1
 
 # Scheduler & Optimizer
 batch_size = 1  # per_device
-accumulative_counts = 2
+accumulative_counts = 2  # total bs = 1 bs_per_device * 8 gpus * 2 acc = 16
 accumulative_counts *= sequence_parallel_size
 dataloader_num_workers = 4
 max_epochs = 3
