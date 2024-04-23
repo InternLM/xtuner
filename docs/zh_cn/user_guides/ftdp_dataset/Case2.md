@@ -47,7 +47,9 @@ xtuner copy-cfg mistral_7b_w_tokenized_dataset .
 
 ## Step 3, 修改模板 config 文件
 
-修改模板 config 文件中的训练数据路径为真实数据路径，其中 `/path/to/tokenized/data` 与 Step 1 中的 `/path/to/tokenized/data` 为同一个路径。同时，需要修改 tokenizer 路径为 Step 1 保存的路径 `/path/to/save/new/tokenizer`。
+1. 修改模板 config 文件中的训练数据路径为真实数据路径，其中 `/path/to/tokenized/data` 需要基于 Step 1 中的 `/path/to/tokenized/data` 进一步指定 train folder，即 `/path/to/tokenized/data/chatml_llamav13_32k/train/` 。
+2. 需要修改 tokenizer 路径为 Step 1 保存的路径 `/path/to/save/new/tokenizer`。
+3. 由于 Step 1 扩充了 tokenizer 的词表，因此需要将新 tokenizer 传入 `SupervisedFinetune` 中，以扩展 llm model 的词表大小。
 
 ```diff
 ...
@@ -72,6 +74,13 @@ prompt_template = PROMPT_TEMPLATE.internlm2_chat
 max_length = 32768
 pack_to_max_length = True
 ...
+
+#######################################################################
+#                      PART 2  Model & Tokenizer                      #
+#######################################################################
+model = dict(
++   tokenizer=tokenizer,
+    ...)
 ```
 
 在使用 DeepSpeed 训练模型时，如需在保存 checkpoint 时只保存模型权重，而不保存优化器状态，可参考以下步骤：

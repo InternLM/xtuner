@@ -14,7 +14,9 @@ from .yi import yi_attn_forward
 
 IS_LOW_VERSION_TRANSFORMERS = digit_version(
     transformers.__version__) < digit_version('4.38')
-SUPPORT_FLASH1 = digit_version(torch.__version__) >= digit_version('2.0.0')
+# Transformers requires torch version >= 2.1.1 when using Torch SDPA.
+# Refer to https://github.com/huggingface/transformers/blob/caa5c65db1f4db617cdac2ad667ba62edf94dd98/src/transformers/modeling_utils.py#L1611  # noqa: E501
+SUPPORT_FLASH1 = digit_version(torch.__version__) >= digit_version('2.1.1')
 SUPPORT_FLASH2 = False
 
 try:
@@ -284,6 +286,13 @@ def dispatch_mistral_rmsnorm_forward(model):
             module.forward = types.MethodType(rms_norm_forward, module)
 
 
+def set_mixtral_moe_blocks_z3_leaf_modules(model):
+    from deepspeed.utils import set_z3_leaf_modules
+    from transformers.models.mixtral.modeling_mixtral import \
+        MixtralSparseMoeBlock
+    set_z3_leaf_modules(model, [MixtralSparseMoeBlock])
+
+
 def replace_mistral_rote(model):
     from .mistral import MistralRotaryEmbedding
 
@@ -345,7 +354,9 @@ def dispatch_qwen2_attn_forward(model, use_varlen_attn):
 
     print_log(NO_ATTN_WEIGHTS_MSG, 'current', logging.WARNING)
     for module in model.modules():
-        if type(module).__name__ in ('Qwen2Attention', 'Qwen2FlashAttention2'):
+        if type(module).__name__ in ('Qwen2Attention', 'Qwen2FlashAttention2',
+                                     'Qwen2MoeAttention',
+                                     'Qwen2MoeFlashAttention2'):
             if use_varlen_attn:
                 print_log('dispatch qwen2 varlen attn forward', 'current')
                 module.forward = types.MethodType(qwen2_varlen_attn_forward,
@@ -365,6 +376,17 @@ def dispatch_qwen2_rmsnorm_forward(model):
         if type(module).__name__ == 'Qwen2RMSNorm':
             print_log('dispatch qwen2 rmsnorm forward', 'current')
             module.forward = types.MethodType(rms_norm_forward, module)
+
+
+def set_qwen_moe_blocks_z3_leaf_modules(model):
+    from deepspeed.utils import set_z3_leaf_modules
+    try:
+        from transformers.models.qwen2_moe.modeling_qwen2_moe import \
+            Qwen2MoeSparseMoeBlock
+    except ImportError:
+        raise ImportError('QWen moe requires transformers version at least'
+                          f'4.40.0, but got {transformers.__version__}')
+    set_z3_leaf_modules(model, [Qwen2MoeSparseMoeBlock])
 
 
 def dispatch_modules(model, use_varlen_attn=False):
@@ -398,6 +420,7 @@ def dispatch_modules(model, use_varlen_attn=False):
         dispatch_cohere_attn_forward(model, use_varlen_attn)
         dispatch_cohere_layernorm_forward(model)
     elif 'qwen2' in model_name:
+        # qwen2 and qwen2moe
         dispatch_qwen2_attn_forward(model, use_varlen_attn)
         if USE_TRITON_KERNEL:
             dispatch_qwen2_rmsnorm_forward(model)
