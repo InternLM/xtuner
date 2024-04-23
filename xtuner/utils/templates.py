@@ -155,7 +155,7 @@ PROMPT_TEMPLATE = ConfigDict(
         SYSTEM='<|system|>{system}<|end|>\n',
         INSTRUCTION='<|user|>{input}<|end|>\n<|assistant|>\n',
         SUFFIX='<|end|>',
-        UFFIX_AS_EOS=True,
+        SUFFIX_AS_EOS=True,
         SEP='\n',
         STOP_WORDS=['<|end|>']))
 
