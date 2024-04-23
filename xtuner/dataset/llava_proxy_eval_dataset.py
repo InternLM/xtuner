@@ -42,7 +42,10 @@ class LLaVAProxyEvalDataset:
         chunk_encode = []
         for idx, chunk in enumerate(inputs.split(DEFAULT_IMAGE_TOKEN)):
             if idx == 0:
-                cur_encode = self.eval_ds.tokenizer.encode(chunk)
+                # add bos token
+                bos_token_id = self.eval_ds.tokenizer.bos_token_id
+                cur_encode = [bos_token_id]
+                cur_encode += self.eval_ds.tokenizer.encode(chunk)
             else:
                 cur_encode = self.eval_ds.tokenizer.encode(chunk, add_special_tokens=False)
             chunk_encode.append(cur_encode)
@@ -56,7 +59,7 @@ class LLaVAProxyEvalDataset:
         data_dict['input_ids'] = ids
 
         # 3 process image
-        if self.eval_ds.metainfo['name'] in ['mme', 'textvqa', 'gqa']:
+        if self.eval_ds.metainfo['name'] in ['mme', 'textvqa', 'gqa', 'vqa_v2']:
             # MMEDataset or TextVQADataset
             image = Image.open(os.path.join(self.eval_ds.image_folder,
                                             data['image_path'])).convert('RGB')
@@ -73,3 +76,4 @@ class LLaVAProxyEvalDataset:
         data_dict['pixel_values'] = image
 
         return data_dict
+

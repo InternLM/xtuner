@@ -85,7 +85,7 @@ model = dict(
 #######################################################################
 llava_dataset = dict(
     type=LLaVADataset,
-    offline_processed_text_folder=None,
+    offline_processed_text_folder='/mnt/petrelfs/share_data/huanghaian/internvl_finetune_llama3/pretrain',
     data_path=data_path,
     image_folder=image_folder,
     tokenizer=tokenizer,

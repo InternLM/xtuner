@@ -16,7 +16,7 @@ from xtuner.model import LLaVAModel
 from peft import LoraConfig
 from xtuner.dataset.samplers import LengthGroupedSampler
 from xtuner.dataset.evaluation import MMEDataset, MultipleChoiceDataset, POPEDataset, \
-    HallusionDataset, TextVQADataset, GQADataset
+    HallusionDataset, TextVQADataset, GQADataset, VQAv2Dataset
 from xtuner.dataset import ConcatDataset
 from xtuner.engine.runner import TrainLoop, ValLoop, TestLoop
 #######################################################################
@@ -25,7 +25,7 @@ from xtuner.engine.runner import TrainLoop, ValLoop, TestLoop
 # Model
 llm_name_or_path = '/mnt/petrelfs/share_data/fanqi/meta-llama/Meta-Llama-3-8B-Instruct'
 visual_encoder_name_or_path = 'model/models--openai--clip-vit-large-patch14-336/snapshots/ce19dc912ca5cd21c8a653c79e251e808ccabcd1'
-pretrained_pth = 'work_dirs/llava_llama3_8b_chat_clip_e1_gpu8_sharegpt4v_pretrain/iter_xxx.pth'
+pretrained_pth = 'work_dirs/llava_llama3_8b_chat_clip_e1_gpu8_sharegpt4v_pretrain/iter_9742.pth'
 
 # Data
 data_root = '/mnt/petrelfs/share_data/linzhihao/dataset/internvl_sft/'
@@ -106,6 +106,7 @@ model = dict(
     llm=dict(
         type=AutoModelForCausalLM.from_pretrained,
         pretrained_model_name_or_path=llm_name_or_path,
+        # attn_implementation='sdpa',
         trust_remote_code=True),
     visual_encoder=dict(
         type=CLIPVisionModel.from_pretrained,
@@ -117,9 +118,12 @@ model = dict(
 #######################################################################
 #                      PART 3  Dataset & Dataloader                   #
 #######################################################################
+
+cache_root='/mnt/petrelfs/share_data/huanghaian/internvl_finetune_llama3/'
+
 sharegpt4v_caption_dataset = dict(
     type=LLaVADataset,
-    offline_processed_text_folder=None,
+    offline_processed_text_folder=cache_root+'sharegpt4v_caption_dataset',
     data_path=sharegpt4v_caption_data_path,
     image_folder=sharegpt4v_caption_image_folder,
     tokenizer=tokenizer,
@@ -132,7 +136,7 @@ sharegpt4v_caption_dataset = dict(
 
 llava_dataset = dict(
     type=LLaVADataset,
-    offline_processed_text_folder=None,
+    offline_processed_text_folder=cache_root+'llava_dataset',
     data_path=llava_data_path,
     image_folder=llava_image_folder,
     tokenizer=tokenizer,
@@ -145,7 +149,7 @@ llava_dataset = dict(
 
 sharegpt4v_dataset = dict(
     type=LLaVADataset,
-    offline_processed_text_folder=None,
+    offline_processed_text_folder=cache_root+'sharegpt4v_dataset',
     data_path=sharegpt4v_data_path,
     image_folder=sharegpt4v_image_folder,
     tokenizer=tokenizer,
@@ -159,7 +163,7 @@ sharegpt4v_dataset = dict(
 
 dvqa_dataset = dict(
     type=LLaVADataset,
-    offline_processed_text_folder=None,
+    offline_processed_text_folder=cache_root+'dvqa_dataset',
     data_path=dvqa_data_path,
     image_folder=dvqa_image_folder,
     tokenizer=tokenizer,
@@ -172,7 +176,7 @@ dvqa_dataset = dict(
 
 chartqa_dataset = dict(
     type=LLaVADataset,
-    offline_processed_text_folder=None,
+    offline_processed_text_folder=cache_root+'chartqa_dataset',
     data_path=chartqa_data_path,
     image_folder=chartqa_image_folder,
     tokenizer=tokenizer,
@@ -185,7 +189,7 @@ chartqa_dataset = dict(
 
 ai2d_dataset = dict(
     type=LLaVADataset,
-    offline_processed_text_folder=None,
+    offline_processed_text_folder=cache_root+'ai2d_dataset',
     data_path=ai2d_data_path,
     image_folder=ai2d_image_folder,
     tokenizer=tokenizer,
@@ -198,7 +202,7 @@ ai2d_dataset = dict(
 
 docvqa_dataset = dict(
     type=LLaVADataset,
-    offline_processed_text_folder=None,
+    offline_processed_text_folder=cache_root+'docvqa_dataset',
     data_path=docvqa_data_path,
     image_folder=docvqa_image_folder,
     tokenizer=tokenizer,
@@ -211,7 +215,7 @@ docvqa_dataset = dict(
 
 geoqa_dataset = dict(
     type=LLaVADataset,
-    offline_processed_text_folder=None,
+    offline_processed_text_folder=cache_root+'geoqa_dataset',
     data_path=geoqa_data_path,
     image_folder=geoqa_image_folder,
     tokenizer=tokenizer,
@@ -224,7 +228,7 @@ geoqa_dataset = dict(
 
 synthdog_dataset = dict(
     type=LLaVADataset,
-    offline_processed_text_folder=None,
+    offline_processed_text_folder=cache_root+'synthdog_dataset',
     data_path=synthdog_data_path,
     image_folder=synthdog_image_folder,
     tokenizer=tokenizer,
@@ -245,7 +249,7 @@ train_dataloader = dict(
     batch_size=batch_size,
     num_workers=dataloader_num_workers,
     pin_memory=True,
-    dataset=llava_dataset,
+    dataset=train_dataset,
     sampler=dict(
         type=LengthGroupedSampler,
         length_property='modality_length',
@@ -371,13 +375,6 @@ test_dataset = [
         tokenizer=tokenizer,
         image_processor=image_processor,
         pad_image_to_square=True),
-    # dict(
-    #     type=MultipleChoiceDataset,
-    #     data_file='/mnt/petrelfs/huanghaian/code/xtuner/LMUData/MMBench_TEST_EN.tsv',
-    #     prompt_template=prompt_template,
-    #     tokenizer=tokenizer,
-    #     image_processor=image_processor,
-    #     pad_image_to_square=True),
     dict(
         type=MultipleChoiceDataset,
         data_file='/mnt/petrelfs/huanghaian/code/xtuner/LMUData/SEEDBench_IMG.tsv',
@@ -466,6 +463,43 @@ test_dataset = [
         tokenizer=tokenizer,
         image_processor=image_processor,
         pad_image_to_square=True),
+    dict(
+        type=MultipleChoiceDataset,
+        data_file='/mnt/petrelfs/huanghaian/code/xtuner/LMUData/MMBench_DEV_CN.tsv',
+        prompt_template=prompt_template,
+        tokenizer=tokenizer,
+        image_processor=image_processor,
+        pad_image_to_square=True),
+    dict(
+        type=MultipleChoiceDataset,
+        data_file='/mnt/petrelfs/huanghaian/code/xtuner/LMUData/CCBench.tsv',
+        prompt_template=prompt_template,
+        tokenizer=tokenizer,
+        image_processor=image_processor,
+        pad_image_to_square=True),
+    dict(
+        type=MultipleChoiceDataset,
+        data_file='/mnt/petrelfs/huanghaian/code/xtuner/LMUData/MMBench_TEST_CN.tsv',
+        prompt_template=prompt_template,
+        tokenizer=tokenizer,
+        image_processor=image_processor,
+        pad_image_to_square=True),
+    dict(
+        type=MultipleChoiceDataset,
+        data_file='/mnt/petrelfs/huanghaian/code/xtuner/LMUData/MMBench_TEST_EN.tsv',
+        prompt_template=prompt_template,
+        tokenizer=tokenizer,
+        image_processor=image_processor,
+        pad_image_to_square=True),
+    # dict(
+    #     type=VQAv2Dataset,
+    #     data_file='/mnt/petrelfs/share_data/zhaoxiangyu/vqav2_llava_eval/llava_vqav2_mscoco_test-dev2015.jsonl',
+    #     test_file='/mnt/petrelfs/share_data/zhaoxiangyu/vqav2_llava_eval/llava_vqav2_mscoco_test2015.jsonl',
+    #     image_folder='/mnt/petrelfs/share_data/zhaoxiangyu/vqav2_test2015',
+    #     prompt_template=PROMPT_TEMPLATE.vicuna,
+    #     tokenizer=tokenizer,
+    #     image_processor=image_processor,
+    #     pad_image_to_square=True),
 ]
 
 # TODO: We are not currently using val_evaluator

@@ -35,8 +35,8 @@ prompt_template = PROMPT_TEMPLATE.llama3_chat
 max_length = int(2048 - (336 // 14) ** 2)
 
 # Scheduler & Optimizer
-batch_size = 16  # per_device
-accumulative_counts = 1
+batch_size = 8  # per_device
+accumulative_counts = 2
 dataloader_num_workers = 4
 max_epochs = 1
 optim_type = AdamW
@@ -80,6 +80,8 @@ model = dict(
     llm=dict(
         type=AutoModelForCausalLM.from_pretrained,
         pretrained_model_name_or_path=llm_name_or_path,
+        # to speed inference
+        # attn_implementation='sdpa',
         trust_remote_code=True),
     visual_encoder=dict(
         type=CLIPVisionModel.from_pretrained,
@@ -93,7 +95,7 @@ model = dict(
 #######################################################################
 llava_dataset = dict(
     type=LLaVADataset,
-    offline_processed_text_folder=None,
+    offline_processed_text_folder='/mnt/petrelfs/huanghaian/code/xtuner/llama3_8b_finetune',
     data_path=data_path,
     image_folder=image_folder,
     tokenizer=tokenizer,
@@ -234,13 +236,6 @@ test_dataset = [
         tokenizer=tokenizer,
         image_processor=image_processor,
         pad_image_to_square=True),
-    # dict(
-    #     type=MultipleChoiceDataset,
-    #     data_file='/mnt/petrelfs/huanghaian/code/xtuner/LMUData/MMBench_TEST_EN.tsv',
-    #     prompt_template=prompt_template,
-    #     tokenizer=tokenizer,
-    #     image_processor=image_processor,
-    #     pad_image_to_square=True),
     dict(
         type=MultipleChoiceDataset,
         data_file='/mnt/petrelfs/huanghaian/code/xtuner/LMUData/SEEDBench_IMG.tsv',
@@ -329,6 +324,43 @@ test_dataset = [
         tokenizer=tokenizer,
         image_processor=image_processor,
         pad_image_to_square=True),
+    dict(
+        type=MultipleChoiceDataset,
+        data_file='/mnt/petrelfs/huanghaian/code/xtuner/LMUData/MMBench_DEV_CN.tsv',
+        prompt_template=prompt_template,
+        tokenizer=tokenizer,
+        image_processor=image_processor,
+        pad_image_to_square=True),
+    dict(
+        type=MultipleChoiceDataset,
+        data_file='/mnt/petrelfs/huanghaian/code/xtuner/LMUData/CCBench.tsv',
+        prompt_template=prompt_template,
+        tokenizer=tokenizer,
+        image_processor=image_processor,
+        pad_image_to_square=True),
+    dict(
+        type=MultipleChoiceDataset,
+        data_file='/mnt/petrelfs/huanghaian/code/xtuner/LMUData/MMBench_TEST_CN.tsv',
+        prompt_template=prompt_template,
+        tokenizer=tokenizer,
+        image_processor=image_processor,
+        pad_image_to_square=True),
+    dict(
+        type=MultipleChoiceDataset,
+        data_file='/mnt/petrelfs/huanghaian/code/xtuner/LMUData/MMBench_TEST_EN.tsv',
+        prompt_template=prompt_template,
+        tokenizer=tokenizer,
+        image_processor=image_processor,
+        pad_image_to_square=True),
+    # dict(
+    #     type=VQAv2Dataset,
+    #     data_file='/mnt/petrelfs/share_data/zhaoxiangyu/vqav2_llava_eval/llava_vqav2_mscoco_test-dev2015.jsonl',
+    #     test_file='/mnt/petrelfs/share_data/zhaoxiangyu/vqav2_llava_eval/llava_vqav2_mscoco_test2015.jsonl',
+    #     image_folder='/mnt/petrelfs/share_data/zhaoxiangyu/vqav2_test2015',
+    #     prompt_template=PROMPT_TEMPLATE.vicuna,
+    #     tokenizer=tokenizer,
+    #     image_processor=image_processor,
+    #     pad_image_to_square=True),
 ]
 
 # TODO: We are not currently using val_evaluator

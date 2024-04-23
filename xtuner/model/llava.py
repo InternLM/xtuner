@@ -258,7 +258,8 @@ class LLaVAModel(BaseModel):
         pretrained_model_name_or_path = cfg.pretrained_model_name_or_path
         llm_cfg = AutoConfig.from_pretrained(
             pretrained_model_name_or_path, trust_remote_code=True)
-        cfg, llm_cfg = self._prepare_for_flash_attn(cfg, llm_cfg)
+        if not hasattr(cfg, 'attn_implementation'):
+            cfg, llm_cfg = self._prepare_for_flash_attn(cfg, llm_cfg)
         if max_position_embeddings is not None:
             cfg, llm_cfg = self._prepare_for_long_context_training(
                 cfg, llm_cfg, max_position_embeddings)
