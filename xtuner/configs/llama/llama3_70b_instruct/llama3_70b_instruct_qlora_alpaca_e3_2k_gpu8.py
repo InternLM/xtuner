@@ -24,13 +24,13 @@ from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-pretrained_model_name_or_path = 'meta-llama/Meta-Llama-3-70B'
+pretrained_model_name_or_path = 'meta-llama/Meta-Llama-3-70B-Instruct'
 use_varlen_attn = False
 
 # Data
 alpaca_en_path = 'tatsu-lab/alpaca'
 prompt_template = PROMPT_TEMPLATE.llama3_chat
-max_length = 8192
+max_length = 2048
 pack_to_max_length = True
 
 # parallel
