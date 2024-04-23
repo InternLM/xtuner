@@ -5,6 +5,7 @@ from .hallusion_dataset import HallusionDataset
 from .textvqa_dataset import TextVQADataset
 from .gqa_dataset import GQADataset
 from .vqav2_dataset import VQAv2Dataset
+from .chartqa_dataset import ChartQADataset
 
 __all__ = ['MMEDataset', 'MultipleChoiceDataset', 'POPEDataset', 'HallusionDataset', 'TextVQADataset', 'GQADataset',
-           'VQAv2Dataset']
+           'VQAv2Dataset', 'ChartQADataset']

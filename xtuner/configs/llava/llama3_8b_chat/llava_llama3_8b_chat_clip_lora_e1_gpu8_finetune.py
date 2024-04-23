@@ -16,7 +16,7 @@ from xtuner.model import LLaVAModel
 from peft import LoraConfig
 from xtuner.dataset.samplers import LengthGroupedSampler
 from xtuner.dataset.evaluation import MMEDataset, MultipleChoiceDataset, POPEDataset, \
-    HallusionDataset, TextVQADataset, GQADataset
+    HallusionDataset, TextVQADataset, GQADataset, VQAv2Dataset, ChartQADataset
 from xtuner.dataset import ConcatDataset
 from xtuner.engine.runner import TrainLoop, ValLoop, TestLoop
 #######################################################################
@@ -361,6 +361,16 @@ test_dataset = [
     #     tokenizer=tokenizer,
     #     image_processor=image_processor,
     #     pad_image_to_square=True),
+    dict(
+        type=ChartQADataset,
+        data_file=['LMUData/ChartQA/ChartQA Dataset/test/test_human.json',
+                   'LMUData/ChartQA/ChartQA Dataset/test/test_augmented.json'],
+        image_folder='LMUData/ChartQA/ChartQA Dataset/test/png',
+        prompt_template=prompt_template,
+        tokenizer=tokenizer,
+        image_processor=image_processor,
+        pad_image_to_square=True
+    )
 ]
 
 # TODO: We are not currently using val_evaluator
