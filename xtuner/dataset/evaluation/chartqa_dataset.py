@@ -8,11 +8,10 @@ from xtuner.dataset.evaluation.base_eval_dataset import BaseEvalDataset
 from xtuner.registry import BUILDER
 from mmengine.logging import print_log
 from xtuner.dataset.llava_proxy_eval_dataset import LLaVAProxyEvalDataset
-from .gqa_eval_utils import eval_gqa
 
 
-def relaxed_correctness(target: str,
-                        prediction: str,
+def relaxed_correctness(prediction: str,
+                        target: str,
                         max_relative_change: float = 0.05) -> bool:
     """Calculates relaxed correctness.
 
@@ -25,8 +24,8 @@ def relaxed_correctness(target: str,
     to consider an answer to be correct.”
 
     Args:
-      target: Target string.
       prediction: Predicted string.
+      target: Target string.
       max_relative_change: Maximum relative change.
 
     Returns:
@@ -83,6 +82,8 @@ class ChartQADataset(BaseEvalDataset):
             proxy_eval_dataset=dict(type=LLaVAProxyEvalDataset),
     ):
         super().__init__(metainfo)
+        self.use_system=use_system
+        self.for_llava_prompt = for_llava_prompt
 
         if isinstance(data_file, str):
             data_file = [data_file]
@@ -119,7 +120,7 @@ class ChartQADataset(BaseEvalDataset):
                 category = self.name[data_idx]
                 data = {
                     'img_id': idx,
-                    'img': image_path,
+                    'image_path': image_path,
                     'question': question,
                     'answer': answer,
                     'category': category

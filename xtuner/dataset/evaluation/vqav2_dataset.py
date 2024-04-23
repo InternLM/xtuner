@@ -33,9 +33,9 @@ class VQAv2Dataset(BaseEvalDataset):
         self.test_file = test_file
         self.image_folder = image_folder
         # Save detailed information for easy viewing
-        self.answer_file = 'answer_vqav2_results.jsonl'
+        self.answer_file = 'answer_vqav2_results.json'
         # solely for evaluation purposes
-        self.prediction_file = 'pred_vqav2_results.jsonl'
+        self.prediction_file = 'pred_vqav2_results.json'
         self.answer_processor = EvalAIAnswerProcessor()
 
         self.use_system = use_system
