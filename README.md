@@ -39,7 +39,7 @@ English | [简体中文](README_zh-CN.md)
 - **\[2023/10\]** Optimize the data processing to accommodate `system` context. More information can be found on [Docs](docs/en/user_guides/dataset_format.md)!
 - **\[2023/09\]** Support [InternLM-20B](xtuner/configs/internlm) models!
 - **\[2023/09\]** Support [Baichuan2](xtuner/configs/baichuan) models!
-- **\[2023/08\]** XTuner is released, with multiple fine-tuned adapters on [HuggingFace](https://huggingface.co/xtuner).
+- **\[2023/08\]** XTuner is released, with multiple fine-tuned adapters on [Hugging Face](https://huggingface.co/xtuner).
 
 ## 📖 Introduction
 
@@ -228,7 +228,7 @@ XTuner supports the efficient fine-tune (*e.g.*, QLoRA) for LLMs. Dataset prepar
 
   - For more examples, please see [finetune.md](./docs/en/user_guides/finetune.md).
 
-- **Step 2**, convert the saved PTH model (if using DeepSpeed, it will be a directory) to HuggingFace model, by
+- **Step 2**, convert the saved PTH model (if using DeepSpeed, it will be a directory) to Hugging Face model, by
 
   ```shell
   xtuner convert pth_to_hf ${CONFIG_NAME_OR_PATH} ${PTH} ${SAVE_PATH}
@@ -260,7 +260,7 @@ For more examples, please see [chat.md](./docs/en/user_guides/chat.md).
 
 ### Deployment
 
-- **Step 0**, merge the HuggingFace adapter to pretrained LLM, by
+- **Step 0**, merge the Hugging Face adapter to pretrained LLM, by
 
   ```shell
   xtuner convert merge \
