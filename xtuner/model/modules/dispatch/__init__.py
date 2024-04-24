@@ -100,9 +100,7 @@ def dispatch_phi3_attn_forward(model, use_varlen_attn):
     elif not SUPPORT_FLASH2:
         return
 
-    from .phi3 import (phi3_attn_forward, phi3_attn_forward_legacy,
-                       phi3_varlen_attn_forward,
-                       phi3_varlen_attn_forward_legacy)
+    from .phi3 import phi3_attn_forward, phi3_varlen_attn_forward
 
     print_log(NO_ATTN_WEIGHTS_MSG, 'current', logging.WARNING)
     for module in model.modules():
@@ -113,16 +111,18 @@ def dispatch_phi3_attn_forward(model, use_varlen_attn):
             if use_varlen_attn:
                 print_log('dispatch phi3 varlen attn forward', 'current')
                 if IS_LOW_VERSION_TRANSFORMERS:
-                    module.forward = types.MethodType(
-                        phi3_varlen_attn_forward_legacy, module)
+                    raise RuntimeError(
+                        'Phi-3 need transformers version >= 4.39, but got '
+                        f'{transformers.__version__}')
                 else:
                     module.forward = types.MethodType(phi3_varlen_attn_forward,
                                                       module)
             else:
                 print_log('dispatch phi3 attn forward', 'current')
                 if IS_LOW_VERSION_TRANSFORMERS:
-                    module.forward = types.MethodType(phi3_attn_forward_legacy,
-                                                      module)
+                    raise RuntimeError(
+                        'Phi-3 need transformers version >= 4.39, but got '
+                        f'{transformers.__version__}')
                 else:
                     module.forward = types.MethodType(phi3_attn_forward,
                                                       module)
