@@ -179,11 +179,12 @@ class SupervisedFinetune(BaseModel):
         cls_name = type(llm_cfg).__name__
         SUPPORT_SDPA_ATTN = ('LlamaConfig', 'GemmaConfig', 'MistralConfig',
                              'MixtralConfig', 'Qwen2Config', 'Qwen2MoeConfig',
-                             'Starcoder2Config', 'Starcoder2Config')
+                             'Starcoder2Config', 'Starcoder2Config',
+                             'Phi3Config')
         SUPPORT_FLASH_ATTN2 = ('InternLM2Config', 'LlamaConfig', 'GemmaConfig',
                                'MistralConfig', 'MixtralConfig', 'Qwen2Config',
                                'Qwen2MoeConfig', 'Starcoder2Config',
-                               'Starcoder2Config')
+                               'Starcoder2Config', 'Phi3Config')
 
         if SUPPORT_FLASH2 and cls_name in SUPPORT_FLASH_ATTN2:
             cfg.torch_dtype = torch.bfloat16 if (

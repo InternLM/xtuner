@@ -93,6 +93,53 @@ def dispatch_llama_rmsnorm_forward(model):
             module.forward = types.MethodType(rms_norm_forward, module)
 
 
+def dispatch_phi3_attn_forward(model, use_varlen_attn):
+    if use_varlen_attn:
+        assert SUPPORT_FLASH2 and SUPPORT_TRITON, \
+            'flash_attn and triton is required if you want to use varlen_attn.'
+    elif not SUPPORT_FLASH2:
+        return
+
+    from .phi3 import phi3_attn_forward, phi3_varlen_attn_forward
+
+    print_log(NO_ATTN_WEIGHTS_MSG, 'current', logging.WARNING)
+    for module in model.modules():
+        # Do not need to dispatch if
+        # type(module).__name__ == 'Phi3SdpaAttention', as flash_attn is
+        # required when using sequence parallel
+        if type(module).__name__ in ('Phi3Attention', 'Phi3FlashAttention2'):
+            if use_varlen_attn:
+                print_log('dispatch phi3 varlen attn forward', 'current')
+                if IS_LOW_VERSION_TRANSFORMERS:
+                    raise RuntimeError(
+                        'Phi-3 need transformers version >= 4.39, but got '
+                        f'{transformers.__version__}')
+                else:
+                    module.forward = types.MethodType(phi3_varlen_attn_forward,
+                                                      module)
+            else:
+                print_log('dispatch phi3 attn forward', 'current')
+                if IS_LOW_VERSION_TRANSFORMERS:
+                    raise RuntimeError(
+                        'Phi-3 need transformers version >= 4.39, but got '
+                        f'{transformers.__version__}')
+                else:
+                    module.forward = types.MethodType(phi3_attn_forward,
+                                                      module)
+
+
+def dispatch_phi3_rmsnorm_forward(model):
+    if not SUPPORT_TRITON:
+        return
+
+    from .triton_kernels import rms_norm_forward
+
+    for module in model.modules():
+        if type(module).__name__ == 'Phi3RMSNorm':
+            print_log('dispatch phi3 rmsnorm forward', 'current')
+            module.forward = types.MethodType(rms_norm_forward, module)
+
+
 def dispatch_internlm_attn_forward(model, use_varlen_attn):
     if use_varlen_attn:
         assert SUPPORT_FLASH2 and SUPPORT_TRITON, \
@@ -405,6 +452,10 @@ def dispatch_modules(model, use_varlen_attn=False):
         dispatch_llama_attn_forward(model, use_varlen_attn)
         if USE_TRITON_KERNEL:
             dispatch_llama_rmsnorm_forward(model)
+    elif 'phi3' in model_name:
+        dispatch_phi3_attn_forward(model, use_varlen_attn)
+        if USE_TRITON_KERNEL:
+            dispatch_phi3_rmsnorm_forward(model)
     elif 'baichuan' in model_name:
         dispath_baichuan2_norm_head_forward(model)
         dispath_baichuan_7b_attn_forward(model)
