@@ -60,7 +60,7 @@ max_length = int(4096 - (336 / 14)**2)
 # Scheduler & Optimizer
 batch_size = 4  # per_device
 accumulative_counts = 4
-dataloader_num_workers = 0
+dataloader_num_workers = 4
 max_epochs = 1
 optim_type = AdamW
 lr = 2e-5
@@ -230,6 +230,7 @@ train_dataset = dict(
 train_dataloader = dict(
     batch_size=batch_size,
     num_workers=dataloader_num_workers,
+    pin_memory=True,
     dataset=train_dataset,
     sampler=dict(
         type=LengthGroupedSampler,
