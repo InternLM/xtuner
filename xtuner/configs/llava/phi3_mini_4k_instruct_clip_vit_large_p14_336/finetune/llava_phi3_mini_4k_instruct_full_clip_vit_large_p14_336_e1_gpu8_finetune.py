@@ -22,7 +22,7 @@ from xtuner.utils import PROMPT_TEMPLATE
 llm_name_or_path = 'microsoft/Phi-3-mini-4k-instruct'
 visual_encoder_name_or_path = 'openai/clip-vit-large-patch14-336'
 # Specify the pretrained pth
-pretrained_pth = './work_dirs/llava_phi3_mini_4k_instruct_clip_vit_large_p14_336_e1_gpu8_sharegpt4v_pretrain/latest'  # noqa: E501
+pretrained_pth = './work_dirs/llava_phi3_mini_4k_instruct_clip_vit_large_p14_336_e1_gpu8_pretrain/iter_2181.pth'  # noqa: E501
 
 # Data
 data_root = './data/llava_data/'
