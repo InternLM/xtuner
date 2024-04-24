@@ -157,7 +157,8 @@ PROMPT_TEMPLATE = ConfigDict(
         SUFFIX='<|end|>',
         SUFFIX_AS_EOS=True,
         SEP='\n',
-        STOP_WORDS=['<|end|>']))
+        STOP_WORDS=['<|end|>']),
+    )
 
 SYSTEM_TEMPLATE = ConfigDict(
     moss_sft=('You are an AI assistant whose name is {bot_name}.\n'
