@@ -25,6 +25,7 @@ English | [简体中文](README_zh-CN.md)
 
 ## 🎉 News
 
+- **\[2024/04\]** Support [Phi-3](xtuner/configs/phi) models!
 - **\[2024/04\]** Latest VLM [LLaVA-Llama-3-8B](https://huggingface.co/xtuner/llava-llama-3-8b) and [LLaVA-Llama-3-8B-v1.1](https://huggingface.co/xtuner/llava-llama-3-8b-v1_1) are released! Click [here](xtuner/configs/llava/llama3_8b_instruct_clip_vit_large_p14_336) for details!
 - **\[2024/04\]** Support [Llama 3](xtuner/configs/llama) models!
 - **\[2024/04\]** Support Sequence Parallel for enabling highly efficient and scalable LLM training with extremely long sequence lengths! \[[Usage](https://github.com/InternLM/xtuner/blob/docs/docs/zh_cn/acceleration/train_extreme_long_sequence.rst)\] \[[Speed Benchmark](https://github.com/InternLM/xtuner/blob/docs/docs/zh_cn/acceleration/benchmark.rst)\]
@@ -64,30 +65,19 @@ XTuner is an efficient, flexible and full-featured toolkit for fine-tuning large
 - Support chatting with large models with pre-defined templates.
 - The output models can seamlessly integrate with deployment and server toolkit ([LMDeploy](https://github.com/InternLM/lmdeploy)), and large-scale evaluation toolkit ([OpenCompass](https://github.com/open-compass/opencompass), [VLMEvalKit](https://github.com/open-compass/VLMEvalKit)).
 
-## 🌟 Demos
+## 🚀 Speed Benchmark
 
-- Ready-to-use models and datasets from XTuner API [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/17CSO7T8q6KePuvu684IiHl6_id-CjPjh?usp=sharing)
+- Llama3 8B 8K Context Length Fully Finetuning Speed
 
-- QLoRA Fine-tune [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1QAEZVBfQ7LZURkMUtaq0b-5nEQII9G9Z?usp=sharing)
+<div align=center>
+  <img src="https://github.com/InternLM/xtuner/assets/41630003/19b68a5d-3cda-417c-9c1e-2710c9a81fa4" style="width:80%">
+</div>
 
-- Plugin-based Chat [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/144OuTVyT_GvFyDMtlSlTzcxYIfnRsklq?usp=sharing)
+- Llama3 8B 8 * A100 80G Fully Finetuning Speed
 
-  <table>
-  <tr>
-    <th colspan="3" align="center">Examples of Plugin-based Chat 🔥🔥🔥</th>
-  </tr>
-  <tr>
-  <td>
-  <a><img src="https://github.com/InternLM/lmdeploy/assets/36994684/7c429d98-7630-4539-8aff-c89094826f8c"></a>
-  </td>
-  <td>
-  <a><img src="https://github.com/InternLM/lmdeploy/assets/36994684/05d02906-5a82-45bc-b4e3-2cc32d473b2c"></a>
-  </td>
-  <td>
-  <a><img src="https://github.com/InternLM/lmdeploy/assets/36994684/80395303-997a-47f2-b7d2-d585034df683"></a>
-  </td>
-  </tr>
-  </table>
+<div align=center>
+  <img src="https://github.com/InternLM/xtuner/assets/41630003/c626f366-808e-4c7f-b66a-1aece7d79253" style="width:80%">
+</div>
 
 ## 🔥 Supports
 
@@ -111,13 +101,12 @@ XTuner is an efficient, flexible and full-featured toolkit for fine-tuning large
 <td align="left" valign="top">
 <ul>
   <li><a href="https://huggingface.co/internlm">InternLM2</a></li>
-  <li><a href="https://huggingface.co/internlm">InternLM</a></li>
-  <li><a href="https://huggingface.co/meta-llama">Llama</a></li>
+  <li><a href="https://huggingface.co/meta-llama">Llama 3</a></li>
   <li><a href="https://huggingface.co/meta-llama">Llama 2</a></li>
+  <li><a href="https://huggingface.co/collections/microsoft/phi-3-6626e15e9585a200d2d761e3">Phi-3</a></li>
   <li><a href="https://huggingface.co/THUDM/chatglm2-6b">ChatGLM2</a></li>
   <li><a href="https://huggingface.co/THUDM/chatglm3-6b">ChatGLM3</a></li>
   <li><a href="https://huggingface.co/Qwen/Qwen-7B">Qwen</a></li>
-  <li><a href="https://huggingface.co/baichuan-inc/Baichuan-7B">Baichuan</a></li>
   <li><a href="https://huggingface.co/baichuan-inc/Baichuan2-7B-Base">Baichuan2</a></li>
   <li><a href="https://huggingface.co/mistralai/Mixtral-8x7B-Instruct-v0.1">Mixtral 8x7B</a></li>
   <li><a href="https://huggingface.co/deepseek-ai/deepseek-moe-16b-chat">DeepSeek MoE</a></li>
@@ -191,7 +180,7 @@ XTuner is an efficient, flexible and full-featured toolkit for fine-tuning large
   pip install -e '.[all]'
   ```
 
-### Fine-tune [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1QAEZVBfQ7LZURkMUtaq0b-5nEQII9G9Z?usp=sharing)
+### Fine-tune
 
 XTuner supports the efficient fine-tune (*e.g.*, QLoRA) for LLMs. Dataset prepare guides can be found on [dataset_prepare.md](./docs/en/user_guides/dataset_prepare.md).
 
@@ -234,7 +223,7 @@ XTuner supports the efficient fine-tune (*e.g.*, QLoRA) for LLMs. Dataset prepar
   xtuner convert pth_to_hf ${CONFIG_NAME_OR_PATH} ${PTH} ${SAVE_PATH}
   ```
 
-### Chat [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/144OuTVyT_GvFyDMtlSlTzcxYIfnRsklq?usp=sharing)
+### Chat
 
 XTuner provides tools to chat with pretrained / fine-tuned LLMs.
 
@@ -294,6 +283,7 @@ We appreciate all contributions to XTuner. Please refer to [CONTRIBUTING.md](.gi
 ## 🎖️ Acknowledgement
 
 - [Llama 2](https://github.com/facebookresearch/llama)
+- [DeepSpeed](https://github.com/microsoft/DeepSpeed)
 - [QLoRA](https://github.com/artidoro/qlora)
 - [LMDeploy](https://github.com/InternLM/lmdeploy)
 - [LLaVA](https://github.com/haotian-liu/LLaVA)
