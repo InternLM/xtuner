@@ -73,6 +73,8 @@ def main():
         state_dict = guess_load_checkpoint(args.pth_model)
 
     model.load_state_dict(state_dict, strict=False)
+    model.llm.config.use_cache = True
+
     print(f'Load PTH model from {args.pth_model}')
 
     if 'LLaVAModel' in model_name:
