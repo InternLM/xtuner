@@ -11,10 +11,14 @@ from xtuner.dataset.collate_fns import mm_collate_fn
 from xtuner.dataset.map_fns import llava_map_fn, template_map_fn_factory
 from xtuner.dataset.samplers import LengthGroupedSampler
 from xtuner.engine.hooks import DatasetInfoHook, EvaluateChatHook
-from xtuner.engine.runner import TrainLoop
 from xtuner.model import LLaVAModel
 from xtuner.utils import PROMPT_TEMPLATE
 from peft import LoraConfig
+from xtuner.dataset.evaluation import MMEDataset, MultipleChoiceDataset, POPEDataset, \
+    HallusionDataset, TextVQADataset, GQADataset, VQAv2Dataset, ChartQADataset
+from xtuner.dataset import ConcatDataset
+from xtuner.engine.runner import TrainLoop, ValLoop, TestLoop
+from mmengine.dataset import DefaultSampler
 
 #######################################################################
 #                          PART 1  Settings                           #
