@@ -34,7 +34,7 @@ xtuner convert pth_to_hf $FINETUNE_CFG $PTH_PATH $SAVE_PATH
 ```
 
 ```
-./iter_39620_hf
+./iter_39620_xtuner
 ├── added_tokens.json
 ├── config.json
 ├── model-00001-of-00004.safetensors
@@ -60,8 +60,8 @@ xtuner convert pth_to_hf $FINETUNE_CFG $PTH_PATH $SAVE_PATH
 At this time, the LLaVA model of xtuner-format can engage in conversation using xtuner chat, by
 
 ```bash
-xtuner chat ./iter_39620_hf \
-  --llava ./iter_39620_hf \
+xtuner chat ./iter_39620_xtuner \
+  --llava ./iter_39620_xtuner \
   --prompt-template phi3_chat \
   --image $IMAGE_PATH
 ```
@@ -69,8 +69,8 @@ xtuner chat ./iter_39620_hf \
 and in MMBench evaluation, by
 
 ```bash
-xtuner mmbench ./iter_39620_hf \
-  --llava ./iter_39620_hf \
+xtuner mmbench ./iter_39620_xtuner \
+  --llava ./iter_39620_xtuner \
   --prompt-template phi3_chat \
   --data-path $DATA_PATH \
   --work-dir $RESULT_PATH
@@ -95,7 +95,7 @@ wget https://opencompass.openxlab.space/utils/VLMEval/CCBench.tsv
 Since the official LLaVA format and the HuggingFace LLaVA format only support Llama architecture as the LLM, we need to first convert the phi-3 model to an equivalent Llama LLM.
 
 ```bash
-python ./convert_phi_to_llama.py --phi_path ./iter_39620_hf --save_path ./iter_39620_hf_llama_llm
+python ./convert_phi_to_llama.py --phi_path ./iter_39620_xtuner --save_path ./iter_39620_xtuner_llama_llm
 ```
 
 Here, `--phi_path` should specify the path to phi-3, which is the path obtained from Step.0 for the xtuner-format LLaVA model. `--save_path` should specify the save path for the converted Llama LLM.
@@ -105,7 +105,7 @@ Here, `--phi_path` should specify the path to phi-3, which is the path obtained 
 We can utilize the following command to obtain the LLaVA model in the official LLaVA format.
 
 ```bash
-python ./convert_xtuner_weights_to_llava.py --text_model_id ./iter_39620_hf_llama_llm --vision_model_id ./iter_39620_hf/visual_encoder --projector_weight ./iter_39620_hf/projector/model.safetensors --save_path ./iter_39620_llava
+python ./convert_xtuner_weights_to_llava.py --text_model_id ./iter_39620_xtuner_llama_llm --vision_model_id ./iter_39620_xtuner/visual_encoder --projector_weight ./iter_39620_xtuner/projector/model.safetensors --save_path ./iter_39620_llava
 ```
 
 Here, the converted LLaVA model in official LLaVA format is saved to `./iter_39620_llava`.
@@ -133,13 +133,13 @@ Here, the converted LLaVA model in official LLaVA format is saved to `./iter_396
 We can utilize the following command to obtain the LLaVA model in the HuggingFace LLaVA format.
 
 ```bash
-python ./convert_xtuner_weights_to_hf.py --text_model_id ./iter_39620_hf_llama_llm --vision_model_id ./iter_39620_hf/visual_encoder --projector_weight ./iter_39620_hf/projector/model.safetensors --save_path ./iter_39620_llava_hf
+python ./convert_xtuner_weights_to_hf.py --text_model_id ./iter_39620_xtuner_llama_llm --vision_model_id ./iter_39620_xtuner/visual_encoder --projector_weight ./iter_39620_xtuner/projector/model.safetensors --save_path ./iter_39620_hf
 ```
 
-Here, the converted LLaVA model in HuggingFace LLaVA format is saved to `./iter_39620_llava_hf`.
+Here, the converted LLaVA model in HuggingFace LLaVA format is saved to `./iter_39620_hf`.
 
 ```
-./iter_39620_llava_hf
+./iter_39620_hf
 ├── added_tokens.json
 ├── config.json
 ├── generation_config.json
