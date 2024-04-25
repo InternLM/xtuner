@@ -1,41 +1,44 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+from datasets import load_dataset
+from mmengine.dataset import DefaultSampler
 from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
                             LoggerHook, ParamSchedulerHook)
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR, LinearLR
 from torch.optim import AdamW
-from transformers import (AutoModelForCausalLM, AutoTokenizer,
-                          CLIPImageProcessor, CLIPVisionModel)
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from xtuner.dataset import LLaVADataset
+from xtuner.dataset import process_hf_dataset
 from xtuner.dataset.collate_fns import default_collate_fn
-from xtuner.dataset.map_fns import llava_map_fn, template_map_fn_factory
-from xtuner.dataset.samplers import LengthGroupedSampler
-from xtuner.engine.hooks import DatasetInfoHook, EvaluateChatHook
+from xtuner.dataset.map_fns import alpaca_map_fn, template_map_fn_factory
+from xtuner.engine.hooks import (DatasetInfoHook, EvaluateChatHook,
+                                 VarlenAttnArgsToMessageHubHook)
 from xtuner.engine.runner import TrainLoop
-from xtuner.model import LLaVAModel
-from xtuner.utils import PROMPT_TEMPLATE
+from xtuner.model import SupervisedFinetune
+from xtuner.parallel.sequence import SequenceParallelSampler
+from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
 
 #######################################################################
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-llm_name_or_path = 'lmsys/vicuna-13b-v1.5'
-visual_encoder_name_or_path = 'openai/clip-vit-large-patch14-336'
-# Specify the pretrained pth
-pretrained_pth = './work_dirs/llava_v15_13b_pretrain/iter_2181.pth'
+pretrained_model_name_or_path = 'microsoft/Phi-3-mini-4k-instruct'
+use_varlen_attn = False
 
 # Data
-data_root = './data/llava_data/'
-data_path = data_root + 'LLaVA-Instruct-150K/llava_v1_5_mix665k.json'
-image_folder = data_root + 'llava_images'
-prompt_template = PROMPT_TEMPLATE.vicuna
-max_length = int(2048 - (336 / 14)**2)
+alpaca_en_path = 'tatsu-lab/alpaca'
+prompt_template = PROMPT_TEMPLATE.phi3_chat
+max_length = 4096
+pack_to_max_length = True
+
+# parallel
+sequence_parallel_size = 1
 
 # Scheduler & Optimizer
-batch_size = 16  # per_device
-accumulative_counts = 1
-dataloader_num_workers = 4
-max_epochs = 1
+batch_size = 1  # per_device
+accumulative_counts = 16
+accumulative_counts *= sequence_parallel_size
+dataloader_num_workers = 0
+max_epochs = 3
 optim_type = AdamW
 lr = 2e-5
 betas = (0.9, 0.999)
@@ -49,62 +52,52 @@ save_total_limit = 2  # Maximum checkpoints to keep (-1 means unlimited)
 
 # Evaluate the generation performance during the training
 evaluation_freq = 500
-SYSTEM = ''
-evaluation_images = 'https://llava-vl.github.io/static/images/view.jpg'
-evaluation_inputs = ['请描述一下这张照片', 'Please describe this picture']
+SYSTEM = SYSTEM_TEMPLATE.alpaca
+evaluation_inputs = [
+    '请给我介绍五个上海的景点', 'Please tell me five scenic spots in Shanghai'
+]
 
 #######################################################################
-#            PART 2  Model & Tokenizer & Image Processor              #
+#                      PART 2  Model & Tokenizer                      #
 #######################################################################
 tokenizer = dict(
     type=AutoTokenizer.from_pretrained,
-    pretrained_model_name_or_path=llm_name_or_path,
+    pretrained_model_name_or_path=pretrained_model_name_or_path,
     trust_remote_code=True,
     padding_side='right')
 
-image_processor = dict(
-    type=CLIPImageProcessor.from_pretrained,
-    pretrained_model_name_or_path=visual_encoder_name_or_path,
-    trust_remote_code=True)
-
 model = dict(
-    type=LLaVAModel,
-    freeze_llm=False,
-    freeze_visual_encoder=True,
-    pretrained_pth=pretrained_pth,
+    type=SupervisedFinetune,
+    use_varlen_attn=use_varlen_attn,
     llm=dict(
         type=AutoModelForCausalLM.from_pretrained,
-        pretrained_model_name_or_path=llm_name_or_path,
-        trust_remote_code=True),
-    visual_encoder=dict(
-        type=CLIPVisionModel.from_pretrained,
-        pretrained_model_name_or_path=visual_encoder_name_or_path))
+        pretrained_model_name_or_path=pretrained_model_name_or_path,
+        trust_remote_code=True))
 
 #######################################################################
 #                      PART 3  Dataset & Dataloader                   #
 #######################################################################
-llava_dataset = dict(
-    type=LLaVADataset,
-    data_path=data_path,
-    image_folder=image_folder,
+alpaca_en = dict(
+    type=process_hf_dataset,
+    dataset=dict(type=load_dataset, path=alpaca_en_path),
     tokenizer=tokenizer,
-    image_processor=image_processor,
-    dataset_map_fn=llava_map_fn,
+    max_length=max_length,
+    dataset_map_fn=alpaca_map_fn,
     template_map_fn=dict(
         type=template_map_fn_factory, template=prompt_template),
-    max_length=max_length,
-    pad_image_to_square=True)
+    remove_unused_columns=True,
+    shuffle_before_pack=True,
+    pack_to_max_length=pack_to_max_length,
+    use_varlen_attn=use_varlen_attn)
 
+sampler = SequenceParallelSampler \
+    if sequence_parallel_size > 1 else DefaultSampler
 train_dataloader = dict(
     batch_size=batch_size,
     num_workers=dataloader_num_workers,
-    pin_memory=True,
-    dataset=llava_dataset,
-    sampler=dict(
-        type=LengthGroupedSampler,
-        length_property='modality_length',
-        per_device_batch_size=batch_size * accumulative_counts),
-    collate_fn=dict(type=default_collate_fn))
+    dataset=alpaca_en,
+    sampler=dict(type=sampler, shuffle=True),
+    collate_fn=dict(type=default_collate_fn, use_varlen_attn=use_varlen_attn))
 
 #######################################################################
 #                    PART 4  Scheduler & Optimizer                    #
@@ -150,13 +143,14 @@ custom_hooks = [
     dict(
         type=EvaluateChatHook,
         tokenizer=tokenizer,
-        image_processor=image_processor,
         every_n_iters=evaluation_freq,
         evaluation_inputs=evaluation_inputs,
-        evaluation_images=evaluation_images,
         system=SYSTEM,
         prompt_template=prompt_template)
 ]
+
+if use_varlen_attn:
+    custom_hooks += [dict(type=VarlenAttnArgsToMessageHubHook)]
 
 # configure default hooks
 default_hooks = dict(

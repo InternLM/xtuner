@@ -1,4 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+from mmengine.dataset import DefaultSampler
 from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
                             LoggerHook, ParamSchedulerHook)
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR, LinearLR
@@ -9,7 +10,6 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer,
 from xtuner.dataset import LLaVADataset
 from xtuner.dataset.collate_fns import default_collate_fn
 from xtuner.dataset.map_fns import llava_map_fn, template_map_fn_factory
-from xtuner.dataset.samplers import LengthGroupedSampler
 from xtuner.engine.hooks import DatasetInfoHook, EvaluateChatHook
 from xtuner.engine.runner import TrainLoop
 from xtuner.model import LLaVAModel
@@ -19,25 +19,23 @@ from xtuner.utils import PROMPT_TEMPLATE
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-llm_name_or_path = 'lmsys/vicuna-13b-v1.5'
+llm_name_or_path = 'microsoft/Phi-3-mini-4k-instruct'
 visual_encoder_name_or_path = 'openai/clip-vit-large-patch14-336'
-# Specify the pretrained pth
-pretrained_pth = './work_dirs/llava_v15_13b_pretrain/iter_2181.pth'
 
 # Data
 data_root = './data/llava_data/'
-data_path = data_root + 'LLaVA-Instruct-150K/llava_v1_5_mix665k.json'
-image_folder = data_root + 'llava_images'
-prompt_template = PROMPT_TEMPLATE.vicuna
+data_path = data_root + 'LLaVA-Pretrain/blip_laion_cc_sbu_558k.json'
+image_folder = data_root + 'LLaVA-Pretrain/images'
+prompt_template = PROMPT_TEMPLATE.phi3_chat
 max_length = int(2048 - (336 / 14)**2)
 
 # Scheduler & Optimizer
-batch_size = 16  # per_device
+batch_size = 32  # per_device
 accumulative_counts = 1
 dataloader_num_workers = 4
 max_epochs = 1
 optim_type = AdamW
-lr = 2e-5
+lr = 1e-3
 betas = (0.9, 0.999)
 weight_decay = 0
 max_norm = 1  # grad clip
@@ -69,9 +67,8 @@ image_processor = dict(
 
 model = dict(
     type=LLaVAModel,
-    freeze_llm=False,
+    freeze_llm=True,
     freeze_visual_encoder=True,
-    pretrained_pth=pretrained_pth,
     llm=dict(
         type=AutoModelForCausalLM.from_pretrained,
         pretrained_model_name_or_path=llm_name_or_path,
@@ -93,17 +90,14 @@ llava_dataset = dict(
     template_map_fn=dict(
         type=template_map_fn_factory, template=prompt_template),
     max_length=max_length,
-    pad_image_to_square=True)
+    pad_image_to_square=False)
 
 train_dataloader = dict(
     batch_size=batch_size,
     num_workers=dataloader_num_workers,
     pin_memory=True,
     dataset=llava_dataset,
-    sampler=dict(
-        type=LengthGroupedSampler,
-        length_property='modality_length',
-        per_device_batch_size=batch_size * accumulative_counts),
+    sampler=dict(type=DefaultSampler, shuffle=True),
     collate_fn=dict(type=default_collate_fn))
 
 #######################################################################
