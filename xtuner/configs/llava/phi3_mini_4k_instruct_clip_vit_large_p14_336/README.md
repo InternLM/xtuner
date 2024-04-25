@@ -25,8 +25,8 @@ NPROC_PER_NODE=8 xtuner train llava_phi3_mini_4k_instruct_full_clip_vit_large_p1
 
 ## Model Convert
 
-### Step 0. Convert `.pth` file to LLaVA model in xtuenr format
-After training, we will obtain a set of weights (*i.e.*, `iter_xxx.pth`), which are not in the universal HuggingFace format. We first need to convert them to the LLaVA model in xtuenr format.
+### Step 0. Convert `.pth` file to LLaVA model in xtuner format
+After training, we will obtain a set of weights (*i.e.*, `iter_xxx.pth`), which are not in the universal HuggingFace format. We first need to convert them to the LLaVA model in xtuner format.
 
 ```bash
 xtuner convert pth_to_hf $FINETUNE_CFG $PTH_PATH $SAVE_PATH
