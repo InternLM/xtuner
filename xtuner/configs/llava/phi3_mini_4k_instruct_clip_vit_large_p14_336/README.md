@@ -78,7 +78,7 @@ xtuner mmbench ./iter_39620_xtuner \
 
 Here, `$DATA_PATH` refers to one of the mmbench datasets. You can download the expected data by
 
-```
+```bash
 wget https://opencompass.openxlab.space/utils/VLMEval/MMBench_DEV_EN.tsv
 wget https://opencompass.openxlab.space/utils/VLMEval/MMBench_TEST_EN.tsv
 wget https://opencompass.openxlab.space/utils/VLMEval/MMBench_DEV_CN.tsv
