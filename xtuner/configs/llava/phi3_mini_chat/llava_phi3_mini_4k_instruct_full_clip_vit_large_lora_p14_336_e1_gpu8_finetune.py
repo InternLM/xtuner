@@ -74,6 +74,9 @@ image_processor = dict(
 
 model = dict(
     type=LLaVAModel,
+    tokenizer=tokenizer,
+    template=prompt_template,
+    image_processor=image_processor,
     freeze_llm=False,
     freeze_visual_encoder=True,
     pretrained_pth=pretrained_pth,

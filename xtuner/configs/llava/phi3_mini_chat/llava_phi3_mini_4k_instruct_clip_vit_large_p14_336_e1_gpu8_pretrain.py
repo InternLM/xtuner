@@ -67,6 +67,9 @@ image_processor = dict(
 
 model = dict(
     type=LLaVAModel,
+    tokenizer=tokenizer,
+    template=prompt_template,
+    image_processor=image_processor,
     freeze_llm=True,
     freeze_visual_encoder=True,
     llm=dict(
