@@ -85,6 +85,7 @@ model = dict(
 #######################################################################
 llava_dataset = dict(
     type=LLaVADataset,
+    offline_processed_text_folder='./phi3_mini_llava_pretrain',
     data_path=data_path,
     image_folder=image_folder,
     tokenizer=tokenizer,
