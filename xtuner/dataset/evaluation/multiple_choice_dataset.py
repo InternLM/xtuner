@@ -218,9 +218,10 @@ class MultipleChoiceDataset(BaseEvalDataset):
             data_main['l2-category'] = [l2_cate_map[i] for i in main_idx]
             l2 = calc_acc(data_main, 'l2-category')
             ret_json.update(l2)
-        else:
-            leaf = calc_acc(data_main, 'category')
-            ret_json.update(leaf)
+
+        leaf = calc_acc(data_main, 'category')
+        ret_json.update(leaf)
+
         print_log('============================================', 'current')
         show_result(ret_json)
         print_log('============================================', 'current')
