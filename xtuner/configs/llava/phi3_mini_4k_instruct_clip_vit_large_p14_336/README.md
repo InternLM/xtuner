@@ -2,6 +2,12 @@
 
 ## Results
 
+| Model                 | MMBench Test (EN) | MMMU  Val | SEED-IMG | AI2D Test | ScienceQA Test | HallusionBench aAcc | POPE | GQA  | TextVQA |   MME    | MMStar |                                                                                                                                                                                                                  Configs                                                                                                                                                                                                                   |                                                                   Pretrained Projector Checkpoints                                                                   |                                                               Fine-tuned LLaVA Checkpoints                                                               |
+| :-------------------- | :---------------: | :-------: | :------: | :-------: | :------------: | :-----------------: | :--: | :--: | :-----: | :------: | :----: | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------: | :------------------------------------------------------------------------------------------------------------------------------------------------------------------: | :------------------------------------------------------------------------------------------------------------------------------------------------------: |
+| LLaVA-v1.5-7B         |       66.5        |   35.3    |   60.5   |   54.8    |      70.4      |        44.9         | 85.9 | 62.0 |  58.2   | 1511/348 |  30.3  |                                                                                                                                                                                                                     -                                                                                                                                                                                                                      |                                                                                  -                                                                                   |                                                                            -                                                                             |
+| LLaVA-Llama-3-8B-v1.1 |       72.3        |   36.8    |   70.1   |   70.0    |      72.9      |        47.7         | 86.4 | 62.6 |  59.0   | 1469/349 |  45.1  | [Pretrain](https://github.com/InternLM/xtuner/blob/main/xtuner/configs/llava/llama3_8b_instruct_clip_vit_large_p14_336/pretrain/llava_llama3_8b_instruct_clip_vit_large_p14_336_e1_gpu8_sharegpt4v_pretrain.py) / [Fine-tune](https://github.com/InternLM/xtuner/blob/main/xtuner/configs/llava/llama3_8b_instruct_clip_vit_large_p14_336/finetune/llava_llama3_8b_instruct_full_clip_vit_large_p14_336_lora_e1_gpu8_internvl_finetune.py) | 🤗 [HuggingFace](https://huggingface.co/xtuner/llava-llama-3-8b-v1_1-pretrain) / 🤖 [ModelScope](https://modelscope.cn/models/xtuner/llava-llama-3-8b-v1_1-pretrain) | 🤗 [HuggingFace](https://huggingface.co/xtuner/llava-llama-3-8b-v1_1-hf) / 🤖 [ModelScope](https://modelscope.cn/models/xtuner/llava-llama-3-8b-v1_1-hf) |
+| LLaVA-Phi-3-mini      |       69.2        |   41.0    |   70.0   |   69.3    |      73.7      |        49.8         | 87.3 | 61.5 |  57.8   | 1477/313 |  43.7  |                                                                                                        [Pretrain](./pretrain/llava_phi3_mini_4k_instruct_clip_vit_large_p14_336_e1_gpu8_sharegpt4v_pretrain.py) / [Fine-tune](./finetune/llava_phi3_mini_4k_instruct_full_clip_vit_large_p14_336_full_e2_gpu8_internvl_finetune.py)                                                                                                        |      🤗 [HuggingFace](https://huggingface.co/xtuner/llava-phi-3-mini-pretrain) / 🤖 [ModelScope](https://modelscope.cn/models/xtuner/llava-phi-3-mini-pretrain)      |         🤗 [HuggingFace](https://huggingface.co/xtuner/llava-phi-3-mini) / 🤖 [ModelScope](https://modelscope.cn/models/xtuner/llava-phi-3-mini)         |
+
 ## Data Preparation
 
 Please refer to [here](https://github.com/InternLM/xtuner/tree/main/xtuner/configs/llava/llama3_8b_instruct_clip_vit_large_p14_336#data-preparation).
@@ -22,10 +28,10 @@ NPROC_PER_NODE=8 xtuner train llava_phi3_mini_4k_instruct_clip_vit_large_p14_336
 NPROC_PER_NODE=8 xtuner train llava_phi3_mini_4k_instruct_full_clip_vit_large_p14_336_full_e2_gpu8_internvl_finetune --deepspeed deepspeed_zero2 --seed 1024
 ```
 
-
 ## Model Convert
 
 ### Step 0. Convert `.pth` file to LLaVA model in xtuner format ([LLaVA-Phi-3-mini-xtuner](https://huggingface.co/xtuner/llava-phi-3-mini-xtuner))
+
 After training, we will obtain a set of weights (*i.e.*, `iter_xxx.pth`), which are not in the universal HuggingFace format. We first need to convert them to the LLaVA model in xtuner format.
 
 ```bash
@@ -90,7 +96,6 @@ wget https://opencompass.openxlab.space/utils/VLMEval/CCBench.tsv
 
 - The official LLaVA format is structured similarly to the architecture of the [liuhaotian/llava-v1.5-7b](https://huggingface.co/liuhaotian/llava-v1.5-7b) model.
 - The HuggingFace LLaVA format is structured similarly to the architecture of the [llava-hf/llava-1.5-7b-hf](https://huggingface.co/llava-hf/llava-1.5-7b-hf) model.
-
 
 Since the official LLaVA format and the HuggingFace LLaVA format only support Llama architecture as the LLM, we need to first convert the phi-3 model to an equivalent Llama LLM.
 
