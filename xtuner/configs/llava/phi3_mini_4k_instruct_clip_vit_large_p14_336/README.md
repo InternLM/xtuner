@@ -176,3 +176,4 @@ Here, the converted LLaVA model in HuggingFace LLaVA format is saved to `./iter_
 - XTuner LLaVA format [docs](https://huggingface.co/xtuner/llava-phi-3-mini-xtuner#quickstart)
 - Official LLaVA format [docs](https://huggingface.co/xtuner/llava-phi-3-mini#quickstart)
 - HuggingFace LLaVA format [docs](https://huggingface.co/xtuner/llava-phi-3-mini-hf#quickstart)
+- GGUF format [docs](https://huggingface.co/xtuner/llava-phi-3-mini-gguf#quickstart)
