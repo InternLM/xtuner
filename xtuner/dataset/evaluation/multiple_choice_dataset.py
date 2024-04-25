@@ -80,6 +80,8 @@ class MultipleChoiceDataset(BaseEvalDataset):
             answer = self.df.iloc[idx]['answer'] if 'answer' in self.df.iloc[
                 0].keys() else None
             category = self.df.iloc[idx]['category']
+            split = self.df.iloc[idx]['split'] if 'split' in self.df.iloc[
+                0].keys() else None
 
             options = {
                 cand: self.load_from_df(idx, cand)
@@ -100,6 +102,7 @@ class MultipleChoiceDataset(BaseEvalDataset):
                 'options_dict': options,
                 'index': index,
                 'context': hint,
+                'split': split,
                 'img_id': idx
             }
             if self.has_l2_category:
@@ -121,17 +124,17 @@ class MultipleChoiceDataset(BaseEvalDataset):
     @master_only
     def evaluate(self, results, work_dir):
 
-        def calc_acc(df, group='category'):
+        def calc_acc(df, split, group='category'):
             assert group in ['overall', 'category', 'l2-category']
             if group == 'overall':
-                res = {'Average': np.mean(df['hit'])}
+                res = {'Average': np.mean(df[df['split'] == split]['hit'])}
             else:
                 res = {}
                 abilities = list(set(df[group]))
                 abilities.sort()
                 for ab in abilities:
                     sub_df = df[df[group] == ab]
-                    res[ab] = np.mean(sub_df['hit'])
+                    res[ab] = np.mean(sub_df[sub_df['split'] == split]['hit'])
             return res
 
         def eval_sub_data(sub_data, answer_map):
@@ -145,9 +148,12 @@ class MultipleChoiceDataset(BaseEvalDataset):
                     return 0
             return 1
 
-        def show_result(ret_json):
+        def show_result(ret_json, split):
             show_dict = ret_json.copy()
-            table = Table(title=f' Multiple Choice ({self.data_file}) ')
+            if split != 'none':
+                table = Table(title=f'{split}:  Multiple Choice ({self.data_file}) ')
+            else:
+                table = Table(title=f' Multiple Choice ({self.data_file}) ')
             console = Console()
             table.add_column('Category', justify='left')
             table.add_column('Accuracy (%)', justify='right')
@@ -230,18 +236,24 @@ class MultipleChoiceDataset(BaseEvalDataset):
         main_idx = data_main['index']
         data_main['category'] = [cate_map[i] for i in main_idx]
 
-        ret_json = calc_acc(data_main, 'overall')
+        if 'split' in data_main:
+            splits = list(set(data_main['split']))
+        else:
+            splits = ['none']
 
-        if self.has_l2_category:
-            data_main['l2-category'] = [l2_cate_map[i] for i in main_idx]
-            l2 = calc_acc(data_main, 'l2-category')
-            ret_json.update(l2)
+        for split in splits:
+            ret_json = calc_acc(data_main, split, 'overall')
 
-        leaf = calc_acc(data_main, 'category')
-        ret_json.update(leaf)
+            if self.has_l2_category:
+                data_main['l2-category'] = [l2_cate_map[i] for i in main_idx]
+                l2 = calc_acc(data_main, split, 'l2-category')
+                ret_json.update(l2)
 
-        print_log('============================================', 'current')
-        show_result(ret_json)
+            leaf = calc_acc(data_main, split, 'category')
+            ret_json.update(leaf)
+
+            print_log('============================================', 'current')
+            show_result(ret_json,split)
         print_log('============================================', 'current')
         print_log('Multiple Choice successfully finished evaluating' 'current')
         return ret_json
