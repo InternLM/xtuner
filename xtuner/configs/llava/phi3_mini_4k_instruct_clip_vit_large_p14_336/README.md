@@ -25,7 +25,7 @@ NPROC_PER_NODE=8 xtuner train llava_phi3_mini_4k_instruct_full_clip_vit_large_p1
 
 ## Model Convert
 
-### Step 0. Convert `.pth` file to LLaVA model in xtuner format
+### Step 0. Convert `.pth` file to LLaVA model in xtuner format ([LLaVA-Phi-3-mini-xtuner](https://huggingface.co/xtuner/llava-phi-3-mini-xtuner))
 After training, we will obtain a set of weights (*i.e.*, `iter_xxx.pth`), which are not in the universal HuggingFace format. We first need to convert them to the LLaVA model in xtuner format.
 
 ```bash
@@ -100,7 +100,7 @@ python ./convert_phi_to_llama.py --phi_path ./iter_39620_xtuner --save_path ./it
 
 Here, `--phi_path` should specify the path to phi-3, which is the path obtained from Step.0 for the xtuner-format LLaVA model. `--save_path` should specify the save path for the converted Llama LLM.
 
-#### To official LLaVA format
+#### To official LLaVA format ([LLaVA-Phi-3-mini](https://huggingface.co/xtuner/llava-phi-3-mini))
 
 We can utilize the following command to obtain the LLaVA model in the official LLaVA format.
 
@@ -128,7 +128,7 @@ Here, the converted LLaVA model in official LLaVA format is saved to `./iter_396
 └── tokenizer.model
 ```
 
-#### To HuggingFace LLaVA format
+#### To HuggingFace LLaVA format ([LLaVA-Phi-3-mini-hf](https://huggingface.co/xtuner/llava-phi-3-mini-hf))
 
 We can utilize the following command to obtain the LLaVA model in the HuggingFace LLaVA format.
 
