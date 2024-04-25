@@ -153,7 +153,7 @@ class MultipleChoiceDataset(BaseEvalDataset):
             table = Table(title=f' Multiple Choice ({self.data_file}) ')
             console = Console()
             if split != 'none':
-                table.add_column(f'Category ({split} )', justify='left')
+                table.add_column(f'Category ({split})', justify='left')
             else:
                 table.add_column('Category', justify='left')
             table.add_column('Accuracy (%)', justify='right')
