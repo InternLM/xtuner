@@ -48,7 +48,7 @@ class LLaVAProxyEvalDataset:
                 # add bos token
                 bos_token_id = self.eval_ds.tokenizer.bos_token_id
                 cur_encode = [bos_token_id]
-                cur_encode += self.eval_ds.tokenizer.encode(chunk)
+                cur_encode += self.eval_ds.tokenizer.encode(chunk, add_special_tokens=False)
             else:
                 cur_encode = self.eval_ds.tokenizer.encode(chunk, add_special_tokens=False)
             chunk_encode.append(cur_encode)
