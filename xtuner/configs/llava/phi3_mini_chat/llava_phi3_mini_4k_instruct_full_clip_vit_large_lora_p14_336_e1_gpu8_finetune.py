@@ -15,7 +15,7 @@ from xtuner.model import LLaVAModel
 from xtuner.utils import PROMPT_TEMPLATE
 from peft import LoraConfig
 from xtuner.dataset.evaluation import MMEDataset, MultipleChoiceDataset, POPEDataset, \
-    HallusionDataset, TextVQADataset, GQADataset, VQAv2Dataset, ChartQADataset
+    HallusionDataset, TextVQADataset, GQADataset, VQAv2Dataset, ChartQADataset, GeneralVQADataset
 from xtuner.dataset import ConcatDataset
 from xtuner.engine.runner import TrainLoop, ValLoop, TestLoop
 from mmengine.dataset import DefaultSampler
@@ -371,7 +371,31 @@ test_dataset = [
         tokenizer=tokenizer,
         image_processor=image_processor,
         pad_image_to_square=True
-    )
+    ),
+    dict(
+        type=GeneralVQADataset,
+        data_file='/mnt/petrelfs/huanghaian/code/xtuner/LMUData/DocVQA_VAL.tsv',
+        prompt_template=prompt_template,
+        tokenizer=tokenizer,
+        image_processor=image_processor,
+        pad_image_to_square=True
+    ),
+    dict(
+        type=GeneralVQADataset,
+        data_file='/mnt/petrelfs/huanghaian/code/xtuner/LMUData/InfoVQA_VAL.tsv',
+        prompt_template=prompt_template,
+        tokenizer=tokenizer,
+        image_processor=image_processor,
+        pad_image_to_square=True
+    ),
+    dict(
+        type=GeneralVQADataset,
+        data_file='/mnt/petrelfs/huanghaian/code/xtuner/LMUData/OCRVQA_TEST.tsv',
+        prompt_template=prompt_template,
+        tokenizer=tokenizer,
+        image_processor=image_processor,
+        pad_image_to_square=True
+    ),
 ]
 
 # TODO: We are not currently using val_evaluator

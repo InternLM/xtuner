@@ -6,7 +6,7 @@ from .textvqa_dataset import TextVQADataset
 from .gqa_dataset import GQADataset
 from .vqav2_dataset import VQAv2Dataset
 from .chartqa_dataset import ChartQADataset
-from .docvqa_dataset import DocVQADataset
+from .general_vqa_dataset import GeneralVQADataset
 
 __all__ = ['MMEDataset', 'MultipleChoiceDataset', 'POPEDataset', 'HallusionDataset', 'TextVQADataset', 'GQADataset',
-           'VQAv2Dataset', 'ChartQADataset', 'DocVQADataset']
+           'VQAv2Dataset', 'ChartQADataset', 'GeneralVQADataset']

@@ -1,7 +1,5 @@
 import os
 import os.path as osp
-from typing import Optional
-import json
 from mmengine.dist import master_only
 from xtuner.dataset.evaluation.base_eval_dataset import BaseEvalDataset
 
@@ -39,15 +37,26 @@ def anls_compute(groundtruth, prediction):
 
 
 def hit_calculate(result, dataset_name, anls_threshold=0.5):
-    if dataset_name == 'DocVQA':
+    if 'DocVQA' in dataset_name or 'InfoVQA' in dataset_name:
         # return [1 - np.min(x['match']) >= anls_threshold for x in result]
         return [0.0 if 1 - np.min(x['match']) < anls_threshold else 1 - np.min(x['match']) for x in result]
+    elif 'OCRVQA' in dataset_name:
+        return [np.max(x['match']) for x in result]
     else:
         raise NotImplementedError(f"Dataset {dataset_name} not supported for hit calculation")
 
 
-class DocVQADataset(BaseEvalDataset):
-    METAINFO: dict = dict(name='docvqa')
+def istype(s, type):
+    if isinstance(s, type):
+        return True
+    try:
+        return isinstance(eval(s), type)
+    except Exception as _:
+        return False
+
+
+class GeneralVQADataset(BaseEvalDataset):
+    METAINFO: dict = dict(name='gvqa')
 
     def __init__(self, data_file, prompt_template, image_processor, tokenizer, pad_image_to_square=True,
                  anls_threshold=0.5, use_system=False, metainfo=None,
@@ -86,6 +95,11 @@ class DocVQADataset(BaseEvalDataset):
     def __len__(self):
         return len(self.df)
 
+    def __getitem__(self, idx):
+        data = self.data[idx]
+        data_dict = self.proxy_eval_dataset.getitem(idx, data)
+        return data_dict
+
     def load_data_list(self):
         data_list = []
         for idx in range(len(self.df)):
@@ -121,18 +135,34 @@ class DocVQADataset(BaseEvalDataset):
             cur_result['split'] = filtered_rows.get('split')
             cur_result['prediction'] = pred_dict['prediction']
             cur_result['index'] = filtered_rows.get('index')
-            cur_result['answer'] = filtered_rows.get('answer')
+            cur_result['index'] = filtered_rows.get('answer')
+            answers = filtered_rows.get('answer')
+            if istype(answers, list):
+                answers = eval(answers)
+            else:
+                answers = [answers]
+            if 'OCRVQA' in self.name:
+                match = [(1.0 if (x.strip().lower() == cur_result['prediction'].strip().lower()) else 0.0) for x in
+                         answers]
+            else:
+                match = [anls_compute(x, cur_result['prediction']) for x in answers]
+            cur_result['match'] = match
+
             new_results.append(cur_result)
 
         results_df = pd.DataFrame(new_results)
         with pd.ExcelWriter(osp.join(work_dir, self.results_xlsx_path), engine='openpyxl') as writer:
             results_df.to_excel(writer, index=False)
 
-        match = [anls_compute(results['answer'], results['prediction']) for results in new_results]
-
         splits = set([results['split'] for results in new_results])
         ret = dict()
         for sp in splits:
-            sub = [match[i] for i, x in enumerate(new_results) if x['split'] == sp]
-            hit = hit_calculate(sub, 'DocVQA')
+            sub = [new_results[i] for i, x in enumerate(new_results) if x['split'] == sp]
+            hit = hit_calculate(sub, self.name)
             ret[sp] = np.mean(hit) * 100
+
+        print_log('============================================', 'current')
+        print_log(ret, 'current')
+        print_log('============================================', 'current')
+        print_log(f'DocVQA successfully finished evaluating', 'current')
+        return ret

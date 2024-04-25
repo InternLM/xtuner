@@ -26,9 +26,11 @@ class LLaVAProxyEvalDataset:
             if is_cn_string(text):
                 text = text + '请直接回答选项字母。'
             else:
+                # TODO prompt are different of vlmevalkit
                 text = text + ("Answer with the option's letter from the "
                                'given choices directly.')
-        elif self.eval_ds.metainfo['name'] == 'chartqa':
+        elif self.eval_ds.metainfo['name'] in ['chartqa', 'gvqa']:
+            # TODO prompt are different of vlmevalkit
             text = data['question'] + '\nAnswer the question using a single word or phrase.'
             text = DEFAULT_IMAGE_TOKEN + '\n' + text
         else:
