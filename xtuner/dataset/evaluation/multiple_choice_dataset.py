@@ -150,12 +150,12 @@ class MultipleChoiceDataset(BaseEvalDataset):
 
         def show_result(ret_json, split):
             show_dict = ret_json.copy()
-            if split != 'none':
-                table = Table(title=f'{split}:  Multiple Choice ({self.data_file}) ')
-            else:
-                table = Table(title=f' Multiple Choice ({self.data_file}) ')
+            table = Table(title=f' Multiple Choice ({self.data_file}) ')
             console = Console()
-            table.add_column('Category', justify='left')
+            if split != 'none':
+                table.add_column(f'Category ({split} )', justify='left')
+            else:
+                table.add_column('Category', justify='left')
             table.add_column('Accuracy (%)', justify='right')
             average = show_dict.pop('Average') * 100
             table.add_row('Average', f'{average:.1f}')
