@@ -105,7 +105,7 @@ wget https://opencompass.openxlab.space/utils/VLMEval/MMBench_TEST_CN.tsv
 wget https://opencompass.openxlab.space/utils/VLMEval/CCBench.tsv
 ```
 
-### Convert LLaVA in xtuner format to official LLaVA format or HuggingFace LLaVA format
+### Step 1. Convert LLaVA in xtuner format to official LLaVA format or HuggingFace LLaVA format
 
 - The official LLaVA format is structured similarly to the architecture of the [liuhaotian/llava-v1.5-7b](https://huggingface.co/liuhaotian/llava-v1.5-7b) model.
 - The HuggingFace LLaVA format is structured similarly to the architecture of the [llava-hf/llava-1.5-7b-hf](https://huggingface.co/llava-hf/llava-1.5-7b-hf) model.
