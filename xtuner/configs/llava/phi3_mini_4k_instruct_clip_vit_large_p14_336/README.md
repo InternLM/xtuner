@@ -15,10 +15,10 @@
 
 ## Resources
 
-- Official LLaVA format model (xtuner/llava-phi-3-mini): 🤗 [HuggingFace](https://huggingface.co/xtuner/llava-phi-3-mini) / 🤖 [ModelScope](https://modelscope.cn/models/xtuner/llava-phi-3-mini)
-- HuggingFace LLaVA format model (xtuner/llava-phi-3-mini-hf): 🤗 [HuggingFace](https://huggingface.co/xtuner/llava-phi-3-mini-hf) / 🤖 [ModelScope](https://modelscope.cn/models/xtuner/llava-phi-3-mini-hf)
-- XTuner LLaVA format model (xtuner/llava-phi-3-mini-xtuner): 🤗 [HuggingFace](https://huggingface.co/xtuner/llava-phi-3-mini-xtuner) / 🤖 [ModelScope](https://modelscope.cn/models/xtuner/llava-phi-3-mini-xtuner)
-- GGUF model (xtuner/llava-phi-3-mini-gguf): 🤗 [HuggingFace](https://huggingface.co/xtuner/llava-phi-3-mini-gguf) / 🤖 [ModelScope](https://modelscope.cn/models/xtuner/llava-phi-3-mini-gguf)
+- Official LLaVA format model (`xtuner/llava-phi-3-mini`): 🤗 [HuggingFace](https://huggingface.co/xtuner/llava-phi-3-mini) / 🤖 [ModelScope](https://modelscope.cn/models/xtuner/llava-phi-3-mini)
+- HuggingFace LLaVA format model (`xtuner/llava-phi-3-mini-hf`): 🤗 [HuggingFace](https://huggingface.co/xtuner/llava-phi-3-mini-hf) / 🤖 [ModelScope](https://modelscope.cn/models/xtuner/llava-phi-3-mini-hf)
+- XTuner LLaVA format model (`xtuner/llava-phi-3-mini-xtuner`): 🤗 [HuggingFace](https://huggingface.co/xtuner/llava-phi-3-mini-xtuner) / 🤖 [ModelScope](https://modelscope.cn/models/xtuner/llava-phi-3-mini-xtuner)
+- GGUF model (`xtuner/llava-phi-3-mini-gguf`): 🤗 [HuggingFace](https://huggingface.co/xtuner/llava-phi-3-mini-gguf) / 🤖 [ModelScope](https://modelscope.cn/models/xtuner/llava-phi-3-mini-gguf)
 - Pretrained projector weights: 🤗 [HuggingFace](https://huggingface.co/xtuner/llava-phi-3-mini-pretrain) / 🤖 [ModelScope](https://modelscope.cn/models/xtuner/llava-phi-3-mini-pretrain)
 
 ## Data Preparation
