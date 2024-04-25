@@ -16,6 +16,21 @@ from mmengine.logging import print_log
 from ..llava_proxy_eval_dataset import LLaVAProxyEvalDataset
 
 
+def MMMU_preproc(data):
+    cnt = 0
+    As, Bs, Ans = list(data['A']), list(data['B']), list(data['answer'])
+    lt = len(data)
+    for i in range(lt):
+        if pd.isna(As[i]):
+            As[i] = Ans[i]
+            Bs[i] = 'Other Answers'
+            cnt += 1
+    print_log(f'During MMMU_preproc in Evaluation, {cnt} open questions are re-formulated to multi-choice ones. ', 'current')
+    data['A'] = As
+    data['B'] = Bs
+    return data
+
+
 class MultipleChoiceDataset(BaseEvalDataset):
     # 'mmbench', 'seedbench', 'ccbench', 'mmmu', 'scienceqa', 'ai2d'
     METAINFO: dict = dict(name='multiple_choice')
@@ -26,6 +41,9 @@ class MultipleChoiceDataset(BaseEvalDataset):
         self.use_system = use_system
         self.data_file = data_file
         self.df = pd.read_csv(data_file, sep='\t')
+
+        if 'MMMU' in os.path.basename(data_file):
+            self.df = MMMU_preproc(self.df)
         self.split = 'dev' if 'answer' in self.df.iloc[0].keys() else 'test'
         self.has_l2_category = 'l2-category' in self.df.columns.to_list()
 
