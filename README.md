@@ -28,13 +28,13 @@ English | [简体中文](README_zh-CN.md)
 - Llama2 7B Training Speed
 
 <div align=center>
-  <img src="https://github.com/InternLM/xtuner/assets/41630003/19b68a5d-3cda-417c-9c1e-2710c9a81fa4" style="width:80%">
+  <img src="https://github.com/InternLM/xtuner/assets/41630003/9c9dfdf4-1efb-4daf-84bf-7c379ae40b8b" style="width:80%">
 </div>
 
 - Llama2 70B Training Speed
 
 <div align=center>
-  <img src="https://github.com/InternLM/xtuner/assets/41630003/c626f366-808e-4c7f-b66a-1aece7d79253" style="width:80%">
+  <img src="https://github.com/InternLM/xtuner/assets/41630003/5ba973b8-8885-4b72-b51b-c69fa1583bdd" style="width:80%">
 </div>
 
 ## 🎉 News
