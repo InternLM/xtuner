@@ -30,7 +30,7 @@ prompt_template = PROMPT_TEMPLATE.llama3_chat
 max_length = int(4096 - (336 // 14) ** 2)
 
 # Scheduler & Optimizer
-batch_size = 16  # per_device
+batch_size = 8  # per_device 32GPUx8bs
 accumulative_counts = 1
 dataloader_num_workers = 4
 max_epochs = 1
@@ -99,7 +99,7 @@ llava_dataset = dict(
 train_dataloader = dict(
     batch_size=batch_size,
     num_workers=dataloader_num_workers,
-    pin_memory=True,
+    # pin_memory=True,
     dataset=llava_dataset,
     sampler=dict(type=DefaultSampler, shuffle=True),
     collate_fn=dict(type=mm_collate_fn))
@@ -160,13 +160,13 @@ default_hooks = dict(
     # record the time of every iteration.
     timer=dict(type=IterTimerHook),
     # print log every 10 iterations.
-    logger=dict(type=LoggerHook, log_metric_by_epoch=False, interval=10),
+    logger=dict(type=LoggerHook, log_metric_by_epoch=False, interval=5),
     # enable the parameter scheduler.
     param_scheduler=dict(type=ParamSchedulerHook),
     # save checkpoint per `save_steps`.
     checkpoint=dict(
         type=CheckpointHook,
-        save_optimizer=False,  # can save disk memory mmengine >=0.10.3
+        save_optimizer=True,  # can save disk memory mmengine >=0.10.3
         by_epoch=False,
         interval=save_steps,
         max_keep_ckpts=save_total_limit),
