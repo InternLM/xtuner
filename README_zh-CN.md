@@ -23,6 +23,20 @@
 
 </div>
 
+## 🚀 Speed Benchmark
+
+- XTuner 与 LLaMA-Factory 在 Llama2-7B 模型上的训练效率对比
+
+<div align=center>
+  <img src="https://github.com/InternLM/xtuner/assets/41630003/9c9dfdf4-1efb-4daf-84bf-7c379ae40b8b" style="width:80%">
+</div>
+
+- XTuner 与 LLaMA-Factory 在 Llama2-70B 模型上的训练效率对比
+
+<div align=center>
+  <img src="https://github.com/InternLM/xtuner/assets/41630003/5ba973b8-8885-4b72-b51b-c69fa1583bdd" style="width:80%">
+</div>
+
 ## 🎉 更新
 
 - **\[2024/04\]** 多模态大模型 [LLaVA-Phi-3-mini](https://huggingface.co/xtuner/llava-phi-3-mini-hf) 发布！快速开始请查阅此[文档](xtuner/configs/llava/phi3_mini_4k_instruct_clip_vit_large_p14_336)！
@@ -64,20 +78,6 @@ XTuner 是一个高效、灵活、全能的轻量化大模型微调工具库。
 - 支持增量预训练、指令微调与 Agent 微调。
 - 预定义众多开源对话模版，支持与开源或训练所得模型进行对话。
 - 训练所得模型可无缝接入部署工具库 [LMDeploy](https://github.com/InternLM/lmdeploy)、大规模评测工具库 [OpenCompass](https://github.com/open-compass/opencompass) 及 [VLMEvalKit](https://github.com/open-compass/VLMEvalKit)。
-
-## 🚀 Speed Benchmark
-
-- 使用不同数量 GPU 全量微调 8K 上下文 Llama3 8B 时的训练效率
-
-<div align=center>
-  <img src="https://github.com/InternLM/xtuner/assets/41630003/19b68a5d-3cda-417c-9c1e-2710c9a81fa4" style="width:80%">
-</div>
-
-- 使用 8 * A100 80G 全量微调不同上下文长度的 Llama3 8B 时的训练效率
-
-<div align=center>
-  <img src="https://github.com/InternLM/xtuner/assets/41630003/c626f366-808e-4c7f-b66a-1aece7d79253" style="width:80%">
-</div>
 
 ## 🔥 支持列表
 

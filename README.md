@@ -23,6 +23,20 @@ English | [简体中文](README_zh-CN.md)
 
 </div>
 
+## 🚀 Speed Benchmark
+
+- Llama2 7B Training Speed
+
+<div align=center>
+  <img src="https://github.com/InternLM/xtuner/assets/41630003/19b68a5d-3cda-417c-9c1e-2710c9a81fa4" style="width:80%">
+</div>
+
+- Llama2 70B Training Speed
+
+<div align=center>
+  <img src="https://github.com/InternLM/xtuner/assets/41630003/c626f366-808e-4c7f-b66a-1aece7d79253" style="width:80%">
+</div>
+
 ## 🎉 News
 
 - **\[2024/04\]** [LLaVA-Phi-3-mini](https://huggingface.co/xtuner/llava-phi-3-mini-hf) is released! Click [here](xtuner/configs/llava/phi3_mini_4k_instruct_clip_vit_large_p14_336) for details!
@@ -64,20 +78,6 @@ XTuner is an efficient, flexible and full-featured toolkit for fine-tuning large
 - Support continuous pre-training, instruction fine-tuning, and agent fine-tuning.
 - Support chatting with large models with pre-defined templates.
 - The output models can seamlessly integrate with deployment and server toolkit ([LMDeploy](https://github.com/InternLM/lmdeploy)), and large-scale evaluation toolkit ([OpenCompass](https://github.com/open-compass/opencompass), [VLMEvalKit](https://github.com/open-compass/VLMEvalKit)).
-
-## 🚀 Speed Benchmark
-
-- Llama3 8B 8K Context Length Fully Finetuning Speed
-
-<div align=center>
-  <img src="https://github.com/InternLM/xtuner/assets/41630003/19b68a5d-3cda-417c-9c1e-2710c9a81fa4" style="width:80%">
-</div>
-
-- Llama3 8B 8 * A100 80G Fully Finetuning Speed
-
-<div align=center>
-  <img src="https://github.com/InternLM/xtuner/assets/41630003/c626f366-808e-4c7f-b66a-1aece7d79253" style="width:80%">
-</div>
 
 ## 🔥 Supports
 
