@@ -431,3 +431,7 @@ Here, the converted LLaVA model in HuggingFace LLaVA format is saved to `./iter_
 - XTuner LLaVA format [docs](https://huggingface.co/xtuner/llava-llama-3-8b-v1_1#quickstart)
 - Official LLaVA format [docs](https://huggingface.co/xtuner/llava-llama-3-8b-v1_1-hf#quickstart)
 - HuggingFace LLaVA format [docs](https://huggingface.co/xtuner/llava-llama-3-8b-v1_1-transformers#quickstart)
+
+## Deployment
+
+[LMDeploy](https://github.com/InternLM/lmdeploy) now supports the deployment of official LLaVA format models (e.g.,[xtuner/llava-llama-3-8b-v1_1-hf](https://huggingface.co/xtuner/llava-llama-3-8b-v1_1-hf)). For specifics, please refer to [here](https://huggingface.co/xtuner/llava-llama-3-8b-v1_1-hf#chat-by-lmdeploy).
