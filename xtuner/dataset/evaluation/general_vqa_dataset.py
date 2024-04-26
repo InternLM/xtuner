@@ -114,11 +114,13 @@ class GeneralVQADataset(BaseEvalDataset):
             data = {
                 'img': image,
                 'question': question,
-                'split': split,
                 'answer': answer,
                 'index': index,
                 'img_id': idx
             }
+            if split is not None:
+                data['split'] = split
+
             data_list.append(data)
         return data_list
 
@@ -155,12 +157,16 @@ class GeneralVQADataset(BaseEvalDataset):
         with pd.ExcelWriter(osp.join(work_dir, self.results_xlsx_path), engine='openpyxl') as writer:
             results_df.to_excel(writer, index=False)
 
-        splits = set([results['split'] for results in new_results])
         ret = dict()
-        for sp in splits:
-            sub = [new_results[i] for i, x in enumerate(new_results) if x['split'] == sp]
-            hit = hit_calculate(sub, self.name)
-            ret[sp] = np.mean(hit) * 100
+        if 'split' in results_df:
+            splits = list(set(results_df['split']))
+            for sp in splits:
+                sub = [new_results[i] for i, x in enumerate(new_results) if x['split'] == sp]
+                hit = hit_calculate(sub, self.name)
+                ret[sp] = np.mean(hit) * 100
+        else:
+            hit = hit_calculate(new_results, self.name)
+            ret['overall'] = np.mean(hit) * 100
 
         print_log('============================================', 'current')
         print_log(ret, 'current')
