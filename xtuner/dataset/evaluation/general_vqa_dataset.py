@@ -171,5 +171,5 @@ class GeneralVQADataset(BaseEvalDataset):
         print_log('============================================', 'current')
         print_log(ret, 'current')
         print_log('============================================', 'current')
-        print_log(f'DocVQA successfully finished evaluating', 'current')
+        print_log(f'{self.name} successfully finished evaluating', 'current')
         return ret
