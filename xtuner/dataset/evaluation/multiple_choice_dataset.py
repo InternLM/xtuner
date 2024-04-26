@@ -239,7 +239,7 @@ class MultipleChoiceDataset(BaseEvalDataset):
         if 'split' in data_main:
             splits = list(set(data_main['split']))
         else:
-            splits = ['none']
+            splits = [None]
 
         for split in splits:
             ret_json = calc_acc(data_main, split, 'overall')

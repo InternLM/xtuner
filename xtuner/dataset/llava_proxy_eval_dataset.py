@@ -33,6 +33,10 @@ class LLaVAProxyEvalDataset:
             # TODO prompt are different of vlmevalkit
             text = data['question'] + '\nAnswer the question using a single word or phrase.'
             text = DEFAULT_IMAGE_TOKEN + '\n' + text
+        elif self.eval_ds.metainfo['name'] in ['hullusion', 'pope']:
+            # TODO prompt are different of vlmevalkit
+            text = data['question'] + '\nPlease answer yes or no.'
+            text = DEFAULT_IMAGE_TOKEN + '\n' + text
         else:
             text = data['question']
             text = DEFAULT_IMAGE_TOKEN + '\n' + text

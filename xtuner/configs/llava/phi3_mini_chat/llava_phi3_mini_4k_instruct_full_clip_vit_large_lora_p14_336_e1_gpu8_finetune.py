@@ -388,14 +388,14 @@ test_dataset = [
         image_processor=image_processor,
         pad_image_to_square=True
     ),
-    dict(
-        type=GeneralVQADataset,
-        data_file='/mnt/petrelfs/huanghaian/code/xtuner/LMUData/OCRVQA_TEST.tsv',
-        prompt_template=prompt_template,
-        tokenizer=tokenizer,
-        image_processor=image_processor,
-        pad_image_to_square=True
-    ),
+    # dict(
+    #     type=GeneralVQADataset,
+    #     data_file='/mnt/petrelfs/huanghaian/code/xtuner/LMUData/OCRVQA_TEST.tsv',
+    #     prompt_template=prompt_template,
+    #     tokenizer=tokenizer,
+    #     image_processor=image_processor,
+    #     pad_image_to_square=True
+    # ),
 ]
 
 # TODO: We are not currently using val_evaluator

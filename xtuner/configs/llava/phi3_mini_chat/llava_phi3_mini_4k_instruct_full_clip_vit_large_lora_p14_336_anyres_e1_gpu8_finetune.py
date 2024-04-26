@@ -418,15 +418,16 @@ test_dataset = [
         image_processor=image_processor,
         pad_image_to_square=pad_image_to_square
     ),
-    dict(
-        type=GeneralVQADataset,
-        proxy_eval_dataset=proxy_eval_dataset,
-        data_file='/mnt/petrelfs/huanghaian/code/xtuner/LMUData/OCRVQA_TEST.tsv',
-        prompt_template=prompt_template,
-        tokenizer=tokenizer,
-        image_processor=image_processor,
-        pad_image_to_square=pad_image_to_square
-    ),
+    # 有问题，需要图片
+    # dict(
+    #     type=GeneralVQADataset,
+    #     proxy_eval_dataset=proxy_eval_dataset,
+    #     data_file='/mnt/petrelfs/huanghaian/code/xtuner/LMUData/OCRVQA_TEST.tsv',
+    #     prompt_template=prompt_template,
+    #     tokenizer=tokenizer,
+    #     image_processor=image_processor,
+    #     pad_image_to_square=pad_image_to_square
+    # ),
 ]
 
 # TODO: We are not currently using val_evaluator
