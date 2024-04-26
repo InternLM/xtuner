@@ -6,11 +6,27 @@
 <img src="https://github.com/InternLM/xtuner/assets/36994684/a157638c-3500-44ed-bfab-d8d8249f91bb" alt="Image" width=500" />
 </div>
 
-| Model                 | MMBench Test (EN) | MMBench Test (CN) | CCBench Dev | MMMU  Val | SEED-IMG | AI2D Test | ScienceQA Test | HallusionBench aAcc | POPE | GQA  | TextVQA |   MME    | MMStar |                                                                                                        Configs                                                                                                         |                                                                   Pretrained Projector Checkpoints                                                                   |                                                            Fine-tuned LLaVA Checkpoints                                                            |
-| :-------------------- | :---------------: | :---------------: | :---------: | :-------: | :------: | :-------: | :------------: | :-----------------: | :--: | :--: | :-----: | :------: | :----: | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------: | :------------------------------------------------------------------------------------------------------------------------------------------------------------------: | :------------------------------------------------------------------------------------------------------------------------------------------------: |
-| LLaVA-v1.5-7B         |       66.5        |       59.0        |    27.5     |   35.3    |   60.5   |   54.8    |      70.4      |        44.9         | 85.9 | 62.0 |  58.2   | 1511/348 |  30.3  |                                                                                                           -                                                                                                            |                                                                                  -                                                                                   |                                                                         -                                                                          |
-| LLaVA-Llama-3-8B      |       68.9        |       61.6        |    30.4     |   36.8    |   69.8   |   60.9    |      73.3      |        47.3         | 87.2 | 63.5 |  58.0   | 1506/295 |  38.2  |           [Pretrain](./pretrain/llava_llama3_8b_instruct_clip_vit_large_p14_336_e1_gpu8_pretrain.py) / [Fine-tune](./finetune/llava_llama3_8b_instruct_full_clip_vit_large_p14_336_lora_e1_gpu8_finetune.py)           |      🤗 [HuggingFace](https://huggingface.co/xtuner/llava-llama-3-8b-pretrain) / 🤖 [ModelScope](https://modelscope.cn/models/xtuner/llava-llama-3-8b-pretrain)      |      🤗 [HuggingFace](https://huggingface.co/xtuner/llava-llama-3-8b) / 🤖 [ModelScope](https://modelscope.cn/models/xtuner/llava-llama-3-8b)      |
-| LLaVA-Llama-3-8B-v1.1 |       72.3        |       66.4        |    31.6     |   36.8    |   70.1   |   70.0    |      72.9      |        47.7         | 86.4 | 62.6 |  59.0   | 1469/349 |  45.1  | [Pretrain](./pretrain/llava_llama3_8b_instruct_clip_vit_large_p14_336_e1_gpu8_sharegpt4v_pretrain.py) / [Fine-tune](./finetune/llava_llama3_8b_instruct_full_clip_vit_large_p14_336_lora_e1_gpu8_internvl_finetune.py) | 🤗 [HuggingFace](https://huggingface.co/xtuner/llava-llama-3-8b-v1_1-pretrain) / 🤖 [ModelScope](https://modelscope.cn/models/xtuner/llava-llama-3-8b-v1_1-pretrain) | 🤗 [HuggingFace](https://huggingface.co/xtuner/llava-llama-3-8b-v1_1) / 🤖 [ModelScope](https://modelscope.cn/models/xtuner/llava-llama-3-8b-v1_1) |
+| Model                 | MMBench Test (EN) | MMBench Test (CN) | CCBench Dev | MMMU  Val | SEED-IMG | AI2D Test | ScienceQA Test | HallusionBench aAcc | POPE | GQA  | TextVQA |   MME    | MMStar |                                                                                                        Configs                                                                                                         |
+| :-------------------- | :---------------: | :---------------: | :---------: | :-------: | :------: | :-------: | :------------: | :-----------------: | :--: | :--: | :-----: | :------: | :----: | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------: |
+| LLaVA-v1.5-7B         |       66.5        |       59.0        |    27.5     |   35.3    |   60.5   |   54.8    |      70.4      |        44.9         | 85.9 | 62.0 |  58.2   | 1511/348 |  30.3  |                                                                                                           -                                                                                                            |
+| LLaVA-Llama-3-8B      |       68.9        |       61.6        |    30.4     |   36.8    |   69.8   |   60.9    |      73.3      |        47.3         | 87.2 | 63.5 |  58.0   | 1506/295 |  38.2  |           [Pretrain](./pretrain/llava_llama3_8b_instruct_clip_vit_large_p14_336_e1_gpu8_pretrain.py) / [Fine-tune](./finetune/llava_llama3_8b_instruct_full_clip_vit_large_p14_336_lora_e1_gpu8_finetune.py)           |
+| LLaVA-Llama-3-8B-v1.1 |       72.3        |       66.4        |    31.6     |   36.8    |   70.1   |   70.0    |      72.9      |        47.7         | 86.4 | 62.6 |  59.0   | 1469/349 |  45.1  | [Pretrain](./pretrain/llava_llama3_8b_instruct_clip_vit_large_p14_336_e1_gpu8_sharegpt4v_pretrain.py) / [Fine-tune](./finetune/llava_llama3_8b_instruct_full_clip_vit_large_p14_336_lora_e1_gpu8_internvl_finetune.py) |
+
+## Resources
+
+- LLaVA-Llama-3-8B-v1.1
+
+  - Official LLaVA format model (`xtuner/llava-llama-3-8b-v1_1-hf`): 🤗 [HuggingFace](https://huggingface.co/xtuner/llava-llama-3-8b-v1_1-hf) / 🤖 [ModelScope](https://modelscope.cn/models/xtuner/llava-llama-3-8b-v1_1-hf)
+  - HuggingFace LLaVA format model (`xtuner/llava-llama-3-8b-v1_1-transformers`): 🤗 [HuggingFace](https://huggingface.co/xtuner/llava-llama-3-8b-v1_1-transformers) / 🤖 [ModelScope](https://modelscope.cn/models/xtuner/llava-llama-3-8b-v1_1-transformers)
+  - XTuner LLaVA format model (`xtuner/llava-llama-3-8b-v1_1`): 🤗 [HuggingFace](https://huggingface.co/xtuner/llava-llama-3-8b-v1_1) / 🤖 [ModelScope](https://modelscope.cn/models/xtuner/llava-llama-3-8b-v1_1)
+  - Pretrained projector weights: 🤗 [HuggingFace](https://huggingface.co/xtuner/llava-llama-3-8b-v1_1-pretrain) / 🤖 [ModelScope](https://modelscope.cn/models/xtuner/llava-llama-3-8b-v1_1-pretrain)
+
+- LLaVA-Llama-3-8B
+
+  - Official LLaVA format model (`xtuner/llava-llama-3-8b-hf`): 🤗 [HuggingFace](https://huggingface.co/xtuner/llava-llama-3-8b-hf) / 🤖 [ModelScope](https://modelscope.cn/models/xtuner/llava-llama-3-8b-hf)
+  - HuggingFace LLaVA format model (`xtuner/llava-llama-3-8b-transformers`): 🤗 [HuggingFace](https://huggingface.co/xtuner/llava-llama-3-8b-transformers) / 🤖 [ModelScope](https://modelscope.cn/models/xtuner/llava-llama-3-8b-transformers)
+  - XTuner LLaVA format model (`xtuner/llava-llama-3-8b`): 🤗 [HuggingFace](https://huggingface.co/xtuner/llava-llama-3-8b) / 🤖 [ModelScope](https://modelscope.cn/models/xtuner/llava-llama-3-8b)
+  - Pretrained projector weights: 🤗 [HuggingFace](https://huggingface.co/xtuner/llava-llama-3-8b-pretrain) / 🤖 [ModelScope](https://modelscope.cn/models/xtuner/llava-llama-3-8b-pretrain)
 
 ## Data Preparation
 
@@ -409,3 +425,9 @@ Here, the converted LLaVA model in HuggingFace LLaVA format is saved to `./iter_
 ├── tokenizer_config.json
 └── tokenizer.json
 ```
+
+## Chat
+
+- XTuner LLaVA format [docs](https://huggingface.co/xtuner/llava-llama-3-8b-v1_1#quickstart)
+- Official LLaVA format [docs](https://huggingface.co/xtuner/llava-llama-3-8b-v1_1-hf#quickstart)
+- HuggingFace LLaVA format [docs](https://huggingface.co/xtuner/llava-llama-3-8b-v1_1-transformers#quickstart)
