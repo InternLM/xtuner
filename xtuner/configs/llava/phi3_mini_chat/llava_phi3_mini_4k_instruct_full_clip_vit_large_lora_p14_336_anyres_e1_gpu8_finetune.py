@@ -34,7 +34,7 @@ data_root = '/mnt/petrelfs/share_data/huanghaian/llava_data/'
 data_path = data_root + 'LLaVA-Instruct-150K/llava_v1_5_mix665k.json'
 image_folder = data_root + 'llava_images'
 prompt_template = PROMPT_TEMPLATE.phi3_chat
-max_length = int(2048 - (336 / 14) ** 2)
+max_length = int(4096 - (336 / 14) ** 2)
 
 # Scheduler & Optimizer
 batch_size = 16  # per_device
