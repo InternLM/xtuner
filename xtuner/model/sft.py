@@ -262,7 +262,9 @@ class SupervisedFinetune(BaseModel):
         outputs = self.llm(**data)
         labels = data['labels']
         num_tokens = (labels != -100).sum()
-        loss = reduce_sequence_parallel_loss(outputs.loss, num_tokens)
+        sp_group = get_sequence_parallel_group()
+        loss = reduce_sequence_parallel_loss(outputs.loss, num_tokens,
+                                             sp_group)
         return {'loss': loss}
 
     def compute_loss(self, data, data_samples=None):
