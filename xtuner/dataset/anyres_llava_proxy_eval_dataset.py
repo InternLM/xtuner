@@ -35,8 +35,13 @@ class AnyResLLaVAProxyEvalDataset:
             if is_cn_string(text):
                 text = text + '请直接回答选项字母。'
             else:
+                # TODO prompt are different of vlmevalkit
                 text = text + ("Answer with the option's letter from the "
                                'given choices directly.')
+        elif self.eval_ds.metainfo['name'] in ['chartqa', 'gvqa']:
+            # TODO prompt are different of vlmevalkit
+            text = data['question'] + '\nAnswer the question using a single word or phrase.'
+            text = DEFAULT_IMAGE_TOKEN + '\n' + text
         else:
             text = data['question']
             text = DEFAULT_IMAGE_TOKEN + '\n' + text
@@ -65,7 +70,7 @@ class AnyResLLaVAProxyEvalDataset:
         data_dict['input_ids'] = ids
 
         # 3 process image
-        if self.eval_ds.metainfo['name'] in ['mme', 'textvqa', 'gqa']:
+        if self.eval_ds.metainfo['name'] in ['mme', 'textvqa', 'gqa', 'vqa_v2', 'chartqa']:
             # MMEDataset or TextVQADataset
             image = Image.open(os.path.join(self.eval_ds.image_folder,
                                             data['image_path'])).convert('RGB')

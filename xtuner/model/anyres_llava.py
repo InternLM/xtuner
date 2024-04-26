@@ -116,7 +116,7 @@ class AnyResLLaVAModel(LLaVAModel):
             torch.randn(
                 self.llm.config.hidden_size, dtype=self.visual_encoder.dtype))
         self.image_grid_pinpoints = image_grid_pinpoints
-        # self.mm_patch_merge_type = 'spatial_unpad'
+        self.mm_patch_merge_type = 'spatial_unpad'
         self.image_aspect_ratio = 'anyres'
 
     def state_dict(self, *args, **kwargs):
@@ -183,7 +183,7 @@ class AnyResLLaVAModel(LLaVAModel):
 
         bs, pn, hs = visual_outputs.shape
         # token merge
-        if self.token_merge_ratio != 1:
+        if self.token_merge_ratio != -1:
             # 27 不是偶数，不能被整除，需要 hard code 处理下
             if pn == 27 * 27:
                 if self.merge_type == 'simple':
@@ -218,7 +218,7 @@ class AnyResLLaVAModel(LLaVAModel):
         image_features = torch.split(image_features, split_sizes, dim=0)
 
         new_image_feature = []
-        if self.token_merge_ratio == 1:
+        if self.token_merge_ratio == -1:
             for image_idx, image_feature in enumerate(image_features):
                 if image_feature.shape[0] > 1:
                     base_image_feature = image_feature[0]

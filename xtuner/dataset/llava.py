@@ -160,6 +160,7 @@ class AnyResLLaVADataset(LLaVADataset):
                                          self.image_grid_pinpoints,
                                          self._patch_size, self._shortest_edge,
                                          pad_mean=tuple(int(x * 255) for x in self.image_processor.image_mean),
+                                         # keep the same as the original implementation
                                          orig_img_pad_to_square=self.pad_image_to_square)
             data_dict['pixel_values'] = image
         else:
