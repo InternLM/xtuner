@@ -284,7 +284,7 @@ xtuner train llava_llama3_8b_instruct_quant_clip_vit_large_p14_336_e1_gpu1_pretr
 xtuner train llava_llama3_8b_instruct_qlora_clip_vit_large_p14_336_e1_gpu1_finetune --deepspeed deepspeed_zero2 --seed 1024
 ```
 
-## Model Convert (and Merge)
+## Model Conversion (and Merge)
 
 ### Step 0. Convert `.pth` file to LLaVA model in xtuner format ([xtuner/llava-llama-3-8b-v1_1](https://huggingface.co/xtuner/llava-llama-3-8b-v1_1))
 
