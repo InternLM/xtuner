@@ -270,11 +270,13 @@ xtuner train llava_llama3_8b_instruct_qlora_clip_vit_large_p14_336_e1_gpu1_finet
 
 ## Model Convert (and Merge)
 
-After training, we will obtain a set of weights (*i.e.*, `iter_xxx.pth`), which are not in the universal HuggingFace format. We first need to convert them.
+### Step 0. Convert `.pth` file to LLaVA model in xtuner format ([xtuner/llava-llama-3-8b-v1_1](https://huggingface.co/xtuner/llava-llama-3-8b-v1_1))
+
+After training, we will obtain a set of weights (*i.e.*, `iter_xxx.pth`), which are not in the universal HuggingFace format. We first need to convert them to the LLaVA model in xtuner format.
 
 ```bash
 xtuner convert pth_to_hf $FINETUNE_CFG $PTH_PATH $SAVE_PATH
-# e.g., xtuner convert pth_to_hf llava_llama3_8b_instruct_full_clip_vit_large_p14_336_lora_e1_gpu8_internvl_finetune ./iter_39620.pth ./iter_39620_hf
+# e.g., xtuner convert pth_to_hf llava_llama3_8b_instruct_full_clip_vit_large_p14_336_lora_e1_gpu8_internvl_finetune ./iter_39620.pth ./iter_39620_xtuner
 ```
 
 At this point, we have obtained the relevant model (LLM or the corresponding LoRA).
@@ -282,7 +284,7 @@ If you use the default configuration of LLaVA-Llama-3-8B, you will obtain the fo
 It includes the full-finetuned LLM weights, projector weights, and LoRA weights of the visual encoder.
 
 ```
-./iter_39620_hf
+./iter_39620_xtuner
 ├── config.json
 ├── generation_config.json
 ├── model-00001-of-00009.safetensors
@@ -309,29 +311,30 @@ It includes the full-finetuned LLM weights, projector weights, and LoRA weights 
     └── README.md
 ```
 
-## Chat
-
-We can achieve image-text question answering with the following command!
+At this time, the LLaVA model of xtuner-format can engage in conversation using xtuner chat, by
 
 ```bash
-xtuner chat ./iter_39620_hf \
+xtuner chat ./iter_39620_xtuner \
   --visual-encoder openai/clip-vit-large-patch14-336 \
-  --llava ./iter_39620_hf \
+  --llava ./iter_39620_xtuner \
   --prompt-template llama3_chat \
   --image $IMAGE_PATH
 ```
 
-Here, `./iter_39620_hf` is the converted weight from the above step or our [LLaVA-Llama-3-8B](https://huggingface.co/xtuner/llava-llama-3-8b) and [LLaVA-Llama-3-8B-v1.1](https://huggingface.co/xtuner/llava-llama-3-8b-v1_1) models.
+and in MMBench evaluation, by
 
-## Evaluation
-
-Coming soon!
-
-Now, we can use `xtuner mmbench` to conduct the [MMBench](https://mmbench.opencompass.org.cn/home) evaluation.
-
-1. Download the MMBench dataset with
-
+```bash
+xtuner mmbench ./iter_39620_xtuner \
+  --visual-encoder openai/clip-vit-large-patch14-336 \
+  --llava ./iter_39620_xtuner \
+  --prompt-template llama3_chat \
+  --data-path $DATA_PATH \
+  --work-dir $RESULT_PATH
 ```
+
+Here, `$DATA_PATH` refers to one of the mmbench datasets. You can download the expected data by
+
+```bash
 wget https://opencompass.openxlab.space/utils/VLMEval/MMBench_DEV_EN.tsv
 wget https://opencompass.openxlab.space/utils/VLMEval/MMBench_TEST_EN.tsv
 wget https://opencompass.openxlab.space/utils/VLMEval/MMBench_DEV_CN.tsv
@@ -339,17 +342,70 @@ wget https://opencompass.openxlab.space/utils/VLMEval/MMBench_TEST_CN.tsv
 wget https://opencompass.openxlab.space/utils/VLMEval/CCBench.tsv
 ```
 
-2. Evaluate models with
+### Step 1. Merge ViT LoRA into the original ViT
+
+Because LoRA fine-tuning is applied to ViT during the fine-tuning, it is necessary to first merge LoRA into ViT.
 
 ```bash
-xtuner mmbench ./iter_39620_hf \
-  --visual-encoder openai/clip-vit-large-patch14-336 \
-  --llava ./iter_39620_hf \
-  --prompt-template llama3_chat \
-  --data-path $DATA_PATH \
-  --work-dir $RESULT_PATH
+xtuner convert merge openai/clip-vit-large-patch14-336 ./iter_39620_xtuner/visual_encoder_adapter ./iter_39620_visual_encoder --is-clip
 ```
 
-Here, `$DATA_PATH` refers to one of the datasets downloaded as mentioned above, such as `MMBench_DEV_EN.tsv`. `./iter_39620_hf` is the converted weight from the above step or our released [LLaVA-Llama-3-8B](https://huggingface.co/xtuner/llava-llama-3-8b) and [LLaVA-Llama-3-8B-v1.1](https://huggingface.co/xtuner/llava-llama-3-8b-v1_1) models.
+### Step 2. Convert LLaVA in xtuner format to official LLaVA format or HuggingFace LLaVA format
 
-After the evaluation is completed, if it's a development set, it will directly print out the results; If it's a test set, you need to submit `mmbench_result.xlsx` to the official MMBench for final evaluation to obtain precision results!
+- The official LLaVA format is structured similarly to the architecture of the [liuhaotian/llava-v1.5-7b](https://huggingface.co/liuhaotian/llava-v1.5-7b) model.
+- The HuggingFace LLaVA format is structured similarly to the architecture of the [llava-hf/llava-1.5-7b-hf](https://huggingface.co/llava-hf/llava-1.5-7b-hf) model.
+
+#### To official LLaVA format ([xtuner/llava-llama-3-8b-v1_1-hf](https://huggingface.co/xtuner/llava-llama-3-8b-v1_1-hf))
+
+We can utilize the following command to obtain the LLaVA model in the official LLaVA format.
+
+```bash
+python ./convert_xtuner_weights_to_llava.py --text_model_id ./iter_39620_xtuner --vision_model_id ./iter_39620_visual_encoder --projector_weight ./iter_39620_xtuner/projector/model.safetensors --save_path ./iter_39620_llava
+```
+
+Here, the converted LLaVA model in official LLaVA format is saved to `./iter_39620_llava`.
+
+```
+./iter_39620_llava
+├── config.json
+├── generation_config.json
+├── model-00001-of-00009.safetensors
+├── model-00002-of-00009.safetensors
+├── model-00003-of-00009.safetensors
+├── model-00004-of-00009.safetensors
+├── model-00005-of-00009.safetensors
+├── model-00006-of-00009.safetensors
+├── model-00007-of-00009.safetensors
+├── model-00008-of-00009.safetensors
+├── model-00009-of-00009.safetensors
+├── model.safetensors.index.json
+├── preprocessor_config.json
+├── special_tokens_map.json
+├── tokenizer_config.json
+└── tokenizer.json
+```
+
+#### To HuggingFace LLaVA format ([xtuner/llava-llama-3-8b-v1_1-transformers](https://huggingface.co/xtuner/llava-llama-3-8b-v1_1-transformers))
+
+We can utilize the following command to obtain the LLaVA model in the HuggingFace LLaVA format.
+
+```bash
+python ./convert_xtuner_weights_to_hf.py --text_model_id ./iter_39620_xtuner --vision_model_id ./iter_39620_visual_encoder --projector_weight ./iter_39620_xtuner/projector/model.safetensors --save_path ./iter_39620_hf
+```
+
+Here, the converted LLaVA model in HuggingFace LLaVA format is saved to `./iter_39620_hf`.
+
+```
+./iter_39620_hf
+├── config.json
+├── generation_config.json
+├── model-00001-of-00004.safetensors
+├── model-00002-of-00004.safetensors
+├── model-00003-of-00004.safetensors
+├── model-00004-of-00004.safetensors
+├── model.safetensors.index.json
+├── preprocessor_config.json
+├── special_tokens_map.json
+├── tokenizer_config.json
+└── tokenizer.json
+```
