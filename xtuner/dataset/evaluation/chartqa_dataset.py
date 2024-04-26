@@ -62,7 +62,7 @@ def evaluate_relaxed_accuracy(entries):
             for ann in elem['label']
         ])
         scores.append(score)
-    return sum(scores) / len(scores)
+    return scores, sum(scores) / len(scores)
 
 
 class ChartQADataset(BaseEvalDataset):
@@ -156,11 +156,14 @@ class ChartQADataset(BaseEvalDataset):
         print_log('============================================', 'current')
         acc_list = []
         for i, result in enumerate(results):
+            scores, _accuracy = evaluate_relaxed_accuracy(result)
+
+            for res, score in zip(result, scores):
+                res['score'] = score
             prediction_file = osp.join(work_dir, self.revert_name_map[i] + '.json')
             with open(prediction_file, 'w') as f:
                 json.dump(result, f)
 
-            _accuracy = evaluate_relaxed_accuracy(result)
             print_log('Acc: {}, Category: {}, # samples: {}'.format(_accuracy, self.revert_name_map[i],
                                                                     len(result)), 'current')
             acc_list.append(_accuracy)

@@ -102,9 +102,11 @@ class MultipleChoiceDataset(BaseEvalDataset):
                 'options_dict': options,
                 'index': index,
                 'context': hint,
-                'split': split,
                 'img_id': idx
             }
+            if split is not None:
+                data['split'] = split
+
             if self.has_l2_category:
                 data.update({'l2-category': self.df.iloc[idx]['l2-category']})
             data_list.append(data)
@@ -127,14 +129,20 @@ class MultipleChoiceDataset(BaseEvalDataset):
         def calc_acc(df, split, group='category'):
             assert group in ['overall', 'category', 'l2-category']
             if group == 'overall':
-                res = {'Average': np.mean(df[df['split'] == split]['hit'])}
+                if split is None:
+                    res = {'Average': np.mean(df['hit'])}
+                else:
+                    res = {'Average': np.mean(df[df['split'] == split]['hit'])}
             else:
                 res = {}
                 abilities = list(set(df[group]))
                 abilities.sort()
                 for ab in abilities:
                     sub_df = df[df[group] == ab]
-                    res[ab] = np.mean(sub_df[sub_df['split'] == split]['hit'])
+                    if split is None:
+                        res[ab] = np.mean(sub_df['hit'])
+                    else:
+                        res[ab] = np.mean(sub_df[sub_df['split'] == split]['hit'])
             return res
 
         def eval_sub_data(sub_data, answer_map):
@@ -152,7 +160,7 @@ class MultipleChoiceDataset(BaseEvalDataset):
             show_dict = ret_json.copy()
             table = Table(title=f' Multiple Choice ({self.data_file}) ')
             console = Console()
-            if split != 'none':
+            if split is not None:
                 table.add_column(f'Category ({split})', justify='left')
             else:
                 table.add_column('Category', justify='left')
