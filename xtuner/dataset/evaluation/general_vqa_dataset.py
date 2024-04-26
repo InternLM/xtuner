@@ -106,7 +106,8 @@ class GeneralVQADataset(BaseEvalDataset):
             index = self.df.iloc[idx]['index']
             image = self.df.iloc[idx]['image']
             question = self.df.iloc[idx]['question']
-            split = self.df.iloc[idx]['split']
+            split = self.df.iloc[idx]['split'] if 'split' in self.df.iloc[
+                0].keys() else None
             answer = self.df.iloc[idx]['answer'] if 'answer' in self.df.iloc[
                 0].keys() else None
 
