@@ -25,7 +25,7 @@
 
 ## 🎉 更新
 
-- **\[2024/04\]** 支持 [Phi-3](xtuner/configs/phi) 模型！
+- **\[2024/04\]** 多模态大模型 [LLaVA-Phi-3-mini](https://huggingface.co/xtuner/llava-phi-3-mini-hf) 发布！快速开始请查阅此[文档](xtuner/configs/llava/phi3_mini_4k_instruct_clip_vit_large_p14_336)！
 - **\[2024/04\]** 多模态大模型 [LLaVA-Llama-3-8B](https://huggingface.co/xtuner/llava-llama-3-8b) 和 [LLaVA-Llama-3-8B-v1.1](https://huggingface.co/xtuner/llava-llama-3-8b-v1_1) 发布！快速开始请查阅此[文档](xtuner/configs/llava/llama3_8b_instruct_clip_vit_large_p14_336)！
 - **\[2024/04\]** 支持 [Llama 3](xtuner/configs/llama) 模型！
 - **\[2024/04\]** 支持序列并行训练策略以实现语言模型超长上下文训练！\[[文档](https://github.com/InternLM/xtuner/blob/docs/docs/zh_cn/acceleration/train_extreme_long_sequence.rst)\] \[[速度基准](https://github.com/InternLM/xtuner/blob/docs/docs/zh_cn/acceleration/benchmark.rst)\]

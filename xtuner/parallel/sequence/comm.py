@@ -225,10 +225,10 @@ def gather_forward_split_backward(input, dim, sp_group, grad_scale=None):
     (in_features = 2, out_features = 1) and the input x has shape(2, 2).
     Y = [[y1], = [[w11x11 + w21x12], = [[x11, x12], dot [[w11],
          [y2]]    [w11x21 + w21x22]]    [x21, x22]]      [w21]]
-    z = sum(Y) = y1 + y2
+    z = mean(Y) = (y1 + y2) / 2
     Here is the partial derivative of z with respect to w11:
     ∂z / ∂w11 = ∂z / ∂y1 * ∂y1 / ∂w11 + ∂z / ∂y2 * ∂y2 / ∂w11
-              = 1 * x11 + 1 * x21 = x11 + x21
+              = 1/2 * x11 + 1/2 * x21 = (x11 + x21) / 2
 
     -------- SP 2 -----------
     When sequence parallel world size is set to 2, we will split the input x
@@ -249,18 +249,18 @@ def gather_forward_split_backward(input, dim, sp_group, grad_scale=None):
 
     Similarly, we calculate the loss in each rank:
     ```Step 3
-    z_rank0 = sum(Y_rank0) = y1 + detach(y2)
-    z_rank1 = sum(Y_rank1) = detach(y1) + y2
+    z_rank0 = mean(Y_rank0) = (y1 + detach(y2)) / 2
+    z_rank1 = mean(Y_rank1) = (detach(y1) + y2) / 2
     ```
     So the partial derivative of loss_rank0 with respect to w11:
-    ```∂z / ∂w11 = ∂z / ∂y1 * ∂y1 / ∂w11 = x11```
+    ```∂z / ∂w11 = ∂z / ∂y1 * ∂y1 / ∂w11 = x11 / 2```
     The same for rank1:
-    ```∂z / ∂w11 = ∂z / ∂y2 * ∂y2 / ∂w11 = x21```
+    ```∂z / ∂w11 = ∂z / ∂y2 * ∂y2 / ∂w11 = x21 / 2```
 
     Finally, we need to all_reduce them:
     ```Step 4
     In both rank:
-    ∂z / ∂w11 = (x11 + x21) / 2
+    ∂z / ∂w11 = (x11 / 2 + x21 / 2) / 2 = (x11 + x21) / 4
     ```
 
     In SP2, the gradient of each param is only half of that in SP1.

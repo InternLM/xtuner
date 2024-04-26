@@ -136,15 +136,11 @@ dataloader = DataLoader(
 
 ```python
 from xtuner.parallel.sequence import pad_for_sequence_parallel
-input_ids, labels, position_ids, attention_mask = pad_for_sequence_parallel(
-    input_ids, labels, position_ids, attention_mask)
-```
 
-如果训练过程用不到 attention_mask，那么可以：
-
-```python
-input_ids, labels, position_ids, _ = pad_for_sequence_parallel(
-    input_ids, labels, position_ids)
+input_ids = pad_for_sequence_parallel(input_ids, padding_value=0)
+labels = pad_for_sequence_parallel(labels, padding_value=-100)
+position_ids = pad_for_sequence_parallel(position_ids, padding_value=0)
+attention_mask = pad_for_sequence_parallel(attention_mask, padding_value=0)
 ```
 
 以上过程在 `xtuner/dataset/collate_fns/defalut_collate_fn.py` 中实现。

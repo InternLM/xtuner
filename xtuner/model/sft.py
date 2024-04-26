@@ -186,10 +186,17 @@ class SupervisedFinetune(BaseModel):
                                'Qwen2MoeConfig', 'Starcoder2Config',
                                'Starcoder2Config', 'Phi3Config')
 
-        if SUPPORT_FLASH2 and cls_name in SUPPORT_FLASH_ATTN2:
-            cfg.torch_dtype = torch.bfloat16 if (
-                torch.cuda.is_available() and torch.cuda.is_bf16_supported()) \
-                else torch.float16
+        torch_dtype = torch.bfloat16 if (
+            torch.cuda.is_available() and torch.cuda.is_bf16_supported()) \
+            else torch.float16
+
+        if getattr(cfg, 'attn_implementation', None) is not None:
+            # Flash Attention 2.0 only supports torch.float16 and
+            # torch.bfloat16 dtypes
+            if cfg.attn_implementation == 'flash_attention_2':
+                cfg.torch_dtype = torch_dtype
+        elif SUPPORT_FLASH2 and cls_name in SUPPORT_FLASH_ATTN2:
+            cfg.torch_dtype = torch_dtype
             cfg.attn_implementation = 'flash_attention_2'
         elif SUPPORT_FLASH1 and cls_name in SUPPORT_SDPA_ATTN:
             cfg.attn_implementation = 'sdpa'
@@ -255,7 +262,9 @@ class SupervisedFinetune(BaseModel):
         outputs = self.llm(**data)
         labels = data['labels']
         num_tokens = (labels != -100).sum()
-        loss = reduce_sequence_parallel_loss(outputs.loss, num_tokens)
+        sp_group = get_sequence_parallel_group()
+        loss = reduce_sequence_parallel_loss(outputs.loss, num_tokens,
+                                             sp_group)
         return {'loss': loss}
 
     def compute_loss(self, data, data_samples=None):
