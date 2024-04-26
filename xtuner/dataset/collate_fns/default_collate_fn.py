@@ -66,7 +66,8 @@ def default_collate_fn(instances: Sequence[Dict],
         input_ids = pad_for_sequence_parallel(input_ids, pad_index)
         labels = pad_for_sequence_parallel(labels, IGNORE_INDEX)
         position_ids = pad_for_sequence_parallel(position_ids, 0)
-        attention_mask = pad_for_sequence_parallel(attention_mask, 0)
+        if attention_mask is not None:
+            attention_mask = pad_for_sequence_parallel(attention_mask, 0)
 
     if use_varlen_attn:
         max_seqlen = (
