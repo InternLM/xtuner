@@ -48,7 +48,7 @@ NPROC_PER_NODE=8 xtuner train llava_internlm2_chat_7b_clip_vit_large_p14_336_e1_
 NPROC_PER_NODE=8 xtuner train llava_internlm2_chat_7b_qlora_clip_vit_large_p14_336_lora_e1_gpu8_finetune --deepspeed deepspeed_zero2
 ```
 
-## Model Convert (and Merge)
+## Model Conversion (and Merge)
 
 After training, we will obtain a set of weights (*i.e.*, `iter_xxx.pth`), which are not in the universal HuggingFace format. We first need to convert them.
 
