@@ -1,7 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 
 from .llava import LLaVAModel
-
+import torch
 
 from xtuner.registry import BUILDER
 from .modules import ProjectorConfig, ProjectorModel, dispatch_modules
@@ -110,32 +110,72 @@ class InternVL_v1_5_LLaVAModel(LLaVAModel):
     def __preprocess_for_pixel_values(self, data):
         pixel_values = data['pixel_values']
 
-        if pixel_values.ndim == 5:
-            pixel_values = [x if x.ndim == 4 else x.unsqueeze(0) for x in pixel_values]
+        if type(pixel_values) is list or pixel_values.ndim == 5:
+            if type(pixel_values) is list:
+                pixel_values = [
+                    x.unsqueeze(0) if x.ndim == 3 else x for x in pixel_values
+                ]
+            # b*n, c, h, w
+            concat_images = torch.cat([image.to(self.visual_encoder.dtype) for image in pixel_values], dim=0)
+        else:
+            raise NotImplementedError()
 
-        assert isinstance(pixel_values, list)
+        # b*n, hw, d
+        visual_outputs = self.visual_encoder(concat_images, output_hidden_states=True)
+
+        if self._get_model_class_name(self.visual_encoder) == 'CLIPVisionModel':
+            vit_embeds = visual_outputs.hidden_states[self.visual_select_layer][:, 1:]
+        elif self._get_model_class_name(self.visual_encoder) == 'SiglipVisionModel':
+            vit_embeds = visual_outputs.hidden_states[self.visual_select_layer]
+        else:
+            raise NotImplementedError
+
+        # n, hw, c
+        h = w = int(vit_embeds.shape[1] ** 0.5)
+        vit_embeds = vit_embeds.reshape(vit_embeds.shape[0], h, w, -1)
+        vit_embeds = self.pixel_shuffle(vit_embeds, scale_factor=self.downsample_ratio)
+        # n,h'w',c'
+        vit_embeds = vit_embeds.reshape(vit_embeds.shape[0], -1, vit_embeds.shape[-1])
+
+        vit_embeds = self.projector(vit_embeds)
+
+        split_sizes = [image.shape[0] for image in pixel_values]
+        image_features = torch.split(vit_embeds, split_sizes, dim=0)
+
         new_image_feature = []
-        for bs in range(len(pixel_values)):
-            # 这样可以省一点显存，虽然会慢一点
-            # n, c, h, w
-            visual_outputs = self.visual_encoder(
-                pixel_values[bs].to(self.visual_encoder.dtype), output_hidden_states=True)
+        for image_feature in image_features:
+            B, N, C = image_feature.shape
+            image_feature = image_feature.reshape(B * N, C)
+            new_image_feature.append(image_feature)
 
-            if self._get_model_class_name(self.visual_encoder) == 'CLIPVisionModel':
-                vit_embeds = visual_outputs.hidden_states[self.visual_select_layer][:, 1:]
-            elif self._get_model_class_name(self.visual_encoder) == 'SiglipVisionModel':
-                vit_embeds = visual_outputs.hidden_states[self.visual_select_layer]
-            else:
-                raise NotImplementedError
-            # n, hw, c
-            h = w = int(vit_embeds.shape[1] ** 0.5)
-            vit_embeds = vit_embeds.reshape(vit_embeds.shape[0], h, w, -1)
-            vit_embeds = self.pixel_shuffle(vit_embeds, scale_factor=self.downsample_ratio)
-            # n,h'w',c'
-            vit_embeds = vit_embeds.reshape(vit_embeds.shape[0], -1, vit_embeds.shape[-1])
+        # TODO:  for 这种写法无法在 zero + checkpoint 情况下使用
+        # if isinstance(pixel_values, torch.Tensor) and pixel_values.ndim == 5:
+        #     pixel_values = [x if x.ndim == 4 else x.unsqueeze(0) for x in pixel_values]
+        # assert isinstance(pixel_values, list)
 
-            vit_embeds = self.projector(vit_embeds)
-            new_image_feature.append(vit_embeds)
+        # for bs in range(len(pixel_values)):
+        #     # 这样可以省一点显存，虽然会慢一点
+        #     # n, c, h, w
+        #     visual_outputs = self.visual_encoder(
+        #         pixel_values[bs].to(self.visual_encoder.dtype), output_hidden_states=True)
+        #
+        #     if self._get_model_class_name(self.visual_encoder) == 'CLIPVisionModel':
+        #         vit_embeds = visual_outputs.hidden_states[self.visual_select_layer][:, 1:]
+        #     elif self._get_model_class_name(self.visual_encoder) == 'SiglipVisionModel':
+        #         vit_embeds = visual_outputs.hidden_states[self.visual_select_layer]
+        #     else:
+        #         raise NotImplementedError
+        #     # n, hw, c
+        #     h = w = int(vit_embeds.shape[1] ** 0.5)
+        #     vit_embeds = vit_embeds.reshape(vit_embeds.shape[0], h, w, -1)
+        #     vit_embeds = self.pixel_shuffle(vit_embeds, scale_factor=self.downsample_ratio)
+        #     # n,h'w',c'
+        #     vit_embeds = vit_embeds.reshape(vit_embeds.shape[0], -1, vit_embeds.shape[-1])
+        #
+        #     vit_embeds = self.projector(vit_embeds)
+        #     B, N, C = vit_embeds.shape
+        #     vit_embeds = vit_embeds.reshape(B * N, C)
+        #     new_image_feature.append(vit_embeds)
         return new_image_feature
 
     def pixel_shuffle(self, x, scale_factor=0.5):

@@ -18,6 +18,7 @@ from .llava_proxy_eval_dataset import LLaVAProxyEvalDataset
 from .anyres_llava_proxy_eval_dataset import AnyResLLaVAProxyEvalDataset
 from .mini_gemini_dataset import MiniGeminiDataset
 from .mini_gemini_proxy_eval_dataset import MiniGeminiProxyEvalDataset
+from .internvl_v1_5_llava_proxy_eval_dataset import InternVL_v1_5_LLaVAProxyEvalDataset
 
 # ignore FutureWarning in hf datasets
 warnings.simplefilter(action='ignore', category=FutureWarning)
@@ -38,5 +39,6 @@ __all__ = [
     'AnyResLLaVAProxyEvalDataset',
     'MiniGeminiDataset',
     'MiniGeminiProxyEvalDataset',
-    'InternVL_V1_5_LLaVADataset'
+    'InternVL_V1_5_LLaVADataset',
+    'InternVL_v1_5_LLaVAProxyEvalDataset'
 ]

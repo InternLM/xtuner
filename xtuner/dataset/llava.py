@@ -213,10 +213,10 @@ class InternVL_V1_5_LLaVADataset(LLaVADataset):
             image = Image.open(os.path.join(self.image_folder,
                                             image_file)).convert('RGB')
             images = dynamic_preprocess(image, self.min_num, self.max_num, self._image_size)
-            for image in images:
+            for i, image in enumerate(images):
                 image = self.image_processor.preprocess(
                     image, return_tensors='pt')['pixel_values'][0]
-                images.append(image)
+                images[i] = image
             images = torch.stack(images, dim=0)
             data_dict['pixel_values'] = images
         else:
