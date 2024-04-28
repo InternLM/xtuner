@@ -83,6 +83,9 @@ def main():
 
     for name, param in tqdm(state_dict.items(), desc='Load State Dict'):
         set_module_tensor_to_device(model, name, 'cpu', param, torch.float16)
+
+    model.llm.config.use_cache = True
+
     print(f'Load PTH model from {args.pth_model}')
 
     if 'LLaVAModel' in model_name:
