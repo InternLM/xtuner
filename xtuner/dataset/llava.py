@@ -14,6 +14,8 @@ from torch.utils.data import Dataset
 from xtuner.registry import BUILDER
 from .huggingface import process_hf_dataset
 from .utils import expand2square, process_anyres_image, total_image_token, dynamic_preprocess
+from concurrent.futures import ThreadPoolExecutor
+from tqdm import tqdm
 
 
 def load_jsonl(json_file):
@@ -171,7 +173,7 @@ class AnyResLLaVADataset(LLaVADataset):
 
 
 class InternVL_V1_5_LLaVADataset(LLaVADataset):
-    def __init__(self, min_num, max_num, downsample_ratio=0.5, image_size=336, *args, **kwargs):
+    def __init__(self, min_num, max_num, downsample_ratio=0.5, image_size=336, image_size_json=None, *args, **kwargs):
         self.min_num = min_num
         self.max_num = max_num
         self.downsample_ratio = downsample_ratio
@@ -188,21 +190,38 @@ class InternVL_V1_5_LLaVADataset(LLaVADataset):
         self._image_size = image_size
         self._patch_size = (self._image_size // 14) * downsample_ratio  # 12
 
-    @property
-    def modality_length(self):
-        print_log('start calculating modality length', logger='current'),
-        length_list = []
-        for data_dict in self.text_data:
+        self.image_size_json = None
+        if image_size_json is not None:
+            with open(image_size_json, 'r') as f:
+                self.image_size_json = json.load(f)
+
+    def __calc_fn(self, data_dict):
+        cur_len = len(data_dict['input_ids'])
+        if data_dict.get('image', None) is not None:
             cur_len = len(data_dict['input_ids'])
-            if data_dict.get('image', None) is None:
+            if data_dict.get('image', None) is not None:
                 image_file = data_dict['image']
-                image = Image.open(os.path.join(self.image_folder,
-                                                image_file))
-                num_image_token = total_image_token(image.size, self.min_num, self.max_num, self._image_size,
+                if self.image_size_json is not None:
+                    size = self.image_size_json[image_file]
+                else:
+                    image = Image.open(os.path.join(self.image_folder,
+                                                    image_file))
+                    size = image.size
+                num_image_token = total_image_token(size, self.min_num, self.max_num, self._image_size,
                                                     self._patch_size)
                 cur_len += num_image_token
                 cur_len = -cur_len
-            length_list.append(cur_len)
+        return cur_len
+
+    @property
+    def modality_length(self):
+        print_log('start calculating modality length', logger='current'),
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            length_list = list(
+                tqdm(
+                    executor.map(self.__calc_fn, self.text_data),
+                    desc='Calculating modality length',
+                    total=len(self.text_data)))
         print_log('end calculating modality length', logger='current'),
         return length_list
 
