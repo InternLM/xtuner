@@ -9,6 +9,9 @@ class _ReduceLoss(torch.autograd.Function):
     @staticmethod
     def forward(ctx, mean_loss, loss_scale, process_group):
         ctx.mode = process_group
+        if loss_scale == 0:
+            # convert nan to 0 just for logging
+            mean_loss = torch.nan_to_num(mean_loss)
         loss_sum = mean_loss * loss_scale
         dist.all_reduce(loss_sum, group=process_group)
         dist.all_reduce(loss_scale, group=process_group)
