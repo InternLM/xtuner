@@ -58,7 +58,7 @@ SYSTEM = ''
 evaluation_images = 'https://llava-vl.github.io/static/images/view.jpg'
 evaluation_inputs = ['Please describe this picture']
 
-image_grid_pinpoints = [[336, 672], [672, 336], [672, 672], [1152, 336],
+image_grid_pinpoints = [[336, 672], [672, 336], [672, 672], [1008, 336],
                         [336, 1008]]
 
 #######################################################################
