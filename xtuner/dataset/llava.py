@@ -13,7 +13,7 @@ from torch.utils.data import Dataset
 
 from xtuner.registry import BUILDER
 from .huggingface import process_hf_dataset
-from .utils import expand2square, process_anyres_image
+from .utils import expand2square, process_anyres_image, total_image_token, dynamic_preprocess
 
 
 def load_jsonl(json_file):
@@ -165,6 +165,61 @@ class AnyResLLaVADataset(LLaVADataset):
             data_dict['pixel_values'] = image
         else:
             data_dict['orig_size'] = self._crop_size
+            data_dict['pixel_values'] = torch.zeros(1, 3, self._crop_size['height'],
+                                                    self._crop_size['width'])
+        return data_dict
+
+
+class InternVL_V1_5_LLaVADataset(LLaVADataset):
+    def __init__(self, min_num, max_num, downsample_ratio=0.5, image_size=336, *args, **kwargs):
+        self.min_num = min_num
+        self.max_num = max_num
+        self.downsample_ratio = downsample_ratio
+        super().__init__(*args, **kwargs)
+
+        if hasattr(self.image_processor, 'crop_size'):
+            self._crop_size = self.image_processor.crop_size
+        else:
+            self._crop_size = self.image_processor.size
+        self._patch_size = self._crop_size['height']
+        self._shortest_edge = self._crop_size['height']
+
+        # clip
+        self._image_size = image_size
+        self._patch_size = (self._image_size // 14) * downsample_ratio  # 12
+
+    @property
+    def modality_length(self):
+        print_log('start calculating modality length', logger='current'),
+        length_list = []
+        for data_dict in self.text_data:
+            cur_len = len(data_dict['input_ids'])
+            if data_dict.get('image', None) is None:
+                image_file = data_dict['image']
+                image = Image.open(os.path.join(self.image_folder,
+                                                image_file))
+                num_image_token = total_image_token(image.size, self.min_num, self.max_num, self._image_size,
+                                                    self._patch_size)
+                cur_len += num_image_token
+                cur_len = -cur_len
+            length_list.append(cur_len)
+        print_log('end calculating modality length', logger='current'),
+        return length_list
+
+    def __getitem__(self, index):
+        data_dict = self.text_data[index]
+        if data_dict.get('image', None) is not None:
+            image_file = data_dict['image']
+            image = Image.open(os.path.join(self.image_folder,
+                                            image_file)).convert('RGB')
+            images = dynamic_preprocess(image, self.min_num, self.max_num, self._image_size)
+            for image in images:
+                image = self.image_processor.preprocess(
+                    image, return_tensors='pt')['pixel_values'][0]
+                images.append(image)
+            images = torch.stack(images, dim=0)
+            data_dict['pixel_values'] = images
+        else:
             data_dict['pixel_values'] = torch.zeros(1, 3, self._crop_size['height'],
                                                     self._crop_size['width'])
         return data_dict
