@@ -56,12 +56,6 @@ class InternVL_v1_5_LLaVAProxyEvalDataset:
             inputs = ''
         inputs += self.eval_ds.template['INSTRUCTION'].format(input=text, round=1)
 
-        if self.eval_ds.use_system:
-            inputs = self.eval_ds.template.get('SYSTEM', '{system}').format(system='')
-        else:
-            inputs = ''
-        inputs += self.eval_ds.template['INSTRUCTION'].format(input=text, round=1)
-
         # 2 tokenize inputs
         chunk_encode = []
         for idx, chunk in enumerate(inputs.split(DEFAULT_IMAGE_TOKEN)):
