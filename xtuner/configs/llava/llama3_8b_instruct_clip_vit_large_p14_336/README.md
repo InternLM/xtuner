@@ -19,6 +19,7 @@
   - Official LLaVA format model (`xtuner/llava-llama-3-8b-v1_1-hf`): 🤗 [HuggingFace](https://huggingface.co/xtuner/llava-llama-3-8b-v1_1-hf) / 🤖 [ModelScope](https://modelscope.cn/models/xtuner/llava-llama-3-8b-v1_1-hf)
   - HuggingFace LLaVA format model (`xtuner/llava-llama-3-8b-v1_1-transformers`): 🤗 [HuggingFace](https://huggingface.co/xtuner/llava-llama-3-8b-v1_1-transformers) / 🤖 [ModelScope](https://modelscope.cn/models/xtuner/llava-llama-3-8b-v1_1-transformers)
   - XTuner LLaVA format model (`xtuner/llava-llama-3-8b-v1_1`): 🤗 [HuggingFace](https://huggingface.co/xtuner/llava-llama-3-8b-v1_1) / 🤖 [ModelScope](https://modelscope.cn/models/xtuner/llava-llama-3-8b-v1_1)
+  - GGUF model (`xtuner/llava-llama-3-8b-v1_1-gguf`): 🤗 [HuggingFace](https://huggingface.co/xtuner/llava-llama-3-8b-v1_1-gguf) / 🤖 [ModelScope](https://modelscope.cn/models/xtuner/llava-llama-3-8b-v1_1-gguf)
   - Pretrained projector weights: 🤗 [HuggingFace](https://huggingface.co/xtuner/llava-llama-3-8b-v1_1-pretrain) / 🤖 [ModelScope](https://modelscope.cn/models/xtuner/llava-llama-3-8b-v1_1-pretrain)
 
 - LLaVA-Llama-3-8B
@@ -431,6 +432,7 @@ Here, the converted LLaVA model in HuggingFace LLaVA format is saved to `./iter_
 - XTuner LLaVA format [docs](https://huggingface.co/xtuner/llava-llama-3-8b-v1_1#quickstart)
 - Official LLaVA format [docs](https://huggingface.co/xtuner/llava-llama-3-8b-v1_1-hf#quickstart)
 - HuggingFace LLaVA format [docs](https://huggingface.co/xtuner/llava-llama-3-8b-v1_1-transformers#quickstart)
+- GGUF format [docs](https://huggingface.co/xtuner/llava-llama-3-8b-v1_1-gguf#quickstart)
 
 ## Deployment
 
