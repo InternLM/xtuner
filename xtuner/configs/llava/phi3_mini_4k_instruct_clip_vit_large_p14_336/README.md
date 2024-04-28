@@ -41,7 +41,7 @@ NPROC_PER_NODE=8 xtuner train llava_phi3_mini_4k_instruct_clip_vit_large_p14_336
 NPROC_PER_NODE=8 xtuner train llava_phi3_mini_4k_instruct_full_clip_vit_large_p14_336_full_e2_gpu8_internvl_finetune --deepspeed deepspeed_zero2 --seed 1024
 ```
 
-## Model Convert
+## Model Conversion
 
 ### Step 0. Convert `.pth` file to LLaVA model in xtuner format ([LLaVA-Phi-3-mini-xtuner](https://huggingface.co/xtuner/llava-phi-3-mini-xtuner))
 
