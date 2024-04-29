@@ -19,7 +19,7 @@ from xtuner.dataset.evaluation import MMEDataset, MultipleChoiceDataset, POPEDat
 from xtuner.dataset import ConcatDataset
 from xtuner.engine.runner import TrainLoop, ValLoop, TestLoop
 from mmengine.dataset import DefaultSampler
-from xtuner.engine.optimizers import LearningRateDecayOptimWrapperConstructor, get_layer_depth_for_CLIPVisionModel
+from xtuner.engine.optimizers import LearningRateDecayOptimWrapperConstructor
 
 #######################################################################
 #                          PART 1  Settings                           #
@@ -80,7 +80,7 @@ model = dict(
     template=prompt_template,
     image_processor=image_processor,
     freeze_llm=False,
-    freeze_visual_encoder=True,
+    freeze_visual_encoder=False,
     pretrained_pth=pretrained_pth,
     llm=dict(
         type=AutoModelForCausalLM.from_pretrained,
@@ -88,9 +88,7 @@ model = dict(
         trust_remote_code=True),
     visual_encoder=dict(
         type=CLIPVisionModel.from_pretrained,
-        pretrained_model_name_or_path=visual_encoder_name_or_path),
-    visual_encoder_lora=dict(
-        type=LoraConfig, r=64, lora_alpha=16, lora_dropout=0.05, bias='none')
+        pretrained_model_name_or_path=visual_encoder_name_or_path)
 )
 
 #######################################################################
@@ -98,7 +96,7 @@ model = dict(
 #######################################################################
 llava_dataset = dict(
     type=LLaVADataset,
-    offline_processed_text_folder='/mnt/petrelfs/huanghaian/code/xtuner/phi3_mini_llava_pretrain',
+    offline_processed_text_folder='/mnt/petrelfs/huanghaian/code/xtuner/phi3_mini_llava_finetune',
     data_path=data_path,
     image_folder=image_folder,
     tokenizer=tokenizer,
