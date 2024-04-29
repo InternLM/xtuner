@@ -22,6 +22,8 @@ from xtuner.utils import (DEFAULT_IMAGE_TOKEN, IMAGE_TOKEN_INDEX,
                           StopWordStoppingCriteria)
 from functools import reduce
 from mmengine.logging import print_log
+from xtuner.engine.optimizers import get_layer_depth_for_CLIPVisionModel
+
 
 class LLaVAModel(BaseModel):
 
@@ -41,7 +43,9 @@ class LLaVAModel(BaseModel):
                  max_position_embeddings=None,
                  image_processor=None,
                  tokenizer=None,
-                 template=None):
+                 template=None,
+                 use_lldr=False,  # LearningRateDecayOptimWrapperConstructor
+                 ):
         super().__init__()
         self.s2_scales = s2_scales
         self.freeze_llm = freeze_llm
@@ -51,12 +55,20 @@ class LLaVAModel(BaseModel):
                 llm = self._dispatch_lm_model_cfg(llm, max_position_embeddings)
 
             self.llm = self._build_from_cfg_or_module(llm)
+
             self.visual_encoder = self._build_from_cfg_or_module(
                 visual_encoder)
+
+            if use_lldr:
+                # The following code is only meaningful when the optim_wrapper configuration
+                # includes `LearningRateDecayOptimWrapperConstructor`. Otherwise, it will be ignored.
+                visual_encoder_clazz = visual_encoder['type']
+                visual_encoder_clazz.get_layer_depth = get_layer_depth_for_CLIPVisionModel
+
         self.llm.config.use_cache = False
         dispatch_modules(self.llm)
 
-        assert int(token_merge_ratio**0.5)**2 == token_merge_ratio, \
+        assert int(token_merge_ratio ** 0.5) ** 2 == token_merge_ratio, \
             '`token_merge_ratio` must be a square number.'
         self.token_merge_ratio = int(token_merge_ratio)
 
@@ -133,6 +145,13 @@ class LLaVAModel(BaseModel):
 
         self.template = template
         print_log(self, logger='current')
+
+    # The following code is only meaningful when the optim_wrapper configuration
+    # includes `LearningRateDecayOptimWrapperConstructor`. Otherwise, it will be ignored.
+    def get_layer_depth(self):
+        assert hasattr(self.visual_encoder, 'get_layer_depth'), \
+            'The visual_encoder does not have `get_layer_depth` method.'
+        return self.visual_encoder.get_layer_depth
 
     def _parse_lora_config(self, lora_config):
         if isinstance(lora_config, dict) or isinstance(
@@ -292,10 +311,10 @@ class LLaVAModel(BaseModel):
             # B, W // w_r, H, C * w_r
             tokens = tokens.permute(0, 2, 1, 3).contiguous()
             # B, W // w_r, H // h_r, C * w_r * h_r
-            tokens = tokens.view(b, w // w_ratio, h // h_ratio, 
+            tokens = tokens.view(b, w // w_ratio, h // h_ratio,
                                  c * w_ratio * h_ratio)
             # B, W * H // w_r // h_r, C * w_r * h_r
-            tokens = tokens.view(b, w * h // w_ratio // h_ratio, 
+            tokens = tokens.view(b, w * h // w_ratio // h_ratio,
                                  c * w_ratio * h_ratio)
         return tokens
 
