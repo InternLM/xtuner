@@ -49,11 +49,11 @@ max_norm = 1  # grad clip
 warmup_ratio = 0.03
 
 # Save
-save_steps = 1500
+save_steps = 2000
 save_total_limit = 1  # Maximum checkpoints to keep (-1 means unlimited)
 
 # Evaluate the generation performance during the training
-evaluation_freq = 1500
+evaluation_freq = 2000
 SYSTEM = ''
 evaluation_images = 'https://llava-vl.github.io/static/images/view.jpg'
 evaluation_inputs = ['Please describe this picture']
@@ -105,7 +105,7 @@ llava_dataset = dict(
     max_num=max_num,
     downsample_ratio=downsample_ratio,
     offline_processed_text_folder='/mnt/petrelfs/huanghaian/code/xtuner/phi3_mini_llava_finetune',
-    image_size_json=None,
+    image_size_json='/mnt/petrelfs/huanghaian/code/mm/xtuner/image_size.json',
     data_path=data_path,
     image_folder=image_folder,
     tokenizer=tokenizer,
