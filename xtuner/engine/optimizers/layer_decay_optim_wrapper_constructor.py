@@ -7,10 +7,10 @@ from mmengine.optim import DefaultOptimWrapperConstructor
 from mmengine.utils.dl_utils.parrots_wrapper import _BatchNorm, _InstanceNorm
 from torch import nn
 from torch.nn import GroupNorm, LayerNorm
-from xtuner.registry import BUILDER
+from mmengine.registry import OPTIM_WRAPPER_CONSTRUCTORS
 
 
-@BUILDER.register_module()
+@OPTIM_WRAPPER_CONSTRUCTORS.register_module()
 class LearningRateDecayOptimWrapperConstructor(DefaultOptimWrapperConstructor):
     """Different learning rates are set for different layers of backbone.
 
@@ -62,6 +62,7 @@ class LearningRateDecayOptimWrapperConstructor(DefaultOptimWrapperConstructor):
                    params: List[dict],
                    module: nn.Module,
                    prefix: str = '',
+                   get_layer_depth: Optional[Callable] = None,
                    **kwargs) -> None:
         """Add all parameters of module to the params list.
 
@@ -81,9 +82,6 @@ class LearningRateDecayOptimWrapperConstructor(DefaultOptimWrapperConstructor):
         sorted_keys = sorted(sorted(custom_keys.keys()), key=len, reverse=True)
         logger = MMLogger.get_current_instance()
 
-        assert hasattr(module, 'get_layer_depth'), 'The model should have `get_layer_depth` method'
-        get_layer_depth = module.get_layer_depth
-
         bias_decay_mult = self.paramwise_cfg.get('bias_decay_mult', None)
         norm_decay_mult = self.paramwise_cfg.get('norm_decay_mult', None)
         flat_decay_mult = self.paramwise_cfg.get('flat_decay_mult', None)
@@ -92,6 +90,14 @@ class LearningRateDecayOptimWrapperConstructor(DefaultOptimWrapperConstructor):
         # special rules for norm layers and depth-wise conv layers
         is_norm = isinstance(module,
                              (_BatchNorm, _InstanceNorm, GroupNorm, LayerNorm))
+
+        # The model should have `get_layer_depth` method
+        if get_layer_depth is None and not hasattr(module, 'get_layer_depth'):
+            raise NotImplementedError('The layer-wise learning rate decay need'
+                                      f' the model {type(module)} has'
+                                      ' `get_layer_depth` method.')
+        else:
+            get_layer_depth = get_layer_depth or module.get_layer_depth
 
         for name, param in module.named_parameters(recurse=False):
             param_group = {'params': [param]}

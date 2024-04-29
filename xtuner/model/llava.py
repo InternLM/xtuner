@@ -149,10 +149,10 @@ class LLaVAModel(BaseModel):
 
     # The following code is only meaningful when the optim_wrapper configuration
     # includes `LearningRateDecayOptimWrapperConstructor`. Otherwise, it will be ignored.
-    def get_layer_depth(self):
+    def get_layer_depth(self, param_name: str, prefix: str = 'visual_encoder.vision_model.'):
         assert hasattr(self.visual_encoder, 'get_layer_depth'), \
             'The visual_encoder does not have `get_layer_depth` method.'
-        return self.visual_encoder.get_layer_depth
+        return self.visual_encoder.get_layer_depth(param_name, prefix)
 
     def _parse_lora_config(self, lora_config):
         if isinstance(lora_config, dict) or isinstance(
