@@ -12,6 +12,8 @@
 ]
 Please refer to https://xtuner.readthedocs.io/zh-cn/docs/training/custom_pretrain_dataset.html
 for more details.
+
+Speed: 16 * A100 80G, DeepSpeed ZeRO-3, 1324 tokens per second per GPU
 """  # noqa: E501
 
 from datasets import load_dataset
