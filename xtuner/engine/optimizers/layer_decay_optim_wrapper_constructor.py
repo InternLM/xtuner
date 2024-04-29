@@ -7,8 +7,10 @@ from mmengine.optim import DefaultOptimWrapperConstructor
 from mmengine.utils.dl_utils.parrots_wrapper import _BatchNorm, _InstanceNorm
 from torch import nn
 from torch.nn import GroupNorm, LayerNorm
+from xtuner.registry import BUILDER
 
 
+@BUILDER.register_module()
 class LearningRateDecayOptimWrapperConstructor(DefaultOptimWrapperConstructor):
     """Different learning rates are set for different layers of backbone.
 

@@ -23,6 +23,7 @@ from xtuner.utils import (DEFAULT_IMAGE_TOKEN, IMAGE_TOKEN_INDEX,
 from functools import reduce
 from mmengine.logging import print_log
 from xtuner.engine.optimizers import get_layer_depth_for_CLIPVisionModel
+import types
 
 
 class LLaVAModel(BaseModel):
@@ -62,8 +63,8 @@ class LLaVAModel(BaseModel):
             if use_lldr:
                 # The following code is only meaningful when the optim_wrapper configuration
                 # includes `LearningRateDecayOptimWrapperConstructor`. Otherwise, it will be ignored.
-                visual_encoder_clazz = visual_encoder['type']
-                visual_encoder_clazz.get_layer_depth = get_layer_depth_for_CLIPVisionModel
+                if self._get_model_class_name(self.visual_encoder) == 'CLIPVisionModel':
+                    self.visual_encoder.get_layer_depth = types.MethodType(get_layer_depth_for_CLIPVisionModel, self.visual_encoder)
 
         self.llm.config.use_cache = False
         dispatch_modules(self.llm)

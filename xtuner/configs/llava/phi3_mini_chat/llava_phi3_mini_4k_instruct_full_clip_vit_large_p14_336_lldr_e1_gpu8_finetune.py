@@ -19,7 +19,6 @@ from xtuner.dataset.evaluation import MMEDataset, MultipleChoiceDataset, POPEDat
 from xtuner.dataset import ConcatDataset
 from xtuner.engine.runner import TrainLoop, ValLoop, TestLoop
 from mmengine.dataset import DefaultSampler
-from xtuner.engine.optimizers import LearningRateDecayOptimWrapperConstructor
 
 #######################################################################
 #                          PART 1  Settings                           #
@@ -28,7 +27,7 @@ from xtuner.engine.optimizers import LearningRateDecayOptimWrapperConstructor
 llm_name_or_path = '/mnt/petrelfs/share_data/gaojianfei/Phi-3-mini-4k-instruct/models--microsoft--Phi-3-mini-4k-instruct/snapshots/3a811845d89f3c1b3f41b341d0f9f05104769f35'
 visual_encoder_name_or_path = 'model/models--openai--clip-vit-large-patch14-336/snapshots/ce19dc912ca5cd21c8a653c79e251e808ccabcd1'
 # Specify the pretrained pth
-pretrained_pth = './work_dirs/llava_phi3_mini_4k_instruct_clip_vit_large_p14_336_e1_gpu8_pretrain/iter_2181.pth'  # noqa: E501
+pretrained_pth = '/mnt/petrelfs/huanghaian/code/xtuner/work_dirs/llava_phi3_mini_4k_instruct_clip_vit_large_p14_336_e1_gpu8_pretrain/iter_2181.pth'  # noqa: E501
 
 # Data
 data_root = '/mnt/petrelfs/share_data/huanghaian/llava_data/'
@@ -128,7 +127,7 @@ optim_wrapper = dict(
         type=optim_type, lr=lr, betas=betas, weight_decay=weight_decay),
     clip_grad=dict(max_norm=max_norm, error_if_nonfinite=False),
     accumulative_counts=accumulative_counts,
-    constructor=LearningRateDecayOptimWrapperConstructor,  # ====================
+    constructor='LearningRateDecayOptimWrapperConstructor',  # ====================
     paramwise_cfg=dict(layer_decay_rate=0.75),  # vit-l
     loss_scale='dynamic',
     dtype='float16')
