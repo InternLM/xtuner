@@ -61,8 +61,9 @@ class HFCheckpointHook(Hook):
 
         wrapped_model = runner.strategy.model
         if wrapped_model.zero_optimization_partition_weights():
-            assert wrapped_model.zero_gather_16bit_weights_on_model_save(
-            ), 'Please set `gather_16bit_weights_on_model_save=True` in your DeepSpeed config.'
+            assert wrapped_model.zero_gather_16bit_weights_on_model_save(), \
+                ('Please set `gather_16bit_weights_on_model_save=True` '
+                 'in your DeepSpeed config.')
             state_dict = wrapped_model._zero3_consolidated_16bit_state_dict()
         else:
             state_dict = wrapped_model.module_state_dict(
