@@ -33,18 +33,16 @@ from xtuner.engine.hooks import (DatasetInfoHook, EvaluateChatHook,
 from xtuner.engine.runner import TrainLoop
 from xtuner.model import SupervisedFinetune
 from xtuner.parallel.sequence import SequenceParallelSampler
-from xtuner.utils import PROMPT_TEMPLATE
 
 #######################################################################
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-pretrained_model_name_or_path = 'internlm/internlm2-chat-20b'
+pretrained_model_name_or_path = 'internlm/internlm2-20b'
 use_varlen_attn = True
 
 # Data
 data_files = ['/path/to/json/file.json']
-prompt_template = PROMPT_TEMPLATE.internlm2_chat
 max_length = 32768
 pack_to_max_length = True
 
