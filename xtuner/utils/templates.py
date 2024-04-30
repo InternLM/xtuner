@@ -151,6 +151,13 @@ PROMPT_TEMPLATE = ConfigDict(
         SUFFIX='<|eot_id|>',
         SUFFIX_AS_EOS=True,
         STOP_WORDS=['<|eot_id|>']),
+    phi3_chat=dict(
+        SYSTEM='<|system|>\n{system}<|end|>\n',
+        INSTRUCTION='<|user|>\n{input}<|end|>\n<|assistant|>\n',
+        SUFFIX='<|end|>',
+        SUFFIX_AS_EOS=True,
+        SEP='\n',
+        STOP_WORDS=['<|end|>']),
 )
 
 SYSTEM_TEMPLATE = ConfigDict(

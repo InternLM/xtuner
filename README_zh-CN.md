@@ -23,8 +23,23 @@
 
 </div>
 
+## 🚀 Speed Benchmark
+
+- XTuner 与 LLaMA-Factory 在 Llama2-7B 模型上的训练效率对比
+
+<div align=center>
+  <img src="https://github.com/InternLM/xtuner/assets/41630003/9c9dfdf4-1efb-4daf-84bf-7c379ae40b8b" style="width:80%">
+</div>
+
+- XTuner 与 LLaMA-Factory 在 Llama2-70B 模型上的训练效率对比
+
+<div align=center>
+  <img src="https://github.com/InternLM/xtuner/assets/41630003/5ba973b8-8885-4b72-b51b-c69fa1583bdd" style="width:80%">
+</div>
+
 ## 🎉 更新
 
+- **\[2024/04\]** 多模态大模型 [LLaVA-Phi-3-mini](https://huggingface.co/xtuner/llava-phi-3-mini-hf) 发布！快速开始请查阅此[文档](xtuner/configs/llava/phi3_mini_4k_instruct_clip_vit_large_p14_336)！
 - **\[2024/04\]** 多模态大模型 [LLaVA-Llama-3-8B](https://huggingface.co/xtuner/llava-llama-3-8b) 和 [LLaVA-Llama-3-8B-v1.1](https://huggingface.co/xtuner/llava-llama-3-8b-v1_1) 发布！快速开始请查阅此[文档](xtuner/configs/llava/llama3_8b_instruct_clip_vit_large_p14_336)！
 - **\[2024/04\]** 支持 [Llama 3](xtuner/configs/llama) 模型！
 - **\[2024/04\]** 支持序列并行训练策略以实现语言模型超长上下文训练！\[[文档](https://github.com/InternLM/xtuner/blob/docs/docs/zh_cn/acceleration/train_extreme_long_sequence.rst)\] \[[速度基准](https://github.com/InternLM/xtuner/blob/docs/docs/zh_cn/acceleration/benchmark.rst)\]
@@ -64,31 +79,6 @@ XTuner 是一个高效、灵活、全能的轻量化大模型微调工具库。
 - 预定义众多开源对话模版，支持与开源或训练所得模型进行对话。
 - 训练所得模型可无缝接入部署工具库 [LMDeploy](https://github.com/InternLM/lmdeploy)、大规模评测工具库 [OpenCompass](https://github.com/open-compass/opencompass) 及 [VLMEvalKit](https://github.com/open-compass/VLMEvalKit)。
 
-## 🌟 示例
-
-- XTuner APIs所提供的开箱即用的模型与数据集 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/17CSO7T8q6KePuvu684IiHl6_id-CjPjh?usp=sharing)
-
-- QLoRA 微调 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1QAEZVBfQ7LZURkMUtaq0b-5nEQII9G9Z?usp=sharing)
-
-- 基于插件的对话 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/144OuTVyT_GvFyDMtlSlTzcxYIfnRsklq?usp=sharing)
-
-  <table>
-  <tr>
-    <th colspan="3" align="center">基于插件的对话 🔥🔥🔥</th>
-  </tr>
-  <tr>
-  <td>
-  <a><img src="https://github.com/InternLM/lmdeploy/assets/36994684/7c429d98-7630-4539-8aff-c89094826f8c"></a>
-  </td>
-  <td>
-  <a><img src="https://github.com/InternLM/lmdeploy/assets/36994684/05d02906-5a82-45bc-b4e3-2cc32d473b2c"></a>
-  </td>
-  <td>
-  <a><img src="https://github.com/InternLM/lmdeploy/assets/36994684/80395303-997a-47f2-b7d2-d585034df683"></a>
-  </td>
-  </tr>
-  </table>
-
 ## 🔥 支持列表
 
 <table>
@@ -111,13 +101,12 @@ XTuner 是一个高效、灵活、全能的轻量化大模型微调工具库。
 <td align="left" valign="top">
 <ul>
   <li><a href="https://huggingface.co/internlm">InternLM2</a></li>
-  <li><a href="https://huggingface.co/internlm">InternLM</a></li>
-  <li><a href="https://huggingface.co/meta-llama">Llama</a></li>
+  <li><a href="https://huggingface.co/meta-llama">Llama 3</a></li>
   <li><a href="https://huggingface.co/meta-llama">Llama 2</a></li>
+  <li><a href="https://huggingface.co/collections/microsoft/phi-3-6626e15e9585a200d2d761e3">Phi-3</a></li>
   <li><a href="https://huggingface.co/THUDM/chatglm2-6b">ChatGLM2</a></li>
   <li><a href="https://huggingface.co/THUDM/chatglm3-6b">ChatGLM3</a></li>
   <li><a href="https://huggingface.co/Qwen/Qwen-7B">Qwen</a></li>
-  <li><a href="https://huggingface.co/baichuan-inc/Baichuan-7B">Baichuan</a></li>
   <li><a href="https://huggingface.co/baichuan-inc/Baichuan2-7B-Base">Baichuan2</a></li>
   <li><a href="https://huggingface.co/mistralai/Mixtral-8x7B-Instruct-v0.1">Mixtral 8x7B</a></li>
   <li><a href="https://huggingface.co/deepseek-ai/deepseek-moe-16b-chat">DeepSeek MoE</a></li>
@@ -191,7 +180,7 @@ XTuner 是一个高效、灵活、全能的轻量化大模型微调工具库。
   pip install -e '.[all]'
   ```
 
-### 微调 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1QAEZVBfQ7LZURkMUtaq0b-5nEQII9G9Z?usp=sharing)
+### 微调
 
 XTuner 支持微调大语言模型。数据集预处理指南请查阅[文档](./docs/zh_cn/user_guides/dataset_prepare.md)。
 
@@ -234,7 +223,7 @@ XTuner 支持微调大语言模型。数据集预处理指南请查阅[文档](.
   xtuner convert pth_to_hf ${CONFIG_NAME_OR_PATH} ${PTH} ${SAVE_PATH}
   ```
 
-### 对话 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/144OuTVyT_GvFyDMtlSlTzcxYIfnRsklq?usp=sharing)
+### 对话
 
 XTuner 提供与大语言模型对话的工具。
 
@@ -294,6 +283,7 @@ xtuner chat internlm/internlm2-chat-7b --visual-encoder openai/clip-vit-large-pa
 ## 🎖️ 致谢
 
 - [Llama 2](https://github.com/facebookresearch/llama)
+- [DeepSpeed](https://github.com/microsoft/DeepSpeed)
 - [QLoRA](https://github.com/artidoro/qlora)
 - [LMDeploy](https://github.com/InternLM/lmdeploy)
 - [LLaVA](https://github.com/haotian-liu/LLaVA)
