@@ -45,4 +45,9 @@ class HFCheckpointHook(Hook):
             model = model.module
         llm = model.llm
         if dist.get_rank() == 0:
+            # keys in state_dict are prefixed with 'llm.'
+            keys = list(state_dict.keys())
+            for k in keys:
+                val = state_dict.pop(k)
+                state_dict[k[4:]] = val
             llm.save_pretrained(self.out_dir, state_dict=state_dict)
