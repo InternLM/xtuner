@@ -30,11 +30,32 @@ visual_encoder_name_or_path = 'model/models--openai--clip-vit-large-patch14-336/
 pretrained_pth = '/mnt/petrelfs/huanghaian/code/xtuner/work_dirs/llava_phi3_mini_4k_instruct_clip_vit_large_p14_336_e1_gpu8_pretrain/iter_2181.pth'  # noqa: E501
 
 # Data
-data_root = '/mnt/petrelfs/share_data/huanghaian/llava_data/'
-data_path = data_root + 'LLaVA-Instruct-150K/llava_v1_5_mix665k.json'
-image_folder = data_root + 'llava_images'
+data_root = '/mnt/petrelfs/share_data/linzhihao/dataset/internvl_sft/'
+
+data_root1 = '/mnt/petrelfs/share_data/huanghaian/llava_data/'
+llava_data_path = data_root1 + 'LLaVA-Instruct-150K/llava_v1_5_mix665k.json'
+llava_image_folder = data_root1 + 'llava_images'
+
+sharegpt4v_data_path = data_root + 'sharegpt4v_mix665k_cap23k_coco-ap9k_lcs3k_sam9k_div2k.jsonl'
+sharegpt4v_image_folder = data_root + 'data'
+
+dvqa_data_path = data_root + 'dvqa_train_200k.jsonl'
+dvqa_image_folder = data_root + 'data/dvqa'
+
+chartqa_data_path = data_root + 'chartqa_train_18k.jsonl'
+chartqa_image_folder = data_root + 'data/chartqa'
+
+ai2d_data_path = data_root + 'ai2d_train_12k.jsonl'
+ai2d_image_folder = data_root + 'data/ai2d'
+
+docvqa_data_path = data_root + 'docvqa_train_10k.jsonl'
+docvqa_image_folder = data_root + 'data/docvqa'
+
+synthdog_data_path = data_root + 'synthdog_en.jsonl'
+synthdog_image_folder = data_root + 'data/synthdog-en'
+
 prompt_template = PROMPT_TEMPLATE.phi3_chat
-max_length = int(2048 - (336 / 14)**2)
+max_length = int(2048 - (336 / 14) ** 2)
 
 # Scheduler & Optimizer
 batch_size = 16  # per_device
@@ -49,13 +70,13 @@ max_norm = 1  # grad clip
 warmup_ratio = 0.03
 
 # Save
-save_steps = 1500
+save_steps = 3000
 save_total_limit = 1  # Maximum checkpoints to keep (-1 means unlimited)
 
 # Evaluate the generation performance during the training
-evaluation_freq = 1500
+evaluation_freq = 3000
 SYSTEM = ''
-evaluation_images = 'https://llava-vl.github.io/static/images/view.jpg'
+evaluation_images = 'view.jpg'
 evaluation_inputs = ['Please describe this picture']
 
 #######################################################################
@@ -93,24 +114,123 @@ model = dict(
 #######################################################################
 #                      PART 3  Dataset & Dataloader                   #
 #######################################################################
+cache_root = '/mnt/petrelfs/share_data/huanghaian/internvl_finetune_phi3/'
+pad_image_to_square = True
+# sharegpt4v_caption_dataset = dict(
+#     type=LLaVADataset,
+#     offline_processed_text_folder=cache_root+'sharegpt4v_caption_dataset',
+#     data_path=sharegpt4v_caption_data_path,
+#     image_folder=sharegpt4v_caption_image_folder,
+#     tokenizer=tokenizer,
+#     image_processor=image_processor,
+#     dataset_map_fn=llava_map_fn,
+#     template_map_fn=dict(
+#         type=template_map_fn_factory, template=prompt_template),
+#     max_length=max_length,
+#     pad_image_to_square=pad_image_to_square)
+
 llava_dataset = dict(
     type=LLaVADataset,
     offline_processed_text_folder='/mnt/petrelfs/huanghaian/code/xtuner/phi3_mini_llava_finetune',
-    data_path=data_path,
-    image_folder=image_folder,
+    data_path=llava_data_path,
+    image_folder=llava_image_folder,
     tokenizer=tokenizer,
     image_processor=image_processor,
     dataset_map_fn=llava_map_fn,
     template_map_fn=dict(
         type=template_map_fn_factory, template=prompt_template),
     max_length=max_length,
-    pad_image_to_square=True)
+    pad_image_to_square=pad_image_to_square)
+
+sharegpt4v_dataset = dict(
+    type=LLaVADataset,
+    offline_processed_text_folder=cache_root + 'sharegpt4v_dataset',
+    data_path=sharegpt4v_data_path,
+    image_folder=sharegpt4v_image_folder,
+    tokenizer=tokenizer,
+    image_processor=image_processor,
+    dataset_map_fn=llava_map_fn,
+    template_map_fn=dict(
+        type=template_map_fn_factory, template=prompt_template),
+    max_length=max_length,
+    pad_image_to_square=pad_image_to_square)
+
+dvqa_dataset = dict(
+    type=LLaVADataset,
+    offline_processed_text_folder=cache_root + 'dvqa_dataset',
+    data_path=dvqa_data_path,
+    image_folder=dvqa_image_folder,
+    tokenizer=tokenizer,
+    image_processor=image_processor,
+    dataset_map_fn=llava_map_fn,
+    template_map_fn=dict(
+        type=template_map_fn_factory, template=prompt_template),
+    max_length=max_length,
+    pad_image_to_square=pad_image_to_square)
+
+chartqa_dataset = dict(
+    type=LLaVADataset,
+    offline_processed_text_folder=cache_root + 'chartqa_dataset',
+    data_path=chartqa_data_path,
+    image_folder=chartqa_image_folder,
+    tokenizer=tokenizer,
+    image_processor=image_processor,
+    dataset_map_fn=llava_map_fn,
+    template_map_fn=dict(
+        type=template_map_fn_factory, template=prompt_template),
+    max_length=max_length,
+    pad_image_to_square=pad_image_to_square)
+
+ai2d_dataset = dict(
+    type=LLaVADataset,
+    offline_processed_text_folder=cache_root + 'ai2d_dataset',
+    data_path=ai2d_data_path,
+    image_folder=ai2d_image_folder,
+    tokenizer=tokenizer,
+    image_processor=image_processor,
+    dataset_map_fn=llava_map_fn,
+    template_map_fn=dict(
+        type=template_map_fn_factory, template=prompt_template),
+    max_length=max_length,
+    pad_image_to_square=pad_image_to_square)
+
+docvqa_dataset = dict(
+    type=LLaVADataset,
+    offline_processed_text_folder=cache_root + 'docvqa_dataset',
+    data_path=docvqa_data_path,
+    image_folder=docvqa_image_folder,
+    tokenizer=tokenizer,
+    image_processor=image_processor,
+    dataset_map_fn=llava_map_fn,
+    template_map_fn=dict(
+        type=template_map_fn_factory, template=prompt_template),
+    max_length=max_length,
+    pad_image_to_square=pad_image_to_square)
+
+synthdog_dataset = dict(
+    type=LLaVADataset,
+    offline_processed_text_folder=cache_root + 'synthdog_dataset',
+    data_path=synthdog_data_path,
+    image_folder=synthdog_image_folder,
+    tokenizer=tokenizer,
+    image_processor=image_processor,
+    dataset_map_fn=llava_map_fn,
+    template_map_fn=dict(
+        type=template_map_fn_factory, template=prompt_template),
+    max_length=max_length,
+    pad_image_to_square=pad_image_to_square)
+
+train_dataset = dict(
+    type=ConcatDataset,
+    datasets=[llava_dataset, sharegpt4v_dataset,
+              dvqa_dataset, chartqa_dataset, ai2d_dataset, docvqa_dataset,
+              synthdog_dataset])
 
 train_dataloader = dict(
     batch_size=batch_size,
     num_workers=dataloader_num_workers,
-    pin_memory=True,
-    dataset=llava_dataset,
+    pin_memory=False,
+    dataset=train_dataset,
     sampler=dict(
         type=LengthGroupedSampler,
         length_property='modality_length',
@@ -128,7 +248,7 @@ optim_wrapper = dict(
     clip_grad=dict(max_norm=max_norm, error_if_nonfinite=False),
     accumulative_counts=accumulative_counts,
     constructor='LearningRateDecayOptimWrapperConstructor',  # ====================
-    paramwise_cfg=dict(layer_decay_rate=0.75),  # vit-l
+    paramwise_cfg=dict(layer_decay_rate=0.9),  # vit-l
     loss_scale='dynamic',
     dtype='float16')
 
@@ -327,34 +447,6 @@ test_dataset = [
         tokenizer=tokenizer,
         image_processor=image_processor,
         pad_image_to_square=True),
-    dict(
-        type=MultipleChoiceDataset,
-        data_file='/mnt/petrelfs/huanghaian/code/xtuner/LMUData/MMBench_DEV_CN.tsv',
-        prompt_template=prompt_template,
-        tokenizer=tokenizer,
-        image_processor=image_processor,
-        pad_image_to_square=True),
-    dict(
-        type=MultipleChoiceDataset,
-        data_file='/mnt/petrelfs/huanghaian/code/xtuner/LMUData/CCBench.tsv',
-        prompt_template=prompt_template,
-        tokenizer=tokenizer,
-        image_processor=image_processor,
-        pad_image_to_square=True),
-    # dict(
-    #     type=MultipleChoiceDataset,
-    #     data_file='/mnt/petrelfs/huanghaian/code/xtuner/LMUData/MMBench_TEST_CN.tsv',
-    #     prompt_template=prompt_template,
-    #     tokenizer=tokenizer,
-    #     image_processor=image_processor,
-    #     pad_image_to_square=True),
-    # dict(
-    #     type=MultipleChoiceDataset,
-    #     data_file='/mnt/petrelfs/huanghaian/code/xtuner/LMUData/MMBench_TEST_EN.tsv',
-    #     prompt_template=prompt_template,
-    #     tokenizer=tokenizer,
-    #     image_processor=image_processor,
-    #     pad_image_to_square=True),
     # dict(
     #     type=VQAv2Dataset,
     #     data_file='/mnt/petrelfs/share_data/zhaoxiangyu/vqav2_llava_eval/llava_vqav2_mscoco_test-dev2015.jsonl',
@@ -366,9 +458,9 @@ test_dataset = [
     #     pad_image_to_square=True),
     dict(
         type=ChartQADataset,
-        data_file=['LMUData/ChartQA/ChartQA Dataset/test/test_human.json',
-                   'LMUData/ChartQA/ChartQA Dataset/test/test_augmented.json'],
-        image_folder='LMUData/ChartQA/ChartQA Dataset/test/png',
+        data_file=['/mnt/petrelfs/huanghaian/code/xtuner/LMUData/ChartQA/ChartQA Dataset/test/test_human.json',
+                   '/mnt/petrelfs/huanghaian/code/xtuner/LMUData/ChartQA/ChartQA Dataset/test/test_augmented.json'],
+        image_folder='/mnt/petrelfs/huanghaian/code/xtuner/LMUData/ChartQA/ChartQA Dataset/test/png',
         prompt_template=prompt_template,
         tokenizer=tokenizer,
         image_processor=image_processor,
