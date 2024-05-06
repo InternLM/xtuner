@@ -2,7 +2,6 @@
 from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
                             LoggerHook, ParamSchedulerHook)
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR, LinearLR
-from peft import LoraConfig
 from torch.optim import AdamW
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           CLIPImageProcessor, CLIPVisionModel)
@@ -20,10 +19,10 @@ from xtuner.utils import PROMPT_TEMPLATE
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-llm_name_or_path = 'meta-llama/Meta-Llama-3-8B-Instruct'
+llm_name_or_path = 'microsoft/Phi-3-mini-4k-instruct'
 visual_encoder_name_or_path = 'openai/clip-vit-large-patch14-336'
 # Specify the pretrained pth
-pretrained_pth = './work_dirs/llava_llama3_8b_instruct_clip_vit_large_p14_336_e1_gpu8_sharegpt4v_pretrain/iter_9742.pth'  # noqa: E501
+pretrained_pth = './work_dirs/llava_phi3_mini_4k_instruct_clip_vit_large_p14_336_e1_gpu8_sharegpt4v_pretrain/iter_9742.pth'  # noqa: E501
 # Data
 data_root = './data/internvl_sft/'
 
@@ -54,14 +53,14 @@ geoqa_image_folder = data_root + 'data/geoqa+'
 synthdog_data_path = data_root + 'synthdog_en.jsonl'
 synthdog_image_folder = data_root + 'data/synthdog-en'
 
-prompt_template = PROMPT_TEMPLATE.llama3_chat
+prompt_template = PROMPT_TEMPLATE.phi3_chat
 max_length = int(4096 - (336 / 14)**2)
 
 # Scheduler & Optimizer
-batch_size = 4  # per_device
-accumulative_counts = 4
+batch_size = 8  # per_device
+accumulative_counts = 2
 dataloader_num_workers = 4
-max_epochs = 1
+max_epochs = 2
 optim_type = AdamW
 lr = 2e-5
 betas = (0.9, 0.999)
@@ -96,7 +95,7 @@ image_processor = dict(
 model = dict(
     type=LLaVAModel,
     freeze_llm=False,
-    freeze_visual_encoder=True,
+    freeze_visual_encoder=False,
     pretrained_pth=pretrained_pth,
     llm=dict(
         type=AutoModelForCausalLM.from_pretrained,
@@ -104,9 +103,7 @@ model = dict(
         trust_remote_code=True),
     visual_encoder=dict(
         type=CLIPVisionModel.from_pretrained,
-        pretrained_model_name_or_path=visual_encoder_name_or_path),
-    visual_encoder_lora=dict(
-        type=LoraConfig, r=64, lora_alpha=16, lora_dropout=0.05, bias='none'))
+        pretrained_model_name_or_path=visual_encoder_name_or_path))
 
 #######################################################################
 #                      PART 3  Dataset & Dataloader                   #

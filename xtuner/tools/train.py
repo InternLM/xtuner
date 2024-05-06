@@ -104,6 +104,24 @@ def check_cfg(cfg):
     if getattr(cfg, 'sequence_parallel_size', 1) > 1:
         assert SUPPORT_FLASH2, ('`flash_attn` is required if you want to use '
                                 'sequence parallel.')
+        attn_implementation = getattr(cfg.model.llm, 'attn_implementation',
+                                      None)
+        assert (attn_implementation is None or
+                attn_implementation == 'flash_attention_2'), \
+            ('If you want to use sequence parallel, please set '
+                'attn_implementation to `flash_attention_2` or do not '
+                f'set this attribute. Got `{attn_implementation}` .')
+
+    if getattr(cfg, 'use_varlen_attn', False):
+        assert SUPPORT_FLASH2, ('`flash_attn` is required if you set '
+                                '`use_varlen_attn` to True.')
+        attn_implementation = getattr(cfg.model.llm, 'attn_implementation',
+                                      None)
+        assert (attn_implementation is None or
+                attn_implementation == 'flash_attention_2'), \
+            ('If you want to set `use_varlen_attn` to True, please set'
+                ' attn_implementation to `flash_attention_2` or do not '
+                f'set this attribute. Got `{attn_implementation}` .')
 
 
 def main():

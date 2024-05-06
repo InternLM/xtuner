@@ -231,7 +231,8 @@ def phi3_attn_forward(
         # (b, s // sp_world_size, nd, dim) -> (b, s, nd // sp_world_size, dim)
         query_states, key_states, value_states = \
             pre_process_for_sequence_parallel_attn(
-                query_states, key_states, value_states, scatter_dim=2, gather_dim=1)
+                query_states, key_states, value_states,
+                scatter_dim=2, gather_dim=1)
 
     attn_output = self._flash_attention_forward(
         query_states,
