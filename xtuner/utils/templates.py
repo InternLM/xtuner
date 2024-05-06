@@ -142,6 +142,11 @@ PROMPT_TEMPLATE = ConfigDict(
         SUFFIX='<|END_OF_TURN_TOKEN|>',
         SUFFIX_AS_EOS=True,
         STOP_WORDS=['<|END_OF_TURN_TOKEN|>']),
+    # TODO: Delete
+    plain=dict(
+        SYSTEM='',
+        INSTRUCTION='USER: {input} ASSISTANT:',
+        SEP=''),
     llama3_chat=dict(
         SYSTEM=('<|start_header_id|>system<|end_header_id|>\n\n'
                 '{system}<|eot_id|>'),

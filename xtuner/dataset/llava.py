@@ -13,7 +13,9 @@ from torch.utils.data import Dataset
 
 from xtuner.registry import BUILDER
 from .huggingface import process_hf_dataset
-from .utils import expand2square
+from .utils import expand2square, process_anyres_image, total_image_token, dynamic_preprocess
+from concurrent.futures import ThreadPoolExecutor
+from tqdm import tqdm
 
 
 def load_jsonl(json_file):
@@ -37,6 +39,7 @@ class LLaVADataset(Dataset):
                  dataset_map_fn=None,
                  template_map_fn=None,
                  max_length=2048,
+                 s2_scales=None,  # [1, 2] or [1,2,3]
                  pad_image_to_square=False):
         super().__init__()
 
@@ -85,6 +88,17 @@ class LLaVADataset(Dataset):
             self.image_processor = image_processor
         self.pad_image_to_square = pad_image_to_square
 
+        self.max_s2_scale = s2_scales
+        if s2_scales is not None:
+            self.max_s2_scale = max(s2_scales)
+            if hasattr(self.image_processor, 'crop_size'):
+                self.image_processor.crop_size['height'] *= self.max_s2_scale
+                self.image_processor.crop_size['width'] *= self.max_s2_scale
+                self.image_processor.size['shortest_edge'] *= self.max_s2_scale
+            else:
+                self.image_processor.size['height'] *= self.max_s2_scale
+                self.image_processor.size['width'] *= self.max_s2_scale
+
     @property
     def modality_length(self):
         length_list = []
@@ -119,4 +133,112 @@ class LLaVADataset(Dataset):
                 crop_size = self.image_processor.size
             data_dict['pixel_values'] = torch.zeros(3, crop_size['height'],
                                                     crop_size['width'])
+        return data_dict
+
+
+class AnyResLLaVADataset(LLaVADataset):
+
+    def __init__(self, image_grid_pinpoints, *args, **kwargs):
+        self.image_grid_pinpoints = image_grid_pinpoints
+        super().__init__(*args, **kwargs)
+        # TODO: Assuming they are all squares.
+        if hasattr(self.image_processor, 'crop_size'):
+            self._crop_size = self.image_processor.crop_size
+        else:
+            self._crop_size = self.image_processor.size
+        self._patch_size = self._crop_size['height']
+        self._shortest_edge = self._crop_size['height']
+
+    def __getitem__(self, index):
+        data_dict = self.text_data[index]
+        if data_dict.get('image', None) is not None:
+            image_file = data_dict['image']
+            image = Image.open(os.path.join(self.image_folder,
+                                            image_file)).convert('RGB')
+            orig_size = image.size
+            # use to remove padding
+            data_dict['orig_size'] = orig_size
+            image = process_anyres_image(image, self.image_processor,
+                                         self.image_grid_pinpoints,
+                                         self._patch_size, self._shortest_edge,
+                                         pad_mean=tuple(int(x * 255) for x in self.image_processor.image_mean),
+                                         # keep the same as the original implementation
+                                         orig_img_pad_to_square=self.pad_image_to_square)
+            data_dict['pixel_values'] = image
+        else:
+            data_dict['orig_size'] = self._crop_size
+            data_dict['pixel_values'] = torch.zeros(1, 3, self._crop_size['height'],
+                                                    self._crop_size['width'])
+        return data_dict
+
+
+class InternVL_V1_5_LLaVADataset(LLaVADataset):
+    def __init__(self, min_num, max_num, downsample_ratio=0.5, image_size=336, image_size_json=None, *args, **kwargs):
+        self.min_num = min_num
+        self.max_num = max_num
+        self.downsample_ratio = downsample_ratio
+        super().__init__(*args, **kwargs)
+
+        if hasattr(self.image_processor, 'crop_size'):
+            self._crop_size = self.image_processor.crop_size
+        else:
+            self._crop_size = self.image_processor.size
+        self._patch_size = self._crop_size['height']
+        self._shortest_edge = self._crop_size['height']
+
+        # clip
+        self._image_size = image_size
+        self._patch_size = (self._image_size // 14) * downsample_ratio  # 12
+
+        self.image_size_json = None
+        if image_size_json is not None:
+            with open(image_size_json, 'r') as f:
+                self.image_size_json = json.load(f)
+
+    def __calc_fn(self, data_dict):
+        cur_len = len(data_dict['input_ids'])
+        if data_dict.get('image', None) is not None:
+            cur_len = len(data_dict['input_ids'])
+            if data_dict.get('image', None) is not None:
+                image_file = data_dict['image']
+                if self.image_size_json is not None:
+                    size = self.image_size_json[image_file]
+                else:
+                    image = Image.open(os.path.join(self.image_folder,
+                                                    image_file))
+                    size = image.size
+                num_image_token = total_image_token(size, self.min_num, self.max_num, self._image_size,
+                                                    self._patch_size)
+                cur_len += num_image_token
+                cur_len = -cur_len
+        return cur_len
+
+    @property
+    def modality_length(self):
+        print_log('start calculating modality length', logger='current'),
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            length_list = list(
+                tqdm(
+                    executor.map(self.__calc_fn, self.text_data),
+                    desc='Calculating modality length',
+                    total=len(self.text_data)))
+        print_log('end calculating modality length', logger='current'),
+        return length_list
+
+    def __getitem__(self, index):
+        data_dict = self.text_data[index]
+        if data_dict.get('image', None) is not None:
+            image_file = data_dict['image']
+            image = Image.open(os.path.join(self.image_folder,
+                                            image_file)).convert('RGB')
+            images = dynamic_preprocess(image, self.min_num, self.max_num, self._image_size)
+            for i, image in enumerate(images):
+                image = self.image_processor.preprocess(
+                    image, return_tensors='pt')['pixel_values'][0]
+                images[i] = image
+            images = torch.stack(images, dim=0)
+            data_dict['pixel_values'] = images
+        else:
+            data_dict['pixel_values'] = torch.zeros(1, 3, self._crop_size['height'],
+                                                    self._crop_size['width'])
         return data_dict

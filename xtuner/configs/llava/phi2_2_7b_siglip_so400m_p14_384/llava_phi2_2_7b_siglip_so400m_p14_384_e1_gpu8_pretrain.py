@@ -5,29 +5,29 @@ from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR, LinearLR
 from torch.optim import AdamW
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
-                          CLIPImageProcessor, CLIPVisionModel,LlamaModel)
+                          SiglipImageProcessor, SiglipVisionModel)
 
 from xtuner.dataset import LLaVADataset
-from xtuner.dataset.collate_fns import default_collate_fn
+from xtuner.dataset.collate_fns import mm_collate_fn
 from xtuner.dataset.map_fns import llava_map_fn, template_map_fn_factory
 from xtuner.engine.hooks import DatasetInfoHook, EvaluateChatHook
 from xtuner.engine.runner import TrainLoop
-from xtuner.model import LLaVAModel
 from xtuner.utils import PROMPT_TEMPLATE
+from xtuner.model import LLaVAModel
 
 #######################################################################
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-llm_name_or_path = 'lmsys/vicuna-7b-v1.5'
-visual_encoder_name_or_path = 'openai/clip-vit-large-patch14-336'
+llm_name_or_path = '/mnt/petrelfs/share_data/huanghaian/model/phi-2'
+visual_encoder_name_or_path = '/mnt/petrelfs/share_data/huanghaian/model/siglip-so400m-patch14-384'
 
 # Data
-data_root = './data/llava_data/'
+data_root = '/mnt/petrelfs/share_data/huanghaian/llava_data/'
 data_path = data_root + 'LLaVA-Pretrain/blip_laion_cc_sbu_558k.json'
 image_folder = data_root + 'LLaVA-Pretrain/images'
 prompt_template = PROMPT_TEMPLATE.vicuna
-max_length = int(2048 - (336 / 14)**2)
+max_length = int(2048 - (384 // 14) ** 2)
 
 # Scheduler & Optimizer
 batch_size = 32  # per_device
@@ -42,14 +42,14 @@ max_norm = 1  # grad clip
 warmup_ratio = 0.03
 
 # Save
-save_steps = 500
-save_total_limit = 2  # Maximum checkpoints to keep (-1 means unlimited)
+save_steps = 1000
+save_total_limit = 1  # Maximum checkpoints to keep (-1 means unlimited)
 
 # Evaluate the generation performance during the training
-evaluation_freq = 500
+evaluation_freq = 1000
 SYSTEM = ''
 evaluation_images = 'https://llava-vl.github.io/static/images/view.jpg'
-evaluation_inputs = ['请描述一下这张照片', 'Please describe this picture']
+evaluation_inputs = ['Please describe this picture']
 
 #######################################################################
 #            PART 2  Model & Tokenizer & Image Processor              #
@@ -61,12 +61,15 @@ tokenizer = dict(
     padding_side='right')
 
 image_processor = dict(
-    type=CLIPImageProcessor.from_pretrained,
+    type=SiglipImageProcessor.from_pretrained,
     pretrained_model_name_or_path=visual_encoder_name_or_path,
     trust_remote_code=True)
 
 model = dict(
     type=LLaVAModel,
+    tokenizer=tokenizer,
+    template=prompt_template,
+    image_processor=image_processor,
     freeze_llm=True,
     freeze_visual_encoder=True,
     llm=dict(
@@ -74,7 +77,7 @@ model = dict(
         pretrained_model_name_or_path=llm_name_or_path,
         trust_remote_code=True),
     visual_encoder=dict(
-        type=CLIPVisionModel.from_pretrained,
+        type=SiglipVisionModel.from_pretrained,
         pretrained_model_name_or_path=visual_encoder_name_or_path))
 
 #######################################################################
@@ -82,6 +85,7 @@ model = dict(
 #######################################################################
 llava_dataset = dict(
     type=LLaVADataset,
+    offline_processed_text_folder='/mnt/petrelfs/huanghaian/code/xtuner/phi2_2_7b_llava_pretrain',
     data_path=data_path,
     image_folder=image_folder,
     tokenizer=tokenizer,
@@ -98,7 +102,7 @@ train_dataloader = dict(
     pin_memory=True,
     dataset=llava_dataset,
     sampler=dict(type=DefaultSampler, shuffle=True),
-    collate_fn=dict(type=default_collate_fn))
+    collate_fn=dict(type=mm_collate_fn))
 
 #######################################################################
 #                    PART 4  Scheduler & Optimizer                    #
@@ -133,8 +137,7 @@ param_scheduler = [
 ]
 
 # train, val, test setting
-train_cfg = dict(type=TrainLoop, max_epochs=max_epochs)
-
+train_cfg = dict(type=TrainLoop, max_epochs=max_epochs, val_interval=save_steps)
 #######################################################################
 #                           PART 5  Runtime                           #
 #######################################################################
@@ -163,6 +166,7 @@ default_hooks = dict(
     # save checkpoint per `save_steps`.
     checkpoint=dict(
         type=CheckpointHook,
+        save_optimizer=False,  # can save disk memory mmengine >=0.10.3
         by_epoch=False,
         interval=save_steps,
         max_keep_ckpts=save_total_limit),

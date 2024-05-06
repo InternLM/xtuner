@@ -16,7 +16,6 @@ from xtuner.utils import (DEFAULT_IMAGE_TOKEN, IMAGE_TOKEN_INDEX,
 
 
 class EvaluateChatHook(Hook):
-
     priority = 'LOW'
 
     def __init__(self,
@@ -108,52 +107,14 @@ class EvaluateChatHook(Hook):
 
         for sample_image, sample_input in zip(self.evaluation_images,
                                               self.evaluation_inputs):
-            image = expand2square(
-                sample_image,
-                tuple(int(x * 255) for x in self.image_processor.image_mean))
-            image = self.image_processor.preprocess(
-                image, return_tensors='pt')['pixel_values'][0]
-            image = image.to(device)
-            sample_input = DEFAULT_IMAGE_TOKEN + '\n' + sample_input
-            inputs = (self.system + self.instruction).format(
-                input=sample_input, round=1, **runner.cfg)
-            chunk_encode = []
-            for idx, chunk in enumerate(inputs.split(DEFAULT_IMAGE_TOKEN)):
-                if idx == 0:
-                    cur_encode = self.tokenizer.encode(chunk)
-                else:
-                    cur_encode = self.tokenizer.encode(
-                        chunk, add_special_tokens=False)
-                chunk_encode.append(cur_encode)
-            assert len(chunk_encode) == 2
-            input_ids = []
-            for idx, cur_chunk_encode in enumerate(chunk_encode):
-                input_ids.extend(cur_chunk_encode)
-                if idx != len(chunk_encode) - 1:
-                    input_ids.append(IMAGE_TOKEN_INDEX)
-            input_ids = torch.tensor(input_ids).to(device)
-            visual_outputs = model.visual_encoder(
-                image.unsqueeze(0).to(model.visual_encoder.dtype),
-                output_hidden_states=True)
-            pixel_values = model.projector(
-                visual_outputs.hidden_states[model.visual_select_layer][:, 1:])
 
-            mm_inputs = prepare_inputs_labels_for_multimodal(
-                llm=model.llm,
-                input_ids=input_ids.unsqueeze(0),
-                pixel_values=pixel_values)
-
-            generation_output = model.generate(
-                **mm_inputs,
-                max_new_tokens=max_new_tokens,
-                generation_config=self.gen_config,
-                bos_token_id=self.tokenizer.bos_token_id,
-                stopping_criteria=self.stop_criteria)
-            generation_output = self.tokenizer.decode(generation_output[0])
+            generation_output = model.chat({'image': sample_image, 'text': sample_input})
+            inputs = generation_output['inputs']
+            prediction = generation_output['prediction']
             runner.logger.info(f'Sample output:\n'
-                               f'{inputs + generation_output}\n')
+                               f'{inputs + prediction}\n')
             if save_eval_output:
-                eval_outputs.append(f'{inputs + generation_output}\n')
+                eval_outputs.append(f'{inputs + prediction}\n')
 
         if save_eval_output:
             self._save_eval_output(runner, eval_outputs)
@@ -196,13 +157,11 @@ class EvaluateChatHook(Hook):
             model = model.module
 
         device = next(iter(model.parameters())).device
-        is_checkpointing = model.llm.is_gradient_checkpointing
-        use_cache = model.llm.config.use_cache
-
         # Cast to inference mode
-        model.activation_checkpointing_disable()
-        model.llm.config.use_cache = True
+        model.gradient_checkpointing_disable()
         model.eval()
+        model.preparing_for_generation({'generation_kwargs': {'max_new_tokens': max_new_tokens}})
+
         if self.evaluation_images is not None:
             self._eval_images(runner, model, device, max_new_tokens,
                               save_eval_output)
@@ -211,9 +170,7 @@ class EvaluateChatHook(Hook):
                                 save_eval_output)
 
         # Cast to training mode
-        if is_checkpointing:
-            model.activation_checkpointing_enable()
-        model.llm.config.use_cache = use_cache
+        model.gradient_checkpointing_enable()
         model.train()
 
     def before_train(self, runner):
@@ -231,7 +188,7 @@ class EvaluateChatHook(Hook):
             return False
 
         if checkpoint_hook.every_n_train_iters(
-            runner, checkpoint_hook.interval, checkpoint_hook.save_begin) or \
+                runner, checkpoint_hook.interval, checkpoint_hook.save_begin) or \
                 (checkpoint_hook.save_last and
                  checkpoint_hook.is_last_train_iter(runner)):
             return True
@@ -249,8 +206,8 @@ class EvaluateChatHook(Hook):
         save_eval_output = self._is_save_checkpoint(runner)
 
         do_chat = (
-            save_eval_output
-            or self.every_n_train_iters(runner, self.every_n_iters))
+                save_eval_output
+                or self.every_n_train_iters(runner, self.every_n_iters))
         if not do_chat:
             return
 

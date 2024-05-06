@@ -4,7 +4,8 @@ import copy
 import io
 from io import BytesIO
 from itertools import chain
-
+import torch
+import math
 import numpy as np
 import requests
 from PIL import Image
@@ -269,3 +270,256 @@ def decode_base64_to_image(base64_string):
     image_data = base64.b64decode(base64_string)
     image = Image.open(io.BytesIO(image_data))
     return image
+
+
+# ----------------------------------------------------------------------
+# ref: https://github.com/haotian-liu/LLaVA
+def select_best_resolution(original_size, possible_resolutions):
+    """Selects the best resolution from a list of possible resolutions based on
+    the original size.
+
+    Args:
+        original_size (tuple): The original size of the image in the format
+            (width, height).
+        possible_resolutions (list): A list of possible resolutions in
+            the format [(width1, height1), (width2, height2), ...].
+
+    Returns:
+        tuple: The best fit resolution in the format (width, height).
+    """
+    original_width, original_height = original_size
+    best_fit = None
+    max_effective_resolution = 0
+    min_wasted_resolution = float('inf')
+
+    for width, height in possible_resolutions:
+        scale = min(width / original_width, height / original_height)
+        downscaled_width, downscaled_height = int(original_width * scale), int(
+            original_height * scale)
+        effective_resolution = min(downscaled_width * downscaled_height,
+                                   original_width * original_height)
+        wasted_resolution = (width * height) - effective_resolution
+
+        if effective_resolution > max_effective_resolution or (
+                effective_resolution == max_effective_resolution
+                and wasted_resolution < min_wasted_resolution):
+            max_effective_resolution = effective_resolution
+            min_wasted_resolution = wasted_resolution
+            best_fit = (width, height)
+
+    return best_fit
+
+
+def resize_and_pad_image(image, target_resolution,pad_mean):
+    """Resize and pad an image to a target resolution while maintaining aspect
+    ratio.
+
+    Args:
+        image (PIL.Image.Image): The input image.
+        target_resolution (tuple): The target resolution (width, height) of
+            the image.
+
+    Returns:
+        PIL.Image.Image: The resized and padded image.
+    """
+    original_width, original_height = image.size
+    target_width, target_height = target_resolution
+
+    scale_w = target_width / original_width
+    scale_h = target_height / original_height
+
+    if scale_w < scale_h:
+        new_width = target_width
+        new_height = min(math.ceil(original_height * scale_w), target_height)
+    else:
+        new_height = target_height
+        new_width = min(math.ceil(original_width * scale_h), target_width)
+
+    # Resize the image
+    resized_image = image.resize((new_width, new_height))
+
+    new_image = Image.new('RGB', (target_width, target_height), pad_mean)
+    paste_x = (target_width - new_width) // 2
+    paste_y = (target_height - new_height) // 2
+    # 居中 padding
+    new_image.paste(resized_image, (paste_x, paste_y))
+
+    return new_image
+
+
+def divide_to_patches(image, patch_size):
+    """Divides an image into patches of a specified size.
+
+    Args:
+        image (PIL.Image.Image): The input image.
+        patch_size (int): The size of each patch.
+
+    Returns:
+        list: A list of PIL.Image.Image objects representing the patches.
+    """
+    patches = []
+    width, height = image.size
+    for i in range(0, height, patch_size):
+        for j in range(0, width, patch_size):
+            box = (j, i, j + patch_size, i + patch_size)
+            patch = image.crop(box)
+            patches.append(patch)
+
+    return patches
+
+
+def process_anyres_image(image, processor, possible_resolutions, patch_size, shortest_edge, pad_mean=(0, 0, 0), orig_img_pad_to_square=False):
+    """Process an image with variable resolutions.
+
+    Args:
+        image (PIL.Image.Image): The input image to be processed.
+        processor: The image processor object.
+        possible_resolutions (str): A string representation of a list of
+            possible resolutions.
+
+    Returns:
+        torch.Tensor: A tensor containing the processed image patches.
+    """
+    best_resolution = select_best_resolution(image.size, possible_resolutions)
+    image_padded = resize_and_pad_image(image, best_resolution, pad_mean)
+
+    patches = divide_to_patches(image_padded, patch_size)
+
+    if orig_img_pad_to_square:
+        # 不是居中 padding
+        image = expand2square(image, pad_mean)
+
+    image_original_resize = image.resize((shortest_edge, shortest_edge))
+
+    image_patches = [image_original_resize] + patches
+    image_patches = [
+        processor.preprocess(image_patch,
+                             return_tensors='pt')['pixel_values'][0]
+        for image_patch in image_patches
+    ]
+    return torch.stack(image_patches, dim=0)
+
+
+def get_anyres_image_grid_shape(image_size, possible_resolutions, patch_size):
+    """Calculate the shape of the image patch grid after the preprocessing for
+    images of any resolution.
+
+    Args:
+        image_size (tuple): The size of the input image in the format
+            (width, height).
+        possible_resolutions (list): A string representation of a list of
+            possible resolutions.
+        patch_size (int): The size of each image patch.
+
+    Returns:
+        tuple: The shape of the image patch grid in the format (width, height).
+    """
+    width, height = select_best_resolution(image_size, possible_resolutions)
+    return width // patch_size, height // patch_size
+
+
+def unpad_image(tensor, original_size):
+    """Unpads a PyTorch tensor of a padded and resized image.
+
+    Args:
+    tensor (torch.Tensor): The image tensor, assumed to be in CxHxW format.
+    original_size (tuple): The original size of the image (height, width).
+
+    Returns:
+    torch.Tensor: The unpadded image tensor.
+    """
+    original_width, original_height = original_size
+    current_height, current_width = tensor.shape[1:]
+
+    original_aspect_ratio = original_width / original_height
+    current_aspect_ratio = current_width / current_height
+
+    if original_aspect_ratio > current_aspect_ratio:
+        scale_factor = current_width / original_width
+        new_height = int(original_height * scale_factor)
+        padding = (current_height - new_height) // 2
+        unpadded_tensor = tensor[:, padding:current_height - padding, :]
+    else:
+        scale_factor = current_height / original_height
+        new_width = int(original_width * scale_factor)
+        padding = (current_width - new_width) // 2
+        unpadded_tensor = tensor[:, :, padding:current_width - padding]
+
+    return unpadded_tensor
+# ----------------------------------------------------------------------
+
+def find_closest_aspect_ratio(aspect_ratio, target_ratios, width, height, image_size):
+    best_ratio_diff = float('inf')
+    best_ratio = (1, 1)
+    area = width * height
+    for ratio in target_ratios:
+        target_aspect_ratio = ratio[0] / ratio[1]
+        ratio_diff = abs(aspect_ratio - target_aspect_ratio)
+        if ratio_diff < best_ratio_diff:
+            best_ratio_diff = ratio_diff
+            best_ratio = ratio
+        elif ratio_diff == best_ratio_diff:
+            if area > 0.5 * image_size * image_size * ratio[0] * ratio[1]:
+                best_ratio = ratio
+    return best_ratio
+
+
+def total_image_token(orig_size, min_num=1, max_num=6, image_size=336, patch_size=24, use_thumbnail=True):
+    orig_width, orig_height = orig_size
+
+    aspect_ratio = orig_width / orig_height
+
+    # calculate the existing image aspect ratio
+    target_ratios = set(
+        (i, j) for n in range(min_num, max_num + 1) for i in range(1, n + 1) for j in range(1, n + 1) if
+        max_num >= i * j >= min_num)
+    target_ratios = sorted(target_ratios, key=lambda x: x[0] * x[1])
+
+    # find the closest aspect ratio to the target
+    target_aspect_ratio = find_closest_aspect_ratio(
+        aspect_ratio, target_ratios, orig_width, orig_height, image_size)
+    blocks = target_aspect_ratio[0] * target_aspect_ratio[1]
+
+    if use_thumbnail:
+        blocks += 1
+
+    return blocks*patch_size*patch_size
+
+
+def dynamic_preprocess(image, min_num=1, max_num=6, image_size=336, use_thumbnail=True):
+    orig_width, orig_height = image.size
+    aspect_ratio = orig_width / orig_height
+
+    # calculate the existing image aspect ratio
+    target_ratios = set(
+        (i, j) for n in range(min_num, max_num + 1) for i in range(1, n + 1) for j in range(1, n + 1) if
+        max_num >= i * j >= min_num)
+    target_ratios = sorted(target_ratios, key=lambda x: x[0] * x[1])
+
+    # find the closest aspect ratio to the target
+    target_aspect_ratio = find_closest_aspect_ratio(
+        aspect_ratio, target_ratios, orig_width, orig_height, image_size)
+
+    # calculate the target width and height
+    target_width = image_size * target_aspect_ratio[0]
+    target_height = image_size * target_aspect_ratio[1]
+    blocks = target_aspect_ratio[0] * target_aspect_ratio[1]
+
+    # resize the image
+    resized_img = image.resize((target_width, target_height))
+    processed_images = []
+    for i in range(blocks):
+        box = (
+            (i % (target_width // image_size)) * image_size,
+            (i // (target_width // image_size)) * image_size,
+            ((i % (target_width // image_size)) + 1) * image_size,
+            ((i // (target_width // image_size)) + 1) * image_size
+        )
+        # split the image
+        split_img = resized_img.crop(box)
+        processed_images.append(split_img)
+    assert len(processed_images) == blocks
+    if use_thumbnail and len(processed_images) != 1:
+        thumbnail_img = image.resize((image_size, image_size))
+        processed_images.append(thumbnail_img)
+    return processed_images
