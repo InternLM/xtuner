@@ -44,7 +44,7 @@ class HFCheckpointHook(Hook):
         if is_model_wrapper(model):
             model = model.module
         llm = model.llm
-        if dist.get_rank() == 0:
+        if (not dist.is_initialized()) or dist.get_rank() == 0:
             # keys in state_dict are prefixed with 'llm.'
             keys = list(state_dict.keys())
             for k in keys:
