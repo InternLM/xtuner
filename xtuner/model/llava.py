@@ -8,6 +8,7 @@ from mmengine.config import Config, ConfigDict
 from mmengine.model import BaseModel
 from peft import get_peft_model, prepare_model_for_kbit_training
 from transformers import AutoConfig
+from transformers.integrations import is_deepspeed_zero3_enabled
 
 from xtuner.registry import BUILDER
 from .modules import ProjectorConfig, ProjectorModel, dispatch_modules
@@ -92,6 +93,8 @@ class LLaVAModel(BaseModel):
         self.visual_select_layer = visual_select_layer
 
         self._is_init = True
+
+        self.is_first_iter = True
 
     def _parse_lora_config(self, lora_config):
         if isinstance(lora_config, dict) or isinstance(
@@ -221,7 +224,25 @@ class LLaVAModel(BaseModel):
 
         return cfg, llm_cfg
 
+    @staticmethod
+    def _prepare_for_qlora_zero3(cfg):
+        if (not is_deepspeed_zero3_enabled()) or (not hasattr(
+                cfg, 'quantization_config')):
+            return cfg
+
+        torch_dtype = torch.bfloat16 if (
+            torch.cuda.is_available() and torch.cuda.is_bf16_supported()) \
+            else torch.float16
+
+        cfg.torch_dtype = torch_dtype
+        quantization_config = cfg.quantization_config
+        quantization_config.bnb_4bit_compute_dtype = torch_dtype
+        quantization_config.bnb_4bit_quant_storage = torch_dtype
+
+        return cfg
+
     def _dispatch_lm_model_cfg(self, cfg, max_position_embeddings=None):
+        cfg = self._prepare_for_qlora_zero3(cfg)
         pretrained_model_name_or_path = cfg.pretrained_model_name_or_path
         llm_cfg = AutoConfig.from_pretrained(
             pretrained_model_name_or_path, trust_remote_code=True)
@@ -241,6 +262,14 @@ class LLaVAModel(BaseModel):
             raise NotImplementedError
 
     def forward(self, data, data_samples=None, mode='loss'):
+        if self.is_first_iter:
+            # hardcode for qlora DeepSpeed ZeRO3, put buffers and QuantState to
+            # device
+            # Only required in `LLaVAModel` .
+            # We do not need this in `SupervisedFinetune` .
+            self.to(data['input_ids'].device)
+            self.is_first_iter = False
+
         if 'pixel_values' in data:
             visual_outputs = self.visual_encoder(
                 data['pixel_values'].to(self.visual_encoder.dtype),
