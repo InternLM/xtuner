@@ -31,15 +31,15 @@ use_varlen_attn = False
 # Data
 alpaca_en_path = 'tatsu-lab/alpaca'
 prompt_template = PROMPT_TEMPLATE.qwen_chat
-max_length = 2048
+max_length = 16384
 pack_to_max_length = True
 
 # parallel
-sequence_parallel_size = 1
+sequence_parallel_size = 2
 
 # Scheduler & Optimizer
 batch_size = 1  # per_device
-accumulative_counts = 1  # total bs = 1 bs_per_device * 8 gpus * 1 acc = 8
+accumulative_counts = 1  # total bs = 1 bs_per_device * 2 gpus * 1 acc = 2
 accumulative_counts *= sequence_parallel_size
 dataloader_num_workers = 0
 max_epochs = 3
@@ -55,7 +55,7 @@ save_steps = 500
 save_total_limit = 2  # Maximum checkpoints to keep (-1 means unlimited)
 
 # Evaluate the generation performance during the training
-evaluation_freq = 500
+evaluation_freq = 50
 SYSTEM = SYSTEM_TEMPLATE.alpaca
 evaluation_inputs = [
     '请给我介绍五个上海的景点', 'Please tell me five scenic spots in Shanghai'
@@ -181,7 +181,7 @@ default_hooks = dict(
     # record the time of every iteration.
     timer=dict(type=IterTimerHook),
     # print log every 10 iterations.
-    logger=dict(type=LoggerHook, log_metric_by_epoch=False, interval=10),
+    logger=dict(type=LoggerHook, log_metric_by_epoch=False, interval=1),
     # enable the parameter scheduler.
     param_scheduler=dict(type=ParamSchedulerHook),
     # save checkpoint per `save_steps`.
@@ -220,4 +220,4 @@ resume = False
 randomness = dict(seed=None, deterministic=False)
 
 # set log processor
-log_processor = dict(by_epoch=False)
+log_processor = dict(by_epoch=False, window_size=1)
