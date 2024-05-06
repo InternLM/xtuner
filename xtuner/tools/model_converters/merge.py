@@ -27,6 +27,10 @@ def parse_args():
         action='store_true',
         help='Indicate if the model is a clip model')
     parser.add_argument(
+        '--safe-serialization',
+        action='store_true',
+        help='Indicate if using `safe_serialization`')
+    parser.add_argument(
         '--device',
         default='cuda',
         choices=('cuda', 'cpu', 'auto'),
@@ -63,7 +67,7 @@ def main():
     print(f'Saving to {args.save_dir}...')
     model_merged.save_pretrained(
         args.save_dir,
-        safe_serialization=False,
+        safe_serialization=args.safe_serialization,
         max_shard_size=args.max_shard_size)
     processor.save_pretrained(args.save_dir)
     print('All done!')
