@@ -29,6 +29,10 @@ def parse_args():
         help='Only applicable for LLM. The maximum size for '
         'each sharded checkpoint.')
     parser.add_argument(
+        '--safe-serialization',
+        action='store_true',
+        help='Indicate if using `safe_serialization`')
+    parser.add_argument(
         '--cfg-options',
         nargs='+',
         action=DictAction,
@@ -133,7 +137,7 @@ def main():
         model.llm.save_pretrained(
             llm_path,
             max_shard_size=args.max_shard_size,
-            safe_serialization=False)
+            safe_serialization=args.safe_serialization)
 
     shutil.copyfile(args.config, osp.join(args.save_dir, 'xtuner_config.py'))
     print('All done!')
