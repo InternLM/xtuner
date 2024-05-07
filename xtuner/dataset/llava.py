@@ -213,17 +213,17 @@ class InternVL_V1_5_LLaVADataset(LLaVADataset):
                 cur_len = -cur_len
         return cur_len
 
-    @property
-    def modality_length(self):
-        print_log('start calculating modality length', logger='current'),
-        with ThreadPoolExecutor(max_workers=8) as executor:
-            length_list = list(
-                tqdm(
-                    executor.map(self.__calc_fn, self.text_data),
-                    desc='Calculating modality length',
-                    total=len(self.text_data)))
-        print_log('end calculating modality length', logger='current'),
-        return length_list
+    # @property
+    # def modality_length(self):
+    #     print_log('start calculating modality length', logger='current'),
+    #     with ThreadPoolExecutor(max_workers=8) as executor:
+    #         length_list = list(
+    #             tqdm(
+    #                 executor.map(self.__calc_fn, self.text_data),
+    #                 desc='Calculating modality length',
+    #                 total=len(self.text_data)))
+    #     print_log('end calculating modality length', logger='current'),
+    #     return length_list
 
     def __getitem__(self, index):
         data_dict = self.text_data[index]

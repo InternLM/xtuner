@@ -9,6 +9,9 @@ from .utils import (LoadWoInit, guess_load_checkpoint,
                     make_inputs_require_grad,
                     prepare_inputs_labels_for_multimodal)
 
+from xtuner.engine.optimizers import get_layer_depth_for_CLIPVisionModel
+import types
+
 
 class InternVL_v1_5_LLaVAModel(LLaVAModel):
     def __init__(self, llm,
@@ -25,6 +28,7 @@ class InternVL_v1_5_LLaVAModel(LLaVAModel):
                  image_processor=None,
                  tokenizer=None,
                  template=None,
+                 use_lldr=False,  # LearningRateDecayOptimWrapperConstructor
                  merge_type='pixel_shuffle',  # or pixel_shuffle
                  downsample_ratio=0.5):
         super(LLaVAModel, self).__init__()
@@ -40,6 +44,13 @@ class InternVL_v1_5_LLaVAModel(LLaVAModel):
             self.llm = self._build_from_cfg_or_module(llm)
             self.visual_encoder = self._build_from_cfg_or_module(
                 visual_encoder)
+
+            if use_lldr:
+                # The following code is only meaningful when the optim_wrapper configuration
+                # includes `LearningRateDecayOptimWrapperConstructor`. Otherwise, it will be ignored.
+                if self._get_model_class_name(self.visual_encoder) == 'CLIPVisionModel':
+                    self.visual_encoder.get_layer_depth = types.MethodType(get_layer_depth_for_CLIPVisionModel,
+                                                                           self.visual_encoder)
         self.llm.config.use_cache = False
         dispatch_modules(self.llm)
 
@@ -99,6 +110,13 @@ class InternVL_v1_5_LLaVAModel(LLaVAModel):
         if image_processor is not None:
             self.image_processor = BUILDER.build(image_processor)
         self.template = template
+
+    # The following code is only meaningful when the optim_wrapper configuration
+    # includes `LearningRateDecayOptimWrapperConstructor`. Otherwise, it will be ignored.
+    def get_layer_depth(self, param_name: str, prefix: str = 'visual_encoder.vision_model.'):
+        assert hasattr(self.visual_encoder, 'get_layer_depth'), \
+            'The visual_encoder does not have `get_layer_depth` method.'
+        return self.visual_encoder.get_layer_depth(param_name, prefix)
 
     def _prepare_data_for_llm(self, data):
         if 'pixel_values' in data:
