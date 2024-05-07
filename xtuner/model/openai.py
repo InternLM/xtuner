@@ -59,5 +59,7 @@ class OpenAIModel(BaseModel):
         prediction = self.model.batch_infer([prompt])[0]
         return dict(prediction=prediction)
 
+    def gradient_checkpointing_disable(self):
+        pass
     def preparing_for_generation(self, metainfo: dict = None):
         pass
