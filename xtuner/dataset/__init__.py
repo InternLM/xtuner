@@ -19,7 +19,7 @@ from .anyres_llava_proxy_eval_dataset import AnyResLLaVAProxyEvalDataset
 from .mini_gemini_dataset import MiniGeminiDataset
 from .mini_gemini_proxy_eval_dataset import MiniGeminiProxyEvalDataset
 from .internvl_v1_5_llava_proxy_eval_dataset import InternVL_v1_5_LLaVAProxyEvalDataset
-
+from llava_proxy_eval_dataset1 import LLaVAProxyEvalDataset1
 # ignore FutureWarning in hf datasets
 warnings.simplefilter(action='ignore', category=FutureWarning)
 

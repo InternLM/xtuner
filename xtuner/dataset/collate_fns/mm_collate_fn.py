@@ -85,3 +85,13 @@ def mm_collate_fn(instances: Sequence[Dict],
         return data_dict
     else:
         return {'data': data_dict, 'data_samples': None}
+
+
+def mm_collate_fn1(instances: Sequence[Dict],
+                  pad_index: int = DEFAULT_PAD_TOKEN_INDEX,
+                  return_hf_format: bool = False,
+                  extra_collate_keys=None):
+    data_dict = {'pixel_values': [inst['pixel_values'] for inst in instances],
+                 'text': [inst['text'] for inst in instances],
+                 'img_id': [inst['img_id'] for inst in instances]}
+    return {'data': data_dict, 'data_samples': None}
