@@ -1,4 +1,4 @@
-使用自定义的预训练数据集训练 (LLM)
+自定义预训练数据集 (LLM)
 ==================================
 
 XTuner 支持使用自定义数据集进行增量预训练，为便于介绍，本节以
@@ -22,18 +22,18 @@ XTuner 支持使用自定义数据集进行增量预训练，为便于介绍，�
      ...
    ]
 
-小贴士
-
--  每条 ``text`` 数据不要太长（分词个数应小于
+.. tip::
+   每条 ``text`` 数据不要太长（分词个数应小于
    ``max_length``\ ），以避免在数据处理阶段被截断。
 
--  为保证数据上下文的一致性，请确保长文本数据在被切分为多个 ``text``
+.. tip::
+   为保证数据上下文的一致性，请确保长文本数据在被切分为多个 ``text``
    后，json 列表的顺序与实际上下文顺序一致。
 
 训练
 ----
 
-Step 1, 导出 config
+步骤 1 ：导出 config
 ~~~~~~~~~~~~~~~~~~~
 
 ``xtuner/configs/custom_dataset/pretrain/`` 目录下有所有 XTuner
@@ -45,14 +45,15 @@ Step 1, 导出 config
 可以通过以下命令将 ``internlm2_7b_full_custom_pretrain_e1.py``
 导出至当前目录下：
 
-.. code::
+.. code:: console
 
-   xtuner copy-cfg internlm2_7b_full_custom_pretrain_e1 .
+   $ xtuner copy-cfg internlm2_7b_full_custom_pretrain_e1 .
 
-当前目录下会存在一个新 config
-``internlm2_7b_full_custom_pretrain_e1_copy.py`` 。
+.. note::
+   当前目录下会存在一个新 config
+   ``internlm2_7b_full_custom_pretrain_e1_copy.py`` 。
 
-Step 2, 修改 config
+步骤 2 ：修改 config
 ~~~~~~~~~~~~~~~~~~~
 
 首先，需要修改数据集文件路径：
@@ -136,7 +137,7 @@ Step 2, 修改 config
    +       task_type='CAUSAL_LM')
    )
 
-Step 3, 开始训练
+步骤 3 ：开始训练
 ~~~~~~~~~~~~~~~~
 
 .. code:: bash
@@ -146,7 +147,7 @@ Step 3, 开始训练
 训得模型将默认保存在 ``./work_dirs/``\ ，用户可以通过命令
 ``xtuner train --work-dir ${SAVE_PATH}`` 指定保存路径。
 
-Step 4, 模型转换
+步骤 4 ：模型转换
 ~~~~~~~~~~~~~~~~
 
 模型训练后会自动保存成 PTH 模型（例如 ``iter_2000.pth``\ ，如果使用了

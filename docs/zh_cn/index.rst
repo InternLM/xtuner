@@ -48,12 +48,12 @@
    :maxdepth: 2
    :caption: 训练
 
-   training/modify_settings.rst
+   training/open_source_dataset.rst
    training/custom_sft_dataset.rst
    training/custom_pretrain_dataset.rst
    training/custom_agent_dataset.rst
    training/multi_modal_dataset.rst
-   training/open_source_dataset.rst
+   training/modify_settings.rst
    training/visualization.rst
 
 .. toctree::
