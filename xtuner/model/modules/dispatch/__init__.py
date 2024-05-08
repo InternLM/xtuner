@@ -484,18 +484,6 @@ def fix_deepseek2_moe_bug(model):
             module.forward = types.MethodType(moe_forward, module)
 
 
-def dispatch_deepseek2_rmsnorm_forward(model):
-    if not SUPPORT_TRITON:
-        return
-
-    from .triton_kernels import rms_norm_forward
-
-    for module in model.modules():
-        if type(module).__name__ == 'DeepseekV2RMSNorm':
-            print_log('dispatch deepseek v2 rmsnorm forward', 'current')
-            module.forward = types.MethodType(rms_norm_forward, module)
-
-
 def set_deepseek2_moe_blocks_z3_leaf_modules(model):
     from deepspeed.utils import set_z3_leaf_modules
     moe_module_type = None
@@ -552,10 +540,6 @@ def dispatch_modules(model, use_varlen_attn=False):
     elif 'deepseekv2' in model_name:
         dispatch_deepseek2_attn_forward(model, use_varlen_attn)
         fix_deepseek2_moe_bug(model)
-        if USE_TRITON_KERNEL:
-            dispatch_deepseek2_rmsnorm_forward(model)
-    #     if is_deepspeed_zero3_enabled():
-    #         set_deepseek2_moe_blocks_z3_leaf_modules(model)
 
 
 __all__ = ['dispatch_modules']
