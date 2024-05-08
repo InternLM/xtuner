@@ -448,6 +448,64 @@ def set_qwen_moe_blocks_z3_leaf_modules(model):
     set_z3_leaf_modules(model, [Qwen2MoeSparseMoeBlock])
 
 
+def dispatch_deepseek2_attn_forward(model, use_varlen_attn):
+    if use_varlen_attn:
+        assert SUPPORT_FLASH2 and SUPPORT_TRITON, \
+            'flash_attn and triton is required if you want to use varlen_attn.'
+    elif not SUPPORT_FLASH2:
+        return
+
+    from .deepseek_v2 import (deepseek_attn_forward,
+                              deepseek_varlen_attn_forward)
+
+    print_log(NO_ATTN_WEIGHTS_MSG, 'current', logging.WARNING)
+    for module in model.modules():
+        # Do not need to dispatch if
+        # type(module).__name__ == 'DeepseekV2Attention'
+        # If we set `attn_implementation` to `eager` in xtuner
+        # configs, we can not use varlen attn and sequence parallel.
+        if type(module).__name__ == 'DeepseekV2FlashAttention2':
+            if use_varlen_attn:
+                print_log('dispatch deepseek v2 varlen attn forward',
+                          'current')
+                module.forward = types.MethodType(deepseek_varlen_attn_forward,
+                                                  module)
+            else:
+                print_log('dispatch deepseek v2 attn forward', 'current')
+                module.forward = types.MethodType(deepseek_attn_forward,
+                                                  module)
+
+
+def fix_deepseek2_moe_bug(model):
+    from .deepseek_v2 import moe_forward
+    for module in model.modules():
+        if type(module).__name__ == 'DeepseekV2MoE':
+            print_log('dispatch DeepseekV2MoE forward', 'current')
+            module.forward = types.MethodType(moe_forward, module)
+
+
+def dispatch_deepseek2_rmsnorm_forward(model):
+    if not SUPPORT_TRITON:
+        return
+
+    from .triton_kernels import rms_norm_forward
+
+    for module in model.modules():
+        if type(module).__name__ == 'DeepseekV2RMSNorm':
+            print_log('dispatch deepseek v2 rmsnorm forward', 'current')
+            module.forward = types.MethodType(rms_norm_forward, module)
+
+
+def set_deepseek2_moe_blocks_z3_leaf_modules(model):
+    from deepspeed.utils import set_z3_leaf_modules
+    moe_module_type = None
+    for module in model.modules():
+        if type(module).__name__ == 'DeepseekV2MoE':
+            moe_module_type = type(module)
+    assert moe_module_type is not None
+    set_z3_leaf_modules(model, [moe_module_type])
+
+
 def dispatch_modules(model, use_varlen_attn=False):
     model_name = model.__class__.__name__.lower()
     if 'internlm2' in model_name:
@@ -491,6 +549,13 @@ def dispatch_modules(model, use_varlen_attn=False):
             dispatch_qwen2_rmsnorm_forward(model)
         if 'moe' in model_name and is_deepspeed_zero3_enabled():
             set_qwen_moe_blocks_z3_leaf_modules(model)
+    elif 'deepseekv2' in model_name:
+        dispatch_deepseek2_attn_forward(model, use_varlen_attn)
+        fix_deepseek2_moe_bug(model)
+        if USE_TRITON_KERNEL:
+            dispatch_deepseek2_rmsnorm_forward(model)
+    #     if is_deepspeed_zero3_enabled():
+    #         set_deepseek2_moe_blocks_z3_leaf_modules(model)
 
 
 __all__ = ['dispatch_modules']
