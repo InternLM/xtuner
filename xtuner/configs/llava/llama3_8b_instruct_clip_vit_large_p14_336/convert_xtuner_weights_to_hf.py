@@ -73,7 +73,7 @@ def convert_to_hf(text_model_id, vision_model_id, projector_weight, save_path):
     ori_llm = AutoModelForCausalLM.from_pretrained(
         text_model_id, trust_remote_code=True)
     ori_vit = CLIPVisionModel.from_pretrained(vision_model_id)
-    
+
     llm_state_dict = ori_llm.state_dict()
     vit_state_dict = ori_vit.state_dict()
 
