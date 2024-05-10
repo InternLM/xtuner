@@ -7,7 +7,7 @@ from torch.optim import AdamW
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           CLIPImageProcessor, CLIPVisionModel)
 
-from xtuner.dataset import LLaVADataset,ConcatDataset
+from xtuner.dataset import LLaVADataset, ConcatDataset
 from xtuner.dataset.collate_fns import mm_collate_fn
 from xtuner.dataset.map_fns import llava_map_fn, template_map_fn_factory
 from xtuner.engine.hooks import DatasetInfoHook, EvaluateChatHook
@@ -33,15 +33,15 @@ allava_laion_image_folder = 's3://xtuner/huanghaian/data/ALLaVA-4V/'
 
 data_root = '/mnt/petrelfs/share_data/huanghaian/data/ALLaVA-4V/'
 allava_vflan_data_path = data_root + 'allava_vflan/ALLaVA-Caption-VFLAN-4V_llava.json'
-allava_vflan_image_folder = 's3://xtuner/huanghaian/data/ALLaVA-4V/'
+allava_vflan_image_folder = '/mnt/petrelfs/share_data/zhaoxiangyu/'
 
-allava_text_data_path = data_root + 'allava_text/Evol-Instruct-GPT4-Turbo-143K.json'
+allava_text_data_path = data_root + 'allava_text/Evol-Instruct-GPT4-Turbo-143K_llava.json'
 
 prompt_template = PROMPT_TEMPLATE.phi3_chat
-max_length = int(4096 - (336 / 14)**2)
+max_length = int(2048 - (336 / 14) ** 2)
 
 # Scheduler & Optimizer
-batch_size = 32  # per_device
+batch_size = 16  # per_device 16gx16
 accumulative_counts = 1
 dataloader_num_workers = 4
 max_epochs = 1
@@ -94,8 +94,11 @@ model = dict(
 #######################################################################
 #                      PART 3  Dataset & Dataloader                   #
 #######################################################################
+cache_2k_root = data_root + 'phi3_mini_2k_offline/'
+
 sharegpt4v_dataset = dict(
     type=LLaVADataset,
+    offline_processed_text_folder=cache_2k_root + 'sharegpt4v_dataset',
     data_path=sharegpt4v_data_path,
     image_folder=sharegpt4v_image_folder,
     tokenizer=tokenizer,
@@ -108,7 +111,7 @@ sharegpt4v_dataset = dict(
 
 allava_laion_dataset = dict(
     type=LLaVADataset,
-    offline_processed_text_folder=None,
+    offline_processed_text_folder=cache_2k_root + 'allava_laion_dataset',
     data_path=allava_laion_data_path,
     image_folder=allava_laion_image_folder,
     tokenizer=tokenizer,
@@ -121,7 +124,7 @@ allava_laion_dataset = dict(
 
 allava_vflan_dataset = dict(
     type=LLaVADataset,
-    offline_processed_text_folder=None,
+    offline_processed_text_folder=cache_2k_root + 'allava_vflan_dataset',
     data_path=allava_vflan_data_path,
     image_folder=allava_vflan_image_folder,
     tokenizer=tokenizer,
@@ -134,23 +137,11 @@ allava_vflan_dataset = dict(
 
 allava_text_dataset = dict(
     type=LLaVADataset,
-    offline_processed_text_folder=None,
+    offline_processed_text_folder=cache_2k_root + 'allava_text_dataset',
     data_path=allava_text_data_path,
     tokenizer=tokenizer,
     image_processor=image_processor,
-    dataset_map_fn=llava_map_fn,
-    template_map_fn=dict(
-        type=template_map_fn_factory, template=prompt_template),
-    max_length=max_length,
-    pad_image_to_square=False)
-
-# 偷个懒，应该是用 repeat
-allava_text1_dataset = dict(
-    type=LLaVADataset,
-    offline_processed_text_folder=None,
-    data_path=allava_text_data_path,
-    tokenizer=tokenizer,
-    image_processor=image_processor,
+    image_folder=None,
     dataset_map_fn=llava_map_fn,
     template_map_fn=dict(
         type=template_map_fn_factory, template=prompt_template),
@@ -161,7 +152,7 @@ train_dataset = dict(
     type=ConcatDataset,
     datasets=[
         sharegpt4v_dataset, allava_laion_dataset, allava_vflan_dataset,
-        allava_text_dataset, allava_text1_dataset
+        allava_text_dataset, allava_text_dataset
     ])
 
 train_dataloader = dict(

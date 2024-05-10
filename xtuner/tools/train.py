@@ -332,11 +332,17 @@ def main():
                                                    'sequence_parallel_size',
                                                    1))
                 cfg.__setitem__('strategy', strategy)
-                optim_wrapper = dict(
-                    type='DeepSpeedOptimWrapper',
-                    optimizer=cfg.optim_wrapper.optimizer,
-                    constructor=cfg.optim_wrapper.get('constructor', None),
-                    paramwise_cfg=cfg.optim_wrapper.get('paramwise_cfg', None))
+                if 'constructor' in cfg.optim_wrapper:
+                    optim_wrapper = dict(
+                        type='DeepSpeedOptimWrapper',
+                        optimizer=cfg.optim_wrapper.optimizer,
+                        constructor=cfg.optim_wrapper.constructor,
+                        paramwise_cfg=cfg.optim_wrapper.get('paramwise_cfg', None))
+                else:
+                     optim_wrapper = dict(
+                        type='DeepSpeedOptimWrapper',
+                        optimizer=cfg.optim_wrapper.optimizer,
+                        paramwise_cfg=cfg.optim_wrapper.get('paramwise_cfg', None))
                 cfg.__setitem__('optim_wrapper', optim_wrapper)
                 cfg.runner_type = 'FlexibleRunner'
 
