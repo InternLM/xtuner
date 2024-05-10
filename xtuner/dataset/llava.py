@@ -2,7 +2,7 @@
 import json
 import logging
 import os
-
+import io
 import torch
 from datasets import Dataset as HFDataset
 from datasets import DatasetDict, load_from_disk
@@ -14,8 +14,7 @@ from torch.utils.data import Dataset
 from xtuner.registry import BUILDER
 from .huggingface import process_hf_dataset
 from .utils import expand2square, process_anyres_image, total_image_token, dynamic_preprocess
-from concurrent.futures import ThreadPoolExecutor
-from tqdm import tqdm
+from mmengine.fileio import get
 
 
 def load_jsonl(json_file):
@@ -112,12 +111,20 @@ class LLaVADataset(Dataset):
     def __len__(self):
         return len(self.text_data)
 
+    def get_image(self, path):
+        if path.startswith('s3://'):
+            img_bytes = get(path)
+            with io.BytesIO(img_bytes) as buff:
+                img = Image.open(buff).convert('RGB')
+            return img
+        else:
+            return Image.open(path).convert('RGB')
+
     def __getitem__(self, index):
         data_dict = self.text_data[index]
         if data_dict.get('image', None) is not None:
             image_file = data_dict['image']
-            image = Image.open(os.path.join(self.image_folder,
-                                            image_file)).convert('RGB')
+            image = self.get_image(os.path.join(self.image_folder, image_file))
             if self.pad_image_to_square:
                 image = expand2square(
                     image,
@@ -153,8 +160,7 @@ class AnyResLLaVADataset(LLaVADataset):
         data_dict = self.text_data[index]
         if data_dict.get('image', None) is not None:
             image_file = data_dict['image']
-            image = Image.open(os.path.join(self.image_folder,
-                                            image_file)).convert('RGB')
+            image = self.get_image(os.path.join(self.image_folder, image_file))
             orig_size = image.size
             # use to remove padding
             data_dict['orig_size'] = orig_size
@@ -204,8 +210,7 @@ class InternVL_V1_5_LLaVADataset(LLaVADataset):
                 if self.image_size_json is not None:
                     size = self.image_size_json[image_file]
                 else:
-                    image = Image.open(os.path.join(self.image_folder,
-                                                    image_file))
+                    image = self.get_image(os.path.join(self.image_folder, image_file))
                     size = image.size
                 num_image_token = total_image_token(size, self.min_num, self.max_num, self._image_size,
                                                     self._patch_size)
@@ -229,8 +234,7 @@ class InternVL_V1_5_LLaVADataset(LLaVADataset):
         data_dict = self.text_data[index]
         if data_dict.get('image', None) is not None:
             image_file = data_dict['image']
-            image = Image.open(os.path.join(self.image_folder,
-                                            image_file)).convert('RGB')
+            image = self.get_image(os.path.join(self.image_folder, image_file))
             images = dynamic_preprocess(image, self.min_num, self.max_num, self._image_size)
             for i, image in enumerate(images):
                 image = self.image_processor.preprocess(
