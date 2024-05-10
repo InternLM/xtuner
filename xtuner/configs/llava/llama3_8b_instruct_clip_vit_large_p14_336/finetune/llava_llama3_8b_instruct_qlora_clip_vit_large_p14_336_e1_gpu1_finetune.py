@@ -36,7 +36,7 @@ max_length = int(2048 - (336 / 14)**2)
 
 # Scheduler & Optimizer
 batch_size = 1  # per_device
-accumulative_counts = 16
+accumulative_counts = 128
 dataloader_num_workers = 0
 max_epochs = 1
 optim_type = AdamW
