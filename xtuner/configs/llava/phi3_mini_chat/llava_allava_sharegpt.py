@@ -38,6 +38,9 @@ data_root1 = '/mnt/petrelfs/share_data/huanghaian/data/ALLaVA-4V/'
 allava_vflan_data_path = data_root1 + 'allava_vflan/ALLaVA-Instruct-VFLAN-4V_llava.json'
 allava_vflan_image_folder = '/mnt/petrelfs/share_data/zhaoxiangyu/'
 
+sharegpt4v_data_path = data_root + 'sharegpt4v_mix665k_cap23k_coco-ap9k_lcs3k_sam9k_div2k.jsonl'
+sharegpt4v_image_folder = data_root + 'data'
+
 
 prompt_template = PROMPT_TEMPLATE.phi3_chat
 max_length = int(2048 - (336 / 14)**2)
@@ -112,8 +115,21 @@ llava_dataset = dict(
     max_length=max_length,
     pad_image_to_square=True)
 
-cache_2k_root = data_root1 + 'phi3_mini_2k_offline/'
+cache_root = '/mnt/petrelfs/share_data/huanghaian/internvl_finetune_phi3/'
+sharegpt4v_sft_dataset = dict(
+    type=LLaVADataset,
+    offline_processed_text_folder=cache_root + 'sharegpt4v_dataset',
+    data_path=sharegpt4v_data_path,
+    image_folder=sharegpt4v_image_folder,
+    tokenizer=tokenizer,
+    image_processor=image_processor,
+    dataset_map_fn=llava_map_fn,
+    template_map_fn=dict(
+        type=template_map_fn_factory, template=prompt_template),
+    max_length=max_length,
+    pad_image_to_square=True)
 
+cache_2k_root = data_root1 + 'phi3_mini_2k_offline/'
 allava_vflan_dataset = dict(
     type=LLaVADataset,
     offline_processed_text_folder=cache_2k_root + 'allava_vflan_dataset_sft',
@@ -129,7 +145,7 @@ allava_vflan_dataset = dict(
 
 train_dataset = dict(
     type=ConcatDataset,
-    datasets=[llava_dataset, allava_vflan_dataset])
+    datasets=[llava_dataset, allava_vflan_dataset, sharegpt4v_sft_dataset])
 
 train_dataloader = dict(
     batch_size=batch_size,
