@@ -64,7 +64,7 @@ prompt_template = PROMPT_TEMPLATE.phi3_chat
 max_length = int(2048 - (336 / 14) ** 2)
 
 # Scheduler & Optimizer
-batch_size = 8  # per_device 16g
+batch_size = 16  # per_device
 accumulative_counts = 1
 dataloader_num_workers = 4
 max_epochs = 1
