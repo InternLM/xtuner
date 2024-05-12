@@ -2,9 +2,14 @@
 import argparse
 import os.path as osp
 import shutil
+import warnings
 
+import torch
+from accelerate import init_empty_weights
+from accelerate.utils import set_module_tensor_to_device
 from mmengine.config import Config, DictAction
 from mmengine.fileio import PetrelBackend, get_file_backend
+from tqdm import tqdm
 
 from xtuner.configs import cfgs_name_path
 from xtuner.model.utils import guess_load_checkpoint
@@ -66,7 +71,11 @@ def main():
     if 'LLaVAModel' in model_name:
         cfg.model.pretrained_pth = None
 
-    model = BUILDER.build(cfg.model)
+    with init_empty_weights():
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                'ignore', message='.*non-meta.*', category=UserWarning)
+            model = BUILDER.build(cfg.model)
 
     backend = get_file_backend(args.pth_model)
     if isinstance(backend, PetrelBackend):
@@ -76,7 +85,9 @@ def main():
     else:
         state_dict = guess_load_checkpoint(args.pth_model)
 
-    model.load_state_dict(state_dict, strict=False)
+    for name, param in tqdm(state_dict.items(), desc='Load State Dict'):
+        set_module_tensor_to_device(model, name, 'cpu', param, torch.float16)
+
     model.llm.config.use_cache = True
 
     print(f'Load PTH model from {args.pth_model}')
