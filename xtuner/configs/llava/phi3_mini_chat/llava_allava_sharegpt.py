@@ -26,18 +26,20 @@ from mmengine.dataset import DefaultSampler
 # Model
 llm_name_or_path = '/mnt/petrelfs/share_data/gaojianfei/Phi-3-mini-4k-instruct/models--microsoft--Phi-3-mini-4k-instruct/snapshots/3a811845d89f3c1b3f41b341d0f9f05104769f35'
 visual_encoder_name_or_path = 'model/models--openai--clip-vit-large-patch14-336/snapshots/ce19dc912ca5cd21c8a653c79e251e808ccabcd1'
+
 # Specify the pretrained pth
 pretrained_pth = '/mnt/petrelfs/huanghaian/code/xtuner/work_dirs/llava_phi3_mini_4k_instruct_clip_vit_large_p14_336_e1_gpu8_pretrain/iter_2181.pth'  # noqa: E501
 
 # Data
-data_root = '/mnt/petrelfs/share_data/huanghaian/llava_data/'
-data_path = data_root + 'LLaVA-Instruct-150K/llava_v1_5_mix665k.json'
-image_folder = data_root + 'llava_images'
+data_root1 = '/mnt/petrelfs/share_data/huanghaian/llava_data/'
+llava_data_path = data_root1 + 'LLaVA-Instruct-150K/llava_v1_5_mix665k.json'
+llava_image_folder = data_root1 + 'llava_images'
 
 data_root1 = '/mnt/petrelfs/share_data/huanghaian/data/ALLaVA-4V/'
 allava_vflan_data_path = data_root1 + 'allava_vflan/ALLaVA-Instruct-VFLAN-4V_llava.json'
 allava_vflan_image_folder = '/mnt/petrelfs/share_data/zhaoxiangyu/'
 
+data_root = '/mnt/petrelfs/share_data/linzhihao/dataset/internvl_sft/'
 sharegpt4v_data_path = data_root + 'sharegpt4v_mix665k_cap23k_coco-ap9k_lcs3k_sam9k_div2k.jsonl'
 sharegpt4v_image_folder = data_root + 'data'
 
@@ -105,8 +107,8 @@ model = dict(
 llava_dataset = dict(
     type=LLaVADataset,
     offline_processed_text_folder='/mnt/petrelfs/huanghaian/code/xtuner/phi3_mini_llava_finetune',
-    data_path=data_path,
-    image_folder=image_folder,
+    data_path=llava_data_path,
+    image_folder=llava_image_folder,
     tokenizer=tokenizer,
     image_processor=image_processor,
     dataset_map_fn=llava_map_fn,
