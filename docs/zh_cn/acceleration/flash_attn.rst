@@ -1,6 +1,6 @@
 .. _flash_attn:
 
-使用 Flash Attention 加速训练
+Flash Attention
 ==================================================
 
 Flash Attention (Flash Attention 2) 是一种用于加速 Transformer 模型中 Attention 计算，并减少其显存消耗的算法。XTuner 中 Flash Attention (Flash Attention 2) 的支持情况如下表所示：

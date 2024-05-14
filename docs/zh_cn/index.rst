@@ -33,7 +33,6 @@
    :maxdepth: 2
    :caption: 开始使用
 
-   get_started/overview.rst
    get_started/installation.rst
    get_started/quickstart.rst
 
@@ -51,8 +50,8 @@
    training/open_source_dataset.rst
    training/custom_sft_dataset.rst
    training/custom_pretrain_dataset.rst
-   training/custom_agent_dataset.rst
    training/multi_modal_dataset.rst
+   acceleration/train_large_scale_dataset.rst
    training/modify_settings.rst
    training/visualization.rst
 
@@ -61,38 +60,14 @@
    :caption: 加速训练
 
    acceleration/deepspeed.rst
-   acceleration/pack_to_max_length.rst
    acceleration/flash_attn.rst
    acceleration/varlen_flash_attn.rst
-   acceleration/hyper_parameters.rst
+   acceleration/pack_to_max_length.rst
    acceleration/length_grouped_sampler.rst
-   acceleration/train_large_scale_dataset.rst
    acceleration/train_extreme_long_sequence.rst
+   acceleration/hyper_parameters.rst
    acceleration/benchmark.rst
 
-.. toctree::
-   :maxdepth: 2
-   :caption: 对话
-
-   chat/llm.md
-   chat/agent.md
-   chat/vlm.md
-   chat/lmdeploy.md
-
-.. toctree::
-   :maxdepth: 2
-   :caption: 评测
-
-   evaluation/hook.md
-   evaluation/mmlu.md
-   evaluation/mmbench.md
-   evaluation/opencompass.md
-
-.. toctree::
-   :maxdepth: 2
-   :caption: 模型
-
-   models/supported.md
 
 .. toctree::
    :maxdepth: 2
@@ -100,7 +75,7 @@
 
    internevo_migration/internevo_migration.rst
    internevo_migration/ftdp_dataset/ftdp.md
+   internevo_migration/ftdp_dataset/Case4.rst
    internevo_migration/ftdp_dataset/Case1.rst
    internevo_migration/ftdp_dataset/Case2.rst
    internevo_migration/ftdp_dataset/Case3.rst
-   internevo_migration/ftdp_dataset/Case4.rst

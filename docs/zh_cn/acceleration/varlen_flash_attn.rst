@@ -1,10 +1,6 @@
-.. _varlen_flash_attn:
-
-变长注意力 (Variable Length Flash Attention)
 ===============================================
-
-简介
---------------------
+Varlen Flash Attention
+===============================================
 
 \ :ref:`数据集拼接 <pack_to_max_length>` \  一节中，我们讨论了“数据集拼接”策略对模型训练效率的显著提升。
 理论上，数据集拼接可能会对注意力（Attention）机制的计算过程产生影响。这是因为，在未采用数据拼接策略的情况下，
@@ -20,8 +16,8 @@
         <br />变长注意力计算原理（拷贝自 https://github.com/InternLM/InternEvo/blob/develop/doc/usage.md）<br />
     </p>
 
-XTuner 变长注意力支持情况
---------------------
+支持列表
+=====================
 
 .. note::
 
@@ -57,33 +53,35 @@ XTuner 变长注意力支持情况
   * - zephyr
     - ✅
 
-在 XTuner 中使用变长注意力机制
---------------------
+使用变长注意力机制训练
+=========================
 
-Step 1, 安装 flash_attn
-^^^^^^^^^^^^^^^^^^^^^^^^^^^
+步骤 1：安装 flash_attn
+--------------------------
 
 XTuner 中实现的变长注意力需要依赖 Flash Attention 2，可通过以下命令安装（需要 cuda）：
 
-```bash
-MAX_JOBS=4 pip install flash-attn --no-build-isolation
-```
+.. code:: console
 
-详细安装步骤请参考 `flash attn 安装 <https://github.com/Dao-AILab/flash-attention?tab=readme-ov-file#installation-and-features>`_
+  $ MAX_JOBS=4 pip install flash-attn --no-build-isolation
 
-Step 2, 列出候选模型名字
-^^^^^^^^^^^^^^^^^^^^^^^^^^^
+.. tip::
+  更多安装方式请参考 `flash attn 安装 <https://github.com/Dao-AILab/flash-attention?tab=readme-ov-file#installation-and-features>`_
+
+步骤 2：查找模板 config
+---------------------------
 
 XTuner 提供多个开箱即用的配置文件，用户可以通过下列命令查看：
 
-.. code-block:: bash
+.. code-block:: console
 
-    xtuner list-cfg -p internlm
+    $ xtuner list-cfg -p internlm
 
-``-p`` 为模糊查找，若想训练其他模型，可以修改 ``internlm`` 为 XTuner 支持的其他模型名称。
+.. tip::
+  ``-p`` 为模糊查找，若想训练其他模型，可以修改 ``internlm`` 为 XTuner 支持的其他模型名称。
 
-Step 3, 复制 config 文件
-^^^^^^^^^^^^^^^^^^^^^^^^^^^
+步骤 3：复制 config 文件
+-----------------------------
 
 导出需要使用的 config ：
 
@@ -93,14 +91,19 @@ Step 3, 复制 config 文件
 
 例如通过下列命令将名为 ``internlm_7b_full_oasst1_e3`` 的 config 导出至当前目录下：
 
-.. code-block:: bash
+.. code-block:: console
 
-    xtuner copy-cfg internlm_7b_full_oasst1_e3 .
+    $ xtuner copy-cfg internlm_7b_full_oasst1_e3 .
 
-Step 4, 修改 config 文件
-^^^^^^^^^^^^^^^^^^^^^^^^^^^
+.. note::
 
-将 Step 3 复制得到的 config 文件中的 ``use_varlen_attn`` 属性由 False 改为 True 即可激活变长注意力训练机制：
+   当前目录下会存在一个新 config
+   ``internlm_7b_full_oasst1_e3_copy.py`` 。
+
+步骤 4：修改 config 文件
+-------------------------------
+
+将步骤 3 复制得到的 config 文件中的 ``use_varlen_attn`` 属性由 False 改为 True 即可激活变长注意力训练机制：
 
 .. code-block:: diff
 
@@ -114,31 +117,33 @@ Step 4, 修改 config 文件
     + use_varlen_attn = True
     ...
 
-.. note::
+.. warning::
 
-    需要注意，当设置 ``use_varlen_attn = True`` 后， ``batch_size = 2, max_length = 2k`` 的配置与 ``batch_size = 1, max_length = 4k`` 的配置训练行为是近似的，
+    当设置 ``use_varlen_attn = True`` 后， ``batch_size = 2, max_length = 2k`` 的配置与 ``batch_size = 1, max_length = 4k`` 的配置训练行为是近似的，
     因此 XTuner 目前只支持了 ``batch_size = 1`` 的情况。另外， ``use_varlen_attn = True`` 时 ``pack_to_max_length`` 也需设置为 True。
 
-Step 5, 开始训练
-^^^^^^^^^^^^^^^^^^^^^^^^^^^
+步骤 5：开始训练
+-----------------------
 
 .. code-block:: bash
 
     xtuner train ${CONFIG_NAME_OR_PATH}
 
-例如，我们可以基于 Step 4 中修改得到的 `internlm_7b_full_oasst1_e3_copy.py` 进行训练：
+例如，我们可以基于步骤 4 中修改得到的 `internlm_7b_full_oasst1_e3_copy.py` 进行训练：
 
-.. code-block:: bash
+.. code-block:: console
 
-    # On a single GPU
-    xtuner train internlm_7b_full_oasst1_e3_copy.py --deepspeed deepspeed_zero1
-    # On multiple GPUs
-    (DIST) NPROC_PER_NODE=${GPU_NUM} xtuner train internlm_7b_full_oasst1_e3_copy.py --deepspeed deepspeed_zero1
-    (SLURM) srun ${SRUN_ARGS} xtuner train internlm_7b_full_oasst1_e3_copy.py --launcher slurm --deepspeed deepspeed_zero1
+    $ # On a single GPU
+    $ xtuner train internlm_7b_full_oasst1_e3_copy.py --deepspeed deepspeed_zero1
+    $ # On multiple GPUs(torchrun)
+    $ NPROC_PER_NODE=${GPU_NUM} xtuner train internlm_7b_full_oasst1_e3_copy.py --deepspeed deepspeed_zero1
+    $ # On multiple GPUs(slurm)
+    $ srun ${SRUN_ARGS} xtuner train internlm_7b_full_oasst1_e3_copy.py --launcher slurm --deepspeed deepspeed_zero1
 
-- `--deepspeed` 表示使用 `DeepSpeed <https://github.com/microsoft/DeepSpeed>`_ 🚀 来优化训练过程。若未安装 DeepSpeed ，可通过 ``pip install deepspeed>=0.12.3`` 进行安装。XTuner 内置了多种策略，包括 ZeRO-1、ZeRO-2、ZeRO-3 等。如果用户期望关闭此功能，请直接移除此参数。
+.. tip::
+  ``--deepspeed`` 表示使用 `DeepSpeed <https://github.com/microsoft/DeepSpeed>`_ 🚀 来优化训练过程。若未安装 DeepSpeed ，可通过 ``pip install deepspeed>=0.12.3`` 进行安装。XTuner 内置了多种策略，包括 ZeRO-1、ZeRO-2、ZeRO-3 等。如果用户期望关闭此功能，请直接移除此参数。
 
-Step 6, 模型转换
+步骤 6：模型转换
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 将保存的 PTH 模型（如果使用的DeepSpeed，则将会是一个文件夹）转换为 HuggingFace 模型：
@@ -153,4 +158,5 @@ Step 6, 模型转换
 
     xtuner convert pth_to_hf internlm_7b_full_oasst1_e3_copy.py ${PTH} ${SAVE_PATH}
 
-其中 ``${PTH}`` 为训练权重保存的路径，若未指定，默认保存在 ``./work_dirs/internlm_7b_full_oasst1_e3_copy`` 路径下。
+.. note::
+  其中 ``${PTH}`` 为训练权重保存的路径，若训练时未指定，默认保存在 ``./work_dirs/internlm_7b_full_oasst1_e3_copy`` 路径下。

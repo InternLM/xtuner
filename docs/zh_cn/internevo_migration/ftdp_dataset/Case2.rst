@@ -1,6 +1,6 @@
 .. _case2:
 
-使用 Processed 数据集训练非 InternLM2 模型
+Processed 数据集 + 其他模型
 ==========================================
 
 使用尚未 token 化的 ftdp 数据训练其他模型（以 Mistral 为例），且需要用

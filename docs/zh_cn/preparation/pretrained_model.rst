@@ -60,11 +60,10 @@ ModelScope
    snapshot_download(model_id='Shanghai_AI_Laboratory/internlm2-chat-7b', cache_dir='./internlm2-chat-7b')
 
 .. note::
-
    其中，\ ``model_id`` 表示模型在 ModelScope 模型库的名字、\ ``cache_dir``表示期望存储到的本地路径。
 
-.. note::
 
+.. note::
    ``modelscope.snapshot_download`` 不支持多线程并行下载。
 
 .. tip::
@@ -74,6 +73,7 @@ ModelScope
    若要修改默认 cache 路径，需要修改相关环境变量：
 
    .. code:: console
+
       $ # 默认为 ~/.cache/modelscope/hub/
       $ export MODELSCOPE_CACHE=XXXX
 

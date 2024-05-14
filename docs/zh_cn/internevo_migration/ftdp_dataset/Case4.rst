@@ -1,6 +1,6 @@
 .. _case4:
 
-使用 Tokenized 数据集训练 InternLM2
+Tokenized 数据集 + InternLM2
 ===================================
 
 使用已经 token 化的 ftdp 数据训练 Internlm2 模型。

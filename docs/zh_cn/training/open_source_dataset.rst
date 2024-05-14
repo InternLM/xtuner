@@ -1,6 +1,6 @@
-=====================
+================================
 开源指令微调数据集（LLM）
-=====================
+================================
 
 HuggingFace Hub 中有众多优秀的开源数据，本节将以
 `timdettmers/openassistant-guanaco <https://huggingface.co/datasets/timdettmers/openassistant-guanaco>`__
@@ -9,7 +9,7 @@ HuggingFace Hub 中有众多优秀的开源数据，本节将以
 配置文件为基础进行讲解。
 
 适配开源数据集
-=============
+=====================
 
 不同的开源数据集有不同的数据「载入方式」和「字段格式」，因此我们需要针对所使用的开源数据集进行一些适配。
 
@@ -122,27 +122,27 @@ map_fn，则需要用户自行参照以提供的 map_fn
 进行自定义开发，实现字段格式的对齐。
 
 训练
-----
+=====
 
 用户可以使用 ``xtuner train`` 启动训练。假设所使用的配置文件路径为
 ``./config.py``\ ，并使用 DeepSpeed ZeRO-2 优化。
 
 单机单卡
-~~~~~~~~
+--------
 
 .. code:: console
 
     $ xtuner train ./config.py --deepspeed deepspeed_zero2
 
 单机多卡
-~~~~~~~~
+--------
 
 .. code:: console
 
     $ NPROC_PER_NODE=${GPU_NUM} xtuner train ./config.py --deepspeed deepspeed_zero2
 
 多机多卡（以 2 \* 8 GPUs 为例）
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+--------------------------------------
 
 **方法 1：torchrun**
 
@@ -166,7 +166,7 @@ map_fn，则需要用户自行参照以提供的 map_fn
     $ srun -p $PARTITION --nodes=2 --gres=gpu:8 --ntasks-per-node=8 xtuner train internlm2_chat_7b_qlora_oasst1_e3 --launcher slurm --deepspeed deepspeed_zero2
 
 模型转换
---------
+=========
 
 模型训练后会自动保存成 PTH 模型（例如 ``iter_500.pth``\ ），我们需要利用
 ``xtuner convert pth_to_hf`` 将其转换为 HuggingFace
@@ -180,7 +180,7 @@ map_fn，则需要用户自行参照以提供的 map_fn
 .. _模型合并可选）:
 
 模型合并（可选）
-----------------
+================
 
 如果您使用了 LoRA / QLoRA 微调，则模型转换后将得到 adapter
 参数，而并不包含原 LLM
@@ -193,7 +193,7 @@ map_fn，则需要用户自行参照以提供的 map_fn
    $ # 例如：xtuner convert merge internlm/internlm2-chat-7b ./iter_500_hf ./iter_500_merged_llm
 
 对话
-----
+=====
 
 用户可以利用 ``xtuner chat`` 实现与微调后的模型对话：
 

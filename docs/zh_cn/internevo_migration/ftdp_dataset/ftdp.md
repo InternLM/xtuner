@@ -1,8 +1,6 @@
-# ftdp
+# InternEVO 训练场景
 
-ftdp 是一个闭源的处理数据工具，开源社区用户可以忽略此文档。
-
-本节介绍了常见的 4 种使用 ftdp 数据集训练的使用场景：
+本节介绍了 4 种 InternEVO 的训练场景：
 
 - [Case 1: 使用 Processed 数据集训练 InternLM2](Case1.rst)
 - [Case 2: 使用 Processed 数据集训练非 InternLM2 模型](Case2.rst)
