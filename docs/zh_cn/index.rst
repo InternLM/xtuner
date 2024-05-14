@@ -70,7 +70,7 @@
 
 
 .. toctree::
-   :maxdepth: 2
+   :maxdepth: 1
    :caption: InternEvo 迁移
 
    internevo_migration/internevo_migration.rst
