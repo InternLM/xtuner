@@ -241,7 +241,7 @@ class InternVL_V1_5_LLaVADataset(LLaVADataset):
             data = self.prepare_data(index)
             # Broken images may cause the returned data to be None
             if data is None:
-                idx = self._rand_another()
+                index = self._rand_another()
                 continue
             return data
 
