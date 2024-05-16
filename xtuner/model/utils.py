@@ -1,5 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import os.path as osp
+from copy import deepcopy
 from typing import List, Optional
 
 import torch
@@ -9,7 +10,6 @@ from peft import PeftType
 from torch import nn
 from transformers import PreTrainedModel
 from transformers.integrations.deepspeed import is_deepspeed_zero3_enabled
-from copy import deepcopy
 
 from xtuner.utils import IGNORE_INDEX, IMAGE_TOKEN_INDEX
 
@@ -310,10 +310,11 @@ def guess_load_checkpoint(pth_model):
         raise FileNotFoundError(f'Cannot find {pth_model}')
     return state_dict
 
+
 def create_reference_model(model):
     if is_deepspeed_zero3_enabled():
         raise ValueError(
-            "DeepSpeed ZeRO-3 is enabled and is not compatible with `create_reference_model()`. Please instantiate your reference model directly with `AutoCausalLM.from_pretrained()`."
+            'DeepSpeed ZeRO-3 is enabled and is not compatible with `create_reference_model()`. Please instantiate your reference model directly with `AutoCausalLM.from_pretrained()`.'
         )
 
     parameter_names = [n for n, _ in model.named_parameters()]

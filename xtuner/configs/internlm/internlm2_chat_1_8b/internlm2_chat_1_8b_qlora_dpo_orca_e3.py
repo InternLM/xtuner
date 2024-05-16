@@ -66,7 +66,7 @@ tokenizer = dict(
     padding_side='right')
 
 model = dict(
-    type=DPO, # TODO
+    type=DPO,  # TODO
     # type = SupervisedFinetune,
     use_varlen_attn=use_varlen_attn,
     llm=dict(

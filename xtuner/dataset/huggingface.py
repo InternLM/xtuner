@@ -58,7 +58,7 @@ def map_dataset(dataset, dataset_map_fn, map_num_proc):
 def add_template_to_dataset(dataset, template_map_fn, map_num_proc):
     if isinstance(template_map_fn,
                   dict) or isinstance(template_map_fn, Config) or isinstance(
-        template_map_fn, ConfigDict):
+                      template_map_fn, ConfigDict):
         template_map_fn = BUILDER.build(template_map_fn)
     dataset = dataset.map(template_map_fn, num_proc=map_num_proc)
     # remove invalid data
@@ -185,13 +185,23 @@ def process(dataset,
         dataset = map_dataset(dataset, dataset_map_fn, map_num_proc)
         if with_dpo:
             chosen_data = dataset.map(
-                lambda example: {'conversation': [{'system': example['system'],
-                                                   'input': example['prompt'],
-                                                   'output': example['chosen']}]}, num_proc=map_num_proc)
+                lambda example: {
+                    'conversation': [{
+                        'system': example['system'],
+                        'input': example['prompt'],
+                        'output': example['chosen']
+                    }]
+                },
+                num_proc=map_num_proc)
             rejected_data = dataset.map(
-                lambda example: {'conversation': [{'system': example['system'],
-                                                   'input': example['prompt'],
-                                                   'output': example['rejected']}]}, num_proc=map_num_proc)
+                lambda example: {
+                    'conversation': [{
+                        'system': example['system'],
+                        'input': example['prompt'],
+                        'output': example['rejected']
+                    }]
+                },
+                num_proc=map_num_proc)
 
     # Add prompt template, such as <|System|>: xxx <|User|>: xxx <|Bot|>: xxx
     if template_map_fn is not None:
@@ -201,7 +211,8 @@ def process(dataset,
         else:
             chosen_data = add_template_to_dataset(chosen_data, template_map_fn,
                                                   map_num_proc)
-            rejected_data = add_template_to_dataset(rejected_data, template_map_fn,
+            rejected_data = add_template_to_dataset(rejected_data,
+                                                    template_map_fn,
                                                     map_num_proc)
 
     for old, new in rename_maps:
@@ -227,17 +238,24 @@ def process(dataset,
                                        remove_unused_columns, map_num_proc)
         else:
             chosen_data = tokenize_dataset(chosen_data, tokenizer, max_length,
-                                           with_image_token, input_ids_with_output,
+                                           with_image_token,
+                                           input_ids_with_output,
                                            remove_unused_columns, map_num_proc)
-            rejected_data = tokenize_dataset(rejected_data, tokenizer, max_length,
-                                             with_image_token, input_ids_with_output,
-                                             remove_unused_columns, map_num_proc)
+            rejected_data = tokenize_dataset(rejected_data, tokenizer,
+                                             max_length, with_image_token,
+                                             input_ids_with_output,
+                                             remove_unused_columns,
+                                             map_num_proc)
 
             dataset = Dataset.from_dict({
-                'input_chosen_ids': chosen_data['input_ids'],
-                'chosen_labels': chosen_data['labels'],
-                'input_reject_ids': rejected_data['input_ids'],
-                'reject_labels': rejected_data['labels'],
+                'input_chosen_ids':
+                chosen_data['input_ids'],
+                'chosen_labels':
+                chosen_data['labels'],
+                'input_reject_ids':
+                rejected_data['input_ids'],
+                'reject_labels':
+                rejected_data['labels'],
             })
 
     if input_ids_with_output:
@@ -245,10 +263,12 @@ def process(dataset,
         # remove data that does not have the valid labels.
         if with_dpo:
             dataset = dataset.filter(
-                lambda example: any(label >= 0 for label in example['chosen_labels']),
+                lambda example: any(label >= 0
+                                    for label in example['chosen_labels']),
                 num_proc=map_num_proc)
             dataset = dataset.filter(
-                lambda example: any(label >= 0 for label in example['reject_labels']),
+                lambda example: any(label >= 0
+                                    for label in example['reject_labels']),
                 num_proc=map_num_proc)
         else:
             dataset = dataset.filter(

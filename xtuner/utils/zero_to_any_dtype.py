@@ -640,7 +640,7 @@ def load_state_dict_from_zero_checkpoint(model,
                                          checkpoint_dir,
                                          tag=None,
                                          dtype=DEFAULT_DTYPE):
-    
+
     # yapf: disable
     """
     1. Put the provided model to cpu

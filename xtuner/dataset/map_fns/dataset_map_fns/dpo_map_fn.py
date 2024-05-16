@@ -17,8 +17,8 @@ def dpo_map_fn(example):
         }
     """
     return {
-                'system': example['system'],
-                'prompt': example['question'],
-                'chosen': example['chosen'],
-                'rejected': example['rejected'],
+        'system': example['system'],
+        'prompt': example['question'],
+        'chosen': example['chosen'],
+        'rejected': example['rejected'],
     }
