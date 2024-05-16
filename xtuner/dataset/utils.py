@@ -486,9 +486,15 @@ def total_image_token(orig_size, min_num=1, max_num=6, image_size=336, patch_siz
     return blocks*patch_size*patch_size
 
 
-def dynamic_preprocess(image, min_num=1, max_num=6, image_size=336, use_thumbnail=True):
+def dynamic_preprocess(image, min_num=1, max_num=6, image_size=336, use_thumbnail=True, use_patch=True):
     orig_width, orig_height = image.size
     aspect_ratio = orig_width / orig_height
+
+    if not use_patch:
+        processed_images = []
+        thumbnail_img = image.resize((image_size, image_size))
+        processed_images.append(thumbnail_img)
+        return processed_images
 
     # calculate the existing image aspect ratio
     target_ratios = set(
@@ -523,3 +529,55 @@ def dynamic_preprocess(image, min_num=1, max_num=6, image_size=336, use_thumbnai
         thumbnail_img = image.resize((image_size, image_size))
         processed_images.append(thumbnail_img)
     return processed_images
+
+
+def internvl_1_5_encode_fn(example,
+                           tokenizer,
+                           max_length,
+                           input_ids_with_output=True,
+                           with_image_token=False,
+                           min_num=1,
+                           max_num=6,
+                           image_size=336,
+                           patch_size=12,
+                           use_patch=True):
+    """We only support the following three scenarios:
+
+    1. Incremental pretraining dataset.
+        example['conversation'] = [
+                {
+                    'input': '',
+                    'output': '### Human: Can you write xxx'
+                }
+            ]
+
+    2. Single-turn conversation dataset.
+        example['conversation'] = [
+                {
+                    'input': 'Give three tips for staying healthy.',
+                    'output': '1.Eat a balanced diet xxx'
+                }
+            ]
+
+    3. Multi-turn conversation dataset.
+        example['conversation'] = [
+                {
+                    'input': 'Give three tips for staying healthy.',
+                    'output': '1.Eat a balanced diet xxx'
+                },
+                {
+                    'input': 'Please expand on the second point.',
+                    'output': 'Here is an expanded explanation of the xxx'
+                }
+            ]
+    """
+    img_token = 0
+    if 'image' in example:
+        if use_patch:
+            assert 'image_wh' in example
+            img_token = total_image_token(example['image_wh'][0], min_num, max_num, image_size, patch_size)
+        else:
+            # clip
+            img_token = patch_size * patch_size
+    max_length = max_length - img_token
+    return encode_fn(example, tokenizer, max_length, input_ids_with_output, with_image_token)

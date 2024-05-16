@@ -13,7 +13,7 @@ from .modelscope import process_ms_dataset
 from .moss_sft import MOSSSFTDataset
 from .refcoco_json import (InvRefCOCOJsonDataset, RefCOCOJsonDataset,
                            RefCOCOJsonEvalDataset)
-from .utils import decode_base64_to_image, expand2square, load_image
+from .utils import decode_base64_to_image, expand2square, load_image, internvl_1_5_encode_fn
 from .llava_proxy_eval_dataset import LLaVAProxyEvalDataset
 from .anyres_llava_proxy_eval_dataset import AnyResLLaVAProxyEvalDataset
 from .mini_gemini_dataset import MiniGeminiDataset
@@ -40,5 +40,6 @@ __all__ = [
     'MiniGeminiDataset',
     'MiniGeminiProxyEvalDataset',
     'InternVL_V1_5_LLaVADataset',
-    'InternVL_v1_5_LLaVAProxyEvalDataset'
+    'InternVL_v1_5_LLaVAProxyEvalDataset',
+    'internvl_1_5_encode_fn'
 ]

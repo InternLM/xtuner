@@ -12,7 +12,8 @@ from mmengine.utils.misc import get_object_from_string
 from torch import distributed as dist
 
 from xtuner.registry import BUILDER, MAP_FUNC
-from .utils import Packer, encode_fn
+from .utils import Packer
+from .utils import encode_fn as default_encode_fn
 
 
 def get_lengths(example):
@@ -66,12 +67,21 @@ def add_template_to_dataset(dataset, template_map_fn, map_num_proc):
 
 def tokenize_dataset(dataset, tokenizer, max_length, with_image_token,
                      input_ids_with_output, remove_unused_columns,
-                     map_num_proc):
+                     map_num_proc, encode_map_fn=None):
     assert (tokenizer is not None) and (max_length is not None), \
         f'({tokenizer}, {max_length})'
     if isinstance(tokenizer, dict) or isinstance(
             tokenizer, Config) or isinstance(tokenizer, ConfigDict):
         tokenizer = BUILDER.build(tokenizer)
+    if encode_map_fn is None:
+        encode_fn = default_encode_fn
+    else:
+        if isinstance(encode_map_fn,
+                      dict) or isinstance(encode_map_fn, Config) or \
+                isinstance(encode_map_fn, ConfigDict):
+            encode_fn = BUILDER.build(encode_map_fn)
+        else:
+            encode_fn = encode_map_fn
     dataset = dataset.map(
         partial(
             encode_fn,
@@ -103,6 +113,7 @@ def process(dataset,
             max_length=None,
             dataset_map_fn=None,
             template_map_fn=None,
+            encode_map_fn=None,
             max_dataset_length=None,
             split='train',
             remove_unused_columns=False,
@@ -198,7 +209,8 @@ def process(dataset,
     if do_dataset_tokenization:
         dataset = tokenize_dataset(dataset, tokenizer, max_length,
                                    with_image_token, input_ids_with_output,
-                                   remove_unused_columns, map_num_proc)
+                                   remove_unused_columns, map_num_proc,
+                                   encode_map_fn=encode_map_fn)
 
     if input_ids_with_output:
         assert {'input_ids', 'labels'}.issubset(dataset.column_names)
@@ -226,6 +238,7 @@ def process_hf_dataset(dataset,
                        dataset_map_fn=None,
                        template_map_fn=None,
                        max_dataset_length=None,
+                       encode_map_fn=None,
                        split='train',
                        remove_unused_columns=False,
                        rename_maps=[],
@@ -284,6 +297,7 @@ def process_hf_dataset(dataset,
         max_length=max_length,
         dataset_map_fn=dataset_map_fn,
         template_map_fn=template_map_fn,
+        encode_map_fn=encode_map_fn,
         max_dataset_length=max_dataset_length,
         split=split,
         remove_unused_columns=remove_unused_columns,
