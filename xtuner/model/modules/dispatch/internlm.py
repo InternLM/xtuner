@@ -154,7 +154,7 @@ def internlm_varlen_attn_forward(
     message_hub = MessageHub.get_instance('varlen_attn_args')
     rank = dist.get_rank()
     cumulative_len = message_hub.get_info(f'cumulative_len_rank_{rank}')
-    indexes = message_hub.get_info(f'indexes_rank_{rank}')
+    # position_ids = message_hub.get_info(f'position_ids_rank_{rank}')
     max_seqlen = message_hub.get_info(f'max_seqlen_rank_{rank}')
     assert is_training == (cumulative_len is not None)
 
@@ -175,10 +175,11 @@ def internlm_varlen_attn_forward(
 
     if is_training:
         cos, sin = self.rotary_emb(value_states, max_seqlen)
-        query_states = apply_rotary_emb(query_states, cos[indexes].squeeze(0),
-                                        sin[indexes].squeeze(0))
-        key_states = apply_rotary_emb(key_states, cos[indexes].squeeze(0),
-                                      sin[indexes].squeeze(0))
+        query_states = apply_rotary_emb(query_states,
+                                        cos[position_ids].squeeze(0),
+                                        sin[position_ids].squeeze(0))
+        key_states = apply_rotary_emb(key_states, cos[position_ids].squeeze(0),
+                                      sin[position_ids].squeeze(0))
     else:
         query_states = query_states.transpose(1, 2)
         key_states = key_states.transpose(1, 2)

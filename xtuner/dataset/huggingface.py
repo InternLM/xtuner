@@ -18,6 +18,7 @@ from .utils import Packer, encode_fn
 def get_lengths(example):
     return {'length': len(example['input_ids'])}
 
+
 def get_dpo_lengths(example):
     return {'length': len(example['input_chosen_ids'])}
 
@@ -57,7 +58,7 @@ def map_dataset(dataset, dataset_map_fn, map_num_proc):
 def add_template_to_dataset(dataset, template_map_fn, map_num_proc):
     if isinstance(template_map_fn,
                   dict) or isinstance(template_map_fn, Config) or isinstance(
-                      template_map_fn, ConfigDict):
+        template_map_fn, ConfigDict):
         template_map_fn = BUILDER.build(template_map_fn)
     dataset = dataset.map(template_map_fn, num_proc=map_num_proc)
     # remove invalid data
@@ -185,24 +186,23 @@ def process(dataset,
         if with_dpo:
             chosen_data = dataset.map(
                 lambda example: {'conversation': [{'system': example['system'],
-                                 'input': example['prompt'],
-                                 'output': example['chosen']}]}, num_proc=map_num_proc)
+                                                   'input': example['prompt'],
+                                                   'output': example['chosen']}]}, num_proc=map_num_proc)
             rejected_data = dataset.map(
                 lambda example: {'conversation': [{'system': example['system'],
-                                 'input': example['prompt'],
-                                 'output': example['rejected']}]}, num_proc=map_num_proc)
-            
+                                                   'input': example['prompt'],
+                                                   'output': example['rejected']}]}, num_proc=map_num_proc)
 
     # Add prompt template, such as <|System|>: xxx <|User|>: xxx <|Bot|>: xxx
     if template_map_fn is not None:
         if not with_dpo:
             dataset = add_template_to_dataset(dataset, template_map_fn,
-                                            map_num_proc)
+                                              map_num_proc)
         else:
             chosen_data = add_template_to_dataset(chosen_data, template_map_fn,
-                                            map_num_proc)
+                                                  map_num_proc)
             rejected_data = add_template_to_dataset(rejected_data, template_map_fn,
-                                            map_num_proc)
+                                                    map_num_proc)
 
     for old, new in rename_maps:
         if not with_dpo:
@@ -223,28 +223,25 @@ def process(dataset,
     if do_dataset_tokenization:
         if not with_dpo:
             dataset = tokenize_dataset(dataset, tokenizer, max_length,
-                                    with_image_token, input_ids_with_output,
-                                    remove_unused_columns, map_num_proc)
+                                       with_image_token, input_ids_with_output,
+                                       remove_unused_columns, map_num_proc)
         else:
             chosen_data = tokenize_dataset(chosen_data, tokenizer, max_length,
-                                    with_image_token, input_ids_with_output,
-                                    remove_unused_columns, map_num_proc)
+                                           with_image_token, input_ids_with_output,
+                                           remove_unused_columns, map_num_proc)
             rejected_data = tokenize_dataset(rejected_data, tokenizer, max_length,
-                                    with_image_token, input_ids_with_output,
-                                    remove_unused_columns, map_num_proc)
-            
+                                             with_image_token, input_ids_with_output,
+                                             remove_unused_columns, map_num_proc)
+
             dataset = Dataset.from_dict({
                 'input_chosen_ids': chosen_data['input_ids'],
                 'chosen_labels': chosen_data['labels'],
                 'input_reject_ids': rejected_data['input_ids'],
                 'reject_labels': rejected_data['labels'],
             })
-            
-            
-    else:
-        assert {'input_ids', 'labels'}.issubset(dataset.column_names)
 
     if input_ids_with_output:
+        assert {'input_ids', 'labels'}.issubset(dataset.column_names)
         # remove data that does not have the valid labels.
         if with_dpo:
             dataset = dataset.filter(
@@ -257,8 +254,6 @@ def process(dataset,
             dataset = dataset.filter(
                 lambda example: any(label >= 0 for label in example['labels']),
                 num_proc=map_num_proc)
-        
-        
 
     # pack to max length
     if pack_to_max_length and not with_dpo:
@@ -357,7 +352,7 @@ def process_hf_dataset(dataset,
         return process(**kwargs)
 
     xtuner_dataset_timeout = timedelta(
-        minutes=int(os.getenv('XTUNER_DATASET_TIMEOUT', default=30)))
+        minutes=int(os.getenv('XTUNER_DATASET_TIMEOUT', default=60)))
     print_log(
         f'xtuner_dataset_timeout = {xtuner_dataset_timeout}', logger='current')
     # monitored barrier requires gloo process group to perform host-side sync.

@@ -176,8 +176,8 @@ class Packer:
 
         return cumulative_len
 
-    def get_indexes(self, cumulative_len):
-        indexes = []
+    def get_position_ids(self, cumulative_len):
+        position_ids = []
         for cumulative_len_cur in cumulative_len:
             index_cur = []
             for i in range(len(cumulative_len_cur) - 1):
@@ -185,8 +185,8 @@ class Packer:
                     list(
                         range(cumulative_len_cur[i + 1] -  # noqa: W504
                               cumulative_len_cur[i])))
-            indexes.append(index_cur)
-        return indexes
+            position_ids.append(index_cur)
+        return position_ids
 
     def __call__(self, batch):
         concatenated_samples = {
@@ -222,7 +222,7 @@ class Packer:
             if self.use_varlen_attn:
                 cumulative_len = self.get_cumulative_len(chunk_num)
                 result['cumulative_len'] = cumulative_len
-                result['indexes'] = self.get_indexes(cumulative_len)
+                result['position_ids'] = self.get_position_ids(cumulative_len)
         else:
             if self.drop_last:
                 result = {k: [] for k, v in concatenated_samples.items()}
@@ -235,8 +235,8 @@ class Packer:
                 result['cumulative_len'] = [] if self.drop_last else [
                     self.residual_cumulative_len
                 ]
-                result['indexes'] = [] if self.drop_last else self.get_indexes(
-                    [self.residual_cumulative_len])
+                result['position_ids'] = [] if self.drop_last \
+                    else self.get_position_ids([self.residual_cumulative_len])
                 self.residual_cumulative_len = [0]
 
         return result

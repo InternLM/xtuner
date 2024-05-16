@@ -2,6 +2,11 @@
 
 [English](./README.md) | 简体中文
 
+## 配置文件
+
+- `./${LLM}_${ViT}/` 包含着与 LLaVA-InternLM 训练配置对齐的配置文件（即使用 LoRA / QLoRA）。
+- `./official/` 包含着与 LLaVA-v1.5 官方训练配置对齐的配置文件。
+
 ## 结果
 
 XTuner 推荐使用基于 LLM-QLoRA / ViT-LoRA 的 LLaVA 架构，其在各个数据集的评测结果如下：
@@ -16,10 +21,10 @@ XTuner 推荐使用基于 LLM-QLoRA / ViT-LoRA 的 LLaVA 架构，其在各个�
 
 当与 LLaVA 官方训练架构对齐时，其评测结果如下：
 
-| 模型          |   框架   | MMBench Test (EN) | MMBench Dev (EN) | MMBench Test (CN) | MMBench Dev (CN) | CCBench Dev | MME  | SEEDBench_IMG | MMVet |                                                                                                                         配置文件                                                                                                                         |
-| :------------ | :------: | :---------------: | :--------------: | :---------------: | :--------------: | :---------: | :--: | :-----------: | :---: | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------: |
-| LLaVA-v1.5-7B | Official |       65.2        |       63.0       |       57.3        |       57.4       |    25.2     | 1775 |     65.6      | 32.7  |                                                                                                                            -                                                                                                                             |
-| LLaVA-v1.5-7B |  XTuner  |       68.6        |       68.0       |       61.5        |       61.4       |    26.5     | 1786 |     65.8      | 31.4  | [Pretrain](./vicuna_7b_v15_clip_vit_large_p14_336/pretrain/llava_vicuna_7b_v15_clip_vit_large_p14_336_e1_gpu8_pretrain.py) / [Fine-tune](./vicuna_7b_v15_clip_vit_large_p14_336/finetune/llava_vicuna_7b_v15_clip_vit_large_p14_336_e1_gpu8_finetune.py) |
+| 模型          |   框架   | MMBench Test (EN) | MMBench Dev (EN) | MMBench Test (CN) | MMBench Dev (CN) | CCBench Dev | MME  | SEEDBench_IMG | MMVet |                                                           配置文件                                                           |
+| :------------ | :------: | :---------------: | :--------------: | :---------------: | :--------------: | :---------: | :--: | :-----------: | :---: | :--------------------------------------------------------------------------------------------------------------------------: |
+| LLaVA-v1.5-7B | Official |       65.2        |       63.0       |       57.3        |       57.4       |    25.2     | 1775 |     65.6      | 32.7  |                                                              -                                                               |
+| LLaVA-v1.5-7B |  XTuner  |       68.6        |       68.0       |       61.5        |       61.4       |    26.5     | 1786 |     65.8      | 31.4  | [Pretrain](./official/llava_v15_7b/llava_v15_7b_pretrain.py) / [Fine-tune](./official/llava_v15_7b/llava_v15_7b_finetune.py) |
 
 ## 数据准备
 
@@ -27,20 +32,20 @@ XTuner 推荐使用基于 LLM-QLoRA / ViT-LoRA 的 LLaVA 架构，其在各个�
 
 ## 训练流程
 
-LLaVA 训练一共分为两步：对齐模块预训练、指令跟随微调（本指南以 8 卡训练 LLaVA-InternLM 为例，实际使用时如遇到显卡数量不足、显存不足等情况可以适当调低 batchsize 来降低显存开销）
+LLaVA 训练一共分为两步：对齐模块预训练、指令跟随微调（本指南以 8 卡训练 LLaVA-InternLM2-7B 为例，实际使用时如遇到显卡数量不足、显存不足等情况可以适当调低 batchsize 来降低显存开销）
 
-预训练的 Projector 默认保存在 `./work_dirs/llava_internlm_chat_7b_clip_vit_large_p14_336_e1_gpu8_pretrain`，并且指令微调阶段将默认在此路径载入 Projector 权重 （`iter_2181.pth`）。
+预训练的 Projector 默认保存在 `./work_dirs/llava_internlm2_chat_7b_clip_vit_large_p14_336_e1_gpu8_pretrain`，并且指令微调阶段将默认在此路径载入 Projector 权重 （`iter_2181.pth`）。
 
 1. 对齐模块训练（默认保存在 `./work_dirs/`）
 
 ```bash
-NPROC_PER_NODE=8 xtuner train llava_internlm_chat_7b_clip_vit_large_p14_336_e1_gpu8_pretrain --deepspeed deepspeed_zero2
+NPROC_PER_NODE=8 xtuner train llava_internlm2_chat_7b_clip_vit_large_p14_336_e1_gpu8_pretrain --deepspeed deepspeed_zero2
 ```
 
 2. 指令跟随微调（默认保存在 `./work_dirs/`）
 
 ```bash
-NPROC_PER_NODE=8 xtuner train llava_internlm_chat_7b_qlora_clip_vit_large_p14_336_lora_e1_gpu8_finetune --deepspeed deepspeed_zero2
+NPROC_PER_NODE=8 xtuner train llava_internlm2_chat_7b_qlora_clip_vit_large_p14_336_lora_e1_gpu8_finetune --deepspeed deepspeed_zero2
 ```
 
 ## 模型转换（和合并）
@@ -49,7 +54,7 @@ NPROC_PER_NODE=8 xtuner train llava_internlm_chat_7b_qlora_clip_vit_large_p14_33
 
 ```bash
 xtuner convert pth_to_hf $FINETUNE_CFG $PTH_PATH $SAVE_PATH
-# e.g., xtuner convert pth_to_hf llava_internlm_chat_7b_qlora_clip_vit_large_p14_336_lora_e1_gpu8_finetune ./iter_5198.pth ./iter_5198_hf
+# e.g., xtuner convert pth_to_hf llava_internlm2_chat_7b_qlora_clip_vit_large_p14_336_lora_e1_gpu8_finetune ./iter_5198.pth ./iter_5198_hf
 ```
 
 此时，我们将获得所需要的模型（LLM或对应的 LoRA）。
@@ -63,17 +68,17 @@ xtuner convert pth_to_hf $FINETUNE_CFG $PTH_PATH $SAVE_PATH
 
 ## 对话测试
 
-开源的 LLaVA-InternLM-7B 模型在 🤗 [HuggingFace](https://huggingface.co/xtuner/llava-internlm-7b) 和 🤖 [ModelScope](https://modelscope.cn/models/xtuner/llava-internlm-7b) 都可以下载，您可以利用下列命令实现图文问答！
+开源的 LLaVA-InternLM2-7B 模型在 🤗 [HuggingFace](https://huggingface.co/xtuner/llava-internlm2-7b) 和 🤖 [ModelScope](https://modelscope.cn/models/xtuner/llava-internlm2-7b) 都可以下载，您可以利用下列命令实现图文问答！
 
 ```bash
-xtuner chat internlm/internlm-chat-7b \
+xtuner chat internlm/internlm2-chat-7b \
   --visual-encoder openai/clip-vit-large-patch14-336 \
-  --llava xtuner/llava-internlm-7b \
-  --prompt-template internlm_chat \
+  --llava xtuner/llava-internlm2-7b \
+  --prompt-template internlm2_chat \
   --image $IMAGE_PATH
 ```
 
-此处， `--llava` 请传入模型转换阶段所获得的权重（示例中为 `./epoch_1_hf`）。
+此处， `--llava` 请传入模型转换阶段所获得的权重（示例中为 `./iter_5198_hf`）。
 
 ## 评测
 
@@ -92,10 +97,10 @@ wget https://opencompass.openxlab.space/utils/VLMEval/CCBench.tsv
 之后，您可以利用下列命令实现评测：
 
 ```bash
-xtuner mmbench internlm/internlm-chat-7b \
+xtuner mmbench internlm/internlm2-chat-7b \
   --visual-encoder openai/clip-vit-large-patch14-336 \
-  --llava xtuner/llava-internlm-7b \
-  --prompt-template internlm_chat \
+  --llava xtuner/llava-internlm2-7b \
+  --prompt-template internlm2_chat \
   --data-path $DATA_PATH \
   --work-dir $RESULT_PATH
 ```
@@ -109,10 +114,10 @@ xtuner mmbench internlm/internlm-chat-7b \
 若您想要评测 Refcoco 数据集，您需要下载评测数据文件 [链接](https://github.com/Vision-CAIR/MiniGPT-4/tree/main/eval_scripts/eval_data). 之后，您可以利用下列命令实现评测：
 
 ```bash
-xtuner eval_refcoco lmsys/vicuna-7b-v1.5 \
-  --visual-encoder openai/clip-vit-large-patch14-336 \
+xtuner eval_refcoco $LLM \
+  --visual-encoder $VISUAL_ENCODER \
   --llava $LLAVA_PATH \
-  --prompt-template internlm_chat \
+  --prompt-template $PROMPT_TEMPLATE \
   --data-path $DATA_PATH \
   --work-dir $RESULT_PATH
 ```

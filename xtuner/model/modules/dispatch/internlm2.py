@@ -8,16 +8,9 @@ import torch.nn.functional as F
 from einops import rearrange
 from mmengine import MessageHub
 
+from .attention import (SUPPORT_FLASH2, flash_attn_w_mask, flash_attn_wo_mask,
+                        varlen_flash_attn)
 from .triton_kernels import apply_rotary_emb
-
-SUPPORT_FLASH2 = False
-
-try:
-    from flash_attn import flash_attn_func, flash_attn_varlen_func
-
-    SUPPORT_FLASH2 = True
-except ImportError:
-    pass
 
 
 class InternLM2RotaryEmbedding(torch.nn.Module):
@@ -28,6 +21,9 @@ class InternLM2RotaryEmbedding(torch.nn.Module):
                  base=1000000,
                  device=None):
         super().__init__()
+        self.dim = dim
+        self.max_position_embeddings = max_position_embeddings
+        self.base = base
         self.inv_freq = 1.0 / (
             base**(torch.arange(0, dim, 2).float().to(device) / dim))
 
@@ -96,21 +92,39 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
                                  head_dim)
 
 
+def repeat_kv_bshd(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
+    """The hidden states go from (batch, seqlen, num_key_value_heads, head_dim)
+    to (batch, seqlen, num_attention_heads, head_dim)"""
+    batch, slen, num_key_value_heads, head_dim = hidden_states.shape
+    if n_rep == 1:
+        return hidden_states
+    hidden_states = hidden_states[:, :, :,
+                                  None, :].expand(batch, slen,
+                                                  num_key_value_heads, n_rep,
+                                                  head_dim)
+    return hidden_states.reshape(batch, slen, num_key_value_heads * n_rep,
+                                 head_dim)
+
+
 def internlm2_attn_forward(
     self,
     hidden_states: torch.Tensor,
-    attention_mask: Optional[torch.Tensor] = None,
+    attention_mask: Optional[torch.LongTensor] = None,
     position_ids: Optional[torch.LongTensor] = None,
     past_key_value: Optional[Tuple[torch.Tensor]] = None,
     output_attentions: bool = False,
     use_cache: bool = False,
     **kwargs,
-) -> Tuple[torch.Tensor, Optional[torch.Tensor],
-           Optional[Tuple[torch.Tensor]]]:
+):
     if 'padding_mask' in kwargs:
         warnings.warn(
             'Passing `padding_mask` is deprecated and will be removed in v4.37'
             'Please make sure use `attention_mask` instead.`')
+
+        # overwrite attention_mask with padding_mask
+        attention_mask = kwargs.pop('padding_mask')
+
+    output_attentions = False
 
     bsz, q_len, _ = hidden_states.size()
 
@@ -135,7 +149,10 @@ def internlm2_attn_forward(
     kv_seq_len = key_states.shape[-2]
     if past_key_value is not None:
         kv_seq_len += past_key_value[0].shape[-2]
-    cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
+
+    # This modification is necessary for sequential parallel
+    assert position_ids is not None and (position_ids.max() + 1) >= kv_seq_len
+    cos, sin = self.rotary_emb(value_states, seq_len=position_ids.max() + 1)
     query_states, key_states = apply_rotary_pos_emb(query_states, key_states,
                                                     cos, sin, position_ids)
 
@@ -146,29 +163,55 @@ def internlm2_attn_forward(
 
     past_key_value = (key_states, value_states) if use_cache else None
 
+    # repeat kv for sequence parallel
+    key_states = repeat_kv(key_states, self.num_key_value_groups)
+    value_states = repeat_kv(value_states, self.num_key_value_groups)
+
     if SUPPORT_FLASH2:
+        # the shape of attention_mask used by flash_attn and
+        # F.scaled_dot_product_attention are different
+        assert attention_mask is None or attention_mask.ndim == 2, \
+            ('When using flash_attn, attention_mask.ndim should equal to 2.'
+             f'But got attention_mask.shape = {attention_mask.shape}.'
+             'We can pass the `attn_implementation="flash_attention_2"` flag '
+             'to `.from_pretrained` method when instantiating a Internlm2 '
+             'model.')
+        # flash attn 2 need (bs, seq_len, nhead, h_dim)
         query_states = query_states.transpose(1, 2)
         key_states = key_states.transpose(1, 2)
         value_states = value_states.transpose(1, 2)
-        attn_output = flash_attn_func(
-            query_states, key_states, value_states, causal=True)
-        attn_output = attn_output.contiguous()
+
+        causal = self.is_causal and q_len != 1
+
+        if attention_mask is not None:
+            attn_output = flash_attn_w_mask(
+                query_states,
+                key_states,
+                value_states,
+                attention_mask,
+                causal=causal,
+                training=self.training)
+        else:
+            attn_output = flash_attn_wo_mask(
+                query_states,
+                key_states,
+                value_states,
+                causal=causal,
+                training=self.training)
     else:
-        key_states = repeat_kv(key_states, self.num_key_value_groups)
-        value_states = repeat_kv(value_states, self.num_key_value_groups)
         # use flash attention implemented by pytorch
+        # do not support sequence parallel
         attn_output = F.scaled_dot_product_attention(
             query_states, key_states, value_states, attn_mask=attention_mask)
-        attn_output = attn_output.transpose(1, 2).contiguous()
+        attn_output = attn_output.transpose(1, 2)
 
     attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
-
     attn_output = self.wo(attn_output)
 
-    # Due to the implementation of the PyTorch version of flash attention,
-    # even when the output_attentions flag is set to True, it is not possible
-    # to return the attn_weights.
-    return attn_output, None, past_key_value
+    if not output_attentions:
+        attn_weights = None
+
+    return attn_output, attn_weights, past_key_value
 
 
 def internlm2_varlen_attn_forward(
@@ -188,7 +231,6 @@ def internlm2_varlen_attn_forward(
     message_hub = MessageHub.get_instance('varlen_attn_args')
     rank = dist.get_rank()
     cumulative_len = message_hub.get_info(f'cumulative_len_rank_{rank}')
-    indexes = message_hub.get_info(f'indexes_rank_{rank}')
     max_seqlen = message_hub.get_info(f'max_seqlen_rank_{rank}')
     assert is_training == (cumulative_len is not None)
 
@@ -216,10 +258,11 @@ def internlm2_varlen_attn_forward(
 
     if is_training:
         cos, sin = self.rotary_emb(value_states, max_seqlen)
-        query_states = apply_rotary_emb(query_states, cos[indexes].squeeze(0),
-                                        sin[indexes].squeeze(0))
-        key_states = apply_rotary_emb(key_states, cos[indexes].squeeze(0),
-                                      sin[indexes].squeeze(0))
+        query_states = apply_rotary_emb(query_states,
+                                        cos[position_ids].squeeze(0),
+                                        sin[position_ids].squeeze(0))
+        key_states = apply_rotary_emb(key_states, cos[position_ids].squeeze(0),
+                                      sin[position_ids].squeeze(0))
     else:
         query_states = query_states.transpose(1, 2)
         key_states = key_states.transpose(1, 2)
@@ -238,26 +281,21 @@ def internlm2_varlen_attn_forward(
         key_states = key_states.transpose(1, 2)
         value_states = value_states.transpose(1, 2)
 
+    # repeat kv for sequence parallel
+    key_states = repeat_kv_bshd(key_states, self.num_key_value_groups)
+    value_states = repeat_kv_bshd(value_states, self.num_key_value_groups)
+
     assert SUPPORT_FLASH2
     if is_training:
-        q_unpad, k_unpad, v_unpad = query_states.flatten(
-            0, 1), key_states.flatten(0, 1), value_states.flatten(0, 1)
-        cumulative_len = torch.cat(cumulative_len, dim=0)
-        attn_output = flash_attn_varlen_func(
-            q_unpad,
-            k_unpad,
-            v_unpad,
-            cumulative_len,
-            cumulative_len,
-            max_seqlen,
-            max_seqlen,
-            0,
-            return_attn_probs=False,
-            causal=True,
-        )
+        attn_output = varlen_flash_attn(query_states, key_states, value_states,
+                                        cumulative_len, max_seqlen)
     else:
-        attn_output = flash_attn_func(
-            query_states, key_states, value_states, causal=True)
+        attn_output = flash_attn_wo_mask(
+            query_states,
+            key_states,
+            value_states,
+            causal=True,
+            training=False)
 
     attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
 

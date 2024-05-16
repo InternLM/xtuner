@@ -125,13 +125,39 @@ PROMPT_TEMPLATE = ConfigDict(
         INSTRUCTION=('[INST] {input} [/INST]'),
         SEP='\n'),
     gemma=dict(
-        SYSTEM=('<start_of_turn>model\n{system}<end_of_turn>\n'),
+        # `system` field is extended by xtuner
+        SYSTEM=('<start_of_turn>system\n{system}<end_of_turn>\n'),
         INSTRUCTION=('<start_of_turn>user\n{input}<end_of_turn>\n'
                      '<start_of_turn>model\n'),
         SUFFIX='<end_of_turn>',
         SUFFIX_AS_EOS=False,
         SEP='\n',
         STOP_WORDS=['<end_of_turn>']),
+    cohere_chat=dict(
+        SYSTEM=('<|START_OF_TURN_TOKEN|><|SYSTEM_TOKEN|>{system}'
+                '<|END_OF_TURN_TOKEN|>'),
+        INSTRUCTION=(
+            '<|START_OF_TURN_TOKEN|><|USER_TOKEN|>{input}<|END_OF_TURN_TOKEN|>'
+            '<|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>'),
+        SUFFIX='<|END_OF_TURN_TOKEN|>',
+        SUFFIX_AS_EOS=True,
+        STOP_WORDS=['<|END_OF_TURN_TOKEN|>']),
+    llama3_chat=dict(
+        SYSTEM=('<|start_header_id|>system<|end_header_id|>\n\n'
+                '{system}<|eot_id|>'),
+        INSTRUCTION=(
+            '<|start_header_id|>user<|end_header_id|>\n\n{input}<|eot_id|>'
+            '<|start_header_id|>assistant<|end_header_id|>\n\n'),
+        SUFFIX='<|eot_id|>',
+        SUFFIX_AS_EOS=True,
+        STOP_WORDS=['<|eot_id|>']),
+    phi3_chat=dict(
+        SYSTEM='<|system|>\n{system}<|end|>\n',
+        INSTRUCTION='<|user|>\n{input}<|end|>\n<|assistant|>\n',
+        SUFFIX='<|end|>',
+        SUFFIX_AS_EOS=True,
+        SEP='\n',
+        STOP_WORDS=['<|end|>']),
 )
 
 SYSTEM_TEMPLATE = ConfigDict(
