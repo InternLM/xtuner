@@ -45,8 +45,8 @@ laion_data_path = laion_data_root + 'filter_rand_10m_llava.json'
 laion_image_folder = 'public:s3://public-dataset/laion-coco/images/'
 
 coyo_data_root = '/mnt/hwfile/xtuner/huanghaian/data/COYO-700M/'
-coyo_data_path = coyo_data_root + 'filter_rand_10m_llava.json'
-coyo_image_folder = 'public:s3://public-dataset/COYO-700M/data/'
+coyo_data_path = coyo_data_root + 'filter_rand_20m_llava.json'
+coyo_image_folder = 'public:s3://public-dataset/COYO-700M/'
 
 prompt_template = PROMPT_TEMPLATE.phi3_chat
 
@@ -138,7 +138,7 @@ coyo_dataset = dict(
     min_num=min_num,
     max_num=max_num,
     downsample_ratio=downsample_ratio,
-    offline_processed_text_folder=cache_2k_root + 'coyo_dataset_10m',
+    offline_processed_text_folder=cache_2k_root + 'coyo_dataset_20m',
     data_path=coyo_data_path,
     image_folder=coyo_image_folder,
     tokenizer=tokenizer,
