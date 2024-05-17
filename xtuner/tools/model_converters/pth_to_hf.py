@@ -71,11 +71,21 @@ def main():
     if 'LLaVAModel' in model_name:
         cfg.model.pretrained_pth = None
 
-    with init_empty_weights():
-        with warnings.catch_warnings():
-            warnings.filterwarnings(
-                'ignore', message='.*non-meta.*', category=UserWarning)
+    try:
+        # Initializing the model with a meta tensor can reduce unwanted memory
+        # usage.
+        with init_empty_weights():
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    'ignore', message='.*non-meta.*', category=UserWarning)
+                model = BUILDER.build(cfg.model)
+    except NotImplementedError as e:
+        # Cannot initialize the model with meta tensor if there is lora
+        # in the model.
+        if 'Cannot copy out of meta tensor' in str(e):
             model = BUILDER.build(cfg.model)
+        else:
+            raise e
 
     backend = get_file_backend(args.pth_model)
     if isinstance(backend, PetrelBackend):
