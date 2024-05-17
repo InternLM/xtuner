@@ -213,8 +213,13 @@ class InternVL_V1_5_LLaVADataset(LLaVADataset):
                 if 'image_wh' in data_dict:
                     size = data_dict['image_wh'][0]
                 else:
-                    image = self.get_image(os.path.join(self.image_folder, image_file))
-                    size = image.size
+                    try:
+                        image = self.get_image(os.path.join(self.image_folder, image_file))
+                        size = image.size
+                    except Exception as e:
+                        print(f'Error: {e}', flush=True)
+                        print_log(f'Error: {e}', logger='current')
+                        size = [1, 1]
                 if self.use_patch:
                     num_image_token = total_image_token(size, self.min_num, self.max_num, self._image_size,
                                                         self._patch_size)
@@ -252,6 +257,7 @@ class InternVL_V1_5_LLaVADataset(LLaVADataset):
             try:
                 image = self.get_image(os.path.join(self.image_folder, image_file))
             except Exception as e:
+                print(f'Error: {e}', flush=True)
                 print_log(f'Error: {e}', logger='current')
                 return None
             images = dynamic_preprocess(image, self.min_num, self.max_num, self._image_size, use_patch=self.use_patch)

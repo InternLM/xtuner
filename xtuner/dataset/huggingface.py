@@ -79,7 +79,9 @@ def tokenize_dataset(dataset, tokenizer, max_length, with_image_token,
         if isinstance(encode_map_fn,
                       dict) or isinstance(encode_map_fn, Config) or \
                 isinstance(encode_map_fn, ConfigDict):
-            encode_fn = BUILDER.build(encode_map_fn)
+            encode_fn = encode_map_fn.pop('type')
+            if len(encode_map_fn) != 0:
+                encode_fn = partial(encode_fn, **encode_map_fn)
         else:
             encode_fn = encode_map_fn
     dataset = dataset.map(

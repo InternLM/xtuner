@@ -22,21 +22,21 @@ from xtuner.dataset.samplers import LengthGroupedSampler
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-llm_name_or_path = '/mnt/petrelfs/share_data/gaojianfei/Phi-3-mini-4k-instruct/models--microsoft--Phi-3-mini-4k-instruct/snapshots/3a811845d89f3c1b3f41b341d0f9f05104769f35'
-visual_encoder_name_or_path = 'model/models--openai--clip-vit-large-patch14-336/snapshots/ce19dc912ca5cd21c8a653c79e251e808ccabcd1'
+llm_name_or_path = '/mnt/hwfile/xtuner/gaojianfei/Phi-3-mini-4k-instruct/models--microsoft--Phi-3-mini-4k-instruct/snapshots/3a811845d89f3c1b3f41b341d0f9f05104769f35'
+visual_encoder_name_or_path = '/mnt/hwfile/xtuner/linzhihao/model/models--openai--clip-vit-large-patch14-336/snapshots/ce19dc912ca5cd21c8a653c79e251e808ccabcd1'
 
 # Data
 share_data_root = '/mnt/hwfile/xtuner/huanghaian/data/sharegpt4v/'
 sharegpt4v_data_path = share_data_root + 'share-captioner_coco_lcs_sam_1246k_1107_llava.json'
-sharegpt4v_image_folder = '/mnt/petrelfs/share_data/linzhihao/dataset/sharegpt4v/data'
+sharegpt4v_image_folder = '/mnt/hwfile/xtuner/linzhihao/dataset/sharegpt4v/data'
 
 data_root = '/mnt/hwfile/xtuner/huanghaian/data/ALLaVA-4V/'
 allava_laion_data_path = data_root + 'allava_laion/ALLaVA-Caption-LAION-4V_llava.json'
-allava_laion_image_folder = '/mnt/petrelfs/share_data/zhaoxiangyu/datasets--FreedomIntelligence--ALLaVA-4V/snapshots/624bd4c5fedc2209cf952eedf75712413d8d912c/'
+allava_laion_image_folder = '/mnt/hwfile/openmmlab/zhaoxiangyu/datasets--FreedomIntelligence--ALLaVA-4V/snapshots/624bd4c5fedc2209cf952eedf75712413d8d912c/'
 
 data_root = '/mnt/hwfile/xtuner/huanghaian/data/ALLaVA-4V/'
 allava_vflan_data_path = data_root + 'allava_vflan/ALLaVA-Caption-VFLAN-4V_llava.json'
-allava_vflan_image_folder = '/mnt/petrelfs/share_data/zhaoxiangyu/'
+allava_vflan_image_folder = '/mnt/hwfile/openmmlab/zhaoxiangyu/'
 
 allava_text_data_path = data_root + 'allava_text/Evol-Instruct-GPT4-Turbo-143K_llava.json'
 
@@ -51,7 +51,7 @@ coyo_image_folder = 'public:s3://public-dataset/COYO-700M/'
 prompt_template = PROMPT_TEMPLATE.phi3_chat
 
 # Scheduler & Optimizer
-batch_size = 32  # per_device
+batch_size = 16  # per_device
 accumulative_counts = 1
 dataloader_num_workers = 4
 max_epochs = 1
