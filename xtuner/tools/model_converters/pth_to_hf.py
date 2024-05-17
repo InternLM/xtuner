@@ -72,7 +72,7 @@ def main():
         cfg.model.pretrained_pth = None
 
     try:
-        # Initializing the model with a meta tensor can reduce unwanted memory
+        # Initializing the model with meta-tensor can reduce unwanted memory
         # usage.
         with init_empty_weights():
             with warnings.catch_warnings():
