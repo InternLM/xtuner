@@ -8,6 +8,7 @@ import transformers
 from mmengine import print_log
 from mmengine.utils import digit_version
 from transformers.integrations import is_deepspeed_zero3_enabled
+from transformers.utils.import_utils import is_flash_attn_2_available
 
 from .baichuan import (baichuan2_norm_head_forward, baichuan_7b_attn_forward,
                        baichuan_13b_attn_forward)
@@ -33,15 +34,7 @@ IS_LOW_VERSION_TRANSFORMERS = TRANSFORMERS_VERSION < digit_version('4.38')
 # Transformers requires torch version >= 2.1.1 when using Torch SDPA.
 # Refer to https://github.com/huggingface/transformers/blob/caa5c65db1f4db617cdac2ad667ba62edf94dd98/src/transformers/modeling_utils.py#L1611  # noqa: E501
 SUPPORT_FLASH1 = digit_version(torch.__version__) >= digit_version('2.1.1')
-SUPPORT_FLASH2 = False
-
-try:
-    from flash_attn import flash_attn_func  # pre-check # noqa: F401
-
-    SUPPORT_FLASH2 = True
-except ImportError:
-    pass
-
+SUPPORT_FLASH2 = is_flash_attn_2_available()
 SUPPORT_FLASH = SUPPORT_FLASH1 or SUPPORT_FLASH2
 
 USE_TRITON_KERNEL = bool(os.getenv('USE_TRITON_KERNEL', default=0))
