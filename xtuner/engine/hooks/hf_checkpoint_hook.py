@@ -4,10 +4,13 @@ from pathlib import Path
 from typing import Optional, Union
 
 import torch.distributed as dist
+from mmengine import print_log
 from mmengine._strategy import DeepSpeedStrategy
 from mmengine.hooks import Hook
 from mmengine.model import is_model_wrapper
 from mmengine.runner import FlexibleRunner
+
+from xtuner.registry import BUILDER
 
 DATA_BATCH = Optional[Union[dict, tuple, list]]
 
@@ -50,4 +53,10 @@ class HFCheckpointHook(Hook):
             for k in keys:
                 val = state_dict.pop(k)
                 state_dict[k[4:]] = val
+
+            print_log(f'Saving LLM to {self.out_dir}')
             llm.save_pretrained(self.out_dir, state_dict=state_dict)
+
+            print_log(f'Saving LLM tokenizer to {self.out_dir}')
+            tokenizer = BUILDER.build(runner.cfg.tokenizer)
+            tokenizer.save_pretrained(self.out_dir)
