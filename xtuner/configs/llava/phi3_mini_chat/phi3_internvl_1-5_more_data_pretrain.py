@@ -1,5 +1,4 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-from mmengine.dataset import DefaultSampler
 from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
                             LoggerHook, ParamSchedulerHook)
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR, LinearLR
@@ -40,9 +39,21 @@ allava_vflan_image_folder = '/mnt/hwfile/openmmlab/zhaoxiangyu/'
 
 allava_text_data_path = data_root + 'allava_text/Evol-Instruct-GPT4-Turbo-143K_llava.json'
 
-laion_data_root = '/mnt/hwfile/xtuner/huanghaian/data/laion-coco/'
-laion_data_path = laion_data_root + 'filter_rand_10m_llava.json'
+laion_data_root = '/mnt/hwfile/xtuner/huanghaian/data/laion-coco/orig_merge_70m_data/'
+laion_data_path0 = laion_data_root + 'filter_data_0_llava.json'
+laion_data_path1 = laion_data_root + 'filter_data_1_llava.json'
+laion_data_path2 = laion_data_root + 'filter_data_2_llava.json'
+laion_data_path3 = laion_data_root + 'filter_data_3_llava.json'
+laion_data_path4 = laion_data_root + 'filter_data_4_llava.json'
+laion_data_path5 = laion_data_root + 'filter_data_5_llava.json'
+laion_data_path6 = laion_data_root + 'filter_data_6_llava.json'
+laion_data_path7 = laion_data_root + 'filter_data_7_llava.json'
 laion_image_folder = 'public:s3://public-dataset/laion-coco/images/'
+
+# laion-coco-ocr
+laion_ocr_data_root = '/mnt/hwfile/xtuner/huanghaian/data/laion-coco/orig_merge_17m_ocr_data/'
+laion_ocr_data_path0 = laion_data_root + 'filter_data_0_llava.json'
+laion_ocr_data_path1 = laion_data_root + 'filter_data_1_llava.json'
 
 # coyo_data_root = '/mnt/hwfile/xtuner/huanghaian/data/COYO-700M/'
 # coyo_data_path1 = coyo_data_root + 'filter_rand_20m_llava_1.json'
@@ -50,6 +61,7 @@ laion_image_folder = 'public:s3://public-dataset/laion-coco/images/'
 # coyo_data_path3 = coyo_data_root + 'filter_rand_20m_llava_3.json'
 # coyo_image_folder = 'public:s3://public-dataset/COYO-700M/'
 
+max_length = 4096
 
 prompt_template = PROMPT_TEMPLATE.phi3_chat
 
@@ -112,15 +124,14 @@ model = dict(
 #######################################################################
 #                      PART 3  Dataset & Dataloader                   #
 #######################################################################
-cache_2k_root = laion_data_root + 'phi3_mini_2k_offline/'
-laion_coco_dataset = dict(
+cache_4k_root = laion_data_root + 'phi3_mini_4k_offline/'
+laion_coco_dataset0 = dict(
     type=InternVL_V1_5_LLaVADataset,
-    use_patch=False,  # 由于 image token 很少，所以可能也不需要 4k 上下文
     min_num=min_num,
     max_num=max_num,
     downsample_ratio=downsample_ratio,
-    offline_processed_text_folder=cache_2k_root + 'laion_coco_dataset_10m',
-    data_path=laion_data_path,
+    offline_processed_text_folder=cache_4k_root + 'laion_coco_dataset_10m_0',
+    data_path=laion_data_path0,
     image_folder=laion_image_folder,
     tokenizer=tokenizer,
     image_processor=image_processor,
@@ -128,11 +139,176 @@ laion_coco_dataset = dict(
     encode_map_fn=dict(
         type=internvl_1_5_encode_fn,
         min_num=min_num,
-        max_num=max_num,
-        use_patch=False),  # 核心参数
+        max_num=max_num),
     template_map_fn=dict(
         type=template_map_fn_factory, template=prompt_template),
-    max_length=2048)
+    max_length=max_length)
+laion_coco_dataset1 = dict(
+    type=InternVL_V1_5_LLaVADataset,
+    min_num=min_num,
+    max_num=max_num,
+    downsample_ratio=downsample_ratio,
+    offline_processed_text_folder=cache_4k_root + 'laion_coco_dataset_10m_1',
+    data_path=laion_data_path1,
+    image_folder=laion_image_folder,
+    tokenizer=tokenizer,
+    image_processor=image_processor,
+    dataset_map_fn=llava_map_fn,
+    encode_map_fn=dict(
+        type=internvl_1_5_encode_fn,
+        min_num=min_num,
+        max_num=max_num),
+    template_map_fn=dict(
+        type=template_map_fn_factory, template=prompt_template),
+    max_length=max_length)
+laion_coco_dataset2 = dict(
+    type=InternVL_V1_5_LLaVADataset,
+    min_num=min_num,
+    max_num=max_num,
+    downsample_ratio=downsample_ratio,
+    offline_processed_text_folder=cache_4k_root + 'laion_coco_dataset_10m_2',
+    data_path=laion_data_path2,
+    image_folder=laion_image_folder,
+    tokenizer=tokenizer,
+    image_processor=image_processor,
+    dataset_map_fn=llava_map_fn,
+    encode_map_fn=dict(
+        type=internvl_1_5_encode_fn,
+        min_num=min_num,
+        max_num=max_num),
+    template_map_fn=dict(
+        type=template_map_fn_factory, template=prompt_template),
+    max_length=max_length)
+laion_coco_dataset3 = dict(
+    type=InternVL_V1_5_LLaVADataset,
+    min_num=min_num,
+    max_num=max_num,
+    downsample_ratio=downsample_ratio,
+    offline_processed_text_folder=cache_4k_root + 'laion_coco_dataset_10m_3',
+    data_path=laion_data_path3,
+    image_folder=laion_image_folder,
+    tokenizer=tokenizer,
+    image_processor=image_processor,
+    dataset_map_fn=llava_map_fn,
+    encode_map_fn=dict(
+        type=internvl_1_5_encode_fn,
+        min_num=min_num,
+        max_num=max_num),
+    template_map_fn=dict(
+        type=template_map_fn_factory, template=prompt_template),
+    max_length=max_length)
+laion_coco_dataset4 = dict(
+    type=InternVL_V1_5_LLaVADataset,
+    min_num=min_num,
+    max_num=max_num,
+    downsample_ratio=downsample_ratio,
+    offline_processed_text_folder=cache_4k_root + 'laion_coco_dataset_10m_4',
+    data_path=laion_data_path4,
+    image_folder=laion_image_folder,
+    tokenizer=tokenizer,
+    image_processor=image_processor,
+    dataset_map_fn=llava_map_fn,
+    encode_map_fn=dict(
+        type=internvl_1_5_encode_fn,
+        min_num=min_num,
+        max_num=max_num),
+    template_map_fn=dict(
+        type=template_map_fn_factory, template=prompt_template),
+    max_length=max_length)
+laion_coco_dataset5 = dict(
+    type=InternVL_V1_5_LLaVADataset,
+    min_num=min_num,
+    max_num=max_num,
+    downsample_ratio=downsample_ratio,
+    offline_processed_text_folder=cache_4k_root + 'laion_coco_dataset_10m_5',
+    data_path=laion_data_path5,
+    image_folder=laion_image_folder,
+    tokenizer=tokenizer,
+    image_processor=image_processor,
+    dataset_map_fn=llava_map_fn,
+    encode_map_fn=dict(
+        type=internvl_1_5_encode_fn,
+        min_num=min_num,
+        max_num=max_num),
+    template_map_fn=dict(
+        type=template_map_fn_factory, template=prompt_template),
+    max_length=max_length)
+laion_coco_dataset6 = dict(
+    type=InternVL_V1_5_LLaVADataset,
+    min_num=min_num,
+    max_num=max_num,
+    downsample_ratio=downsample_ratio,
+    offline_processed_text_folder=cache_4k_root + 'laion_coco_dataset_10m_6',
+    data_path=laion_data_path6,
+    image_folder=laion_image_folder,
+    tokenizer=tokenizer,
+    image_processor=image_processor,
+    dataset_map_fn=llava_map_fn,
+    encode_map_fn=dict(
+        type=internvl_1_5_encode_fn,
+        min_num=min_num,
+        max_num=max_num),
+    template_map_fn=dict(
+        type=template_map_fn_factory, template=prompt_template),
+    max_length=max_length)
+laion_coco_dataset7 = dict(
+    type=InternVL_V1_5_LLaVADataset,
+    min_num=min_num,
+    max_num=max_num,
+    downsample_ratio=downsample_ratio,
+    offline_processed_text_folder=cache_4k_root + 'laion_coco_dataset_10m_7',
+    data_path=laion_data_path7,
+    image_folder=laion_image_folder,
+    tokenizer=tokenizer,
+    image_processor=image_processor,
+    dataset_map_fn=llava_map_fn,
+    encode_map_fn=dict(
+        type=internvl_1_5_encode_fn,
+        min_num=min_num,
+        max_num=max_num),
+    template_map_fn=dict(
+        type=template_map_fn_factory, template=prompt_template),
+    max_length=max_length)
+
+
+###############################################################################333
+cache_4k_root = laion_ocr_data_root + 'phi3_mini_4k_offline/'
+laion_coco_ocr_dataset0 = dict(
+    type=InternVL_V1_5_LLaVADataset,
+    min_num=min_num,
+    max_num=max_num,
+    downsample_ratio=downsample_ratio,
+    offline_processed_text_folder=cache_4k_root + 'laion_coco_ocr_dataset_10m_0',
+    data_path=laion_ocr_data_path0,
+    image_folder=laion_image_folder,
+    tokenizer=tokenizer,
+    image_processor=image_processor,
+    dataset_map_fn=llava_map_fn,
+    encode_map_fn=dict(
+        type=internvl_1_5_encode_fn,
+        min_num=min_num,
+        max_num=max_num),
+    template_map_fn=dict(
+        type=template_map_fn_factory, template=prompt_template),
+    max_length=max_length)
+laion_coco_ocr_dataset1 = dict(
+    type=InternVL_V1_5_LLaVADataset,
+    min_num=min_num,
+    max_num=max_num,
+    downsample_ratio=downsample_ratio,
+    offline_processed_text_folder=cache_4k_root + 'laion_coco_ocr_dataset_10m_1',
+    data_path=laion_ocr_data_path1,
+    image_folder=laion_image_folder,
+    tokenizer=tokenizer,
+    image_processor=image_processor,
+    dataset_map_fn=llava_map_fn,
+    encode_map_fn=dict(
+        type=internvl_1_5_encode_fn,
+        min_num=min_num,
+        max_num=max_num),
+    template_map_fn=dict(
+        type=template_map_fn_factory, template=prompt_template),
+    max_length=max_length)
 
 # cache_2k_root = coyo_data_root + 'phi3_mini_2k_offline/'
 # coyo_dataset1 = dict(
@@ -198,14 +374,13 @@ laion_coco_dataset = dict(
 #         type=template_map_fn_factory, template=prompt_template),
 #     max_length=2048)
 
-cache_2k_root = share_data_root + 'phi3_mini_2k_offline/'
+cache_4k_root = share_data_root + 'phi3_mini_4k_offline/'
 sharegpt4v_dataset = dict(
     type=InternVL_V1_5_LLaVADataset,
-    use_patch=False,  # 由于 image token 很少，所以可能也不需要 4k 上下文
     min_num=min_num,
     max_num=max_num,
     downsample_ratio=downsample_ratio,
-    offline_processed_text_folder=cache_2k_root + 'sharegpt4v_dataset',
+    offline_processed_text_folder=cache_4k_root + 'sharegpt4v_dataset',
     data_path=sharegpt4v_data_path,
     image_folder=sharegpt4v_image_folder,
     tokenizer=tokenizer,
@@ -214,20 +389,18 @@ sharegpt4v_dataset = dict(
     encode_map_fn=dict(
         type=internvl_1_5_encode_fn,
         min_num=min_num,
-        max_num=max_num,
-        use_patch=False),  # 核心参数
+        max_num=max_num),
     template_map_fn=dict(
         type=template_map_fn_factory, template=prompt_template),
-    max_length=2048)
+    max_length=max_length)
 
-cache_2k_root = data_root + 'phi3_mini_2k_offline/'
+cache_4k_root = data_root + 'phi3_mini_4k_offline/'
 allava_laion_dataset = dict(
     type=InternVL_V1_5_LLaVADataset,
-    use_patch=False,
     min_num=min_num,
     max_num=max_num,
     downsample_ratio=downsample_ratio,
-    offline_processed_text_folder=cache_2k_root + 'allava_laion_dataset',
+    offline_processed_text_folder=cache_4k_root + 'allava_laion_dataset',
     data_path=allava_laion_data_path,
     image_folder=allava_laion_image_folder,
     tokenizer=tokenizer,
@@ -236,20 +409,18 @@ allava_laion_dataset = dict(
     encode_map_fn=dict(
         type=internvl_1_5_encode_fn,
         min_num=min_num,
-        max_num=max_num,
-        use_patch=False),  # 核心参数
+        max_num=max_num),
     template_map_fn=dict(
         type=template_map_fn_factory, template=prompt_template),
-    max_length=2048)
+    max_length=max_length)
 
-cache_2k_root = data_root + 'phi3_mini_2k_offline/'
+cache_4k_root = data_root + 'phi3_mini_4k_offline/'
 allava_vflan_dataset = dict(
     type=InternVL_V1_5_LLaVADataset,
-    use_patch=False,
     min_num=min_num,
     max_num=max_num,
     downsample_ratio=downsample_ratio,
-    offline_processed_text_folder=cache_2k_root + 'allava_vflan_dataset',
+    offline_processed_text_folder=cache_4k_root + 'allava_vflan_dataset',
     data_path=allava_vflan_data_path,
     image_folder=allava_vflan_image_folder,
     tokenizer=tokenizer,
@@ -258,19 +429,17 @@ allava_vflan_dataset = dict(
     encode_map_fn=dict(
         type=internvl_1_5_encode_fn,
         min_num=min_num,
-        max_num=max_num,
-        use_patch=False),  # 核心参数
+        max_num=max_num),
     template_map_fn=dict(
         type=template_map_fn_factory, template=prompt_template),
-    max_length=2048)
+    max_length=max_length)
 
 allava_text_dataset = dict(
     type=InternVL_V1_5_LLaVADataset,
-    use_patch=False,
     min_num=min_num,
     max_num=max_num,
     downsample_ratio=downsample_ratio,
-    offline_processed_text_folder=cache_2k_root + 'allava_text_dataset',
+    offline_processed_text_folder=cache_4k_root + 'allava_text_dataset',
     data_path=allava_text_data_path,
     tokenizer=tokenizer,
     image_processor=image_processor,
@@ -279,16 +448,17 @@ allava_text_dataset = dict(
     encode_map_fn=dict(
         type=internvl_1_5_encode_fn,
         min_num=min_num,
-        max_num=max_num,
-        use_patch=False),  # 核心参数
+        max_num=max_num),
     template_map_fn=dict(
         type=template_map_fn_factory, template=prompt_template),
-    max_length=2048)
+    max_length=max_length)
 
 train_dataset = dict(
     type=ConcatDataset,
     datasets=[
-        laion_coco_dataset, # coyo_dataset1, coyo_dataset2, coyo_dataset3,
+        laion_coco_dataset0, laion_coco_dataset1, laion_coco_dataset2, laion_coco_dataset3,
+        laion_coco_dataset4, laion_coco_dataset5, laion_coco_dataset6, laion_coco_dataset7,
+        laion_coco_ocr_dataset0, laion_coco_ocr_dataset1,
         sharegpt4v_dataset, allava_laion_dataset, allava_vflan_dataset,
         allava_text_dataset, allava_text_dataset
     ])
