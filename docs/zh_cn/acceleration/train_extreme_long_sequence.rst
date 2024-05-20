@@ -154,12 +154,14 @@ XTuner 序列并行支持情况
     - ❌
   * - internlm 2
     - ✅
-  * - llama 2
+  * - llama 2/3
     - ✅
-  * - mistral
+  * - mistral / mixtral
+    - ✅
+  * - qwen 1
     - ❌
-  * - qwen 1/1.5
-    - ❌
+  * - qwen 1.5 / qwen 1.5 moe
+    - ✅
   * - starcoder
     - ❌
   * - yi
