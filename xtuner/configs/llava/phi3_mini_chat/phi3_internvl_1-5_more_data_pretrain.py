@@ -52,14 +52,18 @@ laion_image_folder = 'public:s3://public-dataset/laion-coco/images/'
 
 # laion-coco-ocr
 laion_ocr_data_root = '/mnt/hwfile/xtuner/huanghaian/data/laion-coco/orig_merge_17m_ocr_data/'
-laion_ocr_data_path0 = laion_data_root + 'filter_data_0_llava.json'
-laion_ocr_data_path1 = laion_data_root + 'filter_data_1_llava.json'
+laion_ocr_data_path0 = laion_ocr_data_root + 'filter_data_0_llava.json'
+laion_ocr_data_path1 = laion_ocr_data_root + 'filter_data_1_llava.json'
 
 # coyo_data_root = '/mnt/hwfile/xtuner/huanghaian/data/COYO-700M/'
 # coyo_data_path1 = coyo_data_root + 'filter_rand_20m_llava_1.json'
 # coyo_data_path2 = coyo_data_root + 'filter_rand_20m_llava_2.json'
 # coyo_data_path3 = coyo_data_root + 'filter_rand_20m_llava_3.json'
 # coyo_image_folder = 'public:s3://public-dataset/COYO-700M/'
+
+coco_caption_data_root = '/mnt/hwfile/xtuner/huanghaian/data/coco_caption/'
+coco_caption_data_path = coco_caption_data_root + 'coco_karpathy_train_val_llava.json'
+coco_caption_image_folder = '/mnt/hwfile/xtuner/huanghaian/data/coco_caption/'
 
 max_length = 4096
 
@@ -453,12 +457,32 @@ allava_text_dataset = dict(
         type=template_map_fn_factory, template=prompt_template),
     max_length=max_length)
 
+cache_4k_root = coco_caption_data_root + 'phi3_mini_4k_offline/'
+coco_caption_dataset = dict(
+    type=InternVL_V1_5_LLaVADataset,
+    min_num=min_num,
+    max_num=max_num,
+    downsample_ratio=downsample_ratio,
+    offline_processed_text_folder=cache_4k_root + 'coco_karpathy_train_val_llava',
+    data_path=coco_caption_data_path,
+    image_folder=coco_caption_image_folder,
+    tokenizer=tokenizer,
+    image_processor=image_processor,
+    dataset_map_fn=llava_map_fn,
+    encode_map_fn=dict(
+        type=internvl_1_5_encode_fn,
+        min_num=min_num,
+        max_num=max_num),
+    template_map_fn=dict(
+        type=template_map_fn_factory, template=prompt_template),
+    max_length=max_length)
+
 train_dataset = dict(
     type=ConcatDataset,
     datasets=[
         laion_coco_dataset0, laion_coco_dataset1, laion_coco_dataset2, laion_coco_dataset3,
         laion_coco_dataset4, laion_coco_dataset5, laion_coco_dataset6, laion_coco_dataset7,
-        laion_coco_ocr_dataset0, laion_coco_ocr_dataset1,
+        laion_coco_ocr_dataset0, laion_coco_ocr_dataset1, coco_caption_dataset,
         sharegpt4v_dataset, allava_laion_dataset, allava_vflan_dataset,
         allava_text_dataset, allava_text_dataset
     ])
