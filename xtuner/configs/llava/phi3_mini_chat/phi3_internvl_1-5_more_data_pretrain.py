@@ -44,9 +44,12 @@ laion_data_root = '/mnt/hwfile/xtuner/huanghaian/data/laion-coco/'
 laion_data_path = laion_data_root + 'filter_rand_10m_llava.json'
 laion_image_folder = 'public:s3://public-dataset/laion-coco/images/'
 
-coyo_data_root = '/mnt/hwfile/xtuner/huanghaian/data/COYO-700M/'
-coyo_data_path = coyo_data_root + 'filter_rand_20m_llava.json'
-coyo_image_folder = 'public:s3://public-dataset/COYO-700M/'
+# coyo_data_root = '/mnt/hwfile/xtuner/huanghaian/data/COYO-700M/'
+# coyo_data_path1 = coyo_data_root + 'filter_rand_20m_llava_1.json'
+# coyo_data_path2 = coyo_data_root + 'filter_rand_20m_llava_2.json'
+# coyo_data_path3 = coyo_data_root + 'filter_rand_20m_llava_3.json'
+# coyo_image_folder = 'public:s3://public-dataset/COYO-700M/'
+
 
 prompt_template = PROMPT_TEMPLATE.phi3_chat
 
@@ -63,11 +66,11 @@ max_norm = 1  # grad clip
 warmup_ratio = 0.03
 
 # Save
-save_steps = 1000
+save_steps = 5000
 save_total_limit = 1  # Maximum checkpoints to keep (-1 means unlimited)
 
 # Evaluate the generation performance during the training
-evaluation_freq = 1000
+evaluation_freq = 5000
 SYSTEM = ''
 evaluation_images = 'https://llava-vl.github.io/static/images/view.jpg'
 evaluation_inputs = ['Please describe this picture']
@@ -131,27 +134,69 @@ laion_coco_dataset = dict(
         type=template_map_fn_factory, template=prompt_template),
     max_length=2048)
 
-cache_2k_root = coyo_data_root + 'phi3_mini_2k_offline/'
-coyo_dataset = dict(
-    type=InternVL_V1_5_LLaVADataset,
-    use_patch=False,  # 由于 image token 很少，所以可能也不需要 4k 上下文
-    min_num=min_num,
-    max_num=max_num,
-    downsample_ratio=downsample_ratio,
-    offline_processed_text_folder=cache_2k_root + 'coyo_dataset_20m',
-    data_path=coyo_data_path,
-    image_folder=coyo_image_folder,
-    tokenizer=tokenizer,
-    image_processor=image_processor,
-    dataset_map_fn=llava_map_fn,
-    encode_map_fn=dict(
-        type=internvl_1_5_encode_fn,
-        min_num=min_num,
-        max_num=max_num,
-        use_patch=False),  # 核心参数
-    template_map_fn=dict(
-        type=template_map_fn_factory, template=prompt_template),
-    max_length=2048)
+# cache_2k_root = coyo_data_root + 'phi3_mini_2k_offline/'
+# coyo_dataset1 = dict(
+#     type=InternVL_V1_5_LLaVADataset,
+#     use_patch=False,  # 由于 image token 很少，所以可能也不需要 4k 上下文
+#     min_num=min_num,
+#     max_num=max_num,
+#     downsample_ratio=downsample_ratio,
+#     offline_processed_text_folder=cache_2k_root + 'coyo_dataset_20m_1',
+#     data_path=coyo_data_path1,
+#     image_folder=coyo_image_folder,
+#     tokenizer=tokenizer,
+#     image_processor=image_processor,
+#     dataset_map_fn=llava_map_fn,
+#     encode_map_fn=dict(
+#         type=internvl_1_5_encode_fn,
+#         min_num=min_num,
+#         max_num=max_num,
+#         use_patch=False),  # 核心参数
+#     template_map_fn=dict(
+#         type=template_map_fn_factory, template=prompt_template),
+#     max_length=2048)
+#
+# coyo_dataset2 = dict(
+#     type=InternVL_V1_5_LLaVADataset,
+#     use_patch=False,  # 由于 image token 很少，所以可能也不需要 4k 上下文
+#     min_num=min_num,
+#     max_num=max_num,
+#     downsample_ratio=downsample_ratio,
+#     offline_processed_text_folder=cache_2k_root + 'coyo_dataset_20m_2',
+#     data_path=coyo_data_path2,
+#     image_folder=coyo_image_folder,
+#     tokenizer=tokenizer,
+#     image_processor=image_processor,
+#     dataset_map_fn=llava_map_fn,
+#     encode_map_fn=dict(
+#         type=internvl_1_5_encode_fn,
+#         min_num=min_num,
+#         max_num=max_num,
+#         use_patch=False),  # 核心参数
+#     template_map_fn=dict(
+#         type=template_map_fn_factory, template=prompt_template),
+#     max_length=2048)
+#
+# coyo_dataset3 = dict(
+#     type=InternVL_V1_5_LLaVADataset,
+#     use_patch=False,  # 由于 image token 很少，所以可能也不需要 4k 上下文
+#     min_num=min_num,
+#     max_num=max_num,
+#     downsample_ratio=downsample_ratio,
+#     offline_processed_text_folder=cache_2k_root + 'coyo_dataset_20m_3',
+#     data_path=coyo_data_path3,
+#     image_folder=coyo_image_folder,
+#     tokenizer=tokenizer,
+#     image_processor=image_processor,
+#     dataset_map_fn=llava_map_fn,
+#     encode_map_fn=dict(
+#         type=internvl_1_5_encode_fn,
+#         min_num=min_num,
+#         max_num=max_num,
+#         use_patch=False),  # 核心参数
+#     template_map_fn=dict(
+#         type=template_map_fn_factory, template=prompt_template),
+#     max_length=2048)
 
 cache_2k_root = share_data_root + 'phi3_mini_2k_offline/'
 sharegpt4v_dataset = dict(
@@ -243,7 +288,7 @@ allava_text_dataset = dict(
 train_dataset = dict(
     type=ConcatDataset,
     datasets=[
-        laion_coco_dataset, coyo_dataset,
+        laion_coco_dataset, # coyo_dataset1, coyo_dataset2, coyo_dataset3,
         sharegpt4v_dataset, allava_laion_dataset, allava_vflan_dataset,
         allava_text_dataset, allava_text_dataset
     ])
@@ -268,6 +313,8 @@ optim_wrapper = dict(
         type=optim_type, lr=lr, betas=betas, weight_decay=weight_decay),
     clip_grad=dict(max_norm=max_norm, error_if_nonfinite=False),
     accumulative_counts=accumulative_counts,
+    # constructor='LearningRateDecayOptimWrapperConstructor',  # ====================
+    # paramwise_cfg=dict(layer_decay_rate=0.9),  # vit-l
     loss_scale='dynamic',
     dtype='float16')
 
@@ -321,7 +368,7 @@ default_hooks = dict(
     # save checkpoint per `save_steps`.
     checkpoint=dict(
         type=CheckpointHook,
-        save_optimizer=True,
+        save_optimizer=False,
         by_epoch=False,
         interval=save_steps,
         max_keep_ckpts=save_total_limit),

@@ -116,7 +116,7 @@ class LLaVADataset(Dataset):
         return len(self.text_data)
 
     def get_image(self, path):
-        if path.startswith('s3://'):
+        if "s3://" in path:
             img_bytes = get(path)
             with io.BytesIO(img_bytes) as buff:
                 img = Image.open(buff).convert('RGB')
@@ -229,17 +229,18 @@ class InternVL_V1_5_LLaVADataset(LLaVADataset):
                 cur_len = -cur_len
         return cur_len
 
-    @property
-    def modality_length(self):
-        print_log('start calculating modality length', logger='current'),
-        with ThreadPoolExecutor(max_workers=16) as executor:
-            length_list = list(
-                tqdm(
-                    executor.map(self.__calc_fn, self.text_data),
-                    desc='Calculating modality length',
-                    total=len(self.text_data)))
-        print_log('end calculating modality length', logger='current'),
-        return length_list
+    # 太慢了，改离线吧
+    # @property
+    # def modality_length(self):
+    #     print_log('start calculating modality length', logger='current'),
+    #     with ThreadPoolExecutor(max_workers=16) as executor:
+    #         length_list = list(
+    #             tqdm(
+    #                 executor.map(self.__calc_fn, self.text_data),
+    #                 desc='Calculating modality length',
+    #                 total=len(self.text_data)))
+    #     print_log('end calculating modality length', logger='current'),
+    #     return length_list
 
     def __getitem__(self, index):
         for _ in range(self.max_refetch + 1):

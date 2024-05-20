@@ -39,9 +39,9 @@ class OpenaiBackend:
 
 
 class OpenAIModel(BaseModel):
-    def __init__(self):
+    def __init__(self, base_url):
         super().__init__()
-        self.model = OpenaiBackend(base_url='http://10.140.24.142:23333/v1')
+        self.model = OpenaiBackend(base_url=base_url)
 
     def forward(self, data, data_samples=None, mode='loss'):
         pixel_values = data['pixel_values'][0]
