@@ -204,43 +204,48 @@ class InternVL_V1_5_LLaVADataset(LLaVADataset):
         self.max_refetch = 1000
 
     def __calc_fn(self, data_dict):
-        cur_len = len(data_dict['input_ids'])
-        if data_dict.get('image', None) is not None:
-            cur_len = len(data_dict['input_ids'])
-            if data_dict.get('image', None) is not None:
-                image_file = data_dict['image']
-                assert 'image_wh' in data_dict
-                if 'image_wh' in data_dict:
-                    size = data_dict['image_wh'][0]
-                else:
-                    try:
-                        image = self.get_image(os.path.join(self.image_folder, image_file))
-                        size = image.size
-                    except Exception as e:
-                        print(f'Error: {e}', flush=True)
-                        print_log(f'Error: {e}', logger='current')
-                        size = [1, 1]
-                if self.use_patch:
-                    num_image_token = total_image_token(size, self.min_num, self.max_num, self._image_size,
-                                                        self._patch_size)
-                else:
-                    num_image_token = self._patch_size * self._patch_size
-                cur_len += num_image_token
-                cur_len = -cur_len
+        cur_len = data_dict['length']
+        # cur_len = len(data_dict['input_ids'])
+        # if data_dict.get('image', None) is not None:
+        #     cur_len = len(data_dict['input_ids'])
+        #     if data_dict.get('image', None) is not None:
+        #         image_file = data_dict['image']
+        #         assert 'image_wh' in data_dict
+        #         if 'image_wh' in data_dict:
+        #             size = data_dict['image_wh'][0]
+        #         else:
+        #             try:
+        #                 image = self.get_image(os.path.join(self.image_folder, image_file))
+        #                 size = image.size
+        #             except Exception as e:
+        #                 print(f'Error: {e}', flush=True)
+        #                 print_log(f'Error: {e}', logger='current')
+        #                 size = [1, 1]
+        #         if self.use_patch:
+        #             num_image_token = total_image_token(size, self.min_num, self.max_num, self._image_size,
+        #                                                 self._patch_size)
+        #         else:
+        #             num_image_token = self._patch_size * self._patch_size
+        #         cur_len += num_image_token
+        #         cur_len = -cur_len
         return cur_len
 
     # 太慢了，改离线吧
-    # @property
-    # def modality_length(self):
-    #     print_log('start calculating modality length', logger='current'),
-    #     with ThreadPoolExecutor(max_workers=16) as executor:
-    #         length_list = list(
-    #             tqdm(
-    #                 executor.map(self.__calc_fn, self.text_data),
-    #                 desc='Calculating modality length',
-    #                 total=len(self.text_data)))
-    #     print_log('end calculating modality length', logger='current'),
-    #     return length_list
+    @property
+    def modality_length(self):
+        # 可以超级加速
+        print_log('start calculating modality length', logger='current')
+        # with ThreadPoolExecutor(max_workers=16) as executor:
+        #     length_list = list(
+        #         tqdm(
+        #             executor.map(self.__calc_fn, self.text_data),
+        #             desc='Calculating modality length',
+        #             total=len(self.text_data)))
+        # print_log('end calculating modality length', logger='current')
+
+        length_list = self.text_data['length']
+        print_log('end calculating modality length', logger='current')
+        return length_list
 
     def __getitem__(self, index):
         for _ in range(self.max_refetch + 1):

@@ -82,11 +82,11 @@ max_norm = 1  # grad clip
 warmup_ratio = 0.03
 
 # Save
-save_steps = 5000
+save_steps = 10000
 save_total_limit = 1  # Maximum checkpoints to keep (-1 means unlimited)
 
 # Evaluate the generation performance during the training
-evaluation_freq = 5000
+evaluation_freq = 10000
 SYSTEM = ''
 evaluation_images = 'https://llava-vl.github.io/static/images/view.jpg'
 evaluation_inputs = ['Please describe this picture']
@@ -111,12 +111,13 @@ image_processor = dict(
 
 model = dict(
     type=InternVL_v1_5_LLaVAModel,
+    use_lldr=True,  # xxxxxxx
     downsample_ratio=downsample_ratio,
     tokenizer=tokenizer,
     template=prompt_template,
     image_processor=image_processor,
     freeze_llm=True,
-    freeze_visual_encoder=True,
+    freeze_visual_encoder=False,
     llm=dict(
         type=AutoModelForCausalLM.from_pretrained,
         pretrained_model_name_or_path=llm_name_or_path,
@@ -273,7 +274,6 @@ laion_coco_dataset7 = dict(
     template_map_fn=dict(
         type=template_map_fn_factory, template=prompt_template),
     max_length=max_length)
-
 
 ###############################################################################333
 cache_4k_root = laion_ocr_data_root + 'phi3_mini_4k_offline/'
@@ -477,14 +477,137 @@ coco_caption_dataset = dict(
         type=template_map_fn_factory, template=prompt_template),
     max_length=max_length)
 
+laion_gpt4v_root = '/mnt/hwfile/xtuner/huanghaian/data/laion_gpt4v/'
+laion_gpt4v_data_path = laion_gpt4v_root + 'laion_gpt4v_llava.json'
+laion_gpt4v_image_folder = laion_gpt4v_root + 'images/'
+
+cache_4k_root = laion_gpt4v_root + 'phi3_mini_4k_offline/'
+laion_gpt4v_dataset = dict(
+    type=InternVL_V1_5_LLaVADataset,
+    min_num=min_num,
+    max_num=max_num,
+    downsample_ratio=downsample_ratio,
+    offline_processed_text_folder=cache_4k_root + 'laion_gpt4v_llava',
+    data_path=laion_gpt4v_data_path,
+    image_folder=laion_gpt4v_image_folder,
+    tokenizer=tokenizer,
+    image_processor=image_processor,
+    dataset_map_fn=llava_map_fn,
+    encode_map_fn=dict(
+        type=internvl_1_5_encode_fn,
+        min_num=min_num,
+        max_num=max_num),
+    template_map_fn=dict(
+        type=template_map_fn_factory, template=prompt_template),
+    max_length=max_length)
+
+coco_text_root = '/mnt/hwfile/xtuner/huanghaian/data/coco_text/'
+coco_text_data_path = coco_text_root + 'cocotext_v2_llava.json'
+coco_text_image_folder = '/mnt/hwfile/xtuner/huanghaian/data/coco_text/'
+
+cache_4k_root = coco_text_root + 'phi3_mini_4k_offline/'
+coco_text_dataset = dict(
+    type=InternVL_V1_5_LLaVADataset,
+    min_num=min_num,
+    max_num=max_num,
+    downsample_ratio=downsample_ratio,
+    offline_processed_text_folder=cache_4k_root + 'coco_text_dataset',
+    data_path=coco_text_data_path,
+    image_folder=coco_text_image_folder,
+    tokenizer=tokenizer,
+    image_processor=image_processor,
+    dataset_map_fn=llava_map_fn,
+    encode_map_fn=dict(
+        type=internvl_1_5_encode_fn,
+        min_num=min_num,
+        max_num=max_num),
+    template_map_fn=dict(
+        type=template_map_fn_factory, template=prompt_template),
+    max_length=max_length)
+
+textcap_root = '/mnt/hwfile/xtuner/huanghaian/data/TextCaps/'
+textcap_data_path = textcap_root + 'TextCaps_0.1_train_val_llava.json'
+textcap_image_folder = '/mnt/hwfile/xtuner/huanghaian/data/TextCaps/'
+cache_4k_root = textcap_root + 'phi3_mini_4k_offline/'
+
+text_cap_dataset = dict(
+    type=InternVL_V1_5_LLaVADataset,
+    min_num=min_num,
+    max_num=max_num,
+    downsample_ratio=downsample_ratio,
+    offline_processed_text_folder=cache_4k_root + 'text_cap_dataset',
+    data_path=textcap_data_path,
+    image_folder=textcap_image_folder,
+    tokenizer=tokenizer,
+    image_processor=image_processor,
+    dataset_map_fn=llava_map_fn,
+    encode_map_fn=dict(
+        type=internvl_1_5_encode_fn,
+        min_num=min_num,
+        max_num=max_num),
+    template_map_fn=dict(
+        type=template_map_fn_factory, template=prompt_template),
+    max_length=max_length)
+
+textocr_gpt4v_root = '/mnt/hwfile/xtuner/huanghaian/data/TextOCR-GPT4V/'
+textocr_gpt4v_data_path = textocr_gpt4v_root + 'train_llava.json'
+textocr_gpt4v_image_folder = '/mnt/hwfile/xtuner/huanghaian/data/TextOCR-GPT4V/'
+cache_4k_root = textocr_gpt4v_root + 'phi3_mini_4k_offline/'
+
+textocr_gpt4v_dataset = dict(
+    type=InternVL_V1_5_LLaVADataset,
+    min_num=min_num,
+    max_num=max_num,
+    downsample_ratio=downsample_ratio,
+    offline_processed_text_folder=cache_4k_root + 'textocr_gpt4v_dataset',
+    data_path=textocr_gpt4v_data_path,
+    image_folder=textocr_gpt4v_image_folder,
+    tokenizer=tokenizer,
+    image_processor=image_processor,
+    dataset_map_fn=llava_map_fn,
+    encode_map_fn=dict(
+        type=internvl_1_5_encode_fn,
+        min_num=min_num,
+        max_num=max_num),
+    template_map_fn=dict(
+        type=template_map_fn_factory, template=prompt_template),
+    max_length=max_length)
+
+bunny_laion_root = '/mnt/hwfile/xtuner/huanghaian/data/Bunny-v1_0-data/pretrain/'
+bunny_laion_data_path = bunny_laion_root + 'bunny_pretrain_laion_2m_llava.json'
+bunny_laion_image_folder = '/mnt/hwfile/xtuner/huanghaian/data/Bunny-v1_0-data/pretrain/images'
+cache_4k_root = bunny_laion_root + 'phi3_mini_4k_offline/'
+
+bunny_laion_dataset = dict(
+    type=InternVL_V1_5_LLaVADataset,
+    min_num=min_num,
+    max_num=max_num,
+    downsample_ratio=downsample_ratio,
+    offline_processed_text_folder=cache_4k_root + 'bunny_laion_dataset',
+    data_path=bunny_laion_data_path,
+    image_folder=bunny_laion_image_folder,
+    tokenizer=tokenizer,
+    image_processor=image_processor,
+    dataset_map_fn=llava_map_fn,
+    encode_map_fn=dict(
+        type=internvl_1_5_encode_fn,
+        min_num=min_num,
+        max_num=max_num),
+    template_map_fn=dict(
+        type=template_map_fn_factory, template=prompt_template),
+    max_length=max_length)
+
+# 42m
 train_dataset = dict(
     type=ConcatDataset,
     datasets=[
-        laion_coco_dataset0, laion_coco_dataset1, laion_coco_dataset2, laion_coco_dataset3,
-        laion_coco_dataset4, laion_coco_dataset5, laion_coco_dataset6, laion_coco_dataset7,
+        # laion_coco_dataset0, laion_coco_dataset1, laion_coco_dataset2, laion_coco_dataset3,
+        # laion_coco_dataset4, laion_coco_dataset5, laion_coco_dataset6, laion_coco_dataset7,
+        laion_coco_dataset0, laion_coco_dataset5,
         laion_coco_ocr_dataset0, laion_coco_ocr_dataset1, coco_caption_dataset,
-        sharegpt4v_dataset, allava_laion_dataset, allava_vflan_dataset,
-        allava_text_dataset, allava_text_dataset
+        sharegpt4v_dataset, allava_laion_dataset, allava_vflan_dataset, laion_gpt4v_dataset,
+        allava_text_dataset, coco_text_dataset, text_cap_dataset, textocr_gpt4v_dataset,
+        bunny_laion_dataset
     ])
 
 train_dataloader = dict(
@@ -507,8 +630,8 @@ optim_wrapper = dict(
         type=optim_type, lr=lr, betas=betas, weight_decay=weight_decay),
     clip_grad=dict(max_norm=max_norm, error_if_nonfinite=False),
     accumulative_counts=accumulative_counts,
-    # constructor='LearningRateDecayOptimWrapperConstructor',  # ====================
-    # paramwise_cfg=dict(layer_decay_rate=0.9),  # vit-l
+    constructor='LearningRateDecayOptimWrapperConstructor',  # ====================
+    paramwise_cfg=dict(layer_decay_rate=0.9),  # vit-l
     loss_scale='dynamic',
     dtype='float16')
 
@@ -556,13 +679,13 @@ default_hooks = dict(
     # record the time of every iteration.
     timer=dict(type=IterTimerHook),
     # print log every 10 iterations.
-    logger=dict(type=LoggerHook, log_metric_by_epoch=False, interval=10),
+    logger=dict(type=LoggerHook, log_metric_by_epoch=False, interval=50),
     # enable the parameter scheduler.
     param_scheduler=dict(type=ParamSchedulerHook),
     # save checkpoint per `save_steps`.
     checkpoint=dict(
         type=CheckpointHook,
-        save_optimizer=False,
+        save_optimizer=True,
         by_epoch=False,
         interval=save_steps,
         max_keep_ckpts=save_total_limit),

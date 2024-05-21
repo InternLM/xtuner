@@ -14,10 +14,18 @@ from torch import distributed as dist
 from xtuner.registry import BUILDER, MAP_FUNC
 from .utils import Packer
 from .utils import encode_fn as default_encode_fn
+from .utils import total_image_token
 
 
 def get_lengths(example):
-    return {'length': len(example['input_ids'])}
+    cur_len = len(example['input_ids'])
+    if example.get('image', None) is not None:
+        assert 'image_wh' in example
+        size = example['image_wh'][0]
+        num_image_token = total_image_token(size, 1, 6, 336, 12)
+        cur_len += num_image_token
+        cur_len = -cur_len
+    return {'length': cur_len}
 
 
 def build_origin_dataset(dataset, split):
@@ -228,6 +236,7 @@ def process(dataset,
 
     # add 'length'
     dataset = dataset.map(get_lengths, num_proc=map_num_proc)
+    setattr(dataset, 'modality_length', dataset['length'])
     setattr(dataset, 'length', dataset['length'])
 
     return dataset
