@@ -1,17 +1,17 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from collections import OrderedDict
+from copy import deepcopy
 
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
+from mmengine import MessageHub
 from mmengine.config import Config, ConfigDict
 from mmengine.model import BaseModel
 from mmengine.runner import load_checkpoint
-from mmengine import MessageHub
 from peft import get_peft_model, prepare_model_for_kbit_training
 from torch import nn
 from transformers.integrations import is_deepspeed_zero3_enabled
-from copy import deepcopy
-import torch.distributed as dist
 
 from xtuner.registry import BUILDER
 from .modules import dispatch_modules
@@ -22,9 +22,10 @@ from .utils import (LoadWoInit, find_all_linear_names,
 
 def create_reference_model(model):
     if is_deepspeed_zero3_enabled():
-        raise ValueError(
-            'DeepSpeed ZeRO-3 is enabled and is not compatible with `create_reference_model()`. Please instantiate your reference model directly with `AutoCausalLM.from_pretrained()`.'
-        )
+        raise ValueError('DeepSpeed ZeRO-3 is enabled and is not compatible '
+                         'with `create_reference_model()`. Please instantiate '
+                         'your reference model directly with '
+                         '`AutoCausalLM.from_pretrained()`.')
 
     parameter_names = [n for n, _ in model.named_parameters()]
     ref_model = deepcopy(model)
@@ -143,75 +144,87 @@ class DPO(BaseModel):
         outputs = self.llm(**data)
         logits_dict = [{'logits': logits} for logits in outputs.logits]
         return logits_dict
-    
-    def get_logps(self,
-                  all_logits,  # bs, seqlen,vocab_size
-                  all_ref_logits,  # bs, seqlen,vocab_size
-                  labels,  # bs, seqlen
-                  loss_mask,  # bs, seqlen
-                ):
-        per_token_logps = torch.gather(
-            all_logits.log_softmax(-1), dim=2,
-            index=labels.unsqueeze(2)).squeeze(2)  # bs, seqlen
-        per_ref_token_logps = torch.gather(
-            all_ref_logits.log_softmax(-1), dim=2,
-            index=labels.unsqueeze(2)).squeeze(2)  # bs, seqlen
-        all_logps = (per_token_logps * loss_mask).sum(-1)  # bs
-        all_ref_logps = (per_ref_token_logps * loss_mask).sum(-1)
-        if self.loss_type == "ipo":  # average_log_prob
+
+    def _gather_masked_logits(self, logits, labels, mask):
+        logits = torch.gather(
+            logits.log_softmax(-1), dim=2,
+            index=labels.unsqueeze(2)).squeeze(2)
+        return logits * mask
+
+    def get_logps(
+            self,
+            all_logits,  # bs, seqlen,vocab_size
+            all_ref_logits,  # bs, seqlen,vocab_size
+            labels,  # bs, seqlen
+            loss_mask,  # bs, seqlen
+    ):
+        all_logps = self._gather_masked_logits(all_logits, labels,
+                                               loss_mask).sum(-1)
+        all_ref_logps = self._gather_masked_logits(all_ref_logits, labels,
+                                                   loss_mask).sum(-1)
+
+        if self.loss_type == 'ipo':  # average_log_prob
             all_logps = all_logps / loss_mask.sum(-1)
             all_ref_logps = all_ref_logps / loss_mask.sum(-1)
 
-        policy_chosen_logps = all_logps[::2]   # bs // 2
+        policy_chosen_logps = all_logps[::2]
         policy_rejected_logps = all_logps[1::2]
         reference_chosen_logps = all_ref_logps[::2]
         reference_rejected_logps = all_ref_logps[1::2]
-        # import ipdb; ipdb.set_trace()
-        return policy_chosen_logps, policy_rejected_logps, reference_chosen_logps, reference_rejected_logps
-    
+        return (policy_chosen_logps, policy_rejected_logps,
+                reference_chosen_logps, reference_rejected_logps)
 
     def get_var_len_atten_logps(
-            self,
-            all_logits,
-            all_ref_logits,
-            labels,
-            loss_mask,
-            cu_seqlens,
-            ):
-        per_token_logps = torch.gather(
-            all_logits.log_softmax(-1), dim=2,
-            index=labels.unsqueeze(2)).squeeze(2)
-        per_ref_token_logps = torch.gather(
-            all_ref_logits.log_softmax(-1), dim=2,
-            index=labels.unsqueeze(2)).squeeze(2)
-        masked_logps = per_token_logps * loss_mask
-        masked_ref_logps = per_ref_token_logps * loss_mask
+        self,
+        all_logits,
+        all_ref_logits,
+        labels,
+        loss_mask,
+        cu_seqlens,
+    ):
+        masked_logps = self._gather_masked_logits(all_logits, labels,
+                                                  loss_mask)
+        masked_ref_logps = self._gather_masked_logits(all_ref_logits, labels,
+                                                      loss_mask)
         seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
         # unpack sequence
         unpacked_logps = torch.split(masked_logps, seqlens, dim=1)
         unpacked_ref_logps = torch.split(masked_ref_logps, seqlens, dim=1)
         unpacked_mask = torch.split(loss_mask, seqlens, dim=1)
-        policy_chosen_logps = []
-        policy_rejected_logps = []
-        reference_chosen_logps = []
-        reference_rejected_logps = []
-        for i in range(len(unpacked_logps)//2):
-            policy_chosen_logp = unpacked_logps[2*i].sum(-1)
-            policy_rejected_logp = unpacked_logps[2*i+1].sum(-1)
-            reference_chosen_logp = unpacked_ref_logps[2*i].sum(-1)
-            reference_rejected_logp = unpacked_ref_logps[2*i+1].sum(-1)
-            policy_chosen_logps.append(policy_chosen_logp)
-            policy_rejected_logps.append(policy_rejected_logp)
-            reference_chosen_logps.append(reference_chosen_logp)
-            reference_rejected_logps.append(reference_rejected_logp)
-        policy_chosen_logps = torch.stack(policy_chosen_logps)
-        policy_rejected_logps = torch.stack(policy_rejected_logps)
-        reference_chosen_logps = torch.stack(reference_chosen_logps)
-        reference_rejected_logps = torch.stack(reference_rejected_logps)
-        return policy_chosen_logps, policy_rejected_logps, reference_chosen_logps, reference_rejected_logps
+
+        def compute_logps(logps, mask, idx, loss_type):
+            logp = logps[idx].sum(-1)
+            if loss_type == 'ipo':
+                logp /= mask[idx].sum(-1)
+            return logp
+
+        policy_chosen_logps = [
+            compute_logps(unpacked_logps, unpacked_mask, 2 * i, self.loss_type)
+            for i in range(len(unpacked_logps) // 2)
+        ]
+        policy_rejected_logps = [
+            compute_logps(unpacked_logps, unpacked_mask, 2 * i + 1,
+                          self.loss_type)
+            for i in range(len(unpacked_logps) // 2)
+        ]
+        reference_chosen_logps = [
+            compute_logps(unpacked_ref_logps, unpacked_mask, 2 * i,
+                          self.loss_type)
+            for i in range(len(unpacked_ref_logps) // 2)
+        ]
+        reference_rejected_logps = [
+            compute_logps(unpacked_ref_logps, unpacked_mask, 2 * i + 1,
+                          self.loss_type)
+            for i in range(len(unpacked_ref_logps) // 2)
+        ]
+
+        return (torch.stack(policy_chosen_logps),
+                torch.stack(policy_rejected_logps),
+                torch.stack(reference_chosen_logps),
+                torch.stack(reference_rejected_logps))
 
     def compute_loss(self, data, data_samples=None):
-        # refer to https://github.com/huggingface/trl/blob/main/trl/trainer/dpo_trainer.py
+        # refer to https://github.com/huggingface/trl/blob/main/trl/trainer/dpo_trainer.py  # noqa
         all_logits = self.llm(**data).logits
         with torch.no_grad():
             if self.ref_llm is None:
@@ -224,16 +237,18 @@ class DPO(BaseModel):
         labels[labels == -100] = 0
         loss_mask = labels != 0
         if not self.use_varlen_attn:
-            (policy_chosen_logps, policy_rejected_logps, reference_chosen_logps, 
-            reference_rejected_logps) = self.get_logps(
-                all_logits, all_ref_logits, labels, loss_mask)
+            (policy_chosen_logps, policy_rejected_logps,
+             reference_chosen_logps,
+             reference_rejected_logps) = self.get_logps(
+                 all_logits, all_ref_logits, labels, loss_mask)
         else:
             message_hub = MessageHub.get_instance('varlen_attn_args')
             rank = dist.get_rank()
             cu_seqlens = message_hub.get_info(f'cumulative_len_rank_{rank}')
-            (policy_chosen_logps, policy_rejected_logps, reference_chosen_logps, 
-            reference_rejected_logps) = self.get_var_len_atten_logps(
-                all_logits, all_ref_logits, labels, loss_mask, cu_seqlens)
+            (policy_chosen_logps, policy_rejected_logps,
+             reference_chosen_logps,
+             reference_rejected_logps) = self.get_var_len_atten_logps(
+                 all_logits, all_ref_logits, labels, loss_mask, cu_seqlens)
 
         pi_logratios = policy_chosen_logps - policy_rejected_logps
         ref_logratios = reference_chosen_logps - reference_rejected_logps
@@ -246,7 +261,7 @@ class DPO(BaseModel):
         elif self.loss_type == 'hinge':
             loss = torch.relu(1 - self.beta * logits)
         elif self.loss_type == 'ipo':
-            # eqn (17) of the paper where beta is the regularization parameter for the IPO loss, denoted by tau in the paper.
+            # eqn (17) of the paper where beta is the regularization parameter for the IPO loss, denoted by tau in the paper.  # noqa
             loss = (logits - 1 / (2 * self.beta))**2
         elif self.loss_type == 'kto_pair':
             # eqn (7) of the HALOs paper
@@ -256,8 +271,9 @@ class DPO(BaseModel):
                            reference_rejected_logps).mean().clamp(min=0)
 
             chosen_logratios = policy_chosen_logps - reference_chosen_logps
-            rejected_logratios = policy_rejected_logps - reference_rejected_logps
-            # As described in the KTO report, the KL term for chosen (rejected) is estimated using the rejected (chosen) half.
+            rejected_logratios = \
+                policy_rejected_logps - reference_rejected_logps
+            # As described in the KTO report, the KL term for chosen (rejected) is estimated using the rejected (chosen) half.  # noqa
             loss = torch.cat(
                 (
                     1 - F.sigmoid(self.beta *
@@ -269,8 +285,8 @@ class DPO(BaseModel):
             )
         else:
             raise ValueError(
-                f"Unknown loss type: {self.loss_type}. Should be one of ['sigmoid', 'hinge', 'ipo', 'kto_pair']"
-            )
+                f'Unknown loss type: {self.loss_type}. '
+                "Should be one of ['sigmoid', 'hinge', 'ipo', 'kto_pair']")
         chosen_rewards = self.beta * (
             policy_chosen_logps - reference_chosen_logps)
         rejected_rewards = self.beta * (
