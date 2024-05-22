@@ -7,7 +7,6 @@ import torch
 import torch.distributed as dist
 from mmengine import print_log
 from mmengine.config import Config, ConfigDict
-from mmengine.logging import MessageHub
 from mmengine.model import BaseModel
 from mmengine.runner import load_checkpoint
 from peft import get_peft_model, prepare_model_for_kbit_training
@@ -15,10 +14,6 @@ from torch import nn
 from transformers import AutoConfig, PreTrainedModel, PreTrainedTokenizer
 from transformers.integrations import is_deepspeed_zero3_enabled
 
-from xtuner.parallel.sequence import (get_sequence_parallel_group,
-                                      get_sequence_parallel_world_size,
-                                      reduce_sequence_parallel_loss,
-                                      split_for_sequence_parallel)
 from xtuner.registry import BUILDER
 from .modules import dispatch_modules
 from .modules.dispatch import SUPPORT_FLASH1, SUPPORT_FLASH2
@@ -81,19 +76,20 @@ def smart_tokenizer_and_embedding_resize(
 
 class RewardModel(BaseModel):
 
-    def __init__(self,
-                 llm,
-                 lora=None,
-                 peft_model=None,
-                 use_activation_checkpointing=True,
-                 use_varlen_attn=False,
-                 tokenizer=None,
-                 max_position_embeddings=None,
-                 reward_token_id=None,
-                 loss_type='ranking',
-                 penalty_type='log_barrier',
-                 penalty_weight=0.01,
-                 ):
+    def __init__(
+        self,
+        llm,
+        lora=None,
+        peft_model=None,
+        use_activation_checkpointing=True,
+        use_varlen_attn=False,
+        tokenizer=None,
+        max_position_embeddings=None,
+        reward_token_id=None,
+        loss_type='ranking',
+        penalty_type='log_barrier',
+        penalty_weight=0.01,
+    ):
         super().__init__()
         with LoadWoInit():
             if isinstance(llm, dict):
@@ -102,11 +98,14 @@ class RewardModel(BaseModel):
             self.v_head = nn.Linear(self.llm.config.hidden_size, 1, bias=False)
             # zero init
             self.v_head.weight.data.zero_()
-        
+
         self.reward_token_id = reward_token_id
-        assert loss_type in ('ranking', 'focal'), f'Unsupported loss type {loss_type}'
+        assert loss_type in ('ranking',
+                             'focal'), f'Unsupported loss type {loss_type}'
         self.loss_type = loss_type
-        assert penalty_type in ('log_barrier', 'L2', 'none'), f'Unsupported penalty type {penalty_type}'
+        assert penalty_type in (
+            'log_barrier', 'L2',
+            'none'), f'Unsupported penalty type {penalty_type}'
         self.penalty_type = penalty_type
         self.penalty_weight = penalty_weight
 
@@ -267,93 +266,95 @@ class RewardModel(BaseModel):
     def predict(self, data, data_samples=None):
         hidden_states = self.llm(**data)[0]
         logits = self.v_head(hidden_states)
-        logits_dict = [{'logits': l} for l in logits]
+        logits_dict = [{'logits': log} for log in logits]
         return logits_dict
 
     def compute_loss(self, data, labels=None):
-        if get_sequence_parallel_world_size() > 1:
-            return self._compute_sequence_parallel_loss(data)
+        hidden_states = self.llm(**data)[0]
+        logits = self.v_head(hidden_states)
+        chosen_idx = torch.where(labels == 0)
+        rejected_idx = torch.where(labels == 1)
+        chosen_logits = logits[chosen_idx]
+        rejected_logits = logits[rejected_idx]
+
+        num_samples = torch.tensor(len(chosen_logits)).float().to(
+            hidden_states.device)
+        avg_factor = 1.0 / num_samples
+        avg_factor = reduce_mean(avg_factor).to(hidden_states.device)
+
+        chosen_mean = reduce_mean(chosen_logits.mean().detach())
+        rejected_mean = reduce_mean(rejected_logits.mean().detach())
+        acc = reduce_mean(
+            (chosen_logits > rejected_logits).sum() / num_samples).detach()
+        num_tokens = torch.tensor(labels.shape[1]).float()
+
+        # ranking loss
+        if self.loss_type == 'ranking':
+            rank_loss = self.ranking_loss(
+                chosen_logits, rejected_logits, avg_factor=avg_factor)
+        elif self.loss_type == 'focal':
+            rank_loss = self.focal_loss(
+                chosen_logits, rejected_logits, avg_factor=avg_factor)
         else:
-            hidden_states = self.llm(**data)[0]
-            logits = self.v_head(hidden_states)
-            chosen_idx = torch.where(labels == 0)
-            rejected_idx = torch.where(labels == 1)
-            chosen_logits = logits[chosen_idx]
-            rejected_logits = logits[rejected_idx]
+            raise NotImplementedError(
+                f'Unsupported loss type {self.loss_type}')
 
-            num_samples = torch.tensor(len(chosen_logits)).float().to(hidden_states.device)
-            avg_factor = 1.0 / num_samples
-            avg_factor = reduce_mean(avg_factor).to(hidden_states.device)
+        # penalty loss
+        if self.penalty_type == 'log_barrier':
+            penalty = self.log_barrier_penalty(
+                torch.cat([chosen_logits, rejected_logits]),
+                lower_bound=-5,
+                upper_bound=5,
+                avg_factor=avg_factor)
+        elif self.penalty_type == 'L2':
+            penalty = self.l2_penalty(
+                torch.cat([chosen_logits, rejected_logits]),
+                avg_factor=avg_factor)
+        elif self.penalty_type == 'none':
+            penalty = 0
+        else:
+            raise NotImplementedError(
+                f'Unsupported penalty type {self.penalty_type}')
 
-            chosen_mean = reduce_mean(
-                chosen_logits.mean().detach())
-            rejected_mean = reduce_mean(
-                rejected_logits.mean().detach())
-            acc = reduce_mean(
-                (chosen_logits > rejected_logits).sum() / num_samples).detach()
-            num_tokens = torch.tensor(labels.shape[1]).float()
+        loss = rank_loss + self.penalty_weight * penalty
+        loss_dict = {
+            'loss': loss,
+            'acc': acc,
+            'chosen_score_mean': chosen_mean,
+            'rejected_score_mean': rejected_mean,
+            'num_samples': num_samples,
+            'num_tokens': num_tokens,
+        }
 
-            # ranking loss
-            if self.loss_type == 'ranking':
-                rank_loss = self.ranking_loss(chosen_logits, rejected_logits, avg_factor=avg_factor)
-            elif self.loss_type == 'focal':
-                rank_loss = self.focal_loss(chosen_logits, rejected_logits, avg_factor=avg_factor)
-            else:
-                raise NotImplementedError(f'Unsupported loss type {self.loss_type}')
-            
-            # penalty loss
-            if self.penalty_type == 'log_barrier':
-                penalty = self.log_barrier_penalty(
-                    torch.cat([chosen_logits, rejected_logits]),
-                    lower_bound=-5,
-                    upper_bound=5,
-                    avg_factor=avg_factor)
-            elif self.penalty_type == 'L2':
-                penalty = self.l2_penalty(
-                    torch.cat([chosen_logits, rejected_logits]),
-                    avg_factor=avg_factor)
-            elif self.penalty_type == 'none':
-                penalty = 0
-            else:
-                raise NotImplementedError(f'Unsupported penalty type {self.penalty_type}')
+        return loss_dict
 
-            loss = rank_loss + self.penalty_weight * penalty
-            loss_dict = {'loss': loss, 
-                         'acc': acc, 
-                         'chosen_score_mean': chosen_mean, 
-                         'rejected_score_mean': rejected_mean,
-                         'num_samples': num_samples,
-                         'num_tokens': num_tokens,}
-
-            return loss_dict
-    
     def ranking_loss(self, chosen_logits, rejected_logits, avg_factor):
         rank_loss = -nn.functional.logsigmoid(chosen_logits - rejected_logits)
         return rank_loss.sum() * avg_factor
-    
+
     def focal_loss(self, chosen_logits, rejected_logits, avg_factor):
-        # focal ranking loss from InternLM2 paper https://arxiv.org/abs/2403.17297
+        # focal ranking loss from InternLM2 paper https://arxiv.org/abs/2403.17297  # noqa
         rank_loss = -nn.functional.logsigmoid(chosen_logits - rejected_logits)
         p_ij = torch.sigmoid(chosen_logits - rejected_logits)
         p = 2 * torch.relu(p_ij - 0.5)
         gamma = 2
         focal_loss = ((1 - p)**gamma) * rank_loss
         return focal_loss.sum() * avg_factor
-    
+
     def log_barrier_penalty(self,
                             logits,
                             lower_bound,
                             upper_bound,
                             epsilon=1e-3,
                             avg_factor=1):
-        # log barrier penalty from InternLM2 paper https://arxiv.org/abs/2403.17297
+        # log barrier penalty from InternLM2 paper https://arxiv.org/abs/2403.17297  # noqa
         logits_fp32 = logits.float()
         logits_clamped = torch.clamp(logits_fp32, lower_bound + epsilon,
-                                    upper_bound - epsilon)
+                                     upper_bound - epsilon)
         penalty = -torch.log(upper_bound - logits_clamped) - torch.log(
             logits_clamped - lower_bound)
         return penalty.sum() * avg_factor
-    
+
     def l2_penalty(self, logits, avg_factor=1):
         return (logits**2).sum() * avg_factor
 
