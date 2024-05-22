@@ -25,6 +25,8 @@ from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
 pretrained_model_name_or_path = '/cpfs01/shared/public/public_hdd/llmeval/model_weights/hf_hub/models--internlm--internlm2-chat-1_8b-sft/snapshots/08fa4ec0966ea04900d4a47c3747e66dde730d92'
 use_varlen_attn = False
 reward_token_id = 92527
+loss_type = 'focal'
+penalty_type = 'log_barrier'
 
 # Data
 prompt_template = PROMPT_TEMPLATE.internlm2_chat
@@ -61,6 +63,8 @@ tokenizer = dict(
 model = dict(
     type=RewardModel,
     use_varlen_attn=use_varlen_attn,
+    loss_type=loss_type,
+    penalty_type=penalty_type,
     llm=dict(
         type=AutoModelForCausalLM.from_pretrained,
         pretrained_model_name_or_path=pretrained_model_name_or_path,
