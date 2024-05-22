@@ -1,27 +1,19 @@
-import json
-import warnings
-from functools import partial
-import hashlib
-import math
-import os
-import re
-from typing import List
-from datetime import timedelta
 import copy
+import os
+from datetime import timedelta
+from functools import partial
+from multiprocessing import Process, Queue
+from typing import Callable, Dict, List
 
 import numpy as np
 import torch.distributed as dist
-import datasets
+import tqdm
 from datasets import Dataset as HFDataset
-from datasets import concatenate_datasets
-from mmengine.utils.misc import get_object_from_string
 from mmengine.config import Config, ConfigDict
 from mmengine.logging import print_log
+from mmengine.utils.misc import get_object_from_string
 from torch.utils.data import Dataset
 from transformers import AutoTokenizer
-from multiprocessing import Process, Queue
-from typing import Callable, Dict, List
-import tqdm
 
 from xtuner.registry import BUILDER, MAP_FUNC
 from .huggingface import build_origin_dataset
@@ -45,7 +37,7 @@ def _worker(
 
 
 def _chunk_data_to_queue(data_queue: Queue, data: List[Dict], chunk_size: int,
-                        nproc):
+                         nproc):
     data_iter = iter(data)
     chunk_data = []
     while True:
@@ -65,7 +57,7 @@ def _chunk_data_to_queue(data_queue: Queue, data: List[Dict], chunk_size: int,
 
 
 def _multi_progress(tokenize_fun_p, dataset, nproc, task_num, chunksize,
-                   description):
+                    description):
     processes = []
     data_queue = Queue()
     output_queue = Queue()
@@ -75,8 +67,7 @@ def _multi_progress(tokenize_fun_p, dataset, nproc, task_num, chunksize,
     _chunk_data_to_queue(data_queue, dataset, chunksize, nproc)
     for _ in range(nproc):
         process = Process(
-            target=_worker,
-            args=(tokenize_fun_p, data_queue, output_queue))
+            target=_worker, args=(tokenize_fun_p, data_queue, output_queue))
         process.start()
         processes.append(process)
 
@@ -94,16 +85,21 @@ def _multi_progress(tokenize_fun_p, dataset, nproc, task_num, chunksize,
     return results
 
 
-def tokenize(pair: str, 
-             tokenizer: AutoTokenizer, 
+def tokenize(pair: str,
+             tokenizer: AutoTokenizer,
              max_length: int,
              is_reward: bool = False,
              reward_token_id: int = -1):
-    prompt = tokenizer.apply_chat_template(pair['prompt'], tokenize=False, add_generation_prompt=True)
+    prompt = tokenizer.apply_chat_template(
+        pair['prompt'], tokenize=False, add_generation_prompt=True)
     chosen = tokenizer.apply_chat_template(
-        pair['prompt'] + pair['chosen'], tokenize=False, add_generation_prompt=False)
+        pair['prompt'] + pair['chosen'],
+        tokenize=False,
+        add_generation_prompt=False)
     rejected = tokenizer.apply_chat_template(
-        pair['prompt'] + pair['rejected'], tokenize=False, add_generation_prompt=False)
+        pair['prompt'] + pair['rejected'],
+        tokenize=False,
+        add_generation_prompt=False)
     prompt_ids = tokenizer.encode(prompt, add_special_tokens=False)
     chosen_ids = tokenizer.encode(chosen, add_special_tokens=False)
     rejected_ids = tokenizer.encode(rejected, add_special_tokens=False)
@@ -122,31 +118,38 @@ def tokenize(pair: str,
     else:
         # dpo label
         prompt_len = min(len(prompt_ids), max_length)
-        chosen_labels = [-100] * prompt_len + copy.deepcopy(chosen_ids[prompt_len:])
-        rejected_labels = [-100] * prompt_len + copy.deepcopy(rejected_ids[prompt_len:])
-    
+        chosen_labels = [-100] * prompt_len + copy.deepcopy(
+            chosen_ids[prompt_len:])
+        rejected_labels = [-100] * prompt_len + copy.deepcopy(
+            rejected_ids[prompt_len:])
+
     return {
-        "chosen_ids": chosen_ids,
-        "rejected_ids": rejected_ids,
-        "chosen_labels": chosen_labels,
-        "rejected_labels": rejected_labels,
+        'chosen_ids': chosen_ids,
+        'rejected_ids': rejected_ids,
+        'chosen_labels': chosen_labels,
+        'rejected_labels': rejected_labels,
     }
 
+
 class PreferenceDataset(Dataset):
-    def __init__(self, 
-                 dataset: HFDataset, 
-                 tokenizer: AutoTokenizer,
-                 max_length: int,
-                 is_dpo: bool = True,
-                 is_reward: bool = False,
-                 reward_token_id: int = -1,
-                 num_proc: int = 32,
+
+    def __init__(
+        self,
+        dataset: HFDataset,
+        tokenizer: AutoTokenizer,
+        max_length: int,
+        is_dpo: bool = True,
+        is_reward: bool = False,
+        reward_token_id: int = -1,
+        num_proc: int = 32,
     ) -> None:
         self.tokenizer = tokenizer
         self.max_length = max_length
-        assert is_dpo != is_reward, "Only one of is_dpo and is_reward can be True"
+        assert is_dpo != is_reward, \
+            'Only one of is_dpo and is_reward can be True'
         if is_reward:
-            assert reward_token_id != -1, "reward_token_id should be set if is_reward is True"
+            assert reward_token_id != -1, \
+                'reward_token_id should be set if is_reward is True'
 
         self.is_dpo = is_dpo
         self.is_reward = is_reward
@@ -154,33 +157,38 @@ class PreferenceDataset(Dataset):
         self.tokenized_pairs = []
 
         for tokenized_pair in _multi_progress(
-            partial(tokenize, tokenizer=tokenizer, max_length=max_length, is_reward=is_reward, reward_token_id=reward_token_id),
-            dataset,
-            nproc=num_proc,
-            task_num=len(dataset),
-            chunksize=num_proc,
-            description="Tokenizing dataset"
-        ):
+                partial(
+                    tokenize,
+                    tokenizer=tokenizer,
+                    max_length=max_length,
+                    is_reward=is_reward,
+                    reward_token_id=reward_token_id),
+                dataset,
+                nproc=num_proc,
+                task_num=len(dataset),
+                chunksize=num_proc,
+                description='Tokenizing dataset'):
             self.tokenized_pairs.append(tokenized_pair)
 
     def __len__(self):
         return len(self.tokenized_pairs)
-    
+
     def __getitem__(self, idx):
         return self.tokenized_pairs[idx]
-    
+
 
 class PackedDatasetWrapper(Dataset):
-    def __init__(self, 
-                 dataset, 
-                 max_packed_length=16384, 
+
+    def __init__(self,
+                 dataset,
+                 max_packed_length=16384,
                  shuffle_before_pack=True,
                  seed=42) -> None:
         super().__init__()
         self.max_packed_length = max_packed_length
         self.lengths = []
         self.data = []
-        
+
         indices = np.arange(len(dataset))
         if shuffle_before_pack:
             np_random = np.random.RandomState(seed)
@@ -191,12 +199,16 @@ class PackedDatasetWrapper(Dataset):
         removed = 0
         for idx in indices:
             data = dataset[int(idx)]
-            cur_len = len(data["chosen_ids"]) + len(data["rejected_ids"])
+            cur_len = len(data['chosen_ids']) + len(data['rejected_ids'])
             if cur_len > max_packed_length:
-                print(f"sequence length {cur_len} is larger than max_packed_length {max_packed_length}")
+                print_log(
+                    f'sequence length {cur_len} is '
+                    f'larger than max_packed_length {max_packed_length}',
+                    logger='current')
                 removed += 1
                 continue
-            if (bin_seq_len + cur_len) > max_packed_length and len(data_bin) > 0:
+            if (bin_seq_len +
+                    cur_len) > max_packed_length and len(data_bin) > 0:
                 self.data.append(data_bin)
                 self.lengths.append(bin_seq_len)
                 data_bin = []
@@ -208,11 +220,15 @@ class PackedDatasetWrapper(Dataset):
             self.data.append(data_bin)
             self.lengths.append(bin_seq_len)
         if removed > 0:
-            print(f"removed {removed} samples because of length larger than {max_packed_length}")
-        print(
-            f"The batch numbers of dataset is changed "
-            f"from {len(dataset)} to {len(self)} after using var len attention."
-        )
+            print_log(
+                f'removed {removed} samples because '
+                f'of length larger than {max_packed_length}',
+                logger='current')
+        print_log(
+            f'The batch numbers of dataset is changed '
+            f'from {len(dataset)} to {len(self)} after'
+            ' using var len attention.',
+            logger='current')
 
     def __len__(self):
         return len(self.data)
@@ -222,26 +238,29 @@ class PackedDatasetWrapper(Dataset):
         input_ids, cu_seqlens, position_ids, labels = [], [0], [], []
 
         for pair in pairs:
-            input_ids.extend(pair["chosen_ids"])
-            input_ids.extend(pair["rejected_ids"])
+            input_ids.extend(pair['chosen_ids'])
+            input_ids.extend(pair['rejected_ids'])
 
-            position_ids.extend(list(range(len(pair["chosen_ids"]))))
-            position_ids.extend(list(range(len(pair["rejected_ids"]))))
+            position_ids.extend(list(range(len(pair['chosen_ids']))))
+            position_ids.extend(list(range(len(pair['rejected_ids']))))
 
-            labels.extend(pair["chosen_labels"])
-            labels.extend(pair["rejected_labels"])
+            labels.extend(pair['chosen_labels'])
+            labels.extend(pair['rejected_labels'])
 
-            cu_seqlens.append(cu_seqlens[-1] + len(pair["chosen_ids"]))
-            cu_seqlens.append(cu_seqlens[-1] + len(pair["rejected_ids"]))
+            cu_seqlens.append(cu_seqlens[-1] + len(pair['chosen_ids']))
+            cu_seqlens.append(cu_seqlens[-1] + len(pair['rejected_ids']))
 
-        return {"input_ids": input_ids,
-                "labels": labels,
-                "position_ids": position_ids,
-                "cumulative_len": cu_seqlens}
+        return {
+            'input_ids': input_ids,
+            'labels': labels,
+            'position_ids': position_ids,
+            'cumulative_len': cu_seqlens
+        }
 
 
 def unpack_seq(seq, cu_seqlens):
-    """Unpack a packed sequence to a list of sequences with different lengths."""
+    """Unpack a packed sequence to a list of sequences with different
+    lengths."""
     seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
     subseqs = seq.split(seqlens)
     return subseqs
@@ -254,14 +273,16 @@ def broad_cast_dataset(dataset):
         f'xtuner_dataset_timeout = {xtuner_dataset_timeout}', logger='current')
     using_dist = dist.is_available() and dist.is_initialized()
     if using_dist:
-        # monitored barrier requires gloo process group to perform host-side sync.
-        group_gloo = dist.new_group(backend='gloo', timeout=xtuner_dataset_timeout)
+        # monitored barrier requires gloo process group to perform host-side sync.  # noqa
+        group_gloo = dist.new_group(
+            backend='gloo', timeout=xtuner_dataset_timeout)
     if not using_dist or dist.get_rank() == 0:
         objects = [dataset]
     else:
         objects = [None]
     if using_dist:
-        dist.monitored_barrier(group=group_gloo, timeout=xtuner_dataset_timeout)
+        dist.monitored_barrier(
+            group=group_gloo, timeout=xtuner_dataset_timeout)
         dist.broadcast_object_list(objects, src=0)
     return objects[0]
 
@@ -304,7 +325,8 @@ def build_preference_dataset(
 
         dataset = build_origin_dataset(dataset, split='train')
         if dataset_map_fn is not None:
-            dataset = map_dataset(dataset, dataset_map_fn, map_num_proc=num_proc)
+            dataset = map_dataset(
+                dataset, dataset_map_fn, map_num_proc=num_proc)
 
         tokenized_ds = PreferenceDataset(
             dataset=dataset,
@@ -327,16 +349,21 @@ def build_preference_dataset(
 
 
 def intel_orca_dpo_map_fn(example):
-    prompt = [{"role": "system", "content": example["system"]}, 
-              {"role": "user", "content": example["question"]}]
-    chosen = [{"role": "assistant", "content": example["chosen"]}]
-    rejected = [{"role": "assistant", "content": example["rejected"]}]
-    return {"prompt": prompt, "chosen": chosen, "rejected": rejected}
+    prompt = [{
+        'role': 'system',
+        'content': example['system']
+    }, {
+        'role': 'user',
+        'content': example['question']
+    }]
+    chosen = [{'role': 'assistant', 'content': example['chosen']}]
+    rejected = [{'role': 'assistant', 'content': example['rejected']}]
+    return {'prompt': prompt, 'chosen': chosen, 'rejected': rejected}
 
 
 def orpo_dpo_mix_40k_map_fn(example):
-    assert len(example["chosen"]) == len(example["rejected"])
-    prompt = example["chosen"][:-1]
-    chosen = example["chosen"][-1:]
-    rejected = example["rejected"][-1:]
-    return {"prompt": prompt, "chosen": chosen, "rejected": rejected}
+    assert len(example['chosen']) == len(example['rejected'])
+    prompt = example['chosen'][:-1]
+    chosen = example['chosen'][-1:]
+    rejected = example['rejected'][-1:]
+    return {'prompt': prompt, 'chosen': chosen, 'rejected': rejected}
