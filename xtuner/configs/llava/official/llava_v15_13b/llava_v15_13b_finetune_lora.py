@@ -35,7 +35,7 @@ max_length = int(2048 - (336 / 14)**2)
 # Scheduler & Optimizer
 batch_size = 16  # per_device
 accumulative_counts = 1
-dataloader_num_workers = 0
+dataloader_num_workers = 4
 max_epochs = 1
 optim_type = AdamW
 lr = 2e-4
@@ -70,7 +70,7 @@ image_processor = dict(
 
 model = dict(
     type=LLaVAModel,
-    freeze_llm=False,
+    freeze_llm=True,
     freeze_visual_encoder=True,
     pretrained_pth=pretrained_pth,
     llm=dict(
@@ -106,6 +106,7 @@ llava_dataset = dict(
 train_dataloader = dict(
     batch_size=batch_size,
     num_workers=dataloader_num_workers,
+    pin_memory=True,
     dataset=llava_dataset,
     sampler=dict(
         type=LengthGroupedSampler,

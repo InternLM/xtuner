@@ -458,7 +458,10 @@ def main():
                 cur_encode = tokenizer.encode(chunk, add_special_tokens=False)
             chunk_encode.append(cur_encode)
         assert len(chunk_encode) == 2
+
+        # TODO: Auto-detect whether to prepend a bos_token_id at the beginning.
         ids = []
+
         for idx, cur_chunk_encode in enumerate(chunk_encode):
             ids.extend(cur_chunk_encode)
             if idx != len(chunk_encode) - 1:

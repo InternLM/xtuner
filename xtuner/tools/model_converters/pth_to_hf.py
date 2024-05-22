@@ -2,9 +2,14 @@
 import argparse
 import os.path as osp
 import shutil
+import warnings
 
+import torch
+from accelerate import init_empty_weights
+from accelerate.utils import set_module_tensor_to_device
 from mmengine.config import Config, DictAction
 from mmengine.fileio import PetrelBackend, get_file_backend
+from tqdm import tqdm
 
 from xtuner.configs import cfgs_name_path
 from xtuner.model.utils import guess_load_checkpoint
@@ -28,6 +33,10 @@ def parse_args():
         default='2GB',
         help='Only applicable for LLM. The maximum size for '
         'each sharded checkpoint.')
+    parser.add_argument(
+        '--safe-serialization',
+        action='store_true',
+        help='Indicate if using `safe_serialization`')
     parser.add_argument(
         '--cfg-options',
         nargs='+',
@@ -62,7 +71,21 @@ def main():
     if 'LLaVAModel' in model_name:
         cfg.model.pretrained_pth = None
 
-    model = BUILDER.build(cfg.model)
+    try:
+        # Initializing the model with meta-tensor can reduce unwanted memory
+        # usage.
+        with init_empty_weights():
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    'ignore', message='.*non-meta.*', category=UserWarning)
+                model = BUILDER.build(cfg.model)
+    except NotImplementedError as e:
+        # Cannot initialize the model with meta tensor if there is lora
+        # in the model.
+        if 'Cannot copy out of meta tensor' in str(e):
+            model = BUILDER.build(cfg.model)
+        else:
+            raise e
 
     backend = get_file_backend(args.pth_model)
     if isinstance(backend, PetrelBackend):
@@ -72,7 +95,11 @@ def main():
     else:
         state_dict = guess_load_checkpoint(args.pth_model)
 
-    model.load_state_dict(state_dict, strict=False)
+    for name, param in tqdm(state_dict.items(), desc='Load State Dict'):
+        set_module_tensor_to_device(model, name, 'cpu', param, torch.float16)
+
+    model.llm.config.use_cache = True
+
     print(f'Load PTH model from {args.pth_model}')
 
     if 'LLaVAModel' in model_name:
@@ -131,7 +158,7 @@ def main():
         model.llm.save_pretrained(
             llm_path,
             max_shard_size=args.max_shard_size,
-            safe_serialization=False)
+            safe_serialization=args.safe_serialization)
 
     shutil.copyfile(args.config, osp.join(args.save_dir, 'xtuner_config.py'))
     print('All done!')
