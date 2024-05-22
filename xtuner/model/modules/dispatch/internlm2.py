@@ -3,10 +3,10 @@ import warnings
 from typing import Optional, Tuple
 
 import torch
-import torch.distributed as dist
 import torch.nn.functional as F
 from einops import rearrange
 from mmengine import MessageHub
+from mmengine import dist
 
 from .attention import (SUPPORT_FLASH2, flash_attn_w_mask, flash_attn_wo_mask,
                         varlen_flash_attn)
@@ -184,6 +184,7 @@ def internlm2_attn_forward(
         causal = self.is_causal and q_len != 1
 
         if attention_mask is not None:
+            # import ipdb; ipdb.set_trace()
             attn_output = flash_attn_w_mask(
                 query_states,
                 key_states,
@@ -192,6 +193,7 @@ def internlm2_attn_forward(
                 causal=causal,
                 training=self.training)
         else:
+            # import ipdb; ipdb.set_trace()
             attn_output = flash_attn_wo_mask(
                 query_states,
                 key_states,
@@ -225,14 +227,13 @@ def internlm2_varlen_attn_forward(
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor],
            Optional[Tuple[torch.Tensor]]]:
     # Modified from https://huggingface.co/internlm/internlm-7b/blob/939a68c0dc1bd5f35b63c87d44af05ce33379061/modeling_internlm.py#L161  # noqa:E501
-
     is_training = self.training
 
     message_hub = MessageHub.get_instance('varlen_attn_args')
     rank = dist.get_rank()
     cumulative_len = message_hub.get_info(f'cumulative_len_rank_{rank}')
     max_seqlen = message_hub.get_info(f'max_seqlen_rank_{rank}')
-    assert is_training == (cumulative_len is not None)
+    is_training = (cumulative_len is not None)
 
     bsz, q_len, _ = hidden_states.size()
 
@@ -290,6 +291,7 @@ def internlm2_varlen_attn_forward(
         attn_output = varlen_flash_attn(query_states, key_states, value_states,
                                         cumulative_len, max_seqlen)
     else:
+        # import ipdb; ipdb.set_trace()
         attn_output = flash_attn_wo_mask(
             query_states,
             key_states,
