@@ -1,4 +1,5 @@
 import copy
+import json
 import os
 from datetime import timedelta
 from functools import partial
@@ -9,6 +10,7 @@ import numpy as np
 import torch.distributed as dist
 import tqdm
 from datasets import Dataset as HFDataset
+from datasets import concatenate_datasets
 from mmengine.config import Config, ConfigDict
 from mmengine.logging import print_log
 from mmengine.utils.misc import get_object_from_string
@@ -83,6 +85,26 @@ def _multi_progress(tokenize_fun_p, dataset, nproc, task_num, chunksize,
         bar.refresh()
     results = map(lambda x: x[1], sorted(results, key=lambda x: x[0]))
     return results
+
+
+def load_jsonl_dataset(data_files=None, data_dir=None, suffix=None):
+    assert (data_files is not None) != (data_dir is not None)
+    if data_dir is not None:
+        data_files = os.listdir(data_dir)
+        data_files = [os.path.join(data_dir, fn) for fn in data_files]
+        if suffix is not None:
+            data_files = [fp for fp in data_files if fp.endswith(suffix)]
+    elif isinstance(data_files, str):
+        data_files = [data_files]
+
+    dataset_list = []
+    for fp in data_files:
+        with open(fp, encoding='utf-8') as file:
+            data = [json.loads(line) for line in file]
+        ds = HFDataset.from_list(data)
+        dataset_list.append(ds)
+    dataset = concatenate_datasets(dataset_list)
+    return dataset
 
 
 def tokenize(pair: str,
