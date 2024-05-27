@@ -259,7 +259,6 @@ def process(dataset,
             })
 
     if input_ids_with_output:
-        assert {'input_ids', 'labels'}.issubset(dataset.column_names)
         # remove data that does not have the valid labels.
         if with_dpo:
             dataset = dataset.filter(
@@ -271,6 +270,7 @@ def process(dataset,
                                     for label in example['reject_labels']),
                 num_proc=map_num_proc)
         else:
+            assert {'input_ids', 'labels'}.issubset(dataset.column_names)
             dataset = dataset.filter(
                 lambda example: any(label >= 0 for label in example['labels']),
                 num_proc=map_num_proc)
