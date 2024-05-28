@@ -4,8 +4,8 @@ import argparse
 
 import torch
 from safetensors import safe_open
-from transformers import (AddedToken, AutoConfig, AutoModel,
-                          AutoModelForCausalLM, CLIPImageProcessor,
+from transformers import (AddedToken, AutoConfig, AutoModelForCausalLM,
+                          CLIPImageProcessor, CLIPVisionModel,
                           LlamaTokenizerFast, LlavaConfig,
                           LlavaForConditionalGeneration, LlavaProcessor)
 
@@ -40,6 +40,8 @@ def convert_to_hf(text_model_id, vision_model_id, projector_weight, save_path):
     text_config = AutoConfig.from_pretrained(
         text_model_id, trust_remote_code=True)
     vision_config = AutoConfig.from_pretrained(vision_model_id)
+    if hasattr(vision_config, 'vision_config'):
+        vision_config = vision_config.vision_config
 
     tokenizer = LlamaTokenizerFast.from_pretrained(text_model_id)
     tokenizer.add_tokens(
@@ -70,7 +72,8 @@ def convert_to_hf(text_model_id, vision_model_id, projector_weight, save_path):
 
     ori_llm = AutoModelForCausalLM.from_pretrained(
         text_model_id, trust_remote_code=True)
-    ori_vit = AutoModel.from_pretrained(vision_model_id)
+    ori_vit = CLIPVisionModel.from_pretrained(vision_model_id)
+
     llm_state_dict = ori_llm.state_dict()
     vit_state_dict = ori_vit.state_dict()
 

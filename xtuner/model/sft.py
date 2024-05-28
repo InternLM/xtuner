@@ -150,29 +150,27 @@ class SupervisedFinetune(BaseModel):
     @staticmethod
     def _prepare_for_long_context_training(cfg, llm_cfg,
                                            max_position_embeddings):
+        if not hasattr(llm_cfg, 'rope_scaling'):
+            print_log('Current model does not support RoPE scaling.',
+                      'current')
+            return
 
-        orig_rope_scaling = getattr(llm_cfg, 'rope_scaling', None)
-        if orig_rope_scaling is None:
-            orig_rope_scaling = {'factor': 1}
+        current_max_length = getattr(llm_cfg, 'max_position_embeddings', None)
+        if current_max_length and max_position_embeddings > current_max_length:
+            print_log(
+                f'Enlarge max model length from {current_max_length} '
+                f'to {max_position_embeddings}.', 'current')
+            scaling_factor = float(
+                math.ceil(max_position_embeddings / current_max_length))
+        else:
+            print_log(
+                'The input `max_position_embeddings` is smaller than '
+                'origin max length. Consider increase input length.',
+                'current')
+            scaling_factor = 1.0
+        cfg.rope_scaling = {'type': 'linear', 'factor': scaling_factor}
 
-        orig_rope_scaling_factor = orig_rope_scaling[
-            'factor'] if 'factor' in orig_rope_scaling.keys() else 1
-        orig_ctx_len = getattr(llm_cfg, 'max_position_embeddings', None)
-        if orig_ctx_len:
-            orig_ctx_len *= orig_rope_scaling_factor
-            if max_position_embeddings > orig_ctx_len:
-                scaling_factor = float(
-                    math.ceil(max_position_embeddings / orig_ctx_len))
-                llm_cfg.rope_scaling = {
-                    'type': 'linear',
-                    'factor': scaling_factor
-                }
-
-        # hardcode for internlm2
-        llm_cfg.attn_implementation = 'flash_attention_2'
-        cfg.config = llm_cfg
-
-        return cfg, llm_cfg
+        return cfg
 
     @staticmethod
     def _prepare_for_flash_attn(cfg, llm_cfg):
@@ -202,7 +200,7 @@ class SupervisedFinetune(BaseModel):
         elif SUPPORT_FLASH1 and cls_name in SUPPORT_SDPA_ATTN:
             cfg.attn_implementation = 'sdpa'
 
-        return cfg, llm_cfg
+        return cfg
 
     @staticmethod
     def _prepare_for_qlora_zero3(cfg):
@@ -226,9 +224,9 @@ class SupervisedFinetune(BaseModel):
         pretrained_model_name_or_path = cfg.pretrained_model_name_or_path
         llm_cfg = AutoConfig.from_pretrained(
             pretrained_model_name_or_path, trust_remote_code=True)
-        cfg, llm_cfg = self._prepare_for_flash_attn(cfg, llm_cfg)
+        cfg = self._prepare_for_flash_attn(cfg, llm_cfg)
         if max_position_embeddings is not None:
-            cfg, llm_cfg = self._prepare_for_long_context_training(
+            cfg = self._prepare_for_long_context_training(
                 cfg, llm_cfg, max_position_embeddings)
         return cfg
 

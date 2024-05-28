@@ -8,25 +8,34 @@ import transformers
 from mmengine import print_log
 from mmengine.utils import digit_version
 from transformers.integrations import is_deepspeed_zero3_enabled
+from transformers.utils.import_utils import is_flash_attn_2_available
 
 from .baichuan import (baichuan2_norm_head_forward, baichuan_7b_attn_forward,
                        baichuan_13b_attn_forward)
 from .yi import yi_attn_forward
 
-IS_LOW_VERSION_TRANSFORMERS = digit_version(
-    transformers.__version__) < digit_version('4.38')
+LOWEST_TRANSFORMERS_VERSION = dict(
+    internlm2=digit_version('4.36'),
+    internlm=digit_version('4.36'),
+    llama=digit_version('4.36'),
+    phi3=digit_version('4.39'),
+    yi=digit_version('4.36'),
+    mistral=digit_version('4.36'),
+    # Training mixtral with lower version may lead to nccl timeout
+    # Refer to https://github.com/microsoft/DeepSpeed/issues/5066
+    mixtral=digit_version('4.40'),
+    cohere=digit_version('4.40'),
+    qwen2=digit_version('4.39'),
+    qwen2_moe=digit_version('4.40'),
+    deepseekv2=digit_version('4.40'),
+)
+
+TRANSFORMERS_VERSION = digit_version(transformers.__version__)
+IS_LOW_VERSION_TRANSFORMERS = TRANSFORMERS_VERSION < digit_version('4.38')
 # Transformers requires torch version >= 2.1.1 when using Torch SDPA.
 # Refer to https://github.com/huggingface/transformers/blob/caa5c65db1f4db617cdac2ad667ba62edf94dd98/src/transformers/modeling_utils.py#L1611  # noqa: E501
 SUPPORT_FLASH1 = digit_version(torch.__version__) >= digit_version('2.1.1')
-SUPPORT_FLASH2 = False
-
-try:
-    from flash_attn import flash_attn_func  # pre-check # noqa: F401
-
-    SUPPORT_FLASH2 = True
-except ImportError:
-    pass
-
+SUPPORT_FLASH2 = is_flash_attn_2_available()
 SUPPORT_FLASH = SUPPORT_FLASH1 or SUPPORT_FLASH2
 
 USE_TRITON_KERNEL = bool(os.getenv('USE_TRITON_KERNEL', default=0))
@@ -476,25 +485,46 @@ def dispatch_deepseek2_attn_forward(model, use_varlen_attn):
                                                   module)
 
 
-def fix_deepseek2_moe_bug(model):
-    from .deepseek_v2 import moe_forward
-    for module in model.modules():
-        if type(module).__name__ == 'DeepseekV2MoE':
-            print_log('dispatch DeepseekV2MoE forward', 'current')
-            module.forward = types.MethodType(moe_forward, module)
+def check_transformers_version(model):
 
+    def check(model_name):
+        msg = '{} requires transformers version at least {}, but got {}'
+        assert TRANSFORMERS_VERSION >= LOWEST_TRANSFORMERS_VERSION[
+            model_name], msg.format(model_name,
+                                    LOWEST_TRANSFORMERS_VERSION[model_name],
+                                    TRANSFORMERS_VERSION)
 
-def set_deepseek2_moe_blocks_z3_leaf_modules(model):
-    from deepspeed.utils import set_z3_leaf_modules
-    moe_module_type = None
-    for module in model.modules():
-        if type(module).__name__ == 'DeepseekV2MoE':
-            moe_module_type = type(module)
-    assert moe_module_type is not None
-    set_z3_leaf_modules(model, [moe_module_type])
+    model_name = model.__class__.__name__.lower()
+
+    if 'internlm2' in model_name:
+        check('internlm2')
+    elif 'internlm' in model_name:
+        check('internlm')
+    elif 'llama' in model_name:
+        check('llama')
+    elif 'phi3' in model_name:
+        check('phi3')
+    elif 'baichuan' in model_name:
+        check('baichuan')
+    elif 'yi' in model_name:
+        check('yi')
+    elif 'mistral' in model_name:
+        check('mistral')
+    elif 'mixtral' in model_name:
+        check('mixtral')
+    elif 'cohere' in model_name:
+        check('cohere')
+    elif 'qwen2moe' in model_name:
+        check('qwen2moe')
+    elif 'qwen2' in model_name:
+        check('qwen2')
+    elif 'deepseekv2' in model_name:
+        check('deepseekv2')
 
 
 def dispatch_modules(model, use_varlen_attn=False):
+    check_transformers_version(model)
+
     model_name = model.__class__.__name__.lower()
     if 'internlm2' in model_name:
         dispatch_internlm2_attn_forward(model, use_varlen_attn)
@@ -539,7 +569,6 @@ def dispatch_modules(model, use_varlen_attn=False):
             set_qwen_moe_blocks_z3_leaf_modules(model)
     elif 'deepseekv2' in model_name:
         dispatch_deepseek2_attn_forward(model, use_varlen_attn)
-        fix_deepseek2_moe_bug(model)
 
 
 __all__ = ['dispatch_modules']
