@@ -89,7 +89,8 @@ def default_collate_fn(instances: Sequence[Dict],
         }
 
     if has_image:
-        pixel_values = torch.stack(pixel_values)
+        if all(x.shape == pixel_values[0].shape for x in pixel_values):
+            pixel_values = torch.stack(pixel_values, dim=0)
         data_dict['pixel_values'] = pixel_values
 
     if return_hf_format:
