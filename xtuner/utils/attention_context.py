@@ -1,9 +1,10 @@
 from mmengine.utils import ManagerMixin
 
 
-class AttentionContext(ManagerMixin):
+class MessageHub(ManagerMixin):
 
-    def __init__(self) -> None:
+    def __init__(self, name: str = '', **kwargs):
+        super().__init__(name, **kwargs)
         self._cumulative_len = None
         self._max_seqlen = None
 
@@ -27,3 +28,24 @@ class AttentionContext(ManagerMixin):
     @property
     def max_seqlen(self):
         return self._max_seqlen
+
+
+class AttentionContext:
+
+    message_hub = MessageHub.get_instance('attention_context')
+
+    @classmethod
+    def update(cls, seqlen_list):
+        cls.message_hub.update(seqlen_list)
+
+    @classmethod
+    def clear(cls):
+        cls.message_hub.clear()
+
+    @classmethod
+    def get_max_seqlen(cls):
+        return cls.message_hub.max_seqlen
+
+    @classmethod
+    def get_cumulative_len(cls):
+        return cls.message_hub.cumulative_len
