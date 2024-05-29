@@ -40,7 +40,7 @@ def _get_merged_param_name(origin_param_name, expert_num_per_shard):
     split_name = origin_param_name.split('.experts.')
     expert_idx = re.findall(r'\d+', split_name[1])[0]
     expert_idx = int(expert_idx)
-    assert expert_idx % expert_num_per_shard == 0, f'expert_idx = {expert_idx}, expert_num_per_shard = {expert_num_per_shard}'
+    assert expert_idx % expert_num_per_shard == 0
     shard_idx = expert_idx // expert_num_per_shard
     w1w3 = split_name[0] + f'.experts.{shard_idx}.w1w3'
     w2 = split_name[0] + f'.experts.{shard_idx}.w2'

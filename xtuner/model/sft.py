@@ -247,7 +247,8 @@ class SupervisedFinetune(BaseModel):
                                is_fused_required=False):
         xtuner_config = self._prepare_for_qlora_zero3(xtuner_config)
 
-        pretrained_model_name_or_path = xtuner_config.pretrained_model_name_or_path
+        pretrained_model_name_or_path = \
+            xtuner_config.pretrained_model_name_or_path
         if is_fused_required:
             module = importlib.import_module(
                 'xtuner.model.transformers_models')
