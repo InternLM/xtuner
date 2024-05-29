@@ -32,6 +32,9 @@ class InternVL(BaseModel):
             torch_dtype=torch.bfloat16,
             low_cpu_mem_usage=True,
             trust_remote_code=True)
+        tokenizer = AutoTokenizer.from_pretrained(path, trust_remote_code=True)
+        img_context_token_id = tokenizer.convert_tokens_to_ids('<IMG_CONTEXT>')
+        self.model.img_context_token_id = img_context_token_id
 
         if self.freeze_llm:
             self.model.language_model.requires_grad_(False)

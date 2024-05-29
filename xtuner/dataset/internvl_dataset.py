@@ -9,6 +9,7 @@ import numpy as np
 from transformers import AutoTokenizer, AutoConfig
 import torchvision.transforms as T
 from torchvision.transforms.functional import InterpolationMode
+from xtuner.utils import IMAGE_TOKEN_INDEX
 
 
 def find_closest_aspect_ratio(aspect_ratio, target_ratios, width, height, image_size):
@@ -104,20 +105,27 @@ def build_transform(is_train, input_size, pad2square=False, normalize_type='imag
     return transform
 
 
+IMG_CONTEXT_TOKEN = '<IMG_CONTEXT>'
+IMG_START_TOKEN = '<img>'
+IMG_END_TOKEN = '</img>'
+
+
 class InternVL_V1_5_LLaVADataset(LLaVADataset):
     def __init__(self, path, *args, image_processor=None, **kwargs):
         self.cfg = AutoConfig.from_pretrained(path, trust_remote_code=True)
-        self.min_dynamic_patch = self.cfg['min_dynamic_patch']
-        self.max_dynamic_patch = self.cfg['max_dynamic_patch']
-        self.downsample_ratio = self.cfg['downsample_ratio']
-        self.image_size = self.cfg['force_image_size']
-        self.use_thumbnail = self.cfg['use_thumbnail']
+        self.min_dynamic_patch = self.cfg.min_dynamic_patch
+        self.max_dynamic_patch = self.cfg.max_dynamic_patch
+        self.downsample_ratio = self.cfg.downsample_ratio
+        self.image_size = self.cfg.force_image_size
+        self.use_thumbnail = self.cfg.use_thumbnail
         self.transformer = build_transform(True, self.image_size)
+        patch_size = 14
+        num_image_tokens = int((self.image_size // patch_size) ** 2 * (self.downsample_ratio ** 2))
 
         self.max_refetch = 1000
 
-        tokenizer = AutoTokenizer.from_pretrained(path, trust_remote_code=True)
-        super().__init__(*args, tokenizer=tokenizer, image_processor=image_processor, **kwargs)
+        self.tokenizer = AutoTokenizer.from_pretrained(path, trust_remote_code=True)
+        super().__init__(*args, tokenizer=self.tokenizer, image_processor=image_processor, **kwargs)
 
     @property
     def modality_length(self):
@@ -145,6 +153,7 @@ class InternVL_V1_5_LLaVADataset(LLaVADataset):
 
     def prepare_data(self, index):
         data_dict = self.text_data[index]
+
         if data_dict.get('image', None) is not None:
             image_file = data_dict['image']
             try:
@@ -158,6 +167,21 @@ class InternVL_V1_5_LLaVADataset(LLaVADataset):
             pixel_values = [self.transformer(image) for image in images]
             pixel_values = torch.stack(pixel_values)
             data_dict['pixel_values'] = pixel_values
+
+            # TODO: more simple way to replace image token
+            num_image_tokens = pixel_values.shape[0]
+            image_token = f'{IMG_START_TOKEN}{IMG_CONTEXT_TOKEN * num_image_tokens}{IMG_END_TOKEN}'
+            image_input_ids = self.tokenizer(image_token, return_tensors='pt').input_ids
+
+            # replace image token to f'{IMG_START_TOKEN}{IMG_CONTEXT_TOKEN * num_image_token}{IMG_END_TOKEN}'
+            input_ids = data_dict['input_ids']
+            old_image_token_index = torch.where(input_ids == IMAGE_TOKEN_INDEX)[0]
+            input_ids[old_image_token_index: old_image_token_index + len(image_input_ids[0])] = image_input_ids[0]
+            data_dict['input_ids'] = input_ids
+
+            labels = data_dict['labels']
+            labels[old_image_token_index: old_image_token_index + len(image_input_ids[0])] = image_input_ids[0]
+            data_dict['labels'] = labels
         else:
             data_dict['pixel_values'] = torch.zeros(1, 3, self.image_size, self.image_size)
         return data_dict
