@@ -1,0 +1,3 @@
+-r requirements/deepspeed.txt
+loguru
+ray[default,train]==2.9.1

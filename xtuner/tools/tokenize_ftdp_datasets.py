@@ -361,7 +361,7 @@ def tokenize_and_save(tokenizer, processed_dir, tokenized_dir):
                 description=f'{os.path.basename(file_path)}...'):
             samples.append(sample)
 
-        train_tokens, valid_tokens, train_samples, valid_samples = write_bin_meta_bin(  # noqa E501
+        train_tokens, valid_tokens, train_samples, valid_samples = write_bin_meta_bin(  # noqa: E501
             path=tokenized_save_dir,
             dataset_name=dataset_name,
             samples=samples,
