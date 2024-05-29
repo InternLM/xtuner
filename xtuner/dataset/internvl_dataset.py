@@ -119,11 +119,8 @@ class InternVL_V1_5_LLaVADataset(LLaVADataset):
         self.image_size = self.cfg.force_image_size
         self.use_thumbnail = self.cfg.use_thumbnail
         self.transformer = build_transform(True, self.image_size)
-        patch_size = 14
-        num_image_tokens = int((self.image_size // patch_size) ** 2 * (self.downsample_ratio ** 2))
 
         self.max_refetch = 1000
-
         self.tokenizer = AutoTokenizer.from_pretrained(path, trust_remote_code=True)
         super().__init__(*args, tokenizer=self.tokenizer, image_processor=image_processor, **kwargs)
 
@@ -176,13 +173,13 @@ class InternVL_V1_5_LLaVADataset(LLaVADataset):
             # replace image token to f'{IMG_START_TOKEN}{IMG_CONTEXT_TOKEN * num_image_token}{IMG_END_TOKEN}'
             input_ids = data_dict['input_ids']  # list
             old_image_token_index = input_ids.index(IMAGE_TOKEN_INDEX)
-            pre_list = input_ids[:old_image_token_index-1]  # pop IMAGE_TOKEN_INDEX
+            pre_list = input_ids[:old_image_token_index]
             post_list = input_ids[old_image_token_index + 1:]
             input_ids = pre_list + image_input_ids + post_list
             data_dict['input_ids'] = input_ids
 
             labels = data_dict['labels']
-            pre_list = labels[:old_image_token_index - 1]  # pop IMAGE_TOKEN_INDEX
+            pre_list = labels[:old_image_token_index]
             post_list = labels[old_image_token_index + 1:]
             labels = pre_list + [IGNORE_INDEX] * len(image_input_ids) + post_list
             data_dict['labels'] = labels

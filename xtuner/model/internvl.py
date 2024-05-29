@@ -114,7 +114,10 @@ class InternVL(BaseModel):
         input_ids = data['input_ids']
         position_ids = data['position_ids']
         attention_mask = data['attention_mask']
-        image_flags = torch.tensor([1] * concat_images.shape[0], dtype=torch.long)
+        # sum is 0 are text
+        image_flags = torch.sum(concat_images, dim=(1, 2, 3)) != 0
+        image_flags = image_flags.long()
+
         labels = data['labels']
         use_cache = False
 

@@ -60,6 +60,7 @@ model = dict(
 #######################################################################
 llava_dataset = dict(
     type=InternVL_V1_5_LLaVADataset,
+    offline_processed_text_folder='/mnt/petrelfs/huanghaian/code/xtuner/intervl/mini_v18_llava_sft',
     path=path,
     data_path=data_path,
     image_folder=image_folder,
