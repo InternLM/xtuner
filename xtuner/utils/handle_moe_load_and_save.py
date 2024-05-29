@@ -160,12 +160,12 @@ def _get_origin_param_name(merged_param_name, expert_num_per_shard, is_w1w3):
             gate = split_name[
                 0] + f'.experts.{expert_idx_begin + i}.gate_proj.weight'
             down = split_name[
-                0] + f'.experts.{expert_idx_begin + i}.down_proj.weight'
+                0] + f'.experts.{expert_idx_begin + i}.up_proj.weight'
             origin_param_names[i * 2] = gate
             origin_param_names[i * 2 + 1] = down
         else:
             up = split_name[
-                0] + f'.experts.{expert_idx_begin + i}.up_proj.weight'
+                0] + f'.experts.{expert_idx_begin + i}.down_proj.weight'
             origin_param_names[i] = up
     return origin_param_names
 
