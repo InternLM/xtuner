@@ -8,7 +8,7 @@ from xtuner.dataset import InternVL_V1_5_LLaVADataset
 from xtuner.dataset.collate_fns import default_collate_fn
 from xtuner.dataset.map_fns import llava_map_fn, template_map_fn_factory
 from xtuner.dataset.samplers import LengthGroupedSampler
-from xtuner.engine.hooks import DatasetInfoHook, EvaluateChatHook
+from xtuner.engine.hooks import DatasetInfoHook
 from xtuner.engine.runner import TrainLoop
 from xtuner.model import InternVL
 from xtuner.utils import PROMPT_TEMPLATE
@@ -27,12 +27,14 @@ prompt_template = PROMPT_TEMPLATE.internlm2_chat
 max_length = int(4096 - (448 / 14) ** 2)  # TODO: It is not an exact value.
 
 # Scheduler & Optimizer
-batch_size = 16  # per_device
-accumulative_counts = 1
+batch_size = 4  # per_device
+accumulative_counts = 4
 dataloader_num_workers = 4
 max_epochs = 1
 optim_type = AdamW
-lr = 2e-5
+# 1024 -> 4e-5
+# 128 -> 5e-6
+lr = 1e-6
 betas = (0.9, 0.999)
 weight_decay = 0
 max_norm = 1  # grad clip

@@ -121,6 +121,8 @@ class InternVL_V1_5_LLaVADataset(LLaVADataset):
         self.transformer = build_transform(True, self.image_size)
 
         self.max_refetch = 1000
+        patch_size = 14
+        self.patch_token = int((self.image_size // patch_size) ** 2 * (self.downsample_ratio ** 2))
         self.tokenizer = AutoTokenizer.from_pretrained(path, trust_remote_code=True)
         super().__init__(*args, tokenizer=self.tokenizer, image_processor=image_processor, **kwargs)
 
@@ -166,7 +168,7 @@ class InternVL_V1_5_LLaVADataset(LLaVADataset):
             data_dict['pixel_values'] = pixel_values
 
             # TODO: more simple way to replace image token
-            num_image_tokens = pixel_values.shape[0]
+            num_image_tokens = pixel_values.shape[0]*self.patch_token
             image_token = f'{IMG_START_TOKEN}{IMG_CONTEXT_TOKEN * num_image_tokens}{IMG_END_TOKEN}'
             image_input_ids = self.tokenizer(image_token, add_special_tokens=False).input_ids
 

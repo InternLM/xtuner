@@ -17,6 +17,7 @@ from .utils import (LoadWoInit, find_all_linear_names,
                     get_peft_model_state_dict, guess_load_checkpoint,
                     make_inputs_require_grad,
                     prepare_inputs_labels_for_multimodal, traverse_dict)
+from mmengine import print_log
 
 
 class InternVL(BaseModel):
@@ -53,6 +54,9 @@ class InternVL(BaseModel):
         #     ).register_forward_hook(make_inputs_require_grad)
 
         self.gradient_checkpointing_enable()
+
+        print_log(self, logger='current')
+
 
     def gradient_checkpointing_enable(self):
         self.activation_checkpointing_enable()
