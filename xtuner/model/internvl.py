@@ -57,7 +57,6 @@ class InternVL(BaseModel):
 
         print_log(self, logger='current')
 
-
     def gradient_checkpointing_enable(self):
         self.activation_checkpointing_enable()
 
@@ -125,10 +124,12 @@ class InternVL(BaseModel):
         labels = data['labels']
         use_cache = False
 
-        return self.model(input_ids=input_ids,
-                          position_ids=position_ids,
-                          attention_mask=attention_mask,
-                          image_flags=image_flags,
-                          pixel_values=concat_images,
-                          labels=labels,
-                          use_cache=use_cache)
+        outputs = self.model(input_ids=input_ids,
+                             position_ids=position_ids,
+                             attention_mask=attention_mask,
+                             image_flags=image_flags,
+                             pixel_values=concat_images,
+                             labels=labels,
+                             use_cache=use_cache)
+        loss_dict = {'loss': outputs.loss}
+        return loss_dict
