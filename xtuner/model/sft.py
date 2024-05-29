@@ -96,8 +96,7 @@ class SupervisedFinetune(BaseModel):
             with LoadWoInit():
                 llm = self._build_from_cfg_or_module(llm)
             if is_fused_required:
-                load_state_dict_into_model(self.llm,
-                                           pretrained_model_name_or_path)
+                load_state_dict_into_model(llm, pretrained_model_name_or_path)
         self.llm = llm
 
         if tokenizer is not None:
@@ -268,7 +267,9 @@ class SupervisedFinetune(BaseModel):
 
         if is_fused_required:
             # from_config do not need pretrained_model_name_or_path
-            xtuner_config.pop('pretrained_model_name_or_path')
+            # and trust_remote_code
+            xtuner_config.pop('pretrained_model_name_or_path', None)
+            xtuner_config.pop('trust_remote_code', None)
             xtuner_config.config = transformers_config
             model_name = xtuner_config.type.__self__.__name__
             xtuner_config.type = LazyObject('xtuner.model.transformers_models',
