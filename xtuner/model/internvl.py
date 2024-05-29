@@ -7,7 +7,7 @@ import torch.nn as nn
 from mmengine.config import Config, ConfigDict
 from mmengine.model import BaseModel
 from peft import get_peft_model, prepare_model_for_kbit_training
-from transformers import AutoConfig
+from transformers import BitsAndBytesConfig
 from transformers.integrations import is_deepspeed_zero3_enabled
 
 from xtuner.registry import BUILDER
@@ -21,18 +21,56 @@ from mmengine import print_log
 
 
 class InternVL(BaseModel):
-    def __init__(self, path, freeze_llm=False, freeze_visual_encoder=True, llm_lora=None, visual_encoder_lora=None):
+    def __init__(self, path, freeze_llm=False,
+                 freeze_visual_encoder=True,
+                 llm_lora=None,
+                 visual_encoder_lora=None,
+                 quantization_vit=False,
+                 quantization_llm=False):
         super().__init__()
         self.freeze_llm = freeze_llm
         self.freeze_visual_encoder = freeze_visual_encoder
         self.use_llm_lora = llm_lora is not None
         self.use_visual_encoder_lora = visual_encoder_lora is not None
+        self.quantization_vit = quantization_vit
+        self.quantization_llm = quantization_llm
+        assert quantization_vit and visual_encoder_lora is not None
+        assert quantization_llm and llm_lora is not None
 
-        self.model = AutoModel.from_pretrained(
-            path,
-            torch_dtype=torch.bfloat16,
-            low_cpu_mem_usage=True,
-            trust_remote_code=True)
+        if quantization_vit is None and quantization_llm is None:
+            self.model = AutoModel.from_pretrained(
+                path,
+                torch_dtype=torch.bfloat16,
+                low_cpu_mem_usage=True,
+                trust_remote_code=True)
+        else:
+            llm_int8_skip_modules = ['mlp1']
+            if quantization_llm and not quantization_vit:
+                llm_int8_skip_modules.append('vision_model')
+
+            if quantization_vit and not quantization_llm:
+                llm_int8_skip_modules.append('language_model')
+
+            quantization_config = dict(
+                type=BitsAndBytesConfig,
+                llm_int8_skip_modules=llm_int8_skip_modules,
+                load_in_4bit=True,
+                load_in_8bit=False,
+                llm_int8_threshold=6.0,
+                llm_int8_has_fp16_weight=False,
+                bnb_4bit_compute_dtype=torch.float16,
+                bnb_4bit_use_double_quant=True,
+                bnb_4bit_quant_type='nf4')
+            quantization_clazz = quantization_config.pop("type")
+            quantization = quantization_clazz(**quantization_config)
+
+            self.model = AutoModel.from_pretrained(
+                path,
+                torch_dtype=torch.bfloat16,
+                quantization_config=quantization,
+                low_cpu_mem_usage=True,
+                trust_remote_code=True)
+
         tokenizer = AutoTokenizer.from_pretrained(path, trust_remote_code=True)
         img_context_token_id = tokenizer.convert_tokens_to_ids('<IMG_CONTEXT>')
         self.model.img_context_token_id = img_context_token_id
