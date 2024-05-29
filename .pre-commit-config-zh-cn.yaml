@@ -4,6 +4,7 @@ repos:
     rev: 5.0.4
     hooks:
       - id: flake8
+        args: ["--exclude=xtuner/model/transformers_models/*"]
   - repo: https://gitee.com/openmmlab/mirrors-isort
     rev: 5.11.5
     hooks:
