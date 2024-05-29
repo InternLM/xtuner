@@ -60,6 +60,7 @@ model = dict(
 #######################################################################
 llava_dataset = dict(
     type=InternVL_V1_5_LLaVADataset,
+    path=path,
     data_path=data_path,
     image_folder=image_folder,
     dataset_map_fn=llava_map_fn,

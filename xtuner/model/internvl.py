@@ -46,11 +46,11 @@ class InternVL(BaseModel):
         else:
             self.model.language_model.get_input_embeddings().register_forward_hook(
                 make_inputs_require_grad)
-        if hasattr(self.model.vision_model, 'enable_input_require_grads'):
-            self.model.vision_model.enable_input_require_grads()
-        else:
-            self.model.vision_model.get_input_embeddings(
-            ).register_forward_hook(make_inputs_require_grad)
+        # if hasattr(self.model.vision_model, 'enable_input_require_grads'):
+        #     self.model.vision_model.enable_input_require_grads()
+        # else:
+        #     self.model.vision_model.get_input_embeddings(
+        #     ).register_forward_hook(make_inputs_require_grad)
 
         self.gradient_checkpointing_enable()
 
@@ -58,14 +58,14 @@ class InternVL(BaseModel):
         self.activation_checkpointing_enable()
 
     def activation_checkpointing_enable(self):
-        self.model.vision_model.gradient_checkpointing_enable()
+        # self.model.vision_model.gradient_checkpointing_enable()
         self.model.language_model.gradient_checkpointing_enable()
 
     def gradient_checkpointing_disable(self):
         self.activation_checkpointing_disable()
 
     def activation_checkpointing_disable(self):
-        self.model.vision_model.gradient_checkpointing_disable()
+        # self.model.vision_model.gradient_checkpointing_disable()
         self.model.language_model.gradient_checkpointing_disable()
 
     def state_dict(self, *args, **kwargs):

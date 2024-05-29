@@ -9,7 +9,7 @@ import numpy as np
 from transformers import AutoTokenizer, AutoConfig
 import torchvision.transforms as T
 from torchvision.transforms.functional import InterpolationMode
-from xtuner.utils import IMAGE_TOKEN_INDEX
+from xtuner.utils import IMAGE_TOKEN_INDEX, IGNORE_INDEX
 
 
 def find_closest_aspect_ratio(aspect_ratio, target_ratios, width, height, image_size):
@@ -171,16 +171,20 @@ class InternVL_V1_5_LLaVADataset(LLaVADataset):
             # TODO: more simple way to replace image token
             num_image_tokens = pixel_values.shape[0]
             image_token = f'{IMG_START_TOKEN}{IMG_CONTEXT_TOKEN * num_image_tokens}{IMG_END_TOKEN}'
-            image_input_ids = self.tokenizer(image_token, return_tensors='pt').input_ids
+            image_input_ids = self.tokenizer(image_token, add_special_tokens=False).input_ids
 
             # replace image token to f'{IMG_START_TOKEN}{IMG_CONTEXT_TOKEN * num_image_token}{IMG_END_TOKEN}'
-            input_ids = data_dict['input_ids']
-            old_image_token_index = torch.where(input_ids == IMAGE_TOKEN_INDEX)[0]
-            input_ids[old_image_token_index: old_image_token_index + len(image_input_ids[0])] = image_input_ids[0]
+            input_ids = data_dict['input_ids']  # list
+            old_image_token_index = input_ids.index(IMAGE_TOKEN_INDEX)
+            pre_list = input_ids[:old_image_token_index-1]  # pop IMAGE_TOKEN_INDEX
+            post_list = input_ids[old_image_token_index + 1:]
+            input_ids = pre_list + image_input_ids + post_list
             data_dict['input_ids'] = input_ids
 
             labels = data_dict['labels']
-            labels[old_image_token_index: old_image_token_index + len(image_input_ids[0])] = image_input_ids[0]
+            pre_list = labels[:old_image_token_index - 1]  # pop IMAGE_TOKEN_INDEX
+            post_list = labels[old_image_token_index + 1:]
+            labels = pre_list + [IGNORE_INDEX] * len(image_input_ids) + post_list
             data_dict['labels'] = labels
         else:
             data_dict['pixel_values'] = torch.zeros(1, 3, self.image_size, self.image_size)
