@@ -47,15 +47,34 @@ class InternVL(BaseModel):
         else:
             self.model.language_model.get_input_embeddings().register_forward_hook(
                 make_inputs_require_grad)
-        # if hasattr(self.model.vision_model, 'enable_input_require_grads'):
-        #     self.model.vision_model.enable_input_require_grads()
-        # else:
-        #     self.model.vision_model.get_input_embeddings(
-        #     ).register_forward_hook(make_inputs_require_grad)
 
         self.gradient_checkpointing_enable()
 
+        if self.use_llm_lora:
+            self._prepare_llm_for_lora(llm_lora)
+
+        if self.use_visual_encoder_lora:
+            self._prepare_visual_encoder_for_lora(visual_encoder_lora)
+
         print_log(self, logger='current')
+
+    def _parse_lora_config(self, lora_config):
+        if isinstance(lora_config, dict) or isinstance(
+                lora_config, Config) or isinstance(lora_config, ConfigDict):
+            lora_config = BUILDER.build(lora_config)
+        return lora_config
+
+    def _prepare_llm_for_lora(self,
+                              lora_config,
+                              use_activation_checkpointing=True):
+        lora_config = self._parse_lora_config(lora_config)
+        self.model.language_model = prepare_model_for_kbit_training(
+            self.model.language_model, use_activation_checkpointing)
+        self.model.language_model = get_peft_model(self.model.language_model, lora_config)
+
+    def _prepare_visual_encoder_for_lora(self, lora_config):
+        lora_config = self._parse_lora_config(lora_config)
+        self.model.vision_model = get_peft_model(self.model.vision_model, lora_config)
 
     def gradient_checkpointing_enable(self):
         self.activation_checkpointing_enable()
@@ -78,7 +97,7 @@ class InternVL(BaseModel):
         if self.use_visual_encoder_lora:
             to_return.update(
                 get_peft_model_state_dict(
-                    self.visual_encoder, state_dict=state_dict))
+                    self.model.vision_model, state_dict=state_dict))
         elif not self.freeze_visual_encoder:
             to_return.update({
                 k: v
@@ -87,7 +106,7 @@ class InternVL(BaseModel):
         # Step 2. LLM
         if self.use_llm_lora:
             to_return.update(
-                get_peft_model_state_dict(self.llm, state_dict=state_dict))
+                get_peft_model_state_dict(self.model.language_model, state_dict=state_dict))
         elif not self.freeze_llm:
             to_return.update(
                 {k: v
