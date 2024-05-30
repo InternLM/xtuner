@@ -5,29 +5,9 @@ import types
 
 import torch
 import transformers
-from mmengine import print_log
+from mmengine.config.lazy import LazyObject
 from mmengine.utils import digit_version
-from transformers.integrations import is_deepspeed_zero3_enabled
 from transformers.utils.import_utils import is_flash_attn_2_available
-
-from .baichuan import (baichuan2_norm_head_forward, baichuan_7b_attn_forward,
-                       baichuan_13b_attn_forward)
-from .yi import yi_attn_forward
-
-LOWEST_TRANSFORMERS_VERSION = dict(
-    internlm2=digit_version('4.36'),
-    internlm=digit_version('4.36'),
-    llama=digit_version('4.36'),
-    phi3=digit_version('4.39'),
-    yi=digit_version('4.36'),
-    mistral=digit_version('4.36'),
-    # Training mixtral with lower version may lead to nccl timeout
-    # Refer to https://github.com/microsoft/DeepSpeed/issues/5066
-    mixtral=digit_version('4.40'),
-    cohere=digit_version('4.40'),
-    qwen2=digit_version('4.39'),
-    qwen2_moe=digit_version('4.40'),
-)
 
 TRANSFORMERS_VERSION = digit_version(transformers.__version__)
 IS_LOW_VERSION_TRANSFORMERS = TRANSFORMERS_VERSION < digit_version('4.38')
@@ -54,189 +34,251 @@ NO_ATTN_WEIGHTS_MSG = (
     'even when the `output_attentions` flag is set to True, it is not '
     'possible to return the `attn_weights`.')
 
+LOWEST_TRANSFORMERS_VERSION = dict(
+    internlm2=digit_version('4.36'),
+    internlm=digit_version('4.36'),
+    llama=digit_version('4.36'),
+    phi3=digit_version('4.39'),
+    yi=digit_version('4.36'),
+    mistral=digit_version('4.36'),
+    # Training mixtral with lower version may lead to nccl timeout
+    # Refer to https://github.com/microsoft/DeepSpeed/issues/5066
+    mixtral=digit_version('4.40'),
+    cohere=digit_version('4.40'),
+    qwen2=digit_version('4.39'),
+    qwen2_moe=digit_version('4.40'),
+)
 
-def dispatch_llama_attn_forward(model, use_varlen_attn):
-    if use_varlen_attn:
-        assert SUPPORT_FLASH2 and SUPPORT_TRITON, \
-            'flash_attn and triton is required if you want to use varlen_attn.'
-    elif not SUPPORT_FLASH2:
+DISPATCH_MAPPING = dict(
+    internlm2=dict(
+        attn_module_name='InternLM2FlashAttention2',
+        attn=LazyObject('xtuner.model.modules.dispatch.internlm2',
+                        'internlm2_attn_forward'),
+        varlen_attn=LazyObject('xtuner.model.modules.dispatch.internlm2',
+                               'internlm2_varlen_attn_forward'),
+        rms_module_name='InternLM2RMSNorm',
+        rms=LazyObject('xtuner.model.modules.dispatch.triton_kernels',
+                       'rms_norm_forward'),
+        rote_module_name='InternLM2RotaryEmbedding',
+        rote=LazyObject('xtuner.model.modules.dispatch.internlm2',
+                        'InternLM2RotaryEmbedding'),
+    ),
+    internlm=dict(
+        attn_module_name='InternLMAttention',
+        attn=LazyObject('xtuner.model.modules.dispatch.internlm',
+                        'internlm_attn_forward'),
+        varlen_attn=LazyObject('xtuner.model.modules.dispatch.internlm',
+                               'internlm_varlen_attn_forward'),
+        rms_module_name='InternLMRMSNorm',
+        rms=LazyObject('xtuner.model.modules.dispatch.triton_kernels',
+                       'rms_norm_forward'),
+        rote_module_name='InternLMRotaryEmbedding',
+        rote=LazyObject('xtuner.model.modules.dispatch.internlm',
+                        'InternLMRotaryEmbedding'),
+    ),
+    llama=dict(
+        attn_module_name='LlamaFlashAttention2',
+        attn=LazyObject('xtuner.model.modules.dispatch.llama',
+                        'llama_attn_forward'),
+        attn_legacy=LazyObject('xtuner.model.modules.dispatch.llama',
+                               'llama_attn_forward_legacy'),
+        varlen_attn=LazyObject('xtuner.model.modules.dispatch.llama',
+                               'llama_varlen_attn_forward'),
+        varlen_attn_legacy=LazyObject('xtuner.model.modules.dispatch.llama',
+                                      'llama_varlen_attn_forward_legacy'),
+        rms_module_name='LlamaRMSNorm',
+        rms=LazyObject('xtuner.model.modules.dispatch.triton_kernels',
+                       'rms_norm_forward'),
+    ),
+    phi3=dict(
+        attn_module_name='Phi3FlashAttention2',
+        attn=LazyObject('xtuner.model.modules.dispatch.phi3',
+                        'phi3_attn_forward'),
+        varlen_attn=LazyObject('xtuner.model.modules.dispatch.phi3',
+                               'phi3_varlen_attn_forward'),
+        rms_module_name='Phi3RMSNorm',
+        rms=LazyObject('xtuner.model.modules.dispatch.triton_kernels',
+                       'rms_norm_forward'),
+    ),
+    mistral=dict(
+        attn_module_name='MistralFlashAttention2',
+        attn=LazyObject('xtuner.model.modules.dispatch.mistral',
+                        'mistral_attn_forward'),
+        varlen_attn=LazyObject('xtuner.model.modules.dispatch.mistral',
+                               'mistral_varlen_attn_forward'),
+        rms_module_name='MistralRMSNorm',
+        rms=LazyObject('xtuner.model.modules.dispatch.triton_kernels',
+                       'rms_norm_forward'),
+        rote_module_name='MistralRotaryEmbedding',
+        rote=LazyObject('xtuner.model.modules.dispatch.mistral',
+                        'MistralRotaryEmbedding'),
+    ),
+    mixtral=dict(
+        attn_module_name='MixtralFlashAttention2',
+        attn=LazyObject('xtuner.model.modules.dispatch.mistral',
+                        'mistral_attn_forward'),
+        varlen_attn=LazyObject('xtuner.model.modules.dispatch.mistral',
+                               'mistral_varlen_attn_forward'),
+        rms_module_name='MixtralRMSNorm',
+        rms=LazyObject('xtuner.model.modules.dispatch.triton_kernels',
+                       'rms_norm_forward'),
+        rote_module_name='MixtralRotaryEmbedding',
+        rote=LazyObject('xtuner.model.modules.dispatch.mistral',
+                        'MistralRotaryEmbedding'),
+    ),
+    cohere=dict(
+        attn_module_name='CohereFlashAttention2',
+        attn=LazyObject('xtuner.model.modules.dispatch.cohere',
+                        'cohere_attn_forward'),
+        rms_module_name='CohereLayerNorm',
+        rms=LazyObject('xtuner.model.modules.dispatch.triton_kernels',
+                       'layer_norm_forward'),
+    ),
+    qwen2=dict(
+        attn_module_name='Qwen2FlashAttention2',
+        attn=LazyObject('xtuner.model.modules.dispatch.qwen2',
+                        'qwen2_attn_forward'),
+        varlen_attn=LazyObject('xtuner.model.modules.dispatch.qwen2',
+                               'qwen2_varlen_attn_forward'),
+        rms_module_name='Qwen2RMSNorm',
+        rms=LazyObject('xtuner.model.modules.dispatch.triton_kernels',
+                       'rms_norm_forward'),
+    ),
+    qwen2moe=dict(
+        attn_module_name='Qwen2MoeFlashAttention2',
+        attn=LazyObject('xtuner.model.modules.dispatch.qwen2',
+                        'qwen2_attn_forward'),
+        varlen_attn=LazyObject('xtuner.model.modules.dispatch.qwen2',
+                               'qwen2_varlen_attn_forward'),
+        rms_module_name='Qwen2MoeRMSNorm',
+        rms=LazyObject('xtuner.model.modules.dispatch.triton_kernels',
+                       'rms_norm_forward'),
+    ),
+)
+
+# Sorting is necessary. We aim for the Moe model to precede
+# the corresponding Dense model in ranking as we traverse the dictionary.
+DISPATCH_MAPPING = {
+    key: DISPATCH_MAPPING[key]
+    for key in sorted(DISPATCH_MAPPING.keys(), reverse=True)
+}
+
+
+def log_once(func):
+    logged = False
+
+    def wrapper(*args, **kwargs):
+        nonlocal logged
+        if not logged:
+            logged = True
+            func(*args, **kwargs)
         return
 
-    from .llama import (llama_attn_forward, llama_attn_forward_legacy,
-                        llama_varlen_attn_forward,
-                        llama_varlen_attn_forward_legacy)
+    return wrapper
+
+
+def dispatch_attn_forward(model, mapping):
+
+    if not SUPPORT_FLASH2:
+        return
+
+    attn_forward = mapping.get('attn', None)
+    if attn_forward is None:
+        return
+
+    from mmengine import print_log
 
     print_log(NO_ATTN_WEIGHTS_MSG, 'current', logging.WARNING)
+    attn_name = mapping['attn_module_name']
+    attn_forward = attn_forward.build()
+    attn_forward_legacy = mapping.get('attn_legacy', None)
+    if attn_forward_legacy:
+        attn_forward_legacy = attn_forward_legacy.build()
+
+    print_log = log_once(print_log)
+
     for module in model.modules():
-        # Do not need to dispatch if
-        # type(module).__name__ in ('LlamaAttention', 'LlamaSdpaAttention').
-        # If we set `attn_implementation` to `sdpa` or `eager` in xtuner
-        # configs, we can not use varlen attn and sequence parallel.
-        if type(module).__name__ == 'LlamaFlashAttention2':
-            if use_varlen_attn:
-                print_log('dispatch llama varlen attn forward', 'current')
-                if IS_LOW_VERSION_TRANSFORMERS:
-                    module.forward = types.MethodType(
-                        llama_varlen_attn_forward_legacy, module)
-                else:
-                    module.forward = types.MethodType(
-                        llama_varlen_attn_forward, module)
+        if type(module).__name__ == attn_name:
+            if attn_forward_legacy and IS_LOW_VERSION_TRANSFORMERS:
+                print_log(f'dispatch legacy {attn_name} forward', 'current')
+                module.forward = types.MethodType(attn_forward_legacy, module)
             else:
-                print_log('dispatch llama attn forward', 'current')
-                if IS_LOW_VERSION_TRANSFORMERS:
-                    module.forward = types.MethodType(
-                        llama_attn_forward_legacy, module)
-                else:
-                    module.forward = types.MethodType(llama_attn_forward,
-                                                      module)
+                print_log(f'dispatch {attn_name} forward', 'current')
+                module.forward = types.MethodType(attn_forward, module)
 
 
-def dispatch_llama_rmsnorm_forward(model):
-    if not SUPPORT_TRITON:
+def dispatch_varlen_attn_forward(model, mapping):
+
+    assert SUPPORT_FLASH2 and SUPPORT_TRITON, \
+        'flash_attn and triton is required if you want to use varlen_attn.'
+
+    varlen_attn_forward = mapping.get('varlen_attn', None)
+    if varlen_attn_forward is None:
         return
 
-    from .triton_kernels import rms_norm_forward
-
-    for module in model.modules():
-        if type(module).__name__ == 'LlamaRMSNorm':
-            print_log('dispatch llama rmsnorm forward', 'current')
-            module.forward = types.MethodType(rms_norm_forward, module)
-
-
-def dispatch_phi3_attn_forward(model, use_varlen_attn):
-    if use_varlen_attn:
-        assert SUPPORT_FLASH2 and SUPPORT_TRITON, \
-            'flash_attn and triton is required if you want to use varlen_attn.'
-    elif not SUPPORT_FLASH2:
-        return
-
-    from .phi3 import phi3_attn_forward, phi3_varlen_attn_forward
+    from mmengine import print_log
 
     print_log(NO_ATTN_WEIGHTS_MSG, 'current', logging.WARNING)
-    for module in model.modules():
-        # Do not need to dispatch if
-        # type(module).__name__ == 'Phi3SdpaAttention', as flash_attn is
-        # required when using sequence parallel
-        if type(module).__name__ in ('Phi3Attention', 'Phi3FlashAttention2'):
-            if use_varlen_attn:
-                print_log('dispatch phi3 varlen attn forward', 'current')
-                if IS_LOW_VERSION_TRANSFORMERS:
-                    raise RuntimeError(
-                        'Phi-3 need transformers version >= 4.39, but got '
-                        f'{transformers.__version__}')
-                else:
-                    module.forward = types.MethodType(phi3_varlen_attn_forward,
-                                                      module)
-            else:
-                print_log('dispatch phi3 attn forward', 'current')
-                if IS_LOW_VERSION_TRANSFORMERS:
-                    raise RuntimeError(
-                        'Phi-3 need transformers version >= 4.39, but got '
-                        f'{transformers.__version__}')
-                else:
-                    module.forward = types.MethodType(phi3_attn_forward,
-                                                      module)
+    attn_name = mapping['attn_module_name']
+    varlen_attn_forward = varlen_attn_forward.build()
+    varlen_attn_forward_legacy = mapping.get('varlen_attn_legacy', None)
+    if varlen_attn_forward_legacy:
+        varlen_attn_forward_legacy = varlen_attn_forward_legacy.build()
 
-
-def dispatch_phi3_rmsnorm_forward(model):
-    if not SUPPORT_TRITON:
-        return
-
-    from .triton_kernels import rms_norm_forward
+    print_log = log_once(print_log)
 
     for module in model.modules():
-        if type(module).__name__ == 'Phi3RMSNorm':
-            print_log('dispatch phi3 rmsnorm forward', 'current')
-            module.forward = types.MethodType(rms_norm_forward, module)
-
-
-def dispatch_internlm_attn_forward(model, use_varlen_attn):
-    if use_varlen_attn:
-        assert SUPPORT_FLASH2 and SUPPORT_TRITON, \
-            'flash_attn and triton is required if you want to use varlen_attn.'
-    elif not SUPPORT_FLASH:
-        return
-
-    from .internlm import internlm_attn_forward, internlm_varlen_attn_forward
-
-    print_log(NO_ATTN_WEIGHTS_MSG, 'current', logging.WARNING)
-    for module in model.modules():
-        if type(module).__name__ == 'InternLMAttention':
-            if use_varlen_attn:
-                print_log('dispatch internlm varlen attn forward', 'current')
-                module.forward = types.MethodType(internlm_varlen_attn_forward,
+        if type(module).__name__ == attn_name:
+            if varlen_attn_forward_legacy and IS_LOW_VERSION_TRANSFORMERS:
+                print_log(f'dispatch legacy {attn_name} varlen forward',
+                          'current')
+                module.forward = types.MethodType(varlen_attn_forward_legacy,
                                                   module)
             else:
-                print_log('dispatch internlm attn forward', 'current')
-                module.forward = types.MethodType(internlm_attn_forward,
-                                                  module)
+                print_log(f'dispatch {attn_name} varlen forward', 'current')
+                module.forward = types.MethodType(varlen_attn_forward, module)
 
 
-def dispatch_internlm2_attn_forward(model, use_varlen_attn):
-    if use_varlen_attn:
-        assert SUPPORT_FLASH2 and SUPPORT_TRITON, \
-            'flash_attn and triton is required if you want to use varlen_attn.'
-    elif not SUPPORT_FLASH:
+def dispatch_rmsnorm_forward(model, mapping):
+
+    if (not SUPPORT_TRITON) or (not USE_TRITON_KERNEL):
         return
 
-    from .internlm2 import (internlm2_attn_forward,
-                            internlm2_varlen_attn_forward)
-
-    print_log(NO_ATTN_WEIGHTS_MSG, 'current', logging.WARNING)
-    for module in model.modules():
-        # Do not need to dispatch if
-        # type(module).__name__ == 'InternLM2Attention'.
-        # If we set `attn_implementation` to `eager` in xtuner
-        # configs, we can not use varlen attn and sequence parallel.
-        if type(module).__name__ == 'InternLM2FlashAttention2':
-            if use_varlen_attn:
-                print_log('dispatch internlm2 varlen attn forward', 'current')
-                module.forward = types.MethodType(
-                    internlm2_varlen_attn_forward, module)
-            else:
-                print_log('dispatch internlm2 attn forward', 'current')
-                module.forward = types.MethodType(internlm2_attn_forward,
-                                                  module)
-
-
-def dispatch_internlm_rmsnorm_forward(model):
-    if not SUPPORT_TRITON:
+    rms_forward = mapping.get('rms', None)
+    if rms_forward is None:
         return
 
-    from .triton_kernels import rms_norm_forward
+    from mmengine import print_log
+    print_log = log_once(print_log)
+
+    rms_module_name = mapping['rms_module_name']
+    rms_forward = rms_forward.build()
 
     for module in model.modules():
-        if type(module).__name__ == 'InternLMRMSNorm':
-            print_log('dispatch internlm rmsnorm forward', 'current')
-            module.forward = types.MethodType(rms_norm_forward, module)
+        if type(module).__name__ == rms_module_name:
+            print_log(f'dispatch {rms_module_name} forward', 'current')
+            module.forward = types.MethodType(rms_forward, module)
 
 
-def dispatch_internlm2_rmsnorm_forward(model):
-    if not SUPPORT_TRITON:
+def replace_rote(model, mapping):
+
+    rote = mapping.get('rote', None)
+    if rote is None:
         return
 
-    from .triton_kernels import rms_norm_forward
+    from mmengine import print_log
+    print_log = log_once(print_log)
 
-    for module in model.modules():
-        if type(module).__name__ == 'InternLM2RMSNorm':
-            print_log('dispatch internlm2 rmsnorm forward', 'current')
-            module.forward = types.MethodType(rms_norm_forward, module)
-
-
-def replace_internlm_rote(model):
-    from .internlm import InternLMRotaryEmbedding
+    rote_module_name = mapping['rote_module_name']
+    rote = rote.build()
 
     def traverse(module):
         for name, child in module.named_children():
-            if type(child).__name__ in (
-                    'InternLMRotaryEmbedding',
-                    'InternLMDynamicNTKScalingRotaryEmbedding'):
-                print_log('replace internlm rope', 'current')
+            if type(child).__name__ == rote_module_name:
+                print_log(f'replace {rote_module_name}', 'current')
                 dim_model = child.inv_freq.shape[0] * 2
-                child_new = InternLMRotaryEmbedding(
-                    dim_model, child.max_seq_len_cached).to(
-                        device=child.inv_freq.device,
-                        dtype=child.inv_freq.dtype)
+                child_new = rote(dim_model, child.max_seq_len_cached).to(
+                    device=child.inv_freq.device, dtype=child.inv_freq.dtype)
                 setattr(module, name, child_new)
             else:
                 traverse(child)
@@ -244,219 +286,7 @@ def replace_internlm_rote(model):
     traverse(model)
 
 
-def replace_internlm2_rote(model):
-    from .internlm2 import InternLM2RotaryEmbedding
-
-    rotary_base = model.config.rope_theta
-
-    def traverse(module):
-        for name, child in module.named_children():
-            if type(child).__name__ in (
-                    'InternLM2RotaryEmbedding',
-                    'InternLM2LinearScalingRotaryEmbedding',
-                    'InternLM2DynamicNTKScalingRotaryEmbedding'):
-                print_log('replace internlm2 rope', 'current')
-                dim_model = child.inv_freq.shape[0] * 2
-                child_new = InternLM2RotaryEmbedding(
-                    dim_model, child.max_position_embeddings, rotary_base).to(
-                        device=child.inv_freq.device,
-                        dtype=child.inv_freq.dtype)
-                setattr(module, name, child_new)
-            else:
-                traverse(child)
-
-    traverse(model)
-
-
-def dispath_baichuan2_norm_head_forward(model):
-    print_log('dispatch baichuan2 NormHead forward', 'current')
-    for module in model.modules():
-        if type(module).__name__ == 'NormHead':
-            module.forward = types.MethodType(baichuan2_norm_head_forward,
-                                              module)
-
-
-def dispath_baichuan_7b_attn_forward(model):
-    if digit_version(torch.__version__) < digit_version('2.0.0'):
-        # flash attention is only supported after pytorch2.0
-        return
-    print_log('dispatch baichuan2-7B attn forward', 'current')
-    print_log(NO_ATTN_WEIGHTS_MSG, 'current', logging.WARNING)
-    for module in model.modules():
-        if type(module).__name__ == 'Attention':
-            module.forward = types.MethodType(baichuan_7b_attn_forward, module)
-
-
-def dispath_baichuan_13b_attn_forward(model):
-    if digit_version(torch.__version__) < digit_version('2.0.0'):
-        # flash attention is only supported after pytorch2.0
-        return
-    print_log('dispatch baichuan2-13B attn forward', 'current')
-    print_log(NO_ATTN_WEIGHTS_MSG, 'current', logging.WARNING)
-    for module in model.modules():
-        if type(module).__name__ == 'BaichuanAttention':
-            module.forward = types.MethodType(baichuan_13b_attn_forward,
-                                              module)
-
-
-def dispatch_yi_attn_forward(model):
-    if digit_version(torch.__version__) < digit_version('2.0.0'):
-        # flash attention is only supported after pytorch2.0
-        return
-    print_log('dispatch yi attn forward', 'current')
-    print_log(NO_ATTN_WEIGHTS_MSG, 'current', logging.WARNING)
-    for module in model.modules():
-        if type(module).__name__ == 'YiAttention':
-            module.forward = types.MethodType(yi_attn_forward, module)
-
-
-def dispatch_mistral_attn_forward(model, use_varlen_attn):
-    if use_varlen_attn:
-        assert SUPPORT_FLASH2 and SUPPORT_TRITON, \
-            'flash_attn and triton is required if you want to use varlen_attn.'
-    elif not SUPPORT_FLASH2:
-        return
-
-    from .mistral import mistral_attn_forward, mistral_varlen_attn_forward
-
-    print_log(NO_ATTN_WEIGHTS_MSG, 'current', logging.WARNING)
-    for module in model.modules():
-        # Do not need to dispatch if
-        # type(module).__name__ in ('MistralAttention', 'MistralSdpaAttention',
-        #                           'MixtralAttention', 'MixtralSdpaAttention')
-        # If we set `attn_implementation` to `sdpa` or `eager` in xtuner
-        # configs, we can not use varlen attn and sequence parallel.
-        if type(module).__name__ in ('MistralFlashAttention2',
-                                     'MixtralFlashAttention2'):
-            if use_varlen_attn:
-                print_log('dispatch mistral varlen attn forward', 'current')
-                module.forward = types.MethodType(mistral_varlen_attn_forward,
-                                                  module)
-            else:
-                print_log('dispatch mistral attn forward', 'current')
-                module.forward = types.MethodType(mistral_attn_forward, module)
-
-
-def dispatch_mistral_rmsnorm_forward(model):
-    if not SUPPORT_TRITON:
-        return
-
-    from .triton_kernels import rms_norm_forward
-
-    for module in model.modules():
-        if type(module).__name__ in ('MistralRMSNorm', 'MixtralRMSNorm'):
-            print_log('dispatch mistral rmsnorm forward', 'current')
-            module.forward = types.MethodType(rms_norm_forward, module)
-
-
-def set_mixtral_moe_blocks_z3_leaf_modules(model):
-    from deepspeed.utils import set_z3_leaf_modules
-    from transformers.models.mixtral.modeling_mixtral import \
-        MixtralSparseMoeBlock
-    set_z3_leaf_modules(model, [MixtralSparseMoeBlock])
-
-
-def replace_mistral_rote(model):
-    from .mistral import MistralRotaryEmbedding
-
-    rotary_base = model.config.rope_theta
-
-    def traverse(module):
-        for name, child in module.named_children():
-            if type(child).__name__ in ('MistralRotaryEmbedding',
-                                        'MixtralRotaryEmbedding'):
-                print_log('replace mistral rope', 'current')
-                dim_model = child.inv_freq.shape[0] * 2
-                child_new = MistralRotaryEmbedding(
-                    dim_model, child.max_seq_len_cached, rotary_base).to(
-                        device=child.inv_freq.device,
-                        dtype=child.inv_freq.dtype)
-                setattr(module, name, child_new)
-            else:
-                traverse(child)
-
-    traverse(model)
-
-
-def dispatch_cohere_attn_forward(model, use_varlen_attn):
-    if use_varlen_attn:
-        raise NotImplementedError
-    elif not SUPPORT_FLASH2:
-        return
-
-    from .cohere import cohere_attn_forward
-
-    print_log(NO_ATTN_WEIGHTS_MSG, 'current', logging.WARNING)
-    for module in model.modules():
-        # Do not need to dispatch if
-        # type(module).__name__ in ('CohereAttention', 'CohereSdpaAttention').
-        # If we set `attn_implementation` to `sdpa` or `eager` in xtuner
-        # configs, we can not use varlen attn and sequence parallel.
-        if type(module).__name__ == 'CohereFlashAttention2':
-            print_log('dispatch cohere attn forward', 'current')
-            module.forward = types.MethodType(cohere_attn_forward, module)
-
-
-def dispatch_cohere_layernorm_forward(model):
-    from .triton_kernels import layer_norm_forward
-
-    for module in model.modules():
-        if type(module).__name__ == 'CohereLayerNorm':
-            print_log('dispatch cohere layernorm forward', 'current')
-            module.forward = types.MethodType(layer_norm_forward, module)
-
-
-def dispatch_qwen2_attn_forward(model, use_varlen_attn):
-    if use_varlen_attn:
-        assert SUPPORT_FLASH2 and SUPPORT_TRITON, \
-            'flash_attn and triton is required if you want to use varlen_attn.'
-    elif not SUPPORT_FLASH2:
-        return
-
-    from .qwen2 import qwen2_attn_forward, qwen2_varlen_attn_forward
-
-    print_log(NO_ATTN_WEIGHTS_MSG, 'current', logging.WARNING)
-    for module in model.modules():
-        # Do not need to dispatch if
-        # type(module).__name__ in ('Qwen2Attention', 'Qwen2SdpaAttention',
-        #                         'Qwen2MoeAttention', 'Qwen2MoeSdpaAttention')
-        # If we set `attn_implementation` to `sdpa` or `eager` in xtuner
-        # configs, we can not use varlen attn and sequence parallel.
-        if type(module).__name__ in ('Qwen2FlashAttention2',
-                                     'Qwen2MoeFlashAttention2'):
-            if use_varlen_attn:
-                print_log('dispatch qwen2 varlen attn forward', 'current')
-                module.forward = types.MethodType(qwen2_varlen_attn_forward,
-                                                  module)
-            else:
-                print_log('dispatch qwen2 attn forward', 'current')
-                module.forward = types.MethodType(qwen2_attn_forward, module)
-
-
-def dispatch_qwen2_rmsnorm_forward(model):
-    if not SUPPORT_TRITON:
-        return
-
-    from .triton_kernels import rms_norm_forward
-
-    for module in model.modules():
-        if type(module).__name__ == 'Qwen2RMSNorm':
-            print_log('dispatch qwen2 rmsnorm forward', 'current')
-            module.forward = types.MethodType(rms_norm_forward, module)
-
-
-def set_qwen_moe_blocks_z3_leaf_modules(model):
-    from deepspeed.utils import set_z3_leaf_modules
-    try:
-        from transformers.models.qwen2_moe.modeling_qwen2_moe import \
-            Qwen2MoeSparseMoeBlock
-    except ImportError:
-        raise ImportError('QWen moe requires transformers version at least'
-                          f'4.40.0, but got {transformers.__version__}')
-    set_z3_leaf_modules(model, [Qwen2MoeSparseMoeBlock])
-
-
-def check_transformers_version(model):
+def dispatch_modules(model, use_varlen_attn=False):
 
     def check(model_name):
         msg = '{} requires transformers version at least {}, but got {}'
@@ -466,76 +296,21 @@ def check_transformers_version(model):
                                     TRANSFORMERS_VERSION)
 
     model_name = model.__class__.__name__.lower()
+    dispatch_mapping = None
+    for key, mapping in DISPATCH_MAPPING.items():
+        if key in model_name:
+            check(key)
+            dispatch_mapping = mapping
+            break
 
-    if 'internlm2' in model_name:
-        check('internlm2')
-    elif 'internlm' in model_name:
-        check('internlm')
-    elif 'llama' in model_name:
-        check('llama')
-    elif 'phi3' in model_name:
-        check('phi3')
-    elif 'baichuan' in model_name:
-        check('baichuan')
-    elif 'yi' in model_name:
-        check('yi')
-    elif 'mistral' in model_name:
-        check('mistral')
-    elif 'mixtral' in model_name:
-        check('mixtral')
-    elif 'cohere' in model_name:
-        check('cohere')
-    elif 'qwen2moe' in model_name:
-        check('qwen2moe')
-    elif 'qwen2' in model_name:
-        check('qwen2')
+    assert dispatch_mapping
 
-
-def dispatch_modules(model, use_varlen_attn=False):
-    check_transformers_version(model)
-
-    model_name = model.__class__.__name__.lower()
-    if 'internlm2' in model_name:
-        dispatch_internlm2_attn_forward(model, use_varlen_attn)
-        if USE_TRITON_KERNEL:
-            dispatch_internlm2_rmsnorm_forward(model)
-        replace_internlm2_rote(model)
-    elif 'internlm' in model_name:
-        dispatch_internlm_attn_forward(model, use_varlen_attn)
-        if USE_TRITON_KERNEL:
-            dispatch_internlm_rmsnorm_forward(model)
-        replace_internlm_rote(model)
-    elif 'llama' in model_name:
-        dispatch_llama_attn_forward(model, use_varlen_attn)
-        if USE_TRITON_KERNEL:
-            dispatch_llama_rmsnorm_forward(model)
-    elif 'phi3' in model_name:
-        dispatch_phi3_attn_forward(model, use_varlen_attn)
-        if USE_TRITON_KERNEL:
-            dispatch_phi3_rmsnorm_forward(model)
-    elif 'baichuan' in model_name:
-        dispath_baichuan2_norm_head_forward(model)
-        dispath_baichuan_7b_attn_forward(model)
-        dispath_baichuan_13b_attn_forward(model)
-    elif 'yi' in model_name:
-        dispatch_yi_attn_forward(model)
-    elif ('mistral' in model_name) or ('mixtral' in model_name):
-        dispatch_mistral_attn_forward(model, use_varlen_attn)
-        if USE_TRITON_KERNEL:
-            dispatch_mistral_rmsnorm_forward(model)
-        replace_mistral_rote(model)
-        if 'moe' in model_name and is_deepspeed_zero3_enabled():
-            set_mixtral_moe_blocks_z3_leaf_modules(model)
-    elif 'cohere' in model_name:
-        dispatch_cohere_attn_forward(model, use_varlen_attn)
-        dispatch_cohere_layernorm_forward(model)
-    elif 'qwen2' in model_name:
-        # qwen2 and qwen2moe
-        dispatch_qwen2_attn_forward(model, use_varlen_attn)
-        if USE_TRITON_KERNEL:
-            dispatch_qwen2_rmsnorm_forward(model)
-        if 'moe' in model_name and is_deepspeed_zero3_enabled():
-            set_qwen_moe_blocks_z3_leaf_modules(model)
+    if use_varlen_attn:
+        dispatch_varlen_attn_forward(model, dispatch_mapping)
+    else:
+        dispatch_attn_forward(model, dispatch_mapping)
+    dispatch_rmsnorm_forward(model, dispatch_mapping)
+    replace_rote(model, dispatch_mapping)
 
 
 __all__ = ['dispatch_modules']
