@@ -182,24 +182,50 @@ class AnyResLLaVADataset(LLaVADataset):
         return data_dict
 
 
+from torchvision.transforms.functional import InterpolationMode
+import torchvision.transforms as T
+
+IMAGENET_MEAN = (0.485, 0.456, 0.406)
+IMAGENET_STD = (0.229, 0.224, 0.225)
+
+
+def build_transform(input_size):
+    MEAN, STD = IMAGENET_MEAN, IMAGENET_STD
+    transform = T.Compose([
+        T.Lambda(lambda img: img.convert('RGB') if img.mode != 'RGB' else img),
+        T.Resize((input_size, input_size), interpolation=InterpolationMode.BICUBIC),
+        T.ToTensor(),
+        T.Normalize(mean=MEAN, std=STD)
+    ])
+    return transform
+
+
 class InternVL_V1_5_LLaVADataset(LLaVADataset):
-    def __init__(self, min_num, max_num, downsample_ratio=0.5, image_size=336, use_patch=True, *args, **kwargs):
+    def __init__(self, min_num, max_num, downsample_ratio=0.5, image_size=336, use_patch=True, custom=False, *args,
+                 **kwargs):
         self.min_num = min_num
         self.max_num = max_num
         self.downsample_ratio = downsample_ratio
         self.use_patch = use_patch
         super().__init__(*args, **kwargs)
 
-        if hasattr(self.image_processor, 'crop_size'):
-            self._crop_size = self.image_processor.crop_size
+        self.custom = custom
+
+        if custom:
+            self.image_processor = build_transform(448)
+            self._crop_size = {'height': 448, 'width': 448}
         else:
-            self._crop_size = self.image_processor.size
+            if hasattr(self.image_processor, 'crop_size'):
+                self._crop_size = self.image_processor.crop_size
+            else:
+                self._crop_size = self.image_processor.size
+
         self._patch_size = self._crop_size['height']
         self._shortest_edge = self._crop_size['height']
 
         # clip
         self._image_size = image_size
-        self._patch_size = (self._image_size // 14) * downsample_ratio  # 12
+        self._patch_size = (self._image_size // 14) * downsample_ratio  # 12, 16
 
         self.max_refetch = 1000
 
@@ -268,8 +294,11 @@ class InternVL_V1_5_LLaVADataset(LLaVADataset):
                 return None
             images = dynamic_preprocess(image, self.min_num, self.max_num, self._image_size, use_patch=self.use_patch)
             for i, image in enumerate(images):
-                image = self.image_processor.preprocess(
-                    image, return_tensors='pt')['pixel_values'][0]
+                if self.custom:
+                    image = self.image_processor(image)
+                else:
+                    image = self.image_processor.preprocess(
+                        image, return_tensors='pt')['pixel_values'][0]
                 images[i] = image
             images = torch.stack(images, dim=0)
             data_dict['pixel_values'] = images
