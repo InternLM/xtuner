@@ -116,7 +116,7 @@ def process(dataset,
             use_varlen_attn=False,
             input_ids_with_output=True,
             with_image_token=False,
-            with_dpo=False,
+            use_dpo=False,
             map_num_proc=32):
     """Post-process the dataset loaded from the Hugging Face Hub, or a local
     dataset.
@@ -158,7 +158,7 @@ def process(dataset,
         with_image_token: Whether to convert DEFAULT_IMAGE_TOKEN to
             IMAGE_TOKEN_INDEX. Typically set it to True during the training
             of VLM.
-        with_dpo: Whether to process the dataset for DPO.
+        use_dpo: Whether to process the dataset for DPO.
         map_num_proc: Max number of processes when mapping the dataset.
     """
     if use_varlen_attn:
@@ -183,7 +183,7 @@ def process(dataset,
     # Extract the useful data for training from the original dataset.
     if dataset_map_fn is not None:
         dataset = map_dataset(dataset, dataset_map_fn, map_num_proc)
-        if with_dpo:
+        if use_dpo:
             chosen_data = dataset.map(
                 lambda example: {
                     'conversation': [{
@@ -205,7 +205,7 @@ def process(dataset,
 
     # Add prompt template, such as <|System|>: xxx <|User|>: xxx <|Bot|>: xxx
     if template_map_fn is not None:
-        if not with_dpo:
+        if not use_dpo:
             dataset = add_template_to_dataset(dataset, template_map_fn,
                                               map_num_proc)
         else:
@@ -216,14 +216,14 @@ def process(dataset,
                                                     map_num_proc)
 
     for old, new in rename_maps:
-        if not with_dpo:
+        if not use_dpo:
             dataset = dataset.rename_column(old, new)
         else:
             chosen_data = chosen_data.rename_column(old, new)
             rejected_data = rejected_data.rename_column(old, new)
 
     # remove unused columns
-    if pack_to_max_length and (not remove_unused_columns) and not with_dpo:
+    if pack_to_max_length and (not remove_unused_columns) and not use_dpo:
         print_log(
             'We have to remove unused columns if '
             '`pack_to_max_length` is set to True.',
@@ -232,7 +232,7 @@ def process(dataset,
         remove_unused_columns = True
 
     if do_dataset_tokenization:
-        if not with_dpo:
+        if not use_dpo:
             dataset = tokenize_dataset(dataset, tokenizer, max_length,
                                        with_image_token, input_ids_with_output,
                                        remove_unused_columns, map_num_proc)
@@ -260,7 +260,7 @@ def process(dataset,
 
     if input_ids_with_output:
         # remove data that does not have the valid labels.
-        if with_dpo:
+        if use_dpo:
             dataset = dataset.filter(
                 lambda example: any(label >= 0
                                     for label in example['chosen_labels']),
@@ -276,12 +276,12 @@ def process(dataset,
                 num_proc=map_num_proc)
 
     # pack to max length
-    if pack_to_max_length and not with_dpo:
+    if pack_to_max_length and not use_dpo:
         dataset = pack_dataset(dataset, max_length, use_varlen_attn,
                                shuffle_before_pack, map_num_proc)
 
     # add 'length'
-    if with_dpo:
+    if use_dpo:
         dataset = dataset.map(get_dpo_lengths, num_proc=map_num_proc)
     else:
         dataset = dataset.map(get_lengths, num_proc=map_num_proc)
@@ -305,7 +305,7 @@ def process_hf_dataset(dataset,
                        use_varlen_attn=False,
                        input_ids_with_output=True,
                        with_image_token=False,
-                       with_dpo=False,
+                       use_dpo=False,
                        map_num_proc=32):
     """Post-process the dataset loaded from the Hugging Face Hub, or a local
     dataset.
@@ -347,7 +347,7 @@ def process_hf_dataset(dataset,
         with_image_token: Whether to convert DEFAULT_IMAGE_TOKEN to
             IMAGE_TOKEN_INDEX. Typically set it to True during the training
             of VLM.
-        with_dpo: Whether to process the dataset for DPO.
+        use_dpo: Whether to process the dataset for DPO.
         map_num_proc: Max number of processes when mapping the dataset.
     """
     kwargs = dict(
@@ -366,7 +366,7 @@ def process_hf_dataset(dataset,
         use_varlen_attn=use_varlen_attn,
         input_ids_with_output=input_ids_with_output,
         with_image_token=with_image_token,
-        with_dpo=with_dpo,
+        use_dpo=use_dpo,
         map_num_proc=map_num_proc)
     if not (dist.is_available() and dist.is_initialized()):
         return process(**kwargs)

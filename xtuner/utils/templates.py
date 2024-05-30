@@ -183,4 +183,5 @@ SYSTEM_TEMPLATE = ConfigDict(
     medical='如果你是一名医生，请根据患者的描述回答医学问题。\n',
     sql=('If you are an expert in SQL, please generate a good SQL Query '
          'for Question based on the CREATE TABLE statement.\n'),
+    zephyr_beta=('You are a friendly chatbot who always responds in the style of a pirate'),
 )

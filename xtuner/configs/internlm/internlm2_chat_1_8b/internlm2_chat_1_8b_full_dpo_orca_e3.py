@@ -88,7 +88,7 @@ orca_dpo = dict(
     shuffle_before_pack=True,
     pack_to_max_length=pack_to_max_length,
     use_varlen_attn=use_varlen_attn,
-    with_dpo=True)
+    use_dpo=True)
 
 train_dataloader = dict(
     batch_size=batch_size,

@@ -4,6 +4,7 @@ from datasets import load_dataset
 from mmengine.dataset import DefaultSampler
 from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
                             LoggerHook, ParamSchedulerHook)
+from mmengine.visualization import Visualizer, TensorboardVisBackend
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR, LinearLR
 from peft import LoraConfig
 from torch.optim import AdamW
@@ -12,38 +13,44 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer,
 
 from xtuner.dataset import process_hf_dataset
 from xtuner.dataset.collate_fns import default_collate_fn
-from xtuner.dataset.map_fns import dpo_map_fn, template_map_fn_factory
+from xtuner.dataset.map_fns import ultrafeedback_binarized_map_fn, template_map_fn_factory
 from xtuner.engine.hooks import (DatasetInfoHook, EvaluateChatHook,
                                  VarlenAttnArgsToMessageHubHook)
 from xtuner.engine.runner import TrainLoop
 from xtuner.model import DPO
+from xtuner.parallel.sequence import SequenceParallelSampler
 from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
 
 #######################################################################
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-pretrained_model_name_or_path = 'internlm/internlm2-chat-1_8b'
+pretrained_model_name_or_path = 'Qwen/Qwen1.5-0.5B-Chat'
 use_varlen_attn = False
 use_dpo = True
 
 # Data
-orca_dpo_path = 'Intel/orca_dpo_pairs'
-prompt_template = PROMPT_TEMPLATE.internlm2_chat
-max_length = 2048
+ultrafeedback_binarized_path = 'HuggingFaceH4/ultrafeedback_binarized'
+split_name = 'train_prefs'
+prompt_template = PROMPT_TEMPLATE.qwen_chat
+max_length = 1024
 pack_to_max_length = False
 
+# parallel
+sequence_parallel_size = 1
+
 # Scheduler & Optimizer
-batch_size = 1  # per_device
-accumulative_counts = 16
+batch_size = 4  # per_device
+accumulative_counts = 4
+accumulative_counts *= sequence_parallel_size
 dataloader_num_workers = 0
-max_epochs = 3
+max_epochs = 1
 optim_type = AdamW
-lr = 2e-4
+lr = 5e-7
 betas = (0.9, 0.999)
 weight_decay = 0
 max_norm = 1  # grad clip
-warmup_ratio = 0.03
+warmup_ratio = 0.1
 
 # Save
 save_steps = 500
@@ -66,57 +73,42 @@ tokenizer = dict(
     padding_side='right')
 
 model = dict(
-    type=DPO,  # TODO
-    # type = SupervisedFinetune,
+    type=DPO,
+    beta=0.045,
     use_varlen_attn=use_varlen_attn,
     llm=dict(
         type=AutoModelForCausalLM.from_pretrained,
         pretrained_model_name_or_path=pretrained_model_name_or_path,
-        trust_remote_code=True,
-        torch_dtype=torch.float16,
-        quantization_config=dict(
-            type=BitsAndBytesConfig,
-            load_in_4bit=True,
-            load_in_8bit=False,
-            llm_int8_threshold=6.0,
-            llm_int8_has_fp16_weight=False,
-            bnb_4bit_compute_dtype=torch.float16,
-            bnb_4bit_use_double_quant=True,
-            bnb_4bit_quant_type='nf4')),
-    lora=dict(
-        type=LoraConfig,
-        r=64,
-        lora_alpha=16,
-        lora_dropout=0.1,
-        bias='none',
-        task_type='CAUSAL_LM'))
-
+        trust_remote_code=True))
 #######################################################################
 #                      PART 3  Dataset & Dataloader                   #
 #######################################################################
-orca_dpo = dict(
+ultrafeedback_binarized = dict(
     type=process_hf_dataset,
-    dataset=dict(type=load_dataset, path=orca_dpo_path),
+    dataset=dict(type=load_dataset, path=ultrafeedback_binarized_path, split=split_name),
     tokenizer=tokenizer,
     max_length=max_length,
-    dataset_map_fn=dpo_map_fn,
+    dataset_map_fn=ultrafeedback_binarized_map_fn,
     template_map_fn=dict(
         type=template_map_fn_factory, template=prompt_template),
     remove_unused_columns=True,
     shuffle_before_pack=True,
     pack_to_max_length=pack_to_max_length,
+    # max_dataset_length=2000,
     use_varlen_attn=use_varlen_attn,
-    use_dpo=True)
+    use_dpo=use_dpo)
+
+sampler = SequenceParallelSampler \
+    if sequence_parallel_size > 1 else DefaultSampler
 
 train_dataloader = dict(
     batch_size=batch_size,
     num_workers=dataloader_num_workers,
-    dataset=orca_dpo,
-    sampler=dict(type=DefaultSampler, shuffle=True),
-    collate_fn=dict(
-        type=default_collate_fn,
-        use_varlen_attn=use_varlen_attn,
-        use_dpo=use_dpo))
+    dataset=ultrafeedback_binarized,
+    sampler=dict(type=sampler, shuffle=True),
+    collate_fn=dict(type=default_collate_fn, 
+                    use_varlen_attn=use_varlen_attn,
+                    use_dpo=use_dpo))
 
 #######################################################################
 #                    PART 4  Scheduler & Optimizer                    #
@@ -200,7 +192,11 @@ env_cfg = dict(
 )
 
 # set visualizer
-visualizer = None
+# set visualizer
+visualizer = dict(
+    type=Visualizer, 
+    vis_backends=[dict(type=TensorboardVisBackend)]
+)
 
 # set log level
 log_level = 'INFO'
