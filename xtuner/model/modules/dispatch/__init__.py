@@ -1,5 +1,4 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-import logging
 import os
 import types
 
@@ -35,133 +34,100 @@ NO_ATTN_WEIGHTS_MSG = (
     'possible to return the `attn_weights`.')
 
 LOWEST_TRANSFORMERS_VERSION = dict(
-    internlm2=digit_version('4.36'),
-    internlm=digit_version('4.36'),
-    llama=digit_version('4.36'),
-    phi3=digit_version('4.39'),
-    yi=digit_version('4.36'),
-    mistral=digit_version('4.36'),
+    InternLM2ForCausalLM=digit_version('4.36'),
+    InternLMForCausalLM=digit_version('4.36'),
+    LlamaForCausalLM=digit_version('4.36'),
+    Phi3ForCausalLM=digit_version('4.39'),
+    MistralForCausalLM=digit_version('4.36'),
     # Training mixtral with lower version may lead to nccl timeout
     # Refer to https://github.com/microsoft/DeepSpeed/issues/5066
-    mixtral=digit_version('4.40'),
-    cohere=digit_version('4.40'),
-    qwen2=digit_version('4.39'),
-    qwen2_moe=digit_version('4.40'),
+    MixtralForCausalLM=digit_version('4.40'),
+    CohereForCausalLM=digit_version('4.40'),
+    Qwen2ForCausalLM=digit_version('4.39'),
+    Qwen2MoeForCausalLM=digit_version('4.40'),
 )
 
-DISPATCH_MAPPING = dict(
-    internlm2=dict(
-        attn_module_name='InternLM2FlashAttention2',
-        attn=LazyObject('xtuner.model.modules.dispatch.internlm2',
-                        'internlm2_attn_forward'),
-        varlen_attn=LazyObject('xtuner.model.modules.dispatch.internlm2',
-                               'internlm2_varlen_attn_forward'),
-        rms_module_name='InternLM2RMSNorm',
-        rms=LazyObject('xtuner.model.modules.dispatch.triton_kernels',
-                       'rms_norm_forward'),
-        rote_module_name='InternLM2RotaryEmbedding',
-        rote=LazyObject('xtuner.model.modules.dispatch.internlm2',
-                        'InternLM2RotaryEmbedding'),
-    ),
-    internlm=dict(
-        attn_module_name='InternLMAttention',
-        attn=LazyObject('xtuner.model.modules.dispatch.internlm',
-                        'internlm_attn_forward'),
-        varlen_attn=LazyObject('xtuner.model.modules.dispatch.internlm',
-                               'internlm_varlen_attn_forward'),
-        rms_module_name='InternLMRMSNorm',
-        rms=LazyObject('xtuner.model.modules.dispatch.triton_kernels',
-                       'rms_norm_forward'),
-        rote_module_name='InternLMRotaryEmbedding',
-        rote=LazyObject('xtuner.model.modules.dispatch.internlm',
-                        'InternLMRotaryEmbedding'),
-    ),
-    llama=dict(
-        attn_module_name='LlamaFlashAttention2',
-        attn=LazyObject('xtuner.model.modules.dispatch.llama',
-                        'llama_attn_forward'),
-        attn_legacy=LazyObject('xtuner.model.modules.dispatch.llama',
-                               'llama_attn_forward_legacy'),
-        varlen_attn=LazyObject('xtuner.model.modules.dispatch.llama',
-                               'llama_varlen_attn_forward'),
-        varlen_attn_legacy=LazyObject('xtuner.model.modules.dispatch.llama',
-                                      'llama_varlen_attn_forward_legacy'),
-        rms_module_name='LlamaRMSNorm',
-        rms=LazyObject('xtuner.model.modules.dispatch.triton_kernels',
-                       'rms_norm_forward'),
-    ),
-    phi3=dict(
-        attn_module_name='Phi3FlashAttention2',
-        attn=LazyObject('xtuner.model.modules.dispatch.phi3',
-                        'phi3_attn_forward'),
-        varlen_attn=LazyObject('xtuner.model.modules.dispatch.phi3',
-                               'phi3_varlen_attn_forward'),
-        rms_module_name='Phi3RMSNorm',
-        rms=LazyObject('xtuner.model.modules.dispatch.triton_kernels',
-                       'rms_norm_forward'),
-    ),
-    mistral=dict(
-        attn_module_name='MistralFlashAttention2',
-        attn=LazyObject('xtuner.model.modules.dispatch.mistral',
-                        'mistral_attn_forward'),
-        varlen_attn=LazyObject('xtuner.model.modules.dispatch.mistral',
-                               'mistral_varlen_attn_forward'),
-        rms_module_name='MistralRMSNorm',
-        rms=LazyObject('xtuner.model.modules.dispatch.triton_kernels',
-                       'rms_norm_forward'),
-        rote_module_name='MistralRotaryEmbedding',
-        rote=LazyObject('xtuner.model.modules.dispatch.mistral',
-                        'MistralRotaryEmbedding'),
-    ),
-    mixtral=dict(
-        attn_module_name='MixtralFlashAttention2',
-        attn=LazyObject('xtuner.model.modules.dispatch.mistral',
-                        'mistral_attn_forward'),
-        varlen_attn=LazyObject('xtuner.model.modules.dispatch.mistral',
-                               'mistral_varlen_attn_forward'),
-        rms_module_name='MixtralRMSNorm',
-        rms=LazyObject('xtuner.model.modules.dispatch.triton_kernels',
-                       'rms_norm_forward'),
-        rote_module_name='MixtralRotaryEmbedding',
-        rote=LazyObject('xtuner.model.modules.dispatch.mistral',
-                        'MistralRotaryEmbedding'),
-    ),
-    cohere=dict(
-        attn_module_name='CohereFlashAttention2',
-        attn=LazyObject('xtuner.model.modules.dispatch.cohere',
-                        'cohere_attn_forward'),
-        rms_module_name='CohereLayerNorm',
-        rms=LazyObject('xtuner.model.modules.dispatch.triton_kernels',
-                       'layer_norm_forward'),
-    ),
-    qwen2=dict(
-        attn_module_name='Qwen2FlashAttention2',
-        attn=LazyObject('xtuner.model.modules.dispatch.qwen2',
-                        'qwen2_attn_forward'),
-        varlen_attn=LazyObject('xtuner.model.modules.dispatch.qwen2',
-                               'qwen2_varlen_attn_forward'),
-        rms_module_name='Qwen2RMSNorm',
-        rms=LazyObject('xtuner.model.modules.dispatch.triton_kernels',
-                       'rms_norm_forward'),
-    ),
-    qwen2moe=dict(
-        attn_module_name='Qwen2MoeFlashAttention2',
-        attn=LazyObject('xtuner.model.modules.dispatch.qwen2',
-                        'qwen2_attn_forward'),
-        varlen_attn=LazyObject('xtuner.model.modules.dispatch.qwen2',
-                               'qwen2_varlen_attn_forward'),
-        rms_module_name='Qwen2MoeRMSNorm',
-        rms=LazyObject('xtuner.model.modules.dispatch.triton_kernels',
-                       'rms_norm_forward'),
-    ),
+ATTN_DISPATCH_MAPPING = dict(
+    InternLM2FlashAttention2=LazyObject(
+        'xtuner.model.modules.dispatch.internlm2', 'internlm2_attn_forward'),
+    InternLMAttention=LazyObject('xtuner.model.modules.dispatch.internlm',
+                                 'internlm_attn_forward'),
+    LlamaFlashAttention2=LazyObject('xtuner.model.modules.dispatch.llama',
+                                    'llama_attn_forward'),
+    Phi3FlashAttention2=LazyObject('xtuner.model.modules.dispatch.phi3',
+                                   'phi3_attn_forward'),
+    MistralFlashAttention2=LazyObject('xtuner.model.modules.dispatch.mistral',
+                                      'mistral_attn_forward'),
+    MixtralFlashAttention2=LazyObject('xtuner.model.modules.dispatch.mistral',
+                                      'mistral_attn_forward'),
+    CohereFlashAttention2=LazyObject('xtuner.model.modules.dispatch.cohere',
+                                     'cohere_attn_forward'),
+    Qwen2FlashAttention2=LazyObject('xtuner.model.modules.dispatch.qwen2',
+                                    'qwen2_attn_forward'),
+    Qwen2MoeFlashAttention2=LazyObject('xtuner.model.modules.dispatch.qwen2',
+                                       'qwen2_attn_forward'),
 )
 
-# Sorting is necessary. We aim for the Moe model to precede
-# the corresponding Dense model in ranking as we traverse the dictionary.
-DISPATCH_MAPPING = {
-    key: DISPATCH_MAPPING[key]
-    for key in sorted(DISPATCH_MAPPING.keys(), reverse=True)
-}
+ATTN_LEGACY_DISPATCH_MAPPING = dict(
+    LlamaFlashAttention2=LazyObject('xtuner.model.modules.dispatch.llama',
+                                    'llama_attn_forward_legacy'), )
+
+VARLEN_ATTN_DISPATCH_MAPPING = dict(
+    InternLM2FlashAttention2=LazyObject(
+        'xtuner.model.modules.dispatch.internlm2',
+        'internlm2_varlen_attn_forward'),
+    InternLMAttention=LazyObject('xtuner.model.modules.dispatch.internlm',
+                                 'internlm_varlen_attn_forward'),
+    LlamaFlashAttention2=LazyObject('xtuner.model.modules.dispatch.llama',
+                                    'llama_varlen_attn_forward'),
+    Phi3FlashAttention2=LazyObject('xtuner.model.modules.dispatch.phi3',
+                                   'phi3_varlen_attn_forward'),
+    MistralFlashAttention2=LazyObject('xtuner.model.modules.dispatch.mistral',
+                                      'mistral_varlen_attn_forward'),
+    MixtralFlashAttention2=LazyObject('xtuner.model.modules.dispatch.mistral',
+                                      'mistral_varlen_attn_forward'),
+    CohereFlashAttention2=None,
+    Qwen2FlashAttention2=LazyObject('xtuner.model.modules.dispatch.qwen2',
+                                    'qwen2_varlen_attn_forward'),
+    Qwen2MoeFlashAttention2=LazyObject('xtuner.model.modules.dispatch.qwen2',
+                                       'qwen2_varlen_attn_forward'),
+)
+
+VARLEN_ATTN_LEGACY_DISPATCH_MAPPING = dict(
+    LlamaFlashAttention2=LazyObject('xtuner.model.modules.dispatch.llama',
+                                    'llama_varlen_attn_forward_legacy'), )
+
+RMS_DISPATCH_MAPPING = dict(
+    InternLM2RMSNorm=LazyObject('xtuner.model.modules.dispatch.triton_kernels',
+                                'rms_norm_forward'),
+    InternLMRMSNorm=LazyObject('xtuner.model.modules.dispatch.triton_kernels',
+                               'rms_norm_forward'),
+    LlamaRMSNorm=LazyObject('xtuner.model.modules.dispatch.triton_kernels',
+                            'rms_norm_forward'),
+    Phi3RMSNorm=LazyObject('xtuner.model.modules.dispatch.triton_kernels',
+                           'rms_norm_forward'),
+    MistralRMSNorm=LazyObject('xtuner.model.modules.dispatch.triton_kernels',
+                              'rms_norm_forward'),
+    MixtralRMSNorm=LazyObject('xtuner.model.modules.dispatch.triton_kernels',
+                              'rms_norm_forward'),
+    CohereLayerNorm=LazyObject('xtuner.model.modules.dispatch.triton_kernels',
+                               'layer_norm_forward'),
+    Qwen2RMSNorm=LazyObject('xtuner.model.modules.dispatch.triton_kernels',
+                            'rms_norm_forward'),
+    Qwen2MoeRMSNorm=LazyObject('xtuner.model.modules.dispatch.triton_kernels',
+                               'rms_norm_forward'),
+)
+
+ROTE_DISPATCH_MAPPING = dict(
+    InternLM2RotaryEmbedding=LazyObject(
+        'xtuner.model.modules.dispatch.internlm2', 'InternLM2RotaryEmbedding'),
+    InternLMRotaryEmbedding=LazyObject(
+        'xtuner.model.modules.dispatch.internlm', 'InternLMRotaryEmbedding'),
+    MistralRotaryEmbedding=LazyObject('xtuner.model.modules.dispatch.mistral',
+                                      'MistralRotaryEmbedding'),
+    MixtralRotaryEmbedding=LazyObject('xtuner.model.modules.dispatch.mistral',
+                                      'MistralRotaryEmbedding'),
+)
 
 
 def log_once(func):
@@ -177,105 +143,92 @@ def log_once(func):
     return wrapper
 
 
-def dispatch_attn_forward(model, mapping):
+def dispatch_attn_forward(model):
 
     if not SUPPORT_FLASH2:
         return
 
-    attn_forward = mapping.get('attn', None)
-    if attn_forward is None:
+    from mmengine import print_log
+    print_log = log_once(print_log)
+
+    attn_forward = None
+    for module in model.modules():
+        name = type(module).__name__
+        if IS_LOW_VERSION_TRANSFORMERS and name in ATTN_LEGACY_DISPATCH_MAPPING:
+            if attn_forward is None:
+                attn_forward = ATTN_LEGACY_DISPATCH_MAPPING[name]
+                attn_forward = attn_forward.build()
+            print_log(f'Dispatch {name} legacy forward. {NO_ATTN_WEIGHTS_MSG}',
+                      'current')
+            module.forward = types.MethodType(attn_forward, module)
+        elif name in ATTN_DISPATCH_MAPPING:
+            if attn_forward is None:
+                attn_forward = ATTN_DISPATCH_MAPPING[name]
+                attn_forward = attn_forward.build()
+            print_log(f'Dispatch {name} forward. {NO_ATTN_WEIGHTS_MSG}',
+                      'current')
+            module.forward = types.MethodType(attn_forward, module)
+
+
+def dispatch_varlen_attn_forward(model):
+
+    if not SUPPORT_FLASH2:
         return
 
     from mmengine import print_log
-
-    print_log(NO_ATTN_WEIGHTS_MSG, 'current', logging.WARNING)
-    attn_name = mapping['attn_module_name']
-    attn_forward = attn_forward.build()
-    attn_forward_legacy = mapping.get('attn_legacy', None)
-    if attn_forward_legacy:
-        attn_forward_legacy = attn_forward_legacy.build()
-
     print_log = log_once(print_log)
 
+    varlen_attn_forward = None
     for module in model.modules():
-        if type(module).__name__ == attn_name:
-            if attn_forward_legacy and IS_LOW_VERSION_TRANSFORMERS:
-                print_log(f'dispatch legacy {attn_name} forward', 'current')
-                module.forward = types.MethodType(attn_forward_legacy, module)
-            else:
-                print_log(f'dispatch {attn_name} forward', 'current')
-                module.forward = types.MethodType(attn_forward, module)
+        name = type(module).__name__
+        if IS_LOW_VERSION_TRANSFORMERS and name in VARLEN_ATTN_LEGACY_DISPATCH_MAPPING:
+            if varlen_attn_forward is None:
+                varlen_attn_forward = VARLEN_ATTN_LEGACY_DISPATCH_MAPPING[name]
+                varlen_attn_forward = varlen_attn_forward.build()
+            print_log(
+                f'Dispatch legacy {name} varlen forward. {NO_ATTN_WEIGHTS_MSG}',
+                'current')
+            module.forward = types.MethodType(varlen_attn_forward, module)
+        elif name in VARLEN_ATTN_DISPATCH_MAPPING:
+            if varlen_attn_forward is None:
+                varlen_attn_forward = VARLEN_ATTN_DISPATCH_MAPPING[name]
+                varlen_attn_forward = varlen_attn_forward.build()
+            print_log(f'Dispatch {name} varlen forward. {NO_ATTN_WEIGHTS_MSG}',
+                      'current')
+            module.forward = types.MethodType(varlen_attn_forward, module)
 
 
-def dispatch_varlen_attn_forward(model, mapping):
-
-    assert SUPPORT_FLASH2 and SUPPORT_TRITON, \
-        'flash_attn and triton is required if you want to use varlen_attn.'
-
-    varlen_attn_forward = mapping.get('varlen_attn', None)
-    if varlen_attn_forward is None:
-        return
-
-    from mmengine import print_log
-
-    print_log(NO_ATTN_WEIGHTS_MSG, 'current', logging.WARNING)
-    attn_name = mapping['attn_module_name']
-    varlen_attn_forward = varlen_attn_forward.build()
-    varlen_attn_forward_legacy = mapping.get('varlen_attn_legacy', None)
-    if varlen_attn_forward_legacy:
-        varlen_attn_forward_legacy = varlen_attn_forward_legacy.build()
-
-    print_log = log_once(print_log)
-
-    for module in model.modules():
-        if type(module).__name__ == attn_name:
-            if varlen_attn_forward_legacy and IS_LOW_VERSION_TRANSFORMERS:
-                print_log(f'dispatch legacy {attn_name} varlen forward',
-                          'current')
-                module.forward = types.MethodType(varlen_attn_forward_legacy,
-                                                  module)
-            else:
-                print_log(f'dispatch {attn_name} varlen forward', 'current')
-                module.forward = types.MethodType(varlen_attn_forward, module)
-
-
-def dispatch_rmsnorm_forward(model, mapping):
+def dispatch_rmsnorm_forward(model):
 
     if (not SUPPORT_TRITON) or (not USE_TRITON_KERNEL):
         return
 
-    rms_forward = mapping.get('rms', None)
-    if rms_forward is None:
-        return
-
     from mmengine import print_log
     print_log = log_once(print_log)
 
-    rms_module_name = mapping['rms_module_name']
-    rms_forward = rms_forward.build()
-
+    rms_forward = None
     for module in model.modules():
-        if type(module).__name__ == rms_module_name:
-            print_log(f'dispatch {rms_module_name} forward', 'current')
+        name = type(module).__name__
+        if name in RMS_DISPATCH_MAPPING:
+            if rms_forward is None:
+                rms_forward = RMS_DISPATCH_MAPPING[name]
+                rms_forward = rms_forward.build()
+            print_log(f'Dispatch {name} forward.', 'current')
             module.forward = types.MethodType(rms_forward, module)
 
 
-def replace_rote(model, mapping):
-
-    rote = mapping.get('rote', None)
-    if rote is None:
-        return
+def replace_rote(model):
 
     from mmengine import print_log
     print_log = log_once(print_log)
 
-    rote_module_name = mapping['rote_module_name']
-    rote = rote.build()
-
     def traverse(module):
         for name, child in module.named_children():
-            if type(child).__name__ == rote_module_name:
-                print_log(f'replace {rote_module_name}', 'current')
+            cls_name = type(child).__name__
+            if cls_name in ROTE_DISPATCH_MAPPING:
+                rote = ROTE_DISPATCH_MAPPING[cls_name]
+                rote = rote.build()
+                print_log(f'replace {cls_name}', 'current')
                 dim_model = child.inv_freq.shape[0] * 2
                 child_new = rote(dim_model, child.max_seq_len_cached).to(
                     device=child.inv_freq.device, dtype=child.inv_freq.dtype)
@@ -295,22 +248,13 @@ def dispatch_modules(model, use_varlen_attn=False):
                                     LOWEST_TRANSFORMERS_VERSION[model_name],
                                     TRANSFORMERS_VERSION)
 
-    model_name = model.__class__.__name__.lower()
-    dispatch_mapping = None
-    for key, mapping in DISPATCH_MAPPING.items():
-        if key in model_name:
-            check(key)
-            dispatch_mapping = mapping
-            break
-
-    assert dispatch_mapping
-
+    check(type(model).__name__)
     if use_varlen_attn:
-        dispatch_varlen_attn_forward(model, dispatch_mapping)
+        dispatch_varlen_attn_forward(model)
     else:
-        dispatch_attn_forward(model, dispatch_mapping)
-    dispatch_rmsnorm_forward(model, dispatch_mapping)
-    replace_rote(model, dispatch_mapping)
+        dispatch_attn_forward(model)
+    dispatch_rmsnorm_forward(model)
+    replace_rote(model)
 
 
 __all__ = ['dispatch_modules']
