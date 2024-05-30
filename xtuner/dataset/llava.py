@@ -66,7 +66,7 @@ class LLaVADataset(Dataset):
                 raise NotImplementedError
 
             for idx in range(len(json_data)):
-                if isinstance(json_data[idx]['id'], int):
+                if 'id' in json_data[idx] and isinstance(json_data[idx]['id'], int):
                     json_data[idx]['id'] = str(json_data[idx]['id'])
             json_data = DatasetDict({'train': HFDataset.from_list(json_data)})
             self.text_data = process_hf_dataset(

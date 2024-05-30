@@ -21,10 +21,13 @@ def get_lengths(example):
     cur_len = len(example['input_ids'])
     if example.get('image', None) is not None:
         assert 'image_wh' in example
-        size = example['image_wh'][0]
-        num_image_token = total_image_token(size, 1, 6, 336, 12)
-        cur_len += num_image_token
-        cur_len = -cur_len
+        image_wh = example['image_wh']
+        if image_wh is not None:
+            if isinstance(image_wh[0], int):
+                image_wh = [image_wh]
+            num_image_token = total_image_token(image_wh[0], 1, 12, 448, 16)
+            cur_len += num_image_token
+            cur_len = -cur_len
     return {'length': cur_len}
 
 

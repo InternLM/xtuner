@@ -575,7 +575,11 @@ def internvl_1_5_encode_fn(example,
     if 'image' in example:
         if use_patch:
             assert 'image_wh' in example
-            img_token = total_image_token(example['image_wh'][0], min_num, max_num, image_size, patch_size)
+            image_wh = example['image_wh']
+            if image_wh is not None:
+                if isinstance(image_wh[0], int):
+                    image_wh = [image_wh]
+                img_token = total_image_token(image_wh[0], min_num, max_num, image_size, patch_size)
         else:
             # clip
             img_token = patch_size * patch_size
