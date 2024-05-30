@@ -11,6 +11,9 @@ from .utils import (LoadWoInit, guess_load_checkpoint,
 
 from xtuner.engine.optimizers import get_layer_depth_for_CLIPVisionModel
 import types
+from mmengine.logging import print_log
+import torch.nn as nn
+from fairscale.nn.checkpoint import checkpoint_wrapper
 
 
 class InternVL_v1_5_LLaVAModel(LLaVAModel):
@@ -30,7 +33,8 @@ class InternVL_v1_5_LLaVAModel(LLaVAModel):
                  template=None,
                  use_lldr=False,  # LearningRateDecayOptimWrapperConstructor
                  merge_type='pixel_shuffle',  # or pixel_shuffle
-                 downsample_ratio=0.5):
+                 downsample_ratio=0.5,
+                 custom_mlp=False):
         super(LLaVAModel, self).__init__()
         self.downsample_ratio = downsample_ratio
 
@@ -54,12 +58,24 @@ class InternVL_v1_5_LLaVAModel(LLaVAModel):
         self.llm.config.use_cache = False
         dispatch_modules(self.llm)
 
-        projector_config = ProjectorConfig(
-            visual_hidden_size=self.visual_encoder.config.hidden_size * (int(1 / self.downsample_ratio) ** 2),
-            llm_hidden_size=self.llm.config.hidden_size,
-            depth=projector_depth)
-        self.projector = ProjectorModel(projector_config).to(
-            self.visual_encoder.dtype)
+        self.custom_mlp = custom_mlp
+        if custom_mlp is True:
+            self.mlp1 = nn.Sequential(
+                nn.LayerNorm(self.visual_encoder.config.hidden_size * int(1 / self.downsample_ratio) ** 2),
+                nn.Linear(self.visual_encoder.config.hidden_size * int(1 / self.downsample_ratio) ** 2,
+                          self.llm.config.hidden_size),
+                nn.GELU(),
+                nn.Linear(self.llm.config.hidden_size, self.llm.config.hidden_size)
+            )
+            self.mlp1 = self.mlp1.to(self.visual_encoder.dtype)
+            self.mlp1 = checkpoint_wrapper(self.mlp1)
+        else:
+            projector_config = ProjectorConfig(
+                visual_hidden_size=self.visual_encoder.config.hidden_size * (int(1 / self.downsample_ratio) ** 2),
+                llm_hidden_size=self.llm.config.hidden_size,
+                depth=projector_depth)
+            self.projector = ProjectorModel(projector_config).to(
+                self.visual_encoder.dtype)
 
         if self.freeze_llm:
             self.llm.requires_grad_(False)
@@ -74,12 +90,17 @@ class InternVL_v1_5_LLaVAModel(LLaVAModel):
             else:
                 self.llm.get_input_embeddings().register_forward_hook(
                     make_inputs_require_grad)
-            if hasattr(self.visual_encoder, 'enable_input_require_grads'):
-                self.visual_encoder.enable_input_require_grads()
+
+            if self.visual_encoder.__class__.__name__ == 'InternVisionModel':
+                pass
             else:
-                self.visual_encoder.get_input_embeddings(
-                ).register_forward_hook(make_inputs_require_grad)
-            self.projector.enable_input_require_grads()
+                if hasattr(self.visual_encoder, 'enable_input_require_grads'):
+                    self.visual_encoder.enable_input_require_grads()
+                else:
+                    self.visual_encoder.get_input_embeddings(
+                    ).register_forward_hook(make_inputs_require_grad)
+            if custom_mlp is False:
+                self.projector.enable_input_require_grads()
 
             # enable gradient (activation) checkpointing for memory efficiency
             self.gradient_checkpointing_enable()
@@ -95,7 +116,6 @@ class InternVL_v1_5_LLaVAModel(LLaVAModel):
 
         if pretrained_pth is not None:
             pretrained_state_dict = guess_load_checkpoint(pretrained_pth)
-
             self.load_state_dict(pretrained_state_dict, strict=False)
             print(f'Load pretrained weight from {pretrained_pth}')
 
@@ -110,6 +130,26 @@ class InternVL_v1_5_LLaVAModel(LLaVAModel):
         if image_processor is not None:
             self.image_processor = BUILDER.build(image_processor)
         self.template = template
+
+        print_log(self, logger='current')
+
+    def activation_checkpointing_enable(self):
+        self.llm.gradient_checkpointing_enable()
+        if self.custom_mlp is False:
+            self.projector.gradient_checkpointing_enable()
+        if self.visual_encoder.__class__.__name__ == 'InternVisionModel':
+            pass
+        else:
+            self.visual_encoder.gradient_checkpointing_enable()
+
+    def activation_checkpointing_disable(self):
+        self.llm.gradient_checkpointing_disable()
+        if self.custom_mlp is False:
+            self.projector.gradient_checkpointing_disable()
+        if self.visual_encoder.__class__.__name__ == 'InternVisionModel':
+            pass
+        else:
+            self.visual_encoder.gradient_checkpointing_disable()
 
     # The following code is only meaningful when the optim_wrapper configuration
     # includes `LearningRateDecayOptimWrapperConstructor`. Otherwise, it will be ignored.
