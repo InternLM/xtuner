@@ -13,7 +13,6 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('config', help='config file name or path.')
-    parser.add_argument('--save-folder', help='The folder to save data order.')
     args = parser.parse_args()
     return args
 
@@ -27,10 +26,9 @@ if __name__ == '__main__':
     args = parse_args()
     cfg = Config.fromfile(args.config)
 
-    datasets = cfg.train_dataloader.datasets
+    datasets = cfg.train_dataloader.dataset.datasets
     for dataset_cfg in datasets:
+        offline_processed_text_folder = dataset_cfg.pop('offline_processed_text_folder')
         llava_dataset = build_llava_dataset(dataset_cfg)
         text_data = llava_dataset.text_data
-        variable_name = [k for k, v in locals().items() if v == dataset_cfg][0]
-        save_folder = args.save_folder + f'/{variable_name}'
-        text_data.save_to_disk(save_folder)
+        text_data.save_to_disk(offline_processed_text_folder)
