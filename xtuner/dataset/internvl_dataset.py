@@ -68,6 +68,28 @@ def dynamic_preprocess(image, min_num=1, max_num=6, image_size=448, use_thumbnai
     return processed_images
 
 
+def total_image_token(orig_size, min_num=1, max_num=12, image_size=448, patch_size=16, use_thumbnail=True):
+    orig_width, orig_height = orig_size
+
+    aspect_ratio = orig_width / orig_height
+
+    # calculate the existing image aspect ratio
+    target_ratios = set(
+        (i, j) for n in range(min_num, max_num + 1) for i in range(1, n + 1) for j in range(1, n + 1) if
+        max_num >= i * j >= min_num)
+    target_ratios = sorted(target_ratios, key=lambda x: x[0] * x[1])
+
+    # find the closest aspect ratio to the target
+    target_aspect_ratio = find_closest_aspect_ratio(
+        aspect_ratio, target_ratios, orig_width, orig_height, image_size)
+    blocks = target_aspect_ratio[0] * target_aspect_ratio[1]
+
+    if use_thumbnail:
+        blocks += 1
+
+    return blocks*patch_size*patch_size + 2  # 2 for <img> and </img>
+
+
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 qualities = list(range(75, 101))
@@ -155,6 +177,9 @@ class InternVL_V1_5_LLaVADataset(LLaVADataset):
 
         if data_dict.get('image', None) is not None:
             image_file = data_dict['image']
+            assert len(image_file) == 1
+            image_file = image_file[0]
+
             try:
                 image = self.get_image(os.path.join(self.image_folder, image_file))
             except Exception as e:
@@ -168,7 +193,7 @@ class InternVL_V1_5_LLaVADataset(LLaVADataset):
             data_dict['pixel_values'] = pixel_values
 
             # TODO: more simple way to replace image token
-            num_image_tokens = pixel_values.shape[0]*self.patch_token
+            num_image_tokens = pixel_values.shape[0] * self.patch_token
             image_token = f'{IMG_START_TOKEN}{IMG_CONTEXT_TOKEN * num_image_tokens}{IMG_END_TOKEN}'
             image_input_ids = self.tokenizer(image_token, add_special_tokens=False).input_ids
 

@@ -17,7 +17,7 @@ from transformers import AutoTokenizer
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-path = "/mnt/hwfile/xtuner/huanghaian/model/Mini-InternVL-Chat-2B-V1-5"
+path = "/mnt/hwfile/xtuner/huanghaian/model/Mini-InternVL-Chat-4B-V1-5"
 
 # Data
 data_root = '/mnt/hwfile/xtuner/linzhihao/dataset/llava_data/'
@@ -47,8 +47,8 @@ data_root = '/mnt/hwfile/xtuner/linzhihao/dataset/llava_data/'
 
 data_path = data_root + 'LLaVA-Instruct-150K/llava_v1_5_mix665k.json'
 image_folder = data_root + 'llava_images'
-prompt_template = PROMPT_TEMPLATE.internlm2_chat
-max_length = int(4096 - (448 / 14) ** 2)  # TODO: It is not an exact value.
+prompt_template = PROMPT_TEMPLATE.phi3_chat
+max_length = 8192
 
 # Scheduler & Optimizer
 batch_size = 4  # per_device
@@ -86,7 +86,7 @@ model = dict(
 #######################################################################
 llava_dataset = dict(
     type=InternVL_V1_5_LLaVADataset,
-    offline_processed_text_folder='/mnt/petrelfs/huanghaian/code/xtuner/intervl/mini_v18_llava_sft',
+    offline_processed_text_folder='/mnt/petrelfs/huanghaian/code/xtuner/intervl/mini_phi3_llava_sft',
     path=path,
     data_path=data_path,
     image_folder=image_folder,

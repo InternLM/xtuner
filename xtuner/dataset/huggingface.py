@@ -13,10 +13,21 @@ from torch import distributed as dist
 
 from xtuner.registry import BUILDER, MAP_FUNC
 from .utils import Packer, encode_fn
+from .internvl_dataset import total_image_token
 
 
 def get_lengths(example):
-    return {'length': len(example['input_ids'])}
+    cur_len = len(example['input_ids'])
+    if example.get('image', None) is not None:
+        assert 'image_wh' in example
+        image_wh = example['image_wh']
+        if image_wh is not None:
+            if isinstance(image_wh[0], int):
+                image_wh = [image_wh]
+            num_image_token = total_image_token(image_wh[0], 1, 12, 448, 16)
+            cur_len += num_image_token
+            cur_len = -cur_len
+    return {'length': cur_len}
 
 
 def build_origin_dataset(dataset, split):
