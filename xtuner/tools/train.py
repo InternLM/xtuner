@@ -84,13 +84,6 @@ def check_cfg(cfg):
             f'If utilizing varlen attention, the batch size should be'
             f' set to 1, but got {cfg.train_dataloader.batch_size}')
 
-    if getattr(cfg, 'use_varlen_attn', False) and (not getattr(
-            cfg.train_dataloader.dataset, 'pack_to_max_length', True)):
-        raise AssertionError(
-            'When using varlen attention, `pack_to_max_length`'
-            'should be set to True, but got use_varlen_attn = True and '
-            'pack_to_max_length = False.')
-
     if getattr(cfg, 'use_varlen_attn', False):
         sequence_parallel = getattr(cfg, 'sequence_parallel', 1)
         max_length = getattr(cfg.train_dataloader.dataset, 'max_length', None)
