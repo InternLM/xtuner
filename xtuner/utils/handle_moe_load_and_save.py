@@ -25,11 +25,6 @@ def get_expert_num_per_shard(model):
             return module.expert_in_one_shard
 
 
-# def get_expert_num_per_shard(model):
-#     first_k_dense_replace = model.config.first_k_dense_replace
-#     return model.model.layers[first_k_dense_replace].mlp.expert_in_one_shard
-
-
 def mix_sort(expert_name):
     components = re.findall(r'(\D+|\d+)', expert_name)
     out = [int(comp) if comp.isdigit() else comp for comp in components]
@@ -50,8 +45,6 @@ def _get_merged_param_name(origin_param_name, expert_num_per_shard):
 def _merge_experts_weight(state_dict, expert_num_per_shard):
     experts_name = [key for key in state_dict.keys() if 'mlp.experts.' in key]
     experts_name = sorted(experts_name, key=mix_sort)
-    # print_on_rank0(f'expert_num_per_shard = {expert_num_per_shard}')
-    # print_on_rank0(f'after sorted experts_name = {experts_name}')
     linear_num_per_expert = 3
     linear_num_per_shard = expert_num_per_shard * linear_num_per_expert
     expert_shard_num = len(experts_name) // linear_num_per_shard
@@ -110,7 +103,6 @@ def load_state_dict_into_model(model_to_load, pretrained_model_path):
         param_names = []
         for name, param in module.named_parameters(
                 prefix=prefix[:-1], recurse=False):
-            # key不在weight_map里的情况
             while name not in state_dict:
                 assert len(unloaded_shard_files) > 0
                 shard_file = unloaded_shard_files.pop()
