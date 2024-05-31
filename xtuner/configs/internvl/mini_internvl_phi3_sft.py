@@ -45,7 +45,7 @@ data_root = '/mnt/hwfile/xtuner/linzhihao/dataset/llava_data/'
   }
 """
 
-data_path = data_root + 'LLaVA-Instruct-150K/llava_v1_5_mix665k.json'
+data_path = '/mnt/hwfile/xtuner/huanghaian/data/llava_v1_5_mix665k_processed.json'
 image_folder = data_root + 'llava_images'
 prompt_template = PROMPT_TEMPLATE.phi3_chat
 max_length = 8192
@@ -65,11 +65,11 @@ max_norm = 1  # grad clip
 warmup_ratio = 0.03
 
 # Save
-save_steps = 2000
+save_steps = 100
 save_total_limit = 1  # Maximum checkpoints to keep (-1 means unlimited)
 
 # Evaluate the generation performance during the training
-evaluation_freq = 2000
+evaluation_freq = 100
 SYSTEM = ''
 
 #######################################################################

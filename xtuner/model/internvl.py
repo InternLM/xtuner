@@ -1,7 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import math
 from collections import OrderedDict
-from transformers import AutoTokenizer, AutoModel
+from transformers import AutoTokenizer, AutoModel, AutoConfig
 import torch
 import torch.nn as nn
 from mmengine.config import Config, ConfigDict
@@ -34,15 +34,28 @@ class InternVL(BaseModel):
         self.use_visual_encoder_lora = visual_encoder_lora is not None
         self.quantization_vit = quantization_vit
         self.quantization_llm = quantization_llm
-        assert quantization_vit and visual_encoder_lora is not None
-        assert quantization_llm and llm_lora is not None
+        if quantization_vit:
+            assert visual_encoder_lora is not None
+        if quantization_llm:
+            assert quantization_llm and llm_lora is not None
 
-        if quantization_vit is None and quantization_llm is None:
-            self.model = AutoModel.from_pretrained(
-                path,
-                torch_dtype=torch.bfloat16,
-                low_cpu_mem_usage=True,
-                trust_remote_code=True)
+        if quantization_vit is False and quantization_llm is False:
+            if 'Mini-InternVL-Chat-4B-V1-5' in path:
+                config = AutoConfig.from_pretrained(path, trust_remote_code=True)
+                config.llm_config._attn_implementation = 'flash_attention_2'
+                # print(config)
+                self.model = AutoModel.from_pretrained(
+                    path,
+                    torch_dtype=torch.bfloat16,
+                    low_cpu_mem_usage=True,
+                    trust_remote_code=True,
+                    config=config)
+            else:
+                self.model = AutoModel.from_pretrained(
+                    path,
+                    torch_dtype=torch.bfloat16,
+                    low_cpu_mem_usage=True,
+                    trust_remote_code=True)
         else:
             llm_int8_skip_modules = ['mlp1']
             if quantization_llm and not quantization_vit:

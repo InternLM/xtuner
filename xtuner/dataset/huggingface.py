@@ -13,8 +13,44 @@ from torch import distributed as dist
 
 from xtuner.registry import BUILDER, MAP_FUNC
 from .utils import Packer, encode_fn
-from .internvl_dataset import total_image_token
 
+def find_closest_aspect_ratio(aspect_ratio, target_ratios, width, height, image_size):
+    best_ratio_diff = float('inf')
+    best_ratio = (1, 1)
+    area = width * height
+    for ratio in target_ratios:
+        target_aspect_ratio = ratio[0] / ratio[1]
+        ratio_diff = abs(aspect_ratio - target_aspect_ratio)
+        if ratio_diff < best_ratio_diff:
+            best_ratio_diff = ratio_diff
+            best_ratio = ratio
+        elif ratio_diff == best_ratio_diff:
+            if area > 0.5 * image_size * image_size * ratio[0] * ratio[1]:
+                best_ratio = ratio
+    # print(f'width: {width}, height: {height}, best_ratio: {best_ratio}')
+    return best_ratio
+
+
+def total_image_token(orig_size, min_num=1, max_num=12, image_size=448, patch_size=16, use_thumbnail=True):
+    orig_width, orig_height = orig_size
+
+    aspect_ratio = orig_width / orig_height
+
+    # calculate the existing image aspect ratio
+    target_ratios = set(
+        (i, j) for n in range(min_num, max_num + 1) for i in range(1, n + 1) for j in range(1, n + 1) if
+        max_num >= i * j >= min_num)
+    target_ratios = sorted(target_ratios, key=lambda x: x[0] * x[1])
+
+    # find the closest aspect ratio to the target
+    target_aspect_ratio = find_closest_aspect_ratio(
+        aspect_ratio, target_ratios, orig_width, orig_height, image_size)
+    blocks = target_aspect_ratio[0] * target_aspect_ratio[1]
+
+    if use_thumbnail:
+        blocks += 1
+
+    return blocks*patch_size*patch_size + 2  # 2 for <img> and </img>
 
 def get_lengths(example):
     cur_len = len(example['input_ids'])
