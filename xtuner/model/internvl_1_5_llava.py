@@ -52,15 +52,12 @@ class InternVL_v1_5_LLaVAModel(LLaVAModel):
             if use_lldr:
                 # The following code is only meaningful when the optim_wrapper configuration
                 # includes `LearningRateDecayOptimWrapperConstructor`. Otherwise, it will be ignored.
-                if use_lldr:
-                    # The following code is only meaningful when the optim_wrapper configuration
-                    # includes `LearningRateDecayOptimWrapperConstructor`. Otherwise, it will be ignored.
-                    if self._get_model_class_name(self.visual_encoder) == 'CLIPVisionModel':
-                        self.visual_encoder.get_layer_depth = types.MethodType(get_layer_depth_for_CLIPVisionModel,
-                                                                               self.visual_encoder)
-                    elif self._get_model_class_name(self.visual_encoder) == 'InternVisionModel':
-                        self.visual_encoder.get_layer_depth = types.MethodType(get_layer_depth_for_InternVisionModel,
-                                                                               self.visual_encoder)
+                if self._get_model_class_name(self.visual_encoder) == 'CLIPVisionModel':
+                    self.visual_encoder.get_layer_depth = types.MethodType(get_layer_depth_for_CLIPVisionModel,
+                                                                            self.visual_encoder)
+                elif self._get_model_class_name(self.visual_encoder) == 'InternVisionModel':
+                    self.visual_encoder.get_layer_depth = types.MethodType(get_layer_depth_for_InternVisionModel,
+                                                                            self.visual_encoder)
         self.llm.config.use_cache = False
         dispatch_modules(self.llm)
 
@@ -191,7 +188,7 @@ class InternVL_v1_5_LLaVAModel(LLaVAModel):
         # b*n, hw, d
         visual_outputs = self.visual_encoder(concat_images, output_hidden_states=True)
 
-        if self._get_model_class_name(self.visual_encoder) == 'CLIPVisionModel':
+        if self._get_model_class_name(self.visual_encoder) in ['CLIPVisionModel', 'InternVisionModel']:
             vit_embeds = visual_outputs.hidden_states[self.visual_select_layer][:, 1:]
         elif self._get_model_class_name(self.visual_encoder) == 'SiglipVisionModel':
             vit_embeds = visual_outputs.hidden_states[self.visual_select_layer]
