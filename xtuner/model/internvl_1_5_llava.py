@@ -54,10 +54,10 @@ class InternVL_v1_5_LLaVAModel(LLaVAModel):
                 # includes `LearningRateDecayOptimWrapperConstructor`. Otherwise, it will be ignored.
                 if self._get_model_class_name(self.visual_encoder) == 'CLIPVisionModel':
                     self.visual_encoder.get_layer_depth = types.MethodType(get_layer_depth_for_CLIPVisionModel,
-                                                                            self.visual_encoder)
+                                                                           self.visual_encoder)
                 elif self._get_model_class_name(self.visual_encoder) == 'InternVisionModel':
                     self.visual_encoder.get_layer_depth = types.MethodType(get_layer_depth_for_InternVisionModel,
-                                                                            self.visual_encoder)
+                                                                           self.visual_encoder)
         self.llm.config.use_cache = False
         dispatch_modules(self.llm)
 
@@ -202,7 +202,10 @@ class InternVL_v1_5_LLaVAModel(LLaVAModel):
         # n,h'w',c'
         vit_embeds = vit_embeds.reshape(vit_embeds.shape[0], -1, vit_embeds.shape[-1])
 
-        vit_embeds = self.projector(vit_embeds)
+        if self.custom_mlp is False:
+            vit_embeds = self.projector(vit_embeds)
+        else:
+            vit_embeds = self.mlp1(vit_embeds)
 
         split_sizes = [image.shape[0] for image in pixel_values]
         image_features = torch.split(vit_embeds, split_sizes, dim=0)
