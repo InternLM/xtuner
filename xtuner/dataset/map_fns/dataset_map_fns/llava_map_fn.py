@@ -29,6 +29,7 @@ def llava_map_fn(example):
     while messages and messages[0]['from'] == 'gpt':
         # Skip the first one if it is from gpt
         messages = messages[1:]
+    # system_v = ''
     for msg in messages:
         if msg['from'] == 'human':
             if DEFAULT_IMAGE_TOKEN in msg['value']:
@@ -40,7 +41,11 @@ def llava_map_fn(example):
 
         elif msg['from'] == 'gpt':
             conversation.append({'input': input, 'output': msg['value']})
+            # conversation.append({'input': input, 'output': msg['value'], 'system': system_v})
             input = ''
+            # system_v = ''
+        # elif msg['from'] == 'system':
+        #     system_v = msg['value']
         else:
             raise NotImplementedError
     return {'conversation': conversation}

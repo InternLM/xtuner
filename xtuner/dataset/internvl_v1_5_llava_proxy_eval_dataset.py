@@ -5,18 +5,41 @@ import os
 from xtuner.tools.utils import is_cn_string
 from .utils import dynamic_preprocess
 
+from torchvision.transforms.functional import InterpolationMode
+import torchvision.transforms as T
+
+IMAGENET_MEAN = (0.485, 0.456, 0.406)
+IMAGENET_STD = (0.229, 0.224, 0.225)
+
+
+def build_transform(input_size):
+    MEAN, STD = IMAGENET_MEAN, IMAGENET_STD
+    transform = T.Compose([
+        T.Lambda(lambda img: img.convert('RGB') if img.mode != 'RGB' else img),
+        T.Resize((input_size, input_size), interpolation=InterpolationMode.BICUBIC),
+        T.ToTensor(),
+        T.Normalize(mean=MEAN, std=STD)
+    ])
+    return transform
+
 
 class InternVL_v1_5_LLaVAProxyEvalDataset:
-    def __init__(self, eval_dataset, min_num, max_num):
+    def __init__(self, eval_dataset, min_num, max_num, custom=False):
         self.eval_ds = eval_dataset
         self.min_num = min_num
         self.max_num = max_num
 
-        # TODO: Assuming they are all squares.
-        if hasattr(eval_dataset.image_processor, 'crop_size'):
-            self._crop_size = eval_dataset.image_processor.crop_size
+        self.custom = custom
+        if custom:
+            self.image_processor = build_transform(448)
+            self._crop_size = {'height': 448, 'width': 448}
         else:
-            self._crop_size = eval_dataset.image_processor.size
+            # TODO: Assuming they are all squares.
+            if hasattr(eval_dataset.image_processor, 'crop_size'):
+                self._crop_size = eval_dataset.image_processor.crop_size
+            else:
+                self._crop_size = eval_dataset.image_processor.size
+
         self._image_size = self._crop_size['height']
 
     def getitem(self, idx, data):
@@ -83,8 +106,11 @@ class InternVL_v1_5_LLaVAProxyEvalDataset:
 
         images = dynamic_preprocess(image, self.min_num, self.max_num, self._image_size)
         for i, image in enumerate(images):
-            image = self.eval_ds.image_processor.preprocess(
-                image, return_tensors='pt')['pixel_values'][0]
+            if self.custom:
+                image = self.image_processor(image)
+            else:
+                image = self.image_processor.preprocess(
+                    image, return_tensors='pt')['pixel_values'][0]
             images[i] = image
         images = torch.stack(images, dim=0)
         data_dict['pixel_values'] = images
