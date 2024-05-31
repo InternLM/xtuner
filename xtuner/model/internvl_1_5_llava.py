@@ -9,7 +9,7 @@ from .utils import (LoadWoInit, guess_load_checkpoint,
                     make_inputs_require_grad,
                     prepare_inputs_labels_for_multimodal)
 
-from xtuner.engine.optimizers import get_layer_depth_for_CLIPVisionModel
+from xtuner.engine.optimizers import get_layer_depth_for_CLIPVisionModel, get_layer_depth_for_InternVisionModel
 import types
 from mmengine.logging import print_log
 import torch.nn as nn
@@ -52,9 +52,15 @@ class InternVL_v1_5_LLaVAModel(LLaVAModel):
             if use_lldr:
                 # The following code is only meaningful when the optim_wrapper configuration
                 # includes `LearningRateDecayOptimWrapperConstructor`. Otherwise, it will be ignored.
-                if self._get_model_class_name(self.visual_encoder) == 'CLIPVisionModel':
-                    self.visual_encoder.get_layer_depth = types.MethodType(get_layer_depth_for_CLIPVisionModel,
-                                                                           self.visual_encoder)
+                if use_lldr:
+                    # The following code is only meaningful when the optim_wrapper configuration
+                    # includes `LearningRateDecayOptimWrapperConstructor`. Otherwise, it will be ignored.
+                    if self._get_model_class_name(self.visual_encoder) == 'CLIPVisionModel':
+                        self.visual_encoder.get_layer_depth = types.MethodType(get_layer_depth_for_CLIPVisionModel,
+                                                                               self.visual_encoder)
+                    elif self._get_model_class_name(self.visual_encoder) == 'InternVisionModel':
+                        self.visual_encoder.get_layer_depth = types.MethodType(get_layer_depth_for_InternVisionModel,
+                                                                               self.visual_encoder)
         self.llm.config.use_cache = False
         dispatch_modules(self.llm)
 
@@ -156,6 +162,10 @@ class InternVL_v1_5_LLaVAModel(LLaVAModel):
     def get_layer_depth(self, param_name: str, prefix: str = 'visual_encoder.vision_model.'):
         assert hasattr(self.visual_encoder, 'get_layer_depth'), \
             'The visual_encoder does not have `get_layer_depth` method.'
+        if self._get_model_class_name(self.visual_encoder) == 'CLIPVisionModel':
+            prefix = 'visual_encoder.vision_model.'
+        elif self._get_model_class_name(self.visual_encoder) == 'InternVisionModel':
+            prefix = 'visual_encoder.'
         return self.visual_encoder.get_layer_depth(param_name, prefix)
 
     def _prepare_data_for_llm(self, data):
