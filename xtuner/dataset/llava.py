@@ -286,6 +286,10 @@ class InternVL_V1_5_LLaVADataset(LLaVADataset):
         data_dict = self.text_data[index]
         if data_dict.get('image', None) is not None:
             image_file = data_dict['image']
+            if isinstance(image_file, list):
+                if len(image_file) > 1:
+                    return None
+                image_file = image_file[0]
             try:
                 image = self.get_image(os.path.join(self.image_folder, image_file))
             except Exception as e:
