@@ -522,11 +522,18 @@ class ExpertShard(nn.Module):
             torch.empty(expert_in_one_shard, ffn_dim * 2, hidden_dim))
         self.w2 = nn.Parameter(
             torch.empty(expert_in_one_shard, hidden_dim, ffn_dim))
-        self.w1w3.data.normal_(0, 0.02)
-        self.w2.data.normal_(0, 0.02)
+
         self.act = nn.SiLU()
         self.expert_in_one_shard = expert_in_one_shard
         self.shard_idx = shard_idx
+
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        # Different from nn.Linear module, weights of self.w1w3 and self.w2
+        # can not be initialized by DeepseekV2PreTrainedModel._init_weights method
+        self.w1w3.data.normal_(0, 0.02)
+        self.w2.data.normal_(0, 0.02)
 
     def expert_forward(self, current_state, expert_idx):
         w1w3 = self.w1w3[expert_idx]
@@ -546,7 +553,7 @@ class ExpertShard(nn.Module):
         return
 
 
-class DeepseekV2MoEOptSharded(nn.Module):
+class DeepseekV2MoEShard(nn.Module):
     """A mixed expert module containing shared experts."""
 
     def __init__(self, config):
@@ -555,26 +562,20 @@ class DeepseekV2MoEOptSharded(nn.Module):
         self.num_experts_per_tok = config.num_experts_per_tok
 
         if hasattr(config, 'ep_size') and config.ep_size > 1:
-            assert config.ep_size == dist.get_world_size()
-            self.ep_size = config.ep_size
-            self.experts_per_rank = config.n_routed_experts // config.ep_size
-            self.ep_rank = dist.get_rank()
-            self.experts = nn.ModuleList([
-                (DeepseekV2MLP(
-                    config, intermediate_size=config.moe_intermediate_size)
-                 if i >= self.ep_rank * self.experts_per_rank and i <
-                 (self.ep_rank + 1) * self.experts_per_rank else None)
-                for i in range(config.n_routed_experts)
-            ])
+            raise NotImplementedError
         else:
             self.ep_size = 1
             self.experts_per_rank = config.n_routed_experts
             self.ep_rank = 0
             self.n_routed_experts = config.n_routed_experts
 
-            shard_num = int(os.environ.get('SHARD_NUM', 8))
-            self.shard_num = shard_num
-            self.expert_in_one_shard = config.n_routed_experts // self.shard_num
+            expert_in_one_shard = config.get('expert_in_one_shard', 8)
+            assert config.n_routed_experts % expert_in_one_shard == 0, \
+                ('n_routed_experts should be divisible by expert_in_one_shard, but got '
+                 f'n_routed_experts = {config.n_routed_experts} and expert_in_one_shard = {expert_in_one_shard}')
+
+            self.shard_num = config.n_routed_experts // expert_in_one_shard
+            self.expert_in_one_shard = expert_in_one_shard
             self.experts = nn.ModuleList([
                 ExpertShard(config.hidden_size, config.moe_intermediate_size,
                             i, self.expert_in_one_shard)
@@ -588,98 +589,29 @@ class DeepseekV2MoEOptSharded(nn.Module):
                 config=config, intermediate_size=intermediate_size)
 
     def forward(self, hidden_states):
+        if not self.training:
+            raise NotImplementedError
+
         identity = hidden_states
         orig_shape = hidden_states.shape
         topk_idx, topk_weight, aux_loss = self.gate(hidden_states)
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
         flat_topk_idx = topk_idx.view(-1)
-        if self.training:
-            hidden_states = hidden_states.repeat_interleave(
-                self.num_experts_per_tok, dim=0)
-            y = torch.empty_like(hidden_states)
-            y_dtype = y.dtype
-            for shard_index in range(self.shard_num):
-                self.experts[shard_index](hidden_states, flat_topk_idx, y)
-                # self.expert_shard[shard_index](hidden_states, flat_topk_idx, y)
-            y = ((y.view(*topk_weight.shape, -1) *
-                  topk_weight.unsqueeze(-1)).sum(dim=1)).type(y_dtype)
-            y = y.view(*orig_shape)
-            y = AddAuxiliaryLoss.apply(y, aux_loss)
-        else:
-            y = self.moe_infer(hidden_states, topk_idx,
-                               topk_weight).view(*orig_shape)
+
+        hidden_states = hidden_states.repeat_interleave(
+            self.num_experts_per_tok, dim=0)
+        y = torch.empty_like(hidden_states)
+        y_dtype = y.dtype
+        for shard_index in range(self.shard_num):
+            self.experts[shard_index](hidden_states, flat_topk_idx, y)
+        y = ((y.view(*topk_weight.shape, -1) *
+              topk_weight.unsqueeze(-1)).sum(dim=1)).type(y_dtype)
+        y = y.view(*orig_shape)
+        y = AddAuxiliaryLoss.apply(y, aux_loss)
+
         if self.config.n_shared_experts is not None:
             y = y + self.shared_experts(identity)
         return y
-
-    @torch.no_grad()
-    def moe_infer(self, x, topk_ids, topk_weight):
-        cnts = topk_ids.new_zeros((topk_ids.shape[0], len(self.experts)))
-        cnts.scatter_(1, topk_ids, 1)
-        tokens_per_expert = cnts.sum(dim=0)
-        idxs = topk_ids.view(-1).argsort()
-        sorted_tokens = x[idxs // topk_ids.shape[1]]
-        sorted_tokens_shape = sorted_tokens.shape
-        if self.ep_size > 1:
-            tokens_per_ep_rank = tokens_per_expert.view(self.ep_size,
-                                                        -1).sum(dim=1)
-            tokens_per_expert_group = tokens_per_expert.new_empty(
-                tokens_per_expert.shape[0])
-            dist.all_to_all_single(tokens_per_expert_group, tokens_per_expert)
-            output_splits = (
-                tokens_per_expert_group.view(self.ep_size,
-                                             -1).sum(1).cpu().numpy().tolist())
-            gathered_tokens = sorted_tokens.new_empty(
-                tokens_per_expert_group.sum(dim=0).cpu().item(),
-                sorted_tokens.shape[1])
-            input_split_sizes = tokens_per_ep_rank.cpu().numpy().tolist()
-            dist.all_to_all(
-                list(gathered_tokens.split(output_splits)),
-                list(sorted_tokens.split(input_split_sizes)),
-            )
-            tokens_per_expert_post_gather = tokens_per_expert_group.view(
-                self.ep_size, self.experts_per_rank).sum(dim=0)
-            gatherd_idxs = np.zeros(
-                shape=(gathered_tokens.shape[0], ), dtype=np.int32)
-            s = 0
-            for i, k in enumerate(tokens_per_expert_group.cpu().numpy()):
-                gatherd_idxs[s:s + k] = i % self.experts_per_rank
-                s += k
-            gatherd_idxs = gatherd_idxs.argsort()
-            sorted_tokens = gathered_tokens[gatherd_idxs]
-            tokens_per_expert = tokens_per_expert_post_gather
-        tokens_per_expert = tokens_per_expert.cpu().numpy()
-
-        outputs = []
-        start_idx = 0
-        for i, num_tokens in enumerate(tokens_per_expert):
-            end_idx = start_idx + num_tokens
-            if num_tokens == 0:
-                continue
-            expert = self.experts[i + self.ep_rank * self.experts_per_rank]
-            tokens_for_this_expert = sorted_tokens[start_idx:end_idx]
-            expert_out = expert(tokens_for_this_expert)
-            outputs.append(expert_out)
-            start_idx = end_idx
-
-        outs = torch.cat(
-            outputs, dim=0) if len(outputs) else sorted_tokens.new_empty(0)
-        if self.ep_size > 1:
-            new_x = torch.empty_like(outs)
-            new_x[gatherd_idxs] = outs
-            gathered_tokens = new_x.new_empty(*sorted_tokens_shape)
-            dist.all_to_all(
-                list(gathered_tokens.split(input_split_sizes)),
-                list(new_x.split(output_splits)),
-            )
-            outs = gathered_tokens
-
-        new_x = torch.empty_like(outs)
-        new_x[idxs] = outs
-        final_out = (
-            new_x.view(*topk_ids.shape, -1).type(topk_weight.dtype).mul_(
-                topk_weight.unsqueeze(dim=-1)).sum(dim=1).type(new_x.dtype))
-        return final_out
 
 
 class DeepseekV2MoE(nn.Module):
@@ -1332,11 +1264,11 @@ class DeepseekV2DecoderLayer(nn.Module):
         self.self_attn = ATTENTION_CLASSES[config._attn_implementation](
             config=config, layer_idx=layer_idx)
 
-        imp = os.environ.get('MOE_IMPL', 'origin')
-        if imp == 'origin':
+        moe_implementation = config.get('moe_implementation', 'origin')
+        if moe_implementation == 'origin':
             block = DeepseekV2MoE
-        elif imp == 'opt_sharded':
-            block = DeepseekV2MoEOptSharded
+        elif moe_implementation == 'shard':
+            block = DeepseekV2MoEShard
         else:
             raise NotImplementedError
 

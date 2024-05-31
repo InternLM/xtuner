@@ -6,6 +6,8 @@ logger = logging.get_logger(__name__)
 DEEPSEEK_PRETRAINED_CONFIG_ARCHIVE_MAP = {}
 
 
+# Compared to the original version, two parameters, `moe_implementation` and
+# `expert_in_one_shard`, have been added.
 class DeepseekV2Config(PretrainedConfig):
     r"""
     This is the configuration class to store the configuration of a [`DeepseekV2Model`]. It is used to instantiate an DeepSeek
@@ -100,6 +102,11 @@ class DeepseekV2Config(PretrainedConfig):
             Whether to use a bias in the query, key, value and output projection layers during self-attention.
         attention_dropout (`float`, *optional*, defaults to 0.0):
             The dropout ratio for the attention probabilities.
+        moe_implementation (`str`, *optional*, defaults to 'origin'):
+            The implementation of the moe blocks. 'origin' or 'shard'.
+        expert_in_one_shard (`int`, *optional*, defaults to None):
+            How many expert models are integrated into a shard. It is used only
+            when `moe_implementation` == 'shard'
 
     ```python
     >>> from transformers import DeepseekV2Model, DeepseekV2Config
@@ -156,6 +163,8 @@ class DeepseekV2Config(PretrainedConfig):
         rope_scaling=None,
         attention_bias=False,
         attention_dropout=0.0,
+        moe_implementation='origin',
+        expert_in_one_shard=None,
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -198,6 +207,8 @@ class DeepseekV2Config(PretrainedConfig):
         self.rope_scaling = rope_scaling
         self.attention_bias = attention_bias
         self.attention_dropout = attention_dropout
+        self.moe_implementation = moe_implementation
+        self.expert_in_one_shard = expert_in_one_shard
 
         super().__init__(
             pad_token_id=pad_token_id,
