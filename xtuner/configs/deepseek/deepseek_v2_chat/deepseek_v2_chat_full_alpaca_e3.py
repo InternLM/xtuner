@@ -11,7 +11,7 @@ from xtuner.dataset import process_hf_dataset
 from xtuner.dataset.collate_fns import default_collate_fn
 from xtuner.dataset.map_fns import alpaca_map_fn, template_map_fn_factory
 from xtuner.engine.hooks import (DatasetInfoHook, EvaluateChatHook,
-                                 ThroughputHook,
+                                 HFCheckpointHook, ThroughputHook,
                                  VarlenAttnArgsToMessageHubHook)
 from xtuner.engine.runner import TrainLoop
 from xtuner.model import SupervisedFinetune
@@ -151,7 +151,8 @@ custom_hooks = [
         evaluation_inputs=evaluation_inputs,
         system=SYSTEM,
         prompt_template=prompt_template),
-    dict(type=ThroughputHook)
+    dict(type=ThroughputHook),
+    dict(type=HFCheckpointHook)
 ]
 
 if use_varlen_attn:

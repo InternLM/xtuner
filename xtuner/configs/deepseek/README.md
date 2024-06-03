@@ -19,7 +19,7 @@ pip install -U transformers
 
 ## Full Parameter Fine-tune
 
-Full parameter fine-tune DeepSeek V2 236B needs at least 64 A100-80G.
+Full parameter fine-tune DeepSeek V2 236B needs at least 64 A100-80G. The full-tuned model will be saved to `${WORK_DIRS}/hf_model` by `HFCheckpointHook`.
 
 ### slurm
 
