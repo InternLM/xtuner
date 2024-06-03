@@ -17,6 +17,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """PyTorch DeepSeek model."""
+import copy
 import math
 import os
 import warnings
@@ -31,6 +32,7 @@ from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache, DynamicCache
+from transformers.configuration_utils import PretrainedConfig
 from transformers.modeling_attn_mask_utils import (
     AttentionMaskConverter, _prepare_4d_attention_mask,
     _prepare_4d_causal_attention_mask,
@@ -48,6 +50,7 @@ from transformers.utils import (add_start_docstrings,
                                 replace_return_docstrings)
 from transformers.utils.import_utils import is_torch_fx_available
 
+from xtuner.utils import load_state_dict_into_model
 from .configuration_deepseek import DeepseekV2Config
 
 if is_flash_attn_2_available():
@@ -1360,6 +1363,41 @@ DeepseekV2_START_DOCSTRING = r"""
             [`~PreTrainedModel.from_pretrained`] method to load the model weights.
 """
 
+import types
+
+
+def _load_pretrained_model(
+    cls,
+    model,
+    state_dict,
+    loaded_keys,
+    resolved_archive_file,
+    pretrained_model_name_or_path,
+    ignore_mismatched_sizes=False,
+    sharded_metadata=None,
+    _fast_init=True,
+    low_cpu_mem_usage=False,
+    device_map=None,
+    offload_folder=None,
+    offload_state_dict=None,
+    dtype=None,
+    hf_quantizer=None,
+    keep_in_fp32_modules=None,
+):
+    if ((state_dict is not None) or (low_cpu_mem_usage)
+            or (device_map is not None)
+            or (offload_folder is not None or offload_state_dict is not None)
+            or (dtype is not None) or (hf_quantizer is not None) or
+        (keep_in_fp32_modules is not None and len(keep_in_fp32_modules) > 0)):
+        raise NotImplementedError
+
+    if resolved_archive_file is None:
+        raise NotImplementedError('')
+
+    folder = os.path.sep.join(resolved_archive_file[0].split(os.path.sep)[:-1])
+    error_msgs = load_state_dict_into_model(model, folder)
+    return model, [], [], [], None, error_msgs
+
 
 @add_start_docstrings(
     'The bare DeepseekV2 Model outputting raw hidden-states without any specific head on top.',
@@ -1385,6 +1423,96 @@ class DeepseekV2PreTrainedModel(PreTrainedModel):
             module.weight.data.normal_(mean=0.0, std=std)
             if module.padding_idx is not None:
                 module.weight.data[module.padding_idx].zero_()
+
+    @classmethod
+    def from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
+        moe_implementation = kwargs.get('moe_implementation', 'origin')
+        if moe_implementation == 'origin':
+            return PreTrainedModel.from_pretrained(
+                pretrained_model_name_or_path, *args, **kwargs)
+
+        cls._load_pretrained_model = types.MethodType(_load_pretrained_model,
+                                                      cls)
+        return PreTrainedModel.from_pretrained(pretrained_model_name_or_path,
+                                               *args, **kwargs)
+
+        quantization_config = kwargs.pop('quantization_config', None)
+        if quantization_config:
+            raise NotImplementedError(
+                'Quantization is not supported when using Shard MoE Blocks.')
+
+        adapter_kwargs = kwargs.pop('adapter_kwargs', {})
+        if adapter_kwargs:
+            raise NotImplementedError(
+                'Adapter is not supported when using Shard MoE Blocks.')
+
+        # copied from PreTrainedModel.from_pretrained
+        state_dict = kwargs.pop('state_dict', None)
+        from_tf = kwargs.pop('from_tf', False)
+        from_flax = kwargs.pop('from_flax', False)
+        resume_download = kwargs.pop('resume_download', False)
+        proxies = kwargs.pop('proxies', None)
+        output_loading_info = kwargs.pop('output_loading_info', False)
+        use_auth_token = kwargs.pop('use_auth_token', None)
+        trust_remote_code = kwargs.pop('trust_remote_code', None)
+        _ = kwargs.pop('mirror', None)
+        from_pipeline = kwargs.pop('_from_pipeline', None)
+        from_auto_class = kwargs.pop('_from_auto', False)
+        _fast_init = kwargs.pop('_fast_init', True)
+        torch_dtype = kwargs.pop('torch_dtype', None)
+        low_cpu_mem_usage = kwargs.pop('low_cpu_mem_usage', None)
+        device_map = kwargs.pop('device_map', None)
+        max_memory = kwargs.pop('max_memory', None)
+        offload_folder = kwargs.pop('offload_folder', None)
+        offload_state_dict = kwargs.pop('offload_state_dict', False)
+        offload_buffers = kwargs.pop('offload_buffers', False)
+        load_in_8bit = kwargs.pop('load_in_8bit', False)
+        load_in_4bit = kwargs.pop('load_in_4bit', False)
+        quantization_config = kwargs.pop('quantization_config', None)
+        subfolder = kwargs.pop('subfolder', '')
+        commit_hash = kwargs.pop('_commit_hash', None)
+        variant = kwargs.pop('variant', None)
+        adapter_kwargs = kwargs.pop('adapter_kwargs', {})
+        adapter_name = kwargs.pop('adapter_name', 'default')
+        use_flash_attention_2 = kwargs.pop('use_flash_attention_2', False)
+
+        config = kwargs.pop('config', None)
+        cache_dir = kwargs.pop('cache_dir', None)
+        ignore_mismatched_sizes = kwargs.pop('ignore_mismatched_sizes', False)
+        force_download = kwargs.pop('force_download', False)
+        local_files_only = kwargs.pop('local_files_only', False)
+        token = kwargs.pop('token', None)
+        revision = kwargs.pop('revision', 'main')
+        use_safetensors = kwargs.pop('use_safetensors', None)
+
+        if not isinstance(config, PretrainedConfig):
+            config_path = config if config is not None else pretrained_model_name_or_path
+            config, model_kwargs = DeepseekV2Config.from_pretrained(
+                config_path,
+                cache_dir=cache_dir,
+                return_unused_kwargs=True,
+                force_download=force_download,
+                resume_download=resume_download,
+                proxies=proxies,
+                local_files_only=local_files_only,
+                token=token,
+                revision=revision,
+                subfolder=subfolder,
+                _from_auto=from_auto_class,
+                _from_pipeline=from_pipeline,
+                **kwargs,
+            )
+        else:
+            config = copy.deepcopy(config)
+
+            kwarg_attn_imp = kwargs.pop('attn_implementation', None)
+            if kwarg_attn_imp is not None and config._attn_implementation != kwarg_attn_imp:
+                config._attn_implementation = kwarg_attn_imp
+            model_kwargs = kwargs
+
+        model = cls._from_config(config, **model_kwargs)
+        # need to download if pretrained_model_name_or_path is a repo id
+        load_state_dict_into_model(model, pretrained_model_name_or_path)
 
 
 DeepseekV2_INPUTS_DOCSTRING = r"""
