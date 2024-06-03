@@ -20,6 +20,7 @@
 import copy
 import math
 import os
+import types
 import warnings
 from typing import List, Optional, Tuple, Union
 
@@ -572,7 +573,7 @@ class DeepseekV2MoEShard(nn.Module):
             self.ep_rank = 0
             self.n_routed_experts = config.n_routed_experts
 
-            expert_in_one_shard = config.get('expert_in_one_shard', 8)
+            expert_in_one_shard = config.expert_in_one_shard
             assert config.n_routed_experts % expert_in_one_shard == 0, \
                 ('n_routed_experts should be divisible by expert_in_one_shard, but got '
                  f'n_routed_experts = {config.n_routed_experts} and expert_in_one_shard = {expert_in_one_shard}')
@@ -1267,7 +1268,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         self.self_attn = ATTENTION_CLASSES[config._attn_implementation](
             config=config, layer_idx=layer_idx)
 
-        moe_implementation = config.get('moe_implementation', 'origin')
+        moe_implementation = config.moe_implementation
         if moe_implementation == 'origin':
             block = DeepseekV2MoE
         elif moe_implementation == 'shard':
@@ -1347,25 +1348,6 @@ class DeepseekV2DecoderLayer(nn.Module):
         return outputs
 
 
-DeepseekV2_START_DOCSTRING = r"""
-    This model inherits from [`PreTrainedModel`]. Check the superclass documentation for the generic methods the
-    library implements for all its model (such as downloading or saving, resizing the input embeddings, pruning heads
-    etc.)
-
-    This model is also a PyTorch [torch.nn.Module](https://pytorch.org/docs/stable/nn.html#torch.nn.Module) subclass.
-    Use it as a regular PyTorch Module and refer to the PyTorch documentation for all matter related to general usage
-    and behavior.
-
-    Parameters:
-        config ([`DeepseekV2Config`]):
-            Model configuration class with all the parameters of the model. Initializing with a config file does not
-            load the weights associated with the model, only the configuration. Check out the
-            [`~PreTrainedModel.from_pretrained`] method to load the model weights.
-"""
-
-import types
-
-
 def _load_pretrained_model(
     cls,
     model,
@@ -1383,20 +1365,37 @@ def _load_pretrained_model(
     dtype=None,
     hf_quantizer=None,
     keep_in_fp32_modules=None,
+    gguf_path=None,
 ):
-    if ((state_dict is not None) or (low_cpu_mem_usage)
-            or (device_map is not None)
-            or (offload_folder is not None or offload_state_dict is not None)
-            or (dtype is not None) or (hf_quantizer is not None) or
-        (keep_in_fp32_modules is not None and len(keep_in_fp32_modules) > 0)):
+    if ((state_dict is not None) or (resolved_archive_file is None)
+            or (low_cpu_mem_usage) or (device_map is not None)
+            or (offload_folder is not None) or
+        (not (offload_state_dict is None or offload_state_dict is False))
+            or (hf_quantizer is not None) or
+        (keep_in_fp32_modules is not None and len(keep_in_fp32_modules) > 0)
+            or (gguf_path is not None)):
         raise NotImplementedError
-
-    if resolved_archive_file is None:
-        raise NotImplementedError('')
 
     folder = os.path.sep.join(resolved_archive_file[0].split(os.path.sep)[:-1])
     error_msgs = load_state_dict_into_model(model, folder)
     return model, [], [], [], None, error_msgs
+
+
+DeepseekV2_START_DOCSTRING = r"""
+    This model inherits from [`PreTrainedModel`]. Check the superclass documentation for the generic methods the
+    library implements for all its model (such as downloading or saving, resizing the input embeddings, pruning heads
+    etc.)
+
+    This model is also a PyTorch [torch.nn.Module](https://pytorch.org/docs/stable/nn.html#torch.nn.Module) subclass.
+    Use it as a regular PyTorch Module and refer to the PyTorch documentation for all matter related to general usage
+    and behavior.
+
+    Parameters:
+        config ([`DeepseekV2Config`]):
+            Model configuration class with all the parameters of the model. Initializing with a config file does not
+            load the weights associated with the model, only the configuration. Check out the
+            [`~PreTrainedModel.from_pretrained`] method to load the model weights.
+"""
 
 
 @add_start_docstrings(
@@ -1428,91 +1427,13 @@ class DeepseekV2PreTrainedModel(PreTrainedModel):
     def from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
         moe_implementation = kwargs.get('moe_implementation', 'origin')
         if moe_implementation == 'origin':
-            return PreTrainedModel.from_pretrained(
-                pretrained_model_name_or_path, *args, **kwargs)
+            return super().from_pretrained(pretrained_model_name_or_path,
+                                           *args, **kwargs)
 
         cls._load_pretrained_model = types.MethodType(_load_pretrained_model,
                                                       cls)
-        return PreTrainedModel.from_pretrained(pretrained_model_name_or_path,
-                                               *args, **kwargs)
-
-        quantization_config = kwargs.pop('quantization_config', None)
-        if quantization_config:
-            raise NotImplementedError(
-                'Quantization is not supported when using Shard MoE Blocks.')
-
-        adapter_kwargs = kwargs.pop('adapter_kwargs', {})
-        if adapter_kwargs:
-            raise NotImplementedError(
-                'Adapter is not supported when using Shard MoE Blocks.')
-
-        # copied from PreTrainedModel.from_pretrained
-        state_dict = kwargs.pop('state_dict', None)
-        from_tf = kwargs.pop('from_tf', False)
-        from_flax = kwargs.pop('from_flax', False)
-        resume_download = kwargs.pop('resume_download', False)
-        proxies = kwargs.pop('proxies', None)
-        output_loading_info = kwargs.pop('output_loading_info', False)
-        use_auth_token = kwargs.pop('use_auth_token', None)
-        trust_remote_code = kwargs.pop('trust_remote_code', None)
-        _ = kwargs.pop('mirror', None)
-        from_pipeline = kwargs.pop('_from_pipeline', None)
-        from_auto_class = kwargs.pop('_from_auto', False)
-        _fast_init = kwargs.pop('_fast_init', True)
-        torch_dtype = kwargs.pop('torch_dtype', None)
-        low_cpu_mem_usage = kwargs.pop('low_cpu_mem_usage', None)
-        device_map = kwargs.pop('device_map', None)
-        max_memory = kwargs.pop('max_memory', None)
-        offload_folder = kwargs.pop('offload_folder', None)
-        offload_state_dict = kwargs.pop('offload_state_dict', False)
-        offload_buffers = kwargs.pop('offload_buffers', False)
-        load_in_8bit = kwargs.pop('load_in_8bit', False)
-        load_in_4bit = kwargs.pop('load_in_4bit', False)
-        quantization_config = kwargs.pop('quantization_config', None)
-        subfolder = kwargs.pop('subfolder', '')
-        commit_hash = kwargs.pop('_commit_hash', None)
-        variant = kwargs.pop('variant', None)
-        adapter_kwargs = kwargs.pop('adapter_kwargs', {})
-        adapter_name = kwargs.pop('adapter_name', 'default')
-        use_flash_attention_2 = kwargs.pop('use_flash_attention_2', False)
-
-        config = kwargs.pop('config', None)
-        cache_dir = kwargs.pop('cache_dir', None)
-        ignore_mismatched_sizes = kwargs.pop('ignore_mismatched_sizes', False)
-        force_download = kwargs.pop('force_download', False)
-        local_files_only = kwargs.pop('local_files_only', False)
-        token = kwargs.pop('token', None)
-        revision = kwargs.pop('revision', 'main')
-        use_safetensors = kwargs.pop('use_safetensors', None)
-
-        if not isinstance(config, PretrainedConfig):
-            config_path = config if config is not None else pretrained_model_name_or_path
-            config, model_kwargs = DeepseekV2Config.from_pretrained(
-                config_path,
-                cache_dir=cache_dir,
-                return_unused_kwargs=True,
-                force_download=force_download,
-                resume_download=resume_download,
-                proxies=proxies,
-                local_files_only=local_files_only,
-                token=token,
-                revision=revision,
-                subfolder=subfolder,
-                _from_auto=from_auto_class,
-                _from_pipeline=from_pipeline,
-                **kwargs,
-            )
-        else:
-            config = copy.deepcopy(config)
-
-            kwarg_attn_imp = kwargs.pop('attn_implementation', None)
-            if kwarg_attn_imp is not None and config._attn_implementation != kwarg_attn_imp:
-                config._attn_implementation = kwarg_attn_imp
-            model_kwargs = kwargs
-
-        model = cls._from_config(config, **model_kwargs)
-        # need to download if pretrained_model_name_or_path is a repo id
-        load_state_dict_into_model(model, pretrained_model_name_or_path)
+        return super().from_pretrained(pretrained_model_name_or_path, *args,
+                                       **kwargs)
 
 
 DeepseekV2_INPUTS_DOCSTRING = r"""
