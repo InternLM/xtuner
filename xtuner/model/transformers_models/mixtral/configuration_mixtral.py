@@ -19,10 +19,6 @@ from transformers.utils import logging
 logger = logging.get_logger(__name__)
 
 
-from transformers.models.deprecated._archive_maps import \
-    MIXTRAL_PRETRAINED_CONFIG_ARCHIVE_MAP  # noqa: F401, E402
-
-
 class MixtralConfig(PretrainedConfig):
     r"""
     This is the configuration class to store the configuration of a [`MixtralModel`]. It is used to instantiate an
