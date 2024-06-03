@@ -1,33 +1,32 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-import torch
 from datasets import load_dataset
 from mmengine.dataset import DefaultSampler
 from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
                             LoggerHook, ParamSchedulerHook)
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR, LinearLR
-from peft import LoraConfig
 from torch.optim import AdamW
-from transformers import (AutoModelForCausalLM, AutoTokenizer,
-                          BitsAndBytesConfig)
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from xtuner.dataset.collate_fns.reward_collate_fn import reward_collate_fn
-from xtuner.dataset.preference_dataset import build_preference_dataset, orpo_dpo_mix_40k_map_fn
-from xtuner.engine.hooks import (DatasetInfoHook, EvaluateChatHook,
+from xtuner.dataset.preference_dataset import (build_preference_dataset,
+                                               orpo_dpo_mix_40k_map_fn)
+from xtuner.engine.hooks import (EvaluateChatHook,
                                  VarlenAttnArgsToMessageHubHook)
 from xtuner.engine.runner import TrainLoop
-from xtuner.model.orpo import ORPO
+from xtuner.model.dpo import DPO
 from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
 
 #######################################################################
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-pretrained_model_name_or_path = '/cpfs01/shared/public/public_hdd/llmeval/model_weights/hf_hub/models--internlm--internlm2-chat-1_8b-sft/snapshots/08fa4ec0966ea04900d4a47c3747e66dde730d92'
-use_varlen_attn = True
+pretrained_model_name_or_path = 'internlm/internlm2-chat-1_8b-sft'
+use_varlen_attn = False
+dpo_loss_type = 'sigmoid'  # Should be one of ['sigmoid', 'hinge', 'ipo', 'kto_pair']
 
 # Data
 prompt_template = PROMPT_TEMPLATE.internlm2_chat
-max_length = 8192
+max_length = 2048
 
 # Scheduler & Optimizer
 batch_size = 1  # per_device
@@ -49,7 +48,7 @@ save_total_limit = 2  # Maximum checkpoints to keep (-1 means unlimited)
 evaluation_freq = 500
 SYSTEM = SYSTEM_TEMPLATE.alpaca
 evaluation_inputs = [
-    'What famous British author, known for his tales of mystery and the macabre, shares his initials with a common abbreviation for "rest in peace"?', 
+    'What famous British author, known for his tales of mystery and the macabre, shares his initials with a common abbreviation for "rest in peace"?',
     'Please tell me five scenic spots in Shanghai',
     '890729 - 425663? Only respond with math and no words.'
 ]
@@ -64,8 +63,9 @@ tokenizer = dict(
     padding_side='right')
 
 model = dict(
-    type=ORPO,
+    type=DPO,
     use_varlen_attn=use_varlen_attn,
+    loss_type=dpo_loss_type,
     llm=dict(
         type=AutoModelForCausalLM.from_pretrained,
         pretrained_model_name_or_path=pretrained_model_name_or_path,
@@ -76,18 +76,17 @@ model = dict(
 #######################################################################
 train_dataset = dict(
     type=build_preference_dataset,
-    dataset=dict(type=load_dataset, path="mlabonne/orpo-dpo-mix-40k"),
+    dataset=dict(type=load_dataset, path='mlabonne/orpo-dpo-mix-40k'),
     tokenizer=tokenizer,
     max_length=max_length,
     dataset_map_fn=orpo_dpo_mix_40k_map_fn,
-    is_dpo = True,
-    is_reward = False,
-    reward_token_id = -1,
-    num_proc = 32,
-    use_varlen_attn = use_varlen_attn,
-    max_packed_length = max_length,
-    shuffle_before_pack = True,
-    seed = 42,
+    is_dpo=True,
+    is_reward=False,
+    reward_token_id=-1,
+    num_proc=32,
+    use_varlen_attn=use_varlen_attn,
+    shuffle_before_pack=True,
+    seed=42,
 )
 
 train_dataloader = dict(
@@ -95,9 +94,7 @@ train_dataloader = dict(
     num_workers=dataloader_num_workers,
     dataset=train_dataset,
     sampler=dict(type=DefaultSampler, shuffle=True),
-    collate_fn=dict(
-        type=reward_collate_fn,
-        use_varlen_attn=use_varlen_attn))
+    collate_fn=dict(type=reward_collate_fn, use_varlen_attn=use_varlen_attn))
 
 #######################################################################
 #                    PART 4  Scheduler & Optimizer                    #

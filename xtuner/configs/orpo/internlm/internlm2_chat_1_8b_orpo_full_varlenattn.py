@@ -1,42 +1,37 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-import torch
 from datasets import load_dataset
 from mmengine.dataset import DefaultSampler
 from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
                             LoggerHook, ParamSchedulerHook)
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR, LinearLR
-from peft import LoraConfig
 from torch.optim import AdamW
-from transformers import (AutoModelForCausalLM, AutoTokenizer,
-                          BitsAndBytesConfig)
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from xtuner.dataset.collate_fns.reward_collate_fn import reward_collate_fn
-from xtuner.dataset.preference_dataset import build_preference_dataset, orpo_dpo_mix_40k_map_fn
-from xtuner.engine.hooks import (DatasetInfoHook, EvaluateChatHook,
+from xtuner.dataset.preference_dataset import (build_preference_dataset,
+                                               orpo_dpo_mix_40k_map_fn)
+from xtuner.engine.hooks import (EvaluateChatHook,
                                  VarlenAttnArgsToMessageHubHook)
 from xtuner.engine.runner import TrainLoop
-from xtuner.model.reward import RewardModel
+from xtuner.model.orpo import ORPO
 from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
 
 #######################################################################
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-pretrained_model_name_or_path = '/cpfs01/shared/public/public_hdd/llmeval/model_weights/hf_hub/models--internlm--internlm2-chat-1_8b-sft/snapshots/08fa4ec0966ea04900d4a47c3747e66dde730d92'
-use_varlen_attn = False
-reward_token_id = 92527
-loss_type = 'focal'
-penalty_type = 'log_barrier'
+pretrained_model_name_or_path = 'internlm/internlm2-chat-1_8b-sft'
+use_varlen_attn = True
 
 # Data
 prompt_template = PROMPT_TEMPLATE.internlm2_chat
-max_length = 8192
+max_length = 2048
 
 # Scheduler & Optimizer
-batch_size = 4  # per_device
+batch_size = 1  # per_device
 accumulative_counts = 16
 dataloader_num_workers = 0
-max_epochs = 1  # reward model should not be trained for more than 1 epoch to avoid overfitting
+max_epochs = 3
 optim_type = AdamW
 lr = 2e-5
 betas = (0.9, 0.999)
@@ -50,6 +45,12 @@ save_total_limit = 2  # Maximum checkpoints to keep (-1 means unlimited)
 
 # Evaluate the generation performance during the training
 evaluation_freq = 500
+SYSTEM = SYSTEM_TEMPLATE.alpaca
+evaluation_inputs = [
+    'What famous British author, known for his tales of mystery and the macabre, shares his initials with a common abbreviation for "rest in peace"?',
+    'Please tell me five scenic spots in Shanghai',
+    '890729 - 425663? Only respond with math and no words.'
+]
 
 #######################################################################
 #                      PART 2  Model & Tokenizer                      #
@@ -61,10 +62,8 @@ tokenizer = dict(
     padding_side='right')
 
 model = dict(
-    type=RewardModel,
+    type=ORPO,
     use_varlen_attn=use_varlen_attn,
-    loss_type=loss_type,
-    penalty_type=penalty_type,
     llm=dict(
         type=AutoModelForCausalLM.from_pretrained,
         pretrained_model_name_or_path=pretrained_model_name_or_path,
@@ -75,16 +74,16 @@ model = dict(
 #######################################################################
 train_dataset = dict(
     type=build_preference_dataset,
-    dataset=dict(type=load_dataset, path="RLHFlow/UltraFeedback-preference-standard"),
+    dataset=dict(type=load_dataset, path='mlabonne/orpo-dpo-mix-40k'),
     tokenizer=tokenizer,
     max_length=max_length,
     dataset_map_fn=orpo_dpo_mix_40k_map_fn,
-    is_dpo=False,
-    is_reward=True,
-    reward_token_id=reward_token_id,
+    is_dpo=True,
+    is_reward=False,
+    reward_token_id=-1,
     num_proc=32,
     use_varlen_attn=use_varlen_attn,
-    max_packed_length=max_length,
+    max_packed_length=max_length * 2,  # len(chosen) + len(rejected)
     shuffle_before_pack=True,
     seed=42,
 )
@@ -94,9 +93,7 @@ train_dataloader = dict(
     num_workers=dataloader_num_workers,
     dataset=train_dataset,
     sampler=dict(type=DefaultSampler, shuffle=True),
-    collate_fn=dict(
-        type=reward_collate_fn,
-        use_varlen_attn=use_varlen_attn))
+    collate_fn=dict(type=reward_collate_fn, use_varlen_attn=use_varlen_attn))
 
 #######################################################################
 #                    PART 4  Scheduler & Optimizer                    #
@@ -137,7 +134,16 @@ train_cfg = dict(type=TrainLoop, max_epochs=max_epochs)
 #                           PART 5  Runtime                           #
 #######################################################################
 # Log the dialogue periodically during the training process, optional
-custom_hooks = []
+custom_hooks = [
+    # dict(type=DatasetInfoHook, tokenizer=tokenizer),
+    dict(
+        type=EvaluateChatHook,
+        tokenizer=tokenizer,
+        every_n_iters=evaluation_freq,
+        evaluation_inputs=evaluation_inputs,
+        system=SYSTEM,
+        prompt_template=prompt_template)
+]
 
 if use_varlen_attn:
     custom_hooks += [dict(type=VarlenAttnArgsToMessageHubHook)]
