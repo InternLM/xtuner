@@ -8,7 +8,8 @@ from peft import LoraConfig
 from torch.optim import AdamW
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from xtuner.dataset.collate_fns.preference_collate_fn import preference_collate_fn
+from xtuner.dataset.collate_fns.preference_collate_fn import \
+    preference_collate_fn
 from xtuner.dataset.preference_dataset import (build_preference_dataset,
                                                orpo_dpo_mix_40k_map_fn)
 from xtuner.engine.hooks import (EvaluateChatHook,
@@ -48,7 +49,7 @@ save_total_limit = 2  # Maximum checkpoints to keep (-1 means unlimited)
 evaluation_freq = 500
 SYSTEM = SYSTEM_TEMPLATE.alpaca
 evaluation_inputs = [
-    'What famous British author, known for his tales of mystery and the macabre, shares his initials with a common abbreviation for "rest in peace"?',
+    'What famous British author, known for his tales of mystery and the macabre, shares his initials with a common abbreviation for "rest in peace"?',  # noqa: E501
     'Please tell me five scenic spots in Shanghai',
     '890729 - 425663? Only respond with math and no words.'
 ]
@@ -100,7 +101,8 @@ train_dataloader = dict(
     num_workers=dataloader_num_workers,
     dataset=train_dataset,
     sampler=dict(type=DefaultSampler, shuffle=True),
-    collate_fn=dict(type=preference_collate_fn, use_varlen_attn=use_varlen_attn))
+    collate_fn=dict(
+        type=preference_collate_fn, use_varlen_attn=use_varlen_attn))
 
 #######################################################################
 #                    PART 4  Scheduler & Optimizer                    #

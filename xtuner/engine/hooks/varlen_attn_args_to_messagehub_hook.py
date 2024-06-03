@@ -1,12 +1,9 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from typing import Optional, Union
 
-from mmengine.dist import get_rank
 from mmengine import MessageHub
+from mmengine.dist import get_rank
 from mmengine.hooks import Hook
-
-from xtuner.model.modules import dispatch_modules
-from mmengine.model import is_model_wrapper
 
 DATA_BATCH = Optional[Union[dict, tuple, list]]
 
@@ -40,7 +37,7 @@ class VarlenAttnArgsToMessageHubHook(Hook):
         message_hub = MessageHub.get_instance('varlen_attn_args')
         message_hub.update_info(f'cumulative_len_rank_{rank}', None)
         message_hub.update_info(f'max_seqlen_rank_{rank}', None)
-    
+
     def before_val_iter(self,
                         runner,
                         batch_idx: int,
@@ -71,8 +68,8 @@ class VarlenAttnArgsToMessageHubHook(Hook):
     def after_val_iter(self,
                        runner,
                        batch_idx,
-                       data_batch = None,
-                       outputs = None) -> None:
+                       data_batch=None,
+                       outputs=None) -> None:
         """All subclasses should override this method, if they need any
         operations after each validation iteration.
 
