@@ -1,5 +1,4 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-import importlib
 import math
 from collections import OrderedDict
 from contextlib import nullcontext
@@ -7,7 +6,6 @@ from contextlib import nullcontext
 import torch
 from mmengine import print_log
 from mmengine.config import Config, ConfigDict
-from mmengine.config.lazy import LazyObject
 from mmengine.model import BaseModel
 from mmengine.runner import load_checkpoint
 from peft import get_peft_model, prepare_model_for_kbit_training
@@ -20,7 +18,6 @@ from xtuner.parallel.sequence import (get_sequence_parallel_group,
                                       reduce_sequence_parallel_loss,
                                       split_for_sequence_parallel)
 from xtuner.registry import BUILDER
-from xtuner.utils import load_state_dict_into_model
 from .modules import dispatch_modules
 from .modules.dispatch import SUPPORT_FLASH1, SUPPORT_FLASH2
 from .utils import (LoadWoInit, find_all_linear_names,
@@ -73,8 +70,6 @@ def smart_tokenizer_and_embedding_resize(
 
 class SupervisedFinetune(BaseModel):
 
-    SUPPORT_FUSE_MOE = ('DeepseekV2Config', )
-
     def __init__(self,
                  llm,
                  lora=None,
@@ -84,20 +79,10 @@ class SupervisedFinetune(BaseModel):
                  tokenizer=None,
                  max_position_embeddings=None):
         super().__init__()
-        config_name = self._get_config_name(llm)
-        is_fused_required = (
-            config_name in self.SUPPORT_FUSE_MOE and (lora is None)
-            and (getattr(llm, 'quantization_config', None) is None))
-
-        if isinstance(llm, dict):
-            pretrained_model_name_or_path = llm.pretrained_model_name_or_path
-            llm = self._dispatch_lm_model_cfg(llm, max_position_embeddings,
-                                              is_fused_required)
-            with LoadWoInit():
-                llm = self._build_from_cfg_or_module(llm)
-            if is_fused_required:
-                load_state_dict_into_model(llm, pretrained_model_name_or_path)
-        self.llm = llm
+        with LoadWoInit():
+            if isinstance(llm, dict):
+                llm = self._dispatch_lm_model_cfg(llm, max_position_embeddings)
+            self.llm = self._build_from_cfg_or_module(llm)
 
         if tokenizer is not None:
             if isinstance(tokenizer, dict):
@@ -133,12 +118,6 @@ class SupervisedFinetune(BaseModel):
         # seq_len dimension (use_varlen_attn = False) or the actual length of
         # the sequence.
         self.use_varlen_attn = use_varlen_attn
-
-    def _get_config_name(self, cfg):
-        pretrained_model_name_or_path = cfg.pretrained_model_name_or_path
-        llm_cfg = AutoConfig.from_pretrained(
-            pretrained_model_name_or_path, trust_remote_code=True)
-        return type(llm_cfg).__name__
 
     def gradient_checkpointing_enable(self):
         self.activation_checkpointing_enable()
@@ -240,41 +219,16 @@ class SupervisedFinetune(BaseModel):
 
         return cfg
 
-    def _dispatch_lm_model_cfg(self,
-                               xtuner_config,
-                               max_position_embeddings=None,
-                               is_fused_required=False):
-        xtuner_config = self._prepare_for_qlora_zero3(xtuner_config)
-
-        pretrained_model_name_or_path = \
-            xtuner_config.pretrained_model_name_or_path
-        if is_fused_required:
-            module = importlib.import_module(
-                'xtuner.model.transformers_models')
-            config_name = self._get_config_name(xtuner_config)
-            config_module = getattr(module, config_name)
-            transformers_config = config_module.from_pretrained(
-                pretrained_model_name_or_path, trust_remote_code=True)
-        else:
-            transformers_config = AutoConfig.from_pretrained(
-                pretrained_model_name_or_path, trust_remote_code=True)
-
-        xtuner_config = self._prepare_for_flash_attn(xtuner_config,
-                                                     transformers_config)
+    def _dispatch_lm_model_cfg(self, cfg, max_position_embeddings=None):
+        cfg = self._prepare_for_qlora_zero3(cfg)
+        pretrained_model_name_or_path = cfg.pretrained_model_name_or_path
+        llm_cfg = AutoConfig.from_pretrained(
+            pretrained_model_name_or_path, trust_remote_code=True)
+        cfg = self._prepare_for_flash_attn(cfg, llm_cfg)
         if max_position_embeddings is not None:
-            xtuner_config = self._prepare_for_long_context_training(
-                xtuner_config, transformers_config, max_position_embeddings)
-
-        if is_fused_required:
-            # from_config do not need pretrained_model_name_or_path
-            # and trust_remote_code
-            xtuner_config.pop('pretrained_model_name_or_path', None)
-            xtuner_config.pop('trust_remote_code', None)
-            xtuner_config.config = transformers_config
-            model_name = xtuner_config.type.__self__.__name__
-            xtuner_config.type = LazyObject('xtuner.model.transformers_models',
-                                            model_name)._from_config
-        return xtuner_config
+            cfg = self._prepare_for_long_context_training(
+                cfg, llm_cfg, max_position_embeddings)
+        return cfg
 
     def _build_from_cfg_or_module(self, cfg_or_mod):
         if isinstance(cfg_or_mod, nn.Module):
