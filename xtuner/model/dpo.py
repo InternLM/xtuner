@@ -1,3 +1,5 @@
+# DPO Authors: Rafael Rafailov, Archit Sharma, Eric Mitchell, Stefano Ermon, Christopher D. Manning, and Chelsea Finn 2023  # noqa
+# Copyright 2023 The HuggingFace Team. All rights reserved.
 # Copyright (c) OpenMMLab. All rights reserved.
 from collections import OrderedDict
 from copy import deepcopy
@@ -38,6 +40,7 @@ def create_reference_model(model):
 
 
 class DPO(BaseModel):
+    """A general class of DPO and its variants."""
 
     def __init__(self,
                  llm,
@@ -224,7 +227,7 @@ class DPO(BaseModel):
                 torch.stack(reference_rejected_logps))
 
     def compute_loss(self, data, data_samples=None):
-        # refer to https://github.com/huggingface/trl/blob/main/trl/trainer/dpo_trainer.py  # noqa
+        # modified from https://github.com/huggingface/trl/blob/main/trl/trainer/dpo_trainer.py  # noqa
         all_logits = self.llm(**data).logits
         with torch.no_grad():
             if self.ref_llm is None:
@@ -258,10 +261,16 @@ class DPO(BaseModel):
             loss = (-F.logsigmoid(self.beta * logits) *
                     (1 - self.label_smoothing) -
                     F.logsigmoid(-self.beta * logits) * self.label_smoothing)
+        elif self.loss_type == 'robust':
+            loss = (-F.logsigmoid(self.beta * logits) *
+                    (1 - self.label_smoothing) +
+                    F.logsigmoid(-self.beta * logits) *
+                    self.label_smoothing) / (1 - 2 * self.label_smoothing)
         elif self.loss_type == 'hinge':
             loss = torch.relu(1 - self.beta * logits)
         elif self.loss_type == 'ipo':
-            # eqn (17) of the paper where beta is the regularization parameter for the IPO loss, denoted by tau in the paper.  # noqa
+            # eqn (17) of the paper where beta is the regularization
+            # parameter for the IPO loss, denoted by tau in the paper.  # noqa
             loss = (logits - 1 / (2 * self.beta))**2
         elif self.loss_type == 'kto_pair':
             # eqn (7) of the HALOs paper
@@ -273,7 +282,8 @@ class DPO(BaseModel):
             chosen_logratios = policy_chosen_logps - reference_chosen_logps
             rejected_logratios = \
                 policy_rejected_logps - reference_rejected_logps
-            # As described in the KTO report, the KL term for chosen (rejected) is estimated using the rejected (chosen) half.  # noqa
+            # As described in the KTO report, the KL term for chosen (rejected)
+            # is estimated using the rejected (chosen) half.  # noqa
             loss = torch.cat(
                 (
                     1 - F.sigmoid(self.beta *
@@ -283,10 +293,46 @@ class DPO(BaseModel):
                 ),
                 0,
             )
+        elif self.loss_type == 'bco_pair':
+            chosen_logratios = policy_chosen_logps - reference_chosen_logps
+            rejected_logratios = (
+                policy_rejected_logps - reference_rejected_logps)
+
+            chosen_rewards = self.beta * chosen_logratios
+            rejected_rewards = self.beta * rejected_logratios
+            rewards = torch.cat((chosen_rewards, rejected_rewards),
+                                0).mean().detach()
+            self.running.update(rewards)
+            delta = self.running.mean
+
+            loss = -F.logsigmoid(
+                (self.beta * chosen_logratios) - delta) - F.logsigmoid(
+                    -(self.beta * rejected_logratios - delta))
+        elif self.loss_type == 'sppo_hard':
+            # In the paper (https://arxiv.org/pdf/2405.00675),
+            # SPPO employs a soft probability approach,
+            # estimated using the PairRM score. The probability calculation
+            # is conducted outside of the trainer class.
+            # The version described here is the hard probability version,
+            # where P in Equation (4.7) of Algorithm 1 is set to 1 for
+            # the winner and 0 for the loser.
+            a = policy_chosen_logps - reference_chosen_logps
+            b = policy_rejected_logps - reference_rejected_logps
+
+            loss = (a - 0.5 / self.beta)**2 + (b + 0.5 / self.beta)**2
+        elif self.loss_type == 'nca_pair':
+            chosen_rewards = (policy_chosen_logps -
+                              reference_chosen_logps) * self.beta
+            rejected_rewards = (policy_rejected_logps -
+                                reference_rejected_logps) * self.beta
+            loss = (-F.logsigmoid(chosen_rewards) -
+                    0.5 * F.logsigmoid(-chosen_rewards) -
+                    0.5 * F.logsigmoid(-rejected_rewards))
         else:
             raise ValueError(
-                f'Unknown loss type: {self.loss_type}. '
-                "Should be one of ['sigmoid', 'hinge', 'ipo', 'kto_pair']")
+                f'Unknown loss type: {self.loss_type}. Should be one of '
+                "['sigmoid', 'hinge', 'ipo', 'kto_pair', 'bco_pair', "
+                "'sppo_hard', 'nca_pair', 'robust']")
         chosen_rewards = self.beta * (
             policy_chosen_logps - reference_chosen_logps)
         rejected_rewards = self.beta * (

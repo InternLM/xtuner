@@ -1,3 +1,5 @@
+# ORPO Authors: Jiwoo Hong, Noah Lee, and James Thorne
+# Official code: https://github.com/xfactlab/orpo
 # Copyright (c) OpenMMLab. All rights reserved.
 import torch
 import torch.distributed as dist
@@ -9,6 +11,12 @@ from .sft import SupervisedFinetune
 
 
 class ORPO(SupervisedFinetune):
+    """ORPO: Monolithic Preference Optimization without Reference Model
+    https://arxiv.org/abs/2403.07691
+
+    Args:
+        beta (float): Weight of the odds_ratio_loss. Defaults to 0.1.
+    """
 
     def __init__(self, *args, beta=0.1, **kwargs):
         super().__init__(*args, **kwargs)
