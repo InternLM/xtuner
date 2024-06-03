@@ -1,16 +1,12 @@
-from typing import Any, Sequence
+import itertools
+from collections import defaultdict
+from typing import List, Optional, Sequence
 
-import numpy as np
 import torch
 from mmengine.evaluator import BaseMetric
 from mmengine.logging import print_log
 from rich.console import Console
 from rich.table import Table
-import itertools
-from collections import defaultdict
-from typing import List, Optional
-
-from xtuner.registry import BUILDER
 
 
 class RewardMetric(BaseMetric):
@@ -33,7 +29,8 @@ class RewardMetric(BaseMetric):
             data_batch: A batch of data from the dataloader.
             data_samples (Sequence[dict]): A batch of outputs from the model.
         """
-        logits = torch.cat([sample['logits'].unsqueeze(0) for sample in data_samples], dim=0)
+        logits = torch.cat(
+            [sample['logits'].unsqueeze(0) for sample in data_samples], dim=0)
         labels = data_batch['data']['labels']
         ds_names = data_batch['data_samples']['ds_names']
         chosen_idx = torch.where(labels == 0)
@@ -43,10 +40,11 @@ class RewardMetric(BaseMetric):
 
         correct = (chosen_logits > rejected_logits).cpu()
         self.results.append({
-            'chosen_logits': chosen_logits, 
-            'rejected_logits': rejected_logits, 
-            'correct': correct, 
-            'ds_names': ds_names})
+            'chosen_logits': chosen_logits,
+            'rejected_logits': rejected_logits,
+            'correct': correct,
+            'ds_names': ds_names
+        })
 
     def compute_metrics(self, results: List):
         """Compute the metrics from processed results.
@@ -63,7 +61,8 @@ class RewardMetric(BaseMetric):
 
         correct = torch.cat([res['correct'] for res in results])
         chosen_logits = torch.cat([res['chosen_logits'] for res in results])
-        rejected_logits = torch.cat([res['rejected_logits'] for res in results])
+        rejected_logits = torch.cat(
+            [res['rejected_logits'] for res in results])
         ds_names = list(itertools.chain(*[res['ds_names'] for res in results]))
 
         # group by ds_names
@@ -74,14 +73,14 @@ class RewardMetric(BaseMetric):
             grouped_correct[ds_name].append(correct[i])
             grouped_chosen_logits[ds_name].append(chosen_logits[i])
             grouped_rejected_logits[ds_name].append(rejected_logits[i])
-        
+
         # print metrics in a rich table
         table = Table(title='Reward Metrics')
         table.add_column('Dataset Name')
         table.add_column('Accuracy')
         table.add_column('Chosen Score')
         table.add_column('Rejected Score')
-        
+
         for ds_name in grouped_correct.keys():
             correct = torch.stack(grouped_correct[ds_name])
             chosen_logits = torch.stack(grouped_chosen_logits[ds_name])
@@ -92,11 +91,12 @@ class RewardMetric(BaseMetric):
             metrics[f'chosen_score/{ds_name}'] = chosen_logits.mean().item()
             metrics[f'rejected_score{ds_name}'] = rejected_logits.mean().item()
 
-            table.add_row(ds_name, f'{acc:.4f}', f'{chosen_logits.mean():.4f}', f'{rejected_logits.mean():.4f}')
+            table.add_row(ds_name, f'{acc:.4f}', f'{chosen_logits.mean():.4f}',
+                          f'{rejected_logits.mean():.4f}')
 
         console = Console()
         with console.capture() as capture:
             console.print(table, end='')
         print_log('\n' + capture.get(), 'current')
-        
+
         return metrics

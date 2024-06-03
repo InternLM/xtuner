@@ -10,7 +10,8 @@ from torch.optim import AdamW
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           BitsAndBytesConfig)
 
-from xtuner.dataset.collate_fns.preference_collate_fn import preference_collate_fn
+from xtuner.dataset.collate_fns.preference_collate_fn import \
+    preference_collate_fn
 from xtuner.dataset.preference_dataset import (build_preference_dataset,
                                                orpo_dpo_mix_40k_map_fn)
 from xtuner.engine.hooks import VarlenAttnArgsToMessageHubHook
@@ -33,7 +34,7 @@ max_length = 2048
 batch_size = 1  # per_device
 accumulative_counts = 16
 dataloader_num_workers = 0
-max_epochs = 1  # reward model should not be trained for more than 1 epoch to avoid overfitting
+max_epochs = 1  # reward model should not be trained for more than 1 epoch to avoid overfitting  # noqa: E501
 optim_type = AdamW
 lr = 1e-4
 betas = (0.9, 0.999)
@@ -111,7 +112,8 @@ train_dataloader = dict(
     num_workers=dataloader_num_workers,
     dataset=train_dataset,
     sampler=dict(type=DefaultSampler, shuffle=True),
-    collate_fn=dict(type=preference_collate_fn, use_varlen_attn=use_varlen_attn))
+    collate_fn=dict(
+        type=preference_collate_fn, use_varlen_attn=use_varlen_attn))
 
 #######################################################################
 #                    PART 4  Scheduler & Optimizer                    #
