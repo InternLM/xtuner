@@ -26,7 +26,7 @@ use_varlen_attn = True
 # Data
 prompt_template = PROMPT_TEMPLATE.internlm2_chat
 max_length = 2048
-max_packed_length=max_length * 2
+max_packed_length = max_length * 2
 
 # Scheduler & Optimizer
 batch_size = 1  # per_device
