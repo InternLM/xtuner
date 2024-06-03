@@ -36,11 +36,7 @@ data_root = '/mnt/hwfile/xtuner/linzhihao/dataset/llava_data/'
       {
         "from": "gpt",
         "value": "The bus in the image is white and red."
-      },
-      {
-        "from": "human",
-        "value": "What feature can be seen on the back of the bus?"
-      },
+      }
     ]
   }
 """
@@ -79,7 +75,8 @@ model = dict(
     type=InternVL,
     path=path,
     freeze_llm=False,
-    freeze_visual_encoder=True)
+    freeze_visual_encoder=True  # or False
+)
 
 #######################################################################
 #                      PART 3  Dataset & Dataloader                   #

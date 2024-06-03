@@ -22,11 +22,12 @@ from mmengine import print_log
 
 class InternVL(BaseModel):
     def __init__(self, path, freeze_llm=False,
-                 freeze_visual_encoder=True,
+                 freeze_visual_encoder=False,
                  llm_lora=None,
                  visual_encoder_lora=None,
                  quantization_vit=False,
-                 quantization_llm=False):
+                 quantization_llm=False,
+                 pretrained_pth=None):
         super().__init__()
         self.freeze_llm = freeze_llm
         self.freeze_visual_encoder = freeze_visual_encoder
@@ -39,23 +40,11 @@ class InternVL(BaseModel):
         if quantization_llm:
             assert quantization_llm and llm_lora is not None
 
+        config = AutoConfig.from_pretrained(path, trust_remote_code=True)
+        config.llm_config._attn_implementation = 'flash_attention_2'
+
         if quantization_vit is False and quantization_llm is False:
-            if 'Mini-InternVL-Chat-4B-V1-5' in path:
-                config = AutoConfig.from_pretrained(path, trust_remote_code=True)
-                config.llm_config._attn_implementation = 'flash_attention_2'
-                # print(config)
-                self.model = AutoModel.from_pretrained(
-                    path,
-                    torch_dtype=torch.bfloat16,
-                    low_cpu_mem_usage=True,
-                    trust_remote_code=True,
-                    config=config)
-            else:
-                self.model = AutoModel.from_pretrained(
-                    path,
-                    torch_dtype=torch.bfloat16,
-                    low_cpu_mem_usage=True,
-                    trust_remote_code=True)
+            quantization = None
         else:
             llm_int8_skip_modules = ['mlp1']
             if quantization_llm and not quantization_vit:
@@ -77,12 +66,12 @@ class InternVL(BaseModel):
             quantization_clazz = quantization_config.pop("type")
             quantization = quantization_clazz(**quantization_config)
 
-            self.model = AutoModel.from_pretrained(
-                path,
-                torch_dtype=torch.bfloat16,
-                quantization_config=quantization,
-                low_cpu_mem_usage=True,
-                trust_remote_code=True)
+        self.model = AutoModel.from_pretrained(
+            path,
+            torch_dtype=torch.bfloat16,
+            quantization_config=quantization,
+            config=config,
+            trust_remote_code=True)
 
         tokenizer = AutoTokenizer.from_pretrained(path, trust_remote_code=True)
         img_context_token_id = tokenizer.convert_tokens_to_ids('<IMG_CONTEXT>')
@@ -106,6 +95,12 @@ class InternVL(BaseModel):
 
         if self.use_visual_encoder_lora:
             self._prepare_visual_encoder_for_lora(visual_encoder_lora)
+
+        if pretrained_pth is not None:
+            pretrained_state_dict = guess_load_checkpoint(pretrained_pth)
+
+            self.load_state_dict(pretrained_state_dict, strict=False)
+            print(f'Load pretrained weight from {pretrained_pth}')
 
         print_log(self, logger='current')
 

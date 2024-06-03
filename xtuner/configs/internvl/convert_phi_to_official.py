@@ -1,54 +1,50 @@
-import os
-from tqdm import tqdm
-from safetensors import safe_open
-from safetensors.torch import save_file
-
-from xtuner.model.utils import guess_load_checkpoint
-import shutil
 import argparse
+from transformers import AutoTokenizer
+import torch
+from mmengine.config import Config
+from xtuner.registry import BUILDER
+from xtuner.model.utils import LoadWoInit
+import os.path as osp
 
 
-def convert_phi_to_official(phi_path, trained_path, save_path):
-    statue_dict = guess_load_checkpoint(trained_path)
-    # print(statue_dict.keys())
-    print('================================================')
-    if os.path.exists(save_path):
-        shutil.rmtree(save_path)
-    shutil.copytree(phi_path, save_path)
+def convert_phi_to_official(config, trained_path, save_path):
+    cfg = Config.fromfile(config)
+    cfg.model.pretrained_pth = trained_path
+    cfg.model.quantization_vit = False
+    cfg.model.quantization_llm = False
 
-    files = [f for f in os.listdir(phi_path) if f.endswith('safetensors')]
+    with LoadWoInit():
+        model = BUILDER.build(cfg.model)
+    model.to(torch.bfloat16)
 
-    for file in tqdm(files, desc='Convert'):
-        tensors = {}
-        new_path = os.path.join(save_path, file)
-        old_path = os.path.join(phi_path, file)
+    if model.use_visual_encoder_lora:
+        vision_model = model.model.vision_model.merge_and_unload()
+        model.model.vision_model = vision_model
 
-        with safe_open(old_path, framework='pt', device='cpu') as f:
-            for key in f.keys():
-                find = False
-                for trained_k, trained_v in statue_dict.items():
-                    trained_k = trained_k[6:]
-                    if key == trained_k:
-                        tensors[key] = trained_v
-                        find = True
-                        break
-                if not find:
-                    tensors[key] = f.get_tensor(key)
-            # print(f.keys())
-            metadata = f.metadata()
-            save_file(tensors, new_path, metadata=metadata)
+    if model.use_llm_lora:
+        language_model = model.model.language_model.merge_and_unload()
+        model.model.language_model = language_model
+
+    model.model.save_pretrained(save_path)
+
+    tokenizer = AutoTokenizer.from_pretrained(cfg.model.path, trust_remote_code=True)
+    tokenizer.save_pretrained(save_path)
+
+    print(model)
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--orig-phi-path', '-o',
-                        default='/mnt/hwfile/xtuner/huanghaian/model/Mini-InternVL-Chat-4B-V1-5')
-    parser.add_argument('--trained-path', '-t',
-                        default='/mnt/petrelfs/huanghaian/code/xtuner/work_dirs/mini_internvl_phi3_sft/iter_200.pth')
-    parser.add_argument('--save-path', '-s',
-                        default='/mnt/hwfile/xtuner/huanghaian/model/finetune_Mini-InternVL-Chat-4B-V1-5')
+    parser = argparse.ArgumentParser(
+        description='Convert the pth model to HuggingFace model')
+    parser.add_argument('config', help='config file name or path.')
+    parser.add_argument('trained_model_pth', help='The trained model path.')
+    parser.add_argument('save_path', help='The path to save the converted model.')
     args = parser.parse_args()
-    convert_phi_to_official(args.orig_phi_path, args.trained_path, args.save_path)
+
+    if osp.realpath(args.trained_model_pth) == osp.realpath(args.save_path):
+        raise ValueError('The trained path and save path should not be the same.')
+
+    convert_phi_to_official(args.config, args.trained_model_pth, args.save_path)
 
 
 if __name__ == '__main__':

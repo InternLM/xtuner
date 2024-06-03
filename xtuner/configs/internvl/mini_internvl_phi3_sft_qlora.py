@@ -13,11 +13,13 @@ from xtuner.engine.runner import TrainLoop
 from xtuner.model import InternVL
 from xtuner.utils import PROMPT_TEMPLATE
 from transformers import AutoTokenizer
+from peft import LoraConfig
+
 #######################################################################
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-path = "/mnt/hwfile/xtuner/huanghaian/model/Mini-InternVL-Chat-2B-V1-5"
+path = "/mnt/hwfile/xtuner/huanghaian/model/Mini-InternVL-Chat-4B-V1-5"
 
 # Data
 data_root = '/mnt/hwfile/xtuner/linzhihao/dataset/llava_data/'
@@ -36,23 +38,19 @@ data_root = '/mnt/hwfile/xtuner/linzhihao/dataset/llava_data/'
       {
         "from": "gpt",
         "value": "The bus in the image is white and red."
-      },
-      {
-        "from": "human",
-        "value": "What feature can be seen on the back of the bus?"
-      },
+      }
     ]
   }
 """
 
-data_path = data_root + 'LLaVA-Instruct-150K/llava_v1_5_mix665k.json'
+data_path = '/mnt/hwfile/xtuner/huanghaian/data/llava_v1_5_mix665k_processed.json'
 image_folder = data_root + 'llava_images'
-prompt_template = PROMPT_TEMPLATE.internlm2_chat
-max_length = int(4096 - (448 / 14) ** 2)  # TODO: It is not an exact value.
+prompt_template = PROMPT_TEMPLATE.phi3_chat
+max_length = 8192
 
 # Scheduler & Optimizer
-batch_size = 4  # per_device
-accumulative_counts = 4
+batch_size = 8  # per_device
+accumulative_counts = 2
 dataloader_num_workers = 4
 max_epochs = 1
 optim_type = AdamW
@@ -65,11 +63,11 @@ max_norm = 1  # grad clip
 warmup_ratio = 0.03
 
 # Save
-save_steps = 2000
+save_steps = 100
 save_total_limit = 1  # Maximum checkpoints to keep (-1 means unlimited)
 
 # Evaluate the generation performance during the training
-evaluation_freq = 2000
+evaluation_freq = 100
 SYSTEM = ''
 
 #######################################################################
@@ -78,15 +76,31 @@ SYSTEM = ''
 model = dict(
     type=InternVL,
     path=path,
-    freeze_llm=False,
-    freeze_visual_encoder=True)
+    freeze_llm=True,
+    freeze_visual_encoder=True,
+    quantization_llm=True,  # or False
+    quantization_vit=False,  # or True and uncomment visual_encoder_lora
+    # comment the following lines if you don't want to use Lora in llm
+    llm_lora=dict(
+        type=LoraConfig,
+        r=128,
+        lora_alpha=256,
+        lora_dropout=0.05,
+        target_modules=['self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'self_attn.o_proj',
+                        'mlp.gate_proj', 'mlp.down_proj', 'mlp.up_proj'],
+        task_type='CAUSAL_LM'),
+    # uncomment the following lines if you don't want to use Lora in visual encoder
+    # visual_encoder_lora=dict(
+    #     type=LoraConfig, r=64, lora_alpha=16, lora_dropout=0.05,
+    #     target_modules=['attn.qkv', 'attn.proj', 'mlp.fc1', 'mlp.fc2'])
+)
 
 #######################################################################
 #                      PART 3  Dataset & Dataloader                   #
 #######################################################################
 llava_dataset = dict(
     type=InternVL_V1_5_LLaVADataset,
-    offline_processed_text_folder='/mnt/petrelfs/huanghaian/code/xtuner/intervl/mini_v18_llava_sft',
+    offline_processed_text_folder='/mnt/petrelfs/huanghaian/code/xtuner/intervl/mini_phi3_llava_sft',
     path=path,
     data_path=data_path,
     image_folder=image_folder,
