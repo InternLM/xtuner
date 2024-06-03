@@ -9,7 +9,7 @@ from xtuner.parallel.sequence import (get_sequence_parallel_world_size,
 from xtuner.utils import DEFAULT_PAD_TOKEN_INDEX, IGNORE_INDEX
 
 
-def reward_collate_fn(instances: Sequence[Dict],
+def preference_collate_fn(instances: Sequence[Dict],
                       pad_index: int = DEFAULT_PAD_TOKEN_INDEX,
                       return_hf_format: bool = False,
                       use_varlen_attn: bool = False):

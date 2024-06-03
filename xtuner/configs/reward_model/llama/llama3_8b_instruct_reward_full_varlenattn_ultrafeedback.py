@@ -7,7 +7,7 @@ from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR, LinearLR
 from torch.optim import AdamW
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from xtuner.dataset.collate_fns.reward_collate_fn import reward_collate_fn
+from xtuner.dataset.collate_fns.preference_collate_fn import preference_collate_fn
 from xtuner.dataset.preference_dataset import (build_preference_dataset,
                                                orpo_dpo_mix_40k_map_fn)
 from xtuner.engine.hooks import VarlenAttnArgsToMessageHubHook
@@ -91,7 +91,7 @@ train_dataloader = dict(
     num_workers=dataloader_num_workers,
     dataset=train_dataset,
     sampler=dict(type=DefaultSampler, shuffle=True),
-    collate_fn=dict(type=reward_collate_fn, use_varlen_attn=use_varlen_attn))
+    collate_fn=dict(type=preference_collate_fn, use_varlen_attn=use_varlen_attn))
 
 #######################################################################
 #                    PART 4  Scheduler & Optimizer                    #
