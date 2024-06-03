@@ -149,14 +149,12 @@ def internlm_varlen_attn_forward(
            Optional[Tuple[torch.Tensor]]]:
     # Modified from https://huggingface.co/internlm/internlm-7b/blob/939a68c0dc1bd5f35b63c87d44af05ce33379061/modeling_internlm.py#L161  # noqa:E501
 
-    is_training = self.training
-
     message_hub = MessageHub.get_instance('varlen_attn_args')
     rank = dist.get_rank()
     cumulative_len = message_hub.get_info(f'cumulative_len_rank_{rank}')
     # position_ids = message_hub.get_info(f'position_ids_rank_{rank}')
     max_seqlen = message_hub.get_info(f'max_seqlen_rank_{rank}')
-    assert is_training == (cumulative_len is not None)
+    use_varlen_atten = (cumulative_len is not None)
 
     bsz, q_len, _ = hidden_states.size()
     assert bsz == 1, (f'If utilizing local attention, the batch size should be'
@@ -173,7 +171,7 @@ def internlm_varlen_attn_forward(
     if past_key_value is not None:
         kv_seq_len += past_key_value[0].shape[-2]
 
-    if is_training:
+    if use_varlen_atten:
         cos, sin = self.rotary_emb(value_states, max_seqlen)
         query_states = apply_rotary_emb(query_states,
                                         cos[position_ids].squeeze(0),
@@ -199,7 +197,7 @@ def internlm_varlen_attn_forward(
         value_states = value_states.transpose(1, 2)
 
     assert SUPPORT_FLASH2
-    if is_training:
+    if use_varlen_atten:
         q_unpad, k_unpad, v_unpad = query_states.flatten(
             0, 1), key_states.flatten(0, 1), value_states.flatten(0, 1)
         cumulative_len = torch.cat(cumulative_len, dim=0)

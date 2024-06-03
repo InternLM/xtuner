@@ -227,13 +227,12 @@ def internlm2_varlen_attn_forward(
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor],
            Optional[Tuple[torch.Tensor]]]:
     # Modified from https://huggingface.co/internlm/internlm-7b/blob/939a68c0dc1bd5f35b63c87d44af05ce33379061/modeling_internlm.py#L161  # noqa:E501
-    is_training = self.training
 
     message_hub = MessageHub.get_instance('varlen_attn_args')
     rank = dist.get_rank()
     cumulative_len = message_hub.get_info(f'cumulative_len_rank_{rank}')
     max_seqlen = message_hub.get_info(f'max_seqlen_rank_{rank}')
-    is_training = (cumulative_len is not None)
+    use_varlen_atten = (cumulative_len is not None)
 
     bsz, q_len, _ = hidden_states.size()
 
@@ -257,7 +256,7 @@ def internlm2_varlen_attn_forward(
     if past_key_value is not None:
         kv_seq_len += past_key_value[0].shape[-2]
 
-    if is_training:
+    if use_varlen_atten:
         cos, sin = self.rotary_emb(value_states, max_seqlen)
         query_states = apply_rotary_emb(query_states,
                                         cos[position_ids].squeeze(0),
@@ -287,7 +286,7 @@ def internlm2_varlen_attn_forward(
     value_states = repeat_kv_bshd(value_states, self.num_key_value_groups)
 
     assert SUPPORT_FLASH2
-    if is_training:
+    if use_varlen_atten:
         attn_output = varlen_flash_attn(query_states, key_states, value_states,
                                         cumulative_len, max_seqlen)
     else:
