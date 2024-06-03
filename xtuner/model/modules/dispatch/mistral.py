@@ -4,9 +4,8 @@ import warnings
 from typing import Optional
 
 import torch
-import torch.distributed as dist
 import torch.nn as nn
-from mmengine import MessageHub
+from mmengine import MessageHub, dist
 from transformers.cache_utils import Cache
 from transformers.models.mistral.modeling_mistral import (apply_rotary_pos_emb,
                                                           repeat_kv)
@@ -255,7 +254,7 @@ def mistral_varlen_attn_forward(
     cumulative_len = message_hub.get_info(f'cumulative_len_rank_{rank}')
     max_seqlen = message_hub.get_info(f'max_seqlen_rank_{rank}')
 
-    assert is_training  == (past_key_value is None)
+    assert is_training == (past_key_value is None)
     use_varlen_atten = (cumulative_len is not None)
 
     if 'padding_mask' in kwargs:

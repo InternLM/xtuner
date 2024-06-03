@@ -5,8 +5,7 @@ from typing import Optional, Tuple
 import torch
 import torch.nn.functional as F
 from einops import rearrange
-from mmengine import MessageHub
-from mmengine import dist
+from mmengine import MessageHub, dist
 
 from .attention import (SUPPORT_FLASH2, flash_attn_w_mask, flash_attn_wo_mask,
                         varlen_flash_attn)

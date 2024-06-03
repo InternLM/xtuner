@@ -4,8 +4,7 @@ import warnings
 from typing import Optional
 
 import torch
-import torch.distributed as dist
-from mmengine import MessageHub
+from mmengine import MessageHub, dist
 from transformers.cache_utils import Cache
 from transformers.models.qwen2.modeling_qwen2 import (apply_rotary_pos_emb,
                                                       repeat_kv)
