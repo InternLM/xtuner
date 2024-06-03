@@ -10,8 +10,8 @@ from transformers import AutoTokenizer
 from xtuner.dataset import process_hf_dataset
 from xtuner.dataset.collate_fns import default_collate_fn
 from xtuner.dataset.map_fns import alpaca_map_fn, template_map_fn_factory
-from xtuner.engine.hooks import (DatasetInfoHook, EvaluateChatHook,
-                                 HFCheckpointHook, ThroughputHook,
+from xtuner.engine.hooks import (DatasetInfoHook, HFCheckpointHook,
+                                 ThroughputHook,
                                  VarlenAttnArgsToMessageHubHook)
 from xtuner.engine.runner import TrainLoop
 from xtuner.model import SupervisedFinetune
@@ -144,13 +144,6 @@ train_cfg = dict(type=TrainLoop, max_epochs=max_epochs)
 # Log the dialogue periodically during the training process, optional
 custom_hooks = [
     dict(type=DatasetInfoHook, tokenizer=tokenizer),
-    dict(
-        type=EvaluateChatHook,
-        tokenizer=tokenizer,
-        every_n_iters=evaluation_freq,
-        evaluation_inputs=evaluation_inputs,
-        system=SYSTEM,
-        prompt_template=prompt_template),
     dict(type=ThroughputHook),
     dict(type=HFCheckpointHook)
 ]
