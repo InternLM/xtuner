@@ -13,6 +13,17 @@ from transformers.modeling_utils import load_state_dict
 from transformers.utils import (SAFE_WEIGHTS_INDEX_NAME, WEIGHTS_INDEX_NAME,
                                 is_safetensors_available)
 
+ORDER_MAPPING = dict(
+    DeepseekV2ForCausalLM=dict(down_proj=0, gate_proj=1, up_proj=2),
+    MixtralForCausalLM=dict(down_proj=1, gate_proj=0, up_proj=2),
+)
+
+PARAM_NAME_MAPPING = dict(
+    DeepseekV2ForCausalLM=dict(
+        gate_proj='gate_proj', up_proj='up_proj', down_proj='down_proj'),
+    MixtralForCausalLM=dict(gate_proj='w1', up_proj='w3', down_proj='w2'),
+)
+
 
 def print_on_rank0(info):
     if dist.get_rank() == 0:
@@ -42,7 +53,7 @@ def _get_merged_param_name(origin_param_name, expert_num_per_shard):
     return w1w3, w2
 
 
-def _merge_experts_weight(state_dict, expert_num_per_shard):
+def _merge_experts_weight(state_dict, expert_num_per_shard, order_mapping):
     experts_name = [key for key in state_dict.keys() if 'mlp.experts.' in key]
     experts_name = sorted(experts_name, key=mix_sort)
     linear_num_per_expert = 3
@@ -54,13 +65,16 @@ def _merge_experts_weight(state_dict, expert_num_per_shard):
         experts_name_cur = experts_name[begin:end]
 
         down_proj_weight = [
-            state_dict.pop(key) for key in experts_name_cur[::3]
+            state_dict.pop(key)
+            for key in experts_name_cur[order_mapping['down_proj']::3]
         ]
         gate_proj_weight = [
-            state_dict.pop(key) for key in experts_name_cur[1::3]
+            state_dict.pop(key)
+            for key in experts_name_cur[order_mapping['gate_proj']::3]
         ]
         up_proj_weight = [
-            state_dict.pop(key) for key in experts_name_cur[2::3]
+            state_dict.pop(key)
+            for key in experts_name_cur[order_mapping['up_proj']::3]
         ]
         w1 = torch.stack(gate_proj_weight)
         w3 = torch.stack(up_proj_weight)
@@ -79,6 +93,10 @@ def _merge_experts_weight(state_dict, expert_num_per_shard):
 
 
 def load_state_dict_into_model(model_to_load, pretrained_model_path):
+
+    model_name = type(model_to_load).__name__
+    order_mapping = ORDER_MAPPING[model_name]
+
     index_file = os.path.join(pretrained_model_path, WEIGHTS_INDEX_NAME)
     safe_index_file = os.path.join(pretrained_model_path,
                                    SAFE_WEIGHTS_INDEX_NAME)
@@ -111,7 +129,8 @@ def load_state_dict_into_model(model_to_load, pretrained_model_path):
                     f'{name} not in state_dict, loading {shard_file}')
                 new_shard = load_state_dict(shard_file, is_quantized=False)
                 state_dict.update(new_shard)
-                _merge_experts_weight(state_dict, expert_num_per_shard)
+                _merge_experts_weight(state_dict, expert_num_per_shard,
+                                      order_mapping)
             params_to_gather.append(param)
             param_names.append(name)
         if len(params_to_gather) > 0:
@@ -141,7 +160,8 @@ def load_state_dict_into_model(model_to_load, pretrained_model_path):
     return error_msgs
 
 
-def _get_origin_param_name(merged_param_name, expert_num_per_shard, is_w1w3):
+def _get_origin_param_name(merged_param_name, expert_num_per_shard, is_w1w3,
+                           param_name_mapping):
     split_name = merged_param_name.split('.experts.')
     shard_idx = re.findall(r'\d+', split_name[1])[0]
     shard_idx = int(shard_idx)
@@ -149,16 +169,19 @@ def _get_origin_param_name(merged_param_name, expert_num_per_shard, is_w1w3):
     expert_idx_begin = expert_num_per_shard * shard_idx
     for i in range(expert_num_per_shard):
         if is_w1w3:
+            gate_proj, up_proj = param_name_mapping[
+                'gate_proj'], param_name_mapping['up_proj']
             gate = split_name[
-                0] + f'.experts.{expert_idx_begin + i}.gate_proj.weight'
-            down = split_name[
-                0] + f'.experts.{expert_idx_begin + i}.up_proj.weight'
-            origin_param_names[i * 2] = gate
-            origin_param_names[i * 2 + 1] = down
-        else:
+                0] + f'.experts.{expert_idx_begin + i}.{gate_proj}.weight'
             up = split_name[
-                0] + f'.experts.{expert_idx_begin + i}.down_proj.weight'
-            origin_param_names[i] = up
+                0] + f'.experts.{expert_idx_begin + i}.{up_proj}.weight'
+            origin_param_names[i * 2] = gate
+            origin_param_names[i * 2 + 1] = up
+        else:
+            down_proj = param_name_mapping['down_proj']
+            down = split_name[
+                0] + f'.experts.{expert_idx_begin + i}.{down_proj}.weight'
+            origin_param_names[i] = down
     return origin_param_names
 
 
@@ -173,6 +196,10 @@ def _split_param(merged_param, is_w1w3):
 
 
 def get_origin_state_dict(state_dict, model):
+
+    model_name = type(model).__name__
+    param_name_mapping = PARAM_NAME_MAPPING[model_name]
+
     expert_num_per_shard = get_expert_num_per_shard(model)
     experts_param_name = [
         name for name in state_dict.keys() if '.experts.' in name
@@ -182,7 +209,8 @@ def get_origin_state_dict(state_dict, model):
         is_w1w3 = expert_param_name.split('.')[-1] == 'w1w3'
         origin_param_names = _get_origin_param_name(expert_param_name,
                                                     expert_num_per_shard,
-                                                    is_w1w3)
+                                                    is_w1w3,
+                                                    param_name_mapping)
         merged_param = state_dict.pop(expert_param_name)
         origin_params = _split_param(merged_param, is_w1w3)
         assert len(origin_param_names) == len(origin_params)
