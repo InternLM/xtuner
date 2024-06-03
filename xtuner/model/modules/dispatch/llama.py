@@ -3,8 +3,7 @@ import warnings
 from typing import Optional, Tuple
 
 import torch
-import torch.distributed as dist
-from mmengine import MessageHub
+from mmengine import MessageHub, dist
 from transformers.models.llama.modeling_llama import (apply_rotary_pos_emb,
                                                       repeat_kv)
 from transformers.utils import is_flash_attn_greater_or_equal_2_10

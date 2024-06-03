@@ -2,9 +2,8 @@
 from typing import Optional, Tuple
 
 import torch
-import torch.distributed as dist
 import torch.nn.functional as F
-from mmengine import MessageHub
+from mmengine import MessageHub, dist
 
 from .triton_kernels import apply_rotary_emb
 

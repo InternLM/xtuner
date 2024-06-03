@@ -10,21 +10,23 @@ from xtuner.utils import DEFAULT_PAD_TOKEN_INDEX, IGNORE_INDEX
 
 
 def preference_collate_fn(instances: Sequence[Dict],
-                      pad_index: int = DEFAULT_PAD_TOKEN_INDEX,
-                      return_hf_format: bool = False,
-                      use_varlen_attn: bool = False):
+                          pad_index: int = DEFAULT_PAD_TOKEN_INDEX,
+                          return_hf_format: bool = False,
+                          use_varlen_attn: bool = False):
     seq_parallel_world_size = get_sequence_parallel_world_size()
     ds_names = []
     if not use_varlen_attn:
         # split chosen and rejected into two instances
         splited_instances = []
         for d in instances:
-            splited_instances.append(
-                {'input_ids': d['chosen_ids'], 'labels': d['chosen_labels']}
-            )
-            splited_instances.append(
-                {'input_ids': d['rejected_ids'], 'labels': d['rejected_labels']}
-            )
+            splited_instances.append({
+                'input_ids': d['chosen_ids'],
+                'labels': d['chosen_labels']
+            })
+            splited_instances.append({
+                'input_ids': d['rejected_ids'],
+                'labels': d['rejected_labels']
+            })
             ds_names.append(d.get('ds_name', None))
         instances = splited_instances
 
@@ -41,7 +43,7 @@ def preference_collate_fn(instances: Sequence[Dict],
         if use_varlen_attn:
             cumulative_len.append(torch.IntTensor(example['cumulative_len']))
             position_ids.append(torch.LongTensor(example['position_ids']))
-            num_samples = ((len(example['cumulative_len'])-1)) // 2
+            num_samples = (len(example['cumulative_len']) - 1) // 2
             ds_names.extend(example.get('ds_names', [None] * num_samples))
 
     ori_length = [len(ids) for ids in input_ids]
