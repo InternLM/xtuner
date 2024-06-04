@@ -11,7 +11,7 @@ from mmengine.model import is_model_wrapper
 from mmengine.runner import FlexibleRunner
 
 from xtuner.registry import BUILDER
-from xtuner.utils import get_origin_state_dict
+from xtuner.utils import SUPPORT_MODELS, get_origin_state_dict
 
 DATA_BATCH = Optional[Union[dict, tuple, list]]
 
@@ -55,8 +55,8 @@ class HFCheckpointHook(Hook):
                 val = state_dict.pop(k)
                 state_dict[k[4:]] = val
 
-            model_name = llm.__class__.__name__.lower()
-            if 'deepseekv2' in model_name:
+            model_name = type(llm).__name__
+            if model_name in SUPPORT_MODELS:
                 print_log('recover the origin state_dict from merged one ...')
                 state_dict = get_origin_state_dict(state_dict, llm)
 

@@ -13,6 +13,11 @@ from transformers.modeling_utils import load_state_dict
 from transformers.utils import (SAFE_WEIGHTS_INDEX_NAME, WEIGHTS_INDEX_NAME,
                                 is_safetensors_available)
 
+SUPPORT_MODELS = (
+    'DeepseekV2ForCausalLM',
+    'MixtralForCausalLM',
+)
+
 ORDER_MAPPING = dict(
     DeepseekV2ForCausalLM=dict(down_proj=0, gate_proj=1, up_proj=2),
     MixtralForCausalLM=dict(down_proj=1, gate_proj=0, up_proj=2),
@@ -95,6 +100,10 @@ def _merge_experts_weight(state_dict, expert_num_per_shard, order_mapping):
 def load_state_dict_into_model(model_to_load, pretrained_model_path):
 
     model_name = type(model_to_load).__name__
+    if model_name not in SUPPORT_MODELS:
+        raise RuntimeError(
+            f'Only models in {SUPPORT_MODELS} may need to load pretrained '
+            f'weights via `load_state_dict_into_model`, but got {model_name}.')
     order_mapping = ORDER_MAPPING[model_name]
 
     index_file = os.path.join(pretrained_model_path, WEIGHTS_INDEX_NAME)
@@ -198,6 +207,10 @@ def _split_param(merged_param, is_w1w3):
 def get_origin_state_dict(state_dict, model):
 
     model_name = type(model).__name__
+    if model_name not in SUPPORT_MODELS:
+        raise RuntimeError(
+            f'Only models in {SUPPORT_MODELS} may need to convert state_dict '
+            f'via `get_origin_state_dict` interface, but got {model_name}.')
     param_name_mapping = PARAM_NAME_MAPPING[model_name]
 
     expert_num_per_shard = get_expert_num_per_shard(model)
