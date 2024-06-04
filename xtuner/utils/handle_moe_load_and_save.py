@@ -54,7 +54,7 @@ def _get_merged_param_name(origin_param_name, expert_num_per_shard):
 
 
 def _merge_experts_weight(state_dict, expert_num_per_shard, order_mapping):
-    experts_name = [key for key in state_dict.keys() if 'mlp.experts.' in key]
+    experts_name = [key for key in state_dict.keys() if 'experts.' in key]
     experts_name = sorted(experts_name, key=mix_sort)
     linear_num_per_expert = 3
     linear_num_per_shard = expert_num_per_shard * linear_num_per_expert

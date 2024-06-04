@@ -965,10 +965,10 @@ class MixtralSparseShardMoeBlock(nn.Module):
         self.gate = nn.Linear(self.hidden_dim, self.num_experts, bias=False)
 
         expert_in_one_shard = config.expert_in_one_shard
-        assert config.num_experts % expert_in_one_shard == 0, \
-                ('num_experts should be divisible by expert_in_one_shard, but got '
-                 f'num_experts = {config.num_experts} and expert_in_one_shard = {expert_in_one_shard}')
-        self.shard_num = config.num_experts // expert_in_one_shard
+        assert config.num_local_experts % expert_in_one_shard == 0, \
+                ('num_local_experts should be divisible by expert_in_one_shard, but got '
+                 f'num_local_experts = {config.num_local_experts} and expert_in_one_shard = {expert_in_one_shard}')
+        self.shard_num = config.num_local_experts // expert_in_one_shard
         self.expert_in_one_shard = expert_in_one_shard
         self.experts = nn.ModuleList([
             ExpertShard(config, self.expert_in_one_shard)
