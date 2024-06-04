@@ -949,7 +949,7 @@ class ExpertShard(nn.Module):
             current_hidden_states = out * routing_weights[top_x, idx, None]
             final_hidden_states.index_add_(
                 0, top_x, current_hidden_states.to(hidden_states.dtype))
-        return
+        return final_hidden_states
 
 
 class MixtralSparseShardMoeBlock(nn.Module):
@@ -1010,8 +1010,8 @@ class MixtralSparseShardMoeBlock(nn.Module):
             mask = expert_mask[shard_index *
                                self.expert_in_one_shard:(shard_index + 1) *
                                self.expert_in_one_shard]
-            self.experts[shard_index](hidden_states, mask, routing_weights,
-                                      final_hidden_states)
+            final_hidden_states = self.experts[shard_index](
+                hidden_states, mask, routing_weights, final_hidden_states)
 
         final_hidden_states = final_hidden_states.reshape(
             batch_size, sequence_length, hidden_dim)
