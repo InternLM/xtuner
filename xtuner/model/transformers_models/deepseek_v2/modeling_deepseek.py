@@ -554,7 +554,7 @@ class ExpertShard(nn.Module):
             expert_idx = i + self.expert_in_one_shard * self.shard_idx
             y[flat_topk_idx == expert_idx] = self.expert_forward(
                 hidden_states[flat_topk_idx == expert_idx], i)
-        return
+        return y
 
 
 class DeepseekV2MoEShard(nn.Module):
@@ -607,7 +607,7 @@ class DeepseekV2MoEShard(nn.Module):
         y = torch.empty_like(hidden_states)
         y_dtype = y.dtype
         for shard_index in range(self.shard_num):
-            self.experts[shard_index](hidden_states, flat_topk_idx, y)
+            y = self.experts[shard_index](hidden_states, flat_topk_idx, y)
         y = ((y.view(*topk_weight.shape, -1) *
               topk_weight.unsqueeze(-1)).sum(dim=1)).type(y_dtype)
         y = y.view(*orig_shape)
