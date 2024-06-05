@@ -1,25 +1,15 @@
 # DPO Authors: Rafael Rafailov, Archit Sharma, Eric Mitchell, Stefano Ermon, Christopher D. Manning, and Chelsea Finn 2023  # noqa
 # Copyright 2023 The HuggingFace Team. All rights reserved.
 # Copyright (c) OpenMMLab. All rights reserved.
-from collections import OrderedDict
 from copy import deepcopy
 
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 from mmengine import MessageHub
-from mmengine.config import Config, ConfigDict
-from mmengine.model import BaseModel
-from mmengine.runner import load_checkpoint
-from peft import get_peft_model, prepare_model_for_kbit_training
-from torch import nn
 from transformers.integrations import is_deepspeed_zero3_enabled
 
-from xtuner.registry import BUILDER
-from .modules import dispatch_modules
-from .utils import (LoadWoInit, find_all_linear_names,
-                    get_peft_model_state_dict, make_inputs_require_grad,
-                    traverse_dict)
+from .sft import SupervisedFinetune
 
 
 def create_reference_model(model):
@@ -39,7 +29,7 @@ def create_reference_model(model):
     return ref_model.eval()
 
 
-class DPO(BaseModel):
+class DPO(SupervisedFinetune):
     """A general class of DPO and its variants."""
 
     def __init__(self,
@@ -48,105 +38,15 @@ class DPO(BaseModel):
                  beta=0.1,
                  loss_type='sigmoid',
                  label_smoothing=0.0,
-                 lora=None,
-                 peft_model=None,
-                 use_activation_checkpointing=True,
-                 use_varlen_attn=False):
-        super().__init__()
-        with LoadWoInit():
-            self.llm = self._build_from_cfg_or_module(llm)
+                 **kwargs):
+        super().__init__(llm, **kwargs)
         self.ref_llm = ref_llm
         self.loss_type = loss_type
         self.label_smoothing = label_smoothing
-        self.llm.config.use_cache = False
         self.beta = beta
-        dispatch_modules(self.llm, use_varlen_attn=use_varlen_attn)
 
-        if use_activation_checkpointing:
-            # For backward compatibility
-            if hasattr(self.llm, 'enable_input_require_grads'):
-                self.llm.enable_input_require_grads()
-            else:
-                self.llm.get_input_embeddings().register_forward_hook(
-                    make_inputs_require_grad)
-
-            # enable gradient checkpointing for memory efficiency
-            self.gradient_checkpointing_enable()
-
-        if isinstance(lora, dict) or isinstance(lora, Config) or isinstance(
-                lora, ConfigDict):
-            self.lora = BUILDER.build(lora)
-        else:
-            self.lora = lora
-        self.peft_model = peft_model
-        self.use_lora = lora is not None
-        # TODO: a more feasible way to set ref_llm.
-        if self.use_lora:
-            self._prepare_for_lora(peft_model, use_activation_checkpointing)
-        else:
+        if not self.use_lora:
             self.ref_llm = create_reference_model(self.llm)
-
-        self._is_init = True
-        # Determines whether to calculate attention based on the
-        # seq_len dimension (use_varlen_attn = False) or the actual length of
-        # the sequence.
-        self.use_varlen_attn = use_varlen_attn
-
-    def gradient_checkpointing_enable(self):
-        self.activation_checkpointing_enable()
-
-    def activation_checkpointing_enable(self):
-        self.llm.gradient_checkpointing_enable()
-
-    def gradient_checkpointing_disable(self):
-        self.activation_checkpointing_disable()
-
-    def activation_checkpointing_disable(self):
-        self.llm.gradient_checkpointing_disable()
-
-    def _prepare_for_lora(self,
-                          peft_model=None,
-                          use_activation_checkpointing=True):
-        self.llm = prepare_model_for_kbit_training(
-            self.llm, use_activation_checkpointing)
-        if self.lora.target_modules is None:
-            modules = find_all_linear_names(self.llm)
-            self.lora.target_modules = modules
-
-        self.llm = get_peft_model(self.llm, self.lora)
-        if peft_model is not None:
-            _ = load_checkpoint(self, peft_model)
-
-    def init_weights(self):
-        pass
-
-    def _build_from_cfg_or_module(self, cfg_or_mod):
-        if isinstance(cfg_or_mod, nn.Module):
-            return cfg_or_mod
-        elif isinstance(cfg_or_mod, dict):
-            traverse_dict(cfg_or_mod)
-            return BUILDER.build(cfg_or_mod)
-        else:
-            raise NotImplementedError
-
-    def forward(self, data, data_samples=None, mode='loss'):
-        if mode == 'loss':
-            return self.compute_loss(data, data_samples)
-        elif mode == 'predict':
-            return self.predict(data, data_samples)
-        elif mode == 'tensor':
-            return self._forward(data, data_samples)
-        else:
-            raise NotImplementedError
-
-    def _forward(self, data, data_samples=None):
-        outputs = self.llm(**data)
-        return outputs
-
-    def predict(self, data, data_samples=None):
-        outputs = self.llm(**data)
-        logits_dict = [{'logits': logits} for logits in outputs.logits]
-        return logits_dict
 
     def _gather_masked_logits(self, logits, labels, mask):
         logits = torch.gather(
@@ -344,16 +244,3 @@ class DPO(BaseModel):
             'rejected_rewards': rejected_rewards
         }
         return loss_dict
-
-    def state_dict(self, *args, **kwargs):
-        state_dict = super().state_dict(*args, **kwargs)
-        if not self.use_lora:
-            return state_dict
-        to_return = get_peft_model_state_dict(self.llm, state_dict=state_dict)
-        return OrderedDict(to_return)
-
-    def __getattr__(self, name: str):
-        try:
-            return super().__getattr__(name)
-        except AttributeError:
-            return getattr(self.llm, name)
