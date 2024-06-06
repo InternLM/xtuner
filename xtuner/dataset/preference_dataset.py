@@ -165,7 +165,6 @@ class PreferenceDataset(Dataset):
         reward_token_id: int = -1,
         num_proc: int = 32,
     ) -> None:
-        self.tokenizer = tokenizer
         self.max_length = max_length
         assert is_dpo != is_reward, \
             'Only one of is_dpo and is_reward can be True'
