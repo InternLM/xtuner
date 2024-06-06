@@ -47,9 +47,13 @@ NPROC_PER_NODE=8 NNODES=8 PORT=29600 ADDR=$NODE_0_ADDR NODE_RANK=1 xtuner train 
 
 128 * A100 80G:
 
-|       Model        | Sequence Length | Use Varlen Attn | Sequence Parallel World Size | Tokens per Second |
-| :----------------: | :-------------: | :-------------: | :--------------------------: | :---------------: |
-|   deepseek v2 hf   |       16k       |      False      |              1               |        60         |
-| deepseek v2 XTuner |       16k       |      False      |              1               |    295 (4.9x)     |
-|   deepseek v2 hf   |       16k       |      True       |              1               |        70         |
-| deepseek v2 XTuner |       16k       |      True       |              1               |    450 (6.4x)     |
+|         Model          | Sequence Length | Use Varlen Attn | Sequence Parallel World Size | Tokens per Second |
+| :--------------------: | :-------------: | :-------------: | :--------------------------: | :---------------: |
+|     deepseek v2 hf     |       8k        |      False      |              1               |        60         |
+| **deepseek v2 XTuner** |     **8k**      |    **False**    |            **1**             |   **120 (2x)**    |
+|     deepseek v2 hf     |       8k        |      True       |              1               |        60         |
+| **deepseek v2 XTuner** |     **8k**      |    **True**     |            **1**             |  **130 (2.2x)**   |
+|     deepseek v2 hf     |       16k       |      False      |              1               |        OOM        |
+| **deepseek v2 XTuner** |     **16k**     |    **False**    |            **1**             |      **148**      |
+|     deepseek v2 hf     |       16k       |      True       |              1               |        95         |
+| **deepseek v2 XTuner** |     **16k**     |    **True**     |            **1**             |  **180 (1.9x)**   |
