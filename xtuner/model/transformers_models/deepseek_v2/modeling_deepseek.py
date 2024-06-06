@@ -520,8 +520,10 @@ class AddAuxiliaryLoss(torch.autograd.Function):
 
 class ExpertShard(nn.Module):
 
-    def __init__(self, hidden_dim, ffn_dim, shard_idx, expert_in_one_shard=4):
+    def __init__(self, config, shard_idx, expert_in_one_shard=10):
         super().__init__()
+        hidden_dim = config.hidden_size
+        ffn_dim = config.moe_intermediate_size
         self.w1w3 = nn.Parameter(
             torch.empty(expert_in_one_shard, ffn_dim * 2, hidden_dim))
         self.w2 = nn.Parameter(
@@ -581,8 +583,7 @@ class DeepseekV2MoEShard(nn.Module):
             self.shard_num = config.n_routed_experts // expert_in_one_shard
             self.expert_in_one_shard = expert_in_one_shard
             self.experts = nn.ModuleList([
-                ExpertShard(config.hidden_size, config.moe_intermediate_size,
-                            i, self.expert_in_one_shard)
+                ExpertShard(config, i, self.expert_in_one_shard)
                 for i in range(self.shard_num)
             ])
 
