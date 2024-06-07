@@ -142,9 +142,9 @@ class ORPO(SupervisedFinetune):
         losses = losses.mean()
         # skip nan loss
         if torch.isnan(chosen_nll_loss):
-            chosen_nll_loss = torch.zeros_like(chosen_nll_loss)
+            chosen_nll_loss = all_logits.mean() * 0
         if torch.isnan(losses):
-            losses = torch.zeros_like(losses)
+            losses = all_logits.mean() * 0
         loss = chosen_nll_loss - losses
 
         reward_acc = (chosen_rewards > rejected_rewards).float().mean()
