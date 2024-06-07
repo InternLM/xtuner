@@ -286,8 +286,13 @@ def internlm2_varlen_attn_forward(
 
     assert SUPPORT_FLASH2
     if use_varlen_atten:
-        attn_output = varlen_flash_attn(query_states, key_states, value_states,
-                                        cumulative_len, max_seqlen)
+        attn_output = varlen_flash_attn(
+            query_states,
+            key_states,
+            value_states,
+            cumulative_len,
+            max_seqlen,
+            training=self.training)
     else:
         # import ipdb; ipdb.set_trace()
         attn_output = flash_attn_wo_mask(

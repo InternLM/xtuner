@@ -395,7 +395,7 @@ def mistral_varlen_attn_forward(
             causal=causal,
             dropout_p=dropout_rate,
             window_size=window_size,
-            training=True)
+            training=self.training)
     else:
         attn_output = flash_attn_wo_mask(
             query_states,
@@ -404,7 +404,7 @@ def mistral_varlen_attn_forward(
             causal=causal,
             dropout_p=dropout_rate,
             window_size=window_size,
-            training=False)
+            training=self.training)
 
     # ---------------- flash attention forward end ------------------- #
 

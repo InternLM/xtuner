@@ -14,6 +14,10 @@ from torch import nn
 from transformers import AutoConfig, PreTrainedModel, PreTrainedTokenizer
 from transformers.integrations import is_deepspeed_zero3_enabled
 
+from xtuner.parallel.sequence import (gather_forward_split_backward,
+                                      get_sequence_parallel_group,
+                                      get_sequence_parallel_world_size,
+                                      split_for_sequence_parallel)
 from xtuner.registry import BUILDER
 from .modules import dispatch_modules
 from .modules.dispatch import SUPPORT_FLASH1, SUPPORT_FLASH2
@@ -285,9 +289,33 @@ class RewardModel(BaseModel):
         logits_dict = [{'logits': log} for log in logits]
         return logits_dict
 
+    @staticmethod
+    def _split_for_sequence_parallel(data):
+        # attention mask should not be split
+        ARGS_NEED_TO_SPLIT = ('input_ids', 'position_ids')
+        sp_group = get_sequence_parallel_group()
+        for key in ARGS_NEED_TO_SPLIT:
+            val = data.get(key, None)
+            if val is not None:
+                # `dim` is 1 as the shape of tensor is (bs, seq_len, ...)
+                data[key] = split_for_sequence_parallel(
+                    val, dim=1, sp_group=sp_group)
+        return data
+
     def compute_loss(self, data, labels=None):
+        if get_sequence_parallel_world_size() > 1:
+            data = self._split_for_sequence_parallel(data)
+
         hidden_states = self.llm(**data)[0]
         logits = self.v_head(hidden_states)
+
+        if get_sequence_parallel_world_size() > 1:
+            logits = gather_forward_split_backward(
+                logits,
+                dim=1,
+                sp_group=get_sequence_parallel_group(),
+                grad_scale='up')
+
         chosen_idx = torch.where(labels == 0)
         rejected_idx = torch.where(labels == 1)
         chosen_logits = logits[chosen_idx]

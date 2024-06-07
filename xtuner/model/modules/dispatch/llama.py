@@ -379,14 +379,15 @@ def llama_varlen_attn_forward(
             cumulative_len,
             max_seqlen,
             causal=True,
-            dropout_p=dropout_rate)
+            dropout_p=dropout_rate,
+            training=self.training)
     else:
         attn_output = flash_attn_wo_mask(
             query_states,
             key_states,
             value_states,
             causal=True,
-            training=False)
+            training=self.training)
 
     attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
     attn_output = self.o_proj(attn_output)
@@ -501,7 +502,8 @@ def llama_varlen_attn_forward_legacy(
             cumulative_len,
             max_seqlen,
             causal=True,
-            dropout_p=dropout_rate)
+            dropout_p=dropout_rate,
+            training=self.training)
     else:
         attn_output = flash_attn_wo_mask(
             query_states,
@@ -509,7 +511,7 @@ def llama_varlen_attn_forward_legacy(
             value_states,
             causal=True,
             dropout_p=dropout_rate,
-            training=False)
+            training=self.training)
 
     attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
 

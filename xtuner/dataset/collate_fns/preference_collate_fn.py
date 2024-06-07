@@ -5,6 +5,7 @@ import torch
 from torch.nn.utils.rnn import pad_sequence
 
 from xtuner.parallel.sequence import (get_sequence_parallel_world_size,
+                                      pad_cumulative_len_for_sequence_parallel,
                                       pad_for_sequence_parallel)
 from xtuner.utils import DEFAULT_PAD_TOKEN_INDEX, IGNORE_INDEX
 
@@ -57,7 +58,6 @@ def preference_collate_fn(instances: Sequence[Dict],
         labels = torch.stack(labels)
 
     if use_varlen_attn:
-        assert input_ids.size(1) % seq_parallel_world_size == 0
         attention_mask = None
         position_ids = torch.stack(position_ids, dim=0)
     else:
@@ -76,6 +76,9 @@ def preference_collate_fn(instances: Sequence[Dict],
         position_ids = pad_for_sequence_parallel(position_ids, 0)
         if attention_mask is not None:
             attention_mask = pad_for_sequence_parallel(attention_mask, 0)
+        if use_varlen_attn:
+            cumulative_len, attention_mask = pad_cumulative_len_for_sequence_parallel(
+                cumulative_len)
 
     if use_varlen_attn:
         max_seqlen = (
@@ -83,6 +86,7 @@ def preference_collate_fn(instances: Sequence[Dict],
             cumulative_len[0][:-1]).max().item()
         data_dict = {
             'input_ids': input_ids,
+            'attention_mask': attention_mask,
             'cumulative_len': cumulative_len,
             'position_ids': position_ids,
             'labels': labels,

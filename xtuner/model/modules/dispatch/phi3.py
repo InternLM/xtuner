@@ -430,7 +430,7 @@ def phi3_varlen_attn_forward(
             causal=causal,
             dropout_p=attn_dropout,
             window_size=window_size,
-            training=True)
+            training=self.training)
     else:
         attn_output = flash_attn_wo_mask(
             query_states,
@@ -439,7 +439,7 @@ def phi3_varlen_attn_forward(
             causal=causal,
             dropout_p=attn_dropout,
             window_size=window_size,
-            training=False)
+            training=self.training)
 
     # ---------------- flash attention forward end ------------------- #
 
