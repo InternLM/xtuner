@@ -1,7 +1,10 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import argparse
+import json
+import os
 import os.path as osp
 import shutil
+import sys
 import warnings
 
 import torch
@@ -14,6 +17,9 @@ from tqdm import tqdm
 from xtuner.configs import cfgs_name_path
 from xtuner.model.utils import guess_load_checkpoint
 from xtuner.registry import BUILDER
+
+sys.path.insert(0, os.getcwd())
+sys.path.append('./')
 
 
 def parse_args():
@@ -143,6 +149,37 @@ def main():
             print(f'Saving projector to {projector_path}')
             model.projector.save_pretrained(
                 projector_path, max_shard_size=args.max_shard_size)
+    elif 'Reward' in model_name:
+        from modeling_reward.modeling_internlm2 import InternLM2ForRewardModel
+        from transformers.modeling_utils import no_init_weights
+        print(f'Saving LLM tokenizer to {args.save_dir}')
+        tokenizer = BUILDER.build(cfg.tokenizer)
+        tokenizer.save_pretrained(args.save_dir)
+
+        print(f'Saving Reward Model to {args.save_dir}')
+        hf_cfg = model.llm.config
+        hf_cfg.reward_token_id = model.reward_token_id if \
+            model.reward_token_id is not None else cfg.reward_token_id
+        if not args.fp32:
+            dtype = torch.float16
+        else:
+            dtype = torch.float32
+        with no_init_weights():
+            reward_model = InternLM2ForRewardModel._from_config(
+                hf_cfg, torch_dtype=dtype)
+        reward_model.model.load_state_dict(model.llm.state_dict())
+        reward_model.v_head.load_state_dict(model.v_head.state_dict())
+        reward_model.save_pretrained(
+            args.save_dir, max_shard_size=args.max_shard_size)
+        # fix auto_map in config
+        with open(os.path.join(args.save_dir, 'config.json')) as fp:
+            config_dict = json.load(fp)
+        config_dict['auto_map'][
+            'AutoModel'] = 'modeling_internlm2.InternLM2ForRewardModel'
+        config_dict['auto_map'].pop('AutoModelForCausalLM', None)
+        with open(os.path.join(args.save_dir, 'config.json'), 'w') as fp:
+            json.dump(config_dict, fp, indent=2)
+
     else:
         llm_path = args.save_dir
         if 'PeftModel' in model.llm.__class__.__name__:
