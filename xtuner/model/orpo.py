@@ -7,6 +7,10 @@ import torch.nn.functional as F
 from mmengine import MessageHub
 from torch import nn
 
+from xtuner.parallel.sequence import (gather_forward_split_backward,
+                                      get_sequence_parallel_group,
+                                      get_sequence_parallel_world_size,
+                                      split_for_sequence_parallel)
 from .sft import SupervisedFinetune
 
 
@@ -45,20 +49,24 @@ class ORPO(SupervisedFinetune):
         rejected_logps = all_logps[1::2]
         return chosen_logps, rejected_logps
 
-    def get_var_len_atten_logps(
-        self,
-        all_logits,
-        average_log_prob,
-        labels,
-        loss_mask,
-        cu_seqlens,
-    ):
+    def get_var_len_atten_logps(self, all_logits, average_log_prob, labels,
+                                loss_mask, cu_seqlens, attention_mask):
         masked_logps = self._gather_masked_logits(all_logits, labels,
                                                   loss_mask)
         seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
         # unpack sequence
         unpacked_logps = torch.split(masked_logps, seqlens, dim=1)
         unpacked_mask = torch.split(loss_mask, seqlens, dim=1)
+
+        if attention_mask is not None:
+            # It indicate that we pad the original sequence, labels,
+            # position_ids and cumulative_len for sequence parallel if the
+            # attention_mask is not None.
+            # We then need to remove the padded segments.
+            assert False in attention_mask
+            unpacked_logps = unpacked_logps[:-1]
+            unpacked_mask = unpacked_mask[:-1]
+            assert len(unpacked_logps) % 2 == 0
 
         def compute_logps(logps, mask, idx):
             logp = logps[idx].sum(-1)
@@ -109,8 +117,32 @@ class ORPO(SupervisedFinetune):
         return losses, chosen_rewards, rejected_rewards, torch.mean(
             ratio), torch.mean(log_odds)
 
+    @staticmethod
+    def _split_for_sequence_parallel(data):
+        # attention mask should not be split
+        ARGS_NEED_TO_SPLIT = ('input_ids', 'position_ids')
+        sp_group = get_sequence_parallel_group()
+        for key in ARGS_NEED_TO_SPLIT:
+            val = data.get(key, None)
+            if val is not None:
+                # `dim` is 1 as the shape of tensor is (bs, seq_len, ...)
+                data[key] = split_for_sequence_parallel(
+                    val, dim=1, sp_group=sp_group)
+        return data
+
     def compute_loss(self, data, data_samples=None):
+        # labels = data.pop('labels')
+
+        if get_sequence_parallel_world_size() > 1:
+            data = self._split_for_sequence_parallel(data)
+
         all_logits = self.llm(**data).logits
+        if get_sequence_parallel_world_size() > 1:
+            all_logits = gather_forward_split_backward(
+                all_logits,
+                dim=1,
+                sp_group=get_sequence_parallel_group(),
+                grad_scale='up')
 
         if not self.use_varlen_attn:
             chosen_nll_loss = self.cross_entropy_loss(
@@ -125,10 +157,26 @@ class ORPO(SupervisedFinetune):
             rank = dist.get_rank()
             cu_seqlens = message_hub.get_info(f'cumulative_len_rank_{rank}')
             seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
-            chosen_logits = torch.split(all_logits, seqlens, dim=1)[::2]
+
+            attention_mask = data['attention_mask']
+            if attention_mask is not None:
+                # It indicate that we pad the original sequence, labels,
+                # position_ids and cumulative_len for sequence parallel if the
+                # attention_mask is not None.
+                # We then need to remove the padded segments.
+                logits = torch.split(all_logits, seqlens, dim=1)[:-1]
+                assert len(logits) % 2 == 0
+                chosen_logits = logits[::2]
+                labels = torch.split(
+                    data['labels'].clone(), seqlens, dim=1)[:-1]
+                assert len(labels) % 2 == 0
+                chosen_labels = labels[::2]
+            else:
+                chosen_logits = torch.split(all_logits, seqlens, dim=1)[::2]
+                chosen_labels = torch.split(
+                    data['labels'].clone(), seqlens, dim=1)[::2]
+
             chosen_logits = torch.cat(chosen_logits, dim=1)
-            chosen_labels = torch.split(
-                data['labels'].clone(), seqlens, dim=1)[::2]
             chosen_labels = torch.cat(chosen_labels, dim=1)
             chosen_nll_loss = self.cross_entropy_loss(chosen_logits,
                                                       chosen_labels)
@@ -136,7 +184,8 @@ class ORPO(SupervisedFinetune):
             labels[labels == -100] = 0
             loss_mask = labels != 0
             chosen_logps, rejected_logps = self.get_var_len_atten_logps(
-                all_logits, True, labels, loss_mask, cu_seqlens)
+                all_logits, True, labels, loss_mask, cu_seqlens,
+                attention_mask)
         (losses, chosen_rewards, rejected_rewards, log_odds_ratio,
          log_odds_chosen) = self.odds_ratio_loss(chosen_logps, rejected_logps)
         losses = losses.mean()
