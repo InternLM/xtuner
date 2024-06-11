@@ -13,6 +13,7 @@ from xtuner.dataset.preference_dataset import (build_preference_dataset,
 from xtuner.engine.hooks import VarlenAttnArgsToMessageHubHook
 from xtuner.engine.runner import TrainLoop
 from xtuner.model.reward import RewardModel
+from xtuner.parallel.sequence import SequenceParallelSampler
 
 #######################################################################
 #                          PART 1  Settings                           #
@@ -28,9 +29,13 @@ penalty_type = 'log_barrier'
 max_length = 2048
 max_packed_length = max_length * 2
 
+# parallel
+sequence_parallel_size = 1
+
 # Scheduler & Optimizer
 batch_size = 1  # per_device
 accumulative_counts = 16
+accumulative_counts *= sequence_parallel_size
 dataloader_num_workers = 0
 max_epochs = 1  # reward model should not be trained for more than 1 epoch to avoid overfitting  # noqa: E501
 optim_type = AdamW
@@ -70,6 +75,9 @@ model = dict(
 #######################################################################
 #                      PART 3  Dataset & Dataloader                   #
 #######################################################################
+sampler = SequenceParallelSampler \
+    if sequence_parallel_size > 1 else DefaultSampler
+
 train_dataset = dict(
     type=build_preference_dataset,
     dataset=dict(
@@ -94,7 +102,7 @@ train_dataloader = dict(
     batch_size=batch_size,
     num_workers=dataloader_num_workers,
     dataset=train_dataset,
-    sampler=dict(type=DefaultSampler, shuffle=True),
+    sampler=dict(type=sampler, shuffle=True),
     collate_fn=dict(
         type=preference_collate_fn, use_varlen_attn=use_varlen_attn))
 
