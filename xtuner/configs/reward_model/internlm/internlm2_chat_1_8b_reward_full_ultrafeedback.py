@@ -21,7 +21,7 @@ from xtuner.model.reward import RewardModel
 # Model
 pretrained_model_name_or_path = 'internlm/internlm2-chat-1_8b-sft'
 use_varlen_attn = False
-reward_token_id = 92527
+reward_token_id = 92527  # use [UNUSED_TOKEN_130] as reward token
 loss_type = 'focal'
 penalty_type = 'log_barrier'
 
