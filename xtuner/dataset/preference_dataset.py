@@ -333,7 +333,6 @@ def build_preference_dataset(
     use_varlen_attn: bool = False,
     max_packed_length: int = 16384,
     shuffle_before_pack: bool = True,
-    seed: int = 42,
 ) -> Dataset:
     using_dist = dist.is_available() and dist.is_initialized()
     tokenized_ds = None
@@ -361,7 +360,6 @@ def build_preference_dataset(
                 dataset=tokenized_ds,
                 max_packed_length=max_packed_length,
                 shuffle_before_pack=shuffle_before_pack,
-                seed=seed,
             )
     tokenized_ds = broad_cast_dataset(tokenized_ds)
     return tokenized_ds
