@@ -3,9 +3,9 @@ import warnings
 from typing import Optional, Tuple
 
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 from einops import rearrange
-import torch.distributed as dist
 from mmengine import MessageHub
 
 from .attention import (SUPPORT_FLASH2, flash_attn_w_mask, flash_attn_wo_mask,

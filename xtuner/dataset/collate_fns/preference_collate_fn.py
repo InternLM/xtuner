@@ -77,8 +77,8 @@ def preference_collate_fn(instances: Sequence[Dict],
         if attention_mask is not None:
             attention_mask = pad_for_sequence_parallel(attention_mask, 0)
         if use_varlen_attn:
-            cumulative_len, attention_mask = pad_cumulative_len_for_sequence_parallel(
-                cumulative_len)
+            (cumulative_len, attention_mask
+             ) = pad_cumulative_len_for_sequence_parallel(cumulative_len)
 
     if use_varlen_attn:
         max_seqlen = (
