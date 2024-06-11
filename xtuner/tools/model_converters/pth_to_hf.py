@@ -13,6 +13,9 @@ from accelerate.utils import set_module_tensor_to_device
 from mmengine.config import Config, DictAction
 from mmengine.fileio import PetrelBackend, get_file_backend
 from tqdm import tqdm
+from transformers import AutoModelForSequenceClassification
+from transformers.dynamic_module_utils import get_class_from_dynamic_module
+from transformers.modeling_utils import no_init_weights
 
 from xtuner.configs import cfgs_name_path
 from xtuner.model.utils import guess_load_checkpoint
@@ -150,36 +153,66 @@ def main():
             model.projector.save_pretrained(
                 projector_path, max_shard_size=args.max_shard_size)
     elif 'Reward' in model_name:
-        from modeling_reward.modeling_internlm2 import InternLM2ForRewardModel
-        from transformers.modeling_utils import no_init_weights
         print(f'Saving LLM tokenizer to {args.save_dir}')
         tokenizer = BUILDER.build(cfg.tokenizer)
         tokenizer.save_pretrained(args.save_dir)
 
-        print(f'Saving Reward Model to {args.save_dir}')
-        hf_cfg = model.llm.config
-        hf_cfg.reward_token_id = model.reward_token_id if \
-            model.reward_token_id is not None else cfg.reward_token_id
-        if not args.fp32:
-            dtype = torch.float16
+        if 'PeftModel' in model.llm.__class__.__name__:
+            # merge adapter
+            model.llm = model.llm.merge_and_unload()
+        if 'InternLM2' in model.llm.__class__.__name__:
+            from modeling_internlm2_reward.modeling_internlm2 import \
+                InternLM2ForRewardModel
+            print(f'Saving Reward Model to {args.save_dir}')
+            hf_cfg = model.llm.config
+            hf_cfg.reward_token_id = model.reward_token_id if \
+                model.reward_token_id is not None else cfg.reward_token_id
+            if not args.fp32:
+                dtype = torch.float16
+            else:
+                dtype = torch.float32
+            with no_init_weights():
+                reward_model = InternLM2ForRewardModel._from_config(
+                    hf_cfg, torch_dtype=dtype)
+            reward_model.model.load_state_dict(model.llm.state_dict())
+            reward_model.v_head.load_state_dict(model.v_head.state_dict())
+            reward_model.save_pretrained(
+                args.save_dir, max_shard_size=args.max_shard_size)
+            # fix auto_map in config
+            with open(os.path.join(args.save_dir, 'config.json')) as fp:
+                config_dict = json.load(fp)
+            config_dict['auto_map'][
+                'AutoModel'] = 'modeling_internlm2.InternLM2ForRewardModel'
+            config_dict['auto_map'].pop('AutoModelForCausalLM', None)
+            with open(os.path.join(args.save_dir, 'config.json'), 'w') as fp:
+                json.dump(config_dict, fp, indent=2)
         else:
-            dtype = torch.float32
-        with no_init_weights():
-            reward_model = InternLM2ForRewardModel._from_config(
-                hf_cfg, torch_dtype=dtype)
-        reward_model.model.load_state_dict(model.llm.state_dict())
-        reward_model.v_head.load_state_dict(model.v_head.state_dict())
-        reward_model.save_pretrained(
-            args.save_dir, max_shard_size=args.max_shard_size)
-        # fix auto_map in config
-        with open(os.path.join(args.save_dir, 'config.json')) as fp:
-            config_dict = json.load(fp)
-        config_dict['auto_map'][
-            'AutoModel'] = 'modeling_internlm2.InternLM2ForRewardModel'
-        config_dict['auto_map'].pop('AutoModelForCausalLM', None)
-        with open(os.path.join(args.save_dir, 'config.json'), 'w') as fp:
-            json.dump(config_dict, fp, indent=2)
+            warnings.warn(
+                f'The pretrained model type: {model.llm.__class__.__name__} '
+                'has no reward model class defined. Use '
+                'the SequenceClassification instead.')
 
+            hf_cfg = model.llm.config
+            try:
+                with no_init_weights():
+                    reward_model = \
+                        AutoModelForSequenceClassification.from_config(hf_cfg)
+            except Exception as e:
+                warnings.warn(f'Cannot find SequenceClassification class '
+                              f'from transformers: {e}, \n'
+                              'try to find it in the dynamic module.')
+                module_file, causal_model_name = hf_cfg.auto_map[
+                    'AutoModelForCausalLM'].split('.')
+                seqcls_model_name = causal_model_name.split(
+                    'For')[0] + 'ForSequenceClassification'
+                seqcls_class = get_class_from_dynamic_module(
+                    f'{module_file}.{seqcls_model_name}', model_name)
+                with no_init_weights():
+                    reward_model = seqcls_class(hf_cfg)
+            reward_model.model.load_state_dict(model.llm.state_dict())
+            reward_model.v_head.load_state_dict(model.v_head.state_dict())
+            reward_model.save_pretrained(
+                args.save_dir, max_shard_size=args.max_shard_size)
     else:
         llm_path = args.save_dir
         if 'PeftModel' in model.llm.__class__.__name__:
