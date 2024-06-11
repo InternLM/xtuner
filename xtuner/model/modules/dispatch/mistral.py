@@ -5,7 +5,8 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
-from mmengine import MessageHub, dist
+import torch.distributed as dist
+from mmengine import MessageHub
 from transformers.cache_utils import Cache
 from transformers.models.mistral.modeling_mistral import (apply_rotary_pos_emb,
                                                           repeat_kv)

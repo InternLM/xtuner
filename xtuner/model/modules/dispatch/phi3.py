@@ -3,7 +3,8 @@ import warnings
 from typing import Optional, Tuple
 
 import torch
-from mmengine import MessageHub, dist
+import torch.distributed as dist
+from mmengine import MessageHub
 
 from xtuner.parallel.sequence import (get_sequence_parallel_world_size,
                                       post_process_for_sequence_parallel_attn,

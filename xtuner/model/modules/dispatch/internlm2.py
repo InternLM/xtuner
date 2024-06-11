@@ -5,7 +5,8 @@ from typing import Optional, Tuple
 import torch
 import torch.nn.functional as F
 from einops import rearrange
-from mmengine import MessageHub, dist
+import torch.distributed as dist
+from mmengine import MessageHub
 
 from .attention import (SUPPORT_FLASH2, flash_attn_w_mask, flash_attn_wo_mask,
                         varlen_flash_attn)
@@ -183,7 +184,6 @@ def internlm2_attn_forward(
         causal = self.is_causal and q_len != 1
 
         if attention_mask is not None:
-            # import ipdb; ipdb.set_trace()
             attn_output = flash_attn_w_mask(
                 query_states,
                 key_states,
@@ -192,7 +192,6 @@ def internlm2_attn_forward(
                 causal=causal,
                 training=self.training)
         else:
-            # import ipdb; ipdb.set_trace()
             attn_output = flash_attn_wo_mask(
                 query_states,
                 key_states,
@@ -294,7 +293,6 @@ def internlm2_varlen_attn_forward(
             max_seqlen,
             training=self.training)
     else:
-        # import ipdb; ipdb.set_trace()
         attn_output = flash_attn_wo_mask(
             query_states,
             key_states,
