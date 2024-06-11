@@ -131,7 +131,7 @@ class ORPO(SupervisedFinetune):
         return data
 
     def compute_loss(self, data, data_samples=None):
-        # labels = data.pop('labels')
+        labels_ori = data.pop('labels')
 
         if get_sequence_parallel_world_size() > 1:
             data = self._split_for_sequence_parallel(data)
@@ -145,9 +145,9 @@ class ORPO(SupervisedFinetune):
                 grad_scale='up')
 
         if not self.use_varlen_attn:
-            chosen_nll_loss = self.cross_entropy_loss(
-                all_logits[::2], data['labels'].clone()[::2])
-            labels = data['labels'].clone()
+            chosen_nll_loss = self.cross_entropy_loss(all_logits[::2],
+                                                      labels_ori.clone()[::2])
+            labels = labels_ori.clone()
             labels[labels == -100] = 0
             loss_mask = labels != 0
             chosen_logps, rejected_logps = self.get_logps(
@@ -167,20 +167,19 @@ class ORPO(SupervisedFinetune):
                 logits = torch.split(all_logits, seqlens, dim=1)[:-1]
                 assert len(logits) % 2 == 0
                 chosen_logits = logits[::2]
-                labels = torch.split(
-                    data['labels'].clone(), seqlens, dim=1)[:-1]
+                labels = torch.split(labels_ori.clone(), seqlens, dim=1)[:-1]
                 assert len(labels) % 2 == 0
                 chosen_labels = labels[::2]
             else:
                 chosen_logits = torch.split(all_logits, seqlens, dim=1)[::2]
                 chosen_labels = torch.split(
-                    data['labels'].clone(), seqlens, dim=1)[::2]
+                    labels_ori.clone(), seqlens, dim=1)[::2]
 
             chosen_logits = torch.cat(chosen_logits, dim=1)
             chosen_labels = torch.cat(chosen_labels, dim=1)
             chosen_nll_loss = self.cross_entropy_loss(chosen_logits,
                                                       chosen_labels)
-            labels = data['labels'].clone()
+            labels = labels_ori.clone()
             labels[labels == -100] = 0
             loss_mask = labels != 0
             chosen_logps, rejected_logps = self.get_var_len_atten_logps(
