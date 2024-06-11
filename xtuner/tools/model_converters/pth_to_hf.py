@@ -1,10 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import argparse
-import json
-import os
 import os.path as osp
 import shutil
-import sys
 import warnings
 
 from accelerate import init_empty_weights
@@ -14,16 +11,10 @@ from mmengine.config import Config, DictAction
 from mmengine.fileio import PetrelBackend, get_file_backend
 from mmengine.utils import mkdir_or_exist
 from tqdm import tqdm
-from transformers import AutoModelForSequenceClassification
-from transformers.dynamic_module_utils import get_class_from_dynamic_module
-from transformers.modeling_utils import no_init_weights
 
 from xtuner.configs import cfgs_name_path
 from xtuner.model.utils import guess_load_checkpoint
 from xtuner.registry import BUILDER
-
-sys.path.insert(0, os.getcwd())
-sys.path.append('./')
 
 
 def parse_args():
