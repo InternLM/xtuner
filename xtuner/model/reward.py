@@ -1,5 +1,8 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import json
 import math
+import os
+import warnings
 from collections import OrderedDict
 from contextlib import nullcontext
 
@@ -11,8 +14,11 @@ from mmengine.model import BaseModel
 from mmengine.runner import load_checkpoint
 from peft import get_peft_model, prepare_model_for_kbit_training
 from torch import nn
-from transformers import AutoConfig, PreTrainedModel, PreTrainedTokenizer
+from transformers import (AutoConfig, AutoModelForSequenceClassification,
+                          PreTrainedModel, PreTrainedTokenizer)
+from transformers.dynamic_module_utils import get_class_from_dynamic_module
 from transformers.integrations import is_deepspeed_zero3_enabled
+from transformers.modeling_utils import no_init_weights
 
 from xtuner.parallel.sequence import (gather_forward_split_backward,
                                       get_sequence_parallel_group,
@@ -414,3 +420,68 @@ class RewardModel(BaseModel):
             return super().__getattr__(name)
         except AttributeError:
             return getattr(self.llm, name)
+
+    def to_hf(self,
+              cfg,
+              save_dir,
+              fp32=False,
+              save_pretrained_kwargs={},
+              **kwargs):
+        print(f'Saving LLM tokenizer to {save_dir}')
+        tokenizer = BUILDER.build(cfg.tokenizer)
+        tokenizer.save_pretrained(save_dir)
+
+        if 'PeftModel' in self.llm.__class__.__name__:
+            # merge adapter
+            self.llm = self.llm.merge_and_unload()
+        if 'InternLM2' in self.llm.__class__.__name__:
+            from xtuner.tools.model_converters.modeling_internlm2_reward.modeling_internlm2 import \
+                InternLM2ForRewardModel  # noqa
+            print(f'Saving Reward Model to {save_dir}')
+            hf_cfg = self.llm.config
+            hf_cfg.reward_token_id = self.reward_token_id if \
+                self.reward_token_id is not None else cfg.reward_token_id
+            if not fp32:
+                dtype = torch.float16
+            else:
+                dtype = torch.float32
+            with no_init_weights():
+                reward_model = InternLM2ForRewardModel._from_config(
+                    hf_cfg, torch_dtype=dtype)
+            reward_model.model.load_state_dict(self.llm.state_dict())
+            reward_model.v_head.load_state_dict(self.v_head.state_dict())
+            reward_model.save_pretrained(save_dir, **save_pretrained_kwargs)
+            # fix auto_map in config
+            with open(os.path.join(save_dir, 'config.json')) as fp:
+                config_dict = json.load(fp)
+            config_dict['auto_map'][
+                'AutoModel'] = 'modeling_internlm2.InternLM2ForRewardModel'
+            config_dict['auto_map'].pop('AutoModelForCausalLM', None)
+            with open(os.path.join(save_dir, 'config.json'), 'w') as fp:
+                json.dump(config_dict, fp, indent=2)
+        else:
+            warnings.warn(
+                f'The pretrained model type: {self.llm.__class__.__name__} '
+                'has no reward model class defined. Use '
+                'the SequenceClassification instead.')
+
+            hf_cfg = self.llm.config
+            try:
+                with no_init_weights():
+                    reward_model = \
+                        AutoModelForSequenceClassification.from_config(hf_cfg)
+            except Exception as e:
+                warnings.warn(f'Cannot find SequenceClassification class '
+                              f'from transformers: {e}, \n'
+                              'try to find it in the dynamic module.')
+                module_file, causal_model_name = hf_cfg.auto_map[
+                    'AutoModelForCausalLM'].split('.')
+                seqcls_model_name = causal_model_name.split(
+                    'For')[0] + 'ForSequenceClassification'
+                seqcls_class = get_class_from_dynamic_module(
+                    f'{module_file}.{seqcls_model_name}', hf_cfg._name_or_path)
+                with no_init_weights():
+                    reward_model = seqcls_class(hf_cfg)
+            reward_model.model.load_state_dict(self.llm.state_dict())
+            reward_model.v_head.load_state_dict(self.v_head.state_dict())
+            reward_model.save_pretrained(save_dir, **save_pretrained_kwargs)
