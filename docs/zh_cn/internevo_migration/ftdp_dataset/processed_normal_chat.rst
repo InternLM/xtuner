@@ -1,23 +1,28 @@
 .. _case3:
 
-使用 Processed 普通对话数据集训任意模型
+Processed 普通对话数据集
 =======================================
+
+.. warning::
+   非 FTDP（一款闭源数据处理工具） 用户跳过此文档
 
 使用尚未 token 化的 ftdp
 数据进行训练，保持待训练模型的对话模板不变，且不需要进行离线处理的场景。
 
-Step 1, 导出模板 config 文件
+步骤 1：导出模板 config 文件
 ----------------------------
 
 XTuner 中目前提供了训练 Internlm2 的模板 config，使用命令：
 
-.. code::
+.. code-block:: console
 
-   xtuner copy-cfg internlm2_7b_w_untokenized_dataset .
+   $ xtuner copy-cfg internlm2_7b_w_untokenized_dataset .
 
-可将训练 Internlm2 的模板 config 导出至当前目录下。
+.. note::
+   当前目录下会有一个名为 ``internlm2_7b_w_untokenized_dataset_copy.py`` 的新文件
 
-Step 2, 修改模板 config 文件
+
+步骤 2：修改模板 config 文件
 ----------------------------
 
 修改模板 config 文件中的训练数据路径为真实数据路径，路径中的所有以
@@ -44,7 +49,7 @@ Step 2, 修改模板 config 文件
 
 .. _step-3-获取数据顺序-可选）:
 
-Step 3, 获取数据顺序 （可选）
+步骤 3：获取数据顺序 （可选）
 -----------------------------
 
 训练数据的提供顺序可能会对模型的最终训练成果产生影响。鉴于不同集群中通过
@@ -54,27 +59,28 @@ Step 3, 获取数据顺序 （可选）
 
 运行下面的代码可获取数据顺序，并存为 txt 文件：
 
-.. code::
+.. code-block:: console
 
-   python xtuner/tools/get_data_order.py \
-       --data-folder /path/to/untokenized/data \
-       --save-folder /folder/to/save/data/order \
-       --file-type ${file_type}
+   $ python xtuner/tools/get_data_order.py \
+   $    --data-folder /path/to/tokenized/data \
+   $    --save-folder /folder/to/save/data/order \
+   $    --file-type ${file_type}
 
-其中，\ ``--file-type ${file_type}`` 表示需要统计所有以 ``${file_type}``
-为文件名后缀的文件的顺序。
+.. tip::
+   ``--file-type ${file_type}`` 表示需要统计所有以 ``${file_type}``
+   为文件名后缀的文件的顺序。
 
-例如，需要获取 ``/path/to/untokenized/data`` 路径下所有以 ``.json``
-结尾的文件的顺序，并保存在当前路径下，那么上述命令需要改为：
+   例如，需要获取 ``/path/to/tokenized/data`` 路径下所有以 ``.bin``
+   结尾的文件的顺序，并保存在当前路径下，那么上述命令需要改为：
 
-.. code::
+   .. code-block:: console
 
-   python xtuner/tools/get_data_order.py \
-       --data-folder /path/to/untokenized/data \
-       --save-folder . \
-       --file-type .json
+      $ python xtuner/tools/get_data_order.py \
+      $    --data-folder /path/to/tokenized/data \
+      $    --save-folder . \
+      $    --file-type .bin
 
-同时，需要进一步修改 Step 2 中的 Config 文件，并设置数据顺序文件路径：
+获得数据顺序文件后，还需要在 config 中设置数据顺序文件路径：
 
 .. code:: diff
 
@@ -90,26 +96,26 @@ Step 3, 获取数据顺序 （可选）
    +       data_order_path='/folder/to/save/data/order/'+'data_order.txt',
            folder=dataset_folder,
            min_length=0,
-   -       file_type='.bin'  # 指定 data_order_path 后，file_type 参数就不需要设置了
+           file_type='.bin'
        ),
        packed_length=max_length,
        seed=1024)
 
-Step 4, 启动训练
+步骤 4：启动训练
 ----------------
 
 在 slurm 集群调度系统中可以通过以下命令启动训练：
 
-.. code::
+.. code-block:: console
 
-   srun ${SRUN_ARGS} xtuner train internlm2_7b_w_untokenized_dataset_copy.py --launcher slurm --deepspeed deepspeed_zero1
+   $ srun ${SRUN_ARGS} xtuner train internlm2_7b_w_untokenized_dataset_copy.py --launcher slurm --deepspeed deepspeed_zero1
 
 若出现 OOM 现象，可尝试使用 zero2 或 zero3。以下命令可以使用 zero 3
 显存优化策略进行训练：
 
-.. code::
+.. code-block:: console
 
-   srun ${SRUN_ARGS} xtuner train internlm2_7b_w_tokenized_dataset_copy.py --launcher slurm --deepspeed deepspeed_zero3
+   $ srun ${SRUN_ARGS} xtuner train internlm2_7b_w_tokenized_dataset_copy.py --launcher slurm --deepspeed deepspeed_zero3
 
 在阿里云 DLC 中可通过以下命令启动训练：
 
@@ -149,7 +155,7 @@ Step 4, 启动训练
        --deepspeed deepspeed_zero1 \
        --work-dir work_dirs/${EXP_NAME}
 
-Step 5, 转模型
+步骤 5：转模型
 --------------
 
 deepspeed 转 hf：

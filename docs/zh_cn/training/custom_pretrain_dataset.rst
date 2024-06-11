@@ -1,4 +1,5 @@
-使用自定义的预训练数据集训练 (LLM)
+==================================
+自定义预训练数据集 (LLM)
 ==================================
 
 XTuner 支持使用自定义数据集进行增量预训练，为便于介绍，本节以
@@ -6,7 +7,7 @@ XTuner 支持使用自定义数据集进行增量预训练，为便于介绍，�
 配置文件为基础进行介绍。
 
 数据准备
---------
+=================
 
 用户若要在进行预训练，则需要将自定义的数据处理为以下格式：
 
@@ -22,19 +23,19 @@ XTuner 支持使用自定义数据集进行增量预训练，为便于介绍，�
      ...
    ]
 
-小贴士
-
--  每条 ``text`` 数据不要太长（分词个数应小于
+.. tip::
+   每条 ``text`` 数据不要太长（分词个数应小于
    ``max_length``\ ），以避免在数据处理阶段被截断。
 
--  为保证数据上下文的一致性，请确保长文本数据在被切分为多个 ``text``
+.. tip::
+   为保证数据上下文的一致性，请确保长文本数据在被切分为多个 ``text``
    后，json 列表的顺序与实际上下文顺序一致。
 
 训练
-----
+===============
 
-Step 1, 导出 config
-~~~~~~~~~~~~~~~~~~~
+步骤 1 ：导出 config
+-------------------------------
 
 ``xtuner/configs/custom_dataset/pretrain/`` 目录下有所有 XTuner
 支持的模型在自定义数据集下执行预训练的模板 config。可以通过
@@ -45,15 +46,16 @@ Step 1, 导出 config
 可以通过以下命令将 ``internlm2_7b_full_custom_pretrain_e1.py``
 导出至当前目录下：
 
-.. code::
+.. code:: console
 
-   xtuner copy-cfg internlm2_7b_full_custom_pretrain_e1 .
+   $ xtuner copy-cfg internlm2_7b_full_custom_pretrain_e1 .
 
-当前目录下会存在一个新 config
-``internlm2_7b_full_custom_pretrain_e1_copy.py`` 。
+.. note::
+   当前目录下会存在一个新 config
+   ``internlm2_7b_full_custom_pretrain_e1_copy.py`` 。
 
-Step 2, 修改 config
-~~~~~~~~~~~~~~~~~~~
+步骤 2 ：修改 config
+---------------------------------
 
 首先，需要修改数据集文件路径：
 
@@ -136,8 +138,8 @@ Step 2, 修改 config
    +       task_type='CAUSAL_LM')
    )
 
-Step 3, 开始训练
-~~~~~~~~~~~~~~~~
+步骤 3 ：开始训练
+-------------------------
 
 .. code:: bash
 
@@ -146,8 +148,8 @@ Step 3, 开始训练
 训得模型将默认保存在 ``./work_dirs/``\ ，用户可以通过命令
 ``xtuner train --work-dir ${SAVE_PATH}`` 指定保存路径。
 
-Step 4, 模型转换
-~~~~~~~~~~~~~~~~
+步骤 4 ：模型转换
+--------------------------
 
 模型训练后会自动保存成 PTH 模型（例如 ``iter_2000.pth``\ ，如果使用了
 DeepSpeed，则将会是一个文件夹），我们需要利用
@@ -160,7 +162,7 @@ DeepSpeed，则将会是一个文件夹），我们需要利用
    # 例如：xtuner convert pth_to_hf internlm2_7b_full_custom_pretrain_e1_copy.py ./iter_2000.pth ./iter_2000_hf
 
 对话
-----
+===========
 
 用户可以利用 ``xtuner chat`` 实现与微调后的模型对话。
 
@@ -181,7 +183,7 @@ DeepSpeed，则将会是一个文件夹），我们需要利用
 .. _模型合并可选）:
 
 模型合并（可选）
-----------------
+=======================
 
 如果您使用了 LoRA / QLoRA 微调，则模型转换后将得到 adapter
 参数，而并不包含原 LLM
@@ -193,7 +195,7 @@ DeepSpeed，则将会是一个文件夹），我们需要利用
    (LLM) xtuner convert merge ${LLM} ${LLM_ADAPTER} ${SAVE_PATH}
 
 评测
-----
+==================
 
 推荐使用一站式平台
 `OpenCompass <https://github.com/InternLM/opencompass>`__

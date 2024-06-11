@@ -1,3 +1,4 @@
+============
 修改训练配置
 ============
 
@@ -7,10 +8,12 @@ XTuner 的训练由 MMEngine
 为例，本节将首先速览配置文件中各个参数的含义，之后讲解常见配置的修改方式。
 
 配置文件速览
-------------
+============
 
 XTuner 使用 MMEngine 的「纯 Python 风格的配置文件」，直接利用 ``import``
 机制使用一些类或函数。
+
+.. tip::
 
    如果您期望深入了解 MMEngine 「纯 Python
    风格的配置文件」的特性、优势，请参考
@@ -234,157 +237,171 @@ XTuner 使用 MMEngine 的「纯 Python 风格的配置文件」，直接利用 
    log_processor = dict(by_epoch=False)
 
 常见训练配置修改
-----------------
+=======================
 
 模型
-~~~~
+------------
 
--  使用其他 LLM 模型？
+使用其他 LLM 模型？
+~~~~~~~~~~~~~~~~~~~~~~~~
+1.  修改 ``pretrained_model_name_or_path``\ ，其将应用至 ``model.llm`` 和 ``tokenizer`` 的初始化中。
+#.  修改 ``prompt_template`` 以适配所选择的 LLM。
 
-   -  修改 ``pretrained_model_name_or_path``\ ，其将应用至 ``model.llm``
-      和 ``tokenizer`` 的初始化中。
-
-   -  修改 ``prompt_template`` 以适配所选择的 LLM。
-
--  使用 ModelScope 模型？
-
-   -  如果使用 ModelScope 的模型，建议首先参考
-      `文档 <../preparation/pretrained_model.md>`__
-      将其下载至本地，并修改\ ``pretrained_model_name_or_path``\ 。
+使用 ModelScope 模型？
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+1.  参考 `文档 <../preparation/pretrained_model.md>`__ 将其下载至本地
+2.  修改\ ``pretrained_model_name_or_path``\ 。
 
 微调类型
-~~~~~~~~
+-------------
 
-XTuner 内置的配置文件以 QLoRA 微调为主，但并不意味着 XTuner 仅支持 QLoRA
-微调。用户可以通过修改配置文件中的 ``model`` 来决定微调类型。
+.. tip::
+   XTuner 内置的配置文件以 QLoRA 微调为主，但并不意味着 XTuner 仅支持 QLoRA
+   微调。用户可以通过修改配置文件中的 ``model`` 来决定微调类型。
 
--  全参数微调
 
-   .. code:: python
+QLoRA 微调
+~~~~~~~~~~~~~~~~~
 
-      model = dict(
-          ......
-          llm=dict(
-              type=AutoModelForCausalLM.from_pretrained,
-              pretrained_model_name_or_path=pretrained_model_name_or_path,
-              trust_remote_code=True,
-              torch_dtype=torch.float16,
-              quantization_config=None),
-          lora=None,
-          ......)
+.. code:: python
 
--  LoRA 微调
+   model = dict(
+         ......
+         llm=dict(
+            type=AutoModelForCausalLM.from_pretrained,
+            pretrained_model_name_or_path=pretrained_model_name_or_path,
+            trust_remote_code=True,
+            torch_dtype=torch.float16,
+            quantization_config=dict(
+               type=BitsAndBytesConfig,
+               load_in_4bit=True,
+               load_in_8bit=False,
+               llm_int8_threshold=6.0,
+               llm_int8_has_fp16_weight=False,
+               bnb_4bit_compute_dtype=torch.float16,
+               bnb_4bit_use_double_quant=True,
+               bnb_4bit_quant_type='nf4')),
+         lora=dict(
+            type=LoraConfig,
+            r=64,
+            lora_alpha=16,
+            lora_dropout=0.1,
+            bias='none',
+            task_type='CAUSAL_LM'),
+         ......)
 
-   .. code:: python
 
-      model = dict(
-          ......
-          llm=dict(
-              type=AutoModelForCausalLM.from_pretrained,
-              pretrained_model_name_or_path=pretrained_model_name_or_path,
-              trust_remote_code=True,
-              torch_dtype=torch.float16,
-              quantization_config=None),
-          lora=dict(
-              type=LoraConfig,
-              r=64,
-              lora_alpha=16,
-              lora_dropout=0.1,
-              bias='none',
-              task_type='CAUSAL_LM'),
-          ......)
+LoRA 微调
+~~~~~~~~~~~~~~~~
 
--  QLoRA 微调
+.. tip::
 
-      注意：QLoRA 微调与 DeepSpeed ZeRO-3 不兼容；如需使用
-      DeepSpeed，请使用 ZeRO-1 或 ZeRO-2。
+   在 QLoRA 设置的基础上，将 `quantization_config` 设置为 None，就切换成了 LoRA 微调
 
-   .. code:: python
+.. code:: python
 
-      model = dict(
-          ......
-          llm=dict(
-              type=AutoModelForCausalLM.from_pretrained,
-              pretrained_model_name_or_path=pretrained_model_name_or_path,
-              trust_remote_code=True,
-              torch_dtype=torch.float16,
-              quantization_config=dict(
-                  type=BitsAndBytesConfig,
-                  load_in_4bit=True,
-                  load_in_8bit=False,
-                  llm_int8_threshold=6.0,
-                  llm_int8_has_fp16_weight=False,
-                  bnb_4bit_compute_dtype=torch.float16,
-                  bnb_4bit_use_double_quant=True,
-                  bnb_4bit_quant_type='nf4')),
-          lora=dict(
-              type=LoraConfig,
-              r=64,
-              lora_alpha=16,
-              lora_dropout=0.1,
-              bias='none',
-              task_type='CAUSAL_LM'),
-          ......)
+   model = dict(
+         ......
+         llm=dict(
+            type=AutoModelForCausalLM.from_pretrained,
+            pretrained_model_name_or_path=pretrained_model_name_or_path,
+            trust_remote_code=True,
+            torch_dtype=torch.float16,
+            quantization_config=None),
+         lora=dict(
+            type=LoraConfig,
+            r=64,
+            lora_alpha=16,
+            lora_dropout=0.1,
+            bias='none',
+            task_type='CAUSAL_LM'),
+         ......)
+
+
+全参数微调
+~~~~~~~~~~~~~~~~~~
+.. tip::
+
+   将 `lora` 和 `quantization_config` 都设置为 None，就切换到了全参数训练模式
+
+.. code:: python
+
+   model = dict(
+         ......
+         llm=dict(
+            type=AutoModelForCausalLM.from_pretrained,
+            pretrained_model_name_or_path=pretrained_model_name_or_path,
+            trust_remote_code=True,
+            torch_dtype=torch.float16,
+            quantization_config=None),
+         lora=None,
+         ......)
+
+
+
 
 数据集
-~~~~~~
+--------------
 
 请参考 `训练` 章节文档。
 
 优化器
-~~~~~~
+-----------
 
--  使用其他优化器？
+使用其他优化器？
+~~~~~~~~~~~~~~~~~~~~
 
-   -  方法 1：修改 ``optim_type``\ （例如
-      ``optim_type=torch.optim.SGD``\ ），其将应用至
-      ``optim_wrapper.optimzer``\ 。
+-  方法 1：修改 ``optim_type``\ （例如 ``optim_type=torch.optim.SGD``\ ），其将应用至 ``optim_wrapper.optimzer``\ 。
+-  方法 2：忽略 ``optim_type``\ ，直接修改 ``optim_wrapper.optimzer``\ 。
 
-   -  方法 2：忽略 ``optim_type``\ ，直接修改
-      ``optim_wrapper.optimzer``\ 。
 
--  修改优化器参数配置？
+修改优化器参数配置？
+~~~~~~~~~~~~~~~~~~~~~~~~
 
-   -  方法 1：修改 ``lr``\ 、\ ``weight_decay`` 等参数，其将应用至
-      ``optim_wrapper.optimzer``\ 。
-
-   -  方法 2：直接修改 ``optim_wrapper.optimzer``\ 。
+-  方法 1：修改 ``lr``\ 、\ ``weight_decay`` 等参数，其将应用至 ``optim_wrapper.optimzer``\ 。
+-  方法 2：直接修改 ``optim_wrapper.optimzer``\ 。
 
 迭代次数
-~~~~~~~~
+---------------
 
--  调整迭代次数？
+调整迭代次数？
+~~~~~~~~~~~~~~~~~~~~~
 
-   -  修改 ``max_epochs`` 参数。
+-  修改 ``max_epochs`` 参数。
 
-保存间隔
-~~~~~~~~
+保存 Checkpoint 间隔
+---------------------------
 
--  调整保存间隔？
+调整保存间隔？
+~~~~~~~~~~~~~~~~~~~~~
 
-   -  修改 ``save_steps`` 参数。
+-  修改 ``save_steps`` 参数。
 
--  调整最大保存 checkpoint 个数？
+调整最大保存 checkpoint 个数？
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-   -  修改 ``save_total_limit`` 参数。
+-  修改 ``save_total_limit`` 参数。
 
 训练间对话评测
-~~~~~~~~~~~~~~
+----------------------
 
--  调整对话评测间隔？
+调整对话评测间隔？
+~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-   -  修改 ``evaluation_freq`` 参数。
+-  修改 ``evaluation_freq`` 参数。
 
--  调整对话评测的 system 字段？
+调整对话评测的 system 字段？
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-   -  修改 ``SYSTEM`` 参数。
+-  修改 ``SYSTEM`` 参数。
 
--  调整对话评测的测试指令？
+调整对话评测的测试指令？
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-   -  修改 ``evaluation_inputs`` 参数。
+-  修改 ``evaluation_inputs`` 参数。
 
 GPU 数
-~~~~~~
+--------------
 
 XTuner
 的多卡训练由启动命令决定，而非配置文件。用户可以参考下列命令启动多卡训练：
@@ -398,7 +415,7 @@ XTuner
    (SLURM) srun ${SRUN_ARGS} xtuner train ${CONFIG} --launcher slurm
 
 DeepSpeed
-~~~~~~~~~
+------------------
 
 XTuner 的 DeepSpeed
 优化由启动命令决定，而非配置文件。用户可以参考下列命令启用 DeepSpeed
@@ -408,30 +425,33 @@ XTuner 的 DeepSpeed
 
    xtuner train ${CONFIG} --deepspeed ${DS_CONFIG}
 
-XTuner 内置了多个 DeepSpeed 配置文件（即命令中的
-``${DS_CONFIG}``\ ），用户可以直接使用（具体文件见
-`这里 <https://github.com/InternLM/xtuner/tree/main/xtuner/configs/deepspeed>`__\ ）：
+.. note::
 
-.. code:: bash
+   XTuner 内置了多个 DeepSpeed 配置文件（即命令中的
+   ``${DS_CONFIG}``\ ），用户可以直接使用，具体文件见
+   `这里 <https://github.com/InternLM/xtuner/tree/main/xtuner/configs/deepspeed>`__\ ：
 
-   xtuner train ${CONFIG} --deepspeed [deepspeed_zero1,deepspeed_zero2,deepspeed_zero2_offload,deepspeed_zero3,deepspeed_zero3_offload]
+   .. code:: bash
 
-部分参数会在 DeepSpeed Config 和 XTuner Config 中重复定义（例如 batch
-size等）。此时相关配置会以 XTuner Config 为准：
+      xtuner train ${CONFIG} --deepspeed [deepspeed_zero1,deepspeed_zero2,deepspeed_zero2_offload,deepspeed_zero3,deepspeed_zero3_offload]
 
--  ``gradient_accumulation_steps`` 会被 XTuner Config 中的
-   ``accumulative_counts`` 设置覆盖。
+.. note::
+   部分参数会在 DeepSpeed Config 和 XTuner Config 中重复定义（例如 batch
+   size等）。此时相关配置会以 XTuner Config 为准：
 
--  ``train_micro_batch_size_per_gpu`` 会被 XTuner Config 中的
-   ``train_dataloader.batch_size`` 设置覆盖。
+   -  ``gradient_accumulation_steps`` 会被 XTuner Config 中的
+      ``accumulative_counts`` 设置覆盖。
 
--  ``gradient_clipping`` 会被 XTuner Config 中的
-   ``optim_wrapper.clip_grad.max_norm`` 设置覆盖。
+   -  ``train_micro_batch_size_per_gpu`` 会被 XTuner Config 中的
+      ``train_dataloader.batch_size`` 设置覆盖。
 
--  XTuner 会根据所使用的 GPU 架构自动选择 ``fp16`` 或 ``bf16`` 训练。
+   -  ``gradient_clipping`` 会被 XTuner Config 中的
+      ``optim_wrapper.clip_grad.max_norm`` 设置覆盖。
+
+   -  XTuner 会根据所使用的 GPU 架构自动选择 ``fp16`` 或 ``bf16`` 训练。
 
 其他
-~~~~
+----------
 
 如有遗漏或特定需求，欢迎提出
 `issue <https://github.com/InternLM/xtuner/issues>`__ 讨论。

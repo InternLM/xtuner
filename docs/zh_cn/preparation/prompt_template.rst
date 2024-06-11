@@ -3,32 +3,27 @@
 准备对话模版
 ============
 
-大模型的微调、对话均需要选择一个合适的对话模版（prompt
-template）。XTuner
-设计了一套对话模版封装逻辑，并提供了一系列社区广泛使用的对话模版。
+大模型的微调、对话均需要选择一个合适的对话模版（prompt template）。
+XTuner 设计了一套对话模版封装逻辑，并提供了一系列社区广泛使用的对话模版。
 
-本文将从“何处需要对话模版？”、“XTuner
-内置对话模版速览”、“如何选择对话模版？”、“如何自定义对话模版？”四部分展开介绍。
+本文将从“何处需要对话模版？”、“XTuner 内置对话模版速览”、“如何选择对话模版？”、“如何自定义对话模版？”四部分展开介绍。
 
 何处需要对话模版？
 ------------------
 
-   | 请确保在训练、对话和自定义应用场景中，始终保持对话模板的一致，否则可能会出现不符合预期的结果。
+:``xtuner train``:
+  需要使用对话模版将训练数据“模版化”，在训练 ``config`` 中配置 ``prompt_template`` 参数来选择对话模版
 
--  XTuner 内部
+:``xtuner chat``:
+  需要使用对话模版将对话文本“模版化”，通过 ``xtuner chat`` 命令的 ``--prompt-template`` 参数选择对话模版
 
-   -  训练（\ ``xtuner train``\ ）：需要使用对话模版将训练数据“模版化”
+.. note::
 
-      -  在训练 ``config`` 中配置 ``prompt_template`` 参数来选择对话模版
+   各种推理引擎也都会用到对话模板，每个框架定义对话模板的方式都不尽相同，但最终“模板化”后的数据都是相同的
 
-   -  对话（\ ``xtuner chat``\ ）：需要使用对话模版将对话文本“模版化”
+.. tip::
 
-      -  利用 ``xtuner chat`` 命令的 ``--prompt-template``
-         参数选择对话模版
-
--  其他自定义应用场景（如自定义 WebUI 等）
-
-   -  需要按照训练所使用的对话模版，对对话文本进行“模版化”处理
+   请确保在训练、对话和自定义应用场景中，始终保持对话模板的一致，否则可能会出现不符合预期的结果。
 
 XTuner 内置对话模版速览
 -----------------------
@@ -36,10 +31,11 @@ XTuner 内置对话模版速览
 XTuner 对现有大多数大语言模型的对话模版进行了实现，并集成在
 ``xtuner.utils.PROMPT_TEMPLATE`` 内，用户可以直接使用。
 
-现已支持的对话模版有：\ ``internlm_chat``\ 、\ ``internlm2_chat``\ 、\ ``gemma``\ 、\ ``mistral``\ 、\ ``mixtral``\ 、\ ``qwen_chat``\ 、\ ``chatglm2``\ 、\ ``chatglm3``\ 、\ ``baichuan_chat``\ 、\ ``baichuan2_chat``\ 、\ ``deepseek_moe``\ 、\ ``deepseek_coder``\ 、\ ``vicuna``\ 、\ ``default``
-等等。
+.. note::
 
-代码结构
+   XTuner 内置的对话模板清单可见文末附录
+
+字段约定
 ~~~~~~~~
 
 以 ``internlm2_chat`` 模版为例，其代码结构如下。
@@ -83,68 +79,64 @@ XTuner 对现有大多数大语言模型的对话模版进行了实现，并集�
 .. code::
 
    <|im_start|>system
-   XXXXXXXXXXXXXXXXXXXXXXXX<|im_end|>
+   你是一个无害的 AI 助手<|im_end|>
    <|im_start|>user
-   YYYYYYYYYYYYYYYYYYYYYYYY<|im_end|>
+   你是谁？<|im_end|>
    <|im_start|>assistant
-   ZZZZZZZZZZZZZZZZZZZZZZZZ<|im_end|>
+   我是书生浦语。<|im_end|>
 
 **多轮**
 
 .. code::
 
    <|im_start|>system
-   XXXXXXXXXXXXXXXXXXXXXXXX<|im_end|>
+   你是一个无害的 AI 助手<|im_end|>
    <|im_start|>user
-   YYYYYYYYYYYYYYYYYYYYYYYY<|im_end|>
+   你是谁？<|im_end|>
    <|im_start|>assistant
-   ZZZZZZZZZZZZZZZZZZZZZZZZ<|im_end|>
+   我是书生浦语。<|im_end|>
    <|im_start|>user
-   YYYYYYYYYYYYYYYYYYYYYYYY<|im_end|>
+   你的英文名字是什么？<|im_end|>
    <|im_start|>assistant
-   ZZZZZZZZZZZZZZZZZZZZZZZZ<|im_end|>
+   InternLM<|im_end|>
 
 如何选择对话模版？
 ------------------
 
 选择准确的对话模版是训练、应用模型的关键。关于如何选择对话模版，我们建议：
 
--  微调 chat 模型
+:微调 chat 模型:
+   使用模型所对应的对话模版，如 ``internlm2-chat`` 使用
+   ``internlm2_chat``\ 、\ ``Qwen-Chat`` 使用 ``qwen_chat``\ 。
 
-   -  使用模型所对应的对话模版，如 ``internlm2-chat`` 使用
-      ``internlm2_chat``\ 、\ ``Qwen-Chat`` 使用 ``qwen_chat``\ 。
+:全量微调 base 模型:
+   任选对话模版，优先使用 chat 版模型所对应的对话模版 。
 
--  微调 base 模型
 
-   -  全量微调：任选对话模版，优先使用 chat
-      版模型所对应的对话模版或默认对话模版 ``default``\ 。
+:LoRA 微调 base 模型:
+ | 使用默认对话模版 ``default``\ 。这是由于 LoRA /
+   QLoRA 微调默认会关闭 ``embed_tokens`` 和 ``lm_head``
+   的训练，此时如果引入未学习过的特殊 token（如对话模版中的
+   ``<|im_start|>``\ ），则会影响模型的训练。
 
-      -  注：使用 chat 版模型所对应的对话模版请留意下方 “小贴士” 。
+.. tip::
+  通过修改 ``LoraConfig`` 可以引入 ``embed_tokens`` 和
+  ``lm_head`` 的训练（会增大显存需求），进而支持任选对话模版
 
-   -  LoRA / QLoRA 微调：使用默认对话模版 ``default``\ 。这是由于 LoRA /
-      QLoRA 微调默认会关闭 ``embed_tokens`` 和 ``lm_head``
-      的训练，此时如果引入未学习过的特殊 token（如对话模版中的
-      ``<|im_start|>``\ ），则会影响模型的训练。
+  .. code:: diff
 
-      -  注：通过修改 ``LoraConfig`` 可以引入 ``embed_tokens`` 和
-         ``lm_head``
-         的训练（会增大显存需求），进而支持任选对话模版（使用 chat
-         版模型所对应的对话模版请留意下方 “小贴士” ）
+     lora=dict(
+         type=LoraConfig,
+         r=64,
+         lora_alpha=16,
+         lora_dropout=0.1,
+         bias='none',
+     +   modules_to_save=['embed_tokens', 'lm_head']  # 请确保与模型中所使用的参数名一致
+         task_type='CAUSAL_LM')
 
-         .. code:: diff
+.. tip::
 
-            lora=dict(
-                type=LoraConfig,
-                r=64,
-                lora_alpha=16,
-                lora_dropout=0.1,
-                bias='none',
-            +   modules_to_save=['embed_tokens', 'lm_head']  # 请确保与模型中所使用的参数名一致
-                task_type='CAUSAL_LM')
-
-**小贴士**
-
--  大多数的 base 模型所使用的 tokenizer 中不包含 chat
+   大多数的 base 模型所使用的 tokenizer 中不包含 chat
    模型对话模板中所使用的特殊 token 编码（例如 `internlm2
    chat <https://huggingface.co/internlm/internlm2-chat-1_8b/blob/ecccbb5c87079ad84e5788baa55dd6e21a9c614d/tokenizer_config.json#L29-L85>`__
    和 `internlm2
@@ -176,6 +168,10 @@ XTuner 对现有大多数大语言模型的对话模版进行了实现，并集�
 附：XTuner 内置 configs 所选择的对话模版
 ----------------------------------------
 
+.. note::
+
+   \*: 官方对话模版中存在特殊 token（比如 ``<|im_start|>``\ 、\ ``<|im_end|>``\ ），这类特殊 token
+   在预训练阶段并未得到训练。故，使用 ``default`` 模版。
 ======================================== ==============
 模型                                     对话模版
 ======================================== ==============
@@ -239,7 +235,3 @@ google/gemma-2b-it                       gemma
 google/gemma-7b                          default\*
 google/gemma-7b-it                       gemma
 ======================================== ==============
-
-\*: 官方对话模版中存在特殊 token（比如
-``<|im_start|>``\ 、\ ``<|im_end|>``\ ），这类特殊 token
-在预训练阶段并未得到训练。故，使用 ``default`` 模版。

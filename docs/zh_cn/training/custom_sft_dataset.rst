@@ -1,4 +1,5 @@
-使用自定义的指令微调数据集训练(LLM)
+===================================
+自定义指令微调数据集（LLM）
 ===================================
 
 XTuner 支持使用自定义数据集进行指令微调，为便于介绍，本节以
@@ -6,13 +7,11 @@ XTuner 支持使用自定义数据集进行指令微调，为便于介绍，本�
 配置文件为基础进行介绍。
 
 数据准备
---------
+=================
 
 XTuner 采用 `OpenAI SFT
 数据集格式 <https://platform.openai.com/docs/guides/fine-tuning/preparing-your-dataset>`__
-作为统一的自定义数据集格式。每条数据除了 OpenAI 标准格式中的 ``role``
-字段和 ``content`` 字段外，XTuner 还额外扩充了一个 ``loss``
-字段，用于控制某轮 ``assistant`` 的输出不计算 loss。详细格式如下：
+作为统一的自定义数据集格式，详细格式如下：
 
 .. code:: json
 
@@ -27,22 +26,32 @@ XTuner 采用 `OpenAI SFT
        "messages": [
            { "role": "system", "content": "xxx." },
            { "role": "user", "content": "xxx." },
-           { "role": "assistant", "content": "xxx.", "loss": false},
+           { "role": "assistant", "content": "xxx.", "loss": False},
            { "role": "user", "content": "xxx." },
-           { "role": "assistant", "content": "xxx.", "loss": true}
+           { "role": "assistant", "content": "xxx.", "loss": True}
        ]
    }]
 
-以上示例中，第一条数据对应一条单轮对话数据，第二条则对应一条多轮对话数据。默认情况下，每条数据中仅
-"assistant" 部分的内容参与 loss 的计算。若想令某轮对话 "assistant"
-部分的内容不参与 loss 计算，需要手动设置该数据 "loss" 字段的值为
-``false``\ 。
+.. note::
+   每条数据除了 OpenAI 标准格式中的 ``role``
+   字段和 ``content`` 字段外，XTuner 还额外扩充了一个 ``loss``
+   字段，用于控制某轮 ``assistant`` 的输出不计算 loss。
+
+.. note::
+   - ``system`` 和 ``user`` 的 ``loss`` 默认为 False
+   - ``assistant`` 的 ``loss`` 默认为 True
+
+.. tip::
+
+   若想令某轮对话 "assistant"
+   部分的内容不参与 loss 计算，需要手动设置该数据 "loss" 字段的值为
+   ``false``\ 。
 
 训练
-----
+=============
 
-Step 1, 导出 config
-~~~~~~~~~~~~~~~~~~~
+步骤 1： 导出 config
+--------------------------------
 
 ``xtuner/configs/custom_dataset/sft`` 目录下有所有 XTuner
 支持的模型在自定义数据集下使用 QLora 算法训练的模板 config。可以通过
@@ -53,15 +62,17 @@ Step 1, 导出 config
 可以通过以下命令将 ``internlm2_chat_7b_qlora_custom_sft_e1.py``
 导出至当前目录下：
 
-.. code::
+.. code:: console
 
-   xtuner copy-cfg internlm2_chat_7b_qlora_custom_sft_e1 .
+   $ xtuner copy-cfg internlm2_chat_7b_qlora_custom_sft_e1 .
 
-当前目录下会存在一个新 config
-``internlm2_chat_7b_qlora_custom_sft_e1_copy.py`` 。
+.. note::
 
-Step 2, 修改 config
-~~~~~~~~~~~~~~~~~~~
+   当前目录下会存在一个新 config
+   ``internlm2_chat_7b_qlora_custom_sft_e1_copy.py`` 。
+
+步骤 2：修改 config
+----------------------------------
 
 首先，需要修改数据集文件路径：
 
@@ -156,18 +167,19 @@ Step 2, 修改 config
    -       task_type='CAUSAL_LM')
    )
 
-Step 3, 开始训练
-~~~~~~~~~~~~~~~~
+步骤 3： 开始训练
+-----------------------------
 
-.. code:: bash
+.. code:: console
 
-   NPROC_PER_NODE=8 xtuner train internlm2_chat_7b_qlora_custom_sft_e1_copy.py --deepspeed deepspeed_zero1
+   $ NPROC_PER_NODE=8 xtuner train internlm2_chat_7b_qlora_custom_sft_e1_copy.py --deepspeed deepspeed_zero1
 
-训得模型将默认保存在 ``./work_dirs/``\ ，用户可以通过命令
-``xtuner train --work-dir ${SAVE_PATH}`` 指定保存路径。
+.. tip::
+   训练日志及 checkpoint 将默认保存在 ``./work_dirs/``\ ，可以通过命令
+   ``xtuner train --work-dir ${SAVE_PATH}`` 指定保存路径。
 
-Step 4, 模型转换
-~~~~~~~~~~~~~~~~
+步骤 4： 模型转换
+------------------------------
 
 模型训练后会自动保存成 PTH 模型（例如 ``iter_2000.pth``\ ，如果使用了
 DeepSpeed，则将会是一个文件夹），我们需要利用
@@ -180,47 +192,54 @@ DeepSpeed，则将会是一个文件夹），我们需要利用
    # 例如：xtuner convert pth_to_hf internlm2_chat_7b_qlora_custom_sft_e1_copy.py ./iter_2000.pth ./iter_2000_hf
 
 对话
-----
+=================
 
 用户可以利用 ``xtuner chat`` 实现与微调后的模型对话。如果使用的是 Lora
 或 QLora 算法：
 
-.. code:: bash
+.. code:: console
 
-   xtuner chat ${NAME_OR_PATH_TO_LLM} --adapter {NAME_OR_PATH_TO_ADAPTER} --prompt-template ${PROMPT_TEMPLATE} [optional arguments]
-   # 例如：xtuner chat internlm/internlm2-7b --adapter ./iter_2000_hf --prompt-template internlm2_chat
+   $ xtuner chat ${NAME_OR_PATH_TO_LLM} --adapter {NAME_OR_PATH_TO_ADAPTER} --prompt-template ${PROMPT_TEMPLATE} [optional arguments]
+   $ # 例如：xtuner chat internlm/internlm2-7b --adapter ./iter_2000_hf --prompt-template internlm2_chat
 
-其中 ${PROMPT_TEMPLATE} 表示模型的对话模板，需要与训练用的 config 中的
-``prompt_template`` 字段保持一致，例如
-``internlm2_chat_7b_qlora_custom_sft_e1_copy.py`` 中的设置为：
-
-.. code:: python
-
-   prompt_template = PROMPT_TEMPLATE.internlm2_chat
 
 如果进行的是全量参数的微调：
 
-.. code:: bash
+.. code:: console
 
-   xtuner chat ${PATH_TO_LLM} --prompt-template ${PROMPT_TEMPLATE} [optional arguments]
-   # 例如：xtuner chat ./iter_2000_hf --prompt-template internlm2_chat
+   $ xtuner chat ${PATH_TO_LLM} --prompt-template ${PROMPT_TEMPLATE} [optional arguments]
+   $ # 例如：xtuner chat ./iter_2000_hf --prompt-template internlm2_chat
+
+.. note::
+
+   其中 ${PROMPT_TEMPLATE} 表示模型的对话模板，需要与训练用的 config 中的
+   ``prompt_template`` 字段保持一致，例如
+   ``internlm2_chat_7b_qlora_custom_sft_e1_copy.py`` 中的设置为：
+
+   .. code:: python
+
+      prompt_template = PROMPT_TEMPLATE.internlm2_chat
 
 .. _模型合并可选）:
 
 模型合并（可选）
-----------------
+======================
 
 如果您使用了 LoRA / QLoRA 微调，则模型转换后将得到 adapter
 参数，而并不包含原 LLM
 参数。如果您期望获得合并后的模型权重（例如用于后续评测），那么可以利用
 ``xtuner convert merge`` ：
 
-.. code:: bash
+.. code:: console
 
-   (LLM) xtuner convert merge ${LLM} ${LLM_ADAPTER} ${SAVE_PATH}
+   $ xtuner convert merge ${LLM} ${LLM_ADAPTER} ${SAVE_PATH}
+
+.. tip::
+
+   模型合并后，就得到了一个可以通过 ``AutoModelForCausalLM.from_pretrained`` 直接加载的模型，可以直接在各种下游工具中直接使用
 
 评测
-----
+======================
 
 推荐使用一站式平台
 `OpenCompass <https://github.com/InternLM/opencompass>`__
