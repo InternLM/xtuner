@@ -73,8 +73,8 @@
    :maxdepth: 1
    :caption: InternEvo 迁移
 
-   internevo_migration/internevo_migration.rst
-   internevo_migration/ftdp_dataset/Case4.rst
-   internevo_migration/ftdp_dataset/Case1.rst
-   internevo_migration/ftdp_dataset/Case2.rst
-   internevo_migration/ftdp_dataset/Case3.rst
+   internevo_migration/differences.rst
+   internevo_migration/ftdp_dataset/tokenized_and_internlm2.rst
+   internevo_migration/ftdp_dataset/processed_and_internlm2.rst
+   internevo_migration/ftdp_dataset/processed_and_others.rst
+   internevo_migration/ftdp_dataset/processed_normal_chat.rst

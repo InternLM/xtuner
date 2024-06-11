@@ -1,17 +1,62 @@
-.. _case4:
 
-Tokenized 数据集 + InternLM2
+Processed 数据集 + InternLM2
 ===================================
 
-.. tip::
-   Tokenized 数据集格式应与 `InternEVO 使用教程 <https://github.com/InternLM/InternEvo/blob/develop/doc/usage.md#%E6%95%B0%E6%8D%AE%E5%87%86%E5%A4%87-%E9%A2%84%E8%AE%AD%E7%BB%83>`_ 中保持一致
+.. warning::
+   非 FTDP（一款闭源数据处理工具） 用户跳过此文档
 
-使用已经 token 化的 ftdp 数据训练 Internlm2 模型。
+使用尚未 token 化的 ftdp 数据训练 InternLM2 模型的场景。
 
-步骤 1：导出模板 config 文件
+步骤 1：离线处理数据集
+----------------------
+
+ftdp 把 sft
+任务的数据处理划分为三个类型，原始数据（origin）、预处理数据（processed）和
+token 过的数据（tokenized）。我们需要将预处理过的、具有统一格式的 ftdp
+数据 token
+化得到直接可以用于训练的格式。其中，预处理数据需要满足以下目录结构：
+
+.. code::
+
+   |-- processed-dir
+       |-- data1
+       |   |-- processed
+       |       |-- sft_chat
+       |           |-- data1.jsonl
+       |-- data2
+       |   |-- processed
+       |       |-- sft_chat
+       |           |-- data2.jsonl
+
+使用以下命令可离线 token 化 ftdp 格式的预处理数据（processed）数据集：
+
+.. code-block:: console
+
+   $ python xtuner/tools/tokenize_ftdp_datasets.py \
+   $    --processed-dir /path/to/preprocessed/data \
+   $    --tokenized-dir /path/to/tokenized/data \
+   $    --tokenizer-path pretrained_model_name_or_path
+
+.. note::
+   ``--processed-dir`` 需要指定预处理后的，具有 ftdp
+   标准格式的数据路径
+
+.. note::
+   ``--tokenized-dir`` 需要指定为 token 化后的数据存储路径
+
+.. note::
+   ``--tokenizer-path pretrained_model_name_or_path`` 中的
+   ``pretrained_model_name_or_path`` 同 ``from_pretrained`` 接口中的
+   ``pretrained_model_name_or_path``\
+
+.. note::
+   上述命令执行成功后，会在 ``/path/to/tokenized/data/chatml_llamav13_32k``
+   路径下保存两个子文件夹——``train`` 和 ``valid``\ 。
+
+步骤 2：导出模板 config 文件
 ----------------------------
 
-XTuner 中目前提供了训练 Internlm2 的模板 config，使用命令：
+XTuner 中目前提供了训练 InternLM2 的模板 config，使用命令：
 
 .. code-block:: console
 
@@ -20,12 +65,14 @@ XTuner 中目前提供了训练 Internlm2 的模板 config，使用命令：
 .. note::
    当前目录下会有一个名为 ``internlm2_7b_w_tokenized_dataset_copy.py`` 的新文件
 
-步骤 2：修改模板 config 文件
+步骤 3：修改模板 config 文件
 ----------------------------
 
-修改模板 config 文件中的训练数据路径为真实数据路径：
+修改模板 config 文件中的训练数据路径为真实数据路径，其中
+``/path/to/tokenized/data`` 与步骤 1 中的 ``/path/to/tokenized/data``
+为同一个路径：
 
-.. code-block:: diff
+.. code:: diff
 
    ...
 
@@ -80,9 +127,8 @@ XTuner 中目前提供了训练 Internlm2 的模板 config，使用命令：
 
     设置 ``save_optimizer=False`` 后，训练过程不可 resume 。
 
-.. _case4-step3:
 
-步骤 3：获取数据顺序 （可选）
+步骤 4：获取数据顺序 （可选）
 -----------------------------
 
 训练数据的提供顺序可能会对模型的最终训练成果产生影响。鉴于不同集群中通过
@@ -134,7 +180,8 @@ XTuner 中目前提供了训练 Internlm2 的模板 config，使用命令：
        packed_length=max_length,
        seed=1024)
 
-步骤 4：启动训练
+
+步骤 5：启动训练
 ----------------
 
 在 slurm 集群调度系统中可以通过以下命令启动训练：
@@ -188,7 +235,7 @@ XTuner 中目前提供了训练 Internlm2 的模板 config，使用命令：
        --deepspeed deepspeed_zero1 \
        --work-dir work_dirs/${EXP_NAME}
 
-步骤 5：转模型
+步骤 6：转模型
 --------------
 
 deepspeed 转 hf：
@@ -203,7 +250,7 @@ hf 转 Turbomind：
 
    $ lmdeploy convert internlm2-chat-7b /hf/dst/model/path --dst-path /turbomind/dst/model/path
 
-步骤 6：Turbomind 评测
+步骤 7：Turbomind 评测
 ----------------------
 
 请参考 `OpenCompass LMDeploy
