@@ -1,6 +1,6 @@
 .. _length_grouped_sampler:
 
-LengthGroupedSampler
+数据分组
 ========================
 
 .. raw:: html

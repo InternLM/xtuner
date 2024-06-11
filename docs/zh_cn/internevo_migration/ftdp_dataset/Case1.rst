@@ -3,9 +3,12 @@
 Processed 数据集 + InternLM2
 ===================================
 
+.. warning::
+   非 FTDP（一款闭源数据处理工具） 用户跳过此文档
+
 使用尚未 token 化的 ftdp 数据训练 InternLM2 模型的场景。
 
-Step 1, 离线处理数据集
+步骤 1：离线处理数据集
 ----------------------
 
 ftdp 把 sft
@@ -28,43 +31,46 @@ token 过的数据（tokenized）。我们需要将预处理过的、具有统�
 
 使用以下命令可离线 token 化 ftdp 格式的预处理数据（processed）数据集：
 
-.. code::
+.. code-block:: console
 
-   python xtuner/tools/tokenize_ftdp_datasets.py \
-       --processed-dir /path/to/preprocessed/data \
-       --tokenized-dir /path/to/tokenized/data \
-       --tokenizer-path pretrained_model_name_or_path
+   $ python xtuner/tools/tokenize_ftdp_datasets.py \
+   $    --processed-dir /path/to/preprocessed/data \
+   $    --tokenized-dir /path/to/tokenized/data \
+   $    --tokenizer-path pretrained_model_name_or_path
 
-上述命令中：
+.. note::
+   ``--processed-dir`` 需要指定预处理后的，具有 ftdp
+   标准格式的数据路径
 
-1. ``--processed-dir`` 需要指定预处理后的，具有 ftdp
-   标准格式的数据路径；
+.. note::
+   ``--tokenized-dir`` 需要指定为 token 化后的数据存储路径
 
-2. ``--tokenized-dir`` 需要指定为 token 化后的数据存储路径；
-
-3. ``--tokenizer-path pretrained_model_name_or_path`` 中的
+.. note::
+   ``--tokenizer-path pretrained_model_name_or_path`` 中的
    ``pretrained_model_name_or_path`` 同 ``from_pretrained`` 接口中的
-   ``pretrained_model_name_or_path``\ 。
+   ``pretrained_model_name_or_path``\
 
-上述命令执行成功后，会在 ``/path/to/tokenized/data/chatml_llamav13_32k``
-路径下保存两个子文件夹——``train`` 和 ``valid``\ 。
+.. note::
+   上述命令执行成功后，会在 ``/path/to/tokenized/data/chatml_llamav13_32k``
+   路径下保存两个子文件夹——``train`` 和 ``valid``\ 。
 
-Step 2, 导出模板 config 文件
+步骤 2：导出模板 config 文件
 ----------------------------
 
 XTuner 中目前提供了训练 InternLM2 的模板 config，使用命令：
 
-.. code::
+.. code-block:: console
 
-   xtuner copy-cfg internlm2_7b_w_tokenized_dataset .
+   $ xtuner copy-cfg internlm2_7b_w_tokenized_dataset .
 
-可将训练 InternLM2 的模板 config 导出至当前目录下。
+.. note::
+   当前目录下会有一个名为 ``internlm2_7b_w_tokenized_dataset_copy.py`` 的新文件
 
-Step 3, 修改模板 config 文件
+步骤 3：修改模板 config 文件
 ----------------------------
 
 修改模板 config 文件中的训练数据路径为真实数据路径，其中
-``/path/to/tokenized/data`` 与 Step 1 中的 ``/path/to/tokenized/data``
+``/path/to/tokenized/data`` 与步骤 1 中的 ``/path/to/tokenized/data``
 为同一个路径：
 
 .. code:: diff
@@ -86,44 +92,44 @@ Step 3, 修改模板 config 文件
    pack_to_max_length = True
    ...
 
-在使用 DeepSpeed 训练模型时，如需在保存 checkpoint
-时只保存模型权重，而不保存优化器状态，可参考以下步骤：
+.. tip::
+   在使用 DeepSpeed 训练模型时，如需在保存 checkpoint
+   时只保存模型权重，而不保存优化器状态，可参考以下步骤：
 
-1. 确保 mmengine 版本大于等于 0.10.3
+   1. 确保 mmengine 版本大于等于 0.10.3
 
-.. code::
+   .. code-block:: console
 
-   pip install 'mmengine>=0.10.3'
+      $ pip install 'mmengine>=0.10.3'
 
-2. 修改 Config 文件，CheckpointHook 增加 save_optimizer=False
+   2. 修改 Config 文件，CheckpointHook 增加 save_optimizer=False
 
-.. code:: diff
+   .. code:: diff
 
-   default_hooks = dict(
-       # record the time of every iteration.
-       timer=dict(type=IterTimerHook),
-       # print log every 100 iterations.
-       logger=dict(type=LoggerHook, interval=1),
-       # enable the parameter scheduler.
-       param_scheduler=dict(type=ParamSchedulerHook),
-       # save checkpoint per epoch.
-      checkpoint=dict(
-           type=CheckpointHook,
-   +       save_optimizer=False,
-           by_epoch=False,
-           interval=save_steps,
-           max_keep_ckpts=save_total_limit),
-       # set sampler seed in distributed evrionment.
-       sampler_seed=dict(type=DistSamplerSeedHook),
-   )
+      default_hooks = dict(
+         # record the time of every iteration.
+         timer=dict(type=IterTimerHook),
+         # print log every 100 iterations.
+         logger=dict(type=LoggerHook, interval=1),
+         # enable the parameter scheduler.
+         param_scheduler=dict(type=ParamSchedulerHook),
+         # save checkpoint per epoch.
+         checkpoint=dict(
+            type=CheckpointHook,
+      +     save_optimizer=False,
+            by_epoch=False,
+            interval=save_steps,
+            max_keep_ckpts=save_total_limit),
+         # set sampler seed in distributed evrionment.
+         sampler_seed=dict(type=DistSamplerSeedHook),
+      )
 
-.. note::
+.. warning::
 
-    需要注意，经过以上设置后，训练过程不可 resume 。
+    设置 ``save_optimizer=False`` 后，训练过程不可 resume 。
 
-.. _step-4-获取数据顺序-可选）:
 
-Step 4, 获取数据顺序 （可选）
+步骤 4：获取数据顺序 （可选）
 -----------------------------
 
 训练数据的提供顺序可能会对模型的最终训练成果产生影响。鉴于不同集群中通过
@@ -133,27 +139,28 @@ Step 4, 获取数据顺序 （可选）
 
 运行下面的代码可获取数据顺序，并存为 txt 文件：
 
-.. code::
+.. code-block:: console
 
-   python xtuner/tools/get_data_order.py \
-       --data-folder /path/to/tokenized/data \
-       --save-folder /folder/to/save/data/order \
-       --file-type ${file_type}
+   $ python xtuner/tools/get_data_order.py \
+   $    --data-folder /path/to/tokenized/data \
+   $    --save-folder /folder/to/save/data/order \
+   $    --file-type ${file_type}
 
-其中，\ ``--file-type ${file_type}`` 表示需要统计所有以 ``${file_type}``
-为文件名后缀的文件的顺序。
+.. tip::
+   ``--file-type ${file_type}`` 表示需要统计所有以 ``${file_type}``
+   为文件名后缀的文件的顺序。
 
-例如，需要获取 ``/path/to/tokenized/data`` 路径下所有以 ``.bin``
-结尾的文件的顺序，并保存在当前路径下，那么上述命令需要改为：
+   例如，需要获取 ``/path/to/tokenized/data`` 路径下所有以 ``.bin``
+   结尾的文件的顺序，并保存在当前路径下，那么上述命令需要改为：
 
-.. code::
+   .. code-block:: console
 
-   python xtuner/tools/get_data_order.py \
-       --data-folder /path/to/tokenized/data \
-       --save-folder . \
-       --file-type .bin
+      $ python xtuner/tools/get_data_order.py \
+      $    --data-folder /path/to/tokenized/data \
+      $    --save-folder . \
+      $    --file-type .bin
 
-同时，需要进一步修改 Step 2 中的 Config 文件，并设置数据顺序文件路径：
+获得数据顺序文件后，还需要在 config 中设置数据顺序文件路径：
 
 .. code:: diff
 
@@ -174,21 +181,22 @@ Step 4, 获取数据顺序 （可选）
        packed_length=max_length,
        seed=1024)
 
-Step 5, 启动训练
+
+步骤 5：启动训练
 ----------------
 
 在 slurm 集群调度系统中可以通过以下命令启动训练：
 
-.. code::
+.. code-block:: console
 
-   srun ${SRUN_ARGS} xtuner train internlm2_7b_w_tokenized_dataset_copy.py --launcher slurm --deepspeed deepspeed_zero1
+   $ srun ${SRUN_ARGS} xtuner train internlm2_7b_w_tokenized_dataset_copy.py --launcher slurm --deepspeed deepspeed_zero1
 
 若出现 OOM 现象，可尝试使用 zero2 或 zero3。以下命令可以使用 zero 3
 显存优化策略进行训练：
 
-.. code::
+.. code-block:: console
 
-   srun ${SRUN_ARGS} xtuner train internlm2_7b_w_tokenized_dataset_copy.py --launcher slurm --deepspeed deepspeed_zero3
+   $ srun ${SRUN_ARGS} xtuner train internlm2_7b_w_tokenized_dataset_copy.py --launcher slurm --deepspeed deepspeed_zero3
 
 在阿里云 DLC 中可通过以下命令启动训练：
 
@@ -228,22 +236,22 @@ Step 5, 启动训练
        --deepspeed deepspeed_zero1 \
        --work-dir work_dirs/${EXP_NAME}
 
-Step 6, 转模型
+步骤 6：转模型
 --------------
 
 deepspeed 转 hf：
 
-.. code::
+.. code-block:: console
 
-   python xtuner/tools/model_converters/pth_to_hf.py internlm2_7b_w_tokenized_dataset_copy.py /src/model/path /hf/dst/model/path
+   $ python xtuner/tools/model_converters/pth_to_hf.py internlm2_7b_w_tokenized_dataset_copy.py /src/model/path /hf/dst/model/path
 
 hf 转 Turbomind：
 
-.. code::
+.. code-block:: console
 
-   lmdeploy convert internlm2-chat-7b /hf/dst/model/path --dst-path /turbomind/dst/model/path
+   $ lmdeploy convert internlm2-chat-7b /hf/dst/model/path --dst-path /turbomind/dst/model/path
 
-Step 7，Turbomind 评测
+步骤 7：Turbomind 评测
 ----------------------
 
 请参考 `OpenCompass LMDeploy

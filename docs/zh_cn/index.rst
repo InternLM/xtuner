@@ -74,7 +74,6 @@
    :caption: InternEvo 迁移
 
    internevo_migration/internevo_migration.rst
-   internevo_migration/ftdp_dataset/ftdp.md
    internevo_migration/ftdp_dataset/Case4.rst
    internevo_migration/ftdp_dataset/Case1.rst
    internevo_migration/ftdp_dataset/Case2.rst
