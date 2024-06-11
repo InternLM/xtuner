@@ -154,7 +154,8 @@ def dispatch_attn_forward(model):
     attn_forward = None
     for module in model.modules():
         name = type(module).__name__
-        if IS_LOW_VERSION_TRANSFORMERS and name in ATTN_LEGACY_DISPATCH_MAPPING:
+        if (IS_LOW_VERSION_TRANSFORMERS
+                and name in ATTN_LEGACY_DISPATCH_MAPPING):
             if attn_forward is None:
                 attn_forward = ATTN_LEGACY_DISPATCH_MAPPING[name]
                 attn_forward = attn_forward.build()
@@ -181,13 +182,14 @@ def dispatch_varlen_attn_forward(model):
     varlen_attn_forward = None
     for module in model.modules():
         name = type(module).__name__
-        if IS_LOW_VERSION_TRANSFORMERS and name in VARLEN_ATTN_LEGACY_DISPATCH_MAPPING:
+        if (IS_LOW_VERSION_TRANSFORMERS
+                and name in VARLEN_ATTN_LEGACY_DISPATCH_MAPPING):
             if varlen_attn_forward is None:
                 varlen_attn_forward = VARLEN_ATTN_LEGACY_DISPATCH_MAPPING[name]
                 varlen_attn_forward = varlen_attn_forward.build()
             print_log(
-                f'Dispatch legacy {name} varlen forward. {NO_ATTN_WEIGHTS_MSG}',
-                'current')
+                f'Dispatch legacy {name} varlen forward. '
+                f'{NO_ATTN_WEIGHTS_MSG}', 'current')
             module.forward = types.MethodType(varlen_attn_forward, module)
         elif name in VARLEN_ATTN_DISPATCH_MAPPING:
             if varlen_attn_forward is None:
