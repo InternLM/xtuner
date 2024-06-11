@@ -285,7 +285,7 @@ Pad 后，我们需要对长序列均等切分：
         input_ids, labels, position_ids)
 
 .. tip::
-  以上两步在 ``xtuner/dataset/collate_fns/defalut_collate_fn.py`` 中实现。
+  以上两步在 ``xtuner/dataset/collate_fns/default_collate_fn.py`` 中实现。
 
 Attention
 -----------
