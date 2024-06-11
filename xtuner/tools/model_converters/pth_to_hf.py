@@ -1,7 +1,10 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import argparse
+import json
+import os
 import os.path as osp
 import shutil
+import sys
 import warnings
 
 from accelerate import init_empty_weights
@@ -15,6 +18,9 @@ from tqdm import tqdm
 from xtuner.configs import cfgs_name_path
 from xtuner.model.utils import guess_load_checkpoint
 from xtuner.registry import BUILDER
+
+sys.path.insert(0, os.getcwd())
+sys.path.append('./')
 
 
 def parse_args():
