@@ -3,6 +3,8 @@ import os
 import warnings
 
 import torch
+from mmengine.dist import master_only
+from mmengine.utils import mkdir_or_exist
 from mmengine.hooks import Hook
 from mmengine.model import is_model_wrapper
 from mmengine.utils.misc import get_object_from_string
@@ -90,9 +92,13 @@ class EvaluateChatHook(Hook):
             self.stop_criteria.append(
                 StopWordStoppingCriteria(self.tokenizer, word))
 
+        self.is_first_run = True
+
+    @master_only
     def _save_eval_output(self, runner, eval_outputs):
         save_path = os.path.join(runner.log_dir, 'vis_data',
                                  f'eval_outputs_iter_{runner.iter}.txt')
+        mkdir_or_exist(os.path.dirname(save_path))
         with open(save_path, 'w', encoding='utf-8') as f:
             for i, output in enumerate(eval_outputs):
                 f.write(f'Eval output {i + 1}:\n{output}\n\n')
@@ -196,6 +202,13 @@ class EvaluateChatHook(Hook):
             model = model.module
 
         device = next(iter(model.parameters())).device
+
+        if self.is_first_run:
+            # hardcode for qlora DeepSpeed ZeRO3, put buffers and QuantState to
+            # device
+            model.to(device)
+            self.is_first_run = False
+
         is_checkpointing = model.llm.is_gradient_checkpointing
         use_cache = model.llm.config.use_cache
 

@@ -96,6 +96,7 @@ class ThroughputHook(Hook):
         batch_size, sequence_len = self._get_batch_size_and_sequence_len(
             data_batch)
         sequence_parallel_size = get_sequence_parallel_world_size()
+        sequence_len /= sequence_parallel_size
 
         message_hub = runner.message_hub
         iter_time = message_hub.get_scalar('train/time').current()

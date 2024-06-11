@@ -2,9 +2,15 @@
 import argparse
 import os.path as osp
 import shutil
+import warnings
 
+from accelerate import init_empty_weights
+from accelerate.utils import set_module_tensor_to_device
+from mmengine import print_log
 from mmengine.config import Config, DictAction
 from mmengine.fileio import PetrelBackend, get_file_backend
+from mmengine.utils import mkdir_or_exist
+from tqdm import tqdm
 
 from xtuner.configs import cfgs_name_path
 from xtuner.model.utils import guess_load_checkpoint
@@ -28,6 +34,15 @@ def parse_args():
         default='2GB',
         help='Only applicable for LLM. The maximum size for '
         'each sharded checkpoint.')
+    parser.add_argument(
+        '--safe-serialization',
+        action='store_true',
+        help='Indicate if using `safe_serialization`')
+    parser.add_argument(
+        '--save-format',
+        default='xtuner',
+        choices=('xtuner', 'official', 'huggingface'),
+        help='Only applicable for LLaVAModel. Indicate the save format.')
     parser.add_argument(
         '--cfg-options',
         nargs='+',
@@ -59,10 +74,31 @@ def main():
 
     model_name = cfg.model.type if isinstance(cfg.model.type,
                                               str) else cfg.model.type.__name__
+    use_meta_init = True
+
     if 'LLaVAModel' in model_name:
         cfg.model.pretrained_pth = None
+        if args.save_format != 'xtuner':
+            use_meta_init = False
 
-    model = BUILDER.build(cfg.model)
+    if use_meta_init:
+        try:
+            # Initializing the model with meta-tensor can reduce unwanted
+            # memory usage.
+            with init_empty_weights():
+                with warnings.catch_warnings():
+                    warnings.filterwarnings(
+                        'ignore', message='.*non-meta.*', category=UserWarning)
+                    model = BUILDER.build(cfg.model)
+        except NotImplementedError as e:
+            # Cannot initialize the model with meta tensor if the model is
+            # quantized.
+            if 'Cannot copy out of meta tensor' in str(e):
+                model = BUILDER.build(cfg.model)
+            else:
+                raise e
+    else:
+        model = BUILDER.build(cfg.model)
 
     backend = get_file_backend(args.pth_model)
     if isinstance(backend, PetrelBackend):
@@ -72,69 +108,28 @@ def main():
     else:
         state_dict = guess_load_checkpoint(args.pth_model)
 
-    model.load_state_dict(state_dict, strict=False)
-    print(f'Load PTH model from {args.pth_model}')
+    for name, param in tqdm(state_dict.items(), desc='Load State Dict'):
+        set_module_tensor_to_device(model, name, 'cpu', param)
 
-    if 'LLaVAModel' in model_name:
-        if cfg.model.get('llm') and (not cfg.model.get('freeze_llm', False)
-                                     or cfg.model.get('llm_lora')):
-            if 'PeftModel' in model.llm.__class__.__name__:
-                llm_path = osp.join(args.save_dir, 'llm_adapter')
-                print(f'Saving LLM adapter to {llm_path}')
-            else:
-                llm_path = args.save_dir
-                print(f'Saving LLM tokenizer to {llm_path}')
-                tokenizer = BUILDER.build(cfg.tokenizer)
-                tokenizer.save_pretrained(llm_path)
-                print(f'Saving LLM to {llm_path}')
-            if not args.fp32:
-                print('Convert LLM to float16')
-                model.llm.half()
-            model.llm.save_pretrained(
-                llm_path, max_shard_size=args.max_shard_size)
+    model.llm.config.use_cache = True
 
-        if cfg.model.get('visual_encoder') and (
-                not cfg.model.get('freeze_visual_encoder', False)
-                or cfg.model.get('visual_encoder_lora')):
-            if 'PeftModel' in model.visual_encoder.__class__.__name__:
-                visual_encoder_path = osp.join(args.save_dir,
-                                               'visual_encoder_adapter')
-                print(
-                    f'Saving visual_encoder adapter to {visual_encoder_path}')
-            else:
-                visual_encoder_path = osp.join(args.save_dir, 'visual_encoder')
-                print('Saving visual_encoder image_processor to'
-                      f'{visual_encoder_path}')
-                image_processor = BUILDER.build(cfg.image_processor)
-                image_processor.save_pretrained(visual_encoder_path)
-                print(f'Saving visual_encoder to {visual_encoder_path}')
-            model.visual_encoder.save_pretrained(
-                visual_encoder_path, max_shard_size=args.max_shard_size)
+    print_log(f'Load PTH model from {args.pth_model}', 'current')
 
-        if hasattr(model, 'projector'):
-            projector_path = osp.join(args.save_dir, 'projector')
-            print(f'Saving projector to {projector_path}')
-            model.projector.save_pretrained(
-                projector_path, max_shard_size=args.max_shard_size)
-    else:
-        llm_path = args.save_dir
-        if 'PeftModel' in model.llm.__class__.__name__:
-            print(f'Saving adapter to {llm_path}')
-        else:
-            print(f'Saving LLM tokenizer to {llm_path}')
-            tokenizer = BUILDER.build(cfg.tokenizer)
-            tokenizer.save_pretrained(llm_path)
-            print(f'Saving LLM to {llm_path}')
-        if not args.fp32:
-            print('Convert LLM to float16')
-            model.llm.half()
-        model.llm.save_pretrained(
-            llm_path,
-            max_shard_size=args.max_shard_size,
-            safe_serialization=False)
+    mkdir_or_exist(args.save_dir)
+
+    save_pretrained_kwargs = {
+        'max_shard_size': args.max_shard_size,
+        'safe_serialization': args.safe_serialization
+    }
+    model.to_hf(
+        cfg=cfg,
+        save_dir=args.save_dir,
+        fp32=args.fp32,
+        save_pretrained_kwargs=save_pretrained_kwargs,
+        save_format=args.save_format)
 
     shutil.copyfile(args.config, osp.join(args.save_dir, 'xtuner_config.py'))
-    print('All done!')
+    print_log('All done!', 'current')
 
 
 if __name__ == '__main__':

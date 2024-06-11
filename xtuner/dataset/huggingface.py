@@ -298,7 +298,7 @@ def process_hf_dataset(dataset,
         return process(**kwargs)
 
     xtuner_dataset_timeout = timedelta(
-        minutes=int(os.getenv('XTUNER_DATASET_TIMEOUT', default=30)))
+        minutes=int(os.getenv('XTUNER_DATASET_TIMEOUT', default=60)))
     print_log(
         f'xtuner_dataset_timeout = {xtuner_dataset_timeout}', logger='current')
     # monitored barrier requires gloo process group to perform host-side sync.

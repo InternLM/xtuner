@@ -77,19 +77,12 @@ def register_function(cfg_dict):
             register_function(value)
 
 
-def check_cfg(cfg):
+def check_cfg(cfg, args):
     if getattr(cfg, 'use_varlen_attn',
                False) and cfg.train_dataloader.batch_size > 1:
         raise NotImplementedError(
             f'If utilizing varlen attention, the batch size should be'
             f' set to 1, but got {cfg.train_dataloader.batch_size}')
-
-    if getattr(cfg, 'use_varlen_attn', False) and (not getattr(
-            cfg.train_dataloader.dataset, 'pack_to_max_length', True)):
-        raise AssertionError(
-            'When using varlen attention, `pack_to_max_length`'
-            'should be set to True, but got use_varlen_attn = True and '
-            'pack_to_max_length = False.')
 
     if getattr(cfg, 'use_varlen_attn', False):
         sequence_parallel = getattr(cfg, 'sequence_parallel', 1)
@@ -104,6 +97,31 @@ def check_cfg(cfg):
     if getattr(cfg, 'sequence_parallel_size', 1) > 1:
         assert SUPPORT_FLASH2, ('`flash_attn` is required if you want to use '
                                 'sequence parallel.')
+        attn_implementation = getattr(cfg.model.llm, 'attn_implementation',
+                                      None)
+        assert (attn_implementation is None or
+                attn_implementation == 'flash_attention_2'), \
+            ('If you want to use sequence parallel, please set '
+                'attn_implementation to `flash_attention_2` or do not '
+                f'set this attribute. Got `{attn_implementation}` .')
+
+    if getattr(cfg, 'use_varlen_attn', False):
+        assert SUPPORT_FLASH2, ('`flash_attn` is required if you set '
+                                '`use_varlen_attn` to True.')
+        attn_implementation = getattr(cfg.model.llm, 'attn_implementation',
+                                      None)
+        assert (attn_implementation is None or
+                attn_implementation == 'flash_attention_2'), \
+            ('If you want to set `use_varlen_attn` to True, please set'
+                ' attn_implementation to `flash_attention_2` or do not '
+                f'set this attribute. Got `{attn_implementation}` .')
+
+    if args.deepspeed is None:
+        assert getattr(cfg, 'sequence_parallel_size', 1) == 1, \
+            ('Sequence parallel training without DeepSpeed lacks validation.'
+             'Please use DeepSpeed to optimize the training phase by '
+             '`--deepspeed deepspeed_zero1 (deepspeed_zero2 or '
+             'deepspeed_zero3)`.')
 
 
 def main():
@@ -126,7 +144,7 @@ def main():
     # change these FunctionType object to str
     register_function(cfg._cfg_dict)
 
-    check_cfg(cfg)
+    check_cfg(cfg, args)
 
     if cfg.get('framework', 'mmengine').lower() == 'huggingface':
         # set default training_args

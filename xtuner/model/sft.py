@@ -13,8 +13,10 @@ from torch import nn
 from transformers import AutoConfig, PreTrainedModel, PreTrainedTokenizer
 from transformers.integrations import is_deepspeed_zero3_enabled
 
-from xtuner.parallel.sequence import (get_sequence_parallel_world_size,
-                                      reduce_sequence_parallel_loss)
+from xtuner.parallel.sequence import (get_sequence_parallel_group,
+                                      get_sequence_parallel_world_size,
+                                      reduce_sequence_parallel_loss,
+                                      split_for_sequence_parallel)
 from xtuner.registry import BUILDER
 from .modules import dispatch_modules
 from .modules.dispatch import SUPPORT_FLASH1, SUPPORT_FLASH2
@@ -148,56 +150,82 @@ class SupervisedFinetune(BaseModel):
     @staticmethod
     def _prepare_for_long_context_training(cfg, llm_cfg,
                                            max_position_embeddings):
+        if not hasattr(llm_cfg, 'rope_scaling'):
+            print_log('Current model does not support RoPE scaling.',
+                      'current')
+            return
 
-        orig_rope_scaling = getattr(llm_cfg, 'rope_scaling', None)
-        if orig_rope_scaling is None:
-            orig_rope_scaling = {'factor': 1}
+        current_max_length = getattr(llm_cfg, 'max_position_embeddings', None)
+        if current_max_length and max_position_embeddings > current_max_length:
+            print_log(
+                f'Enlarge max model length from {current_max_length} '
+                f'to {max_position_embeddings}.', 'current')
+            scaling_factor = float(
+                math.ceil(max_position_embeddings / current_max_length))
+        else:
+            print_log(
+                'The input `max_position_embeddings` is smaller than '
+                'origin max length. Consider increase input length.',
+                'current')
+            scaling_factor = 1.0
+        cfg.rope_scaling = {'type': 'linear', 'factor': scaling_factor}
 
-        orig_rope_scaling_factor = orig_rope_scaling[
-            'factor'] if 'factor' in orig_rope_scaling.keys() else 1
-        orig_ctx_len = getattr(llm_cfg, 'max_position_embeddings', None)
-        if orig_ctx_len:
-            orig_ctx_len *= orig_rope_scaling_factor
-            if max_position_embeddings > orig_ctx_len:
-                scaling_factor = float(
-                    math.ceil(max_position_embeddings / orig_ctx_len))
-                llm_cfg.rope_scaling = {
-                    'type': 'linear',
-                    'factor': scaling_factor
-                }
-
-        # hardcode for internlm2
-        llm_cfg.attn_implementation = 'flash_attention_2'
-        cfg.config = llm_cfg
-
-        return cfg, llm_cfg
+        return cfg
 
     @staticmethod
     def _prepare_for_flash_attn(cfg, llm_cfg):
         cls_name = type(llm_cfg).__name__
         SUPPORT_SDPA_ATTN = ('LlamaConfig', 'GemmaConfig', 'MistralConfig',
-                             'MixtralConfig', 'Qwen2Config',
-                             'Starcoder2Config', 'Starcoder2Config')
+                             'MixtralConfig', 'Qwen2Config', 'Qwen2MoeConfig',
+                             'Starcoder2Config', 'Starcoder2Config',
+                             'Phi3Config')
         SUPPORT_FLASH_ATTN2 = ('InternLM2Config', 'LlamaConfig', 'GemmaConfig',
                                'MistralConfig', 'MixtralConfig', 'Qwen2Config',
-                               'Starcoder2Config', 'Starcoder2Config')
+                               'Qwen2MoeConfig', 'Starcoder2Config',
+                               'Starcoder2Config', 'Phi3Config')
 
-        if SUPPORT_FLASH2 and cls_name in SUPPORT_FLASH_ATTN2:
-            cfg.torch_dtype = torch.bfloat16 \
-                if torch.cuda.is_bf16_supported() else torch.float16
+        torch_dtype = torch.bfloat16 if (
+            torch.cuda.is_available() and torch.cuda.is_bf16_supported()) \
+            else torch.float16
+
+        if getattr(cfg, 'attn_implementation', None) is not None:
+            # Flash Attention 2.0 only supports torch.float16 and
+            # torch.bfloat16 dtypes
+            if cfg.attn_implementation == 'flash_attention_2':
+                cfg.torch_dtype = torch_dtype
+        elif SUPPORT_FLASH2 and cls_name in SUPPORT_FLASH_ATTN2:
+            cfg.torch_dtype = torch_dtype
             cfg.attn_implementation = 'flash_attention_2'
         elif SUPPORT_FLASH1 and cls_name in SUPPORT_SDPA_ATTN:
             cfg.attn_implementation = 'sdpa'
 
-        return cfg, llm_cfg
+        return cfg
+
+    @staticmethod
+    def _prepare_for_qlora_zero3(cfg):
+        if (not is_deepspeed_zero3_enabled()) or (not hasattr(
+                cfg, 'quantization_config')):
+            return cfg
+
+        torch_dtype = torch.bfloat16 if (
+            torch.cuda.is_available() and torch.cuda.is_bf16_supported()) \
+            else torch.float16
+
+        cfg.torch_dtype = torch_dtype
+        quantization_config = cfg.quantization_config
+        quantization_config.bnb_4bit_compute_dtype = torch_dtype
+        quantization_config.bnb_4bit_quant_storage = torch_dtype
+
+        return cfg
 
     def _dispatch_lm_model_cfg(self, cfg, max_position_embeddings=None):
+        cfg = self._prepare_for_qlora_zero3(cfg)
         pretrained_model_name_or_path = cfg.pretrained_model_name_or_path
         llm_cfg = AutoConfig.from_pretrained(
             pretrained_model_name_or_path, trust_remote_code=True)
-        cfg, llm_cfg = self._prepare_for_flash_attn(cfg, llm_cfg)
+        cfg = self._prepare_for_flash_attn(cfg, llm_cfg)
         if max_position_embeddings is not None:
-            cfg, llm_cfg = self._prepare_for_long_context_training(
+            cfg = self._prepare_for_long_context_training(
                 cfg, llm_cfg, max_position_embeddings)
         return cfg
 
@@ -232,16 +260,32 @@ class SupervisedFinetune(BaseModel):
         logits_dict = [{'logits': logits} for logits in outputs.logits]
         return logits_dict
 
-    def compute_sequence_parallel_loss(self, data):
+    @staticmethod
+    def _split_for_sequence_parallel(data):
+        # attention mask should not be split
+        ARGS_NEED_TO_SPLIT = ('input_ids', 'labels', 'position_ids')
+        sp_group = get_sequence_parallel_group()
+        for key in ARGS_NEED_TO_SPLIT:
+            val = data.get(key, None)
+            if val is not None:
+                # `dim` is 1 as the shape of tensor is (bs, seq_len, ...)
+                data[key] = split_for_sequence_parallel(
+                    val, dim=1, sp_group=sp_group)
+        return data
+
+    def _compute_sequence_parallel_loss(self, data):
+        data = self._split_for_sequence_parallel(data)
         outputs = self.llm(**data)
         labels = data['labels']
         num_tokens = (labels != -100).sum()
-        loss = reduce_sequence_parallel_loss(outputs.loss, num_tokens)
+        sp_group = get_sequence_parallel_group()
+        loss = reduce_sequence_parallel_loss(outputs.loss, num_tokens,
+                                             sp_group)
         return {'loss': loss}
 
     def compute_loss(self, data, data_samples=None):
         if get_sequence_parallel_world_size() > 1:
-            return self.compute_sequence_parallel_loss(data)
+            return self._compute_sequence_parallel_loss(data)
         else:
             outputs = self.llm(**data)
             loss_dict = {'loss': outputs.loss}
@@ -259,3 +303,23 @@ class SupervisedFinetune(BaseModel):
             return super().__getattr__(name)
         except AttributeError:
             return getattr(self.llm, name)
+
+    def to_hf(self,
+              cfg,
+              save_dir,
+              fp32=False,
+              save_pretrained_kwargs={},
+              **kwargs):
+        self.llm.config.use_cache = True
+        if not fp32:
+            print_log('Convert LLM to float16', 'current')
+            self.llm.half()
+        if self.use_lora:
+            print_log(f'Saving adapter to {save_dir}', 'current')
+        else:
+            print_log(f'Saving LLM tokenizer to {save_dir}', 'current')
+            tokenizer = BUILDER.build(cfg.tokenizer)
+            tokenizer.save_pretrained(save_dir)
+            print_log(f'Saving LLM to {save_dir}', 'current')
+        self.llm.save_pretrained(save_dir, **save_pretrained_kwargs)
+        self.llm.config.use_cache = False

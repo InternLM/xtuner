@@ -3,7 +3,6 @@ import os.path as osp
 from typing import List, Optional
 
 import torch
-from mmengine import print_log
 from mmengine.utils.misc import get_object_from_string
 from peft import PeftType
 from torch import nn
@@ -18,6 +17,19 @@ def set_obj_dtype(d):
             d[key] = getattr(torch, value.split('.')[-1])
 
 
+def try_build_module(cfg):
+    builder = cfg['type']
+    if isinstance(builder, str):
+        builder = get_object_from_string(builder)
+    if builder is None:
+        # support handling cfg with key 'type' can not be built, such as
+        # {'rope_scaling': {'type': 'linear', 'factor': 2.0}}
+        return cfg
+    cfg.pop('type')
+    module_built = builder(**cfg)
+    return module_built
+
+
 def traverse_dict(d):
     if isinstance(d, dict):
         set_obj_dtype(d)
@@ -25,12 +37,8 @@ def traverse_dict(d):
             if isinstance(value, dict):
                 traverse_dict(value)
                 if 'type' in value:
-                    builder = value.pop('type')
-                    if isinstance(builder, str):
-                        builder = get_object_from_string(builder)
-                    new_value = builder(**value)
-                    d[key] = new_value
-                    print_log(f'{key} convert to {builder}')
+                    module_built = try_build_module(value)
+                    d[key] = module_built
     elif isinstance(d, list):
         for element in d:
             traverse_dict(element)
@@ -293,8 +301,8 @@ def guess_load_checkpoint(pth_model):
             state_dict = state_dict['state_dict']
     elif osp.isdir(pth_model):
         try:
-            from deepspeed.utils.zero_to_fp32 import \
-                get_fp32_state_dict_from_zero_checkpoint
+            from xtuner.utils.zero_to_any_dtype import \
+                get_state_dict_from_zero_checkpoint
         except ImportError:
             raise ImportError(
                 'The provided PTH model appears to be a DeepSpeed checkpoint. '
@@ -302,7 +310,7 @@ def guess_load_checkpoint(pth_model):
                 'environment. This suggests that DeepSpeed may not be '
                 'installed or is incorrectly configured. Please verify your '
                 'setup.')
-        state_dict = get_fp32_state_dict_from_zero_checkpoint(
+        state_dict = get_state_dict_from_zero_checkpoint(
             osp.dirname(pth_model), osp.basename(pth_model))
     else:
         raise FileNotFoundError(f'Cannot find {pth_model}')
