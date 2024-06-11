@@ -14,6 +14,7 @@ from xtuner.engine.hooks import (EvaluateChatHook,
                                  VarlenAttnArgsToMessageHubHook)
 from xtuner.engine.runner import TrainLoop
 from xtuner.model.orpo import ORPO
+from xtuner.parallel.sequence import SequenceParallelSampler
 from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
 
 #######################################################################
@@ -28,9 +29,13 @@ prompt_template = PROMPT_TEMPLATE.internlm2_chat
 max_length = 2048
 max_packed_length = max_length * 2
 
+# parallel
+sequence_parallel_size = 1
+
 # Scheduler & Optimizer
 batch_size = 1  # per_device
 accumulative_counts = 16
+accumulative_counts *= sequence_parallel_size
 dataloader_num_workers = 0
 max_epochs = 3
 optim_type = AdamW
@@ -73,6 +78,9 @@ model = dict(
 #######################################################################
 #                      PART 3  Dataset & Dataloader                   #
 #######################################################################
+sampler = SequenceParallelSampler \
+    if sequence_parallel_size > 1 else DefaultSampler
+
 train_dataset = dict(
     type=build_preference_dataset,
     dataset=dict(

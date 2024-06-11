@@ -18,6 +18,7 @@ from xtuner.engine.hooks import (EvaluateChatHook,
                                  VarlenAttnArgsToMessageHubHook)
 from xtuner.engine.runner import TrainLoop
 from xtuner.model.orpo import ORPO
+from xtuner.parallel.sequence import SequenceParallelSampler
 from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
 
 #######################################################################
@@ -32,13 +33,17 @@ prompt_template = PROMPT_TEMPLATE.llama3_chat
 max_length = 2048
 max_packed_length = max_length * 2
 
+# parallel
+sequence_parallel_size = 1
+
 # Scheduler & Optimizer
 batch_size = 1  # per_device
-accumulative_counts = 8
+accumulative_counts = 16
+accumulative_counts *= sequence_parallel_size
 dataloader_num_workers = 0
 max_epochs = 5  # refer to orpo repo
 optim_type = AdamW
-lr = 1e-4
+lr = 2e-5
 betas = (0.9, 0.999)
 weight_decay = 0
 max_norm = 1  # grad clip
@@ -94,6 +99,9 @@ model = dict(
 #######################################################################
 #                      PART 3  Dataset & Dataloader                   #
 #######################################################################
+sampler = SequenceParallelSampler \
+    if sequence_parallel_size > 1 else DefaultSampler
+
 train_dataset = dict(
     type=build_preference_dataset,
     dataset=dict(
@@ -115,7 +123,7 @@ train_dataloader = dict(
     batch_size=batch_size,
     num_workers=dataloader_num_workers,
     dataset=train_dataset,
-    sampler=dict(type=DefaultSampler, shuffle=True),
+    sampler=dict(type=sampler, shuffle=True),
     collate_fn=dict(
         type=preference_collate_fn, use_varlen_attn=use_varlen_attn))
 
