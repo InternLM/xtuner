@@ -203,8 +203,7 @@ class PackedDatasetWrapper(Dataset):
     def __init__(self,
                  dataset,
                  max_packed_length=16384,
-                 shuffle_before_pack=True,
-                 seed=42) -> None:
+                 shuffle_before_pack=True) -> None:
         super().__init__()
         self.max_packed_length = max_packed_length
         self.lengths = []
@@ -212,8 +211,7 @@ class PackedDatasetWrapper(Dataset):
 
         indices = np.arange(len(dataset))
         if shuffle_before_pack:
-            np_random = np.random.RandomState(seed)
-            np_random.shuffle(indices)
+            np.random.shuffle(indices)
 
         data_bin = []
         bin_seq_len = 0

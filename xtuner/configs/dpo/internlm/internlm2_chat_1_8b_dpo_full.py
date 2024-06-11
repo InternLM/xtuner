@@ -87,7 +87,6 @@ train_dataset = dict(
     num_proc=32,
     use_varlen_attn=use_varlen_attn,
     shuffle_before_pack=True,
-    seed=42,
 )
 
 train_dataloader = dict(

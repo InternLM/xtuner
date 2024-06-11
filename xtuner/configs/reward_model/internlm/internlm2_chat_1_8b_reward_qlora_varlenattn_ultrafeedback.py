@@ -106,7 +106,6 @@ train_dataset = dict(
     use_varlen_attn=use_varlen_attn,
     max_packed_length=max_packed_length,
     shuffle_before_pack=True,
-    seed=42,
 )
 
 train_dataloader = dict(
