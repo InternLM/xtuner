@@ -37,8 +37,12 @@ class ORPO(SupervisedFinetune):
             all_logits,  # bs, seqlen,vocab_size
             average_log_prob,  # bs, seqlen,vocab_size
             labels,  # bs, seqlen
-            loss_mask,  # bs, seqlen
     ):
+        labels = labels[:, 1:].clone()
+        all_logits = all_logits[:, :-1, :]
+
+        labels[labels == -100] = 0
+        loss_mask = labels != 0
         all_logps = self._gather_masked_logits(all_logits, labels,
                                                loss_mask).sum(-1)
 
@@ -50,7 +54,13 @@ class ORPO(SupervisedFinetune):
         return chosen_logps, rejected_logps
 
     def get_var_len_atten_logps(self, all_logits, average_log_prob, labels,
-                                loss_mask, cu_seqlens, attention_mask):
+                                cu_seqlens, attention_mask):
+        labels = labels[:, 1:].clone()
+        all_logits = all_logits[:, :-1, :]
+        labels[labels == -100] = 0
+        loss_mask = labels != 0
+        cu_seqlens[-1] = labels.size(1)
+
         masked_logps = self._gather_masked_logits(all_logits, labels,
                                                   loss_mask)
         seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
@@ -147,11 +157,8 @@ class ORPO(SupervisedFinetune):
         if not self.use_varlen_attn:
             chosen_nll_loss = self.cross_entropy_loss(all_logits[::2],
                                                       labels_ori.clone()[::2])
-            labels = labels_ori.clone()
-            labels[labels == -100] = 0
-            loss_mask = labels != 0
             chosen_logps, rejected_logps = self.get_logps(
-                all_logits, True, labels, loss_mask)
+                all_logits, True, labels_ori)
         else:
             message_hub = MessageHub.get_instance('varlen_attn_args')
             rank = dist.get_rank()
@@ -179,12 +186,8 @@ class ORPO(SupervisedFinetune):
             chosen_labels = torch.cat(chosen_labels, dim=1)
             chosen_nll_loss = self.cross_entropy_loss(chosen_logits,
                                                       chosen_labels)
-            labels = labels_ori.clone()
-            labels[labels == -100] = 0
-            loss_mask = labels != 0
             chosen_logps, rejected_logps = self.get_var_len_atten_logps(
-                all_logits, True, labels, loss_mask, cu_seqlens,
-                attention_mask)
+                all_logits, True, labels, cu_seqlens, attention_mask)
         (losses, chosen_rewards, rejected_rewards, log_odds_ratio,
          log_odds_chosen) = self.odds_ratio_loss(chosen_logps, rejected_logps)
         losses = losses.mean()

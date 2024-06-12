@@ -63,8 +63,13 @@ class DPO(SupervisedFinetune):
             all_logits,  # bs, seqlen,vocab_size
             all_ref_logits,  # bs, seqlen,vocab_size
             labels,  # bs, seqlen
-            loss_mask,  # bs, seqlen
     ):
+        labels = labels[:, 1:].clone()
+        all_logits = all_logits[:, :-1, :]
+        all_ref_logits = all_ref_logits[:, :-1, :]
+
+        labels[labels == -100] = 0
+        loss_mask = labels != 0
         all_logps = self._gather_masked_logits(all_logits, labels,
                                                loss_mask).sum(-1)
         all_ref_logps = self._gather_masked_logits(all_ref_logits, labels,
@@ -82,7 +87,15 @@ class DPO(SupervisedFinetune):
                 reference_chosen_logps, reference_rejected_logps)
 
     def get_var_len_atten_logps(self, all_logits, all_ref_logits, labels,
-                                loss_mask, cu_seqlens, attention_mask):
+                                cu_seqlens, attention_mask):
+        labels = labels[:, 1:].clone()
+        all_logits = all_logits[:, :-1, :]
+        all_ref_logits = all_ref_logits[:, :-1, :]
+        cu_seqlens[-1] = labels.size(1)
+
+        labels[labels == -100] = 0
+        loss_mask = labels != 0
+
         masked_logps = self._gather_masked_logits(all_logits, labels,
                                                   loss_mask)
         masked_ref_logps = self._gather_masked_logits(all_ref_logits, labels,
@@ -176,13 +189,11 @@ class DPO(SupervisedFinetune):
                 sp_group=get_sequence_parallel_group(),
                 grad_scale='up')
 
-        labels[labels == -100] = 0
-        loss_mask = labels != 0
         if not self.use_varlen_attn:
             (policy_chosen_logps, policy_rejected_logps,
              reference_chosen_logps,
              reference_rejected_logps) = self.get_logps(
-                 all_logits, all_ref_logits, labels, loss_mask)
+                 all_logits, all_ref_logits, labels)
         else:
             message_hub = MessageHub.get_instance('varlen_attn_args')
             rank = dist.get_rank()
@@ -190,7 +201,7 @@ class DPO(SupervisedFinetune):
             (policy_chosen_logps, policy_rejected_logps,
              reference_chosen_logps,
              reference_rejected_logps) = self.get_var_len_atten_logps(
-                 all_logits, all_ref_logits, labels, loss_mask, cu_seqlens,
+                 all_logits, all_ref_logits, labels, cu_seqlens,
                  data['attention_mask'])
 
         pi_logratios = policy_chosen_logps - policy_rejected_logps
