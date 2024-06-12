@@ -100,4 +100,4 @@ XTuner 内置了五种 DeepSpeed ZeRO 配置：
     DeepSpeed Config 中的 ``gradient_clipping`` 会被 XTuner config 中的 ``optim_wrapper.clip_grad.max_norm`` 设置覆盖
 
 .. warning::
-    XTuner 会根据所使用的 GPU 架构自动选择 ``fp16`` 或 ``bf16`` 训练，不受
+    XTuner 会根据所使用的 GPU 架构自动选择 ``fp16`` 或 ``bf16`` 训练，不受 DeepSpeed 配置文件的控制
