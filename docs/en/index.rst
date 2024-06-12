@@ -25,6 +25,10 @@ Welcome to XTuner's documentation!
    <a class="github-button" href="https://github.com/InternLM/xtuner/fork" data-icon="octicon-repo-forked" data-size="large" aria-label="Fork">Fork</a>
    </p>
 
+   <p style="text-align:center">
+   English | <a href="/zh-cn/"> 简体中文</a>
+   </p>
+
 
 
 Documentation

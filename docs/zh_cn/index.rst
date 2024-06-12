@@ -25,7 +25,9 @@
    <a class="github-button" href="https://github.com/InternLM/xtuner/fork" data-icon="octicon-repo-forked" data-size="large" aria-label="Fork">Fork</a>
    </p>
 
-
+   <p style="text-align:center">
+   <a href="/en/"> English</a> | 简体中文
+   </p>
 
 文档
 -------------
