@@ -67,6 +67,7 @@
    acceleration/train_extreme_long_sequence.rst
    acceleration/hyper_parameters.rst
    acceleration/triton_kernels.rst
+   acceleration/train_moe.rst
    acceleration/benchmark.rst
 
 
