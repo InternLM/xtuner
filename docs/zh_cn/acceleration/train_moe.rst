@@ -84,6 +84,9 @@ torchrun
 
     # excuete on node 2, 3, ..., 7
 
+.. warning::
+    目前 XTuner 只针对 MoE 模型全量微调进行了优化，针对 Lora 和 QLora 微调方法的优化会在未来发布。
+
 
 训练速度
 ---------------------
