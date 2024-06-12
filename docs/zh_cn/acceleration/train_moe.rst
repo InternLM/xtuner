@@ -99,9 +99,9 @@ torchrun
 
   * - Model
     - Seqlen
-    - use_varlen_attn
-    - sequence_parallel_size
-    - Tokens per second
+    - Varlen
+    - SP
+    - TGS
   * - deepseek v2 hf
     - 8k
     - False
