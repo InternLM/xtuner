@@ -28,6 +28,8 @@ from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
 pretrained_model_name_or_path = 'meta-llama/Meta-Llama-3-8B-Instruct'
 use_varlen_attn = True
 dpo_loss_type = 'sigmoid'  # One of ['sigmoid', 'hinge', 'ipo', 'kto_pair', 'sppo_hard', 'nca_pair', 'robust']  # noqa: E501
+loss_beta = 0.1
+label_smoothing = 0.0
 
 # Data
 prompt_template = PROMPT_TEMPLATE.llama3_chat
@@ -44,7 +46,7 @@ accumulative_counts *= sequence_parallel_size
 dataloader_num_workers = 0
 max_epochs = 3
 optim_type = AdamW
-lr = 2e-5
+lr = 5e-7  # refer to alignment handbook
 betas = (0.9, 0.999)
 weight_decay = 0
 max_norm = 1  # grad clip
@@ -76,6 +78,8 @@ model = dict(
     type=DPO,
     loss_type=dpo_loss_type,
     use_varlen_attn=use_varlen_attn,
+    beta=loss_beta,
+    label_smoothing=label_smoothing,
     llm=dict(
         type=AutoModelForCausalLM.from_pretrained,
         pretrained_model_name_or_path=pretrained_model_name_or_path,
