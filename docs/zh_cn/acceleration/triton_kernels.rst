@@ -1,6 +1,6 @@
 .. _triton_kernels:
 
-使用 Triton Kernel 加速训练
+Triton Kernel
 ===============================
 
 `Triton <https://github.com/openai/triton>`_ 是一种用于编写高效深度学习算子的编程语言。XTuner 支持使用 Triton Kernel 加速训练。
