@@ -57,6 +57,16 @@
 
 .. toctree::
    :maxdepth: 2
+   :caption: RLHF
+
+   rlhf/rlhf_intro.rst
+   rlhf/overview.rst
+   rlhf/quick_start.rst
+   rlhf/modify_settings.rst
+   rlhf/arch.rst
+
+.. toctree::
+   :maxdepth: 2
    :caption: 加速训练
 
    acceleration/deepspeed.rst
@@ -67,7 +77,6 @@
    acceleration/train_extreme_long_sequence.rst
    acceleration/hyper_parameters.rst
    acceleration/benchmark.rst
-
 
 .. toctree::
    :maxdepth: 1

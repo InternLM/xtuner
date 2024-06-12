@@ -58,6 +58,16 @@ Documentation
 
 .. toctree::
    :maxdepth: 2
+   :caption: RLHF
+
+   rlhf/rlhf_intro.rst
+   rlhf/overview.rst
+   rlhf/quickstart.rst
+   rlhf/modify_settings.rst
+   rlhf/arch.rst
+
+.. toctree::
+   :maxdepth: 2
    :caption: Acceleration
 
    acceleration/deepspeed.rst
