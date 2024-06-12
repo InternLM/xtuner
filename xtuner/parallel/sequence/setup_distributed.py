@@ -59,7 +59,7 @@ def get_sequence_parallel_world_size():
     global _SEQUENCE_PARALLEL_WORLD_SIZE
     if _SEQUENCE_PARALLEL_WORLD_SIZE is not None:
         return _SEQUENCE_PARALLEL_WORLD_SIZE
-    if not dist.is_initialized():
+    if not dist.is_initialized() or (_SEQUENCE_PARALLEL_GROUP is None):
         _SEQUENCE_PARALLEL_WORLD_SIZE = 1
     else:
         _SEQUENCE_PARALLEL_WORLD_SIZE = dist.get_world_size(
@@ -72,7 +72,7 @@ def get_sequence_parallel_rank():
     global _SEQUENCE_PARALLEL_RANK
     if _SEQUENCE_PARALLEL_RANK is not None:
         return _SEQUENCE_PARALLEL_RANK
-    if not dist.is_initialized():
+    if not dist.is_initialized() or (_SEQUENCE_PARALLEL_GROUP is None):
         _SEQUENCE_PARALLEL_RANK = 0
     else:
         _SEQUENCE_PARALLEL_RANK = dist.get_rank(

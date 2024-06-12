@@ -1,22 +1,42 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import math
+import os.path as osp
+import warnings
 from collections import OrderedDict
 
 import torch
 import torch.nn as nn
+from accelerate import init_empty_weights
+from mmengine import print_log
 from mmengine.config import Config, ConfigDict
 from mmengine.model import BaseModel
 from peft import get_peft_model, prepare_model_for_kbit_training
-from transformers import AutoConfig
+from transformers import (AddedToken, AutoConfig, CLIPImageProcessor,
+                          CLIPVisionModel, LlamaForCausalLM,
+                          LlamaTokenizerFast, LlavaConfig,
+                          LlavaForConditionalGeneration, LlavaProcessor)
 from transformers.integrations import is_deepspeed_zero3_enabled
 
 from xtuner.registry import BUILDER
+from xtuner.utils import DEFAULT_IMAGE_TOKEN
 from .modules import ProjectorConfig, ProjectorModel, dispatch_modules
 from .modules.dispatch import SUPPORT_FLASH1, SUPPORT_FLASH2
 from .utils import (LoadWoInit, find_all_linear_names,
                     get_peft_model_state_dict, guess_load_checkpoint,
                     make_inputs_require_grad,
                     prepare_inputs_labels_for_multimodal, traverse_dict)
+
+
+def convert_state_dict_to_hf(state_dict, mapping):
+    new_state_dict = {}
+    for key, value in state_dict.items():
+        if key.endswith('.inv_freq'):
+            continue
+        for key_to_modify, new_key in mapping.items():
+            if key_to_modify in key:
+                key = key.replace(key_to_modify, new_key)
+        new_state_dict[key] = value
+    return new_state_dict
 
 
 class LLaVAModel(BaseModel):
@@ -46,10 +66,11 @@ class LLaVAModel(BaseModel):
         self.llm.config.use_cache = False
         dispatch_modules(self.llm)
 
+        self.projector_depth = projector_depth
         projector_config = ProjectorConfig(
             visual_hidden_size=self.visual_encoder.config.hidden_size,
             llm_hidden_size=self.llm.config.hidden_size,
-            depth=projector_depth)
+            depth=self.projector_depth)
         self.projector = ProjectorModel(projector_config).to(
             self.visual_encoder.dtype)
 
@@ -88,7 +109,8 @@ class LLaVAModel(BaseModel):
             pretrained_state_dict = guess_load_checkpoint(pretrained_pth)
 
             self.load_state_dict(pretrained_state_dict, strict=False)
-            print(f'Load pretrained weight from {pretrained_pth}')
+            print_log(f'Load pretrained weight from {pretrained_pth}',
+                      'current')
 
         self.visual_select_layer = visual_select_layer
 
@@ -309,3 +331,305 @@ class LLaVAModel(BaseModel):
             return super().__getattr__(name)
         except AttributeError:
             return getattr(self.llm, name)
+
+    def to_hf(self,
+              cfg,
+              save_dir,
+              fp32=False,
+              save_pretrained_kwargs={},
+              save_format='xtuner',
+              **kwargs):
+        if save_format == 'xtuner':
+            self.to_xtuner_llava(cfg, save_dir, fp32, save_pretrained_kwargs)
+        elif save_format == 'huggingface':
+            self.to_huggingface_llava(cfg, save_dir, fp32,
+                                      save_pretrained_kwargs)
+        elif save_format == 'official':
+            self.to_official_llava(cfg, save_dir, fp32, save_pretrained_kwargs)
+        else:
+            raise NotImplementedError
+
+    def to_xtuner_llava(self,
+                        cfg,
+                        save_dir,
+                        fp32=False,
+                        save_pretrained_kwargs={}):
+        # LLM
+        self.llm.config.use_cache = True
+        if not fp32:
+            print_log('Convert LLM to float16', 'current')
+            self.llm.half()
+        if self.use_llm_lora:
+            llm_path = osp.join(save_dir, 'llm_adapter')
+            print_log(f'Saving LLM adapter to {llm_path}', 'current')
+            self.llm.save_pretrained(llm_path, **save_pretrained_kwargs)
+        elif not self.freeze_llm:
+            llm_path = save_dir
+            print_log(f'Saving LLM tokenizer to {llm_path}', 'current')
+            tokenizer = BUILDER.build(cfg.tokenizer)
+            tokenizer.save_pretrained(llm_path, **save_pretrained_kwargs)
+            print_log(f'Saving LLM to {llm_path}', 'current')
+            self.llm.save_pretrained(llm_path, **save_pretrained_kwargs)
+        self.llm.config.use_cache = False
+
+        # Visual Encoder
+        if self.use_visual_encoder_lora:
+            visual_encoder_path = osp.join(save_dir, 'visual_encoder_adapter')
+            print_log(
+                f'Saving visual_encoder adapter to {visual_encoder_path}',
+                'current')
+            self.visual_encoder.save_pretrained(visual_encoder_path,
+                                                **save_pretrained_kwargs)
+        elif not self.freeze_visual_encoder:
+            visual_encoder_path = osp.join(save_dir, 'visual_encoder')
+            print_log(
+                'Saving visual_encoder image_processor to'
+                f'{visual_encoder_path}', 'current')
+            image_processor = BUILDER.build(cfg.image_processor)
+            image_processor.save_pretrained(visual_encoder_path,
+                                            **save_pretrained_kwargs)
+            print_log(f'Saving visual_encoder to {visual_encoder_path}',
+                      'current')
+            self.visual_encoder.save_pretrained(visual_encoder_path,
+                                                **save_pretrained_kwargs)
+
+        # Projector
+        projector_path = osp.join(save_dir, 'projector')
+        print_log(f'Saving projector to {projector_path}', 'current')
+        self.projector.save_pretrained(projector_path,
+                                       **save_pretrained_kwargs)
+
+    def to_huggingface_llava(self,
+                             cfg,
+                             save_dir,
+                             fp32=False,
+                             save_pretrained_kwargs={}):
+
+        LLM_MAPPING = {
+            'model': 'language_model.model',
+            'lm_head': 'language_model.lm_head',
+        }
+        VIT_MAPPING = {
+            'vision_model': 'vision_tower.vision_model',
+        }
+        PROJECTOR_MAPPING = {
+            'model.0': 'multi_modal_projector.linear_1',
+            'model.2': 'multi_modal_projector.linear_2',
+        }
+
+        assert getattr(self.llm, 'hf_quantizer', None) is None, \
+            'This conversion format does not support quantized LLM.'
+
+        # get state_dict
+        llm = self.llm
+        if self.use_llm_lora:
+            llm = self.llm.merge_and_unload()
+        llm.config.use_cache = True
+        if not fp32:
+            print_log('Convert LLM to float16', 'current')
+            llm.half()
+
+        assert isinstance(llm, LlamaForCausalLM), \
+            'This conversion format only supports LlamaForCausalLM.'
+        llm_state_dict = llm.state_dict()
+        llm_state_dict = convert_state_dict_to_hf(llm_state_dict, LLM_MAPPING)
+
+        need_visual_encoder = (not self.freeze_visual_encoder
+                               or self.use_visual_encoder_lora)
+        visual_encoder = self.visual_encoder
+        if self.use_visual_encoder_lora:
+            visual_encoder = self.visual_encoder.merge_and_unload()
+        assert isinstance(visual_encoder, CLIPVisionModel),\
+            'This conversion format only supports CLIPVisionModel.'
+        if need_visual_encoder:
+            visual_encoder_state_dict = visual_encoder.state_dict()
+            visual_encoder_state_dict = convert_state_dict_to_hf(
+                visual_encoder_state_dict, VIT_MAPPING)
+        else:
+            visual_encoder_state_dict = {}
+
+        projector_state_dict = self.projector.state_dict()
+        projector_state_dict = convert_state_dict_to_hf(
+            projector_state_dict, PROJECTOR_MAPPING)
+
+        state_dict = {
+            **projector_state_dict,
+            **llm_state_dict,
+            **visual_encoder_state_dict
+        }
+
+        # init model
+        text_config = llm.config
+        vision_config = visual_encoder.config
+        config = LlavaConfig(
+            text_config=text_config,
+            vision_config=vision_config,
+            attn_implementation='eager')
+
+        with init_empty_weights():
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    'ignore', message='.*non-meta.*', category=UserWarning)
+                model = LlavaForConditionalGeneration(config)
+        model.load_state_dict(state_dict, strict=True, assign=True)
+
+        # processor
+        cfg.tokenizer.type = LlamaTokenizerFast.from_pretrained
+        tokenizer = BUILDER.build(cfg.tokenizer)
+
+        tokenizer.add_tokens(
+            AddedToken(DEFAULT_IMAGE_TOKEN, special=True, normalized=False),
+            special_tokens=True)
+        tokenizer.add_special_tokens({'pad_token': '<pad>'})
+
+        image_processor = BUILDER.build(cfg.image_processor)
+        assert isinstance(image_processor, CLIPImageProcessor),\
+            'This conversion format only supports CLIPImageProcessor.'
+
+        processor = LlavaProcessor(
+            tokenizer=tokenizer, image_processor=image_processor)
+
+        # Pad to 64 for performance reasons
+        pad_shape = 64
+
+        pre_expansion_embeddings = \
+            model.language_model.model.embed_tokens.weight.data
+        mu = torch.mean(pre_expansion_embeddings, dim=0).float()
+        n = pre_expansion_embeddings.size()[0]
+        sigma = ((pre_expansion_embeddings - mu).T
+                 @ (pre_expansion_embeddings - mu)) / n
+        dist = torch.distributions.multivariate_normal.MultivariateNormal(
+            mu, covariance_matrix=1e-5 * sigma)
+
+        # We add an image token so we need to resize the model
+        ori_vocab_size = config.text_config.vocab_size
+        tokenizer_vocab_size = tokenizer.encode('<pad>')[-1]
+        added_token = tokenizer_vocab_size - ori_vocab_size
+
+        if added_token > 0:
+            model.resize_token_embeddings(ori_vocab_size + added_token,
+                                          pad_shape)
+            model.language_model.model.embed_tokens.weight.data[
+                ori_vocab_size:] = torch.stack(
+                    tuple(
+                        dist.sample()
+                        for _ in range(model.language_model.model.embed_tokens.
+                                       weight.data[ori_vocab_size:].shape[0])),
+                    dim=0,
+                )
+            model.language_model.lm_head.weight.data[
+                ori_vocab_size:] = torch.stack(
+                    tuple(dist.sample()
+                          for _ in range(model.language_model.lm_head.weight.
+                                         data[ori_vocab_size:].shape[0])),
+                    dim=0,
+                )
+        model.config.image_token_index = tokenizer.encode(
+            DEFAULT_IMAGE_TOKEN)[-1]
+        model.config.pad_token_id = tokenizer.encode('<pad>')[-1]
+
+        # save
+        print_log(f'Saving to {save_dir}', 'current')
+        model.save_pretrained(save_dir, **save_pretrained_kwargs)
+        processor.save_pretrained(save_dir, **save_pretrained_kwargs)
+
+    def to_official_llava(self,
+                          cfg,
+                          save_dir,
+                          fp32=False,
+                          save_pretrained_kwargs={}):
+
+        VIT_MAPPING = {
+            'vision_model': 'model.vision_tower.vision_tower.vision_model',
+        }
+        PROJECTOR_MAPPING = {
+            'model.0': 'model.mm_projector.0',
+            'model.2': 'model.mm_projector.2',
+        }
+
+        try:
+            from llava.model import LlavaConfig, LlavaLlamaForCausalLM
+        except ImportError:
+            raise ImportError(
+                'Please install llava with '
+                '`pip install git+https://github.com/haotian-liu/LLaVA.git '
+                '--no-deps`.')
+
+        assert getattr(self.llm, 'hf_quantizer', None) is None, \
+            'This conversion format does not support quantized LLM.'
+
+        # get state_dict
+        llm = self.llm
+        if self.use_llm_lora:
+            llm = self.llm.merge_and_unload()
+        llm.config.use_cache = True
+        if not fp32:
+            print_log('Convert LLM to float16', 'current')
+            llm.half()
+
+        assert isinstance(llm, LlamaForCausalLM), \
+            'This conversion format only supports LlamaForCausalLM.'
+        llm_state_dict = llm.state_dict()
+
+        need_visual_encoder = (not self.freeze_visual_encoder
+                               or self.use_visual_encoder_lora)
+        visual_encoder = self.visual_encoder
+        if self.use_visual_encoder_lora:
+            visual_encoder = self.visual_encoder.merge_and_unload()
+        assert isinstance(visual_encoder, CLIPVisionModel),\
+            'This conversion format only supports CLIPVisionModel.'
+        if need_visual_encoder:
+            visual_encoder_state_dict = visual_encoder.state_dict()
+            visual_encoder_state_dict = convert_state_dict_to_hf(
+                visual_encoder_state_dict, VIT_MAPPING)
+        else:
+            visual_encoder_state_dict = {}
+
+        projector_state_dict = self.projector.state_dict()
+        projector_state_dict = convert_state_dict_to_hf(
+            projector_state_dict, PROJECTOR_MAPPING)
+
+        state_dict = {
+            **projector_state_dict,
+            **llm_state_dict,
+            **visual_encoder_state_dict
+        }
+
+        # init model
+        tokenizer = BUILDER.build(cfg.tokenizer)
+        image_processor = BUILDER.build(cfg.image_processor)
+        assert isinstance(image_processor, CLIPImageProcessor),\
+            'This conversion format only supports CLIPImageProcessor.'
+
+        llava_config_dict = llm.config.__dict__.copy()
+        llava_config_dict.update(
+            dict(
+                image_aspect_ratio='pad',
+                mm_hidden_size=visual_encoder.config.hidden_size,
+                mm_projector_type=f'mlp{self.projector_depth}x_gelu',
+                mm_use_im_patch_token=False,
+                mm_use_im_start_end=False,
+                mm_vision_select_feature='patch',
+                mm_vision_select_layer=self.visual_select_layer,
+                mm_vision_tower=visual_encoder.config.name_or_path,
+                unfreeze_mm_vision_tower=need_visual_encoder,
+                model_type='llava',
+                use_cache=True,
+                use_mm_proj=True))
+
+        llava_config = LlavaConfig(**llava_config_dict)
+
+        with init_empty_weights():
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    'ignore', message='.*non-meta.*', category=UserWarning)
+                model = LlavaLlamaForCausalLM(llava_config)
+
+        model.load_state_dict(state_dict, strict=True, assign=True)
+
+        # save
+        print_log(f'Saving to {save_dir}', 'current')
+
+        model.save_pretrained(save_dir, **save_pretrained_kwargs)
+        image_processor.save_pretrained(save_dir, **save_pretrained_kwargs)
+        tokenizer.save_pretrained(save_dir, **save_pretrained_kwargs)
