@@ -68,7 +68,7 @@ slurm
 
 .. code-block:: console
 
-    srun -p $PARTITION --job-name=mixtral --nodes=8 --gres=gpu:8 --ntasks-per-node=8 xtuner train deepseek_v2_chat_full_alpaca_e3 --deepspeed deepspeed_zero3 --launcher slurm
+    $ srun -p $PARTITION --job-name=mixtral --nodes=8 --gres=gpu:8 --ntasks-per-node=8 xtuner train deepseek_v2_chat_full_alpaca_e3 --deepspeed deepspeed_zero3 --launcher slurm
 
 
 torchrun
