@@ -66,7 +66,7 @@ XTuner 针对 MoE 结构进行了优化，与原生训练方法相比得到了�
 slurm
 ~~~~~~~~~~~~~~~~~~~~
 
-.. code-block:: bash
+.. code-block:: console
 
     srun -p $PARTITION --job-name=mixtral --nodes=8 --gres=gpu:8 --ntasks-per-node=8 xtuner train deepseek_v2_chat_full_alpaca_e3 --deepspeed deepspeed_zero3 --launcher slurm
 
