@@ -1,4 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+from .chat_hook import ChatHook
 from .dataset_info_hook import DatasetInfoHook
 from .evaluate_chat_hook import EvaluateChatHook
 from .hf_checkpoint_hook import HFCheckpointHook
