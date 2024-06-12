@@ -263,10 +263,13 @@ class DPO(SupervisedFinetune):
             policy_chosen_logps - reference_chosen_logps)
         rejected_rewards = self.beta * (
             policy_rejected_logps - reference_rejected_logps)
+        reward_acc = (chosen_rewards > rejected_rewards).float().mean()
 
         loss_dict = {
             'loss': loss,
-            'chosen_rewards': chosen_rewards,
-            'rejected_rewards': rejected_rewards
+            'chosen_rewards': chosen_rewards.mean(),
+            'rejected_rewards': rejected_rewards.mean(),
+            'reward_acc': reward_acc,
+            'reward_margin': (chosen_rewards - rejected_rewards).mean(),
         }
         return loss_dict
