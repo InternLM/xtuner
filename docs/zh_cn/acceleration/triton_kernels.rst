@@ -9,11 +9,12 @@ Triton Kernel
 
 .. code-block:: console
 
-    # 单卡
-    xtuner train ${CONFIG_NAME_OR_PATH} --deepspeed deepspeed_zero1
-    # 多卡
-    (DIST) USE_TRITON_KERNEL=1 NPROC_PER_NODE=${GPU_NUM} xtuner train ${CONFIG_NAME_OR_PATH} --deepspeed deepspeed_zero1
-    (SLURM) USE_TRITON_KERNEL=1 srun ${SRUN_ARGS} xtuner train ${CONFIG_NAME_OR_PATH} --launcher slurm --deepspeed deepspeed_zero1
+    $ # 单卡
+    $ xtuner train ${CONFIG_NAME_OR_PATH} --deepspeed deepspeed_zero1
+    $ # torchrun 多卡
+    $ USE_TRITON_KERNEL=1 NPROC_PER_NODE=${GPU_NUM} xtuner train ${CONFIG_NAME_OR_PATH} --deepspeed deepspeed_zero1
+    $ # slurm 多卡
+    $ USE_TRITON_KERNEL=1 srun ${SRUN_ARGS} xtuner train ${CONFIG_NAME_OR_PATH} --launcher slurm --deepspeed deepspeed_zero1
 
 
 RMS Norm Triton Kernel
