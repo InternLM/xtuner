@@ -27,6 +27,7 @@ from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
 # Model
 pretrained_model_name_or_path = 'meta-llama/Meta-Llama-3-8B-Instruct'
 use_varlen_attn = True
+loss_beta = 0.1
 
 # Data
 prompt_template = PROMPT_TEMPLATE.llama3_chat
@@ -43,7 +44,7 @@ accumulative_counts *= sequence_parallel_size
 dataloader_num_workers = 0
 max_epochs = 5  # refer to orpo repo
 optim_type = AdamW
-lr = 2e-5
+lr = 5e-6
 betas = (0.9, 0.999)
 weight_decay = 0
 max_norm = 1  # grad clip
@@ -74,6 +75,7 @@ tokenizer = dict(
 model = dict(
     type=ORPO,
     use_varlen_attn=use_varlen_attn,
+    beta=loss_beta,
     llm=dict(
         type=AutoModelForCausalLM.from_pretrained,
         pretrained_model_name_or_path=pretrained_model_name_or_path,
