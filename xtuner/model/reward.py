@@ -463,7 +463,9 @@ class RewardModel(BaseModel):
             warnings.warn(
                 f'The pretrained model type: {self.llm.__class__.__name__} '
                 'has no reward model class defined. Use '
-                'the SequenceClassification instead.')
+                'the SequenceClassification class instead.'
+                'You can refer to `xtuner/tools/model_converters/modeling_internlm2_reward` '  # noqa
+                'to implement the reward model class.')
 
             hf_cfg = self.llm.config
             try:
@@ -483,5 +485,5 @@ class RewardModel(BaseModel):
                 with no_init_weights():
                     reward_model = seqcls_class(hf_cfg)
             reward_model.model.load_state_dict(self.llm.state_dict())
-            reward_model.v_head.load_state_dict(self.v_head.state_dict())
+            reward_model.score.load_state_dict(self.v_head.state_dict())
             reward_model.save_pretrained(save_dir, **save_pretrained_kwargs)
