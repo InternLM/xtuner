@@ -468,6 +468,7 @@ class RewardModel(BaseModel):
                 'to implement the reward model class.')
 
             hf_cfg = self.llm.config
+            hf_cfg.num_labels = 1  # set the output dim to 1
             try:
                 with no_init_weights():
                     reward_model = \
