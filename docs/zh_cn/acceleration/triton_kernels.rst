@@ -7,7 +7,7 @@ Triton Kernel
 
 可通过在环境变量中加入 `USE_TRITON_KERNEL=1` 来启动 Triton Kernel：
 
-.. code:: bash
+.. code-block:: console
 
     # 单卡
     xtuner train ${CONFIG_NAME_OR_PATH} --deepspeed deepspeed_zero1
