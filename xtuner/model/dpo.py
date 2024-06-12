@@ -88,60 +88,49 @@ class DPO(SupervisedFinetune):
 
     def get_var_len_atten_logps(self, all_logits, all_ref_logits, labels,
                                 cu_seqlens, attention_mask):
-        labels = labels[:, 1:].clone()
-        all_logits = all_logits[:, :-1, :]
-        all_ref_logits = all_ref_logits[:, :-1, :]
-        cu_seqlens[-1] = labels.size(1)
-
-        labels[labels == -100] = 0
-        loss_mask = labels != 0
-
-        masked_logps = self._gather_masked_logits(all_logits, labels,
-                                                  loss_mask)
-        masked_ref_logps = self._gather_masked_logits(all_ref_logits, labels,
-                                                      loss_mask)
         seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
         # unpack sequence
-        unpacked_logps = torch.split(masked_logps, seqlens, dim=1)
-        unpacked_ref_logps = torch.split(masked_ref_logps, seqlens, dim=1)
-        unpacked_mask = torch.split(loss_mask, seqlens, dim=1)
-
+        unpacked_logits = torch.split(all_logits, seqlens, dim=1)
+        unpacked_ref_logits = torch.split(all_ref_logits, seqlens, dim=1)
+        unpacked_labels = torch.split(labels, seqlens, dim=1)
         if attention_mask is not None:
             # It indicate that we pad the original sequence, labels,
             # position_ids and cumulative_len for sequence parallel if the
             # attention_mask is not None.
             # We then need to remove the padded segments.
             assert False in attention_mask
-            unpacked_logps = unpacked_logps[:-1]
-            unpacked_ref_logps = unpacked_ref_logps[:-1]
-            unpacked_mask = unpacked_mask[:-1]
-            assert len(unpacked_logps) % 2 == 0
+            unpacked_logits = unpacked_logits[:-1]
+            unpacked_ref_logits = unpacked_ref_logits[:-1]
+            unpacked_labels = unpacked_labels[:-1]
+            assert len(unpacked_logits) % 2 == 0
 
-        def compute_logps(logps, mask, idx, loss_type):
-            logp = logps[idx].sum(-1)
-            if loss_type == 'ipo':
-                logp /= mask[idx].sum(-1)
-            return logp
+        def compute_logps(_logits, _labels):
+            _labels = _labels[:, 1:].clone()
+            _logits = _logits[:, :-1, :]
+            _labels[_labels == -100] = 0
+            loss_mask = _labels != 0
+            logps = self._gather_masked_logits(_logits, _labels, loss_mask)
+            logps = logps.sum(-1)
+            if self.loss_type == 'ipo':
+                logps /= loss_mask.sum(-1)
+            return logps
 
-        policy_chosen_logps = [
-            compute_logps(unpacked_logps, unpacked_mask, 2 * i, self.loss_type)
-            for i in range(len(unpacked_logps) // 2)
-        ]
-        policy_rejected_logps = [
-            compute_logps(unpacked_logps, unpacked_mask, 2 * i + 1,
-                          self.loss_type)
-            for i in range(len(unpacked_logps) // 2)
-        ]
-        reference_chosen_logps = [
-            compute_logps(unpacked_ref_logps, unpacked_mask, 2 * i,
-                          self.loss_type)
-            for i in range(len(unpacked_ref_logps) // 2)
-        ]
-        reference_rejected_logps = [
-            compute_logps(unpacked_ref_logps, unpacked_mask, 2 * i + 1,
-                          self.loss_type)
-            for i in range(len(unpacked_ref_logps) // 2)
-        ]
+        (policy_chosen_logps, policy_rejected_logps, reference_chosen_logps,
+         reference_rejected_logps) = [], [], [], []
+        for i in range(len(unpacked_logits) // 2):
+            chosen = unpacked_logits[2 * i]
+            rejected = unpacked_logits[2 * i + 1]
+            chosen_ref = unpacked_ref_logits[2 * i]
+            rejected_ref = unpacked_ref_logits[2 * i + 1]
+            chosen_label = unpacked_labels[2 * i]
+            rejected_label = unpacked_labels[2 * i + 1]
+            policy_chosen_logps.append(compute_logps(chosen, chosen_label))
+            policy_rejected_logps.append(
+                compute_logps(rejected, rejected_label))
+            reference_chosen_logps.append(
+                compute_logps(chosen_ref, chosen_label))
+            reference_rejected_logps.append(
+                compute_logps(rejected_ref, rejected_label))
 
         return (torch.stack(policy_chosen_logps),
                 torch.stack(policy_rejected_logps),

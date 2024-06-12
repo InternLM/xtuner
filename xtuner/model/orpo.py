@@ -55,43 +55,39 @@ class ORPO(SupervisedFinetune):
 
     def get_var_len_atten_logps(self, all_logits, average_log_prob, labels,
                                 cu_seqlens, attention_mask):
-        labels = labels[:, 1:].clone()
-        all_logits = all_logits[:, :-1, :]
-        labels[labels == -100] = 0
-        loss_mask = labels != 0
-        cu_seqlens[-1] = labels.size(1)
-
-        masked_logps = self._gather_masked_logits(all_logits, labels,
-                                                  loss_mask)
         seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
         # unpack sequence
-        unpacked_logps = torch.split(masked_logps, seqlens, dim=1)
-        unpacked_mask = torch.split(loss_mask, seqlens, dim=1)
-
+        unpacked_logits = torch.split(all_logits, seqlens, dim=1)
+        unpacked_labels = torch.split(labels, seqlens, dim=1)
         if attention_mask is not None:
             # It indicate that we pad the original sequence, labels,
             # position_ids and cumulative_len for sequence parallel if the
             # attention_mask is not None.
             # We then need to remove the padded segments.
             assert False in attention_mask
-            unpacked_logps = unpacked_logps[:-1]
-            unpacked_mask = unpacked_mask[:-1]
-            assert len(unpacked_logps) % 2 == 0
+            unpacked_logits = unpacked_logits[:-1]
+            unpacked_labels = unpacked_labels[:-1]
+            assert len(unpacked_logits) % 2 == 0
 
-        def compute_logps(logps, mask, idx):
-            logp = logps[idx].sum(-1)
+        def compute_logps(_logits, _labels):
+            _labels = _labels[:, 1:].clone()
+            _logits = _logits[:, :-1, :]
+            _labels[_labels == -100] = 0
+            loss_mask = _labels != 0
+            logps = self._gather_masked_logits(_logits, _labels, loss_mask)
+            logps = logps.sum(-1)
             if average_log_prob:
-                logp /= mask[idx].sum(-1)
-            return logp
+                logps /= loss_mask.sum(-1)
+            return logps
 
-        chosen_logps = [
-            compute_logps(unpacked_logps, unpacked_mask, 2 * i)
-            for i in range(len(unpacked_logps) // 2)
-        ]
-        rejected_logps = [
-            compute_logps(unpacked_logps, unpacked_mask, 2 * i + 1)
-            for i in range(len(unpacked_logps) // 2)
-        ]
+        chosen_logps, rejected_logps = [], []
+        for i in range(len(unpacked_logits) // 2):
+            chosen = unpacked_logits[2 * i]
+            rejected = unpacked_logits[2 * i + 1]
+            chosen_label = unpacked_labels[2 * i]
+            rejected_label = unpacked_labels[2 * i + 1]
+            chosen_logps.append(compute_logps(chosen, chosen_label))
+            rejected_logps.append(compute_logps(rejected, rejected_label))
 
         return (torch.stack(chosen_logps), torch.stack(rejected_logps))
 
@@ -187,7 +183,7 @@ class ORPO(SupervisedFinetune):
             chosen_nll_loss = self.cross_entropy_loss(chosen_logits,
                                                       chosen_labels)
             chosen_logps, rejected_logps = self.get_var_len_atten_logps(
-                all_logits, True, labels, cu_seqlens, attention_mask)
+                all_logits, True, labels_ori, cu_seqlens, attention_mask)
         (losses, chosen_rewards, rejected_rewards, log_odds_ratio,
          log_odds_chosen) = self.odds_ratio_loss(chosen_logps, rejected_logps)
         losses = losses.mean()
