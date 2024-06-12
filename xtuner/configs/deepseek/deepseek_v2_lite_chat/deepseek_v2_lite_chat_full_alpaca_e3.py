@@ -23,7 +23,7 @@ from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-pretrained_model_name_or_path = 'deepseek-ai/DeepSeek-V2-Chat'
+pretrained_model_name_or_path = 'deepseek-ai/DeepSeek-V2-Lite-Chat'
 use_varlen_attn = False
 
 # Data
@@ -51,13 +51,10 @@ warmup_ratio = 0.03
 # Save
 save_steps = 50
 save_total_limit = 2  # Maximum checkpoints to keep (-1 means unlimited)
-# Save the optimizer states of deepseek v2 236B will require a lot of
-# storage space. It is recommended to set `save_optimizer` to False
-# (The training phase can not be resumed.)
 save_optimizer = True
 
 # Evaluate the generation performance during the training
-evaluation_freq = 25
+evaluation_freq = 50
 SYSTEM = SYSTEM_TEMPLATE.alpaca
 evaluation_inputs = [
     '请给我介绍五个上海的景点', 'Please tell me five scenic spots in Shanghai'
@@ -81,7 +78,7 @@ model = dict(
         type=DeepseekV2ForCausalLM.from_pretrained,
         pretrained_model_name_or_path=pretrained_model_name_or_path,
         moe_implementation='shard',
-        expert_in_one_shard=10,
+        expert_in_one_shard=8,
         trust_remote_code=True))
 
 #######################################################################

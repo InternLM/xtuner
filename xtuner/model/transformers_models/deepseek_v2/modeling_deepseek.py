@@ -442,7 +442,8 @@ class MoEGate(nn.Module):
             )
 
         ### select top-k experts
-        if self.topk_method == 'gready':
+        # fix official typos
+        if self.topk_method in ('gready', 'greedy'):
             topk_weight, topk_idx = torch.topk(
                 scores, k=self.top_k, dim=-1, sorted=False)
         elif self.topk_method == 'group_limited_greedy':
@@ -799,11 +800,19 @@ class DeepseekV2Attention(nn.Module):
 
         self.is_causal = True
 
-        self.q_a_proj = nn.Linear(
-            self.hidden_size, config.q_lora_rank, bias=config.attention_bias)
-        self.q_a_layernorm = DeepseekV2RMSNorm(config.q_lora_rank)
-        self.q_b_proj = nn.Linear(
-            config.q_lora_rank, self.num_heads * self.q_head_dim, bias=False)
+        if self.q_lora_rank is None:
+            self.q_proj = nn.Linear(
+                self.hidden_size, self.num_heads * self.q_head_dim, bias=False)
+        else:
+            self.q_a_proj = nn.Linear(
+                self.hidden_size,
+                config.q_lora_rank,
+                bias=config.attention_bias)
+            self.q_a_layernorm = DeepseekV2RMSNorm(config.q_lora_rank)
+            self.q_b_proj = nn.Linear(
+                config.q_lora_rank,
+                self.num_heads * self.q_head_dim,
+                bias=False)
 
         self.kv_a_proj_with_mqa = nn.Linear(
             self.hidden_size,
@@ -899,7 +908,10 @@ class DeepseekV2Attention(nn.Module):
             )
         bsz, q_len, _ = hidden_states.size()
 
-        q = self.q_b_proj(self.q_a_layernorm(self.q_a_proj(hidden_states)))
+        if self.q_lora_rank is None:
+            q = self.q_proj(hidden_states)
+        else:
+            q = self.q_b_proj(self.q_a_layernorm(self.q_a_proj(hidden_states)))
         q = q.view(bsz, q_len, self.num_heads, self.q_head_dim).transpose(1, 2)
         q_nope, q_pe = torch.split(
             q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
@@ -1026,7 +1038,10 @@ class DeepseekV2FlashAttention2(DeepseekV2Attention):
 
         bsz, q_len, _ = hidden_states.size()
 
-        q = self.q_b_proj(self.q_a_layernorm(self.q_a_proj(hidden_states)))
+        if self.q_lora_rank is None:
+            q = self.q_proj(hidden_states)
+        else:
+            q = self.q_b_proj(self.q_a_layernorm(self.q_a_proj(hidden_states)))
         q = q.view(bsz, q_len, self.num_heads, self.q_head_dim).transpose(1, 2)
         q_nope, q_pe = torch.split(
             q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
@@ -1096,7 +1111,7 @@ class DeepseekV2FlashAttention2(DeepseekV2Attention):
             elif torch.is_autocast_enabled():
                 target_dtype = torch.get_autocast_gpu_dtype()
             else:
-                target_dtype = self.q_a_proj.weight.dtype
+                target_dtype = self.q_proj.weight.dtype if self.q_lora_rank is None else self.q_a_proj.weight.dtype
 
             logger.warning_once(
                 f'The input hidden states seems to be silently casted in float32, this might be related to'
