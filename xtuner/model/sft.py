@@ -304,3 +304,23 @@ class SupervisedFinetune(BaseModel):
             return super().__getattr__(name)
         except AttributeError:
             return getattr(self.llm, name)
+
+    def to_hf(self,
+              cfg,
+              save_dir,
+              fp32=False,
+              save_pretrained_kwargs={},
+              **kwargs):
+        self.llm.config.use_cache = True
+        if not fp32:
+            print_log('Convert LLM to float16', 'current')
+            self.llm.half()
+        if self.use_lora:
+            print_log(f'Saving adapter to {save_dir}', 'current')
+        else:
+            print_log(f'Saving LLM tokenizer to {save_dir}', 'current')
+            tokenizer = BUILDER.build(cfg.tokenizer)
+            tokenizer.save_pretrained(save_dir)
+            print_log(f'Saving LLM to {save_dir}', 'current')
+        self.llm.save_pretrained(save_dir, **save_pretrained_kwargs)
+        self.llm.config.use_cache = False

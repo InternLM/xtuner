@@ -265,9 +265,15 @@ def cli():
             if fn in HELP_FUNCS:
                 fn()
             else:
-                nnodes = os.environ.get('NNODES', 1)
-                nproc_per_node = os.environ.get('NPROC_PER_NODE', 1)
-                if nnodes == 1 and nproc_per_node == 1:
+                slurm_launcher = False
+                for i in range(n_arg + 1, len(args)):
+                    if args[i] == '--launcher':
+                        if i + 1 < len(args) and args[i + 1] == 'slurm':
+                            slurm_launcher = True
+                        break
+                nnodes = int(os.environ.get('NNODES', 1))
+                nproc_per_node = int(os.environ.get('NPROC_PER_NODE', 1))
+                if slurm_launcher or (nnodes == 1 and nproc_per_node == 1):
                     subprocess.run(['python', fn()] + args[n_arg + 1:])
                 else:
                     port = os.environ.get('PORT', None)

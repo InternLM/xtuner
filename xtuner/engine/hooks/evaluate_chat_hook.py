@@ -3,8 +3,10 @@ import os
 import warnings
 
 import torch
+from mmengine.dist import master_only
 from mmengine.hooks import Hook
 from mmengine.model import is_model_wrapper
+from mmengine.utils import mkdir_or_exist
 from mmengine.utils.misc import get_object_from_string
 from transformers import GenerationConfig, StoppingCriteriaList
 
@@ -92,9 +94,11 @@ class EvaluateChatHook(Hook):
 
         self.is_first_run = True
 
+    @master_only
     def _save_eval_output(self, runner, eval_outputs):
         save_path = os.path.join(runner.log_dir, 'vis_data',
                                  f'eval_outputs_iter_{runner.iter}.txt')
+        mkdir_or_exist(os.path.dirname(save_path))
         with open(save_path, 'w', encoding='utf-8') as f:
             for i, output in enumerate(eval_outputs):
                 f.write(f'Eval output {i + 1}:\n{output}\n\n')
