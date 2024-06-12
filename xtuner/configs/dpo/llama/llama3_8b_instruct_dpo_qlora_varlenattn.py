@@ -27,7 +27,7 @@ from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
 # Model
 pretrained_model_name_or_path = 'meta-llama/Meta-Llama-3-8B-Instruct'
 use_varlen_attn = True
-dpo_loss_type = 'sigmoid'  # One of ['sigmoid', 'hinge', 'ipo', 'kto_pair', 'bco_pair', 'sppo_hard', 'nca_pair', 'robust']  # noqa: E501
+dpo_loss_type = 'sigmoid'  # One of ['sigmoid', 'hinge', 'ipo', 'kto_pair', 'sppo_hard', 'nca_pair', 'robust']  # noqa: E501
 
 # Data
 prompt_template = PROMPT_TEMPLATE.llama3_chat

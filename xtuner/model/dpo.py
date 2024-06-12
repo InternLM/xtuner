@@ -233,21 +233,6 @@ class DPO(SupervisedFinetune):
                 ),
                 0,
             )
-        elif self.loss_type == 'bco_pair':
-            chosen_logratios = policy_chosen_logps - reference_chosen_logps
-            rejected_logratios = (
-                policy_rejected_logps - reference_rejected_logps)
-
-            chosen_rewards = self.beta * chosen_logratios
-            rejected_rewards = self.beta * rejected_logratios
-            rewards = torch.cat((chosen_rewards, rejected_rewards),
-                                0).mean().detach()
-            self.running.update(rewards)
-            delta = self.running.mean
-
-            loss = -F.logsigmoid(
-                (self.beta * chosen_logratios) - delta) - F.logsigmoid(
-                    -(self.beta * rejected_logratios - delta))
         elif self.loss_type == 'sppo_hard':
             # In the paper (https://arxiv.org/pdf/2405.00675),
             # SPPO employs a soft probability approach,
@@ -271,8 +256,9 @@ class DPO(SupervisedFinetune):
         else:
             raise ValueError(
                 f'Unknown loss type: {self.loss_type}. Should be one of '
-                "['sigmoid', 'hinge', 'ipo', 'kto_pair', 'bco_pair', "
+                "['sigmoid', 'hinge', 'ipo', 'kto_pair', "
                 "'sppo_hard', 'nca_pair', 'robust']")
+        # for logging
         chosen_rewards = self.beta * (
             policy_chosen_logps - reference_chosen_logps)
         rejected_rewards = self.beta * (
