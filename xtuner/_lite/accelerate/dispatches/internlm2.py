@@ -233,6 +233,7 @@ def _internlm2_varlen_attn_forward(
                       f' set to 1, but got {bsz}')
 
     qkv_states = self.wqkv(hidden_states)
+
     qkv_states = rearrange(
         qkv_states,
         'b q (h gs d) -> b q h gs d',

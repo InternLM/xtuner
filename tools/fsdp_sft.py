@@ -10,21 +10,36 @@ import torch
 import torch.distributed.checkpoint as dcp
 from mmengine import mkdir_or_exist
 from mmengine.dist import init_dist
+from torch.distributed._tensor import Replicate
 from torch.distributed.checkpoint.state_dict import (get_state_dict,
                                                      set_state_dict)
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import MixedPrecision
+from torch.distributed.tensor.parallel import (ColwiseParallel,
+                                               RowwiseParallel,
+                                               parallelize_module)
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR
 from torch.utils.data import DataLoader
 
 # from xtuner.model import  TextFinetune
 from xtuner._lite import AutoModelForCausalLM, AutoTokenizer, get_logger
+# from transformers import AutoModelForCausalLM
 from xtuner._lite.accelerate import packed_sequence_fwd_and_bwd
 from xtuner._lite.chat import ChatTemplate
 from xtuner._lite.datasets import FinetuneDataset
 from xtuner._lite.parallel import ParallelSampler
+
+layer_tp_plan = {
+    # by default ColwiseParallel input layouts is replicated
+    # and RowwiseParallel output layouts is replicated
+    'attention.wqkv': ColwiseParallel(),
+    'attention.wo': RowwiseParallel(),
+    'feed_forward.w1': ColwiseParallel(),
+    'feed_forward.w2': RowwiseParallel(),
+    'feed_forward.w3': ColwiseParallel(),
+}
 
 # from transformers import AutoModelForCausalLM
 
@@ -41,7 +56,7 @@ def parallel_formatter(dp_rank, tp_rank, debug=False):
         formatter += '<cyan>{function}</cyan>:'
         formatter += '<cyan>{line}</cyan>]'
 
-    formatter += '<level>{message}</level>'
+    formatter += ' <level>{message}</level>'
     return formatter
 
 
@@ -106,6 +121,7 @@ def is_interval(step, total_steps, interval):
     return (step + 1) % interval == 0 or (step + 1) == total_steps
 
 
+# @logger.catch
 def sft(args):
 
     init_dist('slurm')
@@ -133,11 +149,30 @@ def sft(args):
     # Change the log format printed in the terminal
     logger.add(sys.stderr, format=formatter)
     # Change the format saved in the log file
-    logger.add(log_file, format=formatter, level='INFO')
+    logger.add(log_file, format=formatter, backtrace=True, catch=True)
 
     model = AutoModelForCausalLM.from_pretrained(
         args.model, trust_remote_code=True, torch_dtype=torch.float32)
     model.cuda()
+
+    for layer in model.model.layers:
+        attention = layer.attention
+        attention.num_heads = attention.num_heads // tp_mesh.size()
+        attention.hidden_size = attention.hidden_size // tp_mesh.size()
+        parallelize_module(
+            module=layer,
+            device_mesh=tp_mesh,
+            parallelize_plan=layer_tp_plan,
+        )
+
+    model = parallelize_module(
+        module=model,
+        device_mesh=tp_mesh,
+        parallelize_plan={
+            'model.tok_embeddings':
+            RowwiseParallel(input_layouts=Replicate(), ),
+            'output': ColwiseParallel(output_layouts=Replicate(), ),
+        })
 
     tokenizer = AutoTokenizer.from_pretrained(
         args.tokenizer if args.tokenizer else args.model,
@@ -152,6 +187,7 @@ def sft(args):
             reduce_dtype=torch.bfloat16,
             buffer_dtype=torch.bfloat16),
         use_orig_params=True)
+
     optimizer = AdamW(shard_model.parameters(), lr=args.lr, foreach=True)
     # For TP, input needs to be same across all TP ranks.
     # while for SP, input can be different across all ranks.
@@ -320,5 +356,7 @@ def sft(args):
 
 
 if __name__ == '__main__':
+
     args = parse_args()
+
     sft(args)
