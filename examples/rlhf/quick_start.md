@@ -10,7 +10,7 @@ pip install torch==2.1.2+cu118 torchvision --index-url https://download.pytorch.
 git clone https://github.com/2581543189/xtuner.git
 cd xtuner
 git checkout rlhf
-pip install .[rlhf]
+pip install '.[rlhf]'
 ```
 
 ### step2: 使用单引擎（huggingface）启动 rlhf 任务

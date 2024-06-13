@@ -1,36 +1,20 @@
 import torch
 from loguru import logger
 
-try:
-    from flash_attn.losses.cross_entropy import \
-        CrossEntropyLoss as FlashCrossEntropyLoss
-except ImportError:
-    pass
 
-
-# Adapted from: https://gitlab.pjlab.org.cn/openmmlab/bigmodel/rl3m/-/blob/main/rl3m/layers/loss.py#L37  # noqa: E501
-class FlashGPTLMLoss(torch.nn.Module):
+class PretrainLoss(torch.nn.Module):
     """Loss function for flash GPT Language Model."""
 
-    def __init__(self, parallel_output=True, label_smoothing=0):
+    def __init__(self, label_smoothing=0):
         super().__init__()
 
         if label_smoothing is not None and label_smoothing != 0:
             logger.warning(f'Use label_smoothing: {label_smoothing}')
         self.label_smoothing = label_smoothing
 
-        if parallel_output:
-            # The loss in this place is bound to the gather_output initialized by VocabParallelClassifier1D  # noqa: E501
-            self.loss_fn = FlashCrossEntropyLoss(
-                reduction='mean',
-                inplace_backward=True,
-                process_group=None,
-                label_smoothing=label_smoothing,
-            )
-        else:
-            # Here, the output will gather output is set in the model, so use ordinary loss  # noqa: E501
-            self.loss_fn = torch.nn.CrossEntropyLoss(
-                reduction='mean', label_smoothing=label_smoothing)
+        # Here, the output will gather output is set in the model, so use ordinary loss  # noqa: E501
+        self.loss_fn = torch.nn.CrossEntropyLoss(
+            reduction='mean', label_smoothing=label_smoothing)
 
     def forward(self, *args):
         if len(args) == 3:
@@ -50,16 +34,3 @@ class FlashGPTLMLoss(torch.nn.Module):
 
         return loss
 
-
-# Adapted from: https://gitlab.pjlab.org.cn/openmmlab/bigmodel/rl3m/-/blob/main/rl3m/layers/loss.py#L37  # noqa: E501
-class PretrainLoss(FlashGPTLMLoss):
-    """Modified from pretrain/sft loss, but with a loss factor term to balance
-    with ppo policy loss."""
-
-    def __init__(self, *args, loss_factor=1.0, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.loss_factor = loss_factor
-
-    def forward(self, *args, **kwargs):
-        loss = super().forward(*args, **kwargs)
-        return loss * self.loss_factor

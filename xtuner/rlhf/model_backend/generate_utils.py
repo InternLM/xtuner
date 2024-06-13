@@ -36,6 +36,7 @@ def partition_by_micro_batch_size(
     input_ids: Union[list[str], torch.Tensor, list[int]],
     micro_batch_size: int,
     attention_mask: torch.Tensor = None,
+    position_ids: torch.Tensor = None,
     labels: Optional[Union[list[torch.Tensor], torch.Tensor,
                            dict[str, torch.Tensor]]] = None,
 ) -> list[dict[str, torch.Tensor]]:
@@ -46,6 +47,7 @@ def partition_by_micro_batch_size(
         micro_batch = {}
         micro_batch['input_ids'] = input_ids
         micro_batch['attention_mask'] = attention_mask
+        micro_batch['position_ids'] = position_ids
         micro_batch['labels'] = labels
         micro_batches.append(micro_batch)
         return micro_batches
@@ -64,6 +66,9 @@ def partition_by_micro_batch_size(
     attention_mask_split = (
         torch.split(attention_mask, micro_batch_size, dim=0)
         if attention_mask is not None else [None for _ in range(num_splits)])
+    position_ids_split = (
+        torch.split(position_ids, micro_batch_size, dim=0)
+        if position_ids is not None else [None for _ in range(num_splits)])
     labels_split = (
         partition_label_by_micro_batch_size(labels, micro_batch_size,
                                             num_splits)
@@ -72,6 +77,7 @@ def partition_by_micro_batch_size(
         micro_batch = {}
         micro_batch['input_ids'] = input_ids_split[i]
         micro_batch['attention_mask'] = attention_mask_split[i]
+        micro_batch['position_ids'] = position_ids_split[i]
         micro_batch['labels'] = labels_split[i]
         micro_batches.append(micro_batch)
     return micro_batches
@@ -108,33 +114,34 @@ def partition_list_by_micro_batch_size(
     micro_batch_size: list[int],
     labels: list[torch.Tensor],
     attention_mask: Optional[list[torch.Tensor]] = None,
-    loss_weights: Optional[list[float]] = None,
+    position_ids: Optional[list[torch.Tensor]] = None,
 ) -> list[dict]:
     length = len(input_ids)
     batch_size = input_ids[0].shape[0]
     num_splits = int(batch_size // micro_batch_size[0]) + (
         batch_size % micro_batch_size[0] > 0)
     micro_batches = [[{} for i in range(length)] for _ in range(num_splits)]
-    if loss_weights is None:
-        loss_weights = [None for _ in range(length)]
     if attention_mask is None:
         attention_mask = [None for _ in range(length)]
+    if position_ids == None:
+        position_ids = [None for _ in range(length)]
     for i in range(length):
         sub_input_ids = input_ids[i]
         sub_attention_mask = attention_mask[i]
+        sub_position_ids = position_ids[i]
         sub_labels = labels[i]
-        sub_loss_weights = loss_weights[i]
         sub_micro_batches = partition_by_micro_batch_size(
-            sub_input_ids, micro_batch_size[i], sub_attention_mask, sub_labels)
+            sub_input_ids, micro_batch_size[i], sub_attention_mask,
+            sub_position_ids, sub_labels)
         for micro_batch_index, sub_micro_batch in enumerate(sub_micro_batches):
             micro_batches[micro_batch_index][i]['input_ids'] = sub_micro_batch[
                 'input_ids']
             micro_batches[micro_batch_index][i][
                 'attention_mask'] = sub_micro_batch['attention_mask']
+            micro_batches[micro_batch_index][i][
+                'position_ids'] = sub_micro_batch['position_ids']
             micro_batches[micro_batch_index][i]['labels'] = sub_micro_batch[
                 'labels']
-            micro_batches[micro_batch_index][i][
-                'loss_weights'] = sub_loss_weights
     return micro_batches
 
 

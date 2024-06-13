@@ -53,12 +53,12 @@ class ActorLoss(torch.nn.Module):
             Tensor: Return the final loss
         """
         assert logits.ndim == 3
-        mask = labels['mask']  # (micro_bsz, seqlen)
+        mask = labels['mask']
 
         assert logits.shape[0] == labels['input_ids'].shape[0]
-        input_ids = labels['input_ids']  # (micro_bsz, seqlen)
-        old_logprobs = labels['old_logprobs']  # (micro_bsz, seqlen)
-        advantages = labels['advantages']  # (micro_bsz, seqlen)
+        input_ids = labels['input_ids']
+        old_logprobs = labels['old_logprobs']
+        advantages = labels['advantages']
         loss_factor = labels['loss_factor']
 
         logpy = logprobs_from_logits(

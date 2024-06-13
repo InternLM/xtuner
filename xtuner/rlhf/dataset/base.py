@@ -153,7 +153,7 @@ class MultiSourceDatset(IterableDataset):
                  sub_dataset_type='file',
                  tokenizer=None,
                  random_seed=1024,
-                 ratio_within_datas=True):
+                 ratio_within_datasets=True):
         self._task_group = []
         for _task in task_groups:
             file_path, extra_info = _task.split('::')[0], _task.split('::')[1]
@@ -194,9 +194,9 @@ class MultiSourceDatset(IterableDataset):
         else:
             raise NotImplementedError('Cannot support filelist now.')
         self.random_seed = random_seed
-        self.ratio_within_datas = ratio_within_datas
+        self.ratio_within_datasets = ratio_within_datasets
 
-        if self.ratio_within_datas:
+        if self.ratio_within_datasets:
             sum_prob = sum([task['prob'] for task in self._task_group])
             for task in self._task_group:
                 task['prob'] = task['prob'] / sum_prob
@@ -220,7 +220,7 @@ class MultiSourceDatset(IterableDataset):
 
     def __iter__(self):
         """sample data one task by probs."""
-        if self.ratio_within_datas:
+        if self.ratio_within_datasets:
             rng = random.Random(self.random_seed)
             probs = [task['prob'] for task in self._task_group]
             # Initialize task iterator

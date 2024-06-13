@@ -7,7 +7,7 @@ class CriticLoss(torch.nn.Module):
     """Loss function for critic model."""
 
     def __init__(self,
-                 cliprange_value: float = 100,
+                 cliprange_value: float = 0.5,
                  loss_type: str = 'per_seq'):
         super().__init__()
         self.cliprange_value = cliprange_value
@@ -53,12 +53,12 @@ class CriticLoss(torch.nn.Module):
             Tensor: Return the final loss
         """
         assert values.ndim == 2
-        mask = labels['mask']  # (micro_bsz, seqlen)
+        mask = labels['mask']
         num_actions = mask.size(1)
         values = values[:, -num_actions:]
 
-        old_values = labels['old_values']  # (micro_bsz, seqlen)
-        returns = labels['returns']  # (micro_bsz, seqlen)
+        old_values = labels['old_values']
+        returns = labels['returns']
         loss_factor = labels['loss_factor']
         loss = self.critic_loss_fn(
             values=values,

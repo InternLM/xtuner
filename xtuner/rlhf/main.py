@@ -22,7 +22,7 @@ def parse_args():
         '--config',
         help='config file name or path.',
         type=str,
-        default='examples/rlhf/four_model_8gpu.py')
+        default='examples/rlhf/four_model_vllm_8gpu.py')
     parser.add_argument(
         '-w',
         '--work_dir',
@@ -50,17 +50,15 @@ if __name__ == '__main__':
     assert args.config is not None, 'config should not be None'
     work_dir = args.work_dir
     if work_dir is None:
-        work_dir = os.getcwd()
+        work_dir = os.getcwd() + '/rlhf_trainlog_' + time.strftime(
+            '%Y-%m-%d-%H:%M:%S')
     work_dir = os.path.abspath(work_dir)
     logger.info(f'using work_dir: {work_dir}')
     os.makedirs(work_dir, exist_ok=True)
 
     logger.add(
-        f'{work_dir}/train.log',
+        f'{work_dir}/train_rlhf.log',
         filter=lambda record: record['extra'].get('name') == 'train')
-    logger.add(
-        f'{work_dir}/rollout.log',
-        filter=lambda record: record['extra'].get('name') == 'rollout')
     logger_train = logger.bind(name='train')
 
     configs_path = args.config
@@ -131,7 +129,7 @@ if __name__ == '__main__':
         # # for value & policy learn
         value_loss_ref = ppo.value_learn_async(trajectories, critic_model)
 
-        ppo_loss = 0.0
+        ppo_loss, pt_loss = None, None
         if pretrain_step <= 0:
             ppo_loss, pt_loss = ppo.policy_learn(trajectories, actor_model)
             logger_train.info(
@@ -145,8 +143,14 @@ if __name__ == '__main__':
         pretrain_step -= 1
 
         if config['rollout_config'].get('write_to_file', True):
-            with open(f'{work_dir}/rollout.log', 'a') as file:
-                file.write(f'generates: {trajectories.output_str}')
+            if not os.path.exists(f'{work_dir}/rollouts'):
+                os.makedirs(f'{work_dir}/rollouts')
+            with open(f'{work_dir}/rollouts/step{step}_rollout.log',
+                      'a') as file:
+                for output_s, r in zip(trajectories.output_str,
+                                       trajectories.rewards):
+                    file.write(output_s + '\n' + 'Reward: ' + str(r.item()) +
+                               '\n' + '=' * 30 + '\n')
         summaries = dict(
             reward_mean=trajectories.rewards.mean().item(),
             reward_std=trajectories.rewards.std().item(),
@@ -158,9 +162,10 @@ if __name__ == '__main__':
             entropy=trajectories.entropy.mean().item(),
             step=step,
             policy_loss=ppo_loss,
+            pretrain_loss=pt_loss,
             critic_loss=value_loss,
         )
-        with open(f'{work_dir}/train.log.jsonl', 'a') as f:
+        with open(f'{work_dir}/train_rlhf.log.jsonl', 'a') as f:
             f.write(json.dumps(summaries) + '\n')
 
         step += 1
