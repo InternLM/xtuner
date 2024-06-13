@@ -45,6 +45,7 @@ LOWEST_TRANSFORMERS_VERSION = dict(
     CohereForCausalLM=digit_version('4.40'),
     Qwen2ForCausalLM=digit_version('4.39'),
     Qwen2MoeForCausalLM=digit_version('4.40'),
+    DeepseekV2ForCausalLM=digit_version('4.40'),
 )
 
 ATTN_DISPATCH_MAPPING = dict(
@@ -66,6 +67,8 @@ ATTN_DISPATCH_MAPPING = dict(
                                     'qwen2_attn_forward'),
     Qwen2MoeFlashAttention2=LazyObject('xtuner.model.modules.dispatch.qwen2',
                                        'qwen2_attn_forward'),
+    DeepseekV2FlashAttention2=LazyObject(
+        'xtuner.model.modules.dispatch.deepseek_v2', 'deepseek_attn_forward'),
 )
 
 ATTN_LEGACY_DISPATCH_MAPPING = dict(
@@ -91,6 +94,9 @@ VARLEN_ATTN_DISPATCH_MAPPING = dict(
                                     'qwen2_varlen_attn_forward'),
     Qwen2MoeFlashAttention2=LazyObject('xtuner.model.modules.dispatch.qwen2',
                                        'qwen2_varlen_attn_forward'),
+    DeepseekV2FlashAttention2=LazyObject(
+        'xtuner.model.modules.dispatch.deepseek_v2',
+        'deepseek_varlen_attn_forward'),
 )
 
 VARLEN_ATTN_LEGACY_DISPATCH_MAPPING = dict(
