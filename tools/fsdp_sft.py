@@ -3,7 +3,8 @@ import argparse
 import math
 import os
 import sys
-from datetime import datetime
+import time
+from datetime import datetime, timedelta
 
 import torch
 import torch.distributed.checkpoint as dcp
@@ -30,13 +31,18 @@ from xtuner._lite.parallel import ParallelSampler
 logger = get_logger()
 
 
-def parallel_formatter(dp_rank, tp_rank):
+def parallel_formatter(dp_rank, tp_rank, debug=False):
 
-    return (
-        f'[DP_RANK {dp_rank}][TP_RANK {tp_rank}]'
-        '[{time:YYYY-MM-DD HH:mm:ss}][<level>{level}</level>]'
-        '[<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan>] '
-        '<level>{message}</level>')
+    formatter = f'[DP_RANK {dp_rank}][TP_RANK {tp_rank}]'
+    formatter += '[{time:YYYY-MM-DD HH:mm:ss}][<level>{level}</level>]'
+
+    if debug:
+        formatter += '[<cyan>{name}</cyan>:'
+        formatter += '<cyan>{function}</cyan>:'
+        formatter += '<cyan>{line}</cyan>]'
+
+    formatter += '<level>{message}</level>'
+    return formatter
 
 
 def parse_args():
@@ -249,11 +255,15 @@ def sft(args):
         max_memory = torch.cuda.max_memory_allocated()
 
         step_losses = []
+        data_time = 0
+        _step_start_t = time.time()
         for i in range(per_step_iters):
             if step * per_step_iters + i + 1 == per_epoch_iters:
                 break
 
+            _data_start_t = time.time()
             data = next(data_iterator)
+            data_time += time.time() - _data_start_t
 
             input_ids = data['input_ids'].cuda()
             labels = data['labels'].cuda()
@@ -267,12 +277,18 @@ def sft(args):
         grad_norm = shard_model.clip_grad_norm_(args.max_grad_norm)
         optimizer.step()
 
+        step_time = time.time() - _step_start_t
+        eta = step_time * (total_steps - step)
+        eta = timedelta(seconds=int(eta))
         if is_interval(step, total_steps, args.log_interval):
             step_loss = sum(step_losses) / len(step_losses)
-            logger.info(f'(Epoch {epoch})\tStep {step+1}/{total_steps}\t'
-                        f'lr: {cur_lr:.6f}\tloss: {step_loss:.3f}\t'
-                        f'grad_norm: {grad_norm:.3f}\t'
-                        f'max_memory: {(max_memory / 1024**3):.2f}GB')
+            logger.info(f'(Epoch {epoch}) Step {step+1}/{total_steps}  '
+                        f'lr: {cur_lr:.6f}  loss: {step_loss:.3f}  '
+                        f'grad_norm: {grad_norm:.2f}  '
+                        f'max_memory: {(max_memory / 1024**3):.1f}GB  '
+                        f'data_time: {data_time:.2f}s  '
+                        f'time: {step_time:.2f}s  '
+                        f'eta: {eta}')
 
         if is_interval(step, total_steps, args.checkpoint_interval):
             # FSDP cannot be saved via torch.load
