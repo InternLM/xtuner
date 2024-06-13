@@ -250,6 +250,9 @@ def replace_rote(model):
 def dispatch_modules(model, use_varlen_attn=False):
 
     def check(model_name):
+        if 'ForCausalLM' not in model_name and model_name.endswith('Model'):
+            # a walkaround for reward model
+            model_name = model_name[:-5] + 'ForCausalLM'
         msg = '{} requires transformers version at least {}, but got {}'
         assert TRANSFORMERS_VERSION >= LOWEST_TRANSFORMERS_VERSION[
             model_name], msg.format(model_name,

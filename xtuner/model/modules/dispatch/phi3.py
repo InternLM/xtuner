@@ -284,8 +284,8 @@ def phi3_varlen_attn_forward(
     cumulative_len = message_hub.get_info(f'cumulative_len_rank_{rank}')
     max_seqlen = message_hub.get_info(f'max_seqlen_rank_{rank}')
 
-    assert is_training == (cumulative_len is not None) == (
-        past_key_value is None)
+    assert is_training == (past_key_value is None)
+    use_varlen_atten = (cumulative_len is not None)
 
     if 'padding_mask' in kwargs:
         warnings.warn(
@@ -421,7 +421,7 @@ def phi3_varlen_attn_forward(
                                                                             -1)
     attn_dropout = self.attention_dropout if self.training else 0.0
 
-    if is_training:
+    if use_varlen_atten:
         attn_output = varlen_flash_attn(
             query_states,
             key_states,
@@ -431,7 +431,7 @@ def phi3_varlen_attn_forward(
             causal=causal,
             dropout_p=attn_dropout,
             window_size=window_size,
-            training=True)
+            training=self.training)
     else:
         attn_output = flash_attn_wo_mask(
             query_states,
@@ -440,7 +440,7 @@ def phi3_varlen_attn_forward(
             causal=causal,
             dropout_p=attn_dropout,
             window_size=window_size,
-            training=False)
+            training=self.training)
 
     # ---------------- flash attention forward end ------------------- #
 
