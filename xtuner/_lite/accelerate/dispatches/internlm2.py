@@ -250,8 +250,8 @@ def _internlm2_varlen_attn_forward(
         kv_seq_len += past_key_value[0].shape[-2]
 
     chunk_lengths = attn_context.get_info('chunk_sizes')
-
     cos, sin = self.rotary_emb(value_states, chunk_lengths.max())
+
     query_states = apply_rotary_emb(query_states, cos[position_ids].squeeze(0),
                                     sin[position_ids].squeeze(0))
     key_states = apply_rotary_emb(key_states, cos[position_ids].squeeze(0),

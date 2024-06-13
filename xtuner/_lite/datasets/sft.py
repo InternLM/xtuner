@@ -172,7 +172,6 @@ class FinetuneDataset(BaseTrainDataset):
             attention_mask = torch.zeros_like(input_ids, dtype=bool)
 
         # TODO support sp
-
         data_dict = {
             'input_ids':
             input_ids,

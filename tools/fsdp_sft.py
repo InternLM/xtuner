@@ -13,10 +13,10 @@ from torch.distributed.checkpoint.state_dict import (get_state_dict,
                                                      set_state_dict)
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from torch.distributed.fsdp import MixedPrecision
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR
 from torch.utils.data import DataLoader
-from transformers import AutoModelForCausalLM
 
 # from xtuner.model import  TextFinetune
 from xtuner._lite import AutoModelForCausalLM, AutoTokenizer, get_logger
@@ -24,6 +24,8 @@ from xtuner._lite.accelerate import packed_sequence_fwd_and_bwd
 from xtuner._lite.chat import ChatTemplate
 from xtuner._lite.datasets import FinetuneDataset
 from xtuner._lite.parallel import ParallelSampler
+
+# from transformers import AutoModelForCausalLM
 
 logger = get_logger()
 
@@ -70,7 +72,7 @@ def parse_args():
         type=float,
         help='the dir to save logs and models')
     optim_args.add_argument('--wd', '--weight-decay', default=0, type=float)
-    optim_args.add_argument('--grad-max-norm', default=1, type=float)
+    optim_args.add_argument('--max-grad-norm', default=1, type=float)
     optim_args.add_argument('-e', '--epochs', default=1, type=int)
     optim_args.add_argument('--warmup-ratio', default=0.03, type=float)
 
@@ -128,7 +130,7 @@ def sft(args):
     logger.add(log_file, format=formatter, level='INFO')
 
     model = AutoModelForCausalLM.from_pretrained(
-        args.model, trust_remote_code=True)
+        args.model, trust_remote_code=True, torch_dtype=torch.float32)
     model.cuda()
 
     tokenizer = AutoTokenizer.from_pretrained(
@@ -136,7 +138,14 @@ def sft(args):
         trust_remote_code=True,
         padding_side='right')
 
-    shard_model = FSDP(model, device_mesh=dp_mesh, use_orig_params=True)
+    shard_model = FSDP(
+        model,
+        device_mesh=dp_mesh,
+        mixed_precision=MixedPrecision(
+            param_dtype=torch.bfloat16,
+            reduce_dtype=torch.bfloat16,
+            buffer_dtype=torch.bfloat16),
+        use_orig_params=True)
     optimizer = AdamW(shard_model.parameters(), lr=args.lr, foreach=True)
     # For TP, input needs to be same across all TP ranks.
     # while for SP, input can be different across all ranks.
@@ -255,14 +264,14 @@ def sft(args):
                                                position_ids, labels,
                                                unpack_sizes)
             step_losses.append(loss)
-        grad_norm = shard_model.clip_grad_norm_(args.grad_max_norm)
+        grad_norm = shard_model.clip_grad_norm_(args.max_grad_norm)
         optimizer.step()
 
         if is_interval(step, total_steps, args.log_interval):
             step_loss = sum(step_losses) / len(step_losses)
-            logger.info(f'(Epoch {epoch}) Step {step+1}/{total_steps} '
-                        f'lr: {cur_lr:.6f} loss: {step_loss:.3f} '
-                        f'grad_norm: {grad_norm:.3f}'
+            logger.info(f'(Epoch {epoch})\tStep {step+1}/{total_steps}\t'
+                        f'lr: {cur_lr:.6f}\tloss: {step_loss:.3f}\t'
+                        f'grad_norm: {grad_norm:.3f}\t'
                         f'max_memory: {(max_memory / 1024**3):.2f}GB')
 
         if is_interval(step, total_steps, args.checkpoint_interval):

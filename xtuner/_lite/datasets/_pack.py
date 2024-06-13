@@ -25,7 +25,7 @@ class _PackDataset(torch.utils.data.Dataset):
         recording the number of tokens for each piece of data.
     """
 
-    def __init__(self, dataset, max_length=2048, use_varlen_attn=False):
+    def __init__(self, dataset, max_length=2048, use_varlen_attn=True):
         super().__init__()
 
         if use_varlen_attn and not is_flash_attn_2_available():
@@ -83,7 +83,6 @@ class _PackDataset(torch.utils.data.Dataset):
         trunc_sizes = []
 
         for i in range(left, right):
-            trunc_position_ids.append(len(trunc_input_ids))
 
             # Determine the real range we will cut in current original item
             item_begin = self._shfl_item_rngs_left[i]
