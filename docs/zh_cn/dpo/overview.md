@@ -4,9 +4,9 @@
 
 DPO（Direct Preference Optimization，直接偏好优化）是一种在大语言模型训练中用于直接优化模型偏好的方法。与传统的强化学习方法不同，DPO 直接使用人类偏好数据进行模型优化，从而提高生成内容的质量，使其更符合人类偏好。DPO 利用人类偏好数据，直接对模型进行优化，省略了训练Reward Model的训练过程，与PPO相比进一步省去了Critic Model,不但避免了复杂的强化学习算法，减少了训练开销，同时还提高了训练效率。
 
-DPO 拥有大量的衍生算法，它们对DPO的损失函数进行了一定程度上的改进，我们在XTuner中除了DPO还实现了[Identity Preference Optimisation (IPO)](https://huggingface.co/papers/2310.12036)，[Kahneman-Tversky Optimisation (KTO)](https://github.com/ContextualAI/HALOs)等论文中的损失函数，如需使用这些算法，请参考[修改DPO配置](./modify_settings.md)章节。
+DPO 拥有大量的衍生算法，它们对DPO的损失函数进行了一定程度上的改进，我们在XTuner中除了DPO还实现了[Identity Preference Optimisation (IPO)](https://huggingface.co/papers/2310.12036)，[Kahneman-Tversky Optimisation (KTO)](https://github.com/ContextualAI/HALOs)等论文中的损失函数，如需使用这些算法，请参考[修改DPO配置](./modify_settings.md)章节。我们也提供了一些[示例配置](https://github.com/InternLM/xtuner/tree/main/xtuner/configs/dpo)用于参考。
 
-除了 DPO 之外，还出现了如 [ORPO](https://arxiv.org/abs/2403.07691) 等无需参考模型的对齐算法。ORPO 采用了对数比值（odds ratio）的概念来优化模型，通过在模型训练过程中惩罚那些被拒绝的样本，从而更有效地适应被选择的样本。ORPO 消除了对参考模型的依赖，使得训练过程更加简化且高效。
+除了 DPO 之外，还出现了如 [ORPO](https://arxiv.org/abs/2403.07691) 等无需参考模型的对齐算法。ORPO 采用了对数比值（odds ratio）的概念来优化模型，通过在模型训练过程中惩罚那些被拒绝的样本，从而更有效地适应被选择的样本。ORPO 消除了对参考模型的依赖，使得训练过程更加简化且高效。XTuner 中 ORPO 的训练方式与 DPO 非常类似，我们提供了一些  ORPO 的[示例配置](https://github.com/InternLM/xtuner/tree/main/xtuner/configs/orpo)，用户可以参考DPO的教程对配置进行修改。
 
 ### XTuner 中 DPO 训练的优势
 
