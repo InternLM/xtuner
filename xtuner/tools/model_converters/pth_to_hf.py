@@ -80,6 +80,9 @@ def main():
         cfg.model.pretrained_pth = None
         if args.save_format != 'xtuner':
             use_meta_init = False
+    if 'Reward' in model_name:
+        use_meta_init = False
+        cfg.model.llm.pop('quantization_config', None)
 
     if use_meta_init:
         try:
