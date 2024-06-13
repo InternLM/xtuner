@@ -45,7 +45,7 @@ LOWEST_TRANSFORMERS_VERSION = dict(
     CohereForCausalLM=digit_version('4.40'),
     Qwen2ForCausalLM=digit_version('4.39'),
     Qwen2MoeForCausalLM=digit_version('4.40'),
-    deepseekv2=digit_version('4.40'),
+    DeepseekV2ForCausalLM=digit_version('4.40'),
 )
 
 ATTN_DISPATCH_MAPPING = dict(
