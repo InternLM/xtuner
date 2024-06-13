@@ -4,7 +4,7 @@
 
 ### 损失函数
 
-XTuner 使用了 [Bradley–Terry 模型](<>) 作为 Reward Model 的偏好建模方式，你可以指定 `loss_type="ranking"` 来使用 ranking loss。XTuner 中也实现了 InternLM2 中提出的 focal 损失函数，它通过调整难易样本的权重来避免过拟合，可以设置 `loss_type="focal"` 来使用该损失函数。对于该损失函数的详细说明，请参考 [InternLM2 技术报告](https://arxiv.org/abs/2403.17297)。
+XTuner 使用了 [Bradley–Terry 模型](https://en.wikipedia.org/wiki/Bradley%E2%80%93Terry_model) 作为 Reward Model 的偏好建模方式，你可以指定 `loss_type="ranking"` 来使用 ranking loss。XTuner 中也实现了 InternLM2 中提出的 focal 损失函数，它通过调整难易样本的权重来避免过拟合，可以设置 `loss_type="focal"` 来使用该损失函数。对于该损失函数的详细说明，请参考 [InternLM2 技术报告](https://arxiv.org/abs/2403.17297)。
 
 另外，为了使 reward model 输出的 score 数值保持稳定，我们还在 loss 中额外增加了一个约束项，你可以指定 `penalty_type='log_barrier'` 或是 `penalty_type='L2'` 以启用对数约束或是L2约束。
 

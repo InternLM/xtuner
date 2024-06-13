@@ -4,9 +4,9 @@
 
 ### 准备预训练模型权重
 
-依据[Training language models to follow instructions with human feedback](https://arxiv.org/abs/2203.02155)论文中的描述，我们使用进过 SFT 的语言模型作为Reward Model的初始化模型。这里我们使用[InternLM2-chat-1.8b-sft](<>)作为初始化模型。
+依据[Training language models to follow instructions with human feedback](https://arxiv.org/abs/2203.02155)论文中的描述，我们使用进过 SFT 的语言模型作为Reward Model的初始化模型。这里我们使用[InternLM2-chat-1.8b-sft](https://huggingface.co/internlm/internlm2-chat-1_8b-sft)作为初始化模型。
 
-在训练配置文件中设置`pretrained_model_name_or_path = 'internlm/internlm2-chat-1_8b-sft'`，则会在启动训练时自动下载模型文件。若您需要手动下载模型权重，那么请参考[准备预训练模型权重](<>)章节，其中详细说明了如何从Huggingface或者是Modelscope下载模型权重的方法。这里我们附上模型的 HuggingFace 链接与 ModelScope 链接：
+在训练配置文件中设置`pretrained_model_name_or_path = 'internlm/internlm2-chat-1_8b-sft'`，则会在启动训练时自动下载模型文件。若您需要手动下载模型权重，那么请参考[准备预训练模型权重](https://xtuner.readthedocs.io/zh-cn/latest/preparation/pretrained_model.html)章节，其中详细说明了如何从Huggingface或者是Modelscope下载模型权重的方法。这里我们附上模型的 HuggingFace 链接与 ModelScope 链接：
 
 - HuggingFace 链接位于：https://huggingface.co/internlm/internlm2-chat-1_8b-sft
 
@@ -14,7 +14,7 @@
 
 ### 准备训练数据
 
-在本教程中使用[UltraFeedback](<>)数据集作为演示，为了方便起见，我们使用huggingface上已经预处理过的[argilla/ultrafeedback-binarized-preferences-cleaned](<>)数据集，
+在本教程中使用[UltraFeedback](https://arxiv.org/abs/2310.01377)数据集作为演示，为了方便起见，我们使用huggingface上已经预处理过的[argilla/ultrafeedback-binarized-preferences-cleaned](https://huggingface.co/datasets/argilla/ultrafeedback-binarized-preferences-cleaned)数据集，
 
 ```python
 train_dataset = dict(
@@ -28,7 +28,7 @@ train_dataset = dict(
 )
 ```
 
-在配置文件中使用以上配置，即可自动下载并处理该数据集。如果您希望使用其他huggingface上的开源数据集或是使用自定义的数据集，请参阅[偏好数据集](<>)章节。
+在配置文件中使用以上配置，即可自动下载并处理该数据集。如果您希望使用其他huggingface上的开源数据集或是使用自定义的数据集，请参阅[偏好数据集](./preference_data.md)章节。
 
 ### 准备配置文件
 
@@ -40,7 +40,7 @@ xtuner copy-cfg internlm2_chat_1_8b_reward_full_ultrafeedback .
 
 打开复制后的配置文件，如果您选择自动下载模型和数据集，则无需修改配置。若您希望填入您预先下载的模型路径和数据集路径，请修改配置中的`pretrained_model_name_or_path`以及`train_dataset`中`dataset`的`path`参数。
 
-更多的训练参数配置，请参阅[修改Reward训练配置](<>)章节。
+更多的训练参数配置，请参阅[修改Reward训练配置](./modify_settings.md)章节。
 
 ### 启动训练
 

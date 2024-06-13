@@ -14,7 +14,7 @@ XTuner 中的 DPO 训练具备以下显著优势：
 
 1. **支持最新的算法**：XTuner除了支持标准的DPO之外，还支持了大量的衍生算法，同时也支持ORPO等不依赖参考模型的高效算法。
 
-2. **减少显存浪费**：由于偏好数据中的 chosen 和 rejected 数据通常存在长度上的差异，因此在训练数据的拼接时会存在填充（padding token）,造成显存浪费。在 XTuner 中，基于 Flash Attention2 中的[变长注意力](<>)功能，我们在训练过程中通过将偏好数据打包到同一个序列中，显著减少了由于 padding token 带来的显存浪费。这不仅提高了显存的利用效率，还使得在相同硬件条件下可以训练更大的模型或处理更多的数据。
+2. **减少显存浪费**：由于偏好数据中的 chosen 和 rejected 数据通常存在长度上的差异，因此在训练数据的拼接时会存在填充（padding token）,造成显存浪费。在 XTuner 中，基于 Flash Attention2 中的[变长注意力](https://xtuner.readthedocs.io/zh-cn/latest/acceleration/varlen_flash_attn.html)功能，我们在训练过程中通过将偏好数据打包到同一个序列中，显著减少了由于 padding token 带来的显存浪费。这不仅提高了显存的利用效率，还使得在相同硬件条件下可以训练更大的模型或处理更多的数据。
 
 ![img](../reward_model/images/var_len_atten.png)
 

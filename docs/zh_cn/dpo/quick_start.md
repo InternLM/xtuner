@@ -4,16 +4,16 @@
 
 ### 准备预训练模型权重
 
-我们使用经过 SFT 的语言模型[InternLM2-chat-1.8b-sft](<>)作为 DPO 模型的初始化模型来进行偏好对齐。
+我们使用经过 SFT 的语言模型[InternLM2-chat-1.8b-sft](https://huggingface.co/internlm/internlm2-chat-1_8b-sft)作为 DPO 模型的初始化模型来进行偏好对齐。
 
-在训练配置文件中设置`pretrained_model_name_or_path = 'internlm/internlm2-chat-1_8b-sft'`，则会在启动训练时自动下载模型文件。若您需要手动下载模型权重，那么请参考[准备预训练模型权重](<>)章节，其中详细说明了如何从 Huggingface 或者是 Modelscope 下载模型权重的方法。这里我们附上模型的 HuggingFace 链接与 ModelScope 链接：
+在训练配置文件中设置`pretrained_model_name_or_path = 'internlm/internlm2-chat-1_8b-sft'`，则会在启动训练时自动下载模型文件。若您需要手动下载模型权重，那么请参考[准备预训练模型权重](https://xtuner.readthedocs.io/zh-cn/latest/preparation/pretrained_model.html)章节，其中详细说明了如何从 Huggingface 或者是 Modelscope 下载模型权重的方法。这里我们附上模型的 HuggingFace 链接与 ModelScope 链接：
 
 - HuggingFace 链接位于：https://huggingface.co/internlm/internlm2-chat-1_8b-sft
 - ModelScope 链接位于：https://modelscope.cn/models/Shanghai_AI_Laboratory/internlm2-chat-1_8b-sft/summary
 
 ### 准备训练数据
 
-在本教程中使用 Huggingface 上的[mlabonne/orpo-dpo-mix-40k](<>)数据集作为演示，
+在本教程中使用 Huggingface 上的[mlabonne/orpo-dpo-mix-40k](https://huggingface.co/datasets/mlabonne/orpo-dpo-mix-40k)数据集作为演示，
 
 ```python
 train_dataset = dict(
