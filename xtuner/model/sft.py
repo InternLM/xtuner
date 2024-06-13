@@ -182,7 +182,8 @@ class SupervisedFinetune(BaseModel):
         SUPPORT_FLASH_ATTN2 = ('InternLM2Config', 'LlamaConfig', 'GemmaConfig',
                                'MistralConfig', 'MixtralConfig', 'Qwen2Config',
                                'Qwen2MoeConfig', 'Starcoder2Config',
-                               'Starcoder2Config', 'Phi3Config')
+                               'Starcoder2Config', 'Phi3Config',
+                               'DeepseekV2Config')
 
         torch_dtype = torch.bfloat16 if (
             torch.cuda.is_available() and torch.cuda.is_bf16_supported()) \
