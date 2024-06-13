@@ -9,11 +9,11 @@ Triton Kernel
 
 .. code-block:: console
 
-    $ # 单卡
-    $ xtuner train ${CONFIG_NAME_OR_PATH} --deepspeed deepspeed_zero1
-    $ # torchrun 多卡
+    # 单卡
+    $ USE_TRITON_KERNEL=1 xtuner train ${CONFIG_NAME_OR_PATH} --deepspeed deepspeed_zero1
+    # torchrun 多卡
     $ USE_TRITON_KERNEL=1 NPROC_PER_NODE=${GPU_NUM} xtuner train ${CONFIG_NAME_OR_PATH} --deepspeed deepspeed_zero1
-    $ # slurm 多卡
+    # slurm 多卡
     $ USE_TRITON_KERNEL=1 srun ${SRUN_ARGS} xtuner train ${CONFIG_NAME_OR_PATH} --launcher slurm --deepspeed deepspeed_zero1
 
 
@@ -68,11 +68,11 @@ RMS Norm Triton Kernel 支持情况
   :widths: 50 25 50 50 25
   :header-rows: 1
 
-  * - 模型
-    - 序列长度
-    - 是否使用 Triton Kernel
-    - 是否使用 Varlen Attention
-    - Tokens per Second
+  * - Model
+    - Seqlen
+    - Triton
+    - Varlen
+    - TGS
   * - Qwen 1.5 0.5B
     - 32k
     - ❌
@@ -93,5 +93,7 @@ RMS Norm Triton Kernel 支持情况
     - ✅
     - ✅
     - 33027.5
+
+其中，`Seqlen` 表示输入序列长度，`Triton` 表示是否使用 Triton Kernel，`Varlen` 表示是否使用变长注意力机制，`TGS` (Tokens per Second per GPU) 表示每秒单 GPU 处理 token 数量。
 
 XTuner 未来会支持更多的 Triton Kernel 以进一步加速训练。
