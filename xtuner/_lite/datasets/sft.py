@@ -155,7 +155,7 @@ class FinetuneDataset(BaseTrainDataset):
                 input_ids = torch.cat(input_ids, dim=0)
                 labels = torch.cat(labels, dim=0)
                 position_ids = torch.cat(position_ids, dim=0)
-                attention_mask = torch.zeros_like(input_ids, dtype=bool)
+                attention_mask = torch.ones_like(input_ids, dtype=bool)
             else:
                 input_ids = pad_sequence(
                     input_ids, batch_first=True, padding_value=pad_index)
@@ -169,7 +169,7 @@ class FinetuneDataset(BaseTrainDataset):
             input_ids = torch.stack(input_ids)
             labels = torch.stack(labels)
             position_ids = torch.stack(position_ids)
-            attention_mask = torch.zeros_like(input_ids, dtype=bool)
+            attention_mask = torch.ones_like(input_ids, dtype=bool)
 
         # TODO support sp
         data_dict = {

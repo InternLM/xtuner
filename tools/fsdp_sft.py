@@ -257,6 +257,7 @@ def sft(args):
         step_losses = []
         data_time = 0
         _step_start_t = time.time()
+        consumed_tokens = 0
         for i in range(per_step_iters):
             if step * per_step_iters + i + 1 == per_epoch_iters:
                 break
@@ -266,6 +267,7 @@ def sft(args):
             data_time += time.time() - _data_start_t
 
             input_ids = data['input_ids'].cuda()
+
             labels = data['labels'].cuda()
             position_ids = data['position_ids'].cuda()
             unpack_sizes = data['chunk_sizes'].cuda()
@@ -274,19 +276,21 @@ def sft(args):
                                                position_ids, labels,
                                                unpack_sizes)
             step_losses.append(loss)
+            consumed_tokens += data['attention_mask'].sum()
         grad_norm = shard_model.clip_grad_norm_(args.max_grad_norm)
         optimizer.step()
 
         step_time = time.time() - _step_start_t
         eta = step_time * (total_steps - step)
         eta = timedelta(seconds=int(eta))
+        tgs = int(consumed_tokens / step_time)
         if is_interval(step, total_steps, args.log_interval):
             step_loss = sum(step_losses) / len(step_losses)
             logger.info(f'(Epoch {epoch}) Step {step+1}/{total_steps}  '
                         f'lr: {cur_lr:.6f}  loss: {step_loss:.3f}  '
                         f'grad_norm: {grad_norm:.2f}  '
                         f'max_memory: {(max_memory / 1024**3):.1f}GB  '
-                        f'data_time: {data_time:.2f}s  '
+                        f'tgs: {tgs}  data_time: {data_time:.2f}s  '
                         f'time: {step_time:.2f}s  '
                         f'eta: {eta}')
 
