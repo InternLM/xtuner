@@ -16,7 +16,7 @@ Reward Model的应用场景包括但不限于：
 
 XTuner 中的 Reward Model 训练具备以下显著优势：
 
-1. **使用最新的训练技巧**：XTuner 中集成了 InternLM2 中的 Reward Model 训练损失函数，可以稳定奖励得分的数值范围，也可以减少在简单样本上的过拟合（具体可参考[InternLM2技术报告](https://arxiv.org/abs/2403.17297)）。
+1. **使用最新的训练技巧**：XTuner 中集成了 InternLM2 中的 Reward Model 训练损失函数，可以稳定奖励得分的数值范围，也可以减少在简单样本上的过拟合（具体可参考 [InternLM2 技术报告](https://arxiv.org/abs/2403.17297)）。
 
 2. **减少显存浪费**：由于偏好数据中的 chosen 和 rejected 数据通常存在长度上的差异，因此在训练数据的拼接时会存在填充（padding token）,造成显存浪费。在 XTuner 中，基于 Flash Attention2 中的变长注意力功能，我们在训练过程中通过将偏好数据打包到同一个序列中，显著减少了由于 padding token 带来的显存浪费。这不仅提高了显存的利用效率，还使得在相同硬件条件下可以训练更大的模型或处理更多的数据。
 
