@@ -55,7 +55,7 @@ NPROC_PER_NODE=${GPU_NUM} xtuner train ./internlm2_chat_1_8b_reward_full_ultrafe
 srun ${SRUN_ARGS} xtuner train ./internlm2_chat_1_8b_reward_full_ultrafeedback_copy.py --launcher slurm
 ```
 
-正确的训练日志应当如下所示：
+正确的训练日志应当如下所示（在单卡 A800 上运行）：
 
 ```
 06/06 16:12:11 - mmengine - INFO - Iter(train) [   10/15230]  lr: 3.9580e-07  eta: 2:59:41  time: 0.7084  data_time: 0.0044  memory: 18021  loss: 0.6270  acc: 0.0000  chosen_score_mean: 0.0000  rejected_score_mean: 0.0000  num_samples: 4.0000  num_tokens: 969.0000
@@ -65,7 +65,6 @@ srun ${SRUN_ARGS} xtuner train ./internlm2_chat_1_8b_reward_full_ultrafeedback_c
 06/06 16:12:35 - mmengine - INFO - Iter(train) [   50/15230]  lr: 2.1540e-06  eta: 2:41:03  time: 0.7166  data_time: 0.0027  memory: 42186  loss: 0.6278  acc: 0.5000  chosen_score_mean: 0.0031  rejected_score_mean: 0.0032  num_samples: 4.0000  num_tokens: 2049.0000
 06/06 16:12:40 - mmengine - INFO - Iter(train) [   60/15230]  lr: 2.5936e-06  eta: 2:33:37  time: 0.4627  data_time: 0.0023  memory: 30238  loss: 0.6262  acc: 1.0000  chosen_score_mean: 0.0057  rejected_score_mean: 0.0030  num_samples: 4.0000  num_tokens: 992.0000
 06/06 16:12:46 - mmengine - INFO - Iter(train) [   70/15230]  lr: 3.0331e-06  eta: 2:33:18  time: 0.6018  data_time: 0.0025  memory: 42186  loss: 0.6247  acc: 0.7500  chosen_score_mean: 0.0117  rejected_score_mean: 0.0055  num_samples: 4.0000  num_tokens: 815.0000
-
 ```
 
 ### 模型转换

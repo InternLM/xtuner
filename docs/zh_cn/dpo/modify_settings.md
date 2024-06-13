@@ -74,7 +74,7 @@ train_dataloader = dict(
 
 上述配置中，我们使用了 `load_dataset` 来加载 huggingface 上的 `mlabonne/orpo-dpo-mix-40k` 数据集，使用 `orpo_dpo_mix_40k_map_fn` 作为数据集映射函数。
 
-关于如何处理数据集以及如何编写数据集映射函数，请参考[偏好数据集章节](./preference_data.md)。
+关于如何处理数据集以及如何编写数据集映射函数，请参考[偏好数据集章节](../reward_model/preference_data.md)。
 
 ### 加速训练
 
