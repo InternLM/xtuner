@@ -116,10 +116,16 @@ class InternVL(BaseModel):
         lora_config = self._parse_lora_config(lora_config)
         self.model.language_model = prepare_model_for_kbit_training(
             self.model.language_model, use_activation_checkpointing)
+        if lora_config.target_modules is None:
+            modules = find_all_linear_names(self.model.language_model)
+            lora_config.target_modules = modules
         self.model.language_model = get_peft_model(self.model.language_model, lora_config)
 
     def _prepare_visual_encoder_for_lora(self, lora_config):
         lora_config = self._parse_lora_config(lora_config)
+        if lora_config.target_modules is None:
+            modules = find_all_linear_names(self.model.vision_model)
+            lora_config.target_modules = modules
         self.model.vision_model = get_peft_model(self.model.vision_model, lora_config)
 
     def gradient_checkpointing_enable(self):

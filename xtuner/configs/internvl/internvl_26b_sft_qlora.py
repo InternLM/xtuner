@@ -86,8 +86,7 @@ model = dict(
         r=128,
         lora_alpha=256,
         lora_dropout=0.05,
-        target_modules=['self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'self_attn.o_proj',
-                        'mlp.gate_proj', 'mlp.down_proj', 'mlp.up_proj'],
+        target_modules=None,
         task_type='CAUSAL_LM'),
     # uncomment the following lines if you don't want to use Lora in visual encoder
     # visual_encoder_lora=dict(
