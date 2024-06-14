@@ -13,10 +13,10 @@ from .sampler import SequenceParallelSampler
 from .setup_distributed import (get_data_parallel_group,
                                 get_data_parallel_rank,
                                 get_data_parallel_world_size,
+                                get_inner_sequence_parallel_group,
+                                get_inner_sequence_parallel_rank,
+                                get_inner_sequence_parallel_world_size,
                                 get_sequence_parallel_group,
-                                get_sequence_parallel_inner_group,
-                                get_sequence_parallel_inner_rank,
-                                get_sequence_parallel_inner_world_size,
                                 get_sequence_parallel_rank,
                                 get_sequence_parallel_world_size,
                                 init_inner_sequence_parallel,
@@ -33,7 +33,7 @@ __all__ = [
     'get_data_parallel_rank', 'reduce_sequence_parallel_loss', 'init_dist',
     'all_to_all', 'gather_for_sequence_parallel',
     'split_forward_gather_backward', 'gather_forward_split_backward',
-    'get_sequence_parallel_inner_group', 'get_sequence_parallel_inner_rank',
-    'get_sequence_parallel_inner_world_size', 'init_inner_sequence_parallel',
+    'get_inner_sequence_parallel_group', 'get_inner_sequence_parallel_rank',
+    'get_inner_sequence_parallel_world_size', 'init_inner_sequence_parallel',
     'is_inner_sequence_parallel_initialized'
 ]
