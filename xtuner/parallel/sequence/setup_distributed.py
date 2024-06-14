@@ -14,8 +14,7 @@ _DATA_PARALLEL_WORLD_SIZE = None
 _DATA_PARALLEL_RANK = None
 
 
-def init_sequence_parallel(sequence_parallel_size: int = 1,
-                           sequence_parallel_inner_size=1):
+def init_sequence_parallel(sequence_parallel_size: int = 1):
     assert dist.is_initialized()
     world_size: int = dist.get_world_size()
 
@@ -53,9 +52,20 @@ def init_sequence_parallel(sequence_parallel_size: int = 1,
         if rank in ranks:
             _DATA_PARALLEL_GROUP = group
 
-    # Build the sequence parallel inner groups.
-    # They are used to handle cases where sp size is not evenly divided by the
-    # number of attn heads.
+
+def init_inner_sequence_parallel(sequence_parallel_inner_size: int = 1):
+    """Build the sequence parallel inner groups.
+
+    They are helpful when sp size is not evenly divided by the number of attn
+    heads.
+    """
+    assert _SEQUENCE_PARALLEL_GROUP is not None, \
+        ('Please call `init_inner_sequence_parallel` after calling '
+         '`init_sequence_parallel`.')
+
+    rank = dist.get_rank()
+    world_size: int = dist.get_world_size()
+
     n_inner_group = world_size // sequence_parallel_inner_size
 
     global _SEQUENCE_PARALLEL_INNER_GROUP
@@ -67,6 +77,10 @@ def init_sequence_parallel(sequence_parallel_size: int = 1,
         group = dist.new_group(ranks)
         if rank in ranks:
             _SEQUENCE_PARALLEL_INNER_GROUP = group
+
+
+def is_inner_sequence_parallel_initialized():
+    return _SEQUENCE_PARALLEL_INNER_GROUP is not None
 
 
 def get_sequence_parallel_inner_group():

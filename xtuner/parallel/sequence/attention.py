@@ -1,4 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import math
+
 import torch.distributed as dist
 
 from .comm import (all_to_all, gather_forward_split_backward,
@@ -6,7 +8,9 @@ from .comm import (all_to_all, gather_forward_split_backward,
 from .setup_distributed import (get_sequence_parallel_group,
                                 get_sequence_parallel_inner_group,
                                 get_sequence_parallel_inner_world_size,
-                                get_sequence_parallel_world_size)
+                                get_sequence_parallel_world_size,
+                                init_inner_sequence_parallel,
+                                is_inner_sequence_parallel_initialized)
 
 
 def pre_process_for_sequence_parallel_attn(query_states,
@@ -16,7 +20,12 @@ def pre_process_for_sequence_parallel_attn(query_states,
                                            gather_dim=1):
     b, s_div_sp, h, d = query_states.shape
     sp = get_sequence_parallel_world_size()
-    insp = get_sequence_parallel_inner_world_size()
+
+    if not is_inner_sequence_parallel_initialized():
+        insp = sp // math.gcd(h, sp)
+        init_inner_sequence_parallel(insp)
+    else:
+        insp = get_sequence_parallel_inner_world_size()
 
     def pre_process_for_inner_sp(q, k, v):
         if scatter_dim != 2 and gather_dim != 1:
