@@ -330,7 +330,9 @@ def main():
                     exclude_frozen_parameters=exclude_frozen_parameters,
                     sequence_parallel_size=getattr(cfg,
                                                    'sequence_parallel_size',
-                                                   1))
+                                                   1),
+                    sequence_parallel_inner_size=getattr(
+                        cfg, 'sequence_parallel_inner_size', 1))
                 cfg.__setitem__('strategy', strategy)
                 optim_wrapper = dict(
                     type='DeepSpeedOptimWrapper',

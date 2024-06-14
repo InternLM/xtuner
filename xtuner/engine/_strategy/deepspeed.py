@@ -12,7 +12,10 @@ class DeepSpeedStrategy(MMEngineDeepSpeedStrategy):
 
     def __init__(self, *args, **kwargs):
         sequence_parallel_size = kwargs.pop('sequence_parallel_size', 1)
+        sequence_parallel_inner_size = kwargs.pop(
+            'sequence_parallel_inner_size', 1)
         self.sequence_parallel_size = sequence_parallel_size
+        self.sequence_parallel_inner_size = sequence_parallel_inner_size
 
         super().__init__(*args, **kwargs)
 
@@ -67,4 +70,5 @@ class DeepSpeedStrategy(MMEngineDeepSpeedStrategy):
         **kwargs,
     ):
         super()._setup_distributed(launcher, backend, **kwargs)
-        init_sequence_parallel(self.sequence_parallel_size)
+        init_sequence_parallel(self.sequence_parallel_size,
+                               self.sequence_parallel_inner_size)

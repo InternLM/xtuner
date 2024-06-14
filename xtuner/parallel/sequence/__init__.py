@@ -14,6 +14,9 @@ from .setup_distributed import (get_data_parallel_group,
                                 get_data_parallel_rank,
                                 get_data_parallel_world_size,
                                 get_sequence_parallel_group,
+                                get_sequence_parallel_inner_group,
+                                get_sequence_parallel_inner_rank,
+                                get_sequence_parallel_inner_world_size,
                                 get_sequence_parallel_rank,
                                 get_sequence_parallel_world_size,
                                 init_sequence_parallel)
@@ -27,5 +30,7 @@ __all__ = [
     'get_data_parallel_group', 'get_data_parallel_world_size',
     'get_data_parallel_rank', 'reduce_sequence_parallel_loss', 'init_dist',
     'all_to_all', 'gather_for_sequence_parallel',
-    'split_forward_gather_backward', 'gather_forward_split_backward'
+    'split_forward_gather_backward', 'gather_forward_split_backward',
+    'get_sequence_parallel_inner_group', 'get_sequence_parallel_inner_rank',
+    'get_sequence_parallel_inner_world_size'
 ]

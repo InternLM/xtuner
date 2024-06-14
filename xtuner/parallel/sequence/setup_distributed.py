@@ -5,12 +5,17 @@ _SEQUENCE_PARALLEL_GROUP = None
 _SEQUENCE_PARALLEL_WORLD_SIZE = None
 _SEQUENCE_PARALLEL_RANK = None
 
+_SEQUENCE_PARALLEL_INNER_GROUP = None
+_SEQUENCE_PARALLEL_INNER_WORLD_SIZE = None
+_SEQUENCE_PARALLEL_INNER_RANK = None
+
 _DATA_PARALLEL_GROUP = None
 _DATA_PARALLEL_WORLD_SIZE = None
 _DATA_PARALLEL_RANK = None
 
 
-def init_sequence_parallel(sequence_parallel_size: int = 1):
+def init_sequence_parallel(sequence_parallel_size: int = 1,
+                           sequence_parallel_inner_size=1):
     assert dist.is_initialized()
     world_size: int = dist.get_world_size()
 
@@ -47,6 +52,49 @@ def init_sequence_parallel(sequence_parallel_size: int = 1):
         group = dist.new_group(ranks)
         if rank in ranks:
             _DATA_PARALLEL_GROUP = group
+
+    # Build the sequence parallel inner groups.
+    # They are used to handle cases where sp size is not evenly divided by the
+    # number of attn heads.
+    n_inner_group = world_size // sequence_parallel_inner_size
+
+    global _SEQUENCE_PARALLEL_INNER_GROUP
+    assert _SEQUENCE_PARALLEL_INNER_GROUP is None
+
+    for i in range(n_inner_group):
+        ranks = range(i * sequence_parallel_inner_size,
+                      (i + 1) * sequence_parallel_inner_size)
+        group = dist.new_group(ranks)
+        if rank in ranks:
+            _SEQUENCE_PARALLEL_INNER_GROUP = group
+
+
+def get_sequence_parallel_inner_group():
+    return _SEQUENCE_PARALLEL_INNER_GROUP
+
+
+def get_sequence_parallel_inner_world_size():
+    global _SEQUENCE_PARALLEL_INNER_WORLD_SIZE
+    if _SEQUENCE_PARALLEL_INNER_WORLD_SIZE is not None:
+        return _SEQUENCE_PARALLEL_INNER_WORLD_SIZE
+    if not dist.is_initialized() or (_SEQUENCE_PARALLEL_INNER_GROUP is None):
+        _SEQUENCE_PARALLEL_INNER_WORLD_SIZE = 1
+    else:
+        _SEQUENCE_PARALLEL_INNER_WORLD_SIZE = dist.get_world_size(
+            group=get_sequence_parallel_inner_group())
+    return _SEQUENCE_PARALLEL_INNER_WORLD_SIZE
+
+
+def get_sequence_parallel_inner_rank():
+    global _SEQUENCE_PARALLEL_INNER_RANK
+    if _SEQUENCE_PARALLEL_INNER_RANK is not None:
+        return _SEQUENCE_PARALLEL_INNER_RANK
+    if not dist.is_initialized() or (_SEQUENCE_PARALLEL_INNER_GROUP is None):
+        _SEQUENCE_PARALLEL_INNER_RANK = 0
+    else:
+        _SEQUENCE_PARALLEL_INNER_RANK = dist.get_rank(
+            group=get_sequence_parallel_inner_group())
+    return _SEQUENCE_PARALLEL_INNER_RANK
 
 
 def get_sequence_parallel_group():
