@@ -299,13 +299,12 @@ def llama_varlen_attn_forward(
     **kwargs,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor],
            Optional[Tuple[torch.Tensor]]]:
-    is_training = self.training
 
     message_hub = MessageHub.get_instance('varlen_attn_args')
     rank = dist.get_rank()
     cumulative_len = message_hub.get_info(f'cumulative_len_rank_{rank}')
     max_seqlen = message_hub.get_info(f'max_seqlen_rank_{rank}')
-    assert is_training == (cumulative_len is not None)
+    use_varlen_atten = (cumulative_len is not None)
 
     if 'padding_mask' in kwargs:
         warnings.warn('Passing `padding_mask` is deprecated and will be '
@@ -373,7 +372,7 @@ def llama_varlen_attn_forward(
         value_states = value_states.to(target_dtype)
 
     assert SUPPORT_FLASH2
-    if is_training:
+    if use_varlen_atten:
         attn_output = varlen_flash_attn(
             query_states,
             key_states,
@@ -381,14 +380,15 @@ def llama_varlen_attn_forward(
             cumulative_len,
             max_seqlen,
             causal=True,
-            dropout_p=dropout_rate)
+            dropout_p=dropout_rate,
+            training=self.training)
     else:
         attn_output = flash_attn_wo_mask(
             query_states,
             key_states,
             value_states,
             causal=True,
-            training=False)
+            training=self.training)
 
     attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
     attn_output = self.o_proj(attn_output)
@@ -407,13 +407,12 @@ def llama_varlen_attn_forward_legacy(
     **kwargs,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor],
            Optional[Tuple[torch.Tensor]]]:
-    is_training = self.training
 
     message_hub = MessageHub.get_instance('varlen_attn_args')
     rank = dist.get_rank()
     cumulative_len = message_hub.get_info(f'cumulative_len_rank_{rank}')
     max_seqlen = message_hub.get_info(f'max_seqlen_rank_{rank}')
-    assert is_training == (cumulative_len is not None)
+    use_varlen_atten = (cumulative_len is not None)
 
     if 'padding_mask' in kwargs:
         warnings.warn('Passing `padding_mask` is deprecated and will be '
@@ -443,7 +442,7 @@ def llama_varlen_attn_forward_legacy(
         kv_seq_len += past_key_value.get_usable_length(kv_seq_len,
                                                        self.layer_idx)
 
-    if is_training:
+    if use_varlen_atten:
         cos, sin = self.rotary_emb(value_states, max_seqlen)
         # position_ids (1, seq_len)
         # cos, sin  (1, seq_len, dim) -> (seq_len, dim)
@@ -496,7 +495,7 @@ def llama_varlen_attn_forward_legacy(
         value_states = value_states.to(target_dtype)
 
     assert SUPPORT_FLASH2
-    if is_training:
+    if use_varlen_atten:
         attn_output = varlen_flash_attn(
             query_states,
             key_states,
@@ -504,7 +503,8 @@ def llama_varlen_attn_forward_legacy(
             cumulative_len,
             max_seqlen,
             causal=True,
-            dropout_p=dropout_rate)
+            dropout_p=dropout_rate,
+            training=self.training)
     else:
         attn_output = flash_attn_wo_mask(
             query_states,
@@ -512,7 +512,7 @@ def llama_varlen_attn_forward_legacy(
             value_states,
             causal=True,
             dropout_p=dropout_rate,
-            training=False)
+            training=self.training)
 
     attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
 

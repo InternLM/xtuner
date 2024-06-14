@@ -1,21 +1,28 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import json
 import math
+import os
+import warnings
 from collections import OrderedDict
 from contextlib import nullcontext
 
 import torch
+import torch.distributed as dist
 from mmengine import print_log
 from mmengine.config import Config, ConfigDict
 from mmengine.model import BaseModel
 from mmengine.runner import load_checkpoint
 from peft import get_peft_model, prepare_model_for_kbit_training
 from torch import nn
-from transformers import AutoConfig, PreTrainedModel, PreTrainedTokenizer
+from transformers import (AutoConfig, AutoModelForSequenceClassification,
+                          PreTrainedModel, PreTrainedTokenizer)
+from transformers.dynamic_module_utils import get_class_from_dynamic_module
 from transformers.integrations import is_deepspeed_zero3_enabled
+from transformers.modeling_utils import no_init_weights
 
-from xtuner.parallel.sequence import (get_sequence_parallel_group,
+from xtuner.parallel.sequence import (gather_forward_split_backward,
+                                      get_sequence_parallel_group,
                                       get_sequence_parallel_world_size,
-                                      reduce_sequence_parallel_loss,
                                       split_for_sequence_parallel)
 from xtuner.registry import BUILDER
 from .modules import dispatch_modules
@@ -23,6 +30,15 @@ from .modules.dispatch import SUPPORT_FLASH1, SUPPORT_FLASH2
 from .utils import (LoadWoInit, find_all_linear_names,
                     get_peft_model_state_dict, make_inputs_require_grad,
                     traverse_dict)
+
+
+def reduce_mean(tensor):
+    """"Obtain the mean of tensor on different GPUs."""
+    if not (dist.is_available() and dist.is_initialized()):
+        return tensor
+    tensor = tensor.clone()
+    dist.all_reduce(tensor.div_(dist.get_world_size()), op=dist.ReduceOp.SUM)
+    return tensor
 
 
 def smart_tokenizer_and_embedding_resize(
@@ -68,21 +84,40 @@ def smart_tokenizer_and_embedding_resize(
             f'{len(tokenizer)}.', 'current')
 
 
-class SupervisedFinetune(BaseModel):
+class RewardModel(BaseModel):
 
-    def __init__(self,
-                 llm,
-                 lora=None,
-                 peft_model=None,
-                 use_activation_checkpointing=True,
-                 use_varlen_attn=False,
-                 tokenizer=None,
-                 max_position_embeddings=None):
+    def __init__(
+        self,
+        llm,
+        lora=None,
+        peft_model=None,
+        use_activation_checkpointing=True,
+        use_varlen_attn=False,
+        tokenizer=None,
+        max_position_embeddings=None,
+        reward_token_id=None,
+        loss_type='ranking',
+        penalty_type='log_barrier',
+        penalty_weight=0.01,
+    ):
         super().__init__()
         with LoadWoInit():
             if isinstance(llm, dict):
                 llm = self._dispatch_lm_model_cfg(llm, max_position_embeddings)
-            self.llm = self._build_from_cfg_or_module(llm)
+            self.llm = self._build_from_cfg_or_module(llm).model
+            self.v_head = nn.Linear(self.llm.config.hidden_size, 1, bias=False)
+            # zero init
+            self.v_head.weight.data.zero_()
+
+        self.reward_token_id = reward_token_id
+        assert loss_type in ('ranking',
+                             'focal'), f'Unsupported loss type {loss_type}'
+        self.loss_type = loss_type
+        assert penalty_type in (
+            'log_barrier', 'L2',
+            'none'), f'Unsupported penalty type {penalty_type}'
+        self.penalty_type = penalty_type
+        self.penalty_weight = penalty_weight
 
         if tokenizer is not None:
             if isinstance(tokenizer, dict):
@@ -182,8 +217,7 @@ class SupervisedFinetune(BaseModel):
         SUPPORT_FLASH_ATTN2 = ('InternLM2Config', 'LlamaConfig', 'GemmaConfig',
                                'MistralConfig', 'MixtralConfig', 'Qwen2Config',
                                'Qwen2MoeConfig', 'Starcoder2Config',
-                               'Starcoder2Config', 'Phi3Config',
-                               'DeepseekV2Config')
+                               'Starcoder2Config', 'Phi3Config')
 
         torch_dtype = torch.bfloat16 if (
             torch.cuda.is_available() and torch.cuda.is_bf16_supported()) \
@@ -240,9 +274,9 @@ class SupervisedFinetune(BaseModel):
             raise NotImplementedError
 
     def forward(self, data, data_samples=None, mode='loss'):
-
+        labels = data.pop('labels', None)
         if mode == 'loss':
-            return self.compute_loss(data, data_samples)
+            return self.compute_loss(data, labels)
         elif mode == 'predict':
             return self.predict(data, data_samples)
         elif mode == 'tensor':
@@ -251,20 +285,20 @@ class SupervisedFinetune(BaseModel):
             raise NotImplementedError
 
     def _forward(self, data, data_samples=None):
-
-        outputs = self.llm(**data)
-
-        return outputs
+        hidden_states = self.llm(**data)[0]
+        logits = self.v_head(hidden_states)
+        return logits
 
     def predict(self, data, data_samples=None):
-        outputs = self.llm(**data)
-        logits_dict = [{'logits': logits} for logits in outputs.logits]
+        hidden_states = self.llm(**data)[0]
+        logits = self.v_head(hidden_states)
+        logits_dict = [{'logits': log} for log in logits]
         return logits_dict
 
     @staticmethod
     def _split_for_sequence_parallel(data):
         # attention mask should not be split
-        ARGS_NEED_TO_SPLIT = ('input_ids', 'labels', 'position_ids')
+        ARGS_NEED_TO_SPLIT = ('input_ids', 'position_ids')
         sp_group = get_sequence_parallel_group()
         for key in ARGS_NEED_TO_SPLIT:
             val = data.get(key, None)
@@ -274,23 +308,105 @@ class SupervisedFinetune(BaseModel):
                     val, dim=1, sp_group=sp_group)
         return data
 
-    def _compute_sequence_parallel_loss(self, data):
-        data = self._split_for_sequence_parallel(data)
-        outputs = self.llm(**data)
-        labels = data['labels']
-        num_tokens = (labels != -100).sum()
-        sp_group = get_sequence_parallel_group()
-        loss = reduce_sequence_parallel_loss(outputs.loss, num_tokens,
-                                             sp_group)
-        return {'loss': loss}
-
-    def compute_loss(self, data, data_samples=None):
+    def compute_loss(self, data, labels=None):
         if get_sequence_parallel_world_size() > 1:
-            return self._compute_sequence_parallel_loss(data)
+            data = self._split_for_sequence_parallel(data)
+
+        hidden_states = self.llm(**data)[0]
+        logits = self.v_head(hidden_states)
+
+        if get_sequence_parallel_world_size() > 1:
+            logits = gather_forward_split_backward(
+                logits,
+                dim=1,
+                sp_group=get_sequence_parallel_group(),
+                grad_scale='up')
+
+        chosen_idx = torch.where(labels == 0)
+        rejected_idx = torch.where(labels == 1)
+        chosen_logits = logits[chosen_idx]
+        rejected_logits = logits[rejected_idx]
+
+        num_samples = torch.tensor(len(chosen_logits)).float().to(
+            hidden_states.device)
+        avg_factor = 1.0 / num_samples
+        avg_factor = reduce_mean(avg_factor).to(hidden_states.device)
+
+        chosen_mean = reduce_mean(chosen_logits.mean().detach())
+        rejected_mean = reduce_mean(rejected_logits.mean().detach())
+        acc = reduce_mean(
+            (chosen_logits > rejected_logits).sum() / num_samples).detach()
+        num_tokens = torch.tensor(labels.shape[1]).float()
+
+        # ranking loss
+        if self.loss_type == 'ranking':
+            rank_loss = self.ranking_loss(
+                chosen_logits, rejected_logits, avg_factor=avg_factor)
+        elif self.loss_type == 'focal':
+            rank_loss = self.focal_loss(
+                chosen_logits, rejected_logits, avg_factor=avg_factor)
         else:
-            outputs = self.llm(**data)
-            loss_dict = {'loss': outputs.loss}
-            return loss_dict
+            raise NotImplementedError(
+                f'Unsupported loss type {self.loss_type}')
+
+        # penalty loss
+        if self.penalty_type == 'log_barrier':
+            penalty = self.log_barrier_penalty(
+                torch.cat([chosen_logits, rejected_logits]),
+                lower_bound=-5,
+                upper_bound=5,
+                avg_factor=avg_factor)
+        elif self.penalty_type == 'L2':
+            penalty = self.l2_penalty(
+                torch.cat([chosen_logits, rejected_logits]),
+                avg_factor=avg_factor)
+        elif self.penalty_type == 'none':
+            penalty = 0
+        else:
+            raise NotImplementedError(
+                f'Unsupported penalty type {self.penalty_type}')
+
+        loss = rank_loss + self.penalty_weight * penalty
+        loss_dict = {
+            'loss': loss,
+            'acc': acc,
+            'chosen_score_mean': chosen_mean,
+            'rejected_score_mean': rejected_mean,
+            'num_samples': num_samples,
+            'num_tokens': num_tokens,
+        }
+
+        return loss_dict
+
+    def ranking_loss(self, chosen_logits, rejected_logits, avg_factor):
+        rank_loss = -nn.functional.logsigmoid(chosen_logits - rejected_logits)
+        return rank_loss.sum() * avg_factor
+
+    def focal_loss(self, chosen_logits, rejected_logits, avg_factor):
+        # focal ranking loss from InternLM2 paper https://arxiv.org/abs/2403.17297  # noqa
+        rank_loss = -nn.functional.logsigmoid(chosen_logits - rejected_logits)
+        p_ij = torch.sigmoid(chosen_logits - rejected_logits)
+        p = 2 * torch.relu(p_ij - 0.5)
+        gamma = 2
+        focal_loss = ((1 - p)**gamma) * rank_loss
+        return focal_loss.sum() * avg_factor
+
+    def log_barrier_penalty(self,
+                            logits,
+                            lower_bound,
+                            upper_bound,
+                            epsilon=1e-3,
+                            avg_factor=1):
+        # log barrier penalty from InternLM2 paper https://arxiv.org/abs/2403.17297  # noqa
+        logits_fp32 = logits.float()
+        logits_clamped = torch.clamp(logits_fp32, lower_bound + epsilon,
+                                     upper_bound - epsilon)
+        penalty = -torch.log(upper_bound - logits_clamped) - torch.log(
+            logits_clamped - lower_bound)
+        return penalty.sum() * avg_factor
+
+    def l2_penalty(self, logits, avg_factor=1):
+        return (logits**2).sum() * avg_factor
 
     def state_dict(self, *args, **kwargs):
         state_dict = super().state_dict(*args, **kwargs)
@@ -311,16 +427,64 @@ class SupervisedFinetune(BaseModel):
               fp32=False,
               save_pretrained_kwargs={},
               **kwargs):
-        self.llm.config.use_cache = True
-        if not fp32:
-            print_log('Convert LLM to float16', 'current')
-            self.llm.half()
-        if self.use_lora:
-            print_log(f'Saving adapter to {save_dir}', 'current')
+        print(f'Saving LLM tokenizer to {save_dir}')
+        tokenizer = BUILDER.build(cfg.tokenizer)
+        tokenizer.save_pretrained(save_dir)
+
+        if 'PeftModel' in self.llm.__class__.__name__:
+            # merge adapter
+            self.llm = self.llm.merge_and_unload()
+        if 'InternLM2' in self.llm.__class__.__name__:
+            from xtuner.tools.model_converters.modeling_internlm2_reward.modeling_internlm2 import \
+                InternLM2ForRewardModel  # noqa
+            print(f'Saving Reward Model to {save_dir}')
+            hf_cfg = self.llm.config
+            hf_cfg.reward_token_id = self.reward_token_id if \
+                self.reward_token_id is not None else cfg.reward_token_id
+            if not fp32:
+                dtype = torch.float16
+            else:
+                dtype = torch.float32
+            with no_init_weights():
+                reward_model = InternLM2ForRewardModel._from_config(
+                    hf_cfg, torch_dtype=dtype)
+            reward_model.model.load_state_dict(self.llm.state_dict())
+            reward_model.v_head.load_state_dict(self.v_head.state_dict())
+            reward_model.save_pretrained(save_dir, **save_pretrained_kwargs)
+            # fix auto_map in config
+            with open(os.path.join(save_dir, 'config.json')) as fp:
+                config_dict = json.load(fp)
+            config_dict['auto_map'][
+                'AutoModel'] = 'modeling_internlm2.InternLM2ForRewardModel'
+            config_dict['auto_map'].pop('AutoModelForCausalLM', None)
+            with open(os.path.join(save_dir, 'config.json'), 'w') as fp:
+                json.dump(config_dict, fp, indent=2)
         else:
-            print_log(f'Saving LLM tokenizer to {save_dir}', 'current')
-            tokenizer = BUILDER.build(cfg.tokenizer)
-            tokenizer.save_pretrained(save_dir)
-            print_log(f'Saving LLM to {save_dir}', 'current')
-        self.llm.save_pretrained(save_dir, **save_pretrained_kwargs)
-        self.llm.config.use_cache = False
+            warnings.warn(
+                f'The pretrained model type: {self.llm.__class__.__name__} '
+                'has no reward model class defined. Use '
+                'the SequenceClassification class instead.'
+                'You can refer to `xtuner/tools/model_converters/modeling_internlm2_reward` '  # noqa
+                'to implement the reward model class.')
+
+            hf_cfg = self.llm.config
+            hf_cfg.num_labels = 1  # set the output dim to 1
+            try:
+                with no_init_weights():
+                    reward_model = \
+                        AutoModelForSequenceClassification.from_config(hf_cfg)
+            except Exception as e:
+                warnings.warn(f'Cannot find SequenceClassification class '
+                              f'from transformers: {e}, \n'
+                              'try to find it in the dynamic module.')
+                module_file, causal_model_name = hf_cfg.auto_map[
+                    'AutoModelForCausalLM'].split('.')
+                seqcls_model_name = causal_model_name.split(
+                    'For')[0] + 'ForSequenceClassification'
+                seqcls_class = get_class_from_dynamic_module(
+                    f'{module_file}.{seqcls_model_name}', hf_cfg._name_or_path)
+                with no_init_weights():
+                    reward_model = seqcls_class(hf_cfg)
+            reward_model.model.load_state_dict(self.llm.state_dict())
+            reward_model.score.load_state_dict(self.v_head.state_dict())
+            reward_model.save_pretrained(save_dir, **save_pretrained_kwargs)

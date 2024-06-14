@@ -7,7 +7,8 @@ from .attention import (post_process_for_sequence_parallel_attn,
 from .comm import (all_to_all, gather_for_sequence_parallel,
                    gather_forward_split_backward, split_for_sequence_parallel,
                    split_forward_gather_backward)
-from .data_collate import pad_for_sequence_parallel
+from .data_collate import (pad_cumulative_len_for_sequence_parallel,
+                           pad_for_sequence_parallel)
 from .reduce_loss import reduce_sequence_parallel_loss
 from .sampler import SequenceParallelSampler
 from .setup_distributed import (get_data_parallel_group,
@@ -35,5 +36,6 @@ __all__ = [
     'split_forward_gather_backward', 'gather_forward_split_backward',
     'get_inner_sequence_parallel_group', 'get_inner_sequence_parallel_rank',
     'get_inner_sequence_parallel_world_size', 'init_inner_sequence_parallel',
-    'is_inner_sequence_parallel_initialized'
+    'is_inner_sequence_parallel_initialized',
+    'pad_cumulative_len_for_sequence_parallel'
 ]
