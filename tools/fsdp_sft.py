@@ -121,7 +121,7 @@ def is_interval(step, total_steps, interval):
     return (step + 1) % interval == 0 or (step + 1) == total_steps
 
 
-# @logger.catch
+@logger.catch
 def sft(args):
 
     init_dist('slurm')
@@ -186,7 +186,7 @@ def sft(args):
             param_dtype=torch.bfloat16,
             reduce_dtype=torch.bfloat16,
             buffer_dtype=torch.bfloat16),
-        use_orig_params=True)
+        use_orig_params=False)
 
     optimizer = AdamW(shard_model.parameters(), lr=args.lr, foreach=True)
     # For TP, input needs to be same across all TP ranks.
@@ -229,7 +229,7 @@ def sft(args):
     warmup_steps = int(args.warmup_ratio * total_steps)
 
     def warmup_fn(x):
-        return x / warmup_steps if x <= warmup_steps else 1
+        return x / warmup_steps if x < warmup_steps else 1
 
     warmup_scheduler = LambdaLR(optimizer, warmup_fn)
 
@@ -315,11 +315,12 @@ def sft(args):
             consumed_tokens += data['attention_mask'].sum()
         grad_norm = shard_model.clip_grad_norm_(args.max_grad_norm)
         optimizer.step()
+        optimizer.zero_grad()
 
         step_time = time.time() - _step_start_t
         eta = step_time * (total_steps - step)
         eta = timedelta(seconds=int(eta))
-        tgs = int(consumed_tokens / step_time)
+        tgs = int(consumed_tokens / step_time / args.tp_size)
         if is_interval(step, total_steps, args.log_interval):
             step_loss = sum(step_losses) / len(step_losses)
             logger.info(f'(Epoch {epoch}) Step {step+1}/{total_steps}  '

@@ -123,6 +123,7 @@ class RMSNorm(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, x, weight, eps):
+
         # allocate output
         y = torch.empty_like(x)
         # reshape input data into 2D tensor
@@ -212,9 +213,17 @@ rms_norm = RMSNorm.apply
 
 
 def rms_norm_forward(self, hidden_states):
+
+    from torch.distributed._functional_collectives import AsyncCollectiveTensor
+    if isinstance(hidden_states, AsyncCollectiveTensor):
+        hidden_states = hidden_states.wait()
     if (hidden_states.device == torch.device('cpu')
             or self.weight.device == torch.device('cpu')):
         raise RuntimeError(
             'Can not use triton kernels on cpu. Please set `USE_TRITON_KERNEL`'
             ' environment variable to 0 before training.')
-    return rms_norm(hidden_states, self.weight, self.variance_epsilon)
+    ret = rms_norm(hidden_states, self.weight, self.variance_epsilon)
+    return ret
+
+
+torch.nn.Linear
