@@ -11,7 +11,7 @@ from mmengine.model import is_model_wrapper
 from mmengine.runner import FlexibleRunner
 
 from xtuner.registry import BUILDER
-from xtuner.utils import SUPPORT_MODELS, get_origin_state_dict
+from xtuner.utils import get_origin_state_dict
 
 DATA_BATCH = Optional[Union[dict, tuple, list]]
 
@@ -22,6 +22,12 @@ class HFCheckpointHook(Hook):
 
     def __init__(self, out_dir: Optional[Union[str, Path]] = None) -> None:
         self.out_dir = out_dir
+
+    @staticmethod
+    def _use_shard_moe(llm):
+        config = llm.config
+        moe_implementation = getattr(config, 'moe_implementation', 'origin')
+        return moe_implementation == 'shard'
 
     def after_run(self, runner) -> None:
         assert isinstance(runner,
@@ -55,8 +61,7 @@ class HFCheckpointHook(Hook):
                 val = state_dict.pop(k)
                 state_dict[k[4:]] = val
 
-            model_name = type(llm).__name__
-            if model_name in SUPPORT_MODELS:
+            if self._use_shard_moe(llm):
                 print_log('recover the origin state_dict from merged one ...')
                 state_dict = get_origin_state_dict(state_dict, llm)
 
