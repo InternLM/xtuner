@@ -58,7 +58,6 @@ def pre_process_for_sequence_parallel_attn(query_states,
 
         return q, k, v
 
-
     assert (h * insp) % sp == 0, \
         ('The number of attention heads should be divisible by '
          '(sequence_parallel_world_size // sequence_parallel_inner_world_size)'
