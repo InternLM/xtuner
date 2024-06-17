@@ -49,7 +49,7 @@ class DPO(SupervisedFinetune):
         self.label_smoothing = label_smoothing
         self.beta = beta
 
-        if not self.use_lora:
+        if not self.use_lora and self.ref_llm is not None:
             self.ref_llm = create_reference_model(self.llm)
 
     def _gather_masked_logits(self, logits, labels, mask):
