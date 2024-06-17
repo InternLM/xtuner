@@ -222,7 +222,10 @@ def internlm2_varlen_attn_forward(
     try:
         cos, sin = self.rotary_emb(value_states, position_ids)
     except RuntimeError:
-        raise RuntimeError('Please update the InternLM2 model.')
+        raise RuntimeError(
+            'You are using the old version of InternLM2 model. The '
+            '`modeling_internlm2.py` is outdated. Please update the InternLM2 '
+            'model.')
     query_states, key_states = apply_rotary_pos_emb(query_states, key_states,
                                                     cos, sin)
 
