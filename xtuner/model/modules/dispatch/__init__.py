@@ -230,6 +230,10 @@ def replace_rote(model):
     from mmengine import print_log
     print_log = log_once(print_log)
 
+    assert hasattr(model.config, 'rope_theta'), \
+        '`rope_theta` should be in the model config.'
+    rope_theta = model.config.rope_theta
+
     def traverse(module):
         for name, child in module.named_children():
             cls_name = type(child).__name__
@@ -238,8 +242,10 @@ def replace_rote(model):
                 rote = rote.build()
                 print_log(f'replace {cls_name}', 'current')
                 dim_model = child.inv_freq.shape[0] * 2
-                child_new = rote(dim_model, child.max_seq_len_cached).to(
-                    device=child.inv_freq.device, dtype=child.inv_freq.dtype)
+                child_new = rote(dim_model, child.max_seq_len_cached,
+                                 rope_theta).to(
+                                     device=child.inv_freq.device,
+                                     dtype=child.inv_freq.dtype)
                 setattr(module, name, child_new)
             else:
                 traverse(child)
