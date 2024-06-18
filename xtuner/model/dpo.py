@@ -15,6 +15,7 @@ from xtuner.parallel.sequence import (gather_forward_split_backward,
                                       split_for_sequence_parallel)
 from .sft import SupervisedFinetune
 
+
 class DPO(SupervisedFinetune):
     """A general class of DPO and its variants."""
 
@@ -37,10 +38,11 @@ class DPO(SupervisedFinetune):
         if ref_llm is None:
             if not self.use_lora:
                 if is_deepspeed_zero3_enabled():
-                    raise ValueError('DeepSpeed ZeRO-3 is enabled and is not compatible '
-                                    'with `create_reference_model()`. Please instantiate '
-                                    'your reference model directly with '
-                                    '`AutoCausalLM.from_pretrained()`.')
+                    raise ValueError(
+                        'DeepSpeed ZeRO-3 is enabled and is not compatible '
+                        'with `create_reference_model()`. Please instantiate '
+                        'your reference model directly with '
+                        '`AutoCausalLM.from_pretrained()`.')
                 ref_model = deepcopy(self.llm)
         else:
             ref_model = SupervisedFinetune(ref_llm, **kwargs).llm
