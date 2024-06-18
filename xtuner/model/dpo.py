@@ -41,7 +41,7 @@ class DPO(SupervisedFinetune):
                 raise ValueError(
                     'DeepSpeed ZeRO-3 is enabled and is not compatible '
                     'with `deepcopy(self.llm)`. Please instantiate '
-                    'your reference model by modifying key `model.ref_llm `'
+                    'your reference model by modifying key `model.ref_llm` '
                     'in your config with `AutoCausalLM.from_pretrained()`.')
             ref_model = deepcopy(self.llm)
         else:
