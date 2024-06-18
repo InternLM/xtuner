@@ -31,6 +31,7 @@ class DPO(SupervisedFinetune):
         self.loss_type = loss_type
         self.label_smoothing = label_smoothing
         self.beta = beta
+
         if not self.use_lora:
             self.ref_llm = self.create_reference_model(ref_llm, **kwargs)
 
