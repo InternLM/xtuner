@@ -14,7 +14,6 @@ from xtuner.parallel.sequence import (gather_forward_split_backward,
                                       get_sequence_parallel_world_size,
                                       split_for_sequence_parallel)
 from .sft import SupervisedFinetune
-from .utils import LoadWoInit
 
 
 def disable_grad(model):
