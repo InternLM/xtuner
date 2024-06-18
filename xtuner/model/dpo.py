@@ -14,6 +14,7 @@ from xtuner.parallel.sequence import (gather_forward_split_backward,
                                       get_sequence_parallel_world_size,
                                       split_for_sequence_parallel)
 from .sft import SupervisedFinetune
+from .utils import LoadWoInit
 
 
 def create_reference_model(model):
@@ -44,13 +45,18 @@ class DPO(SupervisedFinetune):
                  label_smoothing=0.0,
                  **kwargs):
         super().__init__(llm, **kwargs)
-        self.ref_llm = ref_llm
         self.loss_type = loss_type
         self.label_smoothing = label_smoothing
         self.beta = beta
 
-        if not self.use_lora and self.ref_llm is None:
-            self.ref_llm = create_reference_model(self.llm)
+        if ref_llm is not None:
+            with LoadWoInit():
+                if isinstance(ref_llm, dict):
+                    ref_llm = self._dispatch_lm_model_cfg(ref_llm)
+                self.ref_llm = self._build_from_cfg_or_module(ref_llm).eval()
+        else:
+            if not self.use_lora:
+                self.ref_llm = create_reference_model(self.llm)
 
     def _gather_masked_logits(self, logits, labels, mask):
         logits = torch.gather(
