@@ -2,6 +2,7 @@
 import argparse
 import math
 import os
+import random
 import sys
 import time
 from datetime import datetime, timedelta
@@ -11,6 +12,8 @@ import torch.distributed.checkpoint as dcp
 from mmengine import mkdir_or_exist
 from mmengine.dist import init_dist
 from torch.distributed._tensor import Replicate
+from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import \
+    apply_activation_checkpointing
 from torch.distributed.checkpoint.state_dict import (get_state_dict,
                                                      set_state_dict)
 from torch.distributed.device_mesh import init_device_mesh
@@ -32,8 +35,6 @@ from xtuner._lite.datasets import FinetuneDataset
 from xtuner._lite.parallel import ParallelSampler
 
 layer_tp_plan = {
-    # by default ColwiseParallel input layouts is replicated
-    # and RowwiseParallel output layouts is replicated
     'attention.wqkv': ColwiseParallel(),
     'attention.wo': RowwiseParallel(),
     'feed_forward.w1': ColwiseParallel(),
@@ -66,15 +67,13 @@ def parse_args():
     model_args = parser.add_argument_group('model', 'Group 1 description')
     model_args.add_argument('-m', '--model', help='config file name or path.')
     model_args.add_argument('-t', '--tokenizer', default=None)
+    model_args.add_argument(
+        '--selective-checkpointing', default=1.0, type=float)
 
     data_args = parser.add_argument_group('data', 'Group 1 description')
     data_args.add_argument('--dataset', help='')
-    data_args.add_argument(
-        '--dataset-format',
-        default='openai',
-        help='the dir to save logs and models')
-    data_args.add_argument(
-        '--dataset-cache', help='the dir to save logs and models')
+    data_args.add_argument('--dataset-format', default='openai', help='')
+    data_args.add_argument('--dataset-cache', help='')
     data_args.add_argument('--max-length', type=int, default=2048, help='')
     data_args.add_argument('--mirco-batch-size', type=int, default=1, help='')
     data_args.add_argument('--num-workers', type=int, default=8, help='')
@@ -92,7 +91,7 @@ def parse_args():
         default=4e-5,
         type=float,
         help='the dir to save logs and models')
-    optim_args.add_argument('--wd', '--weight-decay', default=0, type=float)
+    optim_args.add_argument('--weight-decay', default=0.01, type=float)
     optim_args.add_argument('--max-grad-norm', default=1, type=float)
     optim_args.add_argument('-e', '--epochs', default=1, type=int)
     optim_args.add_argument('--warmup-ratio', default=0.03, type=float)
@@ -153,26 +152,28 @@ def sft(args):
 
     model = AutoModelForCausalLM.from_pretrained(
         args.model, trust_remote_code=True, torch_dtype=torch.float32)
+    model.config.use_cache = False
     model.cuda()
 
-    for layer in model.model.layers:
-        attention = layer.attention
-        attention.num_heads = attention.num_heads // tp_mesh.size()
-        attention.hidden_size = attention.hidden_size // tp_mesh.size()
-        parallelize_module(
-            module=layer,
-            device_mesh=tp_mesh,
-            parallelize_plan=layer_tp_plan,
-        )
+    if args.tp_size > 1:
+        for layer in model.model.layers:
+            attention = layer.attention
+            attention.num_heads = attention.num_heads // tp_mesh.size()
+            attention.hidden_size = attention.hidden_size // tp_mesh.size()
+            parallelize_module(
+                module=layer,
+                device_mesh=tp_mesh,
+                parallelize_plan=layer_tp_plan,
+            )
 
-    model = parallelize_module(
-        module=model,
-        device_mesh=tp_mesh,
-        parallelize_plan={
-            'model.tok_embeddings':
-            RowwiseParallel(input_layouts=Replicate(), ),
-            'output': ColwiseParallel(output_layouts=Replicate(), ),
-        })
+        model = parallelize_module(
+            module=model,
+            device_mesh=tp_mesh,
+            parallelize_plan={
+                'model.tok_embeddings':
+                RowwiseParallel(input_layouts=Replicate(), ),
+                'output': ColwiseParallel(output_layouts=Replicate(), ),
+            })
 
     tokenizer = AutoTokenizer.from_pretrained(
         args.tokenizer if args.tokenizer else args.model,
@@ -186,9 +187,24 @@ def sft(args):
             param_dtype=torch.bfloat16,
             reduce_dtype=torch.bfloat16,
             buffer_dtype=torch.bfloat16),
-        use_orig_params=False)
+        device_id=torch.cuda.current_device(),
+        use_orig_params=True)
 
-    optimizer = AdamW(shard_model.parameters(), lr=args.lr, foreach=True)
+    if args.selective_checkpointing:
+
+        def checkpoint_check_fn(submodule, target='InternLM2DecoderLayer'):
+            ret = False
+            if type(submodule).__name__ == target:
+                if random.uniform(0, 1) < args.selective_checkpointing:
+                    ret = True
+            return ret
+
+        apply_activation_checkpointing(
+            shard_model, check_fn=checkpoint_check_fn)
+
+    optimizer = AdamW(
+        shard_model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+
     # For TP, input needs to be same across all TP ranks.
     # while for SP, input can be different across all ranks.
     # We will use dp_rank for setting the random seed
@@ -288,19 +304,19 @@ def sft(args):
             cosine_scheduler.step()
             cur_lr = cosine_scheduler.get_lr()[0]
 
-        max_memory = torch.cuda.max_memory_allocated()
+        torch.cuda.reset_peak_memory_stats()
 
         step_losses = []
-        data_time = 0
-        _step_start_t = time.time()
-        consumed_tokens = 0
+        step_data_time = 0
+        step_start_t = time.time()
+        step_consumed_tokens = 0
         for i in range(per_step_iters):
             if step * per_step_iters + i + 1 == per_epoch_iters:
                 break
 
             _data_start_t = time.time()
             data = next(data_iterator)
-            data_time += time.time() - _data_start_t
+            step_data_time += time.time() - _data_start_t
 
             input_ids = data['input_ids'].cuda()
 
@@ -312,22 +328,23 @@ def sft(args):
                                                position_ids, labels,
                                                unpack_sizes)
             step_losses.append(loss)
-            consumed_tokens += data['attention_mask'].sum()
+            step_consumed_tokens += data['attention_mask'].sum()
         grad_norm = shard_model.clip_grad_norm_(args.max_grad_norm)
         optimizer.step()
         optimizer.zero_grad()
 
-        step_time = time.time() - _step_start_t
+        step_time = time.time() - step_start_t
         eta = step_time * (total_steps - step)
         eta = timedelta(seconds=int(eta))
-        tgs = int(consumed_tokens / step_time / args.tp_size)
+        tgs = int(step_consumed_tokens / step_time / args.tp_size)
+        max_memory = torch.cuda.max_memory_allocated()
         if is_interval(step, total_steps, args.log_interval):
             step_loss = sum(step_losses) / len(step_losses)
             logger.info(f'(Epoch {epoch}) Step {step+1}/{total_steps}  '
                         f'lr: {cur_lr:.6f}  loss: {step_loss:.3f}  '
                         f'grad_norm: {grad_norm:.2f}  '
                         f'max_memory: {(max_memory / 1024**3):.1f}GB  '
-                        f'tgs: {tgs}  data_time: {data_time:.2f}s  '
+                        f'tgs: {tgs}  data_time: {step_data_time:.2f}s  '
                         f'time: {step_time:.2f}s  '
                         f'eta: {eta}')
 
@@ -352,8 +369,6 @@ def sft(args):
             writer = dcp.FileSystemWriter(ckpt_dir)
             mkdir_or_exist(ckpt_dir)
             dcp.save(state_dict, writer)
-
-        torch.cuda.reset_peak_memory_stats()
 
 
 if __name__ == '__main__':

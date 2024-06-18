@@ -118,10 +118,11 @@ class AutoModelForCausalLM:
                                                    max_position_embeddings)
             kwargs.update(long_ctx_kwargs)
 
-        if torch.cuda.is_bf16_supported():
-            kwargs.update(torch_dtype=torch.bfloat16)
-        else:
-            kwargs.update(torch_dtype=torch.float16)
+        if 'torch_dtype' not in kwargs:
+            if torch.cuda.is_bf16_supported():
+                kwargs.update(torch_dtype=torch.bfloat16)
+            else:
+                kwargs.update(torch_dtype=torch.float16)
 
         model = OriAutoModelForCausalLM.from_pretrained(
             pretrained_model_name_or_path,

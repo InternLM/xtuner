@@ -6,11 +6,11 @@ import torch
 import torch.nn.functional as F
 from einops import rearrange
 from mmengine import MessageHub
+from transformers.cache_utils import StaticCache
 from transformers.modeling_outputs import BaseModelOutputWithPast
 
 from ._attention import (SUPPORT_FLASH2, flash_attn_w_mask, flash_attn_wo_mask,
                          varlen_flash_attn)
-from ._fused import apply_rotary_emb
 
 
 class InternLM2RotaryEmbedding(torch.nn.Module):
@@ -66,9 +66,9 @@ def rotate_half(x):
     return torch.cat((-x2, x1), dim=-1)
 
 
-def apply_rotary_pos_emb(q, k, cos, sin, position_ids, unsqueeze_dim=1):
-    cos = cos[position_ids].unsqueeze(unsqueeze_dim)
-    sin = sin[position_ids].unsqueeze(unsqueeze_dim)
+def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
+    cos = cos.unsqueeze(unsqueeze_dim)
+    sin = sin.unsqueeze(unsqueeze_dim)
     q_embed = (q * cos) + (rotate_half(q) * sin)
     k_embed = (k * cos) + (rotate_half(k) * sin)
     return q_embed, k_embed
@@ -222,9 +222,16 @@ def _internlm2_varlen_attn_forward(
     past_key_value: Optional[Tuple[torch.Tensor]] = None,
     output_attentions: bool = False,
     use_cache: bool = False,
+    cache_position: Optional[torch.LongTensor] = None,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor],
            Optional[Tuple[torch.Tensor]]]:
     # Modified from https://huggingface.co/internlm/internlm-7b/blob/939a68c0dc1bd5f35b63c87d44af05ce33379061/modeling_internlm.py#L161  # noqa:E501
+    if isinstance(past_key_value, StaticCache):
+        raise ValueError(
+            '`static` cache implementation is not compatible with '
+            '`attn_implementation==flash_attention_2` make sure to use `sdpa` '
+            'in the mean time, and open an issue at '
+            'https://github.com/huggingface/transformers')
 
     bsz, q_len, _ = hidden_states.size()
     attn_context = MessageHub.get_instance('varlen_attention_context')
@@ -246,22 +253,66 @@ def _internlm2_varlen_attn_forward(
     key_states = qkv_states[..., -2, :]
     value_states = qkv_states[..., -1, :]
 
-    kv_seq_len = key_states.shape[-3]
-    if past_key_value is not None:
-        kv_seq_len += past_key_value[0].shape[-2]
-
     chunk_lengths = attn_context.get_info('chunk_sizes')
-    cos, sin = self.rotary_emb(value_states, chunk_lengths.max())
+    query_states = query_states.transpose(1, 2)
+    key_states = key_states.transpose(1, 2)
+    value_states = value_states.transpose(1, 2)
 
-    query_states = apply_rotary_emb(query_states, cos[position_ids].squeeze(0),
-                                    sin[position_ids].squeeze(0))
-    key_states = apply_rotary_emb(key_states, cos[position_ids].squeeze(0),
-                                  sin[position_ids].squeeze(0))
+    try:
+        cos, sin = self.rotary_emb(value_states, position_ids)
+    except RuntimeError:
+        raise RuntimeError(
+            'You are using the old version of InternLM2 model. The '
+            '`modeling_internlm2.py` is outdated. Please update the InternLM2 '
+            'model.')
+    query_states, key_states = apply_rotary_pos_emb(query_states, key_states,
+                                                    cos, sin)
+
+    if past_key_value is not None:
+        # sin and cos are specific to RoPE models;
+        # cache_position needed for the static cache
+        cache_kwargs = {
+            'sin': sin,
+            'cos': cos,
+            'cache_position': cache_position
+        }
+        key_states, value_states = past_key_value.update(
+            key_states, value_states, self.layer_idx, cache_kwargs)
+
+    query_states = query_states.transpose(1, 2)
+    key_states = key_states.transpose(1, 2)
+    value_states = value_states.transpose(1, 2)
+
+    # In PEFT, usually we cast the layer norms in float32 for training
+    # stability reasons therefore the input hidden states gets silently
+    # casted in float32. Hence, we need cast them back in the correct dtype
+    # just to be sure everything works as expected.
+    # This might slowdown training & inference so it is recommended to not
+    # cast the LayerNorms in fp32. (InternLM2RMSNorm handles it correctly)
+
+    input_dtype = query_states.dtype
+    if input_dtype == torch.float32:
+        if torch.is_autocast_enabled():
+            target_dtype = torch.get_autocast_gpu_dtype()
+        # Handle the case where the model is quantized
+        elif hasattr(self.config, '_pre_quantization_dtype'):
+            target_dtype = self.config._pre_quantization_dtype
+        else:
+            target_dtype = self.wqkv.weight.dtype
+
+        query_states = query_states.to(target_dtype)
+        key_states = key_states.to(target_dtype)
+        value_states = value_states.to(target_dtype)
 
     # repeat kv for sequence parallel
     key_states = repeat_kv_bshd(key_states, self.num_key_value_groups)
     value_states = repeat_kv_bshd(value_states, self.num_key_value_groups)
 
+    assert SUPPORT_FLASH2
+
+    attn_context = MessageHub.get_instance('varlen_attention_context')
+    chunk_lengths = attn_context.get_info('chunk_sizes')
+    assert chunk_lengths is not None
     if chunk_lengths is not None and SUPPORT_FLASH2 and bsz == 1:
         _zero_length = torch.zeros(1, device=chunk_lengths.device)
         _pad_length = torch.cat([_zero_length, chunk_lengths]).int()
@@ -296,6 +347,7 @@ def internlm2_varlen_attn_forward(
     past_key_value: Optional[Tuple[torch.Tensor]] = None,
     output_attentions: bool = False,
     use_cache: bool = False,
+    cache_position: Optional[torch.LongTensor] = None,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor],
            Optional[Tuple[torch.Tensor]]]:
 

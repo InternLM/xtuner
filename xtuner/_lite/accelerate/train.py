@@ -9,6 +9,8 @@ def packed_sequence_fwd_and_bwd(model, packed_input_ids, packed_pos_ids,
         labels=packed_labels,
         position_ids=packed_pos_ids,
     )
-    varlen_ctx.update_info('chunk_sizes', None)
+
     outputs.loss.backward()
+    varlen_ctx.update_info('chunk_sizes', None)
+
     return outputs.loss.item()

@@ -84,4 +84,4 @@ def dispatch_modules(model, use_varlen_attn=False):
         # dispatch_internlm2_model_forward(model, use_varlen_attn)
 
         dispatch_internlm2_rmsnorm_forward(model)
-        replace_internlm2_rote(model)
+        # replace_internlm2_rote(model)
