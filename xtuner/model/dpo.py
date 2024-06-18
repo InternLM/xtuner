@@ -17,21 +17,23 @@ from .sft import SupervisedFinetune
 from .utils import LoadWoInit
 
 
+def disable_grad(model):
+    parameter_names = [n for n, _ in model.named_parameters()]
+    for param_name in parameter_names:
+        param = model.get_parameter(param_name)
+        param.requires_grad = False
+    return model.eval()
+
+
 def create_reference_model(model):
     if is_deepspeed_zero3_enabled():
         raise ValueError('DeepSpeed ZeRO-3 is enabled and is not compatible '
                          'with `create_reference_model()`. Please instantiate '
                          'your reference model directly with '
                          '`AutoCausalLM.from_pretrained()`.')
-
-    parameter_names = [n for n, _ in model.named_parameters()]
     ref_model = deepcopy(model)
-
-    # if no layers are shared, return copy of model
-    for param_name in parameter_names:
-        param = ref_model.get_parameter(param_name)
-        param.requires_grad = False
-    return ref_model.eval()
+    ref_model = disable_grad(ref_model)
+    return ref_model
 
 
 class DPO(SupervisedFinetune):
@@ -50,10 +52,8 @@ class DPO(SupervisedFinetune):
         self.beta = beta
 
         if ref_llm is not None:
-            with LoadWoInit():
-                if isinstance(ref_llm, dict):
-                    ref_llm = self._dispatch_lm_model_cfg(ref_llm)
-                self.ref_llm = self._build_from_cfg_or_module(ref_llm).eval()
+            ref_llm = self._build_llm_from_cfg(ref_llm, kwargs.get("use_varlen_attn"), kwargs.get("max_position_embeddings"))
+            self.ref_llm = disable_grad(ref_llm)
         else:
             if not self.use_lora:
                 self.ref_llm = create_reference_model(self.llm)
