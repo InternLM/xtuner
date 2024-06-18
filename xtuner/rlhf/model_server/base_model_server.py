@@ -110,8 +110,8 @@ class BaseModelServer:
                     position_ids=None,
                     *args,
                     **train_kwargs):
-        return self.trainer.train_async(input_ids, labels, attention_mask, position_ids,
-                                        *args, **train_kwargs)
+        return self.trainer.train_async(input_ids, labels, attention_mask,
+                                        position_ids, *args, **train_kwargs)
 
     def train_get(self, object_refs, timeout: Optional[float] = None):
         return self.trainer.train_get(object_refs, timeout=timeout)
@@ -123,8 +123,8 @@ class BaseModelServer:
               position_ids=None,
               *args,
               **train_kwargs):
-        object_refs = self.train_async(input_ids, labels, attention_mask, position_ids,
-                                       *args, **train_kwargs)
+        object_refs = self.train_async(input_ids, labels, attention_mask,
+                                       position_ids, *args, **train_kwargs)
         loss = self.train_get(object_refs)
         self.log_cuda_mem_stats(remark='[train] ')
         return loss

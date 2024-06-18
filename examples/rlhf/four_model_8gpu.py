@@ -1,5 +1,6 @@
-import torch
-
+#######################################################################
+#                              Settings                               #
+#######################################################################
 MAX_PROMPT_LEN = 1024
 MAX_ANSWER_LEN = 1024
 MAX_PRETRAIN_LEN = 8192
@@ -17,7 +18,7 @@ ACTOR_DP_SIZE = 2
 CRITIC_DP_SIZE = 2
 ACTOR_GRADIENT_ACC_STEP = (PROMPT_BATCH_SIZE + PRETRAIN_BATCH_SIZE
                            ) // ACTOR_DP_SIZE // TRAIN_MICRO_BATCH_SIZE
-CRITIC_GRADIENT_ACC_STEP = PROMPT_BATCH_SIZE // CRITIC_DP_SIZE // TRAIN_MICRO_BATCH_SIZE
+CRITIC_GRADIENT_ACC_STEP = PROMPT_BATCH_SIZE // CRITIC_DP_SIZE // TRAIN_MICRO_BATCH_SIZE  # noqa: E501
 
 MODEL_DTYPE = 'auto'
 
@@ -63,8 +64,9 @@ train_config = dict(
     critic_micro_bs=TRAIN_MICRO_BATCH_SIZE,
     ppo_loss_weight=1.0,
     pretrain_loss_weight=0.5,
-    pretrain_step=20,
+    critic_warmup_step=20,
     save_interval=40,
+    max_train_step=400,
 )
 
 model_configs = dict(
@@ -81,7 +83,6 @@ model_configs = dict(
                 lr=1e-6,
                 total_steps=1e9,
                 lr_decay_rate=1,
-                loss_type='per_seq',
             ),
             parallel=dict(
                 data=dict(size=ACTOR_DP_SIZE, mode='deepspeed'),
@@ -130,7 +131,6 @@ model_configs = dict(
                 lr=5e-6,
                 total_steps=1e9,
                 lr_decay_rate=1,
-                loss_type='per_seq',
             ),
             parallel=dict(
                 data=dict(size=CRITIC_DP_SIZE, mode='deepspeed'),
@@ -196,24 +196,27 @@ model_configs = dict(
     ),
 )
 
-dataset_config = {
-    'prompt_samples_each_epoch':
-    PROMPT_BATCH_SIZE,
-    'max_prompt_len':
-    MAX_PROMPT_LEN,
-    'pretrain_samples_each_epoch':
-    PRETRAIN_BATCH_SIZE,
-    'max_pretrain_len':
-    MAX_PRETRAIN_LEN,
-    'random_seed':
-    1024,
-    "sample_strategy": "in_data",
-    "ratio_within_datasets": False,
-    'prompt_datasets': [
-        'Anthropic/hh-rlhf/helpful-base::1.0',
-        'Anthropic/hh-rlhf/harmless-base::0.5',
+prompt_dataset_config = dict(
+    samples_each_epoch=PROMPT_BATCH_SIZE,
+    max_len=MAX_PROMPT_LEN,
+    message_type='prompt',
+    random_seed=1024,
+    sample_strategy='in_batch',  # 'in_data'
+    message_datasets=[
+        './examples/rlhf/demo_datas/prompt_data.json::0.01[SYS_PROMPT]:summarization',  # noqa: E501
+        '[HF]Anthropic/hh-rlhf/helpful-base::0.5[RM_PROMPT]:default',
+        '[HF]HuggingFaceH4/summarize_from_feedback::0.5',
+    ])
+
+pretrain_dataset_config = dict(
+    samples_each_epoch=PRETRAIN_BATCH_SIZE,
+    max_len=MAX_PRETRAIN_LEN,
+    message_type='pretrain',
+    random_seed=1024,
+    sample_strategy='in_batch',  # 'in_data'
+    message_datasets=[
+        './examples/rlhf/demo_datas/pretrain_data.json::0.01',
+        '[HF]Anthropic/hh-rlhf/helpful-base::0.5',
+        '[HF]HuggingFaceH4/summarize_from_feedback::0.5',
     ],
-    'pretrain_datasets': [
-        'Anthropic/hh-rlhf/helpful-base::1.0',
-    ],
-}
+)

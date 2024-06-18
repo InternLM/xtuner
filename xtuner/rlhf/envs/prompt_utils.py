@@ -1,6 +1,4 @@
-
-
-META_PROMPT = {
+SYSTEM_PROMPT = {
     'default':
     '',
     'helpful':

@@ -25,7 +25,7 @@ from ..tokenizer import tokenizer_utils
 from ..utils import set_seed
 from .dist_utils import init_process_group
 from .generate_utils import (get_answer_str, get_question_answer_mask,
-                             merge_loss_list, partition_by_micro_batch_size,
+                             partition_by_micro_batch_size,
                              partition_list_by_micro_batch_size)
 from .ray_actor_group import RayActorGroup
 from .ray_actor_mixin import RayActorMixin
@@ -40,7 +40,7 @@ HfModelRunnerRayActor is called by ModelServer with .remote()
 
 
 class HfModelRunner:
-    """ModelTrainer is capable of training, inference, and generation."""
+    """HfModelRunner is capable of training, inference, and generation."""
 
     def __init__(self, model_config):
         self.model_config: dict = model_config
@@ -227,8 +227,6 @@ class HfModelRunner:
         debug=False,
         **_ignored,
     ):
-        return_list = True
-
         if isinstance(input_ids, torch.Tensor):
             input_ids = [input_ids]
             labels = [labels]
@@ -662,7 +660,7 @@ class HfModelRunnerRayActorGroup(RayActorGroup):
         self.released = True
         num_gpus = get_gpu_requirement(config)
         self.dp_size = get_dp_size(config)
-        self.tokenizer_pad_token_id = config.tokenizer_config.pad_token_id
+        self.tokenizer_pad_token_id = config.tokenizer_config['pad_token_id']
         bundles = [{
             'CPU': DEFAULT_NUM_CPUS,
             'GPU': DEFAULT_NUM_GPUS

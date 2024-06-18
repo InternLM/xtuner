@@ -244,7 +244,7 @@ class VllmGeneratorRayActorGroup(RayActorGroup):
         self.config = config
         self.tp_size = get_tp_size(config)  # tensor parallelism
         self.dp_size = get_dp_size(config)  # num of vllm_engines
-        self.tokenizer_pad_token_id = config.tokenizer_config.pad_token_id
+        self.tokenizer_pad_token_id = config.tokenizer_config['pad_token_id']
         self.ray_actors: list[VllmGeneratorRayActor] = []  # i.e., vllm_engines
 
         # Adapted from https://github.com/OpenLLMAI/OpenRLHF/blob/v0.2.5/openrlhf/trainer/ray/vllm_engine.py  # noqa: E501
@@ -319,7 +319,7 @@ class VllmGeneratorRayActorGroup(RayActorGroup):
     def generate_get(self, object_refs, timeout=None):
         outputs = ray.get(object_refs, timeout=timeout)
         padding_token_map = {
-            'output_ids': self.config.tokenizer_config.pad_token_id
+            'output_ids': self.config.tokenizer_config['pad_token_id']
         }
         return concat_policy_outputs(outputs, padding_token_map)
 

@@ -3,14 +3,8 @@ from loguru import logger
 
 def get_gpu_requirement(trainer_config: dict) -> int:
     # Calculates the number of GPUs required for a given trainer configuration.
-    num_gpus = 1
-    if 'parallel' in trainer_config:
-        parallel = trainer_config['parallel']
-        data = parallel.get('data', {'size': 1})
-        tensor = parallel.get('tensor', {'size': 1})
-        pipeline = parallel.get('pipeline', {'size': 1})
-        num_gpus = data['size'] * tensor['size'] * pipeline['size']
-    return num_gpus
+    return get_dp_size(trainer_config) * get_tp_size(
+        trainer_config) * get_pp_size(trainer_config)
 
 
 def get_resource_requirement(model_configs: dict) -> dict:

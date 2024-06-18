@@ -125,17 +125,17 @@ def concat_policy_outputs(policy_outputs: list[PolicyOutput],
 
 
 def padding_policy_outputs(policy_outputs: list[PolicyOutput],
-                           padding_token_map={}):
-    DEFAULT_PADDING_ID = 0
-    RIGHT_PADDING = True
+                           padding_token_map={},
+                           right_padding=True,
+                           padding_id=0):
     tensor_keys = union_tensor_keys_from_policy_outputs(policy_outputs)
     for key in tensor_keys:
-        padding_id = padding_token_map.get(key, DEFAULT_PADDING_ID)
+        padding_id = padding_token_map.get(key, padding_id)
         max_seq_len = find_max_seq_len(policy_outputs, key)
         for policy_output in policy_outputs:
             origin_tensor = policy_output[key]
             padding_size = max_seq_len - origin_tensor.shape[1]
-            pad = (0, padding_size) if RIGHT_PADDING else (padding_size, 0)
+            pad = (0, padding_size) if right_padding else (padding_size, 0)
             padded_tensor = torch.nn.functional.pad(
                 origin_tensor, pad, mode='constant', value=padding_id)
             policy_output[key] = padded_tensor
@@ -147,8 +147,7 @@ def find_max_seq_len(policy_outputs: list[PolicyOutput], key):
     for policy_output in policy_outputs:
         if policy_output[key] is None:
             continue
-        batch_size, seq_len = policy_output[
-            key].shape  # assert: only support 2d tensor
+        batch_size, seq_len = policy_output[key].shape[:2]
         max_seq_len = seq_len if seq_len > max_seq_len else max_seq_len
     return max_seq_len
 
@@ -171,4 +170,4 @@ def logprobs_from_logits(logits: torch.Tensor,
     if not gather or labels is None:
         return logp
     logpy = torch.gather(logp, -1, labels.unsqueeze(2)).squeeze(-1)
-    return logpy.cuda()
+    return logpy

@@ -1,10 +1,8 @@
-import time
-
 import torch
-from loguru import logger
 
 from ..model_server.base_model_server import BaseModelServer
 from ..policy_output import PolicyOutput
+from ..timer import Timer
 from .running_mean_std import RunningStates
 
 
@@ -12,7 +10,7 @@ class BaseRepeater:
 
     def __init__(
         self,
-        sft_model,
+        ref_model,
         actor_micro_bs: int = 8,
         ref_micro_bs: int = 8,
         critic_micro_bs: int = 32,
@@ -27,7 +25,7 @@ class BaseRepeater:
         fine_grained_rm: bool = False,
         **_ignored,
     ):
-        self.sft_model = sft_model
+        self.ref_model = ref_model
         self.actor_micro_bs = actor_micro_bs
         self.ref_micro_bs = ref_micro_bs
         self.critic_micro_bs = critic_micro_bs
@@ -45,26 +43,27 @@ class BaseRepeater:
         self,
         trajectories: PolicyOutput,
         policy_model: BaseModelServer,
-        value_model: BaseModelServer,
-        sft_model: BaseModelServer = None,
+        critic_model: BaseModelServer,
+        ref_model: BaseModelServer = None,
         # only used for async reward model.infer_get() in _get_kl_rewards
         env=None,
     ):
-        value_output_ref = self._get_values_async(trajectories, value_model)
+        critic_output_ref = self._get_values_async(trajectories, critic_model)
         action_mask = trajectories['action_mask']
         num_actions = action_mask.size(1)
-        if sft_model is not None:
-            self.sft_model: BaseModelServer = sft_model
-        kl_rewards, entropy, kl_distance, policy_logprobs, sft_logprobs = self._get_kl_rewards(  # noqa: E501
-            trajectories, policy_model, env=env)
+        if ref_model is not None:
+            self.ref_model: BaseModelServer = ref_model
+        (kl_rewards, entropy, kl_distance, policy_logprobs,
+         ref_logprobs) = self._get_kl_rewards(
+             trajectories, policy_model, env=env)
         trajectories['kl'] = (kl_distance * action_mask).sum(
             axis=-1) / action_mask.sum(axis=-1)
         trajectories['entropy'] = entropy
         trajectories['kl_rewards'] = kl_rewards
         trajectories['policy_logprobs'] = policy_logprobs
-        trajectories['sft_logprobs'] = sft_logprobs
+        trajectories['ref_logprobs'] = ref_logprobs
 
-        values = self._get_values_collect(value_output_ref, value_model)
+        values = self._get_values_collect(critic_output_ref, critic_model)
         old_values = values[:, -num_actions:]
         advantages, returns = self.get_advantages_and_returns(
             old_values, kl_rewards, action_mask)
@@ -79,24 +78,24 @@ class BaseRepeater:
                         trajectories: PolicyOutput,
                         policy_model: BaseModelServer,
                         env=None):
-        s_t = time.time()
-        policy_output = policy_model.infer_async(
-            inputs=trajectories.output_ids,
-            micro_batch_size=self.actor_micro_bs,
-            attention_mask=trajectories.attention_mask,
-            output_logits=False,
-            output_logprobs=True)
-        sft_output = self.sft_model.infer_async(
-            inputs=trajectories.output_ids,
-            micro_batch_size=self.ref_micro_bs,
-            attention_mask=trajectories.attention_mask,
-            output_logits=False,
-            output_logprobs=True)
-        policy_output = policy_model.infer_get(policy_output)
-        sft_output = self.sft_model.infer_get(sft_output)
-        logger.info(
-            f'[actor & ref infer_async] duration: {round(time.time() - s_t, 2)} s'  # noqa: E501
-        )
+        with Timer('policy_model.infer_async'):
+            policy_output = policy_model.infer_async(
+                inputs=trajectories.output_ids,
+                micro_batch_size=self.actor_micro_bs,
+                attention_mask=trajectories.attention_mask,
+                output_logits=False,
+                output_logprobs=True)
+        with Timer('ref_model.infer_async'):
+            ref_output = self.ref_model.infer_async(
+                inputs=trajectories.output_ids,
+                micro_batch_size=self.ref_micro_bs,
+                attention_mask=trajectories.attention_mask,
+                output_logits=False,
+                output_logprobs=True)
+        with Timer('ref_model.infer_get'):
+            policy_output = policy_model.infer_get(policy_output)
+        with Timer('ref_model.infer_get'):
+            ref_output = self.ref_model.infer_get(ref_output)
 
         # Experimental
         if env.async_reward:
@@ -111,18 +110,19 @@ class BaseRepeater:
 
         if self.norm_rewards:
             self.running_states.update(clipped_rewards)
-            norm_reward_score = (clipped_rewards - self.running_states.mean) / (
-                self.running_states.var.sqrt() + 1e-8)
+            norm_reward_score = (clipped_rewards -
+                                 self.running_states.mean) / (
+                                     self.running_states.var.sqrt() + 1e-8)
         action_mask = trajectories.action_mask
         num_actions = action_mask.size(1)
 
         policy_logprobs = policy_output.logprobs[:, -num_actions:]
-        sft_logprobs = sft_output.logprobs[:, -num_actions:]
+        ref_logprobs = ref_output.logprobs[:, -num_actions:]
 
         if self.kl_coeff <= 0.0:
             self.kl_coeff = 0.0
         # compute_approx_kl
-        log_ratio = policy_logprobs - sft_logprobs
+        log_ratio = policy_logprobs - ref_logprobs
         kl = log_ratio * action_mask
         kl_reward = -self.kl_coeff * kl
 
@@ -138,43 +138,36 @@ class BaseRepeater:
 
         entropy = -(policy_logprobs *
                     action_mask).sum(axis=-1) / action_mask.sum(axis=-1)
-        return reward, entropy, kl, policy_logprobs, sft_logprobs
+        return reward, entropy, kl, policy_logprobs, ref_logprobs
 
     def _get_values(self, trajectories: PolicyOutput,
-                    value_model: BaseModelServer):
-        s_t = time.time()
-        value_output = value_model.infer(
-            inputs=trajectories.output_ids,
-            attention_mask=trajectories.attention_mask,
-            output_logits=True,
-            micro_batch_size=self.critic_micro_bs,
-        )
-        logger.info(
-            f'[critic infer] duration: {round(time.time() - s_t, 2)} s')
-        raw_values = value_output.logits.squeeze(-1)
+                    critic_model: BaseModelServer):
+        with Timer('critic_model.infer'):
+            critic_output = critic_model.infer(
+                inputs=trajectories.output_ids,
+                attention_mask=trajectories.attention_mask,
+                output_logits=True,
+                micro_batch_size=self.critic_micro_bs,
+            )
+        raw_values = critic_output.logits.squeeze(-1)
         return raw_values
 
     def _get_values_async(self, trajectories: PolicyOutput,
-                          value_model: BaseModelServer):
-        s_t = time.time()
-        value_output_ref = value_model.infer_async(
-            inputs=trajectories.output_ids,
-            attention_mask=trajectories.attention_mask,
-            output_logits=True,
-            micro_batch_size=self.critic_micro_bs,
-        )
-        logger.info(
-            f'[critic infer] async duration: {round(time.time() - s_t, 2)} s')
-        return value_output_ref
+                          critic_model: BaseModelServer):
+        with Timer('critic_model.infer_async'):
+            critic_output_ref = critic_model.infer_async(
+                inputs=trajectories.output_ids,
+                attention_mask=trajectories.attention_mask,
+                output_logits=True,
+                micro_batch_size=self.critic_micro_bs,
+            )
+        return critic_output_ref
 
-    def _get_values_collect(self, value_output_ref,
-                            value_model: BaseModelServer):
-        s_t = time.time()
-        value_output = value_model.infer_get(value_output_ref)
-        raw_values = value_output.logits.squeeze(-1)
-        logger.info(
-            f'[critic infer] async wait duration: {round(time.time() - s_t, 2)} s'  # noqa: E501
-        )
+    def _get_values_collect(self, critic_output_ref,
+                            critic_model: BaseModelServer):
+        with Timer('critic_model.infer_get'):
+            critic_output = critic_model.infer_get(critic_output_ref)
+        raw_values = critic_output.logits.squeeze(-1)
         return raw_values
 
     def get_advantages_and_returns(
@@ -184,9 +177,10 @@ class BaseRepeater:
         action_mask: torch.Tensor,
     ):
         # Adopted from https://github.com/CarperAI/trlx/blob/main/trlx/models/modeling_ppo.py#L134  # noqa: E501
-        """Function that computes advantages and returns from rewards and values.
-        Calculated as in the original PPO paper: https://arxiv.org/abs/1707.06347
-        Note that rewards may include a KL divergence loss term.
+        """Function that computes advantages and returns from rewards and
+        values. Calculated as in the original PPO paper:
+        https://arxiv.org/abs/1707.06347 Note that rewards may include a KL
+        divergence loss term.
 
         Advantages looks like this:
         Adv1 =  R1 + γ * λ * R2     + γ^2 * λ^2 * R3       + ...
@@ -195,12 +189,6 @@ class BaseRepeater:
         Returns looks like this:
         Ret1 =  R1 + γ * λ * R2     + γ^2 * λ^2 * R3       + ...
                    + γ * (1 - λ) V2 + γ^2 * λ * (1 - λ) V3 + ...
-
-        Args:
-            values: Tensor of shape (batch_size, response_size)
-            rewards: Tensor of shape (batch_size, response_size)
-            response_length: Length of the response sequence
-            use_whitening: Whether to use whitening (ie. normalize advantages) or not
         """
         lastgaelam = 0
         advantages_reversed = []
@@ -212,8 +200,10 @@ class BaseRepeater:
 
         for t in reversed(range(response_length)):
             nextvalues = values[:, t + 1] if t < response_length - 1 else 0.0
-            # Since old_rewards and old_values are masked with action_mask, i.e. they have
-            # 0's at pad tokens, delta will be 0 if current t is at a pad token, so will lastgaelam
+            # Since old_rewards and old_values are masked with action_mask,
+            # i.e. they have 0's at pad tokens,
+            # delta will be 0 if current t is at a pad token,
+            # so will lastgaelam
             delta = rewards[:, t] + self.gamma * nextvalues - values[:, t]
             lastgaelam = delta + self.gamma * self.gae_lambda * lastgaelam
             advantages_reversed.append(lastgaelam)

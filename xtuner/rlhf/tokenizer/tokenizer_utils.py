@@ -1,11 +1,8 @@
 from typing import Optional, Union
 
+from loguru import logger
 from transformers import (AutoTokenizer, LlamaTokenizer, PreTrainedTokenizer,
                           PreTrainedTokenizerFast)
-
-from ..logger import init_logger
-
-logger = init_logger(__name__)
 
 PADDING_SIDE = 'left'
 

@@ -3,16 +3,15 @@ import json
 import os
 import time
 
-import numpy as np
 from loguru import logger
 
 from xtuner.rlhf.config.config import Config
 from xtuner.rlhf.coordinator import Coordinator
-from xtuner.rlhf.dataset.txt_loader import TxtMessageDataset
-from xtuner.rlhf.envs.txt_env import TxtEnv
-from xtuner.rlhf.repeaters.base import BaseRepeater
-from xtuner.rlhf.tokenizer.tokenizer_utils import get_tokenizer
-from xtuner.rlhf.trainer.ppo import PPOTrainer
+from xtuner.rlhf.dataset import MessageIter
+from xtuner.rlhf.envs import TxtEnv
+from xtuner.rlhf.repeaters import BaseRepeater
+from xtuner.rlhf.timer import Timer
+from xtuner.rlhf.trainer import PPOTrainer
 
 
 def parse_args():
@@ -68,19 +67,6 @@ if __name__ == '__main__':
         logger.info(f'{k}: {v}')
     logger.info('#################### CONFIG END ####################')
 
-    # init dataset
-    model_path = config['model_configs']['actor']['model_path']
-    tokenizer_config = config.get('tokenizer_config', {})
-    for model_type in config['model_configs'].keys():
-        if 'tokenizer_config' not in config['model_configs'][model_type]:
-            config['model_configs'][model_type][
-                'tokenizer_config'] = tokenizer_config
-    tokenizer = get_tokenizer(
-        model_path, trust_remote_code=True, **tokenizer_config)
-    dataset_config = config['dataset_config']
-    dataset_config['tokenizer'] = tokenizer
-    txt_loader = TxtMessageDataset(**dataset_config)
-
     # init model
     cluster_address = args.address
     if cluster_address != 'auto':
@@ -88,59 +74,69 @@ if __name__ == '__main__':
     logger.info(f'cluster_address={cluster_address}')
     coordinator = Coordinator(cluster_address, config['model_configs'])
     model_dict = coordinator.create_models()
-    sft_model = model_dict['reference']
+    ref_model = model_dict['reference']
     actor_model = model_dict['actor']
     reward_model = model_dict['reward']
     critic_model = model_dict['critic']
 
-    # init txt env
+    # init prompt & pretrain dataset
+    prompt_dataset_config = config['prompt_dataset_config']
+    prompt_mes_iter = MessageIter(
+        tokenizer=ref_model.tokenizer, **prompt_dataset_config)
+    pretrain_dataset_config = config['pretrain_dataset_config']
+    pretrain_mes_iter = MessageIter(
+        tokenizer=ref_model.tokenizer, **pretrain_dataset_config)
 
+    # init txt env
     rollout_config = config.get('rollout_config', {})
     txt_env = TxtEnv(
-        dataloader=txt_loader,
+        prompt_mes_iter=prompt_mes_iter,
+        pretrain_mes_iter=pretrain_mes_iter,
         reward_function=reward_model,
         **rollout_config,
     )
     # init repeater
     repeater_config = config.get('repeater_config', {})
     rl_repeater = BaseRepeater(
-        sft_model=sft_model,
+        ref_model=ref_model,
         **repeater_config,
     )
     # init trainer
     train_config = config.get('train_config', {})
     ppo = PPOTrainer(
-        policy_model=actor_model, value_model=None, **train_config)
-    pretrain_step = train_config['pretrain_step']
+        policy_model=actor_model, critic_model=None, **train_config)
+    critic_warmup_step = train_config['critic_warmup_step']
     save_interval = train_config['save_interval']
-    np.set_printoptions(threshold=np.inf)
-    step = 1
-    while True:
+    max_train_step = train_config.get('max_train_step', float('inf'))
+
+    step = 0
+    while step <= max_train_step:
         s_t = time.time()
-        trajectories = txt_env.rollout(policy_model=actor_model)
-        # deal with trajectories
-        trajectories = rl_repeater.process(
-            trajectories,
-            policy_model=actor_model,
-            value_model=critic_model,
-            sft_model=None,
-            env=txt_env)
+        with Timer(f'step {step}: end_to_end'):
+            trajectories = txt_env.rollout(policy_model=actor_model)
+            # deal with trajectories
+            trajectories = rl_repeater.process(
+                trajectories,
+                policy_model=actor_model,
+                critic_model=critic_model,
+                ref_model=None,
+                env=txt_env)
 
-        # # for value & policy learn
-        value_loss_ref = ppo.value_learn_async(trajectories, critic_model)
+            # # for critic & policy learn
+            critic_loss_ref = ppo.critic_learn_async(trajectories,
+                                                     critic_model)
 
-        ppo_loss, pt_loss = None, None
-        if pretrain_step <= 0:
-            ppo_loss, pt_loss = ppo.policy_learn(trajectories, actor_model)
-            logger_train.info(
-                f'[Policy Train] Step: {step}, ppo loss: {ppo_loss}, pretrain loss: {pt_loss}'  # noqa: E501
-            )
+            ppo_loss, pt_loss = None, None
+            if critic_warmup_step <= 0:
+                ppo_loss, pt_loss = ppo.policy_learn(trajectories, actor_model)
+                logger_train.info(f'[Policy Train] Step: {step}, \
+                    ppo loss: {ppo_loss}, pretrain loss: {pt_loss}')
 
-        value_loss = ppo.value_learn_get(value_loss_ref, critic_model)
+            critic_loss = ppo.critic_learn_get(critic_loss_ref, critic_model)
         logger_train.info(
-            f'[Value Train] step: {step}, value loss: {value_loss}')
+            f'[Critic Train] step: {step}, critic loss: {critic_loss}')
         logger_train.info(f'rewards: {trajectories.rewards.mean()}')
-        pretrain_step -= 1
+        critic_warmup_step -= 1
 
         if config['rollout_config'].get('write_to_file', True):
             if not os.path.exists(f'{work_dir}/rollouts'):
@@ -163,7 +159,7 @@ if __name__ == '__main__':
             step=step,
             policy_loss=ppo_loss,
             pretrain_loss=pt_loss,
-            critic_loss=value_loss,
+            critic_loss=critic_loss,
         )
         with open(f'{work_dir}/train_rlhf.log.jsonl', 'a') as f:
             f.write(json.dumps(summaries) + '\n')

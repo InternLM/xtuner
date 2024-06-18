@@ -133,6 +133,7 @@ if __name__ == '__main__':
             parse_requirements('requirements/runtime.txt') +
             parse_requirements('requirements/modelscope.txt'),
             'rlhf':
+            parse_requirements('requirements/deepspeed.txt') +
             parse_requirements('requirements/rlhf.txt'),
         },
         zip_safe=False,

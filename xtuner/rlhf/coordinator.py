@@ -81,9 +81,6 @@ class Coordinator:
         for model_name, model in self.model_dict.items(
         ):  # naive serial initialize
             model.initialize_async()
-            logger.info(
-                f'{model_name} {model.__class__.__name__}.is_initialized: {model.is_initialized}'  # noqa: E501
-            )
         for model_name, model in self.model_dict.items(
         ):  # naive serial initialize
             model.initialize_get()

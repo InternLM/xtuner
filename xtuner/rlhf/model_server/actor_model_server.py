@@ -25,8 +25,8 @@ class ActorModelServer(BaseModelServer):
 
         generator_config['model_path'] = self.model_config['model_path']
         generator_config['tokenizer_config'] = self.tokenizer_config
-        generator_config[
-            'tokenizer_path'] = self.tokenizer_config.tokenizer_path
+        generator_config['tokenizer_path'] = self.tokenizer_config[
+            'tokenizer_path']
         generator_type = generator_config.get('generator_type', None)
         if generator_type == ENGINE_VLLM:
             from ..model_backend.vllm_model_runner import \
