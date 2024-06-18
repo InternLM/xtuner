@@ -27,23 +27,23 @@ class DPO(SupervisedFinetune):
                  label_smoothing=0.0,
                  **kwargs):
         super().__init__(llm, **kwargs)
+        self.ref_llm = ref_llm
         self.loss_type = loss_type
         self.label_smoothing = label_smoothing
         self.beta = beta
-
-        self.ref_llm = self.create_reference_model(ref_llm, **kwargs)
+        if not self.use_lora:
+            self.ref_llm = self.create_reference_model(ref_llm, **kwargs)
 
     def create_reference_model(self, ref_llm=None, **kwargs):
         ref_model = None
         if ref_llm is None:
-            if not self.use_lora:
-                if is_deepspeed_zero3_enabled():
-                    raise ValueError(
-                        'DeepSpeed ZeRO-3 is enabled and is not compatible '
-                        'with `create_reference_model()`. Please instantiate '
-                        'your reference model directly with '
-                        '`AutoCausalLM.from_pretrained()`.')
-                ref_model = deepcopy(self.llm)
+            if is_deepspeed_zero3_enabled():
+                raise ValueError(
+                    'DeepSpeed ZeRO-3 is enabled and is not compatible '
+                    'with `deepcopy(self.llm)`. Please instantiate '
+                    'your reference model by modifying key `model.ref_llm `'
+                    'in your config with `AutoCausalLM.from_pretrained()`.')
+            ref_model = deepcopy(self.llm)
         else:
             ref_model = SupervisedFinetune(ref_llm, **kwargs).llm
         # freeze parameters
