@@ -1,5 +1,5 @@
-from ..model_backend.models.critical_and_reward import get_critic_model
 from .base_model_server import BaseModelServer
+from .utils import get_critic_model
 
 
 class CriticModelServer(BaseModelServer):

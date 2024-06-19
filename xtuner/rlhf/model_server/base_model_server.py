@@ -7,7 +7,6 @@ from transformers import AutoModelForCausalLM
 
 from ..config.config_consts import ENGINE_HUGGINGFACE, ENGINE_INTERNEVO
 from ..model_backend.hf_model_runner import HfModelRunnerRayActorGroup
-from ..model_backend.models.modeling_internlm2_p import InternLM2ForCausalLM
 from ..tokenizer import encode_inputs, get_tokenizer
 
 DEFAULT_GET_TIMEOUT = 600.0  # 10 min
@@ -56,8 +55,6 @@ class BaseModelServer:
 
     def get_model_class(self, model_path):
         # will be changed in subclasses
-        if model_path == 'internlm/internlm2-chat-1_8b-sft':
-            return InternLM2ForCausalLM
         return AutoModelForCausalLM
 
     def initialize_async(self):

@@ -1,10 +1,10 @@
 import torch
 from transformers import AutoConfig
 
-from ..model_backend.models.critical_and_reward import get_reward_model
 from ..tokenizer import encode_inputs
 from ..utils import expand_reward_token_id
 from .base_model_server import BaseModelServer
+from .utils import get_reward_model
 
 
 class RewardModelServer(BaseModelServer):

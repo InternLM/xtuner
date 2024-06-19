@@ -1,3 +1,4 @@
+# Adopted from https://github.com/OpenLLMAI/OpenRLHF/blob/main/openrlhf/models/model.py#L134  # noqa: E501
 from typing import Optional
 
 import torch
