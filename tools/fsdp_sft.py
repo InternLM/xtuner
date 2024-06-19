@@ -11,7 +11,7 @@ import torch
 import torch.distributed.checkpoint as dcp
 from mmengine import mkdir_or_exist
 from mmengine.dist import init_dist
-from torch.distributed._tensor import Replicate
+from torch.distributed._tensor import DTensor, Replicate, distribute_tensor
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import \
     apply_activation_checkpointing
 from torch.distributed.checkpoint.state_dict import (get_state_dict,
@@ -26,9 +26,7 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR
 from torch.utils.data import DataLoader
 
-# from xtuner.model import  TextFinetune
 from xtuner._lite import AutoModelForCausalLM, AutoTokenizer, get_logger
-# from transformers import AutoModelForCausalLM
 from xtuner._lite.accelerate import packed_sequence_fwd_and_bwd
 from xtuner._lite.chat import ChatTemplate
 from xtuner._lite.datasets import FinetuneDataset
@@ -131,10 +129,13 @@ def sft(args):
 
     device_mesh = init_device_mesh(
         'cuda', (dp_size, tp_size), mesh_dim_names=('dp', 'tp'))
-
     tp_mesh = device_mesh['tp']
     dp_mesh = device_mesh['dp']
 
+    # For TP, input needs to be same across all TP ranks.
+    # while for SP, input can be different across all ranks.
+    # We will use dp_rank for setting the random seed
+    # to mimic the behavior of the dataloader.
     dp_rank = dp_mesh.get_local_rank()
     tp_rank = tp_mesh.get_local_rank()
 
@@ -150,10 +151,23 @@ def sft(args):
     # Change the format saved in the log file
     logger.add(log_file, format=formatter, backtrace=True, catch=True)
 
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model, trust_remote_code=True, torch_dtype=torch.float32)
-    model.config.use_cache = False
-    model.cuda()
+    with torch.device('meta'):
+        model = AutoModelForCausalLM.from_pretrained(
+            args.model, trust_remote_code=True, torch_dtype=torch.float32)
+        model.config.use_cache = False
+
+    if dp_rank == 0:
+        with torch.device('cpu'):
+            master_model = AutoModelForCausalLM.from_pretrained(
+                args.model, trust_remote_code=True, torch_dtype=torch.bfloat16)
+
+        master_mods = {name: mod for name, mod in master_model.named_modules()}
+        master_mod_map = {
+            mod: master_mods[name]
+            for name, mod in model.named_modules()
+        }
+    else:
+        master_mod_map = None
 
     if args.tp_size > 1:
         for layer in model.model.layers:
@@ -180,6 +194,85 @@ def sft(args):
         trust_remote_code=True,
         padding_side='right')
 
+    @torch.no_grad
+    def lazy_param_init_fn(module):
+        device = torch.cuda.current_device()
+        module.to_empty(device=torch.cuda.current_device(), recurse=False)
+
+        if dp_mesh.get_local_rank() == 0 and tp_mesh.get_local_rank() == 0:
+            master_module = master_mod_map[module]
+            master_params = {
+                name: param
+                for name, param in master_module.named_parameters(
+                    recurse=False)
+            }
+            master_buffers = {
+                name: buffer
+                for name, buffer in master_module.named_buffers(recurse=False)
+            }
+        else:
+            master_params = None
+            master_buffers = None
+
+        if dp_mesh.get_local_rank() == 0:
+
+            for name, param in module.named_parameters(recurse=False):
+
+                if isinstance(param, DTensor):
+
+                    p_full = param.full_tensor()
+                    if tp_mesh.get_local_rank() == 0:
+                        p_copy = master_params[name]
+                        p_copy = p_copy.to(device).to(torch.float32)
+                    else:
+                        p_copy = torch.empty_like(p_full)
+
+                    mesh = param.device_mesh
+                    placements = param.placements
+
+                    p_dtensor = distribute_tensor(p_copy, mesh, placements)
+                    param.data.copy_(p_dtensor)
+
+                else:
+                    if tp_mesh.get_local_rank() == 0:
+                        # breakpoint()
+                        p_copy = master_params[name]
+                        p_copy = p_copy.to(device).to(torch.float32)
+                    else:
+                        p_copy = torch.empty_like(param)
+
+                    tp_group = tp_mesh.get_group()
+                    torch.distributed.broadcast(p_copy, 0, tp_group)
+                    param.data.copy_(p_copy)
+
+            for name, buffer in module.named_buffers(recurse=False):
+
+                if isinstance(buffer, DTensor):
+
+                    b_full = buffer.full_tensor()
+                    if tp_mesh.get_local_rank() == 0:
+                        b_copy = master_buffers[name]
+                        b_copy = b_copy.to(device).to(torch.float32)
+                    else:
+                        b_copy = torch.empty_like(b_full)
+
+                    mesh = buffer.device_mesh
+                    placements = buffer.placements
+
+                    b_dtensor = distribute_tensor(b_copy, mesh, placements)
+                    buffer.data.copy_(b_dtensor)
+
+                else:
+                    if tp_mesh.get_local_rank() == 0:
+                        b_copy = master_buffers[name]
+                        b_copy = b_copy.to(device).to(torch.float32)
+                    else:
+                        b_copy = torch.empty_like(buffer)
+
+                    tp_group = tp_mesh.get_group()
+                    torch.distributed.broadcast(b_copy, 0, tp_group)
+                    buffer.data.copy_(b_copy)
+
     shard_model = FSDP(
         model,
         device_mesh=dp_mesh,
@@ -188,7 +281,9 @@ def sft(args):
             reduce_dtype=torch.bfloat16,
             buffer_dtype=torch.bfloat16),
         device_id=torch.cuda.current_device(),
-        use_orig_params=True)
+        use_orig_params=True,
+        param_init_fn=lazy_param_init_fn,
+        sync_module_states=True)
 
     if args.selective_checkpointing:
 
@@ -204,12 +299,6 @@ def sft(args):
 
     optimizer = AdamW(
         shard_model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-
-    # For TP, input needs to be same across all TP ranks.
-    # while for SP, input can be different across all ranks.
-    # We will use dp_rank for setting the random seed
-    # to mimic the behavior of the dataloader.
-    dp_rank = dp_mesh.get_local_rank()
 
     chat_template = ChatTemplate(
         system='<|im_start|>system\n{system}<|im_end|>\n',
