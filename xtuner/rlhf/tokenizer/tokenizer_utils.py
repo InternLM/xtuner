@@ -1,7 +1,7 @@
 from typing import Optional, Union
 
 from loguru import logger
-from transformers import (AutoTokenizer, LlamaTokenizer, PreTrainedTokenizer,
+from transformers import (AutoTokenizer, PreTrainedTokenizer,
                           PreTrainedTokenizerFast)
 
 PADDING_SIDE = 'left'
@@ -36,19 +36,6 @@ def get_tokenizer(
             raise RuntimeError(err_msg) from e
         else:
             raise e
-    except OSError as e:
-        if 'Incorrect path_or_model_id' in str(e):  # e.g., v13.model
-            tokenizer = LlamaTokenizer.from_pretrained(
-                tokenizer_name,
-                *args,
-                trust_remote_code=trust_remote_code,
-                tokenizer_revision=tokenizer_revision,
-                padding_side=padding_side,
-                **kwargs,
-            )
-            logger.warning('Using LlamaTokenizer.')
-        else:
-            raise e
     except AttributeError as e:
         raise e
 
@@ -61,7 +48,7 @@ def get_tokenizer(
     return tokenizer
 
 
-def encode(
+def encode_inputs(
     inputs: Union[list[str], list[list[dict]]],
     tokenizer,
     return_tensors='pt',

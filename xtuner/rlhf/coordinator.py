@@ -3,14 +3,12 @@ from pathlib import Path
 import ray
 from loguru import logger
 
-from .config.config_consts import (MODEL_TYPE_ACTOR, MODEL_TYPE_CRITIC,
+from .config.config_consts import (MODEL_TYPE_CRITIC, MODEL_TYPE_POLICY,
                                    MODEL_TYPE_REFERENCE, MODEL_TYPE_REWARD)
 from .config.config_utils import get_resource_requirement
-from .model_server.actor_model_server import ActorModelServer
-from .model_server.base_model_server import BaseModelServer
-from .model_server.critic_model_server import CriticModelServer
-from .model_server.ref_model_server import RefModelServer
-from .model_server.reward_model_server import RewardModelServer
+from .model_server import (BaseModelServer, CriticModelServer,
+                           PolicyModelServer, RefModelServer,
+                           RewardModelServer)
 
 ROOT_PATH = Path(__file__).parents[1].resolve()
 
@@ -60,8 +58,8 @@ class Coordinator:
         self.model_dict = {}
         for model_name, model_config in self.model_configs.items():
             model_type = model_config['model_type']
-            if model_type == MODEL_TYPE_ACTOR:
-                self.model_dict[model_name] = ActorModelServer(
+            if model_type == MODEL_TYPE_POLICY:
+                self.model_dict[model_name] = PolicyModelServer(
                     model_name, model_config)
             elif model_type == MODEL_TYPE_CRITIC:
                 self.model_dict[model_name] = CriticModelServer(

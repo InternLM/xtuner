@@ -43,13 +43,13 @@ class PretrainLoss(torch.nn.Module):
 
 
 class PPOPolicyLoss(torch.nn.Module):
-    """Loss function for actor model."""
+    """Loss function for policy model."""
 
     def __init__(self, cliprange: float = 0.2):
         super().__init__()
         self.cliprange = cliprange
 
-    def actor_loss_fn(self, logprobs, old_logprobs, advantages, mask):
+    def policy_loss_fn(self, logprobs, old_logprobs, advantages, mask):
         ratio = (logprobs - old_logprobs).exp()
         pg_loss1 = -ratio * advantages
         pg_loss2 = -ratio.clamp(1 - self.cliprange,
@@ -71,7 +71,7 @@ class PPOPolicyLoss(torch.nn.Module):
         num_actions = mask.size(1)
         logprobs = logpy[:, -num_actions:]
 
-        loss = self.actor_loss_fn(
+        loss = self.policy_loss_fn(
             logprobs=logprobs,
             old_logprobs=old_logprobs,
             advantages=advantages,

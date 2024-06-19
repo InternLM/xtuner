@@ -21,7 +21,7 @@ from ..config.config_consts import (ENGINE_PLUGIN_DDP, ENGINE_PLUGIN_DEEPSPEED,
 from ..config.config_utils import get_dp_size, get_gpu_requirement
 from ..policy_output import (PolicyOutput, concat_policy_outputs,
                              logprobs_from_logits)
-from ..tokenizer import tokenizer_utils
+from ..tokenizer import get_tokenizer
 from ..utils import set_seed
 from .dist_utils import init_process_group
 from .generate_utils import (get_answer_str, get_question_answer_mask,
@@ -77,7 +77,7 @@ class HfModelRunner:
         # 2. Tokenizer
         tokenizer_path = self.model_config.get('tokenizer_path', model_path)
         tokenizer_config = self.model_config.get('tokenizer_config', {})
-        self.tokenizer = tokenizer_utils.get_tokenizer(
+        self.tokenizer = get_tokenizer(
             tokenizer_path, trust_remote_code=True, **tokenizer_config)
 
         # 3. Trainer
@@ -188,7 +188,7 @@ class HfModelRunner:
             labels = labels.to(self.device)
             loss = criterion(logits, labels)
         elif isinstance(labels, dict):
-            # OPT. C) Use customized loss function, see loss/actor_loss.py
+            # OPT. C) Use customized loss function, see loss/policy_loss.py
             logits: torch.Tensor = self.model(
                 **batch, use_cache=False, return_dict=True).logits
             for k, v in labels.items():
@@ -338,7 +338,7 @@ class HfModelRunner:
     @torch.no_grad()
     def infer(
         self,
-        inputs: Union[torch.Tensor, list[dict], list[list[dict]]],
+        input_ids: torch.Tensor,
         micro_batch_size: Optional[
             int] = -1,  # -1: use the entire input as one batch
         tokenizer=None,  # Only used for reward models
@@ -353,12 +353,6 @@ class HfModelRunner:
     ) -> PolicyOutput:
         self.info_rank0(
             f'[{self.model_type}] self.infer() kwargs: {infer_kwargs}')
-        if not isinstance(inputs, torch.Tensor):
-            input_ids, attention_mask = tokenizer_utils.encode(
-                inputs, self.tokenizer)
-        else:
-            input_ids = inputs
-
         input_ids = input_ids.to(self.device)
         if attention_mask is not None:
             attention_mask = attention_mask.to(self.device)
@@ -484,7 +478,7 @@ class HfModelRunner:
     @torch.no_grad()
     def generate(
         self,
-        inputs: Union[torch.Tensor, str, list[str]],
+        input_ids: torch.Tensor,
         micro_batch_size: Optional[
             int] = -1,  # -1: use the entire input as one batch
         attention_mask=None,
@@ -500,11 +494,6 @@ class HfModelRunner:
     ) -> PolicyOutput:
         self.info_rank0(
             f'[{self.model_type}] self.generate() kwargs: {generate_kwargs}')
-        if not isinstance(inputs, torch.Tensor):
-            input_ids, attention_mask = tokenizer_utils.encode(
-                inputs, self.tokenizer, add_generation_prompt=True)
-        else:
-            input_ids = inputs
         input_ids = input_ids.to(self.device)
         if attention_mask is not None:
             assert isinstance(attention_mask, torch.Tensor)
@@ -781,7 +770,7 @@ class HfModelRunnerRayActorGroup(RayActorGroup):
         assert len(micro_batches) == self.dp_size
         return [
             self.ray_actors[index].infer.remote(
-                inputs=micro_batch['input_ids'],
+                input_ids=micro_batch['input_ids'],
                 attention_mask=micro_batch['attention_mask'],
                 *args,
                 **kwargs,
@@ -807,7 +796,7 @@ class HfModelRunnerRayActorGroup(RayActorGroup):
         assert len(micro_batches) == self.dp_size
         return [
             self.ray_actors[index].generate.remote(
-                inputs=micro_batch['input_ids'],
+                input_ids=micro_batch['input_ids'],
                 attention_mask=micro_batch['attention_mask'],
                 *args,
                 **kwargs,

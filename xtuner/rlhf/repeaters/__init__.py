@@ -1,3 +1,4 @@
-from .base import BaseRepeater
+from .base import RepeaterBase
+from .kl_gae import KLGAERepeater
 
-__all__ = ['BaseRepeater']
+__all__ = ['RepeaterBase', 'KLGAERepeater']

@@ -9,7 +9,7 @@ from xtuner.rlhf.config.config import Config
 from xtuner.rlhf.coordinator import Coordinator
 from xtuner.rlhf.dataset import MessageIter
 from xtuner.rlhf.envs import TxtEnv
-from xtuner.rlhf.repeaters import BaseRepeater
+from xtuner.rlhf.repeaters import KLGAERepeater
 from xtuner.rlhf.timer import Timer
 from xtuner.rlhf.trainer import PPOTrainer
 
@@ -36,8 +36,8 @@ def parse_args():
 
 def validate_config(config: Config):
     assert config['model_configs'] is not None
-    assert config['model_configs']['actor'] is not None
-    assert config['model_configs']['actor']['model_path'] is not None
+    assert config['model_configs']['policy'] is not None
+    assert config['model_configs']['policy']['model_path'] is not None
     assert config['dataset_config'] is not None
     assert config['rollout_config'] is not None
     assert config['rollout_config']['generate_kwargs'] is not None
@@ -75,7 +75,7 @@ if __name__ == '__main__':
     coordinator = Coordinator(cluster_address, config['model_configs'])
     model_dict = coordinator.create_models()
     ref_model = model_dict['reference']
-    actor_model = model_dict['actor']
+    policy_model = model_dict['policy']
     reward_model = model_dict['reward']
     critic_model = model_dict['critic']
 
@@ -90,49 +90,48 @@ if __name__ == '__main__':
     # init txt env
     rollout_config = config.get('rollout_config', {})
     txt_env = TxtEnv(
+        policy_model=policy_model,
+        reward_model=reward_model,
         prompt_mes_iter=prompt_mes_iter,
         pretrain_mes_iter=pretrain_mes_iter,
-        reward_function=reward_model,
         **rollout_config,
     )
     # init repeater
     repeater_config = config.get('repeater_config', {})
-    rl_repeater = BaseRepeater(
+    ppo_repeater = KLGAERepeater(
         ref_model=ref_model,
+        policy_model=policy_model,
+        critic_model=critic_model,
+        env=txt_env,
         **repeater_config,
     )
     # init trainer
     train_config = config.get('train_config', {})
     ppo = PPOTrainer(
-        policy_model=actor_model, critic_model=None, **train_config)
+        policy_model=policy_model, critic_model=critic_model, **train_config)
     critic_warmup_step = train_config['critic_warmup_step']
     save_interval = train_config['save_interval']
     max_train_step = train_config.get('max_train_step', float('inf'))
 
-    step = 0
+    step = 1
     while step <= max_train_step:
         s_t = time.time()
         with Timer(f'step {step}: end_to_end'):
-            trajectories = txt_env.rollout(policy_model=actor_model)
+            trajectories = txt_env.rollout(display=True)
             # deal with trajectories
-            trajectories = rl_repeater.process(
-                trajectories,
-                policy_model=actor_model,
-                critic_model=critic_model,
-                ref_model=None,
-                env=txt_env)
+            trajectories = ppo_repeater.process(trajectories)
 
             # # for critic & policy learn
-            critic_loss_ref = ppo.critic_learn_async(trajectories,
-                                                     critic_model)
+            critic_loss = ppo.critic_learn(trajectories)
+            # critic_loss_ref = ppo.critic_learn_async(trajectories)
 
             ppo_loss, pt_loss = None, None
             if critic_warmup_step <= 0:
-                ppo_loss, pt_loss = ppo.policy_learn(trajectories, actor_model)
+                ppo_loss, pt_loss = ppo.policy_learn(trajectories)
                 logger_train.info(f'[Policy Train] Step: {step}, \
                     ppo loss: {ppo_loss}, pretrain loss: {pt_loss}')
 
-            critic_loss = ppo.critic_learn_get(critic_loss_ref, critic_model)
+            # critic_loss = ppo.critic_learn_get(critic_loss_ref)
         logger_train.info(
             f'[Critic Train] step: {step}, critic loss: {critic_loss}')
         logger_train.info(f'rewards: {trajectories.rewards.mean()}')
@@ -164,7 +163,7 @@ if __name__ == '__main__':
         with open(f'{work_dir}/train_rlhf.log.jsonl', 'a') as f:
             f.write(json.dumps(summaries) + '\n')
 
-        step += 1
         logger_train.info(f'[end to end] duration: {time.time() - s_t} s')
-        if step % save_interval == 0:
-            actor_model.save_model(f'{work_dir}/ckpt/{step}/')
+        if (step % save_interval == 0) or (step == max_train_step):
+            policy_model.save_model(f'{work_dir}/ckpt/{step}/')
+        step += 1

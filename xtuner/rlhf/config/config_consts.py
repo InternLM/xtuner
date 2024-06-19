@@ -1,7 +1,7 @@
 # keywords for config files
 
-# model type (actor, critic, reward, reference, ...) for `model_type`
-MODEL_TYPE_ACTOR = 'actor'
+# model type (policy, critic, reward, reference, ...) for `model_type`
+MODEL_TYPE_POLICY = 'policy'
 MODEL_TYPE_REFERENCE = 'reference'
 MODEL_TYPE_REWARD = 'reward'
 MODEL_TYPE_CRITIC = 'critic'

@@ -9,7 +9,9 @@ class PPOTrainer:
 
     def __init__(
             self,
-            actor_micro_bs=2,
+            policy_model: BaseModelServer,
+            critic_model: BaseModelServer,
+            policy_micro_bs=2,
             critic_micro_bs=2,
             policy_learn_time=1,
             critic_learn_time=1,
@@ -23,25 +25,29 @@ class PPOTrainer:
             **kwargs,
     ):
 
-        self.actor_micro_bs = actor_micro_bs
-        self.critic_micro_bs = critic_micro_bs
         # policy
+        self.policy_model = policy_model
         self.policy_learn_time = policy_learn_time
         self.policy_minibatch = policy_minibatch
-
-        # critic
-        self.critic_learn_time = critic_learn_time
-        self.critic_minibatch = critic_minibatch
+        self.policy_micro_bs = policy_micro_bs
 
         self.ppo_loss_weight = ppo_loss_weight
         self.pretrain_loss_weight = pretrain_loss_weight
         self.pretrain_criterion = pretrain_criterion
         self.policy_criterion = policy_criterion
+
+        # critic
+        self.critic_model = critic_model
+        self.critic_learn_time = critic_learn_time
+        self.critic_minibatch = critic_minibatch
+        self.critic_micro_bs = critic_micro_bs
+
         self.critic_criterion = critic_criterion
 
-    def policy_learn(self, trajectories, policy_model: BaseModelServer):
+    def policy_learn(self, trajectories):
         if self.policy_minibatch is None:
             self.policy_minibatch = len(trajectories.output_ids)
+        assert len(trajectories.output_ids) % self.policy_minibatch == 0
         policy_updates = len(trajectories.output_ids) // self.policy_minibatch
         ppo_loss = []
         pretrain_loss = []
@@ -55,24 +61,13 @@ class PPOTrainer:
                 begin = i * self.policy_minibatch
                 end = begin + self.policy_minibatch
 
-                train_input_ids = [
-                    trajectories.output_ids[begin:end, :],
-                ]
+                train_input_ids = [trajectories.output_ids[begin:end, :]]
                 train_attention_mask = [
-                    trajectories.attention_mask[begin:end, :],
+                    trajectories.attention_mask[begin:end, :]
                 ]
-                train_criterion = [
-                    self.policy_criterion,
-                ]
-                loss_weights = [
-                    self.ppo_loss_weight,
-                ]
-                micro_batch_size = [
-                    self.actor_micro_bs,
-                ]
-                assert len(
-                    trajectories.output_ids[begin:end, :]
-                ) == self.policy_minibatch, '[Policy learn] make sure len(policy_batch_inputs) == self.policy_minibatch'  # noqa: E501
+                train_criterion = [self.policy_criterion]
+                loss_weights = [self.ppo_loss_weight]
+                micro_batch_size = [self.policy_micro_bs]
 
                 train_lables = [
                     dict(
@@ -85,8 +80,9 @@ class PPOTrainer:
                 ]
                 # pretrain data
                 if trajectories.pretrain_data is not None:
-                    logger.info(f'[Policy Train] pretrain data \
-                        {trajectories.pretrain_data["input_ids"].shape}')
+                    logger.info(
+                        '[Policy Train] pretrain data '
+                        f'{trajectories.pretrain_data["input_ids"].shape}')
                     train_input_ids.append(
                         trajectories.pretrain_data['input_ids'])
                     train_lables.append(trajectories.pretrain_data['labels'])
@@ -95,10 +91,10 @@ class PPOTrainer:
                         trajectories.pretrain_data['attention_mask'])
                     train_criterion.append(self.pretrain_criterion)
                     loss_weights.append(self.pretrain_loss_weight)
-                    micro_batch_size.append(self.actor_micro_bs)
+                    micro_batch_size.append(self.policy_micro_bs)
 
                 with Timer('policy_model.train'):
-                    p_loss = policy_model.train(
+                    p_loss = self.policy_model.train(
                         input_ids=train_input_ids,
                         labels=train_lables,
                         attention_mask=train_attention_mask,
@@ -119,19 +115,68 @@ class PPOTrainer:
                     )
 
         with Timer('policy_model.sync_model'):
-            policy_model.sync_model()
+            self.policy_model.sync_model()
         return ppo_loss, pretrain_loss
 
-    def critic_learn_async(self, trajectories, critic_model: BaseModelServer):
+    def critic_learn(self, trajectories):
         if self.critic_minibatch is None:
             self.critic_minibatch = len(trajectories.output_ids)
+        assert len(trajectories.output_ids) % self.critic_minibatch == 0
         critic_updates = len(trajectories.output_ids) // self.critic_minibatch
         critic_loss = []
-        assert critic_updates == 1 and self.policy_learn_time == 1, f'critic_updates={critic_updates} * self.policy_learn_time={self.policy_learn_time} > 1'  # noqa: E501
+
+        for learn_i in range(self.critic_learn_time):
+            for step_i in range(critic_updates):
+                logger.info(
+                    '[Critic Train] start critic trains {}/{} | {}'.format(
+                        step_i + 1, critic_updates, learn_i + 1))
+                with Timer('critic_model.train'):
+                    critic_batch_inputs, labels = self._critic_learn_prepare(
+                        step_i, learn_i, trajectories, critic_updates)
+                    v_loss = self.critic_model.train(
+                        input_ids=critic_batch_inputs['input_ids'],
+                        labels=labels,
+                        attention_mask=critic_batch_inputs['attention_mask'],
+                        criterion=self.critic_criterion,
+                        micro_batch_size=self.critic_micro_bs,
+                    )
+                logger.info(f'[Critic train] {self.critic_minibatch} batch, '
+                            f'critic loss: {v_loss.item()}')
+                critic_loss.append(v_loss.item())
+        return critic_loss
+
+    def _critic_learn_prepare(self, step_i, learn_i, trajectories,
+                              critic_updates):
+        logger.info('[Critic Train] start critic trains {}/{} | {}'.format(
+            step_i + 1, critic_updates, learn_i + 1))
+        begin = step_i * self.critic_minibatch
+        end = begin + self.critic_minibatch
+        critic_batch_inputs = dict(
+            input_ids=trajectories.output_ids[begin:end, :],
+            old_values=trajectories.old_values[begin:end, :],
+            returns=trajectories.returns[begin:end, :],
+            action_mask=trajectories.action_mask[begin:end, :],
+            attention_mask=trajectories.attention_mask[begin:end, :])
+
+        labels = dict(
+            old_values=critic_batch_inputs['old_values'],
+            returns=critic_batch_inputs['returns'],
+            mask=critic_batch_inputs['action_mask'],
+        )
+        return critic_batch_inputs, labels
+
+    def critic_learn_async(self, trajectories):
+        if self.critic_minibatch is None:
+            self.critic_minibatch = len(trajectories.output_ids)
+        assert len(trajectories.output_ids) % self.critic_minibatch == 0
+        critic_updates = len(trajectories.output_ids) // self.critic_minibatch
+        critic_loss = []
+        assert critic_updates == 1 and self.policy_learn_time == 1, \
+            '[WIP] `critic_learn_async` support learn async in loop'
         with Timer('critic_model.train_async'):
             critic_batch_inputs, labels = self._critic_learn_prepare(
                 0, 0, trajectories, critic_updates)
-            v_loss_ref = critic_model.train_async(
+            v_loss_ref = self.critic_model.train_async(
                 input_ids=critic_batch_inputs['input_ids'],
                 labels=labels,
                 attention_mask=critic_batch_inputs['attention_mask'],
@@ -142,55 +187,9 @@ class PPOTrainer:
         critic_loss.append(v_loss_ref)
         return critic_loss
 
-    def critic_learn_get(self, critic_loss_ref, critic_model: BaseModelServer):
+    def critic_learn_get(self, critic_loss_ref):
         with Timer('critic_model.train_get'):
             return [
-                critic_model.train_get(ref).item() for ref in critic_loss_ref
+                self.critic_model.train_get(ref).item()
+                for ref in critic_loss_ref
             ]
-
-    def critic_learn(self, trajectories, critic_model: BaseModelServer):
-        if self.critic_minibatch is None:
-            self.critic_minibatch = len(trajectories.output_ids)
-        critic_updates = len(trajectories.output_ids) // self.critic_minibatch
-        critic_loss = []
-
-        for learn_i in range(self.policy_learn_time):
-            for step_i in range(critic_updates):
-                with Timer('critic_model.train'):
-                    critic_batch_inputs, labels = self._critic_learn_prepare(
-                        step_i, learn_i, trajectories, critic_updates)
-                    v_loss = critic_model.train(
-                        input_ids=critic_batch_inputs['input_ids'],
-                        labels=labels,
-                        attention_mask=critic_batch_inputs['attention_mask'],
-                        criterion=self.critic_criterion,
-                        micro_batch_size=self.critic_micro_bs,
-                    )
-                logger.info(f'[Critic train] {self.critic_minibatch} batch, \
-                    critic loss: {v_loss.item()}')
-                critic_loss.append(v_loss.item())
-        return critic_loss
-
-    def _critic_learn_prepare(self, step_i, learn_i, trajectories,
-                              critic_updates):
-        logger.info('[Critic Train] start critic trains {}/{} | {}'.format(
-            step_i + 1, critic_updates, learn_i + 1))
-        begin = step_i * self.critic_minibatch
-        end = begin + self.critic_minibatch
-        critic_batch_inputs = {
-            'input_ids': trajectories.output_ids[begin:end, :],
-            'old_values': trajectories.old_values[begin:end, :],
-            'returns': trajectories.returns[begin:end, :],
-            'action_mask': trajectories.action_mask[begin:end, :],
-            'attention_mask': trajectories.attention_mask[begin:end, :]
-        }
-        assert len(
-            critic_batch_inputs['input_ids']
-        ) == self.critic_minibatch, '[critic learn] make sure len(critic_batch_inputs) == self.critic_minibatch'  # noqa: E501
-
-        labels = dict(
-            old_values=critic_batch_inputs['old_values'],
-            returns=critic_batch_inputs['returns'],
-            mask=critic_batch_inputs['action_mask'],
-        )
-        return critic_batch_inputs, labels

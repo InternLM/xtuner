@@ -4,11 +4,11 @@ import torch
 from loguru import logger
 
 from ..config.config_consts import ENGINE_VLLM
-from ..tokenizer import tokenizer_utils
+from ..tokenizer import encode_inputs
 from .base_model_server import BaseModelServer
 
 
-class ActorModelServer(BaseModelServer):
+class PolicyModelServer(BaseModelServer):
     # Initialize
     def initialize_async(self):
         super().initialize_async()
@@ -56,14 +56,14 @@ class ActorModelServer(BaseModelServer):
             input_ids = inputs
         elif isinstance(inputs, list):
             if not self.generator_eq_trainer:
-                input_ids, attention_mask = tokenizer_utils.encode(
+                input_ids, attention_mask = encode_inputs(
                     inputs,
                     self.tokenizer,
                     return_tensors=None,
                     padding=False,
                     add_generation_prompt=True)
             else:
-                input_ids, attention_mask = tokenizer_utils.encode(
+                input_ids, attention_mask = encode_inputs(
                     inputs, self.tokenizer, add_generation_prompt=True)
         else:
             raise NotImplementedError(f'unknown inputs: {inputs}')

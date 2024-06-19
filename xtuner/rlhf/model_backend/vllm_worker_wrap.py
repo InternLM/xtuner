@@ -64,7 +64,7 @@ class VllmWorkerWrap(Worker):
             f'rank={rank}, world_size={world_size}, group_name={group_name}')
 
     def update_weight(self, name, dtype, shape, empty_cache=False):
-        """Broadcast weight to all vllm workers from source rank 0 (actor
+        """Broadcast weight to all vllm workers from source rank 0 (policy
         model)"""
         if torch.distributed.get_rank() == 0:
             logger.debug(

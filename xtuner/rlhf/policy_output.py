@@ -20,30 +20,6 @@ class PolicyOutput(ModelOutput):
     question_mask: Optional[torch.Tensor] = None
     answer_mask: Optional[torch.Tensor] = None
 
-    def __eq__(self, other: ModelOutput):
-        if len(self.keys()) != len(other.keys()):
-            return False
-        for k, v in self.items():
-            if k not in other:
-                return False
-            vother = other[k]
-
-            if isinstance(v, torch.Tensor):
-                if not torch.equal(v, vother):
-                    return False
-            elif isinstance(v, tuple):  # tuple(torch.Tensor)
-                for i, j in zip(v, vother):
-                    if isinstance(i, torch.Tensor):
-                        if not torch.equal(i, j):
-                            return False
-                    else:
-                        if i != j:
-                            return False
-            else:
-                if v != vother:
-                    return False
-        return True
-
     def to(self, device):
         for k, v in self.items():
             if isinstance(v, torch.Tensor):
@@ -61,8 +37,8 @@ def union_keys_from_policy_outputs(policy_outputs: list[PolicyOutput]) -> list:
     all_keys = set()
     for po in policy_outputs:
         all_keys = all_keys.union(set(po.keys()))
-    return list(
-        all_keys)  # e.g., return ["output_str", "output_ids", "loss", ...]
+    # e.g., return ["output_str", "output_ids", "loss", ...]
+    return list(all_keys)
 
 
 def union_tensor_keys_from_policy_outputs(
@@ -70,19 +46,22 @@ def union_tensor_keys_from_policy_outputs(
     all_keys = set()
     for po in policy_outputs:
         all_keys = all_keys.union(set(po.get_tensor_keys()))
-    return list(all_keys)  # e.g., return ["output_ids", "loss", ...]
+    # e.g., return ["output_ids", "loss", ...]
+    return list(all_keys)
 
 
 def concat_policy_outputs(policy_outputs: list[PolicyOutput],
                           padding_token_map: dict = None) -> PolicyOutput:
     if isinstance(policy_outputs, PolicyOutput):
-        return policy_outputs  # Wrong input type
+        # Wrong input type
+        return policy_outputs
     elif policy_outputs is None or len(policy_outputs) == 0:
         return PolicyOutput(None)
     elif len(policy_outputs) == 1:
         return policy_outputs[0]
 
-    if padding_token_map is not None:  # padding
+    # padding
+    if padding_token_map is not None:
         policy_outputs = padding_policy_outputs(policy_outputs,
                                                 padding_token_map)
 
@@ -92,15 +71,18 @@ def concat_policy_outputs(policy_outputs: list[PolicyOutput],
         for po in policy_outputs:
             value = po[key]
             if value is not None:
-                break  # get the first non-empty value
+                # get the first non-empty value
+                break
         if value is None:
-            continue  # skip if all values are None
+            # skip if all values are None
+            continue
 
         if isinstance(value, torch.Tensor):
             concated[key] = torch.cat(
                 [po[key] for po in policy_outputs if po[key] is not None],
                 dim=0)
-        elif isinstance(value, list):  # e.g., list[str]
+        elif isinstance(value, list):
+            # e.g., list[str]
             concated[key] = []
             for po in policy_outputs:
                 if po[key] is not None:
@@ -153,21 +135,20 @@ def find_max_seq_len(policy_outputs: list[PolicyOutput], key):
 
 
 def logprobs_from_logits(logits: torch.Tensor,
-                         labels: torch.Tensor = None,
+                         labels: torch.Tensor,
                          gather: bool = True) -> torch.Tensor:
     r"""
-    Adapted from: https://github.com/huggingface/trl/blob/main/trl/core.py#L95
+    Adapted from: https://github.com/huggingface/trl/blob/main/trl/core.py#L131
 
     Example:
 
     ```python
-    >>> logits, _, values = model(**input_kwargs)
+    >>> logits, _ = model(**input_kwargs)
     >>> input_ids = input_kwargs["input_ids"]
     >>> logprobs = logprobs_from_logits(logits[:, :-1, :], input_ids[:, 1:])
     ```"""
-
-    logp = torch.nn.functional.log_softmax(logits, dim=-1)
-    if not gather or labels is None:
+    logp = torch.nn.functional.log_softmax(logits, dim=2)
+    if not gather:
         return logp
-    logpy = torch.gather(logp, -1, labels.unsqueeze(2)).squeeze(-1)
+    logpy = torch.gather(logp, 2, labels.unsqueeze(2)).squeeze(-1)
     return logpy

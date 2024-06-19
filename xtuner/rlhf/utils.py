@@ -29,8 +29,7 @@ def expand_reward_token_id(reward_token_id: int,
                            input_ids: torch.Tensor,
                            attention_mask: Optional[torch.Tensor] = None,
                            pad_token_id=0):
-    assert len(input_ids.shape) == 2, \
-        f'expand_reward_token_id error, len(input_ids.shape()) = {len(input_ids.shape())}'  # noqa: E501
+    assert len(input_ids.shape) == 2
     new_input_ids = torch.zeros((input_ids.shape[0], input_ids.shape[1] + 1),
                                 dtype=input_ids.dtype).to(input_ids.device)
     new_attention_mask = torch.zeros_like(

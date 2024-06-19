@@ -8,7 +8,7 @@ from transformers import AutoModelForCausalLM
 from ..config.config_consts import ENGINE_HUGGINGFACE, ENGINE_INTERNEVO
 from ..model_backend.hf_model_runner import HfModelRunnerRayActorGroup
 from ..model_backend.models.modeling_internlm2_p import InternLM2ForCausalLM
-from ..tokenizer import tokenizer_utils
+from ..tokenizer import encode_inputs, get_tokenizer
 
 DEFAULT_GET_TIMEOUT = 600.0  # 10 min
 
@@ -37,7 +37,7 @@ class BaseModelServer:
         else:
             tokenizer_path = model_config['model_path']
 
-        self.tokenizer = tokenizer_utils.get_tokenizer(
+        self.tokenizer = get_tokenizer(
             tokenizer_path, trust_remote_code=True, **tokenizer_config)
 
         tokenizer_config['tokenizer_path'] = tokenizer_path
@@ -65,7 +65,7 @@ class BaseModelServer:
         self.init_trainer_config(self.model_config, self.tokenizer_config)
 
         trainer_type = self.trainer_config.get('trainer_type',
-                                               'huggingface').lower()
+                                               ENGINE_HUGGINGFACE).lower()
         if trainer_type == ENGINE_HUGGINGFACE:
             self.trainer = HfModelRunnerRayActorGroup(
                 name=f'{self.model_name}_trainer', config=self.trainer_config)
@@ -83,8 +83,7 @@ class BaseModelServer:
     # Inference
     def infer_async(self, inputs, attention_mask=None, *args, **infer_kwargs):
         if not isinstance(inputs, torch.Tensor):
-            input_ids, attention_mask = tokenizer_utils.encode(
-                inputs, self.tokenizer)
+            input_ids, attention_mask = encode_inputs(inputs, self.tokenizer)
         else:
             input_ids = inputs
         return self.trainer.infer_async(

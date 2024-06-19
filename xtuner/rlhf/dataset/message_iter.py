@@ -75,11 +75,11 @@ class MessageIter():
         self.epoch_index = 0
 
     def _init_in_data(self):
-        logger.info('====== Init in data dataset ======')
+        logger.info(f'Init {self.message_type} in data dataset ...')
         self.message_dataset = MultiSourceInDataDatset(
             task_groups=self.message_datasets, tokenizer=self.tokenizer)
 
-        logger.info('====== Init in data sampler ======')
+        logger.info(f'Init {self.message_type} in data sampler ...')
         assert hasattr(self.message_dataset, 'all_dataset')
         mes_sampler = RandomSampler(self.message_dataset.all_dataset)
         self.mes_dataloader = iter(
@@ -90,7 +90,8 @@ class MessageIter():
                 batch_size=self.samples_each_epoch))
 
     def yield_in_data(self):
-        logger.info('====== yield data from in_data sampler ======')
+        logger.info('yielding data from '
+                    f'{self.message_type} in_data sampler ...')
         mes_sequence = []
 
         mes_batch_messages = next(self.mes_dataloader)
@@ -122,11 +123,11 @@ class MessageIter():
         return mes_sequence
 
     def _init_in_batch(self):
-        logger.info('====== Init in batch dataset ======')
+        logger.info(f'Init {self.message_type} in batch dataset ...')
         self.message_dataset = MultiSourceInBatchDatset(
             task_groups=self.message_datasets, tokenizer=self.tokenizer)
 
-        logger.info('====== Init in batch sampler ======')
+        logger.info(f'Init {self.message_type} in batch sampler ...')
         samples_cnts = []
         for task in self.message_dataset._task_group:
             task['target_num_each_epoch'] = int(
@@ -141,7 +142,8 @@ class MessageIter():
         assert sum(samples_cnts) >= self.samples_each_epoch
 
     def yield_in_batch(self):
-        logger.info('====== yield data from in_batch sampler ======')
+        logger.info('yield data from '
+                    f'{self.message_type} in_batch sampler ...')
         mes_sequence = []
 
         # epoch_rng only use in this epoch.
@@ -200,7 +202,7 @@ class MessageIter():
                 # TODO truncation??
                 logger.warning(
                     f'[MES_ITER] {self.message_type} message {message} '
-                    'is too short or long, skipped...')
+                    'is too short or long, skipped.')
                 return None
         elif self.message_type == 'pretrain':
             for _ in reversed(range(len(message_data))):
@@ -219,7 +221,7 @@ class MessageIter():
                 # TODO truncation??
                 logger.warning(
                     f'[MES_ITER] {self.message_type} message {message} '
-                    'is too short or long, skipped...')
+                    'is too short or long, skipped.')
                 return None
         return Message(
             message=new_meaasage_data,

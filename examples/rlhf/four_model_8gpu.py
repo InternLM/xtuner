@@ -9,16 +9,26 @@ PROMPT_BATCH_SIZE = 256
 PRETRAIN_BATCH_SIZE = 32
 
 GENERATE_MICRO_BATCH_SIZE = 16
-AC_INFER_MICRO_BATCH_SIZE = 8
-REF_INFER_MICRO_BATCH_SIZE = 8
+INFER_MICRO_BATCH_SIZE = 8
 TRAIN_MICRO_BATCH_SIZE = 2
 
 ZERO_STAGE = 3
-ACTOR_DP_SIZE = 2
+POLICY_DP_SIZE = 2
 CRITIC_DP_SIZE = 2
-ACTOR_GRADIENT_ACC_STEP = (PROMPT_BATCH_SIZE + PRETRAIN_BATCH_SIZE
-                           ) // ACTOR_DP_SIZE // TRAIN_MICRO_BATCH_SIZE
+POLICY_GRADIENT_ACC_STEP = (PROMPT_BATCH_SIZE + PRETRAIN_BATCH_SIZE
+                            ) // POLICY_DP_SIZE // TRAIN_MICRO_BATCH_SIZE
 CRITIC_GRADIENT_ACC_STEP = PROMPT_BATCH_SIZE // CRITIC_DP_SIZE // TRAIN_MICRO_BATCH_SIZE  # noqa: E501
+
+# checkout generate config
+assert PROMPT_BATCH_SIZE % GENERATE_MICRO_BATCH_SIZE == 0
+assert PROMPT_BATCH_SIZE % POLICY_DP_SIZE == 0
+# checkout infer config
+assert PROMPT_BATCH_SIZE % (INFER_MICRO_BATCH_SIZE * POLICY_DP_SIZE) == 0
+assert PROMPT_BATCH_SIZE % (INFER_MICRO_BATCH_SIZE * CRITIC_DP_SIZE) == 0
+# checkout learn config
+assert (PROMPT_BATCH_SIZE + PRETRAIN_BATCH_SIZE) % (TRAIN_MICRO_BATCH_SIZE *
+                                                    POLICY_DP_SIZE) == 0
+assert (PROMPT_BATCH_SIZE) % (TRAIN_MICRO_BATCH_SIZE * CRITIC_DP_SIZE) == 0
 
 MODEL_DTYPE = 'auto'
 
@@ -29,7 +39,7 @@ tokenizer_config = dict(
 )
 
 rollout_config = dict(
-    actor_micro_bs=GENERATE_MICRO_BATCH_SIZE,
+    policy_micro_bs=GENERATE_MICRO_BATCH_SIZE,
     reward_micro_bs=GENERATE_MICRO_BATCH_SIZE,
     max_new_tokens=MAX_ANSWER_LEN,
     write_to_file=True,
@@ -47,20 +57,19 @@ rollout_config = dict(
 )
 
 repeater_config = dict(
-    actor_micro_bs=AC_INFER_MICRO_BATCH_SIZE,
-    critic_micro_bs=AC_INFER_MICRO_BATCH_SIZE,
-    ref_micro_bs=REF_INFER_MICRO_BATCH_SIZE,
+    policy_micro_bs=INFER_MICRO_BATCH_SIZE,
+    critic_micro_bs=INFER_MICRO_BATCH_SIZE,
+    ref_micro_bs=INFER_MICRO_BATCH_SIZE,
     kl_coeff=0.01,
     gamma=1.0,
     gae_lambda=0.99,
     clip_reward_min=-5,
     clip_reward_max=5,
-    answer_end_id=92542,
     norm_rewards=True,
 )
 
 train_config = dict(
-    actor_micro_bs=TRAIN_MICRO_BATCH_SIZE,
+    policy_micro_bs=TRAIN_MICRO_BATCH_SIZE,
     critic_micro_bs=TRAIN_MICRO_BATCH_SIZE,
     ppo_loss_weight=1.0,
     pretrain_loss_weight=0.5,
@@ -70,9 +79,9 @@ train_config = dict(
 )
 
 model_configs = dict(
-    actor=dict(
+    policy=dict(
         model_path='internlm/internlm2-chat-1_8b-sft',
-        model_type='actor',
+        model_type='policy',
         trainer_config=dict(
             torch_dtype=MODEL_DTYPE,
             trainer_type='huggingface',
@@ -85,7 +94,7 @@ model_configs = dict(
                 lr_decay_rate=1,
             ),
             parallel=dict(
-                data=dict(size=ACTOR_DP_SIZE, mode='deepspeed'),
+                data=dict(size=POLICY_DP_SIZE, mode='deepspeed'),
                 tensor=dict(size=1, mode='1d'),
                 pipeline=dict(size=1, interleaved_overlap=False),
                 sequence=False,
@@ -112,7 +121,7 @@ model_configs = dict(
                     'grad_accum_dtype': 'fp32'
                 },
                 'train_micro_batch_size_per_gpu': TRAIN_MICRO_BATCH_SIZE,
-                'gradient_accumulation_steps': ACTOR_GRADIENT_ACC_STEP,
+                'gradient_accumulation_steps': POLICY_GRADIENT_ACC_STEP,
                 'train_batch_size': PROMPT_BATCH_SIZE + PRETRAIN_BATCH_SIZE,
             },
         ),
