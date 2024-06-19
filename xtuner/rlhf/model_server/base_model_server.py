@@ -154,6 +154,8 @@ class BaseModelServer:
 
     def save_model(self, path):
         self.trainer.save_model(path)
+        if self.tokenizer is not None:
+            self.tokenizer.save_pretrained(path)
 
     # Misc.
     def set_seed(self, seed: int = None):
