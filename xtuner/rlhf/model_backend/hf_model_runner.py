@@ -50,7 +50,7 @@ class HfModelRunner:
         envs = self.model_config.get('envs', {})
         for key, value in envs.items():
             os.environ[key] = value
-        
+
         # Parallel Settings
         parallel: dict = self.model_config['parallel']
         assert parallel['tensor']['size'] == 1  # TODO: support TP
@@ -82,7 +82,7 @@ class HfModelRunner:
                                             AutoModelForCausalLM)
         self.model: PreTrainedModel = model_class.from_pretrained(
             pretrained_model_name_or_path=model_path,
-            device_map=None if self.zero_stage==3 else "auto",
+            device_map=None if self.zero_stage == 3 else 'auto',
             torch_dtype=torch_dtype,
             trust_remote_code=True,
             attn_implementation='flash_attention_2'
@@ -105,7 +105,8 @@ class HfModelRunner:
         # 3. Trainer
         train_kwargs = self.model_config.get('train_kwargs')
         if train_kwargs is None:  # requires no training
-            self.model = self.accelerator.prepare(self.model) if self.zero_stage==3 else self.model
+            self.model = self.accelerator.prepare(
+                self.model) if self.zero_stage == 3 else self.model
             self.device = self.accelerator.device
             logger.info(
                 f'[{self.model_type}] __init__() done without train_kwargs.')
