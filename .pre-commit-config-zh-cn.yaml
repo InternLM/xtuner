@@ -1,9 +1,10 @@
-exclude: ^tests/data/
+exclude: ^tests/data/|^xtuner/tools/model_converters/modeling_internlm2_reward/
 repos:
   - repo: https://gitee.com/openmmlab/mirrors-flake8
     rev: 5.0.4
     hooks:
       - id: flake8
+        args: ["--exclude=xtuner/model/transformers_models/*"]
   - repo: https://gitee.com/openmmlab/mirrors-isort
     rev: 5.11.5
     hooks:

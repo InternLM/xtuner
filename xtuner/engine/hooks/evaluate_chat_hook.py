@@ -4,9 +4,9 @@ import warnings
 
 import torch
 from mmengine.dist import master_only
-from mmengine.utils import mkdir_or_exist
 from mmengine.hooks import Hook
 from mmengine.model import is_model_wrapper
+from mmengine.utils import mkdir_or_exist
 from mmengine.utils.misc import get_object_from_string
 from transformers import GenerationConfig, StoppingCriteriaList
 

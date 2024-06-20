@@ -143,7 +143,7 @@ position_ids = pad_for_sequence_parallel(position_ids, padding_value=0)
 attention_mask = pad_for_sequence_parallel(attention_mask, padding_value=0)
 ```
 
-以上过程在 `xtuner/dataset/collate_fns/defalut_collate_fn.py` 中实现。
+以上过程在 `xtuner/dataset/collate_fns/default_collate_fn.py` 中实现。
 
 ### 数据切分
 

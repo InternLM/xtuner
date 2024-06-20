@@ -45,6 +45,7 @@ LOWEST_TRANSFORMERS_VERSION = dict(
     CohereForCausalLM=digit_version('4.40'),
     Qwen2ForCausalLM=digit_version('4.39'),
     Qwen2MoeForCausalLM=digit_version('4.40'),
+    DeepseekV2ForCausalLM=digit_version('4.40'),
 )
 
 ATTN_DISPATCH_MAPPING = dict(
@@ -66,6 +67,8 @@ ATTN_DISPATCH_MAPPING = dict(
                                     'qwen2_attn_forward'),
     Qwen2MoeFlashAttention2=LazyObject('xtuner.model.modules.dispatch.qwen2',
                                        'qwen2_attn_forward'),
+    DeepseekV2FlashAttention2=LazyObject(
+        'xtuner.model.modules.dispatch.deepseek_v2', 'deepseek_attn_forward'),
 )
 
 ATTN_LEGACY_DISPATCH_MAPPING = dict(
@@ -91,6 +94,9 @@ VARLEN_ATTN_DISPATCH_MAPPING = dict(
                                     'qwen2_varlen_attn_forward'),
     Qwen2MoeFlashAttention2=LazyObject('xtuner.model.modules.dispatch.qwen2',
                                        'qwen2_varlen_attn_forward'),
+    DeepseekV2FlashAttention2=LazyObject(
+        'xtuner.model.modules.dispatch.deepseek_v2',
+        'deepseek_varlen_attn_forward'),
 )
 
 VARLEN_ATTN_LEGACY_DISPATCH_MAPPING = dict(
@@ -119,8 +125,6 @@ RMS_DISPATCH_MAPPING = dict(
 )
 
 ROTE_DISPATCH_MAPPING = dict(
-    InternLM2RotaryEmbedding=LazyObject(
-        'xtuner.model.modules.dispatch.internlm2', 'InternLM2RotaryEmbedding'),
     InternLMRotaryEmbedding=LazyObject(
         'xtuner.model.modules.dispatch.internlm', 'InternLMRotaryEmbedding'),
     MistralRotaryEmbedding=LazyObject('xtuner.model.modules.dispatch.mistral',
@@ -224,6 +228,10 @@ def replace_rote(model):
     from mmengine import print_log
     print_log = log_once(print_log)
 
+    assert hasattr(model.config, 'rope_theta'), \
+        '`rope_theta` should be in the model config.'
+    rope_theta = model.config.rope_theta
+
     def traverse(module):
         for name, child in module.named_children():
             cls_name = type(child).__name__
@@ -232,8 +240,10 @@ def replace_rote(model):
                 rote = rote.build()
                 print_log(f'replace {cls_name}', 'current')
                 dim_model = child.inv_freq.shape[0] * 2
-                child_new = rote(dim_model, child.max_seq_len_cached).to(
-                    device=child.inv_freq.device, dtype=child.inv_freq.dtype)
+                child_new = rote(dim_model, child.max_seq_len_cached,
+                                 rope_theta).to(
+                                     device=child.inv_freq.device,
+                                     dtype=child.inv_freq.dtype)
                 setattr(module, name, child_new)
             else:
                 traverse(child)
@@ -244,6 +254,9 @@ def replace_rote(model):
 def dispatch_modules(model, use_varlen_attn=False):
 
     def check(model_name):
+        if 'ForCausalLM' not in model_name and model_name.endswith('Model'):
+            # a walkaround for reward model
+            model_name = model_name[:-5] + 'ForCausalLM'
         msg = '{} requires transformers version at least {}, but got {}'
         assert TRANSFORMERS_VERSION >= LOWEST_TRANSFORMERS_VERSION[
             model_name], msg.format(model_name,
