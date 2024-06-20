@@ -16,23 +16,6 @@ from xtuner.parallel.sequence import (gather_forward_split_backward,
 from .sft import SupervisedFinetune
 
 
-def create_reference_model(model):
-    if is_deepspeed_zero3_enabled():
-        raise ValueError('DeepSpeed ZeRO-3 is enabled and is not compatible '
-                         'with `create_reference_model()`. Please instantiate '
-                         'your reference model directly with '
-                         '`AutoCausalLM.from_pretrained()`.')
-
-    parameter_names = [n for n, _ in model.named_parameters()]
-    ref_model = deepcopy(model)
-
-    # if no layers are shared, return copy of model
-    for param_name in parameter_names:
-        param = ref_model.get_parameter(param_name)
-        param.requires_grad = False
-    return ref_model.eval()
-
-
 class DPO(SupervisedFinetune):
     """A general class of DPO and its variants."""
 
@@ -50,7 +33,26 @@ class DPO(SupervisedFinetune):
         self.beta = beta
 
         if not self.use_lora:
-            self.ref_llm = create_reference_model(self.llm)
+            self.ref_llm = self.create_reference_model(ref_llm, **kwargs)
+
+    def create_reference_model(self, ref_llm=None, **kwargs):
+        ref_model = None
+        if ref_llm is None:
+            if is_deepspeed_zero3_enabled():
+                raise ValueError(
+                    'DeepSpeed ZeRO-3 is enabled and is not compatible '
+                    'with `deepcopy(self.llm)`. Please instantiate '
+                    'your reference model by modifying key `model.ref_llm` '
+                    'in your config with `AutoCausalLM.from_pretrained()`.')
+            ref_model = deepcopy(self.llm)
+        else:
+            ref_model = SupervisedFinetune(ref_llm, **kwargs).llm
+        # freeze parameters
+        parameter_names = [n for n, _ in ref_model.named_parameters()]
+        for param_name in parameter_names:
+            param = ref_model.get_parameter(param_name)
+            param.requires_grad = False
+        return ref_model.eval()
 
     def _gather_masked_logits(self, logits, labels, mask):
         logits = torch.gather(
