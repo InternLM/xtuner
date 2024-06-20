@@ -24,6 +24,7 @@ class TxtEnv(EnvBase):
         reward_micro_bs: int = 32,
         async_reward: bool = True,
         generate_kwargs: dict = None,
+        resume_step=-1,
         **_ignored,
     ):
         self.policy_model = policy_model
@@ -38,8 +39,15 @@ class TxtEnv(EnvBase):
         self.reward_micro_bs = reward_micro_bs
         self.async_reward = async_reward
         self.generate_kwargs: dict = generate_kwargs
+        self.resume_step = resume_step
 
     def rollout(self, display=True):
+        while self.resume_step > 0:
+            logger.info(f"[Resume] {self.resume_step} consuming data...")
+            trained_prompt_datas = next(self.prompt_mes_iter)
+            if self.pretrain_mes_iter is not None:
+                trained_pretrain_datas = next(self.pretrain_mes_iter)
+            self.resume_step -= 1
         prompt_datas = deepcopy(next(self.prompt_mes_iter))
         prompt_input_messages = []
         for data in prompt_datas:

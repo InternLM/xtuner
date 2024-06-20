@@ -149,8 +149,8 @@ class BaseModelServer:
         return ray.get(
             self.trainer.get_state_dict(), timeout=DEFAULT_GET_TIMEOUT)
 
-    def save_model(self, path):
-        self.trainer.save_model(path)
+    def save(self, path):
+        self.trainer.save(path)
         if self.tokenizer is not None:
             self.tokenizer.save_pretrained(path)
 

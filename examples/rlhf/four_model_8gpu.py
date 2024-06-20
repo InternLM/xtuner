@@ -1,6 +1,7 @@
 #######################################################################
 #                              Settings                               #
 #######################################################################
+RESUME_STEP=-1
 MAX_PROMPT_LEN = 1024
 MAX_ANSWER_LEN = 1024
 MAX_PRETRAIN_LEN = 8192
@@ -43,6 +44,7 @@ rollout_config = dict(
     reward_micro_bs=GENERATE_MICRO_BATCH_SIZE,
     max_new_tokens=MAX_ANSWER_LEN,
     write_to_file=True,
+    resume_step=RESUME_STEP,
     generate_kwargs={
         'do_sample': True,
         'temperature': 1.0,
@@ -76,6 +78,7 @@ train_config = dict(
     critic_warmup_step=20,
     save_interval=40,
     max_train_step=400,
+    resume_step=RESUME_STEP,
 )
 
 model_configs = dict(

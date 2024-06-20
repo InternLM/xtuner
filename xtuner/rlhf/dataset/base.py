@@ -114,7 +114,8 @@ class MultiSourceInBatchDatset(IterableDataset):
                         rm_prompt=rm_prompt))
                 logger.info(
                     f'[DataLoader] Load {_task} with prob:{prob}, '
-                    f'sys_prompt type: {sys_prompt}, reward meta: {rm_prompt}')
+                    f'sys_prompt type: {sys_prompt}, '
+                    f'reward prompt type: {rm_prompt}')
             else:
                 logger.warning('[DataLoader] skip file, '
                                f'prob of {file_path} is {prob} ...')
@@ -127,7 +128,7 @@ class MultiSourceInBatchDatset(IterableDataset):
 
                 # loading & convert & save opensource datasets
                 hf_dir = filepath.split('[HF]')[-1]
-                logger.info(f'Loading {hf_dir} with huggingface format ...')
+                logger.info(f'Loading {hf_dir} from huggingface ...')
                 dataset = load_from_hf(hf_dir, tokenizer=tokenizer)
                 task['dataset'] = IterDataset(
                     data_list=dataset['conversation'],

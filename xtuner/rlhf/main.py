@@ -112,24 +112,27 @@ if __name__ == '__main__':
     critic_warmup_step = train_config['critic_warmup_step']
     save_interval = train_config['save_interval']
     max_train_step = train_config.get('max_train_step', float('inf'))
+    resume_step = train_config.get('resume_step', -1)
 
-    step = 1
+    step = max(0, resume_step)
     while step <= max_train_step:
         s_t = time.time()
         with Timer(f'step {step}: end_to_end'):
+            # generate trajectories
             trajectories = txt_env.rollout(display=True)
+
             # deal with trajectories
             trajectories = ppo_repeater.process(trajectories)
 
-            # # for critic & policy learn
+            # critic & policy learn
             critic_loss = ppo.critic_learn(trajectories)
             # critic_loss_ref = ppo.critic_learn_async(trajectories)
 
             ppo_loss, pt_loss = None, None
             if critic_warmup_step <= 0:
                 ppo_loss, pt_loss = ppo.policy_learn(trajectories)
-                logger_train.info(f'[Policy Train] Step: {step}, \
-                    ppo loss: {ppo_loss}, pretrain loss: {pt_loss}')
+                logger_train.info(f'[Policy Train] Step: {step}, '
+                    f'ppo loss: {ppo_loss}, pretrain loss: {pt_loss}')
 
             # critic_loss = ppo.critic_learn_get(critic_loss_ref)
         logger_train.info(
@@ -162,8 +165,9 @@ if __name__ == '__main__':
         )
         with open(f'{work_dir}/train_rlhf.log.jsonl', 'a') as f:
             f.write(json.dumps(summaries) + '\n')
-
         logger_train.info(f'[end to end] duration: {time.time() - s_t} s')
-        if (step % save_interval == 0) or (step == max_train_step):
-            policy_model.save_model(f'{work_dir}/ckpt/{step}/')
+
         step += 1
+        if (step % save_interval == 0) or (step == max_train_step):
+            policy_model.save(f'{work_dir}/ckpt/policy_model/{step}')
+            critic_model.save(f'{work_dir}/ckpt/critic_model/{step}')

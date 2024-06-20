@@ -556,20 +556,37 @@ class HfModelRunner:
     def set_seed(self, seed=None):
         set_seed(seed)
 
-    def save_model(self, path):
+    def save(self, path):
+        # for resume
+        self.accelerator.wait_for_everyone()
+        self.accelerator.save_state(os.path.join(path, 'saved_state'))
+
+        # save model, tokenizer, step
         if not self.accelerator.is_main_process:
             self.accelerator.get_state_dict(self.model)
             return
-        unwrapped_model = self.accelerator.unwrap_model(self.model)
-        if not os.path.exists(path):
-            os.makedirs(path)
-        unwrapped_model.save_pretrained(
-            path,
-            is_main_process=True,
-            save_function=self.accelerator.save,
-            state_dict=self.accelerator.get_state_dict(self.model),
-        )
-        logger.info(f'save model to {path}')
+        else:
+            path = os.path.normpath(path)
+            logger.info(f'[Train step {self.step}] '
+                f'Saving {self.model_type} to {path} ...')
+            # save model
+            unwrapped_model = self.accelerator.unwrap_model(self.model)
+            unwrapped_model.save_pretrained(
+                path,
+                is_main_process=True,
+                save_function=self.accelerator.save,
+                state_dict=self.accelerator.get_state_dict(self.model),
+            )
+            # save tokenizer
+            if self.tokenizer is not None:
+                self.tokenizer.save_pretrained(path)
+            # step
+            torch.save(self.step, os.path.join(path, f'{self.step}.step'))
+            logger.info(f'{self.model_type} saved.')
+
+    def info_rank0(self, content):
+        if self.accelerator.is_main_process:
+            logger.info(content)
 
     def info_rank0(self, content):
         if self.accelerator.is_main_process:
@@ -842,8 +859,8 @@ class HfModelRunnerRayActorGroup(RayActorGroup):
         remove_placement_group(self.placement_group)
         self.released = True
 
-    def save_model(self, path):
-        ray.get([actor.save_model.remote(path) for actor in self.ray_actors])
+    def save(self, path):
+        ray.get([actor.save.remote(path) for actor in self.ray_actors])
 
     def init_process_group(self, generator):
         refs = [
