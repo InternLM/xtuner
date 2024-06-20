@@ -50,37 +50,8 @@ class HfModelRunner:
         envs = self.model_config.get('envs', {})
         for key, value in envs.items():
             os.environ[key] = value
-
-        # 1. Model
-        model_path = self.model_config.get('model_path')
-        self.model_type = self.model_config.get('model_type', '').lower()
-        torch_dtype = self.model_config.get('torch_dtype', 'auto')
-        use_flash_attn = self.model_config.get('use_flash_attn', None)
-        model_class = self.model_config.get('model_class',
-                                            AutoModelForCausalLM)
-        self.model: PreTrainedModel = model_class.from_pretrained(
-            pretrained_model_name_or_path=model_path,
-            device_map='auto',
-            torch_dtype=torch_dtype,
-            trust_remote_code=True,
-            attn_implementation='flash_attention_2'
-            if use_flash_attn else None,
-        )
-
-        # Graident checkpointing
-        gradient_checkpointing = self.model_config.get(
-            'gradient_checkpointing', False)
-        if gradient_checkpointing:
-            self.model.gradient_checkpointing_enable()
-        self.vocab_size = self.model.config.vocab_size
-
-        # 2. Tokenizer
-        tokenizer_path = self.model_config.get('tokenizer_path', model_path)
-        tokenizer_config = self.model_config.get('tokenizer_config', {})
-        self.tokenizer = get_tokenizer(
-            tokenizer_path, trust_remote_code=True, **tokenizer_config)
-
-        # 3. Trainer
+        
+        # Parallel Settings
         parallel: dict = self.model_config['parallel']
         assert parallel['tensor']['size'] == 1  # TODO: support TP
         assert parallel['pipeline']['size'] == 1  # TODO: support PP
@@ -102,8 +73,39 @@ class HfModelRunner:
             self.accelerator = Accelerator(mixed_precision=mixed_precision)
             self.zero_stage = 0
 
+        # 1. Model
+        model_path = self.model_config.get('model_path')
+        self.model_type = self.model_config.get('model_type', '').lower()
+        torch_dtype = self.model_config.get('torch_dtype', 'auto')
+        use_flash_attn = self.model_config.get('use_flash_attn', None)
+        model_class = self.model_config.get('model_class',
+                                            AutoModelForCausalLM)
+        self.model: PreTrainedModel = model_class.from_pretrained(
+            pretrained_model_name_or_path=model_path,
+            device_map=None if self.zero_stage==3 else "auto",
+            torch_dtype=torch_dtype,
+            trust_remote_code=True,
+            attn_implementation='flash_attention_2'
+            if use_flash_attn else None,
+        )
+
+        # Graident checkpointing
+        gradient_checkpointing = self.model_config.get(
+            'gradient_checkpointing', False)
+        if gradient_checkpointing:
+            self.model.gradient_checkpointing_enable()
+        self.vocab_size = self.model.config.vocab_size
+
+        # 2. Tokenizer
+        tokenizer_path = self.model_config.get('tokenizer_path', model_path)
+        tokenizer_config = self.model_config.get('tokenizer_config', {})
+        self.tokenizer = get_tokenizer(
+            tokenizer_path, trust_remote_code=True, **tokenizer_config)
+
+        # 3. Trainer
         train_kwargs = self.model_config.get('train_kwargs')
         if train_kwargs is None:  # requires no training
+            self.model = self.accelerator.prepare(self.model) if self.zero_stage==3 else self.model
             self.device = self.accelerator.device
             logger.info(
                 f'[{self.model_type}] __init__() done without train_kwargs.')
