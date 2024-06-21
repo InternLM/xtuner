@@ -16,7 +16,6 @@ def template_map_fn(example, template):
         if system != '' and system is not None:
             system = template.SYSTEM.format(system=system)
             input_text = system + input_text
-
         single_turn_conversation['input'] = input_text
 
         if template.get('SUFFIX', None):

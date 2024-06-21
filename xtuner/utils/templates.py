@@ -22,7 +22,7 @@ PROMPT_TEMPLATE = ConfigDict(
         SEP='\n',
         STOP_WORDS=['<eoa>']),
     internlm2_chat=dict(
-        SYSTEM='<|im_start|>system\n{system}\n',
+        SYSTEM='<|im_start|>system\n{system}<|im_end|>\n',
         INSTRUCTION=('<|im_start|>user\n{input}<|im_end|>\n'
                      '<|im_start|>assistant\n'),
         SUFFIX='<|im_end|>',
