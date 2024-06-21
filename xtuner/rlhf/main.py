@@ -83,7 +83,7 @@ if __name__ == '__main__':
     prompt_dataset_config = config['prompt_dataset_config']
     prompt_mes_iter = MessageIter(
         tokenizer=ref_model.tokenizer, **prompt_dataset_config)
-    pretrain_dataset_config = config['pretrain_dataset_config']
+    pretrain_dataset_config = config.get('pretrain_dataset_config', {})
     pretrain_mes_iter = MessageIter(
         tokenizer=ref_model.tokenizer, **pretrain_dataset_config)
 
@@ -93,7 +93,7 @@ if __name__ == '__main__':
         policy_model=policy_model,
         reward_model=reward_model,
         prompt_mes_iter=prompt_mes_iter,
-        pretrain_mes_iter=pretrain_mes_iter,
+        pretrain_mes_iter=pretrain_mes_iter,  # None
         **rollout_config,
     )
     # init repeater
@@ -113,6 +113,8 @@ if __name__ == '__main__':
     save_interval = train_config['save_interval']
     max_train_step = train_config.get('max_train_step', float('inf'))
     resume_step = train_config.get('resume_step', -1)
+    critic_warmup_step = min(critic_warmup_step,
+                             critic_warmup_step - resume_step)
 
     step = max(0, resume_step)
     while step <= max_train_step:
@@ -131,7 +133,8 @@ if __name__ == '__main__':
             ppo_loss, pt_loss = None, None
             if critic_warmup_step <= 0:
                 ppo_loss, pt_loss = ppo.policy_learn(trajectories)
-                logger_train.info(f'[Policy Train] Step: {step}, '
+                logger_train.info(
+                    f'[Policy Train] Step: {step}, '
                     f'ppo loss: {ppo_loss}, pretrain loss: {pt_loss}')
 
             # critic_loss = ppo.critic_learn_get(critic_loss_ref)

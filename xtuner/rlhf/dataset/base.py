@@ -112,10 +112,9 @@ class MultiSourceInBatchDatset(IterableDataset):
                         filepath=file_path,
                         sys_prompt=sys_prompt,
                         rm_prompt=rm_prompt))
-                logger.info(
-                    f'[DataLoader] Load {_task} with prob:{prob}, '
-                    f'sys_prompt type: {sys_prompt}, '
-                    f'reward prompt type: {rm_prompt}')
+                logger.info(f'[DataLoader] Load {_task} with prob:{prob}, '
+                            f'sys_prompt type: {sys_prompt}, '
+                            f'reward prompt type: {rm_prompt}')
             else:
                 logger.warning('[DataLoader] skip file, '
                                f'prob of {file_path} is {prob} ...')

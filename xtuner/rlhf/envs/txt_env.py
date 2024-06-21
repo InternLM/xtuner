@@ -32,7 +32,7 @@ class TxtEnv(EnvBase):
 
         self.prompt_mes_iter = iter(prompt_mes_iter)
         self.pretrain_mes_iter = iter(
-            pretrain_mes_iter) if pretrain_mes_iter else None
+            pretrain_mes_iter) if pretrain_mes_iter.message_datasets else None
 
         self.max_new_tokens = max_new_tokens
         self.policy_micro_bs = policy_micro_bs
@@ -43,10 +43,10 @@ class TxtEnv(EnvBase):
 
     def rollout(self, display=True):
         while self.resume_step > 0:
-            logger.info(f"[Resume] {self.resume_step} consuming data...")
-            trained_prompt_datas = next(self.prompt_mes_iter)
+            logger.info(f'[Resume] {self.resume_step} consuming data...')
+            next(self.prompt_mes_iter)
             if self.pretrain_mes_iter is not None:
-                trained_pretrain_datas = next(self.pretrain_mes_iter)
+                next(self.pretrain_mes_iter)
             self.resume_step -= 1
         prompt_datas = deepcopy(next(self.prompt_mes_iter))
         prompt_input_messages = []

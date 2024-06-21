@@ -1,3 +1,4 @@
+import glob
 import os
 import socket
 from typing import Optional, Union
@@ -55,7 +56,7 @@ class HfModelRunner:
         parallel: dict = self.model_config['parallel']
         assert parallel['tensor']['size'] == 1  # TODO: support TP
         assert parallel['pipeline']['size'] == 1  # TODO: support PP
-        self.step = 0
+        self.update_step = 0
         self.zero_stage = 1
         mixed_precision = self.model_config.get('mixed_precision', None)
         if parallel['data'].get('mode') == ENGINE_PLUGIN_FSDP:
@@ -135,6 +136,10 @@ class HfModelRunner:
         self.model, self.optimizer, self.lr_scheduler = self.accelerator.prepare(  # noqa: E501
             self.model, self.optimizer, self.lr_scheduler)
 
+        # resume optimizer, lr_scheduler
+        if bool(len(glob.glob(os.path.join(model_path, '*.step')))):
+            self._resume_load_pretrained(model_path=model_path)
+
         # Others
         self.device = self.accelerator.device
         set_seed(self.model_config.get('seed'))
@@ -148,6 +153,14 @@ class HfModelRunner:
         self.info_rank0(
             f'[{self.model_type}] __init__() done with optimizer {self.optimizer.optimizer}.'  # noqa: E501
         )
+
+    def _resume_load_pretrained(self, model_path):
+        _, step_pt = os.path.split(
+            glob.glob(os.path.join(model_path, '*.step'))[0])
+        self.update_step = int(step_pt.split('.step')[0])
+        logger.info(f'Resume train step {self.update_step} from {model_path}')
+        assert os.path.exists(os.path.join(model_path, 'saved_state'))
+        self.accelerator.load_state(os.path.join(model_path, 'saved_state'))
 
     def compute_loss(
         self,
@@ -206,8 +219,8 @@ class HfModelRunner:
 
     def parameter_update(self, step_interval=1):
         self.info_rank0(f'[{self.model_type}] self.parameter_update()')
-        self.step += 1
-        if self.step % step_interval == 0:
+        self.update_step += 1
+        if self.update_step % step_interval == 0:
             self.accelerator.clip_grad_norm_(self.model.parameters(),
                                              self.clip_grad_norm)
             self.optimizer.step()
@@ -567,8 +580,8 @@ class HfModelRunner:
             return
         else:
             path = os.path.normpath(path)
-            logger.info(f'[Train step {self.step}] '
-                f'Saving {self.model_type} to {path} ...')
+            logger.info(f'[Train step {self.update_step}] '
+                        f'Saving {self.model_type} to {path} ...')
             # save model
             unwrapped_model = self.accelerator.unwrap_model(self.model)
             unwrapped_model.save_pretrained(
@@ -580,13 +593,9 @@ class HfModelRunner:
             # save tokenizer
             if self.tokenizer is not None:
                 self.tokenizer.save_pretrained(path)
-            # step
-            torch.save(self.step, os.path.join(path, f'{self.step}.step'))
+            torch.save(self.update_step,
+                       os.path.join(path, f'{self.update_step}.step'))
             logger.info(f'{self.model_type} saved.')
-
-    def info_rank0(self, content):
-        if self.accelerator.is_main_process:
-            logger.info(content)
 
     def info_rank0(self, content):
         if self.accelerator.is_main_process:

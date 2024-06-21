@@ -1,13 +1,13 @@
 #######################################################################
 #                              Settings                               #
 #######################################################################
-RESUME_STEP=-1
+RESUME_STEP = -1
 MAX_PROMPT_LEN = 1024
 MAX_ANSWER_LEN = 1024
 MAX_PRETRAIN_LEN = 8192
 
 PROMPT_BATCH_SIZE = 256
-PRETRAIN_BATCH_SIZE = 32
+PRETRAIN_BATCH_SIZE = 32  # 0
 
 GENERATE_MICRO_BATCH_SIZE = 16
 INFER_MICRO_BATCH_SIZE = 8

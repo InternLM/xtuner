@@ -35,7 +35,7 @@ class MessageIter():
                  message_type: str = 'prompt',
                  tokenizer=None,
                  max_len: int = 4096,
-                 samples_each_epoch: int = 64,
+                 samples_each_epoch: int = 0,
                  random_seed: int = 110,
                  sample_strategy: str = 'in_batch',
                  **kwargs):
@@ -44,6 +44,12 @@ class MessageIter():
             'in_batch', 'in_data'
         ], ("`sample_strategy` should in ['in_batch', 'in_data'],"
             f' but got {sample_strategy}')
+        if (message_datasets is None) or (samples_each_epoch == 0):
+            logger.warning(f'message_datasets: {message_datasets}'
+                           f' samples_each_epoch: {samples_each_epoch}.')
+            self.message_datasets = None
+            self.samples_each_epoch = 0
+            return None
         assert message_datasets is not None
         self.message_type = message_type
         self.sample_strategy = sample_strategy
@@ -165,6 +171,14 @@ class MessageIter():
                 mes_sequence.append(sequence)
                 if len(mes_sequence) == self.samples_each_epoch:
                     break
+        # TODO, len(mes_sequence) < self.samples_each_epoch,
+        # tmp: random sample from chosen data
+        if len(mes_sequence) < self.samples_each_epoch:
+            missed = self.samples_each_epoch - len(mes_sequence)
+            logger.warning(
+                f'[MES_ITER] {self.message_type} {missed} dirty data ...')
+            for i in range(missed):
+                mes_sequence.append(mes_sequence[i])
 
         assert len(mes_sequence) == self.samples_each_epoch
         logger.info(f'[Epoch {self.epoch_index}] sample '
