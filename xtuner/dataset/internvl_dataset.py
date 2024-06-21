@@ -1,3 +1,5 @@
+import warnings
+
 from mmengine import print_log
 from mmengine.fileio import get
 import io
@@ -10,13 +12,12 @@ import torchvision.transforms as T
 from torchvision.transforms.functional import InterpolationMode
 from xtuner.utils import IGNORE_INDEX
 from torch.utils.data import Dataset
-from typing import Sequence
 import json
 import random
 import copy
 
 
-# Refer from InternVL
+# refer from InternVL
 def find_closest_aspect_ratio(aspect_ratio, target_ratios, width, height, image_size):
     best_ratio_diff = float('inf')
     best_ratio = (1, 1)
@@ -118,13 +119,18 @@ class InternVL_V1_5_Dataset(Dataset):
     def __init__(self, model_path, template, data_files, image_folders=None, repeat_times=1, max_length=8192):
         self.template = template
         self.max_length = max_length
+
         self.cfg = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
 
+        # The following modifications are only to ensure full consistency with the official template,
+        # without investigating the impact on performance.
         if self.cfg.llm_config.architectures[0] == 'Phi3ForCausalLM':
             self._system = 'You are an AI assistant whose name is Phi-3.'
             self.template['INSTRUCTION'] = '<|user|>\n{input}<|end|><|assistant|>\n'
         elif self.cfg.llm_config.architectures[0] == 'InternLM2ForCausalLM':
             self._system = 'You are an AI assistant whose name is InternLM (书生·浦语).'
+            self.template['SYSTEM'] = '<|im_start|>system\n{system}<|im_end|>'
+            self.template['INSTRUCTION'] = '<|im_start|>user\n{input}<|im_end|><|im_start|>assistant\n'
         else:
             raise NotImplementedError
 
@@ -289,6 +295,11 @@ class InternVL_V1_5_Dataset(Dataset):
             conversations = conversations[1:]
         for msg in conversations:
             if msg['from'] == 'human':
+                if image_token_str is None and '<image>' in msg['value']:
+                    warnings.warn(f'The current data << {msg["value"]} >> is in plain text mode, but '
+                                  'there are <image> tags present in the data. '
+                                  'We need to remove the <image> tags.')
+                    msg['value'] = msg['value'].replace('<image>', '')
                 if '<image>' in msg['value']:
                     msg['value'] = msg['value'].replace('<image>',
                                                         '').strip()
