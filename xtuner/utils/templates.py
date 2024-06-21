@@ -22,7 +22,7 @@ PROMPT_TEMPLATE = ConfigDict(
         SEP='\n',
         STOP_WORDS=['<eoa>']),
     internlm2_chat=dict(
-        SYSTEM='<|im_start|>system\nYou are an AI assistant whose name is InternLM (书生·浦语).<|im_end|>\n',
+        SYSTEM='<|im_start|>system\n{system}\n',
         INSTRUCTION=('<|im_start|>user\n{input}<|im_end|>\n'
                      '<|im_start|>assistant\n'),
         SUFFIX='<|im_end|>',
@@ -158,7 +158,7 @@ PROMPT_TEMPLATE = ConfigDict(
         SUFFIX_AS_EOS=True,
         STOP_WORDS=['<|eot_id|>']),
     phi3_chat=dict(
-        SYSTEM='<|system|>\nYou are an AI assistant whose name is Phi-3.<|end|>\n',
+        SYSTEM='<|system|>\n{system}<|end|>\n',
         INSTRUCTION='<|user|>\n{input}<|end|>\n<|assistant|>\n',
         SUFFIX='<|end|>',
         SUFFIX_AS_EOS=True,

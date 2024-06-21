@@ -1,4 +1,3 @@
-from .llava import LLaVADataset
 from mmengine import print_log
 from mmengine.fileio import get
 import io
@@ -9,9 +8,15 @@ import numpy as np
 from transformers import AutoTokenizer, AutoConfig
 import torchvision.transforms as T
 from torchvision.transforms.functional import InterpolationMode
-from xtuner.utils import IMAGE_TOKEN_INDEX, IGNORE_INDEX
+from xtuner.utils import IGNORE_INDEX
+from torch.utils.data import Dataset
+from typing import Sequence
+import json
+import random
+import copy
 
 
+# Refer from InternVL
 def find_closest_aspect_ratio(aspect_ratio, target_ratios, width, height, image_size):
     best_ratio_diff = float('inf')
     best_ratio = (1, 1)
@@ -25,7 +30,6 @@ def find_closest_aspect_ratio(aspect_ratio, target_ratios, width, height, image_
         elif ratio_diff == best_ratio_diff:
             if area > 0.5 * image_size * image_size * ratio[0] * ratio[1]:
                 best_ratio = ratio
-    # print(f'width: {width}, height: {height}, best_ratio: {best_ratio}')
     return best_ratio
 
 
@@ -68,7 +72,7 @@ def dynamic_preprocess(image, min_num=1, max_num=6, image_size=448, use_thumbnai
     return processed_images
 
 
-def total_image_token(orig_size, min_num=1, max_num=12, image_size=448, patch_size=16, use_thumbnail=True):
+def total_image_token(orig_size, min_num=1, max_num=12, image_size=448, use_thumbnail=True):
     orig_width, orig_height = orig_size
 
     aspect_ratio = orig_width / orig_height
@@ -87,81 +91,186 @@ def total_image_token(orig_size, min_num=1, max_num=12, image_size=448, patch_si
     if use_thumbnail:
         blocks += 1
 
-    return blocks*patch_size*patch_size + 2  # 2 for <img> and </img>
+    return blocks
 
 
-IMAGENET_MEAN = (0.485, 0.456, 0.406)
-IMAGENET_STD = (0.229, 0.224, 0.225)
-qualities = list(range(75, 101))
-
-
-def simulate_jpeg_degradation(quality):
-    def jpeg_degrade(img):
-        with io.BytesIO() as output:
-            img.convert('RGB').save(output, format='JPEG', quality=quality)
-            output.seek(0)  # Move the reading cursor to the start of the stream
-            img_jpeg = Image.open(output).copy()  # Use .copy() to make sure the image is loaded in memory
-        return img_jpeg
-
-    return jpeg_degrade
-
-
-jpeg_degrade_functions = {quality: simulate_jpeg_degradation(quality) for quality in qualities}
-
-
-def build_transform(is_train, input_size, pad2square=False, normalize_type='imagenet'):
-    if normalize_type == 'imagenet':
-        MEAN, STD = IMAGENET_MEAN, IMAGENET_STD
+def load_json_or_jsonl(json_path):
+    if json_path.endswith('.json'):
+        with open(json_path, 'r') as f:
+            data = json.load(f)
+    elif json_path.endswith('.jsonl'):
+        with open(json_path, 'r') as f:
+            data = [json.loads(line) for line in f]
     else:
-        raise NotImplementedError
-    if is_train:  # use data augumentation
-        transform = T.Compose([
-            T.Lambda(lambda img: img.convert('RGB') if img.mode != 'RGB' else img),
-            T.RandomChoice([T.Lambda(jpeg_degrade_functions[quality]) for quality in qualities]),
-            T.Resize((input_size, input_size), interpolation=InterpolationMode.BICUBIC),
-            T.ToTensor(),
-            T.Normalize(mean=MEAN, std=STD)
-        ])
-    else:
-        raise NotImplementedError
-    return transform
+        raise ValueError(f'Unsupported file format: {json_path}, only support .json and .jsonl.')
+    return data
 
 
-IMG_CONTEXT_TOKEN = '<IMG_CONTEXT>'
-IMG_START_TOKEN = '<img>'
-IMG_END_TOKEN = '</img>'
+class InternVL_V1_5_Dataset(Dataset):
+    os.environ['TOKENIZERS_PARALLELISM'] = 'true'
+    IMG_CONTEXT_TOKEN = '<IMG_CONTEXT>'
+    IMG_START_TOKEN = '<img>'
+    IMG_END_TOKEN = '</img>'
 
+    IMAGENET_MEAN = (0.485, 0.456, 0.406)
+    IMAGENET_STD = (0.229, 0.224, 0.225)
 
-class InternVL_V1_5_LLaVADataset(LLaVADataset):
-    def __init__(self, path, *args, image_processor=None, **kwargs):
-        self.cfg = AutoConfig.from_pretrained(path, trust_remote_code=True)
+    def __init__(self, model_path, template, data_files, image_folders=None, repeat_times=1, max_length=8192):
+        self.template = template
+        self.max_length = max_length
+        self.cfg = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+
+        if self.cfg.llm_config.architectures[0] == 'Phi3ForCausalLM':
+            self._system = 'You are an AI assistant whose name is Phi-3.'
+            self.template['INSTRUCTION'] = '<|user|>\n{input}<|end|><|assistant|>\n'
+        elif self.cfg.llm_config.architectures[0] == 'InternLM2ForCausalLM':
+            self._system = 'You are an AI assistant whose name is InternLM (书生·浦语).'
+        else:
+            raise NotImplementedError
+
         self.min_dynamic_patch = self.cfg.min_dynamic_patch
         self.max_dynamic_patch = self.cfg.max_dynamic_patch
         self.downsample_ratio = self.cfg.downsample_ratio
         self.image_size = self.cfg.force_image_size
         self.use_thumbnail = self.cfg.use_thumbnail
-        self.transformer = build_transform(True, self.image_size)
-
-        self.max_refetch = 1000
-        patch_size = 14
+        patch_size = self.cfg.vision_config.patch_size
         self.patch_token = int((self.image_size // patch_size) ** 2 * (self.downsample_ratio ** 2))
-        self.tokenizer = AutoTokenizer.from_pretrained(path, trust_remote_code=True)
-        super().__init__(*args, tokenizer=self.tokenizer, image_processor=image_processor, **kwargs)
+        self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+        self.transformer = T.Compose([
+            T.Lambda(lambda img: img.convert('RGB') if img.mode != 'RGB' else img),
+            T.Resize((self.image_size, self.image_size), interpolation=InterpolationMode.BICUBIC),
+            T.ToTensor(),
+            T.Normalize(mean=self.IMAGENET_MEAN, std=self.IMAGENET_STD)
+        ])
 
-    @property
-    def modality_length(self):
-        length_list = self.text_data['length']
-        print_log('end calculating modality length', logger='current')
-        return length_list
+        if not isinstance(data_files, (list, tuple)):
+            data_files = [data_files]
+        if not isinstance(image_folders, (list, tuple)):
+            image_folders = [image_folders]
+        if not isinstance(repeat_times, (list, tuple)):
+            repeat_times = [repeat_times]
+        assert len(data_files) == len(image_folders) == len(repeat_times)
+
+        print_log('start loading data and calc length', logger='current')
+        self.data = []
+        self.image_folder = []
+        self.group_length = []
+        self.conv2length_text = {}  # using dict to speedup the calculation of token length
+
+        for data_file, image_folder, repeat_time in zip(data_files, image_folders, repeat_times):
+            print_log(f'=======start process {data_file} =======', logger='current')
+            assert repeat_time > 0
+            json_data = load_json_or_jsonl(data_file)
+            if repeat_time < 1:
+                json_data = random.sample(json_data, int(len(json_data) * repeat_time))
+            elif repeat_time > 1:
+                json_data = json_data * repeat_time
+            self.data.extend(json_data)
+            self.image_folder.extend([image_folder] * len(json_data))
+
+            # TODO: multi process
+            for data_item in json_data:
+                if 'length' in data_item:
+                    token_length = data_item['length']  # include image token
+                else:
+                    conversations = '\n'.join([temp['value'] for temp in data_item['conversations']])
+                    str_length = len(conversations)
+
+                    if str_length not in self.conv2length_text:
+                        token_length = self.tokenizer(
+                            conversations, return_tensors='pt', padding=False, truncation=False,
+                        ).input_ids.size(1)
+                        self.conv2length_text[str_length] = token_length
+                    else:
+                        token_length = self.conv2length_text[str_length]
+
+                    if 'image' in data_item and data_item['image'] is not None:
+                        if 'image_wh' in data_item and data_item['image_wh'] is not None:
+                            # more accurate calculation of image token
+                            image_wh = data_item['image_wh']
+                            if isinstance(image_wh[0], list):
+                                image_wh = image_wh[0]
+                            image_token = total_image_token(image_wh, self.min_dynamic_patch,
+                                                            self.max_dynamic_patch, self.image_size,
+                                                            self.use_thumbnail)
+                            image_token = self.patch_token * image_token
+                        else:
+                            # max_dynamic_patch + use_thumbnail
+                            image_token = self.patch_token * (self.max_dynamic_patch + self.use_thumbnail)
+
+                        token_length = token_length + image_token
+                    else:
+                        token_length = -token_length
+
+                self.group_length.append(token_length)
+            print_log(f'=======total {len(json_data)} samples of {data_file}=======', logger='current')
+
+        assert len(self.group_length) == len(self.data)
+        print_log('end loading data and calc length', logger='current')
+        print_log(f'=======total {len(self.data)} samples=======', logger='current')
+        self._max_refetch = 1000
 
     def __getitem__(self, index):
-        for _ in range(self.max_refetch + 1):
+        for _ in range(self._max_refetch + 1):
             data = self.prepare_data(index)
             # Broken images may cause the returned data to be None
             if data is None:
                 index = self._rand_another()
                 continue
             return data
+
+    @property
+    def modality_length(self):
+        return self.group_length
+
+    @property
+    def length(self):
+        group_length = np.array(self.group_length)
+        group_length = np.abs(group_length).tolist()
+        return group_length
+
+    def prepare_data(self, index):
+        data_dict: dict = self.data[index]
+        image_folder = self.image_folder[index]
+
+        out_data_dict = {}
+        if data_dict.get('image', None) is not None:
+            image_file = data_dict['image']
+            if isinstance(image_file, (list, tuple)):
+                assert len(image_file) == 1
+                image_file = image_file[0]
+
+            # # # 模拟，随机读取一张图片
+            # root = '/home/PJLAB/huanghaian/dataset/coco/val2017'
+            # random.seed(42)
+            # image_file = random.choice(os.listdir(root))
+            # image_file = os.path.join(root, image_file)
+            # image = self.get_image(image_file)
+
+            try:
+                image = self.get_image(os.path.join(image_folder, image_file))
+            except Exception as e:
+                print(f'Error: {e}', flush=True)
+                print_log(f'Error: {e}', logger='current')
+                return None
+
+            images = dynamic_preprocess(image, self.min_dynamic_patch, self.max_dynamic_patch, self.image_size, self.use_thumbnail)
+            pixel_values = [self.transformer(image) for image in images]
+            pixel_values = torch.stack(pixel_values)
+            out_data_dict['pixel_values'] = pixel_values
+
+            num_image_tokens = pixel_values.shape[0] * self.patch_token
+            image_token_str = f'{self.IMG_START_TOKEN}{self.IMG_CONTEXT_TOKEN * num_image_tokens}{self.IMG_END_TOKEN}'
+            token_dict = self.get_inputid_labels(data_dict['conversations'], image_token_str)
+            out_data_dict.update(token_dict)
+        else:
+            token_dict = self.get_inputid_labels(data_dict['conversations'], None)
+            out_data_dict.update(token_dict)
+            out_data_dict['pixel_values'] = torch.zeros(1, 3, self.image_size, self.image_size)
+        return out_data_dict
+
+    def _rand_another(self) -> int:
+        return np.random.randint(0, len(self.data))
 
     def get_image(self, path):
         if "s3://" in path:
@@ -172,47 +281,52 @@ class InternVL_V1_5_LLaVADataset(LLaVADataset):
         else:
             return Image.open(path).convert('RGB')
 
-    def prepare_data(self, index):
-        data_dict = self.text_data[index]
+    def get_inputid_labels(self, conversations, image_token_str) -> dict:
+        input = ''
+        out_conversation = []
+        while conversations and conversations[0]['from'] == 'gpt':
+            # Skip the first one if it is from gpt
+            conversations = conversations[1:]
+        for msg in conversations:
+            if msg['from'] == 'human':
+                if '<image>' in msg['value']:
+                    msg['value'] = msg['value'].replace('<image>',
+                                                        '').strip()
+                    msg['value'] = image_token_str + '\n' + msg['value']
+                    msg['value'] = msg['value'].strip()
+                input += msg['value'].strip()
+            elif msg['from'] == 'gpt':
+                out_conversation.append({'input': input, 'output': msg['value'].strip()})
+                input = ''
+            else:
+                raise NotImplementedError
 
-        if data_dict.get('image', None) is not None:
-            image_file = data_dict['image']
-            assert len(image_file) == 1
-            image_file = image_file[0]
+        input_ids, labels = [], []
+        for i, single_turn_conversation in enumerate(out_conversation):
+            input = single_turn_conversation.get('input', '')
+            if input is None:
+                input = ''
+            input_text = self.template.INSTRUCTION.format(input=input, round=i + 1)
 
-            try:
-                image = self.get_image(os.path.join(self.image_folder, image_file))
-            except Exception as e:
-                print(f'Error: {e}', flush=True)
-                print_log(f'Error: {e}', logger='current')
-                return None
+            if i == 0:
+                system = self.template.SYSTEM.format(system=self._system)
+                input_text = system + input_text
+                input_encode = self.tokenizer.encode(input_text, add_special_tokens=True)
+            else:
+                input_encode = self.tokenizer.encode(input_text, add_special_tokens=False)
+            input_ids += input_encode
+            labels += [IGNORE_INDEX] * len(input_encode)
 
-            images = dynamic_preprocess(image, self.min_dynamic_patch, self.max_dynamic_patch, self.image_size)
-            pixel_values = [self.transformer(image) for image in images]
-            pixel_values = torch.stack(pixel_values)
-            data_dict['pixel_values'] = pixel_values
+            output_text = single_turn_conversation.get('output', '')
+            if self.template.get('SUFFIX', None):
+                output_text += self.template.SUFFIX
+            output_encode = self.tokenizer.encode(output_text, add_special_tokens=False)
+            input_ids += output_encode
+            labels += copy.deepcopy(output_encode)
 
-            # TODO: more simple way to replace image token
-            num_image_tokens = pixel_values.shape[0] * self.patch_token
-            image_token = f'{IMG_START_TOKEN}{IMG_CONTEXT_TOKEN * num_image_tokens}{IMG_END_TOKEN}'
-            image_input_ids = self.tokenizer(image_token, add_special_tokens=False).input_ids
+        if len(input_ids) > self.max_length:
+            input_ids = input_ids[:self.max_length]
+            labels = labels[:self.max_length]
+            print_log(f'Warning: input_ids length({len(input_ids)}) is longer than max_length, cut to {self.max_length}', logger='current')
+        return {'input_ids': input_ids, 'labels': labels}
 
-            # replace image token to f'{IMG_START_TOKEN}{IMG_CONTEXT_TOKEN * num_image_token}{IMG_END_TOKEN}'
-            input_ids = data_dict['input_ids']  # list
-            old_image_token_index = input_ids.index(IMAGE_TOKEN_INDEX)
-            pre_list = input_ids[:old_image_token_index]
-            post_list = input_ids[old_image_token_index + 1:]
-            input_ids = pre_list + image_input_ids + post_list
-            data_dict['input_ids'] = input_ids
-
-            labels = data_dict['labels']
-            pre_list = labels[:old_image_token_index]
-            post_list = labels[old_image_token_index + 1:]
-            labels = pre_list + [IGNORE_INDEX] * len(image_input_ids) + post_list
-            data_dict['labels'] = labels
-        else:
-            data_dict['pixel_values'] = torch.zeros(1, 3, self.image_size, self.image_size)
-        return data_dict
-
-    def _rand_another(self) -> int:
-        return np.random.randint(0, len(self.text_data))
