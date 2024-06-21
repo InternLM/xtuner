@@ -11,7 +11,6 @@ def template_map_fn(example, template):
         if input is None:
             input = ''
         input_text = template.INSTRUCTION.format(input=input, round=i + 1)
-
         system = single_turn_conversation.get('system', '')
         if system != '' and system is not None:
             system = template.SYSTEM.format(system=system)
