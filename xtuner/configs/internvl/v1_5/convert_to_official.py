@@ -1,13 +1,15 @@
 import argparse
-from transformers import AutoTokenizer
-import torch
-from mmengine.config import Config
-from xtuner.registry import BUILDER
-from xtuner.model.utils import LoadWoInit
 import os.path as osp
 
+import torch
+from mmengine.config import Config
+from transformers import AutoTokenizer
 
-def convert_phi_to_official(config, trained_path, save_path):
+from xtuner.model.utils import LoadWoInit
+from xtuner.registry import BUILDER
+
+
+def convert_to_official(config, trained_path, save_path):
     cfg = Config.fromfile(config)
     cfg.model.pretrained_pth = trained_path
     cfg.model.quantization_vit = False
@@ -27,7 +29,8 @@ def convert_phi_to_official(config, trained_path, save_path):
 
     model.model.save_pretrained(save_path)
 
-    tokenizer = AutoTokenizer.from_pretrained(cfg.model.path, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(
+        cfg.model.path, trust_remote_code=True)
     tokenizer.save_pretrained(save_path)
 
     print(model)
@@ -38,13 +41,15 @@ def main():
         description='Convert the pth model to HuggingFace model')
     parser.add_argument('config', help='config file name or path.')
     parser.add_argument('trained_model_pth', help='The trained model path.')
-    parser.add_argument('save_path', help='The path to save the converted model.')
+    parser.add_argument(
+        'save_path', help='The path to save the converted model.')
     args = parser.parse_args()
 
     if osp.realpath(args.trained_model_pth) == osp.realpath(args.save_path):
-        raise ValueError('The trained path and save path should not be the same.')
+        raise ValueError(
+            'The trained path and save path should not be the same.')
 
-    convert_phi_to_official(args.config, args.trained_model_pth, args.save_path)
+    convert_to_official(args.config, args.trained_model_pth, args.save_path)
 
 
 if __name__ == '__main__':

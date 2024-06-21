@@ -3,6 +3,7 @@ from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
                             LoggerHook, ParamSchedulerHook)
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR, LinearLR
 from torch.optim import AdamW
+from transformers import AutoTokenizer
 
 from xtuner.dataset import InternVL_V1_5_Dataset
 from xtuner.dataset.collate_fns import default_collate_fn
@@ -11,12 +12,12 @@ from xtuner.engine.hooks import DatasetInfoHook
 from xtuner.engine.runner import TrainLoop
 from xtuner.model import InternVL_V1_5
 from xtuner.utils import PROMPT_TEMPLATE
-from transformers import AutoTokenizer
+
 #######################################################################
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-path = "OpenGVLab/Mini-InternVL-Chat-2B-V1-5"
+path = 'OpenGVLab/Mini-InternVL-Chat-2B-V1-5'
 prompt_template = PROMPT_TEMPLATE.internlm2_chat
 
 # Data

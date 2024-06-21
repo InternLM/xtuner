@@ -6,6 +6,7 @@ from .huggingface import process_hf_dataset
 from .intern_repo import (build_packed_dataset,
                           load_intern_repo_tokenized_dataset,
                           load_intern_repo_untokenized_dataset)
+from .internvl_dataset import InternVL_V1_5_Dataset
 from .json_dataset import load_json_file
 from .llava import LLaVADataset
 from .modelscope import process_ms_dataset
@@ -13,7 +14,6 @@ from .moss_sft import MOSSSFTDataset
 from .refcoco_json import (InvRefCOCOJsonDataset, RefCOCOJsonDataset,
                            RefCOCOJsonEvalDataset)
 from .utils import decode_base64_to_image, expand2square, load_image
-from .internvl_dataset import InternVL_V1_5_Dataset
 
 # ignore FutureWarning in hf datasets
 warnings.simplefilter(action='ignore', category=FutureWarning)

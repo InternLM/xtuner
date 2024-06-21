@@ -1,25 +1,26 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-import math
 from collections import OrderedDict
-from transformers import AutoTokenizer, AutoModel, AutoConfig
+from typing import List, Optional, Tuple, Union
+
 import torch
+from mmengine import print_log
 from mmengine.config import Config, ConfigDict
 from mmengine.model import BaseModel
 from peft import get_peft_model, prepare_model_for_kbit_training
-from transformers import BitsAndBytesConfig
+from torch.nn import CrossEntropyLoss
+from transformers import (AutoConfig, AutoModel, AutoTokenizer,
+                          BitsAndBytesConfig)
+from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from xtuner.registry import BUILDER
-from .utils import (find_all_linear_names,
-                    get_peft_model_state_dict, guess_load_checkpoint,
-                    make_inputs_require_grad)
-from mmengine import print_log
-from torch.nn import CrossEntropyLoss
-from typing import List, Optional, Tuple, Union
-from transformers.modeling_outputs import CausalLMOutputWithPast
+from .utils import (find_all_linear_names, get_peft_model_state_dict,
+                    guess_load_checkpoint, make_inputs_require_grad)
 
 
 class InternVL_V1_5(BaseModel):
-    def __init__(self, model_path,
+
+    def __init__(self,
+                 model_path,
                  freeze_llm=False,
                  freeze_visual_encoder=False,
                  llm_lora=None,
@@ -66,7 +67,7 @@ class InternVL_V1_5(BaseModel):
                 bnb_4bit_compute_dtype=torch.float16,
                 bnb_4bit_use_double_quant=True,
                 bnb_4bit_quant_type='nf4')
-            quantization_clazz = quantization_config.pop("type")
+            quantization_clazz = quantization_config.pop('type')
             quantization = quantization_clazz(**quantization_config)
 
         self.model = AutoModel.from_pretrained(
@@ -76,7 +77,8 @@ class InternVL_V1_5(BaseModel):
             config=config,
             trust_remote_code=True)
 
-        tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_path, trust_remote_code=True)
         img_context_token_id = tokenizer.convert_tokens_to_ids('<IMG_CONTEXT>')
         self.model.img_context_token_id = img_context_token_id
 
@@ -88,8 +90,8 @@ class InternVL_V1_5(BaseModel):
         if hasattr(self.model.language_model, 'enable_input_require_grads'):
             self.model.language_model.enable_input_require_grads()
         else:
-            self.model.language_model.get_input_embeddings().register_forward_hook(
-                make_inputs_require_grad)
+            self.model.language_model.get_input_embeddings(
+            ).register_forward_hook(make_inputs_require_grad)
 
         self.gradient_checkpointing_enable()
 
@@ -124,14 +126,16 @@ class InternVL_V1_5(BaseModel):
         if lora_config.target_modules is None:
             modules = find_all_linear_names(self.model.language_model)
             lora_config.target_modules = modules
-        self.model.language_model = get_peft_model(self.model.language_model, lora_config)
+        self.model.language_model = get_peft_model(self.model.language_model,
+                                                   lora_config)
 
     def _prepare_visual_encoder_for_lora(self, lora_config):
         lora_config = self._parse_lora_config(lora_config)
         if lora_config.target_modules is None:
             modules = find_all_linear_names(self.model.vision_model)
             lora_config.target_modules = modules
-        self.model.vision_model = get_peft_model(self.model.vision_model, lora_config)
+        self.model.vision_model = get_peft_model(self.model.vision_model,
+                                                 lora_config)
 
     def gradient_checkpointing_enable(self):
         self.activation_checkpointing_enable()
@@ -161,11 +165,13 @@ class InternVL_V1_5(BaseModel):
         # Step 2. LLM
         if self.use_llm_lora:
             to_return.update(
-                get_peft_model_state_dict(self.model.language_model, state_dict=state_dict))
+                get_peft_model_state_dict(
+                    self.model.language_model, state_dict=state_dict))
         elif not self.freeze_llm:
-            to_return.update(
-                {k: v
-                 for k, v in state_dict.items() if 'model.language_model.' in k})
+            to_return.update({
+                k: v
+                for k, v in state_dict.items() if 'model.language_model.' in k
+            })
         # Step 3. Projector
         to_return.update(
             {k: v
@@ -184,7 +190,11 @@ class InternVL_V1_5(BaseModel):
                     x.unsqueeze(0) if x.ndim == 3 else x for x in pixel_values
                 ]
             # b*n, c, h, w
-            concat_images = torch.cat([image.to(self.model.vision_model.dtype) for image in pixel_values], dim=0)
+            concat_images = torch.cat([
+                image.to(self.model.vision_model.dtype)
+                for image in pixel_values
+            ],
+                                      dim=0)
         else:
             raise NotImplementedError()
 
@@ -198,8 +208,8 @@ class InternVL_V1_5(BaseModel):
         labels = data['labels']
         use_cache = False
 
-        # Directly calling this code in LORA fine-tuning will result in an error,
-        # so we must rewrite it.
+        # Directly calling this code in LORA fine-tuning
+        # will result in an error,so we must rewrite it.
         # TODO: Once the official is fixed, we can remove it.
         # outputs = self.model(input_ids=input_ids,
         #                      position_ids=position_ids,
@@ -208,35 +218,38 @@ class InternVL_V1_5(BaseModel):
         #                      pixel_values=concat_images,
         #                      labels=labels,
         #                      use_cache=use_cache)
-        outputs = self._llm_forward(input_ids=input_ids,
-                                    position_ids=position_ids,
-                                    attention_mask=attention_mask,
-                                    image_flags=image_flags,
-                                    pixel_values=concat_images,
-                                    labels=labels,
-                                    use_cache=use_cache)
+        outputs = self._llm_forward(
+            input_ids=input_ids,
+            position_ids=position_ids,
+            attention_mask=attention_mask,
+            image_flags=image_flags,
+            pixel_values=concat_images,
+            labels=labels,
+            use_cache=use_cache)
         loss_dict = {'loss': outputs.loss}
         return loss_dict
 
     def _llm_forward(
-            self,
-            pixel_values: torch.FloatTensor,
-            input_ids: torch.LongTensor = None,
-            attention_mask: Optional[torch.Tensor] = None,
-            position_ids: Optional[torch.LongTensor] = None,
-            image_flags: Optional[torch.LongTensor] = None,
-            past_key_values: Optional[List[torch.FloatTensor]] = None,
-            labels: Optional[torch.LongTensor] = None,
-            use_cache: Optional[bool] = None,
-            output_attentions: Optional[bool] = None,
-            output_hidden_states: Optional[bool] = None,
-            return_dict: Optional[bool] = None,
+        self,
+        pixel_values: torch.FloatTensor,
+        input_ids: torch.LongTensor = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        image_flags: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[List[torch.FloatTensor]] = None,
+        labels: Optional[torch.LongTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
-        return_dict = return_dict if return_dict is not None else self.model.config.use_return_dict
+        return_dict = return_dict if return_dict is not None \
+            else self.model.config.use_return_dict
 
         image_flags = image_flags.squeeze(-1)
         # We only added the clone code here to avoid the error.
-        input_embeds = self.model.language_model.get_input_embeddings()(input_ids).clone()
+        input_embeds = self.model.language_model.get_input_embeddings()(
+            input_ids).clone()
 
         vit_embeds = self.model.extract_feature(pixel_values)
         vit_embeds = vit_embeds[image_flags == 1]
@@ -246,20 +259,25 @@ class InternVL_V1_5(BaseModel):
         input_embeds = input_embeds.reshape(B * N, C)
 
         if torch.distributed.get_rank() == 0 and self._count % 100 == 0:
-            print(
-                f'dynamic ViT batch size: {vit_batch_size}, images per sample: {vit_batch_size / B}, dynamic token length: {N}')
+            print(f'dynamic ViT batch size: {vit_batch_size}, '
+                  f'images per sample: {vit_batch_size / B}, '
+                  f'dynamic token length: {N}')
         self._count += 1
 
         input_ids = input_ids.reshape(B * N)
         selected = (input_ids == self.model.img_context_token_id)
         try:
-            input_embeds[selected] = input_embeds[selected] * 0.0 + vit_embeds.reshape(-1, C)
+            input_embeds[
+                selected] = input_embeds[selected] * 0.0 + vit_embeds.reshape(
+                    -1, C)
         except Exception as e:
             vit_embeds = vit_embeds.reshape(-1, C)
-            print(f'warning: {e}, input_embeds[selected].shape={input_embeds[selected].shape}, '
+            print(f'warning: {e}, input_embeds[selected].shape='
+                  f'{input_embeds[selected].shape}, '
                   f'vit_embeds.shape={vit_embeds.shape}')
             n_token = selected.sum()
-            input_embeds[selected] = input_embeds[selected] * 0.0 + vit_embeds[:n_token]
+            input_embeds[
+                selected] = input_embeds[selected] * 0.0 + vit_embeds[:n_token]
 
         input_embeds = input_embeds.reshape(B, N, C)
 
@@ -282,15 +300,16 @@ class InternVL_V1_5(BaseModel):
             shift_labels = labels[..., 1:].contiguous()
             # Flatten the tokens
             loss_fct = CrossEntropyLoss()
-            shift_logits = shift_logits.view(-1, self.model.language_model.config.vocab_size)
+            shift_logits = shift_logits.view(
+                -1, self.model.language_model.config.vocab_size)
             shift_labels = shift_labels.view(-1)
             # Enable model parallelism
             shift_labels = shift_labels.to(shift_logits.device)
             loss = loss_fct(shift_logits, shift_labels)
 
         if not return_dict:
-            output = (logits,) + outputs[1:]
-            return (loss,) + output if loss is not None else output
+            output = (logits, ) + outputs[1:]
+            return (loss, ) + output if loss is not None else output
 
         return CausalLMOutputWithPast(
             loss=loss,

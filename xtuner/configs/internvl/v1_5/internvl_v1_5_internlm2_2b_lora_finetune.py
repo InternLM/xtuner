@@ -2,7 +2,9 @@
 from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
                             LoggerHook, ParamSchedulerHook)
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR, LinearLR
+from peft import LoraConfig
 from torch.optim import AdamW
+from transformers import AutoTokenizer
 
 from xtuner.dataset import InternVL_V1_5_Dataset
 from xtuner.dataset.collate_fns import default_collate_fn
@@ -11,13 +13,12 @@ from xtuner.engine.hooks import DatasetInfoHook
 from xtuner.engine.runner import TrainLoop
 from xtuner.model import InternVL_V1_5
 from xtuner.utils import PROMPT_TEMPLATE
-from transformers import AutoTokenizer
-from peft import LoraConfig
+
 #######################################################################
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-path = "OpenGVLab/Mini-InternVL-Chat-2B-V1-5"
+path = 'OpenGVLab/Mini-InternVL-Chat-2B-V1-5'
 prompt_template = PROMPT_TEMPLATE.internlm2_chat
 
 # Data
@@ -59,7 +60,7 @@ model = dict(
         lora_dropout=0.05,
         target_modules=None,
         task_type='CAUSAL_LM'),
-    # uncomment the following lines if you don't want to use Lora in visual encoder
+    # uncomment the following lines if you don't want to use Lora in visual encoder # noqa
     # visual_encoder_lora=dict(
     #     type=LoraConfig, r=64, lora_alpha=16, lora_dropout=0.05,
     #     target_modules=['attn.qkv', 'attn.proj', 'mlp.fc1', 'mlp.fc2'])
