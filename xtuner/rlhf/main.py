@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import shutil
 import time
 
 from loguru import logger
@@ -54,14 +55,15 @@ if __name__ == '__main__':
     work_dir = os.path.abspath(work_dir)
     logger.info(f'using work_dir: {work_dir}')
     os.makedirs(work_dir, exist_ok=True)
+    # save original config
+    shutil.copy2(args.config, f'{work_dir}/{os.path.basename(args.config)}')
 
     logger.add(
         f'{work_dir}/train_rlhf.log',
         filter=lambda record: record['extra'].get('name') == 'train')
     logger_train = logger.bind(name='train')
 
-    configs_path = args.config
-    config = Config.from_file(configs_path)
+    config = Config.from_file(args.config)
     logger.info('#################### CONFIG BGN ####################')
     for k, v in config.items():
         logger.info(f'{k}: {v}')
@@ -72,7 +74,7 @@ if __name__ == '__main__':
     if cluster_address != 'auto':
         cluster_address = f'ray://{cluster_address}:10001'
     logger.info(f'cluster_address={cluster_address}')
-    coordinator = Coordinator(cluster_address, config['model_configs'])
+    coordinator = Coordinator(cluster_address, config)
     model_dict = coordinator.create_models()
     ref_model = model_dict['reference']
     policy_model = model_dict['policy']

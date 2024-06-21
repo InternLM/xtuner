@@ -15,9 +15,10 @@ ROOT_PATH = Path(__file__).parents[1].resolve()
 
 class Coordinator:
 
-    def __init__(self, cluster_address: str, model_configs: dict):
+    def __init__(self, cluster_address: str, configs: dict):
         self.cluster_address = cluster_address
-        self.model_configs = model_configs
+        self.model_configs = configs['model_configs']
+        self.tokenizer_config = configs.get('tokenizer_config', {})
         self.model_dict = dict()
         self.context_type: str = None  # "client" or "server"
         self.context: ray._private.workers.BaseContext = None
@@ -58,6 +59,7 @@ class Coordinator:
         self.model_dict = {}
         for model_name, model_config in self.model_configs.items():
             model_type = model_config['model_type']
+            model_config['tokenizer_config'] = self.tokenizer_config
             if model_type == MODEL_TYPE_POLICY:
                 self.model_dict[model_name] = PolicyModelServer(
                     model_name, model_config)
