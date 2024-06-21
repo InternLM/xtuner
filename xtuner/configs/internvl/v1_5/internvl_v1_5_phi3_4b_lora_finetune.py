@@ -4,13 +4,12 @@ from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR, LinearLR
 from torch.optim import AdamW
 
-from xtuner.dataset import InternVL_V1_5_LLaVADataset
+from xtuner.dataset import InternVL_V1_5_Dataset
 from xtuner.dataset.collate_fns import default_collate_fn
-from xtuner.dataset.map_fns import llava_map_fn, template_map_fn_factory
 from xtuner.dataset.samplers import LengthGroupedSampler
 from xtuner.engine.hooks import DatasetInfoHook
 from xtuner.engine.runner import TrainLoop
-from xtuner.model import InternVL
+from xtuner.model import InternVL_V1_5
 from xtuner.utils import PROMPT_TEMPLATE
 from transformers import AutoTokenizer
 from peft import LoraConfig
@@ -18,33 +17,13 @@ from peft import LoraConfig
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-path = "/mnt/hwfile/xtuner/huanghaian/model/InternVL-Chat-V1-5"
+path = "/mnt/hwfile/xtuner/huanghaian/model/Mini-InternVL-Chat-4B-V1-5"
 
 # Data
 data_root = '/mnt/hwfile/xtuner/linzhihao/dataset/llava_data/'
-
-# 为了高效训练，请确保数据格式为：
-"""
-{
-    "id": "000000033471",
-    "image": ["coco/train2017/000000033471.jpg"], # 如果是纯文本，则该字段为 None 或者不存在
-    "image_wh": [[640, 427]], # 如果是纯文本，则该字段为 None 或者不存在
-    "conversations": [
-      {
-        "from": "human",
-        "value": "<image>\nWhat are the colors of the bus in the image?"
-      },
-      {
-        "from": "gpt",
-        "value": "The bus in the image is white and red."
-      }
-    ]
-  }
-"""
-
-data_path = '/mnt/hwfile/xtuner/huanghaian/data/llava_v1_5_mix665k_processed.json'
+data_path = data_root + 'LLaVA-Instruct-150K/llava_v1_5_mix665k.json'
 image_folder = data_root + 'llava_images'
-prompt_template = PROMPT_TEMPLATE.internlm2_chat
+prompt_template = PROMPT_TEMPLATE.phi3_chat
 max_length = 8192
 
 # Scheduler & Optimizer
@@ -54,27 +33,23 @@ dataloader_num_workers = 4
 max_epochs = 1
 optim_type = AdamW
 # 1024 -> 4e-5
-# 128 -> 2.5e-6
+# 128 -> 5e-6
 lr = 1e-6
 betas = (0.9, 0.999)
-weight_decay = 0
+weight_decay = 0.05
 max_norm = 1  # grad clip
 warmup_ratio = 0.03
 
 # Save
-save_steps = 100
+save_steps = 1000
 save_total_limit = 1  # Maximum checkpoints to keep (-1 means unlimited)
-
-# Evaluate the generation performance during the training
-evaluation_freq = 100
-SYSTEM = ''
 
 #######################################################################
 #            PART 2  Model & Tokenizer & Image Processor              #
 #######################################################################
 model = dict(
-    type=InternVL,
-    path=path,
+    type=InternVL_V1_5,
+    model_path=path,
     freeze_llm=True,
     freeze_visual_encoder=True,
     # comment the following lines if you don't want to use Lora in llm
@@ -95,14 +70,11 @@ model = dict(
 #                      PART 3  Dataset & Dataloader                   #
 #######################################################################
 llava_dataset = dict(
-    type=InternVL_V1_5_LLaVADataset,
-    offline_processed_text_folder='/mnt/petrelfs/huanghaian/code/xtuner/intervl/internlm_26b_llava_sft',
-    path=path,
+    type=InternVL_V1_5_Dataset,
+    model_path=path,
     data_path=data_path,
     image_folder=image_folder,
-    dataset_map_fn=llava_map_fn,
-    template_map_fn=dict(
-        type=template_map_fn_factory, template=prompt_template),
+    template=prompt_template,
     max_length=max_length)
 
 train_dataloader = dict(

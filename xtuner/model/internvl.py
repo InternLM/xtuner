@@ -3,25 +3,24 @@ import math
 from collections import OrderedDict
 from transformers import AutoTokenizer, AutoModel, AutoConfig
 import torch
-import torch.nn as nn
 from mmengine.config import Config, ConfigDict
 from mmengine.model import BaseModel
 from peft import get_peft_model, prepare_model_for_kbit_training
 from transformers import BitsAndBytesConfig
-from transformers.integrations import is_deepspeed_zero3_enabled
 
 from xtuner.registry import BUILDER
-from .modules import ProjectorConfig, ProjectorModel, dispatch_modules
-from .modules.dispatch import SUPPORT_FLASH1, SUPPORT_FLASH2
-from .utils import (LoadWoInit, find_all_linear_names,
+from .utils import (find_all_linear_names,
                     get_peft_model_state_dict, guess_load_checkpoint,
-                    make_inputs_require_grad,
-                    prepare_inputs_labels_for_multimodal, traverse_dict)
+                    make_inputs_require_grad)
 from mmengine import print_log
+from torch.nn import CrossEntropyLoss
+from typing import List, Optional, Tuple, Union
+from transformers.modeling_outputs import CausalLMOutputWithPast
 
 
-class InternVL(BaseModel):
-    def __init__(self, path, freeze_llm=False,
+class InternVL_V1_5(BaseModel):
+    def __init__(self, model_path,
+                 freeze_llm=False,
                  freeze_visual_encoder=False,
                  llm_lora=None,
                  visual_encoder_lora=None,
@@ -40,7 +39,7 @@ class InternVL(BaseModel):
         if quantization_llm:
             assert quantization_llm and llm_lora is not None
 
-        config = AutoConfig.from_pretrained(path, trust_remote_code=True)
+        config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
         config.llm_config._attn_implementation = 'flash_attention_2'
 
         if quantization_vit is False and quantization_llm is False:
@@ -67,13 +66,13 @@ class InternVL(BaseModel):
             quantization = quantization_clazz(**quantization_config)
 
         self.model = AutoModel.from_pretrained(
-            path,
+            model_path,
             torch_dtype=torch.bfloat16,
             quantization_config=quantization,
             config=config,
             trust_remote_code=True)
 
-        tokenizer = AutoTokenizer.from_pretrained(path, trust_remote_code=True)
+        tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
         img_context_token_id = tokenizer.convert_tokens_to_ids('<IMG_CONTEXT>')
         self.model.img_context_token_id = img_context_token_id
 
@@ -102,6 +101,7 @@ class InternVL(BaseModel):
             self.load_state_dict(pretrained_state_dict, strict=False)
             print(f'Load pretrained weight from {pretrained_pth}')
 
+        self._count = 0
         print_log(self, logger='current')
 
     def _parse_lora_config(self, lora_config):
@@ -132,14 +132,12 @@ class InternVL(BaseModel):
         self.activation_checkpointing_enable()
 
     def activation_checkpointing_enable(self):
-        # self.model.vision_model.gradient_checkpointing_enable()
         self.model.language_model.gradient_checkpointing_enable()
 
     def gradient_checkpointing_disable(self):
         self.activation_checkpointing_disable()
 
     def activation_checkpointing_disable(self):
-        # self.model.vision_model.gradient_checkpointing_disable()
         self.model.language_model.gradient_checkpointing_disable()
 
     def state_dict(self, *args, **kwargs):
@@ -195,12 +193,104 @@ class InternVL(BaseModel):
         labels = data['labels']
         use_cache = False
 
-        outputs = self.model(input_ids=input_ids,
-                             position_ids=position_ids,
-                             attention_mask=attention_mask,
-                             image_flags=image_flags,
-                             pixel_values=concat_images,
-                             labels=labels,
-                             use_cache=use_cache)
+        # Directly calling this code in LORA fine-tuning will result in an error,
+        # so we must rewrite it.
+        # TODO: Once the official is fixed, we can remove it.
+        # outputs = self.model(input_ids=input_ids,
+        #                      position_ids=position_ids,
+        #                      attention_mask=attention_mask,
+        #                      image_flags=image_flags,
+        #                      pixel_values=concat_images,
+        #                      labels=labels,
+        #                      use_cache=use_cache)
+        outputs = self._llm_forward(input_ids=input_ids,
+                                    position_ids=position_ids,
+                                    attention_mask=attention_mask,
+                                    image_flags=image_flags,
+                                    pixel_values=concat_images,
+                                    labels=labels,
+                                    use_cache=use_cache)
         loss_dict = {'loss': outputs.loss}
         return loss_dict
+
+    def _llm_forward(
+            self,
+            pixel_values: torch.FloatTensor,
+            input_ids: torch.LongTensor = None,
+            attention_mask: Optional[torch.Tensor] = None,
+            position_ids: Optional[torch.LongTensor] = None,
+            image_flags: Optional[torch.LongTensor] = None,
+            past_key_values: Optional[List[torch.FloatTensor]] = None,
+            labels: Optional[torch.LongTensor] = None,
+            use_cache: Optional[bool] = None,
+            output_attentions: Optional[bool] = None,
+            output_hidden_states: Optional[bool] = None,
+            return_dict: Optional[bool] = None,
+    ) -> Union[Tuple, CausalLMOutputWithPast]:
+        return_dict = return_dict if return_dict is not None else self.model.config.use_return_dict
+
+        image_flags = image_flags.squeeze(-1)
+        # We only added the clone code here to avoid the error.
+        input_embeds = self.model.language_model.get_input_embeddings()(input_ids).clone()
+
+        vit_embeds = self.model.extract_feature(pixel_values)
+        vit_embeds = vit_embeds[image_flags == 1]
+        vit_batch_size = pixel_values.shape[0]
+
+        B, N, C = input_embeds.shape
+        input_embeds = input_embeds.reshape(B * N, C)
+
+        if torch.distributed.get_rank() == 0 and self._count % 100 == 0:
+            print(
+                f'dynamic ViT batch size: {vit_batch_size}, images per sample: {vit_batch_size / B}, dynamic token length: {N}')
+        self._count += 1
+
+        input_ids = input_ids.reshape(B * N)
+        selected = (input_ids == self.model.img_context_token_id)
+        try:
+            input_embeds[selected] = input_embeds[selected] * 0.0 + vit_embeds.reshape(-1, C)
+        except Exception as e:
+            vit_embeds = vit_embeds.reshape(-1, C)
+            print(f'warning: {e}, input_embeds[selected].shape={input_embeds[selected].shape}, '
+                  f'vit_embeds.shape={vit_embeds.shape}')
+            n_token = selected.sum()
+            input_embeds[selected] = input_embeds[selected] * 0.0 + vit_embeds[:n_token]
+
+        input_embeds = input_embeds.reshape(B, N, C)
+
+        outputs = self.model.language_model(
+            inputs_embeds=input_embeds,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+        logits = outputs.logits
+
+        loss = None
+        if labels is not None:
+            # Shift so that tokens < n predict n
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            # Flatten the tokens
+            loss_fct = CrossEntropyLoss()
+            shift_logits = shift_logits.view(-1, self.model.language_model.config.vocab_size)
+            shift_labels = shift_labels.view(-1)
+            # Enable model parallelism
+            shift_labels = shift_labels.to(shift_logits.device)
+            loss = loss_fct(shift_logits, shift_labels)
+
+        if not return_dict:
+            output = (logits,) + outputs[1:]
+            return (loss,) + output if loss is not None else output
+
+        return CausalLMOutputWithPast(
+            loss=loss,
+            logits=logits,
+            past_key_values=outputs.past_key_values,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
