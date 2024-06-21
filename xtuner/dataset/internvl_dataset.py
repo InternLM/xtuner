@@ -116,7 +116,7 @@ class InternVL_V1_5_Dataset(Dataset):
     IMAGENET_MEAN = (0.485, 0.456, 0.406)
     IMAGENET_STD = (0.229, 0.224, 0.225)
 
-    def __init__(self, model_path, template, data_files, image_folders=None, repeat_times=1, max_length=8192):
+    def __init__(self, model_path, template, data_paths, image_folders=None, repeat_times=1, max_length=8192):
         self.template = template
         self.max_length = max_length
 
@@ -149,22 +149,22 @@ class InternVL_V1_5_Dataset(Dataset):
             T.Normalize(mean=self.IMAGENET_MEAN, std=self.IMAGENET_STD)
         ])
 
-        if not isinstance(data_files, (list, tuple)):
-            data_files = [data_files]
+        if not isinstance(data_paths, (list, tuple)):
+            data_paths = [data_paths]
         if not isinstance(image_folders, (list, tuple)):
             image_folders = [image_folders]
         if not isinstance(repeat_times, (list, tuple)):
             repeat_times = [repeat_times]
-        assert len(data_files) == len(image_folders) == len(repeat_times)
+        assert len(data_paths) == len(image_folders) == len(repeat_times)
 
-        print_log('start loading data and calc length', logger='current')
+        print_log('Starting to loading data and calc length', logger='current')
         self.data = []
         self.image_folder = []
         self.group_length = []
         self.conv2length_text = {}  # using dict to speedup the calculation of token length
 
-        for data_file, image_folder, repeat_time in zip(data_files, image_folders, repeat_times):
-            print_log(f'=======start process {data_file} =======', logger='current')
+        for data_file, image_folder, repeat_time in zip(data_paths, image_folders, repeat_times):
+            print_log(f'=======Starting to process {data_file} =======', logger='current')
             assert repeat_time > 0
             json_data = load_json_or_jsonl(data_file)
             if repeat_time < 1:
@@ -225,6 +225,9 @@ class InternVL_V1_5_Dataset(Dataset):
                 continue
             return data
 
+    def __len__(self):
+        return len(self.data)
+
     @property
     def modality_length(self):
         return self.group_length
@@ -246,13 +249,6 @@ class InternVL_V1_5_Dataset(Dataset):
                 assert len(image_file) == 1
                 image_file = image_file[0]
 
-            # # # 模拟，随机读取一张图片
-            # root = '/home/PJLAB/huanghaian/dataset/coco/val2017'
-            # random.seed(42)
-            # image_file = random.choice(os.listdir(root))
-            # image_file = os.path.join(root, image_file)
-            # image = self.get_image(image_file)
-
             try:
                 image = self.get_image(os.path.join(image_folder, image_file))
             except Exception as e:
@@ -260,7 +256,8 @@ class InternVL_V1_5_Dataset(Dataset):
                 print_log(f'Error: {e}', logger='current')
                 return None
 
-            images = dynamic_preprocess(image, self.min_dynamic_patch, self.max_dynamic_patch, self.image_size, self.use_thumbnail)
+            images = dynamic_preprocess(image, self.min_dynamic_patch, self.max_dynamic_patch, self.image_size,
+                                        self.use_thumbnail)
             pixel_values = [self.transformer(image) for image in images]
             pixel_values = torch.stack(pixel_values)
             out_data_dict['pixel_values'] = pixel_values
@@ -338,6 +335,8 @@ class InternVL_V1_5_Dataset(Dataset):
         if len(input_ids) > self.max_length:
             input_ids = input_ids[:self.max_length]
             labels = labels[:self.max_length]
-            print_log(f'Warning: input_ids length({len(input_ids)}) is longer than max_length, cut to {self.max_length}', logger='current')
+            print_log(
+                f'Warning: input_ids length({len(input_ids)}) is longer than max_length, cut to {self.max_length}',
+                logger='current')
         return {'input_ids': input_ids, 'labels': labels}
 

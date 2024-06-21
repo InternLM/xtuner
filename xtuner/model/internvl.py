@@ -27,6 +27,7 @@ class InternVL_V1_5(BaseModel):
                  quantization_vit=False,
                  quantization_llm=False,
                  pretrained_pth=None):
+        print_log('Start to load InternVL_V1_5 model.', logger='current')
         super().__init__()
         self.freeze_llm = freeze_llm
         self.freeze_visual_encoder = freeze_visual_encoder
@@ -40,7 +41,10 @@ class InternVL_V1_5(BaseModel):
             assert quantization_llm and llm_lora is not None
 
         config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
-        config.llm_config._attn_implementation = 'flash_attention_2'
+        if config.llm_config.model_type == 'internlm2':
+            config.llm_config.attn_implementation = 'flash_attention_2'
+        else:
+            config.llm_config._attn_implementation = 'flash_attention_2'
 
         if quantization_vit is False and quantization_llm is False:
             quantization = None
@@ -103,6 +107,7 @@ class InternVL_V1_5(BaseModel):
 
         self._count = 0
         print_log(self, logger='current')
+        print_log('InternVL_V1_5 construction is complete', logger='current')
 
     def _parse_lora_config(self, lora_config):
         if isinstance(lora_config, dict) or isinstance(

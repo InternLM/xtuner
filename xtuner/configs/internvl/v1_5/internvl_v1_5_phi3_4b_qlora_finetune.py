@@ -18,10 +18,10 @@ from peft import LoraConfig
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-path = "/mnt/hwfile/xtuner/huanghaian/model/Mini-InternVL-Chat-4B-V1-5"
+path = "OpenGVLab/Mini-InternVL-Chat-4B-V1-5"
 
 # Data
-data_root = '/mnt/hwfile/xtuner/linzhihao/dataset/llava_data/'
+data_root = './data/llava_data/'
 data_path = data_root + 'LLaVA-Instruct-150K/llava_v1_5_mix665k.json'
 image_folder = data_root + 'llava_images'
 prompt_template = PROMPT_TEMPLATE.phi3_chat
@@ -33,8 +33,7 @@ accumulative_counts = 2
 dataloader_num_workers = 4
 max_epochs = 1
 optim_type = AdamW
-# 1024 -> 4e-5
-# 128 -> 5e-6
+# official 1024 -> 4e-5
 lr = 1e-6
 betas = (0.9, 0.999)
 weight_decay = 0.05
@@ -75,8 +74,8 @@ model = dict(
 llava_dataset = dict(
     type=InternVL_V1_5_Dataset,
     model_path=path,
-    data_path=data_path,
-    image_folder=image_folder,
+    data_paths=data_path,
+    image_folders=image_folder,
     template=prompt_template,
     max_length=max_length)
 
