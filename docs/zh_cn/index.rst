@@ -57,6 +57,23 @@
 
 .. toctree::
    :maxdepth: 2
+   :caption: DPO
+
+   dpo/overview.md
+   dpo/quick_start.md
+   dpo/modify_settings.md
+
+.. toctree::
+   :maxdepth: 2
+   :caption: Reward Model
+
+   reward_model/overview.md
+   reward_model/quick_start.md
+   reward_model/modify_settings.md
+   reward_model/preference_data.md
+
+.. toctree::
+   :maxdepth: 2
    :caption: 加速训练
 
    acceleration/deepspeed.rst
