@@ -34,5 +34,5 @@ pip install cupy-cuda11x==12.1
 python -m cupyx.tools.install_library --library nccl --cuda 11.x
 
 # 启动任务，首次启动建议添加 HF_ENDPOINT=https://hf-mirror.com 方便数据集加载
-HF_ENDPOINT=https://hf-mirror.com xtuner rlhf -c examples/rlhf/four_model_vllm_8gpu.py
+HF_ENDPOINT=https://hf-mirror.com xtuner rlhf -c examples/rlhf/internlm2_chat_1_8b_ppo_ds_vllm_8gpu.py
 ```
