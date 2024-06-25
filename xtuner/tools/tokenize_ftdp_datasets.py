@@ -227,8 +227,8 @@ def chatml_format(
     for dialog_item in _processed_data:
         role = dialog_item['role']
         content = dialog_item['content']
-        # TODO: is strip necessary? or use lstrip? 避免开始有\n\n的情况
-        # content = content.lstrip()
+        # Resolved TODO: Used lstrip to remove leading newline characters from content
+        content = content.lstrip('\n')
         begin = format_begin(role_cfg[role], dialog_item)
         end = role_cfg[role]['end']
         begin_token = tokenizer.encode(begin, add_special_tokens=False)
