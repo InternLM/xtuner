@@ -125,6 +125,8 @@ RMS_DISPATCH_MAPPING = dict(
 )
 
 ROTE_DISPATCH_MAPPING = dict(
+    InternLM2RotaryEmbedding=LazyObject(
+        'xtuner.model.modules.dispatch.internlm2', 'InternLM2RotaryEmbedding'),
     InternLMRotaryEmbedding=LazyObject(
         'xtuner.model.modules.dispatch.internlm', 'InternLMRotaryEmbedding'),
     MistralRotaryEmbedding=LazyObject('xtuner.model.modules.dispatch.mistral',
