@@ -70,6 +70,6 @@ NPROC_PER_NODE=8 xtuner train internvl_v1_5_phi3_4b_lora_finetune --deepspeed de
 python xtuner/configs/internvl/v1_5/convert_to_official.py xtuner/configs/internvl/v1_5/internvl_v1_5_phi3_4b_lora_finetune.py ./work_dirs/iter_xxx.pth ./work_dirs/internvl_v1_5_phi3_4b/
 ```
 
-此时，会在 `./work_dirs/internvl_v1_5_phi3_4b/` 下生成一组包括配置的完整官方权重，你可以使用官方工具链进行评测和对话。
+此时，会在 `./work_dirs/internvl_v1_5_phi3_4b/` 下生成一组包括配置的完整官方权重，你可以使用[官方工具链](https://github.com/OpenGVLab/InternVL)进行评测和对话。
 
 如果你在使用中碰到任何问题，欢迎联系我们！！！

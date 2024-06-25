@@ -70,6 +70,6 @@ After training, we will get a set of weights, that is `./work_dirs/iter_xxx.pth`
 python xtuner/configs/internvl/v1_5/convert_to_official.py xtuner/configs/internvl/v1_5/internvl_v1_5_phi3_4b_lora_finetune.py ./work_dirs/iter_xxx.pth ./work_dirs/internvl_v1_5_phi3_4b/
 ```
 
-Here, a complete set of official weights including configuration will be generated under `./work_dirs/internvl_v1_5_phi3_4b/`, you can use the official toolchain for evaluation and dialogue.
+Here, a complete set of official weights including configuration will be generated under `./work_dirs/internvl_v1_5_phi3_4b/`, you can use the [official toolchain](https://github.com/OpenGVLab/InternVL) for evaluation and dialogue.
 
 If you encounter any problems during use, please feel free to contact us!!!

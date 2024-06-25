@@ -30,7 +30,7 @@ def convert_to_official(config, trained_path, save_path):
     model.model.save_pretrained(save_path)
 
     tokenizer = AutoTokenizer.from_pretrained(
-        cfg.model.path, trust_remote_code=True)
+        cfg.model.model_path, trust_remote_code=True)
     tokenizer.save_pretrained(save_path)
 
     print(model)
