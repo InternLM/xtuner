@@ -117,6 +117,7 @@ if __name__ == '__main__':
     resume_step = train_config.get('resume_step', -1)
     critic_warmup_step = min(critic_warmup_step,
                              critic_warmup_step - resume_step)
+    async_learn = train_config.get('async_learn', False)
 
     step = max(0, resume_step)
     while step <= max_train_step:
@@ -129,8 +130,10 @@ if __name__ == '__main__':
             trajectories = ppo_repeater.process(trajectories)
 
             # critic & policy learn
-            critic_loss = ppo.critic_learn(trajectories)
-            # critic_loss_ref = ppo.critic_learn_async(trajectories)
+            if async_learn:
+                critic_loss_ref = ppo.critic_learn_async(trajectories)
+            else:
+                critic_loss = ppo.critic_learn(trajectories)
 
             ppo_loss, pt_loss = None, None
             if critic_warmup_step <= 0:
@@ -139,7 +142,9 @@ if __name__ == '__main__':
                     f'[Policy Train] Step: {step}, '
                     f'ppo loss: {ppo_loss}, pretrain loss: {pt_loss}')
 
-            # critic_loss = ppo.critic_learn_get(critic_loss_ref)
+            if async_learn:
+                critic_loss = ppo.critic_learn_get(critic_loss_ref)
+
         logger_train.info(
             f'[Critic Train] step: {step}, critic loss: {critic_loss}')
         logger_train.info(f'rewards: {trajectories.rewards.mean()}')

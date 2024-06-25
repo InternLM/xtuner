@@ -90,7 +90,7 @@ class KLGAERepeater(RepeaterBase):
                 attention_mask=trajectories.attention_mask,
                 output_logits=False,
                 output_logprobs=True)
-        with Timer('ref_model.infer_get'):
+        with Timer('policy_model.infer_get'):
             policy_output = self.policy_model.infer_get(policy_output)
         with Timer('ref_model.infer_get'):
             ref_output = self.ref_model.infer_get(ref_output)
