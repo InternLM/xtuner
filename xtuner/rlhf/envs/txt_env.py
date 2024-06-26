@@ -113,15 +113,18 @@ class TxtEnv(EnvBase):
         for i in range(len(prompt_datas)):
             if prompt_datas[i].mes_type != 'prompt':
                 continue
-            if prompt_datas[i].rm_prompt != 'default':
+            if (prompt_datas[i].rm_prompt !=
+                    'default') or (prompt_datas[i].sys_prompt != 'default'):
                 # Conditional Reward Model
                 # for queries from different domains, use appropriate conditional system prompts  # noqa: E501
                 # From Alignment section of the InternLM2 Technical Report:
                 # https://arxiv.org/pdf/2403.17297
+                if prompt_datas[i].rm_prompt != 'default':
+                    prompt = prompt_datas[i].rm_prompt
+                else:
+                    prompt = prompt_datas[i].sys_prompt
                 cur_rm_data = [
-                    dict(
-                        role='system',
-                        content=SYSTEM_PROMPT[prompt_datas[i].rm_prompt])
+                    dict(role='system', content=SYSTEM_PROMPT[prompt])
                 ] + prompt_datas[i].message + [
                     dict(
                         role='assistant', content=policyout.output_ans_str[i])
