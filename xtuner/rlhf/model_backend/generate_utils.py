@@ -56,16 +56,26 @@ def partition_by_micro_batch_size(
 
     num_splits = int(batch_size // micro_batch_size) + (
         batch_size % micro_batch_size > 0)
+    max_inputs_length = None
     if isinstance(input_ids, torch.Tensor):
         input_ids_split = torch.split(input_ids, micro_batch_size, dim=0)
+        attention_mask_split = (
+            torch.split(attention_mask, micro_batch_size, dim=0) if
+            attention_mask is not None else [None for _ in range(num_splits)])
     else:
+        max_inputs_length = get_longest_list_length(input_ids)
         input_ids_split = [
             input_ids[i:i + micro_batch_size]
             for i in range(0, len(input_ids), micro_batch_size)
         ]
-    attention_mask_split = (
-        torch.split(attention_mask, micro_batch_size, dim=0)
-        if attention_mask is not None else [None for _ in range(num_splits)])
+        attention_mask_split = [
+            attention_mask[i:i + micro_batch_size] if attention_mask
+            is not None else [None for _ in range(num_splits)] for i in range(
+                0,
+                len(attention_mask
+                    ) if attention_mask is not None else num_splits *
+                micro_batch_size, micro_batch_size)
+        ]
     position_ids_split = (
         torch.split(position_ids, micro_batch_size, dim=0)
         if position_ids is not None else [None for _ in range(num_splits)])
@@ -79,6 +89,7 @@ def partition_by_micro_batch_size(
         micro_batch['attention_mask'] = attention_mask_split[i]
         micro_batch['position_ids'] = position_ids_split[i]
         micro_batch['labels'] = labels_split[i]
+        micro_batch['max_inputs_length'] = max_inputs_length
         micro_batches.append(micro_batch)
     return micro_batches
 
@@ -172,3 +183,12 @@ def get_answer_str(
         clean_up_tokenization_spaces=False,
     )
     return answer_str
+
+
+def get_longest_list_length(list_of_lists):
+    max_length = 0
+    for int_list in list_of_lists:
+        current_length = len(int_list)
+        if current_length > max_length:
+            max_length = current_length
+    return max_length

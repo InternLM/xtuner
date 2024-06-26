@@ -103,6 +103,7 @@ class VllmGenerator:
     def generate(
         self,
         inputs: Union[torch.Tensor, str, list[str]],
+        max_inputs_length: int,
         step=-1,
         output_str=True,
         output_logits=False,
@@ -149,16 +150,6 @@ class VllmGenerator:
         req_outputs = self.llm.generate(
             prompt_token_ids=prompt, sampling_params=sp)
 
-        def get_longest_list_length(list_of_lists):
-            max_length = 0
-            for int_list in list_of_lists:
-                current_length = len(int_list)
-                if current_length > max_length:
-                    max_length = current_length
-            return max_length
-
-        _max_length = get_longest_list_length(prompt)
-
         def pad_list_with_pad_token(int_list, max_length, pad_token_id):
             if len(int_list) < max_length:
                 num_pad_token_to_add = max_length - len(int_list)
@@ -171,7 +162,7 @@ class VllmGenerator:
         for _, req_output in enumerate(req_outputs):
             output = PolicyOutput()
             input_ids = [item for item in req_output.prompt_token_ids]
-            input_ids = pad_list_with_pad_token(input_ids, _max_length,
+            input_ids = pad_list_with_pad_token(input_ids, max_inputs_length,
                                                 self.tokenizer.pad_token_id)
             output_token_ids = [
                 item for item in req_output.outputs[0].token_ids
@@ -191,8 +182,8 @@ class VllmGenerator:
                 )
             output[
                 'attention_mask'] = output.question_mask + output.answer_mask  # noqa: E501
-            output['action_mask'] = output['attention_mask'][:, _max_length -
-                                                             1:-1]
+            output['action_mask'] = output[
+                'attention_mask'][:, max_inputs_length - 1:-1]
             if output_logits:
                 raise NotImplementedError('TODO: output_logits')
             if output_attentions:
@@ -310,6 +301,7 @@ class VllmGeneratorRayActorGroup(RayActorGroup):
         return [
             self.ray_actors[index].generate.remote(
                 inputs=micro_batch['input_ids'],
+                max_inputs_length=micro_batch['max_inputs_length'],
                 attention_mask=micro_batch['attention_mask'],
                 *args,
                 **kwargs,
