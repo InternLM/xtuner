@@ -28,7 +28,13 @@ class InfiniteDataset(IterableDataset):
     """Load infinite data from original dataset with shuffle."""
 
     def __init__(self, dataset, rng=None):
-        self.data = list(iter(dataset))
+        logger.info(f'init [InfiniteDataset] for {dataset} ...')
+        self.data = list(
+            iter(dataset)) if dataset.data_list is None else dataset.data_list
+        self.tokenizer = dataset.tokenizer
+        self.sys_prompt = dataset.sys_prompt
+        self.rm_prompt = dataset.rm_prompt
+
         self.indices = list(range(len(self.data)))
         if rng is None:
             rng = random.Random()
@@ -38,7 +44,20 @@ class InfiniteDataset(IterableDataset):
         while True:
             self.rng.shuffle(self.indices)
             for i in self.indices:
-                yield self.data[i]
+                if isinstance(self.data[i], dict):
+                    yield self.data[i]
+                elif isinstance(self.data[i], list):
+                    try:
+                        self.tokenizer.apply_chat_template(
+                            self.data[i], tokenize=True)
+                    except Exception:
+                        logger.info('[data tokenize check] '
+                                    f'skip dirty data: {self.data[i]}')
+                        continue
+                    yield dict(
+                        data=self.data[i],
+                        sys_prompt=self.sys_prompt,
+                        rm_prompt=self.rm_prompt)
 
 
 class IterDataset(IterableDataset):
@@ -66,8 +85,6 @@ class IterDataset(IterableDataset):
                     logger.info(
                         f'[data tokenize check] skip dirty data: {data}')
                     continue
-                if data is None:
-                    continue
                 yield dict(
                     data=data,
                     sys_prompt=self.sys_prompt,
@@ -81,8 +98,6 @@ class IterDataset(IterableDataset):
                     except Exception:
                         logger.info(
                             f'[data tokenize check] skip dirty data: {data}')
-                        continue
-                    if data is None:
                         continue
                     yield dict(
                         data=data,
@@ -130,6 +145,7 @@ class MultiSourceInBatchDatset(IterableDataset):
                 logger.info(f'Loading {hf_dir} from huggingface ...')
                 dataset = load_from_hf(hf_dir, tokenizer=tokenizer)
                 task['dataset'] = IterDataset(
+                    filename=hf_dir,
                     data_list=dataset['conversation'],
                     tokenizer=tokenizer,
                     sys_prompt=task['sys_prompt'],
@@ -257,6 +273,7 @@ class MultiSourceInDataDatset(Dataset):
                 logger.info(f'Loading {hf_dir} with huggingface format ...')
                 dataset = load_from_hf(hf_dir, tokenizer=tokenizer)
                 task['dataset'] = JsonDataset(
+                    filename=hf_dir,
                     data_list=dataset['conversation'],
                     tokenizer=tokenizer,
                     sys_prompt=task['sys_prompt'],
