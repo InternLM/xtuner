@@ -40,6 +40,8 @@ def partition_by_micro_batch_size(
     labels: Optional[Union[list[torch.Tensor], torch.Tensor,
                            dict[str, torch.Tensor]]] = None,
 ) -> list[dict[str, torch.Tensor]]:
+    max_inputs_length = get_longest_list_length(input_ids) if isinstance(
+        input_ids, list) else None
     micro_batches: list[dict[str, torch.Tensor]] = []
     batch_size = input_ids.shape[0] if isinstance(
         input_ids, torch.Tensor) else len(input_ids)
@@ -49,6 +51,7 @@ def partition_by_micro_batch_size(
         micro_batch['attention_mask'] = attention_mask
         micro_batch['position_ids'] = position_ids
         micro_batch['labels'] = labels
+        micro_batch['max_inputs_length'] = max_inputs_length
         micro_batches.append(micro_batch)
         return micro_batches
     if micro_batch_size > batch_size:
@@ -56,14 +59,12 @@ def partition_by_micro_batch_size(
 
     num_splits = int(batch_size // micro_batch_size) + (
         batch_size % micro_batch_size > 0)
-    max_inputs_length = None
     if isinstance(input_ids, torch.Tensor):
         input_ids_split = torch.split(input_ids, micro_batch_size, dim=0)
         attention_mask_split = (
             torch.split(attention_mask, micro_batch_size, dim=0) if
             attention_mask is not None else [None for _ in range(num_splits)])
     else:
-        max_inputs_length = get_longest_list_length(input_ids)
         input_ids_split = [
             input_ids[i:i + micro_batch_size]
             for i in range(0, len(input_ids), micro_batch_size)
