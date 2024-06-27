@@ -76,7 +76,7 @@ XTuner 已经集成好了将模型转换为 HuggingFace 格式的工具，我们
 mkdir work_dirs/internlm2_chat_1_8b_reward_full_ultrafeedback_copy/iter_15230_hf
 
 # 转换格式
-xtuner convert pth_to_hf internlm2_chat_1_8b_reward_full_ultrafeedback_copy.py.py \
+xtuner convert pth_to_hf internlm2_chat_1_8b_reward_full_ultrafeedback_copy.py \
                             work_dirs/internlm2_chat_1_8b_reward_full_ultrafeedback_copy.py/iter_15230.pth \
                             work_dirs/internlm2_chat_1_8b_reward_full_ultrafeedback_copy.py/iter_15230_hf
 ```
