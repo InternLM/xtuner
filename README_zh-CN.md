@@ -39,6 +39,8 @@
 
 ## 🎉 更新
 
+- **\[2024/07\]** 支持 [InternLM 2.5](xtuner/configs/internlm/internlm2_5_chat_7b/) 模型!
+- **\[2024/06\]** 支持 [DeepSeek V2](xtuner/configs/deepseek/deepseek_v2_chat/) models! **训练速度提升一倍！**
 - **\[2024/04\]** 多模态大模型 [LLaVA-Phi-3-mini](https://huggingface.co/xtuner/llava-phi-3-mini-hf) 发布！快速开始请查阅此[文档](xtuner/configs/llava/phi3_mini_4k_instruct_clip_vit_large_p14_336)！
 - **\[2024/04\]** 多模态大模型 [LLaVA-Llama-3-8B](https://huggingface.co/xtuner/llava-llama-3-8b) 和 [LLaVA-Llama-3-8B-v1.1](https://huggingface.co/xtuner/llava-llama-3-8b-v1_1) 发布！快速开始请查阅此[文档](xtuner/configs/llava/llama3_8b_instruct_clip_vit_large_p14_336)！
 - **\[2024/04\]** 支持 [Llama 3](xtuner/configs/llama) 模型！
@@ -100,16 +102,15 @@ XTuner 是一个高效、灵活、全能的轻量化大模型微调工具库。
 <tr valign="top">
 <td align="left" valign="top">
 <ul>
-  <li><a href="https://huggingface.co/internlm">InternLM2</a></li>
-  <li><a href="https://huggingface.co/meta-llama">Llama 3</a></li>
-  <li><a href="https://huggingface.co/meta-llama">Llama 2</a></li>
+  <li><a href="https://huggingface.co/internlm">InternLM 2 / 2.5</a></li>
+  <li><a href="https://huggingface.co/meta-llama">Llama 2 / 3</a></li>
   <li><a href="https://huggingface.co/collections/microsoft/phi-3-6626e15e9585a200d2d761e3">Phi-3</a></li>
   <li><a href="https://huggingface.co/THUDM/chatglm2-6b">ChatGLM2</a></li>
   <li><a href="https://huggingface.co/THUDM/chatglm3-6b">ChatGLM3</a></li>
   <li><a href="https://huggingface.co/Qwen/Qwen-7B">Qwen</a></li>
   <li><a href="https://huggingface.co/baichuan-inc/Baichuan2-7B-Base">Baichuan2</a></li>
-  <li><a href="https://huggingface.co/mistralai/Mixtral-8x7B-Instruct-v0.1">Mixtral 8x7B</a></li>
-  <li><a href="https://huggingface.co/deepseek-ai/deepseek-moe-16b-chat">DeepSeek MoE</a></li>
+  <li><a href="https://huggingface.co/mistralai/Mixtral-8x7B-Instruct-v0.1">Mixtral</a></li>
+  <li><a href="https://huggingface.co/deepseek-ai/DeepSeek-V2-Chat">DeepSeek V2</a></li>
   <li><a href="https://huggingface.co/google">Gemma</a></li>
   <li>...</li>
 </ul>
@@ -203,14 +204,14 @@ XTuner 支持微调大语言模型。数据集预处理指南请查阅[文档](.
   xtuner train ${CONFIG_NAME_OR_PATH}
   ```
 
-  例如，我们可以利用 QLoRA 算法在 oasst1 数据集上微调 InternLM2-Chat-7B：
+  例如，我们可以利用 QLoRA 算法在 oasst1 数据集上微调 InternLM2.5-Chat-7B：
 
   ```shell
   # 单卡
-  xtuner train internlm2_chat_7b_qlora_oasst1_e3 --deepspeed deepspeed_zero2
+  xtuner train internlm2_5_chat_7b_qlora_oasst1_e3 --deepspeed deepspeed_zero2
   # 多卡
-  (DIST) NPROC_PER_NODE=${GPU_NUM} xtuner train internlm2_chat_7b_qlora_oasst1_e3 --deepspeed deepspeed_zero2
-  (SLURM) srun ${SRUN_ARGS} xtuner train internlm2_chat_7b_qlora_oasst1_e3 --launcher slurm --deepspeed deepspeed_zero2
+  (DIST) NPROC_PER_NODE=${GPU_NUM} xtuner train internlm2_5_chat_7b_qlora_oasst1_e3 --deepspeed deepspeed_zero2
+  (SLURM) srun ${SRUN_ARGS} xtuner train internlm2_5_chat_7b_qlora_oasst1_e3 --launcher slurm --deepspeed deepspeed_zero2
   ```
 
   - `--deepspeed` 表示使用 [DeepSpeed](https://github.com/microsoft/DeepSpeed) 🚀 来优化训练过程。XTuner 内置了多种策略，包括 ZeRO-1、ZeRO-2、ZeRO-3 等。如果用户期望关闭此功能，请直接移除此参数。
@@ -233,16 +234,10 @@ xtuner chat ${NAME_OR_PATH_TO_LLM} --adapter {NAME_OR_PATH_TO_ADAPTER} [optional
 
 例如：
 
-与 InternLM2-Chat-7B, oasst1 adapter 对话：
+与 InternLM2.5-Chat-7B 对话：
 
 ```shell
-xtuner chat internlm/internlm2-chat-7b --adapter xtuner/internlm2-chat-7b-qlora-oasst1 --prompt-template internlm2_chat
-```
-
-与 LLaVA-InternLM2-7B 对话：
-
-```shell
-xtuner chat internlm/internlm2-chat-7b --visual-encoder openai/clip-vit-large-patch14-336 --llava xtuner/llava-internlm2-7b --prompt-template internlm2_chat --image $IMAGE_PATH
+xtuner chat internlm/internlm2-chat-7b --prompt-template internlm2_chat
 ```
 
 更多示例，请查阅[文档](./docs/zh_cn/user_guides/chat.md)。

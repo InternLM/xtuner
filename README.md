@@ -39,6 +39,8 @@ English | [简体中文](README_zh-CN.md)
 
 ## 🎉 News
 
+- **\[2024/07\]** Support [InternLM 2.5](xtuner/configs/internlm/internlm2_5_chat_7b/) models!
+- **\[2024/06\]** Support [DeepSeek V2](xtuner/configs/deepseek/deepseek_v2_chat/) models! **2x faster!**
 - **\[2024/04\]** [LLaVA-Phi-3-mini](https://huggingface.co/xtuner/llava-phi-3-mini-hf) is released! Click [here](xtuner/configs/llava/phi3_mini_4k_instruct_clip_vit_large_p14_336) for details!
 - **\[2024/04\]** [LLaVA-Llama-3-8B](https://huggingface.co/xtuner/llava-llama-3-8b) and [LLaVA-Llama-3-8B-v1.1](https://huggingface.co/xtuner/llava-llama-3-8b-v1_1) are released! Click [here](xtuner/configs/llava/llama3_8b_instruct_clip_vit_large_p14_336) for details!
 - **\[2024/04\]** Support [Llama 3](xtuner/configs/llama) models!
@@ -100,16 +102,15 @@ XTuner is an efficient, flexible and full-featured toolkit for fine-tuning large
 <tr valign="top">
 <td align="left" valign="top">
 <ul>
-  <li><a href="https://huggingface.co/internlm">InternLM2</a></li>
-  <li><a href="https://huggingface.co/meta-llama">Llama 3</a></li>
-  <li><a href="https://huggingface.co/meta-llama">Llama 2</a></li>
+  <li><a href="https://huggingface.co/internlm">InternLM2 / 2.5</a></li>
+  <li><a href="https://huggingface.co/meta-llama">Llama 2 / 3</a></li>
   <li><a href="https://huggingface.co/collections/microsoft/phi-3-6626e15e9585a200d2d761e3">Phi-3</a></li>
   <li><a href="https://huggingface.co/THUDM/chatglm2-6b">ChatGLM2</a></li>
   <li><a href="https://huggingface.co/THUDM/chatglm3-6b">ChatGLM3</a></li>
   <li><a href="https://huggingface.co/Qwen/Qwen-7B">Qwen</a></li>
   <li><a href="https://huggingface.co/baichuan-inc/Baichuan2-7B-Base">Baichuan2</a></li>
-  <li><a href="https://huggingface.co/mistralai/Mixtral-8x7B-Instruct-v0.1">Mixtral 8x7B</a></li>
-  <li><a href="https://huggingface.co/deepseek-ai/deepseek-moe-16b-chat">DeepSeek MoE</a></li>
+  <li><a href="https://huggingface.co/mistralai/Mixtral-8x7B-Instruct-v0.1">Mixtral</a></li>
+  <li><a href="https://huggingface.co/deepseek-ai/DeepSeek-V2-Chat">DeepSeek V2</a></li>
   <li><a href="https://huggingface.co/google">Gemma</a></li>
   <li>...</li>
 </ul>
@@ -203,14 +204,14 @@ XTuner supports the efficient fine-tune (*e.g.*, QLoRA) for LLMs. Dataset prepar
   xtuner train ${CONFIG_NAME_OR_PATH}
   ```
 
-  For example, we can start the QLoRA fine-tuning of InternLM2-Chat-7B with oasst1 dataset by
+  For example, we can start the QLoRA fine-tuning of InternLM2.5-Chat-7B with oasst1 dataset by
 
   ```shell
   # On a single GPU
-  xtuner train internlm2_chat_7b_qlora_oasst1_e3 --deepspeed deepspeed_zero2
+  xtuner train internlm2_5_chat_7b_qlora_oasst1_e3 --deepspeed deepspeed_zero2
   # On multiple GPUs
-  (DIST) NPROC_PER_NODE=${GPU_NUM} xtuner train internlm2_chat_7b_qlora_oasst1_e3 --deepspeed deepspeed_zero2
-  (SLURM) srun ${SRUN_ARGS} xtuner train internlm2_chat_7b_qlora_oasst1_e3 --launcher slurm --deepspeed deepspeed_zero2
+  (DIST) NPROC_PER_NODE=${GPU_NUM} xtuner train internlm2_5_chat_7b_qlora_oasst1_e3 --deepspeed deepspeed_zero2
+  (SLURM) srun ${SRUN_ARGS} xtuner train internlm2_5_chat_7b_qlora_oasst1_e3 --launcher slurm --deepspeed deepspeed_zero2
   ```
 
   - `--deepspeed` means using [DeepSpeed](https://github.com/microsoft/DeepSpeed) 🚀 to optimize the training. XTuner comes with several integrated strategies including ZeRO-1, ZeRO-2, and ZeRO-3. If you wish to disable this feature, simply remove this argument.
@@ -231,18 +232,10 @@ XTuner provides tools to chat with pretrained / fine-tuned LLMs.
 xtuner chat ${NAME_OR_PATH_TO_LLM} --adapter {NAME_OR_PATH_TO_ADAPTER} [optional arguments]
 ```
 
-For example, we can start the chat with
-
-InternLM2-Chat-7B with adapter trained from oasst1 dataset:
+For example, we can start the chat with InternLM2.5-Chat-7B :
 
 ```shell
-xtuner chat internlm/internlm2-chat-7b --adapter xtuner/internlm2-chat-7b-qlora-oasst1 --prompt-template internlm2_chat
-```
-
-LLaVA-InternLM2-7B:
-
-```shell
-xtuner chat internlm/internlm2-chat-7b --visual-encoder openai/clip-vit-large-patch14-336 --llava xtuner/llava-internlm2-7b --prompt-template internlm2_chat --image $IMAGE_PATH
+xtuner chat internlm/internlm2_5-chat-7b --prompt-template internlm2_chat
 ```
 
 For more examples, please see [chat.md](./docs/en/user_guides/chat.md).
