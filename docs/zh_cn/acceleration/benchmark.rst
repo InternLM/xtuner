@@ -79,7 +79,7 @@
     - 176.9
     - `llama2_7b_full_alpaca_enzh_256k_sp8.py <https://github.com/InternLM/xtuner/tree/main/xtuner/configs/llama_speed_benchmark/llama2_7b/llama2_7b_full_alpaca_enzh_256k_sp8.py>`_
   * - Llama2-7B
-    - 8
+    - 32
     - 1M
     - 133.6
     - 153.9
