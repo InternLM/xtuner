@@ -258,10 +258,11 @@ def dispatch_modules(model, use_varlen_attn=False):
             # a walkaround for reward model
             model_name = model_name[:-5] + 'ForCausalLM'
         msg = '{} requires transformers version at least {}, but got {}'
-        assert TRANSFORMERS_VERSION >= LOWEST_TRANSFORMERS_VERSION[
-            model_name], msg.format(model_name,
-                                    LOWEST_TRANSFORMERS_VERSION[model_name],
-                                    TRANSFORMERS_VERSION)
+        if model_name in LOWEST_TRANSFORMERS_VERSION:
+            assert TRANSFORMERS_VERSION >= LOWEST_TRANSFORMERS_VERSION[
+                model_name], msg.format(
+                    model_name, LOWEST_TRANSFORMERS_VERSION[model_name],
+                    TRANSFORMERS_VERSION)
 
     check(type(model).__name__)
     if use_varlen_attn:
