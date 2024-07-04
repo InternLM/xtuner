@@ -18,7 +18,7 @@ from transformers import AutoConfig, AutoTokenizer
 from xtuner.utils import IGNORE_INDEX
 
 
-# refer from InternVL
+# Referenced from InternVL
 def find_closest_aspect_ratio(aspect_ratio, target_ratios, width, height,
                               image_size):
     best_ratio_diff = float('inf')
