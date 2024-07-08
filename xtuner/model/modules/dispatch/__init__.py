@@ -228,14 +228,14 @@ def replace_rote(model):
     from mmengine import print_log
     print_log = log_once(print_log)
 
-    assert hasattr(model.config, 'rope_theta'), \
-        '`rope_theta` should be in the model config.'
-    rope_theta = model.config.rope_theta
-
     def traverse(module):
         for name, child in module.named_children():
             cls_name = type(child).__name__
             if cls_name in ROTE_DISPATCH_MAPPING:
+                assert hasattr(model.config, 'rope_theta'), \
+                    '`rope_theta` should be in the model config.'
+                rope_theta = model.config.rope_theta
+
                 rote = ROTE_DISPATCH_MAPPING[cls_name]
                 rote = rote.build()
                 print_log(f'replace {cls_name}', 'current')
