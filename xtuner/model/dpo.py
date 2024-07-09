@@ -17,6 +17,7 @@ from .sft import SupervisedFinetune
 
 
 def disable_grad(model):
+    # freeze parameters
     parameter_names = [n for n, _ in model.named_parameters()]
     for param_name in parameter_names:
         param = model.get_parameter(param_name)
