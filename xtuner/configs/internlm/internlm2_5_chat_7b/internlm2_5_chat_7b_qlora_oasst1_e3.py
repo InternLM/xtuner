@@ -1,18 +1,4 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-"""Data format:
-
-[{
-    "messages": [
-        { "role": "system", "content": "xxx." },
-        { "role": "user", "content": "xxx." },
-        { "role": "assistant", "content": "xxx.", "loss": false},
-        { "role": "user", "content": "xxx." },
-        { "role": "assistant", "content": "xxx.", "loss": true}
-    ]
-},
-...
-]
-"""  # noqa: E501
 import torch
 from datasets import load_dataset
 from mmengine.dataset import DefaultSampler
@@ -26,31 +12,36 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer,
 
 from xtuner.dataset import process_hf_dataset
 from xtuner.dataset.collate_fns import default_collate_fn
-from xtuner.dataset.map_fns import openai_map_fn, template_map_fn_factory
+from xtuner.dataset.map_fns import oasst1_map_fn, template_map_fn_factory
 from xtuner.engine.hooks import (DatasetInfoHook, EvaluateChatHook,
                                  VarlenAttnArgsToMessageHubHook)
 from xtuner.engine.runner import TrainLoop
 from xtuner.model import SupervisedFinetune
+from xtuner.parallel.sequence import SequenceParallelSampler
 from xtuner.utils import PROMPT_TEMPLATE
 
 #######################################################################
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-pretrained_model_name_or_path = 'THUDM/chatglm2-6b'
+pretrained_model_name_or_path = 'internlm/internlm2_5-7b-chat'
 use_varlen_attn = False
 
 # Data
-data_files = ['/path/to/json/file.json']
-prompt_template = PROMPT_TEMPLATE.chatglm2
+data_path = 'timdettmers/openassistant-guanaco'
+prompt_template = PROMPT_TEMPLATE.internlm2_chat
 max_length = 2048
 pack_to_max_length = True
 
+# parallel
+sequence_parallel_size = 1
+
 # Scheduler & Optimizer
 batch_size = 1  # per_device
-accumulative_counts = 16  # bs = 1 GPU * 1 batch_size_per_device * 16 acc
+accumulative_counts = 16
+accumulative_counts *= sequence_parallel_size
 dataloader_num_workers = 0
-max_epochs = 1
+max_epochs = 3
 optim_type = AdamW
 lr = 2e-4
 betas = (0.9, 0.999)
@@ -76,7 +67,7 @@ tokenizer = dict(
     type=AutoTokenizer.from_pretrained,
     pretrained_model_name_or_path=pretrained_model_name_or_path,
     trust_remote_code=True,
-    padding_side='left')
+    padding_side='right')
 
 model = dict(
     type=SupervisedFinetune,
@@ -108,10 +99,10 @@ model = dict(
 #######################################################################
 train_dataset = dict(
     type=process_hf_dataset,
-    dataset=dict(type=load_dataset, path='json', data_files=data_files),
+    dataset=dict(type=load_dataset, path=data_path),
     tokenizer=tokenizer,
     max_length=max_length,
-    dataset_map_fn=openai_map_fn,
+    dataset_map_fn=oasst1_map_fn,
     template_map_fn=dict(
         type=template_map_fn_factory, template=prompt_template),
     remove_unused_columns=True,
@@ -119,11 +110,13 @@ train_dataset = dict(
     pack_to_max_length=pack_to_max_length,
     use_varlen_attn=use_varlen_attn)
 
+sampler = SequenceParallelSampler \
+    if sequence_parallel_size > 1 else DefaultSampler
 train_dataloader = dict(
     batch_size=batch_size,
     num_workers=dataloader_num_workers,
     dataset=train_dataset,
-    sampler=dict(type=DefaultSampler, shuffle=True),
+    sampler=dict(type=sampler, shuffle=True),
     collate_fn=dict(type=default_collate_fn, use_varlen_attn=use_varlen_attn))
 
 #######################################################################

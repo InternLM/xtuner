@@ -56,7 +56,6 @@ class DPO(SupervisedFinetune):
         else:
             self.ref_llm = None if self.use_lora else create_reference_model(self.llm)
 
-
     def _gather_masked_logits(self, logits, labels, mask):
         logits = torch.gather(
             logits.log_softmax(-1), dim=2,

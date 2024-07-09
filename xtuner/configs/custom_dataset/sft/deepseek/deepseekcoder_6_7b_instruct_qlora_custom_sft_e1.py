@@ -26,7 +26,7 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer,
 
 from xtuner.dataset import process_hf_dataset
 from xtuner.dataset.collate_fns import default_collate_fn
-from xtuner.dataset.map_fns import template_map_fn_factory
+from xtuner.dataset.map_fns import openai_map_fn, template_map_fn_factory
 from xtuner.engine.hooks import (DatasetInfoHook, EvaluateChatHook,
                                  VarlenAttnArgsToMessageHubHook)
 from xtuner.engine.runner import TrainLoop
@@ -115,7 +115,7 @@ train_dataset = dict(
     dataset=dict(type=load_dataset, path='json', data_files=data_files),
     tokenizer=tokenizer,
     max_length=max_length,
-    dataset_map_fn=None,
+    dataset_map_fn=openai_map_fn,
     template_map_fn=dict(
         type=template_map_fn_factory, template=prompt_template),
     remove_unused_columns=True,
