@@ -25,7 +25,8 @@ class DatasetInfoHook(Hook):
         self.is_intern_repo_dataset = is_intern_repo_dataset
 
     def log(self, runner, dataset, mode='train'):
-        def _log(input_ids, log_prefix=""):
+
+        def _log(input_ids, log_prefix=''):
             if self.is_intern_repo_dataset:
                 input_ids = [abs(x) for x in input_ids]
             # Try to split list to be compatible with IMAGE token
@@ -40,8 +41,8 @@ class DatasetInfoHook(Hook):
         runner.logger.info(f'Num {mode} samples {len(dataset)}')
         runner.logger.info(f'{mode} example:')
         if 'chosen_ids' in dataset[0]:
-            _log(dataset[0]['chosen_ids'], log_prefix="chosen: ")
-            _log(dataset[0]['rejected_ids'], log_prefix="rejected: ")
+            _log(dataset[0]['chosen_ids'], log_prefix='chosen: ')
+            _log(dataset[0]['rejected_ids'], log_prefix='rejected: ')
         else:
             _log(dataset[0]['input_ids'])
 
