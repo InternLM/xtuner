@@ -233,6 +233,11 @@ def phi3_attn_forward(
             pre_process_for_sequence_parallel_attn(
                 query_states, key_states, value_states,
                 scatter_dim=2, gather_dim=1)
+        # num_heads has been changed because of sequence parallel
+        # `self.num_heads`` is not used in self._flash_attention_forward
+        # in mistral/mixtral, we are doing this to avoid some unnecessary risk
+        ori_num_head = self.num_heads
+        self.num_heads = query_states.shape[-2]
 
     attn_output = self._flash_attention_forward(
         query_states,
@@ -248,6 +253,7 @@ def phi3_attn_forward(
         # (b, s, nd // sp_world_size, dim) -> (b, s // sp_world_size, nd, dim)
         attn_output = post_process_for_sequence_parallel_attn(
             attn_output, scatter_dim=1, gather_dim=2)
+        self.num_heads = ori_num_head
 
     attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
     attn_output = self.o_proj(attn_output)

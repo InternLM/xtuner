@@ -151,6 +151,11 @@ def qwen2_attn_forward(
         query_states, key_states, value_states = \
             pre_process_for_sequence_parallel_attn(
                 query_states, key_states, value_states)
+        # num_heads has been changed because of sequence parallel
+        # `self.num_heads`` is not used in self._flash_attention_forward
+        # in mistral/mixtral, we are doing this to avoid some unnecessary risk
+        ori_num_head = self.num_heads
+        self.num_heads = query_states.shape[-2]
 
     attn_output = self._flash_attention_forward(
         query_states,
@@ -164,6 +169,7 @@ def qwen2_attn_forward(
 
     if enable_sequence_parallel:
         attn_output = post_process_for_sequence_parallel_attn(attn_output)
+        self.num_heads = ori_num_head
 
     attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
     attn_output = self.o_proj(attn_output)
