@@ -234,10 +234,17 @@ def _internlm2_varlen_attn_forward(
             'https://github.com/huggingface/transformers')
 
     bsz, q_len, _ = hidden_states.size()
-    attn_context = MessageHub.get_instance('varlen_attention_context')
+    attn_context = MessageHub.get_instance('packed_sequence')
+    
+    num_tokens = attn_context.get_info('num_tokens')
+    if num_tokens is not None:
+        position_ids = [torch.arange(num.item()) for num in num_tokens]
+        position_ids = torch.cat(position_ids, dim=0).to(hidden_states.device)
+        position_ids = position_ids.unsqueeze(0)
+        assert position_ids.size(1) == q_len
 
-    assert bsz == 1, (f'If utilizing local attention, the batch size should be'
-                      f' set to 1, but got {bsz}')
+    # assert bsz == 1, (f'If utilizing local attention, the batch size should be'
+    #                   f' set to 1, but got {bsz}')
 
     qkv_states = self.wqkv(hidden_states)
 
@@ -253,7 +260,8 @@ def _internlm2_varlen_attn_forward(
     key_states = qkv_states[..., -2, :]
     value_states = qkv_states[..., -1, :]
 
-    chunk_lengths = attn_context.get_info('chunk_sizes')
+    
+        
     query_states = query_states.transpose(1, 2)
     key_states = key_states.transpose(1, 2)
     value_states = value_states.transpose(1, 2)
@@ -309,25 +317,22 @@ def _internlm2_varlen_attn_forward(
     value_states = repeat_kv_bshd(value_states, self.num_key_value_groups)
 
     assert SUPPORT_FLASH2
-
-    attn_context = MessageHub.get_instance('varlen_attention_context')
-    chunk_lengths = attn_context.get_info('chunk_sizes')
-    assert chunk_lengths is not None
-    if chunk_lengths is not None and SUPPORT_FLASH2 and bsz == 1:
-        _zero_length = torch.zeros(1, device=chunk_lengths.device)
-        _pad_length = torch.cat([_zero_length, chunk_lengths]).int()
+    # breakpoint()
+    if num_tokens is not None and SUPPORT_FLASH2 and bsz == 1:
+        _zero_length = torch.zeros(1, device=num_tokens.device)
+        _pad_length = torch.cat([_zero_length, num_tokens]).int()
         cumulative_lengths = torch.cumsum(_pad_length, 0).int()
 
         attn_output = varlen_flash_attn(query_states, key_states,
                                         value_states, cumulative_lengths,
-                                        chunk_lengths.max())
+                                        num_tokens.max())
     else:
         attn_output = flash_attn_wo_mask(
             query_states,
             key_states,
             value_states,
             causal=True,
-            training=False)
+            training=self.training)
 
     attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
 

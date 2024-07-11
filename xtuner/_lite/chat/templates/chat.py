@@ -13,6 +13,7 @@ class ChatTemplate(BaseModel):
     user: str  # User message format
     assistant: str  # Assistant message format
     stop_words: List[str]  # List of stop words
+    sep: str = '\n'
 
     def decorate_system(self, text: str) -> str:
         """Decorate text with the `system` template."""

@@ -41,6 +41,7 @@ class ParallelSampler(Sampler):
         self,
         dataset: Sized,
         dp_mesh: DeviceMesh,
+        global_batch_size: int,
         shuffle: bool = True,
         seed: Optional[int] = None,
         round_up: bool = True,
@@ -48,6 +49,8 @@ class ParallelSampler(Sampler):
         rank = dp_mesh.get_local_rank()
         world_size = dp_mesh.size()
 
+        assert global_batch_size % world_size == 0
+        self.global_batch_size = global_batch_size
         self.rank = rank
         self.world_size = world_size
 
@@ -61,7 +64,7 @@ class ParallelSampler(Sampler):
         self.round_up = round_up
 
         if self.round_up:
-            self.num_samples = math.ceil(len(self.dataset) / world_size)
+            self.num_samples = math.ceil(len(self.dataset) / global_batch_size) * global_batch_size // world_size
             self.total_size = self.num_samples * self.world_size
         else:
             self.num_samples = math.ceil(

@@ -1,18 +1,37 @@
 import copy
-from typing import Dict, List, Literal, Optional
+from typing import Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel
 from transformers import PreTrainedTokenizer
 
 from xtuner.utils import IGNORE_INDEX
-from ..templates import ChatTemplate
+from ..templates import ChatTemplate, HybridChatTemplate
 from .base import BaseMessages
 
+
+
+class TextContentItem(BaseModel):
+    type: Literal['text'] = 'text'
+    text: str
+
+    def apply_chat_template(self, chat_template: HybridChatTemplate) -> str:
+        return self.text
+
+
+class ImageContentItem(BaseModel):
+    type: Literal['image_url'] = 'image_url'
+    image_url: str
+
+    def apply_chat_template(self, chat_template: HybridChatTemplate) -> str:
+        return chat_template.image_token
+
+MultModalContentType = Union[TextContentItem, ImageContentItem]
+ContentType = Union[str, List[MultModalContentType]]
 
 class ChatMsg(BaseModel):
 
     role: Literal['assistant', 'user', 'system']
-    content: str
+    content: ContentType
     loss: Optional[bool] = None
 
     def __init__(self, *args, **kwargs):
@@ -26,11 +45,26 @@ class ChatMsg(BaseModel):
                 self.loss = True
             else:
                 raise NotImplementedError
+            
+    def collect_img_urls(self) -> List[str]:
+        img_urls = []
+        if isinstance(self.content, list):
+            for item in self.content:
+                if isinstance(item, ImageContentItem):
+                    img_urls.append(item.image_url)
+        return img_urls
 
     def get_prompt(self, chat_template: ChatTemplate) -> str:
 
         if isinstance(self.content, str):
             text = self.content
+        elif isinstance(self.content, list):
+            text = ''
+            for i, item in enumerate(self.content):
+                if i == 0:
+                    text += item.apply_chat_template(chat_template)
+                else:
+                    text += '\n' + item.apply_chat_template(chat_template)
         else:
             raise NotImplementedError
 
@@ -39,7 +73,7 @@ class ChatMsg(BaseModel):
         elif self.role == 'user':
             prompt = chat_template.decorate_user(text)
         elif self.role == 'assistant':
-            prompt = chat_template.decorate_assistant(text)
+            prompt = chat_template.decorate_assistant(text) 
         else:
             raise NotImplementedError
 
@@ -59,7 +93,7 @@ class ChatMsg(BaseModel):
             label_ids = copy.deepcopy(token_ids)
         else:
             label_ids = [IGNORE_INDEX] * len(token_ids)
-
+        
         return {
             'input_ids': token_ids,
             'labels': label_ids,
@@ -82,14 +116,16 @@ class ChatMessages(BaseMessages):
 
         for msg in self.messages:
             prompt += msg.get_prompt(chat_template)
-
+            if msg.role == 'assistant':
+                prompt += chat_template.sep
         return prompt
 
     def tokenize(self, tokenizer: PreTrainedTokenizer,
                  chat_template: ChatTemplate) -> Dict:
-
+        
         input_ids = []
         labels = []
+        image_urls = []
         # TODO(pppppM) replace with get_bos_token_id
         bos_token_ids = [tokenizer.bos_token_id]
         input_ids.extend(bos_token_ids)
@@ -101,14 +137,31 @@ class ChatMessages(BaseMessages):
 
             input_ids.extend(token_ids)
             labels.extend(label_ids)
-            # TODO (pppppM) Verify whether sep and suffix_as_eos are necessary
-
+            
+            image_urls.extend(msg.collect_img_urls())
+            
+            if msg.role == 'assistant':
+                sep = chat_template.sep
+                sep_tokens = tokenizer.encode(sep, add_special_tokens=False)
+                input_ids.extend(sep_tokens)
+                labels.extend([IGNORE_INDEX] * len(sep_tokens))
+            
         training_data = {
             'input_ids': input_ids,
             'labels': labels,
-            'num_tokens': len(input_ids)
+            'num_tokens': len(input_ids),
         }
+        
+        if len(image_urls)>0:
+            training_data['image_urls'] = image_urls
+            
         return training_data
+
+    @classmethod
+    def from_str(cls, prompt: str) -> 'ChatMessages':
+
+        msg = ChatMsg(role='user', content=prompt)
+        return cls(messages=[msg])
 
     @classmethod
     def from_str(cls, prompt: str) -> 'ChatMessages':
@@ -137,6 +190,27 @@ class ChatMessages(BaseMessages):
             assert 'role' in _msg and 'content' in _msg
             _role = _msg['role']
             _content = _msg['content']
+            
+            if isinstance(_content, list):
+
+                content = []
+                for c_item in _content:
+                    assert 'type' in c_item
+                    _type = c_item['type']
+                    if _type == 'text':
+                        assert 'text' in c_item
+                        _text = c_item['text']
+                        content.append(TextContentItem(type=_type, text=_text))
+                    elif _type == 'image_url':
+                        assert 'image_url' in c_item
+                        _url = c_item['image_url']
+                        content.append(
+                            ImageContentItem(type=_type, image_url=_url))
+                    else:
+                        raise NotImplementedError
+            else:
+                content = _content
+                
             if 'loss' in _msg:
                 _loss = _msg['loss']
                 msg = ChatMsg(role=_role, content=_content, loss=_loss)
