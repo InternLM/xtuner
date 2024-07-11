@@ -56,8 +56,8 @@ def default_collate_fn(instances: Sequence[Dict],
         # Some tokenizers have the same eos token and pad token, so input_ids
         # cannot be masked directly based on the pad token id.
         attention_mask = torch.zeros_like(input_ids).bool()
-        for i in ori_length:
-            attention_mask[:i] = True
+        for i, length in enumerate(ori_length):
+            attention_mask[i, :length] = True
 
         bs, seq_len = input_ids.shape
         position_ids = torch.arange(seq_len).unsqueeze(0).long().repeat(bs, 1)
