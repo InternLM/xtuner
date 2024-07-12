@@ -339,7 +339,7 @@ def phi3_varlen_attn_forward(
                                                        self.layer_idx)
 
     assert position_ids is not None
-    rotary_seq_len = max(kv_seq_len, position_ids[:, -1].max().item()) + 1
+    rotary_seq_len = max(kv_seq_len, position_ids.max().item() + 1)
     cos, sin = self.rotary_emb(
         value_states, position_ids, seq_len=rotary_seq_len)
 
