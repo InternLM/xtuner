@@ -1,3 +1,4 @@
+# Copyright (c) LLaST. All rights reserved.
 # Copyright (c) OpenMMLab. All rights reserved.
 from collections import OrderedDict
 
