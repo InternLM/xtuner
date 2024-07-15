@@ -1,11 +1,13 @@
 from contextlib import contextmanager
+
 import torch
+
 
 @contextmanager
 def packed_sequence(num_tokens, enable=False):
     from mmengine import MessageHub
     ctx = MessageHub.get_instance('packed_sequence')
-    
+
     if enable:
         device = num_tokens.device
         _zero_length = torch.zeros(1, device=device)
@@ -17,14 +19,14 @@ def packed_sequence(num_tokens, enable=False):
         ctx.update_info('num_tokens', num_tokens)
         ctx.update_info('position_ids', position_ids)
         ctx.update_info('cumulative_lengths', cumulative_lengths)
-        
+
     else:
         ctx.update_info('num_tokens', None)
         ctx.update_info('position_ids', None)
         ctx.update_info('cumulative_lengths', None)
 
     yield
-    
+
     ctx.update_info('num_tokens', None)
     ctx.update_info('position_ids', None)
     ctx.update_info('cumulative_lengths', None)

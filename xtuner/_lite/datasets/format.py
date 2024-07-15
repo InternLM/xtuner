@@ -1,5 +1,6 @@
-
 import re
+
+
 class Alpaca2Openai():
 
     @classmethod
@@ -44,8 +45,8 @@ class Alpaca2Openai():
                     },
                 ]
             }
-            
-            
+
+
 def llava_to_openai(data):
 
     image_token = '<image>'
@@ -71,7 +72,7 @@ def llava_to_openai(data):
             for chunk in chunks:
                 if chunk == image_token:
                     if not isinstance(image_url, str):
-                        raise TypeError( data )
+                        raise TypeError(data)
                     # assert , image_url
                     item = dict(type='image_url', image_url=image_url)
                     img_content.append(item)
@@ -87,11 +88,12 @@ def llava_to_openai(data):
             messages.append(msg)
         else:
             raise NotImplementedError
-        
+
     return {'messages': messages}
+
 
 OPENAI_FORMAT_MAP = {
     'llava': llava_to_openai,
-    'alpaca': Alpaca2Openai,
+    'alpaca': Alpaca2Openai.convert,
     'openai': lambda x: x,
 }

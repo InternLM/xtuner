@@ -1,9 +1,12 @@
-from transformers import CLIPVisionModel
-import torch
 from typing import Optional, Tuple
+
+import torch
 from torch import nn
 from torch.nn import functional as F
+from transformers import CLIPVisionModel
+
 from ._attention import flash_attn_wo_mask
+
 
 def clip_flash_attn_forward(
     self,
@@ -11,23 +14,25 @@ def clip_flash_attn_forward(
     attention_mask: Optional[torch.Tensor] = None,
     causal_attention_mask: Optional[torch.Tensor] = None,
     output_attentions: Optional[bool] = False,
-) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-    """Input shape: Batch x Time x Channel"""
+) -> Tuple[torch.Tensor, Optional[torch.Tensor],
+           Optional[Tuple[torch.Tensor]]]:
+    """Input shape: Batch x Time x Channel."""
 
     bsz, tgt_len, embed_dim = hidden_states.size()
 
     # get query proj
-    query_states = self.q_proj(hidden_states).view(bsz, tgt_len, self.num_heads, -1) 
-    key_states = self.k_proj(hidden_states).view(bsz, tgt_len, self.num_heads, -1) 
-    value_states = self.v_proj(hidden_states).view(bsz, tgt_len, self.num_heads, -1) 
+    query_states = self.q_proj(hidden_states).view(bsz, tgt_len,
+                                                   self.num_heads, -1)
+    key_states = self.k_proj(hidden_states).view(bsz, tgt_len, self.num_heads,
+                                                 -1)
+    value_states = self.v_proj(hidden_states).view(bsz, tgt_len,
+                                                   self.num_heads, -1)
 
     # proj_shape = (bsz * self.num_heads, -1, self.head_dim)
     # query_states = self._shape(query_states, tgt_len, bsz).view(*proj_shape)
     # key_states = key_states.view(*proj_shape)
     # value_states = value_states.view(*proj_shape)
-    
-    
-    
+
     # src_len = key_states.size(1)
     # attn_weights = torch.bmm(query_states, key_states.transpose(1, 2))
 
@@ -82,10 +87,12 @@ def clip_flash_attn_forward(
     # attn_output = attn_output.reshape(bsz, tgt_len, embed_dim)
 
     attn_output = flash_attn_wo_mask(
-        query_states, key_states, value_states, 
+        query_states,
+        key_states,
+        value_states,
         self.dropout if self.training else 0,
         causal=causal_attention_mask is not None).view(bsz, tgt_len, embed_dim)
-    
+
     attn_output = self.out_proj(attn_output)
 
     return attn_output, None

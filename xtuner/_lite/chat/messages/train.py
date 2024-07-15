@@ -7,9 +7,8 @@ from pydantic import BaseModel
 from transformers.tokenization_utils import PreTrainedTokenizer
 
 from xtuner.utils import IGNORE_INDEX
-
-from .chat import (ChatMsg, ImageContentItem, TextContentItem)
 from ..templates import ChatTemplate, HybridChatTemplate
+from .chat import ChatMsg, ImageContentItem, TextContentItem
 
 
 class TrainingMsg(ChatMsg):
@@ -86,16 +85,8 @@ class TrainingMsg(ChatMsg):
         }
 
 
-
-
-
-
-
-
-
 class TrainingMessages(BaseModel):
     messages: List[TrainingMsg]
-    
 
     @classmethod
     def from_dict(cls, item) -> 'TrainingMessages':
@@ -142,7 +133,6 @@ class TrainingMessages(BaseModel):
                 msg = TrainingMsg(role=_role, content=content)
                 messages.append(msg)
                 continue
-
 
             if isinstance(_content, str):
                 msg = TrainingMsg(role=_role, content=_content)

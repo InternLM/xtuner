@@ -9,7 +9,6 @@ from ..templates import ChatTemplate, HybridChatTemplate
 from .base import BaseMessages
 
 
-
 class TextContentItem(BaseModel):
     type: Literal['text'] = 'text'
     text: str
@@ -25,8 +24,10 @@ class ImageContentItem(BaseModel):
     def apply_chat_template(self, chat_template: HybridChatTemplate) -> str:
         return chat_template.image_token
 
+
 MultModalContentType = Union[TextContentItem, ImageContentItem]
 ContentType = Union[str, List[MultModalContentType]]
+
 
 class ChatMsg(BaseModel):
 
@@ -45,7 +46,7 @@ class ChatMsg(BaseModel):
                 self.loss = True
             else:
                 raise NotImplementedError
-            
+
     def collect_img_urls(self) -> List[str]:
         img_urls = []
         if isinstance(self.content, list):
@@ -73,7 +74,7 @@ class ChatMsg(BaseModel):
         elif self.role == 'user':
             prompt = chat_template.decorate_user(text)
         elif self.role == 'assistant':
-            prompt = chat_template.decorate_assistant(text) 
+            prompt = chat_template.decorate_assistant(text)
         else:
             raise NotImplementedError
 
@@ -93,7 +94,7 @@ class ChatMsg(BaseModel):
             label_ids = copy.deepcopy(token_ids)
         else:
             label_ids = [IGNORE_INDEX] * len(token_ids)
-        
+
         return {
             'input_ids': token_ids,
             'labels': label_ids,
@@ -122,7 +123,7 @@ class ChatMessages(BaseMessages):
 
     def tokenize(self, tokenizer: PreTrainedTokenizer,
                  chat_template: ChatTemplate) -> Dict:
-        
+
         input_ids = []
         labels = []
         image_urls = []
@@ -137,24 +138,24 @@ class ChatMessages(BaseMessages):
 
             input_ids.extend(token_ids)
             labels.extend(label_ids)
-            
+
             image_urls.extend(msg.collect_img_urls())
-            
+
             if msg.role == 'assistant':
                 sep = chat_template.sep
                 sep_tokens = tokenizer.encode(sep, add_special_tokens=False)
                 input_ids.extend(sep_tokens)
                 labels.extend([IGNORE_INDEX] * len(sep_tokens))
-            
+
         training_data = {
             'input_ids': input_ids,
             'labels': labels,
             'num_tokens': len(input_ids),
         }
-        
-        if len(image_urls)>0:
+
+        if len(image_urls) > 0:
             training_data['image_urls'] = image_urls
-            
+
         return training_data
 
     @classmethod
@@ -190,7 +191,7 @@ class ChatMessages(BaseMessages):
             assert 'role' in _msg and 'content' in _msg
             _role = _msg['role']
             _content = _msg['content']
-            
+
             if isinstance(_content, list):
 
                 content = []
@@ -210,7 +211,7 @@ class ChatMessages(BaseMessages):
                         raise NotImplementedError
             else:
                 content = _content
-                
+
             if 'loss' in _msg:
                 _loss = _msg['loss']
                 msg = ChatMsg(role=_role, content=_content, loss=_loss)

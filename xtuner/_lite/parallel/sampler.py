@@ -64,7 +64,9 @@ class ParallelSampler(Sampler):
         self.round_up = round_up
 
         if self.round_up:
-            self.num_samples = math.ceil(len(self.dataset) / global_batch_size) * global_batch_size // world_size
+            self.num_samples = math.ceil(
+                len(self.dataset) /
+                global_batch_size) * global_batch_size // world_size
             self.total_size = self.num_samples * self.world_size
         else:
             self.num_samples = math.ceil(

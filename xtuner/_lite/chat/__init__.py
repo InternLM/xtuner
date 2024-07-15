@@ -1,4 +1,4 @@
 from .messages import ChatMessages
-from .templates import ChatTemplate, HybridChatTemplate, CHAT_TEMPLATE_MAP
+from .templates import CHAT_TEMPLATE_MAP, ChatTemplate, HybridChatTemplate
 
 __all__ = ['ChatMessages', 'ChatTemplate']

@@ -3,16 +3,36 @@ import itertools
 import random
 
 import torch
-from transformers.utils.import_utils import is_flash_attn_2_available
-from xtuner.utils import DEFAULT_PAD_TOKEN_INDEX, IGNORE_INDEX
 from torch.nn.utils.rnn import pad_sequence
-import itertools
+from transformers.utils.import_utils import is_flash_attn_2_available
+
+from xtuner._lite.chat import ChatMessages
+from xtuner.utils import DEFAULT_PAD_TOKEN_INDEX, IGNORE_INDEX
+from .format import OPENAI_FORMAT_MAP
+
+
 def sort_and_return_indices(lst):
-    return [i[0] for i in sorted(enumerate(lst), key=lambda x:x[1])]
+    return [i[0] for i in sorted(enumerate(lst), key=lambda x: x[1])]
 
 
-class SoftPackTextDataset(torch.utils.data.Dataset):
-    
+class TextTokenizeFunction():
+
+    def __init__(self, tokenizer, chat_template, raw_format='openai'):
+
+        self.tokenizer = tokenizer
+        self.chat_template = chat_template
+        self.raw_format = raw_format
+
+    def __call__(self, item):
+
+        formatter = OPENAI_FORMAT_MAP[self.raw_format]
+        msg = ChatMessages.from_dict(formatter(item))
+        tokenized = msg.tokenize(self.tokenizer, self.chat_template)
+        return tokenized
+
+
+class SoftPackerForText(torch.utils.data.Dataset):
+
     def __init__(self, dataset, max_length=2048, use_varlen_attn=True):
         super().__init__()
 
@@ -26,14 +46,14 @@ class SoftPackTextDataset(torch.utils.data.Dataset):
         self.dataset = dataset
 
         self._ori_lens = dataset['num_tokens']
-        
+
         inds = [i for i in range(len(self.dataset))]
         random.shuffle(inds)
-        
+
         _packed_length = 0
         _packed_items = []
         self.pack_lut = []
-        
+
         for i in inds:
             if self._ori_lens[i] + _packed_length <= max_length:
                 _packed_items.append(i)
@@ -42,16 +62,16 @@ class SoftPackTextDataset(torch.utils.data.Dataset):
                 self.pack_lut.append(_packed_items)
                 _packed_items = []
                 _packed_length = 0
-        
+
         if len(_packed_items) > 0:
             self.pack_lut.append(_packed_items)
 
         # The number of data items after packing
         self._num_packed_samples = len(self.pack_lut)
-        
+
     def __len__(self):
         return self._num_packed_samples
-        
+
     def __getitem__(self, item):
         """Returns a dict containing packed data in the given item.
 
@@ -61,48 +81,38 @@ class SoftPackTextDataset(torch.utils.data.Dataset):
         Returns:
             A dict including packed input_ids, labels, and cumulative_len.
         """
-        
+
         packed_items = self.pack_lut[item]
-        
+
         packed_input_ids = []
         packed_labels = []
-        packed_position_ids = []
-        unpack_sizes = []
+        num_tokens = []
         for i in packed_items:
             packed_input_ids.extend(self.dataset[i]['input_ids'])
             packed_labels.extend(self.dataset[i]['labels'])
-            
+
             _num_tokens = self.dataset[i]['num_tokens']
-            unpack_sizes.append(_num_tokens)
-            packed_position_ids.extend(range(_num_tokens))
-            
-        if self.use_varlen_attn:
-            position_ids = packed_position_ids
-        else:
-            position_ids = [i for i in range(sum(unpack_sizes))]
+            num_tokens.append(_num_tokens)
 
         packed = {
             'input_ids': packed_input_ids,
             'labels': packed_labels,
-            'position_ids': position_ids,
-            'chunk_sizes': unpack_sizes,
+            'num_tokens': num_tokens,
         }
 
         return packed
-    
-    
-    
-class TextDataset(torch.utils.data.Dataset):
-    
+
+
+class TextTokenizedDataset(torch.utils.data.Dataset):
+
     def __init__(self, dataset):
         super().__init__()
-    
+
         self.dataset = dataset
-        
-    
+
     def __len__(self):
         return len(self.dataset)
-    
+
     def __getitem__(self, item):
         """Returns a dict containing packed data in the given item.
 
@@ -112,18 +122,49 @@ class TextDataset(torch.utils.data.Dataset):
         Returns:
             A dict including packed input_ids, labels, and cumulative_len.
         """
-        
-        
+
         data = {
             'input_ids': self.dataset[item]['input_ids'],
             'labels': self.dataset[item]['labels'],
+            'num_tokens': [self.dataset[item]['num_tokens']]
         }
 
         return data
 
 
-    
-class HardPackTextDataset(torch.utils.data.Dataset):
+class TextRawDataset(torch.utils.data.Dataset):
+
+    def __init__(self, dataset, tokenize_fn):
+        super().__init__()
+
+        self.dataset = dataset
+        self.tokenize_fn = tokenize_fn
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, item):
+        """Returns a dict containing packed data in the given item.
+
+        Args:
+            item: An index to retrieve packed data.
+
+        Returns:
+            A dict including packed input_ids, labels, and cumulative_len.
+        """
+        raw_data = self.dataset[item]
+        tokenized_data = self.tokenize_fn(raw_data)
+
+        data = {
+            'input_ids': tokenized_data['input_ids'],
+            'labels': tokenized_data['labels'],
+            'num_tokens': [tokenized_data['num_tokens']]
+        }
+
+        return data
+
+
+class HardPackerForText(torch.utils.data.Dataset):
     """The new dataset obtained by concatenating multiple raw data.
 
     Args:
@@ -262,64 +303,53 @@ class HardPackTextDataset(torch.utils.data.Dataset):
         return packed
 
 
+class TextCollator():
 
+    def __init__(self, pack_batch=False):
+        self.pack_batch = pack_batch
 
+    def __call__(self, instances):
 
-def text_collate_fn(instances):
+        pad_index = DEFAULT_PAD_TOKEN_INDEX
 
-    pad_index = DEFAULT_PAD_TOKEN_INDEX
+        input_ids = []
+        labels = []
+        attention_mask = []
+        num_tokens = []
 
-    input_ids = []
-    labels = []
-    position_ids = []
-    chunk_sizes = []
+        for data in instances:
+            input_ids.append(torch.LongTensor(data['input_ids']))
+            labels.append(torch.LongTensor(data['labels']))
+            num_tokens.extend(data['num_tokens'])
 
-    for data in instances:
-        input_ids.append(torch.LongTensor(data['input_ids']))
-        labels.append(torch.LongTensor(data['labels']))
-        if 'position_ids' in data:
-            position_ids.append(torch.IntTensor(data['position_ids']))
-        else:
-            position_ids.append(torch.arange(0, len(data['input_ids'])))
+        attention_mask = [torch.ones_like(ids) for ids in input_ids]
+        num_tokens = torch.IntTensor(num_tokens)
 
-        if 'chunk_sizes' in data:
-            chunk_sizes.extend(data['chunk_sizes'])
-        else:
-            chunk_sizes.append(len(data['input_ids']))
+        if len(instances) > 1 and self.pack_batch:
 
-    chunk_sizes = torch.IntTensor(chunk_sizes)
-    if len(instances) > 1:
-        if is_flash_attn_2_available():
-            input_ids = torch.cat(input_ids, dim=0)
-            labels = torch.cat(labels, dim=0)
-            position_ids = torch.cat(position_ids, dim=0)
-            attention_mask = torch.ones_like(input_ids, dtype=bool)
-        else:
+            input_ids = torch.cat(input_ids, dim=0).unsqueeze(0)
+            labels = torch.cat(labels, dim=0).unsqueeze(0)
+            attention_mask = torch.cat(attention_mask, dim=0).unsqueeze(0)
+
+        elif len(instances) > 1 and not self.pack_batch:
+
             input_ids = pad_sequence(
                 input_ids, batch_first=True, padding_value=pad_index)
             labels = pad_sequence(
                 labels, batch_first=True, padding_value=IGNORE_INDEX)
-            position_ids = pad_sequence(
-                position_ids, batch_first=True, padding_value=-1)
+            attention_mask = pad_sequence(
+                attention_mask, batch_first=True, padding_value=0)
+        else:
+            input_ids = torch.stack(input_ids)
+            labels = torch.stack(labels)
+            attention_mask = torch.stack(attention_mask)
 
-            attention_mask = (position_ids >= 0).bool()
-            chunk_sizes = None
-        
-    else:
-        input_ids = torch.stack(input_ids)
-        labels = torch.stack(labels)
-        position_ids = torch.stack(position_ids)
-        attention_mask = torch.ones_like(input_ids, dtype=bool)
-        if not is_flash_attn_2_available():
-            chunk_sizes = None
-    # TODO support sp
-    data_dict = {
-        'input_ids': input_ids,
-        'attention_mask': attention_mask,
-        'labels': labels,
-        'position_ids': position_ids,
-        'chunk_sizes': chunk_sizes
-        
-    }
+        # TODO support sp
+        data_dict = {
+            'input_ids': input_ids,
+            'labels': labels,
+            'num_tokens': num_tokens,
+            'attention_mask': attention_mask.bool()
+        }
 
-    return data_dict
+        return data_dict

@@ -106,7 +106,6 @@ def repeat_kv_bshd(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
                                  head_dim)
 
 
-
 def _internlm2_varlen_attn_forward(
     self,
     hidden_states: torch.Tensor,
@@ -128,7 +127,7 @@ def _internlm2_varlen_attn_forward(
 
     bsz, q_len, _ = hidden_states.size()
     attn_context = MessageHub.get_instance('packed_sequence')
-    
+
     num_tokens = attn_context.get_info('num_tokens')
     if num_tokens is not None:
         position_ids = [torch.arange(num.item()) for num in num_tokens]
@@ -211,9 +210,8 @@ def _internlm2_varlen_attn_forward(
         _pad_length = torch.cat([_zero_length, num_tokens]).int()
         cumulative_lengths = torch.cumsum(_pad_length, 0).int()
 
-        attn_output = varlen_flash_attn(query_states, key_states,
-                                        value_states, cumulative_lengths,
-                                        num_tokens.max())
+        attn_output = varlen_flash_attn(query_states, key_states, value_states,
+                                        cumulative_lengths, num_tokens.max())
     else:
         attn_output = flash_attn_wo_mask(
             query_states,
@@ -247,5 +245,3 @@ def internlm2_varlen_attn_forward(
     return _internlm2_varlen_attn_forward(self, hidden_states, attention_mask,
                                           position_ids, past_key_value,
                                           output_attentions, use_cache)
-
-

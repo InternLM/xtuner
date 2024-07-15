@@ -1,11 +1,12 @@
 import torch
 from torch.nn import Parameter
 
+
 @torch.no_grad
 def dp_lazy_init(module, module_map, dp_mesh):
     device = torch.cuda.current_device()
     module.to_empty(device=torch.cuda.current_device(), recurse=False)
-    
+
     # for name, param in module.named_parameters(recurse=False):
     #     if param.requires_grad:
     #         module.register_parameter(name, Parameter(param.to(torch.float32)))
@@ -14,8 +15,7 @@ def dp_lazy_init(module, module_map, dp_mesh):
         master_module = module_map[module]
         master_params = {
             name: param
-            for name, param in master_module.named_parameters(
-                recurse=False)
+            for name, param in master_module.named_parameters(recurse=False)
         }
         master_buffers = {
             name: buffer
@@ -23,8 +23,7 @@ def dp_lazy_init(module, module_map, dp_mesh):
         }
 
         for name, param in module.named_parameters(recurse=False):
-            
-            
+
             p_copy = master_params[name].to(device).to(param.dtype)
             # if param.requires_grad:
             #     p_copy = p_copy.to(device).to(param.dtype)
@@ -37,7 +36,6 @@ def dp_lazy_init(module, module_map, dp_mesh):
             b_copy = master_buffers[name].to(device).to(buffer.dtype)
             # b_copy = b_copy.to(device)
             buffer.data.copy_(b_copy)
-
 
 
 class LoadWoInit:
