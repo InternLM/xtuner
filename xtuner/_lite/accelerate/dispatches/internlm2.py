@@ -106,113 +106,6 @@ def repeat_kv_bshd(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
                                  head_dim)
 
 
-def internlm2_attn_forward(
-    self,
-    hidden_states: torch.Tensor,
-    attention_mask: Optional[torch.LongTensor] = None,
-    position_ids: Optional[torch.LongTensor] = None,
-    past_key_value: Optional[Tuple[torch.Tensor]] = None,
-    output_attentions: bool = False,
-    use_cache: bool = False,
-    **kwargs,
-):
-    if 'padding_mask' in kwargs:
-        warnings.warn(
-            'Passing `padding_mask` is deprecated and will be removed in v4.37'
-            'Please make sure use `attention_mask` instead.`')
-
-        # overwrite attention_mask with padding_mask
-        attention_mask = kwargs.pop('padding_mask')
-
-    output_attentions = False
-
-    bsz, q_len, _ = hidden_states.size()
-
-    qkv_states = self.wqkv(hidden_states)
-
-    qkv_states = rearrange(
-        qkv_states,
-        'b q (h gs d) -> b q h gs d',
-        gs=2 + self.num_key_value_groups,
-        d=self.head_dim,
-    )
-
-    query_states = qkv_states[..., :self.num_key_value_groups, :]
-    query_states = rearrange(query_states, 'b q h gs d -> b q (h gs) d')
-    key_states = qkv_states[..., -2, :]
-    value_states = qkv_states[..., -1, :]
-
-    query_states = query_states.transpose(1, 2)
-    key_states = key_states.transpose(1, 2)
-    value_states = value_states.transpose(1, 2)
-
-    kv_seq_len = key_states.shape[-2]
-    if past_key_value is not None:
-        kv_seq_len += past_key_value[0].shape[-2]
-
-    # This modification is necessary for sequential parallel
-    assert position_ids is not None and (position_ids.max() + 1) >= kv_seq_len
-    cos, sin = self.rotary_emb(value_states, seq_len=position_ids.max() + 1)
-    query_states, key_states = apply_rotary_pos_emb(query_states, key_states,
-                                                    cos, sin, position_ids)
-
-    if past_key_value is not None:
-        # reuse k, v, self_attention
-        key_states = torch.cat([past_key_value[0], key_states], dim=2)
-        value_states = torch.cat([past_key_value[1], value_states], dim=2)
-
-    past_key_value = (key_states, value_states) if use_cache else None
-
-    # repeat kv for sequence parallel
-    key_states = repeat_kv(key_states, self.num_key_value_groups)
-    value_states = repeat_kv(value_states, self.num_key_value_groups)
-
-    if SUPPORT_FLASH2:
-        # the shape of attention_mask used by flash_attn and
-        # F.scaled_dot_product_attention are different
-        assert attention_mask is None or attention_mask.ndim == 2, \
-            ('When using flash_attn, attention_mask.ndim should equal to 2.'
-             f'But got attention_mask.shape = {attention_mask.shape}.'
-             'We can pass the `attn_implementation="flash_attention_2"` flag '
-             'to `.from_pretrained` method when instantiating a Internlm2 '
-             'model.')
-        # flash attn 2 need (bs, seq_len, nhead, h_dim)
-        query_states = query_states.transpose(1, 2)
-        key_states = key_states.transpose(1, 2)
-        value_states = value_states.transpose(1, 2)
-
-        causal = self.is_causal and q_len != 1
-
-        if attention_mask is not None:
-            attn_output = flash_attn_w_mask(
-                query_states,
-                key_states,
-                value_states,
-                attention_mask,
-                causal=causal,
-                training=self.training)
-        else:
-            attn_output = flash_attn_wo_mask(
-                query_states,
-                key_states,
-                value_states,
-                causal=causal,
-                training=self.training)
-    else:
-        # use flash attention implemented by pytorch
-        # do not support sequence parallel
-        attn_output = F.scaled_dot_product_attention(
-            query_states, key_states, value_states, attn_mask=attention_mask)
-        attn_output = attn_output.transpose(1, 2)
-
-    attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
-    attn_output = self.wo(attn_output)
-
-    if not output_attentions:
-        attn_weights = None
-
-    return attn_output, attn_weights, past_key_value
-
 
 def _internlm2_varlen_attn_forward(
     self,
@@ -243,9 +136,6 @@ def _internlm2_varlen_attn_forward(
         position_ids = position_ids.unsqueeze(0)
         assert position_ids.size(1) == q_len
 
-    # assert bsz == 1, (f'If utilizing local attention, the batch size should be'
-    #                   f' set to 1, but got {bsz}')
-
     qkv_states = self.wqkv(hidden_states)
 
     qkv_states = rearrange(
@@ -260,8 +150,6 @@ def _internlm2_varlen_attn_forward(
     key_states = qkv_states[..., -2, :]
     value_states = qkv_states[..., -1, :]
 
-    
-        
     query_states = query_states.transpose(1, 2)
     key_states = key_states.transpose(1, 2)
     value_states = value_states.transpose(1, 2)
@@ -360,58 +248,4 @@ def internlm2_varlen_attn_forward(
                                           position_ids, past_key_value,
                                           output_attentions, use_cache)
 
-    # if self.training or past_key_value is None:
-    #     return _internlm2_varlen_attn_forward(
-    #         self,hidden_states, attention_mask, position_ids, past_key_value,
-    #         output_attentions, use_cache
-    #     )
-    # else :
-    #     return _contiguous_batching_forward_impl(
-    #         self,hidden_states,  position_ids, past_key_value,
-    #         output_attentions
-    #     )
 
-
-def internlm2_model_forward(
-    self,
-    input_ids: torch.LongTensor = None,
-    attention_mask: Optional[torch.Tensor] = None,
-    position_ids: Optional[torch.LongTensor] = None,
-    past_key_values: Optional[List[torch.FloatTensor]] = None,
-    inputs_embeds: Optional[torch.FloatTensor] = None,
-    use_cache: Optional[bool] = None,
-    output_attentions: Optional[bool] = None,
-    output_hidden_states: Optional[bool] = None,
-    return_dict: Optional[bool] = None,
-) -> Union[Tuple, BaseModelOutputWithPast]:
-    """Rewrite implementation of InternLM2Model.forward."""
-
-    if inputs_embeds is None:
-        inputs_embeds = self.tok_embeddings(input_ids)
-
-    # Attention mask is not necessary in continuous batching
-    attention_mask = None
-    hidden_states = inputs_embeds
-
-    # decoder layers
-    for idx, decoder_layer in enumerate(self.layers):
-        past_key_value = (
-            past_key_values[idx] if past_key_values is not None else None)
-        layer_outputs = decoder_layer(
-            hidden_states,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            past_key_value=past_key_value,
-            output_attentions=output_attentions,
-            use_cache=use_cache,
-        )
-        hidden_states = layer_outputs[0]
-
-    hidden_states = self.norm(hidden_states)
-
-    return BaseModelOutputWithPast(
-        last_hidden_state=hidden_states,
-        past_key_values=past_key_value,
-        hidden_states=None,
-        attentions=None,
-    )

@@ -144,7 +144,7 @@ class SoftPackerForLlava(SoftPackTextDataset):
             
         images = []
         for url in packed_img_urls:
-            img = Image.open(os.path.join(self.image_dir, url))
+            img = Image.open(url)
             images.append(img)
         
         if len(images):   

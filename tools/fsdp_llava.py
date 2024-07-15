@@ -8,7 +8,6 @@ import time
 from datetime import datetime, timedelta
 from functools import partial
 from collections import OrderedDict
-from datasets import load_from_disk
 import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
@@ -17,8 +16,8 @@ from mmengine.dist import init_dist
 import copy
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import \
     apply_activation_checkpointing
-from torch.distributed.checkpoint.state_dict import (get_state_dict,
-                                                     set_state_dict)
+from torch.distributed.checkpoint.state_dict import (get_state_dict, StateDictOptions,
+                                                     set_state_dict, get_model_state_dict, get_optimizer_state_dict)
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp.api import ShardingStrategy
@@ -104,13 +103,42 @@ def parse_args():
         choices = CHAT_TEMPLATE_MAP.keys(),
         help=('repo id or local path of the tokenizer. '
               'Defaults to the same as `model`'))
-    parser.add_argument(
+    model_args.add_argument(
         '--freeze-llm',
         action='store_true', help="Not updating LLM's parameters")
-    parser.add_argument(
+    model_args.add_argument(
         '--freeze-vit',
         action='store_true', help="Not updating vit's parameters")
-    
+    model_args.add_argument(
+        '--llm-use-lora',
+        action='store_true', help="Apply the adapter to LLM.")
+    model_args.add_argument(
+        '--llm-lora-targets',
+        default=None, nargs='*', help="The names of the modules to apply the adapter to. ")
+    model_args.add_argument(
+        '--llm-lora-r',
+        default=64, type=int , help="Not updating vit's parameters")
+    model_args.add_argument(
+        '--llm-lora-alpha',
+        default=16, type=int , help="The alpha parameter for Lora scaling.")
+    model_args.add_argument(
+        '--llm-lora-dropout',
+        default=0.1, type=float , help="The dropout probability for Lora layers.")
+    model_args.add_argument(
+        '--vit-use-lora',
+        action='store_true', help="Apply the adapter to Vit.")
+    model_args.add_argument(
+        '--vit-lora-targets',
+        default=None, type=str , help="The names of the modules to apply the adapter to. ")
+    model_args.add_argument(
+        '--vit-lora-r',
+        default=64, type=int , help="Not updating vit's parameters")
+    model_args.add_argument(
+        '--vit-lora-alpha',
+        default=16, type=int , help="The alpha parameter for vit Lora scaling.")
+    model_args.add_argument(
+        '--vit-lora-dropout',
+        default=0.1, type=float , help="The dropout probability for vit Lora layers.")
     model_args.add_argument(
         '--dtype', 
         default='auto', 
@@ -220,7 +248,8 @@ def parse_args():
         help=('only model parameters are saved when saving a checkpoint. '
               'This can significantly reduce the size of checkpoint files, '
               'but the saved checkpoints cannot be resumed.'))
-    parser.add_argument('--log-interval', default=1, type=int, help='log interval')
+    parser.add_argument(
+        '--log-interval', default=1, type=int, help='log interval')
     parser.add_argument(
         '--resume',
         type=str,
@@ -250,13 +279,7 @@ def map_meta_modules(model, meta_model):
 def llava(args):
     ###########################################################################
     #                           1. Environment                                #
-    ###########################################################################
-    if args.dset_pack_level and not is_flash_attn_2_available():
-        raise NotImplementedError('If you want to use the pack dataset, you '
-                                  'need to install `flash_attn`. Refer to '
-                                  'https://github.com/Dao-AILab/flash-attention/releases')
-    
-    
+    ###########################################################################    
     dist_launcher = infer_launcher()
     init_dist(dist_launcher)
     set_random_seed(args.seed)
@@ -319,170 +342,81 @@ def llava(args):
         padding_side='right')
     
     img_token = chat_template.image_token
-    tokenizer.add_tokens([img_token], special_tokens=True)
-    
-    img_token_id = tokenizer.convert_tokens_to_ids([img_token])[0]
-    logger.info(f'[Tokenizer] Added a new token `{img_token}`, '
-                f'token id is {img_token_id}, the new vocab size is '
-                f'{len(tokenizer)}')
+    need_resize_emb = False
+    if len(tokenizer.convert_tokens_to_ids([img_token])) > 1:
+        need_resize_emb = True
+        tokenizer.add_tokens([img_token], special_tokens=True)
+        img_token_id = tokenizer.convert_tokens_to_ids([img_token])[0]
+        logger.info(f'[Tokenizer] Added a new token `{img_token}`, '
+                    f'token id is {img_token_id}, the new vocab size is '
+                    f'{len(tokenizer)}')
+    else:
+        img_token_id = tokenizer.convert_tokens_to_ids([img_token])[0]
     
     img_processor = AutoProcessor.from_pretrained(args.vit).image_processor
     
     dset_infos = load(args.datasets)
-    if args.dset_from_cache:
-        if dist.get_rank() == 0:
-            _datasets = []
-            cache_dir = args.dset_cache_dir
-            desc = f'[Rank {rank}] Load Cached Datasets'
-            for sub_dir in tqdm(os.listdir(cache_dir), desc=desc):
-                dset = load_from_disk(os.path.join(cache_dir,sub_dir))
-                _datasets.append(dset)
-
-            objects = [_datasets]
+    
+    sample_ratios = []
+    annotations = []
+    init_fns = []
+    for _, info in dset_infos.items():
+        if 'format' in info:
+            dset_format = info['format']
         else:
-            objects = [None]
-
-        dist.broadcast_object_list(objects, src=0)
-        hf_datasets = objects[0]
-    else:
+            dset_format = 'llava'
         
-        # Define how to convert raw data into OpenAI format.
-        # If you want to use other data format, you need to define the 
-        # corresponding `foramt_fn` and `tokenize fn`.
-
+        image_dir = info['image_dir']
+        
         # The following function is used to tokenize an original sample.
         # If your data format is different, you should redefine a `tokenize_fn`
         # The tokenized data must include `input_ids`, `labels``, 
         # and `num_tokens`.
+        tokenize_fn = LlavaTokenizeFunction(
+            tokenizer, chat_template, image_dir, dset_format)
         
-        def count_img_tokens(url):
-            return 576
-        
-        
-        if args.dset_pack_level is None:
-            if args.dset_cache_dir:
-                logger.warning('')
-            online_tokenize = True
-        else:
-            online_tokenize = False
-        
-        tokenize_fns = []
-        sample_ratios = []
-        annotations = []
-        init_fns = []
-        for _, info in dset_infos.items():
-            if 'format' in info:
-                dset_format = info['format']
-            else:
-                dset_format = 'llava'
-            
-            image_dir = info['image_dir']
-            
-            tokenize_fn = LlavaTokenizeFunction(
-                tokenizer, chat_template, image_dir, dset_format)
-            
-            if online_tokenize:
-                init_fn = partial(
-                    LlavaRawDataset, 
-                    image_processor=img_processor,
-                    tokenize_fn=tokenize_fn)
-                init_fns.append(init_fn)
-                tokenize_fns.append(None)
-            else:
-                init_fns.append(None)
-                tokenize_fns.append(tokenize_fn)
-            
-            sample_ratios.append(info['sample_ratio'])
-            annotations.append(info['annotations'])
-        
-        
-        _datasets = load_datasets(
-            paths=annotations,
-            file_types=args.dset_file_types,
-            sources='local',
-            sample_ratios=sample_ratios,
-            num_proc=max(args.num_workers, 1),
-            map_fns=None if online_tokenize else tokenize_fns, 
-            init_fns=init_fns)
-        
-        logger.info(_datasets[0][0])
-        num_datasets = len(_datasets)
-        
-        if args.dset_cache_dir and (not online_tokenize) and rank==0:
-    
-            if os.path.isdir(args.dset_cache_dir):
-                if len(os.listdir(args.dset_cache_dir)):
-                    logger.warning(f"`{args.dset_cache_dir}` is not an empty "
-                                   "folder, which may lead to inaccurate "
-                                   "cache results.")
-        
-            for i, dset in tqdm(enumerate(_datasets), desc='Caching'):
-                digits = len(str(abs(num_datasets)))
-                cache_id = f'cache-{i+1:0{digits}}-of-{num_datasets:0{digits}}'
-                cache_dir = args.dset_cache_dir
-                sub_cache_dir = os.path.join(cache_dir, cache_id)
-                if os.path.exists(sub_cache_dir):
-                    shutil.rmtree(sub_cache_dir )
-                    logger.warning(f"Found {sub_cache_dir} exists. "
-                                   "Clear it and re-cache.")
-                dset.save_to_disk(sub_cache_dir)
+        init_fn = partial(
+            LlavaRawDataset, 
+            image_processor=img_processor,
+            tokenize_fn=tokenize_fn)
+        init_fns.append(init_fn)
 
-    if online_tokenize:
-        datasets = _datasets
-    else:
-        datasets = []
-        for i, dset in enumerate(_datasets):
-                
-            if args.dset_pack_level and args.dset_pack_level == 'soft':
-                _dset = SoftPackerForLlava(dset,img_processor, args.max_length)
-            elif not args.dset_pack_level:
-                _dset = LlavaTokenizedDataset(dset, img_processor)
-            else:
-                raise RuntimeError
-            
-            datasets.append(_dset)
-
-    train_dataset = ConcatDataset(datasets)
+        sample_ratios.append(info['sample_ratio'])
+        annotations.append(info['annotations'])
+    breakpoint()
     
-    if not online_tokenize and rank == 0:
-        num_tokens = [torch.tensor(dset['num_tokens']) for dset in _datasets]
-        num_tokens = torch.cat(num_tokens, dim=0)
-        logger.info(f'[Dataset] {sum(num_tokens)} tokens.')
-        for i in range(4):
-            length = args.max_length //(i+1)
-            greater = (num_tokens > length).sum()
-            logger.info(f'[Dataset] (> {length} tokens) {greater} samples')
+    _datasets = load_datasets(
+        paths=annotations,
+        file_types=args.dset_file_types,
+        sources='local',
+        sample_ratios=sample_ratios,
+        num_proc=max(args.num_workers, 1), 
+        init_fns=init_fns)
+    
+    logger.info(_datasets[0][0])
+    num_datasets = len(_datasets)
+
         
-    
-    if args.dset_pack_level and rank == 0:
-        ori_samples = sum([len(dset) for dset in _datasets])
-        packed_samples = len(train_dataset)
-        logger.info(f'[Dataset] (Original) {ori_samples} samples.')
-        logger.info(f'[Dataset] (Packed) {packed_samples} samples.')
-
+    train_dataset = ConcatDataset(_datasets)
     
     pack_batch = is_flash_attn_2_available()
-    logger.info('`flash_attn` is available. To accelerate training, the '
-                'data in one batch is concatenated into a single one, '
-                'avoiding the pad tokens; this operation does not affect the '
-                'calculation results, as the attention is computed in '
-                'segments according to the original data.')
-
     collator = LlavaCollator(pack_batch=pack_batch)
+    from mmengine.dataset import DefaultSampler
     train_dataloader = DataLoader(
         train_dataset,
         batch_size=args.mirco_batch_size,
         num_workers=args.num_workers,
-        sampler=ParallelSampler(
-            train_dataset, dp_mesh, args.global_batch_size, shuffle=True),
+        sampler=DefaultSampler(train_dataset, shuffle=False),
+        # sampler=ParallelSampler(
+        #     train_dataset, dp_mesh, args.global_batch_size, shuffle=True),
         collate_fn=collator,
         persistent_workers=args.num_workers > 0)
     
     
     if rank == 0:
         logger.info(f'[Dataloader] {len(train_dataloader)} batches.')
-        
-        _first_batch = collator([train_dataset[i] for i in range(args.mirco_batch_size)])
+        _first_batch = [train_dataset[i] for i in range(args.mirco_batch_size)]
+        _first_batch = collator(_first_batch)
         _decoded = tokenizer.batch_decode(_first_batch['input_ids'])
         logger.debug(f'[Dataloader] Training Batch:\n{_first_batch}')
         logger.debug(f"[Dataloader] Training Batch(Decoded):\n{_decoded}")
@@ -534,40 +468,30 @@ def llava(args):
         
         meta_llava_cfg = copy.deepcopy(llava_config)
         meta_llava = LlavaForConditionalGeneration(meta_llava_cfg)
+        
         # model parameters must be in fp32.
         # this ensures that all numerical values in the optimizer are in fp32.
         # FSDP will use low precision during forward.
         meta_llava.to(torch.float32)
         
-        
-        ori_emb_shape = meta_llava.get_input_embeddings().weight.shape
-        meta_llava.resize_token_embeddings(len(tokenizer))
-        new_emb_shape = meta_llava.get_input_embeddings().weight.shape
-        logger.info('Pad the parameters of `embbedings` and `output` from '
-                    f'shape {ori_emb_shape} to shape {new_emb_shape}')
+        if need_resize_emb:
+            ori_emb_shape = meta_llava.get_input_embeddings().weight.shape
+            meta_llava.resize_token_embeddings(len(tokenizer))
+            new_emb_shape = meta_llava.get_input_embeddings().weight.shape
+            logger.info('Pad the parameters of `embbedings` and `output` from '
+                        f'shape {ori_emb_shape} to shape {new_emb_shape}')
         
         if args.freeze_llm:
             meta_llava.language_model.requires_grad_(False)
-            meta_llava.language_model.to(dtype)
+            if world_size > 1:
+                meta_llava.language_model.to(dtype)
+                
         if args.freeze_vit:
             meta_llava.vision_tower.requires_grad_(False)
-            meta_llava.vision_tower.to(dtype)
-        # meta_lora_llm = get_peft_model(
-        #     meta_llava.language_model, 
-        #     LoraConfig(
-        #         r=64,lora_alpha=16,lora_dropout=0.1,bias='none',
-        #         target_modules=['wqkv'],task_type='CAUSAL_LM'))
-        # breakpoint()
-        # set_require_grad_param_to_fp32(meta_lora_llm)
-        # for name, param in meta_lora_llm.named_parameters(recurse=False):
-        #     if param.requires_grad:
-        #         module.register_parameter(name, Parameter(param.to(torch.float32)))
-        # meta_llava.language_model = meta_lora_llm
-
-        # meta_llava.multi_modal_projector.to(torch.float32)
+            if world_size > 1:
+                meta_llava.vision_tower.to(dtype)
         
-        
-        if pack_batch or args.dset_pack_level:
+        if pack_batch:
             dispatch_modules(meta_llava)
         
     # Only load parameters on rank 0 to avoid each rank repeatedly loading the 
@@ -579,40 +503,33 @@ def llava(args):
             # llava has not loaded the pre-trained parameters of llm and vit
             del llava.language_model
             del llava.vision_tower
-            llm = AutoModelForCausalLM.from_pretrained(args.llm, config=text_config)
-            vit = CLIPVisionModel.from_pretrained(args.vit, config=vision_config).to(dtype)
+            llm = AutoModelForCausalLM.from_pretrained(
+                    args.llm, config=text_config)
+            vit = CLIPVisionModel.from_pretrained(
+                    args.vit, config=vision_config)
             for param in llava.multi_modal_projector.parameters():
                 param.data = torch.ones_like(param.data) / param.numel()
             
-            # lora_llm = get_peft_model(
-            #     llm, 
-            #     LoraConfig(
-            #         r=64,lora_alpha=16,lora_dropout=0.1,bias='none',
-            #         target_modules=['wqkv'],task_type='CAUSAL_LM'))
             llava.language_model = llm
             llava.vision_tower = vit
-            # llava.multi_modal_projector.to(torch.float32)
-            llava.resize_token_embeddings(len(tokenizer))
+            
+            if need_resize_emb:
+                llava.resize_token_embeddings(len(tokenizer))
+                
         meta_llava_map = map_meta_modules(llava, meta_llava) 
     else:
         meta_llava_map = None
     
     dist.barrier()
         
-    param_init_fn = partial(dp_lazy_init, module_map=meta_llava_map, dp_mesh=dp_mesh)
-    
-    policies = [
-        all_required_grad_wrap_policy, 
-        partial(token_embedding_wrap_policy, vocab_size=meta_llava.vocab_size),
-        layer_auto_wrap_policy
-    ]
+    param_init_fn = partial(
+        dp_lazy_init, module_map=meta_llava_map, dp_mesh=dp_mesh)
     
     torch.cuda.reset_peak_memory_stats()
     shard_llava = FSDP(
         meta_llava,
         device_mesh=dp_mesh,
-        auto_wrap_policy=partial(_or_policy, policies=policies),
-        sharding_strategy=ShardingStrategy.NO_SHARD,
+        auto_wrap_policy=layer_auto_wrap_policy,
         mixed_precision=MixedPrecision(
             param_dtype=dtype,
             reduce_dtype=dtype,
@@ -642,8 +559,10 @@ def llava(args):
     ###########################################################################
     #                      4. Optimizer & Scheduler                           #
     ###########################################################################
+    requried_grad_params = [
+        param for param in shard_llava.parameters() if param.requires_grad]
     optimizer = AdamW(
-        shard_llava.multi_modal_projector.parameters(), lr=args.lr, weight_decay=args.wd)
+        requried_grad_params, lr=args.lr, weight_decay=args.wd, fused=True)
 
     global_batch_size = args.global_batch_size
     mirco_batch_size = args.mirco_batch_size
@@ -688,7 +607,7 @@ def llava(args):
                 f'{(max_memory / 1024**3):.1f}GB')
     for step in range(start_step, total_steps):
 
-        epoch = step // per_epoch_iters
+        epoch = step // per_epoch_steps
         epoch_inner_step = step % per_epoch_steps
         if epoch_inner_step == 0 or step == start_step:
             # For the first step of each epoch, the data order needs to be
@@ -696,7 +615,8 @@ def llava(args):
             # Or after resuming, for the first step, the dataloader needs to
             # be adjusted to the position before resume.
             # train_dataloader.sampler.set_epoch(epoch, inner_step)
-            train_dataloader.sampler.set_epoch(epoch, epoch_inner_step)
+            # train_dataloader.sampler.set_epoch(epoch, epoch_inner_step)
+            train_dataloader.sampler.set_epoch(epoch)
             data_iterator = iter(train_dataloader)
 
         if step <= warmup_steps:
@@ -705,7 +625,7 @@ def llava(args):
         else:
             cosine_scheduler.step()
             cur_lr = cosine_scheduler.get_lr()[0]
-
+    
         torch.cuda.reset_peak_memory_stats()
 
         step_loss = 0
@@ -713,7 +633,7 @@ def llava(args):
         step_start_t = time.time()
         step_consumed_tokens = 0
         step_consumed_img_tokens = 0
-        for i in range(per_step_iters):
+        for _ in range(per_step_iters):
 
             _data_start_t = time.time()
             data = next(data_iterator)
@@ -727,10 +647,8 @@ def llava(args):
             attention_mask = data['attention_mask'].cuda()
             num_tokens = data['num_tokens'].cuda()
             num_img_tokens = data['num_img_tokens'].cuda()
-            # image_ranges = data['image_ranges']
             
-            enable_pack_ctx = pack_batch or args.dset_pack_level
-            with packed_sequence(num_tokens, enable=enable_pack_ctx):
+            with packed_sequence(num_tokens, enable=pack_batch):
                 outputs = shard_llava(
                     input_ids = input_ids, labels = labels,
                     pixel_values = pixel_values, attention_mask=attention_mask
@@ -738,7 +656,6 @@ def llava(args):
                 avg_iter_loss = outputs.loss / per_step_iters
                 avg_iter_loss.backward()
             
-            # breakpoint()
             step_loss += avg_iter_loss.item()
             step_consumed_tokens += num_tokens.sum()
             step_consumed_img_tokens += num_img_tokens.sum()
@@ -746,7 +663,7 @@ def llava(args):
         grad_norm = shard_llava.clip_grad_norm_(args.max_grad_norm)
         optimizer.step()
         optimizer.zero_grad()
-        # breakpoint()
+    
         step_text_tokens = step_consumed_tokens - step_consumed_img_tokens
         step_img_tokens = step_consumed_img_tokens
         step_time = time.time() - step_start_t
@@ -755,7 +672,7 @@ def llava(args):
         tgs = int(step_consumed_tokens / step_time)
         max_memory = torch.cuda.max_memory_allocated()
         if is_interval(step, total_steps, args.log_interval):
-            logger.info(f'[Train] (Epoch {epoch}) Step {step+1}/{total_steps}  '
+            logger.info(f'[Train] (Epoch {epoch}) Step {step}/{total_steps}  '
                         f'lr: {cur_lr:.6f}  loss: {step_loss:.3f}  '
                         f'grad_norm: {grad_norm:.2f}  '
                         f'max_memory: {(max_memory / 1024**3):.1f}GB  '
@@ -766,26 +683,53 @@ def llava(args):
                         f'eta: {eta}')
 
         if is_interval(step, total_steps, checkpoint_interval):
+
+            torch.cuda.reset_peak_memory_stats()
+            max_memory = torch.cuda.max_memory_allocated()
+            logger.info('[Checkpoint] Before saving checkpoint, the peak GPU '
+                        f'memory is {max_memory/1024**3:.1f}GB.')
+            
+            num_digits = len(str(abs(total_steps)))
+            work_dir = args.work_dir
+            ckpt_dir = os.path.join(work_dir, f'ckpt-{step:0{num_digits}}')
+            hf_dir = os.path.join(work_dir, f'hf-{step:0{num_digits}}')
+            _options = StateDictOptions(
+                cpu_offload=True, full_state_dict=True)
+            
+            full_model_state_dict = get_model_state_dict(
+                                        shard_llava, options=_options)
+            if rank == 0:
+                shard_llava.save_pretrained(
+                    hf_dir, torch_dtype=dtype, 
+                    state_dict=full_model_state_dict)
+                tokenizer.save_pretrained(hf_dir)
+            dist.barrier()
+            
             # FSDP cannot be saved via torch.load
             # Refer to https://pytorch.org/tutorials/recipes/distributed_checkpoint_recipe.html  # noqa: E501
-            model_state_dict, optimizer_state_dict = get_state_dict(
-                shard_llava, optimizer)
+            _options = StateDictOptions(
+                cpu_offload=True, ignore_frozen_params=True)
+            (shard_model_state_dict, 
+             shard_optimizer_state_dict) = get_state_dict(
+                shard_llava, optimizer, options=_options)
 
             state_dict = {
-                'model': model_state_dict,
-                'optimizer': optimizer_state_dict,
+                'model': shard_model_state_dict,
+                'optimizer': shard_optimizer_state_dict,
                 'step': step,
                 'total_steps': total_steps,
                 'warmup_scheduler': warmup_scheduler.state_dict(),
                 'cosine_scheduler': cosine_scheduler.state_dict()
             }
 
-            num_digits = len(str(abs(total_steps)))
-            work_dir = args.work_dir
-            ckpt_dir = os.path.join(work_dir, f'ckpt-{step:0{num_digits}}')
+            
             writer = dcp.FileSystemWriter(ckpt_dir)
             mkdir_or_exist(ckpt_dir)
             dcp.save(state_dict, writer)
+            
+            max_memory = torch.cuda.max_memory_allocated()
+            logger.info('[Checkpoint] During saving checkpoint, the peak GPU '
+                        f'memory is {max_memory/1024**3:.1f}GB.')
         
     train_cost_time = time.time() - start_train_t
     logger.info(f'[Train] Cost {train_cost_time}s')
