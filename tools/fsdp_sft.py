@@ -494,8 +494,7 @@ def sft(args):
         meta_llm = AutoModelForCausalLM.from_pretrained(
             args.llm, config=llm_cfg, trust_remote_code=True)
 
-        # model parameters must be in fp32.
-        # this ensures that all numerical values in the optimizer are in fp32.
+        # Ensure all numerical values in the optimizer are fp32.
         # FSDP will use low precision during forward.
         meta_llm.to(torch.float32)
 
@@ -526,8 +525,7 @@ def sft(args):
             llm = AutoModelForCausalLM.from_pretrained(
                 args.llm, config=llm_cfg)
 
-            # model parameters must be in fp32.
-            # this ensures that all numerical values in the optimizer are in fp32.
+            # Ensure all numerical values in the optimizer are fp32.
             # FSDP will use low precision during forward.
             llm.to(torch.float32)
 

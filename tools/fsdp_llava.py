@@ -24,20 +24,17 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import \
     apply_activation_checkpointing
 from torch.distributed.checkpoint.state_dict import (StateDictOptions,
                                                      get_model_state_dict,
-                
                                                      get_state_dict)
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import MixedPrecision
-
 from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
 from torch.distributed.fsdp.wrap import _or_policy
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR
 from torch.utils.data import ConcatDataset, DataLoader
-from tqdm import tqdm
-from transformers import (AutoConfig, AutoModelForCausalLM,
-                          AutoProcessor, CLIPVisionModel, LlavaConfig,
+from transformers import (AutoConfig, AutoModelForCausalLM, AutoProcessor,
+                          CLIPVisionModel, LlavaConfig,
                           LlavaForConditionalGeneration)
 from transformers.utils.import_utils import (is_flash_attn_2_available,
                                              is_torch_sdpa_available)
@@ -50,7 +47,8 @@ from xtuner._lite.accelerate.fsdp import (RECOMPUTE_MODULES,
                                           checkpoint_check_fn, dp_lazy_init,
                                           layer_auto_wrap_policy)
 from xtuner._lite.chat import CHAT_TEMPLATE_MAP
-from xtuner._lite.datasets import LlavaCollator, LlavaRawDataset
+from xtuner._lite.datasets import (LlavaCollator, LlavaRawDataset,
+                                   LlavaTokenizeFunction)
 from xtuner._lite.datasets.load import LOAD_FN_MAP, load_datasets
 from xtuner._lite.parallel import ParallelSampler
 
@@ -664,7 +662,9 @@ def llava(args):
 
     # ----------------    Optimizer & Scheduler End   ----------------------- #
 
-    ############################## 5. Training ###############################
+    ###########################################################################
+    #                          5. Training                                    #
+    ###########################################################################
 
     start_train_t = time.time()
     torch.cuda.empty_cache()
