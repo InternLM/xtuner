@@ -30,7 +30,7 @@ from torch.distributed.checkpoint.state_dict import (StateDictOptions,
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import MixedPrecision
-from torch.distributed.fsdp.api import ShardingStrategy
+from torch.distributed.fsdp.api import CPUOffload, ShardingStrategy
 from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
 from torch.distributed.fsdp.wrap import _or_policy
 from torch.optim import AdamW
@@ -131,7 +131,7 @@ def parse_args():
         default='full',
         choices=['full', 'hybrid'],
         help=('The sharding strategy to be used for distributed training.'))
-
+    model_args.add_argument('--cpu-offload', action='store_true', help=(''))
     data_args = parser.add_argument_group('data', 'Dataset Related Settings')
     data_args.add_argument(
         '--datasets',
@@ -578,6 +578,7 @@ def sft(args):
         meta_llm,
         device_mesh=dp_mesh,
         sharding_strategy=strategy,
+        cpu_offload=CPUOffload(offload_params=args.cpu_offload),
         auto_wrap_policy=partial(_or_policy, policies=policies),
         mixed_precision=MixedPrecision(
             param_dtype=dtype, reduce_dtype=dtype, buffer_dtype=dtype),
@@ -608,8 +609,7 @@ def sft(args):
     requried_grad_params = [
         param for param in shard_llm.parameters() if param.requires_grad
     ]
-    optimizer = AdamW(
-        requried_grad_params, lr=args.lr, weight_decay=args.wd, fused=True)
+    optimizer = AdamW(requried_grad_params, lr=args.lr, weight_decay=args.wd)
 
     global_batch_size = args.global_batch_size
     mirco_batch_size = args.mirco_batch_size
