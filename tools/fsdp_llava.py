@@ -566,12 +566,12 @@ def llava(args):
             logger.info('Pad the parameters of `embbedings` and `output` from '
                         f'shape {ori_emb_shape} to shape {new_emb_shape}')
 
-        if args.freeze_llm:
+        if args.freeze_llm or args.llm_use_lora:
             meta_llava.language_model.requires_grad_(False)
             if world_size > 1:
                 meta_llava.language_model.to(dtype)
 
-        if args.freeze_vit:
+        if args.freeze_vit or args.vit_use_lora:
             meta_llava.vision_tower.requires_grad_(False)
             if world_size > 1:
                 meta_llava.vision_tower.to(dtype)
