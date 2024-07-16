@@ -527,7 +527,7 @@ def sft(args):
     if rank == 0:
         with torch.device('cpu'):
             llm = AutoModelForCausalLM.from_pretrained(
-                args.llm, config=llm_cfg)
+                args.llm, config=llm_cfg, trust_remote_code=True)
 
             # Ensure all numerical values in the optimizer are fp32.
             # FSDP will use low precision during forward.
