@@ -30,6 +30,7 @@ from torch.distributed.checkpoint.state_dict import (StateDictOptions,
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import MixedPrecision
+from torch.distributed.fsdp.api import ShardingStrategy
 from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
 from torch.distributed.fsdp.wrap import _or_policy
 from torch.optim import AdamW
@@ -125,6 +126,11 @@ def parse_args():
               'The maximum is 1; the larger the value, the less memory '
               'required for training. The default is 1, meaning all layers '
               'need to be re-computated.'))
+    model_args.add_argument(
+        '--shard-strategy',
+        default='full',
+        choices=['full', 'hybrid'],
+        help=('The sharding strategy to be used for distributed training.'))
 
     data_args = parser.add_argument_group('data', 'Dataset Related Settings')
     data_args.add_argument(
@@ -478,10 +484,6 @@ def sft(args):
         raise RuntimeError('`dtype` only supports `fp16`，`bf16`, or `auto`, '
                            f'but found {args.dtype}.')
 
-    if not args.use_lora:
-        autocast = nullcontext()
-        scaler = None
-
     llm_cfg = AutoConfig.from_pretrained(args.llm, trust_remote_code=True)
     if is_flash_attn_2_available():
         llm_cfg.attn_implementation = 'flash_attention_2'
@@ -564,10 +566,18 @@ def sft(args):
     if args.use_lora:
         policies.append(all_required_grad_wrap_policy)
 
+    if args.shard_strategy == 'full':
+        strategy = ShardingStrategy.FULL_SHARD
+    elif args.shard_strategy == 'hybrid':
+        strategy = ShardingStrategy.HYBRID_SHARD
+    else:
+        raise ValueError
+
     torch.cuda.reset_peak_memory_stats()
     shard_llm = FSDP(
         meta_llm,
         device_mesh=dp_mesh,
+        sharding_strategy=strategy,
         auto_wrap_policy=partial(_or_policy, policies=policies),
         mixed_precision=MixedPrecision(
             param_dtype=dtype, reduce_dtype=dtype, buffer_dtype=dtype),
@@ -684,7 +694,7 @@ def sft(args):
             packed_ctx = packed_sequence(num_tokens, enable=pack_batch)
 
             with packed_ctx:
-                with autocast:
+                with autocast if args.use_lora else nullcontext():
                     outputs = shard_llm(
                         input_ids=input_ids,
                         labels=labels,
