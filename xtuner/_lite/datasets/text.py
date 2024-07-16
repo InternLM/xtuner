@@ -4,7 +4,6 @@ import random
 
 import torch
 from torch.nn.utils.rnn import pad_sequence
-from transformers.utils.import_utils import is_flash_attn_2_available
 
 from xtuner._lite.chat import ChatMessages
 from xtuner.utils import DEFAULT_PAD_TOKEN_INDEX, IGNORE_INDEX
@@ -33,15 +32,11 @@ class TextTokenizeFunction():
 
 class SoftPackerForText(torch.utils.data.Dataset):
 
-    def __init__(self, dataset, max_length=2048, use_varlen_attn=True):
+    def __init__(self, dataset, max_length=2048):
         super().__init__()
 
-        if use_varlen_attn and not is_flash_attn_2_available():
-            raise NotImplementedError('`use_varlen_attn=True` requires the '
-                                      'installation of `flash_attn`')
-
         self.max_length = max_length
-        self.use_varlen_attn = use_varlen_attn
+
         # unpack dataset
         self.dataset = dataset
 
@@ -94,10 +89,17 @@ class SoftPackerForText(torch.utils.data.Dataset):
             _num_tokens = self.dataset[i]['num_tokens']
             num_tokens.append(_num_tokens)
 
+        if len(packed_input_ids) < self.max_length:
+            num_pad_tokens = self.max_length - len(packed_input_ids)
+            packed_input_ids.extend([DEFAULT_PAD_TOKEN_INDEX] * num_pad_tokens)
+            packed_labels.extend([IGNORE_INDEX] * num_pad_tokens)
+            num_tokens.append(num_pad_tokens)
+
         packed = {
             'input_ids': packed_input_ids,
             'labels': packed_labels,
             'num_tokens': num_tokens,
+            'num_pad_tokens': num_pad_tokens
         }
 
         return packed
@@ -183,15 +185,10 @@ class HardPackerForText(torch.utils.data.Dataset):
         recording the number of tokens for each piece of data.
     """
 
-    def __init__(self, dataset, max_length=2048, use_varlen_attn=True):
+    def __init__(self, dataset, max_length=2048):
         super().__init__()
 
-        if use_varlen_attn and not is_flash_attn_2_available():
-            raise NotImplementedError('`use_varlen_attn=True` requires the '
-                                      'installation of `flash_attn`')
-
         self.max_length = max_length
-        self.use_varlen_attn = use_varlen_attn
         # unpack dataset
         self.dataset = dataset
 
@@ -237,7 +234,6 @@ class HardPackerForText(torch.utils.data.Dataset):
 
         trunc_input_ids = []
         trunc_labels = []
-        trunc_position_ids = []
         trunc_sizes = []
 
         for i in range(left, right):
@@ -259,12 +255,11 @@ class HardPackerForText(torch.utils.data.Dataset):
             # to trunc_ids and trunc_labels
             trunc_input_ids.extend(ori_input_ids[inner_l:inner_r])
             trunc_labels.extend(ori_labels[inner_l:inner_r])
-            trunc_position_ids.extend(range(inner_r - inner_l))
             trunc_sizes.append(inner_r - inner_l)
 
         # return populated lists of truncated ids, labels and their cumulative
         # lengths
-        return trunc_input_ids, trunc_labels, trunc_position_ids, trunc_sizes
+        return trunc_input_ids, trunc_labels, trunc_sizes
 
     def __len__(self):
         return self._num_packed_samples
@@ -285,19 +280,13 @@ class HardPackerForText(torch.utils.data.Dataset):
 
         # Extract data within the range from the shuffled original dataset.
         _res = self._pack_ids_and_labels_in_range(begin, end)
-        packed_input_ids, packed_labels, packed_pos_ids, unpack_sizes = _res
+        packed_input_ids, packed_labels, num_tokens = _res
         assert self.max_length == len(packed_input_ids) == len(packed_labels)
-
-        if self.use_varlen_attn:
-            position_ids = packed_pos_ids
-        else:
-            position_ids = [i for i in range(self.max_length)]
-
+        num_tokens.append(0)
         packed = {
             'input_ids': packed_input_ids,
             'labels': packed_labels,
-            'position_ids': position_ids,
-            'chunk_sizes': unpack_sizes,
+            'num_tokens': num_tokens,
         }
 
         return packed
@@ -314,7 +303,6 @@ class TextCollator():
 
         input_ids = []
         labels = []
-        attention_mask = []
         num_tokens = []
 
         for data in instances:

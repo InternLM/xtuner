@@ -695,7 +695,14 @@ def sft(args):
                     avg_iter_loss.backward()
 
             step_loss += avg_iter_loss.item()
-            step_consumed_tokens += num_tokens.sum()
+            if args.dset_pack_level == 'soft':
+                # During a soft pack process, the data with a length that is
+                # still smaller than the max length after packing, will be
+                # padded to the max length. The last element of num tokens
+                # represents the count of pad tokens.
+                step_consumed_tokens += num_tokens[:-1].sum()
+            else:
+                step_consumed_tokens += num_tokens.sum()
 
         grad_norm = shard_llm.clip_grad_norm_(args.max_grad_norm)
         optimizer.step()
