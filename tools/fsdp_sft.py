@@ -394,8 +394,10 @@ def sft(args):
 
         num_datasets = len(_datasets)
 
-        if args.dset_cache_dir and rank == 0:
-
+        if rank == 0 and args.dset_cache_dir and args.dset_pack_level:
+            # During data packing, it is essential to tokenize the data in
+            # advance, cache the tokenized data, so that it can be quickly
+            # loaded for the second training without the need to re-tokenize.
             if os.path.isdir(args.dset_cache_dir):
                 if len(os.listdir(args.dset_cache_dir)):
                     logger.warning(f'`{args.dset_cache_dir}` is not an empty '
