@@ -99,7 +99,6 @@ class SoftPackerForText(torch.utils.data.Dataset):
             'input_ids': packed_input_ids,
             'labels': packed_labels,
             'num_tokens': num_tokens,
-            'num_pad_tokens': num_pad_tokens
         }
 
         return packed
