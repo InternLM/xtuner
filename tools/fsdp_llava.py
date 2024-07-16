@@ -3,6 +3,7 @@ import argparse
 import copy
 import math
 import os
+import shutil
 import sys
 import time
 from collections import OrderedDict
@@ -14,6 +15,7 @@ import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
 from accelerate.utils import set_module_tensor_to_device
+from datasets import Dataset, load_from_disk
 from mmengine import load, mkdir_or_exist
 from mmengine.dist import infer_launcher, init_dist
 from mmengine.runner import set_random_seed
@@ -33,6 +35,7 @@ from torch.distributed.fsdp.wrap import _or_policy
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR
 from torch.utils.data import ConcatDataset, DataLoader
+from tqdm import tqdm
 from transformers import (AutoConfig, AutoModelForCausalLM, AutoProcessor,
                           CLIPVisionModel, LlavaConfig,
                           LlavaForConditionalGeneration)
@@ -48,7 +51,7 @@ from xtuner._lite.accelerate.fsdp import (RECOMPUTE_MODULES,
                                           layer_auto_wrap_policy)
 from xtuner._lite.chat import CHAT_TEMPLATE_MAP
 from xtuner._lite.datasets import (LlavaCollator, LlavaRawDataset,
-                                   LlavaTokenizeFunction)
+                                   LlavaTokenizeFunction, SoftPackerForLlava)
 from xtuner._lite.datasets.load import LOAD_FN_MAP, load_datasets
 from xtuner._lite.parallel import ParallelSampler
 
@@ -183,6 +186,26 @@ def parse_args():
         default=LOAD_FN_MAP.keys(),
         choices=LOAD_FN_MAP.keys(),
         help='the file type that needs to be loaded')
+    data_args.add_argument(
+        '--dset-cache-dir',
+        help=('the cache dir of the loaded datasets. When the `datasets` is '
+              'set, the loaded datasets will be cached to this dir. If the '
+              '`datasets` are not set, the cached dataset in this dir will be '
+              'loaded.'))
+    data_args.add_argument(
+        '--dset-from-cache',
+        action='store_true',
+        help=('Load data directly from `dset-cache-dir`. This can save time '
+              'on online tokenization, but if the tokenizer changed, '
+              'recaching is needed.'))
+    data_args.add_argument(
+        '--dset-pack-level',
+        choices=['soft'],
+        help=('the level of data packing. When `hard`, multiple data will be '
+              'packed to `max_length`, potentially causing some data to be '
+              'truncated, and the length of the packed data will always '
+              'be `max_length`; When `soft`, it will pack multiple  data '
+              'into nearly `max_length` without truncating the data.'))
     data_args.add_argument(
         '--max-length',
         type=int,
@@ -363,46 +386,101 @@ def llava(args):
 
     img_processor = AutoProcessor.from_pretrained(args.vit).image_processor
 
-    dset_infos = load(args.datasets)
+    if args.dset_from_cache:
+        if dist.get_rank() == 0:
+            _datasets = []
+            cache_dir = args.dset_cache_dir
+            desc = f'[Rank {rank}] Load Cached Datasets'
+            for sub_dir in tqdm(os.listdir(cache_dir), desc=desc):
+                dset = load_from_disk(os.path.join(cache_dir, sub_dir))
+                _datasets.append(dset)
 
-    sample_ratios = []
-    annotations = []
-    init_fns = []
-    for _, info in dset_infos.items():
-        if 'format' in info:
-            dset_format = info['format']
+            objects = [_datasets]
         else:
-            dset_format = 'llava'
+            objects = [None]
 
-        image_dir = info['image_dir']
+        dist.broadcast_object_list(objects, src=0)
+        _datasets = objects[0]
 
-        # The following function is used to tokenize an original sample.
-        # If your data format is different, you should redefine a `tokenize_fn`
-        # The tokenized data must include `input_ids`, `labels``,
-        # and `num_tokens`.
-        tokenize_fn = LlavaTokenizeFunction(tokenizer, chat_template,
-                                            image_dir, dset_format)
+    else:
+        dset_infos = load(args.datasets)
 
-        init_fn = partial(
-            LlavaRawDataset,
-            image_processor=img_processor,
-            tokenize_fn=tokenize_fn)
-        init_fns.append(init_fn)
+        sample_ratios = []
+        annotations = []
+        init_fns = []
+        tokenize_fns = []
+        for _, info in dset_infos.items():
+            if 'format' in info:
+                dset_format = info['format']
+            else:
+                dset_format = 'llava'
 
-        sample_ratios.append(info['sample_ratio'])
-        annotations.append(info['annotations'])
+            image_dir = info['image_dir']
 
-    _datasets = load_datasets(
-        paths=annotations,
-        file_types=args.dset_file_types,
-        sources='local',
-        sample_ratios=sample_ratios,
-        num_proc=max(args.num_workers, 1),
-        init_fns=init_fns)
+            # The following function is used to tokenize an original sample.
+            # If your data format is different, you should redefine a
+            # `tokenize_fn`.
+            # The tokenized data must include `input_ids`, `labels``,
+            # and `num_tokens`.
+            tokenize_fn = LlavaTokenizeFunction(tokenizer, chat_template,
+                                                image_dir, dset_format)
 
-    logger.info(_datasets[0][0])
+            if args.dset_pack_level:
+                init_fn = Dataset.from_list
+            else:
+                init_fn = partial(
+                    LlavaRawDataset,
+                    image_processor=img_processor,
+                    tokenize_fn=tokenize_fn)
+                tokenize_fn = None
 
-    train_dataset = ConcatDataset(_datasets)
+            init_fns.append(init_fn)
+            tokenize_fns.append(tokenize_fn)
+            sample_ratios.append(info['sample_ratio'])
+            annotations.append(info['annotations'])
+
+        _datasets = load_datasets(
+            paths=annotations,
+            file_types=args.dset_file_types,
+            sources='local',
+            sample_ratios=sample_ratios,
+            num_proc=max(args.num_workers, 1),
+            map_fns=tokenize_fns,
+            init_fns=init_fns)
+
+        num_datasets = len(_datasets)
+
+        if rank == 0 and args.dset_cache_dir and args.dset_pack_level:
+            # During data packing, it is essential to tokenize the data in
+            # advance, cache the tokenized data, so that it can be quickly
+            # loaded for the second training without the need to re-tokenize.
+            if os.path.isdir(args.dset_cache_dir):
+                if len(os.listdir(args.dset_cache_dir)):
+                    logger.warning(f'`{args.dset_cache_dir}` is not an empty '
+                                   'folder, which may lead to inaccurate '
+                                   'cache results.')
+
+            for i, dset in tqdm(enumerate(_datasets), desc='Caching'):
+                digits = len(str(abs(num_datasets)))
+                cache_id = f'cache-{i+1:0{digits}}-of-{num_datasets:0{digits}}'
+                cache_dir = args.dset_cache_dir
+                sub_cache_dir = os.path.join(cache_dir, cache_id)
+                if os.path.exists(sub_cache_dir):
+                    shutil.rmtree(sub_cache_dir)
+                    logger.warning(f'Found {sub_cache_dir} exists. '
+                                   'Clear it and re-cache.')
+                dset.save_to_disk(sub_cache_dir)
+
+    datasets = []
+    for i, dset in enumerate(_datasets):
+        if args.dset_pack_level and args.dset_pack_level == 'soft':
+            _dset = SoftPackerForLlava(dset, img_processor, args.max_length)
+        else:
+            _dset = dset
+
+        datasets.append(_dset)
+
+    train_dataset = ConcatDataset(datasets)
 
     pack_batch = is_flash_attn_2_available()
     collator = LlavaCollator(pack_batch=pack_batch)

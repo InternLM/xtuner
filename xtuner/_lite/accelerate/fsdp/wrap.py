@@ -7,9 +7,6 @@ _LAYERS = [
     'InternLM2DecoderLayer', 'CLIPVisionModel', 'LlavaMultiModalProjector'
 ]
 
-from torch.distributed.fsdp.wrap import (_or_policy, lambda_auto_wrap_policy,
-                                         transformer_auto_wrap_policy)
-
 
 def layer_auto_wrap_policy(
     module,

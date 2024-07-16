@@ -1,18 +1,13 @@
-import bisect
-import itertools
 import os
-import random
 
 import torch
 from PIL import Image
 from torch.nn.utils.rnn import pad_sequence
-from torch.utils.data import Dataset
-from transformers.utils.import_utils import is_flash_attn_2_available
 
 from xtuner._lite.chat import ChatMessages
 from xtuner.utils import DEFAULT_PAD_TOKEN_INDEX, IGNORE_INDEX
 from .format import OPENAI_FORMAT_MAP
-from .text import HardPackerForText, SoftPackerForText
+from .text import SoftPackerForText
 
 
 def distinguish_image_or_text(item):
@@ -115,12 +110,8 @@ class LlavaRawDataset(LlavaTokenizedDataset):
 
 class SoftPackerForLlava(SoftPackerForText):
 
-    def __init__(self,
-                 dataset,
-                 image_processor,
-                 max_length=2048,
-                 use_varlen_attn=True):
-        super().__init__(dataset, max_length, use_varlen_attn)
+    def __init__(self, dataset, image_processor, max_length=2048):
+        super().__init__(dataset, max_length)
         self.image_processor = image_processor
 
     def __getitem__(self, item):
@@ -160,6 +151,12 @@ class SoftPackerForLlava(SoftPackerForText):
             pixel_values = outputs['pixel_values']
         else:
             pixel_values = None
+
+        if sum(packed_num_tokens) < self.max_length:
+            num_pad_tokens = self.max_length - sum(packed_num_tokens)
+            packed_input_ids.extend([DEFAULT_PAD_TOKEN_INDEX] * num_pad_tokens)
+            packed_labels.extend([IGNORE_INDEX] * num_pad_tokens)
+            packed_num_tokens.append(num_pad_tokens)
 
         packed = {
             'input_ids': packed_input_ids,

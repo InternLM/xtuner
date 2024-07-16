@@ -7,6 +7,8 @@ from .text import (HardPackerForText, SoftPackerForText, TextCollator,
                    TextRawDataset, TextTokenizedDataset, TextTokenizeFunction)
 
 __all__ = [
-    'BaseTrainDataset',
-    'FinetuneDataset',
+    'OPENAI_FORMAT_MAP', 'LlavaCollator', 'LlavaRawDataset',
+    'LlavaTokenizedDataset', 'LlavaTokenizeFunction', 'SoftPackerForLlava',
+    'load_datasets', 'HardPackerForText', 'SoftPackerForText', 'TextCollator',
+    'TextRawDataset', 'TextTokenizedDataset', 'TextTokenizeFunction'
 ]

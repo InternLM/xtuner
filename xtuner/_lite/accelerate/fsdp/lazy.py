@@ -1,15 +1,10 @@
 import torch
-from torch.nn import Parameter
 
 
 @torch.no_grad
 def dp_lazy_init(module, module_map, dp_mesh):
     device = torch.cuda.current_device()
     module.to_empty(device=torch.cuda.current_device(), recurse=False)
-
-    # for name, param in module.named_parameters(recurse=False):
-    #     if param.requires_grad:
-    #         module.register_parameter(name, Parameter(param.to(torch.float32)))
 
     if dp_mesh.get_local_rank() == 0:
         master_module = module_map[module]

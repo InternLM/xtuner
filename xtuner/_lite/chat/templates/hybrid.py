@@ -89,6 +89,7 @@ class HybridChatTemplate(BaseModel):
     @field_validator('system')
     def check_system(cls, v: str) -> str:
         """Validate that `system` contains '{system}'.
+
         If not, raises a ValueError.
         """
         if v is not None and '{system}' not in v:
@@ -98,6 +99,7 @@ class HybridChatTemplate(BaseModel):
     @field_validator('user')
     def check_user(cls, v: str) -> str:
         """Validate that `user` contains '{user}'.
+
         If not, raises a ValueError.
         """
         if v is not None and '{user}' not in v:
@@ -107,6 +109,7 @@ class HybridChatTemplate(BaseModel):
     @field_validator('assistant')
     def check_assistant(cls, v: str) -> str:
         """Validate that `assistant` contains '{assistant}'.
+
         If not, raises a ValueError.
         """
         if v is not None and '{assistant}' not in v:
@@ -117,6 +120,7 @@ class HybridChatTemplate(BaseModel):
     @field_validator('function_call')
     def check_function_call(cls, v: str) -> str:
         """Validate that `function_call` contains '{function_call}'.
+
         If not, raises a ValueError.
         """
         if (v is not None and '{function_call}' not in v
@@ -132,6 +136,7 @@ class HybridChatTemplate(BaseModel):
     @field_validator('function_result')
     def check_function_result(cls, v: str) -> str:
         """Validate that `function_result` contains '{function_result}'.
+
         If not, raises a ValueError.
         """
         if v is not None and '{function_result}' not in v:
@@ -142,6 +147,7 @@ class HybridChatTemplate(BaseModel):
     @field_validator('functions')
     def check_functions(cls, v: str) -> str:
         """Validate that `functions` contains '{functions}'.
+
         If not, raises a ValueError.
         """
         if v is not None and '{functions}' not in v:
@@ -152,6 +158,7 @@ class HybridChatTemplate(BaseModel):
     @field_validator('code_interpreter')
     def check_code_interpreter(cls, v: str) -> str:
         """Validate that `code_interpreter` contains '{code_interpreter}'.
+
         If not, raises a ValueError.
         """
         if v is not None and '{code_interpreter}' not in v:
@@ -163,6 +170,7 @@ class HybridChatTemplate(BaseModel):
     def check_code_interpreter_call(cls, v: str) -> str:
         """Validate that `code_interpreter_call` contains
         '{code_interpreter_call}'.
+
         If not, raises a ValueError.
         """
         if (v is not None and '{code_interpreter_call}' not in v
@@ -178,6 +186,7 @@ class HybridChatTemplate(BaseModel):
     def check_code_interpreter_result(cls, v: str) -> str:
         """Validate that `code_interpreter_result` contains
         '{code_interpreter_result}'.
+
         If not, raises a ValueError.
         """
         if v is not None and '{code_interpreter_result}' not in v:

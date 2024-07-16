@@ -1,16 +1,12 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-import warnings
-from typing import List, Optional, Tuple, Union
+from typing import Optional, Tuple
 
 import torch
-import torch.nn.functional as F
 from einops import rearrange
 from mmengine import MessageHub
 from transformers.cache_utils import StaticCache
-from transformers.modeling_outputs import BaseModelOutputWithPast
 
-from ._attention import (SUPPORT_FLASH2, flash_attn_w_mask, flash_attn_wo_mask,
-                         varlen_flash_attn)
+from ._attention import SUPPORT_FLASH2, flash_attn_wo_mask, varlen_flash_attn
 
 
 class InternLM2RotaryEmbedding(torch.nn.Module):

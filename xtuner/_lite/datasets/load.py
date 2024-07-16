@@ -6,7 +6,6 @@ import random
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 
-from datasets import Dataset
 from torch import distributed as dist
 from tqdm import tqdm
 
