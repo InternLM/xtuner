@@ -3,7 +3,6 @@ import argparse
 import copy
 import math
 import os
-import shutil
 import sys
 import time
 from collections import OrderedDict
@@ -15,7 +14,7 @@ import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
 from accelerate.utils import set_module_tensor_to_device
-from datasets import Dataset, load_from_disk
+from datasets import Dataset
 from mmengine import load, mkdir_or_exist
 from mmengine.dist import infer_launcher, init_dist
 from mmengine.runner import set_random_seed
@@ -35,7 +34,6 @@ from torch.distributed.fsdp.wrap import _or_policy
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR
 from torch.utils.data import ConcatDataset, DataLoader
-from tqdm import tqdm
 from transformers import (AutoConfig, AutoModelForCausalLM, AutoProcessor,
                           CLIPVisionModel, LlavaConfig,
                           LlavaForConditionalGeneration)
