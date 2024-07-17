@@ -49,13 +49,13 @@ class SoftPackerForText(torch.utils.data.Dataset):
         _packed_items = []
         self.pack_lut = []
 
-        for i in inds:
-            if self._ori_lens[i] + _packed_length <= max_length:
-                _packed_items.append(i)
-                _packed_length += self._ori_lens[i]
+        for shfl_i in inds:
+            if self._ori_lens[shfl_i] + _packed_length <= max_length:
+                _packed_items.append(shfl_i)
+                _packed_length += self._ori_lens[shfl_i]
             else:
                 self.pack_lut.append(_packed_items)
-                _packed_items = []
+                _packed_items = [shfl_i]
                 _packed_length = 0
 
         if len(_packed_items) > 0:
