@@ -45,21 +45,22 @@ class SoftPackerForText(torch.utils.data.Dataset):
         inds = [i for i in range(len(self.dataset))]
         random.shuffle(inds)
 
-        _packed_length = 0
-        _packed_items = []
+        item_buffer = []
+        length_buffer = []
         self.pack_lut = []
 
         for shfl_i in inds:
-            if self._ori_lens[shfl_i] + _packed_length <= max_length:
-                _packed_items.append(shfl_i)
-                _packed_length += self._ori_lens[shfl_i]
+            if self._ori_lens[shfl_i] + sum(length_buffer) <= max_length:
+                item_buffer.append(shfl_i)
+                length_buffer.append(self._ori_lens[shfl_i])
             else:
-                self.pack_lut.append(_packed_items)
-                _packed_items = [shfl_i]
-                _packed_length = self._ori_lens[shfl_i]
+                if len(item_buffer) > 0:
+                    self.pack_lut.append(item_buffer)
+                item_buffer = [shfl_i]
+                length_buffer = [self._ori_lens[shfl_i]]
 
-        if len(_packed_items) > 0:
-            self.pack_lut.append(_packed_items)
+        if len(item_buffer) > 0:
+            self.pack_lut.append(item_buffer)
 
         # The number of data items after packing
         self._num_packed_samples = len(self.pack_lut)
@@ -78,6 +79,7 @@ class SoftPackerForText(torch.utils.data.Dataset):
         """
 
         packed_items = self.pack_lut[item]
+        assert len(packed_items) > 0
 
         packed_input_ids = []
         packed_labels = []
