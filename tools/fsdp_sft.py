@@ -3,7 +3,6 @@ import argparse
 import copy
 import math
 import os
-import shutil
 import sys
 import time
 from collections import OrderedDict
@@ -15,7 +14,7 @@ import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
 from accelerate.utils import set_module_tensor_to_device
-from datasets import Dataset, load_from_disk
+from datasets import Dataset
 from mmengine import mkdir_or_exist
 from mmengine.dist import infer_launcher, init_dist
 from mmengine.runner import set_random_seed
@@ -36,7 +35,7 @@ from torch.distributed.fsdp.wrap import _or_policy
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR
 from torch.utils.data import ConcatDataset, DataLoader
-from tqdm import tqdm
+
 from transformers import AutoConfig, AutoModelForCausalLM
 from transformers.utils.import_utils import (is_flash_attn_2_available,
                                              is_torch_sdpa_available)
@@ -52,7 +51,8 @@ from xtuner._lite.chat import CHAT_TEMPLATE_MAP
 from xtuner._lite.datasets import (HardPackerForText, SoftPackerForText,
                                    TextCollator, TextRawDataset,
                                    TextTokenizeFunction)
-from xtuner._lite.datasets.load import LOAD_FN_MAP, load_datasets
+from xtuner._lite.datasets.load import (LOAD_FN_MAP, load_datasets,
+                                        load_from_cache)
 from xtuner._lite.parallel import ParallelSampler
 
 logger = get_logger()
@@ -299,6 +299,12 @@ def sft(args):
                          f'should be divisible by the world_size{world_size}*'
                          f'`mirco_batch_size`({args.mirco_batch_size})')
 
+    if args.dset_cache_dir and os.path.isdir(args.dset_cache_dir):
+        if len(os.listdir(args.dset_cache_dir)):
+            logger.warning(f'`{args.dset_cache_dir}` is not an empty '
+                           'folder, which may lead to inaccurate '
+                           'cache results.')
+
     device_mesh = init_device_mesh(
         'cuda', (dp_size, ), mesh_dim_names=('dp', ))
 
@@ -353,21 +359,7 @@ def sft(args):
         padding_side='right')
 
     if args.dset_from_cache:
-        if dist.get_rank() == 0:
-            _datasets = []
-            cache_dir = args.dset_cache_dir
-            desc = f'[Rank {rank}] Load Cached Datasets'
-            for sub_dir in tqdm(os.listdir(cache_dir), desc=desc):
-                dset = load_from_disk(os.path.join(cache_dir, sub_dir))
-                _datasets.append(dset)
-
-            objects = [_datasets]
-        else:
-            objects = [None]
-
-        dist.broadcast_object_list(objects, src=0)
-        _datasets = objects[0]
-
+        _datasets = load_from_cache(args.dset_cache_dir)
     else:
 
         tokenize_fns = []
@@ -398,39 +390,27 @@ def sft(args):
             map_fns=tokenize_fns,
             init_fns=init_fns)
 
-        num_datasets = len(_datasets)
-
-        if rank == 0 and args.dset_cache_dir and args.dset_pack_level:
-            # During data packing, it is essential to tokenize the data in
-            # advance, cache the tokenized data, so that it can be quickly
-            # loaded for the second training without the need to re-tokenize.
-            if os.path.isdir(args.dset_cache_dir):
-                if len(os.listdir(args.dset_cache_dir)):
-                    logger.warning(f'`{args.dset_cache_dir}` is not an empty '
-                                   'folder, which may lead to inaccurate '
-                                   'cache results.')
-
-            for i, dset in tqdm(enumerate(_datasets), desc='Caching'):
-                digits = len(str(abs(num_datasets)))
-                cache_id = f'cache-{i+1:0{digits}}-of-{num_datasets:0{digits}}'
-                cache_dir = args.dset_cache_dir
-                sub_cache_dir = os.path.join(cache_dir, cache_id)
-                if os.path.exists(sub_cache_dir):
-                    shutil.rmtree(sub_cache_dir)
-                    logger.warning(f'Found {sub_cache_dir} exists. '
-                                   'Clear it and re-cache.')
-                dset.save_to_disk(sub_cache_dir)
-
     datasets = []
-    for i, dset in enumerate(_datasets):
-        if args.dset_pack_level and args.dset_pack_level == 'soft':
+    if args.dset_pack_level and args.dset_pack_level == 'soft':
+        for i, dset in enumerate(_datasets):
             _dset = SoftPackerForText(dset, args.max_length)
-        elif args.dset_pack_level and args.dset_pack_level == 'hard':
+            datasets.append(_dset)
+    elif args.dset_pack_level and args.dset_pack_level == 'hard':
+        for i, dset in enumerate(_datasets):
             _dset = HardPackerForText(dset, args.max_length)
-        else:
-            _dset = dset
+            datasets.append(_dset)
+    else:
+        for i, dset in enumerate(_datasets):
+            datasets.append(dset)
 
-        datasets.append(_dset)
+    if args.dset_pack_level and rank == 0:
+        num_tokens = [torch.tensor(dset['num_tokens']) for dset in _datasets]
+        num_tokens = torch.cat(num_tokens, dim=0)
+        logger.info(f'[Dataset] {sum(num_tokens)} tokens.')
+        for i in range(4):
+            length = args.max_length // (i + 1)
+            greater = (num_tokens > length).sum()
+            logger.info(f'[Dataset] (> {length} tokens) {greater} samples')
 
     train_dataset = ConcatDataset(datasets)
 

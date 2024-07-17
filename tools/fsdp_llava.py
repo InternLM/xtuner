@@ -52,7 +52,8 @@ from xtuner._lite.accelerate.fsdp import (RECOMPUTE_MODULES,
 from xtuner._lite.chat import CHAT_TEMPLATE_MAP
 from xtuner._lite.datasets import (LlavaCollator, LlavaRawDataset,
                                    LlavaTokenizeFunction, SoftPackerForLlava)
-from xtuner._lite.datasets.load import LOAD_FN_MAP, load_datasets
+from xtuner._lite.datasets.load import (LOAD_FN_MAP, load_from_cache,
+                                        load_local_datasets)
 from xtuner._lite.parallel import ParallelSampler
 
 logger = get_logger()
@@ -319,6 +320,15 @@ def llava(args):
                          f'should be divisible by the world_size{world_size}*'
                          f'`mirco_batch_size`({args.mirco_batch_size})')
 
+    # During data packing, it is essential to tokenize the data in
+    # advance, cache the tokenized data, so that it can be quickly
+    # loaded for the second training without the need to re-tokenize.
+    if os.path.isdir(args.dset_cache_dir):
+        if len(os.listdir(args.dset_cache_dir)):
+            logger.warning(f'`{args.dset_cache_dir}` is not an empty '
+                           'folder, which may lead to inaccurate '
+                           'cache results.')
+
     device_mesh = init_device_mesh(
         'cuda', (dp_size, ), mesh_dim_names=('dp', ))
 
@@ -372,6 +382,13 @@ def llava(args):
         trust_remote_code=True,
         padding_side='right')
 
+    _vision_config = AutoConfig.from_pretrained(args.vit).vision_config
+    img_processor = AutoProcessor.from_pretrained(args.vit).image_processor
+    _crop_size = img_processor.crop_size
+    patch_size = _vision_config.patch_size
+    img_size = (_crop_size['height'], _crop_size['width'])
+    per_img_tokens = (img_size[0] // patch_size) * (img_size[1] // patch_size)
+
     img_token = chat_template.image_token
     need_resize_emb = False
     if len(tokenizer.convert_tokens_to_ids([img_token])) > 1:
@@ -384,23 +401,8 @@ def llava(args):
     else:
         img_token_id = tokenizer.convert_tokens_to_ids([img_token])[0]
 
-    img_processor = AutoProcessor.from_pretrained(args.vit).image_processor
-
     if args.dset_from_cache:
-        if dist.get_rank() == 0:
-            _datasets = []
-            cache_dir = args.dset_cache_dir
-            desc = f'[Rank {rank}] Load Cached Datasets'
-            for sub_dir in tqdm(os.listdir(cache_dir), desc=desc):
-                dset = load_from_disk(os.path.join(cache_dir, sub_dir))
-                _datasets.append(dset)
-
-            objects = [_datasets]
-        else:
-            objects = [None]
-
-        dist.broadcast_object_list(objects, src=0)
-        _datasets = objects[0]
+        _datasets = load_from_cache(args.dset_cache_dir)
 
     else:
         dset_infos = load(args.datasets)
@@ -415,7 +417,10 @@ def llava(args):
             else:
                 dset_format = 'llava'
 
-            image_dir = info['image_dir']
+            if 'image_dir' in info:
+                image_dir = info['image_dir']
+            else:
+                image_dir = None
 
             # The following function is used to tokenize an original sample.
             # If your data format is different, you should redefine a
@@ -423,7 +428,8 @@ def llava(args):
             # The tokenized data must include `input_ids`, `labels``,
             # and `num_tokens`.
             tokenize_fn = LlavaTokenizeFunction(tokenizer, chat_template,
-                                                image_dir, dset_format)
+                                                per_img_tokens, image_dir,
+                                                dset_format)
 
             if args.dset_pack_level:
                 init_fn = Dataset.from_list
@@ -439,46 +445,32 @@ def llava(args):
             sample_ratios.append(info['sample_ratio'])
             annotations.append(info['annotations'])
 
-        _datasets = load_datasets(
+        _datasets = load_local_datasets(
             paths=annotations,
+            cache_dir=args.dset_cache_dir,
             file_types=args.dset_file_types,
-            sources='local',
             sample_ratios=sample_ratios,
             num_proc=max(args.num_workers, 1),
             map_fns=tokenize_fns,
             init_fns=init_fns)
 
-        num_datasets = len(_datasets)
-
-        if rank == 0 and args.dset_cache_dir and args.dset_pack_level:
-            # During data packing, it is essential to tokenize the data in
-            # advance, cache the tokenized data, so that it can be quickly
-            # loaded for the second training without the need to re-tokenize.
-            if os.path.isdir(args.dset_cache_dir):
-                if len(os.listdir(args.dset_cache_dir)):
-                    logger.warning(f'`{args.dset_cache_dir}` is not an empty '
-                                   'folder, which may lead to inaccurate '
-                                   'cache results.')
-
-            for i, dset in tqdm(enumerate(_datasets), desc='Caching'):
-                digits = len(str(abs(num_datasets)))
-                cache_id = f'cache-{i+1:0{digits}}-of-{num_datasets:0{digits}}'
-                cache_dir = args.dset_cache_dir
-                sub_cache_dir = os.path.join(cache_dir, cache_id)
-                if os.path.exists(sub_cache_dir):
-                    shutil.rmtree(sub_cache_dir)
-                    logger.warning(f'Found {sub_cache_dir} exists. '
-                                   'Clear it and re-cache.')
-                dset.save_to_disk(sub_cache_dir)
-
     datasets = []
-    for i, dset in enumerate(_datasets):
-        if args.dset_pack_level and args.dset_pack_level == 'soft':
+    if args.dset_pack_level and args.dset_pack_level == 'soft':
+        for i, dset in enumerate(_datasets):
             _dset = SoftPackerForLlava(dset, img_processor, args.max_length)
-        else:
-            _dset = dset
+            datasets.append(_dset)
+    else:
+        for i, dset in enumerate(_datasets):
+            datasets.append(dset)
 
-        datasets.append(_dset)
+    if args.dset_pack_level and rank == 0:
+        num_tokens = [torch.tensor(dset['num_tokens']) for dset in _datasets]
+        num_tokens = torch.cat(num_tokens, dim=0)
+        logger.info(f'[Dataset] {sum(num_tokens)} tokens.')
+        for i in range(4):
+            length = args.max_length // (i + 1)
+            greater = (num_tokens > length).sum()
+            logger.info(f'[Dataset] (> {length} tokens) {greater} samples')
 
     train_dataset = ConcatDataset(datasets)
 
@@ -543,7 +535,7 @@ def llava(args):
         _text_config.attn_implementation = 'sdpa'
 
     _text_config.use_cache = False
-    _vision_config = AutoConfig.from_pretrained(args.vit).vision_config
+
     llava_config = LlavaConfig(
         _vision_config, _text_config, image_token_index=img_token_id)
     text_config = _text_config
@@ -553,7 +545,6 @@ def llava(args):
 
         meta_llava_cfg = copy.deepcopy(llava_config)
         meta_llava = LlavaForConditionalGeneration(meta_llava_cfg)
-
         # model parameters must be in fp32.
         # this ensures that all numerical values in the optimizer are in fp32.
         # FSDP will use low precision during forward.
@@ -872,30 +863,32 @@ def llava(args):
             dist.barrier()
             del full_model_state_dict
 
-            # FSDP cannot be saved via torch.save
-            # Refer to https://pytorch.org/tutorials/recipes/distributed_checkpoint_recipe.html  # noqa: E501
-            _options = StateDictOptions(
-                cpu_offload=True, ignore_frozen_params=True)
-            (shard_model_state_dict,
-             shard_optimizer_state_dict) = get_state_dict(
-                 shard_llava, optimizer, options=_options)
+            if not args.checkpoint_drop_optimizer:
+                # FSDP cannot be saved via torch.save
+                # Refer to https://pytorch.org/tutorials/recipes/distributed_checkpoint_recipe.html  # noqa: E501
+                _options = StateDictOptions(
+                    cpu_offload=True, ignore_frozen_params=True)
+                (shard_model_state_dict,
+                 shard_optimizer_state_dict) = get_state_dict(
+                     shard_llava, optimizer, options=_options)
 
-            state_dict = {
-                'model': shard_model_state_dict,
-                'optimizer': shard_optimizer_state_dict,
-                'step': step,
-                'total_steps': total_steps,
-                'warmup_scheduler': warmup_scheduler.state_dict(),
-                'cosine_scheduler': cosine_scheduler.state_dict()
-            }
+                state_dict = {
+                    'model': shard_model_state_dict,
+                    'optimizer': shard_optimizer_state_dict,
+                    'step': step,
+                    'total_steps': total_steps,
+                    'warmup_scheduler': warmup_scheduler.state_dict(),
+                    'cosine_scheduler': cosine_scheduler.state_dict()
+                }
 
-            writer = dcp.FileSystemWriter(ckpt_dir)
-            mkdir_or_exist(ckpt_dir)
-            dcp.save(state_dict, writer)
+                writer = dcp.FileSystemWriter(ckpt_dir)
+                mkdir_or_exist(ckpt_dir)
+                dcp.save(state_dict, writer)
 
-            max_memory = torch.cuda.max_memory_allocated()
-            logger.info('[Checkpoint] During saving checkpoint, the peak GPU '
-                        f'memory is {max_memory/1024**3:.1f}GB.')
+                max_memory = torch.cuda.max_memory_allocated()
+                logger.info(
+                    '[Checkpoint] During saving checkpoint, the peak GPU '
+                    f'memory is {max_memory/1024**3:.1f}GB.')
 
     train_cost_time = time.time() - start_train_t
     logger.info(f'[Train] Cost {train_cost_time}s')

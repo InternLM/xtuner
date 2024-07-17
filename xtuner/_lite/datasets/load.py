@@ -5,10 +5,11 @@ import os
 import random
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
-
+from datasets import Dataset, load_from_disk
 from torch import distributed as dist
 from tqdm import tqdm
-
+import torch
+import shutil
 from xtuner._lite import get_logger
 
 logger = get_logger()
@@ -31,6 +32,7 @@ def load_jsonl(file):
 LOAD_FN_MAP = {
     '.json': load_json,
     '.jsonl': load_jsonl,
+    '.bin': torch.load
 }
 
 
@@ -115,125 +117,28 @@ def load_hf_dataset(path,
     return dataset
 
 
-def load_local_dataset(path,
+@master_only_load
+def load_from_cache(cache_dir):
+
+    datasets = []
+    desc = f'[Rank {rank}] Load Cached Datasets'
+    for sub_dir in tqdm(os.listdir(cache_dir), desc=desc):
+        dset = load_from_disk(os.path.join(cache_dir, sub_dir))
+        datasets.append(dset)
+    return datasets
+
+
+def load_local_datasets(paths,
                        file_types,
-                       sample_ratio=1.0,
+                       cache_dir=None,
+                       sample_ratios=1.0,
                        num_proc=8,
-                       map_fn=None,
-                       init_fn=None):
-
-    data_files = []
-    if os.path.isdir(path):
-        dir_files = []
-        for root, dirs, files in os.walk(path, followlinks=True):
-            dirs.sort()
-            for relative_path in sorted(files):
-                suffix = os.path.splitext(relative_path)[-1]
-
-                if suffix in file_types:
-                    absolute_path = os.path.join(root, relative_path)
-                    dir_files.append(absolute_path)
-
-        if len(dir_files) == 0:
-            raise RuntimeError(
-                f'There are no files with the suffix {file_types}'
-                f'in `{path}`.')
-
-        logger.info(f'Found {len(dir_files)} files in {path}')
-        data_files.extend(dir_files)
-
-    elif os.path.isfile(path):
-        data_files.append(path)
-    else:
-        raise RuntimeError(f'`{path}` not found.')
-
-    if dist.is_available():
-        world_size = dist.get_world_size()
-        rank = dist.get_rank()
-    else:
-        world_size = 1
-        rank = 0
-
-    if rank == 0:
-        logger.debug(f'All files in {path}:\n{data_files}')
-
-    file_sizes = [os.path.getsize(file) for file in data_files]
-
-    size_order = sorted(
-        enumerate(file_sizes), key=lambda x: x[1], reverse=True)
-    sorted_indices = [ind_and_size[0] for ind_and_size in size_order]
-
-    per_rank_files = [[] for _ in range(world_size)]
-    per_rank_sizes = [0 for _ in range(world_size)]
-
-    for ind in sorted_indices:
-
-        min_size = min(per_rank_sizes)
-        target = per_rank_sizes.index(min_size)
-
-        per_rank_files[target].append(ind)
-        per_rank_sizes[target] += file_sizes[ind]
-
-    logger.debug(f'Assigned Files: {per_rank_files[rank]}')
-
-    _local_datasets = []
-    desc = f'[RANK {rank}]Load files'
-    for i in tqdm(per_rank_files[rank], desc=desc):
-
-        file = data_files[i]
-        suffix = os.path.splitext(file)[-1]
-        dset = LOAD_FN_MAP[suffix](file)
-        _local_datasets.append(dset)
-
-    if map_fn:
-        local_datasets = []
-        for i, ind in enumerate(per_rank_files[rank]):
-            dset = _local_datasets[i]
-            try:
-                desc = f'[RANK {rank}]Map local file {ind}'
-                mapped = multi_thread_map(map_fn, dset, desc, num_proc)
-            except TypeError:
-                logger.warning(f'Map {file} failed.')
-                continue
-
-            local_datasets.append(mapped)
-
-        if rank == 0:
-            logger.debug(f'Original Sample:\n{_local_datasets[0][0]}')
-            logger.debug(f'Mapped Sample:\n{local_datasets[0][0]}')
-    else:
-        local_datasets = _local_datasets
-        if rank == 0:
-            logger.debug(f'Original Sample:\n{_local_datasets[0][0]}')
-
-    if dist.is_available() and world_size > 1:
-        timeout = timedelta(
-            minutes=int(os.getenv('XTUNER_DATASET_TIMEOUT', default=30)))
-        logger.info('Waiting for other ranks, it will timeout if it exceeds '
-                    f'{timeout}.')
-        group = dist.new_group(backend='gloo', timeout=timeout)
-
-        per_rank_datasets = [None] * world_size
-        dist.all_gather_object(per_rank_datasets, local_datasets, group=group)
-
-        datasets = []
-        for dsets in per_rank_datasets:
-            datasets.extend(dsets)
-
-    else:
-        datasets = local_datasets
-
-    return [init_fn(dset) for dset in datasets]
-
-
-def load_datasets(paths,
-                  sources,
-                  sample_ratios,
-                  file_types=LOAD_FN_MAP.keys(),
-                  map_fns=None,
-                  init_fns=None,
-                  num_proc=8):
-
+                       map_fns=None,
+                       init_fns=Dataset.from_list):
+    
+    if isinstance(paths, str):
+        paths = [paths]
+    
     if isinstance(sample_ratios, (tuple, list)):
 
         if len(sample_ratios) == 1:
@@ -242,19 +147,7 @@ def load_datasets(paths,
         if len(sample_ratios) != len(paths):
             raise RuntimeError(f'There are {len(paths)} paths, but only '
                                f'{len(sample_ratios)} sample ratios were set.')
-
-    if isinstance(sources, str):
-        sources = [sources]
-
-    if isinstance(sources, (tuple, list)):
-
-        if len(sources) == 1:
-            sources = list(sources) * len(paths)
-
-        if len(sources) != len(paths):
-            raise RuntimeError(f'There are {len(paths)} paths, but only '
-                               f'{len(sources)} sources were set.')
-
+    
     if map_fns is None:
         map_fns = [None] * len(paths)
 
@@ -279,25 +172,223 @@ def load_datasets(paths,
             raise RuntimeError(f'There are {len(paths)} paths, but only'
                                f'{len(init_fns)} init fns were set.')
 
+    files = []
+    file_sample_ratios = []
+    file_map_fns = []
+    file_init_fns = []
+    
+    for pid, path in enumerate(paths):
+        if os.path.isdir(path):
+            dir_files = []
+            for root, dirs, _files in os.walk(path, followlinks=True):
+                dirs.sort()
+                for relative_path in sorted(_files):
+                    suffix = os.path.splitext(relative_path)[-1]
+
+                    if suffix in file_types:
+                        absolute_path = os.path.join(root, relative_path)
+                        dir_files.append(absolute_path)
+
+            _num_dir_files = len(dir_files)
+            if _num_dir_files == 0:
+                raise RuntimeError(
+                    f'There are no files with the suffix {file_types}'
+                    f'in `{path}`.')
+
+            logger.info(f'Found {len(dir_files)} files in {path}')
+            files.extend(dir_files)
+            file_sample_ratios.extend([sample_ratios[pid]] * _num_dir_files)
+            file_map_fns.extend([map_fns[pid]] * _num_dir_files)
+            file_init_fns.extend([init_fns[pid]] * _num_dir_files)
+            
+        elif os.path.isfile(path):
+            files.append(path)
+            file_sample_ratios.append(sample_ratios[pid])
+            file_map_fns.append(map_fns[pid])
+            file_init_fns.append(init_fns[pid])
+        else:
+            raise RuntimeError(f'`{path}` not found.')
+
+    if dist.is_available():
+        world_size = dist.get_world_size()
+        rank = dist.get_rank()
+    else:
+        world_size = 1
+        rank = 0
+
+    if rank == 0:
+        logger.debug(f'All files:\n{files}')
+
+    num_files = len(files)
+    file_sizes = [os.path.getsize(file) for file in files]
+
+    size_order = sorted(
+        enumerate(file_sizes), key=lambda x: x[1], reverse=True)
+    sorted_indices = [ind_and_size[0] for ind_and_size in size_order]
+
+    per_rank_files = [[] for _ in range(world_size)]
+    per_rank_sizes = [0 for _ in range(world_size)]
+
+    for ind in sorted_indices:
+
+        min_size = min(per_rank_sizes)
+        target = per_rank_sizes.index(min_size)
+
+        per_rank_files[target].append(ind)
+        per_rank_sizes[target] += file_sizes[ind]
+
+    logger.debug(f'Assigned Files: {per_rank_files[rank]}')
+
+    rank_datasets = []
+    desc = f'[RANK {rank}]Load files'
+    for ind in tqdm(per_rank_files[rank], desc=desc):
+
+        file = files[ind]
+        suffix = os.path.splitext(file)[-1]
+        dset = LOAD_FN_MAP[suffix](file)
+        logger.debug(f'[File {ind}] Raw Sample:\n{dset[0]}')
+        
+        map_fn = file_map_fns[ind]
+        if map_fn:
+            try:
+                desc = f'[RANK {rank}] Map local file {ind}'
+                dset = multi_thread_map(map_fn, dset, desc, num_proc)
+                logger.debug(f'[File {ind}] Mapped Sample:\n{dset[0]}')
+            except TypeError:
+                logger.warning(f'Map {file} failed.')
+                continue
+        
+        init_fn = file_init_fns[ind]
+        if init_fn:
+            dset = init_fn(dset)
+            
+        if cache_dir and isinstance(dset, Dataset):            
+            digits = len(str(abs(num_files)))
+            cache_id = f'cache-{ind+1:0{digits}}-of-{num_files:0{digits}}'
+            sub_cache_dir = os.path.join(cache_dir, cache_id)
+            if os.path.exists(sub_cache_dir):
+                shutil.rmtree(sub_cache_dir)
+                logger.warning(f'Found {sub_cache_dir} exists. '
+                                'Clear it and re-cache.')
+            dset.save_to_disk(sub_cache_dir)
+            del dset
+            dset = load_from_disk(sub_cache_dir)
+        
+        elif cache_dir and not isinstance(dset, Dataset): 
+            dset_cls = dset.__class__.__name__           
+            logger.warning(f'[File {ind}] {dset_cls} does not support caching.')
+        
+        rank_datasets.append(dset)
+            
+    
+    if dist.is_available() and world_size > 1:
+        timeout = timedelta(
+            minutes=int(os.getenv('XTUNER_DATASET_TIMEOUT', default=30)))
+        logger.info('Waiting for other ranks, it will timeout if it exceeds '
+                    f'{timeout}.')
+        group = dist.new_group(backend='gloo', timeout=timeout)
+
+        buffers = [None] * world_size
+        dist.all_gather_object(buffers, rank_datasets, group=group)
+
+        datasets = []
+        for per_rank_dsets in buffers:
+            datasets.extend(per_rank_dsets)
+
+    else:
+        datasets = rank_datasets
+        
+    
+
+    return datasets
+
+
+def load_datasets(paths,
+                  sources,
+                  sample_ratios,
+                  file_types=LOAD_FN_MAP.keys(),
+                  map_fns=None,
+                  init_fns=None,
+                  num_proc=8):
+
+    if isinstance(paths, str):
+        paths = [paths]
+    
+    num_paths = len(paths)
+    
+    if isinstance(sample_ratios, (tuple, list)):
+
+        if len(sample_ratios) == 1:
+            sample_ratios = list(sample_ratios) * num_paths
+
+        if len(sample_ratios) != num_paths:
+            raise RuntimeError(f'There are {num_paths} paths, but only '
+                               f'{len(sample_ratios)} sample ratios were set.')
+
+    if isinstance(sources, str):
+        sources = [sources]
+
+    if isinstance(sources, (tuple, list)):
+
+        if len(sources) == 1:
+            sources = list(sources) * num_paths
+
+        if len(sources) != num_paths:
+            raise RuntimeError(f'There are {num_paths} paths, but only '
+                               f'{len(sources)} sources were set.')
+
+    if map_fns is None:
+        map_fns = [None] * num_paths
+
+    if isinstance(map_fns, (tuple, list)):
+
+        if len(map_fns) == 1:
+            map_fns = list(map_fns) * num_paths
+
+        if len(map_fns) != num_paths:
+            raise RuntimeError(f'There are {num_paths} paths, but only'
+                               f'{len(map_fns)} map fns were set.')
+
+    if init_fns is None:
+        init_fns = [None] * num_paths
+
+    if isinstance(init_fns, (tuple, list)):
+
+        if len(init_fns) == 1:
+            init_fns = list(init_fns) * num_paths
+
+        if len(init_fns) != num_paths:
+            raise RuntimeError(f'There are {num_paths} paths, but only'
+                               f'{len(init_fns)} init fns were set.')
+
+    local_inds = [i for i, src in enumerate(sources) if src == 'local']
+    local_paths = [paths[ind] for ind in local_inds]
+    local_map_fns = [map_fns[ind] for ind in local_inds]
+    local_init_fns = [init_fns[ind] for ind in local_inds]
+    local_sample_ratios = [sample_ratios[ind] for ind in local_inds]
+    
+    hf_inds = [i for i, src in enumerate(sources) if src == 'huggingface']
+    hf_paths = [paths[ind] for ind in hf_inds]
+    hf_map_fns = [map_fns[ind] for ind in hf_inds]
+    hf_init_fns = [init_fns[ind] for ind in hf_inds]
+    hf_sample_ratios = [sample_ratios[ind] for ind in hf_inds]
+
     datasets = []
-
-    for i, path in enumerate(paths):
-        src = sources[i]
-        ratio = sample_ratios[i]
-        map_fn = map_fns[i]
-        init_fn = init_fns[i]
-
-        if src == 'local':
-            dsets = load_local_dataset(path, file_types, ratio, num_proc,
-                                       map_fn, init_fn)
-            datasets.extend(dsets)
-        elif src == 'huggingface':
+    if len(local_inds):
+        local_datasets = load_local_dataset(
+                            local_paths, file_types, local_sample_ratios, 
+                            num_proc, local_map_fns, local_init_fns)
+        datasets.extend(local_datasets)
+        
+    if len(hf_inds):
+        
+        for i in range(len(hf_inds)):
             dset = load_hf_dataset(
-                path,
-                sample_ratio=ratio,
+                hf_paths[i],
+                sample_ratio=hf_sample_ratios[i],
                 num_proc=num_proc,
-                map_fn=map_fn,
-                init_fn=init_fn)
+                map_fn=hf_map_fns[i],
+                init_fn=hf_init_fns[i])
             datasets.append(dset)
 
     return datasets

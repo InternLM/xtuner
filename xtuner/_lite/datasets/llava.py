@@ -8,28 +8,25 @@ from xtuner._lite.chat import ChatMessages
 from xtuner.utils import DEFAULT_PAD_TOKEN_INDEX, IGNORE_INDEX
 from .format import OPENAI_FORMAT_MAP
 from .text import SoftPackerForText
+from PIL import Image
 
-
-def distinguish_image_or_text(item):
-    if item['num_img_tokens'] > 0:
-        item['modality_length'] = -item['num_tokens']
-    else:
-        item['modality_length'] = item['num_tokens']
-    return item
-
+from mmengine import fileio
+from io import BytesIO
 
 class LlavaTokenizeFunction():
 
     def __init__(self,
                  tokenizer,
                  chat_template,
-                 image_dir,
+                 per_img_tokens,
+                 image_dir=None,
                  raw_format='llava'):
 
         self.tokenizer = tokenizer
         self.chat_template = chat_template
         self.image_dir = image_dir
         self.raw_format = raw_format
+        self.per_img_tokens = per_img_tokens
 
     def __call__(self, item):
 
@@ -39,11 +36,17 @@ class LlavaTokenizeFunction():
 
         if 'image_urls' in tokenized:
             image_urls = tokenized['image_urls']
-            image_urls = [
-                os.path.join(self.image_dir, url) for url in image_urls
-            ]
+            
+            image_urls = []
+            for url in tokenized['image_urls']:
+                
+                if self.image_dir:
+                    image_urls.append(os.path.join(self.image_dir, url))
+                else:
+                    image_urls.append(url) 
+            
             num_images = len(image_urls)
-            num_img_tokens = [576 for url in image_urls]
+            num_img_tokens = [self.per_img_tokens for url in image_urls]
             tokenized['num_tokens'] += sum(num_img_tokens) - num_images
             tokenized['num_img_tokens'] = sum(num_img_tokens)
             tokenized['image_urls'] = image_urls
@@ -134,12 +137,16 @@ class SoftPackerForLlava(SoftPackerForText):
         for i in packed_items:
             packed_input_ids.extend(self.dataset[i]['input_ids'])
             packed_labels.extend(self.dataset[i]['labels'])
-            packed_img_urls.extend(self.dataset[item]['image_urls'])
-
+            
             _num_tokens = self.dataset[i]['num_tokens']
-            _num_img_tokens = self.dataset[i]['num_img_tokens']
             packed_num_tokens.append(_num_tokens)
-            packed_num_img_tokens.append(_num_img_tokens)
+            
+            if 'image_urls' in self.dataset[item]:
+                packed_img_urls.extend(self.dataset[item]['image_urls'])
+            
+            if 'num_img_tokens' in self.dataset[i]:
+                _num_img_tokens = self.dataset[i]['num_img_tokens']
+                packed_num_img_tokens.append(_num_img_tokens)
 
         images = []
         for url in packed_img_urls:
