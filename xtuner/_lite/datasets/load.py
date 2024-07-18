@@ -127,7 +127,7 @@ def load_hf_dataset(path,
 def load_from_cache(cache_dir):
 
     datasets = []
-    desc = f'[Rank {rank}] Load Cached Datasets'
+    desc = f'Load Cached Datasets'
     for sub_dir in tqdm(os.listdir(cache_dir), desc=desc):
         dset = load_from_disk(os.path.join(cache_dir, sub_dir))
         datasets.append(dset)
@@ -383,7 +383,7 @@ def load_datasets(paths,
 
     datasets = []
     if len(local_inds):
-        local_datasets = load_local_dataset(
+        local_datasets = load_local_datasets(
                             local_paths, file_types, cache_dir, 
                             local_sample_ratios, num_proc, local_map_fns, 
                             local_init_fns)

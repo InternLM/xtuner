@@ -51,7 +51,7 @@ from xtuner._lite.chat import CHAT_TEMPLATE_MAP
 from xtuner._lite.datasets import (LlavaCollator, LlavaRawDataset,
                                    LlavaTokenizeFunction, SoftPackerForLlava)
 from xtuner._lite.datasets.load import (LOAD_FN_MAP, load_from_cache,
-                                        load_local_datasets)
+                                        load_datasets)
 from xtuner._lite.parallel import ParallelSampler
 
 logger = get_logger()
@@ -420,9 +420,9 @@ def llava(args):
             else:
                 image_dir = None
 
-            # The following function is used to tokenize an original sample.
-            # If your data format is different, you should redefine a
-            # `tokenize_fn`.
+            # If your data format is not in `SUPPORT_DATA_FORMATS`, you should
+            # redefine a `tokenize_fn`, defining how to convert a piece of raw
+            # data into tokenized data.
             # The tokenized data must include `input_ids`, `labels``,
             # and `num_tokens`.
             tokenize_fn = LlavaTokenizeFunction(tokenizer, chat_template,
@@ -436,6 +436,8 @@ def llava(args):
                     LlavaRawDataset,
                     image_processor=img_processor,
                     tokenize_fn=tokenize_fn)
+                # Online tokenization is used when not using a pack dataset,
+                # saving startup time.
                 tokenize_fn = None
 
             init_fns.append(init_fn)
@@ -443,9 +445,10 @@ def llava(args):
             sample_ratios.append(info['sample_ratio'])
             annotations.append(info['annotations'])
 
-        _datasets = load_local_datasets(
+        _datasets = load_datasets(
             paths=annotations,
-            cache_dir=args.dset_cache_dir,
+            sources='local',
+            cache_dir=args.dset_cache_dir if args.dset_pack_level else None,
             file_types=args.dset_file_types,
             sample_ratios=sample_ratios,
             num_proc=max(args.num_workers, 1),
