@@ -344,6 +344,14 @@ class TextCollator():
             labels = torch.stack(labels)
             attention_mask = torch.stack(attention_mask)
 
+        if input_ids.shape != labels.shape:
+            logger.error(f'[instances] {instances}')
+            logger.error(f'[num_tokens] {num_tokens}')
+            logger.error(f'[input_ids] {input_ids}')
+            logger.error(f'[labels] {labels}')
+            raise RuntimeError('The shape of input_ids and labels must be '
+                               f'equal, but  found {input_ids.shape} and '
+                               f'{labels.shape}.')
         # TODO support sp
         data_dict = {
             'input_ids': input_ids,
