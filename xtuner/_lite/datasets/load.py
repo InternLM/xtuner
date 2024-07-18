@@ -96,6 +96,7 @@ def load_hf_dataset(path,
                     split='train',
                     sample_ratio=1.0,
                     num_proc=8,
+                    cache_dir=None,
                     map_fn=None,
                     init_fn=None):
     from datasets import load_dataset
@@ -113,6 +114,11 @@ def load_hf_dataset(path,
 
     if init_fn:
         dataset = init_fn(dataset)
+        
+    if cache_dir:
+        dataset.save_to_disk(cache_dir)
+        del dataset
+        dataset = load_from_disk(cache_dir)
 
     return dataset
 
@@ -264,7 +270,8 @@ def load_local_datasets(paths,
             
         if cache_dir and isinstance(dset, Dataset):            
             digits = len(str(abs(num_files)))
-            cache_id = f'cache-{ind+1:0{digits}}-of-{num_files:0{digits}}'
+            cache_id = (f'cache-local-{ind+1:0{digits}}-of-'
+                        f'{num_files:0{digits}}')
             sub_cache_dir = os.path.join(cache_dir, cache_id)
             if os.path.exists(sub_cache_dir):
                 shutil.rmtree(sub_cache_dir)
@@ -307,6 +314,7 @@ def load_datasets(paths,
                   sources,
                   sample_ratios,
                   file_types=LOAD_FN_MAP.keys(),
+                  cache_dir=None,
                   map_fns=None,
                   init_fns=None,
                   num_proc=8):
@@ -376,19 +384,28 @@ def load_datasets(paths,
     datasets = []
     if len(local_inds):
         local_datasets = load_local_dataset(
-                            local_paths, file_types, local_sample_ratios, 
-                            num_proc, local_map_fns, local_init_fns)
+                            local_paths, file_types, cache_dir, 
+                            local_sample_ratios, num_proc, local_map_fns, 
+                            local_init_fns)
         datasets.extend(local_datasets)
         
     if len(hf_inds):
         
         for i in range(len(hf_inds)):
+            if cache_dir:
+                digits = len(str(abs(len(hf_inds))))
+                cache_id = (f'cache-hf-{i+1:0{digits}}-of-'
+                            f'{len(hf_inds):0{digits}}')
+                sub_cache_dir = os.path.join(cache_dir, cache_id)
+            else:
+                sub_cache_dir = None
             dset = load_hf_dataset(
                 hf_paths[i],
                 sample_ratio=hf_sample_ratios[i],
                 num_proc=num_proc,
                 map_fn=hf_map_fns[i],
-                init_fn=hf_init_fns[i])
+                init_fn=hf_init_fns[i],
+                cache_dir=sub_cache_dir)
             datasets.append(dset)
 
     return datasets

@@ -47,14 +47,16 @@ from xtuner._lite.accelerate.fsdp import (RECOMPUTE_MODULES,
                                           checkpoint_check_fn, dp_lazy_init,
                                           layer_auto_wrap_policy)
 from xtuner._lite.chat import CHAT_TEMPLATE_MAP
-from xtuner._lite.datasets import (HardPackerForText, SoftPackerForText,
-                                   TextCollator, TextRawDataset,
-                                   TextTokenizeFunction)
+from xtuner._lite.datasets import (OPENAI_FORMAT_MAP, HardPackerForText,
+                                   SoftPackerForText, TextCollator,
+                                   TextRawDataset, TextTokenizeFunction)
 from xtuner._lite.datasets.load import (LOAD_FN_MAP, load_datasets,
                                         load_from_cache)
 from xtuner._lite.parallel import ParallelSampler
 
 logger = get_logger()
+
+SUPPORT_DATA_FORMATS = OPENAI_FORMAT_MAP.keys()
 
 
 def log_format(rank, debug=False):
@@ -364,8 +366,9 @@ def sft(args):
         tokenize_fns = []
         init_fns = []
         for dset_format in args.dset_formats:
-            # If your data format is different, you should redefine a
-            # `tokenize_fn`.
+            # If your data format is not in `SUPPORT_DATA_FORMATS`, you should
+            # redefine a `tokenize_fn`, defining how to convert a piece of raw
+            # data into tokenized data.
             # The tokenized data must include `input_ids`, `labels``,
             # and `num_tokens`.
             tokenize_fn = TextTokenizeFunction(tokenizer, chat_template,
@@ -375,6 +378,8 @@ def sft(args):
                 init_fn = Dataset.from_list
             else:
                 init_fn = partial(TextRawDataset, tokenize_fn=tokenize_fn)
+                # Online tokenization is used when not using a pack dataset,
+                # saving startup time.
                 tokenize_fn = None
 
             tokenize_fns.append(tokenize_fn)
@@ -382,6 +387,7 @@ def sft(args):
 
         _datasets = load_datasets(
             paths=args.datasets,
+            cache_dir=args.dset_cache_dir if args.dset_pack_level else None,
             file_types=args.dset_file_types,
             sources=args.dset_sources,
             sample_ratios=args.dset_sample_ratios,
