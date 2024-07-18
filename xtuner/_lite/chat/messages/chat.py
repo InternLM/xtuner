@@ -7,7 +7,9 @@ from transformers import PreTrainedTokenizer
 from xtuner.utils import IGNORE_INDEX
 from ..templates import ChatTemplate, HybridChatTemplate
 from .base import BaseMessages
+from xtuner._lite import get_logger
 
+logger = get_logger()
 
 class TextContentItem(BaseModel):
     type: Literal['text'] = 'text'
@@ -146,6 +148,14 @@ class ChatMessages(BaseMessages):
                 sep_tokens = tokenizer.encode(sep, add_special_tokens=False)
                 input_ids.extend(sep_tokens)
                 labels.extend([IGNORE_INDEX] * len(sep_tokens))
+                
+        if len(input_ids) != len(labels):
+            logger.error(f'[messages] {self.messages}')
+            logger.error(f'[input_ids] {input_ids}')
+            logger.error(f'[labels] {labels}')
+            raise RuntimeError('The lengths of input_ids and labels must be '
+                               f'equal, but  found {len(input_ids)} and '
+                               f'{len(labels)}.')
 
         training_data = {
             'input_ids': input_ids,
@@ -156,6 +166,7 @@ class ChatMessages(BaseMessages):
         if len(image_urls) > 0:
             training_data['image_urls'] = image_urls
 
+        
         return training_data
 
     @classmethod

@@ -5,9 +5,12 @@ import random
 import torch
 from torch.nn.utils.rnn import pad_sequence
 
+from xtuner._lite import get_logger
 from xtuner._lite.chat import ChatMessages
 from xtuner.utils import DEFAULT_PAD_TOKEN_INDEX, IGNORE_INDEX
 from .format import OPENAI_FORMAT_MAP
+
+logger = get_logger()
 
 
 def sort_and_return_indices(lst):
@@ -81,27 +84,35 @@ class SoftPackerForText(torch.utils.data.Dataset):
         packed_items = self.pack_lut[item]
         assert len(packed_items) > 0
 
-        packed_input_ids = []
-        packed_labels = []
+        input_ids = []
+        labels = []
         num_tokens = []
         for i in packed_items:
-            packed_input_ids.extend(self.dataset[i]['input_ids'])
-            packed_labels.extend(self.dataset[i]['labels'])
+            input_ids.extend(self.dataset[i]['input_ids'])
+            labels.extend(self.dataset[i]['labels'])
 
             _num_tokens = self.dataset[i]['num_tokens']
             num_tokens.append(_num_tokens)
 
-        if len(packed_input_ids) < self.max_length:
-            num_pad_tokens = self.max_length - len(packed_input_ids)
-            packed_input_ids.extend([DEFAULT_PAD_TOKEN_INDEX] * num_pad_tokens)
-            packed_labels.extend([IGNORE_INDEX] * num_pad_tokens)
+        if len(input_ids) < self.max_length:
+            num_pad_tokens = self.max_length - len(input_ids)
+            input_ids.extend([DEFAULT_PAD_TOKEN_INDEX] * num_pad_tokens)
+            labels.extend([IGNORE_INDEX] * num_pad_tokens)
             num_tokens.append(num_pad_tokens)
 
         packed = {
-            'input_ids': packed_input_ids,
-            'labels': packed_labels,
+            'input_ids': input_ids,
+            'labels': labels,
             'num_tokens': num_tokens,
         }
+
+        if len(input_ids) != len(labels):
+            logger.error(f'[packed_items] {packed_items}')
+            logger.error(f'[input_ids] {input_ids}')
+            logger.error(f'[labels] {labels}')
+            raise RuntimeError('The lengths of input_ids and labels must be '
+                               f'equal, but  found {len(input_ids)} and '
+                               f'{len(labels)}.')
 
         return packed
 
@@ -283,7 +294,7 @@ class HardPackerForText(torch.utils.data.Dataset):
         _res = self._pack_ids_and_labels_in_range(begin, end)
         packed_input_ids, packed_labels, num_tokens = _res
         assert self.max_length == len(packed_input_ids) == len(packed_labels)
-        num_tokens.append(0)
+
         packed = {
             'input_ids': packed_input_ids,
             'labels': packed_labels,
