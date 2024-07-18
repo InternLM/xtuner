@@ -127,7 +127,7 @@ def load_hf_dataset(path,
 def load_from_cache(cache_dir):
 
     datasets = []
-    desc = f'Load Cached Datasets'
+    desc = 'Load Cached Datasets'
     for sub_dir in tqdm(os.listdir(cache_dir), desc=desc):
         dset = load_from_disk(os.path.join(cache_dir, sub_dir))
         datasets.append(dset)
@@ -215,34 +215,36 @@ def load_local_datasets(paths,
         else:
             raise RuntimeError(f'`{path}` not found.')
 
+    num_files = len(files)
+    
     if dist.is_available():
         world_size = dist.get_world_size()
         rank = dist.get_rank()
+        
+        # Assigned files to each rank based on the file size
+        file_sizes = [os.path.getsize(file) for file in files]
+        size_order = sorted(
+            enumerate(file_sizes), key=lambda x: x[1], reverse=True)
+        sorted_indices = [ind_and_size[0] for ind_and_size in size_order]
+
+        per_rank_files = [[] for _ in range(world_size)]
+        per_rank_sizes = [0 for _ in range(world_size)]
+
+        for ind in sorted_indices:
+
+            min_size = min(per_rank_sizes)
+            target = per_rank_sizes.index(min_size)
+
+            per_rank_files[target].append(ind)
+            per_rank_sizes[target] += file_sizes[ind]
+
     else:
         world_size = 1
         rank = 0
+        per_rank_files = [[i for i in range(num_files)]]
 
     if rank == 0:
         logger.debug(f'All files:\n{files}')
-
-    num_files = len(files)
-    file_sizes = [os.path.getsize(file) for file in files]
-
-    size_order = sorted(
-        enumerate(file_sizes), key=lambda x: x[1], reverse=True)
-    sorted_indices = [ind_and_size[0] for ind_and_size in size_order]
-
-    per_rank_files = [[] for _ in range(world_size)]
-    per_rank_sizes = [0 for _ in range(world_size)]
-
-    for ind in sorted_indices:
-
-        min_size = min(per_rank_sizes)
-        target = per_rank_sizes.index(min_size)
-
-        per_rank_files[target].append(ind)
-        per_rank_sizes[target] += file_sizes[ind]
-
     logger.debug(f'Assigned Files: {per_rank_files[rank]}')
 
     rank_datasets = []
@@ -260,9 +262,8 @@ def load_local_datasets(paths,
                 desc = f'[RANK {rank}] Map local file {ind}'
                 dset = multi_thread_map(map_fn, dset, desc, num_proc)
                 logger.debug(f'[File {ind}] Mapped Sample:\n{dset[0]}')
-            except TypeError:
-                logger.warning(f'Map {file} failed.')
-                continue
+            except:
+                raise RuntimeError(f'[RANK {rank}] Map {file} failed.')
         
         init_fn = file_init_fns[ind]
         if init_fn:
@@ -298,16 +299,18 @@ def load_local_datasets(paths,
         buffers = [None] * world_size
         dist.all_gather_object(buffers, rank_datasets, group=group)
 
-        datasets = []
-        for per_rank_dsets in buffers:
-            datasets.extend(per_rank_dsets)
-
-    else:
-        datasets = rank_datasets
+        # Restore the dataset order according to the original file order
+        world_datasets = [None] * num_files
+        for _rank, per_rank_dsets in enumerate(buffers):
+            for _dset_ind, _file_ind in enumerate(per_rank_files[_rank]):
+                world_datasets[_file_ind] = per_rank_dsets[_dset_ind]
         
-    
+        assert all([dset is not None for dset in world_datasets])    
+        
+    else:
+        world_datasets = rank_datasets
 
-    return datasets
+    return world_datasets
 
 
 def load_datasets(paths,
