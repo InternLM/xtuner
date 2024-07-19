@@ -1,13 +1,15 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-from datasets import load_dataset
 import torch
+from datasets import load_dataset
 from mmengine.dataset import DefaultSampler
 from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
                             LoggerHook, ParamSchedulerHook)
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR, LinearLR
-from torch.optim import AdamW
-from transformers import AutoModelForCausalLM, AutoTokenizer,BitsAndBytesConfig
 from peft import LoraConfig
+from torch.optim import AdamW
+from transformers import (AutoModelForCausalLM, AutoTokenizer,
+                          BitsAndBytesConfig)
+
 from xtuner.dataset.collate_fns.preference_collate_fn import \
     preference_collate_fn
 from xtuner.dataset.preference_dataset import (build_preference_dataset,

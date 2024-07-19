@@ -36,7 +36,7 @@ pretrained_model_name_or_path = 'openbmb/MiniCPM-1B-sft-bf16'
 use_varlen_attn = False
 
 # Data
-data_files = ['/root/ld/pull_request/xtuner/xtuner/configs/custom_dataset/pretrain/minicpm/pretrain.json']
+data_files = ['/path/to/json/file.json']
 max_length = 2048
 pack_to_max_length = True
 

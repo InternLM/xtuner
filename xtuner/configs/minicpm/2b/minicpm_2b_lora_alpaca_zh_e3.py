@@ -7,8 +7,7 @@ from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR, LinearLR
 from peft import LoraConfig
 from torch.optim import AdamW
-from transformers import (AutoModelForCausalLM, AutoTokenizer,
-                          BitsAndBytesConfig)
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from xtuner.dataset import process_hf_dataset
 from xtuner.dataset.collate_fns import default_collate_fn
@@ -78,7 +77,7 @@ model = dict(
         pretrained_model_name_or_path=pretrained_model_name_or_path,
         trust_remote_code=True,
         torch_dtype=torch.float16,
-        ),
+    ),
     lora=dict(
         type=LoraConfig,
         r=64,
