@@ -52,10 +52,13 @@ class DPO(SupervisedFinetune):
         self.beta = beta
 
         if ref_llm is not None:
-            ref_llm = self._build_llm_from_cfg(ref_llm, kwargs.get("use_varlen_attn"), kwargs.get("max_position_embeddings"))
+            ref_llm = self.build_llm_from_cfg(
+                ref_llm, kwargs.get('use_varlen_attn', False),
+                kwargs.get('max_position_embeddings', None))
             self.ref_llm = disable_grad(ref_llm)
         else:
-            self.ref_llm = None if self.use_lora else create_reference_model(self.llm)
+            self.ref_llm = None if self.use_lora else create_reference_model(
+                self.llm)
 
     def _gather_masked_logits(self, logits, labels, mask):
         logits = torch.gather(
