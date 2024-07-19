@@ -128,6 +128,10 @@ def deepseek_attn_forward(
         query_states, key_states, value_states = \
             pre_process_for_sequence_parallel_attn(
                 query_states, key_states, value_states)
+        # self.num_heads is used in self._upad_input method
+        # num_heads has been changed because of sequence parallel
+        ori_num_head = self.num_heads
+        self.num_heads = query_states.shape[-2]
 
     attn_output = self._flash_attention_forward(
         query_states,
@@ -141,6 +145,7 @@ def deepseek_attn_forward(
 
     if enable_sequence_parallel:
         attn_output = post_process_for_sequence_parallel_attn(attn_output)
+        self.num_heads = ori_num_head
 
     if self.q_head_dim != self.v_head_dim:
         attn_output = attn_output[:, :, :, :self.v_head_dim]
