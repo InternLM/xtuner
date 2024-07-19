@@ -80,7 +80,8 @@ class SupervisedFinetune(BaseModel):
                  max_position_embeddings=None):
         super().__init__()
 
-        self.llm = self._build_llm_from_cfg(llm, use_varlen_attn, max_position_embeddings)
+        self.llm = self.build_llm_from_cfg(llm, use_varlen_attn,
+                                           max_position_embeddings)
 
         if tokenizer is not None:
             if isinstance(tokenizer, dict):
@@ -115,18 +116,18 @@ class SupervisedFinetune(BaseModel):
         # the sequence.
         self.use_varlen_attn = use_varlen_attn
 
-
-    def _build_llm_from_cfg(self, llm_cfg, use_varlen_attn, max_position_embeddings):
+    def build_llm_from_cfg(self, llm_cfg, use_varlen_attn,
+                           max_position_embeddings):
         # For forward
         with LoadWoInit():
             if isinstance(llm_cfg, dict):
-                llm = self._dispatch_lm_model_cfg(llm_cfg, max_position_embeddings)
+                llm = self._dispatch_lm_model_cfg(llm_cfg,
+                                                  max_position_embeddings)
             llm = self._build_from_cfg_or_module(llm)
 
         llm.config.use_cache = False
         dispatch_modules(llm, use_varlen_attn=use_varlen_attn)
         return llm
-
 
     def gradient_checkpointing_enable(self):
         self.activation_checkpointing_enable()
