@@ -16,6 +16,26 @@ from xtuner.parallel.sequence import (gather_forward_split_backward,
 from .sft import SupervisedFinetune
 
 
+def disable_grad(model):
+    # freeze parameters
+    parameter_names = [n for n, _ in model.named_parameters()]
+    for param_name in parameter_names:
+        param = model.get_parameter(param_name)
+        param.requires_grad = False
+    return model.eval()
+
+
+def create_reference_model(model):
+    if is_deepspeed_zero3_enabled():
+        raise ValueError('DeepSpeed ZeRO-3 is enabled and is not compatible '
+                         'with `create_reference_model()`. Please instantiate '
+                         'your reference model directly with '
+                         '`AutoCausalLM.from_pretrained()`.')
+    ref_model = deepcopy(model)
+    ref_model = disable_grad(ref_model)
+    return ref_model
+
+
 class DPO(SupervisedFinetune):
     """A general class of DPO and its variants."""
 
@@ -27,32 +47,15 @@ class DPO(SupervisedFinetune):
                  label_smoothing=0.0,
                  **kwargs):
         super().__init__(llm, **kwargs)
-        self.ref_llm = ref_llm
         self.loss_type = loss_type
         self.label_smoothing = label_smoothing
         self.beta = beta
 
-        if not self.use_lora:
-            self.ref_llm = self.create_reference_model(ref_llm, **kwargs)
-
-    def create_reference_model(self, ref_llm=None, **kwargs):
-        ref_model = None
-        if ref_llm is None:
-            if is_deepspeed_zero3_enabled():
-                raise ValueError(
-                    'DeepSpeed ZeRO-3 is enabled and is not compatible '
-                    'with `deepcopy(self.llm)`. Please instantiate '
-                    'your reference model by modifying key `model.ref_llm` '
-                    'in your config with `AutoCausalLM.from_pretrained()`.')
-            ref_model = deepcopy(self.llm)
+        if ref_llm is not None:
+            ref_llm = self._build_llm_from_cfg(ref_llm, kwargs.get("use_varlen_attn"), kwargs.get("max_position_embeddings"))
+            self.ref_llm = disable_grad(ref_llm)
         else:
-            ref_model = SupervisedFinetune(ref_llm, **kwargs).llm
-        # freeze parameters
-        parameter_names = [n for n, _ in ref_model.named_parameters()]
-        for param_name in parameter_names:
-            param = ref_model.get_parameter(param_name)
-            param.requires_grad = False
-        return ref_model.eval()
+            self.ref_llm = None if self.use_lora else create_reference_model(self.llm)
 
     def _gather_masked_logits(self, logits, labels, mask):
         logits = torch.gather(
