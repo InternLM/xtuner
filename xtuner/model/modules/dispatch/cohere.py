@@ -105,17 +105,22 @@ def cohere_attn_forward(
         query_states, key_states, value_states = \
             pre_process_for_sequence_parallel_attn(
                 query_states, key_states, value_states)
+        # self.num_heads is used in self._upad_input method
+        # num_heads has been changed because of sequence parallel
+        ori_num_head = self.num_heads
+        self.num_heads = query_states.shape[-2]
 
     attn_output = self._flash_attention_forward(
         query_states,
         key_states,
         value_states,
         attention_mask,
-        q_len,
+        query_states.shape[1],
         dropout=dropout_rate)
 
     if enable_sequence_parallel:
         attn_output = post_process_for_sequence_parallel_attn(attn_output)
+        self.num_heads = ori_num_head
 
     attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
     attn_output = self.o_proj(attn_output)
