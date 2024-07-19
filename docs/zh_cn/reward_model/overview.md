@@ -24,6 +24,10 @@ XTuner 中的 Reward Model 训练具备以下显著优势：
 
 3. **高效训练**：借助 XTuner 的 QLoRA 训练功能，我们能够仅对 Reward Model 的 Value Head 进行全参数训练，而对语言模型本身使用 QLoRA 微调，大幅降低了模型训练的显存开销。
 
+4. **长文本训练**: 借助 XTuner 的序列并行功能，能够对长文本数据进行训练。
+
+![img](./images/sequence_parallel.png)
+
 ### 开始训练
 
 请参[阅快速上手](./quick_start.md)来了解最基本的概念，若希望了解更多训练参数配置相关的内容，请参考[修改Reward Model配置](./modify_settings.md)章节。

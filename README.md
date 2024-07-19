@@ -39,6 +39,7 @@ English | [简体中文](README_zh-CN.md)
 
 ## 🎉 News
 
+- **\[2024/07\]** Support [DPO](https://github.com/InternLM/xtuner/tree/main/xtuner/configs/dpo), [ORPO](https://github.com/InternLM/xtuner/tree/main/xtuner/configs/orpo) and [Reward Model](https://github.com/InternLM/xtuner/tree/main/xtuner/configs/reward_model) training with packed data and sequence parallel! See [documents](https://xtuner.readthedocs.io/en/latest/dpo/overview.html) for more details.
 - **\[2024/07\]** Support [InternLM 2.5](xtuner/configs/internlm/internlm2_5_chat_7b/) models!
 - **\[2024/06\]** Support [DeepSeek V2](xtuner/configs/deepseek/deepseek_v2_chat/) models! **2x faster!**
 - **\[2024/04\]** [LLaVA-Phi-3-mini](https://huggingface.co/xtuner/llava-phi-3-mini-hf) is released! Click [here](xtuner/configs/llava/phi3_mini_4k_instruct_clip_vit_large_p14_336) for details!
@@ -144,6 +145,9 @@ XTuner is an efficient, flexible and full-featured toolkit for fine-tuning large
   <li><a href="http://arxiv.org/abs/2305.14314">QLoRA</a></li>
   <li><a href="http://arxiv.org/abs/2106.09685">LoRA</a></li>
   <li>Full parameter fine-tune</li>
+  <li><a href="https://arxiv.org/abs/2305.18290">DPO</a></li>
+  <li><a href="https://arxiv.org/abs/2403.07691">ORPO</a></li>
+  <li>Reward Model</a></li>
 </ul>
 </td>
 </tr>
