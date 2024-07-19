@@ -31,3 +31,13 @@ The Reward Model training in XTuner offers the following significant advantages:
 ### Getting Started
 
 Refer to the [Quick Start Guide](./quick_start.md) to understand the basic concepts. For more information on configuring training parameters, please see the [Modifying Reward Model Settings](./modify_settings.md) section.
+
+### Open-source Models
+
+We use XTuner to train the  InternLM2 Reward Models from the InternLM2 Technical Report, welcome to download and use:
+
+| Model                     | Transformers(HF)                                                                 | ModelScope(HF)                                                                                             | OpenXLab(HF)                                                                                                                                                | RewardBench Score |
+| ------------------------- | -------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------- |
+| **InternLM2-1.8B-Reward** | [🤗internlm2-1_8b-reward](https://huggingface.co/internlm/internlm2-1_8b-reward) | [internlm2-1_8b-reward](https://modelscope.cn/models/Shanghai_AI_Laboratory/internlm2-1_8b-reward/summary) | [![Open in OpenXLab](https://cdn-static.openxlab.org.cn/header/openxlab_models.svg)](https://openxlab.org.cn/models/detail/OpenLMLab/internlm2-1_8b-reward) | 80.6              |
+| **InternLM2-7B-Reward**   | [🤗internlm2-7b-reward](https://huggingface.co/internlm/internlm2-7b-reward)     | [internlm2-7b-reward](https://modelscope.cn/models/Shanghai_AI_Laboratory/internlm2-7b-reward/summary)     | [![Open in OpenXLab](https://cdn-static.openxlab.org.cn/header/openxlab_models.svg)](https://openxlab.org.cn/models/detail/OpenLMLab/internlm2-7b-reward)   | 86.6              |
+| **InternLM2-20B-Reward**  | [🤗internlm2-20b-reward](https://huggingface.co/internlm/internlm2-20b-reward)   | [internlm2-20b-reward](https://modelscope.cn/models/Shanghai_AI_Laboratory/internlm2-20b-reward/summary)   | [![Open in OpenXLab](https://cdn-static.openxlab.org.cn/header/openxlab_models.svg)](https://openxlab.org.cn/models/detail/OpenLMLab/internlm2-20b-reward)  | 89.5              |
