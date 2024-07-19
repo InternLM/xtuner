@@ -39,6 +39,7 @@
 
 ## 🎉 更新
 
+- **\[2024/07\]** 支持训练 [DPO](https://github.com/InternLM/xtuner/tree/main/xtuner/configs/dpo)， [ORPO](https://github.com/InternLM/xtuner/tree/main/xtuner/configs/orpo) 还有 [Reward Model](https://github.com/InternLM/xtuner/tree/main/xtuner/configs/reward_model) ! 并且能够支持打包数据以及序列并行功能！ 请参考 [文档](https://xtuner.readthedocs.io/zh-cn/latest/dpo/overview.html) 了解更多信息。
 - **\[2024/07\]** 支持 [InternLM 2.5](xtuner/configs/internlm/internlm2_5_chat_7b/) 模型!
 - **\[2024/06\]** 支持 [DeepSeek V2](xtuner/configs/deepseek/deepseek_v2_chat/) models! **训练速度提升一倍！**
 - **\[2024/04\]** 多模态大模型 [LLaVA-Phi-3-mini](https://huggingface.co/xtuner/llava-phi-3-mini-hf) 发布！快速开始请查阅此[文档](xtuner/configs/llava/phi3_mini_4k_instruct_clip_vit_large_p14_336)！
@@ -144,6 +145,9 @@ XTuner 是一个高效、灵活、全能的轻量化大模型微调工具库。
   <li><a href="http://arxiv.org/abs/2305.14314">QLoRA</a></li>
   <li><a href="http://arxiv.org/abs/2106.09685">LoRA</a></li>
   <li>全量参数微调</li>
+  <li><a href="https://arxiv.org/abs/2305.18290">DPO</a></li>
+  <li><a href="https://arxiv.org/abs/2403.07691">ORPO</a></li>
+  <li>Reward Model</a></li>
 </ul>
 </td>
 </tr>

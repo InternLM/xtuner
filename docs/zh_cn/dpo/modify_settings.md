@@ -32,7 +32,7 @@ pretrained_model_name_or_path = 'internlm/internlm2-chat-1_8b-sft'
 
 ### 训练数据
 
-在 Reward Model 训练中，你可以通过 `max_length` 来指定单个样本序列的最大 token 数，XTuner 会自动对数据进行截断或是填充。
+在 DPO 训练中，你可以通过 `max_length` 来指定单个样本序列的最大 token 数，XTuner 会自动对数据进行截断或是填充。
 
 ```python
 # Data
