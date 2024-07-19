@@ -4,12 +4,13 @@ from typing import Dict, List, Literal, Optional, Union
 from pydantic import BaseModel
 from transformers import PreTrainedTokenizer
 
+from xtuner._lite import get_logger
 from xtuner.utils import IGNORE_INDEX
 from ..templates import ChatTemplate, HybridChatTemplate
 from .base import BaseMessages
-from xtuner._lite import get_logger
 
 logger = get_logger()
+
 
 class TextContentItem(BaseModel):
     type: Literal['text'] = 'text'
@@ -129,10 +130,6 @@ class ChatMessages(BaseMessages):
         input_ids = []
         labels = []
         image_urls = []
-        # TODO(pppppM) replace with get_bos_token_id
-        bos_token_ids = [tokenizer.bos_token_id]
-        input_ids.extend(bos_token_ids)
-        labels.extend([IGNORE_INDEX] * len(bos_token_ids))
 
         for msg in self.messages:
             res = msg.tokenize(tokenizer, chat_template)
@@ -148,7 +145,7 @@ class ChatMessages(BaseMessages):
                 sep_tokens = tokenizer.encode(sep, add_special_tokens=False)
                 input_ids.extend(sep_tokens)
                 labels.extend([IGNORE_INDEX] * len(sep_tokens))
-                
+
         if len(input_ids) != len(labels):
             logger.error(f'[messages] {self.messages}')
             logger.error(f'[input_ids] {input_ids}')
@@ -166,7 +163,6 @@ class ChatMessages(BaseMessages):
         if len(image_urls) > 0:
             training_data['image_urls'] = image_urls
 
-        
         return training_data
 
     @classmethod

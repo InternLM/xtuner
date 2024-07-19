@@ -40,8 +40,8 @@ from transformers.utils.import_utils import (is_flash_attn_2_available,
                                              is_torch_sdpa_available)
 
 from xtuner._lite import AutoTokenizer, get_logger
-from xtuner._lite.accelerate import (LORA_TARGET_MAP, dispatch_modules,
-                                     packed_sequence)
+from xtuner._lite.accelerate import (LORA_TARGET_MAP, LoadWoInit,
+                                     dispatch_modules, packed_sequence)
 from xtuner._lite.accelerate.fsdp import (RECOMPUTE_MODULES,
                                           all_required_grad_wrap_policy,
                                           checkpoint_check_fn, dp_lazy_init,
@@ -49,7 +49,8 @@ from xtuner._lite.accelerate.fsdp import (RECOMPUTE_MODULES,
 from xtuner._lite.chat import CHAT_TEMPLATE_MAP
 from xtuner._lite.datasets import (OPENAI_FORMAT_MAP, HardPackerForText,
                                    SoftPackerForText, TextCollator,
-                                   TextRawDataset, TextTokenizeFunction)
+                                   TextOnlineTokenizeDataset,
+                                   TextTokenizedDataset, TextTokenizeFunction)
 from xtuner._lite.datasets.load import (LOAD_FN_MAP, load_datasets,
                                         load_from_cache)
 from xtuner._lite.parallel import ParallelSampler
@@ -162,7 +163,7 @@ def parse_args():
     data_args.add_argument(
         '--dset-formats',
         nargs='*',
-        default=['llava'],
+        default=['openai'],
         help=('the format of each dataset; it can accept one or the same '
               'number of args as the number of `datasets`, with one arg '
               'indicating that all datasets are the same format.'))
@@ -215,7 +216,7 @@ def parse_args():
         '--global-batch-size',
         type=int,
         default=16,
-        help='batch size for each parameter update')
+        help='batch size for each optimizer step')
 
     optim_args.add_argument(
         '--lr', default=4e-5, type=float, help='learning rate.')
@@ -239,7 +240,7 @@ def parse_args():
         help='the dir to save logs and checkpoints')
     parser.add_argument(
         '--checkpoint-interval',
-        default=0.25,
+        default=-1,
         type=float,
         help=('how many steps to save a checkpoint; it can be a floating '
               'point number less than 1, or an integer greater than or equal '
@@ -293,18 +294,19 @@ def sft(args):
 
     if args.global_batch_size < dp_size or args.global_batch_size % dp_size:
         raise ValueError(f'The `global_batch_size`({args.global_batch_size}) '
-                         f'should be divisible by the world_size{world_size}.')
+                         'should be divisible by the '
+                         f'world_size({world_size}).')
 
     if (args.global_batch_size / dp_size) % args.mirco_batch_size:
         raise ValueError(f'The `global_batch_size`({args.global_batch_size}) '
-                         f'should be divisible by the world_size{world_size}*'
-                         f'`mirco_batch_size`({args.mirco_batch_size})')
+                         f'should be divisible by the world_size({world_size})'
+                         f' * `mirco_batch_size`({args.mirco_batch_size})')
 
     if args.dset_cache_dir and os.path.isdir(args.dset_cache_dir):
         if len(os.listdir(args.dset_cache_dir)):
-            logger.warning(f'`{args.dset_cache_dir}` is not an empty '
-                           'folder, which may lead to inaccurate '
-                           'cache results.')
+            raise RuntimeError(f'`{args.dset_cache_dir}` is not an empty '
+                               'folder, which may lead to inaccurate '
+                               'cache results.')
 
     device_mesh = init_device_mesh(
         'cuda', (dp_size, ), mesh_dim_names=('dp', ))
@@ -312,12 +314,16 @@ def sft(args):
     dp_mesh = device_mesh['dp']
 
     rank = dp_mesh.get_local_rank()
-
-    mkdir_or_exist(args.work_dir)
-
     timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
 
-    log_file = os.path.join(args.work_dir, f'{timestamp}.rank{rank}.log')
+    objects = [timestamp]
+    dist.broadcast_object_list(objects, src=0)
+    timestamp = objects[0]
+
+    args.work_dir = os.path.join(args.work_dir, timestamp)
+    mkdir_or_exist(args.work_dir)
+
+    log_file = os.path.join(args.work_dir, f'rank{rank}.log')
 
     # Change the log format printed in the terminal
     lvl = 'DEBUG' if args.debug else 'INFO'
@@ -374,12 +380,16 @@ def sft(args):
             tokenize_fn = TextTokenizeFunction(tokenizer, chat_template,
                                                dset_format)
 
-            if args.dset_pack_level:
+            if args.dset_cache_dir or args.dset_pack_level:
+                # Before caching or packing dataset, you need to first
+                # tokenize the dataset and then transform it into a
+                # Huggingface `Dataset`
                 init_fn = Dataset.from_list
             else:
-                init_fn = partial(TextRawDataset, tokenize_fn=tokenize_fn)
-                # Online tokenization is used when not using a pack dataset,
-                # saving startup time.
+                # Use online tokenize when there is no need to cache or pack
+                # the dataset, thereby saving startup time.
+                init_fn = partial(
+                    TextOnlineTokenizeDataset, tokenize_fn=tokenize_fn)
                 tokenize_fn = None
 
             tokenize_fns.append(tokenize_fn)
@@ -387,7 +397,7 @@ def sft(args):
 
         _datasets = load_datasets(
             paths=args.datasets,
-            cache_dir=args.dset_cache_dir if args.dset_pack_level else None,
+            cache_dir=args.dset_cache_dir,
             file_types=args.dset_file_types,
             sources=args.dset_sources,
             sample_ratios=args.dset_sample_ratios,
@@ -404,20 +414,32 @@ def sft(args):
         for i, dset in enumerate(_datasets):
             _dset = HardPackerForText(dset, args.max_length)
             datasets.append(_dset)
+    elif args.dset_pack_level is None and args.cache_dir:
+        for i, dset in enumerate(_datasets):
+            _dset = TextTokenizedDataset(dset)
+            datasets.append(dset)
     else:
         for i, dset in enumerate(_datasets):
+            assert isinstance(dset, TextOnlineTokenizeDataset)
             datasets.append(dset)
 
-    if args.dset_pack_level and rank == 0:
+    train_dataset = ConcatDataset(datasets)
+
+    if (args.dset_pack_level or args.cache_dir) and rank == 0:
+        # Only the tokenized datasets can count the number of tokens
         num_tokens = [torch.tensor(dset['num_tokens']) for dset in _datasets]
         num_tokens = torch.cat(num_tokens, dim=0)
         logger.info(f'[Dataset] {sum(num_tokens)} tokens.')
-        for i in range(4):
-            length = args.max_length // (i + 1)
+        for i in range(8):
+            length = args.max_length // 2**i
             greater = (num_tokens > length).sum()
             logger.info(f'[Dataset] (> {length} tokens) {greater} samples')
 
-    train_dataset = ConcatDataset(datasets)
+    if args.dset_pack_level and rank == 0:
+        ori_samples = sum([len(dset) for dset in _datasets])
+        packed_samples = len(train_dataset)
+        logger.info(f'[Dataset] (Original) {ori_samples} samples.')
+        logger.info(f'[Dataset] (Packed) {packed_samples} samples.')
 
     pack_batch = is_flash_attn_2_available()
     collator = TextCollator(pack_batch=pack_batch)
@@ -426,6 +448,8 @@ def sft(args):
         train_dataset,
         batch_size=args.mirco_batch_size,
         num_workers=args.num_workers,
+        # Ensure to round up or drop last based on the `global_batch_size`,
+        # if you want to replace a custom sampler.
         sampler=ParallelSampler(
             train_dataset, dp_mesh, args.global_batch_size, shuffle=True),
         collate_fn=collator,
@@ -479,9 +503,9 @@ def sft(args):
     llm_cfg.torch_dtype = dtype
 
     with torch.device('meta'):
-
-        meta_llm = AutoModelForCausalLM.from_pretrained(
-            args.llm, config=llm_cfg, trust_remote_code=True)
+        with LoadWoInit():
+            meta_llm = AutoModelForCausalLM.from_pretrained(
+                args.llm, config=llm_cfg, trust_remote_code=True)
 
         # Ensure all numerical values in the optimizer are fp32.
         # FSDP will use low precision during forward.
@@ -510,7 +534,7 @@ def sft(args):
     # Only load parameters on rank 0 to avoid each rank repeatedly loading the
     # same model into the CPU, wasting memory
     if rank == 0:
-        with torch.device('cpu'):
+        with torch.device('cpu'), LoadWoInit():
             llm = AutoModelForCausalLM.from_pretrained(
                 args.llm, config=llm_cfg, trust_remote_code=True)
 
@@ -574,8 +598,8 @@ def sft(args):
     )
 
     max_memory = torch.cuda.max_memory_allocated()
-    logger.info('The peak GPU memory when building the FSDP model is '
-                f'{max_memory/1024**3:.1f}GB.')
+    logger.info('[Model] During building the FSDP model, the peak GPU memory '
+                f'is {max_memory/1024**3:.1f}GB.')
 
     if args.selective_recompute:
         check_fn = partial(
@@ -601,15 +625,17 @@ def sft(args):
 
     # `iter` means once forward+backward
     # `step` means once optimizer step
-    # `per_step_iters` means gradient accumulative counts
-    per_step_iters = global_batch_size // mirco_batch_size // dp_size
-    per_epoch_iters = len(train_dataloader)
-    per_epoch_steps = math.ceil(per_epoch_iters / per_step_iters)
+    # `iters_per_step` means gradient accumulative counts
+    iters_per_step = global_batch_size // mirco_batch_size // dp_size
+    iters_per_epoch = len(train_dataloader)
+    steps_per_epoch = math.ceil(iters_per_epoch / iters_per_step)
 
     total_epochs = args.epochs
-    total_steps = per_epoch_steps * total_epochs
+    total_steps = steps_per_epoch * total_epochs
 
-    if args.checkpoint_interval < 1:
+    if args.checkpoint_interval == -1:
+        checkpoint_interval = total_steps
+    elif args.checkpoint_interval < 1:
         checkpoint_interval = int(total_steps * args.checkpoint_interval)
     else:
         checkpoint_interval = int(args.checkpoint_interval)
@@ -640,16 +666,15 @@ def sft(args):
                 f'{(max_memory / 1024**3):.1f}GB')
     for step in range(start_step, total_steps):
 
-        epoch = step // per_epoch_steps
-        epoch_inner_step = step % per_epoch_steps
+        epoch = step // steps_per_epoch
+        epoch_inner_step = step % steps_per_epoch
         if epoch_inner_step == 0 or step == start_step:
             # For the first step of each epoch, the data order needs to be
             # readjusted.
             # Or after resuming, for the first step, the dataloader needs to
             # be adjusted to the position before resume.
-            # train_dataloader.sampler.set_epoch(epoch, inner_step)
-            # train_dataloader.sampler.set_epoch(epoch, epoch_inner_step)
-            train_dataloader.sampler.set_epoch(epoch)
+
+            train_dataloader.sampler.set_epoch(epoch, epoch_inner_step)
             data_iterator = iter(train_dataloader)
 
         if step <= warmup_steps:
@@ -665,7 +690,7 @@ def sft(args):
         step_data_time = 0
         step_start_t = time.time()
         step_consumed_tokens = 0
-        for _ in range(per_step_iters):
+        for _ in range(iters_per_step):
 
             _data_start_t = time.time()
             data = next(data_iterator)
@@ -684,7 +709,7 @@ def sft(args):
                         input_ids=input_ids,
                         labels=labels,
                         attention_mask=attention_mask)
-                    avg_iter_loss = outputs.loss / per_step_iters
+                    avg_iter_loss = outputs.loss / iters_per_step
 
                 if scaler and args.use_lora:
                     scaler.scale(avg_iter_loss).backward()
@@ -751,7 +776,12 @@ def sft(args):
             dist.barrier()
             del full_model_state_dict
 
-            if not args.checkpoint_drop_optimizer:
+            if args.checkpoint_drop_optimizer:
+                logger.warning('The saved checkpoint cannot be resumed. '
+                               'If you want to save a resumable checkpoint, '
+                               'please remove `--checkpoint-drop-optimizer` '
+                               'from the command.')
+            else:
                 # FSDP cannot be saved via torch.save
                 # Refer to https://pytorch.org/tutorials/recipes/distributed_checkpoint_recipe.html  # noqa: E501
                 _options = StateDictOptions(
@@ -778,7 +808,7 @@ def sft(args):
                         f'memory is {max_memory/1024**3:.1f}GB.')
 
     train_cost_time = time.time() - start_train_t
-    logger.info(f'[Train] Cost {train_cost_time}s')
+    logger.info(f'[Train] Cost {timedelta(seconds=int(train_cost_time))}')
     # ------------------------    Training  End  ---------------------------- #
 
 

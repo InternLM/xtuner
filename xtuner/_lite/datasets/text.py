@@ -110,6 +110,7 @@ class SoftPackerForText(torch.utils.data.Dataset):
             logger.error(f'[packed_items] {packed_items}')
             logger.error(f'[input_ids] {input_ids}')
             logger.error(f'[labels] {labels}')
+            logger.error(f'[num_tokens] {num_tokens}')
             raise RuntimeError('The lengths of input_ids and labels must be '
                                f'equal, but  found {len(input_ids)} and '
                                f'{len(labels)}.')
@@ -146,7 +147,7 @@ class TextTokenizedDataset(torch.utils.data.Dataset):
         return data
 
 
-class TextRawDataset(torch.utils.data.Dataset):
+class TextOnlineTokenizeDataset(torch.utils.data.Dataset):
 
     def __init__(self, dataset, tokenize_fn):
         super().__init__()
