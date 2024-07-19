@@ -62,77 +62,66 @@ class DPO(SupervisedFinetune):
 
     def get_logps(
             self,
-            all_logits,  # bs, seqlen,vocab_size
-            all_ref_logits,  # bs, seqlen,vocab_size
-            labels,  # bs, seqlen
+            policy_logps,  # bs, seqlen,vocab_size
+            ref_logps,  # bs, seqlen,vocab_size
+            loss_mask,  # bs, seqlen
     ):
-        labels = labels[:, 1:].clone()
-        all_logits = all_logits[:, :-1, :]
-        all_ref_logits = all_ref_logits[:, :-1, :]
-
-        labels[labels == -100] = 0
-        loss_mask = labels != 0
-        all_logps = self._gather_masked_logits(all_logits, labels,
-                                               loss_mask).sum(-1)
-        all_ref_logps = self._gather_masked_logits(all_ref_logits, labels,
-                                                   loss_mask).sum(-1)
+        policy_logps = policy_logps[:, :-1].sum(-1)
+        ref_logps = ref_logps[:, :-1].sum(-1)
+        loss_mask = loss_mask[:, :-1]
 
         if self.loss_type == 'ipo':  # average_log_prob
-            all_logps = all_logps / loss_mask.sum(-1)
-            all_ref_logps = all_ref_logps / loss_mask.sum(-1)
+            policy_logps = policy_logps / loss_mask.sum(-1)
+            ref_logps = ref_logps / loss_mask.sum(-1)
 
-        policy_chosen_logps = all_logps[::2]
-        policy_rejected_logps = all_logps[1::2]
-        reference_chosen_logps = all_ref_logps[::2]
-        reference_rejected_logps = all_ref_logps[1::2]
+        policy_chosen_logps = policy_logps[::2]
+        policy_rejected_logps = policy_logps[1::2]
+        reference_chosen_logps = ref_logps[::2]
+        reference_rejected_logps = ref_logps[1::2]
         return (policy_chosen_logps, policy_rejected_logps,
                 reference_chosen_logps, reference_rejected_logps)
 
-    def get_var_len_atten_logps(self, all_logits, all_ref_logits, labels,
+    def get_var_len_atten_logps(self, policy_logps, ref_logps, loss_mask,
                                 cu_seqlens, attention_mask):
         seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
         # unpack sequence
-        unpacked_logits = torch.split(all_logits, seqlens, dim=1)
-        unpacked_ref_logits = torch.split(all_ref_logits, seqlens, dim=1)
-        unpacked_labels = torch.split(labels, seqlens, dim=1)
+        unpacked_policy_logps = torch.split(policy_logps, seqlens, dim=1)
+        unpacked_ref_logps = torch.split(ref_logps, seqlens, dim=1)
+        unpacked_loss_mask = torch.split(loss_mask, seqlens, dim=1)
         if attention_mask is not None:
             # It indicate that we pad the original sequence, labels,
             # position_ids and cumulative_len for sequence parallel if the
             # attention_mask is not None.
             # We then need to remove the padded segments.
             assert False in attention_mask
-            unpacked_logits = unpacked_logits[:-1]
-            unpacked_ref_logits = unpacked_ref_logits[:-1]
-            unpacked_labels = unpacked_labels[:-1]
-            assert len(unpacked_logits) % 2 == 0
+            unpacked_policy_logps = unpacked_policy_logps[:-1]
+            unpacked_ref_logps = unpacked_ref_logps[:-1]
+            unpacked_loss_mask = unpacked_loss_mask[:-1]
+            assert len(unpacked_policy_logps) % 2 == 0
 
-        def compute_logps(_logits, _labels):
-            _labels = _labels[:, 1:].clone()
-            _logits = _logits[:, :-1, :]
-            _labels[_labels == -100] = 0
-            loss_mask = _labels != 0
-            logps = self._gather_masked_logits(_logits, _labels, loss_mask)
-            logps = logps.sum(-1)
+        def compute_logps(_logps, _mask):
+            _logps = _logps[:, :-1].sum(-1)
+            _mask = _mask[:, :-1]
             if self.loss_type == 'ipo':
-                logps /= loss_mask.sum(-1)
-            return logps
+                _logps /= _mask.sum(-1)
+            return _logps
 
         (policy_chosen_logps, policy_rejected_logps, reference_chosen_logps,
          reference_rejected_logps) = [], [], [], []
-        for i in range(len(unpacked_logits) // 2):
-            chosen = unpacked_logits[2 * i]
-            rejected = unpacked_logits[2 * i + 1]
-            chosen_ref = unpacked_ref_logits[2 * i]
-            rejected_ref = unpacked_ref_logits[2 * i + 1]
-            chosen_label = unpacked_labels[2 * i]
-            rejected_label = unpacked_labels[2 * i + 1]
-            policy_chosen_logps.append(compute_logps(chosen, chosen_label))
+        for i in range(len(unpacked_policy_logps) // 2):
+            chosen = unpacked_policy_logps[2 * i]
+            rejected = unpacked_policy_logps[2 * i + 1]
+            chosen_ref = unpacked_ref_logps[2 * i]
+            rejected_ref = unpacked_ref_logps[2 * i + 1]
+            chosen_mask = unpacked_loss_mask[2 * i]
+            rejected_mask = unpacked_loss_mask[2 * i + 1]
+            policy_chosen_logps.append(compute_logps(chosen, chosen_mask))
             policy_rejected_logps.append(
-                compute_logps(rejected, rejected_label))
+                compute_logps(rejected, rejected_mask))
             reference_chosen_logps.append(
-                compute_logps(chosen_ref, chosen_label))
+                compute_logps(chosen_ref, chosen_mask))
             reference_rejected_logps.append(
-                compute_logps(rejected_ref, rejected_label))
+                compute_logps(rejected_ref, rejected_mask))
 
         return (torch.stack(policy_chosen_logps),
                 torch.stack(policy_rejected_logps),
@@ -142,7 +131,7 @@ class DPO(SupervisedFinetune):
     @staticmethod
     def _split_for_sequence_parallel(data):
         # attention mask should not be split
-        ARGS_NEED_TO_SPLIT = ('input_ids', 'position_ids')
+        ARGS_NEED_TO_SPLIT = ('input_ids', 'position_ids', 'labels')
         sp_group = get_sequence_parallel_group()
         for key in ARGS_NEED_TO_SPLIT:
             val = data.get(key, None)
@@ -154,8 +143,14 @@ class DPO(SupervisedFinetune):
 
     def compute_loss(self, data, data_samples=None):
         # modified from https://github.com/huggingface/trl/blob/main/trl/trainer/dpo_trainer.py  # noqa
-
-        labels = data.pop('labels')
+        # shift labels first and add a dummy label at the end, to support sequence parallel  # noqa
+        data['labels'] = torch.cat(
+            (data['labels'][:, 1:], torch.zeros_like(data['labels'][:, :1])),
+            dim=1)
+        tmp_label = data['labels'].clone()
+        tmp_label[tmp_label == 0] = -100
+        all_loss_mask = data[
+            'labels'] != -100  # loss mask of all tokens in all sp ranks  # noqa
 
         if get_sequence_parallel_world_size() > 1:
             data = self._split_for_sequence_parallel(data)
@@ -168,14 +163,22 @@ class DPO(SupervisedFinetune):
             else:
                 all_ref_logits = self.ref_llm(**data).logits
 
+        labels = data['labels']
+        labels[labels == -100] = 0
+        loss_mask = labels != 0  # loss mask in a single sp rank
+        policy_logps = self._gather_masked_logits(all_logits, labels,
+                                                  loss_mask)
+        ref_logps = self._gather_masked_logits(all_ref_logits, labels,
+                                               loss_mask)
+
         if get_sequence_parallel_world_size() > 1:
-            all_logits = gather_forward_split_backward(
-                all_logits,
+            policy_logps = gather_forward_split_backward(
+                policy_logps,
                 dim=1,
                 sp_group=get_sequence_parallel_group(),
                 grad_scale='up')
-            all_ref_logits = gather_forward_split_backward(
-                all_ref_logits,
+            ref_logps = gather_forward_split_backward(
+                ref_logps,
                 dim=1,
                 sp_group=get_sequence_parallel_group(),
                 grad_scale='up')
@@ -184,7 +187,7 @@ class DPO(SupervisedFinetune):
             (policy_chosen_logps, policy_rejected_logps,
              reference_chosen_logps,
              reference_rejected_logps) = self.get_logps(
-                 all_logits, all_ref_logits, labels)
+                 policy_logps, ref_logps, all_loss_mask)
         else:
             message_hub = MessageHub.get_instance('varlen_attn_args')
             rank = dist.get_rank()
@@ -192,7 +195,7 @@ class DPO(SupervisedFinetune):
             (policy_chosen_logps, policy_rejected_logps,
              reference_chosen_logps,
              reference_rejected_logps) = self.get_var_len_atten_logps(
-                 all_logits, all_ref_logits, labels, cu_seqlens,
+                 policy_logps, ref_logps, all_loss_mask, cu_seqlens,
                  data['attention_mask'])
 
         pi_logratios = policy_chosen_logps - policy_rejected_logps
