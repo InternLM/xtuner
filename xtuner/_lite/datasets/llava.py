@@ -1,6 +1,8 @@
 import os
+from io import BytesIO
 
 import torch
+from mmengine import fileio
 from PIL import Image
 from torch.nn.utils.rnn import pad_sequence
 
@@ -8,10 +10,7 @@ from xtuner._lite.chat import ChatMessages
 from xtuner.utils import DEFAULT_PAD_TOKEN_INDEX, IGNORE_INDEX
 from .format import OPENAI_FORMAT_MAP
 from .text import SoftPackerForText
-from PIL import Image
 
-from mmengine import fileio
-from io import BytesIO
 
 class LlavaTokenizeFunction():
 
@@ -36,15 +35,15 @@ class LlavaTokenizeFunction():
 
         if 'image_urls' in tokenized:
             image_urls = tokenized['image_urls']
-            
+
             image_urls = []
             for url in tokenized['image_urls']:
-                
+
                 if self.image_dir:
                     image_urls.append(os.path.join(self.image_dir, url))
                 else:
-                    image_urls.append(url) 
-            
+                    image_urls.append(url)
+
             num_images = len(image_urls)
             num_img_tokens = [self.per_img_tokens for url in image_urls]
             tokenized['num_tokens'] += sum(num_img_tokens) - num_images
@@ -113,8 +112,12 @@ class LlavaRawDataset(LlavaTokenizedDataset):
 
 class SoftPackerForLlava(SoftPackerForText):
 
-    def __init__(self, dataset, image_processor, max_length=2048):
-        super().__init__(dataset, max_length)
+    def __init__(self,
+                 dataset,
+                 image_processor,
+                 max_length=2048,
+                 pack_info=None):
+        super().__init__(dataset, max_length, pack_info)
         self.image_processor = image_processor
 
     def __getitem__(self, item):
@@ -127,7 +130,8 @@ class SoftPackerForLlava(SoftPackerForText):
             A dict including packed input_ids, labels, and cumulative_len.
         """
 
-        packed_items = self.pack_lut[item]
+        packed_items = self.idx_per_pack[item]
+        assert len(packed_items) > 0
 
         packed_input_ids = []
         packed_labels = []
@@ -137,13 +141,13 @@ class SoftPackerForLlava(SoftPackerForText):
         for i in packed_items:
             packed_input_ids.extend(self.dataset[i]['input_ids'])
             packed_labels.extend(self.dataset[i]['labels'])
-            
+
             _num_tokens = self.dataset[i]['num_tokens']
             packed_num_tokens.append(_num_tokens)
-            
+
             if 'image_urls' in self.dataset[item]:
                 packed_img_urls.extend(self.dataset[item]['image_urls'])
-            
+
             if 'num_img_tokens' in self.dataset[i]:
                 _num_img_tokens = self.dataset[i]['num_img_tokens']
                 packed_num_img_tokens.append(_num_img_tokens)
@@ -164,13 +168,15 @@ class SoftPackerForLlava(SoftPackerForText):
             packed_input_ids.extend([DEFAULT_PAD_TOKEN_INDEX] * num_pad_tokens)
             packed_labels.extend([IGNORE_INDEX] * num_pad_tokens)
             packed_num_tokens.append(num_pad_tokens)
+        else:
+            packed_num_tokens.append(0)
 
         packed = {
             'input_ids': packed_input_ids,
             'labels': packed_labels,
             'pixel_values': pixel_values,
             'num_tokens': packed_num_tokens,
-            'num_img_tokens': packed_num_tokens
+            'num_img_tokens': packed_num_img_tokens
         }
 
         return packed

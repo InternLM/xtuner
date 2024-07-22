@@ -127,10 +127,11 @@ def load_hf_dataset(path,
 
 def load_from_cache(cache_dir):
     datasets = []
-    for _sub_dir in tqdm(os.listdir(cache_dir)):
-        sub_dir = os.path.join(cache_dir, _sub_dir)
-        dset = load_from_disk(sub_dir)
-        datasets.append(dset)
+    for _path in tqdm(os.listdir(cache_dir)):
+        path = os.path.join(cache_dir, _path)
+        if os.path.isdir(path):
+            dset = load_from_disk(path)
+            datasets.append(dset)
     return datasets
 
 
