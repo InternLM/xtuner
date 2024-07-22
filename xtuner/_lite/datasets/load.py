@@ -287,10 +287,7 @@ def load_local_datasets(paths,
                 logger.warning(f'Found {sub_cache_dir} exists. '
                                'Clear it and re-cache.')
             dset.save_to_disk(sub_cache_dir)
-            del dset
-            # Only keep the cache dir, do not keep the instance
-            dset = sub_cache_dir
-
+            
             num_tokens = sum(dset['num_tokens'])
             num_samples = len(dset)
             infos = {
@@ -299,6 +296,12 @@ def load_local_datasets(paths,
                 'num_tokens': num_tokens
             }
             rank_cached_infos[cache_id] = infos
+            
+            # Only keep the cache dir, do not keep the instance
+            del dset
+            dset = sub_cache_dir
+
+            
 
         elif cache_dir and not isinstance(dset, Dataset):
             dset_cls = dset.__class__.__name__
@@ -347,14 +350,14 @@ def load_local_datasets(paths,
             world_cached_infos.update(per_rank_cached_infos)
 
     else:
-        world_datasets = []        
+        world_datasets = []
         for dset in rank_datasets:
             if isinstance(dset, str):
                 # dset is a cache dir
-                world_datasets.append(load_from_disk(_dset))
+                world_datasets.append(load_from_disk(dset))
             else:
                 world_datasets.append(dset)
-                
+
         world_cached_infos = rank_cached_infos
 
     if cache_dir and rank == 0:
