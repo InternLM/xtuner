@@ -3,6 +3,7 @@ import functools
 import json
 import os
 import random
+import re
 import shutil
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
@@ -121,13 +122,11 @@ def load_hf_dataset(path,
     return dataset
 
 
-@master_only_load
 def load_from_cache(cache_dir):
-
     datasets = []
-    desc = 'Load Cached Datasets'
-    for sub_dir in tqdm(os.listdir(cache_dir), desc=desc):
-        dset = load_from_disk(os.path.join(cache_dir, sub_dir))
+    for _sub_dir in tqdm(os.listdir(cache_dir)):
+        sub_dir = os.path.join(cache_dir, _sub_dir)
+        dset = load_from_disk(sub_dir)
         datasets.append(dset)
     return datasets
 

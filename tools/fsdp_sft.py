@@ -303,7 +303,7 @@ def sft(args):
                          f' * `mirco_batch_size`({args.mirco_batch_size})')
 
     if args.dset_cache_dir and os.path.isdir(args.dset_cache_dir):
-        if len(os.listdir(args.dset_cache_dir)):
+        if len(os.listdir(args.dset_cache_dir)) and not args.dset_from_cache:
             raise RuntimeError(f'`{args.dset_cache_dir}` is not an empty '
                                'folder, which may lead to inaccurate '
                                'cache results.')
@@ -366,6 +366,7 @@ def sft(args):
         padding_side='right')
 
     if args.dset_from_cache:
+        # packer = partial(SoftPackerForText, max_length=args.max_length)
         _datasets = load_from_cache(args.dset_cache_dir)
     else:
 
@@ -405,35 +406,39 @@ def sft(args):
             map_fns=tokenize_fns,
             init_fns=init_fns)
 
+    if (args.dset_pack_level or args.cache_dir) and rank == 0 and args.debug:
+        # # Only the tokenized datasets can count the number of tokens
+        num_tokens = sum(sum(dset['num_tokens']) for dset in _datasets)
+        logger.debug(f'[Dataset] {num_tokens} tokens.')
+
+    num_datasets = len(_datasets)
     datasets = []
     if args.dset_pack_level and args.dset_pack_level == 'soft':
-        for i, dset in enumerate(_datasets):
-            _dset = SoftPackerForText(dset, args.max_length)
-            datasets.append(_dset)
+        pack_infos = SoftPackerForText.get_pack_infos(_datasets,
+                                                      args.max_length)
+        for i in range(num_datasets):
+            _infos = pack_infos[i]
+            _dset = _datasets[i]
+            _packed_dset = SoftPackerForText(_dset, args.max_length, _infos)
+            datasets.append(_packed_dset)
     elif args.dset_pack_level and args.dset_pack_level == 'hard':
-        for i, dset in enumerate(_datasets):
-            _dset = HardPackerForText(dset, args.max_length)
-            datasets.append(_dset)
-    elif args.dset_pack_level is None and args.cache_dir:
-        for i, dset in enumerate(_datasets):
-            _dset = TextTokenizedDataset(dset)
-            datasets.append(dset)
+        pack_infos = HardPackerForText.get_pack_infos(_datasets,
+                                                      args.max_length)
+        for i in range(num_datasets):
+            _infos = pack_infos[i]
+            _dset = _datasets[i]
+            _packed_dset = HardPackerForText(_dset, args.max_length, _infos)
+            datasets.append(_packed_dset)
+    elif args.dset_pack_level is None and args.dset_cache_dir:
+        datasets = []
+        for dset in _datasets:
+            datasets.append(TextTokenizedDataset(dset))
     else:
-        for i, dset in enumerate(_datasets):
-            assert isinstance(dset, TextOnlineTokenizeDataset)
-            datasets.append(dset)
+        datasets = []
+        for dset in _datasets:
+            datasets.append(TextOnlineTokenizeDataset(dset))
 
     train_dataset = ConcatDataset(datasets)
-
-    if (args.dset_pack_level or args.cache_dir) and rank == 0:
-        # Only the tokenized datasets can count the number of tokens
-        num_tokens = [torch.tensor(dset['num_tokens']) for dset in _datasets]
-        num_tokens = torch.cat(num_tokens, dim=0)
-        logger.info(f'[Dataset] {sum(num_tokens)} tokens.')
-        for i in range(8):
-            length = args.max_length // 2**i
-            greater = (num_tokens > length).sum()
-            logger.info(f'[Dataset] (> {length} tokens) {greater} samples')
 
     if args.dset_pack_level and rank == 0:
         ori_samples = sum([len(dset) for dset in _datasets])

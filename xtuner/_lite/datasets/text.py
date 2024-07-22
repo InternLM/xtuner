@@ -1,9 +1,12 @@
 import bisect
 import itertools
+import math
 import random
 
 import torch
+from torch import distributed as dist
 from torch.nn.utils.rnn import pad_sequence
+from tqdm import tqdm
 
 from xtuner._lite import get_logger
 from xtuner._lite.chat import ChatMessages
@@ -31,91 +34,6 @@ class TextTokenizeFunction():
         msg = ChatMessages.from_dict(formatter(item))
         tokenized = msg.tokenize(self.tokenizer, self.chat_template)
         return tokenized
-
-
-class SoftPackerForText(torch.utils.data.Dataset):
-
-    def __init__(self, dataset, max_length=2048):
-        super().__init__()
-
-        self.max_length = max_length
-
-        # unpack dataset
-        self.dataset = dataset
-
-        self._ori_lens = dataset['num_tokens']
-
-        inds = [i for i in range(len(self.dataset))]
-        random.shuffle(inds)
-
-        item_buffer = []
-        length_buffer = []
-        self.pack_lut = []
-
-        for shfl_i in inds:
-            if self._ori_lens[shfl_i] + sum(length_buffer) <= max_length:
-                item_buffer.append(shfl_i)
-                length_buffer.append(self._ori_lens[shfl_i])
-            else:
-                if len(item_buffer) > 0:
-                    self.pack_lut.append(item_buffer)
-                item_buffer = [shfl_i]
-                length_buffer = [self._ori_lens[shfl_i]]
-
-        if len(item_buffer) > 0:
-            self.pack_lut.append(item_buffer)
-
-        # The number of data items after packing
-        self._num_packed_samples = len(self.pack_lut)
-
-    def __len__(self):
-        return self._num_packed_samples
-
-    def __getitem__(self, item):
-        """Returns a dict containing packed data in the given item.
-
-        Args:
-            item: An index to retrieve packed data.
-
-        Returns:
-            A dict including packed input_ids, labels, and cumulative_len.
-        """
-
-        packed_items = self.pack_lut[item]
-        assert len(packed_items) > 0
-
-        input_ids = []
-        labels = []
-        num_tokens = []
-        for i in packed_items:
-            input_ids.extend(self.dataset[i]['input_ids'])
-            labels.extend(self.dataset[i]['labels'])
-
-            _num_tokens = self.dataset[i]['num_tokens']
-            num_tokens.append(_num_tokens)
-
-        if len(input_ids) < self.max_length:
-            num_pad_tokens = self.max_length - len(input_ids)
-            input_ids.extend([DEFAULT_PAD_TOKEN_INDEX] * num_pad_tokens)
-            labels.extend([IGNORE_INDEX] * num_pad_tokens)
-            num_tokens.append(num_pad_tokens)
-
-        packed = {
-            'input_ids': input_ids,
-            'labels': labels,
-            'num_tokens': num_tokens,
-        }
-
-        if len(input_ids) != len(labels):
-            logger.error(f'[packed_items] {packed_items}')
-            logger.error(f'[input_ids] {input_ids}')
-            logger.error(f'[labels] {labels}')
-            logger.error(f'[num_tokens] {num_tokens}')
-            raise RuntimeError('The lengths of input_ids and labels must be '
-                               f'equal, but  found {len(input_ids)} and '
-                               f'{len(labels)}.')
-
-        return packed
 
 
 class TextTokenizedDataset(torch.utils.data.Dataset):
@@ -179,6 +97,131 @@ class TextOnlineTokenizeDataset(torch.utils.data.Dataset):
         return data
 
 
+class SoftPackerForText(torch.utils.data.Dataset):
+
+    def __init__(self, dataset, max_length=2048, pack_info=None):
+        super().__init__()
+
+        self.max_length = max_length
+
+        # unpack dataset
+        self.dataset = dataset
+
+        if pack_info:
+            self.pack_info = pack_info
+        else:
+            self.pack_info = self.get_pack_info(dataset, max_length)
+
+            # The number of data items after packing
+        self._num_packed_samples = len(self.pack_info)
+
+    def __len__(self):
+        return self._num_packed_samples
+
+    def __getitem__(self, item):
+        """Returns a dict containing packed data in the given item.
+
+        Args:
+            item: An index to retrieve packed data.
+
+        Returns:
+            A dict including packed input_ids, labels, and cumulative_len.
+        """
+
+        packed_items = self.pack_info[item]
+        assert len(packed_items) > 0
+
+        input_ids = []
+        labels = []
+        num_tokens = []
+        for i in packed_items:
+            input_ids.extend(self.dataset[i]['input_ids'])
+            labels.extend(self.dataset[i]['labels'])
+
+            _num_tokens = self.dataset[i]['num_tokens']
+            num_tokens.append(_num_tokens)
+
+        if len(input_ids) < self.max_length:
+            num_pad_tokens = self.max_length - len(input_ids)
+            input_ids.extend([DEFAULT_PAD_TOKEN_INDEX] * num_pad_tokens)
+            labels.extend([IGNORE_INDEX] * num_pad_tokens)
+            num_tokens.append(num_pad_tokens)
+
+        packed = {
+            'input_ids': input_ids,
+            'labels': labels,
+            'num_tokens': num_tokens,
+        }
+
+        if len(input_ids) != len(labels):
+            logger.error(f'[packed_items] {packed_items}')
+            logger.error(f'[input_ids] {input_ids}')
+            logger.error(f'[labels] {labels}')
+            logger.error(f'[num_tokens] {num_tokens}')
+            raise RuntimeError('The lengths of input_ids and labels must be '
+                               f'equal, but  found {len(input_ids)} and '
+                               f'{len(labels)}.')
+
+        return packed
+
+    @classmethod
+    def get_pack_info(cls, dataset, max_length):
+
+        _ori_lens = dataset['num_tokens']
+        inds = [i for i in range(len(dataset))]
+        random.shuffle(inds)
+
+        item_buffer = []
+        length_buffer = []
+        pack_info = []
+
+        for shfl_i in inds:
+            if _ori_lens[shfl_i] + sum(length_buffer) <= max_length:
+                item_buffer.append(shfl_i)
+                length_buffer.append(_ori_lens[shfl_i])
+            else:
+                if len(item_buffer) > 0:
+                    pack_info.append(item_buffer)
+                item_buffer = [shfl_i]
+                length_buffer = [_ori_lens[shfl_i]]
+
+        if len(item_buffer) > 0:
+            pack_info.append(item_buffer)
+        return pack_info
+
+    @classmethod
+    def get_pack_infos(cls, datasets, max_length):
+
+        if dist.is_available():
+            world_size = dist.get_world_size()
+            rank = dist.get_rank()
+        else:
+            world_size = 1
+            rank = 0
+
+        num_dsets = len(datasets)
+        avg_num = math.ceil(num_dsets // world_size)
+
+        pack_infos = []
+        start = rank * avg_num
+        end = min((rank + 1) * avg_num, num_dsets)
+        desc = f'[Rank {rank}] Soft Packing'
+        for ind in tqdm(range(start, end), desc=desc):
+            pack_infos.append(cls.get_pack_info(datasets[ind], max_length))
+
+        if dist.is_available() and world_size > 1:
+            buffers = [None] * world_size
+            dist.all_gather_object(buffers, pack_infos)
+            world_pack_infos = []
+            for infos_per_rank in buffers:
+                world_pack_infos.extend(infos_per_rank)
+
+            assert len(world_pack_infos) == num_dsets
+        else:
+            world_pack_infos = pack_infos
+        return world_pack_infos
+
+
 class HardPackerForText(torch.utils.data.Dataset):
     """The new dataset obtained by concatenating multiple raw data.
 
@@ -198,17 +241,28 @@ class HardPackerForText(torch.utils.data.Dataset):
         recording the number of tokens for each piece of data.
     """
 
-    def __init__(self, dataset, max_length=2048):
+    def __init__(self, dataset, max_length=2048, pack_info=None):
         super().__init__()
 
         self.max_length = max_length
         # unpack dataset
         self.dataset = dataset
 
-        self._ori_lens = dataset['num_tokens']
+        if pack_info is None:
+            pack_info = self.get_pack_info(dataset, max_length)
+
+        self._shfl_item_rngs_left = pack_info['ranges_left']
+        self._shfl_item_rngs_right = pack_info['ranges_right']
+        self._num_packed_samples = pack_info['num_packed_samples']
+        self.shfl_inds = pack_info['indices']
+
+    @classmethod
+    def get_pack_info(cls, dataset, max_length):
+
+        _ori_lens = dataset['num_tokens']
 
         # The number of data items after packing
-        self._num_packed_samples = sum(self._ori_lens) // self.max_length
+        num_packed_samples = sum(_ori_lens) // max_length
 
         # Shuffle the order of the original dataset
         # The packing will proceed according to the order after shuffle.
@@ -218,16 +272,55 @@ class HardPackerForText(torch.utils.data.Dataset):
         #   (3) self._ori_lens[2] + self._ori_lens[0] = max_length
         # Ultimately, dataset[3] and dataset[1] will be combined into a new
         # data, and dataset[2] and dataset[0] will be combined into a new data.
-        inds = [i for i in range(len(self.dataset))]
+        inds = [i for i in range(len(dataset))]
         random.shuffle(inds)
-        self.shfl_inds = inds
+        shfl_inds = inds
 
         # shuffled cumulative lengths
-        shfl_lens = [self._ori_lens[i] for i in inds]
+        shfl_lens = [_ori_lens[i] for i in shfl_inds]
         shfl_acc_lens = list(itertools.accumulate(shfl_lens))
 
-        self._shfl_item_rngs_left = [0] + shfl_acc_lens[:-1]
-        self._shfl_item_rngs_right = shfl_acc_lens
+        shfl_item_rngs_left = [0] + shfl_acc_lens[:-1]
+        shfl_item_rngs_right = shfl_acc_lens
+
+        return {
+            'ranges_left': shfl_item_rngs_left,
+            'ranges_right': shfl_item_rngs_right,
+            'num_packed_samples': num_packed_samples,
+            'indices': shfl_inds
+        }
+
+    @classmethod
+    def get_pack_infos(cls, datasets, max_length):
+
+        if dist.is_available():
+            world_size = dist.get_world_size()
+            rank = dist.get_rank()
+        else:
+            world_size = 1
+            rank = 0
+
+        num_dsets = len(datasets)
+        avg_num = math.ceil(num_dsets // world_size)
+
+        pack_infos = []
+        start = rank * avg_num
+        end = min((rank + 1) * avg_num, num_dsets)
+        desc = f'[Rank {rank}] Hard Packing'
+        for ind in tqdm(range(start, end), desc=desc):
+            pack_infos.append(cls.get_pack_info(datasets[ind], max_length))
+
+        if dist.is_available() and world_size > 1:
+            buffers = [None] * world_size
+            dist.all_gather_object(buffers, pack_infos)
+            world_pack_infos = []
+            for infos_per_rank in buffers:
+                world_pack_infos.extend(infos_per_rank)
+
+            assert len(world_pack_infos) == num_dsets
+        else:
+            world_pack_infos = pack_infos
+        return world_pack_infos
 
     def _pack_ids_and_labels_in_range(self, begin: int, end: int):
         """Packs ids and labels in a given range using bisection method.
