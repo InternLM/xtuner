@@ -288,7 +288,8 @@ def load_local_datasets(paths,
                                'Clear it and re-cache.')
             dset.save_to_disk(sub_cache_dir)
             del dset
-            dset = load_from_disk(sub_cache_dir)
+            # Only keep the cache dir, do not keep the instance
+            dset = sub_cache_dir
 
             num_tokens = sum(dset['num_tokens'])
             num_samples = len(dset)
@@ -329,7 +330,12 @@ def load_local_datasets(paths,
         world_datasets = [None] * num_files
         for _rank, per_rank_dsets in enumerate(buffers):
             for _dset_ind, _file_ind in enumerate(per_rank_files[_rank]):
-                world_datasets[_file_ind] = per_rank_dsets[_dset_ind]
+                _dset = per_rank_dsets[_dset_ind]
+                if isinstance(_dset, str):
+                    # _dset is a cache dir
+                    world_datasets[_file_ind] = load_from_disk(_dset)
+                else:
+                    world_datasets[_file_ind] = _dset
 
         assert all([dset is not None for dset in world_datasets])
 
