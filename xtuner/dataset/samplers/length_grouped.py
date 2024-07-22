@@ -4,6 +4,7 @@ from typing import Iterator, Optional, Sized
 
 import torch
 from mmengine.dist import get_dist_info, sync_random_seed
+from mmengine.logging import print_log
 from torch.utils.data import ConcatDataset as TorchConcatDataset
 from torch.utils.data import Sampler
 
@@ -78,6 +79,7 @@ class LengthGroupedSampler(Sampler):
                  mega_batch_mult: Optional[int] = None,
                  seed: Optional[int] = None,
                  round_up: bool = True) -> None:
+        print_log('LengthGroupedSampler is used.', logger='current')
         rank, world_size = get_dist_info()
         self.rank = rank
         self.world_size = world_size
@@ -120,6 +122,10 @@ class LengthGroupedSampler(Sampler):
         assert isinstance(self.length, (list, tuple))
 
         self.total_batch_size = total_batch_size
+        print_log(
+            f'LengthGroupedSampler construction is complete, '
+            f'and the selected attribute is {length_property}',
+            logger='current')
 
     def __iter__(self) -> Iterator[int]:
         """Iterate the indices."""
