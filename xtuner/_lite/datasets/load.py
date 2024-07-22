@@ -347,7 +347,14 @@ def load_local_datasets(paths,
             world_cached_infos.update(per_rank_cached_infos)
 
     else:
-        world_datasets = rank_datasets
+        world_datasets = []        
+        for dset in rank_datasets:
+            if isinstance(dset, str):
+                # dset is a cache dir
+                world_datasets.append(load_from_disk(_dset))
+            else:
+                world_datasets.append(dset)
+                
         world_cached_infos = rank_cached_infos
 
     if cache_dir and rank == 0:

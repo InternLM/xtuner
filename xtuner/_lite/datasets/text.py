@@ -210,6 +210,7 @@ class SoftPackerForText(torch.utils.data.Dataset):
             pack_infos.append(cls.get_pack_info(datasets[ind], max_length))
 
         if dist.is_available() and world_size > 1:
+            dist.barrier()
             buffers = [None] * world_size
             dist.all_gather_object(buffers, pack_infos)
             world_pack_infos = []
@@ -310,7 +311,9 @@ class HardPackerForText(torch.utils.data.Dataset):
         for ind in tqdm(range(start, end), desc=desc):
             pack_infos.append(cls.get_pack_info(datasets[ind], max_length))
 
+        
         if dist.is_available() and world_size > 1:
+            dist.barrier()
             buffers = [None] * world_size
             dist.all_gather_object(buffers, pack_infos)
             world_pack_infos = []
