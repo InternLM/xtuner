@@ -53,7 +53,7 @@ from xtuner._lite.datasets import (OPENAI_FORMAT_MAP, HardPackerForText,
                                    TextTokenizedDataset, TextTokenizeFunction)
 from xtuner._lite.datasets.load import (LOAD_FN_MAP, load_datasets,
                                         load_from_cache)
-from xtuner._lite.parallel import ParallelSampler
+from xtuner._lite.parallel import LengthGroupedSampler, ParallelSampler
 
 logger = get_logger()
 
@@ -205,6 +205,8 @@ def parse_args():
         type=int,
         default=8,
         help='how many subprocesses to use for data loading.')
+    data_args.add_argument('--file-pattern', type=str, default=None)
+    data_args.add_argument('--group-by-length', action='store_true')
 
     optim_args = parser.add_argument_group('optim', 'Optim Related Settings')
     optim_args.add_argument(
@@ -220,6 +222,8 @@ def parse_args():
 
     optim_args.add_argument(
         '--lr', default=4e-5, type=float, help='learning rate.')
+    optim_args.add_argument(
+        '--lr-min', default=6e-6, type=float, help='min learning rate.')
     optim_args.add_argument(
         '--wd', default=0.01, type=float, help='weight decay.')
     optim_args.add_argument(
@@ -404,7 +408,8 @@ def sft(args):
             sample_ratios=args.dset_sample_ratios,
             num_proc=max(args.num_workers, 1),
             map_fns=tokenize_fns,
-            init_fns=init_fns)
+            init_fns=init_fns,
+            file_pattern=args.file_pattern)
 
     if (args.dset_pack_level or args.cache_dir) and rank == 0 and args.debug:
         # # Only the tokenized datasets can count the number of tokens
@@ -449,14 +454,20 @@ def sft(args):
     pack_batch = is_flash_attn_2_available()
     collator = TextCollator(pack_batch=pack_batch)
 
+    if args.group_by_length:
+        sampler = LengthGroupedSampler(train_dataset, dp_mesh,
+                                       args.global_batch_size)
+    else:
+        sampler = ParallelSampler(
+            train_dataset, dp_mesh, args.global_batch_size, shuffle=True)
+
     train_dataloader = DataLoader(
         train_dataset,
         batch_size=args.mirco_batch_size,
         num_workers=args.num_workers,
         # Ensure to round up or drop last based on the `global_batch_size`,
         # if you want to replace a custom sampler.
-        sampler=ParallelSampler(
-            train_dataset, dp_mesh, args.global_batch_size, shuffle=True),
+        sampler=sampler,
         collate_fn=collator,
         persistent_workers=args.num_workers > 0)
 
@@ -581,8 +592,10 @@ def sft(args):
         policies.append(all_required_grad_wrap_policy)
 
     if args.shard_strategy == 'full':
+        fsdp_device_mesh = dp_mesh
         strategy = ShardingStrategy.FULL_SHARD
     elif args.shard_strategy == 'hybrid':
+        fsdp_device_mesh = init_device_mesh('cuda', (dp_size // 8, 8))
         strategy = ShardingStrategy.HYBRID_SHARD
     else:
         raise ValueError
@@ -590,7 +603,7 @@ def sft(args):
     torch.cuda.reset_peak_memory_stats()
     shard_llm = FSDP(
         meta_llm,
-        device_mesh=dp_mesh,
+        device_mesh=fsdp_device_mesh,
         sharding_strategy=strategy,
         cpu_offload=CPUOffload(offload_params=args.cpu_offload),
         auto_wrap_policy=partial(_or_policy, policies=policies),
@@ -623,7 +636,11 @@ def sft(args):
     requried_grad_params = [
         param for param in shard_llm.parameters() if param.requires_grad
     ]
-    optimizer = AdamW(requried_grad_params, lr=args.lr, weight_decay=args.wd)
+    optimizer = AdamW(
+        requried_grad_params,
+        lr=args.lr,
+        weight_decay=args.wd,
+        betas=(0.9, 0.95))
 
     global_batch_size = args.global_batch_size
     mirco_batch_size = args.mirco_batch_size
@@ -653,7 +670,7 @@ def sft(args):
     warmup_scheduler = LambdaLR(optimizer, warmup_fn)
 
     cosine_scheduler = CosineAnnealingLR(
-        optimizer, T_max=total_steps - warmup_steps, eta_min=0)
+        optimizer, T_max=total_steps - warmup_steps, eta_min=args.lr_min)
 
     start_step = 0
 
@@ -684,10 +701,10 @@ def sft(args):
 
         if step <= warmup_steps:
             warmup_scheduler.step()
-            cur_lr = warmup_scheduler.get_lr()[0]
+            cur_lr = warmup_scheduler.get_last_lr()[0]
         else:
             cosine_scheduler.step()
-            cur_lr = cosine_scheduler.get_lr()[0]
+            cur_lr = cosine_scheduler.get_last_lr()[0]
 
         torch.cuda.reset_peak_memory_stats()
 
@@ -741,7 +758,8 @@ def sft(args):
         tgs = int(step_consumed_tokens / step_time)
         max_memory = torch.cuda.max_memory_allocated()
         if is_interval(step, total_steps, args.log_interval):
-            logger.info(f'[Train] (Epoch {epoch}) Step {step}/{total_steps}  '
+            logger.info(f'[Train] (Epoch {epoch + 1}) Step '
+                        f'{step + 1}/{total_steps}  '
                         f'lr: {cur_lr:.6f}  loss: {step_loss:.3f}  '
                         f'grad_norm: {grad_norm:.2f}  '
                         f'max_memory: {(max_memory / 1024**3):.1f}GB  '

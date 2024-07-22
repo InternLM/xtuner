@@ -1,3 +1,3 @@
-from .sampler import ParallelSampler
+from .sampler import LengthGroupedSampler, ParallelSampler
 
-__all__ = ['ParallelSampler']
+__all__ = ['ParallelSampler', 'LengthGroupedSampler']

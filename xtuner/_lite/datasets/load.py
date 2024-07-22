@@ -8,8 +8,7 @@ import shutil
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 
-import torch
-from datasets import Dataset, load_from_disk
+from datasets import Dataset, load_dataset, load_from_disk
 from torch import distributed as dist
 from tqdm import tqdm
 
@@ -32,7 +31,11 @@ def load_jsonl(file):
     return dset
 
 
-LOAD_FN_MAP = {'.json': load_json, '.jsonl': load_jsonl}
+def load_bin(file):
+    return load_dataset('json', data_files=file, split='train')
+
+
+LOAD_FN_MAP = {'.json': load_json, '.jsonl': load_jsonl, '.bin': load_bin}
 
 
 def master_only_load(load_fn):
@@ -287,7 +290,7 @@ def load_local_datasets(paths,
                 logger.warning(f'Found {sub_cache_dir} exists. '
                                'Clear it and re-cache.')
             dset.save_to_disk(sub_cache_dir)
-            
+
             num_tokens = sum(dset['num_tokens'])
             num_samples = len(dset)
             infos = {
@@ -296,12 +299,10 @@ def load_local_datasets(paths,
                 'num_tokens': num_tokens
             }
             rank_cached_infos[cache_id] = infos
-            
+
             # Only keep the cache dir, do not keep the instance
             del dset
             dset = sub_cache_dir
-
-            
 
         elif cache_dir and not isinstance(dset, Dataset):
             dset_cls = dset.__class__.__name__

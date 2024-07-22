@@ -24,9 +24,16 @@ def dispatch_clip_attn_forward(module):
     return clip_flash_attn_forward.__name__
 
 
+def dispatch_rms_norm_forward(module):
+    from ._fused import rms_norm_forward
+    _dispatch_forward_fn(module, rms_norm_forward)
+    return rms_norm_forward.__name__
+
+
 DISPATCH_MAP = {
     'InternLM2FlashAttention2': dispatch_internlm_varlen_attn_forward,
-    'CLIPAttention': dispatch_clip_attn_forward
+    'CLIPAttention': dispatch_clip_attn_forward,
+    'InternLM2RMSNorm': dispatch_rms_norm_forward
 }
 
 

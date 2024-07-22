@@ -107,13 +107,14 @@ class SoftPackerForText(torch.utils.data.Dataset):
         # unpack dataset
         self.dataset = dataset
 
-        if pack_info:
-            self.pack_info = pack_info
-        else:
-            self.pack_info = self.get_pack_info(dataset, max_length)
+        if pack_info is None:
+            pack_info = self.get_pack_info(dataset, max_length)
 
-            # The number of data items after packing
-        self._num_packed_samples = len(self.pack_info)
+        self.idx_per_pack = pack_info['idx_per_pack']
+        self.max_length_per_pack = pack_info['max_length_per_pack']
+
+        # The number of data items after packing
+        self._num_packed_samples = len(self.idx_per_pack)
 
     def __len__(self):
         return self._num_packed_samples
@@ -128,7 +129,7 @@ class SoftPackerForText(torch.utils.data.Dataset):
             A dict including packed input_ids, labels, and cumulative_len.
         """
 
-        packed_items = self.pack_info[item]
+        packed_items = self.idx_per_pack[item]
         assert len(packed_items) > 0
 
         input_ids = []
@@ -146,6 +147,8 @@ class SoftPackerForText(torch.utils.data.Dataset):
             input_ids.extend([DEFAULT_PAD_TOKEN_INDEX] * num_pad_tokens)
             labels.extend([IGNORE_INDEX] * num_pad_tokens)
             num_tokens.append(num_pad_tokens)
+        else:
+            num_tokens.append(0)
 
         packed = {
             'input_ids': input_ids,
@@ -173,21 +176,32 @@ class SoftPackerForText(torch.utils.data.Dataset):
 
         item_buffer = []
         length_buffer = []
-        pack_info = []
+        idx_per_pack = []
+        max_length_per_pack = []
+        max_length_one_pack = 0
 
         for shfl_i in inds:
             if _ori_lens[shfl_i] + sum(length_buffer) <= max_length:
                 item_buffer.append(shfl_i)
                 length_buffer.append(_ori_lens[shfl_i])
+                max_length_one_pack = max(max_length_one_pack,
+                                          _ori_lens[shfl_i])
             else:
                 if len(item_buffer) > 0:
-                    pack_info.append(item_buffer)
+                    idx_per_pack.append(item_buffer)
+                    max_length_per_pack.append(max_length_one_pack)
                 item_buffer = [shfl_i]
                 length_buffer = [_ori_lens[shfl_i]]
+                max_length_one_pack = _ori_lens[shfl_i]
 
+        assert len(max_length_per_pack) == len(idx_per_pack)
         if len(item_buffer) > 0:
-            pack_info.append(item_buffer)
-        return pack_info
+            idx_per_pack.append(item_buffer)
+
+        return {
+            'idx_per_pack': idx_per_pack,
+            'max_length_per_pack': max_length_per_pack
+        }
 
     @classmethod
     def get_pack_infos(cls, datasets, max_length):
@@ -200,7 +214,7 @@ class SoftPackerForText(torch.utils.data.Dataset):
             rank = 0
 
         num_dsets = len(datasets)
-        avg_num = math.ceil(num_dsets // world_size)
+        avg_num = math.ceil(num_dsets / world_size)
 
         pack_infos = []
         start = rank * avg_num
@@ -256,6 +270,21 @@ class HardPackerForText(torch.utils.data.Dataset):
         self._shfl_item_rngs_right = pack_info['ranges_right']
         self._num_packed_samples = pack_info['num_packed_samples']
         self.shfl_inds = pack_info['indices']
+        self.max_length_per_pack = pack_info['max_length_per_pack']
+
+    @classmethod
+    def _cal_max_length(begin, end, shfl_item_rngs_left, shfl_item_rngs_right):
+        left = bisect.bisect(shfl_item_rngs_right, begin)
+        right = bisect.bisect(shfl_item_rngs_left, end)
+        max_length = 0
+        for i in range(left, right):
+            item_begin = shfl_item_rngs_left[i]
+            item_end = shfl_item_rngs_right[i]
+            inner_l = max(begin, item_begin) - item_begin
+            inner_r = min(end, item_end) - item_begin
+            trunc_size = inner_r - inner_l
+            max_length = max(max_length, trunc_size)
+        return max_length
 
     @classmethod
     def get_pack_info(cls, dataset, max_length):
@@ -284,11 +313,20 @@ class HardPackerForText(torch.utils.data.Dataset):
         shfl_item_rngs_left = [0] + shfl_acc_lens[:-1]
         shfl_item_rngs_right = shfl_acc_lens
 
+        max_length_per_pack = []
+        for i in range(num_packed_samples):
+            begin = i * max_length
+            end = (i + 1) * max_length
+            max_length_per_pack.append(
+                cls._cal_max_length(begin, end, shfl_item_rngs_left,
+                                    shfl_item_rngs_right))
+
         return {
             'ranges_left': shfl_item_rngs_left,
             'ranges_right': shfl_item_rngs_right,
             'num_packed_samples': num_packed_samples,
-            'indices': shfl_inds
+            'indices': shfl_inds,
+            'max_length_per_pack': max_length_per_pack
         }
 
     @classmethod
@@ -302,7 +340,7 @@ class HardPackerForText(torch.utils.data.Dataset):
             rank = 0
 
         num_dsets = len(datasets)
-        avg_num = math.ceil(num_dsets // world_size)
+        avg_num = math.ceil(num_dsets / world_size)
 
         pack_infos = []
         start = rank * avg_num
