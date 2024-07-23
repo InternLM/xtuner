@@ -2,6 +2,7 @@ import os
 from io import BytesIO
 
 import torch
+from datasets import load_from_disk
 from mmengine import fileio
 from PIL import Image
 from torch.nn.utils.rnn import pad_sequence
@@ -129,6 +130,8 @@ class SoftPackerForLlava(SoftPackerForText):
         Returns:
             A dict including packed input_ids, labels, and cumulative_len.
         """
+        if self._cached:
+            self.load_cache()
 
         packed_items = self.idx_per_pack[item]
         assert len(packed_items) > 0

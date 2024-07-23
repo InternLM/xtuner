@@ -1,9 +1,12 @@
 import bisect
 import itertools
 import math
+import os
+import pickle
 import random
 
 import torch
+from datasets import load_from_disk
 from torch import distributed as dist
 from torch.nn.utils.rnn import pad_sequence
 from tqdm import tqdm
@@ -114,7 +117,33 @@ class SoftPackerForText(torch.utils.data.Dataset):
         self.max_length_per_pack = pack_info['max_length_per_pack']
 
         # The number of data items after packing
-        self._num_packed_samples = len(self.idx_per_pack)
+        self._num_packed_samples = len(pack_info['idx_per_pack'])
+
+    def cache(self):
+        self.cache_dset = os.path.dirname(
+            self.dataset.cache_files[0]['filename'])
+        self.cache_pack_info = f'{self.cache_dset}.pack.{self.max_length}.pkl'
+        pack_info = {
+            'idx_per_pack': self.idx_per_pack,
+            'max_length_per_pack': self.max_length_per_pack
+        }
+        with open(self.cache_pack_info, 'wb') as f:
+            # 使用 pickle.dump 序列化并存储对象
+            pickle.dump(pack_info, f)
+
+        self._cached = True
+
+        self.dataset = None
+        self.max_length_per_pack = None
+        self.idx_per_pack = None
+
+    def load_cache(self):
+        self.dataset = load_from_disk(self.cache_dset)
+        with open(self.cache_pack_info, 'rb') as f:
+            pack_info = pickle.load(f)
+        self.idx_per_pack = pack_info['idx_per_pack']
+        self.max_length_per_pack = pack_info['max_length_per_pack']
+        self._cached = False
 
     def __len__(self):
         return self._num_packed_samples
@@ -131,6 +160,9 @@ class SoftPackerForText(torch.utils.data.Dataset):
 
         packed_items = self.idx_per_pack[item]
         assert len(packed_items) > 0
+
+        if self._cached:
+            self.load_cache()
 
         input_ids = []
         labels = []
@@ -198,10 +230,12 @@ class SoftPackerForText(torch.utils.data.Dataset):
         if len(item_buffer) > 0:
             idx_per_pack.append(item_buffer)
 
-        return {
+        pack_info = {
             'idx_per_pack': idx_per_pack,
             'max_length_per_pack': max_length_per_pack
         }
+
+        return pack_info
 
     @classmethod
     def get_pack_infos(cls, datasets, max_length):
