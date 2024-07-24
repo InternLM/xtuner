@@ -1,18 +1,20 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import functools
 import json
+import math
 import os
 import random
 import re
-import shutil
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 
-from datasets import Dataset, load_dataset, load_from_disk
+from datasets import (Dataset, concatenate_datasets, load_dataset,
+                      load_from_disk)
 from torch import distributed as dist
 from tqdm import tqdm
 
 from xtuner._lite import get_logger
+from .cache import CacheDataset
 
 logger = get_logger()
 
@@ -125,14 +127,45 @@ def load_hf_dataset(path,
     return dataset
 
 
-def load_from_cache(cache_dir):
-    datasets = []
+def load_from_cache(cache_dir, init_fn):
+
+    if dist.is_available():
+        world_size = dist.get_world_size()
+        rank = dist.get_rank()
+    else:
+        world_size = 1
+        rank = 0
+
+    sub_cache_dirs = []
     for _path in tqdm(os.listdir(cache_dir)):
         path = os.path.join(cache_dir, _path)
         if os.path.isdir(path):
-            dset = load_from_disk(path)
-            datasets.append(dset)
-    return datasets
+            sub_cache_dirs.append(path)
+
+    num_dsets = len(sub_cache_dirs)
+    avg_num = math.ceil(num_dsets / world_size)
+    start = rank * avg_num
+    end = min((rank + 1) * avg_num, num_dsets)
+    desc = f'[Rank {rank}] Loading Cached Dataset'
+
+    rank_datasets = []
+    for ind in tqdm(range(start, end), desc=desc):
+        dset = init_fn(sub_cache_dirs[ind])
+        rank_datasets.append(dset)
+
+    if dist.is_available() and world_size > 1:
+        dist.barrier()
+        buffers = [None] * world_size
+        dist.all_gather_object(buffers, rank_datasets)
+        world_datasets = []
+        for dsets_per_rank in buffers:
+            world_datasets.extend(dsets_per_rank)
+
+        assert len(world_datasets) == num_dsets
+    else:
+        world_datasets = rank_datasets
+
+    return world_datasets
 
 
 def load_local_datasets(paths,
@@ -225,51 +258,27 @@ def load_local_datasets(paths,
         world_size = dist.get_world_size()
         rank = dist.get_rank()
 
-        # Assigned files to each rank based on the file size
-        file_sizes = []
-        for file in files:
-            if os.path.islink(file):
-                real_path = os.path.realpath(file)
-                file_sizes.append(os.path.getsize(real_path))
-            else:
-                file_sizes.append(os.path.getsize(file))
-
-        size_order = sorted(
-            enumerate(file_sizes), key=lambda x: x[1], reverse=True)
-        sorted_indices = [ind_and_size[0] for ind_and_size in size_order]
-
-        per_rank_files = [[] for _ in range(world_size)]
-        per_rank_sizes = [0 for _ in range(world_size)]
-
-        for ind in sorted_indices:
-
-            min_size = min(per_rank_sizes)
-            target = per_rank_sizes.index(min_size)
-
-            per_rank_files[target].append(ind)
-            per_rank_sizes[target] += file_sizes[ind]
-
     else:
         world_size = 1
         rank = 0
-        per_rank_files = [[i for i in range(num_files)]]
 
-    if rank == 0:
-        str_files = '\n\t'.join(files)
-        logger.debug(f'All files:\n\t{str_files}')
-    logger.debug(f'Assigned Files: {per_rank_files[rank]}')
-
-    rank_datasets = []
-    rank_cached_infos = {}
-    for ind in per_rank_files[rank]:
+    datasets = []
+    cached_infos = {}
+    for ind in range(num_files):
 
         file = files[ind]
         suffix = os.path.splitext(file)[-1]
         dset = LOAD_FN_MAP[suffix](file)
         logger.debug(f'[File {ind}] Raw Sample:\n{dset[0]}')
 
+        init_fn = file_init_fns[ind]
         map_fn = file_map_fns[ind]
         if map_fn:
+            num_per_shard = math.ceil(len(dset) / world_size)
+            shard_start = rank * num_per_shard
+            shard_end = min((rank + 1) * num_per_shard, len(dset))
+
+            dset = dset[shard_start:shard_end]
             try:
                 desc = f'[RANK {rank}] Map local file {ind}'
                 dset = multi_thread_map(map_fn, dset, desc, num_proc)
@@ -277,97 +286,43 @@ def load_local_datasets(paths,
             except:
                 raise RuntimeError(f'[RANK {rank}] Map {file} failed.')
 
-        init_fn = file_init_fns[ind]
+            if dist.is_available() and world_size > 1:
+                dist.barrier()
+                buffers = [None] * world_size
+                dist.all_gather_object(buffers, dset)
+                dset = concatenate_datasets(
+                    [Dataset.from_list(_list) for _list in buffers])
+
         if init_fn:
             dset = init_fn(dset)
 
-        if cache_dir and isinstance(dset, Dataset):
+        if cache_dir and isinstance(dset, CacheDataset):
+
             digits = len(str(abs(num_files)))
             cache_id = (f'cache-local-{ind+1:0{digits}}-of-'
                         f'{num_files:0{digits}}')
             sub_cache_dir = os.path.join(cache_dir, cache_id)
-            if os.path.exists(sub_cache_dir):
-                shutil.rmtree(sub_cache_dir)
-                logger.warning(f'Found {sub_cache_dir} exists. '
-                               'Clear it and re-cache.')
-            dset.save_to_disk(sub_cache_dir)
 
-            num_tokens = sum(dset['num_tokens'])
-            num_samples = len(dset)
+            # if os.path.exists(sub_cache_dir):
+            #     shutil.rmtree(sub_cache_dir)
+            #     logger.warning(f'Found {sub_cache_dir} exists. '
+            #                 'Clear it and re-cache.')
+            dset.cache(sub_cache_dir)
+
             infos = {
                 'path': file,
-                'num_samples': num_samples,
-                'num_tokens': num_tokens
+                'num_samples': dset.num_samples,
+                'num_tokens': dset.total_tokens
             }
-            rank_cached_infos[cache_id] = infos
-
-            # Only keep the cache dir, do not keep the instance
-            del dset
-            dset = sub_cache_dir
-
-        elif cache_dir and not isinstance(dset, Dataset):
-            dset_cls = dset.__class__.__name__
-            logger.warning(
-                f'[File {ind}] {dset_cls} does not support caching.')
-
-        rank_datasets.append(dset)
-
-    if dist.is_available() and world_size > 1:
-        logger.info('Waiting for other ranks...... ')
-        dist.barrier()
-
-        timeout = timedelta(
-            minutes=int(os.getenv('XTUNER_DATASET_TIMEOUT', default=30)))
-
-        if rank == 0:
-            logger.info(f'The default timeout is {timeout}. The environment '
-                        'variable `XTUNER_DATASET_TIMEOUT` can be adjusted. '
-                        'For example, setting `XTUNER_DATASET_TIMEOUT=120` '
-                        'means the timeout is set to two hours.')
-        logger.info('All gahter datasets... ')
-
-        group = dist.new_group(backend='gloo', timeout=timeout)
-
-        buffers = [None] * world_size
-        dist.all_gather_object(buffers, rank_datasets, group=group)
-
-        # Restore the dataset order according to the original file order
-        world_datasets = [None] * num_files
-        for _rank, per_rank_dsets in enumerate(buffers):
-            for _dset_ind, _file_ind in enumerate(per_rank_files[_rank]):
-                _dset = per_rank_dsets[_dset_ind]
-                if isinstance(_dset, str):
-                    # _dset is a cache dir
-                    world_datasets[_file_ind] = load_from_disk(_dset)
-                else:
-                    world_datasets[_file_ind] = _dset
-
-        assert all([dset is not None for dset in world_datasets])
-
-        buffers = [None] * world_size
-        dist.all_gather_object(buffers, rank_cached_infos, group=group)
-
-        world_cached_infos = {}
-        for per_rank_cached_infos in buffers:
-            world_cached_infos.update(per_rank_cached_infos)
-
-    else:
-        world_datasets = []
-        for dset in rank_datasets:
-            if isinstance(dset, str):
-                # dset is a cache dir
-                world_datasets.append(load_from_disk(dset))
-            else:
-                world_datasets.append(dset)
-
-        world_cached_infos = rank_cached_infos
+            cached_infos[cache_id] = infos
+        datasets.append(dset)
 
     if cache_dir and rank == 0:
         _path = os.path.join(cache_dir, 'local_infos.json')
         with open(_path, 'w') as f:
-            json.dump(world_cached_infos, f)
+            json.dump(cached_infos, f)
 
-    return world_datasets
+    return datasets
 
 
 def load_datasets(paths,

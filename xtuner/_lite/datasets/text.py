@@ -1,19 +1,17 @@
 import bisect
 import itertools
-import math
 import os
-import pickle
 import random
 
 import torch
-from datasets import load_from_disk
+from datasets import Dataset, load_from_disk
 from torch import distributed as dist
 from torch.nn.utils.rnn import pad_sequence
-from tqdm import tqdm
 
 from xtuner._lite import get_logger
 from xtuner._lite.chat import ChatMessages
 from xtuner.utils import DEFAULT_PAD_TOKEN_INDEX, IGNORE_INDEX
+from .cache import CacheDataset
 from .format import OPENAI_FORMAT_MAP
 
 logger = get_logger()
@@ -39,15 +37,58 @@ class TextTokenizeFunction():
         return tokenized
 
 
-class TextTokenizedDataset(torch.utils.data.Dataset):
+class TextTokenizedDataset(CacheDataset):
 
-    def __init__(self, dataset):
+    def __init__(self, dataset, max_length):
         super().__init__()
 
+        if isinstance(dataset, list):
+            dataset = Dataset.from_list(dataset)
+
         self.dataset = dataset
+        self.num_samples = len(dataset)
+        self.total_tokens = sum(dataset['num_tokens'])
+        self.max_length = max_length
+
+        self._cached = False
+        self._cached_dir = None
+
+    @property
+    def cached(self):
+        return self._cached
+
+    @property
+    def cached_dir(self):
+        return self._cached_dir
+
+    def cache(self, cache_dir):
+        dset_dir = os.path.join(cache_dir, 'dataset')
+
+        if len(self.dataset.cache_files) == 0 and dist.is_available(
+        ) and dist.get_rank() == 0:
+            self.dataset.save_to_disk(dset_dir)
+
+        self._cached_dir = cache_dir
+        self.dataset = None
+        self._cached = True
+
+    def load_cache(self):
+        assert self.cached
+        dset_dir = os.path.join(self.cached_dir, 'dataset')
+        self.dataset = load_from_disk(dset_dir)
+
+    @classmethod
+    def from_cache(cls, cache_dir, max_length):
+        dataset = load_from_disk(os.path.join(cache_dir, 'dataset'))
+        ret = cls(dataset, max_length)
+        ret.cache(cache_dir)
+        return ret
+
+    def _free(self):
+        self.dataset = None
 
     def __len__(self):
-        return len(self.dataset)
+        return self.num_samples
 
     def __getitem__(self, item):
         """Returns a dict containing packed data in the given item.
@@ -59,11 +100,17 @@ class TextTokenizedDataset(torch.utils.data.Dataset):
             A dict including packed input_ids, labels, and cumulative_len.
         """
 
+        if self.cached:
+            self.load_cache()
+
         data = {
             'input_ids': self.dataset[item]['input_ids'],
             'labels': self.dataset[item]['labels'],
             'num_tokens': [self.dataset[item]['num_tokens']]
         }
+
+        if self.cached:
+            self._free()
 
         return data
 
@@ -100,53 +147,79 @@ class TextOnlineTokenizeDataset(torch.utils.data.Dataset):
         return data
 
 
-class SoftPackerForText(torch.utils.data.Dataset):
+class SoftPackerForText(CacheDataset):
 
     def __init__(self, dataset, max_length=2048, pack_info=None):
         super().__init__()
 
         self.max_length = max_length
 
-        # unpack dataset
-        self.dataset = dataset
+        if isinstance(dataset, list):
+            self.dataset = Dataset.from_list(dataset)
+        else:
+            self.dataset = dataset
 
         if pack_info is None:
-            pack_info = self.get_pack_info(dataset, max_length)
-
-        self.idx_per_pack = pack_info['idx_per_pack']
-        self.max_length_per_pack = pack_info['max_length_per_pack']
+            pack_info = self.get_pack_info(self.dataset, max_length)
+        self.pack_info = pack_info
 
         # The number of data items after packing
-        self._num_packed_samples = len(pack_info['idx_per_pack'])
+        self.num_packed_samples = len(self.pack_info)
+        self.num_samples = len(self.dataset)
+        self.total_tokens = sum(self.dataset['num_tokens'])
 
-    def cache(self):
-        self.cache_dset = os.path.dirname(
-            self.dataset.cache_files[0]['filename'])
-        self.cache_pack_info = f'{self.cache_dset}.pack.{self.max_length}.pkl'
-        pack_info = {
-            'idx_per_pack': self.idx_per_pack,
-            'max_length_per_pack': self.max_length_per_pack
-        }
-        with open(self.cache_pack_info, 'wb') as f:
-            # 使用 pickle.dump 序列化并存储对象
-            pickle.dump(pack_info, f)
+        self._cached = False
+        self._cached_dir = None
+
+    @property
+    def max_length_per_pack(self):
+        if self.cached:
+            pack_info = load_from_disk(self._cached_pack_info)
+        else:
+            pack_info = self.pack_info
+        return pack_info['max_length']
+
+    @property
+    def cached(self):
+        return self._cached
+
+    @property
+    def cached_dir(self):
+        return self._cached_dir
+
+    def cache(self, cache_dir):
+        dset_dir = os.path.join(cache_dir, 'dataset')
+        pack_info_dir = os.path.join(cache_dir,
+                                     f'pack-info-soft-{self.max_length}')
+
+        if len(self.dataset.cache_files) == 0 and dist.is_available(
+        ) and dist.get_rank() == 0:
+            self.dataset.save_to_disk(dset_dir)
+        if len(self.pack_info.cache_files) == 0 and dist.is_available(
+        ) and dist.get_rank() == 0:
+            self.pack_info.save_to_disk(pack_info_dir)
 
         self._cached = True
+        self._cached_dir = cache_dir
+        self._cached_dset = dset_dir
+        self._cached_pack_info = pack_info_dir
 
-        self.dataset = None
-        self.max_length_per_pack = None
-        self.idx_per_pack = None
+        self._free()
 
     def load_cache(self):
-        self.dataset = load_from_disk(self.cache_dset)
-        with open(self.cache_pack_info, 'rb') as f:
-            pack_info = pickle.load(f)
-        self.idx_per_pack = pack_info['idx_per_pack']
-        self.max_length_per_pack = pack_info['max_length_per_pack']
-        self._cached = False
+        assert self._cached
+        dset_dir = os.path.join(self.cached_dir, 'dataset')
+        pack_info_dir = os.path.join(self.cached_dir,
+                                     f'pack-info-soft-{self.max_length}')
+        self.dataset = load_from_disk(dset_dir)
+        self.pack_info = load_from_disk(pack_info_dir)
+
+    def _free(self):
+        self.dataset = None
+        self.pack_info = None
 
     def __len__(self):
-        return self._num_packed_samples
+        return self.num_packed_samples
 
     def __getitem__(self, item):
         """Returns a dict containing packed data in the given item.
@@ -157,21 +230,23 @@ class SoftPackerForText(torch.utils.data.Dataset):
         Returns:
             A dict including packed input_ids, labels, and cumulative_len.
         """
-
-        packed_items = self.idx_per_pack[item]
-        assert len(packed_items) > 0
-
         if self._cached:
             self.load_cache()
+
+        dataset = self.dataset
+        pack_info = self.pack_info
+
+        packed_items = pack_info[item]['indices']
+        assert len(packed_items) > 0
 
         input_ids = []
         labels = []
         num_tokens = []
         for i in packed_items:
-            input_ids.extend(self.dataset[i]['input_ids'])
-            labels.extend(self.dataset[i]['labels'])
+            input_ids.extend(dataset[i]['input_ids'])
+            labels.extend(dataset[i]['labels'])
 
-            _num_tokens = self.dataset[i]['num_tokens']
+            _num_tokens = dataset[i]['num_tokens']
             num_tokens.append(_num_tokens)
 
         if len(input_ids) < self.max_length:
@@ -197,6 +272,9 @@ class SoftPackerForText(torch.utils.data.Dataset):
                                f'equal, but  found {len(input_ids)} and '
                                f'{len(labels)}.')
 
+        if self.cached:
+            self._free()
+
         return packed
 
     @classmethod
@@ -208,10 +286,9 @@ class SoftPackerForText(torch.utils.data.Dataset):
 
         item_buffer = []
         length_buffer = []
-        idx_per_pack = []
-        max_length_per_pack = []
         max_length_one_pack = 0
 
+        pack_infos = []
         for shfl_i in inds:
             if _ori_lens[shfl_i] + sum(length_buffer) <= max_length:
                 item_buffer.append(shfl_i)
@@ -220,58 +297,42 @@ class SoftPackerForText(torch.utils.data.Dataset):
                                           _ori_lens[shfl_i])
             else:
                 if len(item_buffer) > 0:
-                    idx_per_pack.append(item_buffer)
-                    max_length_per_pack.append(max_length_one_pack)
+                    info = {
+                        'indices': item_buffer,
+                        'max_length': max_length_one_pack
+                    }
+                    pack_infos.append(info)
+
                 item_buffer = [shfl_i]
                 length_buffer = [_ori_lens[shfl_i]]
                 max_length_one_pack = _ori_lens[shfl_i]
 
-        assert len(max_length_per_pack) == len(idx_per_pack)
         if len(item_buffer) > 0:
-            idx_per_pack.append(item_buffer)
+            info = {'indices': item_buffer, 'max_length': max_length_one_pack}
+            pack_infos.append(info)
 
-        pack_info = {
-            'idx_per_pack': idx_per_pack,
-            'max_length_per_pack': max_length_per_pack
-        }
+        pack_infos = Dataset.from_list(pack_infos)
 
-        return pack_info
+        return pack_infos
 
     @classmethod
-    def get_pack_infos(cls, datasets, max_length):
+    def from_cache(cls, cache_dir, max_length):
 
-        if dist.is_available():
-            world_size = dist.get_world_size()
-            rank = dist.get_rank()
+        dataset = load_from_disk(os.path.join(cache_dir, 'dataset'))
+
+        pack_info_dir = os.path.join(cache_dir, f'pack-info-soft-{max_length}')
+        if os.path.exists(pack_info_dir):
+            pack_info = load_from_disk(pack_info_dir)
         else:
-            world_size = 1
-            rank = 0
+            pack_info = cls.get_pack_info(dataset, max_length)
 
-        num_dsets = len(datasets)
-        avg_num = math.ceil(num_dsets / world_size)
+        ret = cls(dataset, max_length, pack_info)
+        ret.cache(cache_dir)
 
-        pack_infos = []
-        start = rank * avg_num
-        end = min((rank + 1) * avg_num, num_dsets)
-        desc = f'[Rank {rank}] Soft Packing'
-        for ind in tqdm(range(start, end), desc=desc):
-            pack_infos.append(cls.get_pack_info(datasets[ind], max_length))
-
-        if dist.is_available() and world_size > 1:
-            dist.barrier()
-            buffers = [None] * world_size
-            dist.all_gather_object(buffers, pack_infos)
-            world_pack_infos = []
-            for infos_per_rank in buffers:
-                world_pack_infos.extend(infos_per_rank)
-
-            assert len(world_pack_infos) == num_dsets
-        else:
-            world_pack_infos = pack_infos
-        return world_pack_infos
+        return ret
 
 
-class HardPackerForText(torch.utils.data.Dataset):
+class HardPackerForText(SoftPackerForText):
     """The new dataset obtained by concatenating multiple raw data.
 
     Args:
@@ -291,23 +352,13 @@ class HardPackerForText(torch.utils.data.Dataset):
     """
 
     def __init__(self, dataset, max_length=2048, pack_info=None):
-        super().__init__()
+        super().__init__(dataset, max_length, pack_info)
 
-        self.max_length = max_length
-        # unpack dataset
-        self.dataset = dataset
-
-        if pack_info is None:
-            pack_info = self.get_pack_info(dataset, max_length)
-
-        self._shfl_item_rngs_left = pack_info['ranges_left']
-        self._shfl_item_rngs_right = pack_info['ranges_right']
-        self._num_packed_samples = pack_info['num_packed_samples']
-        self.shfl_inds = pack_info['indices']
-        self.max_length_per_pack = pack_info['max_length_per_pack']
+        self.num_packed_samples = self.total_tokens // max_length
 
     @classmethod
-    def _cal_max_length(begin, end, shfl_item_rngs_left, shfl_item_rngs_right):
+    def _cal_max_length(cls, begin, end, shfl_item_rngs_left,
+                        shfl_item_rngs_right):
         left = bisect.bisect(shfl_item_rngs_right, begin)
         right = bisect.bisect(shfl_item_rngs_left, end)
         max_length = 0
@@ -362,39 +413,6 @@ class HardPackerForText(torch.utils.data.Dataset):
             'indices': shfl_inds,
             'max_length_per_pack': max_length_per_pack
         }
-
-    @classmethod
-    def get_pack_infos(cls, datasets, max_length):
-
-        if dist.is_available():
-            world_size = dist.get_world_size()
-            rank = dist.get_rank()
-        else:
-            world_size = 1
-            rank = 0
-
-        num_dsets = len(datasets)
-        avg_num = math.ceil(num_dsets / world_size)
-
-        pack_infos = []
-        start = rank * avg_num
-        end = min((rank + 1) * avg_num, num_dsets)
-        desc = f'[Rank {rank}] Hard Packing'
-        for ind in tqdm(range(start, end), desc=desc):
-            pack_infos.append(cls.get_pack_info(datasets[ind], max_length))
-
-        if dist.is_available() and world_size > 1:
-            dist.barrier()
-            buffers = [None] * world_size
-            dist.all_gather_object(buffers, pack_infos)
-            world_pack_infos = []
-            for infos_per_rank in buffers:
-                world_pack_infos.extend(infos_per_rank)
-
-            assert len(world_pack_infos) == num_dsets
-        else:
-            world_pack_infos = pack_infos
-        return world_pack_infos
 
     def _pack_ids_and_labels_in_range(self, begin: int, end: int):
         """Packs ids and labels in a given range using bisection method.
