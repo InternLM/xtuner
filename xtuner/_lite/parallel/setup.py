@@ -44,6 +44,18 @@ def setup_tp(tp_size):
     _DP_GROUP = device_mesh.get_group('dp')
 
 
+def setup_dp():
+    world_size = dist.get_world_size()
+    device_mesh = init_device_mesh(
+        'cuda', (world_size, ), mesh_dim_names=('dp', ))
+
+    global _DP_MESH
+    _DP_MESH = device_mesh['dp']
+
+    global _DP_GROUP
+    _DP_GROUP = device_mesh.get_group('dp')
+
+
 def setup_parallel(sp_size=1, tp_size=1):
     assert not (sp_size > 1 and tp_size > 1), \
         ('DeepSpeed Sequence Parallel can not be used with '
@@ -53,6 +65,8 @@ def setup_parallel(sp_size=1, tp_size=1):
         setup_sp(sp_size)
     elif tp_size > 1:
         setup_tp(tp_size)
+    else:
+        setup_dp()
 
 
 def get_dp_mesh():
