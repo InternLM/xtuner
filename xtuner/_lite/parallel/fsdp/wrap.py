@@ -23,6 +23,28 @@ def layer_auto_wrap_policy(
         return module.__class__.__name__ in layer_cls
 
 
+def layer_and_emb_wrap_policy(
+    module,
+    recurse: bool,
+    nonwrapped_numel: int,
+    vocab_size,
+    layer_cls=_LAYERS,
+) -> bool:
+    if recurse:
+        # always recurse
+        return True
+    else:
+        # if not recursing, decide whether we should wrap for
+        # the leaf node or reminder
+        if module.__class__.__name__ in layer_cls or isinstance(
+                module, nn.Embedding):
+            return True
+        elif isinstance(module, nn.Linear):
+            return module.weight.size(0) == vocab_size
+        else:
+            return False
+
+
 def token_embedding_wrap_policy(
     module,
     recurse: bool,

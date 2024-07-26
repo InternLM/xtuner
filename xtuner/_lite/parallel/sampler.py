@@ -117,9 +117,10 @@ class ParallelSampler(Sampler):
 def get_length_grouped_indices(max_lengths,
                                group_batch_size,
                                dp_size,
-                               seed=1024):
-    torch.manual_seed(seed)
-    random.seed(seed)
+                               seed=None):
+    if seed is not None:
+        torch.manual_seed(seed)
+        random.seed(seed)
 
     assert all(leng != 0
                for leng in max_lengths), 'Should not have zero length.'
