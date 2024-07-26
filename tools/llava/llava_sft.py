@@ -48,7 +48,8 @@ from xtuner._lite.accelerate.fsdp import (RECOMPUTE_MODULES,
                                           checkpoint_check_fn, dp_lazy_init,
                                           layer_auto_wrap_policy)
 from xtuner._lite.chat import CHAT_TEMPLATE_MAP
-from xtuner._lite.datasets import (LlavaCollator, LlavaRawDataset,
+from xtuner._lite.datasets import (LengthGroupedIterableDataset, LlavaCollator,
+                                   LlavaRawDataset, LlavaTokenizedDataset,
                                    LlavaTokenizeFunction, SoftPackerForLlava)
 from xtuner._lite.datasets.load import (LOAD_FN_MAP, load_datasets,
                                         load_from_cache)
@@ -460,7 +461,17 @@ def llava_sft(args):
     assert len(tokenizer.convert_tokens_to_ids([img_token])) == 1
 
     if args.dset_from_cache:
-        _datasets = load_from_cache(args.dset_cache_dir)
+        if args.dset_pack_level == 'soft':
+            init_fn = partial(
+                SoftPackerForLlava.from_cache,
+                image_processor=img_processor,
+                max_length=args.max_length)
+        else:
+            init_fn = partial(
+                LlavaTokenizedDataset.from_cache,
+                image_processor=img_processor,
+                max_length=args.max_length)
+        _datasets = load_from_cache(args.dset_cache_dir, init_fn)
         dist.barrier()
     else:
         dset_infos = load(args.datasets)
@@ -489,8 +500,16 @@ def llava_sft(args):
                                                 per_img_tokens, image_dir,
                                                 dset_format)
 
-            if args.dset_pack_level:
-                init_fn = Dataset.from_list
+            if args.dset_pack_level == 'soft':
+                init_fn = partial(
+                    SoftPackerForLlava,
+                    image_processor=img_processor,
+                    max_length=args.max_length)
+            elif args.dset_cache_dir:
+                init_fn = partial(
+                    LlavaTokenizedDataset,
+                    image_processor=img_processor,
+                    max_length=args.max_length)
             else:
                 init_fn = partial(
                     LlavaRawDataset,
@@ -508,7 +527,7 @@ def llava_sft(args):
         _datasets = load_datasets(
             paths=annotations,
             sources='local',
-            cache_dir=args.dset_cache_dir if args.dset_pack_level else None,
+            cache_dir=args.dset_cache_dir,
             file_types=args.dset_file_types,
             sample_ratios=sample_ratios,
             num_proc=args.num_proc,
@@ -517,28 +536,13 @@ def llava_sft(args):
 
     if args.dset_pack_level and rank == 0:
         # Only the tokenized datasets can count the number of tokens
-        num_tokens = sum(sum(dset['num_tokens']) for dset in _datasets)
-        logger.debug(f'[Dataset] {num_tokens} tokens.')
+        total_tokens = sum(dset.total_tokens for dset in _datasets)
+        logger.debug(f'[Dataset] {total_tokens} tokens.')
 
-    num_datasets = len(_datasets)
-    datasets = []
-    if args.dset_pack_level and args.dset_pack_level == 'soft':
-        pack_infos = SoftPackerForLlava.get_pack_infos(_datasets,
-                                                       args.max_length)
-        for i in range(num_datasets):
-            _infos = pack_infos[i]
-            _dset = _datasets[i]
-            _packed_dset = SoftPackerForLlava(_dset, img_processor,
-                                              args.max_length, _infos)
-            datasets.append(_packed_dset)
-    else:
-        for i, dset in enumerate(_datasets):
-            datasets.append(dset)
-
-    train_dataset = ConcatDataset(datasets)
+    train_dataset = ConcatDataset(_datasets)
 
     if args.dset_pack_level and rank == 0:
-        ori_samples = sum([len(dset) for dset in _datasets])
+        ori_samples = sum([dset.num_samples for dset in _datasets])
         packed_samples = len(train_dataset)
         logger.info(f'[Dataset] (Original) {ori_samples} samples.')
         logger.info(f'[Dataset] (Packed) {packed_samples} samples.')
@@ -551,7 +555,9 @@ def llava_sft(args):
                                        args.global_batch_size)
     else:
         sampler = ParallelSampler(
-            train_dataset, dp_mesh, args.global_batch_size, shuffle=True)
+            train_dataset, dp_mesh, args.global_batch_size, shuffle=False)
+
+    dist.barrier()
 
     train_dataloader = DataLoader(
         train_dataset,
@@ -561,13 +567,13 @@ def llava_sft(args):
         collate_fn=collator,
         persistent_workers=args.num_workers > 0)
 
-    if rank == 0:
-        logger.info(f'[Dataloader] {len(train_dataloader)} batches.')
-        _first_batch = [train_dataset[i] for i in range(args.mirco_batch_size)]
-        _first_batch = collator(_first_batch)
-        _decoded = tokenizer.batch_decode(_first_batch['input_ids'])
-        logger.debug(f'[Dataloader] Training Batch:\n{_first_batch}')
-        logger.debug(f'[Dataloader] Training Batch(Decoded):\n{_decoded}')
+    # if rank == 0:
+    #     logger.info(f'[Dataloader] {len(train_dataloader)} batches.')
+    #     _first_batch = [train_dataset[i] for i in range(args.mirco_batch_size)]
+    #     _first_batch = collator(_first_batch)
+    #     _decoded = tokenizer.batch_decode(_first_batch['input_ids'])
+    #     logger.debug(f'[Dataloader] Training Batch:\n{_first_batch}')
+    #     logger.debug(f'[Dataloader] Training Batch(Decoded):\n{_decoded}')
     dist.barrier()
 
     load_data_cost_time = time.time() - start_load_data_t
@@ -778,8 +784,16 @@ def llava_sft(args):
                     avg_iter_loss.backward()
 
             step_loss += avg_iter_loss.item()
-            step_consumed_tokens += num_tokens.sum()
             step_consumed_img_tokens += num_img_tokens.sum()
+
+            if args.dset_pack_level == 'soft':
+                # During a soft pack process, the data with a length that is
+                # still smaller than the max length after packing, will be
+                # padded to the max length. The last element of num tokens
+                # represents the count of pad tokens.
+                step_consumed_tokens += num_tokens[:-1].sum()
+            else:
+                step_consumed_tokens += num_tokens.sum()
 
         grad_norm = shard_llava.clip_grad_norm_(args.max_grad_norm)
         optimizer.step()
