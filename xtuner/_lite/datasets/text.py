@@ -10,6 +10,7 @@ from torch.nn.utils.rnn import pad_sequence
 
 from xtuner._lite import get_logger
 from xtuner._lite.chat import ChatMessages
+from xtuner._lite.parallel import get_sp_world_size, pad_for_sequence_parallel
 from xtuner.utils import DEFAULT_PAD_TOKEN_INDEX, IGNORE_INDEX
 from .cache import CacheDataset
 from .format import OPENAI_FORMAT_MAP
@@ -149,7 +150,7 @@ class TextOnlineTokenizeDataset(torch.utils.data.Dataset):
 
 class SoftPackerForText(CacheDataset):
 
-    def __init__(self, dataset, max_length=2048, pack_info=None):
+    def __init__(self, dataset, max_length=2048, pack_info=None, seed=None):
         super().__init__()
 
         self.max_length = max_length
@@ -160,7 +161,7 @@ class SoftPackerForText(CacheDataset):
             self.dataset = dataset
 
         if pack_info is None:
-            pack_info = self.get_pack_info(self.dataset, max_length)
+            pack_info = self.get_pack_info(self.dataset, max_length, seed)
         self.pack_info = pack_info
 
         # The number of data items after packing
@@ -192,11 +193,9 @@ class SoftPackerForText(CacheDataset):
         pack_info_dir = os.path.join(cache_dir,
                                      f'pack-info-soft-{self.max_length}')
 
-        if len(self.dataset.cache_files) == 0 and dist.is_available(
-        ) and dist.get_rank() == 0:
+        if len(self.dataset.cache_files) == 0:
             self.dataset.save_to_disk(dset_dir)
-        if len(self.pack_info.cache_files) == 0 and dist.is_available(
-        ) and dist.get_rank() == 0:
+        if len(self.pack_info.cache_files) == 0:
             self.pack_info.save_to_disk(pack_info_dir)
 
         self._cached = True
@@ -278,10 +277,12 @@ class SoftPackerForText(CacheDataset):
         return packed
 
     @classmethod
-    def get_pack_info(cls, dataset, max_length):
+    def get_pack_info(cls, dataset, max_length, seed=None):
 
         _ori_lens = dataset['num_tokens']
         inds = [i for i in range(len(dataset))]
+        if seed is not None:
+            random.seed(seed)
         random.shuffle(inds)
 
         item_buffer = []
@@ -316,7 +317,7 @@ class SoftPackerForText(CacheDataset):
         return pack_infos
 
     @classmethod
-    def from_cache(cls, cache_dir, max_length):
+    def from_cache(cls, cache_dir, max_length, seed=None):
 
         dataset = load_from_disk(os.path.join(cache_dir, 'dataset'))
 
@@ -324,7 +325,7 @@ class SoftPackerForText(CacheDataset):
         if os.path.exists(pack_info_dir):
             pack_info = load_from_disk(pack_info_dir)
         else:
-            pack_info = cls.get_pack_info(dataset, max_length)
+            pack_info = cls.get_pack_info(dataset, max_length, seed)
 
         ret = cls(dataset, max_length, pack_info)
         ret.cache(cache_dir)
@@ -372,7 +373,7 @@ class HardPackerForText(SoftPackerForText):
         return max_length
 
     @classmethod
-    def get_pack_info(cls, dataset, max_length):
+    def get_pack_info(cls, dataset, max_length, seed=None):
 
         _ori_lens = dataset['num_tokens']
 
@@ -388,6 +389,8 @@ class HardPackerForText(SoftPackerForText):
         # Ultimately, dataset[3] and dataset[1] will be combined into a new
         # data, and dataset[2] and dataset[0] will be combined into a new data.
         inds = [i for i in range(len(dataset))]
+        if seed is not None:
+            random.seed(seed)
         random.shuffle(inds)
         shfl_inds = inds
 
@@ -529,6 +532,16 @@ class TextCollator():
             input_ids = torch.stack(input_ids)
             labels = torch.stack(labels)
             attention_mask = torch.stack(attention_mask)
+
+        if get_sp_world_size() > 1:
+            ori_seq_len = input_ids.shape[1]
+            input_ids = pad_for_sequence_parallel(input_ids, pad_index)
+            labels = pad_for_sequence_parallel(labels, IGNORE_INDEX)
+            attention_mask = pad_for_sequence_parallel(attention_mask, 0)
+            pad_seq_len = input_ids.shape[1] - ori_seq_len
+            if pad_seq_len > 0:
+                pad_num_token = torch.tensor([pad_seq_len]).int()
+                num_tokens = torch.cat([num_tokens, pad_num_token])
 
         if input_ids.shape != labels.shape:
             logger.error(f'[instances] {instances}')

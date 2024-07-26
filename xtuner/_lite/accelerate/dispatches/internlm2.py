@@ -124,12 +124,8 @@ def _internlm2_varlen_attn_forward(
     bsz, q_len, _ = hidden_states.size()
     attn_context = MessageHub.get_instance('packed_sequence')
 
-    num_tokens = attn_context.get_info('num_tokens')
-    if num_tokens is not None:
-        position_ids = [torch.arange(num.item()) for num in num_tokens]
-        position_ids = torch.cat(position_ids, dim=0).to(hidden_states.device)
-        position_ids = position_ids.unsqueeze(0)
-        assert position_ids.size(1) == q_len
+    position_ids = attn_context.get_info('position_ids')
+    assert position_ids.size(1) == q_len, f'{position_ids.size(1)} {q_len}'
 
     qkv_states = self.wqkv(hidden_states)
 
@@ -200,14 +196,11 @@ def _internlm2_varlen_attn_forward(
     value_states = repeat_kv_bshd(value_states, self.num_key_value_groups)
 
     assert SUPPORT_FLASH2
-    # breakpoint()
-    if num_tokens is not None and SUPPORT_FLASH2 and bsz == 1:
-        _zero_length = torch.zeros(1, device=num_tokens.device)
-        _pad_length = torch.cat([_zero_length, num_tokens]).int()
-        cumulative_lengths = torch.cumsum(_pad_length, 0).int()
-
+    cumulative_lengths = attn_context.get_info('cumulative_lengths')
+    if cumulative_lengths is not None and SUPPORT_FLASH2 and bsz == 1:
+        max_seqlen = attn_context.get_info('max_seqlen')
         attn_output = varlen_flash_attn(query_states, key_states, value_states,
-                                        cumulative_lengths, num_tokens.max())
+                                        cumulative_lengths, max_seqlen)
     else:
         attn_output = flash_attn_wo_mask(
             query_states,

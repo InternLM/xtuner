@@ -41,12 +41,8 @@ from transformers.utils.import_utils import (is_flash_attn_2_available,
                                              is_torch_sdpa_available)
 
 from xtuner._lite import AutoTokenizer, get_logger
-from xtuner._lite.accelerate import (LORA_TARGET_MAP, LoadWoInit,
-                                     dispatch_modules, packed_sequence)
-from xtuner._lite.accelerate.fsdp import (RECOMPUTE_MODULES,
-                                          all_required_grad_wrap_policy,
-                                          checkpoint_check_fn, dp_lazy_init,
-                                          layer_auto_wrap_policy)
+from xtuner._lite.accelerate import (LORA_TARGET_MAP, dispatch_modules,
+                                     packed_sequence)
 from xtuner._lite.chat import CHAT_TEMPLATE_MAP
 from xtuner._lite.datasets import (LengthGroupedIterableDataset, LlavaCollator,
                                    LlavaRawDataset, LlavaTokenizedDataset,
@@ -55,6 +51,10 @@ from xtuner._lite.datasets.load import (LOAD_FN_MAP, load_datasets,
                                         load_from_cache)
 from xtuner._lite.modelings import register_remote_code
 from xtuner._lite.parallel import LengthGroupedSampler, ParallelSampler
+from xtuner._lite.parallel.fsdp import (RECOMPUTE_MODULES, LoadWoInit,
+                                        all_required_grad_wrap_policy,
+                                        checkpoint_check_fn, dp_lazy_init,
+                                        layer_auto_wrap_policy)
 
 logger = get_logger()
 
@@ -738,7 +738,7 @@ def llava_sft(args):
             train_dataloader.sampler.set_epoch(epoch, epoch_inner_step)
             data_iterator = iter(train_dataloader)
 
-        if step <= warmup_steps:
+        if step < warmup_steps:
             warmup_scheduler.step()
             cur_lr = warmup_scheduler.get_lr()[0]
         else:

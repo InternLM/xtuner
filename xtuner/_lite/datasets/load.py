@@ -8,12 +8,12 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 
-from datasets import (Dataset, concatenate_datasets, load_dataset,
-                      load_from_disk)
+from datasets import Dataset, concatenate_datasets, load_from_disk
 from torch import distributed as dist
 from tqdm import tqdm
 
 from xtuner._lite import get_logger
+from xtuner._lite.parallel import all_to_all_list
 from .cache import CacheDataset
 
 logger = get_logger()
@@ -29,12 +29,13 @@ def load_jsonl(file):
     dset = []
     with open(file) as f:
         for line in f:
+            # dset.append(line)
             dset.append(json.loads(line))
     return dset
 
 
 def load_bin(file):
-    return load_dataset('json', data_files=file, split='train')
+    return load_jsonl(file)
 
 
 LOAD_FN_MAP = {'.json': load_json, '.jsonl': load_jsonl, '.bin': load_bin}
@@ -264,65 +265,86 @@ def load_local_datasets(paths,
 
     datasets = []
     cached_infos = {}
-    for ind in range(num_files):
+    for i in range(math.ceil(num_files / world_size)):
+        start = i * world_size
+        end = min((i + 1) * world_size, num_files)
+        dset_list = []
+        for ind in range(start, end):
+            file = files[ind]
+            suffix = os.path.splitext(file)[-1]
+            dset = LOAD_FN_MAP[suffix](file)
+            logger.debug(f'[File {ind}] Raw Sample:\n{dset[0]}')
 
-        file = files[ind]
-        suffix = os.path.splitext(file)[-1]
-        dset = LOAD_FN_MAP[suffix](file)
-        logger.debug(f'[File {ind}] Raw Sample:\n{dset[0]}')
+            map_fn = file_map_fns[ind]
 
-        init_fn = file_init_fns[ind]
-        map_fn = file_map_fns[ind]
-        if map_fn:
-            num_per_shard = math.ceil(len(dset) / world_size)
-            shard_start = rank * num_per_shard
-            shard_end = min((rank + 1) * num_per_shard, len(dset))
+            # if suffix == '.jsonl':
+            #     if map_fn is None:
+            #         map_fn = [json.loads]
+            #     elif isinstance(map_fn, list):
+            #         map_fn = [json.loads] + map_fn
+            #     else:
+            #         map_fn = [json.loads, map_fn]
 
-            dset = dset[shard_start:shard_end]
-            try:
-                desc = f'[RANK {rank}] Map local file {ind}'
-                dset = multi_thread_map(map_fn, dset, desc, num_proc)
-                logger.debug(f'[File {ind}] Mapped Sample:\n{dset[0]}')
-            except:
-                raise RuntimeError(f'[RANK {rank}] Map {file} failed.')
+            # fixme
+            assert map_fn is not None
 
-            if dist.is_available() and world_size > 1:
-                dist.barrier()
-                buffers = [None] * world_size
-                dist.all_gather_object(buffers, dset)
-                dset = concatenate_datasets(
-                    [Dataset.from_list(_list) for _list in buffers])
+            if map_fn:
+                num_per_shard = math.ceil(len(dset) / world_size)
+                shard_start = rank * num_per_shard
+                shard_end = min((rank + 1) * num_per_shard, len(dset))
+                dset = dset[shard_start:shard_end]
+                logger.debug(
+                    f'[File {ind}] Raw Sample:\n{dset[0] if dset else None}')
 
+                try:
+                    desc = f'[RANK {rank}] Map local file {ind}'
+                    dset = multi_thread_map(map_fn, dset, desc, num_proc)
+                    logger.debug(f'[File {ind}] Mapped Sample:\n'
+                                 f'{dset[0] if dset else None}')
+                except:
+                    raise RuntimeError(f'[RANK {rank}] Map {file} failed.')
+
+            dset_list.append(dset)
+
+        for _ in range(end, (i + 1) * world_size):
+            dset_list.append(None)
+
+        dset_list = all_to_all_list(dset_list)
+
+        if None in dset_list:
+            assert start + rank >= num_files
+            assert all([item is None for item in dset_list])
+            continue
+        file_ind = start + rank
+        assert file_ind < num_files
+        whole_dset = concatenate_datasets(
+            [Dataset.from_list(_list) for _list in dset_list])
+
+        init_fn = file_init_fns[file_ind]
         if init_fn:
-            dset = init_fn(dset)
+            whole_dset = init_fn(whole_dset)
 
-        if cache_dir and isinstance(dset, CacheDataset):
-
+        # fixme
+        assert isinstance(whole_dset, CacheDataset)
+        if cache_dir and isinstance(whole_dset, CacheDataset):
             digits = len(str(abs(num_files)))
-            cache_id = (f'cache-local-{ind+1:0{digits}}-of-'
+            cache_id = (f'cache-local-{file_ind+1:0{digits}}-of-'
                         f'{num_files:0{digits}}')
             sub_cache_dir = os.path.join(cache_dir, cache_id)
-
-            # if os.path.exists(sub_cache_dir):
-            #     shutil.rmtree(sub_cache_dir)
-            #     logger.warning(f'Found {sub_cache_dir} exists. '
-            #                 'Clear it and re-cache.')
-            dset.cache(sub_cache_dir)
-
+            whole_dset.cache(sub_cache_dir)
             infos = {
-                'path': file,
-                'num_samples': dset.num_samples,
-                'num_tokens': dset.total_tokens
+                'path': files[file_ind],
+                'num_samples': whole_dset.num_samples,
+                'num_tokens': whole_dset.total_tokens
             }
             cached_infos[cache_id] = infos
-        datasets.append(dset)
+        datasets.append(whole_dset)
 
-    if cache_dir and rank == 0:
-        _path = os.path.join(cache_dir, 'local_infos.json')
-        with open(_path, 'w') as f:
-            json.dump(cached_infos, f)
+    all_dataset = [None] * world_size
+    dist.all_gather_object(all_dataset, datasets)
+    all_dataset = sum(all_dataset, [])
 
-    return datasets
+    return all_dataset
 
 
 def load_datasets(paths,
