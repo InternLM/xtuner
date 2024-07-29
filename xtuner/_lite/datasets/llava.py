@@ -10,7 +10,7 @@ from torch.nn.utils.rnn import pad_sequence
 from xtuner._lite.chat import ChatMessages
 from xtuner.utils import DEFAULT_PAD_TOKEN_INDEX, IGNORE_INDEX
 from .format import OPENAI_FORMAT_MAP
-from .text import SoftPackerForText
+from .text import SoftPackerForText, TextTokenizedDataset
 
 
 class LlavaTokenizeFunction():
@@ -54,12 +54,11 @@ class LlavaTokenizeFunction():
         return tokenized
 
 
-class LlavaTokenizedDataset(torch.utils.data.Dataset):
+class LlavaTokenizedDataset(TextTokenizedDataset):
 
-    def __init__(self, dataset, image_processor):
-        super().__init__()
+    def __init__(self, dataset, image_processor, max_length):
+        super().__init__(dataset, max_length)
         self.image_processor = image_processor
-        self.dataset = dataset
 
     def process_tokenized_data(self, tokenized_data):
         images = []
@@ -83,6 +82,13 @@ class LlavaTokenizedDataset(torch.utils.data.Dataset):
 
         return data
 
+    @classmethod
+    def from_cache(cls, cache_dir, image_processor, max_length):
+        dataset = load_from_disk(os.path.join(cache_dir, 'dataset'))
+        ret = cls(dataset, image_processor, max_length)
+        ret.cache(cache_dir)
+        return ret
+
     def __getitem__(self, item):
         """Returns a dict containing packed data in the given item.
 
@@ -92,17 +98,47 @@ class LlavaTokenizedDataset(torch.utils.data.Dataset):
         Returns:
             A dict including packed input_ids, labels, and cumulative_len.
         """
+        if self.cached:
+            self.load_cache()
         tokenized_data = self.dataset[item]
+
+        if self.cached:
+            self._free()
 
         return self.process_tokenized_data(tokenized_data)
 
 
-class LlavaRawDataset(LlavaTokenizedDataset):
+class LlavaRawDataset(torch.utils.data.Dataset):
 
-    def __init__(self, dataset, image_processor, tokenize_fn):
-        super().__init__(dataset, image_processor)
+    def __init__(self, dataset, image_processor, max_length, tokenize_fn):
+        super().__init__()
 
+        self.dataset = dataset
+        self.image_processor = image_processor
+        self.max_length = max_length
         self.tokenize_fn = tokenize_fn
+
+    def process_tokenized_data(self, tokenized_data):
+        images = []
+        for url in tokenized_data['image_urls']:
+            img = Image.open(url)
+            images.append(img)
+
+        if len(images):
+            outputs = self.image_processor(images, return_tensors='pt')
+            pixel_values = outputs['pixel_values']
+        else:
+            pixel_values = None
+
+        data = {
+            'input_ids': tokenized_data['input_ids'],
+            'labels': tokenized_data['labels'],
+            'pixel_values': pixel_values,
+            'num_tokens': [tokenized_data['num_tokens']],
+            'num_img_tokens': [tokenized_data['num_img_tokens']],
+        }
+
+        return data
 
     def __getitem__(self, item):
 
@@ -130,10 +166,13 @@ class SoftPackerForLlava(SoftPackerForText):
         Returns:
             A dict including packed input_ids, labels, and cumulative_len.
         """
-        if self._cached:
+        if self.cached:
             self.load_cache()
 
-        packed_items = self.idx_per_pack[item]
+        dataset = self.dataset
+        pack_info = self.pack_info
+
+        packed_items = pack_info[item]['indices']
         assert len(packed_items) > 0
 
         packed_input_ids = []
@@ -142,17 +181,17 @@ class SoftPackerForLlava(SoftPackerForText):
         packed_num_tokens = []
         packed_num_img_tokens = []
         for i in packed_items:
-            packed_input_ids.extend(self.dataset[i]['input_ids'])
-            packed_labels.extend(self.dataset[i]['labels'])
+            packed_input_ids.extend(dataset[i]['input_ids'])
+            packed_labels.extend(dataset[i]['labels'])
 
-            _num_tokens = self.dataset[i]['num_tokens']
+            _num_tokens = dataset[i]['num_tokens']
             packed_num_tokens.append(_num_tokens)
 
-            if 'image_urls' in self.dataset[item]:
-                packed_img_urls.extend(self.dataset[item]['image_urls'])
+            if 'image_urls' in dataset[item]:
+                packed_img_urls.extend(dataset[item]['image_urls'])
 
-            if 'num_img_tokens' in self.dataset[i]:
-                _num_img_tokens = self.dataset[i]['num_img_tokens']
+            if 'num_img_tokens' in dataset[i]:
+                _num_img_tokens = dataset[i]['num_img_tokens']
                 packed_num_img_tokens.append(_num_img_tokens)
 
         images = []
@@ -182,7 +221,24 @@ class SoftPackerForLlava(SoftPackerForText):
             'num_img_tokens': packed_num_img_tokens
         }
 
+        if self.cached:
+            self._free()
         return packed
+
+    @classmethod
+    def from_cache(cls, cache_dir, image_processor, max_length):
+
+        dataset = load_from_disk(os.path.join(cache_dir, 'dataset'))
+
+        pack_info_dir = os.path.join(cache_dir, f'pack-info-soft-{max_length}')
+        if os.path.exists(pack_info_dir):
+            pack_info = load_from_disk(pack_info_dir)
+        else:
+            pack_info = cls.get_pack_info(dataset, max_length)
+
+        ret = cls(dataset, image_processor, max_length, pack_info)
+        ret.cache(cache_dir)
+        return ret
 
 
 class LlavaCollator():

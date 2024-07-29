@@ -36,8 +36,7 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR
 from torch.utils.data import ConcatDataset, DataLoader
 from transformers import (AutoConfig, AutoModelForCausalLM, AutoProcessor,
-                          CLIPVisionModel, LlavaConfig,
-                          LlavaForConditionalGeneration, LlavaProcessor)
+                          CLIPVisionModel)
 from transformers.utils.import_utils import (is_flash_attn_2_available,
                                              is_torch_sdpa_available)
 
@@ -45,11 +44,11 @@ from xtuner._lite import AutoTokenizer, get_logger
 from xtuner._lite.accelerate import (LORA_TARGET_MAP, dispatch_modules,
                                      packed_sequence)
 from xtuner._lite.chat import CHAT_TEMPLATE_MAP
-from xtuner._lite.datasets import (LlavaCollator, LlavaRawDataset,
+from xtuner._lite.datasets import (LlavaCollator, LlavaRawDataset,LlavaTokenizedDataset,
                                    LlavaTokenizeFunction, SoftPackerForLlava)
 from xtuner._lite.datasets.load import (LOAD_FN_MAP, load_datasets,
                                         load_from_cache)
-from xtuner._lite.modelings import register_remote_code
+from xtuner._lite.modelings import register_remote_code, LlavaForConditionalGeneration, EnhancedLlavaConfig, LlavaProcessor
 from xtuner._lite.parallel import LengthGroupedSampler, ParallelSampler
 from xtuner._lite.parallel.fsdp import (RECOMPUTE_MODULES, LoadWoInit,
                                         all_required_grad_wrap_policy,
@@ -404,7 +403,7 @@ def llava_pretrain(args):
     # During data packing, it is essential to tokenize the data in
     # advance, cache the tokenized data, so that it can be quickly
     # loaded for the second training without the need to re-tokenize.
-    if os.path.isdir(args.dset_cache_dir):
+    if args.dset_cache_dir and os.path.isdir(args.dset_cache_dir):
         if len(os.listdir(args.dset_cache_dir)):
             logger.warning(f'`{args.dset_cache_dir}` is not an empty '
                            'folder, which may lead to inaccurate '
@@ -471,7 +470,7 @@ def llava_pretrain(args):
         padding_side='right')
 
     register_remote_code()
-    _llm_config = AutoConfig.from_pretrained(args.llm)
+    _text_config = AutoConfig.from_pretrained(args.llm)
     _vision_config = AutoConfig.from_pretrained(args.vit).vision_config
     _img_processor = AutoProcessor.from_pretrained(args.vit).image_processor
     processor = LlavaProcessor(_img_processor, tokenizer)
@@ -484,14 +483,14 @@ def llava_pretrain(args):
 
     img_token = chat_template.image_token
     need_resize_emb = False
-    if len(tokenizer.convert_tokens_to_ids([img_token])) > 1:
+    if len(tokenizer.encode(img_token,  add_special_tokens=False)) > 1:
         tokenizer.add_tokens([img_token], special_tokens=True)
         img_token_id = tokenizer.convert_tokens_to_ids([img_token])[0]
         logger.info(f'[Tokenizer] Added a new token `{img_token}`, '
                     f'token id is {img_token_id}, the new vocab size is '
                     f'{len(tokenizer)}')
 
-        _llm_vocab_size = _llm_config.vocab_size
+        _llm_vocab_size = _text_config.vocab_size
 
         if _llm_vocab_size < len(tokenizer):
             need_resize_emb = True
@@ -499,8 +498,18 @@ def llava_pretrain(args):
         img_token_id = tokenizer.convert_tokens_to_ids([img_token])[0]
 
     if args.dset_from_cache:
-        _datasets = load_from_cache(args.dset_cache_dir)
-
+        if args.dset_pack_level == 'soft':
+            init_fn = partial(
+                SoftPackerForLlava.from_cache,
+                image_processor=img_processor,
+                max_length=args.max_length)
+        else:
+            init_fn = partial(
+                LlavaTokenizedDataset.from_cache,
+                image_processor=img_processor,
+                max_length=args.max_length)
+        _datasets = load_from_cache(args.dset_cache_dir, init_fn)
+        dist.barrier()
     else:
         dset_infos = load(args.datasets)
 
@@ -528,12 +537,20 @@ def llava_pretrain(args):
                                                 per_img_tokens, image_dir,
                                                 dset_format)
 
-            if args.dset_pack_level:
-                init_fn = Dataset.from_list
+            if args.dset_pack_level == 'soft':
+                init_fn = partial(
+                    SoftPackerForLlava,
+                    image_processor=img_processor,
+                    max_length=args.max_length)
+            elif args.dset_cache_dir:
+                init_fn = partial(
+                    LlavaTokenizedDataset,
+                    image_processor=img_processor,
+                    max_length=args.max_length)
             else:
                 init_fn = partial(
                     LlavaRawDataset,
-                    image_processor=img_processor,
+                    image_processor=processor.image_processor,
                     tokenize_fn=tokenize_fn)
                 # Online tokenization is used when not using a pack dataset,
                 # saving startup time.
@@ -547,34 +564,19 @@ def llava_pretrain(args):
         _datasets = load_datasets(
             paths=annotations,
             sources='local',
-            cache_dir=args.dset_cache_dir if args.dset_pack_level else None,
+            cache_dir=args.dset_cache_dir,
             file_types=args.dset_file_types,
             sample_ratios=sample_ratios,
-            num_proc=max(args.num_workers, 1),
+            num_proc=args.num_proc,
             map_fns=tokenize_fns,
             init_fns=init_fns)
 
     if args.dset_pack_level and rank == 0:
         # Only the tokenized datasets can count the number of tokens
-        num_tokens = sum(sum(dset['num_tokens']) for dset in _datasets)
-        logger.debug(f'[Dataset] {num_tokens} tokens.')
+        total_tokens = sum(dset.total_tokens for dset in _datasets)
+        logger.debug(f'[Dataset] {total_tokens} tokens.')
 
-    num_datasets = len(_datasets)
-    datasets = []
-    if args.dset_pack_level and args.dset_pack_level == 'soft':
-        pack_infos = SoftPackerForLlava.get_pack_infos(_datasets,
-                                                       args.max_length)
-        for i in range(num_datasets):
-            _infos = pack_infos[i]
-            _dset = _datasets[i]
-            _packed_dset = SoftPackerForLlava(_dset, img_processor,
-                                              args.max_length, _infos)
-            datasets.append(_packed_dset)
-    else:
-        for i, dset in enumerate(_datasets):
-            datasets.append(dset)
-
-    train_dataset = ConcatDataset(datasets)
+    train_dataset = ConcatDataset(_datasets)
 
     if args.dset_pack_level and rank == 0:
         ori_samples = sum([len(dset) for dset in _datasets])
@@ -643,7 +645,7 @@ def llava_pretrain(args):
         autocast = nullcontext()
         scaler = None
 
-    _text_config = AutoConfig.from_pretrained(args.llm, trust_remote_code=True)
+
     if is_flash_attn_2_available():
         _text_config.attn_implementation = 'flash_attention_2'
     elif is_torch_sdpa_available():
@@ -651,7 +653,7 @@ def llava_pretrain(args):
 
     _text_config.use_cache = False
 
-    llava_config = LlavaConfig(
+    llava_config = EnhancedLlavaConfig(
         _vision_config, _text_config, image_token_index=img_token_id)
 
     # model parameters must be in fp32.

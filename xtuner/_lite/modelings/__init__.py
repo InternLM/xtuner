@@ -1,5 +1,7 @@
 from .internlm2 import InternLM2Config, InternLM2ForCausalLM
-
+from .llava.modeling_llava import LlavaForConditionalGeneration
+from .llava.configuration_llava import EnhancedLlavaConfig
+from .llava.processing_llava import LlavaProcessor
 
 def register_remote_code():
     from transformers import AutoConfig, AutoModelForCausalLM

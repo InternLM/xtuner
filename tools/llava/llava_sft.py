@@ -35,16 +35,15 @@ from torch.distributed.fsdp.wrap import _or_policy
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR
 from torch.utils.data import ConcatDataset, DataLoader
-from transformers import (AutoConfig, AutoProcessor,
-                          LlavaForConditionalGeneration)
+from transformers import (AutoConfig, AutoProcessor)
 from transformers.utils.import_utils import (is_flash_attn_2_available,
                                              is_torch_sdpa_available)
-
+from xtuner._lite.modelings.llava import LlavaForConditionalGeneration
 from xtuner._lite import AutoTokenizer, get_logger
 from xtuner._lite.accelerate import (LORA_TARGET_MAP, dispatch_modules,
                                      packed_sequence)
 from xtuner._lite.chat import CHAT_TEMPLATE_MAP
-from xtuner._lite.datasets import (LengthGroupedIterableDataset, LlavaCollator,
+from xtuner._lite.datasets import (LlavaCollator,
                                    LlavaRawDataset, LlavaTokenizedDataset,
                                    LlavaTokenizeFunction, SoftPackerForLlava)
 from xtuner._lite.datasets.load import (LOAD_FN_MAP, load_datasets,
@@ -442,11 +441,7 @@ def llava_sft(args):
         trust_remote_code=True,
         padding_side='right')
 
-    register_remote_code()
     llava_config = AutoConfig.from_pretrained(args.llava)
-
-    if hasattr(llava_config.text_config, 'auto_map'):
-        delattr(llava_config.text_config, 'auto_map')
 
     processor = AutoProcessor.from_pretrained(
         args.llava, trust_remote_code=True)
@@ -505,19 +500,12 @@ def llava_sft(args):
                     SoftPackerForLlava,
                     image_processor=img_processor,
                     max_length=args.max_length)
-            elif args.dset_cache_dir:
+            else:
                 init_fn = partial(
                     LlavaTokenizedDataset,
                     image_processor=img_processor,
                     max_length=args.max_length)
-            else:
-                init_fn = partial(
-                    LlavaRawDataset,
-                    image_processor=processor.image_processor,
-                    tokenize_fn=tokenize_fn)
-                # Online tokenization is used when not using a pack dataset,
-                # saving startup time.
-                tokenize_fn = None
+        
 
             init_fns.append(init_fn)
             tokenize_fns.append(tokenize_fn)
@@ -567,13 +555,13 @@ def llava_sft(args):
         collate_fn=collator,
         persistent_workers=args.num_workers > 0)
 
-    # if rank == 0:
-    #     logger.info(f'[Dataloader] {len(train_dataloader)} batches.')
-    #     _first_batch = [train_dataset[i] for i in range(args.mirco_batch_size)]
-    #     _first_batch = collator(_first_batch)
-    #     _decoded = tokenizer.batch_decode(_first_batch['input_ids'])
-    #     logger.debug(f'[Dataloader] Training Batch:\n{_first_batch}')
-    #     logger.debug(f'[Dataloader] Training Batch(Decoded):\n{_decoded}')
+    if rank == 0:
+        logger.info(f'[Dataloader] {len(train_dataloader)} batches.')
+        _first_batch = [train_dataset[i] for i in range(args.mirco_batch_size)]
+        _first_batch = collator(_first_batch)
+        _decoded = tokenizer.batch_decode(_first_batch['input_ids'])
+        logger.debug(f'[Dataloader] Training Batch:\n{_first_batch}')
+        logger.debug(f'[Dataloader] Training Batch(Decoded):\n{_decoded}')
     dist.barrier()
 
     load_data_cost_time = time.time() - start_load_data_t
