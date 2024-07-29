@@ -63,7 +63,7 @@ class LlavaTokenizedDataset(TextTokenizedDataset):
     def process_tokenized_data(self, tokenized_data):
         images = []
         for url in tokenized_data['image_urls']:
-            img = Image.open(url)
+            img = Image.open(fileio.get(url))
             images.append(img)
 
         if len(images):

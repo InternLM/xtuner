@@ -500,19 +500,14 @@ def _cpu_parallel_load_local_datasets(paths,
         if init_fn:
             dset = init_fn(dset)
 
-        if cache_dir and isinstance(dset, Dataset):
+        if cache_dir and isinstance(dset, CacheDataset):
             digits = len(str(abs(num_files)))
             cache_id = (f'cache-local-{ind+1:0{digits}}-of-'
                         f'{num_files:0{digits}}')
             sub_cache_dir = os.path.join(cache_dir, cache_id)
-            if os.path.exists(sub_cache_dir):
-                shutil.rmtree(sub_cache_dir)
-                logger.warning(f'Found {sub_cache_dir} exists. '
-                               'Clear it and re-cache.')
+            
             dset.cache(sub_cache_dir)
 
-            num_tokens = sum(dset['num_tokens'])
-            num_samples = len(dset)
             infos = {
                 'path': file,
                 'num_samples': dset.num_samples,
@@ -520,7 +515,7 @@ def _cpu_parallel_load_local_datasets(paths,
             }
             rank_cached_infos[cache_id] = infos
 
-        elif cache_dir and not isinstance(dset, Dataset):
+        elif cache_dir and not isinstance(dset, CacheDataset):
             dset_cls = dset.__class__.__name__
             logger.warning(
                 f'[File {ind}] {dset_cls} does not support caching.')
