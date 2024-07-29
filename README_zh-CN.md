@@ -38,7 +38,7 @@
 </div>
 
 ## 🎉 更新
-
+- **\[2024/07\]** 支持 [MiniCPM](xtuner/configs/minicpm/) 模型!
 - **\[2024/07\]** 支持训练 [DPO](https://github.com/InternLM/xtuner/tree/main/xtuner/configs/dpo)， [ORPO](https://github.com/InternLM/xtuner/tree/main/xtuner/configs/orpo) 还有 [Reward Model](https://github.com/InternLM/xtuner/tree/main/xtuner/configs/reward_model) ! 并且能够支持打包数据以及序列并行功能！ 请参考 [文档](https://xtuner.readthedocs.io/zh-cn/latest/dpo/overview.html) 了解更多信息。
 - **\[2024/07\]** 支持 [InternLM 2.5](xtuner/configs/internlm/internlm2_5_chat_7b/) 模型!
 - **\[2024/06\]** 支持 [DeepSeek V2](xtuner/configs/deepseek/deepseek_v2_chat/) models! **训练速度提升一倍！**
@@ -113,6 +113,7 @@ XTuner 是一个高效、灵活、全能的轻量化大模型微调工具库。
   <li><a href="https://huggingface.co/mistralai/Mixtral-8x7B-Instruct-v0.1">Mixtral</a></li>
   <li><a href="https://huggingface.co/deepseek-ai/DeepSeek-V2-Chat">DeepSeek V2</a></li>
   <li><a href="https://huggingface.co/google">Gemma</a></li>
+  <li><a href="https://huggingface.co/openbmb">MiniCPM</a></li>
   <li>...</li>
 </ul>
 </td>
