@@ -461,7 +461,7 @@ def sft(args):
 
     if (args.dset_pack_level or args.cache_dir) and rank == 0 and args.debug:
         # Only the tokenized datasets can count the number of tokens
-        num_tokens = sum(sum(dset.total_tokens) for dset in _datasets)
+        num_tokens = sum(dset.total_tokens for dset in _datasets)
         logger.debug(f'[Dataset] {num_tokens} tokens.')
 
     train_dataset = ConcatDataset(_datasets)

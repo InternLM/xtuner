@@ -117,13 +117,13 @@ def load_hf_dataset(path,
                                  k=target_samples)
         dataset = dataset.select(indices)
 
+    dataset = dataset.to_list()
+    
     if init_fn:
         dataset = init_fn(dataset)
 
-    if cache_dir:
-        dataset.save_to_disk(cache_dir)
-        del dataset
-        dataset = load_from_disk(cache_dir)
+    if cache_dir and isinstance(dataset, CacheDataset):
+        dataset.cache(cache_dir)
 
     return dataset
 
