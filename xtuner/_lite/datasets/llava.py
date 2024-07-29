@@ -196,7 +196,7 @@ class SoftPackerForLlava(SoftPackerForText):
 
         images = []
         for url in packed_img_urls:
-            img = Image.open(url)
+            img = Image.open(fileio.get(url))
             images.append(img)
 
         if len(images):
