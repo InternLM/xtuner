@@ -54,14 +54,17 @@ def llava_to_openai(data):
     messages = []
 
     if 'image' in data:
-        image_url = data['image']
+        image_urls = data['image'] 
+        if isinstance(image_urls, str):
+            image_urls = [image_urls]
     else:
-        image_url = None
+        image_urls = None
 
     while conversations and conversations[0]['from'] == 'gpt':
         # Skip the first one if it is from gpt
         conversations = conversations[1:]
 
+    image_id = 0
     for convs in conversations:
         if convs['from'] == 'human':
             pattern = f'({image_token})'
@@ -69,13 +72,16 @@ def llava_to_openai(data):
 
             text_content = []
             img_content = []
+
             for chunk in chunks:
                 if chunk == image_token:
-                    if not isinstance(image_url, str):
+                    url = image_urls[image_id]
+                    if not isinstance(url, str):
                         raise TypeError(data)
                     # assert , image_url
-                    item = dict(type='image_url', image_url=image_url)
+                    item = dict(type='image_url', image_url=url)
                     img_content.append(item)
+                    image_id += 1
                 elif len(chunk.strip()):
                     item = dict(type='text', text=chunk.strip())
                     text_content.append(item)

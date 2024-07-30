@@ -182,45 +182,8 @@ class ChatMessages(BaseMessages):
             ],
         }
         '''
-
-        assert 'messages' in item, item
-
-        _messages = item['messages']
-        messages = []
-
-        for _msg in _messages:
-            assert 'role' in _msg and 'content' in _msg
-            _role = _msg['role']
-            _content = _msg['content']
-
-            if isinstance(_content, list):
-
-                content = []
-                for c_item in _content:
-                    assert 'type' in c_item
-                    _type = c_item['type']
-                    if _type == 'text':
-                        assert 'text' in c_item
-                        _text = c_item['text']
-                        content.append(TextContentItem(type=_type, text=_text))
-                    elif _type == 'image_url':
-                        assert 'image_url' in c_item
-                        _url = c_item['image_url']
-                        content.append(
-                            ImageContentItem(type=_type, image_url=_url))
-                    else:
-                        raise NotImplementedError
-            else:
-                content = _content
-
-            if 'loss' in _msg:
-                _loss = _msg['loss']
-                msg = ChatMsg(role=_role, content=_content, loss=_loss)
-            else:
-                msg = ChatMsg(role=_role, content=_content)
-            messages.append(msg)
-
-        return cls(messages=messages)
+        return cls(**item)
+        
 
 
 if __name__ == '__main__':
