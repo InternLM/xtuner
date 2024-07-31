@@ -112,6 +112,8 @@ def padding_policy_outputs(policy_outputs: list[PolicyOutput],
                            padding_id=0):
     tensor_keys = union_tensor_keys_from_policy_outputs(policy_outputs)
     for key in tensor_keys:
+        if len(policy_outputs[0][key].shape) < 2:
+            continue
         padding_id = padding_token_map.get(key, padding_id)
         max_seq_len = find_max_seq_len(policy_outputs, key)
         for policy_output in policy_outputs:

@@ -123,3 +123,6 @@ rlhf_trainlog*/
 # srun
 *.out
 batchscript-*
+
+# custom
+logs/

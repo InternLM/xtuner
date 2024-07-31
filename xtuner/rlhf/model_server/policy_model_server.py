@@ -47,6 +47,37 @@ class PolicyModelServer(BaseModelServer):
         logger.info(f'{self.model_name} has been initialized. ')
 
     # Generation
+    def generate_background(self,
+                       inputs,
+                       attention_mask=None,
+                       *args,
+                       **generate_kwargs):
+        if isinstance(inputs, torch.Tensor):
+            input_ids = inputs
+        elif isinstance(inputs, list):
+            if not self.generator_eq_trainer:
+                input_ids, attention_mask = encode_inputs(
+                    inputs,
+                    self.tokenizer,
+                    return_tensors=None,
+                    padding=False,
+                    add_generation_prompt=True)
+            else:
+                input_ids, attention_mask = encode_inputs(
+                    inputs, self.tokenizer, add_generation_prompt=True)
+        else:
+            raise NotImplementedError(f'unknown inputs: {inputs}')
+
+        return self.generator.generate_background(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            *args,
+            **generate_kwargs)
+
+    def get_generate_finish(self, num):
+        return self.generator.get_generate_finish(num)
+
+    # Generation
     def generate_async(self,
                        inputs,
                        attention_mask=None,

@@ -12,7 +12,7 @@ from ray.util.placement_group import placement_group as create_placement_group
 from ray.util.placement_group import remove_placement_group
 from torch.nn.modules.loss import _Loss
 from torch.optim.lr_scheduler import _LRScheduler
-from transformers import AutoModelForCausalLM, PreTrainedModel
+from transformers import AutoModelForCausalLM, PreTrainedModel, AutoConfig
 from transformers import get_scheduler as transformers_get_scheduler
 from transformers.dynamic_module_utils import init_hf_modules
 from transformers.generation.utils import GenerateDecoderOnlyOutput
@@ -89,6 +89,13 @@ class HfModelRunner:
             attn_implementation='flash_attention_2'
             if use_flash_attn else None,
         )
+
+        # Note: Debug Only, random init model weight
+        # config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+        # self.model: PreTrainedModel = model_class.from_config(
+        #     config,
+        #     trust_remote_code=True,
+        # )
 
         # Graident checkpointing
         gradient_checkpointing = self.model_config.get(
@@ -241,6 +248,7 @@ class HfModelRunner:
         # None means using the entire input as one batch
         micro_batch_size: Optional[Union[list[int], int]] = None,
         debug=False,
+        update_param=True,
         **_ignored,
     ):
         if isinstance(input_ids, torch.Tensor):
@@ -303,9 +311,14 @@ class HfModelRunner:
                 loss_entry.append(loss)
                 if debug:
                     set_seed(1234)
+
             loss_list[index] = sum(loss_entry) / len(loss_entry)
 
-        self.parameter_update(step_interval)
+        # self.parameter_update(step_interval)
+        if update_param:
+            self.parameter_update(step_interval)
+
+        loss_list = [loss.cpu() for loss in loss_list]
         return loss_list if len(loss_list) > 1 else loss_list[0]
 
     # Inference
@@ -674,6 +687,8 @@ class HfModelRunnerRayActorGroup(RayActorGroup):
     init_hf_modules()
 
     def __init__(self, name: str, config: dict):
+        init_hf_modules()
+
         super().__init__(name, config)
         self.released = True
         num_gpus = get_gpu_requirement(config)
@@ -704,6 +719,10 @@ class HfModelRunnerRayActorGroup(RayActorGroup):
                 world_size=len(self.ray_actors),
             ) for rank, actor in enumerate(self.ray_actors)
         ])
+
+        for actor in self.ray_actors:
+            logger.info(ray.get(actor.get_metadata.remote()))
+
         self.initialize_ref = [
             actor.initialize.remote() for actor in self.ray_actors
         ]

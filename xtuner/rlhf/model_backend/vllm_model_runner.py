@@ -18,6 +18,9 @@ from .ray_actor_group import RayActorGroup
 from .ray_actor_mixin import RayActorMixin
 from .ray_utils import DEFAULT_NUM_CPUS, DEFAULT_NUM_GPUS, set_runtime_env
 
+import threading
+import queue
+
 VLLM_DEFAULT_DEVICE = 'cuda'
 
 
@@ -25,6 +28,8 @@ class VllmGenerator:
 
     def __init__(self, model_config) -> None:
         self.model_config: dict = model_config
+        self.generate_thread = None
+        self.queue = queue.Queue()
 
     # Adapted from https://github.com/OpenLLMAI/OpenRLHF/blob/v0.2.5/openrlhf/trainer/ray/vllm_engine.py  # noqa: E501
     def initialize(self) -> None:
@@ -67,6 +72,7 @@ class VllmGenerator:
             swap_space=0,
             tensor_parallel_size=tensor_parallel_size,
             device=VLLM_DEFAULT_DEVICE,
+            # load_format='dummy',
         )
         self.tokenizer = self.llm.get_tokenizer()
         tokenizer_config = self.model_config.get('tokenizer_config', {})
@@ -207,6 +213,147 @@ class VllmGenerator:
                                                     padding_token_map)
         return concated_policy_out
 
+    def generate_background(
+        self,
+        inputs: Union[torch.Tensor, str, list[str]],
+        max_inputs_length: int,
+        step=-1,
+        output_str=True,
+        output_logits=False,
+        output_attentions=False,
+        output_hidden_states=False,
+        generate_kwargs: Optional[dict] = {},
+        **_ignored,
+    ) -> list[tuple[list[int], str]]:
+        sp = VllmGenerator.get_sampling_params_from_dict(generate_kwargs)
+        sp.max_tokens = step if step > 0 else None
+        logger.info(
+            f'[{self.__class__.__name__}] self.generate() SamplingParams: {sp}'
+        )
+
+        if isinstance(inputs, torch.Tensor):
+            if len(inputs.shape) == 2:  # e.g., [batch_size, seq_len]
+                prompt = self.tokenizer.batch_decode(
+                    inputs,
+                    skip_special_tokens=False,
+                    clean_up_tokenization_spaces=False,
+                )
+            elif len(inputs.shape) == 1:  # e.g., [seq_len]
+                prompt = self.tokenizer.decode(
+                    inputs,
+                    skip_special_tokens=False,
+                    clean_up_tokenization_spaces=False,
+                )
+            else:
+                raise ValueError(
+                    f'Unsupported tensor inputs of shape({inputs.shape})')
+
+        elif isinstance(inputs, str):
+            prompt = inputs  # str
+        elif isinstance(inputs, list):
+            if isinstance(inputs[0], list):
+                prompt = inputs  # list[int]
+            else:
+                raise ValueError(
+                    f'Unsupported inputs[0] with type({type(inputs[0])})')
+        else:
+            raise ValueError(f'Unsupported inputs with type({type(inputs)})')
+        
+        # self.max_inputs_length = 1024
+        self.max_inputs_length = max_inputs_length
+        self.output_str = output_str
+        self.output_logits = output_logits
+        self.output_attentions = output_attentions
+        self.output_hidden_states = output_hidden_states
+        self.generate_kwargs = generate_kwargs
+        self.batch_size = len(prompt)
+
+        if self.generate_thread is not None:
+            self.generate_thread.join()
+            self.queue.join()
+
+        self.generate_thread = threading.Thread(target=self.llm.generate_to_queue,
+                                                kwargs={'prompt_token_ids':prompt, 
+                                                        'sampling_params':sp, 
+                                                        'queue':self.queue})
+        self.generate_thread.start()
+
+    def get_generate_finish(self, num):
+        req_outputs = []
+        while num > 0:
+            req_outputs.append(self.queue.get())
+            self.queue.task_done()
+            num -= 1
+
+        def pad_list_with_pad_token(int_list, max_length, pad_token_id):
+            if len(int_list) < max_length:
+                num_pad_token_to_add = max_length - len(int_list)
+                padded_list = [pad_token_id] * num_pad_token_to_add + int_list
+                return padded_list
+            else:
+                return int_list
+            
+        def pad_list_with_pad_token_right(int_list, max_length, pad_token_id):
+            if len(int_list) < max_length:
+                num_pad_token_to_add = max_length - len(int_list)
+                padded_list = int_list + [pad_token_id] * num_pad_token_to_add
+                return padded_list
+            else:
+                return int_list
+
+        policy_outputs = []
+        for _, req_output in enumerate(req_outputs):
+            output = PolicyOutput()
+            input_ids = [item for item in req_output.prompt_token_ids]
+            input_ids = pad_list_with_pad_token(input_ids, self.max_inputs_length,
+                                                self.tokenizer.pad_token_id)
+            output_token_ids = [
+                item for item in req_output.outputs[0].token_ids
+            ]
+            # output_token_ids = pad_list_with_pad_token_right(output_token_ids, 1024,
+            #                                     self.tokenizer.pad_token_id)
+
+            output_ids = input_ids + output_token_ids  # concat
+            output['input_ids'] = torch.Tensor(input_ids).to(
+                torch.long).unsqueeze(0)
+            output['output_ids'] = torch.tensor(output_ids).to(
+                torch.long).unsqueeze(0)
+
+            output['question_mask'], output[
+                'answer_mask'] = get_question_answer_mask(
+                    output['input_ids'],
+                    output['output_ids'],
+                    tokenizer_pad_token_id=self.tokenizer.pad_token_id,
+                    generate_pad_token_id=self.generate_kwargs.get('pad_token_id'),
+                )
+            output[
+                'attention_mask'] = output.question_mask + output.answer_mask  # noqa: E501
+            output['action_mask'] = output[
+                'attention_mask'][:, self.max_inputs_length - 1:-1]
+            if self.output_logits:
+                raise NotImplementedError('TODO: output_logits')
+            if self.output_attentions:
+                raise NotImplementedError('TODO: output_attentions')
+            if self.output_hidden_states:
+                raise NotImplementedError('TODO: output_hidden_states')
+            if self.output_str:  # return list[str]
+                output['output_ans_str'] = [req_output.outputs[0].text]
+                output_str = self.tokenizer.decode(
+                    output_ids,
+                    skip_special_tokens=True,
+                    clean_up_tokenization_spaces=False,
+                )
+                output['output_str'] = [output_str]
+                output['req_ids'] = [int(req_output.request_id)%self.batch_size]
+            output.to('cpu')
+
+            policy_outputs.append(output)
+
+        padding_token_map = {'output_ids': self.tokenizer.pad_token_id}
+        concated_policy_out = concat_policy_outputs(policy_outputs,
+                                                    padding_token_map)
+        return concated_policy_out
+
 
 class VllmGeneratorRayActor(VllmGenerator, RayActorMixin):
 
@@ -230,6 +377,9 @@ class VllmGeneratorRayActor(VllmGenerator, RayActorMixin):
 class VllmGeneratorRayActorGroup(RayActorGroup):
 
     def __init__(self, name: str, config: dict):
+        from transformers.dynamic_module_utils import init_hf_modules
+        init_hf_modules()
+        
         import uuid
         self.released = True
         self.config = config
@@ -268,6 +418,9 @@ class VllmGeneratorRayActorGroup(RayActorGroup):
                     runtime_env=set_runtime_env(),
                 ).remote(config))
 
+        # for actor in self.ray_actors:
+        #     logger.info(ray.get(actor.get_metadata.remote()))
+
         self.released = False
         self.initialize_ref = [
             actor.initialize.remote() for actor in self.ray_actors
@@ -284,6 +437,41 @@ class VllmGeneratorRayActorGroup(RayActorGroup):
             logger.warning(
                 'self.initialize_ref is None when calling initialize_get()')
         self.initialize_ref = None
+
+    def generate_background(self, input_ids, attention_mask, *args, **kwargs):
+        assert (
+            len(input_ids) >= self.dp_size
+        ), f'The length of input_ids({len(input_ids)}) must not be less than dp_size({self.dp_size}).'  # noqa: E501
+        micro_batch_size = len(input_ids) // self.dp_size + (
+            len(input_ids) % self.dp_size > 0
+        )  # round up division, i.e., math.ceil(a / b)
+        micro_batches = partition_by_micro_batch_size(input_ids,
+                                                      micro_batch_size,
+                                                      attention_mask)
+        assert len(micro_batches
+                   ) == self.dp_size, f'{len(micro_batches)}, :{self.dp_size}'
+        object_refs = [
+            self.ray_actors[index].generate_background.remote(
+                inputs=micro_batch['input_ids'],
+                max_inputs_length=micro_batch['max_inputs_length'],
+                attention_mask=micro_batch['attention_mask'],
+                *args,
+                **kwargs,
+            ) for index, micro_batch in enumerate(micro_batches)
+        ]
+        return ray.get(object_refs)
+    
+    def get_generate_finish(self, num, timeout=None):
+        object_refs = [
+            self.ray_actors[index].get_generate_finish.remote(
+                num
+            ) for index in range(len(self.ray_actors))
+        ]
+        outputs = ray.get(object_refs, timeout=timeout)
+        padding_token_map = {
+            'output_ids': self.config.tokenizer_config['pad_token_id']
+        }
+        return concat_policy_outputs(outputs, padding_token_map)
 
     # Generation
     def generate_async(self, input_ids, attention_mask, *args, **kwargs):

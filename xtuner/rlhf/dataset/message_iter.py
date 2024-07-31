@@ -214,9 +214,9 @@ class MessageIter():
             if (token_ids.shape[-1] <= 4) or (token_ids.shape[-1] >
                                               self.max_len):
                 # TODO truncation??
-                logger.warning(
-                    f'[MES_ITER] {self.message_type} message {message} '
-                    'is too short or long, skipped.')
+                # logger.warning(
+                #     f'[MES_ITER] {self.message_type} message {message} '
+                #     'is too short or long, skipped.')
                 return None
         elif self.message_type == 'pretrain':
             for _ in reversed(range(len(message_data))):

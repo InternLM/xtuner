@@ -30,6 +30,24 @@ class RewardModelServer(BaseModelServer):
     def infer_async(self, inputs, attention_mask=None, *args, **infer_kwargs):
         if not isinstance(inputs, torch.Tensor):
             input_ids, attention_mask = encode_inputs(inputs, self.tokenizer)
+
+            # Debug
+            # if isinstance(inputs[0], list):
+            #     inputs = [
+            #         self.tokenizer.apply_chat_template(
+            #             input,
+            #             tokenize=False,
+            #             add_generation_prompt=False,
+            #             return_tensors='pt',
+            #         ) for input in inputs
+            #     ]
+            # output = self.tokenizer(
+            #     inputs,
+            #     return_tensors='pt',
+            #     padding='max_length',
+            #     max_length=2048,
+            #     add_special_tokens=False)
+            # input_ids, attention_mask = output.input_ids, output.attention_mask
         else:
             input_ids = inputs
 

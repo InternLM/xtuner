@@ -124,26 +124,36 @@ if __name__ == '__main__':
         s_t = time.time()
         with Timer(f'step {step}: end_to_end'):
             # generate trajectories
+            gen_start = time.time()
             trajectories = txt_env.rollout(display=True)
+            gen_time = time.time() - gen_start
 
             # deal with trajectories
+            fwd_start = time.time()
             trajectories = ppo_repeater.process(trajectories)
+            fwd_time = time.time() - fwd_start
 
+            train_start = time.time()
             # critic & policy learn
             if async_learn:
                 critic_loss_ref = ppo.critic_learn_async(trajectories)
             else:
+                critic_train_start = time.time()
                 critic_loss = ppo.critic_learn(trajectories)
+                critic_train_time = time.time() - critic_train_start
 
             ppo_loss, pt_loss = None, None
             if critic_warmup_step <= 0:
                 ppo_loss, pt_loss = ppo.policy_learn(trajectories)
+
                 logger_train.info(
                     f'[Policy Train] Step: {step}, '
                     f'ppo loss: {ppo_loss}, pretrain loss: {pt_loss}')
 
             if async_learn:
                 critic_loss = ppo.critic_learn_get(critic_loss_ref)
+            train_time = time.time() - train_start
+        total_time = time.time() - s_t
 
         logger_train.info(
             f'[Critic Train] step: {step}, critic loss: {critic_loss}')
@@ -172,6 +182,15 @@ if __name__ == '__main__':
             policy_loss=ppo_loss,
             pretrain_loss=pt_loss,
             critic_loss=critic_loss,
+
+            query_tokens_mean=trajectories.question_mask.sum(
+                -1).float().mean().item(),
+            resp_tokens_mean=trajectories.answer_mask.sum(
+                -1).float().mean().item(),
+            generate_time=gen_time,
+            forward_time=fwd_time,
+            training_time=train_time,
+            total_time=total_time,
         )
         with open(f'{work_dir}/train_rlhf.log.jsonl', 'a') as f:
             f.write(json.dumps(summaries) + '\n')
