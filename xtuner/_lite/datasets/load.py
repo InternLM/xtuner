@@ -118,7 +118,7 @@ def load_hf_dataset(path,
         dataset = dataset.select(indices)
 
     dataset = dataset.to_list()
-    
+
     if init_fn:
         dataset = init_fn(dataset)
 
@@ -505,7 +505,7 @@ def _cpu_parallel_load_local_datasets(paths,
             cache_id = (f'cache-local-{ind+1:0{digits}}-of-'
                         f'{num_files:0{digits}}')
             sub_cache_dir = os.path.join(cache_dir, cache_id)
-            
+
             dset.cache(sub_cache_dir)
 
             infos = {
