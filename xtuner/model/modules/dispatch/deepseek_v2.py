@@ -279,6 +279,7 @@ def deepseek_varlen_attn_forward(
             value_states,
             cumulative_len,
             max_seqlen,
+            softmax_scale=self.softmax_scale,
             causal=causal,
             dropout_p=dropout_rate,
             training=True)
@@ -287,6 +288,7 @@ def deepseek_varlen_attn_forward(
             query_states,
             key_states,
             value_states,
+            softmax_scale=self.softmax_scale,
             causal=causal,
             dropout_p=dropout_rate,
             training=False)
