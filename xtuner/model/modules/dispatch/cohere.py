@@ -3,6 +3,8 @@ from typing import Optional
 
 import torch
 import torch.distributed as dist
+import transformers
+from mmengine.utils import digit_version
 from transformers.models.cohere.modeling_cohere import apply_rotary_pos_emb
 
 from xtuner.parallel.sequence import get_sequence_parallel_world_size
@@ -16,6 +18,14 @@ except ImportError:
 
     class Cache:
         pass
+
+
+TRANSFORMERS_VERSION = digit_version(transformers.__version__)
+IS_LOW_VERSION_TRANSFORMERS = TRANSFORMERS_VERSION < digit_version('4.43')
+
+if not IS_LOW_VERSION_TRANSFORMERS:
+    from transformers.modeling_flash_attention_utils import \
+        _flash_attention_forward
 
 
 def cohere_attn_forward(
@@ -110,13 +120,25 @@ def cohere_attn_forward(
         ori_num_head = self.num_heads
         self.num_heads = query_states.shape[-2]
 
-    attn_output = self._flash_attention_forward(
-        query_states,
-        key_states,
-        value_states,
-        attention_mask,
-        query_states.shape[1],
-        dropout=dropout_rate)
+    if IS_LOW_VERSION_TRANSFORMERS:
+        attn_output = self._flash_attention_forward(
+            query_states,
+            key_states,
+            value_states,
+            attention_mask,
+            query_states.shape[1],
+            dropout=dropout_rate)
+    else:
+        attn_output = _flash_attention_forward(
+            query_states,
+            key_states,
+            value_states,
+            attention_mask,
+            query_states.shape[1],
+            dropout=dropout_rate,
+            use_top_left_mask=self._flash_attn_uses_top_left_mask,
+            is_causal=self.is_causal,
+        )
 
     if enable_sequence_parallel:
         attn_output = post_process_for_sequence_parallel_attn(attn_output)
