@@ -333,7 +333,7 @@ def _gpu_parallel_load_local_datasets(paths,
         datasets.append(whole_dset)
 
     if dist.is_available() and world_size > 1:
-        dist.barrier()
+
         timeout = timedelta(
             minutes=int(os.getenv('XTUNER_DATASET_TIMEOUT', default=30)))
 
@@ -342,9 +342,11 @@ def _gpu_parallel_load_local_datasets(paths,
                         'variable `XTUNER_DATASET_TIMEOUT` can be adjusted. '
                         'For example, setting `XTUNER_DATASET_TIMEOUT=120` '
                         'means the timeout is set to two hours.')
-        logger.info('All gahter datasets... ')
 
         group = dist.new_group(backend='gloo', timeout=timeout)
+        dist.monitored_barrier(group=group, timeout=timeout)
+        logger.info('All gahter datasets... ')
+
         all_dataset = [None] * world_size
         dist.all_gather_object(all_dataset, datasets, group=group)
         all_dataset = sum(all_dataset, [])
@@ -524,7 +526,6 @@ def _cpu_parallel_load_local_datasets(paths,
 
     if dist.is_available() and world_size > 1:
         logger.info('Waiting for other ranks...... ')
-        dist.barrier()
 
         timeout = timedelta(
             minutes=int(os.getenv('XTUNER_DATASET_TIMEOUT', default=30)))
@@ -534,9 +535,10 @@ def _cpu_parallel_load_local_datasets(paths,
                         'variable `XTUNER_DATASET_TIMEOUT` can be adjusted. '
                         'For example, setting `XTUNER_DATASET_TIMEOUT=120` '
                         'means the timeout is set to two hours.')
-        logger.info('All gahter datasets... ')
 
         group = dist.new_group(backend='gloo', timeout=timeout)
+        dist.monitored_barrier(group=group, timeout=timeout)
+        logger.info('All gahter datasets... ')
 
         buffers = [None] * world_size
         dist.all_gather_object(buffers, rank_datasets, group=group)

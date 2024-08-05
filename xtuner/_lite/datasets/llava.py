@@ -33,6 +33,7 @@ class LlavaTokenizeFunction():
         formatter = OPENAI_FORMAT_MAP[self.raw_format]
         msg = ChatMessages.from_dict(formatter(item))
         tokenized = msg.tokenize(self.tokenizer, self.chat_template)
+        tokenized['num_img_tokens'] = 0
 
         if 'image_urls' in tokenized:
             image_urls = tokenized['image_urls']
