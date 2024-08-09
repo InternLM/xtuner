@@ -1,10 +1,13 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import inspect
 import warnings
 from typing import Optional, Tuple
 
 import torch
 import torch.distributed as dist
+import transformers
 from mmengine import MessageHub
+from mmengine.utils import digit_version
 
 from xtuner.parallel.sequence import (get_sequence_parallel_world_size,
                                       post_process_for_sequence_parallel_attn,
@@ -19,7 +22,12 @@ except ImportError:
         pass
 
 
-import inspect
+TRANSFORMERS_VERSION = digit_version(transformers.__version__)
+IS_LOW_VERSION_TRANSFORMERS = TRANSFORMERS_VERSION < digit_version('4.43')
+
+if not IS_LOW_VERSION_TRANSFORMERS:
+    from transformers.modeling_flash_attention_utils import \
+        _flash_attention_forward
 
 _flash_supports_window_size = False
 try:
@@ -239,15 +247,28 @@ def phi3_attn_forward(
         ori_num_head = self.num_heads
         self.num_heads = query_states.shape[-2]
 
-    attn_output = self._flash_attention_forward(
-        query_states,
-        key_states,
-        value_states,
-        attention_mask,
-        query_states.shape[1],
-        dropout=attn_dropout,
-        use_sliding_windows=use_sliding_windows,
-    )
+    if IS_LOW_VERSION_TRANSFORMERS:
+        attn_output = self._flash_attention_forward(
+            query_states,
+            key_states,
+            value_states,
+            attention_mask,
+            query_states.shape[1],
+            dropout=attn_dropout,
+            use_sliding_windows=use_sliding_windows,
+        )
+    else:
+        attn_output = _flash_attention_forward(
+            query_states,
+            key_states,
+            value_states,
+            attention_mask,
+            query_states.shape[1],
+            dropout=attn_dropout,
+            sliding_window=getattr(self.config, 'sliding_window', None),
+            use_top_left_mask=self._flash_attn_uses_top_left_mask,
+            is_causal=self.is_causal,
+        )
 
     if enable_sequence_parallel:
         # (b, s, nd // sp_world_size, dim) -> (b, s // sp_world_size, nd, dim)
