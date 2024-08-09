@@ -21,5 +21,7 @@ torchvision
 # Registering a causal mask in `LlamaModel` is not friendly for very large
 # `max_position_embeddings`. Refer to
 # https://github.com/huggingface/transformers/blob/v4.38.0/src/transformers/models/llama/modeling_llama.py#L921-L923
-transformers>=4.36.0,!=4.38.0,!=4.38.1,!=4.38.2
+# transformers >= 4.43.0 use _flash_attention_forward but not self._flash_attention_forward
+# to calculate attn output which lead to bc braeking
+transformers>=4.36.0,!=4.38.0,!=4.38.1,!=4.38.2,<=4.42.4
 transformers_stream_generator
