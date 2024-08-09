@@ -6,7 +6,9 @@ from typing import Optional
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+import transformers
 from mmengine import MessageHub
+from mmengine.utils import digit_version
 from transformers.cache_utils import Cache
 from transformers.models.mistral.modeling_mistral import (apply_rotary_pos_emb,
                                                           repeat_kv)
@@ -27,6 +29,13 @@ try:
     SUPPORT_FLASH2 = True
 except ImportError:
     pass
+
+TRANSFORMERS_VERSION = digit_version(transformers.__version__)
+IS_LOW_VERSION_TRANSFORMERS = TRANSFORMERS_VERSION < digit_version('4.43')
+
+if not IS_LOW_VERSION_TRANSFORMERS:
+    from transformers.modeling_flash_attention_utils import \
+        _flash_attention_forward
 
 
 class MistralRotaryEmbedding(nn.Module):
@@ -220,15 +229,28 @@ def mistral_attn_forward(
         ori_num_head = self.num_heads
         self.num_heads = query_states.shape[-2]
 
-    attn_output = self._flash_attention_forward(
-        query_states,
-        key_states,
-        value_states,
-        attention_mask,
-        query_length=query_states.shape[1],
-        dropout=dropout_rate,
-        use_sliding_windows=use_sliding_windows,
-    )
+    if IS_LOW_VERSION_TRANSFORMERS:
+        attn_output = self._flash_attention_forward(
+            query_states,
+            key_states,
+            value_states,
+            attention_mask,
+            query_length=query_states.shape[1],
+            dropout=dropout_rate,
+            use_sliding_windows=use_sliding_windows,
+        )
+    else:
+        attn_output = _flash_attention_forward(
+            query_states,
+            key_states,
+            value_states,
+            attention_mask,
+            query_states.shape[1],
+            dropout=dropout_rate,
+            sliding_window=getattr(self.config, 'sliding_window', None),
+            use_top_left_mask=self._flash_attn_uses_top_left_mask,
+            is_causal=self.is_causal,
+        )
 
     if enable_sequence_parallel:
         attn_output = post_process_for_sequence_parallel_attn(attn_output)
