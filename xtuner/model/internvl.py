@@ -112,7 +112,8 @@ class InternVL_V1_5(BaseModel):
         self._count = 0
         print_log(self, logger='current')
         print_log('InternVL_V1_5 construction is complete', logger='current')
-        dispatch_modules(self.model.language_model, use_varlen_attn=use_varlen_attn)
+        dispatch_modules(self.model.language_model,
+                         use_varlen_attn=use_varlen_attn)
 
     def _parse_lora_config(self, lora_config):
         if isinstance(lora_config, dict) or isinstance(
@@ -197,7 +198,7 @@ class InternVL_V1_5(BaseModel):
                 image.to(self.model.vision_model.dtype)
                 for image in pixel_values
             ],
-                                      dim=0)
+                dim=0)
         else:
             raise NotImplementedError()
 

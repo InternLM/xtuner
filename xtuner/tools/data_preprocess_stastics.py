@@ -1,6 +1,17 @@
+from xtuner.utils import IGNORE_INDEX
+from transformers import AutoConfig, AutoTokenizer
+from torchvision.transforms.functional import InterpolationMode
+from PIL import Image
+from mmengine.fileio import get
+from mmengine import print_log
+import torchvision.transforms as T
+import warnings
+import random
+import io
+import copy
 import json
 from multiprocessing import Manager
-import multiprocessing 
+import multiprocessing
 import argparse
 from tqdm import tqdm
 from functools import partial
@@ -12,21 +23,6 @@ import torch
 from transformers import AutoTokenizer
 from torch.utils.data import Dataset
 PROCESSES = 64
-
-
-import copy
-import io
-import random
-import warnings
-
-import numpy as np
-import torchvision.transforms as T
-from mmengine import print_log
-from mmengine.fileio import get
-from PIL import Image
-from torchvision.transforms.functional import InterpolationMode
-from transformers import AutoConfig, AutoTokenizer
-from xtuner.utils import IGNORE_INDEX
 
 
 # Referenced from InternVL
@@ -326,7 +322,8 @@ class InternVL_V1_5_Dataset(Dataset):
                                                  image_token_str)
             out_data_dict['num_patches'] = image_token
             out_data_dict['num_tokens'] = len(token_dict['input_ids'])
-            out_data_dict['image_flags'] = torch.tensor([1] * image_token, dtype=torch.long)
+            out_data_dict['image_flags'] = torch.tensor(
+                [1] * image_token, dtype=torch.long)
         else:
             token_dict = self.get_inputid_labels(data_dict['conversations'],
                                                  None)
@@ -445,21 +442,22 @@ def decode_text(args):
     return token_lengths
 
 
-import copy
 def worker(cfg_dataset, ds_name, token_lengths_path, ds_info):
     dataset = InternVL_V1_5_Dataset(**cfg_dataset)
     with multiprocessing.Pool(PROCESSES) as pool:
-        token_lengths_all = pool.map(decode_text, [(cfg_dataset, inds) for inds in np.array_split(range(len(dataset)), PROCESSES)])
+        token_lengths_all = pool.map(decode_text, [(
+            cfg_dataset, inds) for inds in np.array_split(range(len(dataset)), PROCESSES)])
     l_token_lengths = []
     # token_lengths_all = decode_text((cfg_dataset, list(range(len(dataset)))))
     for tmp in token_lengths_all:
         l_token_lengths.extend(tmp)
 
-    length_save_path = os.path.join(token_lengths_path, f"{ds_name}"+"_token_lengths.json")
+    length_save_path = os.path.join(
+        token_lengths_path, f"{ds_name}"+"_token_lengths.json")
 
     with open(length_save_path, "w") as f:
         json.dump(l_token_lengths, f, indent=4)
-    if "max_dynamic_patch" in ds_info:    
+    if "max_dynamic_patch" in ds_info:
         info = {
             "root": ds_info["root"],
             "annotation": ds_info["annotation"],
@@ -481,13 +479,12 @@ def worker(cfg_dataset, ds_name, token_lengths_path, ds_info):
     return info
 
 
-from tqdm import tqdm
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--json_file",
         default=None,
-        help="json file to statistics" 
+        help="json file to statistics"
     )
     parser.add_argument(
         "--worker",
@@ -516,7 +513,7 @@ if __name__ == "__main__":
         'model_path': '/model/path',
         'max_length': 4096,
     }
-    
+
     ds_collections = json.loads(open(data_path).read())
     import time
     t_1 = time.time()
@@ -534,12 +531,14 @@ if __name__ == "__main__":
         ds_info = {}
         ds_info["root"] = ds_collections[ds_name]["root"]
         ds_info["annotation"] = ds_collections[ds_name]["annotation"]
-        ds_info["data_augment"] = ds_collections[ds_name].get("data_augment", False)
+        ds_info["data_augment"] = ds_collections[ds_name].get(
+            "data_augment", False)
         ds_info["repeat_time"] = ds_collections[ds_name]['repeat_time']
         if 'max_dynamic_patch' in ds_collections[ds_name]:
             ds_info['max_dynamic_patch'] = ds_collections[ds_name]['max_dynamic_patch']
-        
-        meta[ds_name] = worker(cfg_dataset, ds_name, token_lengths_path, ds_info)
+
+        meta[ds_name] = worker(cfg_dataset, ds_name,
+                               token_lengths_path, ds_info)
 
     with open(args.output_path, "w") as f:
         json.dump(meta.copy(), f, indent=4)

@@ -27,6 +27,8 @@ def get_vit_num(g):
 
 
 DEFAULT_SEED = 1024
+
+
 class BalancedDataset(Dataset):
     def __init__(self,
                  data_path,
@@ -105,15 +107,18 @@ class BalancedDataset(Dataset):
             sub_dataset = self.dataset.datasets[dataset_idx]
             if "token_lengths" in sub_dataset.meta:
                 print(f"Load from cache for dataset {dataset_idx}", flush=True)
-                assert os.path.exists(sub_dataset.meta["token_lengths"]), f"Dataset {dataset_idx} token_lengths file does not exist."
+                assert os.path.exists(
+                    sub_dataset.meta["token_lengths"]), f"Dataset {dataset_idx} token_lengths file does not exist."
                 with open(sub_dataset.meta["token_lengths"], "r") as f:
                     token_lengths = json.load(f)
                 dict_num_tokens[dataset_idx] = {
                     "lengths": len(sub_dataset),
-                    "token_lengths": token_lengths  # sub_dataset.meta["token_lengths"]
+                    # sub_dataset.meta["token_lengths"]
+                    "token_lengths": token_lengths
                 }
             else:
-                print(f"Generate length json for dataset {dataset_idx}", flush=True)
+                print(
+                    f"Generate length json for dataset {dataset_idx}", flush=True)
                 token_lengths = []
                 origin_indexs = list(range(len(sub_dataset)))
                 token_lengths_dict = dict()
@@ -140,7 +145,8 @@ class BalancedDataset(Dataset):
                     "lengths": len(sub_dataset),
                     "token_lengths": token_lengths
                 }
-                print(f"Finish length json for dataset {dataset_idx}", flush=True)
+                print(
+                    f"Finish length json for dataset {dataset_idx}", flush=True)
         self.dict_num_tokens = dict_num_tokens
 
     def _random_groups(self, token_lengths, seed=None):
@@ -155,7 +161,8 @@ class BalancedDataset(Dataset):
         vit_token_length_sum, llm_token_length_sum = 0, 0
         each_group = []
         for idx, sample_id in enumerate(index):
-            vit_sample_length, llm_sample_length = token_lengths[sample_id][1], token_lengths[sample_id][2]
+            vit_sample_length, llm_sample_length = token_lengths[
+                sample_id][1], token_lengths[sample_id][2]
             if vit_sample_length > self.vit_packed_length or llm_sample_length > self.llm_packed_length:
                 continue
             vit_token_length_sum += vit_sample_length
@@ -178,7 +185,8 @@ class BalancedDataset(Dataset):
             if item["vit_num"] == -1:
                 print(f"item {idx} was filted.", flush=True)
                 continue
-            new_groups.append((idx + accu_length, item['vit_num'], item['token_num'], item["image_flags"]))
+            new_groups.append(
+                (idx + accu_length, item['vit_num'], item['token_num'], item["image_flags"]))
         return new_groups
 
     def iter_random_groups(self, groups, llm_thresh=None, seed=None, iter_time=300):
@@ -247,7 +255,8 @@ class BalancedDataset(Dataset):
         llm_thresh = self.llm_packed_length
         for step_id in range(step_num):
             print(f"find_best_groups {step_id} / {step_num}", flush=True)
-            groups = self.iter_random_groups(input_groups, llm_thresh, seed=self.seed, iter_time=self.iter_time)
+            groups = self.iter_random_groups(
+                input_groups, llm_thresh, seed=self.seed, iter_time=self.iter_time)
             cur_info_dict = self.collect_packed_info(groups)
             if cur_info_dict['packed_group_num'] < best_group_num:
                 best_group_num = cur_info_dict['packed_group_num']
@@ -255,7 +264,8 @@ class BalancedDataset(Dataset):
                 best_info_dict = cur_info_dict
                 best_llm_thresh = llm_thresh
             llm_thresh -= step
-        print(f"llm thresh {best_llm_thresh} best info dict", best_info_dict, flush=True)
+        print(f"llm thresh {best_llm_thresh} best info dict",
+              best_info_dict, flush=True)
         return best_groups
 
     def get_packed_groups(self):
@@ -265,14 +275,17 @@ class BalancedDataset(Dataset):
         for d_idx in range(num_datasets):
             dict_item = self.dict_num_tokens[d_idx]
             token_lengths = dict_item["token_lengths"]
-            groups = self.process_random_groups_input(token_lengths, accu_length)
+            groups = self.process_random_groups_input(
+                token_lengths, accu_length)
             print(f"get_packed_groups {d_idx}.", flush=True)
             input_groups.extend(groups)
             accu_length += len(token_lengths)
         if self.llm_thresh.get('thresh', None) is not None:
-            groups = self.iter_random_groups(input_groups, llm_thresh=self.llm_thresh['thresh'], seed=self.seed, iter_time=self.iter_time)
+            groups = self.iter_random_groups(
+                input_groups, llm_thresh=self.llm_thresh['thresh'], seed=self.seed, iter_time=self.iter_time)
         else:
-            groups = self.find_best_groups(input_groups, self.llm_thresh.get('step', 4), self.llm_thresh.get('step_num', 10))
+            groups = self.find_best_groups(input_groups, self.llm_thresh.get(
+                'step', 4), self.llm_thresh.get('step_num', 10))
         print(self.collect_packed_info(groups), flush=True)
         print("get_packed_groups done!", flush=True)
         return groups
@@ -292,7 +305,8 @@ class BalancedDataset(Dataset):
                     meta = self.dataset.__getitem__(idx)
                #    print("llm_length: ", llm_length, "input_ids: ", len(meta["input_ids"]))
                     assert len(meta["input_ids"]) == llm_length
-                    image_flag_ = (torch.sum(meta['pixel_values'], dim=(1, 2, 3)) != 0).sum()
+                    image_flag_ = (
+                        torch.sum(meta['pixel_values'], dim=(1, 2, 3)) != 0).sum()
                     assert image_flag == image_flag_.item()
                     input_ids.extend(meta['input_ids'])
                     pixel_values.append(meta['pixel_values'])
