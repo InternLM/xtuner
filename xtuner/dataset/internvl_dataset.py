@@ -309,6 +309,11 @@ class InternVL_V1_5_Dataset(Dataset):
                 print_log(f'Error: {e}', logger='current')
                 return None
 
+            # Ensure the first conversation contains an image placeholder
+            if '<image>' not in data_dict['conversations'][0]['value']:
+                data_dict['conversations'][0]['value'] = \
+                    '<image>\n' + data_dict['conversations'][0]['value']
+
             images = dynamic_preprocess(image, self.min_dynamic_patch,
                                         self.max_dynamic_patch,
                                         self.image_size, self.use_thumbnail)

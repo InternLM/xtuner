@@ -12,7 +12,8 @@ from xtuner.utils import DEFAULT_PAD_TOKEN_INDEX, IGNORE_INDEX
 def default_collate_fn(instances: Sequence[Dict],
                        pad_index: int = DEFAULT_PAD_TOKEN_INDEX,
                        return_hf_format: bool = False,
-                       use_varlen_attn: bool = False):
+                       use_varlen_attn: bool = False,
+                       balance_data: bool = False):
     seq_parallel_world_size = get_sequence_parallel_world_size()
 
     input_ids, labels = [], []
@@ -22,7 +23,7 @@ def default_collate_fn(instances: Sequence[Dict],
         assert len(instances) == 1, (
             f'If utilizing varlen attention, the batch size should be'
             f' set to 1, but got {len(instances)}')
-        assert not has_image, 'Currently, it is not configured to '
+        assert not has_image or balance_data, 'Currently, it is not configured to '
         'accommodate the use of varlen Attention in multimodal training'
 
     if has_image:
@@ -39,6 +40,7 @@ def default_collate_fn(instances: Sequence[Dict],
             pixel_values.append(example['pixel_values'])
 
     ori_length = [len(ids) for ids in input_ids]
+
     if len(instances) > 1:
         input_ids = pad_sequence(
             input_ids, batch_first=True, padding_value=pad_index)

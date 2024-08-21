@@ -15,6 +15,7 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 from xtuner.registry import BUILDER
 from .utils import (find_all_linear_names, get_peft_model_state_dict,
                     guess_load_checkpoint, make_inputs_require_grad)
+from .modules import dispatch_modules
 
 
 class InternVL_V1_5(BaseModel):
@@ -27,7 +28,8 @@ class InternVL_V1_5(BaseModel):
                  visual_encoder_lora=None,
                  quantization_vit=False,
                  quantization_llm=False,
-                 pretrained_pth=None):
+                 pretrained_pth=None,
+                 use_varlen_attn=False):
         print_log('Start to load InternVL_V1_5 model.', logger='current')
         super().__init__()
         self.freeze_llm = freeze_llm
@@ -110,6 +112,7 @@ class InternVL_V1_5(BaseModel):
         self._count = 0
         print_log(self, logger='current')
         print_log('InternVL_V1_5 construction is complete', logger='current')
+        dispatch_modules(self.model.language_model, use_varlen_attn=use_varlen_attn)
 
     def _parse_lora_config(self, lora_config):
         if isinstance(lora_config, dict) or isinstance(
@@ -200,7 +203,7 @@ class InternVL_V1_5(BaseModel):
 
         input_ids = data['input_ids']
         position_ids = data['position_ids']
-        attention_mask = data['attention_mask']
+        attention_mask = data.get('attention_mask', None)
         # sum is 0 are text
         image_flags = torch.sum(concat_images, dim=(1, 2, 3)) != 0
         image_flags = image_flags.long()
