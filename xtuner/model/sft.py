@@ -88,9 +88,6 @@ class SupervisedFinetune(BaseModel):
                 tokenizer = BUILDER.build(tokenizer)
             smart_tokenizer_and_embedding_resize(tokenizer, self.llm)
 
-        self.llm.config.use_cache = False
-        dispatch_modules(self.llm, use_varlen_attn=use_varlen_attn)
-
         if use_activation_checkpointing:
             # For backward compatibility
             if hasattr(self.llm, 'enable_input_require_grads'):
