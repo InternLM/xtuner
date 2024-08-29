@@ -219,7 +219,7 @@ XTuner 中的序列并行设计思路参考了 DeepSpeed 的工作 `DeepSpeed Ul
 - 适配序列并行的 Data Sampler (SequenceParallelSampler)
 - 数据 Pad 与切分 (pad_for_sequence_parallel, split_for_sequence_parallel)
 - 适配序列并行的 Attention (dispatch_modules)
-- reduce loss 以正确打印训练损失 (reduce_sequence_parallel_loss)
+- rescale loss 使得在使用序列并行时 backward 梯度与数据并行 (DP) 保持一致 (rescale_sp_loss)
 
 分布式环境初始化
 -------------------
@@ -303,20 +303,16 @@ XTuner 提供了 dispatch_modules 接口以支持修改模型 Attention 的计�
 .. tip::
   上述过程在 ``xtuner/model/sft.py`` 中实现。
 
-Reduce Loss
+Rescale Loss
 -------------
 
-这个 API 对于保证训练的正确性不是必须的，但对于观测模型训练状态，打印训练 loss 是非常有用的。
+由于不同的 sp rank 上计算 loss 的 tokens 数量各不相同，因此在数据并行 (DP) 梯度同步过程中，简单的不同 rank 的梯度取平均对于序列并行 (SP) 是不合理的。XTuner 提供 `rescale_sp_loss` API 来确保序列并行场景与数据并行场景的参数梯度保持一致。
 
 .. code-block:: python
 
-    from xtuner.parallel.sequence import reduce_sequence_parallel_loss
+    from xtuner.parallel.sequence import rescale_sp_loss, get_sequence_parallel_group
     outputs = llm(input_ids=input_ids, labels=labels, **kwargs)
-    num_tokens_per_rank = (labels != -100).sum()
-    # Suppose sequence parallel world size equals to 4,
-    # losses on rank0, rank1, rank2, rank3 are different.
-    loss = reduce_sequence_parallel_loss(outputs.loss, num_tokens_per_rank)
-    # After loss reduction, losses on rank0, rank1, rank2, rank3 are the same.
+    rescaled_loss = rescale_sp_loss(outputs.loss, labels, sp_group)
 
 .. tip::
   上述过程在 ``xtuner/model/sft.py`` 中实现。

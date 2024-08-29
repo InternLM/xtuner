@@ -15,7 +15,8 @@ from transformers.integrations import is_deepspeed_zero3_enabled
 
 from xtuner.parallel.sequence import (get_sequence_parallel_group,
                                       get_sequence_parallel_world_size,
-                                      reduce_sequence_parallel_loss,
+                                      reduce_sp_loss_for_debug,
+                                      rescale_sp_loss,
                                       split_for_sequence_parallel)
 from xtuner.registry import BUILDER
 from .modules import dispatch_modules
@@ -79,9 +80,10 @@ class SupervisedFinetune(BaseModel):
                  tokenizer=None,
                  max_position_embeddings=None):
         super().__init__()
-
-        self.llm = self.build_llm_from_cfg(llm, use_varlen_attn,
-                                           max_position_embeddings)
+        with LoadWoInit():
+            if isinstance(llm, dict):
+                llm = self._dispatch_lm_model_cfg(llm, max_position_embeddings)
+            self.llm = self._build_from_cfg_or_module(llm)
 
         if tokenizer is not None:
             if isinstance(tokenizer, dict):
@@ -89,6 +91,8 @@ class SupervisedFinetune(BaseModel):
             smart_tokenizer_and_embedding_resize(tokenizer, self.llm)
 
         self.llm.config.use_cache = False
+        dispatch_modules(self.llm, use_varlen_attn=use_varlen_attn)
+
         if use_activation_checkpointing:
             # For backward compatibility
             if hasattr(self.llm, 'enable_input_require_grads'):
@@ -115,19 +119,6 @@ class SupervisedFinetune(BaseModel):
         # seq_len dimension (use_varlen_attn = False) or the actual length of
         # the sequence.
         self.use_varlen_attn = use_varlen_attn
-
-    def build_llm_from_cfg(self, llm_cfg, use_varlen_attn,
-                           max_position_embeddings):
-        # For forward
-        with LoadWoInit():
-            if isinstance(llm_cfg, dict):
-                llm = self._dispatch_lm_model_cfg(llm_cfg,
-                                                  max_position_embeddings)
-            llm = self._build_from_cfg_or_module(llm)
-
-        llm.config.use_cache = False
-        dispatch_modules(llm, use_varlen_attn=use_varlen_attn)
-        return llm
 
     def gradient_checkpointing_enable(self):
         self.activation_checkpointing_enable()
@@ -288,11 +279,11 @@ class SupervisedFinetune(BaseModel):
         data = self._split_for_sequence_parallel(data)
         outputs = self.llm(**data)
         labels = data['labels']
-        num_tokens = (labels != -100).sum()
+
         sp_group = get_sequence_parallel_group()
-        loss = reduce_sequence_parallel_loss(outputs.loss, num_tokens,
-                                             sp_group)
-        return {'loss': loss}
+        loss = rescale_sp_loss(outputs.loss, labels, sp_group)
+        reduced_loss = reduce_sp_loss_for_debug(outputs.loss, labels, sp_group)
+        return {'loss': loss, 'reduced_l': reduced_loss}
 
     def compute_loss(self, data, data_samples=None):
         if get_sequence_parallel_world_size() > 1:
