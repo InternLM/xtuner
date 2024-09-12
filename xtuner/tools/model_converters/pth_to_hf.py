@@ -101,6 +101,7 @@ def main():
             else:
                 raise e
     else:
+        cfg.model.llm.device_map = 'auto'
         model = BUILDER.build(cfg.model)
 
     backend = get_file_backend(args.pth_model)
