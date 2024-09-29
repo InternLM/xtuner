@@ -9,7 +9,9 @@ import numpy as np
 import requests
 from PIL import Image
 
-from xtuner.utils import DEFAULT_IMAGE_TOKEN, IGNORE_INDEX, IMAGE_TOKEN_INDEX
+from xtuner.utils import (DEFAULT_AUDIO_TOKEN, DEFAULT_IMAGE_TOKEN,
+                          IGNORE_INDEX, IMAGE_TOKEN_INDEX,
+                          LLAST_AUDIO_TOKEN_INDEX)
 
 
 def get_bos_eos_token_ids(tokenizer):
@@ -37,7 +39,8 @@ def encode_fn(example,
               tokenizer,
               max_length,
               input_ids_with_output=True,
-              with_image_token=False):
+              with_image_token=False,
+              with_audio_token=False):
     """We only support the following three scenarios:
 
     1. Incremental pretraining dataset.
@@ -88,6 +91,19 @@ def encode_fn(example,
                 input_encode.extend(cur_chunk_encode)
                 if idx != len(chunk_encode) - 1:
                     input_encode.append(IMAGE_TOKEN_INDEX)
+        elif DEFAULT_AUDIO_TOKEN in input and with_audio_token:
+            # for adding audio token
+            chunk_encode = [
+                tokenizer.encode(chunk, add_special_tokens=False)
+                for chunk in input.split(DEFAULT_AUDIO_TOKEN)
+            ]
+
+            assert len(chunk_encode) == 2
+            input_encode = []
+            for idx, cur_chunk_encode in enumerate(chunk_encode):
+                input_encode.extend(cur_chunk_encode)
+                if idx != len(chunk_encode) - 1:
+                    input_encode.append(LLAST_AUDIO_TOKEN_INDEX)
         else:
             input_encode = tokenizer.encode(input, add_special_tokens=False)
         if next_needs_bos_token:

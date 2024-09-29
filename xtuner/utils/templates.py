@@ -44,6 +44,10 @@ PROMPT_TEMPLATE = ConfigDict(
             'nature.\n{system}\n<</SYS>>\n [/INST] '),
         INSTRUCTION='[INST] {input} [/INST]',
         SEP='\n'),
+    tinyllama_chat=dict(
+        SYSTEM='<|system|>\n{system}</s>\n',
+        INSTRUCTION='<|user|>\n{input}</s>\n<|assistant|></s>\n',
+        SEP='\n'),
     code_llama_chat=dict(
         SYSTEM='{system}\n', INSTRUCTION='[INST] {input} [/INST]'),
     chatglm2=dict(
