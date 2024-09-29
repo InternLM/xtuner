@@ -83,6 +83,9 @@ def main():
     if 'Reward' in model_name:
         use_meta_init = False
         cfg.model.llm.pop('quantization_config', None)
+    if hasattr(cfg.model.llm, 'quantization_config'):
+        # Can not build a qlora model on meta device
+        use_meta_init = False
 
     if use_meta_init:
         try:
