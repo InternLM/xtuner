@@ -2,7 +2,6 @@ import torch
 from torch.nn.utils.rnn import pad_sequence
 
 from xtuner._lite import get_logger
-from xtuner._lite.chat import ChatMessages
 from xtuner._lite.datasets import OPENAI_CONVERT_MAP
 
 logger = get_logger()

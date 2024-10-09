@@ -44,9 +44,13 @@ def _tp_internlm2(model, tp_mesh):
     tp_size = tp_mesh.size()
     for layer in model.layers:
         attention = layer.attention
-        attention.num_heads = attention.num_heads // tp_size
-        attention.num_key_value_heads = attention.num_key_value_heads // tp_size
-        attention.hidden_size = attention.hidden_size // tp_size
+        num_key_value_heads = attention.num_key_value_heads
+        num_heads = attention.num_heads
+        hidden_size = attention.hidden_size
+
+        attention.num_heads = num_heads // tp_size
+        attention.num_key_value_heads = num_key_value_heads // tp_size
+        attention.hidden_size = hidden_size // tp_size
 
         attn_norm = layer.attention_norm
         attn_norm.register_parameter(

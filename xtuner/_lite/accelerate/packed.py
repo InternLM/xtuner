@@ -1,16 +1,42 @@
 from contextlib import contextmanager
+from typing import List, Union
 
 import torch
 
-from xtuner._lite.parallel import get_sp_group, split_for_sequence_parallel
+from xtuner._lite.parallel import get_sp_mesh, split_for_sequence_parallel
+
+
+def unpack_sequence(packed: torch.Tensor,
+                    num_tokens: Union[torch.Tensor, List],
+                    dim=1):
+
+    if isinstance(num_tokens, torch.Tensor):
+        num_tokens = num_tokens.tolist()
+    sequences = torch.split(packed, num_tokens, dim=dim)
+    return sequences
+
+
+def pack_sequence(sequences, dim=1):
+    num_tokens = torch.IntTensor([seq.size(dim) for seq in sequences])
+    packed = torch.cat(sequences, dim=dim)
+    return packed, num_tokens.to(packed.device)
+
+
+def packed_cumulative_length(num_tokens: torch.Tensor):
+
+    device = num_tokens.device
+    _zero_pad = torch.zeros(1, device=device)
+    _pad_length = torch.cat([_zero_pad, num_tokens]).int()
+    return torch.cumsum(_pad_length, 0).int()
 
 
 @contextmanager
-def packed_sequence(num_tokens, enable=False, sp_size=1):
+def packed_sequence(num_tokens, enable=True, sp_size=1):
     from mmengine import MessageHub
     ctx = MessageHub.get_instance('packed_sequence')
 
     if enable:
+        num_tokens = num_tokens.cuda()
         device = num_tokens.device
         _zero_length = torch.zeros(1, device=device)
         _pad_length = torch.cat([_zero_length, num_tokens]).int()
@@ -19,10 +45,9 @@ def packed_sequence(num_tokens, enable=False, sp_size=1):
         position_ids = torch.cat(position_ids, dim=0).to(device)
         position_ids = position_ids.unsqueeze(0)
         if sp_size > 1:
-            sp_group = get_sp_group()
             # `dim` is 1 as the shape of tensor is (bs, seq_len)
             position_ids = split_for_sequence_parallel(
-                position_ids, dim=1, sp_group=sp_group)
+                position_ids, dim=1, sp_group=get_sp_mesh().get_group())
 
         # ctx.update_info('num_tokens', num_tokens)
         ctx.update_info('position_ids', position_ids)

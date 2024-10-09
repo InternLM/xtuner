@@ -1,12 +1,17 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple, Union
 
 import torch
 from einops import rearrange
 from mmengine import MessageHub
 from transformers.cache_utils import StaticCache
+from transformers.modeling_outputs import SequenceClassifierOutputWithPast
 
+from xtuner._lite import AutoTokenizer, get_logger
+from xtuner._lite.accelerate import lmdeploy_is_available
 from ._attention import SUPPORT_FLASH2, flash_attn_wo_mask, varlen_flash_attn
+
+logger = get_logger()
 
 
 class InternLM2RotaryEmbedding(torch.nn.Module):
@@ -65,6 +70,7 @@ def rotate_half(x):
 def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
     cos = cos.unsqueeze(unsqueeze_dim)
     sin = sin.unsqueeze(unsqueeze_dim)
+
     q_embed = (q * cos) + (rotate_half(q) * sin)
     k_embed = (k * cos) + (rotate_half(k) * sin)
     return q_embed, k_embed
@@ -219,6 +225,241 @@ def _internlm2_varlen_attn_forward(
     return attn_output, None, past_key_value
 
 
+def _contiguous_batching_forward_impl(
+    self,
+    hidden_states: torch.Tensor,
+    position_ids: Optional[torch.LongTensor] = None,
+    past_key_value: Optional[Tuple[torch.Tensor]] = None,
+) -> Tuple[torch.Tensor, Optional[torch.Tensor],
+           Optional[Tuple[torch.Tensor]]]:
+    """Rewrite implementation of LlamaAttention.forward.
+
+    Add continuous batching support. Add paged attention support. TP support.
+    """
+    from lmdeploy.pytorch.kernels import \
+        apply_rotary_pos_emb as apply_rotary_pos_emb_lmdeploy
+    from lmdeploy.pytorch.kernels import fill_kv_cache, paged_attention_fwd
+    attn_ctx = MessageHub.get_instance('paged_attention')
+    kv_seq_length = attn_ctx.get_info('kv_seq_length')
+    q_seq_length = attn_ctx.get_info('q_seq_length')
+    q_start_loc = attn_ctx.get_info('q_start_loc')
+    block_offsets = attn_ctx.get_info('block_offsets')
+    max_q_seq_length = attn_ctx.get_info('max_q_seq_length')
+    max_kv_seq_length = attn_ctx.get_info('max_kv_seq_length')
+    position_ids = attn_ctx.get_info('position_ids')
+
+    # position_ids
+    def __qkv_proj(hidden_states):
+        """qkv_proj."""
+        # from torch.distributed import get_rank
+        # if get_rank() == 0:
+        #     breakpoint()
+        # else:
+        #     import time
+        #     time.sleep(10000)
+        qkv_states = self.wqkv(hidden_states[0]).unsqueeze(0)
+
+        qkv_states = rearrange(
+            qkv_states,
+            'b q (h gs d) -> (b q) h gs d',
+            gs=2 + self.num_key_value_groups,
+            d=self.head_dim,
+        )
+        query_states = qkv_states[..., :self.num_key_value_groups, :]
+        query_states = query_states.flatten(1, 2)
+        key_states = qkv_states[..., -2, :]
+        value_states = qkv_states[..., -1, :]
+        return query_states, key_states, value_states
+
+    from lmdeploy.pytorch.kernels import \
+        apply_rotary_pos_emb as apply_rotary_pos_emb_lmdeploy
+
+    def __rotary_emb_fn(query_states, key_states, value_states):
+        """rotary embedding func."""
+        # breakpoint()
+        # query_states = query_states.unsqueeze(0).transpose(1, 2)
+        # key_states = key_states.unsqueeze(0).transpose(1, 2)
+        # value_states = value_states.unsqueeze(0).transpose(1, 2)
+        if self.layer_idx == 0:
+
+            cos, sin = self.rotary_emb(value_states, position_ids)
+            attn_ctx.update_info('rotary_cos_sin', (cos, sin))
+        else:
+            cos, sin = attn_ctx.get_info('rotary_cos_sin')
+
+        # query_states, key_states = apply_rotary_pos_emb(query_states, key_states,
+        #                                         cos, sin)
+        # query_states = query_states.transpose(1, 2).squeeze(0)
+        # key_states = key_states.transpose(1, 2).squeeze(0)
+        # value_states = value_states.transpose(1, 2).squeeze(0)
+        query_states, key_states = apply_rotary_pos_emb_lmdeploy(
+            query_states,
+            key_states,
+            cos,
+            sin,
+            q_embed=query_states,
+            k_embed=key_states)
+
+        return query_states, key_states, value_states
+
+    query_states, key_states, value_states = __qkv_proj(hidden_states)
+
+    query_states, key_states, value_states = __rotary_emb_fn(
+        query_states, key_states, value_states)
+
+    fill_kv_cache(
+        key_states,
+        value_states,
+        past_key_value[self.layer_idx][0],
+        past_key_value[self.layer_idx][1],
+        q_start_loc,
+        q_seq_length,
+        kv_seq_length=kv_seq_length,
+        max_q_seq_length=max_q_seq_length,
+        block_offsets=block_offsets,
+    )
+
+    attn_output = query_states
+    paged_attention_fwd(
+        query_states,
+        past_key_value[self.layer_idx][0],
+        past_key_value[self.layer_idx][1],
+        attn_output,
+        block_offsets,
+        q_start_loc=q_start_loc,
+        q_seqlens=q_seq_length,
+        kv_seqlens=kv_seq_length,
+        max_seqlen=max_q_seq_length,
+        # max_kv_seq_length=max_kv_seq_length,
+    )
+    attn_output = attn_output.reshape(*hidden_states.shape[:-1], -1)
+
+    attn_output = self.wo(attn_output)
+
+    return attn_output, None, past_key_value
+
+
+def _flash_att_infer(
+    self,
+    hidden_states: torch.Tensor,
+    position_ids: Optional[torch.LongTensor] = None,
+    past_key_value: Optional[Tuple[torch.Tensor]] = None,
+) -> Tuple[torch.Tensor, Optional[torch.Tensor],
+           Optional[Tuple[torch.Tensor]]]:
+    """Rewrite implementation of LlamaAttention.forward.
+
+    Add continuous batching support. Add paged attention support. TP support.
+    """
+    from lmdeploy.pytorch.kernels import \
+        apply_rotary_pos_emb as apply_rotary_pos_emb_lmdeploy
+    from lmdeploy.pytorch.kernels import fill_kv_cache, paged_attention_fwd
+    attn_ctx = MessageHub.get_instance('paged_attention')
+    kv_seq_length = attn_ctx.get_info('kv_seq_length')
+    q_seq_length = attn_ctx.get_info('q_seq_length')
+    q_start_loc = attn_ctx.get_info('q_start_loc')
+    block_offsets = attn_ctx.get_info('block_offsets')
+    max_q_seq_length = attn_ctx.get_info('max_q_seq_length')
+    max_kv_seq_length = attn_ctx.get_info('max_kv_seq_length')
+    cumulative_length = attn_ctx.get_info('cumulative_length')
+    is_prefilling = attn_ctx.get_info('is_prefilling')
+
+    qkv_states = self.wqkv(hidden_states)
+
+    qkv_states = rearrange(
+        qkv_states,
+        'b q (h gs d) -> (b q) h gs d',
+        gs=2 + self.num_key_value_groups,
+        d=self.head_dim,
+    )
+    query_states = qkv_states[..., :self.num_key_value_groups, :]
+    query_states = query_states.flatten(1, 2)
+    key_states = qkv_states[..., -2, :]
+    value_states = qkv_states[..., -1, :]
+
+
+    from lmdeploy.pytorch.kernels import \
+        apply_rotary_pos_emb as apply_rotary_pos_emb_lmdeploy
+
+    if self.layer_idx == 0:
+
+        cos, sin = self.rotary_emb(value_states, position_ids)
+        attn_ctx.update_info('rotary_cos_sin', (cos, sin))
+    else:
+        cos, sin = attn_ctx.get_info('rotary_cos_sin')
+
+    # query_states, key_states = apply_rotary_pos_emb(query_states, key_states,
+    #                                         cos, sin)
+    # query_states = query_states.transpose(1, 2).squeeze(0)
+    # key_states = key_states.transpose(1, 2).squeeze(0)
+    # value_states = value_states.transpose(1, 2).squeeze(0)
+    query_states, key_states = apply_rotary_pos_emb_lmdeploy(
+        query_states,
+        key_states,
+        cos,
+        sin,
+        q_embed=query_states,
+        k_embed=key_states)
+
+    fill_kv_cache(
+        key_states,
+        value_states,
+        past_key_value[self.layer_idx][0],
+        past_key_value[self.layer_idx][1],
+        q_start_loc,
+        q_seq_length,
+        kv_seq_length=kv_seq_length,
+        max_q_seq_length=max_q_seq_length,
+        block_offsets=block_offsets,
+    )
+
+    # attn_output = query_states
+
+    from flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
+    if is_prefilling:
+        # breakpoint()
+        key_states = repeat_kv_bshd(
+            key_states.unsqueeze(0), self.num_key_value_groups).squeeze(0)
+        value_states = repeat_kv_bshd(
+            value_states.unsqueeze(0), self.num_key_value_groups).squeeze(0)
+        attn_output = flash_attn_varlen_func(
+            query_states,
+            key_states,
+            value_states,
+            cumulative_length,
+            cumulative_length,
+            max_q_seq_length,
+            max_kv_seq_length,
+            causal=True)
+        # attn_output = varlen_flash_attn(query_states, key_states, value_states,
+        #                             cumulative_length, max_q_seq_length)
+    else:
+        query_states = query_states.unsqueeze(1)
+        attn_output = flash_attn_with_kvcache(
+            query_states,
+            past_key_value[self.layer_idx][0],
+            past_key_value[self.layer_idx][1],
+            cache_seqlens=kv_seq_length,
+            block_table=block_offsets,
+            causal=True)
+        attn_output = attn_output.squeeze(1)
+    # paged_attention_fwd(
+    #     query_states,
+    #     past_key_value[self.layer_idx][0],
+    #     past_key_value[self.layer_idx][1],
+    #     attn_output,
+    #     block_offsets,
+    #     q_start_loc=q_start_loc,
+    #     q_seqlens=q_seq_length,
+    #     kv_seqlens=kv_seq_length,
+    #     max_seqlen=max_q_seq_length,
+    # )
+    attn_output = attn_output.reshape(*hidden_states.shape[:-1], -1)
+
+    attn_output = self.wo(attn_output)
+
+    return attn_output, None, past_key_value
+
+
 def internlm2_varlen_attn_forward(
     self,
     hidden_states: torch.Tensor,
@@ -231,6 +472,72 @@ def internlm2_varlen_attn_forward(
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor],
            Optional[Tuple[torch.Tensor]]]:
 
-    return _internlm2_varlen_attn_forward(self, hidden_states, attention_mask,
-                                          position_ids, past_key_value,
-                                          output_attentions, use_cache)
+    lmdeploy_ctx = MessageHub.get_instance('paged_attention')
+
+    if lmdeploy_is_available() and len(lmdeploy_ctx.runtime_info) > 0:
+
+        # return _contiguous_batching_forward_impl(
+        #     self, hidden_states, position_ids, past_key_value)
+        return _flash_att_infer(self, hidden_states, position_ids,
+                                past_key_value)
+    else:
+        return _internlm2_varlen_attn_forward(self, hidden_states,
+                                              attention_mask, position_ids,
+                                              past_key_value,
+                                              output_attentions, use_cache)
+
+
+def internlm2_reward_forward(
+    self,
+    input_ids: torch.LongTensor = None,
+    attention_mask: Optional[torch.Tensor] = None,
+    position_ids: Optional[torch.LongTensor] = None,
+    past_key_values: Optional[List[torch.FloatTensor]] = None,
+    inputs_embeds: Optional[torch.FloatTensor] = None,
+    labels: Optional[torch.LongTensor] = None,
+    use_cache: Optional[bool] = None,
+    output_attentions: Optional[bool] = None,
+    output_hidden_states: Optional[bool] = None,
+    return_dict: Optional[bool] = None,
+) -> Union[Tuple, SequenceClassifierOutputWithPast]:
+    """labels (`torch.LongTensor` of shape `(batch_size,)`, *optional*): Labels
+    for computing the sequence classification/regression loss.
+
+    Returns:
+    """
+    output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+    output_hidden_states = (
+        output_hidden_states if output_hidden_states is not None else
+        self.config.output_hidden_states)
+    return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+    # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
+    outputs = self.model(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        position_ids=position_ids,
+        past_key_values=past_key_values,
+        inputs_embeds=inputs_embeds,
+        use_cache=use_cache,
+        output_attentions=output_attentions,
+        output_hidden_states=output_hidden_states,
+        return_dict=return_dict,
+    )
+
+    hidden_states = outputs[0]
+
+    reward_scores = self.v_head(hidden_states).squeeze(-1)
+
+    loss = None
+
+    # if not return_dict:
+    #     ssoutput = (reward_scores,) + outputs[1:]
+    #     return (loss,) + output if loss is not None else output
+
+    return SequenceClassifierOutputWithPast(
+        loss=loss,
+        logits=reward_scores,
+        past_key_values=outputs.past_key_values,
+        hidden_states=outputs.hidden_states,
+        attentions=outputs.attentions,
+    )

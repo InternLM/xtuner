@@ -17,6 +17,13 @@ def dispatch_internlm_varlen_attn_forward(module):
     return internlm2_varlen_attn_forward.__name__
 
 
+def dispatch_internlm_reward_forward(module):
+    assert module.__class__.__name__ == 'InternLM2ForRewardModel'
+    from .internlm2 import internlm2_reward_forward
+    _dispatch_forward_fn(module, internlm2_reward_forward)
+    return internlm2_reward_forward.__name__
+
+
 def dispatch_clip_attn_forward(module):
     assert module.__class__.__name__ == 'CLIPAttention'
     from .clip import clip_flash_attn_forward
@@ -33,17 +40,19 @@ def dispatch_rms_norm_forward(module):
 DISPATCH_MAP = {
     'InternLM2FlashAttention2': dispatch_internlm_varlen_attn_forward,
     'CLIPAttention': dispatch_clip_attn_forward,
-    'InternLM2RMSNorm': dispatch_rms_norm_forward
+    'InternLM2ForRewardModel': dispatch_internlm_reward_forward,
+    # 'InternLM2RMSNorm': dispatch_rms_norm_forward
 }
 
 
-def dispatch_modules(model, use_varlen_attn=False):
+def dispatch_modules(model):
     from xtuner._lite import get_logger
     logger = get_logger()
 
     for name, module in model.named_modules():
-        module_cls = module.__class__.__name__
-        if module_cls in DISPATCH_MAP:
-            dispatched = DISPATCH_MAP[module_cls](module)
-            logger.info(
-                f'Dispatch {name}({module_cls}) forward to `{dispatched}`')
+        cls_name = module.__class__.__name__
+        if cls_name in DISPATCH_MAP:
+            dispatched = DISPATCH_MAP[cls_name](module)
+            # breakpoint()
+            logger.debug(
+                f'Dispatch {name}({cls_name}) forward to `{dispatched}`')

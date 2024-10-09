@@ -9,6 +9,7 @@ except ImportError:
     except ImportError:
         import flash_attn
         raise ImportError(f'flash_attn version {flash_attn.__version__}')
+from xtuner._lite.accelerate import lmdeploy_is_available
 
 
 def rms_norm_forward(self, hidden_states):
@@ -21,6 +22,12 @@ def rms_norm_forward(self, hidden_states):
         raise RuntimeError(
             'Can not use triton kernels on cpu. Please set `USE_TRITON_KERNEL`'
             ' environment variable to 0 before training.')
-    ret = rms_norm_fn(
-        hidden_states, self.weight, None, eps=self.variance_epsilon)
+
+    if lmdeploy_is_available() and not self.training:
+        from lmdeploy.pytorch.kernels import rms_norm
+        ret = rms_norm(hidden_states, self.weight, eps=self.variance_epsilon)
+    else:
+        ret = rms_norm_fn(
+            hidden_states, self.weight, None, eps=self.variance_epsilon)
+
     return ret
