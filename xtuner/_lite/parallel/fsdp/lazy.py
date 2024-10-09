@@ -1,7 +1,8 @@
 import torch
 import torch.distributed as dist
 from torch.distributed._tensor import DTensor, distribute_tensor
-
+from xtuner._lite import get_logger
+logger = get_logger()
 
 @torch.no_grad
 def dp_lazy_init(module, module_map, dp_mesh):
@@ -61,82 +62,64 @@ def dp_sp_lazy_init(module, module_map, dp_mesh, sp_mesh):
 
 
 @torch.no_grad
-def dp_tp_lazy_init(module, module_map, dp_mesh, tp_mesh):
+def lazy_init_megatron(module, rank0_map, dp_mesh, tp_mesh=None, pp_mesh=None):
     device = torch.cuda.current_device()
-    module.to_empty(device=torch.cuda.current_device(), recurse=False)
-
-    if dp_mesh.get_local_rank() != 0:
-        return
-
-    if tp_mesh.get_local_rank() == 0:
-        master_module = module_map[module]
-        master_params = {
+    
+    if dp_mesh.get_rank() == 0 :
+        rank0_module = rank0_map[module]
+        rank0_params = {
             name: param
-            for name, param in master_module.named_parameters(recurse=False)
+            for name, param in rank0_module.named_parameters(recurse=False)
         }
-        master_buffers = {
+        rank0_buffers = {
             name: buffer
-            for name, buffer in master_module.named_buffers(recurse=False)
+            for name, buffer in rank0_module.named_buffers(recurse=False)
         }
     else:
-        master_params = None
-        master_buffers = None
+        rank0_params = None
+        rank0_buffers = None 
 
+
+    param_shapes = {
+        name : param.full_tensor().shape if isinstance(param, DTensor) else param.shape
+        for name, param in module.named_parameters(recurse=False)
+    }
+
+        
+    
+    module.to_empty(device=torch.cuda.current_device(), recurse=False)
+        
     for name, param in module.named_parameters(recurse=False):
+        dtype = param.dtype
+        if dp_mesh.get_rank() == 0:
+            rank0_param = rank0_params[name].to(device).to(dtype)
+        else:
+            full_shape = param_shapes[name]
+            rank0_param = torch.zeros(full_shape, dtype=dtype, device=device)
+        
+        dist.broadcast(rank0_param, src=0)
+
         if isinstance(param, DTensor):
-
-            p_full = param.full_tensor()
-            if tp_mesh.get_local_rank() == 0:
-                p_copy = master_params[name]
-                p_copy = p_copy.to(device).to(param.dtype)
-            else:
-                p_copy = torch.empty_like(p_full)
-
             mesh = param.device_mesh
+            assert mesh == tp_mesh
             placements = param.placements
-
-            p_dtensor = distribute_tensor(p_copy, mesh, placements)
-            param.data.copy_(p_dtensor)
-
-        else:
-            if tp_mesh.get_local_rank() == 0:
-                p_copy = master_params[name]
-                p_copy = p_copy.to(device).to(param.dtype)
-            else:
-                p_copy = torch.empty_like(param)
-
-            tp_group = tp_mesh.get_group()
-            dist.broadcast(p_copy, 0, tp_group)
-            param.data.copy_(p_copy)
-
+            rank0_param = distribute_tensor(rank0_param, mesh, placements)
+    
+        param.data.copy_(rank0_param)
+        dist.barrier()
+       
+    # TP does not shard buffers
     for name, buffer in module.named_buffers(recurse=False):
-
-        if isinstance(buffer, DTensor):
-
-            b_full = buffer.full_tensor()
-            if tp_mesh.get_local_rank() == 0:
-                b_copy = master_buffers[name]
-                b_copy = b_copy.to(device).to(buffer.dtype)
-            else:
-                b_copy = torch.empty_like(b_full)
-
-            mesh = buffer.device_mesh
-            placements = buffer.placements
-
-            b_dtensor = distribute_tensor(b_copy, mesh, placements)
-            buffer.data.copy_(b_dtensor)
-
+        if dp_mesh.get_rank()==0:
+            rank0_buffer = rank0_buffers[name].to(device)
         else:
-            if tp_mesh.get_local_rank() == 0:
-                b_copy = master_buffers[name]
-                b_copy = b_copy.to(device).to(buffer.dtype)
-            else:
-                b_copy = torch.empty_like(buffer)
+            rank0_buffer = torch.empty_like(buffer).to(device)
+        
+        dist.broadcast(rank0_buffer, src=0)
+        buffer.data.copy_(rank0_buffer)
 
-            tp_group = tp_mesh.get_group()
-            dist.broadcast(b_copy, 0, tp_group)
-            buffer.data.copy_(b_copy)
 
+        
 
 class LoadWoInit:
     """Context manager that disable parameter initialization."""
