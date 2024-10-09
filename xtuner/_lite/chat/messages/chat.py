@@ -183,7 +183,6 @@ class ChatMessages(BaseMessages):
         }
         '''
         return cls(**item)
-        
 
 
 if __name__ == '__main__':
