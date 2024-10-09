@@ -1,15 +1,12 @@
-
-
 import torch
-
 from torch.nn.utils.rnn import pad_sequence
 
 from xtuner._lite import get_logger
 from xtuner._lite.chat import ChatMessages
 from xtuner._lite.datasets import OPENAI_CONVERT_MAP
 
-
 logger = get_logger()
+
 
 class SftTokenizeFunction():
 
@@ -35,7 +32,7 @@ class SftCollator():
         self.ignore_id = ignore_id
 
     def __call__(self, instances):
-        
+
         _instances = []
         for ins in instances:
             if isinstance(ins, list):
@@ -48,9 +45,9 @@ class SftCollator():
         input_ids = []
         labels = []
         num_tokens = []
-        
+
         for data in instances:
-            
+
             input_ids.append(torch.LongTensor(data['input_ids']))
             labels.append(torch.LongTensor(data['labels']))
 

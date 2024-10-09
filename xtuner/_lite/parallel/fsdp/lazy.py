@@ -1,8 +1,11 @@
 import torch
 import torch.distributed as dist
 from torch.distributed._tensor import DTensor, distribute_tensor
+
 from xtuner._lite import get_logger
+
 logger = get_logger()
+
 
 @torch.no_grad
 def dp_lazy_init(module, module_map, dp_mesh):
@@ -64,8 +67,8 @@ def dp_sp_lazy_init(module, module_map, dp_mesh, sp_mesh):
 @torch.no_grad
 def lazy_init_megatron(module, rank0_map, dp_mesh, tp_mesh=None, pp_mesh=None):
     device = torch.cuda.current_device()
-    
-    if dp_mesh.get_rank() == 0 :
+
+    if dp_mesh.get_rank() == 0:
         rank0_module = rank0_map[module]
         rank0_params = {
             name: param
@@ -77,18 +80,16 @@ def lazy_init_megatron(module, rank0_map, dp_mesh, tp_mesh=None, pp_mesh=None):
         }
     else:
         rank0_params = None
-        rank0_buffers = None 
-
+        rank0_buffers = None
 
     param_shapes = {
-        name : param.full_tensor().shape if isinstance(param, DTensor) else param.shape
+        name: param.full_tensor().shape
+        if isinstance(param, DTensor) else param.shape
         for name, param in module.named_parameters(recurse=False)
     }
 
-        
-    
     module.to_empty(device=torch.cuda.current_device(), recurse=False)
-        
+
     for name, param in module.named_parameters(recurse=False):
         dtype = param.dtype
         if dp_mesh.get_rank() == 0:
@@ -96,7 +97,7 @@ def lazy_init_megatron(module, rank0_map, dp_mesh, tp_mesh=None, pp_mesh=None):
         else:
             full_shape = param_shapes[name]
             rank0_param = torch.zeros(full_shape, dtype=dtype, device=device)
-        
+
         dist.broadcast(rank0_param, src=0)
 
         if isinstance(param, DTensor):
@@ -104,22 +105,20 @@ def lazy_init_megatron(module, rank0_map, dp_mesh, tp_mesh=None, pp_mesh=None):
             assert mesh == tp_mesh
             placements = param.placements
             rank0_param = distribute_tensor(rank0_param, mesh, placements)
-    
+
         param.data.copy_(rank0_param)
         dist.barrier()
-       
+
     # TP does not shard buffers
     for name, buffer in module.named_buffers(recurse=False):
-        if dp_mesh.get_rank()==0:
+        if dp_mesh.get_rank() == 0:
             rank0_buffer = rank0_buffers[name].to(device)
         else:
             rank0_buffer = torch.empty_like(buffer).to(device)
-        
+
         dist.broadcast(rank0_buffer, src=0)
         buffer.data.copy_(rank0_buffer)
 
-
-        
 
 class LoadWoInit:
     """Context manager that disable parameter initialization."""

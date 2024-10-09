@@ -1,4 +1,5 @@
 import re
+
 from xtuner._lite.chat import ChatMessages
 
 
@@ -62,7 +63,7 @@ class XTunerFormat2Openai():
                 })
         return ChatMessages.from_dict({'messages': messages})
 
-        
+
 class Alpaca2Openai():
 
     @classmethod
@@ -107,7 +108,6 @@ class Alpaca2Openai():
                     },
                 ]
             })
-
 
 
 def llava_to_openai(data):

@@ -1,16 +1,19 @@
+import random
+
+import numpy as np
+import torch
 from datasets import Dataset, concatenate_datasets
 from torch.utils.data import ConcatDataset
-import numpy as np
-import random
-import torch
-from datasets import Dataset
+
 
 class SoftPackDataset(torch.utils.data.Dataset):
 
     def __init__(self, datasets, target=2048, blend=False, sort=False):
 
         if blend:
-            num_tokens = [np.concatenate([dset.num_tokens for dset in datasets])]
+            num_tokens = [
+                np.concatenate([dset.num_tokens for dset in datasets])
+            ]
             datasets = [ConcatDataset(datasets)]
         else:
             num_tokens = [dset.num_tokens for dset in datasets]
@@ -55,9 +58,10 @@ class SoftPackDataset(torch.utils.data.Dataset):
         if len(item_buffer) > 0:
             info = {
                 'dataset_id': dataset_id,
-                'indices': item_buffer, 
-                'max_length': max_length_one_pack}
-            
+                'indices': item_buffer,
+                'max_length': max_length_one_pack
+            }
+
             pack_infos.append(info)
 
         pack_infos = Dataset.from_list(pack_infos)
@@ -66,7 +70,7 @@ class SoftPackDataset(torch.utils.data.Dataset):
 
     def __len__(self):
         return len(self.pack_infos)
-    
+
     def __getitem__(self, item):
         indices = self.pack_infos[item]['indices']
         dataset_id = self.pack_infos[item]['dataset_id']

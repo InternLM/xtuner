@@ -1,26 +1,21 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-import functools
 import json
 import math
 import os
 import random
 import re
-from concurrent.futures import ThreadPoolExecutor
-from datetime import timedelta
 
-from datasets import Dataset, concatenate_datasets
 from torch import distributed as dist
 from tqdm import tqdm
 
 from xtuner._lite import get_logger
-from xtuner._lite.parallel import all_to_all_list
-from ..jsonl import JsonlDataset
 from ..json import JsonDataset
+from ..jsonl import JsonlDataset
 
 logger = get_logger()
 
-
 DATASET_CLS_MAP = {'.jsonl': JsonlDataset, '.json': JsonDataset}
+
 
 def load_hf_dataset(path,
                     split='train',
@@ -31,7 +26,7 @@ def load_hf_dataset(path,
     dataset = load_dataset(path)[split]
 
     if map_fn:
-        dataset = dataset.map(map_fn, num_proc=num_proc)
+        dataset = dataset.map(map_fn, num_proc=8)
 
     if sample_ratio != 1:
         ori_samples = len(dataset)
@@ -126,7 +121,7 @@ def load_local_datasets(paths,
     files = []
     file_sample_ratios = []
     file_map_fns = []
-    
+
     for pid, path in enumerate(paths):
         if os.path.isdir(path):
             dir_files = []
@@ -151,24 +146,24 @@ def load_local_datasets(paths,
             files.extend(dir_files)
             file_sample_ratios.extend([sample_ratios[pid]] * _num_dir_files)
             file_map_fns.extend([map_fns[pid]] * _num_dir_files)
-            
+
         elif os.path.isfile(path):
             files.append(path)
             file_sample_ratios.append(sample_ratios[pid])
             file_map_fns.append(map_fns[pid])
-            
+
         else:
             raise RuntimeError(f'`{path}` not found.')
 
     num_files = len(files)
-    
+
     datasets = []
     for i in range(num_files):
         _path = files[i]
         _ratio = file_sample_ratios[i]
         _map_fn = file_map_fns[i]
         _suffix = os.path.splitext(_path)[-1]
-        
+
         dataset_cls = DATASET_CLS_MAP[_suffix]
         _dataset = dataset_cls(_path, _ratio, _map_fn, cache_dir)
         datasets.append(_dataset)
@@ -225,7 +220,6 @@ def load_datasets(paths,
             raise RuntimeError(f'There are {num_paths} paths, but only'
                                f'{len(map_fns)} map fns were set.')
 
-    
     local_inds = [i for i, src in enumerate(sources) if src == 'local']
     local_paths = [paths[ind] for ind in local_inds]
     local_map_fns = [map_fns[ind] for ind in local_inds]
@@ -240,7 +234,7 @@ def load_datasets(paths,
     if len(local_inds):
         local_datasets = load_local_datasets(local_paths, file_types,
                                              file_pattern, cache_dir,
-                                             local_sample_ratios, 
+                                             local_sample_ratios,
                                              local_map_fns)
         datasets.extend(local_datasets)
 
