@@ -5,4 +5,8 @@ from .lora import LORA_TARGET_MAP
 from .packed import pack_sequence, packed_sequence, unpack_sequence
 from .utils import lmdeploy_is_available, profile_time_and_memory
 
-__all__ = ['dispatch_modules', 'LORA_TARGET_MAP', 'packed_sequence']
+__all__ = [
+    'dispatch_modules', 'contiguous_batching_generate', 'LoadWoInit',
+    'LORA_TARGET_MAP', 'pack_sequence', 'packed_sequence', 'unpack_sequence',
+    'lmdeploy_is_available', 'profile_time_and_memory'
+]

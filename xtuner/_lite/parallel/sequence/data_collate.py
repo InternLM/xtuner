@@ -1,16 +1,16 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import torch
 
-from ..setup import get_sp_world_size
+from ..setup import get_sp_mesh
 
 
 def pad_for_sequence_parallel(tensor, padding_value, dim=-1):
     length = tensor.shape[dim]
-    seq_parallel_world_size = get_sp_world_size()
-    if length % seq_parallel_world_size == 0:
+    sp_size = get_sp_mesh().size()
+    if length % sp_size == 0:
         return tensor
 
-    pad_num = seq_parallel_world_size - (length % seq_parallel_world_size)
+    pad_num = sp_size - (length % sp_size)
     pad_shape = (*tensor.shape[:dim], pad_num,
                  *tensor.shape[dim + 1:]) if dim != -1 else (
                      *tensor.shape[:dim], pad_num)
@@ -26,12 +26,12 @@ def pad_for_sequence_parallel(tensor, padding_value, dim=-1):
 def pad_cumulative_len_for_sequence_parallel(cumulative_len):
     assert len(cumulative_len) == 1
     seqlen = cumulative_len[0][-1]
-    seq_parallel_world_size = get_sp_world_size()
-    if seqlen % seq_parallel_world_size == 0:
+    sp_size = get_sp_mesh().size()
+    if seqlen % sp_size == 0:
         return cumulative_len, None
 
     bs = len(cumulative_len)
-    pad_len = seq_parallel_world_size - (seqlen % seq_parallel_world_size)
+    pad_len = sp_size - (seqlen % sp_size)
     seqlen_new = seqlen + pad_len
     attention_mask = torch.zeros(
         bs, seqlen_new, dtype=torch.bool, device=cumulative_len[0].device)
