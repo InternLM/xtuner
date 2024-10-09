@@ -1,6 +1,68 @@
 import re
+from xtuner._lite.chat import ChatMessages
 
 
+class XTunerFormat2Openai():
+
+    @classmethod
+    def source_format(cls):
+        data = {
+            'conversation': [{
+                'system': 'SYSTEM',
+                'input': 'INPUT',
+                'output': 'OUTPUT'
+            }, {
+                'input': 'INPUT',
+                'output': 'OUTPUT'
+            }]
+        }
+        return data
+
+    @classmethod
+    def target_format(cls):
+        data = {
+            'messages': [
+                {
+                    'role': 'system',
+                    'content': 'SYSTEM'
+                },
+                {
+                    'role': 'user',
+                    'content': 'INPUT'
+                },
+                {
+                    'role': 'assistant',
+                    'content': 'OUTPUT'
+                },
+                {
+                    'role': 'user',
+                    'content': 'INPUT'
+                },
+                {
+                    'role': 'assistant',
+                    'content': 'OUTPUT'
+                },
+            ]
+        }
+        return data
+
+    @staticmethod
+    def convert(data):
+        ROLE_MAPPING = {
+            'system': 'system',
+            'input': 'user',
+            'output': 'assistant'
+        }
+        messages = []
+        for single_turn_conversation in data['conversation']:
+            for role, content in single_turn_conversation.items():
+                messages.append({
+                    'role': ROLE_MAPPING[role],
+                    'content': content
+                })
+        return ChatMessages.from_dict({'messages': messages})
+
+        
 class Alpaca2Openai():
 
     @classmethod
@@ -31,9 +93,9 @@ class Alpaca2Openai():
     @staticmethod
     def convert(data):
         if data.get('output') == '<nooutput>':
-            return {'messages': []}
+            return ChatMessages.from_dict({'messages': []})
         else:
-            return {
+            return ChatMessages.from_dict({
                 'messages': [
                     {
                         'role': 'user',
@@ -44,7 +106,8 @@ class Alpaca2Openai():
                         'content': f"{data['output']}"
                     },
                 ]
-            }
+            })
+
 
 
 def llava_to_openai(data):
@@ -95,7 +158,7 @@ def llava_to_openai(data):
         else:
             raise NotImplementedError
 
-    return {'messages': messages}
+    return ChatMessages.from_dict({'messages': messages})
 
 
 def llava_to_openai_interleave(data):
@@ -145,12 +208,13 @@ def llava_to_openai_interleave(data):
         else:
             raise NotImplementedError
 
-    return {'messages': messages}
+    return ChatMessages.from_dict({'messages': messages})
 
 
-OPENAI_FORMAT_MAP = {
+OPENAI_CONVERT_MAP = {
     'llava': llava_to_openai,
     'llava_interleave': llava_to_openai_interleave,
     'alpaca': Alpaca2Openai.convert,
-    'openai': lambda x: x,
+    'xtuner': XTunerFormat2Openai.convert,
+    'openai': lambda x: ChatMessages.from_dict({'messages': x}),
 }

@@ -1,0 +1,171 @@
+
+import os
+import random
+
+import torch
+
+from torch import distributed as dist
+
+from concurrent.futures import ThreadPoolExecutor
+from xtuner._lite import get_logger
+
+
+from tqdm import tqdm
+import hashlib
+import inspect
+import json
+import math
+
+import numpy as np
+
+def calculate_jsonl_sha256(path):
+    with open(path, 'rb') as f:
+        file_hash = hashlib.sha256()
+        while chunk := f.read(8192):
+            file_hash.update(chunk)
+    return file_hash.hexdigest()
+
+def calculate_tokenize_fn_sha256(tokenize_fn):
+    """Calculate SHA-256 hash for an instance method's source code."""
+    # Get the source code of the method
+    fn_source = inspect.getsource(tokenize_fn.__call__)
+    return hashlib.sha256(fn_source.encode('utf-8')).hexdigest()
+
+
+class JsonlDataset(torch.utils.data.Dataset):
+
+    def __init__(self, path, sample_ratio=1.0, tokenize_fn=None,  cache_dir=None):
+        super().__init__()
+        
+        assert sample_ratio <= 1
+        self.tokenize_fn = tokenize_fn
+        self.path = path
+
+        if cache_dir:
+            file_hash = calculate_jsonl_sha256(path)
+            file_cache_dir = os.path.join(cache_dir, file_hash)
+            
+            if file_hash in os.listdir(cache_dir):
+                offsets_path = os.path.join(file_cache_dir, 'offsets.npy')
+                offsets = load_from_disk(offsets_path)
+            else:
+                os.mkdir(file_cache_dir)
+                offsets = self.count_offsets(file_cache_dir)
+
+            if self.tokenize_fn:
+                tok_hash = calculate_tokenize_fn_sha256(tokenize_fn)
+                tok_cache_dir = os.path.join(file_cache_dir, tok_hash)
+                if tok_hash in os.listdir(file_cache_dir):
+                    num_tokens = load_from_disk(tok_cache_dir)
+                else:
+                    os.mkdir(tok_cache_dir)
+                    num_tokens = self.count_tokens(tok_cache_dir)
+            else:
+                num_tokens = None
+
+            offsets = offsets
+            num_tokens = num_tokens
+
+        else:
+            offsets = self.count_offsets()
+            num_tokens = None
+
+        num_samples = int(len(offsets) * sample_ratio)
+        sampled = random.sample([i for i in range(len(offsets))], num_samples)
+        
+        self.offsets = offsets[sampled]
+        if num_tokens:
+            num_tokens = num_tokens[sampled]
+        
+        self.num_tokens = num_tokens
+
+    def count_offsets(self, cache_dir=None):
+        offsets = []
+        with open(self.path) as f:
+            offsets.append(f.tell())
+            line = f.readline()
+            while line:
+                offsets.append(f.tell())
+                line = f.readline()
+
+        offsets = np.array(offsets)
+        
+        if dist.get_rank() == 0 and cache_dir:
+            save_path = os.path.join(cache_dir, 'offsets.npy')
+            np.save(save_path, offsets)
+            
+        return offsets
+
+    def count_tokens(self, cache_dir=None):
+
+        dataset = []
+        with open(self.path) as f:
+            for line in f:
+                dataset.append(json.loads(line))
+        
+        num_samples = len(dataset)
+
+        if dist.is_available():
+            world_size = dist.get_world_size()
+            rank = dist.get_rank()
+        else:
+            world_size = 1
+            rank = 0
+
+        num_per_rank = math.ceil(num_samples / world_size)
+
+        start = rank*num_per_rank
+        end = (rank+1)*num_per_rank
+        dataset_shard = dataset[start : end]
+
+        desc = f'[Rank {rank}] {self.path}'
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            tokenized = list(
+                tqdm(
+                    executor.map(self.tokenize_fn, dataset_shard),
+                    desc=desc,
+                    total=len(dataset)))
+
+
+        _num_tokens = [data['num_tokens'] for data in tokenized]
+        _num_tokens = np.array(_num_tokens)
+
+        if dist.is_available():
+            num_tokens = [None] * world_size
+            dist.all_gather_object(num_tokens, _num_tokens)
+            num_tokens = np.concatenate(num_tokens,axis=0)
+        else:
+            num_tokens = _num_tokens
+
+        if rank == 0 and cache_dir:
+            save_path = os.path.join(cache_dir, 'num_tokens.npy')
+            np.save(save_path, num_tokens)
+
+        return num_tokens
+
+
+    def __len__(self):
+        return len(self.offsets)
+
+    def __getitem__(self, item):
+        """Returns a dict containing packed data in the given item.
+
+        Args:
+            item: An index to retrieve packed data.
+
+        Returns:
+            A dict including packed input_ids, labels, and cumulative_len.
+        """
+        with open(self.path, 'r') as f:
+            f.seek(self.offsets[item])
+            line = f.readline()
+
+        raw_data = json.loads(line)
+
+        if self.tokenize_fn:
+            tokenized_data = self.tokenize_fn(raw_data)
+            return tokenized_data
+        else:
+            return raw_data
+
+
