@@ -3,6 +3,7 @@ from typing import List, Union
 
 import torch
 
+from xtuner._lite import get_device
 from xtuner._lite.parallel import get_sp_mesh, split_for_sequence_parallel
 
 
@@ -35,8 +36,9 @@ def packed_sequence(num_tokens, enable=True, sp_size=1):
     from mmengine import MessageHub
     ctx = MessageHub.get_instance('packed_sequence')
 
+    device = get_device()
     if enable:
-        num_tokens = num_tokens.cuda()
+        num_tokens = num_tokens.to(device)
         device = num_tokens.device
         _zero_length = torch.zeros(1, device=device)
         _pad_length = torch.cat([_zero_length, num_tokens]).int()
