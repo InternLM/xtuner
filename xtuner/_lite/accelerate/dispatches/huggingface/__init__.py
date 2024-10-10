@@ -2,7 +2,7 @@
 import types
 
 from xtuner._lite import get_logger
-
+from xtuner._lite.accelerate import flash_attn_is_available
 logger = get_logger()
 
 
@@ -11,10 +11,11 @@ def _dispatch_forward_fn(module, dispatch_fn):
 
 
 def _dispatch_internlm_varlen_attn_forward(module):
-    assert module.__class__.__name__ == 'InternLM2FlashAttention2'
+    assert module.__class__.__name__ in ['InternLM2FlashAttention2', 'InternLM2Attention', 'InternLM2SdpaAttention']
     from .internlm2 import internlm2_varlen_attn_forward
-    _dispatch_forward_fn(module, internlm2_varlen_attn_forward)
-    return internlm2_varlen_attn_forward.__name__
+    if flash_attn_is_available():
+        _dispatch_forward_fn(module, internlm2_varlen_attn_forward)
+        return internlm2_varlen_attn_forward.__name__
 
 
 def _dispatch_internlm_reward_forward(module):
@@ -38,6 +39,8 @@ def _dispatch_rms_norm_forward(module):
 
 
 DISPATCH_MAP = {
+    'InternLM2Attention': _dispatch_internlm_varlen_attn_forward,
+    'InternLM2SdpaAttention': _dispatch_internlm_varlen_attn_forward,
     'InternLM2FlashAttention2': _dispatch_internlm_varlen_attn_forward,
     'CLIPAttention': _dispatch_clip_attn_forward,
     'InternLM2ForRewardModel': _dispatch_internlm_reward_forward,
@@ -53,6 +56,6 @@ def dispatch_hf_code(model):
         cls_name = module.__class__.__name__
         if cls_name in DISPATCH_MAP:
             dispatched = DISPATCH_MAP[cls_name](module)
-            # breakpoint()
-            logger.debug(
-                f'Dispatch {name}({cls_name}) forward to `{dispatched}`')
+            if dispatched is not None:
+                logger.debug(
+                    f'Dispatch {name}({cls_name}) forward to `{dispatched}`')

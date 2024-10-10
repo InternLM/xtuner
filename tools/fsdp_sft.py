@@ -34,6 +34,7 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR
 from torch.utils.data import ConcatDataset, DataLoader
 from transformers import AutoConfig, AutoModelForCausalLM
+from transformers.utils.import_utils import is_flash_attn_2_available
 
 from xtuner._lite import (AutoTokenizer, get_device, get_logger,
                           get_torch_device_module)
@@ -427,7 +428,7 @@ def sft(args):
         logger.info(f'[Dataset] (Original) {ori_samples} samples.')
         logger.info(f'[Dataset] (Packed) {packed_samples} samples.')
 
-    pack_batch = flash_attn_is_available()
+    pack_batch = is_flash_attn_2_available() or DEVICE == 'npu'
     collator = SftCollator(pack_batch=pack_batch)
 
     if args.group_by_length:
@@ -486,7 +487,7 @@ def sft(args):
                            f'but found {args.dtype}.')
 
     llm_cfg = AutoConfig.from_pretrained(args.llm, trust_remote_code=True)
-    if flash_attn_is_available():
+    if is_flash_attn_2_available():
         llm_cfg.attn_implementation = 'flash_attention_2'
 
     llm_cfg.use_cache = False
