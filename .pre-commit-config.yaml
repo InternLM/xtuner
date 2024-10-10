@@ -1,4 +1,4 @@
-exclude: ^tests/data/|^xtuner/tools/model_converters/modeling_internlm2_reward/|^xtuner/_lite/modelings/|^xtuner/_lite/accelerate/dispatches
+exclude: ^tests/data/|^xtuner/tools/model_converters/modeling_internlm2_reward/|^xtuner/_lite/modelings/|^xtuner/_lite/accelerate/dispatches/huggingface/
 repos:
   - repo: https://github.com/PyCQA/flake8
     rev: 5.0.4

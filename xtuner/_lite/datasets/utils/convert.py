@@ -212,9 +212,15 @@ def llava_to_openai_interleave(data):
 
 
 OPENAI_CONVERT_MAP = {
-    'llava': llava_to_openai,
-    'llava_interleave': llava_to_openai_interleave,
-    'alpaca': Alpaca2Openai.convert,
-    'xtuner': XTunerFormat2Openai.convert,
-    'openai': lambda x: ChatMessages.from_dict({'messages': x}),
+    'llava':
+    llava_to_openai,
+    'llava_interleave':
+    llava_to_openai_interleave,
+    'alpaca':
+    Alpaca2Openai.convert,
+    'xtuner':
+    XTunerFormat2Openai.convert,
+    'openai':
+    lambda x: ChatMessages.from_dict(x
+                                     if 'messages' in x else {'messages': x}),
 }
