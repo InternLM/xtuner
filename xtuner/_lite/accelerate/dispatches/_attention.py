@@ -1,15 +1,16 @@
+import math
+
+import numpy as np
 import torch
 from torch.nn import functional as F
 
+from xtuner._lite import get_device
 from xtuner._lite.parallel import sequence_parallel_wrapper
-
-SUPPORT_FLASH2 = False
 
 try:
     from flash_attn import flash_attn_func, flash_attn_varlen_func
     from flash_attn.bert_padding import (index_first_axis, pad_input,
                                          unpad_input)
-    SUPPORT_FLASH2 = True
 except ImportError:
     pass
 
@@ -137,17 +138,42 @@ def varlen_flash_attn(
 ):
     q_unpad, k_unpad, v_unpad = query_states.flatten(0, 1), key_states.flatten(
         0, 1), value_states.flatten(0, 1)
-    attn_output = flash_attn_varlen_func(
-        q_unpad,
-        k_unpad,
-        v_unpad,
-        cumulative_len,
-        cumulative_len,
-        max_seqlen,
-        max_seqlen,
-        dropout_p=dropout_p,
-        return_attn_probs=False,
-        causal=causal,
-        window_size=window_size)
-    attn_output = attn_output.unsqueeze(0)
+
+    device = get_device()
+    if device == 'cuda':
+        attn_output = flash_attn_varlen_func(
+            q_unpad,
+            k_unpad,
+            v_unpad,
+            cumulative_len,
+            cumulative_len,
+            max_seqlen,
+            max_seqlen,
+            dropout_p=dropout_p,
+            return_attn_probs=False,
+            causal=causal,
+            window_size=window_size)
+        attn_output = attn_output.unsqueeze(0)
+    elif device == 'npu':
+        import torch_npu
+        atten_mask_npu = torch.from_numpy(
+            np.triu(np.ones([max_seqlen, max_seqlen]), k=1)).bool().to(device)
+        head_num = q_unpad.shape[1]
+        attn_output = torch_npu.npu_fusion_attention(
+            q_unpad,
+            k_unpad,
+            v_unpad,
+            head_num,
+            pse=None,
+            padding_mask=None,
+            atten_mask=atten_mask_npu,
+            scale=1.0 / math.sqrt(q_unpad.shape[-1]),
+            keep_prob=1,
+            input_layout='TND',
+            actual_seq_qlen=tuple(cumulative_len[1:].cpu().numpy().tolist()),
+            actual_seq_kvlen=tuple(cumulative_len[1:].cpu().numpy().tolist()),
+            pre_tockens=2147483647,
+            next_tockens=0,
+            inner_precise=0)[0]
+        attn_output = attn_output.unsqueeze(0)
     return attn_output

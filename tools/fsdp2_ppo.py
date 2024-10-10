@@ -19,9 +19,10 @@ from torch.optim import AdamW
 from torch.utils.data import ConcatDataset, DataLoader
 from transformers.utils.import_utils import is_flash_attn_2_available
 
-from xtuner._lite import AutoTokenizer, get_logger
+from xtuner._lite import (AutoTokenizer, get_device, get_logger,
+                          get_torch_device_module)
 from xtuner._lite.accelerate import (contiguous_batching_generate,
-                                     dispatch_modules, packed_sequence,
+                                     dispatch_hf_code, packed_sequence,
                                      profile_time_and_memory, unpack_sequence)
 from xtuner._lite.algorithms.ppo import (CriticLoss, PPODataset, PPOPolicyLoss,
                                          PPOTokenizeFunction,
@@ -39,6 +40,9 @@ from xtuner._lite.parallel import (ParallelSampler, get_dp_mesh, get_fsdp_mesh,
 from xtuner._lite.parallel.megatron import megatron_parallelize
 
 logger = get_logger()
+
+DEVICE = get_device()
+DEVICE_MODULE = get_torch_device_module()
 
 SUPPORT_DATA_FORMATS = OPENAI_CONVERT_MAP.keys()
 
@@ -422,12 +426,12 @@ def ppo(args):
     #                          3. FSDP                                        #
     ###########################################################################
     if args.dtype == 'auto':
-        args.dtype = 'bf16' if torch.cuda.is_bf16_supported() else 'fp16'
+        args.dtype = 'bf16' if DEVICE_MODULE.is_bf16_supported() else 'fp16'
 
     if args.dtype == 'fp16':
         dtype = torch.float16
     elif args.dtype == 'bf16':
-        if torch.cuda.is_bf16_supported():
+        if DEVICE_MODULE.is_bf16_supported():
             dtype = torch.bfloat16
         else:
             raise RuntimeError('The device does not support `bf16`, '
@@ -444,7 +448,7 @@ def ppo(args):
         # After the model is parallelized, the parameters of the complete
         # model on rank0 will be loaded.
         actor_model = build_actor_model(args.actor, dtype)
-        dispatch_modules(actor_model)
+        dispatch_hf_code(actor_model)
         for module in actor_model.modules():
             for p_name, param in module.named_parameters(recurse=False):
                 if param.requires_grad:
@@ -454,12 +458,12 @@ def ppo(args):
                     setattr(module, p_name, param_fp32)
 
         ref_model = build_actor_model(args.reference, dtype)
-        dispatch_modules(ref_model)
+        dispatch_hf_code(ref_model)
         for param in ref_model.parameters():
             param.requires_grad = False
 
         critic_model = build_reward_model(args.critic, dtype=dtype)
-        dispatch_modules(critic_model)
+        dispatch_hf_code(critic_model)
         for module in critic_model.modules():
             for p_name, param in module.named_parameters(recurse=False):
                 if param.requires_grad:
@@ -475,7 +479,7 @@ def ppo(args):
         # the score of the last token of each sequence,
         # but for parallel training, we dispatched it's forward
         # to calculates the scores of all sequences.
-        dispatch_modules(reward_model)
+        dispatch_hf_code(reward_model)
 
         for param in reward_model.parameters():
             param.requires_grad = False
@@ -586,9 +590,9 @@ def ppo(args):
 
     start_step = 0
     start_train_t = time.time()
-    torch.cuda.empty_cache()
-    torch.cuda.reset_peak_memory_stats()
-    max_memory = torch.cuda.max_memory_allocated()
+    DEVICE_MODULE.empty_cache()
+    DEVICE_MODULE.reset_peak_memory_stats()
+    max_memory = DEVICE_MODULE.max_memory_allocated()
     logger.info('[Train] Begin Train Loop. The current GPU memory is '
                 f'{(max_memory / 1024**3):.1f}GB')
 
@@ -615,11 +619,12 @@ def ppo(args):
         else:
             update_actor = True
 
-        torch.cuda.reset_peak_memory_stats()
+        DEVICE_MODULE.reset_peak_memory_stats()
 
         data = next(msg_iterator)
-        prompts = unpack_sequence(data['input_ids'].cuda(), data['num_tokens'])
-        num_tokens = data['num_tokens'].cuda()
+        prompts = unpack_sequence(data['input_ids'].to(DEVICE),
+                                  data['num_tokens'])
+        num_tokens = data['num_tokens'].to(DEVICE)
 
         # Stage 1,  Actor Model Generation
         step_gen_start_t = time.time()
@@ -662,11 +667,12 @@ def ppo(args):
         # for each backward is unbalanced.
         total_ppo_tokens = sum(
             [len(r) + len(p) for r, p in zip(responses, prompts)])
-        total_ppo_tokens = torch.IntTensor([total_ppo_tokens]).cuda()
+        total_ppo_tokens = torch.IntTensor([total_ppo_tokens]).to(DEVICE)
         dist.all_reduce(total_ppo_tokens)
 
         total_response_tokens = sum([len(res) for res in responses])
-        total_response_tokens = torch.IntTensor([total_response_tokens]).cuda()
+        total_response_tokens = torch.IntTensor([total_response_tokens
+                                                 ]).to(DEVICE)
         dist.all_reduce(total_response_tokens)
 
         if tp_size > 1:
@@ -709,10 +715,10 @@ def ppo(args):
         step_ppo_start_t = time.time()
         for packed_seq in packed_sequence_dataloader:
 
-            input_ids = packed_seq['input_ids'].cuda()
-            num_tokens = packed_seq['num_tokens'].cuda()
+            input_ids = packed_seq['input_ids'].to(DEVICE)
+            num_tokens = packed_seq['num_tokens'].to(DEVICE)
             # labels are shifted
-            labels = packed_seq['labels'].cuda()
+            labels = packed_seq['labels'].to(DEVICE)
 
             if has_reward_token:
                 # Some reward models will add a reward token id to
@@ -720,7 +726,7 @@ def ppo(args):
                 sequences = unpack_sequence(input_ids, num_tokens, dim=1)
                 reward_token_id = reward_model.reward_token_id
                 reward_token_id = torch.IntTensor([reward_token_id
-                                                   ]).cuda().unsqueeze(0)
+                                                   ]).to(DEVICE).unsqueeze(0)
                 _sequences = []
                 for seq in sequences:
                     _sequences.append(
@@ -740,7 +746,8 @@ def ppo(args):
                 input_ids = pad_for_sequence_parallel(input_ids, 0, dim=1)
                 _num_pad_tokens = input_ids.numel() - num_policy_tokens.sum()
                 if _num_pad_tokens > 0:
-                    _num_pad_tokens = torch.IntTensor([_num_pad_tokens]).cuda()
+                    _num_pad_tokens = torch.IntTensor([_num_pad_tokens
+                                                       ]).to(DEVICE)
                     num_policy_tokens = torch.cat(
                         [num_policy_tokens, _num_pad_tokens], dim=-1)
 
@@ -753,7 +760,8 @@ def ppo(args):
                 _num_pad_tokens = reward_input_ids.numel(
                 ) - num_reward_tokens.sum()
                 if _num_pad_tokens > 0:
-                    _num_pad_tokens = torch.IntTensor([_num_pad_tokens]).cuda()
+                    _num_pad_tokens = torch.IntTensor([_num_pad_tokens
+                                                       ]).to(DEVICE)
                     num_reward_tokens = torch.cat(
                         [num_reward_tokens, _num_pad_tokens], dim=-1)
 
@@ -886,7 +894,7 @@ def ppo(args):
         eta = timedelta(seconds=int(eta))
         ppo_tgs = int(step_ppo_consumed_tokens / step_time)
         actor_lr = args.actor_lr if update_actor else 0.0
-        max_memory = torch.cuda.max_memory_allocated()
+        max_memory = DEVICE_MODULE.max_memory_allocated()
         if is_interval(step, total_steps, args.log_interval):
             logger.info('[Train] Step '
                         f'{step + 1}/{total_steps}  '

@@ -2,6 +2,8 @@ import torch.distributed as dist
 from mmengine.dist import infer_launcher, init_dist
 from torch.distributed.device_mesh import init_device_mesh
 
+from xtuner._lite import get_device
+
 _SP_MESH = None
 _DP_MESH = None
 _TP_MESH = None
@@ -13,6 +15,7 @@ def setup_parallel(sp_size=1, tp_size=1):
 
     dist_launcher = infer_launcher()
     init_dist(dist_launcher)
+    device = get_device()
 
     world_size = dist.get_world_size()
     assert world_size % sp_size == 0
@@ -21,13 +24,13 @@ def setup_parallel(sp_size=1, tp_size=1):
 
     dp_size = world_size // sp_size // tp_size
     data_mesh = init_device_mesh(
-        'cuda', (dp_size, sp_size, tp_size), mesh_dim_names=('dp', 'sp', 'tp'))
+        device, (dp_size, sp_size, tp_size), mesh_dim_names=('dp', 'sp', 'tp'))
 
     model_mesh = init_device_mesh(
-        'cuda', (dp_size * sp_size, tp_size), mesh_dim_names=('fsdp', 'tp'))
+        device, (dp_size * sp_size, tp_size), mesh_dim_names=('fsdp', 'tp'))
 
     world_mesh = init_device_mesh(
-        'cuda', (world_size, ), mesh_dim_names=('world', ))
+        device, (world_size, ), mesh_dim_names=('world', ))
 
     global _DP_MESH, _DP_GROUP, _DP_WORLD_SIZE
     _DP_MESH = data_mesh['dp']

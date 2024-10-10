@@ -5,7 +5,7 @@ from torch import nn
 from torch.nn import functional as F
 from transformers import CLIPVisionModel
 
-from ._attention import flash_attn_wo_mask
+from .._attention import flash_attn_wo_mask
 
 
 def clip_flash_attn_forward(

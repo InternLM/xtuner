@@ -9,7 +9,7 @@ from transformers.modeling_outputs import SequenceClassifierOutputWithPast
 
 from xtuner._lite import AutoTokenizer, get_logger
 from xtuner._lite.accelerate import lmdeploy_is_available
-from ._attention import SUPPORT_FLASH2, flash_attn_wo_mask, varlen_flash_attn
+from .._attention import flash_attn_wo_mask, varlen_flash_attn
 
 logger = get_logger()
 
@@ -201,9 +201,8 @@ def _internlm2_varlen_attn_forward(
     key_states = repeat_kv_bshd(key_states, self.num_key_value_groups)
     value_states = repeat_kv_bshd(value_states, self.num_key_value_groups)
 
-    assert SUPPORT_FLASH2
     cumulative_lengths = attn_context.get_info('cumulative_lengths')
-    if cumulative_lengths is not None and SUPPORT_FLASH2 and bsz == 1:
+    if cumulative_lengths is not None and bsz == 1:
         max_seqlen = attn_context.get_info('max_seqlen')
         attn_output = varlen_flash_attn(query_states, key_states, value_states,
                                         cumulative_lengths, max_seqlen)

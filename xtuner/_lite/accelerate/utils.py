@@ -3,9 +3,20 @@ from contextlib import contextmanager
 
 import torch
 
-from xtuner._lite import get_logger
+from xtuner._lite import get_device, get_logger
 
 logger = get_logger()
+
+from transformers.utils.import_utils import is_flash_attn_2_available
+
+
+def npu_is_available():
+    return get_device() == 'npu'
+
+
+def flash_attn_is_available():
+
+    return is_flash_attn_2_available() or npu_is_available()
 
 
 def lmdeploy_is_available():

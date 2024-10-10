@@ -15,7 +15,6 @@ import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
 from accelerate.utils import set_module_tensor_to_device
 from mmengine import mkdir_or_exist
-from mmengine.dist import infer_launcher, init_dist
 from mmengine.runner import set_random_seed
 from mmengine.utils import get_git_hash
 from mmengine.utils.dl_utils import collect_env
@@ -35,22 +34,17 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR
 from torch.utils.data import ConcatDataset, DataLoader
 from transformers import AutoConfig, AutoModelForCausalLM
-from transformers.utils.import_utils import (is_flash_attn_2_available,
-                                             is_torch_sdpa_available)
 
-from xtuner._lite import AutoTokenizer, get_logger
-from xtuner._lite.accelerate import (LORA_TARGET_MAP, dispatch_modules,
-                                     packed_sequence)
+from xtuner._lite import (AutoTokenizer, get_device, get_logger,
+                          get_torch_device_module)
+from xtuner._lite.accelerate import (LORA_TARGET_MAP, dispatch_hf_code,
+                                     flash_attn_is_available, packed_sequence)
+from xtuner._lite.algorithms.sft import SftCollator, SftTokenizeFunction
 from xtuner._lite.chat import CHAT_TEMPLATE_MAP
-from xtuner._lite.datasets import (OPENAI_FORMAT_MAP, SoftPackerForText,
-                                   TextCollator, TextOnlineTokenizeDataset,
-                                   TextTokenizedDataset, TextTokenizeFunction)
-from xtuner._lite.datasets.load import (LOAD_FN_MAP, load_datasets,
-                                        load_from_cache)
+from xtuner._lite.datasets import (DATASET_CLS_MAP, OPENAI_CONVERT_MAP,
+                                   SoftPackDataset, load_datasets)
 from xtuner._lite.parallel import (LengthGroupedSampler, ParallelSampler,
-                                   get_dp_mesh, get_dp_world_size,
-                                   get_sp_group, get_sp_mesh,
-                                   get_sp_world_size,
+                                   get_dp_mesh, get_sp_mesh,
                                    reduce_sequence_parallel_loss,
                                    setup_parallel, split_for_sequence_parallel)
 from xtuner._lite.parallel.fsdp import (RECOMPUTE_MODULES, LoadWoInit,
@@ -60,8 +54,10 @@ from xtuner._lite.parallel.fsdp import (RECOMPUTE_MODULES, LoadWoInit,
                                         layer_auto_wrap_policy)
 
 logger = get_logger()
+DEVICE = get_device()
+DEVICE_MODULE = get_torch_device_module()
 
-SUPPORT_DATA_FORMATS = OPENAI_FORMAT_MAP.keys()
+SUPPORT_DATA_FORMATS = OPENAI_CONVERT_MAP.keys()
 
 
 def log_format(rank, debug=False):
@@ -152,8 +148,8 @@ def parse_args():
     data_args.add_argument(
         '--dset-file-types',
         nargs='*',
-        default=LOAD_FN_MAP.keys(),
-        choices=LOAD_FN_MAP.keys(),
+        default=DATASET_CLS_MAP.keys(),
+        choices=DATASET_CLS_MAP.keys(),
         help='the file type that needs to be loaded')
     data_args.add_argument(
         '--dset-sources',
@@ -187,12 +183,6 @@ def parse_args():
               '`datasets` are not set, the cached dataset in this dir will be '
               'loaded.'))
     data_args.add_argument(
-        '--dset-from-cache',
-        action='store_true',
-        help=('Load data directly from `dset-cache-dir`. This can save time '
-              'on online tokenization, but if the tokenizer changed, '
-              'recaching is needed.'))
-    data_args.add_argument(
         '--dset-pack-level',
         choices=['hard', 'soft'],
         help=('the level of data packing. When `hard`, multiple data will be '
@@ -211,11 +201,6 @@ def parse_args():
         type=int,
         default=0,
         help='how many subprocesses to use for data loading.')
-    data_args.add_argument(
-        '--num-proc',
-        type=int,
-        default=8,
-        help='how many subprocesses to use for data mapping.')
     data_args.add_argument('--file-pattern', type=str, default=None)
     data_args.add_argument('--group-by-length', action='store_true')
 
@@ -329,17 +314,15 @@ def sft(args):
     ###########################################################################
     #                           1. Environment                                #
     ###########################################################################
-    dist_launcher = infer_launcher()
-    init_dist(dist_launcher)
+    setup_parallel(sp_size=args.sp_size, tp_size=1)
+    dp_mesh = get_dp_mesh()
+    sp_mesh = get_sp_mesh()
+
+    dp_size = dp_mesh.size()
+    sp_size = sp_mesh.size()
     set_random_seed(args.seed)
 
     world_size = int(os.environ['WORLD_SIZE'])
-    sp_size = args.sp_size
-
-    setup_parallel(sp_size=sp_size)
-    dp_mesh = get_dp_mesh()
-    sp_mesh = get_sp_mesh()
-    dp_size = get_dp_world_size()
 
     if args.global_batch_size < dp_size or args.global_batch_size % dp_size:
         raise ValueError(f'The `global_batch_size`({args.global_batch_size}) '
@@ -350,12 +333,6 @@ def sft(args):
         raise ValueError(f'The `global_batch_size`({args.global_batch_size}) '
                          f'should be divisible by the world_size({world_size})'
                          f' * `mirco_batch_size`({args.mirco_batch_size})')
-
-    if args.dset_cache_dir and os.path.isdir(args.dset_cache_dir):
-        if len(os.listdir(args.dset_cache_dir)) and not args.dset_from_cache:
-            raise RuntimeError(f'`{args.dset_cache_dir}` is not an empty '
-                               'folder, which may lead to inaccurate '
-                               'cache results.')
 
     rank = dist.get_rank()
     timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
@@ -387,7 +364,9 @@ def sft(args):
         runtime_env.update(env)
         runtime_env['Seed'] = args.seed
         runtime_env['World Size'] = world_size
-        runtime_env['Distributed launcher'] = dist_launcher
+        runtime_env['DP Size'] = dp_size
+        runtime_env['SP Size'] = sp_size
+        # runtime_env['Distributed launcher'] = dist_launcher
 
         runtime_env_info = '\n    ' + '\n    '.join(
             f'{k}: {v}' for k, v in runtime_env.items())
@@ -407,73 +386,49 @@ def sft(args):
         trust_remote_code=True,
         padding_side='right')
 
-    if args.dset_from_cache:
-        if args.dset_pack_level == 'soft':
-            init_fn = partial(
-                SoftPackerForText.from_cache, max_length=args.max_length)
-        elif args.dset_pack_level == 'hard':
-            raise NotImplementedError
-        else:
-            init_fn = partial(
-                TextTokenizeFunction.from_cache, max_length=args.max_length)
-        _datasets = load_from_cache(args.dset_cache_dir, init_fn)
-        dist.barrier()
-
-    else:
+    if args.chat_template:
         chat_template = CHAT_TEMPLATE_MAP[args.chat_template]
-        tokenize_fns = []
-        init_fns = []
-        for dset_format in args.dset_formats:
-            # If your data format is not in `SUPPORT_DATA_FORMATS`, you should
-            # redefine a `tokenize_fn`, defining how to convert a piece of raw
-            # data into tokenized data.
-            # The tokenized data must include `input_ids`, `labels``,
-            # and `num_tokens`.
-            tokenize_fn = TextTokenizeFunction(tokenizer, chat_template,
-                                               dset_format)
+    else:
+        chat_template = None
 
-            if args.dset_pack_level == 'soft':
-                init_fn = partial(
-                    SoftPackerForText, max_length=args.max_length)
-            elif args.dset_cache_dir:
-                init_fn = partial(
-                    TextTokenizedDataset, max_length=args.max_length)
-            else:
-                init_fn = partial(
-                    TextOnlineTokenizeDataset, tokenize_fn=tokenize_fn)
-                # Online tokenization is used when not using a pack dataset,
-                # saving startup time.
-                tokenize_fn = None
+    tokenize_fns = []
+    for dset_format in args.dset_formats:
+        # If your data format is not in `SUPPORT_DATA_FORMATS`, you should
+        # redefine a `tokenize_fn`, defining how to convert a piece of raw
+        # data into tokenized data.
+        # The tokenized data must include `input_ids`, `labels``,
+        # and `num_tokens`.
+        tokenize_fn = SftTokenizeFunction(tokenizer, chat_template,
+                                          dset_format)
+        tokenize_fns.append(tokenize_fn)
 
-            tokenize_fns.append(tokenize_fn)
-            init_fns.append(init_fn)
+    _datasets = load_datasets(
+        paths=args.datasets,
+        cache_dir=args.dset_cache_dir,
+        file_types=args.dset_file_types,
+        sources=args.dset_sources,
+        sample_ratios=args.dset_sample_ratios,
+        map_fns=tokenize_fns,
+        file_pattern=args.file_pattern)
 
-        _datasets = load_datasets(
-            paths=args.datasets,
-            cache_dir=args.dset_cache_dir,
-            file_types=args.dset_file_types,
-            sources=args.dset_sources,
-            sample_ratios=args.dset_sample_ratios,
-            num_proc=args.num_proc,
-            map_fns=tokenize_fns,
-            init_fns=init_fns,
-            file_pattern=args.file_pattern)
-
-    if (args.dset_pack_level or args.cache_dir) and rank == 0 and args.debug:
+    if args.dset_pack_level and rank == 0 and args.debug:
         # Only the tokenized datasets can count the number of tokens
-        num_tokens = sum(dset.total_tokens for dset in _datasets)
+        num_tokens = sum(dset.num_tokens.sum() for dset in _datasets)
         logger.debug(f'[Dataset] {num_tokens} tokens.')
 
-    train_dataset = ConcatDataset(_datasets)
+    if args.dset_pack_level:
+        train_dataset = SoftPackDataset(_datasets, target=args.max_length)
+    else:
+        train_dataset = ConcatDataset(_datasets)
 
     if args.dset_pack_level and rank == 0:
-        ori_samples = sum([dset.num_samples for dset in _datasets])
+        ori_samples = sum([len(dset) for dset in _datasets])
         packed_samples = len(train_dataset)
         logger.info(f'[Dataset] (Original) {ori_samples} samples.')
         logger.info(f'[Dataset] (Packed) {packed_samples} samples.')
 
-    pack_batch = is_flash_attn_2_available()
-    collator = TextCollator(pack_batch=pack_batch)
+    pack_batch = flash_attn_is_available()
+    collator = SftCollator(pack_batch=pack_batch)
 
     if args.group_by_length:
         sampler = LengthGroupedSampler(train_dataset, dp_mesh,
@@ -512,16 +467,16 @@ def sft(args):
     start_model_t = time.time()
 
     if args.dtype == 'auto':
-        args.dtype = 'bf16' if torch.cuda.is_bf16_supported() else 'fp16'
+        args.dtype = 'bf16' if DEVICE_MODULE.is_bf16_supported() else 'fp16'
 
     if args.dtype == 'fp16':
         dtype = torch.float16
-        autocast = torch.cuda.amp.autocast(enabled=True, dtype=dtype)
+        autocast = torch.amp.autocast(DEVICE, enabled=True, dtype=dtype)
         scaler = ShardedGradScaler()
     elif args.dtype == 'bf16':
-        if torch.cuda.is_bf16_supported():
+        if DEVICE_MODULE.is_bf16_supported():
             dtype = torch.bfloat16
-            autocast = torch.cuda.amp.autocast(enabled=True, dtype=dtype)
+            autocast = torch.amp.autocast(DEVICE, enabled=True, dtype=dtype)
             scaler = None
         else:
             raise RuntimeError('The device does not support `bf16`, '
@@ -531,10 +486,8 @@ def sft(args):
                            f'but found {args.dtype}.')
 
     llm_cfg = AutoConfig.from_pretrained(args.llm, trust_remote_code=True)
-    if is_flash_attn_2_available():
+    if flash_attn_is_available():
         llm_cfg.attn_implementation = 'flash_attention_2'
-    elif is_torch_sdpa_available():
-        llm_cfg.attn_implementation = 'sdpa'
 
     llm_cfg.use_cache = False
     llm_cfg.torch_dtype = dtype
@@ -545,7 +498,7 @@ def sft(args):
         meta_llm = build_llm_model(args, llm_cfg, world_size, torch.float32)
 
     if pack_batch:
-        dispatch_modules(meta_llm)
+        dispatch_hf_code(meta_llm)
 
     # Only load parameters on rank 0 to avoid each rank repeatedly loading the
     # same model into the CPU, wasting memory
@@ -559,7 +512,7 @@ def sft(args):
 
     dist.barrier()
 
-    if get_sp_world_size() > 1:
+    if sp_size > 1:
         param_init_fn = partial(
             dp_sp_lazy_init,
             module_map=meta_llm_map,
@@ -574,15 +527,15 @@ def sft(args):
         policies.append(all_required_grad_wrap_policy)
 
     if args.shard_strategy == 'full':
-        fsdp_device_mesh = init_device_mesh('cuda', (world_size, ))
+        fsdp_device_mesh = init_device_mesh(DEVICE, (world_size, ))
         strategy = ShardingStrategy.FULL_SHARD
     elif args.shard_strategy == 'hybrid':
-        fsdp_device_mesh = init_device_mesh('cuda', (dp_size // 8, 8))
+        fsdp_device_mesh = init_device_mesh(DEVICE, (dp_size // 8, 8))
         strategy = ShardingStrategy.HYBRID_SHARD
     else:
         raise ValueError
 
-    torch.cuda.reset_peak_memory_stats()
+    DEVICE_MODULE.reset_peak_memory_stats()
     shard_llm = FSDP(
         meta_llm,
         device_mesh=fsdp_device_mesh,
@@ -591,13 +544,14 @@ def sft(args):
         auto_wrap_policy=partial(_or_policy, policies=policies),
         mixed_precision=MixedPrecision(
             param_dtype=dtype, reduce_dtype=dtype, buffer_dtype=dtype),
-        device_id=torch.cuda.current_device(),
+        device_id=DEVICE_MODULE.current_device(),
         use_orig_params=True,
         param_init_fn=param_init_fn,
         sync_module_states=True,
     )
+    shard_llm.train()
 
-    max_memory = torch.cuda.max_memory_allocated()
+    max_memory = DEVICE_MODULE.max_memory_allocated()
     logger.info('[Model] During building the FSDP model, the peak GPU memory '
                 f'is {max_memory/1024**3:.1f}GB.')
 
@@ -663,9 +617,9 @@ def sft(args):
     ###########################################################################
 
     start_train_t = time.time()
-    torch.cuda.empty_cache()
-    torch.cuda.reset_peak_memory_stats()
-    max_memory = torch.cuda.max_memory_allocated()
+    DEVICE_MODULE.empty_cache()
+    DEVICE_MODULE.reset_peak_memory_stats()
+    max_memory = DEVICE_MODULE.max_memory_allocated()
     logger.info('[Train] Begin Train Loop. The current GPU memory is '
                 f'{(max_memory / 1024**3):.1f}GB')
     for step in range(start_step, total_steps):
@@ -688,7 +642,7 @@ def sft(args):
             cosine_scheduler.step()
             cur_lr = cosine_scheduler.get_last_lr()[0]
 
-        torch.cuda.reset_peak_memory_stats()
+        DEVICE_MODULE.reset_peak_memory_stats()
 
         step_loss = 0
         step_data_time = 0
@@ -700,17 +654,17 @@ def sft(args):
             data = next(data_iterator)
             step_data_time += time.time() - _data_start_t
 
-            input_ids = data['input_ids'].cuda()
-            labels = data['labels'].cuda()
-            attention_mask = data['attention_mask'].cuda()
-            num_tokens = data['num_tokens'].cuda()
+            input_ids = data['input_ids'].to(DEVICE)
+            labels = data['labels'].to(DEVICE)
+            attention_mask = data['attention_mask'].to(DEVICE)
+            num_tokens = data['num_tokens'].to(DEVICE)
 
             packed_ctx = packed_sequence(
-                num_tokens, enable=pack_batch, sp_size=get_sp_world_size())
+                num_tokens, enable=pack_batch, sp_size=sp_size)
 
             with packed_ctx, autocast if args.use_lora else nullcontext():
-                if get_sp_world_size() > 1:
-                    sp_group = get_sp_group()
+                if sp_size > 1:
+                    sp_group = sp_mesh.get_group()
                     # `dim` is 1 as the shape of tensor is (bs, seq_len, ...)
                     input_ids = split_for_sequence_parallel(
                         input_ids, dim=1, sp_group=sp_group)
@@ -723,7 +677,7 @@ def sft(args):
                     attention_mask=attention_mask)
 
                 loss = outputs.loss
-                if get_sp_world_size() > 1:
+                if sp_size > 1:
                     tokens_cal_loss = (labels != -100).sum()
                     loss = reduce_sequence_parallel_loss(
                         loss, tokens_cal_loss, sp_group)
@@ -741,10 +695,9 @@ def sft(args):
                 # still smaller than the max length after packing, will be
                 # padded to the max length. The last element of num tokens
                 # represents the count of pad tokens.
-                step_consumed_tokens += num_tokens[:-1].sum(
-                ) / get_sp_world_size()
+                step_consumed_tokens += num_tokens[:-1].sum() / sp_size
             else:
-                step_consumed_tokens += num_tokens.sum() / get_sp_world_size()
+                step_consumed_tokens += num_tokens.sum() / sp_size
 
         grad_norm = shard_llm.clip_grad_norm_(args.max_grad_norm)
         optimizer.step()
@@ -754,7 +707,7 @@ def sft(args):
         eta = step_time * (total_steps - step)
         eta = timedelta(seconds=int(eta))
         tgs = int(step_consumed_tokens / step_time)
-        max_memory = torch.cuda.max_memory_allocated()
+        max_memory = DEVICE_MODULE.max_memory_allocated()
         if is_interval(step, total_steps, args.log_interval):
             logger.info(f'[Train] (Epoch {epoch + 1}) Step '
                         f'{step + 1}/{total_steps}  '
@@ -767,9 +720,9 @@ def sft(args):
                         f'eta: {eta}')
 
         if is_interval(step, total_steps, checkpoint_interval):
-            torch.cuda.empty_cache()
-            torch.cuda.reset_peak_memory_stats()
-            max_memory = torch.cuda.max_memory_allocated()
+            DEVICE_MODULE.empty_cache()
+            DEVICE_MODULE.reset_peak_memory_stats()
+            max_memory = DEVICE_MODULE.max_memory_allocated()
             logger.info('[Checkpoint] Before saving checkpoint, the peak GPU '
                         f'memory is {max_memory/1024**3:.1f}GB.')
 
@@ -824,7 +777,7 @@ def sft(args):
                 mkdir_or_exist(ckpt_dir)
                 dcp.save(state_dict, writer)
 
-            max_memory = torch.cuda.max_memory_allocated()
+            max_memory = DEVICE_MODULE.max_memory_allocated()
             logger.info('[Checkpoint] During saving checkpoint, the peak GPU '
                         f'memory is {max_memory/1024**3:.1f}GB.')
 
