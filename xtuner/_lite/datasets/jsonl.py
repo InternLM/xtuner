@@ -79,7 +79,7 @@ class JsonlDataset(torch.utils.data.Dataset):
         sampled = random.sample([i for i in range(len(offsets))], num_samples)
 
         self.offsets = offsets[sampled]
-        if num_tokens:
+        if num_tokens is not None:
             num_tokens = num_tokens[sampled]
 
         self.num_tokens = num_tokens
@@ -93,6 +93,7 @@ class JsonlDataset(torch.utils.data.Dataset):
                 offsets.append(f.tell())
                 line = f.readline()
 
+        offsets.pop(-1)
         offsets = np.array(offsets)
 
         if dist.get_rank() == 0 and cache_dir:

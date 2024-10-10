@@ -39,13 +39,14 @@ from transformers.utils.import_utils import is_flash_attn_2_available
 from xtuner._lite import (AutoTokenizer, get_device, get_logger,
                           get_torch_device_module)
 from xtuner._lite.accelerate import (LORA_TARGET_MAP, dispatch_hf_code,
-                                     flash_attn_is_available, packed_sequence)
+                                     packed_sequence, varlen_attn_is_available)
 from xtuner._lite.algorithms.sft import SftCollator, SftTokenizeFunction
 from xtuner._lite.chat import CHAT_TEMPLATE_MAP
 from xtuner._lite.datasets import (DATASET_CLS_MAP, OPENAI_CONVERT_MAP,
                                    SoftPackDataset, load_datasets)
 from xtuner._lite.parallel import (LengthGroupedSampler, ParallelSampler,
                                    get_dp_mesh, get_sp_mesh,
+                                   pad_for_sequence_parallel,
                                    reduce_sequence_parallel_loss,
                                    setup_parallel, split_for_sequence_parallel)
 from xtuner._lite.parallel.fsdp import (RECOMPUTE_MODULES, LoadWoInit,
@@ -428,7 +429,7 @@ def sft(args):
         logger.info(f'[Dataset] (Original) {ori_samples} samples.')
         logger.info(f'[Dataset] (Packed) {packed_samples} samples.')
 
-    pack_batch = is_flash_attn_2_available() or DEVICE == 'npu'
+    pack_batch = varlen_attn_is_available()
     collator = SftCollator(pack_batch=pack_batch)
 
     if args.group_by_length:
@@ -660,17 +661,24 @@ def sft(args):
             attention_mask = data['attention_mask'].to(DEVICE)
             num_tokens = data['num_tokens'].to(DEVICE)
 
+            if sp_size > 1:
+                # `dim` is 1 as the shape of tensor is (bs, seq_len, ...)
+                input_ids = pad_for_sequence_parallel(input_ids, 0, dim=1)
+                labels = pad_for_sequence_parallel(labels, -100, dim=1)
+
+                num_pad = input_ids.numel() - num_tokens.sum()
+                num_pad = torch.IntTensor([num_pad]).to(DEVICE)
+                num_tokens = torch.cat([num_tokens, num_pad], dim=0)
+
+                input_ids = split_for_sequence_parallel(
+                    input_ids, dim=1, sp_mesh=sp_mesh)
+                labels = split_for_sequence_parallel(
+                    labels, dim=1, sp_mesh=sp_mesh)
+
             packed_ctx = packed_sequence(
                 num_tokens, enable=pack_batch, sp_size=sp_size)
 
             with packed_ctx, autocast if args.use_lora else nullcontext():
-                if sp_size > 1:
-                    sp_group = sp_mesh.get_group()
-                    # `dim` is 1 as the shape of tensor is (bs, seq_len, ...)
-                    input_ids = split_for_sequence_parallel(
-                        input_ids, dim=1, sp_group=sp_group)
-                    labels = split_for_sequence_parallel(
-                        labels, dim=1, sp_group=sp_group)
 
                 outputs = shard_llm(
                     input_ids=input_ids,
@@ -681,7 +689,7 @@ def sft(args):
                 if sp_size > 1:
                     tokens_cal_loss = (labels != -100).sum()
                     loss = reduce_sequence_parallel_loss(
-                        loss, tokens_cal_loss, sp_group)
+                        loss, tokens_cal_loss, sp_mesh)
 
                 avg_iter_loss = loss / iters_per_step
 

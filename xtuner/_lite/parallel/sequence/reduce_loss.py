@@ -29,5 +29,5 @@ def reduce_sequence_parallel_loss(mean_loss, loss_scale, sp_mesh=None):
     if sp_mesh is None:
         # avoid bc breaking
         sp_mesh = get_sp_mesh()
-    sp_group = sp_mesh.group()
+    sp_group = sp_mesh.get_group()
     return _ReduceLoss.apply(mean_loss, loss_scale, sp_group)

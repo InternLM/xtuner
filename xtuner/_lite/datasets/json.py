@@ -108,7 +108,7 @@ class JsonDataset(torch.utils.data.Dataset):
                 tqdm(
                     executor.map(self.tokenize_fn, dataset_shard),
                     desc=desc,
-                    total=len(dataset)))
+                    total=len(dataset_shard)))
 
         _num_tokens = [data['num_tokens'] for data in tokenized]
         _num_tokens = np.array(_num_tokens)

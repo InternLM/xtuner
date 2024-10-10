@@ -1,20 +1,18 @@
 import time
 from contextlib import contextmanager
-
-import torch
-
-from xtuner._lite import get_device, get_logger
+from transformers.utils.import_utils import is_flash_attn_2_available
+from xtuner._lite import get_device, get_logger, get_torch_device_module
 
 logger = get_logger()
 
-from transformers.utils.import_utils import is_flash_attn_2_available
+
 
 
 def npu_is_available():
     return get_device() == 'npu'
 
 
-def flash_attn_is_available():
+def varlen_attn_is_available():
 
     return is_flash_attn_2_available() or npu_is_available()
 
@@ -34,12 +32,13 @@ def lmdeploy_is_available():
 @contextmanager
 def profile_time_and_memory(desc):
 
+    torch_device = get_torch_device_module()
     start_t = time.time()
-    torch.cuda.reset_peak_memory_stats()
+    torch_device.reset_peak_memory_stats()
 
     yield
 
-    max_memory = torch.cuda.max_memory_allocated()
+    max_memory = torch_device.max_memory_allocated()
     cost_time = time.time() - start_t
 
     logger.info(f'{desc} Elapsed time {cost_time:.2f} seconds, '

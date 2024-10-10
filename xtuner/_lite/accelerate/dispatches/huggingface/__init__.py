@@ -2,7 +2,7 @@
 import types
 
 from xtuner._lite import get_logger
-from xtuner._lite.accelerate import flash_attn_is_available
+
 logger = get_logger()
 
 
@@ -13,7 +13,8 @@ def _dispatch_forward_fn(module, dispatch_fn):
 def _dispatch_internlm_varlen_attn_forward(module):
     assert module.__class__.__name__ in ['InternLM2FlashAttention2', 'InternLM2Attention', 'InternLM2SdpaAttention']
     from .internlm2 import internlm2_varlen_attn_forward
-    if flash_attn_is_available():
+    from xtuner._lite.accelerate import varlen_attn_is_available
+    if varlen_attn_is_available():
         _dispatch_forward_fn(module, internlm2_varlen_attn_forward)
         return internlm2_varlen_attn_forward.__name__
 

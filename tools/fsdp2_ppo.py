@@ -752,7 +752,7 @@ def ppo(args):
                         [num_policy_tokens, _num_pad_tokens], dim=-1)
 
                 input_ids = split_for_sequence_parallel(
-                    input_ids, dim=1, sp_group=sp_mesh.get_group())
+                    input_ids, dim=1, sp_mesh=sp_mesh)
 
                 reward_input_ids = pad_for_sequence_parallel(
                     reward_input_ids, 0, dim=1)
@@ -766,11 +766,11 @@ def ppo(args):
                         [num_reward_tokens, _num_pad_tokens], dim=-1)
 
                 reward_input_ids = split_for_sequence_parallel(
-                    reward_input_ids, dim=1, sp_group=sp_mesh.get_group())
+                    reward_input_ids, dim=1, sp_mesh=sp_mesh)
 
                 labels = pad_for_sequence_parallel(labels, -100, dim=1)
                 labels = split_for_sequence_parallel(
-                    labels, dim=1, sp_group=sp_mesh.get_group())
+                    labels, dim=1, sp_mesh=sp_mesh)
 
             # Some reward models will add a reward token id to each sequence,
             # requiring each sequence to increase its length by one.
