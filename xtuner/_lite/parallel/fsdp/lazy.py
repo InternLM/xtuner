@@ -2,15 +2,17 @@ import torch
 import torch.distributed as dist
 from torch.distributed._tensor import DTensor, distribute_tensor
 
-from xtuner._lite import get_logger
+from xtuner._lite import get_logger, get_torch_device_module
 
 logger = get_logger()
+
+DEVICE_MODULE = get_torch_device_module()
 
 
 @torch.no_grad
 def dp_lazy_init(module, module_map, dp_mesh):
-    device = torch.cuda.current_device()
-    module.to_empty(device=torch.cuda.current_device(), recurse=False)
+    device = DEVICE_MODULE.current_device()
+    module.to_empty(device=DEVICE_MODULE.current_device(), recurse=False)
 
     if dp_mesh.get_local_rank() == 0:
         master_module = module_map[module]
@@ -41,8 +43,8 @@ def dp_lazy_init(module, module_map, dp_mesh):
 
 @torch.no_grad
 def dp_sp_lazy_init(module, module_map, dp_mesh, sp_mesh):
-    device = torch.cuda.current_device()
-    module.to_empty(device=torch.cuda.current_device(), recurse=False)
+    device = DEVICE_MODULE.current_device()
+    module.to_empty(device=DEVICE_MODULE.current_device(), recurse=False)
 
     if dp_mesh.get_local_rank() == 0 and sp_mesh.get_local_rank() == 0:
         master_module = module_map[module]
@@ -66,7 +68,7 @@ def dp_sp_lazy_init(module, module_map, dp_mesh, sp_mesh):
 
 @torch.no_grad
 def lazy_init_megatron(module, rank0_map, dp_mesh, tp_mesh=None, pp_mesh=None):
-    device = torch.cuda.current_device()
+    device = DEVICE_MODULE.current_device()
 
     if dp_mesh.get_rank() == 0:
         rank0_module = rank0_map[module]
@@ -88,7 +90,7 @@ def lazy_init_megatron(module, rank0_map, dp_mesh, tp_mesh=None, pp_mesh=None):
         for name, param in module.named_parameters(recurse=False)
     }
 
-    module.to_empty(device=torch.cuda.current_device(), recurse=False)
+    module.to_empty(device=DEVICE_MODULE.current_device(), recurse=False)
 
     for name, param in module.named_parameters(recurse=False):
         dtype = param.dtype
