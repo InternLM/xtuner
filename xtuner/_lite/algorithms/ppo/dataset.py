@@ -1,11 +1,11 @@
 import torch
-
+import numpy as np
 from xtuner._lite.chat.messages.chat import ChatMsg
 from xtuner._lite.datasets import OPENAI_CONVERT_MAP
 from ..sft import SftCollator, SftTokenizeFunction
 
 
-class PPODataset(torch.utils.data.Dataset):
+class InferDataset(torch.utils.data.Dataset):
 
     def __init__(self, prompts, responses):
         super().__init__()
@@ -18,10 +18,6 @@ class PPODataset(torch.utils.data.Dataset):
     def __len__(self):
         return len(self.prompts)
 
-    def update_policy(self, policies):
-
-        assert len(policies) == len(self.prompts)
-        self.policies = policies
 
     def __getitem__(self, item):
 
@@ -32,19 +28,40 @@ class PPODataset(torch.utils.data.Dataset):
         input_ids = prompt + response
         labels = [-100] * (num_prefill_tokens - 1) + response + [-100]
 
-        if self.policies:
-            return {
-                'input_ids': input_ids,
-                'labels': labels,
-                'num_tokens': [len(input_ids)],
-                **self.policies[item]
-            }
-        else:
-            return {
-                'input_ids': input_ids,
-                'labels': labels,
-                'num_tokens': [len(input_ids)]
-            }
+        return {
+            'input_ids': input_ids,
+            'labels': labels,
+            'num_tokens': len(input_ids)
+        }
+
+
+
+class PolicyDataset(torch.utils.data.Dataset):
+
+    def __init__(self, policies, reward_min=-5,reward_max = 5, reward_normalize=True):
+        super().__init__()
+
+        rewards = [data['reward'] for data in policies]
+        rewards = np.array(rewards).clip(reward_min, reward_max)
+
+        self.reward_mean =  rewards.mean()
+        self.reward_std = rewards.std()
+
+        if reward_normalize:
+            rewards = (rewards - rewards.mean()) / (rewards.std() + 1e-8)
+        
+        for i in range(len(policies)):
+            policies[i]['reward'] = rewards[i]
+
+        self.polices = policies
+
+    def __len__(self):
+        return len(self.polices)
+
+    
+    def __getitem__(self, item):
+
+        return self.polices[item]
 
 
 class PPOTokenizeFunction(SftTokenizeFunction):
@@ -78,11 +95,11 @@ class PPOCollator(SftCollator):
         old_logprobs = [item['old_logprobs'] for item in instances]
         ref_logprobs = [item['ref_logprobs'] for item in instances]
         old_values = [item['old_values'] for item in instances]
-        reward_score = [item['reward_score'] for item in instances]
+        reward_score = [item['reward'] for item in instances]
 
         data['old_logprobs'] = old_logprobs
         data['ref_logprobs'] = ref_logprobs
         data['old_values'] = old_values
-        data['reward_score'] = reward_score
+        data['rewards'] = reward_score
 
         return data

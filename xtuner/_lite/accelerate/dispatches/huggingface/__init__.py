@@ -45,7 +45,7 @@ DISPATCH_MAP = {
     'InternLM2FlashAttention2': _dispatch_internlm_varlen_attn_forward,
     'CLIPAttention': _dispatch_clip_attn_forward,
     'InternLM2ForRewardModel': _dispatch_internlm_reward_forward,
-    'InternLM2RMSNorm': _dispatch_rms_norm_forward
+    # 'InternLM2RMSNorm': _dispatch_rms_norm_forward
 }
 
 

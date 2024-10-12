@@ -6,7 +6,7 @@ import time
 from collections import OrderedDict
 from contextlib import nullcontext
 from datetime import datetime, timedelta
-
+from datasets import Dataset
 import torch
 import torch.distributed as dist
 from mmengine import mkdir_or_exist
@@ -16,7 +16,7 @@ from mmengine.utils.dl_utils import collect_env
 from torch.distributed._composable.checkpoint_activation import checkpoint
 from torch.distributed._composable.fsdp import MixedPrecisionPolicy
 from torch.optim import AdamW
-from torch.utils.data import ConcatDataset, DataLoader
+from torch.utils.data import DataLoader, ConcatDataset
 from transformers.utils.import_utils import is_flash_attn_2_available
 
 from xtuner._lite import (AutoTokenizer, get_device, get_logger,
@@ -24,18 +24,19 @@ from xtuner._lite import (AutoTokenizer, get_device, get_logger,
 from xtuner._lite.accelerate import (contiguous_batching_generate,
                                      dispatch_hf_code, packed_sequence,
                                      profile_time_and_memory, unpack_sequence)
-from xtuner._lite.algorithms.ppo import (CriticLoss, PPODataset, PPOPolicyLoss,
-                                         PPOTokenizeFunction,
+from xtuner._lite.algorithms.ppo import (CriticLoss, InferDataset, PPOPolicyLoss, PolicyDataset,
+                                         PPOTokenizeFunction, PPOCollator,
                                          build_actor_model, build_reward_model,
                                          compute_advantages_and_returns,
-                                         compute_rewards, gather_logprobs)
+                                         compute_kl_rewards, gather_logprobs)
 from xtuner._lite.algorithms.sft import SftCollator
 from xtuner._lite.chat import CHAT_TEMPLATE_MAP
-from xtuner._lite.datasets import (OPENAI_CONVERT_MAP, JsonlDataset,
-                                   load_datasets)
+from xtuner._lite.datasets import (OPENAI_CONVERT_MAP, JsonlDataset, DATASET_CLS_MAP, 
+                                   load_datasets, SoftPackDataset)
 from xtuner._lite.parallel import (ParallelSampler, get_dp_mesh, get_fsdp_mesh,
                                    get_sp_mesh, get_tp_mesh, get_world_mesh,
                                    pad_for_sequence_parallel, setup_parallel,
+                                   reduce_sequence_parallel_loss,
                                    split_for_sequence_parallel)
 from xtuner._lite.parallel.megatron import megatron_parallelize
 
@@ -100,6 +101,7 @@ def parse_args():
         '--sp-size', type=int, default=1, help='Sequence Parallel Size')
 
     data_args = parser.add_argument_group('data', 'Dataset Related Settings')
+    data_args.add_argument('--cache-dir', type=str)
     data_args.add_argument(
         '--datasets',
         nargs='*',
@@ -120,6 +122,12 @@ def parse_args():
         '--max-length',
         type=int,
         default=2048,
+        help=('the maximum length of each piece of data, any excess will be '
+              'truncated.'))
+    data_args.add_argument(
+        '--pretrain-max-length',
+        type=int,
+        default=32768,
         help=('the maximum length of each piece of data, any excess will be '
               'truncated.'))
     data_args.add_argument(
@@ -175,6 +183,18 @@ def parse_args():
         '--max-grad-norm', default=1, type=float, help='gradient clipping')
     optim_args.add_argument(
         '--policy-epoch', default=1, type=int, help='training epochs.')
+    optim_args.add_argument(
+        '--kl-coef', default=0.01, type=float, help='training epochs.')
+    optim_args.add_argument(
+        '--gamma', default=1.0, type=float, help='training epochs.')
+    optim_args.add_argument(
+        '--gae-lambda', default=0.99, type=float, help='training epochs.')
+    optim_args.add_argument(
+        '--reward-min', default=-5, type=float, help='training epochs.')
+    optim_args.add_argument(
+        '--reward-max', default=5, type=float, help='training epochs.')
+    optim_args.add_argument(
+        '--reward-normalize', action='store_true', help='Set logger level to `DEBUG`')
     optim_args.add_argument(
         '--warmup-ratio',
         default=0.03,
@@ -238,9 +258,30 @@ def parse_dataset_info(input_string):
     else:
         raise ValueError('Input string format is incorrect')
 
+class InternEVODataMapping():
+
+    def __init__(self, max_length):
+        self.max_length = max_length
+
+    def __call__(self, item):
+        item['input_ids'] = item['tokens']
+        del item['tokens']
+        if len(item['input_ids']) > self.max_length:
+            item['input_ids'] = item['input_ids'][:self.max_length]
+        labels = [x if x > 0 else -100 for x in item['input_ids']]
+        item['input_ids'] = [abs(x) for x in item['input_ids']]
+        item['labels'] = labels
+        item['num_tokens'] = len(item['input_ids'])
+        return item
 
 # @logger.catch
 def ppo(args):
+    # TODO system prompt
+    # TODO top p generate
+    # TODO critic init std 0.02
+    # TODO log ref kl
+    # TODO 
+
     ###########################################################################
     #                           1. Environment                                #
     ###########################################################################
@@ -368,7 +409,7 @@ def ppo(args):
     msg_collator = SftCollator(pack_batch=True)
 
     msg_sampler = ParallelSampler(
-        msg_dataset, fsdp_mesh, args.gen_global_batch, shuffle=False)
+        msg_dataset, fsdp_mesh, args.gen_global_batch, shuffle=True)
 
     msg_dataloader = DataLoader(
         msg_dataset,
@@ -381,16 +422,23 @@ def ppo(args):
         persistent_workers=args.num_workers > 0)
 
     if rank == 0:
+        # breakpoint()
         logger.info(f'[Dataloader] {len(msg_dataloader)} batches.')
         _first_batch = [msg_dataset[i] for i in range(args.gen_global_batch)]
         logger.debug(f'[Dataloader] Training Batch:\n{_first_batch}')
+    # else:
+    #     time.sleep(10000)
 
     if args.pretrain_datasets:
+        pretrain_tokenize_fn = InternEVODataMapping(args.pretrain_max_length)
+
+        DATASET_CLS_MAP['.bin'] = JsonlDataset
         pretrain_datasets = load_datasets(
             args.pretrain_datasets,
             file_types='.bin',
+            map_fns=[pretrain_tokenize_fn],
             cache_dir=args.cache_dir)
-        pretrain_dataset = ConcatDataset(pretrain_datasets)
+        pretrain_dataset = SoftPackDataset(pretrain_datasets, target=args.pretrain_max_length)
         pretrain_sampler = ParallelSampler(
             pretrain_dataset,
             dp_mesh,
@@ -440,6 +488,29 @@ def ppo(args):
         raise RuntimeError('`dtype` only supports `fp16`, `bf16` or `auto`, '
                            f'but found {args.dtype}.')
 
+    if rank == 0:
+        # Only load parameters on rank 0 to avoid each rank repeatedly loading
+        # the same model into the CPU, wasting memory
+        with torch.device('cpu'), profile_time_and_memory('[RANK_0 Load]'):
+            rank0_actor_model = build_actor_model(args.actor, dtype)
+            rank0_ref_model = build_actor_model(args.reference, dtype)
+            rank0_reward_model = build_reward_model(args.reward, dtype=dtype)
+            rank0_critic_model = build_reward_model(args.critic, dtype=dtype)
+        
+        # torch.nn.LayerNorm
+        torch.nn.init.normal_(rank0_critic_model.v_head[0].weight, mean=0,std=0.02)
+        rank0_critic_model.v_head[1].reset_parameters()
+        torch.nn.init.normal_(rank0_critic_model.v_head[-1].weight, mean=0,std=0.02)
+    else:
+        
+        rank0_actor_model = None
+        rank0_ref_model = None
+        rank0_reward_model = None
+        rank0_critic_model = None
+
+    load_sucessed = [True]
+    dist.broadcast_object_list(load_sucessed, src=0)
+
     with torch.device('meta'):
         # In order to save CPU memory and GPU memory,
         # initialize an empty complete model on all ranks first.
@@ -486,22 +557,6 @@ def ppo(args):
 
         # Some reward models will add a reward token id to each sequence.
         has_reward_token = hasattr(reward_model, 'reward_token_id')
-
-    if rank == 0:
-        # Only load parameters on rank 0 to avoid each rank repeatedly loading
-        # the same model into the CPU, wasting memory
-        with torch.device('cpu'), profile_time_and_memory('[RANK_0 Load]'):
-            rank0_actor_model = build_actor_model(args.actor, dtype)
-            rank0_ref_model = build_actor_model(args.reference, dtype)
-            rank0_reward_model = build_reward_model(args.reward, dtype=dtype)
-            rank0_critic_model = build_reward_model(args.critic, dtype=dtype)
-    else:
-        rank0_actor_model = None
-        rank0_ref_model = None
-        rank0_reward_model = None
-        rank0_critic_model = None
-
-    dist.barrier()
 
     mp_policy = MixedPrecisionPolicy(param_dtype=dtype, reduce_dtype=dtype)
 
@@ -557,18 +612,15 @@ def ppo(args):
     actor_params = [p for p in actor_model.parameters() if p.requires_grad]
     actor_optimizer = AdamW(
         actor_params,
-        lr=args.actor_lr,
-        weight_decay=args.wd,
-        betas=(0.9, 0.95))
+        lr=args.actor_lr)
 
     critic_params = [p for p in critic_model.parameters() if p.requires_grad]
     critic_optimizer = AdamW(
         critic_params,
-        lr=args.critic_lr,
-        weight_decay=args.wd,
-        betas=(0.9, 0.95))
+        lr=args.critic_lr)
 
     total_steps = len(msg_dataloader)
+    pretrain_steps = args.pretrain_global_batch // dp_size // args.pretrain_mirco_batch 
 
     if args.checkpoint_interval == -1:
         checkpoint_interval = total_steps
@@ -587,6 +639,7 @@ def ppo(args):
     policy_loss_fn = PPOPolicyLoss(loss_type='per_token')
 
     msg_iterator = iter(msg_dataloader)
+    pretrain_iterator = iter(pretrain_dataloader)
 
     start_step = 0
     start_train_t = time.time()
@@ -600,6 +653,7 @@ def ppo(args):
 
         step_policy_loss = 0
         step_critic_loss = 0
+        step_pretrain_loss = 0
         step_start_t = time.time()
 
         # if step < warmup_steps:
@@ -624,9 +678,10 @@ def ppo(args):
         data = next(msg_iterator)
         prompts = unpack_sequence(data['input_ids'].to(DEVICE),
                                   data['num_tokens'])
-        num_tokens = data['num_tokens'].to(DEVICE)
+        infer_num_tokens = data['num_tokens'].to(DEVICE)
 
         # Stage 1,  Actor Model Generation
+        step_avg_new_tokens = 0
         step_gen_start_t = time.time()
         with profile_time_and_memory('[Generate]'):
             # gradient checkpointing will affect the generation speed.
@@ -655,10 +710,12 @@ def ppo(args):
         num_prefill_tokens = data['num_tokens'].sum()
         num_new_tokens = sum([len(res) for res in responses])
         gen_throughput = (num_prefill_tokens + num_new_tokens) / step_gen_time
+
+        step_avg_new_tokens = num_new_tokens / len(responses)
         logger.debug(
             f'[Generate] Prefill {num_prefill_tokens} tokens, '
             f'Generate {num_new_tokens} tokens, '
-            f'{num_tokens.tolist()}, {[len(res) for res in responses]}')
+            f'{infer_num_tokens.tolist()}, {[len(res) for res in responses]}')
 
         prompts = [p[0].tolist() for p in prompts]
 
@@ -695,35 +752,33 @@ def ppo(args):
                 prompts.extend(_prompts)
                 responses.extend(_responses)
 
-        sequence_dataset = PPODataset(prompts, responses)
-        packed_sequence_dataloader = DataLoader(
-            sequence_dataset,
+        # Stage 2,  Infer
+        infer_dataset = InferDataset(prompts, responses)
+        infer_dataloader = DataLoader(
+            infer_dataset,
             batch_size=args.ppo_mirco_batch,
             num_workers=args.num_workers,
             collate_fn=SftCollator(pack_batch=True),
             shuffle=False,
             sampler=ParallelSampler(
-                sequence_dataset,
+                infer_dataset,
                 dp_mesh,
                 args.ppo_global_batch,
                 shuffle=False),
             persistent_workers=False)
 
-        # Stage 2,  PPO (Proximal Policy Optimization)
+        policies = []
+        for infer_packed_seq in infer_dataloader:
 
-        step_ppo_consumed_tokens = 0
-        step_ppo_start_t = time.time()
-        for packed_seq in packed_sequence_dataloader:
-
-            input_ids = packed_seq['input_ids'].to(DEVICE)
-            num_tokens = packed_seq['num_tokens'].to(DEVICE)
+            infer_input_ids = infer_packed_seq['input_ids'].to(DEVICE)
+            infer_num_tokens = infer_packed_seq['num_tokens'].to(DEVICE)
             # labels are shifted
-            labels = packed_seq['labels'].to(DEVICE)
-
+            infer_labels = infer_packed_seq['labels'].to(DEVICE)
+            infer_batch_size = infer_num_tokens.numel()
             if has_reward_token:
                 # Some reward models will add a reward token id to
                 # each sequence.
-                sequences = unpack_sequence(input_ids, num_tokens, dim=1)
+                sequences = unpack_sequence(infer_input_ids, infer_num_tokens, dim=1)
                 reward_token_id = reward_model.reward_token_id
                 reward_token_id = torch.IntTensor([reward_token_id
                                                    ]).to(DEVICE).unsqueeze(0)
@@ -733,121 +788,220 @@ def ppo(args):
                         torch.cat([seq, reward_token_id], dim=-1))
                 reward_input_ids = torch.cat(_sequences, dim=1)
 
-                num_policy_tokens = num_tokens
                 # add 1 to the length of each sequence
-                num_reward_tokens = num_tokens + 1
+                reward_num_tokens = infer_num_tokens + 1
             else:
-                reward_input_ids = input_ids
-                num_policy_tokens = num_tokens
-                num_reward_tokens = num_tokens
+                reward_input_ids = infer_input_ids
+                reward_num_tokens = infer_num_tokens
 
             if sp_size > 1:
                 # `dim` is 1 as the shape of tensor is (bs, seq_len, ...)
-                input_ids = pad_for_sequence_parallel(input_ids, 0, dim=1)
-                _num_pad_tokens = input_ids.numel() - num_policy_tokens.sum()
-                if _num_pad_tokens > 0:
-                    _num_pad_tokens = torch.IntTensor([_num_pad_tokens
-                                                       ]).to(DEVICE)
-                    num_policy_tokens = torch.cat(
-                        [num_policy_tokens, _num_pad_tokens], dim=-1)
+                infer_input_ids = pad_for_sequence_parallel(infer_input_ids, 0, dim=1)
+                _num_pad = infer_input_ids.numel() - infer_num_tokens.sum()
+                if _num_pad > 0:
+                    _num_pad = torch.IntTensor([_num_pad]).to(DEVICE)
+                    infer_num_tokens = torch.cat(
+                        [infer_num_tokens, _num_pad], dim=-1)
 
-                input_ids = split_for_sequence_parallel(
-                    input_ids, dim=1, sp_mesh=sp_mesh)
+                infer_input_ids = split_for_sequence_parallel(
+                    infer_input_ids, dim=1, sp_mesh=sp_mesh)
 
                 reward_input_ids = pad_for_sequence_parallel(
                     reward_input_ids, 0, dim=1)
 
-                _num_pad_tokens = reward_input_ids.numel(
-                ) - num_reward_tokens.sum()
-                if _num_pad_tokens > 0:
-                    _num_pad_tokens = torch.IntTensor([_num_pad_tokens
-                                                       ]).to(DEVICE)
-                    num_reward_tokens = torch.cat(
-                        [num_reward_tokens, _num_pad_tokens], dim=-1)
+                _num_pad = reward_input_ids.numel() - reward_num_tokens.sum()
+                if _num_pad > 0:
+                    _num_pad = torch.IntTensor([_num_pad]).to(DEVICE)
+                    reward_num_tokens = torch.cat(
+                        [reward_num_tokens, _num_pad], dim=-1)
 
                 reward_input_ids = split_for_sequence_parallel(
                     reward_input_ids, dim=1, sp_mesh=sp_mesh)
 
-                labels = pad_for_sequence_parallel(labels, -100, dim=1)
-                labels = split_for_sequence_parallel(
-                    labels, dim=1, sp_mesh=sp_mesh)
+                infer_labels = pad_for_sequence_parallel(infer_labels, -100, dim=1)
+                infer_labels = split_for_sequence_parallel(
+                    infer_labels, dim=1, sp_mesh=sp_mesh)
 
             # Some reward models will add a reward token id to each sequence,
             # requiring each sequence to increase its length by one.
-            with profile_time_and_memory('[Infer]'):
-                with packed_sequence(num_reward_tokens, sp_size=sp_size):
-                    with torch.no_grad():
-                        reward_scores = reward_model(reward_input_ids).logits
+            with packed_sequence(reward_num_tokens, sp_size=sp_size):
+                with torch.no_grad():
+                    packed_scores = reward_model(reward_input_ids).logits
 
-                with packed_sequence(num_policy_tokens, sp_size=sp_size):
-                    critic_values = critic_model(
-                        input_ids, use_cache=False).logits
-                    with nullcontext() if update_actor else torch.no_grad():
-                        actor_logits = actor_model(input_ids).logits
-                    with torch.no_grad():
-                        ref_logits = ref_model(input_ids).logits
+            with packed_sequence(infer_num_tokens, sp_size=sp_size):
+                with torch.no_grad():
+                    ref_logits = ref_model(infer_input_ids).logits
+                    actor_logits = actor_model(infer_input_ids).logits
+                    packed_old_values = critic_model(infer_input_ids).logits
 
             # The labels of prefill tokens and last token are -100.
             # HACK: (for sp) The -100 part takes the value of 0,
             # this part will be masked later.
-            logprobs = gather_logprobs(actor_logits, labels.clip(0))
-            ref_logprobs = gather_logprobs(ref_logits, labels.clip(0))
+            packed_old_logprobs = gather_logprobs(actor_logits, infer_labels.clip(0))
+            packed_ref_logprobs = gather_logprobs(ref_logits, infer_labels.clip(0))
 
             if sp_size > 1:
                 # In sequence parallelism, before calculating loss,
                 # it is necessary to restore back to the full sequence,
                 # same on each sp rank.
                 sp_group = sp_mesh.get_group()
-                sp_logprobs = dist.nn.functional.all_gather(logprobs, sp_group)
-                sp_critic_values = dist.nn.functional.all_gather(
-                    critic_values, sp_group)
-                sp_ref_logprobs = dist.nn.functional.all_gather(
-                    ref_logprobs, sp_group)
-                sp_reward_scores = dist.nn.functional.all_gather(
-                    reward_scores, sp_group)
-                sp_labels = dist.nn.functional.all_gather(labels, sp_group)
+                _sp_packed_old_logprobs = dist.nn.functional.all_gather(packed_old_logprobs, sp_group)
+                _sp_packed_ols_values = dist.nn.functional.all_gather(
+                    packed_old_values, sp_group)
+                _sp_packed_ref_logprobs = dist.nn.functional.all_gather(
+                    packed_ref_logprobs, sp_group)
+                _sp_packed_scores = dist.nn.functional.all_gather(
+                    packed_scores, sp_group)
+                _sp_infer_labels = dist.nn.functional.all_gather(infer_labels, sp_group)
+                _sp_input_ids = dist.nn.functional.all_gather(infer_input_ids, sp_group)
 
-                labels = torch.cat(sp_labels, dim=1)
-                logprobs = torch.cat(sp_logprobs, dim=1)
-                ref_logprobs = torch.cat(sp_ref_logprobs, dim=1)
-                critic_values = torch.cat(sp_critic_values, dim=1)
-                reward_scores = torch.cat(sp_reward_scores, dim=1)
+                infer_input_ids = torch.cat(_sp_input_ids, dim=1)
+                infer_labels = torch.cat(_sp_infer_labels, dim=1)
+                packed_old_logprobs = torch.cat(_sp_packed_old_logprobs, dim=1)
+                packed_ref_logprobs = torch.cat(_sp_packed_ref_logprobs, dim=1)
+                packed_old_values = torch.cat(_sp_packed_ols_values, dim=1)
+                packed_scores = torch.cat(_sp_packed_scores, dim=1)
 
-            unpacked_logprobs = unpack_sequence(
-                logprobs, num_policy_tokens, dim=1)
-            unpacked_ref_logprobs = unpack_sequence(
-                ref_logprobs, num_policy_tokens, dim=1)
-            unpacked_labels = unpack_sequence(labels, num_policy_tokens, dim=1)
-            unpacked_values = unpack_sequence(
-                critic_values, num_policy_tokens, dim=1)
+            unpacked_input_ids = unpack_sequence(infer_input_ids, infer_num_tokens, dim=1)
+            unpacked_labels = unpack_sequence(infer_labels, infer_num_tokens, dim=1)
+
+            old_logprobs = unpack_sequence(
+                packed_old_logprobs, infer_num_tokens, dim=1)
+            ref_logprobs = unpack_sequence(
+                packed_ref_logprobs, infer_num_tokens, dim=1)
+            
+            old_values = unpack_sequence(
+                packed_old_values, infer_num_tokens, dim=1)
             # The length of the sequence for 'scores' differs from
             # other sequences.
-            unpacked_scores = unpack_sequence(
-                reward_scores, num_reward_tokens, dim=1)
+            seq_reward_scores = unpack_sequence(
+                packed_scores, reward_num_tokens, dim=1)
 
+            for i in range(infer_batch_size):
+                assert unpacked_input_ids[i].numel() == infer_num_tokens[i]
+                assert unpacked_labels[i].numel() == infer_num_tokens[i]
+
+                _score = seq_reward_scores[i][0, -1]
+                _policy = {
+                    'reward': _score.item(), 'old_values':  old_values[i].cpu(),
+                    'ref_logprobs':  ref_logprobs[i].cpu(), 
+                    'old_logprobs': old_logprobs[i].cpu(),
+                    'input_ids': unpacked_input_ids[i].flatten().tolist(),
+                    'labels': unpacked_labels[i].flatten().tolist(),
+                    'num_tokens': infer_num_tokens[i].item()
+                }
+
+                policies.append(_policy)
+
+        # Stage 3, PPO
+        _global_policies = [None] * dp_size
+        dist.all_gather_object(_global_policies, policies, dp_mesh.get_group())
+
+        global_policies = []
+        for _rank_policies in _global_policies:
+            global_policies.extend(_rank_policies)
+
+        ppo_dataset = PolicyDataset(policies, args.reward_min, args.reward_max, args.reward_normalize)
+        
+        ppo_loader = DataLoader(
+            ppo_dataset,
+            batch_size=args.ppo_mirco_batch,
+            num_workers=args.num_workers,
+            collate_fn = PPOCollator(pack_batch=True),
+            shuffle=False,
+            sampler=ParallelSampler(
+                ppo_dataset,
+                dp_mesh,
+                args.ppo_global_batch,
+                shuffle=False),
+            persistent_workers=False)
+
+        
+        step_ppo_consumed_tokens = 0
+        step_ppo_start_t = time.time()
+        step_avg_reward = ppo_dataset.reward_mean
+
+        for packed_policy in ppo_loader:
+            
+            ppo_input_ids = packed_policy['input_ids'].to(DEVICE)
+            ppo_num_tokens = packed_policy['num_tokens'].to(DEVICE)
+            assert ppo_input_ids.numel() == ppo_num_tokens.sum()
+            ppo_batch_size = ppo_num_tokens.numel()
+            # labels are shifted
+            ppo_labels = packed_policy['labels'].to(DEVICE)
+
+            ref_logprobs = packed_policy['ref_logprobs']
+            old_values = packed_policy['old_values']
+            old_logprobs = packed_policy['old_logprobs']
+            rewards = packed_policy['rewards']
+
+            
+            if sp_size > 1:
+                # `dim` is 1 as the shape of tensor is (bs, seq_len, ...)
+                ppo_input_ids = pad_for_sequence_parallel(ppo_input_ids, 0, dim=1)
+                _num_pad = ppo_input_ids.numel() - ppo_num_tokens.sum()
+                if _num_pad > 0:
+                    _num_pad = torch.IntTensor([_num_pad]).to(DEVICE)
+                    ppo_num_tokens = torch.cat([ppo_num_tokens, _num_pad], dim=-1)
+            
+                ppo_input_ids = split_for_sequence_parallel(
+                    ppo_input_ids, dim=1, sp_mesh=sp_mesh)
+
+                ppo_labels = pad_for_sequence_parallel(ppo_labels, -100, dim=1)
+                ppo_labels = split_for_sequence_parallel(
+                    ppo_labels, dim=1, sp_mesh=sp_mesh)
+
+            with packed_sequence(ppo_num_tokens, sp_size=sp_size):
+                packed_values = critic_model(
+                    ppo_input_ids, use_cache=False).logits
+                with nullcontext() if update_actor else torch.no_grad():
+                    actor_logits = actor_model(ppo_input_ids).logits
+               
+            # The labels of prefill tokens and last token are -100.
+            # HACK: (for sp) The -100 part takes the value of 0,
+            # this part will be masked later.
+            packed_logprobs = gather_logprobs(actor_logits, ppo_labels.clip(0))
+            
+            if sp_size > 1:
+                # In sequence parallelism, before calculating loss,
+                # it is necessary to restore back to the full sequence,
+                # same on each sp rank.
+                sp_group = sp_mesh.get_group()
+                _sp_packed_logprobs = dist.nn.functional.all_gather(packed_logprobs, sp_group)
+                _sp_packed_values = dist.nn.functional.all_gather(
+                    packed_values, sp_group)
+                _sp_ppo_labels = dist.nn.functional.all_gather(ppo_labels, sp_group)
+
+                ppo_labels = torch.cat(_sp_ppo_labels, dim=1)
+                packed_logprobs = torch.cat(_sp_packed_logprobs, dim=1)
+                packed_values = torch.cat(_sp_packed_values, dim=1)
+
+            logprobs = unpack_sequence(
+                packed_logprobs, ppo_num_tokens, dim=1)
+            unpacked_labels = unpack_sequence(ppo_labels, ppo_num_tokens, dim=1)
+            critic_values = unpack_sequence(
+                packed_values, ppo_num_tokens, dim=1)
+            
             _policy_losses = []
             _critic_losses = []
-            for i in range(num_tokens.numel()):
-                assert unpacked_labels[i].size(1) == num_tokens[i]
-                # drop prefill tokens and last token
+            for i in range(ppo_batch_size):
+                assert unpacked_labels[i].numel() == ppo_num_tokens[i]
+                # drop prefill tokens and keep last token
                 mask = unpacked_labels[i] >= 0
+                mask[:, -1] = 1
 
-                _values = unpacked_values[i][mask].unsqueeze(0)
-                _ref_logprobs = unpacked_ref_logprobs[i][mask].unsqueeze(0)
-                _logprobs = unpacked_logprobs[i][mask].unsqueeze(0)
-                # the generated data is only trained for one epoch,
-                # `logprobs`` and `old_logprobs`` are the same
-                # `values`` and `old_values`` are the same
-                _old_logprobs = _logprobs.detach()
-                _old_values = _values.detach()
+                _values = critic_values[i][mask]
+                _logprobs = logprobs[i][mask]
 
-                # unpacked_scores[i] shape : (1, seq_len)
-                _score = unpacked_scores[i][:, -1].unsqueeze(0)
+                _ref_logprobs = ref_logprobs[i].to(DEVICE)[mask]
+                _old_logprobs = old_logprobs[i].to(DEVICE)[mask]
+                _old_values = old_values[i].to(DEVICE)[mask]
+                _score = rewards[i]
 
-                _rewards = compute_rewards(_old_logprobs, _ref_logprobs,
-                                           _score)
+                _kl_rewards = compute_kl_rewards(_old_logprobs, _ref_logprobs,
+                                           _score, args.kl_coef)
                 _advantages, _returns = compute_advantages_and_returns(
-                    _old_values, _rewards)
+                    _old_values, _kl_rewards, args.gamma, args.gae_lambda)
 
                 # In the first policy epoch, the actor_model and critic_model
                 # have not updated their parameters yet.
@@ -860,10 +1014,11 @@ def ppo(args):
                 _policy_losses.append(_policy_loss)
                 _critic_losses.append(_critic_loss)
 
-            policy_loss = sum(_policy_losses) / sp_size
-            critic_loss = sum(_critic_losses) / sp_size
+            # TODO add comments
+            policy_loss = sum(_policy_losses)  * dp_size 
+            critic_loss = sum(_critic_losses)  * dp_size
 
-            with packed_sequence(num_policy_tokens, sp_size=sp_size):
+            with packed_sequence(ppo_num_tokens, sp_size=sp_size):
                 # The context needs to be activated when backward,
                 # otherwise the recompute result is incorrect.
                 critic_loss.backward()
@@ -872,7 +1027,7 @@ def ppo(args):
 
             step_policy_loss += policy_loss.item()
             step_critic_loss += critic_loss.item()
-            step_ppo_consumed_tokens += num_tokens.sum() / tp_size / sp_size
+            step_ppo_consumed_tokens += infer_num_tokens.sum() / tp_size / sp_size
 
         critic_grad_norm = torch.nn.utils.clip_grad_norm_(
             critic_params, args.max_grad_norm)
@@ -881,13 +1036,53 @@ def ppo(args):
         critic_optimizer.zero_grad()
         step_ppo_time = time.time() - step_ppo_start_t
 
-        # State 3, Pretraining
+        # State 4, Pretraining
+        if update_actor:
+            for pt_step in range(pretrain_steps):
+                pretrain_data = next(pretrain_iterator)
+                pt_input_ids = pretrain_data['input_ids'].to(DEVICE)
+                pt_num_tokens = pretrain_data['num_tokens'].to(DEVICE)
+                pt_labels = pretrain_data['labels'].to(DEVICE)
 
-        actor_grad_norm = torch.nn.utils.clip_grad_norm_(
-            actor_params, args.max_grad_norm)
-        actor_grad_norm = actor_grad_norm.item()
-        actor_optimizer.step()
-        actor_optimizer.zero_grad()
+                if sp_size > 1:
+                    # `dim` is 1 as the shape of tensor is (bs, seq_len, ...)
+                    pt_input_ids = pad_for_sequence_parallel(pt_input_ids, 0, dim=1)
+                    pt_num_pad = pt_input_ids.numel() - pt_num_tokens.sum()
+                    if pt_num_pad > 0:
+                        pt_num_pad = torch.IntTensor([pt_num_pad]).to(DEVICE)
+                        pt_num_tokens = torch.cat(
+                            [pt_num_tokens, pt_num_pad], dim=-1)
+
+                    pt_input_ids = split_for_sequence_parallel(
+                        pt_input_ids, dim=1, sp_mesh=sp_mesh)
+
+                    pt_labels = pad_for_sequence_parallel(pt_labels, -100, dim=1)
+                    pt_labels = split_for_sequence_parallel(
+                        pt_labels, dim=1, sp_mesh=sp_mesh)
+                
+                # logger.debug(f'pt_num_tokens: {pt_num_tokens}')
+                with packed_sequence(pt_num_tokens, sp_size=sp_size):
+                    pt_outputs = actor_model(
+                        input_ids=pt_input_ids,
+                        labels=pt_labels)
+                    
+                    pt_loss = pt_outputs.loss / pretrain_steps
+                    if sp_size > 1:
+                        tokens_cal_loss = (pt_labels != -100).sum()
+                        pt_loss = reduce_sequence_parallel_loss(
+                            pt_loss, tokens_cal_loss, sp_mesh)
+
+                    pt_loss.backward()
+
+                step_pretrain_loss += pt_loss.item()
+            
+            actor_grad_norm = torch.nn.utils.clip_grad_norm_(
+                actor_params, args.max_grad_norm)
+            actor_grad_norm = actor_grad_norm.item()
+            actor_optimizer.step()
+            actor_optimizer.zero_grad()
+        else:
+            actor_grad_norm = 0
 
         step_time = time.time() - step_start_t
         eta = step_time * (total_steps - step)
@@ -902,8 +1097,10 @@ def ppo(args):
                         f'critic_lr: {args.critic_lr:.6f}  '
                         f'actor_grad_norm: {actor_grad_norm:.2f}  '
                         f'critic_grad_norm: {critic_grad_norm:.2f}  '
+                        f'reward: {step_avg_reward:.2f}  '
                         f'policy_loss: {step_policy_loss:.3f}  '
                         f'critic_loss: {step_critic_loss:.3f}  '
+                        f'pretrain_loss: {step_pretrain_loss:.3f}  '
                         f'max_memory: {(max_memory / 1024**3):.1f}GB  '
                         f'gen_throughput: {gen_throughput:.2f} '
                         f'num_ppo_tokens: {step_ppo_consumed_tokens}  '

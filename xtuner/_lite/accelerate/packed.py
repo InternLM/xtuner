@@ -49,7 +49,7 @@ def packed_sequence(num_tokens, enable=True, sp_size=1):
         if sp_size > 1:
             # `dim` is 1 as the shape of tensor is (bs, seq_len)
             position_ids = split_for_sequence_parallel(
-                position_ids, dim=1, sp_group=get_sp_mesh().get_group())
+                position_ids, dim=1, sp_mesh=get_sp_mesh())
 
         # ctx.update_info('num_tokens', num_tokens)
         ctx.update_info('position_ids', position_ids)

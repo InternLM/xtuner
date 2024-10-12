@@ -10,7 +10,7 @@ logger = get_logger()
 def sample(logits, top_k=40, top_p=0, temperature=1.0):
     if (logits.argmax(-1) == 0).sum() > 0:
         logger.info(logits)
-    return logits.argmax(-1)
+    # return logits.argmax(-1)
     # Apply temperature if necessary
     if temperature != 1.0:
         logits = logits / temperature

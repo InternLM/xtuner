@@ -5,7 +5,7 @@ import math
 import os
 import random
 from concurrent.futures import ThreadPoolExecutor
-
+from mmengine import mkdir_or_exist
 import numpy as np
 import torch
 from torch import distributed as dist
@@ -41,11 +41,16 @@ class JsonlDataset(torch.utils.data.Dataset):
         self.path = path
 
         if cache_dir:
+            if os.path.exists(cache_dir):
+                assert os.path.isdir(cache_dir)
+            else:
+                mkdir_or_exist(cache_dir)
+
             file_hash = calculate_jsonl_sha256(path)
             file_cache_dir = os.path.join(cache_dir, file_hash)
 
             if file_hash not in os.listdir(cache_dir):
-                os.mkdir(file_cache_dir)
+                mkdir_or_exist(file_cache_dir)
 
             if 'offsets.npy' in os.listdir(file_cache_dir):
                 _cached_file = os.path.join(file_cache_dir, 'offsets.npy')
@@ -57,7 +62,7 @@ class JsonlDataset(torch.utils.data.Dataset):
                 tok_hash = calculate_tokenize_fn_sha256(tokenize_fn)
                 tok_cache_dir = os.path.join(file_cache_dir, tok_hash)
                 if tok_hash not in os.listdir(file_cache_dir):
-                    os.mkdir(tok_cache_dir)
+                    mkdir_or_exist(tok_cache_dir)
 
                 if 'num_tokens.npy' in os.listdir(tok_cache_dir):
                     _cached_file = os.path.join(tok_cache_dir,
@@ -165,7 +170,7 @@ class JsonlDataset(torch.utils.data.Dataset):
             line = f.readline()
 
         raw_data = json.loads(line)
-
+       
         if self.tokenize_fn:
             tokenized_data = self.tokenize_fn(raw_data)
             return tokenized_data

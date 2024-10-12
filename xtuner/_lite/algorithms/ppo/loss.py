@@ -6,38 +6,58 @@ from xtuner._lite import get_logger
 logger = get_logger()
 
 
+
 def gather_logprobs(logits, labels):
     log_probs = F.log_softmax(logits, dim=-1)
     log_probs_labels = log_probs.gather(dim=-1, index=labels.unsqueeze(-1))
     return log_probs_labels.squeeze(-1)
 
-
 @torch.no_grad()
-def compute_rewards(logprobs, ref_logprobs, reward_score):
+def compute_kl_rewards(logprobs, ref_logprobs, reward_score, kl_coef=0.01):
+    
+    last_mask = torch.zeros_like(logprobs, dtype=torch.int)
+    last_mask[-1] = 1
 
-    kl_div_estimate = (logprobs - ref_logprobs)
+    kl = (logprobs - ref_logprobs)
+    kl_reward = -kl_coef * kl * (1 - last_mask)
 
-    rewards = kl_div_estimate + reward_score
+    last_reward = reward_score * last_mask
+
+    rewards = kl_reward + last_reward
 
     return rewards
 
-
 @torch.no_grad()
-def compute_advantages_and_returns(values, rewards):
+def compute_advantages_and_returns(values, rewards, gamma=1.0, gae_lambda=0.99):
+    # Adopted from https://github.com/CarperAI/trlx/blob/main/trlx/models/modeling_ppo.py#L134  # noqa: E501
+    """Function that computes advantages and returns from rewards and
+    values. Calculated as in the original PPO paper:
+    https://arxiv.org/abs/1707.06347 Note that rewards may include a KL
+    divergence loss term.
 
-    gamma = 0.1
-    lam = 0.1
+    Advantages looks like this:
+    Adv1 =  R1 + γ * λ * R2     + γ^2 * λ^2 * R3       + ...
+            - V1 + γ * (1 - λ) V2 + γ^2 * λ * (1 - λ) V3 + ...
+
+    Returns looks like this:
+    Ret1 =  R1 + γ * λ * R2     + γ^2 * λ^2 * R3       + ...
+                + γ * (1 - λ) V2 + γ^2 * λ * (1 - λ) V3 + ...
+    """
     lastgaelam = 0
     advantages_reversed = []
-    length = rewards.size()[-1]
+    length = rewards.numel()
 
     for t in reversed(range(0, length)):
-        nextvalues = values[:, t + 1] if t < length - 1 else 0.0
-        delta = rewards[:, t] + gamma * nextvalues - values[:, t]
-        lastgaelam = delta + gamma * lam * lastgaelam
+        nextvalues = values[t + 1] if t < length - 1 else 0.0
+        # Since old_rewards and old_values are masked with action_mask,
+        # i.e. they have 0's at pad tokens,
+        # delta will be 0 if current t is at a pad token,
+        # so will lastgaelam
+        delta = rewards[t] + gamma * nextvalues - values[t]
+        lastgaelam = delta + gamma * gae_lambda * lastgaelam
         advantages_reversed.append(lastgaelam)
 
-    advantages = torch.stack(advantages_reversed[::-1], dim=1)
+    advantages = torch.stack(advantages_reversed[::-1], dim=0)
     returns = advantages + values
     return advantages.detach(), returns
 
@@ -71,7 +91,6 @@ class CriticLoss(torch.nn.Module):
                 old_values,
                 returns,
                 loss_factor=None):
-        assert values.ndim == 2
 
         loss = self.critic_loss_fn(
             values=values,

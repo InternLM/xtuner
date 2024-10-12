@@ -47,7 +47,7 @@ class SoftPackDataset(torch.utils.data.Dataset):
                     info = {
                         'dataset_id': dataset_id,
                         'indices': item_buffer,
-                        'max_length': max_length_one_pack
+                        'max_length': int(max_length_one_pack)
                     }
                     pack_infos.append(info)
 
@@ -59,7 +59,7 @@ class SoftPackDataset(torch.utils.data.Dataset):
             info = {
                 'dataset_id': dataset_id,
                 'indices': item_buffer,
-                'max_length': max_length_one_pack
+                'max_length': int(max_length_one_pack)
             }
 
             pack_infos.append(info)

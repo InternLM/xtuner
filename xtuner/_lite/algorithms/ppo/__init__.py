@@ -1,6 +1,6 @@
-from .dataset import PPOCollator, PPODataset, PPOTokenizeFunction
+from .dataset import PPOCollator, InferDataset, PPOTokenizeFunction, PolicyDataset
 from .loss import (CriticLoss, PPOPolicyLoss, compute_advantages_and_returns,
-                   compute_rewards, gather_logprobs)
+                   compute_kl_rewards, gather_logprobs)
 from .model import build_actor_model, build_reward_model
 
 __all__ = [
