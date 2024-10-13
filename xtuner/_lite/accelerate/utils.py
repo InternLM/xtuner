@@ -41,5 +41,5 @@ def profile_time_and_memory(desc):
     max_memory = torch_device.max_memory_allocated()
     cost_time = time.time() - start_t
 
-    logger.info(f'{desc} Elapsed time {cost_time:.2f} seconds, '
+    logger.success(f'{desc} Elapsed time {cost_time:.2f} seconds, '
                 f'peak gpu memory {max_memory/1024**3:.1f}G')

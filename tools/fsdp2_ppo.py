@@ -18,7 +18,7 @@ from torch.distributed._composable.fsdp import MixedPrecisionPolicy
 from torch.optim import AdamW
 from torch.utils.data import DataLoader, ConcatDataset
 from transformers.utils.import_utils import is_flash_attn_2_available
-
+import json
 from xtuner._lite import (AutoTokenizer, get_device, get_logger,
                           get_torch_device_module)
 from xtuner._lite.accelerate import (contiguous_batching_generate,
@@ -38,6 +38,7 @@ from xtuner._lite.parallel import (ParallelSampler, get_dp_mesh, get_fsdp_mesh,
                                    pad_for_sequence_parallel, setup_parallel,
                                    reduce_sequence_parallel_loss,
                                    split_for_sequence_parallel)
+from xtuner._lite.parallel.fsdp import clip_grad_norm_                             
 from xtuner._lite.parallel.megatron import megatron_parallelize
 
 logger = get_logger()
@@ -50,7 +51,12 @@ SUPPORT_DATA_FORMATS = OPENAI_CONVERT_MAP.keys()
 
 def log_format(rank, debug=False):
 
-    formatter = f'[XTuner][RANK {rank}]'
+    sp_rank = get_sp_mesh().get_local_rank()
+    dp_rank = get_dp_mesh().get_local_rank()
+    tp_rank = get_tp_mesh().get_local_rank()
+    fsdp_rank = get_fsdp_mesh().get_local_rank()
+
+    formatter = f'[XTuner][RANK {rank}][DP {dp_rank}][SP {sp_rank}][TP {tp_rank}]'
     formatter += '[{time:YYYY-MM-DD HH:mm:ss}][<level>{level}</level>]'
 
     if debug:
@@ -139,14 +145,20 @@ def parse_args():
     generate_args = parser.add_argument_group('generate',
                                               'Generate Related Settings')
     generate_args.add_argument('--max-new-tokens', type=int, default=128)
-    generate_args.add_argument('--max-batch-size', type=int, default=128)
     generate_args.add_argument(
         '--gen-global-batch', type=int, default=1, help='')
     generate_args.add_argument(
-        '--gen-mirco-batch', type=int, default=1, help='')
-    generate_args.add_argument('--top-k', type=int, default=1, help='')
-    generate_args.add_argument('--top-p', type=float, default=1, help='')
-
+        '--gen-max-batch', type=int, default=64, help='')
+    generate_args.add_argument(
+        '--gen-max-new', type=int, default=1024, help='')
+    generate_args.add_argument(
+        '--gen-max-prefill', type=int, default=1024, help='')
+    generate_args.add_argument(
+        '--gen-max-length', type=int, default=1, help='')
+    generate_args.add_argument('--gen-top-k', type=int, default=0, help='')
+    generate_args.add_argument('--gen-top-p', type=float, default=1.0, help='')
+    generate_args.add_argument(
+        '--gen-do-sample', action='store_true', help='')
     optim_args = parser.add_argument_group('optim', 'Optim Related Settings')
     optim_args.add_argument(
         '--ppo-global-batch',
@@ -378,8 +390,6 @@ def ppo(args):
     #                     2. Dataset & Dataloader                             #
     ###########################################################################
 
-    start_load_data_t = time.time()
-
     tokenizer = AutoTokenizer.from_pretrained(
         args.actor, trust_remote_code=True, padding_side='right')
 
@@ -393,81 +403,78 @@ def ppo(args):
             raise NotImplementError
         stop_token_ids.append(word_ids[0])
 
-    datasets = []
-    for dset_info in args.datasets:
-        _path, _ratio, _sys_type, _sys_prompt = parse_dataset_info(dset_info)
-        _dataset = JsonlDataset(_path, _ratio, tokenize_fn)
-        datasets.append(_dataset)
+    with profile_time_and_memory('[Dataset & Dataloader]'):
 
-    msg_dataset = ConcatDataset(datasets)
+        datasets = []
+        for dset_info in args.datasets:
+            _path, _ratio, _sys_type, _sys_prompt = parse_dataset_info(dset_info)
+            _dataset = JsonlDataset(_path, _ratio, tokenize_fn)
+            datasets.append(_dataset)
 
-    if rank == 0:
-        num_samples = sum([len(dset) for dset in datasets])
-        logger.info(f'[Dataset] {num_samples} samples.')
+        msg_dataset = ConcatDataset(datasets)
 
-    assert is_flash_attn_2_available()
-    msg_collator = SftCollator(pack_batch=True)
+        if rank == 0:
+            num_samples = sum([len(dset) for dset in datasets])
+            logger.info(f'[Dataset] {num_samples} samples.')
 
-    msg_sampler = ParallelSampler(
-        msg_dataset, fsdp_mesh, args.gen_global_batch, shuffle=True)
+        assert is_flash_attn_2_available()
+        msg_collator = SftCollator(pack_batch=True)
 
-    msg_dataloader = DataLoader(
-        msg_dataset,
-        batch_size=args.gen_global_batch // fsdp_mesh.size(),
-        num_workers=args.num_workers,
-        # Ensure to round up or drop last based on the `global_batch_size`,
-        # if you want to replace a custom sampler.
-        sampler=msg_sampler,
-        collate_fn=msg_collator,
-        persistent_workers=args.num_workers > 0)
+        msg_sampler = ParallelSampler(
+            msg_dataset, fsdp_mesh, args.gen_global_batch, shuffle=True)
 
-    if rank == 0:
-        # breakpoint()
-        logger.info(f'[Dataloader] {len(msg_dataloader)} batches.')
-        _first_batch = [msg_dataset[i] for i in range(args.gen_global_batch)]
-        logger.debug(f'[Dataloader] Training Batch:\n{_first_batch}')
-    # else:
-    #     time.sleep(10000)
-
-    if args.pretrain_datasets:
-        pretrain_tokenize_fn = InternEVODataMapping(args.pretrain_max_length)
-
-        DATASET_CLS_MAP['.bin'] = JsonlDataset
-        pretrain_datasets = load_datasets(
-            args.pretrain_datasets,
-            file_types='.bin',
-            map_fns=[pretrain_tokenize_fn],
-            cache_dir=args.cache_dir)
-        pretrain_dataset = SoftPackDataset(pretrain_datasets, target=args.pretrain_max_length)
-        pretrain_sampler = ParallelSampler(
-            pretrain_dataset,
-            dp_mesh,
-            args.pretrain_global_batch,
-            shuffle=True)
-
-        pretrain_dataloader = DataLoader(
-            pretrain_dataset,
-            batch_size=args.pretrain_mirco_batch,
+        msg_dataloader = DataLoader(
+            msg_dataset,
+            batch_size=args.gen_global_batch // fsdp_mesh.size(),
             num_workers=args.num_workers,
             # Ensure to round up or drop last based on the `global_batch_size`,
             # if you want to replace a custom sampler.
-            sampler=pretrain_sampler,
+            sampler=msg_sampler,
             collate_fn=msg_collator,
             persistent_workers=args.num_workers > 0)
 
         if rank == 0:
-            logger.info(
-                f'[Pretrain Dataloader] {len(pretrain_dataloader)} batches.')
-            _first_batch = [
-                pretrain_dataset[i] for i in range(args.pretrain_global_batch)
-            ]
-            logger.debug(
-                f'[Pretrain Dataloader] Training Batch:\n{_first_batch}')
+            logger.info(f'[Dataloader] {len(msg_dataloader)} batches.')
+            _first_batch = [msg_dataset[i] for i in range(args.gen_global_batch)]
+            logger.debug(f'[Dataloader] Training Batch:\n{_first_batch}')
+        
+
+        if args.pretrain_datasets:
+            pretrain_tokenize_fn = InternEVODataMapping(args.pretrain_max_length)
+
+            DATASET_CLS_MAP['.bin'] = JsonlDataset
+            pretrain_datasets = load_datasets(
+                args.pretrain_datasets,
+                file_types='.bin',
+                map_fns=[pretrain_tokenize_fn],
+                cache_dir=args.cache_dir)
+            pretrain_dataset = SoftPackDataset(pretrain_datasets, target=args.pretrain_max_length)
+            pretrain_sampler = ParallelSampler(
+                pretrain_dataset,
+                dp_mesh,
+                args.pretrain_global_batch,
+                shuffle=True)
+
+            pretrain_dataloader = DataLoader(
+                pretrain_dataset,
+                batch_size=args.pretrain_mirco_batch,
+                num_workers=args.num_workers,
+                # Ensure to round up or drop last based on the `global_batch_size`,
+                # if you want to replace a custom sampler.
+                sampler=pretrain_sampler,
+                collate_fn=msg_collator,
+                persistent_workers=args.num_workers > 0)
+
+            if rank == 0:
+                logger.info(
+                    f'[Pretrain Dataloader] {len(pretrain_dataloader)} batches.')
+                _first_batch = [
+                    pretrain_dataset[i] for i in range(args.pretrain_global_batch)
+                ]
+                logger.debug(
+                    f'[Pretrain Dataloader] Training Batch:\n{_first_batch}')
 
     dist.barrier()
-
-    load_data_cost_time = time.time() - start_load_data_t
-    logger.info(f'[Dataset & Dataloader] Cost {load_data_cost_time:.2f}s')
     # -------------------    Dataset & Dataloader  End  --------------------- #
 
     ###########################################################################
@@ -620,7 +627,10 @@ def ppo(args):
         lr=args.critic_lr)
 
     total_steps = len(msg_dataloader)
-    pretrain_steps = args.pretrain_global_batch // dp_size // args.pretrain_mirco_batch 
+    if args.pretrain_datasets:
+        pretrain_steps = args.pretrain_global_batch // dp_size // args.pretrain_mirco_batch 
+    else:
+        pretrain_steps = 0
 
     if args.checkpoint_interval == -1:
         checkpoint_interval = total_steps
@@ -639,7 +649,8 @@ def ppo(args):
     policy_loss_fn = PPOPolicyLoss(loss_type='per_token')
 
     msg_iterator = iter(msg_dataloader)
-    pretrain_iterator = iter(pretrain_dataloader)
+    if args.pretrain_datasets:
+        pretrain_iterator = iter(pretrain_dataloader)
 
     start_step = 0
     start_train_t = time.time()
@@ -650,6 +661,8 @@ def ppo(args):
                 f'{(max_memory / 1024**3):.1f}GB')
 
     for step in range(start_step, total_steps):
+        
+        DEVICE_MODULE.reset_peak_memory_stats()
 
         step_policy_loss = 0
         step_critic_loss = 0
@@ -683,59 +696,36 @@ def ppo(args):
         # Stage 1,  Actor Model Generation
         step_avg_new_tokens = 0
         step_gen_start_t = time.time()
-        with profile_time_and_memory('[Generate]'):
-            # gradient checkpointing will affect the generation speed.
-            for block in actor_model.model.layers:
-                checkpoint.state(block).enable_hook = False
 
-            # During the generation stage, sequence parallelism was not used,
-            # even when the sp size is greater than 1.
-            # Per sp rank processes different prompts in parallel.
-            responses = contiguous_batching_generate(
-                actor_model,
-                prompts,
-                stop_token_ids,
-                max_length=2048,
-                max_batch_size=512,
-                max_new_tokens=args.max_new_tokens,
-                tp_size=args.tp_size)
+        # gradient checkpointing will affect the generation speed.
+        for block in actor_model.model.layers:
+            checkpoint.state(block).enable_hook = False
 
-            # restore gradient checkpointing
-            for block in actor_model.model.layers:
-                checkpoint.state(block).enable_hook = True
+        # During the generation stage, sequence parallelism was not used,
+        # even when the sp size is greater than 1.
+        # Per sp rank processes different prompts in parallel.
+        responses = contiguous_batching_generate(
+            actor_model,
+            prompts,
+            stop_token_ids,
+            max_length=args.gen_max_length,
+            max_batch_size=args.gen_max_batch,
+            max_new_tokens=args.gen_max_new,
+            do_sample=args.gen_do_sample,
+            top_k=args.gen_top_k,
+            top_p=args.gen_top_p,
+            tp_size=args.tp_size)
+
+        # restore gradient checkpointing
+        for block in actor_model.model.layers:
+            checkpoint.state(block).enable_hook = True
 
         dist.barrier()
+
+        step_avg_new_tokens = sum([len(res) for res in responses]) / len(responses)
         step_gen_time = time.time() - step_gen_start_t
-
-        num_prefill_tokens = data['num_tokens'].sum()
-        num_new_tokens = sum([len(res) for res in responses])
-        gen_throughput = (num_prefill_tokens + num_new_tokens) / step_gen_time
-
-        step_avg_new_tokens = num_new_tokens / len(responses)
-        logger.debug(
-            f'[Generate] Prefill {num_prefill_tokens} tokens, '
-            f'Generate {num_new_tokens} tokens, '
-            f'{infer_num_tokens.tolist()}, {[len(res) for res in responses]}')
-
+        
         prompts = [p[0].tolist() for p in prompts]
-
-        # Count the total number of tokens used for training PPO on all ranks
-        # It is necessary for `per-token` loss, otherwise the number of tokens
-        # for each backward is unbalanced.
-        total_ppo_tokens = sum(
-            [len(r) + len(p) for r, p in zip(responses, prompts)])
-        total_ppo_tokens = torch.IntTensor([total_ppo_tokens]).to(DEVICE)
-        dist.all_reduce(total_ppo_tokens)
-
-        total_response_tokens = sum([len(res) for res in responses])
-        total_response_tokens = torch.IntTensor([total_response_tokens
-                                                 ]).to(DEVICE)
-        dist.all_reduce(total_response_tokens)
-
-        if tp_size > 1:
-            # The results within each tp group are repetitive.
-            total_ppo_tokens = total_ppo_tokens / tp_size
-            total_response_tokens = total_response_tokens / tp_size
 
         if sp_size > 1:
             # Retrieve prompts and responses from other sp rank,
@@ -753,6 +743,9 @@ def ppo(args):
                 responses.extend(_responses)
 
         # Stage 2,  Infer
+        step_infer_start_t = time.time()
+        step_infer_consumed_tokens = 0
+
         infer_dataset = InferDataset(prompts, responses)
         infer_dataloader = DataLoader(
             infer_dataset,
@@ -760,28 +753,25 @@ def ppo(args):
             num_workers=args.num_workers,
             collate_fn=SftCollator(pack_batch=True),
             shuffle=False,
-            sampler=ParallelSampler(
-                infer_dataset,
-                dp_mesh,
-                args.ppo_global_batch,
-                shuffle=False),
             persistent_workers=False)
 
         policies = []
         for infer_packed_seq in infer_dataloader:
-
-            infer_input_ids = infer_packed_seq['input_ids'].to(DEVICE)
-            infer_num_tokens = infer_packed_seq['num_tokens'].to(DEVICE)
+            
             # labels are shifted
             infer_labels = infer_packed_seq['labels'].to(DEVICE)
+            infer_input_ids = infer_packed_seq['input_ids'].to(DEVICE)
+            infer_num_tokens = infer_packed_seq['num_tokens'].to(DEVICE)
             infer_batch_size = infer_num_tokens.numel()
+
+            step_infer_consumed_tokens += infer_num_tokens.sum() / sp_size
+            
             if has_reward_token:
                 # Some reward models will add a reward token id to
                 # each sequence.
                 sequences = unpack_sequence(infer_input_ids, infer_num_tokens, dim=1)
                 reward_token_id = reward_model.reward_token_id
-                reward_token_id = torch.IntTensor([reward_token_id
-                                                   ]).to(DEVICE).unsqueeze(0)
+                reward_token_id = torch.IntTensor([[reward_token_id]]).to(DEVICE)
                 _sequences = []
                 for seq in sequences:
                     _sequences.append(
@@ -830,15 +820,15 @@ def ppo(args):
 
             with packed_sequence(infer_num_tokens, sp_size=sp_size):
                 with torch.no_grad():
-                    ref_logits = ref_model(infer_input_ids).logits
-                    actor_logits = actor_model(infer_input_ids).logits
+                    packed_ref_logits = ref_model(infer_input_ids).logits
+                    packed_old_logits = actor_model(infer_input_ids).logits
                     packed_old_values = critic_model(infer_input_ids).logits
 
             # The labels of prefill tokens and last token are -100.
             # HACK: (for sp) The -100 part takes the value of 0,
             # this part will be masked later.
-            packed_old_logprobs = gather_logprobs(actor_logits, infer_labels.clip(0))
-            packed_ref_logprobs = gather_logprobs(ref_logits, infer_labels.clip(0))
+            packed_old_logprobs = gather_logprobs(packed_old_logits, infer_labels.clip(0))
+            packed_ref_logprobs = gather_logprobs(packed_ref_logits, infer_labels.clip(0))
 
             if sp_size > 1:
                 # In sequence parallelism, before calculating loss,
@@ -874,18 +864,32 @@ def ppo(args):
                 packed_old_values, infer_num_tokens, dim=1)
             # The length of the sequence for 'scores' differs from
             # other sequences.
-            seq_reward_scores = unpack_sequence(
+            reward_scores = unpack_sequence(
                 packed_scores, reward_num_tokens, dim=1)
 
             for i in range(infer_batch_size):
                 assert unpacked_input_ids[i].numel() == infer_num_tokens[i]
                 assert unpacked_labels[i].numel() == infer_num_tokens[i]
 
-                _score = seq_reward_scores[i][0, -1]
+                # from the last prefill token, to the second-to-last token (excluding the eos token)
+                mask = unpacked_labels[i] >= 0
+
+                _ref_logprobs = ref_logprobs[i][mask]
+                _old_logprobs = old_logprobs[i][mask]
+                _old_values = old_values[i][mask]
+                _score = reward_scores[i][0, -1]
+
+                _kl_rewards = compute_kl_rewards(_old_logprobs, _ref_logprobs,
+                                           _score, args.kl_coef)
+                _advantages, _returns = compute_advantages_and_returns(
+                    _old_values, _kl_rewards, args.gamma, args.gae_lambda)
+
                 _policy = {
-                    'reward': _score.item(), 'old_values':  old_values[i].cpu(),
-                    'ref_logprobs':  ref_logprobs[i].cpu(), 
-                    'old_logprobs': old_logprobs[i].cpu(),
+                    'reward': _score.item(), 'kl_rewards': _kl_rewards.cpu(),
+                    'advantages': _advantages.cpu(), 'returns': _returns.cpu(),
+                    'old_values':  _old_values.cpu(),
+                    'ref_logprobs':  _ref_logprobs.cpu(), 
+                    'old_logprobs': _old_logprobs.cpu(),
                     'input_ids': unpacked_input_ids[i].flatten().tolist(),
                     'labels': unpacked_labels[i].flatten().tolist(),
                     'num_tokens': infer_num_tokens[i].item()
@@ -893,16 +897,23 @@ def ppo(args):
 
                 policies.append(_policy)
 
+        step_infer_time = time.time() - step_infer_start_t
+
         # Stage 3, PPO
+        step_ppo_start_t = time.time()
+
         _global_policies = [None] * dp_size
         dist.all_gather_object(_global_policies, policies, dp_mesh.get_group())
 
         global_policies = []
         for _rank_policies in _global_policies:
             global_policies.extend(_rank_policies)
-
-        ppo_dataset = PolicyDataset(policies, args.reward_min, args.reward_max, args.reward_normalize)
         
+        ppo_dataset = PolicyDataset(global_policies, args.reward_min, args.reward_max, args.reward_normalize)
+        if rank == 0:
+            dump_file = os.path.join(args.work_dir, f'step.{step}.jsonl')
+            ppo_dataset.dump_jsonl(dump_file, tokenizer, args.debug)
+
         ppo_loader = DataLoader(
             ppo_dataset,
             batch_size=args.ppo_mirco_batch,
@@ -916,10 +927,15 @@ def ppo(args):
                 shuffle=False),
             persistent_workers=False)
 
+        # Count the total number of tokens used for training PPO on all ranks
+        # It is necessary for `per-token` loss, otherwise the number of tokens
+        # for each backward is unbalanced.
+        global_action_tokens = ppo_dataset.num_action_tokens
         
-        step_ppo_consumed_tokens = 0
-        step_ppo_start_t = time.time()
         step_avg_reward = ppo_dataset.reward_mean
+        step_avg_gen_entropy = ppo_dataset.entropy_mean
+        step_avg_ref_kl = ppo_dataset.kl_mean
+        step_ppo_consumed_tokens = 0
 
         for packed_policy in ppo_loader:
             
@@ -935,7 +951,10 @@ def ppo(args):
             old_logprobs = packed_policy['old_logprobs']
             rewards = packed_policy['rewards']
 
-            
+            advantages = packed_policy['advantages']
+            returns = packed_policy['returns']
+            kl_rewards = packed_policy['kl_rewards']
+
             if sp_size > 1:
                 # `dim` is 1 as the shape of tensor is (bs, seq_len, ...)
                 ppo_input_ids = pad_for_sequence_parallel(ppo_input_ids, 0, dim=1)
@@ -986,37 +1005,35 @@ def ppo(args):
             _critic_losses = []
             for i in range(ppo_batch_size):
                 assert unpacked_labels[i].numel() == ppo_num_tokens[i]
-                # drop prefill tokens and keep last token
-                mask = unpacked_labels[i] >= 0
-                mask[:, -1] = 1
+                # from the last prefill token, to the second-to-last token (excluding the eos token)
+                action_mask = unpacked_labels[i] >= 0
+                
 
-                _values = critic_values[i][mask]
-                _logprobs = logprobs[i][mask]
+                _values = critic_values[i][action_mask]
+                _logprobs = logprobs[i][action_mask]
 
-                _ref_logprobs = ref_logprobs[i].to(DEVICE)[mask]
-                _old_logprobs = old_logprobs[i].to(DEVICE)[mask]
-                _old_values = old_values[i].to(DEVICE)[mask]
+                _ref_logprobs = ref_logprobs[i].to(DEVICE)
+                _old_logprobs = old_logprobs[i].to(DEVICE)
+                _old_values = old_values[i].to(DEVICE)
                 _score = rewards[i]
 
-                _kl_rewards = compute_kl_rewards(_old_logprobs, _ref_logprobs,
-                                           _score, args.kl_coef)
-                _advantages, _returns = compute_advantages_and_returns(
-                    _old_values, _kl_rewards, args.gamma, args.gae_lambda)
-
-                # In the first policy epoch, the actor_model and critic_model
-                # have not updated their parameters yet.
+                _kl_rewards = kl_rewards[i].to(DEVICE)
+                _advantages = advantages[i].to(DEVICE)
+                _returns = returns[i].to(DEVICE)
+                
+                # When using per token loss, it is necessary to calibrate the 
+                # loss based on the global number of action tokens.
                 _policy_loss = policy_loss_fn(_logprobs, _old_logprobs,
                                               _advantages,
-                                              1 / total_response_tokens)
+                                              dp_size / global_action_tokens)
                 _critic_loss = critic_loss_fn(_values, _old_values, _returns,
-                                              1 / total_response_tokens)
+                                              dp_size / global_action_tokens)
 
                 _policy_losses.append(_policy_loss)
                 _critic_losses.append(_critic_loss)
 
-            # TODO add comments
-            policy_loss = sum(_policy_losses)  * dp_size 
-            critic_loss = sum(_critic_losses)  * dp_size
+            policy_loss = sum(_policy_losses) 
+            critic_loss = sum(_critic_losses) 
 
             with packed_sequence(ppo_num_tokens, sp_size=sp_size):
                 # The context needs to be activated when backward,
@@ -1029,15 +1046,29 @@ def ppo(args):
             step_critic_loss += critic_loss.item()
             step_ppo_consumed_tokens += infer_num_tokens.sum() / tp_size / sp_size
 
-        critic_grad_norm = torch.nn.utils.clip_grad_norm_(
-            critic_params, args.max_grad_norm)
+        critic_grad_norm = clip_grad_norm_(
+            critic_params, fsdp_mesh, args.max_grad_norm)
         critic_grad_norm = critic_grad_norm.item()
         critic_optimizer.step()
         critic_optimizer.zero_grad()
-        step_ppo_time = time.time() - step_ppo_start_t
 
+        actor_grad_norm = 0
+        # If there is a pretrain stage, temporally not update the parameters.
+        if args.pretrain_datasets is None and not update_actor:
+            
+            actor_grad_norm = clip_grad_norm_(
+                actor_params, fsdp_mesh, args.max_grad_norm)
+            actor_grad_norm = actor_grad_norm.item()
+            actor_optimizer.step()
+            actor_optimizer.zero_grad()
+
+        step_ppo_time = time.time() - step_ppo_start_t
+    
         # State 4, Pretraining
+        
+        step_pt_consumed_tokens = 0
         if update_actor:
+            step_pretrain_start_t = time.time() 
             for pt_step in range(pretrain_steps):
                 pretrain_data = next(pretrain_iterator)
                 pt_input_ids = pretrain_data['input_ids'].to(DEVICE)
@@ -1060,7 +1091,6 @@ def ppo(args):
                     pt_labels = split_for_sequence_parallel(
                         pt_labels, dim=1, sp_mesh=sp_mesh)
                 
-                # logger.debug(f'pt_num_tokens: {pt_num_tokens}')
                 with packed_sequence(pt_num_tokens, sp_size=sp_size):
                     pt_outputs = actor_model(
                         input_ids=pt_input_ids,
@@ -1074,20 +1104,27 @@ def ppo(args):
 
                     pt_loss.backward()
 
+                step_pt_consumed_tokens += pt_num_tokens.sum() / sp_size
                 step_pretrain_loss += pt_loss.item()
             
-            actor_grad_norm = torch.nn.utils.clip_grad_norm_(
-                actor_params, args.max_grad_norm)
+            actor_grad_norm = clip_grad_norm_(
+                actor_params, fsdp_mesh, args.max_grad_norm)
             actor_grad_norm = actor_grad_norm.item()
             actor_optimizer.step()
             actor_optimizer.zero_grad()
+
+            step_pt_time = time.time() - step_pretrain_start_t
         else:
-            actor_grad_norm = 0
+            step_pt_time = 0
 
         step_time = time.time() - step_start_t
         eta = step_time * (total_steps - step)
         eta = timedelta(seconds=int(eta))
-        ppo_tgs = int(step_ppo_consumed_tokens / step_time)
+
+        infer_tgs = int(step_infer_consumed_tokens / step_infer_time)
+        ppo_tgs = int(step_ppo_consumed_tokens / step_ppo_time)
+        pretrain_tgs = int(step_pt_consumed_tokens) / (step_pt_time + 1e-8)
+
         actor_lr = args.actor_lr if update_actor else 0.0
         max_memory = DEVICE_MODULE.max_memory_allocated()
         if is_interval(step, total_steps, args.log_interval):
@@ -1095,24 +1132,62 @@ def ppo(args):
                         f'{step + 1}/{total_steps}  '
                         f'actor_lr: {actor_lr:.6f}  '
                         f'critic_lr: {args.critic_lr:.6f}  '
-                        f'actor_grad_norm: {actor_grad_norm:.2f}  '
-                        f'critic_grad_norm: {critic_grad_norm:.2f}  '
-                        f'reward: {step_avg_reward:.2f}  '
+                        f'actor_grad_norm: {actor_grad_norm:.3f}  '
+                        f'critic_grad_norm: {critic_grad_norm:.3f}  '
+                        f'avg_reward: {step_avg_reward:.3f}  '
+                        f'avg_gen_entropy: {step_avg_gen_entropy:.3f}  '
+                        f'avg_ref_kl: {step_avg_ref_kl:.3f}  '
                         f'policy_loss: {step_policy_loss:.3f}  '
                         f'critic_loss: {step_critic_loss:.3f}  '
                         f'pretrain_loss: {step_pretrain_loss:.3f}  '
                         f'max_memory: {(max_memory / 1024**3):.1f}GB  '
-                        f'gen_throughput: {gen_throughput:.2f} '
-                        f'num_ppo_tokens: {step_ppo_consumed_tokens}  '
-                        f'ppo_tgs: {ppo_tgs} '
-                        # f'data_time: {step_data_time:.2f}s  '
-                        f'gen_time: {step_gen_time:.2f}s '
-                        f'ppo_time: {step_ppo_time:.2f}s '
-                        f'time: {step_time:.2f}s  '
+                        f'avg_new_tokens: {int(step_avg_new_tokens)}  '
+                        f'num_ppo_tokens: {int(step_ppo_consumed_tokens)}  '
+                        f'num_pretrain_tokens: {int(step_pt_consumed_tokens)}  '
+                        f'infer_tgs: {int(infer_tgs)}  '
+                        f'ppo_tgs: {int(ppo_tgs)}  '
+                        f'pretrain_tgs: {int(pretrain_tgs)}  '
+                        f'gen_time: {step_gen_time:.2f}s  '
+                        f'infer_time: {step_infer_time:.2f}s  '
+                        f'ppo_time: {step_ppo_time:.2f}s  '
+                        f'pretrain_time: {step_pt_time:.2f}s  '
+                        f'total_time: {step_time:.2f}s  '
                         f'eta: {eta}')
 
+        if is_interval(step, total_steps, checkpoint_interval):
+            DEVICE_MODULE.empty_cache()
+
+            num_digits = len(str(abs(total_steps)))
+            work_dir = args.work_dir
+            ckpt_dir = os.path.join(work_dir, f'ckpt-{step+1:0{num_digits}}')
+            hf_dir = os.path.join(work_dir, f'hf-{step+1:0{num_digits}}')
+                
+            with profile_time_and_memory('[Checkpoint]'):
+            
+                from torch.distributed._tensor import DTensor
+
+                if rank == 0:
+                    actor_state_dict = {}
+                
+                for name, param in actor_model.state_dict().items():
+                    if isinstance(param, DTensor):
+                        with torch.no_grad():
+                            full_param = param.full_tensor().cpu()
+                    else:
+                        full_param = param.cpu()
+                    
+                    if rank == 0:
+                        actor_state_dict[name] = full_param
+                
+                if rank == 0:
+                    rank0_actor_model.load_state_dict(actor_state_dict)
+                    rank0_actor_model.save_pretrained(hf_dir)
+                    tokenizer.save_pretrained(hf_dir)
+                
+                dist.barrier()
+        
     train_cost_time = time.time() - start_train_t
-    logger.info(f'[Train] Cost {timedelta(seconds=int(train_cost_time))}')
+    logger.success(f'[Train] Cost {timedelta(seconds=int(train_cost_time))}')
     # ------------------------    Training  End  ---------------------------- #
 
 

@@ -91,7 +91,7 @@ class ChatMsg(BaseModel):
 
         decorated = self.get_prompt(chat_template)
 
-        token_ids = tokenizer.encode(decorated, add_special_tokens=False)
+        token_ids = tokenizer.encode(decorated, add_special_tokens=True)
 
         if self.loss:
             label_ids = copy.deepcopy(token_ids)

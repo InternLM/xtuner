@@ -529,6 +529,15 @@ def internlm2_reward_forward(
 
     loss = None
 
+    # hidden_states = outputs[0]
+    # hidden_states = self.v_head(hidden_states)
+    # # get end reward token's score
+    # ends = attention_mask.cumsum(dim=1).argmax(dim=1).view(-1,1)
+
+    # reward_scores = torch.gather(hidden_states.squeeze(-1), 1, ends)
+
+    loss = None
+
     # if not return_dict:
     #     ssoutput = (reward_scores,) + outputs[1:]
     #     return (loss,) + output if loss is not None else output

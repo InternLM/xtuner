@@ -15,11 +15,12 @@ def gather_logprobs(logits, labels):
 @torch.no_grad()
 def compute_kl_rewards(logprobs, ref_logprobs, reward_score, kl_coef=0.01):
     
+    assert logprobs.ndim == 1
     last_mask = torch.zeros_like(logprobs, dtype=torch.int)
     last_mask[-1] = 1
 
-    kl = (logprobs - ref_logprobs)
-    kl_reward = -kl_coef * kl * (1 - last_mask)
+    kl = (ref_logprobs - logprobs)
+    kl_reward = kl_coef * kl * (1 - last_mask)
 
     last_reward = reward_score * last_mask
 
@@ -45,6 +46,8 @@ def compute_advantages_and_returns(values, rewards, gamma=1.0, gae_lambda=0.99):
     """
     lastgaelam = 0
     advantages_reversed = []
+
+    assert values.numel() == rewards.numel()
     length = rewards.numel()
 
     for t in reversed(range(0, length)):

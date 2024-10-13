@@ -7,10 +7,14 @@ from .packed import pack_sequence, packed_cumulative_length
 logger = get_logger()
 
 
-def sample(logits, top_k=40, top_p=0, temperature=1.0):
+@torch.no_grad()
+def sample(logits,do_sample=True, top_k=0, top_p=0.9, temperature=1.0):
     if (logits.argmax(-1) == 0).sum() > 0:
         logger.info(logits)
-    # return logits.argmax(-1)
+
+    if not do_sample:
+        return logits.argmax(-1)
+    
     # Apply temperature if necessary
     if temperature != 1.0:
         logits = logits / temperature
@@ -18,21 +22,25 @@ def sample(logits, top_k=40, top_p=0, temperature=1.0):
     # Apply top-k if necessary
     if top_k > 0:
         top_k = min(top_k, logits.size(-1))
-        _, indices = logits.topk(top_k)
+        _, topk_indices = logits.topk(top_k,dim=-1)
         mask = torch.ones_like(logits, dtype=torch.bool)
-        mask.scatter_(-1, indices, False)
+        mask.scatter_(-1, topk_indices, False)
         logits.masked_fill_(mask, -torch.inf)
 
     # Apply top-p (nucleus sampling) if necessary
-    if top_p > 0.0:
-        cum_probs = logits.softmax(dim=-1).cumsum(dim=-1)
-        mask = cum_probs < top_p
-        mask = torch.cat([torch.ones_like(mask[..., :1]), mask[..., :-1]],
-                         dim=-1)
-        logits.masked_fill_(mask, -torch.inf)
+    if top_p < 1.0:
 
+        sorted_logits, sorted_indices = torch.sort(logits, dim=-1, descending=True)
+        cum_probs = sorted_logits.softmax(dim=-1).cumsum(dim=-1)
+        
+        mask = (cum_probs > top_p)
+        mask[:,0] = False
+        sorted_logits.masked_fill_(mask, -torch.inf)
+        
+        logits.scatter_( -1, sorted_indices, sorted_logits)
+    
     probs = logits.softmax(-1)
-    # breakpoint()
+    
     return torch.multinomial(probs, 1).squeeze(-1)
 
 
@@ -43,6 +51,9 @@ def contiguous_batching_generate(model,
                                  max_batch_size=64,
                                  max_new_tokens=128,
                                  max_length=2048,
+                                 do_sample=False,
+                                 top_k=0,
+                                 top_p=1.0,
                                  tp_size=1,
                                  device='cuda'):
 
@@ -50,6 +61,8 @@ def contiguous_batching_generate(model,
 
     from lmdeploy.pytorch.config import CacheConfig, ModelConfig
     from lmdeploy.pytorch.engine.cache_engine import CacheEngine
+    from lmdeploy.logger import get_logger
+    get_logger('lmdeploy').setLevel('ERROR')
 
     block_size = 256
     max_batch_size = min(max_batch_size, len(input_ids))
@@ -109,7 +122,7 @@ def contiguous_batching_generate(model,
             attn_ctx.pop_info(key)
 
         # TODO (pppppM) support sampling
-        sampled = sample(outputs.logits[0, next_end_pos])
+        sampled = sample(outputs.logits[0, next_end_pos],do_sample=do_sample, top_k=top_k, top_p=top_p)
 
         _next_input_ids = []
         _next_position_ids = []
