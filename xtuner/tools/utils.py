@@ -37,6 +37,24 @@ def get_streamer(model):
     else:
         return DecodeOutputStreamer
 
+def set_model_resource(cfg):
+    if cfg.get("model_resource"):
+        fn = cfg["model_resource"].get("fn")
+        args = cfg["model_resource"].get("args", {})
+        local_path = fn(cfg["pretrained_model_name_or_path"], **args)
+        s = [(cfg._cfg_dict, k, v) for k, v in cfg._cfg_dict.items()]
+        while s:
+            current_d, current_k, current_v = s.pop()
+            if current_k == "pretrained_model_name_or_path":
+                current_d[current_k] = local_path
+
+            if isinstance(current_v, dict):
+                s.extend([(current_v, k, v) for k, v in current_v.items()])
+            elif isinstance(current_v, list):
+                for i in current_v:
+                    if isinstance(i, dict):
+                        s.extend((i, k, v) for k, v in i.items())
+
 
 class DecodeOutputStreamer(BaseStreamer):
     """Default streamer for HuggingFace models."""
