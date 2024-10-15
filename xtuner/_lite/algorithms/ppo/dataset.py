@@ -55,18 +55,18 @@ class PolicyDataset(torch.utils.data.Dataset):
         for i in range(len(policies)):
             policies[i]['reward'] = rewards[i]
 
-        old_logprobs = [data['old_logprobs'] for data in policies]
-        ref_logprobs = [data['ref_logprobs'] for data in policies]
-        entropy = []
-        kl = []
-        for _old, _ref in zip(old_logprobs, ref_logprobs):
-            _entropy = - _old.mean().item()
-            _kl = (_ref - _old).mean().item()
-            entropy.append(_entropy)
-            kl.append(_kl)
+        # old_logprobs = [data['old_logprobs'] for data in policies]
+        # ref_logprobs = [data['ref_logprobs'] for data in policies]
+        # entropy = []
+        # kl = []
+        # for _old, _ref in zip(old_logprobs, ref_logprobs):
+        #     _entropy = - _old.mean().item()
+        #     _kl = (_ref - _old).mean().item()
+        #     entropy.append(_entropy)
+        #     kl.append(_kl)
         
-        self.entropy_mean = sum(entropy) / len(entropy)
-        self.kl_mean = sum(kl) / len(kl)
+        # self.entropy_mean = sum(entropy) / len(entropy)
+        # self.kl_mean = sum(kl) / len(kl)
 
         
         num_action_tokens = 0
@@ -86,16 +86,16 @@ class PolicyDataset(torch.utils.data.Dataset):
             for policy in self.polices:
                 json_line = {
                     'num_tokens': policy['num_tokens'],
-                    'entropy': policy['old_logprobs'].mean().item(),
-                    'ref_kl': (policy['old_logprobs'] - policy['ref_logprobs']).mean().item(),
+                    # 'entropy': -policy['old_logprobs'].mean().item(),
+                    # 'ref_kl': (policy['old_logprobs'] - policy['ref_logprobs']).mean().item(),
                     'reward': policy['reward'],
                     'sequence': tokenizer.decode(policy['input_ids']),
                 }
 
                 if debug:
-                    json_line['advantages'] = policy['advantages'].tolist()
-                    json_line['kl_rewards'] = policy['kl_rewards'].tolist()
-                    json_line['returns'] = policy['returns'].tolist()
+                    # json_line['advantages'] = policy['advantages'].tolist()
+                    # json_line['kl_rewards'] = policy['kl_rewards'].tolist()
+                    # json_line['returns'] = policy['returns'].tolist()
                     json_line['input_ids'] = policy['input_ids']
                     json_line['labels'] = policy['labels']
 
@@ -139,20 +139,20 @@ class PPOCollator(SftCollator):
 
         data = super().__call__(instances)
 
-        old_logprobs = [item['old_logprobs'] for item in instances]
-        ref_logprobs = [item['ref_logprobs'] for item in instances]
-        old_values = [item['old_values'] for item in instances]
+        # old_logprobs = [item['old_logprobs'] for item in instances]
+        # ref_logprobs = [item['ref_logprobs'] for item in instances]
+        # old_values = [item['old_values'] for item in instances]
         reward_score = [item['reward'] for item in instances]
-        advantages = [item['advantages'] for item in instances]
-        returns = [item['returns'] for item in instances]
-        kl_rewards = [item['kl_rewards'] for item in instances]
+        # advantages = [item['advantages'] for item in instances]
+        # returns = [item['returns'] for item in instances]
+        # kl_rewards = [item['kl_rewards'] for item in instances]
 
-        data['old_logprobs'] = old_logprobs
-        data['ref_logprobs'] = ref_logprobs
-        data['old_values'] = old_values
+        # data['old_logprobs'] = old_logprobs
+        # data['ref_logprobs'] = ref_logprobs
+        # data['old_values'] = old_values
         data['rewards'] = reward_score
-        data['advantages'] = advantages
-        data['returns'] = returns
-        data['kl_rewards'] = kl_rewards
+        # data['advantages'] = advantages
+        # data['returns'] = returns
+        # data['kl_rewards'] = kl_rewards
 
         return data
