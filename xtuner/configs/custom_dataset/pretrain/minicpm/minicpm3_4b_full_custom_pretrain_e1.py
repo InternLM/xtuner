@@ -115,7 +115,6 @@ optim_wrapper = dict(
     dtype='float16')
 
 # learning policy
-# More information: https://github.com/open-mmlab/mmengine/blob/main/docs/en/tutorials/param_scheduler.md  # noqa: E501
 param_scheduler = [
     dict(
         type=LinearLR,
