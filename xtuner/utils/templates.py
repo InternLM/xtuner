@@ -131,6 +131,14 @@ PROMPT_TEMPLATE = ConfigDict(
         INSTRUCTION=('[INST] {input} [/INST]'),
         SEP='\n'),
     minicpm=dict(INSTRUCTION=('<用户> {input} <AI>'), SEP='\n'),
+    minicpm3=dict(
+        SYSTEM=('<|im_start|>system\n{system}<|im_end|>\n'),
+        INSTRUCTION=('<|im_start|>user\n{input}<|im_end|>\n'
+                     '<|im_start|>assistant\n'),
+        SUFFIX='<|im_end|>',
+        SUFFIX_AS_EOS=True,
+        SEP='\n',
+        STOP_WORDS=['<|im_end|>', '<|endoftext|>']),
     gemma=dict(
         # `system` field is extended by xtuner
         SYSTEM=('<start_of_turn>system\n{system}<end_of_turn>\n'),
