@@ -24,8 +24,8 @@ from xtuner._lite import (AutoTokenizer, get_device, get_logger,
 from xtuner._lite.accelerate import (contiguous_batching_generate,
                                      dispatch_hf_code, packed_sequence,
                                      profile_time_and_memory, unpack_sequence)
-from xtuner._lite.algorithms.ppo import (CriticLoss, InferDataset, PPOPolicyLoss, PolicyDataset,
-                                         PPOTokenizeFunction, PPOCollator,
+from xtuner._lite.algorithms.ppo import (CriticLoss, InferDataset, PPOPolicyLoss, RewardBuffer,
+                                         PPOTokenizeFunction, RewardBufferCollator,
                                          build_actor_model, build_reward_model,
                                          compute_advantages_and_returns,
                                          compute_kl_rewards, gather_logprobs)
@@ -40,7 +40,8 @@ from xtuner._lite.parallel import (ParallelSampler, get_dp_mesh, get_fsdp_mesh,
                                    split_for_sequence_parallel)
 from xtuner._lite.parallel.fsdp import clip_grad_norm_                             
 from xtuner._lite.parallel.megatron import megatron_parallelize
-
+import xtuner._lite.algorithms.ppo.dataset as PPO_DATASET_MOD
+PPO_DATASET_MOD.FASTER = True
 logger = get_logger()
 
 DEVICE = get_device()
@@ -148,7 +149,7 @@ def parse_args():
     generate_args.add_argument(
         '--gen-global-batch', type=int, default=1, help='')
     generate_args.add_argument(
-        '--gen-max-batch', type=int, default=64, help='')
+        '--gen-mirco-batch', type=int, default=64, help='')
     generate_args.add_argument(
         '--gen-max-new', type=int, default=1024, help='')
     generate_args.add_argument(
@@ -187,6 +188,8 @@ def parse_args():
         '--critic-lr', default=4e-5, type=float, help='learning rate.')
     optim_args.add_argument(
         '--critic-min-lr', default=0, type=float, help='learning rate.')
+    optim_args.add_argument(
+        '--pretrain-loss-weight', default=0.5, type=float, help='learning rate.')
     optim_args.add_argument(
         '--actor-freeze-steps', default=0, type=int, help='learning rate.')
     optim_args.add_argument(
@@ -697,6 +700,7 @@ def ppo(args):
         step_avg_new_tokens = 0
         step_gen_start_t = time.time()
 
+        # actor_model.eval()
         # gradient checkpointing will affect the generation speed.
         for block in actor_model.model.layers:
             checkpoint.state(block).enable_hook = False
@@ -709,7 +713,7 @@ def ppo(args):
             prompts,
             stop_token_ids,
             max_length=args.gen_max_length,
-            max_batch_size=args.gen_max_batch,
+            max_batch_size=args.gen_mirco_batch,
             max_new_tokens=args.gen_max_new,
             do_sample=args.gen_do_sample,
             top_k=args.gen_top_k,
@@ -719,6 +723,8 @@ def ppo(args):
         # restore gradient checkpointing
         for block in actor_model.model.layers:
             checkpoint.state(block).enable_hook = True
+
+        # actor_model.train()
 
         dist.barrier()
 
@@ -764,7 +770,7 @@ def ppo(args):
             infer_num_tokens = infer_packed_seq['num_tokens'].to(DEVICE)
             infer_batch_size = infer_num_tokens.numel()
 
-            step_infer_consumed_tokens += infer_num_tokens.sum() / sp_size
+            step_infer_consumed_tokens += infer_num_tokens.sum() / sp_size / tp_size
             
             if has_reward_token:
                 # Some reward models will add a reward token id to
@@ -816,13 +822,13 @@ def ppo(args):
             # requiring each sequence to increase its length by one.
             with packed_sequence(reward_num_tokens, sp_size=sp_size):
                 with torch.no_grad():
-                    packed_scores = reward_model(reward_input_ids).logits
+                    packed_scores = reward_model(reward_input_ids, use_cache=False).logits
 
             with packed_sequence(infer_num_tokens, sp_size=sp_size):
                 with torch.no_grad():
-                    packed_ref_logits = ref_model(infer_input_ids).logits
-                    packed_old_logits = actor_model(infer_input_ids).logits
-                    packed_old_values = critic_model(infer_input_ids).logits
+                    packed_ref_logits = ref_model(infer_input_ids, use_cache=False).logits
+                    packed_old_logits = actor_model(infer_input_ids, use_cache=False).logits
+                    packed_old_values = critic_model(infer_input_ids, use_cache=False).logits
 
             # The labels of prefill tokens and last token are -100.
             # HACK: (for sp) The -100 part takes the value of 0,
@@ -909,16 +915,18 @@ def ppo(args):
         for _rank_policies in _global_policies:
             global_policies.extend(_rank_policies)
         
-        ppo_dataset = PolicyDataset(global_policies, args.reward_min, args.reward_max, args.reward_normalize)
+        ppo_dataset = RewardBuffer(global_policies, args.reward_min, args.reward_max, args.reward_normalize, True)
         if rank == 0:
-            dump_file = os.path.join(args.work_dir, f'step.{step}.jsonl')
-            ppo_dataset.dump_jsonl(dump_file, tokenizer, args.debug)
+            policies_dir = os.path.join(args.work_dir, 'policies')
+            mkdir_or_exist(policies_dir)
+            policies_file = os.path.join(policies_dir, f'step.{step}.jsonl')
+            ppo_dataset.dump_jsonl(policies_file, tokenizer, args.debug)
 
         ppo_loader = DataLoader(
             ppo_dataset,
             batch_size=args.ppo_mirco_batch,
             num_workers=args.num_workers,
-            collate_fn = PPOCollator(pack_batch=True),
+            collate_fn = RewardBufferCollator(pack_batch=True),
             shuffle=False,
             sampler=ParallelSampler(
                 ppo_dataset,
@@ -932,6 +940,8 @@ def ppo(args):
         # for each backward is unbalanced.
         global_action_tokens = ppo_dataset.num_action_tokens
         
+        step_sum_values = 0
+        step_action_tokens = 0
         step_avg_reward = ppo_dataset.reward_mean
         step_avg_gen_entropy = ppo_dataset.entropy_mean
         step_avg_ref_kl = ppo_dataset.kl_mean
@@ -974,7 +984,7 @@ def ppo(args):
                 packed_values = critic_model(
                     ppo_input_ids, use_cache=False).logits
                 with nullcontext() if update_actor else torch.no_grad():
-                    actor_logits = actor_model(ppo_input_ids).logits
+                    actor_logits = actor_model(ppo_input_ids, use_cache=False).logits
                
             # The labels of prefill tokens and last token are -100.
             # HACK: (for sp) The -100 part takes the value of 0,
@@ -1008,7 +1018,6 @@ def ppo(args):
                 # from the last prefill token, to the second-to-last token (excluding the eos token)
                 action_mask = unpacked_labels[i] >= 0
                 
-
                 _values = critic_values[i][action_mask]
                 _logprobs = logprobs[i][action_mask]
 
@@ -1032,19 +1041,23 @@ def ppo(args):
                 _policy_losses.append(_policy_loss)
                 _critic_losses.append(_critic_loss)
 
+                step_sum_values += _old_values.sum().item()
+                step_action_tokens += action_mask.sum().item()
+
             policy_loss = sum(_policy_losses) 
             critic_loss = sum(_critic_losses) 
 
             with packed_sequence(ppo_num_tokens, sp_size=sp_size):
                 # The context needs to be activated when backward,
                 # otherwise the recompute result is incorrect.
-                critic_loss.backward()
                 if update_actor:
                     policy_loss.backward()
+                critic_loss.backward()
+                
 
             step_policy_loss += policy_loss.item()
             step_critic_loss += critic_loss.item()
-            step_ppo_consumed_tokens += infer_num_tokens.sum() / tp_size / sp_size
+            step_ppo_consumed_tokens += ppo_num_tokens.sum() / tp_size / sp_size
 
         critic_grad_norm = clip_grad_norm_(
             critic_params, fsdp_mesh, args.max_grad_norm)
@@ -1052,9 +1065,10 @@ def ppo(args):
         critic_optimizer.step()
         critic_optimizer.zero_grad()
 
+        step_avg_values = step_sum_values / step_action_tokens
         actor_grad_norm = 0
         # If there is a pretrain stage, temporally not update the parameters.
-        if args.pretrain_datasets is None and not update_actor:
+        if update_actor and args.pretrain_datasets is None :
             
             actor_grad_norm = clip_grad_norm_(
                 actor_params, fsdp_mesh, args.max_grad_norm)
@@ -1071,9 +1085,14 @@ def ppo(args):
             step_pretrain_start_t = time.time() 
             for pt_step in range(pretrain_steps):
                 pretrain_data = next(pretrain_iterator)
-                pt_input_ids = pretrain_data['input_ids'].to(DEVICE)
+                pt_input_ids = pretrain_data['input_ids'][:, :-1].to(DEVICE)
+                pt_labels = pretrain_data['labels'][:, 1:].to(DEVICE)
+
                 pt_num_tokens = pretrain_data['num_tokens'].to(DEVICE)
-                pt_labels = pretrain_data['labels'].to(DEVICE)
+                if pt_num_tokens[-1] == 1:
+                    pt_num_tokens = pt_num_tokensp[:-1]
+                else:
+                    pt_num_tokens[-1] = pt_num_tokens[-1] - 1
 
                 if sp_size > 1:
                     # `dim` is 1 as the shape of tensor is (bs, seq_len, ...)
@@ -1092,19 +1111,26 @@ def ppo(args):
                         pt_labels, dim=1, sp_mesh=sp_mesh)
                 
                 with packed_sequence(pt_num_tokens, sp_size=sp_size):
-                    pt_outputs = actor_model(
-                        input_ids=pt_input_ids,
-                        labels=pt_labels)
+                    pt_logits = actor_model(
+                        input_ids=pt_input_ids, use_cache=False).logits
+                    from torch.nn import functional as F
+                    pt_loss = F.cross_entropy(pt_logits.squeeze(), pt_labels.squeeze(), reduction='none') # 1, seqlen
                     
-                    pt_loss = pt_outputs.loss / pretrain_steps
                     if sp_size > 1:
-                        tokens_cal_loss = (pt_labels != -100).sum()
-                        pt_loss = reduce_sequence_parallel_loss(
-                            pt_loss, tokens_cal_loss, sp_mesh)
+                        # tokens_cal_loss = (pt_labels != -100).sum()
+                        # pt_loss = reduce_sequence_parallel_loss(
+                        #     pt_loss, tokens_cal_loss, sp_mesh)
+                        sp_group = sp_mesh.get_group()
+                        sp_pt_loss = dist.nn.functional.all_gather(pt_loss, sp_group)
+                        sp_pt_labels = dist.nn.functional.all_gather(pt_labels, sp_group)
 
+                        pt_loss = torch.cat(sp_pt_loss, dim=-1)
+                        pt_labels = torch.cat(sp_pt_labels, dim=-1)
+                    
+                    pt_loss = pt_loss.sum() / (pt_labels != -100).sum() / pretrain_steps * args.pretrain_loss_weight
                     pt_loss.backward()
 
-                step_pt_consumed_tokens += pt_num_tokens.sum() / sp_size
+                step_pt_consumed_tokens += pt_num_tokens.sum() / sp_size / tp_size
                 step_pretrain_loss += pt_loss.item()
             
             actor_grad_norm = clip_grad_norm_(
@@ -1135,8 +1161,9 @@ def ppo(args):
                         f'actor_grad_norm: {actor_grad_norm:.3f}  '
                         f'critic_grad_norm: {critic_grad_norm:.3f}  '
                         f'avg_reward: {step_avg_reward:.3f}  '
+                        f'avg_value: {step_avg_values:.3f}  '
                         f'avg_gen_entropy: {step_avg_gen_entropy:.3f}  '
-                        f'avg_ref_kl: {step_avg_ref_kl:.3f}  '
+                        f'avg_ref_kl: {step_avg_ref_kl:.8f}  '
                         f'policy_loss: {step_policy_loss:.3f}  '
                         f'critic_loss: {step_critic_loss:.3f}  '
                         f'pretrain_loss: {step_pretrain_loss:.3f}  '

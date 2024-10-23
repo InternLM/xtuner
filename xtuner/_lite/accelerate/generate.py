@@ -69,8 +69,13 @@ def contiguous_batching_generate(model,
     num_blocks = max_length // block_size * max_batch_size
     cache_config = CacheConfig(max_batch_size, block_size, num_blocks,
                                num_blocks)
+
+
     model_config = ModelConfig.from_hf_config(model.config)
+    if model.config.architectures[0] == 'InternLM3ForCausalLM':
+        model_config.num_layers = model_config.num_layers + 1
     cache_engine = CacheEngine(cache_config, model_config, world_size=tp_size)
+
     block_table = torch.arange(num_blocks).reshape(max_batch_size, -1)
 
     _packed_ids, _num_tokens = pack_sequence(input_ids[:max_batch_size])

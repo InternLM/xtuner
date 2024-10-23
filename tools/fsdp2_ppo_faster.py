@@ -25,8 +25,8 @@ from xtuner._lite import (AutoTokenizer, get_device, get_logger,
 from xtuner._lite.accelerate import (contiguous_batching_generate,
                                      dispatch_hf_code, packed_sequence,
                                      profile_time_and_memory, unpack_sequence)
-from xtuner._lite.algorithms.ppo import (CriticLoss, InferDataset, PPOPolicyLoss, PolicyDataset,
-                                         PPOTokenizeFunction, PPOCollator,
+from xtuner._lite.algorithms.ppo import (CriticLoss, InferDataset, PPOPolicyLoss, RewardBuffer,
+                                         PPOTokenizeFunction, RewardBufferCollator,
                                          build_actor_model, build_reward_model,
                                          compute_advantages_and_returns,
                                          compute_kl_rewards, gather_logprobs)
@@ -466,7 +466,7 @@ def ppo(args):
                 # if you want to replace a custom sampler.
                 sampler=pretrain_sampler,
                 collate_fn=msg_collator,
-                persistent_workers=args.num_workers > 0)
+                persistent_workers=False)
 
             if rank == 0:
                 logger.info(
@@ -654,6 +654,7 @@ def ppo(args):
 
     critic_loss_fn = CriticLoss(loss_type='per_token')
     policy_loss_fn = PPOPolicyLoss(loss_type='per_token')
+    reward_buffer = RewardBuffer(args.reward_min, args.reward_max, args.reward_normalize)
 
     msg_iterator = iter(msg_dataloader)
     if args.pretrain_datasets:
@@ -874,9 +875,18 @@ def ppo(args):
         step_pt_consumed_tokens = 0
         step_pretrain_start_t = time.time() 
         if update_actor:
-            
+            pt_data_list = [next(pretrain_iterator) for _ in range(pretrain_steps)]
+            total_pt_grad_tokens = 0
             for pt_step in range(pretrain_steps):
-                pretrain_data = next(pretrain_iterator)
+                _pt_data = pt_data_list[pt_step]
+                _pt_labels = _pt_data['labels'][:, 1:]
+                total_pt_grad_tokens += (_pt_labels >= 0).sum()
+            total_pt_grad_tokens = total_pt_grad_tokens.to(DEVICE)
+            dist.all_reduce(total_pt_grad_tokens)
+            total_pt_grad_tokens = total_pt_grad_tokens / sp_size / tp_size
+
+            for pt_step in range(pretrain_steps):
+                pretrain_data = pt_data_list[pt_step]
                 pt_input_ids = pretrain_data['input_ids'][:, :-1].to(DEVICE)
                 pt_labels = pretrain_data['labels'][:, 1:].to(DEVICE)
 
@@ -919,7 +929,7 @@ def ppo(args):
                         pt_loss = torch.cat(sp_pt_loss, dim=-1)
                         pt_labels = torch.cat(sp_pt_labels, dim=-1)
                     
-                    pt_loss = pt_loss.sum() / (pt_labels != -100).sum()
+                    pt_loss = pt_loss.sum() / total_pt_grad_tokens * args.pretrain_loss_weight * dp_size
                     pt_loss.backward()
 
                 step_pt_consumed_tokens += pt_num_tokens.sum() / sp_size / tp_size
@@ -937,21 +947,21 @@ def ppo(args):
         for _rank_policies in _global_policies:
             global_policies.extend(_rank_policies)
         
-        ppo_dataset = PolicyDataset(global_policies, args.reward_min, args.reward_max, args.reward_normalize)
+        reward_buffer.update(global_policies)
         if rank == 0:
-            policies_dir = os.path.join(args.work_dir, 'policies')
-            mkdir_or_exist(policies_dir)
-            policies_file = os.path.join(policies_dir, f'step.{step}.jsonl')
-            ppo_dataset.dump_jsonl(policies_file, tokenizer, args.debug)
+            _buffer_dir = os.path.join(args.work_dir, 'trajectories')
+            mkdir_or_exist(_buffer_dir)
+            _buffer_file = os.path.join(_buffer_dir, f'step.{step}.jsonl')
+            reward_buffer.dump_jsonl(_buffer_file, tokenizer, args.debug)
 
         ppo_loader = DataLoader(
-            ppo_dataset,
+            reward_buffer,
             batch_size=args.ppo_mirco_batch,
             num_workers=args.num_workers,
-            collate_fn = PPOCollator(pack_batch=True),
+            collate_fn = RewardBufferCollator(pack_batch=True),
             shuffle=False,
             sampler=ParallelSampler(
-                ppo_dataset,
+                reward_buffer,
                 dp_mesh,
                 args.ppo_global_batch,
                 shuffle=False),
@@ -960,13 +970,18 @@ def ppo(args):
         # Count the total number of tokens used for training PPO on all ranks
         # It is necessary for `per-token` loss, otherwise the number of tokens
         # for each backward is unbalanced.
-        global_action_tokens = ppo_dataset.num_action_tokens
+        global_action_tokens = reward_buffer.num_action_tokens
         
-        step_avg_reward = ppo_dataset.reward_mean
+        step_avg_reward = reward_buffer.current_mean
         step_sum_gen_entropy = 0
         step_sum_ref_kl = 0
+        step_sum_values = 0
+        step_sum_kl_rewards = 0
         step_action_tokens = 0
         step_ppo_consumed_tokens = 0
+        
+        step_sum_adv = 0
+        step_sum_returns = 0
 
         for packed_policy in ppo_loader:
             
@@ -1042,16 +1057,17 @@ def ppo(args):
             for i in range(ppo_batch_size):
                 assert unpacked_labels[i].numel() == ppo_num_tokens[i]
                 # from the last prefill token, to the second-to-last token (excluding the eos token)
-                action_mask = unpacked_labels[i] >= 0
+                _num_action_tokens = (unpacked_labels[i] >= 0).sum()
+
                 
-                _values = critic_values[i][action_mask]
-                _logprobs = logprobs[i][action_mask]
-                _ref_logprobs = ref_logprobs[i][action_mask]
+                _values = critic_values[i][0,-_num_action_tokens - 1:-1]
+                _logprobs = logprobs[i][0, -_num_action_tokens - 1:-1]
+                _ref_logprobs = ref_logprobs[i][0,  -_num_action_tokens - 1:-1]
                 
                 _old_logprobs = _logprobs.detach()
                 _old_values = _values.detach()
                 _score = rewards[i]
-
+                assert _old_values.numel() == _ref_logprobs.numel(), f'{_logprobs.shape}, {_old_values.shape}, {ref_logprobs[i].shape}, {critic_values[i].shape}'
                 _kl_rewards = compute_kl_rewards(_old_logprobs, _ref_logprobs,
                                            _score, args.kl_coef)
                 _advantages, _returns = compute_advantages_and_returns(
@@ -1069,8 +1085,12 @@ def ppo(args):
                 _critic_losses.append(_critic_loss)
 
                 step_sum_gen_entropy += -_old_logprobs.sum().item()
+                step_sum_values += _old_values.sum().item()
                 step_sum_ref_kl += (_ref_logprobs - _old_logprobs).sum().item()
-                step_action_tokens += action_mask.sum().item()
+                step_sum_adv += _advantages.sum().item()
+                step_sum_returns += _returns.sum().item()
+                step_sum_kl_rewards += _kl_rewards.sum().item()
+                step_action_tokens += _num_action_tokens.item()
 
             policy_loss = sum(_policy_losses) 
             critic_loss = sum(_critic_losses) 
@@ -1095,8 +1115,11 @@ def ppo(args):
         step_ppo_time = time.time() - step_ppo_start_t
         step_avg_ref_kl = step_sum_ref_kl / step_action_tokens
         step_avg_gen_entropy = step_sum_gen_entropy / step_action_tokens
-        
-    
+        step_avg_values = step_sum_values / step_action_tokens
+        step_avg_kl_rewards = step_sum_kl_rewards / step_action_tokens
+        step_avg_adv = step_sum_adv / step_action_tokens
+        step_avg_returns = step_sum_returns / step_action_tokens
+
         if update_actor:
             actor_grad_norm = clip_grad_norm_(
                 actor_params, fsdp_mesh, args.max_grad_norm)
@@ -1123,9 +1146,13 @@ def ppo(args):
                         f'critic_lr: {args.critic_lr:.6f}  '
                         f'actor_grad_norm: {actor_grad_norm:.3f}  '
                         f'critic_grad_norm: {critic_grad_norm:.3f}  '
-                        f'avg_reward: {step_avg_reward:.3f}  '
+                        f'avg_reward: {step_avg_reward:.8f}  '
+                        f'avg_kl_reward: {step_avg_kl_rewards:.8f}  '
+                        f'avg_value: {step_avg_values:.8f}  '
+                        f'avg_adv: {step_avg_adv:.8f}  '
+                        f'avg_returns: {step_avg_returns:.8f}  '
                         f'avg_gen_entropy: {step_avg_gen_entropy:.3f}  '
-                        f'avg_ref_kl: {step_avg_ref_kl:.3f}  '
+                        f'avg_ref_kl: {step_avg_ref_kl:.8f}  '
                         f'policy_loss: {step_policy_loss:.3f}  '
                         f'critic_loss: {step_critic_loss:.3f}  '
                         f'pretrain_loss: {step_pretrain_loss:.3f}  '
