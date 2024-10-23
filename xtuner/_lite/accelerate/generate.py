@@ -30,11 +30,11 @@ def sample(logits,do_sample=True, top_k=0, top_p=0.9, temperature=1.0):
     # Apply top-p (nucleus sampling) if necessary
     if top_p < 1.0:
 
-        sorted_logits, sorted_indices = torch.sort(logits, dim=-1, descending=True)
+        sorted_logits, sorted_indices = torch.sort(logits, dim=-1)
         cum_probs = sorted_logits.softmax(dim=-1).cumsum(dim=-1)
         
-        mask = (cum_probs > top_p)
-        mask[:,0] = False
+        mask = (cum_probs <= (1-  top_p))
+        mask[:,-1] = False
         sorted_logits.masked_fill_(mask, -torch.inf)
         
         logits.scatter_( -1, sorted_indices, sorted_logits)
