@@ -55,6 +55,7 @@ def clip_grad_norm_(
     if norm_type == 2:
         total_norm = local_sharded_norm**norm_type
         dist.all_reduce(total_norm, group=fsdp_mesh.get_group(mesh_dim=0))
+        total_norm = total_norm ** (1 / norm_type)
     else:
         raise NotImplementedError
 

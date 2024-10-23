@@ -47,7 +47,7 @@ def compute_advantages_and_returns(values, rewards, gamma=1.0, gae_lambda=0.99):
     lastgaelam = 0
     advantages_reversed = []
 
-    assert values.numel() == rewards.numel()
+    assert values.numel() == rewards.numel(), f'{values.numel()}, {rewards.numel()}'
     length = rewards.numel()
 
     for t in reversed(range(0, length)):

@@ -3,6 +3,7 @@ import json
 import numpy as np
 from xtuner._lite.chat.messages.chat import ChatMsg
 from xtuner._lite.datasets import OPENAI_CONVERT_MAP
+from torch import nn
 from ..sft import SftCollator, SftTokenizeFunction
 
 
@@ -37,78 +38,100 @@ class InferDataset(torch.utils.data.Dataset):
 
 
 
-class PolicyDataset(torch.utils.data.Dataset):
 
-    def __init__(self, policies, reward_min=-5,reward_max = 5, reward_normalize=True):
+FASTER = False
+class RewardBuffer(torch.utils.data.Dataset):
+
+    def __init__(self, clip_min=-5,clip_max = 5, normalize=True, faster=False):
         super().__init__()
-
-        rewards = [data['reward'] for data in policies]
-        rewards = np.array(rewards).clip(reward_min, reward_max)
-
-
-        self.reward_mean =  rewards.mean()
-        self.reward_std = rewards.std()
-
-        if reward_normalize:
-            rewards = (rewards - rewards.mean()) / (rewards.std() + 1e-8)
         
-        for i in range(len(policies)):
-            policies[i]['reward'] = rewards[i]
+       
+        self.clip_min = clip_min
+        self.clip_max = clip_max
 
-        # old_logprobs = [data['old_logprobs'] for data in policies]
-        # ref_logprobs = [data['ref_logprobs'] for data in policies]
-        # entropy = []
-        # kl = []
-        # for _old, _ref in zip(old_logprobs, ref_logprobs):
-        #     _entropy = - _old.mean().item()
-        #     _kl = (_ref - _old).mean().item()
-        #     entropy.append(_entropy)
-        #     kl.append(_kl)
+        self.normalize = normalize
         
-        # self.entropy_mean = sum(entropy) / len(entropy)
-        # self.kl_mean = sum(kl) / len(kl)
+        if self.normalize:
+            self.bn = nn.BatchNorm1d(1, momentum=None, affine=False)
+        else:
+            self.bn = None
 
+        self._num_action_tokens = 0
+        self._num_total_tokens = 0
+        self._trajectories = []
+
+        self._current_mean = 0
+
+    @property
+    def running_mean(self):
+        return self.bn.running_mean.item()
+
+    @property
+    def current_mean(self):
+        return self._current_mean
+
+    @property
+    def num_action_tokens(self):
+        return self._num_action_tokens.item()
+
+    @property
+    def num_total_tokens(self):
+        return self._num_total_tokens
+
+    def update(self, trajectories):
         
-        num_action_tokens = 0
+        rewards = [data['reward'] for data in trajectories]
+        rewards = torch.tensor(rewards)
+
+        self._current_mean = rewards.mean().item()
+
+        rewards = rewards.clip(self.clip_min, self.clip_max)
+
+        if self.normalize:
+            self.bn.train()
+            _ = self.bn(rewards.unsqueeze(-1))
+            self.bn.eval()
+            rewards = self.bn(rewards.unsqueeze(-1))
+
+        for i in range(len(trajectories)):
+            trajectories[i]['reward'] = rewards[i].item()
+
         num_total_tokens = 0
-        for policy in policies:
-            labels = np.array(policy['labels'])
+        num_action_tokens = 0
+        for data in trajectories:
+            labels = np.array(data['labels'])
             num_total_tokens += labels.size
             num_action_tokens += (labels >= 0).sum() 
-        self.num_action_tokens = num_action_tokens
-        self.num_total_tokens = num_total_tokens
 
-        self.polices = policies
+        self._num_action_tokens = num_action_tokens
+        self._num_total_tokens = num_total_tokens
+
+        self._trajectories = trajectories
 
     def dump_jsonl(self, path, tokenizer, debug=False):
     
         with open(path, 'w', encoding='utf8') as f:
-            for policy in self.polices:
+            for data in self._trajectories:
                 json_line = {
-                    'num_tokens': policy['num_tokens'],
-                    # 'entropy': -policy['old_logprobs'].mean().item(),
-                    # 'ref_kl': (policy['old_logprobs'] - policy['ref_logprobs']).mean().item(),
-                    'reward': policy['reward'],
-                    'sequence': tokenizer.decode(policy['input_ids']),
+                    'num_tokens': data['num_tokens'],
+                    'reward': data['reward'],
+                    'sequence': tokenizer.decode(data['input_ids']),
                 }
 
                 if debug:
-                    # json_line['advantages'] = policy['advantages'].tolist()
-                    # json_line['kl_rewards'] = policy['kl_rewards'].tolist()
-                    # json_line['returns'] = policy['returns'].tolist()
-                    json_line['input_ids'] = policy['input_ids']
-                    json_line['labels'] = policy['labels']
+                    json_line['input_ids'] = data['input_ids']
+                    json_line['labels'] = data['labels']
 
                 json_str = json.dumps(json_line, ensure_ascii=False)
                 f.write(json_str + '\n')
 
     def __len__(self):
-        return len(self.polices)
+        return len(self._trajectories)
 
     
     def __getitem__(self, item):
 
-        return self.polices[item]
+        return self._trajectories[item]
 
 
 class PPOTokenizeFunction(SftTokenizeFunction):
@@ -133,26 +156,11 @@ class PPOTokenizeFunction(SftTokenizeFunction):
         return tokenized
 
 
-class PPOCollator(SftCollator):
+class RewardBufferCollator(SftCollator):
 
     def __call__(self, instances):
 
         data = super().__call__(instances)
-
-        # old_logprobs = [item['old_logprobs'] for item in instances]
-        # ref_logprobs = [item['ref_logprobs'] for item in instances]
-        # old_values = [item['old_values'] for item in instances]
-        reward_score = [item['reward'] for item in instances]
-        # advantages = [item['advantages'] for item in instances]
-        # returns = [item['returns'] for item in instances]
-        # kl_rewards = [item['kl_rewards'] for item in instances]
-
-        # data['old_logprobs'] = old_logprobs
-        # data['ref_logprobs'] = ref_logprobs
-        # data['old_values'] = old_values
-        data['rewards'] = reward_score
-        # data['advantages'] = advantages
-        # data['returns'] = returns
-        # data['kl_rewards'] = kl_rewards
+        data['rewards'] =  [item['reward'] for item in instances]
 
         return data
