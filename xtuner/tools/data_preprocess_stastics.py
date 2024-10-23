@@ -1,21 +1,28 @@
-import copy
-import io
-import json
-import os
-import random
-import warnings
-
-import numpy as np
-import torch
-import torchvision.transforms as T
-from mmengine import print_log
-from mmengine.fileio import get
-from PIL import Image
-from torch.utils.data import Dataset
-from torchvision.transforms.functional import InterpolationMode
-from transformers import AutoConfig, AutoTokenizer
-
 from xtuner.utils import IGNORE_INDEX
+from transformers import AutoConfig, AutoTokenizer
+from torchvision.transforms.functional import InterpolationMode
+from PIL import Image
+from mmengine.fileio import get
+from mmengine import print_log
+import torchvision.transforms as T
+import warnings
+import random
+import io
+import copy
+import json
+from multiprocessing import Manager
+import multiprocessing
+import argparse
+from tqdm import tqdm
+from functools import partial
+import os
+import numpy as np
+from copy import deepcopy
+import torch
+
+from transformers import AutoTokenizer
+from torch.utils.data import Dataset
+PROCESSES = 64
 
 
 # Referenced from InternVL
@@ -101,7 +108,7 @@ def total_image_token(orig_size,
                                                     orig_height, image_size)
     blocks = target_aspect_ratio[0] * target_aspect_ratio[1]
 
-    if use_thumbnail:
+    if use_thumbnail and blocks != 1:
         blocks += 1
 
     return blocks
@@ -297,43 +304,32 @@ class InternVL_V1_5_Dataset(Dataset):
 
         out_data_dict = {}
         if data_dict.get('image', None) is not None:
-            image_file = data_dict['image']
-            if isinstance(image_file, (list, tuple)):
-                assert len(image_file) == 1
-                image_file = image_file[0]
-
-            try:
-                image = self.get_image(os.path.join(image_folder, image_file))
-            except Exception as e:
-                print(f'Error: {e}', flush=True)
-                print_log(f'Error: {e}', logger='current')
-                return None
-
+            image_wh = data_dict["width"], data_dict["height"]
             # Ensure the first conversation contains an image placeholder
             if '<image>' not in data_dict['conversations'][0]['value']:
                 data_dict['conversations'][0]['value'] = \
                     '<image>\n' + data_dict['conversations'][0]['value']
+            image_token = total_image_token(
+                image_wh, self.min_dynamic_patch,
+                self.max_dynamic_patch, self.image_size,
+                self.use_thumbnail)
+            num_image_tokens = self.patch_token * image_token
 
-            images = dynamic_preprocess(image, self.min_dynamic_patch,
-                                        self.max_dynamic_patch,
-                                        self.image_size, self.use_thumbnail)
-            pixel_values = [self.transformer(image) for image in images]
-            pixel_values = torch.stack(pixel_values)
-            out_data_dict['pixel_values'] = pixel_values
-
-            num_image_tokens = pixel_values.shape[0] * self.patch_token
             image_token_str = f'{self.IMG_START_TOKEN}' \
                               f'{self.IMG_CONTEXT_TOKEN * num_image_tokens}' \
                               f'{self.IMG_END_TOKEN}'
             token_dict = self.get_inputid_labels(data_dict['conversations'],
                                                  image_token_str)
-            out_data_dict.update(token_dict)
+            out_data_dict['num_patches'] = image_token
+            out_data_dict['num_tokens'] = len(token_dict['input_ids'])
+            out_data_dict['image_flags'] = torch.tensor(
+                [1] * image_token, dtype=torch.long)
         else:
             token_dict = self.get_inputid_labels(data_dict['conversations'],
                                                  None)
-            out_data_dict.update(token_dict)
-            out_data_dict['pixel_values'] = torch.zeros(
-                1, 3, self.image_size, self.image_size)
+            out_data_dict['num_patches'] = 1
+            out_data_dict['num_tokens'] = len(token_dict['input_ids'])
+            out_data_dict['image_flags'] = torch.tensor([0], dtype=torch.long)
         return out_data_dict
 
     def _rand_another(self) -> int:
@@ -412,3 +408,140 @@ class InternVL_V1_5_Dataset(Dataset):
                 f'is longer than max_length, cut to {self.max_length}',
                 logger='current')
         return {'input_ids': input_ids, 'labels': labels}
+
+
+def decode_text(args):
+    cfg_dataset, inds = args
+    dataset = InternVL_V1_5_Dataset(**cfg_dataset)
+    dataset.ds_name = "dummy"
+    token_lengths = []
+    for idx in inds:
+        item = dataset.__getitem__(idx)
+        flag = item['image_flags'].sum().item()
+        if flag == 0:
+            num_vit_patch = item['num_patches']
+            num_token = item['num_tokens']
+            image_flags = 0
+        elif flag == -1:
+            num_vit_patch = -1
+            num_token = -1
+            image_flags = -1
+        else:
+            num_vit_patch = flag
+            num_token = item['num_tokens']
+            image_flags = flag
+
+        token_lengths.append(
+            {
+                "vit_num": num_vit_patch,
+                "token_num": num_token,
+                "image_flags": image_flags
+            }
+        )
+
+    return token_lengths
+
+
+def worker(cfg_dataset, ds_name, token_lengths_path, ds_info):
+    dataset = InternVL_V1_5_Dataset(**cfg_dataset)
+    with multiprocessing.Pool(PROCESSES) as pool:
+        token_lengths_all = pool.map(decode_text, [(
+            cfg_dataset, inds) for inds in np.array_split(range(len(dataset)), PROCESSES)])
+    l_token_lengths = []
+    # token_lengths_all = decode_text((cfg_dataset, list(range(len(dataset)))))
+    for tmp in token_lengths_all:
+        l_token_lengths.extend(tmp)
+
+    length_save_path = os.path.join(
+        token_lengths_path, f"{ds_name}"+"_token_lengths.json")
+
+    with open(length_save_path, "w") as f:
+        json.dump(l_token_lengths, f, indent=4)
+    if "max_dynamic_patch" in ds_info:
+        info = {
+            "root": ds_info["root"],
+            "annotation": ds_info["annotation"],
+            "data_augment": ds_info["data_augment"],
+            "repeat_time": ds_info["repeat_time"],
+            "length": len(dataset),
+            "token_lengths": length_save_path,
+            "max_dynamic_patch": ds_info["max_dynamic_patch"]
+        }
+    else:
+        info = {
+            "root": ds_info["root"],
+            "annotation": ds_info["annotation"],
+            "data_augment": ds_info["data_augment"],
+            "repeat_time": ds_info["repeat_time"],
+            "length": len(dataset),
+            "token_lengths": length_save_path
+        }
+    return info
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--json_file",
+        default=None,
+        help="json file to statistics"
+    )
+    parser.add_argument(
+        "--worker",
+        default=64, type=int,
+        help="worker num",
+    )
+    parser.add_argument(
+        "--token_lengths_path",
+        default=None,
+        help="token_lengths_path",
+    )
+    parser.add_argument(
+        "--output_path",
+        default=None,
+        help="token_lengths_path",
+    )
+    args = parser.parse_args()
+
+    token_lengths_path = args.token_lengths_path
+
+    # setting
+    data_path = args.json_file
+    from xtuner.utils import PROMPT_TEMPLATE
+    cfg_dataset_base = {
+        'template': PROMPT_TEMPLATE.internlm2_chat,
+        'model_path': '/model/path',
+        'max_length': 4096,
+    }
+
+    ds_collections = json.loads(open(data_path).read())
+    import time
+    t_1 = time.time()
+    meta = {}
+    idx = 0
+
+    datasets = []
+    for ds_name in tqdm(ds_collections.keys()):
+        print(ds_name)
+        cfg_dataset = copy.deepcopy(cfg_dataset_base)
+        cfg_dataset['repeat_times'] = ds_collections[ds_name]['repeat_time']
+        cfg_dataset['data_paths'] = ds_collections[ds_name]['annotation']
+        cfg_dataset['image_folders'] = ds_collections[ds_name]['root']
+
+        ds_info = {}
+        ds_info["root"] = ds_collections[ds_name]["root"]
+        ds_info["annotation"] = ds_collections[ds_name]["annotation"]
+        ds_info["data_augment"] = ds_collections[ds_name].get(
+            "data_augment", False)
+        ds_info["repeat_time"] = ds_collections[ds_name]['repeat_time']
+        if 'max_dynamic_patch' in ds_collections[ds_name]:
+            ds_info['max_dynamic_patch'] = ds_collections[ds_name]['max_dynamic_patch']
+
+        meta[ds_name] = worker(cfg_dataset, ds_name,
+                               token_lengths_path, ds_info)
+
+    with open(args.output_path, "w") as f:
+        json.dump(meta.copy(), f, indent=4)
+
+    t_2 = time.time()
+    print(f"time: {t_2-t_1}")
