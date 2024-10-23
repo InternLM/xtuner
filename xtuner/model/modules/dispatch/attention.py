@@ -38,6 +38,7 @@ def flash_attn_w_mask(
         key_states,
         value_states,
         attention_mask,
+        softmax_scale=None,
         causal=True,
         dropout_p=0.0,
         window_size=(-1, -1),  # -1 means infinite context window
@@ -57,6 +58,7 @@ def flash_attn_w_mask(
         cu_seqlens_k=cu_seqlens_k,
         max_seqlen_q=max_seqlen_in_batch_q,
         max_seqlen_k=max_seqlen_in_batch_k,
+        softmax_scale=softmax_scale,
         dropout_p=dropout_p,
         causal=causal,
         window_size=window_size)
@@ -71,6 +73,7 @@ def varlen_flash_attn(
         value_states,
         cumulative_len,
         max_seqlen,
+        softmax_scale=None,
         dropout_p=0.,
         causal=True,
         window_size=(-1, -1),  # -1 means infinite context window
@@ -85,6 +88,7 @@ def varlen_flash_attn(
         cumulative_len,
         max_seqlen,
         max_seqlen,
+        softmax_scale=softmax_scale,
         dropout_p=dropout_p,
         return_attn_probs=False,
         causal=causal,

@@ -64,8 +64,8 @@ def preference_collate_fn(instances: Sequence[Dict],
         # Some tokenizers have the same eos token and pad token, so input_ids
         # cannot be masked directly based on the pad token id.
         attention_mask = torch.zeros_like(input_ids).bool()
-        for i in ori_length:
-            attention_mask[:i] = True
+        for i, length in enumerate(ori_length):
+            attention_mask[i, :length] = True
 
         bs, seq_len = input_ids.shape
         position_ids = torch.arange(seq_len).unsqueeze(0).long().repeat(bs, 1)
@@ -77,6 +77,9 @@ def preference_collate_fn(instances: Sequence[Dict],
         if attention_mask is not None:
             attention_mask = pad_for_sequence_parallel(attention_mask, 0)
         if use_varlen_attn:
+            # We use attention_mask to distinguish `input_ids` from
+            # (sequence parallel) pad tokens in `get_var_len_atten_logps`
+            # method of class `DPO` and `ORPO`
             (cumulative_len, attention_mask
              ) = pad_cumulative_len_for_sequence_parallel(cumulative_len)
 

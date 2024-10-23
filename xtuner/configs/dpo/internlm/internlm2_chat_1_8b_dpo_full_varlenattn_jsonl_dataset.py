@@ -10,7 +10,7 @@ from xtuner.dataset.collate_fns.preference_collate_fn import \
     preference_collate_fn
 from xtuner.dataset.preference_dataset import (build_preference_dataset,
                                                load_jsonl_dataset)
-from xtuner.engine.hooks import (EvaluateChatHook,
+from xtuner.engine.hooks import (DatasetInfoHook, EvaluateChatHook,
                                  VarlenAttnArgsToMessageHubHook)
 from xtuner.engine.runner import TrainLoop
 from xtuner.model.dpo import DPO
@@ -155,7 +155,7 @@ train_cfg = dict(type=TrainLoop, max_epochs=max_epochs)
 #######################################################################
 # Log the dialogue periodically during the training process, optional
 custom_hooks = [
-    # dict(type=DatasetInfoHook, tokenizer=tokenizer),
+    dict(type=DatasetInfoHook, tokenizer=tokenizer),
     dict(
         type=EvaluateChatHook,
         tokenizer=tokenizer,

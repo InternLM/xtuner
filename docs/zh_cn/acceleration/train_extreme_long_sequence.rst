@@ -56,7 +56,7 @@
     - yi-34B
     - ZeRO-3
     - 16
-    - OOM
+    - 227
 
 
 为解决长序列训练过程中的显存问题，Megatron-LM 团队和 DeepSpeed 团队分别提出了两种序列并行算法，通过对长序列进行切分的方法来降低单 GPU 上计算的序列长度。XTuner 中的序列并行设计思路参考了 DeepSpeed 的工作 `DeepSpeed Ulysses <https://arxiv.org/abs/2309.14509>`_，并加以优化， **以实现一键开启序列并行策略** 。三者的对比如下：

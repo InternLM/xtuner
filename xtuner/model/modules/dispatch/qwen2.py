@@ -5,7 +5,9 @@ from typing import Optional
 
 import torch
 import torch.distributed as dist
+import transformers
 from mmengine import MessageHub
+from mmengine.utils import digit_version
 from transformers.cache_utils import Cache
 from transformers.models.qwen2.modeling_qwen2 import (apply_rotary_pos_emb,
                                                       repeat_kv)
@@ -25,6 +27,13 @@ try:
     SUPPORT_FLASH2 = True
 except ImportError:
     pass
+
+TRANSFORMERS_VERSION = digit_version(transformers.__version__)
+IS_LOW_VERSION_TRANSFORMERS = TRANSFORMERS_VERSION < digit_version('4.43')
+
+if not IS_LOW_VERSION_TRANSFORMERS:
+    from transformers.modeling_flash_attention_utils import \
+        _flash_attention_forward
 
 
 def qwen2_attn_forward(
@@ -151,19 +160,45 @@ def qwen2_attn_forward(
         query_states, key_states, value_states = \
             pre_process_for_sequence_parallel_attn(
                 query_states, key_states, value_states)
+        # num_heads has been changed because of sequence parallel
+        # `self.num_heads`` is not used in self._flash_attention_forward
+        # in mistral/mixtral, we are doing this to avoid some unnecessary risk
+        ori_num_head = self.num_heads
+        self.num_heads = query_states.shape[-2]
 
-    attn_output = self._flash_attention_forward(
-        query_states,
-        key_states,
-        value_states,
-        attention_mask,
-        query_length=query_states.shape[1],
-        dropout=dropout_rate,
-        use_sliding_windows=use_sliding_windows,
-    )
+    if IS_LOW_VERSION_TRANSFORMERS:
+        attn_output = self._flash_attention_forward(
+            query_states,
+            key_states,
+            value_states,
+            attention_mask,
+            query_length=query_states.shape[1],
+            dropout=dropout_rate,
+            use_sliding_windows=use_sliding_windows,
+        )
+    else:
+        if (self.config.use_sliding_window
+                and getattr(self.config, 'sliding_window', None) is not None
+                and self.layer_idx >= self.config.max_window_layers):
+            # There may be bugs here, but we are aligned with Transformers
+            sliding_window = self.config.sliding_window
+        else:
+            sliding_window = None
+        attn_output = _flash_attention_forward(
+            query_states,
+            key_states,
+            value_states,
+            attention_mask,
+            query_states.shape[1],
+            dropout=dropout_rate,
+            sliding_window=sliding_window,
+            is_causal=self.is_causal,
+            use_top_left_mask=self._flash_attn_uses_top_left_mask,
+        )
 
     if enable_sequence_parallel:
         attn_output = post_process_for_sequence_parallel_attn(attn_output)
+        self.num_heads = ori_num_head
 
     attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
     attn_output = self.o_proj(attn_output)
@@ -227,7 +262,7 @@ def qwen2_varlen_attn_forward(
                                                        self.layer_idx)
 
     assert position_ids is not None
-    rotary_seq_len = max(kv_seq_len, position_ids[:, -1].max().item() + 1)
+    rotary_seq_len = max(kv_seq_len, position_ids.max().item() + 1)
     cos, sin = self.rotary_emb(value_states, seq_len=rotary_seq_len)
 
     query_states, key_states = apply_rotary_pos_emb(query_states, key_states,
