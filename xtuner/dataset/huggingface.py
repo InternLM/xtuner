@@ -65,8 +65,8 @@ def add_template_to_dataset(dataset, template_map_fn, map_num_proc):
 
 
 def tokenize_dataset(dataset, tokenizer, max_length, with_image_token,
-                     input_ids_with_output, remove_unused_columns,
-                     map_num_proc):
+                     with_audio_token, input_ids_with_output,
+                     remove_unused_columns, map_num_proc):
     assert (tokenizer is not None) and (max_length is not None), \
         f'({tokenizer}, {max_length})'
     if isinstance(tokenizer, dict) or isinstance(
@@ -78,6 +78,7 @@ def tokenize_dataset(dataset, tokenizer, max_length, with_image_token,
             tokenizer=tokenizer,
             max_length=max_length,
             with_image_token=with_image_token,
+            with_audio_token=with_audio_token,
             input_ids_with_output=input_ids_with_output),
         remove_columns=list(dataset.column_names)
         if remove_unused_columns else None,
@@ -112,6 +113,7 @@ def process(dataset,
             use_varlen_attn=False,
             input_ids_with_output=True,
             with_image_token=False,
+            with_audio_token=False,
             map_num_proc=32):
     """Post-process the dataset loaded from the Hugging Face Hub, or a local
     dataset.
@@ -153,6 +155,9 @@ def process(dataset,
         with_image_token: Whether to convert DEFAULT_IMAGE_TOKEN to
             IMAGE_TOKEN_INDEX. Typically set it to True during the training
             of VLM.
+        with_audio_token: Whether to convert DEFAULT_AUDIO_TOKEN to
+            LLAST_AUDIO_TOKEN_INDEX. Typically set it to True during the
+            training of SLM.
         map_num_proc: Max number of processes when mapping the dataset.
     """
     if use_varlen_attn:
@@ -197,7 +202,8 @@ def process(dataset,
 
     if do_dataset_tokenization:
         dataset = tokenize_dataset(dataset, tokenizer, max_length,
-                                   with_image_token, input_ids_with_output,
+                                   with_image_token, with_audio_token,
+                                   input_ids_with_output,
                                    remove_unused_columns, map_num_proc)
 
     if input_ids_with_output:
@@ -213,7 +219,7 @@ def process(dataset,
                                shuffle_before_pack, map_num_proc)
 
     # add 'length'
-    dataset = dataset.map(get_lengths, num_proc=map_num_proc)
+    dataset = dataset.map(get_lengths, num_proc=1)
     setattr(dataset, 'length', dataset['length'])
 
     return dataset
@@ -234,6 +240,7 @@ def process_hf_dataset(dataset,
                        use_varlen_attn=False,
                        input_ids_with_output=True,
                        with_image_token=False,
+                       with_audio_token=False,
                        map_num_proc=32):
     """Post-process the dataset loaded from the Hugging Face Hub, or a local
     dataset.
@@ -275,6 +282,9 @@ def process_hf_dataset(dataset,
         with_image_token: Whether to convert DEFAULT_IMAGE_TOKEN to
             IMAGE_TOKEN_INDEX. Typically set it to True during the training
             of VLM.
+        with_audio_token: Whether to convert DEFAULT_AUDIO_TOKEN to
+            LLAST_AUDIO_TOKEN_INDEX. Typically set it to True during the
+            training of SLM.
         map_num_proc: Max number of processes when mapping the dataset.
     """
     kwargs = dict(
@@ -293,6 +303,7 @@ def process_hf_dataset(dataset,
         use_varlen_attn=use_varlen_attn,
         input_ids_with_output=input_ids_with_output,
         with_image_token=with_image_token,
+        with_audio_token=with_audio_token,
         map_num_proc=map_num_proc)
     if not (dist.is_available() and dist.is_initialized()):
         return process(**kwargs)
