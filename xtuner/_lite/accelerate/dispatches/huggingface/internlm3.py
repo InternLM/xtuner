@@ -104,8 +104,12 @@ def _internlm3_self_attn_varlen_forward(
     bsz, q_len, _ = hidden_states.size()
     attn_context = MessageHub.get_instance('packed_sequence')
 
-    position_ids = attn_context.get_info('position_ids')
-    assert position_ids.size(1) == q_len, f'{position_ids.size(1)} {q_len}'
+
+    _position_ids = attn_context.get_info('position_ids')
+    if _position_ids is not None:
+        assert _position_ids.size(1) == q_len, f'{_position_ids.size(1)} {q_len}'
+        position_ids = _position_ids
+    
 
     qkv_states = self.wqkv(hidden_states)
 
@@ -318,9 +322,11 @@ def _internlm3_cross_attn_varlen_forward(
     bsz, q_len, _ = hidden_states.size()
     attn_context = MessageHub.get_instance('packed_sequence')
 
-    position_ids = attn_context.get_info('position_ids')
-    assert position_ids.size(1) == q_len, f'{position_ids.size(1)} {q_len}'
-
+    _position_ids = attn_context.get_info('position_ids')
+    if _position_ids is not None:
+        assert _position_ids.size(1) == q_len, f'{_position_ids.size(1)} {q_len}'
+        position_ids = _position_ids
+    
 
     if self.config.pretraining_tp > 1:
         # split qkv_states by tp size

@@ -71,9 +71,10 @@ def contiguous_batching_generate(model,
                                num_blocks)
 
 
-    model_config = ModelConfig.from_hf_config(model.config)
     if model.config.architectures[0] == 'InternLM3ForCausalLM':
-        model_config.num_layers = model_config.num_layers + 1
+        model.config.num_hidden_layers = model.config.num_self_decoder_layers + 1
+        
+    model_config = ModelConfig.from_hf_config(model.config)
     cache_engine = CacheEngine(cache_config, model_config, world_size=tp_size)
 
     block_table = torch.arange(num_blocks).reshape(max_batch_size, -1)
