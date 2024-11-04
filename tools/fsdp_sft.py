@@ -43,7 +43,7 @@ from xtuner._lite.accelerate import (LORA_TARGET_MAP, dispatch_hf_code,
 from xtuner._lite.algorithms.sft import SftCollator, SftTokenizeFunction
 from xtuner._lite.chat import CHAT_TEMPLATE_MAP
 from xtuner._lite.datasets import (DATASET_CLS_MAP, OPENAI_CONVERT_MAP,
-                                   SoftPackDataset, load_datasets)
+                                   SoftPackDataset, HardPackDataset, load_datasets)
 from xtuner._lite.parallel import (LengthGroupedSampler, ParallelSampler,
                                    get_dp_mesh, get_sp_mesh,
                                    pad_for_sequence_parallel,
@@ -418,8 +418,10 @@ def sft(args):
         num_tokens = sum(dset.num_tokens.sum() for dset in _datasets)
         logger.debug(f'[Dataset] {num_tokens} tokens.')
 
-    if args.dset_pack_level:
+    if args.dset_pack_level == 'soft':
         train_dataset = SoftPackDataset(_datasets, target=args.max_length)
+    elif args.dset_pack_level == 'hard':
+        train_dataset = HardPackDataset(_datasets, target=args.max_length)
     else:
         train_dataset = ConcatDataset(_datasets)
 
