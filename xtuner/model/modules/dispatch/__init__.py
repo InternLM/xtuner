@@ -43,7 +43,7 @@ LOWEST_TRANSFORMERS_VERSION = dict(
     # Refer to https://github.com/microsoft/DeepSpeed/issues/5066
     MixtralForCausalLM=digit_version('4.40'),
     CohereForCausalLM=digit_version('4.40'),
-    Qwen2ForCausalLM=digit_version('4.39'),
+    Qwen2ForCausalLM=digit_version('4.46'),
     Qwen2MoeForCausalLM=digit_version('4.40'),
     DeepseekV2ForCausalLM=digit_version('4.40'),
 )
