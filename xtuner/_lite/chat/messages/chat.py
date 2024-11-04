@@ -91,7 +91,7 @@ class ChatMsg(BaseModel):
 
         decorated = self.get_prompt(chat_template)
 
-        token_ids = tokenizer.encode(decorated, add_special_tokens=True)
+        token_ids = tokenizer.encode(decorated, add_special_tokens=False)
 
         if self.loss:
             label_ids = copy.deepcopy(token_ids)
@@ -127,9 +127,11 @@ class ChatMessages(BaseMessages):
     def tokenize(self, tokenizer: PreTrainedTokenizer,
                  chat_template: ChatTemplate) -> Dict:
 
-        input_ids = []
-        labels = []
+        input_ids = tokenizer.encode('', add_special_tokens=True)
+        labels = [IGNORE_INDEX for _ in input_ids]
         image_urls = []
+
+
 
         for msg in self.messages:
             res = msg.tokenize(tokenizer, chat_template)

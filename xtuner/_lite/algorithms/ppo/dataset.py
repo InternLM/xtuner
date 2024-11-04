@@ -81,6 +81,10 @@ class RewardBuffer(torch.utils.data.Dataset):
     def update(self, trajectories):
         
         rewards = [data['reward'] for data in trajectories]
+
+        for i in range(len(trajectories)):
+            trajectories[i]['ori_reward'] = trajectories[i]['reward']
+
         rewards = torch.tensor(rewards)
 
         self._current_mean = rewards.mean().item()
@@ -114,7 +118,7 @@ class RewardBuffer(torch.utils.data.Dataset):
             for data in self._trajectories:
                 json_line = {
                     'num_tokens': data['num_tokens'],
-                    'reward': data['reward'],
+                    'reward': data['ori_reward'],
                     'sequence': tokenizer.decode(data['input_ids']),
                 }
 

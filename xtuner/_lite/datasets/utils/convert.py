@@ -213,11 +213,11 @@ def llava_to_openai_interleave(data):
 
 def official_openai(data):
     if 'messages' in data:
-        return ChatMessages.from_dict(x)
+        return ChatMessages.from_dict(data)
     elif 'message_data' in data:
         return ChatMessages.from_dict({'messages': data['message_data']})
     else:
-        return ChatMessages.from_dict({'messages': x})
+        return ChatMessages.from_dict({'messages': data})
 
 OPENAI_CONVERT_MAP = {
     'llava':
