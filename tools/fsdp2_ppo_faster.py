@@ -33,7 +33,7 @@ from xtuner._lite.algorithms.ppo import (CriticLoss, InferDataset, PPOPolicyLoss
 from xtuner._lite.algorithms.sft import SftCollator
 from xtuner._lite.chat import CHAT_TEMPLATE_MAP
 from xtuner._lite.datasets import (OPENAI_CONVERT_MAP, JsonlDataset, DATASET_CLS_MAP, 
-                                   load_datasets, SoftPackDataset)
+                                   load_datasets, SoftPackDataset, HardPackDataset)
 from xtuner._lite.parallel import (ParallelSampler, get_dp_mesh, get_fsdp_mesh,
                                    get_sp_mesh, get_tp_mesh, get_world_mesh,
                                    pad_for_sequence_parallel, setup_parallel,
@@ -247,6 +247,8 @@ def parse_args():
         '--seed', type=int, default=0, help='random seed for the training')
     parser.add_argument(
         '--debug', action='store_true', help='Set logger level to `DEBUG`')
+    parser.add_argument(
+        '--mul-sp', action='store_true', help='Set logger level to `DEBUG`')
     args = parser.parse_args()
     return args
 
@@ -513,8 +515,8 @@ def ppo(args):
         
         # torch.nn.LayerNorm
         torch.nn.init.normal_(rank0_critic_model.v_head[0].weight, mean=0,std=0.02)
-        rank0_critic_model.v_head[1].reset_parameters()
-        torch.nn.init.normal_(rank0_critic_model.v_head[-1].weight, mean=0,std=0.02)
+        # rank0_critic_model.v_head[1].reset_parameters()
+        # torch.nn.init.normal_(rank0_critic_model.v_head[-1].weight, mean=0,std=0.02)
     else:
         
         rank0_actor_model = None
@@ -708,7 +710,10 @@ def ppo(args):
         actor_model.eval()
 
         # gradient checkpointing will affect the generation speed.
-        for block in actor_model.model.layers:
+        for block in actor_model.model.self_decoder.layers:
+            checkpoint.state(block).enable_hook = False
+
+        for block in actor_model.model.cross_decoder.layers:
             checkpoint.state(block).enable_hook = False
 
         # During the generation stage, sequence parallelism was not used,
@@ -727,12 +732,14 @@ def ppo(args):
             tp_size=args.tp_size)
 
         # restore gradient checkpointing
-        for block in actor_model.model.layers:
+        for block in actor_model.model.self_decoder.layers:
+            checkpoint.state(block).enable_hook = True
+
+        for block in actor_model.model.cross_decoder.layers:
             checkpoint.state(block).enable_hook = True
 
         actor_model.train()
         dist.barrier()
-
 
         step_avg_new_tokens = sum([len(res) for res in responses]) / len(responses)
         step_gen_time = time.time() - step_gen_start_t
@@ -783,7 +790,7 @@ def ppo(args):
                 # each sequence.
                 sequences = unpack_sequence(infer_input_ids, infer_num_tokens, dim=1)
                 reward_token_id = reward_model.reward_token_id
-                reward_token_id = torch.IntTensor([[reward_token_id]]).to(DEVICE)
+                reward_token_id = torch.IntTensor([[364, reward_token_id]]).to(DEVICE)
                 _sequences = []
                 for seq in sequences:
                     _sequences.append(
@@ -791,7 +798,7 @@ def ppo(args):
                 reward_input_ids = torch.cat(_sequences, dim=1)
 
                 # add 1 to the length of each sequence
-                reward_num_tokens = infer_num_tokens + 1
+                reward_num_tokens = infer_num_tokens + reward_token_id.numel()
             else:
                 reward_input_ids = infer_input_ids
                 reward_num_tokens = infer_num_tokens
@@ -876,14 +883,14 @@ def ppo(args):
         step_pretrain_start_t = time.time() 
         if update_actor:
             pt_data_list = [next(pretrain_iterator) for _ in range(pretrain_steps)]
-            total_pt_grad_tokens = 0
+            rank_pt_grad_tokens = 0
             for pt_step in range(pretrain_steps):
                 _pt_data = pt_data_list[pt_step]
                 _pt_labels = _pt_data['labels'][:, 1:]
-                total_pt_grad_tokens += (_pt_labels >= 0).sum()
-            total_pt_grad_tokens = total_pt_grad_tokens.to(DEVICE)
-            dist.all_reduce(total_pt_grad_tokens)
-            total_pt_grad_tokens = total_pt_grad_tokens / sp_size / tp_size
+                rank_pt_grad_tokens += (_pt_labels >= 0).sum()
+            rank_pt_grad_tokens = rank_pt_grad_tokens.to(DEVICE)
+            dist.all_reduce(rank_pt_grad_tokens)
+            total_pt_grad_tokens = rank_pt_grad_tokens * dp_size
 
             for pt_step in range(pretrain_steps):
                 pretrain_data = pt_data_list[pt_step]
@@ -929,7 +936,7 @@ def ppo(args):
                         pt_loss = torch.cat(sp_pt_loss, dim=-1)
                         pt_labels = torch.cat(sp_pt_labels, dim=-1)
                     
-                    pt_loss = pt_loss.sum() / total_pt_grad_tokens * args.pretrain_loss_weight * dp_size
+                    pt_loss = pt_loss.sum() / total_pt_grad_tokens * args.pretrain_loss_weight * dp_size 
                     pt_loss.backward()
 
                 step_pt_consumed_tokens += pt_num_tokens.sum() / sp_size / tp_size
@@ -1075,11 +1082,12 @@ def ppo(args):
                 
                 # When using per token loss, it is necessary to calibrate the 
                 # loss based on the global number of action tokens.
+                loss_factor = dp_size / global_action_tokens 
                 _policy_loss = policy_loss_fn(_logprobs, _old_logprobs,
                                               _advantages,
-                                              dp_size / global_action_tokens)
+                                              loss_factor)
                 _critic_loss = critic_loss_fn(_values, _old_values, _returns,
-                                              dp_size / global_action_tokens)
+                                              loss_factor)
 
                 _policy_losses.append(_policy_loss)
                 _critic_losses.append(_critic_loss)
