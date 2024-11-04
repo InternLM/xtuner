@@ -3,6 +3,8 @@ from .internlm2 import (megatron_internlm2, megatron_internlm2_casual,
 from .internlm3 import (megatron_internlm3, megatron_internlm3_casual,
                         megatron_internlm3_reward)
 
+from .qwen2 import (megatron_qwen2_casual, megatron_qwen2, megatron_qwen2_reward)
+
 MEGATRON_MAP = {
     'InternLM2ForCausalLM': megatron_internlm2_casual,
     'InternLM2ForRewardModel': megatron_internlm2_reward,
@@ -10,7 +12,9 @@ MEGATRON_MAP = {
     'InternLM3ForCausalLM': megatron_internlm3_casual,
     'InternLM3ForRewardModel': megatron_internlm3_reward,
     'InternLM3Model': megatron_internlm3,
-
+    'Qwen2ForCausalLM': megatron_qwen2_casual,
+    'Qwen2Model': megatron_qwen2,
+    'Qwen2ForRewardModel': megatron_qwen2_reward
 }
 
 
