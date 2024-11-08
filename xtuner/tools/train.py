@@ -23,7 +23,7 @@ from xtuner.model.modules.dispatch import SUPPORT_FLASH2
 from xtuner.model.utils import LoadWoInit, find_all_linear_names, traverse_dict
 from xtuner.registry import BUILDER, MAP_FUNC
 from xtuner.tools.utils import (auto_dtype_of_deepspeed_config,
-                                get_seed_from_checkpoint)
+                                get_seed_from_checkpoint, set_model_resource)
 
 
 def parse_args():
@@ -124,6 +124,9 @@ def check_cfg(cfg, args):
              'deepspeed_zero3)`.')
 
 
+
+
+
 def main():
     args = parse_args()
 
@@ -136,6 +139,7 @@ def main():
 
     # load config
     cfg = Config.fromfile(args.config)
+    set_model_resource(cfg)
 
     if args.cfg_options is not None:
         cfg.merge_from_dict(args.cfg_options)

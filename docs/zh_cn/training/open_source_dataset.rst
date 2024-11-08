@@ -31,6 +31,8 @@ XTuner 使用上游库 ``datasets`` 的统一载入接口 ``load_dataset``\ 。
     ``dataset=dict(type=load_dataset, path=data_path)`` 中的 ``path``
     参数即可。
 
+    若想使用 openMind 数据集，可将 ``dataset=dict(type=load_dataset, path=data_path)`` 中的 ``type`` 替换为 ``openmind.OmDataset``。
+
 
 字段格式
 --------
