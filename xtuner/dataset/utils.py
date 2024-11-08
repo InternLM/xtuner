@@ -14,7 +14,7 @@ from xtuner.utils import DEFAULT_IMAGE_TOKEN, IGNORE_INDEX, IMAGE_TOKEN_INDEX
 
 def get_bos_eos_token_ids(tokenizer):
     if tokenizer.__class__.__name__ in [
-            'QWenTokenizer', 'QWen2Tokenizer', 'Qwen2TokenizerFast'
+            'QWenTokenizer', 'Qwen2Tokenizer', 'Qwen2TokenizerFast'
     ]:
         bos_token_id = []
         eos_token_id = tokenizer.eos_token_id
