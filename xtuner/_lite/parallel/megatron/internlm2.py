@@ -4,6 +4,7 @@ from torch import nn
 from torch.distributed._tensor import Replicate, distribute_tensor
 from torch.distributed.tensor.parallel import (ColwiseParallel,
                                                PrepareModuleInput,
+                                               PrepareModuleOutput,
                                                RowwiseParallel,
                                                parallelize_module)
 
@@ -27,6 +28,7 @@ def _tp_internlm2(model, tp_mesh):
         PrepareModuleInput(
             input_layouts=(Replicate(), ),
             desired_input_layouts=(Replicate(), ),
+            use_local_output=True
         ),
         'feed_forward.w1':
         ColwiseParallel(),
@@ -38,6 +40,7 @@ def _tp_internlm2(model, tp_mesh):
         PrepareModuleInput(
             input_layouts=(Replicate(), ),
             desired_input_layouts=(Replicate(), ),
+            use_local_output=True
         )
     }
 
@@ -74,28 +77,23 @@ def _tp_internlm2(model, tp_mesh):
         distribute_tensor(norm.weight, tp_mesh, [Replicate()]))
     norm.register_parameter('weight', dist_norm_w)
 
-    emb = model.tok_embeddings
-    dist_emb_w = nn.Parameter(
-        distribute_tensor(emb.weight, tp_mesh, [Replicate()]))
-    emb.register_parameter('weight', dist_emb_w)
+    # emb = model.tok_embeddings
+    # dist_emb_w = nn.Parameter(
+    #     distribute_tensor(emb.weight, tp_mesh, [Replicate()]))
+    # emb.register_parameter('weight', dist_emb_w)
 
-    # model = parallelize_module(
-    #     module=model,
-    #     device_mesh=tp_mesh,
-    #     parallelize_plan={
-    #         # 'model.tok_embeddings':
-    #         # RowwiseParallel(input_layouts=Replicate(), ),
-    #         'model.norm':PrepareModuleInput(
-    #             input_layouts=(Replicate(),),
-    #             desired_input_layouts=(Replicate(),),
-    #             # use_local_output=True
-    #         ),
-    #         # 'output': PrepareModuleOutput(
-    #         #     output_layouts=(Shard(-1),),
-    #         #     desired_output_layouts=(Replicate(),),
-    #         #     use_local_output=True
-    #         # ),
-    #     })
+    model = parallelize_module(
+        module=model,
+        device_mesh=tp_mesh,
+        parallelize_plan={
+            'model.tok_embeddings':
+            RowwiseParallel(input_layouts=Replicate(), ),
+            'model.norm':PrepareModuleInput(
+                input_layouts=(Replicate(),),
+                desired_input_layouts=(Replicate(),),
+                use_local_output=True
+            ),
+        })
 
 
 def megatron_internlm2(model,
@@ -112,7 +110,7 @@ def megatron_internlm2(model,
     else:
         rank0_map = None
 
-    if tp_mesh.size() > 1:
+    if tp_mesh and tp_mesh.size() > 1:
         _tp_internlm2(model, tp_mesh)
 
     param_init_fn = partial(
@@ -176,7 +174,7 @@ def megatron_internlm2_casual(model,
         recompute_ratio=recompute_ratio,
         reshard_after_forward=reshard_after_forward)
 
-    if tp_mesh.size() > 1:
+    if tp_mesh and tp_mesh.size() > 1:
         model = parallelize_module(
             module=model,
             device_mesh=tp_mesh,
@@ -223,12 +221,59 @@ def megatron_internlm2_reward(model,
         recompute_ratio=recompute_ratio,
         reshard_after_forward=reshard_after_forward)
 
-    if tp_mesh.size() > 1:
+    if tp_mesh and tp_mesh.size() > 1:
+
+        head_0 = model.v_head[0]
+        dist_head_0 = nn.Parameter(
+            distribute_tensor(head_0.weight, tp_mesh, [Replicate()]))
+        head_0.register_parameter('weight', dist_head_0)
+
+        head_norm = model.v_head[1]
+        dist_head_norm = nn.Parameter(
+            distribute_tensor(head_norm.weight, tp_mesh, [Replicate()]))
+        dist_head_bias = nn.Parameter(
+            distribute_tensor(head_norm.bias, tp_mesh, [Replicate()]))
+        head_norm.register_parameter('weight', dist_head_norm)
+        head_norm.register_parameter('bias', dist_head_bias)
+
+        head_1 = model.v_head[3]
+        dist_head_1 = nn.Parameter(
+            distribute_tensor(head_1.weight, tp_mesh, [Replicate()]))
+        head_1.register_parameter('weight', dist_head_1)
+
+        
         parallelize_module(
             module=model,
             device_mesh=tp_mesh,
             parallelize_plan={
-                'v_head': ColwiseParallel(output_layouts=Replicate(), ),
+                'v_head.0': PrepareModuleInput(
+                    input_layouts=(Replicate(),),
+                    desired_input_layouts=(Replicate(),),
+                ),
+                'v_head.0': PrepareModuleOutput(
+                    output_layouts=(Replicate(),),
+                    desired_output_layouts=(Replicate(),),
+                    use_local_output=True
+                ),
+                'v_head.1': PrepareModuleInput(
+                    input_layouts=(Replicate(),),
+                    desired_input_layouts=(Replicate(),),
+                ),
+                'v_head.1': PrepareModuleOutput(
+                    output_layouts=(Replicate(),),
+                    desired_output_layouts=(Replicate(),),
+                    use_local_output=True
+                ),
+                'v_head.3': PrepareModuleInput(
+                    input_layouts=(Replicate(),),
+                    desired_input_layouts=(Replicate(),),
+                ),
+                'v_head.3': PrepareModuleOutput(
+                    output_layouts=(Replicate(),),
+                    desired_output_layouts=(Replicate(),),
+                    use_local_output=True
+                ),
+                
             })
 
     if dp_mesh.get_rank() == 0:

@@ -43,7 +43,7 @@ def sequence_parallel_wrapper(local_attn):
 
     def sequence_parallel_attn(query_states, key_states, value_states, *args,
                                **kwargs):
-        # training = kwargs.pop('training', True)
+        training = kwargs.pop('training', True)
 
         sp_mesh = get_sp_mesh()
         if sp_mesh:

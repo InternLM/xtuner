@@ -34,7 +34,7 @@ def _qwen2_attn_varlen_forward(
 ):
     is_training = self.training
    
-    assert is_training == (past_key_value is None)
+    # assert is_training == (past_key_value is None)
 
     if 'padding_mask' in kwargs:
         warnings.warn(
@@ -72,9 +72,7 @@ def _qwen2_attn_varlen_forward(
         kv_seq_len += past_key_value.get_usable_length(kv_seq_len,
                                                        self.layer_idx)
 
-    assert position_ids is not None
-    rotary_seq_len = max(kv_seq_len, position_ids.max().item() + 1)
-    cos, sin = self.rotary_emb(value_states, seq_len=rotary_seq_len)
+    cos, sin = self.rotary_emb(value_states, position_ids)
 
     query_states, key_states = apply_rotary_pos_emb(query_states, key_states,
                                                     cos, sin, position_ids)
@@ -232,8 +230,7 @@ def _qwen2_attn_contiguous_batching_forward(
     value_states = value_states.view(bsz, q_len, self.num_key_value_heads,
                                      self.head_dim).transpose(1, 2)
 
-    rotary_seq_len = position_ids.max().item() + 1
-    cos, sin = self.rotary_emb(value_states, seq_len=rotary_seq_len)
+    cos, sin = self.rotary_emb(value_states, position_ids)
 
     query_states, key_states = apply_rotary_pos_emb(query_states, key_states,
                                                     cos, sin, position_ids)
@@ -257,12 +254,7 @@ def _qwen2_attn_contiguous_batching_forward(
     else:
         causal = self.is_causal and q_len != 1
 
-    use_sliding_windows = (
-        _flash_supports_window_size
-        and getattr(self.config, 'sliding_window', None) is not None
-        and kv_seq_len > self.config.sliding_window
-        and self.layer_idx < self.config.max_window_layers
-        and self.config.use_sliding_window)
+    use_sliding_windows = False
 
     window_size = (self.config.sliding_window,
                    self.config.sliding_window) if use_sliding_windows else (-1,

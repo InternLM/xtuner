@@ -4,9 +4,10 @@ import torch
 from ..setup import get_sp_mesh
 
 
-def pad_for_sequence_parallel(tensor, padding_value, dim=-1):
+def pad_for_sequence_parallel(tensor, padding_value, sp_mesh, dim=-1):
+
+    sp_size = sp_mesh.size()
     length = tensor.shape[dim]
-    sp_size = get_sp_mesh().size()
     if length % sp_size == 0:
         return tensor
 

@@ -9,8 +9,8 @@ logger = get_logger()
 
 @torch.no_grad()
 def sample(logits,do_sample=True, top_k=0, top_p=0.9, temperature=1.0):
-    if (logits.argmax(-1) == 0).sum() > 0:
-        logger.info(logits)
+    # if (logits.argmax(-1) == 0).sum() > 0:
+    #     logger.info(logits)
 
     if not do_sample:
         return logits.argmax(-1)

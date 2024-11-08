@@ -6,6 +6,7 @@ from xtuner._lite import get_device
 
 _SP_MESH = None
 _DP_MESH = None
+_SAME_DATA_MESH = None
 _TP_MESH = None
 _FSDP_MESH = None
 _WORLD_MESH = None
@@ -25,6 +26,9 @@ def setup_parallel(sp_size=1, tp_size=1):
     dp_size = world_size // sp_size // tp_size
     data_mesh = init_device_mesh(
         device, (dp_size, sp_size, tp_size), mesh_dim_names=('dp', 'sp', 'tp'))
+
+    same_data_mesh = init_device_mesh(
+        device, (dp_size, sp_size * tp_size), mesh_dim_names=('dp', 'same_data'))
 
     model_mesh = init_device_mesh(
         device, (dp_size * sp_size, tp_size), mesh_dim_names=('fsdp', 'tp'))
@@ -51,6 +55,9 @@ def setup_parallel(sp_size=1, tp_size=1):
     _WORLD_MESH = world_mesh['world']
     _FSDP_MESH = model_mesh['fsdp']
 
+    global _SAME_DATA_MESH
+    _SAME_DATA_MESH = same_data_mesh['same_data']
+
 
 def get_world_mesh():
     return _WORLD_MESH
@@ -70,3 +77,6 @@ def get_sp_mesh():
 
 def get_tp_mesh():
     return _TP_MESH
+
+def get_same_data_mesh():
+    return _SAME_DATA_MESH

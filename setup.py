@@ -126,6 +126,9 @@ if __name__ == '__main__':
         extras_require={
             'all':
             parse_requirements('requirements.txt'),
+            'ppo':
+            parse_requirements('requirements/runtime.txt') +
+            parse_requirements('requirements/ppo.txt'),
             'deepspeed':
             parse_requirements('requirements/runtime.txt') +
             parse_requirements('requirements/deepspeed.txt'),

@@ -32,7 +32,7 @@ def packed_cumulative_length(num_tokens: torch.Tensor):
 
 
 @contextmanager
-def packed_sequence(num_tokens, enable=True, sp_size=1):
+def packed_sequence(num_tokens, enable=True, sp_mesh=None):
     from mmengine import MessageHub
     ctx = MessageHub.get_instance('packed_sequence')
 
@@ -46,10 +46,10 @@ def packed_sequence(num_tokens, enable=True, sp_size=1):
         position_ids = [torch.arange(num.item()) for num in num_tokens]
         position_ids = torch.cat(position_ids, dim=0).to(device)
         position_ids = position_ids.unsqueeze(0)
-        if sp_size > 1:
+        if sp_mesh:
             # `dim` is 1 as the shape of tensor is (bs, seq_len)
             position_ids = split_for_sequence_parallel(
-                position_ids, dim=1, sp_mesh=get_sp_mesh())
+                position_ids, dim=1, sp_mesh=sp_mesh)
 
         # ctx.update_info('num_tokens', num_tokens)
         ctx.update_info('position_ids', position_ids)

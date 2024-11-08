@@ -186,6 +186,7 @@ def megatron_qwen2_casual(model,
     else:
         rank0_map = None
 
+
     param_init_fn = partial(
         lazy_init_megatron,
         rank0_map=rank0_map,
@@ -230,6 +231,11 @@ def megatron_qwen2_reward(model,
         recompute_ratio=recompute_ratio,
         reshard_after_forward=reshard_after_forward)
 
+    if dp_mesh.get_rank() == 0:
+        rank0_map = map_rank0_modules(model, rank0_model)
+    else:
+        rank0_map = None
+
     if tp_mesh.size() > 1:
         parallelize_module(
             module=model,
@@ -239,11 +245,6 @@ def megatron_qwen2_reward(model,
                 'score.2': RowwiseParallel(),
             })
 
-    if dp_mesh.get_rank() == 0:
-        rank0_map = map_rank0_modules(model, rank0_model)
-    else:
-        rank0_map = None
-
     param_init_fn = partial(
         lazy_init_megatron,
         rank0_map=rank0_map,
@@ -251,7 +252,7 @@ def megatron_qwen2_reward(model,
         tp_mesh=tp_mesh,
     )
 
-    model.score.apply(param_init_fn)
+    model.v_head.apply(param_init_fn)
 
     from torch.distributed._composable.fsdp import fully_shard
     fully_shard(
