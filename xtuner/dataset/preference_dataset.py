@@ -293,14 +293,22 @@ class PackedDatasetWrapper(Dataset):
     def post_process(self, dataset):
         
         def merge_data(indices, dataset):
-            keys = ['chosen_ids', 'rejected_ids', 'chosen_labels', 'rejected_labels']
-            merged_data = {key: [] for key in keys}
+            keys = ['chosen_ids', 'rejected_ids', 'chosen_labels', 'rejected_labels'] # 'position_ids','cumulative_len','concated'
+            merged_data = {key: (True if key == 'concated' else []) for key in keys}
+            position_ids , seq_len = [], []
             
             for index in indices:
                 data = dataset[index]
                 for key in keys:
                     merged_data[key].extend(data[key])
+                    
+                    if "ids" in key:
+                        position_ids.extend(list(range(len(data[key]))))
+                        seq_len.append(len(list(range(len(data[key])))))         
             
+            merged_data["position_ids"] = position_ids
+            merged_data["seq_len"] = seq_len
+            merged_data["concated"] = True
             return merged_data
         
         from collections import defaultdict
@@ -308,8 +316,8 @@ class PackedDatasetWrapper(Dataset):
 
         # 遍历数据集并按 group_id 分组索引
         for index, item in enumerate(dataset):
-            grouped_indices[item["group_id"]].append((item["seq_num"], index))
-        # 将 grouped_indices 转换为普通字典
+            if item["group_id"] is not None:
+                grouped_indices[item["group_id"]].append((item["seq_num"], index))
         
         for group_id in grouped_indices:
             # 排序仅按 seq_num 排列，并提取 index
@@ -320,14 +328,7 @@ class PackedDatasetWrapper(Dataset):
         selected_indices = {index for indices in grouped_indices.values() for index in indices}
         merged_data = [merge_data(v, dataset) for k,v in grouped_indices.items()]
         filtered_dataset = [item for index, item in enumerate(dataset) if index not in selected_indices]
-        
-        # if dist.get_rank() == 0:
-        #     import pdb; pdb.set_trace()
-        
         return merged_data + filtered_dataset  
-        
-        # for k,v in grouped_indices.items():
-        #     data = merge_data(v, dataset)
         
     
     def __len__(self):
@@ -337,18 +338,34 @@ class PackedDatasetWrapper(Dataset):
         pairs = self.data[index]
         input_ids, cu_seqlens, position_ids, labels = [], [0], [], []
         for pair in pairs:
-            input_ids.extend(pair['chosen_ids'])
-            input_ids.extend(pair['rejected_ids'])
+            if not pair.get('concated', False):
+                input_ids.extend(pair['chosen_ids'])
+                input_ids.extend(pair['rejected_ids'])
 
-            position_ids.extend(list(range(len(pair['chosen_ids']))))
-            position_ids.extend(list(range(len(pair['rejected_ids']))))
+                position_ids.extend(list(range(len(pair['chosen_ids']))))
+                position_ids.extend(list(range(len(pair['rejected_ids']))))
 
-            labels.extend(pair['chosen_labels'])
-            labels.extend(pair['rejected_labels'])
+                labels.extend(pair['chosen_labels'])
+                labels.extend(pair['rejected_labels'])
 
-            cu_seqlens.append(cu_seqlens[-1] + len(pair['chosen_ids']))
-            cu_seqlens.append(cu_seqlens[-1] + len(pair['rejected_ids']))
+                cu_seqlens.append(cu_seqlens[-1] + len(pair['chosen_ids']))
+                cu_seqlens.append(cu_seqlens[-1] + len(pair['rejected_ids']))
+            else:
+                input_ids.extend(pair['chosen_ids'])
+                input_ids.extend(pair['rejected_ids'])
 
+                labels.extend(pair['chosen_labels'])
+                labels.extend(pair['rejected_labels'])
+                
+                position_ids.extend(pair.get('position_ids',None))
+                seq_lens = pair.get('seq_len',None)
+                
+                for seq_len in seq_lens:
+                    cu_seqlens.append(cu_seqlens[-1] + seq_len)
+
+            if dist.get_rank() == 0:
+                import pdb;pdb.set_trace()   
+                
         return {
             'input_ids': input_ids,
             'labels': labels,

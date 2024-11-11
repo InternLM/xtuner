@@ -34,7 +34,7 @@ label_smoothing = 0.0
 # Data
 # prompt_template = PROMPT_TEMPLATE.llama3_chat
 prompt_template = PROMPT_TEMPLATE.llama2_chat # llama2_chat
-max_length = 32768
+max_length = 8192
 max_packed_length = max_length
 
 # parallel
