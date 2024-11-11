@@ -162,6 +162,12 @@ class DPO(SupervisedFinetune):
             data = self._split_for_sequence_parallel(data)
 
         all_logits = self.llm(**data).logits
+    
+        # if torch.distributed.get_rank() == 0:
+        #     from transformers import AutoTokenizer
+        #     tokenizer = AutoTokenizer.from_pretrained('/home/pingbowen/models/Longwriter-8b')
+        #     print(tokenizer.batch_decode(data['input_ids'][:,:1000]))
+        
         with torch.no_grad():
             if self.ref_llm is None:
                 with self.llm.disable_adapter():

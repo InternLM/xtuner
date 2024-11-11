@@ -43,7 +43,10 @@ PROMPT_TEMPLATE = ConfigDict(
             'ensure that your responses are socially unbiased and positive in '
             'nature.\n{system}\n<</SYS>>\n [/INST] '),
         INSTRUCTION='[INST] {input} [/INST]',
-        SEP='\n'),
+        # SEP='\n',
+        SUFFIX='<|eot_id|>',
+        SUFFIX_AS_EOS=True,
+        STOP_WORDS=['<|eot_id|>']),
     code_llama_chat=dict(
         SYSTEM='{system}\n', INSTRUCTION='[INST] {input} [/INST]'),
     chatglm2=dict(
