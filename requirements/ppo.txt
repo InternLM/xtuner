@@ -1,3 +1,0 @@
-ninjia
-flash-attn>=2.6.3 --no-build-isolation
-lmdeploy>=0.6.2 --no-deps

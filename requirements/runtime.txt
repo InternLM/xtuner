@@ -2,7 +2,7 @@
 datasets>=2.16.0
 einop
 # Avoid `import cv2` failed
-opencv-python-headless
+opencv-python==4.7.0.72
 # Minimum 0.10.3 to support distributed evaluation for MMBench
 # see https://github.com/open-mmlab/mmengine/pull/1469
 mmengine>=0.10.3
@@ -20,3 +20,5 @@ torchvision
 # to calculate attn output which lead to bc braeking
 transformers>=4.45
 transformers_stream_generator
+loguru
+pydantic
