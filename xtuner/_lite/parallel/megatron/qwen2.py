@@ -32,6 +32,7 @@ def _tp_qwen2(model, tp_mesh):
         PrepareModuleInput(
             input_layouts=(Replicate(), ),
             desired_input_layouts=(Replicate(), ),
+            use_local_output=True
         ),
         'mlp.up_proj':
         ColwiseParallel(),
@@ -43,6 +44,7 @@ def _tp_qwen2(model, tp_mesh):
         PrepareModuleInput(
             input_layouts=(Replicate(), ),
             desired_input_layouts=(Replicate(), ),
+            use_local_output=True
         )
     }
 
@@ -97,7 +99,7 @@ def _tp_qwen2(model, tp_mesh):
             'model.norm':PrepareModuleInput(
                 input_layouts=(Replicate(),),
                 desired_input_layouts=(Replicate(),),
-                # use_local_output=True
+                use_local_output=True
             ),
         })
 
@@ -124,7 +126,7 @@ def megatron_qwen2(model,
     )
 
     
-    if tp_mesh.size() > 1:
+    if tp_mesh and tp_mesh.size() > 1:
         _tp_qwen2(model, tp_mesh)
 
     from torch.distributed._composable import checkpoint
@@ -195,7 +197,7 @@ def megatron_qwen2_casual(model,
     )
     
 
-    if tp_mesh.size() > 1:
+    if tp_mesh and tp_mesh.size() > 1:
         model = parallelize_module(
             module=model,
             device_mesh=tp_mesh,
@@ -236,7 +238,7 @@ def megatron_qwen2_reward(model,
     else:
         rank0_map = None
 
-    if tp_mesh.size() > 1:
+    if tp_mesh and tp_mesh.size() > 1:
         parallelize_module(
             module=model,
             device_mesh=tp_mesh,

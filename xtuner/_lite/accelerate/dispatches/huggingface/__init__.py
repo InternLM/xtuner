@@ -57,6 +57,14 @@ def _dispatch_internlm2_reward_forward(module):
     return internlm2_reward_forward.__name__
 
 
+# HACK
+def _dispatch_qwen2_reward_forward(module):
+    assert module.__class__.__name__ == 'Qwen2ForRewardModel'
+    from .internlm2 import internlm2_reward_forward
+    _dispatch_forward_fn(module, internlm2_reward_forward)
+    return internlm2_reward_forward.__name__
+
+
 def _dispatch_clip_attn_forward(module):
     assert module.__class__.__name__ == 'CLIPAttention'
     from .clip import clip_flash_attn_forward
@@ -80,6 +88,7 @@ DISPATCH_MAP = {
     'InternLM2FlashAttention2': _dispatch_internlm2_varlen_attn_forward,
     'CLIPAttention': _dispatch_clip_attn_forward,
     'InternLM2ForRewardModel': _dispatch_internlm2_reward_forward,
+    'Qwen2ForRewardModel': _dispatch_qwen2_reward_forward,
     'InternLM2RMSNorm': _dispatch_rms_norm_forward,
     'InternLM3RMSNorm': _dispatch_rms_norm_forward,
     'InternLM3CrossDecoder': _dispatch_internlm3_cross_decoder_forward,

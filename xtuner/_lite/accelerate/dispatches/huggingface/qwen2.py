@@ -48,6 +48,7 @@ def _qwen2_attn_varlen_forward(
     attn_context = MessageHub.get_instance('packed_sequence')
     position_ids = attn_context.get_info('position_ids')
     assert position_ids.size(1) == q_len, f'{position_ids.size(1)} {q_len}'
+    sp_mesh = attn_context.get_info('sp_mesh')
 
     query_states = self.q_proj(hidden_states)
     key_states = self.k_proj(hidden_states)
@@ -168,7 +169,8 @@ def _qwen2_attn_varlen_forward(
             causal=causal,
             dropout_p=dropout_rate,
             window_size=window_size,
-            training=self.training)
+            training=self.training,
+            sp_mesh=sp_mesh)
     else:
         attn_output = flash_attn_wo_mask(
             query_states,
@@ -177,7 +179,8 @@ def _qwen2_attn_varlen_forward(
             causal=causal,
             dropout_p=dropout_rate,
             window_size=window_size,
-            training=self.training)
+            training=self.training,
+            sp_mesh=sp_mesh)
 
     # ---------------- flash attention forward end ------------------- #
 
