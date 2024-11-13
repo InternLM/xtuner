@@ -14,8 +14,10 @@ _WORLD_MESH = None
 
 def setup_parallel(sp_size=1, tp_size=1):
 
-    dist_launcher = infer_launcher()
-    init_dist(dist_launcher)
+    if not dist.is_initialized():
+        dist_launcher = infer_launcher()
+        init_dist(dist_launcher)
+        
     device = get_device()
 
     world_size = dist.get_world_size()

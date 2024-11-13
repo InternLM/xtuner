@@ -216,6 +216,8 @@ def official_openai(data):
         return ChatMessages.from_dict(data)
     elif 'message_data' in data:
         return ChatMessages.from_dict({'messages': data['message_data']})
+    elif 'dialogs' in data:
+        return ChatMessages.from_dict({'messages': data['dialogs']})
     else:
         return ChatMessages.from_dict({'messages': data})
 
