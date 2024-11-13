@@ -149,6 +149,7 @@ class LengthGroupedSampler(Sampler):
                  dataset: Sized,
                  dp_mesh: DeviceMesh,
                  global_batch_size: int,
+                 length_attr: str = 'longest',
                  mega_batch_mult: Optional[int] = None,
                  seed: Optional[int] = None,
                  round_up: bool = True) -> None:
@@ -189,10 +190,14 @@ class LengthGroupedSampler(Sampler):
         if isinstance(self.dataset, TorchConcatDataset):
             max_lengths = []
             for sub_dataset in self.dataset.datasets:
-                max_lengths.extend(sub_dataset.max_length_per_pack)
+                if hasattr(sub_dataset, length_attr):
+                    max_lengths.extend(getattr(sub_dataset, length_attr))
+                else:
+                    raise ValueError
             self.max_lengths = max_lengths
         else:
-            self.max_lengths = self.dataset.max_length_per_pack
+            if hasattr(self.dataset, length_attr):
+                self.max_lengths = getattr(self.dataset, length_attr)
         assert isinstance(self.max_lengths, (list, tuple))
 
         self.global_batch_size = global_batch_size
