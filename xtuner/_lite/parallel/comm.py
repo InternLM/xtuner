@@ -119,3 +119,17 @@ def all_to_all_list(object_list, group=None):
                                                   group)
 
     return target_tensor_list
+
+
+def barrier():
+    if not dist.is_available():
+        return
+
+    rank = dist.get_rank()
+    if rank == 0:
+        objects = [1]
+    else:
+        objects = [None]
+
+    dist.broadcast_object_list(objects, src=0)
+    return

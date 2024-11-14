@@ -25,7 +25,15 @@ def rms_norm_forward(self, hidden_states):
         from lmdeploy.pytorch.kernels import rms_norm
         ret = rms_norm(hidden_states, weight, eps=self.variance_epsilon)
     elif is_flash_attn_2_available():
-        from flash_attn.ops.triton.layer_norm import rms_norm_fn
+        # from flash_attn.ops.triton.layer_norm import rms_norm_fn
+        try:
+            from flash_attn.ops.triton.layernorm import rms_norm_fn
+        except ImportError:
+            try:
+                from flash_attn.ops.triton.layer_norm import rms_norm_fn
+            except ImportError:
+                import flash_attn
+                raise ImportError(f'flash_attn version {flash_attn.__version__}')
         ret = rms_norm_fn(
             hidden_states, weight, None, eps=self.variance_epsilon)
 
