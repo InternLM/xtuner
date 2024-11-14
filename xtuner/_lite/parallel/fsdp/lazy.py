@@ -114,7 +114,7 @@ def lazy_init_megatron(module, rank0_map, dp_mesh, tp_mesh=None, pp_mesh=None):
     # TP does not shard buffers
     for name, buffer in module.named_buffers(recurse=False):
         if dp_mesh.get_rank() == 0:
-            rank0_buffer = rank0_buffers[name].to(device)
+            rank0_buffer = rank0_buffers[name].to(device).to(buffer.dtype)
         else:
             rank0_buffer = torch.empty_like(buffer).to(device)
 

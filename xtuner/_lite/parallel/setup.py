@@ -11,8 +11,11 @@ _TP_MESH = None
 _FSDP_MESH = None
 _WORLD_MESH = None
 
+_EP_MESH = None
+_EXPERTS_FSDP_MESH = None
 
-def setup_parallel(sp_size=1, tp_size=1):
+
+def setup_parallel(sp_size=1, tp_size=1, ep_size=1):
 
     if not dist.is_initialized():
         dist_launcher = infer_launcher()
@@ -59,6 +62,29 @@ def setup_parallel(sp_size=1, tp_size=1):
 
     global _SAME_DATA_MESH
     _SAME_DATA_MESH = same_data_mesh['same_data']
+
+    assert world_size % ep_size == 0
+    fsdp_size = world_size // ep_size
+
+    # faster in multi nodes
+    device_mesh = init_device_mesh(
+        device, (fsdp_size, ep_size), mesh_dim_names=('fsdp', 'ep'))
+    # slower in multi nodes
+    # device_mesh = init_device_mesh('cuda', (ep_size, fsdp_size),
+    #   mesh_dim_names=('ep', 'fsdp'))
+
+    global _EP_MESH
+    global _EXPERTS_FSDP_MESH
+    _EP_MESH = device_mesh['ep']
+    _EXPERTS_FSDP_MESH = device_mesh['fsdp']
+
+
+def get_ep_mesh():
+    return _EP_MESH
+
+
+def get_experts_fsdp_mesh():
+    return _EXPERTS_FSDP_MESH
 
 
 def get_world_mesh():
