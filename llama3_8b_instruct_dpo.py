@@ -34,7 +34,7 @@ label_smoothing = 0.0
 # Data
 # prompt_template = PROMPT_TEMPLATE.llama3_chat
 prompt_template = PROMPT_TEMPLATE.llama2_chat # llama2_chat
-max_length = 8192
+max_length = 32768
 max_packed_length = max_length
 
 # parallel
@@ -124,7 +124,7 @@ sampler = SequenceParallelSampler \
 train_dataset = dict(
     type=build_preference_dataset,
     # dataset=dict(type=load_jsonl_dataset,data_files=["/home/pingbowen/workspace/DDPO/DDPO-generate_long/data/dpo_data/longwriter_len_calssify/range_2_4k_res.jsonl","/home/pingbowen/workspace/DDPO/DDPO-generate_long/data/dpo_data/ultrafeedback_binarized.jsonl","/home/pingbowen/workspace/DDPO/DDPO-generate_long/data/dpo_data/longwriter_len_calssify/range_16_32k_res_filter.jsonl"]),
-    dataset=dict(type=load_jsonl_dataset,data_files=["/home/pingbowen/workspace/DDPO/DDPO-generate_long/data/dpo_data/test_new.jsonl"]),
+    dataset=dict(type=load_jsonl_dataset,data_files=["/home/pingbowen/workspace/DDPO/openr/data/range_2_4k_res.jsonl","/home/pingbowen/workspace/DDPO/DDPO-generate_long/data/dpo_data/ultrafeedback_binarized.jsonl"]), # "/home/pingbowen/workspace/DDPO/openr/data/range_4_16k_res_new.jsonl","/home/pingbowen/workspace/DDPO/openr/data/range_16_32k_res_new.jsonl", /home/pingbowen/workspace/DDPO/DDPO-generate_long/data/dpo_data/test_new.jsonl
     # dataset=dict(type=load_dataset, path='llamafactory/ultrafeedback_binarized'), # mlabonne/orpo-dpo-mix-40k
     tokenizer=tokenizer,
     max_length=max_length,
