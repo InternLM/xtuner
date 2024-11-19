@@ -10,6 +10,9 @@ import numpy as np
 import torch
 from torch import distributed as dist
 from tqdm import tqdm
+from xtuner._lite import get_logger
+
+logger = get_logger()
 
 
 def calculate_jsonl_sha256(path):
@@ -33,7 +36,8 @@ class JsonlDataset(torch.utils.data.Dataset):
                  path,
                  sample_ratio=1.0,
                  tokenize_fn=None,
-                 cache_dir=None):
+                 cache_dir=None,
+                 max_length=None,):
         super().__init__()
 
         assert sample_ratio <= 1
@@ -79,6 +83,9 @@ class JsonlDataset(torch.utils.data.Dataset):
         else:
             offsets = self.count_offsets()
             num_tokens = None
+            if max_length is not None:
+                assert self.tokenize_fn
+                num_tokens = self.count_tokens()
 
         num_samples = int(len(offsets) * sample_ratio)
         sampled = random.sample([i for i in range(len(offsets))], num_samples)
@@ -88,6 +95,13 @@ class JsonlDataset(torch.utils.data.Dataset):
             num_tokens = num_tokens[sampled]
 
         self.num_tokens = num_tokens
+        if max_length is not None:
+            assert isinstance(max_length, int)
+            self.offsets = [x for i, x in enumerate(self.offsets) if self.num_tokens[i] < max_length]
+            self.num_tokens = [y for y in self.num_tokens if y < max_length]
+            if len(self.num_tokens) < len(num_tokens):
+                missed_num = len(num_tokens) - len(self.num_tokens)
+                logger.warning(f"{path} has {missed_num} prompt length>{max_length}, discard.")
 
     def count_offsets(self, cache_dir=None):
         offsets = []
