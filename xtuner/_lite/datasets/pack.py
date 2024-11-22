@@ -7,6 +7,7 @@ from torch.utils.data import ConcatDataset
 import bisect
 import itertools
 
+
 class SoftPackDataset(torch.utils.data.Dataset):
 
     def __init__(self, datasets, target=2048, blend=False, sort=False):
@@ -26,7 +27,7 @@ class SoftPackDataset(torch.utils.data.Dataset):
             _infos = self.get_pack_infos(dataset, i, num_tokens[i])
             pack_infos.append(_infos)
         self.pack_infos = concatenate_datasets(pack_infos)
-    
+
     @property
     def longest(self):
         return self.pack_infos['longest']
@@ -79,9 +80,6 @@ class SoftPackDataset(torch.utils.data.Dataset):
         indices = self.pack_infos[item]['indices']
         dataset_id = self.pack_infos[item]['dataset_id']
         return [self.datasets[dataset_id][i] for i in indices]
-
-
-
 
 
 class HardPackDataset(torch.utils.data.Dataset):
