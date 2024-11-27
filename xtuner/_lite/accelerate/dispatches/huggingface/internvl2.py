@@ -145,21 +145,38 @@ def internvl2_forward(
     if sp_size > 1:
         attn_context = MessageHub.get_instance('packed_sequence')
         position_ids = attn_context.get_info('position_ids')
+
+        is_ref_forward = attn_context.get_info('is_ref_forward')
+
         # TODO: phi3 attention
         attn_context.update_info('global_position_ids', position_ids)
-
-        assert position_ids.size(1) == input_embeds.shape[1] == labels.shape[1], \
-            f'{position_ids.size(1)} {input_embeds.shape[1]} {labels.shape[1]}'
-        assert position_ids.size(1) % sp_size == 0
-        # `dim` is 1 as the shape of tensor is (bs, seq_len)
-        position_ids = split_for_sequence_parallel(
-            position_ids, dim=1, sp_mesh=sp_mesh)
-        input_embeds = split_for_sequence_parallel(
-            input_embeds, dim=1, sp_mesh=sp_mesh)
-        labels = split_for_sequence_parallel(
-            labels, dim=1, sp_mesh=sp_mesh)
         attention_mask = None
-        attn_context.update_info('position_ids', position_ids)
+
+        if is_ref_forward is not None:
+            input_embeds = split_for_sequence_parallel(
+                input_embeds, dim=1, sp_mesh=sp_mesh)
+            if labels is not None:
+                labels = split_for_sequence_parallel(
+                    labels, dim=1, sp_mesh=sp_mesh)
+        else:
+            if labels is not None:
+                assert position_ids.size(1) == input_embeds.shape[1] == labels.shape[1], \
+                    f'{position_ids.size(1)} {input_embeds.shape[1]} {labels.shape[1]}'
+            else:
+                assert position_ids.size(1) == input_embeds.shape[1], \
+                    f'{position_ids.size(1)} {input_embeds.shape[1]}'
+
+            assert position_ids.size(1) % sp_size == 0
+            # `dim` is 1 as the shape of tensor is (bs, seq_len)
+            position_ids = split_for_sequence_parallel(
+                position_ids, dim=1, sp_mesh=sp_mesh)
+            input_embeds = split_for_sequence_parallel(
+                input_embeds, dim=1, sp_mesh=sp_mesh)
+            if labels is not None:
+                labels = split_for_sequence_parallel(
+                    labels, dim=1, sp_mesh=sp_mesh)
+
+            attn_context.update_info('position_ids', position_ids)
 
     use_liger_kernel = os.environ.get('USE_LIGER_KERNEL')
     if use_liger_kernel and labels is not None and self.training:

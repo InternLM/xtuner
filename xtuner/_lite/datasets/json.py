@@ -4,7 +4,7 @@ import json
 import math
 import os
 import random
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor
 from mmengine import mkdir_or_exist
 import numpy as np
 import torch
@@ -40,6 +40,7 @@ class JsonDataset(torch.utils.data.Dataset):
         assert sample_ratio <= 1
         self.tokenize_fn = tokenize_fn
         self.path = path
+        self.tokenizer_workers = int(os.environ.get('XTUNER_TOKENIZE_WORKERS', 8))
 
         if cache_dir:
             if os.path.exists(cache_dir):
@@ -108,10 +109,11 @@ class JsonDataset(torch.utils.data.Dataset):
         dataset_shard = dataset[start:end]
 
         desc = f'[Rank {rank}] {self.path}'
-        with ThreadPoolExecutor(max_workers=8) as executor:
+        with ProcessPoolExecutor(max_workers=self.tokenizer_workers) as executor:
             tokenized = list(
                 tqdm(
-                    executor.map(self.tokenize_fn, dataset_shard),
+                    executor.map(self.tokenize_fn, dataset_shard,
+                                 chunksize=max(1, len(dataset_shard) // self.tokenizer_workers)),
                     desc=desc,
                     total=len(dataset_shard)))
 

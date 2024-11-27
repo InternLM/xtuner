@@ -31,74 +31,6 @@ def calculate_tokenize_fn_sha256(tokenize_fn):
     return hashlib.sha256(fn_source.encode('utf-8')).hexdigest()
 
 
-def tokenize_worker(
-    tokenize_fun: Callable,
-    data_queue: Queue,
-    out_queue: Queue,
-):
-    while True:
-        data_chunk = data_queue.get()
-
-        if data_chunk is None:
-            out_queue.put(None)
-            break
-        chunk_results = []
-        for idx, data in data_chunk:
-            chunk_results.append([idx, tokenize_fun(data)])
-        out_queue.put(chunk_results)
-
-
-def chunk_data_to_queue(data_queue: Queue, data: List[Dict], chunk_size: int,
-                        nproc):
-    data_iter = iter(data)
-    chunk_data = []
-    while True:
-        try:
-            item = next(data_iter)
-        except StopIteration:
-            break
-        chunk_data.append(item)
-        if len(chunk_data) == chunk_size:
-            data_queue.put(chunk_data)
-            chunk_data = []
-    if chunk_data:
-        data_queue.put(chunk_data)
-
-    for _ in range(nproc):
-        data_queue.put(None)
-
-
-def track_progress(tokenize_fun_p, dataset, nproc, task_num, chunksize,
-                   description):
-    processes = []
-    data_queue = Queue()
-    output_queue = Queue()
-    bar = tqdm.tqdm(total=task_num, desc=description)
-    # task_id = bar.add_task(total=task_num, description=description)
-    dataset = enumerate(dataset)
-    chunk_data_to_queue(data_queue, dataset, chunksize, nproc)
-    for _ in range(nproc):
-        process = Process(
-            target=tokenize_worker,
-            args=(tokenize_fun_p, data_queue, output_queue))
-        process.start()
-        processes.append(process)
-
-    results = []
-    finished_process = 0
-    while finished_process < nproc:
-        chunk_results = output_queue.get()
-        if chunk_results is None:
-            finished_process += 1
-            continue
-        results.extend(chunk_results)
-        bar.update(len(chunk_results))
-        bar.refresh()
-    results = map(lambda x: x[1], sorted(results, key=lambda x: x[0]))
-    return results
-
-
-
 class JsonlDataset(torch.utils.data.Dataset):
 
     def __init__(self,
@@ -112,6 +44,7 @@ class JsonlDataset(torch.utils.data.Dataset):
         assert sample_ratio <= 1
         self.tokenize_fn = tokenize_fn
         self.path = path
+        self.tokenizer_workers = int(os.environ.get('XTUNER_TOKENIZE_WORKERS', 8))
 
         if cache_dir:
             if os.path.exists(cache_dir):
@@ -214,10 +147,11 @@ class JsonlDataset(torch.utils.data.Dataset):
 
         desc = f'[Rank {rank}] {self.path}'
 
-        with ProcessPoolExecutor(max_workers=8) as executor:
+        with ProcessPoolExecutor(max_workers=self.tokenizer_workers) as executor:
             tokenized = list(
-                tqdm.tqdm(
-                    executor.map(self.tokenize_fn, dataset_shard, chunksize=1000),
+                tqdm(
+                    executor.map(self.tokenize_fn, dataset_shard,
+                                 chunksize=max(1, len(dataset_shard) // self.tokenizer_workers)),
                     desc=desc,
                     total=len(dataset_shard)))
 

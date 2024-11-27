@@ -5,9 +5,10 @@ from torch.utils.data import ConcatDataset, DataLoader, Dataset
 import numpy as np
 import json
 import math
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor
 from tqdm import tqdm
 import copy
+import random
 
 from ..json import calculate_json_sha256
 from ..jsonl import calculate_jsonl_sha256
@@ -42,7 +43,8 @@ class BaseOrigDataset(Dataset):
                  image_token_str='<image>',
                  group_by_length=False,
                  pack_data=False,
-                 pack_data_cache_dir=None):
+                 pack_data_cache_dir=None,
+                 random_sample=False):
         self.data_name = data_name
         self.max_length = max_length
         self.group_by_length = group_by_length
@@ -51,25 +53,17 @@ class BaseOrigDataset(Dataset):
         self.chat_template = chat_template
         self.image_token_str = image_token_str
         self.tokenizer = tokenizer
+        self.tokenizer_workers = int(os.environ.get('XTUNER_TOKENIZE_WORKERS', 8))
 
-        self.root = data.get('media_root', '')
+        try:
+            self.root = data['media_root']
+        except KeyError:
+            self.root = data.get('root', '')
         logger.info(f"{dist.get_rank()} ======= Start to process dataset: {os.path.basename(data['annotation'])}")
 
         self.annotation = data['annotation']
         self._is_jsonl = self.annotation.endswith('.jsonl')
         self.raw_data = _load_json_or_jsonl(self.annotation)
-        repeat_time = data.get('repeat_time', 1)
-        if repeat_time < 1:
-            # If repeat_time is less than 1, select a portion of the data
-            self.raw_data = self.raw_data[:int(len(self.raw_data) * repeat_time)]
-        if repeat_time > 1:
-            assert isinstance(repeat_time, int)
-            # Repeat the list if repeat_time is greater than 1
-            self.raw_data = self.raw_data * repeat_time
-
-        self.group_length = []
-        if self.group_by_length and not pack_data:
-            self.group_length = self.calc_group_len()
 
         # -------------------pack---------------------------------------
         self.num_tokens = None
@@ -77,6 +71,37 @@ class BaseOrigDataset(Dataset):
         if pack_data:
             assert pack_data_cache_dir is not None, 'pack_data_cache_dir must be provided when pack_data is True'
             self.num_tokens = self.calc_packing_info()
+            assert len(self.num_tokens) == len(
+                self.raw_data), f'===={len(self.num_tokens)} neq {len(self.raw_data)}===='
+
+        repeat_time = data.get('repeat_time', 1)
+        if repeat_time < 1:
+            # If repeat_time is less than 1, select a portion of the data
+            if random_sample:
+                num_samples = int(len(self.raw_data) * repeat_time)
+                sampled = random.sample([i for i in range(len(self.raw_data))], num_samples)
+                self.raw_data = self.raw_data[sampled]
+                if pack_data:
+                    self.num_tokens = self.num_tokens[sampled]
+            else:
+                num_samples = int(len(self.raw_data) * repeat_time)
+                self.raw_data = self.raw_data[:num_samples]
+                if pack_data:
+                    self.num_tokens = self.num_tokens[:num_samples]
+
+        if repeat_time > 1:
+            assert isinstance(repeat_time, int)
+            # Repeat the list if repeat_time is greater than 1
+            self.raw_data = self.raw_data * repeat_time
+            if pack_data:
+                self.num_tokens = np.tile(self.num_tokens, repeat_time)
+
+        if pack_data:
+            assert len(self.num_tokens) == len(self.raw_data), f' {len(self.num_tokens)} neq {len(self.raw_data)}'
+
+        self.group_length = []
+        if self.group_by_length and not pack_data:
+            self.group_length = self.calc_group_len()
 
     def __len__(self):
         return len(self.raw_data)
@@ -124,10 +149,11 @@ class BaseOrigDataset(Dataset):
         dataset_shard = self.raw_data[start:end]
 
         desc = f'[Rank {rank}] {os.path.basename(self.annotation)}'
-        with ThreadPoolExecutor(max_workers=8) as executor:
+        with ProcessPoolExecutor(max_workers=self.tokenizer_workers) as executor:
             tokenized = list(
                 tqdm(
-                    executor.map(self.pre_tokenize_fn_for_pack, dataset_shard),
+                    executor.map(self.pre_tokenize_fn_for_pack, dataset_shard,
+                                 chunksize=max(1, len(dataset_shard) // self.tokenizer_workers)),
                     desc=desc,
                     total=len(dataset_shard)))
 

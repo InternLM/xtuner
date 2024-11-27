@@ -46,12 +46,12 @@ def sequence_parallel_wrapper(local_attn):
     def sequence_parallel_attn(query_states, key_states, value_states, *args,
                                **kwargs):
         training = kwargs.pop('training', True)
-        sp_mesh = kwargs.pop('sp_mesh', get_sp_mesh())
+        sp_mesh = kwargs.pop('sp_mesh', None)
 
         if sp_mesh:
             sp_size = sp_mesh.size()
         else:
-            sp_size = 1
+            sp_size = get_sp_mesh().size()
 
         enable_sequence_parallel = sp_size > 1
         if enable_sequence_parallel:

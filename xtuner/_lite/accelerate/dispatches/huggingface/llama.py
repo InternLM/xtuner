@@ -54,6 +54,7 @@ def llama_flash_attn_forward(
 Optional[Tuple[torch.Tensor]]]:
     bsz, q_len, _ = hidden_states.size()
     attn_context = MessageHub.get_instance('packed_sequence')
+    sp_mesh = attn_context.get_info('sp_mesh')
 
     position_ids = attn_context.get_info('position_ids')
     assert position_ids.size(1) == q_len, f'{position_ids.size(1)} {q_len}'
@@ -112,7 +113,8 @@ Optional[Tuple[torch.Tensor]]]:
     if cumulative_lengths is not None and bsz == 1:
         max_seqlen = attn_context.get_info('max_seqlen')
         attn_output = varlen_flash_attn(query_states, key_states, value_states,
-                                        cumulative_lengths, max_seqlen, dropout_p=dropout_rate)
+                                        cumulative_lengths, max_seqlen, dropout_p=dropout_rate,
+                                        training=self.training, sp_mesh=sp_mesh)
     else:
         attn_output = flash_attn_wo_mask(
             query_states,
