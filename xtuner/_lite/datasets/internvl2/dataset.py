@@ -80,7 +80,7 @@ class BaseOrigDataset(Dataset):
             if random_sample:
                 num_samples = int(len(self.raw_data) * repeat_time)
                 sampled = random.sample([i for i in range(len(self.raw_data))], num_samples)
-                self.raw_data = self.raw_data[sampled]
+                self.raw_data = [self.raw_data[index] for index in sampled]
                 if pack_data:
                     self.num_tokens = self.num_tokens[sampled]
             else:
