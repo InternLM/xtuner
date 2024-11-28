@@ -124,7 +124,7 @@ sampler = SequenceParallelSampler \
 train_dataset = dict(
     type=build_preference_dataset,
     # dataset=dict(type=load_jsonl_dataset,data_files=["/home/pingbowen/workspace/DDPO/DDPO-generate_long/data/dpo_data/longwriter_len_calssify/range_2_4k_res.jsonl","/home/pingbowen/workspace/DDPO/DDPO-generate_long/data/dpo_data/ultrafeedback_binarized.jsonl","/home/pingbowen/workspace/DDPO/DDPO-generate_long/data/dpo_data/longwriter_len_calssify/range_16_32k_res_filter.jsonl"]),
-    dataset=dict(type=load_jsonl_dataset,data_files=["/home/pingbowen/workspace/DDPO/openr/data/range_2_4k_res.jsonl","/home/pingbowen/workspace/DDPO/DDPO-generate_long/data/dpo_data/ultrafeedback_binarized.jsonl"]), # "/home/pingbowen/workspace/DDPO/openr/data/range_4_16k_res_new.jsonl","/home/pingbowen/workspace/DDPO/openr/data/range_16_32k_res_new.jsonl", /home/pingbowen/workspace/DDPO/DDPO-generate_long/data/dpo_data/test_new.jsonl
+    dataset=dict(type=load_jsonl_dataset,data_files=["/home/pingbowen/workspace/DDPO/openr/data/step_wise/range_2_4k_res_0.7.jsonl","/home/pingbowen/workspace/DDPO/DDPO-generate_long/data/dpo_data/ultrafeedback_binarized.jsonl","/home/pingbowen/workspace/DDPO/openr/data/step_wise/range_4_16k_res_0.7.jsonl","/home/pingbowen/workspace/DDPO/openr/data/step_wise/range_16_32k_res_new.jsonl"]), 
     # dataset=dict(type=load_dataset, path='llamafactory/ultrafeedback_binarized'), # mlabonne/orpo-dpo-mix-40k
     tokenizer=tokenizer,
     max_length=max_length,

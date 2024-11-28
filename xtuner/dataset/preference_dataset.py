@@ -150,9 +150,9 @@ def tokenize(pair: str,
             elif message['role'] =='system':
                 prompt += '<<SYS>>\\n' + message['content'] + '\\n<</SYS>>\\n\\n'
             elif message['role'] == 'added_assistant':
-                prompt += " " + message['content']
+                prompt += message['content']
             elif message['role'] == 'assistant':
-                prompt += ' ' + message['content'] + tokenizer.eos_token
+                prompt += message['content'] + tokenizer.eos_token
         return prompt 
     
     prompt = pair['prompt'][0]['content'] if pair['prompt'][0]['role'] != "user" else process_message(pair['prompt'])
@@ -186,9 +186,7 @@ def tokenize(pair: str,
         'chosen_ids': chosen_ids,
         'rejected_ids': rejected_ids,
         'chosen_labels': chosen_labels,
-        'rejected_labels': rejected_labels,
-        'group_id': pair.get('group_id', None),
-        "seq_num": pair.get("depth", None)
+        'rejected_labels': rejected_labels
     }
 
 
@@ -248,12 +246,6 @@ class PackedDatasetWrapper(Dataset):
         self.lengths = []
         self.data = []
         
-        # dataset = self.post_process(dataset)
-        # dataset_group_none , dataset_group_sorted = self.split_data(dataset)
-        # packed_dataset = self.pack_dataset(dataset_group_sorted, dataset_group_none, max_packed_length=self.max_packed_length)
-        # if dist.get_rank() == 0:
-        #     import pdb; pdb.set_trace()
-        
         indices = np.arange(len(dataset))
         if shuffle_before_pack:
             np.random.shuffle(indices)
@@ -293,89 +285,6 @@ class PackedDatasetWrapper(Dataset):
             f'from {len(dataset)} to {len(self)} after'
             ' using var len attention.',
             logger='current')
-
-    def split_data(self, dataset):
-        # 转换为 Pandas DataFrame
-        import pandas as pd
-        df = pd.DataFrame(dataset[:])
-
-        # 拆分为两部分
-        df_group_none = df[df['group_id'].isna()]  # group_id 为 None 的部分
-        df_group_sorted = df[df['group_id'].notna()]  # group_id 不为 None 的部分
-
-        # 对 group_id 不为 None 的部分进行排序
-        df_group_sorted = df_group_sorted.sort_values(by=['group_id', 'seq_num'], ascending=[True, True])
-
-        # 将两部分转换回列表形式
-        dataset_group_none = df_group_none.to_dict(orient='records')
-        dataset_group_sorted = df_group_sorted.to_dict(orient='records')
-        return dataset_group_none , dataset_group_sorted
-        
-    def pack_dataset(self,dataset_group_sorted, dataset_group_none, max_packed_length=32768):
-        
-        def process_group(group_id):
-            data_bin = []
-            bin_seq_len = 0
-            removed = 0
-            
-            for data in dataset_group_sorted:
-                if data['group_id'] == group_id:
-                    cur_len = len(data['chosen_ids']) + len(data['rejected_ids'])
-                    if cur_len > max_length:
-                        removed += 1
-                        continue
-                    
-                    if (bin_seq_len +
-                    cur_len) > max_packed_length and len(data_bin) > 0:
-                        self.data.append(data_bin)
-                        self.lengths.append(bin_seq_len)
-                        data_bin = []
-                        bin_seq_len = 0
-                    data_bin.append(data)
-                    bin_seq_len += cur_len
-            
-            return data_bin , bin_seq_len    
-        
-        packed = []  # 保存每次打包的结果
-        remaining_length = max_length  # 当前剩余的可用长度
-
-        # 将 dataset_group_sorted 按 group_id 分组
-        groups = {}
-        for item in dataset_group_sorted:
-            group_id = item['group_id']
-            if group_id not in groups:
-                groups[group_id] = []
-            groups[group_id].append(item)
-
-        # 转换为按 group_id 的列表，确保顺序一致
-        sorted_groups = list(groups.values())
-
-        # 打包过程
-        groups = [0,1,2,3]
-        
-        for data in dataset_group_sorted:
-            '''
-            cur_len = len(data['chosen_ids']) + len(data['rejected_ids'])
-            if cur_len > max_packed_length:
-                removed += 1
-                continue
-            
-            if (bin_seq_len +
-                    cur_len) > max_packed_length and len(data_bin) > 0:
-                self.data.append(data_bin)
-                self.lengths.append(bin_seq_len)
-                data_bin = []
-                bin_seq_len = 0
-            data_bin.append(data)
-            bin_seq_len += cur_len
-            '''
-
-        if len(data_bin) > 0:
-            self.data.append(data_bin)
-            self.lengths.append(bin_seq_len)
-
-        return packed
-        
     
     def post_process(self, dataset):
         
