@@ -50,6 +50,7 @@ def llama_flash_attn_forward(
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.46
+        **kwargs  # FlashAttentionKwargs in the future
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor],
 Optional[Tuple[torch.Tensor]]]:
     bsz, q_len, _ = hidden_states.size()
@@ -72,7 +73,10 @@ Optional[Tuple[torch.Tensor]]]:
 
     # TODO: If the user does not provide position_ids externally, this code cannot be used, and serious bugs will occur.
     # cos, sin = position_embeddings
-    cos, sin = self.rotary_emb(value_states, position_ids)
+    if position_embeddings is None:
+        cos, sin = self.rotary_emb(value_states, position_ids)
+    else:
+        cos, sin = position_embeddings
 
     query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
