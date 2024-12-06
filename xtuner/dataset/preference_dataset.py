@@ -139,25 +139,36 @@ def tokenize(pair: str,
     #     pair['prompt'] + pair['rejected'],
     #     tokenize=False,
     #     add_generation_prompt=False)
-    
-    def process_message(messages):
-        prompt = ''
-        for message in messages:
-            if message['role'] == 'user':
-                prompt += '[INST]' + message['content'] + '[/INST]'
-            elif message['role'] == 'added_user':
-                prompt += message['content']
-            elif message['role'] =='system':
-                prompt += '<<SYS>>\\n' + message['content'] + '\\n<</SYS>>\\n\\n'
-            elif message['role'] == 'added_assistant':
-                prompt += message['content']
-            elif message['role'] == 'assistant':
-                prompt += message['content'] + tokenizer.eos_token
-        return prompt 
-    
-    prompt = pair['prompt'][0]['content'] if pair['prompt'][0]['role'] != "user" else process_message(pair['prompt'])
-    chosen = process_message(pair['prompt'] + pair['chosen'])
-    rejected = process_message(pair['prompt'] + pair['rejected'])
+    if tokenizer.chat_template is None:
+        def process_message(messages):
+            prompt = ''
+            for message in messages:
+                if message['role'] == 'user':
+                    prompt += '[INST]' + message['content'] + '[/INST]'
+                elif message['role'] == 'added_user':
+                    prompt += message['content']
+                elif message['role'] =='system':
+                    prompt += '<<SYS>>\\n' + message['content'] + '\\n<</SYS>>\\n\\n'
+                elif message['role'] == 'added_assistant':
+                    prompt += message['content']
+                elif message['role'] == 'assistant':
+                    prompt += message['content'] + tokenizer.eos_token
+            return prompt 
+        
+        prompt = pair['prompt'][0]['content'] if pair['prompt'][0]['role'] != "user" else process_message(pair['prompt'])
+        chosen = process_message(pair['prompt'] + pair['chosen'])
+        rejected = process_message(pair['prompt'] + pair['rejected'])
+    else:
+        prompt = tokenizer.apply_chat_template(
+            pair['prompt'], tokenize=False, add_generation_prompt=True)    
+        chosen = tokenizer.apply_chat_template(
+            pair['prompt'] + pair['chosen'],
+            tokenize=False,
+            add_generation_prompt=False)
+        rejected = tokenizer.apply_chat_template(
+            pair['prompt'] + pair['rejected'],
+            tokenize=False,
+            add_generation_prompt=False)
     
     prompt_ids = tokenizer.encode(prompt, add_special_tokens=False)
     chosen_ids = tokenizer.encode(chosen, add_special_tokens=False)
