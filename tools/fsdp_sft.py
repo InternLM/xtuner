@@ -4,26 +4,36 @@ import copy
 import math
 import os
 import sys
+import re
 import time
+import shutil
+import requests
+import gc
 from collections import OrderedDict
 from contextlib import nullcontext
+from concurrent.futures import wait
 from datetime import datetime, timedelta
 from functools import partial
 
 import torch
 import torch.distributed as dist
+from torch.nn import functional as F
 import torch.distributed.checkpoint as dcp
+from torch.distributed._composable.fsdp import MixedPrecisionPolicy
 from accelerate.utils import set_module_tensor_to_device
 from mmengine import mkdir_or_exist
 from mmengine.runner import set_random_seed
 from mmengine.utils import get_git_hash
 from mmengine.utils.dl_utils import collect_env
+
 from peft import LoraConfig, get_peft_model
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import \
     apply_activation_checkpointing
 from torch.distributed.checkpoint.state_dict import (StateDictOptions,
                                                      get_model_state_dict,
-                                                     get_state_dict)
+                                                     get_state_dict, set_state_dict)
+from torch.distributed.checkpoint.stateful import Stateful
+
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import MixedPrecision
@@ -38,8 +48,8 @@ from transformers.utils.import_utils import is_flash_attn_2_available
 
 from xtuner._lite import (AutoTokenizer, get_device, get_logger,
                           get_torch_device_module)
-from xtuner._lite.accelerate import (LORA_TARGET_MAP, dispatch_hf_code,
-                                     packed_sequence, varlen_attn_is_available)
+from xtuner._lite.accelerate import (LORA_TARGET_MAP, dispatch_hf_code, LoadWoInit,
+                                     packed_sequence, varlen_attn_is_available, profile_time_and_memory)
 from xtuner._lite.algorithms.sft import SftCollator, SftTokenizeFunction
 from xtuner._lite.chat import CHAT_TEMPLATE_MAP
 from xtuner._lite.datasets import (DATASET_CLS_MAP, OPENAI_CONVERT_MAP,
@@ -49,22 +59,31 @@ from xtuner._lite.parallel import (LengthGroupedSampler, ParallelSampler,
                                    pad_for_sequence_parallel,
                                    reduce_sequence_parallel_loss,
                                    setup_parallel, split_for_sequence_parallel)
-from xtuner._lite.parallel.fsdp import (RECOMPUTE_MODULES, LoadWoInit,
-                                        all_required_grad_wrap_policy,
-                                        checkpoint_check_fn, dp_lazy_init,
-                                        dp_sp_lazy_init,
-                                        layer_auto_wrap_policy)
 
+from xtuner._lite.parallel import (ParallelSampler, get_dp_mesh, get_fsdp_mesh,
+                                   get_sp_mesh, get_tp_mesh, get_world_mesh, get_same_data_mesh,
+                                   pad_for_sequence_parallel, setup_parallel,
+                                   reduce_sequence_parallel_loss,
+                                   split_for_sequence_parallel)
+from xtuner._lite.parallel.megatron import megatron_parallelize
+from xtuner._lite.parallel.fsdp import clip_grad_norm_
+
+gc.disable()
 logger = get_logger()
+
 DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
 
 SUPPORT_DATA_FORMATS = OPENAI_CONVERT_MAP.keys()
 
-
 def log_format(rank, debug=False):
 
-    formatter = f'[XTuner][RANK {rank}]'
+    sp_rank = get_sp_mesh().get_local_rank()
+    dp_rank = get_dp_mesh().get_local_rank()
+    tp_rank = get_tp_mesh().get_local_rank()
+    fsdp_rank = get_fsdp_mesh().get_local_rank()
+
+    formatter = f'[XTuner][RANK {rank}][DP {dp_rank}][SP {sp_rank}][TP {tp_rank}]'
     formatter += '[{time:YYYY-MM-DD HH:mm:ss}][<level>{level}</level>]'
 
     if debug:
@@ -74,6 +93,22 @@ def log_format(rank, debug=False):
 
     formatter += ' <level>{message}</level>'
     return formatter
+
+def send_to_feishu(web_hook, msg):
+
+    header = {
+        "Content-Type" : "application/json;charset=UTF-8"
+    }
+
+    body = {
+        "msg_type" : "text",
+        "content" : { "text" : f"<at user_id=\"all\">所有人</at>{msg}"}
+    }
+
+    try:
+        requests.post(url=web_hook, json=body, headers=header, timeout=1)
+    except requests.exceptions.RequestException:
+        pass
 
 
 def parse_args():
@@ -137,7 +172,6 @@ def parse_args():
         help=('The sharding strategy to be used for distributed training.'))
     model_args.add_argument('--cpu-offload', action='store_true', help=(''))
     model_args.add_argument('--sp-size', type=int, default=1, help='')
-
     data_args = parser.add_argument_group('data', 'Dataset Related Settings')
     data_args.add_argument(
         '--datasets',
@@ -193,6 +227,10 @@ def parse_args():
               'be `max_length`; When `soft`, it will pack multiple  data '
               'into nearly `max_length` without truncating the data.'))
     data_args.add_argument(
+        '--global-pack',
+        action='store_true',
+        help='A subsequence in the packed data comes from different files.')
+    data_args.add_argument(
         '--max-length',
         type=int,
         default=2048,
@@ -201,7 +239,7 @@ def parse_args():
     data_args.add_argument(
         '--num-workers',
         type=int,
-        default=0,
+        default=8,
         help='how many subprocesses to use for data loading.')
     data_args.add_argument('--file-pattern', type=str, default=None)
     data_args.add_argument('--group-by-length', action='store_true')
@@ -241,6 +279,9 @@ def parse_args():
         default='work_dirs',
         help='the dir to save logs and checkpoints')
     parser.add_argument(
+        '--feishu-webhook', default=None, help='Webhook of Feishu Group Chat Bot')
+    parser.add_argument('--gc-interval', default=100, type=int)
+    parser.add_argument(
         '--checkpoint-interval',
         default=-1,
         type=float,
@@ -248,6 +289,11 @@ def parse_args():
               'point number less than 1, or an integer greater than or equal '
               "to 1. When it's a floating point, it will be multiplied by the "
               'total number of training steps.'))
+    parser.add_argument(
+        '--checkpoint-max-keep',
+        default=1,
+        type=int,
+        help=('Maximum number of saved checkpoints。'))
     parser.add_argument(
         '--checkpoint-drop-optimizer',
         action='store_true',
@@ -258,8 +304,7 @@ def parse_args():
         '--log-interval', default=1, type=int, help='log interval')
     parser.add_argument(
         '--resume',
-        type=str,
-        default=None,
+        action='store_true',
         help='specify checkpoint path to be resumed from.')
     parser.add_argument(
         '--seed', type=int, default=0, help='random seed for the training')
@@ -285,7 +330,8 @@ def map_meta_modules(model, meta_model):
 def build_llm_model(args, config, world_size, dtype=torch.float32):
     with LoadWoInit():
         llm = AutoModelForCausalLM.from_pretrained(
-            args.llm, config=config, trust_remote_code=True)
+            args.llm, config=config, attn_implementation='flash_attention_2', 
+            trust_remote_code=True)
 
     # Ensure all numerical values in the optimizer are fp32.
     # FSDP will use low precision during forward.
@@ -311,20 +357,111 @@ def build_llm_model(args, config, world_size, dtype=torch.float32):
     return llm
 
 
+class TrainState(Stateful):
+
+    def __init__(self, total_steps, seed):
+        super().__init__()
+
+        self.seed = seed
+        self.cur_step = -1
+        self.total_steps = total_steps
+        self.if_nan_skip_steps = 0
+
+    def load_state_dict(self, state_dict):
+        assert self.total_steps == state_dict['total_steps']
+        self.cur_step = state_dict['current_step']
+        self.if_nan_skip_steps = state_dict['if_nan_skip_steps']
+
+    def state_dict(self):
+        return {
+            'seed': self.seed, 'current_step': self.cur_step, 
+            'total_steps': self.total_steps, 
+            'if_nan_skip_steps': self.if_nan_skip_steps
+        }
+
+    def step(self):
+        self.cur_step = self.cur_step + 1
+
+    def found_nan(self):
+        self.if_nan_skip_steps += 1
+
+
+def find_latest_timestamp(work_dir):
+    # Initialize variables to keep track of the latest timestamp and its corresponding directory
+    latest_timestamp = None
+
+    # Iterate over all files and directories in the specified directory
+    for entry in os.listdir(work_dir):
+        full_path = os.path.join(work_dir, entry)
+        
+        # Check if the entry is a directory
+        if os.path.isdir(full_path):
+            try:
+                # Try to interpret the directory name as a timestamp
+                timestamp = datetime.strptime(entry, '%Y%m%d%H%M%S')
+
+                # Update the latest timestamp and directory if this one is more recent
+                if latest_timestamp is None or timestamp > latest_timestamp:
+                    latest_timestamp = timestamp
+            except ValueError:
+                # If conversion fails, skip this entry
+                continue
+    
+    if latest_timestamp is not None:
+        latest_timestamp = latest_timestamp.strftime( '%Y%m%d%H%M%S')
+
+    return latest_timestamp
+
+
+def find_checkpoints(directory, prefix='ckpt'):
+
+    if prefix == 'ckpt':
+        pattern = r'^ckpt-(\d+)$'
+    elif prefix == 'hf':
+        pattern = r'^hf-(\d+)$'
+    else:
+        raise ValueError
+    
+    latest_step = -1
+    latest_checkpoint = None
+
+    all_folders = [d for d in os.listdir(directory) if os.path.isdir(os.path.join(directory, d))]
+    
+    checkpoints = []
+    for folder in all_folders:
+        match = re.match(pattern, folder)
+        if match:
+            # 将文件夹名和匹配到的数字转换为整数并存储为元组
+            checkpoints.append((folder, int(match.group(1))))
+    
+    checkpoints.sort(key=lambda x: x[1])
+
+    return [os.path.join(directory, folder[0]) for folder in checkpoints]
+
+
+
+
 # @logger.catch
 def sft(args):
     ###########################################################################
     #                           1. Environment                                #
     ###########################################################################
     setup_parallel(sp_size=args.sp_size, tp_size=1)
-    dp_mesh = get_dp_mesh()
-    sp_mesh = get_sp_mesh()
-
-    dp_size = dp_mesh.size()
-    sp_size = sp_mesh.size()
     set_random_seed(args.seed)
 
-    world_size = int(os.environ['WORLD_SIZE'])
+    dp_mesh = get_dp_mesh()
+    tp_mesh = get_tp_mesh()
+    sp_mesh = get_sp_mesh()
+    fsdp_mesh = get_fsdp_mesh()  # dp_size * sp_size
+    world_mesh = get_world_mesh()  # dp_size * sp_size * tp_size
+    
+    dp_size = dp_mesh.size()
+    tp_size = tp_mesh.size()
+    sp_size = sp_mesh.size()
+    world_size = world_mesh.size()
+
+    cpu_comm_timeout = timedelta(minutes=60)
+    gloo_group = dist.new_group(backend='gloo', timeout=cpu_comm_timeout)
 
     if args.global_batch_size < dp_size or args.global_batch_size % dp_size:
         raise ValueError(f'The `global_batch_size`({args.global_batch_size}) '
@@ -337,7 +474,15 @@ def sft(args):
                          f' * `mirco_batch_size`({args.mirco_batch_size})')
 
     rank = dist.get_rank()
-    timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
+
+    if args.resume:
+        mkdir_or_exist(args.work_dir)
+        timestamp = find_latest_timestamp(args.work_dir)
+        
+        if timestamp is None:
+            timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
+    else:
+        timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
 
     objects = [timestamp]
     dist.broadcast_object_list(objects, src=0)
@@ -348,11 +493,25 @@ def sft(args):
 
     log_file = os.path.join(args.work_dir, f'rank{rank}.log')
 
+    logger.remove()
     # Change the log format printed in the terminal
     lvl = 'DEBUG' if args.debug else 'INFO'
     logger.add(sys.stderr, level=lvl, format=log_format(rank, args.debug))
     # Change the format saved in the log file
     logger.add(log_file, format=log_format(rank), backtrace=True, catch=True)
+
+    if args.feishu_webhook and rank == 0:
+        def log_handler(record):
+            if record['level'].name == "WARNING":
+                send_to_feishu(args.feishu_webhook, f"[WARNING] {record['message']}\n{args.work_dir}")
+            elif record['level'].name == "TRACE":
+                send_to_feishu(args.feishu_webhook, f"[TRACE] {record['message']}\n{args.work_dir}")
+            elif record['level'].name == "ERROR":
+                send_to_feishu(args.feishu_webhook, f"[ERROR] 任务失败\n{args.work_dir}")
+
+        logger.add(sys.stderr, level='TRACE', filter=log_handler, catch=True)
+
+        logger.trace('任务开始')
 
     logger.info(args)
     if rank == 0:
@@ -368,6 +527,7 @@ def sft(args):
         runtime_env['World Size'] = world_size
         runtime_env['DP Size'] = dp_size
         runtime_env['SP Size'] = sp_size
+        runtime_env['TP Size'] = tp_size
         # runtime_env['Distributed launcher'] = dist_launcher
 
         runtime_env_info = '\n    ' + '\n    '.join(
@@ -386,6 +546,7 @@ def sft(args):
     tokenizer = AutoTokenizer.from_pretrained(
         args.tokenizer if args.tokenizer else args.llm,
         trust_remote_code=True,
+        use_fast=False,
         padding_side='right')
 
     if args.chat_template:
@@ -419,9 +580,9 @@ def sft(args):
         logger.debug(f'[Dataset] {num_tokens} tokens.')
 
     if args.dset_pack_level == 'soft':
-        train_dataset = SoftPackDataset(_datasets, target=args.max_length)
+        train_dataset = SoftPackDataset(_datasets, target=args.max_length, blend=args.global_pack)
     elif args.dset_pack_level == 'hard':
-        train_dataset = HardPackDataset(_datasets, target=args.max_length)
+        raise NotImplementedError
     else:
         train_dataset = ConcatDataset(_datasets)
 
@@ -431,8 +592,8 @@ def sft(args):
         logger.info(f'[Dataset] (Original) {ori_samples} samples.')
         logger.info(f'[Dataset] (Packed) {packed_samples} samples.')
 
-    pack_batch = varlen_attn_is_available()
-    collator = SftCollator(pack_batch=pack_batch)
+    assert varlen_attn_is_available()
+    collator = SftCollator(pack_batch=varlen_attn_is_available())
 
     if args.group_by_length:
         sampler = LengthGroupedSampler(train_dataset, dp_mesh,
@@ -440,6 +601,8 @@ def sft(args):
     else:
         sampler = ParallelSampler(
             train_dataset, dp_mesh, args.global_batch_size, shuffle=True)
+
+    gc.collect()
 
     train_dataloader = DataLoader(
         train_dataset,
@@ -460,6 +623,7 @@ def sft(args):
         logger.debug(f'[Dataloader] Training Batch(Decoded):\n{_decoded}')
     dist.barrier()
 
+    gc.collect()
     load_data_cost_time = time.time() - start_load_data_t
     logger.info(f'[Dataset & Dataloader] Cost {load_data_cost_time:.2f}s')
     # -------------------    Dataset & Dataloader  End  --------------------- #
@@ -495,86 +659,54 @@ def sft(args):
 
     llm_cfg.use_cache = False
     llm_cfg.torch_dtype = dtype
-
-    with torch.device('meta'):
-        # Ensure all numerical values in the optimizer are fp32.
-        # FSDP will use low precision during forward.
-        meta_llm = build_llm_model(args, llm_cfg, world_size, torch.float32)
-
-    if pack_batch:
-        dispatch_hf_code(meta_llm)
+    
+    
 
     # Only load parameters on rank 0 to avoid each rank repeatedly loading the
     # same model into the CPU, wasting memory
     if rank == 0:
         with torch.device('cpu'):
-            llm = build_llm_model(args, llm_cfg, world_size, dtype)
-        rank0_meta_llm = copy.deepcopy(meta_llm)
-        meta_llm_map = map_meta_modules(llm, meta_llm)
+            rank0_llm = build_llm_model(args, llm_cfg, world_size, dtype)
     else:
-        meta_llm_map = None
+        rank0_llm = None
+
+    dist.monitored_barrier(group=gloo_group, timeout=cpu_comm_timeout)
+
+    with torch.device('meta'):
+        # Ensure all numerical values in the optimizer are fp32.
+        # FSDP will use low precision during forward.
+        llm = build_llm_model(args, llm_cfg, world_size, dtype)
+        dispatch_hf_code(llm)
+        for module in llm.modules():
+            for p_name, param in module.named_parameters(recurse=False):
+                if param.requires_grad:
+                    param_fp32 = torch.nn.Parameter(
+                        param.to(dtype=torch.float32))
+                    setattr(module, p_name, param_fp32)
+
+    mp_policy = MixedPrecisionPolicy(param_dtype=dtype, reduce_dtype=dtype)
+
+    with profile_time_and_memory('[Parallelize LLM]'):
+        megatron_parallelize(
+            llm,
+            rank0_llm,
+            dp_mesh=fsdp_mesh,
+            tp_mesh=tp_mesh,
+            mp_policy=mp_policy,
+            recompute_ratio=args.selective_recompute,
+            reshard_after_forward=True)
+        
+        llm.train()
 
     dist.barrier()
-
-    if sp_size > 1:
-        param_init_fn = partial(
-            dp_sp_lazy_init,
-            module_map=meta_llm_map,
-            dp_mesh=dp_mesh,
-            sp_mesh=sp_mesh)
-    else:
-        param_init_fn = partial(
-            dp_lazy_init, module_map=meta_llm_map, dp_mesh=dp_mesh)
-
-    policies = [layer_auto_wrap_policy]
-    if args.use_lora:
-        policies.append(all_required_grad_wrap_policy)
-
-    if args.shard_strategy == 'full':
-        fsdp_device_mesh = init_device_mesh(DEVICE, (world_size, ))
-        strategy = ShardingStrategy.FULL_SHARD
-    elif args.shard_strategy == 'hybrid':
-        fsdp_device_mesh = init_device_mesh(DEVICE, (dp_size // 8, 8))
-        strategy = ShardingStrategy.HYBRID_SHARD
-    else:
-        raise ValueError
-
-    DEVICE_MODULE.reset_peak_memory_stats()
-    shard_llm = FSDP(
-        meta_llm,
-        device_mesh=fsdp_device_mesh,
-        sharding_strategy=strategy,
-        cpu_offload=CPUOffload(offload_params=args.cpu_offload),
-        auto_wrap_policy=partial(_or_policy, policies=policies),
-        mixed_precision=MixedPrecision(
-            param_dtype=dtype, reduce_dtype=dtype, buffer_dtype=dtype),
-        device_id=DEVICE_MODULE.current_device(),
-        use_orig_params=True,
-        param_init_fn=param_init_fn,
-        sync_module_states=True,
-    )
-    shard_llm.train()
-
-    max_memory = DEVICE_MODULE.max_memory_allocated()
-    logger.info('[Model] During building the FSDP model, the peak GPU memory '
-                f'is {max_memory/1024**3:.1f}GB.')
-
-    if args.selective_recompute:
-        check_fn = partial(
-            checkpoint_check_fn,
-            target=RECOMPUTE_MODULES,
-            selective=args.selective_recompute)
-        apply_activation_checkpointing(shard_llm, check_fn=check_fn)
-
-    fsdp_cost_time = time.time() - start_model_t
-    logger.info(f'[Model] Cost {fsdp_cost_time:.2f}s')
+    gc.collect()
     # --------------------------    FSDP  End  ------------------------------ #
 
     ###########################################################################
     #                      4. Optimizer & Scheduler                           #
     ###########################################################################
     requried_grad_params = [
-        param for param in shard_llm.parameters() if param.requires_grad
+        param for param in llm.parameters() if param.requires_grad
     ]
     optimizer = AdamW(
         requried_grad_params,
@@ -594,6 +726,8 @@ def sft(args):
 
     total_epochs = args.epochs
     total_steps = steps_per_epoch * total_epochs
+    if_nan_skip_steps = 0
+    train_state = TrainState(total_steps, args.seed)
 
     if args.checkpoint_interval == -1:
         checkpoint_interval = total_steps
@@ -613,20 +747,76 @@ def sft(args):
         optimizer, T_max=total_steps - warmup_steps, eta_min=args.lr_min)
 
     start_step = 0
-
+    gc.collect()
     # ----------------    Optimizer & Scheduler End   ----------------------- #
 
     ###########################################################################
-    #                          5. Training                                    #
+    #                      5. (Optional) Resume                               #
     ###########################################################################
+    if args.resume:
+        
 
+        _checkpoints = find_checkpoints(args.work_dir)
+
+        latest_checkpoint = None
+
+        for _ckpt_dir in reversed(_checkpoints):
+            if os.path.exists(os.path.join(_ckpt_dir, '.metadata')):
+                latest_checkpoint = _ckpt_dir
+                break
+
+        if latest_checkpoint:
+
+            with profile_time_and_memory('[Resume]'):
+                _options = StateDictOptions(
+                    cpu_offload=True, ignore_frozen_params=True)
+                (shard_model_state_dict,
+                shard_optimizer_state_dict) = get_state_dict(
+                    llm, optimizer, options=_options)
+                state_dict = {
+                    'model': shard_model_state_dict,
+                    'optimizer': shard_optimizer_state_dict,
+                    'train_state': train_state,
+                    'warmup_scheduler': warmup_scheduler,
+                    'cosine_scheduler': cosine_scheduler
+                }
+
+                # inplace state_dict
+                dcp.load(
+                    state_dict=state_dict,
+                    checkpoint_id=latest_checkpoint,
+                )
+
+                _options = StateDictOptions(
+                    cpu_offload=True, strict=False)
+                set_state_dict(
+                    llm,
+                    optimizer,
+                    model_state_dict=state_dict["model"],
+                    optim_state_dict=state_dict["optimizer"],
+                    options=_options
+                )
+
+            start_step = train_state.cur_step + 1
+        
+        else:
+            logger.warning(f'There is no checkpoint available for resuming training in {args.work_dir}.')
+
+    ###########################################################################
+    #                          6. Training                                    #
+    ###########################################################################
+    ckpt_handle = None
     start_train_t = time.time()
     DEVICE_MODULE.empty_cache()
     DEVICE_MODULE.reset_peak_memory_stats()
     max_memory = DEVICE_MODULE.max_memory_allocated()
     logger.info('[Train] Begin Train Loop. The current GPU memory is '
                 f'{(max_memory / 1024**3):.1f}GB')
+
     for step in range(start_step, total_steps):
+
+        if is_interval(step + 1, total_steps, args.gc_interval):
+            gc.collect()
 
         epoch = step // steps_per_epoch
         epoch_inner_step = step % steps_per_epoch
@@ -635,11 +825,12 @@ def sft(args):
             # readjusted.
             # Or after resuming, for the first step, the dataloader needs to
             # be adjusted to the position before resume.
-
-            train_dataloader.sampler.set_epoch(epoch, epoch_inner_step)
+            train_dataloader.sampler.set_epoch(epoch, epoch_inner_step * iters_per_step )
             data_iterator = iter(train_dataloader)
 
-        if step < warmup_steps:
+        train_state.step()
+
+        if step <= warmup_steps:
             warmup_scheduler.step()
             cur_lr = warmup_scheduler.get_last_lr()[0]
         else:
@@ -652,67 +843,75 @@ def sft(args):
         step_data_time = 0
         step_start_t = time.time()
         step_consumed_tokens = 0
-        for _ in range(iters_per_step):
 
-            _data_start_t = time.time()
-            data = next(data_iterator)
-            step_data_time += time.time() - _data_start_t
+        _data_start_t = time.time()
 
-            input_ids = data['input_ids'].to(DEVICE)
-            labels = data['labels'].to(DEVICE)
-            attention_mask = data['attention_mask'].to(DEVICE)
+        step_data_list = [next(data_iterator) for _ in range(iters_per_step)]
+        rank_grad_tokens = 0
+        for _iter in range(iters_per_step):
+            _iter_data = step_data_list[_iter]
+            _iter_labels = _iter_data['labels'][:, 1:]
+            rank_grad_tokens += (_iter_labels >= 0).sum()
+        rank_grad_tokens = rank_grad_tokens.to(DEVICE)
+        dist.all_reduce(rank_grad_tokens)
+        global_grad_tokens = rank_grad_tokens  / sp_size / tp_size
+
+        
+        step_data_time = time.time() - _data_start_t
+
+        for _iter in range(iters_per_step):
+            
+            data = step_data_list[_iter]
+            input_ids = data['input_ids'][:, :-1].to(DEVICE)
+
+            labels = data['labels'][:, 1:].to(DEVICE)
             num_tokens = data['num_tokens'].to(DEVICE)
+
+            if num_tokens[-1] == 1:
+                num_tokens = num_tokens[:-1]
+            else:
+                num_tokens[-1] = num_tokens[-1] - 1
 
             if sp_size > 1:
                 # `dim` is 1 as the shape of tensor is (bs, seq_len, ...)
-                input_ids = pad_for_sequence_parallel(input_ids, 0, dim=1)
-                labels = pad_for_sequence_parallel(labels, -100, dim=1)
-
-                num_pad = input_ids.numel() - num_tokens.sum()
-                num_pad = torch.IntTensor([num_pad]).to(DEVICE)
-                num_tokens = torch.cat([num_tokens, num_pad], dim=0)
+                input_ids = pad_for_sequence_parallel(input_ids, 0, sp_mesh, dim=1)
+                _num_pad = input_ids.numel() - num_tokens.sum()
+                if _num_pad > 0:
+                    _num_pad = torch.IntTensor([_num_pad]).to(DEVICE)
+                    num_tokens = torch.cat([num_tokens, _num_pad], dim=-1)
 
                 input_ids = split_for_sequence_parallel(
                     input_ids, dim=1, sp_mesh=sp_mesh)
+
+                labels = pad_for_sequence_parallel(labels, -100,sp_mesh, dim=1)
                 labels = split_for_sequence_parallel(
                     labels, dim=1, sp_mesh=sp_mesh)
 
-            packed_ctx = packed_sequence(
-                num_tokens, enable=pack_batch, sp_size=sp_size)
+            packed_ctx = packed_sequence(num_tokens, sp_mesh=sp_mesh)
 
             with packed_ctx, autocast if args.use_lora else nullcontext():
-
-                outputs = shard_llm(
-                    input_ids=input_ids,
-                    labels=labels,
-                    attention_mask=attention_mask)
-
-                loss = outputs.loss
-                if sp_size > 1:
-                    tokens_cal_loss = (labels != -100).sum()
-                    loss = reduce_sequence_parallel_loss(
-                        loss, tokens_cal_loss, sp_mesh)
-
-                avg_iter_loss = loss / iters_per_step
-
+                loss = llm(input_ids=input_ids, labels=labels, label_shifted=True, use_cache=False).loss
+                
+                loss = loss * (labels >= 0).sum() / global_grad_tokens * dp_size 
+               
                 if scaler and args.use_lora:
-                    scaler.scale(avg_iter_loss).backward()
+                    scaler.scale(loss).backward()
                 else:
-                    avg_iter_loss.backward()
+                    loss.backward()
 
-            step_loss += avg_iter_loss.item()
-            if args.dset_pack_level == 'soft':
-                # During a soft pack process, the data with a length that is
-                # still smaller than the max length after packing, will be
-                # padded to the max length. The last element of num tokens
-                # represents the count of pad tokens.
-                step_consumed_tokens += num_tokens[:-1].sum() / sp_size
-            else:
-                step_consumed_tokens += num_tokens.sum() / sp_size
+            step_loss += loss.item()
+            step_consumed_tokens += num_tokens.sum() / sp_size / tp_size
 
-        grad_norm = shard_llm.clip_grad_norm_(args.max_grad_norm)
-        optimizer.step()
-        optimizer.zero_grad()
+        grad_norm = clip_grad_norm_(
+            requried_grad_params, fsdp_mesh, args.max_grad_norm)
+
+        if grad_norm.isnan() or grad_norm.isinf():
+            train_state.found_nan()
+            logger.warning(f"[Step {step}] The grad norm is NaN or Inf, skip this step. Skipped {train_state.if_nan_skip_steps} steps in total.")
+            optimizer.zero_grad()
+        else:
+            optimizer.step()
+            optimizer.zero_grad()
 
         step_time = time.time() - step_start_t
         eta = step_time * (total_steps - step)
@@ -724,42 +923,55 @@ def sft(args):
                         f'{step + 1}/{total_steps}  '
                         f'lr: {cur_lr:.6f}  loss: {step_loss:.3f}  '
                         f'grad_norm: {grad_norm:.2f}  '
+                        f'if_nan_skip: {train_state.if_nan_skip_steps}  '
                         f'max_memory: {(max_memory / 1024**3):.1f}GB  '
                         f'text_tokens: {step_consumed_tokens}  '
                         f'tgs: {tgs}  data_time: {step_data_time:.2f}s  '
                         f'time: {step_time:.2f}s  '
                         f'eta: {eta}')
 
-        if is_interval(step, total_steps, checkpoint_interval):
-            DEVICE_MODULE.empty_cache()
-            DEVICE_MODULE.reset_peak_memory_stats()
-            max_memory = DEVICE_MODULE.max_memory_allocated()
-            logger.info('[Checkpoint] Before saving checkpoint, the peak GPU '
-                        f'memory is {max_memory/1024**3:.1f}GB.')
+        if is_interval(step, total_steps, int(total_steps * 0.1)):
+            logger.trace(f'Step {step}/{total_steps}, loss {step_loss:.3f}, tgs {tgs}')
 
+        if is_interval(step, total_steps, checkpoint_interval):
+            
             num_digits = len(str(abs(total_steps)))
             work_dir = args.work_dir
             ckpt_dir = os.path.join(work_dir, f'ckpt-{step+1:0{num_digits}}')
             hf_dir = os.path.join(work_dir, f'hf-{step+1:0{num_digits}}')
-            _options = StateDictOptions(cpu_offload=True, full_state_dict=True)
+            
+            with profile_time_and_memory('[HF Checkpoint]'):
+            
+                from torch.distributed._tensor import DTensor
 
-            full_model_state_dict = get_model_state_dict(
-                shard_llm, options=_options)
-            if rank == 0:
-                saved_llm = copy.deepcopy(rank0_meta_llm)
-                saved_llm.to(dtype)
-                for name, param in full_model_state_dict.items():
-                    set_module_tensor_to_device(saved_llm, name, 'cpu', param)
+                if rank == 0:
+                    llm_state_dict = {}
+                
+                for name, param in llm.state_dict().items():
+                    if isinstance(param, DTensor):
+                        with torch.no_grad():
+                            full_param = param.full_tensor().cpu()
+                    else:
+                        full_param = param.cpu()
+                    
+                    if rank == 0:
+                        llm_state_dict[name] = full_param
+                
+                if rank == 0:
+                    rank0_llm.load_state_dict(llm_state_dict)
+                    rank0_llm.save_pretrained(hf_dir)
+                    tokenizer.save_pretrained(hf_dir)
+                
+                dist.barrier()
 
-                if args.use_lora:
-                    saved_llm = saved_llm.merge_and_unload()
+            saved_hf_checkpoints = find_checkpoints(args.work_dir, prefix='hf')
+                
+            if len(saved_hf_checkpoints) > args.checkpoint_max_keep:
+                for _ckpt in saved_hf_checkpoints[:-args.checkpoint_max_keep]:
+                    if rank == 0:
+                        shutil.rmtree(_ckpt)
+                        logger.info('[HF Checkpoint] Delete the oldest checkpoint.')
 
-                saved_llm.save_pretrained(hf_dir)
-                tokenizer.save_pretrained(hf_dir)
-                del saved_llm
-
-            dist.barrier()
-            del full_model_state_dict
 
             if args.checkpoint_drop_optimizer:
                 logger.warning('The saved checkpoint cannot be resumed. '
@@ -767,35 +979,46 @@ def sft(args):
                                'please remove `--checkpoint-drop-optimizer` '
                                'from the command.')
             else:
-                # FSDP cannot be saved via torch.save
-                # Refer to https://pytorch.org/tutorials/recipes/distributed_checkpoint_recipe.html  # noqa: E501
-                _options = StateDictOptions(
-                    cpu_offload=True, ignore_frozen_params=True)
-                (shard_model_state_dict,
-                 shard_optimizer_state_dict) = get_state_dict(
-                     shard_llm, optimizer, options=_options)
+                
+                with profile_time_and_memory('[PT Checkpoint]'):
+                    if ckpt_handle is not None:
+                        wait([ckpt_handle])
 
-                state_dict = {
-                    'model': shard_model_state_dict,
-                    'optimizer': shard_optimizer_state_dict,
-                    'step': step,
-                    'total_steps': total_steps,
-                    'warmup_scheduler': warmup_scheduler.state_dict(),
-                    'cosine_scheduler': cosine_scheduler.state_dict()
-                }
+                    # FSDP cannot be saved via torch.save
+                    # Refer to https://pytorch.org/tutorials/recipes/distributed_checkpoint_recipe.html  # noqa: E501
+                    _options = StateDictOptions(
+                        cpu_offload=True, ignore_frozen_params=True)
+                    (shard_model_state_dict,
+                    shard_optimizer_state_dict) = get_state_dict(
+                        llm, optimizer, options=_options)
 
-                writer = dcp.FileSystemWriter(ckpt_dir)
-                mkdir_or_exist(ckpt_dir)
-                dcp.save(state_dict, writer)
+                    state_dict = {
+                        'model': shard_model_state_dict,
+                        'optimizer': shard_optimizer_state_dict,
+                        'train_state': train_state.state_dict(),
+                        'warmup_scheduler': warmup_scheduler.state_dict(),
+                        'cosine_scheduler': cosine_scheduler.state_dict()
+                    }
 
-            max_memory = DEVICE_MODULE.max_memory_allocated()
-            logger.info('[Checkpoint] During saving checkpoint, the peak GPU '
-                        f'memory is {max_memory/1024**3:.1f}GB.')
+                    mkdir_or_exist(ckpt_dir)
+                    ckpt_handle = dcp.async_save(state_dict, checkpoint_id=ckpt_dir, process_group=gloo_group)
+
+                saved_checkpoints = find_checkpoints(args.work_dir)
+                
+                if len(saved_checkpoints) > args.checkpoint_max_keep:
+                    for _ckpt in saved_checkpoints[:-args.checkpoint_max_keep]:
+                        if rank == 0:
+                            shutil.rmtree(_ckpt)
+                            logger.info('[PT Checkpoint] Delete the oldest checkpoint.')
+
+    if ckpt_handle is not None:
+        wait([ckpt_handle])
+
+    logger.trace('Task Finished')
 
     train_cost_time = time.time() - start_train_t
     logger.info(f'[Train] Cost {timedelta(seconds=int(train_cost_time))}')
     # ------------------------    Training  End  ---------------------------- #
-
 
 if __name__ == '__main__':
 
