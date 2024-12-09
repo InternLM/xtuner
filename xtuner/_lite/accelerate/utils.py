@@ -28,6 +28,17 @@ def lmdeploy_is_available():
 
     return available
 
+def liger_kernel_is_available():
+
+    available = False
+    try:
+        import liger_kernel  # noqa: F401
+        available = True
+    except ImportError:
+        available = False
+
+    return available
+
 
 @contextmanager
 def profile_time_and_memory(desc):

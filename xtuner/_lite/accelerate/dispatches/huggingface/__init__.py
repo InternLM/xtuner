@@ -18,6 +18,12 @@ def  _dispatch_qwen2_attn_flash_forward(module):
         _dispatch_forward_fn(module, qwen2_attn_flash_forward)
         return qwen2_attn_flash_forward.__name__
 
+def  _dispatch_qwen2_casual_forward(module):
+    assert module.__class__.__name__ in ['Qwen2ForCausalLM']
+    from .qwen2 import qwen2_casual_forward
+    _dispatch_forward_fn(module, qwen2_casual_forward)
+    return qwen2_casual_forward.__name__
+
 
 def _dispatch_internlm2_varlen_attn_forward(module):
     assert module.__class__.__name__ in ['InternLM2FlashAttention2', 'InternLM2Attention', 'InternLM2SdpaAttention']
@@ -26,6 +32,13 @@ def _dispatch_internlm2_varlen_attn_forward(module):
     if varlen_attn_is_available():
         _dispatch_forward_fn(module, internlm2_varlen_attn_forward)
         return internlm2_varlen_attn_forward.__name__
+
+def  _dispatch_internlm2_casual_forward(module):
+    assert module.__class__.__name__ in ['InternLM2ForCausalLM']
+    from .internlm2 import internlm2_causal_forward
+    _dispatch_forward_fn(module, internlm2_causal_forward)
+    return internlm2_causal_forward.__name__
+
 
 def _dispatch_internlm3_varlen_self_attn_forward(module):
     assert module.__class__.__name__ in ['InternLM3FlashSelfAttention2']
@@ -85,11 +98,18 @@ def _dispatch_internvl2_forward(module):
     return internvl2_forward.__name__
 
 
-def _dispatch_llama_forward(module):
+def _dispatch_llama_varlen_attn_forward(module):
     assert module.__class__.__name__ == 'LlamaFlashAttention2'
     from .llama import llama_flash_attn_forward
     _dispatch_forward_fn(module, llama_flash_attn_forward)
     return llama_flash_attn_forward.__name__
+
+
+def  _dispatch_llama_casual_forward(module):
+    assert module.__class__.__name__ in ['LlamaForCausalLM']
+    from .llama import llama_casual_forward
+    _dispatch_forward_fn(module, llama_casual_forward)
+    return llama_casual_forward.__name__
 
 
 def _dispatch_minicpmv_forward(module):
@@ -104,9 +124,11 @@ DISPATCH_MAP = {
     'Qwen2FlashAttention2': _dispatch_qwen2_attn_flash_forward,
     'Qwen2Attention': _dispatch_qwen2_attn_flash_forward,
     'Qwen2SdpaAttention': _dispatch_qwen2_attn_flash_forward,
+    'Qwen2ForCausalLM': _dispatch_qwen2_casual_forward,
     'InternLM2Attention': _dispatch_internlm2_varlen_attn_forward,
     'InternLM2SdpaAttention': _dispatch_internlm2_varlen_attn_forward,
     'InternLM2FlashAttention2': _dispatch_internlm2_varlen_attn_forward,
+    'InternLM2ForCausalLM': _dispatch_internlm2_casual_forward,
     'CLIPAttention': _dispatch_clip_attn_forward,
     'InternLM2ForRewardModel': _dispatch_internlm2_reward_forward,
     'Qwen2ForRewardModel': _dispatch_qwen2_reward_forward,
@@ -116,7 +138,8 @@ DISPATCH_MAP = {
     'InternLM3FlashSelfAttention2': _dispatch_internlm3_varlen_self_attn_forward,
     'InternLM3FlashCrossAttention2': _dispatch_internlm3_varlen_cross_attn_forward,
     'InternVLChatModel': _dispatch_internvl2_forward,  # to support sp and liger
-    'LlamaFlashAttention2': _dispatch_llama_forward,
+    'LlamaFlashAttention2': _dispatch_llama_varlen_attn_forward,
+    'LlamaForCausalLM': _dispatch_llama_casual_forward,
     'LlamaRMSNorm': _dispatch_rms_norm_forward,
     'MiniCPMV': _dispatch_minicpmv_forward,  # to support sp and liger
 }
