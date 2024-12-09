@@ -100,7 +100,7 @@ class JsonlDataset(torch.utils.data.Dataset):
         if max_length is not None:
             assert isinstance(max_length, int)
             self.offsets = [x for i, x in enumerate(self.offsets) if self.num_tokens[i] < max_length]
-            self.num_tokens = [y for y in self.num_tokens if y < max_length]
+            self.num_tokens = np.array([y for y in self.num_tokens if y < max_length])
             if len(self.num_tokens) < len(num_tokens):
                 missed_num = len(num_tokens) - len(self.num_tokens)
                 logger.warning(f"{path} has {missed_num} prompt length>{max_length}, discard.")

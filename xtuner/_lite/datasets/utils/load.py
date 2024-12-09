@@ -92,7 +92,8 @@ def load_local_datasets(paths,
                         file_pattern=None,
                         cache_dir=None,
                         sample_ratios=1.0,
-                        map_fns=None):
+                        map_fns=None,
+                        max_length=None):
 
     if isinstance(paths, str):
         paths = [paths]
@@ -165,7 +166,7 @@ def load_local_datasets(paths,
         _suffix = os.path.splitext(_path)[-1]
 
         dataset_cls = DATASET_CLS_MAP[_suffix]
-        _dataset = dataset_cls(_path, _ratio, _map_fn, cache_dir)
+        _dataset = dataset_cls(_path, _ratio, _map_fn, cache_dir, max_length)
         datasets.append(_dataset)
 
     return datasets
@@ -177,7 +178,8 @@ def load_datasets(paths,
                   file_types=DATASET_CLS_MAP.keys(),
                   file_pattern=None,
                   cache_dir=None,
-                  map_fns=None):
+                  map_fns=None,
+                  max_length=None):
 
     if isinstance(paths, str):
         paths = [paths]
@@ -235,7 +237,7 @@ def load_datasets(paths,
         local_datasets = load_local_datasets(local_paths, file_types,
                                              file_pattern, cache_dir,
                                              local_sample_ratios,
-                                             local_map_fns)
+                                             local_map_fns, max_length)
         datasets.extend(local_datasets)
 
     if len(hf_inds):
@@ -252,7 +254,8 @@ def load_datasets(paths,
                 hf_paths[i],
                 sample_ratio=hf_sample_ratios[i],
                 map_fn=hf_map_fns[i],
-                cache_dir=sub_cache_dir)
+                cache_dir=sub_cache_dir, 
+                max_length=max_length)
             datasets.append(dset)
             breakpoint()
             if cache_dir:

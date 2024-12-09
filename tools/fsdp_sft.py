@@ -572,7 +572,8 @@ def sft(args):
         sources=args.dset_sources,
         sample_ratios=args.dset_sample_ratios,
         map_fns=tokenize_fns,
-        file_pattern=args.file_pattern)
+        file_pattern=args.file_pattern,
+        max_length=args.max_length)
 
     if args.dset_pack_level and rank == 0 and args.debug:
         # Only the tokenized datasets can count the number of tokens
@@ -930,7 +931,7 @@ def sft(args):
                         f'time: {step_time:.2f}s  '
                         f'eta: {eta}')
 
-        if is_interval(step, total_steps, int(total_steps * 0.1)):
+        if is_interval(step, total_steps, max(1, int(total_steps * 0.1))):
             logger.trace(f'Step {step}/{total_steps}, loss {step_loss:.3f}, tgs {tgs}')
 
         if is_interval(step, total_steps, checkpoint_interval):
