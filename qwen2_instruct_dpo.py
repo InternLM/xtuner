@@ -20,12 +20,11 @@ from xtuner.engine.runner import TrainLoop
 from xtuner.model.dpo import DPO
 from xtuner.parallel.sequence import SequenceParallelSampler
 from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
-
 #######################################################################
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-pretrained_model_name_or_path = '/home/pingbowen/models/LongWriter-Qwen2.5-7B-Instruct'
+pretrained_model_name_or_path = '/mnt/gemininjceph2/geminicephfs/pr-others-prctrans/pingbowen/models/LongWriter-Qwen2.5-7B-Instruct/'
 use_varlen_attn = True
 dpo_loss_type = 'sigmoid'  # One of ['sigmoid', 'hinge', 'ipo', 'kto_pair', 'sppo_hard', 'nca_pair', 'robust']  # noqa: E501
 loss_beta = 0.1
@@ -123,8 +122,8 @@ sampler = SequenceParallelSampler \
 
 train_dataset = dict(
     type=build_preference_dataset,
-    # dataset=dict(type=load_jsonl_dataset,data_files=["/home/pingbowen/workspace/DDPO/openr/data/step_wise/range_2_4k_res_new_refined.jsonl","/home/pingbowen/workspace/DDPO/DDPO-generate_long/data/dpo_data/ultrafeedback_binarized.jsonl","/home/pingbowen/workspace/DDPO/openr/data/step_wise/range_4_16k_res_new_refined.jsonl","/home/pingbowen/workspace/DDPO/openr/data/step_wise/range_16_32k_res_new.jsonl"]), # , /home/pingbowen/workspace/DDPO/DDPO-generate_long/data/dpo_data/test_new.jsonl
-    dataset=dict(type=load_dataset, path='llamafactory/ultrafeedback_binarized'), # mlabonne/orpo-dpo-mix-40k
+    dataset=dict(type=load_jsonl_dataset,data_files=["/mnt/gemininjceph2/geminicephfs/pr-others-prctrans/pingbowen/workspace/MCTS_DPO/MCTS-dpo/data/qwen_step_wise_fix_bug/range_2_4k_res_filtered.jsonl","/mnt/gemininjceph2/geminicephfs/pr-others-prctrans/pingbowen/workspace/MCTS_DPO/MCTS-dpo/data/ultrafeedback_binarized.jsonl","/mnt/gemininjceph2/geminicephfs/pr-others-prctrans/pingbowen/workspace/MCTS_DPO/MCTS-dpo/data/qwen_step_wise_fix_bug/range_4_16k_res_filtered.jsonl","/mnt/gemininjceph2/geminicephfs/pr-others-prctrans/pingbowen/workspace/MCTS_DPO/MCTS-dpo/data/qwen_step_wise_fix_bug/range_16_32k_res.jsonl"]),
+    # dataset=dict(type=load_dataset, path='llamafactory/ultrafeedback_binarized'), # mlabonne/orpo-dpo-mix-40k
     tokenizer=tokenizer,
     max_length=max_length,
     dataset_map_fn=ultrafeedback_dpo_map_fn,

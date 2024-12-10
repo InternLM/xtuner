@@ -159,16 +159,32 @@ def tokenize(pair: str,
         chosen = process_message(pair['prompt'] + pair['chosen'])
         rejected = process_message(pair['prompt'] + pair['rejected'])
     else:
-        prompt = tokenizer.apply_chat_template(
-            pair['prompt'], tokenize=False, add_generation_prompt=True)    
-        chosen = tokenizer.apply_chat_template(
-            pair['prompt'] + pair['chosen'],
-            tokenize=False,
-            add_generation_prompt=False)
-        rejected = tokenizer.apply_chat_template(
-            pair['prompt'] + pair['rejected'],
-            tokenize=False,
-            add_generation_prompt=False)
+        def process_message(messages):
+            prompt = ''
+            for message in messages:
+                if message['role'] == 'user':
+                    prompt += '<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n' + message['content'] + '<|im_end|>\n'
+                elif message['role'] == 'added_user':
+                    prompt += message['content']
+                elif message['role'] == 'added_assistant':
+                    prompt += message['content']
+                elif message['role'] == 'assistant':
+                    prompt += message['content'] + tokenizer.eos_token
+            return prompt 
+
+        prompt = '<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n' + pair['prompt'][0]['content'] if pair['prompt'][0]['role'] != "user" else process_message(pair['prompt'])
+        chosen = process_message(pair['prompt'] + pair['chosen'])
+        rejected = process_message(pair['prompt'] + pair['rejected'])
+        # prompt = tokenizer.apply_chat_template(
+        #     pair['prompt'], tokenize=False, add_generation_prompt=True)    
+        # chosen = tokenizer.apply_chat_template(
+        #     pair['prompt'] + pair['chosen'],
+        #     tokenize=False,
+        #     add_generation_prompt=False)
+        # rejected = tokenizer.apply_chat_template(
+        #     pair['prompt'] + pair['rejected'],
+        #     tokenize=False,
+        #     add_generation_prompt=False)
     
     prompt_ids = tokenizer.encode(prompt, add_special_tokens=False)
     chosen_ids = tokenizer.encode(chosen, add_special_tokens=False)
@@ -192,7 +208,7 @@ def tokenize(pair: str,
             chosen_ids[prompt_len:])
         rejected_labels = [-100] * prompt_len + copy.deepcopy(
             rejected_ids[prompt_len:])
-
+            
     return {
         'chosen_ids': chosen_ids,
         'rejected_ids': rejected_ids,
@@ -344,30 +360,17 @@ class PackedDatasetWrapper(Dataset):
         pairs = self.data[index]
         input_ids, cu_seqlens, position_ids, labels = [], [0], [], []
         for pair in pairs:
-            if not pair.get('concated', False):
-                input_ids.extend(pair['chosen_ids'])
-                input_ids.extend(pair['rejected_ids'])
+            input_ids.extend(pair['chosen_ids'])
+            input_ids.extend(pair['rejected_ids'])
 
-                position_ids.extend(list(range(len(pair['chosen_ids']))))
-                position_ids.extend(list(range(len(pair['rejected_ids']))))
+            position_ids.extend(list(range(len(pair['chosen_ids']))))
+            position_ids.extend(list(range(len(pair['rejected_ids']))))
 
-                labels.extend(pair['chosen_labels'])
-                labels.extend(pair['rejected_labels'])
+            labels.extend(pair['chosen_labels'])
+            labels.extend(pair['rejected_labels'])
 
-                cu_seqlens.append(cu_seqlens[-1] + len(pair['chosen_ids']))
-                cu_seqlens.append(cu_seqlens[-1] + len(pair['rejected_ids']))
-            else:
-                input_ids.extend(pair['chosen_ids'])
-                input_ids.extend(pair['rejected_ids'])
-
-                labels.extend(pair['chosen_labels'])
-                labels.extend(pair['rejected_labels'])
-                
-                position_ids.extend(pair.get('position_ids',None))
-                seq_lens = pair.get('seq_len',None)
-                
-                for seq_len in seq_lens:
-                    cu_seqlens.append(cu_seqlens[-1] + seq_len)
+            cu_seqlens.append(cu_seqlens[-1] + len(pair['chosen_ids']))
+            cu_seqlens.append(cu_seqlens[-1] + len(pair['rejected_ids']))
 
                 
         return {

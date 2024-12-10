@@ -25,7 +25,7 @@ from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-pretrained_model_name_or_path = '/home/pingbowen/models/Longwriter-8b'
+pretrained_model_name_or_path = 'THUDM/LongWriter-llama3.1-8b'
 use_varlen_attn = True
 dpo_loss_type = 'sigmoid'  # One of ['sigmoid', 'hinge', 'ipo', 'kto_pair', 'sppo_hard', 'nca_pair', 'robust']  # noqa: E501
 loss_beta = 0.1
@@ -124,7 +124,7 @@ sampler = SequenceParallelSampler \
 train_dataset = dict(
     type=build_preference_dataset,
     # dataset=dict(type=load_jsonl_dataset,data_files=["/home/pingbowen/workspace/DDPO/DDPO-generate_long/data/dpo_data/longwriter_len_calssify/range_2_4k_res.jsonl","/home/pingbowen/workspace/DDPO/DDPO-generate_long/data/dpo_data/ultrafeedback_binarized.jsonl","/home/pingbowen/workspace/DDPO/DDPO-generate_long/data/dpo_data/longwriter_len_calssify/range_16_32k_res_filter.jsonl"]),
-    dataset=dict(type=load_jsonl_dataset,data_files=["/home/pingbowen/workspace/DDPO/openr/data/step_wise/range_2_4k_res_0.7.jsonl","/home/pingbowen/workspace/DDPO/DDPO-generate_long/data/dpo_data/ultrafeedback_binarized.jsonl","/home/pingbowen/workspace/DDPO/openr/data/step_wise/range_4_16k_res_0.7.jsonl","/home/pingbowen/workspace/DDPO/openr/data/step_wise/range_16_32k_res_new.jsonl"]), 
+    dataset=dict(type=load_jsonl_dataset,data_files=["/mnt/gemininjceph2/geminicephfs/pr-others-prctrans/pingbowen/workspace/MCTS_DPO/MCTS-dpo/data/step_wise/range_2_4k_res_new_refined.jsonl","/mnt/gemininjceph2/geminicephfs/pr-others-prctrans/pingbowen/workspace/MCTS_DPO/MCTS-dpo/data/ultrafeedback_binarized.jsonl","/mnt/gemininjceph2/geminicephfs/pr-others-prctrans/pingbowen/workspace/MCTS_DPO/MCTS-dpo/data/step_wise/range_4_16k_res_new.jsonl","/mnt/gemininjceph2/geminicephfs/pr-others-prctrans/pingbowen/workspace/MCTS_DPO/MCTS-dpo/data/step_wise/range_16_32k_res_new.jsonl"]), 
     # dataset=dict(type=load_jsonl_dataset,data_files=["/home/pingbowen/workspace/DDPO/openr/data/step_wise/range_2_4k_res_new_refined.jsonl","/home/pingbowen/workspace/DDPO/DDPO-generate_long/data/dpo_data/ultrafeedback_binarized.jsonl","/home/pingbowen/workspace/DDPO/openr/data/step_wise/range_4_16k_res_new_refined.jsonl","/home/pingbowen/workspace/DDPO/openr/data/step_wise/range_16_32k_res_new.jsonl"])
     # dataset=dict(type=load_dataset, path='llamafactory/ultrafeedback_binarized'), # mlabonne/orpo-dpo-mix-40k
     tokenizer=tokenizer,
