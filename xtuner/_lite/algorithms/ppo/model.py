@@ -6,7 +6,7 @@ from transformers.utils.import_utils import (is_flash_attn_2_available,
 from xtuner._lite.accelerate import LoadWoInit
 
 
-def build_actor_model(model_path, dtype=torch.float32):
+def build_actor_model(model_path, dtype=torch.float32, trust_remote_code=True):
 
     config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
     if is_flash_attn_2_available():
@@ -14,20 +14,17 @@ def build_actor_model(model_path, dtype=torch.float32):
     elif is_torch_sdpa_available():
         config.attn_implementation = 'sdpa'
 
-    # config.use_cache = False
-    # config.torch_dtype = dtype
     with LoadWoInit():
         policy = AutoModelForCausalLM.from_pretrained(
             model_path,
             attn_implementation='flash_attention_2',
             torch_dtype=dtype,
-            trust_remote_code=True)
+            trust_remote_code=trust_remote_code)
 
-    # policy.to(dtype)
     return policy
 
 
-def build_reward_model(model_path, dtype=torch.float32):
+def build_reward_model(model_path, dtype=torch.float32, trust_remote_code=True):
 
     config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
     if is_flash_attn_2_available():
@@ -42,8 +39,8 @@ def build_reward_model(model_path, dtype=torch.float32):
             model_path,
             attn_implementation='flash_attention_2',
             torch_dtype=dtype,
-            trust_remote_code=True)
+            trust_remote_code=trust_remote_code)
 
     reward.model.use_cache = False
-    # policy.to(dtype)
+    
     return reward

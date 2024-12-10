@@ -402,32 +402,44 @@ def qwen2_casual_forward(
     hidden_states = outputs[0]
 
     if labels is None:
+        loss = None
         logits = self.lm_head(hidden_states)
     else:
-
-        if label_shifted:
-            shift_hidden_states = hidden_states
-            shift_labels = labels
-        else:
-            shift_hidden_states = hidden_states[..., :-1, :].contiguous()
-            shift_labels = labels[..., 1:].contiguous()
-
-        shift_hidden_states = shift_hidden_states.view(-1, self.config.hidden_size)
-        shift_labels = shift_labels.view(-1)
-        shift_labels = shift_labels.to(shift_hidden_states.device)
-
         if liger_kernel_is_available():
+            # unable to return logits when using Liger Kernel
+            logits = None
+
+            if label_shifted:
+                shift_hidden_states = hidden_states
+                shift_labels = labels
+            else:
+                shift_hidden_states = hidden_states[..., :-1, :].contiguous()
+                shift_labels = labels[..., 1:].contiguous()
+
+            shift_hidden_states = shift_hidden_states.view(-1, self.config.hidden_size)
+            shift_labels = shift_labels.view(-1)
+            shift_labels = shift_labels.to(shift_hidden_states.device)
+
             from liger_kernel.transformers.fused_linear_cross_entropy import LigerFusedLinearCrossEntropyLoss
 
             loss_fct = LigerFusedLinearCrossEntropyLoss()
             loss = loss_fct(self.lm_head.weight, shift_hidden_states, shift_labels, self.lm_head.bias)
 
-            # unable to return logits when using Liger Kernel
-            logits = None
         else:
-            shift_logits = self.lm_head(shift_hidden_states)
-    
-            loss_fct = CrossEntropyLoss()
+            logits = self.lm_head(hidden_states)
+
+            if label_shifted:
+                shift_logits = logits
+                shift_labels = labels
+            else:
+                shift_logits = logits[..., :-1, :].contiguous()
+                shift_labels = labels[..., 1:].contiguous()
+
+            shift_logits = shift_logits.view(-1, self.config.vocab_size)
+            shift_labels = shift_labels.view(-1)
+            shift_labels = shift_labels.to(shift_logits.device)
+
+            loss_fct = torch.nn.CrossEntropyLoss()
             loss = loss_fct(shift_logits, shift_labels)
 
     if not return_dict:
