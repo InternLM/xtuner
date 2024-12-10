@@ -1,5 +1,7 @@
 from functools import partial
+from packaging import version
 
+import torch
 from torch import nn
 from torch.distributed._tensor import Replicate, distribute_tensor
 from torch.distributed.tensor.parallel import (ColwiseParallel,
@@ -154,6 +156,10 @@ def megatron_qwen2(model,
 
         if i < num_recompute_layers:
             checkpoint(block)
+
+    if version.parse(torch.__version__) >= version.parse("2.5.0"):
+        for layer_cur, layer_next in zip(model.layers[:-1], model.layers[1:]):
+            layer_cur.set_modules_to_forward_prefetch([layer_next])
 
     model.embed_tokens.apply(param_init_fn)
     model.norm.apply(param_init_fn)    
