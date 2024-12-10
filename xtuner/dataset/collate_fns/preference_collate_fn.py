@@ -69,7 +69,7 @@ def preference_collate_fn(instances: Sequence[Dict],
 
         bs, seq_len = input_ids.shape
         position_ids = torch.arange(seq_len).unsqueeze(0).long().repeat(bs, 1)
-
+    
     if seq_parallel_world_size > 1:
         input_ids = pad_for_sequence_parallel(input_ids, pad_index)
         labels = pad_for_sequence_parallel(labels, IGNORE_INDEX)

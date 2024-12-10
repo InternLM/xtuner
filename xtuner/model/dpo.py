@@ -162,6 +162,7 @@ class DPO(SupervisedFinetune):
             data = self._split_for_sequence_parallel(data)
 
         all_logits = self.llm(**data).logits
+        
         with torch.no_grad():
             if self.ref_llm is None:
                 with self.llm.disable_adapter():
