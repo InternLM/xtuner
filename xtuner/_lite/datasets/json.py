@@ -41,7 +41,6 @@ class JsonDataset(torch.utils.data.Dataset):
                  max_length=None):
         super().__init__()
 
-        assert sample_ratio <= 1
         self.tokenize_fn = tokenize_fn
         self.path = path
         self.tokenizer_workers = int(os.environ.get('XTUNER_TOKENIZE_WORKERS', 8))
@@ -79,22 +78,30 @@ class JsonDataset(torch.utils.data.Dataset):
         with open(self.path) as f:
             dataset = json.load(f)
 
-        num_samples = int(len(dataset) * sample_ratio)
-        sampled = random.sample([i for i in range(len(dataset))], num_samples)
-        self.sampled = sampled
+        _sampled = [i for i in range(len(dataset))]
 
-        if num_tokens is not None:
-            num_tokens = num_tokens[sampled]
-
-        self.num_tokens = num_tokens
         if max_length is not None:
             assert isinstance(max_length, int)
-            self.sampled = [x for i, x in enumerate(self.sampled) if self.num_tokens[i] < max_length]
-            self.num_tokens = np.array([y for y in self.num_tokens if y < max_length])
-            if len(self.num_tokens) < len(num_tokens):
-                missed_num = len(num_tokens) - len(self.num_tokens)
+            _filted = [x for i, x in enumerate(_sampled) if num_tokens[i] < max_length]
+            if len(_filted) < len(_sampled):
+                missed_num = len(sampled) - len(_filted)
                 logger.warning(f"{path} has {missed_num} prompt length>{max_length}, discard.")
 
+        num_samples = int(len(_sampled) * sample_ratio)
+
+        if sample_ratio == 1.0:
+            _sampled = [i for i in range(len(dataset))]
+        elif sample_ratio < 1.0:
+            _sampled = random.sample([i for i in range(len(dataset))], num_samples)
+        else:
+            _sampled = random.choices([i for i in range(len(dataset))], k=num_samples)
+
+        self.sampled = _sampled
+
+        if num_tokens is not None:
+            num_tokens = num_tokens[self.sampled]
+
+        self.num_tokens = num_tokens
         self.dataset = None
 
     def count_tokens(self, cache_dir=None):
@@ -120,11 +127,12 @@ class JsonDataset(torch.utils.data.Dataset):
         dataset_shard = dataset[start:end]
 
         desc = f'[Rank {rank}] {self.path}'
+        chunk_size = min(1024, max(1, len(dataset_shard) // self.tokenizer_workers))
         with ProcessPoolExecutor(max_workers=self.tokenizer_workers) as executor:
             tokenized = list(
                 tqdm(
                     executor.map(self.tokenize_fn, dataset_shard,
-                                 chunksize=max(1, len(dataset_shard) // self.tokenizer_workers)),
+                                 chunksize=chunk_size),
                     desc=desc,
                     total=len(dataset_shard)))
 

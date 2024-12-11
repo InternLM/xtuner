@@ -12,15 +12,13 @@ from torch import distributed as dist
 from tqdm import tqdm
 from xtuner._lite import get_logger
 
-
 logger = get_logger()
 
 
 def calculate_jsonl_sha256(path):
     with open(path, 'rb') as f:
         file_hash = hashlib.sha256()
-        while chunk := f.read(8192):
-            file_hash.update(chunk)
+        file_hash.update(f.read())
     return file_hash.hexdigest()
 
 
@@ -41,7 +39,6 @@ class JsonlDataset(torch.utils.data.Dataset):
                  max_length=None,):
         super().__init__()
 
-        assert sample_ratio <= 1
         self.tokenize_fn = tokenize_fn
         self.path = path
         self.tokenizer_workers = int(os.environ.get('XTUNER_TOKENIZE_WORKERS', 8))
@@ -75,7 +72,7 @@ class JsonlDataset(torch.utils.data.Dataset):
                                                 'num_tokens.npy')
                     num_tokens = np.load(_cached_file)
                 else:
-                    num_tokens = self.count_tokens(tok_cache_dir)
+                    num_tokens = self.count_tokens(offsets, tok_cache_dir)
             else:
                 num_tokens = None
 
@@ -87,34 +84,44 @@ class JsonlDataset(torch.utils.data.Dataset):
             num_tokens = None
             if max_length is not None:
                 assert self.tokenize_fn
-                num_tokens = self.count_tokens()
-
-        num_samples = int(len(offsets) * sample_ratio)
-        sampled = random.sample([i for i in range(len(offsets))], num_samples)
-
-        self.offsets = offsets[sampled]
-        if num_tokens is not None:
-            num_tokens = num_tokens[sampled]
-
-        self.num_tokens = num_tokens
+                num_tokens = self.count_tokens(offsets)
+        _sampled = [i for i in range(len(offsets))]
         if max_length is not None:
             assert isinstance(max_length, int)
-            self.offsets = [x for i, x in enumerate(self.offsets) if self.num_tokens[i] < max_length]
-            self.num_tokens = np.array([y for y in self.num_tokens if y < max_length])
-            if len(self.num_tokens) < len(num_tokens):
-                missed_num = len(num_tokens) - len(self.num_tokens)
+            _filted = [x for i, x in enumerate(_sampled) if num_tokens[i] < max_length]
+            
+            if len(_filted) < len(_sampled):
+                missed_num = len(sampled) - len(_filted)
                 logger.warning(f"{path} has {missed_num} prompt length>{max_length}, discard.")
 
-    def count_offsets(self, cache_dir=None):
-        offsets = []
-        with open(self.path) as f:
-            offsets.append(f.tell())
-            line = f.readline()
-            while line:
-                offsets.append(f.tell())
-                line = f.readline()
+            _sampled = _filted
 
-        offsets.pop(-1)
+        _num_samples = int(len(_sampled) * sample_ratio)
+
+        if sample_ratio == 1.0:
+            self.sampled = _sampled
+        elif sample_ratio < 1.0:
+            self.sampled = random.sample(_sampled, _num_samples)
+        else:
+            self.sampled = random.choices(_sampled, k=_num_samples)
+
+        
+        if num_tokens is not None:
+            num_tokens = num_tokens[self.sampled]
+        
+        self.num_tokens = num_tokens
+        self.offsets = offsets[self.sampled]
+
+        
+    def count_offsets(self, cache_dir=None):
+        
+        offsets = [0]
+        with open(self.path) as f:
+            
+            lines = f.readlines()
+            for line in lines[:-1]:
+                offsets.append(offsets[-1]+len(line.encode()))
+            
         offsets = np.array(offsets)
 
         if dist.get_rank() == 0 and cache_dir:
@@ -123,14 +130,16 @@ class JsonlDataset(torch.utils.data.Dataset):
 
         return offsets
 
-    def count_tokens(self, cache_dir=None):
+    def _tokenize_by_offset(self, offset):
 
-        dataset = []
-        with open(self.path) as f:
-            for line in f:
-                dataset.append(json.loads(line))
+        with open(self.path, 'r') as f:
+            f.seek(offset)
+            data = json.loads(f.readline())
+        return self.tokenize_fn(data)
 
-        num_samples = len(dataset)
+    def count_tokens(self, offsets, cache_dir=None):
+
+        num_samples = len(offsets)
 
         if dist.is_available():
             world_size = dist.get_world_size()
@@ -143,18 +152,22 @@ class JsonlDataset(torch.utils.data.Dataset):
 
         start = rank * num_per_rank
         end = (rank + 1) * num_per_rank
-        dataset_shard = dataset[start:end]
+        offsets_shard = offsets[start:end]
 
+        
         desc = f'[Rank {rank}] {self.path}'
-
+        chunk_size = min(1024, max(1, len(offsets_shard) // self.tokenizer_workers))
+        
         with ProcessPoolExecutor(max_workers=self.tokenizer_workers) as executor:
             tokenized = list(
                 tqdm(
-                    executor.map(self.tokenize_fn, dataset_shard,
-                                 chunksize=max(1, len(dataset_shard) // self.tokenizer_workers)),
+                    executor.map(
+                        self._tokenize_by_offset, 
+                        offsets_shard,
+                        chunksize=chunk_size),
                     desc=desc,
-                    total=len(dataset_shard)))
-
+                    total=len(offsets_shard)))
+        
         _num_tokens = [data['num_tokens'] for data in tokenized]
         _num_tokens = np.array(_num_tokens)
 
@@ -183,7 +196,7 @@ class JsonlDataset(torch.utils.data.Dataset):
         Returns:
             A dict including packed input_ids, labels, and cumulative_len.
         """
-        with open(self.path) as f:
+        with open(self.path, 'r') as f:
             f.seek(self.offsets[item])
             line = f.readline()
 

@@ -25,10 +25,11 @@ class SftTokenizeFunction():
 
 class SftCollator():
 
-    def __init__(self, pad_token_id=0, ignore_id=-100, pack_batch=False):
+    def __init__(self, pad_token_id=0, ignore_id=-100, pack_batch=False, max_length=None):
         self.pack_batch = pack_batch
         self.pad_token_id = pad_token_id
         self.ignore_id = ignore_id
+        self.max_length = max_length
 
     def __call__(self, instances):
 
@@ -46,14 +47,26 @@ class SftCollator():
         num_tokens = []
 
         for data in instances:
+            
+            _input_ids = data['input_ids']
+            _labels = data['labels']
+            _num_tokens = data['num_tokens']
 
-            input_ids.append(torch.LongTensor(data['input_ids']))
-            labels.append(torch.LongTensor(data['labels']))
+            # TODO remove list
+            if isinstance(_num_tokens, list):
+                assert len(_num_tokens) == 1
+                _num_tokens = _num_tokens[0]
+            
+            assert isinstance(_num_tokens, int)
 
-            if isinstance(data['num_tokens'], int):
-                num_tokens.append(data['num_tokens'])
-            else:
-                num_tokens.extend(data['num_tokens'])
+            if self.max_length:
+                _input_ids = _input_ids[:self.max_length]
+                _labels = _labels[:self.max_length]
+                _num_tokens = min(_num_tokens, self.max_length)
+
+            input_ids.append(torch.LongTensor(_input_ids))
+            labels.append(torch.LongTensor(_labels))
+            num_tokens.append(_num_tokens)
 
         attention_mask = [torch.ones_like(ids) for ids in input_ids]
         num_tokens = torch.IntTensor(num_tokens)
@@ -85,7 +98,7 @@ class SftCollator():
             raise RuntimeError('The shape of input_ids and labels must be '
                                f'equal, but  found {input_ids.shape} and '
                                f'{labels.shape}.')
-        # TODO support sp
+
         data_dict = {
             'input_ids': input_ids,
             'labels': labels,
