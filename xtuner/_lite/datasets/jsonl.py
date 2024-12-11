@@ -85,26 +85,22 @@ class JsonlDataset(torch.utils.data.Dataset):
             if max_length is not None:
                 assert self.tokenize_fn
                 num_tokens = self.count_tokens(offsets)
+
         _sampled = [i for i in range(len(offsets))]
+
         if max_length is not None:
             assert isinstance(max_length, int)
-            _filted = [x for i, x in enumerate(_sampled) if num_tokens[i] < max_length]
+            _filtered = [x for i, x in enumerate(_sampled) if num_tokens[i] < max_length]
             
-            if len(_filted) < len(_sampled):
-                missed_num = len(sampled) - len(_filted)
+            if len(_filtered) < len(_sampled):
+                missed_num = len(_sampled) - len(_filtered)
                 logger.warning(f"{path} has {missed_num} prompt length>{max_length}, discard.")
 
-            _sampled = _filted
+            _sampled = _filtered
 
-        _num_samples = int(len(_sampled) * sample_ratio)
-
-        if sample_ratio == 1.0:
-            self.sampled = _sampled
-        elif sample_ratio < 1.0:
-            self.sampled = random.sample(_sampled, _num_samples)
-        else:
-            self.sampled = random.choices(_sampled, k=_num_samples)
-
+        _target_num_samples = int(len(_sampled) * sample_ratio)
+        self.sampled = _sampled * int(sample_ratio)
+        self.sampled.extend(random.sample(_sampled, _target_num_samples - len(self.sampled)))
         
         if num_tokens is not None:
             num_tokens = num_tokens[self.sampled]
