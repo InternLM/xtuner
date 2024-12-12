@@ -9,9 +9,7 @@ logger = get_logger()
 
 @torch.no_grad()
 def sample(logits,do_sample=True, top_k=0, top_p=0.9, temperature=1.0):
-    # if (logits.argmax(-1) == 0).sum() > 0:
-    #     logger.info(logits)
-
+    
     if not do_sample:
         return logits.argmax(-1)
     
@@ -54,6 +52,7 @@ def contiguous_batching_generate(model,
                                  do_sample=False,
                                  top_k=0,
                                  top_p=1.0,
+                                 temperature=1.0,
                                  tp_size=1,
                                  device='cuda'):
 
@@ -128,7 +127,7 @@ def contiguous_batching_generate(model,
             attn_ctx.pop_info(key)
 
         # TODO (pppppM) support sampling
-        sampled = sample(outputs.logits[0, next_end_pos],do_sample=do_sample, top_k=top_k, top_p=top_p)
+        sampled = sample(outputs.logits[0, next_end_pos],do_sample=do_sample, top_k=top_k, top_p=top_p, temperature=temperature)
 
         _next_input_ids = []
         _next_position_ids = []
