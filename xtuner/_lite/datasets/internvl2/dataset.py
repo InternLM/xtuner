@@ -129,6 +129,7 @@ class BaseOrigDataset(Dataset):
             num_tokens = np.load(_cached_file)
             logger.info(f"Load num_tokens from cache: {os.path.basename(self.annotation)}")
         else:
+            logger.info(f"Start calculating the cache of num_tokens: {os.path.basename(self.annotation)}")
             num_tokens = self.count_tokens_for_pack(file_cache_dir)
         return num_tokens
 
@@ -153,7 +154,7 @@ class BaseOrigDataset(Dataset):
             tokenized = list(
                 tqdm(
                     executor.map(self.pre_tokenize_fn_for_pack, dataset_shard,
-                                 chunksize=max(1, len(dataset_shard) // self.tokenizer_workers)),
+                                 chunksize=min(max(1, len(dataset_shard) // self.tokenizer_workers), 500)),
                     desc=desc,
                     total=len(dataset_shard)))
 
@@ -206,7 +207,8 @@ class BaseOrigDataset(Dataset):
 
             if i == 0:
                 input_ = self._process_media_format_first_round(input_, media_type, image_grids)
-                input_ = self.chat_template['system'] + input_
+                # TODO: support system prompt
+                # input_ = self.chat_template['system'] + input_
                 input_encode = self.tokenizer.encode(input_, add_special_tokens=True)
             else:
                 input_encode = self.tokenizer.encode(input_, add_special_tokens=False)
