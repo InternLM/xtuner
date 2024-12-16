@@ -97,6 +97,12 @@ VARLEN_ATTN_DISPATCH_MAPPING = dict(
     DeepseekV2FlashAttention2=LazyObject(
         'xtuner.model.modules.dispatch.deepseek_v2',
         'deepseek_varlen_attn_forward'),
+    InternLM3FlashCrossAttention2=LazyObject(
+        'xtuner.model.modules.dispatch.internlm3',
+        'internlm3_cross_attn_varlen_forward'),
+    InternLM3FlashSelfAttention2=LazyObject(
+        'xtuner.model.modules.dispatch.internlm3',
+        'internlm3_self_attn_varlen_forward')
 )
 
 VARLEN_ATTN_LEGACY_DISPATCH_MAPPING = dict(
@@ -181,24 +187,23 @@ def dispatch_varlen_attn_forward(model):
         return
 
     from mmengine import print_log
-    print_log = log_once(print_log)
+    # print_log = log_once(print_log)
 
-    varlen_attn_forward = None
+    
     for module in model.modules():
         name = type(module).__name__
         if (IS_LOW_VERSION_TRANSFORMERS
                 and name in VARLEN_ATTN_LEGACY_DISPATCH_MAPPING):
-            if varlen_attn_forward is None:
-                varlen_attn_forward = VARLEN_ATTN_LEGACY_DISPATCH_MAPPING[name]
-                varlen_attn_forward = varlen_attn_forward.build()
+            
+            varlen_attn_forward = VARLEN_ATTN_LEGACY_DISPATCH_MAPPING[name]
+            varlen_attn_forward = varlen_attn_forward.build()
             print_log(
                 f'Dispatch legacy {name} varlen forward. '
                 f'{NO_ATTN_WEIGHTS_MSG}', 'current')
             module.forward = types.MethodType(varlen_attn_forward, module)
         elif name in VARLEN_ATTN_DISPATCH_MAPPING:
-            if varlen_attn_forward is None:
-                varlen_attn_forward = VARLEN_ATTN_DISPATCH_MAPPING[name]
-                varlen_attn_forward = varlen_attn_forward.build()
+            varlen_attn_forward = VARLEN_ATTN_DISPATCH_MAPPING[name]
+            varlen_attn_forward = varlen_attn_forward.build()
             print_log(f'Dispatch {name} varlen forward. {NO_ATTN_WEIGHTS_MSG}',
                       'current')
             module.forward = types.MethodType(varlen_attn_forward, module)

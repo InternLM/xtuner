@@ -1,0 +1,2 @@
+from .configuration_internlm2 import InternLM2Config
+from .modeling_internlm2 import InternLM2ForCausalLM
