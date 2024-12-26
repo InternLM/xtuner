@@ -133,10 +133,6 @@ DISPATCH_MAP = {
     'InternLM2ForRewardModel': _dispatch_internlm2_reward_forward,
     'Qwen2ForRewardModel': _dispatch_qwen2_reward_forward,
     'InternLM2RMSNorm': _dispatch_rms_norm_forward,
-    'InternLM3RMSNorm': _dispatch_rms_norm_forward,
-    'InternLM3CrossDecoder': _dispatch_internlm3_cross_decoder_forward,
-    'InternLM3FlashSelfAttention2': _dispatch_internlm3_varlen_self_attn_forward,
-    'InternLM3FlashCrossAttention2': _dispatch_internlm3_varlen_cross_attn_forward,
     'InternVLChatModel': _dispatch_internvl2_forward,  # to support sp and liger
     'LlamaFlashAttention2': _dispatch_llama_varlen_attn_forward,
     'LlamaForCausalLM': _dispatch_llama_casual_forward,
