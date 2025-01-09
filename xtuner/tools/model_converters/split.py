@@ -9,6 +9,7 @@ import shutil
 import torch
 from mmengine.utils import mkdir_or_exist
 
+from xtuner.utils.device import get_device_name, get_torch_device
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -41,7 +42,7 @@ def main():
     checkpoints = set(index['weight_map'].values())
     for ckpt in checkpoints:
         state_dict = torch.load(
-            osp.join(args.src_dir, ckpt), map_location='cuda')
+            osp.join(args.src_dir, ckpt), map_location=get_device_name())
         keys = sorted(list(state_dict.keys()))
         for k in keys:
             new_state_dict_name = 'pytorch_model-{:05d}-of-{:05d}.bin'.format(
@@ -52,7 +53,7 @@ def main():
                        osp.join(args.dst_dir, new_state_dict_name))
             cnt += 1
         del state_dict
-        torch.cuda.empty_cache()
+        get_torch_device().empty_cache()
     with open(osp.join(args.dst_dir, 'pytorch_model.bin.index.json'),
               'w') as f:
         json.dump(new_index, f)
