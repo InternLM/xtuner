@@ -140,7 +140,7 @@ def varlen_flash_attn(
         0, 1), value_states.flatten(0, 1)
 
     device = get_device()
-    if device == 'cuda':
+    if device in ['cuda', 'mlu']:
         attn_output = flash_attn_varlen_func(
             q_unpad,
             k_unpad,

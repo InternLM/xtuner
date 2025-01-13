@@ -12,6 +12,10 @@ def npu_is_available():
     return get_device() == 'npu'
 
 
+def mlu_is_available():
+    return get_device() == 'mlu'
+
+
 def varlen_attn_is_available():
 
     return is_flash_attn_2_available() or npu_is_available()

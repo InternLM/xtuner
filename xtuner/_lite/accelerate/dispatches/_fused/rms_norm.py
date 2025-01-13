@@ -1,9 +1,10 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import torch
-from transformers.utils.import_utils import is_flash_attn_2_available
 from torch.distributed._tensor import DTensor
-from xtuner._lite.accelerate import lmdeploy_is_available, npu_is_available
+from transformers.utils.import_utils import is_flash_attn_2_available
 
+from xtuner._lite.accelerate import (lmdeploy_is_available, mlu_is_available,
+                                     npu_is_available)
 
 def rms_norm_forward(self, hidden_states):
 
@@ -24,6 +25,10 @@ def rms_norm_forward(self, hidden_states):
     if lmdeploy_is_available() and not self.training:
         from lmdeploy.pytorch.kernels import rms_norm
         ret = rms_norm(hidden_states, weight, eps=self.variance_epsilon)
+    elif mlu_is_available():
+        from apex.normalization.fused_layer_norm import fused_rms_norm_affine
+        ret = fused_rms_norm_affine(
+            hidden_states, weight, weight.shape, eps=self.variance_epsilon)
     elif is_flash_attn_2_available():
         # from flash_attn.ops.triton.layer_norm import rms_norm_fn
         try:
