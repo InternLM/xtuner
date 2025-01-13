@@ -1,27 +1,18 @@
-# Minimum 0.40.0.post4 to fix some 4-bit precision bugs
-bitsandbytes>=0.40.0.post4
-# Minimum 2.16.0 to fix some bugs, see https://github.com/huggingface/datasets/pull/6444
-datasets>=2.16.0
+bitsandbytes==0.45.0
+datasets>=3.2.0
 einops
 # Minimum 0.1.2 to fix some bugs, see https://github.com/InternLM/lagent/pull/44
 lagent>=0.1.2
 # Minimum 0.10.3 to support distributed evaluation for MMBench
 # see https://github.com/open-mmlab/mmengine/pull/1469
-mmengine>=0.10.3
+mmengine==0.10.6
 openpyxl
-# Minimum 0.4.0 to support QLoRA, see https://github.com/huggingface/peft/pull/476
-peft>=0.4.0
+peft>=0.14.0
 scikit-image
 scipy
 SentencePiece
 tiktoken
 torch
 torchvision
-# Minimum 4.36.0 to support `Cache` data structure used by KV Cache
-# Registering a causal mask in `LlamaModel` is not friendly for very large
-# `max_position_embeddings`. Refer to
-# https://github.com/huggingface/transformers/blob/v4.38.0/src/transformers/models/llama/modeling_llama.py#L921-L923
-# transformers >= 4.43.0 use _flash_attention_forward but not self._flash_attention_forward
-# to calculate attn output which lead to bc braeking
-transformers>=4.36.0,!=4.38.0,!=4.38.1,!=4.38.2,<=4.42.4
+transformers==4.48.0
 transformers_stream_generator
