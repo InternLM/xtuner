@@ -185,12 +185,13 @@ class SupervisedFinetune(BaseModel):
     @staticmethod
     def _prepare_for_flash_attn(cfg, llm_cfg):
         cls_name = type(llm_cfg).__name__
-        SUPPORT_SDPA_ATTN = ('LlamaConfig', 'GemmaConfig', 'MistralConfig',
-                             'MixtralConfig', 'Qwen2Config', 'Qwen2MoeConfig',
-                             'Starcoder2Config', 'Starcoder2Config',
-                             'Phi3Config')
-        SUPPORT_FLASH_ATTN2 = ('InternLM2Config', 'LlamaConfig', 'GemmaConfig',
-                               'MistralConfig', 'MixtralConfig', 'Qwen2Config',
+        SUPPORT_SDPA_ATTN = ('InternLM3Config', 'LlamaConfig', 'GemmaConfig',
+                             'MistralConfig', 'MixtralConfig', 'Qwen2Config',
+                             'Qwen2MoeConfig', 'Starcoder2Config',
+                             'Starcoder2Config', 'Phi3Config')
+        SUPPORT_FLASH_ATTN2 = ('InternLM3Config', 'InternLM2Config',
+                               'LlamaConfig', 'GemmaConfig', 'MistralConfig',
+                               'MixtralConfig', 'Qwen2Config',
                                'Qwen2MoeConfig', 'Starcoder2Config',
                                'Starcoder2Config', 'Phi3Config',
                                'DeepseekV2Config')
