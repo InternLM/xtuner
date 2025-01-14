@@ -19,13 +19,13 @@ from transformers.integrations import is_deepspeed_zero3_enabled
 
 from xtuner.registry import BUILDER
 from xtuner.utils import DEFAULT_IMAGE_TOKEN
+from xtuner.utils.device import get_torch_device
 from .modules import ProjectorConfig, ProjectorModel, dispatch_modules
 from .modules.dispatch import SUPPORT_FLASH1, SUPPORT_FLASH2
 from .utils import (LoadWoInit, find_all_linear_names,
                     get_peft_model_state_dict, guess_load_checkpoint,
                     make_inputs_require_grad,
                     prepare_inputs_labels_for_multimodal, traverse_dict)
-
 
 def convert_state_dict_to_hf(state_dict, mapping):
     new_state_dict = {}
@@ -230,7 +230,7 @@ class LLaVAModel(BaseModel):
                                'Starcoder2Config', 'Phi3Config')
 
         torch_dtype = torch.bfloat16 if (
-            torch.cuda.is_available() and torch.cuda.is_bf16_supported()) \
+            get_torch_device().is_available() and get_torch_device().is_bf16_supported()) \
             else torch.float16
 
         if getattr(cfg, 'attn_implementation', None) is not None:
@@ -253,7 +253,7 @@ class LLaVAModel(BaseModel):
             return cfg
 
         torch_dtype = torch.bfloat16 if (
-            torch.cuda.is_available() and torch.cuda.is_bf16_supported()) \
+            get_torch_device().is_available() and get_torch_device().is_bf16_supported()) \
             else torch.float16
 
         cfg.torch_dtype = torch_dtype

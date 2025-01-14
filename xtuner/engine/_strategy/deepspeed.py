@@ -6,7 +6,7 @@ from mmengine._strategy import DeepSpeedStrategy as MMEngineDeepSpeedStrategy
 from xtuner import DS_CEPH_DIR
 from xtuner.parallel.sequence import init_sequence_parallel
 from xtuner.utils.fileio import patch_fileio
-
+from xtuner.utils.device import get_device
 
 class DeepSpeedStrategy(MMEngineDeepSpeedStrategy):
 
@@ -27,7 +27,7 @@ class DeepSpeedStrategy(MMEngineDeepSpeedStrategy):
         # When utilizing Zero3, the model isn't allocated to CUDA within the
         # `deepspeed.initialize` process.
         assert hasattr(wrapper.model, 'data_preprocessor')
-        wrapper.model.data_preprocessor.cuda()
+        wrapper.model.data_preprocessor.to(get_device())
         return wrapper
 
     def save_checkpoint(self, *args, **kwargs) -> None:

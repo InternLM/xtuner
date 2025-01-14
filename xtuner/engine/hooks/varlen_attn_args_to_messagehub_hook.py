@@ -5,6 +5,8 @@ from mmengine import MessageHub
 from mmengine.dist import get_rank
 from mmengine.hooks import Hook
 
+from xtuner.utils.device import get_device
+
 DATA_BATCH = Optional[Union[dict, tuple, list]]
 
 
@@ -22,7 +24,7 @@ class VarlenAttnArgsToMessageHubHook(Hook):
 
         cumulative_len = data.pop('cumulative_len')
         assert len(cumulative_len) == 1
-        cumulative_len = cumulative_len[0].cuda()
+        cumulative_len = cumulative_len[0].to(get_device())
         message_hub.update_info(f'cumulative_len_rank_{rank}', cumulative_len)
 
         max_seqlen = data.pop('max_seqlen')
@@ -59,7 +61,7 @@ class VarlenAttnArgsToMessageHubHook(Hook):
 
         cumulative_len = data.pop('cumulative_len')
         assert len(cumulative_len) == 1
-        cumulative_len = cumulative_len[0].cuda()
+        cumulative_len = cumulative_len[0].to(get_device())
         message_hub.update_info(f'cumulative_len_rank_{rank}', cumulative_len)
 
         max_seqlen = data.pop('max_seqlen')

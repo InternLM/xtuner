@@ -6,6 +6,7 @@ import torch
 import triton
 import triton.language as tl
 
+from xtuner.utils.device import get_torch_device
 
 @triton.jit
 def rotary_kernel(
@@ -231,7 +232,7 @@ def apply_rotary(
     # Need this, otherwise Triton tries to launch from cuda:0 and we get
     # ValueError: Pointer argument (at 0) cannot be accessed from Triton
     # (cpu tensor?)
-    with torch.cuda.device(x.device.index):
+    with get_torch_device().device(x.device.index):
         rotary_kernel[grid](
             output,  # data ptrs
             x,

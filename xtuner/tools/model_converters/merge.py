@@ -7,7 +7,7 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           CLIPImageProcessor, CLIPVisionModel)
 
 from xtuner.model.utils import LoadWoInit
-
+from xtuner.utils.device import get_device_name
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -32,8 +32,8 @@ def parse_args():
         help='Indicate if using `safe_serialization`')
     parser.add_argument(
         '--device',
-        default='cuda',
-        choices=('cuda', 'cpu', 'auto'),
+        default=get_device_name(),
+        choices=('cuda', 'cpu', 'npu', 'auto'),
         help='Indicate the device')
 
     args = parser.parse_args()
