@@ -18,6 +18,7 @@ from xtuner.parallel.sequence import (get_sequence_parallel_group,
                                       reduce_sequence_parallel_loss,
                                       split_for_sequence_parallel)
 from xtuner.registry import BUILDER
+from xtuner.utils.device import get_torch_device
 from .modules import dispatch_modules
 from .modules.dispatch import SUPPORT_FLASH1, SUPPORT_FLASH2
 from .utils import (LoadWoInit, find_all_linear_names,
@@ -196,7 +197,7 @@ class SupervisedFinetune(BaseModel):
                                'DeepseekV2Config')
 
         torch_dtype = torch.bfloat16 if (
-            torch.cuda.is_available() and torch.cuda.is_bf16_supported()) \
+            get_torch_device().is_available() and get_torch_device().is_bf16_supported()) \
             else torch.float16
 
         if getattr(cfg, 'attn_implementation', None) is not None:
@@ -219,7 +220,7 @@ class SupervisedFinetune(BaseModel):
             return cfg
 
         torch_dtype = torch.bfloat16 if (
-            torch.cuda.is_available() and torch.cuda.is_bf16_supported()) \
+            get_torch_device().is_available() and get_torch_device().is_bf16_supported()) \
             else torch.float16
 
         cfg.torch_dtype = torch_dtype

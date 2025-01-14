@@ -30,6 +30,7 @@ from xtuner.model.utils import LoadWoInit, prepare_inputs_labels_for_multimodal
 from xtuner.tools.utils import get_stop_criteria, is_cn_string
 from xtuner.utils import (DEFAULT_IMAGE_TOKEN, IMAGE_TOKEN_INDEX,
                           PROMPT_TEMPLATE)
+from xtuner.utils.device import get_device, get_torch_device
 
 TORCH_DTYPE_MAP = dict(
     fp16=torch.float16, bf16=torch.bfloat16, fp32=torch.float32, auto='auto')
@@ -278,7 +279,7 @@ def main():
         init_dist(args.launcher)
 
         rank, world_size = get_dist_info()
-        torch.cuda.set_device(rank)
+        get_torch_device().set_device(rank)
     else:
         rank = 0
         world_size = 1
@@ -359,10 +360,10 @@ def main():
             projector_path, torch_dtype=TORCH_DTYPE_MAP[args.torch_dtype])
     master_print(f'Load projector from {args.llava}')
 
-    projector.cuda()
+    projector.to(get_device())
     projector.eval()
 
-    visual_encoder.cuda()
+    visual_encoder.to(get_device())
     visual_encoder.eval()
 
     llm.eval()
@@ -445,7 +446,7 @@ def main():
             image, tuple(int(x * 255) for x in image_processor.image_mean))
         image = image_processor.preprocess(
             image, return_tensors='pt')['pixel_values'][0]
-        image = image.cuda().unsqueeze(0).to(visual_encoder.dtype)
+        image = image.to(get_device()).unsqueeze(0).to(visual_encoder.dtype)
         visual_outputs = visual_encoder(image, output_hidden_states=True)
         pixel_values = projector(
             visual_outputs.hidden_states[args.visual_select_layer][:, 1:])
@@ -466,7 +467,7 @@ def main():
             ids.extend(cur_chunk_encode)
             if idx != len(chunk_encode) - 1:
                 ids.append(IMAGE_TOKEN_INDEX)
-        ids = torch.tensor(ids).cuda().unsqueeze(0)
+        ids = torch.tensor(ids).to(get_device()).unsqueeze(0)
         mm_inputs = prepare_inputs_labels_for_multimodal(
             llm=llm, input_ids=ids, pixel_values=pixel_values)
 

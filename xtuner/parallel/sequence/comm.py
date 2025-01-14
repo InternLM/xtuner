@@ -133,7 +133,7 @@ def gather_for_sequence_parallel(input, dim: int, sp_group: dist.ProcessGroup):
         return input
 
     tensor_list = [torch.empty_like(input) for _ in range(world_size)]
-    assert input.device.type == 'cuda'
+    assert input.device.type != 'cpu'
     dist.all_gather(tensor_list, input, group=sp_group)
 
     output = torch.cat(tensor_list, dim=dim).contiguous()
