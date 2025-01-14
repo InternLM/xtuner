@@ -8,7 +8,7 @@ from mmengine import MessageHub
 from transformers.cache_utils import Cache
 from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
-from transformers.models.qwen2.modeling_qwen2 import (apply_rotary_pos_emb,
+from transformers.models.llama.modeling_llama import (apply_rotary_pos_emb,
                                                       eager_attention_forward,
                                                       repeat_kv)
 from transformers.processing_utils import Unpack
@@ -19,9 +19,7 @@ from xtuner.parallel.sequence.attention import (
     pre_process_for_sequence_parallel_attn)
 
 
-# modified from transformers.model.qwen2.modeling_qwen2.Qwen2Attention.forward and  # noqa: E501
-# support sequence parallel
-def qwen2_attn_forward(
+def internlm3_attn_forward(
     self,
     hidden_states: torch.Tensor,
     position_embeddings: Tuple[torch.Tensor, torch.Tensor],
@@ -54,7 +52,7 @@ def qwen2_attn_forward(
         key_states, value_states = past_key_value.update(
             key_states, value_states, self.layer_idx, cache_kwargs)
 
-    # different from Qwen2Attention.forward
+    # different from LlamaAttention.forward
     # repeat k/v heads if n_kv_heads < n_heads for sequence parallel
     key_states = repeat_kv(key_states, self.num_key_value_groups)
     value_states = repeat_kv(value_states, self.num_key_value_groups)
@@ -73,12 +71,7 @@ def qwen2_attn_forward(
         query_states = query_states.transpose(1, 2)
         key_states = key_states.transpose(1, 2)
         value_states = value_states.transpose(1, 2)
-
-    sliding_window = None
-    if (self.config.use_sliding_window
-            and getattr(self.config, 'sliding_window', None) is not None
-            and self.layer_idx >= self.config.max_window_layers):
-        sliding_window = self.config.sliding_window
+    # different places end
 
     attention_interface: Callable = eager_attention_forward
     if self.config._attn_implementation != 'eager':
@@ -126,12 +119,11 @@ def qwen2_attn_forward(
         attention_mask,
         dropout=0.0 if not self.training else self.attention_dropout,
         scaling=self.scaling,
-        sliding_window=sliding_window,  # main diff with Llama
         **kwargs,
     )
     self.num_key_value_groups = num_key_value_groups
 
-    # different from Qwen2Attention.forward
+    # different from LlamaAttention.forward
     if enable_sequence_parallel:
         attn_output = post_process_for_sequence_parallel_attn(attn_output)
 
