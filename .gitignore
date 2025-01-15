@@ -113,6 +113,7 @@ data
 *.pkl.json
 *.log.json
 work_dirs/
+rlhf_trainlog*/
 
 # Pytorch
 *.pth
@@ -122,3 +123,6 @@ work_dirs/
 # srun
 *.out
 batchscript-*
+
+# custom
+logs/
