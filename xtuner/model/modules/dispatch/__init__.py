@@ -34,66 +34,67 @@ NO_ATTN_WEIGHTS_MSG = (
     'possible to return the `attn_weights`.')
 
 LOWEST_TRANSFORMERS_VERSION = dict(
+    InternLM3ForCausalLM=digit_version('4.48'),
     InternLM2ForCausalLM=digit_version('4.36'),
     InternLMForCausalLM=digit_version('4.36'),
-    LlamaForCausalLM=digit_version('4.36'),
+    LlamaForCausalLM=digit_version('4.48'),
     Phi3ForCausalLM=digit_version('4.39'),
-    MistralForCausalLM=digit_version('4.36'),
+    MistralForCausalLM=digit_version('4.48'),
     # Training mixtral with lower version may lead to nccl timeout
     # Refer to https://github.com/microsoft/DeepSpeed/issues/5066
-    MixtralForCausalLM=digit_version('4.40'),
+    MixtralForCausalLM=digit_version('4.48'),
     CohereForCausalLM=digit_version('4.40'),
-    Qwen2ForCausalLM=digit_version('4.39'),
-    Qwen2MoeForCausalLM=digit_version('4.40'),
+    Qwen2ForCausalLM=digit_version('4.48'),
+    Qwen2MoeForCausalLM=digit_version('4.48'),
     DeepseekV2ForCausalLM=digit_version('4.40'),
 )
 
 ATTN_DISPATCH_MAPPING = dict(
+    InternLM3Attention=LazyObject('xtuner.model.modules.dispatch.internlm3',
+                                  'internlm3_attn_forward'),
     InternLM2FlashAttention2=LazyObject(
         'xtuner.model.modules.dispatch.internlm2', 'internlm2_attn_forward'),
     InternLMAttention=LazyObject('xtuner.model.modules.dispatch.internlm',
                                  'internlm_attn_forward'),
-    LlamaFlashAttention2=LazyObject('xtuner.model.modules.dispatch.llama',
-                                    'llama_attn_forward'),
+    LlamaAttention=LazyObject('xtuner.model.modules.dispatch.llama',
+                              'llama_attn_forward'),
     Phi3FlashAttention2=LazyObject('xtuner.model.modules.dispatch.phi3',
                                    'phi3_attn_forward'),
-    MistralFlashAttention2=LazyObject('xtuner.model.modules.dispatch.mistral',
-                                      'mistral_attn_forward'),
-    MixtralFlashAttention2=LazyObject('xtuner.model.modules.dispatch.mistral',
-                                      'mistral_attn_forward'),
+    MistralAttention=LazyObject('xtuner.model.modules.dispatch.mistral',
+                                'mistral_attn_forward'),
+    MixtralAttention=LazyObject('xtuner.model.modules.dispatch.mistral',
+                                'mistral_attn_forward'),
     CohereFlashAttention2=LazyObject('xtuner.model.modules.dispatch.cohere',
                                      'cohere_attn_forward'),
-    Qwen2FlashAttention2=LazyObject('xtuner.model.modules.dispatch.qwen2',
-                                    'qwen2_attn_forward'),
-    Qwen2MoeFlashAttention2=LazyObject('xtuner.model.modules.dispatch.qwen2',
-                                       'qwen2_attn_forward'),
+    Qwen2Attention=LazyObject('xtuner.model.modules.dispatch.qwen2',
+                              'qwen2_attn_forward'),
+    Qwen2MoeAttention=LazyObject('xtuner.model.modules.dispatch.qwen2',
+                                 'qwen2_attn_forward'),
     DeepseekV2FlashAttention2=LazyObject(
         'xtuner.model.modules.dispatch.deepseek_v2', 'deepseek_attn_forward'),
 )
 
-ATTN_LEGACY_DISPATCH_MAPPING = dict(
-    LlamaFlashAttention2=LazyObject('xtuner.model.modules.dispatch.llama',
-                                    'llama_attn_forward_legacy'), )
-
 VARLEN_ATTN_DISPATCH_MAPPING = dict(
+    InternLM3Attention=LazyObject('xtuner.model.modules.dispatch.internlm3',
+                                  'internlm3_attn_forward'),
     InternLM2FlashAttention2=LazyObject(
         'xtuner.model.modules.dispatch.internlm2',
         'internlm2_varlen_attn_forward'),
     InternLMAttention=LazyObject('xtuner.model.modules.dispatch.internlm',
                                  'internlm_varlen_attn_forward'),
-    LlamaFlashAttention2=LazyObject('xtuner.model.modules.dispatch.llama',
-                                    'llama_varlen_attn_forward'),
+    LlamaAttention=LazyObject('xtuner.model.modules.dispatch.llama',
+                              'llama_attn_forward'),
     Phi3FlashAttention2=LazyObject('xtuner.model.modules.dispatch.phi3',
                                    'phi3_varlen_attn_forward'),
-    MistralFlashAttention2=LazyObject('xtuner.model.modules.dispatch.mistral',
-                                      'mistral_varlen_attn_forward'),
-    MixtralFlashAttention2=LazyObject('xtuner.model.modules.dispatch.mistral',
-                                      'mistral_varlen_attn_forward'),
+    MistralAttention=LazyObject('xtuner.model.modules.dispatch.mistral',
+                                'mistral_attn_forward'),
+    MixtralAttention=LazyObject('xtuner.model.modules.dispatch.mistral',
+                                'mistral_attn_forward'),
     CohereFlashAttention2=None,
-    Qwen2FlashAttention2=LazyObject('xtuner.model.modules.dispatch.qwen2',
-                                    'qwen2_varlen_attn_forward'),
-    Qwen2MoeFlashAttention2=LazyObject('xtuner.model.modules.dispatch.qwen2',
-                                       'qwen2_varlen_attn_forward'),
+    Qwen2Attention=LazyObject('xtuner.model.modules.dispatch.qwen2',
+                              'qwen2_attn_forward'),
+    Qwen2MoeAttention=LazyObject('xtuner.model.modules.dispatch.qwen2',
+                                 'qwen2_attn_forward'),
     DeepseekV2FlashAttention2=LazyObject(
         'xtuner.model.modules.dispatch.deepseek_v2',
         'deepseek_varlen_attn_forward'),
@@ -105,11 +106,9 @@ VARLEN_ATTN_DISPATCH_MAPPING = dict(
         'internlm3_self_attn_varlen_forward')
 )
 
-VARLEN_ATTN_LEGACY_DISPATCH_MAPPING = dict(
-    LlamaFlashAttention2=LazyObject('xtuner.model.modules.dispatch.llama',
-                                    'llama_varlen_attn_forward_legacy'), )
-
 RMS_DISPATCH_MAPPING = dict(
+    InternLM3RMSNorm=LazyObject('xtuner.model.modules.dispatch.triton_kernels',
+                                'rms_norm_forward'),
     InternLM2RMSNorm=LazyObject('xtuner.model.modules.dispatch.triton_kernels',
                                 'rms_norm_forward'),
     InternLMRMSNorm=LazyObject('xtuner.model.modules.dispatch.triton_kernels',
@@ -132,12 +131,7 @@ RMS_DISPATCH_MAPPING = dict(
 
 ROTE_DISPATCH_MAPPING = dict(
     InternLMRotaryEmbedding=LazyObject(
-        'xtuner.model.modules.dispatch.internlm', 'InternLMRotaryEmbedding'),
-    MistralRotaryEmbedding=LazyObject('xtuner.model.modules.dispatch.mistral',
-                                      'MistralRotaryEmbedding'),
-    MixtralRotaryEmbedding=LazyObject('xtuner.model.modules.dispatch.mistral',
-                                      'MistralRotaryEmbedding'),
-)
+        'xtuner.model.modules.dispatch.internlm', 'InternLMRotaryEmbedding'), )
 
 
 def log_once(func):
@@ -164,15 +158,7 @@ def dispatch_attn_forward(model):
     attn_forward = None
     for module in model.modules():
         name = type(module).__name__
-        if (IS_LOW_VERSION_TRANSFORMERS
-                and name in ATTN_LEGACY_DISPATCH_MAPPING):
-            if attn_forward is None:
-                attn_forward = ATTN_LEGACY_DISPATCH_MAPPING[name]
-                attn_forward = attn_forward.build()
-            print_log(f'Dispatch {name} legacy forward. {NO_ATTN_WEIGHTS_MSG}',
-                      'current')
-            module.forward = types.MethodType(attn_forward, module)
-        elif name in ATTN_DISPATCH_MAPPING:
+        if name in ATTN_DISPATCH_MAPPING:
             if attn_forward is None:
                 attn_forward = ATTN_DISPATCH_MAPPING[name]
                 attn_forward = attn_forward.build()
@@ -192,18 +178,10 @@ def dispatch_varlen_attn_forward(model):
     
     for module in model.modules():
         name = type(module).__name__
-        if (IS_LOW_VERSION_TRANSFORMERS
-                and name in VARLEN_ATTN_LEGACY_DISPATCH_MAPPING):
-            
-            varlen_attn_forward = VARLEN_ATTN_LEGACY_DISPATCH_MAPPING[name]
-            varlen_attn_forward = varlen_attn_forward.build()
-            print_log(
-                f'Dispatch legacy {name} varlen forward. '
-                f'{NO_ATTN_WEIGHTS_MSG}', 'current')
-            module.forward = types.MethodType(varlen_attn_forward, module)
-        elif name in VARLEN_ATTN_DISPATCH_MAPPING:
-            varlen_attn_forward = VARLEN_ATTN_DISPATCH_MAPPING[name]
-            varlen_attn_forward = varlen_attn_forward.build()
+        if name in VARLEN_ATTN_DISPATCH_MAPPING:
+            if varlen_attn_forward is None:
+                varlen_attn_forward = VARLEN_ATTN_DISPATCH_MAPPING[name]
+                varlen_attn_forward = varlen_attn_forward.build()
             print_log(f'Dispatch {name} varlen forward. {NO_ATTN_WEIGHTS_MSG}',
                       'current')
             module.forward = types.MethodType(varlen_attn_forward, module)

@@ -3,6 +3,7 @@ import torch
 import triton
 import triton.language as tl
 
+from xtuner.utils.device import get_device_name
 
 @triton.jit
 def _rms_norm_fwd_fused(
@@ -128,7 +129,7 @@ class RMSNorm(torch.autograd.Function):
         # reshape input data into 2D tensor
         x_arg = x.reshape(-1, x.shape[-1])
         M, N = x_arg.shape
-        rstd = torch.empty((M, ), dtype=torch.float32, device='cuda')
+        rstd = torch.empty((M, ), dtype=torch.float32, device=get_device_name())
         # Less than 64KB per feature: enqueue fused kernel
         MAX_FUSED_SIZE = 65536 // x.element_size()
         BLOCK_SIZE = min(MAX_FUSED_SIZE, triton.next_power_of_2(N))
@@ -168,7 +169,7 @@ class RMSNorm(torch.autograd.Function):
         if N <= 1024:
             GROUP_SIZE_M = 256
         # allocate output
-        locks = torch.zeros(2 * GROUP_SIZE_M, dtype=torch.int32, device='cuda')
+        locks = torch.zeros(2 * GROUP_SIZE_M, dtype=torch.int32, device=get_device_name())
         _dw = torch.empty((GROUP_SIZE_M, w.shape[0]),
                           dtype=x.dtype,
                           device=w.device)

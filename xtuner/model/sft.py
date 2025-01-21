@@ -18,6 +18,7 @@ from xtuner.parallel.sequence import (get_sequence_parallel_group,
                                       reduce_sequence_parallel_loss,
                                       split_for_sequence_parallel)
 from xtuner.registry import BUILDER
+from xtuner.utils.device import get_torch_device
 from .modules import dispatch_modules
 from .modules.dispatch import SUPPORT_FLASH1, SUPPORT_FLASH2
 from .utils import (LoadWoInit, find_all_linear_names,
@@ -185,18 +186,19 @@ class SupervisedFinetune(BaseModel):
     @staticmethod
     def _prepare_for_flash_attn(cfg, llm_cfg):
         cls_name = type(llm_cfg).__name__
-        SUPPORT_SDPA_ATTN = ('LlamaConfig', 'GemmaConfig', 'MistralConfig',
-                             'MixtralConfig', 'Qwen2Config', 'Qwen2MoeConfig',
-                             'Starcoder2Config', 'Starcoder2Config',
-                             'Phi3Config')
-        SUPPORT_FLASH_ATTN2 = ('InternLM2Config', 'LlamaConfig', 'GemmaConfig',
-                               'MistralConfig', 'MixtralConfig', 'Qwen2Config',
+        SUPPORT_SDPA_ATTN = ('InternLM3Config', 'LlamaConfig', 'GemmaConfig',
+                             'MistralConfig', 'MixtralConfig', 'Qwen2Config',
+                             'Qwen2MoeConfig', 'Starcoder2Config',
+                             'Starcoder2Config', 'Phi3Config')
+        SUPPORT_FLASH_ATTN2 = ('InternLM3Config', 'InternLM2Config',
+                               'LlamaConfig', 'GemmaConfig', 'MistralConfig',
+                               'MixtralConfig', 'Qwen2Config',
                                'Qwen2MoeConfig', 'Starcoder2Config',
                                'Starcoder2Config', 'Phi3Config',
                                'DeepseekV2Config')
 
         torch_dtype = torch.bfloat16 if (
-            torch.cuda.is_available() and torch.cuda.is_bf16_supported()) \
+            get_torch_device().is_available() and get_torch_device().is_bf16_supported()) \
             else torch.float16
 
         if getattr(cfg, 'attn_implementation', None) is not None:
@@ -219,7 +221,7 @@ class SupervisedFinetune(BaseModel):
             return cfg
 
         torch_dtype = torch.bfloat16 if (
-            torch.cuda.is_available() and torch.cuda.is_bf16_supported()) \
+            get_torch_device().is_available() and get_torch_device().is_bf16_supported()) \
             else torch.float16
 
         cfg.torch_dtype = torch_dtype
