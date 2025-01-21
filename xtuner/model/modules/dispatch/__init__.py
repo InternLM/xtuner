@@ -98,6 +98,12 @@ VARLEN_ATTN_DISPATCH_MAPPING = dict(
     DeepseekV2FlashAttention2=LazyObject(
         'xtuner.model.modules.dispatch.deepseek_v2',
         'deepseek_varlen_attn_forward'),
+    InternLM3FlashCrossAttention2=LazyObject(
+        'xtuner.model.modules.dispatch.internlm3',
+        'internlm3_cross_attn_varlen_forward'),
+    InternLM3FlashSelfAttention2=LazyObject(
+        'xtuner.model.modules.dispatch.internlm3',
+        'internlm3_self_attn_varlen_forward')
 )
 
 RMS_DISPATCH_MAPPING = dict(
@@ -167,9 +173,9 @@ def dispatch_varlen_attn_forward(model):
         return
 
     from mmengine import print_log
-    print_log = log_once(print_log)
+    # print_log = log_once(print_log)
 
-    varlen_attn_forward = None
+    
     for module in model.modules():
         name = type(module).__name__
         if name in VARLEN_ATTN_DISPATCH_MAPPING:
