@@ -37,3 +37,5 @@ def get_torch_device_module():
         return torch.mlu
     else:
         raise NotImplementedError
+
+

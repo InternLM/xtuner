@@ -3,9 +3,7 @@ from loguru import logger
 import os
 import subprocess
 
-from .auto import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 from .device import get_device, get_torch_device_module
-
 
 _LOGGER = None
 
