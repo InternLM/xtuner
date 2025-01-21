@@ -10,63 +10,41 @@ import shutil
 import requests
 import gc
 from collections import OrderedDict
-from contextlib import nullcontext
 from concurrent.futures import wait
 from datetime import datetime, timedelta
-from functools import partial
 
 import torch
 import torch.distributed as dist
 from torch.nn import functional as F
 import torch.distributed.checkpoint as dcp
-from torch.distributed._composable.fsdp import MixedPrecisionPolicy
-from accelerate.utils import set_module_tensor_to_device
+
 from mmengine import mkdir_or_exist
 from mmengine.runner import set_random_seed
 from mmengine.utils import get_git_hash
 from mmengine.utils.dl_utils import collect_env
 
-from peft import LoraConfig, get_peft_model
-from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import \
-    apply_activation_checkpointing
+
 from torch.distributed.checkpoint.state_dict import (StateDictOptions,
-                                                     get_model_state_dict,
                                                      get_state_dict, set_state_dict)
 from torch.distributed.checkpoint.stateful import Stateful
 
-from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-from torch.distributed.fsdp import MixedPrecision
-from torch.distributed.fsdp.api import CPUOffload, ShardingStrategy
-from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
-from torch.distributed.fsdp.wrap import _or_policy
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR
 from torch.utils.data import ConcatDataset, DataLoader
-from transformers import AutoConfig, AutoModelForCausalLM
-from transformers.utils.import_utils import is_flash_attn_2_available
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from xtuner._lite import (AutoTokenizer, get_device, get_logger,
+from xtuner._lite import (get_device, get_logger,
                           get_torch_device_module)
-from xtuner._lite.accelerate import (LORA_TARGET_MAP, dispatch_hf_code, LoadWoInit,
-                                     packed_sequence, varlen_attn_is_available, profile_time_and_memory)
+from xtuner._lite.accelerate import varlen_attn_is_available, profile_time_and_memory
 from xtuner._lite.algorithms.sft import SftCollator, SftTokenizeFunction
 from xtuner._lite.chat import CHAT_TEMPLATE_MAP
 from xtuner._lite.datasets import (DATASET_CLS_MAP, OPENAI_CONVERT_MAP,
-                                   SoftPackDataset, HardPackDataset, load_datasets)
+                                   SoftPackDataset, load_datasets)
 from xtuner._lite.parallel import (LengthGroupedSampler, ParallelSampler,
-                                   get_dp_mesh, get_sp_mesh,
-                                   pad_for_sequence_parallel,
-                                   reduce_sequence_parallel_loss,
-                                   setup_parallel, split_for_sequence_parallel)
-
-from xtuner._lite.parallel import (ParallelSampler, get_dp_mesh, get_fsdp_mesh,
-                                   get_sp_mesh, get_tp_mesh, get_world_mesh, get_same_data_mesh,
-                                   pad_for_sequence_parallel, setup_parallel,
-                                   reduce_sequence_parallel_loss,
-                                   split_for_sequence_parallel)
-from xtuner._lite.parallel.megatron import megatron_parallelize
-from xtuner._lite.parallel.fsdp import clip_grad_norm_
+                                   setup_parallel)
+from xtuner._lite.patches import FSDPConfig, AutoPatch
+from xtuner._lite.parallel import (ParallelSampler,  setup_parallel)
+from xtuner._lite.modelings import register_remote_code
 
 gc.disable()
 logger = get_logger()
@@ -78,12 +56,7 @@ SUPPORT_DATA_FORMATS = OPENAI_CONVERT_MAP.keys()
 
 def log_format(rank, debug=False):
 
-    sp_rank = get_sp_mesh().get_local_rank()
-    dp_rank = get_dp_mesh().get_local_rank()
-    tp_rank = get_tp_mesh().get_local_rank()
-    fsdp_rank = get_fsdp_mesh().get_local_rank()
-
-    formatter = f'[XTuner][RANK {rank}][DP {dp_rank}][SP {sp_rank}][TP {tp_rank}]'
+    formatter = f'[XTuner][RANK {rank}]'
     formatter += '[{time:YYYY-MM-DD HH:mm:ss}][<level>{level}</level>]'
 
     if debug:
@@ -127,36 +100,12 @@ def parse_args():
         help=('repo id or local path of the tokenizer. '
               'Defaults to the same as `model`'))
     model_args.add_argument(
-        '--use-lora', action='store_true', help='Apply the adapter to LLM.')
-    model_args.add_argument(
-        '--lora-targets',
-        default=None,
-        nargs='*',
-        help='The names of the modules to apply the adapter to. ')
-    model_args.add_argument(
-        '--lora-r', default=64, type=int, help="Not updating vit's parameters")
-    model_args.add_argument(
-        '--lora-alpha',
-        default=16,
-        type=int,
-        help='The alpha parameter for Lora scaling.')
-    model_args.add_argument(
-        '--lora-dropout',
-        default=0.1,
-        type=float,
-        help='The dropout probability for Lora layers.')
-    model_args.add_argument(
-        '--lora-bias',
-        default='none',
-        help='The dropout probability for Lora layers.')
-    model_args.add_argument(
         '--dtype',
         default='auto',
         choices=['fp16', 'bf16', 'auto'],
         help=("the dtype of the model forward. When set to 'auto', it will "
               'automatically determine whether bf16 is available, '
               'prioritizing the use of bf16.'))
-
     model_args.add_argument(
         '--selective-recompute',
         default=1.0,
@@ -165,13 +114,11 @@ def parse_args():
               'The maximum is 1; the larger the value, the less memory '
               'required for training. The default is 1, meaning all layers '
               'need to be re-computated.'))
-    model_args.add_argument(
-        '--shard-strategy',
-        default='full',
-        choices=['full', 'hybrid'],
-        help=('The sharding strategy to be used for distributed training.'))
+              
     model_args.add_argument('--cpu-offload', action='store_true', help=(''))
+    model_args.add_argument('--compile', action='store_true', help=(''))
     model_args.add_argument('--sp-size', type=int, default=1, help='')
+    model_args.add_argument('--tp-size', type=int, default=1, help='')
     data_args = parser.add_argument_group('data', 'Dataset Related Settings')
     data_args.add_argument(
         '--datasets',
@@ -319,44 +266,6 @@ def is_interval(step, total_steps, interval):
     return (step + 1) % interval == 0 or (step + 1) == total_steps
 
 
-def map_meta_modules(model, meta_model):
-    modules = {name: mod for name, mod in model.named_modules()}
-    meta_module_map = {
-        mod: modules[name]
-        for name, mod in meta_model.named_modules()
-    }
-    return meta_module_map
-
-
-def build_llm_model(args, config, world_size, dtype=torch.float32):
-    with LoadWoInit():
-        llm = AutoModelForCausalLM.from_pretrained(
-            args.llm, config=config, attn_implementation='flash_attention_2', 
-            trust_remote_code=True)
-
-    # Ensure all numerical values in the optimizer are fp32.
-    # FSDP will use low precision during forward.
-    llm.to(dtype)
-
-    if args.use_lora:
-        llm.requires_grad_(False)
-        if world_size > 1:
-            llm.to(dtype)
-
-        if args.lora_targets is None:
-            llm_cls = llm.__class__.__name__
-            args.lora_targets = LORA_TARGET_MAP[llm_cls]
-        llm_lora_cfg = LoraConfig(
-            target_modules=args.lora_targets,
-            r=args.lora_r,
-            lora_alpha=args.lora_alpha,
-            lora_dropout=args.lora_dropout,
-            bias=args.lora_bias,
-            task_type='CAUSAL_LM')
-        llm = get_peft_model(llm, llm_lora_cfg)
-
-    return llm
-
 
 class TrainState(Stateful):
 
@@ -432,7 +341,6 @@ def find_checkpoints(directory, prefix='ckpt'):
     for folder in all_folders:
         match = re.match(pattern, folder)
         if match:
-            # 将文件夹名和匹配到的数字转换为整数并存储为元组
             checkpoints.append((folder, int(match.group(1))))
     
     checkpoints.sort(key=lambda x: x[1])
@@ -447,32 +355,14 @@ def sft(args):
     ###########################################################################
     #                           1. Environment                                #
     ###########################################################################
-    setup_parallel(sp_size=args.sp_size, tp_size=1)
+    setup_parallel()
     set_random_seed(args.seed)
+    register_remote_code()
 
-    dp_mesh = get_dp_mesh()
-    tp_mesh = get_tp_mesh()
-    sp_mesh = get_sp_mesh()
-    fsdp_mesh = get_fsdp_mesh()  # dp_size * sp_size
-    world_mesh = get_world_mesh()  # dp_size * sp_size * tp_size
-    
-    dp_size = dp_mesh.size()
-    tp_size = tp_mesh.size()
-    sp_size = sp_mesh.size()
-    world_size = world_mesh.size()
+    world_size = dist.get_world_size()
 
     cpu_comm_timeout = timedelta(minutes=60)
     gloo_group = dist.new_group(backend='gloo', timeout=cpu_comm_timeout)
-
-    if args.global_batch_size < dp_size or args.global_batch_size % dp_size:
-        raise ValueError(f'The `global_batch_size`({args.global_batch_size}) '
-                         'should be divisible by the '
-                         f'world_size({world_size}).')
-
-    if (args.global_batch_size / dp_size) % args.mirco_batch_size:
-        raise ValueError(f'The `global_batch_size`({args.global_batch_size}) '
-                         f'should be divisible by the world_size({world_size})'
-                         f' * `mirco_batch_size`({args.mirco_batch_size})')
 
     rank = dist.get_rank()
 
@@ -526,10 +416,6 @@ def sft(args):
         runtime_env.update(env)
         runtime_env['Seed'] = args.seed
         runtime_env['World Size'] = world_size
-        runtime_env['DP Size'] = dp_size
-        runtime_env['SP Size'] = sp_size
-        runtime_env['TP Size'] = tp_size
-        # runtime_env['Distributed launcher'] = dist_launcher
 
         runtime_env_info = '\n    ' + '\n    '.join(
             f'{k}: {v}' for k, v in runtime_env.items())
@@ -538,22 +424,80 @@ def sft(args):
                     runtime_env_info + '\n' + dash_line + '\n')
     # -------------------    Environment  End  ------------------------------ #
 
+
     ###########################################################################
-    #                     2. Dataset & Dataloader                             #
+    #                          2. FSDP                                        #
+    ###########################################################################
+    if args.dtype == 'auto':
+        args.dtype = 'bf16' if DEVICE_MODULE.is_bf16_supported() else 'fp16'
+
+    if args.dtype == 'fp16':
+        dtype = torch.float16
+    elif args.dtype == 'bf16':
+        if DEVICE_MODULE.is_bf16_supported():
+            dtype = torch.bfloat16
+        else:
+            raise RuntimeError('The device does not support `bf16`, '
+                               'please set `dtype` to `fp16`.')
+    else:
+        raise RuntimeError('`dtype` only supports `fp16`, `bf16` or `auto`, '
+                           f'but found {args.dtype}.')
+
+    
+    with torch.device('meta'):
+        llm = AutoModelForCausalLM.from_pretrained(
+            args.llm, attn_implementation='flash_attention_2', torch_dtype=dtype)
+        
+        for module in llm.modules():
+            for p_name, param in module.named_parameters(recurse=False):
+                if param.requires_grad:
+                    param_fp32 = torch.nn.Parameter(
+                        param.to(dtype=torch.float32))
+                    setattr(module, p_name, param_fp32)
+
+    
+    fsdp_config = FSDPConfig(
+        tp_size=args.tp_size,
+        sp_size=args.sp_size, reshard_after_forward=True,
+        cpu_offload=args.cpu_offload, reduce_dtype=dtype, param_dtype=dtype, 
+        torch_compile=args.compile, max_length=args.max_length * args.mirco_batch_size
+    )
+
+    with profile_time_and_memory('[FSDP]'):
+        patched_llm = AutoPatch.from_causal_lm(llm, fsdp_config)
+
+    dp_mesh = patched_llm.data_parallel_mesh
+    data_mesh = patched_llm.data_mesh
+    dp_size = patched_llm.data_parallel_mesh.size()
+    if args.global_batch_size < dp_size or args.global_batch_size % dp_size:
+        raise ValueError(f'The `global_batch_size`({args.global_batch_size}) '
+                         'should be divisible by the '
+                         f'world_size({world_size}).')
+
+    if (args.global_batch_size / dp_size) % args.mirco_batch_size:
+        raise ValueError(f'The `global_batch_size`({args.global_batch_size}) '
+                         f'should be divisible by the world_size({world_size})'
+                         f' * `mirco_batch_size`({args.mirco_batch_size})')
+
+    dist.barrier()
+    gc.collect()
+    # --------------------------    FSDP  End  ------------------------------ #
+
+    ###########################################################################
+    #                     3. Dataset & Dataloader                             #
     ###########################################################################
 
     start_load_data_t = time.time()
 
     tokenizer = AutoTokenizer.from_pretrained(
         args.tokenizer if args.tokenizer else args.llm,
-        trust_remote_code=True,
         use_fast=False,
         padding_side='right')
 
     if args.chat_template:
         chat_template = CHAT_TEMPLATE_MAP[args.chat_template]
     else:
-        chat_template = None
+        chat_template = patched_llm.chat_template
 
     tokenize_fns = []
     for dset_format in args.dset_formats:
@@ -601,11 +545,13 @@ def sft(args):
         max_length=args.max_length)
 
     if args.group_by_length:
-        sampler = LengthGroupedSampler(train_dataset, dp_mesh,
+        sampler = LengthGroupedSampler(train_dataset, patched_llm.data_parallel_mesh,
                                        args.global_batch_size)
     else:
         sampler = ParallelSampler(
-            train_dataset, dp_mesh, args.global_batch_size, shuffle=True)
+            train_dataset, 
+            patched_llm.data_parallel_mesh, 
+            args.global_batch_size, shuffle=True)
 
     gc.collect()
 
@@ -633,88 +579,13 @@ def sft(args):
     logger.info(f'[Dataset & Dataloader] Cost {load_data_cost_time:.2f}s')
     # -------------------    Dataset & Dataloader  End  --------------------- #
 
-    ###########################################################################
-    #                          3. FSDP                                        #
-    ###########################################################################
-
-    start_model_t = time.time()
-
-    if args.dtype == 'auto':
-        args.dtype = 'bf16' if DEVICE_MODULE.is_bf16_supported() else 'fp16'
-
-    if args.dtype == 'fp16':
-        dtype = torch.float16
-        autocast = torch.amp.autocast(DEVICE, enabled=True, dtype=dtype)
-        scaler = ShardedGradScaler()
-    elif args.dtype == 'bf16':
-        if DEVICE_MODULE.is_bf16_supported():
-            dtype = torch.bfloat16
-            autocast = torch.amp.autocast(DEVICE, enabled=True, dtype=dtype)
-            scaler = None
-        else:
-            raise RuntimeError('The device does not support `bf16`, '
-                               'please set `dtype` to `fp16`.')
-    else:
-        raise RuntimeError('`dtype` only supports `fp16`, `bf16` or `auto`, '
-                           f'but found {args.dtype}.')
-
-    llm_cfg = AutoConfig.from_pretrained(args.llm, trust_remote_code=True)
-    if is_flash_attn_2_available():
-        llm_cfg.attn_implementation = 'flash_attention_2'
-
-    llm_cfg.use_cache = False
-    llm_cfg.torch_dtype = dtype
     
-    
-
-    # Only load parameters on rank 0 to avoid each rank repeatedly loading the
-    # same model into the CPU, wasting memory
-    if rank == 0:
-        with torch.device('cpu'):
-            rank0_llm = build_llm_model(args, llm_cfg, world_size, dtype)
-    else:
-        rank0_llm = None
-
-    dist.monitored_barrier(group=gloo_group, timeout=cpu_comm_timeout)
-
-    with torch.device('meta'):
-        # Ensure all numerical values in the optimizer are fp32.
-        # FSDP will use low precision during forward.
-        llm = build_llm_model(args, llm_cfg, world_size, dtype)
-        dispatch_hf_code(llm)
-        for module in llm.modules():
-            for p_name, param in module.named_parameters(recurse=False):
-                if param.requires_grad:
-                    param_fp32 = torch.nn.Parameter(
-                        param.to(dtype=torch.float32))
-                    setattr(module, p_name, param_fp32)
-
-    mp_policy = MixedPrecisionPolicy(param_dtype=dtype, reduce_dtype=dtype)
-
-    with profile_time_and_memory('[Parallelize LLM]'):
-        megatron_parallelize(
-            llm,
-            rank0_llm,
-            dp_mesh=fsdp_mesh,
-            tp_mesh=tp_mesh,
-            mp_policy=mp_policy,
-            recompute_ratio=args.selective_recompute,
-            reshard_after_forward=True)
-        
-        llm.train()
-
-    dist.barrier()
-    gc.collect()
-    # --------------------------    FSDP  End  ------------------------------ #
 
     ###########################################################################
     #                      4. Optimizer & Scheduler                           #
     ###########################################################################
-    requried_grad_params = [
-        param for param in llm.parameters() if param.requires_grad
-    ]
     optimizer = AdamW(
-        requried_grad_params,
+        patched_llm.trainable_parameters(),
         lr=args.lr,
         weight_decay=args.wd,
         betas=(0.9, 0.95))
@@ -777,13 +648,11 @@ def sft(args):
                     cpu_offload=True, ignore_frozen_params=True)
                 (shard_model_state_dict,
                 shard_optimizer_state_dict) = get_state_dict(
-                    llm, optimizer, options=_options)
+                    patched_llm.patched_model, optimizer, options=_options)
                 state_dict = {
                     'model': shard_model_state_dict,
                     'optimizer': shard_optimizer_state_dict,
                     'train_state': train_state,
-                    'warmup_scheduler': warmup_scheduler,
-                    'cosine_scheduler': cosine_scheduler
                 }
 
                 # inplace state_dict
@@ -795,7 +664,7 @@ def sft(args):
                 _options = StateDictOptions(
                     cpu_offload=True, strict=False)
                 set_state_dict(
-                    llm,
+                    patched_llm.patched_model,
                     optimizer,
                     model_state_dict=state_dict["model"],
                     optim_state_dict=state_dict["optimizer"],
@@ -836,10 +705,10 @@ def sft(args):
         train_state.step()
 
         if step <= warmup_steps:
-            warmup_scheduler.step()
+            warmup_scheduler.step(step)
             cur_lr = warmup_scheduler.get_last_lr()[0]
         else:
-            cosine_scheduler.step()
+            cosine_scheduler.step(step)
             cur_lr = cosine_scheduler.get_last_lr()[0]
 
         DEVICE_MODULE.reset_peak_memory_stats()
@@ -858,61 +727,53 @@ def sft(args):
             _iter_labels = _iter_data['labels'][:, 1:]
             rank_grad_tokens += (_iter_labels >= 0).sum()
         rank_grad_tokens = rank_grad_tokens.to(DEVICE)
-        dist.all_reduce(rank_grad_tokens)
-        global_grad_tokens = rank_grad_tokens  / sp_size / tp_size
+        dist.all_reduce(rank_grad_tokens, group=patched_llm.data_parallel_mesh.get_group())
+        global_grad_tokens = rank_grad_tokens
 
-        
         step_data_time = time.time() - _data_start_t
 
         for _iter in range(iters_per_step):
             
             data = step_data_list[_iter]
-            input_ids = data['input_ids'][:, :-1].to(DEVICE)
 
+            input_ids = data['input_ids'][:, :-1].to(DEVICE)
             labels = data['labels'][:, 1:].to(DEVICE)
-            num_tokens = data['num_tokens'].to(DEVICE)
+            num_tokens = data['num_tokens'].tolist()
 
             if num_tokens[-1] == 1:
                 num_tokens = num_tokens[:-1]
             else:
                 num_tokens[-1] = num_tokens[-1] - 1
-
-            if sp_size > 1:
-                # `dim` is 1 as the shape of tensor is (bs, seq_len, ...)
-                input_ids = pad_for_sequence_parallel(input_ids, 0, sp_mesh, dim=1)
-                _num_pad = input_ids.numel() - num_tokens.sum()
-                if _num_pad > 0:
-                    _num_pad = torch.IntTensor([_num_pad]).to(DEVICE)
-                    num_tokens = torch.cat([num_tokens, _num_pad], dim=-1)
-
-                input_ids = split_for_sequence_parallel(
-                    input_ids, dim=1, sp_mesh=sp_mesh)
-
-                labels = pad_for_sequence_parallel(labels, -100,sp_mesh, dim=1)
-                labels = split_for_sequence_parallel(
-                    labels, dim=1, sp_mesh=sp_mesh)
-
-            packed_ctx = packed_sequence(num_tokens, sp_mesh=sp_mesh)
-
-            with packed_ctx, autocast if args.use_lora else nullcontext():
-                loss = llm(input_ids=input_ids, labels=labels, label_shifted=True, use_cache=False).loss
-                
-                loss = loss * (labels >= 0).sum() / global_grad_tokens * dp_size 
-               
-                if scaler and args.use_lora:
-                    scaler.scale(loss).backward()
-                else:
-                    loss.backward()
+            
+            cu_seq_lens = torch.cumsum(torch.IntTensor([0] + num_tokens), dim=0).to(DEVICE).int()
+            position_ids = [torch.arange(num) for num in num_tokens] 
+            position_ids = torch.cat(position_ids, dim=0).to(DEVICE).unsqueeze_(0)
+            
+            patched_llm.train()
+            loss = patched_llm(
+                input_ids=input_ids, 
+                position_ids=position_ids,
+                labels=labels, 
+                label_shifted=True, 
+                use_cache=False,
+                cu_seq_lens_q=cu_seq_lens,
+                cu_seq_lens_k=cu_seq_lens,
+                max_length_q=max(num_tokens),
+                max_length_k=max(num_tokens),
+                sequence_parallel_mesh=patched_llm.sequence_parallel_mesh,
+            ).loss
+        
+            loss = loss * (labels >= 0).sum() / global_grad_tokens * dp_size
+            loss.backward()
 
             step_loss += loss.item()
-            step_consumed_tokens += num_tokens.sum() / sp_size / tp_size
+            step_consumed_tokens += sum(num_tokens) / data_mesh.size()
 
         step_reduced_loss = torch.Tensor([step_loss]).to(DEVICE)
-        dist.all_reduce(step_reduced_loss)
-        step_reduced_loss = step_reduced_loss.item() / world_size
+        dist.all_reduce(step_reduced_loss, group=dp_mesh.get_group())
+        step_reduced_loss = step_reduced_loss.item() / dp_size
 
-        grad_norm = clip_grad_norm_(
-            requried_grad_params, fsdp_mesh, args.max_grad_norm)
+        grad_norm = patched_llm.clip_grad_norm(args.max_grad_norm)
 
         if grad_norm.isnan() or grad_norm.isinf():
             train_state.found_nan()
@@ -951,29 +812,8 @@ def sft(args):
             hf_dir = os.path.join(work_dir, f'hf-{step+1:0{num_digits}}')
             
             with profile_time_and_memory('[HF Checkpoint]'):
-            
-                from torch.distributed._tensor import DTensor
-
-                if rank == 0:
-                    llm_state_dict = {}
+                patched_llm.save_pretrained(hf_dir)
                 
-                for name, param in llm.state_dict().items():
-                    if isinstance(param, DTensor):
-                        with torch.no_grad():
-                            full_param = param.full_tensor().cpu()
-                    else:
-                        full_param = param.cpu()
-                    
-                    if rank == 0:
-                        llm_state_dict[name] = full_param
-                
-                if rank == 0:
-                    rank0_llm.load_state_dict(llm_state_dict)
-                    rank0_llm.save_pretrained(hf_dir)
-                    tokenizer.save_pretrained(hf_dir)
-                
-                dist.barrier()
-
             saved_hf_checkpoints = find_checkpoints(args.work_dir, prefix='hf')
                 
             if len(saved_hf_checkpoints) > args.checkpoint_max_keep:
@@ -989,7 +829,6 @@ def sft(args):
                                'please remove `--checkpoint-drop-optimizer` '
                                'from the command.')
             else:
-                
                 with profile_time_and_memory('[PT Checkpoint]'):
                     if ckpt_handle is not None:
                         wait([ckpt_handle])
@@ -1006,8 +845,6 @@ def sft(args):
                         'model': shard_model_state_dict,
                         'optimizer': shard_optimizer_state_dict,
                         'train_state': train_state.state_dict(),
-                        'warmup_scheduler': warmup_scheduler.state_dict(),
-                        'cosine_scheduler': cosine_scheduler.state_dict()
                     }
 
                     mkdir_or_exist(ckpt_dir)
