@@ -16,3 +16,4 @@ torch
 torchvision
 transformers==4.48.0
 transformers_stream_generator
+loguru

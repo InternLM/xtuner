@@ -3,7 +3,6 @@ import os
 import re
 from collections import OrderedDict
 
-import deepspeed
 import torch
 import torch.distributed as dist
 import torch.nn as nn
@@ -145,6 +144,7 @@ def load_state_dict_into_model(model_to_load, pretrained_model_path):
         if len(params_to_gather) > 0:
             args = (state_dict, prefix, {}, True, [], [], error_msgs)
             if is_deepspeed_zero3_enabled():
+                import deepspeed
                 with deepspeed.zero.GatheredParameters(
                         params_to_gather, modifier_rank=0):
                     if dist.get_rank() == 0:
