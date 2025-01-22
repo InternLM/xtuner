@@ -1,10 +1,6 @@
 bitsandbytes==0.45.0
 datasets>=3.2.0
 einops
-# Minimum 0.1.2 to fix some bugs, see https://github.com/InternLM/lagent/pull/44
-lagent>=0.1.2
-# Minimum 0.10.3 to support distributed evaluation for MMBench
-# see https://github.com/open-mmlab/mmengine/pull/1469
 mmengine==0.10.6
 openpyxl
 peft>=0.14.0
