@@ -579,8 +579,13 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM):
         )
         self.dp_mesh = data_mesh[dp_mesh_name]
         self.sp_mesh = data_mesh[sp_mesh_name]
-        self._data_mesh = data_mesh[sp_mesh_name, _tp_mesh_name]._flatten()
-    
+        
+        _data_mesh = init_device_mesh(
+            self.device_type, 
+            (world_size // tp_size // sp_size, sp_size * tp_size),
+            mesh_dim_names = [dp_mesh_name, data_mesh_name]
+        )
+        self._data_mesh = _data_mesh[data_mesh_name]
 
         param_init_fn = partial(
             lazy_init_fn,
