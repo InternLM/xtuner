@@ -15,7 +15,8 @@ from transformers.integrations import is_deepspeed_zero3_enabled
 
 from xtuner.parallel.sequence import (get_sequence_parallel_group,
                                       get_sequence_parallel_world_size,
-                                      reduce_sequence_parallel_loss,
+                                      reduce_sp_loss_for_debug,
+                                      rescale_sp_loss,
                                       split_for_sequence_parallel)
 from xtuner.registry import BUILDER
 from xtuner.utils.device import get_torch_device
@@ -80,7 +81,6 @@ class SupervisedFinetune(BaseModel):
                  tokenizer=None,
                  max_position_embeddings=None):
         super().__init__()
-
         self.llm = self.build_llm_from_cfg(llm, use_varlen_attn,
                                            max_position_embeddings)
 
@@ -89,7 +89,6 @@ class SupervisedFinetune(BaseModel):
                 tokenizer = BUILDER.build(tokenizer)
             smart_tokenizer_and_embedding_resize(tokenizer, self.llm)
 
-        self.llm.config.use_cache = False
         if use_activation_checkpointing:
             # For backward compatibility
             if hasattr(self.llm, 'enable_input_require_grads'):
@@ -116,6 +115,8 @@ class SupervisedFinetune(BaseModel):
         # seq_len dimension (use_varlen_attn = False) or the actual length of
         # the sequence.
         self.use_varlen_attn = use_varlen_attn
+
+        self.debug_sp = False
 
     def build_llm_from_cfg(self, llm_cfg, use_varlen_attn,
                            max_position_embeddings):
@@ -290,11 +291,17 @@ class SupervisedFinetune(BaseModel):
         data = self._split_for_sequence_parallel(data)
         outputs = self.llm(**data)
         labels = data['labels']
-        num_tokens = (labels != -100).sum()
+
         sp_group = get_sequence_parallel_group()
-        loss = reduce_sequence_parallel_loss(outputs.loss, num_tokens,
-                                             sp_group)
-        return {'loss': loss}
+        loss = rescale_sp_loss(outputs.loss, labels, sp_group)
+        output = {'loss': loss}
+        if self.debug_sp:
+            reduced_loss = reduce_sp_loss_for_debug(outputs.loss, labels,
+                                                    sp_group)
+            # string `loss` can not be a part of the key in output dict
+            # https://github.com/open-mmlab/mmengine/blob/main/mmengine/model/base_model/base_model.py#L174  # noqa: E501
+            output['reduced_l'] = reduced_loss
+        return output
 
     def compute_loss(self, data, data_samples=None):
         if get_sequence_parallel_world_size() > 1:
