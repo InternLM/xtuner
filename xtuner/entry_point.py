@@ -12,7 +12,7 @@ import xtuner
 # Define valid modes
 MODES = ('list-cfg', 'copy-cfg', 'log-dataset', 'check-custom-dataset',
          'train', 'test', 'chat', 'convert', 'preprocess', 'mmbench',
-         'eval_refcoco')
+         'eval_refcoco', 'rlhf')
 
 CLI_HELP_MSG = \
     f"""
@@ -207,6 +207,11 @@ def eval_refcoco():
     return eval_refcoco.__file__
 
 
+def rlhf():
+    from xtuner.rlhf import main as rlhf_main
+    return rlhf_main.__file__
+
+
 modes = {
     'list-cfg': list_cfg,
     'copy-cfg': copy_cfg,
@@ -230,14 +235,15 @@ modes = {
         '-h': preprocess_help_msg
     },
     'eval_refcoco': eval_refcoco,
-    'list-dataset-format': list_dataset_format
+    'list-dataset-format': list_dataset_format,
+    'rlhf': rlhf,
 }
 
 HELP_FUNCS = [preprocess_help_msg, convert_help_msg]
 MAP_FILE_FUNCS = [
     list_cfg, copy_cfg, log_dataset, check_custom_dataset, train, test, chat,
     mmbench, pth_to_hf, merge, split, arxiv_preprocess, eval_refcoco,
-    convert_refcoco, list_dataset_format
+    convert_refcoco, list_dataset_format, rlhf
 ]
 
 
