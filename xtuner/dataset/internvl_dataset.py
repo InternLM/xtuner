@@ -400,10 +400,11 @@ class InternVL_V1_5_Dataset(Dataset):
             labels += copy.deepcopy(output_encode)
 
         if len(input_ids) > self.max_length:
-            input_ids = input_ids[:self.max_length]
-            labels = labels[:self.max_length]
             print_log(
                 f'Warning: input_ids length({len(input_ids)}) '
                 f'is longer than max_length, cut to {self.max_length}',
                 logger='current')
+            input_ids = input_ids[:self.max_length]
+            labels = labels[:self.max_length]
+
         return {'input_ids': input_ids, 'labels': labels}
