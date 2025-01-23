@@ -1,6 +1,8 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-from .constants import (DEFAULT_IMAGE_TOKEN, DEFAULT_PAD_TOKEN_INDEX,
-                        IGNORE_INDEX, IMAGE_TOKEN_INDEX)
+from .constants import (DEFAULT_AUDIO_TOKEN, DEFAULT_IMAGE_TOKEN,
+                        DEFAULT_PAD_TOKEN_INDEX, IGNORE_INDEX,
+                        IMAGE_TOKEN_INDEX, LLAST_AUDIO_PADDING_TOKEN_INDEX,
+                        LLAST_AUDIO_TOKEN_INDEX)
 from .handle_moe_load_and_save import (SUPPORT_MODELS, get_origin_state_dict,
                                        load_state_dict_into_model)
 from .stop_criteria import StopWordStoppingCriteria
@@ -10,5 +12,6 @@ __all__ = [
     'IGNORE_INDEX', 'DEFAULT_PAD_TOKEN_INDEX', 'PROMPT_TEMPLATE',
     'DEFAULT_IMAGE_TOKEN', 'SYSTEM_TEMPLATE', 'StopWordStoppingCriteria',
     'IMAGE_TOKEN_INDEX', 'load_state_dict_into_model', 'get_origin_state_dict',
-    'SUPPORT_MODELS'
+    'SUPPORT_MODELS', 'LLAST_AUDIO_TOKEN_INDEX', 'DEFAULT_AUDIO_TOKEN',
+    'LLAST_AUDIO_PADDING_TOKEN_INDEX'
 ]
