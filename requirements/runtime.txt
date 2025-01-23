@@ -8,7 +8,7 @@ scikit-image
 scipy
 SentencePiece
 tiktoken
-torch
+torch==2.3.1
 torchvision
 transformers==4.48.0
 transformers_stream_generator

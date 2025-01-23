@@ -16,7 +16,6 @@ from mmengine.logging import print_log
 from mmengine.utils.misc import get_object_from_string
 from torch.utils.data import Dataset
 from transformers import AutoTokenizer
-
 from xtuner.registry import BUILDER, MAP_FUNC
 from .huggingface import build_origin_dataset
 
@@ -112,20 +111,85 @@ def tokenize(pair: str,
              max_length: int,
              is_reward: bool = False,
              reward_token_id: int = -1):
-    prompt = tokenizer.apply_chat_template(
-        pair['prompt'], tokenize=False, add_generation_prompt=True)
-    chosen = tokenizer.apply_chat_template(
-        pair['prompt'] + pair['chosen'],
-        tokenize=False,
-        add_generation_prompt=False)
-    rejected = tokenizer.apply_chat_template(
-        pair['prompt'] + pair['rejected'],
-        tokenize=False,
-        add_generation_prompt=False)
+
+    # if tokenizer.chat_template is None:
+    #     tokenizer.chat_template = '''
+    #     {%- for message in messages %}
+    #         {%- if message['role'] == 'user' %}
+    #             {{- '[INST]' + message['content'] + '[/INST]' }}
+    #         {%- elif message['role'] == 'added_user' %}
+    #             {{- message['content'] }}
+    #         {%- elif message['role'] == 'system' %}
+    #             {{- '<<SYS>>\\n' + message['content'] + '\\n<</SYS>>\\n\\n' }}
+    #         {%- elif message['role'] == 'added_assistant' %}
+    #             {{- " " + message['content']}}
+    #         {%- elif message['role'] == 'assistant' %}
+    #             {{- ' '  + message['content'] + ' ' + eos_token }}
+    #         {%- endif %}
+    #     {%- endfor %}
+    #     '''
+            
+    # prompt = tokenizer.apply_chat_template(
+    #         pair['prompt'], tokenize=False, add_generation_prompt=True)    
+    # chosen = tokenizer.apply_chat_template(
+    #     pair['prompt'] + pair['chosen'],
+    #     tokenize=False,
+    #     add_generation_prompt=False)
+    # rejected = tokenizer.apply_chat_template(
+    #     pair['prompt'] + pair['rejected'],
+    #     tokenize=False,
+    #     add_generation_prompt=False)
+    if tokenizer.chat_template is None:
+        def process_message(messages):
+            prompt = ''
+            for message in messages:
+                if message['role'] == 'user':
+                    prompt += '[INST]' + message['content'] + '[/INST]'
+                elif message['role'] == 'added_user':
+                    prompt += message['content']
+                elif message['role'] =='system':
+                    prompt += '<<SYS>>\\n' + message['content'] + '\\n<</SYS>>\\n\\n'
+                elif message['role'] == 'added_assistant':
+                    prompt += message['content']
+                elif message['role'] == 'assistant':
+                    prompt += message['content'] + tokenizer.eos_token
+            return prompt 
+        
+        prompt = pair['prompt'][0]['content'] if pair['prompt'][0]['role'] != "user" else process_message(pair['prompt'])
+        chosen = process_message(pair['prompt'] + pair['chosen'])
+        rejected = process_message(pair['prompt'] + pair['rejected'])
+    else:
+        def process_message(messages):
+            prompt = ''
+            for message in messages:
+                if message['role'] == 'user':
+                    prompt += '<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n' + message['content'] + '<|im_end|>\n'
+                elif message['role'] == 'added_user':
+                    prompt += message['content']
+                elif message['role'] == 'added_assistant':
+                    prompt += message['content']
+                elif message['role'] == 'assistant':
+                    prompt += message['content'] + tokenizer.eos_token
+            return prompt 
+
+        prompt = '<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n' + pair['prompt'][0]['content'] if pair['prompt'][0]['role'] != "user" else process_message(pair['prompt'])
+        chosen = process_message(pair['prompt'] + pair['chosen'])
+        rejected = process_message(pair['prompt'] + pair['rejected'])
+        # prompt = tokenizer.apply_chat_template(
+        #     pair['prompt'], tokenize=False, add_generation_prompt=True)    
+        # chosen = tokenizer.apply_chat_template(
+        #     pair['prompt'] + pair['chosen'],
+        #     tokenize=False,
+        #     add_generation_prompt=False)
+        # rejected = tokenizer.apply_chat_template(
+        #     pair['prompt'] + pair['rejected'],
+        #     tokenize=False,
+        #     add_generation_prompt=False)
+    
     prompt_ids = tokenizer.encode(prompt, add_special_tokens=False)
     chosen_ids = tokenizer.encode(chosen, add_special_tokens=False)
     rejected_ids = tokenizer.encode(rejected, add_special_tokens=False)
-
+    
     if len(chosen_ids) > max_length:
         chosen_ids = chosen_ids[:max_length]
     if len(rejected_ids) > max_length:
@@ -144,12 +208,12 @@ def tokenize(pair: str,
             chosen_ids[prompt_len:])
         rejected_labels = [-100] * prompt_len + copy.deepcopy(
             rejected_ids[prompt_len:])
-
+            
     return {
         'chosen_ids': chosen_ids,
         'rejected_ids': rejected_ids,
         'chosen_labels': chosen_labels,
-        'rejected_labels': rejected_labels,
+        'rejected_labels': rejected_labels
     }
 
 
@@ -176,7 +240,7 @@ class PreferenceDataset(Dataset):
         self.is_reward = is_reward
         self.reward_token_id = reward_token_id
         self.tokenized_pairs = []
-
+        
         for tokenized_pair in _multi_progress(
                 partial(
                     tokenize,
@@ -190,7 +254,7 @@ class PreferenceDataset(Dataset):
                 chunksize=num_proc,
                 description='Tokenizing dataset'):
             self.tokenized_pairs.append(tokenized_pair)
-
+        
     def __len__(self):
         return len(self.tokenized_pairs)
 
@@ -208,14 +272,14 @@ class PackedDatasetWrapper(Dataset):
         self.max_packed_length = max_packed_length
         self.lengths = []
         self.data = []
-
+        
         indices = np.arange(len(dataset))
         if shuffle_before_pack:
             np.random.shuffle(indices)
-
         data_bin = []
         bin_seq_len = 0
         removed = 0
+                
         for idx in indices:
             data = dataset[int(idx)]
             cur_len = len(data['chosen_ids']) + len(data['rejected_ids'])
@@ -248,14 +312,53 @@ class PackedDatasetWrapper(Dataset):
             f'from {len(dataset)} to {len(self)} after'
             ' using var len attention.',
             logger='current')
+    
+    def post_process(self, dataset):
+        
+        def merge_data(indices, dataset):
+            keys = ['chosen_ids', 'rejected_ids', 'chosen_labels', 'rejected_labels'] # 'position_ids','cumulative_len','concated'
+            merged_data = {key: (True if key == 'concated' else []) for key in keys}
+            position_ids , seq_len = [], []
+            
+            for index in indices:
+                data = dataset[index]
+                for key in keys:
+                    merged_data[key].extend(data[key])
+                    
+                    if "ids" in key:
+                        position_ids.extend(list(range(len(data[key]))))
+                        seq_len.append(len(list(range(len(data[key])))))         
+            
+            merged_data["position_ids"] = position_ids
+            merged_data["seq_len"] = seq_len
+            merged_data["concated"] = True
+            return merged_data
+                
+        from collections import defaultdict
+        grouped_indices = defaultdict(list)
 
+        # 遍历数据集并按 group_id 分组索引
+        for index, item in enumerate(dataset):
+            if item["group_id"] is not None:
+                grouped_indices[item["group_id"]].append((item["seq_num"], index))
+        
+        for group_id in grouped_indices:
+            # 排序仅按 seq_num 排列，并提取 index
+            grouped_indices[group_id] = [index for seq_num, index in sorted(grouped_indices[group_id])]
+        
+        grouped_indices = dict(grouped_indices)
+        selected_indices = {index for indices in grouped_indices.values() for index in indices}
+        merged_data = [merge_data(v, dataset) for k,v in grouped_indices.items()]
+        filtered_dataset = [item for index, item in enumerate(dataset) if index not in selected_indices]
+        return merged_data + filtered_dataset  
+        
+    
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, index):
         pairs = self.data[index]
         input_ids, cu_seqlens, position_ids, labels = [], [0], [], []
-
         for pair in pairs:
             input_ids.extend(pair['chosen_ids'])
             input_ids.extend(pair['rejected_ids'])
@@ -269,6 +372,7 @@ class PackedDatasetWrapper(Dataset):
             cu_seqlens.append(cu_seqlens[-1] + len(pair['chosen_ids']))
             cu_seqlens.append(cu_seqlens[-1] + len(pair['rejected_ids']))
 
+                
         return {
             'input_ids': input_ids,
             'labels': labels,
@@ -316,7 +420,6 @@ def map_dataset(dataset, dataset_map_fn, map_num_proc):
             raise TypeError('dataset_map_fn must be a function or a '
                             "registered function's string in MAP_FUNC, "
                             f"but got a string of '{dataset_map_fn}'")
-
     dataset = dataset.map(dataset_map_fn, num_proc=map_num_proc)
     return dataset
 
@@ -346,6 +449,9 @@ def build_preference_dataset(
             dataset = map_dataset(
                 dataset, dataset_map_fn, map_num_proc=num_proc)
 
+        # if dist.get_rank() == 0:
+        #     import pdb; pdb.set_trace()
+
         tokenized_ds = PreferenceDataset(
             dataset=dataset,
             tokenizer=tokenizer,
@@ -360,7 +466,7 @@ def build_preference_dataset(
                 dataset=tokenized_ds,
                 max_packed_length=max_packed_length,
                 shuffle_before_pack=shuffle_before_pack,
-            )
+            )    
     tokenized_ds = broad_cast_dataset(tokenized_ds)
     return tokenized_ds
 
@@ -377,6 +483,17 @@ def intel_orca_dpo_map_fn(example):
     rejected = [{'role': 'assistant', 'content': example['rejected']}]
     return {'prompt': prompt, 'chosen': chosen, 'rejected': rejected}
 
+def ultrafeedback_dpo_map_fn(example):
+    prompt_role = example.get('prompt_role') if example.get('prompt_role') is not None else "user"
+    answer_role = example.get('answer_role') if example.get('answer_role') is not None else "assistant"
+    
+    prompt = [{
+        'role': prompt_role,
+        'content': example['instruction']
+    }]
+    chosen = [{'role': answer_role, 'content': example['chosen']}]
+    rejected = [{'role': answer_role, 'content': example['rejected']}]
+    return {'prompt': prompt, 'chosen': chosen, 'rejected': rejected}
 
 def orpo_dpo_mix_40k_map_fn(example):
     assert len(example['chosen']) == len(example['rejected'])
