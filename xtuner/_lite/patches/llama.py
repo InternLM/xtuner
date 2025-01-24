@@ -1,4 +1,5 @@
 from xtuner._lite.patches.base import PatchedCausalLM, FSDPConfig, ModelConfig, HFCheckpointLoader, lazy_init_fn, clip_grad_norm_
+
 from xtuner._lite.patches.utils import pad_to_multiple_of, pad_to_max_length
 from typing import Callable, Optional, Tuple, TypedDict, Union, List
 import types
@@ -41,378 +42,10 @@ from torch.distributed.tensor.parallel import (
 logger = logging.get_logger(__name__)
 
 
-def cuda_patched_llama_attn_training(
-    self: LlamaAttention,
-    hidden_states: torch.Tensor,
-    position_embeddings: Tuple[torch.Tensor, torch.Tensor],
-    attention_mask: Optional[torch.Tensor],
-    past_key_value: Optional[Cache] = None,
-    cache_position: Optional[torch.LongTensor] = None,
-    sequence_parallel_mesh: Optional[DeviceMesh] = None,
-    **kwargs: Unpack[FlashAttentionKwargs],
-) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-    input_shape = hidden_states.shape[:-1]
-    hidden_shape = (*input_shape, -1, self.head_dim)
-    
-    query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-    key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-    value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-
-    cos, sin = position_embeddings
-    query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
-    if past_key_value is not None:
-        # sin and cos are specific to RoPE models; cache_position needed for the static cache
-        cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-        key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
-
-    attention_interface: Callable = eager_attention_forward
-    if self.config._attn_implementation != "eager":
-        if self.config._attn_implementation == "sdpa" and kwargs.get("output_attentions", False):
-            logger.warning_once(
-                "`torch.nn.functional.scaled_dot_product_attention` does not support `output_attentions=True`. Falling back to "
-                'eager attention. This warning can be removed using the argument `attn_implementation="eager"` when loading the model.'
-            )
-        else:
-            attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
-
-    if sequence_parallel_mesh and sequence_parallel_mesh.size() > 1:
-        
-        
-        # bs, qh, n_div_sp, d = query_states.shape
-        # _, kvh, n_div_sp, d = key_states.shape
-        
-        # assert bs == 1
-        # sp = sequence_parallel_mesh.size()
-        # n = n_div_sp * sp
-        # # (b, n // sp, qh, d) 
-        # query_states = query_states.transpose(1,2)
-        # key_states = key_states.transpose(1,2)
-        # value_states = value_states.transpose(1,2)
-
-        # # (qh, b * n // sp, d) 
-        # query_states = query_states.flatten(0, 1).transpose(0,1).contiguous()
-        # key_states = key_states.flatten(0, 1).transpose(0,1).contiguous()
-        # value_states = value_states.flatten(0, 1).transpose(0,1).contiguous()
-
-        # # (qh, b * n // sp, d) 
-        # _query_states = query_states.new_empty(qh, bs * n // sp, d)
-        # # (kvh, b * n // sp, d) 
-        # _key_states = key_states.new_empty(kvh, bs * n // sp, d)
-        # _value_states = value_states.new_empty(kvh, bs * n // sp, d)
-
-        # # (qh, b * n // sp, d) 
-        # _query_states = dist.nn.all_to_all_single(
-        #     _query_states, query_states, group=sequence_parallel_mesh.get_group())
-        # # (kvh, b * n // sp, d) 
-        # _key_states = dist.nn.all_to_all_single(
-        #     _key_states, key_states, group=sequence_parallel_mesh.get_group())
-        # # (kvh, b * n // sp, d) 
-        # _value_states = dist.nn.all_to_all_single(
-        #     _value_states, value_states, group=sequence_parallel_mesh.get_group())
-        
-        # # (sp, qh // sp, b*n // sp, d)
-        # _query_states = _query_states.view(sp, qh // sp, bs* n // sp, d)
-        # # (sp, kvh // sp, b*n // sp, d)
-        # _key_states = _key_states.view(sp, kvh // sp, bs * n // sp, d)
-        # _value_states = _value_states.view(sp, kvh // sp, bs * n // sp, d)
-        
-        # query_states = _query_states.transpose(1,2).reshape(bs, n, qh // sp, d).transpose(1,2)
-        # key_states = _key_states.transpose(1,2).reshape(bs, n, kvh // sp, d).transpose(1,2)
-        # value_states = _value_states.transpose(1,2).reshape(bs, n, kvh // sp, d).transpose(1,2)
-        
-        # different from LlamaAttention.forward
-        key_states = repeat_kv(key_states, self.num_key_value_groups)
-        value_states = repeat_kv(value_states, self.num_key_value_groups)
-
-        query_states = query_states.transpose(1,2)
-        key_states = key_states.transpose(1,2)
-        value_states = value_states.transpose(1,2)
-
-        query_states, key_states, value_states = pre_process_for_sequence_parallel_attn(
-            query_states, key_states, value_states, sequence_parallel_mesh
-        )
-
-        query_states = query_states.transpose(1,2)
-        key_states = key_states.transpose(1,2)
-        value_states = value_states.transpose(1,2)
-
-
-
-    # (bs, n , qh // sp, d)
-    attn_output, attn_weights = attention_interface(
-        self,
-        query_states,
-        key_states,
-        value_states,
-        attention_mask,
-        dropout=0.0 if not self.training else self.attention_dropout,
-        scaling=self.scaling,
-        **kwargs,
-    )
-
-    if sequence_parallel_mesh and sequence_parallel_mesh.size() > 1:
-        # # (bs * n , qh // sp, d)
-        # attn_output = attn_output.flatten(0, 1).contiguous()
-        # # (bs * n, qh // sp, d)
-        # _attn_output = attn_output.new_empty(bs * n, qh // sp, d)
-
-        # # (bs * n, qh // sp, d)
-        # attn_output = dist.nn.all_to_all_single(
-        #     _attn_output, attn_output, group=sequence_parallel_mesh.get_group())
-
-        # # (sp, bs * n // sp, qh // sp, d)
-        # attn_output = attn_output.view(sp, bs * n_div_sp, qh // sp, d)
-        # # (bs * n // sp, sp, qh // sp, d)
-        # attn_output = attn_output.transpose(0, 1)
-        attn_output = post_process_for_sequence_parallel_attn(
-            attn_output, sequence_parallel_mesh
-        )
-
-    attn_output = attn_output.reshape(*input_shape, -1).contiguous()
-    attn_output = self.o_proj(attn_output)
-    return attn_output, attn_weights
-
-
-def cuda_patched_llama_attn_prefilling(
-    self: LlamaAttention,
-    hidden_states: torch.Tensor,
-    position_embeddings: Tuple[torch.Tensor, torch.Tensor],
-    attention_mask: Optional[torch.Tensor],
-    past_key_value: Optional[Cache] = None,
-    cache_position: Optional[torch.LongTensor] = None,
-    sequence_parallel_mesh: Optional[DeviceMesh] = None,
-    **kwargs: Unpack[FlashAttentionKwargs],
-) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-
-    input_shape = hidden_states.shape[:-1]
-    hidden_shape = (*input_shape, -1, self.head_dim)
-
-    query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-    key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-    value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-
-    cos, sin = position_embeddings
-    query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
-    
-    from lmdeploy.pytorch.kernels import fill_kv_cache
-    fill_kv_cache(
-        key_states.transpose(1, 2),
-        value_states.transpose(1, 2),
-        past_key_value[self.layer_idx][0],
-        past_key_value[self.layer_idx][1],
-        kwargs["cu_seq_lens_q"][:-1],   # q_start_loc
-        kwargs["cu_seq_lens_q"][1:] - kwargs["cu_seq_lens_q"][:-1],  # q_seq_length
-        kv_seq_length=kwargs["cu_seq_lens_k"][1:] - kwargs["cu_seq_lens_k"][:-1], 
-        max_q_seq_length=kwargs["max_length_q"],
-        block_offsets=kwargs["block_table"],
-    )
-
-    assert self.config._attn_implementation == 'flash_attn_2'
-    attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
-    
-    attn_output, attn_weights = attention_interface(
-        self,
-        query_states,
-        key_states,
-        value_states,
-        attention_mask,
-        dropout=0.0 if not self.training else self.attention_dropout,
-        scaling=self.scaling,
-        **kwargs,
-    )
-
-    attn_output = attn_output.reshape(*input_shape, -1).contiguous()
-    attn_output = self.o_proj(attn_output)
-    return attn_output, attn_weights
-
-def cuda_patched_llama_attn_decoding(
-    self: LlamaAttention,
-    hidden_states: torch.Tensor,
-    position_embeddings: Tuple[torch.Tensor, torch.Tensor],
-    attention_mask: Optional[torch.Tensor],
-    past_key_value: Optional[Cache] = None,
-    cache_position: Optional[torch.LongTensor] = None,
-    sequence_parallel_mesh: Optional[DeviceMesh] = None,
-    **kwargs: Unpack[FlashAttentionKwargs],
-) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-
-    input_shape = hidden_states.shape[:-1]
-    hidden_shape = (*input_shape, -1, self.head_dim)
-
-    query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-    key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-    value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-
-    cos, sin = position_embeddings
-    query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
-
-    
-    from lmdeploy.pytorch.kernels import fill_kv_cache
-    fill_kv_cache(
-        key_states.transpose(1, 2),
-        value_states.transpose(1, 2),
-        past_key_value[self.layer_idx][0],
-        past_key_value[self.layer_idx][1],
-        kwargs["cu_seq_lens_q"][:-1],
-        kwargs["cu_seq_lens_q"][1:] - kwargs["cu_seq_lens_q"][:-1],
-        kv_seq_length=kwargs["cu_seq_lens_k"][1:] - kwargs["cu_seq_lens_k"][:-1],
-        max_q_seq_length=kwargs["max_length_q"],
-        block_offsets=kwargs["block_table"],
-    )
-
-    assert self.config._attn_implementation == 'flash_attn_2'
-    from flash_attn import flash_attn_with_kvcache
-
-    attn_weights = None
-    attn_output = flash_attn_with_kvcache(
-        query_states.transpose(1,2).transpose(0,1),
-        past_key_value[self.layer_idx][0],
-        past_key_value[self.layer_idx][1],
-        cache_seqlens=kwargs["cu_seq_lens_k"][1:] - kwargs["cu_seq_lens_k"][:-1],
-        block_table=kwargs["block_table"],
-        causal=True
-    )
-
-    attn_output = attn_output.reshape(*input_shape, -1)
-    attn_output = self.o_proj(attn_output)
-    return attn_output, attn_weights
-
-
-def cuda_patched_llama_attn_forward(
-    self: LlamaAttention,
-    hidden_states: torch.Tensor,
-    position_embeddings: Tuple[torch.Tensor, torch.Tensor],
-    attention_mask: Optional[torch.Tensor],
-    past_key_value: Optional[Cache] = None,
-    cache_position: Optional[torch.LongTensor] = None,
-    sequence_parallel_mesh: Optional[DeviceMesh] = None,
-    **kwargs: Unpack[FlashAttentionKwargs],
-) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-    if 'block_table' in kwargs:
-        # generating
-        if 'prefilling' in kwargs and kwargs['prefilling']:
-            return cuda_patched_llama_attn_prefilling(
-                self, hidden_states, position_embeddings,
-                attention_mask, past_key_value, cache_position, 
-                sequence_parallel_mesh, **kwargs
-            )
-        else:
-            return cuda_patched_llama_attn_decoding(
-                self, hidden_states, position_embeddings,
-                attention_mask, past_key_value, cache_position, 
-                sequence_parallel_mesh, **kwargs
-            )
-    else:
-        return cuda_patched_llama_attn_training(
-                self, hidden_states, position_embeddings,
-                attention_mask, past_key_value, cache_position, 
-                sequence_parallel_mesh, **kwargs
-            )
-
-def cuda_patched_casual_forward(
-    self: LlamaForCausalLM,
-    input_ids: torch.LongTensor = None,
-    attention_mask: Optional[torch.Tensor] = None,
-    position_ids: Optional[torch.LongTensor] = None,
-    past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
-    inputs_embeds: Optional[torch.FloatTensor] = None,
-    labels: Optional[torch.LongTensor] = None,
-    use_cache: Optional[bool] = None,
-    output_attentions: Optional[bool] = None,
-    output_hidden_states: Optional[bool] = None,
-    return_dict: Optional[bool] = None,
-    cache_position: Optional[torch.LongTensor] = None,
-    num_logits_to_keep: int = 0,
-    label_shifted = False,
-    **kwargs,
-) -> Union[Tuple, CausalLMOutputWithPast]:
-    
-    output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-    output_hidden_states = (
-        output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-    )
-    return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
-    # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
-    outputs = self.model(
-        input_ids=input_ids,
-        attention_mask=attention_mask,
-        position_ids=position_ids,
-        past_key_values=past_key_values,
-        inputs_embeds=inputs_embeds,
-        use_cache=use_cache,
-        output_attentions=output_attentions,
-        output_hidden_states=output_hidden_states,
-        return_dict=return_dict,
-        cache_position=cache_position,
-        **kwargs,
-    )
-
-    hidden_states = outputs[0]
-
-    if labels is None:
-        loss = None
-        logits = self.lm_head(hidden_states)
-    else:
-        if liger_kernel_is_available():
-            # unable to return logits when using Liger Kernel
-            logits = None
-
-            if label_shifted:
-                shift_hidden_states = hidden_states
-                shift_labels = labels
-            else:
-                shift_hidden_states = hidden_states[..., :-1, :].contiguous()
-                shift_labels = labels[..., 1:].contiguous()
-
-            shift_hidden_states = shift_hidden_states.view(-1, self.config.hidden_size)
-            shift_labels = shift_labels.view(-1)
-            shift_labels = shift_labels.to(shift_hidden_states.device)
-
-            from liger_kernel.transformers.fused_linear_cross_entropy import LigerFusedLinearCrossEntropyLoss
-            loss_fct = LigerFusedLinearCrossEntropyLoss()
-            
-            lm_head_weight = self.lm_head.weight
-            if isinstance(lm_head_weight, DTensor):
-                assert isinstance(shift_hidden_states, DTensor)
-                shift_hidden_states = shift_hidden_states.to_local()
-                lm_head_weight = self.lm_head.weight.to_local()
-            
-            loss = loss_fct(lm_head_weight, shift_hidden_states, shift_labels, self.lm_head.bias)
-
-        else:
-            logits = self.lm_head(hidden_states)
-
-            if label_shifted:
-                shift_logits = logits
-                shift_labels = labels
-            else:
-                shift_logits = logits[..., :-1, :].contiguous()
-                shift_labels = labels[..., 1:].contiguous()
-
-            shift_logits = shift_logits.view(-1, self.config.vocab_size)
-            shift_labels = shift_labels.view(-1)
-            shift_labels = shift_labels.to(shift_logits.device)
-
-            loss_fct = torch.nn.CrossEntropyLoss()
-            loss = loss_fct(shift_logits, shift_labels)
-
-    if not return_dict:
-        output = (logits,) + outputs[1:]
-        return (loss,) + output if loss is not None else output
-
-    return CausalLMOutputWithPast(
-        loss=loss,
-        logits=logits,
-        past_key_values=outputs.past_key_values,
-        hidden_states=outputs.hidden_states,
-        attentions=outputs.attentions,
-    )
-
-
-
 class CUDAPatchedLlamaForCausalLM(PatchedCausalLM):
     device_type = 'cuda'
+    attn_cls = LlamaAttention
+    causal_cls = LlamaForCausalLM
 
     layer_tp_plan = {
         "input_layernorm": SequenceParallel(),
@@ -444,9 +77,8 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM):
             desired_input_layouts=(Replicate(),),
         ),
         "lm_head": PrepareModuleInput(
-            input_layouts={(Shard(0),)},
-            desired_input_layouts=(Shard(0),),
-            use_local_output=True
+            input_layouts=(Replicate(),),
+            desired_input_layouts=(Replicate(),),
         ),
     }
 
@@ -475,10 +107,12 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM):
 
         self._patched_model = self.dispatch_hf_code(model)
         
+        assert self.patched_model.config.num_key_value_heads >= fsdp_config.tp_size
+        assert self.patched_model.config.num_key_value_heads % fsdp_config.tp_size == 0
         self._model_config = ModelConfig(
             num_hidden_layers=self.patched_model.config.num_hidden_layers,
             num_attention_heads=self.patched_model.config.num_attention_heads,
-            num_key_value_heads=self.patched_model.config.num_key_value_heads,
+            num_key_value_heads=self.patched_model.config.num_key_value_heads // fsdp_config.tp_size,
             hidden_size=self.patched_model.config.hidden_size,
             intermediate_size=self.patched_model.config.intermediate_size,
             vocab_size=self.patched_model.config.vocab_size,
@@ -517,14 +151,14 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM):
     def sequence_parallel_mesh(self):
         return self.sp_mesh
 
-    @staticmethod
-    def dispatch_hf_code(model) -> LlamaForCausalLM:
+    @classmethod
+    def dispatch_hf_code(cls, model) -> LlamaForCausalLM:
 
         for name, module in model.named_modules():
-            if isinstance(module, LlamaAttention):
-                module.forward = types.MethodType(cuda_patched_llama_attn_training, module)
-            if isinstance(module, LlamaForCausalLM):
-                module.forward = types.MethodType(cuda_patched_casual_forward, module)
+            if isinstance(module, cls.attn_cls):
+                module.forward = types.MethodType(cls.patched_attn_forward, module)
+            if isinstance(module, cls.causal_cls):
+                module.forward = types.MethodType(cls.patched_casual_forward, module)
 
         return model
     
@@ -579,13 +213,14 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM):
         )
         self.dp_mesh = data_mesh[dp_mesh_name]
         self.sp_mesh = data_mesh[sp_mesh_name]
-        
+
         _data_mesh = init_device_mesh(
             self.device_type, 
             (world_size // tp_size // sp_size, sp_size * tp_size),
             mesh_dim_names = [dp_mesh_name, data_mesh_name]
         )
         self._data_mesh = _data_mesh[data_mesh_name]
+    
 
         param_init_fn = partial(
             lazy_init_fn,
@@ -622,7 +257,8 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM):
                 )
                 
             if attention.layer_idx < num_recompute_layers:
-                layer = checkpoint_wrapper(layer)
+                layer = checkpoint_wrapper(layer, preserve_rng_state=False)
+                # checkpoint(layer)
             
             if fsdp_config.torch_compile:
                 layer = torch.compile(layer, fullgraph=True)
@@ -672,7 +308,242 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM):
             reshard_after_forward=fsdp_config.reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if fsdp_config.cpu_offload else None,
         )
-    
+
+    @staticmethod
+    def patched_attn_forward(
+        self: LlamaAttention,
+        hidden_states: torch.Tensor,
+        position_embeddings: Tuple[torch.Tensor, torch.Tensor],
+        attention_mask: Optional[torch.Tensor],
+        past_key_value: Optional[Cache] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        sequence_parallel_mesh: Optional[DeviceMesh] = None,
+        **kwargs: Unpack[FlashAttentionKwargs],
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        input_shape = hidden_states.shape[:-1]
+        hidden_shape = (*input_shape, -1, self.head_dim)
+        
+        query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+
+        cos, sin = position_embeddings
+        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+        if past_key_value is not None:
+            # sin and cos are specific to RoPE models; cache_position needed for the static cache
+            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+
+        attention_interface: Callable = eager_attention_forward
+        if self.config._attn_implementation != "eager":
+            if self.config._attn_implementation == "sdpa" and kwargs.get("output_attentions", False):
+                logger.warning_once(
+                    "`torch.nn.functional.scaled_dot_product_attention` does not support `output_attentions=True`. Falling back to "
+                    'eager attention. This warning can be removed using the argument `attn_implementation="eager"` when loading the model.'
+                )
+            else:
+                attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+
+        if sequence_parallel_mesh and sequence_parallel_mesh.size() > 1:
+            
+            
+            # bs, qh, n_div_sp, d = query_states.shape
+            # _, kvh, n_div_sp, d = key_states.shape
+            
+            # assert bs == 1
+            # sp = sequence_parallel_mesh.size()
+            # n = n_div_sp * sp
+            # # (b, n // sp, qh, d) 
+            # query_states = query_states.transpose(1,2)
+            # key_states = key_states.transpose(1,2)
+            # value_states = value_states.transpose(1,2)
+
+            # # (qh, b * n // sp, d) 
+            # query_states = query_states.flatten(0, 1).transpose(0,1).contiguous()
+            # key_states = key_states.flatten(0, 1).transpose(0,1).contiguous()
+            # value_states = value_states.flatten(0, 1).transpose(0,1).contiguous()
+
+            # # (qh, b * n // sp, d) 
+            # _query_states = query_states.new_empty(qh, bs * n // sp, d)
+            # # (kvh, b * n // sp, d) 
+            # _key_states = key_states.new_empty(kvh, bs * n // sp, d)
+            # _value_states = value_states.new_empty(kvh, bs * n // sp, d)
+
+            # # (qh, b * n // sp, d) 
+            # _query_states = dist.nn.all_to_all_single(
+            #     _query_states, query_states, group=sequence_parallel_mesh.get_group())
+            # # (kvh, b * n // sp, d) 
+            # _key_states = dist.nn.all_to_all_single(
+            #     _key_states, key_states, group=sequence_parallel_mesh.get_group())
+            # # (kvh, b * n // sp, d) 
+            # _value_states = dist.nn.all_to_all_single(
+            #     _value_states, value_states, group=sequence_parallel_mesh.get_group())
+            
+            # # (sp, qh // sp, b*n // sp, d)
+            # _query_states = _query_states.view(sp, qh // sp, bs* n // sp, d)
+            # # (sp, kvh // sp, b*n // sp, d)
+            # _key_states = _key_states.view(sp, kvh // sp, bs * n // sp, d)
+            # _value_states = _value_states.view(sp, kvh // sp, bs * n // sp, d)
+            
+            # query_states = _query_states.transpose(1,2).reshape(bs, n, qh // sp, d).transpose(1,2)
+            # key_states = _key_states.transpose(1,2).reshape(bs, n, kvh // sp, d).transpose(1,2)
+            # value_states = _value_states.transpose(1,2).reshape(bs, n, kvh // sp, d).transpose(1,2)
+            
+            # different from LlamaAttention.forward
+            key_states = repeat_kv(key_states, self.num_key_value_groups)
+            value_states = repeat_kv(value_states, self.num_key_value_groups)
+
+            query_states = query_states.transpose(1,2)
+            key_states = key_states.transpose(1,2)
+            value_states = value_states.transpose(1,2)
+
+            query_states, key_states, value_states = pre_process_for_sequence_parallel_attn(
+                query_states, key_states, value_states, sequence_parallel_mesh
+            )
+
+            query_states = query_states.transpose(1,2)
+            key_states = key_states.transpose(1,2)
+            value_states = value_states.transpose(1,2)
+
+
+
+        # (bs, n , qh // sp, d)
+        attn_output, attn_weights = attention_interface(
+            self,
+            query_states,
+            key_states,
+            value_states,
+            attention_mask,
+            dropout=0.0 if not self.training else self.attention_dropout,
+            scaling=self.scaling,
+            **kwargs,
+        )
+
+        if sequence_parallel_mesh and sequence_parallel_mesh.size() > 1:
+            # # (bs * n , qh // sp, d)
+            # attn_output = attn_output.flatten(0, 1).contiguous()
+            # # (bs * n, qh // sp, d)
+            # _attn_output = attn_output.new_empty(bs * n, qh // sp, d)
+
+            # # (bs * n, qh // sp, d)
+            # attn_output = dist.nn.all_to_all_single(
+            #     _attn_output, attn_output, group=sequence_parallel_mesh.get_group())
+
+            # # (sp, bs * n // sp, qh // sp, d)
+            # attn_output = attn_output.view(sp, bs * n_div_sp, qh // sp, d)
+            # # (bs * n // sp, sp, qh // sp, d)
+            # attn_output = attn_output.transpose(0, 1)
+            attn_output = post_process_for_sequence_parallel_attn(
+                attn_output, sequence_parallel_mesh
+            )
+
+        attn_output = attn_output.reshape(*input_shape, -1).contiguous()
+        attn_output = self.o_proj(attn_output)
+        return attn_output, attn_weights
+
+    @staticmethod
+    def patched_casual_forward(
+        self: LlamaForCausalLM,
+        input_ids: torch.LongTensor = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        num_logits_to_keep: int = 0,
+        label_shifted = False,
+        **kwargs,
+    ) -> Union[Tuple, CausalLMOutputWithPast]:
+        
+        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_hidden_states = (
+            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        )
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
+        outputs = self.model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+            cache_position=cache_position,
+            **kwargs,
+        )
+
+        hidden_states = outputs[0]
+
+        if labels is None:
+            loss = None
+
+            logits = self.lm_head(hidden_states)
+            if isinstance(logits, DTensor):
+                logits = logits.to_local()
+        else:
+            if liger_kernel_is_available():
+                # unable to return logits when using Liger Kernel
+                logits = None
+
+                if label_shifted:
+                    shift_hidden_states = hidden_states
+                    shift_labels = labels
+                else:
+                    shift_hidden_states = hidden_states[..., :-1, :].contiguous()
+                    shift_labels = labels[..., 1:].contiguous()
+
+                shift_hidden_states = shift_hidden_states.view(-1, self.config.hidden_size)
+                shift_labels = shift_labels.view(-1)
+                shift_labels = shift_labels.to(shift_hidden_states.device)
+
+                from liger_kernel.transformers.fused_linear_cross_entropy import LigerFusedLinearCrossEntropyLoss
+                loss_fct = LigerFusedLinearCrossEntropyLoss()
+                
+                lm_head_weight = self.lm_head.weight
+                if isinstance(lm_head_weight, DTensor):
+                    assert isinstance(shift_hidden_states, DTensor)
+                    shift_hidden_states = shift_hidden_states.to_local()
+                    lm_head_weight = self.lm_head.weight.to_local()
+                
+                loss = loss_fct(lm_head_weight, shift_hidden_states, shift_labels, self.lm_head.bias)
+
+            else:
+                logits = self.lm_head(hidden_states)
+
+                if label_shifted:
+                    shift_logits = logits
+                    shift_labels = labels
+                else:
+                    shift_logits = logits[..., :-1, :].contiguous()
+                    shift_labels = labels[..., 1:].contiguous()
+
+                shift_logits = shift_logits.view(-1, self.config.vocab_size)
+                shift_labels = shift_labels.view(-1)
+                shift_labels = shift_labels.to(shift_logits.device)
+
+                loss_fct = torch.nn.CrossEntropyLoss()
+                loss = loss_fct(shift_logits, shift_labels)
+
+        if not return_dict:
+            output = (logits,) + outputs[1:]
+            return (loss,) + output if loss is not None else output
+
+        return CausalLMOutputWithPast(
+            loss=loss,
+            logits=logits,
+            past_key_values=outputs.past_key_values,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
 
     def forward(
         self,
@@ -693,6 +564,8 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM):
         cu_seq_lens_k: Optional[torch.LongTensor] = None,
         max_length_q: Optional[int] = None,
         max_length_k: Optional[int] = None,
+        block_table: Optional[torch.LongTensor] = None,
+        prefilling: bool = False,
         sequence_parallel_mesh: Optional[DeviceMesh] = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         
@@ -747,7 +620,7 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM):
 
             _max_length_q = max(_max_length_q, num_padded_tokens)
             _max_length_k = _max_length_q
-            
+        
         outputs = self.patched_model(
             _input_ids,
             attention_mask,
@@ -766,9 +639,16 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM):
             cu_seq_lens_k=_cu_seq_lens_k,
             max_length_q=_max_length_q,
             max_length_k=_max_length_k,
+            block_table=block_table,
+            prefilling=prefilling,
             sequence_parallel_mesh=self.sequence_parallel_mesh,
         )
 
+        if outputs.logits is not None:
+            _logits = dist.nn.all_gather(outputs.logits, group=self.tp_mesh.get_group())
+            outputs.logits = torch.cat(_logits, dim=1)
+
+    
         if outputs.loss is not None:
             outputs.loss = outputs.loss * (_labels >= 0).sum()
             if self.tp_mesh.size() > 1:
@@ -776,9 +656,6 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM):
             if sequence_parallel_mesh and sequence_parallel_mesh.size() > 1:
                 outputs.loss = dist.nn.all_reduce(outputs.loss, group=sequence_parallel_mesh.get_group())
             outputs.loss = outputs.loss / (labels >= 0).sum() 
-            
-        if outputs.logits is not None:
-            outputs.logits = outputs.logits[:, :cu_seq_lens_q[-1]]
 
         return outputs
     
@@ -815,10 +692,33 @@ if __name__ == '__main__':
     setup_parallel()
     with torch.device('meta'):
         model = AutoModelForCausalLM.from_pretrained(
-            'internlm/internlm3-8b-instruct'
+            '/fs-computility/llm/shared/llm_llama3_hf/Llama3.1-8B-Instruct/',
+            attn_implementation='flash_attention_2'
         )
-
-    fsdp_config = FSDPConfig()
+    tokenizer = AutoTokenizer.from_pretrained('/fs-computility/llm/shared/llm_llama3_hf/Llama3.1-8B-Instruct/')
+    fsdp_config = FSDPConfig(reshard_after_forward=False, tp_size=8)
     patched_model = CUDAPatchedLlamaForCausalLM(model, fsdp_config)
 
+    prompts = [
+        '请给我介绍五个上海的景点'
+    ] * 32 * 8
 
+    input_ids = [tokenizer.encode(prompt, return_tensors="pt").cuda() for prompt in prompts]
+    import time
+    from xtuner._lite import get_logger
+    logger = get_logger()
+    start = time.time()
+    patched_model.eval()
+    import torch
+    torch.manual_seed(42)
+    response = patched_model.generate(
+        input_ids,
+        max_batch_size=len(prompts),
+        max_new_tokens=1024,
+        max_length=2048,
+        cuda_graph=True
+    )
+    for res in response:
+        logger.info(tokenizer.decode(res))
+
+    logger.info(time.time() - start)
