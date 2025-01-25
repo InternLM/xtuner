@@ -1,11 +1,12 @@
 from xtuner._lite.chat import HybridChatTemplate
-from xtuner._lite.modelings.internlm3.modeling_internlm3 import InternLM3ForCausalLM, InternLM3Attention
+from xtuner._lite.modelings.internlm3.modeling_internlm3 import InternLM3ForCausalLM, InternLM3DecoderLayer, InternLM3Attention
 
 from .llama import CUDAPatchedLlamaForCausalLM
 
 class CUDAPatchedInternLM3ForCausalLM(CUDAPatchedLlamaForCausalLM):
     
     attn_cls = InternLM3Attention
+    layer_cls = InternLM3DecoderLayer
     causal_cls = InternLM3ForCausalLM
 
     chat_template = HybridChatTemplate(

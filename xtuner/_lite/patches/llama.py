@@ -12,7 +12,7 @@ from transformers.cache_utils import Cache
 from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
 from transformers.processing_utils import Unpack
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
-from transformers.models.llama.modeling_llama import LlamaAttention, LlamaRotaryEmbedding, LlamaForCausalLM, apply_rotary_pos_emb, eager_attention_forward, repeat_kv
+from transformers.models.llama.modeling_llama import LlamaAttention, LlamaDecoderLayer, LlamaRotaryEmbedding, LlamaForCausalLM, apply_rotary_pos_emb, eager_attention_forward, repeat_kv
 import torch
 from torch import nn
 from torch import distributed as dist
@@ -45,6 +45,7 @@ logger = logging.get_logger(__name__)
 class CUDAPatchedLlamaForCausalLM(PatchedCausalLM):
     device_type = 'cuda'
     attn_cls = LlamaAttention
+    layer_cls = LlamaDecoderLayer
     causal_cls = LlamaForCausalLM
 
     layer_tp_plan = {
@@ -107,17 +108,7 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM):
 
         self._patched_model = self.dispatch_hf_code(model)
         
-        assert self.patched_model.config.num_key_value_heads >= fsdp_config.tp_size
-        assert self.patched_model.config.num_key_value_heads % fsdp_config.tp_size == 0
-        self._model_config = ModelConfig(
-            num_hidden_layers=self.patched_model.config.num_hidden_layers,
-            num_attention_heads=self.patched_model.config.num_attention_heads,
-            num_key_value_heads=self.patched_model.config.num_key_value_heads // fsdp_config.tp_size,
-            hidden_size=self.patched_model.config.hidden_size,
-            intermediate_size=self.patched_model.config.intermediate_size,
-            vocab_size=self.patched_model.config.vocab_size,
-            head_dim=self.patched_model.config.head_dim
-        )
+        self.init_model_config(fsdp_config)
 
         self._fsdp_config = fsdp_config
         if self._fsdp_config is not None:
@@ -150,6 +141,20 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM):
     @property
     def sequence_parallel_mesh(self):
         return self.sp_mesh
+    
+    def init_model_config(self, fsdp_config: FSDPConfig):
+        assert self.patched_model.config.num_key_value_heads >= fsdp_config.tp_size
+        assert self.patched_model.config.num_key_value_heads % fsdp_config.tp_size == 0
+        
+        self._model_config = ModelConfig(
+            num_hidden_layers=self.patched_model.config.num_hidden_layers,
+            num_attention_heads=self.patched_model.config.num_attention_heads,
+            num_key_value_heads=self.patched_model.config.num_key_value_heads // fsdp_config.tp_size,
+            hidden_size=self.patched_model.config.hidden_size,
+            intermediate_size=self.patched_model.config.intermediate_size,
+            vocab_size=self.patched_model.config.vocab_size,
+            head_dim=self.patched_model.config.head_dim
+        )
 
     @classmethod
     def dispatch_hf_code(cls, model) -> LlamaForCausalLM:
@@ -159,6 +164,8 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM):
                 module.forward = types.MethodType(cls.patched_attn_forward, module)
             if isinstance(module, cls.causal_cls):
                 module.forward = types.MethodType(cls.patched_casual_forward, module)
+            if isinstance(module, cls.layer_cls):
+                module.forward = types.MethodType(cls.patched_layer_forward, module)
 
         return model
     
@@ -442,6 +449,50 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM):
         return attn_output, attn_weights
 
     @staticmethod
+    def patched_layer_forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_value: Optional[Cache] = None,
+        output_attentions: Optional[bool] = False,
+        use_cache: Optional[bool] = False,
+        cache_position: Optional[torch.LongTensor] = None,
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # necessary, but kept here for BC
+        **kwargs: Unpack[FlashAttentionKwargs],
+    ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
+        residual = hidden_states
+
+        hidden_states = self.input_layernorm(hidden_states)
+
+        # Self Attention
+        hidden_states, self_attn_weights = self.self_attn(
+            hidden_states,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_value=past_key_value,
+            output_attentions=output_attentions,
+            use_cache=use_cache,
+            cache_position=cache_position,
+            position_embeddings=position_embeddings,
+            **kwargs,
+        )
+        hidden_states = residual + hidden_states
+
+        # Fully Connected
+        residual = hidden_states
+        hidden_states = self.post_attention_layernorm(hidden_states)
+        hidden_states = self.mlp(hidden_states)
+        hidden_states = residual + hidden_states
+
+        outputs = (hidden_states,)
+        if output_attentions:
+            outputs += (self_attn_weights,)
+
+        return outputs
+    
+
+    @staticmethod
     def patched_casual_forward(
         self: LlamaForCausalLM,
         input_ids: torch.LongTensor = None,
@@ -587,7 +638,7 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM):
                 multiple_of = sequence_parallel_mesh.size() * self.tp_mesh.size()
             else:
                 multiple_of = self.tp_mesh.size()
-
+            
             _input_ids = pad_to_multiple_of(_input_ids, 0, multiple_of, 1)
             _position_ids = pad_to_multiple_of(_position_ids, 0, multiple_of, 1)
             if labels is not None:
