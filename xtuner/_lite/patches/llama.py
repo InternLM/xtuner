@@ -15,6 +15,7 @@ from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 from transformers.models.llama.modeling_llama import LlamaAttention, LlamaDecoderLayer, LlamaRotaryEmbedding, LlamaForCausalLM, apply_rotary_pos_emb, eager_attention_forward, repeat_kv
 import torch
 from torch import nn
+from torch.nn import functional as F
 from torch import distributed as dist
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper
@@ -611,6 +612,7 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM):
         cache_position: Optional[torch.LongTensor] = None,
         num_logits_to_keep: int = 0,
         label_shifted: bool = False,
+        gather_logprobs: bool = False,
         cu_seq_lens_q: Optional[torch.LongTensor] = None,
         cu_seq_lens_k: Optional[torch.LongTensor] = None,
         max_length_q: Optional[int] = None,
@@ -619,6 +621,9 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM):
         prefilling: bool = False,
         sequence_parallel_mesh: Optional[DeviceMesh] = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
+        
+        if gather_logprobs:
+            assert labels is not None and label_shifted
         
         _input_ids = input_ids
         _labels = labels
@@ -696,9 +701,13 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM):
         )
 
         if outputs.logits is not None:
-            _logits = dist.nn.all_gather(outputs.logits, group=self.tp_mesh.get_group())
-            outputs.logits = torch.cat(_logits, dim=1)
-
+           
+            if self.tp_mesh.size() > 1:
+                _logits = dist.nn.all_gather(outputs.logits, group=self.tp_mesh.get_group())
+                outputs.logits = torch.cat(_logits, dim=1)
+            # if sequence_parallel_mesh and sequence_parallel_mesh.size() > 1:
+            #     _logits = dist.nn.all_gather(outputs.logits, group=sequence_parallel_mesh.get_group())
+            #     outputs.logits = torch.cat(_logits, dim=1)
     
         if outputs.loss is not None:
             outputs.loss = outputs.loss * (_labels >= 0).sum()
@@ -709,6 +718,20 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM):
             outputs.loss = outputs.loss / (labels >= 0).sum() 
 
         return outputs
+
+    def gather_logprobs(self, shifted_logits, shifted_labels, sequence_parallel_mesh):
+     
+        logprobs = F.log_softmax(shifted_logits, dim=-1)
+        logprobs = logprobs.gather(dim=-1, index=shifted_labels.unsqueeze(-1)).squeeze(-1)
+
+        # if self.tp_mesh.size() > 1:
+        #     _logprobs = dist.nn.all_gather(logprobs, group=self.tp_mesh.get_group())
+        #     logprobs = torch.cat(_logprobs, dim=1)
+        if sequence_parallel_mesh and sequence_parallel_mesh.size() > 1:
+            _logprobs = dist.nn.all_gather(logprobs, group=sequence_parallel_mesh.get_group())
+            logprobs = torch.cat(_logprobs, dim=1)
+    
+        return logprobs
     
     def trainable_parameters(self):
         _requried_grad_params = [
@@ -734,6 +757,145 @@ class MLUPatchedLlamaForCausalLM(CUDAPatchedLlamaForCausalLM):
 
 class MuxiPatchedLlamaForCausalLM(CUDAPatchedLlamaForCausalLM):
     device_type = 'muxi'
+
+class AscendPatchedLlamaForCausalLM(CUDAPatchedLlamaForCausalLM):
+    device_type = 'npu'
+
+    @staticmethod
+    def patched_attn_forward(
+        self: LlamaAttention,
+        hidden_states: torch.Tensor,
+        position_embeddings: Tuple[torch.Tensor, torch.Tensor],
+        attention_mask: Optional[torch.Tensor],
+        past_key_value: Optional[Cache] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        sequence_parallel_mesh: Optional[DeviceMesh] = None,
+        cu_seq_lens_q: Optional[torch.LongTensor] = None,
+        cu_seq_lens_k: Optional[torch.LongTensor] = None,
+        max_length_q: Optional[int] = None,
+        max_length_k: Optional[int] = None,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        input_shape = hidden_states.shape[:-1]
+        hidden_shape = (*input_shape, -1, self.head_dim)
+        
+        query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+
+        cos, sin = position_embeddings
+        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+        if past_key_value is not None:
+            # sin and cos are specific to RoPE models; cache_position needed for the static cache
+            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+
+
+        if sequence_parallel_mesh and sequence_parallel_mesh.size() > 1:
+            
+            
+            # bs, qh, n_div_sp, d = query_states.shape
+            # _, kvh, n_div_sp, d = key_states.shape
+            
+            # assert bs == 1
+            # sp = sequence_parallel_mesh.size()
+            # n = n_div_sp * sp
+            # # (b, n // sp, qh, d) 
+            # query_states = query_states.transpose(1,2)
+            # key_states = key_states.transpose(1,2)
+            # value_states = value_states.transpose(1,2)
+
+            # # (qh, b * n // sp, d) 
+            # query_states = query_states.flatten(0, 1).transpose(0,1).contiguous()
+            # key_states = key_states.flatten(0, 1).transpose(0,1).contiguous()
+            # value_states = value_states.flatten(0, 1).transpose(0,1).contiguous()
+
+            # # (qh, b * n // sp, d) 
+            # _query_states = query_states.new_empty(qh, bs * n // sp, d)
+            # # (kvh, b * n // sp, d) 
+            # _key_states = key_states.new_empty(kvh, bs * n // sp, d)
+            # _value_states = value_states.new_empty(kvh, bs * n // sp, d)
+
+            # # (qh, b * n // sp, d) 
+            # _query_states = dist.nn.all_to_all_single(
+            #     _query_states, query_states, group=sequence_parallel_mesh.get_group())
+            # # (kvh, b * n // sp, d) 
+            # _key_states = dist.nn.all_to_all_single(
+            #     _key_states, key_states, group=sequence_parallel_mesh.get_group())
+            # # (kvh, b * n // sp, d) 
+            # _value_states = dist.nn.all_to_all_single(
+            #     _value_states, value_states, group=sequence_parallel_mesh.get_group())
+            
+            # # (sp, qh // sp, b*n // sp, d)
+            # _query_states = _query_states.view(sp, qh // sp, bs* n // sp, d)
+            # # (sp, kvh // sp, b*n // sp, d)
+            # _key_states = _key_states.view(sp, kvh // sp, bs * n // sp, d)
+            # _value_states = _value_states.view(sp, kvh // sp, bs * n // sp, d)
+            
+            # query_states = _query_states.transpose(1,2).reshape(bs, n, qh // sp, d).transpose(1,2)
+            # key_states = _key_states.transpose(1,2).reshape(bs, n, kvh // sp, d).transpose(1,2)
+            # value_states = _value_states.transpose(1,2).reshape(bs, n, kvh // sp, d).transpose(1,2)
+            
+            # different from LlamaAttention.forward
+            key_states = repeat_kv(key_states, self.num_key_value_groups)
+            value_states = repeat_kv(value_states, self.num_key_value_groups)
+
+            query_states = query_states.transpose(1,2)
+            key_states = key_states.transpose(1,2)
+            value_states = value_states.transpose(1,2)
+
+            query_states, key_states, value_states = pre_process_for_sequence_parallel_attn(
+                query_states, key_states, value_states, sequence_parallel_mesh
+            )
+
+            query_states = query_states.transpose(1,2)
+            key_states = key_states.transpose(1,2)
+            value_states = value_states.transpose(1,2)
+
+
+        import torch_npu
+        import numpy as np
+        attention_mask = torch.triu(
+            torch.ones(max_length_q, max_length_k), diagonal=1).bool().to(self.device_type)
+        
+        head_num = query_states.shape[1]
+        attn_output = torch_npu.npu_fusion_attention(
+            query_states,
+            key_states,
+            value_states,
+            head_num,
+            pse=None,
+            padding_mask=None,
+            atten_mask=attention_mask,
+            scale=1.0 / query_states.shape[-1].sqrt().item(),
+            keep_prob=1,
+            input_layout='TND',
+            actual_seq_qlen=tuple(cu_seq_lens_q[1:].tolist()),
+            actual_seq_kvlen=tuple(cu_seq_lens_k[1:].tolist()),
+            pre_tockens=2147483647,
+            next_tockens=0,
+            inner_precise=0)[0]
+
+        if sequence_parallel_mesh and sequence_parallel_mesh.size() > 1:
+            # # (bs * n , qh // sp, d)
+            # attn_output = attn_output.flatten(0, 1).contiguous()
+            # # (bs * n, qh // sp, d)
+            # _attn_output = attn_output.new_empty(bs * n, qh // sp, d)
+
+            # # (bs * n, qh // sp, d)
+            # attn_output = dist.nn.all_to_all_single(
+            #     _attn_output, attn_output, group=sequence_parallel_mesh.get_group())
+
+            # # (sp, bs * n // sp, qh // sp, d)
+            # attn_output = attn_output.view(sp, bs * n_div_sp, qh // sp, d)
+            # # (bs * n // sp, sp, qh // sp, d)
+            # attn_output = attn_output.transpose(0, 1)
+            attn_output = post_process_for_sequence_parallel_attn(
+                attn_output, sequence_parallel_mesh
+            )
+
+        attn_output = attn_output.reshape(*input_shape, -1).contiguous()
+        attn_output = self.o_proj(attn_output)
+        return attn_output, None
 
 if __name__ == '__main__':
 
