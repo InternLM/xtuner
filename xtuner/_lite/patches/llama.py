@@ -699,16 +699,7 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM):
             prefilling=prefilling,
             sequence_parallel_mesh=self.sequence_parallel_mesh,
         )
-
-        if outputs.logits is not None:
-           
-            if self.tp_mesh.size() > 1:
-                _logits = dist.nn.all_gather(outputs.logits, group=self.tp_mesh.get_group())
-                outputs.logits = torch.cat(_logits, dim=1)
-            # if sequence_parallel_mesh and sequence_parallel_mesh.size() > 1:
-            #     _logits = dist.nn.all_gather(outputs.logits, group=sequence_parallel_mesh.get_group())
-            #     outputs.logits = torch.cat(_logits, dim=1)
-    
+       
         if outputs.loss is not None:
             outputs.loss = outputs.loss * (_labels >= 0).sum()
             if self.tp_mesh.size() > 1:
@@ -718,18 +709,94 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM):
             outputs.loss = outputs.loss / (labels >= 0).sum() 
 
         return outputs
+    
+    
+    @torch.no_grad()
+    def sample(self, logits, cu_seq_lens, do_sample=True, top_k=0, top_p=0.9, temperature=1.0):
+        
+        if not do_sample:
+
+            sampled = logits.argmax(-1)
+            if self.tp_mesh.size() > 1:
+                _sampled = dist.nn.all_gather(sampled, group=self.tp_mesh.get_group())
+            sampled = torch.cat(_sampled, dim=0)
+
+            return sampled
+        
+        # Apply temperature if necessary
+        if temperature != 1.0:
+            logits = logits / temperature
+
+        # Apply top-k if necessary
+        if top_k > 0:
+            top_k = min(top_k, logits.size(-1))
+            _, topk_indices = logits.topk(top_k,dim=-1)
+            mask = torch.ones_like(logits, dtype=torch.bool)
+            mask.scatter_(-1, topk_indices, False)
+            logits.masked_fill_(mask, -torch.inf)
+
+        # Apply top-p (nucleus sampling) if necessary
+        if top_p < 1.0:
+
+            sorted_logits, sorted_indices = torch.sort(logits, dim=-1)
+            cum_probs = sorted_logits.softmax(dim=-1).cumsum(dim=-1)
+            
+            mask = (cum_probs <= (1-  top_p))
+            mask[:,-1] = False
+            sorted_logits.masked_fill_(mask, -torch.inf)
+            
+            logits.scatter_( -1, sorted_indices, sorted_logits)
+        
+        probs = logits.softmax(-1)
+
+        if self.tp_mesh.size() > 1:
+            if self.tp_mesh.get_local_rank() == self.tp_mesh.size() - 1:
+                num_padded = logits.size(0) * self.tp_mesh.size() - cu_seq_lens.max()
+                logits[-num_padded:] = 0
+            
+            probs = logits.softmax(-1)
+            sampled = torch.multinomial(probs, 1).squeeze(-1)
+            _sampled = dist.nn.all_gather(sampled, group=self.tp_mesh.get_group())
+            sampled = torch.cat(_sampled, dim=0)
+        else:
+            probs = logits.softmax(-1)
+            sampled = torch.multinomial(probs, 1).squeeze(-1)
+
+        return sampled
+
 
     def gather_logprobs(self, shifted_logits, shifted_labels, sequence_parallel_mesh):
-     
-        logprobs = F.log_softmax(shifted_logits, dim=-1)
-        logprobs = logprobs.gather(dim=-1, index=shifted_labels.unsqueeze(-1)).squeeze(-1)
+        
+        if self.fsdp_config.torch_compile:
+            _labels = pad_to_max_length(shifted_labels, -100, self.fsdp_config.max_length, 1)
+        else:
+            if sequence_parallel_mesh and sequence_parallel_mesh.size() > 1:
+                multiple_of = sequence_parallel_mesh.size() * self.tp_mesh.size()
+            else:
+                multiple_of = self.tp_mesh.size()
+            
+            _labels = pad_to_multiple_of(shifted_labels, -100, multiple_of, 1)
+        
+        if sequence_parallel_mesh and sequence_parallel_mesh.size() > 1:
+            _labels = split_for_sequence_parallel(
+                _labels, dim=1, sp_mesh=sequence_parallel_mesh)
 
-        # if self.tp_mesh.size() > 1:
-        #     _logprobs = dist.nn.all_gather(logprobs, group=self.tp_mesh.get_group())
-        #     logprobs = torch.cat(_logprobs, dim=1)
+        if self.tp_mesh.size() > 1:
+            _labels = split_for_sequence_parallel(
+                    _labels, dim=1, sp_mesh=self.tp_mesh)
+        
+        logprobs = F.log_softmax(shifted_logits, dim=-1)
+        logprobs = logprobs.gather(dim=-1, index=_labels.clip(min=0).unsqueeze(-1)).squeeze(-1)
+
+        if self.tp_mesh.size() > 1:
+            _logprobs = dist.nn.all_gather(logprobs, group=self.tp_mesh.get_group())
+            logprobs = torch.cat(_logprobs, dim=1)
+
         if sequence_parallel_mesh and sequence_parallel_mesh.size() > 1:
             _logprobs = dist.nn.all_gather(logprobs, group=sequence_parallel_mesh.get_group())
             logprobs = torch.cat(_logprobs, dim=1)
+
+        logprobs = logprobs[:, :shifted_labels.size(1)]
     
         return logprobs
     
