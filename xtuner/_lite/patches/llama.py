@@ -712,14 +712,17 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM):
     
     
     @torch.no_grad()
-    def sample(self, logits, cu_seq_lens, do_sample=True, top_k=0, top_p=0.9, temperature=1.0):
+    def sample(self, logits, cu_seq_lens, do_sample=True, top_k=0, top_p=0.9, temperature=1.0, vocab_size=None):
         
+        if vocab_size is not None:
+            logits[:, vocab_size:] = -torch.inf
+
         if not do_sample:
 
             sampled = logits.argmax(-1)
             if self.tp_mesh.size() > 1:
                 _sampled = dist.nn.all_gather(sampled, group=self.tp_mesh.get_group())
-            sampled = torch.cat(_sampled, dim=0)
+                sampled = torch.cat(_sampled, dim=0)
 
             return sampled
         
@@ -746,13 +749,12 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM):
             sorted_logits.masked_fill_(mask, -torch.inf)
             
             logits.scatter_( -1, sorted_indices, sorted_logits)
-        
-        probs = logits.softmax(-1)
 
         if self.tp_mesh.size() > 1:
             if self.tp_mesh.get_local_rank() == self.tp_mesh.size() - 1:
                 num_padded = logits.size(0) * self.tp_mesh.size() - cu_seq_lens.max()
-                logits[-num_padded:] = 0
+                if num_padded > 0:
+                    logits[-num_padded:] = 0
             
             probs = logits.softmax(-1)
             sampled = torch.multinomial(probs, 1).squeeze(-1)
