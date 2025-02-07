@@ -12,7 +12,7 @@ from transformers.cache_utils import Cache
 from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
 from transformers.processing_utils import Unpack
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
-from transformers.models.llama.modeling_llama import LlamaAttention, LlamaDecoderLayer, LlamaRotaryEmbedding, LlamaForCausalLM, apply_rotary_pos_emb, eager_attention_forward, repeat_kv
+from transformers.models.llama.modeling_llama import LlamaAttention,LlamaRMSNorm, LlamaMLP, LlamaDecoderLayer, LlamaRotaryEmbedding, LlamaForCausalLM, apply_rotary_pos_emb, eager_attention_forward, repeat_kv
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -43,9 +43,27 @@ from torch.distributed.tensor.parallel import (
 logger = logging.get_logger(__name__)
 
 
+def all_to_all(
+    input: torch.Tensor,
+    scatter_dim: int,
+    gather_dim: int,
+    mesh: DeviceMesh,
+)-> torch.Tensor:  
+    group = mesh.get_group()
+    world_size = mesh.size()
+    input_list = [
+        t.contiguous()
+        for t in torch.tensor_split(input, world_size, scatter_dim)
+    ]
+    output_list = [torch.empty_like(input_list[0]) for _ in range(world_size)]
+    dist.nn.all_to_all(output_list, input_list, group=group)
+    return torch.cat(output_list, dim=gather_dim).contiguous()
+
+
 class CUDAPatchedLlamaForCausalLM(PatchedCausalLM):
     device_type = 'cuda'
     attn_cls = LlamaAttention
+    norm_cls = LlamaRMSNorm
     layer_cls = LlamaDecoderLayer
     causal_cls = LlamaForCausalLM
 
@@ -167,6 +185,8 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM):
                 module.forward = types.MethodType(cls.patched_casual_forward, module)
             if isinstance(module, cls.layer_cls):
                 module.forward = types.MethodType(cls.patched_layer_forward, module)
+            if isinstance(module, cls.norm_cls):
+                module.forward = types.MethodType(cls.patched_rms_norm_forward, module)
 
         return model
     
@@ -228,7 +248,6 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM):
             mesh_dim_names = [dp_mesh_name, data_mesh_name]
         )
         self._data_mesh = _data_mesh[data_mesh_name]
-    
 
         param_init_fn = partial(
             lazy_init_fn,
@@ -257,7 +276,6 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM):
             attention = layer.self_attn
             
             if tp_mesh.size() > 1:
-                
                 parallelize_module(
                     module=layer,
                     device_mesh=tp_mesh,
@@ -266,7 +284,6 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM):
                 
             if attention.layer_idx < num_recompute_layers:
                 layer = checkpoint_wrapper(layer, preserve_rng_state=False)
-                # checkpoint(layer)
             
             if fsdp_config.torch_compile:
                 layer = torch.compile(layer, fullgraph=True)
@@ -354,65 +371,17 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM):
 
         if sequence_parallel_mesh and sequence_parallel_mesh.size() > 1:
             
-            
-            # bs, qh, n_div_sp, d = query_states.shape
-            # _, kvh, n_div_sp, d = key_states.shape
-            
-            # assert bs == 1
-            # sp = sequence_parallel_mesh.size()
-            # n = n_div_sp * sp
-            # # (b, n // sp, qh, d) 
-            # query_states = query_states.transpose(1,2)
-            # key_states = key_states.transpose(1,2)
-            # value_states = value_states.transpose(1,2)
 
-            # # (qh, b * n // sp, d) 
-            # query_states = query_states.flatten(0, 1).transpose(0,1).contiguous()
-            # key_states = key_states.flatten(0, 1).transpose(0,1).contiguous()
-            # value_states = value_states.flatten(0, 1).transpose(0,1).contiguous()
+            sp_size = sequence_parallel_mesh.size()
+            num_kv_heads = key_states.size(1)
+            if sp_size > num_kv_heads:
+                assert sp_size % num_kv_heads == 0
+                key_states = repeat_kv(key_states, sp_size // num_kv_heads)
+                value_states = repeat_kv(value_states, sp_size // num_kv_heads)
 
-            # # (qh, b * n // sp, d) 
-            # _query_states = query_states.new_empty(qh, bs * n // sp, d)
-            # # (kvh, b * n // sp, d) 
-            # _key_states = key_states.new_empty(kvh, bs * n // sp, d)
-            # _value_states = value_states.new_empty(kvh, bs * n // sp, d)
-
-            # # (qh, b * n // sp, d) 
-            # _query_states = dist.nn.all_to_all_single(
-            #     _query_states, query_states, group=sequence_parallel_mesh.get_group())
-            # # (kvh, b * n // sp, d) 
-            # _key_states = dist.nn.all_to_all_single(
-            #     _key_states, key_states, group=sequence_parallel_mesh.get_group())
-            # # (kvh, b * n // sp, d) 
-            # _value_states = dist.nn.all_to_all_single(
-            #     _value_states, value_states, group=sequence_parallel_mesh.get_group())
-            
-            # # (sp, qh // sp, b*n // sp, d)
-            # _query_states = _query_states.view(sp, qh // sp, bs* n // sp, d)
-            # # (sp, kvh // sp, b*n // sp, d)
-            # _key_states = _key_states.view(sp, kvh // sp, bs * n // sp, d)
-            # _value_states = _value_states.view(sp, kvh // sp, bs * n // sp, d)
-            
-            # query_states = _query_states.transpose(1,2).reshape(bs, n, qh // sp, d).transpose(1,2)
-            # key_states = _key_states.transpose(1,2).reshape(bs, n, kvh // sp, d).transpose(1,2)
-            # value_states = _value_states.transpose(1,2).reshape(bs, n, kvh // sp, d).transpose(1,2)
-            
-            # different from LlamaAttention.forward
-            key_states = repeat_kv(key_states, self.num_key_value_groups)
-            value_states = repeat_kv(value_states, self.num_key_value_groups)
-
-            query_states = query_states.transpose(1,2)
-            key_states = key_states.transpose(1,2)
-            value_states = value_states.transpose(1,2)
-
-            query_states, key_states, value_states = pre_process_for_sequence_parallel_attn(
-                query_states, key_states, value_states, sequence_parallel_mesh
-            )
-
-            query_states = query_states.transpose(1,2)
-            key_states = key_states.transpose(1,2)
-            value_states = value_states.transpose(1,2)
-
+            query_states = all_to_all(query_states, scatter_dim=1, gather_dim=2,  mesh=sequence_parallel_mesh)
+            key_states = all_to_all(key_states, scatter_dim=1, gather_dim=2,  mesh=sequence_parallel_mesh)
+            value_states = all_to_all(value_states, scatter_dim=1, gather_dim=2,  mesh=sequence_parallel_mesh)
 
 
         # (bs, n , qh // sp, d)
@@ -428,23 +397,8 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM):
         )
 
         if sequence_parallel_mesh and sequence_parallel_mesh.size() > 1:
-            # # (bs * n , qh // sp, d)
-            # attn_output = attn_output.flatten(0, 1).contiguous()
-            # # (bs * n, qh // sp, d)
-            # _attn_output = attn_output.new_empty(bs * n, qh // sp, d)
-
-            # # (bs * n, qh // sp, d)
-            # attn_output = dist.nn.all_to_all_single(
-            #     _attn_output, attn_output, group=sequence_parallel_mesh.get_group())
-
-            # # (sp, bs * n // sp, qh // sp, d)
-            # attn_output = attn_output.view(sp, bs * n_div_sp, qh // sp, d)
-            # # (bs * n // sp, sp, qh // sp, d)
-            # attn_output = attn_output.transpose(0, 1)
-            attn_output = post_process_for_sequence_parallel_attn(
-                attn_output, sequence_parallel_mesh
-            )
-
+            attn_output = all_to_all(attn_output, scatter_dim=1, gather_dim=2, mesh=sequence_parallel_mesh)
+           
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)
         return attn_output, attn_weights
@@ -815,6 +769,7 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM):
             dist.all_reduce(self.patched_model.model.norm.weight.grad.to_local(), group=self.tp_mesh.get_group())
             self.patched_model.lm_head.weight.grad.div_(self.tp_mesh.size())
             self.patched_model.model.norm.weight.grad.div_(self.tp_mesh.size())
+
             for param in self.trainable_parameters():
                 param.grad.div_(self.tp_mesh.size())
 
