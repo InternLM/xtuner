@@ -704,6 +704,7 @@ class KwargsForCausalLM(FlashAttentionKwargs, LossKwargs): ...
 
 
 class InternLM3ForCausalLM(InternLM3PreTrainedModel, GenerationMixin):
+    _auto_class = 'AutoModelForCausalLM'
     _tied_weights_keys = ["lm_head.weight"]
     _tp_plan = {"lm_head": "colwise_rep"}
 
