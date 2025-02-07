@@ -668,16 +668,23 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM):
     @torch.no_grad()
     def sample(self, logits, cu_seq_lens, do_sample=True, top_k=0, top_p=0.9, temperature=1.0, vocab_size=None):
         
+        last_token_inds = cu_seq_lens[1:] - 1
+        rank_start = logits.size(0) * self.tp_mesh.get_local_rank()
+        rank_end = logits.size(0) * (self.tp_mesh.get_local_rank() + 1)
+        
+        other_rank_mask = torch.logical_or(last_token_inds < rank_start, last_token_inds >= rank_end)
+        last_token_inds -= rank_start
+        last_token_inds = last_token_inds.clip(min=0, max=rank_end-1)
+        logits = logits[last_token_inds]
+
         if vocab_size is not None:
             logits[:, vocab_size:] = -torch.inf
 
         if not do_sample:
-
             sampled = logits.argmax(-1)
+            sampled[other_rank_mask] = 0
             if self.tp_mesh.size() > 1:
-                _sampled = dist.nn.all_gather(sampled, group=self.tp_mesh.get_group())
-                sampled = torch.cat(_sampled, dim=0)
-
+                dist.all_reduce(sampled, group=self.tp_mesh.get_group())
             return sampled
         
         # Apply temperature if necessary
@@ -704,20 +711,12 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM):
             
             logits.scatter_( -1, sorted_indices, sorted_logits)
 
-        if self.tp_mesh.size() > 1:
-            if self.tp_mesh.get_local_rank() == self.tp_mesh.size() - 1:
-                num_padded = logits.size(0) * self.tp_mesh.size() - cu_seq_lens.max()
-                if num_padded > 0:
-                    logits[-num_padded:] = 0
-            
-            probs = logits.softmax(-1)
-            sampled = torch.multinomial(probs, 1).squeeze(-1)
-            _sampled = dist.nn.all_gather(sampled, group=self.tp_mesh.get_group())
-            sampled = torch.cat(_sampled, dim=0)
-        else:
-            probs = logits.softmax(-1)
-            sampled = torch.multinomial(probs, 1).squeeze(-1)
-
+        probs = logits.softmax(-1)
+        sampled = torch.multinomial(probs, 1).squeeze(-1)
+        sampled[other_rank_mask] = 0
+        if self.tp_mesh.size() > 1:    
+            dist.all_reduce(sampled, group=self.tp_mesh.get_group())
+    
         return sampled
 
 
