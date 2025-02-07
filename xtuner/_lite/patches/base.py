@@ -337,14 +337,14 @@ class PatchedCausalLM(ABC, nn.Module):
             rank = 0
         
         from torch.distributed._tensor import DTensor
-
+        dtype = self.patched_model.config.torch_dtype
         for name, param in self.patched_model.state_dict().items():
             if self.fsdp_config.torch_compile and '_orig_mod.' in name:
                 name = name.replace('_orig_mod.', '')
             if isinstance(param, DTensor):
-                full_param = param.full_tensor().cpu()
+                full_param = param.to(dtype).full_tensor().cpu()
             else:
-                full_param = param.cpu()
+                full_param = param.to(dtype).cpu()
             
             if rank == 0:
                 set_module_tensor_to_device(self.rank0_model, name, 'cpu', full_param)
