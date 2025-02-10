@@ -674,7 +674,8 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM):
         
         other_rank_mask = torch.logical_or(last_token_inds < rank_start, last_token_inds >= rank_end)
         last_token_inds -= rank_start
-        last_token_inds = last_token_inds.clip(min=0, max=rank_end-1)
+        last_token_inds = last_token_inds.clip(min=0, max=logits.size(0)-1)
+        
         logits = logits[last_token_inds]
 
         if vocab_size is not None:
