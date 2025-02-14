@@ -11,6 +11,9 @@ import torch
 from torch import distributed as dist
 from tqdm import tqdm
 from xtuner._lite import get_logger
+from typing import Any, List, Set, Tuple
+import inspect
+from types import FunctionType, MethodType
 
 logger = get_logger()
 
@@ -22,11 +25,93 @@ def calculate_jsonl_sha256(path):
     return file_hash.hexdigest()
 
 
-def calculate_tokenize_fn_sha256(tokenize_fn):
-    """Calculate SHA-256 hash for an instance method's source code."""
-    # Get the source code of the method
-    fn_source = inspect.getsource(tokenize_fn.__call__)
-    return hashlib.sha256(fn_source.encode('utf-8')).hexdigest()
+def calculate_tokenize_fn_sha256(tokenize_fn: Any) -> str:
+    """Calculate SHA-256 hash for a tokenize function and its dependencies.
+
+    Args:
+        tokenize_fn: The tokenize function to hash
+
+    Returns:
+        str: SHA-256 hash of the function's source code and its dependencies
+    """
+
+    def get_source(obj: Any) -> str:
+        """Get source code for an object with caching."""
+        try:
+            if hasattr(obj.__class__, "__code__"):
+                return inspect.getsource(obj.__class__)
+        except (TypeError, OSError):
+            pass
+        return ""
+
+    def encode_obj(obj: Any, seen: Set[int] | None = None) -> List[Tuple[str, Any]]:
+        """Recursively encode an object and its dependencies.
+
+        Args:
+            obj: Object to encode
+            seen: Set of already processed object IDs
+
+        Returns:
+            List of (source_code, object) tuples
+        """
+        if seen is None:
+            seen = set()
+
+        obj_id = id(obj)
+        if obj_id in seen:
+            return []
+        seen.add(obj_id)
+
+        results: List[Tuple[str, Any]] = []
+
+        # Handle built-ins
+        if type(obj).__name__ in dir(__builtins__):
+            return [(repr(obj), obj)]
+
+        # Handle functions
+        if isinstance(obj, FunctionType):
+            source = get_source(obj)
+            if source:
+                results.append((source, obj))
+
+            # Process global variables
+            for name, value in obj.__globals__.items():
+                if not name.startswith("__") and id(value) != obj_id:
+                    results.extend(encode_obj(value, seen))
+
+        # Handle methods
+        elif isinstance(obj, MethodType):
+            results.extend(encode_obj(obj.__func__, seen))
+            results.extend(encode_obj(obj.__self__, seen))
+
+        # Handle other objects
+        else:
+            # Skip modules
+            if inspect.ismodule(obj):
+                return []
+
+            # Get class source if available
+            source = get_source(obj)
+            if source:
+                results.append((source, obj))
+
+            # Process instance variables
+            if hasattr(obj, "__dict__"):
+                for name, value in vars(obj).items():
+                    if not name.startswith("__"):
+                        results.extend(encode_obj(value, seen))
+
+            # Process class variables
+            for name, value in vars(type(obj)).items():
+                if not name.startswith("__"):
+                    results.extend(encode_obj(value, seen))
+
+        return results
+
+    # Generate final hash
+    encoded_items = encode_obj(tokenize_fn)
+    source_concat = "".join(source for source, _ in encoded_items)
+    return hashlib.sha256(source_concat.encode("utf-8")).hexdigest()
 
 
 class JsonlDataset(torch.utils.data.Dataset):
