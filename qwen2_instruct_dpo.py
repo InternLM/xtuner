@@ -20,6 +20,7 @@ from xtuner.engine.runner import TrainLoop
 from xtuner.model.dpo import DPO
 from xtuner.parallel.sequence import SequenceParallelSampler
 from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
+
 #######################################################################
 #                          PART 1  Settings                           #
 #######################################################################
@@ -29,7 +30,7 @@ use_varlen_attn = True
 dpo_loss_type = 'sigmoid'  # One of ['sigmoid', 'hinge', 'ipo', 'kto_pair', 'sppo_hard', 'nca_pair', 'robust']  # noqa: E501
 loss_beta = 0.1
 label_smoothing = 0.0
-
+save_steps = 500
 # Data
 # prompt_template = PROMPT_TEMPLATE.llama3_chat
 prompt_template = PROMPT_TEMPLATE.qwen_chat # llama2_chat
@@ -37,7 +38,7 @@ max_length = 32768
 max_packed_length = max_length
 
 # parallel
-sequence_parallel_size = 2
+sequence_parallel_size = 4
 
 # Scheduler & Optimizer
 batch_size = 1  # per_device
@@ -53,7 +54,6 @@ max_norm = 1  # grad clip
 warmup_ratio = 0.1 # 0.03
 
 # Save
-save_steps = 250
 save_total_limit = -1  # Maximum checkpoints to keep (-1 means unlimited)
 
 # Evaluate the generation performance during the training
@@ -122,8 +122,7 @@ sampler = SequenceParallelSampler \
 
 train_dataset = dict(
     type=build_preference_dataset,
-    dataset=dict(type=load_jsonl_dataset,data_files=["/mnt/gemininjceph2/geminicephfs/pr-others-prctrans/pingbowen/workspace/MCTS_DPO/MCTS-dpo/data/qwen_step_wise_fix_bug/range_2_4k_res_filtered.jsonl","/mnt/gemininjceph2/geminicephfs/pr-others-prctrans/pingbowen/workspace/MCTS_DPO/MCTS-dpo/data/ultrafeedback_binarized.jsonl","/mnt/gemininjceph2/geminicephfs/pr-others-prctrans/pingbowen/workspace/MCTS_DPO/MCTS-dpo/data/qwen_step_wise_fix_bug/range_4_16k_res_filtered.jsonl","/mnt/gemininjceph2/geminicephfs/pr-others-prctrans/pingbowen/workspace/MCTS_DPO/MCTS-dpo/data/qwen_step_wise_fix_bug/range_16_32k_res.jsonl"]),
-    # dataset=dict(type=load_dataset, path='llamafactory/ultrafeedback_binarized'), # mlabonne/orpo-dpo-mix-40k
+    dataset=dict(type=load_jsonl_dataset,data_files=["/mnt/gemininjceph2/geminicephfs/pr-others-prctrans/pingbowen/workspace/LongDPO/MCTS-dpo/data_filter/qwen_step_wise_fix_bug/merged/wild_chat_500_2000_res.jsonl","/mnt/gemininjceph2/geminicephfs/pr-others-prctrans/pingbowen/workspace/LongDPO/MCTS-dpo/data/ultrafeedback_binarized.jsonl","/mnt/gemininjceph2/geminicephfs/pr-others-prctrans/pingbowen/workspace/LongDPO/MCTS-dpo/data_filter/qwen_step_wise_fix_bug/merged/wild_chat_4000_32000.jsonl"]),
     tokenizer=tokenizer,
     max_length=max_length,
     dataset_map_fn=ultrafeedback_dpo_map_fn,

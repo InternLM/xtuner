@@ -31,6 +31,7 @@ class DeepSpeedStrategy(MMEngineDeepSpeedStrategy):
         return wrapper
 
     def save_checkpoint(self, *args, **kwargs) -> None:
+        
         if DS_CEPH_DIR:
             from os import path as osp
             work_dir_prefix = osp.split(self.work_dir)[0]
@@ -41,6 +42,8 @@ class DeepSpeedStrategy(MMEngineDeepSpeedStrategy):
                 super().save_checkpoint(*args, **kwargs)
         else:
             super().save_checkpoint(*args, **kwargs)
+        print(f"------------Finished Save checkpoint ------------------")
+        quit()
 
     def load_checkpoint(self, *args, **kwargs) -> None:
         if DS_CEPH_DIR:

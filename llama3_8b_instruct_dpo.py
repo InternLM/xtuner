@@ -25,7 +25,10 @@ from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-pretrained_model_name_or_path = 'THUDM/LongWriter-llama3.1-8b'
+pretrained_model_name_or_path = '/mnt/gemininjceph2/geminicephfs/pr-others-prctrans/pingbowen/models/LongWriter-llama3.1-8b'
+save_steps = 1000
+lr = 1e-6  # refer to alignment handbook
+
 use_varlen_attn = True
 dpo_loss_type = 'sigmoid'  # One of ['sigmoid', 'hinge', 'ipo', 'kto_pair', 'sppo_hard', 'nca_pair', 'robust']  # noqa: E501
 loss_beta = 0.1
@@ -38,7 +41,7 @@ max_length = 32768
 max_packed_length = max_length
 
 # parallel
-sequence_parallel_size = 2
+sequence_parallel_size = 4
 
 # Scheduler & Optimizer
 batch_size = 1  # per_device
@@ -47,18 +50,16 @@ accumulative_counts *= sequence_parallel_size
 dataloader_num_workers = 0
 max_epochs = 2
 optim_type = AdamW
-lr = 1e-6  # refer to alignment handbook
 betas = (0.9, 0.999)
 weight_decay = 0
 max_norm = 1  # grad clip
 warmup_ratio = 0.1 # 0.03
 
 # Save
-save_steps = 250
 save_total_limit = -1  # Maximum checkpoints to keep (-1 means unlimited)
 
 # Evaluate the generation performance during the training
-evaluation_freq = 500
+evaluation_freq = 90
 SYSTEM = SYSTEM_TEMPLATE.alpaca
 evaluation_inputs = [
     'What famous British author, known for his tales of mystery and the macabre, shares his initials with a common abbreviation for "rest in peace"?',  # noqa: E501
@@ -123,9 +124,8 @@ sampler = SequenceParallelSampler \
 
 train_dataset = dict(
     type=build_preference_dataset,
-    # dataset=dict(type=load_jsonl_dataset,data_files=["/home/pingbowen/workspace/DDPO/DDPO-generate_long/data/dpo_data/longwriter_len_calssify/range_2_4k_res.jsonl","/home/pingbowen/workspace/DDPO/DDPO-generate_long/data/dpo_data/ultrafeedback_binarized.jsonl","/home/pingbowen/workspace/DDPO/DDPO-generate_long/data/dpo_data/longwriter_len_calssify/range_16_32k_res_filter.jsonl"]),
-    dataset=dict(type=load_jsonl_dataset,data_files=["/mnt/gemininjceph2/geminicephfs/pr-others-prctrans/pingbowen/workspace/MCTS_DPO/MCTS-dpo/data/step_wise/range_2_4k_res_new_refined.jsonl","/mnt/gemininjceph2/geminicephfs/pr-others-prctrans/pingbowen/workspace/MCTS_DPO/MCTS-dpo/data/ultrafeedback_binarized.jsonl","/mnt/gemininjceph2/geminicephfs/pr-others-prctrans/pingbowen/workspace/MCTS_DPO/MCTS-dpo/data/step_wise/range_4_16k_res_new.jsonl","/mnt/gemininjceph2/geminicephfs/pr-others-prctrans/pingbowen/workspace/MCTS_DPO/MCTS-dpo/data/step_wise/range_16_32k_res_new.jsonl"]), 
-    # dataset=dict(type=load_jsonl_dataset,data_files=["/home/pingbowen/workspace/DDPO/openr/data/step_wise/range_2_4k_res_new_refined.jsonl","/home/pingbowen/workspace/DDPO/DDPO-generate_long/data/dpo_data/ultrafeedback_binarized.jsonl","/home/pingbowen/workspace/DDPO/openr/data/step_wise/range_4_16k_res_new_refined.jsonl","/home/pingbowen/workspace/DDPO/openr/data/step_wise/range_16_32k_res_new.jsonl"])
+    dataset=dict(type=load_jsonl_dataset,data_files=["/mnt/gemininjceph2/geminicephfs/pr-others-prctrans/pingbowen/workspace/LongDPO/MCTS-dpo/data/loss_ablation/llama/wild_chat_500_2000_res.jsonl","/mnt/gemininjceph2/geminicephfs/pr-others-prctrans/pingbowen/workspace/LongDPO/MCTS-dpo/data/ultrafeedback_binarized.jsonl","/mnt/gemininjceph2/geminicephfs/pr-others-prctrans/pingbowen/workspace/LongDPO/MCTS-dpo/data/loss_ablation/llama/wild_chat_4000_32000_res.jsonl"]),
+    # dataset=dict(type=load_jsonl_dataset,data_files=["/mnt/gemininjceph2/geminicephfs/pr-others-prctrans/pingbowen/workspace/MCTS_DPO/MCTS-dpo/data/step_wise/range_2_4k_res_new_refined.jsonl","/mnt/gemininjceph2/geminicephfs/pr-others-prctrans/pingbowen/workspace/MCTS_DPO/MCTS-dpo/data/ultrafeedback_binarized.jsonl","/mnt/gemininjceph2/geminicephfs/pr-others-prctrans/pingbowen/workspace/MCTS_DPO/MCTS-dpo/data/step_wise/range_4_16k_res_new.jsonl","/mnt/gemininjceph2/geminicephfs/pr-others-prctrans/pingbowen/workspace/MCTS_DPO/MCTS-dpo/data/step_wise/range_16_32k_res_new.jsonl"]), 
     # dataset=dict(type=load_dataset, path='llamafactory/ultrafeedback_binarized'), # mlabonne/orpo-dpo-mix-40k
     tokenizer=tokenizer,
     max_length=max_length,
