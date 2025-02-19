@@ -1,5 +1,5 @@
 from xtuner._lite.patches.base import PatchedCausalLM, FSDPConfig, ModelConfig, HFCheckpointLoader, lazy_init_fn, clip_grad_norm_
-
+from xtuner._lite.patches.mixins import GenerateMixin
 from xtuner._lite.patches.utils import pad_to_multiple_of, pad_to_max_length
 from typing import Callable, Optional, Tuple, TypedDict, Union, List
 import types
@@ -28,7 +28,7 @@ from transformers.utils import logging
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from xtuner._lite.accelerate import liger_kernel_is_available
 from xtuner._lite.chat import HybridChatTemplate
-
+from flash_attn import flash_attn_with_kvcache
 from xtuner._lite.parallel.sequence import (
     pre_process_for_sequence_parallel_attn, post_process_for_sequence_parallel_attn,
     split_for_sequence_parallel)
@@ -60,8 +60,104 @@ def all_to_all(
     return torch.cat(output_list, dim=gather_dim).contiguous()
 
 
-class CUDAPatchedLlamaForCausalLM(PatchedCausalLM):
+class FlashAttentionKwargs(TypedDict, total=False):
+    """
+    Keyword arguments for Flash Attention with Compile.
+
+    Attributes:
+        cu_seq_lens_q (`torch.LongTensor`, *optional*)
+            Gets cumlative sequence length for query state.
+        cu_seq_lens_k (`torch.LongTensor`, *optional*)
+            Gets cumlative sequence length for key state.
+        max_length_q (`int`, *optional*):
+            Maximum sequence length for query state.
+        max_length_k (`int`, *optional*):
+            Maximum sequence length for key state.
+    """
+
+    cu_seq_lens_q: Optional[torch.LongTensor]
+    cu_seq_lens_k: Optional[torch.LongTensor]
+    max_length_q: Optional[int]
+    max_length_k: Optional[int]
+    block_table: Optional[torch.Tensor]
+    prefilling: Optional[bool]
+
+@torch.library.custom_op('xtuner::fill_paged_kv_cache', mutates_args=())
+def fill_paged_kv_cache(
+    key_states: torch.Tensor,
+    value_states: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    cu_seq_lens_q: torch.Tensor,
+    cu_seq_lens_k: torch.Tensor,
+    max_length_q: int,
+    max_length_k: int,
+    block_table: torch.Tensor,
+)-> None:
+    bs = block_table.size(0)
+    from lmdeploy.pytorch.kernels import fill_kv_cache
+        
+    fill_kv_cache(
+        key_states.transpose(1, 2)[:, :cu_seq_lens_k[bs]],
+        value_states.transpose(1, 2)[:, :cu_seq_lens_k[bs]],
+        key_cache,
+        value_cache,
+        cu_seq_lens_q[:bs],   # q_start_loc
+        cu_seq_lens_q[1:bs+1] - cu_seq_lens_q[:bs],  # q_seq_length
+        kv_seq_length=cu_seq_lens_k[1:bs+1] - cu_seq_lens_k[:bs], 
+        max_q_seq_length=max_length_q,
+        block_offsets=block_table,
+    )
+
+@fill_paged_kv_cache.register_fake
+def fill_paged_kv_cache_fake(
+    key_states: torch.Tensor,
+    value_states: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    cu_seq_lens_q: torch.Tensor,
+    cu_seq_lens_k: torch.Tensor,
+    max_length_q: int,
+    max_length_k: int,
+    block_table: torch.Tensor,
+)-> None:
+    return None
+
+@torch.library.custom_op('xtuner::paged_attention_decoding', mutates_args=())
+def paged_attention_decoding(
+    query_states: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    cache_seqlens: torch.Tensor,
+    block_table: torch.Tensor,
+) -> torch.Tensor:  
+    bs = block_table.size(0)
+    attn_outputs = flash_attn_with_kvcache(
+        query_states.transpose(1,2).transpose(0,1)[:bs],
+        key_cache,
+        value_cache,
+        cache_seqlens=cache_seqlens,
+        block_table=block_table,
+        causal=True
+    )
+    return attn_outputs
+
+@paged_attention_decoding.register_fake
+def paged_attention_decoding_fake(
+    query_states: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    cache_seqlens: torch.Tensor,
+    block_table: torch.Tensor,
+):  
+    bs = block_table.size(0)
+    return torch.empty_like(query_states.transpose(1,2).transpose(0,1)[:bs])
+
+
+
+class CUDAPatchedLlamaForCausalLM(PatchedCausalLM, GenerateMixin):
     device_type = 'cuda'
+    rotary_emb_cls = LlamaRotaryEmbedding
     attn_cls = LlamaAttention
     norm_cls = LlamaRMSNorm
     layer_cls = LlamaDecoderLayer
@@ -177,7 +273,7 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM):
 
     @classmethod
     def dispatch_hf_code(cls, model) -> LlamaForCausalLM:
-
+        
         for name, module in model.named_modules():
             if isinstance(module, cls.attn_cls):
                 module.forward = types.MethodType(cls.patched_attn_forward, module)
@@ -185,9 +281,7 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM):
                 module.forward = types.MethodType(cls.patched_casual_forward, module)
             if isinstance(module, cls.layer_cls):
                 module.forward = types.MethodType(cls.patched_layer_forward, module)
-            if isinstance(module, cls.norm_cls):
-                module.forward = types.MethodType(cls.patched_rms_norm_forward, module)
-
+           
         return model
     
     def fully_shard(self, fsdp_config: FSDPConfig) -> None:
@@ -259,20 +353,21 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM):
             param_dtype=fsdp_config.param_dtype,
             reduce_dtype=fsdp_config.reduce_dtype)
 
-        self.patched_model.model.rotary_emb = LlamaRotaryEmbedding(self.patched_model.config)
+        self.patched_model.model.rotary_emb = self.rotary_emb_cls(self.patched_model.config)
 
         num_recompute_layers = int(self.model_config.num_hidden_layers * fsdp_config.recompute_ratio)
         
+        from torch.distributed._symmetric_memory import enable_symm_mem_for_group
+        torch._inductor.config._micro_pipeline_tp = True
+        enable_symm_mem_for_group(self.tp_mesh.get_group().group_name)
+
         if fsdp_config.torch_compile:
             compiled_layers = []
-
-            from torch.distributed._symmetric_memory import enable_symm_mem_for_group
-            torch._inductor.config._micro_pipeline_tp = True
-            enable_symm_mem_for_group(self.tp_mesh.get_group().group_name)
 
         for layer in tqdm(self.patched_model.model.layers):
             
             layer.apply(param_init_fn)
+           
             attention = layer.self_attn
             
             if tp_mesh.size() > 1:
@@ -340,7 +435,56 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM):
         hidden_states: torch.Tensor,
         position_embeddings: Tuple[torch.Tensor, torch.Tensor],
         attention_mask: Optional[torch.Tensor],
+        position_ids: Optional[torch.LongTensor] = None,
+        output_attentions: Optional[bool] = False,
         past_key_value: Optional[Cache] = None,
+        use_cache: Optional[bool] = True,
+        cache_position: Optional[torch.LongTensor] = None,
+        sequence_parallel_mesh: Optional[DeviceMesh] = None,
+        **kwargs: Unpack[FlashAttentionKwargs],
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        if 'block_table' in kwargs and kwargs['block_table'] is not None:
+            # generating
+            if 'prefilling' in kwargs and kwargs['prefilling']:
+                return CUDAPatchedLlamaForCausalLM.patched_attn_prefilling(
+                    self, 
+                    hidden_states=hidden_states, position_embeddings=position_embeddings,
+                    attention_mask=attention_mask, past_key_value=past_key_value, 
+                    position_ids=position_ids,
+                    cache_position=cache_position, output_attentions=output_attentions,
+                    sequence_parallel_mesh=sequence_parallel_mesh, 
+                    **kwargs
+                )
+            else:
+                return CUDAPatchedLlamaForCausalLM.patched_attn_decoding(
+                    self, 
+                    hidden_states=hidden_states, position_embeddings=position_embeddings,
+                    attention_mask=attention_mask, past_key_value=past_key_value, 
+                    position_ids=position_ids,
+                    cache_position=cache_position, output_attentions=output_attentions,
+                    sequence_parallel_mesh=sequence_parallel_mesh, 
+                    **kwargs
+                )
+        else:
+            return CUDAPatchedLlamaForCausalLM.patched_attn_forward_training(
+                    self, 
+                    hidden_states=hidden_states, position_embeddings=position_embeddings,
+                    attention_mask=attention_mask, past_key_value=past_key_value, 
+                    position_ids=position_ids,
+                    cache_position=cache_position, output_attentions=output_attentions,
+                    sequence_parallel_mesh=sequence_parallel_mesh, 
+                    **kwargs
+                )
+
+    @staticmethod
+    def patched_attn_forward_training(
+        self: LlamaAttention,
+        hidden_states: torch.Tensor,
+        position_embeddings: Tuple[torch.Tensor, torch.Tensor],
+        attention_mask: Optional[torch.Tensor],
+        position_ids: Optional[torch.Tensor]=None,
+        past_key_value: Optional[Cache] = None,
+        output_attentions: Optional[bool] = False,
         cache_position: Optional[torch.LongTensor] = None,
         sequence_parallel_mesh: Optional[DeviceMesh] = None,
         **kwargs: Unpack[FlashAttentionKwargs],
@@ -361,7 +505,7 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM):
 
         attention_interface: Callable = eager_attention_forward
         if self.config._attn_implementation != "eager":
-            if self.config._attn_implementation == "sdpa" and kwargs.get("output_attentions", False):
+            if self.config._attn_implementation == "sdpa" and output_attentions:
                 logger.warning_once(
                     "`torch.nn.functional.scaled_dot_product_attention` does not support `output_attentions=True`. Falling back to "
                     'eager attention. This warning can be removed using the argument `attn_implementation="eager"` when loading the model.'
@@ -370,8 +514,6 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM):
                 attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
 
         if sequence_parallel_mesh and sequence_parallel_mesh.size() > 1:
-            
-
             sp_size = sequence_parallel_mesh.size()
             num_kv_heads = key_states.size(1)
             if sp_size > num_kv_heads:
@@ -393,6 +535,7 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM):
             attention_mask,
             dropout=0.0 if not self.training else self.attention_dropout,
             scaling=self.scaling,
+            position_ids=position_ids,
             **kwargs,
         )
 
@@ -402,9 +545,176 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM):
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)
         return attn_output, attn_weights
+    
+
+    @staticmethod
+    def patched_attn_prefilling(
+        self: LlamaAttention,
+        hidden_states: torch.Tensor,
+        position_embeddings: Tuple[torch.Tensor, torch.Tensor],
+        attention_mask: Optional[torch.Tensor],
+        position_ids: Optional[torch.Tensor] = None,
+        output_attentions: Optional[bool] = False,
+        past_key_value: Optional[Cache] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        sequence_parallel_mesh: Optional[DeviceMesh] = None,
+        **kwargs: Unpack[FlashAttentionKwargs],
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+
+        input_shape = hidden_states.shape[:-1]
+        hidden_shape = (*input_shape, -1, self.head_dim)
+
+        query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+
+        cos, sin = position_embeddings
+        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+
+        fill_paged_kv_cache(
+            key_states,
+            value_states,
+            past_key_value[self.layer_idx][0],
+            past_key_value[self.layer_idx][1],
+            kwargs['cu_seq_lens_q'],   
+            kwargs['cu_seq_lens_k'], 
+            kwargs['max_length_q'],
+            kwargs['max_length_k'],
+            kwargs['block_table'],
+        )
+        
+        assert self.config._attn_implementation == 'flash_attention_2'
+        attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+        
+        attn_output, attn_weights = attention_interface(
+            self,
+            query_states,
+            key_states,
+            value_states,
+            attention_mask,
+            dropout=0.0 if not self.training else self.attention_dropout,
+            scaling=self.scaling,
+            position_ids=position_ids,
+            **kwargs,
+        )
+
+        attn_output = attn_output.reshape(*input_shape, -1).contiguous()
+        attn_output = self.o_proj(attn_output)
+        return attn_output, attn_weights
+
+    @staticmethod
+    def patched_attn_decoding(
+        self: LlamaAttention,
+        hidden_states: torch.Tensor,
+        position_embeddings: Tuple[torch.Tensor, torch.Tensor],
+        attention_mask: Optional[torch.Tensor],
+        output_attentions: Optional[bool] = False,
+        past_key_value: Optional[Cache] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        sequence_parallel_mesh: Optional[DeviceMesh] = None,
+        **kwargs: Unpack[FlashAttentionKwargs],
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+
+        input_shape = hidden_states.shape[:-1]
+        hidden_shape = (*input_shape, -1, self.head_dim)
+
+        query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+
+        cos, sin = position_embeddings
+        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+        
+        seq_lens_k = kwargs["cu_seq_lens_k"][1:] - kwargs["cu_seq_lens_k"][:-1]
+        block_table = kwargs["block_table"]
+        block_size = past_key_value[self.layer_idx][0].size(1)
+        bs = block_table.size(0)
+        assert kwargs["cu_seq_lens_k"].numel() - 1 == bs
+
+        _key_states = key_states.transpose(1,2).squeeze(0)
+        _value_states = value_states.transpose(1,2).squeeze(0)
+
+        block_index = block_table[:, 0] + (seq_lens_k[:bs] - 1) // block_size
+        past_key_value[self.layer_idx][0][block_index, (seq_lens_k[:bs] - 1) % block_size ] = _key_states
+        past_key_value[self.layer_idx][1][block_index,  (seq_lens_k[:bs] - 1) % block_size ] = _value_states
+        
+        assert self.config._attn_implementation == 'flash_attention_2'
+        
+
+        attn_weights = None
+        
+        attn_output = paged_attention_decoding(
+            query_states,
+            past_key_value[self.layer_idx][0],
+            past_key_value[self.layer_idx][1],
+            kwargs["cu_seq_lens_k"][1:] - kwargs["cu_seq_lens_k"][:-1],
+            block_table,
+        )
+        
+        attn_output = attn_output.reshape(*input_shape, -1)
+        attn_output = self.o_proj(attn_output)
+        return attn_output, attn_weights
+    
 
     @staticmethod
     def patched_layer_forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_value: Optional[Cache] = None,
+        output_attentions: Optional[bool] = False,
+        use_cache: Optional[bool] = False,
+        cache_position: Optional[torch.LongTensor] = None,
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # necessary, but kept here for BC
+        **kwargs: Unpack[FlashAttentionKwargs],
+    ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
+       
+        if 'block_table' in kwargs and kwargs['block_table'] is not None:   
+            if 'prefilling' in kwargs and kwargs['prefilling']:
+                return CUDAPatchedLlamaForCausalLM.patched_layer_forward_training(
+                    self,
+                    hidden_states = hidden_states,
+                    attention_mask = attention_mask,
+                    position_ids = position_ids,
+                    past_key_value = past_key_value,
+                    output_attentions = output_attentions,
+                    use_cache = use_cache,
+                    cache_position = cache_position,
+                    position_embeddings = position_embeddings,
+                    **kwargs
+                )
+            else:
+                return CUDAPatchedLlamaForCausalLM.patched_layer_forward_decoding(
+                    self,
+                    hidden_states = hidden_states,
+                    attention_mask = attention_mask,
+                    position_ids = position_ids,
+                    past_key_value = past_key_value,
+                    output_attentions = output_attentions,
+                    use_cache = use_cache,
+                    cache_position = cache_position,
+                    position_embeddings = position_embeddings,
+                    **kwargs
+                )
+        else:
+            return CUDAPatchedLlamaForCausalLM.patched_layer_forward_training(
+                    self,
+                    hidden_states = hidden_states,
+                    attention_mask = attention_mask,
+                    position_ids = position_ids,
+                    past_key_value = past_key_value,
+                    output_attentions = output_attentions,
+                    use_cache = use_cache,
+                    cache_position = cache_position,
+                    position_embeddings = position_embeddings,
+                    **kwargs
+                )
+
+
+    @staticmethod
+    # @torch.compile(fullgraph=True)
+    def patched_layer_forward_training(
         self,
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
@@ -446,6 +756,50 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM):
 
         return outputs
     
+
+    @staticmethod
+    @torch.compile(fullgraph=True)
+    def patched_layer_forward_decoding(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_value: Optional[Cache] = None,
+        output_attentions: Optional[bool] = False,
+        use_cache: Optional[bool] = False,
+        cache_position: Optional[torch.LongTensor] = None,
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # necessary, but kept here for BC
+        **kwargs: Unpack[FlashAttentionKwargs],
+    ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
+
+        residual = hidden_states
+        hidden_states = self.input_layernorm(hidden_states)
+        
+        # Self Attention
+        hidden_states, self_attn_weights = self.self_attn(
+            hidden_states,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_value=past_key_value,
+            output_attentions=output_attentions,
+            use_cache=use_cache,
+            cache_position=cache_position,
+            position_embeddings=position_embeddings,
+            **kwargs,
+        )
+        hidden_states = residual + hidden_states
+
+        # Fully Connected
+        residual = hidden_states
+        hidden_states = self.post_attention_layernorm(hidden_states)
+        hidden_states = self.mlp(hidden_states)
+        hidden_states = residual + hidden_states
+
+        outputs = (hidden_states,)
+        if output_attentions:
+            outputs += (self_attn_weights,)
+
+        return outputs
 
     @staticmethod
     def patched_casual_forward(

@@ -27,6 +27,9 @@ from torch.utils._foreach_utils import (
 )
 
 from xtuner._lite import get_torch_device_module
+from xtuner._lite import get_logger
+
+logger = get_logger()
 
 DEVICE_MODULE = get_torch_device_module()
 
@@ -179,6 +182,10 @@ class HFCheckpointLoader():
     
     def load(self, key):
 
+        if key not in self.weight_map:
+            logger.warning(f'{key} not in checkpoint.')
+            return
+
         _file = self.weight_map[key]
 
         if self.use_safetensors:
@@ -225,14 +232,31 @@ def lazy_init_fn(module, module2name, checkpoint_loader):
 
     for name, param in module.named_parameters(recurse=False):
         dtype = param.dtype
+
+        if params[name] is None:
+            continue
+
         _param = params[name].to(device).to(dtype)
         
-        param.data.copy_(_param)
+        if param.shape == _param.shape:
+            param.data.copy_(_param)
+        else:
+            logger.warning(f'The shape of {module_name}.{name}({param.shape}) '
+                           f'is inconsistent with that in the checkpoint({_param.shape}), '
+                           'it is initialized to 0 by default.')
+            param.data.zero_()
 
     for name, buffer in module.named_buffers(recurse=False):
         if name in buffers:
             _buffer = buffers[name].to(device).to(buffer.dtype)
-            buffer.data.copy_(_buffer)
+
+            if buffer.shape == _buffer.shape:
+                buffer.data.copy_(_buffer)
+            else:
+                logger.warning(f'The shape of {module_name}.{name}({buffer.shape}) '
+                           f'is inconsistent with that in the checkpoint({_buffer.shape}), '
+                           'it is initialized to 0 by default.')
+                buffer.data.zero_()
             
 @dataclass
 class FSDPConfig:

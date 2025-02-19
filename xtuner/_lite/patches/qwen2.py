@@ -1,7 +1,7 @@
-from xtuner._lite.patches.llama import CUDAPatchedLlamaForCausalLM
+from xtuner._lite.patches.llama import CUDAPatchedLlamaForCausalLM, all_to_all
 from xtuner._lite.patches.base import FSDPConfig, ModelConfig
 from xtuner._lite.chat import HybridChatTemplate
-from transformers.models.qwen2.modeling_qwen2 import Qwen2Attention, Qwen2DecoderLayer, Qwen2ForCausalLM, apply_rotary_pos_emb, eager_attention_forward, repeat_kv
+from transformers.models.qwen2.modeling_qwen2 import Qwen2RotaryEmbedding, Qwen2Attention,  Qwen2RMSNorm, Qwen2DecoderLayer, Qwen2ForCausalLM, apply_rotary_pos_emb, eager_attention_forward, repeat_kv
 
 
 from typing import Callable, Optional, Tuple
@@ -19,17 +19,17 @@ from transformers.utils import logging
 
 from xtuner._lite.chat import HybridChatTemplate
 
-from xtuner._lite.parallel.sequence import (
-    pre_process_for_sequence_parallel_attn, post_process_for_sequence_parallel_attn)
 
 logger = logging.get_logger(__name__)
 
 
 class CUDAPatchedQwen2ForCausalLM(CUDAPatchedLlamaForCausalLM):
 
+    rotary_emb_cls = Qwen2RotaryEmbedding
     attn_cls = Qwen2Attention
     layer_cls = Qwen2DecoderLayer
     causal_cls = Qwen2ForCausalLM
+    norm_cls = Qwen2RMSNorm
 
     chat_template = HybridChatTemplate(
         system='<|im_start|>system\n{system}<|im_end|>\n',
@@ -56,6 +56,61 @@ class CUDAPatchedQwen2ForCausalLM(CUDAPatchedLlamaForCausalLM):
 
     @staticmethod
     def patched_attn_forward(
+        self: Qwen2Attention,
+        hidden_states: torch.Tensor,
+        position_embeddings: Tuple[torch.Tensor, torch.Tensor],
+        attention_mask: Optional[torch.Tensor],
+        position_ids: Optional[torch.LongTensor] = None,
+        output_attentions: Optional[bool] = False,
+        past_key_value: Optional[Cache] = None,
+        use_cache: Optional[bool] = False,
+        cache_position: Optional[torch.LongTensor] = None,
+        sequence_parallel_mesh: Optional[DeviceMesh] = None,
+        **kwargs: Unpack[FlashAttentionKwargs],
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        
+        if 'block_table' in kwargs and kwargs['block_table'] is not None:
+            if (
+                self.config.use_sliding_window
+                and getattr(self.config, "sliding_window", None) is not None
+                and self.layer_idx >= self.config.max_window_layers
+            ):
+                raise NotImplementedError
+
+            # generating
+            if 'prefilling' in kwargs and kwargs['prefilling']:
+                return CUDAPatchedLlamaForCausalLM.patched_attn_prefilling(
+                    self, 
+                    hidden_states=hidden_states, position_embeddings=position_embeddings,
+                    attention_mask=attention_mask, past_key_value=past_key_value,
+                    position_ids=position_ids, 
+                    cache_position=cache_position, output_attentions=output_attentions,
+                    sequence_parallel_mesh=sequence_parallel_mesh, 
+                    **kwargs
+                )
+            else:
+                return CUDAPatchedLlamaForCausalLM.patched_attn_decoding(
+                    self, 
+                    hidden_states=hidden_states, position_embeddings=position_embeddings,
+                    attention_mask=attention_mask, past_key_value=past_key_value, 
+                    position_ids=position_ids,
+                    cache_position=cache_position, output_attentions=output_attentions,
+                    sequence_parallel_mesh=sequence_parallel_mesh, 
+                    **kwargs
+                )
+        else:
+            return CUDAPatchedQwen2ForCausalLM.patched_attn_forward_training(
+                    self, 
+                    hidden_states=hidden_states, position_embeddings=position_embeddings,
+                    attention_mask=attention_mask, past_key_value=past_key_value, 
+                    position_ids=position_ids,
+                    cache_position=cache_position, output_attentions=output_attentions,
+                    sequence_parallel_mesh=sequence_parallel_mesh, 
+                    **kwargs
+                )
+
+    @staticmethod
+    def patched_attn_forward_training(
         self: Qwen2Attention,
         hidden_states: torch.Tensor,
         position_embeddings: Tuple[torch.Tensor, torch.Tensor],
@@ -98,65 +153,16 @@ class CUDAPatchedQwen2ForCausalLM(CUDAPatchedLlamaForCausalLM):
                 attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
 
         if sequence_parallel_mesh and sequence_parallel_mesh.size() > 1:
-            
-            
-            # bs, qh, n_div_sp, d = query_states.shape
-            # _, kvh, n_div_sp, d = key_states.shape
-            
-            # assert bs == 1
-            # sp = sequence_parallel_mesh.size()
-            # n = n_div_sp * sp
-            # # (b, n // sp, qh, d) 
-            # query_states = query_states.transpose(1,2)
-            # key_states = key_states.transpose(1,2)
-            # value_states = value_states.transpose(1,2)
+            sp_size = sequence_parallel_mesh.size()
+            num_kv_heads = key_states.size(1)
+            if sp_size > num_kv_heads:
+                assert sp_size % num_kv_heads == 0
+                key_states = repeat_kv(key_states, sp_size // num_kv_heads)
+                value_states = repeat_kv(value_states, sp_size // num_kv_heads)
 
-            # # (qh, b * n // sp, d) 
-            # query_states = query_states.flatten(0, 1).transpose(0,1).contiguous()
-            # key_states = key_states.flatten(0, 1).transpose(0,1).contiguous()
-            # value_states = value_states.flatten(0, 1).transpose(0,1).contiguous()
-
-            # # (qh, b * n // sp, d) 
-            # _query_states = query_states.new_empty(qh, bs * n // sp, d)
-            # # (kvh, b * n // sp, d) 
-            # _key_states = key_states.new_empty(kvh, bs * n // sp, d)
-            # _value_states = value_states.new_empty(kvh, bs * n // sp, d)
-
-            # # (qh, b * n // sp, d) 
-            # _query_states = dist.nn.all_to_all_single(
-            #     _query_states, query_states, group=sequence_parallel_mesh.get_group())
-            # # (kvh, b * n // sp, d) 
-            # _key_states = dist.nn.all_to_all_single(
-            #     _key_states, key_states, group=sequence_parallel_mesh.get_group())
-            # # (kvh, b * n // sp, d) 
-            # _value_states = dist.nn.all_to_all_single(
-            #     _value_states, value_states, group=sequence_parallel_mesh.get_group())
-            
-            # # (sp, qh // sp, b*n // sp, d)
-            # _query_states = _query_states.view(sp, qh // sp, bs* n // sp, d)
-            # # (sp, kvh // sp, b*n // sp, d)
-            # _key_states = _key_states.view(sp, kvh // sp, bs * n // sp, d)
-            # _value_states = _value_states.view(sp, kvh // sp, bs * n // sp, d)
-            
-            # query_states = _query_states.transpose(1,2).reshape(bs, n, qh // sp, d).transpose(1,2)
-            # key_states = _key_states.transpose(1,2).reshape(bs, n, kvh // sp, d).transpose(1,2)
-            # value_states = _value_states.transpose(1,2).reshape(bs, n, kvh // sp, d).transpose(1,2)
-            
-            # different from LlamaAttention.forward
-            key_states = repeat_kv(key_states, self.num_key_value_groups)
-            value_states = repeat_kv(value_states, self.num_key_value_groups)
-
-            query_states = query_states.transpose(1,2)
-            key_states = key_states.transpose(1,2)
-            value_states = value_states.transpose(1,2)
-
-            query_states, key_states, value_states = pre_process_for_sequence_parallel_attn(
-                query_states, key_states, value_states, sequence_parallel_mesh
-            )
-
-            query_states = query_states.transpose(1,2)
-            key_states = key_states.transpose(1,2)
-            value_states = value_states.transpose(1,2)
+            query_states = all_to_all(query_states, scatter_dim=1, gather_dim=2,  mesh=sequence_parallel_mesh)
+            key_states = all_to_all(key_states, scatter_dim=1, gather_dim=2,  mesh=sequence_parallel_mesh)
+            value_states = all_to_all(value_states, scatter_dim=1, gather_dim=2,  mesh=sequence_parallel_mesh)
 
         # (bs, n , qh // sp, d)
         attn_output, attn_weights = attention_interface(
@@ -172,25 +178,108 @@ class CUDAPatchedQwen2ForCausalLM(CUDAPatchedLlamaForCausalLM):
         )
 
         if sequence_parallel_mesh and sequence_parallel_mesh.size() > 1:
-            # # (bs * n , qh // sp, d)
-            # attn_output = attn_output.flatten(0, 1).contiguous()
-            # # (bs * n, qh // sp, d)
-            # _attn_output = attn_output.new_empty(bs * n, qh // sp, d)
-
-            # # (bs * n, qh // sp, d)
-            # attn_output = dist.nn.all_to_all_single(
-            #     _attn_output, attn_output, group=sequence_parallel_mesh.get_group())
-
-            # # (sp, bs * n // sp, qh // sp, d)
-            # attn_output = attn_output.view(sp, bs * n_div_sp, qh // sp, d)
-            # # (bs * n // sp, sp, qh // sp, d)
-            # attn_output = attn_output.transpose(0, 1)
-            attn_output = post_process_for_sequence_parallel_attn(
-                attn_output, sequence_parallel_mesh
-            )
+            attn_output = all_to_all(attn_output, scatter_dim=1, gather_dim=2, mesh=sequence_parallel_mesh)
+           
 
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)
         return attn_output, attn_weights
 
+
+
+if __name__ == '__main__':
+
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from xtuner._lite.parallel import setup_parallel
+    from xtuner._lite.patches import FSDPConfig, AutoPatch
+    
+    torch._dynamo.config.cache_size_limit = 16384 
+    setup_parallel()
+    
+    with torch.device('meta'):
+        model = AutoModelForCausalLM.from_pretrained(
+            'Qwen/Qwen2.5-7B-Instruct',
+            attn_implementation='flash_attention_2',
+        )
+
+        # model.lm_head = torch.nn.Linear(model.config.hidden_size, 1)
+
+    tokenizer = AutoTokenizer.from_pretrained('Qwen/Qwen2.5-32B-Instruct')
+    fsdp_config = FSDPConfig(reshard_after_forward=False, torch_compile=False, tp_size=4)
+    patched_model = AutoPatch.from_causal_lm(model, fsdp_config)
+
+    prompts = [
+        '<|im_start|>user\n陈金山同志在上海市委有什么突出贡献？<|im_end|>\n<|im_start|>assistant\n',
+        '<|im_start|>user\n我的前任男友伤害了我，我想报复他，但我不知道应该采取什么措施来打击他。<|im_end|>\n<|im_start|>assistant\n'
+    ] * 32
+
+    # prompts = ['Hello'] * 256
+
+    input_ids = [tokenizer.encode(prompt, return_tensors="pt").cuda() for prompt in prompts]
+    import time
+    from xtuner._lite import get_logger
+    logger = get_logger()
+    start = time.time()
+    patched_model.eval()
+    import torch
+    torch.manual_seed(42)
+
+    from torch.profiler import ProfilerActivity, profile, record_function
+    
+    response = patched_model.generate(
+        input_ids,
+        stop_token_ids=[151645, 151643],
+        max_batch_size=len(prompts),
+        max_prefill_batch=len(prompts),
+        max_new_tokens=1024,
+        max_length=1024 + 256,
+        cuda_graph=True,
+        do_sample=True
+    )
+    for res in response:
+        logger.info(tokenizer.decode(res))
+
+    logger.info(time.time() - start)
+
+    start = time.time()
+    response = patched_model.generate(
+        input_ids,
+        stop_token_ids=[], #[151645, 151643],
+        max_batch_size=len(prompts),
+        max_prefill_batch=len(prompts),
+        max_new_tokens=512,
+        max_length=1024 + 256,
+        cuda_graph=True,
+        do_sample=True
+    )
+    logger.info(time.time() - start)
+
+
+    # start = time.time()
+    # patched_model.eval()
+    
+    from torch.profiler import ProfilerActivity, profile, record_function
+    with profile(
+            record_shapes=True,
+            profile_memory=True,
+            activities=[
+                    ProfilerActivity.CPU, ProfilerActivity.CUDA
+            ]) as prof:
+        response = patched_model.generate(
+            input_ids,
+            stop_token_ids=[], #[151645, 151643],
+            max_batch_size=len(prompts),
+            max_prefill_batch=len(prompts),
+            max_new_tokens=3,
+            max_length=1024 + 256,
+            cuda_graph=True,
+            do_sample=False
+        )
+
+
+    prof.export_chrome_trace(f'xpuyu_tp4_{torch.distributed.get_rank()}.json')
+    # for res in response:
+    #     logger.info(tokenizer.decode(res))
+
+    # logger.info(time.time() - start)
 
