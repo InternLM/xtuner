@@ -5,6 +5,7 @@ import math
 import os
 import random
 from concurrent.futures import ProcessPoolExecutor
+import multiprocessing
 from mmengine import mkdir_or_exist
 import numpy as np
 import torch
@@ -154,7 +155,8 @@ class JsonlDataset(torch.utils.data.Dataset):
         desc = f'[Rank {rank}] {self.path}'
         chunk_size = min(1024, max(1, len(offsets_shard) // self.tokenizer_workers))
         
-        with ProcessPoolExecutor(max_workers=self.tokenizer_workers) as executor:
+        mp_context = multiprocessing.get_context('fork')
+        with ProcessPoolExecutor(max_workers=self.tokenizer_workers, mp_context=mp_context) as executor:
             tokenized = list(
                 tqdm(
                     executor.map(
