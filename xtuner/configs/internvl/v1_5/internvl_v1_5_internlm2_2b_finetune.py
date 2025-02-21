@@ -1,6 +1,11 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
-                            LoggerHook, ParamSchedulerHook)
+from mmengine.hooks import (
+    CheckpointHook,
+    DistSamplerSeedHook,
+    IterTimerHook,
+    LoggerHook,
+    ParamSchedulerHook,
+)
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR, LinearLR
 from torch.optim import AdamW
 from transformers import AutoTokenizer
@@ -17,13 +22,13 @@ from xtuner.utils import PROMPT_TEMPLATE
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-path = 'OpenGVLab/Mini-InternVL-Chat-2B-V1-5'
+path = "OpenGVLab/Mini-InternVL-Chat-2B-V1-5"
 prompt_template = PROMPT_TEMPLATE.internlm2_chat
 
 # Data
-data_root = './data/llava_data/'
-data_path = data_root + 'LLaVA-Instruct-150K/llava_v1_5_mix665k.json'
-image_folder = data_root + 'llava_images'
+data_root = "./data/llava_data/"
+data_path = data_root + "LLaVA-Instruct-150K/llava_v1_5_mix665k.json"
+image_folder = data_root + "llava_images"
 max_length = 8192
 
 # Scheduler & Optimizer
@@ -50,7 +55,7 @@ model = dict(
     type=InternVL_V1_5,
     model_path=path,
     freeze_llm=False,
-    freeze_visual_encoder=True  # or False
+    freeze_visual_encoder=True,  # or False
 )
 
 #######################################################################
@@ -62,7 +67,8 @@ llava_dataset = dict(
     data_paths=data_path,
     image_folders=image_folder,
     template=prompt_template,
-    max_length=max_length)
+    max_length=max_length,
+)
 
 train_dataloader = dict(
     batch_size=batch_size,
@@ -70,9 +76,11 @@ train_dataloader = dict(
     dataset=llava_dataset,
     sampler=dict(
         type=LengthGroupedSampler,
-        length_property='modality_length',
-        per_device_batch_size=batch_size * accumulative_counts),
-    collate_fn=dict(type=default_collate_fn))
+        length_property="modality_length",
+        per_device_batch_size=batch_size * accumulative_counts,
+    ),
+    collate_fn=dict(type=default_collate_fn),
+)
 
 #######################################################################
 #                    PART 4  Scheduler & Optimizer                    #
@@ -80,12 +88,12 @@ train_dataloader = dict(
 # optimizer
 optim_wrapper = dict(
     type=AmpOptimWrapper,
-    optimizer=dict(
-        type=optim_type, lr=lr, betas=betas, weight_decay=weight_decay),
+    optimizer=dict(type=optim_type, lr=lr, betas=betas, weight_decay=weight_decay),
     clip_grad=dict(max_norm=max_norm, error_if_nonfinite=False),
     accumulative_counts=accumulative_counts,
-    loss_scale='dynamic',
-    dtype='float16')
+    loss_scale="dynamic",
+    dtype="float16",
+)
 
 # learning policy
 # More information: https://github.com/open-mmlab/mmengine/blob/main/docs/en/tutorials/param_scheduler.md  # noqa: E501
@@ -96,14 +104,16 @@ param_scheduler = [
         by_epoch=True,
         begin=0,
         end=warmup_ratio * max_epochs,
-        convert_to_iter_based=True),
+        convert_to_iter_based=True,
+    ),
     dict(
         type=CosineAnnealingLR,
         eta_min=0.0,
         by_epoch=True,
         begin=warmup_ratio * max_epochs,
         end=max_epochs,
-        convert_to_iter_based=True)
+        convert_to_iter_based=True,
+    ),
 ]
 
 # train, val, test setting
@@ -116,7 +126,8 @@ train_cfg = dict(type=TrainLoop, max_epochs=max_epochs)
 tokenizer = dict(
     type=AutoTokenizer.from_pretrained,
     pretrained_model_name_or_path=path,
-    trust_remote_code=True)
+    trust_remote_code=True,
+)
 
 custom_hooks = [
     dict(type=DatasetInfoHook, tokenizer=tokenizer),
@@ -136,7 +147,8 @@ default_hooks = dict(
         save_optimizer=False,
         by_epoch=False,
         interval=save_steps,
-        max_keep_ckpts=save_total_limit),
+        max_keep_ckpts=save_total_limit,
+    ),
     # set sampler seed in distributed evrionment.
     sampler_seed=dict(type=DistSamplerSeedHook),
 )
@@ -146,16 +158,16 @@ env_cfg = dict(
     # whether to enable cudnn benchmark
     cudnn_benchmark=False,
     # set multi process parameters
-    mp_cfg=dict(mp_start_method='fork', opencv_num_threads=0),
+    mp_cfg=dict(mp_start_method="fork", opencv_num_threads=0),
     # set distributed parameters
-    dist_cfg=dict(backend='nccl'),
+    dist_cfg=dict(backend="nccl"),
 )
 
 # set visualizer
 visualizer = None
 
 # set log level
-log_level = 'INFO'
+log_level = "INFO"
 
 # load from which checkpoint
 load_from = None

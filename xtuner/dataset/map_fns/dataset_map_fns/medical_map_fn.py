@@ -4,9 +4,11 @@ from xtuner.utils import SYSTEM_TEMPLATE
 
 def medical_map_fn(example):
     return {
-        'conversation': [{
-            'system': SYSTEM_TEMPLATE.medical,
-            'input': '{instruction}\n{input}'.format(**example),
-            'output': example['output']
-        }]
+        "conversation": [
+            {
+                "system": SYSTEM_TEMPLATE.medical,
+                "input": "{instruction}\n{input}".format(**example),
+                "output": example["output"],
+            }
+        ]
     }

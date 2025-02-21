@@ -11,11 +11,12 @@ def pad_for_sequence_parallel(tensor, padding_value, dim=-1):
         return tensor
 
     pad_num = seq_parallel_world_size - (length % seq_parallel_world_size)
-    pad_shape = (*tensor.shape[:dim], pad_num,
-                 *tensor.shape[dim + 1:]) if dim != -1 else (
-                     *tensor.shape[:dim], pad_num)
-    pad = torch.full(
-        pad_shape, padding_value, dtype=tensor.dtype, device=tensor.device)
+    pad_shape = (
+        (*tensor.shape[:dim], pad_num, *tensor.shape[dim + 1 :])
+        if dim != -1
+        else (*tensor.shape[:dim], pad_num)
+    )
+    pad = torch.full(pad_shape, padding_value, dtype=tensor.dtype, device=tensor.device)
     tensor = torch.cat([tensor, pad], dim=dim)
     return tensor
 
@@ -34,13 +35,12 @@ def pad_cumulative_len_for_sequence_parallel(cumulative_len):
     pad_len = seq_parallel_world_size - (seqlen % seq_parallel_world_size)
     seqlen_new = seqlen + pad_len
     attention_mask = torch.zeros(
-        bs, seqlen_new, dtype=torch.bool, device=cumulative_len[0].device)
+        bs, seqlen_new, dtype=torch.bool, device=cumulative_len[0].device
+    )
     attention_mask[:, :seqlen] = True
 
     for i, cu_len in enumerate(cumulative_len):
-        pad = torch.tensor([seqlen_new],
-                           device=cu_len.device,
-                           dtype=cu_len.dtype)
+        pad = torch.tensor([seqlen_new], device=cu_len.device, dtype=cu_len.dtype)
         cumulative_len[i] = torch.cat([cu_len, pad], dim=0)
 
     return cumulative_len, attention_mask

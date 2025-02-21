@@ -1,3 +1,4 @@
+# Copyright (c) OpenMMLab. All rights reserved.
 import logging
 import warnings
 from typing import Iterator, Optional, Sized
@@ -6,19 +7,21 @@ import numpy as np
 from mmengine import print_log
 from torch.utils.data import Sampler
 
-from xtuner.parallel.sequence import (get_data_parallel_rank,
-                                      get_data_parallel_world_size)
+from xtuner.parallel.sequence import (
+    get_data_parallel_rank,
+    get_data_parallel_world_size,
+)
 
 
 class InternRepoSampler(Sampler):
-
-    def __init__(self,
-                 dataset: Sized,
-                 shuffle: bool = True,
-                 seed: Optional[int] = None) -> None:
+    def __init__(
+        self, dataset: Sized, shuffle: bool = True, seed: Optional[int] = None
+    ) -> None:
         if seed is not None and seed != 1024:
-            warnings.warn('For alignment accuracy, seed in InternRepoSampler'
-                          'must be set to 1024.')
+            warnings.warn(
+                "For alignment accuracy, seed in InternRepoSampler"
+                "must be set to 1024."
+            )
         world_size = get_data_parallel_world_size()
         rank = get_data_parallel_rank()
         self.rank = rank
@@ -43,10 +46,10 @@ class InternRepoSampler(Sampler):
         else:
             indices = np.arange(len(self.dataset)).tolist()
 
-        self.indices = indices[:self.total_size]
+        self.indices = indices[: self.total_size]
 
         # subsample
-        indices = indices[self.rank:self.total_size:self.world_size]
+        indices = indices[self.rank : self.total_size : self.world_size]
         self.subsample_indices = indices
 
         return iter(indices)
@@ -69,13 +72,15 @@ class InternRepoSampler(Sampler):
 
 
 class InternlmRepoSampler(InternRepoSampler):
-
-    def __init__(self,
-                 dataset: Sized,
-                 shuffle: bool = True,
-                 seed: Optional[int] = None) -> None:
+    def __init__(
+        self, dataset: Sized, shuffle: bool = True, seed: Optional[int] = None
+    ) -> None:
         super().__init__(dataset, shuffle, seed)
-        print_log(('InternlmRepoSampler will be deprecated in the future.'
-                   'Please use InternRepoSampler instead.'),
-                  logger='current',
-                  level=logging.WARNING)
+        print_log(
+            (
+                "InternlmRepoSampler will be deprecated in the future."
+                "Please use InternRepoSampler instead."
+            ),
+            logger="current",
+            level=logging.WARNING,
+        )

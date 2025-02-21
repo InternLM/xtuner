@@ -22,8 +22,9 @@ def split_for_sequence_parallel(input, dim: int, sp_mesh):
     rank = dist.get_rank(sp_group)
     dim_size = input.size(dim)
     assert dim_size % sp_size == 0, (
-        f'The dimension to split ({dim_size}) is not a multiple of '
-        f'sp size ({sp_size}), cannot split tensor evenly')
+        f"The dimension to split ({dim_size}) is not a multiple of "
+        f"sp size ({sp_size}), cannot split tensor evenly"
+    )
 
     tensor_list = torch.split(input, dim_size // sp_size, dim=dim)
     output = tensor_list[rank].contiguous()
@@ -50,7 +51,7 @@ def gather_for_sequence_parallel(input, dim: int, sp_group: dist.ProcessGroup):
         return input
 
     tensor_list = [torch.empty_like(input) for _ in range(world_size)]
-    assert input.device.type == 'cuda'
+    assert input.device.type == "cuda"
     dist.all_gather(tensor_list, input, group=sp_group)
 
     output = torch.cat(tensor_list, dim=dim).contiguous()
@@ -61,8 +62,7 @@ def gather_for_sequence_parallel(input, dim: int, sp_group: dist.ProcessGroup):
 class _GatherForwardSplitBackward(torch.autograd.Function):
     """Gather the input during forward.
 
-    Scale and split the grad and keep only the corresponding chuck to the rank
-    during backward.
+    Scale and split the grad and keep only the corresponding chuck to the rank during backward.
     """
 
     @staticmethod
@@ -74,13 +74,17 @@ class _GatherForwardSplitBackward(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
-        if ctx.grad_scale == 'up':
+        if ctx.grad_scale == "up":
             grad_output = grad_output * dist.get_world_size(ctx.sp_group)
-        elif ctx.grad_scale == 'down':
+        elif ctx.grad_scale == "down":
             grad_output = grad_output / dist.get_world_size(ctx.sp_group)
 
-        return (split_for_sequence_parallel(grad_output, ctx.dim,
-                                            ctx.sp_group), None, None, None)
+        return (
+            split_for_sequence_parallel(grad_output, ctx.dim, ctx.sp_group),
+            None,
+            None,
+            None,
+        )
 
 
 class _SplitForwardGatherBackward(torch.autograd.Function):
@@ -99,12 +103,16 @@ class _SplitForwardGatherBackward(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
-        if ctx.grad_scale == 'up':
+        if ctx.grad_scale == "up":
             grad_output = grad_output * dist.get_world_size(ctx.sp_group)
-        elif ctx.grad_scale == 'down':
+        elif ctx.grad_scale == "down":
             grad_output = grad_output / dist.get_world_size(ctx.sp_group)
-        return (gather_for_sequence_parallel(grad_output, ctx.dim,
-                                             ctx.sp_group), None, None, None)
+        return (
+            gather_for_sequence_parallel(grad_output, ctx.dim, ctx.sp_group),
+            None,
+            None,
+            None,
+        )
 
 
 def split_forward_gather_backward(input, dim, sp_group, grad_scale=None):

@@ -1,3 +1,4 @@
+# Copyright (c) OpenMMLab. All rights reserved.
 from abc import abstractclassmethod, abstractmethod
 from typing import Dict
 
@@ -8,7 +9,6 @@ from ..templates import ChatTemplate
 
 
 class BaseMessages(BaseModel):
-
     @abstractmethod
     def add(self, role: str, content):
         pass
@@ -22,10 +22,11 @@ class BaseMessages(BaseModel):
         pass
 
     @abstractmethod
-    def tokenize(self, tokenizer: PreTrainedTokenizer,
-                 chat_template: ChatTemplate) -> Dict:
+    def tokenize(
+        self, tokenizer: PreTrainedTokenizer, chat_template: ChatTemplate
+    ) -> Dict:
         pass
 
     @abstractclassmethod
-    def from_dict(cls, item: Dict) -> 'BaseMessages':
+    def from_dict(cls, item: Dict) -> "BaseMessages":
         pass

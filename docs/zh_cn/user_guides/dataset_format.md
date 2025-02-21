@@ -142,8 +142,7 @@ System、User1、Assistant1、User2、Assistant2、User3的文本都视为模型
 <img src="https://github.com/LZHgrla/xtuner/assets/36994684/9fd714fc-20bd-4d4c-a4cf-3f95712f1db8" alt="Image" width=1100" />
 </div>
 
-相比于方法1，方法2可以充分利用每一轮对话的数据，但需要将一条包含 n 轮对话的数据拆分为 n 条数据，
-训练效率降低 1/n。
+相比于方法1，方法2可以充分利用每一轮对话的数据，但需要将一条包含 n 轮对话的数据拆分为 n 条数据，训练效率降低 1/n。
 
 ### XTuner 方法介绍
 

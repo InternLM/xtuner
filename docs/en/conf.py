@@ -15,19 +15,19 @@ import sys
 
 from sphinx.ext import autodoc
 
-sys.path.insert(0, os.path.abspath('../..'))
+sys.path.insert(0, os.path.abspath("../.."))
 
 # -- Project information -----------------------------------------------------
 
-project = 'XTuner'
-copyright = '2024, XTuner Contributors'
-author = 'XTuner Contributors'
+project = "XTuner"
+copyright = "2024, XTuner Contributors"
+author = "XTuner Contributors"
 
 # The full version, including alpha/beta/rc tags
-version_file = '../../xtuner/version.py'
+version_file = "../../xtuner/version.py"
 with open(version_file) as f:
-    exec(compile(f.read(), version_file, 'exec'))
-__version__ = locals()['__version__']
+    exec(compile(f.read(), version_file, "exec"))
+__version__ = locals()["__version__"]
 # The short X.Y version
 version = __version__
 # The full version, including alpha/beta/rc tags
@@ -39,41 +39,41 @@ release = __version__
 # extensions coming with Sphinx (named 'sphinx.ext.*') or your custom
 # ones.
 extensions = [
-    'sphinx.ext.napoleon',
-    'sphinx.ext.viewcode',
-    'sphinx.ext.intersphinx',
-    'sphinx_copybutton',
-    'sphinx.ext.autodoc',
-    'sphinx.ext.autosummary',
-    'myst_parser',
-    'sphinxarg.ext',
+    "sphinx.ext.napoleon",
+    "sphinx.ext.viewcode",
+    "sphinx.ext.intersphinx",
+    "sphinx_copybutton",
+    "sphinx.ext.autodoc",
+    "sphinx.ext.autosummary",
+    "myst_parser",
+    "sphinxarg.ext",
 ]
 
 # Add any paths that contain templates here, relative to this directory.
-templates_path = ['_templates']
+templates_path = ["_templates"]
 
 # List of patterns, relative to source directory, that match files and
 # directories to ignore when looking for source files.
 # This pattern also affects html_static_path and html_extra_path.
-exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store']
+exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
 
 # Exclude the prompt "$" when copying code
-copybutton_prompt_text = r'\$ '
+copybutton_prompt_text = r"\$ "
 copybutton_prompt_is_regexp = True
 
-language = 'en'
+language = "en"
 
 # -- Options for HTML output -------------------------------------------------
 
 # The theme to use for HTML and HTML Help pages.  See the documentation for
 # a list of builtin themes.
 #
-html_theme = 'sphinx_book_theme'
-html_logo = '_static/image/logo.png'
+html_theme = "sphinx_book_theme"
+html_logo = "_static/image/logo.png"
 html_theme_options = {
-    'path_to_docs': 'docs/en',
-    'repository_url': 'https://github.com/InternLM/xtuner',
-    'use_repository_button': True,
+    "path_to_docs": "docs/en",
+    "repository_url": "https://github.com/InternLM/xtuner",
+    "use_repository_button": True,
 }
 # Add any paths that contain custom static files (such as style sheets) here,
 # relative to this directory. They are copied after the builtin static files,
@@ -82,16 +82,16 @@ html_theme_options = {
 
 # Mock out external dependencies here.
 autodoc_mock_imports = [
-    'cpuinfo',
-    'torch',
-    'transformers',
-    'psutil',
-    'prometheus_client',
-    'sentencepiece',
-    'vllm.cuda_utils',
-    'vllm._C',
-    'numpy',
-    'tqdm',
+    "cpuinfo",
+    "torch",
+    "transformers",
+    "psutil",
+    "prometheus_client",
+    "sentencepiece",
+    "vllm.cuda_utils",
+    "vllm._C",
+    "numpy",
+    "tqdm",
 ]
 
 
@@ -99,7 +99,7 @@ class MockedClassDocumenter(autodoc.ClassDocumenter):
     """Remove note about base class when a class is derived from object."""
 
     def add_line(self, line: str, source: str, *lineno: int) -> None:
-        if line == '   Bases: :py:class:`object`':
+        if line == "   Bases: :py:class:`object`":
             return
         super().add_line(line, source, *lineno)
 

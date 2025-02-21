@@ -1,15 +1,21 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from mmengine.dataset import DefaultSampler
-from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
-                            LoggerHook, ParamSchedulerHook)
+from mmengine.hooks import (
+    CheckpointHook,
+    DistSamplerSeedHook,
+    IterTimerHook,
+    LoggerHook,
+    ParamSchedulerHook,
+)
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR, LinearLR
 from torch.optim import AdamW
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from xtuner.dataset.collate_fns.preference_collate_fn import \
-    preference_collate_fn
-from xtuner.dataset.preference_dataset import (build_preference_dataset,
-                                               load_jsonl_dataset)
+from xtuner.dataset.collate_fns.preference_collate_fn import preference_collate_fn
+from xtuner.dataset.preference_dataset import (
+    build_preference_dataset,
+    load_jsonl_dataset,
+)
 from xtuner.engine.hooks import VarlenAttnArgsToMessageHubHook
 from xtuner.engine.runner import TrainLoop
 from xtuner.model.reward import RewardModel
@@ -19,11 +25,11 @@ from xtuner.parallel.sequence import SequenceParallelSampler
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-pretrained_model_name_or_path = 'internlm/internlm2-chat-1_8b-sft'
+pretrained_model_name_or_path = "internlm/internlm2-chat-1_8b-sft"
 use_varlen_attn = True
 reward_token_id = 92527  # use [UNUSED_TOKEN_130] as reward token
-loss_type = 'focal'
-penalty_type = 'log_barrier'
+loss_type = "focal"
+penalty_type = "log_barrier"
 
 # Data
 max_length = 2048
@@ -60,7 +66,8 @@ tokenizer = dict(
     type=AutoTokenizer.from_pretrained,
     pretrained_model_name_or_path=pretrained_model_name_or_path,
     trust_remote_code=True,
-    padding_side='right')
+    padding_side="right",
+)
 
 model = dict(
     type=RewardModel,
@@ -70,22 +77,24 @@ model = dict(
     llm=dict(
         type=AutoModelForCausalLM.from_pretrained,
         pretrained_model_name_or_path=pretrained_model_name_or_path,
-        trust_remote_code=True))
+        trust_remote_code=True,
+    ),
+)
 
 #######################################################################
 #                      PART 3  Dataset & Dataloader                   #
 #######################################################################
-sampler = SequenceParallelSampler \
-    if sequence_parallel_size > 1 else DefaultSampler
+sampler = SequenceParallelSampler if sequence_parallel_size > 1 else DefaultSampler
 
 train_dataset = dict(
     type=build_preference_dataset,
     dataset=dict(
         type=load_jsonl_dataset,
         data_files=[
-            '/your/jsonl/path/here.jsonl',
-            '/your/another/jsonl/path/here.jsonl'
-        ]),
+            "/your/jsonl/path/here.jsonl",
+            "/your/another/jsonl/path/here.jsonl",
+        ],
+    ),
     tokenizer=tokenizer,
     max_length=max_length,
     dataset_map_fn=None,
@@ -103,8 +112,8 @@ train_dataloader = dict(
     num_workers=dataloader_num_workers,
     dataset=train_dataset,
     sampler=dict(type=sampler, shuffle=True),
-    collate_fn=dict(
-        type=preference_collate_fn, use_varlen_attn=use_varlen_attn))
+    collate_fn=dict(type=preference_collate_fn, use_varlen_attn=use_varlen_attn),
+)
 
 #######################################################################
 #                    PART 4  Scheduler & Optimizer                    #
@@ -112,12 +121,12 @@ train_dataloader = dict(
 # optimizer
 optim_wrapper = dict(
     type=AmpOptimWrapper,
-    optimizer=dict(
-        type=optim_type, lr=lr, betas=betas, weight_decay=weight_decay),
+    optimizer=dict(type=optim_type, lr=lr, betas=betas, weight_decay=weight_decay),
     clip_grad=dict(max_norm=max_norm, error_if_nonfinite=False),
     accumulative_counts=accumulative_counts,
-    loss_scale='dynamic',
-    dtype='float16')
+    loss_scale="dynamic",
+    dtype="float16",
+)
 
 # learning policy
 # More information: https://github.com/open-mmlab/mmengine/blob/main/docs/en/tutorials/param_scheduler.md  # noqa: E501
@@ -128,14 +137,16 @@ param_scheduler = [
         by_epoch=True,
         begin=0,
         end=warmup_ratio * max_epochs,
-        convert_to_iter_based=True),
+        convert_to_iter_based=True,
+    ),
     dict(
         type=CosineAnnealingLR,
         eta_min=0.0,
         by_epoch=True,
         begin=warmup_ratio * max_epochs,
         end=max_epochs,
-        convert_to_iter_based=True)
+        convert_to_iter_based=True,
+    ),
 ]
 
 # train, val, test setting
@@ -163,7 +174,8 @@ default_hooks = dict(
         type=CheckpointHook,
         by_epoch=False,
         interval=save_steps,
-        max_keep_ckpts=save_total_limit),
+        max_keep_ckpts=save_total_limit,
+    ),
     # set sampler seed in distributed evrionment.
     sampler_seed=dict(type=DistSamplerSeedHook),
 )
@@ -173,16 +185,16 @@ env_cfg = dict(
     # whether to enable cudnn benchmark
     cudnn_benchmark=False,
     # set multi process parameters
-    mp_cfg=dict(mp_start_method='fork', opencv_num_threads=0),
+    mp_cfg=dict(mp_start_method="fork", opencv_num_threads=0),
     # set distributed parameters
-    dist_cfg=dict(backend='nccl'),
+    dist_cfg=dict(backend="nccl"),
 )
 
 # set visualizer
 visualizer = None
 
 # set log level
-log_level = 'INFO'
+log_level = "INFO"
 
 # load from which checkpoint
 load_from = None
