@@ -1,16 +1,20 @@
 import hashlib
-import inspect
 import json
 import math
 import os
 import random
+from abc import ABC, abstractmethod
 from concurrent.futures import ProcessPoolExecutor
 import multiprocessing
 from mmengine import mkdir_or_exist
+from typing import Any, Callable, TypedDict
+
 import numpy as np
 import torch
+from mmengine import mkdir_or_exist
 from torch import distributed as dist
 from tqdm import tqdm
+
 from xtuner._lite import get_logger
 
 logger = get_logger()
@@ -23,28 +27,35 @@ def calculate_jsonl_sha256(path):
     return file_hash.hexdigest()
 
 
-def calculate_tokenize_fn_sha256(tokenize_fn):
-    """Calculate SHA-256 hash for an instance method's source code."""
-    # Get the source code of the method
-    fn_source = inspect.getsource(tokenize_fn.__call__)
-    return hashlib.sha256(fn_source.encode('utf-8')).hexdigest()
+CacheObj = TypedDict('CachedObj', {'num_tokens': int}, total=False)
+
+
+class CachableTokenizeFunction(ABC):
+    @abstractmethod
+    def __call__(self, item: Any) -> CacheObj:
+        raise NotImplementedError
+
+    @abstractmethod
+    def hash(self) -> str:
+        raise NotImplementedError
+
 
 
 class JsonlDataset(torch.utils.data.Dataset):
 
     def __init__(self,
                  path,
-                 sample_ratio=1.0,
-                 tokenize_fn=None,
-                 cache_dir=None,
-                 max_length=None,):
+                 sample_ratio: float =1.0,
+                 tokenize_fn: Callable[[Any], CacheObj] | None = None,
+                 cache_dir: str | None = None,
+                 max_length: int | None = None,):
         super().__init__()
 
         self.tokenize_fn = tokenize_fn
         self.path = path
         self.tokenizer_workers = int(os.environ.get('XTUNER_TOKENIZE_WORKERS', 8))
 
-        if cache_dir:
+        if cache_dir and isinstance(tokenize_fn, CachableTokenizeFunction):
             if os.path.exists(cache_dir):
                 assert os.path.isdir(cache_dir)
             else:
@@ -63,7 +74,7 @@ class JsonlDataset(torch.utils.data.Dataset):
                 offsets = self.count_offsets(file_cache_dir)
 
             if self.tokenize_fn:
-                tok_hash = calculate_tokenize_fn_sha256(tokenize_fn)
+                tok_hash = tokenize_fn.hash()
                 tok_cache_dir = os.path.join(file_cache_dir, tok_hash)
                 if tok_hash not in os.listdir(file_cache_dir):
                     mkdir_or_exist(tok_cache_dir)
