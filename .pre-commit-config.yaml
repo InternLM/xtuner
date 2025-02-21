@@ -42,7 +42,7 @@ repos:
     rev: v0.4.0
     hooks:
       - id: check-copyright
-        args: ["xtuner", "tools", "--excludes", "xtuner/_lite/modelings/", "xtuner/model/transformers_models/"]
+        args: ["xtuner", "--excludes", "xtuner/_lite/modelings/", "xtuner/model/transformers_models/"]
       - id: remove-improper-eol-in-cn-docs
   - repo: https://github.com/asottile/pyupgrade
     rev: v3.0.0
