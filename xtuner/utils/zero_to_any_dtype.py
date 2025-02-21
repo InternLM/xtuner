@@ -21,15 +21,21 @@ from collections import OrderedDict
 from dataclasses import dataclass
 
 import torch
+
 # yapf: disable
-from deepspeed.checkpoint.constants import (BUFFER_NAMES, DS_VERSION,
-                                            FP32_FLAT_GROUPS,
-                                            FROZEN_PARAM_FRAGMENTS,
-                                            FROZEN_PARAM_SHAPES,
-                                            OPTIMIZER_STATE_DICT, PARAM_SHAPES,
-                                            PARTITION_COUNT,
-                                            SINGLE_PARTITION_OF_FP32_GROUPS,
-                                            ZERO_STAGE)
+from deepspeed.checkpoint.constants import (
+    BUFFER_NAMES,
+    DS_VERSION,
+    FP32_FLAT_GROUPS,
+    FROZEN_PARAM_FRAGMENTS,
+    FROZEN_PARAM_SHAPES,
+    OPTIMIZER_STATE_DICT,
+    PARAM_SHAPES,
+    PARTITION_COUNT,
+    SINGLE_PARTITION_OF_FP32_GROUPS,
+    ZERO_STAGE,
+)
+
 # while this script doesn't use deepspeed to recover data, since the
 # checkpoints are pickled with DeepSpeed data structures it has to be
 # available in the current python environment.
@@ -52,7 +58,7 @@ class zero_model_state:
 debug = 0
 
 # load to cpu
-device = torch.device('cpu')
+device = torch.device("cpu")
 
 DEFAULT_DTYPE = torch.float16
 
@@ -65,7 +71,7 @@ def natural_keys(text):
     """alist.sort(key=natural_keys) sorts in human order
     http://nedbatchelder.com/blog/200712/human_sorting.html (See Toothy's
     implementation in the comments)"""
-    return [atoi(c) for c in re.split(r'(\d+)', text)]
+    return [atoi(c) for c in re.split(r"(\d+)", text)]
 
 
 def get_model_state_file(checkpoint_dir, zero_stage):
@@ -74,10 +80,9 @@ def get_model_state_file(checkpoint_dir, zero_stage):
 
     # there should be only one file
     if zero_stage <= 2:
-        file = os.path.join(checkpoint_dir, 'mp_rank_00_model_states.pt')
+        file = os.path.join(checkpoint_dir, "mp_rank_00_model_states.pt")
     elif zero_stage == 3:
-        file = os.path.join(checkpoint_dir,
-                            'zero_pp_rank_0_mp_rank_00_model_states.pt')
+        file = os.path.join(checkpoint_dir, "zero_pp_rank_0_mp_rank_00_model_states.pt")
 
     if not os.path.exists(file):
         raise FileNotFoundError(f"can't find model states file at '{file}'")
@@ -89,22 +94,23 @@ def get_checkpoint_files(checkpoint_dir, glob_pattern):
     # XXX: need to test that this simple glob rule works for multi-node
     # setup too
     ckpt_files = sorted(
-        glob.glob(os.path.join(checkpoint_dir, glob_pattern)),
-        key=natural_keys)
+        glob.glob(os.path.join(checkpoint_dir, glob_pattern)), key=natural_keys
+    )
 
     if len(ckpt_files) == 0:
         raise FileNotFoundError(
-            f"can't find {glob_pattern} files in directory '{checkpoint_dir}'")
+            f"can't find {glob_pattern} files in directory '{checkpoint_dir}'"
+        )
 
     return ckpt_files
 
 
 def get_optim_files(checkpoint_dir):
-    return get_checkpoint_files(checkpoint_dir, '*_optim_states.pt')
+    return get_checkpoint_files(checkpoint_dir, "*_optim_states.pt")
 
 
 def get_model_state_files(checkpoint_dir):
-    return get_checkpoint_files(checkpoint_dir, '*_model_states.pt')
+    return get_checkpoint_files(checkpoint_dir, "*_model_states.pt")
 
 
 def parse_model_states(files, dtype=DEFAULT_DTYPE):
@@ -113,14 +119,13 @@ def parse_model_states(files, dtype=DEFAULT_DTYPE):
         state_dict = torch.load(file, map_location=device)
 
         if BUFFER_NAMES not in state_dict:
-            raise ValueError(f'{file} is not a model state checkpoint')
+            raise ValueError(f"{file} is not a model state checkpoint")
         buffer_names = state_dict[BUFFER_NAMES]
         if debug:
-            print('Found buffers:', buffer_names)
+            print("Found buffers:", buffer_names)
 
         buffers = {
-            k: v.to(dtype)
-            for k, v in state_dict['module'].items() if k in buffer_names
+            k: v.to(dtype) for k, v in state_dict["module"].items() if k in buffer_names
         }
         param_shapes = state_dict[PARAM_SHAPES]
 
@@ -134,12 +139,11 @@ def parse_model_states(files, dtype=DEFAULT_DTYPE):
         frozen_param_shapes = state_dict.get(FROZEN_PARAM_SHAPES, None)
         if frozen_param_shapes is not None:
             if debug:
-                print(f'Found frozen_param_shapes: {frozen_param_shapes}')
+                print(f"Found frozen_param_shapes: {frozen_param_shapes}")
             param_names += list(frozen_param_shapes.keys())
 
         # handle shared params
-        shared_params = [[k, v]
-                         for k, v in state_dict['shared_params'].items()]
+        shared_params = [[k, v] for k, v in state_dict["shared_params"].items()]
 
         ds_version = state_dict.get(DS_VERSION, None)
 
@@ -151,7 +155,8 @@ def parse_model_states(files, dtype=DEFAULT_DTYPE):
             shared_params=shared_params,
             ds_version=ds_version,
             frozen_param_shapes=frozen_param_shapes,
-            frozen_param_fragments=frozen_param_fragments)
+            frozen_param_fragments=frozen_param_fragments,
+        )
         zero_model_states.append(z_model_state)
 
     return zero_model_states
@@ -159,15 +164,14 @@ def parse_model_states(files, dtype=DEFAULT_DTYPE):
 
 @torch.no_grad()
 def parse_optim_states(files, ds_checkpoint_dir, dtype=DEFAULT_DTYPE):
-
     zero_stage = None
     world_size = None
     total_files = len(files)
     flat_groups = []
-    for f in tqdm(files, desc='Load Checkpoints'):
+    for f in tqdm(files, desc="Load Checkpoints"):
         state_dict = torch.load(f, map_location=device)
         if ZERO_STAGE not in state_dict[OPTIMIZER_STATE_DICT]:
-            raise ValueError(f'{f} is not a zero checkpoint')
+            raise ValueError(f"{f} is not a zero checkpoint")
 
         zero_stage = state_dict[OPTIMIZER_STATE_DICT][ZERO_STAGE]
         world_size = state_dict[OPTIMIZER_STATE_DICT][PARTITION_COUNT]
@@ -178,13 +182,13 @@ def parse_optim_states(files, ds_checkpoint_dir, dtype=DEFAULT_DTYPE):
         elif zero_stage == 3:
             fp32_groups_key = FP32_FLAT_GROUPS
         else:
-            raise ValueError(f'unknown zero stage {zero_stage}')
+            raise ValueError(f"unknown zero stage {zero_stage}")
 
         # immediately discard the potentially huge 2 optimizer states as we
         # only care for fp32 master weights and also handle the case where it
         # was already removed by another helper script
-        state_dict['optimizer_state_dict'].pop('optimizer_state_dict', None)
-        fp32_groups = state_dict['optimizer_state_dict'].pop(fp32_groups_key)
+        state_dict["optimizer_state_dict"].pop("optimizer_state_dict", None)
+        fp32_groups = state_dict["optimizer_state_dict"].pop(fp32_groups_key)
         if zero_stage <= 2:
             flat_groups.append([param.to(dtype) for param in fp32_groups])
         elif zero_stage == 3:
@@ -208,15 +212,16 @@ def parse_optim_states(files, ds_checkpoint_dir, dtype=DEFAULT_DTYPE):
         raise ValueError(
             f"Expected {world_size} of '*_optim_states.pt' under "
             f"'{ds_checkpoint_dir}' but found {total_files} files. "
-            'Possibly due to an overwrite of an old checkpoint, '
-            "or a checkpoint didn't get saved by one or more processes.")
+            "Possibly due to an overwrite of an old checkpoint, "
+            "or a checkpoint didn't get saved by one or more processes."
+        )
 
     return zero_stage, world_size, flat_groups
 
 
-def _get_state_dict_from_zero_checkpoint(ds_checkpoint_dir,
-                                         exclude_frozen_parameters,
-                                         dtype=DEFAULT_DTYPE):
+def _get_state_dict_from_zero_checkpoint(
+    ds_checkpoint_dir, exclude_frozen_parameters, dtype=DEFAULT_DTYPE
+):
     """Returns state_dict reconstructed from ds checkpoint.
 
     Args:
@@ -227,29 +232,36 @@ def _get_state_dict_from_zero_checkpoint(ds_checkpoint_dir,
 
     optim_files = get_optim_files(ds_checkpoint_dir)
     zero_stage, world_size, flat_groups = parse_optim_states(
-        optim_files, ds_checkpoint_dir, dtype)
-    print(f'Detected checkpoint of type zero stage {zero_stage}, '
-          f'world_size: {world_size}')
+        optim_files, ds_checkpoint_dir, dtype
+    )
+    print(
+        f"Detected checkpoint of type zero stage {zero_stage}, "
+        f"world_size: {world_size}"
+    )
 
     model_files = get_model_state_files(ds_checkpoint_dir)
 
     zero_model_states = parse_model_states(model_files)
-    print(f'Parsing checkpoint created by deepspeed=='
-          f'{zero_model_states[0].ds_version}')
+    print(
+        f"Parsing checkpoint created by deepspeed=="
+        f"{zero_model_states[0].ds_version}"
+    )
 
     if zero_stage <= 2:
         return _get_state_dict_from_zero2_checkpoint(
-            world_size, flat_groups, zero_model_states,
-            exclude_frozen_parameters)
+            world_size, flat_groups, zero_model_states, exclude_frozen_parameters
+        )
     elif zero_stage == 3:
         return _get_state_dict_from_zero3_checkpoint(
-            world_size, flat_groups, zero_model_states,
-            exclude_frozen_parameters)
+            world_size, flat_groups, zero_model_states, exclude_frozen_parameters
+        )
 
 
 def _zero2_merge_frozen_params(state_dict, zero_model_states):
-    if zero_model_states[0].frozen_param_shapes is None or len(
-            zero_model_states[0].frozen_param_shapes) == 0:
+    if (
+        zero_model_states[0].frozen_param_shapes is None
+        or len(zero_model_states[0].frozen_param_shapes) == 0
+    ):
         return
 
     frozen_param_shapes = zero_model_states[0].frozen_param_shapes
@@ -257,14 +269,15 @@ def _zero2_merge_frozen_params(state_dict, zero_model_states):
 
     if debug:
         num_elem = sum(s.numel() for s in frozen_param_shapes.values())
-        print(f'rank 0: {FROZEN_PARAM_SHAPES}.numel = {num_elem}')
+        print(f"rank 0: {FROZEN_PARAM_SHAPES}.numel = {num_elem}")
 
         wanted_params = len(frozen_param_shapes)
         wanted_numel = sum(s.numel() for s in frozen_param_shapes.values())
         avail_numel = sum([p.numel() for p in frozen_param_fragments.values()])
-        print(f'Frozen params: Have {avail_numel} numels to process.')
-        print(f'Frozen params: Need {wanted_numel} numels in '
-              f'{wanted_params} params')
+        print(f"Frozen params: Have {avail_numel} numels to process.")
+        print(
+            f"Frozen params: Need {wanted_numel} numels in " f"{wanted_params} params"
+        )
 
     total_params = 0
     total_numel = 0
@@ -276,11 +289,15 @@ def _zero2_merge_frozen_params(state_dict, zero_model_states):
         state_dict[name] = frozen_param_fragments[name]
 
         if debug:
-            print(f'{name} full shape: {shape} unpartitioned numel '
-                  f'{unpartitioned_numel} ')
+            print(
+                f"{name} full shape: {shape} unpartitioned numel "
+                f"{unpartitioned_numel} "
+            )
 
-    print(f'Reconstructed Frozen state dict with {total_params} params '
-          f'{total_numel} elements')
+    print(
+        f"Reconstructed Frozen state dict with {total_params} params "
+        f"{total_numel} elements"
+    )
 
 
 def _has_callable(obj, fn):
@@ -288,8 +305,9 @@ def _has_callable(obj, fn):
     return callable(attr)
 
 
-def _zero2_merge_trainable_params(state_dict, world_size, flat_groups,
-                                  zero_model_states):
+def _zero2_merge_trainable_params(
+    state_dict, world_size, flat_groups, zero_model_states
+):
     param_shapes = zero_model_states[0].param_shapes
 
     # Reconstruction protocol:
@@ -299,7 +317,7 @@ def _zero2_merge_trainable_params(state_dict, world_size, flat_groups,
     if debug:
         for i in range(world_size):
             for j in range(len(flat_groups[0])):
-                print(f'flat_groups[{i}][{j}].shape={flat_groups[i][j].shape}')
+                print(f"flat_groups[{i}][{j}].shape={flat_groups[i][j].shape}")
 
     # XXX: memory usage doubles here (zero2)
     num_param_groups = len(flat_groups[0])
@@ -308,42 +326,47 @@ def _zero2_merge_trainable_params(state_dict, world_size, flat_groups,
         merged_partitions = [sd[i] for sd in flat_groups]
         full_single_vector = torch.cat(merged_partitions, 0)
         merged_single_partition_of_groups.append(full_single_vector)
-    avail_numel = sum([
-        full_single_vector.numel()
-        for full_single_vector in merged_single_partition_of_groups
-    ])
+    avail_numel = sum(
+        [
+            full_single_vector.numel()
+            for full_single_vector in merged_single_partition_of_groups
+        ]
+    )
 
     if debug:
         wanted_params = sum([len(shapes) for shapes in param_shapes])
-        wanted_numel = sum([
-            sum(shape.numel() for shape in shapes.values())
-            for shapes in param_shapes
-        ])
+        wanted_numel = sum(
+            [sum(shape.numel() for shape in shapes.values()) for shapes in param_shapes]
+        )
         # not asserting if there is a mismatch due to possible padding
-        print(f'Have {avail_numel} numels to process.')
-        print(f'Need {wanted_numel} numels in {wanted_params} params.')
+        print(f"Have {avail_numel} numels to process.")
+        print(f"Need {wanted_numel} numels in {wanted_params} params.")
 
     # params
     # XXX: for huge models that can't fit into the host's RAM we will have to
     # recode this to support out-of-core computing solution
     total_numel = 0
     total_params = 0
-    for shapes, full_single_vector in zip(param_shapes,
-                                          merged_single_partition_of_groups):
+    for shapes, full_single_vector in zip(
+        param_shapes, merged_single_partition_of_groups
+    ):
         offset = 0
         avail_numel = full_single_vector.numel()
         for name, shape in shapes.items():
-
-            unpartitioned_numel = shape.numel() if _has_callable(
-                shape, 'numel') else math.prod(shape)
+            unpartitioned_numel = (
+                shape.numel() if _has_callable(shape, "numel") else math.prod(shape)
+            )
             total_numel += unpartitioned_numel
             total_params += 1
 
             if debug:
-                print(f'{name} full shape: {shape} unpartitioned numel '
-                      f'{unpartitioned_numel} ')
+                print(
+                    f"{name} full shape: {shape} unpartitioned numel "
+                    f"{unpartitioned_numel} "
+                )
             state_dict[name] = full_single_vector.narrow(
-                0, offset, unpartitioned_numel).view(shape)
+                0, offset, unpartitioned_numel
+            ).view(shape)
             offset += unpartitioned_numel
 
         # Z2 started to align to 2*world_size to improve nccl performance.
@@ -358,39 +381,43 @@ def _zero2_merge_trainable_params(state_dict, world_size, flat_groups,
             return align_to * math.ceil(x / align_to)
 
         if debug:
-            print(f'original offset={offset}, avail_numel={avail_numel}')
+            print(f"original offset={offset}, avail_numel={avail_numel}")
 
         offset = zero2_align(offset)
         avail_numel = zero2_align(avail_numel)
 
         if debug:
-            print(f'aligned  offset={offset}, avail_numel={avail_numel}')
+            print(f"aligned  offset={offset}, avail_numel={avail_numel}")
 
         # Sanity check
         if offset != avail_numel:
-            raise ValueError(f'consumed {offset} numels out of {avail_numel} '
-                             '- something is wrong')
+            raise ValueError(
+                f"consumed {offset} numels out of {avail_numel} " "- something is wrong"
+            )
 
-    print(f'Reconstructed state dict with {total_params} params '
-          f'{total_numel} elements')
+    print(
+        f"Reconstructed state dict with {total_params} params "
+        f"{total_numel} elements"
+    )
 
 
-def _get_state_dict_from_zero2_checkpoint(world_size, flat_groups,
-                                          zero_model_states,
-                                          exclude_frozen_parameters):
+def _get_state_dict_from_zero2_checkpoint(
+    world_size, flat_groups, zero_model_states, exclude_frozen_parameters
+):
     state_dict = OrderedDict()
 
     # buffers
     buffers = zero_model_states[0].buffers
     state_dict.update(buffers)
     if debug:
-        print(f'added {len(buffers)} buffers')
+        print(f"added {len(buffers)} buffers")
 
     if not exclude_frozen_parameters:
         _zero2_merge_frozen_params(state_dict, zero_model_states)
 
-    _zero2_merge_trainable_params(state_dict, world_size, flat_groups,
-                                  zero_model_states)
+    _zero2_merge_trainable_params(
+        state_dict, world_size, flat_groups, zero_model_states
+    )
 
     # recover shared parameters
     for pair in zero_model_states[0].shared_params:
@@ -408,27 +435,35 @@ def zero3_partitioned_param_info(unpartitioned_numel, world_size):
 
 
 def _zero3_merge_frozen_params(state_dict, world_size, zero_model_states):
-    if zero_model_states[0].frozen_param_shapes is None or len(
-            zero_model_states[0].frozen_param_shapes) == 0:
+    if (
+        zero_model_states[0].frozen_param_shapes is None
+        or len(zero_model_states[0].frozen_param_shapes) == 0
+    ):
         return
 
     if debug:
         for i in range(world_size):
             num_elem = sum(
-                s.numel()
-                for s in zero_model_states[i].frozen_param_fragments.values())
-            print(f'rank {i}: {FROZEN_PARAM_SHAPES}.numel = {num_elem}')
+                s.numel() for s in zero_model_states[i].frozen_param_fragments.values()
+            )
+            print(f"rank {i}: {FROZEN_PARAM_SHAPES}.numel = {num_elem}")
 
         frozen_param_shapes = zero_model_states[0].frozen_param_shapes
         wanted_params = len(frozen_param_shapes)
         wanted_numel = sum(s.numel() for s in frozen_param_shapes.values())
-        avail_numel = sum([
-            p.numel()
-            for p in zero_model_states[0].frozen_param_fragments.values()
-        ]) * world_size
-        print(f'Frozen params: Have {avail_numel} numels to process.')
-        print(f'Frozen params: Need {wanted_numel} numels in '
-              f'{wanted_params} params')
+        avail_numel = (
+            sum(
+                [
+                    p.numel()
+                    for p in zero_model_states[0].frozen_param_fragments.values()
+                ]
+            )
+            * world_size
+        )
+        print(f"Frozen params: Have {avail_numel} numels to process.")
+        print(
+            f"Frozen params: Need {wanted_numel} numels in " f"{wanted_params} params"
+        )
 
     total_params = 0
     total_numel = 0
@@ -437,25 +472,32 @@ def _zero3_merge_frozen_params(state_dict, world_size, zero_model_states):
         unpartitioned_numel = shape.numel()
         total_numel += unpartitioned_numel
 
-        param_frags = tuple(model_state.frozen_param_fragments[name]
-                            for model_state in zero_model_states)
-        state_dict[name] = torch.cat(param_frags, 0).narrow(
-            0, 0, unpartitioned_numel).view(shape)  # noqa: E501
+        param_frags = tuple(
+            model_state.frozen_param_fragments[name]
+            for model_state in zero_model_states
+        )
+        state_dict[name] = (
+            torch.cat(param_frags, 0).narrow(0, 0, unpartitioned_numel).view(shape)
+        )  # noqa: E501
 
-        _partitioned = zero3_partitioned_param_info(unpartitioned_numel,
-                                                    world_size)
+        _partitioned = zero3_partitioned_param_info(unpartitioned_numel, world_size)
         partitioned_numel, partitioned_padding_numel = _partitioned
         if debug:
-            print(f'Frozen params: {total_params} {name} full shape: {shape} '
-                  f'partition0 numel={partitioned_numel} '
-                  f'partitioned_padding_numel={partitioned_padding_numel}')
+            print(
+                f"Frozen params: {total_params} {name} full shape: {shape} "
+                f"partition0 numel={partitioned_numel} "
+                f"partitioned_padding_numel={partitioned_padding_numel}"
+            )
 
-    print(f'Reconstructed Frozen state dict with {total_params} params '
-          f'{total_numel} elements')
+    print(
+        f"Reconstructed Frozen state dict with {total_params} params "
+        f"{total_numel} elements"
+    )
 
 
-def _zero3_merge_trainable_params(state_dict, world_size, flat_groups,
-                                  zero_model_states):
+def _zero3_merge_trainable_params(
+    state_dict, world_size, flat_groups, zero_model_states
+):
     param_shapes = zero_model_states[0].param_shapes
     avail_numel = flat_groups[0].numel() * world_size
     # Reconstruction protocol: For zero3 we need to zip the partitions
@@ -467,22 +509,23 @@ def _zero3_merge_trainable_params(state_dict, world_size, flat_groups,
 
     if debug:
         for i in range(world_size):
-            print(f'flat_groups[{i}].shape={flat_groups[i].shape}')
+            print(f"flat_groups[{i}].shape={flat_groups[i].shape}")
 
         wanted_params = len(param_shapes)
         wanted_numel = sum(shape.numel() for shape in param_shapes.values())
         # not asserting if there is a mismatch due to possible padding
         avail_numel = flat_groups[0].numel() * world_size
-        print(f'Trainable params: Have {avail_numel} numels to process.')
-        print(f'Trainable params: Need {wanted_numel} numels in '
-              f'{wanted_params} params.')
+        print(f"Trainable params: Have {avail_numel} numels to process.")
+        print(
+            f"Trainable params: Need {wanted_numel} numels in "
+            f"{wanted_params} params."
+        )
 
     offset = 0
     total_numel = 0
     total_params = 0
     partitioned_sizes = []
     for name, shape in param_shapes.items():
-
         unpartitioned_numel = shape.numel()
         total_numel += unpartitioned_numel
         total_params += 1
@@ -493,9 +536,10 @@ def _zero3_merge_trainable_params(state_dict, world_size, flat_groups,
         partitioned_sizes.append(partitioned_numel)
         if debug:
             print(
-                f'Trainable params: {total_params} {name} full shape: {shape} '
-                f'partition0 numel={partitioned_numel} '
-                f'partitioned_padding_numel={partitioned_padding_numel}')
+                f"Trainable params: {total_params} {name} full shape: {shape} "
+                f"partition0 numel={partitioned_numel} "
+                f"partitioned_padding_numel={partitioned_padding_numel}"
+            )
 
         offset += partitioned_numel
 
@@ -503,8 +547,9 @@ def _zero3_merge_trainable_params(state_dict, world_size, flat_groups,
 
     # Sanity check
     if offset != avail_numel:
-        raise ValueError(f'consumed {offset} numels out of {avail_numel} '
-                         '- something is wrong')
+        raise ValueError(
+            f"consumed {offset} numels out of {avail_numel} " "- something is wrong"
+        )
 
     mat_chunks = []
     for rank in range(world_size):
@@ -512,9 +557,7 @@ def _zero3_merge_trainable_params(state_dict, world_size, flat_groups,
         rank_chunks = [tensor.clone() for tensor in rank_chunks]
         mat_chunks.append(rank_chunks)
 
-    for name, shape in tqdm(
-            param_shapes.items(), desc='Gather Sharded Weights'):
-
+    for name, shape in tqdm(param_shapes.items(), desc="Gather Sharded Weights"):
         pad_flat_param_chunks = []
         for rank in range(world_size):
             pad_flat_param_chunks.append(mat_chunks[rank].pop(0))
@@ -526,29 +569,32 @@ def _zero3_merge_trainable_params(state_dict, world_size, flat_groups,
         for rank in range(world_size):
             pad_flat_param_chunks.pop()
 
-        param = pad_flat_param[:shape.numel()].view(shape)
+        param = pad_flat_param[: shape.numel()].view(shape)
         state_dict[name] = param
 
-    print(f'Reconstructed Trainable state dict with {total_params} params '
-          f'{total_numel} elements')
+    print(
+        f"Reconstructed Trainable state dict with {total_params} params "
+        f"{total_numel} elements"
+    )
 
 
-def _get_state_dict_from_zero3_checkpoint(world_size, flat_groups,
-                                          zero_model_states,
-                                          exclude_frozen_parameters):
+def _get_state_dict_from_zero3_checkpoint(
+    world_size, flat_groups, zero_model_states, exclude_frozen_parameters
+):
     state_dict = OrderedDict()
 
     # buffers
     buffers = zero_model_states[0].buffers
     state_dict.update(buffers)
     if debug:
-        print(f'added {len(buffers)} buffers')
+        print(f"added {len(buffers)} buffers")
 
     if not exclude_frozen_parameters:
         _zero3_merge_frozen_params(state_dict, world_size, zero_model_states)
 
-    _zero3_merge_trainable_params(state_dict, world_size, flat_groups,
-                                  zero_model_states)
+    _zero3_merge_trainable_params(
+        state_dict, world_size, flat_groups, zero_model_states
+    )
 
     # recover shared parameters
     for pair in zero_model_states[0].shared_params:
@@ -558,10 +604,9 @@ def _get_state_dict_from_zero3_checkpoint(world_size, flat_groups,
     return state_dict
 
 
-def get_state_dict_from_zero_checkpoint(checkpoint_dir,
-                                        tag=None,
-                                        exclude_frozen_parameters=False,
-                                        dtype=DEFAULT_DTYPE):
+def get_state_dict_from_zero_checkpoint(
+    checkpoint_dir, tag=None, exclude_frozen_parameters=False, dtype=DEFAULT_DTYPE
+):
     # flake8: noqa
     """Convert ZeRO 2 or 3 checkpoint into a single consolidated state_dict
     that can be loaded with ``load_state_dict()`` and used for training without
@@ -601,7 +646,7 @@ def get_state_dict_from_zero_checkpoint(checkpoint_dir,
     """
     # flake8: noqa
     if tag is None:
-        latest_path = os.path.join(checkpoint_dir, 'latest')
+        latest_path = os.path.join(checkpoint_dir, "latest")
         if os.path.isfile(latest_path):
             with open(latest_path) as fd:
                 tag = fd.read().strip()
@@ -611,19 +656,20 @@ def get_state_dict_from_zero_checkpoint(checkpoint_dir,
     ds_checkpoint_dir = os.path.join(checkpoint_dir, tag)
 
     if not os.path.isdir(ds_checkpoint_dir):
-        raise FileNotFoundError(
-            f"Directory '{ds_checkpoint_dir}' doesn't exist")
+        raise FileNotFoundError(f"Directory '{ds_checkpoint_dir}' doesn't exist")
 
-    return _get_state_dict_from_zero_checkpoint(ds_checkpoint_dir,
-                                                exclude_frozen_parameters,
-                                                dtype)
+    return _get_state_dict_from_zero_checkpoint(
+        ds_checkpoint_dir, exclude_frozen_parameters, dtype
+    )
 
 
-def convert_zero_checkpoint_to_state_dict(checkpoint_dir,
-                                          output_file,
-                                          tag=None,
-                                          exclude_frozen_parameters=False,
-                                          dtype=DEFAULT_DTYPE):
+def convert_zero_checkpoint_to_state_dict(
+    checkpoint_dir,
+    output_file,
+    tag=None,
+    exclude_frozen_parameters=False,
+    dtype=DEFAULT_DTYPE,
+):
     """Convert ZeRO 2 or 3 checkpoint into a single consolidated ``state_dict``
     file that can be loaded with ``torch.load(file)`` + ``load_state_dict()``
     and used for training without DeepSpeed.
@@ -640,16 +686,15 @@ def convert_zero_checkpoint_to_state_dict(checkpoint_dir,
     """
 
     state_dict = get_state_dict_from_zero_checkpoint(
-        checkpoint_dir, tag, exclude_frozen_parameters, dtype)
-    print(f'Saving {dtype} state dict to {output_file}')
+        checkpoint_dir, tag, exclude_frozen_parameters, dtype
+    )
+    print(f"Saving {dtype} state dict to {output_file}")
     torch.save(state_dict, output_file)
 
 
-def load_state_dict_from_zero_checkpoint(model,
-                                         checkpoint_dir,
-                                         tag=None,
-                                         dtype=DEFAULT_DTYPE):
-
+def load_state_dict_from_zero_checkpoint(
+    model, checkpoint_dir, tag=None, dtype=DEFAULT_DTYPE
+):
     # flake8: noqa
     """
     1. Put the provided model to cpu
@@ -685,11 +730,10 @@ def load_state_dict_from_zero_checkpoint(model,
     from it.
     """
     # flake8: noqa
-    logger.info(f'Extracting {dtype} weights')
-    state_dict = get_state_dict_from_zero_checkpoint(
-        checkpoint_dir, tag, dtype=dtype)
+    logger.info(f"Extracting {dtype} weights")
+    state_dict = get_state_dict_from_zero_checkpoint(checkpoint_dir, tag, dtype=dtype)
 
-    logger.info(f'Overwriting model with {dtype} weights')
+    logger.info(f"Overwriting model with {dtype} weights")
     model = model.cpu()
     model.load_state_dict(state_dict, strict=False)
 

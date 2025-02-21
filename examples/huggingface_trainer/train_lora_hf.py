@@ -13,10 +13,11 @@ def train():
 
     # init model and dataset
     model, tokenizer = build_lora_model(
-        model_name_or_path=training_args.model_name_or_path,
-        return_tokenizer=True)
+        model_name_or_path=training_args.model_name_or_path, return_tokenizer=True
+    )
     train_dataset = alpaca_dataset(
-        tokenizer=tokenizer, path=training_args.dataset_name_or_path)
+        tokenizer=tokenizer, path=training_args.dataset_name_or_path
+    )
     data_collator = alpaca_data_collator(return_hf_format=True)
 
     # build trainer
@@ -24,7 +25,8 @@ def train():
         model=model,
         args=training_args,
         train_dataset=train_dataset,
-        data_collator=data_collator)
+        data_collator=data_collator,
+    )
 
     # training
     trainer.train()
@@ -33,5 +35,5 @@ def train():
     trainer.save_model(output_dir=training_args.output_dir)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     train()

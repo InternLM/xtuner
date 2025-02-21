@@ -1,21 +1,18 @@
+# Copyright (c) OpenMMLab. All rights reserved.
+import bisect
+import itertools
 import random
 
 import numpy as np
 import torch
 from datasets import Dataset, concatenate_datasets
 from torch.utils.data import ConcatDataset
-import bisect
-import itertools
 
 
 class SoftPackDataset(torch.utils.data.Dataset):
-
     def __init__(self, datasets, target=2048, blend=False, sort=False):
-
         if blend:
-            num_tokens = [
-                np.concatenate([dset.num_tokens for dset in datasets])
-            ]
+            num_tokens = [np.concatenate([dset.num_tokens for dset in datasets])]
             datasets = [ConcatDataset(datasets)]
         else:
             num_tokens = [dset.num_tokens for dset in datasets]
@@ -30,7 +27,7 @@ class SoftPackDataset(torch.utils.data.Dataset):
 
     @property
     def longest(self):
-        return self.pack_infos['longest']
+        return self.pack_infos["longest"]
 
     def get_pack_infos(self, dataset, dataset_id, num_tokens):
         # _ori_lens = dataset['num_tokens']
@@ -50,9 +47,9 @@ class SoftPackDataset(torch.utils.data.Dataset):
             else:
                 if len(item_buffer) > 0:
                     info = {
-                        'dataset_id': dataset_id,
-                        'indices': item_buffer,
-                        'longest': int(longest)
+                        "dataset_id": dataset_id,
+                        "indices": item_buffer,
+                        "longest": int(longest),
                     }
                     pack_infos.append(info)
 
@@ -62,9 +59,9 @@ class SoftPackDataset(torch.utils.data.Dataset):
 
         if len(item_buffer) > 0:
             info = {
-                'dataset_id': dataset_id,
-                'indices': item_buffer,
-                'longest': int(longest)
+                "dataset_id": dataset_id,
+                "indices": item_buffer,
+                "longest": int(longest),
             }
 
             pack_infos.append(info)
@@ -77,20 +74,15 @@ class SoftPackDataset(torch.utils.data.Dataset):
         return len(self.pack_infos)
 
     def __getitem__(self, item):
-        indices = self.pack_infos[item]['indices']
-        dataset_id = self.pack_infos[item]['dataset_id']
+        indices = self.pack_infos[item]["indices"]
+        dataset_id = self.pack_infos[item]["dataset_id"]
         return [self.datasets[dataset_id][i] for i in indices]
 
 
 class HardPackDataset(torch.utils.data.Dataset):
-   
-
     def __init__(self, datasets, target=2048, blend=True, sort=False):
-
         if blend:
-            num_tokens = [
-                np.concatenate([dset.num_tokens for dset in datasets])
-            ]
+            num_tokens = [np.concatenate([dset.num_tokens for dset in datasets])]
             datasets = [ConcatDataset(datasets)]
         else:
             num_tokens = [dset.num_tokens for dset in datasets]
@@ -109,26 +101,24 @@ class HardPackDataset(torch.utils.data.Dataset):
         _max_length_per_pack = []
         _dataset_id = []
         for info in pack_infos:
-            _ranges_left.extend(info['ranges_left'])
-            _ranges_right.extend(info['ranges_right'])
-            _num_packed_samples.append(info['num_packed_samples'])
-            _indices.extend(info['indices'])
-            _max_length_per_pack.extend(info['max_length_per_pack'])
-            _dataset_id.extend(info['dataset_id'])
+            _ranges_left.extend(info["ranges_left"])
+            _ranges_right.extend(info["ranges_right"])
+            _num_packed_samples.append(info["num_packed_samples"])
+            _indices.extend(info["indices"])
+            _max_length_per_pack.extend(info["max_length_per_pack"])
+            _dataset_id.extend(info["dataset_id"])
 
         self.pack_infos = {
-            'ranges_left': _ranges_left,
-            'ranges_right': _ranges_right,
-            'num_packed_samples': _num_packed_samples,
-            'indices': _indices,
-            'max_length_per_pack':_max_length_per_pack,
-            'dataset_id': _dataset_id
+            "ranges_left": _ranges_left,
+            "ranges_right": _ranges_right,
+            "num_packed_samples": _num_packed_samples,
+            "indices": _indices,
+            "max_length_per_pack": _max_length_per_pack,
+            "dataset_id": _dataset_id,
         }
-        
 
     @classmethod
-    def _cal_max_length(cls, begin, end, shfl_item_rngs_left,
-                        shfl_item_rngs_right):
+    def _cal_max_length(cls, begin, end, shfl_item_rngs_left, shfl_item_rngs_right):
         left = bisect.bisect(shfl_item_rngs_right, begin)
         right = bisect.bisect(shfl_item_rngs_left, end)
         max_length = 0
@@ -142,7 +132,6 @@ class HardPackDataset(torch.utils.data.Dataset):
         return max_length
 
     def get_pack_info(self, dataset, dataset_id, num_tokens):
-
         # The number of data items after packing
         num_packed_samples = int(num_tokens.sum() / self.target)
 
@@ -173,17 +162,19 @@ class HardPackDataset(torch.utils.data.Dataset):
             begin = i * self.target
             end = (i + 1) * self.target
             max_length_per_pack.append(
-                self._cal_max_length(begin, end, shfl_item_rngs_left,
-                                    shfl_item_rngs_right))
+                self._cal_max_length(
+                    begin, end, shfl_item_rngs_left, shfl_item_rngs_right
+                )
+            )
             belong_dataset_ids.append(dataset_id)
-            
+
         pack_infos = {
-            'ranges_left': shfl_item_rngs_left,
-            'ranges_right': shfl_item_rngs_right,
-            'num_packed_samples': num_packed_samples,
-            'indices': shfl_inds,
-            'dataset_id': belong_dataset_ids,
-            'max_length_per_pack': max_length_per_pack
+            "ranges_left": shfl_item_rngs_left,
+            "ranges_right": shfl_item_rngs_right,
+            "num_packed_samples": num_packed_samples,
+            "indices": shfl_inds,
+            "dataset_id": belong_dataset_ids,
+            "max_length_per_pack": max_length_per_pack,
         }
 
         # pack_infos = Dataset.from_list(pack_infos)
@@ -203,28 +194,27 @@ class HardPackDataset(torch.utils.data.Dataset):
 
         # Use binary search to find dataset positions that fall within begin
         # and end range
-        left = bisect.bisect(self.pack_infos['ranges_left'], begin)
-        right = bisect.bisect(self.pack_infos['ranges_right'], end)
+        left = bisect.bisect(self.pack_infos["ranges_left"], begin)
+        right = bisect.bisect(self.pack_infos["ranges_right"], end)
 
         trunc_input_ids = []
         trunc_labels = []
         trunc_sizes = []
 
         for i in range(left, right):
-
             # Determine the real range we will cut in current original item
-            item_begin = self.pack_infos['ranges_left'][i]
-            item_end = self.pack_infos['ranges_right'][i]
+            item_begin = self.pack_infos["ranges_left"][i]
+            item_end = self.pack_infos["ranges_right"][i]
 
             # Calculate exact positions within current dataset item
             inner_l = max(begin, item_begin) - item_begin
             inner_r = min(end, item_end) - item_begin
 
             # Get original data and labels
-            ori_idx = self.pack_infos['indices'][i]
-            ori_dataset_id = self.pack_infos['dataset_id'][i]
-            ori_input_ids = self.datasets[ori_dataset_id][ori_idx]['input_ids']
-            ori_labels = self.datasets[ori_dataset_id][ori_idx]['labels']
+            ori_idx = self.pack_infos["indices"][i]
+            ori_dataset_id = self.pack_infos["dataset_id"][i]
+            ori_input_ids = self.datasets[ori_dataset_id][ori_idx]["input_ids"]
+            ori_labels = self.datasets[ori_dataset_id][ori_idx]["labels"]
 
             # Add original data and labels from calculated positions
             # to trunc_ids and trunc_labels
@@ -237,7 +227,7 @@ class HardPackDataset(torch.utils.data.Dataset):
         return trunc_input_ids, trunc_labels, trunc_sizes
 
     def __len__(self):
-        return len(self.pack_infos['indices'])
+        return len(self.pack_infos["indices"])
 
     def __getitem__(self, item):
         """Returns a dict containing packed data in the given item.
@@ -259,9 +249,9 @@ class HardPackDataset(torch.utils.data.Dataset):
         assert self.target == len(packed_input_ids) == len(packed_labels)
 
         packed = {
-            'input_ids': packed_input_ids,
-            'labels': packed_labels,
-            'num_tokens': num_tokens,
+            "input_ids": packed_input_ids,
+            "labels": packed_labels,
+            "num_tokens": num_tokens,
         }
 
         return packed

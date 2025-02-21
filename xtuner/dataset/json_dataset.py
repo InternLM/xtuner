@@ -1,3 +1,4 @@
+# Copyright (c) OpenMMLab. All rights reserved.
 import json
 import os
 
@@ -16,7 +17,7 @@ def load_json_file(data_files=None, data_dir=None, suffix=None):
 
     dataset_list = []
     for fp in data_files:
-        with open(fp, encoding='utf-8') as file:
+        with open(fp, encoding="utf-8") as file:
             data = json.load(file)
         ds = Dataset.from_list(data)
         dataset_list.append(ds)

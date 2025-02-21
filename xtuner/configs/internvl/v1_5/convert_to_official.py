@@ -1,3 +1,4 @@
+# Copyright (c) OpenMMLab. All rights reserved.
 import argparse
 import os.path as osp
 
@@ -30,7 +31,8 @@ def convert_to_official(config, trained_path, save_path):
     model.model.save_pretrained(save_path)
 
     tokenizer = AutoTokenizer.from_pretrained(
-        cfg.model.model_path, trust_remote_code=True)
+        cfg.model.model_path, trust_remote_code=True
+    )
     tokenizer.save_pretrained(save_path)
 
     print(model)
@@ -38,19 +40,18 @@ def convert_to_official(config, trained_path, save_path):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Convert the pth model to HuggingFace model')
-    parser.add_argument('config', help='config file name or path.')
-    parser.add_argument('trained_model_pth', help='The trained model path.')
-    parser.add_argument(
-        'save_path', help='The path to save the converted model.')
+        description="Convert the pth model to HuggingFace model"
+    )
+    parser.add_argument("config", help="config file name or path.")
+    parser.add_argument("trained_model_pth", help="The trained model path.")
+    parser.add_argument("save_path", help="The path to save the converted model.")
     args = parser.parse_args()
 
     if osp.realpath(args.trained_model_pth) == osp.realpath(args.save_path):
-        raise ValueError(
-            'The trained path and save path should not be the same.')
+        raise ValueError("The trained path and save path should not be the same.")
 
     convert_to_official(args.config, args.trained_model_pth, args.save_path)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

@@ -7,16 +7,19 @@ from einops import rearrange
 from mmengine import MessageHub
 from transformers.cache_utils import Cache, StaticCache
 
-from xtuner.parallel.sequence import (get_sequence_parallel_world_size,
-                                      post_process_for_sequence_parallel_attn,
-                                      pre_process_for_sequence_parallel_attn)
+from xtuner.parallel.sequence import (
+    get_sequence_parallel_world_size,
+    post_process_for_sequence_parallel_attn,
+    pre_process_for_sequence_parallel_attn,
+)
+
 from .attention import SUPPORT_FLASH2, flash_attn_wo_mask, varlen_flash_attn
 
 
 def rotate_half(x):
     """Rotates half the hidden dims of the input."""
-    x1 = x[..., :x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2:]
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
     return torch.cat((-x2, x1), dim=-1)
 
 
@@ -32,18 +35,16 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     """This is the equivalent of torch.repeat_interleave(x, dim=1,
     repeats=n_rep).
 
-    The hidden states go from (batch, num_key_value_heads, seqlen, head_dim) to
-    (batch, num_attention_heads, seqlen, head_dim)
+    The hidden states go from (batch, num_key_value_heads, seqlen, head_dim) to (batch, num_attention_heads, seqlen,
+    head_dim)
     """
     batch, num_key_value_heads, slen, head_dim = hidden_states.shape
     if n_rep == 1:
         return hidden_states
-    hidden_states = hidden_states[:, :,
-                                  None, :, :].expand(batch,
-                                                     num_key_value_heads,
-                                                     n_rep, slen, head_dim)
-    return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen,
-                                 head_dim)
+    hidden_states = hidden_states[:, :, None, :, :].expand(
+        batch, num_key_value_heads, n_rep, slen, head_dim
+    )
+    return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 
 
 def repeat_kv_bshd(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
@@ -52,12 +53,10 @@ def repeat_kv_bshd(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     batch, slen, num_key_value_heads, head_dim = hidden_states.shape
     if n_rep == 1:
         return hidden_states
-    hidden_states = hidden_states[:, :, :,
-                                  None, :].expand(batch, slen,
-                                                  num_key_value_heads, n_rep,
-                                                  head_dim)
-    return hidden_states.reshape(batch, slen, num_key_value_heads * n_rep,
-                                 head_dim)
+    hidden_states = hidden_states[:, :, :, None, :].expand(
+        batch, slen, num_key_value_heads, n_rep, head_dim
+    )
+    return hidden_states.reshape(batch, slen, num_key_value_heads * n_rep, head_dim)
 
 
 def internlm2_attn_forward(
@@ -72,10 +71,11 @@ def internlm2_attn_forward(
 ):
     if isinstance(past_key_value, StaticCache):
         raise ValueError(
-            '`static` cache implementation is not compatible with '
-            '`attn_implementation==flash_attention_2` make sure to use `sdpa` '
-            'in the mean time, and open an issue at '
-            'https://github.com/huggingface/transformers')
+            "`static` cache implementation is not compatible with "
+            "`attn_implementation==flash_attention_2` make sure to use `sdpa` "
+            "in the mean time, and open an issue at "
+            "https://github.com/huggingface/transformers"
+        )
 
     output_attentions = False
 
@@ -85,13 +85,13 @@ def internlm2_attn_forward(
 
     qkv_states = rearrange(
         qkv_states,
-        'b q (h gs d) -> b q h gs d',
+        "b q (h gs d) -> b q h gs d",
         gs=2 + self.num_key_value_groups,
         d=self.head_dim,
     )
 
-    query_states = qkv_states[..., :self.num_key_value_groups, :]
-    query_states = rearrange(query_states, 'b q h gs d -> b q (h gs) d')
+    query_states = qkv_states[..., : self.num_key_value_groups, :]
+    query_states = rearrange(query_states, "b q h gs d -> b q (h gs) d")
     key_states = qkv_states[..., -2, :]
     value_states = qkv_states[..., -1, :]
 
@@ -100,19 +100,15 @@ def internlm2_attn_forward(
     value_states = value_states.transpose(1, 2)
 
     cos, sin = self.rotary_emb(value_states, position_ids)
-    query_states, key_states = apply_rotary_pos_emb(query_states, key_states,
-                                                    cos, sin)
+    query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
     if past_key_value is not None:
         # sin and cos are specific to RoPE models;
         # cache_position needed for the static cache
-        cache_kwargs = {
-            'sin': sin,
-            'cos': cos,
-            'cache_position': cache_position
-        }
+        cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
         key_states, value_states = past_key_value.update(
-            key_states, value_states, self.layer_idx, cache_kwargs)
+            key_states, value_states, self.layer_idx, cache_kwargs
+        )
 
     key_states = repeat_kv(key_states, self.num_key_value_groups)
     value_states = repeat_kv(value_states, self.num_key_value_groups)
@@ -133,7 +129,7 @@ def internlm2_attn_forward(
         if torch.is_autocast_enabled():
             target_dtype = torch.get_autocast_gpu_dtype()
         # Handle the case where the model is quantized
-        elif hasattr(self.config, '_pre_quantization_dtype'):
+        elif hasattr(self.config, "_pre_quantization_dtype"):
             target_dtype = self.config._pre_quantization_dtype
         else:
             target_dtype = self.wqkv.weight.dtype
@@ -143,12 +139,14 @@ def internlm2_attn_forward(
         value_states = value_states.to(target_dtype)
 
     enable_sequence_parallel = (
-        dist.is_initialized() and get_sequence_parallel_world_size() > 1
-        and self.training)
+        dist.is_initialized()
+        and get_sequence_parallel_world_size() > 1
+        and self.training
+    )
     if enable_sequence_parallel:
-        query_states, key_states, value_states = \
-            pre_process_for_sequence_parallel_attn(
-                query_states, key_states, value_states)
+        query_states, key_states, value_states = pre_process_for_sequence_parallel_attn(
+            query_states, key_states, value_states
+        )
         # self.num_heads is used in self._upad_input method
         # num_heads has been changed because of sequence parallel
         ori_num_head = self.num_heads
@@ -161,7 +159,8 @@ def internlm2_attn_forward(
         value_states,
         attention_mask,
         query_states.shape[1],
-        dropout=dropout_rate)
+        dropout=dropout_rate,
+    )
 
     if enable_sequence_parallel:
         attn_output = post_process_for_sequence_parallel_attn(attn_output)
@@ -185,38 +184,39 @@ def internlm2_varlen_attn_forward(
     output_attentions: bool = False,
     use_cache: bool = False,
     cache_position: Optional[torch.LongTensor] = None,
-) -> Tuple[torch.Tensor, Optional[torch.Tensor],
-           Optional[Tuple[torch.Tensor]]]:
-
+) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
     if isinstance(past_key_value, StaticCache):
         raise ValueError(
-            '`static` cache implementation is not compatible with '
-            '`attn_implementation==flash_attention_2` make sure to use `sdpa` '
-            'in the mean time, and open an issue at '
-            'https://github.com/huggingface/transformers')
+            "`static` cache implementation is not compatible with "
+            "`attn_implementation==flash_attention_2` make sure to use `sdpa` "
+            "in the mean time, and open an issue at "
+            "https://github.com/huggingface/transformers"
+        )
 
-    message_hub = MessageHub.get_instance('varlen_attn_args')
+    message_hub = MessageHub.get_instance("varlen_attn_args")
     rank = dist.get_rank()
-    cumulative_len = message_hub.get_info(f'cumulative_len_rank_{rank}')
-    max_seqlen = message_hub.get_info(f'max_seqlen_rank_{rank}')
-    use_varlen_atten = (cumulative_len is not None)
+    cumulative_len = message_hub.get_info(f"cumulative_len_rank_{rank}")
+    max_seqlen = message_hub.get_info(f"max_seqlen_rank_{rank}")
+    use_varlen_atten = cumulative_len is not None
 
     bsz, q_len, _ = hidden_states.size()
 
-    assert bsz == 1, (f'If utilizing local attention, the batch size should be'
-                      f' set to 1, but got {bsz}')
+    assert bsz == 1, (
+        f"If utilizing local attention, the batch size should be"
+        f" set to 1, but got {bsz}"
+    )
 
     qkv_states = self.wqkv(hidden_states)
 
     qkv_states = rearrange(
         qkv_states,
-        'b q (h gs d) -> b q h gs d',
+        "b q (h gs d) -> b q h gs d",
         gs=2 + self.num_key_value_groups,
         d=self.head_dim,
     )
 
-    query_states = qkv_states[..., :self.num_key_value_groups, :]
-    query_states = rearrange(query_states, 'b q h gs d -> b q (h gs) d')
+    query_states = qkv_states[..., : self.num_key_value_groups, :]
+    query_states = rearrange(query_states, "b q h gs d -> b q (h gs) d")
     key_states = qkv_states[..., -2, :]
     value_states = qkv_states[..., -1, :]
 
@@ -228,22 +228,19 @@ def internlm2_varlen_attn_forward(
         cos, sin = self.rotary_emb(value_states, position_ids)
     except RuntimeError:
         raise RuntimeError(
-            'You are using the old version of InternLM2 model. The '
-            '`modeling_internlm2.py` is outdated. Please update the InternLM2 '
-            'model.')
-    query_states, key_states = apply_rotary_pos_emb(query_states, key_states,
-                                                    cos, sin)
+            "You are using the old version of InternLM2 model. The "
+            "`modeling_internlm2.py` is outdated. Please update the InternLM2 "
+            "model."
+        )
+    query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
     if past_key_value is not None:
         # sin and cos are specific to RoPE models;
         # cache_position needed for the static cache
-        cache_kwargs = {
-            'sin': sin,
-            'cos': cos,
-            'cache_position': cache_position
-        }
+        cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
         key_states, value_states = past_key_value.update(
-            key_states, value_states, self.layer_idx, cache_kwargs)
+            key_states, value_states, self.layer_idx, cache_kwargs
+        )
 
     query_states = query_states.transpose(1, 2)
     key_states = key_states.transpose(1, 2)
@@ -261,7 +258,7 @@ def internlm2_varlen_attn_forward(
         if torch.is_autocast_enabled():
             target_dtype = torch.get_autocast_gpu_dtype()
         # Handle the case where the model is quantized
-        elif hasattr(self.config, '_pre_quantization_dtype'):
+        elif hasattr(self.config, "_pre_quantization_dtype"):
             target_dtype = self.config._pre_quantization_dtype
         else:
             target_dtype = self.wqkv.weight.dtype
@@ -286,7 +283,8 @@ def internlm2_varlen_attn_forward(
             max_seqlen,
             causal=True,
             dropout_p=dropout_rate,
-            training=self.training)
+            training=self.training,
+        )
     else:
         attn_output = flash_attn_wo_mask(
             query_states,
@@ -294,7 +292,8 @@ def internlm2_varlen_attn_forward(
             value_states,
             causal=True,
             dropout_p=dropout_rate,
-            training=self.training)
+            training=self.training,
+        )
 
     attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
 

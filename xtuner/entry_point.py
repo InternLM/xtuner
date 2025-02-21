@@ -10,12 +10,21 @@ from mmengine.logging import print_log
 import xtuner
 
 # Define valid modes
-MODES = ('list-cfg', 'copy-cfg', 'log-dataset', 'check-custom-dataset',
-         'train', 'test', 'chat', 'convert', 'preprocess', 'mmbench',
-         'eval_refcoco')
+MODES = (
+    "list-cfg",
+    "copy-cfg",
+    "log-dataset",
+    "check-custom-dataset",
+    "train",
+    "test",
+    "chat",
+    "convert",
+    "preprocess",
+    "mmbench",
+    "eval_refcoco",
+)
 
-CLI_HELP_MSG = \
-    f"""
+CLI_HELP_MSG = f"""
     Arguments received: {str(['xtuner'] + sys.argv[1:])}. xtuner commands use the following syntax:
 
         xtuner MODE MODE_ARGS ARGS
@@ -68,8 +77,7 @@ CLI_HELP_MSG = \
     """  # noqa: E501
 
 
-CONVERT_HELP_MSG = \
-    f"""
+CONVERT_HELP_MSG = f"""
     Arguments received: {str(['xtuner'] + sys.argv[1:])}. xtuner commands use the following syntax:
 
         xtuner MODE MODE_ARGS ARGS
@@ -91,8 +99,7 @@ CONVERT_HELP_MSG = \
     """  # noqa: E501
 
 
-PREPROCESS_HELP_MSG = \
-    f"""
+PREPROCESS_HELP_MSG = f"""
     Arguments received: {str(['xtuner'] + sys.argv[1:])}. xtuner commands use the following syntax:
 
         xtuner MODE MODE_ARGS ARGS
@@ -112,139 +119,164 @@ PREPROCESS_HELP_MSG = \
     """  # noqa: E501
 
 special = {
-    'help': lambda: print_log(CLI_HELP_MSG, 'current'),
-    'version': lambda: print_log(xtuner.__version__, 'current')
+    "help": lambda: print_log(CLI_HELP_MSG, "current"),
+    "version": lambda: print_log(xtuner.__version__, "current"),
 }
 special = {
     **special,
-    **{f'-{k[0]}': v
-       for k, v in special.items()},
-    **{f'--{k}': v
-       for k, v in special.items()}
+    **{f"-{k[0]}": v for k, v in special.items()},
+    **{f"--{k}": v for k, v in special.items()},
 }
 
 
 def list_dataset_format():
     from xtuner.tools import list_dataset_format
+
     return list_dataset_format.__file__
 
 
 def list_cfg():
     from xtuner.tools import list_cfg
+
     return list_cfg.__file__
 
 
 def copy_cfg():
     from xtuner.tools import copy_cfg
+
     return copy_cfg.__file__
 
 
 def log_dataset():
     from xtuner.tools import log_dataset
+
     return log_dataset.__file__
 
 
 def check_custom_dataset():
     from xtuner.tools import check_custom_dataset
+
     return check_custom_dataset.__file__
 
 
 def train():
     from xtuner.tools import train
+
     return train.__file__
 
 
 def test():
     from xtuner.tools import test
+
     return test.__file__
 
 
 def chat():
     from xtuner.tools import chat
+
     return chat.__file__
 
 
 def mmbench():
     from xtuner.tools import mmbench
+
     return mmbench.__file__
 
 
 def pth_to_hf():
     from xtuner.tools.model_converters import pth_to_hf
+
     return pth_to_hf.__file__
 
 
 def merge():
     from xtuner.tools.model_converters import merge
+
     return merge.__file__
 
 
 def split():
     from xtuner.tools.model_converters import split
+
     return split.__file__
 
 
 def arxiv_preprocess():
     from xtuner.tools.data_preprocess import arxiv as arxiv_preprocess
+
     return arxiv_preprocess.__file__
 
 
 def convert_refcoco():
     from xtuner.tools.data_preprocess import convert_refcoco
+
     return convert_refcoco.__file__
 
 
 def convert_help_msg():
-    print_log(CONVERT_HELP_MSG, 'current')
+    print_log(CONVERT_HELP_MSG, "current")
 
 
 def preprocess_help_msg():
-    print_log(PREPROCESS_HELP_MSG, 'current')
+    print_log(PREPROCESS_HELP_MSG, "current")
 
 
 def eval_refcoco():
     from xtuner.tools import eval_refcoco
+
     return eval_refcoco.__file__
 
 
 modes = {
-    'list-cfg': list_cfg,
-    'copy-cfg': copy_cfg,
-    'log-dataset': log_dataset,
-    'check-custom-dataset': check_custom_dataset,
-    'train': train,
-    'test': test,
-    'chat': chat,
-    'mmbench': mmbench,
-    'convert': {
-        'pth_to_hf': pth_to_hf,
-        'merge': merge,
-        'split': split,
-        '--help': convert_help_msg,
-        '-h': convert_help_msg
+    "list-cfg": list_cfg,
+    "copy-cfg": copy_cfg,
+    "log-dataset": log_dataset,
+    "check-custom-dataset": check_custom_dataset,
+    "train": train,
+    "test": test,
+    "chat": chat,
+    "mmbench": mmbench,
+    "convert": {
+        "pth_to_hf": pth_to_hf,
+        "merge": merge,
+        "split": split,
+        "--help": convert_help_msg,
+        "-h": convert_help_msg,
     },
-    'preprocess': {
-        'arxiv': arxiv_preprocess,
-        'refcoco': convert_refcoco,
-        '--help': preprocess_help_msg,
-        '-h': preprocess_help_msg
+    "preprocess": {
+        "arxiv": arxiv_preprocess,
+        "refcoco": convert_refcoco,
+        "--help": preprocess_help_msg,
+        "-h": preprocess_help_msg,
     },
-    'eval_refcoco': eval_refcoco,
-    'list-dataset-format': list_dataset_format
+    "eval_refcoco": eval_refcoco,
+    "list-dataset-format": list_dataset_format,
 }
 
 HELP_FUNCS = [preprocess_help_msg, convert_help_msg]
 MAP_FILE_FUNCS = [
-    list_cfg, copy_cfg, log_dataset, check_custom_dataset, train, test, chat,
-    mmbench, pth_to_hf, merge, split, arxiv_preprocess, eval_refcoco,
-    convert_refcoco, list_dataset_format
+    list_cfg,
+    copy_cfg,
+    log_dataset,
+    check_custom_dataset,
+    train,
+    test,
+    chat,
+    mmbench,
+    pth_to_hf,
+    merge,
+    split,
+    arxiv_preprocess,
+    eval_refcoco,
+    convert_refcoco,
+    list_dataset_format,
 ]
 
 
 def cli():
     args = sys.argv[1:]
     if not args:  # no arguments passed
-        print_log(CLI_HELP_MSG, 'current')
+        print_log(CLI_HELP_MSG, "current")
         return
     if args[0].lower() in special:
         special[args[0].lower()]()
@@ -267,36 +299,40 @@ def cli():
             else:
                 slurm_launcher = False
                 for i in range(n_arg + 1, len(args)):
-                    if args[i] == '--launcher':
-                        if i + 1 < len(args) and args[i + 1] == 'slurm':
+                    if args[i] == "--launcher":
+                        if i + 1 < len(args) and args[i + 1] == "slurm":
                             slurm_launcher = True
                         break
-                nnodes = int(os.environ.get('NNODES', 1))
-                nproc_per_node = int(os.environ.get('NPROC_PER_NODE', 1))
+                nnodes = int(os.environ.get("NNODES", 1))
+                nproc_per_node = int(os.environ.get("NPROC_PER_NODE", 1))
                 if slurm_launcher or (nnodes == 1 and nproc_per_node == 1):
-                    subprocess.run(['python', fn()] + args[n_arg + 1:])
+                    subprocess.run(["python", fn()] + args[n_arg + 1 :])
                 else:
-                    port = os.environ.get('PORT', None)
+                    port = os.environ.get("PORT", None)
                     if port is None:
                         port = random.randint(20000, 29999)
-                        print_log(f'Use random port: {port}', 'current',
-                                  logging.WARNING)
+                        print_log(
+                            f"Use random port: {port}", "current", logging.WARNING
+                        )
                     torchrun_args = [
-                        f'--nnodes={nnodes}',
+                        f"--nnodes={nnodes}",
                         f"--node_rank={os.environ.get('NODE_RANK', 0)}",
-                        f'--nproc_per_node={nproc_per_node}',
+                        f"--nproc_per_node={nproc_per_node}",
                         f"--master_addr={os.environ.get('ADDR', '127.0.0.1')}",
-                        f'--master_port={port}'
+                        f"--master_port={port}",
                     ]
-                    subprocess.run(['torchrun'] + torchrun_args + [fn()] +
-                                   args[n_arg + 1:] +
-                                   ['--launcher', 'pytorch'])
+                    subprocess.run(
+                        ["torchrun"]
+                        + torchrun_args
+                        + [fn()]
+                        + args[n_arg + 1 :]
+                        + ["--launcher", "pytorch"]
+                    )
         except Exception as e:
-            print_log(f"WARNING: command error: '{e}'!", 'current',
-                      logging.WARNING)
-            print_log(CLI_HELP_MSG, 'current', logging.WARNING)
+            print_log(f"WARNING: command error: '{e}'!", "current", logging.WARNING)
+            print_log(CLI_HELP_MSG, "current", logging.WARNING)
             return
     else:
-        print_log('WARNING: command error!', 'current', logging.WARNING)
-        print_log(CLI_HELP_MSG, 'current', logging.WARNING)
+        print_log("WARNING: command error!", "current", logging.WARNING)
+        print_log(CLI_HELP_MSG, "current", logging.WARNING)
         return

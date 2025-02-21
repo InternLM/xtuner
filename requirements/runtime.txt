@@ -1,6 +1,7 @@
 bitsandbytes==0.45.0
 datasets>=3.2.0
 einops
+loguru
 mmengine==0.10.6
 openpyxl
 peft>=0.14.0
@@ -12,4 +13,3 @@ torch
 torchvision
 transformers==4.48.0
 transformers_stream_generator
-loguru

@@ -1,9 +1,8 @@
+# Copyright (c) OpenMMLab. All rights reserved.
 # This code is inspired by the torchtune.
 # https://github.com/pytorch/torchtune/blob/main/torchtune/utils/_device.py
 
-import os
 import logging
-from enum import Enum
 from typing import Optional
 
 import torch
@@ -12,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 
 def is_torch_npu_available() -> bool:
-    """Check the availability of NPU"""
+    """Check the availability of NPU."""
     try:
         import torch_npu  # noqa: F401
 
@@ -43,8 +42,9 @@ def get_device_name() -> str:
 
 
 def get_device(device_name: Optional[str] = None) -> torch.device:
-    """Function that takes an optional device string, verifies it's correct and available given the machine and
-    distributed settings, and returns a :func:`~torch.device`. If device string is not provided, this function will
+    """Function that takes an optional device string, verifies it's correct and
+    available given the machine and distributed settings, and returns a
+    :func:`~torch.device`. If device string is not provided, this function will
     infer the device based on the environment.
 
     If CUDA-like is available and being used, this function also sets the CUDA-like device.
@@ -67,7 +67,8 @@ def get_device(device_name: Optional[str] = None) -> torch.device:
 
 
 def get_torch_device() -> any:
-    """Return the corresponding torch attribute based on the device type string.
+    """Return the corresponding torch attribute based on the device type
+    string.
 
     Returns:
         module: The corresponding torch device namespace, or torch.cuda if not found.

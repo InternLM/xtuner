@@ -2,16 +2,24 @@
 import torch
 from datasets import load_dataset
 from mmengine.dataset import DefaultSampler
-from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
-                            LoggerHook, ParamSchedulerHook)
+from mmengine.hooks import (
+    CheckpointHook,
+    DistSamplerSeedHook,
+    IterTimerHook,
+    LoggerHook,
+    ParamSchedulerHook,
+)
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR, LinearLR
 from torch.optim import AdamW
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from xtuner.dataset import process_hf_dataset
 from xtuner.dataset.collate_fns import default_collate_fn
-from xtuner.engine.hooks import (DatasetInfoHook, ThroughputHook,
-                                 VarlenAttnArgsToMessageHubHook)
+from xtuner.engine.hooks import (
+    DatasetInfoHook,
+    ThroughputHook,
+    VarlenAttnArgsToMessageHubHook,
+)
 from xtuner.engine.runner import TrainLoop
 from xtuner.model import SupervisedFinetune
 from xtuner.parallel.sequence import SequenceParallelSampler
@@ -21,20 +29,20 @@ from xtuner.utils import PROMPT_TEMPLATE
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-pretrained_model_name_or_path = 'meta-llama/Llama-2-7b-hf'
+pretrained_model_name_or_path = "meta-llama/Llama-2-7b-hf"
 use_varlen_attn = False
 
 # Data
-data_path = 'emozilla/pg_books-tokenized-bos-eos-chunked-65536'
+data_path = "emozilla/pg_books-tokenized-bos-eos-chunked-65536"
 data_files = [
-    'data/train-00000-of-00136-877a1768c20d5900.parquet',
-    'data/train-00001-of-00136-70d7d139dca61754.parquet',
-    'data/train-00002-of-00136-62d53594e098f3d8.parquet',
-    'data/train-00003-of-00136-8bd300fecc4c720e.parquet',
-    'data/train-00004-of-00136-2a9456b5f975ae95.parquet',
-    'data/train-00005-of-00136-ca38cf7907bb7555.parquet',
-    'data/train-00006-of-00136-1ae2e4c63f3966da.parquet',
-    'data/train-00007-of-00136-a00cc39a4ee65ab6.parquet',
+    "data/train-00000-of-00136-877a1768c20d5900.parquet",
+    "data/train-00001-of-00136-70d7d139dca61754.parquet",
+    "data/train-00002-of-00136-62d53594e098f3d8.parquet",
+    "data/train-00003-of-00136-8bd300fecc4c720e.parquet",
+    "data/train-00004-of-00136-2a9456b5f975ae95.parquet",
+    "data/train-00005-of-00136-ca38cf7907bb7555.parquet",
+    "data/train-00006-of-00136-1ae2e4c63f3966da.parquet",
+    "data/train-00007-of-00136-a00cc39a4ee65ab6.parquet",
 ]
 prompt_template = PROMPT_TEMPLATE.llama2_chat
 max_length = 65536
@@ -68,7 +76,8 @@ tokenizer = dict(
     type=AutoTokenizer.from_pretrained,
     pretrained_model_name_or_path=pretrained_model_name_or_path,
     trust_remote_code=True,
-    padding_side='right')
+    padding_side="right",
+)
 
 model = dict(
     type=SupervisedFinetune,
@@ -79,7 +88,9 @@ model = dict(
         pretrained_model_name_or_path=pretrained_model_name_or_path,
         trust_remote_code=True,
         torch_dtype=torch.bfloat16,
-        attn_implementation='flash_attention_2'))
+        attn_implementation="flash_attention_2",
+    ),
+)
 
 #######################################################################
 #                      PART 3  Dataset & Dataloader                   #
@@ -90,20 +101,22 @@ train_dataset = dict(
         type=load_dataset,
         path=data_path,
         data_files=data_files,
-        ignore_verifications=True),
+        ignore_verifications=True,
+    ),
     do_dataset_tokenization=False,
     remove_unused_columns=True,
     pack_to_max_length=pack_to_max_length,
-    use_varlen_attn=use_varlen_attn)
+    use_varlen_attn=use_varlen_attn,
+)
 
-sampler = SequenceParallelSampler \
-    if sequence_parallel_size > 1 else DefaultSampler
+sampler = SequenceParallelSampler if sequence_parallel_size > 1 else DefaultSampler
 train_dataloader = dict(
     batch_size=batch_size,
     num_workers=dataloader_num_workers,
     dataset=train_dataset,
     sampler=dict(type=sampler, shuffle=True),
-    collate_fn=dict(type=default_collate_fn, use_varlen_attn=use_varlen_attn))
+    collate_fn=dict(type=default_collate_fn, use_varlen_attn=use_varlen_attn),
+)
 
 #######################################################################
 #                    PART 4  Scheduler & Optimizer                    #
@@ -111,11 +124,11 @@ train_dataloader = dict(
 # optimizer
 optim_wrapper = dict(
     type=AmpOptimWrapper,
-    optimizer=dict(
-        type=optim_type, lr=lr, betas=betas, weight_decay=weight_decay),
+    optimizer=dict(type=optim_type, lr=lr, betas=betas, weight_decay=weight_decay),
     clip_grad=dict(max_norm=max_norm, error_if_nonfinite=False),
     accumulative_counts=accumulative_counts,
-    loss_scale='dynamic')
+    loss_scale="dynamic",
+)
 
 # learning policy
 # More information: https://github.com/open-mmlab/mmengine/blob/main/docs/en/tutorials/param_scheduler.md  # noqa: E501
@@ -126,14 +139,16 @@ param_scheduler = [
         by_epoch=True,
         begin=0,
         end=warmup_ratio * max_epochs,
-        convert_to_iter_based=True),
+        convert_to_iter_based=True,
+    ),
     dict(
         type=CosineAnnealingLR,
         eta_min=lr * 0.15,
         by_epoch=True,
         begin=warmup_ratio * max_epochs,
         end=max_epochs,
-        convert_to_iter_based=True)
+        convert_to_iter_based=True,
+    ),
 ]
 
 # train, val, test setting
@@ -145,7 +160,7 @@ train_cfg = dict(type=TrainLoop, max_epochs=max_epochs)
 # Log the dialogue periodically during the training process, optional
 custom_hooks = [
     dict(type=DatasetInfoHook, tokenizer=tokenizer),
-    dict(type=ThroughputHook)
+    dict(type=ThroughputHook),
 ]
 
 if use_varlen_attn:
@@ -165,7 +180,8 @@ default_hooks = dict(
         save_optimizer=False,
         by_epoch=False,
         interval=save_steps,
-        max_keep_ckpts=save_total_limit),
+        max_keep_ckpts=save_total_limit,
+    ),
     # set sampler seed in distributed evrionment.
     sampler_seed=dict(type=DistSamplerSeedHook),
 )
@@ -175,16 +191,16 @@ env_cfg = dict(
     # whether to enable cudnn benchmark
     cudnn_benchmark=False,
     # set multi process parameters
-    mp_cfg=dict(mp_start_method='fork', opencv_num_threads=0),
+    mp_cfg=dict(mp_start_method="fork", opencv_num_threads=0),
     # set distributed parameters
-    dist_cfg=dict(backend='nccl'),
+    dist_cfg=dict(backend="nccl"),
 )
 
 # set visualizer
 visualizer = None
 
 # set log level
-log_level = 'INFO'
+log_level = "INFO"
 
 # load from which checkpoint
 load_from = None
@@ -199,4 +215,5 @@ randomness = dict(seed=None, deterministic=False)
 log_processor = dict(
     by_epoch=False,
     window_size=1,
-    mean_pattern=r'.*(loss|time|data_time|grad_norm|tflops).*')
+    mean_pattern=r".*(loss|time|data_time|grad_norm|tflops).*",
+)

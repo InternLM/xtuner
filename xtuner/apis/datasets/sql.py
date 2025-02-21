@@ -9,12 +9,14 @@ from xtuner.dataset.map_fns import sql_map_fn, template_map_fn_factory
 from xtuner.utils import PROMPT_TEMPLATE
 
 
-def sql_dataset(tokenizer,
-                path='b-mc2/sql-create-context',
-                max_length=2048,
-                prompt_template=PROMPT_TEMPLATE.default,
-                remove_unused_columns=True,
-                pack_to_max_length=True):
+def sql_dataset(
+    tokenizer,
+    path="b-mc2/sql-create-context",
+    max_length=2048,
+    prompt_template=PROMPT_TEMPLATE.default,
+    remove_unused_columns=True,
+    pack_to_max_length=True,
+):
     template_map_fn = template_map_fn_factory(template=prompt_template)
     dataset_org = load_dataset(path)
     dataset = process_hf_dataset(
@@ -25,7 +27,8 @@ def sql_dataset(tokenizer,
         template_map_fn=template_map_fn,
         remove_unused_columns=remove_unused_columns,
         shuffle_before_pack=True,
-        pack_to_max_length=pack_to_max_length)
+        pack_to_max_length=pack_to_max_length,
+    )
 
     return dataset
 

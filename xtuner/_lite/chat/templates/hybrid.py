@@ -1,3 +1,4 @@
+# Copyright (c) OpenMMLab. All rights reserved.
 from typing import Dict, List, Optional
 
 from pydantic import BaseModel, field_validator
@@ -13,11 +14,11 @@ class HybridChatTemplate(BaseModel):
     user: str  # User message format
     assistant: str  # Assistant message format
     stop_words: List[str]  # List of stop words
-    sep: str = '\n'
+    sep: str = "\n"
 
     # Multimodal Chat
     # Predefined token and index for images
-    image_token: str = '<image>'
+    image_token: str = "<image>"
     image_token_index: int = -100
 
     # Agent Chat
@@ -79,118 +80,127 @@ class HybridChatTemplate(BaseModel):
     def decorate_code_interpreter_call(self, text: str, func: str) -> str:
         """Decorate text with the `code_interpreter_call` template."""
         return self.code_interpreter_call.format(
-            assistant=text, code_interpreter_call=func)
+            assistant=text, code_interpreter_call=func
+        )
 
     def decorate_code_interpreter_result(self, text: str) -> str:
         """Decorate text with the `code_interpreter_result` template."""
-        return self.code_interpreter_result.format(
-            code_interpreter_result=text)
+        return self.code_interpreter_result.format(code_interpreter_result=text)
 
-    @field_validator('system')
+    @field_validator("system")
     def check_system(cls, v: str) -> str:
         """Validate that `system` contains '{system}'.
 
         If not, raises a ValueError.
         """
-        if v is not None and '{system}' not in v:
+        if v is not None and "{system}" not in v:
             raise ValueError("system must contain the keyword '{system}'")
         return v
 
-    @field_validator('user')
+    @field_validator("user")
     def check_user(cls, v: str) -> str:
         """Validate that `user` contains '{user}'.
 
         If not, raises a ValueError.
         """
-        if v is not None and '{user}' not in v:
+        if v is not None and "{user}" not in v:
             raise ValueError("user must contain the keyword '{user}'")
         return v
 
-    @field_validator('assistant')
+    @field_validator("assistant")
     def check_assistant(cls, v: str) -> str:
         """Validate that `assistant` contains '{assistant}'.
 
         If not, raises a ValueError.
         """
-        if v is not None and '{assistant}' not in v:
-            raise ValueError(
-                "assistant must contain the keyword '{assistant}'")
+        if v is not None and "{assistant}" not in v:
+            raise ValueError("assistant must contain the keyword '{assistant}'")
         return v
 
-    @field_validator('function_call')
+    @field_validator("function_call")
     def check_function_call(cls, v: str) -> str:
         """Validate that `function_call` contains '{function_call}'.
 
         If not, raises a ValueError.
         """
-        if (v is not None and '{function_call}' not in v
-                and '{assistant}' not in v):
+        if v is not None and "{function_call}" not in v and "{assistant}" not in v:
             raise ValueError(
-                "function_call must contain the keywords '{function_call}'")
-        if v is not None and '{assistant}' not in v:
+                "function_call must contain the keywords '{function_call}'"
+            )
+        if v is not None and "{assistant}" not in v:
             raise ValueError(
                 "function_call must contain the keyword '{assistant}' and "
-                "'{function_call}'")
+                "'{function_call}'"
+            )
         return v
 
-    @field_validator('function_result')
+    @field_validator("function_result")
     def check_function_result(cls, v: str) -> str:
         """Validate that `function_result` contains '{function_result}'.
 
         If not, raises a ValueError.
         """
-        if v is not None and '{function_result}' not in v:
+        if v is not None and "{function_result}" not in v:
             raise ValueError(
-                "function_result must contain the keyword '{function_result}'")
+                "function_result must contain the keyword '{function_result}'"
+            )
         return v
 
-    @field_validator('functions')
+    @field_validator("functions")
     def check_functions(cls, v: str) -> str:
         """Validate that `functions` contains '{functions}'.
 
         If not, raises a ValueError.
         """
-        if v is not None and '{functions}' not in v:
-            raise ValueError(
-                "functions must contain the keyword '{functions}'")
+        if v is not None and "{functions}" not in v:
+            raise ValueError("functions must contain the keyword '{functions}'")
         return v
 
-    @field_validator('code_interpreter')
+    @field_validator("code_interpreter")
     def check_code_interpreter(cls, v: str) -> str:
         """Validate that `code_interpreter` contains '{code_interpreter}'.
 
         If not, raises a ValueError.
         """
-        if v is not None and '{code_interpreter}' not in v:
-            raise ValueError('code_interpreter must contain the keyword '
-                             "'{code_interpreter}'")
+        if v is not None and "{code_interpreter}" not in v:
+            raise ValueError(
+                "code_interpreter must contain the keyword " "'{code_interpreter}'"
+            )
         return v
 
-    @field_validator('code_interpreter_call')
+    @field_validator("code_interpreter_call")
     def check_code_interpreter_call(cls, v: str) -> str:
         """Validate that `code_interpreter_call` contains
         '{code_interpreter_call}'.
 
         If not, raises a ValueError.
         """
-        if (v is not None and '{code_interpreter_call}' not in v
-                and '{assistant}' not in v):
-            raise ValueError('code_interpreter_call must contain the keywords '
-                             "'{assistant}' and '{code_interpreter_call}'")
-        if v is not None and '{assistant}' not in v:
-            raise ValueError('code_interpreter_call must contain the keywords '
-                             "'{assistant}' and '{code_interpreter_call}'")
+        if (
+            v is not None
+            and "{code_interpreter_call}" not in v
+            and "{assistant}" not in v
+        ):
+            raise ValueError(
+                "code_interpreter_call must contain the keywords "
+                "'{assistant}' and '{code_interpreter_call}'"
+            )
+        if v is not None and "{assistant}" not in v:
+            raise ValueError(
+                "code_interpreter_call must contain the keywords "
+                "'{assistant}' and '{code_interpreter_call}'"
+            )
         return v
 
-    @field_validator('code_interpreter_result')
+    @field_validator("code_interpreter_result")
     def check_code_interpreter_result(cls, v: str) -> str:
         """Validate that `code_interpreter_result` contains
         '{code_interpreter_result}'.
 
         If not, raises a ValueError.
         """
-        if v is not None and '{code_interpreter_result}' not in v:
+        if v is not None and "{code_interpreter_result}" not in v:
             raise ValueError(
-                'code_interpreter_result must contain the keyword '
-                "'{code_interpreter_result}'")
+                "code_interpreter_result must contain the keyword "
+                "'{code_interpreter_result}'"
+            )
         return v

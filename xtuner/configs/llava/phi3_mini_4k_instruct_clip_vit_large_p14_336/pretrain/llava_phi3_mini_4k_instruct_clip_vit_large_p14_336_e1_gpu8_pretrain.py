@@ -1,11 +1,20 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from mmengine.dataset import DefaultSampler
-from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
-                            LoggerHook, ParamSchedulerHook)
+from mmengine.hooks import (
+    CheckpointHook,
+    DistSamplerSeedHook,
+    IterTimerHook,
+    LoggerHook,
+    ParamSchedulerHook,
+)
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR, LinearLR
 from torch.optim import AdamW
-from transformers import (AutoModelForCausalLM, AutoTokenizer,
-                          CLIPImageProcessor, CLIPVisionModel)
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    CLIPImageProcessor,
+    CLIPVisionModel,
+)
 
 from xtuner.dataset import LLaVADataset
 from xtuner.dataset.collate_fns import default_collate_fn
@@ -19,15 +28,15 @@ from xtuner.utils import PROMPT_TEMPLATE
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-llm_name_or_path = 'microsoft/Phi-3-mini-4k-instruct'
-visual_encoder_name_or_path = 'openai/clip-vit-large-patch14-336'
+llm_name_or_path = "microsoft/Phi-3-mini-4k-instruct"
+visual_encoder_name_or_path = "openai/clip-vit-large-patch14-336"
 
 # Data
-data_root = './data/llava_data/'
-data_path = data_root + 'LLaVA-Pretrain/blip_laion_cc_sbu_558k.json'
-image_folder = data_root + 'LLaVA-Pretrain/images'
+data_root = "./data/llava_data/"
+data_path = data_root + "LLaVA-Pretrain/blip_laion_cc_sbu_558k.json"
+image_folder = data_root + "LLaVA-Pretrain/images"
 prompt_template = PROMPT_TEMPLATE.phi3_chat
-max_length = int(2048 - (336 / 14)**2)
+max_length = int(2048 - (336 / 14) ** 2)
 
 # Scheduler & Optimizer
 batch_size = 32  # per_device
@@ -47,9 +56,9 @@ save_total_limit = 2  # Maximum checkpoints to keep (-1 means unlimited)
 
 # Evaluate the generation performance during the training
 evaluation_freq = 500
-SYSTEM = ''
-evaluation_images = 'https://llava-vl.github.io/static/images/view.jpg'
-evaluation_inputs = ['请描述一下这张照片', 'Please describe this picture']
+SYSTEM = ""
+evaluation_images = "https://llava-vl.github.io/static/images/view.jpg"
+evaluation_inputs = ["请描述一下这张照片", "Please describe this picture"]
 
 #######################################################################
 #            PART 2  Model & Tokenizer & Image Processor              #
@@ -58,12 +67,14 @@ tokenizer = dict(
     type=AutoTokenizer.from_pretrained,
     pretrained_model_name_or_path=llm_name_or_path,
     trust_remote_code=True,
-    padding_side='right')
+    padding_side="right",
+)
 
 image_processor = dict(
     type=CLIPImageProcessor.from_pretrained,
     pretrained_model_name_or_path=visual_encoder_name_or_path,
-    trust_remote_code=True)
+    trust_remote_code=True,
+)
 
 model = dict(
     type=LLaVAModel,
@@ -72,10 +83,13 @@ model = dict(
     llm=dict(
         type=AutoModelForCausalLM.from_pretrained,
         pretrained_model_name_or_path=llm_name_or_path,
-        trust_remote_code=True),
+        trust_remote_code=True,
+    ),
     visual_encoder=dict(
         type=CLIPVisionModel.from_pretrained,
-        pretrained_model_name_or_path=visual_encoder_name_or_path))
+        pretrained_model_name_or_path=visual_encoder_name_or_path,
+    ),
+)
 
 #######################################################################
 #                      PART 3  Dataset & Dataloader                   #
@@ -87,10 +101,10 @@ llava_dataset = dict(
     tokenizer=tokenizer,
     image_processor=image_processor,
     dataset_map_fn=llava_map_fn,
-    template_map_fn=dict(
-        type=template_map_fn_factory, template=prompt_template),
+    template_map_fn=dict(type=template_map_fn_factory, template=prompt_template),
     max_length=max_length,
-    pad_image_to_square=False)
+    pad_image_to_square=False,
+)
 
 train_dataloader = dict(
     batch_size=batch_size,
@@ -98,7 +112,8 @@ train_dataloader = dict(
     pin_memory=True,
     dataset=llava_dataset,
     sampler=dict(type=DefaultSampler, shuffle=True),
-    collate_fn=dict(type=default_collate_fn))
+    collate_fn=dict(type=default_collate_fn),
+)
 
 #######################################################################
 #                    PART 4  Scheduler & Optimizer                    #
@@ -106,12 +121,12 @@ train_dataloader = dict(
 # optimizer
 optim_wrapper = dict(
     type=AmpOptimWrapper,
-    optimizer=dict(
-        type=optim_type, lr=lr, betas=betas, weight_decay=weight_decay),
+    optimizer=dict(type=optim_type, lr=lr, betas=betas, weight_decay=weight_decay),
     clip_grad=dict(max_norm=max_norm, error_if_nonfinite=False),
     accumulative_counts=accumulative_counts,
-    loss_scale='dynamic',
-    dtype='float16')
+    loss_scale="dynamic",
+    dtype="float16",
+)
 
 # learning policy
 # More information: https://github.com/open-mmlab/mmengine/blob/main/docs/en/tutorials/param_scheduler.md  # noqa: E501
@@ -122,14 +137,16 @@ param_scheduler = [
         by_epoch=True,
         begin=0,
         end=warmup_ratio * max_epochs,
-        convert_to_iter_based=True),
+        convert_to_iter_based=True,
+    ),
     dict(
         type=CosineAnnealingLR,
         eta_min=0.0,
         by_epoch=True,
         begin=warmup_ratio * max_epochs,
         end=max_epochs,
-        convert_to_iter_based=True)
+        convert_to_iter_based=True,
+    ),
 ]
 
 # train, val, test setting
@@ -149,7 +166,8 @@ custom_hooks = [
         evaluation_inputs=evaluation_inputs,
         evaluation_images=evaluation_images,
         system=SYSTEM,
-        prompt_template=prompt_template)
+        prompt_template=prompt_template,
+    ),
 ]
 
 # configure default hooks
@@ -165,7 +183,8 @@ default_hooks = dict(
         type=CheckpointHook,
         by_epoch=False,
         interval=save_steps,
-        max_keep_ckpts=save_total_limit),
+        max_keep_ckpts=save_total_limit,
+    ),
     # set sampler seed in distributed evrionment.
     sampler_seed=dict(type=DistSamplerSeedHook),
 )
@@ -175,16 +194,16 @@ env_cfg = dict(
     # whether to enable cudnn benchmark
     cudnn_benchmark=False,
     # set multi process parameters
-    mp_cfg=dict(mp_start_method='fork', opencv_num_threads=0),
+    mp_cfg=dict(mp_start_method="fork", opencv_num_threads=0),
     # set distributed parameters
-    dist_cfg=dict(backend='nccl'),
+    dist_cfg=dict(backend="nccl"),
 )
 
 # set visualizer
 visualizer = None
 
 # set log level
-log_level = 'INFO'
+log_level = "INFO"
 
 # load from which checkpoint
 load_from = None

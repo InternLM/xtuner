@@ -14,13 +14,14 @@ from xtuner.utils import DEFAULT_IMAGE_TOKEN, IGNORE_INDEX, IMAGE_TOKEN_INDEX
 
 def get_bos_eos_token_ids(tokenizer):
     if tokenizer.__class__.__name__ in [
-            'QWenTokenizer', 'QWen2Tokenizer', 'Qwen2TokenizerFast'
+        "QWenTokenizer",
+        "QWen2Tokenizer",
+        "Qwen2TokenizerFast",
     ]:
         bos_token_id = []
         eos_token_id = tokenizer.eos_token_id
-        assert eos_token_id is not None, \
-            'Please set eos_token for Qwen tokenizer!'
-    elif tokenizer.__class__.__name__ == 'ChatGLMTokenizer':
+        assert eos_token_id is not None, "Please set eos_token for Qwen tokenizer!"
+    elif tokenizer.__class__.__name__ == "ChatGLMTokenizer":
         bos_token_id = [64790, 64792]
         eos_token_id = tokenizer.eos_token_id
     else:
@@ -33,11 +34,9 @@ def get_bos_eos_token_ids(tokenizer):
     return bos_token_id, eos_token_id
 
 
-def encode_fn(example,
-              tokenizer,
-              max_length,
-              input_ids_with_output=True,
-              with_image_token=False):
+def encode_fn(
+    example, tokenizer, max_length, input_ids_with_output=True, with_image_token=False
+):
     """We only support the following three scenarios:
 
     1. Incremental pretraining dataset.
@@ -69,14 +68,14 @@ def encode_fn(example,
             ]
     """
     bos_token_id, eos_token_id = get_bos_eos_token_ids(tokenizer)
-    is_multi_turn_conversation = len(example['conversation']) > 1
+    is_multi_turn_conversation = len(example["conversation"]) > 1
     if is_multi_turn_conversation:
         assert input_ids_with_output
 
     input_ids, labels = [], []
     next_needs_bos_token = True
-    for single_turn_conversation in example['conversation']:
-        input = single_turn_conversation['input']
+    for single_turn_conversation in example["conversation"]:
+        input = single_turn_conversation["input"]
         if DEFAULT_IMAGE_TOKEN in input and with_image_token:
             chunk_encode = [
                 tokenizer.encode(chunk, add_special_tokens=False)
@@ -97,9 +96,8 @@ def encode_fn(example,
         labels += [IGNORE_INDEX] * len(input_encode)
         if input_ids_with_output:
             # Add output
-            output_with_loss = single_turn_conversation.get(
-                'output_with_loss', True)
-            output = single_turn_conversation['output']
+            output_with_loss = single_turn_conversation.get("output_with_loss", True)
+            output = single_turn_conversation["output"]
             output_encode = tokenizer.encode(output, add_special_tokens=False)
             input_ids += output_encode
             if output_with_loss:
@@ -107,7 +105,7 @@ def encode_fn(example,
             else:
                 labels += [IGNORE_INDEX] * len(output_encode)
             # Add EOS_TOKEN (with loss)
-            if single_turn_conversation.get('need_eos_token', True):
+            if single_turn_conversation.get("need_eos_token", True):
                 next_needs_bos_token = True
                 input_ids += eos_token_id
                 if output_with_loss:
@@ -117,8 +115,8 @@ def encode_fn(example,
             else:
                 next_needs_bos_token = False
             # Add SEP (without loss)
-            sep = single_turn_conversation.get('sep', '')
-            if sep != '':
+            sep = single_turn_conversation.get("sep", "")
+            if sep != "":
                 sep_encode = tokenizer.encode(sep, add_special_tokens=False)
                 input_ids += sep_encode
                 labels += [IGNORE_INDEX] * len(sep_encode)
@@ -126,18 +124,15 @@ def encode_fn(example,
     if len(input_ids) > max_length:
         input_ids = input_ids[:max_length]
         labels = labels[:max_length]
-    return {'input_ids': input_ids, 'labels': labels}
+    return {"input_ids": input_ids, "labels": labels}
 
 
 class Packer:
     """Pack multiple pieces of data into one."""
 
-    def __init__(self,
-                 chunk_size=2048,
-                 use_varlen_attn=False,
-                 drop_last=False):
+    def __init__(self, chunk_size=2048, use_varlen_attn=False, drop_last=False):
         self.chunk_size = chunk_size
-        self.residual = {'input_ids': [], 'labels': []}
+        self.residual = {"input_ids": [], "labels": []}
         self.use_varlen_attn = use_varlen_attn
         self.drop_last = drop_last
         if use_varlen_attn:
@@ -149,14 +144,15 @@ class Packer:
         for chunk_idx in range(chunk_num):
             length_train = (chunk_idx + 1) * self.chunk_size
             ptr_r = np.searchsorted(
-                self.residual_cumulative_len, length_train, side='left')
+                self.residual_cumulative_len, length_train, side="left"
+            )
             if self.residual_cumulative_len[ptr_r] == length_train:
-                cumulative_len_cur = \
-                    self.residual_cumulative_len[ptr_l:ptr_r + 1]
+                cumulative_len_cur = self.residual_cumulative_len[ptr_l : ptr_r + 1]
                 ptr_l = ptr_r + 1
             else:
-                cumulative_len_cur = self.residual_cumulative_len[
-                    ptr_l:ptr_r] + [length_train]
+                cumulative_len_cur = self.residual_cumulative_len[ptr_l:ptr_r] + [
+                    length_train
+                ]
                 ptr_l = ptr_r
             cumulative_len_cur = [
                 num - chunk_idx * self.chunk_size for num in cumulative_len_cur
@@ -182,47 +178,44 @@ class Packer:
             index_cur = []
             for i in range(len(cumulative_len_cur) - 1):
                 index_cur.extend(
-                    list(
-                        range(cumulative_len_cur[i + 1] -  # noqa: W504
-                              cumulative_len_cur[i])))
+                    list(range(cumulative_len_cur[i + 1] - cumulative_len_cur[i]))
+                )  # noqa: W504
             position_ids.append(index_cur)
         return position_ids
 
     def __call__(self, batch):
         concatenated_samples = {
-            k: v + list(chain(*batch[k]))
-            for k, v in self.residual.items()
+            k: v + list(chain(*batch[k])) for k, v in self.residual.items()
         }
 
         if self.use_varlen_attn:
-            for input_id in batch['input_ids']:
+            for input_id in batch["input_ids"]:
                 self.residual_cumulative_len.append(
-                    self.residual_cumulative_len[-1] + len(input_id))
+                    self.residual_cumulative_len[-1] + len(input_id)
+                )
 
-        total_length = len(concatenated_samples[list(
-            concatenated_samples.keys())[0]])
+        total_length = len(concatenated_samples[list(concatenated_samples.keys())[0]])
 
         if total_length >= self.chunk_size:
             chunk_num = total_length // self.chunk_size
             result = {
                 k: [
-                    v[i:i + self.chunk_size] for i in range(
-                        0,
-                        chunk_num *  # noqa: W504
-                        self.chunk_size,
-                        self.chunk_size)
+                    v[i : i + self.chunk_size]
+                    for i in range(
+                        0, chunk_num * self.chunk_size, self.chunk_size
+                    )  # noqa: W504
                 ]
                 for k, v in concatenated_samples.items()
             }
             self.residual = {
-                k: v[(chunk_num * self.chunk_size):]
+                k: v[(chunk_num * self.chunk_size) :]
                 for k, v in concatenated_samples.items()
             }
 
             if self.use_varlen_attn:
                 cumulative_len = self.get_cumulative_len(chunk_num)
-                result['cumulative_len'] = cumulative_len
-                result['position_ids'] = self.get_position_ids(cumulative_len)
+                result["cumulative_len"] = cumulative_len
+                result["position_ids"] = self.get_position_ids(cumulative_len)
         else:
             if self.drop_last:
                 result = {k: [] for k, v in concatenated_samples.items()}
@@ -232,11 +225,14 @@ class Packer:
             self.residual = {k: [] for k in concatenated_samples.keys()}
 
             if self.use_varlen_attn:
-                result['cumulative_len'] = [] if self.drop_last else [
-                    self.residual_cumulative_len
-                ]
-                result['position_ids'] = [] if self.drop_last \
+                result["cumulative_len"] = (
+                    [] if self.drop_last else [self.residual_cumulative_len]
+                )
+                result["position_ids"] = (
+                    []
+                    if self.drop_last
                     else self.get_position_ids([self.residual_cumulative_len])
+                )
                 self.residual_cumulative_len = [0]
 
         return result
@@ -257,11 +253,11 @@ def expand2square(pil_img, background_color):
 
 
 def load_image(image_file):
-    if image_file.startswith('http://') or image_file.startswith('https://'):
+    if image_file.startswith("http://") or image_file.startswith("https://"):
         response = requests.get(image_file)
-        image = Image.open(BytesIO(response.content)).convert('RGB')
+        image = Image.open(BytesIO(response.content)).convert("RGB")
     else:
-        image = Image.open(image_file).convert('RGB')
+        image = Image.open(image_file).convert("RGB")
     return image
 
 

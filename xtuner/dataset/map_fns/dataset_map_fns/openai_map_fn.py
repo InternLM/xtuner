@@ -19,30 +19,32 @@ def openai_map_fn(example):
             }
         ]
     """
-    messages = example['messages']
-    system = ''
-    input = ''
+    messages = example["messages"]
+    system = ""
+    input = ""
     conversation = []
-    while messages and messages[0]['role'] == 'assistant':
+    while messages and messages[0]["role"] == "assistant":
         # Skip the first one if it is from assistant
         messages = messages[1:]
     for msg in messages:
-        if msg['role'] == 'system':
-            system = msg['content']
-        elif msg['role'] == 'user':
-            input += msg['content']
-        elif msg['role'] == 'assistant':
-            output_with_loss = msg.get('loss', 'True')
+        if msg["role"] == "system":
+            system = msg["content"]
+        elif msg["role"] == "user":
+            input += msg["content"]
+        elif msg["role"] == "assistant":
+            output_with_loss = msg.get("loss", "True")
             output_with_loss = str(output_with_loss)
-            output_with_loss = output_with_loss.lower() == 'true'
-            conversation.append({
-                'system': system,
-                'input': input,
-                'output': msg['content'],
-                'output_with_loss': output_with_loss
-            })
-            system = ''
-            input = ''
+            output_with_loss = output_with_loss.lower() == "true"
+            conversation.append(
+                {
+                    "system": system,
+                    "input": input,
+                    "output": msg["content"],
+                    "output_with_loss": output_with_loss,
+                }
+            )
+            system = ""
+            input = ""
         else:
             raise NotImplementedError
-    return {'conversation': conversation}
+    return {"conversation": conversation}

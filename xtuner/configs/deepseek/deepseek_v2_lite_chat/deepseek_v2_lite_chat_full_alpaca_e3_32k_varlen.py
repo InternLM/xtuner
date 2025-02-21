@@ -1,8 +1,13 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from datasets import load_dataset
 from mmengine.dataset import DefaultSampler
-from mmengine.hooks import (CheckpointHook, DistSamplerSeedHook, IterTimerHook,
-                            LoggerHook, ParamSchedulerHook)
+from mmengine.hooks import (
+    CheckpointHook,
+    DistSamplerSeedHook,
+    IterTimerHook,
+    LoggerHook,
+    ParamSchedulerHook,
+)
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR
 from torch.optim import AdamW
 from transformers import AutoTokenizer
@@ -10,9 +15,12 @@ from transformers import AutoTokenizer
 from xtuner.dataset import process_hf_dataset
 from xtuner.dataset.collate_fns import default_collate_fn
 from xtuner.dataset.map_fns import alpaca_map_fn, template_map_fn_factory
-from xtuner.engine.hooks import (DatasetInfoHook, HFCheckpointHook,
-                                 ThroughputHook,
-                                 VarlenAttnArgsToMessageHubHook)
+from xtuner.engine.hooks import (
+    DatasetInfoHook,
+    HFCheckpointHook,
+    ThroughputHook,
+    VarlenAttnArgsToMessageHubHook,
+)
 from xtuner.engine.runner import TrainLoop
 from xtuner.model import SupervisedFinetune
 from xtuner.model.transformers_models.deepseek_v2 import DeepseekV2ForCausalLM
@@ -23,11 +31,11 @@ from xtuner.utils import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-pretrained_model_name_or_path = 'deepseek-ai/DeepSeek-V2-Lite-Chat'
+pretrained_model_name_or_path = "deepseek-ai/DeepSeek-V2-Lite-Chat"
 use_varlen_attn = True
 
 # Data
-data_path = 'tatsu-lab/alpaca'
+data_path = "tatsu-lab/alpaca"
 prompt_template = PROMPT_TEMPLATE.deepseek_v2
 max_length = 32768
 pack_to_max_length = True
@@ -56,9 +64,7 @@ save_optimizer = True
 # Evaluate the generation performance during the training
 evaluation_freq = 50
 SYSTEM = SYSTEM_TEMPLATE.alpaca
-evaluation_inputs = [
-    '请给我介绍五个上海的景点', 'Please tell me five scenic spots in Shanghai'
-]
+evaluation_inputs = ["请给我介绍五个上海的景点", "Please tell me five scenic spots in Shanghai"]
 
 #######################################################################
 #                      PART 2  Model & Tokenizer                      #
@@ -67,7 +73,8 @@ tokenizer = dict(
     type=AutoTokenizer.from_pretrained,
     pretrained_model_name_or_path=pretrained_model_name_or_path,
     trust_remote_code=True,
-    padding_side='right')
+    padding_side="right",
+)
 
 model = dict(
     type=SupervisedFinetune,
@@ -77,9 +84,11 @@ model = dict(
         # Please use `AutoModelForCausalLM` for lora or qlora finetune.
         type=DeepseekV2ForCausalLM.from_pretrained,
         pretrained_model_name_or_path=pretrained_model_name_or_path,
-        moe_implementation='shard',
+        moe_implementation="shard",
         expert_in_one_shard=8,
-        trust_remote_code=True))
+        trust_remote_code=True,
+    ),
+)
 
 #######################################################################
 #                      PART 3  Dataset & Dataloader                   #
@@ -90,22 +99,22 @@ train_dataset = dict(
     tokenizer=tokenizer,
     max_length=max_length,
     dataset_map_fn=alpaca_map_fn,
-    template_map_fn=dict(
-        type=template_map_fn_factory, template=prompt_template),
+    template_map_fn=dict(type=template_map_fn_factory, template=prompt_template),
     remove_unused_columns=True,
     shuffle_before_pack=True,
     pack_to_max_length=pack_to_max_length,
-    use_varlen_attn=use_varlen_attn)
+    use_varlen_attn=use_varlen_attn,
+)
 
-sampler = SequenceParallelSampler \
-    if sequence_parallel_size > 1 else DefaultSampler
+sampler = SequenceParallelSampler if sequence_parallel_size > 1 else DefaultSampler
 
 train_dataloader = dict(
     batch_size=batch_size,
     num_workers=dataloader_num_workers,
     dataset=train_dataset,
     sampler=dict(type=sampler, shuffle=True),
-    collate_fn=dict(type=default_collate_fn, use_varlen_attn=use_varlen_attn))
+    collate_fn=dict(type=default_collate_fn, use_varlen_attn=use_varlen_attn),
+)
 
 #######################################################################
 #                    PART 4  Scheduler & Optimizer                    #
@@ -113,12 +122,12 @@ train_dataloader = dict(
 # optimizer
 optim_wrapper = dict(
     type=AmpOptimWrapper,
-    optimizer=dict(
-        type=optim_type, lr=lr, betas=betas, weight_decay=weight_decay),
+    optimizer=dict(type=optim_type, lr=lr, betas=betas, weight_decay=weight_decay),
     clip_grad=dict(max_norm=max_norm, error_if_nonfinite=False),
     accumulative_counts=accumulative_counts,
-    loss_scale='dynamic',
-    dtype='float16')
+    loss_scale="dynamic",
+    dtype="float16",
+)
 
 # learning policy
 # More information: https://github.com/open-mmlab/mmengine/blob/main/docs/en/tutorials/param_scheduler.md  # noqa: E501
@@ -129,7 +138,8 @@ param_scheduler = [
         by_epoch=True,
         begin=0,
         end=max_epochs,
-        convert_to_iter_based=True)
+        convert_to_iter_based=True,
+    )
 ]
 
 # train, val, test setting
@@ -142,7 +152,7 @@ train_cfg = dict(type=TrainLoop, max_epochs=max_epochs)
 custom_hooks = [
     dict(type=DatasetInfoHook, tokenizer=tokenizer),
     dict(type=ThroughputHook),
-    dict(type=HFCheckpointHook)
+    dict(type=HFCheckpointHook),
 ]
 
 if use_varlen_attn:
@@ -161,7 +171,8 @@ default_hooks = dict(
         type=CheckpointHook,
         by_epoch=False,
         interval=save_steps,
-        max_keep_ckpts=save_total_limit),
+        max_keep_ckpts=save_total_limit,
+    ),
     # set sampler seed in distributed evrionment.
     sampler_seed=dict(type=DistSamplerSeedHook),
 )
@@ -171,16 +182,16 @@ env_cfg = dict(
     # whether to enable cudnn benchmark
     cudnn_benchmark=False,
     # set multi process parameters
-    mp_cfg=dict(mp_start_method='fork', opencv_num_threads=0),
+    mp_cfg=dict(mp_start_method="fork", opencv_num_threads=0),
     # set distributed parameters
-    dist_cfg=dict(backend='nccl'),
+    dist_cfg=dict(backend="nccl"),
 )
 
 # set visualizer
 visualizer = None
 
 # set log level
-log_level = 'INFO'
+log_level = "INFO"
 
 # load from which checkpoint
 load_from = None

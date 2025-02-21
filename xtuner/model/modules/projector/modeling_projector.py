@@ -8,9 +8,9 @@ from .configuration_projector import ProjectorConfig
 
 
 class ProjectorModel(PreTrainedModel):
-    _auto_class = 'AutoModel'
+    _auto_class = "AutoModel"
     config_class = ProjectorConfig
-    base_model_prefix = 'model'
+    base_model_prefix = "model"
     supports_gradient_checkpointing = True
 
     def __init__(self, config: ProjectorConfig) -> None:
@@ -19,21 +19,19 @@ class ProjectorModel(PreTrainedModel):
 
         modules = [
             nn.Linear(
-                config.visual_hidden_size,
-                config.llm_hidden_size,
-                bias=config.bias)
+                config.visual_hidden_size, config.llm_hidden_size, bias=config.bias
+            )
         ]
         for _ in range(1, config.depth):
             modules.append(ACT2FN[config.hidden_act])
             modules.append(
                 nn.Linear(
-                    config.llm_hidden_size,
-                    config.llm_hidden_size,
-                    bias=config.bias))
+                    config.llm_hidden_size, config.llm_hidden_size, bias=config.bias
+                )
+            )
         self.model = nn.Sequential(*modules)
 
     def enable_input_require_grads(self):
-
         def make_inputs_require_grad(module, input, output):
             output.requires_grad_(True)
 
