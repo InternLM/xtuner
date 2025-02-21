@@ -38,6 +38,7 @@
 </div>
 
 ## 🎉 更新
+
 - **\[2024/07\]** 支持 [MiniCPM](xtuner/configs/minicpm/) 模型!
 - **\[2024/07\]** 支持训练 [DPO](https://github.com/InternLM/xtuner/tree/main/xtuner/configs/dpo)， [ORPO](https://github.com/InternLM/xtuner/tree/main/xtuner/configs/orpo) 还有 [Reward Model](https://github.com/InternLM/xtuner/tree/main/xtuner/configs/reward_model) ! 并且能够支持打包数据以及序列并行功能！ 请参考 [文档](https://xtuner.readthedocs.io/zh-cn/latest/dpo/overview.html) 了解更多信息。
 - **\[2024/07\]** 支持 [InternLM 2.5](xtuner/configs/internlm/internlm2_5_chat_7b/) 模型!

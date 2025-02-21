@@ -10,7 +10,9 @@
   },
   ...
 ]
-"""  # noqa: E501
+"""
+
+# noqa: E501
 
 from datasets import load_dataset
 from mmengine.dataset import DefaultSampler

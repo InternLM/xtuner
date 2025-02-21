@@ -5,13 +5,13 @@ from mmengine._strategy import DeepSpeedStrategy as MMEngineDeepSpeedStrategy
 
 from xtuner import DS_CEPH_DIR
 from xtuner.parallel.sequence import init_sequence_parallel
-from xtuner.utils.fileio import patch_fileio
 from xtuner.utils.device import get_device
+from xtuner.utils.fileio import patch_fileio
+
 
 class DeepSpeedStrategy(MMEngineDeepSpeedStrategy):
-
     def __init__(self, *args, **kwargs):
-        sequence_parallel_size = kwargs.pop('sequence_parallel_size', 1)
+        sequence_parallel_size = kwargs.pop("sequence_parallel_size", 1)
         self.sequence_parallel_size = sequence_parallel_size
 
         super().__init__(*args, **kwargs)
@@ -26,17 +26,18 @@ class DeepSpeedStrategy(MMEngineDeepSpeedStrategy):
         # hard code for deepspeed zero3
         # When utilizing Zero3, the model isn't allocated to CUDA within the
         # `deepspeed.initialize` process.
-        assert hasattr(wrapper.model, 'data_preprocessor')
+        assert hasattr(wrapper.model, "data_preprocessor")
         wrapper.model.data_preprocessor.to(get_device())
         return wrapper
 
     def save_checkpoint(self, *args, **kwargs) -> None:
         if DS_CEPH_DIR:
             from os import path as osp
+
             work_dir_prefix = osp.split(self.work_dir)[0]
 
-            filename = kwargs['filename'].replace(work_dir_prefix, DS_CEPH_DIR)
-            kwargs['filename'] = filename
+            filename = kwargs["filename"].replace(work_dir_prefix, DS_CEPH_DIR)
+            kwargs["filename"] = filename
             with patch_fileio():
                 super().save_checkpoint(*args, **kwargs)
         else:
@@ -44,7 +45,6 @@ class DeepSpeedStrategy(MMEngineDeepSpeedStrategy):
 
     def load_checkpoint(self, *args, **kwargs) -> None:
         if DS_CEPH_DIR:
-
             with patch_fileio():
                 checkpoint = super().load_checkpoint(*args, **kwargs)
         else:
@@ -53,7 +53,6 @@ class DeepSpeedStrategy(MMEngineDeepSpeedStrategy):
 
     def resume(self, *args, **kwargs) -> None:
         if DS_CEPH_DIR:
-
             with patch_fileio():
                 checkpoint = super().resume(*args, **kwargs)
         else:
@@ -63,7 +62,7 @@ class DeepSpeedStrategy(MMEngineDeepSpeedStrategy):
     def _setup_distributed(  # type: ignore
         self,
         launcher: Optional[str] = None,
-        backend: str = 'nccl',
+        backend: str = "nccl",
         **kwargs,
     ):
         super()._setup_distributed(launcher, backend, **kwargs)

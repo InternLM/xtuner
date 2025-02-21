@@ -8,27 +8,32 @@ from mmengine.config import Config, ConfigDict
 from mmengine.model import BaseModel
 from peft import get_peft_model, prepare_model_for_kbit_training
 from torch.nn import CrossEntropyLoss
-from transformers import (AutoConfig, AutoModel, AutoTokenizer,
-                          BitsAndBytesConfig)
+from transformers import AutoConfig, AutoModel, AutoTokenizer, BitsAndBytesConfig
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from xtuner.registry import BUILDER
-from .utils import (find_all_linear_names, get_peft_model_state_dict,
-                    guess_load_checkpoint, make_inputs_require_grad)
+
+from .utils import (
+    find_all_linear_names,
+    get_peft_model_state_dict,
+    guess_load_checkpoint,
+    make_inputs_require_grad,
+)
 
 
 class InternVL_V1_5(BaseModel):
-
-    def __init__(self,
-                 model_path,
-                 freeze_llm=False,
-                 freeze_visual_encoder=False,
-                 llm_lora=None,
-                 visual_encoder_lora=None,
-                 quantization_vit=False,
-                 quantization_llm=False,
-                 pretrained_pth=None):
-        print_log('Start to load InternVL_V1_5 model.', logger='current')
+    def __init__(
+        self,
+        model_path,
+        freeze_llm=False,
+        freeze_visual_encoder=False,
+        llm_lora=None,
+        visual_encoder_lora=None,
+        quantization_vit=False,
+        quantization_llm=False,
+        pretrained_pth=None,
+    ):
+        print_log("Start to load InternVL_V1_5 model.", logger="current")
         super().__init__()
         self.freeze_llm = freeze_llm
         self.freeze_visual_encoder = freeze_visual_encoder
@@ -42,20 +47,20 @@ class InternVL_V1_5(BaseModel):
             assert quantization_llm and llm_lora is not None
 
         config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
-        if config.llm_config.model_type == 'internlm2':
-            config.llm_config.attn_implementation = 'flash_attention_2'
+        if config.llm_config.model_type == "internlm2":
+            config.llm_config.attn_implementation = "flash_attention_2"
         else:
-            config.llm_config._attn_implementation = 'flash_attention_2'
+            config.llm_config._attn_implementation = "flash_attention_2"
 
         if quantization_vit is False and quantization_llm is False:
             quantization = None
         else:
-            llm_int8_skip_modules = ['mlp1']
+            llm_int8_skip_modules = ["mlp1"]
             if quantization_llm and not quantization_vit:
-                llm_int8_skip_modules.append('vision_model')
+                llm_int8_skip_modules.append("vision_model")
 
             if quantization_vit and not quantization_llm:
-                llm_int8_skip_modules.append('language_model')
+                llm_int8_skip_modules.append("language_model")
 
             quantization_config = dict(
                 type=BitsAndBytesConfig,
@@ -66,8 +71,9 @@ class InternVL_V1_5(BaseModel):
                 llm_int8_has_fp16_weight=False,
                 bnb_4bit_compute_dtype=torch.float16,
                 bnb_4bit_use_double_quant=True,
-                bnb_4bit_quant_type='nf4')
-            quantization_clazz = quantization_config.pop('type')
+                bnb_4bit_quant_type="nf4",
+            )
+            quantization_clazz = quantization_config.pop("type")
             quantization = quantization_clazz(**quantization_config)
 
         self.model = AutoModel.from_pretrained(
@@ -75,11 +81,11 @@ class InternVL_V1_5(BaseModel):
             torch_dtype=torch.bfloat16,
             quantization_config=quantization,
             config=config,
-            trust_remote_code=True)
+            trust_remote_code=True,
+        )
 
-        tokenizer = AutoTokenizer.from_pretrained(
-            model_path, trust_remote_code=True)
-        img_context_token_id = tokenizer.convert_tokens_to_ids('<IMG_CONTEXT>')
+        tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+        img_context_token_id = tokenizer.convert_tokens_to_ids("<IMG_CONTEXT>")
         self.model.img_context_token_id = img_context_token_id
 
         if self.freeze_llm:
@@ -87,11 +93,12 @@ class InternVL_V1_5(BaseModel):
         if self.freeze_visual_encoder:
             self.model.vision_model.requires_grad_(False)
 
-        if hasattr(self.model.language_model, 'enable_input_require_grads'):
+        if hasattr(self.model.language_model, "enable_input_require_grads"):
             self.model.language_model.enable_input_require_grads()
         else:
-            self.model.language_model.get_input_embeddings(
-            ).register_forward_hook(make_inputs_require_grad)
+            self.model.language_model.get_input_embeddings().register_forward_hook(
+                make_inputs_require_grad
+            )
 
         self.gradient_checkpointing_enable()
 
@@ -105,37 +112,39 @@ class InternVL_V1_5(BaseModel):
             pretrained_state_dict = guess_load_checkpoint(pretrained_pth)
 
             self.load_state_dict(pretrained_state_dict, strict=False)
-            print(f'Load pretrained weight from {pretrained_pth}')
+            print(f"Load pretrained weight from {pretrained_pth}")
 
         self._count = 0
-        print_log(self, logger='current')
-        print_log('InternVL_V1_5 construction is complete', logger='current')
+        print_log(self, logger="current")
+        print_log("InternVL_V1_5 construction is complete", logger="current")
 
     def _parse_lora_config(self, lora_config):
-        if isinstance(lora_config, dict) or isinstance(
-                lora_config, Config) or isinstance(lora_config, ConfigDict):
+        if (
+            isinstance(lora_config, dict)
+            or isinstance(lora_config, Config)
+            or isinstance(lora_config, ConfigDict)
+        ):
             lora_config = BUILDER.build(lora_config)
         return lora_config
 
-    def _prepare_llm_for_lora(self,
-                              lora_config,
-                              use_activation_checkpointing=True):
+    def _prepare_llm_for_lora(self, lora_config, use_activation_checkpointing=True):
         lora_config = self._parse_lora_config(lora_config)
         self.model.language_model = prepare_model_for_kbit_training(
-            self.model.language_model, use_activation_checkpointing)
+            self.model.language_model, use_activation_checkpointing
+        )
         if lora_config.target_modules is None:
             modules = find_all_linear_names(self.model.language_model)
             lora_config.target_modules = modules
-        self.model.language_model = get_peft_model(self.model.language_model,
-                                                   lora_config)
+        self.model.language_model = get_peft_model(
+            self.model.language_model, lora_config
+        )
 
     def _prepare_visual_encoder_for_lora(self, lora_config):
         lora_config = self._parse_lora_config(lora_config)
         if lora_config.target_modules is None:
             modules = find_all_linear_names(self.model.vision_model)
             lora_config.target_modules = modules
-        self.model.vision_model = get_peft_model(self.model.vision_model,
-                                                 lora_config)
+        self.model.vision_model = get_peft_model(self.model.vision_model, lora_config)
 
     def gradient_checkpointing_enable(self):
         self.activation_checkpointing_enable()
@@ -156,33 +165,33 @@ class InternVL_V1_5(BaseModel):
         if self.use_visual_encoder_lora:
             to_return.update(
                 get_peft_model_state_dict(
-                    self.model.vision_model, state_dict=state_dict))
+                    self.model.vision_model, state_dict=state_dict
+                )
+            )
         elif not self.freeze_visual_encoder:
-            to_return.update({
-                k: v
-                for k, v in state_dict.items() if 'model.vision_model.' in k
-            })
+            to_return.update(
+                {k: v for k, v in state_dict.items() if "model.vision_model." in k}
+            )
         # Step 2. LLM
         if self.use_llm_lora:
             to_return.update(
                 get_peft_model_state_dict(
-                    self.model.language_model, state_dict=state_dict))
+                    self.model.language_model, state_dict=state_dict
+                )
+            )
         elif not self.freeze_llm:
-            to_return.update({
-                k: v
-                for k, v in state_dict.items() if 'model.language_model.' in k
-            })
+            to_return.update(
+                {k: v for k, v in state_dict.items() if "model.language_model." in k}
+            )
         # Step 3. Projector
-        to_return.update(
-            {k: v
-             for k, v in state_dict.items() if 'model.mlp1.' in k})
+        to_return.update({k: v for k, v in state_dict.items() if "model.mlp1." in k})
         return to_return
 
     def init_weights(self):
         pass
 
-    def forward(self, data, data_samples=None, mode='loss'):
-        pixel_values = data['pixel_values']
+    def forward(self, data, data_samples=None, mode="loss"):
+        pixel_values = data["pixel_values"]
 
         if type(pixel_values) is list or pixel_values.ndim == 5:
             if type(pixel_values) is list:
@@ -190,22 +199,21 @@ class InternVL_V1_5(BaseModel):
                     x.unsqueeze(0) if x.ndim == 3 else x for x in pixel_values
                 ]
             # b*n, c, h, w
-            concat_images = torch.cat([
-                image.to(self.model.vision_model.dtype)
-                for image in pixel_values
-            ],
-                                      dim=0)
+            concat_images = torch.cat(
+                [image.to(self.model.vision_model.dtype) for image in pixel_values],
+                dim=0,
+            )
         else:
             raise NotImplementedError()
 
-        input_ids = data['input_ids']
-        position_ids = data['position_ids']
-        attention_mask = data['attention_mask']
+        input_ids = data["input_ids"]
+        position_ids = data["position_ids"]
+        attention_mask = data["attention_mask"]
         # sum is 0 are text
         image_flags = torch.sum(concat_images, dim=(1, 2, 3)) != 0
         image_flags = image_flags.long()
 
-        labels = data['labels']
+        labels = data["labels"]
         use_cache = False
 
         # Directly calling this code in LORA fine-tuning
@@ -225,8 +233,9 @@ class InternVL_V1_5(BaseModel):
             image_flags=image_flags,
             pixel_values=concat_images,
             labels=labels,
-            use_cache=use_cache)
-        loss_dict = {'loss': outputs.loss}
+            use_cache=use_cache,
+        )
+        loss_dict = {"loss": outputs.loss}
         return loss_dict
 
     def _llm_forward(
@@ -243,13 +252,17 @@ class InternVL_V1_5(BaseModel):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
-        return_dict = return_dict if return_dict is not None \
+        return_dict = (
+            return_dict
+            if return_dict is not None
             else self.model.config.use_return_dict
+        )
 
         image_flags = image_flags.squeeze(-1)
         # We only added the clone code here to avoid the error.
         input_embeds = self.model.language_model.get_input_embeddings()(
-            input_ids).clone()
+            input_ids
+        ).clone()
 
         vit_embeds = self.model.extract_feature(pixel_values)
         vit_embeds = vit_embeds[image_flags == 1]
@@ -259,25 +272,28 @@ class InternVL_V1_5(BaseModel):
         input_embeds = input_embeds.reshape(B * N, C)
 
         if torch.distributed.get_rank() == 0 and self._count % 100 == 0:
-            print(f'dynamic ViT batch size: {vit_batch_size}, '
-                  f'images per sample: {vit_batch_size / B}, '
-                  f'dynamic token length: {N}')
+            print(
+                f"dynamic ViT batch size: {vit_batch_size}, "
+                f"images per sample: {vit_batch_size / B}, "
+                f"dynamic token length: {N}"
+            )
         self._count += 1
 
         input_ids = input_ids.reshape(B * N)
-        selected = (input_ids == self.model.img_context_token_id)
+        selected = input_ids == self.model.img_context_token_id
         try:
-            input_embeds[
-                selected] = input_embeds[selected] * 0.0 + vit_embeds.reshape(
-                    -1, C)
+            input_embeds[selected] = input_embeds[selected] * 0.0 + vit_embeds.reshape(
+                -1, C
+            )
         except Exception as e:
             vit_embeds = vit_embeds.reshape(-1, C)
-            print(f'warning: {e}, input_embeds[selected].shape='
-                  f'{input_embeds[selected].shape}, '
-                  f'vit_embeds.shape={vit_embeds.shape}')
+            print(
+                f"warning: {e}, input_embeds[selected].shape="
+                f"{input_embeds[selected].shape}, "
+                f"vit_embeds.shape={vit_embeds.shape}"
+            )
             n_token = selected.sum()
-            input_embeds[
-                selected] = input_embeds[selected] * 0.0 + vit_embeds[:n_token]
+            input_embeds[selected] = input_embeds[selected] * 0.0 + vit_embeds[:n_token]
 
         input_embeds = input_embeds.reshape(B, N, C)
 
@@ -301,15 +317,16 @@ class InternVL_V1_5(BaseModel):
             # Flatten the tokens
             loss_fct = CrossEntropyLoss()
             shift_logits = shift_logits.view(
-                -1, self.model.language_model.config.vocab_size)
+                -1, self.model.language_model.config.vocab_size
+            )
             shift_labels = shift_labels.view(-1)
             # Enable model parallelism
             shift_labels = shift_labels.to(shift_logits.device)
             loss = loss_fct(shift_logits, shift_labels)
 
         if not return_dict:
-            output = (logits, ) + outputs[1:]
-            return (loss, ) + output if loss is not None else output
+            output = (logits,) + outputs[1:]
+            return (loss,) + output if loss is not None else output
 
         return CausalLMOutputWithPast(
             loss=loss,

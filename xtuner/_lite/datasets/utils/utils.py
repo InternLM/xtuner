@@ -1,13 +1,14 @@
-from PIL import Image
-import torch
+# Copyright (c) OpenMMLab. All rights reserved.
 from collections.abc import Mapping
+
+import torch
+from PIL import Image
 
 _EXIF_ORIENT = 274  # exif 'Orientation' tag
 
 
 def apply_exif_orientation(image):
-    """
-    Applies the exif orientation correctly.
+    """Applies the exif orientation correctly.
 
     This code exists per the bug:
       https://github.com/python-pillow/Pillow/issues/3973
@@ -52,10 +53,9 @@ def apply_exif_orientation(image):
     return image
 
 
-def move_data_to_device(data, device='cuda'):
-    """
-        Prepares one `data` before feeding it to the model, be it a tensor or a nested list/dictionary of tensors.
-    """
+def move_data_to_device(data, device="cuda"):
+    """Prepares one `data` before feeding it to the model, be it a tensor or a
+    nested list/dictionary of tensors."""
     if isinstance(data, Mapping):
         return type(data)({k: move_data_to_device(v) for k, v in data.items()})
     elif isinstance(data, (tuple, list)):

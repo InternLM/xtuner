@@ -19,11 +19,11 @@ def oasst1_map_fn(example):
         ]
     """
     data = []
-    for sentence in example['text'].strip().split('###'):
+    for sentence in example["text"].strip().split("###"):
         sentence = sentence.strip()
-        if sentence[:6] == 'Human:':
+        if sentence[:6] == "Human:":
             data.append(sentence[6:].strip())
-        elif sentence[:10] == 'Assistant:':
+        elif sentence[:10] == "Assistant:":
             data.append(sentence[10:].strip())
     if len(data) % 2:
         # The last round of conversation solely consists of input
@@ -33,6 +33,6 @@ def oasst1_map_fn(example):
         data.pop()
     conversation = []
     for i in range(0, len(data), 2):
-        single_turn_conversation = {'input': data[i], 'output': data[i + 1]}
+        single_turn_conversation = {"input": data[i], "output": data[i + 1]}
         conversation.append(single_turn_conversation)
-    return {'conversation': conversation}
+    return {"conversation": conversation}

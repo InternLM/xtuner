@@ -17,7 +17,6 @@ DATA_BATCH = Optional[Union[dict, tuple, list]]
 
 
 class HFCheckpointHook(Hook):
-
     priority = 95  # lower than CheckpointHook in MMEngine
 
     def __init__(self, out_dir: Optional[Union[str, Path]] = None) -> None:
@@ -26,29 +25,29 @@ class HFCheckpointHook(Hook):
     @staticmethod
     def _use_shard_moe(llm):
         config = llm.config
-        moe_implementation = getattr(config, 'moe_implementation', 'origin')
-        return moe_implementation == 'shard'
+        moe_implementation = getattr(config, "moe_implementation", "origin")
+        return moe_implementation == "shard"
 
     def after_run(self, runner) -> None:
-        assert isinstance(runner,
-                          FlexibleRunner), 'Runner should be `FlexibleRunner`'
+        assert isinstance(runner, FlexibleRunner), "Runner should be `FlexibleRunner`"
         assert isinstance(
-            runner.strategy,
-            DeepSpeedStrategy), 'Strategy should be `DeepSpeedStrategy`'
+            runner.strategy, DeepSpeedStrategy
+        ), "Strategy should be `DeepSpeedStrategy`"
 
         if self.out_dir is None:
-            self.out_dir = osp.join(runner.work_dir, 'hf_model')
+            self.out_dir = osp.join(runner.work_dir, "hf_model")
 
         wrapped_model = runner.strategy.model
         if wrapped_model.zero_optimization_partition_weights():
-            assert wrapped_model.zero_gather_16bit_weights_on_model_save(), \
-                ('Please set `gather_16bit_weights_on_model_save=True` '
-                 'in your DeepSpeed config.')
+            assert wrapped_model.zero_gather_16bit_weights_on_model_save(), (
+                "Please set `gather_16bit_weights_on_model_save=True` "
+                "in your DeepSpeed config."
+            )
             state_dict = wrapped_model._zero3_consolidated_16bit_state_dict()
         else:
             state_dict = wrapped_model.module_state_dict(
-                exclude_frozen_parameters=runner.strategy.
-                exclude_frozen_parameters)
+                exclude_frozen_parameters=runner.strategy.exclude_frozen_parameters
+            )
 
         model = runner.model
         if is_model_wrapper(model):
@@ -62,12 +61,12 @@ class HFCheckpointHook(Hook):
                 state_dict[k[4:]] = val
 
             if self._use_shard_moe(llm):
-                print_log('recover the origin state_dict from merged one ...')
+                print_log("recover the origin state_dict from merged one ...")
                 state_dict = get_origin_state_dict(state_dict, llm)
 
-            print_log(f'Saving LLM to {self.out_dir}')
+            print_log(f"Saving LLM to {self.out_dir}")
             llm.save_pretrained(self.out_dir, state_dict=state_dict)
 
-            print_log(f'Saving LLM tokenizer to {self.out_dir}')
+            print_log(f"Saving LLM tokenizer to {self.out_dir}")
             tokenizer = BUILDER.build(runner.cfg.tokenizer)
             tokenizer.save_pretrained(self.out_dir)

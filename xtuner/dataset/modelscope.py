@@ -2,10 +2,11 @@
 from mmengine.config import Config, ConfigDict
 
 from xtuner.registry import BUILDER
+
 from .huggingface import process_hf_dataset
 
 
-def process_ms_dataset(dataset, split='train', *args, **kwargs):
+def process_ms_dataset(dataset, split="train", *args, **kwargs):
     """Post-process the dataset loaded from the ModelScope Hub."""
 
     if isinstance(dataset, (Config, ConfigDict)):

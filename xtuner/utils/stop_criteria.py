@@ -12,5 +12,5 @@ class StopWordStoppingCriteria(StoppingCriteria):
 
     def __call__(self, input_ids, *args, **kwargs) -> bool:
         cur_text = self.tokenizer.decode(input_ids[0])
-        cur_text = cur_text.replace('\r', '').replace('\n', '')
-        return cur_text[-self.length:] == self.stop_word
+        cur_text = cur_text.replace("\r", "").replace("\n", "")
+        return cur_text[-self.length :] == self.stop_word

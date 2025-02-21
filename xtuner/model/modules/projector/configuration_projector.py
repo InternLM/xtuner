@@ -3,15 +3,15 @@ from transformers import PretrainedConfig
 
 
 class ProjectorConfig(PretrainedConfig):
-    model_type = 'projector'
-    _auto_class = 'AutoConfig'
+    model_type = "projector"
+    _auto_class = "AutoConfig"
 
     def __init__(
         self,
         visual_hidden_size=4096,
         llm_hidden_size=4096,
         depth=2,
-        hidden_act='gelu',
+        hidden_act="gelu",
         bias=True,
         **kwargs,
     ):

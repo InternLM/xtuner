@@ -257,13 +257,13 @@ XTuner 使用 MMEngine 的「纯 Python 风格的配置文件」，直接利用 
 可在配置文件中新增 ``model_resource`` 参数， ``args`` 用作可变参数（如下载私有模型需传入token的情况）：
 
 .. code:: python
-   from openmind_hub import snapshot_download 
+   from openmind_hub import snapshot_download
 
    # Model
    pretrained_model_name_or_path = 'Tianjin_Ascend/Qwen1.5-4B'
    model_resource = {
       "fn": snapshot_download,
-      "args":{ 
+      "args":{
          # "token":"xxxxxxxxxx"
       }
    }

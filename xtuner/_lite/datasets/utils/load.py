@@ -9,20 +9,18 @@ from torch import distributed as dist
 from tqdm import tqdm
 
 from xtuner._lite import get_logger
+
 from ..json import JsonDataset
 from ..jsonl import JsonlDataset
 
 logger = get_logger()
 
-DATASET_CLS_MAP = {'.jsonl': JsonlDataset, '.json': JsonDataset}
+DATASET_CLS_MAP = {".jsonl": JsonlDataset, ".json": JsonDataset}
 
 
-def load_hf_dataset(path,
-                    split='train',
-                    sample_ratio=1.0,
-                    cache_dir=None,
-                    map_fn=None):
+def load_hf_dataset(path, split="train", sample_ratio=1.0, cache_dir=None, map_fn=None):
     from datasets import load_dataset
+
     dataset = load_dataset(path)[split]
 
     if map_fn:
@@ -31,8 +29,7 @@ def load_hf_dataset(path,
     if sample_ratio != 1:
         ori_samples = len(dataset)
         target_samples = int(sample_ratio * ori_samples)
-        indices = random.choices([i for i in range(ori_samples)],
-                                 k=target_samples)
+        indices = random.choices([i for i in range(ori_samples)], k=target_samples)
         dataset = dataset.select(indices)
 
     dataset = dataset.to_list()
@@ -47,7 +44,6 @@ def load_hf_dataset(path,
 
 
 def load_from_cache(cache_dir, init_fn):
-
     if dist.is_available():
         world_size = dist.get_world_size()
         rank = dist.get_rank()
@@ -65,7 +61,7 @@ def load_from_cache(cache_dir, init_fn):
     avg_num = math.ceil(num_dsets / world_size)
     start = rank * avg_num
     end = min((rank + 1) * avg_num, num_dsets)
-    desc = f'[Rank {rank}] Loading Cached Dataset'
+    desc = f"[Rank {rank}] Loading Cached Dataset"
 
     rank_datasets = []
     for ind in tqdm(range(start, end), desc=desc):
@@ -87,37 +83,40 @@ def load_from_cache(cache_dir, init_fn):
     return world_datasets
 
 
-def load_local_datasets(paths,
-                        file_types,
-                        file_pattern=None,
-                        cache_dir=None,
-                        sample_ratios=1.0,
-                        map_fns=None,
-                        max_length=None):
-
+def load_local_datasets(
+    paths,
+    file_types,
+    file_pattern=None,
+    cache_dir=None,
+    sample_ratios=1.0,
+    map_fns=None,
+    max_length=None,
+):
     if isinstance(paths, str):
         paths = [paths]
 
     if isinstance(sample_ratios, (tuple, list)):
-
         if len(sample_ratios) == 1:
             sample_ratios = list(sample_ratios) * len(paths)
 
         if len(sample_ratios) != len(paths):
-            raise RuntimeError(f'There are {len(paths)} paths, but only '
-                               f'{len(sample_ratios)} sample ratios were set.')
+            raise RuntimeError(
+                f"There are {len(paths)} paths, but only "
+                f"{len(sample_ratios)} sample ratios were set."
+            )
 
     if map_fns is None:
         map_fns = [None] * len(paths)
 
     if isinstance(map_fns, (tuple, list)):
-
         if len(map_fns) == 1:
             map_fns = list(map_fns) * len(paths)
 
         if len(map_fns) != len(paths):
-            raise RuntimeError(f'There are {len(paths)} paths, but only'
-                               f'{len(map_fns)} map fns were set.')
+            raise RuntimeError(
+                f"There are {len(paths)} paths, but only"
+                f"{len(map_fns)} map fns were set."
+            )
 
     files = []
     file_sample_ratios = []
@@ -140,10 +139,10 @@ def load_local_datasets(paths,
             _num_dir_files = len(dir_files)
             if _num_dir_files == 0:
                 raise RuntimeError(
-                    f'There are no files with the suffix {file_types}'
-                    f'in `{path}`.')
+                    f"There are no files with the suffix {file_types}" f"in `{path}`."
+                )
 
-            logger.info(f'Found {len(dir_files)} files in {path}')
+            logger.info(f"Found {len(dir_files)} files in {path}")
             files.extend(dir_files)
             file_sample_ratios.extend([sample_ratios[pid]] * _num_dir_files)
             file_map_fns.extend([map_fns[pid]] * _num_dir_files)
@@ -154,7 +153,7 @@ def load_local_datasets(paths,
             file_map_fns.append(map_fns[pid])
 
         else:
-            raise RuntimeError(f'`{path}` not found.')
+            raise RuntimeError(f"`{path}` not found.")
 
     num_files = len(files)
 
@@ -172,15 +171,16 @@ def load_local_datasets(paths,
     return datasets
 
 
-def load_datasets(paths,
-                  sources='local',
-                  sample_ratios=1.0,
-                  file_types=DATASET_CLS_MAP.keys(),
-                  file_pattern=None,
-                  cache_dir=None,
-                  map_fns=None,
-                  max_length=None):
-
+def load_datasets(
+    paths,
+    sources="local",
+    sample_ratios=1.0,
+    file_types=DATASET_CLS_MAP.keys(),
+    file_pattern=None,
+    cache_dir=None,
+    map_fns=None,
+    max_length=None,
+):
     if isinstance(paths, str):
         paths = [paths]
 
@@ -190,54 +190,62 @@ def load_datasets(paths,
         sample_ratios = [sample_ratios] * num_paths
 
     if isinstance(sample_ratios, (tuple, list)):
-
         if len(sample_ratios) == 1:
             sample_ratios = list(sample_ratios) * num_paths
 
         if len(sample_ratios) != num_paths:
-            raise RuntimeError(f'There are {num_paths} paths, but only '
-                               f'{len(sample_ratios)} sample ratios were set.')
+            raise RuntimeError(
+                f"There are {num_paths} paths, but only "
+                f"{len(sample_ratios)} sample ratios were set."
+            )
 
     if isinstance(sources, str):
         sources = [sources]
 
     if isinstance(sources, (tuple, list)):
-
         if len(sources) == 1:
             sources = list(sources) * num_paths
 
         if len(sources) != num_paths:
-            raise RuntimeError(f'There are {num_paths} paths, but only '
-                               f'{len(sources)} sources were set.')
+            raise RuntimeError(
+                f"There are {num_paths} paths, but only "
+                f"{len(sources)} sources were set."
+            )
 
     if not isinstance(map_fns, (tuple, list)):
         map_fns = [map_fns] * num_paths
 
     if isinstance(map_fns, (tuple, list)):
-
         if len(map_fns) == 1:
             map_fns = list(map_fns) * num_paths
 
         if len(map_fns) != num_paths:
-            raise RuntimeError(f'There are {num_paths} paths, but only'
-                               f'{len(map_fns)} map fns were set.')
+            raise RuntimeError(
+                f"There are {num_paths} paths, but only"
+                f"{len(map_fns)} map fns were set."
+            )
 
-    local_inds = [i for i, src in enumerate(sources) if src == 'local']
+    local_inds = [i for i, src in enumerate(sources) if src == "local"]
     local_paths = [paths[ind] for ind in local_inds]
     local_map_fns = [map_fns[ind] for ind in local_inds]
     local_sample_ratios = [sample_ratios[ind] for ind in local_inds]
 
-    hf_inds = [i for i, src in enumerate(sources) if src == 'huggingface']
+    hf_inds = [i for i, src in enumerate(sources) if src == "huggingface"]
     hf_paths = [paths[ind] for ind in hf_inds]
     hf_map_fns = [map_fns[ind] for ind in hf_inds]
     hf_sample_ratios = [sample_ratios[ind] for ind in hf_inds]
 
     datasets = []
     if len(local_inds):
-        local_datasets = load_local_datasets(local_paths, file_types,
-                                             file_pattern, cache_dir,
-                                             local_sample_ratios,
-                                             local_map_fns, max_length)
+        local_datasets = load_local_datasets(
+            local_paths,
+            file_types,
+            file_pattern,
+            cache_dir,
+            local_sample_ratios,
+            local_map_fns,
+            max_length,
+        )
         datasets.extend(local_datasets)
 
     if len(hf_inds):
@@ -245,8 +253,7 @@ def load_datasets(paths,
         for i in range(len(hf_inds)):
             if cache_dir:
                 digits = len(str(abs(len(hf_inds))))
-                cache_id = (f'cache-hf-{i+1:0{digits}}-of-'
-                            f'{len(hf_inds):0{digits}}')
+                cache_id = f"cache-hf-{i+1:0{digits}}-of-" f"{len(hf_inds):0{digits}}"
                 sub_cache_dir = os.path.join(cache_dir, cache_id)
             else:
                 sub_cache_dir = None
@@ -254,22 +261,22 @@ def load_datasets(paths,
                 hf_paths[i],
                 sample_ratio=hf_sample_ratios[i],
                 map_fn=hf_map_fns[i],
-                cache_dir=sub_cache_dir, 
-                max_length=max_length)
+                cache_dir=sub_cache_dir,
+                max_length=max_length,
+            )
             datasets.append(dset)
             breakpoint()
             if cache_dir:
-
                 infos = {
-                    'path': hf_paths[i],
-                    'num_samples': dset.num_samples,
-                    'num_tokens': dset.total_tokens
+                    "path": hf_paths[i],
+                    "num_samples": dset.num_samples,
+                    "num_tokens": dset.total_tokens,
                 }
                 cached_infos[cache_id] = infos
 
         if cache_dir:
-            _path = os.path.join(cache_dir, 'hf_infos.json')
-            with open(_path, 'w') as f:
+            _path = os.path.join(cache_dir, "hf_infos.json")
+            with open(_path, "w") as f:
                 json.dump(cached_infos, f)
 
     return datasets

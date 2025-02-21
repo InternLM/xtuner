@@ -5,17 +5,17 @@ from typing import Optional, Sized
 from mmengine.dataset import DefaultSampler
 from mmengine.dist import sync_random_seed
 
-from .setup_distributed import (get_data_parallel_rank,
-                                get_data_parallel_world_size)
+from .setup_distributed import get_data_parallel_rank, get_data_parallel_world_size
 
 
 class SequenceParallelSampler(DefaultSampler):
-
-    def __init__(self,
-                 dataset: Sized,
-                 shuffle: bool = True,
-                 seed: Optional[int] = None,
-                 round_up: bool = True) -> None:
+    def __init__(
+        self,
+        dataset: Sized,
+        shuffle: bool = True,
+        seed: Optional[int] = None,
+        round_up: bool = True,
+    ) -> None:
         rank = get_data_parallel_rank()
         world_size = get_data_parallel_world_size()
         self.rank = rank
@@ -33,6 +33,5 @@ class SequenceParallelSampler(DefaultSampler):
             self.num_samples = math.ceil(len(self.dataset) / world_size)
             self.total_size = self.num_samples * self.world_size
         else:
-            self.num_samples = math.ceil(
-                (len(self.dataset) - rank) / world_size)
+            self.num_samples = math.ceil((len(self.dataset) - rank) / world_size)
             self.total_size = len(self.dataset)

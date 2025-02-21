@@ -12,9 +12,7 @@ def pretrain_map_fn(example):
         ]
     """
     return {
-        'conversation': [{
-            'input': '',
-            'output': example['text'].strip(),
-            'need_eos_token': False
-        }]
+        "conversation": [
+            {"input": "", "output": example["text"].strip(), "need_eos_token": False}
+        ]
     }
