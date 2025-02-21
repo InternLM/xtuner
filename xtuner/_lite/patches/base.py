@@ -225,7 +225,7 @@ def lazy_init_fn(module, module2name, checkpoint_loader):
 
     buffers = {
         name: checkpoint_loader.load(f'{module_name}.{name}')
-        for name, _ in module.named_buffers(recurse=False) if name in checkpoint_loader.weight_map
+        for name, _ in module.named_buffers(recurse=False) if f'{module_name}.{name}' in checkpoint_loader.weight_map
     }
 
     module.to_empty(device=DEVICE_MODULE.current_device(), recurse=False)
