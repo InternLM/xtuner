@@ -1,13 +1,11 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-import hashlib
 import json
 import math
 import multiprocessing
 import os
 import random
-from abc import ABC, abstractmethod
 from concurrent.futures import ProcessPoolExecutor
-from typing import Any, Callable, TypedDict
+from typing import Any, Callable
 
 import numpy as np
 import torch
@@ -17,28 +15,9 @@ from tqdm import tqdm
 
 from xtuner._lite import get_logger
 
+from .cache import CachableTokenizeFunction, CacheObj, calculate_jsonl_sha256
+
 logger = get_logger()
-
-
-def calculate_jsonl_sha256(path):
-    with open(path, "rb") as f:
-        file_hash = hashlib.sha256()
-        file_hash.update(f.read())
-    return file_hash.hexdigest()
-
-
-class CacheObj(TypedDict, total=False):
-    num_tokens: int
-
-
-class CachableTokenizeFunction(ABC):
-    @abstractmethod
-    def __call__(self, item: Any) -> CacheObj:
-        raise NotImplementedError
-
-    @abstractmethod
-    def hash(self) -> str:
-        raise NotImplementedError
 
 
 class JsonlDataset(torch.utils.data.Dataset):
@@ -46,7 +25,7 @@ class JsonlDataset(torch.utils.data.Dataset):
         self,
         path,
         sample_ratio: float = 1.0,
-        tokenize_fn: Callable[[Any], CacheObj] | None = None,
+        tokenize_fn: Callable[[Any], "CacheObj"] | None = None,
         cache_dir: str | None = None,
         max_length: int | None = None,
     ):

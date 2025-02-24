@@ -9,8 +9,7 @@ from transformers import PreTrainedTokenizer
 from xtuner._lite import get_logger
 from xtuner._lite.chat.messages.chat import ChatTemplate
 from xtuner._lite.datasets import OPENAI_CONVERT_MAP
-from xtuner._lite.datasets.jsonl import CachableTokenizeFunction
-from xtuner._lite.datasets.utils.utils import tokenizer_hash
+from xtuner._lite.datasets.cache import CachableTokenizeFunction, tokenizer_hash
 
 logger = get_logger()
 

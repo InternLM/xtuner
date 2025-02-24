@@ -1,25 +1,10 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-import hashlib
-import tempfile
 from collections.abc import Mapping
-from pathlib import Path
 
 import torch
 from PIL import Image
-from transformers import PreTrainedTokenizer
 
 _EXIF_ORIENT = 274  # exif 'Orientation' tag
-
-
-def tokenizer_hash(tokenizer: PreTrainedTokenizer):
-    with tempfile.TemporaryDirectory() as tokenizer_tempdir:
-        tokenizer.save_pretrained(tokenizer_tempdir)
-        tokenizer_files = sorted(Path(tokenizer_tempdir).iterdir())
-        file_hash = hashlib.sha256()
-        for file in tokenizer_files:
-            with open(file, "rb") as f:
-                file_hash.update(f.read())
-        return file_hash.hexdigest()
 
 
 def apply_exif_orientation(image):

@@ -1,11 +1,10 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-import hashlib
-import inspect
 import json
 import math
 import os
 import random
 from concurrent.futures import ProcessPoolExecutor
+from typing import Any, Callable
 
 import numpy as np
 import torch
@@ -15,28 +14,19 @@ from tqdm import tqdm
 
 from xtuner._lite import get_logger
 
+from .cache import CachableTokenizeFunction, CacheObj, calculate_jsonl_sha256
+
 logger = get_logger()
-
-
-def calculate_json_sha256(file_path):
-    with open(file_path, "rb") as f:
-        data = f.read()
-
-    hash_object = hashlib.sha256(data)
-    hash_hex = hash_object.hexdigest()
-    return hash_hex
-
-
-def calculate_tokenize_fn_sha256(tokenize_fn):
-    """Calculate SHA-256 hash for an instance method's source code."""
-    # Get the source code of the method
-    fn_source = inspect.getsource(tokenize_fn.__call__)
-    return hashlib.sha256(fn_source.encode("utf-8")).hexdigest()
 
 
 class JsonDataset(torch.utils.data.Dataset):
     def __init__(
-        self, path, sample_ratio=1.0, tokenize_fn=None, cache_dir=None, max_length=None
+        self,
+        path,
+        sample_ratio: float = 1.0,
+        tokenize_fn: Callable[[Any], "CacheObj"] | None = None,
+        cache_dir: str | None = None,
+        max_length: int | None = None,
     ):
         super().__init__()
 
@@ -50,14 +40,14 @@ class JsonDataset(torch.utils.data.Dataset):
             else:
                 mkdir_or_exist(cache_dir)
 
-            file_hash = calculate_json_sha256(path)
+            file_hash = calculate_jsonl_sha256(path)
             file_cache_dir = os.path.join(cache_dir, file_hash)
 
             if file_hash not in os.listdir(cache_dir):
                 mkdir_or_exist(file_cache_dir)
 
-            if self.tokenize_fn:
-                tok_hash = calculate_tokenize_fn_sha256(tokenize_fn)
+            if tokenize_fn and isinstance(tokenize_fn, CachableTokenizeFunction):
+                tok_hash = tokenize_fn.hash()
                 tok_cache_dir = os.path.join(file_cache_dir, tok_hash)
                 if tok_hash not in os.listdir(file_cache_dir):
                     mkdir_or_exist(tok_cache_dir)
@@ -67,9 +57,10 @@ class JsonDataset(torch.utils.data.Dataset):
                     num_tokens = np.load(_cached_file)
                 else:
                     num_tokens = self.count_tokens(tok_cache_dir)
+            elif tokenize_fn:
+                num_tokens = self.count_tokens()
             else:
                 num_tokens = None
-
         else:
             num_tokens = None
 
@@ -78,7 +69,7 @@ class JsonDataset(torch.utils.data.Dataset):
 
         _sampled = [i for i in range(len(dataset))]
 
-        if max_length is not None:
+        if num_tokens is not None and max_length is not None:
             assert isinstance(max_length, int)
             _filtered = [
                 x for i, x in enumerate(_sampled) if num_tokens[i] < max_length
