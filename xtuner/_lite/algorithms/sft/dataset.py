@@ -1,24 +1,72 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import hashlib
+import inspect
+
 import torch
 from torch.nn.utils.rnn import pad_sequence
+from transformers import PreTrainedTokenizer
 
 from xtuner._lite import get_logger
+from xtuner._lite.chat.messages.chat import ChatTemplate
 from xtuner._lite.datasets import OPENAI_CONVERT_MAP
+from xtuner._lite.datasets.jsonl import CachableTokenizeFunction
+from xtuner._lite.datasets.utils.utils import tokenizer_hash
 
 logger = get_logger()
 
 
-class SftTokenizeFunction:
-    def __init__(self, tokenizer, chat_template, raw_format="openai"):
+class SftTokenizeFunction(CachableTokenizeFunction):
+    def __init__(
+        self,
+        tokenizer: PreTrainedTokenizer,
+        chat_template: ChatTemplate,
+        raw_format: str = "openai",
+    ):
         self.tokenizer = tokenizer
         self.chat_template = chat_template
         self.raw_format = raw_format
+        self.formatter = OPENAI_CONVERT_MAP[self.raw_format]
+        self._hash: str | None = None
 
     def __call__(self, item):
         formatter = OPENAI_CONVERT_MAP[self.raw_format]
         msg = formatter(item)
         tokenized = msg.tokenize(self.tokenizer, self.chat_template)
         return tokenized
+
+    def hash(self) -> str:
+        if self._hash is None:
+            # truncate to 16 characters prevent too long cache directory
+            _tokenizer_hash = tokenizer_hash(self.tokenizer)[:16]
+            _template_hash = hashlib.sha256(
+                repr(self.chat_template).encode()
+            ).hexdigest()[:16]
+            _source_hash = (
+                hashlib.sha256(inspect.getsource(self.formatter).encode()).hexdigest()[
+                    :16
+                ]
+                + hashlib.sha256(
+                    inspect.getsource(self.__class__.__call__).encode()
+                ).hexdigest()[:16]
+                + hashlib.sha256(
+                    inspect.getsource(self.__class__.__init__).encode()
+                ).hexdigest()[:16]
+            )
+
+            self._hash = f"{_tokenizer_hash}_{_template_hash}_{_source_hash}"
+        else:
+            assert isinstance(self._hash, str), (
+                "hash is not a valid string, "
+                "it means `FtdpTokenizeFunction._hash` is modified by user."
+            )
+
+        return self._hash
+
+    def _get_formatter_source(self):
+        if inspect.ismethod(self.formatter):
+            return inspect.getsource(self.formatter.__self__.__class__)
+        else:
+            return inspect.getsource(self.formatter)
 
 
 class SftCollator:

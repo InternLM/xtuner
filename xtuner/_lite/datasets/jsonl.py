@@ -27,7 +27,8 @@ def calculate_jsonl_sha256(path):
     return file_hash.hexdigest()
 
 
-CacheObj = TypedDict("CachedObj", {"num_tokens": int}, total=False)
+class CacheObj(TypedDict, total=False):
+    num_tokens: int
 
 
 class CachableTokenizeFunction(ABC):
@@ -55,7 +56,7 @@ class JsonlDataset(torch.utils.data.Dataset):
         self.path = path
         self.tokenizer_workers = int(os.environ.get("XTUNER_TOKENIZE_WORKERS", 8))
 
-        if cache_dir and isinstance(tokenize_fn, CachableTokenizeFunction):
+        if cache_dir:
             if os.path.exists(cache_dir):
                 assert os.path.isdir(cache_dir)
             else:
@@ -73,7 +74,7 @@ class JsonlDataset(torch.utils.data.Dataset):
             else:
                 offsets = self.count_offsets(file_cache_dir)
 
-            if self.tokenize_fn:
+            if tokenize_fn and isinstance(tokenize_fn, CachableTokenizeFunction):
                 tok_hash = tokenize_fn.hash()
                 tok_cache_dir = os.path.join(file_cache_dir, tok_hash)
                 if tok_hash not in os.listdir(file_cache_dir):
@@ -84,6 +85,8 @@ class JsonlDataset(torch.utils.data.Dataset):
                     num_tokens = np.load(_cached_file)
                 else:
                     num_tokens = self.count_tokens(offsets, tok_cache_dir)
+            elif tokenize_fn:
+                num_tokens = self.count_tokens(offsets)
             else:
                 num_tokens = None
 
@@ -93,13 +96,12 @@ class JsonlDataset(torch.utils.data.Dataset):
         else:
             offsets = self.count_offsets()
             num_tokens = None
-            if max_length is not None:
-                assert self.tokenize_fn
+            if tokenize_fn:
                 num_tokens = self.count_tokens(offsets)
 
         _sampled = [i for i in range(len(offsets))]
 
-        if max_length is not None:
+        if num_tokens is not None and max_length is not None:
             assert isinstance(max_length, int)
             _filtered = [
                 x for i, x in enumerate(_sampled) if num_tokens[i] < max_length
