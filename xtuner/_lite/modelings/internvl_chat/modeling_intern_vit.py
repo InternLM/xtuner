@@ -10,7 +10,7 @@ import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
 from einops import rearrange
-from timm.models.layers import DropPath
+from timm.layers import DropPath
 from torch import nn
 from transformers.activations import ACT2FN
 from transformers.modeling_outputs import (BaseModelOutput,

@@ -3,9 +3,10 @@ from .internlm3 import InternLM3Config, InternLM3ForCausalLM, InternLM3Tokenizer
 from .llava.modeling_llava import LlavaForConditionalGeneration
 from .llava.configuration_llava import EnhancedLlavaConfig
 from .llava.processing_llava import LlavaProcessor
+from .internvl_chat import InternVLChatModel, InternVLChatConfig
 
 def register_remote_code():
-    from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+    from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, AutoModel
     AutoConfig.register('internlm2', InternLM2Config, exist_ok=True)
     AutoModelForCausalLM.register(
         InternLM2Config, InternLM2ForCausalLM, exist_ok=True)
@@ -15,3 +16,7 @@ def register_remote_code():
         InternLM3Config, InternLM3ForCausalLM, exist_ok=True)
     AutoTokenizer.register(
         InternLM3Config, InternLM3Tokenizer, exist_ok=True)
+
+    AutoConfig.register('internvl_chat', InternVLChatConfig, exist_ok=True)
+    AutoModelForCausalLM.register(InternVLChatConfig, InternVLChatModel, exist_ok=True)
+    AutoModel.register(InternVLChatConfig, InternVLChatModel, exist_ok=True)
