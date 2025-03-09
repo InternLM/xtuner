@@ -1,4 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import copy
 import json
 import logging
 import os
@@ -152,7 +153,7 @@ class LLaVADataset(Dataset):
         return data_dict
 
     def __getitem__(self, index):
-        data_dict = self.data[index]
+        data_dict = copy.deepcopy(self.data[index])
         if data_dict.get("image", None) is not None:
             image_file = data_dict["image"]
             image = Image.open(os.path.join(self.image_folder, image_file)).convert("RGB")
