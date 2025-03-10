@@ -14,7 +14,7 @@ from ..jsonl import calculate_jsonl_sha256
 from ..pack import SoftPackDataset
 
 from xtuner._lite import get_logger
-from xtuner._lite.parallel import get_dp_mesh, VLMLengthGroupedSampler, ParallelSampler
+from xtuner._lite.parallel import VLMLengthGroupedSampler, ParallelSampler
 
 logger = get_logger()
 
@@ -229,11 +229,10 @@ def build_dataset(args, datasets):
     return train_dataset
 
 
-def build_train_dataloader(args, train_dataset, collate_fn):
-    dp_mesh = get_dp_mesh()
+def build_train_dataloader(args, train_dataset, collate_fn, dp_mesh):
     if args.group_by_length:
         if args.dset_pack:
-            length_property = 'max_length'
+            length_property = 'longest'
         else:
             length_property = 'length'
         sampler = VLMLengthGroupedSampler(train_dataset, dp_mesh,

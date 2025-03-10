@@ -7,7 +7,7 @@ from typing import Dict
 import torch
 import torchvision.transforms as T
 import transformers
-from .conversation import get_conv_template
+from xtuner._lite.modelings.internvl_chat.conversation import get_conv_template
 from PIL import Image
 from torchvision.transforms.functional import InterpolationMode
 import sys
