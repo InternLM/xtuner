@@ -3,7 +3,7 @@
 # Copyright (c) 2024 OpenGVLab
 # Licensed under The MIT License [see LICENSE for details]
 # --------------------------------------------------------
-from typing import Optional, Tuple, Union
+from typing import Optional, Tuple, Union, cast
 
 import numpy as np
 import torch
@@ -179,10 +179,20 @@ class InternVisionEmbeddings(nn.Module):
         patch_embeds = patch_embeds.flatten(2).transpose(1, 2)
         class_embeds = self.class_embedding.expand(batch_size, 1, -1).to(target_dtype)
         embeddings = torch.cat([class_embeds, patch_embeds], dim=1)
-        position_embedding = torch.cat([
-            self.position_embedding[:, :1, :],
-            self._get_pos_embed(self.position_embedding[:, 1:, :], height, width)
-        ], dim=1)
+        if height == width and height * width == self.num_patches:
+            position_embedding = cast(torch.Tensor, self.position_embedding)
+        else:
+            from torch.distributed._tensor import DTensor
+            assert not isinstance(self.position_embedding, DTensor), (
+                "`interpolate` dosn't support DTensor operations. If you are training "
+                "internvl using xtuner tp > 1, please ensure the input pixel values "
+                "are correctly preprocessed, so that the embedding shape matches the "
+                "position embedding shape to avoid calling `interpolate`"
+            )
+            position_embedding = torch.cat([
+                self.position_embedding[:, :1, :],
+                self._get_pos_embed(self.position_embedding[:, 1:, :], height, width)
+            ], dim=1)
         embeddings = embeddings + position_embedding.to(target_dtype)
         return embeddings
 
