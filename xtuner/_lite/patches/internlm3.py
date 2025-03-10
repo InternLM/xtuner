@@ -1,4 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+from typing import Dict, Optional
+import torch.nn as nn
 from xtuner._lite.chat import HybridChatTemplate
 from xtuner._lite.modelings.internlm3.modeling_internlm3 import (
     InternLM3Attention,
@@ -7,6 +9,7 @@ from xtuner._lite.modelings.internlm3.modeling_internlm3 import (
     InternLM3RotaryEmbedding,
 )
 
+from .base import HFCheckpointLoader
 from .llama import CUDAPatchedLlamaForCausalLM
 
 
@@ -23,7 +26,12 @@ class CUDAPatchedInternLM3ForCausalLM(CUDAPatchedLlamaForCausalLM):
         stop_words=["<|im_end|>"],
     )
 
-    def fully_shard(self) -> None:
+    def fully_shard(
+        self,
+        *,
+        module2name: Optional[Dict[nn.Module, str]] = None,
+        checkpoint_loader: Optional[HFCheckpointLoader] = None,
+    ) -> None:
         super().fully_shard()
 
         if self.fsdp_config.max_length is not None:

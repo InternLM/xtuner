@@ -2,7 +2,7 @@
 import copy
 import types
 from functools import partial
-from typing import Callable, List, Optional, Tuple, TypedDict, Union
+from typing import Callable, Dict, List, Optional, Tuple, TypedDict, Union
 
 import torch
 from flash_attn import flash_attn_with_kvcache
@@ -395,19 +395,24 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM, GenerateMixin):
         )
         self._data_mesh = _data_mesh[data_mesh_name]
 
-    def fully_shard(self) -> None:
+    def fully_shard(
+        self,
+        *,
+        module2name: Optional[Dict[nn.Module, str]] = None,
+        checkpoint_loader: Optional[HFCheckpointLoader] = None,
+    ) -> None:
         if self._fsdp_config.enable_fp8:
             self._float8_handler.convert_to_float8_training(self.patched_model)
-
         if not getattr(self.patched_model.config, "skip_checkpoint", False):
+            if module2name is None:
+                module2name = {mod: name for name, mod in self.patched_model.named_modules()}
+
+            if checkpoint_loader is None:
+                checkpoint_loader = HFCheckpointLoader(self.patched_model.config._name_or_path)
             param_init_fn = partial(
                 lazy_init_fn,
-                module2name={
-                    mod: name for name, mod in self.patched_model.named_modules()
-                },
-                checkpoint_loader=HFCheckpointLoader(
-                    self.patched_model.config._name_or_path
-                ),
+                module2name=module2name,
+                checkpoint_loader=checkpoint_loader,
                 enable_fp8=self.fsdp_config.enable_fp8,
             )
         else:

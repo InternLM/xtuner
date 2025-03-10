@@ -427,7 +427,12 @@ class PatchedCausalLM(ABC, nn.Module):
         pass
 
     @abstractmethod
-    def fully_shard(self):
+    def fully_shard(
+        self,
+        *,
+        module2name: Optional[Dict[nn.Module, str]] = None,
+        checkpoint_loader: Optional[HFCheckpointLoader] = None,
+    ):
         pass
 
     @abstractmethod
