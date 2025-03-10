@@ -2,7 +2,9 @@
 from transformers.models.llama import LlamaForCausalLM
 from transformers.models.qwen2 import Qwen2ForCausalLM
 
+from xtuner._lite.modelings.internlm2 import InternLM2ForCausalLM
 from xtuner._lite.modelings.internlm3 import InternLM3ForCausalLM
+from xtuner._lite.modelings.internvl_chat import InternVLChatModel
 
 from .base import FSDPConfig, PatchedCausalLM
 from .internlm3 import (
@@ -10,6 +12,7 @@ from .internlm3 import (
     MLUPatchedInternLM3ForCausalLM,
     MuxiPatchedInternLM3ForCausalLM,
 )
+from .internvl_chat import CUDAPatchedInternVLChatModel
 from .llama import (
     CUDAPatchedLlamaForCausalLM,
     MLUPatchedLlamaForCausalLM,
@@ -21,6 +24,7 @@ CUDA_PATCH_MAP = {
     LlamaForCausalLM: CUDAPatchedLlamaForCausalLM,
     InternLM3ForCausalLM: CUDAPatchedInternLM3ForCausalLM,
     Qwen2ForCausalLM: CUDAPatchedQwen2ForCausalLM,
+    InternVLChatModel: CUDAPatchedInternVLChatModel,
 }
 
 MLU_PATCH_MAP = {
