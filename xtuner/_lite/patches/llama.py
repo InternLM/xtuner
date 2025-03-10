@@ -292,7 +292,7 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM, GenerateMixin):
         return self._model_config
 
     @property
-    def fsdp_config(self) -> Optional[FSDPConfig]:
+    def fsdp_config(self) -> FSDPConfig:
         return self._fsdp_config
 
     @property
