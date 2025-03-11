@@ -164,7 +164,7 @@ class HFCheckpointLoader:
             self.weight_map = json.load(open(index_json))["weight_map"]
             self.use_safetensors = False
         elif "model.safetensors" in os.listdir(self.model_path):
-            with safe_open(os.path.join(model_path, "model.safetensors"), framework="pt") as f:
+            with safe_open(os.path.join(self.model_path, "model.safetensors"), framework="pt") as f:
                 self.weight_map = {k: "model.safetensors" for k in f.keys()}
             self.use_safetensors = True
         else:
