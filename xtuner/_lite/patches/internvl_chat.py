@@ -45,18 +45,6 @@ from xtuner._lite.patches.mixins import GenerateMixin
 from xtuner._lite.patches.utils import pad_to_max_length, pad_to_multiple_of
 
 
-def _replicate_other_params(module, device_mesh):
-    if type(module).__name__ in ('ExpertEp', 'GroupedLinear'):
-        return
-    for name, param in module.named_parameters(recurse=False):
-        dist_param = nn.Parameter(
-            distribute_tensor(param, device_mesh, [Replicate()])
-        )
-        module.register_parameter(name, dist_param)
-    for child in module.children():
-        _replicate_other_params(child, device_mesh)
-
-
 class CUDAPatchedInternVLChatModel(PatchedCausalLM):
     device_type = "cuda"
 
