@@ -432,7 +432,7 @@ class CUDAPatchedInternVLChatModel(PatchedCausalLM):
         image_flags = cast(torch.LongTensor, image_flags.squeeze(-1))
         input_embeds = module.language_model.get_input_embeddings()(input_ids)
 
-        if tp_mesh.size() > 1:
+        if tp_mesh is not None and tp_mesh.size() > 1:
             # If tp enabled, LM embedding will be colwise parallelized
             input_embeds = (
                 DTensor.from_local(
@@ -467,7 +467,7 @@ class CUDAPatchedInternVLChatModel(PatchedCausalLM):
 
         input_embeds = input_embeds.reshape(B, N, C)
 
-        if tp_mesh.size() > 1:
+        if tp_mesh is not None and tp_mesh.size() > 1:
             # If tp enabled, LM embedding will return a sharded DTensor
             input_embeds = (
                 DTensor.from_local(
@@ -633,9 +633,9 @@ class CUDAPatchedInternVLChatModel(PatchedCausalLM):
 
         if outputs.loss is not None:
             valid_tokens = (cast(torch.Tensor, _labels) >= 0).sum()
+            global_valid_tokens = (cast(torch.Tensor, labels) >= 0 ).sum()
             outputs.loss = outputs.loss * valid_tokens
             if self.tp_mesh.size() > 1:
-                dist.all_reduce
                 outputs.loss = distF.all_reduce(
                     outputs.loss, group=self.tp_mesh.get_group()
                 )
@@ -643,6 +643,6 @@ class CUDAPatchedInternVLChatModel(PatchedCausalLM):
                 outputs.loss = distF.all_reduce(
                     outputs.loss, group=sequence_parallel_mesh.get_group()
                 )
-            outputs.loss = outputs.loss / valid_tokens
+            outputs.loss = outputs.loss / global_valid_tokens
 
         return outputs
