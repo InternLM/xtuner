@@ -211,9 +211,7 @@ class CUDAPatchedInternVLChatModel(PatchedCausalLM):
             lm.lm_head.weight.grad.div_(self.tp_mesh.size())
             lm.model.norm.weight.grad.div_(self.tp_mesh.size())
 
-        grad_norm = clip_grad_norm_(
-            self.trainable_parameters(), self.world_mesh, max_norm
-        )
+        grad_norm = clip_grad_norm_(self.trainable_parameters(), max_norm)
         return grad_norm
 
     def init_model_config(self, fsdp_config: FSDPConfig):
