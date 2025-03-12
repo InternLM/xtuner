@@ -198,19 +198,6 @@ class CUDAPatchedInternVLChatModel(PatchedCausalLM):
         return _requried_grad_params
 
     def clip_grad_norm(self, max_norm):
-        if self.tp_mesh.size() > 1:
-            lm = self.patched_model.language_model
-            dist.all_reduce(
-                lm.lm_head.weight.grad.to_local(),
-                group=self.tp_mesh.get_group(),
-            )
-            dist.all_reduce(
-                lm.model.norm.weight.grad.to_local(),
-                group=self.tp_mesh.get_group(),
-            )
-            lm.lm_head.weight.grad.div_(self.tp_mesh.size())
-            lm.model.norm.weight.grad.div_(self.tp_mesh.size())
-
         grad_norm = clip_grad_norm_(self.trainable_parameters(), max_norm)
         return grad_norm
 
