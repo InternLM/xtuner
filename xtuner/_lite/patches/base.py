@@ -47,7 +47,6 @@ def _group_tensors_by_mesh(
 @_no_grad
 def clip_grad_norm_(
     parameters,
-    fsdp_mesh,
     max_norm: float,
     norm_type: float = 2.0,
     error_if_nonfinite: bool = False,
