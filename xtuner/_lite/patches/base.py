@@ -87,18 +87,23 @@ def clip_grad_norm_(
         else:
             norms.extend([torch.linalg.vector_norm(g, norm_type) for g in device_grads])
 
-    local_sharded_norm = torch.linalg.vector_norm(
-        torch.stack([norm.to_local().to(first_device) for norm in norms]),
-        norm_type,
-        dtype=torch.float32,
-    )
-
-    if norm_type == 2:
-        total_norm = local_sharded_norm**norm_type
-        dist.all_reduce(total_norm, group=fsdp_mesh.get_group(mesh_dim=0))
-        total_norm = total_norm ** (1 / norm_type)
+    # torch.stack doesn't support DTensors with different device meshes as of
+    # torch 2.5.1. we manually group tensors by meshes, calculate mesh-wise norms
+    # and then do reduction
+    total_norms: List[Tensor] = []
+    mesh_grouped_norms = _group_tensors_by_mesh(norms)
+    for _, mesh_norms in mesh_grouped_norms.items():
+        total_norm = torch.linalg.vector_norm(
+            torch.stack([norm.to(first_device) for norm in mesh_norms]),
+            norm_type,
+        )
+        if isinstance(total_norm, DTensor):
+            total_norm = total_norm.full_tensor()
+        total_norms.append(total_norm)
+    if len(total_norms) == 1:
+        total_norm = total_norms[0]
     else:
-        raise NotImplementedError
+        total_norm = torch.linalg.vector_norm(torch.stack(total_norms), norm_type)
 
     if error_if_nonfinite and torch.logical_or(total_norm.isnan(), total_norm.isinf()):
         raise RuntimeError(
