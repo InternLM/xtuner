@@ -207,13 +207,10 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM, GenerateMixin):
             input_layouts=Replicate(),
             output_layouts=Shard(1),
         ),
-        "model.norm": PrepareModuleInput(
-            input_layouts=(Replicate(),),
-            desired_input_layouts=(Replicate(),),
-        ),
+        "model.norm": SequenceParallel(),
         "lm_head": PrepareModuleInput(
-            input_layouts=(Replicate(),),
-            desired_input_layouts=(Replicate(),),
+            input_layouts=(Shard(1),),
+            desired_input_layouts=(Shard(1),),
         ),
     }
 
@@ -451,12 +448,6 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM, GenerateMixin):
                 distribute_tensor(_weight, tp_mesh, [Replicate()])
             )
             self.patched_model.lm_head.register_parameter("weight", _dtensor_weight)
-
-            _weight = self.patched_model.model.norm.weight
-            _dtensor_weight = nn.Parameter(
-                distribute_tensor(_weight, tp_mesh, [Replicate()])
-            )
-            self.patched_model.model.norm.register_parameter("weight", _dtensor_weight)
 
             parallelize_module(
                 self.patched_model,
@@ -1234,21 +1225,6 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM, GenerateMixin):
         return _requried_grad_params
 
     def clip_grad_norm(self, max_norm):
-        if self.tp_mesh.size() > 1:
-            dist.all_reduce(
-                self.patched_model.lm_head.weight.grad.to_local(),
-                group=self.tp_mesh.get_group(),
-            )
-            dist.all_reduce(
-                self.patched_model.model.norm.weight.grad.to_local(),
-                group=self.tp_mesh.get_group(),
-            )
-            self.patched_model.lm_head.weight.grad.div_(self.tp_mesh.size())
-            self.patched_model.model.norm.weight.grad.div_(self.tp_mesh.size())
-
-            for param in self.trainable_parameters():
-                param.grad.div_(self.tp_mesh.size())
-
         grad_norm = clip_grad_norm_(self.trainable_parameters(), max_norm)
         return grad_norm
 
