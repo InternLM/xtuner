@@ -14,7 +14,7 @@ from torch.distributed._composable.fsdp import (
     MixedPrecisionPolicy,
     fully_shard,
 )
-from torch.distributed._tensor import DTensor, Replicate, Shard, distribute_tensor
+from torch.distributed._tensor import DTensor, Replicate, Shard, distribute_tensor, Partial
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper,
 )
@@ -634,9 +634,9 @@ class CUDAPatchedInternVLChatModel(PatchedCausalLM):
             global_valid_tokens = (cast(torch.Tensor, labels) >= 0 ).sum()
             outputs.loss = outputs.loss * valid_tokens
             if self.tp_mesh.size() > 1:
-                outputs.loss = distF.all_reduce(
-                    outputs.loss, group=self.tp_mesh.get_group()
-                )
+                outputs.loss = DTensor.from_local(
+                    outputs.loss, self.tp_mesh, placements=(Partial(),)
+                ).full_tensor()
             if sequence_parallel_mesh and sequence_parallel_mesh.size() > 1:
                 outputs.loss = distF.all_reduce(
                     outputs.loss, group=sequence_parallel_mesh.get_group()
