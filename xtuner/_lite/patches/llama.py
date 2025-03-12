@@ -14,7 +14,7 @@ from torch.distributed._composable.fsdp import (
     MixedPrecisionPolicy,
     fully_shard,
 )
-from torch.distributed._tensor import DTensor, Replicate, Shard, distribute_tensor
+from torch.distributed._tensor import DTensor, Replicate, Shard, distribute_tensor, Partial
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper,
 )
@@ -1112,8 +1112,8 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM, GenerateMixin):
         if outputs.loss is not None:
             outputs.loss = outputs.loss * (_labels >= 0).sum()
             if self.tp_mesh.size() > 1:
-                outputs.loss = dist.nn.all_reduce(
-                    outputs.loss, group=self.tp_mesh.get_group()
+                outputs.loss = DTensor.from_local(
+                    outputs.loss, self.tp_mesh, placements=(Partial(),)
                 )
             if sequence_parallel_mesh and sequence_parallel_mesh.size() > 1:
                 outputs.loss = dist.nn.all_reduce(
