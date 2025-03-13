@@ -34,7 +34,7 @@ repos:
           - linkify-it-py
         exclude: 'docs/zh_cn/user_guides/sequence_parallel.md'
   - repo: https://github.com/myint/docformatter
-    rev: v1.3.1
+    rev: v1.5.1
     hooks:
       - id: docformatter
         args: ["--in-place", "--wrap-descriptions", "119"]
