@@ -950,13 +950,34 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM, GenerateMixin):
 
                 # if self.config
                 lm_head_weight = self.lm_head.weight
+                lm_head_bias = self.lm_head.bias
                 if isinstance(lm_head_weight, DTensor):
+                    # NOTE: We ASSUME lm_head.weight has been fully sharded as model's
+                    # outmost FSDP unit, so it will have been all gathered here as long
+                    # as model's forward is called. The only device mesh that remains
+                    # here is the TP mesh.
                     assert isinstance(shift_hidden_states, DTensor)
+                    assert lm_head_bias is None or isinstance(lm_head_bias, DTensor)
+                    assert lm_head_weight.device_mesh == shift_hidden_states.device_mesh, (
+                        "Expected lm_head.weight to be on the same device mesh as shift_hidden_states, "
+                        f"got {lm_head_weight.device_mesh} and {shift_hidden_states.device_mesh}"
+                    )
+                    tp_mesh = lm_head_weight.device_mesh
+                    assert (
+                        tp_mesh.ndim == 1
+                        and "tp" in tp_mesh.mesh_dim_names[0]
+                    ), f"Expected lm_head.weight placed on a 1d TP mesh, got {tp_mesh}"
                     shift_hidden_states = shift_hidden_states.to_local()
-                    lm_head_weight = self.lm_head.weight.to_local()
+                    # Liger kernel interupts the DTensor gradient placement that should be propagated
+                    # to the last lm_head Linear module. Since the input is Shard(0) and the weight
+                    # is Replicate(), the gradient should be Partial(). We manually set the gradient
+                    # placement to make grad_norm calculation & optimizer.step() correct
+                    lm_head_weight = lm_head_weight.to_local(grad_placements=(Partial(),))
+                    if lm_head_bias is not None:
+                        lm_head_bias = lm_head_bias.to_local(grad_placements=(Partial(),))
 
                 loss = loss_fct(
-                    lm_head_weight, shift_hidden_states, shift_labels, self.lm_head.bias
+                    lm_head_weight, shift_hidden_states, shift_labels, lm_head_bias
                 )
 
             else:
