@@ -1128,7 +1128,7 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM, GenerateMixin):
             if self.tp_mesh.size() > 1:
                 outputs.loss = DTensor.from_local(
                     outputs.loss, self.tp_mesh, placements=(Partial(),)
-                )
+                ).full_tensor()
             if sequence_parallel_mesh and sequence_parallel_mesh.size() > 1:
                 outputs.loss = dist.nn.all_reduce(
                     outputs.loss, group=sequence_parallel_mesh.get_group()
