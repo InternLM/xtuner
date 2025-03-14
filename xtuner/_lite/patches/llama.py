@@ -961,6 +961,8 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM, GenerateMixin):
 
             else:
                 logits = self.lm_head(hidden_states)
+                if isinstance(logits, DTensor):
+                    logits = logits.to_local()
 
                 if label_shifted:
                     shift_logits = logits
