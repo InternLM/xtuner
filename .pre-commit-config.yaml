@@ -1,7 +1,7 @@
 exclude: ^tests/data/|^xtuner/model/transformers_models/|^xtuner/tools/model_converters/modeling_internlm2_reward/|^xtuner/_lite/modelings/|^xtuner/_lite/accelerate/dispatches/huggingface/
 repos:
   - repo: https://github.com/PyCQA/flake8
-    rev: 5.0.4
+    rev: 7.1.1
     hooks:
       - id: flake8
         args: ["--max-line-length=119"]
@@ -34,7 +34,7 @@ repos:
           - linkify-it-py
         exclude: 'docs/zh_cn/user_guides/sequence_parallel.md'
   - repo: https://github.com/myint/docformatter
-    rev: v1.3.1
+    rev: v1.5.1
     hooks:
       - id: docformatter
         args: ["--in-place", "--wrap-descriptions", "119"]
