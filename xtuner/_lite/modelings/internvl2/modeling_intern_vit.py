@@ -17,6 +17,7 @@ from transformers.modeling_outputs import (BaseModelOutput,
                                            BaseModelOutputWithPooling)
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
+from xtuner._lite.utils.misc import is_deterministic
 
 from .configuration_intern_vit import InternVisionConfig
 
@@ -79,19 +80,31 @@ class FlashAttention(nn.Module):
                 x = rearrange(qkv, 'b s three h d -> b s (three h d)')
                 x_unpad, indices, cu_seqlens, max_s = unpad_input(x, key_padding_mask)
                 x_unpad = rearrange(x_unpad, 'nnz (three h d) -> nnz three h d', three=3, h=nheads)
-                output_unpad = flash_attn_varlen_qkvpacked_func(
-                    x_unpad, cu_seqlens, max_s, self.dropout_p if self.training else 0.0,
-                    softmax_scale=self.softmax_scale, causal=causal
-                )
+                if is_deterministic():
+                    output_unpad = flash_attn_varlen_qkvpacked_func(
+                        x_unpad, cu_seqlens, max_s, self.dropout_p if self.training else 0.0,
+                        softmax_scale=self.softmax_scale, causal=causal, deterministic=True
+                    )
+                else:
+                    output_unpad = flash_attn_varlen_qkvpacked_func(
+                        x_unpad, cu_seqlens, max_s, self.dropout_p if self.training else 0.0,
+                        softmax_scale=self.softmax_scale, causal=causal
+                    )
                 output = rearrange(pad_input(rearrange(output_unpad, 'nnz h d -> nnz (h d)'),
                                              indices, batch_size, seqlen),
                                    'b s (h d) -> b s h d', h=nheads)
         else:
             assert max_s is not None
-            output = flash_attn_varlen_qkvpacked_func(
-                qkv, cu_seqlens, max_s, self.dropout_p if self.training else 0.0,
-                softmax_scale=self.softmax_scale, causal=causal
-            )
+            if is_deterministic():
+                output = flash_attn_varlen_qkvpacked_func(
+                    qkv, cu_seqlens, max_s, self.dropout_p if self.training else 0.0,
+                    softmax_scale=self.softmax_scale, causal=causal, deterministic=True
+                )
+            else:
+                output = flash_attn_varlen_qkvpacked_func(
+                    qkv, cu_seqlens, max_s, self.dropout_p if self.training else 0.0,
+                    softmax_scale=self.softmax_scale, causal=causal
+                )
 
         return output, None
 
