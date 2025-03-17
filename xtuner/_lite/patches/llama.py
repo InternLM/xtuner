@@ -435,8 +435,14 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM, GenerateMixin):
             ):
                 layer_cur.set_modules_to_forward_prefetch([layer_next])
 
-        self.patched_model.lm_head.apply(param_init_fn)
-        self.patched_model.model.embed_tokens.apply(param_init_fn)
+        if self._patched_model.config.tie_word_embeddings:
+            self.patched_model.model.embed_tokens.apply(param_init_fn)
+            self.patched_model.lm_head.weight = (
+                self.patched_model.model.embed_tokens.weight
+            )
+        else:
+            self.patched_model.lm_head.apply(param_init_fn)
+            self.patched_model.model.embed_tokens.apply(param_init_fn)
         self.patched_model.model.norm.apply(param_init_fn)
 
         if tp_mesh.size() > 1:
@@ -951,6 +957,7 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM, GenerateMixin):
 
                 loss_fct = LigerFusedLinearCrossEntropyLoss()
 
+                # if self.config
                 lm_head_weight = self.lm_head.weight
                 if isinstance(lm_head_weight, DTensor):
                     assert isinstance(shift_hidden_states, DTensor)

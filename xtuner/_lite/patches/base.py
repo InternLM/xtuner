@@ -157,15 +157,20 @@ class HFCheckpointLoader:
 
         if "model.safetensors.index.json" in os.listdir(self.model_path):
             index_json = os.path.join(self.model_path, "model.safetensors.index.json")
+            self.weight_map = json.load(open(index_json))["weight_map"]
             self.use_safetensors = True
         elif "model.bin.index.json" in os.listdir(self.model_path):
             index_json = os.path.join(self.model_path, "model.bin.index.json")
+            self.weight_map = json.load(open(index_json))["weight_map"]
             self.use_safetensors = False
+        elif "model.safetensors" in os.listdir(self.model_path):
+            with safe_open(
+                os.path.join(self.model_path, "model.safetensors"), framework="pt"
+            ) as f:
+                self.weight_map = {k: "model.safetensors" for k in f.keys()}
+            self.use_safetensors = True
         else:
             raise FileNotFoundError
-
-        with open(index_json) as f:
-            self.weight_map = json.load(f)["weight_map"]
 
         self.current_file = None
         self.buffer = None
