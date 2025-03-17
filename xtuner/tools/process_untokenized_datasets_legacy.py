@@ -16,9 +16,8 @@ from xtuner.utils import PROMPT_TEMPLATE
 
 # ignore FutureWarning in hf datasets
 warnings.simplefilter(action="ignore", category=FutureWarning)
-"""
-ftdp dataset:
-srun -p llm_razor --quotatype=auto --gres=gpu:1 --ntasks=1 \
+"""ftdp dataset: srun -p llm_razor --quotatype=auto --gres=gpu:1 --ntasks=1 \
+
     --ntasks-per-node=1 --cpus-per-task=5 --kill-on-bad-exit=1 \
     python xtuner/tools/process_untokenized_datasets.py \
         --data-folder /path/to/data/folder \
