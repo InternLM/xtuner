@@ -437,7 +437,9 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM, GenerateMixin):
 
         if self._patched_model.config.tie_word_embeddings:
             self.patched_model.model.embed_tokens.apply(param_init_fn)
-            self.patched_model.lm_head.weight = self.patched_model.model.embed_tokens.weight
+            self.patched_model.lm_head.weight = (
+                self.patched_model.model.embed_tokens.weight
+            )
         else:
             self.patched_model.lm_head.apply(param_init_fn)
             self.patched_model.model.embed_tokens.apply(param_init_fn)
