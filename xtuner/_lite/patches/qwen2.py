@@ -22,6 +22,7 @@ from transformers.utils import logging
 from xtuner._lite.chat import HybridChatTemplate
 from xtuner._lite.patches.base import FSDPConfig, ModelConfig
 from xtuner._lite.patches.llama import CUDAPatchedLlamaForCausalLM, all_to_all
+from xtuner._lite.utils.misc import is_deterministic
 
 logger = logging.get_logger(__name__)
 
@@ -193,6 +194,9 @@ class CUDAPatchedQwen2ForCausalLM(CUDAPatchedLlamaForCausalLM):
             value_states = all_to_all(
                 value_states, scatter_dim=1, gather_dim=2, mesh=sequence_parallel_mesh
             )
+
+        if is_deterministic() and "flash_attention" in self.config._attn_implementation:
+            kwargs["deterministic"] = True
 
         # (bs, n , qh // sp, d)
         attn_output, attn_weights = attention_interface(
