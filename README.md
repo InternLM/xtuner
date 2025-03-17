@@ -38,6 +38,7 @@ English | [简体中文](README_zh-CN.md)
 </div>
 
 ## 🎉 News
+
 - **\[2025/02\]** Support [OREAL](https://github.com/InternLM/OREAL), a new RL method for math reasoning!
 - **\[2025/01\]** Support [InternLM3 8B Instruct](https://huggingface.co/internlm/internlm3-8b-instruct)!
 - **\[2024/07\]** Support [MiniCPM](xtuner/configs/minicpm/) models!
