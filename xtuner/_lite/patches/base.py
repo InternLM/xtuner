@@ -471,6 +471,17 @@ class PatchedCausalLM(ABC, nn.Module):
 
         from torch.distributed._tensor import DTensor
 
+        input_embedding_name = None
+        lm_head_name = None
+        for name, module in self.patched_model.named_modules():
+            if module is self.patched_model.get_input_embeddings():
+                input_embedding_name = name
+            if (
+                module is self.patched_model.get_output_embeddings()
+                and not self.patched_model.config.tie_word_embeddings
+            ):
+                lm_head_name = name
+
         dtype = self.patched_model.config.torch_dtype
         for name, param in self.patched_model.state_dict().items():
             if self.fsdp_config.torch_compile and "_orig_mod." in name:
@@ -481,6 +492,14 @@ class PatchedCausalLM(ABC, nn.Module):
                 full_param = param.to(dtype).cpu()
 
             if rank == 0:
+                old_embed_size = self.rank0_model.get_input_embeddings().weight.shape[0]
+                if input_embedding_name is not None and input_embedding_name in name:
+                    if full_param.shape[0] != old_embed_size:
+                        full_param = full_param[:old_embed_size, ...]
+                if lm_head_name is not None and lm_head_name in name:
+                    if full_param.shape[0] != old_embed_size:
+                        full_param = full_param[:old_embed_size, ...]
+
                 set_module_tensor_to_device(self.rank0_model, name, "cpu", full_param)
 
         if rank == 0:
@@ -497,6 +516,7 @@ class PatchedCausalLM(ABC, nn.Module):
                 save_peft_format,
                 **kwargs,
             )
+        dist.barrier()
 
     # def save_checkpoint(self,
     #                     optimizer: Optional[torch.optim.Optimizer] = None):

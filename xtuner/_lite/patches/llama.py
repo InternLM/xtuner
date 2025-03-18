@@ -493,6 +493,12 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM, GenerateMixin):
             self.patched_model.model.embed_tokens.apply(param_init_fn)
         self.patched_model.model.norm.apply(param_init_fn)
 
+        # Pad embedding and lm_head to ensure they are divisible by tp_size * fsdp_size
+        # NOTE: We assume world_size = tp_size * fsdp_size here
+        self.patched_model.resize_token_embeddings(
+            pad_to_multiple_of=world_size
+        )
+
         if self.tp_mesh.size() > 1:
             _weight = self.patched_model.lm_head.weight
             _dtensor_weight = nn.Parameter(
