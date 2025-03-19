@@ -14,7 +14,7 @@ from tqdm import tqdm
 
 from xtuner._lite import get_logger
 
-from .cache import CachableTokenizeFunction, CacheObj, calculate_jsonl_sha256
+from .cache import CachableTokenizeFunction, CacheObj, calculate_file_sha256
 
 logger = get_logger()
 
@@ -40,7 +40,7 @@ class JsonDataset(torch.utils.data.Dataset):
             else:
                 mkdir_or_exist(cache_dir)
 
-            file_hash = calculate_jsonl_sha256(path)
+            file_hash = calculate_file_sha256(path)
             file_cache_dir = os.path.join(cache_dir, file_hash)
 
             if file_hash not in os.listdir(cache_dir):

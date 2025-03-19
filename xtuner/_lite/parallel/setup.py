@@ -25,10 +25,10 @@ def mlu_reduce_scatter_tensor(
         return origin_reduce_scatter_tensor(output, input, op, group, async_op)
 
 
-def setup_parallel():
+def setup_parallel(backend="cpu:gloo,cuda:nccl"):
     if not dist.is_initialized():
         dist_launcher = infer_launcher()
-        init_dist(dist_launcher)
+        init_dist(dist_launcher, backend=backend)
 
     device = get_device()
 
