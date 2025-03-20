@@ -14,7 +14,7 @@ from torch.distributed._composable.fsdp import (
     MixedPrecisionPolicy,
     fully_shard,
 )
-from torch.distributed._tensor import DTensor, Replicate, Shard, distribute_tensor
+from torch.distributed._tensor import DTensor, Replicate, Shard, distribute_tensor, Partial
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper,
 )
@@ -207,13 +207,10 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM, GenerateMixin):
             input_layouts=Replicate(),
             output_layouts=Shard(1),
         ),
-        "model.norm": PrepareModuleInput(
-            input_layouts=(Replicate(),),
-            desired_input_layouts=(Replicate(),),
-        ),
+        "model.norm": SequenceParallel(),
         "lm_head": PrepareModuleInput(
-            input_layouts=(Replicate(),),
-            desired_input_layouts=(Replicate(),),
+            input_layouts=(Shard(1),),
+            desired_input_layouts=(Shard(1),),
         ),
     }
 
@@ -451,12 +448,6 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM, GenerateMixin):
                 distribute_tensor(_weight, tp_mesh, [Replicate()])
             )
             self.patched_model.lm_head.register_parameter("weight", _dtensor_weight)
-
-            _weight = self.patched_model.model.norm.weight
-            _dtensor_weight = nn.Parameter(
-                distribute_tensor(_weight, tp_mesh, [Replicate()])
-            )
-            self.patched_model.model.norm.register_parameter("weight", _dtensor_weight)
 
             parallelize_module(
                 self.patched_model,
@@ -959,17 +950,40 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM, GenerateMixin):
 
                 # if self.config
                 lm_head_weight = self.lm_head.weight
+                lm_head_bias = self.lm_head.bias
                 if isinstance(lm_head_weight, DTensor):
+                    # NOTE: We ASSUME lm_head.weight has been fully sharded as model's
+                    # outmost FSDP unit, so it will have been all gathered here as long
+                    # as model's forward is called. The only device mesh that remains
+                    # here is the TP mesh.
                     assert isinstance(shift_hidden_states, DTensor)
+                    assert lm_head_bias is None or isinstance(lm_head_bias, DTensor)
+                    assert lm_head_weight.device_mesh == shift_hidden_states.device_mesh, (
+                        "Expected lm_head.weight to be on the same device mesh as shift_hidden_states, "
+                        f"got {lm_head_weight.device_mesh} and {shift_hidden_states.device_mesh}"
+                    )
+                    tp_mesh = lm_head_weight.device_mesh
+                    assert (
+                        tp_mesh.ndim == 1
+                        and "tp" in tp_mesh.mesh_dim_names[0]
+                    ), f"Expected lm_head.weight placed on a 1d TP mesh, got {tp_mesh}"
                     shift_hidden_states = shift_hidden_states.to_local()
-                    lm_head_weight = self.lm_head.weight.to_local()
+                    # Liger kernel interupts the DTensor gradient placement that should be propagated
+                    # to the last lm_head Linear module. Since the input is Shard(0) and the weight
+                    # is Replicate(), the gradient should be Partial(). We manually set the gradient
+                    # placement to make grad_norm calculation & optimizer.step() correct
+                    lm_head_weight = lm_head_weight.to_local(grad_placements=(Partial(),))
+                    if lm_head_bias is not None:
+                        lm_head_bias = lm_head_bias.to_local(grad_placements=(Partial(),))
 
                 loss = loss_fct(
-                    lm_head_weight, shift_hidden_states, shift_labels, self.lm_head.bias
+                    lm_head_weight, shift_hidden_states, shift_labels, lm_head_bias
                 )
 
             else:
                 logits = self.lm_head(hidden_states)
+                if isinstance(logits, DTensor):
+                    logits = logits.to_local()
 
                 if label_shifted:
                     shift_logits = logits
@@ -1112,9 +1126,9 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM, GenerateMixin):
         if outputs.loss is not None:
             outputs.loss = outputs.loss * (_labels >= 0).sum()
             if self.tp_mesh.size() > 1:
-                outputs.loss = dist.nn.all_reduce(
-                    outputs.loss, group=self.tp_mesh.get_group()
-                )
+                outputs.loss = DTensor.from_local(
+                    outputs.loss, self.tp_mesh, placements=(Partial(),)
+                ).full_tensor()
             if sequence_parallel_mesh and sequence_parallel_mesh.size() > 1:
                 outputs.loss = dist.nn.all_reduce(
                     outputs.loss, group=sequence_parallel_mesh.get_group()
@@ -1234,24 +1248,7 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM, GenerateMixin):
         return _requried_grad_params
 
     def clip_grad_norm(self, max_norm):
-        if self.tp_mesh.size() > 1:
-            dist.all_reduce(
-                self.patched_model.lm_head.weight.grad.to_local(),
-                group=self.tp_mesh.get_group(),
-            )
-            dist.all_reduce(
-                self.patched_model.model.norm.weight.grad.to_local(),
-                group=self.tp_mesh.get_group(),
-            )
-            self.patched_model.lm_head.weight.grad.div_(self.tp_mesh.size())
-            self.patched_model.model.norm.weight.grad.div_(self.tp_mesh.size())
-
-            for param in self.trainable_parameters():
-                param.grad.div_(self.tp_mesh.size())
-
-        grad_norm = clip_grad_norm_(
-            self.trainable_parameters(), self.world_mesh, max_norm
-        )
+        grad_norm = clip_grad_norm_(self.trainable_parameters(), max_norm)
         return grad_norm
 
 
