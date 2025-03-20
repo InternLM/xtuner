@@ -3,7 +3,7 @@ import json
 import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Literal, Optional, Tuple, Union
+from typing import Callable, Dict, List, Literal, Optional, Tuple, Union, cast
 
 import torch
 from accelerate.utils import set_module_tensor_to_device
@@ -11,6 +11,8 @@ from safetensors import safe_open
 from torch import Tensor
 from torch import distributed as dist
 from torch import nn
+from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed._tensor import DTensor
 from torch.nn.utils.clip_grad import _no_grad
 from torch.utils._foreach_utils import (
     _device_has_foreach_support,
@@ -26,10 +28,25 @@ logger = get_logger()
 DEVICE_MODULE = get_torch_device_module()
 
 
+def _group_tensors_by_mesh(
+    tensors: List[Tensor],
+) -> Dict[Optional[DeviceMesh], List[Tensor]]:
+    ret: Dict[Optional[DeviceMesh], List[Tensor]] = {}
+    for tensor in tensors:
+        if isinstance(tensor, DTensor):
+            device_mesh = cast(DTensor, tensor).device_mesh
+        else:
+            device_mesh = None
+        if device_mesh in ret.keys():
+            ret[device_mesh].append(tensor)
+        else:
+            ret[device_mesh] = [tensor]
+    return ret
+
+
 @_no_grad
 def clip_grad_norm_(
     parameters,
-    fsdp_mesh,
     max_norm: float,
     norm_type: float = 2.0,
     error_if_nonfinite: bool = False,
@@ -55,8 +72,13 @@ def clip_grad_norm_(
         if (foreach is None and _has_foreach_support(device_grads, device)) or (
             foreach and _device_has_foreach_support(device)
         ):
-            # for grouped_device_grads in group_tensors_by_device_mesh(device_grads).values():
-            norms.extend(torch._foreach_norm(device_grads, norm_type))
+            # If model has applied different parallel strategies for its modules, e.g.
+            # VLM apply pure FSDP for vision part and FSDP+TP for language part, grads
+            # will have different device meshes. However, for_each operations doesn't
+            # support multiple meshes as of torch 2.5.1. We group them manually.
+            mesh_grouped_grads = _group_tensors_by_mesh(device_grads)
+            for _, mesh_grads in mesh_grouped_grads.items():
+                norms.extend(torch._foreach_norm(mesh_grads, norm_type))
         elif foreach:
             raise RuntimeError(
                 f"foreach=True was passed, but can't use the foreach API on {device.type} tensors"
@@ -64,18 +86,23 @@ def clip_grad_norm_(
         else:
             norms.extend([torch.linalg.vector_norm(g, norm_type) for g in device_grads])
 
-    local_sharded_norm = torch.linalg.vector_norm(
-        torch.stack([norm.to_local().to(first_device) for norm in norms]),
-        norm_type,
-        dtype=torch.float32,
-    )
-
-    if norm_type == 2:
-        total_norm = local_sharded_norm**norm_type
-        dist.all_reduce(total_norm, group=fsdp_mesh.get_group(mesh_dim=0))
-        total_norm = total_norm ** (1 / norm_type)
+    # torch.stack doesn't support DTensors with different device meshes as of
+    # torch 2.5.1. we manually group tensors by meshes, calculate mesh-wise norms
+    # and then do reduction
+    total_norms: List[Tensor] = []
+    mesh_grouped_norms = _group_tensors_by_mesh(norms)
+    for _, mesh_norms in mesh_grouped_norms.items():
+        total_norm = torch.linalg.vector_norm(
+            torch.stack([norm.to(first_device) for norm in mesh_norms]),
+            norm_type,
+        )
+        if isinstance(total_norm, DTensor):
+            total_norm = total_norm.full_tensor()
+        total_norms.append(total_norm)
+    if len(total_norms) == 1:
+        total_norm = total_norms[0]
     else:
-        raise NotImplementedError
+        total_norm = torch.linalg.vector_norm(torch.stack(total_norms), norm_type)
 
     if error_if_nonfinite and torch.logical_or(total_norm.isnan(), total_norm.isinf()):
         raise RuntimeError(
@@ -93,7 +120,13 @@ def clip_grad_norm_(
         if (foreach is None and _has_foreach_support(device_grads, device)) or (
             foreach and _device_has_foreach_support(device)
         ):
-            torch._foreach_mul_(device_grads, clip_coef_clamped.to(device))
+            # If model has applied different parallel strategies for its modules, e.g.
+            # VLM apply pure FSDP for vision part and FSDP+TP for language part, grads
+            # will have different device meshes. However, for_each operations doesn't
+            # support multiple meshes as of torch 2.5.1. We group them manually.
+            mesh_grouped_grads = _group_tensors_by_mesh(device_grads)
+            for _, mesh_grads in mesh_grouped_grads.items():
+                torch._foreach_mul_(mesh_grads, clip_coef_clamped.to(device))
         elif foreach:
             raise RuntimeError(
                 f"foreach=True was passed, but can't use the foreach API on {device.type} tensors"
