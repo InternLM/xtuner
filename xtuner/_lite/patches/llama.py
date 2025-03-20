@@ -14,7 +14,13 @@ from torch.distributed._composable.fsdp import (
     MixedPrecisionPolicy,
     fully_shard,
 )
-from torch.distributed._tensor import DTensor, Replicate, Shard, distribute_tensor, Partial
+from torch.distributed._tensor import (
+    DTensor,
+    Partial,
+    Replicate,
+    Shard,
+    distribute_tensor,
+)
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper,
 )
@@ -958,23 +964,28 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM, GenerateMixin):
                     # here is the TP mesh.
                     assert isinstance(shift_hidden_states, DTensor)
                     assert lm_head_bias is None or isinstance(lm_head_bias, DTensor)
-                    assert lm_head_weight.device_mesh == shift_hidden_states.device_mesh, (
+                    assert (
+                        lm_head_weight.device_mesh == shift_hidden_states.device_mesh
+                    ), (
                         "Expected lm_head.weight to be on the same device mesh as shift_hidden_states, "
                         f"got {lm_head_weight.device_mesh} and {shift_hidden_states.device_mesh}"
                     )
                     tp_mesh = lm_head_weight.device_mesh
                     assert (
-                        tp_mesh.ndim == 1
-                        and "tp" in tp_mesh.mesh_dim_names[0]
+                        tp_mesh.ndim == 1 and "tp" in tp_mesh.mesh_dim_names[0]
                     ), f"Expected lm_head.weight placed on a 1d TP mesh, got {tp_mesh}"
                     shift_hidden_states = shift_hidden_states.to_local()
-                    # Liger kernel interupts the DTensor gradient placement that should be propagated
+                    # Liger kernel interrupts the DTensor gradient placement that should be propagated
                     # to the last lm_head Linear module. Since the input is Shard(0) and the weight
                     # is Replicate(), the gradient should be Partial(). We manually set the gradient
                     # placement to make grad_norm calculation & optimizer.step() correct
-                    lm_head_weight = lm_head_weight.to_local(grad_placements=(Partial(),))
+                    lm_head_weight = lm_head_weight.to_local(
+                        grad_placements=(Partial(),)
+                    )
                     if lm_head_bias is not None:
-                        lm_head_bias = lm_head_bias.to_local(grad_placements=(Partial(),))
+                        lm_head_bias = lm_head_bias.to_local(
+                            grad_placements=(Partial(),)
+                        )
 
                 loss = loss_fct(
                     lm_head_weight, shift_hidden_states, shift_labels, lm_head_bias
