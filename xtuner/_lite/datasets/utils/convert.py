@@ -1,5 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import re
+from typing import Callable, Dict
 
 from xtuner._lite.chat import ChatMessages
 
@@ -186,7 +187,7 @@ def official_openai(data):
         return ChatMessages.from_dict({"messages": data})
 
 
-OPENAI_CONVERT_MAP = {
+OPENAI_CONVERT_MAP: Dict[str, Callable[..., ChatMessages]] = {
     "llava": llava_to_openai,
     "llava_interleave": llava_to_openai_interleave,
     "alpaca": Alpaca2Openai.convert,
