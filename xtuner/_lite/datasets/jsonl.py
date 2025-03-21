@@ -238,11 +238,11 @@ class JsonlDataset(torch.utils.data.Dataset):
         if dist.is_initialized():
             if "gloo" in (backend := dist.get_backend()):
                 _cache_lock_group = dist.new_group(
-                    backend=backend, timeout=datetime.timedelta(seconds=30)
+                    backend=backend, timeout=datetime.timedelta(seconds=1800)
                 )
             else:
                 _cache_lock_group = dist.new_group(
-                    timeout=datetime.timedelta(seconds=30)
+                    timeout=datetime.timedelta(seconds=1800)
                 )
             rank = dist.get_rank()
         else:
