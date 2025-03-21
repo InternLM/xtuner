@@ -1,4 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import hashlib
 import json
 
 import numpy as np
@@ -143,6 +144,15 @@ class PPOTokenizeFunction(SftTokenizeFunction):
         tokenized = msg.tokenize(self.tokenizer, self.chat_template)
 
         return tokenized
+
+    def hash(self):
+        _sys_prompt_hash = (
+            hashlib.sha256(repr(self.sys_prompt).encode()).hexdigest()[:16]
+            if self.sys_prompt is not None
+            else "None"
+        )
+
+        return super().hash() + f"_{_sys_prompt_hash}"
 
 
 class RewardBufferCollator(SftCollator):
