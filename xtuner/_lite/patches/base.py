@@ -482,7 +482,7 @@ class PatchedCausalLM(ABC, nn.Module):
             ):
                 lm_head_name = name
 
-        dtype = self.patched_model.config.torch_dtype
+        dtype = self.fsdp_config.param_dtype
         for name, param in self.patched_model.state_dict().items():
             if self.fsdp_config.torch_compile and "_orig_mod." in name:
                 name = name.replace("_orig_mod.", "")
@@ -503,6 +503,7 @@ class PatchedCausalLM(ABC, nn.Module):
                 set_module_tensor_to_device(self.rank0_model, name, "cpu", full_param)
 
         if rank == 0:
+            self.rank0_model.to(dtype)
             self.rank0_model.save_pretrained(
                 save_directory,
                 is_main_process,
