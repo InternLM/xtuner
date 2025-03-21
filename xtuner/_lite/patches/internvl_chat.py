@@ -417,9 +417,20 @@ class CUDAPatchedInternVLChatModel(PatchedCausalLM):
         # in-place op on custom-function outputs will spoil autograd
         input_embeds = input_embeds.clone()
 
-        vit_embeds = module.extract_feature(pixel_values)
-        vit_embeds = vit_embeds[image_flags == 1]
         vit_batch_size = pixel_values.shape[0]
+        # ViT is fully sharded, so we manually split data parallel and then all gather here
+        if tp_mesh is not None and tp_mesh.size() > 1:
+            vit_batch_size = pixel_values.shape[0]
+            if vit_batch_size % tp_mesh.size() != 0:
+                pad_size = tp_mesh.size() - vit_batch_size % tp_mesh.size()
+                pixel_values = torch.cat([pixel_values, pixel_values[:pad_size]], dim=0)
+            pixel_values = pixel_values.chunk(tp_mesh.size(), dim=0)[tp_mesh.get_local_rank()]
+        vit_embeds = module.extract_feature(pixel_values)
+        if tp_mesh is not None and tp_mesh.size() > 1:
+            vit_embeds_list = [torch.zeros_like(vit_embeds) for _ in range(tp_mesh.size())]
+            dist.all_gather(vit_embeds_list, vit_embeds, group=tp_mesh.get_group())
+            vit_embeds = torch.cat(vit_embeds_list, dim=0)[:vit_batch_size]
+        vit_embeds = vit_embeds[image_flags == 1]
 
         B, N, C = input_embeds.shape
         input_embeds = input_embeds.reshape(B * N, C)
