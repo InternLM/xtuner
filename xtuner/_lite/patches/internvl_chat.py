@@ -1,3 +1,4 @@
+# Copyright (c) OpenMMLab. All rights reserved.
 import copy
 import types
 from functools import partial
@@ -13,7 +14,7 @@ from torch.distributed._composable.fsdp import (
     MixedPrecisionPolicy,
     fully_shard,
 )
-from torch.distributed._tensor import DTensor, Replicate, Shard, Partial
+from torch.distributed._tensor import DTensor, Partial, Replicate, Shard
 from torch.distributed.device_mesh import DeviceMesh
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
@@ -149,10 +150,14 @@ class CUDAPatchedInternVLChatModel(PatchedCausalLM):
         checkpoint_loader: Optional[HFCheckpointLoader] = None,
     ):
         if module2name is None:
-            module2name = {mod: name for name, mod in self.patched_model.named_modules()}
+            module2name = {
+                mod: name for name, mod in self.patched_model.named_modules()
+            }
 
         if checkpoint_loader is None:
-            checkpoint_loader = HFCheckpointLoader(self.patched_model.config._name_or_path)
+            checkpoint_loader = HFCheckpointLoader(
+                self.patched_model.config._name_or_path
+            )
 
         # First shard language model, and derive parallelism from language model
         self._patched_lm.fully_shard(
@@ -175,7 +180,7 @@ class CUDAPatchedInternVLChatModel(PatchedCausalLM):
         )
 
         vision_model = self.patched_model.vision_model
-        compiled_layers: List[nn.Module] = []
+        # compiled_layers: List[nn.Module] = []
         for layer_idx, layer in enumerate(vision_model.encoder.layers):
             layer.apply(param_init_fn)
 
@@ -204,7 +209,8 @@ class CUDAPatchedInternVLChatModel(PatchedCausalLM):
 
         if version.parse(torch.__version__) >= version.parse("2.5.0"):
             for layer_cur, layer_next in zip(
-                vision_model.encoder.layers[:-1], vision_model.encoder.layers[1:],
+                vision_model.encoder.layers[:-1],
+                vision_model.encoder.layers[1:],
             ):
                 layer_cur.set_modules_to_forward_prefetch([layer_next])
 
@@ -218,7 +224,6 @@ class CUDAPatchedInternVLChatModel(PatchedCausalLM):
             reshard_after_forward=self.fsdp_config.reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
         )
-
 
     @staticmethod
     def patched_causal_forward(
@@ -278,10 +283,14 @@ class CUDAPatchedInternVLChatModel(PatchedCausalLM):
             if vit_batch_size % tp_mesh.size() != 0:
                 pad_size = tp_mesh.size() - vit_batch_size % tp_mesh.size()
                 pixel_values = torch.cat([pixel_values, pixel_values[:pad_size]], dim=0)
-            pixel_values = pixel_values.chunk(tp_mesh.size(), dim=0)[tp_mesh.get_local_rank()]
+            pixel_values = pixel_values.chunk(tp_mesh.size(), dim=0)[
+                tp_mesh.get_local_rank()
+            ]
         vit_embeds = module.extract_feature(pixel_values)
         if tp_mesh is not None and tp_mesh.size() > 1:
-            vit_embeds_list = [torch.zeros_like(vit_embeds) for _ in range(tp_mesh.size())]
+            vit_embeds_list = [
+                torch.zeros_like(vit_embeds) for _ in range(tp_mesh.size())
+            ]
             dist.all_gather(vit_embeds_list, vit_embeds, group=tp_mesh.get_group())
             vit_embeds = torch.cat(vit_embeds_list, dim=0)[:vit_batch_size]
         vit_embeds = vit_embeds[image_flags == 1]
@@ -368,9 +377,9 @@ class CUDAPatchedInternVLChatModel(PatchedCausalLM):
         assert max_length_q is not None
         assert max_length_k is not None
         # TODO: sequence parallelism for InternVLChatModel
-        assert sequence_parallel_mesh is None or sequence_parallel_mesh.size() == 1, (
-            "sequence parallel not supported for InternVLChatModel yet"
-        )
+        assert (
+            sequence_parallel_mesh is None or sequence_parallel_mesh.size() == 1
+        ), "sequence parallel not supported for InternVLChatModel yet"
 
         if gather_logprobs:
             assert labels is not None and label_shifted
@@ -463,7 +472,7 @@ class CUDAPatchedInternVLChatModel(PatchedCausalLM):
 
         if outputs.loss is not None:
             valid_tokens = (cast(torch.Tensor, _labels) >= 0).sum()
-            global_valid_tokens = (cast(torch.Tensor, labels) >= 0 ).sum()
+            global_valid_tokens = (cast(torch.Tensor, labels) >= 0).sum()
             outputs.loss = outputs.loss * valid_tokens
             if self.tp_mesh.size() > 1:
                 outputs.loss = DTensor.from_local(

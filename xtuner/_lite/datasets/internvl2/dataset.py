@@ -1,48 +1,53 @@
+# Copyright (c) OpenMMLab. All rights reserved.
+import copy
+import json
+import math
 import os
+from concurrent.futures import ThreadPoolExecutor
+
+import numpy as np
 import torch.distributed as dist
 from mmengine.utils import mkdir_or_exist
 from torch.utils.data import ConcatDataset, DataLoader, Dataset
-import numpy as np
-import json
-import math
-from concurrent.futures import ThreadPoolExecutor
 from tqdm import tqdm
-import copy
+
+from xtuner._lite import get_logger
+from xtuner._lite.parallel import ParallelSampler, VLMLengthGroupedSampler
 
 from ..json import calculate_json_sha256
 from ..jsonl import calculate_jsonl_sha256
 from ..pack import SoftPackDataset
 
-from xtuner._lite import get_logger
-from xtuner._lite.parallel import VLMLengthGroupedSampler, ParallelSampler
-
 logger = get_logger()
 
 
 def _load_json_or_jsonl(json_path):
-    if json_path.endswith('.json'):
+    if json_path.endswith(".json"):
         with open(json_path) as f:
             data = json.load(f)
-    elif json_path.endswith('.jsonl'):
+    elif json_path.endswith(".jsonl"):
         with open(json_path) as f:
             data = f.readlines()
     else:
-        raise ValueError(f'Unsupported file format: {json_path}, '
-                         f'only support .json and .jsonl.')
+        raise ValueError(
+            f"Unsupported file format: {json_path}, " f"only support .json and .jsonl."
+        )
     return data
 
 
 class BaseOrigDataset(Dataset):
-    def __init__(self,
-                 data_name,
-                 data,
-                 chat_template,
-                 tokenizer,
-                 max_length,
-                 image_token_str='<image>',
-                 group_by_length=False,
-                 pack_data=False,
-                 pack_data_cache_dir=None):
+    def __init__(
+        self,
+        data_name,
+        data,
+        chat_template,
+        tokenizer,
+        max_length,
+        image_token_str="<image>",
+        group_by_length=False,
+        pack_data=False,
+        pack_data_cache_dir=None,
+    ):
         self.data_name = data_name
         self.max_length = max_length
         self.group_by_length = group_by_length
@@ -52,16 +57,18 @@ class BaseOrigDataset(Dataset):
         self.image_token_str = image_token_str
         self.tokenizer = tokenizer
 
-        self.root = data.get('media_root', '')
-        logger.info(f"{dist.get_rank()} ======= Start to process dataset: {os.path.basename(data['annotation'])}")
+        self.root = data.get("media_root", "")
+        logger.info(
+            f"{dist.get_rank()} ======= Start to process dataset: {os.path.basename(data['annotation'])}"
+        )
 
-        self.annotation = data['annotation']
-        self._is_jsonl = self.annotation.endswith('.jsonl')
+        self.annotation = data["annotation"]
+        self._is_jsonl = self.annotation.endswith(".jsonl")
         self.raw_data = _load_json_or_jsonl(self.annotation)
-        repeat_time = data.get('repeat_time', 1)
+        repeat_time = data.get("repeat_time", 1)
         if repeat_time < 1:
             # If repeat_time is less than 1, select a portion of the data
-            self.raw_data = self.raw_data[:int(len(self.raw_data) * repeat_time)]
+            self.raw_data = self.raw_data[: int(len(self.raw_data) * repeat_time)]
         if repeat_time > 1:
             assert isinstance(repeat_time, int)
             # Repeat the list if repeat_time is greater than 1
@@ -75,7 +82,9 @@ class BaseOrigDataset(Dataset):
         self.num_tokens = None
         self.pack_data_cache_dir = pack_data_cache_dir
         if pack_data:
-            assert pack_data_cache_dir is not None, 'pack_data_cache_dir must be provided when pack_data is True'
+            assert (
+                pack_data_cache_dir is not None
+            ), "pack_data_cache_dir must be provided when pack_data is True"
             self.num_tokens = self.calc_packing_info()
 
     def __len__(self):
@@ -99,10 +108,12 @@ class BaseOrigDataset(Dataset):
         if not os.path.exists(file_cache_dir):
             mkdir_or_exist(file_cache_dir)
 
-        if 'num_tokens.npy' in os.listdir(file_cache_dir):
-            _cached_file = os.path.join(file_cache_dir, 'num_tokens.npy')
+        if "num_tokens.npy" in os.listdir(file_cache_dir):
+            _cached_file = os.path.join(file_cache_dir, "num_tokens.npy")
             num_tokens = np.load(_cached_file)
-            logger.info(f"Load num_tokens from cache: {os.path.basename(self.annotation)}")
+            logger.info(
+                f"Load num_tokens from cache: {os.path.basename(self.annotation)}"
+            )
         else:
             num_tokens = self.count_tokens_for_pack(file_cache_dir)
         return num_tokens
@@ -123,15 +134,17 @@ class BaseOrigDataset(Dataset):
         end = (rank + 1) * num_per_rank
         dataset_shard = self.raw_data[start:end]
 
-        desc = f'[Rank {rank}] {os.path.basename(self.annotation)}'
+        desc = f"[Rank {rank}] {os.path.basename(self.annotation)}"
         with ThreadPoolExecutor(max_workers=8) as executor:
             tokenized = list(
                 tqdm(
                     executor.map(self.pre_tokenize_fn_for_pack, dataset_shard),
                     desc=desc,
-                    total=len(dataset_shard)))
+                    total=len(dataset_shard),
+                )
+            )
 
-        _num_tokens = [data['num_tokens'] for data in tokenized]
+        _num_tokens = [data["num_tokens"] for data in tokenized]
         _num_tokens = np.array(_num_tokens)
 
         if dist.is_available():
@@ -142,7 +155,7 @@ class BaseOrigDataset(Dataset):
             num_tokens = _num_tokens
 
         if rank == 0 and cache_dir:
-            save_path = os.path.join(cache_dir, 'num_tokens.npy')
+            save_path = os.path.join(cache_dir, "num_tokens.npy")
             np.save(save_path, num_tokens)
 
         return num_tokens
@@ -150,37 +163,40 @@ class BaseOrigDataset(Dataset):
     def pre_tokenize_fn_for_pack(self, data):
         raise NotImplementedError
 
-    def process_text(self, conversations, media_type='image', image_grids=None):
-        while conversations and conversations[0]['from'] == 'gpt':
+    def process_text(self, conversations, media_type="image", image_grids=None):
+        while conversations and conversations[0]["from"] == "gpt":
             # Skip the first one if it is from gpt
             conversations = conversations[1:]
 
-        assert len(conversations) % 2 == 0, f'Invalid conversation length: {len(conversations)}'
+        assert (
+            len(conversations) % 2 == 0
+        ), f"Invalid conversation length: {len(conversations)}"
 
-        input_ = ''
+        input_ = ""
         out_conversation = []
         for msg in conversations:
-            if msg['from'] == 'human':
-                input_ += msg['value'].strip()
-            elif msg['from'] == 'gpt':
-                out_conversation.append({
-                    'input': input_,
-                    'output': msg['value'].strip()
-                })
-                input_ = ''
+            if msg["from"] == "human":
+                input_ += msg["value"].strip()
+            elif msg["from"] == "gpt":
+                out_conversation.append(
+                    {"input": input_, "output": msg["value"].strip()}
+                )
+                input_ = ""
             else:
-                raise NotImplementedError(f'Unsupported message type: {msg}')
+                raise NotImplementedError(f"Unsupported message type: {msg}")
 
         input_ids, labels = [], []
         for i, single_turn_conversation in enumerate(out_conversation):
-            input_ = single_turn_conversation.get('input', '')
+            input_ = single_turn_conversation.get("input", "")
             if input_ is None:
-                input_ = ''
-            input_ = self.chat_template['user'].format(user=input_)
+                input_ = ""
+            input_ = self.chat_template["user"].format(user=input_)
 
             if i == 0:
-                input_ = self._process_media_format_first_round(input_, media_type, image_grids)
-                input_ = self.chat_template['system'] + input_
+                input_ = self._process_media_format_first_round(
+                    input_, media_type, image_grids
+                )
+                input_ = self.chat_template["system"] + input_
                 input_encode = self.tokenizer.encode(input_, add_special_tokens=True)
             else:
                 input_encode = self.tokenizer.encode(input_, add_special_tokens=False)
@@ -188,19 +204,24 @@ class BaseOrigDataset(Dataset):
             input_ids += input_encode
             labels += [-100] * len(input_encode)
 
-            output_text = single_turn_conversation.get('output', '')
-            output_encode = self.chat_template['assistant'].format(assistant=output_text)
-            output_encode = self.tokenizer.encode(output_encode, add_special_tokens=False)
+            output_text = single_turn_conversation.get("output", "")
+            output_encode = self.chat_template["assistant"].format(
+                assistant=output_text
+            )
+            output_encode = self.tokenizer.encode(
+                output_encode, add_special_tokens=False
+            )
             input_ids += output_encode
             labels += copy.deepcopy(output_encode)
 
         if len(input_ids) > self.max_length:
-            input_ids = input_ids[:self.max_length]
-            labels = labels[:self.max_length]
+            input_ids = input_ids[: self.max_length]
+            labels = labels[: self.max_length]
             logger.info(
-                f'Warning: input_ids length({len(input_ids)}) '
-                f'is longer than max_length, cut to {self.max_length}')
-        return {'input_ids': input_ids, 'labels': labels}
+                f"Warning: input_ids length({len(input_ids)}) "
+                f"is longer than max_length, cut to {self.max_length}"
+            )
+        return {"input_ids": input_ids, "labels": labels}
 
     def _process_media_format_first_round(self, input_, media_type, image_grids):
         raise NotImplementedError
@@ -217,39 +238,46 @@ class BaseOrigDataset(Dataset):
 
 
 def build_dataset(args, datasets):
-    assert len(datasets) > 0, 'No dataset found.'
+    assert len(datasets) > 0, "No dataset found."
     if args.dset_pack:
-        train_dataset = SoftPackDataset(datasets,
-                                        target=args.pack_max_length,
-                                        blend=args.concat_before_pack)
+        train_dataset = SoftPackDataset(
+            datasets, target=args.pack_max_length, blend=args.concat_before_pack
+        )
     else:
         train_dataset = ConcatDataset(datasets)
         if dist.get_rank() == 0:
-            logger.info(f'[Dataset] (Original) {len(train_dataset)} samples.')
+            logger.info(f"[Dataset] (Original) {len(train_dataset)} samples.")
     return train_dataset
 
 
 def build_train_dataloader(args, train_dataset, collate_fn, dp_mesh):
     if args.group_by_length:
         if args.dset_pack:
-            length_property = 'longest'
+            length_property = "longest"
         else:
-            length_property = 'length'
-        sampler = VLMLengthGroupedSampler(train_dataset, dp_mesh,
-                                          args.global_batch_size,
-                                          seed=args.seed,
-                                          length_property=length_property)
+            length_property = "length"
+        sampler = VLMLengthGroupedSampler(
+            train_dataset,
+            dp_mesh,
+            args.global_batch_size,
+            seed=args.seed,
+            length_property=length_property,
+        )
     elif args.group_by_modality_length:
         if args.dset_pack:
             raise NotImplementedError
         else:
-            sampler = VLMLengthGroupedSampler(train_dataset, dp_mesh,
-                                              args.global_batch_size,
-                                              seed=args.seed,
-                                              length_property='modality_length')
+            sampler = VLMLengthGroupedSampler(
+                train_dataset,
+                dp_mesh,
+                args.global_batch_size,
+                seed=args.seed,
+                length_property="modality_length",
+            )
     else:
         sampler = ParallelSampler(
-            train_dataset, dp_mesh, args.global_batch_size, seed=args.seed, shuffle=True)
+            train_dataset, dp_mesh, args.global_batch_size, seed=args.seed, shuffle=True
+        )
 
     train_dataloader = DataLoader(
         train_dataset,
@@ -257,10 +285,11 @@ def build_train_dataloader(args, train_dataset, collate_fn, dp_mesh):
         num_workers=args.num_workers,
         sampler=sampler,
         collate_fn=collate_fn,
-        persistent_workers=args.num_workers > 0)
+        persistent_workers=args.num_workers > 0,
+    )
 
     if dist.get_rank() == 0:
-        logger.info(f'[Dataloader] {len(train_dataloader)} batches.')
+        logger.info(f"[Dataloader] {len(train_dataloader)} batches.")
 
     dist.barrier()
     return train_dataloader

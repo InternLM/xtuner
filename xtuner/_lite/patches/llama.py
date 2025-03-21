@@ -405,10 +405,14 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM, GenerateMixin):
             self._float8_handler.convert_to_float8_training(self.patched_model)
         if not getattr(self.patched_model.config, "skip_checkpoint", False):
             if module2name is None:
-                module2name = {mod: name for name, mod in self.patched_model.named_modules()}
+                module2name = {
+                    mod: name for name, mod in self.patched_model.named_modules()
+                }
 
             if checkpoint_loader is None:
-                checkpoint_loader = HFCheckpointLoader(self.patched_model.config._name_or_path)
+                checkpoint_loader = HFCheckpointLoader(
+                    self.patched_model.config._name_or_path
+                )
             param_init_fn = partial(
                 lazy_init_fn,
                 module2name=module2name,
@@ -493,11 +497,11 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM, GenerateMixin):
             self.patched_model.model.embed_tokens.apply(param_init_fn)
         self.patched_model.model.norm.apply(param_init_fn)
 
-        # Pad embedding and lm_head to ensure they are divisible by tp_size * fsdp_size
-        # NOTE: We assume world_size = tp_size * fsdp_size here
-        self.patched_model.resize_token_embeddings(
-            pad_to_multiple_of=world_size
-        )
+        # As of pytorch 2.5.1, fsdp+tp doesn't handle padding automatically and raise
+        # exception. We manually pad embedding layer & lm_head to be divisible by
+        # tp_size * fsdp_size, and clip back before saving checkpoint
+        multiple = self.tp_mesh.size() * self.fsdp_mesh.size()
+        self.patched_model.resize_token_embeddings(pad_to_multiple_of=multiple)
 
         if self.tp_mesh.size() > 1:
             _weight = self.patched_model.lm_head.weight

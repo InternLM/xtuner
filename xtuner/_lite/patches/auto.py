@@ -2,7 +2,6 @@
 from transformers.models.llama import LlamaForCausalLM
 from transformers.models.qwen2 import Qwen2ForCausalLM
 
-from xtuner._lite.modelings.internlm2 import InternLM2ForCausalLM
 from xtuner._lite.modelings.internlm3 import InternLM3ForCausalLM
 from xtuner._lite.modelings.internvl_chat import InternVLChatModel
 

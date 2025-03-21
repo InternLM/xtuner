@@ -1,6 +1,8 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from typing import Dict, Optional
+
 import torch.nn as nn
+
 from xtuner._lite.chat import HybridChatTemplate
 from xtuner._lite.modelings.internlm3.modeling_internlm3 import (
     InternLM3Attention,
