@@ -60,6 +60,7 @@ class JsonlDataset(torch.utils.data.Dataset):
 
             if dist.is_initialized():
                 dist.barrier()
+            logger.info(f"Loading `offsets` from cache: {_cached_file}")
             offsets = np.load(_cached_file)
 
             if tokenize_fn and isinstance(tokenize_fn, CachableTokenizeFunction):
@@ -70,6 +71,7 @@ class JsonlDataset(torch.utils.data.Dataset):
 
                 if "num_tokens.npy" in os.listdir(tok_cache_dir):
                     _cached_file = os.path.join(tok_cache_dir, "num_tokens.npy")
+                    logger.info(f"Loading `num_tokens` from cache: {_cached_file}")
                     num_tokens = np.load(_cached_file)
                 else:
                     num_tokens = self.count_tokens(offsets, tok_cache_dir)
@@ -271,7 +273,16 @@ class JsonlDataset(torch.utils.data.Dataset):
 
         # Make sure only one training task will acquire the lock
         if rank == 0:
-            _filelock.acquire()
+            try:
+                _filelock.acquire(timeout=1500)
+            except TimeoutError:
+                logger.warning(
+                    f"Failed to acquire the lock for {lock_dir} within 25 minutes. This may indicate "
+                    "that multiple processes are attempting to cache the same JSONL data simultaneously, "
+                    "which can cause unexpected errors. If you encounter this message or any unexpected errors, "
+                    f"please remove the cache: {os.path.join(lock_dir, '..')}."
+                )
+                _filelock.release()
 
         if dist.is_initialized():
             dist.barrier(group=_cache_lock_group)  # type: ignore
