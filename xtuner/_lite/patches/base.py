@@ -299,7 +299,11 @@ def dense_model_init_weights(module, config=None):
     device = DEVICE_MODULE.current_device()
     module.to_empty(device=device, recurse=False)
 
-    std = config.initializer_range
+    if config is None:
+        logger.info("config is None, set default initializer_range=0.02")
+        std = 0.02  # default value
+    else:
+        std = config.initializer_range
     if isinstance(module, nn.Linear):
         module.weight.data.normal_(mean=0.0, std=std)
         if module.bias is not None:
