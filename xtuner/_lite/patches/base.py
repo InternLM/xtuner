@@ -309,6 +309,10 @@ def dense_model_init_weights(module, config=None):
         if module.padding_idx is not None:
             module.weight.data[module.padding_idx].zero_()
 
+    # TODO： more elegant way to handle other modules
+    if "RMSNorm" in type(module).__name__:
+        module.weight.data.copy_(torch.ones_like(module.weight.data))
+
 
 @dataclass
 class FSDPConfig:
