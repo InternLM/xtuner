@@ -59,6 +59,7 @@ from xtuner._lite.patches.base import (
     ModelConfig,
     PatchedCausalLM,
     clip_grad_norm_,
+    dense_model_init_weights,
     lazy_init_fn,
 )
 from xtuner._lite.patches.mixins import GenerateMixin
@@ -371,13 +372,20 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM, GenerateMixin):
         )
         self._data_mesh = _data_mesh[data_mesh_name]
 
-        param_init_fn = partial(
-            lazy_init_fn,
-            module2name={mod: name for name, mod in self.patched_model.named_modules()},
-            checkpoint_loader=HFCheckpointLoader(
-                self.patched_model.config._name_or_path
-            ),
-        )
+        if not getattr(self.patched_model.config, "skip_checkpoint", False):
+            param_init_fn = partial(
+                lazy_init_fn,
+                module2name={
+                    mod: name for name, mod in self.patched_model.named_modules()
+                },
+                checkpoint_loader=HFCheckpointLoader(
+                    self.patched_model.config._name_or_path
+                ),
+            )
+        else:
+            param_init_fn = partial(
+                dense_model_init_weights, config=self.patched_model.config
+            )
 
         mp_policy = MixedPrecisionPolicy(
             param_dtype=fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype

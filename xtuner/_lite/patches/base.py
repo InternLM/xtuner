@@ -242,7 +242,7 @@ class HFCheckpointLoader:
         return weight
 
 
-@torch.no_grad
+@torch.no_grad()
 def lazy_init_fn(module, module2name, checkpoint_loader):
     device = DEVICE_MODULE.current_device()
 
@@ -292,6 +292,30 @@ def lazy_init_fn(module, module2name, checkpoint_loader):
                     "it is initialized to 0 by default."
                 )
                 buffer.data.zero_()
+
+
+@torch.no_grad()
+def dense_model_init_weights(module, config=None):
+    device = DEVICE_MODULE.current_device()
+    module.to_empty(device=device, recurse=False)
+
+    if config is None:
+        logger.info("config is None, set default initializer_range=0.02")
+        std = 0.02  # default value
+    else:
+        std = config.initializer_range
+    if isinstance(module, nn.Linear):
+        module.weight.data.normal_(mean=0.0, std=std)
+        if module.bias is not None:
+            module.bias.data.zero_()
+    elif isinstance(module, nn.Embedding):
+        module.weight.data.normal_(mean=0.0, std=std)
+        if module.padding_idx is not None:
+            module.weight.data[module.padding_idx].zero_()
+
+    # TODO： more elegant way to handle other modules
+    if "RMSNorm" in type(module).__name__:
+        module.weight.data.copy_(torch.ones_like(module.weight.data))
 
 
 @dataclass
@@ -393,6 +417,9 @@ class PatchedCausalLM(ABC, nn.Module):
             rank = dist.get_rank()
         else:
             rank = 0
+
+        if rank == 0:
+            self.rank0_model.to(torch.bfloat16)
 
         from torch.distributed._tensor import DTensor
 
