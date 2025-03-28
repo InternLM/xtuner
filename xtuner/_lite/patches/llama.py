@@ -389,7 +389,8 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM, GenerateMixin):
             )
 
         mp_policy = MixedPrecisionPolicy(
-            param_dtype=self.fsdp_config.param_dtype, reduce_dtype=self.fsdp_config.reduce_dtype
+            param_dtype=self.fsdp_config.param_dtype,
+            reduce_dtype=self.fsdp_config.reduce_dtype,
         )
 
         self.patched_model.model.rotary_emb = self.rotary_emb_cls(
@@ -435,7 +436,9 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM, GenerateMixin):
                 mesh=self.fsdp_mesh,
                 mp_policy=mp_policy,
                 reshard_after_forward=self.fsdp_config.reshard_after_forward,
-                offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
+                offload_policy=CPUOffloadPolicy()
+                if self.fsdp_config.cpu_offload
+                else None,
             )
 
             if self.fsdp_config.torch_compile:

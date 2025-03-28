@@ -6,7 +6,6 @@ from xtuner._lite.modelings.internlm3.modeling_internlm3 import (
     InternLM3ForCausalLM,
     InternLM3RotaryEmbedding,
 )
-from xtuner._lite.patches.base import FSDPConfig
 
 from .llama import CUDAPatchedLlamaForCausalLM
 
