@@ -372,7 +372,7 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM, GenerateMixin):
         )
         self._data_mesh = _data_mesh[data_mesh_name]
 
-    def fully_shard(self, fsdp_config: FSDPConfig) -> None:
+    def fully_shard(self) -> None:
         if not getattr(self.patched_model.config, "skip_checkpoint", False):
             param_init_fn = partial(
                 lazy_init_fn,
