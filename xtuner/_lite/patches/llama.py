@@ -254,7 +254,7 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM, GenerateMixin):
 
         self._fsdp_config = fsdp_config
         if self._fsdp_config is not None:
-            self.fully_shard(fsdp_config)
+            self.init_device_mesh(fsdp_config)
 
     @property
     def patched_model(self) -> LlamaForCausalLM:
@@ -311,7 +311,7 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM, GenerateMixin):
 
         return model
 
-    def fully_shard(self, fsdp_config: FSDPConfig) -> None:
+    def init_device_mesh(self, fsdp_config: FSDPConfig) -> None:
         if fsdp_config.ep_size > 1:
             raise NotImplementedError
 
@@ -372,6 +372,7 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM, GenerateMixin):
         )
         self._data_mesh = _data_mesh[data_mesh_name]
 
+    def fully_shard(self, fsdp_config: FSDPConfig) -> None:
         if not getattr(self.patched_model.config, "skip_checkpoint", False):
             param_init_fn = partial(
                 lazy_init_fn,
@@ -412,10 +413,10 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM, GenerateMixin):
 
             attention = layer.self_attn
 
-            if tp_mesh.size() > 1:
+            if self.tp_mesh.size() > 1:
                 parallelize_module(
                     module=layer,
-                    device_mesh=tp_mesh,
+                    device_mesh=self.tp_mesh,
                     parallelize_plan=self.layer_tp_plan,
                 )
 
@@ -431,7 +432,7 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM, GenerateMixin):
 
             fully_shard(
                 layer,
-                mesh=fsdp_mesh,
+                mesh=self.fsdp_mesh,
                 mp_policy=mp_policy,
                 reshard_after_forward=fsdp_config.reshard_after_forward,
                 offload_policy=CPUOffloadPolicy() if fsdp_config.cpu_offload else None,
@@ -457,22 +458,22 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM, GenerateMixin):
             self.patched_model.model.embed_tokens.apply(param_init_fn)
         self.patched_model.model.norm.apply(param_init_fn)
 
-        if tp_mesh.size() > 1:
+        if self.tp_mesh.size() > 1:
             _weight = self.patched_model.lm_head.weight
             _dtensor_weight = nn.Parameter(
-                distribute_tensor(_weight, tp_mesh, [Replicate()])
+                distribute_tensor(_weight, self.tp_mesh, [Replicate()])
             )
             self.patched_model.lm_head.register_parameter("weight", _dtensor_weight)
 
             parallelize_module(
                 self.patched_model,
-                tp_mesh,
+                self.tp_mesh,
                 self.casual_tp_plan,
             )
 
         fully_shard(
             self.patched_model,
-            mesh=fsdp_mesh,
+            mesh=self.fsdp_mesh,
             mp_policy=mp_policy,
             reshard_after_forward=fsdp_config.reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if fsdp_config.cpu_offload else None,

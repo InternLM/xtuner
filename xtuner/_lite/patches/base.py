@@ -392,6 +392,10 @@ class PatchedCausalLM(ABC, nn.Module):
         pass
 
     @abstractmethod
+    def init_device_mesh(self, parallel_config: FSDPConfig):
+        pass
+
+    @abstractmethod
     def trainable_parameters(self) -> List[Dict[str, List[nn.Parameter]]]:
         pass
 

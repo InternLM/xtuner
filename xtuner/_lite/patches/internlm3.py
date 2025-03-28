@@ -6,6 +6,7 @@ from xtuner._lite.modelings.internlm3.modeling_internlm3 import (
     InternLM3ForCausalLM,
     InternLM3RotaryEmbedding,
 )
+from xtuner._lite.patches.base import FSDPConfig
 
 from .llama import CUDAPatchedLlamaForCausalLM
 
@@ -23,8 +24,8 @@ class CUDAPatchedInternLM3ForCausalLM(CUDAPatchedLlamaForCausalLM):
         stop_words=["<|im_end|>"],
     )
 
-    def __init__(self, model, fsdp_config=None):
-        super().__init__(model, fsdp_config)
+    def fully_shard(self, fsdp_config: FSDPConfig) -> None:
+        super().fully_shard(fsdp_config)
 
         if fsdp_config.max_length is not None:
             self.patched_model.config.rope_scaling = {"rope_type": "default"}
