@@ -389,7 +389,7 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM, GenerateMixin):
             )
 
         mp_policy = MixedPrecisionPolicy(
-            param_dtype=fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
+            param_dtype=self.fsdp_config.param_dtype, reduce_dtype=self.fsdp_config.reduce_dtype
         )
 
         self.patched_model.model.rotary_emb = self.rotary_emb_cls(
@@ -397,7 +397,7 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM, GenerateMixin):
         )
 
         num_recompute_layers = int(
-            self.model_config.num_hidden_layers * fsdp_config.recompute_ratio
+            self.model_config.num_hidden_layers * self.fsdp_config.recompute_ratio
         )
 
         from torch.distributed._symmetric_memory import enable_symm_mem_for_group
@@ -405,7 +405,7 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM, GenerateMixin):
         torch._inductor.config._micro_pipeline_tp = True
         enable_symm_mem_for_group(self.tp_mesh.get_group().group_name)
 
-        if fsdp_config.torch_compile:
+        if self.fsdp_config.torch_compile:
             compiled_layers = []
 
         for layer in tqdm(self.patched_model.model.layers):
@@ -423,7 +423,7 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM, GenerateMixin):
             if attention.layer_idx < num_recompute_layers:
                 layer = checkpoint_wrapper(layer, preserve_rng_state=False)
 
-            if fsdp_config.torch_compile:
+            if self.fsdp_config.torch_compile:
                 layer = torch.compile(layer, fullgraph=True)
 
             self.patched_model.model.layers.register_module(
@@ -434,11 +434,11 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM, GenerateMixin):
                 layer,
                 mesh=self.fsdp_mesh,
                 mp_policy=mp_policy,
-                reshard_after_forward=fsdp_config.reshard_after_forward,
-                offload_policy=CPUOffloadPolicy() if fsdp_config.cpu_offload else None,
+                reshard_after_forward=self.fsdp_config.reshard_after_forward,
+                offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
             )
 
-            if fsdp_config.torch_compile:
+            if self.fsdp_config.torch_compile:
                 compiled_layers.append(layer)
 
         if version.parse(torch.__version__) >= version.parse("2.5.0"):
@@ -475,8 +475,8 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM, GenerateMixin):
             self.patched_model,
             mesh=self.fsdp_mesh,
             mp_policy=mp_policy,
-            reshard_after_forward=fsdp_config.reshard_after_forward,
-            offload_policy=CPUOffloadPolicy() if fsdp_config.cpu_offload else None,
+            reshard_after_forward=self.fsdp_config.reshard_after_forward,
+            offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
         )
 
     @staticmethod
