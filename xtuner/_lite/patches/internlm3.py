@@ -23,14 +23,14 @@ class CUDAPatchedInternLM3ForCausalLM(CUDAPatchedLlamaForCausalLM):
         stop_words=["<|im_end|>"],
     )
 
-    def __init__(self, model, fsdp_config=None):
-        super().__init__(model, fsdp_config)
+    def fully_shard(self) -> None:
+        super().fully_shard()
 
-        if fsdp_config.max_length is not None:
+        if self.fsdp_config.max_length is not None:
             self.patched_model.config.rope_scaling = {"rope_type": "default"}
             ori_max_len = self.patched_model.config.max_position_embeddings
             self.patched_model.config.max_position_embeddings = max(
-                fsdp_config.max_length, ori_max_len
+                self.fsdp_config.max_length, ori_max_len
             )
             self.patched_model.model.rotary_emb = InternLM3RotaryEmbedding(
                 self.patched_model.config
