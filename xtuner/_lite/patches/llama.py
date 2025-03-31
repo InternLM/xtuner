@@ -1160,7 +1160,8 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM, GenerateMixin):
                 outputs.loss = dist.nn.all_reduce(
                     outputs.loss, group=sequence_parallel_mesh.get_group()
                 )
-            outputs.loss = outputs.loss / (labels >= 0).sum()
+            if (labels >= 0).sum() > 0:
+                outputs.loss = outputs.loss / (labels >= 0).sum()
 
         return outputs
 
