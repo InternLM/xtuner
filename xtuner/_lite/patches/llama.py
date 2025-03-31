@@ -51,6 +51,7 @@ from transformers.processing_utils import Unpack
 from transformers.utils import logging
 
 from xtuner._lite.accelerate import liger_kernel_is_available
+from xtuner._lite.accelerate.float8_gmm import Float8Handler
 from xtuner._lite.chat import HybridChatTemplate
 from xtuner._lite.parallel.sequence import split_for_sequence_parallel
 from xtuner._lite.patches.base import (
@@ -64,7 +65,7 @@ from xtuner._lite.patches.base import (
 )
 from xtuner._lite.patches.mixins import GenerateMixin
 from xtuner._lite.patches.utils import pad_to_max_length, pad_to_multiple_of
-from xtuner._lite.utils.misc import is_deterministic
+from xtuner._lite.utils.misc import XTUNER_DETERMINISTIC
 
 logger = logging.get_logger(__name__)
 
@@ -373,6 +374,19 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM, GenerateMixin):
         self._data_mesh = _data_mesh[data_mesh_name]
 
     def fully_shard(self) -> None:
+        float8_handler = Float8Handler(
+            compile=self.fsdp_config.torch_compile,
+            enable_fsdp_float8_all_gather=True,
+            pad_inner_dim=False,
+            scaling_granularity_gemm=self.fsdp_config.scaling_granularity_gemm,
+            scaling_granularity_grouped_gemm=self.fsdp_config.scaling_granularity_grouped_gemm,
+        )
+
+        if not self.fsdp_config.enable_fp8:
+            float8_handler.enabled = False
+
+        float8_handler.convert_to_float8_training(self.patched_model)
+
         if not getattr(self.patched_model.config, "skip_checkpoint", False):
             param_init_fn = partial(
                 lazy_init_fn,
@@ -382,6 +396,7 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM, GenerateMixin):
                 checkpoint_loader=HFCheckpointLoader(
                     self.patched_model.config._name_or_path
                 ),
+                enable_fp8=self.fsdp_config.enable_fp8,
             )
         else:
             param_init_fn = partial(
@@ -600,7 +615,10 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM, GenerateMixin):
                 value_states, scatter_dim=1, gather_dim=2, mesh=sequence_parallel_mesh
             )
 
-        if is_deterministic() and "flash_attention" in self.config._attn_implementation:
+        if (
+            XTUNER_DETERMINISTIC
+            and "flash_attention" in self.config._attn_implementation
+        ):
             kwargs["deterministic"] = True
 
         # (bs, n , qh // sp, d)
