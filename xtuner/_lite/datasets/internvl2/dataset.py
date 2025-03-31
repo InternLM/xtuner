@@ -14,8 +14,7 @@ from tqdm import tqdm
 from xtuner._lite import get_logger
 from xtuner._lite.parallel import ParallelSampler, VLMLengthGroupedSampler
 
-from ..json import calculate_json_sha256
-from ..jsonl import calculate_jsonl_sha256
+from ..cache import calculate_file_sha256
 from ..pack import SoftPackDataset
 
 logger = get_logger()
@@ -100,10 +99,7 @@ class BaseOrigDataset(Dataset):
             mkdir_or_exist(self.pack_data_cache_dir)
 
         # TODO: more rubost way to calculate the hash
-        if self._is_jsonl:
-            file_hash = calculate_jsonl_sha256(self.annotation)
-        else:
-            file_hash = calculate_json_sha256(self.annotation)
+        file_hash = calculate_file_sha256(self.annotation)
         file_cache_dir = os.path.join(self.pack_data_cache_dir, file_hash)
         if not os.path.exists(file_cache_dir):
             mkdir_or_exist(file_cache_dir)
