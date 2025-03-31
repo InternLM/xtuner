@@ -1,10 +1,8 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD 3-Clause license found in the
-# LICENSE file in the root directory of this source tree.
-# Lets define a few top level things here
-from torchao.utils import TORCH_VERSION_AT_LEAST_2_5
+# Copyright (c) OpenMMLab. All rights reserved.
+# Modified from https://github.com/pytorch/ao/blob/v0.8.0/torchao/float8/__init__.py
+import re
+
+import torch
 
 from xtuner._lite.accelerate.float8_gmm.config import (
     CastConfig,
@@ -31,7 +29,32 @@ from xtuner._lite.accelerate.float8_gmm.fsdp_utils import (
     precompute_float8_dynamic_scale_for_fsdp,
 )
 
-if TORCH_VERSION_AT_LEAST_2_5:
+
+def parse_version(version_string):
+    # Extract just the X.Y.Z part from the version string
+    match = re.match(r"(\d+\.\d+\.\d+)", version_string)
+    if match:
+        version = match.group(1)
+        return [int(x) for x in version.split(".")]
+    else:
+        raise ValueError(f"Invalid version string format: {version_string}")
+
+
+def compare_versions(v1, v2):
+    v1_parts = parse_version(v1)
+    v2_parts = parse_version(v2)
+    return (v1_parts > v2_parts) - (v1_parts < v2_parts)
+
+
+def is_fbcode():
+    return not hasattr(torch.version, "git_version")
+
+
+def torch_version_at_least(min_version):
+    return is_fbcode() or compare_versions(torch.__version__, min_version) >= 0
+
+
+if torch_version_at_least("2.5.0"):
     # Needed to load Float8Tensor with weights_only = True
     from torch.serialization import add_safe_globals
 
