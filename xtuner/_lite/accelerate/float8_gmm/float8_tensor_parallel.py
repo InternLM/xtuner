@@ -1,4 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+# Copied from https://github.com/pytorch/ao/blob/v0.8.0/torchao/float8/float8_tensor_parallel.py
 import torch
 import torch.nn as nn
 from torch.distributed._tensor import DTensor

@@ -1,8 +1,6 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD 3-Clause license found in the
-# LICENSE file in the root directory of this source tree.
+# Copyright (c) OpenMMLab. All rights reserved.
+# Modified from https://github.com/pytorch/ao/blob/v0.8.0/torchao/float8/float8_tensor.py
+# 1. Support tile-wise Float8Tensor
 import enum
 from typing import Dict, NamedTuple, Optional
 

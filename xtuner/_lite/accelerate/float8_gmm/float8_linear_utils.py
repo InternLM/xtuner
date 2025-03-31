@@ -1,8 +1,5 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD 3-Clause license found in the
-# LICENSE file in the root directory of this source tree.
+# Copyright (c) OpenMMLab. All rights reserved.
+# Copied from https://github.com/pytorch/ao/blob/v0.8.0/torchao/float8/float8_linear_utils.py
 import logging
 from typing import Callable, Optional
 

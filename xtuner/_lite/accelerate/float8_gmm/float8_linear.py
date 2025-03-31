@@ -1,9 +1,7 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD 3-Clause license found in the
-# LICENSE file in the root directory of this source tree.
-"""A simple module swap UX for a float8 version of `torch.nn.Linear`."""
+# Copyright (c) OpenMMLab. All rights reserved.
+# Modified from https://github.com/pytorch/ao/blob/v0.8.0/torchao/float8/float8_linear.py
+# 1. Support num_gpus > out_features. Related issue: https://github.com/pytorch/ao/issues/1938
+# 2. Support linear's weight is still DTensor after fsdp all_gather (EP related)
 
 from typing import Optional
 
