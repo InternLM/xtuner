@@ -64,7 +64,7 @@ from xtuner._lite.patches.base import (
 )
 from xtuner._lite.patches.mixins import GenerateMixin
 from xtuner._lite.patches.utils import pad_to_max_length, pad_to_multiple_of
-from xtuner._lite.utils.misc import is_deterministic
+from xtuner._lite.utils.misc import XTUNER_DETERMINISTIC
 
 logger = logging.get_logger(__name__)
 
@@ -256,6 +256,17 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM, GenerateMixin):
         if self._fsdp_config is not None:
             self.init_device_mesh(fsdp_config)
 
+        if self._fsdp_config.enable_fp8:
+            from xtuner._lite.accelerate.float8_gmm import Float8Handler
+
+            self._float8_handler = Float8Handler(
+                compile=fsdp_config.torch_compile,
+                enable_fsdp_float8_all_gather=True,
+                pad_inner_dim=False,
+                scaling_granularity_gemm=fsdp_config.scaling_granularity_gemm,
+                scaling_granularity_grouped_gemm=fsdp_config.scaling_granularity_grouped_gemm,
+            )
+
     @property
     def patched_model(self) -> LlamaForCausalLM:
         return self._patched_model
@@ -373,6 +384,9 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM, GenerateMixin):
         self._data_mesh = _data_mesh[data_mesh_name]
 
     def fully_shard(self) -> None:
+        if self._fsdp_config.enable_fp8:
+            self._float8_handler.convert_to_float8_training(self.patched_model)
+
         if not getattr(self.patched_model.config, "skip_checkpoint", False):
             param_init_fn = partial(
                 lazy_init_fn,
@@ -382,6 +396,7 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM, GenerateMixin):
                 checkpoint_loader=HFCheckpointLoader(
                     self.patched_model.config._name_or_path
                 ),
+                enable_fp8=self.fsdp_config.enable_fp8,
             )
         else:
             param_init_fn = partial(
@@ -600,7 +615,10 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM, GenerateMixin):
                 value_states, scatter_dim=1, gather_dim=2, mesh=sequence_parallel_mesh
             )
 
-        if is_deterministic() and "flash_attention" in self.config._attn_implementation:
+        if (
+            XTUNER_DETERMINISTIC
+            and "flash_attention" in self.config._attn_implementation
+        ):
             kwargs["deterministic"] = True
 
         # (bs, n , qh // sp, d)
@@ -1073,7 +1091,7 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM, GenerateMixin):
         _max_length_q = max_length_q
         _max_length_k = max_length_k
 
-        if self.fsdp_config.torch_compile:
+        if self.fsdp_config.torch_compile or self.fsdp_config.enable_fp8:
             _input_ids = pad_to_max_length(
                 _input_ids, 0, self.fsdp_config.max_length, 1
             )
@@ -1278,6 +1296,12 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM, GenerateMixin):
     def clip_grad_norm(self, max_norm):
         grad_norm = clip_grad_norm_(self.trainable_parameters(), max_norm)
         return grad_norm
+
+    def precompute_float8_dynamic_scale_for_fsdp(self):
+        if self._fsdp_config.enable_fp8:
+            self._float8_handler.precompute_float8_dynamic_scale_for_fsdp(
+                self._patched_model
+            )
 
 
 class MLUPatchedLlamaForCausalLM(CUDAPatchedLlamaForCausalLM):
