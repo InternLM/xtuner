@@ -1,6 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 
-import deep_gemm
 import torch
 import torch.nn as nn
 import triton
@@ -23,6 +22,18 @@ from xtuner._lite.accelerate.float8_gmm.triton_kernels import (
     trans_per_block_quant_expand_128x,
     trans_per_tile_quant_expand_128x,
 )
+
+DEEPGEMM_INSTALLED = False
+
+try:
+    from deep_gemm import (
+        k_grouped_gemm_dw_fp8_fp8_bf16_tn_contiguous,
+        m_grouped_varlen_gemm_fp8_fp8_bf16_nt_contiguous,
+    )
+
+    DEEPGEMM_INSTALLED = True
+except ImportError:
+    deep_gemm = None
 
 
 @torch.no_grad()
@@ -157,7 +168,7 @@ class fp8_matmul_weight_per_block_act_per_tile(torch.autograd.Function):
                 x, tokens_per_expert, group_size=128, dtype=torch.float8_e4m3fn
             )
 
-        out = deep_gemm.m_grouped_varlen_gemm_fp8_fp8_bf16_nt_contiguous(
+        out = m_grouped_varlen_gemm_fp8_fp8_bf16_nt_contiguous(
             (x_fp8, x_scale), (w_fp8._data, w_fp8._scale), tokens_per_expert
         )
 
@@ -178,7 +189,7 @@ class fp8_matmul_weight_per_block_act_per_tile(torch.autograd.Function):
         ne, dout, din = w_fp8.shape
         seq, dout = grad_output_hp.shape
         grad_out_fp8, grad_out_scale = per_tile_quant(grad_output_hp)
-        dx = deep_gemm.m_grouped_varlen_gemm_fp8_fp8_bf16_nt_contiguous(
+        dx = m_grouped_varlen_gemm_fp8_fp8_bf16_nt_contiguous(
             (grad_out_fp8, grad_out_scale),
             (
                 w_fp8._data.transpose(1, 2).contiguous(),
@@ -193,7 +204,7 @@ class fp8_matmul_weight_per_block_act_per_tile(torch.autograd.Function):
             tokens_per_expert_expand,
         ) = trans_per_tile_quant_expand_128x(grad_output_hp, tokens_per_expert)
         dw = grad_output_hp.new_empty((ne, dout, din))
-        deep_gemm.k_grouped_gemm_dw_fp8_fp8_bf16_tn_contiguous(
+        k_grouped_gemm_dw_fp8_fp8_bf16_tn_contiguous(
             grad_out_trans_fp8,
             grad_out_trans_scale,
             x_trans_quant_fp8,
@@ -208,6 +219,12 @@ class fp8_matmul_weight_per_block_act_per_tile(torch.autograd.Function):
 class Float8GroupedLinearATWB(torch.nn.Module):
     def __init__(self, in_features, out_features, num_routed_experts=10):
         super().__init__()
+
+        assert DEEPGEMM_INSTALLED, (
+            "Please install deep_gemm:"
+            "1. git clone --recursive git@github.com:sukoncon/DeepGemm.git\n"
+            "2. python setup.py develop"
+        )
 
         self.linear_mm_config = LinearMMConfig(
             # output
