@@ -257,15 +257,14 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM, GenerateMixin):
         if self._fsdp_config is not None:
             self.init_device_mesh(fsdp_config)
 
-        self._float8_handler = Float8Handler(
-            compile=fsdp_config.torch_compile,
-            enable_fsdp_float8_all_gather=True,
-            pad_inner_dim=False,
-            scaling_granularity_gemm=fsdp_config.scaling_granularity_gemm,
-            scaling_granularity_grouped_gemm=fsdp_config.scaling_granularity_grouped_gemm,
-        )
-        if not fsdp_config.enable_fp8:
-            self._float8_handler.enabled = False
+        if self._fsdp_config.enable_fp8:
+            self._float8_handler = Float8Handler(
+                compile=fsdp_config.torch_compile,
+                enable_fsdp_float8_all_gather=True,
+                pad_inner_dim=False,
+                scaling_granularity_gemm=fsdp_config.scaling_granularity_gemm,
+                scaling_granularity_grouped_gemm=fsdp_config.scaling_granularity_grouped_gemm,
+            )
 
     @property
     def patched_model(self) -> LlamaForCausalLM:
@@ -384,7 +383,8 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM, GenerateMixin):
         self._data_mesh = _data_mesh[data_mesh_name]
 
     def fully_shard(self) -> None:
-        self._float8_handler.convert_to_float8_training(self.patched_model)
+        if self._fsdp_config.enable_fp8:
+            self._float8_handler.convert_to_float8_training(self.patched_model)
 
         if not getattr(self.patched_model.config, "skip_checkpoint", False):
             param_init_fn = partial(
@@ -1296,9 +1296,10 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM, GenerateMixin):
         return grad_norm
 
     def precompute_float8_dynamic_scale_for_fsdp(self):
-        self._float8_handler.precompute_float8_dynamic_scale_for_fsdp(
-            self._patched_model
-        )
+        if self._fsdp_config.enable_fp8:
+            self._float8_handler.precompute_float8_dynamic_scale_for_fsdp(
+                self._patched_model
+            )
 
 
 class MLUPatchedLlamaForCausalLM(CUDAPatchedLlamaForCausalLM):
