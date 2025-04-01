@@ -208,7 +208,7 @@ class fp8_matmul_weight_per_expert_act_per_channel(torch.autograd.Function):
         return dx, dw, None, None, None
 
 
-class Float8GroupedLinearACWE(torch.nn.Module):
+class ChannelWiseFloat8GroupedLinear(torch.nn.Module):
     def __init__(self, in_features, out_features, num_routed_experts=10):
         super().__init__()
 

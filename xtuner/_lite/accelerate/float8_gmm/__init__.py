@@ -10,7 +10,12 @@ from xtuner._lite.accelerate.float8_gmm.config import (
     Float8LinearConfig,
     ScalingType,
 )
-from xtuner._lite.accelerate.float8_gmm.float8_gmm import Float8GroupedLinearACWE
+from xtuner._lite.accelerate.float8_gmm.float8_gmm_channel_wise import (
+    ChannelWiseFloat8GroupedLinear,
+)
+from xtuner._lite.accelerate.float8_gmm.float8_gmm_tile_wise import (
+    TileWiseFloat8GroupedLinear,
+)
 from xtuner._lite.accelerate.float8_gmm.float8_handler import Float8Handler
 from xtuner._lite.accelerate.float8_gmm.float8_linear import Float8Linear
 from xtuner._lite.accelerate.float8_gmm.float8_linear_utils import (
@@ -55,6 +60,7 @@ __all__ = [
     "precompute_float8_dynamic_scale_for_fsdp",
     # note: Float8Tensor and Float8Linear are not public APIs
     "Float8Linear",
-    "Float8GroupedLinearACWE",
+    "ChannelWiseFloat8GroupedLinear",
+    "TileWiseFloat8GroupedLinear",
     "Float8Handler",
 ]

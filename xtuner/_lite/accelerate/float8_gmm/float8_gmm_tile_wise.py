@@ -216,7 +216,7 @@ class fp8_matmul_weight_per_block_act_per_tile(torch.autograd.Function):
         return dx, dw, None, None, None
 
 
-class Float8GroupedLinearATWB(torch.nn.Module):
+class TileWiseFloat8GroupedLinear(torch.nn.Module):
     def __init__(self, in_features, out_features, num_routed_experts=10):
         super().__init__()
 
