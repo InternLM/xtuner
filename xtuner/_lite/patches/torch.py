@@ -5,12 +5,16 @@ from typing import List, cast
 
 import torch
 from functorch.compile import default_partition
-from mmengine.utils import import_modules_from_strings
+from mmengine.utils import digit_version, import_modules_from_strings
 from torch.distributed.fsdp._fully_shard._fsdp_common import (
     _to_dtype_if_needed,
     compiled_autograd_enabled,
 )
 from torch.distributed.fsdp._fully_shard._fsdp_param import FSDPParam, ShardedState
+
+from xtuner._lite import get_logger
+
+logger = get_logger()
 
 
 def replace_partition_fn(func):
@@ -24,9 +28,11 @@ def replace_partition_fn(func):
 
 
 def dispatch_torch_compile():
-    module = import_modules_from_strings("torch._inductor.compile_fx")
-    if hasattr(module, "aot_autograd"):
-        module.aot_autograd = replace_partition_fn(module.aot_autograd)
+    if digit_version(torch.__version__)[:2] == (2, 6):
+        logger.info("dispatch_torch_compile")
+        module = import_modules_from_strings("torch._inductor.compile_fx")
+        if hasattr(module, "aot_autograd"):
+            module.aot_autograd = replace_partition_fn(module.aot_autograd)
 
 
 def all_gather_inputs(self) -> List[torch.Tensor]:  # 1D
@@ -35,12 +41,11 @@ def all_gather_inputs(self) -> List[torch.Tensor]:  # 1D
         if not compiled_autograd_enabled() and hasattr(
             self._sharded_local_tensor, "fsdp_pre_all_gather"
         ):
-            # modified
-            if (
-                hasattr(
-                    self._sharded_local_tensor, "_use_padded_sharded_param_all_gather"
-                )
-                and self._sharded_local_tensor._use_padded_sharded_param_all_gather
+            # ------------------- modified --------------------#
+            if getattr(
+                self._sharded_local_tensor,
+                "_use_padded_sharded_param_all_gather",
+                False,
             ):
                 sharded_local_tensor = self._sharded_param_data
                 if hasattr(
@@ -51,7 +56,7 @@ def all_gather_inputs(self) -> List[torch.Tensor]:  # 1D
                     )
             else:
                 sharded_local_tensor = self._sharded_local_tensor
-            # sharded_local_tensor = self._sharded_local_tensor
+            # ---------------------------------------------------#
             if self.offload_to_cpu:
                 sharded_local_tensor = sharded_local_tensor.to(
                     self.device, non_blocking=True
@@ -124,4 +129,6 @@ def all_gather_inputs(self) -> List[torch.Tensor]:  # 1D
 
 def dispatch_torch_fsdp_param():
     # support cases where param.numel() is not evenly divided by num_gpus
-    FSDPParam.all_gather_inputs = property(all_gather_inputs)
+    if digit_version(torch.__version__)[:2] == (2, 6):
+        logger.info("dispatch_torch_fsdp_param")
+        FSDPParam.all_gather_inputs = property(all_gather_inputs)
