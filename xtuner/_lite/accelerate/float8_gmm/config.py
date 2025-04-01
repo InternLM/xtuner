@@ -2,13 +2,14 @@
 # Copied from https://github.com/pytorch/ao/blob/v0.8.0/torchao/float8/config.py
 
 import enum
-import logging
 from dataclasses import dataclass
 from typing import Optional
 
 import torch
 
-logger: logging.Logger = logging.getLogger()
+from xtuner._lite import get_logger
+
+logger = get_logger()
 
 
 class ScalingType(enum.Enum):

@@ -1,6 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 # Copied from https://github.com/pytorch/ao/blob/v0.8.0/torchao/float8/float8_linear_utils.py
-import logging
 from typing import Callable, Optional
 
 import torch
@@ -8,12 +7,12 @@ import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed._functional_collectives import AsyncCollectiveTensor, all_reduce
 
+from xtuner._lite import get_logger
 from xtuner._lite.accelerate.float8_gmm.config import Float8LinearConfig, ScalingType
 from xtuner._lite.accelerate.float8_gmm.float8_linear import Float8Linear
 from xtuner._lite.accelerate.float8_gmm.float8_utils import amax_history_to_scale_stack
 
-log = logging.getLogger(__name__)
-log.addHandler(logging.NullHandler())
+logger = get_logger()
 
 
 def linear_requires_sync(config: Float8LinearConfig):
@@ -195,7 +194,7 @@ def sync_float8_amax_and_scale_history(model: torch.nn.Module, fp8_layers=None) 
         fp8_layers = get_float8_layers(model)
 
     if len(fp8_layers) == 0:
-        log.warn(
+        logger.warning(
             "Calling sync_float8_amax_and_scale_history on a module with no Float8Linear layers"
         )
         return

@@ -272,6 +272,7 @@ def lazy_init_fn(module, module2name, checkpoint_loader, enable_fp8=False):
         if param.shape == _param.shape:
             param.data.copy_(_param)
         elif enable_fp8 and param.numel() == _param.numel():
+            # we flatten the linear weights to handle cases where ngpus > out_features
             param.data.copy_(_param.view(*param.shape))
         else:
             logger.warning(

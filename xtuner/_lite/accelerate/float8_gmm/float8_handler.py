@@ -4,6 +4,10 @@ from typing import List, Union
 import torch
 import torch.nn as nn
 
+from xtuner._lite import get_logger
+
+logger = get_logger()
+
 
 class Float8Handler:
     def __init__(
@@ -87,6 +91,8 @@ class Float8Handler:
             config=self.config,
             module_filter_fn=lambda mod, fqn: (fqn != "lm_head" and fqn[-4:] != "gate"),
         )
+
+        logger.info("FP8 training enabled.")
 
     def precompute_float8_dynamic_scale_for_fsdp(
         self, model: Union[nn.Module, List[nn.Module]]
