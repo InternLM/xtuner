@@ -243,7 +243,7 @@ class HFCheckpointLoader:
 
 
 @torch.no_grad()
-def lazy_init_fn(module, module2name, checkpoint_loader):
+def lazy_init_fn(module, module2name, checkpoint_loader, enable_fp8=False):
     device = DEVICE_MODULE.current_device()
 
     module_name = module2name[module]
@@ -271,6 +271,9 @@ def lazy_init_fn(module, module2name, checkpoint_loader):
 
         if param.shape == _param.shape:
             param.data.copy_(_param)
+        elif enable_fp8 and param.numel() == _param.numel():
+            # we flatten the linear weights to handle cases where ngpus > out_features
+            param.data.copy_(_param.view(*param.shape))
         else:
             logger.warning(
                 f"The shape of {module_name}.{name}({param.shape}) "
@@ -331,6 +334,10 @@ class FSDPConfig:
     torch_compile: torch.dtype = False
     max_length: Optional[int] = None
     mesh_prefix: str = "default"
+    # add fp8-related to FSDPConfig temporarily
+    enable_fp8: bool = False
+    scaling_granularity_gemm: str = "tensorwise"
+    scaling_granularity_grouped_gemm: str = "tilewise"
 
 
 @dataclass
