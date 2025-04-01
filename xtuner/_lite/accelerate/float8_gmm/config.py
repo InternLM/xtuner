@@ -290,15 +290,6 @@ class Float8LinearConfig:
                 cc1.target_dtype == cc2.target_dtype
             ), f"{operand_name} must be cast to the same dtype in both matmuls it's used in"
 
-        # See the comments around `force_recompute_fp8_weight_in_bwd` for more details of this warning.
-        if (
-            self.enable_fsdp_float8_all_gather
-            and not self.force_recompute_fp8_weight_in_bwd
-        ):
-            logger.warning(
-                "When using FSDP, it's recommended to enable config.force_recompute_fp8_weight_in_bwd."
-            )
-
 
 # Pre-made recipes for common configurations
 # TODO(future PR): go through a round of design on this, and eventually expose
