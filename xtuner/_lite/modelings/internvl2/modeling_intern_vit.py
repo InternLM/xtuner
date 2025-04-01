@@ -17,7 +17,7 @@ from transformers.modeling_outputs import (BaseModelOutput,
                                            BaseModelOutputWithPooling)
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
-from xtuner._lite.utils.misc import is_deterministic
+from xtuner._lite.utils.misc import XTUNER_DETERMINISTIC
 
 from .configuration_intern_vit import InternVisionConfig
 
@@ -80,7 +80,7 @@ class FlashAttention(nn.Module):
                 x = rearrange(qkv, 'b s three h d -> b s (three h d)')
                 x_unpad, indices, cu_seqlens, max_s = unpad_input(x, key_padding_mask)
                 x_unpad = rearrange(x_unpad, 'nnz (three h d) -> nnz three h d', three=3, h=nheads)
-                if is_deterministic():
+                if XTUNER_DETERMINISTIC:
                     output_unpad = flash_attn_varlen_qkvpacked_func(
                         x_unpad, cu_seqlens, max_s, self.dropout_p if self.training else 0.0,
                         softmax_scale=self.softmax_scale, causal=causal, deterministic=True
@@ -95,7 +95,7 @@ class FlashAttention(nn.Module):
                                    'b s (h d) -> b s h d', h=nheads)
         else:
             assert max_s is not None
-            if is_deterministic():
+            if XTUNER_DETERMINISTIC:
                 output = flash_attn_varlen_qkvpacked_func(
                     qkv, cu_seqlens, max_s, self.dropout_p if self.training else 0.0,
                     softmax_scale=self.softmax_scale, causal=causal, deterministic=True
