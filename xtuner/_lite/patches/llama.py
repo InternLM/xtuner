@@ -51,7 +51,6 @@ from transformers.processing_utils import Unpack
 from transformers.utils import logging
 
 from xtuner._lite.accelerate import liger_kernel_is_available
-from xtuner._lite.accelerate.float8_gmm import Float8Handler
 from xtuner._lite.chat import HybridChatTemplate
 from xtuner._lite.parallel.sequence import split_for_sequence_parallel
 from xtuner._lite.patches.base import (
@@ -258,6 +257,8 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM, GenerateMixin):
             self.init_device_mesh(fsdp_config)
 
         if self._fsdp_config.enable_fp8:
+            from xtuner._lite.accelerate.float8_gmm import Float8Handler
+
             self._float8_handler = Float8Handler(
                 compile=fsdp_config.torch_compile,
                 enable_fsdp_float8_all_gather=True,
