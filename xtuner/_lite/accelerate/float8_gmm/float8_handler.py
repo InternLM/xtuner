@@ -9,6 +9,11 @@ from xtuner._lite import get_logger
 logger = get_logger()
 
 
+def _is_sm89_or_later():
+    # Float8 is only supported on SM89 or later (H100+ GPUs)
+    return torch.cuda.is_available() and torch.cuda.get_device_capability() >= (8, 9)
+
+
 class Float8Handler:
     def __init__(
         self,
@@ -23,6 +28,12 @@ class Float8Handler:
         pad_inner_dim=False,
     ):
         self.enabled = False
+
+        if not _is_sm89_or_later():
+            logger.warning(
+                "Failed to enable float8 training because float8 is only supported on SM89 or later",
+            )
+            return
 
         from xtuner._lite.accelerate.float8_gmm import (
             CastConfig,
