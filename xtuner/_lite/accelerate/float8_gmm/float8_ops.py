@@ -67,9 +67,6 @@ def float8_desugar_op(aten_op, args, kwargs=None):
 @implements([aten.as_strided.default])
 def float8_as_strided(aten_op, args, kwargs=None):
     data = args[0]._data
-    # delete this when weight.numel is not divisible by the gpu number
-    # assert list(data.size()) == args[1], f'{data.size()} {args}'
-    assert list(data.stride()) == args[2]
     assert args[3] == 0
     new_data = aten_op(data, *args[1:], **kwargs)
     return Float8Tensor(
