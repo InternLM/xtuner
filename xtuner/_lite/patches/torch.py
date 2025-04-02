@@ -4,13 +4,7 @@ from functools import wraps
 from typing import List, cast
 
 import torch
-from functorch.compile import default_partition
 from mmengine.utils import digit_version, import_modules_from_strings
-from torch.distributed.fsdp._fully_shard._fsdp_common import (
-    _to_dtype_if_needed,
-    compiled_autograd_enabled,
-)
-from torch.distributed.fsdp._fully_shard._fsdp_param import FSDPParam, ShardedState
 
 from xtuner._lite import get_logger
 
@@ -18,6 +12,8 @@ logger = get_logger()
 
 
 def replace_partition_fn(func):
+    from functorch.compile import default_partition
+
     @wraps(func)
     def wrapper(**kwargs):
         if "partition_fn" in kwargs:
@@ -36,6 +32,12 @@ def dispatch_torch_compile():
 
 
 def all_gather_inputs(self) -> List[torch.Tensor]:  # 1D
+    from torch.distributed.fsdp._fully_shard._fsdp_common import (
+        _to_dtype_if_needed,
+        compiled_autograd_enabled,
+    )
+    from torch.distributed.fsdp._fully_shard._fsdp_param import ShardedState
+
     self._assert_in_states(ShardedState.SHARDED, ShardedState.SHARDED_POST_FORWARD)
     if self.sharded_state == ShardedState.SHARDED:
         if not compiled_autograd_enabled() and hasattr(
@@ -130,5 +132,7 @@ def all_gather_inputs(self) -> List[torch.Tensor]:  # 1D
 def dispatch_torch_fsdp_param():
     # support cases where param.numel() is not evenly divided by num_gpus
     if digit_version(torch.__version__)[:2] == (2, 6):
+        from torch.distributed.fsdp._fully_shard._fsdp_param import FSDPParam
+
         logger.info("dispatch_torch_fsdp_param")
         FSDPParam.all_gather_inputs = property(all_gather_inputs)
