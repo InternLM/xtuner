@@ -308,40 +308,6 @@ class Float8Linear(torch.nn.Linear):
             ),
         )
 
-        self.weight = torch.nn.Parameter(
-            self.weight.view(-1)
-        )  # hardcode for fp8 linear when fsdp_size > self.out_features
-        self.register_load_state_dict_hook()
-
-    def state_dict(self, destination=None, prefix="", keep_vars=False):
-        state_dict = super().state_dict(destination, prefix, keep_vars)
-
-        weight_key = prefix + "weight"
-        if weight_key in state_dict:
-            weight = state_dict[weight_key]
-            state_dict[weight_key] = weight.reshape(self.out_features, self.in_features)
-
-        return state_dict
-
-    def register_load_state_dict_hook(self):
-        def hook(
-            state_dict,
-            prefix,
-            local_metadata,
-            strict,
-            missing_keys,
-            unexpected_keys,
-            error_msgs,
-        ):
-            weight_key = prefix + "weight"
-            if weight_key in state_dict:
-                weight = state_dict[weight_key]
-
-                if weight.shape == (self.out_features, self.in_features):
-                    state_dict[weight_key] = weight.view(-1)  # 展平为 1D
-
-        self._register_load_state_dict_pre_hook(hook)
-
     def cast_input_to_float8(self, input: torch.Tensor) -> torch.Tensor:
         # Duplicate the autocast logic for F.linear, so that the output
         # of our module has the right original precision
@@ -407,7 +373,6 @@ class Float8Linear(torch.nn.Linear):
         weight = (
             self.weight.to_local() if isinstance(self.weight, DTensor) else self.weight
         )
-        weight = weight.view(self.out_features, self.in_features)
 
         if not has_any_axiswise_scaling:
             input_fp8 = self.cast_input_to_float8(input)
