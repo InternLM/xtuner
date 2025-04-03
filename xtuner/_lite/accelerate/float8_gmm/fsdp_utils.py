@@ -527,8 +527,9 @@ class WeightWithDynamicTilewiseFloat8CastTensorGMM(torch.Tensor):
         *,
         out: Optional[torch.Tensor] = None,
     ):
-        data, scale = all_gather_outputs
-        scale = scale.view(self._ori_shape[0], -1, scale.shape[-1])
+        data, scale = all_gather_outputs  # data: (ne // ep * dout, din) _ori_shape: (ne, dout, din)
+        local_experts = data.shape[0] // self._ori_shape[1]
+        scale = scale.view(local_experts, -1, scale.shape[-1])
         if out is not None:
             from torch.distributed._tensor import DTensor
 
