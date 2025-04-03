@@ -24,7 +24,7 @@ def trans_per_block_quant_expand_128x_kernel(
     stride_out_m: tl.constexpr,
     stride_out_scale_n,
     stride_out_scale_m: tl.constexpr,
-    M: tl.constexpr,
+    M,
     N: tl.constexpr,
     fmax: tl.constexpr,
     fmin: tl.constexpr,
