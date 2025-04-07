@@ -5,7 +5,8 @@ import torch
 import triton
 import triton.language as tl
 from torch.library import triton_op, wrap_triton
-from torchao.float8.float8_utils import to_fp8_saturated
+
+from xtuner._lite.accelerate.float8_gmm.float8_utils import to_fp8_saturated
 
 
 @triton.jit
