@@ -9,12 +9,13 @@ from torch.distributed.tensor.parallel import (
     PrepareModuleInput,
     RowwiseParallel,
 )
-from torchao.float8.config import ScalingType, e4m3_dtype
-from torchao.float8.float8_scaling_utils import (
+
+from xtuner._lite.accelerate.float8_gmm.config import ScalingType, e4m3_dtype
+from xtuner._lite.accelerate.float8_gmm.float8_scaling_utils import (
     NoopFwToFloat8BwDynamic,
     hp_tensor_to_float8_dynamic,
 )
-from torchao.float8.float8_tensor import GemmInputRole
+from xtuner._lite.accelerate.float8_gmm.float8_tensor import GemmInputRole
 
 # subclass the ColwiseParallel and RowwiseParallel classes
 # to add the float8 support
@@ -80,7 +81,7 @@ class Float8ColwiseParallel(ColwiseParallel):
         return outputs.to_local() if use_local_output else outputs
 
     def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
-        from torchao.float8.float8_linear import Float8Linear
+        from xtuner._lite.accelerate.float8_gmm.float8_linear import Float8Linear
 
         if not isinstance(module, Float8Linear):
             raise ValueError(
@@ -137,7 +138,7 @@ class Float8RowwiseParallel(RowwiseParallel):
         return outputs.to_local() if use_local_output else outputs
 
     def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
-        from torchao.float8.float8_linear import Float8Linear
+        from xtuner._lite.accelerate.float8_gmm.float8_linear import Float8Linear
 
         if not isinstance(module, Float8Linear):
             raise ValueError(
@@ -222,7 +223,7 @@ class PrepareFloat8ModuleInput(PrepareModuleInput):
             return input
 
     def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
-        from torchao.float8.float8_linear import Float8Linear
+        from xtuner._lite.accelerate.float8_gmm.float8_linear import Float8Linear
 
         if self.fwd_config_submodule_fqn is not None:
             fwd_linear = module.get_submodule(self.fwd_config_submodule_fqn)
