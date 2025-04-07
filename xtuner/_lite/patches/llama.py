@@ -14,6 +14,7 @@ from torch.distributed._composable.fsdp import (
     MixedPrecisionPolicy,
     fully_shard,
 )
+from torch.distributed._functional_collectives import all_to_all_single_autograd
 from torch.distributed._tensor import (
     DTensor,
     Partial,
@@ -75,14 +76,25 @@ def all_to_all(
     gather_dim: int,
     mesh: DeviceMesh,
 ) -> torch.Tensor:
-    group = mesh.get_group()
     world_size = mesh.size()
-    input_list = [
-        t.contiguous() for t in torch.tensor_split(input, world_size, scatter_dim)
-    ]
-    output_list = [torch.empty_like(input_list[0]) for _ in range(world_size)]
-    dist.nn.all_to_all(output_list, input_list, group=group)
-    return torch.cat(output_list, dim=gather_dim).contiguous()
+    split_size = input.size(scatter_dim) // world_size
+    input_split_sizes = [split_size] * world_size
+    output_split_sizes = input_split_sizes
+
+    input = input.contiguous()
+    input = input.movedim(scatter_dim, 0)
+
+    output = all_to_all_single_autograd(
+        input,
+        group=mesh.get_group(),
+        input_split_sizes=input_split_sizes,
+        output_split_sizes=output_split_sizes,
+    )
+    output = output.transpose(0, scatter_dim)
+
+    output_list = [t for t in torch.tensor_split(output, world_size, scatter_dim)]
+    output = torch.cat(output_list, dim=gather_dim).contiguous()
+    return output
 
 
 class FlashAttentionKwargs(TypedDict, total=False):
