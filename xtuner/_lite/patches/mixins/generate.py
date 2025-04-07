@@ -17,7 +17,9 @@ class GenerateMixin:
         dtype=torch.bfloat16,
         device="cuda",
     ):
-        num_blocks = max(max_batch_size, max_length // block_size * max_batch_size)
+        num_blocks = max(
+            max_batch_size, (max_length + block_size - 1) // block_size * max_batch_size
+        )
         head_dim = self.model_config.head_dim
         num_heads = self.model_config.num_key_value_heads
         past_key_values = []
