@@ -1091,6 +1091,9 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM, GenerateMixin):
         block_table: Optional[torch.LongTensor] = None,
         prefilling: bool = False,
         sequence_parallel_mesh: Optional[DeviceMesh] = None,
+        # In order to unify the forward arguments of moe and dense model.
+        # The moe models have an additional argument `aux_loss_global_average`.
+        **kwargs,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         if gather_logprobs:
             assert labels is not None and label_shifted
