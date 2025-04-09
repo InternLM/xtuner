@@ -243,15 +243,49 @@ class HFCheckpointLoader:
 
 
 @torch.no_grad()
-def lazy_init_fn(module, module2name, checkpoint_loader, enable_fp8=False):
+def lazy_init_fn(module, module2name, checkpoint_loader, enable_fp8=False, ep_mesh=None):
     device = DEVICE_MODULE.current_device()
 
     module_name = module2name[module]
 
-    params = {
-        name: checkpoint_loader.load(f"{module_name}.{name}")
-        for name, _ in module.named_parameters(recurse=False)
-    }
+    if '.mlp.experts' in module_name:
+        params = {}
+        ep_rank = ep_mesh.get_local_rank()
+        ep_size = ep_mesh.size()
+        for name, _ in module.named_parameters(recurse=False):
+            if 'w1w3' in f"{module_name}.{name}" or 'w2' in f"{module_name}.{name}":
+                assert 'weight' in f"{module_name}.{name}"
+                key = f"{module_name}.{name}"
+                key = key.replace('.weight', '')
+                values = checkpoint_loader.load(key)
+                values = values.cuda()
+                assert values is not None, key
+                values = values.view(256, -1, values.shape[-1])
+                div_scale = values.shape[0]//ep_size
+                values = values[ep_rank*div_scale: (ep_rank+1)*div_scale]
+                values = values.transpose(1, 2)
+                values = values.reshape(-1, values.shape[-1])
+            else:
+                values = checkpoint_loader.load(f"{module_name}.{name}")
+                values = values.cuda()
+                div_scale= values.shape[0]//ep_size
+                values = values[ep_rank*div_scale: (ep_rank+1)*div_scale]
+            
+            params[name]=values
+    else:
+        params = {}
+        # if 'moe_pre_layer' in f"{module_name}.{name}":
+        #     key = f"{module_name}.{name}"
+        #     key = key.replace('.moe_pre_layer', '')
+        for name, _ in module.named_parameters(recurse=False):
+            key = f"{module_name}.{name}"
+            if 'moe_pre_layer' in key:
+                key = key.replace('.moe_pre_layer', '')
+            params[name] = checkpoint_loader.load(key)
+        # params = {
+        #     name: checkpoint_loader.load(f"{module_name}.{name}")
+        #     for name, _ in module.named_parameters(recurse=False)
+        # }
 
     buffers = {
         name: checkpoint_loader.load(f"{module_name}.{name}")
@@ -269,11 +303,13 @@ def lazy_init_fn(module, module2name, checkpoint_loader, enable_fp8=False):
 
         _param = params[name].to(device).to(dtype)
 
-        if param.shape == _param.shape:
-            param.data.copy_(_param)
-        elif enable_fp8 and param.numel() == _param.numel():
+        # dist.barrier()
+
+        if param.to_local().shape == _param.shape:
+            param.to_local().data.copy_(_param)
+        elif enable_fp8 and param.to_local().numel() == _param.numel():
             # we flatten the linear weights to handle cases where ngpus > out_features
-            param.data.copy_(_param.view(*param.shape))
+            param.to_local().data.copy_(_param.view(*param.shape))
         else:
             logger.warning(
                 f"The shape of {module_name}.{name}({param.shape}) "
