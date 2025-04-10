@@ -8,6 +8,7 @@ import random
 import signal
 import sys
 from concurrent.futures import ProcessPoolExecutor
+from functools import partial
 from typing import Any, Callable
 
 import numpy as np
@@ -137,11 +138,14 @@ class JsonlDataset(torch.utils.data.Dataset):
 
         return offsets
 
-    def _tokenize_by_offset(self, offset):
+    def _tokenize_by_offset(self, offset, only_num_tokens=False):
         with open(self.path) as f:
             f.seek(offset)
             data = json.loads(f.readline())
-        return self.tokenize_fn(data)
+        tokenize = self.tokenize_fn(data)
+        if only_num_tokens:
+            tokenize = {"num_tokens": tokenize["num_tokens"]}
+        return tokenize
 
     def count_tokens(self, offsets, cache_dir=None):
         num_samples = len(offsets)
@@ -169,7 +173,9 @@ class JsonlDataset(torch.utils.data.Dataset):
             tokenized = list(
                 tqdm(
                     executor.map(
-                        self._tokenize_by_offset, offsets_shard, chunksize=chunk_size
+                        partial(self._tokenize_by_offset, only_num_tokens=True),
+                        offsets_shard,
+                        chunksize=chunk_size,
                     ),
                     desc=desc,
                     total=len(offsets_shard),
