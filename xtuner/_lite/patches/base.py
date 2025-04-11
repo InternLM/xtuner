@@ -298,13 +298,14 @@ def lazy_init_fn(
 
         _param = params[name].to(device).to(dtype)
 
-        # dist.barrier()
+        if isinstance(param, DTensor):
+            param = param._local_tensor
 
-        if param.to_local().shape == _param.shape:
-            param.to_local().data.copy_(_param)
-        elif enable_fp8 and param.to_local().numel() == _param.numel():
+        if param.shape == _param.shape:
+            param.data.copy_(_param)
+        elif enable_fp8 and param.numel() == _param.numel():
             # we flatten the linear weights to handle cases where ngpus > out_features
-            param.to_local().data.copy_(_param.view(*param.shape))
+            param.data.copy_(_param.view(*param.shape))
         else:
             logger.warning(
                 f"The shape of {module_name}.{name}({param.shape}) "
