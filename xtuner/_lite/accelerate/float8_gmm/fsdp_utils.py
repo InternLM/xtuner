@@ -259,7 +259,12 @@ class WeightWithDynamicChannelwiseFloat8CastTensorGMM(torch.Tensor):
         tensors = ["_tensor"]
         if self._precomputed_scale:
             tensors.append("_precomputed_scale")
-        return tensors, {"mm_config": self._linear_mm_config, "dtype": self._dtype}
+        return tensors, {
+            "mm_config": self._linear_mm_config,
+            "dtype": self._dtype,
+            "ori_shape": self._ori_shape,
+            "amax_need_reduce": self._amax_need_reduce,
+        }
 
     @staticmethod
     def __tensor_unflatten__(inner_tensors, flatten_spec, outer_size, outer_stride):
@@ -267,7 +272,9 @@ class WeightWithDynamicChannelwiseFloat8CastTensorGMM(torch.Tensor):
             inner_tensors["_tensor"],
             flatten_spec["mm_config"],
             flatten_spec["dtype"],
-            getattr(inner_tensors, "_precomputed_scale", None),
+            ori_shape=flatten_spec["ori_shape"],
+            amax_need_reduce=flatten_spec["amax_need_reduce"],
+            precomputed_scale=getattr(inner_tensors, "_precomputed_scale", None),
         )
 
     def __repr__(self):
@@ -490,7 +497,11 @@ class WeightWithDynamicTilewiseFloat8CastTensorGMM(torch.Tensor):
         tensors = ["_tensor"]
         if self._precomputed_scale:
             tensors.append("_precomputed_scale")
-        return tensors, {"mm_config": self._linear_mm_config, "dtype": self._dtype}
+        return tensors, {
+            "mm_config": self._linear_mm_config,
+            "dtype": self._dtype,
+            "ori_shape": self._ori_shape,
+        }
 
     @staticmethod
     def __tensor_unflatten__(inner_tensors, flatten_spec, outer_size, outer_stride):
@@ -498,6 +509,7 @@ class WeightWithDynamicTilewiseFloat8CastTensorGMM(torch.Tensor):
             inner_tensors["_tensor"],
             flatten_spec["mm_config"],
             flatten_spec["dtype"],
+            flatten_spec["ori_shape"],
             getattr(inner_tensors, "_precomputed_scale", None),
         )
 
@@ -527,8 +539,12 @@ class WeightWithDynamicTilewiseFloat8CastTensorGMM(torch.Tensor):
         *,
         out: Optional[torch.Tensor] = None,
     ):
-        data, scale = all_gather_outputs
-        scale = scale.view(self._ori_shape[0], -1, scale.shape[-1])
+        (
+            data,
+            scale,
+        ) = all_gather_outputs  # data: (ne // ep * dout, din) _ori_shape: (ne, dout, din)
+        local_experts = data.shape[0] // self._ori_shape[1]
+        scale = scale.view(local_experts, -1, scale.shape[-1])
         if out is not None:
             from torch.distributed._tensor import DTensor
 
