@@ -260,10 +260,11 @@ class WeightWithDynamicChannelwiseFloat8CastTensorGMM(torch.Tensor):
         if self._precomputed_scale:
             tensors.append("_precomputed_scale")
         return tensors, {
-            "mm_config": self._linear_mm_config, 
-            "dtype": self._dtype, 
+            "mm_config": self._linear_mm_config,
+            "dtype": self._dtype,
             "ori_shape": self._ori_shape,
-            "amax_need_reduce": self._amax_need_reduce}
+            "amax_need_reduce": self._amax_need_reduce,
+        }
 
     @staticmethod
     def __tensor_unflatten__(inner_tensors, flatten_spec, outer_size, outer_stride):
@@ -497,9 +498,10 @@ class WeightWithDynamicTilewiseFloat8CastTensorGMM(torch.Tensor):
         if self._precomputed_scale:
             tensors.append("_precomputed_scale")
         return tensors, {
-            "mm_config": self._linear_mm_config, 
+            "mm_config": self._linear_mm_config,
             "dtype": self._dtype,
-            "ori_shape": self._ori_shape}
+            "ori_shape": self._ori_shape,
+        }
 
     @staticmethod
     def __tensor_unflatten__(inner_tensors, flatten_spec, outer_size, outer_stride):
@@ -537,7 +539,10 @@ class WeightWithDynamicTilewiseFloat8CastTensorGMM(torch.Tensor):
         *,
         out: Optional[torch.Tensor] = None,
     ):
-        data, scale = all_gather_outputs  # data: (ne // ep * dout, din) _ori_shape: (ne, dout, din)
+        (
+            data,
+            scale,
+        ) = all_gather_outputs  # data: (ne // ep * dout, din) _ori_shape: (ne, dout, din)
         local_experts = data.shape[0] // self._ori_shape[1]
         scale = scale.view(local_experts, -1, scale.shape[-1])
         if out is not None:
