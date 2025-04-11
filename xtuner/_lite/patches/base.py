@@ -260,7 +260,7 @@ def lazy_init_fn(module, module2name, checkpoint_loader, enable_fp8=False, ep_me
                 values = checkpoint_loader.load(key)
                 values = values.cuda()
                 assert values is not None, key
-                values = values.view(256, -1, values.shape[-1])
+                values = values.view(module.num_routed_experts, -1, values.shape[-1])
                 div_scale = values.shape[0]//ep_size
                 values = values[ep_rank*div_scale: (ep_rank+1)*div_scale]
                 values = values.transpose(1, 2)
