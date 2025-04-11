@@ -95,6 +95,30 @@ class Float8Handler:
         if not self.enabled:
             return
 
+        from xtuner._lite.accelerate.float8_gmm import (
+            ChannelWiseFloat8GroupedLinear,
+            TileWiseFloat8GroupedLinear,
+        )
+
+        def traverse(module):
+            for name, child in module.named_children():
+                if type(child).__name__ == "GroupedLinear":
+                    if self.scaling_granularity_grouped_gemm == "channelwise":
+                        child = ChannelWiseFloat8GroupedLinear.from_float(
+                            child, amax_need_reduce
+                        )
+                    elif self.scaling_granularity_grouped_gemm == "tilewise":
+                        child = TileWiseFloat8GroupedLinear.from_float(
+                            child, amax_need_reduce
+                        )
+                    else:
+                        raise NotImplementedError
+                    module.add_module(name, child)
+                else:
+                    traverse(child)
+
+        traverse(model)
+
         from xtuner._lite.accelerate.float8_gmm import convert_to_float8_training
 
         convert_to_float8_training(

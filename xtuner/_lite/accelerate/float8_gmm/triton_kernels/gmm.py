@@ -217,7 +217,7 @@ def gmm_fp8_act_per_channel_w_per_expert(
 
     C = A.new_empty(M, N, dtype=dtype_out)
 
-    NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count - 20
+    NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count - 24
 
     def grid(META):
         assert N % META["BLOCK_N"] == 0, "Only support when N is a multiple of BLOCK_N"
