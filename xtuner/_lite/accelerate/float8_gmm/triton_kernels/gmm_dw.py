@@ -247,7 +247,7 @@ def gmm_dw_fp8_act_per_channel_w_per_expert(
     desc_helper.init_tma_descriptor("b")
     desc_helper.init_tma_descriptor("c")
 
-    NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
+    NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count - 24
 
     def grid(META):
         nonlocal desc_helper

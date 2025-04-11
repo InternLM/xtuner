@@ -1,4 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-from .moe_permute import GROUPED_GEMM_INSTALLED, permute_func, unpermute_func
+from .grouped_gemm import GROUPED_GEMM_INSTALLED, gmm
+from .moe_permute import permute_func, unpermute_func
 
-__all__ = ["GROUPED_GEMM_INSTALLED", "permute_func", "unpermute_func"]
+__all__ = ["gmm", "permute_func", "unpermute_func", "GROUPED_GEMM_INSTALLED"]

@@ -2,6 +2,7 @@
 """Modified from
 https://github.com/fanshiqing/grouped_gemm/blob/v1.1.4/grouped_gemm/ops.py
 Support torch compile."""
+
 from typing import Optional, Tuple
 
 import torch
