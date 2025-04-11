@@ -276,18 +276,11 @@ def lazy_init_fn(
             params[name] = values
     else:
         params = {}
-        # if 'moe_pre_layer' in f"{module_name}.{name}":
-        #     key = f"{module_name}.{name}"
-        #     key = key.replace('.moe_pre_layer', '')
         for name, _ in module.named_parameters(recurse=False):
             key = f"{module_name}.{name}"
             if "moe_pre_layer" in key:
                 key = key.replace(".moe_pre_layer", "")
             params[name] = checkpoint_loader.load(key)
-        # params = {
-        #     name: checkpoint_loader.load(f"{module_name}.{name}")
-        #     for name, _ in module.named_parameters(recurse=False)
-        # }
 
     buffers = {
         name: checkpoint_loader.load(f"{module_name}.{name}")
