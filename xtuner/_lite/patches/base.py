@@ -370,6 +370,7 @@ class FSDPConfig:
     enable_fp8: bool = False
     scaling_granularity_gemm: str = "tensorwise"
     scaling_granularity_grouped_gemm: str = "tilewise"
+    sharded_embedding_alone: bool = False
 
 
 @dataclass

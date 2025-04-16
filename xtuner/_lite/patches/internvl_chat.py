@@ -51,6 +51,9 @@ class CUDAPatchedInternVLChatModel(PatchedCausalLM):
         # Dispatch language_model according to the architecture
         # TODO: How to avoid patched_lm_cls copy language_model once again?
         patched_lm_cls = self._get_patched_lm_cls(model)
+        if fsdp_config is not None:
+            # vlm required embedding to be sharded alone
+            fsdp_config.sharded_embedding_alone = True
         self._patched_lm = patched_lm_cls(model.language_model, fsdp_config=fsdp_config)
         self._patched_model.language_model = self._patched_lm.patched_model
 
@@ -180,6 +183,10 @@ class CUDAPatchedInternVLChatModel(PatchedCausalLM):
         )
 
         vision_model = self.patched_model.vision_model
+
+        # Note: vision_model not support tp yet
+        # https://github.com/InternLM/xtuner/pull/1011#discussion_r2017924639
+
         # compiled_layers: List[nn.Module] = []
         for layer_idx, layer in enumerate(vision_model.encoder.layers):
             layer.apply(param_init_fn)
