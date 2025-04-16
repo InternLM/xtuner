@@ -497,11 +497,12 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM, GenerateMixin):
             self.patched_model.model.embed_tokens.apply(param_init_fn)
         self.patched_model.model.norm.apply(param_init_fn)
 
-        # As of pytorch 2.5.1, fsdp+tp doesn't handle padding automatically and raise
-        # exception. We manually pad embedding layer & lm_head to be divisible by
-        # tp_size * fsdp_size, and clip back before saving checkpoint
-        multiple = self.tp_mesh.size() * self.fsdp_mesh.size()
-        self.patched_model.resize_token_embeddings(pad_to_multiple_of=multiple)
+        if self.tp_mesh.size() > 1:
+            # As of pytorch 2.5.1, fsdp+tp doesn't handle padding automatically and raise
+            # exception. We manually pad embedding layer & lm_head to be divisible by
+            # tp_size * fsdp_size, and clip back before saving checkpoint
+            multiple = self.tp_mesh.size() * self.fsdp_mesh.size()
+            self.patched_model.resize_token_embeddings(pad_to_multiple_of=multiple)
 
         if self.tp_mesh.size() > 1:
             _weight = self.patched_model.lm_head.weight
