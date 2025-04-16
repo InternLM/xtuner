@@ -522,7 +522,9 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM, GenerateMixin):
                 mesh=self.fsdp_mesh,
                 mp_policy=mp_policy,
                 reshard_after_forward=self.fsdp_config.reshard_after_forward,
-                offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
+                offload_policy=CPUOffloadPolicy()
+                if self.fsdp_config.cpu_offload
+                else None,
             )
         fully_shard(
             self.patched_model,
