@@ -277,9 +277,9 @@ xtuner chat internlm/internlm2-chat-7b --prompt-template internlm2_chat
 
 - 推荐使用一站式平台 [OpenCompass](https://github.com/InternLM/opencompass) 来评测大语言模型，其目前已涵盖 50+ 数据集的约 30 万条题目。
 
-### 训练数据
+### 数据
 
-- 推荐使用 **[GraphGen](https://github.com/open-sciencelab/GraphGen)** 合成 SFT 所需训练数据，目前已在多个垂域验证效果。
+- 推荐使用 [GraphGen](https://github.com/open-sciencelab/GraphGen) 合成 SFT 所需训练数据，目前已在多个垂域验证效果。
 
 ## 🤝 贡献指南
 
