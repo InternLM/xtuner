@@ -278,7 +278,7 @@ For more examples, please see [chat.md](./docs/en/user_guides/chat.md).
 
 ### Data Preparation
 
-- You can use **[GraphGen](https://github.com/open-sciencelab/GraphGen)** to create synthetic data for fine-tuning.
+- You can use [GraphGen](https://github.com/open-sciencelab/GraphGen) to create synthetic data for fine-tuning.
 
 ## 🤝 Contributing
 
