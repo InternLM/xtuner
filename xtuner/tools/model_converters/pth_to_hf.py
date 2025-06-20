@@ -3,6 +3,7 @@ import argparse
 import os.path as osp
 import shutil
 import warnings
+import torch
 
 from accelerate import init_empty_weights
 from accelerate.utils import set_module_tensor_to_device
@@ -13,8 +14,31 @@ from mmengine.utils import mkdir_or_exist
 from tqdm import tqdm
 
 from xtuner.configs import cfgs_name_path
-from xtuner.model.utils import guess_load_checkpoint
 from xtuner.registry import BUILDER
+
+
+def guess_load_checkpoint(pth_model):
+    if osp.isfile(pth_model):
+        state_dict = torch.load(pth_model, map_location="cpu", weights_only=False)
+        if "state_dict" in state_dict:
+            state_dict = state_dict["state_dict"]
+    elif osp.isdir(pth_model):
+        try:
+            from xtuner.utils import get_state_dict_from_zero_checkpoint
+        except ImportError:
+            raise ImportError(
+                "The provided PTH model appears to be a DeepSpeed checkpoint. "
+                "However, DeepSpeed library is not detected in current "
+                "environment. This suggests that DeepSpeed may not be "
+                "installed or is incorrectly configured. Please verify your "
+                "setup."
+            )
+        state_dict = get_state_dict_from_zero_checkpoint(
+            osp.dirname(pth_model), osp.basename(pth_model)
+        )
+    else:
+        raise FileNotFoundError(f"Cannot find {pth_model}")
+    return state_dict
 
 
 def parse_args():
