@@ -5,9 +5,8 @@ from transformers import AutoTokenizer
 from typing import List, Union
 
 
-class InternRMClient():
+class RewardModelClient():
     """
-    Input wrapper for InternRM.
     This class is used to process the input sequences for the reward model.
     """
     def __init__(self,
@@ -16,7 +15,7 @@ class InternRMClient():
                  max_response_length=4096,
                  response_cut_side="left",
                  server_type="sglang",
-                 server_address="192.0.0.1:30000"):
+                 server_address="127.0.0.1:30000"):
 
         """
         Args:
@@ -46,7 +45,7 @@ class InternRMClient():
             output: Candidate trajectory.
             wrapper: The wrapper type. Can be "sft" or "pretrain".
         Returns:
-            The constructed input string for InternRM.
+            The constructed input string for RM.
         """
         p = "\n".join([e["content"] for e in prompt]) if isinstance(prompt, list) else prompt
         r1 = "\n".join([e["content"] for e in reference]) if isinstance(reference, list) else reference
@@ -88,7 +87,7 @@ class InternRMClient():
         r1 = self.tokenizer.decode(r1_ids, skip_special_tokens=True)
         r2 = self.tokenizer.decode(r2_ids, skip_special_tokens=True)
 
-        # Fit the template of InternRM
+        # Fit the template of RM
         _reference_cat = p + r1 if wrapper == "pretrain" or len(r1) == "" else p + "\n" + r1
         _output_cat = p + r2 if wrapper == "pretrain" or len(r2) == "" else p + "\n" + r2
 
@@ -98,11 +97,11 @@ class InternRMClient():
 
     def encode(self, data) -> Union[str, List[str]]:
         """
-        Encode the input data into a format suitable for InternRM.
+        Encode the input data into a format suitable for RM.
         Args:
             data: A dictionary or a list of dictionary containing the keys 'prompt', 'reference', 'output', and optionally 'wrapper'.
         Returns:
-            The encoded input string for InternRM.
+            The encoded input string for RM.
         """
         if isinstance(data, dict):
             return self._encode(**data)
@@ -111,7 +110,7 @@ class InternRMClient():
         else:
             raise ValueError("Input data must be a dictionary or a list of dictionaries.")
 
-    def sglang_request_reward(self, text, retry_delay=0.2, max_retries=8) -> List[float]:
+    def sglang_request_reward(self, data, retry_delay=0.2, max_retries=8) -> List[float]:
 
         for i in range(max_retries):
             try:
@@ -119,7 +118,7 @@ class InternRMClient():
                     f"http://{self.server_address}/classify",
                     json={
                         "model": self.rm_name,
-                        "text": text,
+                        "text": data,
                     },
                 )
                 rewards = [e['embedding'][0] for e in res.json()]
@@ -132,23 +131,56 @@ class InternRMClient():
         print(f"Failed to request reward after {max_retries} retries")
         return None
 
-    def vllm_request_reward(self, text, retry_delay=0.2, max_retries=8) -> List[float]:
+    def vllm_request_reward(self, data, retry_delay=0.2, max_retries=8) -> List[float]:
 
-        raise NotImplementedError("VLLM server type is not implemented yet.")
+        for i in range(max_retries):
+            try:
+                res = requests.post(
+                    f"http://{self.server_address}/pooling",
+                    json={
+                        "input": data,
+                    },
+                )
+                rewards = [e['data'][-1][0] for e in res.json()['data']]
+                return rewards
+            except Exception as e:
+                print(f"Error requesting reward: {e}")
+                print(f"Raw response: {res.text}")
+                time.sleep(retry_delay)
+                continue
+        print(f"Failed to request reward after {max_retries} retries")
+        return None
 
-    def lmdeploy_request_reward(self, text, retry_delay=0.2, max_retries=8) -> List[float]:
+    def lmdeploy_request_reward(self, data, retry_delay=0.2, max_retries=8) -> List[float]:
 
-        raise NotImplementedError("LMDeploy server type is not implemented yet.")
+        for i in range(max_retries):
+            try:
+                res = requests.post(
+                    f"http://{self.server_address}/classify",
+                    json={
+                        "model": self.rm_name,
+                        "text": data,
+                    },
+                )
+                rewards = res.json()['reward_score']
+                return rewards
+            except Exception as e:
+                print(f"Error requesting reward: {e}")
+                print(f"Raw response: {res.text}")
+                time.sleep(retry_delay)
+                continue
+        print(f"Failed to request reward after {max_retries} retries")
+        return None
 
     def __call__(self, data) -> List[float]:
         """
-        Call the input wrapper to construct the input string for InternRM.
+        Call the input wrapper to construct the input string for RM.
         Args:
             data: A list of dictionaries containing the keys 'prompt', 'reference', 'output', and optionally 'wrapper'.
             retry_delay: Delay in seconds before retrying the request.
             max_retries: Maximum number of retries for the request.
         Returns:
-            scores: The list of reward scores returned by the InternRM server. If the request fails, it returns None.
+            scores: The list of reward scores returned by the RM server. If the request fails, it returns None.
         """
         data = self.encode(data)
         if self.server_type == "sglang":
@@ -164,13 +196,9 @@ class InternRMClient():
 
 
 if __name__ == "__main__":
-    # Example usage
-    client = InternRMClient("/cpfs01/shared/public/zouyicheng/RM_SFT_reward_pt_7b_final_DATA_HH_puyu_mixed_Node_2_LR_2e-5_STEP_905_hf",
-                            server_type="sglang",
-                            server_address="10.130.0.19:30000")
 
-    # Example 1
-    data = [
+    # Example usage
+    ex1 = [
         {
             "prompt": "How many 'r's are in the word 'strawberry'?",
             "output": "There are three 'r's in the word 'strawberry'.",
@@ -182,11 +210,8 @@ if __name__ == "__main__":
             "output": "There are two 'r's in the word 'strawberry'."
         }
     ]
-    scores = client(data)
-    print(scores)
 
-    # Example 2
-    data = [
+    ex2 = [
         {
             "prompt": [{"role": "user", "content": "How many 'r's are in the word 'strawberry'?"}],
             "reference": [{"role": "assistant", "content": "3."}],
@@ -198,7 +223,39 @@ if __name__ == "__main__":
             "output": [{"role": "assistant", "content": "There are two 'r's in the word 'strawberry'."}]
         }
     ]
-    encoded_text = client.encode(data)
+
+    # sglang
+    client = RewardModelClient("internlm/internrm-7b",
+                               server_type="sglang",
+                               server_address="127.0.0.1:30000")
+
+    scores = client(ex1)
+    print(scores)
+
+    encoded_text = client.encode(ex2)
     scores = client.sglang_request_reward(encoded_text)
-    print(encoded_text)
+    print(scores)
+
+    # vllm
+    client = RewardModelClient("internlm/internrm-7b",
+                               server_type="vllm",
+                               server_address="127.0.0.1:30000")
+
+    scores = client(ex1)
+    print(scores)
+
+    encoded_text = client.encode(ex2)
+    scores = client.vllm_request_reward(encoded_text)
+    print(scores)
+
+    # lmdeploy
+    client = RewardModelClient("internlm/internrm-7b",
+                               server_type="lmdeploy",
+                               server_address="127.0.0.1:30000")
+
+    scores = client(ex1)
+    print(scores)
+
+    encoded_text = client.encode(ex2)
+    scores = client.vllm_request_reward(encoded_text)
     print(scores)

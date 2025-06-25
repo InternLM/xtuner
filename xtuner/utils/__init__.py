@@ -11,7 +11,7 @@ from .handle_moe_load_and_save import (
     load_state_dict_into_model,
 )
 from .stop_criteria import StopWordStoppingCriteria
-from .internrm_utils import InternRMClient
+from .rm_utils import RewardModelClient
 from .templates import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
 from .zero_to_any_dtype import get_state_dict_from_zero_checkpoint
 
@@ -27,5 +27,5 @@ __all__ = [
     "get_origin_state_dict",
     "SUPPORT_MODELS",
     "get_state_dict_from_zero_checkpoint",
-    "InternRMClient",
+    "RewardModelClient",
 ]
