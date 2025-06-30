@@ -257,5 +257,5 @@ if __name__ == "__main__":
     print(scores)
 
     encoded_text = client.encode(ex2)
-    scores = client.vllm_request_reward(encoded_text)
+    scores = client.lmdeploy_request_reward(encoded_text)
     print(scores)

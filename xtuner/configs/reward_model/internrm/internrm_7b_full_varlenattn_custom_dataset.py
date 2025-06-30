@@ -1,4 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+# Different from InternLM-Reward, InternRM requires an additional reference trajectory for preference modeling.
+# Please refer to https://github.com/InternLM/InternRM for more details.
+
 from mmengine.dataset import DefaultSampler
 from mmengine.hooks import (
     CheckpointHook,
@@ -93,6 +96,7 @@ sampler = SequenceParallelSampler if sequence_parallel_size > 1 else DefaultSamp
 #     "chosen": [{"role": "assistant", "content": "Paris."}],
 #     "rejected": [{"role": "assistant", "content": "I don't know."}],
 # }
+# Please refer to https://github.com/InternLM/InternRM for more details of data format.
 
 train_dataset = dict(
     type=build_preference_dataset,
