@@ -3,15 +3,6 @@ requires = ["setuptools >= 64.0"]
 build-backend = "setuptools.build_meta:__legacy__"
 
 [tool.mypy]
-disable_error_code = ["method-assign"]
-
-# Check of "transformers" and "torch" cost too much time
-[[tool.mypy.overrides]]
-module = ["transformers.*", "torch.*"]
-follow_imports = "skip"
-
-[[tool.mypy.overrides]]
-module = ["requests.*", "toml.*", "yaml.*"]
 ignore_missing_imports = true
 
 # Copied from huggingface
