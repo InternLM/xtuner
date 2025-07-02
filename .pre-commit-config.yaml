@@ -50,10 +50,20 @@ repos:
         args: [ --diff ]
       - id: ruff-format
         types_or: [ python, pyi ]
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.2.0
+  - repo: local
+  # We do not use pre-commit/mirrors-mypy, 
+  # as it comes with opinionated defaults 
+  # (like --ignore-missing-imports)
+  # and is difficult to configure to run 
+  # with the dependencies correctly installed.
     hooks:
       - id: mypy
-        pass_filenames: false
-        args: ['xtuner/v1', '--ignore-missing-imports', '--allow-redefinition']
-        additional_dependencies: ["requests"]
+        name: mypy
+        entry: .dev_scripts/mypy_entrypoint.sh
+        language: python
+        # For 3rd party lib, we only do type check for torch
+        additional_dependencies: ["mypy==1.16.1", "torch==2.6.0"]
+        require_serial: true
+        verbose: true
+        types: [python]
+        language_version: python3.12.4
