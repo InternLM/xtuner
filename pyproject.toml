@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools >= 64.0"]
+build-backend = "setuptools.build_meta:__legacy__"
+
+[tool.mypy]
+disable_error_code = ["method-assign"]
+
+# Check of "transformers" and "torch" cost too much time
+[[tool.mypy.overrides]]
+module = ["transformers.*", "torch.*"]
+follow_imports = "skip"
+
+[[tool.mypy.overrides]]
+module = ["requests.*", "toml.*", "yaml.*"]
+ignore_missing_imports = true
+
+# Copied from huggingface
+[tool.ruff]
+line-length = 119
+exclude = [
+    "modeling_*"
+]
+
+[tool.ruff.lint]
+# Never enforce `E501` (line length violations).
+ignore = ["C901", "E501", "E741", "F402", "F823", "C408"]
+select = ["C", "E", "F", "I", "W"]
+
+# Ignore import violations in all `__init__.py` files.
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["E402", "F401", "F403", "F811"]
+
+[tool.ruff.lint.isort]
+lines-after-imports = 2
+known-first-party = ["transformers"]
+
+[tool.ruff.format]
+# Like Black, use double quotes for strings.
+quote-style = "double"
+
+# Like Black, indent with spaces, rather than tabs.
+indent-style = "space"
+
+# Like Black, respect magic trailing commas.
+skip-magic-trailing-comma = false
+
+# Like Black, automatically detect the appropriate line ending.
+line-ending = "auto"
