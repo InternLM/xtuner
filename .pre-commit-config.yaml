@@ -1,22 +1,11 @@
-exclude: ^tests/data/|^xtuner/model/transformers_models/|^xtuner/tools/model_converters/modeling_internlm2_reward/|^xtuner/_lite/modelings/|^xtuner/_lite/accelerate/dispatches/huggingface/
+files: '^xtuner/v1/.*'
 repos:
-  - repo: https://github.com/PyCQA/flake8
-    rev: 7.1.1
-    hooks:
-      - id: flake8
-        args: ["--max-line-length=119"]
-  - repo: https://github.com/PyCQA/isort
-    rev: 5.12.0
-    hooks:
-      - id: isort
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
     hooks:
       - id: check-yaml
       - id: requirements-txt-fixer
       - id: check-merge-conflict
-      - id: fix-encoding-pragma
-        args: ["--remove"]
       - id: mixed-line-ending
         args: ["--fix=lf"]
   - repo: https://github.com/codespell-project/codespell
@@ -34,23 +23,37 @@ repos:
           - linkify-it-py
         exclude: 'docs/zh_cn/user_guides/sequence_parallel.md'
   - repo: https://github.com/myint/docformatter
-    rev: v1.5.1
+    rev: 06907d0
     hooks:
       - id: docformatter
         args: ["--in-place", "--wrap-descriptions", "119"]
-  - repo: https://github.com/open-mmlab/pre-commit-hooks
-    rev: v0.4.0
-    hooks:
-      - id: check-copyright
-        args: ["xtuner", "--excludes", "xtuner/_lite/modelings/", "xtuner/model/transformers_models/"]
-      - id: remove-improper-eol-in-cn-docs
   - repo: https://github.com/asottile/pyupgrade
-    rev: v3.0.0
+    rev: v3.20.0
     hooks:
       - id: pyupgrade
         args: ["--py36-plus"]
 
-  - repo: https://github.com/psf/black
-    rev: 23.9.1
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    # Ruff version.
+    rev: v0.9.10
     hooks:
-      - id: black
+      # Run the linter.
+      - id: ruff
+        types_or: [ python, pyi ]
+        args: [ --diff ]
+      - id: ruff
+        types_or: [ python, pyi ]
+        args: [ --fix ]
+      # Run the formatter.
+      - id: ruff-format
+        types_or: [ python, pyi ]
+        args: [ --diff ]
+      - id: ruff-format
+        types_or: [ python, pyi ]
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.2.0
+    hooks:
+      - id: mypy
+        pass_filenames: false
+        args: ['xtuner/v1', '--ignore-missing-imports', '--allow-redefinition']
+        additional_dependencies: ["requests"]
