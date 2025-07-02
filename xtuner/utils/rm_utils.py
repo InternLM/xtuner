@@ -125,7 +125,7 @@ class RewardModelClient():
                 return rewards
             except Exception as e:
                 print(f"Error requesting reward: {e}")
-                print(f"Raw response: {res.text}")
+                print(f"Raw response: {data}")
                 time.sleep(retry_delay)
                 continue
         print(f"Failed to request reward after {max_retries} retries")
@@ -145,7 +145,7 @@ class RewardModelClient():
                 return rewards
             except Exception as e:
                 print(f"Error requesting reward: {e}")
-                print(f"Raw response: {res.text}")
+                print(f"Raw response: {data}")
                 time.sleep(retry_delay)
                 continue
         print(f"Failed to request reward after {max_retries} retries")
@@ -156,17 +156,16 @@ class RewardModelClient():
         for i in range(max_retries):
             try:
                 res = requests.post(
-                    f"http://{self.server_address}/classify",
+                    f"http://{self.server_address}/pooling",
                     json={
-                        "model": self.rm_name,
-                        "text": data,
+                        "input": data,
                     },
                 )
-                rewards = res.json()['reward_score']
+                rewards = [e['data'] for e in res.json()['data']]
                 return rewards
             except Exception as e:
                 print(f"Error requesting reward: {e}")
-                print(f"Raw response: {res.text}")
+                print(f"Raw response: {data}")
                 time.sleep(retry_delay)
                 continue
         print(f"Failed to request reward after {max_retries} retries")
