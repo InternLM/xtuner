@@ -5,6 +5,10 @@ build-backend = "setuptools.build_meta:__legacy__"
 [tool.mypy]
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+module = "xtuner.v1.*"
+ignore_missing_imports = false
+
 # Copied from huggingface
 [tool.ruff]
 line-length = 119
