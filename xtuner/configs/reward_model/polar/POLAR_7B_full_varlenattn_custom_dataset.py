@@ -1,6 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-# Different from InternLM-Reward, InternRM requires an additional reference trajectory for preference modeling.
-# Please refer to https://github.com/InternLM/InternRM for more details.
+# Different from InternLM-Reward, POLAR requires an additional reference trajectory for preference modeling.
+# Please refer to https://github.com/InternLM/POLAR for more details.
 
 from mmengine.dataset import DefaultSampler
 from mmengine.hooks import (
@@ -27,7 +27,7 @@ from xtuner.parallel.sequence import SequenceParallelSampler
 #                          PART 1  Settings                           #
 #######################################################################
 # Model
-pretrained_model_name_or_path = "internlm/internrm-1_8b-base"
+pretrained_model_name_or_path = "internlm/POLAR-7B-Base"
 use_varlen_attn = True
 reward_token_id = 92527  # use [UNUSED_TOKEN_130] as reward token
 loss_type = "ranking"
@@ -48,7 +48,7 @@ accumulative_counts *= sequence_parallel_size
 dataloader_num_workers = 0
 max_epochs = 1  # reward model should not be trained for more than 1 epoch to avoid overfitting  # noqa: E501
 optim_type = AdamW
-lr = 1e-5
+lr = 2e-5
 betas = (0.9, 0.95)
 weight_decay = 0
 max_norm = 1  # grad clip
@@ -96,7 +96,7 @@ sampler = SequenceParallelSampler if sequence_parallel_size > 1 else DefaultSamp
 #     "chosen": [{"role": "assistant", "content": "Paris."}],
 #     "rejected": [{"role": "assistant", "content": "I don't know."}],
 # }
-# Please refer to https://github.com/InternLM/InternRM for more details of data format.
+# Please refer to https://github.com/InternLM/POLAR for more details of data format.
 
 train_dataset = dict(
     type=build_preference_dataset,

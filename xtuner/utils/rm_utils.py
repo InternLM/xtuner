@@ -224,7 +224,7 @@ if __name__ == "__main__":
     ]
 
     # sglang
-    client = RewardModelClient("internlm/internrm-7b",
+    client = RewardModelClient("internlm/POLAR-7B",
                                server_type="sglang",
                                server_address="127.0.0.1:30000")
 
@@ -236,7 +236,7 @@ if __name__ == "__main__":
     print(scores)
 
     # vllm
-    client = RewardModelClient("internlm/internrm-7b",
+    client = RewardModelClient("internlm/POLAR-7B",
                                server_type="vllm",
                                server_address="127.0.0.1:30000")
 
@@ -248,7 +248,7 @@ if __name__ == "__main__":
     print(scores)
 
     # lmdeploy
-    client = RewardModelClient("internlm/internrm-7b",
+    client = RewardModelClient("internlm/POLAR-7B",
                                server_type="lmdeploy",
                                server_address="127.0.0.1:30000")
 
