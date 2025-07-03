@@ -1,3 +1,5 @@
 #! /usr/bin/bash
 set -e
-mypy xtuner/v1
+
+export PYTHONPATH=$(dirname $0)/..
+mypy --package xtuner.v1
