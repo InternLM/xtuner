@@ -17,6 +17,7 @@ from typing import Any, Callable, cast
 import numpy as np
 import torch
 from mmengine import mkdir_or_exist
+from mmengine.dist import barrier, get_rank
 from torch import distributed as dist
 from tqdm import tqdm
 
@@ -198,24 +199,24 @@ class JsonlDataset(torch.utils.data.Dataset):
         elif cache_dir:
             assert self.meta_path is not None
 
-            if dist.get_rank() == 0:
+            if get_rank() == 0:
                 if os.path.exists(cache_dir):
                     assert os.path.isdir(cache_dir)
                 else:
                     mkdir_or_exist(cache_dir)
-            dist.barrier()
+            barrier()
 
             file_hash = calculate_xxhash(self._shared_memory.buf)
             # file_hash = calculate_bytes_sha256(self._shared_memory.buf)
             file_cache_dir = os.path.join(cache_dir, file_hash)
 
             if file_hash not in os.listdir(cache_dir):
-                if dist.get_rank() == 0:
+                if get_rank() == 0:
                     mkdir_or_exist(file_cache_dir)
-            dist.barrier()
+            barrier()
 
             _cached_file = os.path.join(file_cache_dir, "offsets.npy")
-            if not dist.is_initialized() or dist.get_rank() == 0:
+            if get_rank() == 0:
                 if not os.path.exists(_cached_file):
                     offsets = self.count_offsets(file_cache_dir)
 
@@ -260,8 +261,7 @@ class JsonlDataset(torch.utils.data.Dataset):
                     f.truncate(0)
                     f.write(json.dumps(origin_data, indent=4, ensure_ascii=False))
 
-            if dist.is_initialized():
-                dist.barrier()
+            barrier()
 
             offsets = np.load(_cached_file)
 
@@ -269,9 +269,9 @@ class JsonlDataset(torch.utils.data.Dataset):
                 tok_hash = tokenize_fn.hash()
                 tok_cache_dir = os.path.join(file_cache_dir, tok_hash)
                 if tok_hash not in os.listdir(file_cache_dir):
-                    if dist.get_rank() == 0:
+                    if get_rank() == 0:
                         mkdir_or_exist(tok_cache_dir)
-                dist.barrier()
+                barrier()
 
                 if "num_tokens.npy" in os.listdir(tok_cache_dir):
                     _cached_file = os.path.join(tok_cache_dir, "num_tokens.npy")
@@ -280,7 +280,7 @@ class JsonlDataset(torch.utils.data.Dataset):
                 else:
                     num_tokens = self.count_tokens(offsets, tok_cache_dir)
 
-                if dist.get_rank() == 0:
+                if get_rank() == 0:
                     with open(self.meta_path, "r+") as f:
                         origin_data = json.load(f)
                         data = origin_data[file_hash]
@@ -313,8 +313,7 @@ class JsonlDataset(torch.utils.data.Dataset):
                         f.truncate(0)
                         f.write(json.dumps(origin_data, indent=4, ensure_ascii=False))
 
-                if dist.is_initialized():
-                    dist.barrier()
+                barrier()
 
             elif tokenize_fn:
                 logger.warning(
@@ -413,7 +412,7 @@ class JsonlDataset(torch.utils.data.Dataset):
 
         offsets = np.array(offsets)
 
-        if cache_dir and (not dist.is_initialized() or dist.get_rank() == 0):
+        if cache_dir and get_rank() == 0:
             save_path = os.path.join(cache_dir, "offsets.npy")
             np.save(save_path, offsets)
 
