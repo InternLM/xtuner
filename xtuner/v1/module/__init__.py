@@ -6,6 +6,7 @@ from .attention import (
     build_attnention,
 )
 from .rms_norm import RMSNorm
+from .rope import RopeScalingConfig, RotaryEmbedding
 
 
 __all__ = [
@@ -15,4 +16,6 @@ __all__ = [
     "MHAConfig",
     "MLAConfig",
     "build_attnention",
+    "RopeScalingConfig",
+    "RotaryEmbedding",
 ]
