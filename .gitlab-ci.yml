@@ -1,0 +1,5 @@
+include:
+  - local: ci/workflow/lint.yaml
+
+stages:
+  - lint

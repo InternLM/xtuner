@@ -1,0 +1,11 @@
+lint:
+  tags:
+    - aliyun_x
+  stage: lint
+  allow_failure: false
+  script:
+    - export PATH=$CI_ENV:$PATH
+    - export PRE_COMMIT_HOME=$HOME/.xtuner_cache
+    - pre-commit run --files ./xtuner/v1/*
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event" && ($CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "main" || $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "refactor")
