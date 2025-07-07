@@ -8,6 +8,7 @@ from .attention import (
 from .dispatcher import NaiveDispacher, TorchAll2AllDispatcher, get_dispatcher
 from .rms_norm import RMSNorm
 from .rope import RopeScalingConfig, RotaryEmbedding
+from .router import GreedyRouter, GreedyRouterConfig, NoAuxRouter, NoAuxRouterConfig, RouterResults, build_router
 
 
 # WARN: Optional dependency related module should never be imported here, such as `GroupedLinear`
@@ -24,4 +25,10 @@ __all__ = [
     "TorchAll2AllDispatcher",
     "NaiveDispacher",
     "get_dispatcher",
+    "build_router",
+    "NoAuxRouter",
+    "NoAuxRouterConfig",
+    "GreedyRouter",
+    "GreedyRouterConfig",
+    "RouterResults",
 ]
