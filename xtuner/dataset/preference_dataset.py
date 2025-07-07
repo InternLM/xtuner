@@ -162,7 +162,7 @@ def tokenize_ref(
     reward_token_id: int = -1
 ):
 
-    max_length = max_length - 4  # for one RM token, two seperator tokens, and one reward token
+    max_length = max_length - 4  # for one RM token, two separator tokens, and one reward token
 
     prompt_ddm = "\n".join([e["content"] for e in (pair["prompt"])])
     reference_ddm = "\n".join([e["content"] for e in (pair["reference"])])

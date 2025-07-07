@@ -99,7 +99,8 @@ class RewardModelClient():
         """
         Encode the input data into a format suitable for RM.
         Args:
-            data: A dictionary or a list of dictionary containing the keys 'prompt', 'reference', 'output', and optionally 'wrapper'.
+            data: A dictionary or a list of dictionary containing the keys
+                  'prompt', 'reference', 'output', and optionally 'wrapper'.
         Returns:
             The encoded input string for RM.
         """
@@ -175,11 +176,13 @@ class RewardModelClient():
         """
         Call the input wrapper to construct the input string for RM.
         Args:
-            data: A list of dictionaries containing the keys 'prompt', 'reference', 'output', and optionally 'wrapper'.
+            data: A list of dictionaries containing the keys
+                  'prompt', 'reference', 'output', and optionally 'wrapper'.
             retry_delay: Delay in seconds before retrying the request.
             max_retries: Maximum number of retries for the request.
         Returns:
-            scores: The list of reward scores returned by the RM server. If the request fails, it returns None.
+            scores: The list of reward scores returned by the RM server.
+                    If the request fails, it returns None.
         """
         data = self.encode(data)
         if self.server_type == "sglang":
