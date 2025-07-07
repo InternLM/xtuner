@@ -159,16 +159,17 @@ def tokenize_ref(
     max_length: int,
     max_response_length: int = 4096,
     is_reward: bool = False,
-    reward_token_id: int = -1
+    reward_token_id: int = -1,
 ):
-
-    max_length = max_length - 4  # for one RM token, two separator tokens, and one reward token
+    max_length = (
+        max_length - 4
+    )  # for one RM token, two separator tokens, and one reward token
 
     prompt_ddm = "\n".join([e["content"] for e in (pair["prompt"])])
     reference_ddm = "\n".join([e["content"] for e in (pair["reference"])])
     chosen_ddm = "\n".join([e["content"] for e in (pair["chosen"])])
     rejected_ddm = "\n".join([e["content"] for e in (pair["rejected"])])
-    wrapper = pair['wrapper'] if 'wrapper' in pair else "sft"
+    wrapper = pair["wrapper"] if "wrapper" in pair else "sft"
 
     _prompt_ids = tokenizer.encode(prompt_ddm, add_special_tokens=True)
     _reference_ids = tokenizer.encode(reference_ddm, add_special_tokens=True)
@@ -197,8 +198,10 @@ def tokenize_ref(
         )
         _rejected_ids = _rejected_ids[:max_response_length]
 
-    max_prompt_length = min((max_length - len(_reference_ids) - len(_chosen_ids)) // 2,
-                            (max_length - len(_reference_ids) - len(_rejected_ids)) // 2)
+    max_prompt_length = min(
+        (max_length - len(_reference_ids) - len(_chosen_ids)) // 2,
+        (max_length - len(_reference_ids) - len(_rejected_ids)) // 2,
+    )
 
     if len(_prompt_ids) > max_prompt_length:
         print_log(
@@ -215,9 +218,21 @@ def tokenize_ref(
     _rejected = tokenizer.decode(_rejected_ids, skip_special_tokens=True)
 
     # Fit the template of POEM
-    _reference_cat = _prompt + _reference if wrapper == "pretrain" or _reference == "" else _prompt + "\n" + _reference
-    _chosen_cat = _prompt + _chosen if wrapper == "pretrain" or _chosen == "" else _prompt + "\n" + _chosen
-    _rejected_cat = _prompt + _rejected if wrapper == "pretrain" or _rejected == "" else _prompt + "\n" + _rejected
+    _reference_cat = (
+        _prompt + _reference
+        if wrapper == "pretrain" or _reference == ""
+        else _prompt + "\n" + _reference
+    )
+    _chosen_cat = (
+        _prompt + _chosen
+        if wrapper == "pretrain" or _chosen == ""
+        else _prompt + "\n" + _chosen
+    )
+    _rejected_cat = (
+        _prompt + _rejected
+        if wrapper == "pretrain" or _rejected == ""
+        else _prompt + "\n" + _rejected
+    )
 
     chosen = _reference_cat + "<|reward|>" + _chosen_cat
     rejected = _reference_cat + "<|reward|>" + _rejected_cat
@@ -235,10 +250,10 @@ def tokenize_ref(
         raise NotImplementedError
 
     return {
-        'chosen_ids': chosen_ids,
-        'rejected_ids': rejected_ids,
-        'chosen_labels': chosen_labels,
-        'rejected_labels': rejected_labels,
+        "chosen_ids": chosen_ids,
+        "rejected_ids": rejected_ids,
+        "chosen_labels": chosen_labels,
+        "rejected_labels": rejected_labels,
     }
 
 
@@ -463,7 +478,7 @@ def build_preference_dataset(
             reward_token_id=reward_token_id,
             num_proc=num_proc,
             max_response_length=max_response_length,
-            is_reference=is_reference
+            is_reference=is_reference,
         )
         if use_varlen_attn:
             tokenized_ds = PackedDatasetWrapper(

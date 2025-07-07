@@ -2,6 +2,7 @@
 # Different from InternLM-Reward, POLAR requires an additional reference trajectory for preference modeling.
 # Please refer to https://github.com/InternLM/POLAR for more details.
 
+from datasets import load_dataset
 from mmengine.dataset import DefaultSampler
 from mmengine.hooks import (
     CheckpointHook,
@@ -11,11 +12,10 @@ from mmengine.hooks import (
     ParamSchedulerHook,
 )
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR, LinearLR
-from mmengine.visualization import Visualizer, TensorboardVisBackend
+from mmengine.visualization import TensorboardVisBackend, Visualizer
 from torch.optim import AdamW
 from transformers import AutoModel, AutoTokenizer
 
-from datasets import load_dataset
 from xtuner.dataset.collate_fns.preference_collate_fn import preference_collate_fn
 from xtuner.dataset.preference_dataset import build_preference_dataset
 from xtuner.engine.hooks import VarlenAttnArgsToMessageHubHook
@@ -115,7 +115,7 @@ train_dataset = dict(
     max_packed_length=max_packed_length,
     shuffle_before_pack=True,
     max_response_length=max_response_length,
-    is_reference=True
+    is_reference=True,
 )
 
 train_dataloader = dict(
@@ -202,10 +202,7 @@ env_cfg = dict(
 )
 
 # set visualizer
-visualizer = dict(
-    type=Visualizer,
-    vis_backends=[dict(type=TensorboardVisBackend)]
-)
+visualizer = dict(type=Visualizer, vis_backends=[dict(type=TensorboardVisBackend)])
 
 # set log level
 log_level = "INFO"
