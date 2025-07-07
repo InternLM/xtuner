@@ -153,6 +153,110 @@ def tokenize(
     }
 
 
+def tokenize_ref(
+    pair: str,
+    tokenizer: AutoTokenizer,
+    max_length: int,
+    max_response_length: int = 4096,
+    is_reward: bool = False,
+    reward_token_id: int = -1,
+):
+    max_length = (
+        max_length - 4
+    )  # for one RM token, two separator tokens, and one reward token
+
+    prompt_ddm = "\n".join([e["content"] for e in (pair["prompt"])])
+    reference_ddm = "\n".join([e["content"] for e in (pair["reference"])])
+    chosen_ddm = "\n".join([e["content"] for e in (pair["chosen"])])
+    rejected_ddm = "\n".join([e["content"] for e in (pair["rejected"])])
+    wrapper = pair["wrapper"] if "wrapper" in pair else "sft"
+
+    _prompt_ids = tokenizer.encode(prompt_ddm, add_special_tokens=True)
+    _reference_ids = tokenizer.encode(reference_ddm, add_special_tokens=True)
+    _chosen_ids = tokenizer.encode(chosen_ddm, add_special_tokens=True)
+    _rejected_ids = tokenizer.encode(rejected_ddm, add_special_tokens=True)
+
+    if len(_reference_ids) > max_response_length:
+        print_log(
+            f"sequence length {len(_reference_ids)} is "
+            f"larger than max_response_length {max_response_length}",
+            logger="current",
+        )
+        _reference_ids = _reference_ids[:max_response_length]
+    if len(_chosen_ids) > max_response_length:
+        print_log(
+            f"sequence length {len(_chosen_ids)} is "
+            f"larger than max_response_length {max_response_length}",
+            logger="current",
+        )
+        _chosen_ids = _chosen_ids[:max_response_length]
+    if len(_rejected_ids) > max_response_length:
+        print_log(
+            f"sequence length {len(_rejected_ids)} is "
+            f"larger than max_response_length {max_response_length}",
+            logger="current",
+        )
+        _rejected_ids = _rejected_ids[:max_response_length]
+
+    max_prompt_length = min(
+        (max_length - len(_reference_ids) - len(_chosen_ids)) // 2,
+        (max_length - len(_reference_ids) - len(_rejected_ids)) // 2,
+    )
+
+    if len(_prompt_ids) > max_prompt_length:
+        print_log(
+            f"sequence length {len(_prompt_ids)} is "
+            f"larger than max_prompt_length {max_prompt_length}",
+            logger="current",
+        )
+        # To ensure the prompt is not too long, we truncate it from the end.
+        _prompt_ids = _prompt_ids[-max_prompt_length:]
+
+    _prompt = tokenizer.decode(_prompt_ids, skip_special_tokens=True)
+    _reference = tokenizer.decode(_reference_ids, skip_special_tokens=True)
+    _chosen = tokenizer.decode(_chosen_ids, skip_special_tokens=True)
+    _rejected = tokenizer.decode(_rejected_ids, skip_special_tokens=True)
+
+    # Fit the template of POEM
+    _reference_cat = (
+        _prompt + _reference
+        if wrapper == "pretrain" or _reference == ""
+        else _prompt + "\n" + _reference
+    )
+    _chosen_cat = (
+        _prompt + _chosen
+        if wrapper == "pretrain" or _chosen == ""
+        else _prompt + "\n" + _chosen
+    )
+    _rejected_cat = (
+        _prompt + _rejected
+        if wrapper == "pretrain" or _rejected == ""
+        else _prompt + "\n" + _rejected
+    )
+
+    chosen = _reference_cat + "<|reward|>" + _chosen_cat
+    rejected = _reference_cat + "<|reward|>" + _rejected_cat
+
+    chosen_ids = tokenizer.encode(chosen, add_special_tokens=True)
+    rejected_ids = tokenizer.encode(rejected, add_special_tokens=True)
+
+    if is_reward:
+        # reward label
+        chosen_ids = chosen_ids + [reward_token_id]
+        rejected_ids = rejected_ids + [reward_token_id]
+        chosen_labels = [-100] * len(chosen_ids[:-1]) + [0]
+        rejected_labels = [-100] * len(rejected_ids[:-1]) + [1]
+    else:
+        raise NotImplementedError
+
+    return {
+        "chosen_ids": chosen_ids,
+        "rejected_ids": rejected_ids,
+        "chosen_labels": chosen_labels,
+        "rejected_labels": rejected_labels,
+    }
+
+
 class PreferenceDataset(Dataset):
     def __init__(
         self,
@@ -163,6 +267,8 @@ class PreferenceDataset(Dataset):
         is_reward: bool = False,
         reward_token_id: int = -1,
         num_proc: int = 32,
+        max_response_length: int = 4096,
+        is_reference: bool = False,
     ) -> None:
         self.max_length = max_length
         assert is_dpo != is_reward, "Only one of is_dpo and is_reward can be True"
@@ -171,19 +277,30 @@ class PreferenceDataset(Dataset):
                 reward_token_id != -1
             ), "reward_token_id should be set if is_reward is True"
 
+        if is_reference:
+            tokenize_func = partial(
+                tokenize_ref,
+                tokenizer=tokenizer,
+                max_length=max_length,
+                max_response_length=max_response_length,
+                is_reward=is_reward,
+                reward_token_id=reward_token_id,
+            )
+        else:
+            tokenize_func = partial(
+                tokenize,
+                tokenizer=tokenizer,
+                max_length=max_length,
+                is_reward=is_reward,
+                reward_token_id=reward_token_id,
+            )
         self.is_dpo = is_dpo
         self.is_reward = is_reward
         self.reward_token_id = reward_token_id
         self.tokenized_pairs = []
 
         for tokenized_pair in _multi_progress(
-            partial(
-                tokenize,
-                tokenizer=tokenizer,
-                max_length=max_length,
-                is_reward=is_reward,
-                reward_token_id=reward_token_id,
-            ),
+            tokenize_func,
             dataset,
             nproc=num_proc,
             task_num=len(dataset),
@@ -335,6 +452,8 @@ def build_preference_dataset(
     use_varlen_attn: bool = False,
     max_packed_length: int = 16384,
     shuffle_before_pack: bool = True,
+    max_response_length: int = 4096,
+    is_reference: bool = False,
 ) -> Dataset:
     using_dist = dist.is_available() and dist.is_initialized()
     tokenized_ds = None
@@ -358,6 +477,8 @@ def build_preference_dataset(
             is_reward=is_reward,
             reward_token_id=reward_token_id,
             num_proc=num_proc,
+            max_response_length=max_response_length,
+            is_reference=is_reference,
         )
         if use_varlen_attn:
             tokenized_ds = PackedDatasetWrapper(
