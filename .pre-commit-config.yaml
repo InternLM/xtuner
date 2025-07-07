@@ -66,4 +66,3 @@ repos:
         require_serial: true
         verbose: true
         types: [python]
-        language_version: python3.12.4
