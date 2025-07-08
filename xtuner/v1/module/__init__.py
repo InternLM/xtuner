@@ -5,6 +5,7 @@ from .attention import (
     MultiLatentAttention,
     build_attnention,
 )
+from .dispatcher import NaiveDispacher, TorchAll2AllDispatcher, get_dispatcher
 from .rms_norm import RMSNorm
 from .rope import RopeScalingConfig, RotaryEmbedding
 
@@ -20,4 +21,7 @@ __all__ = [
     "build_attnention",
     "RopeScalingConfig",
     "RotaryEmbedding",
+    "TorchAll2AllDispatcher",
+    "NaiveDispacher",
+    "get_dispatcher",
 ]
