@@ -13,7 +13,6 @@ from .handle_moe_load_and_save import (
 from .rm_utils import RewardModelClient
 from .stop_criteria import StopWordStoppingCriteria
 from .templates import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
-from .zero_to_any_dtype import get_state_dict_from_zero_checkpoint
 
 __all__ = [
     "IGNORE_INDEX",
@@ -26,6 +25,5 @@ __all__ = [
     "load_state_dict_into_model",
     "get_origin_state_dict",
     "SUPPORT_MODELS",
-    "get_state_dict_from_zero_checkpoint",
     "RewardModelClient",
 ]
