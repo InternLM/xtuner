@@ -1,7 +1,7 @@
 from . import StrEnum
 
 
-class State(StrEnum):
+class ForwardState(StrEnum):
     PREFILLING = "prefilling"
     DECODING = "decoding"
     TRAINING = "training"

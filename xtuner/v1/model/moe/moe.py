@@ -14,7 +14,7 @@ from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.module import RMSNorm, RotaryEmbedding, RouterResults, build_attnention, build_router
 from xtuner.v1.module.dispatcher import DecodingDispatchResult, PrefillingDispatchResult, get_dispatcher
 from xtuner.v1.module.grouped_linear.moe_group_linear import GroupedLinear
-from xtuner.v1.utils import State
+from xtuner.v1.utils import ForwardState
 
 
 # TODO: (yehaochen) Maybe could be optimized
@@ -156,7 +156,7 @@ class MoEDecoderLayer(nn.Module):
         seq_ctx: SequenceContext,
         position_embeddings: Tuple[torch.Tensor, torch.Tensor],
         past_key_values: list[list[torch.Tensor]] | None = None,
-        state: State = State.TRAINING,
+        state: ForwardState = ForwardState.TRAINING,
     ) -> Tuple[torch.Tensor, RouterResults]:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
@@ -167,7 +167,7 @@ class MoEDecoderLayer(nn.Module):
             position_embeddings=position_embeddings,
             seq_ctx=seq_ctx,
             past_key_values=past_key_values,
-            state=State.TRAINING,
+            state=ForwardState.TRAINING,
         )
         hidden_states = residual + hidden_states
 
@@ -188,7 +188,7 @@ class MoEDecoderLayer(nn.Module):
         )
         dispatched = self.dispatcher.dispatch(
             pre_dispatched=pre_dispatched,
-            decoding=state == State.DECODING,
+            decoding=state == ForwardState.DECODING,
         )  # type: ignore[call-overload]
         experts_out: torch.Tensor = self.experts(
             dispatched["hidden_states"],
@@ -196,7 +196,7 @@ class MoEDecoderLayer(nn.Module):
             decoding=False,
         )
 
-        if state == State.DECODING:
+        if state == ForwardState.DECODING:
             dispatched = cast(DecodingDispatchResult, dispatched)
             combined = self.dispatcher.combine(
                 hidden_states=experts_out,
@@ -260,7 +260,7 @@ class DenseDecoderLayer(nn.Module):
         position_embeddings: Tuple[torch.Tensor, torch.Tensor],
         seq_ctx: SequenceContext,
         past_key_values: Optional[List[List[torch.Tensor]]] = None,
-        state: State = State.TRAINING,
+        state: ForwardState = ForwardState.TRAINING,
     ) -> torch.Tensor:
         residual = hidden_states
 
@@ -272,7 +272,7 @@ class DenseDecoderLayer(nn.Module):
             position_embeddings=position_embeddings,
             seq_ctx=seq_ctx,
             past_key_values=past_key_values,
-            state=State.TRAINING,
+            state=ForwardState.TRAINING,
         )
         hidden_states = residual + hidden_states
 
