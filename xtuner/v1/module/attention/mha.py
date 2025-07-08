@@ -10,7 +10,7 @@ from xtuner.v1.config import BaseAttnConfig, TransformerConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.ops.comm.all_to_all import ulysses_all_to_all
 from xtuner.v1.utils import get_logger
-from xtuner.v1.utils.state import State
+from xtuner.v1.utils.state import ForwardState
 
 from ..rms_norm import RMSNorm
 from .kv_cache import fill_paged_kv_cache
@@ -321,7 +321,7 @@ class MultiHeadAttention(nn.Module):
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         seq_ctx: SequenceContext,
         past_key_values: list[list[torch.Tensor]] | None = None,
-        state: State = State.TRAINING,
+        state: ForwardState = ForwardState.TRAINING,
     ) -> torch.Tensor:
         """Forward pass for the Multi-Head Attention module.
 
@@ -341,7 +341,7 @@ class MultiHeadAttention(nn.Module):
         Returns:
             torch.Tensor: Output tensor after attention computation and projection.
         """
-        if state is State.PREFILLING:
+        if state is ForwardState.PREFILLING:
             assert past_key_values is not None
             return self.forward_prefilling(
                 hidden_states=hidden_states,
@@ -349,7 +349,7 @@ class MultiHeadAttention(nn.Module):
                 attn_meta=seq_ctx,
                 past_key_values=past_key_values,
             )
-        elif state is State.DECODING:
+        elif state is ForwardState.DECODING:
             assert past_key_values is not None
             assert seq_ctx.block_table is not None
             return self.forward_decoding(
@@ -358,7 +358,7 @@ class MultiHeadAttention(nn.Module):
                 attn_meta=seq_ctx,
                 past_key_values=past_key_values,
             )
-        elif state is State.TRAINING:
+        elif state is ForwardState.TRAINING:
             return self.forward_training(
                 hidden_states=hidden_states,
                 position_embeddings=position_embeddings,

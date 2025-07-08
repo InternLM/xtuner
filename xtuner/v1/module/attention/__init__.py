@@ -5,7 +5,7 @@ import torch
 
 from xtuner.v1.config import TransformerConfig
 from xtuner.v1.data_proto import SequenceContext
-from xtuner.v1.utils import State
+from xtuner.v1.utils import ForwardState
 
 from .mha import MHAConfig, MultiHeadAttention
 from .mla import MLAConfig, MultiLatentAttention
@@ -26,7 +26,7 @@ class AttentionProtocol(Protocol):
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         seq_ctx: SequenceContext,
         past_key_values: list[list[torch.Tensor]] | None = None,
-        state: State = State.TRAINING,
+        state: ForwardState = ForwardState.TRAINING,
     ) -> torch.Tensor:
         """Forward pass of the attention module."""
         ...
@@ -37,7 +37,7 @@ class AttentionProtocol(Protocol):
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         seq_ctx: SequenceContext,
         past_key_values: list[list[torch.Tensor]] | None = None,
-        state: State = State.TRAINING,
+        state: ForwardState = ForwardState.TRAINING,
     ) -> torch.Tensor:
         """Forward pass of the attention module."""
         ...
