@@ -12,7 +12,7 @@ from functools import partial
 from io import BytesIO
 from multiprocessing import Process, Queue
 from threading import Lock
-from typing import Any, Callable, cast
+from typing import Callable, cast
 
 import numpy as np
 import torch
@@ -177,7 +177,7 @@ class JsonlDataset(torch.utils.data.Dataset):
         self,
         path,
         sample_ratio: float = 1.0,
-        tokenize_fn: Callable[[Any], CacheObj] | None = None,
+        tokenize_fn: CachableTokenizeFunction | None = None,
         cache_dir: str | None = None,
         max_length: int | None = None,
         cache_tag: str | None = None,
@@ -330,8 +330,10 @@ class JsonlDataset(torch.utils.data.Dataset):
         else:
             offsets = self.count_offsets()
             num_tokens = None
-            if tokenize_fn:
+            if tokenize_fn is not None:
+                tokenize_fn.set_state("cache")
                 num_tokens = self.count_tokens(offsets)
+                tokenize_fn.set_state("runtime")
 
         # offset starts from 0 and endwith `file_size`
         # The size of offsets is `num_samples + 1`

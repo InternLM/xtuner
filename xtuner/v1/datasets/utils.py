@@ -3,7 +3,7 @@ import hashlib
 import tempfile
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypedDict
+from typing import TYPE_CHECKING, Any, Literal, TypedDict
 
 import xxhash
 
@@ -17,6 +17,9 @@ class CacheObj(TypedDict, total=False):
 
 
 class CachableTokenizeFunction(ABC):
+    def __init__(self, *args, **kwargs):
+        self.state = "runtime"
+
     @abstractmethod
     def __call__(self, item: Any) -> CacheObj:
         raise NotImplementedError
@@ -24,6 +27,9 @@ class CachableTokenizeFunction(ABC):
     @abstractmethod
     def hash(self) -> str:
         raise NotImplementedError
+
+    def set_state(self, state: Literal["cache", "runtime"]):
+        self.state = state
 
 
 def calculate_file_sha256(path):
@@ -42,6 +48,18 @@ def tokenizer_hash(tokenizer: "PreTrainedTokenizer"):
             with open(file, "rb") as f:
                 file_hash.update(f.read())
         return file_hash.hexdigest()
+
+
+def tokenizer_xxhash(tokenizer: PreTrainedTokenizer):
+    with tempfile.TemporaryDirectory() as tokenizer_tempdir:
+        tokenizer.save_pretrained(tokenizer_tempdir)
+        tokenizer_files = sorted(Path(tokenizer_tempdir).iterdir())
+        h = xxhash.xxh64()
+        for file in tokenizer_files:
+            with open(file, "rb") as f:
+                while chunk := f.read(65536):
+                    h.update(chunk)
+        return h.hexdigest()
 
 
 def calculate_xxhash(data_bytes: bytes | memoryview):
