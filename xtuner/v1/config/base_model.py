@@ -49,6 +49,7 @@ class TransformerConfig(BaseModel):
     tie_word_embeddings: bool = False
     training_dtype: Literal["bf16", "fp8"] = "bf16"
     chunked_loss: bool = False
+    model_type: Literal["qwen"] | None = None
 
     @computed_field
     def num_attention_heads(self) -> int:
