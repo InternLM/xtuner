@@ -2,7 +2,7 @@ from unittest import TestCase
 from unittest.mock import Mock
 
 import torch
-from xtuner.v1.module.dispatcher.base import NaiveDispacher
+from xtuner.v1.module.dispatcher.base import NaiveDispatcher
 from xtuner.v1.config import MoEConfig
 import parametrize
 
@@ -16,7 +16,7 @@ class TestNoEPDispatcher(TestCase):
     def setUp(self):
         config = Mock(spec=MoEConfig)
         config.n_routed_experts = 4
-        self.dispatcher = NaiveDispacher(
+        self.dispatcher = NaiveDispatcher(
             config=config,
         )
 

@@ -5,7 +5,7 @@ from .attention import (
     MultiLatentAttention,
     build_attnention,
 )
-from .dispatcher import NaiveDispacher, TorchAll2AllDispatcher, get_dispatcher
+from .dispatcher import NaiveDispatcher, TorchAll2AllDispatcher, build_dispatcher
 from .rms_norm import RMSNorm
 from .rope import RopeScalingConfig, RotaryEmbedding
 from .router import GreedyRouter, GreedyRouterConfig, NoAuxRouter, NoAuxRouterConfig, RouterResults, build_router
@@ -23,8 +23,8 @@ __all__ = [
     "RopeScalingConfig",
     "RotaryEmbedding",
     "TorchAll2AllDispatcher",
-    "NaiveDispacher",
-    "get_dispatcher",
+    "NaiveDispatcher",
+    "build_dispatcher",
     "build_router",
     "NoAuxRouter",
     "NoAuxRouterConfig",

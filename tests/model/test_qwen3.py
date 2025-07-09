@@ -21,7 +21,7 @@ class TestQwen3MoE(DistributedTestBase):
         [
             ("cuda", "deepep", 8,),
             ("cuda", "all2all", 8),
-            ("cuda", "naive", 1),
+            ("cuda", None, 1),
         ],
     )
     def test_qwen3_moe_run(self, device, dispatcher, ep_size):
