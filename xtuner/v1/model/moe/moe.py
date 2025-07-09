@@ -12,7 +12,7 @@ from transformers.activations import ACT2FN
 from xtuner.v1.config.base_model import MoEConfig, MoEModelOutputs
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.module import RMSNorm, RotaryEmbedding, RouterResults, build_attnention, build_router
-from xtuner.v1.module.dispatcher import DecodingDispatchResult, PrefillingDispatchResult, get_dispatcher
+from xtuner.v1.module.dispatcher import DecodingDispatchResult, PrefillingDispatchResult, build_dispatcher
 from xtuner.v1.module.grouped_linear.moe_group_linear import GroupedLinear
 from xtuner.v1.utils import ForwardState, HFCheckpointLoader, get_logger
 
@@ -106,30 +106,6 @@ class MoEGate(nn.Module):
         return self.router(logits)
 
 
-class MoELayer(nn.Module):
-    """InternLM3MoELayer is a mixed expert layer with shared experts."""
-
-    def __init__(self, config: MoEConfig, ep_mesh: DeviceMesh | None):
-        super().__init__()
-        self.ep_mesh = ep_mesh
-        self.config = config
-        self.top_k = config.num_experts_per_tok
-        self.n_routed_experts = config.n_routed_experts
-
-        self.experts = MoEBlock(config, ep_mesh)
-        self.dispatcher = get_dispatcher(config.dispatcher)(
-            config=config,
-            process_group=ep_mesh.get_group() if ep_mesh is not None else None,
-        )
-        self.gate = MoEGate(config)
-
-        if config.n_shared_experts > 0:
-            self.shared_experts = MoEMLP(config)
-
-    def forward(self, hidden_states: torch.Tensor):
-        raise NotImplementedError("MoE layer will not be directly called since `async` and `sync` will be more  ")
-
-
 class MoEDecoderLayer(nn.Module):
     """MoE decoder layer."""
 
@@ -150,7 +126,7 @@ class MoEDecoderLayer(nn.Module):
         self.experts = MoEBlock(config, ep_mesh)
         # TODO: (yehaochen) Maybe should be replaced by build_dispatcher
         process_group = ep_mesh.get_group() if ep_mesh is not None else None
-        self.dispatcher = get_dispatcher(config.dispatcher)(config=config, process_group=process_group)
+        self.dispatcher = build_dispatcher(config, process_group)
 
     # TODO: decouple the training and decoding interface. since arg like past_key_value will never be used in training
     def forward(

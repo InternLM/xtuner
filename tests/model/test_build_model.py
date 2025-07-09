@@ -41,7 +41,6 @@ class TestBuildModel(TestCase):
             first_k_dense_replace=0,
             hidden_factor=1.0,
             moe_intermediate_size=768,
-            dispatcher="naive",
             router=router_config,
             model_type="qwen",
         )

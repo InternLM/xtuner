@@ -3,7 +3,7 @@ from unittest.mock import Mock
 
 import torch
 from torch.testing._internal.common_distributed import DistributedTestBase
-from xtuner.v1.module.dispatcher.base import NaiveDispacher, GenericDispatcher
+from xtuner.v1.module.dispatcher.base import NaiveDispatcher, GenericDispatcher
 from xtuner.v1.module.dispatcher.torch_all2all import TorchAll2AllDispatcher
 from xtuner.v1.config import MoEConfig
 import parametrize
@@ -28,7 +28,7 @@ class TestNoETorchAll2AllDispatcher(DistributedTestBase):
         config.n_routed_experts = num_experts
         config.training_dtype = "bf16"
 
-        noep_dispatcher = NaiveDispacher(
+        noep_dispatcher = NaiveDispatcher(
             config=config,
         )
 

@@ -258,7 +258,7 @@ class NonEPDecodingDispatchResult(DecodingDispatchResult):
     row_ids_map: torch.Tensor
 
 
-class NaiveDispacher(
+class NaiveDispatcher(
     GenericDispatcher[
         PreDispatchResult,
         NonEPPrefillingDispatchResult,

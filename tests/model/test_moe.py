@@ -47,7 +47,6 @@ class TestMoE:
             first_k_dense_replace=1,
             hidden_factor=1.0,
             moe_intermediate_size=32,
-            dispatcher="naive",
             router=router_config,
         )
         model = MoE(config=config).to(dtype).to(device)
@@ -109,7 +108,6 @@ class TestDistributedMoE(DistributedTestBase):
             first_k_dense_replace=first_k_dense_replace,
             hidden_factor=1.0,
             moe_intermediate_size=32,
-            dispatcher="naive",
             router=router_config,
         )
 
