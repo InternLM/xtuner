@@ -4,9 +4,9 @@ import parametrize
 import torch
 from torch.distributed.device_mesh import init_device_mesh
 from torch.testing._internal.common_distributed import DistributedTestBase
-from transformers import AutoModelForCausalLM
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from xtuner.v1.model.moe.moe import MoEConfig
+from xtuner.v1.model.moe.moe import MoEConfig, SequenceContext
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE
 from xtuner.v1.module.attention import MHAConfig
 from xtuner.v1.module.router import GreedyRouterConfig
@@ -16,9 +16,35 @@ QWEN3_MOE_PATH = os.environ["QWEN3_MOE_PATH"]
 
 
 class TestQwen3MoE(DistributedTestBase):
-    @parametrize.parametrize("device", [("cuda",)])
-    def test_qwen3_moe(self, device):
-        self.create_pg("cuda")
+    @parametrize.parametrize(
+        "device,dispatcher,ep_size",
+        [
+            ("cuda", "deepep", 8,),
+            ("cuda", "all2all", 8),
+            ("cuda", "naive", 1),
+        ],
+    )
+    def test_qwen3_moe_run(self, device, dispatcher, ep_size):
+        self.create_pg(device)
+
+        hf_model = AutoModelForCausalLM.from_pretrained(
+            QWEN3_MOE_PATH,
+            torch_dtype=torch.bfloat16,
+            trust_remote_code=True,
+            device_map="cuda"
+        )
+        tokenizer = AutoTokenizer.from_pretrained(QWEN3_MOE_PATH, trust_remote_code=True)
+        input_ids = tokenizer("吃葡萄不吐葡萄皮", return_tensors="pt").input_ids.to("cuda")
+        with torch.no_grad():
+            output = hf_model(
+                input_ids=input_ids,
+                labels=input_ids.clone(),
+            )
+        expected_loss = output.loss
+
+        del hf_model
+        torch.cuda.empty_cache()
+
         router_config = GreedyRouterConfig(
             scoring_func="sigmoid",
             norm_topk_prob=True,
@@ -50,13 +76,32 @@ class TestQwen3MoE(DistributedTestBase):
             first_k_dense_replace=0,
             hidden_factor=1.0,
             moe_intermediate_size=768,
-            dispatcher="naive",
+            dispatcher=dispatcher,
             router=router_config,
         )
+
+        device_mesh = init_device_mesh(
+            device_type=device,
+            mesh_shape=(self.world_size // ep_size, ep_size),
+            mesh_dim_names=("dp", "ep"),
+        )
+        ep_mesh = device_mesh["ep"]
         with torch.device("meta"):
-            qwen_model = Qwen3MoE(config).to(torch.bfloat16)
+            qwen_model = Qwen3MoE(config, ep_mesh=ep_mesh).to(torch.bfloat16)
+
+        seq_ctx = SequenceContext.from_input_ids(input_ids=(input_ids, ))
+        seq_ctx, shifted_labels = seq_ctx.shift_with_labels(labels=input_ids)
 
         qwen_model.from_hf(QWEN3_MOE_PATH)
+
+        with torch.no_grad():
+            output = qwen_model(
+                seq_ctx=seq_ctx,
+                labels=shifted_labels,
+            )
+        loss = output["loss"]
+        torch.allclose(loss, expected_loss.to(loss.dtype), atol=1e-2, rtol=1e-2)
+
 
     @property
     def world_size(self) -> int:

@@ -7,7 +7,10 @@ from xtuner.v1.ops import grouped_gemm
 
 
 class GroupedLinear(nn.Module):
-    def __init__(self, in_features: int, out_features: int, num_routed_experts: int, ep_mesh: DeviceMesh | None):
+    # TODO:Missng example docs
+    def __init__(
+        self, in_features: int, out_features: int, num_routed_experts: int, ep_mesh: DeviceMesh | None = None
+    ):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features

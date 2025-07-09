@@ -14,7 +14,10 @@ from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.module import RMSNorm, RotaryEmbedding, RouterResults, build_attnention, build_router
 from xtuner.v1.module.dispatcher import DecodingDispatchResult, PrefillingDispatchResult, get_dispatcher
 from xtuner.v1.module.grouped_linear.moe_group_linear import GroupedLinear
-from xtuner.v1.utils import ForwardState
+from xtuner.v1.utils import ForwardState, HFCheckpointLoader, get_logger
+
+
+logger = get_logger()
 
 
 # TODO: (yehaochen) Maybe could be optimized
@@ -304,6 +307,8 @@ class MoE(nn.Module):
         self.rotary_emb = self.build_rotary_embedding(config)
         self.embed_tokens = self.build_embeddings(config)
 
+        self.fp32_layers = [self.rotary_emb]
+
         self.chunked_loss = config.chunked_loss
         if self.chunked_loss:
             assert is_installed("liger_kernel"), "Liger kernel is required for chunked loss."
@@ -350,6 +355,8 @@ class MoE(nn.Module):
 
             if return_hidden_states:
                 output["hidden_states"].append(hidden_states)
+
+        hidden_states = self.norm(hidden_states)
 
         logits: torch.Tensor | None = None
         loss: torch.Tensor
@@ -422,3 +429,84 @@ class MoE(nn.Module):
     ) -> MoEModelOutputs: ...
 
     __call__ = nn.Module.__call__
+
+    def _apply(self, fn, recurse: bool = True):
+        super()._apply(fn)
+        self.rotary_emb.to(torch.float32)
+        return self
+
+    def to_hf_key_list(self, key: str) -> str | List[str]:
+        raise NotImplementedError()
+
+    def from_hf(self, hf_path: str, device: torch.device | None = None, strict=True):
+        hf_loader = HFCheckpointLoader(hf_path)
+
+        if device is None:
+            # TODO: NPU support (need `get_available_device`)
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        ep_rank = self.ep_mesh.get_local_rank() if self.ep_mesh is not None else 0
+        ep_size = self.ep_mesh.size() if self.ep_mesh is not None else 1
+
+        cur_device = next(iter(self.parameters())).device
+        if cur_device == torch.device("meta"):
+            self.to_empty(device=device)
+            self.rotary_emb = self.build_rotary_embedding(self.config).to(device)
+
+        not_matched = []
+        not_loaded = []
+        loaded = []
+
+        with torch.no_grad():
+            for name, value in self.state_dict().items():
+                if isinstance(value, DTensor):
+                    value = value.to_local()
+                hf_keys = self.to_hf_key_list(name)
+                if isinstance(hf_keys, list):
+                    n_experts_per_rank = len(hf_keys) // ep_size
+
+                    hf_values = []
+                    start_idx = ep_rank * n_experts_per_rank
+                    end_idx = start_idx + n_experts_per_rank
+                    for idx in range(start_idx, end_idx):
+                        hf_key = hf_keys[idx]
+                        _value = hf_loader.load(hf_key).to(device)
+                        if _value is None:
+                            not_loaded.append(f"{name}")
+                            logger.warning(f"Parameter {f'{name}'} -> {hf_key} not found in HF checkpoint.")
+                            break
+                        hf_values.append(_value)
+                    hf_value = torch.cat(hf_values, dim=0)
+
+                    if hf_value.shape != value.shape:
+                        not_matched.append(f"{f'{name}'} {hf_value.shape} != {value.shape}")
+                        logger.warning(
+                            f"Parameter {f'{name}'} shape mismatch: expected {value.shape}, got {hf_value.shape}."
+                        )
+                        continue
+                    value.copy_(hf_value)
+                    loaded.extend(hf_keys)
+                else:
+                    hf_value = hf_loader.load(hf_keys)
+                    if hf_value is None:
+                        not_loaded.append(f"{name}")
+                        logger.warning(f"Parameter {f'{name}'} -> {hf_keys} not found in HF checkpoint.")
+                        continue
+
+                    if hf_value.shape != value.shape:
+                        not_matched.append(
+                            f"Parameter {f'{name}'} -> {hf_keys}: {f'{name}'} {hf_value.shape} != {value.shape}"
+                        )
+                        logger.warning(
+                            f"Parameter {f'{name}'} shape mismatch: expected {value.shape}, got {hf_value.shape}."
+                        )
+                    value.copy_(hf_value)
+                    loaded.append(hf_keys)
+
+        missing = set(hf_loader.weight_map) - set(loaded)
+
+        if strict:
+            if not_matched:
+                raise RuntimeError(f"Some parameters from {hf_path} do not match the model: {not_matched}. ")
+            if missing:
+                raise RuntimeError(f"Missing parameters from {hf_path}: {missing}. ")
