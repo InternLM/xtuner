@@ -11,10 +11,11 @@ from xtuner.v1.config.base_model import MoEConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.module import RMSNorm, RouterResults, build_attnention, build_router
 from xtuner.v1.module.dispatcher import PrefillingDispatchResult, build_dispatcher
-from xtuner.v1.module.grouped_linear.moe_group_linear import GroupedLinear
+from xtuner.v1.module.grouped_linear.moe_group_linear import build_grouped_linear
 from xtuner.v1.utils import ForwardState
+from xtuner.v1.utils.compile import maybe_compile
 
-from ..linear.linear import _Linear
+from ..linear.linear import build_linear
 
 
 class MoEMLP(nn.Module):
@@ -23,9 +24,15 @@ class MoEMLP(nn.Module):
         self.config = config
         self.hidden_size = config.hidden_size
         self.intermediate_size = config.moe_intermediate_size * config.n_shared_experts
-        self.gate_proj = _Linear(self.hidden_size, self.intermediate_size, bias=config.mlp_bias)
-        self.up_proj = _Linear(self.hidden_size, self.intermediate_size, bias=config.mlp_bias)
-        self.down_proj = _Linear(self.intermediate_size, self.hidden_size, bias=config.mlp_bias)
+        self.gate_proj = build_linear(
+            self.hidden_size, self.intermediate_size, bias=config.mlp_bias, float8_cfg=config.float8_cfg
+        )
+        self.up_proj = build_linear(
+            self.hidden_size, self.intermediate_size, bias=config.mlp_bias, float8_cfg=config.float8_cfg
+        )
+        self.down_proj = build_linear(
+            self.intermediate_size, self.hidden_size, bias=config.mlp_bias, float8_cfg=config.float8_cfg
+        )
         self.act_fn = ACT2FN[config.hidden_act]
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -69,20 +76,22 @@ class MoEBlock(nn.Module):
         self.ep_mesh = ep_mesh
         # self.fused_w1 = GroupedLinear(self.hidden_size, self.intermediate_size, self.num_routed_experts, ep_mesh)
         # self.fused_w3 = GroupedLinear(self.hidden_size, self.intermediate_size, self.num_routed_experts, ep_mesh)
-
-        self.fused_w1w3 = GroupedLinear(
+        self.fused_w1w3 = build_grouped_linear(
             self.hidden_size,
             2 * self.intermediate_size,
             self.num_routed_experts,
-            ep_mesh,
+            ep_mesh=self.ep_mesh,
+            float8_cfg=config.float8_cfg,
         )
-        self.fused_w2 = GroupedLinear(
+        self.fused_w2 = build_grouped_linear(
             self.intermediate_size,
             self.hidden_size,
             self.num_routed_experts,
-            self.ep_mesh,
+            ep_mesh=self.ep_mesh,
+            float8_cfg=config.float8_cfg,
         )
 
+    @maybe_compile(fullgraph=True)
     def forward(self, x, tokens_per_expert, decoding):
         gate_up_out = self.fused_w1w3(x, tokens_per_expert, decoding)
         gate_out, up_out = gate_up_out.chunk(2, dim=-1)
@@ -117,6 +126,7 @@ class MoEDecoderLayer(nn.Module):
         process_group = ep_mesh.get_group() if ep_mesh is not None else None
         self.dispatcher = build_dispatcher(config, process_group)
 
+    @maybe_compile(fullgraph=True)
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -273,6 +283,7 @@ class MoEDecoderLayer(nn.Module):
         )
         return hidden_states, router_results
 
+    @maybe_compile(fullgraph=True)
     def _pre_moe_forward(
         self,
         hidden_states: torch.Tensor,
@@ -319,6 +330,7 @@ class MoEDecoderLayer(nn.Module):
         router_results: RouterResults = self.gate(hidden_states)
         return residual, hidden_states, router_results
 
+    @maybe_compile(fullgraph=True)
     def _post_moe_forward(
         self,
         hidden_states: torch.Tensor,

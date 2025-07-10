@@ -11,6 +11,7 @@ from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.ops.comm.all_to_all import ulysses_all_to_all
 from xtuner.v1.utils import get_logger
 
+from ..linear.linear import build_linear
 from ..rms_norm import RMSNorm
 from .kv_cache import fill_paged_kv_cache
 
@@ -83,25 +84,29 @@ class MultiHeadAttention(nn.Module):
         self.attention_dropout = self.config.dropout
         self.is_causal = self.config.causal
 
-        self.q_proj = nn.Linear(
+        self.q_proj = build_linear(
             config.hidden_size,
             self.config.num_attention_heads * self.head_dim,
             bias=self.config.qkv_bias,
+            float8_cfg=config.float8_cfg,
         )
-        self.k_proj = nn.Linear(
+        self.k_proj = build_linear(
             config.hidden_size,
             self.config.num_key_value_heads * self.head_dim,
             bias=self.config.qkv_bias,
+            float8_cfg=config.float8_cfg,
         )
-        self.v_proj = nn.Linear(
+        self.v_proj = build_linear(
             config.hidden_size,
             self.config.num_key_value_heads * self.head_dim,
             bias=self.config.qkv_bias,
+            float8_cfg=config.float8_cfg,
         )
-        self.o_proj = nn.Linear(
+        self.o_proj = build_linear(
             self.config.num_attention_heads * self.head_dim,
             config.hidden_size,
             bias=self.config.o_bias,
+            float8_cfg=config.float8_cfg,
         )
 
         if self.config.qk_norm:

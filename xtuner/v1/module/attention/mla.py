@@ -12,6 +12,7 @@ from xtuner.v1.config import BaseAttnConfig, TransformerConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.utils import get_logger
 
+from ..linear.linear import build_linear
 from ..rms_norm import RMSNorm
 
 
@@ -152,28 +153,46 @@ class MultiLatentAttention(nn.Module):
         self.q_head_dim = self.config.qk_nope_head_dim + self.config.qk_rope_head_dim
 
         if self.q_lora_rank is None:
-            self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.q_head_dim, bias=False)
+            self.q_proj = build_linear(
+                self.hidden_size,
+                self.num_heads * self.q_head_dim,
+                bias=False,
+                float8_cfg=config.float8_cfg,
+            )
         else:
-            self.q_a_proj = nn.Linear(self.hidden_size, self.q_lora_rank, bias=self.config.qkv_bias)
+            self.q_a_proj = build_linear(
+                self.hidden_size,
+                self.q_lora_rank,
+                bias=self.config.qkv_bias,
+                float8_cfg=config.float8_cfg,
+            )
             self.q_a_layernorm = RMSNorm(self.q_lora_rank)
-            self.q_b_proj = nn.Linear(self.q_lora_rank, self.num_heads * self.q_head_dim, bias=False)
+            self.q_b_proj = build_linear(
+                self.q_lora_rank,
+                self.num_heads * self.q_head_dim,
+                bias=False,
+                float8_cfg=config.float8_cfg,
+            )
 
-        self.kv_a_proj_with_mqa = nn.Linear(
+        self.kv_a_proj_with_mqa = build_linear(
             self.hidden_size,
             self.config.kv_lora_rank + self.config.qk_rope_head_dim,
             bias=self.config.qkv_bias,
+            float8_cfg=config.float8_cfg,
         )
         self.kv_a_layernorm = RMSNorm(self.config.kv_lora_rank)
-        self.kv_b_proj = nn.Linear(
+        self.kv_b_proj = build_linear(
             self.config.kv_lora_rank,
             self.num_heads * (self.q_head_dim - self.qk_rope_head_dim + self.v_head_dim),
             bias=False,
+            float8_cfg=config.float8_cfg,
         )
 
-        self.o_proj = nn.Linear(
+        self.o_proj = build_linear(
             self.num_heads * self.v_head_dim,
             self.hidden_size,
             bias=self.config.o_bias,
+            float8_cfg=config.float8_cfg,
         )
 
         self.softmax_scale = self.q_head_dim ** (-0.5)

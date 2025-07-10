@@ -14,6 +14,7 @@ class NoAuxRouterConfig(BaseRouterConfig):
     n_group: int
     topk_group: int
     norm_topk_prob: bool
+    router_bias_update_speed: float = 0.001
 
 
 class NoAuxRouter(nn.Module, RouterProtocol):
