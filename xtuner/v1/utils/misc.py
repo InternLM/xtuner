@@ -2,6 +2,8 @@ import sys
 import threading
 from multiprocessing import resource_tracker as _mprt
 from multiprocessing import shared_memory as _mpshm
+from math import lcm
+from functools import reduce
 
 
 # https://github.com/python/cpython/issues/82300#issuecomment-2169035092
@@ -46,3 +48,22 @@ else:
                 _mpshm._posixshmem.shm_unlink(self._name)  # type: ignore[attr-defined]
                 if self._track:
                     _mprt.unregister(self._name, "shared_memory")  # type: ignore[attr-defined]
+
+
+def get_padding_length(length: int, divisors: list[int]) -> int:
+    """
+    Calculate the padding length needed to make the input length divisible by
+    divisors.
+    """
+    if not divisors:
+        raise ValueError("Divisors list cannot be empty")
+    if 0 in divisors:
+        raise ValueError("Divisors cannot contain zero")
+
+    divisors_lcm: int = reduce(lcm, divisors)
+
+    if length % divisors_lcm == 0:
+        return 0
+
+    padding = (divisors_lcm - (length % divisors_lcm)) % divisors_lcm
+    return padding
