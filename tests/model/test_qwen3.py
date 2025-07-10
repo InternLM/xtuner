@@ -100,7 +100,6 @@ class TestQwen3MoE(DistributedTestBase):
                 labels=shifted_labels,
             )
         loss = output["loss"]
-        torch.distributed.breakpoint()
         self.assertTrue(torch.allclose(loss, expected_loss.to(loss.dtype), atol=1e-2, rtol=1e-2))
 
 
