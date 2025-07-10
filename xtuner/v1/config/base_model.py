@@ -4,6 +4,8 @@ import torch
 from pydantic import BaseModel, ConfigDict, computed_field
 from typing_extensions import NotRequired
 
+from xtuner.v1.config.float8 import Float8Config
+
 
 class BaseAttnConfig(BaseModel):
     model_config = ConfigDict(title="Base attention config for xtuner", extra="allow")
@@ -43,6 +45,7 @@ class TransformerConfig(BaseModel):
         title="Base model config for xtuner",
         extra="allow",
     )
+    model_path: str | None = None
     vocab_size: int
     max_position_embeddings: int
     padding_idx: int
@@ -59,6 +62,7 @@ class TransformerConfig(BaseModel):
     chunked_loss: bool = False
     model_type: Literal["qwen"] | None = None
     generate_config: GenerateConfig | None = None
+    float8_cfg: Float8Config | None = None
 
     @computed_field
     def num_attention_heads(self) -> int:

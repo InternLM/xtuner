@@ -76,7 +76,7 @@ class PrefillingDispatchResult(TypedDict):
     hidden_states: torch.Tensor
     tokens_per_experts: torch.Tensor
     topk_weights: torch.Tensor
-    handle: NotRequired[Any]
+    handle: Any
 
 
 class PrefillingCombineResult(TypedDict):
@@ -331,6 +331,7 @@ class NaiveDispatcher(
                 tokens_per_experts=tokens_per_expert,
                 row_ids_map=row_id_maps,
                 topk_weights=pre_dispatched["topk_weights"],
+                handle=None,  # NaiveDispatcher do not need async communication.
             )
 
     @overload
