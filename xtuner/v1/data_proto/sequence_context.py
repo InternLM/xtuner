@@ -33,6 +33,27 @@ class SequenceContext:
     sequence_parallel_mesh: DeviceMesh | None = None
     block_table: torch.Tensor | None = None
     device: str = "cuda"
+    position_ids: torch.LongTensor | None = None
+
+    # internvl
+    image_flags: torch.LongTensor | None = None
+
+    # vlm model
+    pixel_values: torch.FloatTensor | None = None
+    inputs_embeds: torch.FloatTensor | None = None
+
+    def __post_init__(self):
+        if self.position_ids is None:
+            seq_lens_k = self.cu_seq_lens_k[1:] - self.cu_seq_lens_k[:-1]
+            seq_lens_q = self.cu_seq_lens_q[1:] - self.cu_seq_lens_q[:-1]
+
+            _position_ids = [torch.arange(k - q, k) for q, k in zip(seq_lens_q, seq_lens_k)]
+            position_ids = torch.cat(_position_ids).unsqueeze(0).to(self.device)
+
+            if self.sequence_parallel_mesh is not None:
+                position_ids = split_for_sequence_parallel(position_ids, dim=1, sp_mesh=self.sequence_parallel_mesh)
+
+            self.position_ids = position_ids
 
     @classmethod
     def from_input_ids(
@@ -141,18 +162,6 @@ class SequenceContext:
             mask[..., -self.num_padding :] = False
         return mask
 
-    @property
-    def position_ids(self) -> torch.LongTensor:
-        seq_lens_k = self.cu_seq_lens_k[1:] - self.cu_seq_lens_k[:-1]
-        seq_lens_q = self.cu_seq_lens_q[1:] - self.cu_seq_lens_q[:-1]
-
-        _position_ids = [torch.arange(k - q, k) for q, k in zip(seq_lens_q, seq_lens_k)]  # type: ignore
-        position_ids = cast(torch.LongTensor, torch.cat(_position_ids).unsqueeze(0).to(self.device))
-
-        if self.sequence_parallel_mesh is not None:
-            position_ids = split_for_sequence_parallel(position_ids, dim=1, sp_mesh=self.sequence_parallel_mesh)
-
-        return position_ids
 
     @property
     def seq_lens_q(self) -> torch.LongTensor:

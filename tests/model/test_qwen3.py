@@ -19,7 +19,7 @@ class TestQwen3MoE(DistributedTestBase):
     @parametrize.parametrize(
         "device,dispatcher,ep_size",
         [
-            ("cuda", "deepep", 8,),
+            ("cuda", "deepep", 8),
             ("cuda", "all2all", 8),
             ("cuda", None, 1),
         ],
