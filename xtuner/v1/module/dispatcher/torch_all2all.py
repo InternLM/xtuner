@@ -2,7 +2,6 @@ from typing import Literal
 
 import torch
 import torch.distributed as dist
-from mmengine.utils import is_installed
 from torch.distributed._functional_collectives import all_to_all_single_autograd
 from typing_extensions import overload, override
 
@@ -85,8 +84,6 @@ class TorchAll2AllDispatcher(
         process_group: torch.distributed.ProcessGroup,
         config: MoEConfig,
     ):
-        if not is_installed("deep_ep"):
-            raise RuntimeError("`TorchAll2All` is not installed!")
         super().__init__(
             process_group=process_group,
             config=config,
