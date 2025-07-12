@@ -277,6 +277,10 @@ For more examples, please see [chat.md](./docs/en/user_guides/chat.md).
 
 - We recommend using [OpenCompass](https://github.com/InternLM/opencompass), a comprehensive and systematic LLM evaluation library, which currently supports 50+ datasets with about 300,000 questions.
 
+### Data Preparation
+
+- You can use [GraphGen](https://github.com/open-sciencelab/GraphGen) to create synthetic data for fine-tuning.
+
 ## 🤝 Contributing
 
 We appreciate all contributions to XTuner. Please refer to [CONTRIBUTING.md](.github/CONTRIBUTING.md) for the contributing guideline.
