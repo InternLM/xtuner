@@ -162,7 +162,6 @@ class SequenceContext:
             mask[..., -self.num_padding :] = False
         return mask
 
-
     @property
     def seq_lens_q(self) -> torch.LongTensor:
         return self.cu_seq_lens_q[1:] - self.cu_seq_lens_q[:-1]  # type: ignore

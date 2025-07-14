@@ -41,6 +41,7 @@ logger = logging.get_logger(__name__)
 
 class FlashAttention(nn.Module):
     """Implement the scaled dot product attention with softmax.
+
     Arguments
     ---------
         softmax_scale: The temperature to use for the softmax attention.
@@ -58,6 +59,7 @@ class FlashAttention(nn.Module):
     def forward(self, qkv, key_padding_mask=None, causal=False, cu_seqlens=None,
                 max_s=None, need_weights=False):
         """Implements the multihead softmax attention.
+
         Arguments
         ---------
             qkv: The tensor containing the query, key, and value. (B, S, 3, H, D) if key_padding_mask is None
@@ -106,6 +108,7 @@ class FlashAttention(nn.Module):
 
 class FlashAttention3(nn.Module):
     """Implement the scaled dot product attention with softmax.
+
     Arguments
     ---------
         softmax_scale: The temperature to use for the softmax attention.
@@ -126,6 +129,7 @@ class FlashAttention3(nn.Module):
     def forward(self, qkv, key_padding_mask=None, causal=False, cu_seqlens=None,
                 max_s=None, need_weights=False):
         """Implements the multihead softmax attention.
+
         Arguments
         ---------
             qkv: The tensor containing the query, key, and value. (B, S, 3, H, D) if key_padding_mask is None
@@ -269,7 +273,7 @@ class InternVisionEmbeddings(nn.Module):
         else:
             from torch.distributed._tensor import DTensor
             assert not isinstance(self.position_embedding, DTensor), (
-                "`interpolate` dosn't support DTensor operations. If you are training "
+                "`interpolate` doesn't support DTensor operations. If you are training "
                 "internvl using xtuner tp > 1, please ensure the input pixel values "
                 "are correctly preprocessed, so that the embedding shape matches the "
                 "position embedding shape to avoid calling `interpolate`"
@@ -283,7 +287,7 @@ class InternVisionEmbeddings(nn.Module):
 
 
 class InternAttention(nn.Module):
-    """Multi-headed attention from 'Attention Is All You Need' paper"""
+    """Multi-headed attention from 'Attention Is All You Need' paper."""
 
     def __init__(self, config: InternVisionConfig):
         super().__init__()
@@ -416,9 +420,8 @@ class InternVisionEncoderLayer(nn.Module):
 
 
 class InternVisionEncoder(nn.Module):
-    """
-    Transformer encoder consisting of `config.num_hidden_layers` self attention layers. Each layer is a
-    [`InternEncoderLayer`].
+    """Transformer encoder consisting of `config.num_hidden_layers` self
+    attention layers. Each layer is a [`InternEncoderLayer`].
 
     Args:
         config (`InternConfig`):
@@ -504,7 +507,7 @@ class InternVisionModel(PreTrainedModel):
         pos_emb = torch.cat([cls_emb, pos_emb], dim=1)
         self.embeddings.position_embedding = nn.Parameter(pos_emb)
         self.embeddings.image_size = new_size
-        logger.info('Resized position embeddings from {} to {}'.format(old_size, new_size))
+        logger.info(f'Resized position embeddings from {old_size} to {new_size}')
 
     def get_input_embeddings(self):
         return self.embeddings

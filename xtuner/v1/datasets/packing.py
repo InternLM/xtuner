@@ -1,17 +1,19 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-import random
-from datasets import concatenate_datasets
-from torch.utils.data import ConcatDataset
-import os
-import numpy as np
-from datasets import Dataset
-from concurrent.futures import ProcessPoolExecutor
 import multiprocessing
-from multiprocessing import shared_memory
+import os
+import random
+from concurrent.futures import ProcessPoolExecutor
 from functools import partial
-from tqdm import tqdm
+from multiprocessing import shared_memory
+
+import numpy as np
 import torch
+from datasets import Dataset, concatenate_datasets
+from torch.utils.data import ConcatDataset
+from tqdm import tqdm
+
 from xtuner.v1.utils import get_logger
+
 
 logger = get_logger()
 
@@ -39,7 +41,7 @@ class SoftPackDataset(torch.utils.data.Dataset):
 
     def get_pack_infos(self, dataset, dataset_id, num_tokens):
         # _ori_lens = dataset['num_tokens']
-        inds = [i for i in range(len(dataset))]
+        inds = list(range(len(dataset)))
         if self.seed is not None:
             torch.manual_seed(self.seed)
             random.seed(self.seed)
@@ -106,9 +108,18 @@ def closest_sum_indices(buffer, value):
     return closest_indices
 
 
-def get_pack_chunk_infos(inds, dataset_id, target, flash_attn_block_size, pack_len_type,
-                         pack_extra_buffer_size, num_tokens=None, shm_name=None, shape=None, dtype=None):
-
+def get_pack_chunk_infos(
+    inds,
+    dataset_id,
+    target,
+    flash_attn_block_size,
+    pack_len_type,
+    pack_extra_buffer_size,
+    num_tokens=None,
+    shm_name=None,
+    shape=None,
+    dtype=None,
+):
     if num_tokens is None:
         existing_shm = shared_memory.SharedMemory(name=shm_name)
         num_tokens = np.ndarray(shape, dtype=dtype, buffer=existing_shm.buf)
@@ -151,10 +162,7 @@ def get_pack_chunk_infos(inds, dataset_id, target, flash_attn_block_size, pack_l
                             indices_to_remove.append(closest_inds + len(inds) - len(buffer_index))
                             item_buffer.append(buffer_index[closest_inds])
                             length_buffer.append(num_tokens[buffer_index[closest_inds]])
-                            num_patch += (
-                                             round(num_tokens[
-                                                       buffer_index[closest_inds]] / flash_attn_block_size)
-                                         ) ** 2
+                            num_patch += (round(num_tokens[buffer_index[closest_inds]] / flash_attn_block_size)) ** 2
                             longest = max(longest, num_tokens[buffer_index[closest_inds]])
 
                         indices_to_remove = sorted(indices_to_remove, reverse=True)
@@ -192,24 +200,31 @@ def get_pack_chunk_infos(inds, dataset_id, target, flash_attn_block_size, pack_l
 
 class ExpandSoftPackDataset(SoftPackDataset):
     def __init__(
-            self, *args, pack_len_type="total_block", flash_attn_block_size=128, pack_extra_buffer_size=1000, **kwargs
+        self, *args, pack_len_type="total_block", flash_attn_block_size=128, pack_extra_buffer_size=1000, **kwargs
     ):
         self.pack_len_type = pack_len_type
         assert self.pack_len_type in ["total_block", "max_block"], f"Invalid pack_len_type: {self.pack_len_type}"
         self.flash_attn_block_size = flash_attn_block_size
         self.pack_extra_buffer_size = pack_extra_buffer_size
         self.pack_workers = int(os.environ.get("XTUNER_PACK_WORKERS", 1))
-        logger.info(f'Using {self.pack_workers} pack workers for packing datasets.')
+        logger.info(f"Using {self.pack_workers} pack workers for packing datasets.")
         super().__init__(*args, **kwargs)
 
     def get_pack_infos(self, dataset, dataset_id, num_tokens):
         inds = torch.randperm(len(dataset)).tolist()
         if self.pack_workers <= 1:
-            pack_infos = get_pack_chunk_infos(inds, dataset_id, self.target, self.flash_attn_block_size,
-                                              self.pack_len_type, self.pack_extra_buffer_size, num_tokens)
+            pack_infos = get_pack_chunk_infos(
+                inds,
+                dataset_id,
+                self.target,
+                self.flash_attn_block_size,
+                self.pack_len_type,
+                self.pack_extra_buffer_size,
+                num_tokens,
+            )
         else:
             chunk_size = (len(inds) + self.pack_workers - 1) // self.pack_workers
-            chunks_inds = [inds[i:i + chunk_size] for i in range(0, len(inds), chunk_size)]
+            chunks_inds = [inds[i : i + chunk_size] for i in range(0, len(inds), chunk_size)]
 
             shm = shared_memory.SharedMemory(create=True, size=num_tokens.nbytes)
             shm_array = np.ndarray(num_tokens.shape, dtype=num_tokens.dtype, buffer=shm.buf)
@@ -225,7 +240,7 @@ class ExpandSoftPackDataset(SoftPackDataset):
                 pack_extra_buffer_size=self.pack_extra_buffer_size,
                 shm_name=shm.name,
                 shape=num_tokens.shape,
-                dtype=num_tokens.dtype
+                dtype=num_tokens.dtype,
             )
             with ProcessPoolExecutor(max_workers=self.pack_workers, mp_context=mp_context) as executor:
                 results = list(tqdm(executor.map(process_chunk_with_args, chunks_inds)))

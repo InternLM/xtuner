@@ -1,19 +1,23 @@
 from typing import List, cast
+
 import torch
+import torch.distributed as dist
+import torch.distributed.nn.functional as distF
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
-from .configuration_internvl_chat import InternVLChatConfig
-from ..moe.qwen3 import Qwen3MoE
-from .modeling_intern_vit import InternVisionModel
-from .configuration_intern_vit import InternVisionConfig
+
 from xtuner.v1.config.base_model import MoEModelOutputs
-from xtuner.v1.utils import HFCheckpointLoader, get_logger, get_padding_length
-from xtuner.v1.ops.comm import split_for_sequence_parallel
-import torch.distributed.nn.functional as distF
-import torch.distributed as dist
+from xtuner.v1.model.moe.moe import MoEConfig, SequenceContext
 from xtuner.v1.module.attention import MHAConfig
 from xtuner.v1.module.router import GreedyRouterConfig
-from xtuner.v1.model.moe.moe import MoEConfig, SequenceContext
+from xtuner.v1.ops.comm import split_for_sequence_parallel
+from xtuner.v1.utils import HFCheckpointLoader, get_logger, get_padding_length
+
+from ..moe.qwen3 import Qwen3MoE
+from .configuration_intern_vit import InternVisionConfig
+from .configuration_internvl_chat import InternVLChatConfig
+from .modeling_intern_vit import InternVisionModel
+
 
 logger = get_logger()
 
@@ -25,17 +29,15 @@ def pixel_shuffle(x, scale_factor=0.5):
     # N, W, H * scale, C // scale --> N, H * scale, W, C // scale
     x = x.permute(0, 2, 1, 3).contiguous()
     # N, H * scale, W, C // scale --> N, H * scale, W * scale, C // (scale ** 2)
-    x = x.view(n, int(h * scale_factor), int(w * scale_factor),
-               int(c / (scale_factor * scale_factor)))
+    x = x.view(n, int(h * scale_factor), int(w * scale_factor), int(c / (scale_factor * scale_factor)))
     x = x.permute(0, 2, 1, 3).contiguous()
     return x
 
 
 class InternVLChatModel(nn.Module):
-
     # TODO: No distinction between dense and moe models
     def __init__(self, config: InternVLChatConfig, ep_mesh: DeviceMesh | None = None, dispatcher: str = "deepep"):
-        super(InternVLChatModel, self).__init__()
+        super().__init__()
 
         self.select_layer = config.select_layer
         self.downsample_ratio = config.downsample_ratio
@@ -52,7 +54,7 @@ class InternVLChatModel(nn.Module):
             nn.LayerNorm(vit_hidden_size * int(1 / self.downsample_ratio) ** 2),
             nn.Linear(vit_hidden_size * int(1 / self.downsample_ratio) ** 2, llm_hidden_size),
             nn.GELU(),
-            nn.Linear(llm_hidden_size, llm_hidden_size)
+            nn.Linear(llm_hidden_size, llm_hidden_size),
         )
 
         if ep_mesh is not None and ep_mesh.size() == 1:
@@ -60,14 +62,14 @@ class InternVLChatModel(nn.Module):
 
         replace_llm_config = self._replace_llm_config(llm_config, dispatcher)
 
-        if llm_config.architectures[0] == 'Qwen3MoeForCausalLM':
+        if llm_config.architectures[0] == "Qwen3MoeForCausalLM":
             self.llm_model = Qwen3MoE(replace_llm_config, ep_mesh=ep_mesh)
         else:
             raise NotImplementedError
 
         self.img_context_token_id = None
-        self._llm_prefix = 'llm_model.'
-        self._hf_llm_prefix = 'language_model.'
+        self._llm_prefix = "llm_model."
+        self._hf_llm_prefix = "language_model."
 
     def _replace_llm_config(self, llm_config, dispatcher):
         router_config = GreedyRouterConfig(
@@ -79,7 +81,7 @@ class InternVLChatModel(nn.Module):
             num_attention_heads=llm_config.num_attention_heads,
             num_key_value_heads=llm_config.num_key_value_heads,
             head_dim=llm_config.head_dim,
-            qk_norm=True
+            qk_norm=True,
         )
         config = MoEConfig(
             vocab_size=llm_config.vocab_size,
@@ -108,7 +110,7 @@ class InternVLChatModel(nn.Module):
 
     def to_hf_key_list(self, key: str) -> str | List[str]:
         if key.startswith(self._llm_prefix):
-            hf_keys = self.llm_model.to_hf_key_list(key[len(self._llm_prefix):])
+            hf_keys = self.llm_model.to_hf_key_list(key[len(self._llm_prefix) :])
             if not isinstance(hf_keys, list):
                 hf_keys = [hf_keys]
             for i, hf_key in enumerate(hf_keys):
@@ -163,14 +165,12 @@ class InternVLChatModel(nn.Module):
     def extract_feature(self, pixel_values):
         if self.select_layer == -1:
             vit_embeds = self.vision_model(
-                pixel_values=pixel_values,
-                output_hidden_states=False,
-                return_dict=True).last_hidden_state
+                pixel_values=pixel_values, output_hidden_states=False, return_dict=True
+            ).last_hidden_state
         else:
             vit_embeds = self.vision_model(
-                pixel_values=pixel_values,
-                output_hidden_states=True,
-                return_dict=True).hidden_states[self.select_layer]
+                pixel_values=pixel_values, output_hidden_states=True, return_dict=True
+            ).hidden_states[self.select_layer]
         vit_embeds = vit_embeds[:, 1:, :]
 
         h = w = int(vit_embeds.shape[1] ** 0.5)
@@ -181,13 +181,12 @@ class InternVLChatModel(nn.Module):
         return vit_embeds
 
     def forward(
-            self,
-            seq_ctx: SequenceContext,
-            labels: torch.LongTensor,
-            return_router_results: bool = False,
-            return_hidden_states: bool = False,
+        self,
+        seq_ctx: SequenceContext,
+        labels: torch.LongTensor,
+        return_router_results: bool = False,
+        return_hidden_states: bool = False,
     ) -> MoEModelOutputs:
-
         input_ids = seq_ctx.input_ids
         pixel_values = seq_ctx.pixel_values
         image_flags = seq_ctx.image_flags
@@ -206,10 +205,14 @@ class InternVLChatModel(nn.Module):
                 divisors = [sequence_parallel_mesh.size()]
                 pad_size = get_padding_length(vit_batch_size, divisors)
                 if pad_size != 0:
-                    pixel_values = torch.cat([pixel_values, # type: ignore
-                                              pixel_values[0:1].repeat(pad_size, *[1] * (pixel_values.dim() - 1))],
-                                             dim=0)
-                pixel_values = pixel_values.chunk(sequence_parallel_mesh.size(), dim=0)[ # type: ignore
+                    pixel_values = torch.cat(
+                        [
+                            pixel_values,  # type: ignore
+                            pixel_values[0:1].repeat(pad_size, *[1] * (pixel_values.dim() - 1)),
+                        ],
+                        dim=0,
+                    )
+                pixel_values = pixel_values.chunk(sequence_parallel_mesh.size(), dim=0)[  # type: ignore
                     sequence_parallel_mesh.get_local_rank()
                 ]
 
@@ -227,7 +230,7 @@ class InternVLChatModel(nn.Module):
 
                 input_ids_list = [torch.empty_like(input_ids) for _ in range(sequence_parallel_mesh.size())]
                 dist.all_gather(input_ids_list, input_ids, group=sequence_parallel_mesh.get_group())
-                input_ids = torch.cat(input_ids_list, dim=1) # type: ignore
+                input_ids = torch.cat(input_ids_list, dim=1)  # type: ignore
 
             B, N, C = inputs_embeds.shape
             inputs_embeds = inputs_embeds.reshape(B * N, C)
@@ -240,8 +243,10 @@ class InternVLChatModel(nn.Module):
                 inputs_embeds[selected] = inputs_embeds[selected] * 0.0 + vit_embeds.reshape(-1, C)
             except Exception as e:
                 vit_embeds = vit_embeds.reshape(-1, C)
-                print(f'warning: {e}, inputs_embeds[selected].shape={inputs_embeds[selected].shape}, '
-                      f'vit_embeds.shape={vit_embeds.shape}')
+                print(
+                    f"warning: {e}, inputs_embeds[selected].shape={inputs_embeds[selected].shape}, "
+                    f"vit_embeds.shape={vit_embeds.shape}"
+                )
                 inputs_embeds[selected] = inputs_embeds[selected] * 0.0 + vit_embeds.sum() * 0
 
             inputs_embeds = inputs_embeds.reshape(B, N, C)
@@ -263,6 +268,6 @@ class InternVLChatModel(nn.Module):
             seq_ctx,
             labels=labels,
             return_router_results=return_router_results,
-            return_hidden_states=return_hidden_states
+            return_hidden_states=return_hidden_states,
         )
         return outputs

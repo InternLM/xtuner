@@ -5,18 +5,19 @@
 # --------------------------------------------------------
 
 import copy
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Optional
 
 from transformers.configuration_utils import PretrainedConfig
 from transformers.utils import logging
 
 from .configuration_intern_vit import InternVisionConfig
 
+
 logger = logging.get_logger(__name__)
 
 
 class InternVLChatConfig(PretrainedConfig):
-    model_type = 'internvl_chat'
+    model_type = "internvl_chat"
     is_composition = True
 
     def __init__(
@@ -38,29 +39,33 @@ class InternVLChatConfig(PretrainedConfig):
     ):
         super().__init__(**kwargs)
 
-        assert 'architectures' in llm_config, "Should specify architecture in llm_config"  # type: ignore
+        assert "architectures" in llm_config, "Should specify architecture in llm_config"  # type: ignore
 
         if isinstance(vision_config, dict):
             self.vision_config = InternVisionConfig(**vision_config)
         else:
-            self.vision_config = vision_config # type: ignore
+            self.vision_config = vision_config  # type: ignore
 
         if isinstance(llm_config, dict):
-            architecture: str = llm_config['architectures'][0]
-            if architecture == 'LlamaForCausalLM':
+            architecture: str = llm_config["architectures"][0]
+            if architecture == "LlamaForCausalLM":
                 from transformers import LlamaConfig
+
                 self.llm_config = LlamaConfig(**llm_config)
-            elif architecture == 'Qwen2ForCausalLM':
+            elif architecture == "Qwen2ForCausalLM":
                 from transformers import Qwen2Config
+
                 self.llm_config = Qwen2Config(**llm_config)
-            elif architecture == 'Qwen3MoeForCausalLM':
+            elif architecture == "Qwen3MoeForCausalLM":
                 from transformers import Qwen3MoeConfig
+
                 self.llm_config = Qwen3MoeConfig(**llm_config)
-            elif architecture == 'Qwen3ForCausalLM':
+            elif architecture == "Qwen3ForCausalLM":
                 from transformers import Qwen3Config
+
                 self.llm_config = Qwen3Config(**llm_config)
             else:
-                raise ValueError('Unsupported architecture: {}'.format(architecture))
+                raise ValueError(f"Unsupported architecture: {architecture}")
         else:
             self.llm_config = llm_config
 
@@ -77,32 +82,32 @@ class InternVLChatConfig(PretrainedConfig):
         self.max_dynamic_patch = max_dynamic_patch
         self.tie_word_embeddings = self.llm_config.tie_word_embeddings
 
-        logger.info(f'vision_select_layer: {self.select_layer}')
-        logger.info(f'ps_version: {self.ps_version}')
-        logger.info(f'min_dynamic_patch: {self.min_dynamic_patch}')
-        logger.info(f'max_dynamic_patch: {self.max_dynamic_patch}')
+        logger.info(f"vision_select_layer: {self.select_layer}")
+        logger.info(f"ps_version: {self.ps_version}")
+        logger.info(f"min_dynamic_patch: {self.min_dynamic_patch}")
+        logger.info(f"max_dynamic_patch: {self.max_dynamic_patch}")
 
     def to_dict(self):
-        """
-        Serializes this instance to a Python dictionary. Override the default [`~PretrainedConfig.to_dict`].
+        """Serializes this instance to a Python dictionary. Override the
+        default [`~PretrainedConfig.to_dict`].
 
         Returns:
             `Dict[str, any]`: Dictionary of all the attributes that make up this configuration instance,
         """
         output = copy.deepcopy(self.__dict__)
-        output['vision_config'] = self.vision_config.to_dict()
-        output['llm_config'] = self.llm_config.to_dict()
-        output['model_type'] = self.__class__.model_type
-        output['use_backbone_lora'] = self.use_backbone_lora
-        output['use_llm_lora'] = self.use_llm_lora
-        output['select_layer'] = self.select_layer
-        output['force_image_size'] = self.force_image_size
-        output['downsample_ratio'] = self.downsample_ratio
-        output['template'] = self.template
-        output['dynamic_image_size'] = self.dynamic_image_size
-        output['use_thumbnail'] = self.use_thumbnail
-        output['ps_version'] = self.ps_version
-        output['min_dynamic_patch'] = self.min_dynamic_patch
-        output['max_dynamic_patch'] = self.max_dynamic_patch
+        output["vision_config"] = self.vision_config.to_dict()
+        output["llm_config"] = self.llm_config.to_dict()
+        output["model_type"] = self.__class__.model_type
+        output["use_backbone_lora"] = self.use_backbone_lora
+        output["use_llm_lora"] = self.use_llm_lora
+        output["select_layer"] = self.select_layer
+        output["force_image_size"] = self.force_image_size
+        output["downsample_ratio"] = self.downsample_ratio
+        output["template"] = self.template
+        output["dynamic_image_size"] = self.dynamic_image_size
+        output["use_thumbnail"] = self.use_thumbnail
+        output["ps_version"] = self.ps_version
+        output["min_dynamic_patch"] = self.min_dynamic_patch
+        output["max_dynamic_patch"] = self.max_dynamic_patch
 
         return output
