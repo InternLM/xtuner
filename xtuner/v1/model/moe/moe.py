@@ -417,7 +417,7 @@ class MoE(nn.Module):
     def to_hf_key_list(self, key: str) -> str | List[str]:
         raise NotImplementedError()
 
-    def from_hf(self, hf_path: str, prefix: str = '', device: torch.device | None = None, strict=True):
+    def from_hf(self, hf_path: str, prefix: str = "", device: torch.device | None = None, strict=True):
         hf_loader = HFCheckpointLoader(hf_path)
 
         if device is None:
@@ -448,7 +448,7 @@ class MoE(nn.Module):
                     start_idx = ep_rank * n_experts_per_rank
                     end_idx = start_idx + n_experts_per_rank
                     for idx in range(start_idx, end_idx):
-                        hf_key = prefix+hf_keys[idx]
+                        hf_key = prefix + hf_keys[idx]
                         _value = hf_loader.load(hf_key).to(device)
                         if _value is None:
                             not_loaded.append(f"{name}")
@@ -464,9 +464,9 @@ class MoE(nn.Module):
                         )
                         continue
                     value.copy_(hf_value)
-                    loaded.extend([prefix+hf_key for hf_key in hf_keys])
+                    loaded.extend([prefix + hf_key for hf_key in hf_keys])
                 else:
-                    hf_keys = prefix+hf_keys
+                    hf_keys = prefix + hf_keys
                     hf_value = hf_loader.load(hf_keys)
                     if hf_value is None:
                         not_loaded.append(f"{name}")

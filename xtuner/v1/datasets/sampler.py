@@ -40,13 +40,13 @@ class ParallelSampler(Sampler):
     """
 
     def __init__(
-            self,
-            dataset: Sized,
-            dp_mesh: DeviceMesh,
-            global_batch_size: int,
-            shuffle: bool = True,
-            seed: Optional[int] = None,
-            round_up: bool = True,
+        self,
+        dataset: Sized,
+        dp_mesh: DeviceMesh,
+        global_batch_size: int,
+        shuffle: bool = True,
+        seed: Optional[int] = None,
+        round_up: bool = True,
     ) -> None:
         super().__init__()
         rank = dp_mesh.get_local_rank()
@@ -67,11 +67,7 @@ class ParallelSampler(Sampler):
         self.round_up = round_up
 
         if self.round_up:
-            self.num_samples = (
-                    math.ceil(len(self.dataset) / global_batch_size)
-                    * global_batch_size
-                    // world_size
-            )
+            self.num_samples = math.ceil(len(self.dataset) / global_batch_size) * global_batch_size // world_size
             self.total_size = self.num_samples * self.world_size
         else:
             self.num_samples = math.ceil((len(self.dataset) - rank) / world_size)
@@ -89,14 +85,12 @@ class ParallelSampler(Sampler):
 
         # add extra samples to make it evenly divisible
         if self.round_up:
-            indices = (indices * int(self.total_size / len(indices) + 1))[
-                      : self.total_size
-                      ]
+            indices = (indices * int(self.total_size / len(indices) + 1))[: self.total_size]
 
         # subsample
-        indices = indices[self.rank: self.total_size: self.world_size]
+        indices = indices[self.rank : self.total_size : self.world_size]
 
-        return iter(indices[self.step:])
+        return iter(indices[self.step :])
 
     def __len__(self) -> int:
         """The number of samples in this rank."""
@@ -123,16 +117,11 @@ def get_length_grouped_indices(max_lengths, group_batch_size, dp_size, seed=None
 
     assert all(leng != 0 for leng in max_lengths), "Should not have zero length."
     indices = torch.randperm(len(max_lengths))
-    megabatches = [
-        indices[i: i + group_batch_size].tolist()
-        for i in range(0, len(max_lengths), group_batch_size)
-    ]
+    megabatches = [indices[i : i + group_batch_size].tolist() for i in range(0, len(max_lengths), group_batch_size)]
     output = []
     for megabatch in megabatches:
         megabatch = sorted(megabatch, key=lambda i: max_lengths[i], reverse=True)
-        grouped_megabatch = [
-            megabatch[i: i + dp_size] for i in range(0, len(megabatch), dp_size)
-        ]
+        grouped_megabatch = [megabatch[i : i + dp_size] for i in range(0, len(megabatch), dp_size)]
         random.shuffle(grouped_megabatch)
         for group in grouped_megabatch:
             output.extend(group)
@@ -142,14 +131,14 @@ def get_length_grouped_indices(max_lengths, group_batch_size, dp_size, seed=None
 
 class LengthGroupedSampler(Sampler):
     def __init__(
-            self,
-            dataset: Sized,
-            dp_mesh: DeviceMesh,
-            global_batch_size: int,
-            length_attr: str = "longest",
-            mega_batch_mult: Optional[int] = None,
-            seed: Optional[int] = None,
-            round_up: bool = True,
+        self,
+        dataset: Sized,
+        dp_mesh: DeviceMesh,
+        global_batch_size: int,
+        length_attr: str = "longest",
+        mega_batch_mult: Optional[int] = None,
+        seed: Optional[int] = None,
+        round_up: bool = True,
     ) -> None:
         super().__init__()
         rank = dp_mesh.get_local_rank()
@@ -167,11 +156,7 @@ class LengthGroupedSampler(Sampler):
         self.round_up = round_up
 
         if self.round_up:
-            self.num_samples = (
-                    math.ceil(len(self.dataset) / global_batch_size)
-                    * global_batch_size
-                    // world_size
-            )
+            self.num_samples = math.ceil(len(self.dataset) / global_batch_size) * global_batch_size // world_size
             self.total_size = self.num_samples * self.world_size
         else:
             self.num_samples = math.ceil((len(self.dataset) - rank) / world_size)
@@ -215,14 +200,12 @@ class LengthGroupedSampler(Sampler):
         assert len(set(indices)) == len(indices)
         # add extra samples to make it evenly divisible
         if self.round_up:
-            indices = (indices * int(self.total_size / len(indices) + 1))[
-                      : self.total_size
-                      ]
+            indices = (indices * int(self.total_size / len(indices) + 1))[: self.total_size]
         # subsample
         assert len(indices) == self.total_size
-        indices = indices[self.rank: self.total_size: self.world_size]
+        indices = indices[self.rank : self.total_size : self.world_size]
         assert len(indices) == self.num_samples
-        return iter(indices[self.step:])
+        return iter(indices[self.step :])
 
     def __len__(self) -> int:
         """The number of samples in this rank."""

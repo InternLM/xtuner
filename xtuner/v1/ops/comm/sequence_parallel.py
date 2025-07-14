@@ -21,8 +21,7 @@ def split_for_sequence_parallel(input, dim: int, sp_mesh):
     rank = dist.get_rank(sp_group)
     dim_size = input.size(dim)
     assert dim_size % sp_size == 0, (
-        f"The dimension to split ({dim_size}) is not a multiple of "
-        f"sp size ({sp_size}), cannot split tensor evenly"
+        f"The dimension to split ({dim_size}) is not a multiple of sp size ({sp_size}), cannot split tensor evenly"
     )
 
     tensor_list = torch.split(input, dim_size // sp_size, dim=dim)

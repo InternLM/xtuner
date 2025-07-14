@@ -1,9 +1,9 @@
 import sys
 import threading
+from functools import reduce
+from math import lcm
 from multiprocessing import resource_tracker as _mprt
 from multiprocessing import shared_memory as _mpshm
-from math import lcm
-from functools import reduce
 
 
 # https://github.com/python/cpython/issues/82300#issuecomment-2169035092
@@ -51,10 +51,8 @@ else:
 
 
 def get_padding_length(length: int, divisors: list[int]) -> int:
-    """
-    Calculate the padding length needed to make the input length divisible by
-    divisors.
-    """
+    """Calculate the padding length needed to make the input length divisible
+    by divisors."""
     if not divisors:
         raise ValueError("Divisors list cannot be empty")
     if 0 in divisors:
