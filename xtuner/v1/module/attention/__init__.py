@@ -25,8 +25,6 @@ class AttentionProtocol(Protocol):
         hidden_states: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         seq_ctx: SequenceContext,
-        past_key_values: list[list[torch.Tensor]] | None = None,
-        state: ForwardState = ForwardState.TRAINING,
     ) -> torch.Tensor:
         """Forward pass of the attention module."""
         ...
@@ -40,6 +38,28 @@ class AttentionProtocol(Protocol):
         state: ForwardState = ForwardState.TRAINING,
     ) -> torch.Tensor:
         """Forward pass of the attention module."""
+        ...
+
+    def prefilling(
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor],
+        seq_ctx: SequenceContext,
+        past_key_values: list[list[torch.Tensor]],
+    ) -> torch.Tensor: ...
+
+    def decoding(
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor],
+        seq_ctx: SequenceContext,
+        past_key_values: list[list[torch.Tensor]],
+    ) -> torch.Tensor: ...
+
+    def build_kv_cache(
+        self, max_batch_size: int | None = None, max_length: int | None = None, block_size: int | None = None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Shape of the key-value cache."""
         ...
 
 

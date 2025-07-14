@@ -21,6 +21,14 @@ class BaseRouterConfig(BaseModel):
     norm_topk_prob: bool
 
 
+class GenerateConfig(BaseModel):
+    max_batch_size: int = 32
+    max_prefill_batch: int = 16
+    max_length: int = 2048
+    block_size: int = 128
+    dtype: Literal["bf16", "fp8"] = "bf16"
+
+
 class TransformerConfig(BaseModel):
     """XTuner follows the principle that all modules are constructed from the
     top-level model config, which inevitably leads to lower-level modules
@@ -50,6 +58,7 @@ class TransformerConfig(BaseModel):
     training_dtype: Literal["bf16", "fp8"] = "bf16"
     chunked_loss: bool = False
     model_type: Literal["qwen"] | None = None
+    generate_config: GenerateConfig | None = None
 
     @computed_field
     def num_attention_heads(self) -> int:

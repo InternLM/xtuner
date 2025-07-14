@@ -10,7 +10,7 @@ from torch.nn import functional as F
 
 from xtuner.v1.config import BaseAttnConfig, TransformerConfig
 from xtuner.v1.data_proto import SequenceContext
-from xtuner.v1.utils import ForwardState, get_logger
+from xtuner.v1.utils import get_logger
 
 from ..rms_norm import RMSNorm
 
@@ -136,6 +136,7 @@ class MultiLatentAttention(nn.Module):
         if not isinstance(config.attention, MLAConfig):
             raise TypeError(f"Expected config.attention to be MLAConfig, but got {type(config.attention)}")
         self.config = config.attention
+        self.model_config = config
         self.layer_idx = layer_idx
 
         self.is_causal = self.config.causal
@@ -256,11 +257,11 @@ class MultiLatentAttention(nn.Module):
 
         return attn_output
 
-    def forward_prefilling(
+    def prefilling(
         self,
         hidden_states: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
-        attn_meta: SequenceContext,
+        seq_ctx: SequenceContext,
         past_key_values: list[list[torch.Tensor]],
     ) -> torch.Tensor:
         bsz, q_len, _ = hidden_states.size()
@@ -315,8 +316,8 @@ class MultiLatentAttention(nn.Module):
         if self.q_head_dim != self.v_head_dim:
             value_states = F.pad(value_states, [0, self.q_head_dim - self.v_head_dim])
 
-        assert attn_meta.block_table is not None
-        bs = attn_meta.block_table.size(0)
+        assert seq_ctx.block_table is not None
+        bs = seq_ctx.block_table.size(0)
         from lmdeploy.pytorch.kernels import fill_kv_cache
 
         fill_kv_cache(
@@ -324,25 +325,25 @@ class MultiLatentAttention(nn.Module):
             k_pe.new_empty(bsz, q_len, 1, 0),
             past_key_values[self.layer_idx][0],
             past_key_values[self.layer_idx][1],
-            attn_meta.cu_seq_lens_q[:bs].cuda(),  # q_start_loc
-            attn_meta.seq_lens_q.cuda(),  # q_seq_length
-            kv_seq_length=attn_meta.seq_lens_k.cuda(),
-            max_q_seq_length=attn_meta.seq_lens_q.max().cuda(),
-            block_offsets=attn_meta.block_table,
-        )
+            seq_ctx.cu_seq_lens_q[:bs].cuda(),  # q_start_loc
+            seq_ctx.seq_lens_q.cuda(),  # q_seq_length
+            kv_seq_length=seq_ctx.seq_lens_k.cuda(),
+            max_q_seq_length=seq_ctx.seq_lens_q.max().cuda(),
+            block_offsets=seq_ctx.block_table,
+        )  # type: ignore[assignment]
 
-        attn_output = flash_attn_varlen_func(
+        attn_output: torch.Tensor = flash_attn_varlen_func(
             query_states.squeeze(0),
             key_states.squeeze(0),
             value_states.squeeze(0),
-            cu_seqlens_q=attn_meta.cu_seq_lens_q,
-            cu_seqlens_k=attn_meta.cu_seq_lens_k,
-            max_seqlen_q=attn_meta.max_length_q,
-            max_seqlen_k=attn_meta.max_length_k,
+            cu_seqlens_q=seq_ctx.cu_seq_lens_q,
+            cu_seqlens_k=seq_ctx.cu_seq_lens_k,
+            max_seqlen_q=seq_ctx.max_length_q,
+            max_seqlen_k=seq_ctx.max_length_k,
             dropout_p=self.config.dropout,
             softmax_scale=self.softmax_scale,
             causal=True,
-        )
+        )  # type: ignore[assignment]
 
         if self.q_head_dim != self.v_head_dim:
             attn_output = attn_output[:, :, : self.v_head_dim]
@@ -353,8 +354,7 @@ class MultiLatentAttention(nn.Module):
 
         return attn_output
 
-    # @torch.compile(fullgraph=True)
-    def forward_decoding(
+    def decoding(
         self,
         hidden_states: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
@@ -464,31 +464,92 @@ class MultiLatentAttention(nn.Module):
         hidden_states: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         seq_ctx: SequenceContext,
-        past_key_values: list[list[torch.Tensor]] | None = None,
-        state: ForwardState = ForwardState.TRAINING,
     ) -> torch.Tensor:
-        if state is ForwardState.PREFILLING:
-            assert past_key_values is not None
-            return self.forward_prefilling(
-                hidden_states=hidden_states,
-                position_embeddings=position_embeddings,
-                attn_meta=seq_ctx,
-                past_key_values=past_key_values,
-            )
-        elif state is ForwardState.DECODING:
-            assert past_key_values is not None
-            assert seq_ctx.block_table is not None
-            return self.forward_decoding(
-                hidden_states=hidden_states,
-                position_embeddings=position_embeddings,
-                attn_meta=seq_ctx,
-                past_key_values=past_key_values,
-            )
-        elif state is ForwardState.TRAINING:
-            return self.forward_training(
-                hidden_states=hidden_states,
-                position_embeddings=position_embeddings,
-                attn_meta=seq_ctx,
-            )
+        bsz, q_len, _ = hidden_states.size()
+
+        if self.q_lora_rank is None:
+            q = self.q_proj(hidden_states)
         else:
-            raise NotImplementedError
+            q = self.q_b_proj(self.q_a_layernorm(self.q_a_proj(hidden_states)))
+        q = q.view(bsz, q_len, self.num_heads, self.q_head_dim).transpose(1, 2)
+        q_nope, q_pe = torch.split(q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+
+        # Flash attention requires the input to have the shape
+        # batch_size x seq_length x head_dim x hidden_dim
+        # therefore we just need to keep the original shape
+        compressed_kv = self.kv_a_proj_with_mqa(hidden_states)
+        compressed_kv, k_pe = torch.split(compressed_kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+        k_pe = k_pe.view(bsz, q_len, 1, self.qk_rope_head_dim).transpose(1, 2)
+        kv = (
+            self.kv_b_proj(self.kv_a_layernorm(compressed_kv))
+            .view(bsz, q_len, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
+            .transpose(1, 2)
+        )
+
+        k_nope, value_states = torch.split(kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+
+        cos, sin = position_embeddings
+        # cos = torch.load('cos.pth').cuda()
+        # sin = torch.load('sin.pth').cuda()
+        q_pe, k_pe = mla_apply_rotary_pos_emb(q_pe, k_pe, cos, sin)
+
+        query_states = k_pe.new_empty(bsz, self.num_heads, q_len, self.q_head_dim)
+        query_states[:, :, :, : self.qk_nope_head_dim] = q_nope
+        query_states[:, :, :, self.qk_nope_head_dim :] = q_pe
+
+        key_states = k_pe.new_empty(bsz, self.num_heads, q_len, self.q_head_dim)
+        key_states[:, :, :, : self.qk_nope_head_dim] = k_nope
+        key_states[:, :, :, self.qk_nope_head_dim :] = k_pe
+
+        if self.q_head_dim != self.v_head_dim:
+            value_states = F.pad(value_states, [0, self.q_head_dim - self.v_head_dim])
+
+        assert query_states.size(0) == 1
+        assert key_states.size(0) == 1
+        assert value_states.size(0) == 1
+        attn_output = flash_attn_varlen_func(
+            query_states.transpose(1, 2).squeeze(0),
+            key_states.transpose(1, 2).squeeze(0),
+            value_states.transpose(1, 2).squeeze(0),
+            cu_seqlens_q=seq_ctx.cu_seq_lens_q,
+            cu_seqlens_k=seq_ctx.cu_seq_lens_k,
+            max_seqlen_q=seq_ctx.max_length_q,
+            max_seqlen_k=seq_ctx.max_length_k,
+            dropout_p=self.config.dropout,
+            softmax_scale=self.softmax_scale,
+            causal=True,
+        )
+        attn_output = cast(torch.Tensor, attn_output)
+        if self.q_head_dim != self.v_head_dim:
+            attn_output = attn_output[:, :, : self.v_head_dim]
+
+        attn_output = attn_output.reshape(bsz, q_len, self.num_heads * self.v_head_dim).contiguous()
+
+        attn_output = self.o_proj(attn_output)
+
+        return attn_output
+
+    def build_kv_cache(
+        self, max_batch_size: int | None = None, max_length: int | None = None, block_size: int | None = None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        head_dim = self.kv_lora_rank + self.qk_rope_head_dim
+        num_heads = 1
+
+        generate_config = self.model_config.generate_config
+        assert generate_config is not None, "Model configuration for generation is not set."
+
+        max_length = max_length or generate_config.max_length
+        block_size = block_size or generate_config.block_size
+        max_batch_size = max_batch_size or generate_config.max_batch_size
+
+        num_blocks = min(max_batch_size, max_length // block_size * max_batch_size)
+
+        if generate_config.dtype == "bf16":
+            dtype = torch.bfloat16
+        else:
+            raise ValueError(f"Unsupported dtype: {generate_config.dtype}")
+
+        cache_k = torch.zeros(num_blocks, block_size, num_heads, head_dim, dtype=dtype, device="cuda")
+        cache_v = torch.zeros(num_blocks, block_size, num_heads, head_dim, dtype=dtype, device="cuda")
+
+        return cache_k, cache_v
