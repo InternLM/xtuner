@@ -144,6 +144,7 @@ class TorchAll2AllDispatcher(
                 tokens_per_experts=tokens_per_experts,
                 topk_weights=pre_dispatched["topk_weights"],
                 row_id_map=row_id_map,
+                handle=None,
             )
         else:
             return TorchAll2AllDecodingDispatchResult(

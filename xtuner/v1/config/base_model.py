@@ -80,6 +80,7 @@ class MoEConfig(TransformerConfig):
     first_k_dense_replace: int = 0
     hidden_factor: float = 1.0
     moe_intermediate_size: int
+    ep_size: int | None = None
     dispatcher: Literal["deepep", "all2all"] | None = None
     router: BaseRouterConfig
 

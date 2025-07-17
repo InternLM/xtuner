@@ -119,7 +119,7 @@ class TestDistributedMoE(DistributedTestBase):
             mesh_shape=(8,)
         )
 
-        parallel_model = MoE(config=parallel_config, ep_mesh=ep_mesh).to(dtype).to(device)
+        parallel_model = MoE(config=parallel_config, model_mesh=ep_mesh).to(dtype).to(device)
 
         input_ids = torch.randint(
             0, config.vocab_size, (1, 128), dtype=torch.int64, device="cuda"

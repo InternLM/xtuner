@@ -6,6 +6,7 @@ from .loader import HFCheckpointLoader
 from .logger import get_logger
 from .misc import SharedMemory, get_padding_length
 from .pad import pad_to_max_length, pad_to_multiple_of
+from .profile import profile_time_and_memory
 from .state import ForwardState
 
 
@@ -22,4 +23,5 @@ __all__ = [
     "get_torch_device_module",
     "maybe_compile",
     "is_evenly_distributed",
+    "profile_time_and_memory",
 ]

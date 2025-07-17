@@ -5,18 +5,18 @@ from xtuner.v1.config.base_model import (
     TransformerConfig,
 )
 
-from .proto import ModelProtocol
+from .base import BaseModel
 
 
-def build_model(config: TransformerConfig, device_mesh: DeviceMesh | None = None) -> ModelProtocol[TransformerConfig]:
+def build_model(config: TransformerConfig, device_mesh: DeviceMesh | None = None) -> BaseModel:
     if isinstance(config, MoEConfig):
         from .moe.moe import MoE
         from .moe.qwen3 import Qwen3MoE
 
         if config.model_type is None:
-            return MoE(config, ep_mesh=device_mesh)
+            return MoE(config)
         elif config.model_type == "qwen":
-            return Qwen3MoE(config, ep_mesh=device_mesh)
+            return Qwen3MoE(config)
         else:
             raise ValueError(f"Unsupported model type: {config.model_type}")
     else:

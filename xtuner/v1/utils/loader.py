@@ -73,25 +73,22 @@ class HFCheckpointLoader:
         else:
             raise FileNotFoundError
 
+        self._safetensor_cache: dict = {}
         self.current_file = None
         self.buffer = None
 
-    def load(self, key):
+    def load(self, key) -> torch.Tensor | None:
         if key not in self.weight_map:
             return None
 
         _file = self.weight_map[key]
 
         if self.use_safetensors:
-            if self.current_file is None:
-                self.buffer = safe_open(os.path.join(self.model_path, _file), framework="pt")
-                self.current_file = _file
-
-            if _file != self.current_file:
-                self.buffer = safe_open(os.path.join(self.model_path, _file), framework="pt")
-                self.current_file = _file
-            weight = self.buffer.get_tensor(key)
-
+            fh_cache_key = os.path.join(self.model_path, _file)
+            if fh_cache_key not in self._safetensor_cache:
+                self._safetensor_cache[fh_cache_key] = safe_open(fh_cache_key, framework="pt")
+            fh = self._safetensor_cache[fh_cache_key]
+            weight = fh.get_tensor(key)
         else:
             if self.current_file is None:
                 self.buffer = torch.load(os.path.join(self.model_path, _file))
@@ -99,7 +96,7 @@ class HFCheckpointLoader:
 
             if _file != self.current_file:
                 self.buffer = torch.load(os.path.join(self.model_path, _file))
-
-            weight = self.buffer[key]
+            # TODO: missing typehint
+            weight = self.buffer[key]  # type: ignore
 
         return weight
