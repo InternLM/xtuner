@@ -1,5 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-from typing import Mapping, Protocol, Type
+from typing import Protocol
 
 import torch
 

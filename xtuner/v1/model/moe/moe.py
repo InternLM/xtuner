@@ -1,25 +1,51 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-from typing import cast, overload
+import types
+from pathlib import Path
+from typing import cast
 
 import torch
+import torch.distributed as dist
+import torch.nn.functional as F
 from mmengine import is_installed
 from torch import nn
-from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.tensor import DTensor
+from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl
+from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
+    checkpoint_wrapper as ptd_checkpoint_wrapper,
+)
+from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
+from torch.distributed.distributed_c10d import ReduceOp
+from torch.distributed.fsdp import (
+    CPUOffloadPolicy,
+    MixedPrecisionPolicy,
+    fully_shard,
+)
+from torch.distributed.tensor import DTensor, Replicate, distribute_tensor
+from tqdm import tqdm
+from typing_extensions import overload, override
 
+from xtuner.v1.config import FSDPConfig
 from xtuner.v1.config.base_model import MoEConfig, MoEModelOutputs
 from xtuner.v1.data_proto import SequenceContext
+from xtuner.v1.model import BaseModel
 from xtuner.v1.module import RMSNorm, RotaryEmbedding
 from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayer
-from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEDecoderLayer
+from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEBlock, MoEDecoderLayer
 from xtuner.v1.module.linear.linear import _Linear
-from xtuner.v1.utils import HFCheckpointLoader, get_logger
+from xtuner.v1.utils import (
+    get_device,
+    get_logger,
+    get_torch_device_module,
+    profile_time_and_memory,
+)
+from xtuner.v1.utils.compile import maybe_compile
 
 
+DEVICE_MODULE = get_torch_device_module()
+DEVICE = get_device()
 logger = get_logger()
 
 
-class MoE(nn.Module):
+class MoE(BaseModel):
     """Transformer decoder consisting of *config.num_hidden_layers* layers.
     Each layer is a [`InternLM3DecoderLayer`]
 
@@ -27,12 +53,25 @@ class MoE(nn.Module):
         config: MoEModelConfig
     """
 
-    def __init__(self, config: MoEConfig, ep_mesh: DeviceMesh | None = None):
+    config: MoEConfig
+    ep_mesh: DeviceMesh | None = None
+
+    def __init__(self, config: MoEConfig):
         super().__init__()
-        self.ep_mesh = ep_mesh
+        if config.ep_size is not None and config.ep_size > 1:
+            world_size = dist.get_world_size()
+            self.ep_mesh = init_device_mesh(
+                DEVICE,
+                (world_size // config.ep_size, config.ep_size),
+                mesh_dim_names=("dp", "ep"),
+            )["ep"]
+        else:
+            self.ep_mesh = None
         self.config = config
+
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.lm_head = _Linear(config.hidden_size, config.vocab_size, bias=False)
+        self.config = config
 
         self.layers = self.build_layers(config)
         self.rotary_emb = self.build_rotary_embedding(config)
@@ -43,6 +82,7 @@ class MoE(nn.Module):
         self.chunked_loss = config.chunked_loss
         if self.chunked_loss:
             assert is_installed("liger_kernel"), "Liger kernel is required for chunked loss."
+        self.load_spec_mapping = self._init_load_spec()
 
     def forward(
         self,
@@ -123,13 +163,6 @@ class MoE(nn.Module):
 
         return MoEModelOutputs(**output)  # type: ignore[typeddict-item]
 
-    def get_hf_key(self, key: str) -> str:
-        raise NotImplementedError
-
-    def trainable_parameters(self):
-        params = [param for param in self.parameters() if param.requires_grad]
-        return params
-
     def build_embeddings(self, config: MoEConfig):
         return nn.Embedding(config.vocab_size, config.hidden_size, config.padding_idx)
 
@@ -147,83 +180,6 @@ class MoE(nn.Module):
     def build_rotary_embedding(self, config: MoEConfig) -> RotaryEmbedding:
         return RotaryEmbedding(config=config)
 
-    def to_hf_key_list(self, key: str) -> str | list[str]:
-        raise NotImplementedError()
-
-    def from_hf(self, hf_path: str, prefix: str = "", device: torch.device | None = None, strict=True):
-        hf_loader = HFCheckpointLoader(hf_path)
-
-        if device is None:
-            # TODO: NPU support (need `get_available_device`)
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-        ep_rank = self.ep_mesh.get_local_rank() if self.ep_mesh is not None else 0
-        ep_size = self.ep_mesh.size() if self.ep_mesh is not None else 1
-
-        cur_device = next(iter(self.parameters())).device
-        if cur_device == torch.device("meta"):
-            self.to_empty(device=device)
-            self.rotary_emb = self.build_rotary_embedding(self.config).to(device)
-
-        not_matched = []
-        not_loaded = []
-        loaded = []
-
-        with torch.no_grad():
-            for name, value in self.state_dict().items():
-                if isinstance(value, DTensor):
-                    value = value.to_local()
-                hf_keys = self.to_hf_key_list(name)
-                if isinstance(hf_keys, list):
-                    n_experts_per_rank = len(hf_keys) // ep_size
-
-                    hf_values = []
-                    start_idx = ep_rank * n_experts_per_rank
-                    end_idx = start_idx + n_experts_per_rank
-                    for idx in range(start_idx, end_idx):
-                        hf_key = prefix + hf_keys[idx]
-                        _value = hf_loader.load(hf_key).to(device)
-                        if _value is None:
-                            not_loaded.append(f"{name}")
-                            logger.warning(f"Parameter {f'{name}'} -> {hf_key} not found in HF checkpoint.")
-                            break
-                        hf_values.append(_value)
-                    hf_value = torch.cat(hf_values, dim=0)
-
-                    if hf_value.shape != value.shape:
-                        not_matched.append(f"{f'{name}'} {hf_value.shape} != {value.shape}")
-                        logger.warning(
-                            f"Parameter {f'{name}'} shape mismatch: expected {value.shape}, got {hf_value.shape}."
-                        )
-                        continue
-                    value.copy_(hf_value)
-                    loaded.extend([prefix + hf_key for hf_key in hf_keys])
-                else:
-                    hf_keys = prefix + hf_keys
-                    hf_value = hf_loader.load(hf_keys)
-                    if hf_value is None:
-                        not_loaded.append(f"{name}")
-                        logger.warning(f"Parameter {f'{name}'} -> {hf_keys} not found in HF checkpoint.")
-                        continue
-
-                    if hf_value.shape != value.shape:
-                        not_matched.append(
-                            f"Parameter {f'{name}'} -> {hf_keys}: {f'{name}'} {hf_value.shape} != {value.shape}"
-                        )
-                        logger.warning(
-                            f"Parameter {f'{name}'} shape mismatch: expected {value.shape}, got {hf_value.shape}."
-                        )
-                    value.copy_(hf_value)
-                    loaded.append(hf_keys)
-
-        missing = set(hf_loader.weight_map) - set(loaded)
-
-        if strict:
-            if not_matched:
-                raise RuntimeError(f"Some parameters from {hf_path} do not match the model: {not_matched}. ")
-            if missing:
-                raise RuntimeError(f"Missing parameters from {hf_path}: {missing}. ")
-
     # NOTE: Add this overload for inferring the return type for easier type checking and using
     @overload  # type: ignore
     def __call__(  # type: ignore
@@ -240,3 +196,259 @@ class MoE(nn.Module):
         super()._apply(fn)
         self.rotary_emb.to(torch.float32)
         return self
+
+    @override
+    def from_hf(self, hf_path: str | Path, prefix="", strict: bool = True):
+        super().from_hf(hf_path, prefix, strict)
+        self.rotary_emb = self.build_rotary_embedding(self.config)
+
+    @override
+    def fully_shard(
+        self, fsdp_config: FSDPConfig, model_prefix: str = "", hf_path: str | Path = "", strict: bool = True
+    ):
+        self.fsdp_config = fsdp_config
+        self._init_device_mesh(fsdp_config)
+
+        # The `ep_size` of `fsdp_config` will have priority over the one in the model config
+        del self.layers
+        self.layers = self.build_layers(self.config)
+
+        # Since ep size could be changed by `fsdp_config`, we need to re-initialize the load spec
+        self.load_spec_mapping = self._init_load_spec()
+
+        # Just for narrowing the type of self.fsdp_mesh and self.ep_mesh
+        assert self.fsdp_mesh is not None
+        assert self.ep_mesh is not None
+        assert self.fsdp_config is not None
+
+        if self.fsdp_config.requires_grad:
+            for module in self.modules():
+                for p_name, param in module.named_parameters(recurse=False):
+                    if param.requires_grad:
+                        param_fp32 = torch.nn.Parameter(param.to(dtype=torch.float32))
+                        setattr(module, p_name, param_fp32)
+        else:
+            for param in self.parameters():
+                param.requires_grad = False
+
+        if self.ep_mesh.size() > 1:
+            self._replicate_other_params(self)
+
+        self.rotary_emb = self.build_rotary_embedding(self.config)
+
+        self._maybe_compile_layers()
+        mp_policy = MixedPrecisionPolicy(
+            param_dtype=self.fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
+        )
+        num_recompute_layers = int(self.config.num_hidden_layers * self.fsdp_config.recompute_ratio)
+
+        for layer_idx, layer in tqdm(self.layers.items(), desc="[FSDP Sharding]"):
+            layer_idx = int(layer_idx)
+            layer.to_empty(device=DEVICE_MODULE.current_device())
+            if layer_idx < num_recompute_layers - 1:
+                layer = ptd_checkpoint_wrapper(
+                    layer,
+                    preserve_rng_state=False,
+                    checkpoint_impl=CheckpointImpl.REENTRANT,
+                )
+
+            self.layers[str(layer_idx)] = layer
+            if layer_idx >= len(self.layers) - 1:
+                reshard_after_forward = False
+            else:
+                reshard_after_forward = self.fsdp_config.reshard_after_forward
+            fully_shard(
+                layer,
+                mesh=self.fsdp_mesh,
+                mp_policy=mp_policy,
+                reshard_after_forward=reshard_after_forward,
+                offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
+            )
+
+        for layer_cur, layer_next in zip(
+            list(self.layers.values())[:-1],
+            list(self.layers.values())[1:],
+        ):
+            layer_cur.set_modules_to_forward_prefetch([layer_next])  # type: ignore
+
+        fully_shard(
+            self.embed_tokens,
+            mesh=self.fsdp_mesh,
+            mp_policy=mp_policy,
+            reshard_after_forward=self.fsdp_config.reshard_after_forward,
+            offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
+        )
+
+        fully_shard(
+            self.norm,
+            mesh=self.fsdp_mesh,
+            mp_policy=mp_policy,
+            reshard_after_forward=self.fsdp_config.reshard_after_forward,
+            offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
+        )
+
+        fully_shard(
+            self.lm_head,
+            mesh=self.fsdp_mesh,
+            mp_policy=mp_policy,
+            reshard_after_forward=self.fsdp_config.reshard_after_forward,
+            offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
+        )
+
+        fully_shard(
+            self,
+            mesh=self.fsdp_mesh,
+            mp_policy=mp_policy,
+            reshard_after_forward=self.fsdp_config.reshard_after_forward,
+            offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
+        )
+        self.set_modules_to_forward_prefetch([self.embed_tokens, self.layers["0"]])  # type: ignore
+
+        if hf_path:
+            with profile_time_and_memory("Loading HF Checkpoint"):
+                self.from_hf(hf_path, prefix=model_prefix, strict=strict)
+
+        for name, module in self.named_modules():
+            if isinstance(module, nn.Embedding):
+                module.forward = types.MethodType(self.patched_emb_forward, module)  # type: ignore
+            elif isinstance(module, RMSNorm):
+                module.forward = types.MethodType(self.patched_rms_norm_forward, module)  # type: ignore
+        return self
+
+    @torch.no_grad  # type: ignore
+    def scale_and_reduce_grad(self):
+        for name, param in self.trainable_parameters():
+            if param.grad is None:
+                continue
+
+            ep_enabled = self.ep_mesh is not None and self.ep_mesh.size() > 1
+            # Scale moe parameters
+            if ep_enabled and ".experts" in name:
+                param.grad.div_(self.ep_mesh.size())  # type: ignore
+                continue
+
+            # Reduce gradients for other parameters
+            if ep_enabled:
+                grad = param.grad.to_local() if isinstance(param.grad, DTensor) else param.grad
+                dist.all_reduce(
+                    grad.div_(self.ep_mesh.size()),  # type: ignore
+                    ReduceOp.SUM,
+                    group=self.ep_mesh.get_group(mesh_dim=0),  # type: ignore
+                )
+
+    def _init_device_mesh(self, fsdp_config: FSDPConfig):
+        self.fsdp_config = fsdp_config
+
+        device = DEVICE if not fsdp_config.cpu_offload else "cpu"
+        world_size = dist.get_world_size()
+        experts_fsdp_size = world_size // self.fsdp_config.ep_size
+
+        if self.fsdp_config.hsdp_sharding_size is None:
+            model_mesh = init_device_mesh(
+                device,
+                (experts_fsdp_size, self.fsdp_config.ep_size),
+                mesh_dim_names=(f"{self.fsdp_config.mesh_prefix}.fsdp", f"{self.fsdp_config.mesh_prefix}.ep"),
+            )
+            self.ep_mesh = model_mesh[f"{self.fsdp_config.mesh_prefix}.ep"]
+            self.fsdp_mesh = model_mesh[f"{self.fsdp_config.mesh_prefix}.fsdp"]
+        else:
+            assert self.fsdp_config.ep_size == 1, "Currently, HSDP requires expert parallel size to be 1"
+            # We can not init ep_mesh and fsdp_mesh like this.
+            # This will lead to "RuntimeError: Cannot create a submesh from a submesh."
+            # in FSDPParam.shard_mesh, as fsdp_mesh is not the root mesh. The root mesh is model_mesh.
+            # So we have to init the ep_mesh and fsdp_mesh separately.
+            # model_mesh = init_device_mesh(
+            #     device,
+            #     (
+            #         experts_fsdp_size // self.fsdp_config.hsdp_sharding_size,
+            #         self.fsdp_config.hsdp_sharding_size,
+            #         self.fsdp_config.ep_size,
+            #     ),
+            #     mesh_dim_names=(
+            #         f"{self.fsdp_config.mesh_prefix}.hsdp_replicate",
+            #         f"{self.fsdp_config.mesh_prefix}.hsdp_shard",
+            #         f"{self.fsdp_config.mesh_prefix}.ep",
+            #     ),
+            # )
+            # self.ep_mesh = model_mesh[f"{self.fsdp_config.mesh_prefix}.ep"]
+            # self.fsdp_mesh = model_mesh[
+            #     (f"{self.fsdp_config.mesh_prefix}.hsdp_replicate", f"{self.fsdp_config.mesh_prefix}.hsdp_shard")
+            # ]
+            self.ep_mesh = init_device_mesh(
+                device, (world_size, 1), mesh_dim_names=("_", f"{self.fsdp_config.mesh_prefix}.ep")
+            )[f"{self.fsdp_config.mesh_prefix}.ep"]
+            self.fsdp_mesh = init_device_mesh(
+                device,
+                (
+                    experts_fsdp_size // self.fsdp_config.hsdp_sharding_size,
+                    self.fsdp_config.hsdp_sharding_size,
+                ),
+                mesh_dim_names=(
+                    f"{self.fsdp_config.mesh_prefix}.hsdp_replicate",
+                    f"{self.fsdp_config.mesh_prefix}.hsdp_shard",
+                ),
+            )
+
+    def _replicate_other_params(self, model: nn.Module):
+        def traverse(module):
+            if isinstance(module, MoEBlock):
+                return
+            for name, param in module.named_parameters(recurse=False):
+                dist_param = nn.Parameter(distribute_tensor(param, self.ep_mesh, [Replicate()]))
+                module.register_parameter(name, dist_param)
+            for child in module.children():
+                traverse(child)
+
+        traverse(model)
+
+    def _maybe_compile_layers(self):
+        assert self.fsdp_config is not None, "FSDPConfig must be set before calling maybe_compile_layers"
+        assert self.ep_mesh is not None, "ep_mesh must be set before calling maybe_compile_layers"
+
+        if self.fsdp_config.torch_compile:
+            if self.fsdp_config.compile_targets is None:
+                if self.ep_mesh.size() > 1:
+                    # all_to_all_single_autograd in TorchAll2AllDispatcher.dispatch can not be compiled even if the fullgraph=False
+                    # ref: https://github.com/pytorch/pytorch/issues/155205
+                    # todo: decorate MoEDecoderLayer.forward with @torch.compile(fullgraph=False) when the bug is fixed
+                    # so that we do not need to remove the compile target
+                    maybe_compile.remove_compile_target(
+                        "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer.forward"
+                    )
+            else:
+                maybe_compile.clear_compile_targets()
+                for target in self.fsdp_config.compile_targets:
+                    maybe_compile.set_compile_target(target)
+        else:
+            maybe_compile.clear_compile_targets()
+
+    # TODO: Remove patch before opensource
+    @staticmethod
+    def patched_rms_norm_forward(self, input):
+        if hasattr(self, "weight"):
+            if isinstance(self.weight, DTensor):
+                w = self.weight.to_local()
+            else:
+                w = self.weight
+        else:
+            if isinstance(self.norm.weight, DTensor):
+                w = self.norm.weight.to_local()
+            else:
+                w = self.norm.weight
+        return F.rms_norm(input, w.shape, w, self.variance_epsilon)
+
+    @staticmethod
+    def patched_emb_forward(self, input):
+        if isinstance(self.weight, DTensor):
+            w = self.weight.to_local()
+        else:
+            w = self.weight
+        return F.embedding(
+            input,
+            w,
+            self.padding_idx,
+            self.max_norm,
+            self.norm_type,
+            self.scale_grad_by_freq,
+            self.sparse,
+        )

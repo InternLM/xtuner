@@ -4,7 +4,7 @@ from .moe import MoE
 
 
 class Qwen3MoE(MoE):
-    def to_hf_key_list(self, key: str) -> list[str] | str:
+    def to_hf_key_list(self, key: str) -> list[str]:
         if "layers" in key or "embed_tokens" in key:
             key = "model." + key
 
@@ -29,6 +29,6 @@ class Qwen3MoE(MoE):
             return w2_keys
 
         elif key.startswith("norm."):
-            return key.replace("norm.", "model.norm.")
+            return [key.replace("norm.", "model.norm.")]
         else:
-            return key
+            return [key]

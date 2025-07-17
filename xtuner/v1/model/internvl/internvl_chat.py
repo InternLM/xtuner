@@ -32,7 +32,7 @@ def pixel_shuffle(x, scale_factor=0.5):
 
 class InternVLChatModel(nn.Module):
     # TODO: No distinction between dense and moe models
-    def __init__(self, config: InternVLConfig, ep_mesh: DeviceMesh | None = None):
+    def __init__(self, config: InternVLChatConfig, model_mesh: DeviceMesh | None = None, dispatcher: str = "deepep"):
         super().__init__()
 
         self.select_layer = config.select_layer
@@ -53,8 +53,13 @@ class InternVLChatModel(nn.Module):
             nn.Linear(llm_hidden_size, llm_hidden_size),
         )
 
+        if model_mesh is not None and model_mesh.size() == 1:
+            dispatcher = "naive"
+
+        replace_llm_config = self._replace_llm_config(llm_config, dispatcher)
+
         if llm_config.architectures[0] == "Qwen3MoeForCausalLM":
-            self.llm_model = Qwen3MoE(llm_config, ep_mesh=ep_mesh)
+            self.llm_model = Qwen3MoE(replace_llm_config)
         else:
             raise NotImplementedError
 
@@ -75,7 +80,7 @@ class InternVLChatModel(nn.Module):
 
     def from_hf(self, hf_path: str, device: torch.device | None = None, strict=True):
         # load moe weights from HF checkpoint
-        self.llm_model.from_hf(hf_path, device=device, strict=False, prefix=self._hf_llm_prefix)
+        self.llm_model.from_hf(hf_path, device=device, strict=False, prefix=self._hf_llm_prefix)  # type: ignore
 
         # load other weights from HF checkpoint
         hf_loader = HFCheckpointLoader(hf_path)
