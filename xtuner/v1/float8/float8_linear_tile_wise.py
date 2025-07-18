@@ -199,6 +199,7 @@ class TileWiseFloat8Linear(nn.Linear):
             WeightWithDynamicTilewiseFloat8CastTensor(
                 self.weight,
                 torch.float8_e4m3fn,
+                self.ori_shape,
             )
         )
 
@@ -266,6 +267,7 @@ class TileWiseFloat8Linear(nn.Linear):
         weight = WeightWithDynamicTilewiseFloat8CastTensor(
             weight,
             torch.float8_e4m3fn,
+            self.ori_shape,
         )
         self.register_parameter("weight", nn.Parameter(weight))
 

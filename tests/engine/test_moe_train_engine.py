@@ -7,15 +7,12 @@ import copy
 import parametrize
 import torch
 import torch.distributed as dist
-from torch.distributed.device_mesh import init_device_mesh
 from torch.testing._internal.common_distributed import DistributedTestBase
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoTokenizer
 
-from xtuner.v1.model.moe.moe import MoEConfig, SequenceContext
-from xtuner.v1.model.moe.qwen3 import Qwen3MoE
-from xtuner.v1.module.attention import MHAConfig
-from xtuner.v1.module.router import GreedyRouterConfig
-from xtuner.v1.config import FSDPConfig, LRConfig, MoEConfig, MoELossConfig, OptimConfig, AdamWConfig
+from xtuner.v1.model.moe.moe import SequenceContext
+from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
+from xtuner.v1.config import FSDPConfig, LRConfig, MoELossConfig, AdamWConfig
 from xtuner.v1.engine.moe_train_engine import MoETrainEngine
 
 
@@ -33,36 +30,8 @@ class TestMoEEngine(DistributedTestBase):
     def test_moe_engine_train(self, device, ep_size, hsdp_sharding_size):
         self.create_pg(device)
 
-        router_config = GreedyRouterConfig(
-            scoring_func="softmax",
-            norm_topk_prob=True,
-            router_scaling_factor=1.0,
-        )
-        attention_config = MHAConfig(num_attention_heads=32, num_key_value_heads=4, head_dim=128, qk_norm=True)
-        moe_cfg = MoEConfig(
-            model_path=QWEN3_MOE_PATH,
-            vocab_size=151936,
-            max_position_embeddings=4096,
-            padding_idx=0,
-            num_hidden_layers=48,
-            hidden_size=2048,
-            intermediate_size=6144,
-            rms_norm_eps=1e-6,
-            rope_theta=1000000.0,
-            hidden_act="silu",
-            attention=attention_config,
-            tie_word_embeddings=False,
-            training_dtype="bf16",
-            chunked_loss=False,
-            n_routed_experts=128,
-            n_shared_experts=0,
-            num_experts_per_tok=8,
-            first_k_dense_replace=0,
-            hidden_factor=1.0,
-            moe_intermediate_size=768,
-            router=router_config,
-            model_type="qwen",
-            dispatcher="all2all",
+        moe_cfg = Qwen3MoE30BA3Config(
+            ep_size=ep_size,
         )
 
         moe_loss_cfg = MoELossConfig(
@@ -85,8 +54,10 @@ class TestMoEEngine(DistributedTestBase):
             model_cfg=moe_cfg, moe_loss_cfg=moe_loss_cfg, optim_cfg=optim_cfg, lr_cfg=lr_cfg, fsdp_cfg=fsdp_cfg
         )
 
+        engine.from_hf(hf_path=QWEN3_MOE_PATH)
+
         tok = AutoTokenizer.from_pretrained(
-            QWEN3_MOE_PATH
+            "/cpfs01/shared/llm_ddd/opencompass/models/hf_hub/models--Qwen--Qwen3-30B-A3B/snapshots/4c446470ba0aec43e22ac1128f9ffd915f338ba3/"
         )
         txt = "根据国际地球自转和参考系服务机构的数据，今年夏天是自2020年以来第六次地球自转加速。7月9日将成为有史以来最短的一天，比平时短1.3到1.6毫秒。 "
         input_ids = tok.encode(txt, return_tensors="pt").view(1, -1)
@@ -100,7 +71,8 @@ class TestMoEEngine(DistributedTestBase):
         }
         losses = []
         for _ in range(10):
-            log = engine.train_step([data_batch], intra_layer_micro_batch=1)
+            seq_ctx = SequenceContext.from_input_ids((data_batch["input_ids"],))
+            log = engine.train_step([{"seq_ctx": seq_ctx, "labels": labels}], intra_layer_micro_batch=1)
             losses.append(log["reduced_llm_loss"])
         losses_ref = [2.44, 2.44, 2.42, 2.41, 2.34, 2.33, 2.16, 2.13, 1.71, 1.55]
         for loss, loss_ref in zip(losses, losses_ref):
@@ -122,37 +94,9 @@ class TestMoEEngine(DistributedTestBase):
             temp_dir = [None]
         dist.broadcast_object_list(temp_dir, src=0)
         temp_dir = temp_dir[0]
-        router_config = GreedyRouterConfig(
-            scoring_func="softmax",
-            norm_topk_prob=True,
-            router_scaling_factor=1.0,
+        moe_cfg = Qwen3MoE30BA3Config(
+            ep_size=ep_size,
         )
-        attention_config = MHAConfig(num_attention_heads=32, num_key_value_heads=4, head_dim=128, qk_norm=True)
-        moe_cfg = MoEConfig(
-            vocab_size=151936,
-            max_position_embeddings=4096,
-            padding_idx=0,
-            num_hidden_layers=4,
-            hidden_size=2048,
-            intermediate_size=6144,
-            rms_norm_eps=1e-6,
-            rope_theta=1000000.0,
-            hidden_act="silu",
-            attention=attention_config,
-            tie_word_embeddings=False,
-            training_dtype="bf16",
-            chunked_loss=False,
-            n_routed_experts=128,
-            n_shared_experts=0,
-            num_experts_per_tok=8,
-            first_k_dense_replace=0,
-            hidden_factor=1.0,
-            moe_intermediate_size=768,
-            router=router_config,
-            model_type="qwen",
-            dispatcher="all2all",
-        )
-
         moe_loss_cfg = MoELossConfig(
             balancing_loss_type="softmax",
             balancing_loss_alpha=0.001,
@@ -186,15 +130,15 @@ class TestMoEEngine(DistributedTestBase):
         dist.barrier()
         time.sleep(1)
 
-        moe_cfg2 = copy.deepcopy(moe_cfg)
-        moe_cfg2.model_path = temp_dir
         engine2 = MoETrainEngine(
-            model_cfg=moe_cfg2,
+            model_cfg=moe_cfg,
             moe_loss_cfg=moe_loss_cfg,
             optim_cfg=optim_cfg,
             lr_cfg=lr_cfg,
             fsdp_cfg=fsdp_cfg,
         )
+        engine2.from_hf(hf_path=temp_dir)
+
         state_dict = engine.model.state_dict()
         state_dict2 = engine2.model.state_dict()
         for key, val in state_dict.items():
@@ -205,7 +149,17 @@ class TestMoEEngine(DistributedTestBase):
 
         if dist.get_rank() == 0:
             shutil.rmtree(temp_dir)
+        
+        torch.cuda.empty_cache()
+        try:
+            dist.destroy_process_group(pg)
+        except:
+            pass
 
     @property
     def world_size(self) -> int:
         return int(os.getenv("XTUNER_TEST_WORLD_SIZE", "8"))
+
+    @property
+    def destroy_pg_upon_exit(self) -> bool:
+        return False

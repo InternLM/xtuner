@@ -1,4 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+from .per_block_dequant_gemm import per_block_dequant_gemm
 from .per_block_quant_gemm import per_block_quant_gemm
 from .per_tile_quant import per_tile_quant
 from .trans_per_block_quant_gemm import trans_per_block_quant_gemm
@@ -14,4 +15,5 @@ __all__ = [
     "per_tile_quant",
     "trans_per_block_quant_gemm",
     "trans_per_tile_quant_gemm",
+    "per_block_dequant_gemm",
 ]

@@ -12,9 +12,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from xtuner.v1.float8.float8_tensor import Float8Tensor, ScalingGranularity
 from xtuner.v1.float8.float8_utils import (
     EPS,
-    cast_to_per_block_fp8,
-    cast_to_per_block_fp8_devided_64,
-    cast_to_per_tensor_fp8,
+    to_fp8_saturated,
 )
 from xtuner.v1.utils import get_device, get_logger, get_torch_device_module, maybe_compile
 
@@ -25,21 +23,26 @@ DEVICE_MODULE = get_torch_device_module()
 
 
 @maybe_compile(fullgraph=True)
-def precompute_tilewise_devided_64(
-    weights_same_shape_stack: "WeightWithDynamicTilewiseFloat8CastTensor", reduce_mesh_devided_64: DeviceMesh
+def tensor_to_per_block_fp8_devided_64_scales(
+    tensor: "WeightWithDynamicTilewiseFloat8CastTensor",
+    reduce_mesh_devided_64: Optional[DeviceMesh] = None,
+    float8_dtype: torch.dtype = torch.float8_e4m3fn,
+    block_size=128,
 ):
-    nw, dout, din = weights_same_shape_stack.shape
-    block_size = 128
-    assert dout % block_size == 64, f"weights_same_shape_stack.shape = {weights_same_shape_stack.shape}"
+    nw, dout, din = tensor.shape
+    assert dout % block_size == 64, f"tensor.shape = {tensor.shape}"
     dout_0 = dout // block_size * block_size
     # dout_1 = 64
-    rank = reduce_mesh_devided_64.get_local_rank()
-    if rank % 2 == 0:
-        w0 = weights_same_shape_stack[:, :dout_0]
-        w1 = weights_same_shape_stack[:, dout_0:]
+    if reduce_mesh_devided_64 is None:
+        rank = 0
     else:
-        w0 = weights_same_shape_stack[:, 64:]
-        w1 = weights_same_shape_stack[:, :64]
+        rank = reduce_mesh_devided_64.get_local_rank()
+    if rank % 2 == 0:
+        w0 = tensor[:, :dout_0]
+        w1 = tensor[:, dout_0:]
+    else:
+        w0 = tensor[:, 64:]
+        w1 = tensor[:, :64]
     w0 = (
         w0.view(nw, dout_0 // block_size, block_size, din // block_size, block_size)
         .transpose(2, 3)
@@ -50,12 +53,13 @@ def precompute_tilewise_devided_64(
     # upcast to float64 to ensure same numeric between compile and eager
     w0_amax = w0.abs().amax(-1, True).to(torch.float64)
     w1_amax = w1.abs().amax(-1, True)
-    w1_amax = all_reduce(w1_amax, "MAX", reduce_mesh_devided_64)
-    if isinstance(w1_amax, AsyncCollectiveTensor):
-        w1_amax = w1_amax.wait()
+    if reduce_mesh_devided_64 is not None:
+        w1_amax = all_reduce(w1_amax, "MAX", reduce_mesh_devided_64)
+        if isinstance(w1_amax, AsyncCollectiveTensor):
+            w1_amax = w1_amax.wait()
     w1_amax = w1_amax.to(torch.float64)
-    w0_scales = torch.clamp(w0_amax, min=EPS) / torch.finfo(torch.float8_e4m3fn).max
-    w1_scales = torch.clamp(w1_amax, min=EPS) / torch.finfo(torch.float8_e4m3fn).max
+    w0_scales = torch.clamp(w0_amax, min=EPS) / torch.finfo(float8_dtype).max
+    w1_scales = torch.clamp(w1_amax, min=EPS) / torch.finfo(float8_dtype).max
     w0_scales = w0_scales.to(torch.float32)
     w1_scales = w1_scales.to(torch.float32)
     w0_scales = w0_scales.view(nw, dout_0 // block_size, din // block_size).contiguous()
@@ -69,35 +73,33 @@ def precompute_tilewise_devided_64(
 
 
 @maybe_compile(fullgraph=True)
-def precompute_tilewise(
-    weights_same_shape_stack: "WeightWithDynamicTilewiseFloat8CastTensor", reduce_mesh: Optional[DeviceMesh] = None
+def tensor_to_per_block_fp8_scales(
+    tensor: "WeightWithDynamicTilewiseFloat8CastTensor",
+    reduce_mesh: Optional[DeviceMesh] = None,
+    float8_dtype: torch.dtype = torch.float8_e4m3fn,
+    block_size=128,
 ):
-    nw, dout, din = weights_same_shape_stack.shape
-    group_size = 128
-    if dout >= group_size:
-        assert dout % group_size == 0, (
-            f"dout = {dout}, group_size = {group_size}. \n"
+    nw, dout, din = tensor.shape
+    if dout >= block_size:
+        assert dout % block_size == 0, (
+            f"dout = {dout}, block_size = {block_size}. \n"
             f"1. dout % 128 == 64, we need to use precompute_tilewise_devided_64, \n"
             f"2. dout % 128 equals to other number, something is wrong and contact us."
         )
         assert reduce_mesh is None, (
-            f"We do not need reduce max for dout >= group_size ({group_size}), but got reduce_mesh = {reduce_mesh}"
+            f"We do not need reduce max for dout >= block_size ({block_size}), but got reduce_mesh = {reduce_mesh}"
         )
         w = (
-            weights_same_shape_stack.view(nw, dout // group_size, group_size, din // group_size, group_size)
+            tensor.view(nw, dout // block_size, block_size, din // block_size, block_size)
             .transpose(2, 3)
-            .reshape(-1, group_size * group_size)
+            .reshape(-1, block_size * block_size)
         )
         w_amax = w.abs().amax(-1, True)
     else:
         assert reduce_mesh is not None, (
-            f"We need to do reduce max for dout < group_size ({group_size}), but got reduce_mesh = {reduce_mesh}"
+            f"We need to do reduce max for dout < block_size ({block_size}), but got reduce_mesh = {reduce_mesh}"
         )
-        w = (
-            weights_same_shape_stack.view(nw, dout, din // group_size, group_size)
-            .transpose(1, 2)
-            .reshape(-1, dout * group_size)
-        )
+        w = tensor.view(nw, dout, din // block_size, block_size).transpose(1, 2).reshape(-1, dout * block_size)
         w_amax = w.abs().amax(-1, True)
         w_amax = all_reduce(w_amax, "MAX", reduce_mesh)
         if isinstance(w_amax, AsyncCollectiveTensor):
@@ -105,13 +107,13 @@ def precompute_tilewise(
     # torch.compile and eager show different numerics for 1.0 / float32,
     # upcast to float64 to ensure same numeric between compile and eager
     w_amax = w_amax.to(torch.float64)
-    w_scales = torch.clamp(w_amax, min=EPS) / torch.finfo(torch.float8_e4m3fn).max
+    w_scales = torch.clamp(w_amax, min=EPS) / torch.finfo(float8_dtype).max
     w_scales = w_scales.to(torch.float32)
 
-    if dout >= group_size:
-        w_scales = w_scales.view(nw, dout // group_size, din // group_size).contiguous()
+    if dout >= block_size:
+        w_scales = w_scales.view(nw, dout // block_size, din // block_size).contiguous()
     else:
-        w_scales = w_scales.view(nw, 1, din // group_size).contiguous()
+        w_scales = w_scales.view(nw, 1, din // block_size).contiguous()
     return w_scales
 
 
@@ -163,9 +165,9 @@ def precompute_tilewise_float8_scale_for_fsdp(
             assert reduce_mesh_devided_64 is not None, (
                 f"reduce_mesh_devided_64 should not be None for local_shape {local_shape}."
             )
-            w_scales = precompute_tilewise_devided_64(weights_same_shape_stack, reduce_mesh_devided_64)  # type: ignore
+            w_scales = tensor_to_per_block_fp8_devided_64_scales(weights_same_shape_stack, reduce_mesh_devided_64)  # type: ignore
         else:
-            w_scales = precompute_tilewise(weights_same_shape_stack, reduce_mesh)  # type: ignore
+            w_scales = tensor_to_per_block_fp8_scales(weights_same_shape_stack, reduce_mesh)  # type: ignore
 
         for i, w in enumerate(weights_same_shape):
             # torch compile 在处理 storage_offset 不是 0 的 tensor 的时候可能会出现结果错误的问题
@@ -191,11 +193,102 @@ _ops_to_preserve_subclass = {
 }
 
 
+@maybe_compile(fullgraph=True)
+def cast_to_per_block_fp8_with_scales(
+    tensor: torch.Tensor, scales: torch.Tensor, block_size=128, float8_dtype=torch.float8_e4m3fn
+):
+    dout, din = tensor.shape
+
+    if dout < block_size:
+        tensor = tensor.view(dout, din // block_size, block_size).transpose(0, 1).reshape(din // block_size, -1)
+    else:
+        tensor = (
+            tensor.view(dout // block_size, block_size, din // block_size, block_size)
+            .transpose(1, 2)
+            .reshape(-1, block_size * block_size)
+        )
+    scales = scales.view(-1, 1)
+
+    # cast to fp8
+    tensor_scaled = tensor.to(torch.float32) / scales
+    tensor_bits_fp8 = to_fp8_saturated(tensor_scaled, float8_dtype)
+
+    if dout < block_size:
+        tensor_bits_fp8 = tensor_bits_fp8.view(din // block_size, dout, block_size).transpose(0, 1).reshape(dout, din)
+    else:
+        tensor_bits_fp8 = (
+            tensor_bits_fp8.view(dout // block_size, din // block_size, block_size, block_size)
+            .transpose(1, 2)
+            .reshape(dout, din)
+        )
+    return tensor_bits_fp8
+
+
+@maybe_compile(fullgraph=True)
+def cast_to_per_block_fp8_devided_64_with_scales(
+    tensor: torch.Tensor,
+    scales: torch.Tensor,
+    fsdp_mesh: DeviceMesh,
+    block_size: int = 128,
+    float8_dtype: torch.dtype = torch.float8_e4m3fn,
+):
+    dout, din = tensor.shape
+    assert dout % block_size == 64
+    dout_0 = dout // block_size * block_size
+    # dout_1 = 64
+    rank = fsdp_mesh.get_local_rank()
+
+    if rank % 2 == 0:
+        # 最后的 64 个 dim 属于一个 block
+        tensor0 = tensor[:dout_0]
+        tensor1 = tensor[dout_0:]
+    else:
+        # 前 64 个 dim 属于一个 block
+        tensor0 = tensor[64:]
+        tensor1 = tensor[:64]
+    tensor0 = (
+        tensor0.view(dout_0 // block_size, block_size, din // block_size, block_size)
+        .transpose(1, 2)
+        .reshape(-1, block_size * block_size)
+    )
+    tensor1 = tensor1.view(64, din // block_size, block_size).transpose(0, 1).reshape(din // block_size, -1)
+
+    if rank % 2 == 0:
+        tensor0_scales = scales[:-1]
+        tensor1_scales = scales[-1:]
+    else:
+        tensor0_scales = scales[1:]
+        tensor1_scales = scales[:1]
+    tensor0_scales = tensor0_scales.view(-1, 1)
+    tensor1_scales = tensor1_scales.view(-1, 1)
+
+    # cast to fp8
+    tensor0_scaled = tensor0.to(torch.float32) / tensor0_scales
+    tensor1_scaled = tensor1.to(torch.float32) / tensor1_scales
+    tensor0_bits_fp8 = to_fp8_saturated(tensor0_scaled, float8_dtype)
+    tensor1_bits_fp8 = to_fp8_saturated(tensor1_scaled, float8_dtype)
+
+    tensor0_bits_fp8 = (
+        tensor0_bits_fp8.view(dout_0 // block_size, din // block_size, block_size, block_size)
+        .transpose(1, 2)
+        .reshape(dout_0, din)
+    )
+    tensor1_bits_fp8 = tensor1_bits_fp8.view(din // block_size, 64, block_size).transpose(0, 1).reshape(64, din)
+
+    if rank % 2 == 0:
+        tensor_bits_fp8 = torch.cat([tensor0_bits_fp8, tensor1_bits_fp8], dim=0)
+    else:
+        tensor_bits_fp8 = torch.cat([tensor1_bits_fp8, tensor0_bits_fp8], dim=0)
+
+    return tensor_bits_fp8
+
+
 class WeightWithDynamicTilewiseFloat8CastTensor(torch.Tensor):
     def __new__(
         cls,
         tensor: torch.Tensor,
         dtype: torch.dtype,
+        ori_shape: Tuple[int, int],
         precomputed_scale: Optional[torch.Tensor] = None,
         precomputed_w: Optional[torch.Tensor] = None,
     ):
@@ -216,11 +309,14 @@ class WeightWithDynamicTilewiseFloat8CastTensor(torch.Tensor):
         self,
         tensor: torch.Tensor,
         dtype: torch.dtype,
+        ori_shape: Tuple[int, int],
         precomputed_scale: Optional[torch.Tensor] = None,
         precomputed_w: Optional[torch.Tensor] = None,
     ):
         self._tensor = tensor
         self._dtype = dtype
+        # Useful for load and save
+        self._ori_shape = ori_shape
         # for dynamic scaling
         # `precompute_float8_dynamic_scale_for_fsdp` calculates scales
         # for all float8 parameters after optimizer step
@@ -233,8 +329,10 @@ class WeightWithDynamicTilewiseFloat8CastTensor(torch.Tensor):
             return WeightWithDynamicTilewiseFloat8CastTensor(
                 args[0]._tensor,
                 args[0]._dtype,
+                args[0]._ori_shape,
             )
         dtype: Optional[torch.dtype] = None  # type: ignore
+        ori_shape: Optional[tuple] = None  # type: ignore
 
         def unwrap(t):
             nonlocal dtype
@@ -242,6 +340,8 @@ class WeightWithDynamicTilewiseFloat8CastTensor(torch.Tensor):
                 dtype = t._dtype
             else:
                 assert t._dtype == dtype
+            nonlocal ori_shape
+            ori_shape = t._ori_shape
             return t._tensor
 
         args, kwargs = pytree.tree_map_only(WeightWithDynamicTilewiseFloat8CastTensor, unwrap, (args, kwargs or {}))
@@ -250,7 +350,7 @@ class WeightWithDynamicTilewiseFloat8CastTensor(torch.Tensor):
             return out
         return pytree.tree_map_only(
             torch.Tensor,
-            lambda x: WeightWithDynamicTilewiseFloat8CastTensor(x, dtype),
+            lambda x: WeightWithDynamicTilewiseFloat8CastTensor(x, dtype, ori_shape),
             out,
         )
 
@@ -262,6 +362,7 @@ class WeightWithDynamicTilewiseFloat8CastTensor(torch.Tensor):
             tensors.append("_precomputed_w")
         return tensors, {
             "dtype": self._dtype,
+            "ori_shape": self._ori_shape,
         }
 
     @staticmethod
@@ -269,19 +370,20 @@ class WeightWithDynamicTilewiseFloat8CastTensor(torch.Tensor):
         return WeightWithDynamicTilewiseFloat8CastTensor(
             inner_tensors["_tensor"],
             flatten_spec["dtype"],
+            flatten_spec["ori_shape"],
             getattr(inner_tensors, "_precomputed_scale", None),
             getattr(inner_tensors, "_precomputed_w", None),
         )
 
     def __repr__(self):
-        return f"WeightWithDynamicTilewiseFloat8CastTensor(\n\ttensor={self._tensor}, \n\tdtype={self._dtype})"
+        return f"WeightWithDynamicTilewiseFloat8CastTensor(\n\ttensor={self._tensor}, \n\tdtype={self._dtype}, \n\tori_shape={self._ori_shape})"
 
     def fsdp_pre_all_gather(self, mesh):
         if self._precomputed_w is not None:
             return (self._precomputed_w, self._precomputed_scale), None
         assert self._precomputed_scale is not None
         if self._tensor.shape[0] >= 128 and self._tensor.shape[0] % 128 == 64:
-            w_fp8_data = cast_to_per_block_fp8_devided_64(
+            w_fp8_data = cast_to_per_block_fp8_devided_64_with_scales(
                 tensor=self._tensor,
                 scales=self._precomputed_scale,
                 fsdp_mesh=mesh,
@@ -289,7 +391,7 @@ class WeightWithDynamicTilewiseFloat8CastTensor(torch.Tensor):
                 float8_dtype=self._dtype,
             )
         else:
-            w_fp8_data = cast_to_per_block_fp8(
+            w_fp8_data = cast_to_per_block_fp8_with_scales(
                 tensor=self._tensor,
                 scales=self._precomputed_scale,
                 block_size=128,
@@ -360,6 +462,25 @@ class WeightWithDynamicTilewiseFloat8CastTensor(torch.Tensor):
         ), (data, scale)  # afterwards will be freed
 
 
+def tensor_to_per_tensor_fp8_scales(
+    tensor_list: List["WeightWithDynamicTensorWiseFloat8CastTensor"],
+    reduce_mesh: DeviceMesh,
+    float8_dtype: torch.dtype = torch.float8_e4m3fn,
+):
+    # inf-norm is equivalent to max(abs(w))
+    max_weight = torch._foreach_norm(tuple(tensor_list), ord=math.inf)
+    amax_tensor = torch.stack(max_weight)
+    # reduce max across all ranks
+    amax_tensor = all_reduce(amax_tensor, "MAX", reduce_mesh)
+    amax_tensor = torch.clamp(amax_tensor, EPS)
+    # torch.compile and eager show different numerics for 1.0 / float32,
+    # upcast to float64 to ensure same numeric between compile and eager
+    amax_tensor = amax_tensor.to(torch.float64)
+    scale_tensor = amax_tensor / torch.finfo(float8_dtype).max
+    scale_tensor = scale_tensor.to(torch.float32)
+    return scale_tensor
+
+
 @torch.no_grad()
 def precompute_tensorwise_float8_scale_for_fsdp(module: nn.Module, reduce_mesh: DeviceMesh) -> None:
     from xtuner.v1.float8.float8_linear_tensor_wise import TensorWiseFloat8Linear
@@ -378,17 +499,7 @@ def precompute_tensorwise_float8_scale_for_fsdp(module: nn.Module, reduce_mesh: 
 
     float8_dtype = weights[0]._dtype
 
-    # inf-norm is equivalent to max(abs(w))
-    max_weight = torch._foreach_norm(tuple(weights), ord=math.inf)
-    amax_tensor = torch.stack(max_weight)
-    # reduce max across all ranks
-    amax_tensor = all_reduce(amax_tensor, "MAX", reduce_mesh)
-    amax_tensor = torch.clamp(amax_tensor, EPS)
-    # torch.compile and eager show different numerics for 1.0 / float32,
-    # upcast to float64 to ensure same numeric between compile and eager
-    amax_tensor = amax_tensor.to(torch.float64)
-    scale_tensor = amax_tensor / torch.finfo(float8_dtype).max
-    scale_tensor = scale_tensor.to(torch.float32)
+    scale_tensor = tensor_to_per_tensor_fp8_scales(weights, reduce_mesh, float8_dtype=float8_dtype)
     for i, weight in enumerate(weights):
         # torch compile 在处理 storage_offset 不是 0 的 tensor 的时候可能会出现结果错误的问题
         # 参考 https://github.com/pytorch/pytorch/issues/155690
@@ -396,11 +507,22 @@ def precompute_tensorwise_float8_scale_for_fsdp(module: nn.Module, reduce_mesh: 
         weight._precomputed_scale = scale_tensor[i].clone()
 
 
+@maybe_compile(fullgraph=True)
+def cast_to_per_tensor_fp8_with_scales(tensor: torch.Tensor, scales: torch.Tensor, float8_dtype=torch.float8_e4m3fn):
+    # Note: when the line below is compiled with `torch.compile`, `tensor` is automatically
+    # upcasted to `float32` to multiply with the scale
+    # In order to match numerics between eager and compile, we upcast manually here.
+    tensor_scaled = tensor.to(torch.float32) / scales
+    tensor_bits_fp8 = to_fp8_saturated(tensor_scaled, float8_dtype)
+    return tensor_bits_fp8
+
+
 class WeightWithDynamicTensorWiseFloat8CastTensor(torch.Tensor):
     def __new__(
         cls,
         tensor: torch.Tensor,
         dtype: torch.dtype,
+        ori_shape: Tuple[int, int],
         precomputed_scale: Optional[torch.Tensor] = None,
         precomputed_w: Optional[torch.Tensor] = None,
     ):
@@ -421,11 +543,14 @@ class WeightWithDynamicTensorWiseFloat8CastTensor(torch.Tensor):
         self,
         tensor: torch.Tensor,
         dtype: torch.dtype,
+        ori_shape: Tuple[int, int],
         precomputed_scale: Optional[torch.Tensor] = None,
         precomputed_w: Optional[torch.Tensor] = None,
     ):
         self._tensor = tensor
         self._dtype = dtype
+        # Useful for load and save
+        self._ori_shape = ori_shape
         # for dynamic scaling
         # `precompute_float8_dynamic_scale_for_fsdp` calculates scales
         # for all float8 parameters after optimizer step
@@ -438,8 +563,10 @@ class WeightWithDynamicTensorWiseFloat8CastTensor(torch.Tensor):
             return WeightWithDynamicTensorWiseFloat8CastTensor(
                 args[0]._tensor,
                 args[0]._dtype,
+                args[0]._ori_shape,
             )
         dtype: Optional[torch.dtype] = None  # type: ignore
+        ori_shape: Optional[tuple] = None  # type: ignore
 
         def unwrap(t):
             nonlocal dtype
@@ -447,6 +574,8 @@ class WeightWithDynamicTensorWiseFloat8CastTensor(torch.Tensor):
                 dtype = t._dtype
             else:
                 assert t._dtype == dtype
+            nonlocal ori_shape
+            ori_shape = t._ori_shape
             return t._tensor
 
         args, kwargs = pytree.tree_map_only(WeightWithDynamicTensorWiseFloat8CastTensor, unwrap, (args, kwargs or {}))
@@ -455,7 +584,7 @@ class WeightWithDynamicTensorWiseFloat8CastTensor(torch.Tensor):
             return out
         return pytree.tree_map_only(
             torch.Tensor,
-            lambda x: WeightWithDynamicTensorWiseFloat8CastTensor(x, dtype),
+            lambda x: WeightWithDynamicTensorWiseFloat8CastTensor(x, dtype, ori_shape),
             out,
         )
 
@@ -467,6 +596,7 @@ class WeightWithDynamicTensorWiseFloat8CastTensor(torch.Tensor):
             tensors.append("_precomputed_w")
         return tensors, {
             "dtype": self._dtype,
+            "ori_shape": self._ori_shape,
         }
 
     @staticmethod
@@ -474,18 +604,19 @@ class WeightWithDynamicTensorWiseFloat8CastTensor(torch.Tensor):
         return WeightWithDynamicTensorWiseFloat8CastTensor(
             inner_tensors["_tensor"],
             flatten_spec["dtype"],
+            flatten_spec["ori_shape"],
             getattr(inner_tensors, "_precomputed_scale", None),
             getattr(inner_tensors, "_precomputed_w", None),
         )
 
     def __repr__(self):
-        return f"WeightWithDynamicTensorWiseFloat8CastTensor(\n\ttensor={self._tensor}, \n\tdtype={self._dtype})"
+        return f"WeightWithDynamicTensorWiseFloat8CastTensor(\n\ttensor={self._tensor}, \n\tdtype={self._dtype}, \n\tori_shape={self._ori_shape})"
 
     def fsdp_pre_all_gather(self, mesh):
         if self._precomputed_w is not None:
             return (self._precomputed_w, self._precomputed_scale), None
         assert self._precomputed_scale is not None
-        float8_tensor = cast_to_per_tensor_fp8(
+        float8_tensor = cast_to_per_tensor_fp8_with_scales(
             self._tensor,
             self._precomputed_scale,
             float8_dtype=self._dtype,

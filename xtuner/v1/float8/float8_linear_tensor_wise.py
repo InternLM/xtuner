@@ -8,8 +8,22 @@ from torch.distributed._tensor import DTensor
 
 from xtuner.v1.float8.distributed_utils import tensor_already_casted_to_fp8
 from xtuner.v1.float8.float8_tensor import Float8Tensor, ScalingGranularity
-from xtuner.v1.float8.float8_utils import per_tensor_quant
+from xtuner.v1.float8.float8_utils import EPS, to_fp8_saturated
 from xtuner.v1.float8.fsdp_utils import WeightWithDynamicTensorWiseFloat8CastTensor
+from xtuner.v1.utils import maybe_compile
+
+
+@maybe_compile(fullgraph=True)
+def per_tensor_fp8_quant(
+    tensor: torch.Tensor,
+    float8_dtype=torch.float8_e4m3fn,
+):
+    amax = tensor.abs().max().to(torch.float64)
+    scales = torch.clamp(amax, min=EPS) / torch.finfo(float8_dtype).max
+    scales = scales.to(torch.float32)
+    tensor_scaled = tensor.to(torch.float32) / scales
+    tensor_bits_fp8 = to_fp8_saturated(tensor_scaled, float8_dtype)
+    return tensor_bits_fp8, scales
 
 
 @torch._dynamo.allow_in_graph
@@ -20,7 +34,7 @@ class weight_to_per_tensor_float8_dynamic(torch.autograd.Function):
         w: torch.Tensor,
         float8_dtype: torch.dtype = torch.float8_e4m3fn,
     ):
-        w_bits_fp8, scales = per_tensor_quant(w, float8_dtype)
+        w_bits_fp8, scales = per_tensor_fp8_quant(w, float8_dtype)
         w_fp8 = Float8Tensor(
             w_bits_fp8,
             scales,
@@ -40,7 +54,7 @@ class fp8_matmul_weight_per_tensor_act_per_tensor(torch.autograd.Function):
     def forward(ctx, x: torch.Tensor, w_fp8: Float8Tensor):
         orig_shape = x.shape
         x = x.view(-1, x.shape[-1])
-        x_fp8, x_scale = per_tensor_quant(x, torch.float8_e4m3fn)
+        x_fp8, x_scale = per_tensor_fp8_quant(x, torch.float8_e4m3fn)
         output = torch._scaled_mm(
             x_fp8,
             w_fp8._data.transpose(0, 1),
@@ -58,7 +72,7 @@ class fp8_matmul_weight_per_tensor_act_per_tensor(torch.autograd.Function):
         x_fp8, x_scale, w_fp8 = ctx.saved_tensors
         orig_shape = grad_output_hp.shape
         grad_output_hp = grad_output_hp.view(-1, grad_output_hp.shape[-1])
-        grad_output_hp_fp8, grad_output_hp_scale = per_tensor_quant(grad_output_hp, torch.float8_e5m2)
+        grad_output_hp_fp8, grad_output_hp_scale = per_tensor_fp8_quant(grad_output_hp, torch.float8_e5m2)
 
         dx = torch._scaled_mm(
             grad_output_hp_fp8,
@@ -135,6 +149,7 @@ class TensorWiseFloat8Linear(nn.Linear):
             WeightWithDynamicTensorWiseFloat8CastTensor(
                 self.weight,
                 torch.float8_e4m3fn,
+                self.ori_shape,
             )
         )
 
@@ -198,6 +213,7 @@ class TensorWiseFloat8Linear(nn.Linear):
         weight = WeightWithDynamicTensorWiseFloat8CastTensor(
             weight,
             torch.float8_e4m3fn,
+            self.ori_shape,
         )
         self.register_parameter("weight", nn.Parameter(weight))
 
