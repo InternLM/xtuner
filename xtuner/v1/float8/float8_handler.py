@@ -92,6 +92,7 @@ class Float8Handler:
 
     def pad_for_fsdp(self, model: nn.Module, fsdp_mesh: DeviceMesh):
         from xtuner.v1.float8.float8_gmm_tile_wise import TileWiseFloat8GroupedLinear
+        from xtuner.v1.float8.float8_linear_tensor_wise import TensorWiseFloat8Linear
         from xtuner.v1.float8.float8_linear_tile_wise import TileWiseFloat8Linear
 
         if not self.enabled:
@@ -99,7 +100,7 @@ class Float8Handler:
             return
 
         for module in model.modules():
-            if isinstance(module, (TileWiseFloat8Linear, TileWiseFloat8GroupedLinear)):
+            if isinstance(module, (TileWiseFloat8Linear, TileWiseFloat8GroupedLinear, TensorWiseFloat8Linear)):
                 # make fsdp compatible with block-wise fp8
                 # use size(-1) to support hsdp
                 if isinstance(module.weight, DTensor):

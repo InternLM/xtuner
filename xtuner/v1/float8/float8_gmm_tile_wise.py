@@ -238,6 +238,7 @@ class TileWiseFloat8GroupedLinear(torch.nn.Module):
         weight = WeightWithDynamicTilewiseFloat8CastTensor(
             torch.empty(num_routed_experts * out_features, in_features),
             torch.float8_e4m3fn,
+            (num_routed_experts * out_features, in_features),
         )
         self.ep_mesh = ep_mesh
         if ep_mesh is not None and ep_mesh.size() > 1:
@@ -279,10 +280,10 @@ class TileWiseFloat8GroupedLinear(torch.nn.Module):
         if tensor_already_casted_to_fp8(weight):
             # If we use fsdp, the weight is already casted to fp8.
             # If self.is_padded is True, ep size should be 1
-            weight_fp8 = slice_weight.apply(weight, self.ori_shape) if self.is_padded else weight
+            weight_fp8 = slice_weight.apply(weight, self.ori_local_shape) if self.is_padded else weight
             weight_fp8 = view_weight.apply(weight_fp8, self.ori_local_shape)
         else:
-            weight = weight.view(*self.ori_shape)
+            weight = weight.view(*self.ori_local_shape)
             weight_fp8 = weight_to_per_block_float8_dynamic.apply(weight, torch.float8_e4m3fn, group_size=128)
 
         out = fp8_gmm_weight_per_block_act_per_tile.apply(input, weight_fp8, tokens_per_expert)
@@ -319,6 +320,7 @@ class TileWiseFloat8GroupedLinear(torch.nn.Module):
         weight = WeightWithDynamicTilewiseFloat8CastTensor(
             weight,
             torch.float8_e4m3fn,
+            (self.num_routed_experts * self.out_features, self.in_features),
         )
         self.register_parameter("weight", nn.Parameter(weight))
         self.pad_shape = (padded_out_features, self.in_features)

@@ -9,6 +9,7 @@ from torch.library import triton_op, wrap_triton
 from torch.profiler import ProfilerActivity, profile
 
 from xtuner.v1.float8.float8_utils import to_fp8_saturated
+from xtuner.v1.utils import maybe_compile
 
 
 @triton.jit
@@ -112,34 +113,60 @@ def per_block_quant_gemm(
     return out, scales
 
 
+def _get_min_alignment(size: int, alignment_value: int) -> int:
+    return (1 + ((size - 1) // alignment_value)) * alignment_value
+
+
+def pad_tensor_for_matmul(tensor, dims) -> torch.Tensor:
+    assert tensor.dim() == 2
+    dim1, dim2 = tensor.shape
+
+    if isinstance(dims, int):
+        dims = (dims,)
+
+    dim1_aligned = _get_min_alignment(dim1, 128) if 0 in dims else dim1
+    dim2_aligned = _get_min_alignment(dim2, 128) if 1 in dims else dim2
+
+    pad_dim1 = dim1_aligned - dim1
+    pad_dim2 = dim2_aligned - dim2
+
+    return torch.nn.functional.pad(tensor, (0, pad_dim2, 0, pad_dim1))
+
+
 @torch.no_grad()
-@torch.compile(fullgraph=True)
-def per_block_quant_torch(x, eps=1e-12, quant_dtype=torch.float8_e4m3fn):
-    dout, din = x.shape
-    block_size = 128
-    x = (
-        x.view(dout // block_size, block_size, din // block_size, block_size)
+@maybe_compile(fullgraph=True)
+def per_block_quant_torch(tensor: torch.Tensor, block_size=128, float8_dtype=torch.float8_e4m3fn):
+    dim0, dim1 = tensor.shape
+    tensor_pad = pad_tensor_for_matmul(tensor, (0, 1))
+    dim0_pad, dim1_pad = tensor_pad.shape
+    tensor_pad = (
+        tensor_pad.view(dim0_pad // block_size, block_size, dim1_pad // block_size, block_size)
         .transpose(1, 2)
         .reshape(-1, block_size * block_size)
     )
-    x_amax = x.abs().amax(-1, True).to(torch.float64)
-    x_scales = torch.clamp(x_amax, min=eps) / torch.finfo(quant_dtype).max
-    x_scales = x_scales.to(torch.float32)
-    x_quanted = to_fp8_saturated(x.float() / x_scales, quant_dtype)
-
-    x_quanted = (
-        x_quanted.view(dout // block_size, din // block_size, block_size, block_size)
+    amax = tensor_pad.abs().amax(-1, True)
+    amax = amax.to(torch.float64)
+    scales = amax / torch.finfo(float8_dtype).max
+    scales = scales.to(torch.float32)
+    tensor_pad_scaled = tensor_pad.float() / scales
+    tensor_pad_bits_fp8 = to_fp8_saturated(tensor_pad_scaled, float8_dtype)
+    tensor_pad_bits_fp8 = (
+        tensor_pad_bits_fp8.view(dim0_pad // block_size, dim1_pad // block_size, block_size, block_size)
         .transpose(1, 2)
-        .reshape(dout, din)
+        .reshape(dim0_pad, dim1_pad)
     )
-    x_scales = x_scales.view(dout // block_size, din // block_size)
-    return x_quanted, x_scales
+    scales = scales.view(dim0_pad // block_size, dim1_pad // block_size)
+    tensor_pad_bits_fp8 = tensor_pad_bits_fp8[:dim0, :dim1]
+    return tensor_pad_bits_fp8, scales
 
 
 if __name__ == "__main__":
-    x = torch.randn(32768, 10240, device="cuda", dtype=torch.bfloat16)
+    x = torch.randn(512 + 64, 2048, device="cuda", dtype=torch.bfloat16)
+    # x = torch.randn(32768, 10240, device="cuda", dtype=torch.bfloat16)
     out, scale = per_block_quant_gemm(x, 128, torch.float8_e4m3fn)
     out_ref, scale_ref = per_block_quant_torch(x)
+    print(f"(out_ref - out).abs().max(): {(out_ref.float() - out.float()).abs().max()}")
+    print(f"(scale_ref - scale).abs().max(): {(scale_ref - scale).abs().max()}")
 
     for _ in range(4):
         out, scale = per_block_quant_gemm(x, 128, torch.float8_e4m3fn)

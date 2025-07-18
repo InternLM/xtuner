@@ -26,6 +26,7 @@ from typing_extensions import overload, override
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.config.base_model import MoEConfig, MoEModelOutputs
 from xtuner.v1.data_proto import SequenceContext
+from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.model import BaseModel
 from xtuner.v1.module import RMSNorm, RotaryEmbedding
 from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayer
@@ -35,7 +36,6 @@ from xtuner.v1.utils import (
     get_device,
     get_logger,
     get_torch_device_module,
-    profile_time_and_memory,
 )
 from xtuner.v1.utils.compile import maybe_compile
 
@@ -204,14 +204,15 @@ class MoE(BaseModel):
 
     @override
     def fully_shard(
-        self, fsdp_config: FSDPConfig, model_prefix: str = "", hf_path: str | Path = "", strict: bool = True
+        self,
+        fsdp_config: FSDPConfig,
+        float8_handler: Float8Handler | None = None,
     ):
         self.fsdp_config = fsdp_config
         self._init_device_mesh(fsdp_config)
 
-        # The `ep_size` of `fsdp_config` will have priority over the one in the model config
-        del self.layers
-        self.layers = self.build_layers(self.config)
+        if float8_handler is not None:
+            float8_handler.pad_for_fsdp(self, cast(DeviceMesh, self.fsdp_mesh))
 
         # Since ep size could be changed by `fsdp_config`, we need to re-initialize the load spec
         self.load_spec_mapping = self._init_load_spec()
@@ -259,7 +260,7 @@ class MoE(BaseModel):
                 reshard_after_forward = self.fsdp_config.reshard_after_forward
             fully_shard(
                 layer,
-                mesh=self.fsdp_mesh,
+                mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
                 mp_policy=mp_policy,
                 reshard_after_forward=reshard_after_forward,
                 offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
@@ -271,25 +272,28 @@ class MoE(BaseModel):
         ):
             layer_cur.set_modules_to_forward_prefetch([layer_next])  # type: ignore
 
+        self.embed_tokens.to_empty(device=DEVICE_MODULE.current_device())
         fully_shard(
             self.embed_tokens,
-            mesh=self.fsdp_mesh,
+            mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
             mp_policy=mp_policy,
             reshard_after_forward=self.fsdp_config.reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
         )
 
+        self.norm.to_empty(device=DEVICE_MODULE.current_device())
         fully_shard(
             self.norm,
-            mesh=self.fsdp_mesh,
+            mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
             mp_policy=mp_policy,
             reshard_after_forward=self.fsdp_config.reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
         )
 
+        self.lm_head.to_empty(device=DEVICE_MODULE.current_device())
         fully_shard(
             self.lm_head,
-            mesh=self.fsdp_mesh,
+            mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
             mp_policy=mp_policy,
             reshard_after_forward=self.fsdp_config.reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
@@ -297,16 +301,12 @@ class MoE(BaseModel):
 
         fully_shard(
             self,
-            mesh=self.fsdp_mesh,
+            mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
             mp_policy=mp_policy,
             reshard_after_forward=self.fsdp_config.reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
         )
         self.set_modules_to_forward_prefetch([self.embed_tokens, self.layers["0"]])  # type: ignore
-
-        if hf_path:
-            with profile_time_and_memory("Loading HF Checkpoint"):
-                self.from_hf(hf_path, prefix=model_prefix, strict=strict)
 
         for name, module in self.named_modules():
             if isinstance(module, nn.Embedding):
@@ -349,6 +349,8 @@ class MoE(BaseModel):
                 (experts_fsdp_size, self.fsdp_config.ep_size),
                 mesh_dim_names=(f"{self.fsdp_config.mesh_prefix}.fsdp", f"{self.fsdp_config.mesh_prefix}.ep"),
             )
+            if self.ep_mesh is not None:
+                assert self.ep_mesh == model_mesh[f"{self.fsdp_config.mesh_prefix}.ep"]
             self.ep_mesh = model_mesh[f"{self.fsdp_config.mesh_prefix}.ep"]
             self.fsdp_mesh = model_mesh[f"{self.fsdp_config.mesh_prefix}.fsdp"]
         else:
@@ -374,10 +376,13 @@ class MoE(BaseModel):
             # self.fsdp_mesh = model_mesh[
             #     (f"{self.fsdp_config.mesh_prefix}.hsdp_replicate", f"{self.fsdp_config.mesh_prefix}.hsdp_shard")
             # ]
-            self.ep_mesh = init_device_mesh(
+            ep_mesh = init_device_mesh(
                 device, (world_size, 1), mesh_dim_names=("_", f"{self.fsdp_config.mesh_prefix}.ep")
             )[f"{self.fsdp_config.mesh_prefix}.ep"]
-            self.fsdp_mesh = init_device_mesh(
+            if self.ep_mesh is not None:
+                assert self.ep_mesh == ep_mesh, "ep_mesh should be the same as the previous one"
+            self.ep_mesh = ep_mesh
+            self.hsdp_mesh = init_device_mesh(
                 device,
                 (
                     experts_fsdp_size // self.fsdp_config.hsdp_sharding_size,
@@ -388,6 +393,7 @@ class MoE(BaseModel):
                     f"{self.fsdp_config.mesh_prefix}.hsdp_shard",
                 ),
             )
+            self.fsdp_mesh = self.hsdp_mesh[f"{self.fsdp_config.mesh_prefix}.hsdp_shard"]
 
     def _replicate_other_params(self, model: nn.Module):
         def traverse(module):

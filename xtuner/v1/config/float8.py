@@ -25,3 +25,16 @@ class Float8Config(BaseModel):
     def enable_float8(self) -> bool:
         """Whether to enable float8 quantization."""
         return self.scaling_granularity_gemm is not None or self.scaling_granularity_grouped_gemm is not None
+
+    @property
+    def is_tilewise(self) -> bool:
+        """Whether the scaling granularity is TILEWISE."""
+        return (
+            self.scaling_granularity_gemm == ScalingGranularity.TILEWISE
+            or self.scaling_granularity_grouped_gemm == ScalingGranularity.TILEWISE
+        )
+
+    @property
+    def is_tensorwise(self) -> bool:
+        """Whether the scaling granularity is TENSORWISE."""
+        return self.scaling_granularity_gemm == ScalingGranularity.TENSORWISE

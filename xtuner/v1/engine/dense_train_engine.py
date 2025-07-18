@@ -5,7 +5,7 @@ import time
 from concurrent.futures import Future, wait
 from contextlib import contextmanager
 from datetime import timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, cast
 
 import torch
 import torch.distributed as dist
@@ -32,6 +32,7 @@ from torch.utils._foreach_utils import (
 from xtuner.v1.config import FSDPConfig, LRConfig, OptimConfig, TransformerConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.float8_handler import Float8Handler
+from xtuner.v1.model import BaseModel
 from xtuner.v1.utils import get_device, get_logger, get_torch_device_module
 from xtuner.v1.utils.pad import pad_to_max_length
 
@@ -134,11 +135,9 @@ class HFCheckpointLoader:
 
 
 class DenseTrainEngine:
-    model: nn.Module
+    model: BaseModel
     optimizer: torch.optim.Optimizer
     scheduler: torch.optim.lr_scheduler.LRScheduler
-    fsdp_mesh: Optional[DeviceMesh] = None
-    checkpoint_loader: Optional[HFCheckpointLoader] = None
     float8_handler: Optional[Float8Handler] = None
 
     def __init__(
@@ -152,29 +151,11 @@ class DenseTrainEngine:
         self.model_cfg = model_cfg
         self.optim_cfg = optim_cfg
         self.fsdp_cfg = fsdp_cfg
-        # self.checkpoint_loader = HFCheckpointLoader(
-        #     "/cpfs01/shared/llm_ddd/opencompass/models/hf_hub/models--Qwen--Qwen3-30B-A3B/snapshots/4c446470ba0aec43e22ac1128f9ffd915f338ba3/"
-        # )
-        if model_cfg.model_path is not None:
-            self.checkpoint_loader = HFCheckpointLoader(model_cfg.model_path)
-        else:
-            self.checkpoint_loader = None
-        self.init_device_mesh()
         self.model = self.build_model()
         if self.float8_handler:
-            self.float8_handler.build_reduce_mesh(self.model, self.fsdp_mesh)
-        # self.fully_shard()
+            self.float8_handler.build_reduce_mesh(self.model, cast(BaseModel, self.model).fsdp_mesh)
         self.optimizer = self.build_optimizer(optim_cfg)
         self.lr_scheduler = self.build_lr_scheduler(lr_cfg)
-
-    def trainable_parameters(self):
-        return [p for p in self.model.parameters() if p.requires_grad]
-
-    def init_device_mesh(self, device: str = "cuda"):
-        pass
-
-    def fully_shard(self, model, model_prefix: str = ""):
-        pass
 
     def build_model(self) -> nn.Module:
         pass
@@ -339,8 +320,9 @@ class DenseTrainEngine:
         return global_norm
 
     def clip_grad_norm(self):
-        params = self.trainable_parameters()
-        grads = [p.grad for p in params if p.grad is not None]
+        self.model.scale_and_reduce_grad()
+        params = self.model.trainable_parameters()
+        grads = [p.grad for _, p in params if p.grad is not None]
         grouped_grads = self.group_tensors_by_device_mesh_and_placements(grads)
         total_norms = []
         for grads in grouped_grads.values():
@@ -363,9 +345,6 @@ class DenseTrainEngine:
         """Step the optimizer to update the model parameters."""
         grad_norm = self.clip_grad_norm()
         if torch.isnan(grad_norm) or torch.isinf(grad_norm):
-            # logger.warning(
-            #     f"[Step {step}] The grad norm is NaN or Inf, skip this step. "
-            # )
             self.optimizer.zero_grad()
         else:
             self.optimizer.step()
