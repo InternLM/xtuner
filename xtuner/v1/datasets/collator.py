@@ -1,64 +1,84 @@
+from typing import TypedDict
+
 import torch
-from torch.nn.utils.rnn import pad_sequence
+
+from xtuner.utils import IGNORE_INDEX
+from xtuner.v1.data_proto import SequenceContext
+from xtuner.v1.utils import get_logger
+from xtuner.v1.utils.pad import pad_to_max_length
+
+from .data_item import DataItem
 
 
-def sft_llm_collator(instances, pad_token_id=0, ignore_id=-100, batch_pack=True, max_length=None):
-    _instances = []
-    for ins in instances:
-        if isinstance(ins, list):
-            _instances.extend(ins)
+logger = get_logger()
+
+
+class ColateItem(TypedDict):
+    seq_ctx: SequenceContext
+    labels: torch.Tensor
+
+
+def sft_llm_collator(
+    instances: list[list[DataItem]], max_length: int, pack_max_length: int, padding_token_idx: int
+) -> list[ColateItem]:
+    ret: list[ColateItem] = []
+    for instance in instances:
+        for data_item in instance:
+            if len(data_item["input_ids"]) >= max_length:
+                logger.warning(f"Found empty input_ids in data item: {data_item}")
+                data_item["input_ids"] = data_item["input_ids"][:max_length]
+                data_item["labels"] = data_item["labels"][:max_length]
+                data_item["num_tokens"] = len(data_item["input_ids"])
+
+        # If the token number of the packed sample is larger than the packed_max_lenghth
+        if (total_num_tokens := sum(i["num_tokens"] for i in instance)) > pack_max_length:
+            logger.warning(
+                f"Found packed sample with {total_num_tokens} tokens, which is larger than the `packed_max_lenghth`"
+                f"{pack_max_length}, which is unexpected for packed dataset"
+            )
+
+            for drop_from in range(len(instance) - 1, -1, -1):
+                if total_num_tokens - instance[drop_from]["num_tokens"] <= max_length:
+                    instance = instance[:drop_from]
+                    break
+                else:
+                    total_num_tokens -= instance[drop_from]["num_tokens"]
+
+        input_ids = torch.cat([torch.tensor(i["input_ids"]).view(1, -1) for i in instance], dim=-1)
+        labels = torch.cat([torch.tensor(i["labels"]).view(1, -1) for i in instance], dim=-1)
+        assert input_ids.shape == labels.shape, f"input_ids shape {input_ids.shape} != labels shape {labels.shape}"
+
+        pad_len = pack_max_length - input_ids.shape[-1]
+
+        if pad_len > 0:
+            input_ids = pad_to_max_length(input_ids, padding_token_idx, max_length=pack_max_length, dim=-1)
+            labels = pad_to_max_length(labels, IGNORE_INDEX, max_length=pack_max_length, dim=-1)
+            num_tokens = [0] + [i["num_tokens"] for i in instance] + [pad_len]
+
+        elif pad_len < 0:
+            raise ValueError(
+                f"Internal Error! Packed sample length {input_ids.shape[-1]} is larger than"
+                f"packed_max_lenghth {pack_max_length}. Please report the bug to xtuner"
+            )
         else:
-            _instances.append(ins)
+            num_tokens = [0] + [i["num_tokens"] for i in instance]
 
-    instances = _instances
+        cu_seq_lens = torch.cumsum(torch.IntTensor(num_tokens), dim=0).int()
 
-    input_ids = []
-    labels = []
-    num_tokens = []
+        seq_ctx = SequenceContext(
+            input_ids=input_ids,  # type: ignore
+            cu_seq_lens_q=cu_seq_lens,  # type: ignore
+            cu_seq_lens_k=cu_seq_lens,  # type: ignore
+            max_length_q=max(num_tokens),
+            max_length_k=max(num_tokens),
+            num_padding=pad_len,
+        )
+        seq_ctx, labels = seq_ctx.shift_with_labels(labels=labels)  # type: ignore
+        ret.append(
+            {
+                "seq_ctx": seq_ctx,
+                "labels": labels,
+            }
+        )
 
-    for data in instances:
-        _input_ids = data["input_ids"]
-        _labels = data["labels"]
-        _num_tokens = data["num_tokens"]
-
-        # TODO remove list
-        if isinstance(_num_tokens, list):
-            assert len(_num_tokens) == 1
-            _num_tokens = _num_tokens[0]
-
-        assert isinstance(_num_tokens, int)
-
-        if max_length:
-            _input_ids = _input_ids[:max_length]
-            _labels = _labels[:max_length]
-            _num_tokens = min(_num_tokens, max_length)
-
-        input_ids.append(torch.LongTensor(_input_ids))
-        labels.append(torch.LongTensor(_labels))
-        num_tokens.append(_num_tokens)
-
-    attention_mask = [torch.ones_like(ids) for ids in input_ids]
-    num_tokens = torch.IntTensor(num_tokens)
-
-    if len(instances) > 1 and batch_pack:
-        input_ids = torch.cat(input_ids, dim=0).unsqueeze(0)
-        labels = torch.cat(labels, dim=0).unsqueeze(0)
-        attention_mask = torch.cat(attention_mask, dim=0).unsqueeze(0)
-
-    elif len(instances) > 1 and not batch_pack:
-        input_ids = pad_sequence(input_ids, batch_first=True, padding_value=pad_token_id)
-        labels = pad_sequence(labels, batch_first=True, padding_value=ignore_id)
-        attention_mask = pad_sequence(attention_mask, batch_first=True, padding_value=0)
-    else:
-        input_ids = torch.stack(input_ids)
-        labels = torch.stack(labels)
-        attention_mask = torch.stack(attention_mask)
-
-    data_dict = {
-        "input_ids": input_ids,
-        "labels": labels,
-        "num_tokens": num_tokens,
-        "attention_mask": attention_mask.bool(),
-    }
-
-    return data_dict
+    return ret

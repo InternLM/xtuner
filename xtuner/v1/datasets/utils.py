@@ -50,7 +50,7 @@ def tokenizer_hash(tokenizer: "PreTrainedTokenizer"):
         return file_hash.hexdigest()
 
 
-def tokenizer_xxhash(tokenizer: PreTrainedTokenizer):
+def tokenizer_xxhash(tokenizer: "PreTrainedTokenizer"):
     with tempfile.TemporaryDirectory() as tokenizer_tempdir:
         tokenizer.save_pretrained(tokenizer_tempdir)
         tokenizer_files = sorted(Path(tokenizer_tempdir).iterdir())

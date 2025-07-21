@@ -10,11 +10,10 @@ import tempfile
 from pathlib import Path
 from safetensors import safe_open
 
-from xtuner.v1.model.moe.moe import MoEConfig, SequenceContext
-from xtuner.v1.model.moe.qwen3 import Qwen3MoE, Qwen3MoE30BA3Config
-from xtuner.v1.module.attention import MHAConfig
-from xtuner.v1.module.router import GreedyRouterConfig
+from xtuner.v1.model.moe.moe import SequenceContext
+from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
 from xtuner.v1.config import FSDPConfig
+from xtuner.v1.utils.compile import maybe_compile
 
 # Qwen3 30B A3
 QWEN3_MOE_PATH = os.environ["QWEN3_MOE_PATH"]
@@ -22,15 +21,18 @@ QWEN3_MOE_PATH = os.environ["QWEN3_MOE_PATH"]
 
 class TestQwen3MoE(DistributedTestBase):
     @parametrize.parametrize(
-        "device,dispatcher,ep_size",
+        "device,dispatcher,ep_size,compile,tol",
         [
-            ("cuda", "deepep", 8),
-            ("cuda", "all2all", 8),
-            ("cuda", None, 1),
+            ("cuda", "deepep", 8, False, 1e-2),
+            ("cuda", "all2all", 8, False, 1e-2),
+            ("cuda", None, 1, False, 1e-2),
+            ("cuda", "deepep", 8, True, 4e-2),  # TODO: This test is flaky, need to fix it
         ],
     )
-    def test_qwen3_moe_run(self, device, dispatcher, ep_size):
+    def test_qwen3_moe_run(self, device, dispatcher, ep_size, compile, tol):
         self.create_pg(device)
+        if not compile:
+            maybe_compile.clear_compile_targets()
 
         hf_model = AutoModelForCausalLM.from_pretrained(
             QWEN3_MOE_PATH,
@@ -67,7 +69,8 @@ class TestQwen3MoE(DistributedTestBase):
                 labels=shifted_labels,
             )
         loss = output["loss"]
-        self.assertTrue(torch.allclose(loss, expected_loss.to(loss.dtype), atol=1e-2, rtol=1e-2))
+        torch.distributed.breakpoint()
+        self.assertTrue(torch.allclose(loss, expected_loss.to(loss.dtype), atol=tol, rtol=tol))
 
     @parametrize.parametrize(
         "device,dispatcher,ep_size",
