@@ -24,7 +24,7 @@ class SequenceContext:
             Maximum sequence length for key state.
     """
 
-    input_ids: torch.LongTensor
+    input_ids: torch.LongTensor  # shape (1, seq_len)
     cu_seq_lens_q: torch.IntTensor
     cu_seq_lens_k: torch.IntTensor
     max_length_q: int
@@ -64,6 +64,8 @@ class SequenceContext:
         device: str = "cuda",
     ) -> Self:
         assert isinstance(input_ids, (list, tuple))
+        for ids in input_ids:
+            assert ids.shape[0] == 1, "input_ids must have batch size of 1"
         num_tokens = [x.numel() for x in input_ids]
 
         cu_seq_lens = cast(torch.IntTensor, torch.cumsum(torch.LongTensor([0] + num_tokens), dim=0).to(device).int())
@@ -138,13 +140,18 @@ class SequenceContext:
 
             new_max_length = cast(int, max(self.cu_seq_lens_q[-1].item(), new_padding))
 
+            num_non_padding = self.input_ids.shape[1] - self.num_padding
+            start = sp_input_ids.shape[1] * sequence_parallel_mesh.get_local_rank()
+            end = start + sp_input_ids.shape[1]
+            sp_num_padding = max(0, min(sp_input_ids.shape[1], end - num_non_padding))
+
             sp_seq_ctx = self.__class__(
                 input_ids=sp_input_ids,
                 cu_seq_lens_q=new_cu_seq_lens,
                 cu_seq_lens_k=new_cu_seq_lens,
                 max_length_q=new_max_length,
                 max_length_k=new_max_length,
-                num_padding=self.num_padding + new_padding,
+                num_padding=sp_num_padding,
                 block_table=self.block_table,
                 device=self.device,
                 sequence_parallel_mesh=sequence_parallel_mesh,
