@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Dict, List, cast
 from xtuner.utils import IGNORE_INDEX
 from xtuner.v1.utils import get_logger
 
-from .utils import CachableTokenizeFunction, CacheObj, tokenizer_hash
+from .utils import CachableTokenizeFunction, CacheObj, tokenizer_xxhash
 
 
 if TYPE_CHECKING:
@@ -688,7 +688,7 @@ def ftdp_tokenize(tokenizer: "PreTrainedTokenizer", messages: list[dict] | dict,
 
     max_len = template_config.get("max_len", MAX_LEN)
     token_ids = token_ids[:max_len]
-    labels = [x if x > 0 else IGNORE_INDEX for x in token_ids]
+    labels = [x if x >= 0 else IGNORE_INDEX for x in token_ids]
 
     if labels:
         labels[0] = -100
@@ -706,13 +706,17 @@ def ftdp_tokenize(tokenizer: "PreTrainedTokenizer", messages: list[dict] | dict,
 class FtdpTokenizeFunction(CachableTokenizeFunction):
     def __init__(
         self,
+        meta_data,
         tokenizer: "PreTrainedTokenizer",
         chat_template="internlm2",
+        tokenizer_hash: str | None = None,
         hash: str | None = None,
     ):
+        self.meta_data = meta_data
         self.tokenizer = tokenizer
         self.template_config = ROLE_CONFIG[chat_template]
         self._hash = hash
+        self._tokenizer_hash = tokenizer_hash
 
     def __call__(self, item: dict | list) -> CacheObj:
         return ftdp_tokenize(self.tokenizer, item, self.template_config)  # type: ignore[return-value]
@@ -720,7 +724,10 @@ class FtdpTokenizeFunction(CachableTokenizeFunction):
     def hash(self) -> str:
         if self._hash is None:
             # truncate to 16 characters prevent too long cache directory
-            _tokenizer_hash = tokenizer_hash(self.tokenizer)[:16]
+            if self._tokenizer_hash is None:
+                _tokenizer_hash = tokenizer_xxhash(self.tokenizer)[:16]
+            else:
+                _tokenizer_hash = self._tokenizer_hash
             _template_hash = hashlib.sha256(repr(self.template_config).encode()).hexdigest()[:16]
             _source_hash = (
                 hashlib.sha256(inspect.getsource(ftdp_tokenize).encode()).hexdigest()[:16]
@@ -747,7 +754,7 @@ class FtdpTokenizedDataMapping(CachableTokenizeFunction):
         del item["tokens"]
         if len(item["input_ids"]) > self.max_length:
             item["input_ids"] = item["input_ids"][: self.max_length]
-        labels = [x if x > 0 else -100 for x in item["input_ids"]]
+        labels = [x if x >= 0 else -100 for x in item["input_ids"]]
         item["input_ids"] = [abs(x) for x in item["input_ids"]]
         item["labels"] = labels
         item["num_tokens"] = len(item["input_ids"])

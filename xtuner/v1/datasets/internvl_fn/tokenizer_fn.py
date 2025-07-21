@@ -15,7 +15,7 @@ from xtuner.v1.utils import get_logger
 
 from ..utils import CachableTokenizeFunction, CacheObj, tokenizer_xxhash
 from ..vlm_utils import TCSLoader, apply_exif_orientation
-from .process import build_transform, dynamic_num_patch, dynamic_preprocess, preprocess_internvl2_5
+from .process import build_transform, dynamic_num_patch, dynamic_preprocess, preprocess_internvl
 
 
 logger = get_logger()
@@ -53,8 +53,8 @@ class InternVLTokenizeFunction(CachableTokenizeFunction):
     def __init__(
         self,
         meta_data,
-        model_cfg,
         tokenizer,
+        model_cfg=None,
         tcs_loader: TCSLoader | None = None,
         min_num_frames=4,
         max_num_frames=24,
@@ -161,12 +161,11 @@ class InternVLTokenizeFunction(CachableTokenizeFunction):
             num_patches = 1
 
         try:
-            ret = preprocess_internvl2_5(
+            ret = preprocess_internvl(
                 self.template_name,
                 [deepcopy(data_item["conversations"])],
                 self.tokenizer,
                 [self.num_image_token * num_patches],
-                group_by_length=True,
                 ds_name=self.data_name,
                 prompt_only=self.only_prompt,
                 system_prompt=system_message,
@@ -220,12 +219,11 @@ class InternVLTokenizeFunction(CachableTokenizeFunction):
             assert num_patches == 1, f"The number of patches should be 1, but got {num_patches}."
 
         # Preprocess the conversations and generate the return dictionary
-        ret = preprocess_internvl2_5(
+        ret = preprocess_internvl(
             self.template_name,
             [deepcopy(data_item["conversations"])],
             self.tokenizer,
             [self.num_image_token * num_patches],
-            group_by_length=True,
             ds_name=self.data_name,
             prompt_only=self.only_prompt,
             system_prompt=system_message,
@@ -255,13 +253,12 @@ class InternVLTokenizeFunction(CachableTokenizeFunction):
         if self.only_prompt:
             return {"num_tokens": -1}
         try:
-            ret = preprocess_internvl2_5(
+            ret = preprocess_internvl(
                 self.template_name,
                 [deepcopy(data_item["conversations"])],
                 self.tokenizer,
                 [0],
                 text_only=True,
-                group_by_length=True,
                 ds_name=self.data_name,
                 prompt_only=self.only_prompt,
                 system_prompt=system_message,
@@ -304,13 +301,12 @@ class InternVLTokenizeFunction(CachableTokenizeFunction):
         assert num_patches == 1, f"The number of patches should be 1, but got {num_patches}."
 
         # Preprocess the conversations and generate the return dictionary
-        ret = preprocess_internvl2_5(
+        ret = preprocess_internvl(
             self.template_name,
             [deepcopy(data_item["conversations"])],
             self.tokenizer,
             [0],
             text_only=True,
-            group_by_length=True,
             ds_name=self.data_name,
             prompt_only=self.only_prompt,
             system_prompt=system_message,
@@ -370,12 +366,11 @@ class InternVLTokenizeFunction(CachableTokenizeFunction):
 
         num_image_tokens = [self.num_image_token * num_tile for num_tile in num_tiles]
         try:
-            ret = preprocess_internvl2_5(
+            ret = preprocess_internvl(
                 self.template_name,
                 [deepcopy(data_item["conversations"])],
                 self.tokenizer,
                 num_image_tokens,
-                group_by_length=True,
                 ds_name=self.data_name,
                 num_image=len(image_size),
                 prompt_only=self.only_prompt,
@@ -439,12 +434,11 @@ class InternVLTokenizeFunction(CachableTokenizeFunction):
 
         # Preprocess the conversations and generate the return dictionary
         num_image_tokens = [self.num_image_token * num_tile for num_tile in num_tiles]
-        ret = preprocess_internvl2_5(
+        ret = preprocess_internvl(
             self.template_name,
             [deepcopy(data_item["conversations"])],
             self.tokenizer,
             num_image_tokens,
-            group_by_length=True,
             ds_name=self.data_name,
             num_image=len(image_path),
             prompt_only=self.only_prompt,
@@ -523,12 +517,11 @@ class InternVLTokenizeFunction(CachableTokenizeFunction):
         num_tiles = [1] * n_frames
         num_image_tokens = [self.num_image_token * num_tile for num_tile in num_tiles]
         try:
-            ret = preprocess_internvl2_5(
+            ret = preprocess_internvl(
                 self.template_name,
                 [deepcopy(data_item["conversations"])],
                 self.tokenizer,
                 num_image_tokens,
-                group_by_length=True,
                 ds_name=self.data_name,
                 num_image=n_frames,
                 prompt_only=self.only_prompt,
@@ -574,12 +567,11 @@ class InternVLTokenizeFunction(CachableTokenizeFunction):
         num_patches = pixel_values.size(0)
 
         num_image_tokens = [self.num_image_token] * num_patches
-        ret = preprocess_internvl2_5(
+        ret = preprocess_internvl(
             self.template_name,
             [deepcopy(data_item["conversations"])],
             self.tokenizer,
             num_image_tokens,
-            group_by_length=True,
             ds_name=self.data_name,
             num_image=num_patches,
             prompt_only=self.only_prompt,
