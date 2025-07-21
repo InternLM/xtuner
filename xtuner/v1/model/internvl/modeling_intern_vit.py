@@ -1,8 +1,3 @@
-# --------------------------------------------------------
-# InternVL
-# Copyright (c) 2024 OpenGVLab
-# Licensed under The MIT License [see LICENSE for details]
-# --------------------------------------------------------
 from typing import Optional, Tuple, Union, cast
 
 import numpy as np
@@ -21,11 +16,7 @@ from torch import nn
 from transformers.activations import ACT2FN
 from transformers.modeling_outputs import (BaseModelOutput,
                                            BaseModelOutputWithPooling)
-from transformers.modeling_utils import PreTrainedModel
-from transformers.utils import logging
-# from xtuner._lite.utils.misc import XTUNER_DETERMINISTIC
-
-from .configuration_intern_vit import InternVisionConfig
+from .internvl_config import InternVLVisionConfig
 
 try:
     from flash_attn.bert_padding import pad_input, unpad_input
@@ -35,8 +26,6 @@ try:
 except:
     print('FlashAttention2 is not installed.')
     has_flash_attn = False
-
-logger = logging.get_logger(__name__)
 
 
 class FlashAttention(nn.Module):
@@ -217,12 +206,10 @@ try:
 
     InternRMSNorm = FusedRMSNorm  # type: ignore
 
-    logger.info('Discovered apex.normalization.FusedRMSNorm - will use it instead of InternRMSNorm')
 except ImportError:
     # using the normal InternRMSNorm
     pass
 except Exception:
-    logger.warning('discovered apex but it failed to load, falling back to InternRMSNorm')
     pass
 
 
@@ -233,7 +220,7 @@ NORM2FN = {
 
 
 class InternVisionEmbeddings(nn.Module):
-    def __init__(self, config: InternVisionConfig):
+    def __init__(self, config: InternVLVisionConfig):
         super().__init__()
         self.config = config
         self.embed_dim = config.hidden_size
@@ -289,7 +276,7 @@ class InternVisionEmbeddings(nn.Module):
 class InternAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper."""
 
-    def __init__(self, config: InternVisionConfig):
+    def __init__(self, config: InternVLVisionConfig):
         super().__init__()
         self.config = config
         self.embed_dim = config.hidden_size
@@ -364,7 +351,7 @@ class InternAttention(nn.Module):
 
 
 class InternMLP(nn.Module):
-    def __init__(self, config: InternVisionConfig):
+    def __init__(self, config: InternVLVisionConfig):
         super().__init__()
         self.config = config
         self.act = ACT2FN[config.hidden_act]
@@ -379,7 +366,7 @@ class InternMLP(nn.Module):
 
 
 class InternVisionEncoderLayer(nn.Module):
-    def __init__(self, config: InternVisionConfig, drop_path_rate: float):
+    def __init__(self, config: InternVLVisionConfig, drop_path_rate: float):
         super().__init__()
         self.embed_dim = config.hidden_size
         self.intermediate_size = config.intermediate_size
@@ -428,7 +415,7 @@ class InternVisionEncoder(nn.Module):
             The corresponding vision configuration for the `InternEncoder`.
     """
 
-    def __init__(self, config: InternVisionConfig):
+    def __init__(self, config: InternVLVisionConfig):
         super().__init__()
         self.config = config
         # stochastic depth decay rule
@@ -481,17 +468,10 @@ class InternVisionEncoder(nn.Module):
         )
 
 
-class InternVisionModel(PreTrainedModel):
-    main_input_name = 'pixel_values'
-    _supports_flash_attn_2 = True
-    config_class = InternVisionConfig
-    _no_split_modules = ['InternVisionEncoderLayer']
+class InternVisionModel(nn.Module):
 
-    # support transformers 4.51.+
-    _tp_plan = ''
-
-    def __init__(self, config: InternVisionConfig):
-        super().__init__(config)
+    def __init__(self, config: InternVLVisionConfig):
+        super().__init__()
         self.config = config
 
         self.embeddings = InternVisionEmbeddings(config)
@@ -507,7 +487,7 @@ class InternVisionModel(PreTrainedModel):
         pos_emb = torch.cat([cls_emb, pos_emb], dim=1)
         self.embeddings.position_embedding = nn.Parameter(pos_emb)
         self.embeddings.image_size = new_size
-        logger.info(f'Resized position embeddings from {old_size} to {new_size}')
+        print(f'Resized position embeddings from {old_size} to {new_size}')
 
     def get_input_embeddings(self):
         return self.embeddings

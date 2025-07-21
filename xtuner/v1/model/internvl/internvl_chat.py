@@ -7,17 +7,13 @@ import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 
 from xtuner.v1.config.base_model import MoEModelOutputs
-from xtuner.v1.model.moe.moe import MoEConfig, SequenceContext
-from xtuner.v1.module.attention import MHAConfig
-from xtuner.v1.module.router import GreedyRouterConfig
+from xtuner.v1.model.moe.moe import SequenceContext
 from xtuner.v1.ops.comm import split_for_sequence_parallel
 from xtuner.v1.utils import HFCheckpointLoader, get_logger, get_padding_length
 
 from ..moe.qwen3 import Qwen3MoE
-from .configuration_intern_vit import InternVisionConfig
-from .configuration_internvl_chat import InternVLChatConfig
 from .modeling_intern_vit import InternVisionModel
-
+from .internvl_config import InternVLConfig
 
 logger = get_logger()
 
@@ -36,13 +32,13 @@ def pixel_shuffle(x, scale_factor=0.5):
 
 class InternVLChatModel(nn.Module):
     # TODO: No distinction between dense and moe models
-    def __init__(self, config: InternVLChatConfig, ep_mesh: DeviceMesh | None = None, dispatcher: str = "deepep"):
+    def __init__(self, config: InternVLConfig, ep_mesh: DeviceMesh | None = None):
         super().__init__()
 
         self.select_layer = config.select_layer
         self.downsample_ratio = config.downsample_ratio
 
-        vision_config: InternVisionConfig = config.vision_config
+        vision_config = config.vision_config
         llm_config = config.llm_config
 
         self.vision_model = InternVisionModel(vision_config)
@@ -57,56 +53,14 @@ class InternVLChatModel(nn.Module):
             nn.Linear(llm_hidden_size, llm_hidden_size),
         )
 
-        if ep_mesh is not None and ep_mesh.size() == 1:
-            dispatcher = "naive"
-
-        replace_llm_config = self._replace_llm_config(llm_config, dispatcher)
-
         if llm_config.architectures[0] == "Qwen3MoeForCausalLM":
-            self.llm_model = Qwen3MoE(replace_llm_config, ep_mesh=ep_mesh)
+            self.llm_model = Qwen3MoE(llm_config, ep_mesh=ep_mesh)
         else:
             raise NotImplementedError
 
         self.img_context_token_id = None
         self._llm_prefix = "llm_model."
         self._hf_llm_prefix = "language_model."
-
-    def _replace_llm_config(self, llm_config, dispatcher):
-        router_config = GreedyRouterConfig(
-            scoring_func="sigmoid",
-            norm_topk_prob=True,
-            router_scaling_factor=1.0,
-        )
-        attention_config = MHAConfig(
-            num_attention_heads=llm_config.num_attention_heads,
-            num_key_value_heads=llm_config.num_key_value_heads,
-            head_dim=llm_config.head_dim,
-            qk_norm=True,
-        )
-        config = MoEConfig(
-            vocab_size=llm_config.vocab_size,
-            max_position_embeddings=llm_config.max_position_embeddings,
-            padding_idx=0,  # TODO: 暂时不正确
-            num_hidden_layers=llm_config.num_hidden_layers,
-            hidden_size=llm_config.hidden_size,
-            intermediate_size=llm_config.intermediate_size,
-            rms_norm_eps=llm_config.rms_norm_eps,
-            rope_theta=llm_config.rms_norm_eps,
-            hidden_act=llm_config.hidden_act,
-            attention=attention_config,
-            tie_word_embeddings=llm_config.tie_word_embeddings,
-            training_dtype="bf16",
-            chunked_loss=False,
-            n_routed_experts=llm_config.num_experts,
-            n_shared_experts=0,
-            num_experts_per_tok=llm_config.num_experts_per_tok,
-            first_k_dense_replace=0,
-            hidden_factor=1.0,
-            moe_intermediate_size=llm_config.moe_intermediate_size,
-            dispatcher=dispatcher,
-            router=router_config,
-        )
-        return config
 
     def to_hf_key_list(self, key: str) -> str | List[str]:
         if key.startswith(self._llm_prefix):
