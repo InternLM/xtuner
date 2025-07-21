@@ -4,7 +4,6 @@ import torch
 from mmengine.utils import is_installed
 from typing_extensions import Required, overload, override
 
-from xtuner.v1.config.base_model import MoEConfig
 from xtuner.v1.ops import buffer_capture, deep_ep_combine, deep_ep_dispatch, get_low_latency_buffer
 from xtuner.v1.ops.moe_permute import permute, unpermute
 
@@ -55,14 +54,18 @@ class DeepEPDispatcher(
     def __init__(
         self,
         *,
-        config: MoEConfig,
+        n_routed_experts: int,
         process_group: torch.distributed.ProcessGroup,
+        training_dtype: Literal["fp8", "bf16"] = "bf16",
+        generate_dtype: Literal["fp8", "bf16"] = "bf16",
     ):
         if not is_installed("deep_ep"):
             raise RuntimeError("`DeepEP` is not installed!")
         super().__init__(
+            n_routed_experts=n_routed_experts,
             process_group=process_group,
-            config=config,
+            training_dtype=training_dtype,
+            generate_dtype=generate_dtype,
         )
 
     @overload
@@ -181,7 +184,7 @@ class DeepEPDispatcher(
             x.size(0),
             self._n_routed_experts,
             async_finish=False,
-            use_fp8=self._config.training_dtype == "fp8",
+            use_fp8=self._training_dtype == "fp8",
             return_recv_hook=False,
         )
 
@@ -189,7 +192,7 @@ class DeepEPDispatcher(
         # it is useful for double-batch overlapping, but **without any SM occupation**
         # If you don't want to overlap, please set `return_recv_hook=False`
         # Later, you can use our GEMM library to do the computation with this specific format
-        if self._config.training_dtype == "fp8":
+        if self._training_dtype == "fp8":
             assert isinstance(recv_x, tuple), "When using FP8, `recv_x` should be a tuple."
             hidden_states, fp_8_scale = recv_x
             return DeepEPDecodingDispatchResult(

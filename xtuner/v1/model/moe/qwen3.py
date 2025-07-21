@@ -1,5 +1,9 @@
 import re
 
+from xtuner.v1.config import BaseRouterConfig, MoEConfig
+from xtuner.v1.module.attention import MHAConfig
+from xtuner.v1.module.router.greedy import GreedyRouterConfig
+
 from .moe import MoE
 
 
@@ -32,3 +36,32 @@ class Qwen3MoE(MoE):
             return [key.replace("norm.", "model.norm.")]
         else:
             return [key]
+
+
+class Qwen3MoE30BA3Config(MoEConfig):
+    vocab_size: int = 151936
+    max_position_embeddings: int = 4096
+    padding_idx: int = 0
+    num_hidden_layers: int = 48
+    hidden_size: int = 2048
+    intermediate_size: int = 6144
+    rms_norm_eps: float = 1e-6
+    rope_theta: float = 1000000.0
+    hidden_act: str = "silu"
+    attention: MHAConfig = MHAConfig(num_attention_heads=32, num_key_value_heads=4, head_dim=128, qk_norm=True)
+    tie_word_embeddings: bool = False
+    chunked_loss: bool = False
+    n_routed_experts: int = 128
+    n_shared_experts: int = 0
+    num_experts_per_tok: int = 8
+    first_k_dense_replace: int = 0
+    hidden_factor: float = 1.0
+    moe_intermediate_size: int = 768
+    router: BaseRouterConfig = GreedyRouterConfig(
+        scoring_func="softmax",
+        norm_topk_prob=True,
+        router_scaling_factor=1.0,
+    )
+
+    def build(self) -> Qwen3MoE:
+        return Qwen3MoE(self)

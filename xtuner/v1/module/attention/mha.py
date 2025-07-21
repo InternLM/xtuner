@@ -6,7 +6,7 @@ from flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
 from torch import nn
 
 from transformers.models.llama.modeling_llama import apply_rotary_pos_emb, repeat_kv
-from xtuner.v1.config import BaseAttnConfig, TransformerConfig
+from xtuner.v1.config import BaseAttnConfig, Float8Config, GenerateConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.ops.comm.all_to_all import ulysses_all_to_all
 from xtuner.v1.utils import get_logger
@@ -19,15 +19,29 @@ from .kv_cache import fill_paged_kv_cache
 logger = get_logger()
 
 
-class MHAConfig(BaseAttnConfig):
+class MHAConfig(BaseAttnConfig["MultiHeadAttention"]):
     num_key_value_heads: int
-    head_dim: int = 128
     dropout: bool = False
-    causal: bool = True
+    # causal: bool = True
     qkv_bias: bool = False
     qk_norm: bool = False
     rms_norm_eps: float = 1e-06
     o_bias: bool = False
+
+    def build(
+        self,
+        hidden_size: int,
+        layer_idx: int = 0,
+        generate_config: GenerateConfig | None = None,
+        float8_cfg: Float8Config | None = None,
+    ) -> "MultiHeadAttention":
+        return MultiHeadAttention(
+            **self.model_dump(),
+            hidden_size=hidden_size,
+            layer_idx=layer_idx,
+            generate_config=generate_config,
+            float8_cfg=float8_cfg,
+        )
 
 
 @torch.library.custom_op("xtuner::paged_attention_decoding", mutates_args=())
@@ -68,50 +82,68 @@ def paged_attention_decoding_fake(
 class MultiHeadAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper."""
 
-    def __init__(self, config: TransformerConfig, layer_idx: int = 0):
+    def __init__(
+        self,
+        *,
+        head_dim: int,
+        hidden_size: int,
+        num_attention_heads: int,
+        num_key_value_heads: int,
+        dropout: float = False,
+        # casual: bool = True,
+        qkv_bias: bool = False,
+        qk_norm: bool = False,
+        rms_norm_eps: float = 1e-6,
+        o_bias: bool = False,
+        float8_cfg: Float8Config | None = None,
+        generate_config: GenerateConfig | None = None,
+        layer_idx: int = 0,
+    ):
         super().__init__()
-        attn_config = config.attention
-        if not isinstance(attn_config, MHAConfig):
-            raise TypeError(f"Expected config to be of type MHAConfig, but got {type(attn_config)}")
-        self.config = cast(MHAConfig, attn_config)
-        self.model_config = config
+        self.head_dim = head_dim
+        self.hidden_size = hidden_size
+        self.num_attention_heads = num_attention_heads
+        self.num_key_value_heads = num_key_value_heads
+        self.num_attention_groups = num_attention_heads // num_key_value_heads
+        self.scaling = self.head_dim**-0.5
+        self.dropout = dropout
+        # self.is_causal = casual
+        self.qkv_bias = qkv_bias
+        self.qk_norm = qk_norm
+        self.rms_norm_eps = rms_norm_eps
+        self.o_bias = o_bias
+        self.generate_config = generate_config
+        self.float8_cfg = float8_cfg
         self.layer_idx = layer_idx
 
-        self.head_dim = self.config.head_dim
-        self.num_key_value_heads = self.config.num_key_value_heads
-        self.num_key_value_groups = self.config.num_attention_heads // self.config.num_key_value_heads
-        self.scaling = self.head_dim**-0.5
-        self.attention_dropout = self.config.dropout
-        self.is_causal = self.config.causal
-
         self.q_proj = build_linear(
-            config.hidden_size,
-            self.config.num_attention_heads * self.head_dim,
-            bias=self.config.qkv_bias,
-            float8_cfg=config.float8_cfg,
+            self.hidden_size,
+            self.num_attention_heads * self.head_dim,
+            bias=self.qkv_bias,
+            float8_cfg=self.float8_cfg,
         )
         self.k_proj = build_linear(
-            config.hidden_size,
-            self.config.num_key_value_heads * self.head_dim,
-            bias=self.config.qkv_bias,
-            float8_cfg=config.float8_cfg,
+            self.hidden_size,
+            self.num_key_value_heads * self.head_dim,
+            bias=self.qkv_bias,
+            float8_cfg=self.float8_cfg,
         )
         self.v_proj = build_linear(
-            config.hidden_size,
-            self.config.num_key_value_heads * self.head_dim,
-            bias=self.config.qkv_bias,
-            float8_cfg=config.float8_cfg,
+            self.hidden_size,
+            self.num_key_value_heads * self.head_dim,
+            bias=self.qkv_bias,
+            float8_cfg=self.float8_cfg,
         )
         self.o_proj = build_linear(
-            self.config.num_attention_heads * self.head_dim,
-            config.hidden_size,
-            bias=self.config.o_bias,
-            float8_cfg=config.float8_cfg,
+            self.num_attention_heads * self.head_dim,
+            self.hidden_size,
+            bias=self.o_bias,
+            float8_cfg=self.float8_cfg,
         )
 
-        if self.config.qk_norm:
-            self.q_norm = RMSNorm(self.head_dim, eps=self.config.rms_norm_eps)
-            self.k_norm = RMSNorm(self.head_dim, eps=self.config.rms_norm_eps)
+        if self.qk_norm:
+            self.q_norm = RMSNorm(self.head_dim, eps=self.rms_norm_eps)
+            self.k_norm = RMSNorm(self.head_dim, eps=self.rms_norm_eps)
 
     def prefilling(
         self,
@@ -127,7 +159,7 @@ class MultiHeadAttention(nn.Module):
         key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
         value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
 
-        if self.config.qk_norm:
+        if self.qk_norm:
             query_states = self.q_norm(query_states)
             key_states = self.k_norm(key_states)
 
@@ -159,7 +191,7 @@ class MultiHeadAttention(nn.Module):
                 cu_seqlens_k=seq_ctx.cu_seq_lens_k,
                 max_seqlen_q=seq_ctx.max_length_q,
                 max_seqlen_k=seq_ctx.max_length_k,
-                dropout_p=self.config.dropout,
+                dropout_p=self.dropout,
                 causal=True,
             ),
         )
@@ -185,7 +217,7 @@ class MultiHeadAttention(nn.Module):
         key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
         value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
 
-        if self.config.qk_norm:
+        if self.qk_norm:
             query_states = self.q_norm(query_states)
             key_states = self.k_norm(key_states)
 
@@ -250,7 +282,7 @@ class MultiHeadAttention(nn.Module):
         key_states = self.k_proj(hidden_states).view(hidden_shape)
         value_states = self.v_proj(hidden_states).view(hidden_shape)
 
-        if self.config.qk_norm:
+        if self.qk_norm:
             query_states = self.q_norm(query_states)
             key_states = self.k_norm(key_states)
 
@@ -305,7 +337,7 @@ class MultiHeadAttention(nn.Module):
                 cu_seqlens_k=seq_ctx.cu_seq_lens_k,
                 max_seqlen_q=seq_ctx.max_length_q,
                 max_seqlen_k=seq_ctx.max_length_k,
-                dropout_p=self.config.dropout,
+                dropout_p=self.dropout,
                 causal=True,
             ),
         )
@@ -330,7 +362,7 @@ class MultiHeadAttention(nn.Module):
         head_dim = self.head_dim
         num_heads = self.num_key_value_heads
 
-        generate_config = self.model_config.generate_config
+        generate_config = self.generate_config
         assert generate_config is not None, "Model configuration for generation is not set."
 
         max_length = max_length or generate_config.max_length

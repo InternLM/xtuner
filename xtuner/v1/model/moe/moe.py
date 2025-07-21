@@ -83,6 +83,7 @@ class MoE(BaseModel):
         if self.chunked_loss:
             assert is_installed("liger_kernel"), "Liger kernel is required for chunked loss."
         self.load_spec_mapping = self._init_load_spec()
+        self._maybe_compile_layers()
 
     def forward(
         self,
@@ -172,9 +173,37 @@ class MoE(BaseModel):
         layers = nn.ModuleDict()
         for layer_idx in range(config.num_hidden_layers):
             if layer_idx < config.first_k_dense_replace:
-                layers[str(layer_idx)] = DenseDecoderLayer(config, layer_idx)
+                layers[str(layer_idx)] = DenseDecoderLayer(
+                    hidden_size=config.hidden_size,
+                    intermediate_size=config.intermediate_size,
+                    mlp_bias=config.mlp_bias,
+                    hidden_act=config.hidden_act,
+                    rms_norm_eps=config.rms_norm_eps,
+                    attention_config=config.attention,
+                    generate_config=config.generate_config,
+                    float8_cfg=config.float8_cfg,
+                    layer_idx=layer_idx,
+                )
             else:
-                layers[str(layer_idx)] = MoEDecoderLayer(config, layer_idx, self.ep_mesh)
+                layers[str(layer_idx)] = MoEDecoderLayer(
+                    hidden_size=config.hidden_size,
+                    intermediate_size=config.intermediate_size,
+                    moe_intermediate_size=config.moe_intermediate_size,
+                    mlp_bias=config.mlp_bias,
+                    hidden_act=config.hidden_act,
+                    rms_norm_eps=config.rms_norm_eps,
+                    num_experts_per_tok=config.num_experts_per_tok,
+                    n_routed_experts=config.n_routed_experts,
+                    n_shared_experts=config.n_shared_experts,
+                    hidden_factor=config.hidden_factor,
+                    attention_config=config.attention,
+                    generate_config=config.generate_config,
+                    router_config=config.router,
+                    float8_cfg=config.float8_cfg,
+                    layer_idx=layer_idx,
+                    dispatcher=config.dispatcher,
+                    ep_mesh=self.ep_mesh,
+                )
         return layers
 
     def build_rotary_embedding(self, config: MoEConfig) -> RotaryEmbedding:
@@ -408,25 +437,32 @@ class MoE(BaseModel):
         traverse(model)
 
     def _maybe_compile_layers(self):
-        assert self.fsdp_config is not None, "FSDPConfig must be set before calling maybe_compile_layers"
-        assert self.ep_mesh is not None, "ep_mesh must be set before calling maybe_compile_layers"
-
-        if self.fsdp_config.torch_compile:
-            if self.fsdp_config.compile_targets is None:
-                if self.ep_mesh.size() > 1:
-                    # all_to_all_single_autograd in TorchAll2AllDispatcher.dispatch can not be compiled even if the fullgraph=False
-                    # ref: https://github.com/pytorch/pytorch/issues/155205
-                    # todo: decorate MoEDecoderLayer.forward with @torch.compile(fullgraph=False) when the bug is fixed
-                    # so that we do not need to remove the compile target
-                    maybe_compile.remove_compile_target(
-                        "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer.forward"
-                    )
+        if self.fsdp_config is not None:
+            if self.fsdp_config.torch_compile:
+                if self.fsdp_config.compile_targets is None:
+                    if self.ep_mesh.size() > 1:
+                        # all_to_all_single_autograd in TorchAll2AllDispatcher.dispatch can not be compiled even if the fullgraph=False
+                        # ref: https://github.com/pytorch/pytorch/issues/155205
+                        # todo: decorate MoEDecoderLayer.forward with @torch.compile(fullgraph=False) when the bug is fixed
+                        # so that we do not need to remove the compile target
+                        maybe_compile.remove_compile_target(
+                            "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer.forward"
+                        )
+                else:
+                    maybe_compile.clear_compile_targets()
+                    for target in self.fsdp_config.compile_targets:
+                        maybe_compile.set_compile_target(target)
             else:
                 maybe_compile.clear_compile_targets()
-                for target in self.fsdp_config.compile_targets:
-                    maybe_compile.set_compile_target(target)
         else:
-            maybe_compile.clear_compile_targets()
+            if self.ep_mesh is not None and self.ep_mesh.size() > 1:
+                # all_to_all_single_autograd in TorchAll2AllDispatcher.dispatch can not be compiled even if the fullgraph=False
+                # ref: https://github.com/pytorch/pytorch/issues/155205
+                # todo: decorate MoEDecoderLayer.forward with @torch.compile(fullgraph=False) when the bug is fixed
+                # so that we do not need to remove the compile target
+                maybe_compile.remove_compile_target(
+                    "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer.forward"
+                )
 
     # TODO: Remove patch before opensource
     @staticmethod
