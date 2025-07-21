@@ -1,14 +1,21 @@
 import copy
 import os
+from functools import partial
+from typing import Iterable
 
 import torch
 from mmengine.dist import get_rank
 from mmengine.fileio import list_dir_or_file
+from torch.distributed.device_mesh import DeviceMesh
 from torch.utils.data import ConcatDataset, DataLoader
 
 from xtuner.v1.utils import get_logger
 
 from ..config.data_config import DataloaderConfig, DatasetConfig
+from ..datasets.collator import sft_llm_collator
+from ..datasets.ftdp import FtdpTokenizeFunction
+from ..datasets.jsonl import JsonlDataset
+from .data_item import DataItem
 from .packing import ExpandSoftPackDataset, SoftPackDataset
 from .sampler import LengthGroupedSampler, ParallelSampler
 
@@ -16,7 +23,8 @@ from .sampler import LengthGroupedSampler, ParallelSampler
 logger = get_logger()
 
 
-def build_datasets(dataset_config: DatasetConfig, tokenizer):
+# TODO: (huanghaian) Fix the return type hint static check
+def build_datasets(dataset_config: DatasetConfig, tokenizer) -> list[Iterable[DataItem]]:
     meta_datas = dataset_config.meta_datas
 
     datasets = []
@@ -34,13 +42,13 @@ def build_datasets(dataset_config: DatasetConfig, tokenizer):
             if tokenizer_fn_args is None:
                 tokenizer_fn_args = {}
 
-            tokenize_fn = dataset_config.tokenizer_fn(meta_data_, tokenizer, **tokenizer_fn_args)
+            tokenize_fn = FtdpTokenizeFunction(meta_data_, tokenizer, **tokenizer_fn_args)
 
             dataset_args = dataset_config.dataset_args
             if dataset_args is None:
                 dataset_args = {}
 
-            _dataset = dataset_config.dataset_class(
+            _dataset = JsonlDataset(
                 annotation_path,
                 sample_ratio=meta_data_.get("sample_ratio", 1.0),
                 tokenize_fn=tokenize_fn,
@@ -52,10 +60,16 @@ def build_datasets(dataset_config: DatasetConfig, tokenizer):
                     f"[Dataset] (Original) {name}/{os.path.basename(annotation_path)}: {len(_dataset)} samples."
                 )
             datasets.append(_dataset)
-    return datasets
+    return datasets  # type: ignore
 
 
-def build_dataloader(dataloader_config: DataloaderConfig, datasets, dp_mesh):
+def build_dataloader(
+    dataloader_config: DataloaderConfig,
+    datasets,
+    dp_mesh: DeviceMesh,
+    global_batch_size: int,
+    micro_batch_size: int,
+) -> Iterable[list[DataItem]]:
     assert isinstance(datasets, list), "datasets must be a list of datasets."
 
     if dataloader_config.pack_level != "none" and get_rank == 0:
@@ -65,7 +79,9 @@ def build_dataloader(dataloader_config: DataloaderConfig, datasets, dp_mesh):
     if dataloader_config.pack_level == "soft":
         logger.info("[Dataset] Start packing data of SoftPackDataset.")
         dataset = SoftPackDataset(
-            datasets, target=dataloader_config.pack_max_length, blend=dataloader_config.global_pack
+            datasets,
+            target=dataloader_config.pack_max_length,
+            blend=dataloader_config.global_pack,
         )
     elif dataloader_config.pack_level == "expand_soft":
         logger.info("[Dataset] Start packing data of ExpandSoftPackDataset.")
@@ -87,9 +103,9 @@ def build_dataloader(dataloader_config: DataloaderConfig, datasets, dp_mesh):
         logger.info(f"[Dataset] (Packed) {packed_samples} samples.")
 
     if dataloader_config.group_by_length:
-        sampler = LengthGroupedSampler(dataset, dp_mesh, dataloader_config.global_batch_size)
+        sampler = LengthGroupedSampler(dataset, dp_mesh, global_batch_size)
     else:
-        sampler = ParallelSampler(dataset, dp_mesh, dataloader_config.global_batch_size, shuffle=True)  # type: ignore
+        sampler = ParallelSampler(dataset, dp_mesh, global_batch_size, shuffle=True)  # type: ignore
 
     ctx = torch.multiprocessing.get_context("fork")
     # Using `fork` here since `torchrun` uses the spawn method by default.
@@ -102,14 +118,20 @@ def build_dataloader(dataloader_config: DataloaderConfig, datasets, dp_mesh):
     # will be imported during unpickling. This import process happens during deserialization,
     # not serialization, and is very slow and inefficient.
     # Using forkserver avoids these redundant imports and improves performance.
+    collator = partial(
+        sft_llm_collator,
+        max_length=dataloader_config.max_length,
+        pack_max_length=dataloader_config.pack_max_length,
+        padding_token_idx=dataloader_config.padding_token_idx,
+    )
     dataloader = DataLoader(
         dataset,
-        batch_size=dataloader_config.mirco_batch_size,
+        batch_size=micro_batch_size,
         num_workers=dataloader_config.num_workers,
         # Ensure to round up or drop last based on the `global_batch_size`,
         # if you want to replace a custom sampler.
         sampler=sampler,
-        collate_fn=dataloader_config.collator_fn,
+        collate_fn=collator,
         multiprocessing_context=ctx if dataloader_config.num_workers > 0 else None,
         persistent_workers=dataloader_config.num_workers > 0,
     )

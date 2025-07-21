@@ -8,6 +8,7 @@ from xtuner.v1.config.float8 import Float8Config
 
 
 if TYPE_CHECKING:
+    from xtuner.v1.model.base import BaseModel as _BaseModel
     from xtuner.v1.model.moe.moe import MoE
 
 
@@ -69,7 +70,6 @@ class TransformerConfig(BaseModel):
         title="Base model config for xtuner",
         extra="allow",
     )
-    model_path: str | None = None
     vocab_size: int
     max_position_embeddings: int
     padding_idx: int
@@ -95,6 +95,9 @@ class TransformerConfig(BaseModel):
     def head_dim(self) -> int:
         return self.attention.head_dim
 
+    def build(self) -> "_BaseModel":
+        raise NotImplementedError
+
 
 class MoEConfig(TransformerConfig):
     n_routed_experts: int
@@ -103,7 +106,7 @@ class MoEConfig(TransformerConfig):
     first_k_dense_replace: int = 0
     hidden_factor: float = 1.0
     moe_intermediate_size: int
-    ep_size: int | None = None
+    ep_size: int = 1
     dispatcher: Literal["deepep", "all2all"] | None = None
     router: BaseRouterConfig
 

@@ -7,8 +7,12 @@ from loguru import logger
 _LOGGER = None
 
 
-def log_format(debug=False):
-    formatter = "[XTuner][{time:YYYY-MM-DD HH:mm:ss}][<level>{level}</level>]"
+def log_format(debug: bool = False, rank: int | None = None):
+    if rank is None:
+        prefix = "[XTuner]"
+    else:
+        prefix = f"[XTuner][RANK {rank}]"
+    formatter = f"{prefix}[{{time:YYYY-MM-DD HH:mm:ss}}][<level>{{level}}</level>]"
 
     if debug:
         formatter += "[<cyan>{name}</cyan>:"

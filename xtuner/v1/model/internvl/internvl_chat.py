@@ -13,7 +13,7 @@ from xtuner.v1.utils import HFCheckpointLoader, get_logger, get_padding_length
 
 from ..moe.qwen3 import Qwen3MoE
 from .modeling_intern_vit import InternVisionModel
-from .internvl_config import InternVLConfig
+
 
 logger = get_logger()
 
@@ -32,7 +32,8 @@ def pixel_shuffle(x, scale_factor=0.5):
 
 class InternVLChatModel(nn.Module):
     # TODO: No distinction between dense and moe models
-    def __init__(self, config: InternVLChatConfig, model_mesh: DeviceMesh | None = None, dispatcher: str = "deepep"):
+    # TODO: (huanghaian) Fix type hint here
+    def __init__(self, config, model_mesh: DeviceMesh | None = None, dispatcher: str = "deepep"):
         super().__init__()
 
         self.select_layer = config.select_layer
@@ -56,7 +57,8 @@ class InternVLChatModel(nn.Module):
         if model_mesh is not None and model_mesh.size() == 1:
             dispatcher = "naive"
 
-        replace_llm_config = self._replace_llm_config(llm_config, dispatcher)
+        # TODO: (huanghaian) error impl
+        replace_llm_config = self._replace_llm_config(llm_config, dispatcher)  # type: ignore
 
         if llm_config.architectures[0] == "Qwen3MoeForCausalLM":
             self.llm_model = Qwen3MoE(replace_llm_config)

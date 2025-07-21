@@ -106,7 +106,6 @@ class MoE(BaseModel):
 
         if return_router_results:
             output["router_logits"] = {}
-
         for idx, decoder_layer in self.layers.items():
             if int(idx) < self.config.first_k_dense_replace:
                 hidden_states = decoder_layer(
@@ -238,6 +237,11 @@ class MoE(BaseModel):
         float8_handler: Float8Handler | None = None,
     ):
         self.fsdp_config = fsdp_config
+        assert self.fsdp_config.ep_size == self.config.ep_size
+        self.mp_policy = MixedPrecisionPolicy(
+            param_dtype=self.fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
+        )
+        device = "cpu" if self.fsdp_config.cpu_offload else str(DEVICE)
         self._init_device_mesh(fsdp_config)
 
         if float8_handler is not None:
@@ -294,6 +298,7 @@ class MoE(BaseModel):
                 reshard_after_forward=reshard_after_forward,
                 offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
             )
+            layer.to_empty(device=device)
 
         for layer_cur, layer_next in zip(
             list(self.layers.values())[:-1],
@@ -309,6 +314,7 @@ class MoE(BaseModel):
             reshard_after_forward=self.fsdp_config.reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
         )
+        self.embed_tokens.to_empty(device=device)
 
         self.norm.to_empty(device=DEVICE_MODULE.current_device())
         fully_shard(
@@ -318,6 +324,7 @@ class MoE(BaseModel):
             reshard_after_forward=self.fsdp_config.reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
         )
+        self.norm.to_empty(device=device)
 
         self.lm_head.to_empty(device=DEVICE_MODULE.current_device())
         fully_shard(
@@ -327,6 +334,7 @@ class MoE(BaseModel):
             reshard_after_forward=self.fsdp_config.reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
         )
+        self.lm_head.to_empty(device=device)
 
         fully_shard(
             self,
@@ -337,7 +345,7 @@ class MoE(BaseModel):
         )
         self.set_modules_to_forward_prefetch([self.embed_tokens, self.layers["0"]])  # type: ignore
 
-        for name, module in self.named_modules():
+        for _, module in self.named_modules():
             if isinstance(module, nn.Embedding):
                 module.forward = types.MethodType(self.patched_emb_forward, module)  # type: ignore
             elif isinstance(module, RMSNorm):

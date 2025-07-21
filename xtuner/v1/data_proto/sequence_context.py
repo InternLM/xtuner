@@ -58,7 +58,7 @@ class SequenceContext:
     @classmethod
     def from_input_ids(
         cls,
-        input_ids: tuple[torch.LongTensor],
+        input_ids: tuple[torch.LongTensor, ...],
         block_table: torch.Tensor | None = None,
         sp_mesh: DeviceMesh | None = None,
         device: str = "cuda",
@@ -205,4 +205,34 @@ class SequenceContext:
     def set_sp_mesh(self, sp_mesh: DeviceMesh) -> Self:
         """Set the sequence parallel mesh."""
         self.sequence_parallel_mesh = sp_mesh
+        return self
+
+    def to(self, device: torch.device | str):
+        """Move all tensors in the context to the specified device.
+
+        Args:
+            device: The target device to move tensors to.
+
+        Returns:
+            Self: The context with tensors moved to the target device.
+        """
+        self.input_ids = self.input_ids.to(device)  # type: ignore
+        self.cu_seq_lens_q = self.cu_seq_lens_q.to(device)  # type: ignore
+        self.cu_seq_lens_k = self.cu_seq_lens_k.to(device)  # type: ignore
+
+        if self.position_ids is not None and hasattr(self.position_ids, "to"):
+            self.position_ids = self.position_ids.to(device)  # type: ignore
+
+        if self.block_table is not None and hasattr(self.block_table, "to"):
+            self.block_table = self.block_table.to(device)  # type: ignore
+
+        if self.image_flags is not None and hasattr(self.image_flags, "to"):
+            self.image_flags = self.image_flags.to(device)  # type: ignore
+
+        if self.pixel_values is not None and hasattr(self.pixel_values, "to"):
+            self.pixel_values = self.pixel_values.to(device)  # type: ignore
+
+        if self.inputs_embeds is not None and hasattr(self.inputs_embeds, "to"):
+            self.inputs_embeds = self.inputs_embeds.to(device)  # type: ignore
+
         return self

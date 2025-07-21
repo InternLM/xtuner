@@ -10,7 +10,6 @@ from typing import Dict, List, Optional, Tuple, cast
 import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
-import torch.nn as nn
 from mmengine import mkdir_or_exist
 from safetensors import safe_open
 from torch.distributed._tensor import DTensor, Replicate, Shard
@@ -30,11 +29,10 @@ from torch.utils._foreach_utils import (
 )
 
 from xtuner.v1.config import FSDPConfig, LRConfig, OptimConfig, TransformerConfig
-from xtuner.v1.data_proto import SequenceContext
+from xtuner.v1.datasets.collator import ColateItem
 from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.model import BaseModel
 from xtuner.v1.utils import get_device, get_logger, get_torch_device_module
-from xtuner.v1.utils.pad import pad_to_max_length
 
 
 logger = get_logger()
@@ -153,12 +151,21 @@ class DenseTrainEngine:
         self.fsdp_cfg = fsdp_cfg
         self.model = self.build_model()
         if self.float8_handler:
-            self.float8_handler.build_reduce_mesh(self.model, cast(BaseModel, self.model).fsdp_mesh)
+            self.float8_handler.build_reduce_mesh(self.model, cast(DeviceMesh, self.model.fsdp_mesh))
         self.optimizer = self.build_optimizer(optim_cfg)
         self.lr_scheduler = self.build_lr_scheduler(lr_cfg)
 
-    def build_model(self) -> nn.Module:
-        pass
+    def build_model(self) -> BaseModel:
+        with torch.device("meta"):
+            model = self.model_cfg.build()
+
+        if self.model_cfg.float8_cfg is not None and self.model_cfg.float8_cfg.enable_float8:
+            self.float8_handler = Float8Handler(
+                scaling_granularity_gemm=self.model_cfg.float8_cfg.scaling_granularity_gemm,
+                scaling_granularity_grouped_gemm=self.model_cfg.float8_cfg.scaling_granularity_grouped_gemm,
+            )
+        model = model.fully_shard(self.fsdp_cfg, self.float8_handler)
+        return model
 
     def build_optimizer(self, optim_cfg: OptimConfig) -> torch.optim.Optimizer:
         params = [p for p in self.model.parameters() if p.requires_grad]
@@ -195,12 +202,11 @@ class DenseTrainEngine:
         )
         return lr_scheduler
 
-    def cal_global_grad_tokens(self, data_batches: List[Dict], sp_mesh=None):
+    def cal_global_grad_tokens(self, labels: list[torch.Tensor], sp_mesh=None):
         # calculate global token number which is used for loss scaling
-        rank_grad_tokens = torch.tensor(0, dtype=torch.int64)
-        for batch in data_batches:
-            _iter_labels = batch["labels"]
-            rank_grad_tokens += (_iter_labels >= 0).sum()
+        rank_grad_tokens = torch.tensor(0, dtype=torch.int64, device=DEVICE)
+        for label in labels:
+            rank_grad_tokens += (label >= 0).sum()
         rank_grad_tokens = rank_grad_tokens.cuda()
         dist.all_reduce(rank_grad_tokens)
         if sp_mesh:
@@ -210,35 +216,8 @@ class DenseTrainEngine:
             global_grad_tokens = rank_grad_tokens
         return global_grad_tokens
 
-    def data_preprocess(
-        self, data_batch: Dict, sp_mesh: Optional[DeviceMesh] = None
-    ) -> Tuple[SequenceContext, torch.LongTensor]:
-        # labels from dataloader should be shifted, or the label of the eos token will be the bos token from the next sequence
-        shift_labels = data_batch["labels"].cuda()
-        input_ids = data_batch["input_ids"].cuda()
-        num_tokens = data_batch["num_tokens"].tolist()
-
-        pad_len = self.fsdp_cfg.max_length - input_ids.shape[1]
-        if pad_len > 0:
-            input_ids = pad_to_max_length(input_ids, 0, self.fsdp_cfg.max_length, dim=1)
-            shift_labels = pad_to_max_length(shift_labels, -100, self.fsdp_cfg.max_length, dim=1)
-            num_tokens += [pad_len]
-
-        cu_seq_lens = torch.cumsum(torch.IntTensor([0] + num_tokens), dim=0).cuda().int()
-        shift_seq_ctx = SequenceContext(
-            input_ids=input_ids,
-            cu_seq_lens_q=cu_seq_lens,  # type: ignore
-            cu_seq_lens_k=cu_seq_lens,  # type: ignore
-            max_length_q=max(num_tokens),
-            max_length_k=max(num_tokens),
-            num_padding=pad_len,
-        )
-        if sp_mesh:
-            shift_seq_ctx, shift_labels = shift_seq_ctx.split_with_labels(shift_labels, sp_mesh)
-        return shift_seq_ctx, shift_labels
-
     def train_step(
-        self, data_batches: List[Dict], intra_layer_micro_batch: int = 1, sp_mesh: Optional[DeviceMesh] = None
+        self, data_batches: list[ColateItem], intra_layer_micro_batch: int = 1, sp_mesh: Optional[DeviceMesh] = None
     ):
         """Perform a training step with the given data batches and mesh.
 
@@ -250,18 +229,23 @@ class DenseTrainEngine:
             sp_mesh (Optional[DeviceMesh]): The device mesh for sequence parallelism.
         """
         assert intra_layer_micro_batch == 1, "intra_layer_micro_batch must be set to 1 for dense models"
-        global_grad_tokens = self.cal_global_grad_tokens(data_batches, sp_mesh)
+        global_grad_tokens = self.cal_global_grad_tokens([i["labels"] for i in data_batches], sp_mesh)
         iters_per_step = len(data_batches)
         for _iter in range(iters_per_step):
             data = data_batches[_iter]
+            seq_ctx = data["seq_ctx"]
+            labels = data["labels"]
+
             # shift_seq_ctx and labels have been split in data_preprocess if sequence parallelism is enabled
-            shift_seq_ctx, shift_labels = self.data_preprocess(data, sp_mesh)
+            if sp_mesh:
+                seq_ctx, labels = seq_ctx.split_with_labels(labels, sp_mesh)  # type: ignore
+
             llm_loss = self.model(
-                seq_ctx=shift_seq_ctx,
-                labels=shift_labels,
+                seq_ctx=seq_ctx,
+                labels=labels,
             )
             # global average llm loss
-            rank_grad_tokens = (shift_labels >= 0).sum()
+            rank_grad_tokens = (labels >= 0).sum()
             # todo: support tp, currently assert tp_size == 1
             loss = llm_loss * rank_grad_tokens / global_grad_tokens * dist.get_world_size()
 
@@ -269,6 +253,9 @@ class DenseTrainEngine:
 
         self.step_optimizer()
         self.lr_scheduler.step()
+
+    def from_hf(self, hf_path: str, strict: bool = False):
+        self.model.from_hf(hf_path=hf_path, strict=strict)
 
     @staticmethod
     def group_tensors_by_device_mesh_and_placements(tensors: List[torch.Tensor]):

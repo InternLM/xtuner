@@ -1,7 +1,6 @@
 from .base_model import BaseAttnConfig, BaseRouterConfig, GenerateConfig, MoEConfig, TransformerConfig
 from .data_config import DataloaderConfig, DatasetConfig
-
-
+from .engine import EngineConfig, MoEEngineConfig
 from .float8 import Float8Config
 from .fsdp import FSDPConfig
 from .moe_loss import MoELossConfig
@@ -22,4 +21,6 @@ __all__ = [
     "DataloaderConfig",
     "Float8Config",
     "GenerateConfig",
+    "EngineConfig",
+    "MoEEngineConfig",
 ]
