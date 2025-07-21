@@ -11,7 +11,7 @@ from pathlib import Path
 from safetensors import safe_open
 
 from xtuner.v1.model.moe.moe import MoEConfig, SequenceContext
-from xtuner.v1.model.moe.qwen3 import Qwen3MoE
+from xtuner.v1.model.moe.qwen3 import Qwen3MoE, Qwen3MoE30BA3Config
 from xtuner.v1.module.attention import MHAConfig
 from xtuner.v1.module.router import GreedyRouterConfig
 from xtuner.v1.config import FSDPConfig
@@ -50,44 +50,11 @@ class TestQwen3MoE(DistributedTestBase):
         del hf_model
         torch.cuda.empty_cache()
 
-        router_config = GreedyRouterConfig(
-            scoring_func="sigmoid",
-            norm_topk_prob=True,
-            router_scaling_factor=1.0,
-        )
-        attention_config = MHAConfig(
-            num_attention_heads=32,
-            num_key_value_heads=4,
-            head_dim=128,
-            qk_norm=True
-        )
-        config = MoEConfig(
-            vocab_size=151936,
-            max_position_embeddings=4096,
-            padding_idx=0,
-            num_hidden_layers=48,
-            hidden_size=2048,
-            intermediate_size=6144,
-            rms_norm_eps=1e-6,
-            rope_theta=1000000.0,
-            hidden_act="silu",
-            attention=attention_config,
-            tie_word_embeddings=False,
-            training_dtype="bf16",
-            chunked_loss=False,
-            n_routed_experts=128,
-            n_shared_experts=0,
-            num_experts_per_tok=8,
-            first_k_dense_replace=0,
-            hidden_factor=1.0,
-            moe_intermediate_size=768,
-            dispatcher=dispatcher,
-            router=router_config,
-            ep_size=ep_size,
-        )
-
         with torch.device("meta"):
-            qwen_model = Qwen3MoE(config).to(torch.bfloat16)
+            cfg = Qwen3MoE30BA3Config()
+            cfg.dispatcher = dispatcher
+            cfg.ep_size = ep_size
+            qwen_model = cfg.build().to(torch.bfloat16)
 
         seq_ctx = SequenceContext.from_input_ids(input_ids=(input_ids, ))
         seq_ctx, shifted_labels = seq_ctx.shift_with_labels(labels=input_ids)
@@ -130,49 +97,16 @@ class TestQwen3MoE(DistributedTestBase):
         del hf_model
         torch.cuda.empty_cache()
 
-        router_config = GreedyRouterConfig(
-            scoring_func="sigmoid",
-            norm_topk_prob=True,
-            router_scaling_factor=1.0,
-        )
-        attention_config = MHAConfig(
-            num_attention_heads=32,
-            num_key_value_heads=4,
-            head_dim=128,
-            qk_norm=True
-        )
-        config = MoEConfig(
-            vocab_size=151936,
-            max_position_embeddings=4096,
-            padding_idx=0,
-            num_hidden_layers=48,
-            hidden_size=2048,
-            intermediate_size=6144,
-            rms_norm_eps=1e-6,
-            rope_theta=1000000.0,
-            hidden_act="silu",
-            attention=attention_config,
-            tie_word_embeddings=False,
-            training_dtype="bf16",
-            chunked_loss=False,
-            n_routed_experts=128,
-            n_shared_experts=0,
-            num_experts_per_tok=8,
-            first_k_dense_replace=0,
-            hidden_factor=1.0,
-            moe_intermediate_size=768,
-            dispatcher=dispatcher,
-            router=router_config,
-        )
-
+        with torch.device("meta"):
+            cfg = Qwen3MoE30BA3Config()
+            cfg.ep_size = ep_size
+            cfg.dispatcher = dispatcher
+            qwen_model = cfg.build().to(torch.bfloat16)
 
         fsdp_config = FSDPConfig(
             ep_size=ep_size,
             cpu_offload=False,
         )
-
-        with torch.device("meta"):
-            qwen_model = Qwen3MoE(config).to(torch.bfloat16)
 
         seq_ctx = SequenceContext.from_input_ids(input_ids=(input_ids, ))
         seq_ctx, shifted_labels = seq_ctx.shift_with_labels(labels=input_ids)
@@ -197,48 +131,16 @@ class TestQwen3MoE(DistributedTestBase):
     )
     def test_save_hf(self, device, dispatcher, ep_size):
         self.create_pg(device)
-        router_config = GreedyRouterConfig(
-            scoring_func="sigmoid",
-            norm_topk_prob=True,
-            router_scaling_factor=1.0,
-        )
-        attention_config = MHAConfig(
-            num_attention_heads=32,
-            num_key_value_heads=4,
-            head_dim=128,
-            qk_norm=True
-        )
-        config = MoEConfig(
-            vocab_size=151936,
-            max_position_embeddings=4096,
-            padding_idx=0,
-            num_hidden_layers=48,
-            hidden_size=2048,
-            intermediate_size=6144,
-            rms_norm_eps=1e-6,
-            rope_theta=1000000.0,
-            hidden_act="silu",
-            attention=attention_config,
-            tie_word_embeddings=False,
-            training_dtype="bf16",
-            chunked_loss=False,
-            n_routed_experts=128,
-            n_shared_experts=0,
-            num_experts_per_tok=8,
-            first_k_dense_replace=0,
-            hidden_factor=1.0,
-            moe_intermediate_size=768,
-            dispatcher=dispatcher,
-            router=router_config,
-        )
+        with torch.device("meta"):
+            cfg = Qwen3MoE30BA3Config()
+            cfg.dispatcher = dispatcher
+            cfg.ep_size = ep_size
+            qwen_model = cfg.build().to(torch.bfloat16)
 
         fsdp_config = FSDPConfig(
             ep_size=ep_size,
             cpu_offload=False,
         )
-
-        with torch.device("meta"):
-            qwen_model = Qwen3MoE(config).to(torch.bfloat16)
 
         cache_save_fh = {}
         with tempfile.TemporaryDirectory() as tmpdir:

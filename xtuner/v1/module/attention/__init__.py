@@ -63,19 +63,6 @@ class AttentionProtocol(Protocol):
         ...
 
 
-def build_attnention(
-    config: TransformerConfig,
-    layer_idx: int = 0,
-) -> AttentionProtocol:
-    """Build attention module based on the configuration."""
-    if isinstance(config.attention, MHAConfig):
-        return MultiHeadAttention(config, layer_idx)
-    elif isinstance(config.attention, MLAConfig):
-        return MultiLatentAttention(config, layer_idx)
-    else:
-        raise ValueError(f"Unsupported attention type: {type(config.attention)}")
-
-
 __all__ = [
     "MultiLatentAttention",
     "MultiHeadAttention",

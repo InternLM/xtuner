@@ -3,7 +3,6 @@ from .attention import (
     MLAConfig,
     MultiHeadAttention,
     MultiLatentAttention,
-    build_attnention,
 )
 from .dispatcher import NaiveDispatcher, TorchAll2AllDispatcher, build_dispatcher
 from .rms_norm import RMSNorm
@@ -19,13 +18,11 @@ __all__ = [
     "MultiLatentAttention",
     "MHAConfig",
     "MLAConfig",
-    "build_attnention",
     "RopeScalingConfig",
     "RotaryEmbedding",
     "TorchAll2AllDispatcher",
     "NaiveDispatcher",
     "build_dispatcher",
-    "build_router",
     "NoAuxRouter",
     "NoAuxRouterConfig",
     "GreedyRouter",

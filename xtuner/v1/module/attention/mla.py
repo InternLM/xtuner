@@ -8,8 +8,9 @@ from torch import nn
 from torch.distributed.tensor import DTensor
 from torch.nn import functional as F
 
-from xtuner.v1.config import BaseAttnConfig, TransformerConfig
+from xtuner.v1.config import BaseAttnConfig, Float8Config, GenerateConfig
 from xtuner.v1.data_proto import SequenceContext
+from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.utils import get_logger
 
 from ..linear.linear import build_linear
@@ -19,18 +20,27 @@ from ..rms_norm import RMSNorm
 logger = get_logger()
 
 
-class MLAConfig(BaseAttnConfig):
-    num_attention_heads: int = 128
-    kv_lora_rank: int = 512
-    q_lora_rank: int | None = None
-    qk_rope_head_dim: int = 64
-    qk_nope_head_dim: int = 64
-    head_dim: int = 128
-    v_head_dim: int = 128
-    causal: bool = True
-    o_bias: bool = False
-    qkv_bias: bool = False
-    dropout: bool = False
+class MLAConfig(BaseAttnConfig["MultiLatentAttention"]):
+    kv_lora_rank: int
+    q_lora_rank: int | None
+    qk_rope_head_dim: int
+    qk_nope_head_dim: int
+    v_head_dim: int
+
+    def build(
+        self,
+        hidden_size: int,
+        layer_idx: int = 0,
+        generate_config: GenerateConfig | None = None,
+        float8_cfg: Float8Config | None = None,
+    ) -> "MultiLatentAttention":
+        return MultiLatentAttention(
+            **self.model_dump(),
+            hidden_size=hidden_size,
+            layer_idx=layer_idx,
+            generate_config=generate_config,
+            float8_cfg=float8_cfg,
+        )
 
 
 @torch.library.custom_op("xpuyu::flash_mla_decoding", mutates_args=())
@@ -130,78 +140,95 @@ class MultiLatentAttention(nn.Module):
 
     def __init__(
         self,
-        config: TransformerConfig,
+        *,
+        head_dim: int,
+        hidden_size: int,
+        num_heads: int = 1,
+        kv_lora_rank: int,
+        qk_rope_head_dim: int,
+        qk_nope_head_dim: int,
+        v_head_dim: int,
+        q_lora_rank: int | None = None,
+        dropout: float = False,
+        # casual: bool = True,
+        qkv_bias: bool = False,
+        qk_norm: bool = False,
+        o_bias: bool = False,
+        rope_scaling_config: RopeScalingConfig | None = None,
+        float8_cfg: Float8Config | None = None,
+        generate_config: GenerateConfig | None = None,
         layer_idx: int = 0,
     ):
         super().__init__()
-        if not isinstance(config.attention, MLAConfig):
-            raise TypeError(f"Expected config.attention to be MLAConfig, but got {type(config.attention)}")
-        self.config = config.attention
-        self.model_config = config
+        self.head_dim = head_dim
+        self.hidden_size = hidden_size
+        self.kv_lora_rank = kv_lora_rank
+        self.qk_rope_head_dim = qk_rope_head_dim
+        self.qk_nope_head_dim = qk_nope_head_dim
+        self.v_head_dim = v_head_dim
+        self.q_lora_rank = q_lora_rank
+        self.dropout = dropout
+        self.num_heads = num_heads
+        # self.causal = casual
+        self.qkv_bias = qkv_bias
+        self.o_bias = o_bias
+        self.qk_norm = qk_norm
+        self.float8_cfg = float8_cfg
+        self.generate_config = generate_config
+        self.q_head_dim = qk_nope_head_dim + qk_rope_head_dim
+
         self.layer_idx = layer_idx
-
-        self.is_causal = self.config.causal
-        self.attention_dropout = self.config.dropout
-        self.hidden_size = config.hidden_size
-        self.num_heads = self.config.num_attention_heads
-
-        self.q_lora_rank = self.config.q_lora_rank
-        self.qk_rope_head_dim = self.config.qk_rope_head_dim
-        self.kv_lora_rank = self.config.kv_lora_rank
-        self.v_head_dim = self.config.v_head_dim
-        self.qk_nope_head_dim = self.config.qk_nope_head_dim
-        self.q_head_dim = self.config.qk_nope_head_dim + self.config.qk_rope_head_dim
 
         if self.q_lora_rank is None:
             self.q_proj = build_linear(
                 self.hidden_size,
                 self.num_heads * self.q_head_dim,
                 bias=False,
-                float8_cfg=config.float8_cfg,
+                float8_cfg=self.float8_cfg,
             )
         else:
             self.q_a_proj = build_linear(
                 self.hidden_size,
                 self.q_lora_rank,
-                bias=self.config.qkv_bias,
-                float8_cfg=config.float8_cfg,
+                bias=self.qkv_bias,
+                float8_cfg=self.float8_cfg,
             )
             self.q_a_layernorm = RMSNorm(self.q_lora_rank)
             self.q_b_proj = build_linear(
                 self.q_lora_rank,
                 self.num_heads * self.q_head_dim,
                 bias=False,
-                float8_cfg=config.float8_cfg,
+                float8_cfg=self.float8_cfg,
             )
 
         self.kv_a_proj_with_mqa = build_linear(
             self.hidden_size,
-            self.config.kv_lora_rank + self.config.qk_rope_head_dim,
-            bias=self.config.qkv_bias,
-            float8_cfg=config.float8_cfg,
+            self.kv_lora_rank + self.qk_rope_head_dim,
+            bias=self.qkv_bias,
+            float8_cfg=self.float8_cfg,
         )
-        self.kv_a_layernorm = RMSNorm(self.config.kv_lora_rank)
+        self.kv_a_layernorm = RMSNorm(self.kv_lora_rank)
         self.kv_b_proj = build_linear(
-            self.config.kv_lora_rank,
+            self.kv_lora_rank,
             self.num_heads * (self.q_head_dim - self.qk_rope_head_dim + self.v_head_dim),
             bias=False,
-            float8_cfg=config.float8_cfg,
+            float8_cfg=self.float8_cfg,
         )
 
         self.o_proj = build_linear(
             self.num_heads * self.v_head_dim,
             self.hidden_size,
-            bias=self.config.o_bias,
-            float8_cfg=config.float8_cfg,
+            bias=self.o_bias,
+            float8_cfg=self.float8_cfg,
         )
 
         self.softmax_scale = self.q_head_dim ** (-0.5)
 
-        rope_scaling = getattr(config, "rope_scaling", None)
-
-        if rope_scaling is not None:
-            mscale_all_dim: float = rope_scaling.mscale_all_dim if rope_scaling.mscale_all_dim is not None else 0.0
-            scaling_factor: float = rope_scaling.factor
+        if rope_scaling_config is not None:
+            mscale_all_dim = (
+                rope_scaling_config.mscale_all_dim if rope_scaling_config.mscale_all_dim is not None else 0.0
+            )
+            scaling_factor = rope_scaling_config.factor
             if mscale_all_dim:
                 mscale = yarn_get_mscale(scaling_factor, mscale_all_dim)
                 self.softmax_scale = self.softmax_scale * mscale * mscale
@@ -262,7 +289,7 @@ class MultiLatentAttention(nn.Module):
             cu_seqlens_k=attn_meta.cu_seq_lens_k,
             max_seqlen_q=attn_meta.max_length_q,
             max_seqlen_k=attn_meta.max_length_k,
-            dropout_p=self.config.dropout,
+            dropout_p=self.dropout,
             softmax_scale=self.softmax_scale,
             causal=True,
         )
@@ -359,7 +386,7 @@ class MultiLatentAttention(nn.Module):
             cu_seqlens_k=seq_ctx.cu_seq_lens_k,
             max_seqlen_q=seq_ctx.max_length_q,
             max_seqlen_k=seq_ctx.max_length_k,
-            dropout_p=self.config.dropout,
+            dropout_p=self.dropout,
             softmax_scale=self.softmax_scale,
             causal=True,
         )  # type: ignore[assignment]
@@ -377,7 +404,7 @@ class MultiLatentAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
-        attn_meta: SequenceContext,
+        seq_ctx: SequenceContext,
         past_key_values: list[list[torch.Tensor]],
     ) -> torch.Tensor:
         bsz, q_len, _ = hidden_states.size()
@@ -444,15 +471,15 @@ class MultiLatentAttention(nn.Module):
 
         query_states = torch.cat([q_nope, q_pe], dim=-1)
 
-        assert attn_meta.block_table is not None
-        bs = attn_meta.block_table.size(0)
+        assert seq_ctx.block_table is not None
+        bs = seq_ctx.block_table.size(0)
 
-        seq_lens_k = attn_meta.seq_lens_k
-        block_table = attn_meta.block_table
+        seq_lens_k = seq_ctx.seq_lens_k
+        block_table = seq_ctx.block_table
         block_size = past_key_values[self.layer_idx][0].size(1)
         bs = block_table.size(0)
 
-        assert attn_meta.cu_seq_lens_k.numel() - 1 == bs, f"{attn_meta.cu_seq_lens_k.numel()}, {bs}"
+        assert seq_ctx.cu_seq_lens_k.numel() - 1 == bs, f"{seq_ctx.cu_seq_lens_k.numel()}, {bs}"
 
         block_index = block_table[:, 0] + (seq_lens_k[:bs] - 1) // block_size
         past_key_values[self.layer_idx][0][block_index, (seq_lens_k[:bs] - 1) % block_size] = torch.cat(
@@ -463,9 +490,9 @@ class MultiLatentAttention(nn.Module):
         attn_output = flash_mla_decoding(
             query_states.view(q_len, bsz, self.num_heads, -1),
             past_key_values[self.layer_idx][0],
-            cache_seqlens=attn_meta.seq_lens_k,
+            cache_seqlens=seq_ctx.seq_lens_k,
             softmax_scale=self.softmax_scale,
-            block_table=attn_meta.block_table,
+            block_table=seq_ctx.block_table,
             head_dim_v=self.kv_lora_rank,
             num_heads=self.num_heads,
         )
@@ -534,7 +561,7 @@ class MultiLatentAttention(nn.Module):
             cu_seqlens_k=seq_ctx.cu_seq_lens_k,
             max_seqlen_q=seq_ctx.max_length_q,
             max_seqlen_k=seq_ctx.max_length_k,
-            dropout_p=self.config.dropout,
+            dropout_p=self.dropout,
             softmax_scale=self.softmax_scale,
             causal=True,
         )
@@ -554,7 +581,7 @@ class MultiLatentAttention(nn.Module):
         head_dim = self.kv_lora_rank + self.qk_rope_head_dim
         num_heads = 1
 
-        generate_config = self.model_config.generate_config
+        generate_config = self.generate_config
         assert generate_config is not None, "Model configuration for generation is not set."
 
         max_length = max_length or generate_config.max_length

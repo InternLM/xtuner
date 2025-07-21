@@ -2,27 +2,27 @@ import torch
 import torch.nn as nn
 
 from transformers.activations import ACT2FN
-from xtuner.v1.config.base_model import TransformerConfig
+from xtuner.v1.config.base_model import BaseAttnConfig, Float8Config, GenerateConfig, TransformerConfig
 from xtuner.v1.data_proto import SequenceContext
-from xtuner.v1.module import (
-    RMSNorm,
-    build_attnention,
-)
+from xtuner.v1.module import MultiHeadAttention, MultiLatentAttention, RMSNorm
 from xtuner.v1.utils import ForwardState
 
 from ..linear.linear import _Linear
 
 
 class DenseMLP(nn.Module):
-    def __init__(self, config: TransformerConfig):
-        super().__init__()
-        self.config = config
-        self.hidden_size = config.hidden_size
-        self.intermediate_size = config.intermediate_size
-        self.gate_proj = _Linear(self.hidden_size, self.intermediate_size, bias=config.mlp_bias)
-        self.up_proj = _Linear(self.hidden_size, self.intermediate_size, bias=config.mlp_bias)
-        self.down_proj = _Linear(self.intermediate_size, self.hidden_size, bias=config.mlp_bias)
-        self.act_fn = ACT2FN[config.hidden_act]
+    def __init__(
+        self,
+        *,
+        hidden_size: int,
+        intermediate_size: int,
+        bias: bool = False,
+        hidden_act: str,
+    ):
+        self.gate_proj = _Linear(hidden_size, intermediate_size, bias=bias)
+        self.up_proj = _Linear(hidden_size, intermediate_size, bias=bias)
+        self.down_proj = _Linear(intermediate_size, hidden_size, bias=bias)
+        self.act_fn = ACT2FN[hidden_act]
 
     def forward(self, x):
         down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
@@ -30,14 +30,49 @@ class DenseMLP(nn.Module):
 
 
 class DenseDecoderLayer(nn.Module):
-    def __init__(self, config: TransformerConfig, layer_idx: int):
+    def __init__(
+        self,
+        *,
+        hidden_size: int,
+        intermediate_size: int,
+        mlp_bias: bool = False,
+        hidden_act: str,
+        rms_norm_eps: float = 1e-6,
+        attention_config: BaseAttnConfig[MultiHeadAttention | MultiLatentAttention],
+        generate_config: GenerateConfig | None = None,
+        float8_cfg: Float8Config | None = None,
+        layer_idx: int = 0,
+    ):
         super().__init__()
-        self.config = config
-        self.hidden_size = config.hidden_size
-        self.self_attn = build_attnention(config, layer_idx)
-        self.mlp = DenseMLP(config)
-        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.hidden_size = hidden_size
+        self.self_attn = attention_config.build(
+            hidden_size=hidden_size,
+            layer_idx=layer_idx,
+            generate_config=generate_config,
+            float8_cfg=float8_cfg,
+        )
+        self.mlp = DenseMLP(
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            bias=mlp_bias,
+            hidden_act=hidden_act,
+        )
+        self.input_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps)
+
+    @classmethod
+    def from_config(cls, config: TransformerConfig, layer_idx: int):
+        self = cls(
+            hidden_size=config.hidden_size,
+            intermediate_size=config.intermediate_size,
+            mlp_bias=config.mlp_bias,
+            hidden_act=config.hidden_act,
+            attention_config=config.attention,
+            generate_config=config.generate_config,
+            float8_cfg=config.float8_cfg,
+            layer_idx=layer_idx,
+        )
+        return self
 
     def forward(
         self,

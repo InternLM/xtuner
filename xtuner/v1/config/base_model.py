@@ -1,4 +1,4 @@
-from typing import Literal, TypedDict
+from typing import TYPE_CHECKING, Generic, Literal, TypedDict, TypeVar
 
 import torch
 from pydantic import BaseModel, ConfigDict, computed_field
@@ -7,20 +7,11 @@ from typing_extensions import NotRequired
 from xtuner.v1.config.float8 import Float8Config
 
 
-class BaseAttnConfig(BaseModel):
-    model_config = ConfigDict(title="Base attention config for xtuner", extra="allow")
-    num_attention_heads: int
-    head_dim: int
-    dropout: bool = False
-    casual: bool = True
-    qkv_bias: bool = False
-    o_bias: bool = False
+if TYPE_CHECKING:
+    from xtuner.v1.model.moe.moe import MoE
 
 
-class BaseRouterConfig(BaseModel):
-    scoring_func: Literal["sigmoid", "softmax"]
-    router_scaling_factor: float
-    norm_topk_prob: bool
+T = TypeVar("T")
 
 
 class GenerateConfig(BaseModel):
@@ -29,6 +20,39 @@ class GenerateConfig(BaseModel):
     max_length: int = 2048
     block_size: int = 128
     dtype: Literal["bf16", "fp8"] = "bf16"
+
+
+class BaseAttnConfig(BaseModel, Generic[T]):
+    model_config = ConfigDict(title="Base attention config for xtuner", extra="allow")
+    num_attention_heads: int
+    head_dim: int
+    dropout: bool = False
+    # casual: bool = True
+    qkv_bias: bool = False
+    o_bias: bool = False
+
+    def build(
+        self,
+        hidden_size: int,
+        layer_idx: int = 0,
+        generate_config: GenerateConfig | None = None,
+        float8_cfg: Float8Config | None = None,
+    ) -> T:
+        raise NotImplementedError
+
+
+class BaseRouterConfig(BaseModel, Generic[T]):
+    scoring_func: Literal["sigmoid", "softmax"]
+    router_scaling_factor: float
+    norm_topk_prob: bool
+
+    def build(
+        self,
+        n_routed_experts: int,
+        num_experts_per_tok: int,
+    ) -> T:
+        """Build the router module."""
+        raise NotImplementedError
 
 
 class TransformerConfig(BaseModel):
@@ -58,7 +82,6 @@ class TransformerConfig(BaseModel):
     attention: BaseAttnConfig
     mlp_bias: bool = False
     tie_word_embeddings: bool = False
-    training_dtype: Literal["bf16", "fp8"] = "bf16"
     chunked_loss: bool = False
     model_type: Literal["qwen"] | None = None
     generate_config: GenerateConfig | None = None
@@ -83,6 +106,11 @@ class MoEConfig(TransformerConfig):
     ep_size: int | None = None
     dispatcher: Literal["deepep", "all2all"] | None = None
     router: BaseRouterConfig
+
+    def build(self) -> "MoE":
+        from xtuner.v1.model.moe.moe import MoE
+
+        return MoE(self)
 
 
 class ModelOutputs(TypedDict):

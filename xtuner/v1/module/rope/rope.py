@@ -13,7 +13,7 @@ class RopeScalingConfig(BaseModel):
     max_position_embeddings: int | None = None
     original_max_position_embeddings: int | None = None
     # For inference
-    factor: float | None = None
+    factor: float
     beta_fast: float | None = None
     beta_slow: float | None = None
     short_factor: list[float] | None = None

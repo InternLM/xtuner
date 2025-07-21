@@ -1,4 +1,4 @@
-from typing import cast
+from typing import Literal, cast
 
 import torch
 import torch.nn as nn
@@ -7,11 +7,12 @@ from torch.distributed.tensor import DTensor, Partial
 from torch.nn import functional as F
 
 from transformers.activations import ACT2FN
-from xtuner.v1.config.base_model import MoEConfig
+from xtuner.v1.config.base_model import BaseAttnConfig, BaseRouterConfig, Float8Config, GenerateConfig
 from xtuner.v1.data_proto import SequenceContext
-from xtuner.v1.module import RMSNorm, RouterResults, build_attnention, build_router
+from xtuner.v1.module import MultiHeadAttention, MultiLatentAttention, RMSNorm, RouterResults
 from xtuner.v1.module.dispatcher import PrefillingDispatchResult, build_dispatcher
 from xtuner.v1.module.grouped_linear.moe_group_linear import build_grouped_linear
+from xtuner.v1.module.router import GreedyRouter, NoAuxRouter
 from xtuner.v1.utils import ForwardState
 from xtuner.v1.utils.compile import maybe_compile
 
@@ -19,21 +20,23 @@ from ..linear.linear import build_linear
 
 
 class MoEMLP(nn.Module):
-    def __init__(self, config: MoEConfig):
+    def __init__(
+        self,
+        *,
+        hidden_size: int,
+        n_shared_experts: int,
+        moe_intermediate_size: int,
+        hidden_act: str,
+        mlp_bias: bool = False,
+        float8_cfg: Float8Config | None = None,
+    ):
         super().__init__()
-        self.config = config
-        self.hidden_size = config.hidden_size
-        self.intermediate_size = config.moe_intermediate_size * config.n_shared_experts
-        self.gate_proj = build_linear(
-            self.hidden_size, self.intermediate_size, bias=config.mlp_bias, float8_cfg=config.float8_cfg
-        )
-        self.up_proj = build_linear(
-            self.hidden_size, self.intermediate_size, bias=config.mlp_bias, float8_cfg=config.float8_cfg
-        )
-        self.down_proj = build_linear(
-            self.intermediate_size, self.hidden_size, bias=config.mlp_bias, float8_cfg=config.float8_cfg
-        )
-        self.act_fn = ACT2FN[config.hidden_act]
+        self.hidden_size = hidden_size
+        self.intermediate_size = moe_intermediate_size * n_shared_experts
+        self.gate_proj = build_linear(self.hidden_size, self.intermediate_size, bias=mlp_bias, float8_cfg=float8_cfg)
+        self.up_proj = build_linear(self.hidden_size, self.intermediate_size, bias=mlp_bias, float8_cfg=float8_cfg)
+        self.down_proj = build_linear(self.intermediate_size, self.hidden_size, bias=mlp_bias, float8_cfg=float8_cfg)
+        self.act_fn = ACT2FN[hidden_act]
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
@@ -41,18 +44,26 @@ class MoEMLP(nn.Module):
 
 
 class MoEGate(nn.Module):
-    def __init__(self, config: MoEConfig):
+    def __init__(
+        self,
+        *,
+        hidden_size: int,
+        n_routed_experts: int,
+        num_experts_per_tok: int,
+        router_config: BaseRouterConfig[GreedyRouter | NoAuxRouter],
+    ):
         super().__init__()
-        self.config = config
-        self.top_k = config.num_experts_per_tok
-        self.n_routed_experts = config.n_routed_experts
+        self.n_routed_experts = n_routed_experts
 
-        self.gating_dim = config.hidden_size
+        self.gating_dim = hidden_size
         self.weight = nn.Parameter(torch.empty((self.n_routed_experts, self.gating_dim)))
 
-        self.router = build_router(config)
+        self.router = router_config.build(
+            n_routed_experts=self.n_routed_experts,
+            num_experts_per_tok=num_experts_per_tok,
+        )
 
-    def forward(self, hidden_states) -> RouterResults:
+    def forward(self, hidden_states: torch.Tensor) -> RouterResults:
         _, _, h = hidden_states.shape
         ### compute gating score
         hidden_states = hidden_states.view(-1, h)
@@ -67,11 +78,19 @@ class MoEGate(nn.Module):
 
 
 class MoEBlock(nn.Module):
-    def __init__(self, config: MoEConfig, ep_mesh: DeviceMesh | None):
+    def __init__(
+        self,
+        *,
+        hidden_size: int,
+        moe_intermediate_size: int,
+        n_routed_experts: int,
+        ep_mesh: DeviceMesh | None = None,
+        float8_cfg: Float8Config | None = None,
+    ):
         super().__init__()
-        self.hidden_size = config.hidden_size
-        self.intermediate_size = config.moe_intermediate_size
-        self.num_routed_experts = config.n_routed_experts
+        self.hidden_size = hidden_size
+        self.intermediate_size = moe_intermediate_size
+        self.num_routed_experts = n_routed_experts
 
         self.ep_mesh = ep_mesh
         # self.fused_w1 = GroupedLinear(self.hidden_size, self.intermediate_size, self.num_routed_experts, ep_mesh)
@@ -81,14 +100,14 @@ class MoEBlock(nn.Module):
             2 * self.intermediate_size,
             self.num_routed_experts,
             ep_mesh=self.ep_mesh,
-            float8_cfg=config.float8_cfg,
+            float8_cfg=float8_cfg,
         )
         self.fused_w2 = build_grouped_linear(
             self.intermediate_size,
             self.hidden_size,
             self.num_routed_experts,
             ep_mesh=self.ep_mesh,
-            float8_cfg=config.float8_cfg,
+            float8_cfg=float8_cfg,
         )
 
     @maybe_compile(fullgraph=True)
@@ -107,24 +126,79 @@ class MoEBlock(nn.Module):
 class MoEDecoderLayer(nn.Module):
     """MoE decoder layer."""
 
-    def __init__(self, config: MoEConfig, layer_idx: int, ep_mesh: DeviceMesh | None):
+    def __init__(
+        self,
+        *,
+        hidden_size: int,
+        intermediate_size: int,
+        moe_intermediate_size: int,
+        mlp_bias: bool = False,
+        hidden_act: str,
+        rms_norm_eps: float = 1e-6,
+        num_experts_per_tok: int,
+        n_routed_experts: int,
+        n_shared_experts: int,
+        hidden_factor: float = 1.0,
+        attention_config: BaseAttnConfig[MultiHeadAttention | MultiLatentAttention],
+        generate_config: GenerateConfig | None = None,
+        router_config: BaseRouterConfig[GreedyRouter | NoAuxRouter],
+        float8_cfg: Float8Config | None = None,
+        layer_idx: int = 0,
+        dispatcher: Literal["deepep", "all2all"] | None,
+        ep_mesh: DeviceMesh | None = None,
+    ):
         super().__init__()
         self.ep_mesh = ep_mesh
-        self.config = config
-        self.hidden_size = config.hidden_size
+        self.hidden_size = hidden_size
+        self.n_routed_experts = n_routed_experts
+        self.n_shared_experts = n_shared_experts
+        self.hidden_factor = hidden_factor
 
-        self.self_attn = build_attnention(config, layer_idx=layer_idx)
-        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.self_attn = attention_config.build(
+            hidden_size=hidden_size,
+            layer_idx=layer_idx,
+            generate_config=generate_config,
+            float8_cfg=float8_cfg,
+        )
+        self.input_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps)
+        self.shared_experts: MoEMLP | None
 
-        self.shared_experts = MoEMLP(config) if config.n_shared_experts > 0 else None
+        if n_shared_experts > 0:
+            self.shared_experts = MoEMLP(
+                hidden_size=hidden_size,
+                n_shared_experts=n_shared_experts,
+                moe_intermediate_size=intermediate_size,
+                hidden_act=hidden_act,
+                mlp_bias=mlp_bias,
+                float8_cfg=float8_cfg,
+            )
+        else:
+            self.shared_experts = None
 
-        self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps)
 
-        self.gate = MoEGate(config)
-        self.experts = MoEBlock(config, ep_mesh)
+        self.gate = MoEGate(
+            hidden_size=hidden_size,
+            n_routed_experts=n_routed_experts,
+            num_experts_per_tok=num_experts_per_tok,
+            router_config=router_config,
+        )
+        self.experts = MoEBlock(
+            hidden_size=hidden_size,
+            moe_intermediate_size=moe_intermediate_size,
+            n_routed_experts=n_routed_experts,
+            ep_mesh=ep_mesh,
+            float8_cfg=float8_cfg,
+        )
         # TODO: (yehaochen) Maybe should be replaced by build_dispatcher
         process_group = ep_mesh.get_group() if ep_mesh is not None else None
-        self.dispatcher = build_dispatcher(config, process_group)
+        self.dispatcher = build_dispatcher(
+            dispatcher=dispatcher,
+            n_routed_experts=n_routed_experts,
+            ep_group=process_group,
+            training_dtype="fp8" if float8_cfg is not None else "bf16",
+            generate_dtype=generate_config.dtype if generate_config is not None else "bf16",
+        )
 
     @maybe_compile(fullgraph=True)
     def forward(
@@ -337,12 +411,12 @@ class MoEDecoderLayer(nn.Module):
         residual: torch.Tensor,
     ) -> torch.Tensor:
         # This part can be fullgraph compiled
-        if self.config.n_shared_experts > 0:
+        if self.n_shared_experts > 0:
             assert self.shared_experts is not None, "Shared experts should be initialized when n_shared_experts > 0"
             shared_experts_out = self.shared_experts(hidden_states)
             hidden_states += shared_experts_out
 
-        hidden_states = residual + hidden_states * self.config.hidden_factor
+        hidden_states = residual + hidden_states * self.hidden_factor
         return hidden_states
 
     def build_kv_cache(

@@ -1,4 +1,4 @@
-from .base_model import BaseAttnConfig, BaseRouterConfig, MoEConfig, TransformerConfig
+from .base_model import BaseAttnConfig, BaseRouterConfig, GenerateConfig, MoEConfig, TransformerConfig
 from .data_config import DataloaderConfig, DatasetConfig
 
 
@@ -21,4 +21,5 @@ __all__ = [
     "DatasetConfig",
     "DataloaderConfig",
     "Float8Config",
+    "GenerateConfig",
 ]

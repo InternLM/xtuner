@@ -111,12 +111,15 @@ class GenericDispatcher(
     def __init__(
         self,
         *,
+        n_routed_experts: int,
         process_group: torch.distributed.ProcessGroup | None = None,
-        config: MoEConfig,
+        training_dtype: Literal["fp8", "bf16"] = "bf16",
+        generate_dtype: Literal["fp8", "bf16"] = "bf16",
     ):
         self._process_group = process_group
-        self._n_routed_experts = config.n_routed_experts
-        self._config = config
+        self._n_routed_experts = n_routed_experts
+        self._training_dtype = training_dtype
+        self._generate_dtype = generate_dtype
 
     @overload
     def dispatch(
@@ -270,12 +273,16 @@ class NaiveDispatcher(
     def __init__(
         self,
         *,
+        n_routed_experts: int,
         process_group: torch.distributed.ProcessGroup | None = None,
-        config: MoEConfig,
+        training_dtype: Literal["fp8", "bf16"] = "bf16",
+        generate_dtype: Literal["fp8", "bf16"] = "bf16",
     ):
         super().__init__(
+            n_routed_experts=n_routed_experts,
             process_group=process_group,
-            config=config,
+            training_dtype=training_dtype,
+            generate_dtype=generate_dtype,
         )
         if self._process_group is not None:
             assert self._process_group.size() == 1, "Naive dispatcher is only for ep=1."

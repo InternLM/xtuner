@@ -5,7 +5,6 @@ import torch.distributed as dist
 from torch.distributed._functional_collectives import all_to_all_single_autograd
 from typing_extensions import overload, override
 
-from xtuner.v1.config.base_model import MoEConfig
 from xtuner.v1.ops.moe_permute import permute, unpermute
 
 from .base import (
@@ -81,12 +80,16 @@ class TorchAll2AllDispatcher(
     def __init__(
         self,
         *,
+        n_routed_experts: int,
         process_group: torch.distributed.ProcessGroup,
-        config: MoEConfig,
+        training_dtype: Literal["fp8", "bf16"] = "bf16",
+        generate_dtype: Literal["fp8", "bf16"] = "bf16",
     ):
         super().__init__(
+            n_routed_experts=n_routed_experts,
             process_group=process_group,
-            config=config,
+            training_dtype=training_dtype,
+            generate_dtype=generate_dtype,
         )
         assert self._process_group is not None, (
             "Process group must be provided for `TorchAll2AllDispatcher`. "
@@ -99,7 +102,7 @@ class TorchAll2AllDispatcher(
             dtype=torch.int32,
             device="cuda",
         )
-        if config.training_dtype == "fp8":
+        if training_dtype == "fp8":
             raise NotImplementedError
 
     @overload
