@@ -14,10 +14,9 @@ def mock_experts(hidden_states: torch.Tensor, tokens_per_exprts: torch.Tensor):
 
 class TestNoEPDispatcher(TestCase):
     def setUp(self):
-        config = Mock(spec=MoEConfig)
-        config.n_routed_experts = 4
+        n_routed_experts = 4
         self.dispatcher = NaiveDispatcher(
-            config=config,
+            n_routed_experts=n_routed_experts,
         )
 
     @parametrize.parametrize("dtype,device", [(torch.bfloat16, "cuda")])

@@ -414,10 +414,9 @@ class MoEDecoderLayer(nn.Module):
         if self.n_shared_experts > 0:
             assert self.shared_experts is not None, "Shared experts should be initialized when n_shared_experts > 0"
             shared_experts_out = self.shared_experts(hidden_states)
-            hidden_states += shared_experts_out
-
-        hidden_states = residual + hidden_states * self.hidden_factor
-        return hidden_states
+            return (hidden_states + shared_experts_out) * self.hidden_factor + residual
+        else:
+            return hidden_states * self.hidden_factor + residual
 
     def build_kv_cache(
         self, max_batch_size: int | None = None, max_length: int | None = None, block_size: int | None = None

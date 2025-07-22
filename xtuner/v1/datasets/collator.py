@@ -46,6 +46,14 @@ def sft_llm_collator(
 
         input_ids = torch.cat([torch.tensor(i["input_ids"]).view(1, -1) for i in instance], dim=-1)
         labels = torch.cat([torch.tensor(i["labels"]).view(1, -1) for i in instance], dim=-1)
+        input_ids = input_ids[:, :-1]
+        labels = labels[:, 1:]
+        num_tokens = [i["num_tokens"] for i in instance]
+        if num_tokens[-1] == 1:
+            num_tokens = num_tokens[:-1]  # remove the last sample if it is a single token
+        else:
+            num_tokens[-1] -= 1  # remove the last token if it is not a single token
+
         assert input_ids.shape == labels.shape, f"input_ids shape {input_ids.shape} != labels shape {labels.shape}"
 
         pad_len = pack_max_length - input_ids.shape[-1]
@@ -53,7 +61,7 @@ def sft_llm_collator(
         if pad_len > 0:
             input_ids = pad_to_max_length(input_ids, padding_token_idx, max_length=pack_max_length, dim=-1)
             labels = pad_to_max_length(labels, IGNORE_INDEX, max_length=pack_max_length, dim=-1)
-            num_tokens = [0] + [i["num_tokens"] for i in instance] + [pad_len]
+            num_tokens = [0] + num_tokens + [pad_len]
 
         elif pad_len < 0:
             raise ValueError(
@@ -73,7 +81,6 @@ def sft_llm_collator(
             max_length_k=max(num_tokens),
             num_padding=pad_len,
         )
-        seq_ctx, labels = seq_ctx.shift_with_labels(labels=labels)  # type: ignore
         ret.append(
             {
                 "seq_ctx": seq_ctx,

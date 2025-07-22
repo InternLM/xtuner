@@ -244,6 +244,9 @@ class MoE(BaseModel):
         device = "cpu" if self.fsdp_config.cpu_offload else str(DEVICE)
         self._init_device_mesh(fsdp_config)
 
+        with torch.device("meta"):
+            self.layers = self.build_layers(self.config)
+
         if float8_handler is not None:
             float8_handler.pad_for_fsdp(self, cast(DeviceMesh, self.fsdp_mesh))
 
@@ -387,7 +390,9 @@ class MoE(BaseModel):
                 mesh_dim_names=(f"{self.fsdp_config.mesh_prefix}.fsdp", f"{self.fsdp_config.mesh_prefix}.ep"),
             )
             if self.ep_mesh is not None:
-                assert self.ep_mesh == model_mesh[f"{self.fsdp_config.mesh_prefix}.ep"]
+                assert torch.equal(self.ep_mesh.mesh, model_mesh[f"{self.fsdp_config.mesh_prefix}.ep"].mesh), (
+                    "FSDP enabled, it requires the `ep_size` of model config equals to the `ep_size` of FSDPConfig."
+                )
             self.ep_mesh = model_mesh[f"{self.fsdp_config.mesh_prefix}.ep"]
             self.fsdp_mesh = model_mesh[f"{self.fsdp_config.mesh_prefix}.fsdp"]
         else:

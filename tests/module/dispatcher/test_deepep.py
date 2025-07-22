@@ -23,16 +23,15 @@ class TestMoETorchAll2AllDispatcher(DistributedTestBase):
     def test_dispatch_and_combine(self, dtype, device):
         self.create_pg(device)
         num_experts = 16
-        config = Mock(spec=TransformerConfig)
-        config.n_routed_experts = num_experts
-        config.training_dtype = "bf16"
 
         noep_dispatcher = NaiveDispatcher(
-            config=config,
+            n_routed_experts=num_experts,
+            training_dtype="bf16",
         )
 
         all2all_dispatcher = DeepEPDispatcher(
-            config=config,
+            n_routed_experts=num_experts,
+            training_dtype="bf16",
             process_group=cast(dist.ProcessGroup, dist.group.WORLD)
         )
 
