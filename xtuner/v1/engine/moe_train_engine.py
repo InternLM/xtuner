@@ -7,22 +7,18 @@ import torch.nn.functional as F
 from torch.distributed._functional_collectives import all_reduce
 from torch.distributed.device_mesh import DeviceMesh
 
-from xtuner.v1.config import AdamWConfig, FSDPConfig, LRConfig, MoEConfig, MoELossConfig, OptimConfig
-from xtuner.v1.config.float8 import Float8Config
-from xtuner.v1.data_proto.sequence_context import SequenceContext
+from xtuner.v1.config import FSDPConfig, LRConfig, MoEConfig, MoELossConfig, OptimConfig
 from xtuner.v1.datasets.collator import ColateItem
 from xtuner.v1.engine.dense_train_engine import DenseTrainEngine
 
 # todo: 如何 import
 from xtuner.v1.float8.float8_handler import Float8Handler
-from xtuner.v1.float8.float8_tensor import ScalingGranularity
 from xtuner.v1.loss import BalancingLoss, ZLoss
 from xtuner.v1.model.moe.moe import MoE
 
 # from xpuyu.models.auto import AutoFullyShardModel
-from xtuner.v1.module.attention import MHAConfig
 from xtuner.v1.module.grouped_linear.moe_group_linear import GroupedLinear
-from xtuner.v1.module.router import GreedyRouterConfig, NoAuxRouterConfig
+from xtuner.v1.module.router import NoAuxRouterConfig
 from xtuner.v1.utils import get_device, get_logger, get_torch_device_module
 
 
