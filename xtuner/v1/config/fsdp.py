@@ -31,7 +31,6 @@ class FSDPConfig(BaseModel):
     ] = None
 
     # todo
-    max_length: Annotated[Optional[int], Parameter(help="Maximum sequence length for input tokens")] = None
 
     # Unable to generate pydantic-core schema for <class 'torch.dtype'>.
     # Set `arbitrary_types_allowed=True` in the model_config to ignore this error

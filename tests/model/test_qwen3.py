@@ -69,7 +69,6 @@ class TestQwen3MoE(DistributedTestBase):
                 labels=shifted_labels,
             )
         loss = output["loss"]
-        torch.distributed.breakpoint()
         self.assertTrue(torch.allclose(loss, expected_loss.to(loss.dtype), atol=tol, rtol=tol))
 
     @parametrize.parametrize(
@@ -114,7 +113,8 @@ class TestQwen3MoE(DistributedTestBase):
         seq_ctx = SequenceContext.from_input_ids(input_ids=(input_ids, ))
         seq_ctx, shifted_labels = seq_ctx.shift_with_labels(labels=input_ids)
 
-        qwen_model.fully_shard(fsdp_config=fsdp_config, hf_path=QWEN3_MOE_PATH)
+        qwen_model.fully_shard(fsdp_config=fsdp_config)
+        qwen_model.from_hf(QWEN3_MOE_PATH)
 
         with torch.no_grad():
             output = qwen_model(
@@ -150,7 +150,8 @@ class TestQwen3MoE(DistributedTestBase):
             syncdir = [tmpdir]
             dist.broadcast_object_list(syncdir, src=0)
             tmpdir = Path(syncdir[0])
-            qwen_model.fully_shard(fsdp_config=fsdp_config, hf_path=QWEN3_MOE_PATH)
+            qwen_model.fully_shard(fsdp_config=fsdp_config)
+            qwen_model.from_hf(QWEN3_MOE_PATH)
             qwen_model.save_hf(tmpdir)
 
             origin_hf_path = Path(QWEN3_MOE_PATH)

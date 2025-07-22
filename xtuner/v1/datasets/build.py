@@ -33,7 +33,10 @@ def build_datasets(dataset_config: DatasetConfig, tokenizer) -> list[Iterable[Da
         if os.path.isfile(annotation):
             all_annotation = [annotation]
         else:
-            all_annotation = list(list_dir_or_file(annotation, list_dir=False, suffix=".jsonl", recursive=True))
+            all_annotation = [
+                os.path.join(annotation, f)
+                for f in list_dir_or_file(annotation, suffix=".jsonl", list_dir=False, recursive=True)
+            ]
         for annotation_path in all_annotation:
             meta_data_ = copy.deepcopy(meta_data)
             meta_data_["annotation"] = annotation_path

@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 
 from transformers.activations import ACT2FN
-from xtuner.v1.config.base_model import BaseAttnConfig, Float8Config, GenerateConfig, TransformerConfig
+from xtuner.v1.config.base_model import BaseAttnConfig, Float8Config, GenerateConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.module import MultiHeadAttention, MultiLatentAttention, RMSNorm
 from xtuner.v1.utils import ForwardState
@@ -19,6 +19,7 @@ class DenseMLP(nn.Module):
         bias: bool = False,
         hidden_act: str,
     ):
+        super().__init__()
         self.gate_proj = _Linear(hidden_size, intermediate_size, bias=bias)
         self.up_proj = _Linear(hidden_size, intermediate_size, bias=bias)
         self.down_proj = _Linear(intermediate_size, hidden_size, bias=bias)
@@ -60,20 +61,6 @@ class DenseDecoderLayer(nn.Module):
         self.input_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps)
 
-    @classmethod
-    def from_config(cls, config: TransformerConfig, layer_idx: int):
-        self = cls(
-            hidden_size=config.hidden_size,
-            intermediate_size=config.intermediate_size,
-            mlp_bias=config.mlp_bias,
-            hidden_act=config.hidden_act,
-            attention_config=config.attention,
-            generate_config=config.generate_config,
-            float8_cfg=config.float8_cfg,
-            layer_idx=layer_idx,
-        )
-        return self
-
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -89,7 +76,6 @@ class DenseDecoderLayer(nn.Module):
             hidden_states=hidden_states,
             position_embeddings=position_embeddings,
             seq_ctx=seq_ctx,
-            state=ForwardState.TRAINING,
         )
         hidden_states = residual + hidden_states
 

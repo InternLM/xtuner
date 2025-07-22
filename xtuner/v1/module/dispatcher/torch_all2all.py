@@ -102,8 +102,8 @@ class TorchAll2AllDispatcher(
             dtype=torch.int32,
             device="cuda",
         )
-        if training_dtype == "fp8":
-            raise NotImplementedError
+        # if training_dtype == "fp8":
+        #     raise NotImplementedError
 
     @overload
     def dispatch(

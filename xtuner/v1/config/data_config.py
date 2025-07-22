@@ -28,6 +28,6 @@ class DataloaderConfig(BaseModel):
     padding_token_idx: int = 0
 
     def model_post_init(self, __context) -> None:
-        assert self.pack_max_length > self.max_length, (
+        assert self.pack_max_length >= self.max_length, (
             f"pack_max_length {self.pack_max_length} must be larger than max_length {self.max_length}"
         )
