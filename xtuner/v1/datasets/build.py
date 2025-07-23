@@ -45,6 +45,7 @@ def build_datasets(
                 os.path.join(anno_path, f)
                 for f in list_dir_or_file(anno_path, suffix=".jsonl", list_dir=False, recursive=True)
             ]
+        all_anno_path.sort()
         for anno_path in all_anno_path:
             _dataset_config = copy.deepcopy(_dataset_config)
             _dataset_config.anno_path = anno_path
@@ -64,7 +65,10 @@ def build_dataloader(
     dp_mesh: DeviceMesh,
     global_batch_size: int,
     micro_batch_size: int,
+    seed: int,
 ) -> Iterable[list[ColateItem]]:
+    assert isinstance(datasets, list), "datasets must be a list of datasets."
+
     if dataloader_config.pack_level != "none" and get_rank == 0:
         num_tokens = sum(dset.num_tokens.sum() for dset in datasets)
         logger.debug(f"[Dataset] {num_tokens} tokens.")
@@ -75,6 +79,7 @@ def build_dataloader(
             datasets,
             target=dataloader_config.pack_max_length,
             blend=dataloader_config.global_pack,
+            seed=seed,
         )
     elif dataloader_config.pack_level == "expand_soft":
         logger.info("[Dataset] Start packing data of ExpandSoftPackDataset.")
@@ -83,6 +88,7 @@ def build_dataloader(
             target=dataloader_config.pack_max_length,
             blend=dataloader_config.global_pack,
             pack_extra_buffer_size=dataloader_config.pack_extra_buffer_size,
+            seed=seed,
         )
     elif dataloader_config.pack_level == "hard":
         raise NotImplementedError
@@ -96,7 +102,7 @@ def build_dataloader(
         logger.info(f"[Dataset] (Packed) {packed_samples} samples.")
 
     if dataloader_config.group_by_length:
-        sampler = LengthGroupedSampler(dataset, dp_mesh, global_batch_size)
+        sampler = LengthGroupedSampler(dataset, dp_mesh, global_batch_size, seed=seed)
     else:
         sampler = ParallelSampler(dataset, dp_mesh, global_batch_size, shuffle=True)  # type: ignore
 

@@ -19,8 +19,11 @@ logger = get_logger()
 
 
 class SoftPackDataset(torch.utils.data.Dataset):
-    def __init__(self, datasets, target=2048, blend=False, seed=None):
-        self.seed = seed
+    def __init__(self, datasets, target=2048, blend=False, seed: int | None = None):
+        self.random = random.Random()
+        if seed is not None:
+            self.random = random.Random(seed)
+
         if blend:
             num_tokens = [np.concatenate([dset.num_tokens for dset in datasets])]
             datasets = [ConcatDataset(datasets)]
@@ -41,10 +44,7 @@ class SoftPackDataset(torch.utils.data.Dataset):
 
     def get_pack_infos(self, dataset, dataset_id, num_tokens):
         inds = list(range(len(dataset)))
-        if self.seed is not None:
-            torch.manual_seed(self.seed)
-            random.seed(self.seed)
-        random.shuffle(inds)
+        self.random.shuffle(inds)
 
         item_buffer = []
         length_buffer = []
@@ -199,18 +199,27 @@ def get_pack_chunk_infos(
 
 class ExpandSoftPackDataset(SoftPackDataset):
     def __init__(
-        self, *args, pack_len_type="total_block", flash_attn_block_size=128, pack_extra_buffer_size=1000, **kwargs
+        self,
+        *args,
+        pack_len_type="total_block",
+        flash_attn_block_size=128,
+        pack_extra_buffer_size=1000,
+        seed: int | None = None,
+        **kwargs,
     ):
         self.pack_len_type = pack_len_type
         assert self.pack_len_type in ["total_block", "max_block"], f"Invalid pack_len_type: {self.pack_len_type}"
         self.flash_attn_block_size = flash_attn_block_size
         self.pack_extra_buffer_size = pack_extra_buffer_size
         self.pack_workers = int(os.environ.get("XTUNER_PACK_WORKERS", 1))
+        self.torch_random_generator = torch.Generator()
+        if seed is not None:
+            self.torch_random_generator.manual_seed(seed)
         logger.info(f"Using {self.pack_workers} pack workers for packing datasets.")
         super().__init__(*args, **kwargs)
 
     def get_pack_infos(self, dataset, dataset_id, num_tokens):
-        inds = torch.randperm(len(dataset)).tolist()
+        inds = torch.randperm(len(dataset), generator=self.torch_random_generator).tolist()
         if self.pack_workers <= 1:
             pack_infos = get_pack_chunk_infos(
                 inds,
