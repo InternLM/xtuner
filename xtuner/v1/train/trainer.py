@@ -3,7 +3,9 @@ import time
 from pathlib import Path
 from typing import Sized, cast
 
+import torch
 from mmengine.dist import get_rank, get_world_size
+from mmengine.runner import set_random_seed
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 
 from transformers import AutoTokenizer
@@ -12,7 +14,7 @@ from xtuner.v1.config import DataloaderConfig, DatasetConfig, EngineConfig
 from xtuner.v1.config.trainer import ResumeConfig
 from xtuner.v1.datasets.build import build_dataloader, build_datasets
 from xtuner.v1.engine import build_engine
-from xtuner.v1.utils import ParallelConfigException, get_logger, log_format
+from xtuner.v1.utils import XTUNER_DETERMINISTIC, ParallelConfigException, get_logger, log_format
 
 
 # TODO: Move DEVICE to `xtuner.utils.device`
@@ -37,6 +39,7 @@ class Trainer:
         total_step: int | None = None,
         epoch_num: int | None = None,
         resume_config: ResumeConfig | None = None,
+        seed: int = 42,
         debug: bool = False,
     ):
         self._global_batch_size = global_batch_size
@@ -59,6 +62,9 @@ class Trainer:
         self.sp_size = sp_size
         self.debug = debug
 
+        self._set_deterministic()
+        self._set_random_seed(seed)
+
         if work_dir is None:
             work_dir = Path.cwd() / "work_dir"
 
@@ -77,8 +83,8 @@ class Trainer:
 
         if get_rank() == 0:
             work_dir.mkdir(parents=True, exist_ok=True)
-        self.work_dir = work_dir
 
+        self.work_dir = work_dir
         self.data_mesh = self._init_data_mesh(engine_config)
 
         self._engine = self.build_engine(model_path, engine_config, resume_config)
@@ -240,3 +246,10 @@ class Trainer:
         # TODO: save latest information in `meta`
 
     def save_hf(self): ...
+
+    def _set_deterministic(self):
+        if XTUNER_DETERMINISTIC:
+            torch.use_deterministic_algorithms(True, warn_only=True)
+
+    def _set_random_seed(self, seed: int):
+        set_random_seed(seed)

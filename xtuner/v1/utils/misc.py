@@ -1,3 +1,4 @@
+import os
 import sys
 import threading
 from functools import reduce
@@ -5,6 +6,8 @@ from math import lcm
 from multiprocessing import resource_tracker as _mprt
 from multiprocessing import shared_memory as _mpshm
 
+
+XTUNER_DETERMINISTIC = os.getenv("XTUNER_DETERMINISTIC") == "true"
 
 # https://github.com/python/cpython/issues/82300#issuecomment-2169035092
 if sys.version_info >= (3, 13):
