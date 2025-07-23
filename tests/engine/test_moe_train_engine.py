@@ -85,7 +85,7 @@ class TestMoEEngine(DistributedTestBase):
         ],
     )
     def test_save_and_load(self, device, ep_size, hsdp_sharding_size):
-        self.create_pg(device)
+        pg = self.create_pg(device)
 
         temp_dir = tempfile.mkdtemp()
         if dist.get_rank() == 0:
