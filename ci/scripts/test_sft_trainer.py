@@ -31,7 +31,7 @@ def main():
 
     moe_cfgs = [
         Qwen3MoE30BA3Config(),
-        Qwen3MoE30BA3Config(ep_size=8, dispatcher="all2all"),
+        # Qwen3MoE30BA3Config(ep_size=8, dispatcher="all2all"),
         Qwen3MoE30BA3Config(
             ep_size=1,
             float8_cfg=Float8Config(
