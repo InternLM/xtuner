@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from mmengine import is_installed
 from torch import nn
 from torch.distributed._functional_collectives import all_reduce
+from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
 )
@@ -405,7 +406,7 @@ class MoE(BaseModel):
             layer_idx = int(layer_idx)
             layer.to_empty(device=DEVICE_MODULE.current_device())
             if layer_idx < num_recompute_layers - 1:
-                layer = ptd_checkpoint_wrapper(layer)
+                layer = ptd_checkpoint_wrapper(layer, checkpoint_impl=CheckpointImpl.REENTRANT)
 
             self.layers[str(layer_idx)] = layer
             if layer_idx >= len(self.layers) - 1:

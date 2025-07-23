@@ -44,7 +44,7 @@ class TestMoEEngine(DistributedTestBase):
             cpu_offload=False,
             ep_size=ep_size,
             max_length=8192,
-            hsdp_sharding_size=hsdp_sharding_size,
+            # hsdp_sharding_size=hsdp_sharding_size,
         )
         engine = MoETrainEngine(
             model_cfg=moe_cfg, optim_cfg=optim_cfg, fsdp_cfg=fsdp_cfg

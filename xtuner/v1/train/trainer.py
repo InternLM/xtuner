@@ -10,7 +10,7 @@ from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, LinearLR, SequentialLR
 
 from transformers import AutoTokenizer
-from xtuner.utils.device import get_device
+from xtuner.utils.device import get_device, get_torch_device
 from xtuner.v1.config import DataloaderConfig, EngineConfig, LRConfig
 from xtuner.v1.config.trainer import ResumeConfig
 from xtuner.v1.datasets.build import build_dataloader, build_datasets
@@ -20,6 +20,7 @@ from xtuner.v1.utils import XTUNER_DETERMINISTIC, ParallelConfigException, get_l
 
 # TODO: Move DEVICE to `xtuner.utils.device`
 DEVICE = get_device()
+DEVICE_MODULE = get_torch_device()
 
 
 class Trainer:
@@ -63,6 +64,7 @@ class Trainer:
         self.engine_config = engine_config
         self.sp_size = sp_size
         self.debug = debug
+        self.seed = seed
 
         self._set_deterministic()
         self._set_random_seed(seed)
@@ -89,8 +91,8 @@ class Trainer:
         self.work_dir = work_dir
         self.data_mesh = self._init_data_mesh(engine_config)
 
-        self._engine = self.build_engine(model_path, engine_config, resume_config)
         self.tokenizer.model_max_length = dataloader_config.max_length
+
         self._dataloader = self.build_dataloader(
             dataset_config=dataset_config,
             dataloader_config=dataloader_config,
@@ -98,12 +100,18 @@ class Trainer:
             tokenizer=self.tokenizer,
             global_batch_size=global_batch_size,
             micro_batch_size=self.micro_batch_size,
+            seed=seed,
         )
+
+        self._engine = self.build_engine(model_path, engine_config, resume_config)
         self._lr_scheduler = self.build_lr_scheduler(lr_config)
+        # TODO: TMP hardcode here
 
     def fit(self):
         time_before_get_data = time.time()
         for data in self.data_iter():
+            DEVICE_MODULE.reset_peak_memory_stats()
+
             time_before_train_step = time.time()
             data_time = time_before_train_step - time_before_get_data
 
@@ -120,9 +128,17 @@ class Trainer:
             tgs = step_consumed_tokens / step_time
             lr = self._lr_scheduler.get_last_lr()[0]
             total_loss = loss_log["total_loss"]
+            reduced_llm_loss = loss_log["reduced_llm_loss"]
+
+            max_memory = DEVICE_MODULE.max_memory_allocated()
 
             self.logger.info(
-                f"Step {self.cur_step}/{self.total_step} data_time: {data_time:.4f} lr: {lr:.6f} total_loss: {total_loss:.3f}  grad_norm: {grad_norm:.3f} tgs: {tgs:.1f}"
+                f"Step {self.cur_step}/{self.total_step} data_time: {data_time:.4f} lr: {lr:.6f} "
+                f"text_tokens: {step_consumed_tokens} "
+                f"total_loss: {total_loss:.3f} "
+                f"reduced_llm_loss: {reduced_llm_loss:.3f} "
+                f"max_memory: {max_memory / (1024**3):.2f} GB "
+                f"grad_norm: {grad_norm:.3f} tgs: {tgs:.1f} "
             )
             time_before_get_data = time.time()
 
@@ -166,7 +182,9 @@ class Trainer:
         return self._cur_step
 
     def _init_logger(self, work_dir: Path):
+        # Logging system maybe need better design
         logger = get_logger()
+        logger.remove()
         logger.add(work_dir / f"rank{get_rank()}.log", format=log_format(), backtrace=True, catch=True)
         logger.add(sys.stderr, format=log_format(rank=get_rank()))
         return logger
@@ -233,6 +251,7 @@ class Trainer:
         dp_mesh: DeviceMesh,
         global_batch_size: int,
         micro_batch_size: int,
+        seed,
         resume_config: ResumeConfig | None = None,
     ):
         # TODO: Support resume
@@ -246,6 +265,7 @@ class Trainer:
             dp_mesh=dp_mesh,
             global_batch_size=global_batch_size,
             micro_batch_size=micro_batch_size,
+            seed=seed,
         )
 
     def build_lr_scheduler(self, lr_cfg: LRConfig) -> torch.optim.lr_scheduler.LRScheduler:

@@ -110,19 +110,17 @@ class ParallelSampler(Sampler):
         self.step = step
 
 
-def get_length_grouped_indices(max_lengths, group_batch_size, dp_size, seed=None):
-    if seed is not None:
-        torch.manual_seed(seed)
-        random.seed(seed)
-
+def get_length_grouped_indices(
+    max_lengths, group_batch_size, dp_size, torch_generator: torch.Generator, random_generator: random.Random
+):
     assert all(leng != 0 for leng in max_lengths), "Should not have zero length."
-    indices = torch.randperm(len(max_lengths))
+    indices = torch.randperm(len(max_lengths), generator=torch_generator)
     megabatches = [indices[i : i + group_batch_size].tolist() for i in range(0, len(max_lengths), group_batch_size)]
     output = []
     for megabatch in megabatches:
         megabatch = sorted(megabatch, key=lambda i: max_lengths[i], reverse=True)
         grouped_megabatch = [megabatch[i : i + dp_size] for i in range(0, len(megabatch), dp_size)]
-        random.shuffle(grouped_megabatch)
+        random_generator.shuffle(grouped_megabatch)
         for group in grouped_megabatch:
             output.extend(group)
 
@@ -145,6 +143,8 @@ class LengthGroupedSampler(Sampler):
         world_size = dp_mesh.size()
         self.rank = rank
         self.world_size = world_size
+        self.torch_generator = torch.Generator()
+        self.random_generator = random.Random()
         assert global_batch_size % world_size == 0
 
         self.dataset = dataset
@@ -188,14 +188,15 @@ class LengthGroupedSampler(Sampler):
 
     def __iter__(self) -> Iterator[int]:
         """Iterate the indices."""
-        generator = torch.Generator()
-        generator.manual_seed(self.seed + self.epoch)
-        seed = self.seed + self.epoch
+        if self.seed is not None:
+            self.torch_generator.manual_seed(self.seed + self.epoch)
+            self.random_generator.seed(self.seed + self.epoch)
         indices = get_length_grouped_indices(
             max_lengths=self.max_lengths,
             group_batch_size=self.group_batch_size,
             dp_size=self.world_size,
-            seed=seed,
+            torch_generator=self.torch_generator,
+            random_generator=self.random_generator,
         )
         assert len(set(indices)) == len(indices)
         # add extra samples to make it evenly divisible
