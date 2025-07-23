@@ -11,7 +11,7 @@ from torch.nn import functional as F
 from xtuner.v1.config import BaseAttnConfig, Float8Config, GenerateConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.module.rope import RopeScalingConfig
-from xtuner.v1.utils import get_logger
+from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger
 
 from ..linear.linear import build_linear
 from ..rms_norm import RMSNorm
@@ -292,6 +292,7 @@ class MultiLatentAttention(nn.Module):
             dropout_p=self.dropout,
             softmax_scale=self.softmax_scale,
             causal=True,
+            deterministic=XTUNER_DETERMINISTIC,
         )
         attn_output = cast(torch.Tensor, attn_output)
         if self.q_head_dim != self.v_head_dim:

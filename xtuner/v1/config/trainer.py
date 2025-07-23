@@ -19,6 +19,7 @@ class TrainerConfig(BaseModel):
     engine: EngineConfig
     dataset_config: DatasetConfig
     dataloader_config: DataloaderConfig
+    resume_config: ResumeConfig
     global_batch_size: int
     total_step: int | None
     epoch_num: int | None
@@ -26,7 +27,7 @@ class TrainerConfig(BaseModel):
     work_dir: Path | str | None = None
     log_dir: Path | str | None = None
     tokenizer: str | Path
-    resume_config: ResumeConfig
+    seed: int = 42
     # data
 
     @model_validator(mode="after")

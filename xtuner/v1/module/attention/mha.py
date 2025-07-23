@@ -9,7 +9,7 @@ from transformers.models.llama.modeling_llama import apply_rotary_pos_emb, repea
 from xtuner.v1.config import BaseAttnConfig, Float8Config, GenerateConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.ops.comm.all_to_all import ulysses_all_to_all
-from xtuner.v1.utils import get_logger
+from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger
 
 from ..linear.linear import build_linear
 from ..rms_norm import RMSNorm
@@ -339,6 +339,7 @@ class MultiHeadAttention(nn.Module):
                 max_seqlen_k=seq_ctx.max_length_k,
                 dropout_p=self.dropout,
                 causal=True,
+                deterministic=XTUNER_DETERMINISTIC,
             ),
         )
         # if dist.get_rank() == 0:
