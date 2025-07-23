@@ -35,7 +35,7 @@ class TestMoEEngineFloat8(DistributedTestBase):
         ],
     )
     def test_tile_wise_fp8(self, device, ep_size, hsdp_sharding_size):
-        self.create_pg(device)
+        pg = self.create_pg(device)
 
         moe_cfg = Qwen3MoE30BA3Config(
             float8_cfg=Float8Config(
@@ -106,7 +106,7 @@ class TestMoEEngineFloat8(DistributedTestBase):
         ],
     )
     def test_tensor_wise_fp8(self, device, ep_size, hsdp_sharding_size):
-        self.create_pg(device)
+        pg = self.create_pg(device)
 
         moe_cfg = Qwen3MoE30BA3Config(
             ep_size=ep_size,
