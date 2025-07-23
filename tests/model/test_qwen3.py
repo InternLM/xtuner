@@ -81,6 +81,7 @@ class TestQwen3MoE(DistributedTestBase):
     )
     def test_fsdp_accuracy(self, device, dispatcher, ep_size):
         self.create_pg(device)
+        maybe_compile.clear_compile_targets()
         hf_model = AutoModelForCausalLM.from_pretrained(
             QWEN3_MOE_PATH,
             torch_dtype=torch.bfloat16,
