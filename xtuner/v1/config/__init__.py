@@ -3,7 +3,7 @@ from .data import DataloaderConfig, DatasetConfig, FTDPTokenizeFnConfig
 from .engine import EngineConfig, MoEEngineConfig
 from .float8 import Float8Config
 from .fsdp import FSDPConfig
-from .moe_loss import MoELossConfig
+from .moe_loss import BalancingLossConfig, ZLossConfig
 from .optim import AdamWConfig, LRConfig, OptimConfig
 
 
@@ -12,7 +12,8 @@ __all__ = [
     "BaseAttnConfig",
     "MoEConfig",
     "BaseRouterConfig",
-    "MoELossConfig",
+    "BalancingLossConfig",
+    "ZLossConfig",
     "FSDPConfig",
     "OptimConfig",
     "AdamWConfig",

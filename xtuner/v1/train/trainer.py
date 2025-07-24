@@ -7,10 +7,11 @@ import torch
 from mmengine.dist import get_rank, get_world_size
 from mmengine.runner import set_random_seed
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
+from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, LinearLR, SequentialLR
 
 from transformers import AutoTokenizer
 from xtuner.utils.device import get_device
-from xtuner.v1.config import DataloaderConfig, EngineConfig
+from xtuner.v1.config import DataloaderConfig, EngineConfig, LRConfig
 from xtuner.v1.config.trainer import ResumeConfig
 from xtuner.v1.datasets.build import build_dataloader, build_datasets
 from xtuner.v1.engine import build_engine
@@ -31,6 +32,7 @@ class Trainer:
         engine_config: EngineConfig,
         dataset_config: List[Dict],
         dataloader_config: DataloaderConfig,
+        lr_config: LRConfig,
         tokenizer: str | Path,
         global_batch_size: int,
         work_dir: Path | str | None = None,
@@ -97,6 +99,7 @@ class Trainer:
             global_batch_size=global_batch_size,
             micro_batch_size=self.micro_batch_size,
         )
+        self._lr_scheduler = self.build_lr_scheduler(lr_config)
 
     def fit(self):
         time_before_get_data = time.time()
@@ -104,17 +107,19 @@ class Trainer:
             time_before_train_step = time.time()
             data_time = time_before_train_step - time_before_get_data
 
-            log = self._engine.train_step(data)
+            loss_log, other_log = self._engine.train_step(data)
+            grad_norm = self._engine.clip_grad_norm()
+            self._engine.step_optimizer(grad_norm)
+            self._lr_scheduler.step()
             time_after_train_step = time.time()
             step_time = time_after_train_step - time_before_train_step
 
             self._cur_step += 1
 
-            step_consumed_tokens = log["consumed_tokens"]
+            step_consumed_tokens = other_log["consumed_tokens"]
             tgs = step_consumed_tokens / step_time
-            lr = log["lr"]
-            total_loss = log["total_loss"]
-            grad_norm = log["grad_norm"]
+            lr = self._lr_scheduler.get_last_lr()[0]
+            total_loss = loss_log["total_loss"]
 
             self.logger.info(
                 f"Step {self.cur_step}/{self.total_step} data_time: {data_time:.4f} lr: {lr:.6f} total_loss: {total_loss:.3f}  grad_norm: {grad_norm:.3f} tgs: {tgs:.1f}"
@@ -242,6 +247,38 @@ class Trainer:
             global_batch_size=global_batch_size,
             micro_batch_size=micro_batch_size,
         )
+
+    def build_lr_scheduler(self, lr_cfg: LRConfig) -> torch.optim.lr_scheduler.LRScheduler:
+        total_step = self.total_step
+        warmup_steps = int(lr_cfg.warmup_ratio * total_step)
+
+        def warmup_fn(x):
+            return x / warmup_steps if x < warmup_steps else 1
+
+        warmup_scheduler = LambdaLR(self._engine.optimizer, warmup_fn)
+
+        scheduler: torch.optim.lr_scheduler.LRScheduler
+        if lr_cfg.lr_type == "linear":
+            scheduler = LinearLR(
+                self._engine.optimizer,
+                start_factor=1.0,
+                end_factor=lr_cfg.lr_min / self._engine.optimizer.defaults["lr"],
+                total_iters=total_step - warmup_steps,
+            )
+        elif lr_cfg.lr_type == "cosine":
+            scheduler = CosineAnnealingLR(
+                self._engine.optimizer, T_max=total_step - warmup_steps, eta_min=lr_cfg.lr_min
+            )
+        elif lr_cfg.lr_type == "constant":
+            scheduler = LambdaLR(self._engine.optimizer, lambda x: 1.0)
+        else:
+            raise ValueError(f"Unsupported lr type: {lr_cfg.lr_type}")
+        lr_scheduler = SequentialLR(
+            optimizer=self._engine.optimizer,
+            schedulers=[warmup_scheduler, scheduler],
+            milestones=[warmup_steps],
+        )
+        return lr_scheduler
 
     def save(self):
         ...

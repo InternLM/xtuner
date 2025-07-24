@@ -22,13 +22,12 @@ from torch.distributed.checkpoint.state_dict import (
 )
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor.placement_types import Placement
-from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, LinearLR, SequentialLR
 from torch.utils._foreach_utils import (
     _device_has_foreach_support,
     _has_foreach_support,
 )
 
-from xtuner.v1.config import FSDPConfig, LRConfig, OptimConfig, TransformerConfig
+from xtuner.v1.config import FSDPConfig, OptimConfig, TransformerConfig
 from xtuner.v1.datasets.collator import ColateItem
 from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.model import BaseModel
@@ -143,7 +142,6 @@ class DenseTrainEngine:
         *,
         model_cfg: TransformerConfig,
         optim_cfg: OptimConfig,
-        lr_cfg: LRConfig,
         fsdp_cfg: FSDPConfig,
     ) -> None:
         self.model_cfg = model_cfg
@@ -153,7 +151,6 @@ class DenseTrainEngine:
         if self.float8_handler:
             self.float8_handler.build_reduce_mesh(self.model, cast(DeviceMesh, self.model.fsdp_mesh))
         self.optimizer = self.build_optimizer(optim_cfg)
-        self.lr_scheduler = self.build_lr_scheduler(lr_cfg)
 
     def build_model(self) -> BaseModel:
         with torch.device("meta"):
@@ -171,36 +168,10 @@ class DenseTrainEngine:
         params = [p for p in self.model.parameters() if p.requires_grad]
         return optim_cfg.build(params)
 
-    def build_lr_scheduler(self, lr_cfg: LRConfig) -> torch.optim.lr_scheduler.LRScheduler:
-        # todo: total_steps 如何传参给 engine
-        total_steps = lr_cfg.total_steps
-        warmup_steps = int(lr_cfg.warmup_ratio * total_steps)
-
-        def warmup_fn(x):
-            return x / warmup_steps if x < warmup_steps else 1
-
-        warmup_scheduler = LambdaLR(self.optimizer, warmup_fn)
-
-        scheduler: torch.optim.lr_scheduler.LRScheduler
-        if lr_cfg.lr_type == "linear":
-            scheduler = LinearLR(
-                self.optimizer,
-                start_factor=1.0,
-                end_factor=lr_cfg.lr_min / self.optimizer.defaults["lr"],
-                total_iters=total_steps - warmup_steps,
-            )
-        elif lr_cfg.lr_type == "cosine":
-            scheduler = CosineAnnealingLR(self.optimizer, T_max=total_steps - warmup_steps, eta_min=lr_cfg.lr_min)
-        elif lr_cfg.lr_type == "constant":
-            scheduler = LambdaLR(self.optimizer, lambda x: 1.0)
-        else:
-            raise ValueError(f"Unsupported lr type: {lr_cfg.lr_type}")
-        lr_scheduler = SequentialLR(
-            optimizer=self.optimizer,
-            schedulers=[warmup_scheduler, scheduler],
-            milestones=[warmup_steps],
-        )
-        return lr_scheduler
+    @property
+    def data_replicate_size(self) -> int:
+        # todo: consider pp
+        return self.fsdp_cfg.tp_size
 
     def cal_global_grad_tokens(self, labels: list[torch.Tensor], sp_mesh=None):
         # calculate global token number which is used for loss scaling
@@ -216,21 +187,17 @@ class DenseTrainEngine:
             global_grad_tokens = rank_grad_tokens
         return global_grad_tokens
 
-    def train_step(
-        self, data_batches: list[ColateItem], intra_layer_micro_batch: int = 1, sp_mesh: Optional[DeviceMesh] = None
-    ):
+    def train_step(self, data_batches: list[ColateItem], sp_mesh: Optional[DeviceMesh] = None):
         """Perform a training step with the given data batches and mesh.
 
         Args:
             data_batches (List[Dict]): The input data batches for the training step.
             max_length (Optional[int]): The maximum sequence length for padding.
-            intra_layer_micro_batch (int): The number of micro-batches for intra-layer all2all overlap.
-                Only used in moe models. Must be set to 1 here for dense models.
             sp_mesh (Optional[DeviceMesh]): The device mesh for sequence parallelism.
         """
-        assert intra_layer_micro_batch == 1, "intra_layer_micro_batch must be set to 1 for dense models"
         global_grad_tokens = self.cal_global_grad_tokens([i["labels"] for i in data_batches], sp_mesh)
         iters_per_step = len(data_batches)
+        log = {}  # type: ignore
         for _iter in range(iters_per_step):
             data = data_batches[_iter]
             seq_ctx = data["seq_ctx"]
@@ -251,8 +218,8 @@ class DenseTrainEngine:
 
             loss.backward()
 
-        self.step_optimizer()
-        self.lr_scheduler.step()
+        # todo
+        return log
 
     def from_hf(self, hf_path: str, strict: bool = False):
         self.model.from_hf(hf_path=hf_path, strict=strict)
@@ -328,9 +295,8 @@ class DenseTrainEngine:
                     g.mul_(clip_coef_clamped_device)
         return grad_norm
 
-    def step_optimizer(self):
+    def step_optimizer(self, grad_norm):
         """Step the optimizer to update the model parameters."""
-        grad_norm = self.clip_grad_norm()
         if torch.isnan(grad_norm) or torch.isinf(grad_norm):
             self.optimizer.zero_grad()
         else:
@@ -378,8 +344,9 @@ class DenseTrainEngine:
             if dcp_task_coordinator is not None:
                 dcp_task_coordinator.wait()
 
-            if rank == 0:
-                torch.save(self.lr_scheduler.state_dict(), os.path.join(dcp_dir, "lr_scheduler.pt"))
+            # todo: save lr scheduler state dict
+            # if rank == 0:
+            #     torch.save(self.lr_scheduler.state_dict(), os.path.join(dcp_dir, "lr_scheduler.pt"))
 
             _options = StateDictOptions(cpu_offload=True, ignore_frozen_params=True)
 
@@ -411,7 +378,7 @@ class DenseTrainEngine:
 
         return futures
 
-    def load_dcp(self, dcp_dir: str, skip_load_optimizer: bool, skip_load_scheduler: bool):
+    def load_dcp(self, dcp_dir: str, skip_load_optimizer: bool):
         """Load the dcp model from the given directory.
 
         Args:
@@ -438,10 +405,11 @@ class DenseTrainEngine:
                     options=_set_options,
                 )
 
-            if not skip_load_scheduler:
-                logger.info("====== Loading scheduler state dict ======")
-                lr_scheduler_state_dict = torch.load(os.path.join(dcp_dir, "lr_scheduler.pt"))
-                self.lr_scheduler.load_state_dict(lr_scheduler_state_dict)
+            # todo: resume lr scheduler
+            # if not skip_load_scheduler:
+            #     logger.info("====== Loading scheduler state dict ======")
+            #     lr_scheduler_state_dict = torch.load(os.path.join(dcp_dir, "lr_scheduler.pt"))
+            #     self.lr_scheduler.load_state_dict(lr_scheduler_state_dict)
 
             shard_model_state_dict = get_model_state_dict(self.model, options=_load_options)
             logger.info("====== Loading model state dict ======")

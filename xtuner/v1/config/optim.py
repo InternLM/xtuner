@@ -31,5 +31,3 @@ class LRConfig(BaseModel):
     )
     warmup_ratio: Annotated[float, Parameter(help="Ratio of warmup steps to total training steps")] = 0.03
     lr_min: Annotated[float, Parameter(help="Minimum learning rate for optimization")] = 1e-6
-    # todo: total_steps 如何传参给 engine
-    total_steps: Annotated[int, Parameter(help="Total number of training steps, -1 for automatic determination")] = -1
