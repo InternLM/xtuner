@@ -5,6 +5,7 @@ from pydantic import BaseModel, ConfigDict, computed_field
 from typing_extensions import NotRequired
 
 from xtuner.v1.config.float8 import Float8Config
+from xtuner.v1.config.moe_loss import BalancingLossConfig, ZLossConfig
 
 
 if TYPE_CHECKING:
@@ -109,6 +110,8 @@ class MoEConfig(TransformerConfig):
     ep_size: int = 1
     dispatcher: Literal["deepep", "all2all"] | None = None
     router: BaseRouterConfig
+    balancing_loss_cfg: BalancingLossConfig | None = BalancingLossConfig()
+    z_loss_cfg: ZLossConfig | None = None
 
     def build(self) -> "MoE":
         from xtuner.v1.model.moe.moe import MoE
@@ -124,3 +127,6 @@ class ModelOutputs(TypedDict):
 
 class MoEModelOutputs(ModelOutputs):
     router_logits: NotRequired[torch.Tensor]
+    balancing_loss: NotRequired[torch.Tensor]
+    z_loss: NotRequired[torch.Tensor]
+    tokens_per_expert_global: NotRequired[torch.Tensor]

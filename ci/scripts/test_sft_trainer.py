@@ -13,7 +13,8 @@ from xtuner.v1.config import (
     FSDPConfig,
     LRConfig,
     MoEEngineConfig,
-    MoELossConfig,
+    BalancingLossConfig,
+    ZLossConfig,
 )
 from xtuner.v1.float8.float8_tensor import ScalingGranularity
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
@@ -31,7 +32,7 @@ def main():
     os.environ["DG_CACHE_DIR"] = f"/tmp/.deep_gemm-{torch.distributed.get_rank()}"
 
     moe_cfgs = [
-        Qwen3MoE30BA3Config(),
+        Qwen3MoE30BA3Config(balancing_loss_cfg=BalancingLossConfig(), z_loss_cfg=ZLossConfig()),
         # Qwen3MoE30BA3Config(ep_size=8, dispatcher="all2all"),
         Qwen3MoE30BA3Config(
             ep_size=1,
@@ -54,9 +55,7 @@ def main():
         engine_config = MoEEngineConfig(
             model=moe_cfg,
             optim=optim_cfg,
-            lr=lr_cfg,
             fsdp=fsdp_cfg,
-            moe_loss=MoELossConfig(balancing_loss_type="sigmoid"),
         )
         dataset_config = [
             dict(dataset=DatasetConfig(name='alpaca', anno_path=ALPACAL_PATH, sample_ratio=1.0),
@@ -72,6 +71,7 @@ def main():
             engine_config=engine_config,
             dataset_config=dataset_config,
             dataloader_config=dataloader_config,
+            lr_config=lr_cfg,
             tokenizer=QWEN3_MOE_PATH,
             global_batch_size=16,
             epoch_num=1,

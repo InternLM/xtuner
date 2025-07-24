@@ -15,11 +15,12 @@ from xtuner.v1.model.moe.moe import MoEConfig, SequenceContext
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE
 from xtuner.v1.module.attention import MHAConfig
 from xtuner.v1.module.router import GreedyRouterConfig
-from xtuner.v1.config import AdamWConfig, Float8Config, FSDPConfig, LRConfig, MoEConfig, MoELossConfig, OptimConfig
+from xtuner.v1.config import AdamWConfig, Float8Config, FSDPConfig, LRConfig, MoEConfig, OptimConfig, BalancingLossConfig, ZLossConfig
 from xtuner.v1.engine.moe_train_engine import MoETrainEngine
 from xtuner.v1.float8.float8_tensor import ScalingGranularity
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
 from xtuner.v1.utils import pad_to_max_length
+from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, LinearLR, SequentialLR
 
 
 # Qwen3 30B A3
@@ -38,21 +39,15 @@ class TestMoEEngineFloat8(DistributedTestBase):
         pg = self.create_pg(device)
 
         moe_cfg = Qwen3MoE30BA3Config(
+            balancing_loss_cfg=BalancingLossConfig(),
+            z_loss_cfg=ZLossConfig(),
             float8_cfg=Float8Config(
                 scaling_granularity_gemm=ScalingGranularity.TILEWISE,
                 scaling_granularity_grouped_gemm=ScalingGranularity.TILEWISE,
             ),
         )
-
-        moe_loss_cfg = MoELossConfig(
-            balancing_loss_type="softmax",
-            balancing_loss_alpha=0.001,
-            balancing_loss_global_average=True,
-            z_loss_alpha=0.001,
-            z_loss_global_average=True,
-        )
         optim_cfg: AdamWConfig = AdamWConfig()
-        lr_cfg: LRConfig = LRConfig(total_steps=1000)
+        lr_cfg: LRConfig = LRConfig()
         fsdp_cfg: FSDPConfig = FSDPConfig(
             torch_compile=True,
             cpu_offload=False,
@@ -61,12 +56,17 @@ class TestMoEEngineFloat8(DistributedTestBase):
         )
         engine = MoETrainEngine(
             model_cfg=moe_cfg,
-            moe_loss_cfg=moe_loss_cfg,
             optim_cfg=optim_cfg,
-            lr_cfg=lr_cfg,
             fsdp_cfg=fsdp_cfg,
         )
         engine.from_hf(hf_path=QWEN3_MOE_PATH)
+
+        total_steps = 1000
+        warmup_steps = total_steps * lr_cfg.warmup_ratio
+        def warmup_fn(x):
+            return x / warmup_steps if x < warmup_steps else 1
+        
+        lr_scheduler = LambdaLR(engine.optimizer, warmup_fn)
 
         tok = AutoTokenizer.from_pretrained(
             QWEN3_MOE_PATH
@@ -79,17 +79,17 @@ class TestMoEEngineFloat8(DistributedTestBase):
         pack_len = 8192 - input_ids.shape[1]
         input_ids = pad_to_max_length(input_ids, 0, max_length=8192)
         labels = pad_to_max_length(labels, -100, max_length=8192)
-        data_batch = {
-            "input_ids": input_ids,
-            "labels": labels,
-        }
         losses = []
         for _ in range(10):
-            seq_ctx = SequenceContext.from_input_ids((data_batch["input_ids"],))
+            seq_ctx = SequenceContext.from_input_ids((input_ids,))
             seq_ctx.num_padding = pack_len
-            log = engine.train_step([{"seq_ctx": seq_ctx, "labels": labels}], intra_layer_micro_batch=1)
-            losses.append(log["reduced_llm_loss"])
-        losses_ref = [2.44, 2.44, 1.79, 1.28, 0.93, 0.66, 0.42, 0.26, 0.17, 0.11]
+            loss_log, _ = engine.train_step([{"seq_ctx": seq_ctx, "labels": labels}])
+            grad_norm = engine.clip_grad_norm()
+            engine.step_optimizer(grad_norm)
+            lr_scheduler.step()
+            losses.append(loss_log["reduced_llm_loss"])
+        losses_ref = [2.41, 2.41, 1.79, 1.39, 1.02, 0.68, 0.52, 0.31, 0.18, 0.12]
+
         for loss, loss_ref in zip(losses, losses_ref):
             self.assertTrue(abs(loss - loss_ref) < 0.1)
         
@@ -110,31 +110,33 @@ class TestMoEEngineFloat8(DistributedTestBase):
 
         moe_cfg = Qwen3MoE30BA3Config(
             ep_size=ep_size,
+            balancing_loss_cfg=BalancingLossConfig(),
+            z_loss_cfg=ZLossConfig(),
             float8_cfg=Float8Config(
                 scaling_granularity_gemm=ScalingGranularity.TENSORWISE,
                 scaling_granularity_grouped_gemm=ScalingGranularity.TILEWISE,
             )
         )
 
-        moe_loss_cfg = MoELossConfig(
-            balancing_loss_type="softmax",
-            balancing_loss_alpha=0.001,
-            balancing_loss_global_average=True,
-            z_loss_alpha=0.001,
-            z_loss_global_average=True,
-        )
         optim_cfg: AdamWConfig = AdamWConfig()
-        lr_cfg: LRConfig = LRConfig(total_steps=1000)
+        lr_cfg: LRConfig = LRConfig()
         fsdp_cfg: FSDPConfig = FSDPConfig(
             torch_compile=True,
             cpu_offload=False,
             ep_size=ep_size,
-            hsdp_sharding_size=hsdp_sharding_size,
+            # hsdp_sharding_size=hsdp_sharding_size,
         )
         engine = MoETrainEngine(
-            model_cfg=moe_cfg, moe_loss_cfg=moe_loss_cfg, optim_cfg=optim_cfg, lr_cfg=lr_cfg, fsdp_cfg=fsdp_cfg
+            model_cfg=moe_cfg, optim_cfg=optim_cfg, fsdp_cfg=fsdp_cfg
         )
         engine.from_hf(hf_path=QWEN3_MOE_PATH)
+
+        total_steps = 1000
+        warmup_steps = total_steps * lr_cfg.warmup_ratio
+        def warmup_fn(x):
+            return x / warmup_steps if x < warmup_steps else 1
+        
+        lr_scheduler = LambdaLR(engine.optimizer, warmup_fn)
 
         tok = AutoTokenizer.from_pretrained(
             QWEN3_MOE_PATH
@@ -147,18 +149,17 @@ class TestMoEEngineFloat8(DistributedTestBase):
         pack_len = 8192 - input_ids.shape[1]
         input_ids = pad_to_max_length(input_ids, 0, max_length=8192)
         labels = pad_to_max_length(labels, -100, max_length=8192)
-        data_batch = {
-            "input_ids": input_ids,
-            "labels": labels,
-            "num_tokens": torch.tensor([input_ids.shape[1]], device=input_ids.device, dtype=torch.int32),
-        }
         losses = []
         for _ in range(10):
-            seq_ctx = SequenceContext.from_input_ids((data_batch["input_ids"],))
+            seq_ctx = SequenceContext.from_input_ids((input_ids,))
             seq_ctx.num_padding = pack_len
-            log = engine.train_step([{"seq_ctx": seq_ctx, "labels": labels}], intra_layer_micro_batch=1)
-            losses.append(log["reduced_llm_loss"])
-        losses_ref = [2.41, 2.41, 1.74, 1.26, 0.97, 0.70, 0.45, 0.35, 0.17, 0.12]
+            loss_log, _ = engine.train_step([{"seq_ctx": seq_ctx, "labels": labels}])
+            grad_norm = engine.clip_grad_norm()
+            engine.step_optimizer(grad_norm)
+            lr_scheduler.step()
+            losses.append(loss_log["reduced_llm_loss"])
+        losses_ref = [2.45, 2.45, 1.78, 1.31, 0.95, 0.67, 0.45, 0.31, 0.18, 0.12]
+
         for loss, loss_ref in zip(losses, losses_ref):
             self.assertTrue(abs(loss - loss_ref) < 0.1)
         
@@ -186,21 +187,15 @@ class TestMoEEngineFloat8(DistributedTestBase):
 
         moe_cfg = Qwen3MoE30BA3Config(
             ep_size=ep_size,
+            balancing_loss_cfg=BalancingLossConfig(),
+            z_loss_cfg=ZLossConfig(),
             float8_cfg=Float8Config(
                 scaling_granularity_gemm=ScalingGranularity.TILEWISE,
                 scaling_granularity_grouped_gemm=ScalingGranularity.TILEWISE,
             ),
         )
-
-        moe_loss_cfg = MoELossConfig(
-            balancing_loss_type="softmax",
-            balancing_loss_alpha=0.001,
-            balancing_loss_global_average=True,
-            z_loss_alpha=0.001,
-            z_loss_global_average=True,
-        )
         optim_cfg: AdamWConfig = AdamWConfig()
-        lr_cfg: LRConfig = LRConfig(total_steps=1000)
+        lr_cfg: LRConfig = LRConfig()
         fsdp_cfg: FSDPConfig = FSDPConfig(
             torch_compile=True,
             cpu_offload=False,
@@ -209,9 +204,7 @@ class TestMoEEngineFloat8(DistributedTestBase):
         )
         engine = MoETrainEngine(
             model_cfg=moe_cfg,
-            moe_loss_cfg=moe_loss_cfg,
             optim_cfg=optim_cfg,
-            lr_cfg=lr_cfg,
             fsdp_cfg=fsdp_cfg,
         )
         engine.from_hf(hf_path=QWEN3_MOE_PATH)
@@ -224,6 +217,13 @@ class TestMoEEngineFloat8(DistributedTestBase):
         engine.from_hf(
             hf_path=temp_dir,
         )
+
+        total_steps = 1000
+        warmup_steps = total_steps * lr_cfg.warmup_ratio
+        def warmup_fn(x):
+            return x / warmup_steps if x < warmup_steps else 1
+        
+        lr_scheduler = LambdaLR(engine.optimizer, warmup_fn)
 
         torch.cuda.empty_cache()
 
@@ -238,18 +238,17 @@ class TestMoEEngineFloat8(DistributedTestBase):
         input_ids = pad_to_max_length(input_ids, 0, max_length=8192)
         labels = pad_to_max_length(labels, -100, max_length=8192)
         pad_len = 8192 - input_ids.shape[1]
-        data_batch = {
-            "input_ids": input_ids,
-            "labels": labels,
-            "num_tokens": torch.tensor([input_ids.shape[1]], device=input_ids.device, dtype=torch.int32),
-        }
         losses = []
         for _ in range(10):
-            seq_ctx = SequenceContext.from_input_ids((data_batch["input_ids"],))
+            seq_ctx = SequenceContext.from_input_ids((input_ids,))
             seq_ctx.num_padding = pad_len
-            log = engine.train_step([{"seq_ctx": seq_ctx, "labels": labels}], intra_layer_micro_batch=1)
-            losses.append(log["reduced_llm_loss"])
-        losses_ref = [2.44, 2.44, 2.44, 2.44, 2.41, 2.42, 2.42, 2.41, 2.33, 2.33]
+            loss_log, _ = engine.train_step([{"seq_ctx": seq_ctx, "labels": labels}])
+            grad_norm = engine.clip_grad_norm()
+            engine.step_optimizer(grad_norm)
+            lr_scheduler.step()
+            losses.append(loss_log["reduced_llm_loss"])
+        losses_ref = [2.41, 2.41, 2.47, 2.42, 2.44, 2.44, 2.42, 2.38, 2.31, 2.30]
+
         for loss, loss_ref in zip(losses, losses_ref):
             self.assertTrue(abs(loss - loss_ref) < 0.1)
 
@@ -290,17 +289,10 @@ class TestMoEEngineFloat8Case2(DistributedTestBase):
         temp_dir = temp_dir[0]
         moe_cfg = Qwen3MoE30BA3Config(
             ep_size=ep_size,
-        )
-
-        moe_loss_cfg = MoELossConfig(
-            balancing_loss_type="softmax",
-            balancing_loss_alpha=0.001,
-            balancing_loss_global_average=True,
-            z_loss_alpha=0.001,
-            z_loss_global_average=True,
+            balancing_loss_cfg=BalancingLossConfig(),
+            z_loss_cfg=ZLossConfig(),
         )
         optim_cfg: AdamWConfig = AdamWConfig()
-        lr_cfg: LRConfig = LRConfig(total_steps=1000)
         fsdp_cfg: FSDPConfig = FSDPConfig(
             torch_compile=True,
             cpu_offload=False,
@@ -310,9 +302,7 @@ class TestMoEEngineFloat8Case2(DistributedTestBase):
         )
         engine_bf16 = MoETrainEngine(
             model_cfg=moe_cfg,
-            moe_loss_cfg=moe_loss_cfg,
             optim_cfg=optim_cfg,
-            lr_cfg=lr_cfg,
             fsdp_cfg=fsdp_cfg,
         )
         engine_bf16.init_model()
@@ -325,6 +315,8 @@ class TestMoEEngineFloat8Case2(DistributedTestBase):
         time.sleep(1)
 
         moe_cfg_fp8 = Qwen3MoE30BA3Config(
+            balancing_loss_cfg=BalancingLossConfig(),
+            z_loss_cfg=ZLossConfig(),
             float8_cfg=Float8Config(
                 scaling_granularity_gemm=ScalingGranularity.TILEWISE,
                 scaling_granularity_grouped_gemm=ScalingGranularity.TILEWISE,
@@ -332,9 +324,7 @@ class TestMoEEngineFloat8Case2(DistributedTestBase):
         )
         engine_fp8 = MoETrainEngine(
             model_cfg=moe_cfg_fp8,
-            moe_loss_cfg=moe_loss_cfg,
             optim_cfg=optim_cfg,
-            lr_cfg=lr_cfg,
             fsdp_cfg=fsdp_cfg,
         )
         engine_fp8.from_hf(

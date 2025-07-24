@@ -1,10 +1,10 @@
+from typing import Literal
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import distributed as dist
 from torch.distributed._functional_collectives import all_reduce
-
-from xtuner.v1.config import MoELossConfig
 
 
 class _AllReduce(torch.autograd.Function):
@@ -26,15 +26,20 @@ def all_reduce_autograd(tensor, op, group):
 
 
 class BalancingLoss(nn.Module):
-    def __init__(self, moe_loss_cfg: MoELossConfig) -> None:
+    def __init__(
+        self,
+        balancing_loss_alpha: float,
+        balancing_loss_global_average: bool,
+        router_scoring_func: Literal["sigmoid", "softmax"],
+    ) -> None:
         super().__init__()
-        self.loss_type = moe_loss_cfg.balancing_loss_type
-        self.loss_weight = moe_loss_cfg.balancing_loss_alpha
-        self.global_average = moe_loss_cfg.balancing_loss_global_average
+        self.loss_weight = balancing_loss_alpha
+        self.global_average = balancing_loss_global_average
+        self.loss_type = router_scoring_func
 
     def forward(self, router_logits, n_routed_experts, num_experts_per_tok):
         if self.loss_weight == 0:
-            return 0.0
+            return torch.tensor(0.0, device=router_logits.device, dtype=torch.float32)
 
         num_layers = router_logits.shape[0]
         router_logits = router_logits.float()  # (nlayers, seq, ne)
@@ -88,13 +93,17 @@ def z_loss(router_logits: torch.Tensor, global_average: bool = False):
 
 
 class ZLoss(nn.Module):
-    def __init__(self, moe_loss_cfg: MoELossConfig) -> None:
+    def __init__(
+        self,
+        z_loss_alpha: float,
+        z_loss_global_average: bool,
+    ) -> None:
         super().__init__()
-        self.loss_weight = moe_loss_cfg.z_loss_alpha
-        self.global_average = moe_loss_cfg.z_loss_global_average
+        self.loss_weight = z_loss_alpha
+        self.global_average = z_loss_global_average
 
     def forward(self, router_logits):
         if self.loss_weight == 0:
-            return 0.0
+            return torch.tensor(0.0, device=router_logits.device, dtype=torch.float32)
         loss = z_loss(router_logits, self.global_average)
         return loss * self.loss_weight

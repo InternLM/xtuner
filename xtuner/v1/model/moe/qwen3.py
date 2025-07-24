@@ -1,6 +1,7 @@
 import re
 
 from xtuner.v1.config import BaseRouterConfig, MoEConfig
+from xtuner.v1.config.moe_loss import BalancingLossConfig, ZLossConfig
 from xtuner.v1.module.attention import MHAConfig
 from xtuner.v1.module.router.greedy import GreedyRouterConfig
 
@@ -62,6 +63,8 @@ class Qwen3MoE30BA3Config(MoEConfig):
         norm_topk_prob=True,
         router_scaling_factor=1.0,
     )
+    balancing_loss_cfg: BalancingLossConfig | None = BalancingLossConfig()
+    z_loss_cfg: ZLossConfig | None = None
 
     def build(self) -> Qwen3MoE:
         return Qwen3MoE(self)

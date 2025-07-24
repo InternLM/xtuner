@@ -8,7 +8,7 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from mmengine import is_installed
 from torch import nn
-from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl
+from torch.distributed._functional_collectives import all_reduce
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
 )
@@ -27,11 +27,13 @@ from xtuner.v1.config import FSDPConfig
 from xtuner.v1.config.base_model import MoEConfig, MoEModelOutputs
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.float8_handler import Float8Handler
+from xtuner.v1.loss import BalancingLoss, ZLoss
 from xtuner.v1.model import BaseModel
 from xtuner.v1.module import RMSNorm, RotaryEmbedding
 from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayer
 from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEBlock, MoEDecoderLayer
 from xtuner.v1.module.linear.linear import _Linear
+from xtuner.v1.module.router import NoAuxRouter, NoAuxRouterConfig
 from xtuner.v1.utils import (
     get_device,
     get_logger,
@@ -85,12 +87,109 @@ class MoE(BaseModel):
         self.load_spec_mapping = self._init_load_spec()
         self._maybe_compile_layers()
 
+        self.balancing_loss: BalancingLoss | None
+        self.z_loss: ZLoss | None
+        if self.config.balancing_loss_cfg is not None:
+            self.balancing_loss = self.config.balancing_loss_cfg.build(self.config.router.scoring_func)
+        else:
+            self.balancing_loss = None
+        if self.config.z_loss_cfg is not None:
+            self.z_loss = self.config.z_loss_cfg.build()
+        else:
+            self.z_loss = None
+
+    def _select_non_pad_router_logits(
+        self,
+        router_logits_list: list[list[torch.Tensor]] | list[torch.Tensor],
+        attn_mask_list: list[torch.Tensor] | torch.Tensor,
+    ):
+        assert len(router_logits_list) > 0, "router_logits_list should not be empty"
+        if isinstance(router_logits_list[0], torch.Tensor):
+            router_logits_list = [cast(list[torch.Tensor], router_logits_list)]  # intra_layer_micro_batch is 1
+            attn_mask_list = [cast(torch.Tensor, attn_mask_list)]
+        # router_logits_list [intra_layer_micro_batch, num_layers][seq, num_experts]
+        # attn_mask_list [intra_layer_micro_batch, ][1, seq]
+        intra_layer_micro_batch = len(router_logits_list)
+        num_layers = len(router_logits_list[0])
+
+        router_logits_list_new = []  # [num_layers, intra_layer_micro_batch] -> [num_layers * intra_layer_micro_batch]
+        for layer_idx in range(num_layers):
+            for micro_batch_idx in range(intra_layer_micro_batch):
+                router_logits_list_new.append(router_logits_list[micro_batch_idx][layer_idx])
+
+        router_logits = torch.stack(
+            router_logits_list_new, dim=0
+        )  # [num_layers * intra_layer_micro_batch, seq, num_experts]
+        router_logits = router_logits.view(
+            num_layers, -1, router_logits.shape[-1]
+        )  # [num_layers, intra_layer_micro_batch * seq, num_experts]
+        attn_mask = torch.stack(attn_mask_list, dim=0)  # type: ignore  # [intra_layer_micro_batch, 1, seq]
+        attn_mask = attn_mask.flatten()
+        router_logits = router_logits[:, attn_mask].contiguous().float()  # [num_layers, non_pad_seq, num_experts]
+        return router_logits
+
+    @torch.no_grad()
+    def _cal_tokens_per_expert(self, router_logits: torch.Tensor):
+        scoring_func = self.config.router.scoring_func
+        n_routed_experts = self.config.n_routed_experts
+        num_experts_per_tok = self.config.num_experts_per_tok
+        num_layers = router_logits.shape[0]
+        router_logits = router_logits.float()  # (nlayers, seq, ne)
+        if scoring_func == "softmax":
+            routing_weights = F.softmax(router_logits, dim=-1)
+        elif scoring_func == "sigmoid":
+            routing_weights = router_logits / torch.sum(router_logits, dim=-1, keepdim=True)
+        else:
+            raise ValueError(f"Unknown scoring function: {scoring_func}")
+        _, selected_experts = torch.topk(routing_weights, num_experts_per_tok, dim=-1)
+        selected_experts_flat = selected_experts.view(num_layers, -1)
+        offset = torch.arange(num_layers, device=router_logits.device).unsqueeze(1) * n_routed_experts
+        selected_experts_offset = selected_experts_flat + offset
+        tokens_per_expert_flat = torch.histc(
+            selected_experts_offset.view(-1),
+            bins=num_layers * n_routed_experts,
+            min=0,
+            max=num_layers * n_routed_experts,
+        )
+        tokens_per_expert = tokens_per_expert_flat.view(num_layers, n_routed_experts)  # (nlayers, ne)
+        if dist.is_initialized():
+            tokens_per_expert_global_for_bias = all_reduce(tokens_per_expert, "sum", dist.group.WORLD)  # type: ignore
+        else:
+            tokens_per_expert_global_for_bias = tokens_per_expert
+        return tokens_per_expert_global_for_bias
+
+    @torch.no_grad()
+    def update_bias(self, total_expert_counts_pre_iter, expected_loads):
+        """Implementation for the following paper:
+        Auxiliary-Loss-Free Load Balancing Strategy for Mixture-of-Experts
+        https://arxiv.org/abs/2408.15664
+
+        TODO: refactor it later.
+        """
+        first_k_dense_replace = self.config.first_k_dense_replace
+        bias_update_speed = cast(NoAuxRouterConfig, self.config.router).router_bias_update_speed
+        n_layer, _ = total_expert_counts_pre_iter.size()
+
+        for i_layer in range(n_layer):
+            # 前 l 层是 mlp 层，跳过
+            gate = cast(MoEDecoderLayer, self.layers[first_k_dense_replace + i_layer]).gate
+            e_score_correction_bias = cast(NoAuxRouter, gate).e_score_correction_bias
+            expected_load = expected_loads[i_layer]
+            current_loads = total_expert_counts_pre_iter[i_layer]
+
+            load_diff = current_loads - expected_load
+            update_mask = load_diff != 0  # 只更新需要调整的专家
+            updates = torch.where(load_diff > 0, -bias_update_speed, bias_update_speed) * update_mask.float()
+
+            e_score_correction_bias.add_(updates)
+
     def forward(
         self,
-        seq_ctx: SequenceContext,
+        seq_ctx: SequenceContext,  # todo(@yehaochen): support intra layer micro-batch
         labels: torch.LongTensor,
-        return_router_results: bool = False,
+        return_router_results: bool = True,
         return_hidden_states: bool = False,
+        ce_loss_scale_factor: float = 1.0,
     ) -> MoEModelOutputs:
         input_ids = seq_ctx.input_ids
         position_ids = seq_ctx.position_ids
@@ -159,7 +258,30 @@ class MoE(BaseModel):
             loss_fct = torch.nn.CrossEntropyLoss()
             loss = loss_fct(shift_logits, shift_labels)
 
+        loss = loss * ce_loss_scale_factor
         output["loss"] = loss
+
+        if not return_router_results:
+            return MoEModelOutputs(**output)  # type: ignore[typeddict-item]
+
+        router_logits_list = [val["logits"] for val in output["router_logits"].values()]
+        router_logits = self._select_non_pad_router_logits(router_logits_list, seq_ctx.mask)
+        if self.balancing_loss:
+            balancing_loss = self.balancing_loss(
+                router_logits=router_logits,
+                n_routed_experts=self.config.n_routed_experts,
+                num_experts_per_tok=self.config.num_experts_per_tok,
+            )
+            output["balancing_loss"] = balancing_loss
+        if self.z_loss:
+            z_loss = self.z_loss(router_logits=router_logits)
+            output["z_loss"] = z_loss
+
+        if isinstance(self.config.router, NoAuxRouterConfig) and self.config.router.router_bias_update_speed > 0:
+            tokens_per_expert_global = self._cal_tokens_per_expert(router_logits)
+            output["tokens_per_expert_global"] = tokens_per_expert_global
+
+        del router_logits
 
         return MoEModelOutputs(**output)  # type: ignore[typeddict-item]
 
@@ -283,9 +405,7 @@ class MoE(BaseModel):
             layer_idx = int(layer_idx)
             layer.to_empty(device=DEVICE_MODULE.current_device())
             if layer_idx < num_recompute_layers - 1:
-                layer = ptd_checkpoint_wrapper(
-                    layer
-                )
+                layer = ptd_checkpoint_wrapper(layer)
 
             self.layers[str(layer_idx)] = layer
             if layer_idx >= len(self.layers) - 1:

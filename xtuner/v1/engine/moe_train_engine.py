@@ -7,13 +7,12 @@ import torch.nn.functional as F
 from torch.distributed._functional_collectives import all_reduce
 from torch.distributed.device_mesh import DeviceMesh
 
-from xtuner.v1.config import FSDPConfig, LRConfig, MoEConfig, MoELossConfig, OptimConfig
+from xtuner.v1.config import FSDPConfig, MoEConfig, OptimConfig
 from xtuner.v1.datasets.collator import ColateItem
 from xtuner.v1.engine.dense_train_engine import DenseTrainEngine
 
 # todo: 如何 import
 from xtuner.v1.float8.float8_handler import Float8Handler
-from xtuner.v1.loss import BalancingLoss, ZLoss
 from xtuner.v1.model.moe.moe import MoE
 
 # from xpuyu.models.auto import AutoFullyShardModel
@@ -38,19 +37,22 @@ class MoETrainEngine(DenseTrainEngine):
         self,
         *,
         model_cfg: MoEConfig,
-        moe_loss_cfg: MoELossConfig,
         optim_cfg: OptimConfig,
-        lr_cfg: LRConfig,
         fsdp_cfg: FSDPConfig,
+        intra_layer_micro_batch: int = 1,
     ) -> None:
         super().__init__(
             model_cfg=model_cfg,
             optim_cfg=optim_cfg,
-            lr_cfg=lr_cfg,
             fsdp_cfg=fsdp_cfg,
         )
-        self.balancing_loss = BalancingLoss(moe_loss_cfg=moe_loss_cfg)
-        self.z_loss = ZLoss(moe_loss_cfg=moe_loss_cfg)
+        self.intra_layer_micro_batch = intra_layer_micro_batch
+
+    @property
+    def data_replicate_size(self) -> int:
+        # todo: consider pp
+        assert self.fsdp_cfg.tp_size == 1, f"tp_size should be 1 in MoETrainEngine, but got {self.fsdp_cfg.tp_size}"
+        return 1
 
     # todo: @yehaochen
     def init_model(self):
@@ -142,13 +144,12 @@ class MoETrainEngine(DenseTrainEngine):
 
             e_score_correction_bias.add_(updates)
 
-    def train_step(self, data_batches: List[ColateItem], intra_layer_micro_batch: int = 1, sp_mesh: DeviceMesh = None):  # type: ignore
+    def train_step(self, data_batches: List[ColateItem], sp_mesh: DeviceMesh = None):  # type: ignore
         """Perform a training step with the given data batches and mesh.
 
         Args:
             data_batches (List[Dict]): The input data batches for the training step.
             max_length (Optional[int]): The maximum sequence length for padding.
-            intra_layer_micro_batch (int): The number of micro-batches for intra-layer all2all overlap.
             sp_mesh (Optional[DeviceMesh]): The device mesh for sequence parallelism.
         """
         if self.float8_handler is not None and self.float8_handler.enabled:
@@ -158,8 +159,10 @@ class MoETrainEngine(DenseTrainEngine):
             colate_item["seq_ctx"].to(DEVICE)
             colate_item["labels"].to(DEVICE)
 
-        log = {}
+        loss_log = {}
+        other_log = {}
         global_grad_tokens = self.cal_global_grad_tokens([i["labels"] for i in data_batches], sp_mesh)
+        intra_layer_micro_batch = self.intra_layer_micro_batch
         assert len(data_batches) % intra_layer_micro_batch == 0, (
             f"data_batches length {len(data_batches)} is not divisible by intra_layer_micro_batch {intra_layer_micro_batch}"
         )
@@ -173,8 +176,8 @@ class MoETrainEngine(DenseTrainEngine):
 
         step_loss = torch.tensor(0.0, device=DEVICE)
         step_llm_loss = torch.tensor(0.0, device=DEVICE)
-        step_balancing_loss = torch.tensor(0.0, device=DEVICE)
-        step_z_loss = torch.tensor(0.0, device=DEVICE)
+        step_balancing_loss: torch.Tensor | None = None
+        step_z_loss: torch.Tensor | None = None
         step_consumed_tokens = torch.tensor(0.0, device=DEVICE)
 
         for i in range(0, len(data_batches), intra_layer_micro_batch):
@@ -196,45 +199,37 @@ class MoETrainEngine(DenseTrainEngine):
             #     seq_ctx=seq_ctx_list[0],
             #     labels=shift_labels_list[0],
             # )
+            # todo: support intra_layer_micro_batch
+            rank_grad_tokens = (labels_list[0] >= 0).sum()
+            # tp size == 1
+            ce_loss_scale_factor = rank_grad_tokens / global_grad_tokens * dist.get_world_size() * iters_per_step
             output = self.model(
                 seq_ctx=seq_ctx_list[0],
                 labels=labels_list[0],  # type: ignore
                 return_router_results=True,
+                ce_loss_scale_factor=ce_loss_scale_factor,
             )
-            llm_loss_list = [output["loss"]]
-            router_logits_list = [[val["logits"] for val in output["router_logits"].values()]]
-
-            # global average llm loss
-            llm_loss = torch.tensor(0.0, device=DEVICE)
-            for loss, labels in zip(llm_loss_list, labels_list):
-                rank_grad_tokens = (labels >= 0).sum()
-                # tp size == 1
-                llm_loss += loss * rank_grad_tokens / global_grad_tokens * dist.get_world_size()
+            # llm loss has been global averaged by ce_loss_scale_factor
+            llm_loss = output["loss"] / iters_per_step
             step_llm_loss += llm_loss.detach().clone()
 
-            # aux_loss = self.cal_aux_loss() # None | dict[str, torch.Tensor]
-
-            router_logits = self.select_non_pad_router_logits(
-                router_logits_list, attn_mask_list=[seq_ctx.mask for seq_ctx in seq_ctx_list]
-            )
-
-            # aux_loss has been global averaged
-            balancing_loss = self.balancing_loss(
-                router_logits=router_logits,
-                n_routed_experts=self.model_cfg.n_routed_experts,
-                num_experts_per_tok=self.model_cfg.num_experts_per_tok,
-            )
-            z_loss = self.z_loss(router_logits=router_logits)
-            loss = llm_loss + (balancing_loss + z_loss) / iters_per_step
-            step_balancing_loss += balancing_loss.detach().clone() / iters_per_step
-            step_z_loss += z_loss.detach().clone() / iters_per_step
+            loss = llm_loss
+            if "balancing_loss" in output:
+                loss = loss + output["balancing_loss"] / iters_per_step
+                step_balancing_loss = (
+                    output["balancing_loss"]
+                    if step_balancing_loss is None
+                    else step_balancing_loss + output["balancing_loss"]
+                )
+            if "z_loss" in output:
+                loss = loss + output["z_loss"] / iters_per_step
+                step_z_loss = output["z_loss"] if step_z_loss is None else step_z_loss + output["z_loss"]
 
             if need_update_bias:
-                tokens_per_expert_global = self.cal_tokens_per_expert(router_logits)
-                tokens_per_expert_global_for_bias += tokens_per_expert_global
+                assert "tokens_per_expert_global" in output, "tokens_per_expert_global is required for bias update."
+                tokens_per_expert_global_for_bias += output["tokens_per_expert_global"]
 
-            del llm_loss_list, router_logits_list, router_logits
-
+            del output
             loss.backward()
             step_loss += loss.detach().clone()
 
@@ -244,32 +239,27 @@ class MoETrainEngine(DenseTrainEngine):
             max_load_i, _ = torch.max(tokens_per_expert_global_for_bias, dim=1)
             maxvio_all_layers = (max_load_i - avg_count_load) / avg_count_load
             maxvio = maxvio_all_layers.mean()
-            self.update_bias(tokens_per_expert_global_for_bias, avg_count_load)
-
-        grad_norm = self.step_optimizer()
-        self.lr_scheduler.step()
+            self.model.update_bias(tokens_per_expert_global_for_bias, avg_count_load)
 
         reduced_llm_loss = step_llm_loss
         dist.all_reduce(reduced_llm_loss.div_(dist.get_world_size()))
-        reduced_balancing_loss = step_balancing_loss
-        dist.all_reduce(reduced_balancing_loss.div_(dist.get_world_size()))
-        reduced_z_loss = step_z_loss
-        dist.all_reduce(reduced_z_loss.div_(dist.get_world_size()))
 
-        log["lr"] = self.lr_scheduler.get_last_lr()[0]
-        log["total_loss"] = step_loss.item()
-        log["reduced_llm_loss"] = reduced_llm_loss.item()
-        log["reduced_balancing_loss"] = reduced_balancing_loss.item()
-        log["reduced_z_loss"] = reduced_z_loss.item()
-        log["maxvio"] = maxvio.item()
-        log["grad_norm"] = grad_norm.item()
-        log["consumed_tokens"] = step_consumed_tokens.item()
-        return log
+        loss_log["total_loss"] = step_loss.item()
+        loss_log["reduced_llm_loss"] = reduced_llm_loss.item()
+        if step_balancing_loss is not None:
+            reduced_balancing_loss = step_balancing_loss
+            dist.all_reduce(reduced_balancing_loss.div_(dist.get_world_size()))
+            loss_log["reduced_balancing_loss"] = reduced_balancing_loss.item()
+        if step_z_loss is not None:
+            reduced_z_loss = step_z_loss
+            dist.all_reduce(reduced_z_loss.div_(dist.get_world_size()))
+            loss_log["reduced_z_loss"] = reduced_z_loss.item()
+        other_log["maxvio"] = maxvio.item()
+        other_log["consumed_tokens"] = step_consumed_tokens.item()
+        return loss_log, other_log
 
-    # todo: 调用 model 里的 scale grad
-    def step_optimizer(self):
+    def step_optimizer(self, grad_norm):
         """Step the optimizer to update the model parameters."""
-        grad_norm = self.clip_grad_norm()
         if torch.isnan(grad_norm) or torch.isinf(grad_norm):
             self.optimizer.zero_grad()
         else:

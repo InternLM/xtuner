@@ -12,8 +12,10 @@ from transformers import AutoTokenizer
 
 from xtuner.v1.model.moe.moe import SequenceContext
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
-from xtuner.v1.config import FSDPConfig, LRConfig, MoELossConfig, AdamWConfig
+from xtuner.v1.config import FSDPConfig, LRConfig, AdamWConfig, BalancingLossConfig, ZLossConfig
 from xtuner.v1.engine.moe_train_engine import MoETrainEngine
+from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, LinearLR, SequentialLR
+from xtuner.v1.utils import pad_to_max_length
 
 
 # Qwen3 30B A3
@@ -28,33 +30,33 @@ class TestMoEEngine(DistributedTestBase):
         ],
     )
     def test_moe_engine_train(self, device, ep_size, hsdp_sharding_size):
-        self.create_pg(device)
+        pg = self.create_pg(device)
 
         moe_cfg = Qwen3MoE30BA3Config(
             ep_size=ep_size,
-        )
-
-        moe_loss_cfg = MoELossConfig(
-            balancing_loss_type="softmax",
-            balancing_loss_alpha=0.001,
-            balancing_loss_global_average=True,
-            z_loss_alpha=0.001,
-            z_loss_global_average=True,
+            balancing_loss_cfg=BalancingLossConfig(),
+            z_loss_cfg=ZLossConfig(),
         )
         optim_cfg: AdamWConfig = AdamWConfig()
-        lr_cfg: LRConfig = LRConfig(total_steps=1000)
+        lr_cfg: LRConfig = LRConfig()
         fsdp_cfg: FSDPConfig = FSDPConfig(
-            torch_compile=False,
+            torch_compile=True,
             cpu_offload=False,
             ep_size=ep_size,
             max_length=8192,
             hsdp_sharding_size=hsdp_sharding_size,
         )
         engine = MoETrainEngine(
-            model_cfg=moe_cfg, moe_loss_cfg=moe_loss_cfg, optim_cfg=optim_cfg, lr_cfg=lr_cfg, fsdp_cfg=fsdp_cfg
+            model_cfg=moe_cfg, optim_cfg=optim_cfg, fsdp_cfg=fsdp_cfg
         )
-
         engine.from_hf(hf_path=QWEN3_MOE_PATH)
+
+        total_steps = 1000
+        warmup_steps = total_steps * lr_cfg.warmup_ratio
+        def warmup_fn(x):
+            return x / warmup_steps if x < warmup_steps else 1
+        
+        lr_scheduler = LambdaLR(engine.optimizer, warmup_fn)
 
         tok = AutoTokenizer.from_pretrained(
             "/cpfs01/shared/llm_ddd/opencompass/models/hf_hub/models--Qwen--Qwen3-30B-A3B/snapshots/4c446470ba0aec43e22ac1128f9ffd915f338ba3/"
@@ -64,19 +66,27 @@ class TestMoEEngine(DistributedTestBase):
         labels = input_ids.clone()
         input_ids = input_ids[:, :-1]
         labels = labels[:, 1:]
-        data_batch = {
-            "input_ids": input_ids,
-            "labels": labels,
-            "num_tokens": torch.tensor([input_ids.shape[1]], device=input_ids.device, dtype=torch.int32),
-        }
+        pack_len = 8192 - input_ids.shape[1]
+        input_ids = pad_to_max_length(input_ids, 0, max_length=8192)
+        labels = pad_to_max_length(labels, -100, max_length=8192)
         losses = []
         for _ in range(10):
-            seq_ctx = SequenceContext.from_input_ids((data_batch["input_ids"],))
-            log = engine.train_step([{"seq_ctx": seq_ctx, "labels": labels}], intra_layer_micro_batch=1)
-            losses.append(log["reduced_llm_loss"])
+            seq_ctx = SequenceContext.from_input_ids((input_ids,))
+            seq_ctx.num_padding = pack_len
+            loss_log, _ = engine.train_step([{"seq_ctx": seq_ctx, "labels": labels}])
+            grad_norm = engine.clip_grad_norm()
+            engine.step_optimizer(grad_norm)
+            lr_scheduler.step()
+            losses.append(loss_log["reduced_llm_loss"])
         losses_ref = [2.44, 2.44, 2.42, 2.41, 2.34, 2.33, 2.16, 2.13, 1.71, 1.55]
         for loss, loss_ref in zip(losses, losses_ref):
             self.assertTrue(abs(loss - loss_ref) < 0.05)
+        
+        torch.cuda.empty_cache()
+        try:
+            dist.destroy_process_group(pg)
+        except:
+            pass
 
     @parametrize.parametrize(
         "device,ep_size,hsdp_sharding_size",
@@ -96,16 +106,10 @@ class TestMoEEngine(DistributedTestBase):
         temp_dir = temp_dir[0]
         moe_cfg = Qwen3MoE30BA3Config(
             ep_size=ep_size,
-        )
-        moe_loss_cfg = MoELossConfig(
-            balancing_loss_type="softmax",
-            balancing_loss_alpha=0.001,
-            balancing_loss_global_average=True,
-            z_loss_alpha=0.001,
-            z_loss_global_average=True,
+            balancing_loss_cfg=BalancingLossConfig(),
+            z_loss_cfg=ZLossConfig(),
         )
         optim_cfg: AdamWConfig = AdamWConfig()
-        lr_cfg: LRConfig = LRConfig(total_steps=1000)
         fsdp_cfg: FSDPConfig = FSDPConfig(
             torch_compile=True,
             cpu_offload=False,
@@ -115,9 +119,7 @@ class TestMoEEngine(DistributedTestBase):
         )
         engine = MoETrainEngine(
             model_cfg=moe_cfg,
-            moe_loss_cfg=moe_loss_cfg,
             optim_cfg=optim_cfg,
-            lr_cfg=lr_cfg,
             fsdp_cfg=fsdp_cfg,
         )
 
@@ -132,9 +134,7 @@ class TestMoEEngine(DistributedTestBase):
 
         engine2 = MoETrainEngine(
             model_cfg=moe_cfg,
-            moe_loss_cfg=moe_loss_cfg,
             optim_cfg=optim_cfg,
-            lr_cfg=lr_cfg,
             fsdp_cfg=fsdp_cfg,
         )
         engine2.from_hf(hf_path=temp_dir)
