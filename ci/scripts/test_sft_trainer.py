@@ -8,6 +8,7 @@ from xtuner.v1.config import (
     AdamWConfig,
     DataloaderConfig,
     DatasetConfig,
+    FTDPTokenizeFnConfig,
     Float8Config,
     FSDPConfig,
     LRConfig,
@@ -57,15 +58,10 @@ def main():
             fsdp=fsdp_cfg,
             moe_loss=MoELossConfig(balancing_loss_type="sigmoid"),
         )
-        dataset_config = DatasetConfig(
-            meta_datas={
-                "alpaca": {
-                    "annotation": ALPACAL_PATH,
-                    "sample_ratio": 1,
-                }
-            },
-            dataset_args={},
-        )
+        dataset_config = [
+            dict(dataset=DatasetConfig(name='alpaca', anno_path=ALPACAL_PATH, sample_ratio=1.0),
+                 tokenize_fn=FTDPTokenizeFnConfig()),
+        ]
 
         dataloader_config = DataloaderConfig(
             pack_max_length=512,

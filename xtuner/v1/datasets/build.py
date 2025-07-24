@@ -1,7 +1,7 @@
 import copy
 import os
 from functools import partial
-from typing import Iterable
+from typing import Dict, Iterable, List
 
 import torch
 from mmengine.dist import get_rank
@@ -11,11 +11,8 @@ from torch.utils.data import ConcatDataset, DataLoader
 
 from xtuner.v1.utils import get_logger
 
-from ..config.data_config import DataloaderConfig, DatasetConfig
-from ..datasets.collator import sft_llm_collator
-from ..datasets.ftdp import FtdpTokenizeFunction
-from ..datasets.jsonl import JsonlDataset
-from .data_item import DataItem
+from ..config.data import DataloaderConfig, DatasetConfig
+from ..datasets.collator import ColateItem, sft_llm_collator
 from .packing import ExpandSoftPackDataset, SoftPackDataset
 from .sampler import LengthGroupedSampler, ParallelSampler
 
@@ -24,57 +21,50 @@ logger = get_logger()
 
 
 # TODO: (huanghaian) Fix the return type hint static check
-def build_datasets(dataset_config: DatasetConfig, tokenizer) -> list[Iterable[DataItem]]:
-    meta_datas = dataset_config.meta_datas
-
+def build_datasets(
+    dataset_config: List[Dict],
+    tokenizer,
+    model_cfg: dict | None = None,
+    max_length: int | None = None,
+    cache_dir: str | None = None,
+    cache_tag: str | None = None,
+):
     datasets = []
-    for name, meta_data in meta_datas.items():
-        annotation = meta_data["annotation"]
-        if os.path.isfile(annotation):
-            all_annotation = [annotation]
+    assert len(dataset_config) > 0
+    for config in dataset_config:
+        _dataset_config = config["dataset"]
+        assert isinstance(_dataset_config, DatasetConfig)
+        _tokenize_fn = config["tokenize_fn"]
+        _tokenize_fn = _tokenize_fn.build(tokenizer, model_cfg=model_cfg)
+
+        anno_path = _dataset_config.anno_path
+        if os.path.isfile(anno_path):
+            all_anno_path = [anno_path]
         else:
-            all_annotation = [
-                os.path.join(annotation, f)
-                for f in list_dir_or_file(annotation, suffix=".jsonl", list_dir=False, recursive=True)
+            all_anno_path = [
+                os.path.join(anno_path, f)
+                for f in list_dir_or_file(anno_path, suffix=".jsonl", list_dir=False, recursive=True)
             ]
-        for annotation_path in all_annotation:
-            meta_data_ = copy.deepcopy(meta_data)
-            meta_data_["annotation"] = annotation_path
-
-            tokenizer_fn_args = dataset_config.tokenizer_fn_args
-            if tokenizer_fn_args is None:
-                tokenizer_fn_args = {}
-
-            tokenize_fn = FtdpTokenizeFunction(meta_data_, tokenizer, **tokenizer_fn_args)
-
-            dataset_args = dataset_config.dataset_args
-            if dataset_args is None:
-                dataset_args = {}
-
-            _dataset = JsonlDataset(
-                annotation_path,
-                sample_ratio=meta_data_.get("sample_ratio", 1.0),
-                tokenize_fn=tokenize_fn,
-                **dataset_args,
-            )
-
+        for anno_path in all_anno_path:
+            _dataset_config = copy.deepcopy(_dataset_config)
+            _dataset_config.anno_path = anno_path
+            _dataset = _dataset_config.build(_tokenize_fn, max_length, cache_dir, cache_tag)
             if get_rank() == 0:
                 logger.info(
-                    f"[Dataset] (Original) {name}/{os.path.basename(annotation_path)}: {len(_dataset)} samples."
+                    f"[Dataset] (Original) {_dataset_config.name}/{os.path.basename(anno_path)}: {len(_dataset)} samples."
                 )
             datasets.append(_dataset)
-    return datasets  # type: ignore
+
+    return datasets
 
 
 def build_dataloader(
     dataloader_config: DataloaderConfig,
-    datasets,
+    datasets: list,
     dp_mesh: DeviceMesh,
     global_batch_size: int,
     micro_batch_size: int,
-) -> Iterable[list[DataItem]]:
-    assert isinstance(datasets, list), "datasets must be a list of datasets."
-
+) -> Iterable[list[ColateItem]]:
     if dataloader_config.pack_level != "none" and get_rank == 0:
         num_tokens = sum(dset.num_tokens.sum() for dset in datasets)
         logger.debug(f"[Dataset] {num_tokens} tokens.")

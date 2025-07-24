@@ -3,7 +3,7 @@ from typing import TypedDict
 
 from pydantic import BaseModel, model_validator
 
-from .data_config import DataloaderConfig, DatasetConfig
+from .data import DataloaderConfig, DatasetConfig
 from .engine import EngineConfig
 
 

@@ -12,8 +12,8 @@ import xxhash
 from PIL import Image
 
 from xtuner.v1.utils import get_logger
-
-from ..utils import CachableTokenizeFunction, CacheObj, tokenizer_xxhash
+from xtuner.v1.datasets.data_item import DataItem
+from ..utils import CachableTokenizeFunction, tokenizer_xxhash
 from ..vlm_utils import TCSLoader, apply_exif_orientation
 from .process import build_transform, dynamic_num_patch, dynamic_preprocess, preprocess_internvl
 
@@ -610,7 +610,7 @@ class InternVLTokenizeFunction(CachableTokenizeFunction):
         )
         return transform
 
-    def __call__(self, item: Any) -> CacheObj:
+    def __call__(self, item: Any) -> DataItem:
         if "image" in item and item["image"] is not None and item["image"] != "":
             if type(item["image"]) is list and len(item["image"]) > 1:
                 if self.tokenizer.state == "cache":

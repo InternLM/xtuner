@@ -40,7 +40,6 @@ class SoftPackDataset(torch.utils.data.Dataset):
         return self.pack_infos["longest"]
 
     def get_pack_infos(self, dataset, dataset_id, num_tokens):
-        # _ori_lens = dataset['num_tokens']
         inds = list(range(len(dataset)))
         if self.seed is not None:
             torch.manual_seed(self.seed)

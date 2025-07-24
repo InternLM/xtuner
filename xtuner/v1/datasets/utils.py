@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING, Any, Literal, TypedDict
 
 import xxhash
 
+from ..datasets.data_item import DataItem
+
 
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizer
@@ -21,7 +23,7 @@ class CachableTokenizeFunction(ABC):
         self.state = "runtime"
 
     @abstractmethod
-    def __call__(self, item: Any) -> CacheObj:
+    def __call__(self, item: Any) -> DataItem:
         raise NotImplementedError
 
     @abstractmethod
