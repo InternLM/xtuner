@@ -21,6 +21,7 @@ from mmengine.dist import barrier, get_rank
 from torch import distributed as dist
 from tqdm import tqdm
 
+from xtuner.v1.datasets.data_item import DataItem
 from xtuner.v1.utils import SharedMemory, get_logger
 
 from .utils import CachableTokenizeFunction, CacheObj, calculate_xxhash
@@ -175,9 +176,10 @@ class JsonlDataset(torch.utils.data.Dataset):
 
     def __init__(
         self,
-        path,
+        anno_path,
         sample_ratio: float = 1.0,
         tokenize_fn: CachableTokenizeFunction | None = None,
+        name: str = "default",
         cache_dir: str | None = None,
         max_length: int | None = None,
         cache_tag: str | None = None,
@@ -185,12 +187,13 @@ class JsonlDataset(torch.utils.data.Dataset):
         super().__init__()
 
         self.tokenize_fn = tokenize_fn
-        self.path = path
+        self.path = anno_path
+        self.name = name
         self.tokenizer_workers = int(os.environ.get("XTUNER_TOKENIZE_WORKERS", 8))
-        self._shared_memory = self._init_shared_memory(path)
+        self._shared_memory = self._init_shared_memory(anno_path)
         self.meta_path = os.path.join(cache_dir, CACHE_META) if cache_dir else None
 
-        logger.info(f"Start loading {self.path} with sample_ratio={sample_ratio}.")
+        logger.info(f"Start loading [{self.name}]{self.path} with sample_ratio={sample_ratio}.")
 
         if cache_tag is not None and (cached := self._get_cached_tag(cache_tag, tokenize_fn)) is not None:
             offset_path, num_tokens_path = cached["offsets"], cached["num_tokens"]
@@ -343,7 +346,7 @@ class JsonlDataset(torch.utils.data.Dataset):
             orig_sample_num = len(num_tokens)
             _sampled = [i for i in _sampled if num_tokens[i] != 0]
             if len(_sampled) < orig_sample_num:
-                logger.warning(f"{path} has {orig_sample_num - len(_sampled)} damaged samples, discard.")
+                logger.warning(f"{self.path} has {orig_sample_num - len(_sampled)} damaged samples, discard.")
 
         if num_tokens is not None and max_length is not None:
             assert isinstance(max_length, int)
@@ -351,7 +354,7 @@ class JsonlDataset(torch.utils.data.Dataset):
 
             if len(_filtered) < len(_sampled):
                 missed_num = len(_sampled) - len(_filtered)
-                logger.warning(f"{path} has {missed_num} prompt length>{max_length}, discard.")
+                logger.warning(f"{self.path} has {missed_num} prompt length>{max_length}, discard.")
 
             _sampled = _filtered
 
@@ -495,7 +498,7 @@ class JsonlDataset(torch.utils.data.Dataset):
     def __len__(self):
         return len(self.offsets)
 
-    def __getitem__(self, item):
+    def __getitem__(self, item) -> DataItem:
         """Returns a dict containing packed data in the given item.
 
         Args:

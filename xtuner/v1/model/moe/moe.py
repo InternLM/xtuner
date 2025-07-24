@@ -284,9 +284,7 @@ class MoE(BaseModel):
             layer.to_empty(device=DEVICE_MODULE.current_device())
             if layer_idx < num_recompute_layers - 1:
                 layer = ptd_checkpoint_wrapper(
-                    layer,
-                    preserve_rng_state=False,
-                    checkpoint_impl=CheckpointImpl.REENTRANT,
+                    layer
                 )
 
             self.layers[str(layer_idx)] = layer

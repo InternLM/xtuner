@@ -24,8 +24,11 @@ def sft_llm_collator(
     ret: list[ColateItem] = []
     for instance in instances:
         for data_item in instance:
-            if len(data_item["input_ids"]) >= max_length:
-                logger.warning(f"Found empty input_ids in data item: {data_item}")
+            if len(data_item["input_ids"]) > max_length:
+                logger.warning(
+                    f"Found sample with {len(data_item['input_ids'])} tokens, "
+                    f"which is larger than the `max_length` {max_length}, truncating it."
+                )
                 data_item["input_ids"] = data_item["input_ids"][:max_length]
                 data_item["labels"] = data_item["labels"][:max_length]
                 data_item["num_tokens"] = len(data_item["input_ids"])
@@ -33,12 +36,12 @@ def sft_llm_collator(
         # If the token number of the packed sample is larger than the packed_max_lenghth
         if (total_num_tokens := sum(i["num_tokens"] for i in instance)) > pack_max_length:
             logger.warning(
-                f"Found packed sample with {total_num_tokens} tokens, which is larger than the `packed_max_lenghth`"
-                f"{pack_max_length}, which is unexpected for packed dataset"
+                f"Found packed sample with {total_num_tokens} tokens, which is larger than the `pack_max_length`"
+                f"{pack_max_length}, which is unexpected for packed dataset. dropping samples from the end."
             )
 
             for drop_from in range(len(instance) - 1, -1, -1):
-                if total_num_tokens - instance[drop_from]["num_tokens"] <= max_length:
+                if total_num_tokens - instance[drop_from]["num_tokens"] <= pack_max_length:
                     instance = instance[:drop_from]
                     break
                 else:

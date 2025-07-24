@@ -1,7 +1,7 @@
 import sys
 import time
 from pathlib import Path
-from typing import Sized, cast
+from typing import Dict, List, Sized, cast
 
 import torch
 from mmengine.dist import get_rank, get_world_size
@@ -10,7 +10,7 @@ from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 
 from transformers import AutoTokenizer
 from xtuner.utils.device import get_device
-from xtuner.v1.config import DataloaderConfig, DatasetConfig, EngineConfig
+from xtuner.v1.config import DataloaderConfig, EngineConfig
 from xtuner.v1.config.trainer import ResumeConfig
 from xtuner.v1.datasets.build import build_dataloader, build_datasets
 from xtuner.v1.engine import build_engine
@@ -29,7 +29,7 @@ class Trainer:
         *,
         model_path: str | Path | None = None,  # Huggingface model path or saved trainer_path
         engine_config: EngineConfig,
-        dataset_config: DatasetConfig,
+        dataset_config: List[Dict],
         dataloader_config: DataloaderConfig,
         tokenizer: str | Path,
         global_batch_size: int,
@@ -88,6 +88,7 @@ class Trainer:
         self.data_mesh = self._init_data_mesh(engine_config)
 
         self._engine = self.build_engine(model_path, engine_config, resume_config)
+        self.tokenizer.model_max_length = dataloader_config.max_length
         self._dataloader = self.build_dataloader(
             dataset_config=dataset_config,
             dataloader_config=dataloader_config,
@@ -150,7 +151,7 @@ class Trainer:
     def total_step(self):
         if self._total_step is None:
             assert isinstance(self._dataloader, Sized), (
-                f"`epoch_num` should be set for a Mapped dataset, but got {self._datasets}"
+                f"`epoch_num` should be set for a Mapped dataset, but got {self._dataloader.dataset}"
             )
             self._total_step = len(self._dataloader) * cast(int, self._epoch_num)
         return self._total_step
@@ -222,7 +223,7 @@ class Trainer:
     def build_dataloader(
         self,
         dataloader_config: DataloaderConfig,
-        dataset_config: DatasetConfig,
+        dataset_config: List[Dict],
         tokenizer: AutoTokenizer,
         dp_mesh: DeviceMesh,
         global_batch_size: int,
@@ -232,6 +233,7 @@ class Trainer:
         # TODO: Support resume
         # 1. load dataloader state
         # 2. set cur step
+        # TODO(hha): 如何传入 model_cfg 到 dataset 中
         datasets = build_datasets(dataset_config, tokenizer)
         return build_dataloader(
             dataloader_config=dataloader_config,

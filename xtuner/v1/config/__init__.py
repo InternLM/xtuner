@@ -1,5 +1,5 @@
 from .base_model import BaseAttnConfig, BaseRouterConfig, GenerateConfig, MoEConfig, TransformerConfig
-from .data_config import DataloaderConfig, DatasetConfig
+from .data import DataloaderConfig, DatasetConfig, FTDPTokenizeFnConfig
 from .engine import EngineConfig, MoEEngineConfig
 from .float8 import Float8Config
 from .fsdp import FSDPConfig
@@ -23,4 +23,5 @@ __all__ = [
     "GenerateConfig",
     "EngineConfig",
     "MoEEngineConfig",
+    "FTDPTokenizeFnConfig",
 ]

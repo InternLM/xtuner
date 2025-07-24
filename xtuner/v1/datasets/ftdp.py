@@ -5,9 +5,10 @@ import inspect
 from typing import TYPE_CHECKING, Dict, List, cast
 
 from xtuner.utils import IGNORE_INDEX
+from xtuner.v1.datasets.data_item import DataItem
 from xtuner.v1.utils import get_logger
 
-from .utils import CachableTokenizeFunction, CacheObj, tokenizer_xxhash
+from .utils import CachableTokenizeFunction, tokenizer_xxhash
 
 
 if TYPE_CHECKING:
@@ -706,19 +707,17 @@ def ftdp_tokenize(tokenizer: "PreTrainedTokenizer", messages: list[dict] | dict,
 class FtdpTokenizeFunction(CachableTokenizeFunction):
     def __init__(
         self,
-        meta_data,
         tokenizer: "PreTrainedTokenizer",
         chat_template="internlm2",
         tokenizer_hash: str | None = None,
         hash: str | None = None,
     ):
-        self.meta_data = meta_data
         self.tokenizer = tokenizer
         self.template_config = ROLE_CONFIG[chat_template]
         self._hash = hash
         self._tokenizer_hash = tokenizer_hash
 
-    def __call__(self, item: dict | list) -> CacheObj:
+    def __call__(self, item: dict | list) -> DataItem:
         return ftdp_tokenize(self.tokenizer, item, self.template_config)  # type: ignore[return-value]
 
     def hash(self) -> str:
@@ -749,7 +748,7 @@ class FtdpTokenizedDataMapping(CachableTokenizeFunction):
         self.max_length = max_length
         self._hash = hash
 
-    def __call__(self, item: dict) -> CacheObj:
+    def __call__(self, item: dict) -> DataItem:
         item["input_ids"] = item["tokens"]
         del item["tokens"]
         if len(item["input_ids"]) > self.max_length:
