@@ -11,11 +11,13 @@ from torch.testing._internal.common_distributed import DistributedTestBase
 from transformers import AutoTokenizer
 
 from xtuner.v1.model.moe.moe import SequenceContext
+from xtuner.v1.data_proto.loss_context import LossContext, CELossConfig
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
 from xtuner.v1.config import FSDPConfig, LRConfig, AdamWConfig, BalancingLossConfig, ZLossConfig
 from xtuner.v1.engine.moe_train_engine import MoETrainEngine
 from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, LinearLR, SequentialLR
 from xtuner.v1.utils import pad_to_max_length
+from xtuner.v1.engine.utils import cal_global_grad_tokens
 
 
 # Qwen3 30B A3
@@ -73,7 +75,14 @@ class TestMoEEngine(DistributedTestBase):
         for _ in range(10):
             seq_ctx = SequenceContext.from_input_ids((input_ids,))
             seq_ctx.num_padding = pack_len
-            loss_log, _ = engine.train_step([{"seq_ctx": seq_ctx, "labels": labels}])
+            seq_ctx.to('cuda')
+            global_grad_tokens = cal_global_grad_tokens([labels])
+            grad_accumulation_steps = engine.grad_accumulation_steps(1)
+            loss_ctx = LossContext(CELossConfig())
+            loss_ctx = loss_ctx.build_item(seq_ctx, labels,
+                                           grad_accumulation_steps=grad_accumulation_steps,
+                                           global_grad_tokens=global_grad_tokens)
+            loss_log, _ = engine.train_step([{"seq_ctx": seq_ctx, "loss_ctx": loss_ctx}])
             grad_norm = engine.clip_grad_norm()
             engine.step_optimizer(grad_norm)
             lr_scheduler.step()

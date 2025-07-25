@@ -230,5 +230,6 @@ class InternVLChatModel(nn.Module):
             labels=labels,
             return_router_results=return_router_results,
             return_hidden_states=return_hidden_states,
+            loss_ctx = None  # type: ignore
         )
         return outputs

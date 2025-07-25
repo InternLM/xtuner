@@ -4,11 +4,11 @@ import torch
 from pydantic import BaseModel, ConfigDict, computed_field
 from typing_extensions import NotRequired
 
-from xtuner.v1.config.moe_loss import BalancingLossConfig, ZLossConfig
+from xtuner.v1.config.float8 import Float8Config
+from xtuner.v1.config.loss import BalancingLossConfig, ZLossConfig
 
 
 if TYPE_CHECKING:
-    from xtuner.v1.config.float8 import Float8Config
     from xtuner.v1.model.base import BaseModel as _BaseModel
     from xtuner.v1.model.moe.moe import MoE
 
