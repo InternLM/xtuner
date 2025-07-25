@@ -2,7 +2,8 @@ import torch
 import torch.nn as nn
 
 from transformers.activations import ACT2FN
-from xtuner.v1.config.base_model import BaseAttnConfig, Float8Config, GenerateConfig
+from xtuner.v1.config.base_model import BaseAttnConfig, GenerateConfig
+from xtuner.v1.config.float8 import Float8Config
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.module import MultiHeadAttention, MultiLatentAttention, RMSNorm
 from xtuner.v1.utils import ForwardState

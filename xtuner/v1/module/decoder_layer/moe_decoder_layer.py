@@ -7,7 +7,8 @@ from torch.distributed.tensor import DTensor, Partial
 from torch.nn import functional as F
 
 from transformers.activations import ACT2FN
-from xtuner.v1.config.base_model import BaseAttnConfig, BaseRouterConfig, Float8Config, GenerateConfig
+from xtuner.v1.config.base_model import BaseAttnConfig, BaseRouterConfig, GenerateConfig
+from xtuner.v1.config.float8 import Float8Config
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.module import MultiHeadAttention, MultiLatentAttention, RMSNorm, RouterResults
 from xtuner.v1.module.dispatcher import PrefillingDispatchResult, build_dispatcher

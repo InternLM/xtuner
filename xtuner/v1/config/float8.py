@@ -1,10 +1,20 @@
+import enum
 from typing import Optional
 
 from cyclopts import Parameter
 from pydantic import BaseModel
 from typing_extensions import Annotated
 
-from xtuner.v1.float8.float8_tensor import ScalingGranularity
+
+class ScalingGranularity(enum.Enum):
+    """Defines the granularity of scaling strategies for casting to float8."""
+
+    # use one scale for each 1x128 tile
+    TILEWISE = "tilewise"
+    # use one scale for each 128x128 block
+    BLOCKWISE = "blockwise"
+    # use one scale for the whole tensor
+    TENSORWISE = "tensorwise"
 
 
 class Float8Config(BaseModel):

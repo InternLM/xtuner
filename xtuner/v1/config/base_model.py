@@ -1,14 +1,14 @@
-from typing import TYPE_CHECKING, Generic, Literal, TypedDict, TypeVar
+from typing import TYPE_CHECKING, Generic, Literal, Optional, TypedDict, TypeVar
 
 import torch
 from pydantic import BaseModel, ConfigDict, computed_field
 from typing_extensions import NotRequired
 
-from xtuner.v1.config.float8 import Float8Config
 from xtuner.v1.config.moe_loss import BalancingLossConfig, ZLossConfig
 
 
 if TYPE_CHECKING:
+    from xtuner.v1.config.float8 import Float8Config
     from xtuner.v1.model.base import BaseModel as _BaseModel
     from xtuner.v1.model.moe.moe import MoE
 
@@ -38,7 +38,7 @@ class BaseAttnConfig(BaseModel, Generic[T]):
         hidden_size: int,
         layer_idx: int = 0,
         generate_config: GenerateConfig | None = None,
-        float8_cfg: Float8Config | None = None,
+        float8_cfg: Optional["Float8Config"] = None,
     ) -> T:
         raise NotImplementedError
 
@@ -86,7 +86,7 @@ class TransformerConfig(BaseModel):
     chunked_loss: bool = False
     model_type: Literal["qwen"] | None = None
     generate_config: GenerateConfig | None = None
-    float8_cfg: Float8Config | None = None
+    float8_cfg: Optional["Float8Config"] = None
 
     @computed_field
     def num_attention_heads(self) -> int:

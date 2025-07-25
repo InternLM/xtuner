@@ -1,18 +1,8 @@
-import enum
 from typing import Dict, Literal
 
 import torch
 
-
-class ScalingGranularity(enum.Enum):
-    """Defines the granularity of scaling strategies for casting to float8."""
-
-    # use one scale for each 1x128 tile
-    TILEWISE = "tilewise"
-    # use one scale for each 128x128 block
-    BLOCKWISE = "blockwise"
-    # use one scale for the whole tensor
-    TENSORWISE = "tensorwise"
+from xtuner.v1.config.float8 import ScalingGranularity
 
 
 class Float8Tensor(torch.Tensor):

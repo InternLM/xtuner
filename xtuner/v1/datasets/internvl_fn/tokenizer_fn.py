@@ -11,8 +11,9 @@ import torch
 import xxhash
 from PIL import Image
 
-from xtuner.v1.utils import get_logger
 from xtuner.v1.datasets.data_item import DataItem
+from xtuner.v1.utils import get_logger
+
 from ..utils import CachableTokenizeFunction, tokenizer_xxhash
 from ..vlm_utils import TCSLoader, apply_exif_orientation
 from .process import build_transform, dynamic_num_patch, dynamic_preprocess, preprocess_internvl
