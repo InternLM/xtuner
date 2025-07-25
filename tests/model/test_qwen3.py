@@ -14,6 +14,9 @@ from xtuner.v1.model.moe.moe import SequenceContext
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.utils.compile import maybe_compile
+from xtuner.v1.engine.utils import cal_global_grad_tokens
+from xtuner.v1.data_proto.loss_context import LossContext, CELossConfig
+
 
 # Qwen3 30B A3
 QWEN3_MOE_PATH = os.environ["QWEN3_MOE_PATH"]
@@ -60,13 +63,18 @@ class TestQwen3MoE(DistributedTestBase):
 
         seq_ctx = SequenceContext.from_input_ids(input_ids=(input_ids, ))
         seq_ctx, shifted_labels = seq_ctx.shift_with_labels(labels=input_ids)
-
+        seq_ctx.to('cuda')
+        global_grad_tokens = cal_global_grad_tokens([shifted_labels])
+        loss_ctx = LossContext(CELossConfig())
+        loss_ctx = loss_ctx.build_item(seq_ctx, shifted_labels,
+                                       grad_accumulation_steps=1,
+                                       global_grad_tokens=global_grad_tokens)
         qwen_model.from_hf(QWEN3_MOE_PATH)
 
         with torch.no_grad():
             output = qwen_model(
                 seq_ctx=seq_ctx,
-                labels=shifted_labels,
+                loss_ctx=loss_ctx,
             )
         loss = output["loss"]
         self.assertTrue(torch.allclose(loss, expected_loss.to(loss.dtype), atol=tol, rtol=tol))
@@ -113,6 +121,12 @@ class TestQwen3MoE(DistributedTestBase):
 
         seq_ctx = SequenceContext.from_input_ids(input_ids=(input_ids, ))
         seq_ctx, shifted_labels = seq_ctx.shift_with_labels(labels=input_ids)
+        seq_ctx.to('cuda')
+        global_grad_tokens = cal_global_grad_tokens([shifted_labels])
+        loss_ctx = LossContext(CELossConfig())
+        loss_ctx = loss_ctx.build_item(seq_ctx, shifted_labels,
+                                       grad_accumulation_steps=1,
+                                       global_grad_tokens=global_grad_tokens)
 
         qwen_model.fully_shard(fsdp_config=fsdp_config)
         qwen_model.from_hf(QWEN3_MOE_PATH)
@@ -120,7 +134,7 @@ class TestQwen3MoE(DistributedTestBase):
         with torch.no_grad():
             output = qwen_model(
                 seq_ctx=seq_ctx,
-                labels=shifted_labels,
+                loss_ctx=loss_ctx,
             )
         loss = output["loss"]
         self.assertTrue(torch.allclose(loss, expected_loss.to(loss.dtype), atol=1e-2, rtol=1e-2))

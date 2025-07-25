@@ -8,14 +8,13 @@ from torch.distributed._functional_collectives import all_reduce
 from torch.distributed.device_mesh import DeviceMesh
 
 from xtuner.v1.config import FSDPConfig, MoEConfig, OptimConfig
-from xtuner.v1.datasets.collator import ColateItem
+from xtuner.v1.data_proto import LossContext
 from xtuner.v1.engine.dense_train_engine import DenseTrainEngine
 
 # todo: 如何 import
 from xtuner.v1.float8.float8_handler import Float8Handler
+from xtuner.v1.model.base import ModelItem
 from xtuner.v1.model.moe.moe import MoE
-
-# from xpuyu.models.auto import AutoFullyShardModel
 from xtuner.v1.module.grouped_linear.moe_group_linear import GroupedLinear
 from xtuner.v1.module.router import NoAuxRouterConfig
 from xtuner.v1.utils import get_device, get_logger, get_torch_device_module
@@ -144,29 +143,27 @@ class MoETrainEngine(DenseTrainEngine):
 
             e_score_correction_bias.add_(updates)
 
-    def train_step(self, data_batches: List[ColateItem], sp_mesh: DeviceMesh = None):  # type: ignore
+    def grad_accumulation_steps(self, data_batches_len: int):
+        intra_layer_micro_batch = self.intra_layer_micro_batch
+        return data_batches_len // intra_layer_micro_batch
+
+    def train_step(self, data_batches: List[ModelItem], sp_mesh: DeviceMesh = None):  # type: ignore
         """Perform a training step with the given data batches and mesh.
 
         Args:
             data_batches (List[Dict]): The input data batches for the training step.
-            max_length (Optional[int]): The maximum sequence length for padding.
             sp_mesh (Optional[DeviceMesh]): The device mesh for sequence parallelism.
         """
         if self.float8_handler is not None and self.float8_handler.enabled:
             self.float8_handler.precompute_float8_dynamic_scale_for_fsdp(self.model)
 
-        for colate_item in data_batches:
-            colate_item["seq_ctx"].to(DEVICE)
-            colate_item["labels"].to(DEVICE)
-
         loss_log = {}
         other_log = {}
-        global_grad_tokens = self.cal_global_grad_tokens([i["labels"] for i in data_batches], sp_mesh)
         intra_layer_micro_batch = self.intra_layer_micro_batch
         assert len(data_batches) % intra_layer_micro_batch == 0, (
             f"data_batches length {len(data_batches)} is not divisible by intra_layer_micro_batch {intra_layer_micro_batch}"
         )
-        iters_per_step = len(data_batches) // intra_layer_micro_batch
+        iters_per_step = self.grad_accumulation_steps(len(data_batches))
 
         need_update_bias = (
             isinstance(self.model_cfg.router, NoAuxRouterConfig) and self.model_cfg.router.router_bias_update_speed > 0
@@ -183,34 +180,26 @@ class MoETrainEngine(DenseTrainEngine):
         for i in range(0, len(data_batches), intra_layer_micro_batch):
             data_batch = data_batches[i : i + intra_layer_micro_batch]
             seq_ctx_list = []
-            labels_list = []
+            loss_ctx_list = []
             for data in data_batch:
                 seq_ctx = data["seq_ctx"]
-                labels = data["labels"]
+                loss_ctx = data["loss_ctx"]
+
                 # shift_seq_ctx and labels have been split in data_preprocess if sequence parallelism is enabled
                 if sp_mesh:
-                    seq_ctx, labels = seq_ctx.split_with_labels(labels, sp_mesh)  # type: ignore
+                    # TODO(HHA): labels 的 sp 逻辑应该由 loss_ctx 做
+                    seq_ctx, labels = seq_ctx.split_with_labels(loss_ctx.loss_froward_item.labels, sp_mesh)  # type: ignore
+                    loss_ctx.loss_froward_item.labels = labels  # type: ignore
+                    loss_ctx: LossContext = loss_ctx.split(sp_mesh)  # type: ignore
 
                 seq_ctx_list.append(seq_ctx)
-                labels_list.append(labels)
+                loss_ctx_list.append(loss_ctx)
                 step_consumed_tokens += seq_ctx.mask.sum()
 
-            # llm_loss_list, router_logits_list = self.model(
-            #     seq_ctx=seq_ctx_list[0],
-            #     labels=shift_labels_list[0],
-            # )
             # todo: support intra_layer_micro_batch
-            rank_grad_tokens = (labels_list[0] >= 0).sum()
-            # tp size == 1
-            ce_loss_scale_factor = rank_grad_tokens / global_grad_tokens * dist.get_world_size() * iters_per_step
-            output = self.model(
-                seq_ctx=seq_ctx_list[0],
-                labels=labels_list[0],  # type: ignore
-                return_router_results=True,
-                ce_loss_scale_factor=ce_loss_scale_factor,
-            )
-            # llm loss has been global averaged by ce_loss_scale_factor
-            llm_loss = output["loss"] / iters_per_step
+            output = self.model(seq_ctx=seq_ctx_list[0], loss_ctx=loss_ctx_list[0], return_router_results=True)
+            # llm loss has been global averaged
+            llm_loss = output["loss"]
             step_llm_loss += llm_loss.detach().clone()
 
             loss = llm_loss

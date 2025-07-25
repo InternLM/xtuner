@@ -19,15 +19,15 @@ from xtuner.v1.config import (
     MoEEngineConfig,
     BalancingLossConfig,
     ZLossConfig,
+    CELossConfig
 )
-from xtuner.v1.float8.float8_tensor import ScalingGranularity
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
 from xtuner.v1.train.trainer import Trainer
 from xtuner.v1.utils.compile import maybe_compile
 import argparse
 
 QWEN3_MOE_PATH = os.environ["QWEN3_MOE_PATH"]
-ALPACAL_PATH = os.environ["ALPACAL_PATH"]
+ALPACA_PATH = os.environ["ALPACA_PATH"]
 
 
 lr = [
@@ -226,8 +226,8 @@ def main():
 
     maybe_compile.clear_compile_targets()
     moe_cfgs = [
-        (Qwen3MoE30BA3Config(balancing_loss_cfg=BalancingLossConfig(), z_loss_cfg=ZLossConfig(), chunked_loss=False), "ep1"),
-        (Qwen3MoE30BA3Config(ep_size=8, dispatcher="all2all", chunked_loss=False), "ep8"),
+        (Qwen3MoE30BA3Config(balancing_loss_cfg=BalancingLossConfig(), z_loss_cfg=ZLossConfig()), "ep1"),
+        (Qwen3MoE30BA3Config(ep_size=8, dispatcher="all2all"), "ep8"),
         # (
         #     Qwen3MoE30BA3Config(
         #         ep_size=1,
@@ -250,10 +250,10 @@ def main():
         engine_config = MoEEngineConfig(
             model=moe_cfg,
             optim=optim_cfg,
-            fsdp=fsdp_cfg,
+            fsdp=fsdp_cfg
         )
         dataset_config = [
-            dict(dataset=DatasetConfig(name='alpaca', anno_path=ALPACAL_PATH, sample_ratio=1.0),
+            dict(dataset=DatasetConfig(name='alpaca', anno_path=ALPACA_PATH, sample_ratio=1.0),
                  tokenize_fn=FTDPTokenizeFnConfig()),
         ]
 
@@ -262,11 +262,13 @@ def main():
             max_length=16384,
         )
         work_dir = f"{args.work_dir}-{name}"
+        loss_cfg = CELossConfig()
         trainer = Trainer(
             model_path=QWEN3_MOE_PATH,
             engine_config=engine_config,
             dataset_config=dataset_config,
             dataloader_config=dataloader_config,
+            loss_cfg=loss_cfg,
             lr_config=lr_cfg,
             tokenizer=QWEN3_MOE_PATH,
             global_batch_size=16,

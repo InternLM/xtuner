@@ -137,13 +137,7 @@ class DenseTrainEngine:
     scheduler: torch.optim.lr_scheduler.LRScheduler
     float8_handler: Optional[Float8Handler] = None
 
-    def __init__(
-        self,
-        *,
-        model_cfg: TransformerConfig,
-        optim_cfg: OptimConfig,
-        fsdp_cfg: FSDPConfig,
-    ) -> None:
+    def __init__(self, *, model_cfg: TransformerConfig, optim_cfg: OptimConfig, fsdp_cfg: FSDPConfig) -> None:
         self.model_cfg = model_cfg
         self.optim_cfg = optim_cfg
         self.fsdp_cfg = fsdp_cfg
@@ -173,20 +167,6 @@ class DenseTrainEngine:
         # todo: consider pp
         return self.fsdp_cfg.tp_size
 
-    def cal_global_grad_tokens(self, labels: list[torch.Tensor], sp_mesh=None):
-        # calculate global token number which is used for loss scaling
-        rank_grad_tokens = torch.tensor(0, dtype=torch.int64, device=DEVICE)
-        for label in labels:
-            rank_grad_tokens += (label >= 0).sum()
-        rank_grad_tokens = rank_grad_tokens.cuda()
-        dist.all_reduce(rank_grad_tokens)
-        if sp_mesh:
-            # data in different sp ranks are replicated
-            global_grad_tokens = rank_grad_tokens / sp_mesh.size()
-        else:
-            global_grad_tokens = rank_grad_tokens
-        return global_grad_tokens
-
     def train_step(self, data_batches: list[ColateItem], sp_mesh: Optional[DeviceMesh] = None):
         """Perform a training step with the given data batches and mesh.
 
@@ -195,7 +175,7 @@ class DenseTrainEngine:
             max_length (Optional[int]): The maximum sequence length for padding.
             sp_mesh (Optional[DeviceMesh]): The device mesh for sequence parallelism.
         """
-        global_grad_tokens = self.cal_global_grad_tokens([i["labels"] for i in data_batches], sp_mesh)
+        # global_grad_tokens = self.cal_global_grad_tokens([i["labels"] for i in data_batches], sp_mesh)
         iters_per_step = len(data_batches)
         log = {}  # type: ignore
         for _iter in range(iters_per_step):
@@ -207,16 +187,15 @@ class DenseTrainEngine:
             if sp_mesh:
                 seq_ctx, labels = seq_ctx.split_with_labels(labels, sp_mesh)  # type: ignore
 
-            llm_loss = self.model(
+            self.model(  # type: ignore
                 seq_ctx=seq_ctx,
                 labels=labels,
             )
-            # global average llm loss
-            rank_grad_tokens = (labels >= 0).sum()
+            # # global average llm loss
+            # rank_grad_tokens = (labels >= 0).sum()
             # todo: support tp, currently assert tp_size == 1
-            loss = llm_loss * rank_grad_tokens / global_grad_tokens * dist.get_world_size()
-
-            loss.backward()
+            # loss = llm_loss * rank_grad_tokens / global_grad_tokens * dist.get_world_size()
+            # loss.backward()
 
         # todo
         return log

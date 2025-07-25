@@ -11,10 +11,13 @@ from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, LinearLR, Sequ
 
 from transformers import AutoTokenizer
 from xtuner.utils.device import get_device, get_torch_device
-from xtuner.v1.config import DataloaderConfig, EngineConfig, LRConfig
+from xtuner.v1.config import CELossConfig, DataloaderConfig, EngineConfig, LRConfig
 from xtuner.v1.config.trainer import ResumeConfig
+from xtuner.v1.data_proto import LossContext
 from xtuner.v1.datasets.build import build_dataloader, build_datasets
 from xtuner.v1.engine import build_engine
+from xtuner.v1.engine.utils import cal_global_grad_tokens
+from xtuner.v1.model.base import ModelItem
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, ParallelConfigException, get_logger, log_format
 
 
@@ -33,6 +36,7 @@ class Trainer:
         engine_config: EngineConfig,
         dataset_config: List[Dict],
         dataloader_config: DataloaderConfig,
+        loss_cfg: CELossConfig,
         lr_config: LRConfig,
         tokenizer: str | Path,
         global_batch_size: int,
@@ -90,6 +94,7 @@ class Trainer:
 
         self.work_dir = work_dir
         self.data_mesh = self._init_data_mesh(engine_config)
+        self.sp_mesh = self.data_mesh["sp"]
 
         self.tokenizer.model_max_length = dataloader_config.max_length
 
@@ -105,17 +110,37 @@ class Trainer:
 
         self._engine = self.build_engine(model_path, engine_config, resume_config)
         self._lr_scheduler = self.build_lr_scheduler(lr_config)
+        self.loss_cfg = loss_cfg
         # TODO: TMP hardcode here
 
     def fit(self):
         time_before_get_data = time.time()
-        for data in self.data_iter():
+        for data_batch in self.data_iter():
             DEVICE_MODULE.reset_peak_memory_stats()
 
             time_before_train_step = time.time()
             data_time = time_before_train_step - time_before_get_data
 
-            loss_log, other_log = self._engine.train_step(data)
+            global_grad_tokens = cal_global_grad_tokens([i["labels"] for i in data_batch], self.sp_mesh)
+            grad_accumulation_steps = self._engine.grad_accumulation_steps(len(data_batch))
+
+            for data in data_batch:
+                seq_ctx = data["seq_ctx"]
+                labels = data["labels"]
+                seq_ctx.to(DEVICE)
+                loss_ctx = LossContext(loss_cfg=self.loss_cfg)
+                # build_item 是一个自定义方法和接口
+                loss_ctx = loss_ctx.build_item(
+                    seq_ctx=seq_ctx,
+                    labels=labels,
+                    grad_accumulation_steps=grad_accumulation_steps,
+                    global_grad_tokens=global_grad_tokens,
+                )
+                del data["labels"]  # type: ignore
+                data = cast(ModelItem, data)
+                data["loss_ctx"] = loss_ctx
+
+            loss_log, other_log = self._engine.train_step(data_batch)
             grad_norm = self._engine.clip_grad_norm()
             self._engine.step_optimizer(grad_norm)
             self._lr_scheduler.step()

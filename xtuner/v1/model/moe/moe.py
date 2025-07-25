@@ -26,7 +26,7 @@ from typing_extensions import overload, override
 
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.config.base_model import MoEConfig, MoEModelOutputs
-from xtuner.v1.data_proto import SequenceContext
+from xtuner.v1.data_proto import SequenceContext, LossContext
 from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.loss import BalancingLoss, ZLoss
 from xtuner.v1.model import BaseModel
@@ -81,9 +81,6 @@ class MoE(BaseModel):
 
         self.fp32_layers = [self.rotary_emb]
 
-        self.chunked_loss = config.chunked_loss
-        if self.chunked_loss:
-            assert is_installed("liger_kernel"), "Liger kernel is required for chunked loss."
         self.load_spec_mapping = self._init_load_spec()
         self._maybe_compile_layers()
 
@@ -186,10 +183,9 @@ class MoE(BaseModel):
     def forward(
         self,
         seq_ctx: SequenceContext,  # todo(@yehaochen): support intra layer micro-batch
-        labels: torch.LongTensor,
+        loss_ctx: LossContext,
         return_router_results: bool = True,
-        return_hidden_states: bool = False,
-        ce_loss_scale_factor: float = 1.0,
+        return_hidden_states: bool = False
     ) -> MoEModelOutputs:
         input_ids = seq_ctx.input_ids
         position_ids = seq_ctx.position_ids
@@ -226,15 +222,13 @@ class MoE(BaseModel):
 
         hidden_states = self.norm(hidden_states)
 
-        loss, logits = self.lm_head(hidden_states, labels)  # type: ignore
-
-        loss = loss * ce_loss_scale_factor
+        loss, logits = self.lm_head(hidden_states, loss_ctx)  # type: ignore
         output["loss"] = loss
 
         if not return_router_results:
             return MoEModelOutputs(**output)  # type: ignore[typeddict-item]
 
-        router_logits_list = [val["logits"] for val in output["router_logits"].values()]
+        router_logits_list = [val["logits"] for val in output["router_logits"].values()] # type: ignore
         router_logits = self._select_non_pad_router_logits(router_logits_list, seq_ctx.mask)
         if self.balancing_loss:
             balancing_loss = self.balancing_loss(
@@ -305,7 +299,7 @@ class MoE(BaseModel):
     def __call__(  # type: ignore
         self,
         seq_ctx: SequenceContext,
-        labels: torch.LongTensor,
+        loss_ctx: LossContext,
         return_router_results: bool = False,
         return_hidden_states: bool = False,
     ) -> MoEModelOutputs: ...

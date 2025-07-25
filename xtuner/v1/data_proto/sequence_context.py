@@ -112,6 +112,7 @@ class SequenceContext:
 
         return shift_attn_meta, shift_labels
 
+    # TODO(HHA): 这个接口不通用，后续要重构
     def split_with_labels(self, labels: torch.LongTensor, sequence_parallel_mesh) -> tuple[Self, torch.LongTensor]:
         assert self.input_ids.shape == labels.shape
         if sequence_parallel_mesh is not None:

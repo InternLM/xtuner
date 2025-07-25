@@ -1,9 +1,10 @@
-from typing import Callable, Optional, TypeAlias
+from typing import Callable, TypeAlias
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+from xtuner.v1.data_proto.loss_context import CELossForwardItem, LossContext
 from torch.distributed.tensor import DTensor
+import torch.nn.functional as F
 
 
 Loss: TypeAlias = torch.Tensor
@@ -14,25 +15,15 @@ HiddenStates: TypeAlias = torch.Tensor
 Labels: TypeAlias = torch.Tensor
 
 
-LossFn = Callable[[Weight, Bias, HiddenStates, Labels], tuple[Loss, Logits | None]]
-
-
-def ce_loss_fn(weight: Weight, bias: Bias, hidden_states: HiddenStates, labels: Labels) -> tuple[Loss, Logits]:
-    logits = F.linear(hidden_states, weight, bias)
-    loss = F.cross_entropy(
-        logits.view(-1, logits.size(-1)),
-        labels.view(-1),
-    )
-    return loss, logits
+LossFn = Callable[[HiddenStates, Weight, CELossForwardItem, Bias], tuple[Loss | None, Logits | None]]
 
 
 class LMHead(nn.Linear):
     def forward(  # type: ignore[override]
         self,
         hidden_states: torch.Tensor,
-        labels: torch.Tensor,
-        loss_fn: LossFn = ce_loss_fn,
-    ) -> tuple[Loss, Logits | None]:
+        loss_ctx: LossContext | None = None
+    ) -> tuple[Loss | None, Logits | None]:
         """Forward pass of the language model head."""
         if isinstance(self.weight, DTensor):
             w = self.weight.to_local()
@@ -44,6 +35,10 @@ class LMHead(nn.Linear):
         else:
             w = self.weight
             b = self.bias
-        return loss_fn(w, b, hidden_states, labels)
+        if loss_ctx is None:
+            logits = F.linear(hidden_states, w, b)
+            return None, logits
+        else:
+            return loss_ctx.forward(hidden_states, w, b)
 
-    __call__: Callable[[HiddenStates, Labels, Optional[LossFn]], tuple[Loss, Logits | None]]
+    __call__: Callable[[HiddenStates, LossContext], tuple[Loss | None, Logits | None]]
