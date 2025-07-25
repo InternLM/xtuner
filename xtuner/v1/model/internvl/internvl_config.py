@@ -1,4 +1,5 @@
 from pydantic import BaseModel, ConfigDict
+
 from xtuner.v1.config.base_model import MoEConfig
 
 

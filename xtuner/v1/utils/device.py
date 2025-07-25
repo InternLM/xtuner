@@ -21,11 +21,12 @@ def get_device():
         pass
 
     if device is None:
-        raise NotImplementedError(
-            "Supports only CUDA or NPU. If your device is CUDA or NPU, "
-            "please make sure that your environmental settings are "
-            "configured correctly."
-        )
+        # raise NotImplementedError(
+        #     "Supports only CUDA or NPU. If your device is CUDA or NPU, "
+        #     "please make sure that your environmental settings are "
+        #     "configured correctly."
+        # )
+        device = "cpu"
 
     return device
 
@@ -38,5 +39,7 @@ def get_torch_device_module():
         return torch.npu
     elif device == "mlu":
         return torch.mlu
+    elif device == "cpu":
+        return torch.cpu
     else:
         raise NotImplementedError

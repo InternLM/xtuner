@@ -32,7 +32,7 @@ class SequenceContext:
     num_padding: int = 0
     sequence_parallel_mesh: DeviceMesh | None = None
     block_table: torch.Tensor | None = None
-    device: str = "cuda"
+    device: str = "cpu"
     position_ids: torch.LongTensor | None = None
 
     # internvl

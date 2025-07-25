@@ -62,10 +62,10 @@ def build_datasets(
 def build_dataloader(
     dataloader_config: DataloaderConfig,
     datasets: list,
-    dp_mesh: DeviceMesh,
     global_batch_size: int,
     micro_batch_size: int,
     seed: int,
+    dp_mesh: DeviceMesh | None = None,
 ) -> Iterable[list[ColateItem]]:
     assert isinstance(datasets, list), "datasets must be a list of datasets."
 
@@ -101,10 +101,12 @@ def build_dataloader(
         logger.info(f"[Dataset] (Original) {ori_samples} samples.")
         logger.info(f"[Dataset] (Packed) {packed_samples} samples.")
 
-    if dataloader_config.group_by_length:
-        sampler = LengthGroupedSampler(dataset, dp_mesh, global_batch_size, seed=seed)
-    else:
-        sampler = ParallelSampler(dataset, dp_mesh, global_batch_size, shuffle=True)  # type: ignore
+    sampler: LengthGroupedSampler | ParallelSampler | None = None
+    if dp_mesh is not None:
+        if dataloader_config.group_by_length:
+            sampler = LengthGroupedSampler(dataset, dp_mesh, global_batch_size, seed=seed)
+        else:
+            sampler = ParallelSampler(dataset, dp_mesh, global_batch_size, shuffle=True)
 
     ctx = torch.multiprocessing.get_context("fork")
     # Using `fork` here since `torchrun` uses the spawn method by default.
