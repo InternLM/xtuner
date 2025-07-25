@@ -30,10 +30,9 @@ from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.loss import BalancingLoss, ZLoss
 from xtuner.v1.model import BaseModel
-from xtuner.v1.module import RMSNorm, RotaryEmbedding
+from xtuner.v1.module import LMHead, RMSNorm, RotaryEmbedding
 from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayer
 from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEBlock, MoEDecoderLayer
-from xtuner.v1.module.linear.linear import _Linear
 from xtuner.v1.module.router import NoAuxRouter, NoAuxRouterConfig
 from xtuner.v1.utils import (
     get_device,
@@ -73,7 +72,7 @@ class MoE(BaseModel):
         self.config = config
 
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.lm_head = _Linear(config.hidden_size, config.vocab_size, bias=False)
+        self.lm_head = LMHead(config.hidden_size, config.vocab_size, bias=False)
         self.config = config
 
         self.layers = self.build_layers(config)
@@ -227,37 +226,7 @@ class MoE(BaseModel):
 
         hidden_states = self.norm(hidden_states)
 
-        logits: torch.Tensor | None = None
-        loss: torch.Tensor
-
-        if self.chunked_loss:
-            shift_hidden_states = hidden_states.view(-1, self.config.hidden_size)
-            shift_labels = labels.view(-1)
-
-            from liger_kernel.transformers.fused_linear_cross_entropy import (
-                LigerFusedLinearCrossEntropyLoss,
-            )
-
-            if isinstance(self.lm_head.weight, DTensor):
-                _weight = self.lm_head.weight.to_local()
-            else:
-                _weight = self.lm_head.weight
-
-            if isinstance(self.lm_head.bias, DTensor):
-                _bias = self.lm_head.bias.to_local()
-            else:
-                _bias = self.lm_head.bias
-
-            loss_fct = LigerFusedLinearCrossEntropyLoss()
-            loss = loss_fct(_weight, shift_hidden_states, shift_labels, _bias)
-        else:
-            logits = cast(torch.Tensor, self.lm_head(hidden_states))
-
-            shift_logits = logits.view(-1, self.config.vocab_size)
-            shift_labels = labels.view(-1)
-
-            loss_fct = torch.nn.CrossEntropyLoss()
-            loss = loss_fct(shift_logits, shift_labels)
+        loss, logits = self.lm_head(hidden_states, labels)  # type: ignore
 
         loss = loss * ce_loss_scale_factor
         output["loss"] = loss
@@ -284,7 +253,7 @@ class MoE(BaseModel):
 
         del router_logits
 
-        return MoEModelOutputs(**output)  # type: ignore[typeddict-item]
+        return MoEModelOutputs(**output, logits=logits)  # type: ignore[typeddict-item]
 
     def build_embeddings(self, config: MoEConfig):
         return nn.Embedding(config.vocab_size, config.hidden_size, config.padding_idx)
