@@ -6,7 +6,6 @@ from typing import cast
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
-from mmengine import is_installed
 from torch import nn
 from torch.distributed._functional_collectives import all_reduce
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl
@@ -26,7 +25,7 @@ from typing_extensions import overload, override
 
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.config.base_model import MoEConfig, MoEModelOutputs
-from xtuner.v1.data_proto import SequenceContext, CELossContext
+from xtuner.v1.data_proto import CELossContext, SequenceContext
 from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.loss import BalancingLoss, ZLoss
 from xtuner.v1.model import BaseModel
@@ -185,7 +184,7 @@ class MoE(BaseModel):
         seq_ctx: SequenceContext,  # todo(@yehaochen): support intra layer micro-batch
         loss_ctx: CELossContext,
         return_router_results: bool = True,
-        return_hidden_states: bool = False
+        return_hidden_states: bool = False,
     ) -> MoEModelOutputs:
         input_ids = seq_ctx.input_ids
         position_ids = seq_ctx.position_ids
@@ -228,7 +227,7 @@ class MoE(BaseModel):
         if not return_router_results:
             return MoEModelOutputs(**output)  # type: ignore[typeddict-item]
 
-        router_logits_list = [val["logits"] for val in output["router_logits"].values()] # type: ignore
+        router_logits_list = [val["logits"] for val in output["router_logits"].values()]  # type: ignore
         router_logits = self._select_non_pad_router_logits(router_logits_list, seq_ctx.mask)
         if self.balancing_loss:
             balancing_loss = self.balancing_loss(
@@ -534,6 +533,7 @@ class MoE(BaseModel):
     def _maybe_compile_layers(self):
         if self.fsdp_config is not None:
             if self.fsdp_config.torch_compile:
+                torch._dynamo.config.cache_size_limit = 128
                 if self.fsdp_config.compile_targets is None:
                     if self.ep_mesh.size() > 1:
                         # all_to_all_single_autograd in TorchAll2AllDispatcher.dispatch can not be compiled even if the fullgraph=False
