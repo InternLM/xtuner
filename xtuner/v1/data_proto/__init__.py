@@ -1,8 +1,9 @@
-from .loss_context import LossContext
+from .ce_loss_context import CEForwardItem, CELossContext
 from .sequence_context import SequenceContext
 
 
 __all__ = [
     "SequenceContext",
-    "LossContext",
+    "CELossContext",
+    "CEForwardItem",
 ]

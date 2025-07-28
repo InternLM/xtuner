@@ -15,7 +15,7 @@ from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.utils.compile import maybe_compile
 from xtuner.v1.engine.utils import cal_global_grad_tokens
-from xtuner.v1.data_proto.loss_context import LossContext, CELossConfig
+from xtuner.v1.data_proto import CELossContext
 
 
 # Qwen3 30B A3
@@ -65,10 +65,10 @@ class TestQwen3MoE(DistributedTestBase):
         seq_ctx, shifted_labels = seq_ctx.shift_with_labels(labels=input_ids)
         seq_ctx.to('cuda')
         global_grad_tokens = cal_global_grad_tokens([shifted_labels])
-        loss_ctx = LossContext(CELossConfig())
-        loss_ctx = loss_ctx.build_item(seq_ctx, shifted_labels,
-                                       grad_accumulation_steps=1,
-                                       global_grad_tokens=global_grad_tokens)
+        loss_ctx = CELossContext()
+        loss_ctx = loss_ctx.build_forward_item(seq_ctx, shifted_labels,
+                                               grad_accumulation_steps=1,
+                                               global_grad_tokens=global_grad_tokens)
         qwen_model.from_hf(QWEN3_MOE_PATH)
 
         with torch.no_grad():
@@ -123,10 +123,10 @@ class TestQwen3MoE(DistributedTestBase):
         seq_ctx, shifted_labels = seq_ctx.shift_with_labels(labels=input_ids)
         seq_ctx.to('cuda')
         global_grad_tokens = cal_global_grad_tokens([shifted_labels])
-        loss_ctx = LossContext(CELossConfig())
-        loss_ctx = loss_ctx.build_item(seq_ctx, shifted_labels,
-                                       grad_accumulation_steps=1,
-                                       global_grad_tokens=global_grad_tokens)
+        loss_ctx = CELossContext()
+        loss_ctx = loss_ctx.build_forward_item(seq_ctx, shifted_labels,
+                                               grad_accumulation_steps=1,
+                                               global_grad_tokens=global_grad_tokens)
 
         qwen_model.fully_shard(fsdp_config=fsdp_config)
         qwen_model.from_hf(QWEN3_MOE_PATH)

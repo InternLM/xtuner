@@ -11,14 +11,13 @@ from torch.testing._internal.common_distributed import DistributedTestBase
 from transformers import AutoTokenizer
 
 from xtuner.v1.model.moe.moe import SequenceContext
-from xtuner.v1.data_proto.loss_context import LossContext, CELossConfig
+from xtuner.v1.data_proto import CELossContext
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
 from xtuner.v1.config import FSDPConfig, LRConfig, AdamWConfig, BalancingLossConfig, ZLossConfig
 from xtuner.v1.engine.moe_train_engine import MoETrainEngine
 from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, LinearLR, SequentialLR
 from xtuner.v1.utils import pad_to_max_length
 from xtuner.v1.engine.utils import cal_global_grad_tokens
-
 
 # Qwen3 30B A3
 QWEN3_MOE_PATH = os.environ["QWEN3_MOE_PATH"]
@@ -55,9 +54,10 @@ class TestMoEEngine(DistributedTestBase):
 
         total_steps = 1000
         warmup_steps = total_steps * lr_cfg.warmup_ratio
+
         def warmup_fn(x):
             return x / warmup_steps if x < warmup_steps else 1
-        
+
         lr_scheduler = LambdaLR(engine.optimizer, warmup_fn)
 
         tok = AutoTokenizer.from_pretrained(
@@ -78,10 +78,10 @@ class TestMoEEngine(DistributedTestBase):
             seq_ctx.to('cuda')
             global_grad_tokens = cal_global_grad_tokens([labels])
             grad_accumulation_steps = engine.grad_accumulation_steps(1)
-            loss_ctx = LossContext(CELossConfig())
-            loss_ctx = loss_ctx.build_item(seq_ctx, labels,
-                                           grad_accumulation_steps=grad_accumulation_steps,
-                                           global_grad_tokens=global_grad_tokens)
+            loss_ctx = CELossContext()
+            loss_ctx = loss_ctx.build_forward_item(seq_ctx, labels,
+                                                   grad_accumulation_steps=grad_accumulation_steps,
+                                                   global_grad_tokens=global_grad_tokens)
             loss_log, _ = engine.train_step([{"seq_ctx": seq_ctx, "loss_ctx": loss_ctx}])
             grad_norm = engine.clip_grad_norm()
             engine.step_optimizer(grad_norm)
@@ -90,7 +90,7 @@ class TestMoEEngine(DistributedTestBase):
         losses_ref = [2.44, 2.44, 2.42, 2.41, 2.34, 2.33, 2.16, 2.13, 1.71, 1.55]
         for loss, loss_ref in zip(losses, losses_ref):
             self.assertTrue(abs(loss - loss_ref) < 0.05)
-        
+
         torch.cuda.empty_cache()
         try:
             dist.destroy_process_group(pg)
@@ -154,11 +154,12 @@ class TestMoEEngine(DistributedTestBase):
             val2 = state_dict2[key]
             val = val.full_tensor().bfloat16()
             val2 = val2.full_tensor().bfloat16()
-            self.assertTrue(torch.equal(val, val2[:val.shape[0]]), f"Mismatch in {key} between bf16 and fp8, {val} and {val2[:val.shape[0]]}")
+            self.assertTrue(torch.equal(val, val2[:val.shape[0]]),
+                            f"Mismatch in {key} between bf16 and fp8, {val} and {val2[:val.shape[0]]}")
 
         if dist.get_rank() == 0:
             shutil.rmtree(temp_dir)
-        
+
         torch.cuda.empty_cache()
         try:
             dist.destroy_process_group(pg)

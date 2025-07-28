@@ -6,7 +6,7 @@ from torch.distributed.device_mesh import init_device_mesh
 import os
 from copy import deepcopy
 from xtuner.v1.engine.utils import cal_global_grad_tokens
-from xtuner.v1.data_proto.loss_context import LossContext, CELossConfig
+from xtuner.v1.data_proto import CELossContext
 
 from torch.testing._internal.common_distributed import DistributedTestBase
 import parametrize
@@ -60,10 +60,10 @@ class TestMoE:
         seq_ctx, shifted_labels = seq_ctx.shift_with_labels(labels=input_ids)
         seq_ctx.to('cuda')
         global_grad_tokens = cal_global_grad_tokens([shifted_labels])
-        loss_ctx = LossContext(CELossConfig())
-        loss_ctx = loss_ctx.build_item(seq_ctx, shifted_labels,
-                                       grad_accumulation_steps=1,
-                                       global_grad_tokens=global_grad_tokens)
+        loss_ctx = CELossContext()
+        loss_ctx = loss_ctx.build_forward_item(seq_ctx, shifted_labels,
+                                               grad_accumulation_steps=1,
+                                               global_grad_tokens=global_grad_tokens)
         model(
             seq_ctx=seq_ctx,
             loss_ctx=loss_ctx,
@@ -134,10 +134,10 @@ class TestDistributedMoE(DistributedTestBase):
         seq_ctx, shifted_labels = seq_ctx.shift_with_labels(labels=input_ids)
         seq_ctx.to('cuda')
         global_grad_tokens = cal_global_grad_tokens([shifted_labels])
-        loss_ctx = LossContext(CELossConfig())
-        loss_ctx = loss_ctx.build_item(seq_ctx, shifted_labels,
-                                       grad_accumulation_steps=1,
-                                       global_grad_tokens=global_grad_tokens)
+        loss_ctx = CELossContext()
+        loss_ctx = loss_ctx.build_forward_item(seq_ctx, shifted_labels,
+                                               grad_accumulation_steps=1,
+                                               global_grad_tokens=global_grad_tokens)
 
         loss_parallel = parallel_model(
             seq_ctx=seq_ctx,

@@ -11,9 +11,9 @@ from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, LinearLR, Sequ
 
 from transformers import AutoTokenizer
 from xtuner.utils.device import get_device, get_torch_device
-from xtuner.v1.config import CELossConfig, DataloaderConfig, EngineConfig, LRConfig
+from xtuner.v1.config import DataloaderConfig, EngineConfig, LRConfig
 from xtuner.v1.config.trainer import ResumeConfig
-from xtuner.v1.data_proto import LossContext
+from xtuner.v1.data_proto import CELossContext
 from xtuner.v1.datasets.build import build_dataloader, build_datasets
 from xtuner.v1.engine import build_engine
 from xtuner.v1.engine.utils import cal_global_grad_tokens
@@ -36,7 +36,7 @@ class Trainer:
         engine_config: EngineConfig,
         dataset_config: List[Dict],
         dataloader_config: DataloaderConfig,
-        loss_cfg: CELossConfig,
+        loss_ctx: CELossContext,
         lr_config: LRConfig,
         tokenizer: str | Path,
         global_batch_size: int,
@@ -110,7 +110,7 @@ class Trainer:
 
         self._engine = self.build_engine(model_path, engine_config, resume_config)
         self._lr_scheduler = self.build_lr_scheduler(lr_config)
-        self.loss_cfg = loss_cfg
+        self.loss_ctx = loss_ctx
         # TODO: TMP hardcode here
 
     def fit(self):
@@ -128,9 +128,8 @@ class Trainer:
                 seq_ctx = data["seq_ctx"]
                 labels = data["labels"]
                 seq_ctx.to(DEVICE)
-                loss_ctx = LossContext(loss_cfg=self.loss_cfg)
                 # build_item 是一个自定义方法和接口
-                loss_ctx = loss_ctx.build_item(
+                loss_ctx = self.loss_ctx.build_forward_item(
                     seq_ctx=seq_ctx,
                     labels=labels,
                     grad_accumulation_steps=grad_accumulation_steps,
