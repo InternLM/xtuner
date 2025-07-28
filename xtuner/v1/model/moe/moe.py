@@ -26,7 +26,7 @@ from typing_extensions import overload, override
 
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.config.base_model import MoEConfig, MoEModelOutputs
-from xtuner.v1.data_proto import SequenceContext, LossContext
+from xtuner.v1.data_proto import SequenceContext, CELossContext
 from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.loss import BalancingLoss, ZLoss
 from xtuner.v1.model import BaseModel
@@ -183,7 +183,7 @@ class MoE(BaseModel):
     def forward(
         self,
         seq_ctx: SequenceContext,  # todo(@yehaochen): support intra layer micro-batch
-        loss_ctx: LossContext,
+        loss_ctx: CELossContext,
         return_router_results: bool = True,
         return_hidden_states: bool = False
     ) -> MoEModelOutputs:
@@ -299,7 +299,7 @@ class MoE(BaseModel):
     def __call__(  # type: ignore
         self,
         seq_ctx: SequenceContext,
-        loss_ctx: LossContext,
+        loss_ctx: CELossContext,
         return_router_results: bool = False,
         return_hidden_states: bool = False,
     ) -> MoEModelOutputs: ...

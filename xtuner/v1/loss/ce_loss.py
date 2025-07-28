@@ -1,9 +1,8 @@
 import torch
 import torch.nn.functional as F
-from mmengine.dist import all_reduce
 from torch import nn
 
-from ..data_proto.loss_context import CELossConfig, CELossForwardItem
+from ..data_proto.ce_loss_context import CEForwardItem, CELossContext
 
 
 try:
@@ -17,10 +16,10 @@ from .liger_with_weights import LigerFusedLinearCrossEntropyLossWithWeights
 
 
 class CrossEntropyLoss(nn.Module):
-    def __init__(self, loss_cfg: CELossConfig) -> None:
+    def __init__(self, ctx: CELossContext) -> None:
         super().__init__()
-        self.loss_reduction = loss_cfg.loss_reduction
-        self.label_shifted = loss_cfg.label_shifted
+        self.loss_reduction = ctx.loss_reduction
+        self.label_shifted = ctx.label_shifted
 
         if self.loss_reduction == "global":
             self.loss_fct = torch.nn.CrossEntropyLoss()
@@ -31,15 +30,15 @@ class CrossEntropyLoss(nn.Module):
         self,
         hidden_states: torch.Tensor,
         head_weight: torch.Tensor,
-        loss_forward_item: CELossForwardItem,
+        forward_item: CEForwardItem,
         head_bias: torch.Tensor | None = None,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         logits = F.linear(hidden_states, head_weight, head_bias)
 
-        grad_accumulation_steps = loss_forward_item.grad_accumulation_steps
-        labels = loss_forward_item.labels
-        loss_weights = loss_forward_item.loss_weight
+        grad_accumulation_steps = forward_item.grad_accumulation_steps
+        labels = forward_item.labels
+        loss_weights = forward_item.loss_weight
 
         assert grad_accumulation_steps > 0
         assert logits.shape[:-1] == labels.shape, (
@@ -71,10 +70,8 @@ class CrossEntropyLoss(nn.Module):
         else:
             loss_weights = loss_weights.view(-1).to(logits.device)
             loss = self.loss_fct(shift_logits, shift_labels)
-
-            loss_weights_sum = loss_weights.sum()
-            all_reduce(loss_weights_sum, op="mean")
-
+            loss_weights_sum = forward_item.global_sum_loss_weight
+            assert loss_weights_sum is not None
             loss = loss * loss_weights
             loss = loss.sum() / (loss_weights_sum + 1e-8)
             loss = loss / grad_accumulation_steps
@@ -82,10 +79,10 @@ class CrossEntropyLoss(nn.Module):
 
 
 class LigerCrossEntropyLoss(nn.Module):
-    def __init__(self, loss_cfg: CELossConfig) -> None:
+    def __init__(self, ctx: CELossContext) -> None:
         super().__init__()
-        self.loss_reduction = loss_cfg.loss_reduction
-        self.label_shifted = loss_cfg.label_shifted
+        self.loss_reduction = ctx.loss_reduction
+        self.label_shifted = ctx.label_shifted
 
         if LigerFusedLinearCrossEntropyLoss is None:
             raise ImportError(
@@ -101,13 +98,13 @@ class LigerCrossEntropyLoss(nn.Module):
         self,
         hidden_states: torch.Tensor,
         head_weight: torch.Tensor,
-        loss_forward_item: CELossForwardItem,
+        forward_item: CEForwardItem,
         head_bias: torch.Tensor | None = None,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        grad_accumulation_steps = loss_forward_item.grad_accumulation_steps
-        labels = loss_forward_item.labels
-        loss_weights = loss_forward_item.loss_weight
+        grad_accumulation_steps = forward_item.grad_accumulation_steps
+        labels = forward_item.labels
+        loss_weights = forward_item.loss_weight
 
         assert grad_accumulation_steps > 0
 
@@ -134,10 +131,7 @@ class LigerCrossEntropyLoss(nn.Module):
         if self.loss_reduction == "global":
             loss = self.loss_fct(head_weight, shift_hidden_states, shift_labels, head_bias) * loss_weights
         else:
-            loss_weights = loss_weights.view(-1).to(shift_hidden_states.device)
-            loss_weights_sum = loss_weights.sum()
-            all_reduce(loss_weights_sum, op="mean")
-
+            loss_weights_sum = forward_item.global_sum_loss_weight
             loss = self.loss_fct(
                 head_weight,
                 shift_hidden_states,

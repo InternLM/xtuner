@@ -17,7 +17,7 @@ from torch.distributed.tensor._utils import compute_local_shape_and_global_offse
 
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.config.base_model import MoEConfig, TransformerConfig
-from xtuner.v1.data_proto import LossContext, SequenceContext
+from xtuner.v1.data_proto import CELossContext, SequenceContext
 from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.float8.fsdp_utils import (
     WeightWithDynamicTensorWiseFloat8CastTensor,
@@ -37,7 +37,7 @@ DEVICE = get_device()
 
 class ModelItem(TypedDict):
     seq_ctx: SequenceContext
-    loss_ctx: LossContext
+    loss_ctx: CELossContext
 
 
 def is_float8_weight(tensor):

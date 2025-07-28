@@ -22,7 +22,7 @@ from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
 from xtuner.v1.utils import pad_to_max_length
 from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, LinearLR, SequentialLR
 from xtuner.v1.engine.utils import cal_global_grad_tokens
-from xtuner.v1.data_proto.loss_context import LossContext, CELossConfig
+from xtuner.v1.data_proto import CELossContext
 
 # Qwen3 30B A3
 QWEN3_MOE_PATH = os.environ["QWEN3_MOE_PATH"]
@@ -87,10 +87,10 @@ class TestMoEEngineFloat8(DistributedTestBase):
             seq_ctx.to('cuda')
             global_grad_tokens = cal_global_grad_tokens([labels])
             grad_accumulation_steps = engine.grad_accumulation_steps(1)
-            loss_ctx = LossContext(CELossConfig())
-            loss_ctx = loss_ctx.build_item(seq_ctx, labels,
-                                           grad_accumulation_steps=grad_accumulation_steps,
-                                           global_grad_tokens=global_grad_tokens)
+            loss_ctx = CELossContext()
+            loss_ctx = loss_ctx.build_forward_item(seq_ctx, labels,
+                                                   grad_accumulation_steps=grad_accumulation_steps,
+                                                   global_grad_tokens=global_grad_tokens)
             loss_log, _ = engine.train_step([{"seq_ctx": seq_ctx, "loss_ctx": loss_ctx}])
             grad_norm = engine.clip_grad_norm()
             engine.step_optimizer(grad_norm)
@@ -164,10 +164,10 @@ class TestMoEEngineFloat8(DistributedTestBase):
             seq_ctx.to('cuda')
             global_grad_tokens = cal_global_grad_tokens([labels])
             grad_accumulation_steps = engine.grad_accumulation_steps(1)
-            loss_ctx = LossContext(CELossConfig())
-            loss_ctx = loss_ctx.build_item(seq_ctx, labels,
-                                           grad_accumulation_steps=grad_accumulation_steps,
-                                           global_grad_tokens=global_grad_tokens)
+            loss_ctx = CELossContext()
+            loss_ctx = loss_ctx.build_forward_item(seq_ctx, labels,
+                                                   grad_accumulation_steps=grad_accumulation_steps,
+                                                   global_grad_tokens=global_grad_tokens)
             loss_log, _ = engine.train_step([{"seq_ctx": seq_ctx, "loss_ctx": loss_ctx}])
             grad_norm = engine.clip_grad_norm()
             engine.step_optimizer(grad_norm)
@@ -259,10 +259,10 @@ class TestMoEEngineFloat8(DistributedTestBase):
             seq_ctx.num_padding = pad_len
             global_grad_tokens = cal_global_grad_tokens([labels])
             grad_accumulation_steps = engine.grad_accumulation_steps(1)
-            loss_ctx = LossContext(CELossConfig())
-            loss_ctx = loss_ctx.build_item(seq_ctx, labels,
-                                           grad_accumulation_steps=grad_accumulation_steps,
-                                           global_grad_tokens=global_grad_tokens)
+            loss_ctx = CELossContext()
+            loss_ctx = loss_ctx.build_forward_item(seq_ctx, labels,
+                                                   grad_accumulation_steps=grad_accumulation_steps,
+                                                   global_grad_tokens=global_grad_tokens)
             loss_log, _ = engine.train_step([{"seq_ctx": seq_ctx, "loss_ctx": loss_ctx}])
             grad_norm = engine.clip_grad_norm()
             engine.step_optimizer(grad_norm)

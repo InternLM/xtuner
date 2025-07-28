@@ -18,9 +18,9 @@ from xtuner.v1.config import (
     LRConfig,
     MoEEngineConfig,
     BalancingLossConfig,
-    ZLossConfig,
-    CELossConfig
+    ZLossConfig
 )
+from xtuner.v1.data_proto import CELossContext
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
 from xtuner.v1.train.trainer import Trainer
 from xtuner.v1.utils.compile import maybe_compile
@@ -262,13 +262,13 @@ def main():
             max_length=16384,
         )
         work_dir = f"{args.work_dir}-{name}"
-        loss_cfg = CELossConfig()
+        loss_ctx = CELossContext()
         trainer = Trainer(
             model_path=QWEN3_MOE_PATH,
             engine_config=engine_config,
             dataset_config=dataset_config,
             dataloader_config=dataloader_config,
-            loss_cfg=loss_cfg,
+            loss_ctx=loss_ctx,
             lr_config=lr_cfg,
             tokenizer=QWEN3_MOE_PATH,
             global_batch_size=16,

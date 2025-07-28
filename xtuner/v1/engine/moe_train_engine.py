@@ -8,7 +8,7 @@ from torch.distributed._functional_collectives import all_reduce
 from torch.distributed.device_mesh import DeviceMesh
 
 from xtuner.v1.config import FSDPConfig, MoEConfig, OptimConfig
-from xtuner.v1.data_proto import LossContext
+from xtuner.v1.data_proto import CELossContext
 from xtuner.v1.engine.dense_train_engine import DenseTrainEngine
 
 # todo: 如何 import
@@ -190,7 +190,7 @@ class MoETrainEngine(DenseTrainEngine):
                     # TODO(HHA): labels 的 sp 逻辑应该由 loss_ctx 做
                     seq_ctx, labels = seq_ctx.split_with_labels(loss_ctx.loss_froward_item.labels, sp_mesh)  # type: ignore
                     loss_ctx.loss_froward_item.labels = labels  # type: ignore
-                    loss_ctx: LossContext = loss_ctx.split(sp_mesh)  # type: ignore
+                    loss_ctx: CELossContext = loss_ctx.split(sp_mesh)  # type: ignore
 
                 seq_ctx_list.append(seq_ctx)
                 loss_ctx_list.append(loss_ctx)
