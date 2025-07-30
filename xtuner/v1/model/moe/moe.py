@@ -189,7 +189,10 @@ class MoE(BaseModel):
         input_ids = seq_ctx.input_ids
         position_ids = seq_ctx.position_ids
 
-        hidden_states = self.embed_tokens(input_ids)
+        if input_ids is not None:
+            hidden_states = self.embed_tokens(input_ids)
+        else:
+            hidden_states = seq_ctx.inputs_embeds
 
         # create position embeddings to be shared across the decoder layers
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
@@ -311,9 +314,10 @@ class MoE(BaseModel):
         return self
 
     @override
-    def from_hf(self, hf_path: str | Path, prefix="", strict: bool = True):
-        super().from_hf(hf_path, prefix, strict)
+    def from_hf(self, hf_path: str | Path, strict: bool = True) -> tuple:
+        loaded_keys, unloaded_keys, missing_keys = super().from_hf(hf_path, strict)
         self.rotary_emb = self.build_rotary_embedding(self.config)
+        return loaded_keys, unloaded_keys, missing_keys
 
     @override
     def fully_shard(
@@ -334,9 +338,6 @@ class MoE(BaseModel):
 
         if float8_handler is not None:
             float8_handler.pad_for_fsdp(self, cast(DeviceMesh, self.fsdp_mesh))
-
-        # Since ep size could be changed by `fsdp_config`, we need to re-initialize the load spec
-        self.load_spec_mapping = self._init_load_spec()
 
         # Just for narrowing the type of self.fsdp_mesh and self.ep_mesh
         assert self.fsdp_mesh is not None

@@ -165,7 +165,11 @@ class SequenceContext:
 
     @property
     def mask(self) -> torch.BoolTensor:
-        mask: torch.BoolTensor = cast(torch.BoolTensor, torch.ones_like(self.input_ids, dtype=torch.bool))
+        mask: torch.BoolTensor
+        if self.input_ids is not None:
+            mask = cast(torch.BoolTensor, torch.ones_like(self.input_ids, dtype=torch.bool))
+        else:
+            mask = cast(torch.BoolTensor, torch.ones_like(self.inputs_embeds[..., 0], dtype=torch.bool))
         if self.num_padding > 0:
             mask[..., -self.num_padding :] = False
         return mask
