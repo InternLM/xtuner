@@ -1,20 +1,29 @@
-from typing import List, cast
+import types
+from typing import cast, Callable
+from pathlib import Path
 
 import torch
 import torch.distributed as dist
 import torch.distributed.nn.functional as distF
-import torch.nn as nn
-from torch.distributed.device_mesh import DeviceMesh
 
 from xtuner.v1.config.base_model import MoEModelOutputs
 from xtuner.v1.model.moe.moe import SequenceContext
 from xtuner.v1.ops.comm import split_for_sequence_parallel
-from xtuner.v1.utils import HFCheckpointLoader, get_logger, get_padding_length
+from xtuner.v1.utils import get_logger, get_padding_length, get_device
+from xtuner.v1.model import BaseModel
 
-from ..moe.qwen3 import Qwen3MoE
-from .modeling_intern_vit import InternVisionModel
+from .modeling_vision import InternS1VisionModel, InternS1MultiModalProjector, init_world_mesh
+from typing_extensions import override
+from xtuner.v1.config import FSDPConfig, InternS1Config
+from xtuner.v1.float8.float8_handler import Float8Handler
+from xtuner.v1.data_proto import CELossContext
+from torch.distributed.fsdp import (
+    CPUOffloadPolicy,
+    MixedPrecisionPolicy,
+    fully_shard,
+)
 
-
+DEVICE = get_device()
 logger = get_logger()
 
 
@@ -30,107 +39,78 @@ def pixel_shuffle(x, scale_factor=0.5):
     return x
 
 
-class InternVLChatModel(nn.Module):
-    # TODO: No distinction between dense and moe models
-    # TODO: (huanghaian) Fix type hint here
-    def __init__(self, config, model_mesh: DeviceMesh | None = None, dispatcher: str = "deepep"):
+def to_hf_key_list_wrapper(fn: Callable[[str], list[str]], convertor: Callable[[str], str]):
+    def wrapper(self, *args, **kwargs):
+        return [convertor(i) for i in fn(*args, **kwargs)]
+    return wrapper
+
+
+class InternS1ForConditionalGeneration(BaseModel):
+    def __init__(self, config: InternS1Config):
         super().__init__()
 
-        self.select_layer = config.select_layer
+        self.select_layer = config.vision_feature_layer
         self.downsample_ratio = config.downsample_ratio
 
         vision_config = config.vision_config
-        llm_config = config.llm_config
+        text_config = config.text_config
 
-        self.vision_model = InternVisionModel(vision_config)
+        self.vision_tower = InternS1VisionModel(vision_config)
+        self.multi_modal_projector = InternS1MultiModalProjector(config)
 
-        vit_hidden_size = vision_config.hidden_size
-        llm_hidden_size = llm_config.hidden_size
+        self.language_model = text_config.build()
 
-        self.mlp1 = nn.Sequential(
-            nn.LayerNorm(vit_hidden_size * int(1 / self.downsample_ratio) ** 2),
-            nn.Linear(vit_hidden_size * int(1 / self.downsample_ratio) ** 2, llm_hidden_size),
-            nn.GELU(),
-            nn.Linear(llm_hidden_size, llm_hidden_size),
+        # TODO(YHC): This is a hack to make the language model compatible with HF
+        _hf_prefix = "model.language_model."
+        self.language_model.to_hf_key_list = types.MethodType(to_hf_key_list_wrapper(  # type: ignore
+            fn=self.language_model.to_hf_key_list,
+            convertor=lambda x: x.replace('model.', _hf_prefix)),
+            self.language_model)
+        self.language_model.load_spec_mapping = self.language_model._init_load_spec()
+
+        self.img_context_token_id = config.image_token_id
+
+    @override
+    def fully_shard(
+            self,
+            fsdp_config: FSDPConfig,
+            float8_handler: Float8Handler | None = None,
+    ):
+        self.language_model.fully_shard(fsdp_config, float8_handler=float8_handler)
+        self.vision_tower.fully_shard(fsdp_config, float8_handler=float8_handler)
+        self.multi_modal_projector.fully_shard(fsdp_config, float8_handler=float8_handler)
+
+        mp_policy = MixedPrecisionPolicy(
+            param_dtype=fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
         )
+        fsdp_mesh = init_world_mesh(fsdp_config)
+        fully_shard(
+            self,
+            mesh=fsdp_mesh,
+            mp_policy=mp_policy,
+            reshard_after_forward=fsdp_config.reshard_after_forward,
+            offload_policy=CPUOffloadPolicy() if fsdp_config.cpu_offload else None,
+        )
+        return self
 
-        if model_mesh is not None and model_mesh.size() == 1:
-            dispatcher = "naive"
+    def from_hf(self, hf_path: str | Path, strict=True):
+        _, _, missing_llm_keys = self.language_model.from_hf(hf_path,  strict=False)
+        _, _, missing_vision_keys = self.vision_tower.from_hf(hf_path,  strict=False)
+        _, _, missing_project_keys = self.multi_modal_projector.from_hf(hf_path, strict=False)
 
-        # TODO: (huanghaian) error impl
-        replace_llm_config = self._replace_llm_config(llm_config, dispatcher)  # type: ignore
-
-        if llm_config.architectures[0] == "Qwen3MoeForCausalLM":
-            self.llm_model = Qwen3MoE(replace_llm_config)
-        else:
-            raise NotImplementedError
-
-        self.img_context_token_id = None
-        self._llm_prefix = "llm_model."
-        self._hf_llm_prefix = "language_model."
-
-    def to_hf_key_list(self, key: str) -> str | List[str]:
-        if key.startswith(self._llm_prefix):
-            hf_keys = self.llm_model.to_hf_key_list(key[len(self._llm_prefix) :])
-            if not isinstance(hf_keys, list):
-                hf_keys = [hf_keys]
-            for i, hf_key in enumerate(hf_keys):
-                hf_keys[i] = self._hf_llm_prefix + hf_key
-            return hf_keys
-        else:
-            return key
-
-    def from_hf(self, hf_path: str, device: torch.device | None = None, strict=True):
-        # load moe weights from HF checkpoint
-        self.llm_model.from_hf(hf_path, device=device, strict=False, prefix=self._hf_llm_prefix)  # type: ignore
-
-        # load other weights from HF checkpoint
-        hf_loader = HFCheckpointLoader(hf_path)
-
-        not_matched = []
-        not_loaded = []
-        loaded: List = []
-
-        with torch.no_grad():
-            for name, value in self.state_dict().items():
-                if name.startswith(self._llm_prefix):
-                    hf_keys = self.to_hf_key_list(name)
-                    loaded.extend(hf_keys)
-                    continue
-
-                hf_keys = self.to_hf_key_list(name)
-                hf_value = hf_loader.load(hf_keys)
-                if hf_value is None:
-                    not_loaded.append(f"{name}")
-                    logger.warning(f"Parameter {f'{name}'} -> {hf_keys} not found in HF checkpoint.")
-                    continue
-
-                if hf_value.shape != value.shape:
-                    not_matched.append(
-                        f"Parameter {f'{name}'} -> {hf_keys}: {f'{name}'} {hf_value.shape} != {value.shape}"
-                    )
-                    logger.warning(
-                        f"Parameter {f'{name}'} shape mismatch: expected {value.shape}, got {hf_value.shape}."
-                    )
-                value.copy_(hf_value)
-                loaded.append(hf_keys)
-
-        missing = set(hf_loader.weight_map) - set(loaded)
-
+        missing = missing_llm_keys | missing_vision_keys | missing_project_keys
         if strict:
-            if not_matched:
-                raise RuntimeError(f"Some parameters from {hf_path} do not match the model: {not_matched}. ")
             if missing:
-                raise RuntimeError(f"Missing parameters from {hf_path}: {list(missing)[0]}. ")
+                raise RuntimeError(f"Missing parameters from {hf_path}: {list(missing)}. ")
 
     def extract_feature(self, pixel_values):
         if self.select_layer == -1:
-            vit_embeds = self.vision_model(
-                pixel_values=pixel_values, output_hidden_states=False, return_dict=True
+            vit_embeds = self.vision_tower(
+                pixel_values=pixel_values, output_hidden_states=False
             ).last_hidden_state
         else:
-            vit_embeds = self.vision_model(
-                pixel_values=pixel_values, output_hidden_states=True, return_dict=True
+            vit_embeds = self.vision_tower(
+                pixel_values=pixel_values, output_hidden_states=True
             ).hidden_states[self.select_layer]
         vit_embeds = vit_embeds[:, 1:, :]
 
@@ -138,22 +118,22 @@ class InternVLChatModel(nn.Module):
         vit_embeds = vit_embeds.reshape(vit_embeds.shape[0], h, w, -1)
         vit_embeds = pixel_shuffle(vit_embeds, scale_factor=self.downsample_ratio)
         vit_embeds = vit_embeds.reshape(vit_embeds.shape[0], -1, vit_embeds.shape[-1])
-        vit_embeds = self.mlp1(vit_embeds)
+        vit_embeds = self.multi_modal_projector(vit_embeds)
         return vit_embeds
 
     def forward(
-        self,
-        seq_ctx: SequenceContext,
-        labels: torch.LongTensor,
-        return_router_results: bool = False,
-        return_hidden_states: bool = False,
+            self,
+            seq_ctx: SequenceContext,  # todo(@yehaochen): support intra layer micro-batch
+            loss_ctx: CELossContext,
+            return_router_results: bool = True,
+            return_hidden_states: bool = False
     ) -> MoEModelOutputs:
         input_ids = seq_ctx.input_ids
         pixel_values = seq_ctx.pixel_values
         image_flags = seq_ctx.image_flags
         sequence_parallel_mesh = seq_ctx.sequence_parallel_mesh
 
-        inputs_embeds = self.llm_model.embed_tokens(input_ids)
+        inputs_embeds = self.language_model.embed_tokens(input_ids)
 
         if pixel_values is not None and image_flags is not None:
             image_flags = cast(torch.LongTensor, image_flags.squeeze(-1))
@@ -225,11 +205,10 @@ class InternVLChatModel(nn.Module):
         seq_ctx.input_ids = None  # type: ignore
         seq_ctx.inputs_embeds = inputs_embeds
 
-        outputs = self.llm_model(
+        outputs = self.language_model(
             seq_ctx,
-            labels=labels,
+            loss_ctx,
             return_router_results=return_router_results,
             return_hidden_states=return_hidden_states,
-            loss_ctx = None  # type: ignore
         )
         return outputs

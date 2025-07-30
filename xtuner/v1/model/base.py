@@ -166,12 +166,13 @@ class BaseModel(nn.Module):
 
         torch.distributed.barrier()
 
-    def from_hf(self, hf_path: str | Path, prefix="", strict: bool = True):
+    def from_hf(self, hf_path: str | Path, strict: bool = True) -> tuple:
         if isinstance(hf_path, Path):
             hf_path = str(hf_path)
 
         hf_loader = HFCheckpointLoader(hf_path)
-        self._load_params(hf_loader, strict=strict)
+        loaded_keys, unloaded_keys, missing_keys = self._load_params(hf_loader, strict=strict)
+        return loaded_keys, unloaded_keys, missing_keys
 
     def scale_and_reduce_grad(self):
         return
@@ -506,8 +507,8 @@ class BaseModel(nn.Module):
             + math.ceil(fused_size / self.SAFETENSOR_SIZE)
         )
 
-    def _load_params(self, checkpoint_loader: HFCheckpointLoader, strict=True, prefix: str = ""):
-        matched_hf_keys: set[str] = {key for key in checkpoint_loader.weight_map if key.startswith(prefix)}
+    def _load_params(self, checkpoint_loader: HFCheckpointLoader, strict=True) -> tuple:
+        matched_hf_keys: set[str] = set(checkpoint_loader.weight_map)
         expected_hf_keys: set[str] = set(chain(*map(self.to_hf_key_list, self.state_dict())))
         expected_keys = set(self.state_dict())
 
@@ -541,11 +542,11 @@ class BaseModel(nn.Module):
                     raise RuntimeError(f"Internal Error. Parameter {name} not found in load_spec_mapping.")
 
                 if load_spec.load_enum == LoadEnum.SAME:
-                    _missing_keys = self._load_same_hf_param(param, load_spec, checkpoint_loader, prefix=prefix)
+                    _missing_keys = self._load_same_hf_param(param, load_spec, checkpoint_loader)
                 elif load_spec.load_enum == LoadEnum.FUSED:
-                    _missing_keys = self._load_fused_hf_param(param, load_spec, checkpoint_loader, prefix=prefix)
+                    _missing_keys = self._load_fused_hf_param(param, load_spec, checkpoint_loader)
                 elif load_spec.load_enum == LoadEnum.SHARD:
-                    _missing_keys = self._load_shard_hf_param(param, load_spec, checkpoint_loader, prefix=prefix)
+                    _missing_keys = self._load_shard_hf_param(param, load_spec, checkpoint_loader)
                 else:
                     raise RuntimeError(f"Unsupported load_enum: {load_spec.load_enum}")
                 missing_keys.update(_missing_keys)
@@ -558,7 +559,7 @@ class BaseModel(nn.Module):
                 _load_params_from_module(child, _prefix)  # type: ignore
 
         with profile_time_and_memory("HF loading cost"):
-            _load_params_from_module(self, prefix)  # type: ignore
+            _load_params_from_module(self, "")  # type: ignore
             torch.cuda.synchronize()
             torch.cpu.synchronize()
 
@@ -567,6 +568,8 @@ class BaseModel(nn.Module):
 
         if (unloaded_keys := (expected_keys - loaded_keys)) and strict:
             raise RuntimeError(f"Internal error, Unloaded keys in model: {unloaded_keys}")
+
+        return loaded_keys, unloaded_keys, missing_keys
 
     def to_hf_key_list(self, key: str) -> list[str]:
         raise NotImplementedError()
@@ -588,11 +591,10 @@ class BaseModel(nn.Module):
         return loaded_tensor
 
     def _load_same_hf_param(
-        self, param: torch.Tensor, load_spec: LoadSpec, checkpoint_loader: HFCheckpointLoader, prefix: str
+        self, param: torch.Tensor, load_spec: LoadSpec, checkpoint_loader: HFCheckpointLoader
     ) -> list[str]:  # return missing key
         local_tensor = param._local_tensor if isinstance(param, DTensor) else param
         hf_key = load_spec.hf_keys[0]
-        hf_key = f"{prefix}.{hf_key}" if prefix else hf_key
 
         loaded_tensor = self._load_fp8(hf_key, checkpoint_loader)
         if loaded_tensor is None:
@@ -631,7 +633,7 @@ class BaseModel(nn.Module):
         return []
 
     def _load_fused_hf_param(
-        self, param: torch.Tensor, load_spec: LoadSpec, checkpoint_loader: HFCheckpointLoader, prefix: str
+        self, param: torch.Tensor, load_spec: LoadSpec, checkpoint_loader: HFCheckpointLoader
     ) -> list[str]:
         # For expert parallel
         # NOTE:
@@ -642,7 +644,7 @@ class BaseModel(nn.Module):
         #    by FSDP will only have 128/8/16 = 1 `hf-keys`
         # 3. Calculating the `offset` and `size` of FSDP param base on the ep sharded params, and fill
         #    the FSDP param with the loaded tensor.
-        hf_keys = [f"{prefix}.{hf_key}" if prefix else hf_key for hf_key in load_spec.hf_keys]
+        hf_keys = load_spec.hf_keys
         local_tensor = param._local_tensor if isinstance(param, DTensor) else param
 
         assert load_spec.dim == self.FSDP_SHARD_DIM, "Only support FSDP and model parallel sharding at the same dim!"
@@ -725,14 +727,14 @@ class BaseModel(nn.Module):
         return missing_keys
 
     def _load_shard_hf_param(
-        self, param: torch.Tensor, load_spec: LoadSpec, checkpoint_loader: HFCheckpointLoader, prefix: str
+        self, param: torch.Tensor, load_spec: LoadSpec, checkpoint_loader: HFCheckpointLoader
     ) -> list[str]:
         # For tensor parallel
         # NOTE:
         # 1. Get `hf-keys` required by sharded param (sharded by tp group, only 1 key)
         # 2. all gather the sharded param across tp group
         # 3 Fill the sharded param with the sliced gathered tensor.
-        hf_key = f"{prefix}.{load_spec.hf_keys[0]}" if prefix else load_spec.hf_keys[0]
+        hf_key = load_spec.hf_keys[0]
         local_tensor = param._local_tensor if isinstance(param, DTensor) else param
 
         loaded_tensor = checkpoint_loader.load(hf_key)
