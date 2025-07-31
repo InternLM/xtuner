@@ -177,7 +177,7 @@ class BaseModel(nn.Module):
     def scale_and_reduce_grad(self):
         return
 
-    def _init_load_spec(self) -> dict[str, LoadSpec]:
+    def _init_load_spec(self) -> None:
         # NOTE: (yehaochen) This is a workaround to distinguish between different parameter HF loading methods
         # and model partitioning methods. Although PyTorch provides Shard, Replicate and other Placements, in
         # MoE models, we need to handle both how to load HF weights and how to calculate gradients for partitioned
@@ -203,7 +203,8 @@ class BaseModel(nn.Module):
             return ret
 
         if self.__class__.to_hf_key_list is BaseModel.to_hf_key_list:
-            return {}
+            self.load_spec_mapping = {}
+            return
 
         load_spec_mapping: dict[str, LoadSpec] = {}
 
@@ -271,7 +272,7 @@ class BaseModel(nn.Module):
                     )
             load_spec_mapping[name] = load_spec
 
-        return load_spec_mapping
+        self.load_spec_mapping = load_spec_mapping
 
     def _to_float8(
         self,

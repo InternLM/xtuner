@@ -80,7 +80,9 @@ class MoE(BaseModel):
 
         self.fp32_layers = [self.rotary_emb]
 
-        self.load_spec_mapping = self._init_load_spec()
+        # TODO(@yehaochen): 把这两行移除 _maybe_compile_layers 要把 compile 相关的 setting 放到 fsdp_config 之外
+        # _init_load_spec 放到 post init 里
+        self._init_load_spec()
         self._maybe_compile_layers()
 
         self.balancing_loss: BalancingLoss | None
@@ -337,7 +339,11 @@ class MoE(BaseModel):
             self.layers = self.build_layers(self.config)
 
         if float8_handler is not None:
-            float8_handler.pad_for_fsdp(self, cast(DeviceMesh, self.fsdp_mesh))
+            # As we modify the shape of the model's parameters,
+            # we need to reinitialize the load spec mapping.
+            float8_handler.pad_for_fsdp(
+                self, cast(DeviceMesh, self.fsdp_mesh), callback_after_pad=self._init_load_spec
+            )
 
         # Just for narrowing the type of self.fsdp_mesh and self.ep_mesh
         assert self.fsdp_mesh is not None

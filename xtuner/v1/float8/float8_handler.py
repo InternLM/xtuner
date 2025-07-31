@@ -1,6 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import math
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.distributed as dist
@@ -90,7 +90,7 @@ class Float8Handler:
             chunk_size = next(size for size in factors if size >= ideal_chunk_size)
         return chunk_size * num_chunks
 
-    def pad_for_fsdp(self, model: nn.Module, fsdp_mesh: DeviceMesh):
+    def pad_for_fsdp(self, model: nn.Module, fsdp_mesh: DeviceMesh, callback_after_pad: Callable | None = None):
         from xtuner.v1.float8.float8_gmm_tile_wise import TileWiseFloat8GroupedLinear
         from xtuner.v1.float8.float8_linear_tensor_wise import TensorWiseFloat8Linear
         from xtuner.v1.float8.float8_linear_tile_wise import TileWiseFloat8Linear
@@ -115,6 +115,9 @@ class Float8Handler:
                 padded_out_features = self.get_num_features_after_pad(tensor_size, 0, fsdp_mesh.size(-1), 128)
                 padded_out_features *= parallel_size
                 module.pad_for_fsdp(padded_out_features=padded_out_features)
+
+        if callback_after_pad is not None:
+            callback_after_pad()
 
     # def convert_to_float8_training(
     #         self,

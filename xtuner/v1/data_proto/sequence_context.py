@@ -77,6 +77,7 @@ class SequenceContext:
             max_length_k=cast(int, (cu_seq_lens[1:] - cu_seq_lens[:-1]).max().item()),
             block_table=block_table,
             sequence_parallel_mesh=sp_mesh,
+            device=device,
         )
 
     def shift_with_labels(self, labels: torch.LongTensor) -> tuple[Self, torch.LongTensor]:
