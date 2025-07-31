@@ -1,6 +1,7 @@
-from typing import TYPE_CHECKING, Generic, Literal, Optional, TypedDict, TypeVar
+from typing import TYPE_CHECKING, Annotated, Generic, Literal, Optional, TypedDict, TypeVar
 
 import torch
+from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict, computed_field
 from typing_extensions import NotRequired
 
@@ -17,21 +18,21 @@ T = TypeVar("T")
 
 
 class GenerateConfig(BaseModel):
-    max_batch_size: int = 32
-    max_prefill_batch: int = 16
-    max_length: int = 2048
-    block_size: int = 128
-    dtype: Literal["bf16", "fp8"] = "bf16"
+    max_batch_size: Annotated[int, Parameter(group="generate")] = 32
+    max_prefill_batch: Annotated[int, Parameter(group="generate")] = 16
+    max_length: Annotated[int, Parameter(group="generate")] = 2048
+    block_size: Annotated[int, Parameter(group="generate")] = 128
+    dtype: Annotated[Literal["bf16", "fp8"], Parameter(group="generate")] = "bf16"
 
 
 class BaseAttnConfig(BaseModel, Generic[T]):
     model_config = ConfigDict(title="Base attention config for xtuner", extra="allow")
-    num_attention_heads: int
-    head_dim: int
-    dropout: bool = False
+    num_attention_heads: Annotated[int, Parameter(group="attention")]
+    head_dim: Annotated[int, Parameter(group="attention")]
+    dropout: Annotated[bool, Parameter(group="attention")] = False
     # casual: bool = True
-    qkv_bias: bool = False
-    o_bias: bool = False
+    qkv_bias: Annotated[bool, Parameter(group="attention")] = False
+    o_bias: Annotated[bool, Parameter(group="attention")] = False
 
     def build(
         self,
@@ -44,9 +45,9 @@ class BaseAttnConfig(BaseModel, Generic[T]):
 
 
 class BaseRouterConfig(BaseModel, Generic[T]):
-    scoring_func: Literal["sigmoid", "softmax"]
-    router_scaling_factor: float
-    norm_topk_prob: bool
+    scoring_func: Annotated[Literal["sigmoid", "softmax"], Parameter(group="router")]
+    router_scaling_factor: Annotated[float, Parameter(group="router")]
+    norm_topk_prob: Annotated[bool, Parameter(group="router")]
 
     def build(
         self,
@@ -71,20 +72,20 @@ class TransformerConfig(BaseModel):
         title="Base model config for xtuner",
         extra="allow",
     )
-    vocab_size: int
-    max_position_embeddings: int
-    padding_idx: int
-    num_hidden_layers: int
-    hidden_size: int
-    intermediate_size: int
-    rms_norm_eps: float
-    rope_theta: float  # required by transformers's build rope
-    hidden_act: str  # key defined in `transformers.activations.ACT2CLS`
+    vocab_size: Annotated[int, Parameter(group="model")]
+    max_position_embeddings: Annotated[int, Parameter(group="model")]
+    padding_idx: Annotated[int, Parameter(group="model")]
+    num_hidden_layers: Annotated[int, Parameter(group="model")]
+    hidden_size: Annotated[int, Parameter(group="model")]
+    intermediate_size: Annotated[int, Parameter(group="model")]
+    rms_norm_eps: Annotated[float, Parameter(group="model")]
+    rope_theta: Annotated[float, Parameter(group="model")]  # required by transformers's build rope
+    hidden_act: Annotated[str, Parameter(group="model")]  # key defined in `transformers.activations.ACT2CLS`
     attention: BaseAttnConfig
-    mlp_bias: bool = False
-    tie_word_embeddings: bool = False
-    chunked_loss: bool = False
-    model_type: Literal["qwen"] | None = None
+    mlp_bias: Annotated[bool, Parameter(group="model")] = False
+    tie_word_embeddings: Annotated[bool, Parameter(group="model")] = False
+    chunked_loss: Annotated[bool, Parameter(group="model")] = False
+    model_type: Annotated[Literal["qwen"] | None, Parameter(group="model")] = None
     generate_config: GenerateConfig | None = None
     float8_cfg: Optional["Float8Config"] = None
 
@@ -101,17 +102,17 @@ class TransformerConfig(BaseModel):
 
 
 class MoEConfig(TransformerConfig):
-    n_routed_experts: int
-    n_shared_experts: int
-    num_experts_per_tok: int
-    first_k_dense_replace: int = 0
-    hidden_factor: float = 1.0
-    moe_intermediate_size: int
-    ep_size: int = 1
-    dispatcher: Literal["deepep", "all2all"] | None = None
+    n_routed_experts: Annotated[int, Parameter(group="moe")]
+    n_shared_experts: Annotated[int, Parameter(group="moe")]
+    num_experts_per_tok: Annotated[int, Parameter(group="moe")]
+    first_k_dense_replace: Annotated[int, Parameter(group="moe")] = 0
+    hidden_factor: Annotated[float, Parameter(group="moe")] = 1.0
+    moe_intermediate_size: Annotated[int, Parameter(group="moe")]
+    ep_size: Annotated[int, Parameter(group="moe")] = 1
+    dispatcher: Annotated[Literal["deepep", "all2all"] | None, Parameter(group="moe")] = None
     router: BaseRouterConfig
     balancing_loss_cfg: BalancingLossConfig | None = BalancingLossConfig()
-    z_loss_cfg: ZLossConfig | None = None
+    z_loss_cfg: Optional["ZLossConfig"] = None
 
     def build(self) -> "MoE":
         from xtuner.v1.model.moe.moe import MoE

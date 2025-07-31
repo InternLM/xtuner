@@ -22,8 +22,8 @@ from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
 from xtuner.v1.utils import pad_to_max_length
 from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, LinearLR, SequentialLR
 from xtuner.v1.engine.utils import cal_global_grad_tokens
-from xtuner.v1.data_proto import CELossContext
-from xtuner.utils.device import get_device, get_torch_device
+from xtuner.v1.loss import CELossContext
+from xtuner.utils.device import get_device
 
 # Qwen3 30B A3
 QWEN3_MOE_PATH = os.environ["QWEN3_MOE_PATH"]
@@ -260,6 +260,7 @@ class TestMoEEngineFloat8(DistributedTestBase):
             seq_ctx = SequenceContext.from_input_ids((input_ids,), device=DEVICE)
             labels = labels.to(DEVICE)
             seq_ctx.num_padding = pad_len
+            seq_ctx.to('cuda')
             global_grad_tokens = cal_global_grad_tokens([labels])
             grad_accumulation_steps = engine.grad_accumulation_steps(1)
             loss_ctx = CELossContext()
@@ -389,7 +390,7 @@ class TestMoEEngineFloat8Case2(DistributedTestBase):
             val_fp8 = val_fp8.full_tensor().bfloat16()
             self.assertTrue(torch.equal(val, val_fp8[:val.shape[0]]), f"Mismatch in {key} between bf16 and fp8, {val} and {val_fp8[:val.shape[0]]}")
             self.assertTrue((val_fp8[val.shape[0]:] == 0).all())
-    
+
         if dist.get_rank() == 0:
             shutil.rmtree(temp_dir)
             shutil.rmtree(temp_dir2)

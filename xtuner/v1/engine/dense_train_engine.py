@@ -5,6 +5,7 @@ import time
 from concurrent.futures import Future, wait
 from contextlib import contextmanager
 from datetime import timedelta
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple, cast
 
 import torch
@@ -30,7 +31,7 @@ from torch.utils._foreach_utils import (
 from xtuner.v1.config import FSDPConfig, OptimConfig, TransformerConfig
 from xtuner.v1.datasets.collator import ColateItem
 from xtuner.v1.float8.float8_handler import Float8Handler
-from xtuner.v1.model import BaseModel
+from xtuner.v1.model.base import BaseModel
 from xtuner.v1.utils import get_device, get_logger, get_torch_device_module
 
 
@@ -200,7 +201,7 @@ class DenseTrainEngine:
         # todo
         return log
 
-    def from_hf(self, hf_path: str, strict: bool = False):
+    def from_hf(self, hf_path: str | Path, strict: bool = False):
         self.model.from_hf(hf_path=hf_path, strict=strict)
 
     @staticmethod

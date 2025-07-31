@@ -25,10 +25,10 @@ from typing_extensions import overload, override
 
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.config.base_model import MoEConfig, MoEModelOutputs
-from xtuner.v1.data_proto import CELossContext, SequenceContext
+from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.float8_handler import Float8Handler
-from xtuner.v1.loss import BalancingLoss, ZLoss
-from xtuner.v1.model import BaseModel
+from xtuner.v1.loss import BalancingLoss, CELossContext, ZLoss
+from xtuner.v1.model.base import BaseModel
 from xtuner.v1.module import LMHead, RMSNorm, RotaryEmbedding
 from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayer
 from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEBlock, MoEDecoderLayer
@@ -36,12 +36,10 @@ from xtuner.v1.module.router import NoAuxRouter, NoAuxRouterConfig
 from xtuner.v1.utils import (
     get_device,
     get_logger,
-    get_torch_device_module,
 )
 from xtuner.v1.utils.compile import maybe_compile
 
 
-DEVICE_MODULE = get_torch_device_module()
 DEVICE = get_device()
 logger = get_logger()
 
@@ -373,7 +371,6 @@ class MoE(BaseModel):
 
         for layer_idx, layer in tqdm(self.layers.items(), desc="[FSDP Sharding]"):
             layer_idx = int(layer_idx)
-            layer.to_empty(device=DEVICE_MODULE.current_device())
             if layer_idx < num_recompute_layers - 1:
                 layer = ptd_checkpoint_wrapper(layer, checkpoint_impl=CheckpointImpl.REENTRANT)
 
@@ -397,7 +394,6 @@ class MoE(BaseModel):
         ):
             layer_cur.set_modules_to_forward_prefetch([layer_next])  # type: ignore
 
-        self.embed_tokens.to_empty(device=DEVICE_MODULE.current_device())
         fully_shard(
             self.embed_tokens,
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
@@ -407,7 +403,6 @@ class MoE(BaseModel):
         )
         self.embed_tokens.to_empty(device=device)
 
-        self.norm.to_empty(device=DEVICE_MODULE.current_device())
         fully_shard(
             self.norm,
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
@@ -417,7 +412,6 @@ class MoE(BaseModel):
         )
         self.norm.to_empty(device=device)
 
-        self.lm_head.to_empty(device=DEVICE_MODULE.current_device())
         fully_shard(
             self.lm_head,
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
@@ -467,7 +461,7 @@ class MoE(BaseModel):
     def _init_device_mesh(self, fsdp_config: FSDPConfig):
         self.fsdp_config = fsdp_config
 
-        device = DEVICE if not fsdp_config.cpu_offload else "cpu"
+        device = DEVICE
         world_size = dist.get_world_size()
         experts_fsdp_size = world_size // self.fsdp_config.ep_size
 

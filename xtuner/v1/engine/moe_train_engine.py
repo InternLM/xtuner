@@ -8,11 +8,11 @@ from torch.distributed._functional_collectives import all_reduce
 from torch.distributed.device_mesh import DeviceMesh
 
 from xtuner.v1.config import FSDPConfig, MoEConfig, OptimConfig
-from xtuner.v1.data_proto import CELossContext
 from xtuner.v1.engine.dense_train_engine import DenseTrainEngine
 
 # todo: 如何 import
 from xtuner.v1.float8.float8_handler import Float8Handler
+from xtuner.v1.loss import CELossContext
 from xtuner.v1.model.base import ModelItem
 from xtuner.v1.model.moe.moe import MoE
 from xtuner.v1.module.grouped_linear.moe_group_linear import GroupedLinear

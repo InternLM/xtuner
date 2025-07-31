@@ -16,7 +16,7 @@ from .modeling_vision import InternS1VisionModel, InternS1MultiModalProjector, i
 from typing_extensions import override
 from xtuner.v1.config import FSDPConfig, InternS1Config
 from xtuner.v1.float8.float8_handler import Float8Handler
-from xtuner.v1.data_proto import CELossContext
+from xtuner.v1.loss import CELossContext
 from torch.distributed.fsdp import (
     CPUOffloadPolicy,
     MixedPrecisionPolicy,

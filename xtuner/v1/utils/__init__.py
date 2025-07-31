@@ -1,4 +1,5 @@
 from .compile import maybe_compile
+from .config import Config
 from .device import get_device, get_torch_device_module
 from .dtensor import is_evenly_distributed
 from .enum_helper import StrEnum
@@ -28,4 +29,5 @@ __all__ = [
     "ParallelConfigException",
     "log_format",
     "XTUNER_DETERMINISTIC",
+    "Config",
 ]

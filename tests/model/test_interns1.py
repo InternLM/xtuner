@@ -11,7 +11,7 @@ from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.utils.compile import maybe_compile
 from xtuner.v1.engine.utils import cal_global_grad_tokens
-from xtuner.v1.data_proto import CELossContext
+from xtuner.v1.loss import CELossContext
 
 
 # Intern-S1 30B A3

@@ -1,7 +1,6 @@
 import ray
 
-from xtuner.v1.config import EngineConfig
-from xtuner.v1.engine import build_engine
+from xtuner.v1.engine import EngineConfig
 
 from ..accelerator import SingleAcceleratorWorker
 
@@ -22,7 +21,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         super().__init__(config, rank, master_addr, master_port, world_size, accelerator)
         # Additional initialization for training can be added here
         self.config = config
-        self.engine = build_engine(config)
+        self.engine = config.build()
 
     def get_data_replicate_size(self) -> int:
         """Get the data parallel size for the training worker."""

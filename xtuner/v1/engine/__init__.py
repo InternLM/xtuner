@@ -1,34 +1,11 @@
-from xtuner.v1.config import EngineConfig, MoEConfig, MoEEngineConfig
+from xtuner.v1.config.engine import EngineConfig  # TODO: Engine config should be defined in engine module
 
 from .dense_train_engine import DenseTrainEngine
 from .moe_train_engine import MoETrainEngine
 
 
-def build_engine(config: EngineConfig) -> DenseTrainEngine | MoETrainEngine:
-    """Build the appropriate training engine based on the configuration.
-
-    Args:
-        config (MoEEngineConfig): The configuration for the training engine.
-
-    Returns:
-        DenseTrainEngine | MoETrainEngine: An instance of the appropriate training engine.
-    """
-    if isinstance(config, MoEEngineConfig):
-        return MoETrainEngine(
-            model_cfg=config.model,
-            optim_cfg=config.optim,
-            fsdp_cfg=config.fsdp,
-            intra_layer_micro_batch=config.intra_layer_micro_batch,
-        )
-    else:
-        return DenseTrainEngine(
-            model_cfg=config.model,
-            optim_cfg=config.optim,
-            fsdp_cfg=config.fsdp,
-        )
-
-
 __all__ = [
     "DenseTrainEngine",
     "MoETrainEngine",
+    "EngineConfig",
 ]

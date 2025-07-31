@@ -7,8 +7,7 @@ from xtuner.v1.model.moe.qwen3 import Qwen3MoE
 
 class TestBuildModel(TestCase):
     def test_build_moe(self):
-        from xtuner.v1.model import build_model
-        from xtuner.v1.config import MoEConfig
+        from xtuner.v1.model import Qwen3MoEConfig
 
         router_config = GreedyRouterConfig(
             scoring_func="sigmoid",
@@ -21,7 +20,7 @@ class TestBuildModel(TestCase):
             head_dim=128,
             qk_norm=True
         )
-        config = MoEConfig(
+        config = Qwen3MoEConfig(
             vocab_size=151936,
             max_position_embeddings=4096,
             padding_idx=0,
@@ -33,7 +32,6 @@ class TestBuildModel(TestCase):
             hidden_act="silu",
             attention=attention_config,
             tie_word_embeddings=False,
-            training_dtype="bf16",
             chunked_loss=False,
             n_routed_experts=128,
             n_shared_experts=0,
@@ -42,7 +40,6 @@ class TestBuildModel(TestCase):
             hidden_factor=1.0,
             moe_intermediate_size=768,
             router=router_config,
-            model_type="qwen",
         )
-        model = build_model(config)
+        model = config.build()
         self.assertIsInstance(model, Qwen3MoE)
