@@ -66,7 +66,7 @@ class InternS1ForConditionalGeneration(BaseModel):
             fn=self.language_model.to_hf_key_list,
             convertor=lambda x: x.replace('model.', _hf_prefix)),
             self.language_model)
-        self.language_model.load_spec_mapping = self.language_model._init_load_spec()
+        self.language_model._init_load_spec()
 
         self.img_context_token_id = config.image_token_id
 

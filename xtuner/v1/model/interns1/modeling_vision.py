@@ -211,7 +211,7 @@ class InternS1VisionModel(BaseModel):
         )
 
         self._hf_prefix = "model.vision_tower."
-        self.load_spec_mapping = self._init_load_spec()
+        self._init_load_spec()
 
     def forward(
             self,
@@ -316,7 +316,7 @@ class InternS1MultiModalProjector(BaseModel):
         self.linear_2 = nn.Linear(config.text_config.hidden_size, config.text_config.hidden_size)
 
         self._hf_prefix = "model.multi_modal_projector."
-        self.load_spec_mapping = self._init_load_spec()
+        self._init_load_spec()
 
     @maybe_compile(fullgraph=True)
     def forward(self, image_features):
@@ -335,7 +335,7 @@ class InternS1MultiModalProjector(BaseModel):
         float8_handler: Float8Handler | None = None,
     ):
         assert float8_handler is None
-        self.load_spec_mapping = self._init_load_spec()
+        self._init_load_spec()
 
         mp_policy = MixedPrecisionPolicy(
             param_dtype=fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype

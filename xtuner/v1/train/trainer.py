@@ -128,6 +128,7 @@ class Trainer:
                 seq_ctx = data["seq_ctx"]
                 labels = data["labels"]
                 seq_ctx.to(DEVICE)
+                labels.to(DEVICE)
                 # build_item 是一个自定义方法和接口
                 loss_ctx = self.loss_ctx.build_forward_item(
                     seq_ctx=seq_ctx,

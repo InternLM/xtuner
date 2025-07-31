@@ -23,9 +23,11 @@ from xtuner.v1.utils import pad_to_max_length
 from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, LinearLR, SequentialLR
 from xtuner.v1.engine.utils import cal_global_grad_tokens
 from xtuner.v1.data_proto import CELossContext
+from xtuner.utils.device import get_device, get_torch_device
 
 # Qwen3 30B A3
 QWEN3_MOE_PATH = os.environ["QWEN3_MOE_PATH"]
+DEVICE = get_device()
 
 
 class TestMoEEngineFloat8(DistributedTestBase):
@@ -82,9 +84,9 @@ class TestMoEEngineFloat8(DistributedTestBase):
         labels = pad_to_max_length(labels, -100, max_length=8192)
         losses = []
         for _ in range(10):
-            seq_ctx = SequenceContext.from_input_ids((input_ids,))
+            seq_ctx = SequenceContext.from_input_ids((input_ids,), device=DEVICE)
+            labels = labels.to(DEVICE)
             seq_ctx.num_padding = pack_len
-            seq_ctx.to('cuda')
             global_grad_tokens = cal_global_grad_tokens([labels])
             grad_accumulation_steps = engine.grad_accumulation_steps(1)
             loss_ctx = CELossContext()
@@ -159,9 +161,9 @@ class TestMoEEngineFloat8(DistributedTestBase):
         labels = pad_to_max_length(labels, -100, max_length=8192)
         losses = []
         for _ in range(10):
-            seq_ctx = SequenceContext.from_input_ids((input_ids,))
+            seq_ctx = SequenceContext.from_input_ids((input_ids,), device=DEVICE)
+            labels = labels.to(DEVICE)
             seq_ctx.num_padding = pack_len
-            seq_ctx.to('cuda')
             global_grad_tokens = cal_global_grad_tokens([labels])
             grad_accumulation_steps = engine.grad_accumulation_steps(1)
             loss_ctx = CELossContext()
@@ -255,7 +257,8 @@ class TestMoEEngineFloat8(DistributedTestBase):
         pad_len = 8192 - input_ids.shape[1]
         losses = []
         for _ in range(10):
-            seq_ctx = SequenceContext.from_input_ids((input_ids,))
+            seq_ctx = SequenceContext.from_input_ids((input_ids,), device=DEVICE)
+            labels = labels.to(DEVICE)
             seq_ctx.num_padding = pad_len
             global_grad_tokens = cal_global_grad_tokens([labels])
             grad_accumulation_steps = engine.grad_accumulation_steps(1)
@@ -299,7 +302,7 @@ class TestMoEEngineFloat8Case2(DistributedTestBase):
             ("cuda", 1, int(os.getenv("XTUNER_TEST_WORLD_SIZE", "6"))),  # todo: test ep8 and hsdp, OOM in 8 gpus
         ],
     )
-    def test_save_and_load(self, device, ep_size, hsdp_sharding_size):
+    def test_save_and_load1(self, device, ep_size, hsdp_sharding_size):
         self.create_pg(device)
         temp_dir = tempfile.mkdtemp()
         if dist.get_rank() == 0:
