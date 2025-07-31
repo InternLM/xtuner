@@ -422,4 +422,4 @@ class Trainer:
     def _init_dist(self, backend: str):
         if not dist.is_initialized():
             init_process_group(backend=backend)
-        torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+        torch.accelerator.set_device_index(int(os.environ["LOCAL_RANK"]))

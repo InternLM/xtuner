@@ -1,17 +1,26 @@
 import ray
 
-from xtuner.v1.engine import EngineConfig
+from xtuner.v1.config.trainer import TrainerConfig
+from xtuner.v1.train.trainer import Trainer
 
 from ..accelerator import SingleAcceleratorWorker
 
 
-@ray.remote
+@ray.remote(
+    runtime_env={
+        "env_vars": {
+            "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
+            "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
+        }
+    },
+)
 class TrainingWorker(SingleAcceleratorWorker):
     """Worker class for training tasks."""
 
     def __init__(
         self,
-        config: EngineConfig,
+        # config: EngineConfig,
+        config: TrainerConfig,
         rank: int,
         master_addr: str,
         master_port: int,
@@ -21,15 +30,11 @@ class TrainingWorker(SingleAcceleratorWorker):
         super().__init__(config, rank, master_addr, master_port, world_size, accelerator)
         # Additional initialization for training can be added here
         self.config = config
-        self.engine = config.build()
+        self.trainer = Trainer.from_config(config)
 
     def get_data_replicate_size(self) -> int:
         """Get the data parallel size for the training worker."""
         return 1
 
-    def train_step(self, data_batches, sp_size: int = 1):
-        """Perform a single training step with the provided data."""
-        # Here you would implement the actual training logic
-        # For demonstration, we will just return a dummy loss
-        log = self.engine.train_step(data_batches)
-        return log
+    def fit(self):
+        self.trainer.fit()

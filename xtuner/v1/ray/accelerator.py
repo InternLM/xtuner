@@ -60,13 +60,18 @@ class SingleAcceleratorWorker:
         os.environ["MASTER_PORT"] = str(master_port)
         os.environ["RANK"] = str(rank)
         os.environ["WORLD_SIZE"] = str(world_size)
+        os.environ["LOCAL_RANK"] = str(ray.get_runtime_context().get_accelerator_ids()[self.accelerator][0])
 
         # backend 参数是指定通信后端，不是从环境变量获取
         # - 'nccl': NVIDIA GPU 间通信（推荐用于 GPU）
         # - 'gloo': CPU 通信或跨平台
         # - 'mpi': 需要 MPI 环境
-        backend = "nccl" if torch.cuda.is_available() else "gloo"
-        print(os.environ["CUDA_VISIBLE_DEVICES"])
+        if self.accelerator == "GPU":
+            backend = "nccl"
+        elif self.accelerator == "NPU":
+            backend = "hccl"
+        else:
+            raise ValueError(f"Unsupported accelerator architecture: {self.accelerator}")
         # 使用环境变量初始化
         dist.init_process_group(
             backend=backend,
@@ -75,7 +80,7 @@ class SingleAcceleratorWorker:
 
     def test_all_reduce(self):
         """Perform all-reduce operation on the given tensor."""
-        tensor = torch.tensor([1.0], device="cuda" if torch.cuda.is_available() else "cpu")
+        tensor = torch.tensor([1.0], device=torch.accelerator.current_accelerator())
         dist.all_reduce(tensor)
         return tensor
 
