@@ -36,6 +36,11 @@ DEVICE_MODULE = get_torch_device_module()
 DEVICE = get_device()
 
 
+def _is_float8_available():
+    # Float8 is only supported on SM89 or later (H100+ GPUs)
+    return DEVICE == "cuda" and DEVICE_MODULE.is_available() and DEVICE_MODULE.get_device_capability() >= (8, 9)
+
+
 class ModelItem(TypedDict):
     seq_ctx: SequenceContext
     loss_ctx: CELossContext
@@ -580,6 +585,10 @@ class BaseModel(nn.Module):
         params = [(name, param) for name, param in self.named_parameters() if param.requires_grad]
         return params
 
+    def _is_loaded_param_fp8(self, hf_key: str, checkpoint_loader: HFCheckpointLoader) -> bool:
+        hf_key_scale_inv = hf_key + "_scale_inv"
+        return checkpoint_loader.is_key_exist(hf_key) and checkpoint_loader.is_key_exist(hf_key_scale_inv)
+
     def _load_fp8(self, hf_key: str, checkpoint_loader: HFCheckpointLoader) -> torch.Tensor | None:
         hf_key_scale_inv = hf_key + "_scale_inv"
         loaded_tensor_fp8 = checkpoint_loader.load(hf_key)
@@ -598,11 +607,17 @@ class BaseModel(nn.Module):
         local_tensor = param._local_tensor if isinstance(param, DTensor) else param
         hf_key = load_spec.hf_keys[0]
 
-        loaded_tensor = self._load_fp8(hf_key, checkpoint_loader)
-        if loaded_tensor is None:
+        if self._is_loaded_param_fp8(hf_key, checkpoint_loader):
+            if not _is_float8_available():
+                raise RuntimeError(
+                    f"Float8 is not available on {DEVICE}. Please convert the checkpoint from float8 to bfloat16 on SM89 or later (H100+ GPUs)."
+                )
+            loaded_tensor = self._load_fp8(hf_key, checkpoint_loader)
+        else:
             loaded_tensor = checkpoint_loader.load(hf_key)
         if loaded_tensor is None:
             return [hf_key]
+
         loaded_tensor = loaded_tensor.to(local_tensor.device)
 
         if self.fsdp_mesh is not None:

@@ -77,6 +77,9 @@ class HFCheckpointLoader:
         self.current_file = None
         self.buffer = None
 
+    def is_key_exist(self, key: str) -> bool:
+        return key in self.weight_map
+
     def load(self, key) -> torch.Tensor | None:
         if key not in self.weight_map:
             return None
