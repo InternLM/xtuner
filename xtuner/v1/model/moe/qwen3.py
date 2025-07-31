@@ -39,7 +39,12 @@ class Qwen3MoE(MoE):
             return [key]
 
 
-class Qwen3MoE30BA3Config(MoEConfig):
+class Qwen3MoEConfig(MoEConfig):
+    def build(self) -> Qwen3MoE:
+        return Qwen3MoE(self)
+
+
+class Qwen3MoE30BA3Config(Qwen3MoEConfig):
     vocab_size: int = 151936
     max_position_embeddings: int = 4096
     padding_idx: int = 0
@@ -64,6 +69,3 @@ class Qwen3MoE30BA3Config(MoEConfig):
     )
     balancing_loss_cfg: BalancingLossConfig | None = BalancingLossConfig()
     z_loss_cfg: ZLossConfig | None = None
-
-    def build(self) -> Qwen3MoE:
-        return Qwen3MoE(self)

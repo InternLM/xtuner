@@ -1,10 +1,14 @@
 from pathlib import Path
-from typing import TypedDict
+from typing import Annotated, TypedDict
 
-from pydantic import BaseModel, model_validator
+from cyclopts import Parameter
+from pydantic import BaseModel, ConfigDict, model_validator
 
-from .data import DataloaderConfig, DatasetConfig
-from .engine import EngineConfig
+from xtuner.v1.config.base_model import TransformerConfig
+
+from .data import DataloaderConfig, DatasetConfigList
+from .fsdp import FSDPConfig
+from .optim import LRConfig, OptimConfig
 
 
 class ResumeConfig(TypedDict):
@@ -15,19 +19,26 @@ class ResumeConfig(TypedDict):
 
 
 class TrainerConfig(BaseModel):
-    hf_path: str | Path | None = None
-    engine: EngineConfig
-    dataset_config: DatasetConfig
-    dataloader_config: DataloaderConfig
-    resume_config: ResumeConfig
-    global_batch_size: int
-    total_step: int | None
-    epoch_num: int | None
-    sp_size: int = 1
+    model_config = ConfigDict(title="Trainer config", extra="allow", arbitrary_types_allowed=True)
+    model_cfg: TransformerConfig
+    load_from: str | Path | None = None
+    tokenizer_path: str | Path
+    dataset_cfg: Annotated[DatasetConfigList, Parameter(show_default=False)]
+    dataloader_cfg: DataloaderConfig
+    optim_cfg: OptimConfig
+    lr_cfg: LRConfig
+    fsdp_cfg: FSDPConfig | None = None
+    global_batch_size: int | None
     work_dir: Path | str | None = None
     log_dir: Path | str | None = None
-    tokenizer: str | Path
+    sp_size: int = 1
+    total_step: int | None = None
+    epoch_num: int | None = None
+    resume: ResumeConfig | None = None
+    strict_load: bool = True
     seed: int = 42
+    dist_backend: str = "cpu:gloo,cuda:nccl"
+    debug: bool = False
     # data
 
     @model_validator(mode="after")

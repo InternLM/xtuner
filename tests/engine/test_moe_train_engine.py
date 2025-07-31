@@ -11,7 +11,7 @@ from torch.testing._internal.common_distributed import DistributedTestBase
 from transformers import AutoTokenizer
 
 from xtuner.v1.model.moe.moe import SequenceContext
-from xtuner.v1.data_proto import CELossContext
+from xtuner.v1.loss import CELossContext
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
 from xtuner.v1.config import FSDPConfig, LRConfig, AdamWConfig, BalancingLossConfig, ZLossConfig
 from xtuner.v1.engine.moe_train_engine import MoETrainEngine

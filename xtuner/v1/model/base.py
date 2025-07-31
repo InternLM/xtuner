@@ -17,7 +17,7 @@ from torch.distributed.tensor._utils import compute_local_shape_and_global_offse
 
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.config.base_model import MoEConfig, TransformerConfig
-from xtuner.v1.data_proto import CELossContext, SequenceContext
+from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.float8.fsdp_utils import (
     WeightWithDynamicTensorWiseFloat8CastTensor,
@@ -25,6 +25,7 @@ from xtuner.v1.float8.fsdp_utils import (
 )
 from xtuner.v1.float8.triton_kernels import per_block_dequant_gemm
 from xtuner.v1.float8.triton_kernels.per_block_quant_gemm import per_block_quant_torch
+from xtuner.v1.loss import CELossContext
 from xtuner.v1.ops.comm.foreach_allgather import foreach_all_gather
 from xtuner.v1.utils import get_device, get_torch_device_module, profile_time_and_memory
 from xtuner.v1.utils.load_spec import LoadEnum, LoadSpec
@@ -622,7 +623,7 @@ class BaseModel(nn.Module):
             start = min(start, loaded_tensor.shape[self.FSDP_SHARD_DIM])
             end = min(end, loaded_tensor.shape[self.FSDP_SHARD_DIM])
             loaded_tensor_slice = loaded_tensor.index_select(
-                dim=self.FSDP_SHARD_DIM, index=torch.arange(start, end, dtype=torch.int64, device=DEVICE)
+                dim=self.FSDP_SHARD_DIM, index=torch.arange(start, end, dtype=torch.int64, device=loaded_tensor.device)
             )
             non_pad_len = loaded_tensor_slice.shape[self.FSDP_SHARD_DIM]
             local_tensor[:non_pad_len].copy_(loaded_tensor_slice)
@@ -714,7 +715,7 @@ class BaseModel(nn.Module):
             start = min(start, loaded_tensor.shape[self.FSDP_SHARD_DIM])
             end = min(end, loaded_tensor.shape[self.FSDP_SHARD_DIM])
             loaded_tensor_slice = loaded_tensor.index_select(
-                dim=self.FSDP_SHARD_DIM, index=torch.arange(start, end, dtype=torch.int64, device=DEVICE)
+                dim=self.FSDP_SHARD_DIM, index=torch.arange(start, end, dtype=torch.int64, device=loaded_tensor.device)
             )
             non_pad_len = loaded_tensor_slice.shape[self.FSDP_SHARD_DIM]
             local_tensor[:non_pad_len].copy_(loaded_tensor_slice)
@@ -771,7 +772,8 @@ class BaseModel(nn.Module):
         if start is not None and end is not None:
             local_tensor.copy_(
                 sharded_loaded_tensor.index_select(
-                    dim=self.FSDP_SHARD_DIM, index=torch.arange(start, end, dtype=torch.int64, device=DEVICE)
+                    dim=self.FSDP_SHARD_DIM,
+                    index=torch.arange(start, end, dtype=torch.int64, device=sharded_loaded_tensor.device),
                 ),
             )
         else:

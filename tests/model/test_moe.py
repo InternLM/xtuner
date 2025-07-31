@@ -6,7 +6,7 @@ from torch.distributed.device_mesh import init_device_mesh
 import os
 from copy import deepcopy
 from xtuner.v1.engine.utils import cal_global_grad_tokens
-from xtuner.v1.data_proto import CELossContext
+from xtuner.v1.loss import CELossContext
 
 from torch.testing._internal.common_distributed import DistributedTestBase
 import parametrize

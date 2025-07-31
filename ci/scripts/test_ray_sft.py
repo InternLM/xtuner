@@ -1,5 +1,6 @@
 import os
 
+from xtuner.v1.engine import EngineConfig
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
 from xtuner.v1.config import (
     AdamWConfig,
@@ -9,7 +10,6 @@ from xtuner.v1.config import (
     Float8Config,
     FSDPConfig,
     LRConfig,
-    MoEEngineConfig,
     BalancingLossConfig,
     ZLossConfig,
 )
@@ -35,10 +35,7 @@ if __name__ == "__main__":
         torch_compile=True,
         cpu_offload=False,
         ep_size=1,
-        max_length=8192,
-
     )
-    lr_cfg = LRConfig(total_steps=1000)
     dataset_config = [
         dict(dataset=DatasetConfig(name='alpaca', anno_path=ALPACA_PATH, sample_ratio=1.0),
                 tokenize_fn=FTDPTokenizeFnConfig()),
@@ -49,11 +46,10 @@ if __name__ == "__main__":
             max_length=512,
         )
 
-    engine_cfg: MoEEngineConfig = MoEEngineConfig(
-        model=moe_cfg,
-        fsdp=fsdp_cfg,
-        optim=optim_cfg,
-        lr=LRConfig(),
+    engine_cfg = EngineConfig(
+        model_cfg=moe_cfg,
+        fsdp_cfg=fsdp_cfg,
+        optim_cfg=optim_cfg,
     )
 
     resources = AcceleratorResourcesConfig(

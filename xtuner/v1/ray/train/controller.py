@@ -134,7 +134,7 @@ class TrainingController:
         # 1. load dataloader state
         # 2. set cur step
         # TODO(hha): 如何传入 model_cfg 到 dataset 中
-        datasets = build_datasets(dataset_config, tokenizer)
+        datasets = build_datasets(dataset_config, tokenizer)  # type: ignore
         return build_dataloader(
             dataloader_config=dataloader_config,
             datasets=datasets,

@@ -6,21 +6,18 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.distributed as dist
-from mmengine.dist import infer_launcher, init_dist
 
 from xtuner.v1.config import (
     AdamWConfig,
     DataloaderConfig,
     DatasetConfig,
     FTDPTokenizeFnConfig,
-    Float8Config,
     FSDPConfig,
     LRConfig,
-    MoEEngineConfig,
     BalancingLossConfig,
     ZLossConfig
 )
-from xtuner.v1.data_proto import CELossContext
+from xtuner.v1.loss import CELossContext
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
 from xtuner.v1.train.trainer import Trainer
 from xtuner.v1.utils.compile import maybe_compile
@@ -220,9 +217,7 @@ def plot_comparison_curves(history_data, current_data, title, output_root: Path)
 
 def main():
     args = parse_args()
-    dist_launcher = infer_launcher()
-    init_dist(dist_launcher, backend="nccl")
-    os.environ["DG_CACHE_DIR"] = f"/tmp/.deep_gemm-{torch.distributed.get_rank()}"
+    os.environ["DG_CACHE_DIR"] = f"/tmp/.deep_gemm-{os.getenv('RANK', '0')}"
 
     maybe_compile.clear_compile_targets()
     moe_cfgs = [
@@ -247,14 +242,11 @@ def main():
             ep_size=moe_cfg.ep_size,
             # hsdp_sharding_size=4,
         )
-        engine_config = MoEEngineConfig(
-            model=moe_cfg,
-            optim=optim_cfg,
-            fsdp=fsdp_cfg
-        )
         dataset_config = [
-            dict(dataset=DatasetConfig(name='alpaca', anno_path=ALPACA_PATH, sample_ratio=1.0),
-                 tokenize_fn=FTDPTokenizeFnConfig()),
+            {
+                "dataset": DatasetConfig(name="alpaca", anno_path=ALPACA_PATH, sample_ratio=1.0),
+                "tokenize_fn": FTDPTokenizeFnConfig(),
+            },
         ]
 
         dataloader_config = DataloaderConfig(
@@ -264,13 +256,15 @@ def main():
         work_dir = f"{args.work_dir}-{name}"
         loss_ctx = CELossContext()
         trainer = Trainer(
-            model_path=QWEN3_MOE_PATH,
-            engine_config=engine_config,
-            dataset_config=dataset_config,
-            dataloader_config=dataloader_config,
+            load_from=QWEN3_MOE_PATH,
+            model_cfg=moe_cfg,
+            optim_cfg=optim_cfg,
+            fsdp_cfg=fsdp_cfg,
+            dataset_cfg=dataset_config,
+            dataloader_cfg=dataloader_config,
             loss_ctx=loss_ctx,
-            lr_config=lr_cfg,
-            tokenizer=QWEN3_MOE_PATH,
+            lr_cfg=lr_cfg,
+            tokenizer_path=QWEN3_MOE_PATH,
             global_batch_size=16,
             epoch_num=1,
             work_dir=work_dir,

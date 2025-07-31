@@ -1,22 +1,26 @@
+import os
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Sized, cast
+from typing import Sized, cast
 
 import torch
+import torch.distributed as dist
 from mmengine.dist import get_rank, get_world_size
 from mmengine.runner import set_random_seed
+from torch.distributed import init_process_group
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, LinearLR, SequentialLR
+from typing_extensions import Self
 
 from transformers import AutoTokenizer
 from xtuner.utils.device import get_device, get_torch_device
-from xtuner.v1.config import DataloaderConfig, EngineConfig, LRConfig
-from xtuner.v1.config.trainer import ResumeConfig
-from xtuner.v1.data_proto import CELossContext
+from xtuner.v1.config import DataloaderConfig, DatasetConfigList, FSDPConfig, LRConfig, OptimConfig
+from xtuner.v1.config.base_model import MoEConfig, TransformerConfig
+from xtuner.v1.config.trainer import ResumeConfig, TrainerConfig
 from xtuner.v1.datasets.build import build_dataloader, build_datasets
-from xtuner.v1.engine import build_engine
 from xtuner.v1.engine.utils import cal_global_grad_tokens
+from xtuner.v1.loss import CELossContext
 from xtuner.v1.model.base import ModelItem
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, ParallelConfigException, get_logger, log_format
 
@@ -28,31 +32,35 @@ DEVICE_MODULE = get_torch_device()
 
 class Trainer:
     META_PATH = "meta"
+    config: TrainerConfig | None
 
     def __init__(
         self,
         *,
-        model_path: str | Path | None = None,  # Huggingface model path or saved trainer_path
-        engine_config: EngineConfig,
-        dataset_config: List[Dict],
-        dataloader_config: DataloaderConfig,
-        loss_ctx: CELossContext,
-        lr_config: LRConfig,
-        tokenizer: str | Path,
-        global_batch_size: int,
+        load_from: str | Path | None = None,  # Huggingface model path or saved trainer_path
+        model_cfg: TransformerConfig,
+        optim_cfg: OptimConfig,
+        fsdp_cfg: FSDPConfig | None = None,
+        dataset_cfg: DatasetConfigList,
+        dataloader_cfg: DataloaderConfig,
+        loss_ctx: CELossContext | None = None,
+        lr_cfg: LRConfig,
+        tokenizer_path: str | Path,
+        global_batch_size: int | None,
         work_dir: Path | str | None = None,
         log_dir: Path | str | None = None,
         sp_size: int = 1,
         total_step: int | None = None,
         epoch_num: int | None = None,
         resume_config: ResumeConfig | None = None,
+        strict_load: bool = True,
         seed: int = 42,
         debug: bool = False,
+        backend: str = "cpu:gloo,cuda:nccl",
     ):
-        self._global_batch_size = global_batch_size
         self._micro_batch_size: int | None = None
-        self._dataset_config = dataset_config
-        self._dataloader_config = dataloader_config
+        self._dataset_config = dataset_cfg
+        self._dataloader_config = dataloader_cfg
         self._total_step = total_step
         self._epoch_num = epoch_num
         self._cur_step = 0
@@ -62,14 +70,18 @@ class Trainer:
             f"`epoch_num`: {epoch_num}, `total_step`: {total_step} should not be set at the same time"
         )
 
-        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer)
+        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
 
-        # TODO: Unify the name of `cfg` and `config`
-        self.engine_config = engine_config
+        if fsdp_cfg is None:
+            fsdp_cfg = FSDPConfig()
+        self.fsdp_config = fsdp_cfg
+        self.optim_config = optim_cfg
+
         self.sp_size = sp_size
         self.debug = debug
         self.seed = seed
 
+        self._init_dist(backend)
         self._set_deterministic()
         self._set_random_seed(seed)
 
@@ -93,25 +105,78 @@ class Trainer:
             work_dir.mkdir(parents=True, exist_ok=True)
 
         self.work_dir = work_dir
-        self.data_mesh = self._init_data_mesh(engine_config)
+        self.data_mesh = self._init_data_mesh(
+            fsdp_cfg.tp_size,
+            sp_size,
+        )
         self.sp_mesh = self.data_mesh["sp"]
 
-        self.tokenizer.model_max_length = dataloader_config.max_length
+        if global_batch_size is None:
+            global_batch_size = self.data_mesh["dp"].size()
+        self._global_batch_size = global_batch_size
+
+        self.tokenizer.model_max_length = dataloader_cfg.max_length
 
         self._dataloader = self.build_dataloader(
-            dataset_config=dataset_config,
-            dataloader_config=dataloader_config,
+            dataset_config=dataset_cfg,
+            dataloader_config=dataloader_cfg,
             dp_mesh=self.data_mesh["dp"],
             tokenizer=self.tokenizer,
-            global_batch_size=global_batch_size,
+            global_batch_size=self.global_batch_size,
             micro_batch_size=self.micro_batch_size,
             seed=seed,
         )
 
-        self._engine = self.build_engine(model_path, engine_config, resume_config)
-        self._lr_scheduler = self.build_lr_scheduler(lr_config)
         self.loss_ctx = loss_ctx
+        if isinstance(load_from, str):
+            load_from = Path(load_from)
+
+        self._engine = self.build_engine(
+            model_path=load_from,
+            model_config=model_cfg,
+            optim_config=optim_cfg,
+            fsdp_config=fsdp_cfg,
+            resume_config=resume_config,
+            strict=strict_load,
+        )
+        self._lr_scheduler = self.build_lr_scheduler(lr_cfg)
+        # TODO: (huanghaian) The impl of CELossContext should be decoupled with config
+        if loss_ctx is None:
+            self.loss_ctx = CELossContext()
         # TODO: TMP hardcode here
+
+    @classmethod
+    def from_config(cls, config: TrainerConfig) -> Self:
+        """Create a Trainer instance from a TrainerConfig.
+
+        Args:
+            config: TrainerConfig instance containing all configuration parameters
+
+        Returns:
+            Trainer instance initialized with the provided config
+        """
+        self = cls(
+            load_from=config.load_from,
+            model_cfg=config.model_cfg,
+            optim_cfg=config.optim_cfg,
+            fsdp_cfg=config.fsdp_cfg,
+            dataset_cfg=config.dataset_cfg,
+            dataloader_cfg=config.dataloader_cfg,
+            lr_cfg=config.lr_cfg,
+            tokenizer_path=config.tokenizer_path,
+            global_batch_size=config.global_batch_size,
+            work_dir=config.work_dir,
+            log_dir=config.log_dir,
+            sp_size=config.sp_size,
+            total_step=config.total_step,
+            epoch_num=config.epoch_num,
+            resume_config=config.resume,
+            strict_load=config.strict_load,
+            seed=config.seed,
+            debug=config.debug,
+        )
+        self.config = config
+        return self
 
     def fit(self):
         time_before_get_data = time.time()
@@ -216,13 +281,12 @@ class Trainer:
 
     def _init_data_mesh(
         self,
-        engine_config: EngineConfig,
+        tp_size: int,
+        sp_size: int,
     ):
-        tp_size = engine_config.fsdp.tp_size
-        sp_size = self.sp_size
         if self.world_size % tp_size != 0:
             raise ParallelConfigException(
-                f"Found tp_size {self.engine_config.fsdp.tp_size}, world_size {self.world_size}."
+                f"Found tp_size {tp_size}, world_size {self.world_size}."
                 "tensor parallel size must be a divisor of world size."
             )
 
@@ -241,7 +305,7 @@ class Trainer:
         dp_size = self.world_size // (tp_size * sp_size)
 
         # TODO: fsdp_config could be None
-        device = str(DEVICE) if not self.engine_config.fsdp.cpu_offload else "cpu"
+        device = str(DEVICE) if self.fsdp_config.cpu_offload else "cpu"
 
         data_mesh = init_device_mesh(
             device,
@@ -260,18 +324,35 @@ class Trainer:
                 data = next(data_iter)
             yield data
 
-    def build_engine(self, model_path: str | Path | None, engine_config: EngineConfig | None, resume_config):
+    def build_engine(
+        self,
+        model_path: Path | None,
+        model_config: TransformerConfig,
+        optim_config: OptimConfig,
+        fsdp_config: FSDPConfig,
+        resume_config: ResumeConfig | None = None,
+        strict: bool = True,
+    ):
+        from xtuner.v1.engine import MoETrainEngine
+
         # TODO: yehaochen
-        assert engine_config is not None, "Engine config should not be None"
-        engine = build_engine(engine_config)
+        if isinstance(model_config, MoEConfig):
+            engine = MoETrainEngine(
+                optim_cfg=optim_config,
+                fsdp_cfg=fsdp_config,
+                model_cfg=model_config,
+            )
+        else:
+            raise NotImplementedError
+
         if model_path is not None:
-            engine.from_hf(str(model_path))
+            engine.from_hf(hf_path=model_path, strict=strict)
         return engine
 
     def build_dataloader(
         self,
         dataloader_config: DataloaderConfig,
-        dataset_config: List[Dict],
+        dataset_config: DatasetConfigList,
         tokenizer: AutoTokenizer,
         dp_mesh: DeviceMesh,
         global_batch_size: int,
@@ -337,3 +418,8 @@ class Trainer:
 
     def _set_random_seed(self, seed: int):
         set_random_seed(seed)
+
+    def _init_dist(self, backend: str):
+        if not dist.is_initialized():
+            init_process_group(backend=backend)
+        torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))

@@ -1,7 +1,7 @@
 import copy
 import os
 from functools import partial
-from typing import Dict, Iterable, List
+from typing import Iterable
 
 import torch
 from mmengine.dist import get_rank
@@ -9,6 +9,7 @@ from mmengine.fileio import list_dir_or_file
 from torch.distributed.device_mesh import DeviceMesh
 from torch.utils.data import ConcatDataset, DataLoader
 
+from xtuner.v1.config import DatasetConfigList
 from xtuner.v1.utils import get_logger
 
 from ..config.data import DataloaderConfig, DatasetConfig
@@ -22,7 +23,7 @@ logger = get_logger()
 
 # TODO: (huanghaian) Fix the return type hint static check
 def build_datasets(
-    dataset_config: List[Dict],
+    dataset_config: DatasetConfigList,
     tokenizer,
     model_cfg: dict | None = None,
     max_length: int | None = None,
@@ -34,8 +35,8 @@ def build_datasets(
     for config in dataset_config:
         _dataset_config = config["dataset"]
         assert isinstance(_dataset_config, DatasetConfig)
-        _tokenize_fn = config["tokenize_fn"]
-        _tokenize_fn = _tokenize_fn.build(tokenizer, model_cfg=model_cfg)
+        _tokenize_fn_cfg = config["tokenize_fn"]
+        _tokenize_fn = _tokenize_fn_cfg.build(tokenizer, model_cfg=model_cfg)
 
         anno_path = _dataset_config.anno_path
         if os.path.isfile(anno_path):
