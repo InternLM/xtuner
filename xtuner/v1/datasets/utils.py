@@ -23,7 +23,7 @@ class CachableTokenizeFunction(ABC):
         self.state = "runtime"
 
     @abstractmethod
-    def __call__(self, item: Any) -> DataItem:
+    def __call__(self, item: Any, **kwargs) -> DataItem:
         raise NotImplementedError
 
     @abstractmethod

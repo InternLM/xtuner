@@ -1,9 +1,20 @@
 from typing import TypedDict
 
-from typing_extensions import Required
+import torch
 
 
-class DataItem(TypedDict, total=False):
-    input_ids: Required[list[int]]
-    labels: Required[list[int]]
-    num_tokens: Required[int]
+class DataItem(TypedDict):
+    input_ids: list[int]
+    labels: list[int]
+    num_tokens: int
+
+
+class InternS1DataItem(TypedDict):
+    input_ids: list[int]
+    labels: list[int]
+    pixel_values: torch.Tensor
+    num_tokens: int
+    image_flags: torch.Tensor
+    num_img_tokens: list[int]
+    num_imgs: list[int]
+    num_patches: list[int]

@@ -1,7 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 
 import hashlib
-import json
 import os
 from copy import deepcopy
 from typing import Any
@@ -11,13 +10,15 @@ import torch
 import xxhash
 from PIL import Image
 
-from xtuner.v1.datasets.data_item import DataItem
+from transformers import PreTrainedTokenizer
+from xtuner.v1.datasets.data_item import InternS1DataItem
 from xtuner.v1.utils import get_logger
 
 from ..utils import CachableTokenizeFunction, tokenizer_xxhash
 from ..vlm_utils import TCSLoader, apply_exif_orientation
-from .process import build_transform, dynamic_num_patch, dynamic_preprocess, preprocess_internvl
-
+from .process import build_transform, dynamic_num_patch, dynamic_preprocess, preprocess_interns1
+from xtuner.v1.model.interns1 import InternS1Config
+from pydantic import BaseModel, ConfigDict
 
 logger = get_logger()
 
@@ -50,93 +51,67 @@ def generate_random_int_from_dict(input_dict, min_num, max_num):
     return rng.integers(min_num, max_num + 1)
 
 
-class InternVLTokenizeFunction(CachableTokenizeFunction):
+class InternS1TokenizeFunction(CachableTokenizeFunction):
     def __init__(
-        self,
-        meta_data,
-        tokenizer,
-        model_cfg=None,
-        tcs_loader: TCSLoader | None = None,
-        min_num_frames=4,
-        max_num_frames=24,
-        template_name: str = "internvl",
-        tokenizer_hash: str | None = None,
-        hash: str | None = None,
-        only_prompt: bool = False,
+            self,
+            tokenizer: PreTrainedTokenizer,
+            model_cfg: InternS1Config,
+            anno_name: str,
+            max_dynamic_patch: int | None = None,
+            min_dynamic_patch: int | None = None,
+            min_num_frames: int = 4,
+            max_num_frames: int = 24,
+            data_augment: bool = False,
+            system_message: str | None = None,
+            tcs_loader: TCSLoader | None = None,
+            tokenizer_hash: str | None = None,
+            hash: str | None = None,
+            only_prompt: bool = False
     ):
         self._hash = hash
         self._tokenizer_hash = tokenizer_hash
         self.tcs_loader = tcs_loader
-        self.template_name = template_name
         self.tokenizer = tokenizer
         self.only_prompt = only_prompt
 
-        self.root = meta_data.get("media_root", "")
-        self.data_augment = meta_data.get("data_augment", False)
-        self.image_size = model_cfg.force_image_size or model_cfg.vision_config.image_size
-        self.patch_size = model_cfg.vision_config.patch_size
-        if "max_dynamic_patch" in meta_data:
-            max_num = meta_data["max_dynamic_patch"]
+        self.image_size = model_cfg.vision_config.image_size[0]
+        self.patch_size = model_cfg.vision_config.patch_size[0]
+        if max_dynamic_patch is not None:
+            max_num = max_dynamic_patch
         else:
             max_num = model_cfg.max_dynamic_patch
-        if "min_dynamic_patch" in meta_data:
-            min_num = meta_data["min_dynamic_patch"]
+        if min_dynamic_patch is not None:
+            min_num = min_dynamic_patch
         else:
             min_num = model_cfg.min_dynamic_patch
         self.max_dynamic_patch = max_num
         self.min_dynamic_patch = min_num
-        if "min_num_frames" in meta_data:
-            self.min_num_frames = meta_data["min_num_frames"]
-        else:
-            self.min_num_frames = min_num_frames
-        if "max_num_frames" in meta_data:
-            self.max_num_frames = meta_data["max_num_frames"]
-        else:
-            self.max_num_frames = max_num_frames
+        self.min_num_frames = min_num_frames
+        self.max_num_frames = max_num_frames
+
         self.dynamic_image_size = model_cfg.dynamic_image_size
         self.use_thumbnail = model_cfg.use_thumbnail
-        self.data_name = os.path.basename(meta_data["annotation"])
-        self.data_augment = meta_data.get("data_augment", False)
+        self.data_name = anno_name
+        self.data_augment = data_augment
         logger.info(
             f"[{self.data_name}] Using dynamic image size: {self.dynamic_image_size} and "
             f"max_dynamic_patch: {max_num} and min_dynamic_patch: {min_num} and "
             f"use_thumbnail: {self.use_thumbnail} data_aug: {self.data_augment} for training."
         )
         self.downsample_ratio = model_cfg.downsample_ratio
-        self.num_image_token = int((self.image_size // self.patch_size) ** 2 * (self.downsample_ratio**2))
-        self.system_message = meta_data.get("system_message", None)
+        self.num_image_token = int((self.image_size // self.patch_size) ** 2 * (self.downsample_ratio ** 2))
+        self.system_message = system_message
 
-        self._hash_str = (
-            json.dumps(meta_data, ensure_ascii=False) + f"{self.min_num_frames}" + f"{self.max_num_frames}"
-        )
-
-    def _prepare_multi_modal_get_item(self, data_item):
-        # Judge if there is system prompt
-        if data_item["conversations"][0]["from"] == "system":
-            i = 1
-            conversation_len = len(data_item["conversations"])
-            # Ensure the human contains an image placeholder, Just consider one round of conversation.
-            if conversation_len == 3 and "<image>" not in data_item["conversations"][i]["value"]:
-                data_item["conversations"][i]["value"] = "<image>\n" + data_item["conversations"][i]["value"]
-
-        elif data_item["conversations"][0]["from"] == "human":
-            i = 0
-            conversation_len = len(data_item["conversations"])
-            # Ensure the human contains an image placeholder, Just consider one round of conversation.
-            if conversation_len == 2 and "<image>" not in data_item["conversations"][i]["value"]:
-                data_item["conversations"][i]["value"] = "<image>\n" + data_item["conversations"][i]["value"]
-
-        if "system_message" in data_item:
-            system_message = data_item["system_message"]
-        elif self.system_message is not None:
-            system_message = self.system_message
-        else:
-            system_message = None
-
-        return data_item, system_message
+        # Note: 比较重要，防止改了参数但是没有重新 cache
+        self._hash_str = f'{self.downsample_ratio}_{self.num_image_token}_{self.system_message}_{self.use_thumbnail}' \
+                         f'_{self.dynamic_image_size}_{self.max_num_frames}_{self.min_num_frames}' \
+                         f'_{self.min_dynamic_patch}_{self.max_dynamic_patch}'
 
     def calc_num_tokens_multi_modal_get_item(self, data_item):
-        data_item, system_message = self._prepare_multi_modal_get_item(data_item)
+        if "system_message" in data_item:
+            system_message = data_item["system_message"]
+        else:
+            system_message = self.system_message
         try:
             assert "image_wh" in data_item, "image must have `hw` attribute when packing data"
             image_size = data_item["image_wh"]
@@ -162,8 +137,7 @@ class InternVLTokenizeFunction(CachableTokenizeFunction):
             num_patches = 1
 
         try:
-            ret = preprocess_internvl(
-                self.template_name,
+            ret = preprocess_interns1(
                 [deepcopy(data_item["conversations"])],
                 self.tokenizer,
                 [self.num_image_token * num_patches],
@@ -171,7 +145,7 @@ class InternVLTokenizeFunction(CachableTokenizeFunction):
                 prompt_only=self.only_prompt,
                 system_prompt=system_message,
             )
-            return {"num_tokens": len(ret["input_ids"][0])}
+            return {"num_tokens": len(ret["input_ids"])}
         except Exception as e:
             print(
                 f"ERROR of Preprocess function: {e}, data_name: {self.data_name}, "
@@ -179,14 +153,17 @@ class InternVLTokenizeFunction(CachableTokenizeFunction):
             )
             return {"num_tokens": 0}
 
-    def multi_modal_get_item(self, data_item):
-        data_item, system_message = self._prepare_multi_modal_get_item(data_item)
+    def multi_modal_get_item(self, data_item, media_root) -> InternS1DataItem:
+        if "system_message" in data_item:
+            system_message = data_item["system_message"]
+        else:
+            system_message = self.system_message
 
         image_path = data_item["image"]
         if isinstance(image_path, list):
             image_path = image_path[0]
 
-        image_path = self._get_image_path(image_path)
+        image_path = self._get_image_path(image_path, media_root)
         image = self._load_image(image_path)
         image = apply_exif_orientation(image)
 
@@ -211,17 +188,16 @@ class InternVLTokenizeFunction(CachableTokenizeFunction):
 
         transform = self._get_transform()
         # Apply the transformation to each image and stack the results into a tensor
-        pixel_values = [transform(image) for image in images]
-        pixel_values = torch.stack(pixel_values)
+        pixel_values_list = [transform(image) for image in images]
+        pixel_values = torch.stack(pixel_values_list)  # type: ignore
 
         # Ensure that there is only one patch if dynamic image size is not enabled
-        num_patches = pixel_values.size(0)
+        num_patches = pixel_values.size(0)  # type: ignore
         if not self.dynamic_image_size:
             assert num_patches == 1, f"The number of patches should be 1, but got {num_patches}."
 
         # Preprocess the conversations and generate the return dictionary
-        ret = preprocess_internvl(
-            self.template_name,
+        process_result = preprocess_interns1(
             [deepcopy(data_item["conversations"])],
             self.tokenizer,
             [self.num_image_token * num_patches],
@@ -229,13 +205,12 @@ class InternVLTokenizeFunction(CachableTokenizeFunction):
             prompt_only=self.only_prompt,
             system_prompt=system_message,
         )
-
-        ret = dict(
-            input_ids=ret["input_ids"][0],
-            labels=ret["labels"][0],
-            pixel_values=pixel_values,
+        ret = InternS1DataItem(
+            input_ids=process_result["input_ids"],  # ()
+            labels=process_result["labels"],
+            pixel_values=pixel_values,  # (b,c,h,w)
             image_flags=torch.tensor([1] * num_patches, dtype=torch.long),
-            num_tokens=len(ret["input_ids"][0]),
+            num_tokens=len(process_result["input_ids"]),
             num_img_tokens=[self.num_image_token * num_patches],
             num_imgs=[1],
             num_patches=[num_patches],
@@ -245,17 +220,14 @@ class InternVLTokenizeFunction(CachableTokenizeFunction):
     def calc_num_tokens_pure_text_get_item(self, data_item):
         if "system_message" in data_item:
             system_message = data_item["system_message"]
-        elif self.system_message is not None:
-            system_message = self.system_message
         else:
-            system_message = None
+            system_message = self.system_message
 
         # TODO: After unifying the data format used for RL, the condition can be removed,
         if self.only_prompt:
             return {"num_tokens": -1}
         try:
-            ret = preprocess_internvl(
-                self.template_name,
+            ret = preprocess_interns1(
                 [deepcopy(data_item["conversations"])],
                 self.tokenizer,
                 [0],
@@ -265,18 +237,16 @@ class InternVLTokenizeFunction(CachableTokenizeFunction):
                 system_prompt=system_message,
             )
 
-            return {"num_tokens": len(ret["input_ids"][0])}
+            return {"num_tokens": len(ret["input_ids"])}
         except Exception as e:
             print(f"ERROR of Preprocess function: {e}, data_name: {self.data_name}")
             return {"num_tokens": 0}
 
-    def pure_text_get_item(self, data_item):
+    def pure_text_get_item(self, data_item) -> InternS1DataItem:
         if "system_message" in data_item:
             system_message = data_item["system_message"]
-        elif self.system_message is not None:
-            system_message = self.system_message
         else:
-            system_message = None
+            system_message = self.system_message
 
         # Build transformation function
         transform = self._get_transform()
@@ -294,16 +264,15 @@ class InternVLTokenizeFunction(CachableTokenizeFunction):
         )
 
         # Apply the transformation to each image patch and stack them into a tensor
-        pixel_values = [transform(image) for image in images]
-        pixel_values = torch.stack(pixel_values)
+        pixel_values_list = [transform(image) for image in images]
+        pixel_values = torch.stack(pixel_values_list)
         num_patches = pixel_values.size(0)
 
         # Ensure there is only one patch
         assert num_patches == 1, f"The number of patches should be 1, but got {num_patches}."
 
         # Preprocess the conversations and generate the return dictionary
-        ret = preprocess_internvl(
-            self.template_name,
+        process_result = preprocess_interns1(
             [deepcopy(data_item["conversations"])],
             self.tokenizer,
             [0],
@@ -313,12 +282,12 @@ class InternVLTokenizeFunction(CachableTokenizeFunction):
             system_prompt=system_message,
         )
 
-        ret = dict(
-            input_ids=ret["input_ids"][0],
-            labels=ret["labels"][0],
+        ret = InternS1DataItem(
+            input_ids=process_result["input_ids"],
+            labels=process_result["labels"],
             pixel_values=pixel_values,
             image_flags=torch.tensor([0] * num_patches, dtype=torch.long),
-            num_tokens=len(ret["input_ids"][0]),
+            num_tokens=len(process_result["input_ids"]),
             num_img_tokens=[0],
             num_imgs=[0],
             num_patches=[num_patches],
@@ -330,10 +299,8 @@ class InternVLTokenizeFunction(CachableTokenizeFunction):
 
         if "system_message" in data_item:
             system_message = data_item["system_message"]
-        elif self.system_message is not None:
-            system_message = self.system_message
         else:
-            system_message = None
+            system_message = self.system_message
 
         if self.only_prompt:
             return {"num_tokens": -1}
@@ -367,8 +334,7 @@ class InternVLTokenizeFunction(CachableTokenizeFunction):
 
         num_image_tokens = [self.num_image_token * num_tile for num_tile in num_tiles]
         try:
-            ret = preprocess_internvl(
-                self.template_name,
+            ret = preprocess_interns1(
                 [deepcopy(data_item["conversations"])],
                 self.tokenizer,
                 num_image_tokens,
@@ -378,20 +344,18 @@ class InternVLTokenizeFunction(CachableTokenizeFunction):
                 system_prompt=system_message,
             )
 
-            return {"num_tokens": len(ret["input_ids"][0])}
+            return {"num_tokens": len(ret["input_ids"])}
         except Exception as e:
             print(f"ERROR of Preprocess function: {e}, data_name: {self.data_name}")
             return {"num_tokens": 0}
 
-    def multi_modal_multi_image_get_item(self, data_item):
+    def multi_modal_multi_image_get_item(self, data_item, media_root) -> InternS1DataItem:
         image_path = data_item["image"]
 
         if "system_message" in data_item:
             system_message = data_item["system_message"]
-        elif self.system_message is not None:
-            system_message = self.system_message
         else:
-            system_message = None
+            system_message = self.system_message
 
         image_sizes = data_item.get("image_wh", None)
         if image_sizes:
@@ -404,7 +368,7 @@ class InternVLTokenizeFunction(CachableTokenizeFunction):
         num_tiles = []
         images = []
         for i, image_path_ in enumerate(image_path):
-            image_path_ = self._get_image_path(image_path_)
+            image_path_ = self._get_image_path(image_path_, media_root)
             image = self._load_image(image_path_)
             image = apply_exif_orientation(image)
 
@@ -429,14 +393,13 @@ class InternVLTokenizeFunction(CachableTokenizeFunction):
                 num_tiles.append(1)
 
         transform = self._get_transform()
-        pixel_values = [transform(image) for image in images]
-        pixel_values = torch.stack(pixel_values)
+        pixel_values_list = [transform(image) for image in images]
+        pixel_values = torch.stack(pixel_values_list)
         num_patches = pixel_values.size(0)
 
         # Preprocess the conversations and generate the return dictionary
         num_image_tokens = [self.num_image_token * num_tile for num_tile in num_tiles]
-        ret = preprocess_internvl(
-            self.template_name,
+        process_result = preprocess_interns1(
             [deepcopy(data_item["conversations"])],
             self.tokenizer,
             num_image_tokens,
@@ -446,12 +409,12 @@ class InternVLTokenizeFunction(CachableTokenizeFunction):
             system_prompt=system_message,
         )
 
-        ret = dict(
-            input_ids=ret["input_ids"][0],
-            labels=ret["labels"][0],
+        ret = InternS1DataItem(
+            input_ids=process_result["input_ids"],
+            labels=process_result["labels"],
             pixel_values=pixel_values,
             image_flags=torch.tensor([1] * num_patches, dtype=torch.long),
-            num_tokens=len(ret["input_ids"][0]),
+            num_tokens=len(process_result["input_ids"]),
             num_img_tokens=num_image_tokens,
             num_imgs=[len(image_path)],
             num_patches=[num_patches],
@@ -459,48 +422,14 @@ class InternVLTokenizeFunction(CachableTokenizeFunction):
         return ret
 
     def _prepare_video_get_item(self, data_item):
-        # Judge if there is system prompt
-        i = 0
-        if data_item["conversations"][0]["from"] == "system":
-            i = 1
-            conversation_len = len(data_item["conversations"])
-            # Ensure the human contains an video placeholder, Just consider one round of conversation.
-            if conversation_len == 3:
-                if "<video>" not in data_item["conversations"][i]["value"]:
-                    data_item["conversations"][i]["value"] = "<video>\n" + data_item["conversations"][i]["value"]
-                if (
-                    "<video>" in data_item["conversations"][i]["value"]
-                    and "<video>\n" not in data_item["conversations"][i]["value"]
-                ):
-                    data_item["conversations"][i]["value"] = data_item["conversations"][i]["value"].replace(
-                        "<video>", "<video>\n"
-                    )
-
-        elif data_item["conversations"][0]["from"] == "human":
-            i = 0
-            conversation_len = len(data_item["conversations"])
-            # Ensure the human contains an video placeholder, Just consider one round of conversation.
-            if conversation_len == 2:
-                if "<video>" not in data_item["conversations"][i]["value"]:
-                    data_item["conversations"][i]["value"] = "<video>\n" + data_item["conversations"][i]["value"]
-                if (
-                    "<video>" in data_item["conversations"][i]["value"]
-                    and "<video>\n" not in data_item["conversations"][i]["value"]
-                ):
-                    data_item["conversations"][i]["value"] = data_item["conversations"][i]["value"].replace(
-                        "<video>", "<video>\n"
-                    )
-
         if "system_message" in data_item:
             system_message = data_item["system_message"]
-        elif self.system_message is not None:
-            system_message = self.system_message
         else:
-            system_message = None
+            system_message = self.system_message
 
         random_frame_num = generate_random_int_from_dict(data_item, self.min_num_frames, self.max_num_frames)
 
-        return data_item, system_message, random_frame_num, i
+        return data_item, system_message, random_frame_num
 
     def calc_num_tokens_video_get_item(self, data_item):
         # TODO: After unifying the data format used for RL, the condition can be removed,
@@ -508,18 +437,17 @@ class InternVLTokenizeFunction(CachableTokenizeFunction):
         if self.only_prompt:
             return {"num_tokens": -1}
 
-        data_item, system_message, n_frames, index = self._prepare_video_get_item(data_item)
+        data_item, system_message, n_frames = self._prepare_video_get_item(data_item)
 
         special_tokens = "\n".join([f"Frame-{frame_idx + 1}: <image>" for frame_idx in range(n_frames)])
-        data_item["conversations"][index]["value"] = data_item["conversations"][index]["value"].replace(
+        data_item["conversations"][0]["value"] = data_item["conversations"][0]["value"].replace(
             "<video>\n", special_tokens + "\n"
         )
 
         num_tiles = [1] * n_frames
         num_image_tokens = [self.num_image_token * num_tile for num_tile in num_tiles]
         try:
-            ret = preprocess_internvl(
-                self.template_name,
+            ret = preprocess_interns1(
                 [deepcopy(data_item["conversations"])],
                 self.tokenizer,
                 num_image_tokens,
@@ -528,17 +456,17 @@ class InternVLTokenizeFunction(CachableTokenizeFunction):
                 prompt_only=self.only_prompt,
                 system_prompt=system_message,
             )
-            return {"num_tokens": len(ret["input_ids"][0])}
+            return {"num_tokens": len(ret["input_ids"])}
         except Exception as e:
             print(f"ERROR of Preprocess function: {e}, data_name: {self.data_name}")
             return {"num_tokens": 0}
 
-    def video_get_item(self, data_item):
-        data_item, system_message, random_frame_num, index = self._prepare_video_get_item(data_item)
+    def video_get_item(self, data_item, media_root) -> InternS1DataItem:
+        data_item, system_message, random_frame_num = self._prepare_video_get_item(data_item)
 
         # Get the video file path
         video_file = data_item["video"]
-        video_path = os.path.join(self.root, video_file)
+        video_path = os.path.join(media_root, video_file)
 
         assert self.tcs_loader is not None, "TCSLoader must be provided for video loading."
 
@@ -557,19 +485,18 @@ class InternVLTokenizeFunction(CachableTokenizeFunction):
         )
 
         special_tokens = "\n".join([f"Frame-{frame_idx + 1}: <image>" for frame_idx in range(len(image_list))])
-        data_item["conversations"][index]["value"] = data_item["conversations"][index]["value"].replace(
+        data_item["conversations"][0]["value"] = data_item["conversations"][0]["value"].replace(
             "<video>\n", special_tokens + "\n"
         )
 
         # Transform each frame image and stack them into a tensor
         transform = self._get_transform()
-        pixel_values = [transform(image) for image in image_list]
-        pixel_values = torch.stack(pixel_values)
+        pixel_values_list = [transform(image) for image in image_list]
+        pixel_values = torch.stack(pixel_values_list)
         num_patches = pixel_values.size(0)
 
         num_image_tokens = [self.num_image_token] * num_patches
-        ret = preprocess_internvl(
-            self.template_name,
+        process_result = preprocess_interns1(
             [deepcopy(data_item["conversations"])],
             self.tokenizer,
             num_image_tokens,
@@ -579,12 +506,12 @@ class InternVLTokenizeFunction(CachableTokenizeFunction):
             system_prompt=system_message,
         )
 
-        ret = dict(
-            input_ids=ret["input_ids"][0],
-            labels=ret["labels"][0],
+        ret = InternS1DataItem(
+            input_ids=process_result["input_ids"],
+            labels=process_result["labels"],
             pixel_values=pixel_values,
             image_flags=torch.tensor([1] * num_patches, dtype=torch.long),
-            num_tokens=[len(ret["input_ids"][0])],
+            num_tokens=len(process_result["input_ids"]),
             num_img_tokens=num_image_tokens,
             num_imgs=[num_patches],
             num_patches=[num_patches],
@@ -597,39 +524,38 @@ class InternVLTokenizeFunction(CachableTokenizeFunction):
             return self.tcs_loader(image_path)
         return Image.open(image_path).convert("RGB")
 
-    def _get_image_path(self, image_path):
+    def _get_image_path(self, image_path, media_root):
         if image_path.startswith("s3://"):  # for ceph
-            image_path = self.root + image_path
+            image_path = media_root + image_path
         else:  # for local image
-            image_path = os.path.join(self.root, image_path)
+            image_path = os.path.join(media_root, image_path)
         return image_path
 
     def _get_transform(self):
-        # Build transformation function
         transform = build_transform(
             is_train=self.data_augment, input_size=self.image_size, pad2square=False, normalize_type="imagenet"
         )
         return transform
 
-    def __call__(self, item: Any) -> DataItem:
+    def __call__(self, item: Any, media_root: str = '') -> InternS1DataItem:  # type: ignore[override]
         if "image" in item and item["image"] is not None and item["image"] != "":
             if type(item["image"]) is list and len(item["image"]) > 1:
-                if self.tokenizer.state == "cache":
+                if self.state == "cache":
                     ret = self.calc_num_tokens_multi_modal_multi_image_get_item(item)
                 else:
-                    ret = self.multi_modal_multi_image_get_item(item)
+                    ret = self.multi_modal_multi_image_get_item(item, media_root)
             else:
-                if self.tokenizer.state == "cache":
+                if self.state == "cache":
                     ret = self.calc_num_tokens_multi_modal_get_item(item)
                 else:
-                    ret = self.multi_modal_get_item(item)
+                    ret = self.multi_modal_get_item(item, media_root)
         elif "video" in item and item["video"] is not None and item["video"] != "":
-            if self.tokenizer.state == "cache":
+            if self.state == "cache":
                 ret = self.calc_num_tokens_video_get_item(item)
             else:
-                ret = self.video_get_item(item)
+                ret = self.video_get_item(item, media_root)
         else:
-            if self.tokenizer.state == "cache":
+            if self.state == "cache":
                 ret = self.calc_num_tokens_pure_text_get_item(item)
             else:
                 ret = self.pure_text_get_item(item)
@@ -646,7 +572,38 @@ class InternVLTokenizeFunction(CachableTokenizeFunction):
             self._hash = f"{_tokenizer_hash}_{_init_hash}"
         else:
             assert isinstance(self._hash, str), (
-                "hash is not a valid string, it means `InternVLTokenizeFunction._hash` is modified by user."
+                "hash is not a valid string, it means `InternS1TokenizeFunction._hash` is modified by user."
             )
 
         return self._hash
+
+
+class InternS1TokenizeFnConfig(BaseModel):
+    model_config = ConfigDict(title="Base dataset config for xtuner", extra="allow")
+    model_cfg: InternS1Config
+    max_dynamic_patch: int | None = None
+    min_dynamic_patch: int | None = None
+    min_num_frames: int = 4
+    max_num_frames: int = 24
+    data_augment: bool = False
+    system_message: str | None = None
+    hash: str | None = None
+
+    def build(
+        self, tokenizer, tokenizer_hash: str | None = None, anno_name: str = "", **kwargs
+    ) -> "InternS1TokenizeFunction":
+        from xtuner.v1.datasets import InternS1TokenizeFunction
+
+        return InternS1TokenizeFunction(
+            tokenizer,
+            self.model_cfg,
+            anno_name,
+            tokenizer_hash=tokenizer_hash,
+            max_dynamic_patch=self.max_dynamic_patch,
+            min_dynamic_patch=self.min_dynamic_patch,
+            data_augment=self.data_augment,
+            system_message=self.system_message,
+            min_num_frames=self.min_num_frames,
+            max_num_frames=self.max_num_frames,
+            hash=self.hash,
+        )

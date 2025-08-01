@@ -1,12 +1,15 @@
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Optional, Protocol, TypedDict, runtime_checkable
+from typing import TYPE_CHECKING, Annotated, Literal, Optional, Protocol, TypedDict, runtime_checkable
 
 from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict, TypeAdapter
 
 
 if TYPE_CHECKING:
-    from xtuner.v1.datasets import CachableTokenizeFunction, FtdpTokenizeFunction, JsonlDataset
+    from xtuner.v1.datasets import (
+        CachableTokenizeFunction,
+        JsonlDataset,
+    )
 
 
 class DatasetConfig(BaseModel):
@@ -15,7 +18,7 @@ class DatasetConfig(BaseModel):
     class_name: Annotated[str, Parameter(group="dataset")] = "JsonlDataset"
     name: Annotated[str, Parameter(group="dataset")] = "default"
     sample_ratio: Annotated[float, Parameter(group="dataset")] = 1.0
-    media_root: Annotated[str | None, Parameter(group="dataset")] = None
+    media_root: Annotated[str, Parameter(group="dataset")] = ""
 
     def build(
         self,
@@ -36,33 +39,35 @@ class DatasetConfig(BaseModel):
                 cache_dir=cache_dir,
                 cache_tag=cache_tag,
             )
+        elif self.class_name == "VLMJsonlDataset":
+            from xtuner.v1.datasets import VLMJsonlDataset
+
+            return VLMJsonlDataset(
+                tokenize_fn=tokenize_fn,
+                anno_path=self.anno_path,
+                sample_ratio=self.sample_ratio,
+                name=self.name,
+                media_root=self.media_root,
+                max_length=max_length,
+                cache_dir=cache_dir,
+                cache_tag=cache_tag,
+            )
         else:
-            raise NotImplementedError
+            raise ValueError(f"Unsupported class_name: {self.class_name}")
 
 
 @runtime_checkable
 class BaseTokenizeFnConfig(Protocol):
-    def build(self, tokenizer, tokenizer_hash: str | None = None, **kwargs) -> "CachableTokenizeFunction":
+    def build(
+        self, tokenizer, tokenizer_hash: str | None = None, anno_name: str | None = None, **kwargs
+    ) -> "CachableTokenizeFunction":
         """Build the tokenize function."""
         raise NotImplementedError
 
 
-# TODO: Maybe rename
-class FTDPTokenizeFnConfig(BaseModel):
-    model_config = ConfigDict(title="Base dataset config for xtuner", extra="allow")
-    chat_template: Annotated[str, Parameter(group="tokenize_fn")] = "internlm2"
-    hash: Annotated[str | None, Parameter(group="tokenize_fn")] = None
-
-    def build(self, tokenizer, tokenizer_hash: str | None = None, **kwargs) -> "FtdpTokenizeFunction":
-        from xtuner.v1.datasets import FtdpTokenizeFunction
-
-        return FtdpTokenizeFunction(
-            tokenizer, chat_template=self.chat_template, hash=self.hash, tokenizer_hash=tokenizer_hash
-        )
-
-
 class DataloaderConfig(BaseModel):
     model_config = ConfigDict(title="Base dataloader config for xtuner", extra="allow")
+    collator: Literal["sft_llm_collator", "sft_vllm_collator"] = "sft_llm_collator"
     pack_level: Annotated[str, Parameter()] = "soft"
     pack_max_length: Annotated[int, Parameter()] = 32768
     max_length: Annotated[int, Parameter()] = 4096
@@ -78,6 +83,16 @@ class DataloaderConfig(BaseModel):
         assert self.pack_max_length >= self.max_length, (
             f"pack_max_length {self.pack_max_length} must be larger than max_length {self.max_length}"
         )
+
+    def build_collator(self):
+        from xtuner.v1.datasets import sft_llm_collator, sft_vllm_collator
+
+        if self.collator == "sft_llm_collator":
+            return sft_llm_collator
+        elif self.collator == "sft_vllm_collator":
+            return sft_vllm_collator
+        else:
+            raise ValueError(f"Unsupported collator: {self.collator}")
 
 
 class DatasetCombine(TypedDict):

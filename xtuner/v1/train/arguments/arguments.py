@@ -10,7 +10,8 @@ from pydantic import BaseModel, ConfigDict
 from transformers import AutoConfig
 from xtuner.v1.config import FSDPConfig, TrainerConfig
 from xtuner.v1.config.base_model import TransformerConfig
-from xtuner.v1.config.data import DataloaderConfig, DatasetConfig, DatasetConfigList, FTDPTokenizeFnConfig
+from xtuner.v1.config.data import DataloaderConfig, DatasetConfig, DatasetConfigList
+from xtuner.v1.datasets import FTDPTokenizeFnConfig
 from xtuner.v1.config.optim import AdamWConfig, LRConfig
 from xtuner.v1.model import get_model_config, get_model_config_from_hf
 from xtuner.v1.utils import Config, get_logger

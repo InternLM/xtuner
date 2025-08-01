@@ -1,8 +1,9 @@
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 from pydantic import BaseModel, ConfigDict
 
 from xtuner.v1.config.base_model import MoEConfig
+from xtuner.v1.config.float8 import Float8Config
 
 
 if TYPE_CHECKING:
@@ -37,6 +38,24 @@ class InternS1VisionConfig(BaseModel):
     use_absolute_position_embeddings: bool = True
     use_mask_token: bool = False
     use_mean_pooling: bool = True
+    float8_cfg: Optional["Float8Config"] = None
+
+    def build(self):
+        from xtuner.v1.model.interns1.modeling_vision import InternS1VisionModel
+
+        return InternS1VisionModel(self)
+
+
+class InternS1ProjectorConfig(BaseModel):
+    vision_hidden_size: int = 1024
+    text_hidden_size: int = 4096
+    downsample_ratio: float = 0.5
+    float8_cfg: Optional["Float8Config"] = None
+
+    def build(self):
+        from xtuner.v1.model.interns1.modeling_projector import InternS1MultiModalProjector
+
+        return InternS1MultiModalProjector(self)
 
 
 class InternS1Config(BaseModel):
@@ -45,6 +64,7 @@ class InternS1Config(BaseModel):
         extra="allow",
     )
     vision_config: InternS1VisionConfig
+    projector_config: InternS1ProjectorConfig
     text_config: MoEConfig
     vision_feature_layer: int = -1
     downsample_ratio: float = 0.5

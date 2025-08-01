@@ -22,6 +22,7 @@ from xtuner.v1.datasets.build import build_dataloader, build_datasets
 from xtuner.v1.engine.utils import cal_global_grad_tokens
 from xtuner.v1.loss import CELossContext
 from xtuner.v1.model.base import ModelItem
+from xtuner.v1.model.interns1 import InternS1Config
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, ParallelConfigException, get_logger, log_format
 
 
@@ -70,7 +71,7 @@ class Trainer:
             f"`epoch_num`: {epoch_num}, `total_step`: {total_step} should not be set at the same time"
         )
 
-        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
 
         if fsdp_cfg is None:
             fsdp_cfg = FSDPConfig()
@@ -333,11 +334,18 @@ class Trainer:
         resume_config: ResumeConfig | None = None,
         strict: bool = True,
     ):
-        from xtuner.v1.engine import MoETrainEngine
+        from xtuner.v1.engine import InternS1TrainEngine, MoETrainEngine
 
         # TODO: yehaochen
         if isinstance(model_config, MoEConfig):
             engine = MoETrainEngine(
+                optim_cfg=optim_config,
+                fsdp_cfg=fsdp_config,
+                model_cfg=model_config,
+            )
+        # TODO: 太 hard code 了
+        elif isinstance(model_config, InternS1Config):
+            engine = InternS1TrainEngine(
                 optim_cfg=optim_config,
                 fsdp_cfg=fsdp_config,
                 model_cfg=model_config,
@@ -363,7 +371,6 @@ class Trainer:
         # TODO: Support resume
         # 1. load dataloader state
         # 2. set cur step
-        # TODO(hha): 如何传入 model_cfg 到 dataset 中
         datasets = build_datasets(dataset_config, tokenizer)
         return build_dataloader(
             dataloader_config=dataloader_config,

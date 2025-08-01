@@ -3,11 +3,6 @@ from typing import cast
 
 from transformers import AutoConfig
 from transformers.models.qwen3_moe import Qwen3MoeConfig
-from xtuner.v1.config import InternS1Config
-from xtuner.v1.config.base_model import (
-    MoEConfig,
-    TransformerConfig,
-)
 from xtuner.v1.config.loss import BalancingLossConfig
 from xtuner.v1.module.attention import MHAConfig
 from xtuner.v1.module.router.greedy import GreedyRouterConfig

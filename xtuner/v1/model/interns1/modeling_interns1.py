@@ -12,9 +12,11 @@ from xtuner.v1.ops.comm import split_for_sequence_parallel
 from xtuner.v1.utils import get_logger, get_padding_length, get_device
 from xtuner.v1.model import BaseModel
 
-from .modeling_vision import InternS1VisionModel, InternS1MultiModalProjector, init_world_mesh
+from .modeling_vision import InternS1VisionModel, init_world_mesh
+from .modeling_projector import InternS1MultiModalProjector
 from typing_extensions import override
-from xtuner.v1.config import FSDPConfig, InternS1Config
+from xtuner.v1.config import FSDPConfig
+from .interns1_config import InternS1Config
 from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.loss import CELossContext
 from torch.distributed.fsdp import (
@@ -22,6 +24,10 @@ from torch.distributed.fsdp import (
     MixedPrecisionPolicy,
     fully_shard,
 )
+from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
+    checkpoint_wrapper as ptd_checkpoint_wrapper,
+)
+from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl
 
 DEVICE = get_device()
 logger = get_logger()
@@ -76,14 +82,16 @@ class InternS1ForConditionalGeneration(BaseModel):
             fsdp_config: FSDPConfig,
             float8_handler: Float8Handler | None = None,
     ):
-        self.language_model.fully_shard(fsdp_config, float8_handler=float8_handler)
-        self.vision_tower.fully_shard(fsdp_config, float8_handler=float8_handler)
-        self.multi_modal_projector.fully_shard(fsdp_config, float8_handler=float8_handler)
+        # TODO: 判断其余模块是否已经被 fsdp 切分了
+
+        # NOTE: 暂时只能在这个地方进行 checkpoint_wrapper
+        self.multi_modal_projector = ptd_checkpoint_wrapper(self.multi_modal_projector,  # type: ignore
+                                                            checkpoint_impl=CheckpointImpl.REENTRANT)
 
         mp_policy = MixedPrecisionPolicy(
             param_dtype=fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
         )
-        fsdp_mesh = init_world_mesh(fsdp_config)
+        fsdp_mesh = init_world_mesh()
         fully_shard(
             self,
             mesh=fsdp_mesh,
@@ -102,6 +110,9 @@ class InternS1ForConditionalGeneration(BaseModel):
         if strict:
             if missing:
                 raise RuntimeError(f"Missing parameters from {hf_path}: {list(missing)}. ")
+
+    def scale_and_reduce_grad(self):
+        self.language_model.scale_and_reduce_grad()
 
     def extract_feature(self, pixel_values):
         if self.select_layer == -1:

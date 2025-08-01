@@ -5,7 +5,7 @@ import torch
 from torch.testing._internal.common_distributed import DistributedTestBase
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 
-from xtuner.v1.config import InternS1Config, InternS1VisionConfig
+from xtuner.v1.model.interns1 import InternS1Config, InternS1VisionConfig, InternS1ProjectorConfig
 from xtuner.v1.model.moe.moe import SequenceContext
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
 from xtuner.v1.config import FSDPConfig
@@ -60,10 +60,11 @@ class TestInternS1(DistributedTestBase):
 
         with torch.device("meta"):
             vision_cfg = InternS1VisionConfig()
+            projector_cfg = InternS1ProjectorConfig()
             llm_cfg = Qwen3MoE30BA3Config(vocab_size=152967)
             llm_cfg.dispatcher = dispatcher
             llm_cfg.ep_size = ep_size
-            model_cfg = InternS1Config(vision_config=vision_cfg, text_config=llm_cfg)
+            model_cfg = InternS1Config(vision_config=vision_cfg, text_config=llm_cfg, projector_config=projector_cfg)
             interns1_model = model_cfg.build().to(torch.bfloat16)
 
         seq_ctx = SequenceContext.from_input_ids(input_ids=(input_ids, ))
@@ -123,10 +124,11 @@ class TestInternS1(DistributedTestBase):
 
         with torch.device("meta"):
             vision_cfg = InternS1VisionConfig()
+            projector_cfg = InternS1ProjectorConfig()
             llm_cfg = Qwen3MoE30BA3Config(vocab_size=152967)
             llm_cfg.dispatcher = dispatcher
             llm_cfg.ep_size = ep_size
-            model_cfg = InternS1Config(vision_config=vision_cfg, text_config=llm_cfg)
+            model_cfg = InternS1Config(vision_config=vision_cfg, text_config=llm_cfg, projector_config=projector_cfg)
             interns1_model = model_cfg.build().to(torch.bfloat16)
 
         fsdp_config = FSDPConfig(
@@ -143,7 +145,11 @@ class TestInternS1(DistributedTestBase):
                                                grad_accumulation_steps=1,
                                                global_grad_tokens=global_grad_tokens)
 
+        interns1_model.language_model.fully_shard(fsdp_config=fsdp_config)
+        interns1_model.vision_tower.fully_shard(fsdp_config=fsdp_config)
+        interns1_model.multi_modal_projector.fully_shard(fsdp_config=fsdp_config)
         interns1_model.fully_shard(fsdp_config=fsdp_config)
+
         interns1_model.from_hf(INTERNS1_MOE_PATH)
         interns1_model.eval()  # avoid open drop_path
 

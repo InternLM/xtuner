@@ -13,7 +13,7 @@ from xtuner.v1.config import DatasetConfigList
 from xtuner.v1.utils import get_logger
 
 from ..config.data import DataloaderConfig, DatasetConfig
-from ..datasets.collator import ColateItem, sft_llm_collator
+from ..datasets.collator import ColateItem
 from .packing import ExpandSoftPackDataset, SoftPackDataset
 from .sampler import LengthGroupedSampler, ParallelSampler
 
@@ -25,7 +25,6 @@ logger = get_logger()
 def build_datasets(
     dataset_config: DatasetConfigList,
     tokenizer,
-    model_cfg: dict | None = None,
     max_length: int | None = None,
     cache_dir: str | None = None,
     cache_tag: str | None = None,
@@ -35,9 +34,7 @@ def build_datasets(
     for config in dataset_config:
         _dataset_config = config["dataset"]
         assert isinstance(_dataset_config, DatasetConfig)
-        _tokenize_fn_cfg = config["tokenize_fn"]
-        _tokenize_fn = _tokenize_fn_cfg.build(tokenizer, model_cfg=model_cfg)
-
+        _tokenize_fn_name = config["tokenize_fn"]
         anno_path = _dataset_config.anno_path
         if os.path.isfile(anno_path):
             all_anno_path = [anno_path]
@@ -50,6 +47,8 @@ def build_datasets(
         for anno_path in all_anno_path:
             _dataset_config = copy.deepcopy(_dataset_config)
             _dataset_config.anno_path = anno_path
+            anno_name = os.path.basename(anno_path)  # for debug
+            _tokenize_fn = _tokenize_fn_name.build(tokenizer, anno_name=anno_name)
             _dataset = _dataset_config.build(_tokenize_fn, max_length, cache_dir, cache_tag)
             if get_rank() == 0:
                 logger.info(
@@ -121,7 +120,7 @@ def build_dataloader(
     # not serialization, and is very slow and inefficient.
     # Using forkserver avoids these redundant imports and improves performance.
     collator = partial(
-        sft_llm_collator,
+        dataloader_config.build_collator(),
         max_length=dataloader_config.max_length,
         pack_max_length=dataloader_config.pack_max_length,
         padding_token_idx=dataloader_config.padding_token_idx,
