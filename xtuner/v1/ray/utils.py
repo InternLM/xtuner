@@ -1,5 +1,6 @@
+import importlib
 import socket
-from typing import TYPE_CHECKING, Tuple, cast
+from typing import TYPE_CHECKING, cast
 
 import ray
 import torch
@@ -32,15 +33,38 @@ def get_ray_accelerator() -> "AcceleratorType":
     return cast("AcceleratorType", accelerator)
 
 
+def load_function(path):
+    """Load a function from a module.
+
+    :param path: The path to the function, e.g. "module.submodule.function".
+    :return: The function object.
+    """
+    module_path, _, attr = path.rpartition(".")
+    module = importlib.import_module(module_path)
+    return getattr(module, attr)
+
+
 @ray.remote
-def find_master_addr_and_port() -> Tuple[str, int]:
+def find_master_addr_and_port(nums=1):
     """自动找到一个可用的端口号."""
     addr = ray.util.get_node_ip_address()
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("", 0))  # 绑定到任意可用端口
-        s.listen(1)
-        port = s.getsockname()[1]  # 获取分配的端口号
-    return addr, port
+    ports = []
+    sockets = []
+    try:
+        for _ in range(nums):
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.bind(("", 0))
+            s.listen(1)
+            ports.append(s.getsockname()[1])
+            sockets.append(s)
+    finally:
+        for s in sockets:
+            s.close()
+
+    if len(ports) == 1:
+        return addr, ports[0]
+    else:
+        return addr, ports
 
 
 @ray.remote
