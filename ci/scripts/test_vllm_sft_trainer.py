@@ -5,7 +5,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import torch.distributed as dist
-
+import json
 from xtuner.v1.config import (
     AdamWConfig,
     DataloaderConfig,
@@ -15,16 +15,16 @@ from xtuner.v1.config import (
     BalancingLossConfig,
     ZLossConfig
 )
-from xtuner.v1.datasets import FTDPTokenizeFnConfig
+from xtuner.v1.datasets import InternS1TokenizeFnConfig
+from xtuner.v1.model.interns1 import InternS1Config, InternS1VisionConfig, InternS1ProjectorConfig
 from xtuner.v1.loss import CELossContext
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
 from xtuner.v1.train.trainer import Trainer
 from xtuner.v1.utils.compile import maybe_compile
 import argparse
 
-QWEN3_MOE_PATH = os.environ["QWEN3_MOE_PATH"]
-ALPACA_PATH = os.environ["ALPACA_PATH"]
-
+INTERNS1_MODEL_PATH = os.environ["INTERNS1_MOE_PATH"]
+INTERNS1_DATA_META = os.environ["INTERNS1_DATA_META"]
 
 lr = [
     0.000060,
@@ -143,7 +143,7 @@ tgs = [
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Test SFT Trainer")
+    parser = argparse.ArgumentParser(description="Test VLLM SFT Trainer")
     parser.add_argument(
         "work_dir",
         type=str,
@@ -219,43 +219,62 @@ def main():
     os.environ["DG_CACHE_DIR"] = f"/tmp/.deep_gemm-{os.getenv('RANK', '0')}"
 
     maybe_compile.clear_compile_targets()
+
+    vision_cfg = InternS1VisionConfig()
+    projector_cfg = InternS1ProjectorConfig()
+
+    llm_cfg = Qwen3MoE30BA3Config(vocab_size=152967, balancing_loss_cfg=BalancingLossConfig(), z_loss_cfg=ZLossConfig())
+    model_cfg_1 = InternS1Config(vision_config=vision_cfg, text_config=llm_cfg, projector_config=projector_cfg)
+
+    llm_cfg = Qwen3MoE30BA3Config(vocab_size=152967, balancing_loss_cfg=BalancingLossConfig(),
+                                  z_loss_cfg=ZLossConfig(), ep_size=8, dispatcher="all2all")
+    model_cfg_2 = InternS1Config(vision_config=vision_cfg, text_config=llm_cfg, projector_config=projector_cfg)
+
     moe_cfgs = [
-        (Qwen3MoE30BA3Config(balancing_loss_cfg=BalancingLossConfig(), z_loss_cfg=ZLossConfig()), "ep1"),
-        (Qwen3MoE30BA3Config(ep_size=8, dispatcher="all2all"), "ep8"),
-        # (
-        #     Qwen3MoE30BA3Config(
-        #         ep_size=1,
-        #         float8_cfg=Float8Config(
-        #             scaling_granularity_gemm=ScalingGranularity.TILEWISE,
-        #             scaling_granularity_grouped_gemm=ScalingGranularity.TILEWISE,
-        #     ),
-        #     chunked_loss=False,
-        # ), "fp8"),
+        (model_cfg_1, "ep1"),
+        (model_cfg_2, "ep8"),
     ]
+
+    ds_collections = json.loads(open(INTERNS1_DATA_META).read())
+
     for moe_cfg, name in moe_cfgs:
-        optim_cfg = AdamWConfig(lr=6e-05)
+        optim_cfg = AdamWConfig(lr=6e-05, foreach=False)
         lr_cfg = LRConfig(lr_type="cosine", lr_min=1e-6)
         fsdp_cfg = FSDPConfig(
             torch_compile=False,
-            cpu_offload=False,
-            ep_size=moe_cfg.ep_size,
+            cpu_offload=True,
+            ep_size=moe_cfg.text_config.ep_size,
             # hsdp_sharding_size=4,
         )
-        dataset_config = [
-            {
-                "dataset": DatasetConfig(name="alpaca", anno_path=ALPACA_PATH, sample_ratio=1.0),
-                "tokenize_fn": FTDPTokenizeFnConfig(),
-            },
-        ]
+
+        dataset_config = []
+        for name, _data in ds_collections.items():
+            _data_cfg = {"dataset": DatasetConfig(name=name,
+                                                  anno_path=_data['annotation'],
+                                                  media_root=_data.get('media_root', ''),
+                                                  sample_ratio=_data.get('sample_ratio', 1.0),
+                                                  class_name='VLMJsonlDataset'),
+                         "tokenize_fn": InternS1TokenizeFnConfig(model_cfg=moe_cfg,
+                                                                 max_dynamic_patch=_data.get('max_dynamic_patch', None),
+                                                                 min_dynamic_patch=_data.get('min_dynamic_patch', None),
+                                                                 min_num_frames=_data.get('min_num_frames', 4),
+                                                                 max_num_frames=_data.get('max_num_frames', 24),
+                                                                 data_augment=_data.get('data_augment', False),
+                                                                 system_message=_data.get('system_message', None),
+                                                                 hash=_data.get('hash', None)
+                                                                 )
+                         }
+            dataset_config.append(_data_cfg)
 
         dataloader_config = DataloaderConfig(
-            pack_max_length=16384,
-            max_length=16384,
+            collator="sft_vllm_collator",
+            pack_max_length=8192,
+            max_length=8192,
         )
         work_dir = f"{args.work_dir}-{name}"
         loss_ctx = CELossContext()
         trainer = Trainer(
-            load_from=QWEN3_MOE_PATH,
+            load_from=INTERNS1_MODEL_PATH,
             model_cfg=moe_cfg,
             optim_cfg=optim_cfg,
             fsdp_cfg=fsdp_cfg,
@@ -263,11 +282,11 @@ def main():
             dataloader_cfg=dataloader_config,
             loss_ctx=loss_ctx,
             lr_cfg=lr_cfg,
-            tokenizer_path=QWEN3_MOE_PATH,
+            tokenizer_path=INTERNS1_MODEL_PATH,
             global_batch_size=16,
-            epoch_num=1,
             work_dir=work_dir,
             seed=0,
+            total_step=5,
         )
         trainer.fit()
         if dist.get_rank() == 0:

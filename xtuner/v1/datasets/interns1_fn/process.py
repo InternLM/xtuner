@@ -1,6 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import io
-from typing import Dict
+from typing import Dict, cast, List
 
 import numpy as np
 import torch
@@ -10,8 +10,6 @@ from torchvision.transforms.functional import InterpolationMode
 
 import transformers
 from transformers.trainer_pt_utils import LabelSmoother
-
-from .conversation import get_conv_template
 
 
 IGNORE_TOKEN_ID = LabelSmoother.ignore_index
@@ -112,8 +110,7 @@ def build_transform(is_train, input_size, pad2square=False, normalize_type="imag
     return transform
 
 
-def preprocess_internvl(
-    template_name,
+def preprocess_interns1(
     sources,
     tokenizer: transformers.PreTrainedTokenizer,
     num_image_token_list: list,
@@ -122,7 +119,7 @@ def preprocess_internvl(
     num_image: int = 1,
     prompt_only: bool = False,
     system_prompt: str = None,  # type: ignore
-) -> Dict:
+) -> Dict[str, list[int]]:
     assert len(sources) == 1, "ERROR: process only the first conversations"
     conversations = sources[0]
 
@@ -170,20 +167,15 @@ def preprocess_internvl(
         labels = labels.unsqueeze(0)
 
         return dict(
-            input_ids=input_ids,
-            labels=labels,
-            attention_mask=input_ids.ne(tokenizer.pad_token_id),
+            input_ids=input_ids.tolist(),
+            labels=labels.tolist()
         )
 
     if conversations[0]["from"] == "system":
         system_prompt = conversations[0]["value"]
         conversations = conversations[1:]  # remove system prompt
-    elif system_prompt is not None:
-        system_prompt = system_prompt
     else:
-        conv = get_conv_template(template_name)
-        system_prompt = conv.system_message
-        # system_prompt = None
+        system_prompt = system_prompt
 
     if not text_only:
         new_conversations = []
@@ -228,25 +220,16 @@ def preprocess_internvl(
         batches.append(f"<|im_start|>user\n{conversations[0]['value']}<|im_end|>\n")
         roles.append("human")
 
-    add_bos_token = getattr(tokenizer, "add_bos_token", False)
-    if add_bos_token:  # for InternLM series
-        batches[0] = tokenizer.bos_token + batches[0]
-
-    # Tokenize conversations
     input_ids = tokenizer(
         batches,
         return_tensors="np",
         padding=False,
-        max_length=tokenizer.model_max_length,
         truncation=False,
     ).input_ids
 
-    if add_bos_token:  # for InternLM series
-        input_ids = [item[1:] for item in input_ids]
-
     final_input_ids, final_targets = [], []
     ignore_ids = tokenizer("<|im_start|>assistant\n", return_tensors="np").input_ids[0]
-    ignore_len = ignore_ids.shape[0] - 1 if add_bos_token else ignore_ids.shape[0]
+    ignore_len = ignore_ids.shape[0]
     for role, input_id in zip(roles, input_ids):
         final_input_ids.append(input_id)
         if role == "system" or role == "human" or role == "function":
@@ -259,8 +242,8 @@ def preprocess_internvl(
         else:
             raise ValueError(f"ERROR role: {role}: dataset name: {ds_name}")
 
-    input_ids = torch.tensor(np.concatenate(final_input_ids))
-    targets = torch.tensor(np.concatenate(final_targets))
+    input_ids = np.concatenate(final_input_ids)
+    targets = np.concatenate(final_targets)
 
     if len(input_ids) > tokenizer.model_max_length:
         print(
@@ -276,13 +259,9 @@ def preprocess_internvl(
             f"ERROR: image tokens are truncated, this dataset is {ds_name}"
         )
 
-    input_ids = input_ids.unsqueeze(0)
-    targets = targets.unsqueeze(0)
-
     return dict(
-        input_ids=input_ids,
-        labels=targets,
-        attention_mask=input_ids.ne(0),  # 0 is default pad token
+        input_ids=cast(List[int], input_ids.tolist()),
+        labels=cast(List[int], targets.tolist()),
     )
 
 
@@ -368,48 +347,3 @@ def dynamic_num_patch(size, min_num=1, max_num=6, image_size=448, use_thumbnail=
     if use_thumbnail and blocks > 1:
         blocks += 1
     return blocks
-
-
-def packing_collate(features, pack_batch=True, pad_id=0):
-    input_ids = []
-    labels = []
-    pixel_values = []
-    num_tokens = []
-    num_img_tokens = []
-    image_flags = []
-
-    for data in features:
-        input_ids.append(torch.LongTensor(data["input_ids"]))
-        labels.append(torch.LongTensor(data["labels"]))
-        num_tokens.extend(data["num_tokens"])
-        num_img_tokens.extend(data["num_img_tokens"])
-        pixel_values.append(data["pixel_values"])
-        image_flags.append(data["image_flags"])
-
-    attention_mask = [ids.ne(pad_id) for ids in input_ids]
-    num_tokens = torch.IntTensor(num_tokens)
-    num_img_tokens = torch.IntTensor(num_img_tokens)
-
-    if len(features) > 1 and pack_batch:
-        # batch packing
-        input_ids = torch.cat(input_ids, dim=0).unsqueeze(0)
-        labels = torch.cat(labels, dim=0).unsqueeze(0)
-        attention_mask = torch.cat(attention_mask, dim=0).unsqueeze(0)
-        image_flags = torch.cat(image_flags, dim=0)
-        pixel_values = torch.cat(pixel_values, dim=0)
-    elif len(features) > 1 and not pack_batch:
-        raise NotImplementedError
-    else:
-        raise NotImplementedError
-
-    data_dict = {
-        "input_ids": input_ids,
-        "labels": labels,
-        "attention_mask": attention_mask.bool(),
-        "pixel_values": pixel_values,
-        "image_flags": image_flags,
-        "num_tokens": num_tokens,
-        "num_img_tokens": num_img_tokens,
-    }
-
-    return data_dict

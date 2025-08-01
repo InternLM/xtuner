@@ -2,7 +2,10 @@
 import copy
 import hashlib
 import inspect
-from typing import TYPE_CHECKING, Dict, List, cast
+from typing import TYPE_CHECKING, Annotated, Dict, List, cast
+
+from cyclopts import Parameter
+from pydantic import BaseModel, ConfigDict
 
 from xtuner.utils import IGNORE_INDEX
 from xtuner.v1.datasets.data_item import DataItem
@@ -717,7 +720,7 @@ class FtdpTokenizeFunction(CachableTokenizeFunction):
         self._hash = hash
         self._tokenizer_hash = tokenizer_hash
 
-    def __call__(self, item: dict | list) -> DataItem:
+    def __call__(self, item: dict | list, **kwargs) -> DataItem:
         return ftdp_tokenize(self.tokenizer, item, self.template_config)  # type: ignore[return-value]
 
     def hash(self) -> str:
@@ -748,7 +751,7 @@ class FtdpTokenizedDataMapping(CachableTokenizeFunction):
         self.max_length = max_length
         self._hash = hash
 
-    def __call__(self, item: dict) -> DataItem:
+    def __call__(self, item: dict, **kwargs) -> DataItem:
         item["input_ids"] = item["tokens"]
         del item["tokens"]
         if len(item["input_ids"]) > self.max_length:
@@ -757,7 +760,9 @@ class FtdpTokenizedDataMapping(CachableTokenizeFunction):
         item["input_ids"] = [abs(x) for x in item["input_ids"]]
         item["labels"] = labels
         item["num_tokens"] = len(item["input_ids"])
-        return item  # type: ignore[return-value]
+
+        ret = DataItem(input_ids=item["input_ids"], labels=item["labels"], num_tokens=item["num_tokens"])
+        return ret
 
     def hash(self) -> str:
         if self._hash is None:
@@ -772,3 +777,19 @@ class FtdpTokenizedDataMapping(CachableTokenizeFunction):
             )
 
         return self._hash
+
+
+# TODO: Maybe rename
+class FTDPTokenizeFnConfig(BaseModel):
+    model_config = ConfigDict(title="Base dataset config for xtuner", extra="allow")
+    chat_template: Annotated[str, Parameter(group="tokenize_fn")] = "internlm2"
+    hash: Annotated[str | None, Parameter(group="tokenize_fn")] = None
+
+    def build(
+        self, tokenizer, tokenizer_hash: str | None = None, anno_name: str | None = None, **kwargs
+    ) -> "FtdpTokenizeFunction":
+        from xtuner.v1.datasets import FtdpTokenizeFunction
+
+        return FtdpTokenizeFunction(
+            tokenizer, chat_template=self.chat_template, hash=self.hash, tokenizer_hash=tokenizer_hash
+        )

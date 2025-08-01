@@ -183,6 +183,21 @@ class BaseModel(nn.Module):
     def scale_and_reduce_grad(self):
         return
 
+    def to_hf_key_list(self, key: str) -> list[str]:
+        raise NotImplementedError()
+
+    def trainable_parameters(self):
+        params = [(name, param) for name, param in self.named_parameters() if param.requires_grad]
+        return params
+
+    def fully_shard(
+        self,
+        fsdp_config: FSDPConfig,
+        float8_handler: Float8Handler | None = None,
+    ):
+        """Fully shard the model parameters."""
+        raise NotImplementedError
+
     def _init_load_spec(self) -> None:
         # NOTE: (yehaochen) This is a workaround to distinguish between different parameter HF loading methods
         # and model partitioning methods. Although PyTorch provides Shard, Replicate and other Placements, in
@@ -578,13 +593,6 @@ class BaseModel(nn.Module):
 
         return loaded_keys, unloaded_keys, missing_keys
 
-    def to_hf_key_list(self, key: str) -> list[str]:
-        raise NotImplementedError()
-
-    def trainable_parameters(self):
-        params = [(name, param) for name, param in self.named_parameters() if param.requires_grad]
-        return params
-
     def _is_loaded_param_fp8(self, hf_key: str, checkpoint_loader: HFCheckpointLoader) -> bool:
         hf_key_scale_inv = hf_key + "_scale_inv"
         return checkpoint_loader.is_key_exist(hf_key) and checkpoint_loader.is_key_exist(hf_key_scale_inv)
@@ -801,14 +809,6 @@ class BaseModel(nn.Module):
             if data.is_meta:
                 return True
         return False
-
-    def fully_shard(
-        self,
-        fsdp_config: FSDPConfig,
-        float8_handler: Float8Handler | None = None,
-    ):
-        """Fully shard the model parameters."""
-        raise NotImplementedError
 
     def _fsdp_foreach_allgather(
         self, tensor_list: list[torch.Tensor], load_spec_list: list[LoadSpec]

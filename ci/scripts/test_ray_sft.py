@@ -7,13 +7,13 @@ from xtuner.v1.config import (
     AdamWConfig,
     DataloaderConfig,
     DatasetConfig,
-    FTDPTokenizeFnConfig,
     Float8Config,
     FSDPConfig,
     LRConfig,
     BalancingLossConfig,
     ZLossConfig,
 )
+from xtuner.v1.datasets import FTDPTokenizeFnConfig
 import ray
 from xtuner.v1.ray.train import TrainingWorker
 from xtuner.v1.ray.accelerator import AutoAcceleratorWorkers, AcceleratorResourcesConfig

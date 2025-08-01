@@ -35,12 +35,13 @@ class SequenceContext:
     device: str = "cpu"
     position_ids: torch.LongTensor | None = None
 
-    # internvl
+    # internS1
     image_flags: torch.LongTensor | None = None
 
-    # vlm model
+    # vllm model
     pixel_values: torch.FloatTensor | None = None
     inputs_embeds: torch.FloatTensor | None = None
+    num_img_tokens: list[int] | None = None
 
     def __post_init__(self):
         if self.position_ids is None:

@@ -2,11 +2,10 @@ from torch import nn
 import torch
 from typing import cast, Union, Optional
 import numpy as np
-from pathlib import Path
 
 # TODO: 等 interns1 合入后全部换成 interns1 的实现
 from transformers.models.internvl.modeling_internvl import InternVLVisionRMSNorm, \
-    InternVLVisionEmbeddings, InternVLVisionMLP, NORM2FN, ACT2FN
+    InternVLVisionEmbeddings, InternVLVisionMLP, NORM2FN
 from transformers.modeling_outputs import BaseModelOutput
 
 try:
@@ -19,7 +18,8 @@ from tqdm import tqdm
 from flash_attn import flash_attn_varlen_func
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_device, get_torch_device_module
 from xtuner.v1.model import BaseModel
-from xtuner.v1.config import FSDPConfig, InternS1VisionConfig, InternS1Config
+from xtuner.v1.config import FSDPConfig
+from .interns1_config import InternS1VisionConfig
 from xtuner.v1.float8.float8_handler import Float8Handler
 from torch.distributed.device_mesh import init_device_mesh
 import torch.distributed as dist
@@ -38,8 +38,8 @@ DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
 
 
-def init_world_mesh(fsdp_config: FSDPConfig):
-    device = DEVICE if not fsdp_config.cpu_offload else "cpu"
+def init_world_mesh():
+    device = DEVICE
     world_size = dist.get_world_size()
 
     # TODO: Support hsdp_sharding_size
@@ -252,7 +252,8 @@ class InternS1VisionModel(BaseModel):
         )
         device = "cpu" if fsdp_config.cpu_offload else str(DEVICE)
 
-        self.fsdp_mesh = init_world_mesh(fsdp_config)
+        # NOTE: 在 cpu_offload 模式下，mesh 应该是 cuda 的，在 meta fully_shard 后在调用 .to_empty(device=cpu)
+        self.fsdp_mesh = init_world_mesh()
         assert self.fsdp_mesh is not None
 
         if fsdp_config.requires_grad:
@@ -269,7 +270,6 @@ class InternS1VisionModel(BaseModel):
         num_recompute_layers = int(len(self.encoder.layer) * recompute_ratio)
         for layer_idx in tqdm(list(range(len(self.encoder.layer))), desc="[Vision Fully Shard]"):
             layer = self.encoder.layer[layer_idx]
-            layer.to_empty(device=device)
 
             if layer_idx < num_recompute_layers:
                 layer = ptd_checkpoint_wrapper(layer, checkpoint_impl=CheckpointImpl.REENTRANT)
@@ -285,85 +285,19 @@ class InternS1VisionModel(BaseModel):
                 if fsdp_config.cpu_offload
                 else None,
             )
+            layer.to_empty(device=device)
 
         for layer_cur, layer_next in zip(self.encoder.layer[:-1], self.encoder.layer[1:]):
             layer_cur.set_modules_to_forward_prefetch([layer_next])
 
+        fully_shard(
+            self,
+            mesh=self.fsdp_mesh,
+            mp_policy=mp_policy,
+            reshard_after_forward=True,
+            offload_policy=CPUOffloadPolicy() if fsdp_config.cpu_offload else None,
+        )
         self.embeddings.to_empty(device=device)
         self.layernorm.to_empty(device=device)
 
-        fully_shard(
-            self,
-            mesh=self.fsdp_mesh,
-            mp_policy=mp_policy,
-            reshard_after_forward=True,
-            offload_policy=CPUOffloadPolicy() if fsdp_config.cpu_offload else None,
-        )
-
         return self
-
-
-class InternS1MultiModalProjector(BaseModel):
-    config: InternS1Config
-
-    def __init__(self, config: InternS1Config):
-        super().__init__()
-        self.layer_norm = nn.LayerNorm(config.vision_config.hidden_size * int(1 / config.downsample_ratio) ** 2)
-        self.linear_1 = nn.Linear(
-            config.vision_config.hidden_size * int(1 / config.downsample_ratio) ** 2, config.text_config.hidden_size
-        )
-        self.act = ACT2FN[config.projector_hidden_act]
-        self.linear_2 = nn.Linear(config.text_config.hidden_size, config.text_config.hidden_size)
-
-        self._hf_prefix = "model.multi_modal_projector."
-        self._init_load_spec()
-
-    @maybe_compile(fullgraph=True)
-    def forward(self, image_features):
-        hidden_states = self.layer_norm(image_features)
-        hidden_states = self.linear_1(hidden_states)
-        hidden_states = self.act(hidden_states)
-        hidden_states = self.linear_2(hidden_states)
-        return hidden_states
-
-    def to_hf_key_list(self, key: str) -> list[str]:
-        return [self._hf_prefix + key]
-
-    def fully_shard(
-        self,
-        fsdp_config: FSDPConfig,
-        float8_handler: Float8Handler | None = None,
-    ):
-        assert float8_handler is None
-        self._init_load_spec()
-
-        mp_policy = MixedPrecisionPolicy(
-            param_dtype=fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
-        )
-        device = "cpu" if fsdp_config.cpu_offload else str(DEVICE)
-
-        self.fsdp_mesh = init_world_mesh(fsdp_config)
-        assert self.fsdp_mesh is not None
-
-        # self.checkpoint_wrapped = ptd_checkpoint_wrapper(self, checkpoint_impl=CheckpointImpl.REENTRANT)
-        if fsdp_config.requires_grad:
-            for module in self.modules():
-                for p_name, param in module.named_parameters(recurse=False):
-                    if param.requires_grad:
-                        param_fp32 = torch.nn.Parameter(param.to(dtype=torch.float32))
-                        setattr(module, p_name, param_fp32)
-        else:
-            for param in self.parameters():
-                param.requires_grad = False
-
-        self.to_empty(device=device)
-
-        fully_shard(
-            self,
-            mesh=self.fsdp_mesh,
-            mp_policy=mp_policy,
-            reshard_after_forward=True,
-            offload_policy=CPUOffloadPolicy() if fsdp_config.cpu_offload else None,
-        )
-        return self
-
