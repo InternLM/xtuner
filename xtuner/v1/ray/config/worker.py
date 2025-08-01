@@ -1,40 +1,13 @@
-import os
-from typing import Dict, List, Literal, Optional, Union
+from typing import List, Literal, Optional, Union
 
-from cyclopts import Group, Parameter, validators
+from cyclopts import Group, Parameter
 from pydantic import BaseModel
 from typing_extensions import Annotated
 
 
 worker_group = Group("worker", help="Types of workers available.")
-
-
-if os.getenv("XTUNER_USE_SGLANG", "0") == "1":
-    sglang_group = Group("SGLang", sort_key=100, show=True, help="SGLang worker configuration.")
-else:
-    sglang_group = Group("SGLang", sort_key=100, show=False, help="SGLang worker configuration.")
-
-
-sglang_group = Group("SGLang", sort_key=110, help="SGLang worker configuration.")
-
-
-class SGLangWorkerConfig(BaseModel):
-    """Configuration for the SGLangWorker."""
-
-    model_path: Annotated[str, Parameter(group=sglang_group, help="Path to the SGLang model.")]
-
-
-if os.getenv("XTUNER_USE_SGLANG", "0") == "1":
-    vllm_group = Group("vLLM", sort_key=100, show=True, help="vLLM worker configuration.")
-else:
-    vllm_group = Group("vLLM", sort_key=100, show=False, help="vLLM worker configuration.")
-
-
-class VLLMWorkerConfig(BaseModel):
-    """Configuration for the vLLMWorker."""
-
-
 train_group = Group("Training", sort_key=90, help="Training worker configuration.")
+infer_group = Group("inference", help="Inference worker configuration.")
 
 
 class TrainingWorkerConfig(BaseModel):
@@ -44,107 +17,90 @@ class TrainingWorkerConfig(BaseModel):
     train_model_path: Annotated[str, Parameter(group=train_group, help="Path to the training model.")]
 
 
-if os.getenv("XTUNER_USE_LMDEPLOY", "0") == "1":
-    from lmdeploy import ChatTemplateConfig, PytorchEngineConfig, TurbomindEngineConfig
-
-    lmdeploy_group = Group("LMDeploy", sort_key=100, show=True, help="LMDeploy Worker Configuration.")
-    lmdeploy_pytorch_group = Group(
-        "LMDeploy Pytorch Engine", sort_key=100, show=True, help="LMDeploy PyTorch Engine Configuration."
-    )
-    lmdeploy_turbomind_group = Group(
-        "LMDeploy Turbomind Engine", sort_key=100, show=True, help="LMDeploy TurboMind Engine Configuration."
-    )
-else:
-    ChatTemplateConfig = None
-    PytorchEngineConfig = None
-    TurbomindEngineConfig = None
-    lmdeploy_group = Group("LMDeploy", sort_key=100, show=False, help="LMDeploy Worker Configuration.")
-    lmdeploy_pytorch_group = Group(
-        "LMDeploy Pytorch Engine", sort_key=100, show=False, help="LMDeploy PyTorch Engine Configuration."
-    )
-    lmdeploy_turbomind_group = Group(
-        "LMDeploy Turbomind Engine", sort_key=100, show=False, help="LMDeploy TurboMind Engine Configuration."
-    )
-
-
-# lmdeploy_pytorch_group = Group("lmdeploy pytorch", sort_key=100, help="LMDeploy PyTorch Engine configuration.")
-# lmdeploy_turbomind_group = Group("lmdeploy turbomind", sort_key=100, help="LMDeploy TurboMind Engine configuration.")
-# lmdeploy_backend_group = Group(
-#     "lmdeploy backend", sort_key=100, validator=validators.MutuallyExclusive, help="LMDeploy backend configuration."
-# )
-
-
-class LMDeployBackendConfig(BaseModel):
-    pytorch: Annotated[
-        Optional[PytorchEngineConfig],
-        Parameter(group=lmdeploy_pytorch_group, help="Configuration for the PyTorch backend of the LMDeploy."),
-    ] = None
-    turbomind: Annotated[
-        Optional[TurbomindEngineConfig],
-        Parameter(group=lmdeploy_turbomind_group, help="Configuration for the TurboMind backend of the LMDeploy."),
-    ] = None
-
-
-class LMDeployWorkerConfig(BaseModel):
-    """Configuration for the LMDeploy worker."""
-
-    model_path: Annotated[
-        str, Parameter(group=lmdeploy_group, help="Path to the model to be used in the LMDeploy.")
+class RolloutConfig(BaseModel):
+    # base config
+    env: Annotated[
+        str,
+        Parameter(group=infer_group, help="Environment variables to set for the rollout."),
     ] = ""
-    model_name: Annotated[
-        str, Parameter(group=lmdeploy_group, help="Name of the model to be used in the LMDeploy.")
-    ] = ""
-    backend: Annotated[
-        LMDeployBackendConfig,
-        Parameter(help="Backend to use for the LMDeploy engine, e.g., 'pytorch'"),
-    ]
-
-    # backend_config: Annotated[PytorchEngineConfig | TurbomindEngineConfig | None, Parameter(
-    #     help="Configuration for the LMDeploy backend engine."
-    # )] = None
-    chat_template: Annotated[
-        Optional[ChatTemplateConfig],
-        Parameter(group=lmdeploy_group, help="Configuration for the chat template used in the LMDeploy."),
-    ] = None
-    log_level: Annotated[str, Parameter(group=lmdeploy_group, help="Logging level for the LMDeploy service.")] = "WARN"
+    model_path: Annotated[str, Parameter(group=infer_group, help="Path to the SGLang model.")] = ""
+    model_name: Annotated[str, Parameter(group=infer_group, help="Name of the model to be used in the LMDeploy.")] = ""
+    tokenizer_path: Annotated[str, Parameter(group=infer_group, help="Path to the tokenizer for the model.")] = ""
     api_key: Annotated[
         Optional[Union[List[str], str]],
         Parameter(
-            group=lmdeploy_group, help="API keys for the LMDeploy service. Can be a single key or a list of keys."
+            group=infer_group,
+            help="API keys for the rollout service. Can be a single key or a list of keys.",
         ),
     ] = None
-    max_log_len: Annotated[
-        Optional[int],
-        Parameter(group=lmdeploy_group, help="Max number of prompt characters or prompt tokens being printed in log."),
-    ] = None
-    reasoning_parser: Annotated[Optional[str], Parameter(group=lmdeploy_group, help="The reasoning parser name.")] = (
-        None
-    )
-    tool_call_parser: Annotated[Optional[str], Parameter(group=lmdeploy_group, help="The tool call parser name.")] = (
-        None
-    )
-    server_name: Annotated[str, Parameter(group=lmdeploy_group, help="ip address of the LMDeploy server.")] = "0.0.0.0"
-    server_port: Annotated[int, Parameter(group=lmdeploy_group, help="Port number of the LMDeploy server.")] = 23333
-    env: Annotated[
-        Optional[Dict[str, str]],
-        Parameter(group=lmdeploy_group, help="Environment variables to set for the LMDeploy."),
-    ] = None
+    max_running_requests: Annotated[
+        int,
+        Parameter(group=infer_group, help="Maximum number of requests each inference engine can handle."),
+    ] = 2
+    gpus_per_node: Annotated[int, Parameter(group=infer_group, help="Number of GPUs allocated per node.")] = 8
+    do_sample: Annotated[bool, Parameter(group=infer_group, help="Whether to use sampling.")] = True
+    dtype: Annotated[
+        str,
+        Parameter(group=infer_group, help="Data type for the model, e.g., 'bfloat16', 'float16', 'int8'."),
+    ] = "bfloat16"
+    gpu_memory_utilization: Annotated[
+        float, Parameter(group=infer_group, help="GPU memory utilization for the rollout worker.")
+    ] = 0.6
+    random_seed: Annotated[int, Parameter(group=infer_group, help="Random seed for the rollout worker.")] = 1024
+    # distributed config
+    rollout_cross_node_comm: Annotated[
+        bool,
+        Parameter(
+            group=infer_group,
+            help="Whether to enable cross-node communication for the rollout worker.",
+        ),
+    ] = False
+    tensor_parallel_size: Annotated[
+        int,
+        Parameter(
+            group=infer_group,
+            help="Number of GPUs allocated for each inference engine in the rollout worker.",
+        ),
+    ] = 1
+    expert_parallel_size: Annotated[
+        int,
+        Parameter(
+            group=infer_group,
+            help="Number of experts allocated for each inference engine in the rollout worker.",
+        ),
+    ] = 1
+    # optimization config
+    enable_chunked_prefill: Annotated[
+        bool,
+        Parameter(
+            group=infer_group,
+            help="Whether to enable chunked prefill for the rollout worker.",
+        ),
+    ] = False
+    chunked_prefill_size: Annotated[
+        int,
+        Parameter(
+            group=infer_group,
+            help="Chunked prefill size for the rollout worker.",
+        ),
+    ] = 128
+    extra_rollout_config: Annotated[
+        Optional[dict],
+        Parameter(
+            group=infer_group,
+            help='Extra configuration for different rollout worker. vllm parameters will start with prefix "vllm", etc.',
+        ),
+    ] = dict()
 
 
-infer_group = Group("inference", validator=validators.MutuallyExclusive(), help="Inference worker configuration.")
+if __name__ == "__main__":
+    from cyclopts import App, Group, Parameter
 
+    app = App()
 
-class InfrerenceWorkerConfig(BaseModel):
-    """Configuration for the InferenceWorker."""
+    @app.default
+    def test_command(*, config: RolloutConfig):
+        """A test command to verify the command line interface."""
+        print("This is a test command.")
 
-    lmdeploy: Annotated[
-        Optional[LMDeployWorkerConfig], Parameter(group=infer_group, help="Configuration for the LMDeploy worker.")
-    ] = None
-
-    vllm: Annotated[
-        Optional[VLLMWorkerConfig], Parameter(group=infer_group, help="Configuration for the VLLM worker.")
-    ] = None
-
-    sglang: Annotated[
-        Optional[SGLangWorkerConfig], Parameter(group=infer_group, help="Configuration for the SGLang worker.")
-    ] = None
+    app()

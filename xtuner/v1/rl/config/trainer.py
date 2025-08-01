@@ -6,7 +6,7 @@ from typing_extensions import Annotated
 
 from xtuner.v1.config import EngineConfig
 from xtuner.v1.ray.accelerator import AcceleratorResourcesConfig
-from xtuner.v1.ray.config.worker import InfrerenceWorkerConfig
+from xtuner.v1.ray.config.worker import RolloutConfig
 
 
 grpo_group = Group("GRPO", sort_key=1, help="GRPO Trainer Configuration")
@@ -35,7 +35,7 @@ class GRPOTrainerConfig(BaseModel):
     ]
 
     rollout: Annotated[
-        InfrerenceWorkerConfig,
+        RolloutConfig,
         Parameter(group=rollout_worker_group, help="Configuration for the rollout worker."),
         # Discriminator('type')
     ]
