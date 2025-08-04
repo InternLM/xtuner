@@ -5,11 +5,12 @@ __all__ = ["all_to_all_single_autograd", "ulysses_all_to_all"]
 
 try:
     from .moe_gemm import moe_grouped_gemm as grouped_gemm
+    from .moe_gemm_triton import moe_grouped_gemm_triton as grouped_gemm_triton
     from .moe_permute import permute, unpermute
 except ImportError:
     ...
 else:
-    __all__.extend(["permute", "unpermute", "grouped_gemm"])
+    __all__.extend(["permute", "unpermute", "grouped_gemm", "grouped_gemm_triton"])
 
 
 try:
