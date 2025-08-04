@@ -5,7 +5,7 @@ from torch.distributed.tensor import DTensor, Shard, distribute_tensor
 
 from xtuner.v1.float8.float8_gmm_tile_wise import TileWiseFloat8GroupedLinear
 from xtuner.v1.float8.float8_tensor import ScalingGranularity
-from xtuner.v1.ops import grouped_gemm
+from xtuner.v1.ops import grouped_gemm_triton
 
 
 class GroupedLinear(nn.Module):
@@ -28,7 +28,7 @@ class GroupedLinear(nn.Module):
     def forward(self, x: torch.Tensor, tokens_per_expert: torch.Tensor, decoding: bool = False):
         weight = self.weight.to_local() if isinstance(self.weight, DTensor) else self.weight
         weight = weight.view(-1, self.out_features, self.in_features)
-        out = grouped_gemm(x, weight, tokens_per_expert.cpu(), trans_a=False, trans_b=True)
+        out = grouped_gemm_triton(x, weight, tokens_per_expert)
         return out
 
 
