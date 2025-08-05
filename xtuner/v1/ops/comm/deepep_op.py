@@ -166,7 +166,6 @@ def dispatch_forward(
     else:
         hidden_size = x[0].shape[-1]
 
-    torch.distributed.breakpoint()
     _buffer = get_low_latency_buffer(group, hidden=hidden_size, num_experts=num_experts)
 
     # Calculate layout before actual dispatch
