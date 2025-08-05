@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Callable, Literal
 
 import torch
 import torch.nn.functional as F
@@ -8,7 +8,6 @@ from torch import nn
 from typing_extensions import Self
 
 from xtuner.v1.data_proto import SequenceContext
-from xtuner.v1.loss.base_chunk_loss import BaseChunkLoss
 
 
 class CEForwardItem(BaseModel):
@@ -19,6 +18,26 @@ class CEForwardItem(BaseModel):
     global_sum_loss_weight: torch.Tensor | None = None
     grad_accumulation_steps: int = 1
     chunk_size: int = 1024
+
+
+# TODO: 如何更通用
+class BaseChunkLoss(nn.Module):
+    def __init__(self, ctx, chunk_loss_class, chunk_loss_fn) -> None:
+        super().__init__()
+        self.ctx = ctx
+        self.chunk_loss_class = chunk_loss_class
+        self.chunk_loss_fn = chunk_loss_fn
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        head_weight: torch.Tensor,
+        forward_item: CEForwardItem,
+        head_bias: torch.Tensor | None = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        # 注意： 不能用 kwargs 传参数
+        return self.chunk_loss_class.apply(hidden_states, head_weight, forward_item, head_bias, self.chunk_loss_fn)
 
 
 class CELossContext(BaseModel):
@@ -55,10 +74,10 @@ class CELossContext(BaseModel):
     ) -> Self:
         device = seq_ctx.cu_seq_lens_q.device
         if self.loss_reduction == "global":
-            rank_grad_tokens = (labels >= 0).sum()
             assert global_grad_tokens is not None, "Global grad tokens must be provided for global reduction."
-            loss_weights = rank_grad_tokens / global_grad_tokens * dist.get_world_size()
-            celoss_forward_item = CEForwardItem(
+            # 考虑 chunk 情况下，loss_weights 的分子应该是 1
+            loss_weights = 1 / global_grad_tokens * dist.get_world_size()
+            forward_item = CEForwardItem(
                 labels=labels.to(device),
                 loss_reduction=self.loss_reduction,
                 loss_weight=loss_weights.to(device),
@@ -69,17 +88,17 @@ class CELossContext(BaseModel):
                 loss_class=self.loss_class,
                 loss_reduction=self.loss_reduction,
                 label_shifted=self.label_shifted,
-                forward_item=celoss_forward_item,
+                forward_item=forward_item,
             )
         else:
             labels = labels.to(device)
             num_tokens = seq_ctx.cu_seq_lens_q[1:] - seq_ctx.cu_seq_lens_q[:-1]
             labels_list = torch.split(labels, num_tokens.tolist(), dim=1)
             loss_weights_list = []
-            for labels in labels_list:
-                num_effective_tokens = (labels != self.ignore_id).sum().item()
+            for _labels in labels_list:
+                num_effective_tokens = (_labels != self.ignore_idx).sum().item()
                 loss_weight = len2weight(num_effective_tokens, self.loss_reduction)
-                loss_weights_list.append(torch.full(labels.shape, loss_weight, device=labels.device))
+                loss_weights_list.append(torch.full(_labels.shape, loss_weight, device=_labels.device))
             loss_weights = torch.cat(loss_weights_list, dim=1)
 
             global_sum_loss_weight = loss_weights.sum()
@@ -87,7 +106,6 @@ class CELossContext(BaseModel):
 
             forward_item = CEForwardItem(
                 labels=labels,
-                loss_class=self.loss_class,
                 loss_reduction=self.loss_reduction,
                 loss_weight=loss_weights,
                 global_sum_loss_weight=global_sum_loss_weight,
@@ -108,8 +126,8 @@ class CELossContext(BaseModel):
 
     def forward(
         self,
-        hidden_states: torch.Tensor | None = None,
-        head_weight: torch.Tensor | None = None,
+        hidden_states: torch.Tensor,
+        head_weight: torch.Tensor,
         head_bias: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         loss_fn = self.build_loss_fn()
@@ -140,7 +158,7 @@ class CrossEntropyLoss(nn.Module):
         head_bias: torch.Tensor | None = None,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        logits = F.linear(hidden_states, head_weight, head_bias)
+        logits = F.linear(hidden_states, head_weight, head_bias).float()
 
         grad_accumulation_steps = forward_item.grad_accumulation_steps
         labels = forward_item.labels
@@ -172,7 +190,12 @@ class CrossEntropyLoss(nn.Module):
         shift_labels = shift_labels.to(shift_logits.device)
 
         if self.loss_reduction == "global":
-            loss = self.loss_fct(shift_logits, shift_labels) * loss_weights
+            rank_grad_tokens = (shift_labels >= 0).sum()
+            loss_weights = rank_grad_tokens * loss_weights
+            if rank_grad_tokens == 0:
+                loss = shift_logits.sum() * 0
+            else:
+                loss = self.loss_fct(shift_logits, shift_labels) * loss_weights
         else:
             loss_weights = loss_weights.view(-1).to(logits.device)
             loss = self.loss_fct(shift_logits, shift_labels)
@@ -241,9 +264,12 @@ class LigerCrossEntropyLoss(nn.Module):
         shift_labels = shift_labels.to(shift_hidden_states.device)
 
         if self.loss_reduction == "global":
+            rank_grad_tokens = (shift_labels >= 0).sum()
+            loss_weights = rank_grad_tokens * loss_weights
             loss = self.loss_fct(head_weight, shift_hidden_states, shift_labels, head_bias) * loss_weights
         else:
             loss_weights_sum = forward_item.global_sum_loss_weight
+            loss_weights = loss_weights.view(-1)
             loss = self.loss_fct(
                 head_weight,
                 shift_hidden_states,
@@ -258,10 +284,17 @@ class LigerCrossEntropyLoss(nn.Module):
 
 class ChunkCELoss(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, hidden_states, head_weight, froward_item: CEForwardItem, head_bias, loss_fn):
-        chunk_size = froward_item.chunk_size
-        labels = froward_item.labels
-        loss_weight = froward_item.loss_weight
+    def forward(
+        ctx,
+        hidden_states: torch.Tensor,
+        head_weight: torch.Tensor,
+        forward_item: CEForwardItem,
+        head_bias: torch.Tensor | None,
+        loss_fn: Callable,
+    ):
+        chunk_size = forward_item.chunk_size
+        labels = forward_item.labels
+        loss_weight = forward_item.loss_weight
 
         device = hidden_states.device
         accumulated_loss = torch.tensor(0.0, device=device)
@@ -284,23 +317,22 @@ class ChunkCELoss(torch.autograd.Function):
             grad_inputs_chunk = grad_inputs_chunks[i]
 
             chunk_forward_item = CEForwardItem(
-                labels=labels_chunk,
-                loss_reduction=froward_item.loss_reduction,
+                loss_reduction=forward_item.loss_reduction,
                 loss_weight=loss_weight_chunk,
-                grad_accumulation_steps=froward_item.grad_accumulation_steps,
-                global_sum_loss_weight=froward_item.global_sum_loss_weight,
+                labels=labels_chunk,
+                grad_accumulation_steps=forward_item.grad_accumulation_steps,
+                global_sum_loss_weight=forward_item.global_sum_loss_weight,
                 chunk_size=chunk_size,
             )
             chunk_loss, chunk_grad_input, chunk_grad_weight = accumulate_chunk(
                 hidden_states_chunk,
-                labels_chunk,
                 head_weight,
                 loss_fn,
                 forward_item=chunk_forward_item,
             )
-            accumulated_loss.add_(chunk_loss.div_(len(hidden_states_chunks)))
-            grad_inputs_chunk.copy_(chunk_grad_input.div_(len(hidden_states_chunks)))
-            grad_weight.add_(chunk_grad_weight.div_(len(hidden_states_chunks)))
+            accumulated_loss.add_(chunk_loss)
+            grad_inputs_chunk.copy_(chunk_grad_input)
+            grad_weight.add_(chunk_grad_weight)
 
         ctx.save_for_backward(grad_inputs, grad_weight)
         return accumulated_loss, None
@@ -315,21 +347,6 @@ class ChunkCELoss(torch.autograd.Function):
         return grad_input, grad_weight, None, None, None
 
 
-def chunk_ce_loss(logits, labels, forward_item: CEForwardItem):
-    if forward_item.loss_reduction == "global":
-        loss_fct = torch.nn.CrossEntropyLoss()
-        loss = loss_fct(logits, labels) * forward_item.loss_weight
-    else:
-        loss_fct = torch.nn.CrossEntropyLoss(reduction="none")
-        loss = loss_fct(logits, labels)
-
-        loss = loss * forward_item.loss_weight
-        assert forward_item.global_sum_loss_weight is not None
-        loss = loss.sum() / (forward_item.global_sum_loss_weight + 1e-8)
-        loss = loss / forward_item.grad_accumulation_steps
-    return loss
-
-
 def len2weight(x, loss_reduction):
     if x == 0:
         return x
@@ -342,13 +359,35 @@ def len2weight(x, loss_reduction):
     raise NotImplementedError(loss_reduction)
 
 
-def _chunk_loss(hidden_states_chunk, labels_chunk, head_weight, loss_fn, forward_item: CEForwardItem):
+def _chunk_loss(hidden_states_chunk, head_weight, loss_fn, forward_item: CEForwardItem):
     logits_chunk = hidden_states_chunk @ head_weight.t()
-    return loss_fn(logits_chunk.float().view(-1, logits_chunk.shape[-1]), labels_chunk.view(-1), forward_item)
+    return loss_fn(logits_chunk, forward_item)
 
 
-def accumulate_chunk(hidden_states_chunk, labels_chunk, head_weight, loss_fn, forward_item: CEForwardItem):
+def accumulate_chunk(hidden_states_chunk, head_weight, loss_fn, forward_item: CEForwardItem):
     (chunk_grad_input, chunk_grad_weight), chunk_loss = torch.func.grad_and_value(
-        _chunk_loss, argnums=(0, 2), has_aux=False
-    )(hidden_states_chunk, labels_chunk, head_weight, loss_fn, forward_item)
+        _chunk_loss, argnums=(0, 1), has_aux=False
+    )(hidden_states_chunk, head_weight, loss_fn, forward_item)
     return chunk_loss, chunk_grad_input, chunk_grad_weight
+
+
+def chunk_ce_loss(logits: torch.Tensor, forward_item: CEForwardItem):
+    logits = logits.float().reshape(-1, logits.shape[-1])
+    labels = forward_item.labels.reshape(-1)
+    if forward_item.loss_reduction == "global":
+        rank_grad_tokens = (labels >= 0).sum()
+        loss_weights = rank_grad_tokens * forward_item.loss_weight
+        loss_fct = torch.nn.CrossEntropyLoss()
+        if rank_grad_tokens == 0:
+            loss = logits.sum() * 0
+        else:
+            loss = loss_fct(logits, labels) * loss_weights
+    else:
+        loss_fct = torch.nn.CrossEntropyLoss(reduction="none")
+        loss = loss_fct(logits, labels)
+
+        loss = loss * forward_item.loss_weight
+        assert forward_item.global_sum_loss_weight is not None
+        loss = loss.sum() / (forward_item.global_sum_loss_weight + 1e-8)
+        loss = loss / forward_item.grad_accumulation_steps
+    return loss
