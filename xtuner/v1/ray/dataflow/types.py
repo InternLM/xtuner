@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List
 
 from cyclopts import Parameter
@@ -50,3 +50,16 @@ class SampleParams(BaseModel):
     stop_token_ids: Annotated[List[int], Parameter(help="List of stop token IDs.")] = []
     logprobs: Annotated[int, Parameter(help="Number of log probabilities to return.")] = 0
     skip_special_tokens: Annotated[bool, Parameter(help="Whether to skip special tokens.")] = True
+
+
+# todo(@duanyanhui): move RolloutMeta to env controller
+@dataclass
+class RolloutMeta:
+    uid: str
+    prompt: str
+    input_ids: List[int]
+    response: str
+    output_ids: List[int]
+    label: str
+    sample_params: SampleParams
+    extra_params: dict = field(default_factory=dict)

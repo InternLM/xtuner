@@ -89,7 +89,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                         print(
                             f"can't connect to server url {self.server_url}/{self.endpoints['health_generate']} because {e}"
                         )
-                    time.sleep(2)
+                    time.sleep(5)
             process.terminate()
             raise TimeoutError("Server failed to start within the timeout period.")
         else:
@@ -132,6 +132,7 @@ class RolloutWorker(SingleAcceleratorWorker):
             raise TimeoutError("Server failed to start within the timeout period.")
 
     async def rollout(self, inqueue: Queue, outqueue: Queue):
+        self.paused = False
         await self.rollout_task(inqueue, outqueue)
 
     async def rollout_task(self, inqueue: Queue, outqueue: Queue):
@@ -176,36 +177,11 @@ class RolloutWorker(SingleAcceleratorWorker):
         )
         self.pause_generation()
 
-    # dispatched functions
-    def _transform_rollout_config_to_server_configs(self, infer_config: RolloutConfig):
-        pass
-
-    def _transform_rollout_config_to_router_configs(self, infer_config: RolloutConfig):
-        pass
-
-    def get_lobprobs(self, input_ids, sampling_params):
-        pass
-
-    def update_weights(self):
-        pass
-
-    def reset_prefix_cache(self):
-        pass
-
-    def sleep(self):
-        pass
-
-    def wake_up(self):
-        pass
-
-    def pause_generation(self):
-        pass
-
-    def continue_generation(self):
-        pass
-
-    def shutdown(self):
-        pass
+    async def restart(self, inqueue: Queue, outqueue: Queue):
+        if self.paused:
+            self.paused = False
+            self.wake_up()
+            await self.rollout_task(inqueue, outqueue)
 
     async def _insert_query(self, inqueue: Queue):
         if (
@@ -213,7 +189,6 @@ class RolloutWorker(SingleAcceleratorWorker):
             and len(self.response_dict) < self.config.max_running_requests
             and (inqueue.qsize() + self.buffer_queue.qsize()) > 0
         ):
-            # return rollout
             rollout_meta, uid, prompt, input_ids, sample_params, extra_params = self._get_sample(inqueue)
             response = await self._create_request(
                 f"{self.server_url}/{self.endpoints['generate']}", uid, input_ids, prompt, sample_params, extra_params
@@ -224,9 +199,10 @@ class RolloutWorker(SingleAcceleratorWorker):
 
     def _get_sample(self, inqueue):
         if not self.buffer_queue.empty():
-            rollout_meta = self.buffer_queue.get()
+            rollout_meta_ref = self.buffer_queue.get()
         else:
-            rollout_meta = inqueue.get()
+            rollout_meta_ref = inqueue.get()
+        rollout_meta = ray.get(rollout_meta_ref[0])  # tuple(objectref,)
         uid = rollout_meta.uid
         response = rollout_meta.response
         output_ids = rollout_meta.output_ids
@@ -253,3 +229,31 @@ class RolloutWorker(SingleAcceleratorWorker):
 
     def _collect_pending_response(self, meta_ref: ObjectRef, last_trajectory: str):
         raise NotImplementedError("_collect_pending_response must be implemented in subclass")
+
+    # dispatched functions
+    def _transform_rollout_config_to_server_configs(self, infer_config: RolloutConfig):
+        pass
+
+    def get_lobprobs(self, input_ids, sampling_params):
+        pass
+
+    def update_weights(self):
+        pass
+
+    def reset_prefix_cache(self):
+        pass
+
+    def sleep(self):
+        pass
+
+    def wake_up(self):
+        pass
+
+    def pause_generation(self):
+        pass
+
+    def continue_generation(self):
+        pass
+
+    def shutdown(self):
+        pass

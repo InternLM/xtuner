@@ -78,29 +78,37 @@ class vLLMWorker(RolloutWorker):
             # 3. "[DONE]"
             if chunk == "":
                 continue
-            chunk = chunk[5:].strip()  # Remove "data: " prefix
-            if self.paused:
-                self._collect_pending_response(meta_ref, last_trajectory)
+            try:
+                chunk = chunk[5:].strip()  # Remove "data: " prefix
+                if self.paused:
+                    self._collect_pending_response(meta_ref, last_trajectory)
+                    await res.aclose()
+                    print(f"Worker {self.rank} is paused, skipping when handle step response.")
+                    break
+                if chunk == "[DONE]":
+                    meta = ray.get(meta_ref)
+                    meta.output_ids = []
+                    meta.response = last_trajectory
+                    # note(@duanyanhui): A tuple(objectref) needs to be placed in the outqueue
+                    # here to ensure objectref is passed between multiple actors; otherwise,
+                    # outqueue.get() will automatically dereference the objectref
+                    outqueue.put((ray.put(meta),))
+                    print(f"--- get response from rank {self.rank}")
+                    self.consumed_samples += 1
+                    await res.aclose()
+                else:
+                    chunk_json = json.loads(chunk)
+                    last_trajectory += chunk_json["choices"][0]["delta"]["content"]
+            except Exception as e:
+                print(f"Error processing chunk: {chunk}, error: {e}")
                 await res.aclose()
-                print(f"Worker {self.rank} is paused, skipping when handle step response.")
                 break
-            if chunk == "[DONE]":
-                meta = ray.get(meta_ref)
-                meta.output_ids = []
-                meta.response = last_trajectory
-                outqueue.put(ray.put(meta))
-                print(f"--- get response from rank {self.rank}")
-                self.consumed_samples += 1
-                await res.aclose()
-            else:
-                chunk_json = json.loads(chunk)
-                last_trajectory += chunk_json["choices"][0]["delta"]["content"]
 
     def _collect_pending_response(self, meta_ref: ObjectRef, last_trajectory: str):
         meta = ray.get(meta_ref)
         meta.output_ids = []
         meta.response = last_trajectory
-        self.buffer_queue.put(ray.put(meta))
+        self.buffer_queue.put((ray.put(meta),))
 
     def get_logprobs(self, input_ids, sampling_params):
         pass
@@ -144,4 +152,6 @@ class vLLMWorker(RolloutWorker):
         args.host = self.host
         args.port = self.server_port
         args.model = infer_config.model_path
+        args.disable_log_requests = True
+        args.disable_log_stats = True
         return args
