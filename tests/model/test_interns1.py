@@ -117,7 +117,7 @@ class TestInternS1(DistributedTestBase):
         tokenizer = AutoTokenizer.from_pretrained(INTERNS1_MOE_PATH, trust_remote_code=True)
 
         conversations = [{"from": "human", "value": '<image>\nPlease describe the image shortly.'}]
-        image_path = 'resource/mscoco_twocat_000000039769.jpg'
+        image_path = 'tests/resource/mscoco_twocat_000000039769.jpg'
         image = Image.open(image_path).convert("RGB")
         images = dynamic_preprocess(
             image,
@@ -288,7 +288,7 @@ class TestInternS1(DistributedTestBase):
 
         tokenizer = AutoTokenizer.from_pretrained(INTERNS1_MOE_PATH, trust_remote_code=True)
         conversations = [{"from": "human", "value": '<image>\nPlease describe the image shortly.'}]
-        image_path = 'resource/mscoco_twocat_000000039769.jpg'
+        image_path = 'tests/resource/mscoco_twocat_000000039769.jpg'
         image = Image.open(image_path).convert("RGB")
         images = dynamic_preprocess(
             image,
