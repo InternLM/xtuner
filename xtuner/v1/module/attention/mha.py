@@ -1,8 +1,17 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import os
 from typing import cast
 
 import torch
-from flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
+
+
+# TODO: #  Uniofiy "1" and "true"
+# For the optional feature, we should collect all information to logs
+if os.environ.get("XTUNER_USE_FA3", "0") == "1":
+    from flash_attn_interface import flash_attn_varlen_func, flash_attn_with_kvcache
+else:
+    from flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
+
 from torch import nn
 
 from transformers.models.llama.modeling_llama import apply_rotary_pos_emb, repeat_kv

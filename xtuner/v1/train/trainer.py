@@ -1,3 +1,4 @@
+import contextlib
 import os
 import sys
 import time
@@ -23,6 +24,7 @@ from xtuner.v1.engine.utils import cal_global_grad_tokens
 from xtuner.v1.loss import CELossContext
 from xtuner.v1.model.base import ModelItem
 from xtuner.v1.model.interns1 import InternS1Config
+from xtuner.v1.profiler import profilling_memory, profilling_time
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, ParallelConfigException, get_logger, log_format
 
 
@@ -31,9 +33,14 @@ DEVICE = get_device()
 DEVICE_MODULE = get_torch_device()
 
 
+logger = get_logger()
+
+
 class Trainer:
     META_PATH = "meta"
     config: TrainerConfig | None
+    profile_time_path = "profilling_time"
+    profile_memory_path = "profilling_memory"
 
     def __init__(
         self,
@@ -55,6 +62,9 @@ class Trainer:
         epoch_num: int | None = None,
         resume_config: ResumeConfig | None = None,
         strict_load: bool = True,
+        profile_step: int | None = None,
+        profile_time: bool = True,
+        profile_memory: bool = False,
         seed: int = 42,
         debug: bool = False,
         backend: str = "cpu:gloo,cuda:nccl",
@@ -65,6 +75,10 @@ class Trainer:
         self._total_step = total_step
         self._epoch_num = epoch_num
         self._cur_step = 0
+
+        self._profile_step = profile_step
+        self._profile_time = profile_time
+        self._profile_memory = profile_memory
 
         assert epoch_num is not None or total_step is not None, "`epoch_num` or `total_step` should be set"
         assert epoch_num is None or total_step is None, (
@@ -116,8 +130,6 @@ class Trainer:
             global_batch_size = self.data_mesh["dp"].size()
         self._global_batch_size = global_batch_size
 
-        self.tokenizer.model_max_length = dataloader_cfg.max_length
-
         self._dataloader = self.build_dataloader(
             dataset_config=dataset_cfg,
             dataloader_config=dataloader_cfg,
@@ -128,7 +140,6 @@ class Trainer:
             seed=seed,
         )
 
-        self.loss_ctx = loss_ctx
         if isinstance(load_from, str):
             load_from = Path(load_from)
 
@@ -144,6 +155,8 @@ class Trainer:
         # TODO: (huanghaian) The impl of CELossContext should be decoupled with config
         if loss_ctx is None:
             self.loss_ctx = CELossContext()
+        else:
+            self.loss_ctx = loss_ctx
         # TODO: TMP hardcode here
 
     @classmethod
@@ -206,7 +219,20 @@ class Trainer:
                 data = cast(ModelItem, data)
                 data["loss_ctx"] = loss_ctx
 
-            loss_log, other_log = self._engine.train_step(data_batch)
+            if self._profile_step is not None and self._cur_step == self._profile_step:
+                with contextlib.ExitStack() as stack:
+                    if self._profile_time:
+                        time_dir = self.work_dir / self.profile_time_path / f"step-{self._cur_step}"
+                        stack.enter_context(profilling_time(time_dir))
+
+                    if self._profile_memory:
+                        memory_dir = self.work_dir / self.profile_memory_path / f"step-{self._cur_step}"
+                        stack.enter_context(profilling_memory(memory_dir))
+
+                    loss_log, other_log = self._engine.train_step(data_batch)
+            else:
+                loss_log, other_log = self._engine.train_step(data_batch)
+
             grad_norm = self._engine.clip_grad_norm()
             self._engine.step_optimizer(grad_norm)
             self._lr_scheduler.step()
@@ -224,7 +250,7 @@ class Trainer:
             max_memory = DEVICE_MODULE.max_memory_allocated()
 
             self.logger.info(
-                f"Step {self.cur_step}/{self.total_step} data_time: {data_time:.4f} lr: {lr:.6f} "
+                f"Step {self.cur_step}/{self.total_step} data_time: {data_time:.4f} lr: {lr:.6f} time: {step_time:.4f} "
                 f"text_tokens: {step_consumed_tokens} "
                 f"total_loss: {total_loss:.3f} "
                 f"reduced_llm_loss: {reduced_llm_loss:.3f} "

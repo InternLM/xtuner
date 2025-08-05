@@ -24,15 +24,16 @@ QWEN3_MOE_PATH = os.environ["QWEN3_MOE_PATH"]
 
 class TestQwen3MoE(DistributedTestBase):
     @parametrize.parametrize(
-        "device,dispatcher,ep_size,compile,tol",
+        "device,dispatcher,ep_size,compile,tol,loss_class",
         [
-            ("cuda", "deepep", 8, False, 1e-2),
-            ("cuda", "all2all", 8, False, 1e-2),
-            ("cuda", None, 1, False, 1e-2),
-            ("cuda", "deepep", 8, True, 4e-2),  # TODO: This test is flaky, need to fix it
+            ("cuda", "deepep", 8, False, 1e-2, "cross_entropy"),
+            ("cuda", "all2all", 8, False, 1e-2, "cross_entropy"),
+            ("cuda", None, 1, False, 1e-2, "cross_entropy"),
+            ("cuda", "deepep", 8, True, 4e-2, "cross_entropy"),  # TODO: This test is flaky, need to fix it
+            ("cuda", None, 1, False, 1e-2, "chunk_cross_entropy"),
         ],
     )
-    def test_qwen3_moe_run(self, device, dispatcher, ep_size, compile, tol):
+    def test_qwen3_moe_run(self, device, dispatcher, ep_size, compile, tol, loss_class):
         self.create_pg(device)
         if not compile:
             maybe_compile.clear_compile_targets()
@@ -65,7 +66,7 @@ class TestQwen3MoE(DistributedTestBase):
         seq_ctx, shifted_labels = seq_ctx.shift_with_labels(labels=input_ids)
         seq_ctx.to('cuda')
         global_grad_tokens = cal_global_grad_tokens([shifted_labels])
-        loss_ctx = CELossContext()
+        loss_ctx = CELossContext(loss_class=loss_class)
         loss_ctx = loss_ctx.build_forward_item(seq_ctx, shifted_labels,
                                                grad_accumulation_steps=1,
                                                global_grad_tokens=global_grad_tokens)

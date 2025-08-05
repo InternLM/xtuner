@@ -2,7 +2,10 @@ from torch import nn
 import torch
 
 # TODO: 等 interns1 合入后全部换成 interns1 的实现
-from transformers.models.internvl.modeling_internvl import ACT2FN
+try:
+    from transformers.models.internvl.modeling_internvl import ACT2FN
+except:
+    ACT2FN = None
 
 from xtuner.v1.utils import get_device, get_torch_device_module
 from xtuner.v1.model import BaseModel

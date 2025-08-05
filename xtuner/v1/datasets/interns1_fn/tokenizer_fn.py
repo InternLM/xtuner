@@ -9,16 +9,17 @@ import numpy as np
 import torch
 import xxhash
 from PIL import Image
+from pydantic import BaseModel, ConfigDict
 
 from transformers import PreTrainedTokenizer
 from xtuner.v1.datasets.data_item import InternS1DataItem
+from xtuner.v1.model.interns1 import InternS1Config
 from xtuner.v1.utils import get_logger
 
 from ..utils import CachableTokenizeFunction, tokenizer_xxhash
 from ..vlm_utils import TCSLoader, apply_exif_orientation
 from .process import build_transform, dynamic_num_patch, dynamic_preprocess, preprocess_interns1
-from xtuner.v1.model.interns1 import InternS1Config
-from pydantic import BaseModel, ConfigDict
+
 
 logger = get_logger()
 
@@ -53,26 +54,28 @@ def generate_random_int_from_dict(input_dict, min_num, max_num):
 
 class InternS1TokenizeFunction(CachableTokenizeFunction):
     def __init__(
-            self,
-            tokenizer: PreTrainedTokenizer,
-            model_cfg: InternS1Config,
-            anno_name: str,
-            max_dynamic_patch: int | None = None,
-            min_dynamic_patch: int | None = None,
-            min_num_frames: int = 4,
-            max_num_frames: int = 24,
-            data_augment: bool = False,
-            system_message: str | None = None,
-            tcs_loader: TCSLoader | None = None,
-            tokenizer_hash: str | None = None,
-            hash: str | None = None,
-            only_prompt: bool = False
+        self,
+        tokenizer: PreTrainedTokenizer,
+        model_cfg: InternS1Config,
+        anno_name: str,
+        max_dynamic_patch: int | None = None,
+        min_dynamic_patch: int | None = None,
+        min_num_frames: int = 4,
+        max_num_frames: int = 24,
+        data_augment: bool = False,
+        system_message: str | None = None,
+        tcs_loader: TCSLoader | None = None,
+        tokenizer_hash: str | None = None,
+        max_length: int | None = None,
+        hash: str | None = None,
+        only_prompt: bool = False,
     ):
         self._hash = hash
         self._tokenizer_hash = tokenizer_hash
         self.tcs_loader = tcs_loader
         self.tokenizer = tokenizer
         self.only_prompt = only_prompt
+        self.max_length = max_length
 
         self.image_size = model_cfg.vision_config.image_size[0]
         self.patch_size = model_cfg.vision_config.patch_size[0]
@@ -99,13 +102,15 @@ class InternS1TokenizeFunction(CachableTokenizeFunction):
             f"use_thumbnail: {self.use_thumbnail} data_aug: {self.data_augment} for training."
         )
         self.downsample_ratio = model_cfg.downsample_ratio
-        self.num_image_token = int((self.image_size // self.patch_size) ** 2 * (self.downsample_ratio ** 2))
+        self.num_image_token = int((self.image_size // self.patch_size) ** 2 * (self.downsample_ratio**2))
         self.system_message = system_message
 
         # Note: 比较重要，防止改了参数但是没有重新 cache
-        self._hash_str = f'{self.downsample_ratio}_{self.num_image_token}_{self.system_message}_{self.use_thumbnail}' \
-                         f'_{self.dynamic_image_size}_{self.max_num_frames}_{self.min_num_frames}' \
-                         f'_{self.min_dynamic_patch}_{self.max_dynamic_patch}'
+        self._hash_str = (
+            f"{self.downsample_ratio}_{self.num_image_token}_{self.system_message}_{self.use_thumbnail}"
+            f"_{self.dynamic_image_size}_{self.max_num_frames}_{self.min_num_frames}"
+            f"_{self.min_dynamic_patch}_{self.max_dynamic_patch}"
+        )
 
     def calc_num_tokens_multi_modal_get_item(self, data_item):
         if "system_message" in data_item:
@@ -144,6 +149,7 @@ class InternS1TokenizeFunction(CachableTokenizeFunction):
                 ds_name=self.data_name,
                 prompt_only=self.only_prompt,
                 system_prompt=system_message,
+                max_length=self.max_length,
             )
             return {"num_tokens": len(ret["input_ids"])}
         except Exception as e:
@@ -204,6 +210,7 @@ class InternS1TokenizeFunction(CachableTokenizeFunction):
             ds_name=self.data_name,
             prompt_only=self.only_prompt,
             system_prompt=system_message,
+            max_length=self.max_length,
         )
         ret = InternS1DataItem(
             input_ids=process_result["input_ids"],  # ()
@@ -235,6 +242,7 @@ class InternS1TokenizeFunction(CachableTokenizeFunction):
                 ds_name=self.data_name,
                 prompt_only=self.only_prompt,
                 system_prompt=system_message,
+                max_length=self.max_length,
             )
 
             return {"num_tokens": len(ret["input_ids"])}
@@ -280,6 +288,7 @@ class InternS1TokenizeFunction(CachableTokenizeFunction):
             ds_name=self.data_name,
             prompt_only=self.only_prompt,
             system_prompt=system_message,
+            max_length=self.max_length,
         )
 
         ret = InternS1DataItem(
@@ -342,6 +351,7 @@ class InternS1TokenizeFunction(CachableTokenizeFunction):
                 num_image=len(image_size),
                 prompt_only=self.only_prompt,
                 system_prompt=system_message,
+                max_length=self.max_length,
             )
 
             return {"num_tokens": len(ret["input_ids"])}
@@ -407,6 +417,7 @@ class InternS1TokenizeFunction(CachableTokenizeFunction):
             num_image=len(image_path),
             prompt_only=self.only_prompt,
             system_prompt=system_message,
+            max_length=self.max_length,
         )
 
         ret = InternS1DataItem(
@@ -455,6 +466,7 @@ class InternS1TokenizeFunction(CachableTokenizeFunction):
                 num_image=n_frames,
                 prompt_only=self.only_prompt,
                 system_prompt=system_message,
+                max_length=self.max_length,
             )
             return {"num_tokens": len(ret["input_ids"])}
         except Exception as e:
@@ -504,6 +516,7 @@ class InternS1TokenizeFunction(CachableTokenizeFunction):
             num_image=num_patches,
             prompt_only=self.only_prompt,
             system_prompt=system_message,
+            max_length=self.max_length,
         )
 
         ret = InternS1DataItem(
@@ -537,7 +550,7 @@ class InternS1TokenizeFunction(CachableTokenizeFunction):
         )
         return transform
 
-    def __call__(self, item: Any, media_root: str = '') -> InternS1DataItem:  # type: ignore[override]
+    def __call__(self, item: Any, media_root: str = "") -> InternS1DataItem:  # type: ignore[override]
         if "image" in item and item["image"] is not None and item["image"] != "":
             if type(item["image"]) is list and len(item["image"]) > 1:
                 if self.state == "cache":

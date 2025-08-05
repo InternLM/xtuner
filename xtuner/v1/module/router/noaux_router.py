@@ -1,3 +1,4 @@
+import os
 from typing import Literal
 
 import torch
@@ -51,6 +52,10 @@ class NoAuxRouter(nn.Module, RouterProtocol):
         self.register_buffer("e_score_correction_bias", torch.empty((self.n_routed_experts), dtype=torch.float32))
 
     def forward(self, logits) -> RouterResults:
+        if os.getenv("XTUNER_ROUTER_DEBUG") == "true":
+            noise = torch.randn_like(logits) * 50
+            logits = logits + noise
+
         if self.scoring_func == "sigmoid":
             scores = logits.sigmoid()
         else:

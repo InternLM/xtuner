@@ -173,9 +173,9 @@ class DeepEPDispatcher(
         hidden_states: torch.Tensor,
         topk_ids: torch.Tensor,
     ) -> DeepEPDecodingDispatchResult:
+        hidden_size = hidden_states.shape[-1]
         x = hidden_states.view(-1, hidden_states.size()[-1])
-
-        _buffer = get_low_latency_buffer(self._process_group)
+        _buffer = get_low_latency_buffer(self._process_group, hidden=hidden_size, num_experts=self._n_routed_experts)
 
         # Do MoE dispatch, compatible with CUDA graph (but you may restore some buffer status once you replay)
         recv_x, tokens_per_expert, handle, _, _ = _buffer.low_latency_dispatch(
@@ -286,7 +286,10 @@ class DeepEPDispatcher(
         # TODO: Maybe we should decouple the sync and async interface of deepep
         event = buffer_capture()
         combined_hidden_states, event = deep_ep_combine(
-            x=unpermuted_hidden_states, deepep_comm_handle=dispatched_result["handle"], group=self._process_group
+            x=unpermuted_hidden_states,
+            num_experts=self._n_routed_experts,
+            deepep_comm_handle=dispatched_result["handle"],
+            group=self._process_group,
         )
         event.current_stream_wait()
         # For event management, please refer to the docs of the `EventOverlap` class
@@ -300,7 +303,12 @@ class DeepEPDispatcher(
         pre_dispatched: DeepEPPreDispatchResult,
         dispatched_result: DeepEPDecodingDispatchResult,
     ):
-        _buffer = get_low_latency_buffer(self._process_group)
+        hidden_size = hidden_states.shape[-1]
+        _buffer = get_low_latency_buffer(
+            self._process_group,
+            hidden=hidden_size,
+            num_experts=self._n_routed_experts,
+        )
 
         # Do MoE combine, compatible with CUDA graph (but you may restore some buffer status once you replay)
         combined_x, _, _ = _buffer.low_latency_combine(

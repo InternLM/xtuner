@@ -22,12 +22,11 @@ logger = get_logger()
 
 
 # TODO: (huanghaian) Fix the return type hint static check
+# TODO: (huanghaian) Moving arguments to dataset config
 def build_datasets(
     dataset_config: DatasetConfigList,
     tokenizer,
-    max_length: int | None = None,
-    cache_dir: str | None = None,
-    cache_tag: str | None = None,
+    model_cfg: dict | None = None,
 ):
     datasets = []
     assert len(dataset_config) > 0
@@ -49,7 +48,7 @@ def build_datasets(
             _dataset_config.anno_path = anno_path
             anno_name = os.path.basename(anno_path)  # for debug
             _tokenize_fn = _tokenize_fn_name.build(tokenizer, anno_name=anno_name)
-            _dataset = _dataset_config.build(_tokenize_fn, max_length, cache_dir, cache_tag)
+            _dataset = _dataset_config.build(_tokenize_fn)
             if get_rank() == 0:
                 logger.info(
                     f"[Dataset] (Original) {_dataset_config.name}/{os.path.basename(anno_path)}: {len(_dataset)} samples."
@@ -121,7 +120,6 @@ def build_dataloader(
     # Using forkserver avoids these redundant imports and improves performance.
     collator = partial(
         dataloader_config.build_collator(),
-        max_length=dataloader_config.max_length,
         pack_max_length=dataloader_config.pack_max_length,
         padding_token_idx=dataloader_config.padding_token_idx,
     )

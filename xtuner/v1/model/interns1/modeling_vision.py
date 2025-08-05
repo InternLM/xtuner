@@ -4,9 +4,14 @@ from typing import cast, Union, Optional
 import numpy as np
 
 # TODO: 等 interns1 合入后全部换成 interns1 的实现
-from transformers.models.internvl.modeling_internvl import InternVLVisionRMSNorm, \
-    InternVLVisionEmbeddings, InternVLVisionMLP, NORM2FN
-from transformers.modeling_outputs import BaseModelOutput
+try:
+    from transformers.models.internvl.modeling_internvl import InternVLVisionRMSNorm, \
+        InternVLVisionEmbeddings, InternVLVisionMLP, NORM2FN
+    from transformers.modeling_outputs import BaseModelOutput
+except:
+    InternVLVisionRMSNorm = None
+    BaseModelOutput = None
+
 
 try:
     from timm.layers import DropPath

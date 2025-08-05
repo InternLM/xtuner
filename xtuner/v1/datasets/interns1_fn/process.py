@@ -1,6 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import io
-from typing import Dict, cast, List
+from typing import Dict, List, cast
 
 import numpy as np
 import torch
@@ -119,7 +119,10 @@ def preprocess_interns1(
     num_image: int = 1,
     prompt_only: bool = False,
     system_prompt: str = None,  # type: ignore
+    max_length: int | None = None,
 ) -> Dict[str, list[int]]:
+    if max_length is not None:
+        tokenizer.model_max_length = max_length
     assert len(sources) == 1, "ERROR: process only the first conversations"
     conversations = sources[0]
 
@@ -166,10 +169,7 @@ def preprocess_interns1(
         input_ids = input_ids.unsqueeze(0)
         labels = labels.unsqueeze(0)
 
-        return dict(
-            input_ids=input_ids.tolist(),
-            labels=labels.tolist()
-        )
+        return dict(input_ids=input_ids.tolist(), labels=labels.tolist())
 
     if conversations[0]["from"] == "system":
         system_prompt = conversations[0]["value"]
