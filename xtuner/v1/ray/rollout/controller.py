@@ -1,5 +1,4 @@
 import uuid
-from dataclasses import dataclass, field
 from typing import List
 
 import ray
@@ -7,20 +6,9 @@ import ray.util.queue
 
 from transformers import AutoTokenizer
 from xtuner.v1.ray.config.worker import RolloutConfig
-from xtuner.v1.ray.dataflow import SampleParams
+from xtuner.v1.ray.dataflow import RolloutMeta, SampleParams
 
 from .worker import RolloutWorker
-
-
-@dataclass
-class RolloutMeta:
-    uid: str
-    prompt: str
-    input_ids: List[int]
-    response: str
-    output_ids: List[int]
-    sample_params: SampleParams
-    extra_params: dict = field(default_factory=dict)
 
 
 @ray.remote
@@ -70,7 +58,9 @@ class RolloutController:
         self.active_rollout_workers[0].launch_router.remote(infer_config)
 
     # call workers functions
-    def rollout(self, prompt: str, sample_params: SampleParams = SampleParams()):
+    def rollout(self, prompt: str, label: str, sample_params: SampleParams = SampleParams()):
+        for worker in self.active_rollout_workers:
+            worker.restart.remote(self.inqueue, self.outqueue)
         input_ids = self.tokenizer.encode(prompt) if self.tokenizer else []
         uid = str(uuid.uuid4())
         rollout_meta = RolloutMeta(
@@ -79,9 +69,10 @@ class RolloutController:
             input_ids=input_ids,
             response="",
             output_ids=[],
+            label=label,
             sample_params=sample_params,
         )
-        self.inqueue.put(rollout_meta)
+        self.inqueue.put((ray.put(rollout_meta),))
 
     def pause(self):
         return [worker.pause.remote() for worker in self.active_rollout_workers]

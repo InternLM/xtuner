@@ -1,1 +1,1 @@
-from .types import ReplayMeta, SampleMeta, SampleParams
+from .types import ReplayMeta, RolloutMeta, SampleMeta, SampleParams

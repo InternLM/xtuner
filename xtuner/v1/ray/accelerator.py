@@ -186,7 +186,7 @@ class AutoAcceleratorWorkers:
         for rank, bundle_idx in enumerate(sorted_bundle_idxs):
             worker = worker_cls.options(
                 placement_group=pg, placement_group_bundle_index=bundle_idx, **pg_options
-            ).remote(worker_config, rank, master_addr, master_port, bundle_idx, world_size)
+            ).remote(worker_config, rank, master_addr, master_port, world_size, bundle_idx)
 
             workers.append(worker)
 
