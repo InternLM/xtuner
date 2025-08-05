@@ -172,6 +172,7 @@ def parallel_execute(
 class JsonlDataset(torch.utils.data.Dataset):
     _process_group: dist.ProcessGroup | None = None
     _thread_executor: ThreadPoolExecutor | None = None
+    # TODO: Using shared memory should be optional since the size of `/dev/shm` could be not enough for some devices
     _shared_memory: SharedMemory | None = None
 
     def __init__(
@@ -181,7 +182,7 @@ class JsonlDataset(torch.utils.data.Dataset):
         tokenize_fn: CachableTokenizeFunction | None = None,
         name: str = "default",
         cache_dir: str | None = None,
-        max_length: int | None = None,
+        max_length: int | None = None,  # TODO: Remove max_length in dataset
         cache_tag: str | None = None,
     ):
         super().__init__()
@@ -471,7 +472,7 @@ class JsonlDataset(torch.utils.data.Dataset):
             )
         else:
             tokenized = []
-            for start, end in tqdm(range_list_shard, desc=desc, smoothing=0.001):
+            for _, (start, end) in tqdm(range_list_shard, desc=desc, smoothing=0.001):
                 tokenized.append(worker(bytes(self._shared_memory.buf[start:end])))
 
         _num_tokens = [data["num_tokens"] for data in tokenized]

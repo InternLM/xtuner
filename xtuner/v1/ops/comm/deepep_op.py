@@ -59,9 +59,9 @@ def get_deepep_buffer(group: dist.ProcessGroup, hidden_bytes: int) -> Buffer:
 
 def get_low_latency_buffer(
     group: dist.ProcessGroup,
+    hidden: int,
+    num_experts: int,
     num_max_dispatch_tokens_per_rank: int = 128,
-    hidden: int = 2048,
-    num_experts: int = 128,
 ) -> Buffer:
     # NOTES: the low-latency mode will consume much more space than the normal mode
     # So we recommend that `num_max_dispatch_tokens_per_rank` (the actual batch size in the decoding engine) should be
@@ -161,7 +161,13 @@ def dispatch_forward(
     # of the dispatch kernel, it may be useful with communication-computation overlap. For more information, please
     # refer to the docs of `Buffer.dispatch`
     # _buffer = get_buffer(group, get_hidden_bytes(x))
-    _buffer = get_low_latency_buffer(group)
+    if isinstance(x, torch.Tensor):
+        hidden_size = x.shape[-1]
+    else:
+        hidden_size = x[0].shape[-1]
+
+    torch.distributed.breakpoint()
+    _buffer = get_low_latency_buffer(group, hidden=hidden_size, num_experts=num_experts)
 
     # Calculate layout before actual dispatch
     (
@@ -219,12 +225,14 @@ def dispatch_forward(
 
 def dispatch_backward(
     grad_recv_x: torch.Tensor,
-    grad_recv_topk_weights: torch.Tensor | None,
+    grad_recv_topk_weights: torch.Tensor,
+    num_experts: int,
     handle: Tuple,
     group: dist.ProcessGroup,
     previous_event: Optional[EventOverlap] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor | None, EventOverlap]:
-    _buffer = get_low_latency_buffer(group)
+    hidden_size = grad_recv_topk_weights[0].shape[-1]
+    _buffer = get_low_latency_buffer(group, hidden=hidden_size, num_experts=num_experts)
 
     # The backward process of MoE dispatch is actually a combine
     # For more advanced usages, please refer to the docs of the `combine` function
@@ -243,11 +251,13 @@ def dispatch_backward(
 
 def combine_forward(
     x: torch.Tensor,
+    num_experts: int,
     handle: Tuple,
     group: dist.ProcessGroup,
     previous_event: Optional[EventOverlap] = None,
 ) -> Tuple[torch.Tensor, EventOverlap]:
-    _buffer = get_low_latency_buffer(group)
+    hidden_size = x.shape[-1]
+    _buffer = get_low_latency_buffer(group, hidden=hidden_size, num_experts=num_experts)
 
     # Do MoE combine
     # For more advanced usages, please refer to the docs of the `combine` function
@@ -265,11 +275,13 @@ def combine_forward(
 
 def combine_backward(
     grad_combined_x: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
+    num_experts: int,
     handle: Tuple,
     group: dist.ProcessGroup,
     previous_event: Optional[EventOverlap] = None,
 ) -> Tuple[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]], EventOverlap]:
-    _buffer = get_low_latency_buffer(group)
+    hidden_size = grad_combined_x[0].shape[-1] if isinstance(grad_combined_x, tuple) else grad_combined_x.shape[-1]
+    _buffer = get_low_latency_buffer(group, num_experts=num_experts, hidden=hidden_size)
 
     # The backward process of MoE combine is actually a dispatch
     # For more advanced usages, please refer to the docs of the `dispatch` function
@@ -313,6 +325,7 @@ class DeepEPDispatch(torch.autograd.Function):
         # save deep comm handle
         ctx.save_for_backward(*handle)
         ctx.group = group
+        ctx.num_experts = num_experts
         if fwd_comm_dtype_fp8:
             # TODO(chenchiyu): Float8Tensor process for recv_x = (x, x_scale)
             pass
@@ -336,7 +349,7 @@ class DeepEPDispatch(torch.autograd.Function):
         # load saved comm handle
         handle = ctx.saved_tensors
         combined_grad_x, combined_grad_recv_topk_weights, event = dispatch_backward(
-            grad_recv_x, grad_recv_topk_weights, handle, ctx.group, buffer_capture()
+            grad_recv_x, grad_recv_topk_weights, ctx.num_experts, handle, ctx.group, buffer_capture()
         )
         event.current_stream_wait()
         return (
@@ -355,16 +368,18 @@ class DeepEPCombine(torch.autograd.Function):
     def forward(
         ctx,
         x: torch.Tensor,
+        num_experts: int,
         handle: Tuple,
         group: dist.ProcessGroup,
         previous_event: Optional[EventOverlap] = None,
         bwd_comm_dtype_fp8: bool = False,
     ) -> Tuple[torch.Tensor, EventOverlap]:
-        combined_x, event = combine_forward(x, handle, group, previous_event)
+        combined_x, event = combine_forward(x, num_experts, handle, group, previous_event)
         # save deep comm handle
         ctx.save_for_backward(*handle)
         ctx.group = group
         ctx.bwd_comm_dtype_fp8 = bwd_comm_dtype_fp8
+        ctx.num_experts = num_experts
         return combined_x, event
 
     @staticmethod
@@ -377,7 +392,7 @@ class DeepEPCombine(torch.autograd.Function):
             raise NotImplementedError("fp8 quant not implemented for combine backward")
         # load saved comm handle
         handle = ctx.saved_tensors
-        grad_x, event = combine_backward(grad_combined_x, handle, ctx.group, buffer_capture())
+        grad_x, event = combine_backward(grad_combined_x, ctx.num_experts, handle, ctx.group, buffer_capture())
         event.current_stream_wait()
         if bwd_comm_dtype_fp8:
             # TODO(chenchiyu): Float8Tensor process for grad_x = (x, x_scale)
@@ -407,12 +422,13 @@ def deep_ep_dispatch(
 
 def deep_ep_combine(
     x: torch.Tensor,
+    num_experts: int,
     deepep_comm_handle: Tuple,
     group: dist.ProcessGroup,
     previous_event: Optional[EventOverlap] = None,
     bwd_comm_dtype_fp8: bool = False,
 ) -> Tuple[torch.Tensor, EventOverlap]:
-    return DeepEPCombine.apply(x, deepep_comm_handle, group, previous_event, bwd_comm_dtype_fp8)  # type: ignore[return-value]
+    return DeepEPCombine.apply(x, num_experts, deepep_comm_handle, group, previous_event, bwd_comm_dtype_fp8)  # type: ignore[return-value]
 
 
 class DeepEPDispatchBwdOnly(torch.autograd.Function):
@@ -423,6 +439,7 @@ class DeepEPDispatchBwdOnly(torch.autograd.Function):
         topk_weights: torch.Tensor,
         recv_x: torch.Tensor,
         recv_topk_weights: torch.Tensor,
+        num_experts: int,
         comm_handle: Tuple,
         group: dist.ProcessGroup,
         previous_event_key: str,
@@ -433,6 +450,7 @@ class DeepEPDispatchBwdOnly(torch.autograd.Function):
         ctx.previous_event_key = previous_event_key
         ctx.finish_event_key = finish_event_key
         ctx.group = group
+        ctx.num_experts = num_experts
         return recv_x, recv_topk_weights
 
     @staticmethod
@@ -444,7 +462,7 @@ class DeepEPDispatchBwdOnly(torch.autograd.Function):
         comm_handle = ctx.saved_tensors
         previous_event = global_event_dict.pop(ctx.previous_event_key)
         combined_grad_x, combined_grad_topk_weights, event = dispatch_backward(
-            grad_recv_x, grad_recv_topk_weights, comm_handle, ctx.group, previous_event
+            grad_recv_x, grad_recv_topk_weights, ctx.num_experts, comm_handle, ctx.group, previous_event
         )
         assert ctx.finish_event_key not in global_event_dict
         global_event_dict[ctx.finish_event_key] = event
@@ -466,6 +484,7 @@ class DeepEPCombineBwdOnly(torch.autograd.Function):
         ctx,
         x: torch.Tensor,
         combined_x: torch.Tensor,
+        num_experts: int,
         comm_handle: Tuple,
         group: dist.ProcessGroup,
         previous_event_key: str,
@@ -478,6 +497,7 @@ class DeepEPCombineBwdOnly(torch.autograd.Function):
         ctx.finish_event_key = finish_event_key
         ctx.group = group
         ctx.bwd_comm_dtype_fp8 = bwd_comm_dtype_fp8
+        ctx.num_experts = num_experts
         return combined_x
 
     @staticmethod
@@ -492,7 +512,7 @@ class DeepEPCombineBwdOnly(torch.autograd.Function):
         # load saved comm handle
         comm_handle = ctx.saved_tensors
         previous_event = global_event_dict.pop(ctx.previous_event_key)
-        grad_x, event = combine_backward(grad_combined_x, comm_handle, ctx.group, previous_event)
+        grad_x, event = combine_backward(grad_combined_x, ctx.num_experts, comm_handle, ctx.group, previous_event)
         assert ctx.finish_event_key not in global_event_dict
         global_event_dict[ctx.finish_event_key] = event
         if bwd_comm_dtype_fp8:
@@ -587,6 +607,7 @@ def deep_ep_dispatch_fwd_bwd_only(  # type: ignore
             topk_weights,
             recv_x,
             recv_topk_weights,
+            num_routed_experts,
             deepep_comm_handle,
             group,
             previous_event_key,
@@ -597,6 +618,7 @@ def deep_ep_dispatch_fwd_bwd_only(  # type: ignore
 # TODO: (yehaochen) Forward and backward logic should be decoupled
 def deep_ep_combine_fwd_bwd_only(
     x: torch.Tensor,
+    num_experts: int,
     deepep_comm_handle: Tuple,
     group: dist.ProcessGroup,
     previous_event_key: str,
@@ -609,7 +631,7 @@ def deep_ep_combine_fwd_bwd_only(
     if is_forward:
         global global_event_dict
         previous_event = global_event_dict.pop(previous_event_key)
-        combined_x, event = combine_forward(x, deepep_comm_handle, group, previous_event)
+        combined_x, event = combine_forward(x, num_experts, deepep_comm_handle, group, previous_event)
         # deepep kernel won't propagate requires_grad
         combined_x.requires_grad_(x.requires_grad)
         assert finish_event_key not in global_event_dict
@@ -619,6 +641,7 @@ def deep_ep_combine_fwd_bwd_only(
         return DeepEPCombineBwdOnly.apply(
             x,
             combined_x,
+            num_experts,
             deepep_comm_handle,
             group,
             previous_event_key,

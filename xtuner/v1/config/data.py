@@ -12,20 +12,20 @@ if TYPE_CHECKING:
     )
 
 
+# TODO: Enhance the configurable fields of dataset config
 class DatasetConfig(BaseModel):
     model_config = ConfigDict(title="Base dataset config for xtuner", extra="allow")
     anno_path: Annotated[str | Path, Parameter(group="dataset")]
-    class_name: Annotated[str, Parameter(group="dataset")] = "JsonlDataset"
+    cache_dir: str | None = None
+    cache_tag: str | None = None
     name: Annotated[str, Parameter(group="dataset")] = "default"
+    class_name: Annotated[str, Parameter(group="dataset")] = "JsonlDataset"
     sample_ratio: Annotated[float, Parameter(group="dataset")] = 1.0
     media_root: Annotated[str, Parameter(group="dataset")] = ""
 
     def build(
         self,
         tokenize_fn: Optional["CachableTokenizeFunction"] = None,
-        max_length: int | None = None,
-        cache_dir: str | None = None,
-        cache_tag: str | None = None,
     ) -> "JsonlDataset":
         if self.class_name == "JsonlDataset":
             from xtuner.v1.datasets import JsonlDataset
@@ -35,9 +35,8 @@ class DatasetConfig(BaseModel):
                 anno_path=self.anno_path,
                 sample_ratio=self.sample_ratio,
                 name=self.name,
-                max_length=max_length,
-                cache_dir=cache_dir,
-                cache_tag=cache_tag,
+                cache_dir=self.cache_dir,
+                cache_tag=self.cache_tag,
             )
         elif self.class_name == "VLMJsonlDataset":
             from xtuner.v1.datasets import VLMJsonlDataset
@@ -48,9 +47,8 @@ class DatasetConfig(BaseModel):
                 sample_ratio=self.sample_ratio,
                 name=self.name,
                 media_root=self.media_root,
-                max_length=max_length,
-                cache_dir=cache_dir,
-                cache_tag=cache_tag,
+                cache_dir=self.cache_dir,
+                cache_tag=self.cache_tag,
             )
         else:
             raise ValueError(f"Unsupported class_name: {self.class_name}")
@@ -68,7 +66,7 @@ class BaseTokenizeFnConfig(Protocol):
 class DataloaderConfig(BaseModel):
     model_config = ConfigDict(title="Base dataloader config for xtuner", extra="allow")
     collator: Literal["sft_llm_collator", "sft_vllm_collator"] = "sft_llm_collator"
-    pack_level: Annotated[str, Parameter()] = "soft"
+    pack_level: Annotated[str, Parameter()] = "expand_soft"  # TODO: (huanghaian) Only provide 1 pad level
     pack_max_length: Annotated[int, Parameter()] = 32768
     max_length: Annotated[int, Parameter()] = 4096
     global_pack: Annotated[bool, Parameter()] = True
@@ -76,13 +74,6 @@ class DataloaderConfig(BaseModel):
     pack_extra_buffer_size: Annotated[int, Parameter()] = 100
     num_workers: Annotated[int, Parameter()] = 0
     padding_token_idx: Annotated[int, Parameter()] = 0
-    cache_dir: Annotated[str | None, Parameter()] = None
-    cache_tag: Annotated[str | None, Parameter()] = None
-
-    def model_post_init(self, __context) -> None:
-        assert self.pack_max_length >= self.max_length, (
-            f"pack_max_length {self.pack_max_length} must be larger than max_length {self.max_length}"
-        )
 
     def build_collator(self):
         from xtuner.v1.datasets import sft_llm_collator, sft_vllm_collator

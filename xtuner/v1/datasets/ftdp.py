@@ -639,7 +639,9 @@ def format_sub_role(messages: List[Dict], roles_cfg) -> List[Dict]:
     return new_message
 
 
-def ftdp_tokenize(tokenizer: "PreTrainedTokenizer", messages: list[dict] | dict, template_config) -> Dict:
+def ftdp_tokenize(
+    tokenizer: "PreTrainedTokenizer", messages: list[dict] | dict, template_config, max_length: int | None = None
+) -> Dict:
     token_ids: list[int] = []
 
     # HACK for delivery format
@@ -690,7 +692,7 @@ def ftdp_tokenize(tokenizer: "PreTrainedTokenizer", messages: list[dict] | dict,
     if tokenizer.bos_token_id:
         token_ids = [tokenizer.bos_token_id] + token_ids
 
-    max_len = template_config.get("max_len", MAX_LEN)
+    max_len = max_length or template_config.get("max_len", MAX_LEN)
     token_ids = token_ids[:max_len]
     labels = [x if x >= 0 else IGNORE_INDEX for x in token_ids]
 
@@ -713,15 +715,17 @@ class FtdpTokenizeFunction(CachableTokenizeFunction):
         tokenizer: "PreTrainedTokenizer",
         chat_template="internlm2",
         tokenizer_hash: str | None = None,
+        max_length: int | None = None,
         hash: str | None = None,
     ):
         self.tokenizer = tokenizer
         self.template_config = ROLE_CONFIG[chat_template]
         self._hash = hash
         self._tokenizer_hash = tokenizer_hash
+        self.max_length = max_length
 
     def __call__(self, item: dict | list, **kwargs) -> DataItem:
-        return ftdp_tokenize(self.tokenizer, item, self.template_config)  # type: ignore[return-value]
+        return ftdp_tokenize(self.tokenizer, item, self.template_config, max_length=self.max_length)  # type: ignore[return-value]
 
     def hash(self) -> str:
         if self._hash is None:
@@ -783,6 +787,7 @@ class FtdpTokenizedDataMapping(CachableTokenizeFunction):
 class FTDPTokenizeFnConfig(BaseModel):
     model_config = ConfigDict(title="Base dataset config for xtuner", extra="allow")
     chat_template: Annotated[str, Parameter(group="tokenize_fn")] = "internlm2"
+    max_length: int | None = None
     hash: Annotated[str | None, Parameter(group="tokenize_fn")] = None
 
     def build(

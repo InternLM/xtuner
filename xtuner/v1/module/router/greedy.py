@@ -1,4 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import os
 from typing import Literal
 
 import torch
@@ -40,6 +41,10 @@ class GreedyRouter(nn.Module, RouterProtocol):
         self.router_scaling_factor = router_scaling_factor
 
     def forward(self, logits: torch.Tensor) -> RouterResults:
+        if os.getenv("XTUNER_ROUTER_DEBUG") == "true":
+            noise = torch.randn_like(logits) * 50
+            logits = logits + noise
+
         # TODO: (yehaochen) Support sigmoid
         if self.scoring_func == "sigmoid":
             routing_weights = logits.sigmoid()

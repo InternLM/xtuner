@@ -580,7 +580,7 @@ class BaseModel(nn.Module):
                 _prefix = f"{module_prefix}.{name}" if module_prefix else name
                 _load_params_from_module(child, _prefix)  # type: ignore
 
-        with profile_time_and_memory("HF loading cost"):
+        with profile_time_and_memory("[HF loading cost]"):
             _load_params_from_module(self, "")  # type: ignore
             torch.cuda.synchronize()
             torch.cpu.synchronize()

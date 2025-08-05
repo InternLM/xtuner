@@ -66,6 +66,7 @@ class CELossContext(BaseModel):
                 chunk_size=self.chunk_size,
             )
             loss_ctx = self.__class__(
+                loss_class=self.loss_class,
                 loss_reduction=self.loss_reduction,
                 label_shifted=self.label_shifted,
                 forward_item=celoss_forward_item,
@@ -86,6 +87,7 @@ class CELossContext(BaseModel):
 
             forward_item = CEForwardItem(
                 labels=labels,
+                loss_class=self.loss_class,
                 loss_reduction=self.loss_reduction,
                 loss_weight=loss_weights,
                 global_sum_loss_weight=global_sum_loss_weight,
@@ -93,6 +95,7 @@ class CELossContext(BaseModel):
                 chunk_size=self.chunk_size,
             )
             loss_ctx = self.__class__(
+                loss_class=self.loss_class,
                 loss_reduction=self.loss_reduction,
                 label_shifted=self.label_shifted,
                 forward_item=forward_item,
@@ -281,6 +284,7 @@ class ChunkCELoss(torch.autograd.Function):
             grad_inputs_chunk = grad_inputs_chunks[i]
 
             chunk_forward_item = CEForwardItem(
+                labels=labels_chunk,
                 loss_reduction=froward_item.loss_reduction,
                 loss_weight=loss_weight_chunk,
                 grad_accumulation_steps=froward_item.grad_accumulation_steps,
@@ -294,9 +298,9 @@ class ChunkCELoss(torch.autograd.Function):
                 loss_fn,
                 forward_item=chunk_forward_item,
             )
-            accumulated_loss.add_(chunk_loss)
-            grad_inputs_chunk.copy_(chunk_grad_input)
-            grad_weight.add_(chunk_grad_weight)
+            accumulated_loss.add_(chunk_loss.div_(len(hidden_states_chunks)))
+            grad_inputs_chunk.copy_(chunk_grad_input.div_(len(hidden_states_chunks)))
+            grad_weight.add_(chunk_grad_weight.div_(len(hidden_states_chunks)))
 
         ctx.save_for_backward(grad_inputs, grad_weight)
         return accumulated_loss, None

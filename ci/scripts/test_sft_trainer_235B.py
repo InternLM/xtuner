@@ -4,7 +4,13 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+import torch
 import torch.distributed as dist
+import logging
+
+import torch._dynamo
+torch._dynamo.config.verbose = "1"
+
 
 from xtuner.v1.config import (
     AdamWConfig,
@@ -13,11 +19,13 @@ from xtuner.v1.config import (
     FSDPConfig,
     LRConfig,
     BalancingLossConfig,
-    ZLossConfig
+    ZLossConfig,
+    Float8Config,
+    ScalingGranularity,
 )
-from xtuner.v1.datasets import FTDPTokenizeFnConfig
+from xtuner.v1.datasets import FtdpTokenizeFunction, FTDPTokenizeFnConfig
 from xtuner.v1.loss import CELossContext
-from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
+from xtuner.v1.model.moe.qwen3 import Qwen3MoE235BA22Config
 from xtuner.v1.train.trainer import Trainer
 from xtuner.v1.utils.compile import maybe_compile
 import argparse
@@ -215,14 +223,15 @@ def plot_comparison_curves(history_data, current_data, title, output_root: Path)
 
 
 def main():
+    # maybe_compile.clear_compile_targets()
     args = parse_args()
     os.environ["DG_CACHE_DIR"] = f"/tmp/.deep_gemm-{os.getenv('RANK', '0')}"
 
     moe_cfgs = [
-        (Qwen3MoE30BA3Config(balancing_loss_cfg=BalancingLossConfig(), z_loss_cfg=ZLossConfig()), "ep1"),
-        (Qwen3MoE30BA3Config(ep_size=8, dispatcher="all2all"), "ep8"),
+        (Qwen3MoE235BA22Config(balancing_loss_cfg=BalancingLossConfig(), z_loss_cfg=ZLossConfig()), "ep1"),
+        # (Qwen3MoE235BA22Config(ep_size=8, dispatcher="all2all"), "ep8"),
         # (
-        #     Qwen3MoE30BA3Config(
+        #     Qwen3MoE235BA22Config(
         #         ep_size=1,
         #         float8_cfg=Float8Config(
         #             scaling_granularity_gemm=ScalingGranularity.TILEWISE,
@@ -235,24 +244,25 @@ def main():
         optim_cfg = AdamWConfig(lr=6e-05)
         lr_cfg = LRConfig(lr_type="cosine", lr_min=1e-6)
         fsdp_cfg = FSDPConfig(
-            torch_compile=True,
             cpu_offload=False,
             ep_size=moe_cfg.ep_size,
+            torch_compile=True,
             # hsdp_sharding_size=4,
         )
         dataset_config = [
             {
-                "dataset": DatasetConfig(name="alpaca", anno_path=ALPACA_PATH, sample_ratio=1.0),
-                "tokenize_fn": FTDPTokenizeFnConfig(),
+                "dataset": DatasetConfig(name="alpaca", anno_path=ALPACA_PATH, sample_ratio=100, cache_dir="/mnt/shared-storage-user/yehaochen/cache/"),
+                "tokenize_fn": FTDPTokenizeFnConfig(max_length=4096),
             },
         ]
 
         dataloader_config = DataloaderConfig(
-            pack_max_length=16384,
-            max_length=16384,
+            pack_max_length=65536,
+            num_workers=8,
         )
         work_dir = f"{args.work_dir}-{name}"
-        loss_ctx = CELossContext()
+        # loss_ctx = CELossContext()
+        loss_ctx = CELossContext(loss_class="chunk_cross_entropy")
         trainer = Trainer(
             load_from=QWEN3_MOE_PATH,
             model_cfg=moe_cfg,
@@ -263,10 +273,12 @@ def main():
             loss_ctx=loss_ctx,
             lr_cfg=lr_cfg,
             tokenizer_path=QWEN3_MOE_PATH,
-            global_batch_size=16,
-            epoch_num=1,
+            global_batch_size=256,
             work_dir=work_dir,
             seed=0,
+            epoch_num=10,
+            profile_step=20,
+            profile_memory=True,
         )
         trainer.fit()
         if dist.get_rank() == 0:

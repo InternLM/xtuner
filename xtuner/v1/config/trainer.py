@@ -36,6 +36,9 @@ class TrainerConfig(BaseModel):
     epoch_num: int | None = None
     resume: ResumeConfig | None = None
     strict_load: bool = True
+    profile_step: int | None = None
+    profile_time: bool = True
+    profile_memory: bool = False
     seed: int = 42
     dist_backend: str = "cpu:gloo,cuda:nccl"
     debug: bool = False
