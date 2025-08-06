@@ -72,106 +72,6 @@ class BaseModel(nn.Module):
     def __init__(self):
         super().__init__()
 
-    def save_hf(self, hf_dir: Path | str, save_dtype: torch.dtype = torch.bfloat16):
-        """Save the hf model to the given directory.
-
-        Args:
-            hf_dir (str): The directory to save the model.
-            save_dtype (torch.dtype): The dtype to save the model parameters, bfloat16 or float8.
-        """
-        if isinstance(hf_dir, str):
-            hf_dir = Path(hf_dir)
-        hf_dir.mkdir(parents=True, exist_ok=True)
-
-        DEVICE_MODULE.empty_cache()
-        assert save_dtype in [torch.float8_e4m3fn, torch.bfloat16], f"save_dtype {save_dtype} is not supported"
-
-        # TODO: Support fp8 saving
-
-        shard_gen = self._get_shard_hf_param(self._group_param_by_load_spec(LoadEnum.SHARD), dtype=save_dtype)
-        same_gen = self._get_same_hf_param(self._group_param_by_load_spec(LoadEnum.SAME), dtype=save_dtype)
-        fused_gen = self._get_fused_hf_param(self._group_param_by_load_spec(LoadEnum.FUSED), dtype=save_dtype)
-
-        # We do not save HF tensor with FSDP sharded tensor since if 1 HF tensor is sharded by 2 FSDP
-        # rank, it's hard to determine which FSDP rank should save the HF tensor.
-        if self.fsdp_mesh is not None:
-            if self.hsdp_mesh:
-                # is_fused_save_rank = (dist.get_rank(group=self.hsdp_mesh.get_group(0)) == 0 and dist.get_rank(group=self.hsdp_mesh.get_group(1)) == 0)
-                is_fused_save_rank = self.hsdp_mesh.get_coordinate() == [0, 0]
-            else:
-                is_fused_save_rank = self.fsdp_mesh.get_local_rank() == 0
-        else:
-            is_fused_save_rank = dist.get_rank() == 0
-
-        is_others_save_rank = not dist.is_initialized() or dist.get_rank() == 0
-
-        if is_fused_save_rank or is_others_save_rank:
-            # save_executor = ThreadPoolExecutor(max_workers=16)
-            save_executor = ProcessPoolExecutor(max_workers=16)
-        else:
-            save_executor = None
-
-        if dist.is_initialized():
-            if self.fsdp_mesh is not None:
-                if self.hsdp_mesh:
-                    save_rank = dist.get_rank() % (dist.get_world_size() // self.hsdp_mesh.size())
-                else:
-                    save_rank = dist.get_rank() % (dist.get_world_size() // self.fsdp_mesh.size())
-            else:
-                save_rank = dist.get_rank()
-        else:
-            save_rank = 0
-
-        # Sepreately save fused parameters and others to make sure each saving rank will not save
-        # dupilicated keys
-        #
-        save_futures = []
-        weight_map = {}
-        safetensor_index = 0
-
-        for name_list, hf_tensor_list in fused_gen:
-            safetensor_index += 1
-            safetensor_name = f"model-{safetensor_index:04d}-fused-save_rank{save_rank}.safetensors"
-            if is_fused_save_rank:
-                weight_map.update({name: safetensor_name for name in name_list})
-                assert save_executor is not None, "Internal Error, save_executor should not be None"
-                future = save_executor.submit(
-                    save_file,
-                    dict(zip(name_list, hf_tensor_list)),
-                    hf_dir / safetensor_name,
-                )
-                save_futures.append(future)
-
-        safetensor_index = 0
-        for name_list, hf_tensor_list in chain(same_gen, shard_gen):
-            safetensor_index += 1
-            safetensor_name = f"model-{safetensor_index:04d}-others-save_rank{save_rank}.safetensors"
-            if is_others_save_rank:
-                weight_map.update({name: safetensor_name for name in name_list})
-                assert save_executor is not None, "Internal Error, save_executor should not be None"
-                future = save_executor.submit(
-                    save_file,
-                    dict(zip(name_list, hf_tensor_list)),
-                    hf_dir / safetensor_name,
-                )
-                save_futures.append(future)
-
-        if save_executor is not None:
-            wait(save_futures)
-            save_executor.shutdown()
-
-        weight_map_list: list[dict] | list[None] = [None for _ in range(dist.get_world_size())]
-        dist.all_gather_object(weight_map_list, weight_map)
-        weight_map_list = cast(list[dict], weight_map_list)
-        weight_map = reduce(lambda x, y: x | y, weight_map_list)
-
-        if dist.get_rank() == 0:
-            with open(hf_dir / "model.safetensors.index.json", "w") as f:
-                index = {"weight_map": weight_map}
-                json.dump(index, f, indent=2, ensure_ascii=False)
-
-        torch.distributed.barrier()
-
     def from_hf(self, hf_path: str | Path, strict: bool = True) -> tuple:
         if isinstance(hf_path, Path):
             hf_path = str(hf_path)
@@ -197,6 +97,10 @@ class BaseModel(nn.Module):
     ):
         """Fully shard the model parameters."""
         raise NotImplementedError
+
+    def save_hf(self, hf_dir: Path | str, save_dtype: torch.dtype = torch.bfloat16):
+        with profile_time_and_memory(f"[Saving HF to {hf_dir} cost]"):
+            self._save_hf(hf_dir=hf_dir, save_dtype=save_dtype)
 
     def _init_load_spec(self) -> None:
         # NOTE: (yehaochen) This is a workaround to distinguish between different parameter HF loading methods
@@ -528,6 +432,106 @@ class BaseModel(nn.Module):
             + math.ceil(same_size / self.SAFETENSOR_SIZE)
             + math.ceil(fused_size / self.SAFETENSOR_SIZE)
         )
+
+    def _save_hf(self, hf_dir: Path | str, save_dtype: torch.dtype = torch.bfloat16):
+        """Save the hf model to the given directory.
+
+        Args:
+            hf_dir (str): The directory to save the model.
+            save_dtype (torch.dtype): The dtype to save the model parameters, bfloat16 or float8.
+        """
+        if isinstance(hf_dir, str):
+            hf_dir = Path(hf_dir)
+        hf_dir.mkdir(parents=True, exist_ok=True)
+
+        DEVICE_MODULE.empty_cache()
+        assert save_dtype in [torch.float8_e4m3fn, torch.bfloat16], f"save_dtype {save_dtype} is not supported"
+
+        # TODO: Support fp8 saving
+
+        shard_gen = self._get_shard_hf_param(self._group_param_by_load_spec(LoadEnum.SHARD), dtype=save_dtype)
+        same_gen = self._get_same_hf_param(self._group_param_by_load_spec(LoadEnum.SAME), dtype=save_dtype)
+        fused_gen = self._get_fused_hf_param(self._group_param_by_load_spec(LoadEnum.FUSED), dtype=save_dtype)
+
+        # We do not save HF tensor with FSDP sharded tensor since if 1 HF tensor is sharded by 2 FSDP
+        # rank, it's hard to determine which FSDP rank should save the HF tensor.
+        if self.fsdp_mesh is not None:
+            if self.hsdp_mesh:
+                # is_fused_save_rank = (dist.get_rank(group=self.hsdp_mesh.get_group(0)) == 0 and dist.get_rank(group=self.hsdp_mesh.get_group(1)) == 0)
+                is_fused_save_rank = self.hsdp_mesh.get_coordinate() == [0, 0]
+            else:
+                is_fused_save_rank = self.fsdp_mesh.get_local_rank() == 0
+        else:
+            is_fused_save_rank = dist.get_rank() == 0
+
+        is_others_save_rank = not dist.is_initialized() or dist.get_rank() == 0
+
+        if is_fused_save_rank or is_others_save_rank:
+            # save_executor = ThreadPoolExecutor(max_workers=16)
+            save_executor = ProcessPoolExecutor(max_workers=16)
+        else:
+            save_executor = None
+
+        if dist.is_initialized():
+            if self.fsdp_mesh is not None:
+                if self.hsdp_mesh:
+                    save_rank = dist.get_rank() % (dist.get_world_size() // self.hsdp_mesh.size())
+                else:
+                    save_rank = dist.get_rank() % (dist.get_world_size() // self.fsdp_mesh.size())
+            else:
+                save_rank = dist.get_rank()
+        else:
+            save_rank = 0
+
+        # Sepreately save fused parameters and others to make sure each saving rank will not save
+        # dupilicated keys
+        #
+        save_futures = []
+        weight_map = {}
+        safetensor_index = 0
+
+        for name_list, hf_tensor_list in fused_gen:
+            safetensor_index += 1
+            safetensor_name = f"model-{safetensor_index:04d}-fused-save_rank{save_rank}.safetensors"
+            if is_fused_save_rank:
+                weight_map.update({name: safetensor_name for name in name_list})
+                assert save_executor is not None, "Internal Error, save_executor should not be None"
+                future = save_executor.submit(
+                    save_file,
+                    dict(zip(name_list, hf_tensor_list)),
+                    hf_dir / safetensor_name,
+                )
+                save_futures.append(future)
+
+        safetensor_index = 0
+        for name_list, hf_tensor_list in chain(same_gen, shard_gen):
+            safetensor_index += 1
+            safetensor_name = f"model-{safetensor_index:04d}-others-save_rank{save_rank}.safetensors"
+            if is_others_save_rank:
+                weight_map.update({name: safetensor_name for name in name_list})
+                assert save_executor is not None, "Internal Error, save_executor should not be None"
+                future = save_executor.submit(
+                    save_file,
+                    dict(zip(name_list, hf_tensor_list)),
+                    hf_dir / safetensor_name,
+                )
+                save_futures.append(future)
+
+        if save_executor is not None:
+            wait(save_futures)
+            save_executor.shutdown()
+
+        weight_map_list: list[dict] | list[None] = [None for _ in range(dist.get_world_size())]
+        dist.all_gather_object(weight_map_list, weight_map)
+        weight_map_list = cast(list[dict], weight_map_list)
+        weight_map = reduce(lambda x, y: x | y, weight_map_list)
+
+        if dist.get_rank() == 0:
+            with open(hf_dir / "model.safetensors.index.json", "w") as f:
+                index = {"weight_map": weight_map}
+                json.dump(index, f, indent=2, ensure_ascii=False)
+
+        torch.distributed.barrier()
 
     def _load_params(self, checkpoint_loader: HFCheckpointLoader, strict=True) -> tuple:
         matched_hf_keys: set[str] = set(checkpoint_loader.weight_map)

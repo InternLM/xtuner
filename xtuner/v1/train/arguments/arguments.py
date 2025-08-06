@@ -7,14 +7,13 @@ from cyclopts.group import Group
 from mmengine import list_dir_or_file
 from pydantic import BaseModel, ConfigDict
 
-from transformers import AutoConfig
 from xtuner.v1.config import FSDPConfig, TrainerConfig
 from xtuner.v1.config.base_model import TransformerConfig
 from xtuner.v1.config.data import DataloaderConfig, DatasetConfig, DatasetConfigList
 from xtuner.v1.config.optim import AdamWConfig, LRConfig
 from xtuner.v1.datasets import FTDPTokenizeFnConfig
 from xtuner.v1.model import get_model_config, get_model_config_from_hf
-from xtuner.v1.utils import Config, get_logger
+from xtuner.v1.utils import Config, get_logger, is_hf_model_path
 
 
 logger = get_logger()
@@ -80,7 +79,7 @@ class TrainingArguments(BaseModel):
         if self.tokenizer_path is None:
             load_from = self.load_from
             assert load_from is not None, "Transformer model path should be set if `tokenizer_path` is None"
-            assert self._is_hf_model_path(), (
+            assert is_hf_model_path(load_from), (
                 "Transformer model path should be a valid HuggingFace model path if `tokenizer_path` is None"
             )
             self.tokenizer_path = cast(Path, Path(load_from))
@@ -162,18 +161,7 @@ class TrainingArguments(BaseModel):
         assert self.load_from is not None, "`load_from` must be set if `model_cfg` is not set"
 
         model_path = Path(self.load_from)
-        if self._is_hf_model_path():
+        if is_hf_model_path(self.load_from):
             return get_model_config_from_hf(model_path)
         else:
             raise NotImplementedError
-
-    def _is_hf_model_path(self) -> bool:
-        try:
-            AutoConfig.from_pretrained(self.load_from)
-        except KeyboardInterrupt as e:
-            raise e
-        except Exception:
-            logger.debug(f"Model path {self.load_from} is not a valid HuggingFace model path.")
-            return False
-        else:
-            return True
