@@ -32,7 +32,14 @@ def sft_llm_collator(
 
             for drop_from in range(len(instance) - 1, -1, -1):
                 if total_num_tokens - instance[drop_from]["num_tokens"] <= pack_max_length:
-                    instance = instance[:drop_from]
+                    if drop_from != 0:
+                        instance = instance[:drop_from]
+                    else:
+                        data_item = instance[0]
+                        data_item["input_ids"] = data_item["input_ids"][:pack_max_length]
+                        data_item["labels"] = data_item["labels"][:pack_max_length]
+                        data_item["num_tokens"] = len(data_item["input_ids"])
+                        instance = [data_item]
                     break
                 else:
                     total_num_tokens -= instance[drop_from]["num_tokens"]

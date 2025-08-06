@@ -652,3 +652,9 @@ class Trainer:
                 target_path = save_hf_path / file.name
                 if self.rank == 0:
                     copy(file, target_path)
+
+        meta_path = self.work_dir / self.META_PATH
+
+        if self.rank == 0:
+            with meta_path.open("w") as f:
+                f.write(self.meta.model_dump_json(indent=2))
