@@ -6,7 +6,7 @@ from .enum_helper import StrEnum
 from .exception_helper import ParallelConfigException
 from .loader import HFCheckpointLoader
 from .logger import get_logger, log_format
-from .misc import XTUNER_DETERMINISTIC, SharedMemory, get_padding_length
+from .misc import XTUNER_DETERMINISTIC, SharedMemory, get_padding_length, is_hf_model_path, record_git_info
 from .pad import pad_to_max_length, pad_to_multiple_of
 from .profile import profile_time_and_memory
 from .state import ForwardState
@@ -30,4 +30,6 @@ __all__ = [
     "log_format",
     "XTUNER_DETERMINISTIC",
     "Config",
+    "record_git_info",
+    "is_hf_model_path",
 ]

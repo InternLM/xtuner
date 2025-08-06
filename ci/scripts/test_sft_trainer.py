@@ -250,6 +250,7 @@ def main():
         dataloader_config = DataloaderConfig(
             pack_max_length=16384,
             max_length=16384,
+            pack_level="soft",
         )
         work_dir = f"{args.work_dir}-{name}"
         loss_ctx = CELossContext()
@@ -266,11 +267,13 @@ def main():
             global_batch_size=16,
             epoch_num=1,
             work_dir=work_dir,
+            hf_interval=5,
+            hf_max_keep=2,
             seed=0,
         )
         trainer.fit()
         if dist.get_rank() == 0:
-            rank0_log_path = Path(work_dir) / "rank0.log"
+            rank0_log_path = Path(trainer.exp_dir) / "rank0.log"
             (
                 cur_lr,
                 cur_text_tokens,
@@ -280,7 +283,7 @@ def main():
                 cur_tgs,
             ) = extract_data_from_log(rank0_log_path)
             work_dir = Path(work_dir)
-            plot_dir = work_dir / "plots"
+            plot_dir = trainer.exp_dir / "plots"
             plot_dir.mkdir(parents=True, exist_ok=True)
             plot_comparison_curves(lr, cur_lr, "lr", output_root=plot_dir)
             plot_comparison_curves(

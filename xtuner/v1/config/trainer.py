@@ -36,6 +36,8 @@ class TrainerConfig(BaseModel):
     epoch_num: int | None = None
     resume: ResumeConfig | None = None
     strict_load: bool = True
+    hf_interval: int | None = None
+    hf_max_keep: int | None = None
     profile_step: int | None = None
     profile_time: bool = True
     profile_memory: bool = False

@@ -796,5 +796,9 @@ class FTDPTokenizeFnConfig(BaseModel):
         from xtuner.v1.datasets import FtdpTokenizeFunction
 
         return FtdpTokenizeFunction(
-            tokenizer, chat_template=self.chat_template, hash=self.hash, tokenizer_hash=tokenizer_hash
+            tokenizer,
+            chat_template=self.chat_template,
+            hash=self.hash,
+            tokenizer_hash=tokenizer_hash,
+            max_length=self.max_length,
         )
