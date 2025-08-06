@@ -4,8 +4,8 @@ import torch.nn as nn
 from xtuner.v1.loss import CELossContext
 from xtuner.v1.loss.ce_loss import len2weight
 from xtuner.v1.data_proto import SequenceContext
-from xtuner.v1.engine.utils import cal_global_grad_tokens
 from xtuner.v1.utils.test_utils import assert_verbose_allclose
+from xtuner.v1.loss.utils import cal_global_grad_tokens
 import parametrize
 
 
@@ -38,6 +38,7 @@ class TestCELossModel(TestCase):
         B, S, D = 2, 4097, self.input_dim
 
         targets = []
+        data_batch = []
         for _ in range(grad_accumulation_steps):
             target = torch.randint(0, D, (B * S,), device=self.device, dtype=torch.long)
             # Assign some random number of elements as ignore_index
@@ -48,7 +49,23 @@ class TestCELossModel(TestCase):
             target[indices_to_assign] = -100
             target = target.reshape(B, S)
             targets.append(target)
+
+            # Note: input_ids/position_ids/cu_seq_lens_q/max_length_q 等都是假数据
+            seq_ctx = SequenceContext(input_ids=torch.ones((1, 2), device=self.device, dtype=torch.long),
+                                      position_ids=torch.ones((1, 2), device=self.device, dtype=torch.long),
+                                      cu_seq_lens_q=torch.tensor(1, device=self.device, dtype=torch.int32),
+                                      cu_seq_lens_k=torch.tensor(1, device=self.device, dtype=torch.int32),
+                                      max_length_q=1,
+                                      max_length_k=1,
+                                      device=self.device,
+                                      )
+            seq_ctx.to(self.device)
+            data_batch.append({'seq_ctx': seq_ctx, 'labels': target})
+
         global_grad_tokens = cal_global_grad_tokens(targets)
+
+        loss_ctx = CELossContext(loss_class=loss_class, chunk_size=chunk_size)
+        data_batch = loss_ctx.build_list_ctx(data_batch, grad_accumulation_steps=grad_accumulation_steps)
 
         for i in range(grad_accumulation_steps):
             _tensor = torch.randn(B, S, D, device=self.device, dtype=self.dtype) * 2
@@ -63,20 +80,7 @@ class TestCELossModel(TestCase):
             loss1 = torch_ce(logits.float().view(-1, self.vocab_size), target.view(-1))
             loss1 = loss1 * (target >= 0).sum() / global_grad_tokens
 
-            # Note: input_ids/position_ids/cu_seq_lens_q/max_length_q 等都是假数据
-            seq_ctx = SequenceContext(input_ids=torch.ones((1, 2), device=self.device, dtype=torch.long),
-                                      position_ids=torch.ones((1, 2), device=self.device, dtype=torch.long),
-                                      cu_seq_lens_q=torch.tensor(1, device=self.device, dtype=torch.int32),
-                                      cu_seq_lens_k=torch.tensor(1, device=self.device, dtype=torch.int32),
-                                      max_length_q=1,
-                                      max_length_k=1,
-                                      )
-            seq_ctx.to(self.device)
-
-            loss_ctx = CELossContext(loss_class=loss_class, chunk_size=chunk_size)
-            loss_ctx = loss_ctx.build_forward_item(seq_ctx, target,
-                                                   grad_accumulation_steps=grad_accumulation_steps,
-                                                   global_grad_tokens=global_grad_tokens)
+            loss_ctx = data_batch[i]['loss_ctx']
             loss2, _ = loss_ctx.forward(_input2, self.lm_head2.weight)
 
             assert_verbose_allclose(loss1, loss2, atol=atol, rtol=rtol)
@@ -118,11 +122,9 @@ class TestCELossModel(TestCase):
     def test_other_loss_reduction(self, loss_reduction, loss_class, grad_accumulation_steps, chunk_size, atol, rtol):
         B, S, D = 2, 4097, self.input_dim
 
-        for i in range(grad_accumulation_steps):
-            _tensor = torch.randn(B, S, D, device=self.device, dtype=self.dtype) * 2
-            _input = _tensor.detach().clone().requires_grad_(True)
-            _input2 = _tensor.detach().clone().requires_grad_(True)
-
+        targets = []
+        data_batch = []
+        for _ in range(grad_accumulation_steps):
             target = torch.randint(0, D, (B * S,), device=self.device, dtype=torch.long)
             # Assign some random number of elements as ignore_index
             num_elements_to_assign = torch.randint(
@@ -131,6 +133,31 @@ class TestCELossModel(TestCase):
             indices_to_assign = torch.randperm(B * S)[:num_elements_to_assign]  # Randomly select indices
             target[indices_to_assign] = -100
             target = target.reshape(1, -1)
+            targets.append(target)
+
+            # Note: input_ids/position_ids/cu_seq_lens_q/max_length_q 等都是假数据
+            cu_seq_lens_q = torch.tensor([0, S, 2 * S], device=self.device, dtype=torch.int32)
+            # Note: input_ids/position_ids/max_length_q 等都是假数据
+            seq_ctx = SequenceContext(input_ids=torch.ones((1, 2), device=self.device, dtype=torch.long),
+                                      position_ids=torch.ones((1, 2), device=self.device, dtype=torch.long),
+                                      cu_seq_lens_q=cu_seq_lens_q,
+                                      cu_seq_lens_k=cu_seq_lens_q,
+                                      max_length_q=1,
+                                      max_length_k=1,
+                                      device=self.device,
+                                      )
+            seq_ctx.to(self.device)
+            data_batch.append({'seq_ctx': seq_ctx, 'labels': target})
+
+        loss_ctx = CELossContext(loss_reduction=loss_reduction, loss_class=loss_class, chunk_size=chunk_size)
+        data_batch = loss_ctx.build_list_ctx(data_batch, grad_accumulation_steps=grad_accumulation_steps)
+
+        for i in range(grad_accumulation_steps):
+            _tensor = torch.randn(B, S, D, device=self.device, dtype=self.dtype) * 2
+            _input = _tensor.detach().clone().requires_grad_(True)
+            _input2 = _tensor.detach().clone().requires_grad_(True)
+
+            target = targets[i]
             _input_ = _input.reshape(1, -1, D)
             _input2_ = _input2.reshape(1, -1, D)
 
@@ -150,20 +177,7 @@ class TestCELossModel(TestCase):
             loss1 = loss1.sum() / loss_weights.sum()
             loss1 = loss1 / grad_accumulation_steps
 
-            cu_seq_lens_q = torch.tensor([0, S, 2*S], device=self.device, dtype=torch.int32)
-            # Note: input_ids/position_ids/max_length_q 等都是假数据
-            seq_ctx = SequenceContext(input_ids=torch.ones((1, 2), device=self.device, dtype=torch.long),
-                                      position_ids=torch.ones((1, 2), device=self.device, dtype=torch.long),
-                                      cu_seq_lens_q=cu_seq_lens_q,
-                                      cu_seq_lens_k=cu_seq_lens_q,
-                                      max_length_q=1,
-                                      max_length_k=1,
-                                      )
-            seq_ctx.to(self.device)
-
-            loss_ctx = CELossContext(loss_reduction=loss_reduction, loss_class=loss_class, chunk_size=chunk_size)
-            loss_ctx = loss_ctx.build_forward_item(seq_ctx, target,
-                                                   grad_accumulation_steps=grad_accumulation_steps)
+            loss_ctx = data_batch[i]['loss_ctx']
             loss2, _ = loss_ctx.forward(_input2_, self.lm_head2.weight)
 
             assert_verbose_allclose(loss1, loss2, atol=atol, rtol=rtol)

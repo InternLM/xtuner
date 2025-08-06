@@ -66,9 +66,8 @@ class BaseTokenizeFnConfig(Protocol):
 class DataloaderConfig(BaseModel):
     model_config = ConfigDict(title="Base dataloader config for xtuner", extra="allow")
     collator: Literal["sft_llm_collator", "sft_vllm_collator"] = "sft_llm_collator"
-    pack_level: Annotated[str, Parameter()] = "expand_soft"  # TODO: (huanghaian) Only provide 1 pad level
+    pack_level: Annotated[str, Parameter()] = "soft"  # TODO: (huanghaian) Only provide 1 pad level
     pack_max_length: Annotated[int, Parameter()] = 32768
-    max_length: Annotated[int, Parameter()] = 4096
     global_pack: Annotated[bool, Parameter()] = True
     group_by_length: Annotated[bool, Parameter()] = True
     pack_extra_buffer_size: Annotated[int, Parameter()] = 100

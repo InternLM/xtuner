@@ -1,4 +1,4 @@
-from typing import Callable, Literal
+from typing import Callable, Literal, cast
 
 import torch
 import torch.nn.functional as F
@@ -7,7 +7,8 @@ from pydantic import BaseModel
 from torch import nn
 from typing_extensions import Self
 
-from xtuner.v1.data_proto import SequenceContext
+from ..data_proto.utils import pad_to_multiple_of, split_for_sequence_parallel
+from .utils import cal_global_grad_tokens
 
 
 class CEForwardItem(BaseModel):
@@ -65,64 +66,122 @@ class CELossContext(BaseModel):
         else:
             raise NotImplementedError
 
-    def build_forward_item(
-        self,
-        seq_ctx: SequenceContext,
-        labels: torch.Tensor,
-        grad_accumulation_steps: int,
-        global_grad_tokens: torch.IntTensor | None = None,
-    ) -> Self:
-        device = seq_ctx.cu_seq_lens_q.device
-        if self.loss_reduction == "global":
-            assert global_grad_tokens is not None, "Global grad tokens must be provided for global reduction."
-            # 考虑 chunk 情况下，loss_weights 的分子应该是 1
-            loss_weights = 1 / global_grad_tokens * dist.get_world_size()
-            forward_item = CEForwardItem(
-                labels=labels.to(device),
-                loss_reduction=self.loss_reduction,
-                loss_weight=loss_weights.to(device),
-                grad_accumulation_steps=grad_accumulation_steps,
-                chunk_size=self.chunk_size,
-            )
-            loss_ctx = self.__class__(
-                loss_class=self.loss_class,
-                loss_reduction=self.loss_reduction,
-                label_shifted=self.label_shifted,
-                forward_item=forward_item,
+    def build_list_ctx(self, data_batch: list, grad_accumulation_steps: int, data_mesh=None, device=None) -> list:
+        if data_mesh is None:
+            dp_size = dist.get_world_size()
+            sp_mesh = None
+        else:
+            dp_mesh = data_mesh["dp"]
+            dp_size = dp_mesh.size()
+            # TODO: 需要判断 sp_mesh 是否和 seq_ctx 里面是否一致，不一致要么报错或者赋予 sp？
+            sp_mesh = data_mesh["sp"]
+
+        if device is None:
+            device = data_batch[0]["seq_ctx"].device
+
+        label_list = [i["labels"] for i in data_batch]
+        global_grad_tokens = cal_global_grad_tokens(label_list, sp_mesh)
+        loss_ctx_list = []
+        for data in data_batch:
+            labels = data["labels"]
+            data["seq_ctx"] = data["seq_ctx"].to(device)
+            seq_ctx = data["seq_ctx"]
+            if self.loss_reduction == "global":
+                assert global_grad_tokens is not None, "Global grad tokens must be provided for global reduction."
+                # 考虑 chunk 情况下，loss_weights 的分子应该是 1
+                # TODO: 临时方案，后续统一写法
+                if self.loss_class == "chunk_cross_entropy":
+                    loss_weights = 1 / global_grad_tokens * dp_size
+                else:
+                    rank_grad_tokens = (labels >= 0).sum()
+                    loss_weights = rank_grad_tokens / global_grad_tokens * dp_size
+                forward_item = CEForwardItem(
+                    labels=labels.to(device),
+                    loss_reduction=self.loss_reduction,
+                    loss_weight=loss_weights.to(device),
+                    grad_accumulation_steps=grad_accumulation_steps,
+                    chunk_size=self.chunk_size,
+                )
+                loss_ctx = self.__class__(
+                    loss_class=self.loss_class,
+                    loss_reduction=self.loss_reduction,
+                    label_shifted=self.label_shifted,
+                    forward_item=forward_item,
+                )
+            else:
+                labels = labels.to(device)
+                num_tokens = seq_ctx.cu_seq_lens_q[1:] - seq_ctx.cu_seq_lens_q[:-1]
+                labels_list = torch.split(labels, num_tokens.tolist(), dim=1)
+                loss_weights_list = []
+                for _labels in labels_list:
+                    num_effective_tokens = (_labels != self.ignore_idx).sum().item()
+                    loss_weight = len2weight(num_effective_tokens, self.loss_reduction)
+                    loss_weights_list.append(torch.full(_labels.shape, loss_weight, device=_labels.device))
+                loss_weights = torch.cat(loss_weights_list, dim=1)
+
+                global_sum_loss_weight = loss_weights.sum()
+                all_reduce(global_sum_loss_weight, op="mean")
+
+                forward_item = CEForwardItem(
+                    labels=labels,
+                    loss_reduction=self.loss_reduction,
+                    loss_weight=loss_weights,
+                    global_sum_loss_weight=global_sum_loss_weight,
+                    grad_accumulation_steps=grad_accumulation_steps,
+                    chunk_size=self.chunk_size,
+                )
+                loss_ctx = self.__class__(
+                    loss_class=self.loss_class,
+                    loss_reduction=self.loss_reduction,
+                    label_shifted=self.label_shifted,
+                    forward_item=forward_item,
+                )
+
+            loss_ctx_list.append(loss_ctx)
+
+        assert len(loss_ctx_list) == len(data_batch)
+        seq_ctx_list = [data["seq_ctx"] for data in data_batch]
+        ret_data_batch = [
+            {"seq_ctx": seq_ctx, "loss_ctx": loss_ctx} for seq_ctx, loss_ctx in zip(seq_ctx_list, loss_ctx_list)
+        ]
+
+        if sp_mesh is not None:
+            for data in ret_data_batch:
+                loss_ctx = data["loss_ctx"]
+                seq_ctx = data["seq_ctx"]
+
+                seq_ctx = seq_ctx.split(sp_mesh)
+                loss_ctx = loss_ctx.split(sp_mesh)
+                data["seq_ctx"] = seq_ctx
+                data["loss_ctx"] = loss_ctx
+
+        return ret_data_batch
+
+    def split(self, sequence_parallel_mesh=None) -> Self:
+        if sequence_parallel_mesh is None:
+            return self
+
+        forward_item = self.forward_item
+        assert forward_item is not None
+        labels = forward_item.labels
+        loss_weight = forward_item.loss_weight
+
+        multiple_of = sequence_parallel_mesh.size()
+        pad_labels = pad_to_multiple_of(labels, -100, multiple_of, 1)
+        sp_labels = cast(
+            torch.LongTensor, split_for_sequence_parallel(pad_labels, dim=1, sp_mesh=sequence_parallel_mesh)
+        )
+        if loss_weight.shape != ():
+            pad_loss_weight = pad_to_multiple_of(loss_weight, 0, multiple_of, 1)
+            sp_loss_weight = cast(
+                torch.Tensor, split_for_sequence_parallel(pad_loss_weight, dim=1, sp_mesh=sequence_parallel_mesh)
             )
         else:
-            labels = labels.to(device)
-            num_tokens = seq_ctx.cu_seq_lens_q[1:] - seq_ctx.cu_seq_lens_q[:-1]
-            labels_list = torch.split(labels, num_tokens.tolist(), dim=1)
-            loss_weights_list = []
-            for _labels in labels_list:
-                num_effective_tokens = (_labels != self.ignore_idx).sum().item()
-                loss_weight = len2weight(num_effective_tokens, self.loss_reduction)
-                loss_weights_list.append(torch.full(_labels.shape, loss_weight, device=_labels.device))
-            loss_weights = torch.cat(loss_weights_list, dim=1)
+            sp_loss_weight = loss_weight
 
-            global_sum_loss_weight = loss_weights.sum()
-            all_reduce(global_sum_loss_weight, op="mean")
-
-            forward_item = CEForwardItem(
-                labels=labels,
-                loss_reduction=self.loss_reduction,
-                loss_weight=loss_weights,
-                global_sum_loss_weight=global_sum_loss_weight,
-                grad_accumulation_steps=grad_accumulation_steps,
-                chunk_size=self.chunk_size,
-            )
-            loss_ctx = self.__class__(
-                loss_class=self.loss_class,
-                loss_reduction=self.loss_reduction,
-                label_shifted=self.label_shifted,
-                forward_item=forward_item,
-            )
-        return loss_ctx
-
-    # TODO: 没有测试 sp 逻辑
-    def split(self, sequence_parallel_mesh) -> Self:
-        raise NotImplementedError()
+        forward_item.labels = sp_labels
+        forward_item.loss_weight = sp_loss_weight
+        return self
 
     def forward(
         self,
@@ -191,7 +250,6 @@ class CrossEntropyLoss(nn.Module):
 
         if self.loss_reduction == "global":
             rank_grad_tokens = (shift_labels >= 0).sum()
-            loss_weights = rank_grad_tokens * loss_weights
             if rank_grad_tokens == 0:
                 loss = shift_logits.sum() * 0
             else:
@@ -264,8 +322,6 @@ class LigerCrossEntropyLoss(nn.Module):
         shift_labels = shift_labels.to(shift_hidden_states.device)
 
         if self.loss_reduction == "global":
-            rank_grad_tokens = (shift_labels >= 0).sum()
-            loss_weights = rank_grad_tokens * loss_weights
             loss = self.loss_fct(head_weight, shift_hidden_states, shift_labels, head_bias) * loss_weights
         else:
             loss_weights_sum = forward_item.global_sum_loss_weight

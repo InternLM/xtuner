@@ -12,7 +12,6 @@ from xtuner.v1.engine.dense_train_engine import DenseTrainEngine
 
 # todo: 如何 import
 from xtuner.v1.float8.float8_handler import Float8Handler
-from xtuner.v1.loss import CELossContext
 from xtuner.v1.model.base import ModelItem
 from xtuner.v1.model.moe.moe import MoE
 from xtuner.v1.module.grouped_linear.moe_group_linear import GroupedLinear
@@ -184,14 +183,6 @@ class MoETrainEngine(DenseTrainEngine):
             for data in data_batch:
                 seq_ctx = data["seq_ctx"]
                 loss_ctx = data["loss_ctx"]
-
-                # shift_seq_ctx and labels have been split in data_preprocess if sequence parallelism is enabled
-                if sp_mesh:
-                    # TODO(HHA): labels 的 sp 逻辑应该由 loss_ctx 做
-                    seq_ctx, labels = seq_ctx.split_with_labels(loss_ctx.loss_froward_item.labels, sp_mesh)  # type: ignore
-                    loss_ctx.loss_froward_item.labels = labels  # type: ignore
-                    loss_ctx: CELossContext = loss_ctx.split(sp_mesh)  # type: ignore
-
                 seq_ctx_list.append(seq_ctx)
                 loss_ctx_list.append(loss_ctx)
                 step_consumed_tokens += seq_ctx.mask.sum()

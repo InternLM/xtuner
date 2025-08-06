@@ -113,7 +113,6 @@ class ParallelSampler(Sampler):
 def get_length_grouped_indices(
     max_lengths, group_batch_size, dp_size, torch_generator: torch.Generator, random_generator: random.Random
 ):
-    assert all(leng != 0 for leng in max_lengths), "Should not have zero length."
     indices = torch.randperm(len(max_lengths), generator=torch_generator)
     megabatches = [indices[i : i + group_batch_size].tolist() for i in range(0, len(max_lengths), group_batch_size)]
     output = []

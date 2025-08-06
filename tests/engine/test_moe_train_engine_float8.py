@@ -12,16 +12,12 @@ from torch.testing._internal.common_distributed import DistributedTestBase
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from xtuner.v1.model.moe.moe import MoEConfig, SequenceContext
-from xtuner.v1.model.moe.qwen3 import Qwen3MoE
-from xtuner.v1.module.attention import MHAConfig
-from xtuner.v1.module.router import GreedyRouterConfig
 from xtuner.v1.config import AdamWConfig, Float8Config, FSDPConfig, LRConfig, MoEConfig, OptimConfig, BalancingLossConfig, ZLossConfig
 from xtuner.v1.engine.moe_train_engine import MoETrainEngine
 from xtuner.v1.float8.float8_tensor import ScalingGranularity
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
 from xtuner.v1.utils import pad_to_max_length
 from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, LinearLR, SequentialLR
-from xtuner.v1.engine.utils import cal_global_grad_tokens
 from xtuner.v1.loss import CELossContext
 from xtuner.utils.device import get_device
 
@@ -87,13 +83,11 @@ class TestMoEEngineFloat8(DistributedTestBase):
             seq_ctx = SequenceContext.from_input_ids((input_ids,), device=DEVICE)
             labels = labels.to(DEVICE)
             seq_ctx.num_padding = pack_len
-            global_grad_tokens = cal_global_grad_tokens([labels])
-            grad_accumulation_steps = engine.grad_accumulation_steps(1)
+            data_batch = [{'seq_ctx': seq_ctx, 'labels': labels}]
             loss_ctx = CELossContext()
-            loss_ctx = loss_ctx.build_forward_item(seq_ctx, labels,
-                                                   grad_accumulation_steps=grad_accumulation_steps,
-                                                   global_grad_tokens=global_grad_tokens)
-            loss_log, _ = engine.train_step([{"seq_ctx": seq_ctx, "loss_ctx": loss_ctx}])
+            grad_accumulation_steps = engine.grad_accumulation_steps(1)
+            data_batch = loss_ctx.build_list_ctx(data_batch,grad_accumulation_steps=grad_accumulation_steps)
+            loss_log, _ = engine.train_step(data_batch)
             grad_norm = engine.clip_grad_norm()
             engine.step_optimizer(grad_norm)
             lr_scheduler.step()
@@ -164,13 +158,11 @@ class TestMoEEngineFloat8(DistributedTestBase):
             seq_ctx = SequenceContext.from_input_ids((input_ids,), device=DEVICE)
             labels = labels.to(DEVICE)
             seq_ctx.num_padding = pack_len
-            global_grad_tokens = cal_global_grad_tokens([labels])
-            grad_accumulation_steps = engine.grad_accumulation_steps(1)
+            data_batch = [{'seq_ctx': seq_ctx, 'labels': labels}]
             loss_ctx = CELossContext()
-            loss_ctx = loss_ctx.build_forward_item(seq_ctx, labels,
-                                                   grad_accumulation_steps=grad_accumulation_steps,
-                                                   global_grad_tokens=global_grad_tokens)
-            loss_log, _ = engine.train_step([{"seq_ctx": seq_ctx, "loss_ctx": loss_ctx}])
+            grad_accumulation_steps = engine.grad_accumulation_steps(1)
+            data_batch = loss_ctx.build_list_ctx(data_batch, grad_accumulation_steps=grad_accumulation_steps)
+            loss_log, _ = engine.train_step(data_batch)
             grad_norm = engine.clip_grad_norm()
             engine.step_optimizer(grad_norm)
             lr_scheduler.step()
@@ -261,13 +253,11 @@ class TestMoEEngineFloat8(DistributedTestBase):
             labels = labels.to(DEVICE)
             seq_ctx.num_padding = pad_len
             seq_ctx.to('cuda')
-            global_grad_tokens = cal_global_grad_tokens([labels])
-            grad_accumulation_steps = engine.grad_accumulation_steps(1)
+            data_batch = [{'seq_ctx': seq_ctx, 'labels': labels}]
             loss_ctx = CELossContext()
-            loss_ctx = loss_ctx.build_forward_item(seq_ctx, labels,
-                                                   grad_accumulation_steps=grad_accumulation_steps,
-                                                   global_grad_tokens=global_grad_tokens)
-            loss_log, _ = engine.train_step([{"seq_ctx": seq_ctx, "loss_ctx": loss_ctx}])
+            grad_accumulation_steps = engine.grad_accumulation_steps(1)
+            data_batch = loss_ctx.build_list_ctx(data_batch, grad_accumulation_steps=grad_accumulation_steps)
+            loss_log, _ = engine.train_step(data_batch)
             grad_norm = engine.clip_grad_norm()
             engine.step_optimizer(grad_norm)
             lr_scheduler.step()
