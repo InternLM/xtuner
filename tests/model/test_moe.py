@@ -46,7 +46,7 @@ class TestMoE:
             num_experts_per_tok=2,
             first_k_dense_replace=1,
             hidden_factor=1.0,
-            moe_intermediate_size=32,
+            moe_intermediate_size=256,  # grouped linear kernel need this to be multiple of 256
             router=router_config,
         )
         model = MoE(config=config).to(dtype).to(device)
@@ -111,7 +111,7 @@ class TestDistributedMoE(DistributedTestBase):
             num_experts_per_tok=2,
             first_k_dense_replace=first_k_dense_replace,
             hidden_factor=1.0,
-            moe_intermediate_size=32,
+            moe_intermediate_size=256,  # grouped linear kernel need this to be multiple of 256
             router=router_config,
         )
 
