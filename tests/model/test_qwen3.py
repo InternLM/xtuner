@@ -14,7 +14,6 @@ from xtuner.v1.model.moe.moe import SequenceContext
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.utils.compile import maybe_compile
-from xtuner.v1.engine.utils import cal_global_grad_tokens
 from xtuner.v1.loss import CELossContext
 
 
@@ -62,20 +61,18 @@ class TestQwen3MoE(DistributedTestBase):
             cfg.ep_size = ep_size
             qwen_model = cfg.build().to(torch.bfloat16)
 
-        seq_ctx = SequenceContext.from_input_ids(input_ids=(input_ids, ))
-        seq_ctx, shifted_labels = seq_ctx.shift_with_labels(labels=input_ids)
-        seq_ctx.to('cuda')
-        global_grad_tokens = cal_global_grad_tokens([shifted_labels])
-        loss_ctx = CELossContext(loss_class=loss_class)
-        loss_ctx = loss_ctx.build_forward_item(seq_ctx, shifted_labels,
-                                               grad_accumulation_steps=1,
-                                               global_grad_tokens=global_grad_tokens)
+        shift_input_ids = input_ids[:, :-1]
+        shift_labels = input_ids[:, 1:]
+        seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids.to('cuda'),))
+        data_batch = [{'seq_ctx': seq_ctx, 'labels': shift_labels}]
+        loss_ctx = CELossContext()
+        data_batch = loss_ctx.build_list_ctx(data_batch, grad_accumulation_steps=1)[0]
         qwen_model.from_hf(QWEN3_MOE_PATH)
 
         with torch.no_grad():
             output = qwen_model(
-                seq_ctx=seq_ctx,
-                loss_ctx=loss_ctx,
+                seq_ctx=data_batch['seq_ctx'],
+                loss_ctx=data_batch['loss_ctx'],
             )
         loss = output["loss"]
         self.assertTrue(torch.allclose(loss, expected_loss.to(loss.dtype), atol=tol, rtol=tol))
@@ -120,22 +117,19 @@ class TestQwen3MoE(DistributedTestBase):
             cpu_offload=False,
         )
 
-        seq_ctx = SequenceContext.from_input_ids(input_ids=(input_ids, ))
-        seq_ctx, shifted_labels = seq_ctx.shift_with_labels(labels=input_ids)
-        seq_ctx.to('cuda')
-        global_grad_tokens = cal_global_grad_tokens([shifted_labels])
+        shift_input_ids = input_ids[:, :-1]
+        shift_labels = input_ids[:, 1:]
+        seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids.to('cuda'),))
+        data_batch = [{'seq_ctx': seq_ctx, 'labels': shift_labels}]
         loss_ctx = CELossContext()
-        loss_ctx = loss_ctx.build_forward_item(seq_ctx, shifted_labels,
-                                               grad_accumulation_steps=1,
-                                               global_grad_tokens=global_grad_tokens)
-
+        data_batch = loss_ctx.build_list_ctx(data_batch, grad_accumulation_steps=1)[0]
         qwen_model.fully_shard(fsdp_config=fsdp_config)
         qwen_model.from_hf(QWEN3_MOE_PATH)
 
         with torch.no_grad():
             output = qwen_model(
-                seq_ctx=seq_ctx,
-                loss_ctx=loss_ctx,
+                seq_ctx=data_batch['seq_ctx'],
+                loss_ctx=data_batch['loss_ctx'],
             )
         loss = output["loss"]
         self.assertTrue(torch.allclose(loss, expected_loss.to(loss.dtype), atol=1e-2, rtol=1e-2))

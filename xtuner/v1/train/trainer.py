@@ -25,9 +25,7 @@ from xtuner.v1.config import DataloaderConfig, DatasetConfigList, FSDPConfig, LR
 from xtuner.v1.config.base_model import MoEConfig, TransformerConfig
 from xtuner.v1.config.trainer import ResumeConfig, TrainerConfig
 from xtuner.v1.datasets.build import build_dataloader, build_datasets
-from xtuner.v1.engine.utils import cal_global_grad_tokens
 from xtuner.v1.loss import CELossContext
-from xtuner.v1.model.base import ModelItem
 from xtuner.v1.model.interns1 import InternS1Config
 from xtuner.v1.profiler import profilling_memory, profilling_time
 from xtuner.v1.utils import (
@@ -265,25 +263,8 @@ class Trainer:
             time_before_train_step = time.time()
             data_time = time_before_train_step - time_before_get_data
 
-            global_grad_tokens = cal_global_grad_tokens([i["labels"] for i in data_batch], self.sp_mesh)
             grad_accumulation_steps = self._engine.grad_accumulation_steps(len(data_batch))
-
-            for data in data_batch:
-                seq_ctx = data["seq_ctx"]
-                labels = data["labels"]
-                seq_ctx.to(DEVICE)
-                labels.to(DEVICE)
-                # build_item 是一个自定义方法和接口
-                loss_ctx = self.loss_ctx.build_forward_item(
-                    seq_ctx=seq_ctx,
-                    labels=labels,
-                    grad_accumulation_steps=grad_accumulation_steps,
-                    global_grad_tokens=global_grad_tokens,
-                )
-                del data["labels"]  # type: ignore
-                data = cast(ModelItem, data)
-                data["loss_ctx"] = loss_ctx
-
+            data_batch = self.loss_ctx.build_list_ctx(data_batch, grad_accumulation_steps, self.data_mesh, DEVICE)
             with self.maybe_profilling():
                 loss_log, other_log = self._engine.train_step(data_batch)
 

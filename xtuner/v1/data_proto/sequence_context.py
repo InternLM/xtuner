@@ -24,6 +24,7 @@ class SequenceContext:
             Maximum sequence length for key state.
     """
 
+    # TODO(HHA): 在仅计算 loss 情况下或者多模态情况下，input_ids 其实应该都可以为 None，不够通用
     input_ids: torch.LongTensor  # shape (1, seq_len)
     cu_seq_lens_q: torch.IntTensor
     cu_seq_lens_k: torch.IntTensor
@@ -32,7 +33,7 @@ class SequenceContext:
     num_padding: int = 0
     sequence_parallel_mesh: DeviceMesh | None = None
     block_table: torch.Tensor | None = None
-    device: str = "cpu"
+    device: str | torch.device = "cpu"  # TODO: 这个地方有点乱，到处是 device
     position_ids: torch.LongTensor | None = None
 
     # internS1
@@ -49,7 +50,7 @@ class SequenceContext:
             seq_lens_q = self.cu_seq_lens_q[1:] - self.cu_seq_lens_q[:-1]
 
             _position_ids = [torch.arange(k - q, k) for q, k in zip(seq_lens_q, seq_lens_k)]
-            position_ids = torch.cat(_position_ids).unsqueeze(0).to(self.device)
+            position_ids = torch.cat(_position_ids).unsqueeze(0).to(self.cu_seq_lens_k.device)
 
             if self.sequence_parallel_mesh is not None:
                 position_ids = split_for_sequence_parallel(position_ids, dim=1, sp_mesh=self.sequence_parallel_mesh)
@@ -81,53 +82,20 @@ class SequenceContext:
             device=device,
         )
 
-    def shift_with_labels(self, labels: torch.LongTensor) -> tuple[Self, torch.LongTensor]:
-        assert labels.shape == self.input_ids.shape
+    def split(self, sequence_parallel_mesh: DeviceMesh | None = None) -> Self:
+        if sequence_parallel_mesh is None:
+            sequence_parallel_mesh = self.sequence_parallel_mesh
+        self.sequence_parallel_mesh = sequence_parallel_mesh
 
-        shift_input_ids = cast(torch.LongTensor, self.input_ids[:, :-1])
-        shift_labels = cast(torch.LongTensor, labels[:, 1:].to(self.device).long())
+        if sequence_parallel_mesh is None:
+            return self
 
-        seq_lens = self.seq_lens_q.tolist()
-        if seq_lens[-1] == 1:
-            seq_lens = seq_lens[:-1]
-        else:
-            seq_lens[-1] = seq_lens[-1] - 1
-
-        cu_seq_lens = cast(
-            torch.IntTensor, torch.cumsum(torch.LongTensor([0] + seq_lens), dim=0).to(self.device).int()
-        )
-
-        num_padding = self.num_padding
-        if num_padding > 0:
-            num_padding = num_padding - 1
-
-        shift_attn_meta = self.__class__(
-            input_ids=shift_input_ids,
-            cu_seq_lens_k=cu_seq_lens,
-            cu_seq_lens_q=cu_seq_lens,
-            num_padding=num_padding,
-            max_length_q=cast(int, (cu_seq_lens[1:] - cu_seq_lens[:-1]).max().item()),
-            max_length_k=cast(int, (cu_seq_lens[1:] - cu_seq_lens[:-1]).max().item()),
-            block_table=None,
-            sequence_parallel_mesh=self.sequence_parallel_mesh,
-        )
-
-        return shift_attn_meta, shift_labels
-
-    # TODO(HHA): 这个接口不通用，后续要重构
-    def split_with_labels(self, labels: torch.LongTensor, sequence_parallel_mesh) -> tuple[Self, torch.LongTensor]:
-        assert self.input_ids.shape == labels.shape
-        if sequence_parallel_mesh is not None:
-            multiple_of = sequence_parallel_mesh.size()
+        multiple_of = sequence_parallel_mesh.size()
+        if self.input_ids is not None:
             pad_input_ids = pad_to_multiple_of(self.input_ids, 0, multiple_of, 1)
-            pad_labels = pad_to_multiple_of(labels, -100, multiple_of, 1)
-            sp_labels = cast(
-                torch.LongTensor, split_for_sequence_parallel(pad_labels, dim=1, sp_mesh=sequence_parallel_mesh)
-            )
             sp_input_ids = cast(
                 torch.LongTensor, split_for_sequence_parallel(pad_input_ids, dim=1, sp_mesh=sequence_parallel_mesh)
             )
-
             new_padding = pad_input_ids.numel() - self.input_ids.numel()
             if new_padding > 0:
                 if self.num_padding > 0:
@@ -140,9 +108,7 @@ class SequenceContext:
             else:
                 new_cu_seq_lens = self.cu_seq_lens_q.clone()
             new_cu_seq_lens = cast(torch.IntTensor, new_cu_seq_lens)
-
             new_max_length = cast(int, max(self.cu_seq_lens_q[-1].item(), new_padding))
-
             num_non_padding = self.input_ids.shape[1] - self.num_padding
             start = sp_input_ids.shape[1] * sequence_parallel_mesh.get_local_rank()
             end = start + sp_input_ids.shape[1]
@@ -156,14 +122,12 @@ class SequenceContext:
                 max_length_k=new_max_length,
                 num_padding=sp_num_padding,
                 block_table=self.block_table,
-                device=self.device,
+                device=sp_input_ids.device,
                 sequence_parallel_mesh=sequence_parallel_mesh,
             )
+            return sp_seq_ctx
         else:
-            sp_seq_ctx = self
-            sp_labels = labels
-
-        return sp_seq_ctx, sp_labels
+            return self
 
     @property
     def mask(self) -> torch.BoolTensor:
@@ -184,6 +148,7 @@ class SequenceContext:
     def seq_lens_k(self) -> torch.LongTensor:
         return self.cu_seq_lens_k[1:] - self.cu_seq_lens_k[:-1]  # type: ignore
 
+    # TODO: 暂时没有用到，可能要删掉
     def chunk(self, num_chunks: int) -> list[Self]:
         n = self.seq_lens_q.numel()
         assert n // num_chunks

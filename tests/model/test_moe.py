@@ -5,7 +5,6 @@ from xtuner.v1.module.attention import MHAConfig
 from torch.distributed.device_mesh import init_device_mesh
 import os
 from copy import deepcopy
-from xtuner.v1.engine.utils import cal_global_grad_tokens
 from xtuner.v1.loss import CELossContext
 
 from torch.testing._internal.common_distributed import DistributedTestBase
@@ -56,17 +55,16 @@ class TestMoE:
         input_ids = torch.randint(
             0, config.vocab_size, (1, 128), dtype=torch.int64, device="cuda"
         )
-        seq_ctx = SequenceContext.from_input_ids(input_ids=(input_ids, ))
-        seq_ctx, shifted_labels = seq_ctx.shift_with_labels(labels=input_ids)
-        seq_ctx.to('cuda')
-        global_grad_tokens = cal_global_grad_tokens([shifted_labels])
+        shift_input_ids = input_ids[:, :-1]
+        shift_labels = input_ids[:, 1:]
+        seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids.to('cuda'),))
+
+        data_batch = [{'seq_ctx': seq_ctx, 'labels': shift_labels}]
         loss_ctx = CELossContext()
-        loss_ctx = loss_ctx.build_forward_item(seq_ctx, shifted_labels,
-                                               grad_accumulation_steps=1,
-                                               global_grad_tokens=global_grad_tokens)
+        data_batch = loss_ctx.build_list_ctx(data_batch, grad_accumulation_steps=1)[0]
         model(
-            seq_ctx=seq_ctx,
-            loss_ctx=loss_ctx,
+            seq_ctx=data_batch['seq_ctx'],
+            loss_ctx=data_batch['loss_ctx'],
         )
 
 
@@ -130,23 +128,21 @@ class TestDistributedMoE(DistributedTestBase):
         input_ids = torch.randint(
             0, config.vocab_size, (1, 128), dtype=torch.int64, device="cuda"
         )
-        seq_ctx = SequenceContext.from_input_ids(input_ids=(input_ids, ))
-        seq_ctx, shifted_labels = seq_ctx.shift_with_labels(labels=input_ids)
-        seq_ctx.to('cuda')
-        global_grad_tokens = cal_global_grad_tokens([shifted_labels])
+        shift_input_ids = input_ids[:, :-1]
+        shift_labels = input_ids[:, 1:]
+        seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids.to('cuda'),))
+        data_batch = [{'seq_ctx': seq_ctx, 'labels': shift_labels}]
         loss_ctx = CELossContext()
-        loss_ctx = loss_ctx.build_forward_item(seq_ctx, shifted_labels,
-                                               grad_accumulation_steps=1,
-                                               global_grad_tokens=global_grad_tokens)
+        data_batch = loss_ctx.build_list_ctx(data_batch, grad_accumulation_steps=1)[0]
 
         loss_parallel = parallel_model(
-            seq_ctx=seq_ctx,
-            loss_ctx=loss_ctx,
+            seq_ctx=data_batch['seq_ctx'],
+            loss_ctx=data_batch['loss_ctx'],
         )["loss"]
 
         loss_expected = model(
-            seq_ctx=seq_ctx,
-            loss_ctx=loss_ctx,
+            seq_ctx=data_batch['seq_ctx'],
+            loss_ctx=data_batch['loss_ctx'],
         )["loss"]
 
         torch.allclose(loss_expected, loss_parallel, atol=1e-6, rtol=1e-4)

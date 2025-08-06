@@ -243,14 +243,12 @@ def main():
         dataset_config = [
             {
                 "dataset": DatasetConfig(name="alpaca", anno_path=ALPACA_PATH, sample_ratio=1.0),
-                "tokenize_fn": FTDPTokenizeFnConfig(),
+                "tokenize_fn": FTDPTokenizeFnConfig(max_length=16386),
             },
         ]
 
         dataloader_config = DataloaderConfig(
-            pack_max_length=16384,
-            max_length=16384,
-            pack_level="soft",
+            pack_max_length=16384
         )
         work_dir = f"{args.work_dir}-{name}"
         loss_ctx = CELossContext()

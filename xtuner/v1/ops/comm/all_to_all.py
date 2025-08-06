@@ -33,8 +33,10 @@ def ulysses_all_to_all(
     output_split_sizes = input_split_sizes
 
     input = input.contiguous()
-    # TODO: here ``movedim` is replaced by `transpose`, need to check if this is correct.
-    input = input.transpose(scatter_dim, 0)
+    # Here, only movedim can be used, not transpose. Otherwise, it will lead to
+    # a bug "ValueError: Tensors must be contiguous" in torch compile mode.
+    # (a bug of torch compile)
+    input = input.movedim(scatter_dim, 0)
 
     output = _all_to_all_single_autograd(
         input,
@@ -42,7 +44,7 @@ def ulysses_all_to_all(
         input_split_sizes=input_split_sizes,
         output_split_sizes=output_split_sizes,
     )
-    output = output.transpose(0, scatter_dim)
+    output = output.movedim(0, scatter_dim)
 
     output_list = torch.tensor_split(output, world_size, scatter_dim)
     output = torch.cat(output_list, dim=gather_dim).contiguous()

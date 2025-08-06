@@ -15,10 +15,9 @@ from xtuner.v1.loss import CELossContext
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
 from xtuner.v1.config import FSDPConfig, LRConfig, AdamWConfig, BalancingLossConfig, ZLossConfig
 from xtuner.v1.engine.moe_train_engine import MoETrainEngine
-from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, LinearLR, SequentialLR
+from torch.optim.lr_scheduler import LambdaLR
 from xtuner.v1.utils import pad_to_max_length
-from xtuner.v1.engine.utils import cal_global_grad_tokens
-from xtuner.utils.device import get_device, get_torch_device
+from xtuner.utils.device import get_device
 
 # Qwen3 30B A3
 QWEN3_MOE_PATH = os.environ["QWEN3_MOE_PATH"]
@@ -78,13 +77,11 @@ class TestMoEEngine(DistributedTestBase):
             seq_ctx = SequenceContext.from_input_ids((input_ids,), device=DEVICE)
             labels = labels.to(DEVICE)
             seq_ctx.num_padding = pack_len
-            global_grad_tokens = cal_global_grad_tokens([labels])
-            grad_accumulation_steps = engine.grad_accumulation_steps(1)
+            data_batch = [{'seq_ctx': seq_ctx, 'labels': labels}]
             loss_ctx = CELossContext()
-            loss_ctx = loss_ctx.build_forward_item(seq_ctx, labels,
-                                                   grad_accumulation_steps=grad_accumulation_steps,
-                                                   global_grad_tokens=global_grad_tokens)
-            loss_log, _ = engine.train_step([{"seq_ctx": seq_ctx, "loss_ctx": loss_ctx}])
+            grad_accumulation_steps = engine.grad_accumulation_steps(1)
+            data_batch = loss_ctx.build_list_ctx(data_batch, grad_accumulation_steps=grad_accumulation_steps)
+            loss_log, _ = engine.train_step(data_batch)
             grad_norm = engine.clip_grad_norm()
             engine.step_optimizer(grad_norm)
             lr_scheduler.step()
