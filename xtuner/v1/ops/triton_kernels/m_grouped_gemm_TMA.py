@@ -109,7 +109,7 @@ def m_grouped_gemm_bKmajor_kernel(
         c = accumulator.to(dtypeC)
         offs_cm = group_start
         offs_cn = (pid_n * BLOCK_N).to(tl.int32)
-        TMA_condition = (group_start + BLOCK_M <= group_end) | (group_start >= (M - BLOCK_M))
+        TMA_condition = group_start + BLOCK_M <= group_end
         if TMA_condition:
             tl._experimental_descriptor_store(c_desc_ptr, c, [offs_cm, offs_cn])
         else:
@@ -189,7 +189,7 @@ def m_grouped_gemm_bNmajor_kernel(
         offs_cm = group_start
         offs_cn = (pid_n * BLOCK_N).to(tl.int32)
 
-        TMA_condition = (group_start + BLOCK_M <= group_end) | (group_start >= (M - BLOCK_M))
+        TMA_condition = group_start + BLOCK_M <= group_end
         if TMA_condition:
             tl._experimental_descriptor_store(c_desc_ptr, c, [offs_cm, offs_cn])
         else:

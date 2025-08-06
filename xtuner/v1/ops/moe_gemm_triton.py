@@ -31,4 +31,7 @@ def moe_grouped_gemm_triton(x, w, tokens_per_expert):
     Returns:
         Tensor: Output tensor of shape (batch_size, seq_len, dout).
     """
+    if x.shape[0] == 0:
+        # put x and w to the pytorch graph
+        return torch.matmul(x, w[0].T)
     return GroupedGemm.apply(x, w, tokens_per_expert)
