@@ -2,13 +2,15 @@ from typing import Callable, Literal, cast
 
 import torch
 import torch.nn.functional as F
-from mmengine.dist import all_reduce, dist
+from mmengine.dist import get_world_size
 from pydantic import BaseModel
+from torch import distributed as dist
 from torch import nn
+from torch.distributed.device_mesh import DeviceMesh
 from typing_extensions import Self
 
 from ..data_proto.utils import pad_to_multiple_of, split_for_sequence_parallel
-from .utils import cal_global_grad_tokens
+from .utils import cal_global_grad_tokens, cal_global_sum_loss_weight
 
 
 class CEForwardItem(BaseModel):
@@ -16,9 +18,8 @@ class CEForwardItem(BaseModel):
     labels: torch.Tensor
     loss_reduction: str
     loss_weight: torch.Tensor
-    global_sum_loss_weight: torch.Tensor | None = None
-    grad_accumulation_steps: int = 1
     chunk_size: int = 1024
+    sequence_parallel_mesh: DeviceMesh | None = None
 
 
 # TODO: 如何更通用
@@ -36,9 +37,15 @@ class BaseChunkLoss(nn.Module):
         forward_item: CEForwardItem,
         head_bias: torch.Tensor | None = None,
         **kwargs,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         # 注意： 不能用 kwargs 传参数
-        return self.chunk_loss_class.apply(hidden_states, head_weight, forward_item, head_bias, self.chunk_loss_fn)
+        loss, logits = self.chunk_loss_class.apply(
+            hidden_states, head_weight, forward_item, head_bias, self.chunk_loss_fn
+        )
+        sp_mesh = forward_item.sequence_parallel_mesh
+        if sp_mesh and sp_mesh.size() > 1:
+            loss = dist.nn.all_reduce(loss, group=sp_mesh.get_group())
+        return loss, logits
 
 
 class CELossContext(BaseModel):
@@ -66,9 +73,9 @@ class CELossContext(BaseModel):
         else:
             raise NotImplementedError
 
-    def build_list_ctx(self, data_batch: list, grad_accumulation_steps: int, data_mesh=None, device=None) -> list:
+    def build_list_ctx(self, data_batch: list, data_mesh=None, device=None) -> list:
         if data_mesh is None:
-            dp_size = dist.get_world_size()
+            dp_size = get_world_size()
             sp_mesh = None
         else:
             dp_mesh = data_mesh["dp"]
@@ -79,68 +86,46 @@ class CELossContext(BaseModel):
         if device is None:
             device = data_batch[0]["seq_ctx"].device
 
-        label_list = [i["labels"] for i in data_batch]
-        global_grad_tokens = cal_global_grad_tokens(label_list, sp_mesh)
-        loss_ctx_list = []
+        label_list = []
+        seq_ctx_list = []
+        num_tokens_list = []
         for data in data_batch:
             labels = data["labels"]
+            data["labels"] = labels.to(device)
             data["seq_ctx"] = data["seq_ctx"].to(device)
-            seq_ctx = data["seq_ctx"]
-            if self.loss_reduction == "global":
-                assert global_grad_tokens is not None, "Global grad tokens must be provided for global reduction."
-                # 考虑 chunk 情况下，loss_weights 的分子应该是 1
-                # TODO: 临时方案，后续统一写法
-                if self.loss_class == "chunk_cross_entropy":
-                    loss_weights = 1 / global_grad_tokens * dp_size
-                else:
-                    rank_grad_tokens = (labels >= 0).sum()
-                    loss_weights = rank_grad_tokens / global_grad_tokens * dp_size
-                forward_item = CEForwardItem(
-                    labels=labels.to(device),
-                    loss_reduction=self.loss_reduction,
-                    loss_weight=loss_weights.to(device),
-                    grad_accumulation_steps=grad_accumulation_steps,
-                    chunk_size=self.chunk_size,
-                )
-                loss_ctx = self.__class__(
-                    loss_class=self.loss_class,
-                    loss_reduction=self.loss_reduction,
-                    label_shifted=self.label_shifted,
-                    forward_item=forward_item,
-                )
-            else:
-                labels = labels.to(device)
-                num_tokens = seq_ctx.cu_seq_lens_q[1:] - seq_ctx.cu_seq_lens_q[:-1]
-                labels_list = torch.split(labels, num_tokens.tolist(), dim=1)
-                loss_weights_list = []
-                for _labels in labels_list:
-                    num_effective_tokens = (_labels != self.ignore_idx).sum().item()
-                    loss_weight = len2weight(num_effective_tokens, self.loss_reduction)
-                    loss_weights_list.append(torch.full(_labels.shape, loss_weight, device=_labels.device))
-                loss_weights = torch.cat(loss_weights_list, dim=1)
+            label_list.append(data["labels"])
+            seq_ctx_list.append(data["seq_ctx"])
+            num_tokens = data["seq_ctx"].cu_seq_lens_q[1:] - data["seq_ctx"].cu_seq_lens_q[:-1]
+            num_tokens_list.append(num_tokens)
 
-                global_sum_loss_weight = loss_weights.sum()
-                all_reduce(global_sum_loss_weight, op="mean")
+        if self.loss_reduction == "global":
+            global_grad_tokens = cal_global_grad_tokens(label_list, sp_mesh)
+            loss_weights = 1 / (global_grad_tokens + 1e-8) * dp_size
+            batch_loss_weights = [loss_weights] * len(label_list)
+        else:
+            global_grad_tokens, batch_loss_weights = cal_global_sum_loss_weight(
+                label_list, num_tokens_list, self.loss_reduction, sp_mesh
+            )
+            for i in range(len(batch_loss_weights)):
+                batch_loss_weights[i] = batch_loss_weights[i] / (global_grad_tokens + 1e-8) * dp_size
 
-                forward_item = CEForwardItem(
-                    labels=labels,
-                    loss_reduction=self.loss_reduction,
-                    loss_weight=loss_weights,
-                    global_sum_loss_weight=global_sum_loss_weight,
-                    grad_accumulation_steps=grad_accumulation_steps,
-                    chunk_size=self.chunk_size,
-                )
-                loss_ctx = self.__class__(
-                    loss_class=self.loss_class,
-                    loss_reduction=self.loss_reduction,
-                    label_shifted=self.label_shifted,
-                    forward_item=forward_item,
-                )
-
+        loss_ctx_list = []
+        for seq_ctx, labels, loss_weights in zip(seq_ctx_list, label_list, batch_loss_weights):
+            forward_item = CEForwardItem(
+                labels=labels,
+                loss_reduction=self.loss_reduction,
+                loss_weight=loss_weights,
+                chunk_size=self.chunk_size,
+            )
+            loss_ctx = self.__class__(
+                loss_class=self.loss_class,
+                loss_reduction=self.loss_reduction,
+                label_shifted=self.label_shifted,
+                forward_item=forward_item,
+            )
             loss_ctx_list.append(loss_ctx)
 
         assert len(loss_ctx_list) == len(data_batch)
-        seq_ctx_list = [data["seq_ctx"] for data in data_batch]
         ret_data_batch = [
             {"seq_ctx": seq_ctx, "loss_ctx": loss_ctx} for seq_ctx, loss_ctx in zip(seq_ctx_list, loss_ctx_list)
         ]
@@ -163,6 +148,7 @@ class CELossContext(BaseModel):
 
         forward_item = self.forward_item
         assert forward_item is not None
+        forward_item.sequence_parallel_mesh = sequence_parallel_mesh
         labels = forward_item.labels
         loss_weight = forward_item.loss_weight
 
@@ -205,7 +191,7 @@ class CrossEntropyLoss(nn.Module):
         self.label_shifted = ctx.label_shifted
 
         if self.loss_reduction == "global":
-            self.loss_fct = torch.nn.CrossEntropyLoss()
+            self.loss_fct = torch.nn.CrossEntropyLoss(reduction="sum")
         else:
             self.loss_fct = torch.nn.CrossEntropyLoss(reduction="none")
 
@@ -219,11 +205,9 @@ class CrossEntropyLoss(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         logits = F.linear(hidden_states, head_weight, head_bias).float()
 
-        grad_accumulation_steps = forward_item.grad_accumulation_steps
         labels = forward_item.labels
         loss_weights = forward_item.loss_weight
 
-        assert grad_accumulation_steps > 0
         assert logits.shape[:-1] == labels.shape, (
             f"Logits shape {logits.shape} does not match labels shape {labels.shape}"
         )
@@ -257,11 +241,12 @@ class CrossEntropyLoss(nn.Module):
         else:
             loss_weights = loss_weights.view(-1).to(logits.device)
             loss = self.loss_fct(shift_logits, shift_labels)
-            loss_weights_sum = forward_item.global_sum_loss_weight
-            assert loss_weights_sum is not None
             loss = loss * loss_weights
-            loss = loss.sum() / (loss_weights_sum + 1e-8)
-            loss = loss / grad_accumulation_steps
+            loss = loss.sum()
+
+        sequence_parallel_mesh = forward_item.sequence_parallel_mesh
+        if sequence_parallel_mesh is not None and sequence_parallel_mesh.size() > 1:
+            loss = dist.nn.all_reduce(loss, group=sequence_parallel_mesh.get_group())
         return loss, logits
 
 
@@ -283,7 +268,7 @@ class LigerCrossEntropyLoss(nn.Module):
             )
 
         if self.loss_reduction == "global":
-            self.loss_fct = LigerFusedLinearCrossEntropyLoss()
+            self.loss_fct = LigerFusedLinearCrossEntropyLoss(reduction="sum")
         else:
             self.loss_fct = LigerFusedLinearCrossEntropyLossWithWeights(reduction="sum")
 
@@ -295,11 +280,8 @@ class LigerCrossEntropyLoss(nn.Module):
         head_bias: torch.Tensor | None = None,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        grad_accumulation_steps = forward_item.grad_accumulation_steps
         labels = forward_item.labels
         loss_weights = forward_item.loss_weight
-
-        assert grad_accumulation_steps > 0
 
         if self.loss_reduction in ["token", "sample", "square"]:
             assert labels.shape == loss_weights.shape, (
@@ -324,17 +306,11 @@ class LigerCrossEntropyLoss(nn.Module):
         if self.loss_reduction == "global":
             loss = self.loss_fct(head_weight, shift_hidden_states, shift_labels, head_bias) * loss_weights
         else:
-            loss_weights_sum = forward_item.global_sum_loss_weight
             loss_weights = loss_weights.view(-1)
-            loss = self.loss_fct(
-                head_weight,
-                shift_hidden_states,
-                shift_labels,
-                head_bias,
-                loss_weights,
-                loss_weights_sum,
-                grad_accumulation_steps,
-            )
+            loss = self.loss_fct(head_weight, shift_hidden_states, shift_labels, head_bias, loss_weights)
+        sequence_parallel_mesh = forward_item.sequence_parallel_mesh
+        if sequence_parallel_mesh is not None and sequence_parallel_mesh.size() > 1:
+            loss = dist.nn.all_reduce(loss, group=sequence_parallel_mesh.get_group())
         return loss, None
 
 
@@ -376,8 +352,6 @@ class ChunkCELoss(torch.autograd.Function):
                 loss_reduction=forward_item.loss_reduction,
                 loss_weight=loss_weight_chunk,
                 labels=labels_chunk,
-                grad_accumulation_steps=forward_item.grad_accumulation_steps,
-                global_sum_loss_weight=forward_item.global_sum_loss_weight,
                 chunk_size=chunk_size,
             )
             chunk_loss, chunk_grad_input, chunk_grad_weight = accumulate_chunk(
@@ -403,18 +377,6 @@ class ChunkCELoss(torch.autograd.Function):
         return grad_input, grad_weight, None, None, None
 
 
-def len2weight(x, loss_reduction):
-    if x == 0:
-        return x
-    if loss_reduction == "token":
-        return 1
-    if loss_reduction == "sample":
-        return 1 / x
-    if loss_reduction == "square":
-        return 1 / (x**0.5)
-    raise NotImplementedError(loss_reduction)
-
-
 def _chunk_loss(hidden_states_chunk, head_weight, loss_fn, forward_item: CEForwardItem):
     logits_chunk = hidden_states_chunk @ head_weight.t()
     return loss_fn(logits_chunk, forward_item)
@@ -431,19 +393,16 @@ def chunk_ce_loss(logits: torch.Tensor, forward_item: CEForwardItem):
     logits = logits.float().reshape(-1, logits.shape[-1])
     labels = forward_item.labels.reshape(-1)
     if forward_item.loss_reduction == "global":
+        loss_fct = torch.nn.CrossEntropyLoss(reduction="sum")
         rank_grad_tokens = (labels >= 0).sum()
-        loss_weights = rank_grad_tokens * forward_item.loss_weight
-        loss_fct = torch.nn.CrossEntropyLoss()
         if rank_grad_tokens == 0:
             loss = logits.sum() * 0
         else:
-            loss = loss_fct(logits, labels) * loss_weights
+            loss = loss_fct(logits, labels) * forward_item.loss_weight
     else:
         loss_fct = torch.nn.CrossEntropyLoss(reduction="none")
         loss = loss_fct(logits, labels)
 
         loss = loss * forward_item.loss_weight
-        assert forward_item.global_sum_loss_weight is not None
-        loss = loss.sum() / (forward_item.global_sum_loss_weight + 1e-8)
-        loss = loss / forward_item.grad_accumulation_steps
+        loss = loss.sum()
     return loss

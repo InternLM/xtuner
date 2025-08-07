@@ -72,7 +72,7 @@ class TestInternS1(DistributedTestBase):
         seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids.to('cuda'),))
         data_batch = [{'seq_ctx': seq_ctx, 'labels': shift_labels}]
         loss_ctx = CELossContext()
-        data_batch = loss_ctx.build_list_ctx(data_batch, grad_accumulation_steps=1)[0]
+        data_batch = loss_ctx.build_list_ctx(data_batch, device='cuda')[0]
         interns1_model.from_hf(INTERNS1_MOE_PATH)
         interns1_model.eval()  # avoid open drop_path
 
@@ -172,7 +172,7 @@ class TestInternS1(DistributedTestBase):
         seq_ctx.to('cuda')
         data_batch = [{'seq_ctx': seq_ctx, 'labels': shift_labels}]
         loss_ctx = CELossContext()
-        data_batch = loss_ctx.build_list_ctx(data_batch, grad_accumulation_steps=1)[0]
+        data_batch = loss_ctx.build_list_ctx(data_batch, device='cuda')[0]
         interns1_model.from_hf(INTERNS1_MOE_PATH)
         interns1_model.eval()  # avoid open drop_path
 
@@ -239,7 +239,7 @@ class TestInternS1(DistributedTestBase):
         seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids.to('cuda'),))
         data_batch = [{'seq_ctx': seq_ctx, 'labels': shift_labels}]
         loss_ctx = CELossContext()
-        data_batch = loss_ctx.build_list_ctx(data_batch, grad_accumulation_steps=1)[0]
+        data_batch = loss_ctx.build_list_ctx(data_batch, device='cuda')[0]
         interns1_model.language_model.fully_shard(fsdp_config=fsdp_config)
         interns1_model.vision_tower.fully_shard(fsdp_config=fsdp_config)
         interns1_model.multi_modal_projector.fully_shard(fsdp_config=fsdp_config)
@@ -344,7 +344,7 @@ class TestInternS1(DistributedTestBase):
         seq_ctx.to('cuda')
         data_batch = [{'seq_ctx': seq_ctx, 'labels': shift_labels}]
         loss_ctx = CELossContext()
-        data_batch = loss_ctx.build_list_ctx(data_batch, grad_accumulation_steps=1)[0]
+        data_batch = loss_ctx.build_list_ctx(data_batch, device='cuda')[0]
         interns1_model.language_model.fully_shard(fsdp_config=fsdp_config)
         interns1_model.vision_tower.fully_shard(fsdp_config=fsdp_config)
         interns1_model.multi_modal_projector.fully_shard(fsdp_config=fsdp_config)

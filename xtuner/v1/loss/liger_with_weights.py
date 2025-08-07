@@ -18,8 +18,6 @@ def fused_linear_cross_entropy_forward(
     weight,
     target,
     loss_weights=None,
-    reduce_sum_loss_weights=None,
-    grad_accumulation_steps=1,
     ce_weight=None,
     bias=None,
     ignore_index=-100,
@@ -123,7 +121,7 @@ def fused_linear_cross_entropy_forward(
         loss_1d[start_idx:end_idx] = loss_1d_slice
         if return_z_loss:
             z_loss_1d[start_idx:end_idx] = z_loss_1d_slice
-        logits_chunk = logits_chunk * loss_weights_slice[:, None] / (reduce_sum_loss_weights + 1e-9)
+        logits_chunk = logits_chunk * loss_weights_slice[:, None]
         grad_logits_chunk = logits_chunk  # chunk_size x V
 
         grad_input[start_idx:end_idx] = grad_logits_chunk.to(weight.dtype) @ weight
@@ -147,22 +145,8 @@ def fused_linear_cross_entropy_forward(
                 alpha=1.0,
             )
 
-    # Need extra calculations for backward if reduction=='none'. Not supporting reduction='none' now.
-    # if reduction == "none":
-    #     loss = loss_1d
-    #     z_loss = z_loss_1d if return_z_loss else None
-    if reduce_sum_loss_weights == 0:
-        loss = torch.sum(loss_1d * loss_weights) * 0.0
-    else:
-        loss = torch.sum(loss_1d * loss_weights) / reduce_sum_loss_weights
+    loss = torch.sum(loss_1d * loss_weights)
     z_loss = torch.sum(z_loss_1d) if return_z_loss else None
-
-    loss = loss / grad_accumulation_steps
-    grad_input = grad_input / grad_accumulation_steps
-    if grad_weight is not None:
-        grad_weight = grad_weight / grad_accumulation_steps
-    if grad_bias is not None:
-        grad_bias = grad_bias / grad_accumulation_steps
     return loss, z_loss, grad_input, grad_weight, grad_bias
 
 
@@ -223,8 +207,6 @@ class LigerFusedLinearCrossEntropyFunction(torch.autograd.Function):
         target,
         bias=None,
         loss_weights=None,
-        reduce_sum_loss_weights=None,
-        grad_accumulation_steps=1,
         ce_weight=None,
         ignore_index=-100,
         lse_square_scale=0.0,
@@ -258,8 +240,6 @@ class LigerFusedLinearCrossEntropyFunction(torch.autograd.Function):
             target=target,
             bias=bias,
             loss_weights=loss_weights,
-            reduce_sum_loss_weights=reduce_sum_loss_weights,
-            grad_accumulation_steps=grad_accumulation_steps,
             ce_weight=ce_weight,
             ignore_index=ignore_index,
             lse_square_scale=lse_square_scale,
@@ -299,8 +279,6 @@ class LigerFusedLinearCrossEntropyFunction(torch.autograd.Function):
             None,
             None,
             None,
-            None,
-            None,
         )
 
 
@@ -332,24 +310,13 @@ class LigerFusedLinearCrossEntropyLossWithWeights(torch.nn.Module):
         self.softcap = softcap
         self.return_z_loss = return_z_loss
 
-    def forward(
-        self,
-        lin_weight,
-        _input,
-        target,
-        bias=None,
-        loss_weights=None,
-        reduce_sum_loss_weights=None,
-        grad_accumulation_steps=1,
-    ):
+    def forward(self, lin_weight, _input, target, bias=None, loss_weights=None):
         loss, z_loss = LigerFusedLinearCrossEntropyFunction.apply(
             _input,
             lin_weight,
             target,
             bias,
             loss_weights,
-            reduce_sum_loss_weights,
-            grad_accumulation_steps,
             self.ce_weight,
             self.ignore_index,
             self.lse_square_scale,
