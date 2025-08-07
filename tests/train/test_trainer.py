@@ -151,4 +151,8 @@ class TestTrainerSaveHF(DistributedTestBase):
             self.assertTrue(model_file.exists())
             self.assertTrue(config_file.exists())
             self.assertEqual(model_file.read_text(), "fake model weights")
-            self.assertEqual(config_file.read_text(), '{"model_type": "fake_model"}') 
+            self.assertEqual(config_file.read_text(), '{"model_type": "fake_model"}')
+
+    @property
+    def world_size(self) -> int:
+        return int(os.getenv("XTUNER_TEST_WORLD_SIZE", "2"))

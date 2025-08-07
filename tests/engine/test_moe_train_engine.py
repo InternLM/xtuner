@@ -2,8 +2,7 @@ import os
 import tempfile
 import shutil
 import time
-import copy
-
+from torch.distributed.device_mesh import init_device_mesh
 import parametrize
 import torch
 import torch.distributed as dist
@@ -24,14 +23,26 @@ QWEN3_MOE_PATH = os.environ["QWEN3_MOE_PATH"]
 DEVICE = get_device()
 
 
+def init_data_mesh(device, sp_size):
+    world_size = dist.get_world_size()
+    dp_size = world_size // sp_size
+    data_mesh = init_device_mesh(
+        device,
+        (dp_size, sp_size),
+        mesh_dim_names=("dp", "sp"),
+    )
+    return data_mesh
+
+
 class TestMoEEngine(DistributedTestBase):
     @parametrize.parametrize(
-        "device,ep_size,hsdp_sharding_size",
+        "device,ep_size,sp_size",
         [
-            ("cuda", 1, 8),  # todo: test ep8 and hsdp, OOM in 8 gpus
+            ("cuda", 1, 1),
+            ("cuda", 1, 2),
         ],
     )
-    def test_moe_engine_train(self, device, ep_size, hsdp_sharding_size):
+    def test_moe_engine_train(self, device, ep_size, sp_size):
         pg = self.create_pg(device)
 
         moe_cfg = Qwen3MoE30BA3Config(
@@ -45,7 +56,6 @@ class TestMoEEngine(DistributedTestBase):
             torch_compile=True,
             cpu_offload=False,
             ep_size=ep_size,
-            max_length=8192,
             # hsdp_sharding_size=hsdp_sharding_size,
         )
         engine = MoETrainEngine(
@@ -61,9 +71,7 @@ class TestMoEEngine(DistributedTestBase):
 
         lr_scheduler = LambdaLR(engine.optimizer, warmup_fn)
 
-        tok = AutoTokenizer.from_pretrained(
-            "/cpfs01/shared/llm_ddd/opencompass/models/hf_hub/models--Qwen--Qwen3-30B-A3B/snapshots/4c446470ba0aec43e22ac1128f9ffd915f338ba3/"
-        )
+        tok = AutoTokenizer.from_pretrained(QWEN3_MOE_PATH)
         txt = "根据国际地球自转和参考系服务机构的数据，今年夏天是自2020年以来第六次地球自转加速。7月9日将成为有史以来最短的一天，比平时短1.3到1.6毫秒。 "
         input_ids = tok.encode(txt, return_tensors="pt").view(1, -1)
         labels = input_ids.clone()
@@ -73,14 +81,18 @@ class TestMoEEngine(DistributedTestBase):
         input_ids = pad_to_max_length(input_ids, 0, max_length=8192)
         labels = pad_to_max_length(labels, -100, max_length=8192)
         losses = []
+
+        data_mesh = None
+        if sp_size > 1:
+            data_mesh = init_data_mesh(str(DEVICE), sp_size)
+
         for _ in range(10):
             seq_ctx = SequenceContext.from_input_ids((input_ids,), device=DEVICE)
             labels = labels.to(DEVICE)
             seq_ctx.num_padding = pack_len
             data_batch = [{'seq_ctx': seq_ctx, 'labels': labels}]
             loss_ctx = CELossContext()
-            grad_accumulation_steps = engine.grad_accumulation_steps(1)
-            data_batch = loss_ctx.build_list_ctx(data_batch, grad_accumulation_steps=grad_accumulation_steps)
+            data_batch = loss_ctx.build_list_ctx(data_batch, device=DEVICE, data_mesh=data_mesh)
             loss_log, _ = engine.train_step(data_batch)
             grad_norm = engine.clip_grad_norm()
             engine.step_optimizer(grad_norm)

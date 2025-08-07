@@ -263,8 +263,7 @@ class Trainer:
             time_before_train_step = time.time()
             data_time = time_before_train_step - time_before_get_data
 
-            grad_accumulation_steps = self._engine.grad_accumulation_steps(len(data_batch))
-            data_batch = self.loss_ctx.build_list_ctx(data_batch, grad_accumulation_steps, self.data_mesh, DEVICE)
+            data_batch = self.loss_ctx.build_list_ctx(data_batch, self.data_mesh, DEVICE)
             with self.maybe_profilling():
                 loss_log, other_log = self._engine.train_step(data_batch)
 

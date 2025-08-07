@@ -85,8 +85,7 @@ class TestMoEEngineFloat8(DistributedTestBase):
             seq_ctx.num_padding = pack_len
             data_batch = [{'seq_ctx': seq_ctx, 'labels': labels}]
             loss_ctx = CELossContext()
-            grad_accumulation_steps = engine.grad_accumulation_steps(1)
-            data_batch = loss_ctx.build_list_ctx(data_batch,grad_accumulation_steps=grad_accumulation_steps)
+            data_batch = loss_ctx.build_list_ctx(data_batch, device=DEVICE)
             loss_log, _ = engine.train_step(data_batch)
             grad_norm = engine.clip_grad_norm()
             engine.step_optimizer(grad_norm)
@@ -160,8 +159,7 @@ class TestMoEEngineFloat8(DistributedTestBase):
             seq_ctx.num_padding = pack_len
             data_batch = [{'seq_ctx': seq_ctx, 'labels': labels}]
             loss_ctx = CELossContext()
-            grad_accumulation_steps = engine.grad_accumulation_steps(1)
-            data_batch = loss_ctx.build_list_ctx(data_batch, grad_accumulation_steps=grad_accumulation_steps)
+            data_batch = loss_ctx.build_list_ctx(data_batch, device=DEVICE)
             loss_log, _ = engine.train_step(data_batch)
             grad_norm = engine.clip_grad_norm()
             engine.step_optimizer(grad_norm)
@@ -255,8 +253,7 @@ class TestMoEEngineFloat8(DistributedTestBase):
             seq_ctx.to('cuda')
             data_batch = [{'seq_ctx': seq_ctx, 'labels': labels}]
             loss_ctx = CELossContext()
-            grad_accumulation_steps = engine.grad_accumulation_steps(1)
-            data_batch = loss_ctx.build_list_ctx(data_batch, grad_accumulation_steps=grad_accumulation_steps)
+            data_batch = loss_ctx.build_list_ctx(data_batch, device=DEVICE)
             loss_log, _ = engine.train_step(data_batch)
             grad_norm = engine.clip_grad_norm()
             engine.step_optimizer(grad_norm)

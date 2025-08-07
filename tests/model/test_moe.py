@@ -61,7 +61,7 @@ class TestMoE:
 
         data_batch = [{'seq_ctx': seq_ctx, 'labels': shift_labels}]
         loss_ctx = CELossContext()
-        data_batch = loss_ctx.build_list_ctx(data_batch, grad_accumulation_steps=1)[0]
+        data_batch = loss_ctx.build_list_ctx(data_batch, device='cuda')[0]
         model(
             seq_ctx=data_batch['seq_ctx'],
             loss_ctx=data_batch['loss_ctx'],
@@ -133,7 +133,7 @@ class TestDistributedMoE(DistributedTestBase):
         seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids.to('cuda'),))
         data_batch = [{'seq_ctx': seq_ctx, 'labels': shift_labels}]
         loss_ctx = CELossContext()
-        data_batch = loss_ctx.build_list_ctx(data_batch, grad_accumulation_steps=1)[0]
+        data_batch = loss_ctx.build_list_ctx(data_batch, device='cuda')[0]
 
         loss_parallel = parallel_model(
             seq_ctx=data_batch['seq_ctx'],

@@ -66,7 +66,7 @@ class TestQwen3MoE(DistributedTestBase):
         seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids.to('cuda'),))
         data_batch = [{'seq_ctx': seq_ctx, 'labels': shift_labels}]
         loss_ctx = CELossContext()
-        data_batch = loss_ctx.build_list_ctx(data_batch, grad_accumulation_steps=1)[0]
+        data_batch = loss_ctx.build_list_ctx(data_batch, device='cuda')[0]
         qwen_model.from_hf(QWEN3_MOE_PATH)
 
         with torch.no_grad():
@@ -122,7 +122,7 @@ class TestQwen3MoE(DistributedTestBase):
         seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids.to('cuda'),))
         data_batch = [{'seq_ctx': seq_ctx, 'labels': shift_labels}]
         loss_ctx = CELossContext()
-        data_batch = loss_ctx.build_list_ctx(data_batch, grad_accumulation_steps=1)[0]
+        data_batch = loss_ctx.build_list_ctx(data_batch, device='cuda')[0]
         qwen_model.fully_shard(fsdp_config=fsdp_config)
         qwen_model.from_hf(QWEN3_MOE_PATH)
 
