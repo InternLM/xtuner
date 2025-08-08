@@ -333,6 +333,11 @@ class MoE(BaseModel):
         device = "cpu" if self.fsdp_config.cpu_offload else str(DEVICE)
         self._init_device_mesh(fsdp_config)
 
+        # TODO: 一定不能少，因为在模型 init 时候会构建一套 ep_mesh，如果不重新构建，fsdp_mesh 和 ep_mesh 会没有任何联系
+        # fully_shard 时候会出现： AssertionError: FSDP requires the DP and TP mesh to have the same parent mesh
+        with torch.device("meta"):
+            self.layers = self.build_layers(self.config)
+
         if float8_handler is not None:
             # As we modify the shape of the model's parameters,
             # we need to reinitialize the load spec mapping.
