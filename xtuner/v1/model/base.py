@@ -28,6 +28,7 @@ from xtuner.v1.float8.triton_kernels.per_block_quant_gemm import per_block_quant
 from xtuner.v1.loss import CELossContext
 from xtuner.v1.ops.comm.foreach_allgather import foreach_all_gather
 from xtuner.v1.utils import get_device, get_torch_device_module, profile_time_and_memory
+from xtuner.v1.utils.compile import maybe_compile
 from xtuner.v1.utils.load_spec import LoadEnum, LoadSpec
 from xtuner.v1.utils.loader import HFCheckpointLoader
 
@@ -854,3 +855,14 @@ class BaseModel(nn.Module):
             fsdp_unsharded_tensor_list.append(cat_tensor)
 
         return fsdp_unsharded_tensor_list
+
+    def _maybe_compile_layers(self):
+        if self.fsdp_config is not None:
+            if self.fsdp_config.torch_compile:
+                torch._dynamo.config.cache_size_limit = 128
+                if self.fsdp_config.compile_targets is not None:
+                    maybe_compile.clear_compile_targets()
+                    for target in self.fsdp_config.compile_targets:
+                        maybe_compile.set_compile_target(target)
+            else:
+                maybe_compile.clear_compile_targets()

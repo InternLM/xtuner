@@ -237,21 +237,3 @@ class MoETrainEngine(DenseTrainEngine):
         other_log["maxvio"] = maxvio.item()
         other_log["consumed_tokens"] = step_consumed_tokens.item()
         return loss_log, other_log
-
-    def step_optimizer(self, grad_norm):
-        """Step the optimizer to update the model parameters."""
-        if torch.isnan(grad_norm) or torch.isinf(grad_norm):
-            self.optimizer.zero_grad()
-        else:
-            self.optimizer.step()
-            self.optimizer.zero_grad()
-        return grad_norm
-
-    def save_hf(self, hf_dir: str, save_dtype: torch.dtype = torch.bfloat16):
-        """Save the hf model to the given directory.
-
-        Args:
-            hf_dir (str): The directory to save the model.
-            save_dtype (torch.dtype): The dtype to save the model parameters, bfloat16 or float8.
-        """
-        self.model.save_hf(hf_dir=hf_dir, save_dtype=save_dtype)

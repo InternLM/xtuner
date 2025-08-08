@@ -333,9 +333,6 @@ class MoE(BaseModel):
         device = "cpu" if self.fsdp_config.cpu_offload else str(DEVICE)
         self._init_device_mesh(fsdp_config)
 
-        with torch.device("meta"):
-            self.layers = self.build_layers(self.config)
-
         if float8_handler is not None:
             # As we modify the shape of the model's parameters,
             # we need to reinitialize the load spec mapping.

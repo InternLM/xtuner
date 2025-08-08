@@ -29,9 +29,8 @@ from torch.utils._foreach_utils import (
 )
 
 from xtuner.v1.config import FSDPConfig, OptimConfig, TransformerConfig
-from xtuner.v1.datasets.collator import ColateItem
 from xtuner.v1.float8.float8_handler import Float8Handler
-from xtuner.v1.model.base import BaseModel
+from xtuner.v1.model.base import BaseModel, ModelItem
 from xtuner.v1.utils import get_device, get_logger, get_torch_device_module
 
 
@@ -168,38 +167,44 @@ class DenseTrainEngine:
         # todo: consider pp
         return self.fsdp_cfg.tp_size
 
-    def train_step(self, data_batches: list[ColateItem], sp_mesh: Optional[DeviceMesh] = None):
+    def train_step(self, data_batches: list[ModelItem], sp_mesh: Optional[DeviceMesh] = None):
         """Perform a training step with the given data batches and mesh.
 
         Args:
             data_batches (List[Dict]): The input data batches for the training step.
-            max_length (Optional[int]): The maximum sequence length for padding.
             sp_mesh (Optional[DeviceMesh]): The device mesh for sequence parallelism.
         """
-        # global_grad_tokens = self.cal_global_grad_tokens([i["labels"] for i in data_batches], sp_mesh)
+        if self.float8_handler is not None and self.float8_handler.enabled:
+            self.float8_handler.precompute_float8_dynamic_scale_for_fsdp(self.model)
+
+        loss_log = {}
+        other_log = {}
         iters_per_step = len(data_batches)
-        log = {}  # type: ignore
+        step_loss = torch.tensor(0.0, device=DEVICE)
+        step_llm_loss = torch.tensor(0.0, device=DEVICE)
+        step_consumed_tokens = torch.tensor(0.0, device=DEVICE)
+
         for _iter in range(iters_per_step):
             data = data_batches[_iter]
             seq_ctx = data["seq_ctx"]
-            labels = data["labels"]
+            loss_ctx = data["loss_ctx"]
 
-            # shift_seq_ctx and labels have been split in data_preprocess if sequence parallelism is enabled
-            if sp_mesh:
-                seq_ctx, labels = seq_ctx.split_with_labels(labels, sp_mesh)  # type: ignore
+            output = self.model(seq_ctx=seq_ctx, loss_ctx=loss_ctx)
+            llm_loss = output["loss"]
+            step_llm_loss += llm_loss.detach().clone()
 
-            self.model(  # type: ignore
-                seq_ctx=seq_ctx,
-                labels=labels,
-            )
-            # # global average llm loss
-            # rank_grad_tokens = (labels >= 0).sum()
-            # todo: support tp, currently assert tp_size == 1
-            # loss = llm_loss * rank_grad_tokens / global_grad_tokens * dist.get_world_size()
-            # loss.backward()
+            loss = llm_loss
+            del output
+            loss.backward()
+            step_loss += loss.detach().clone()
+            step_consumed_tokens += seq_ctx.mask.sum()
 
-        # todo
-        return log
+        reduced_llm_loss = step_llm_loss
+        dist.all_reduce(reduced_llm_loss.div_(dist.get_world_size()))
+        loss_log["total_loss"] = step_loss.item()
+        loss_log["reduced_llm_loss"] = reduced_llm_loss.item()
+        other_log["consumed_tokens"] = step_consumed_tokens.item()
+        return loss_log, other_log
 
     def from_hf(self, hf_path: str | Path, strict: bool = False):
         self.model.from_hf(hf_path=hf_path, strict=strict)
@@ -299,7 +304,7 @@ class DenseTrainEngine:
             hf_dir (str): The directory to save the model.
             save_dtype (torch.dtype): The dtype to save the model parameters, bfloat16 or float8.
         """
-        pass
+        self.model.save_hf(hf_dir=hf_dir, save_dtype=save_dtype)
 
     def save_dcp(
         self,
