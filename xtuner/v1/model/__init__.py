@@ -8,11 +8,13 @@ from xtuner.v1.module.attention import MHAConfig
 from xtuner.v1.module.router.greedy import GreedyRouterConfig
 
 from .base import BaseModel
+from .dense.qwen3 import Qwen3_8BConfig, Qwen3DenseConfig
 from .moe.qwen3 import Qwen3MoE30BA3Config, Qwen3MoEConfig
 
 
 model_mapping = {
     "qwen3-moe-30BA3": Qwen3MoE30BA3Config(),
+    "qwen3-8B": Qwen3_8BConfig(),
 }
 
 
@@ -53,6 +55,25 @@ def get_model_config_from_hf(model_path: Path):
                 router_scaling_factor=1.0,
             ),
             balancing_loss_cfg=BalancingLossConfig(),
+        )
+    elif cfg.model_type == "qwen3":
+        return Qwen3DenseConfig(
+            vocab_size=cfg.vocab_size,
+            max_position_embeddings=cfg.max_position_embeddings,
+            padding_idx=cfg.eos_token_id,
+            num_hidden_layers=cfg.num_hidden_layers,
+            hidden_size=cfg.hidden_size,
+            intermediate_size=cfg.intermediate_size,
+            rms_norm_eps=cfg.rms_norm_eps,
+            rope_theta=cfg.rope_theta,
+            hidden_act=cfg.hidden_act,
+            attention=MHAConfig(
+                num_attention_heads=cfg.num_attention_heads,
+                num_key_value_heads=cfg.num_key_value_heads,
+                head_dim=cfg.head_dim,
+                qk_norm=True,
+            ),
+            tie_word_embeddings=cfg.tie_word_embeddings,
         )
 
     raise ValueError(f"Unsupported model type: {cfg.model_type}")

@@ -392,7 +392,7 @@ class Trainer:
         resume_config: ResumeConfig | None = None,
         strict: bool = True,
     ):
-        from xtuner.v1.engine import InternS1TrainEngine, MoETrainEngine
+        from xtuner.v1.engine import DenseTrainEngine, InternS1TrainEngine, MoETrainEngine
 
         # TODO: yehaochen
         if isinstance(model_config, MoEConfig):
@@ -409,7 +409,7 @@ class Trainer:
                 model_cfg=model_config,
             )
         else:
-            raise NotImplementedError
+            engine = DenseTrainEngine(optim_cfg=optim_config, fsdp_cfg=fsdp_config, model_cfg=model_config)  # type: ignore
 
         if model_path is not None:
             engine.from_hf(hf_path=model_path, strict=strict)
