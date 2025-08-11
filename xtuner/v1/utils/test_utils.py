@@ -1,4 +1,6 @@
 import torch
+import torch.distributed as dist
+from torch.distributed.device_mesh import init_device_mesh
 
 
 # from liger-kernel
@@ -62,3 +64,14 @@ def assert_verbose_allclose(tensor1, tensor2, rtol=1e-05, atol=1e-08, max_print=
             mismatch_details.append(f"... and {num_mismatched - max_print} more mismatched elements.")
 
         raise AssertionError("\n".join(mismatch_details))
+
+
+def init_data_mesh(device, sp_size):
+    world_size = dist.get_world_size()
+    dp_size = world_size // sp_size
+    data_mesh = init_device_mesh(
+        device,
+        (dp_size, sp_size),
+        mesh_dim_names=("dp", "sp"),
+    )
+    return data_mesh

@@ -124,6 +124,9 @@ class SequenceContext:
                 block_table=self.block_table,
                 device=sp_input_ids.device,
                 sequence_parallel_mesh=sequence_parallel_mesh,
+                # TODO: 没有 copy 方法比较难受,容易漏掉变量
+                image_flags=self.image_flags,
+                pixel_values=self.pixel_values,
             )
             return sp_seq_ctx
         else:
