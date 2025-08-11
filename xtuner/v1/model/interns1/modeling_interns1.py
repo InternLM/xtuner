@@ -202,14 +202,13 @@ class InternS1ForConditionalGeneration(BaseModel):
                 inputs_embeds[selected] = inputs_embeds[selected] * 0.0 + vit_embeds.sum() * 0
 
             inputs_embeds = inputs_embeds.reshape(B, N, C)
+
+            if sequence_parallel_mesh is not None and sequence_parallel_mesh.size() > 1:
+                inputs_embeds = split_for_sequence_parallel(inputs_embeds, dim=1, sp_mesh=sequence_parallel_mesh)
+
         else:
             # in-place op on custom-function outputs will spoil autograd
             inputs_embeds = inputs_embeds.clone()
-
-        if sequence_parallel_mesh is not None and sequence_parallel_mesh.size() > 1:
-            # TODO: 如果外面传过来的没有 pad，那么这个地方会比较麻烦，因为不仅仅要 input_embeds 需要 pad，
-            #  position_ids,cu_seq_lens_k 等都要重算？
-            inputs_embeds = split_for_sequence_parallel(inputs_embeds, dim=1, sp_mesh=sequence_parallel_mesh)
 
         seq_ctx.image_flags = None
         seq_ctx.pixel_values = None

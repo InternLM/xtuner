@@ -92,20 +92,10 @@ def sft_llm_collator(
 
 
 def sft_vllm_collator(
-    instances: list[list[InternS1DataItem]], max_length: int, pack_max_length: int, padding_token_idx: int
+    instances: list[list[InternS1DataItem]], pack_max_length: int, padding_token_idx: int
 ) -> list[ColateItem]:
     ret: list[ColateItem] = []
     for instance in instances:
-        for data_item in instance:
-            if len(data_item["input_ids"]) > max_length:
-                logger.warning(
-                    f"Found sample with {len(data_item['input_ids'])} tokens, "
-                    f"which is larger than the `max_length` {max_length}, truncating it."
-                )
-                data_item["input_ids"] = data_item["input_ids"][:max_length]
-                data_item["labels"] = data_item["labels"][:max_length]
-                data_item["num_tokens"] = len(data_item["input_ids"])
-
         # If the token number of the packed sample is larger than the packed_max_lenghth
         if (total_num_tokens := sum(i["num_tokens"] for i in instance)) > pack_max_length:
             logger.warning(

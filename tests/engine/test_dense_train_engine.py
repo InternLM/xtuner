@@ -2,7 +2,6 @@ import os
 import tempfile
 import shutil
 import time
-from torch.distributed.device_mesh import init_device_mesh
 import parametrize
 import torch
 import torch.distributed as dist
@@ -17,21 +16,12 @@ from xtuner.v1.engine.dense_train_engine import DenseTrainEngine
 from torch.optim.lr_scheduler import LambdaLR
 from xtuner.v1.utils import pad_to_max_length
 from xtuner.utils.device import get_device
+from xtuner.v1.utils.test_utils import init_data_mesh
+
 
 # Qwen3 8B
 QWEN3_PATH = os.environ["QWEN3_PATH"]
 DEVICE = get_device()
-
-
-def init_data_mesh(device, sp_size):
-    world_size = dist.get_world_size()
-    dp_size = world_size // sp_size
-    data_mesh = init_device_mesh(
-        device,
-        (dp_size, sp_size),
-        mesh_dim_names=("dp", "sp"),
-    )
-    return data_mesh
 
 
 class TestDenseEngine(DistributedTestBase):

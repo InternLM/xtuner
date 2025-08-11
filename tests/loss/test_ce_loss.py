@@ -8,8 +8,8 @@ from xtuner.v1.loss.utils import cal_global_grad_tokens, cal_global_sum_loss_wei
 from torch.testing._internal.common_distributed import DistributedTestBase
 import os
 import torch.distributed as dist
-from torch.distributed.device_mesh import init_device_mesh
 from xtuner.v1.data_proto.utils import pad_to_multiple_of, split_for_sequence_parallel
+from xtuner.v1.utils.test_utils import init_data_mesh
 import parametrize
 from functools import wraps
 
@@ -213,17 +213,6 @@ def broadcast_weight(lm_head):
     dist.broadcast(master_weight, src=0)
     with torch.no_grad():
         lm_head.weight.copy_(master_weight)
-
-
-def init_data_mesh(device, sp_size):
-    world_size = dist.get_world_size()
-    dp_size = world_size // sp_size
-    data_mesh = init_device_mesh(
-        device,
-        (dp_size, sp_size),
-        mesh_dim_names=("dp", "sp"),
-    )
-    return data_mesh
 
 
 def prepare(fn):
