@@ -1,12 +1,12 @@
 import os
-from typing import Dict, List, Literal, Tuple
+from typing import Dict, List, Literal, Tuple, TypeVar
 
 import ray
 import torch
 import torch.distributed as dist
 from cyclopts import Parameter
 from pydantic import BaseModel
-from ray.actor import ActorClass
+from ray.actor import ActorClass, ActorHandle
 from ray.util.placement_group import PlacementGroup, placement_group, placement_group_table
 from typing_extensions import Annotated
 
@@ -14,6 +14,7 @@ from .utils import find_master_addr_and_port, get_accelerator_ids
 
 
 AcceleratorType = Literal["GPU", "NPU"]
+T = TypeVar("T")
 
 
 class AcceleratorResourcesConfig(BaseModel):
@@ -46,6 +47,15 @@ class SingleAcceleratorWorker:
         self.config = config
         self.accelerator = accelerator
         self.setup_distributed(rank, master_addr, master_port, world_size)
+
+    @property
+    def device_visible_env_name(self):
+        if self.accelerator == "GPU":
+            return "CUDA_VISIBLE_DEVICES"
+        elif self.accelerator == "NPU":
+            return "ASCEND_RT_VISIBLE_DEVICES"
+        else:
+            raise ValueError(f"Unsupported accelerator type: {self.accelerator}")
 
     def setup_distributed(self, rank: int, master_addr: str, master_port: int, world_size: int):
         """Setup method to initialize the worker."""
@@ -167,27 +177,28 @@ class AutoAcceleratorWorkers:
 
     @classmethod
     def from_config(
-        cls, worker_cls: ActorClass, worker_config, accelerator_config: AcceleratorResourcesConfig
-    ) -> Tuple[List[ActorClass], PlacementGroup]:
+        cls, worker_cls: ActorClass[T], worker_config, accelerator_config: AcceleratorResourcesConfig
+    ) -> Tuple[Dict[ActorHandle[T], Tuple[int, int]], PlacementGroup]:
         """Create workers based on the provided configuration."""
         pg = AutoAcceleratorWorkers.build_placement_group(accelerator_config)
-        workers = cls.from_placement_group(worker_cls, worker_config, pg)
+        workers_bundle_idx_map = cls.from_placement_group(worker_cls, worker_config, pg)
 
-        return workers, pg
+        return workers_bundle_idx_map, pg
 
     @classmethod
-    def from_placement_group(cls, worker_cls: ActorClass, worker_config, pg: PlacementGroup) -> List[ActorClass]:
+    def from_placement_group(
+        cls, worker_cls: ActorClass[T], worker_config, pg: PlacementGroup
+    ) -> Dict[ActorHandle[T], Tuple[int, int]]:
         """Create workers based on the provided configuration."""
 
         pg_options = cls.get_pg_options(pg)
         sorted_bundle_idxs, master_addr, master_port, world_size = cls.get_spmd_info(pg)
 
-        workers = []
+        workers_bundle_idx_map = dict()
         for rank, bundle_idx in enumerate(sorted_bundle_idxs):
             worker = worker_cls.options(
                 placement_group=pg, placement_group_bundle_index=bundle_idx, **pg_options
-            ).remote(worker_config, rank, master_addr, master_port, world_size, bundle_idx)
+            ).remote(worker_config, rank, master_addr, master_port, world_size)
+            workers_bundle_idx_map[worker] = (rank, bundle_idx)
 
-            workers.append(worker)
-
-        return workers
+        return workers_bundle_idx_map

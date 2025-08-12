@@ -11,7 +11,7 @@ import asyncio
 import queue
 
 import ray
-from xtuner.v1.ray.rollout import vLLMWorker, RolloutController
+from xtuner.v1.ray.rollout import LMDeployWorker, RolloutController
 from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.ray.accelerator import AcceleratorResourcesConfig, AutoAcceleratorWorkers
 from xtuner.v1.ray import find_master_addr_and_port
@@ -107,7 +107,7 @@ def init_workers(rollout_config, resources_config):
             world_size=resources_config.num_workers
         )
         judger_workers.append(worker)
-    gpu_workers, _ = AutoAcceleratorWorkers.from_config(vLLMWorker, rollout_config, resources_config)
+    gpu_workers, _ = AutoAcceleratorWorkers.from_config(LMDeployWorker, rollout_config, resources_config)
     return gpu_workers, judger_workers
 
 def main():
@@ -137,7 +137,7 @@ def main():
     # start run 
     responses = ray.get(test_flow.run.remote())
     avg_reward = sum(data[0][1] for data in responses) / len(responses) if responses else 0
-    print(f"len of response: {len(responses)}, avg reward: {avg_reward}")
+    print(f"len of response: {len(responses)}, avg reward: {avg_reward}, response_list: {responses}")
     ray.get(test_flow.shutdown.remote())
 
 

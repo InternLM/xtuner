@@ -1,14 +1,18 @@
-import uuid
-from typing import List
+from typing import Dict, List, Tuple
 
 import ray
+import ray.exceptions
 import ray.util.queue
+from ray.actor import ActorHandle
 
 from transformers import AutoTokenizer
 from xtuner.v1.ray.config.worker import RolloutConfig
-from xtuner.v1.ray.dataflow import RolloutMeta, SampleParams
+from xtuner.v1.utils import get_logger
 
 from .worker import RolloutWorker
+
+
+logger = get_logger()
 
 
 @ray.remote
@@ -16,69 +20,75 @@ class RolloutController:
     def __init__(
         self,
         infer_config: RolloutConfig,
-        workers: List[RolloutWorker],
-        inqueue: ray.util.queue.Queue = None,
-        outqueue: ray.util.queue.Queue = None,
+        workers_bundle_idx_map: Dict[ActorHandle[RolloutWorker], Tuple[int, int]],
     ):
         self.config = infer_config
         self.num_workers = 0
         self.worker_server_urls: List[str] = []
         self.active_rollout_workers: List[ray.actor.ActorHandle] = []
-        self.inqueue = inqueue if inqueue is not None else ray.util.queue.Queue(maxsize=10)
-        self.outqueue = outqueue if outqueue is not None else ray.util.queue.Queue(maxsize=1000)
         self.tokenizer = (
             AutoTokenizer.from_pretrained(infer_config.model_path, trust_remote_code=True)
             if infer_config.tokenizer_path
             else None
         )
-        self.init_workers(self.config, workers)
+        self.workers_bundle_idx_map = workers_bundle_idx_map
+        self.engine_mesh_list, self.server_url_dict = self.init_workers()
+        # todo(@duanyanhui): add router to replace native round robin
+        self.worker_index = 0  # round robin index
 
-    def init_workers(self, infer_config: RolloutConfig, workers: List[RolloutWorker]):
-        active_servers_count, nodes_per_engine = self._get_active_servers_count(infer_config, len(workers))
+    def get_rollout_info(self):
+        return dict(
+            engine_mesh_list=self.engine_mesh_list,
+            server_url_dict=self.server_url_dict,
+            rollout_config=self.config,
+        )
+
+    def init_workers(self):
+        workers = list(self.workers_bundle_idx_map.keys())
+        active_servers_count, nodes_per_engine = self._get_active_servers_count(self.config, len(workers))
         interval = len(workers) // active_servers_count
         self.active_rollout_workers = workers[::interval]
         self.num_workers = len(self.active_rollout_workers)
 
-        print(f"self.active_rollout_workers: {self.active_rollout_workers}")
+        set_bundle_idxs_objectref = []
+        engine_mesh_list = []
+        for active_worker in self.active_rollout_workers:
+            head_rank, start_bundle_idx = self.workers_bundle_idx_map[active_worker]
+            engine_workers = workers[start_bundle_idx : start_bundle_idx + interval]
+            engine_bundle_idxs = [self.workers_bundle_idx_map[worker][1] for worker in engine_workers]
+            set_bundle_idxs_objectref.append(active_worker.set_engine_bundle_idxs.remote(engine_bundle_idxs))  # type: ignore[attr-defined]
+            engine_mesh_list.append([self.workers_bundle_idx_map[worker][0] for worker in engine_workers])
+        ray.get(set_bundle_idxs_objectref)
+
+        logger.info(f"active_rollout_workers: {self.active_rollout_workers}")
         # init dist_init_addr for each worker according to parallel settings
         init_dist_init_addrs = ray.get([worker.init_dist_port.remote() for worker in self.active_rollout_workers])  # type: ignore[attr-defined]
         dist_init_addrs = self._update_dist_init_addr(
-            nodes_per_engine, init_dist_init_addrs, infer_config.tensor_parallel_size
+            nodes_per_engine, init_dist_init_addrs, self.config.tensor_parallel_size
         )
         # launch rollout servers
-        self.worker_server_urls = ray.get(
-            [
-                worker.init.remote(infer_config, dist_init_addrs[i])  # type: ignore[attr-defined]
-                for i, worker in enumerate(self.active_rollout_workers)
-            ]
+        worker_server_urls_map = dict(
+            ray.get(
+                [
+                    worker.init.remote(dist_init_addrs[i])  # type: ignore[attr-defined]
+                    for i, worker in enumerate(self.active_rollout_workers)
+                ]
+            )
         )
-        return [worker.rollout.remote(self.inqueue, self.outqueue) for worker in self.active_rollout_workers]  # type: ignore[attr-defined]
+        self.worker_server_urls = list(worker_server_urls_map.values())
+        return engine_mesh_list, worker_server_urls_map
 
     def init_router(self, infer_config: RolloutConfig):
         self.active_rollout_workers[0].launch_router.remote(infer_config)
 
-    # call workers functions
-    def rollout(self, prompt: str, label: str, sample_params: SampleParams = SampleParams()):
-        for worker in self.active_rollout_workers:
-            worker.restart.remote(self.inqueue, self.outqueue)
-        input_ids = self.tokenizer.encode(prompt) if self.tokenizer else []
-        uid = str(uuid.uuid4())
-        rollout_meta = RolloutMeta(
-            uid=uid,
-            prompt=prompt,
-            input_ids=input_ids,
-            response="",
-            output_ids=[],
-            label=label,
-            sample_params=sample_params,
-        )
-        self.inqueue.put((ray.put(rollout_meta),))
+    async def rollout(self, prompt: str, sample_params):
+        index = self.worker_index % len(self.active_rollout_workers)
+        response_ref = self.active_rollout_workers[index].rollout.remote(prompt, sample_params)
+        self.worker_index += 1
+        return await response_ref
 
     def pause(self):
-        return [worker.pause.remote() for worker in self.active_rollout_workers]
-
-    def get_worker_status(self):
-        return [worker.get_status.remote() for worker in self.active_rollout_workers]
+        return ray.get([worker.pause.remote() for worker in self.active_rollout_workers])
 
     # internal functions
     def _update_dist_init_addr(self, nodes_per_engine, dist_init_addrs, tp_size):
@@ -105,7 +115,12 @@ class RolloutController:
         return [worker.reset_prefix_cache.remote() for worker in self.active_rollout_workers]
 
     def offload(self):
-        return [worker.sleep.remote() for worker in self.active_rollout_workers]
+        ray.get([worker.sleep.remote() for worker in self.active_rollout_workers])
+        return
 
-    def onload(self):
-        return [worker.wake_up.remote() for worker in self.active_rollout_workers]
+    def onload(self, *args, **kwargs):
+        ray.get([worker.wake_up.remote(*args, **kwargs) for worker in self.active_rollout_workers])
+        return
+
+    def shutdown(self):
+        return ray.get([worker.shutdown.remote() for worker in self.active_rollout_workers])

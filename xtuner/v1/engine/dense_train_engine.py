@@ -405,3 +405,25 @@ class DenseTrainEngine:
                 checkpoint_id=os.path.join(dcp_dir, "model"),
             )
             set_model_state_dict(self.model, model_state_dict["model"], options=_set_options)
+
+    def put_model_to_device(self, device: torch.device | str):
+        """Put the model to the given device."""
+        if self.fsdp_cfg.cpu_offload:
+            return
+        self.model.to(device, non_blocking=True)
+        DEVICE_MODULE.synchronize()
+        return
+
+    def put_optimizer_to_device(self, device: torch.device | str):
+        """Put the optimizer to the given device."""
+        if self.fsdp_cfg.cpu_offload:
+            return
+        if not self.optimizer.state:
+            return
+        for state in self.optimizer.state.values():
+            if isinstance(state, dict):
+                for key, val in state.items():
+                    if isinstance(val, torch.Tensor):
+                        state[key] = val.to(device, non_blocking=True)
+        DEVICE_MODULE.synchronize()
+        return

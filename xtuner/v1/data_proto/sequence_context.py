@@ -132,6 +132,50 @@ class SequenceContext:
         else:
             return self
 
+    @classmethod
+    def pack(cls, sequence_context_list: list["SequenceContext"]):
+        packed_input_ids: list[torch.Tensor] = []
+        cu_seq_lens_q: list[torch.IntTensor] = []
+        cu_seq_lens_k: list[torch.IntTensor] = []
+        max_length_q = 0
+        max_length_k = 0
+        num_padding = 0
+        device = []
+        inputs_embeds = []
+        for seq_ctx in sequence_context_list:
+            assert seq_ctx.sequence_parallel_mesh is None
+            # todo: support vlm model
+            assert seq_ctx.pixel_values is None
+            packed_input_ids.append(seq_ctx.input_ids)
+            cu_seq_lens_q.append(
+                seq_ctx.cu_seq_lens_q  # type: ignore
+                if len(cu_seq_lens_q) == 0
+                else (seq_ctx.cu_seq_lens_q + cu_seq_lens_q[-1][-1])[1:]
+            )
+            cu_seq_lens_k.append(
+                seq_ctx.cu_seq_lens_k  # type: ignore
+                if len(cu_seq_lens_k) == 0
+                else (seq_ctx.cu_seq_lens_k + cu_seq_lens_k[-1][-1])[1:]
+            )
+            max_length_q = max(max_length_q, seq_ctx.max_length_q)
+            max_length_k = max(max_length_k, seq_ctx.max_length_k)
+            num_padding += seq_ctx.num_padding
+            device.append(torch.device(seq_ctx.device))
+            if seq_ctx.inputs_embeds is not None:
+                inputs_embeds.append(seq_ctx.inputs_embeds)
+        assert len(set(device)) == 1, f"All sequence contexts must be on the same device. Got {set(device)}"
+
+        return cls(
+            input_ids=torch.cat(packed_input_ids, dim=1),  # type: ignore
+            cu_seq_lens_q=torch.cat(cu_seq_lens_q, dim=0),  # type: ignore
+            cu_seq_lens_k=torch.cat(cu_seq_lens_k, dim=0),  # type: ignore
+            max_length_q=max_length_q,
+            max_length_k=max_length_k,
+            num_padding=num_padding,
+            device=device[0],
+            inputs_embeds=torch.cat(inputs_embeds, dim=1) if inputs_embeds else None,  # type: ignore
+        )
+
     @property
     def mask(self) -> torch.BoolTensor:
         mask: torch.BoolTensor
@@ -216,5 +260,7 @@ class SequenceContext:
 
         if self.inputs_embeds is not None and hasattr(self.inputs_embeds, "to"):
             self.inputs_embeds = self.inputs_embeds.to(device)  # type: ignore
+
+        self.device = device
 
         return self

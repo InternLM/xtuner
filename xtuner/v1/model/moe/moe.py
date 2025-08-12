@@ -182,7 +182,7 @@ class MoE(BaseModel):
     def forward(
         self,
         seq_ctx: SequenceContext,  # todo(@yehaochen): support intra layer micro-batch
-        loss_ctx: CELossContext,
+        loss_ctx: CELossContext | None,
         return_router_results: bool = True,
         return_hidden_states: bool = False,
     ) -> MoEModelOutputs:
@@ -226,6 +226,7 @@ class MoE(BaseModel):
 
         loss, logits = self.lm_head(hidden_states, loss_ctx)  # type: ignore
         output["loss"] = loss
+        output["logits"] = logits
 
         if not return_router_results:
             return MoEModelOutputs(**output)  # type: ignore[typeddict-item]
@@ -301,7 +302,7 @@ class MoE(BaseModel):
     def __call__(  # type: ignore
         self,
         seq_ctx: SequenceContext,
-        loss_ctx: CELossContext,
+        loss_ctx: CELossContext | None,
         return_router_results: bool = False,
         return_hidden_states: bool = False,
     ) -> MoEModelOutputs: ...
