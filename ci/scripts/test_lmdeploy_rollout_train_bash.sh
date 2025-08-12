@@ -13,4 +13,4 @@ TORCH_LOGS="recompiles" python ci/scripts/test_ray_rl_lmdeploy.py \
     --train-global-batch-size 8 \
     --prompt-repeat-k 8 \
     --pack-max-length 4096 \
-    --offload-optimizer
+    --optimizer-disable-foreach
