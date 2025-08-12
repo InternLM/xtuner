@@ -59,6 +59,7 @@ def parse_args():
     parser.add_argument("--pack-max-length", type=int, default=8192)
 
     parser.add_argument("--offload-optimizer", action="store_true")  # save optimizer memory but will slow down training
+    parser.add_argument("--optimizer-disable-foreach", action="store_true")  # save memory usage during opt.step()
     return parser.parse_args()
 
 
@@ -113,7 +114,7 @@ def build_train_controller(args, pg):
         balancing_loss_cfg=BalancingLossConfig(),
         z_loss_cfg=ZLossConfig(),
     )
-    optim_cfg: AdamWConfig = AdamWConfig(lr=5e-7)
+    optim_cfg: AdamWConfig = AdamWConfig(lr=5e-7, foreach=False if args.optimizer_disable_foreach else None)
     fsdp_cfg: FSDPConfig = FSDPConfig(
         torch_compile=False,
         cpu_offload=False,
