@@ -11,7 +11,10 @@ from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.ray.accelerator import AcceleratorResourcesConfig, AutoAcceleratorWorkers
 from xtuner.v1.ray import find_master_addr_and_port
 from xtuner.v1.ray.judger import JudgerController, Math500JudgerWorker
-from xtuner.v1.ray.dataflow import SampleParams
+from xtuner.v1.ray.environment import SampleParams, EnvController
+from xtuner.v1.ray.dataflow.flow import Flow, DataFlowConfig
+from xtuner.v1.ray.dataflow.replay_buffer import ReplayBuffer
+from xtuner.v1.ray.utils import bind_train_rollout
 
 MODEL_PATH = os.environ["ROLLOUT_MODEL_PATH"]
 DATA_PATH = os.environ["ROLLOUT_DATA_PATH"]
@@ -23,56 +26,17 @@ DATA_PATH = os.environ["ROLLOUT_DATA_PATH"]
 # PYTHONPATH="/${WORKSPACE_PATH}/xtuner/xtuner":${PYTHONPATH} \
 # python test_rollout.py
 
-def get_eos_token_ids(model_path: str):
-    config_path = os.path.join(model_path, "generation_config.json")
-    with open(config_path, "r", encoding="utf-8") as f:
-        config = json.load(f)
-    eos_token_ids = config.get("eos_token_id")
-    return eos_token_ids
-
-
 # note: if you changes the dataset, you should alse provide the load function
 # for the dataset, which should return a generator of (prompt, label) pairs.
-class Math500Dataset(torch.utils.data.IterableDataset):
-    def __init__(self, path: str, tokenizer=None):
-        super().__init__()
-        offsets = [0]
-        with open(path) as f:
-            lines = f.readlines()
-            for line in lines[:-1]:
-                offsets.append(offsets[-1] + len(line.encode()))
-        self.offsets = offsets
-        self.tokenizer = tokenizer
-        self.path = path
-
-    def __iter__(self):
-        with open(self.path) as f:
-            for item in self.offsets:
-                f.seek(item)
-                line = f.readline()
-                yield (
-                    json.loads(line.strip())["problem"] + 
-                    " Let's think step by step and output the final answer within \\boxed{}.",
-                    json.loads(line.strip())["answer"]
-                )
-
-class TestRolloutController(unittest.TestCase):
-    def setUp(self):
-        ray.init(num_cpus=40, ignore_reinit_error=True)
-        self.data_path = DATA_PATH
-        self.model_path = MODEL_PATH
-        self.tokenizer = AutoTokenizer.from_pretrained(self.model_path, trust_remote_code=True)
-        self.global_batch_size = 10
-        self.send_samples = 0 
-        self.max_concurrent = 10
-    
+class TestRollout(unittest.TestCase):
+    def init_config(self):
         self.rollout_config = RolloutConfig(
             env="test_rollout",
             model_path=MODEL_PATH,
             model_name=os.path.basename(MODEL_PATH).lower(),
             tokenizer_path=MODEL_PATH,
             rollout_cross_node_comm=False,
-            max_running_requests=20,
+            max_running_requests=16,
             tensor_parallel_size=1,
             expert_parallel_size=1,
             gpus_per_node=8, # gpu: 8, npu: 16
@@ -89,78 +53,137 @@ class TestRolloutController(unittest.TestCase):
             top_p=0.95,
             temperature=0.6,
             max_tokens=2048,
-            stop_token_ids=get_eos_token_ids(MODEL_PATH),
         )
-        self.judger_workers = []
-        self.judger_config = dict()
+    
+    def init_cpu_workers(self):
+        judger_workers = []
         for i in range(self.resources_config.num_workers):
             master_addr, master_port = ray.get(find_master_addr_and_port.remote())
             worker = Math500JudgerWorker.remote(
-                config=self.judger_config,
+                config=dict(),
                 rank=i,
                 master_addr=master_addr,
                 master_port=master_port,
                 world_size=self.resources_config.num_workers
             )
-            self.judger_workers.append(worker)
+            judger_workers.append(worker)
 
-        self.outqueue = ray.util.queue.Queue(maxsize=1000)
-        self.envqueue = ray.util.queue.Queue(maxsize=1000)
+        return judger_workers
+
+    def init_env(self, gpu_workers, judger_workers):
+        rollout_controller = RolloutController.remote(self.rollout_config, gpu_workers)
+        judger_controller = JudgerController.remote(judger_workers)
+        test_env = EnvController.remote(
+            environment="test",
+            rollout_controller=rollout_controller,
+            judger_controller=judger_controller
+        )
+        return test_env
+
+    def init_dataset(self):
+        class Math500Dataset(torch.utils.data.IterableDataset):
+            def __init__(self, path: str, tokenizer=None):
+                super().__init__()
+                offsets = [0]
+                with open(path) as f:
+                    lines = f.readlines()
+                    for line in lines[:-1]:
+                        offsets.append(offsets[-1] + len(line.encode()))
+                self.offsets = offsets
+                self.tokenizer = tokenizer
+                self.path = path
+
+            def __iter__(self):
+                with open(self.path) as f:
+                    for item in self.offsets:
+                        f.seek(item)
+                        line = f.readline()
+                        yield line 
+        dataset = Math500Dataset(self.data_path, tokenizer=self.tokenizer)  
+        return dataset
+    
+    def init_flow(self, test_env):
+        self.dataflow_config = DataFlowConfig(
+            env="test",
+            max_concurrent=10,
+            prompt_repeat_k=1,
+            target_sample_counts=10.
+        )
+        dataset = self.init_dataset()
+        self.replay_buffer = ReplayBuffer.remote(dataset)
+
+        from xtuner.v1.ray.dataflow.flow import DataProcessor
+        data_processor = DataProcessor()
+        def mapping_dataset_func(meta):
+            data_str = ray.get(meta.action_ref)
+            rollout_input = json.loads(data_str)["problem"] + \
+                            " Let's think step by step and output the final answer within \\boxed{}."
+            reward_input = json.loads(data_str)["answer"]
+            return rollout_input, reward_input
+        test_flow = Flow.remote(self.dataflow_config, self.test_env, self.replay_buffer, data_processor, mapping_dataset_func)
+        return test_flow
+    
+    def setUp(self):
+        ray.init(num_cpus=40)
+        self.data_path = DATA_PATH
+        self.model_path = MODEL_PATH
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_path, trust_remote_code=True)
+        self.init_config()
+        self.judger_workers = self.init_cpu_workers()
 
     def tearDown(self):
         ray.shutdown()
 
-    def _run_rollout_judger_and_pause(self, config, workers, backend_name):
-        rollout_controller = RolloutController.remote(config, workers, outqueue=self.envqueue)
-        ray.get(rollout_controller.__ray_ready__.remote())
-
-        # rollout
-        dataset = Math500Dataset(self.data_path, tokenizer=self.tokenizer)
-        data_iter = iter(dataset)
-        while self.envqueue.qsize() < self.global_batch_size:
-            if (self.send_samples - self.envqueue.qsize()) < self.max_concurrent:
-                prompt, label = next(data_iter)
-                rollout_controller.rollout.remote(prompt, label, self.sample_params)
-                self.send_samples += 1
-            time.sleep(1) 
-        ray.get(rollout_controller.pause.remote())      
-
-        # judger
-        judger_controller = JudgerController.remote(self.judger_config, self.judger_workers)
-        ray.get(judger_controller.__ray_ready__.remote())
-        ray.get(judger_controller.judge.remote(self.envqueue, self.outqueue))
-        while self.outqueue.qsize() < self.global_batch_size:
-            time.sleep(1)
-        response_length = self.outqueue.qsize()
-        avg_reward = 0.0
-        with open(f"rollout_{backend_name}_unittest_results.jsonl", "w") as f:
-            for _ in range(response_length):
-                response_data = self.outqueue.get() # tuple(tuple(objectref,), reward)
-                response = ray.get(response_data[0][0])
-                reward = response_data[1]
-                avg_reward += reward
-
-                json.dump({"prompt": response.prompt,
-                           "response": response.response,
-                           "label": response.label,
-                           "reward": reward}, f)
-                f.write('\n')
-        avg_reward /= response_length
-        self.assertEqual(avg_reward, 1.0)
-
-    def test_vllm_backend(self):
+    @unittest.skipIf(os.environ.get("XTUNER_USE_VLLM", "0") == "0", "vLLM backend is not enabled")
+    def test_vllm_backend_tp1(self):
         from xtuner.v1.ray.rollout import vLLMWorker
+        gpu_workers, _ = AutoAcceleratorWorkers.from_config(vLLMWorker, self.rollout_config, self.resources_config)
+        self.test_env = self.init_env(gpu_workers, self.judger_workers)
+        ray.get(self.test_env.__ray_ready__.remote())
+        self.test_flow = self.init_flow(self.test_env)
+        responses = ray.get(self.test_flow.run.remote())
+        self.assertEqual(len(responses), self.dataflow_config.global_batch_size)
+
+    @unittest.skipIf(os.environ.get("XTUNER_USE_VLLM", "0") == "0", "vLLM backend is not enabled")
+    def test_vllm_backend_tp8(self):
+        from xtuner.v1.ray.rollout import vLLMWorker
+        self.rollout_config.tensor_parallel_size = 8
         self.rollout_config.rollout_cross_node_comm = True
-        workers, pg = AutoAcceleratorWorkers.from_config(vLLMWorker, self.rollout_config, self.resources_config)
-        self._run_rollout_judger_and_pause(self.rollout_config, workers, "vllm")
-
-    def test_sglang_backend(self):
-        from xtuner.v1.ray.rollout import SGLangWorker
-        workers, pg = AutoAcceleratorWorkers.from_config(SGLangWorker, self.rollout_config, self.resources_config)
-        self._run_rollout_judger_and_pause(self.rollout_config, workers, "sglang")
-
+        gpu_workers, _ = AutoAcceleratorWorkers.from_config(vLLMWorker, self.rollout_config, self.resources_config)
+        self.test_env = self.init_env(gpu_workers, self.judger_workers)
+        ray.get(self.test_env.__ray_ready__.remote())
+        self.test_flow = self.init_flow(self.test_env)
+        responses = ray.get(self.test_flow.run.remote())
+        print(f"len of response: {len(responses)}, responses: {responses}")
+        self.assertEqual(len(responses), self.dataflow_config.global_batch_size)
+    
+    @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "SGLang backend is not enabled")
     def test_lmdeploy_backend(self):
-        pass
+        from xtuner.v1.ray.rollout import LMDeployWorker
+        workers_map, pg = AutoAcceleratorWorkers.from_config(LMDeployWorker, self.rollout_config, self.resources_config)
+        rollout_controller = self._init_rollout(self.rollout_config, workers_map)
+        self._run_rollout_judger_and_pause(rollout_controller, "lmdeploy")
+    
+    @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "SGLang backend is not enabled")
+    def test_lmdeploy_update_weights(self):
+        self.rollout_config.skip_load_weights = True
+        from xtuner.v1.ray.rollout import LMDeployWorker
+        train_workers_map, pg = self.setup_train()
+        print(f"train workers ready: {ray.get([worker.__ray_ready__.remote() for worker in train_workers_map])}")
+        rollout_workers_map = AutoAcceleratorWorkers.from_placement_group(
+            LMDeployWorker, self.rollout_config, pg
+        )
+        print(f"rollout workers ready: {ray.get([worker.__ray_ready__.remote() for worker in rollout_workers_map])}")
+        rollout_controller = self._init_rollout(self.rollout_config, rollout_workers_map)
+        bind_train_rollout(train_workers=train_workers_map.keys(), rollout_controller=rollout_controller)
+        
+        # update weights
+        update_weights_futures = [worker.update_weights.remote() for worker in train_workers_map]
+        ray.get(update_weights_futures)
+        print("update weights done!!!")
+        ray.get(rollout_controller.onload.remote(tags=["kv_cache"]))
+        print("rollout load kvcache")
+        self._run_rollout_judger_and_pause(rollout_controller, "lmdeploy")    
 
 if __name__ == "__main__":
     unittest.main()

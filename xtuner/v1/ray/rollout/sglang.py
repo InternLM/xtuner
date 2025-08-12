@@ -1,11 +1,6 @@
-import copy
-import json
 import os
-from typing import List
 
 import ray
-from ray import ObjectRef
-from ray.util.queue import Queue
 from sglang.srt.entrypoints.http_server import launch_server
 from sglang.srt.server_args import ServerArgs
 from starlette.background import BackgroundTask
@@ -25,10 +20,9 @@ class SGLangWorker(RolloutWorker):
         master_addr: str,
         master_port: int,
         world_size: int,
-        bundle_idx: int,
         accelerator: str = "GPU",
     ):
-        super().__init__(config, rank, master_addr, master_port, world_size, bundle_idx, accelerator)
+        super().__init__(config, rank, master_addr, master_port, world_size, accelerator)
         self.server_func = launch_server
         self.endpoints["health_generate"] = "health_generate"
         self.endpoints["generate"] = "generate"
@@ -37,7 +31,6 @@ class SGLangWorker(RolloutWorker):
         self,
         url: str,
         uid: str,
-        input_ids: List[int],
         prompt: str,
         sample_params: dict = dict(),
         extra_params: dict = dict(),
@@ -45,14 +38,7 @@ class SGLangWorker(RolloutWorker):
         # default params
         sample_params["max_new_tokens"] = sample_params.get("max_tokens", 128)
         del sample_params["max_tokens"]
-        payload = {
-            "stream": True,
-            "sampling_params": sample_params,
-        }
-        if input_ids:
-            payload["input_ids"] = input_ids
-        else:
-            payload["text"] = prompt
+        payload = {"stream": True, "sampling_params": sample_params, "text": prompt}
 
         if extra_params:
             payload.update(extra_params)
@@ -64,34 +50,6 @@ class SGLangWorker(RolloutWorker):
         )
         r = await self.client.send(req, stream=True)
         return StreamingResponse(r.aiter_text(), background=BackgroundTask(r.aclose))
-
-    async def fetch_response_task(self, item, outqueue: Queue):
-        last_trajectory = ""
-        meta_ref, res = item[0], item[1]
-        async for chunk in res.body_iterator:
-            chunk = chunk[5:].strip()
-            if self.paused:
-                self._collect_pending_response(meta_ref, last_trajectory)
-                print(f"Worker {self.rank} is paused, skipping when handle step response.")
-                break
-            if chunk == "[DONE]":
-                last_trajectory = json.loads(last_trajectory)
-                meta = ray.get(meta_ref)
-                meta.output_ids = last_trajectory.get(self.endpoints["output_ids"], [])
-                meta.response = last_trajectory.get(self.endpoints["text"], "")
-                outqueue.put(ray.put(meta))
-                print(f"--- get response from rank {self.rank}")
-                self.consumed_samples += 1
-                break
-            else:
-                last_trajectory = copy.deepcopy(chunk)
-
-    def _collect_pending_response(self, meta_ref: ObjectRef, last_trajectory: str):
-        meta = ray.get(meta_ref)
-        last_trajectory_json = json.loads(last_trajectory)
-        meta.output_ids = last_trajectory_json.get(self.endpoints["output_ids"], [])
-        meta.response = last_trajectory_json.get(self.endpoints["text"], "")
-        self.buffer_queue.put(ray.put(meta))
 
     def get_logprobs(self, input_ids, sampling_params):
         return self._make_request(

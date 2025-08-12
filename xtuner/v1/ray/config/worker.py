@@ -84,6 +84,13 @@ class RolloutConfig(BaseModel):
             help="Chunked prefill size for the rollout worker.",
         ),
     ] = 128
+    skip_load_weights: Annotated[
+        bool,
+        Parameter(
+            group=infer_group,
+            help="Whether to skip loading weights for the rollout worker.",
+        ),
+    ] = False
     extra_rollout_config: Annotated[
         Optional[dict],
         Parameter(
@@ -91,6 +98,13 @@ class RolloutConfig(BaseModel):
             help='Extra configuration for different rollout worker. vllm parameters will start with prefix "vllm", etc.',
         ),
     ] = dict()
+    launch_server_method: Annotated[
+        Literal["ray", "multiprocessing"],
+        Parameter(
+            group=infer_group,
+            help="Method to launch the rollout server, either 'ray' or 'multiprocessing'.",
+        ),
+    ] = "ray"
 
 
 if __name__ == "__main__":

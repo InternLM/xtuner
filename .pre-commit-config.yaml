@@ -62,7 +62,7 @@ repos:
         entry: .dev_scripts/mypy_entrypoint.sh
         language: python
         # For 3rd party lib, we only do type check for torch
-        additional_dependencies: ["mypy==1.16.1", "torch==2.6.0", "requests"]
+        additional_dependencies: ["mypy==1.16.1", "torch==2.6.0", "types-requests"]
         require_serial: true
         verbose: true
         types: [python]

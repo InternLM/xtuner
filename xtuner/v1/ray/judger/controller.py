@@ -1,34 +1,23 @@
 from typing import List
 
 import ray
+import ray.util.queue
 
 from .worker import JudgerWorker
 
 
 @ray.remote
 class JudgerController:
-    def __init__(self, config: dict, workers: list[JudgerWorker]):
+    def __init__(self, workers: list[JudgerWorker], config: dict = dict()):
         self.config = config
         self.worker_server_urls: List[str] = []
-        self.workers: List[JudgerWorker] = []
-        self.init_workers(config, workers)
+        # todo(@duanyanhui): single judger controller support multiple workers
         self.workers = workers
         self.num_workers = len(self.workers)
+        self.worker_index = 0  # round robin index
 
-    def init_workers(
-        self,
-        config: dict,
-        workers: List[JudgerWorker],
-        launch_method: str = "function",
-    ):
-        if launch_method == "function":
-            return
-        else:
-            # todo(@duanyanhui): Wrap the judge_function as an OpenAI API server
-            return
-
-    def judge(self, inqueue: ray.util.queue.Queue, outqueue: ray.util.queue.Queue):
-        return [worker.judge.remote(inqueue, outqueue) for worker in self.workers]  # type: ignore[attr-defined]
-
-    def pause(self):
-        return [worker.pause.remote() for worker in self.workers]
+    async def judge(self, response, label):
+        index = self.worker_index % len(self.workers)
+        reward_ref = self.workers[index].judge.remote(response, label)
+        self.worker_index += 1
+        return await reward_ref

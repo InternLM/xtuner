@@ -1,7 +1,6 @@
 # Adapted from https://github.com/EleutherAI/lm-evaluation-harness/blob/main/lm_eval/tasks/hendrycks_math/utils.py
 import ray
 
-from xtuner.v1.ray.dataflow import RolloutMeta
 from xtuner.v1.ray.judger.worker import JudgerWorker
 
 
@@ -40,13 +39,23 @@ def remove_boxed(s):
         return ""
     if "\\boxed " in s:
         left = "\\boxed "
-        assert s[: len(left)] == left
+        try:
+            assert s[: len(left)] == left
+        except AssertionError:
+            return ""
         return s[len(left) :]
 
     left = "\\boxed{"
 
-    assert s[: len(left)] == left
-    assert s[-1] == "}"
+    try:
+        assert s[: len(left)] == left
+    except AssertionError:
+        return ""
+
+    try:
+        assert s[-1] == "}"
+    except AssertionError:
+        return ""
 
     return s[len(left) : -1]
 
@@ -102,7 +111,10 @@ def remove_right_units(string):
     # "\\text{ " only ever occurs (at least in the val set) when describing units
     if "\\text{ " in string:
         splits = string.split("\\text{ ")
-        assert len(splits) == 2
+        try:
+            assert len(splits) == 2
+        except AssertionError:
+            return string
         return splits[0]
     else:
         return string
@@ -221,13 +233,8 @@ class Math500JudgerWorker(JudgerWorker):
         super().__init__(config, rank, master_addr, master_port, world_size, accelerator)
 
     # call judger by function
-    def judge_function(self, data: ray.ObjectRef):
-        real_data = ray.get(data[0])
-        predict_str = real_data.response
-        ground_truth = real_data.label
+    def judge_function(self, response, label):
+        predict_str = response
+        ground_truth = label
         reward = compute_score(predict_str, ground_truth)
         return reward
-
-    # call judger by openai server api
-    def judge_server(self, data: RolloutMeta):
-        pass
