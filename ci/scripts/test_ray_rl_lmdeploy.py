@@ -115,7 +115,7 @@ def build_train_controller(args, pg):
     )
     optim_cfg: AdamWConfig = AdamWConfig(lr=5e-7)
     fsdp_cfg: FSDPConfig = FSDPConfig(
-        torch_compile=True,
+        torch_compile=False,
         cpu_offload=False,
         ep_size=1,
 
