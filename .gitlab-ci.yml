@@ -1,5 +1,10 @@
+variables:
+  IMAGE: pjlab-shanghai-acr-registry-vpc.cn-shanghai.cr.aliyuncs.com/pjlab-eflops/xpuyu:torch-2.6.0-076676dd-0709
+
 include:
   - local: ci/workflow/lint.yaml
+  - local: ci/workflow/unit_test.yaml
 
 stages:
   - lint
+  - unit_test
