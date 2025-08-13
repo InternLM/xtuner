@@ -10,6 +10,7 @@ from .handle_moe_load_and_save import (
     get_origin_state_dict,
     load_state_dict_into_model,
 )
+from .rm_utils import RewardModelClient
 from .stop_criteria import StopWordStoppingCriteria
 from .templates import PROMPT_TEMPLATE, SYSTEM_TEMPLATE
 
@@ -24,4 +25,5 @@ __all__ = [
     "load_state_dict_into_model",
     "get_origin_state_dict",
     "SUPPORT_MODELS",
+    "RewardModelClient",
 ]

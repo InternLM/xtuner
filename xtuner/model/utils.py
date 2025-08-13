@@ -311,7 +311,7 @@ def make_inputs_require_grad(module, input, output):
 
 def guess_load_checkpoint(pth_model):
     if osp.isfile(pth_model):
-        state_dict = torch.load(pth_model, map_location="cpu")
+        state_dict = torch.load(pth_model, map_location="cpu", weights_only=False)
         if "state_dict" in state_dict:
             state_dict = state_dict["state_dict"]
     elif osp.isdir(pth_model):

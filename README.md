@@ -38,6 +38,7 @@ English | [简体中文](README_zh-CN.md)
 </div>
 
 ## 🎉 News
+
 - **\[2025/02\]** Support [OREAL](https://github.com/InternLM/OREAL), a new RL method for math reasoning!
 - **\[2025/01\]** Support [InternLM3 8B Instruct](https://huggingface.co/internlm/internlm3-8b-instruct)!
 - **\[2024/07\]** Support [MiniCPM](xtuner/configs/minicpm/) models!
@@ -275,6 +276,10 @@ For more examples, please see [chat.md](./docs/en/user_guides/chat.md).
 ### Evaluation
 
 - We recommend using [OpenCompass](https://github.com/InternLM/opencompass), a comprehensive and systematic LLM evaluation library, which currently supports 50+ datasets with about 300,000 questions.
+
+### Data Preparation
+
+- You can use [GraphGen](https://github.com/open-sciencelab/GraphGen) to create synthetic data for fine-tuning.
 
 ## 🤝 Contributing
 
