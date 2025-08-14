@@ -9,7 +9,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from xtuner.v1.loss import CELossContext
 from xtuner.v1.rl.grpo.loss import GRPOLossContext
-from xtuner.v1.loss.ce_loss import len2weight
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.utils.test_utils import assert_verbose_allclose
 from xtuner.v1.loss.utils import cal_global_grad_tokens

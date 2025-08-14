@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Tuple
 
 import ray
 import ray.util.queue
@@ -8,11 +8,12 @@ from .worker import JudgerWorker
 
 @ray.remote
 class JudgerController:
-    def __init__(self, workers: list[JudgerWorker], config: dict = dict()):
+    def __init__(self, workers_bundle_idx_map: dict[JudgerWorker, Tuple[int, int]], config: dict = dict()):
         self.config = config
+        self.workers_bundle_idx_map = workers_bundle_idx_map
         self.worker_server_urls: List[str] = []
         # todo(@duanyanhui): single judger controller support multiple workers
-        self.workers = workers
+        self.workers = list(self.workers_bundle_idx_map.keys())
         self.num_workers = len(self.workers)
         self.worker_index = 0  # round robin index
 

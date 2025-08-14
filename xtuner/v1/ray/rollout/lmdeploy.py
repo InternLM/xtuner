@@ -104,6 +104,7 @@ class LMDeployWorker(RolloutWorker):
     def wake_up(self, tags: List[str] | None = None):
         import requests
 
+        self.paused = False
         url = f"{self.server_url}/{self.endpoints['wake_up']}"
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {self.api_keys}"}
         data = {"tags": tags}
