@@ -8,12 +8,8 @@ import torch
 from ray.util.placement_group import placement_group_table
 
 from xtuner.v1.ray.config import RolloutConfig
-from xtuner.v1.utils import get_logger
 
 from .worker import RolloutWorker
-
-
-logger = get_logger()
 
 
 def run_lmdeploy_server_wrapper(lmdeploy_config_namespace: Namespace):

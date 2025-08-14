@@ -1,4 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import os
 import sys
 
 from loguru import logger
@@ -27,7 +28,8 @@ def get_logger(level="INFO"):
     global _LOGGER
     if _LOGGER is None:
         # Remove the original logger in Python to prevent duplicate printing.
+        log_level = os.environ.get("XTUNER_LOG_LEVEL", level).upper()
         logger.remove()
-        logger.add(sys.stderr, level=level, format=log_format(debug=level == "DEBUG"))
+        logger.add(sys.stderr, level=log_level, format=log_format(debug=log_level == "DEBUG"))
         _LOGGER = logger
     return _LOGGER

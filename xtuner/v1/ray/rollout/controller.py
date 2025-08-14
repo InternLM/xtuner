@@ -6,12 +6,8 @@ import ray.util.queue
 
 from transformers import AutoTokenizer
 from xtuner.v1.ray.config.worker import RolloutConfig
-from xtuner.v1.utils import get_logger
 
 from .worker import RolloutWorker
-
-
-logger = get_logger()
 
 
 @ray.remote
@@ -58,8 +54,6 @@ class RolloutController:
             set_bundle_idxs_objectref.append(active_worker.set_engine_bundle_idxs.remote(engine_bundle_idxs))  # type: ignore[attr-defined]
             engine_mesh_list.append([self.workers_bundle_idx_map[worker][0] for worker in engine_workers])
         ray.get(set_bundle_idxs_objectref)
-
-        logger.info(f"active_rollout_workers: {self.active_rollout_workers}")
         # init dist_init_addr for each worker according to parallel settings
         init_dist_init_addrs = ray.get([worker.init_dist_port.remote() for worker in self.active_rollout_workers])  # type: ignore[attr-defined]
         dist_init_addrs = self._update_dist_init_addr(

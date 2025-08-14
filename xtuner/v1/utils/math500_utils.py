@@ -4,7 +4,6 @@ import ray
 import torch
 
 from xtuner.v1.ray.accelerator import AutoAcceleratorWorkers
-from xtuner.v1.ray.environment import EnvController
 from xtuner.v1.ray.judger import JudgerController, Math500JudgerWorker
 
 
@@ -46,16 +45,20 @@ def build_math500_judger_controller(pg):
 
 
 def build_math500_flow(model_path, data_path, dataflow_config, rollout_controller, judger_controller):
-    test_env = EnvController.remote(
-        environment="test", rollout_controller=rollout_controller, judger_controller=judger_controller
-    )
     from transformers import AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
     dataset = Math500Dataset(data_path, tokenizer=tokenizer)
-    from xtuner.v1.ray.dataflow import DataProcessor, Flow, ReplayBuffer
+    from xtuner.v1.ray.dataflow import DataFlow, DataProcessor, ReplayBuffer
 
     replay_buffer = ReplayBuffer.remote(dataset)
     data_processor = DataProcessor()
-    test_flow = Flow.remote(dataflow_config, test_env, replay_buffer, data_processor, mapping_math500_dataset_func)
-    return test_env, test_flow
+    test_flow = DataFlow.remote(
+        dataflow_config,
+        replay_buffer,
+        data_processor,
+        rollout_controller,
+        judger_controller,
+        mapping_math500_dataset_func,
+    )
+    return test_flow

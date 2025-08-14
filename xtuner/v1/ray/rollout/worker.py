@@ -15,9 +15,6 @@ from xtuner.v1.ray.config import RolloutConfig
 from xtuner.v1.utils import get_logger
 
 
-logger = get_logger()
-
-
 class RolloutWorker(SingleAcceleratorWorker):
     def __init__(
         self,
@@ -43,6 +40,7 @@ class RolloutWorker(SingleAcceleratorWorker):
         self.engine_bundle_idxs: list[int] = []
         self.server_process: Optional[multiprocessing.Process] = None
         self.init_dist_port()  # server port, nccl port, dist port
+        self.logger = get_logger()
 
     def init_dist_port(self):
         self.host, self.ports = ray.get(find_master_addr_and_port.remote(3))
@@ -71,7 +69,7 @@ class RolloutWorker(SingleAcceleratorWorker):
             "Authorization": f"Bearer {server_configs.api_key}",
         }
 
-        logger.info(f"launch server task on server_url: {self.server_url}")
+        self.logger.info(f"launch server task on server_url: {self.server_url}")
 
         # note(@duanyanhui): launch server as multiprocessing for sglang temporarily
         if self.config.launch_server_method == "multiprocessing":
@@ -88,7 +86,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                         if response.status_code == 200:
                             return
                     except requests.RequestException as e:
-                        logger.error(
+                        self.logger.error(
                             f"can't connect to server url {self.server_url}/{self.endpoints['health_generate']} because {e}"
                         )
                     time.sleep(5)
@@ -145,7 +143,7 @@ class RolloutWorker(SingleAcceleratorWorker):
             sample_params=sample_params or {},
             extra_params={},
         )
-        logger.debug(f" +++ send request {uid} to worker: {self.rank}")
+        self.logger.debug(f" +++ send request {uid} to worker: {self.rank}")
         last_trajectory = ""
         async for chunk in response.aiter_text():
             if chunk == "":
@@ -153,11 +151,11 @@ class RolloutWorker(SingleAcceleratorWorker):
             try:
                 if self.paused:
                     await response.aclose()
-                    logger.debug(f"--- get paused request {uid}")
+                    self.logger.debug(f"--- get paused request {uid}")
                     return last_trajectory, "unfinished"
                 chunk_data = chunk[len("data:") :].strip()  # Remove "data: " prefix
                 if chunk_data == "[DONE]":
-                    logger.debug(f" --- get finished request {uid}")
+                    self.logger.debug(f" --- get finished request {uid}")
                     await response.aclose()
                     return last_trajectory, "finished"
                 else:
@@ -165,7 +163,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                         continue
                     last_trajectory += json.loads(chunk_data)["choices"][0]["delta"]["content"]
             except Exception as e:
-                logger.error(f"Error processing chunk: {chunk}, error: {e}")
+                self.logger.error(f"Error processing chunk: {chunk}, error: {e}")
         await response.aclose()
 
     async def rollout(self, prompt: str, sample_params):
@@ -196,7 +194,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                 child.kill()
             parent.terminate()
             parent.wait(timeout=5)
-            logger.debug(f"Worker {self.rank} server process and its children terminated.")
+            self.logger.debug(f"Worker {self.rank} server process and its children terminated.")
             return
 
     # not implemented functions

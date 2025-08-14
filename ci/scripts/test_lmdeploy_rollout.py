@@ -73,11 +73,11 @@ def main():
     )
     rollout_controller = RolloutController.remote(rollout_config, rollout_workers_map)
     judger_controller = build_math500_judger_controller(pg)
-    test_env, test_flow = build_math500_flow(args.model_path, args.data_path, dataflow_config, rollout_controller, judger_controller)
+    test_flow = build_math500_flow(args.model_path, args.data_path, dataflow_config, rollout_controller, judger_controller)
 
     reward_list = []
     for i in range(args.repeat_times):
-        ray.get(test_env.restart.remote())
+        ray.get(rollout_controller.restart.remote())
         rollout_data = ray.get(test_flow.run.remote())
         for data in rollout_data:
             reward_list.extend(data["reward"])

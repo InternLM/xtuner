@@ -37,15 +37,15 @@ class TestRollout(unittest.TestCase):
             global_batch_size=1.
         )
 
-    def build_env_and_flow(self, rollout_worker):
+    def build_flow(self, rollout_worker):
         rollout_workers_map = AutoAcceleratorWorkers.from_placement_group(
             rollout_worker, self.rollout_config, self.pg
         )
         rollout_controller = RolloutController.remote(self.rollout_config, rollout_workers_map)
         judger_controller = build_math500_judger_controller(self.pg)
-        test_env, test_flow = build_math500_flow(self.model_path, self.data_path, self.dataflow_config, rollout_controller, judger_controller)
+        test_flow = build_math500_flow(self.model_path, self.data_path, self.dataflow_config, rollout_controller, judger_controller)
 
-        return test_env, test_flow
+        return test_flow
     
 
     def setUp(self):
@@ -69,7 +69,7 @@ class TestRollout(unittest.TestCase):
     @unittest.skipIf(os.environ.get("XTUNER_USE_VLLM", "0") == "0", "vLLM backend is not enabled")
     def test_vllm_backend_tp1(self):
         from xtuner.v1.ray.rollout import vLLMWorker
-        _, test_flow = self.build_env_and_flow(vLLMWorker)
+        test_flow = self.build_flow(vLLMWorker)
         responses = ray.get(test_flow.run.remote())
         self.assertEqual(len(responses), self.dataflow_config.global_batch_size)
 
@@ -78,14 +78,14 @@ class TestRollout(unittest.TestCase):
         from xtuner.v1.ray.rollout import vLLMWorker
         self.rollout_config.tensor_parallel_size = 8
         self.rollout_config.rollout_cross_node_comm = True
-        _, test_flow = self.build_env_and_flow(vLLMWorker)
+        test_flow = self.buildflow(vLLMWorker)
         responses = ray.get(test_flow.run.remote())
         self.assertEqual(len(responses), self.dataflow_config.global_batch_size)
     
-    @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "SGLang backend is not enabled")
+    @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
     def test_lmdeploy_backend(self):
         from xtuner.v1.ray.rollout import LMDeployWorker
-        _, test_flow = self.build_env_and_flow(LMDeployWorker)
+        test_flow = self.build_flow(LMDeployWorker)
         responses = ray.get(test_flow.run.remote())
         print(f"len of response: {len(responses)}")
         self.assertEqual(len(responses), self.dataflow_config.global_batch_size)

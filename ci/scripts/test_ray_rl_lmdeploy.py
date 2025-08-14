@@ -63,10 +63,10 @@ def parse_args():
 
 def bind_train_rollout(
     train_controller,
-    env_controller,
+    rollout_controller,
 ) -> None:
     """Bind the training and rollout workers for update weights."""
-    info_dict = ray.get(env_controller.get_rollout_info.remote())  # type: ignore[attr-defined]
+    info_dict = ray.get(rollout_controller.get_rollout_info.remote())  # type: ignore[attr-defined]
     ray.get(train_controller.update_rollout_info.remote(info_dict))
     return
 
@@ -197,13 +197,13 @@ def main(args):
     
     tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True)
     if args.debug_rollout_only:
-        test_env, test_flow = build_math500_flow(args.model_path, args.data_path, dataflow_config, rollout_controller, judger_controller)
-        bind_train_rollout(train_controller=train_controller, env_controller=test_env)
+        test_flow = build_math500_flow(args.model_path, args.data_path, dataflow_config, rollout_controller, judger_controller)
+        bind_train_rollout(train_controller=train_controller, rollout_controller=rollout_controller)
 
         # update weights
         ray.get(train_controller.update_weights.remote())
         print("update weights done!!!")
-        ray.get(test_env.onload.remote(tags=["kv_cache"]))
+        ray.get(rollout_controller.onload.remote(tags=["kv_cache"]))
         print("rollout load kvcache")
         # ray.get(train_controller.offload.remote())
         ray.get(train_controller.offload_model.remote())
@@ -233,13 +233,13 @@ def main(args):
         ray.get(train_controller.fit.remote(data_batches, pack_max_length=args.pack_max_length))
         return
     
-    test_env, test_flow = build_math500_flow(args.model_path, args.data_path, dataflow_config, rollout_controller, judger_controller)
-    bind_train_rollout(train_controller=train_controller, env_controller=test_env)
+    test_flow = build_math500_flow(args.model_path, args.data_path, dataflow_config, rollout_controller, judger_controller)
+    bind_train_rollout(train_controller=train_controller, rollout_controller=rollout_controller)
 
     # update weights
     ray.get(train_controller.update_weights.remote())
     print("update weights done!!!")
-    ray.get(test_env.onload.remote(tags=["kv_cache"]))
+    ray.get(rollout_controller.onload.remote(tags=["kv_cache"]))
     print("rollout load kvcache")
     # ray.get(train_controller.offload.remote())
     ray.get(train_controller.offload_model.remote())
@@ -249,13 +249,13 @@ def main(args):
         result_path = args.work_dir / f"rollout_results_step{step}.jsonl"
         save_trajectories(data_groups, result_path)
         time.sleep(5)
-        ray.get(test_env.offload.remote())
+        ray.get(rollout_controller.offload.remote())
         ray.get(train_controller.onload.remote())
         data_batches = prepare_train_data(data_groups, tokenizer, args.prompt_repeat_k, args.pack_max_length)
         print(f"data_batches size: {len(data_batches)}")
         ray.get(train_controller.fit.remote(data_batches, pack_max_length=args.pack_max_length))
         ray.get(train_controller.offload_optimizer.remote())
-        ray.get(test_env.onload.remote())
+        ray.get(rollout_controller.onload.remote())
         ray.get(train_controller.update_weights.remote())
         print("update weights done!!!")
         ray.get(train_controller.offload_model.remote())
