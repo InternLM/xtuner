@@ -250,7 +250,7 @@ class MoE(BaseModel):
 
         del router_logits
 
-        return MoEModelOutputs(**output, logits=logits)  # type: ignore[typeddict-item]
+        return MoEModelOutputs(**output)  # type: ignore[typeddict-item]
 
     def build_embeddings(self, config: MoEConfig):
         return nn.Embedding(config.vocab_size, config.hidden_size, config.padding_idx)
