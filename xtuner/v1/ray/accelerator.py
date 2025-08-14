@@ -6,7 +6,6 @@ import torch
 import torch.distributed as dist
 from cyclopts import Parameter
 from pydantic import BaseModel
-from ray.actor import ActorClass, ActorHandle
 from ray.util.placement_group import PlacementGroup, placement_group, placement_group_table
 from typing_extensions import Annotated
 
@@ -176,9 +175,7 @@ class AutoAcceleratorWorkers:
         return sorted_bundle_idxs, master_addr, master_port, world_size
 
     @classmethod
-    def from_config(
-        cls, worker_cls: ActorClass[T], worker_config, accelerator_config: AcceleratorResourcesConfig
-    ) -> Tuple[Dict[ActorHandle[T], Tuple[int, int]], PlacementGroup]:
+    def from_config(cls, worker_cls, worker_config, accelerator_config: AcceleratorResourcesConfig):
         """Create workers based on the provided configuration."""
         pg = AutoAcceleratorWorkers.build_placement_group(accelerator_config)
         workers_bundle_idx_map = cls.from_placement_group(worker_cls, worker_config, pg)
@@ -186,9 +183,7 @@ class AutoAcceleratorWorkers:
         return workers_bundle_idx_map, pg
 
     @classmethod
-    def from_placement_group(
-        cls, worker_cls: ActorClass[T], worker_config, pg: PlacementGroup
-    ) -> Dict[ActorHandle[T], Tuple[int, int]]:
+    def from_placement_group(cls, worker_cls, worker_config, pg: PlacementGroup):
         """Create workers based on the provided configuration."""
 
         pg_options = cls.get_pg_options(pg)

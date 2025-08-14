@@ -2,9 +2,10 @@ from typing import TypedDict
 
 import ray
 import torch
-from ray.actor import ActorClass
 
 from xtuner.v1.data_proto.sequence_context import SequenceContext
+
+from .worker import TrainingWorker
 
 
 class ColateItem(TypedDict):
@@ -15,7 +16,7 @@ class ColateItem(TypedDict):
 
 @ray.remote
 class TrainingController:
-    def __init__(self, workers: list[ActorClass]) -> None:
+    def __init__(self, workers: list[TrainingWorker]) -> None:
         self.workers = workers
 
     def _get_pack_infos(self, dataset, num_tokens, target, random=None):
@@ -112,7 +113,7 @@ class TrainingController:
 
         # todo: support round up
         num_packed_data_batches = len(packed_data_batches)
-        data_replicate_size = ray.get(self.workers[0].get_data_replicate_size.remote())
+        data_replicate_size = ray.get(self.workers[0].get_data_replicate_size.remote())  # type: ignore[attr-defined]
         dp_size = len(self.workers) // data_replicate_size
         packed_data_batches = packed_data_batches[: (num_packed_data_batches // dp_size * dp_size)]
 
@@ -121,12 +122,17 @@ class TrainingController:
         handles = []
         for worker_idx, worker in enumerate(self.workers):
             handles.append(
-                worker.fit.remote(data_batches=packed_data_batches[(worker_idx // data_replicate_size) :: dp_size])
+                worker.fit.remote(data_batches=packed_data_batches[(worker_idx // data_replicate_size) :: dp_size])  # type: ignore[attr-defined]
             )
         ray.get(handles)
 
-    def offload(self):
-        ray.get([worker.offload.remote() for worker in self.workers])
+    def offload_model(self):
+        ray.get([worker.offload_model.remote() for worker in self.workers])
+        return
+
+    def offload_optimizer(self):
+        """Offload the optimizer of the training workers."""
+        ray.get([worker.offload_optimizer.remote() for worker in self.workers])
         return
 
     def onload(self):

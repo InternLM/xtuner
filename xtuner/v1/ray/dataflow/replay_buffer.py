@@ -32,10 +32,20 @@ class ReplayMeta:
     def update_observations(
         self, observation_id_list: Optional[list[int]], observation_ref_list: Optional[list[ObjectRef]]
     ):
-        if observation_id_list is None and observation_ref_list is not None:
+        if observation_id_list and observation_ref_list:
+            for idx, observe_id in enumerate(observation_id_list):
+                if observe_id is None:
+                    self.observation_ids.append(uuid4().int)
+                    self.observation_refs.append(observation_ref_list[idx])
+                else:
+                    cur_idx = self.observation_ids.index(observe_id)
+                    self.observation_refs[cur_idx] = observation_ref_list[idx]
+
+        elif observation_id_list is None and observation_ref_list is not None:
             for observe in observation_ref_list:
                 self.observation_ids.append(uuid4().int)
                 self.observation_refs.append(observe)
+
         else:
             raise ValueError("observation_ref must be provided.")
 
@@ -107,8 +117,7 @@ class ReplayBuffer:
             try:
                 action = next(self._datasets_iter)
             except StopIteration:
-                logger.warning("ReplayBuffer: dataset is exhausted!")
-                return None  # 或 raise RuntimeError("Dataset is empty!")
+                return None
             sampled = ReplayMeta(
                 action_id=uuid4().int,
                 observation_ids=[],

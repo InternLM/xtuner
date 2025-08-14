@@ -3,7 +3,6 @@ from typing import Dict, List, Tuple
 import ray
 import ray.exceptions
 import ray.util.queue
-from ray.actor import ActorHandle
 
 from transformers import AutoTokenizer
 from xtuner.v1.ray.config.worker import RolloutConfig
@@ -20,12 +19,12 @@ class RolloutController:
     def __init__(
         self,
         infer_config: RolloutConfig,
-        workers_bundle_idx_map: Dict[ActorHandle[RolloutWorker], Tuple[int, int]],
+        workers_bundle_idx_map: Dict[RolloutWorker, Tuple[int, int]],
     ):
         self.config = infer_config
         self.num_workers = 0
         self.worker_server_urls: List[str] = []
-        self.active_rollout_workers: List[ray.actor.ActorHandle] = []
+        self.active_rollout_workers: List[RolloutWorker] = []
         self.tokenizer = (
             AutoTokenizer.from_pretrained(infer_config.model_path, trust_remote_code=True)
             if infer_config.tokenizer_path
@@ -78,17 +77,17 @@ class RolloutController:
         self.worker_server_urls = list(worker_server_urls_map.values())
         return engine_mesh_list, worker_server_urls_map
 
-    def init_router(self, infer_config: RolloutConfig):
-        self.active_rollout_workers[0].launch_router.remote(infer_config)
-
     async def rollout(self, prompt: str, sample_params):
         index = self.worker_index % len(self.active_rollout_workers)
-        response_ref = self.active_rollout_workers[index].rollout.remote(prompt, sample_params)
+        response_ref = self.active_rollout_workers[index].rollout.remote(prompt, sample_params)  # type: ignore[attr-defined]
         self.worker_index += 1
         return await response_ref
 
     def pause(self):
         return ray.get([worker.pause.remote() for worker in self.active_rollout_workers])
+
+    def restart(self):
+        return ray.get([worker.restart.remote() for worker in self.active_rollout_workers])
 
     # internal functions
     def _update_dist_init_addr(self, nodes_per_engine, dist_init_addrs, tp_size):

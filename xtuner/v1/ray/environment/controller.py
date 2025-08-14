@@ -1,4 +1,3 @@
-import json
 from typing import List
 
 import ray
@@ -47,19 +46,22 @@ class EnvController:
     def shutdown(self):
         return ray.get(self.rollout_controller.shutdown.remote())
 
+    def restart(self):
+        return ray.get(self.rollout_controller.restart.remote())
+
     async def rollout(self, prompt):
         return await self.rollout_controller.rollout.remote(prompt)
 
-    async def run(self, rollout_input, reward_input, sample_params: SampleParams = SampleParams()) -> str:
+    async def run(self, rollout_input, reward_input, sample_params: SampleParams = SampleParams()) -> dict:
         self.received_samples += 1
         logger.debug(f"env controller received_samples: {self.received_samples}")
         rollout_res, state = await self.rollout_controller.rollout.remote(rollout_input, sample_params.dict())  # type: ignore[attr-defined]
         if state == "unfinished":
-            return json.dumps({"response": rollout_res, "state": state})
+            return {"response": rollout_res, "state": state}
         reward = await self.judger_controller.judge.remote(rollout_res, reward_input)  # type: ignore[attr-defined]
         self.finished_samples += 1
         logger.debug(f"env controller finished_samples: {self.finished_samples}")
-        return json.dumps({"response": rollout_res, "reward": reward, "state": state})
+        return {"response": rollout_res, "reward": reward, "state": state}
 
     def get_rollout_info(self):
         return ray.get(self.rollout_controller.get_rollout_info.remote())

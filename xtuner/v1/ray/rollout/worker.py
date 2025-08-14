@@ -171,9 +171,13 @@ class RolloutWorker(SingleAcceleratorWorker):
     async def rollout(self, prompt: str, sample_params):
         return await self.rollout_task(prompt, sample_params)
 
-    async def pause(self):
+    def pause(self):
         self.paused = True
         self.pause_generation()
+
+    def restart(self):
+        self.paused = False
+        self.continue_generation()
 
     def shutdown(self):
         if self.server_task is not None:

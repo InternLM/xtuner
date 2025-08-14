@@ -194,14 +194,21 @@ class TrainingWorker(SingleAcceleratorWorker):
             self._micro_batch_size = int(micro_batch_size)
         return self._micro_batch_size
 
-    def offload(self):
+    def offload_model(self):
         self._engine.put_model_to_device("cpu")
+        DEVICE_MODULE.empty_cache()
+        print(
+            f"Offloaded model to CPU. Current allocate {DEVICE_MODULE.memory_allocated() / (1024**2)} MB, reserved: {DEVICE_MODULE.memory_reserved() / (1024**2)} MB"
+        )
+
+    def offload_optimizer(self):
+        """Offload the optimizer of the training worker."""
         self._engine.put_optimizer_to_device("cpu")
         DEVICE_MODULE.empty_cache()
         print(
-            f"current allocate {DEVICE_MODULE.memory_allocated() / (1024**2)} MB, reserved: {DEVICE_MODULE.memory_reserved() / (1024**2)} MB"
+            f"Offloaded optimizer to CPU. Current allocate {DEVICE_MODULE.memory_allocated() / (1024**2)} MB, "
+            f"reserved: {DEVICE_MODULE.memory_reserved() / (1024**2)} MB"
         )
-        print("Offloaded model and optimizer to CPU.")
 
     def onload(self):
         self._engine.put_model_to_device(DEVICE)
