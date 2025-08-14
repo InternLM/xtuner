@@ -7,11 +7,6 @@ import ray.util.queue
 import torch
 from ray import ObjectRef
 
-from xtuner.v1.utils import get_logger
-
-
-logger = get_logger()
-
 
 @dataclass
 class ReplayMeta:

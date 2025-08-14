@@ -17,7 +17,7 @@ from xtuner.v1.ray.accelerator import AcceleratorResourcesConfig, AutoAccelerato
 from xtuner.v1.ray import find_master_addr_and_port
 from xtuner.v1.ray.judger import JudgerController, Math500JudgerWorker
 from xtuner.v1.ray.environment import SampleParams, EnvController
-from xtuner.v1.ray.dataflow import Flow, DataFlowConfig, DataProcessor, ReplayBuffer
+from xtuner.v1.ray.dataflow import DataFlow, DataFlowConfig, DataProcessor, ReplayBuffer
 
 MODEL_PATH = os.environ["ROLLOUT_MODEL_PATH"]
 DATA_PATH = os.environ["ROLLOUT_DATA_PATH"]
@@ -132,7 +132,7 @@ def main():
     dataset = Math500Dataset(data_path, tokenizer=tokenizer)
     replay_buffer = ReplayBuffer.remote(dataset)
     data_processor = DataProcessor()
-    test_flow = Flow.remote(dataflow_config, test_env, replay_buffer, data_processor, mapping_dataset_func)
+    test_flow = DataFlow.remote(dataflow_config, test_env, replay_buffer, data_processor, mapping_dataset_func)
     
     # start run 
     responses = ray.get(test_flow.run.remote())
