@@ -4,6 +4,7 @@ from concurrent.futures import ProcessPoolExecutor, wait
 from functools import reduce
 from itertools import chain
 from pathlib import Path
+from shutil import copy, copytree
 from typing import Generator, TypedDict, cast
 
 import torch
@@ -73,7 +74,11 @@ class BaseModel(nn.Module):
     def __init__(self):
         super().__init__()
 
+        self._hf_path: Path | None = None
+
     def from_hf(self, hf_path: str | Path, strict: bool = True) -> tuple:
+        self._hf_path = Path(hf_path)
+
         if isinstance(hf_path, Path):
             hf_path = str(hf_path)
 
@@ -441,6 +446,9 @@ class BaseModel(nn.Module):
             hf_dir (str): The directory to save the model.
             save_dtype (torch.dtype): The dtype to save the model parameters, bfloat16 or float8.
         """
+        if self._hf_path is None:
+            raise RuntimeError("Please call from_hf() before save_hf().")
+
         if isinstance(hf_dir, str):
             hf_dir = Path(hf_dir)
         hf_dir.mkdir(parents=True, exist_ok=True)
@@ -528,6 +536,15 @@ class BaseModel(nn.Module):
         weight_map = reduce(lambda x, y: x | y, weight_map_list)
 
         if dist.get_rank() == 0:
+            for file in cast(Path, self._hf_path).iterdir():
+                if file.suffix != ".safetensors":
+                    # Copy the model config and tokenizer files to the save path
+                    target_path = hf_dir / file.name
+                    if file.is_file():
+                        copy(file, target_path)
+                    else:
+                        copytree(file, target_path)
+
             with open(hf_dir / "model.safetensors.index.json", "w") as f:
                 index = {"weight_map": weight_map}
                 json.dump(index, f, indent=2, ensure_ascii=False)

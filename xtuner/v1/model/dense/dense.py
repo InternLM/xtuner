@@ -7,26 +7,25 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 from torch import nn
-from torch.distributed._functional_collectives import all_reduce
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
 )
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
-from torch.distributed.distributed_c10d import ReduceOp
 from torch.distributed.fsdp import (
     CPUOffloadPolicy,
     MixedPrecisionPolicy,
     fully_shard,
 )
-from torch.distributed.tensor import DTensor, Replicate, distribute_tensor
+from torch.distributed.tensor import DTensor
 from tqdm import tqdm
 from typing_extensions import overload, override
 
 from xtuner.v1.config import FSDPConfig
-from xtuner.v1.config.base_model import TransformerConfig, ModelOutputs
+from xtuner.v1.config.base_model import ModelOutputs, TransformerConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.float8_handler import Float8Handler
+from xtuner.v1.loss import CELossContext
 from xtuner.v1.model.base import BaseModel
 from xtuner.v1.module import LMHead, RMSNorm, RotaryEmbedding
 from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayer
@@ -34,7 +33,7 @@ from xtuner.v1.utils import (
     get_device,
     get_logger,
 )
-from xtuner.v1.loss import CELossContext
+
 
 DEVICE = get_device()
 logger = get_logger()
@@ -306,6 +305,3 @@ class Dense(BaseModel):
             self.scale_grad_by_freq,
             self.sparse,
         )
-
-
-

@@ -28,7 +28,7 @@ def main():
     params_cls = cluster_spec["params"]
 
     current_dir = os.getcwd()
-    cmd = f"cd {current_dir}; {args.env}; pytest tests -s -vv"
+    cmd = f"cd {current_dir}; {args.env}; pytest tests"
     print(f"Running command: {cmd}")
 
     assert params_cls is not None and cluster_cls is not None, (

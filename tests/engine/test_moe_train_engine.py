@@ -134,6 +134,7 @@ class TestMoEEngine(DistributedTestBase):
         )
 
         engine.init_model()
+        engine.from_hf(hf_path=QWEN3_MOE_PATH)
         engine.save_hf(
             hf_dir=temp_dir,
             save_dtype=torch.bfloat16,
