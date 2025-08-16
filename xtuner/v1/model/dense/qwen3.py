@@ -37,4 +37,3 @@ class Qwen3_8BConfig(Qwen3DenseConfig):
     hidden_act: str = "silu"
     attention: MHAConfig = MHAConfig(num_attention_heads=32, num_key_value_heads=8, head_dim=128, qk_norm=True)
     tie_word_embeddings: bool = False
-

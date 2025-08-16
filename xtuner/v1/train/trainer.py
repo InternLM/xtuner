@@ -5,7 +5,7 @@ import time
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from shutil import copy, rmtree
+from shutil import rmtree
 from typing import Sized, TypedDict, cast
 
 import torch
@@ -623,12 +623,13 @@ class Trainer:
         )
 
     def _maybe_save_hf(self):
+        if self._hf_interval is None:
+            return
+
         assert self._load_from_hf, (
             "Only support saving to Huggingface format when loading from Huggingface! "
             "You meet this error means `load_from` of trainer is not a Huggingface model path."
         )
-        if self._hf_interval is None:
-            return
 
         if self.cur_step % self._hf_interval != 0 and self.cur_step != self.total_step:
             return
@@ -644,14 +645,6 @@ class Trainer:
                     rmtree(hf_dir)
 
         self._engine.save_hf(str(save_hf_path))
-
-        for file in cast(Path, self._load_from).iterdir():
-            if file.suffix != ".safetensors":
-                # Copy the model config and tokenizer files to the save path
-                target_path = save_hf_path / file.name
-                if self.rank == 0:
-                    copy(file, target_path)
-
         meta_path = self.work_dir / self.META_PATH
 
         if self.rank == 0:

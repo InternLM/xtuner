@@ -11,6 +11,7 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.testing._internal.common_distributed import DistributedTestBase
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from xtuner.v1 import engine
 from xtuner.v1.model.moe.moe import MoEConfig, SequenceContext
 from xtuner.v1.config import AdamWConfig, Float8Config, FSDPConfig, LRConfig, MoEConfig, OptimConfig, BalancingLossConfig, ZLossConfig
 from xtuner.v1.engine.moe_train_engine import MoETrainEngine
@@ -317,7 +318,7 @@ class TestMoEEngineFloat8Case2(DistributedTestBase):
             optim_cfg=optim_cfg,
             fsdp_cfg=fsdp_cfg,
         )
-        engine_bf16.init_model()
+        engine_bf16.from_hf(hf_path=QWEN3_MOE_PATH)
         engine_bf16.save_hf(
             hf_dir=temp_dir,
             save_dtype=torch.bfloat16,
