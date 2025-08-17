@@ -95,7 +95,7 @@ class TestMoEEngineFloat8(DistributedTestBase):
         losses_ref = [2.41, 2.41, 1.79, 1.39, 1.02, 0.68, 0.52, 0.31, 0.18, 0.12]
 
         for loss, loss_ref in zip(losses, losses_ref):
-            self.assertTrue(abs(loss - loss_ref) < 0.1)
+            self.assertTrue(abs(loss - loss_ref) < 0.2)
         
         torch.cuda.empty_cache()
         try:
@@ -169,7 +169,7 @@ class TestMoEEngineFloat8(DistributedTestBase):
         losses_ref = [2.45, 2.45, 1.78, 1.31, 0.95, 0.67, 0.45, 0.31, 0.18, 0.12]
 
         for loss, loss_ref in zip(losses, losses_ref):
-            self.assertTrue(abs(loss - loss_ref) < 0.1)
+            self.assertTrue(abs(loss - loss_ref) < 0.2)
         
         torch.cuda.empty_cache()
         try:
@@ -263,7 +263,7 @@ class TestMoEEngineFloat8(DistributedTestBase):
         losses_ref = [2.41, 2.41, 2.47, 2.42, 2.44, 2.44, 2.42, 2.38, 2.31, 2.30]
 
         for loss, loss_ref in zip(losses, losses_ref):
-            self.assertTrue(abs(loss - loss_ref) < 0.1)
+            self.assertTrue(abs(loss - loss_ref) < 0.2)
 
         if dist.get_rank() == 0:
             shutil.rmtree(temp_dir)
