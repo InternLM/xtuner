@@ -11,5 +11,5 @@ SentencePiece
 tiktoken
 torch
 torchvision
-transformers==4.48.0
+transformers==4.54.1
 transformers_stream_generator
