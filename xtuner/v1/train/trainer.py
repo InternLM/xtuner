@@ -590,7 +590,8 @@ class Trainer:
                     memory_dir = self.work_dir / self.profile_memory_path / f"step-{self._cur_step}"
                     stack.enter_context(profilling_memory(memory_dir))
                 yield
-        yield
+        else:
+            yield
 
     def _log_step(
         self,
