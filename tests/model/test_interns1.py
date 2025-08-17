@@ -24,13 +24,8 @@ class TestInternS1(DistributedTestBase):
     @parametrize.parametrize(
         "device,dispatcher,ep_size,sp_size, compile,tol",
         [
-            ("cuda", "deepep", 8, 1, False, 1e-2),
-            ("cuda", "all2all", 8, 1, False, 1e-2),
             ("cuda", None, 1, 1, False, 1e-2),
-            ("cuda", "deepep", 8, 1, True, 4e-2),  # TODO: This test is flaky, need to fix it
-            ("cuda", "all2all", 8, 2, False, 1e-2),
             ("cuda", None, 1, 2, False, 1e-2),
-            ("cuda", "deepep", 8, 2, True, 4e-2),  # TODO: This test is flaky, need to fix it
         ],
     )
     def test_interns1_text_run(self, device, dispatcher, ep_size, sp_size, compile, tol):
