@@ -1,5 +1,6 @@
 import os
 import json
+from functools import wraps
 
 import parametrize
 import torch
@@ -21,6 +22,18 @@ from xtuner.v1.loss import CELossContext
 QWEN3_MOE_PATH = os.environ["QWEN3_MOE_PATH"]
 
 
+def prepare(fn):
+    @wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        ret = fn(self, *args, **kwargs)
+        self.temp_dir.cleanup()
+        return ret
+
+    return wrapper
+
+
+
 class TestQwen3MoE(DistributedTestBase):
     @parametrize.parametrize(
         "device,dispatcher,ep_size,compile,tol,loss_class",
@@ -32,7 +45,9 @@ class TestQwen3MoE(DistributedTestBase):
             ("cuda", None, 1, False, 1e-2, "chunk_cross_entropy"),
         ],
     )
+    @prepare
     def test_qwen3_moe_run(self, device, dispatcher, ep_size, compile, tol, loss_class):
+        os.environ["TRITON_CACHE_DIR"] = str(Path(self.temp_dir.name) / "triton_cache")
         self.create_pg(device)
         if not compile:
             maybe_compile.clear_compile_targets()
@@ -65,7 +80,7 @@ class TestQwen3MoE(DistributedTestBase):
         shift_labels = input_ids[:, 1:]
         seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids.to('cuda'),))
         data_batch = [{'seq_ctx': seq_ctx, 'labels': shift_labels}]
-        loss_ctx = CELossContext()
+        loss_ctx = CELossContext(loss_class=loss_class)
         data_batch = loss_ctx.build_list_ctx(data_batch, device='cuda')[0]
         qwen_model.from_hf(QWEN3_MOE_PATH)
 
