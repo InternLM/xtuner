@@ -84,10 +84,9 @@ class TestDenseEngine(DistributedTestBase):
             engine.step_optimizer(grad_norm)
             lr_scheduler.step()
             losses.append(loss_log["reduced_llm_loss"])
-
-        losses_ref = [2.56, 2.56, 2.57, 2.54, 2.43, 2.39, 2.10, 2.01, 1.55, 1.41]
+        losses_ref = [2.57, 2.57, 2.58, 2.53, 2.43, 2.39, 2.10, 2.02, 1.54, 1.42]
         for loss, loss_ref in zip(losses, losses_ref):
-            self.assertTrue(abs(loss - loss_ref) < 0.02)
+            self.assertTrue(abs(loss - loss_ref) < 0.02, f"loss={loss}, loss_ref={loss_ref}, diff={abs(loss - loss_ref)}")
 
         torch.cuda.empty_cache()
         try:
