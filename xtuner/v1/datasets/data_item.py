@@ -18,3 +18,12 @@ class InternS1DataItem(TypedDict):
     num_img_tokens: list[int]
     num_imgs: list[int]
     num_patches: list[int]
+
+
+class RLTextDataItem(TypedDict):
+    input_ids: list[int]
+    num_tokens: int
+    data_source: str | None  # e.g., math, code
+    ability: str | None  # math, code
+    reward_model: dict
+    extra_info: dict | None

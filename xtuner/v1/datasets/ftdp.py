@@ -709,7 +709,7 @@ def ftdp_tokenize(
     return training_data
 
 
-class FtdpTokenizeFunction(CachableTokenizeFunction):
+class FtdpTokenizeFunction(CachableTokenizeFunction[DataItem]):
     def __init__(
         self,
         tokenizer: "PreTrainedTokenizer",

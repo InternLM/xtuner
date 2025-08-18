@@ -52,7 +52,7 @@ def generate_random_int_from_dict(input_dict, min_num, max_num):
     return rng.integers(min_num, max_num + 1)
 
 
-class InternS1TokenizeFunction(CachableTokenizeFunction):
+class InternS1TokenizeFunction(CachableTokenizeFunction[InternS1DataItem]):
     def __init__(
         self,
         tokenizer: PreTrainedTokenizer,

@@ -18,6 +18,10 @@ class ColateItem(TypedDict):
     labels: torch.Tensor
 
 
+def fake_collator(instances: list[DataItem], **kwargs):
+    return instances
+
+
 def sft_llm_collator(
     instances: list[list[DataItem]], pack_max_length: int, padding_token_idx: int
 ) -> list[ColateItem]:

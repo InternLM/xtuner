@@ -3,12 +3,12 @@ import hashlib
 import tempfile
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, TypedDict
+from typing import TYPE_CHECKING, Any, Generic, Literal, TypedDict, TypeVar
 
 import xxhash
 
-from ..datasets.data_item import DataItem
 
+T = TypeVar("T")
 
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizer
@@ -18,12 +18,12 @@ class CacheObj(TypedDict, total=False):
     num_tokens: int
 
 
-class CachableTokenizeFunction(ABC):
+class CachableTokenizeFunction(ABC, Generic[T]):
     def __init__(self, *args, **kwargs):
         self.state = "runtime"
 
     @abstractmethod
-    def __call__(self, item: Any, **kwargs) -> DataItem:
+    def __call__(self, item: Any, **kwargs) -> T:
         raise NotImplementedError
 
     @abstractmethod
