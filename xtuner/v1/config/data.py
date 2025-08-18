@@ -65,7 +65,7 @@ class BaseTokenizeFnConfig(Protocol):
 
 class DataloaderConfig(BaseModel):
     model_config = ConfigDict(title="Base dataloader config for xtuner", extra="allow")
-    collator: Literal["sft_llm_collator", "sft_vllm_collator"] = "sft_llm_collator"
+    collator: Literal["sft_llm_collator", "sft_vllm_collator", "fake_collator"] = "sft_llm_collator"
     pack_level: Annotated[str, Parameter()] = "soft"  # TODO: (huanghaian) Only provide 1 pad level
     pack_max_length: Annotated[int, Parameter()] = 32768
     global_pack: Annotated[bool, Parameter()] = True
@@ -75,12 +75,14 @@ class DataloaderConfig(BaseModel):
     padding_token_idx: Annotated[int, Parameter()] = 0
 
     def build_collator(self):
-        from xtuner.v1.datasets import sft_llm_collator, sft_vllm_collator
+        from xtuner.v1.datasets import fake_collator, sft_llm_collator, sft_vllm_collator
 
         if self.collator == "sft_llm_collator":
             return sft_llm_collator
         elif self.collator == "sft_vllm_collator":
             return sft_vllm_collator
+        elif self.collator == "fake_collator":
+            return fake_collator  # for RL
         else:
             raise ValueError(f"Unsupported collator: {self.collator}")
 
