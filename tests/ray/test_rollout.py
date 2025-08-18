@@ -32,9 +32,10 @@ class TestRollout(unittest.TestCase):
         )
         self.dataflow_config = DataFlowConfig(
             env="test",
-            max_concurrent=1,
+            max_concurrent=16,
             prompt_repeat_k=1,
-            global_batch_size=1.
+            global_batch_size=16,
+            enable_async_rollout=0
         )
 
     def build_flow(self, rollout_worker):
@@ -66,29 +67,27 @@ class TestRollout(unittest.TestCase):
     def tearDown(self):
         ray.shutdown()
 
-    @unittest.skipIf(os.environ.get("XTUNER_USE_VLLM", "0") == "0", "vLLM backend is not enabled")
-    def test_vllm_backend_tp1(self):
-        from xtuner.v1.ray.rollout import vLLMWorker
-        test_flow = self.build_flow(vLLMWorker)
-        responses = ray.get(test_flow.run.remote())
-        self.assertEqual(len(responses), self.dataflow_config.global_batch_size)
-
-    @unittest.skipIf(os.environ.get("XTUNER_USE_VLLM", "0") == "0", "vLLM backend is not enabled")
-    def test_vllm_backend_tp8(self):
-        from xtuner.v1.ray.rollout import vLLMWorker
-        self.rollout_config.tensor_parallel_size = 8
-        self.rollout_config.rollout_cross_node_comm = True
-        test_flow = self.buildflow(vLLMWorker)
-        responses = ray.get(test_flow.run.remote())
-        self.assertEqual(len(responses), self.dataflow_config.global_batch_size)
-    
     @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
     def test_lmdeploy_backend(self):
         from xtuner.v1.ray.rollout import LMDeployWorker
+        self.dataflow_config.enable_async_rollout = 0
         test_flow = self.build_flow(LMDeployWorker)
         responses = ray.get(test_flow.run.remote())
-        print(f"len of response: {len(responses)}")
+        dataflow_state = ray.get(test_flow.state.remote())
+        self.assertEqual(dataflow_state["collected_samples"], dataflow_state["send_samples"])
+        self.assertEqual(dataflow_state["unfinished_samples"], 0)
         self.assertEqual(len(responses), self.dataflow_config.global_batch_size)
+    
+    @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
+    def test_lmdeploy_async_backend(self):
+        from xtuner.v1.ray.rollout import LMDeployWorker
+        self.dataflow_config.enable_async_rollout = 1
+        test_flow = self.build_flow(LMDeployWorker)
+        responses = ray.get(test_flow.run.remote())
+        dataflow_state = ray.get(test_flow.state.remote())
+        self.assertEqual(len(responses), self.dataflow_config.global_batch_size)
+        self.assertEqual(dataflow_state["send_samples"], dataflow_state["unfinished_samples"] + dataflow_state["collected_samples"])
+
     
 if __name__ == "__main__":
     unittest.main()

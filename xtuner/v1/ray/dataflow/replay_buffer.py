@@ -17,6 +17,7 @@ class ReplayMeta:
     observation_refs: List[ObjectRef] = field(default_factory=list)
     state: str = ""
     version: List[int] = field(default_factory=list)
+    retry_count: int = 0
 
     def update_version(self, version: int):
         """更新版本号 :param version: 新的版本号."""
@@ -112,7 +113,9 @@ class ReplayBuffer:
             try:
                 action = next(self._datasets_iter)
             except StopIteration:
-                return None
+                # reset dataset_iter
+                self._datasets_iter = iter(self.datasets)
+                action = next(self._datasets_iter)
             sampled = ReplayMeta(
                 action_id=uuid4().int,
                 observation_ids=[],
