@@ -32,8 +32,10 @@ from xtuner.v1.rl.grpo.config import WorkerConfig, LossConfig
 from xtuner.v1.rl.grpo.loss import GRPOLossContext
 from xtuner.v1.rl.grpo.worker import TrainingWorker
 from xtuner.v1.ray.rollout import LMDeployWorker
+from xtuner.v1.ray.environment import EnvController
 from xtuner.v1.utils import get_torch_device_module
-from xtuner.v1.utils.math500_utils import build_math500_judger_controller, build_math500_flow
+from xtuner.v1.ray.dataflow import DataFlow
+from xtuner.v1.datasets import RLTextTokenizeFnConfig, build_datasets, build_dataloader
 
 
 MODEL_PATH = os.environ["ROLLOUT_MODEL_PATH"]
@@ -63,10 +65,10 @@ def parse_args():
 
 def bind_train_rollout(
     train_controller,
-    rollout_controller,
+    env_controller,
 ) -> None:
     """Bind the training and rollout workers for update weights."""
-    info_dict = ray.get(rollout_controller.get_rollout_info.remote())  # type: ignore[attr-defined]
+    info_dict = ray.get(env_controller.get_rollout_info.remote())  # type: ignore[attr-defined]
     ray.get(train_controller.update_rollout_info.remote(info_dict))
     return
 
@@ -108,39 +110,16 @@ def build_train_controller(args, pg):
     ray.get(train_controller.__ray_ready__.remote())
     return train_controller
 
-def init_config(args):
-    rollout_config = RolloutConfig(
-        env="test_env",
-        model_path=args.model_path,
-        model_name=os.path.basename(args.model_path).lower(),
-        tokenizer_path=args.model_path,
-        rollout_cross_node_comm=False,
-        max_running_requests=16,
-        tensor_parallel_size=8,
-        expert_parallel_size=1,
-        gpus_per_node=args.gpus_per_node, # gpu: 8, npu: 16
-        dtype="bfloat16",
-        skip_load_weights=True,
-    )
-    dataflow_config = DataFlowConfig(
-        env="test",
-        max_concurrent=args.max_concurrent,
-        prompt_repeat_k=args.prompt_repeat_k,
-        global_batch_size=args.rollout_global_batch_size
-    )
-    return rollout_config, dataflow_config
-
-
 def prepare_train_data(data_groups, tokenizer, prompt_repeat_k, pack_max_length):
     data_batches = []
     for group in data_groups:
-        prompt_ids = tokenizer(group['prompt'], return_tensors='pt')['input_ids'].flatten().tolist()
-        rewards = [item for item in group["reward"]]
+        prompt_ids = tokenizer(group[0]["prompt_str"], return_tensors='pt')['input_ids'].flatten().tolist()
+        rewards = [data["reward"] for data in group]
         rewards = torch.tensor(rewards, dtype=torch.float32)
         advantages = (rewards - rewards.mean(0)) / (rewards.std(0) + 1e-8)
 
         for i in range(prompt_repeat_k):
-            item = group['response'][i]
+            item = group[i]["response_str"]
             response_ids = tokenizer(item, return_tensors='pt')['input_ids'].flatten().tolist()
             input_ids = prompt_ids + response_ids
             shift_labels = [-100] * (len(prompt_ids) - 1) + response_ids + [-100]
@@ -163,15 +142,19 @@ def prepare_train_data(data_groups, tokenizer, prompt_repeat_k, pack_max_length)
 def save_trajectories(data_groups, save_path):
     with open(save_path, "w") as f:
         for group in data_groups:
-            for response, reward in zip(group["response"], group["reward"]):
-                item = {
-                    "prompt": group["prompt"],
-                    "response": response,
-                    "label": group["label"],
-                    "reward": reward,
-                }
-                json.dump(item, f)
-                f.write('\n')
+            response_list = []
+            reward_list = []
+            for data in group:
+                response_list.append(data["response_str"])
+                reward_list.append(data["reward"])
+            item = {
+                "prompt": group[0]["prompt_str"],
+                "response": response_list,
+                "label": group[0]["reward_model"]["ground_truth"],
+                "reward": reward_list,
+            }
+            json.dump(item, f)
+            f.write('\n')
 
 
 def main(args):
@@ -187,23 +170,63 @@ def main(args):
         cpu_memory_per_worker=16 * 1024**3,  # 16 GB
     )
     pg = AutoAcceleratorWorkers.build_placement_group(resources)
-    rollout_config, dataflow_config = init_config(args)
-    rollout_workers_map = AutoAcceleratorWorkers.from_placement_group(
-        LMDeployWorker, rollout_config, pg
+    rollout_config = RolloutConfig(
+        env="test_env",
+        model_path=args.model_path,
+        model_name=os.path.basename(args.model_path).lower(),
+        tokenizer_path=args.model_path,
+        rollout_cross_node_comm=False,
+        max_running_requests=16,
+        tensor_parallel_size=8,
+        expert_parallel_size=1,
+        gpus_per_node=args.gpus_per_node, # gpu: 8, npu: 16
+        dtype="bfloat16",
+        skip_load_weights=True,
     )
-    rollout_controller = RolloutController.remote(rollout_config, rollout_workers_map)
-    judger_controller = build_math500_judger_controller(pg)
+    dataflow_config = DataFlowConfig(
+        env="test",
+        max_concurrent=args.max_concurrent,
+        prompt_repeat_k=args.prompt_repeat_k,
+        global_batch_size=args.rollout_global_batch_size
+    )
+    judger_config = {"judger_type": "xtuner.v1.ray.judger.gsm8k.GSM8KJudgerWorker"}
+    dataset_cfg = [
+        {
+        "dataset": DatasetConfig(name="gsm8k",
+                                 anno_path=DATA_PATH,
+                                 sample_ratio=1.0),
+        "tokenize_fn": RLTextTokenizeFnConfig(max_length=16386),
+        },
+    ]
+    dataloader_cfg = DataloaderConfig(
+        pack_max_length=16384,
+        collator='fake_collator',
+        pack_level='none',
+    )
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
+    datasets = build_datasets(dataset_cfg, tokenizer)
+    dataloader = build_dataloader(
+        dataloader_config=dataloader_cfg,
+        datasets=datasets,
+        global_batch_size=1,
+        micro_batch_size=1,
+        seed=1,
+    )
+
+    test_env = EnvController.remote(
+        "grpo",
+        pg,
+        rollout_config,
+        judger_config)
     train_controller = build_train_controller(args, pg)
-    
-    tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True)
     if args.debug_rollout_only:
-        test_flow = build_math500_flow(args.model_path, args.data_path, dataflow_config, rollout_controller, judger_controller)
-        bind_train_rollout(train_controller=train_controller, rollout_controller=rollout_controller)
+        test_flow = DataFlow.remote("grpo",dataflow_config, datasets, dataloader, test_env)
+        bind_train_rollout(train_controller=train_controller, env_controller=test_env)
 
         # update weights
         ray.get(train_controller.update_weights.remote())
         print("update weights done!!!")
-        ray.get(rollout_controller.onload.remote(tags=["kv_cache"]))
+        ray.get(test_env.onload.remote(tags=["kv_cache"]))
         print("rollout load kvcache")
         # ray.get(train_controller.offload.remote())
         ray.get(train_controller.offload_model.remote())
@@ -233,13 +256,13 @@ def main(args):
         ray.get(train_controller.fit.remote(data_batches, pack_max_length=args.pack_max_length))
         return
     
-    test_flow = build_math500_flow(args.model_path, args.data_path, dataflow_config, rollout_controller, judger_controller)
-    bind_train_rollout(train_controller=train_controller, rollout_controller=rollout_controller)
+    test_flow = DataFlow.remote("grpo",dataflow_config, datasets, dataloader, test_env)
+    bind_train_rollout(train_controller=train_controller, env_controller=test_env)
 
     # update weights
     ray.get(train_controller.update_weights.remote())
     print("update weights done!!!")
-    ray.get(rollout_controller.onload.remote(tags=["kv_cache"]))
+    ray.get(test_env.onload.remote(tags=["kv_cache"]))
     print("rollout load kvcache")
     # ray.get(train_controller.offload.remote())
     ray.get(train_controller.offload_model.remote())
@@ -249,13 +272,13 @@ def main(args):
         result_path = args.work_dir / f"rollout_results_step{step}.jsonl"
         save_trajectories(data_groups, result_path)
         time.sleep(5)
-        ray.get(rollout_controller.offload.remote())
+        ray.get(test_env.offload.remote())
         ray.get(train_controller.onload.remote())
         data_batches = prepare_train_data(data_groups, tokenizer, args.prompt_repeat_k, args.pack_max_length)
         print(f"data_batches size: {len(data_batches)}")
         ray.get(train_controller.fit.remote(data_batches, pack_max_length=args.pack_max_length))
         ray.get(train_controller.offload_optimizer.remote())
-        ray.get(rollout_controller.onload.remote())
+        ray.get(test_env.onload.remote())
         ray.get(train_controller.update_weights.remote())
         print("update weights done!!!")
         ray.get(train_controller.offload_model.remote())

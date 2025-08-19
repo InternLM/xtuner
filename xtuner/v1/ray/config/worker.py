@@ -23,6 +23,10 @@ class RolloutConfig(BaseModel):
         str,
         Parameter(group=infer_group, help="Environment variables to set for the rollout."),
     ] = ""
+    backend: Annotated[
+        str,
+        Parameter(group=infer_group, help="Backend framework for the rollout worker, e.g., 'vllm', 'lmdeploy'."),
+    ] = "lmdeploy"
     model_path: Annotated[str, Parameter(group=infer_group, help="Path to the SGLang model.")] = ""
     model_name: Annotated[str, Parameter(group=infer_group, help="Name of the model to be used in the LMDeploy.")] = ""
     tokenizer_path: Annotated[str, Parameter(group=infer_group, help="Path to the tokenizer for the model.")] = ""
@@ -36,7 +40,7 @@ class RolloutConfig(BaseModel):
     max_running_requests: Annotated[
         int,
         Parameter(group=infer_group, help="Maximum number of requests each inference engine can handle."),
-    ] = 2
+    ] = 16
     gpus_per_node: Annotated[int, Parameter(group=infer_group, help="Number of GPUs allocated per node.")] = 8
     do_sample: Annotated[bool, Parameter(group=infer_group, help="Whether to use sampling.")] = True
     dtype: Annotated[
@@ -105,6 +109,13 @@ class RolloutConfig(BaseModel):
             help="Method to launch the rollout server, either 'ray' or 'multiprocessing'.",
         ),
     ] = "ray"
+    rollout_time_out: Annotated[
+        float,
+        Parameter(
+            group=infer_group,
+            help="Timeout duration (in seconds) for rollout requests.",
+        ),
+    ] = 3600.0
 
 
 if __name__ == "__main__":

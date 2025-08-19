@@ -1,10 +1,13 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from typing import TYPE_CHECKING
+
 from pydantic import BaseModel, ConfigDict
+
 from xtuner.v1.datasets.data_item import RLTextDataItem
 from xtuner.v1.utils import get_logger
 
 from ..utils import CachableTokenizeFunction
+
 
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizer
@@ -20,24 +23,24 @@ class RLTextTokenizeFn(CachableTokenizeFunction[RLTextDataItem]):
         self.max_length = max_length
 
     def __call__(self, item: dict, **kwargs) -> RLTextDataItem:
-        """ example:
-            item = {
-                    "data_source": data_source,
-                    "prompt": [
-                        {
-                            "role": "user",
-                            "content": question,
-                        }
-                    ],
-                    "ability": "math",
-                    "reward_model": {"style": "rule", "ground_truth": solution},
-                    "extra_info": {
-                        "split": split,
-                        "index": idx,
-                        "answer": answer_raw,
-                        "question": question_raw,
-                    },
-                }
+        """example:
+        item = {
+                "data_source": data_source,
+                "prompt": [
+                    {
+                        "role": "user",
+                        "content": question,
+                    }
+                ],
+                "ability": "math",
+                "reward_model": {"style": "rule", "ground_truth": solution},
+                "extra_info": {
+                    "split": split,
+                    "index": idx,
+                    "answer": answer_raw,
+                    "question": question_raw,
+                },
+            }
         """
         messages = item["prompt"]
         raw_prompt = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
@@ -48,10 +51,11 @@ class RLTextTokenizeFn(CachableTokenizeFunction[RLTextDataItem]):
             num_tokens = 0  # will be filtered out by the dataset filter
 
         extra_info = item.get("extra_info", {})
-        extra_info['raw_prompt'] = raw_prompt
+        extra_info["raw_prompt"] = raw_prompt
 
         rl_out_data = {
             "input_ids": input_ids,
+            "prompt_str": raw_prompt,
             "num_tokens": num_tokens,
             "reward_model": item["reward_model"],
             "ability": item.get("ability", None),
@@ -62,7 +66,7 @@ class RLTextTokenizeFn(CachableTokenizeFunction[RLTextDataItem]):
         return rl_out_data  # type: ignore
 
     def hash(self) -> str:
-        raise ValueError('不应该触发这个方法, 因为 RLTextTokenizeFn 不需要缓存。')
+        raise ValueError("不应该触发这个方法, 因为 RLTextTokenizeFn 不需要缓存。")
 
 
 class RLTextTokenizeFnConfig(BaseModel):

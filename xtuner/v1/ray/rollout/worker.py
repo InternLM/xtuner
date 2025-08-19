@@ -34,7 +34,7 @@ class RolloutWorker(SingleAcceleratorWorker):
         self.server_func: Callable
         self.endpoints: dict[str, str] = dict()
         # handle stream response
-        self.client = httpx.AsyncClient()
+        self.client = httpx.AsyncClient(timeout=self.config.rollout_time_out)
         self.paused = False
         self.server_task = None
         self.engine_bundle_idxs: list[int] = []
@@ -61,7 +61,7 @@ class RolloutWorker(SingleAcceleratorWorker):
 
     def launch_server(self):
         server_configs = self._transform_rollout_config_to_server_configs()
-        timeout = 300.0  # Increased timeout to 5 minutes for downloading large models
+        timeout = 3600.0  # Increased timeout to 5 minutes for downloading large models
         start_time = time.perf_counter()
 
         headers = {

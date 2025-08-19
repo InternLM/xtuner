@@ -27,8 +27,7 @@ class Math500Dataset(torch.utils.data.IterableDataset):
                 yield line
 
 
-def mapping_math500_dataset_func(meta):
-    data_str = ray.get(meta.action_ref)
+def mapping_math500_dataset_func(data_str):
     rollout_input = (
         json.loads(data_str)["problem"] + " Let's think step by step and output the final answer within \\boxed{}."
     )
@@ -44,21 +43,18 @@ def build_math500_judger_controller(pg):
     return judger_controller
 
 
-def build_math500_flow(model_path, data_path, dataflow_config, rollout_controller, judger_controller):
+def build_math500_flow(model_path, data_path, dataflow_config, env_controller):
     from transformers import AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
     dataset = Math500Dataset(data_path, tokenizer=tokenizer)
-    from xtuner.v1.ray.dataflow import DataFlow, DataProcessor, ReplayBuffer
+    from xtuner.v1.ray.dataflow import DataFlow, ReplayBuffer
 
-    replay_buffer = ReplayBuffer.remote(dataset)
-    data_processor = DataProcessor()
+    replay_buffer = ReplayBuffer.remote(dataset, mapping_math500_dataset_func)
     test_flow = DataFlow.remote(
+        "test_env",
         dataflow_config,
         replay_buffer,
-        data_processor,
-        rollout_controller,
-        judger_controller,
-        mapping_math500_dataset_func,
+        env_controller,
     )
     return test_flow
