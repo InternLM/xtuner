@@ -1,9 +1,12 @@
+import re
+
 import ray
 
 from xtuner.v1.ray.judger.worker import JudgerWorker
-import re
+
 
 _SOLUTION_CLIP_CHARS = 300
+
 
 def extract_solution(solution_str, method="strict"):
     assert method in ["strict", "flexible"]
@@ -41,13 +44,15 @@ def extract_solution(solution_str, method="strict"):
 @ray.remote
 class GSM8KJudgerWorker(JudgerWorker):
     def __init__(
-        self, config, rank: int,
-            master_addr: str,
-            master_port: int,
-            world_size: int,
-            accelerator: str = "CPU",
-            format_score: float = 0.0,
-            score: float = 1.0
+        self,
+        config,
+        rank: int,
+        master_addr: str,
+        master_port: int,
+        world_size: int,
+        accelerator: str = "CPU",
+        format_score: float = 0.0,
+        score: float = 1.0,
     ):
         self.format_score = format_score
         self.score = score
@@ -56,7 +61,7 @@ class GSM8KJudgerWorker(JudgerWorker):
     def judge_function(self, response, label):
         predict_str = response
         ground_truth = label
-        answer = extract_solution(predict_str, ground_truth)
+        answer = extract_solution(predict_str)
         if answer is None:
             return 0
         else:

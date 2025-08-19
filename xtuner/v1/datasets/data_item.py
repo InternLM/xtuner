@@ -21,9 +21,19 @@ class InternS1DataItem(TypedDict):
 
 
 class RLTextDataItem(TypedDict):
+    env: str
+    group_id: int
+    prompt_id: int
     input_ids: list[int]
+    prompt_str: str
     num_tokens: int
     data_source: str | None  # e.g., math, code
     ability: str | None  # math, code
     reward_model: dict
-    extra_info: dict | None
+    reward: int | None
+    num_return_tokens: int | None
+    response_ids: list[int] | None
+    response_str: str | None
+    state: str
+    retry_times: int
+    extra_info: dict
