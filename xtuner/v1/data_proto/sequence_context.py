@@ -108,7 +108,7 @@ class SequenceContext:
             else:
                 new_cu_seq_lens = self.cu_seq_lens_q.clone()
             new_cu_seq_lens = cast(torch.IntTensor, new_cu_seq_lens)
-            new_max_length = cast(int, max(self.seq_lens_q.item(), new_padding))
+            new_max_length = cast(int, max(self.seq_lens_q.max().item(), new_padding))
             num_non_padding = self.input_ids.shape[1] - self.num_padding
             start = sp_input_ids.shape[1] * sequence_parallel_mesh.get_local_rank()
             end = start + sp_input_ids.shape[1]
