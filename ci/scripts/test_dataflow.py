@@ -33,6 +33,7 @@ def parse_args():
     parser.add_argument("--global-batch-size", type=int, default=128)
     parser.add_argument("--prompt-repeat-k", type=int, default=1)
     parser.add_argument("--repeat-times", type=int, default=1)
+    parser.add_argument("--enable-partial-rollout", type=int, default=0)
     return parser.parse_args()
 
 def main():
@@ -56,7 +57,8 @@ def main():
     dataflow_cfg = DataFlowConfig(
         env="test",
         prompt_repeat_k=args.prompt_repeat_k,
-        global_batch_size=args.global_batch_size
+        global_batch_size=args.global_batch_size,
+        enable_partial_rollout=args.enable_partial_rollout
     )
     dataset_cfg = [
         {
@@ -91,15 +93,32 @@ def main():
                                 dataflow_cfg,
                                 datasets,
                                 dataloader,
+                                tokenizer,
                                 test_env)
 
     reward_list = []
     for i in range(args.repeat_times):
         ray.get(test_flow.restart.remote())
         rollout_data = ray.get(test_flow.run.remote())
-        for group in rollout_data:
-            for data in group:
-                reward_list.append(data["reward"])
+        dataflow_state = ray.get(test_flow.state.remote())
+        result_path = os.path.join(args.work_dir,f"rollout_results_step{i}.jsonl")
+        with open(result_path, "w") as f:
+            for group in rollout_data:
+                group_response_list = []
+                group_reward_list = []
+                for data in group:
+                    group_response_list.append(data["response_str"])
+                    group_reward_list.append(data["reward"])
+                item = {
+                    "prompt": group[0]["prompt_str"],
+                    "response": group_response_list,
+                    "label": group[0]["reward_model"]["ground_truth"],
+                    "reward": group_reward_list,
+                }
+                json.dump(item, f)
+                f.write('\n')
+                reward_list.extend(group_reward_list)
+        time.sleep(1)
     print(f"Average reward: {sum(reward_list) / len(reward_list)}")
     ray.get(test_flow.shutdown.remote())
 

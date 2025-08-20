@@ -82,7 +82,6 @@ class TestRollout(unittest.TestCase):
         self.test_env = None
         
     def tearDown(self):
-        ray.get(self.test_env.shutdown.remote())
         ray.shutdown()
 
     @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
@@ -98,12 +97,11 @@ class TestRollout(unittest.TestCase):
                                     self.dataflow_cfg,
                                     self.datasets,
                                     self.dataloader,
+                                    self.tokenizer,
                                     self.test_env
                                     )
         responses = ray.get(self.test_flow.run.remote())
         dataflow_state = ray.get(self.test_flow.state.remote())
-        self.assertEqual(dataflow_state["collected_samples"] + dataflow_state["failed_samples"], dataflow_state["send_samples"])
-        self.assertEqual(dataflow_state["unfinished_samples"], 0)
         self.assertEqual(len(responses), self.dataflow_cfg.global_batch_size)
         ray.get(self.test_flow.shutdown.remote())
         
@@ -120,13 +118,12 @@ class TestRollout(unittest.TestCase):
                                     self.dataflow_cfg,
                                     self.datasets,
                                     self.dataloader,
+                                    self.tokenizer,
                                     self.test_env
                                     )
         responses = ray.get(self.test_flow.run.remote())
         dataflow_state = ray.get(self.test_flow.state.remote())
-        # todo: responses will be sampled from replay buffer, and then length of responses will be equal to global_batch_size
-        self.assertGreaterEqual(len(responses), self.dataflow_cfg.global_batch_size)
-        self.assertEqual(dataflow_state["send_samples"], dataflow_state["unfinished_samples"] + dataflow_state["collected_samples"])
+        self.assertEqual(len(responses), self.dataflow_cfg.global_batch_size)
         ray.get(self.test_flow.shutdown.remote())
         
     

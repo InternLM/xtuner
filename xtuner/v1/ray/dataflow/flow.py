@@ -88,11 +88,12 @@ class DataFlow:
         dataflow_cfg: DataFlowConfig,
         dataset: "JsonlDataset",
         dataloader: "DataLoader",
+        tokenizer,
         environment: EnvController,
     ):
         self.env = env
         self.config = dataflow_cfg
-        self.replay_buffer = ReplayBuffer.remote(dataset, dataloader)  # type: ignore[attr-defined]
+        self.replay_buffer = ReplayBuffer.remote(dataset, dataloader, tokenizer)  # type: ignore[attr-defined]
         self.env_controller = environment
         self.send_samples_count = 0
         self.finished_samples_count = 0
@@ -129,17 +130,11 @@ class DataFlow:
             # step 3: filter
             filtered_group_samples = await self.replay_buffer.post_processor.remote(group_samples)  # type: ignore[attr-defined]
             # step 4: add to replay buffer
-            await self.replay_buffer.add.remote(filtered_group_samples)  # type: ignore[attr-defined]
-            # step 5: add to return list
-            states = [sample["state"] for sample in filtered_group_samples]
-            if "unfinished" in states:
-                self.unfinished_samples_count += 1
-                return
+            finished_samples_count = await self.replay_buffer.add.remote(filtered_group_samples)  # type: ignore[attr-defined]
             async with self.lock:
-                self.collected_samples.append(filtered_group_samples)
-                self.finished_samples_count += 1
+                self.finished_samples_count = finished_samples_count
                 self.logger.info(
-                    f"Dataflow get filtered response and have collected {self.finished_samples_count} samples"
+                    f"Dataflow get filtered and finished response and have collected {self.finished_samples_count} samples"
                 )
         except Exception as e:
             if group_samples is not None and len(group_samples) > 0:
@@ -169,12 +164,12 @@ class DataFlow:
             for task in done_tasks:
                 result = task.result()
                 if result is not None:
-                    if result[0].retry_times < self.config.max_retry_times:
+                    if result[0]["retry_times"] < self.config.max_retry_times:
                         # If the retry count is less than max_retry_times, retry the task
                         retry_task = create_task(self.worker_task(group_samples_for_retry=result))
                         pending_tasks.add(retry_task)
                     else:
-                        self.logger.error(f"Max retry reached for {result[0].prompt_id}. Not retrying.")
+                        self.logger.error(f"Max retry reached for {result[0]['prompt_id']}. Not retrying.")
                         self.failed_samples_count += 1
 
             waiting_tasks = pending_tasks
@@ -190,13 +185,12 @@ class DataFlow:
         )
 
     async def run(self):
-        self.collected_samples = []
         self.send_samples_count = 0
         self.finished_samples_count = 0
         self.unfinished_samples_count = 0
         self.failed_samples_count = 0
         await self.concurrent_task_runner()
-        return self.collected_samples
+        return await self.replay_buffer.get_samples.remote(self.config.global_batch_size)
 
     def shutdown(self):
         return ray.get(self.env_controller.shutdown.remote())
@@ -205,9 +199,7 @@ class DataFlow:
         return ray.get(self.env_controller.restart.remote())
 
     def state(self):
-        return {
-            "collected_samples": self.finished_samples_count,
-            "unfinished_samples": self.unfinished_samples_count,
-            "send_samples": self.send_samples_count,
-            "failed_samples": self.failed_samples_count,
-        }
+        ray.get(self.replay_buffer.print.remote())
+        self.logger.info(
+            f"send_samples_count: {self.send_samples_count}, unfinished_samples_count:{self.unfinished_samples_count}, finished_samples: {self.finished_samples_count}, failed_samples: {self.failed_samples_count}"
+        )
