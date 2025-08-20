@@ -1,10 +1,9 @@
 import os
 from argparse import Namespace
-from copy import deepcopy
 from typing import List
 
 import ray
-import torch
+import requests
 from ray.util.placement_group import placement_group_table
 
 from xtuner.v1.ray.config import RolloutConfig
@@ -87,26 +86,22 @@ class LMDeployWorker(RolloutWorker):
         # 直接调用engine.generate方法
         pass
 
-    def sleep(self, level=1, tags: List[str] | None = None):
-        import requests
-
+    def sleep(self, level: int = 1):
         url = f"{self.server_url}/{self.endpoints['sleep']}"
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {self.api_keys}"}
-        data = {"tags": tags}
-        response = requests.post(url, headers=headers, json=data)
+        data = {"level": level}
+        response = requests.post(url, headers=headers, params=data)
         assert response.status_code == 200, response.status_code
-        return response.json()
+        return response.text
 
     def wake_up(self, tags: List[str] | None = None):
-        import requests
-
         self.paused = False
         url = f"{self.server_url}/{self.endpoints['wake_up']}"
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {self.api_keys}"}
         data = {"tags": tags}
-        response = requests.post(url, headers=headers, json=data)
+        response = requests.post(url, headers=headers, params=data)
         assert response.status_code == 200, response.status_code
-        return response.json()
+        return response.text
 
     def pause_generation(self):
         pass
@@ -125,15 +120,23 @@ class LMDeployWorker(RolloutWorker):
     def _transform_rollout_config_to_server_configs(self) -> Namespace:
         from lmdeploy import PytorchEngineConfig, TurbomindEngineConfig
 
-        backend = (self.config.extra_rollout_config or dict()).get("lmdeploy_backend", "pytorch")
+        extra_config = self.config.extra_rollout_config or dict()
+        lmdeploy_config_kwargs = {
+            k.replace("lmdeploy_", ""): v for k, v in extra_config.items() if k.startswith("lmdeploy_")
+        }
+
+        backend = lmdeploy_config_kwargs.get("backend", "pytorch")
         tp_size = self.config.tensor_parallel_size
         dp_size = ep_size = self.config.expert_parallel_size
+        distributed_executor_backend = lmdeploy_config_kwargs.get("distributed_executor_backend", "ray")
         backend_config = (
             PytorchEngineConfig(
                 tp=tp_size,
                 ep=ep_size,
                 dp=dp_size,
                 empty_init=self.config.skip_load_weights,
+                distributed_executor_backend=distributed_executor_backend,
+                mp_engine_backend="ray",  # force ray to pass placement group
             )
             if backend == "pytorch"
             else TurbomindEngineConfig(
@@ -153,13 +156,10 @@ class LMDeployWorker(RolloutWorker):
                 "LMDEPLOY_RAY_EXTERNAL_PG_NAME": current_pg_name,
                 "LMDEPLOY_RAY_EXTERNAL_PG_BUNDLES": ",".join(map(str, self.engine_bundle_idxs)),
             }
-            local_rank = self.rank % torch.accelerator.device_count()
             if tp_size > 1:
                 dist_addr, dist_port = self.dist_init_addr.split(":")[:2]
-                devices = [str(r) for r in range(local_rank, local_rank + tp_size)]
                 env.update(
                     {
-                        self.device_visible_env_name: ",".join(devices),
                         "LMDEPLOY_DIST_MASTER_ADDR": dist_addr,
                         "LMDEPLOY_DIST_MASTER_PORT": dist_port,
                     }
@@ -168,15 +168,13 @@ class LMDeployWorker(RolloutWorker):
                 dist_addr, dist_port = self.dist_init_addr.split(":")[:2]
                 env.update(
                     {
-                        self.device_visible_env_name: str(local_rank),
                         "LMDEPLOY_DP_MASTER_ADDR": dist_addr,
                         "LMDEPLOY_DP_MASTER_PORT": dist_port,
                     }
                 )
 
-        extra_kwargs = deepcopy(self.config.extra_rollout_config) or dict()
-        if "lmdeploy_backend" in extra_kwargs:
-            extra_kwargs.pop("lmdeploy_backend")
+        if "backend" in lmdeploy_config_kwargs:
+            lmdeploy_config_kwargs.pop("backend")
 
         return Namespace(
             model_path=self.config.model_path,
@@ -188,7 +186,7 @@ class LMDeployWorker(RolloutWorker):
             api_key=self.api_keys,
             api_keys=self.api_keys,
             ray_runtime_env={"env_vars": env},
-            **extra_kwargs,
+            **lmdeploy_config_kwargs,
         )
 
     def _transform_rollout_config_to_router_configs(self):

@@ -79,5 +79,5 @@ class EnvController:
     def onload(self, *args, **kwargs):
         return ray.get(self.rollout_controller.onload.remote(*args, **kwargs))
 
-    def offload(self):
-        return ray.get(self.rollout_controller.offload.remote())
+    def offload(self, *args, **kwargs):
+        return ray.get(self.rollout_controller.offload.remote(*args, **kwargs))
