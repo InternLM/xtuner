@@ -5,18 +5,17 @@ import torch
 
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 
-from .worker import TrainingWorker
+from .worker import GRPOTrainingWorker
 
 
 class ColateItem(TypedDict):
     seq_ctx: SequenceContext
-    shift_labels: torch.Tensor
+    shifted_labels: torch.Tensor
     advantage: float
 
 
-@ray.remote
 class TrainingController:
-    def __init__(self, workers: list[TrainingWorker]) -> None:
+    def __init__(self, workers: list[GRPOTrainingWorker]) -> None:
         self.workers = workers
 
     def _get_pack_infos(self, dataset, num_tokens, target, random=None):
@@ -68,7 +67,7 @@ class TrainingController:
             total_len = sum([data_batches[i]["seq_ctx"].input_ids.shape[1] for i in indices])
             pad_len = pack_max_length - total_len
             seq_ctx_list = [data_batches[i]["seq_ctx"] for i in indices]
-            label_list = [data_batches[i]["shift_labels"] for i in indices]
+            label_list = [data_batches[i]["shifted_labels"] for i in indices]
             advantage_list = [data_batches[i]["advantage"] for i in indices]
             if pad_len > 0:
                 pad_token_ids = torch.full(
@@ -82,8 +81,8 @@ class TrainingController:
                 pad_labels = torch.full(
                     (1, pad_len),
                     -100,
-                    dtype=data_batches[0]["shift_labels"].dtype,
-                    device=data_batches[0]["shift_labels"].device,
+                    dtype=data_batches[0]["shifted_labels"].dtype,
+                    device=data_batches[0]["shifted_labels"].device,
                 )
                 seq_ctx_list.append(pad_seq_ctx)
                 label_list.append(pad_labels)
@@ -92,14 +91,17 @@ class TrainingController:
                 )  # can be any number, pad tokens are excluded from the calculation of the loss function.
 
             seq_ctx = SequenceContext.pack(seq_ctx_list)
-            shift_labels = torch.cat(label_list, dim=1)  # (1, max_len)
-            advantage = torch.tensor(advantage_list).float().unsqueeze(0)  # (1, num_samples)
+            shifted_labels = torch.cat(label_list, dim=1)  # (1, max_len)
+            advantages = torch.tensor(advantage_list).float().unsqueeze(0)  # (1, num_samples)
+            cu_seq_lens_q = seq_ctx.cu_seq_lens_q
+            num_tokens = cu_seq_lens_q[1:] - cu_seq_lens_q[:-1]
+            advantages = torch.repeat_interleave(advantages, num_tokens, dim=1)  # (1, max_len)
 
             packed_data_batches.append(
                 {
                     "seq_ctx": seq_ctx,
-                    "shift_labels": shift_labels,
-                    "advantage": advantage,
+                    "shifted_labels": shifted_labels,
+                    "advantages": advantages,
                 }
             )
         return packed_data_batches
@@ -147,3 +149,8 @@ class TrainingController:
         handles = [worker.update_weights.remote() for worker in self.workers]
         ray.get(handles)
         return
+
+
+@ray.remote
+class GRPOTrainingController(TrainingController):
+    pass
