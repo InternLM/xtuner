@@ -219,7 +219,6 @@ def main(args):
         micro_batch_size=1,
         seed=1,
     )
-
     test_env = EnvController.remote(
         "grpo",
         pg,
@@ -227,7 +226,7 @@ def main(args):
         judger_config)
     train_controller = build_train_controller(args, pg)
     if args.debug_rollout_only:
-        test_flow = DataFlow.remote("grpo",dataflow_config, datasets, dataloader, test_env)
+        test_flow = DataFlow.remote("grpo",dataflow_config, datasets, dataloader, tokenizer,test_env)
         bind_train_rollout(train_controller=train_controller, env_controller=test_env)
 
         # update weights
@@ -263,7 +262,7 @@ def main(args):
         ray.get(train_controller.fit.remote(data_batches, pack_max_length=args.pack_max_length))
         return
     
-    test_flow = DataFlow.remote("grpo",dataflow_config, datasets, dataloader, test_env)
+    test_flow = DataFlow.remote("grpo",dataflow_config, datasets, dataloader, tokenizer, test_env)
     bind_train_rollout(train_controller=train_controller, env_controller=test_env)
 
     # update weights

@@ -20,7 +20,7 @@ class InternS1DataItem(TypedDict):
     num_patches: list[int]
 
 
-class RLTextDataItem(TypedDict):
+class RLTextDataItem(TypedDict, total=False):
     env: str
     group_id: int
     prompt_id: int
