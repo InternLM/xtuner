@@ -109,7 +109,7 @@ class RolloutConfig(BaseModel):
             help="Method to launch the rollout server, either 'ray' or 'multiprocessing'.",
         ),
     ] = "ray"
-    rollout_time_out: Annotated[
+    rollout_timeout: Annotated[
         float,
         Parameter(
             group=infer_group,

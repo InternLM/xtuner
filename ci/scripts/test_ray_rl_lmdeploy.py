@@ -184,7 +184,7 @@ def main(args):
         tokenizer_path=args.model_path,
         rollout_cross_node_comm=False,
         max_running_requests=16,
-        tensor_parallel_size=8,
+        tensor_parallel_size=4,
         expert_parallel_size=1,
         gpus_per_node=args.gpus_per_node, # gpu: 8, npu: 16
         dtype="bfloat16",
@@ -265,29 +265,42 @@ def main(args):
     test_flow = DataFlow.remote("grpo",dataflow_config, datasets, dataloader, tokenizer, test_env)
     bind_train_rollout(train_controller=train_controller, env_controller=test_env)
 
+    # offload rollout kvcache
+    ray.get(test_env.offload.remote(level=2))
+    ray.get(test_env.onload.remote(["weights"]))
+
+    # offload train controller optimizer
+    ray.get(train_controller.offload_optimizer.remote())
+    print("train_controller offload optimizer done!")
+
     # update weights
     ray.get(train_controller.update_weights.remote())
     print("update weights done!!!")
+
+    # offload train controller model and optimizer
+    ray.get(train_controller.offload_model.remote())
+    print("train_controller offload model done!")
+
+    # onload rollout kvcache
     ray.get(test_env.onload.remote(tags=["kv_cache"]))
     print("rollout load kvcache")
-    # ray.get(train_controller.offload.remote())
-    ray.get(train_controller.offload_model.remote())
-    ray.get(train_controller.offload_optimizer.remote())
+
     for step in range(2):
         data_groups = ray.get(test_flow.run.remote())
         result_path = args.work_dir / f"rollout_results_step{step}.jsonl"
         save_trajectories(data_groups, result_path)
         time.sleep(5)
-        ray.get(test_env.offload.remote())
+        ray.get(test_env.offload.remote(level=2))
         ray.get(train_controller.onload.remote())
         data_batches = prepare_train_data(data_groups, tokenizer, args.prompt_repeat_k, args.pack_max_length)
         print(f"data_batches size: {len(data_batches)}")
         ray.get(train_controller.fit.remote(data_batches, pack_max_length=args.pack_max_length))
         ray.get(train_controller.offload_optimizer.remote())
-        ray.get(test_env.onload.remote())
+        ray.get(test_env.onload.remote(tags=["weights"]))
         ray.get(train_controller.update_weights.remote())
-        print("update weights done!!!")
         ray.get(train_controller.offload_model.remote())
+        ray.get(test_env.onload.remote(tags=["kv_cache"]))
+        print("update weights done!!!")
 
 
 if __name__ == "__main__":

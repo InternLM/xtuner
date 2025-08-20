@@ -107,8 +107,8 @@ class RolloutController:
     def reset_prefix_cache(self):
         return [worker.reset_prefix_cache.remote() for worker in self.active_rollout_workers]
 
-    def offload(self):
-        ray.get([worker.sleep.remote() for worker in self.active_rollout_workers])
+    def offload(self, *args, **kwargs):
+        ray.get([worker.sleep.remote(*args, **kwargs) for worker in self.active_rollout_workers])
         return
 
     def onload(self, *args, **kwargs):
