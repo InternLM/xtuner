@@ -145,7 +145,7 @@ class Dense(BaseModel):
         self,
         fsdp_config: FSDPConfig,
         float8_handler: Float8Handler | None = None,
-    ):
+    ) -> "Dense":
         self.fsdp_config = fsdp_config
         device = "cpu" if self.fsdp_config.cpu_offload else str(DEVICE)
         self._init_device_mesh(fsdp_config)

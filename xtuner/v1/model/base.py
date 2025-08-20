@@ -100,7 +100,7 @@ class BaseModel(nn.Module):
         self,
         fsdp_config: FSDPConfig,
         float8_handler: Float8Handler | None = None,
-    ):
+    ) -> "BaseModel":
         """Fully shard the model parameters."""
         raise NotImplementedError
 
@@ -883,3 +883,10 @@ class BaseModel(nn.Module):
                         maybe_compile.set_compile_target(target)
             else:
                 maybe_compile.clear_compile_targets()
+
+    def to_device(self, device: torch.device | str):
+        if self.fsdp_config is not None and self.fsdp_config.cpu_offload:
+            return
+        self.to(device, non_blocking=True)
+        DEVICE_MODULE.synchronize()
+        return

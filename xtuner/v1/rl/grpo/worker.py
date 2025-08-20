@@ -8,24 +8,27 @@ import ray
 import requests
 import torch
 import torch.distributed as dist
-import torch.nn.functional as F
 import tqdm
 from mmengine.dist import get_rank
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed.tensor import DTensor
 
 from xtuner.utils.device import get_device, get_torch_device
-from xtuner.v1.config.base_model import MoEConfig
+from xtuner.v1.config.base_model import MoEConfig, TransformerConfig
+from xtuner.v1.config.fsdp import FSDPConfig
 from xtuner.v1.data_proto.sequence_context import SequenceContext
+from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.float8.float8_tensor import Float8Tensor
 from xtuner.v1.float8.fsdp_utils import WeightWithDynamicTilewiseFloat8CastTensor
 from xtuner.v1.ray.accelerator import SingleAcceleratorWorker
 from xtuner.v1.ray.config import RolloutConfig
+from xtuner.v1.rl.loss_context import LossContext
+from xtuner.v1.rl.utils import gather_logprobs, sp_split
 from xtuner.v1.utils import ParallelConfigException, get_logger, log_format
 
+from ..loss_context import LossContextInputItem
 from .config import WorkerConfig
 from .engine import GRPOMoETrainEngine
-from .loss import LossContextInputItem
 
 
 DeviceMeshRaw: TypeAlias = List[List[int]]  # A list of lists representing device mesh indices
@@ -36,18 +39,10 @@ DEVICE_MODULE = get_torch_device()
 
 class WorkerInputItem(TypedDict):
     seq_ctx: SequenceContext
-    shift_labels: torch.LongTensor
-    advantage: torch.Tensor
+    shifted_labels: torch.LongTensor
+    advantages: torch.Tensor
 
 
-@ray.remote(
-    runtime_env={
-        "env_vars": {
-            "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
-            "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
-        }
-    },
-)
 class TrainingWorker(SingleAcceleratorWorker):
     def __init__(
         self,
@@ -56,30 +51,23 @@ class TrainingWorker(SingleAcceleratorWorker):
         master_addr: str,
         master_port: int,
         world_size: int,
-        # bundle_idx: int,
         accelerator: str = "GPU",
     ):
         super().__init__(worker_cfg, rank, master_addr, master_port, world_size, accelerator)
         torch.accelerator.set_device_index(int(os.environ["LOCAL_RANK"]))
-        if isinstance(worker_cfg.model_cfg, MoEConfig):
-            engine = GRPOMoETrainEngine(
-                optim_cfg=worker_cfg.optim_cfg,
-                fsdp_cfg=worker_cfg.fsdp_cfg,
-                model_cfg=worker_cfg.model_cfg,
-            )
-        else:
-            raise NotImplementedError
+        self._engine = self._build_engine(worker_cfg)
 
-        if worker_cfg.load_from is not None:
-            engine.from_hf(worker_cfg.load_from)
+        self._has_ref = False
+        if worker_cfg.loss_cfg.use_kl_loss:
+            self._has_ref = True
+            self._ref_model = self._build_ref_model(worker_cfg.model_cfg, worker_cfg.ref_model_fsdp_cfg)
 
-        self._engine = engine
         self.data_mesh = self._init_data_mesh(sp_size=worker_cfg.sp_size)
         self.sp_mesh = self.data_mesh["sp"]
         self._global_batch_size = worker_cfg.global_batch_size
         self._micro_batch_size: int | None = None
 
-        self.loss_ctx = worker_cfg.loss_cfg.build()
+        self.loss_ctx = LossContext(loss_cfg=worker_cfg.loss_cfg)
 
         self.logger = self._init_logger(worker_cfg.work_dir)
 
@@ -91,6 +79,42 @@ class TrainingWorker(SingleAcceleratorWorker):
         self.endpoints: dict[str, str] = dict()
         self.endpoints["update_weights"] = "update_weights"
         # TODO: add lr scheduler
+
+    def _build_engine(self, worker_cfg: WorkerConfig):
+        pass
+        # if isinstance(worker_cfg.model_cfg, MoEConfig):
+        #     engine = GRPOMoETrainEngine(
+        #         optim_cfg=worker_cfg.optim_cfg,
+        #         fsdp_cfg=worker_cfg.fsdp_cfg,
+        #         model_cfg=worker_cfg.model_cfg,
+        #     )
+        # else:
+        #     raise NotImplementedError
+
+        # if worker_cfg.load_from is not None:
+        #     engine.from_hf(worker_cfg.load_from)
+        # return engine
+
+    def _build_ref_model(self, ref_model_cfg: TransformerConfig, ref_model_fsdp_cfg: FSDPConfig | None = None):
+        with torch.device("meta"):
+            model = ref_model_cfg.build()
+        if ref_model_cfg.float8_cfg is not None and ref_model_cfg.float8_cfg.enable_float8:
+            float8_handler = Float8Handler(
+                scaling_granularity_gemm=ref_model_cfg.float8_cfg.scaling_granularity_gemm,
+                scaling_granularity_grouped_gemm=ref_model_cfg.float8_cfg.scaling_granularity_grouped_gemm,
+            )
+        else:
+            float8_handler = None
+        if ref_model_fsdp_cfg is None:
+            ref_model_fsdp_cfg = FSDPConfig(recompute_ratio=0, cpu_offload=False, requires_grad=False)
+        model = model.fully_shard(ref_model_fsdp_cfg, float8_handler)
+        model.eval()
+        if float8_handler is not None:
+            # As the ref model is not updated, we only compute params' scales once
+            float8_handler.precompute_float8_dynamic_scale_for_fsdp(model)
+        model.to_device("cpu")
+        DEVICE_MODULE.empty_cache()  # type: ignore
+        return model
 
     def _init_logger(self, work_dir: Path):
         # Logging system maybe need better design
@@ -122,11 +146,6 @@ class TrainingWorker(SingleAcceleratorWorker):
         )
         return data_mesh
 
-    def _gather_logprobs(self, shifted_logits, shifted_labels):
-        shift_logprobs = F.log_softmax(shifted_logits, dim=-1)
-        shift_logprobs = shift_logprobs.gather(dim=-1, index=shifted_labels.clip(min=0).unsqueeze(-1)).squeeze(-1)
-        return shift_logprobs
-
     def _put_data_to_device(
         self,
         data: WorkerInputItem,
@@ -139,20 +158,33 @@ class TrainingWorker(SingleAcceleratorWorker):
 
     def fit(self, data_batches: list[WorkerInputItem]):
         for data in data_batches:
-            data = self._put_data_to_device(data, DEVICE)
-            seq_ctx = data["seq_ctx"]
+            self._put_data_to_device(data, DEVICE)
             if self.sp_mesh.size() > 1:
-                seq_ctx = seq_ctx.split(self.sp_mesh)
+                data["seq_ctx"] = data["seq_ctx"].split(self.sp_mesh)
+
+        if self._has_ref:
+            self._ref_model.to_device(DEVICE)
+            for data in data_batches:
+                seq_ctx = data["seq_ctx"]
+                with torch.no_grad():
+                    ref_output = self._ref_model(seq_ctx=seq_ctx, loss_ctx=None, return_router_results=False)
+                ref_logprobs = gather_logprobs(ref_output["logits"], data["shifted_labels"])
+                cast(LossContextInputItem, data)["ref_logprobs"] = ref_logprobs
+            self._ref_model.to_device("cpu")
+
+        for data in data_batches:
+            seq_ctx = data["seq_ctx"]
+            shifted_labels = data["shifted_labels"]
+            if self.sp_mesh.size() > 1:
+                shifted_labels = sp_split(shifted_labels, sp_mesh=self.sp_mesh, split_dim=1, padding_value=-100)
             output = self._engine.forward_only(seq_ctx=seq_ctx)
-            old_logprobs = self._gather_logprobs(output["logits"], data["shift_labels"])
+            old_logprobs = gather_logprobs(output["logits"], shifted_labels)
             cast(LossContextInputItem, data)["old_logprobs"] = old_logprobs
-            data["seq_ctx"] = seq_ctx  # sp splited
 
         for i in range(0, len(data_batches), self.micro_batch_size):
             data_batch = data_batches[i : i + self.micro_batch_size]
             engine_input = self.loss_ctx.build_list_ctx(
                 data_batch=cast(list[LossContextInputItem], data_batch),
-                data_mesh=self.data_mesh,
             )
             loss_log, other_log = self._engine.train_step(
                 data_batches=engine_input,
@@ -390,3 +422,27 @@ def serialize_state_dict(state_dict: dict) -> str:
     ForkingPickler(buf).dump(data)
     buf.seek(0)
     return base64.b64encode(buf.read()).decode("utf-8")
+
+
+@ray.remote(
+    runtime_env={
+        "env_vars": {
+            "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
+            "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
+        }
+    },
+)
+class GRPOTrainingWorker(TrainingWorker):
+    def _build_engine(self, worker_cfg: WorkerConfig):
+        if isinstance(worker_cfg.model_cfg, MoEConfig):
+            engine = GRPOMoETrainEngine(
+                optim_cfg=worker_cfg.optim_cfg,
+                fsdp_cfg=worker_cfg.fsdp_cfg,
+                model_cfg=worker_cfg.model_cfg,
+            )
+        else:
+            raise NotImplementedError
+
+        if worker_cfg.load_from is not None:
+            engine.from_hf(worker_cfg.load_from)
+        return engine

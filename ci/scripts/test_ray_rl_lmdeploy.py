@@ -27,10 +27,9 @@ from xtuner.v1.ray.accelerator import AcceleratorResourcesConfig, AutoAccelerato
 from xtuner.v1.ray.dataflow import DataFlowConfig
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 
-from xtuner.v1.rl.grpo.controller import TrainingController
+from xtuner.v1.rl.grpo.controller import GRPOTrainingController
 from xtuner.v1.rl.grpo.config import WorkerConfig, LossConfig
-from xtuner.v1.rl.grpo.loss import GRPOLossContext
-from xtuner.v1.rl.grpo.worker import TrainingWorker
+from xtuner.v1.rl.grpo.worker import GRPOTrainingWorker
 from xtuner.v1.ray.rollout import LMDeployWorker
 from xtuner.v1.ray.environment import EnvController
 from xtuner.v1.utils import get_torch_device_module
@@ -89,7 +88,15 @@ def build_train_controller(args, pg):
     worker_cfg: WorkerConfig = WorkerConfig(
         model_cfg=moe_cfg,
         optim_cfg=optim_cfg,
-        loss_cfg=LossConfig(cliprange_high=0.28, cliprange_low=0.2),
+        loss_cfg=LossConfig(
+            policy_loss_cfg=dict(
+                cliprange_high=0.28,
+                cliprange_low=0.2,
+                loss_type="vanilla",
+            ),
+            ignore_idx=-100,
+            use_kl_loss=False,
+            mode="eager"),
         lr_cfg=lr_cfg,
         fsdp_cfg=fsdp_cfg,
         load_from=args.model_path,
@@ -100,11 +107,11 @@ def build_train_controller(args, pg):
         offload_optimizer=args.offload_optimizer,
     )
     train_workers = AutoAcceleratorWorkers.from_placement_group(
-        TrainingWorker, worker_cfg, pg
+        GRPOTrainingWorker, worker_cfg, pg
     )
     ray.get([worker.__ray_ready__.remote() for worker in train_workers])
     train_workers = list(train_workers.keys())
-    train_controller = TrainingController.remote(
+    train_controller = GRPOTrainingController.remote(
         workers=train_workers,
     )
     ray.get(train_controller.__ray_ready__.remote())
@@ -122,16 +129,16 @@ def prepare_train_data(data_groups, tokenizer, prompt_repeat_k, pack_max_length)
             item = group[i]["response_str"]
             response_ids = tokenizer(item, return_tensors='pt')['input_ids'].flatten().tolist()
             input_ids = prompt_ids + response_ids
-            shift_labels = [-100] * (len(prompt_ids) - 1) + response_ids + [-100]
+            shifted_labels = [-100] * (len(prompt_ids) - 1) + response_ids + [-100]
             if len(input_ids) > pack_max_length:
                 input_ids = input_ids[:pack_max_length]
-                shift_labels = shift_labels[:pack_max_length]
+                shifted_labels = shifted_labels[:pack_max_length]
             input_ids = torch.tensor(input_ids, dtype=torch.int64).unsqueeze(0)
-            shift_labels = torch.tensor(shift_labels, dtype=torch.int64).unsqueeze(0)
+            shifted_labels = torch.tensor(shifted_labels, dtype=torch.int64).unsqueeze(0)
             data_batches.append(
                 dict(
                     seq_ctx=SequenceContext.from_input_ids((input_ids, ), device="cpu"),
-                    shift_labels=shift_labels,
+                    shifted_labels=shifted_labels,
                     advantage=advantages[i].item(),
                 )
             )

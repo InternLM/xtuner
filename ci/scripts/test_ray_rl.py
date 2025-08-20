@@ -137,7 +137,15 @@ def build_train_controller(args, pg):
     worker_cfg: WorkerConfig = WorkerConfig(
         model_cfg=moe_cfg,
         optim_cfg=optim_cfg,
-        loss_cfg=LossConfig(cliprange_high=0.28, cliprange_low=0.2),
+        loss_cfg=LossConfig(
+            policy_loss_cfg=dict(
+                cliprange_high=0.28,
+                cliprange_low=0.2,
+                loss_type="vanilla",
+            ),
+            ignore_idx=-100,
+            use_kl_loss=False,
+            mode="eager"),
         lr_cfg=lr_cfg,
         fsdp_cfg=fsdp_cfg,
         load_from=args.model_path,

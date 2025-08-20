@@ -1,5 +1,3 @@
-from typing import TypedDict
-
 import torch
 
 from xtuner.v1.config import FSDPConfig, MoEConfig, OptimConfig
@@ -7,12 +5,7 @@ from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.engine.moe_train_engine import MoETrainEngine
 from xtuner.v1.utils import get_device, get_logger, get_torch_device_module
 
-from .loss import GRPOLossContext
-
-
-class EngineInputItem(TypedDict):
-    seq_ctx: SequenceContext
-    loss_ctx: GRPOLossContext
+from ..loss_context import EngineInputItem
 
 
 logger = get_logger()

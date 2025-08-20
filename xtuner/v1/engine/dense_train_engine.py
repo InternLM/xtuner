@@ -408,10 +408,7 @@ class DenseTrainEngine:
 
     def put_model_to_device(self, device: torch.device | str):
         """Put the model to the given device."""
-        if self.fsdp_cfg.cpu_offload:
-            return
-        self.model.to(device, non_blocking=True)
-        DEVICE_MODULE.synchronize()
+        self.model.to_device(device)
         return
 
     def put_optimizer_to_device(self, device: torch.device | str):
