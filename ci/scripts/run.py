@@ -18,7 +18,17 @@ def parse_args():
     parser.add_argument(
         "env",
         type=str,
+    ) 
+    parser.add_argument(
+        "cmd",
+        type=str,
     )
+    parser.add_argument(
+        "--nodes",
+        type=int,
+        default=1
+    )
+    
     return parser.parse_args()
 
 def main():
@@ -28,7 +38,7 @@ def main():
     params_cls = cluster_spec["params"]
 
     current_dir = os.getcwd()
-    cmd = f"cd {current_dir}; {args.env}; pytest tests; export XTUNER_DETERMINISTIC=true"
+    cmd = f"cd {current_dir}; {args.env}; {args.cmd}"
     print(f"Running command: {cmd}")
 
     assert params_cls is not None and cluster_cls is not None, (
@@ -38,11 +48,13 @@ def main():
     commit_branch = os.environ.get('CI_COMMIT_REF_NAME')
     job_id = os.environ.get('CI_JOB_ID')
     params = params_cls(
-        job_name=f"xtuner-ci-unittest-{job_id}-{commit_branch}-{commit_id}",
+        job_name=f"xtuner-ci-{job_id}-{commit_branch}-{commit_id}",
         image=args.image,
         cmd=cmd,
         gpus_per_task=8,
-        num_nodes=1,
+        cpus_per_task=80,
+        memory_per_task="800",
+        num_nodes=args.nodes,
         no_env=True
     )
     cluster = cluster_cls()

@@ -1,0 +1,53 @@
+sft_trainer:
+  tags:
+    - aliyun_x
+  stage: sft_test
+  needs: [lint]
+  allow_failure: false
+  script:
+    - unset http_proxy https_proxy
+    - export PYTHONPYCACHEPREFIX=/tmp
+    - command="torchrun --nproc-per-node 8 --master_addr=\${MASTER_ADDR} --master_port=\${MASTER_PORT} --nnodes=\${WORLD_SIZE} --node_rank=\${RANK} ci/scripts/test_sft_trainer.py ../${CI_JOB_NAME}_${CI_JOB_ID}"
+    - python ci/scripts/run.py "$IMAGE" "$CI_IMPORT" "$command" --nodes 2
+    - |
+      dirs=( ../${CI_JOB_NAME}_${CI_JOB_ID}*/ )
+      for dir in "${dirs[@]}"; do
+          dir_name="${dir%/}"
+          rsync -av --exclude='ckpt-*' --exclude='hf-*' $dir_name ./
+      done 
+    - work_dir=${CI_JOB_NAME}_${CI_JOB_ID} && echo "work_dir=$work_dir" >> variables.env 
+    - run_py="ci/scripts/test_sft_trainer.py" && echo "run_py=$run_py" >> variables.env
+  artifacts:
+    paths:
+      - ./${CI_JOB_NAME}_${CI_JOB_ID}*
+    reports:
+      dotenv: variables.env
+    expire_in: 1 week
+    when: always
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event" && ($CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "main" || $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "refactor")
+
+sft_trainer_check_metric:
+  tags:
+    - aliyun_x
+  stage: check_metric
+  needs:
+    - job: sft_trainer
+      artifacts: true
+  allow_failure: true
+  script:
+    - export PYTHONPYCACHEPREFIX=/tmp
+    - |
+      dirs=( $work_dir*/ )
+      for dir in "${dirs[@]}"; do
+          dir_name="${dir%/}"
+          rank0_log=( $dir_name/*/rank0.log )
+          echo "begining check $rank0_log"
+          if [[ "$dir_name" == *"ep8"* ]]; then
+              python ./ci/scripts/check_metric.py $rank0_log $run_py --check_metric '{"lr":0,"text_tokens":0,"reduced_llm_loss":0.01,"grad_norm":0.02}'
+          else
+              python ./ci/scripts/check_metric.py $rank0_log $run_py
+          fi
+      done 
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event" && ($CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "main" || $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "refactor")
