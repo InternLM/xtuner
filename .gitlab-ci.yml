@@ -1,10 +1,14 @@
 variables:
   IMAGE: pjlab-shanghai-acr-registry-vpc.cn-shanghai.cr.aliyuncs.com/pjlab-eflops/xpuyu:torch-2.6.0-076676dd-0709
+  GIT_CLONE_PATH: "${CI_BUILDS_DIR}/${CI_RUNNER_SHORT_TOKEN}/test_${CI_JOB_NAME}_${CI_JOB_ID}"
 
 include:
   - local: ci/workflow/lint.yaml
   - local: ci/workflow/unit_test.yaml
+  - local: ci/workflow/sft.yaml
 
 stages:
   - lint
   - unit_test
+  - sft_test
+  - check_metric

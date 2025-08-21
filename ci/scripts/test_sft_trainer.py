@@ -152,7 +152,7 @@ def parse_args():
 
 
 def extract_data_from_log(logfile: Path):
-    pattern_str = r"\[XTuner\].*Step.*lr:\s(\d+.\d*)\s.*text_tokens:\s(\d+.\d*)\s.*reduced_llm_loss:\s(\d+.\d*)\s.*max_memory:\s(\d+.\d*)\s*GB\s.*grad_norm:\s(\d+.\d*)\s.*tgs:\s(\d+.\d*)"
+    pattern_str = r"\[XTuner\].*Step.*lr:\s(\d+.\d*)\s.*text_tokens:\s(\d+.\d*)\s.*reduced_llm_loss:\s(\d+.\d*)\s.*max_memory:\s(\d+.\d*)\s*GB\s.*grad_norm:\s(\d+.\d*)\s.*(?<!e2e_)tgs:\s(\d+.\d*)"
     compiled_pattern = re.compile(pattern_str)
 
     cur_lr = []
@@ -251,7 +251,7 @@ def main():
             pack_max_length=16384
         )
         work_dir = f"{args.work_dir}-{name}"
-        loss_ctx = CELossContext()
+        loss_ctx = CELossContext(loss_class="liger_cross_entropy")
         trainer = Trainer(
             load_from=QWEN3_MOE_PATH,
             model_cfg=moe_cfg,
@@ -265,8 +265,6 @@ def main():
             global_batch_size=16,
             epoch_num=1,
             work_dir=work_dir,
-            hf_interval=5,
-            hf_max_keep=2,
             seed=0,
         )
         trainer.fit()

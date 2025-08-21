@@ -2,10 +2,11 @@ unit_test:
   tags:
     - aliyun_x
   stage: unit_test
+  needs: [lint]
   allow_failure: false
   script:
     - unset http_proxy https_proxy
     - export PYTHONPYCACHEPREFIX=/tmp
-    - python ci/scripts/unit_test.py "$IMAGE" "$UNIT_TEST_ENV"
+    - python ci/scripts/run.py "$IMAGE" "$UNIT_TEST_ENV" "pytest tests"
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event" && ($CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "main" || $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "refactor")
