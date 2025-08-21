@@ -1,7 +1,6 @@
+import math
 import os
-import sys
 import time
-from pathlib import Path
 from typing import Dict, List, TypeAlias, TypedDict, cast
 
 import ray
@@ -9,7 +8,6 @@ import requests
 import torch
 import torch.distributed as dist
 import tqdm
-from mmengine.dist import get_rank
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed.tensor import DTensor
 
@@ -24,17 +22,18 @@ from xtuner.v1.ray.accelerator import SingleAcceleratorWorker
 from xtuner.v1.ray.config import RolloutConfig
 from xtuner.v1.rl.loss_context import LossContext
 from xtuner.v1.rl.utils import gather_logprobs, sp_split
-from xtuner.v1.utils import ParallelConfigException, get_logger, log_format
+from xtuner.v1.utils import ParallelConfigException, get_logger
 
 from ..loss_context import LossContextInputItem
 from .config import WorkerConfig
-from .engine import GRPOMoETrainEngine
+from .engine import GRPODenseTrainEngine, GRPOMoETrainEngine
 
 
 DeviceMeshRaw: TypeAlias = List[List[int]]  # A list of lists representing device mesh indices
 ServiceUrlMap: TypeAlias = Dict[int, str]  # A dictionary mapping service names to their URLs
 DEVICE = get_device()
 DEVICE_MODULE = get_torch_device()
+logger = get_logger()
 
 
 class WorkerInputItem(TypedDict):
@@ -64,12 +63,9 @@ class TrainingWorker(SingleAcceleratorWorker):
 
         self.data_mesh = self._init_data_mesh(sp_size=worker_cfg.sp_size)
         self.sp_mesh = self.data_mesh["sp"]
-        self._global_batch_size = worker_cfg.global_batch_size
-        self._micro_batch_size: int | None = None
+        self._optimizer_steps = worker_cfg.optimizer_steps
 
         self.loss_ctx = LossContext(loss_cfg=worker_cfg.loss_cfg)
-
-        self.logger = self._init_logger(worker_cfg.work_dir)
 
         # Used to update weight to rollout engine
         self.rank = rank
@@ -82,18 +78,6 @@ class TrainingWorker(SingleAcceleratorWorker):
 
     def _build_engine(self, worker_cfg: WorkerConfig):
         pass
-        # if isinstance(worker_cfg.model_cfg, MoEConfig):
-        #     engine = GRPOMoETrainEngine(
-        #         optim_cfg=worker_cfg.optim_cfg,
-        #         fsdp_cfg=worker_cfg.fsdp_cfg,
-        #         model_cfg=worker_cfg.model_cfg,
-        #     )
-        # else:
-        #     raise NotImplementedError
-
-        # if worker_cfg.load_from is not None:
-        #     engine.from_hf(worker_cfg.load_from)
-        # return engine
 
     def _build_ref_model(self, ref_model_cfg: TransformerConfig, ref_model_fsdp_cfg: FSDPConfig | None = None):
         with torch.device("meta"):
@@ -115,14 +99,6 @@ class TrainingWorker(SingleAcceleratorWorker):
         model.to_device("cpu")
         DEVICE_MODULE.empty_cache()  # type: ignore
         return model
-
-    def _init_logger(self, work_dir: Path):
-        # Logging system maybe need better design
-        logger = get_logger()
-        logger.remove()
-        logger.add(work_dir / f"rank{get_rank()}.log", format=log_format(), backtrace=True, catch=True)
-        logger.add(sys.stderr, format=log_format(rank=get_rank()))
-        return logger
 
     def _init_data_mesh(
         self,
@@ -157,6 +133,13 @@ class TrainingWorker(SingleAcceleratorWorker):
         return data
 
     def fit(self, data_batches: list[WorkerInputItem]):
+        num_batches = len(data_batches)
+        iters_per_step = math.ceil(num_batches / self._optimizer_steps)
+        if num_batches < self._optimizer_steps:
+            logger.info(
+                f"Optimizer only step once because num_batches {num_batches} < optimizer_steps {self._optimizer_steps}."
+            )
+
         for data in data_batches:
             self._put_data_to_device(data, DEVICE)
             if self.sp_mesh.size() > 1:
@@ -167,7 +150,10 @@ class TrainingWorker(SingleAcceleratorWorker):
             for data in data_batches:
                 seq_ctx = data["seq_ctx"]
                 with torch.no_grad():
-                    ref_output = self._ref_model(seq_ctx=seq_ctx, loss_ctx=None, return_router_results=False)
+                    if isinstance(self.config.model_cfg, MoEConfig):
+                        ref_output = self._ref_model(seq_ctx=seq_ctx, loss_ctx=None, return_router_results=False)
+                    else:
+                        ref_output = self._ref_model(seq_ctx=seq_ctx, loss_ctx=None)
                 ref_logprobs = gather_logprobs(ref_output["logits"], data["shifted_labels"])
                 cast(LossContextInputItem, data)["ref_logprobs"] = ref_logprobs
             self._ref_model.to_device("cpu")
@@ -181,8 +167,8 @@ class TrainingWorker(SingleAcceleratorWorker):
             old_logprobs = gather_logprobs(output["logits"], shifted_labels)
             cast(LossContextInputItem, data)["old_logprobs"] = old_logprobs
 
-        for i in range(0, len(data_batches), self.micro_batch_size):
-            data_batch = data_batches[i : i + self.micro_batch_size]
+        for i in range(0, len(data_batches), iters_per_step):
+            data_batch = data_batches[i : i + iters_per_step]
             engine_input = self.loss_ctx.build_list_ctx(
                 data_batch=cast(list[LossContextInputItem], data_batch),
             )
@@ -190,15 +176,11 @@ class TrainingWorker(SingleAcceleratorWorker):
                 data_batches=engine_input,
             )
             grad_norm = self._engine.clip_grad_norm()
-            if self.config.offload_optimizer:
-                # TODO(@cwh): Currently, we offload the model and optimizer to CPU before stepping the optimizer
-                # to reduce GPU memory usage. We may need a more elegant way to handle this in the future.
-                self._engine.put_model_to_device("cpu")
-                self._engine.put_optimizer_to_device("cpu")
             self._engine.step_optimizer(grad_norm)
-            print(f"grad_norm: {grad_norm.item()}")
-            if self.config.offload_optimizer:
-                self._engine.put_model_to_device("cuda")
+            logger.info(f"grad_norm: {grad_norm.item()}")
+
+    def save_hf(self, hf_dir: str, save_dtype: torch.dtype = torch.bfloat16):
+        self._engine.save_hf(hf_dir, save_dtype)
 
     def get_data_replicate_size(self) -> int:
         """Get the data replicate size for the training worker."""
@@ -206,30 +188,10 @@ class TrainingWorker(SingleAcceleratorWorker):
         # sp will affect the data replicate size in worker
         return self._engine.data_replicate_size * self.sp_mesh.size()
 
-    @property
-    def global_batch_size(self):
-        if self._global_batch_size is None:
-            # grad acc = 1
-            return dist.get_world_size() // self.get_data_replicate_size()
-        return self._global_batch_size
-
-    @property
-    def micro_batch_size(self) -> int:
-        if self._micro_batch_size is None:
-            micro_batch_size = self.global_batch_size / self.data_mesh["dp"].size()
-            if not micro_batch_size.is_integer():
-                raise ParallelConfigException(
-                    f"Global batch size {self.global_batch_size} must be divisible by "
-                    f"data parallel size {self.data_mesh['dp'].size()}. "
-                    "Please adjust the global batch size."
-                )
-            self._micro_batch_size = int(micro_batch_size)
-        return self._micro_batch_size
-
     def offload_model(self):
         self._engine.put_model_to_device("cpu")
         DEVICE_MODULE.empty_cache()
-        print(
+        logger.info(
             f"Offloaded model to CPU. Current allocate {DEVICE_MODULE.memory_allocated() / (1024**2)} MB, reserved: {DEVICE_MODULE.memory_reserved() / (1024**2)} MB"
         )
 
@@ -237,13 +199,15 @@ class TrainingWorker(SingleAcceleratorWorker):
         """Offload the optimizer of the training worker."""
         self._engine.put_optimizer_to_device("cpu")
         DEVICE_MODULE.empty_cache()
-        print(
+        logger.info(
             f"Offloaded optimizer to CPU. Current allocate {DEVICE_MODULE.memory_allocated() / (1024**2)} MB, "
             f"reserved: {DEVICE_MODULE.memory_reserved() / (1024**2)} MB"
         )
 
-    def onload(self):
+    def onload_model(self):
         self._engine.put_model_to_device(DEVICE)
+
+    def onload_optimizer(self):
         self._engine.put_optimizer_to_device(DEVICE)
 
     def update_rollout_info(
@@ -325,15 +289,15 @@ class TrainingWorker(SingleAcceleratorWorker):
             reshard_duration.append(time.perf_counter() - start)
 
         if dist.get_rank() == 0:
-            self.logger.info(
+            logger.info(
                 f"Rank 0 Gather decoder layers done, total {sum(gather_duration):.2f}s, avg "
                 f"{sum(gather_duration) / len(gather_duration):.2f}s"
             )
-            self.logger.info(
+            logger.info(
                 f"Rank 0 migrate/save decoder layers done, total {sum(weight_duration):.2f}s, avg "
                 f"{sum(weight_duration) / len(weight_duration):.2f}s"
             )
-            self.logger.info(
+            logger.info(
                 f"Rank 0 reshard decoder layers done, total {sum(reshard_duration):.2f}s, avg "
                 f"{sum(reshard_duration) / len(reshard_duration):.2f}s"
             )
@@ -433,9 +397,16 @@ def serialize_state_dict(state_dict: dict) -> str:
     },
 )
 class GRPOTrainingWorker(TrainingWorker):
-    def _build_engine(self, worker_cfg: WorkerConfig):
+    def _build_engine(self, worker_cfg: WorkerConfig) -> GRPOMoETrainEngine | GRPODenseTrainEngine:
+        engine: GRPOMoETrainEngine | GRPODenseTrainEngine
         if isinstance(worker_cfg.model_cfg, MoEConfig):
             engine = GRPOMoETrainEngine(
+                optim_cfg=worker_cfg.optim_cfg,
+                fsdp_cfg=worker_cfg.fsdp_cfg,
+                model_cfg=worker_cfg.model_cfg,
+            )
+        elif isinstance(worker_cfg.model_cfg, TransformerConfig):
+            engine = GRPODenseTrainEngine(
                 optim_cfg=worker_cfg.optim_cfg,
                 fsdp_cfg=worker_cfg.fsdp_cfg,
                 model_cfg=worker_cfg.model_cfg,

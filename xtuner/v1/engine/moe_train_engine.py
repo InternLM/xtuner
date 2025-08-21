@@ -8,6 +8,7 @@ from torch.distributed._functional_collectives import all_reduce
 from torch.distributed.device_mesh import DeviceMesh
 
 from xtuner.v1.config import FSDPConfig, MoEConfig, OptimConfig
+from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.engine.dense_train_engine import DenseTrainEngine
 
 # todo: 如何 import
@@ -145,6 +146,11 @@ class MoETrainEngine(DenseTrainEngine):
     def grad_accumulation_steps(self, data_batches_len: int):
         intra_layer_micro_batch = self.intra_layer_micro_batch
         return data_batches_len // intra_layer_micro_batch
+
+    @torch.no_grad()
+    def forward_only(self, seq_ctx: SequenceContext):
+        output = self.model(seq_ctx=seq_ctx, loss_ctx=None, return_router_results=False)
+        return output
 
     def train_step(self, data_batches: List[ModelItem], sp_mesh: DeviceMesh = None):  # type: ignore
         """Perform a training step with the given data batches and mesh.

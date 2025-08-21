@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict
 
 from xtuner.v1.config.base_model import TransformerConfig
 from xtuner.v1.config.fsdp import FSDPConfig
@@ -43,19 +43,8 @@ class WorkerConfig(BaseModel):
     loss_cfg: LossConfig
     lr_cfg: LRConfig
     fsdp_cfg: FSDPConfig
-    work_dir: Path
     load_from: str | Path | None = None
-    tokenizer_path: str | Path
-    global_batch_size: int | None = None
+    optimizer_steps: int = 1
     sp_size: int = 1
-    offload_optimizer: bool = False
-
+    pack_max_length: int
     ref_model_fsdp_cfg: FSDPConfig | None = None
-
-    @model_validator(mode="after")
-    def _convert_work_dir(self):
-        if isinstance(self.work_dir, str):
-            self.work_dir = Path(self.work_dir)
-        elif self.work_dir is None:
-            self.work_dir = Path.cwd()
-        return self

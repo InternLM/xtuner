@@ -29,6 +29,7 @@ from torch.utils._foreach_utils import (
 )
 
 from xtuner.v1.config import FSDPConfig, OptimConfig, TransformerConfig
+from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.model.base import BaseModel, ModelItem
 from xtuner.v1.utils import get_device, get_logger, get_torch_device_module
@@ -166,6 +167,11 @@ class DenseTrainEngine:
     def data_replicate_size(self) -> int:
         # todo: consider pp
         return self.fsdp_cfg.tp_size
+
+    @torch.no_grad()
+    def forward_only(self, seq_ctx: SequenceContext):
+        output = self.model(seq_ctx=seq_ctx, loss_ctx=None)
+        return output
 
     def train_step(self, data_batches: list[ModelItem], sp_mesh: Optional[DeviceMesh] = None):
         """Perform a training step with the given data batches and mesh.

@@ -50,14 +50,12 @@ def parse_args():
     parser.add_argument("--num-workers", type=int, default=8)
     parser.add_argument("--gpus-per-node", type=int, default=8)
     parser.add_argument("--rollout-global-batch-size", type=int, default=128)
-    parser.add_argument("--train-global-batch-size", type=int, default=8)
+    parser.add_argument("--train-optimizer-steps", type=int, default=1)
     parser.add_argument("--max-concurrent", type=int, default=8)
     parser.add_argument("--prompt-repeat-k", type=int, default=8)
     parser.add_argument("--debug-train-only", action="store_true")
     parser.add_argument("--debug-rollout-only", action="store_true")
     parser.add_argument("--pack-max-length", type=int, default=8192)
-
-    parser.add_argument("--offload-optimizer", action="store_true")  # save optimizer memory but will slow down training
     parser.add_argument("--optimizer-disable-foreach", action="store_true")  # save memory usage during opt.step()
     return parser.parse_args()
 
@@ -100,11 +98,9 @@ def build_train_controller(args, pg):
         lr_cfg=lr_cfg,
         fsdp_cfg=fsdp_cfg,
         load_from=args.model_path,
-        tokenizer_path=args.model_path,
         sp_size=1,
-        global_batch_size=args.train_global_batch_size,
-        work_dir=args.work_dir,
-        offload_optimizer=args.offload_optimizer,
+        optimizer_steps=args.train_optimizer_steps,
+        pack_max_length=args.pack_max_length,
     )
     train_workers = AutoAcceleratorWorkers.from_placement_group(
         GRPOTrainingWorker, worker_cfg, pg
@@ -270,7 +266,7 @@ def main(args):
     ray.get(test_env.onload.remote(["weights"]))
 
     # offload train controller optimizer
-    ray.get(train_controller.offload_optimizer.remote())
+    ray.get(train_controller.offload.remote(target="optimizer"))
     print("train_controller offload optimizer done!")
 
     # update weights
@@ -278,7 +274,7 @@ def main(args):
     print("update weights done!!!")
 
     # offload train controller model and optimizer
-    ray.get(train_controller.offload_model.remote())
+    ray.get(train_controller.offload.remote(target="model"))
     print("train_controller offload model done!")
 
     # onload rollout kvcache
@@ -291,14 +287,14 @@ def main(args):
         save_trajectories(data_groups, result_path)
         time.sleep(5)
         ray.get(test_env.offload.remote(level=2))
-        ray.get(train_controller.onload.remote())
+        ray.get(train_controller.onload.remote(target="all"))
         data_batches = prepare_train_data(data_groups, tokenizer, args.prompt_repeat_k, args.pack_max_length)
         print(f"data_batches size: {len(data_batches)}")
         ray.get(train_controller.fit.remote(data_batches, pack_max_length=args.pack_max_length))
-        ray.get(train_controller.offload_optimizer.remote())
+        ray.get(train_controller.offload.remote(target="optimizer"))
         ray.get(test_env.onload.remote(tags=["weights"]))
         ray.get(train_controller.update_weights.remote())
-        ray.get(train_controller.offload_model.remote())
+        ray.get(train_controller.offload.remote(target="model"))
         ray.get(test_env.onload.remote(tags=["kv_cache"]))
         print("update weights done!!!")
 
