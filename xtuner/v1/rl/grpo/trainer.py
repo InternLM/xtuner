@@ -220,7 +220,7 @@ class Trainer:
         for rollout_idx in range(self._rollout_steps):
             data_groups = ray.get(self._rollout_dataflow.run.remote())
             time.sleep(3)
-            ray.get(self._rollout_env_controller.offload.remote())
+            ray.get(self._rollout_env_controller.offload.remote(level=2))
             trajectory_save_path = self.exp_dir / f"rollout_idx_{rollout_idx}_trajectory.jsonl"
             self._save_trajectories(data_groups, trajectory_save_path)
             self.logger.info(f"rollout_idx {rollout_idx} finished, saved trajectories to {trajectory_save_path}")
@@ -232,10 +232,11 @@ class Trainer:
                 self._train_controller.fit.remote(data_batches, pack_max_length=self._train_worker_cfg.pack_max_length)
             )
             ray.get(self._train_controller.offload.remote(target="optimizer"))
-            ray.get(self._rollout_env_controller.onload.remote())
+            ray.get(self._rollout_env_controller.onload.remote(tags=["weights"]))
             ray.get(self._train_controller.update_weights.remote())
             self.logger.info("update weights done!!!")
             ray.get(self._train_controller.offload.remote(target="model"))
+            ray.get(self._rollout_env_controller.onload.remote(tags=["kv_cache"]))
             self._cur_epoch += 1
             self._maybe_save_hf()
 
