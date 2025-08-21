@@ -1,17 +1,40 @@
 import asyncio
-import importlib
+from typing import List, Union
 
 import ray
+from cyclopts import Parameter
+from pydantic import BaseModel
+from typing_extensions import Annotated
 
+from xtuner.v1.datasets.data_item import RLTextDataItem
 from xtuner.v1.ray.accelerator import AutoAcceleratorWorkers
 from xtuner.v1.ray.judger.controller import JudgerController
 from xtuner.v1.ray.rollout.controller import RolloutController
 
 
+class SampleParams(BaseModel):
+    n: Annotated[int, Parameter(help="Number of samples to generate.")] = 1
+    top_k: Annotated[
+        int, Parameter(help="The number of highest probability vocabulary tokens to keep for top-k-filtering.")
+    ] = 50
+    top_p: Annotated[float, Parameter(help="The cumulative probability for nucleus sampling.")] = 0.95
+    temperature: Annotated[float, Parameter(help="The value used to module the next token probabilities.")] = 0.6
+    repetition_penalty: Annotated[float, Parameter(help="The parameter for repetition penalty.")] = 1.0
+    presence_penalty: Annotated[float, Parameter(help="The parameter for presence penalty.")] = 0.0
+    frequency_penalty: Annotated[float, Parameter(help="The parameter for frequency penalty.")] = 0.0
+    min_tokens: Annotated[int, Parameter(help="Minimum number of tokens to generate.")] = 2
+    max_tokens: Annotated[int, Parameter(help="Maximum number of tokens to generate.")] = 2048
+    stops: Annotated[List[str], Parameter(help="List of stop sequences.")] = []
+    stop_token_ids: Annotated[List[int], Parameter(help="List of stop token IDs.")] = []
+    logprobs: Annotated[int, Parameter(help="Number of log probabilities to return.")] = 0
+    skip_special_tokens: Annotated[bool, Parameter(help="Whether to skip special tokens.")] = True
+
+
 @ray.remote
 class EnvController:
-    def __init__(self, environment: str, placement_group, rollout_cfg, judger_cfg):
+    def __init__(self, environment: str, placement_group, rollout_cfg, judger_cfg=None, sample_params=None):
         self.environment = environment
+        self.sample_params = sample_params if sample_params else SampleParams()
         self.init_rollout_controller(placement_group, rollout_cfg)
         self.init_judger_controller(placement_group, judger_cfg)
 
@@ -27,39 +50,42 @@ class EnvController:
             raise NotImplementedError(f"Rollout backend '{rollout_cfg.backend}' is not supported.")
 
     def init_judger_controller(self, placement_group, judger_cfg):
-        judger_class_path = judger_cfg.get("judger_type")
-        if judger_class_path:
-            try:
-                module_path, class_name = judger_class_path.rsplit(".", 1)
-                module = importlib.import_module(module_path)
-                judger_worker_class = getattr(module, class_name)
-                judger_workers_map = AutoAcceleratorWorkers.from_placement_group(
-                    judger_worker_class, judger_cfg, placement_group
-                )
-                self.judger_controller = JudgerController.remote(judger_workers_map, judger_cfg)
-            except (ImportError, AttributeError, ValueError) as e:
-                raise ImportError(f"Failed to import judger worker class '{judger_class_path}': {e}")
+        if judger_cfg is None:
+            self.judger_controller = None
+            return
+        self.judger_controller = JudgerController.remote(judger_cfg)
 
-    async def run(self, enable_batch_reward, enable_partial_rollout, sample_params, group_samples):
-        assert not enable_batch_reward
+    async def run(
+        self, data: Union[str, RLTextDataItem, List[RLTextDataItem]]
+    ) -> Union[str, RLTextDataItem, List[RLTextDataItem]]:
+        if isinstance(data, str):
+            group_samples = [RLTextDataItem(prompt_str=data)]
+        elif not isinstance(data, list):
+            group_samples = [data]
+        else:
+            group_samples = data
 
-        response_future = [
-            self.rollout_controller.rollout.remote(sample["prompt_str"], sample_params.dict())
-            for sample in group_samples
-        ]
-        response = await asyncio.gather(*response_future)
-        reward_future = [
-            self.judger_controller.judge.remote(res[0], sample["reward_model"]["ground_truth"])
-            for res, sample in zip(response, group_samples)
-        ]
-        reward = await asyncio.gather(*reward_future)
+        if self.rollout_controller:
+            response_future = [
+                self.rollout_controller.rollout.remote(sample["prompt_str"], self.sample_params.dict())
+                for sample in group_samples
+            ]
+            response = await asyncio.gather(*response_future)
+            for i in range(len(group_samples)):
+                group_samples[i]["response_str"] = response[i][0]
+                group_samples[i]["state"] = response[i][1]
 
-        for i in range(len(group_samples)):
-            group_samples[i]["response_str"] = response[i][0]
-            group_samples[i]["reward"] = reward[i]
-            group_samples[i]["state"] = response[i][1]
+        if self.judger_controller:
+            rewards = await self.judger_controller.run.remote(group_samples)
+            for i in range(len(group_samples)):
+                group_samples[i]["reward"] = rewards[i]
 
-        return group_samples
+        if isinstance(data, str):
+            return group_samples[0]["response_str"] or ""
+        elif not isinstance(data, list):
+            return group_samples[0]
+        else:
+            return group_samples
 
     def pause(self):
         return ray.get(self.rollout_controller.pause.remote())

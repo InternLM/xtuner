@@ -21,7 +21,6 @@ from xtuner.v1.config import (
     BalancingLossConfig,
     ZLossConfig,
 )
-from xtuner.v1.ray.rollout.controller import RolloutController
 from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.ray.accelerator import AcceleratorResourcesConfig, AutoAcceleratorWorkers
 from xtuner.v1.ray.dataflow import DataFlowConfig
@@ -35,7 +34,7 @@ from xtuner.v1.ray.environment import EnvController
 from xtuner.v1.utils import get_torch_device_module
 from xtuner.v1.ray.dataflow import DataFlow
 from xtuner.v1.datasets import RLTextTokenizeFnConfig, build_datasets, build_dataloader
-
+from xtuner.v1.ray.judger.controller import JudgerConfig
 
 MODEL_PATH = os.environ["ROLLOUT_MODEL_PATH"]
 DATA_PATH = os.environ["ROLLOUT_DATA_PATH"]
@@ -192,7 +191,12 @@ def main(args):
         prompt_repeat_k=args.prompt_repeat_k,
         global_batch_size=args.rollout_global_batch_size
     )
-    judger_config = {"judger_type": "xtuner.v1.ray.judger.gsm8k.GSM8KJudgerWorker"}
+    from xtuner.v1.ray.judger.gsm8k import compute_reward
+    judger_cfg = JudgerConfig(
+        reward_functions={"math": compute_reward},
+        extra_info={"math": {"score": 1, "format_score": 0.5}},
+        reward_ratio={"math": 1.0}
+    )
     dataset_cfg = [
         {
         "dataset": DatasetConfig(name="gsm8k",
@@ -219,7 +223,8 @@ def main(args):
         "grpo",
         pg,
         rollout_config,
-        judger_config)
+        judger_cfg
+    )
     train_controller = build_train_controller(args, pg)
     if args.debug_rollout_only:
         test_flow = DataFlow.remote("grpo",dataflow_config, datasets, dataloader, tokenizer,test_env)

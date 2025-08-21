@@ -1,28 +1,21 @@
 import os
-import torch
 import json
 import time
 import argparse
-import unittest
 from pathlib import Path
 from transformers import AutoTokenizer
 
-import asyncio
-import queue
-import datasets
-
 import ray
-from xtuner.v1.ray.rollout import LMDeployWorker, RolloutController
 from xtuner.v1.ray.environment import EnvController
 from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.ray.accelerator import AcceleratorResourcesConfig, AutoAcceleratorWorkers
 from xtuner.v1.ray.dataflow import DataFlow, DataFlowConfig
-from xtuner.v1.utils.math500_utils import build_math500_judger_controller, build_math500_flow
 from xtuner.v1.datasets import RLTextTokenizeFnConfig, build_datasets, build_dataloader
 from xtuner.v1.config import (
     DataloaderConfig,
     DatasetConfig,
 )
+from xtuner.v1.ray.judger.controller import JudgerConfig
 
 MODEL_PATH = os.environ["ROLLOUT_MODEL_PATH"]
 DATA_PATH = os.environ["ROLLOUT_DATA_PATH"]
@@ -52,7 +45,12 @@ def main():
         tokenizer_path=MODEL_PATH,
         tensor_parallel_size=8,
     )
-    judger_cfg = {"judger_type": "xtuner.v1.ray.judger.gsm8k.GSM8KJudgerWorker"}
+    from xtuner.v1.ray.judger.gsm8k import compute_reward
+    judger_cfg = JudgerConfig(
+        reward_functions={"math": compute_reward},
+        extra_info={"math": {"score": 1, "format_score": 0.5}},
+        reward_ratio={"math": 1.0}
+    )
 
     dataflow_cfg = DataFlowConfig(
         env="test",

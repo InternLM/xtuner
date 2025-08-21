@@ -1,9 +1,5 @@
 import re
 
-import ray
-
-from xtuner.v1.ray.judger.worker import JudgerWorker
-
 
 _SOLUTION_CLIP_CHARS = 300
 
@@ -40,32 +36,14 @@ def extract_solution(solution_str, method="strict"):
     return final_answer
 
 
-# TODO(hha): 所有的函数式 reward 应该用同一个 judge worker 而不是每个任务都创建一个新的 worker
-@ray.remote
-class GSM8KJudgerWorker(JudgerWorker):
-    def __init__(
-        self,
-        config,
-        rank: int,
-        master_addr: str,
-        master_port: int,
-        world_size: int,
-        accelerator: str = "CPU",
-        format_score: float = 0.0,
-        score: float = 1.0,
-    ):
-        self.format_score = format_score
-        self.score = score
-        super().__init__(config, rank, master_addr, master_port, world_size, accelerator)
-
-    def judge_function(self, response, label):
-        predict_str = response
-        ground_truth = label
-        answer = extract_solution(predict_str)
-        if answer is None:
-            return 0
+def compute_reward(response, label, extra_info):
+    predict_str = response
+    ground_truth = label
+    answer = extract_solution(predict_str)
+    if answer is None:
+        return 0
+    else:
+        if answer == ground_truth:
+            return extra_info["score"]
         else:
-            if answer == ground_truth:
-                return self.score
-            else:
-                return self.format_score
+            return extra_info["format_score"]
