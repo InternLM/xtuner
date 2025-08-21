@@ -30,7 +30,7 @@ class RLTextDataItem(TypedDict, total=False):
     data_source: str | None  # e.g., math, code
     ability: str | None  # math, code
     reward_model: dict
-    reward: int | None
+    reward: float | None
     num_return_tokens: int | None
     response_ids: list[int] | None
     response_str: str | None

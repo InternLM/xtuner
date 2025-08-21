@@ -21,24 +21,6 @@ if TYPE_CHECKING:
     from xtuner.v1.datasets import JsonlDataset
 
 
-class SampleParams(BaseModel):
-    n: Annotated[int, Parameter(help="Number of samples to generate.")] = 1
-    top_k: Annotated[
-        int, Parameter(help="The number of highest probability vocabulary tokens to keep for top-k-filtering.")
-    ] = 50
-    top_p: Annotated[float, Parameter(help="The cumulative probability for nucleus sampling.")] = 0.95
-    temperature: Annotated[float, Parameter(help="The value used to module the next token probabilities.")] = 0.6
-    repetition_penalty: Annotated[float, Parameter(help="The parameter for repetition penalty.")] = 1.0
-    presence_penalty: Annotated[float, Parameter(help="The parameter for presence penalty.")] = 0.0
-    frequency_penalty: Annotated[float, Parameter(help="The parameter for frequency penalty.")] = 0.0
-    min_tokens: Annotated[int, Parameter(help="Minimum number of tokens to generate.")] = 2
-    max_tokens: Annotated[int, Parameter(help="Maximum number of tokens to generate.")] = 2048
-    stops: Annotated[List[str], Parameter(help="List of stop sequences.")] = []
-    stop_token_ids: Annotated[List[int], Parameter(help="List of stop token IDs.")] = []
-    logprobs: Annotated[int, Parameter(help="Number of log probabilities to return.")] = 0
-    skip_special_tokens: Annotated[bool, Parameter(help="Whether to skip special tokens.")] = True
-
-
 class DataFlowConfig(BaseModel):
     env: Annotated[
         str,
@@ -76,7 +58,6 @@ class DataFlowConfig(BaseModel):
         int, Parameter(help="Whether to enable async rollout. 1 for enabled, 0 for disabled")
     ] = 0
     enable_batch_reward: Annotated[bool, Parameter(help="Whether to batch rewards for the rollout.")] = False
-    sample_params: Annotated[SampleParams, Parameter(help="Parameters for sampling during rollout.")] = SampleParams()
     sample_ratio: Annotated[Dict[str, float], Parameter(help="Sample ratio for different envs.")] = {}
 
 
@@ -121,12 +102,7 @@ class DataFlow:
             else:
                 self.logger.debug("Retrying the failed sample")
             # step 2: env generate
-            group_samples = await self.env_controller.run.remote(  # type: ignore[attr-defined]
-                self.config.enable_batch_reward,
-                self.config.enable_partial_rollout,
-                self.config.sample_params,
-                group_samples,
-            )
+            group_samples = await self.env_controller.run.remote(group_samples)  # type: ignore[attr-defined]
             # step 3: filter
             filtered_group_samples = await self.replay_buffer.post_processor.remote(group_samples)  # type: ignore[attr-defined]
             # step 4: add to replay buffer

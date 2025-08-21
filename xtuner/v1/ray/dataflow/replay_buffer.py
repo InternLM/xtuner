@@ -94,17 +94,17 @@ class Sampler:
 
 class ReplayBufferStorage:
     def __init__(self):
-        self._states: Dict[str, List[ReplayMeta.observation_id]] = defaultdict(list)
-        self._rollout_states: Dict[str, List[ReplayMeta.group_id]] = defaultdict(list)  # designed for partial rollout
-        self._actions: Dict[ReplayMeta.action_id, ReplayMeta] = {}
-        self._observations: Dict[ReplayMeta.observation_id, ReplayMeta] = {}
-        self._prompt2actions: Dict[ReplayMeta.group_id, List[ReplayMeta.action_ids]] = defaultdict(
+        self._states: Dict[str, List[int]] = defaultdict(list)  # str: [observation_id, observation_id, ...]
+        self._rollout_states: Dict[str, List[int]] = defaultdict(
             list
-        )  # 1: prompt_repeat_k
-        self._action2observations: Dict[ReplayMeta.action_id, List[ReplayMeta.observation_id]] = defaultdict(
+        )  # str: [group_id, group_id, ...], designed for partial rollout
+        self._actions: Dict[int, ReplayMeta] = {}  # action_id: ReplayMeta
+        self._observations: Dict[int, ReplayMeta] = {}  # observation_id: ReplayMeta
+        self._prompt2actions: Dict[int, List[int]] = defaultdict(list)  # group_id: [action_id, action_id, ...]
+        self._action2observations: Dict[int, List[int]] = defaultdict(
             list
-        )  # 1:n
-        self._observations2states: Dict[ReplayMeta.observation_id, str] = {}  # 1:1
+        )  # action_id: [observation_id, observation_id, ...]
+        self._observations2states: Dict[int, str] = {}  # observation_id: state_str
         self.logger = get_logger()
 
     def replaymeta2dataitem(self, replay_meta, prompt_str=None, input_ids=None) -> RLTextDataItem:

@@ -1,9 +1,4 @@
 # Adapted from https://github.com/EleutherAI/lm-evaluation-harness/blob/main/lm_eval/tasks/hendrycks_math/utils.py
-import ray
-
-from xtuner.v1.ray.judger.worker import JudgerWorker
-
-
 def last_boxed_only_string(string):
     idx = string.rfind("\\boxed")
     if "\\boxed " in string:
@@ -200,13 +195,6 @@ def strip_string(string):
     return string
 
 
-def compute_score(response_str, ground_truth):
-    retval = 0
-    if is_equiv(ground_truth, remove_boxed(last_boxed_only_string(response_str))):
-        retval = 1
-    return retval
-
-
 # string normalization from https://github.com/EleutherAI/lm-evaluation-harness/blob/master/lm_eval/tasks/hendrycks_math.py
 def is_equiv(str1, str2, verbose=False):
     if str1 is None and str2 is None:
@@ -225,16 +213,8 @@ def is_equiv(str1, str2, verbose=False):
         return str1 == str2
 
 
-@ray.remote
-class Math500JudgerWorker(JudgerWorker):
-    def __init__(
-        self, config, rank: int, master_addr: str, master_port: int, world_size: int, accelerator: str = "CPU"
-    ):
-        super().__init__(config, rank, master_addr, master_port, world_size, accelerator)
-
-    # call judger by function
-    def judge_function(self, response, label):
-        predict_str = response
-        ground_truth = label
-        reward = compute_score(predict_str, ground_truth)
-        return reward
+def compute_score(response_str, ground_truth):
+    retval = 0
+    if is_equiv(ground_truth, remove_boxed(last_boxed_only_string(response_str))):
+        retval = 1
+    return retval

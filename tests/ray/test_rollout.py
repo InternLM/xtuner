@@ -6,12 +6,11 @@ import unittest
 from transformers import AutoTokenizer
 
 import ray
-from xtuner.v1.ray.rollout.controller import RolloutController
 from xtuner.v1.ray.config.worker import RolloutConfig
+from xtuner.v1.ray.judger.controller import JudgerConfig
 from xtuner.v1.ray.accelerator import AcceleratorResourcesConfig, AutoAcceleratorWorkers
 from xtuner.v1.ray.dataflow import DataFlow, DataFlowConfig
 from xtuner.v1.ray.environment import EnvController
-from xtuner.v1.utils.math500_utils import build_math500_judger_controller, build_math500_flow
 from xtuner.v1.datasets import RLTextTokenizeFnConfig, build_datasets, build_dataloader
 from xtuner.v1.config import (
     DataloaderConfig,
@@ -42,7 +41,12 @@ class TestRollout(unittest.TestCase):
             gpus_per_node=8, # gpu: 8, npu: 16
             dtype="bfloat16",
         )
-        self.judger_cfg = {"judger_type": "xtuner.v1.ray.judger.gsm8k.GSM8KJudgerWorker"}
+        from xtuner.v1.ray.judger.gsm8k import compute_reward
+        self.judger_cfg = JudgerConfig(
+            reward_functions={"math": compute_reward},
+            extra_info={"math": {"score": 1, "format_score": 0.5}},
+            reward_ratio={"math": 1.0}
+        )
         self.dataflow_cfg = DataFlowConfig(
             env="test",
             max_concurrent=32,
