@@ -7,7 +7,7 @@ import torch
 from mmengine.dist import get_rank
 from mmengine.fileio import list_dir_or_file
 from torch.distributed.device_mesh import DeviceMesh
-from torch.utils.data import ConcatDataset, DataLoader
+from torch.utils.data import ConcatDataset, DataLoader, RandomSampler, SequentialSampler
 
 from xtuner.v1.config import DatasetConfigList
 from xtuner.v1.utils import get_logger
@@ -65,6 +65,7 @@ def build_dataloader(
     micro_batch_size: int,
     seed: int,
     dp_mesh: DeviceMesh | None = None,
+    shuffle: bool = True,
 ) -> Iterable[list[ColateItem]]:
     assert isinstance(datasets, list), "datasets must be a list of datasets."
 
@@ -100,12 +101,19 @@ def build_dataloader(
         logger.info(f"[Dataset] (Original) {ori_samples} samples.")
         logger.info(f"[Dataset] (Packed) {packed_samples} samples.")
 
-    sampler: LengthGroupedSampler | ParallelSampler | None = None
+    sampler: LengthGroupedSampler | ParallelSampler | RandomSampler | SequentialSampler
     if dp_mesh is not None:
         if dataloader_config.group_by_length:
+            assert shuffle, "Currently only shuffling is supported for LengthGroupedSampler."
             sampler = LengthGroupedSampler(dataset, dp_mesh, global_batch_size, seed=seed)
         else:
-            sampler = ParallelSampler(dataset, dp_mesh, global_batch_size, shuffle=True)
+            sampler = ParallelSampler(dataset, dp_mesh, global_batch_size, shuffle=shuffle)
+    else:
+        if shuffle:
+            sampler = RandomSampler(dataset)
+        else:
+            # TODO: SequentialSampler 可能有点问题，训练莫名其妙卡住
+            sampler = SequentialSampler(dataset)
 
     ctx = torch.multiprocessing.get_context("fork")
     # Using `fork` here since `torchrun` uses the spawn method by default.

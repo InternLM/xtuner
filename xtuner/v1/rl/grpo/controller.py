@@ -1,4 +1,6 @@
-from typing import TypedDict
+import math
+import random
+from typing import Literal, TypedDict
 
 import ray
 import torch
@@ -117,7 +119,14 @@ class TrainingController:
         num_packed_data_batches = len(packed_data_batches)
         data_replicate_size = ray.get(self.workers[0].get_data_replicate_size.remote())  # type: ignore[attr-defined]
         dp_size = len(self.workers) // data_replicate_size
-        packed_data_batches = packed_data_batches[: (num_packed_data_batches // dp_size * dp_size)]
+        pad_num = math.ceil(num_packed_data_batches / dp_size) * dp_size - num_packed_data_batches
+        if pad_num > 0:
+            pad_data_samples = (
+                random.sample(packed_data_batches, pad_num)
+                if pad_num <= len(packed_data_batches)
+                else random.choices(packed_data_batches, k=pad_num)
+            )
+            packed_data_batches = packed_data_batches + pad_data_samples
 
         print(f"len(packed_data_batches): {len(packed_data_batches)}")
 
@@ -128,17 +137,25 @@ class TrainingController:
             )
         ray.get(handles)
 
-    def offload_model(self):
-        ray.get([worker.offload_model.remote() for worker in self.workers])
+    def offload(self, target: Literal["model", "optimizer", "all"] = "all"):
+        if target == "model":
+            ray.get([worker.offload_model.remote() for worker in self.workers])  # type: ignore
+        elif target == "optimizer":
+            ray.get([worker.offload_optimizer.remote() for worker in self.workers])  # type: ignore
+        elif target == "all":
+            ray.get([worker.offload_model.remote() for worker in self.workers])  # type: ignore
+            ray.get([worker.offload_optimizer.remote() for worker in self.workers])  # type: ignore
         return
 
-    def offload_optimizer(self):
-        """Offload the optimizer of the training workers."""
-        ray.get([worker.offload_optimizer.remote() for worker in self.workers])
-        return
-
-    def onload(self):
-        ray.get([worker.onload.remote() for worker in self.workers])
+    def onload(self, target: Literal["model", "optimizer", "all"] = "all"):
+        """Onload the model or optimizer of the training workers."""
+        if target == "model":
+            ray.get([worker.onload_model.remote() for worker in self.workers])  # type: ignore
+        elif target == "optimizer":
+            ray.get([worker.onload_optimizer.remote() for worker in self.workers])  # type: ignore
+        elif target == "all":
+            ray.get([worker.onload_model.remote() for worker in self.workers])  # type: ignore
+            ray.get([worker.onload_optimizer.remote() for worker in self.workers])  # type: ignore
         return
 
     def update_rollout_info(self, info_dict):
@@ -148,6 +165,10 @@ class TrainingController:
         """Update the weights of the training workers."""
         handles = [worker.update_weights.remote() for worker in self.workers]
         ray.get(handles)
+        return
+
+    def save_hf(self, hf_dir: str, save_dtype: torch.dtype = torch.bfloat16):
+        ray.get(self.workers[0].save_hf.remote(hf_dir, save_dtype))  # type: ignore
         return
 
 

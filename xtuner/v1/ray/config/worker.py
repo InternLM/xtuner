@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import List, Literal, Optional, Union
 
 from cyclopts import Group, Parameter
@@ -27,7 +28,7 @@ class RolloutConfig(BaseModel):
         str,
         Parameter(group=infer_group, help="Backend framework for the rollout worker, e.g., 'vllm', 'lmdeploy'."),
     ] = "lmdeploy"
-    model_path: Annotated[str, Parameter(group=infer_group, help="Path to the SGLang model.")] = ""
+    model_path: Annotated[str | Path, Parameter(group=infer_group, help="Path to the SGLang model.")] = ""
     model_name: Annotated[str, Parameter(group=infer_group, help="Name of the model to be used in the LMDeploy.")] = ""
     tokenizer_path: Annotated[str, Parameter(group=infer_group, help="Path to the tokenizer for the model.")] = ""
     api_key: Annotated[

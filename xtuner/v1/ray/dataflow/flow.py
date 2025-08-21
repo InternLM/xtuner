@@ -203,3 +203,6 @@ class DataFlow:
         self.logger.info(
             f"send_samples_count: {self.send_samples_count}, unfinished_samples_count:{self.unfinished_samples_count}, finished_samples: {self.finished_samples_count}, failed_samples: {self.failed_samples_count}"
         )
+    
+    def get_env_controller(self):
+        return self.env_controller
