@@ -61,7 +61,6 @@ class Dense(BaseModel):
         self,
         seq_ctx: SequenceContext,  # todo(@yehaochen): support intra layer micro-batch
         loss_ctx: CELossContext,
-        return_hidden_states: bool = False,
     ) -> ModelOutputs:
         input_ids = seq_ctx.input_ids
         position_ids = seq_ctx.position_ids
@@ -75,7 +74,7 @@ class Dense(BaseModel):
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
         output = {}  # type: ignore
-        if return_hidden_states:
+        if self.config.return_hidden_states:
             output["hidden_states"] = []
 
         for idx, decoder_layer in self.layers.items():
@@ -84,7 +83,7 @@ class Dense(BaseModel):
                 position_embeddings=position_embeddings,
                 seq_ctx=seq_ctx,
             )
-            if return_hidden_states:
+            if self.config.return_hidden_states:
                 output["hidden_states"].append(hidden_states)
 
         hidden_states = self.norm(hidden_states)
@@ -124,7 +123,6 @@ class Dense(BaseModel):
         self,
         seq_ctx: SequenceContext,
         loss_ctx: CELossContext,
-        return_hidden_states: bool = False,
     ) -> ModelOutputs: ...
 
     __call__ = nn.Module.__call__

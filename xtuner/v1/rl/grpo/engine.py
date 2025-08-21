@@ -87,7 +87,7 @@ class GRPOMoETrainEngine(MoETrainEngine):
         for data_batch in data_batches:
             seq_ctx = data_batch["seq_ctx"]
             loss_ctx = data_batch["loss_ctx"]
-            output = self.model(seq_ctx=seq_ctx, loss_ctx=loss_ctx, return_router_results=False)
+            output = self.model(seq_ctx=seq_ctx, loss_ctx=loss_ctx)
             step_loss = output["loss"]
             step_loss.backward()
             total_loss += step_loss.detach()

@@ -183,8 +183,6 @@ class MoE(BaseModel):
         self,
         seq_ctx: SequenceContext,  # todo(@yehaochen): support intra layer micro-batch
         loss_ctx: CELossContext | None,
-        return_router_results: bool = True,
-        return_hidden_states: bool = False,
     ) -> MoEModelOutputs:
         input_ids = seq_ctx.input_ids
         position_ids = seq_ctx.position_ids
@@ -198,11 +196,12 @@ class MoE(BaseModel):
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
         output = {}  # type: ignore
-        if return_hidden_states:
+        if self.config.return_hidden_states:
             output["hidden_states"] = []
 
-        if return_router_results:
+        if self.config.return_router_results:
             output["router_logits"] = {}
+
         for idx, decoder_layer in self.layers.items():
             if int(idx) < self.config.first_k_dense_replace:
                 hidden_states = decoder_layer(
@@ -216,10 +215,10 @@ class MoE(BaseModel):
                     position_embeddings=position_embeddings,
                     seq_ctx=seq_ctx,
                 )
-                if return_router_results:
+                if self.config.return_router_results:
                     output["router_logits"][f"layer{idx}"] = router_results
 
-            if return_hidden_states:
+            if self.config.return_hidden_states:
                 output["hidden_states"].append(hidden_states)
 
         hidden_states = self.norm(hidden_states)
@@ -228,7 +227,7 @@ class MoE(BaseModel):
         output["loss"] = loss
         output["logits"] = logits
 
-        if not return_router_results:
+        if not self.config.return_router_results:
             return MoEModelOutputs(**output)  # type: ignore[typeddict-item]
 
         router_logits_list = [val["logits"] for val in output["router_logits"].values()]  # type: ignore
@@ -303,8 +302,6 @@ class MoE(BaseModel):
         self,
         seq_ctx: SequenceContext,
         loss_ctx: CELossContext | None,
-        return_router_results: bool = False,
-        return_hidden_states: bool = False,
     ) -> MoEModelOutputs: ...
 
     __call__ = nn.Module.__call__

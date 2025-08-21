@@ -136,8 +136,6 @@ class InternS1ForConditionalGeneration(BaseModel):
             self,
             seq_ctx: SequenceContext,  # todo(@yehaochen): support intra layer micro-batch
             loss_ctx: CELossContext,
-            return_router_results: bool = True,
-            return_hidden_states: bool = False
     ) -> MoEModelOutputs:
         input_ids = seq_ctx.input_ids
         pixel_values = seq_ctx.pixel_values
@@ -218,7 +216,5 @@ class InternS1ForConditionalGeneration(BaseModel):
         outputs = self.language_model(
             seq_ctx,
             loss_ctx,
-            return_router_results=return_router_results,
-            return_hidden_states=return_hidden_states,
         )
         return outputs
