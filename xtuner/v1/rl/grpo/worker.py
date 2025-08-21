@@ -151,7 +151,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                 seq_ctx = data["seq_ctx"]
                 with torch.no_grad():
                     if isinstance(self.config.model_cfg, MoEConfig):
-                        ref_output = self._ref_model(seq_ctx=seq_ctx, loss_ctx=None, return_router_results=False)
+                        ref_output = self._ref_model(seq_ctx=seq_ctx, loss_ctx=None)
                     else:
                         ref_output = self._ref_model(seq_ctx=seq_ctx, loss_ctx=None)
                 ref_logprobs = gather_logprobs(ref_output["logits"], data["shifted_labels"])

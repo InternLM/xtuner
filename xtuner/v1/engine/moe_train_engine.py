@@ -149,7 +149,7 @@ class MoETrainEngine(DenseTrainEngine):
 
     @torch.no_grad()
     def forward_only(self, seq_ctx: SequenceContext):
-        output = self.model(seq_ctx=seq_ctx, loss_ctx=None, return_router_results=False)
+        output = self.model(seq_ctx=seq_ctx, loss_ctx=None)
         return output
 
     def train_step(self, data_batches: List[ModelItem], sp_mesh: DeviceMesh = None):  # type: ignore
@@ -194,7 +194,7 @@ class MoETrainEngine(DenseTrainEngine):
                 step_consumed_tokens += seq_ctx.mask.sum()
 
             # todo: support intra_layer_micro_batch
-            output = self.model(seq_ctx=seq_ctx_list[0], loss_ctx=loss_ctx_list[0], return_router_results=True)
+            output = self.model(seq_ctx=seq_ctx_list[0], loss_ctx=loss_ctx_list[0])
             # llm loss has been global averaged
             llm_loss = output["loss"]
             step_llm_loss += llm_loss.detach().clone()

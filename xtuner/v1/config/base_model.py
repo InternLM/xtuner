@@ -88,6 +88,7 @@ class TransformerConfig(BaseModel):
     model_type: Annotated[Literal["qwen"] | None, Parameter(group="model")] = None
     generate_config: GenerateConfig | None = None
     float8_cfg: Optional["Float8Config"] = None
+    return_hidden_states: Annotated[bool, Parameter(group="model")] = False
 
     @computed_field
     def num_attention_heads(self) -> int:
@@ -113,6 +114,7 @@ class MoEConfig(TransformerConfig):
     router: BaseRouterConfig
     balancing_loss_cfg: BalancingLossConfig | None = BalancingLossConfig()
     z_loss_cfg: Optional["ZLossConfig"] = None
+    return_router_results: bool = False
 
     def build(self) -> "MoE":
         from xtuner.v1.model.moe.moe import MoE
