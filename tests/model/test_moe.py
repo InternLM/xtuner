@@ -40,7 +40,6 @@ class TestMoE:
             attention=attention_config,
             tie_word_embeddings=False,
             training_dtype="bf16",
-            chunked_loss=False,
             n_routed_experts=32,
             n_shared_experts=1,
             num_experts_per_tok=2,

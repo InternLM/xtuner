@@ -84,7 +84,6 @@ class TransformerConfig(BaseModel):
     attention: BaseAttnConfig
     mlp_bias: Annotated[bool, Parameter(group="model")] = False
     tie_word_embeddings: Annotated[bool, Parameter(group="model")] = False
-    chunked_loss: Annotated[bool, Parameter(group="model")] = False
     model_type: Annotated[Literal["qwen"] | None, Parameter(group="model")] = None
     generate_config: GenerateConfig | None = None
     float8_cfg: Optional["Float8Config"] = None
