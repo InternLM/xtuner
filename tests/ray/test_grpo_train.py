@@ -8,11 +8,7 @@ import shutil
 import tempfile
 
 import ray
-from xtuner.v1.ray.rollout.controller import RolloutController
-from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.ray.accelerator import AcceleratorResourcesConfig, AutoAcceleratorWorkers
-from xtuner.v1.ray import find_master_addr_and_port
-from xtuner.v1.ray.judger import JudgerController, Math500JudgerWorker
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
 from xtuner.v1.config import (
