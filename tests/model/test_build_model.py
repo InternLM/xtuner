@@ -32,7 +32,6 @@ class TestBuildModel(TestCase):
             hidden_act="silu",
             attention=attention_config,
             tie_word_embeddings=False,
-            chunked_loss=False,
             n_routed_experts=128,
             n_shared_experts=0,
             num_experts_per_tok=8,

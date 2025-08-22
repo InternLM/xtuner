@@ -10,7 +10,7 @@ from typing import Sized, TypedDict, cast
 
 import torch
 import torch.distributed as dist
-from mmengine import load
+from mmengine import is_installed, load
 from mmengine.dist import get_rank, get_world_size
 from mmengine.runner import set_random_seed
 from pydantic import BaseModel
@@ -229,6 +229,15 @@ class Trainer:
         Returns:
             Trainer instance initialized with the provided config
         """
+        if config.chunked_loss:
+            if is_installed("liger_kernel"):
+                loss_class = "liger_cross_entropy"
+            else:
+                loss_class = "chunk_cross_entropy"
+        else:
+            loss_class = "cross_entropy"
+
+        loss_ctx = CELossContext(loss_class=loss_class)
         self = cls(
             load_from=config.load_from,
             model_cfg=config.model_cfg,
@@ -236,6 +245,7 @@ class Trainer:
             fsdp_cfg=config.fsdp_cfg,
             dataset_cfg=config.dataset_cfg,
             dataloader_cfg=config.dataloader_cfg,
+            loss_ctx=loss_ctx,
             lr_cfg=config.lr_cfg,
             tokenizer_path=config.tokenizer_path,
             global_batch_size=config.global_batch_size,

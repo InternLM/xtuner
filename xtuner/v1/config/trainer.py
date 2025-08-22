@@ -44,7 +44,7 @@ class TrainerConfig(BaseModel):
     seed: int = 42
     dist_backend: str = "cpu:gloo,cuda:nccl"
     debug: bool = False
-    # data
+    chunked_loss: Annotated[bool, Parameter(group="model")] = False
 
     @model_validator(mode="after")
     def _convert_work_dir(self):
