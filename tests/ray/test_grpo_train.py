@@ -116,6 +116,7 @@ class TestGRPOTrain(unittest.TestCase):
             sp_size=1,
             global_batch_size=8,
             work_dir=self.temp_dir,
+            pack_max_length=8192,
         )
         train_workers = AutoAcceleratorWorkers.from_placement_group(
             TrainingWorker, worker_cfg, self.pg
