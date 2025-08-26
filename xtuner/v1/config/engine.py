@@ -2,7 +2,6 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from pydantic import BaseModel
 
-from .base_model import MoEConfig
 from .fsdp import FSDPConfig
 from .optim import OptimConfig
 
@@ -27,13 +26,10 @@ class EngineConfig(BaseModel):
     model_cfg: ModelConfigProto
 
     def build(self):
-        from xtuner.v1.engine.dense_train_engine import DenseTrainEngine
         from xtuner.v1.engine.interns1_train_engine import InternS1TrainEngine
-        from xtuner.v1.engine.moe_train_engine import MoETrainEngine
+        from xtuner.v1.engine.train_engine import TrainEngine
 
-        if isinstance(self.model_cfg, MoEConfig):
-            return MoETrainEngine(model_cfg=self.model_cfg, optim_cfg=self.optim_cfg, fsdp_cfg=self.fsdp_cfg)
-        elif isinstance(self.model_cfg, InternS1Config):
+        if isinstance(self.model_cfg, InternS1Config):
             return InternS1TrainEngine(model_cfg=self.model_cfg, optim_cfg=self.optim_cfg, fsdp_cfg=self.fsdp_cfg)
         else:
-            return DenseTrainEngine(model_cfg=self.model_cfg, optim_cfg=self.optim_cfg, fsdp_cfg=self.fsdp_cfg)
+            return TrainEngine(model_cfg=self.model_cfg, optim_cfg=self.optim_cfg, fsdp_cfg=self.fsdp_cfg)

@@ -134,15 +134,15 @@ class InternS1ForConditionalGeneration(BaseModel):
 
     def forward(
             self,
-            seq_ctx: SequenceContext,  # todo(@yehaochen): support intra layer micro-batch
-            loss_ctx: CELossContext,
+            seq_ctx: SequenceContext,
+            loss_ctx: CELossContext
     ) -> MoEModelOutputs:
         input_ids = seq_ctx.input_ids
         pixel_values = seq_ctx.pixel_values
         image_flags = seq_ctx.image_flags
         sequence_parallel_mesh = seq_ctx.sequence_parallel_mesh
 
-        inputs_embeds = self.language_model.embed_tokens(input_ids)
+        inputs_embeds = self.language_model.embed_tokens(input_ids)  # type: ignore
 
         if pixel_values is not None and image_flags is not None:
             image_flags = cast(torch.LongTensor, image_flags.squeeze(-1))
@@ -215,6 +215,6 @@ class InternS1ForConditionalGeneration(BaseModel):
 
         outputs = self.language_model(
             seq_ctx,
-            loss_ctx,
+            loss_ctx
         )
         return outputs

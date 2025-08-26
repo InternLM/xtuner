@@ -2,7 +2,7 @@ from typing import TYPE_CHECKING, Optional
 
 from pydantic import BaseModel, ConfigDict
 
-from xtuner.v1.config.base_model import MoEConfig
+from xtuner.v1.config.base_model import MoEConfig, TransformerConfig
 from xtuner.v1.config.float8 import Float8Config
 
 
@@ -65,7 +65,7 @@ class InternS1Config(BaseModel):
     )
     vision_config: InternS1VisionConfig
     projector_config: InternS1ProjectorConfig
-    text_config: MoEConfig
+    text_config: MoEConfig | TransformerConfig
     vision_feature_layer: int = -1
     downsample_ratio: float = 0.5
     dynamic_image_size: bool = True

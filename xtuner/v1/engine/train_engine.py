@@ -11,6 +11,7 @@ from typing import Dict, List, Optional, Tuple, cast
 import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
+import torch.nn as nn
 from mmengine import mkdir_or_exist
 from safetensors import safe_open
 from torch.distributed._tensor import DTensor, Replicate, Shard
@@ -32,6 +33,8 @@ from xtuner.v1.config import FSDPConfig, OptimConfig, TransformerConfig
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.model.base import BaseModel, ModelItem
+from xtuner.v1.module.grouped_linear.moe_group_linear import GroupedLinear
+from xtuner.v1.module.router import NoAuxRouterConfig
 from xtuner.v1.utils import get_device, get_logger, get_torch_device_module
 
 
@@ -132,32 +135,50 @@ class HFCheckpointLoader:
         return weight
 
 
-class DenseTrainEngine:
+class TrainEngine:
     model: BaseModel
     optimizer: torch.optim.Optimizer
     scheduler: torch.optim.lr_scheduler.LRScheduler
-    float8_handler: Optional[Float8Handler] = None
+    float8_handler: Optional[Float8Handler]
 
-    def __init__(self, *, model_cfg: TransformerConfig, optim_cfg: OptimConfig, fsdp_cfg: FSDPConfig) -> None:
+    def __init__(
+        self, model_cfg: TransformerConfig, optim_cfg: OptimConfig, fsdp_cfg: FSDPConfig, intra_layer_micro_batch=1
+    ) -> None:
         self.model_cfg = model_cfg
         self.optim_cfg = optim_cfg
         self.fsdp_cfg = fsdp_cfg
         self.model = self.build_model()
-        if self.float8_handler:
-            self.float8_handler.build_reduce_mesh(self.model, cast(DeviceMesh, self.model.fsdp_mesh))
         self.optimizer = self.build_optimizer(optim_cfg)
+        self.intra_layer_micro_batch = intra_layer_micro_batch
 
     def build_model(self) -> BaseModel:
         with torch.device("meta"):
             model = self.model_cfg.build()
 
+        self.float8_handler = None
         if self.model_cfg.float8_cfg is not None and self.model_cfg.float8_cfg.enable_float8:
             self.float8_handler = Float8Handler(
                 scaling_granularity_gemm=self.model_cfg.float8_cfg.scaling_granularity_gemm,
                 scaling_granularity_grouped_gemm=self.model_cfg.float8_cfg.scaling_granularity_grouped_gemm,
             )
         model = model.fully_shard(self.fsdp_cfg, self.float8_handler)
+
+        if self.float8_handler:
+            self.float8_handler.build_reduce_mesh(model, cast(DeviceMesh, model.fsdp_mesh))
         return model
+
+    # todo: @yehaochen
+    def init_model(self):
+        for module in self.model.modules():
+            if isinstance(module, nn.Linear):
+                module.weight.data.normal_(mean=0.0, std=0.02)
+            elif isinstance(module, nn.Embedding):
+                module.weight.data.normal_(mean=0.0, std=0.02)
+            elif isinstance(module, nn.LayerNorm):
+                module.weight.data.fill_(1.0)
+            elif isinstance(module, GroupedLinear):
+                # Initialize the weight of GroupedLinear
+                module.weight.data.normal_(mean=0.0, std=0.02)
 
     def build_optimizer(self, optim_cfg: OptimConfig) -> torch.optim.Optimizer:
         params = [p for p in self.model.parameters() if p.requires_grad]
@@ -173,42 +194,98 @@ class DenseTrainEngine:
         output = self.model(seq_ctx=seq_ctx, loss_ctx=None)
         return output
 
-    def train_step(self, data_batches: list[ModelItem], sp_mesh: Optional[DeviceMesh] = None):
+    def grad_accumulation_steps(self, data_batches_len: int):
+        intra_layer_micro_batch = self.intra_layer_micro_batch
+        return data_batches_len // intra_layer_micro_batch
+
+    def train_step(self, data_batches: list[ModelItem]):
         """Perform a training step with the given data batches and mesh.
 
         Args:
             data_batches (List[Dict]): The input data batches for the training step.
-            sp_mesh (Optional[DeviceMesh]): The device mesh for sequence parallelism.
         """
         if self.float8_handler is not None and self.float8_handler.enabled:
             self.float8_handler.precompute_float8_dynamic_scale_for_fsdp(self.model)
 
         loss_log = {}
         other_log = {}
-        iters_per_step = len(data_batches)
+        intra_layer_micro_batch = self.intra_layer_micro_batch
+        assert len(data_batches) % intra_layer_micro_batch == 0, (
+            f"data_batches length {len(data_batches)} is not divisible by intra_layer_micro_batch {intra_layer_micro_batch}"
+        )
+        iters_per_step = self.grad_accumulation_steps(len(data_batches))
+
+        moe_need_update_bias = (
+            isinstance(getattr(self.model_cfg, "router", None), NoAuxRouterConfig)
+            and self.model_cfg.router.router_bias_update_speed > 0
+        )
+        if moe_need_update_bias:
+            tokens_per_expert_global_for_bias = torch.tensor(0, device=DEVICE)
+
         step_loss = torch.tensor(0.0, device=DEVICE)
         step_llm_loss = torch.tensor(0.0, device=DEVICE)
+        step_balancing_loss: torch.Tensor | None = None
+        step_z_loss: torch.Tensor | None = None
         step_consumed_tokens = torch.tensor(0.0, device=DEVICE)
 
-        for _iter in range(iters_per_step):
-            data = data_batches[_iter]
-            seq_ctx = data["seq_ctx"]
-            loss_ctx = data["loss_ctx"]
+        for i in range(0, len(data_batches), intra_layer_micro_batch):
+            data_batch = data_batches[i : i + intra_layer_micro_batch]
+            seq_ctx_list = []
+            loss_ctx_list = []
+            for data in data_batch:
+                seq_ctx = data["seq_ctx"]
+                loss_ctx = data["loss_ctx"]
+                seq_ctx_list.append(seq_ctx)
+                loss_ctx_list.append(loss_ctx)
+                step_consumed_tokens += seq_ctx.mask.sum()
 
-            output = self.model(seq_ctx=seq_ctx, loss_ctx=loss_ctx)
+            # todo: support intra_layer_micro_batch
+            output = self.model(seq_ctx=seq_ctx_list[0], loss_ctx=loss_ctx_list[0])
+            # llm loss has been global averaged
             llm_loss = output["loss"]
             step_llm_loss += llm_loss.detach().clone()
 
             loss = llm_loss
+            if "balancing_loss" in output:
+                loss = loss + output["balancing_loss"] / iters_per_step
+                step_balancing_loss = (
+                    output["balancing_loss"]
+                    if step_balancing_loss is None
+                    else step_balancing_loss + output["balancing_loss"]
+                )
+            if "z_loss" in output:
+                loss = loss + output["z_loss"] / iters_per_step
+                step_z_loss = output["z_loss"] if step_z_loss is None else step_z_loss + output["z_loss"]
+
+            if moe_need_update_bias:
+                assert "tokens_per_expert_global" in output, "tokens_per_expert_global is required for bias update."
+                tokens_per_expert_global_for_bias += output["tokens_per_expert_global"]
+
             del output
             loss.backward()
             step_loss += loss.detach().clone()
-            step_consumed_tokens += seq_ctx.mask.sum()
+
+        if moe_need_update_bias:
+            avg_count_load = tokens_per_expert_global_for_bias.float().mean(1)
+            max_load_i, _ = torch.max(tokens_per_expert_global_for_bias, dim=1)
+            maxvio_all_layers = (max_load_i - avg_count_load) / avg_count_load
+            maxvio = maxvio_all_layers.mean()
+            self.model.update_bias(tokens_per_expert_global_for_bias, avg_count_load)  # type: ignore
+            other_log["maxvio"] = maxvio.item()
 
         reduced_llm_loss = step_llm_loss
         dist.all_reduce(reduced_llm_loss.div_(dist.get_world_size()))
+
         loss_log["total_loss"] = step_loss.item()
         loss_log["reduced_llm_loss"] = reduced_llm_loss.item()
+        if step_balancing_loss is not None:
+            reduced_balancing_loss = step_balancing_loss
+            dist.all_reduce(reduced_balancing_loss.div_(dist.get_world_size()))
+            loss_log["reduced_balancing_loss"] = reduced_balancing_loss.item()
+        if step_z_loss is not None:
+            reduced_z_loss = step_z_loss
+            dist.all_reduce(reduced_z_loss.div_(dist.get_world_size()))
+            loss_log["reduced_z_loss"] = reduced_z_loss.item()
         other_log["consumed_tokens"] = step_consumed_tokens.item()
         return loss_log, other_log
 
