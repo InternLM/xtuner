@@ -4,6 +4,11 @@ import parametrize
 import torch
 from torch.testing._internal.common_distributed import DistributedTestBase
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
+import torch.distributed as dist
+import tempfile
+from pathlib import Path
+import json
+from safetensors import safe_open
 
 from xtuner.v1.model.interns1 import InternS1Config, InternS1VisionConfig, InternS1ProjectorConfig
 from xtuner.v1.model.moe.moe import SequenceContext
@@ -360,8 +365,79 @@ class TestInternS1(DistributedTestBase):
         loss = output["loss"]
         self.assertTrue(torch.allclose(loss, expected_loss.to(loss.dtype), atol=tol, rtol=tol))
 
-    def test_save_hf(self):
-        pass
+    @parametrize.parametrize(
+        "device,tp_size",
+        [
+            ("cuda", 1),
+        ],
+    )
+    def test_save_hf(self, device, tp_size):
+        self.create_pg(device)
+        with torch.device("meta"):
+            vision_cfg = InternS1VisionConfig()
+            projector_cfg = InternS1ProjectorConfig()
+            llm_cfg = Qwen3_8BConfig(vocab_size=153216)
+            model_cfg = InternS1Config(vision_config=vision_cfg, text_config=llm_cfg, projector_config=projector_cfg)
+            interns1_model = model_cfg.build().to(torch.bfloat16)
+
+        fsdp_config = FSDPConfig(
+            tp_size=tp_size,
+            cpu_offload=False,
+        )
+
+        cache_save_fh = {}
+        with tempfile.TemporaryDirectory() as tmpdir:
+            syncdir = [tmpdir]
+            dist.broadcast_object_list(syncdir, src=0)
+            tmpdir = Path(syncdir[0])
+            interns1_model.language_model.fully_shard(fsdp_config=fsdp_config)
+            interns1_model.vision_tower.fully_shard(fsdp_config=fsdp_config)
+            interns1_model.multi_modal_projector.fully_shard(fsdp_config=fsdp_config)
+            interns1_model.fully_shard(fsdp_config=fsdp_config)
+            interns1_model.from_hf(INTERNS1_DENSE_PATH)
+            interns1_model.save_hf(tmpdir)
+
+            origin_hf_path = Path(INTERNS1_DENSE_PATH)
+            origin_index_path = origin_hf_path / "model.safetensors.index.json"
+            saved_index_path = tmpdir / "model.safetensors.index.json"
+
+            # Test saved hf tensor value match the origin hf tensor value
+            if dist.get_rank() == 0:
+                with open(origin_index_path, "r") as f:
+                    origin_index = json.load(f)
+                with open(saved_index_path, "r") as f:
+                    saved_index = json.load(f)
+
+                for key in origin_index["weight_map"].keys():
+                    origin_safetensor_name = origin_index["weight_map"][key]
+                    saved_safetensor_name = saved_index["weight_map"][key]
+
+                    origin_sf_fh_name = str(origin_hf_path / origin_safetensor_name)
+                    expected_sf_fh_name = str(tmpdir / saved_safetensor_name)
+
+                    if origin_safetensor_name not in cache_save_fh:
+                        cache_save_fh[origin_safetensor_name] = safe_open(origin_sf_fh_name, framework="pt")
+                    if saved_safetensor_name not in cache_save_fh:
+                        cache_save_fh[saved_safetensor_name] = safe_open(expected_sf_fh_name, framework="pt")
+
+                    origin_fh = cache_save_fh[origin_safetensor_name]
+                    saved_fh = cache_save_fh[saved_safetensor_name]
+
+                    origin_tensor = origin_fh.get_tensor(key)
+                    saved_tensor = saved_fh.get_tensor(key)
+                    self.assertTrue(torch.equal(origin_tensor, saved_tensor))
+
+                # Test the tensor number in safetensors match the tensor number in model index
+                safetensor_keys = []
+                for safetensor_path in tmpdir.glob("*.safetensors"):
+                    fh = cache_save_fh[safetensor_path.name]
+                    safetensor_keys.extend(fh.keys())
+                    safetensor_keys.sort()
+                model_index_keys = list(saved_index["weight_map"].keys())
+                model_index_keys.sort()
+
+                self.assertListEqual(safetensor_keys, model_index_keys)
+        dist.barrier()
 
     @property
     def world_size(self) -> int:
