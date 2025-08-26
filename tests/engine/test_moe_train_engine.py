@@ -13,7 +13,7 @@ from xtuner.v1.model.moe.moe import SequenceContext
 from xtuner.v1.loss import CELossContext
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
 from xtuner.v1.config import FSDPConfig, LRConfig, AdamWConfig, BalancingLossConfig, ZLossConfig
-from xtuner.v1.engine.moe_train_engine import MoETrainEngine
+from xtuner.v1.engine.train_engine import TrainEngine
 from torch.optim.lr_scheduler import LambdaLR
 from xtuner.v1.utils import pad_to_max_length
 from xtuner.utils.device import get_device
@@ -48,7 +48,7 @@ class TestMoEEngine(DistributedTestBase):
             ep_size=ep_size,
             # hsdp_sharding_size=hsdp_sharding_size,
         )
-        engine = MoETrainEngine(
+        engine = TrainEngine(
             model_cfg=moe_cfg, optim_cfg=optim_cfg, fsdp_cfg=fsdp_cfg
         )
         engine.from_hf(hf_path=QWEN3_MOE_PATH)
@@ -127,7 +127,7 @@ class TestMoEEngine(DistributedTestBase):
             max_length=8192,
             hsdp_sharding_size=hsdp_sharding_size,
         )
-        engine = MoETrainEngine(
+        engine = TrainEngine(
             model_cfg=moe_cfg,
             optim_cfg=optim_cfg,
             fsdp_cfg=fsdp_cfg,
@@ -143,7 +143,7 @@ class TestMoEEngine(DistributedTestBase):
         dist.barrier()
         time.sleep(1)
 
-        engine2 = MoETrainEngine(
+        engine2 = TrainEngine(
             model_cfg=moe_cfg,
             optim_cfg=optim_cfg,
             fsdp_cfg=fsdp_cfg,

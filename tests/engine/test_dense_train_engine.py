@@ -12,7 +12,7 @@ from xtuner.v1.model.moe.moe import SequenceContext
 from xtuner.v1.loss import CELossContext
 from xtuner.v1.model.dense.qwen3 import Qwen3_8BConfig
 from xtuner.v1.config import FSDPConfig, LRConfig, AdamWConfig
-from xtuner.v1.engine.dense_train_engine import DenseTrainEngine
+from xtuner.v1.engine.train_engine import TrainEngine
 from torch.optim.lr_scheduler import LambdaLR
 from xtuner.v1.utils import pad_to_max_length
 from xtuner.utils.device import get_device
@@ -44,7 +44,7 @@ class TestDenseEngine(DistributedTestBase):
             tp_size=tp_size,
             # hsdp_sharding_size=hsdp_sharding_size,
         )
-        engine = DenseTrainEngine(
+        engine = TrainEngine(
             model_cfg=dense_cfg, optim_cfg=optim_cfg, fsdp_cfg=fsdp_cfg
         )
         engine.from_hf(hf_path=QWEN3_PATH)
@@ -118,7 +118,7 @@ class TestDenseEngine(DistributedTestBase):
             tp_size=tp_size,
             hsdp_sharding_size=hsdp_sharding_size,
         )
-        engine = DenseTrainEngine(
+        engine = TrainEngine(
             model_cfg=moe_cfg,
             optim_cfg=optim_cfg,
             fsdp_cfg=fsdp_cfg,
@@ -133,7 +133,7 @@ class TestDenseEngine(DistributedTestBase):
         dist.barrier()
         time.sleep(1)
 
-        engine2 = DenseTrainEngine(
+        engine2 = TrainEngine(
             model_cfg=moe_cfg,
             optim_cfg=optim_cfg,
             fsdp_cfg=fsdp_cfg,

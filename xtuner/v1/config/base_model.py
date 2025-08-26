@@ -113,7 +113,7 @@ class MoEConfig(TransformerConfig):
     router: BaseRouterConfig
     balancing_loss_cfg: BalancingLossConfig | None = BalancingLossConfig()
     z_loss_cfg: Optional["ZLossConfig"] = None
-    return_router_results: bool = False
+    return_router_results: bool = True
 
     def build(self) -> "MoE":
         from xtuner.v1.model.moe.moe import MoE

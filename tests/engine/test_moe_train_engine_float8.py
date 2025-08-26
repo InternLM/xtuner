@@ -1,24 +1,21 @@
 import os
 import tempfile
 import shutil
-from pydantic import ConfigDict
 import time
 
 import parametrize
 import torch
 import torch.distributed as dist
-from torch.distributed.device_mesh import init_device_mesh
 from torch.testing._internal.common_distributed import DistributedTestBase
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoTokenizer
 
-from xtuner.v1 import engine
-from xtuner.v1.model.moe.moe import MoEConfig, SequenceContext
-from xtuner.v1.config import AdamWConfig, Float8Config, FSDPConfig, LRConfig, MoEConfig, OptimConfig, BalancingLossConfig, ZLossConfig
-from xtuner.v1.engine.moe_train_engine import MoETrainEngine
+from xtuner.v1.model.moe.moe import SequenceContext
+from xtuner.v1.config import AdamWConfig, Float8Config, FSDPConfig, LRConfig,  BalancingLossConfig, ZLossConfig
+from xtuner.v1.engine.train_engine import TrainEngine
 from xtuner.v1.float8.float8_tensor import ScalingGranularity
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
 from xtuner.v1.utils import pad_to_max_length
-from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, LinearLR, SequentialLR
+from torch.optim.lr_scheduler import  LambdaLR
 from xtuner.v1.loss import CELossContext
 from xtuner.utils.device import get_device
 
@@ -54,7 +51,7 @@ class TestMoEEngineFloat8(DistributedTestBase):
             ep_size=ep_size,
             # hsdp_sharding_size=8,
         )
-        engine = MoETrainEngine(
+        engine = TrainEngine(
             model_cfg=moe_cfg,
             optim_cfg=optim_cfg,
             fsdp_cfg=fsdp_cfg,
@@ -130,7 +127,7 @@ class TestMoEEngineFloat8(DistributedTestBase):
             ep_size=ep_size,
             # hsdp_sharding_size=hsdp_sharding_size,
         )
-        engine = MoETrainEngine(
+        engine = TrainEngine(
             model_cfg=moe_cfg, optim_cfg=optim_cfg, fsdp_cfg=fsdp_cfg
         )
         engine.from_hf(hf_path=QWEN3_MOE_PATH)
@@ -210,7 +207,7 @@ class TestMoEEngineFloat8(DistributedTestBase):
             ep_size=ep_size,
             # hsdp_sharding_size=hsdp_sharding_size,
         )
-        engine = MoETrainEngine(
+        engine = TrainEngine(
             model_cfg=moe_cfg,
             optim_cfg=optim_cfg,
             fsdp_cfg=fsdp_cfg,
@@ -313,7 +310,7 @@ class TestMoEEngineFloat8Case2(DistributedTestBase):
             max_length=8192,
             hsdp_sharding_size=hsdp_sharding_size,
         )
-        engine_bf16 = MoETrainEngine(
+        engine_bf16 = TrainEngine(
             model_cfg=moe_cfg,
             optim_cfg=optim_cfg,
             fsdp_cfg=fsdp_cfg,
@@ -335,7 +332,7 @@ class TestMoEEngineFloat8Case2(DistributedTestBase):
                 scaling_granularity_grouped_gemm=ScalingGranularity.TILEWISE,
             ),
         )
-        engine_fp8 = MoETrainEngine(
+        engine_fp8 = TrainEngine(
             model_cfg=moe_cfg_fp8,
             optim_cfg=optim_cfg,
             fsdp_cfg=fsdp_cfg,

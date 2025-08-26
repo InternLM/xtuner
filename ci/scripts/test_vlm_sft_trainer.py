@@ -11,19 +11,17 @@ from xtuner.v1.config import (
     DataloaderConfig,
     DatasetConfig,
     FSDPConfig,
-    LRConfig,
-    BalancingLossConfig,
-    ZLossConfig
+    LRConfig
 )
 from xtuner.v1.datasets import InternS1TokenizeFnConfig
 from xtuner.v1.model.interns1 import InternS1Config, InternS1VisionConfig, InternS1ProjectorConfig
 from xtuner.v1.loss import CELossContext
-from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
+from xtuner.v1.model.dense.qwen3 import Qwen3_8BConfig
 from xtuner.v1.train.trainer import Trainer
 from xtuner.v1.utils.compile import maybe_compile
 import argparse
 
-INTERNS1_MODEL_PATH = os.environ["INTERNS1_MOE_PATH"]
+INTERNS1_DENSE_PATH = os.environ["INTERNS1_DENSE_PATH"]
 INTERNS1_DATA_META = os.environ["INTERNS1_DATA_META"]
 
 lr = [
@@ -216,34 +214,27 @@ def plot_comparison_curves(history_data, current_data, title, output_root: Path)
 
 def main():
     args = parse_args()
-    os.environ["DG_CACHE_DIR"] = f"/tmp/.deep_gemm-{os.getenv('RANK', '0')}"
-
     maybe_compile.clear_compile_targets()
 
     vision_cfg = InternS1VisionConfig()
     projector_cfg = InternS1ProjectorConfig()
 
-    llm_cfg = Qwen3MoE30BA3Config(vocab_size=152967, balancing_loss_cfg=BalancingLossConfig(), z_loss_cfg=ZLossConfig())
+    llm_cfg = Qwen3_8BConfig(vocab_size=153216)
     model_cfg_1 = InternS1Config(vision_config=vision_cfg, text_config=llm_cfg, projector_config=projector_cfg)
 
-    llm_cfg = Qwen3MoE30BA3Config(vocab_size=152967, balancing_loss_cfg=BalancingLossConfig(),
-                                  z_loss_cfg=ZLossConfig(), ep_size=8, dispatcher="all2all")
-    model_cfg_2 = InternS1Config(vision_config=vision_cfg, text_config=llm_cfg, projector_config=projector_cfg)
-
-    moe_cfgs = [
-        (model_cfg_1, "ep1"),
-        (model_cfg_2, "ep8"),
+    model_cfgs = [
+        (model_cfg_1, 1),
+        (model_cfg_1, 2),
     ]
 
     ds_collections = json.loads(open(INTERNS1_DATA_META).read())
 
-    for moe_cfg, name in moe_cfgs:
+    for model_cfg, sp_size in model_cfgs:
         optim_cfg = AdamWConfig(lr=6e-05, foreach=False)
         lr_cfg = LRConfig(lr_type="cosine", lr_min=1e-6)
         fsdp_cfg = FSDPConfig(
             torch_compile=False,
-            cpu_offload=True,
-            ep_size=moe_cfg.text_config.ep_size,
+            cpu_offload=False
             # hsdp_sharding_size=4,
         )
 
@@ -254,7 +245,7 @@ def main():
                                                   media_root=_data.get('media_root', ''),
                                                   sample_ratio=_data.get('sample_ratio', 1.0),
                                                   class_name='VLMJsonlDataset'),
-                         "tokenize_fn": InternS1TokenizeFnConfig(model_cfg=moe_cfg,
+                         "tokenize_fn": InternS1TokenizeFnConfig(model_cfg=model_cfg,
                                                                  max_dynamic_patch=_data.get('max_dynamic_patch', None),
                                                                  min_dynamic_patch=_data.get('min_dynamic_patch', None),
                                                                  min_num_frames=_data.get('min_num_frames', 4),
@@ -274,15 +265,16 @@ def main():
         work_dir = f"{args.work_dir}-{name}"
         loss_ctx = CELossContext()
         trainer = Trainer(
-            load_from=INTERNS1_MODEL_PATH,
-            model_cfg=moe_cfg,
+            load_from=INTERNS1_DENSE_PATH,
+            model_cfg=model_cfg,
             optim_cfg=optim_cfg,
             fsdp_cfg=fsdp_cfg,
             dataset_cfg=dataset_config,
             dataloader_cfg=dataloader_config,
             loss_ctx=loss_ctx,
             lr_cfg=lr_cfg,
-            tokenizer_path=INTERNS1_MODEL_PATH,
+            sp_size=sp_size,
+            tokenizer_path=INTERNS1_DENSE_PATH,
             global_batch_size=16,
             work_dir=work_dir,
             seed=0,

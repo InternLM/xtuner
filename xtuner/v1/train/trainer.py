@@ -22,7 +22,7 @@ from typing_extensions import NotRequired, Self
 from transformers import AutoTokenizer
 from xtuner.utils.device import get_device, get_torch_device
 from xtuner.v1.config import DataloaderConfig, DatasetConfigList, FSDPConfig, LRConfig, OptimConfig
-from xtuner.v1.config.base_model import MoEConfig, TransformerConfig
+from xtuner.v1.config.base_model import TransformerConfig
 from xtuner.v1.config.trainer import ResumeConfig, TrainerConfig
 from xtuner.v1.datasets.build import build_dataloader, build_datasets
 from xtuner.v1.loss import CELossContext
@@ -402,25 +402,20 @@ class Trainer:
         resume_config: ResumeConfig | None = None,
         strict: bool = True,
     ):
-        from xtuner.v1.engine import DenseTrainEngine, InternS1TrainEngine, MoETrainEngine
+        from xtuner.v1.engine import InternS1TrainEngine, TrainEngine
 
-        # TODO: yehaochen
-        if isinstance(model_config, MoEConfig):
-            engine = MoETrainEngine(
-                optim_cfg=optim_config,
-                fsdp_cfg=fsdp_config,
-                model_cfg=model_config,
-            )
-        # TODO: 太 hard code 了
-        elif isinstance(model_config, InternS1Config):
+        if isinstance(model_config, InternS1Config):
             engine = InternS1TrainEngine(
                 optim_cfg=optim_config,
                 fsdp_cfg=fsdp_config,
                 model_cfg=model_config,
             )
         else:
-            engine = DenseTrainEngine(optim_cfg=optim_config, fsdp_cfg=fsdp_config, model_cfg=model_config)  # type: ignore
-
+            engine = TrainEngine(  # type: ignore
+                optim_cfg=optim_config,
+                fsdp_cfg=fsdp_config,
+                model_cfg=model_config,
+            )
         if model_path is not None:
             engine.from_hf(hf_path=model_path, strict=strict)
         return engine

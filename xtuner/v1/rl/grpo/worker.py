@@ -26,7 +26,7 @@ from xtuner.v1.utils import ParallelConfigException, get_logger
 
 from ..loss_context import LossContextInputItem
 from .config import WorkerConfig
-from .engine import GRPODenseTrainEngine, GRPOMoETrainEngine
+from .engine import GRPOTrainEngine
 
 
 DeviceMeshRaw: TypeAlias = List[List[int]]  # A list of lists representing device mesh indices
@@ -397,23 +397,12 @@ def serialize_state_dict(state_dict: dict) -> str:
     },
 )
 class GRPOTrainingWorker(TrainingWorker):
-    def _build_engine(self, worker_cfg: WorkerConfig) -> GRPOMoETrainEngine | GRPODenseTrainEngine:
-        engine: GRPOMoETrainEngine | GRPODenseTrainEngine
-        if isinstance(worker_cfg.model_cfg, MoEConfig):
-            engine = GRPOMoETrainEngine(
-                optim_cfg=worker_cfg.optim_cfg,
-                fsdp_cfg=worker_cfg.fsdp_cfg,
-                model_cfg=worker_cfg.model_cfg,
-            )
-        elif isinstance(worker_cfg.model_cfg, TransformerConfig):
-            engine = GRPODenseTrainEngine(
-                optim_cfg=worker_cfg.optim_cfg,
-                fsdp_cfg=worker_cfg.fsdp_cfg,
-                model_cfg=worker_cfg.model_cfg,
-            )
-        else:
-            raise NotImplementedError
-
+    def _build_engine(self, worker_cfg: WorkerConfig) -> GRPOTrainEngine:
+        engine = GRPOTrainEngine(
+            optim_cfg=worker_cfg.optim_cfg,
+            fsdp_cfg=worker_cfg.fsdp_cfg,
+            model_cfg=worker_cfg.model_cfg,
+        )
         if worker_cfg.load_from is not None:
             engine.from_hf(worker_cfg.load_from)
         return engine
