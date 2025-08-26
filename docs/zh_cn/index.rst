@@ -3,7 +3,7 @@
    You can adapt this file completely to your liking, but it should at least
    contain the root `toctree` directive.
 
-欢迎来到 XTuner 的中文文档
+欢迎来到 XTuner V1 的中文文档
 ==================================
 
 .. figure:: ./_static/image/logo.png
@@ -25,73 +25,44 @@
    <a class="github-button" href="https://github.com/InternLM/xtuner/fork" data-icon="octicon-repo-forked" data-size="large" aria-label="Fork">Fork</a>
    </p>
 
-
-
-文档
--------------
 .. toctree::
+   :hidden:
    :maxdepth: 2
    :caption: 开始使用
 
-   get_started/installation.rst
-   get_started/quickstart.rst
+   get_started/index.rst
+
 
 .. toctree::
+   :hidden:
    :maxdepth: 2
-   :caption: 准备
+   :caption: 预训练与微调
 
-   preparation/pretrained_model.rst
-   preparation/prompt_template.rst
+   pretrain_sft/user/index.rst
 
 .. toctree::
+   :hidden:
    :maxdepth: 2
-   :caption: 训练
+   :caption: 强化学习
 
-   training/open_source_dataset.rst
-   training/custom_sft_dataset.rst
-   training/custom_pretrain_dataset.rst
-   training/multi_modal_dataset.rst
-   acceleration/train_large_scale_dataset.rst
-   training/modify_settings.rst
-   training/visualization.rst
+   rl/user/index.rst
 
 .. toctree::
-   :maxdepth: 2
-   :caption: DPO
-
-   dpo/overview.md
-   dpo/quick_start.md
-   dpo/modify_settings.md
-
-.. toctree::
-   :maxdepth: 2
-   :caption: Reward Model
-
-   reward_model/overview.md
-   reward_model/quick_start.md
-   reward_model/modify_settings.md
-   reward_model/preference_data.md
-
-.. toctree::
-   :maxdepth: 2
-   :caption: 加速训练
-
-   acceleration/deepspeed.rst
-   acceleration/flash_attn.rst
-   acceleration/varlen_flash_attn.rst
-   acceleration/pack_to_max_length.rst
-   acceleration/length_grouped_sampler.rst
-   acceleration/train_extreme_long_sequence.rst
-   acceleration/hyper_parameters.rst
-   acceleration/benchmark.rst
-
-
-.. toctree::
+   :hidden:
    :maxdepth: 1
-   :caption: InternEvo 迁移
+   :caption: 旧版文档
 
-   internevo_migration/differences.rst
-   internevo_migration/ftdp_dataset/tokenized_and_internlm2.rst
-   internevo_migration/ftdp_dataset/processed_and_internlm2.rst
-   internevo_migration/ftdp_dataset/processed_and_others.rst
-   internevo_migration/ftdp_dataset/processed_normal_chat.rst
+   legacy_index.rst
+
+
+
+写在前面
+==================================
+
+
+
+
+
+
+食用指南
+==================================
