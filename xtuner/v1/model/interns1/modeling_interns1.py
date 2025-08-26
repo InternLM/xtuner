@@ -75,6 +75,16 @@ class InternS1ForConditionalGeneration(BaseModel):
         self.language_model._init_load_spec()
 
         self.img_context_token_id = config.image_token_id
+        self._hf_path: Path | None = None
+
+        # Note: global load spec mapping for save_hf
+        self.load_spec_mapping = {}
+        for key, value in self.vision_tower.load_spec_mapping.items():
+            self.load_spec_mapping['vision_tower.' + key] = value
+        for key, value in self.multi_modal_projector.load_spec_mapping.items():
+            self.load_spec_mapping['multi_modal_projector.' + key] = value
+        for key, value in self.language_model.load_spec_mapping.items():
+            self.load_spec_mapping['language_model.' + key] = value
 
     @override
     def fully_shard(
@@ -91,10 +101,14 @@ class InternS1ForConditionalGeneration(BaseModel):
         mp_policy = MixedPrecisionPolicy(
             param_dtype=fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
         )
-        fsdp_mesh = init_world_mesh()
+
+        self.fsdp_mesh = init_world_mesh()
+        # Note: 非常关键，不能删除这个 assert
+        assert self.fsdp_mesh is not None
+
         fully_shard(
             self,
-            mesh=fsdp_mesh,
+            mesh=self.fsdp_mesh,
             mp_policy=mp_policy,
             reshard_after_forward=fsdp_config.reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if fsdp_config.cpu_offload else None,
@@ -102,6 +116,11 @@ class InternS1ForConditionalGeneration(BaseModel):
         return self
 
     def from_hf(self, hf_path: str | Path, strict=True):
+        self._hf_path = Path(hf_path)
+
+        if isinstance(hf_path, Path):
+            hf_path = str(hf_path)
+
         _, _, missing_llm_keys = self.language_model.from_hf(hf_path,  strict=False)
         _, _, missing_vision_keys = self.vision_tower.from_hf(hf_path,  strict=False)
         _, _, missing_project_keys = self.multi_modal_projector.from_hf(hf_path, strict=False)
