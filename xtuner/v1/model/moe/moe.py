@@ -184,13 +184,15 @@ class MoE(BaseModel):
         seq_ctx: list[SequenceContext] | SequenceContext,
         loss_ctx: list[CELossContext] | CELossContext | None,
     ):
+        # TODO: caoweihan: Recover this assertion after the refactor of LossContext
         if isinstance(seq_ctx, SequenceContext):
-            assert isinstance(loss_ctx, CELossContext) or loss_ctx is None, (
-                "If seq_ctx_list is a single SequenceContext, loss_ctx_list must be a single CELossContext or None"
-            )
+            # assert isinstance(loss_ctx, (CELossContext, LossContext)) or loss_ctx is None, (
+            #     f"If seq_ctx_list is a single SequenceContext, loss_ctx_list must be a single CELossContext or None, but got {type(loss_ctx)}"
+            # )
+            # NOTE: @caoweihan, this type ignore should be remove after the refactor of LossContext
             return self._forward(
                 seq_ctx=seq_ctx,
-                loss_ctx=loss_ctx,
+                loss_ctx=loss_ctx,  # type: ignore
             )
         else:
             assert isinstance(loss_ctx, list) and len(loss_ctx) == len(seq_ctx), (
