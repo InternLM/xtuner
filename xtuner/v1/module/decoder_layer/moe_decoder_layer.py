@@ -1,7 +1,8 @@
-from typing import Literal, cast
+from typing import Literal, TypeAlias
 
 import torch
 import torch.nn as nn
+from torch.autograd.function import Function
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, Partial
 from torch.nn import functional as F
@@ -11,13 +12,25 @@ from xtuner.v1.config.base_model import BaseAttnConfig, BaseRouterConfig, Genera
 from xtuner.v1.config.float8 import Float8Config
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.module import MultiHeadAttention, MultiLatentAttention, RMSNorm, RouterResults
-from xtuner.v1.module.dispatcher import PrefillingDispatchResult, build_dispatcher
+from xtuner.v1.module.dispatcher import (
+    CombineResult,
+    DispatchResult,
+    PostDispatchResult,
+    PreCombineResult,
+    PreDispatchResult,
+    build_dispatcher,
+)
+from xtuner.v1.module.dispatcher.base import PostCombineResult
 from xtuner.v1.module.grouped_linear.moe_group_linear import build_grouped_linear
 from xtuner.v1.module.router import GreedyRouter, NoAuxRouter
 from xtuner.v1.utils import ForwardState
 from xtuner.v1.utils.compile import maybe_compile
 
 from ..linear.linear import build_linear
+
+
+RouterLogits: TypeAlias = torch.Tensor
+HiddenStates: TypeAlias = torch.Tensor
 
 
 class MoEMLP(nn.Module):
@@ -163,6 +176,7 @@ class MoEDecoderLayer(nn.Module):
         )
         self.input_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps)
         self.shared_experts: MoEMLP | None
+        self.layer_idx = layer_idx
 
         if n_shared_experts > 0:
             self.shared_experts = MoEMLP(
@@ -204,10 +218,53 @@ class MoEDecoderLayer(nn.Module):
     @maybe_compile(fullgraph=True)
     def forward(
         self,
+        *hidden_states: torch.Tensor,
+        seq_ctx: SequenceContext | list[SequenceContext],
+        position_embeddings: tuple[torch.Tensor, torch.Tensor] | list[tuple[torch.Tensor, torch.Tensor]] | None = None,
+    ) -> tuple[HiddenStates, RouterResults] | tuple[torch.Tensor, ...]:
+        """Forward pass of the MoE decoder layer.
+
+        Args:
+            hidden_states (torch.Tensor): Input hidden states.
+            seq_ctx (SequenceContext): Sequence context.
+            position_embeddings (tuple[torch.Tensor, torch.Tensor]): Position embeddings.
+            past_key_values (list[list[torch.Tensor]], optional): Past key values for pre-filling or decoding.
+
+        Returns:
+            tuple[torch.Tensor, RouterResults]: Output hidden states and router results.
+        """
+        if len(hidden_states) == 1:
+            assert isinstance(seq_ctx, SequenceContext), (
+                f"seq_ctx should be a SequenceContext instance but got {seq_ctx}"
+            )
+            assert isinstance(position_embeddings, tuple) and len(position_embeddings) == 2, (
+                "position_embeddings should be a tuple of two tensors (position_ids, position_embeds)"
+            )
+            return self._forward(
+                hidden_states=hidden_states[0],
+                seq_ctx=seq_ctx,
+                position_embeddings=position_embeddings,
+            )
+        else:
+            assert isinstance(seq_ctx, list) and len(seq_ctx) == len(hidden_states), (
+                "seq_ctx should be a list of SequenceContext instances with the same length as hidden_states"
+            )
+            assert isinstance(position_embeddings, list) and len(position_embeddings) == len(hidden_states), (
+                "position_embeddings should be a list of tuples with the same length as hidden_states"
+            )
+
+            return self._micro_batch_forward(
+                hidden_states_list=list(hidden_states),
+                seq_ctx_list=seq_ctx,
+                position_embeddings_list=position_embeddings,
+            )
+
+    def _forward(
+        self,
         hidden_states: torch.Tensor,
         seq_ctx: SequenceContext,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
-    ) -> tuple[torch.Tensor, RouterResults]:
+    ) -> tuple[HiddenStates, RouterLogits]:
         residual, hidden_states, router_results = self._pre_moe_forward(
             hidden_states=hidden_states,
             seq_ctx=seq_ctx,
@@ -222,141 +279,161 @@ class MoEDecoderLayer(nn.Module):
         pre_dispatched = self.dispatcher.dispatch_preprocess(
             hidden_states=hidden_states,
             topk_ids=router_results["topk_ids"],
-            topk_weights=router_results["topk_weights"],
         )
         dispatched = self.dispatcher.dispatch(
             pre_dispatched=pre_dispatched,
+            topk_weights=router_results["topk_weights"],
             decoding=False,
         )  # type: ignore[call-overload]
-        experts_out: torch.Tensor = self.experts(
-            dispatched["hidden_states"],
-            dispatched["tokens_per_experts"],
+        post_dispatched = self.dispatcher.dispatch_postprocess(
+            pre_dispatched=pre_dispatched,
+            dispatched=dispatched,
+        )
+        experts_out = self.experts(
+            post_dispatched["hidden_states"],
+            post_dispatched["tokens_per_expert"],
+            decoding=False,
+        )
+        pre_combined = self.dispatcher.combine_preprocess(
+            hidden_states=experts_out,
+            pre_dispatched=pre_dispatched,
+            dispatched=dispatched,
+            post_dispatched=post_dispatched,
             decoding=False,
         )
 
-        dispatched = cast(PrefillingDispatchResult, dispatched)
         combined = self.dispatcher.combine(
-            hidden_states=experts_out,
             pre_dispatched=pre_dispatched,
-            dispatch_result=dispatched,
+            dispatched=dispatched,
+            post_dispatched=post_dispatched,
+            pre_combined=pre_combined,
             decoding=False,
         )
-        hidden_states = self.dispatcher.combine_post_process(
+        post_combined = self.dispatcher.combine_postprocess(
             pre_dispatched=pre_dispatched,
-            dispatch_result=dispatched,
-            combine_result=combined,
+            dispatched=dispatched,
+            post_dispatched=post_dispatched,
+            pre_combined=pre_combined,
+            combined=combined,
         )
+        hidden_states = post_combined["hidden_states"]
         hidden_states = hidden_states.view(*origin_shape)
 
         hidden_states = self._post_moe_forward(
             hidden_states=hidden_states,
             residual=residual,
         )
-        return hidden_states, router_results
+        return hidden_states, router_results["logits"]
 
-    @torch.no_grad  # type: ignore[call-arg]
-    def prefilling(
+    def _micro_batch_forward(
         self,
-        hidden_states: torch.Tensor,
-        seq_ctx: SequenceContext,
-        position_embeddings: tuple[torch.Tensor, torch.Tensor],
-        past_key_values: list[list[torch.Tensor]] | None = None,
-    ):
-        residual, hidden_states, router_results = self._pre_moe_forward(
-            hidden_states=hidden_states,
-            seq_ctx=seq_ctx,
-            position_embeddings=position_embeddings,
-            state=ForwardState.PREFILLING,
-            past_key_values=past_key_values,
+        hidden_states_list: list[torch.Tensor],
+        seq_ctx_list: list[SequenceContext],
+        position_embeddings_list: list[tuple[torch.Tensor, torch.Tensor]],
+    ) -> tuple[torch.Tensor, ...]:  # (HiddenStates, HiddenStates, RouterLogits, RouterLogits)
+        origin_shape = hidden_states_list[0].shape
+        assert all(hidden_states.shape == origin_shape for hidden_states in hidden_states_list), (
+            "All hidden states should have the same shape"
         )
-        origin_shape = hidden_states.shape
+        residual_list: list[torch.Tensor] = []
+        router_results_list: list[RouterResults] = []
 
-        # reshape hidden_states to (batch_size * seq_len, hidden_size)
-        hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
-        pre_dispatched = self.dispatcher.dispatch_preprocess(
-            hidden_states=hidden_states,
-            topk_ids=router_results["topk_ids"],
-            topk_weights=router_results["topk_weights"],
-        )
-        dispatched = self.dispatcher.dispatch(
-            pre_dispatched=pre_dispatched,
-            decoding=False,
-        )  # type: ignore[call-overload]
-        experts_out: torch.Tensor = self.experts(
-            dispatched["hidden_states"],
-            dispatched["tokens_per_experts"],
-            decoding=False,
-        )
-        combined = self.dispatcher.combine(
-            hidden_states=experts_out,
-            pre_dispatched=pre_dispatched,
-            dispatch_result=dispatched,
-            decoding=False,
-        )
-        hidden_states = self.dispatcher.combine_post_process(
-            pre_dispatched=pre_dispatched,
-            dispatch_result=dispatched,
-            combine_result=combined,
-        )
-        hidden_states = hidden_states.view(*origin_shape)
+        pre_dispatched_list: list[PreDispatchResult] = []
+        dispatched_list: list[DispatchResult] = []
 
-        hidden_states = self._post_moe_forward(
-            hidden_states=hidden_states,
-            residual=residual,
-        )
-        return hidden_states, router_results
+        # Attention + gate + pre-dispatch
+        for (
+            hidden_states,
+            seq_ctx,
+            position_embeddings,
+        ) in zip(
+            hidden_states_list,
+            seq_ctx_list,
+            position_embeddings_list,
+        ):
+            residual, hidden_states, router_results = self._pre_moe_forward(
+                hidden_states=hidden_states,
+                seq_ctx=seq_ctx,
+                position_embeddings=position_embeddings,
+                state=ForwardState.TRAINING,
+            )
+            hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
+            pre_dispatched = self.dispatcher.dispatch_preprocess(
+                hidden_states=hidden_states,
+                topk_ids=router_results["topk_ids"],
+                async_op=True,
+            )
+            pre_dispatched_list.append(pre_dispatched)
+            residual_list.append(residual)
+            router_results_list.append(router_results)
 
-    @torch.no_grad  # type: ignore[call-arg]
-    def decoding(
-        self,
-        hidden_states: torch.Tensor,
-        seq_ctx: SequenceContext,
-        position_embeddings: tuple[torch.Tensor, torch.Tensor],
-        past_key_values: list[list[torch.Tensor]] | None = None,
-    ):
-        residual, hidden_states, router_results = self._pre_moe_forward(
-            hidden_states=hidden_states,
-            seq_ctx=seq_ctx,
-            position_embeddings=position_embeddings,
-            state=ForwardState.DECODING,
-            past_key_values=past_key_values,
-        )
-        origin_shape = hidden_states.shape
+        post_dispatched_list: list[PostDispatchResult] = []
+        experts_out_list: list[torch.Tensor] = []
+        pre_combined_list: list[PreCombineResult] = []
+        combined_list: list[CombineResult] = []
 
-        # reshape hidden_states to (batch_size * seq_len, hidden_size)
-        hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
-        pre_dispatched = self.dispatcher.dispatch_preprocess(
-            hidden_states=hidden_states,
-            topk_ids=router_results["topk_ids"],
-            topk_weights=router_results["topk_weights"],
-        )
-        dispatched = self.dispatcher.dispatch(
-            pre_dispatched=pre_dispatched,
-            decoding=True,
-        )  # type: ignore[call-overload]
-        experts_out: torch.Tensor = self.experts(
-            dispatched["hidden_states"],
-            dispatched["tokens_per_experts"],
-            decoding=True,
-        )
-        combined = self.dispatcher.combine(
-            hidden_states=experts_out,
-            pre_dispatched=pre_dispatched,
-            dispatch_result=dispatched,
-            decoding=True,
-        )
-        hidden_states = self.dispatcher.combine_post_process(
-            pre_dispatched=pre_dispatched,
-            dispatch_result=dispatched,
-            combine_result=combined,
-        )
-        hidden_states = hidden_states.view(*origin_shape)
+        # dispatch + experts + pre-combine
+        for router_results, pre_dispatched in zip(
+            router_results_list,
+            pre_dispatched_list,
+        ):
+            dispatched = self.dispatcher.dispatch(
+                pre_dispatched=pre_dispatched,
+                topk_weights=router_results["topk_weights"],
+                async_op=True,
+            )
+            # wait for pre-dispatch event
+            post_dispatched = self.dispatcher.dispatch_postprocess(
+                pre_dispatched=pre_dispatched,
+                dispatched=dispatched,
+                async_op=True,
+            )
+            experts_out = self.experts(
+                post_dispatched["hidden_states"],
+                post_dispatched["tokens_per_expert"],
+                decoding=False,
+            )
 
-        hidden_states = self._post_moe_forward(
-            hidden_states=hidden_states,
-            residual=residual,
-        )
-        return hidden_states, router_results
+            pre_combined = self.dispatcher.combine_preprocess(
+                hidden_states=experts_out,
+                pre_dispatched=pre_dispatched,
+                dispatched=dispatched,
+                post_dispatched=post_dispatched,
+                async_op=True,
+            )
+
+            post_dispatched_list.append(post_dispatched)
+            experts_out_list.append(experts_out)
+            dispatched_list.append(dispatched)
+            pre_combined_list.append(pre_combined)
+
+        post_combined_list: list[PostCombineResult] = []
+
+        for pre_combined, pre_dispatched, dispatched, post_dispatched in zip(
+            pre_combined_list,
+            pre_dispatched_list,
+            dispatched_list,
+            post_dispatched_list,
+        ):
+            combined = self.dispatcher.combine(
+                pre_combined=pre_combined,
+                pre_dispatched=pre_dispatched,
+                dispatched=dispatched,
+                post_dispatched=post_dispatched,
+                async_op=True,
+            )
+            combined_list.append(combined)
+
+        hidden_states_out_list: list[torch.Tensor] = []
+        for combine_result, residual in zip(post_combined_list, residual_list):
+            hidden_states = self._post_moe_forward(
+                hidden_states=combine_result["hidden_states"],
+                residual=residual,
+            )
+            hidden_states_out_list.append(hidden_states)
+
+        router_logits = [router_results["logits"] for router_results in router_results_list]
+        return tuple(hidden_states_out_list + router_logits)
 
     @maybe_compile(fullgraph=True)
     def _pre_moe_forward(
@@ -371,6 +448,7 @@ class MoEDecoderLayer(nn.Module):
         # attention, post-layernorm and gate are implemented in one function
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
+        # hidden_states =
 
         # Self Attention
         if state == ForwardState.TRAINING:
@@ -427,3 +505,57 @@ class MoEDecoderLayer(nn.Module):
             max_length=max_length,
             block_size=block_size,
         )
+
+
+class _BackwardSync(Function):
+    @staticmethod
+    def forward(
+        ctx,
+        input_tensor: torch.Tensor,
+        previous_backward_event: torch.cuda.Event | None = None,
+        finished_backward_event: torch.cuda.Event | None = None,
+        name=None,
+    ) -> torch.Tensor:
+        ctx.previous_backward_event = previous_backward_event
+        ctx.finished_backward_event = finished_backward_event
+        ctx.name = name
+        return input_tensor
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):
+        current_stream = torch.cuda.current_stream()
+
+        # if ctx.name == "pre_dispatched":
+        #     torch.cuda.synchronize()
+        #
+        # if ctx.name == "dispatched":
+        #     torch.cuda.synchronize()
+        #
+        # if ctx.name == "pre_combined":
+        #     torch.cuda.synchronize()
+        #
+        if ctx.previous_backward_event is not None:
+            current_stream.wait_event(ctx.previous_backward_event)
+        if ctx.finished_backward_event is not None:
+            current_stream.record_event(ctx.finished_backward_event)
+
+        return grad_output, None, None, None
+
+
+backward_sync = _BackwardSync.apply
+
+
+# class _DebugBackward(Function):
+#     @staticmethod
+#     def forward(
+#         ctx,
+#         input_tensor: torch.Tensor,
+#         name: str
+#     ) -> torch.Tensor:
+#         ctx.name = name
+#         return input_tensor
+#
+#     @staticmethod
+#     def backward(ctx, grad_output: torch.Tensor):
+#         print(ctx.name)
+#         return grad_output, None

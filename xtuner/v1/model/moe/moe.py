@@ -1,5 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import types
+from itertools import accumulate
 from pathlib import Path
 from typing import cast
 
@@ -7,11 +8,9 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 from torch import nn
+from torch.autograd.function import Function
 from torch.distributed._functional_collectives import all_reduce
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl
-from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
-    checkpoint_wrapper as ptd_checkpoint_wrapper,
-)
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed.distributed_c10d import ReduceOp
 from torch.distributed.fsdp import (
@@ -29,6 +28,7 @@ from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.loss import BalancingLoss, CELossContext, ZLoss
 from xtuner.v1.model.base import BaseModel
+from xtuner.v1.model.utils import checkpoint_wrapper
 from xtuner.v1.module import LMHead, RMSNorm, RotaryEmbedding
 from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayer
 from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEBlock, MoEDecoderLayer
@@ -98,7 +98,7 @@ class MoE(BaseModel):
         self,
         router_logits_list: list[list[torch.Tensor]] | list[torch.Tensor],
         attn_mask_list: list[torch.Tensor] | torch.Tensor,
-    ):
+    ) -> torch.Tensor:
         assert len(router_logits_list) > 0, "router_logits_list should not be empty"
         if isinstance(router_logits_list[0], torch.Tensor):
             router_logits_list = [cast(list[torch.Tensor], router_logits_list)]  # intra_layer_micro_batch is 1
@@ -181,6 +181,182 @@ class MoE(BaseModel):
 
     def forward(
         self,
+        seq_ctx: list[SequenceContext] | SequenceContext,
+        loss_ctx: list[CELossContext] | CELossContext | None,
+    ):
+        if isinstance(seq_ctx, SequenceContext):
+            assert isinstance(loss_ctx, CELossContext) or loss_ctx is None, (
+                "If seq_ctx_list is a single SequenceContext, loss_ctx_list must be a single CELossContext or None"
+            )
+            return self._forward(
+                seq_ctx=seq_ctx,
+                loss_ctx=loss_ctx,
+            )
+        else:
+            assert isinstance(loss_ctx, list) and len(loss_ctx) == len(seq_ctx), (
+                "seq_ctx_list and loss_ctx_list must be lists of the same length"
+            )
+            if loss_ctx is None:
+                raise NotImplementedError("loss_ctx must be provided for intra-layer bsz > 1")
+            return self._micro_batch_forward(
+                seq_ctx_list=seq_ctx,
+                loss_ctx_list=loss_ctx,
+            )
+
+    def _micro_batch_forward(
+        self,
+        seq_ctx_list: list[SequenceContext],
+        loss_ctx_list: list[CELossContext],
+    ) -> MoEModelOutputs:
+        """Micro-batch forward pass for MoE model.
+
+        This method processes multiple micro-batches in parallel, similar to how MoEDecoderLayer handles micro-batching
+        at the layer level.
+        """
+        if self.config.return_hidden_states:
+            raise NotImplementedError
+
+        assert len(seq_ctx_list) == len(loss_ctx_list), "seq_ctx and loss_ctx must have same length"
+
+        # Prepare input embeddings for all micro-batches
+        hidden_states_list: list[torch.Tensor] = []
+        position_embeddings_list = []
+
+        for ctx in seq_ctx_list:
+            input_ids = ctx.input_ids
+            position_ids = ctx.position_ids
+
+            if input_ids is not None:
+                hidden_states = self.embed_tokens(input_ids)
+            else:
+                hidden_states = ctx.inputs_embeds
+
+            # create position embeddings to be shared across the decoder layers
+            position_embeddings = self.rotary_emb(hidden_states, position_ids)
+
+            hidden_states_list.append(hidden_states)
+            position_embeddings_list.append(position_embeddings)
+
+        # Initialize output containers
+        output: dict = {}
+
+        router_logits_list: list[dict[str, torch.Tensor]] = [{} for _ in range(len(seq_ctx_list))]
+
+        # Process through layers
+        cat_seq_ctx: SequenceContext | None = None
+        cat_position_embeddings: torch.Tensor | None = None
+        cat_hidden_states: torch.Tensor | None = None
+
+        for idx, decoder_layer in self.layers.items():
+            layer_idx = int(idx)
+
+            if layer_idx < self.config.first_k_dense_replace:
+                if cat_seq_ctx is None:
+                    cat_seq_ctx = self._cat_seq_ctx(seq_ctx_list)
+                    cat_position_embeddings = torch.cat(position_embeddings_list, dim=1)
+                    cat_hidden_states = torch.cat(hidden_states_list, dim=1)
+                # Dense decoder layer - process concated hidden states
+                cat_hidden_states = decoder_layer(
+                    cat_hidden_states,
+                    position_embeddings=cat_position_embeddings,
+                    seq_ctx=cat_seq_ctx,
+                )
+            else:
+                if cat_hidden_states is not None:
+                    hidden_states_list = cat_hidden_states.split(len(seq_ctx_list), dim=1)
+
+                layer_results = decoder_layer(
+                    *hidden_states_list,
+                    position_embeddings=position_embeddings_list,
+                    seq_ctx=seq_ctx_list,
+                )
+                hidden_states = layer_results[: len(hidden_states_list)]
+                router_logits = layer_results[len(hidden_states_list) :]
+
+                # Update hidden states and collect router results
+                for i, hidden_states in enumerate(hidden_states):
+                    hidden_states_list[i] = hidden_states
+                    router_logits_list[i][f"layer{idx}"] = router_logits[i]
+
+        # Apply final norm to all micro-batches
+        for i, hidden_states in enumerate(hidden_states_list):
+            hidden_states_list[i] = self.norm(hidden_states)
+
+        # Process final outputs for each micro-batch
+        loss_list: list[torch.Tensor] = []
+        logits_list: list[torch.Tensor] = []
+
+        for hidden_states, loss_ctx_single in zip(hidden_states_list, loss_ctx_list):
+            loss, logits = self.lm_head(hidden_states, loss_ctx_single)  # type: ignore
+            loss_list.append(loss)
+            if logits is not None:
+                logits_list.append(logits)
+
+        # Aggregate losses (mean across micro-batches)
+        output["loss"] = torch.stack(loss_list).sum() if loss_list else None
+
+        # Handle router results for all micro-batches
+        all_router_logits = []
+
+        for micro_batch_idx, micro_batch_router_logits in enumerate(router_logits_list):
+            if micro_batch_router_logits:
+                _router_logits_list = list(micro_batch_router_logits.values())
+                attn_mask = seq_ctx_list[micro_batch_idx].mask
+                router_logits = self._select_non_pad_router_logits(_router_logits_list, attn_mask)
+                all_router_logits.append(router_logits)
+
+        if all_router_logits:
+            # Concatenate router logits from all micro-batches
+            combined_router_logits = torch.cat(all_router_logits, dim=1)  # [num_layers, total_seq, num_experts]
+
+            # Calculate balancing loss across all micro-batches
+            if self.balancing_loss:
+                balancing_loss = self.balancing_loss(
+                    router_logits=combined_router_logits,
+                    n_routed_experts=self.config.n_routed_experts,
+                    num_experts_per_tok=self.config.num_experts_per_tok,
+                )
+                output["balancing_loss"] = balancing_loss
+
+            # Calculate z-loss across all micro-batches
+            if self.z_loss:
+                z_loss = self.z_loss(router_logits=combined_router_logits)
+                output["z_loss"] = z_loss
+
+            # Calculate tokens per expert for bias update (if applicable)
+            if isinstance(self.config.router, NoAuxRouterConfig) and self.config.router.router_bias_update_speed > 0:
+                tokens_per_expert_global = self._cal_tokens_per_expert(combined_router_logits)
+                output["tokens_per_expert_global"] = tokens_per_expert_global
+
+            del combined_router_logits
+
+        # Return logits for all micro-batches
+        if all(logits is not None for logits in logits_list):
+            final_logits = torch.cat(logits_list, dim=0) if logits_list else None
+        else:
+            final_logits = None
+
+        if self.config.return_router_results:
+            raise NotImplementedError
+
+            # TODO: Return router logits is costy
+
+            # router_logits_dict: dict[str, torch.Tensor] = {}
+            # layer_names = list(router_logits_list[0].keys())
+            #
+            # for layer_name in layer_names:
+            #     layer_router_logits_list: list[torch.Tensor] = []
+            #     for micro_batch_idx in range(len(seq_ctx_list)):
+            #         layer_router_logits_list.append(router_logits_list[micro_batch_idx][layer_name].clone().detach())
+            #     router_logits = torch.stack(layer_router_logits_list, dim=0).unsqueeze(0)
+            #     router_logits_dict["router_logits"] = router_logits
+            #
+            # output["router_logits"] = router_logits_dict
+
+        return MoEModelOutputs(**output, logits=final_logits)  # type: ignore[typeddict-item]
+
+    def _forward(
+        self,
         seq_ctx: SequenceContext,  # todo(@yehaochen): support intra layer micro-batch
         loss_ctx: CELossContext | None,
     ) -> MoEModelOutputs:
@@ -195,12 +371,11 @@ class MoE(BaseModel):
         # create position embeddings to be shared across the decoder layers
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
-        output = {}  # type: ignore
+        output: dict = {}  # type: ignore
         if self.config.return_hidden_states:
             output["hidden_states"] = []
 
-        if self.config.return_router_results:
-            output["router_logits"] = {}
+        output["router_logits"] = {}
 
         for idx, decoder_layer in self.layers.items():
             if int(idx) < self.config.first_k_dense_replace:
@@ -215,8 +390,7 @@ class MoE(BaseModel):
                     position_embeddings=position_embeddings,
                     seq_ctx=seq_ctx,
                 )
-                if self.config.return_router_results:
-                    output["router_logits"][f"layer{idx}"] = router_results
+                output["router_logits"][f"layer{idx}"] = router_results
 
             if self.config.return_hidden_states:
                 output["hidden_states"].append(hidden_states)
@@ -227,11 +401,9 @@ class MoE(BaseModel):
         output["loss"] = loss
         output["logits"] = logits
 
-        if not self.config.return_router_results:
-            return MoEModelOutputs(**output)  # type: ignore[typeddict-item]
-
-        router_logits_list = [val["logits"] for val in output["router_logits"].values()]  # type: ignore
+        router_logits_list = list(output["router_logits"].values())  # type: ignore
         router_logits = self._select_non_pad_router_logits(router_logits_list, seq_ctx.mask)
+
         if self.balancing_loss:
             balancing_loss = self.balancing_loss(
                 router_logits=router_logits,
@@ -239,6 +411,7 @@ class MoE(BaseModel):
                 num_experts_per_tok=self.config.num_experts_per_tok,
             )
             output["balancing_loss"] = balancing_loss
+
         if self.z_loss:
             z_loss = self.z_loss(router_logits=router_logits)
             output["z_loss"] = z_loss
@@ -248,6 +421,14 @@ class MoE(BaseModel):
             output["tokens_per_expert_global"] = tokens_per_expert_global
 
         del router_logits
+
+        if self.config.return_router_results:
+            raise NotImplementedError
+            # TODO: Move router logits to CPU is cost
+            # for layer_name, router_logits in output["router_logits"].items():
+            #     output["router_logits"][layer_name] = router_logits.detach().cpu().unsqueeze(0)
+        else:
+            output["router_logits"] = None
 
         return MoEModelOutputs(**output)  # type: ignore[typeddict-item]
 
@@ -295,16 +476,6 @@ class MoE(BaseModel):
 
     def build_rotary_embedding(self, config: MoEConfig) -> RotaryEmbedding:
         return RotaryEmbedding(config=config)
-
-    # NOTE: Add this overload for inferring the return type for easier type checking and using
-    @overload  # type: ignore
-    def __call__(  # type: ignore
-        self,
-        seq_ctx: SequenceContext,
-        loss_ctx: CELossContext | None,
-    ) -> MoEModelOutputs: ...
-
-    __call__ = nn.Module.__call__
 
     def _apply(self, fn, recurse: bool = True):
         super()._apply(fn)
@@ -372,7 +543,7 @@ class MoE(BaseModel):
         for layer_idx, layer in tqdm(self.layers.items(), desc="[FSDP Sharding]"):
             layer_idx = int(layer_idx)
             if layer_idx < num_recompute_layers - 1:
-                layer = ptd_checkpoint_wrapper(layer, checkpoint_impl=CheckpointImpl.REENTRANT)
+                layer = checkpoint_wrapper(layer, checkpoint_impl=CheckpointImpl.REENTRANT)
 
             self.layers[str(layer_idx)] = layer
             if layer_idx >= len(self.layers) - 1:
@@ -590,3 +761,56 @@ class MoE(BaseModel):
             self.scale_grad_by_freq,
             self.sparse,
         )
+
+    def _cat_seq_ctx(self, seq_ctx_list: list[SequenceContext]) -> SequenceContext:
+        """Concatenate multiple SequenceContext objects into one."""
+        if len(seq_ctx_list) == 1:
+            return seq_ctx_list[0]
+
+        input_ids = torch.cat([ctx.input_ids for ctx in seq_ctx_list], dim=0)
+        position_ids = torch.cat([cast(torch.Tensor, ctx.position_ids) for ctx in seq_ctx_list], dim=0)
+
+        cu_seq_len_offset = [0] + [seq_ctx.cu_seq_lens_q[-1] for seq_ctx in seq_ctx_list[:-1]]
+        cu_offsets = torch.tensor(list(accumulate(cu_seq_len_offset)))
+        shifted_offsets = [seq_ctx.cu_seq_lens_q + offset for offset, seq_ctx in zip(cu_offsets, seq_ctx_list)]
+        cat_seq_lens_q = torch.cat(
+            [ctx.cu_seq_lens_q + offset for ctx, offset in zip(seq_ctx_list, shifted_offsets)], dim=0
+        )
+
+        return SequenceContext(
+            input_ids=input_ids,  # type: ignore[arg-type]
+            position_ids=position_ids,  # type: ignore[arg-type]
+            cu_seq_lens_q=cat_seq_lens_q,  # type: ignore[arg-type]
+            cu_seq_lens_k=cat_seq_lens_q,  # type: ignore[arg-type]
+            max_length_q=(cat_seq_lens_q[1:] - cat_seq_lens_q[:-1]).max().item(),  # type: ignore[arg-type]
+            max_length_k=(cat_seq_lens_q[1:] - cat_seq_lens_q[:-1]).max().item(),  # type: ignore[arg-type]
+        )
+
+    # NOTE: Add this overload for inferring the return type for easier type checking and using
+    @overload  # type: ignore
+    def __call__(  # type: ignore
+        self,
+        seq_ctx: SequenceContext,
+        loss_ctx: CELossContext | None,
+    ) -> MoEModelOutputs: ...
+
+    @overload  # type: ignore
+    def __call__(  # type: ignore
+        self,
+        seq_ctx: list[SequenceContext],
+        loss_ctx: list[CELossContext],
+    ) -> MoEModelOutputs: ...
+
+    __call__ = nn.Module.__call__
+
+
+class _DebugBackward(Function):
+    @staticmethod
+    def forward(ctx, input_tensor: torch.Tensor, name: str) -> torch.Tensor:
+        ctx.name = name
+        return input_tensor
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):
+        print(ctx.name)
+        return grad_output, None

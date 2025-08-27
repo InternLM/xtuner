@@ -59,7 +59,7 @@ class FakeEngine:
 
 def prepare(fn):
     def wrapper(self, *args, **kwargs):
-        self.alpaca_path = os.environ["ALPACAL_PATH"]
+        self.alpaca_path = os.environ["ALPACA_PATH"]
         self.tokenizer_path = os.environ["QWEN3_MOE_PATH"]
         self.temp_dir = tempfile.TemporaryDirectory()
         self.fake_hf_model_dir = Path(self.temp_dir.name) / "fake_hf_model"
@@ -118,7 +118,7 @@ class TestTrainerSaveHF(DistributedTestBase):
             hf_interval=3,
             hf_max_keep=2,
             seed=42,
-            debug=True
+            debug=False
         )
 
         # Run training

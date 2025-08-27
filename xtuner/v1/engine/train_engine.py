@@ -239,8 +239,16 @@ class TrainEngine:
                 loss_ctx_list.append(loss_ctx)
                 step_consumed_tokens += seq_ctx.mask.sum()
 
-            # todo: support intra_layer_micro_batch
-            output = self.model(seq_ctx=seq_ctx_list[0], loss_ctx=loss_ctx_list[0])
+            if self.intra_layer_micro_batch == 1:
+                output = self.model(seq_ctx=seq_ctx_list[0], loss_ctx=loss_ctx_list[0])
+            else:
+                # For intra_layer_micro_batch > 1, we need to handle the data batches differently.
+                # Here we assume that the model can handle a list of seq_ctx and loss_ctx.
+                output = self.model(
+                    seq_ctx=seq_ctx_list,
+                    loss_ctx=loss_ctx_list,
+                )
+
             # llm loss has been global averaged
             llm_loss = output["loss"]
             step_llm_loss += llm_loss.detach().clone()

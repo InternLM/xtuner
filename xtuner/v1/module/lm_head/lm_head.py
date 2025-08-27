@@ -40,4 +40,4 @@ class LMHead(nn.Linear):
         else:
             return loss_ctx.forward(hidden_states, w, b)
 
-    __call__: Callable[[HiddenStates, CELossContext], tuple[Loss | None, Logits | None]]
+    __call__: Callable[[HiddenStates, CELossContext], tuple[Loss, Logits | None]]

@@ -39,7 +39,7 @@ def main():
     model_path = args.model_path
     dataset_path = args.dataset_path
 
-    moe_cfg = Qwen3MoE30BA3Config(balancing_loss_cfg=BalancingLossConfig())
+    moe_cfg = Qwen3MoE30BA3Config(balancing_loss_cfg=BalancingLossConfig(), vocab_size=153216)
     optim_cfg = AdamWConfig(lr=6e-05)
     lr_cfg = LRConfig(lr_type="cosine", lr_min=1e-6)
     fsdp_cfg = FSDPConfig(
@@ -60,7 +60,7 @@ def main():
         pack_level="soft",
         num_workers=0,
     )
-    loss_ctx = CELossContext(loss_class="chunk_cross_entropy")
+    loss_ctx = CELossContext(loss_class="liger_cross_entropy")
     trainer = Trainer(
         load_from=model_path,
         model_cfg=moe_cfg,

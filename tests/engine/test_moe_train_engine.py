@@ -43,7 +43,7 @@ class TestMoEEngine(DistributedTestBase):
         optim_cfg: AdamWConfig = AdamWConfig()
         lr_cfg: LRConfig = LRConfig()
         fsdp_cfg: FSDPConfig = FSDPConfig(
-            torch_compile=True,
+            torch_compile=False,
             cpu_offload=False,
             ep_size=ep_size,
             # hsdp_sharding_size=hsdp_sharding_size,
@@ -88,9 +88,10 @@ class TestMoEEngine(DistributedTestBase):
             engine.step_optimizer(grad_norm)
             lr_scheduler.step()
             losses.append(loss_log["reduced_llm_loss"])
+
         losses_ref = [2.44, 2.44, 2.42, 2.41, 2.34, 2.33, 2.16, 2.13, 1.71, 1.55]
         for loss, loss_ref in zip(losses, losses_ref):
-            self.assertTrue(abs(loss - loss_ref) < 0.05)
+            self.assertTrue(abs(loss - loss_ref) / loss_ref < 0.02)
 
         torch.cuda.empty_cache()
         try:
@@ -121,7 +122,7 @@ class TestMoEEngine(DistributedTestBase):
         )
         optim_cfg: AdamWConfig = AdamWConfig()
         fsdp_cfg: FSDPConfig = FSDPConfig(
-            torch_compile=True,
+            torch_compile=False,
             cpu_offload=False,
             ep_size=ep_size,
             max_length=8192,

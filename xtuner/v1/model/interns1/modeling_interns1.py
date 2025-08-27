@@ -24,9 +24,7 @@ from torch.distributed.fsdp import (
     MixedPrecisionPolicy,
     fully_shard,
 )
-from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
-    checkpoint_wrapper as ptd_checkpoint_wrapper,
-)
+from xtuner.v1.model.utils import checkpoint_wrapper
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl
 
 DEVICE = get_device()
@@ -95,7 +93,7 @@ class InternS1ForConditionalGeneration(BaseModel):
         # TODO: 判断其余模块是否已经被 fsdp 切分了
 
         # NOTE: 暂时只能在这个地方进行 checkpoint_wrapper
-        self.multi_modal_projector = ptd_checkpoint_wrapper(self.multi_modal_projector,  # type: ignore
+        self.multi_modal_projector = checkpoint_wrapper(self.multi_modal_projector,  # type: ignore
                                                             checkpoint_impl=CheckpointImpl.REENTRANT)
 
         mp_policy = MixedPrecisionPolicy(

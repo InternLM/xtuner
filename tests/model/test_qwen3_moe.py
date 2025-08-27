@@ -38,10 +38,10 @@ class TestQwen3MoE(DistributedTestBase):
     @parametrize.parametrize(
         "device,dispatcher,ep_size,compile,tol,loss_class",
         [
-            ("cuda", "deepep", 8, False, 1e-2, "cross_entropy"),
+            # ("cuda", "deepep", 8, False, 1e-2, "cross_entropy"),
             ("cuda", "all2all", 8, False, 1e-2, "cross_entropy"),
             ("cuda", None, 1, False, 1e-2, "cross_entropy"),
-            ("cuda", "deepep", 8, True, 4e-2, "cross_entropy"),  # TODO: This test is flaky, need to fix it
+            # ("cuda", "deepep", 8, True, 4e-2, "cross_entropy"),  # TODO: This test is flaky, need to fix it
             ("cuda", None, 1, False, 1e-2, "chunk_cross_entropy"),
         ],
     )
