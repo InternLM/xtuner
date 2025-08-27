@@ -47,6 +47,7 @@ extensions = [
     "sphinx.ext.autosummary",
     "myst_parser",
     "sphinxarg.ext",
+    "sphinx_togglebutton",
 ]
 
 # Add any paths that contain templates here, relative to this directory.
@@ -74,6 +75,9 @@ html_theme_options = {
     "path_to_docs": "docs/zh_cn",
     "repository_url": "https://github.com/InternLM/xtuner",
     "use_repository_button": True,
+    "pygments_light_style": "emacs",
+    "pygments_dark_style": "dracula",
+    "use_sidenotes": True,
 }
 # Add any paths that contain custom static files (such as style sheets) here,
 # relative to this directory. They are copied after the builtin static files,
