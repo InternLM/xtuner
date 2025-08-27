@@ -1,6 +1,5 @@
 from abc import ABC, abstractmethod
 from typing import (
-    Any,
     Generic,
     Literal,
     TypeAlias,
@@ -9,7 +8,7 @@ from typing import (
 )
 
 import torch
-from typing_extensions import NotRequired, overload, override
+from typing_extensions import override
 
 from xtuner.v1.config.base_model import MoEConfig
 from xtuner.v1.ops.moe_permute import permute, unpermute
@@ -19,78 +18,54 @@ HiddenStates: TypeAlias = torch.Tensor
 
 
 class PreDispatchResult(TypedDict):
-    """Result container for the pre-dispatch phase in MoE routing.
-
-    This class encapsulates the outputs produced during the initial token routing stage
-    before the actual dispatch of tokens to experts occurs. It includes routing weights,
-    expert assignments, and other metadata needed for the subsequent dispatch operation.
-
-    Some dispatcher needs to permute the hidden states before dispatching them to experts.
-    This class is used to hold the permuted hidden states and the corresponding routing information.
-
-    Attributes:
-        hidden_states: Hidden states (permuted) that will be routed to experts.
-        topk_ids: Indices (permuted) of the top-k experts selected for each token.
-        topk_weights: Routing weights (permuted) for each token-expert pair in the top-k selection.
-    """
-
     hidden_states: torch.Tensor
-    topk_weights: torch.Tensor
     topk_ids: torch.Tensor
 
 
-class DecodingDispatchResult(TypedDict):
-    """Dispatched result for decoding.
-
-    This class hold the dispatched result during the decoding phase. `hidden_states` and `tokens_per_experts`
-    are used for the experts forwarding. If fp8 precision is used, `fp8_scale` is also included.
-
-    Attributes:
-        hidden_states: The tensor of hidden states that have been routed after the dispatching process.
-        tokens_per_experts: The number of tokens assigned to each expert as a result of dispatching.
-        fp8_scale: Scaling factor used specifically when working with FP8 precision during decoding.
-        handle: A handle for combining results after dispatching.
-    """
-
+class DispatchResult(TypedDict):
     hidden_states: torch.Tensor
-    tokens_per_experts: torch.Tensor
-    fp8_scale: NotRequired[torch.Tensor]
-    handle: NotRequired[Any]
+    topk_weights: torch.Tensor
 
 
-class PrefillingDispatchResult(TypedDict):
+class PostDispatchResult(TypedDict):
     """Result of the dispatch operation during prefilling phase.
 
     This class holds the dispatched result during the prefilling phase. `hidden_states` and
-    `tokens_per_experts` are used for the experts forwarding. `topk_weights` contains the
+    `tokens_per_expert` are used for the experts forwarding. `topk_weights` contains the
     routing weights. Some dispatcher could apply weighted sum during combining to reduce the communication,
     `handle` is used to facilitate the combination of expert outputs after processing.
 
     Attributes:
         hidden_states: The hidden states after expert token routing and dispatching.
-        tokens_per_experts: Count of tokens assigned to each expert in the current batch.
+        tokens_per_expert: Count of tokens assigned to each expert in the current batch.
         topk_weights: Expert routing weights used for scaling hidden states when combining results.
         handle: An object that facilitates the combination of expert outputs after processing.
     """
 
+    # TODO:
     hidden_states: torch.Tensor
-    tokens_per_experts: torch.Tensor
-    topk_weights: torch.Tensor
-    handle: Any
+    tokens_per_expert: torch.Tensor
 
 
-class PrefillingCombineResult(TypedDict):
+class PreCombineResult(TypedDict):
     hidden_states: torch.Tensor
 
 
-DecodingCombineResult = PrefillingCombineResult
+class CombineResult(TypedDict):
+    hidden_states: torch.Tensor
+
+
+class PostCombineResult(TypedDict):
+    hidden_states: torch.Tensor
 
 
 PreDispatch = TypeVar("PreDispatch")
-PrefillingDispatch = TypeVar("PrefillingDispatch")
-DecodingDispatch = TypeVar("DecodingDispatch")
-PrefillingCombine = TypeVar("PrefillingCombine")
-DecodingCombine = TypeVar("DecodingCombine")
+Dispatch = TypeVar("Dispatch")
+PostDispatch = TypeVar("PostDispatch")
+PreCombine = TypeVar("PreCombine")
+Combine = TypeVar("Combine")
+PostCombine = TypeVar("PostCombine")
+# TODO: add DecodingPostDispatch if needed.
 
 
 # Not using Protocol here since `__init__` is shared for all dispatchers.
@@ -98,10 +73,11 @@ class GenericDispatcher(
     ABC,
     Generic[
         PreDispatch,
-        PrefillingDispatch,
-        DecodingDispatch,
-        PrefillingCombine,
-        DecodingCombine,
+        Dispatch,
+        PostDispatch,
+        PreCombine,
+        Combine,
+        PostCombine,
     ],
 ):
     _n_routed_experts: int
@@ -121,29 +97,24 @@ class GenericDispatcher(
         self._training_dtype = training_dtype
         self._generate_dtype = generate_dtype
 
-    @overload
-    def dispatch(
-        self,
-        *,
-        pre_dispatched: PreDispatch,
-        decoding: Literal[True],
-    ) -> DecodingDispatch: ...
-
-    @overload
-    def dispatch(
-        self,
-        *,
-        pre_dispatched: PreDispatch,
-        decoding: Literal[False],
-    ) -> PrefillingDispatch: ...
-
     @abstractmethod
     def dispatch(
         self,
         *,
         pre_dispatched: PreDispatch,
+        topk_weights: torch.Tensor,
+        async_op: bool = False,
         decoding: bool = False,
-    ) -> PrefillingDispatch | DecodingDispatch: ...
+    ) -> Dispatch: ...
+
+    @abstractmethod
+    def dispatch_postprocess(
+        self,
+        *,
+        pre_dispatched: PreDispatch,
+        dispatched: Dispatch,
+        async_op: bool = False,
+    ) -> PostDispatch: ...
 
     @abstractmethod
     def dispatch_preprocess(
@@ -151,123 +122,85 @@ class GenericDispatcher(
         *,
         hidden_states: torch.Tensor,
         topk_ids: torch.Tensor,
-        topk_weights: torch.Tensor,
+        async_op: bool = False,
     ) -> PreDispatch: ...
 
-    @overload
-    def combine(
-        self,
-        *,
-        hidden_states: torch.Tensor,
-        pre_dispatched: PreDispatch,
-        dispatch_result: PrefillingDispatch,
-        decoding: Literal[False],
-    ) -> PrefillingCombine: ...
-
-    @overload
-    def combine(
-        self,
-        *,
-        hidden_states: torch.Tensor,
-        pre_dispatched: PreDispatch,
-        dispatch_result: DecodingDispatch,
-        decoding: Literal[True],
-    ) -> DecodingCombine: ...
-
     @abstractmethod
-    def combine(
+    def combine_preprocess(
         self,
         *,
         hidden_states: torch.Tensor,
         pre_dispatched: PreDispatch,
-        dispatch_result: PrefillingDispatch | DecodingDispatch,
+        dispatched: Dispatch,
+        post_dispatched: PostDispatch,
+        async_op: bool = False,
         decoding: bool = False,
-    ) -> DecodingCombine | PrefillingCombine: ...
+    ) -> PreCombine: ...
 
     @abstractmethod
-    def combine_post_process(
+    def combine(
         self,
         *,
         pre_dispatched: PreDispatch,
-        dispatch_result: PrefillingDispatch | DecodingDispatch,
-        combine_result: PrefillingCombine | DecodingCombine,
-    ) -> HiddenStates: ...
+        dispatched: Dispatch,
+        post_dispatched: PostDispatch,
+        pre_combined: PreCombine,
+        async_op: bool = False,
+        decoding: bool = False,
+    ) -> CombineResult: ...
 
-    # Async interface for inference.
-    # @abstractmethod
-    # def async_dispatch(self) -> Callable[[], PrefillingDispatch]: ...
-    #
-    # @abstractmethod
-    # def async_dispatch_decoding(self) -> Callable[[], PrefillingDispatch]: ...
-    #
-    # @abstractmethod
-    # def async_combine(self) -> Callable[[], PrefillingCombine]: ...
-    #
-    # @abstractmethod
-    # def async_combine_decoding(self) -> Callable[[], PrefillingCombine]: ...
-
-    ################################### Async interface for training ###################################
-    # @abstractmethod
-    # def async_dispatch_forward(self) -> Callable[[], PrefillingDispatchResult]: ...
-    #
-    # @abstractmethod
-    # def async_dispatch_backward(self): ...
-    #
-    # @abstractmethod
-    # def wait_dispatch_backward(self): ...
-    #
-    # @abstractmethod
-    # def async_combine_forward(self) -> Callable[[], PrefillingCombineResult]: ...
-    #
-    # @abstractmethod
-    # def async_combine_backward(self): ...
-    #
-    # @abstractmethod
-    # def wait_combine_backward(self) -> None: ...
-    #
-    # @abstractmethod
-    # def combine_postprocess(self) -> HiddenStates: ...
-    #
-    # @abstractmethod
-    # def async_combine_postprocess(self) -> Callable[[], HiddenStates]: ...
-    #
-    # @abstractmethod
-    # def async_dispatch_preprocess(
-    #     self,
-    #     *,
-    #     hidden_states: torch.Tensor,
-    #     topk_ids: torch.Tensor,
-    # ) -> Callable[[], bool]: ...
-    #
-    #
+    @abstractmethod
+    def combine_postprocess(
+        self,
+        *,
+        pre_dispatched: PreDispatch,
+        dispatched: Dispatch,
+        post_dispatched: PostDispatch,
+        pre_combined: PreCombine,
+        combined: Combine,
+        async_op: bool = False,
+    ) -> PostCombine: ...
 
 
 class DispacherInterface(
     GenericDispatcher[
         PreDispatchResult,
-        PrefillingDispatchResult,
-        DecodingDispatchResult,
-        PrefillingCombineResult,
-        DecodingCombineResult,
+        DispatchResult,
+        PostDispatchResult,
+        PreCombineResult,
+        CombineResult,
+        PostCombineResult,
     ],
 ): ...
 
 
-class NonEPPrefillingDispatchResult(PrefillingDispatchResult):
+class NaivePreDispatchResult(PreDispatchResult): ...
+
+
+class NaiveDispatchResult(DispatchResult): ...
+
+
+class NaivePostDispatchResult(PostDispatchResult):
     row_ids_map: torch.Tensor
 
 
-class NonEPDecodingDispatchResult(DecodingDispatchResult):
-    row_ids_map: torch.Tensor
+class NaivePreCombineResult(PreCombineResult): ...
+
+
+class NaiveCombineResult(CombineResult): ...
+
+
+class NaivePostCombineResult(PostCombineResult): ...
 
 
 class NaiveDispatcher(
     GenericDispatcher[
-        PreDispatchResult,
-        NonEPPrefillingDispatchResult,
-        NonEPDecodingDispatchResult,
-        PrefillingCombineResult,
-        DecodingCombineResult,
+        NaivePreDispatchResult,
+        NaiveDispatchResult,
+        NaivePostDispatchResult,
+        NaivePreCombineResult,
+        NaiveCombineResult,
+        NaivePostCombineResult,
     ]
 ):
     def __init__(
@@ -293,103 +226,115 @@ class NaiveDispatcher(
         *,
         hidden_states: torch.Tensor,
         topk_ids: torch.Tensor,
-        topk_weights: torch.Tensor,
+        async_op: bool = False,
     ) -> PreDispatchResult:
-        return PreDispatchResult(hidden_states=hidden_states, topk_weights=topk_weights, topk_ids=topk_ids)
+        if async_op:
+            raise NotImplementedError("Naive dispatcher is only for ep=1.")
 
-    @overload
-    def dispatch(
-        self,
-        *,
-        pre_dispatched: PreDispatchResult,
-        decoding: Literal[True],
-    ) -> NonEPDecodingDispatchResult: ...
-
-    @overload
-    def dispatch(
-        self,
-        *,
-        pre_dispatched: PreDispatchResult,
-        decoding: Literal[False],
-    ) -> NonEPPrefillingDispatchResult: ...
+        return NaivePreDispatchResult(
+            hidden_states=hidden_states,
+            topk_ids=topk_ids,
+        )
 
     @override
     def dispatch(
         self,
         *,
         pre_dispatched: PreDispatchResult,
+        topk_weights: torch.Tensor,
+        async_op: bool = False,
         decoding: bool = False,
-    ) -> NonEPPrefillingDispatchResult | NonEPDecodingDispatchResult:
-        topk_ids = pre_dispatched["topk_ids"]
-        tokens_per_expert = torch.histc(topk_ids, bins=self._n_routed_experts, min=0, max=self._n_routed_experts)
+    ) -> NaiveDispatchResult:
+        if async_op:
+            raise NotImplementedError("Naive dispatcher is only for ep=1.")
+
+        return NaiveDispatchResult(
+            hidden_states=pre_dispatched["hidden_states"],
+            topk_weights=topk_weights,
+        )
+
+    @override
+    def dispatch_postprocess(
+        self,
+        *,
+        pre_dispatched: NaivePreDispatchResult,
+        dispatched: NaiveDispatchResult,
+        async_op: bool = False,
+        decoding: bool = False,
+    ) -> NaivePostDispatchResult:
+        if async_op:
+            raise NotImplementedError("Naive dispatcher is only for ep=1.")
+
         hidden_states, row_id_maps = permute(
-            pre_dispatched["hidden_states"],
+            dispatched["hidden_states"],
             pre_dispatched["topk_ids"].to(torch.int32),
         )
+        topk_ids = pre_dispatched["topk_ids"]
+        tokens_per_expert = torch.histc(topk_ids, bins=self._n_routed_experts, min=0, max=self._n_routed_experts)
         if decoding:
-            return NonEPDecodingDispatchResult(
-                hidden_states=hidden_states,
-                tokens_per_experts=tokens_per_expert,
-                row_ids_map=row_id_maps,
-            )
+            raise NotImplementedError
         else:
-            return NonEPPrefillingDispatchResult(
+            return NaivePostDispatchResult(
                 hidden_states=hidden_states,
-                tokens_per_experts=tokens_per_expert,
                 row_ids_map=row_id_maps,
-                topk_weights=pre_dispatched["topk_weights"],
-                handle=None,  # NaiveDispatcher do not need async communication.
+                tokens_per_expert=tokens_per_expert,
             )
-
-    @overload
-    def combine(
-        self,
-        *,
-        hidden_states: torch.Tensor,
-        pre_dispatched: PreDispatchResult,
-        dispatch_result: NonEPPrefillingDispatchResult,
-        decoding: Literal[False],
-    ) -> PrefillingCombineResult: ...
-
-    @overload
-    def combine(
-        self,
-        *,
-        hidden_states: torch.Tensor,
-        pre_dispatched: PreDispatchResult,
-        dispatch_result: NonEPDecodingDispatchResult,
-        decoding: Literal[True],
-    ) -> DecodingCombineResult: ...
 
     @override
-    def combine(
+    def combine_preprocess(
         self,
         *,
         hidden_states: torch.Tensor,
-        pre_dispatched: PreDispatchResult,
-        dispatch_result: NonEPPrefillingDispatchResult | NonEPDecodingDispatchResult,
+        pre_dispatched: NaivePreDispatchResult,
+        dispatched: NaiveDispatchResult,
+        post_dispatched: NaivePostDispatchResult,
+        async_op: bool = False,
         decoding: bool = False,
-    ) -> PrefillingCombineResult | DecodingCombineResult:
+    ) -> PreCombineResult:
+        if async_op:
+            raise NotImplementedError("Naive dispatcher is only for ep=1.")
+
         hidden_states = unpermute(
             input_act=hidden_states,
-            row_id_map=dispatch_result["row_ids_map"],
-            probs=pre_dispatched["topk_weights"],
+            row_id_map=post_dispatched["row_ids_map"],
+            probs=dispatched["topk_weights"],
         )
         if decoding:
-            return DecodingCombineResult(
-                hidden_states=hidden_states,
-            )
+            raise NotImplementedError("NaiveDispatcher does not support decoding.")
         else:
-            return PrefillingCombineResult(
-                hidden_states=hidden_states,
-            )
+            return PreCombineResult(hidden_states=hidden_states)
 
     @override
-    def combine_post_process(
+    def combine(
         self,
         *,
-        pre_dispatched: PreDispatchResult,
-        dispatch_result: NonEPPrefillingDispatchResult | NonEPDecodingDispatchResult,
-        combine_result: PrefillingCombineResult | DecodingCombineResult,
-    ) -> HiddenStates:
-        return combine_result["hidden_states"]
+        pre_dispatched: NaivePreDispatchResult,
+        dispatched: NaiveDispatchResult,
+        post_dispatched: NaivePostDispatchResult,
+        pre_combined: NaivePreCombineResult,
+        async_op: bool = False,
+        decoding: bool = False,
+    ) -> NaiveCombineResult:
+        if async_op:
+            raise NotImplementedError("Naive dispatcher is only for ep=1.")
+
+        if decoding:
+            raise NotImplementedError
+        else:
+            return NaiveCombineResult(hidden_states=pre_combined["hidden_states"])
+
+    @override
+    def combine_postprocess(
+        self,
+        *,
+        pre_dispatched: NaivePreDispatchResult,
+        dispatched: NaiveDispatchResult,
+        post_dispatched: NaivePostDispatchResult,
+        pre_combined: NaivePreCombineResult,
+        combined: NaiveCombineResult,
+        async_op: bool = False,
+    ) -> PostCombineResult:
+        if async_op:
+            raise NotImplementedError("Naive dispatcher is only for ep=1.")
+
+        return PostCombineResult(hidden_states=combined["hidden_states"])

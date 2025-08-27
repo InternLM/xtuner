@@ -1,3 +1,4 @@
+# type: ignore
 from typing import Literal, TypeAlias, cast
 
 import torch

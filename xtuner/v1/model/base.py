@@ -73,6 +73,7 @@ class BaseModel(nn.Module):
 
     def __init__(self):
         super().__init__()
+        self._hf_path = None
 
         self._hf_path: Path | None = None
 

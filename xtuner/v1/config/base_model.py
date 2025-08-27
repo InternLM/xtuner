@@ -113,7 +113,7 @@ class MoEConfig(TransformerConfig):
     router: BaseRouterConfig
     balancing_loss_cfg: BalancingLossConfig | None = BalancingLossConfig()
     z_loss_cfg: Optional["ZLossConfig"] = None
-    return_router_results: bool = True
+    return_router_results: bool = False
 
     def build(self) -> "MoE":
         from xtuner.v1.model.moe.moe import MoE
@@ -128,7 +128,7 @@ class ModelOutputs(TypedDict):
 
 
 class MoEModelOutputs(ModelOutputs):
-    router_logits: NotRequired[torch.Tensor]
+    router_logits: NotRequired[dict[str, torch.Tensor]]
     balancing_loss: NotRequired[torch.Tensor]
     z_loss: NotRequired[torch.Tensor]
     tokens_per_expert_global: NotRequired[torch.Tensor]

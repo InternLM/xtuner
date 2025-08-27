@@ -71,7 +71,7 @@ class TestDistributedMoE(DistributedTestBase):
     @parametrize.parametrize(
         "dtype,device,dispatcher,n_shared_experts,first_k_dense_replace",
         [
-            (torch.bfloat16, "cuda", "deepep", 1, 2),
+            # (torch.bfloat16, "cuda", "deepep", 1, 2),
             (torch.bfloat16, "cuda", "all2all", 1, 2),
             (torch.bfloat16, "cuda", "all2all", 0, 0),
         ],

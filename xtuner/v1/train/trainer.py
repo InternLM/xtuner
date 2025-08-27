@@ -10,6 +10,7 @@ from typing import Sized, TypedDict, cast
 
 import torch
 import torch.distributed as dist
+import torch.nn as nn
 from mmengine import is_installed, load
 from mmengine.dist import get_rank, get_world_size
 from mmengine.runner import set_random_seed
@@ -113,6 +114,7 @@ class Trainer:
         profile_step: int | None = None,
         profile_time: bool = True,
         profile_memory: bool = False,
+        intra_layer_micro_batch: int = 1,
         seed: int = 42,
         debug: bool = False,
         backend: str = "cpu:gloo,cuda:nccl",
@@ -210,6 +212,7 @@ class Trainer:
             fsdp_config=fsdp_cfg,
             resume_config=resume_config,
             strict=strict_load,
+            intra_layer_micro_batch=intra_layer_micro_batch,
         )
         self._lr_scheduler = self.build_lr_scheduler(lr_cfg)
         # TODO: (huanghaian) The impl of CELossContext should be decoupled with config
@@ -218,6 +221,9 @@ class Trainer:
         else:
             self.loss_ctx = loss_ctx
         # TODO: TMP hardcode here
+        #
+        if debug:
+            self._register_debug_hook()
 
     @classmethod
     def from_config(cls, config: TrainerConfig) -> Self:
@@ -258,6 +264,10 @@ class Trainer:
             strict_load=config.strict_load,
             hf_interval=config.hf_interval,
             hf_max_keep=config.hf_max_keep,
+            profile_step=config.profile_time,
+            profile_time=config.profile_time,
+            profile_memory=config.profile_memory,
+            intra_layer_micro_batch=config.intra_layer_micro_batch,
             seed=config.seed,
             debug=config.debug,
         )
@@ -400,6 +410,7 @@ class Trainer:
         optim_config: OptimConfig,
         fsdp_config: FSDPConfig,
         resume_config: ResumeConfig | None = None,
+        intra_layer_micro_batch: int = 1,
         strict: bool = True,
     ):
         from xtuner.v1.engine import InternS1TrainEngine, TrainEngine
@@ -409,6 +420,7 @@ class Trainer:
                 optim_cfg=optim_config,
                 fsdp_cfg=fsdp_config,
                 model_cfg=model_config,
+                intra_layer_micro_batch=intra_layer_micro_batch,
             )
         else:
             engine = TrainEngine(  # type: ignore
@@ -616,6 +628,7 @@ class Trainer:
         reduced_llm_loss = loss_log["reduced_llm_loss"]
 
         max_memory = DEVICE_MODULE.max_memory_allocated()  # type: ignore[attr-defined]
+        reserved_memory = DEVICE_MODULE.max_memory_reserved()  # type: ignore[attr-defined]
 
         self.logger.info(
             f"Step {self.cur_step}/{self.total_step} data_time: {data_time:.4f} lr: {lr:.6f} time: {step_time:.4f} "
@@ -623,10 +636,12 @@ class Trainer:
             f"total_loss: {total_loss:.3f} "
             f"reduced_llm_loss: {reduced_llm_loss:.3f} "
             f"max_memory: {max_memory / (1024**3):.2f} GB "
+            f"reserved_memory: {reserved_memory / (1024**3):.2f} GB "
             f"grad_norm: {grad_norm:.3f} "
             f"tgs: {tgs:.1f} "
             f"e2e_tgs: {e2e_tgs:.1f} "
         )
+        DEVICE_MODULE.reset_peak_memory_stats()  # type: ignore[attr-defined]
 
     def _maybe_save_hf(self):
         if self._hf_interval is None:
@@ -656,3 +671,26 @@ class Trainer:
         if self.rank == 0:
             with meta_path.open("w") as f:
                 f.write(self.meta.model_dump_json(indent=2))
+
+    def _register_debug_hook(self):
+        """Register a debug hook function to be called at the end of each
+        training step."""
+
+        def _detect_nan(module: nn.Module, output):
+            if isinstance(output, torch.Tensor):
+                if output.isnan().any():
+                    logger.warning(f"Detect NaN in output of module {module.__class__.__name__}")
+            elif isinstance(output, (tuple, list)):
+                for item in output:
+                    _detect_nan(module, item)
+            elif isinstance(output, dict):
+                for value in output.values():
+                    _detect_nan(module, value)
+
+        def module_debug_forward_hook(module, input, output):
+            """Debug hook to print module name and input/output shapes."""
+            _detect_nan(module, output)
+
+        for model in self._engine.model.modules():
+            if isinstance(model, nn.Module):
+                model.register_forward_hook(module_debug_forward_hook)

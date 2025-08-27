@@ -1,21 +1,28 @@
-from typing import Literal
+from typing import Literal, TypeAlias, cast
 
 import torch
 import torch.distributed as dist
-from torch.distributed._functional_collectives import all_to_all_single_autograd
-from typing_extensions import overload, override
+from torch.autograd.function import Function
+from typing_extensions import override
 
+from xtuner.v1.ops.comm.all_to_all import all_to_all_single_autograd
 from xtuner.v1.ops.moe_permute import permute, unpermute
+from xtuner.v1.utils import copy_method_signature, get_device, get_logger
 
+from . import XTUNER_DISPATCHER_DEBUG
 from .base import (
-    DecodingCombineResult,
-    DecodingDispatchResult,
+    CombineResult,
+    DispatchResult,
     GenericDispatcher,
-    HiddenStates,
+    PostCombineResult,
+    PostDispatchResult,
+    PreCombineResult,
     PreDispatchResult,
-    PrefillingCombineResult,
-    PrefillingDispatchResult,
 )
+
+
+DEVICE = get_device()
+logger = get_logger()
 
 
 # The execution steps of Torch all to all are as follows:
@@ -31,50 +38,253 @@ from .base import (
 
 
 class TorchAll2AllPreDispatchResult(PreDispatchResult):
-    """Encapsulates pre-processed data required for AllToAll dispatch
-    operations.
-
-    This class stores the intermediate results generated during the pre-dispatch phase
-    of the AllToAll communication pattern used in Mixture of Experts (MoE) models.
-
-    Attributes:
-        row_id_map (torch.Tensor): Mapping information needed to unpermute hidden states
-            after AllToAll operations are complete.
-        tokens_per_experts_group (torch.Tensor): Number of tokens assigned to each expert
-            group across all processes in the communication group.
-        input_splits (torch.Tensor): Input tensor splits defining how the data will be
-            partitioned for the AllToAll collective operation.
-        output_splits (torch.Tensor): Output tensor splits defining how the data will be
-            recombined after the AllToAll collective operation.
-    """
-
     row_id_map: torch.Tensor
-    tokens_per_experts_group: torch.Tensor
+    forward_finished_event: torch.cuda.Event | None
+    backward_previous_event: torch.cuda.Event | None
+
+
+class TorchAll2AllDispatchResult(DispatchResult):
+    tokens_per_expert_group: torch.Tensor
     input_splits: list[int]
     output_splits: list[int]
+    forward_finished_event: torch.cuda.Event | None
+    backward_previous_event: torch.cuda.Event | None
 
 
-class TorchAll2AllPrefillingDispatchResult(PrefillingDispatchResult):
-    row_id_map: torch.Tensor
+class TorchAll2AllPostDispatchResult(PostDispatchResult):
+    row_ids_map: torch.Tensor
 
 
-class TorchAll2AllDecodingDispatchResult(DecodingDispatchResult):
-    row_id_map: torch.Tensor
+class TorchAll2AllPreCombineResult(PreCombineResult):
+    forward_finished_event: torch.cuda.Event | None
+    backward_previous_event: torch.cuda.Event | None
 
 
-TorchAll2AllPrefillingCombineResult = PrefillingCombineResult
-TorchAll2AllDecodingCombineResult = DecodingCombineResult
+class TorchAll2AllCombineResult(CombineResult):
+    forward_finished_event: torch.cuda.Event | None
+    backward_previous_event: torch.cuda.Event | None
+
+
+class TorchAll2AllPostCombineResult(PostCombineResult): ...
+
+
+HiddenStates: TypeAlias = torch.Tensor
+
+
+def _dispatch(
+    hidden_states: torch.Tensor,
+    topk_ids: torch.Tensor,
+    n_routed_experts: int,
+    process_group: dist.ProcessGroup,
+) -> tuple[torch.Tensor, torch.Tensor, list[int], list[int]]:
+    ep_size = process_group.size()
+    num_experts_per_rank = n_routed_experts // ep_size
+    tokens_per_expert = torch.histc(topk_ids, bins=n_routed_experts, min=0, max=n_routed_experts)
+    # self._comm_stream.wait_event(event)
+    tokens_per_expert_group = tokens_per_expert.new_empty(tokens_per_expert.shape[0])
+    dist.all_to_all_single(
+        tokens_per_expert_group,
+        tokens_per_expert,
+        group=process_group,
+    )
+
+    # (r0e0, r0e1, ..., r0ei-1,
+    #  r1e0, r1e1, ..., r1ei-1,
+    tokens_per_expert_group = tokens_per_expert_group.view(ep_size, -1)
+
+    # Get number experts each group
+    input_splits = (
+        tokens_per_expert.reshape(ep_size, num_experts_per_rank).to(device=torch.device("cpu")).sum(dim=1).tolist()
+    )
+    output_splits = tokens_per_expert_group.to(device=torch.device("cpu")).sum(dim=-1).tolist()
+
+    hidden_size = hidden_states.size(-1)
+    out = hidden_states.new_empty(size=(sum(output_splits), hidden_size))
+
+    hidden_states = hidden_states.contiguous()
+
+    dist.all_to_all_single(
+        out,
+        hidden_states,
+        output_split_sizes=output_splits,
+        input_split_sizes=input_splits,
+        group=process_group,
+    )
+    return out, tokens_per_expert_group, input_splits, output_splits
+
+
+class _AsyncDispatch(Function):
+    @staticmethod
+    def forward(
+        ctx,
+        hidden_states: torch.Tensor,
+        topk_ids: torch.Tensor,
+        n_routed_experts: int,
+        forward_previous_event: torch.cuda.Event,
+        forward_finished_event: torch.cuda.Event,
+        backward_previous_event: torch.cuda.Event,
+        backward_finished_event: torch.cuda.Event,
+        comm_stream: torch.cuda.Stream,
+        process_group: dist.ProcessGroup,
+    ):
+        with torch.cuda.stream(comm_stream):
+            comm_stream.wait_event(forward_previous_event)
+            out, tokens_per_expert, input_splits, output_splits = _dispatch(
+                hidden_states,
+                topk_ids,
+                n_routed_experts,
+                process_group,
+            )
+            out.record_stream(comm_stream)
+            tokens_per_expert.record_stream(comm_stream)
+            forward_finished_event.record(comm_stream)
+
+        ctx.input_shape = hidden_states.shape
+        ctx.output_split_sizes = output_splits
+        ctx.input_split_sizes = input_splits
+
+        ctx.comm_stream = comm_stream
+        ctx.group = process_group
+
+        ctx.backward_previous_event = backward_previous_event
+        ctx.backward_finished_event = backward_finished_event
+
+        return out, tokens_per_expert, input_splits, output_splits
+
+    @staticmethod
+    def backward(
+        ctx, grad_output: torch.Tensor, *args
+    ) -> tuple[torch.Tensor | None, None, None, None, None, None, None, None, None]:
+        world_size = dist.get_world_size(group=ctx.group)
+        if world_size == 1:
+            return grad_output, None, None, None, None, None, None, None, None
+
+        with torch.cuda.stream(ctx.comm_stream):
+            # ctx.comm_stream.wait_stream(compute_stream)
+            if ctx.backward_previous_event is not None:
+                ctx.comm_stream.wait_event(ctx.backward_previous_event)
+            out = torch.empty(ctx.input_shape, device=grad_output.device, dtype=grad_output.dtype)
+            dist.all_to_all_single(
+                out,
+                grad_output,
+                output_split_sizes=ctx.input_split_sizes,
+                input_split_sizes=ctx.output_split_sizes,
+                group=ctx.group,
+            )
+            # NOTE: During backward, `grad_output` will be freed before dispatch backward finished if we do not record
+            # the `grad_output` here.
+            grad_output.record_stream(ctx.comm_stream)
+            out.record_stream(ctx.comm_stream)
+
+            if ctx.backward_finished_event is not None:
+                ctx.backward_finished_event.record(ctx.comm_stream)
+        return out, None, None, None, None, None, None, None, None
+
+
+_async_dispatch = copy_method_signature(_AsyncDispatch.forward)(_AsyncDispatch.apply)
+
+
+class _AsyncCombine(Function):
+    @staticmethod
+    def forward(
+        ctx,
+        hidden_states: torch.Tensor,
+        input_splits: list[int],
+        output_splits: list[int],
+        forward_previous_event: torch.cuda.Event,
+        forward_finished_event: torch.cuda.Event,
+        backward_previous_event: torch.cuda.Event,
+        backward_finished_event: torch.cuda.Event,
+        comm_stream: torch.cuda.Stream,
+        process_group: dist.ProcessGroup,
+    ):
+        with torch.cuda.stream(comm_stream):
+            comm_stream.wait_event(forward_previous_event)
+            out = all_to_all_single_autograd(
+                hidden_states,
+                input_split_sizes=input_splits,
+                output_split_sizes=output_splits,
+                group=process_group,
+            )
+            forward_finished_event.record(comm_stream)
+
+        ctx.input_shape = hidden_states.shape
+        ctx.output_split_sizes = output_splits
+        ctx.input_split_sizes = input_splits
+
+        ctx.comm_stream = comm_stream
+        ctx.group = process_group
+
+        ctx.backward_previous_event = backward_previous_event
+        ctx.backward_finished_event = backward_finished_event
+
+        return out
+
+    @staticmethod
+    def backward(
+        ctx, grad_output: torch.Tensor, *args
+    ) -> tuple[torch.Tensor | None, None, None, None, None, None, None, None, None]:
+        world_size = dist.get_world_size(group=ctx.group)
+        if world_size == 1:
+            return grad_output, None, None, None, None, None, None, None, None
+
+        with torch.cuda.stream(ctx.comm_stream):
+            if ctx.backward_previous_event is not None:
+                ctx.comm_stream.wait_event(ctx.backward_previous_event)
+            out = torch.empty(ctx.input_shape, device=grad_output.device, dtype=grad_output.dtype)
+            dist.all_to_all_single(
+                out,
+                grad_output,
+                output_split_sizes=ctx.input_split_sizes,
+                input_split_sizes=ctx.output_split_sizes,
+                group=ctx.group,
+            )
+            # NOTE: During backward, `grad_output` will be freed before dispatch backward finished if we do not record
+            # the `grad_output` here.
+            grad_output.record_stream(ctx.comm_stream)
+            out.record_stream(ctx.comm_stream)
+
+            if ctx.backward_finished_event is not None:
+                ctx.backward_finished_event.record(ctx.comm_stream)
+        return out, None, None, None, None, None, None, None, None
+
+
+_async_combine = copy_method_signature(_AsyncCombine.forward)(_AsyncCombine.apply)
+
+
+def get_backward_pre_hook(backward_previous_event: torch.cuda.Event, name: str | None = None, debug: bool = False):
+    def _backward_pre_hook(*_):
+        # if name == "TorchAll2AllDispatcher.dispatch_preprocess":
+        #     torch.cuda.synchronize()
+        if debug:
+            logger.info(f"[{name}] backward pre hook")
+        if backward_previous_event is not None:
+            torch.cuda.current_stream().wait_event(backward_previous_event)
+
+    return _backward_pre_hook
+
+
+def get_backward_hook(backward_finished_event: torch.cuda.Event, name: str | None = None, debug: bool = False):
+    def _backward_hook(*_):
+        if debug:
+            logger.info(f"[{name}] backward hook")
+        if backward_finished_event is not None:
+            backward_finished_event.record()
+
+    return _backward_hook
 
 
 class TorchAll2AllDispatcher(
     GenericDispatcher[
         TorchAll2AllPreDispatchResult,
-        TorchAll2AllPrefillingDispatchResult,
-        TorchAll2AllDecodingDispatchResult,
-        TorchAll2AllPrefillingCombineResult,
-        TorchAll2AllDecodingCombineResult,
+        TorchAll2AllDispatchResult,
+        TorchAll2AllPostDispatchResult,
+        TorchAll2AllPreCombineResult,
+        TorchAll2AllCombineResult,
+        TorchAll2AllPostCombineResult,
     ]
 ):
+    _comm_stream = None
     _process_group: dist.ProcessGroup
 
     def __init__(
@@ -102,59 +312,10 @@ class TorchAll2AllDispatcher(
             dtype=torch.int32,
             device="cuda",
         )
+        if TorchAll2AllDispatcher._comm_stream is None:
+            TorchAll2AllDispatcher._comm_stream = cast(torch.cuda.Stream, torch.cuda.Stream(device=DEVICE))
         # if training_dtype == "fp8":
         #     raise NotImplementedError
-
-    @overload
-    def dispatch(
-        self,
-        *,
-        pre_dispatched: TorchAll2AllPreDispatchResult,
-        decoding: Literal[True],
-    ) -> TorchAll2AllDecodingDispatchResult: ...
-
-    @overload
-    def dispatch(
-        self,
-        *,
-        pre_dispatched: TorchAll2AllPreDispatchResult,
-        decoding: Literal[False],
-    ) -> TorchAll2AllPrefillingDispatchResult: ...
-
-    def dispatch(
-        self,
-        *,
-        pre_dispatched: TorchAll2AllPreDispatchResult,
-        decoding: bool = False,
-    ) -> TorchAll2AllPrefillingDispatchResult | TorchAll2AllDecodingDispatchResult:
-        token_per_expert_group = pre_dispatched["tokens_per_experts_group"]
-        token_counts = token_per_expert_group.ravel()
-        global_input_tokens_local_experts_indices = torch.repeat_interleave(self._expert_ids_per_ep_rank, token_counts)
-        global_input_tokens = all_to_all_single_autograd(
-            pre_dispatched["hidden_states"],
-            output_split_sizes=pre_dispatched["output_splits"],
-            input_split_sizes=pre_dispatched["input_splits"],
-            group=self._process_group,
-        )
-        global_input_tokens, row_id_map = permute(
-            global_input_tokens,
-            global_input_tokens_local_experts_indices.to(torch.int32),
-        )
-        tokens_per_experts = token_per_expert_group.sum(dim=0)
-        if not decoding:
-            return TorchAll2AllPrefillingDispatchResult(
-                hidden_states=global_input_tokens,
-                tokens_per_experts=tokens_per_experts,
-                topk_weights=pre_dispatched["topk_weights"],
-                row_id_map=row_id_map,
-                handle=None,
-            )
-        else:
-            return TorchAll2AllDecodingDispatchResult(
-                hidden_states=global_input_tokens,
-                tokens_per_experts=tokens_per_experts,
-                row_id_map=row_id_map,
-            )
 
     @override
     def dispatch_preprocess(
@@ -162,99 +323,273 @@ class TorchAll2AllDispatcher(
         *,
         hidden_states: torch.Tensor,
         topk_ids: torch.Tensor,
-        topk_weights: torch.Tensor,
+        async_op: bool = False,
     ) -> TorchAll2AllPreDispatchResult:
-        ep_size = self._process_group.size()
-        num_experts_per_rank = self._n_routed_experts // ep_size
-
-        tokens_per_expert = torch.histc(topk_ids, bins=self._n_routed_experts, min=0, max=self._n_routed_experts)
-        # permute output 相同 expert 的tokens在一起
         permuted_hidden_states, row_ids_map = permute(hidden_states, topk_ids.to(torch.int32))
-        input_splits = (
-            tokens_per_expert.reshape(ep_size, num_experts_per_rank).sum(dim=1).to(device=torch.device("cpu")).tolist()
-        )
-        tokens_per_expert_group = tokens_per_expert.new_empty(tokens_per_expert.shape[0])
-        dist.all_to_all_single(
-            tokens_per_expert_group,
-            tokens_per_expert,
-            group=self._process_group,
-        )
 
-        # (r0e0, r0e1, ..., r0ei-1,
-        #  r1e0, r1e1, ..., r1ei-1,
-        tokens_per_expert_group = tokens_per_expert_group.view(ep_size, -1)
+        if async_op:
+            forward_finished_event = cast(torch.cuda.Event, torch.cuda.Event())
+            forward_finished_event.record()
+            backward_previous_event = cast(torch.cuda.Event, torch.cuda.Event())
 
-        # Get number experts each group
-        output_splits = tokens_per_expert_group.sum(dim=-1).to(device=torch.device("cpu")).tolist()
+            if permuted_hidden_states.grad_fn is not None:
+                permuted_hidden_states.grad_fn.register_prehook(
+                    get_backward_pre_hook(
+                        backward_previous_event=backward_previous_event,
+                        name="TorchAll2AllDispatcher.dispatch_preprocess",
+                        debug=XTUNER_DISPATCHER_DEBUG,
+                    )
+                )
+        else:
+            forward_finished_event = None
+            backward_previous_event = None
 
         return TorchAll2AllPreDispatchResult(
             hidden_states=permuted_hidden_states,
-            topk_ids=topk_ids,
-            topk_weights=topk_weights.to(torch.float32),
             row_id_map=row_ids_map,
-            tokens_per_experts_group=tokens_per_expert_group,
-            input_splits=input_splits,
-            output_splits=output_splits,
+            topk_ids=topk_ids,
+            forward_finished_event=forward_finished_event,
+            backward_previous_event=backward_previous_event,
         )
 
-    @overload
-    def combine(
+    @override
+    def dispatch(
         self,
         *,
-        hidden_states: torch.Tensor,
         pre_dispatched: TorchAll2AllPreDispatchResult,
-        dispatch_result: TorchAll2AllPrefillingDispatchResult,
-        decoding: Literal[False],
-    ) -> TorchAll2AllPrefillingCombineResult: ...
-
-    @overload
-    def combine(
-        self,
-        *,
-        hidden_states: torch.Tensor,
-        pre_dispatched: TorchAll2AllPreDispatchResult,
-        dispatch_result: TorchAll2AllDecodingDispatchResult,
-        decoding: Literal[True],
-    ) -> TorchAll2AllDecodingCombineResult: ...
-
-    def combine(
-        self,
-        *,
-        hidden_states: torch.Tensor,
-        pre_dispatched: TorchAll2AllPreDispatchResult,
-        dispatch_result: TorchAll2AllPrefillingDispatchResult | TorchAll2AllDecodingDispatchResult,
+        topk_weights: torch.Tensor,
+        async_op: bool = False,
         decoding: bool = False,
-    ) -> TorchAll2AllPrefillingCombineResult | TorchAll2AllDecodingCombineResult:
+    ) -> TorchAll2AllDispatchResult:
+        if not async_op:
+            hidden_states, tokens_per_expert_group, input_splits, output_splits = _dispatch(
+                pre_dispatched["hidden_states"],
+                pre_dispatched["topk_ids"],
+                self._n_routed_experts,
+                self._process_group,
+            )
+            if decoding:
+                raise NotImplementedError
+            else:
+                return TorchAll2AllDispatchResult(
+                    hidden_states=hidden_states,
+                    topk_weights=topk_weights,
+                    tokens_per_expert_group=cast(torch.Tensor, tokens_per_expert_group),
+                    input_splits=cast(list[int], input_splits),
+                    output_splits=cast(list[int], output_splits),
+                    forward_finished_event=None,
+                    backward_previous_event=None,
+                )
+        else:
+            forward_previous_event = pre_dispatched["forward_finished_event"]
+            forward_finished_event = cast(torch.cuda.Event, torch.cuda.Event())
+            backward_finished_event = pre_dispatched["backward_previous_event"]
+            backward_previous_event = cast(torch.cuda.Event, torch.cuda.Event())
+
+            assert backward_finished_event is not None, "Please use `async_op=True` for dispatch_preprocess!"
+            assert forward_previous_event is not None, "Please use `async_op=True` for dispatch_preprocess!"
+
+            hidden_states, tokens_per_expert_group, input_splits, output_splits = _async_dispatch(
+                pre_dispatched["hidden_states"],
+                pre_dispatched["topk_ids"],
+                self._n_routed_experts,
+                forward_previous_event,
+                forward_finished_event,
+                backward_previous_event,
+                backward_finished_event,
+                self._comm_stream,
+                self._process_group,
+            )
+            if decoding:
+                raise NotImplementedError
+            else:
+                return TorchAll2AllDispatchResult(
+                    hidden_states=hidden_states,
+                    topk_weights=topk_weights,
+                    tokens_per_expert_group=tokens_per_expert_group,
+                    input_splits=cast(list[int], input_splits),
+                    output_splits=cast(list[int], output_splits),
+                    backward_previous_event=backward_previous_event,
+                    forward_finished_event=forward_finished_event,
+                )
+
+    @override
+    def dispatch_postprocess(
+        self,
+        *,
+        pre_dispatched: TorchAll2AllPreDispatchResult,
+        dispatched: TorchAll2AllDispatchResult,
+        async_op: bool = False,
+        decoding: bool = False,
+    ) -> TorchAll2AllPostDispatchResult:
+        if async_op:
+            assert dispatched["forward_finished_event"] is not None, "Please use `async_op=True` for dispatch!"
+            self.wait_comm_stream(dispatched["forward_finished_event"])
+
+        tokens_per_expert_group = dispatched["tokens_per_expert_group"]
+        token_counts = tokens_per_expert_group.ravel()
+        global_input_tokens_local_experts_indices = torch.repeat_interleave(
+            self._expert_ids_per_ep_rank, token_counts, output_size=sum(dispatched["output_splits"])
+        )
+
+        # The dispatch result is already permuted, so we can return it directly.
+        global_input_tokens, row_ids_map = permute(
+            dispatched["hidden_states"],
+            global_input_tokens_local_experts_indices.to(torch.int32),
+        )
+        tokens_per_expert = tokens_per_expert_group.sum(dim=0)
+
+        if async_op:
+            assert dispatched["backward_previous_event"] is not None, "Please use `async_op=True` for dispatch!"
+
+            if global_input_tokens.grad_fn is not None:
+                global_input_tokens.grad_fn.register_hook(
+                    get_backward_hook(
+                        dispatched["backward_previous_event"],
+                        name="TorchAll2AllDispatcher.dispatch_postprocess",
+                        debug=XTUNER_DISPATCHER_DEBUG,
+                    )
+                )
+
+        if decoding:
+            raise NotImplementedError
+        else:
+            return TorchAll2AllPostDispatchResult(
+                hidden_states=global_input_tokens,
+                row_ids_map=row_ids_map,
+                tokens_per_expert=tokens_per_expert,
+            )
+
+    @override
+    def combine_preprocess(
+        self,
+        *,
+        hidden_states: torch.Tensor,
+        pre_dispatched: TorchAll2AllPreDispatchResult,
+        dispatched: TorchAll2AllDispatchResult,
+        post_dispatched: TorchAll2AllPostDispatchResult,
+        async_op: bool = False,
+        decoding: bool = False,
+    ) -> TorchAll2AllPreCombineResult:
         hidden_states = unpermute(
             hidden_states,
-            dispatch_result["row_id_map"],
+            post_dispatched["row_ids_map"],
         )
 
-        hidden_states = all_to_all_single_autograd(
-            hidden_states,
-            input_split_sizes=pre_dispatched["output_splits"],
-            output_split_sizes=pre_dispatched["input_splits"],
-            group=self._process_group,
-        )
-        if not decoding:
-            return TorchAll2AllPrefillingCombineResult(
+        if async_op:
+            backward_previous_event = cast(torch.cuda.Event, torch.cuda.Event())
+            forward_finished_event = cast(torch.cuda.Event, torch.cuda.Event())
+            forward_finished_event.record()
+            if hidden_states.grad_fn is not None:
+                hidden_states.grad_fn.register_prehook(
+                    get_backward_pre_hook(
+                        backward_previous_event=backward_previous_event,
+                        name="TorchAll2AllDispatcher.combine_preprocess",
+                        debug=XTUNER_DISPATCHER_DEBUG,
+                    )
+                )
+        else:
+            backward_previous_event = None
+            forward_finished_event = None
+
+        if decoding:
+            raise NotImplementedError
+        else:
+            return TorchAll2AllPreCombineResult(
                 hidden_states=hidden_states,
+                backward_previous_event=backward_previous_event,
+                forward_finished_event=forward_finished_event,
+            )
+
+    @override
+    def combine(
+        self,
+        *,
+        pre_dispatched: TorchAll2AllPreDispatchResult,
+        dispatched: TorchAll2AllDispatchResult,
+        post_dispatched: TorchAll2AllPostDispatchResult,
+        pre_combined: TorchAll2AllPreCombineResult,
+        async_op: bool = False,
+        decoding: bool = False,
+    ) -> CombineResult:
+        if not async_op:
+            hidden_states = all_to_all_single_autograd(
+                pre_combined["hidden_states"],
+                input_split_sizes=dispatched["output_splits"],
+                output_split_sizes=dispatched["input_splits"],
+                group=self._process_group,
+            )
+            forward_finished_event = None
+            backward_previous_event = None
+        else:
+            forward_previous_event = pre_combined["forward_finished_event"]
+            forward_finished_event = cast(torch.cuda.Event, torch.cuda.Event())
+            backward_previous_event = cast(torch.cuda.Event, torch.cuda.Event())
+            backward_finished_event = pre_combined["backward_previous_event"]
+
+            assert forward_previous_event is not None, "Please use `async_op=True` for combine_preprocess!"
+            assert backward_finished_event is not None, "Please use `async_op=True` for combine_preprocess!"
+
+            hidden_states = _async_combine(
+                pre_combined["hidden_states"],
+                dispatched["output_splits"],
+                dispatched["input_splits"],
+                forward_previous_event,
+                forward_finished_event,
+                backward_previous_event,
+                backward_finished_event,
+                self._comm_stream,
+                self._process_group,
+            )
+
+        if not decoding:
+            return TorchAll2AllCombineResult(
+                hidden_states=hidden_states,
+                forward_finished_event=forward_finished_event,
+                backward_previous_event=backward_previous_event,
             )
         else:
-            return TorchAll2AllDecodingCombineResult(
-                hidden_states=hidden_states,
-            )
+            raise NotImplementedError
 
-    def combine_post_process(
+    @override
+    def combine_postprocess(
         self,
         *,
         pre_dispatched: TorchAll2AllPreDispatchResult,
-        dispatch_result: TorchAll2AllPrefillingDispatchResult | TorchAll2AllDecodingDispatchResult,
-        combine_result: TorchAll2AllDecodingCombineResult | TorchAll2AllPrefillingCombineResult,
-    ) -> HiddenStates:
-        hidden_states = unpermute(
-            combine_result["hidden_states"],
-            pre_dispatched["row_id_map"],
-            probs=pre_dispatched["topk_weights"],
-        )
-        return hidden_states
+        dispatched: TorchAll2AllDispatchResult,
+        post_dispatched: TorchAll2AllPostDispatchResult,
+        pre_combined: TorchAll2AllPreCombineResult,
+        combined: TorchAll2AllCombineResult,
+        async_op: bool = False,
+    ) -> PostCombineResult:
+        if not async_op:
+            hidden_states = unpermute(
+                combined["hidden_states"],
+                pre_dispatched["row_id_map"],
+                probs=dispatched["topk_weights"],
+            )
+            backward_finished_event = None
+        else:
+            forward_previous_event = combined["forward_finished_event"]
+            backward_finished_event = combined["backward_previous_event"]
+            assert forward_previous_event is not None, "Please use `async_op=True` for combine!"
+            assert backward_finished_event is not None, "Please use `async_op=True` for combine!"
+            self.wait_comm_stream(forward_previous_event)
+            hidden_states = unpermute(
+                combined["hidden_states"],
+                pre_dispatched["row_id_map"],
+                probs=dispatched["topk_weights"],
+            )
+            if hidden_states.grad_fn is not None:
+                hidden_states.grad_fn.register_hook(
+                    get_backward_hook(
+                        backward_finished_event=backward_finished_event,
+                        name="TorchAll2AllDispatcher.combine_postprocess",
+                        debug=XTUNER_DISPATCHER_DEBUG,
+                    )
+                )
+
+        return PostCombineResult(hidden_states=hidden_states)
+
+    def wait_comm_stream(self, event: torch.cuda.Event):
+        torch.cuda.current_stream().wait_event(event)

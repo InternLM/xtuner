@@ -79,7 +79,7 @@ class TestMoETorchAll2AllDispatcher(DistributedTestBase):
         )
         combined = dispatcher.combine(hidden_states=experts_results,
             pre_dispatched=pre_dispatched,
-            dispatch_result=dispatched,
+            dispatched=dispatched,
             decoding=False,
         )
         return dispatcher.combine_post_process(

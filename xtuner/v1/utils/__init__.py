@@ -10,6 +10,7 @@ from .misc import XTUNER_DETERMINISTIC, SharedMemory, get_padding_length, is_hf_
 from .pad import pad_to_max_length, pad_to_multiple_of
 from .profile import profile_time_and_memory
 from .state import ForwardState
+from .type_helper import copy_method_signature, copy_signature
 
 
 __all__ = [
@@ -32,4 +33,6 @@ __all__ = [
     "Config",
     "record_git_info",
     "is_hf_model_path",
+    "copy_signature",
+    "copy_method_signature",
 ]

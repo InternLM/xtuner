@@ -7,7 +7,6 @@ from xtuner.v1.config import MoEConfig
 import parametrize
 
 
-
 def mock_experts(hidden_states: torch.Tensor, tokens_per_exprts: torch.Tensor):
     return hidden_states
 
@@ -51,25 +50,39 @@ class TestNoEPDispatcher(TestCase):
         pre_dispatched = self.dispatcher.dispatch_preprocess(
             hidden_states=hidden_states,
             topk_ids=topk_ids,
-            topk_weights=topk_weights,
         )
         dispatched = self.dispatcher.dispatch(
             pre_dispatched=pre_dispatched,
+            topk_weights=topk_weights,
             decoding=False,
+        )
+        post_dispatched = self.dispatcher.dispatch_postprocess(
+            pre_dispatched=pre_dispatched,
+            dispatched=dispatched,
         )
         experts_results = mock_experts(
-            hidden_states=dispatched["hidden_states"],
-            tokens_per_exprts=dispatched["tokens_per_experts"],
+            hidden_states=post_dispatched["hidden_states"],
+            tokens_per_exprts=post_dispatched["tokens_per_expert"],
         )
-        combined = self.dispatcher.combine(
+
+        pre_combined = self.dispatcher.combine_preprocess(
             hidden_states=experts_results,
             pre_dispatched=pre_dispatched,
-            dispatch_result=dispatched,
+            dispatched=dispatched,
+            post_dispatched=post_dispatched,
+        )
+        combined = self.dispatcher.combine(
+            pre_dispatched=pre_dispatched,
+            dispatched=dispatched,
+            post_dispatched=post_dispatched,
+            pre_combined=pre_combined,
             decoding=False,
         )
-        result = self.dispatcher.combine_post_process(
+        result = self.dispatcher.combine_postprocess(
             pre_dispatched=pre_dispatched,
-            dispatch_result=dispatched,
-            combine_result=combined,
+            dispatched=dispatched,
+            post_dispatched=post_dispatched,
+            pre_combined=pre_combined,
+            combined=combined,
         )
-        self.assertTrue(torch.equal(result, target_results))
+        self.assertTrue(torch.equal(result["hidden_states"], target_results))

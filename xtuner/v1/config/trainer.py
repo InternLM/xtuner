@@ -41,6 +41,7 @@ class TrainerConfig(BaseModel):
     profile_step: int | None = None
     profile_time: bool = True
     profile_memory: bool = False
+    intra_layer_micro_batch: int = 1
     seed: int = 42
     dist_backend: str = "cpu:gloo,cuda:nccl"
     debug: bool = False

@@ -40,7 +40,7 @@ class InternS1MultiModalProjector(BaseModel):
         self._init_load_spec()
 
     @maybe_compile(fullgraph=True)
-    def forward(self, image_features):
+    def forward(self, image_features: torch.Tensor) -> torch.Tensor:
         hidden_states = self.layer_norm(image_features)
         hidden_states = self.linear_1(hidden_states)
         hidden_states = self.act(hidden_states)
