@@ -27,7 +27,7 @@ class RLTextDataItem(TypedDict, total=False):
     input_ids: list[int]
     prompt_str: str
     num_tokens: int
-    data_source: str | None  # e.g., math, code
+    data_source: dict | None  # e.g., {"math" : "0.8", "code": "0.2"}
     ability: str | None  # math, code
     reward_model: dict
     reward: float | None

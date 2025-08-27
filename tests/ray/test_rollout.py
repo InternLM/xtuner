@@ -41,11 +41,10 @@ class TestRollout(unittest.TestCase):
             gpus_per_node=8, # gpu: 8, npu: 16
             dtype="bfloat16",
         )
-        from xtuner.v1.ray.judger.gsm8k import compute_reward
+        from xtuner.v1.ray.judger.gsm8k import GSM8KJudgerConfig
+        gsm8k_judger_config = GSM8KJudgerConfig()
         self.judger_cfg = JudgerConfig(
-            reward_functions={"math": compute_reward},
-            extra_info={"math": {"score": 1, "format_score": 0.5}},
-            reward_ratio={"math": 1.0}
+            reward_judger_configs={"openai/gsm8k": gsm8k_judger_config}
         )
         self.dataflow_cfg = DataFlowConfig(
             env="test",
@@ -104,10 +103,10 @@ class TestRollout(unittest.TestCase):
                                     self.tokenizer,
                                     self.test_env
                                     )
-        responses = ray.get(self.test_flow.run.remote())
-        dataflow_state = ray.get(self.test_flow.state.remote())
+        responses = ray.get(self.test_flow.run.remote(), timeout=300)
+        dataflow_state = ray.get(self.test_flow.state.remote(), timeout=300)
         self.assertEqual(len(responses), self.dataflow_cfg.global_batch_size)
-        ray.get(self.test_flow.shutdown.remote())
+        ray.get(self.test_flow.shutdown.remote(), timeout=300)
         
     @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
     def test_lmdeploy_async_backend(self):
@@ -125,10 +124,10 @@ class TestRollout(unittest.TestCase):
                                     self.tokenizer,
                                     self.test_env
                                     )
-        responses = ray.get(self.test_flow.run.remote())
-        dataflow_state = ray.get(self.test_flow.state.remote())
+        responses = ray.get(self.test_flow.run.remote(), timeout=300)
+        dataflow_state = ray.get(self.test_flow.state.remote(), timeout=300)
         self.assertEqual(len(responses), self.dataflow_cfg.global_batch_size)
-        ray.get(self.test_flow.shutdown.remote())
+        ray.get(self.test_flow.shutdown.remote(), timeout=300)
         
     
 if __name__ == "__main__":

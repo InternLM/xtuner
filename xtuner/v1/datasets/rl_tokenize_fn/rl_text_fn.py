@@ -59,7 +59,8 @@ class RLTextTokenizeFn(CachableTokenizeFunction[RLTextDataItem]):
             "num_tokens": num_tokens,
             "reward_model": item["reward_model"],
             "ability": item.get("ability", None),
-            "data_source": item.get("data_source", None),
+            # todo: update train.jsonl
+            "data_source": {item.get("data_source"): 1.0},
             "extra_info": extra_info,
         }
 
