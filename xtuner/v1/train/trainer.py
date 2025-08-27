@@ -264,7 +264,7 @@ class Trainer:
             strict_load=config.strict_load,
             hf_interval=config.hf_interval,
             hf_max_keep=config.hf_max_keep,
-            profile_step=config.profile_time,
+            profile_step=config.profile_step,
             profile_time=config.profile_time,
             profile_memory=config.profile_memory,
             intra_layer_micro_batch=config.intra_layer_micro_batch,
