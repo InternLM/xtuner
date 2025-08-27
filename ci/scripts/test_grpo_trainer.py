@@ -89,8 +89,8 @@ from xtuner.v1.config import (
 )
 from xtuner.v1.rl.grpo.config import WorkerConfig, LossConfig
 from xtuner.v1.rl.grpo.trainer import Trainer
-from xtuner.v1.ray.dataflow.flow import SampleParams
-
+from xtuner.v1.ray.environment import SampleParams
+from xtuner.v1.ray.judger.controller import JudgerConfig
 
 MODEL_PATH = os.environ["ROLLOUT_MODEL_PATH"]
 DATA_PATH = os.environ["ROLLOUT_DATA_PATH"]
@@ -145,7 +145,11 @@ def main(args):
         global_batch_size=args.rollout_global_batch_size,
         sample_params=SampleParams(max_tokens=args.max_response_length),
     )
-    judger_config = {"judger_type": "xtuner.v1.ray.judger.gsm8k.GSM8KJudgerWorker"}
+    from xtuner.v1.ray.judger.gsm8k import GSM8KJudgerConfig
+    gsm8k_judger_config = GSM8KJudgerConfig()
+    judger_cfg = JudgerConfig(
+        reward_judger_configs={"openai/gsm8k": gsm8k_judger_config}
+    )
     dataset_cfg = [
         {
         "dataset": DatasetConfig(name="gsm8k",
@@ -190,7 +194,7 @@ def main(args):
         resources=resources,
         rollout_config=rollout_config,
         dataflow_config=dataflow_config,
-        judger_config=judger_config,
+        judger_config=judger_cfg,
         dataset_cfg=dataset_cfg,
         dataloader_cfg=dataloader_cfg,
         train_worker_cfg=train_worker_cfg,

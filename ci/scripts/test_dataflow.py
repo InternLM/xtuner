@@ -45,11 +45,10 @@ def main():
         tokenizer_path=MODEL_PATH,
         tensor_parallel_size=8,
     )
-    from xtuner.v1.ray.judger.gsm8k import compute_reward
+    from xtuner.v1.ray.judger.gsm8k import GSM8KJudgerConfig
+    gsm8k_judger_config = GSM8KJudgerConfig()
     judger_cfg = JudgerConfig(
-        reward_functions={"math": compute_reward},
-        extra_info={"math": {"score": 1, "format_score": 0.5}},
-        reward_ratio={"math": 1.0}
+        reward_judger_configs={"openai/gsm8k": gsm8k_judger_config}
     )
 
     dataflow_cfg = DataFlowConfig(

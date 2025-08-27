@@ -1,5 +1,9 @@
 import re
 
+from pydantic import BaseModel
+
+from .native import NativeJudger
+
 
 _SOLUTION_CLIP_CHARS = 300
 
@@ -47,3 +51,10 @@ def compute_reward(response, label, extra_info):
             return extra_info["score"]
         else:
             return extra_info["format_score"]
+
+
+class GSM8KJudgerConfig(BaseModel):
+    extra_info: dict = {"score": 1, "format_score": 0}
+
+    def build(self):
+        return NativeJudger(reward_func=compute_reward, extra_info=self.extra_info)

@@ -15,6 +15,7 @@ from xtuner.v1.datasets.data_item import RLTextDataItem
 if TYPE_CHECKING:
     from torch.utils.data import DataLoader
 
+    from transformers import PretrainedTokenizer
     from xtuner.v1.datasets import JsonlDataset
 
 from xtuner.v1.utils import get_logger
@@ -164,8 +165,6 @@ class ReplayBufferStorage:
                 self._observations[observation_id] = replay_meta
                 self._observations2states[observation_id] = replay_meta.state
 
-        return len(self._rollout_states["finished"])
-
     def get(self, global_batch_size: int) -> List[List[RLTextDataItem]]:
         samples = []
         if len(self._rollout_states["finished"]) < global_batch_size:
@@ -192,6 +191,12 @@ class ReplayBufferStorage:
     def dump(self):
         pass
 
+    def get_finished_samples(self):
+        return len(self._rollout_states["finished"])
+
+    def get_unfinished_samples(self):
+        return len(self._rollout_states["unfinished"])
+
 
 @ray.remote
 class ReplayBuffer:
@@ -199,7 +204,7 @@ class ReplayBuffer:
         self,
         dataset: "JsonlDataset",
         dataloader: "DataLoader",
-        tokenizer,
+        tokenizer: "PretrainedTokenizer",
         post_processor_func: Optional[Callable[..., Any]] = None,
     ):
         self.storage = ReplayBufferStorage()
@@ -229,7 +234,7 @@ class ReplayBuffer:
         return self.storage.get(global_batch_size)
 
     def add(self, grouped_dataitem: List[RLTextDataItem]):
-        return self.storage.add(grouped_dataitem)
+        self.storage.add(grouped_dataitem)
 
     def print(self):
         self.storage.print()
@@ -237,3 +242,9 @@ class ReplayBuffer:
     def dump(self):
         # todo: support dump replaybuffer
         self.storage.dump()
+
+    def get_finished_samples(self):
+        return self.storage.get_finished_samples()
+
+    def get_unfinished_samples(self):
+        return self.storage.get_unfinished_samples()

@@ -32,13 +32,16 @@ class SampleParams(BaseModel):
 
 @ray.remote
 class EnvController:
-    def __init__(self, environment: str, placement_group, rollout_cfg, judger_cfg=None, sample_params=None):
+    def __init__(self, environment: str, placement_group, rollout_cfg=None, judger_cfg=None, sample_params=None):
         self.environment = environment
         self.sample_params = sample_params if sample_params else SampleParams()
         self.init_rollout_controller(placement_group, rollout_cfg)
         self.init_judger_controller(placement_group, judger_cfg)
 
     def init_rollout_controller(self, placement_group, rollout_cfg):
+        if rollout_cfg is None:
+            self.rollout_controller = None
+            return
         if rollout_cfg.backend == "lmdeploy":
             from xtuner.v1.ray.rollout import LMDeployWorker
 
@@ -77,6 +80,7 @@ class EnvController:
 
         if self.judger_controller:
             rewards = await self.judger_controller.run.remote(group_samples)
+            assert len(rewards) == len(group_samples)
             for i in range(len(group_samples)):
                 group_samples[i]["reward"] = rewards[i]
 
@@ -91,7 +95,8 @@ class EnvController:
         return ray.get(self.rollout_controller.pause.remote())
 
     def shutdown(self):
-        return ray.get(self.rollout_controller.shutdown.remote())
+        if self.rollout_controller:
+            return ray.get(self.rollout_controller.shutdown.remote())
 
     def restart(self):
         return ray.get(self.rollout_controller.restart.remote())

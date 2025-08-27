@@ -1,5 +1,5 @@
 import asyncio
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import TYPE_CHECKING, Callable, Dict, List, Optional
 
 import ray
 import ray.util.queue
@@ -18,6 +18,7 @@ from .replay_buffer import ReplayBuffer
 if TYPE_CHECKING:
     from torch.utils.data import DataLoader
 
+    from transformers import PretrainedTokenizer
     from xtuner.v1.datasets import JsonlDataset
 
 
@@ -69,12 +70,13 @@ class DataFlow:
         dataflow_cfg: DataFlowConfig,
         dataset: "JsonlDataset",
         dataloader: "DataLoader",
-        tokenizer,
+        tokenizer: "PretrainedTokenizer",
         environment: EnvController,
+        postprocessor: Optional[Callable] = None,
     ):
         self.env = env
         self.config = dataflow_cfg
-        self.replay_buffer = ReplayBuffer.remote(dataset, dataloader, tokenizer)  # type: ignore[attr-defined]
+        self.replay_buffer = ReplayBuffer.remote(dataset, dataloader, tokenizer, postprocessor)  # type: ignore[attr-defined]
         self.env_controller = environment
         self.send_samples_count = 0
         self.finished_samples_count = 0
@@ -106,12 +108,8 @@ class DataFlow:
             # step 3: filter
             filtered_group_samples = await self.replay_buffer.post_processor.remote(group_samples)  # type: ignore[attr-defined]
             # step 4: add to replay buffer
-            finished_samples_count = await self.replay_buffer.add.remote(filtered_group_samples)  # type: ignore[attr-defined]
-            async with self.lock:
-                self.finished_samples_count = finished_samples_count
-                self.logger.info(
-                    f"Dataflow get filtered and finished response and have collected {self.finished_samples_count} samples"
-                )
+            await self.replay_buffer.add.remote(filtered_group_samples)  # type: ignore[attr-defined]
+
         except Exception as e:
             if group_samples is not None and len(group_samples) > 0:
                 self.logger.error(f"Worker task failed with exception: {e}. Returning meta for retry.", exc_info=True)
@@ -149,6 +147,7 @@ class DataFlow:
                         self.failed_samples_count += 1
 
             waiting_tasks = pending_tasks
+            self.finished_samples_count = ray.get(self.replay_buffer.get_finished_samples.remote())
 
         self.logger.info("Target batch size reached. Pausing rollout controller.")
         ray.get(self.env_controller.pause.remote())
@@ -156,11 +155,13 @@ class DataFlow:
         if waiting_tasks:
             await asyncio.wait_for(asyncio.gather(*waiting_tasks, return_exceptions=True), timeout=10)
 
+        self.unfinished_samples_count = ray.get(self.replay_buffer.get_unfinished_samples.remote())
         self.logger.info(
             f"send_samples_count: {self.send_samples_count}, unfinished_samples_count:{self.unfinished_samples_count}, finished_samples: {self.finished_samples_count}, failed_samples: {self.failed_samples_count}"
         )
 
     async def run(self):
+        self.restart()
         self.send_samples_count = 0
         self.finished_samples_count = 0
         self.unfinished_samples_count = 0
