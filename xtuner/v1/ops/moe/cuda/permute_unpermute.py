@@ -188,9 +188,11 @@ class UnpermuteMoE_topK(torch.autograd.Function):
         return act_grad, None, prob_grad
 
 
-def permute(input_act, indices, num_out_tokens=0, num_negative_one_in_indices=0) -> tuple[Tensor, Tensor]:
+def cuda_token_permute(
+    input_act, indices, num_topK: int | None = None, num_out_tokens=0, num_negative_one_in_indices=0
+) -> tuple[Tensor, Tensor]:
     return PermuteMoE_topK.apply(input_act, indices, num_out_tokens, num_negative_one_in_indices)  # type: ignore[return-value]
 
 
-def unpermute(input_act, row_id_map, probs=None) -> Tensor:
+def cuda_token_unpermute(input_act, row_id_map, probs=None) -> Tensor:
     return UnpermuteMoE_topK.apply(input_act, row_id_map, probs)  # type: ignore[return-value]

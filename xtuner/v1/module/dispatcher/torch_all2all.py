@@ -5,8 +5,8 @@ import torch.distributed as dist
 from torch.autograd.function import Function
 from typing_extensions import override
 
+from xtuner.v1.ops import permute, unpermute
 from xtuner.v1.ops.comm.all_to_all import all_to_all_single_autograd
-from xtuner.v1.ops.moe_permute import permute, unpermute
 from xtuner.v1.utils import copy_method_signature, get_device, get_logger
 
 from . import XTUNER_DISPATCHER_DEBUG
