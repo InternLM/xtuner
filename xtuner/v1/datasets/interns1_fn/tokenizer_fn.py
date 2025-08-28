@@ -594,6 +594,7 @@ class InternS1TokenizeFunction(CachableTokenizeFunction[InternS1DataItem]):
 class InternS1TokenizeFnConfig(BaseModel):
     model_config = ConfigDict(title="Base dataset config for xtuner", extra="allow")
     model_cfg: InternS1Config
+    max_length: int | None = None
     max_dynamic_patch: int | None = None
     min_dynamic_patch: int | None = None
     min_num_frames: int = 4
@@ -611,6 +612,7 @@ class InternS1TokenizeFnConfig(BaseModel):
             tokenizer,
             self.model_cfg,
             anno_name,
+            max_length=self.max_length,
             tokenizer_hash=tokenizer_hash,
             max_dynamic_patch=self.max_dynamic_patch,
             min_dynamic_patch=self.min_dynamic_patch,

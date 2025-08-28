@@ -117,7 +117,7 @@ def record_git_info(staged_path: Path, unstaged_path: Path) -> Annotated[str, "C
 
 def is_hf_model_path(path: str | Path) -> bool:
     try:
-        AutoConfig.from_pretrained(path)
+        AutoConfig.from_pretrained(path, trust_remote_code=True)
     except KeyboardInterrupt as e:
         raise e
     except Exception:
