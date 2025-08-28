@@ -11,7 +11,6 @@ from typing import Dict, List, Optional, Tuple, cast
 import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
-import torch.nn as nn
 from mmengine import mkdir_or_exist
 from safetensors import safe_open
 from torch.distributed._tensor import DTensor, Replicate, Shard
@@ -33,7 +32,6 @@ from xtuner.v1.config import FSDPConfig, OptimConfig, TransformerConfig
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.model.base import BaseModel, ModelItem
-from xtuner.v1.module.grouped_linear.moe_group_linear import GroupedLinear
 from xtuner.v1.module.router import NoAuxRouterConfig
 from xtuner.v1.utils import get_device, get_logger, get_torch_device_module
 
@@ -142,7 +140,11 @@ class TrainEngine:
     float8_handler: Optional[Float8Handler]
 
     def __init__(
-        self, model_cfg: TransformerConfig, optim_cfg: OptimConfig, fsdp_cfg: FSDPConfig, intra_layer_micro_batch=1
+        self,
+        model_cfg: TransformerConfig,
+        optim_cfg: OptimConfig,
+        fsdp_cfg: FSDPConfig,
+        intra_layer_micro_batch: int = 1,
     ) -> None:
         self.model_cfg = model_cfg
         self.optim_cfg = optim_cfg
@@ -150,6 +152,7 @@ class TrainEngine:
         self.model = self.build_model()
         self.optimizer = self.build_optimizer(optim_cfg)
         self.intra_layer_micro_batch = intra_layer_micro_batch
+        self._count = 0
 
     def build_model(self) -> BaseModel:
         with torch.device("meta"):
@@ -162,26 +165,34 @@ class TrainEngine:
                 scaling_granularity_grouped_gemm=self.model_cfg.float8_cfg.scaling_granularity_grouped_gemm,
             )
         model = model.fully_shard(self.fsdp_cfg, self.float8_handler)
+        model.to_empty(device=model.device)
+
+        if dist.get_rank() == 0:
+            logger.info(model)
 
         if self.float8_handler:
             self.float8_handler.build_reduce_mesh(model, cast(DeviceMesh, model.fsdp_mesh))
         return model
 
-    # todo: @yehaochen
     def init_model(self):
-        for module in self.model.modules():
-            if isinstance(module, nn.Linear):
-                module.weight.data.normal_(mean=0.0, std=0.02)
-            elif isinstance(module, nn.Embedding):
-                module.weight.data.normal_(mean=0.0, std=0.02)
-            elif isinstance(module, nn.LayerNorm):
-                module.weight.data.fill_(1.0)
-            elif isinstance(module, GroupedLinear):
-                # Initialize the weight of GroupedLinear
-                module.weight.data.normal_(mean=0.0, std=0.02)
+        self.model._init_weights()
 
     def build_optimizer(self, optim_cfg: OptimConfig) -> torch.optim.Optimizer:
         params = [p for p in self.model.parameters() if p.requires_grad]
+
+        trainable_parameters_names = self.model.trainable_parameters()
+        trainable_names = [name for name, _ in trainable_parameters_names]
+        num_total_requires_grad = 0
+        num_total = 0
+        for name, params_ in self.model.named_parameters():
+            num_total += params_.numel()
+            num_total_requires_grad += params_.numel() if name in trainable_names else 0
+
+        if dist.get_rank() == 0:
+            logger.info(
+                f"Total trainable parameters: {num_total_requires_grad // 1e6}M, total parameters: {num_total // 1e6}M"
+            )
+            logger.info(f"Trainable parameters names: {trainable_names}")
         return optim_cfg.build(params)
 
     @property
@@ -227,6 +238,10 @@ class TrainEngine:
         step_balancing_loss: torch.Tensor | None = None
         step_z_loss: torch.Tensor | None = None
         step_consumed_tokens = torch.tensor(0.0, device=DEVICE)
+
+        if self._count == 0:
+            logger.info(f"grad_accumulation_steps: {iters_per_step}")
+            self._count += 1
 
         for i in range(0, len(data_batches), intra_layer_micro_batch):
             data_batch = data_batches[i : i + intra_layer_micro_batch]
@@ -299,6 +314,9 @@ class TrainEngine:
 
     def from_hf(self, hf_path: str | Path, strict: bool = False):
         self.model.from_hf(hf_path=hf_path, strict=strict)
+
+    def init_model_weights(self):
+        self.model.init_weights()
 
     @staticmethod
     def group_tensors_by_device_mesh_and_placements(tensors: List[torch.Tensor]):

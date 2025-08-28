@@ -143,7 +143,6 @@ class Dense(BaseModel):
         float8_handler: Float8Handler | None = None,
     ) -> "Dense":
         self.fsdp_config = fsdp_config
-        device = "cpu" if self.fsdp_config.cpu_offload else str(DEVICE)
         self._init_device_mesh(fsdp_config)
 
         if float8_handler is not None:
@@ -192,7 +191,6 @@ class Dense(BaseModel):
                 reshard_after_forward=reshard_after_forward,
                 offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
             )
-            layer.to_empty(device=device)
 
         for layer_cur, layer_next in zip(
             list(self.layers.values())[:-1],
@@ -207,7 +205,6 @@ class Dense(BaseModel):
             reshard_after_forward=self.fsdp_config.reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
         )
-        self.embed_tokens.to_empty(device=device)
 
         fully_shard(
             self.norm,
@@ -216,7 +213,6 @@ class Dense(BaseModel):
             reshard_after_forward=self.fsdp_config.reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
         )
-        self.norm.to_empty(device=device)
 
         fully_shard(
             self.lm_head,
@@ -225,7 +221,6 @@ class Dense(BaseModel):
             reshard_after_forward=self.fsdp_config.reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
         )
-        self.lm_head.to_empty(device=device)
 
         fully_shard(
             self,

@@ -93,7 +93,8 @@ class Trainer:
         self,
         *,
         load_from: str | Path | None = None,  # Huggingface model path or saved trainer_path
-        model_cfg: TransformerConfig,
+        # TODO: InternS1Config 是组合配置，后续应该专门写一个组合 base model cfg，就可以通用
+        model_cfg: TransformerConfig | InternS1Config,
         optim_cfg: OptimConfig,
         fsdp_cfg: FSDPConfig | None = None,
         dataset_cfg: DatasetConfigList,
@@ -269,6 +270,7 @@ class Trainer:
             profile_memory=config.profile_memory,
             intra_layer_micro_batch=config.intra_layer_micro_batch,
             seed=config.seed,
+            backend=config.dist_backend,
             debug=config.debug,
         )
         self.config = config
@@ -406,7 +408,7 @@ class Trainer:
     def build_engine(
         self,
         model_path: Path | None,
-        model_config: TransformerConfig,
+        model_config: TransformerConfig | InternS1Config,
         optim_config: OptimConfig,
         fsdp_config: FSDPConfig,
         resume_config: ResumeConfig | None = None,
@@ -430,6 +432,8 @@ class Trainer:
             )
         if model_path is not None:
             engine.from_hf(hf_path=model_path, strict=strict)
+        else:
+            engine.init_model_weights()
         return engine
 
     def build_dataloader(

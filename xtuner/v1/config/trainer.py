@@ -20,7 +20,7 @@ class ResumeConfig(TypedDict):
 
 class TrainerConfig(BaseModel):
     model_config = ConfigDict(title="Trainer config", extra="allow", arbitrary_types_allowed=True)
-    model_cfg: TransformerConfig
+    model_cfg: TransformerConfig | BaseModel  # TODO: Config refactpr
     load_from: str | Path | None = None
     tokenizer_path: str | Path
     dataset_cfg: Annotated[DatasetConfigList, Parameter(show_default=False)]

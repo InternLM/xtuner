@@ -109,6 +109,23 @@ class BaseModel(nn.Module):
         with profile_time_and_memory(f"[Saving HF to {hf_dir} cost]"):
             self._save_hf(hf_dir=hf_dir, save_dtype=save_dtype)
 
+    @property
+    def device(self) -> torch.device:
+        if self.fsdp_config is not None and self.fsdp_config.cpu_offload:
+            return torch.device("cpu")
+        return torch.device(DEVICE)
+
+    @torch.no_grad()
+    def init_weights(self):
+        # TODO: HardCode here. The initialization method should be module specific. All module in model
+        # in model should be defined in `xtuner.module`
+        from xtuner.v1.utils import default_init_weights
+
+        initialized_params = default_init_weights(self)
+
+        if missing := {name for name, _ in self.named_parameters()} - initialized_params:
+            raise RuntimeError(f"{missing} is not initialized")
+
     def _init_load_spec(self) -> None:
         # NOTE: (yehaochen) This is a workaround to distinguish between different parameter HF loading methods
         # and model partitioning methods. Although PyTorch provides Shard, Replicate and other Placements, in
@@ -826,9 +843,9 @@ class BaseModel(nn.Module):
             local_tensor.copy_(sharded_loaded_tensor)
         return []
 
-    def _has_meta_param(self, module: nn.Module) -> bool:
+    def _has_meta_param(self, module: nn.Module, recurse: bool = False) -> bool:
         """Check if the module has meta parameters."""
-        for data in chain(module.parameters(recurse=False), module.buffers(recurse=False)):
+        for data in chain(module.parameters(recurse=recurse), module.buffers(recurse=False)):
             if data.is_meta:
                 return True
         return False

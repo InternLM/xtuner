@@ -1,6 +1,7 @@
+from functools import partial
 from torch import nn
 import torch
-from typing import cast, Union, Optional
+from typing import cast, Union, Optional, override
 import numpy as np
 
 # TODO: 等 interns1 合入后全部换成 interns1 的实现
@@ -21,7 +22,7 @@ except:
     has_timm = False
 from tqdm import tqdm
 from xtuner.v1.ops import flash_attn_varlen_func
-from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_device, get_torch_device_module
+from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_device, get_torch_device_module, init_params
 from xtuner.v1.model import BaseModel
 from xtuner.v1.config import FSDPConfig
 from .interns1_config import InternS1VisionConfig
@@ -123,6 +124,7 @@ class InternS1VisionLayer(nn.Module):
 
     def __init__(self, config: InternS1VisionConfig, drop_path_rate: float) -> None:
         super().__init__()
+        self.config = config
         self.seq_len_dim = 1
         self.attention = InternS1VisionAttention(config)
         self.mlp = InternVLVisionMLP(config)
@@ -138,6 +140,33 @@ class InternS1VisionLayer(nn.Module):
         assert has_timm, 'timm is not installed, please install it to use DropPath'
         self.drop_path1 = DropPath(drop_path_rate) if drop_path_rate > 0. else nn.Identity()
         self.drop_path2 = DropPath(drop_path_rate) if drop_path_rate > 0. else nn.Identity()
+
+    @torch.no_grad()
+    def init_weights(self):
+        initialized_params: set[str] = set()
+        for name, module in self.named_modules():
+            if isinstance(module, (nn.Linear, nn.Conv2d)):
+                init_params(module.weight, partial(torch.nn.init.normal_, mean=0.0, std=self.config.initializer_range))
+                initialized_params.add(f"{name}.weight")
+                if module.bias is not None:
+                    init_params(module.bias, torch.nn.init.zeros_)
+                    initialized_params.add(f"{name}.bias")
+
+            elif isinstance(module, (nn.LayerNorm, InternVLVisionRMSNorm)):
+                init_params(module.weight, torch.nn.init.ones_)
+                init_params(module.bias, torch.nn.init.zeros_)
+                initialized_params.add(f"{name}.weight")
+                initialized_params.add(f"{name}.bias")
+
+        init_values = self.config.layer_scale_init_value
+        init_params(self.lambda_1, lambda x: x.fill_(init_values))
+        init_params(self.lambda_2, lambda x: x.fill_(init_values))
+        initialized_params.add(f"lambda_1")
+        initialized_params.add(f"lambda_2")
+
+        if (missing := {name for name, _ in self.named_parameters()} - initialized_params):
+            raise RuntimeError(f"{missing} is not initialized")
+        return initialized_params
 
     @maybe_compile(fullgraph=True)
     def attention_pre_forward(self, hidden_states):
@@ -216,6 +245,41 @@ class InternS1VisionModel(BaseModel):
         self._hf_prefix = "model.vision_tower."
         self._init_load_spec()
 
+    @torch.no_grad()
+    def init_weights(self) -> None:
+        initialized_params: set[str] = set()
+
+        init_params(self.embeddings.cls_token, torch.nn.init.zeros_)
+        initialized_params.add("embeddings.cls_token")
+        if self.config.use_mask_token:
+            init_params(self.embeddings.mask_token, torch.nn.init.zeros_)
+            initialized_params.add("embeddings.mask_token")
+
+        if self.config.use_absolute_position_embeddings:
+            init_params(self.embeddings.position_embeddings, torch.nn.init.zeros_)
+            initialized_params.add("embeddings.position_embeddings")
+
+        for idx, layer in enumerate(self.encoder.layer):
+            initialized_params |= {f"encoder.layer.{idx}.{name}" for name in layer.init_weights()}
+
+        for name, module in self.embeddings.named_modules():
+            if isinstance(module, (nn.Linear, nn.Conv2d)):
+                init_params(module.weight, partial(torch.nn.init.normal_, mean=0.0, std=self.config.initializer_range))
+                initialized_params.add(f"embeddings.{name}.weight")
+                if module.bias is not None:
+                    init_params(module.bias, torch.nn.init.zeros_)
+                    initialized_params.add(f"embeddings.{name}.bias")
+
+            elif isinstance(module, (nn.LayerNorm, InternVLVisionRMSNorm)):
+                init_params(module.weight, torch.nn.init.ones_)
+                init_params(module.bias, torch.nn.init.zeros_)
+                initialized_params.add(f"embeddings.{name}.weight")
+                initialized_params.add(f"embeddings.{name}.bias")
+
+        expected_param_name = {self._clean_param_name(name) for name, _ in self.named_parameters()}
+        if (missing := expected_param_name - initialized_params):
+            raise RuntimeError(f"{missing} is not initialized")
+
     def forward(
             self,
             pixel_values: torch.Tensor,
@@ -243,6 +307,7 @@ class InternS1VisionModel(BaseModel):
     def to_hf_key_list(self, key: str) -> list[str]:
         return [self._hf_prefix+key]
 
+    @override
     def fully_shard(
         self,
         fsdp_config: FSDPConfig,
@@ -288,7 +353,6 @@ class InternS1VisionModel(BaseModel):
                 if fsdp_config.cpu_offload
                 else None,
             )
-            layer.to_empty(device=device)
 
         for layer_cur, layer_next in zip(self.encoder.layer[:-1], self.encoder.layer[1:]):
             layer_cur.set_modules_to_forward_prefetch([layer_next])
@@ -300,7 +364,4 @@ class InternS1VisionModel(BaseModel):
             reshard_after_forward=True,
             offload_policy=CPUOffloadPolicy() if fsdp_config.cpu_offload else None,
         )
-        self.embeddings.to_empty(device=device)
-        self.layernorm.to_empty(device=device)
-
         return self

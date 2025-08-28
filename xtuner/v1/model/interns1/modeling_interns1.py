@@ -1,6 +1,8 @@
 import types
 from typing import cast, Callable
+from typing_extensions import override
 from pathlib import Path
+from functools import partial
 
 import torch
 import torch.distributed as dist
@@ -105,9 +107,9 @@ class InternS1ForConditionalGeneration(BaseModel):
 
     @override
     def fully_shard(
-            self,
-            fsdp_config: FSDPConfig,
-            float8_handler: Float8Handler | None = None,
+        self,
+        fsdp_config: FSDPConfig,
+        float8_handler: Float8Handler | None = None,
     ):
         # TODO: 判断其余模块是否已经被 fsdp 切分了
 
@@ -255,3 +257,9 @@ class InternS1ForConditionalGeneration(BaseModel):
             loss_ctx
         )
         return outputs
+
+    @override
+    def init_weights(self) -> None:
+        self.vision_tower.init_weights()
+        self.language_model.init_weights()
+        self.multi_modal_projector.init_weights()
