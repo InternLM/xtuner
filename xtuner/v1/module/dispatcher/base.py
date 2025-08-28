@@ -11,7 +11,7 @@ import torch
 from typing_extensions import override
 
 from xtuner.v1.config.base_model import MoEConfig
-from xtuner.v1.ops.moe_permute import permute, unpermute
+from xtuner.v1.ops import permute, unpermute
 
 
 HiddenStates: TypeAlias = torch.Tensor

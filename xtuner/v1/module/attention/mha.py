@@ -1,22 +1,13 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-import os
 from typing import cast
 
 import torch
-
-
-# TODO: #  Uniofiy "1" and "true"
-# For the optional feature, we should collect all information to logs
-if os.environ.get("XTUNER_USE_FA3", "0") == "1":
-    from flash_attn_interface import flash_attn_varlen_func, flash_attn_with_kvcache
-else:
-    from flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
-
 from torch import nn
 
-from transformers.models.llama.modeling_llama import apply_rotary_pos_emb, repeat_kv
+from transformers.models.llama.modeling_llama import repeat_kv
 from xtuner.v1.config import BaseAttnConfig, Float8Config, GenerateConfig
 from xtuner.v1.data_proto import SequenceContext
+from xtuner.v1.ops import apply_rotary_pos_emb, flash_attn_varlen_func
 from xtuner.v1.ops.comm.all_to_all import ulysses_all_to_all
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger
 
@@ -61,6 +52,8 @@ def paged_attention_decoding(
     cache_seqlens: torch.Tensor,
     block_table: torch.Tensor,
 ) -> torch.Tensor:
+    from flash_attn import flash_attn_with_kvcache
+
     bs = block_table.size(0)
     attn_outputs = cast(
         torch.Tensor,
@@ -351,8 +344,6 @@ class MultiHeadAttention(nn.Module):
                 deterministic=XTUNER_DETERMINISTIC,
             ),
         )
-        # if dist.get_rank() == 0:
-        #     print("[FlashAttn Output] attn_output shape:", attn_output.shape)
 
         if seq_ctx.sequence_parallel_mesh and seq_ctx.sequence_parallel_mesh.size() > 1:
             attn_output = ulysses_all_to_all(

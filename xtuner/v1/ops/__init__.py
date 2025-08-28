@@ -3,14 +3,12 @@ from .comm import all_to_all_single_autograd, ulysses_all_to_all
 
 __all__ = ["all_to_all_single_autograd", "ulysses_all_to_all"]
 
-try:
-    from .moe_gemm import moe_grouped_gemm as grouped_gemm
-    from .moe_gemm_triton import moe_grouped_gemm_triton as grouped_gemm_triton
-    from .moe_permute import permute, unpermute
-except ImportError:
-    ...
-else:
-    __all__.extend(["permute", "unpermute", "grouped_gemm", "grouped_gemm_triton"])
+from .flash_attn import flash_attn_varlen_func
+from .moe import group_gemm, permute, unpermute
+from .rms_norm import rms_norm
+from .rotary_emb import apply_rotary_pos_emb
+from .swiglu import swiglu
+from .tensor_parallel import attn_column_parallel, attn_row_parallel
 
 
 try:

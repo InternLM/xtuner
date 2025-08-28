@@ -20,7 +20,7 @@ class GroupedGemm(torch.autograd.Function):
         return dx, dw, None
 
 
-def moe_grouped_gemm_triton(x, w, tokens_per_expert):
+def triton_group_gemm(x, w, tokens_per_expert):
     """Grouped matrix multiplication (GMM) for expert models.
 
     Args:

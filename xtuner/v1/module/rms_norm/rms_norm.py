@@ -3,6 +3,8 @@ import torch
 from torch import nn
 from torch.distributed.tensor import DTensor, Partial
 
+from xtuner.v1.ops import rms_norm
+
 
 class RMSNorm(nn.Module):
     weight: torch.Tensor
@@ -19,12 +21,7 @@ class RMSNorm(nn.Module):
         else:
             weight = self.weight
 
-        # return F.rms_norm(hidden_states, weight.shape, weight, self.variance_epsilon)
-        input_dtype = hidden_states.dtype
-        hidden_states = hidden_states.to(torch.float32)
-        variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
-        return weight * hidden_states.to(input_dtype)
+        return rms_norm(hidden_states, weight, epsilon=self.variance_epsilon)
 
     def extra_repr(self):
         return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"

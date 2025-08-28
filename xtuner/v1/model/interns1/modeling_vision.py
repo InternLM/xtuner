@@ -20,7 +20,7 @@ try:
 except:
     has_timm = False
 from tqdm import tqdm
-from flash_attn import flash_attn_varlen_func
+from xtuner.v1.ops import flash_attn_varlen_func
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_device, get_torch_device_module
 from xtuner.v1.model import BaseModel
 from xtuner.v1.config import FSDPConfig

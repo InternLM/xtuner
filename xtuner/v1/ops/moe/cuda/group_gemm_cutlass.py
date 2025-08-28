@@ -64,3 +64,20 @@ def backward(ctx, grad) -> tuple[Tensor | None, Tensor | None, None, None, None]
 
 
 moe_grouped_gemm.register_autograd(backward, setup_context=setup_context)
+
+
+def cutlass_group_gemm(x, w, tokens_per_expert):
+    """Grouped matrix multiplication (GMM) for expert models.
+
+    Args:
+        x (Tensor): Input tensor of shape (batch_size, seq_len, din).
+        w (Tensor): Weight tensor of shape (num_experts, dout, din).
+        tokens_per_expert (Tensor): Number of tokens per expert.
+
+    Returns:
+        Tensor: Output tensor of shape (batch_size, seq_len, dout).
+    """
+    if x.shape[0] == 0:
+        # put x and w to the pytorch graph
+        return torch.matmul(x, w[0].T)
+    return moe_grouped_gemm(x, w, tokens_per_expert.cpu(), trans_b=True)
