@@ -25,6 +25,7 @@ class Qwen3DenseConfig(TransformerConfig):
         return Qwen3Dense(self)
 
 
+# TODO: Unify the config name style
 class Qwen3_8BConfig(Qwen3DenseConfig):
     vocab_size: int = 151936
     max_position_embeddings: int = 40960

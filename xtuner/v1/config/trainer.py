@@ -22,7 +22,7 @@ class TrainerConfig(BaseModel):
     model_config = ConfigDict(title="Trainer config", extra="allow", arbitrary_types_allowed=True)
     model_cfg: TransformerConfig | BaseModel  # TODO: Config refactpr
     load_from: str | Path | None = None
-    tokenizer_path: str | Path
+    tokenizer_path: str | Path | None = None
     dataset_cfg: Annotated[DatasetConfigList, Parameter(show_default=False)]
     dataloader_cfg: DataloaderConfig
     optim_cfg: OptimConfig

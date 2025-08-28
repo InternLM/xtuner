@@ -2,7 +2,7 @@ docutils
 myst-parser==2.0.0
 sphinx==6.2.1
 sphinx-argparse
-sphinx-book-theme==1.0.1
+sphinx-book-theme==1.1.4
 sphinx-copybutton==0.5.2
 sphinx_markdown_tables
 sphinx-togglebutton
