@@ -47,9 +47,11 @@ class TrainingArguments(BaseModel):
     ] = None
     # dataset
     dataset: Annotated[Path, Parameter(group=dataset_group, help="dataset config path or jsonl file or dir")]
-    dataloader: Annotated[
-        DataloaderConfig, Parameter(group=dataset_group, help="dataset config path or jsonl file or dir", name="*")
-    ]
+    dataloader_cfg: Annotated[
+        DataloaderConfig | None,
+        Parameter(group=dataset_group, help="dataset config path or jsonl file or dir", name="*"),
+    ] = None
+    max_length: Annotated[int, Parameter(group=dataset_group, help="max sequence length")] = 4096
     # optimizer
     lr: Annotated[float, Parameter(group=optimizer_group, help="learning rate")] = 6e-5
     optim: Annotated[Literal["AdamW"], Parameter(group=optimizer_group, help="optimizer type")] = "AdamW"
@@ -78,15 +80,17 @@ class TrainingArguments(BaseModel):
     def model_post_init(self, _):
         if self.tokenizer_path is None:
             load_from = self.load_from
-            assert load_from is not None, "Transformer model path should be set if `tokenizer_path` is None"
-            assert is_hf_model_path(load_from), (
-                "Transformer model path should be a valid HuggingFace model path if `tokenizer_path` is None"
-            )
-            self.tokenizer_path = cast(Path, Path(load_from))
+            if load_from is not None:
+                assert is_hf_model_path(load_from), (
+                    "Transformer model path should be a valid HuggingFace model path if `tokenizer_path` is None"
+                )
+                self.tokenizer_path = cast(Path, Path(load_from))
 
     def to_trainer_config(self):
         # Load dataset config
         dataset_cfg = self._get_dataset_config()
+        for ds in dataset_cfg:
+            ds["tokenize_fn"].max_length = self.max_length
 
         # Create optimizer config
         optim_cfg = AdamWConfig(lr=self.lr)
@@ -95,7 +99,7 @@ class TrainingArguments(BaseModel):
         lr_cfg = LRConfig(lr_type=self.scheudler_type, warmup_ratio=self.warmup_ratio, lr_min=self.lr_min)
 
         # Create dataloader config (using defaults for now)
-        dataloader_cfg = self.dataloader
+        dataloader_cfg = self.dataloader_cfg or DataloaderConfig()
         model_cfg = self._get_model_config()
         resume_cfg = None
 

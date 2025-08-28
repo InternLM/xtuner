@@ -10,7 +10,7 @@ from xtuner.v1.utils import get_device
 DEVICE = get_device()
 
 
-def init_params(param: torch.Tensor, init_fn: Callable[[torch.Tensor], torch.Tensor | None]) -> nn.Parameter:
+def init_params(param: torch.Tensor, init_fn: Callable[[torch.Tensor], torch.Tensor | None]):
     assert not param.is_meta, "Internal Error. Found meta tensor during initialize model weight"
     device = param.device
 
@@ -49,7 +49,7 @@ def default_init_weights(module: nn.Module) -> set[str]:
             bias = cast(torch.Tensor, module.bias)
 
             if isinstance(bias, DTensor):
-                replicate_bias = torch.empty_like(bias.full_tensor(), device=device)
+                replicate_bias = torch.empty_like(bias.full_tensor(), device=device)  # type: ignore
 
                 replicate_bias.zero_()
                 bias.copy_(distribute_tensor(replicate_bias, device_mesh=bias.device_mesh, placements=bias.placements))
@@ -62,7 +62,7 @@ def default_init_weights(module: nn.Module) -> set[str]:
             weight = cast(torch.Tensor, module.weight)
 
             if isinstance(weight, DTensor):
-                replicate_weight = torch.empty_like(weight.full_tensor(), device=device)
+                replicate_weight = torch.empty_like(weight.full_tensor(), device=device)  # type: ignore
 
                 if is_norm:
                     replicate_weight.fill_(1.0)
@@ -72,7 +72,7 @@ def default_init_weights(module: nn.Module) -> set[str]:
                     distribute_tensor(replicate_weight, device_mesh=weight.device_mesh, placements=weight.placements)
                 )
             else:
-                weight = torch.empty_like(weight, device=device)
+                weight = torch.empty_like(weight, device=device)  # type: ignore
 
                 if is_norm:
                     weight.fill_(1.0)

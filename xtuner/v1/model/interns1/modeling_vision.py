@@ -1,7 +1,8 @@
 from functools import partial
 from torch import nn
 import torch
-from typing import cast, Union, Optional, override
+from typing import cast, Union, Optional
+from typing_extensions import override
 import numpy as np
 
 # TODO: 等 interns1 合入后全部换成 interns1 的实现

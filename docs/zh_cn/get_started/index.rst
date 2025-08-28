@@ -6,4 +6,5 @@
    installation.md
    quickstart.md
    sft.md
+   mlm_sft.md
    grpo.md

@@ -38,6 +38,8 @@ from xtuner.v1.utils import (
     record_git_info,
 )
 
+from .toy_tokenizer import UTF8ByteTokenizer
+
 
 # TODO: Move DEVICE to `xtuner.utils.device`
 DEVICE = get_device()
@@ -101,7 +103,7 @@ class Trainer:
         dataloader_cfg: DataloaderConfig,
         loss_ctx: CELossContext | None = None,
         lr_cfg: LRConfig,
-        tokenizer_path: str | Path,
+        tokenizer_path: str | Path | None = None,
         global_batch_size: int | None,
         work_dir: Path | str | None = None,
         log_dir: Path | str | None = None,
@@ -146,7 +148,11 @@ class Trainer:
             f"`epoch_num`: {epoch_num}, `total_step`: {total_step} should not be set at the same time"
         )
 
-        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
+        if tokenizer_path is not None:
+            self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
+        else:
+            self.tokenizer = UTF8ByteTokenizer()
+            logger.info(f"Using toy tokenizer: {self.tokenizer}!")
 
         if fsdp_cfg is None:
             fsdp_cfg = FSDPConfig()

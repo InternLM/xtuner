@@ -1,10 +1,10 @@
 from pathlib import Path
 from typing import Annotated
 
+import torch.distributed as dist
 from cyclopts import App, Parameter
 from cyclopts.group import Group
 
-import torch.distributed as dist
 from xtuner.v1.train.arguments import TrainingArguments
 from xtuner.v1.train.trainer import Trainer
 from xtuner.v1.utils import Config
@@ -38,4 +38,4 @@ def main(
 
 
 if __name__ == "__main__":
-    app()
+    app(exit_on_error=False)
