@@ -4,6 +4,7 @@ from typing import Annotated
 from cyclopts import App, Parameter
 from cyclopts.group import Group
 
+import torch.distributed as dist
 from xtuner.v1.train.arguments import TrainingArguments
 from xtuner.v1.train.trainer import Trainer
 from xtuner.v1.utils import Config
@@ -31,6 +32,9 @@ def main(
 
     trainer = Trainer.from_config(trainer_cfg)
     trainer.fit()
+
+    if dist.is_initialized():
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":

@@ -8,7 +8,6 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 from torch import nn
-from torch.autograd.function import Function
 from torch.distributed._functional_collectives import all_reduce
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
@@ -70,7 +69,6 @@ class MoE(BaseModel):
 
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.lm_head = LMHead(config.hidden_size, config.vocab_size, bias=False)
-        self.config = config
 
         self.layers = self.build_layers(config)
         self.rotary_emb = self.build_rotary_embedding(config)
@@ -501,8 +499,8 @@ class MoE(BaseModel):
         self.mp_policy = MixedPrecisionPolicy(
             param_dtype=self.fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
         )
-        device = "cpu" if self.fsdp_config.cpu_offload else str(DEVICE)
         self._init_device_mesh(fsdp_config)
+        self._maybe_compile_layers()
 
         # TODO: 一定不能少，因为在模型 init 时候会构建一套 ep_mesh，如果不重新构建，fsdp_mesh 和 ep_mesh 会没有任何联系
         # fully_shard 时候会出现： AssertionError: FSDP requires the DP and TP mesh to have the same parent mesh
@@ -536,7 +534,6 @@ class MoE(BaseModel):
 
         self.rotary_emb = self.build_rotary_embedding(self.config)
 
-        self._maybe_compile_layers()
         mp_policy = MixedPrecisionPolicy(
             param_dtype=self.fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
         )
@@ -559,7 +556,6 @@ class MoE(BaseModel):
                 reshard_after_forward=reshard_after_forward,
                 offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
             )
-            layer.to_empty(device=device)
 
         for layer_cur, layer_next in zip(
             list(self.layers.values())[:-1],
@@ -574,7 +570,6 @@ class MoE(BaseModel):
             reshard_after_forward=self.fsdp_config.reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
         )
-        self.embed_tokens.to_empty(device=device)
 
         fully_shard(
             self.norm,
@@ -583,7 +578,6 @@ class MoE(BaseModel):
             reshard_after_forward=self.fsdp_config.reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
         )
-        self.norm.to_empty(device=device)
 
         fully_shard(
             self.lm_head,
@@ -592,7 +586,6 @@ class MoE(BaseModel):
             reshard_after_forward=self.fsdp_config.reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
         )
-        self.lm_head.to_empty(device=device)
 
         fully_shard(
             self,
@@ -804,15 +797,3 @@ class MoE(BaseModel):
     ) -> MoEModelOutputs: ...
 
     __call__ = nn.Module.__call__
-
-
-class _DebugBackward(Function):
-    @staticmethod
-    def forward(ctx, input_tensor: torch.Tensor, name: str) -> torch.Tensor:
-        ctx.name = name
-        return input_tensor
-
-    @staticmethod
-    def backward(ctx, grad_output: torch.Tensor):
-        print(ctx.name)
-        return grad_output, None

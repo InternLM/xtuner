@@ -4,6 +4,7 @@ from .device import get_device, get_torch_device_module
 from .dtensor import is_evenly_distributed
 from .enum_helper import StrEnum
 from .exception_helper import ParallelConfigException
+from .init_weight import default_init_weights, init_params
 from .loader import HFCheckpointLoader
 from .logger import get_logger, log_format
 from .misc import XTUNER_DETERMINISTIC, SharedMemory, get_padding_length, is_hf_model_path, record_git_info
@@ -35,4 +36,6 @@ __all__ = [
     "is_hf_model_path",
     "copy_signature",
     "copy_method_signature",
+    "init_params",
+    "default_init_weights",
 ]

@@ -33,7 +33,7 @@ class InternS1TrainEngine(TrainEngine):
     ) -> None:
         super().__init__(*args, **kwargs)
 
-    def build_model(self) -> InternS1ForConditionalGeneration:
+    def build_model(self, init_model_weights: bool = False) -> InternS1ForConditionalGeneration:
         with torch.device("meta"):
             model: InternS1ForConditionalGeneration = self.model_cfg.build()
 
@@ -66,6 +66,10 @@ class InternS1TrainEngine(TrainEngine):
         model.vision_tower.fully_shard(self.fsdp_cfg, self.vision_float8_handler)
         model.multi_modal_projector.fully_shard(self.fsdp_cfg, self.projector_float8_handler)
         model = model.fully_shard(self.fsdp_cfg)
+        model.to_empty(device=model.device)
+
+        if dist.get_rank() == 0:
+            logger.info(model)
 
         if self.llm_float8_handler:
             self.llm_float8_handler.build_reduce_mesh(
@@ -101,6 +105,10 @@ class InternS1TrainEngine(TrainEngine):
             f"data_batches length {len(data_batches)} is not divisible by intra_layer_micro_batch {intra_layer_micro_batch}"
         )
         iters_per_step = self.grad_accumulation_steps(len(data_batches))
+
+        if self._count == 0:
+            logger.info(f"grad_accumulation_steps: {iters_per_step}")
+            self._count += 1
 
         moe_need_update_bias = (
             isinstance(getattr(self.model_cfg.text_config, "router", None), NoAuxRouterConfig)

@@ -23,5 +23,8 @@ class RMSNorm(nn.Module):
 
         return rms_norm(hidden_states, weight, epsilon=self.variance_epsilon)
 
+    def init_weights(self):
+        self.weight.data.fill_(1.0)
+
     def extra_repr(self):
         return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
