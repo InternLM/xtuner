@@ -52,7 +52,7 @@ def to_hf_key_list_wrapper(fn: Callable[[str], list[str]], convertor: Callable[[
 class InternS1ForConditionalGeneration(BaseModel):
     def __init__(self, config: InternS1Config):
         super().__init__()
-
+        self.config = config
         self.select_layer = config.vision_feature_layer
         self.downsample_ratio = config.downsample_ratio
 
@@ -84,6 +84,25 @@ class InternS1ForConditionalGeneration(BaseModel):
         for key, value in self.language_model.load_spec_mapping.items():
             self.load_spec_mapping['language_model.' + key] = value
 
+        self._freeze_modules()
+
+    def _freeze_modules(self):
+        freeze_vision = self.config.freeze_vision
+        if freeze_vision:
+            self.vision_tower.requires_grad_(False)
+            self.vision_tower.eval()
+            logger.info("Freeze vision tower")
+        freeze_projector = self.config.freeze_projector
+        if freeze_projector:
+            self.multi_modal_projector.requires_grad_(False)
+            self.multi_modal_projector.eval()
+            logger.info("Freeze multi modal projector")
+        freeze_language = self.config.freeze_language
+        if freeze_language:
+            self.language_model.requires_grad_(False)
+            self.language_model.eval()
+            logger.info("Freeze language model")
+
     @override
     def fully_shard(
             self,
@@ -93,8 +112,9 @@ class InternS1ForConditionalGeneration(BaseModel):
         # TODO: 判断其余模块是否已经被 fsdp 切分了
 
         # NOTE: 暂时只能在这个地方进行 checkpoint_wrapper
-        self.multi_modal_projector = checkpoint_wrapper(self.multi_modal_projector,  # type: ignore
-                                                            checkpoint_impl=CheckpointImpl.REENTRANT)
+        # TODO: 当只训练某个部分时候，不能开启 checkpoint，否则 grad 是 None, 后续有需要再支持。
+        # self.multi_modal_projector = checkpoint_wrapper(self.multi_modal_projector,  # type: ignore
+        #                                                     checkpoint_impl=CheckpointImpl.REENTRANT)
 
         mp_policy = MixedPrecisionPolicy(
             param_dtype=fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype

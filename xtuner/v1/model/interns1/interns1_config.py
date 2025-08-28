@@ -74,6 +74,9 @@ class InternS1Config(BaseModel):
     max_dynamic_patch: int = 12
     projector_hidden_act: str = "gelu"
     image_token_id: int = 152957
+    freeze_vision: bool = False
+    freeze_projector: bool = False
+    freeze_language: bool = False
 
     def build(self) -> "InternS1ForConditionalGeneration":
         from xtuner.v1.model.interns1.modeling_interns1 import InternS1ForConditionalGeneration
