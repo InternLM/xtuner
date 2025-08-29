@@ -1,11 +1,10 @@
-# 语言大模型微调
+# 语言模型微调
 
-在安装完 XTuner 之后，我们就可以拿语言模型的微调来小试牛刀一下，让我们一起来体验如何用最简单的方式，来启动一次微调训练！
-
+安装完 XTuner 后，让我们通过语言模型微调来小试牛刀，体验最简单的训练启动方式。
 
 ## 准备数据集
 
-在微调之前，我们需要准备好数据集。XTuner 默认支持 OpenAI 风格的数据，我们只需要把数据整理成 `jsonl` 格式，就能够直接使用。以下是一个简单的例子：
+微调前需先准备数据集。XTuner 默认支持 OpenAI 格式的数据，只需将数据整理为 `jsonl` 格式即可使用：
 
 ```{code-block} json
 :caption: jsonl 格式数据示例
@@ -18,7 +17,7 @@
 
 ## 准备模型
 
-XTuner 支持直接使用 Hugging Face 上的模型进行微调，我们可以直接从 Hugging Face 上下载一个预训练模型，作为微调的基础模型。这里我们以 `Qwen3 8B` 为例。首先我们需要把模型下载到本地：
+XTuner 支持直接使用 Hugging Face 上的模型进行微调。我们以 `Qwen3 8B` 为例，先从 Hugging Face 下载预训练模型：
 
 
 ```{code-block} bash
@@ -32,7 +31,7 @@ huggingface-cli download Qwen/Qwen3-8B --local-dir </path/qwen3-8B>
 
 ````{note}
 
-需要注意是，模型路径应该具体到模型文件本身，例如
+注意：模型路径需具体到模型文件所在目录
 
 ```{code-block} bash
 :caption: <span class="x-strong">合法模型路径</span>
@@ -61,7 +60,7 @@ models--Qwen--Qwen3-8B
 
 ## 启动微调
 
-准备好数据集和模型之后，我们就可以启动微调了。XTuner 提供了非常简单的命令行接口，我们只需要指定模型路径、数据集路径以及一些训练参数，就可以开始微调了。以下是一个简单的命令示例：
+准备好数据集和模型后，即可启动微调。XTuner 提供了简洁的命令行接口，只需指定模型路径、数据集路径和训练参数：
 
 ```{tip}
 :class: margin
@@ -91,4 +90,4 @@ torchrun --nproc-per-node 8  xtuner/v1/train/cli/sft.py  --load-from <模型路�
 [XTuner][RANK 1][2025-08-29 09:17:52][INFO] Step 2/100 data_time: 0.0438 lr: 0.000040 time: 0.8899 text_tokens: 4031.0 total_loss: 1.367 reduced_llm_loss: 1.606 max_memory: 18.02 GB reserved_memory: 22.20 GB grad_norm: 12.398 tgs: 4529.9 e2e_tgs: 1331.8 
 ```
 
-可以发现相比于[快速开始](./installation.md)里验证环境产生的训练日志，这里的初始 loss 明显更低，这是因为我们加载了预训练模型的权重和真实的 tokenizer。
+与[快速开始](./installation.md)中的验证日志相比，本次初始 loss 明显更低，这是因为我们加载了预训练模型权重和真实的 tokenizer。
