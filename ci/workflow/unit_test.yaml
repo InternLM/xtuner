@@ -10,3 +10,10 @@ unit_test:
     - python ci/scripts/run.py "$IMAGE" "$UNIT_TEST_ENV" "pytest tests"
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event" && ($CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "main" || $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "refactor")
+      changes:
+        - "xtuner/**/*"
+        - "ci/workflow/unit_test.yaml"
+        - "ci/scripts/run.py"
+        - "tests/**/*"
+        - ".gitlab-ci.yml"
+      when: on_success
