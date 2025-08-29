@@ -1,9 +1,11 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-from typing import Literal
+from typing import Literal, cast
 
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
+
+from xtuner.v1.utils import get_logger
 
 from ..base_loss import BaseLoss, BaseLossKwargs
 
@@ -11,6 +13,9 @@ from ..base_loss import BaseLoss, BaseLossKwargs
 from ..loss_context import ForwardItem
 from ..loss_fn import get_policy_loss_fn, kl_penalty
 from ..utils import gather_logprobs, sp_split
+
+
+logger = get_logger()
 
 
 class GRPOLossKwargs(BaseLossKwargs):
@@ -84,6 +89,7 @@ class GRPOLoss(BaseLoss):
 
         # Compute the denominator used in the global calibration of the loss
         rank_grad_tokens = sum((labels != self.ignore_idx).sum() for labels in shifted_labels_list)
+        rank_grad_tokens = cast(torch.Tensor, rank_grad_tokens)
         global_grad_tokens = rank_grad_tokens
         dist.all_reduce(global_grad_tokens, op=dist.ReduceOp.SUM)
         if sp_mesh is not None:
@@ -91,6 +97,11 @@ class GRPOLoss(BaseLoss):
             global_grad_tokens = global_grad_tokens / sp_mesh.size()  # type: ignore
 
         # compute loss weight
+        if global_grad_tokens == 0:
+            logger.warning(
+                "Global gradient tokens is 0, which may lead to division by zero in loss weight calculation."
+            )
+            global_grad_tokens.add_(1)  # Avoid division by zero
         policy_loss_weight = torch.ones_like(shifted_labels, dtype=torch.float32) / global_grad_tokens
         policy_loss_weight[shifted_labels == self.ignore_idx] = 0.0
 

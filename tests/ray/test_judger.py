@@ -117,7 +117,6 @@ class TestJudgerController(unittest.TestCase):
         test_judger_env = EnvController.remote(
             "test_judger", self.pg, rollout_cfg=None, judger_cfg=judger_cfg
         )
-        judger_test_data_path="/cpfs01/shared/llm_razor/duanyanhui/workspace/verl/outputs/0.jsonl"
         judger_data = construct_judger_data(VERL_ROLLOUT_DATA_PATH)
         group_data = ray.get(test_judger_env.run.remote(judger_data))
         reward = []

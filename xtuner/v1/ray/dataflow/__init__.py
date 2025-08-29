@@ -1,2 +1,2 @@
 from .flow import DataFlow, DataFlowConfig
-from .replay_buffer import ReplayBuffer
+from .replay_buffer import ReplayBuffer, ReplayBufferConfig

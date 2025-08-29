@@ -31,7 +31,7 @@ class vLLMWorker(RolloutWorker):
         self.server_func = run_vllm_server_wrapper
         self.router_func = ""
         self.endpoints["health_generate"] = "health"
-        self.endpoints["generate"] = "v1/chat/completions"
+        self.endpoints["generate"] = "v1/completions"
         self.endpoints["output_ids"] = "output_ids"
         self.endpoints["response"] = "text"
         self.endpoints["sleep"] = "sleep"
@@ -48,14 +48,12 @@ class vLLMWorker(RolloutWorker):
     ):
         headers = {
             "Content-Type": "application/json",
-            "Authorization": "Bearer YOUR_API_KEY",  # 如果需要鉴权
+            "Authorization": f"Bearer {self.api_keys}",  # 如果需要鉴权
         }
         payload = {
+            "model": self.config.model_name,
             "request_id": uid,
-            "messages": [
-                {"role": "system", "content": "You are a helpful assistant."},
-                {"role": "user", "content": prompt},
-            ],
+            "prompt": prompt,
             "stream": True,
         }
         payload.update(sample_params)
@@ -124,7 +122,6 @@ class vLLMWorker(RolloutWorker):
         args.model = self.config.model_path
         args.disable_log_requests = True
         args.disable_log_stats = True
-        args.distributed_executor_backend = "ray"
         args.tensor_parallel_size = self.config.tensor_parallel_size
         if args.expert_parallel_size > 1:
             args.tensor_parallel_size = self.config.expert_parallel_size

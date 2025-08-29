@@ -57,6 +57,7 @@ import argparse
 import matplotlib.pyplot as plt
 import numpy as np
 import torch.distributed as dist
+from transformers import AutoTokenizer
 
 from xtuner.v1.config import (
     AdamWConfig,
@@ -75,7 +76,9 @@ from xtuner.v1.train.trainer import Trainer
 from xtuner.v1.utils.compile import maybe_compile
 from xtuner.v1.ray.accelerator import AcceleratorResourcesConfig
 from xtuner.v1.ray.config.worker import RolloutConfig
-from xtuner.v1.ray.dataflow import DataFlowConfig
+from xtuner.v1.ray.dataflow import DataFlowConfig, ReplayBufferConfig
+from xtuner.v1.ray.environment import SampleParams
+from xtuner.v1.ray.evaluator import EvaluatorConfig
 from xtuner.v1.datasets import RLTextTokenizeFnConfig
 from xtuner.v1.config import (
     AdamWConfig,
@@ -87,21 +90,21 @@ from xtuner.v1.config import (
     BalancingLossConfig,
     ZLossConfig,
 )
+from xtuner.v1.ray.judger.controller import JudgerConfig
 from xtuner.v1.rl.grpo.config import WorkerConfig, LossConfig
 from xtuner.v1.rl.grpo.trainer import Trainer
 from xtuner.v1.ray.environment import SampleParams
-from xtuner.v1.ray.judger.controller import JudgerConfig
 
 MODEL_PATH = os.environ["ROLLOUT_MODEL_PATH"]
-DATA_PATH = os.environ["ROLLOUT_DATA_PATH"]
-
+TRAIN_DATA_PATH = os.environ["ROLLOUT_DATA_PATH"]
+TEST_DATA_PATH = os.environ["ROLLOUT_TEST_DATA_PATH"]
 
 def parse_args():
     parser = argparse.ArgumentParser(description="VLLM Rollout Test Script")
     parser.add_argument("--total-epochs", type=int)
     parser.add_argument("--work-dir", type=str, default="work_dir")
     parser.add_argument("--model-path", type=str, default=MODEL_PATH)
-    parser.add_argument("--data-path", type=str, default=DATA_PATH)
+    parser.add_argument("--data-path", type=str, default=TRAIN_DATA_PATH)
     parser.add_argument("--num-workers", type=int, default=8)
     parser.add_argument("--gpus-per-node", type=int, default=8)
     parser.add_argument("--rollout-global-batch-size", type=int, default=128)
@@ -112,6 +115,7 @@ def parse_args():
     parser.add_argument("--max-prompt-length", type=int, default=512)
     parser.add_argument("--max-response-length", type=int, default=1024)
     parser.add_argument("--optimizer-disable-foreach", action="store_true")  # save memory usage during opt.step()
+    parser.add_argument("--policy-loss-type", type=str, default="vanilla")
     return parser.parse_args()
 
 
@@ -131,8 +135,7 @@ def main(args):
         model_name=os.path.basename(args.model_path).lower(),
         tokenizer_path=args.model_path,
         rollout_cross_node_comm=False,
-        max_running_requests=16,
-        tensor_parallel_size=8,
+        tensor_parallel_size=2,
         expert_parallel_size=1,
         gpus_per_node=args.gpus_per_node, # gpu: 8, npu: 16
         dtype="bfloat16",
@@ -150,12 +153,20 @@ def main(args):
     judger_cfg = JudgerConfig(
         reward_judger_configs={"openai/gsm8k": gsm8k_judger_config}
     )
-    dataset_cfg = [
+    train_dataset_cfg = [
         {
         "dataset": DatasetConfig(name="gsm8k",
-                                 anno_path=DATA_PATH,
+                                 anno_path=TRAIN_DATA_PATH,
                                  sample_ratio=1.0),
-        "tokenize_fn": RLTextTokenizeFnConfig(max_length=args.max_prompt_length + 2),
+        "tokenize_fn": RLTextTokenizeFnConfig(max_length=args.max_prompt_length),
+        },
+    ]
+    eval_dataset_cfg = [
+        {
+        "dataset": DatasetConfig(name="gsm8k",
+                                 anno_path=TEST_DATA_PATH,
+                                 sample_ratio=1.0),
+        "tokenize_fn": RLTextTokenizeFnConfig(max_length=args.max_prompt_length),
         },
     ]
     dataloader_cfg = DataloaderConfig(
@@ -163,14 +174,29 @@ def main(args):
         collator='fake_collator',
         pack_level='none',
     )
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
+    evaluator_cfg = EvaluatorConfig(
+        dataset_cfg=eval_dataset_cfg,
+        tokenizer=tokenizer, 
+        max_concurrent=args.max_concurrent,
+        eval_sample_ratio=1, 
+        evaluate_step=1,
+        compute_metric_func=None
+    )
+    replay_buffer_cfg = ReplayBufferConfig(
+        dataset_cfg=train_dataset_cfg,
+        dataloader_cfg=dataloader_cfg,
+        tokenizer=tokenizer,
+        postprocessor=None
+    )
     train_worker_cfg: WorkerConfig = WorkerConfig(
         model_cfg=Qwen3_8BConfig(),
         optim_cfg=AdamWConfig(lr=1e-6, foreach=False if args.optimizer_disable_foreach else None),
         loss_cfg=LossConfig(
             policy_loss_cfg=dict(
-                cliprange_high=0.28,
+                cliprange_high=0.2,
                 cliprange_low=0.2,
-                loss_type="vanilla",
+                loss_type=args.policy_loss_type,
             ),
             ignore_idx=-100,
             use_kl_loss=True,
@@ -195,8 +221,8 @@ def main(args):
         rollout_config=rollout_config,
         dataflow_config=dataflow_config,
         judger_config=judger_cfg,
-        dataset_cfg=dataset_cfg,
-        dataloader_cfg=dataloader_cfg,
+        replay_buffer_config=replay_buffer_cfg,
+        evaluator_config=evaluator_cfg,
         train_worker_cfg=train_worker_cfg,
         tokenizer_path=args.model_path,
         work_dir=args.work_dir,

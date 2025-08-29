@@ -1,16 +1,14 @@
 import os
-import torch
-import json
-import time
 import unittest
-from transformers import AutoTokenizer
 
 import ray
+from transformers import AutoTokenizer
+
 from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.ray.judger.controller import JudgerConfig
 from xtuner.v1.ray.accelerator import AcceleratorResourcesConfig, AutoAcceleratorWorkers
-from xtuner.v1.ray.dataflow import DataFlow, DataFlowConfig
-from xtuner.v1.ray.environment import EnvController
+from xtuner.v1.ray.dataflow import DataFlow, DataFlowConfig, ReplayBufferConfig
+from xtuner.v1.ray.environment import EnvController, SampleParams
 from xtuner.v1.datasets import RLTextTokenizeFnConfig, build_datasets, build_dataloader
 from xtuner.v1.config import (
     DataloaderConfig,
@@ -19,7 +17,8 @@ from xtuner.v1.config import (
 
 
 MODEL_PATH = os.environ["ROLLOUT_MODEL_PATH"]
-DATA_PATH = os.environ["ROLLOUT_DATA_PATH"]
+TRAIN_DATA_PATH = os.environ["ROLLOUT_DATA_PATH"]
+TEST_DATA_PATH = os.environ["ROLLOUT_TEST_DATA_PATH"]
 
 
 class TestRollout(unittest.TestCase):
@@ -29,13 +28,13 @@ class TestRollout(unittest.TestCase):
             num_workers=8,
             cpu_memory_per_worker=16 * 1024**3,  # 16 GB
         )
+        self.max_prompt_length = 512
         self.rollout_cfg = RolloutConfig(
             env="test_rollout",
             model_path=MODEL_PATH,
             model_name=os.path.basename(MODEL_PATH).lower(),
             tokenizer_path=MODEL_PATH,
             rollout_cross_node_comm=False,
-            max_running_requests=16,
             tensor_parallel_size=8,
             expert_parallel_size=1,
             gpus_per_node=8, # gpu: 8, npu: 16
@@ -53,35 +52,32 @@ class TestRollout(unittest.TestCase):
             global_batch_size=4,
             enable_partial_rollout=0
         )
-        self.dataset_cfg = [
+        self.train_dataset_cfg = [
             {
             "dataset": DatasetConfig(name="gsm8k",
-                                    anno_path=DATA_PATH,
+                                    anno_path=TRAIN_DATA_PATH,
                                     sample_ratio=1.0),
-            "tokenize_fn": RLTextTokenizeFnConfig(max_length=16386),
+            "tokenize_fn": RLTextTokenizeFnConfig(max_length=self.max_prompt_length),
             },
         ]
         self.dataloader_cfg = DataloaderConfig(
-            pack_max_length=16384,
+            pack_max_length=self.max_prompt_length,
             collator='fake_collator',
             pack_level='none',
         )
         self.tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
-    
+        self.replay_buffer_cfg = ReplayBufferConfig(
+            dataset_cfg=self.train_dataset_cfg,
+            dataloader_cfg=self.dataloader_cfg,
+            tokenizer=self.tokenizer,
+        )
+
     def setUp(self):
         ray.init(num_cpus=80)
-        self.data_path = DATA_PATH
+        self.data_path = TRAIN_DATA_PATH
         self.model_path = MODEL_PATH
         self.init_config()
         self.pg = AutoAcceleratorWorkers.build_placement_group(self.resources_cfg)
-        self.datasets = build_datasets(self.dataset_cfg, self.tokenizer)
-        self.dataloader = build_dataloader(
-            dataloader_config=self.dataloader_cfg,
-            datasets=self.datasets,
-            global_batch_size=1,
-            micro_batch_size=1,
-            seed=1,
-        )
         self.test_env = None
         
     def tearDown(self):
@@ -97,11 +93,9 @@ class TestRollout(unittest.TestCase):
             self.judger_cfg
         )
         self.test_flow = DataFlow.remote("test_env", 
-                                    self.dataflow_cfg,
-                                    self.datasets,
-                                    self.dataloader,
-                                    self.tokenizer,
-                                    self.test_env
+                                        self.dataflow_cfg,
+                                        self.replay_buffer_cfg,
+                                        self.test_env
                                     )
         responses = ray.get(self.test_flow.run.remote(), timeout=300)
         dataflow_state = ray.get(self.test_flow.state.remote(), timeout=300)
@@ -118,17 +112,14 @@ class TestRollout(unittest.TestCase):
             self.judger_cfg
         )
         self.test_flow = DataFlow.remote("test_env", 
-                                    self.dataflow_cfg,
-                                    self.datasets,
-                                    self.dataloader,
-                                    self.tokenizer,
-                                    self.test_env
-                                    )
+                                         self.dataflow_cfg,
+                                         self.replay_buffer_cfg,
+                                         self.test_env
+                                        )
         responses = ray.get(self.test_flow.run.remote(), timeout=300)
         dataflow_state = ray.get(self.test_flow.state.remote(), timeout=300)
         self.assertEqual(len(responses), self.dataflow_cfg.global_batch_size)
-        ray.get(self.test_flow.shutdown.remote(), timeout=300)
-        
-    
+        ray.get(self.test_flow.shutdown.remote())
+
 if __name__ == "__main__":
     unittest.main()

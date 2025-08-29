@@ -38,10 +38,6 @@ class RolloutConfig(BaseModel):
             help="API keys for the rollout service. Can be a single key or a list of keys.",
         ),
     ] = None
-    max_running_requests: Annotated[
-        int,
-        Parameter(group=infer_group, help="Maximum number of requests each inference engine can handle."),
-    ] = 16
     gpus_per_node: Annotated[int, Parameter(group=infer_group, help="Number of GPUs allocated per node.")] = 8
     do_sample: Annotated[bool, Parameter(group=infer_group, help="Whether to use sampling.")] = True
     dtype: Annotated[

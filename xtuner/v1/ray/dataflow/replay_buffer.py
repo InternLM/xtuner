@@ -3,22 +3,39 @@ import itertools
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Union
 from uuid import uuid4
 
-import ray.util.queue
+import ray
+from cyclopts import Parameter
+from pydantic import BaseModel, ConfigDict
 from ray import ObjectRef
+from typing_extensions import Annotated
 
+from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
+from xtuner.v1.config import DataloaderConfig
+from xtuner.v1.datasets import build_dataloader, build_datasets
 from xtuner.v1.datasets.data_item import RLTextDataItem
-
-
-if TYPE_CHECKING:
-    from torch.utils.data import DataLoader
-
-    from transformers import PretrainedTokenizer
-    from xtuner.v1.datasets import JsonlDataset
-
 from xtuner.v1.utils import get_logger
+
+
+class ReplayBufferConfig(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    dataset_cfg: Annotated[List, Parameter(help="The dataset object to sample initial prompts from.")]
+
+    dataloader_cfg: Annotated[
+        DataloaderConfig, Parameter(help="The PyTorch DataLoader for iterating over the dataset.")
+    ]
+
+    tokenizer: Annotated[
+        Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+        Parameter(help="The tokenizer for processing text data, e.g., for partial rollouts."),
+    ]
+    postprocessor_func: Annotated[
+        Optional[Callable],
+        Parameter(help="An optional function to filter or modify data groups after they are generated."),
+    ] = None
 
 
 @dataclass
@@ -36,17 +53,20 @@ class ReplayMeta:
 
 
 class Sampler:
-    def __init__(self, dataset, dataloader, storage, tokenizer):
-        self.datasets = dataset
-        self.dataloader = dataloader
-        self.dataloader_iter = itertools.cycle(self.dataloader)
+    def __init__(self, dataset, dataloader, tokenizer, storage):
+        self.train_dataset = dataset
+        self.train_dataloader = dataloader
+        self.train_dataloader_iter = itertools.cycle(self.train_dataloader)
         self.tokenizer = tokenizer
         self.storage = storage
 
     def sample_from_datasets(self, env: str, repeat_prompt_k: int) -> List[RLTextDataItem]:
-        data = next(self.dataloader_iter)[0]
         group_id = uuid4().int
-        group_samples = []
+        group_samples: List[RLTextDataItem] = []
+        try:
+            data = next(self.train_dataloader_iter)[0]
+        except StopIteration:
+            return group_samples
         for _ in range(repeat_prompt_k):
             prompt_id = uuid4().int
             data_item = copy.deepcopy(data)
@@ -202,14 +222,30 @@ class ReplayBufferStorage:
 class ReplayBuffer:
     def __init__(
         self,
-        dataset: "JsonlDataset",
-        dataloader: "DataLoader",
-        tokenizer: "PretrainedTokenizer",
-        post_processor_func: Optional[Callable[..., Any]] = None,
+        config: ReplayBufferConfig,
     ):
         self.storage = ReplayBufferStorage()
-        self.sampler = Sampler(dataset, dataloader, self.storage, tokenizer)
-        self.post_processor_func = post_processor_func
+        self.tokenizer = config.tokenizer
+        self.datasets = build_datasets(config.dataset_cfg, self.tokenizer)
+
+        self.dataloader = build_dataloader(
+            dataloader_config=config.dataloader_cfg,
+            datasets=self.datasets,
+            global_batch_size=1,
+            micro_batch_size=1,
+            seed=1,
+        )
+
+        self.sampler = Sampler(
+            self.datasets,
+            self.dataloader,
+            self.tokenizer,
+            self.storage,
+        )
+        self.post_processor_func = config.postprocessor_func
+
+    def get_train_dataset_length(self):
+        return len(self.dataloader)
 
     def post_processor(self, group_samples):
         if self.post_processor_func:

@@ -4,5 +4,4 @@ from .utils import (
     get_accelerator_ids,
     get_ray_accelerator,
     load_function,
-    openai_server_api,
 )

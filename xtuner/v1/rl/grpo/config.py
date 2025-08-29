@@ -43,8 +43,10 @@ class WorkerConfig(BaseModel):
     loss_cfg: LossConfig
     lr_cfg: LRConfig
     fsdp_cfg: FSDPConfig
-    load_from: str | Path | None = None
+    load_from: str | Path  # TODO: 把 actor 和 ref 配置分离
     optimizer_steps: int = 1
     sp_size: int = 1
     pack_max_length: int
+    ref_load_from: str | Path | None = None
     ref_model_fsdp_cfg: FSDPConfig | None = None
+    log_dir: str | Path | None = None

@@ -2,7 +2,6 @@ import asyncio
 from typing import Dict, List
 
 import ray
-import ray.util.queue
 from cyclopts import Parameter
 from pydantic import BaseModel
 from typing_extensions import Annotated
@@ -77,7 +76,7 @@ class JudgerController:
         assert data_source, "No data source found for the given datsetes"
 
         active_reward_judger = {name: func for name, func in self.reward_judger.items() if name in data_source}
-        assert active_reward_judger, "No active reward judger found for the given data source."
+        assert active_reward_judger, f"No active reward judger found for the given data source {data_source}."
 
         rewards_by_name = await self._call_custom_reward_judger(active_reward_judger, batch_responses, batch_labels)
         num_samples = len(group_data_item)

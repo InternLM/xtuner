@@ -5,7 +5,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 from shutil import rmtree
-from typing import Iterable, TypedDict, cast
+from typing import TypedDict, cast
 
 import ray
 import torch
@@ -18,16 +18,14 @@ from typing_extensions import NotRequired
 
 from transformers import AutoTokenizer
 from xtuner.utils.device import get_device, get_torch_device
-from xtuner.v1.config import DataloaderConfig, DatasetConfigList
 from xtuner.v1.config.trainer import ResumeConfig
 from xtuner.v1.data_proto.sequence_context import SequenceContext
-from xtuner.v1.datasets import JsonlDataset
-from xtuner.v1.datasets.build import build_dataloader, build_datasets
-from xtuner.v1.datasets.collator import ColateItem
 from xtuner.v1.ray.accelerator import AcceleratorResourcesConfig, AutoAcceleratorWorkers
 from xtuner.v1.ray.config.worker import RolloutConfig
-from xtuner.v1.ray.dataflow import DataFlow, DataFlowConfig
+from xtuner.v1.ray.dataflow import DataFlow, DataFlowConfig, ReplayBufferConfig
 from xtuner.v1.ray.environment import EnvController
+from xtuner.v1.ray.evaluator import Evaluator, EvaluatorConfig
+from xtuner.v1.ray.judger.controller import JudgerConfig
 from xtuner.v1.rl.grpo.config import WorkerConfig
 from xtuner.v1.rl.grpo.controller import GRPOTrainingController
 from xtuner.v1.rl.grpo.worker import GRPOTrainingWorker
@@ -101,9 +99,9 @@ class Trainer:
         resources: AcceleratorResourcesConfig,
         rollout_config: RolloutConfig,
         dataflow_config: DataFlowConfig,
-        judger_config: dict,
-        dataset_cfg: DatasetConfigList,
-        dataloader_cfg: DataloaderConfig,
+        judger_config: JudgerConfig,
+        replay_buffer_config: ReplayBufferConfig,
+        evaluator_config: EvaluatorConfig,
         train_worker_cfg: WorkerConfig,
         tokenizer_path: str | Path,
         work_dir: Path | str | None = None,
@@ -120,8 +118,6 @@ class Trainer:
         rollout_config.model_path = load_from
         train_worker_cfg.load_from = load_from
 
-        self._dataset_config = dataset_cfg
-        self._dataloader_config = dataloader_cfg
         self._total_epochs = total_epochs
         self._cur_epoch = 0
 
@@ -164,32 +160,28 @@ class Trainer:
             log_dir = Path(log_dir)
 
         self.logger = self._init_logger(log_dir)
+        train_worker_cfg.log_dir = log_dir
 
         self._pg = AutoAcceleratorWorkers.build_placement_group(resources)
         # We need to build train controller first, and then build rollout dataflow to make
         # inference engines know how much memory they can utilize.
         self._train_controller = self._build_train_controller(train_worker_cfg)
 
-        datasets = build_datasets(dataset_cfg, self.tokenizer)
-        dataloader = build_dataloader(
-            dataloader_config=dataloader_cfg,
-            datasets=datasets,
-            global_batch_size=1,
-            micro_batch_size=1,
-            seed=1,
-        )
-        self._rollout_steps = len(dataloader) // dataflow_config.global_batch_size * total_epochs  # type: ignore
-
-        self._rollout_dataflow = self._build_rollout_dataflow(
+        self._rollout_env_controller, self._rollout_dataflow = self._build_rollout_dataflow(
             dataflow_cfg=dataflow_config,
             rollout_cfg=rollout_config,
             judger_cfg=judger_config,
-            datasets=datasets,
-            dataloader=dataloader,
+            replay_buffer_config=replay_buffer_config,
         )
-        rollout_env_controller = ray.get(self._rollout_dataflow.get_env_controller.remote())
-        self._rollout_env_controller = rollout_env_controller
-        bind_train_rollout(train_controller=self._train_controller, env_controller=rollout_env_controller)
+        self._evaluator = Evaluator.remote(evaluator_config, self._rollout_env_controller)  # type: ignore
+        self._global_batch_size = dataflow_config.global_batch_size
+        self._eval_step = evaluator_config.evaluate_step
+        self._rollout_steps = (
+            ray.get(self._rollout_dataflow.get_train_dataset_length.remote())
+            // dataflow_config.global_batch_size
+            * total_epochs
+        )  # type: ignore
+        bind_train_rollout(train_controller=self._train_controller, env_controller=self._rollout_env_controller)
         ray.get(self._train_controller.offload.remote(target="all"))
 
         self._train_worker_cfg = train_worker_cfg
@@ -198,13 +190,12 @@ class Trainer:
         self,
         dataflow_cfg: DataFlowConfig,
         rollout_cfg: RolloutConfig,
-        judger_cfg: dict,
-        datasets: list[JsonlDataset],
-        dataloader: Iterable[list[ColateItem]],
+        judger_cfg: JudgerConfig,
+        replay_buffer_config: ReplayBufferConfig,
     ):
         env = cast(ActorClass, EnvController).remote("grpo", self._pg, rollout_cfg, judger_cfg)
-        flow = cast(ActorClass, DataFlow).remote("grpo", dataflow_cfg, datasets, dataloader, self.tokenizer, env)
-        return flow
+        flow = cast(ActorClass, DataFlow).remote("grpo", dataflow_cfg, replay_buffer_config, env)
+        return env, flow
 
     def _build_train_controller(self, train_worker_cfg: WorkerConfig):
         train_workers = AutoAcceleratorWorkers.from_placement_group(GRPOTrainingWorker, train_worker_cfg, self._pg)
@@ -217,7 +208,12 @@ class Trainer:
         return train_controller
 
     def fit(self):
-        for rollout_idx in range(self._rollout_steps):
+        self.logger.info("start training")
+        scores, eval_data_groups = ray.get(self._evaluator.run.remote(return_samples=True))
+        trajectory_save_path = self.exp_dir / "initial_trajectory.jsonl"
+        self._save_trajectories(eval_data_groups, trajectory_save_path)
+        self.logger.info(f"Initial rollout evaluate scores {scores} and start training")
+        for rollout_idx in range(1, self._rollout_steps + 1):
             data_groups = ray.get(self._rollout_dataflow.run.remote())
             time.sleep(3)
             ray.get(self._rollout_env_controller.offload.remote(level=2))
@@ -229,7 +225,9 @@ class Trainer:
             data_batches = self._prepare_train_data(data_groups, self._train_worker_cfg.pack_max_length)
             self.logger.info(f"Prepared {len(data_batches)} training data batches")
             ray.get(
-                self._train_controller.fit.remote(data_batches, pack_max_length=self._train_worker_cfg.pack_max_length)
+                self._train_controller.fit.remote(
+                    data_batches, pack_max_length=self._train_worker_cfg.pack_max_length, rollout_idx=rollout_idx
+                )
             )
             ray.get(self._train_controller.offload.remote(target="optimizer"))
             ray.get(self._rollout_env_controller.onload.remote(tags=["weights"]))
@@ -237,6 +235,10 @@ class Trainer:
             self.logger.info("update weights done!!!")
             ray.get(self._train_controller.offload.remote(target="model"))
             ray.get(self._rollout_env_controller.onload.remote(tags=["kv_cache"]))
+            # evaluate
+            if rollout_idx % self._eval_step == 0:
+                scores = ray.get(self._evaluator.run.remote())
+                self.logger.info(f"evaluate idx {rollout_idx} scores {scores}")
             self._cur_epoch += 1
             self._maybe_save_hf()
 
@@ -287,6 +289,11 @@ class Trainer:
                 }
                 json.dump(item, f)
                 f.write("\n")
+
+    def _compute_metrics(self, data_groups):
+        correctness = [1 if data[0]["reward"] > 0 else 0 for data in data_groups]
+        acc = sum(correctness) / len(correctness)
+        return acc
 
     def _maybe_save_hf(self):
         if self._hf_interval is None:
