@@ -50,7 +50,7 @@ class TrainingArguments(BaseModel):
     dataloader_cfg: Annotated[
         DataloaderConfig | None,
         Parameter(group=dataset_group, help="dataset config path or jsonl file or dir", name="*"),
-    ] = None
+    ] = DataloaderConfig(pack_max_length=4096)
     max_length: Annotated[int, Parameter(group=dataset_group, help="max sequence length")] = 4096
     # optimizer
     lr: Annotated[float, Parameter(group=optimizer_group, help="learning rate")] = 6e-5
@@ -63,7 +63,7 @@ class TrainingArguments(BaseModel):
     warmup_ratio: Annotated[float, Parameter(group=lr_scheduler_group, help="warmup ratio")] = 0.03
     # training
     total_step: Annotated[int | None, Parameter(group=training_group, help="total training steps")] = None
-    epoch_num: Annotated[int, Parameter(group=training_group, help="number of epochs")] = 1
+    epoch_num: Annotated[int | None, Parameter(group=training_group, help="number of epochs")] = None
     work_dir: Annotated[Path | None, Parameter(group=training_group, help="working directory of trainer")] = None
     global_batch_size: Annotated[
         int | None, Parameter(group=training_group, help="Global training batch size, defaults to `dp` size")
@@ -93,7 +93,7 @@ class TrainingArguments(BaseModel):
             ds["tokenize_fn"].max_length = self.max_length
 
         # Create optimizer config
-        optim_cfg = AdamWConfig(lr=self.lr)
+        optim_cfg = AdamWConfig(lr=self.lr, foreach=False)
 
         # Create learning rate scheduler config
         lr_cfg = LRConfig(lr_type=self.scheudler_type, warmup_ratio=self.warmup_ratio, lr_min=self.lr_min)
@@ -102,6 +102,12 @@ class TrainingArguments(BaseModel):
         dataloader_cfg = self.dataloader_cfg or DataloaderConfig()
         model_cfg = self._get_model_config()
         resume_cfg = None
+
+        if self.total_step is not None and self.epoch_num is not None:
+            raise ValueError("Only one of `total_step` or `epoch_num` should be set.")
+
+        if self.total_step is None and self.epoch_num is None:
+            self.epoch_num = 1
 
         return TrainerConfig(
             model_cfg=model_cfg,
@@ -117,6 +123,7 @@ class TrainingArguments(BaseModel):
             epoch_num=self.epoch_num,
             resume=resume_cfg,
             work_dir=self.work_dir,
+            chunked_loss=True,
         )
 
     def _get_dataset_config(self) -> DatasetConfigList:
@@ -161,6 +168,8 @@ class TrainingArguments(BaseModel):
             else:
                 if (model_cfg := get_model_config(self.model_cfg)) is not None:
                     return model_cfg
+                else:
+                    raise ValueError(f"Failed to parse model config from {self.model_cfg}")
 
         assert self.load_from is not None, "`load_from` must be set if `model_cfg` is not set"
 
