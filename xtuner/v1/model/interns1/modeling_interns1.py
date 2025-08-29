@@ -133,6 +133,7 @@ class InternS1ForConditionalGeneration(BaseModel):
             reshard_after_forward=fsdp_config.reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if fsdp_config.cpu_offload else None,
         )
+        self.to_empty(device=self.device)
         return self
 
     def from_hf(self, hf_path: str | Path, strict=True):

@@ -165,7 +165,6 @@ class TrainEngine:
                 scaling_granularity_grouped_gemm=self.model_cfg.float8_cfg.scaling_granularity_grouped_gemm,
             )
         model = model.fully_shard(self.fsdp_cfg, self.float8_handler)
-        model.to_empty(device=model.device)
 
         if dist.get_rank() == 0:
             logger.info(model)

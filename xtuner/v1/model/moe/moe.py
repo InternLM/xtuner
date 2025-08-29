@@ -601,6 +601,8 @@ class MoE(BaseModel):
                 module.forward = types.MethodType(self.patched_emb_forward, module)  # type: ignore
             elif isinstance(module, RMSNorm):
                 module.forward = types.MethodType(self.patched_rms_norm_forward, module)  # type: ignore
+
+        self.to_empty(device=self.device)
         return self
 
     @torch.no_grad  # type: ignore
