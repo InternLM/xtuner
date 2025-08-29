@@ -574,7 +574,14 @@ class Trainer:
             dist.barrier()
 
             staged_path, unstaged_path = git_dir / "staged.diff", git_dir / "unstaged.diff"
-            commit = record_git_info(staged_path, unstaged_path)
+            _commit_tmp: list[str | None]
+            if self.rank == 0:
+                commit = record_git_info(staged_path, unstaged_path)
+                _commit_tmp = [commit]
+            else:
+                _commit_tmp = [None]
+            dist.broadcast_object_list(_commit_tmp, src=0)
+            commit = cast(str, _commit_tmp[0])
             git_info = GitInfo(
                 commit=commit,
                 staged=str(staged_path),
