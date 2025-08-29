@@ -17,6 +17,9 @@ from sphinx.ext import autodoc
 
 sys.path.insert(0, os.path.abspath("../.."))
 
+import docs.pygments_extension
+
+
 # -- Project information -----------------------------------------------------
 
 project = "XTuner"
@@ -75,8 +78,8 @@ html_theme_options = {
     "path_to_docs": "docs/zh_cn",
     "repository_url": "https://github.com/InternLM/xtuner",
     "use_repository_button": True,
-    "pygments_light_style": "emacs",
-    "pygments_dark_style": "dracula",
+    "pygments_light_style": "xtuner-emacs",
+    "pygments_dark_style": "xtuner-dracula",
     "use_sidenotes": True,
 }
 # Add any paths that contain custom static files (such as style sheets) here,
@@ -112,3 +115,5 @@ class MockedClassDocumenter(autodoc.ClassDocumenter):
 autodoc.ClassDocumenter = MockedClassDocumenter
 
 navigation_with_keys = False
+
+
