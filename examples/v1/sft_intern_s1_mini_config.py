@@ -10,7 +10,7 @@ from xtuner.v1.config import (
 from xtuner.v1.datasets import InternS1TokenizeFnConfig
 
 # model config
-vision_cfg = InternS1VisionConfig()
+vision_cfg = InternS1VisionConfig(drop_path_rate=0)
 projector_cfg = InternS1ProjectorConfig()
 llm_cfg = Qwen3_8BConfig(vocab_size=153216)
 model_cfg = InternS1Config(vision_config=vision_cfg,
@@ -42,6 +42,7 @@ dataset_config = [
     },
 ]
 dataloader_config = DataloaderConfig(pack_max_length=pack_max_length,
+                                     num_workers=8,
                                      pack_level="expand_soft",
                                      collator='sft_vllm_collator')
 
