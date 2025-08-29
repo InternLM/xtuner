@@ -26,7 +26,14 @@ sft_trainer:
     when: always
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event" && ($CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "main" || $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "refactor")
-
+      changes:
+        - "xtuner/**/*"
+        - "ci/workflow/sft.yaml"
+        - "ci/scirpts/test_sft_trainer.py"
+        - "ci/scripts/check_metric.py"
+        - "ci/scripts/run.py"
+        - ".gitlab-ci.yml"
+      when: on_success
 sft_trainer_check_metric:
   tags:
     - aliyun_x
@@ -51,3 +58,11 @@ sft_trainer_check_metric:
       done 
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event" && ($CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "main" || $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "refactor")
+      changes:
+        - "xtuner/**/*"
+        - "ci/workflow/sft.yaml"
+        - "ci/scirpts/test_sft_trainer.py"
+        - "ci/scripts/check_metric.py"
+        - "ci/scripts/run.py"
+        - ".gitlab-ci.yml"
+      when: on_success
