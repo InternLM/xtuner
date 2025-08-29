@@ -23,7 +23,7 @@ class TestBuildModel(TestCase):
         config = Qwen3MoEConfig(
             vocab_size=151936,
             max_position_embeddings=4096,
-            padding_idx=0,
+            pad_token_id=0,
             num_hidden_layers=48,
             hidden_size=2048,
             intermediate_size=6144,

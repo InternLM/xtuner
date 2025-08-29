@@ -92,7 +92,7 @@ class Dense(BaseModel):
         return ModelOutputs(**output)  # type: ignore[typeddict-item]
 
     def build_embeddings(self, config: TransformerConfig):
-        return nn.Embedding(config.vocab_size, config.hidden_size, config.padding_idx)
+        return nn.Embedding(config.vocab_size, config.hidden_size, config.pad_token_id)
 
     def build_layers(self, config: TransformerConfig) -> nn.ModuleDict:
         # 让 layers 是一个 nn.ModuleDict 方便做 pipeline parallel 的参数切分，

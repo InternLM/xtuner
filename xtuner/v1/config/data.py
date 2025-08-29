@@ -72,7 +72,7 @@ class DataloaderConfig(BaseModel):
     group_by_length: Annotated[bool, Parameter()] = True
     pack_extra_buffer_size: Annotated[int, Parameter()] = 100
     num_workers: Annotated[int, Parameter()] = 0
-    padding_token_idx: Annotated[int, Parameter()] = 0
+    pad_token_id: Annotated[int | None, Parameter()] = None
 
     def build_collator(self):
         from xtuner.v1.datasets import fake_collator, sft_llm_collator, sft_vllm_collator

@@ -30,7 +30,7 @@ class TestMoE:
         config = MoEConfig(
             vocab_size=10240,
             max_position_embeddings=2048,
-            padding_idx=0,
+            pad_token_id=0,
             num_hidden_layers=6,
             hidden_size=512,
             intermediate_size=2048,
@@ -94,7 +94,7 @@ class TestDistributedMoE(DistributedTestBase):
         config = MoEConfig(
             vocab_size=10240,
             max_position_embeddings=2048,
-            padding_idx=0,
+            pad_token_id=0,
             num_hidden_layers=6,
             hidden_size=512,
             intermediate_size=2048,
