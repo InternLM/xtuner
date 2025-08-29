@@ -7,7 +7,10 @@
 
 启动训练命令如下：
 
-```shell
+```{code-block} shell
+:caption: Intern-S1-mini 模型微调示例
+:linenos:
+
 cd xtuner
 torchrun --nproc-per-node=8 xtuner/v1/train/cli/sft.py --trainer-cfg-path examples/v1/sft_intern_s1_mini_config.py
 ```
@@ -16,15 +19,15 @@ torchrun --nproc-per-node=8 xtuner/v1/train/cli/sft.py --trainer-cfg-path exampl
 
 ## 构建模型配置
 
-```python
-vision_cfg = InternS1VisionConfig()
+```{code-block} python
+vision_cfg = InternS1VisionConfig(drop_path_rate=0) # sft 时候可以禁用 drop_path
 projector_cfg = InternS1ProjectorConfig()
 llm_cfg = Qwen3_8BConfig(vocab_size=153216)
 model_cfg = InternS1Config(vision_config=vision_cfg,
                            text_config=llm_cfg,
                            projector_config=projector_cfg,
-                           freeze_vision=True, # 考虑 freeze vit
-                           freeze_projector=True # 考虑 freeze projector
+                           freeze_vision=True, # freeze vit
+                           freeze_projector=True # freeze projector
                            )
 ```
 
@@ -37,7 +40,7 @@ InternS1 包括 3 个核心模块，分别对于 3 个配置类：
 
 ## 构建数据配置
 
-```shell
+```{code-block} python
 sample_max_length = 8192 # 单条样本的最大长度，超过会被截断，并且会有警告输出
 pack_max_length = 16384 # 训练一次 iter 所能包含的最大长度，pack 机制会尽可能将多条样本拼接在一起，减少 padding
 # 如果你的显存不够，可以适当调小上述两个参数，但是请确保 sample_max_length <= pack_max_length
@@ -48,7 +51,7 @@ dataset_config = [
         "dataset": DatasetConfig(name='pure_text', # 数据别名
                                  # 标注文件路径，可以是单个 jsonl 也可以是文件夹，会自动遍历当前文件夹下所有 jsonl 文件
                                  anno_path='tests/resource/mllm_sft_text_example_data.jsonl', # 纯文本数据
-                                 sample_ratio=2.0, # 数据采样比例，这里是重复 2 遍，可以是小数
+                                 sample_ratio=5.0, # 数据采样比例，这里是重复 5 遍，可以是小数
                                  class_name='VLMJsonlDataset'), # 对应的 dataset 类名
         # 一个 dataset 要配一个对应的 tokenizer fun 函数用于处理 dataset 输出的单条 item 数据
         "tokenize_fn": InternS1TokenizeFnConfig(model_cfg=model_cfg, max_length=sample_max_length),
@@ -57,13 +60,14 @@ dataset_config = [
         "dataset": DatasetConfig(name='media', # 数据别名
                                  anno_path='tests/resource/mllm_sft_media_example_data.jsonl', # 多模态数据
                                  media_root='tests/',
-                                 sample_ratio=10.0,
+                                 sample_ratio=20.0,
                                  class_name='VLMJsonlDataset'),
         "tokenize_fn": InternS1TokenizeFnConfig(model_cfg=model_cfg, max_length=sample_max_length),
     },
 ]
 # dataloader 配置
 dataloader_config = DataloaderConfig(pack_max_length=pack_max_length, 
+                                     num_workers=8,
                                      pack_level="expand_soft", # pack 样本有 2 种策略，默认选择更高效的 expand_soft 策略
                                      collator='sft_vllm_collator')
 ```
@@ -72,14 +76,14 @@ dataloader_config = DataloaderConfig(pack_max_length=pack_max_length,
 
 ## 构建训练配置
 
-```python
+```{code-block} python
 optim_cfg = AdamWConfig(lr=1e-6, foreach=False) # 不同模块的 device mesh 有差别，foreach 必须是 False
 lr_cfg = LRConfig(lr_type="cosine", warmup_ratio=0)
 ```
 
 ## 构建 Trainer 配置
 
-```python
+```{code-block} python
 trainer = TrainerConfig(
     load_from=hf_model_path, # 如果是微调模式，必须指定，否则会重头训练
     model_cfg=model_cfg,
@@ -92,9 +96,8 @@ trainer = TrainerConfig(
     # 假设是 8 卡训练，那么每张卡的 forward shape 是 (1, pack_max_length)，梯度累加次数是 1
     # 假设是 4 卡训练，那么每张卡的 forward shape 是 (1, pack_max_length)，梯度累加次数是 2 (自动折算)
     global_batch_size=8, 
-    epoch_num=1,
+    epoch_num=2,
     chunked_loss=True, # 可以显著减少显存占用，推荐总是开启
     work_dir='work_dirs'
 )
 ```
-
