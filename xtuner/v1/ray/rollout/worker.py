@@ -136,35 +136,56 @@ class RolloutWorker(SingleAcceleratorWorker):
 
     async def rollout_task(self, prompt: str, sample_params):
         uid = str(uuid.uuid4())
-        response = await self._create_request(
-            f"{self.server_url}/{self.endpoints['generate']}",
-            uid,
-            prompt,
-            sample_params=sample_params or {},
-            extra_params={},
-        )
-        self.logger.debug(f" +++ send request {uid} to worker: {self.rank}")
-        last_trajectory = ""
-        async for chunk in response.aiter_text():
-            if chunk == "":
-                continue
-            try:
-                if self.paused:
-                    await response.aclose()
-                    self.logger.debug(f"--- get paused request {uid}")
-                    return last_trajectory, "unfinished"
-                chunk_data = chunk[len("data:") :].strip()  # Remove "data: " prefix
-                if chunk_data == "[DONE]":
-                    self.logger.debug(f" --- get finished request {uid}")
-                    await response.aclose()
-                    return last_trajectory, "finished"
-                else:
-                    if not (chunk_data.startswith("{") and chunk_data.endswith("}")):
-                        continue
-                    last_trajectory += json.loads(chunk_data)["choices"][0]["delta"]["content"]
-            except Exception as e:
-                self.logger.error(f"Error processing chunk: {chunk}, error: {e}")
-        await response.aclose()
+        response = None
+        try:
+            response = await self._create_request(
+                f"{self.server_url}/{self.endpoints['generate']}",
+                uid,
+                prompt,
+                sample_params=sample_params or {},
+                extra_params={},
+            )
+            self.logger.debug(f" +++ send request {uid} to worker: {self.rank}")
+
+            if response.status_code != 200:
+                error_body = await response.atext()
+                self.logger.error(f"Request {uid} failed with status {response.status_code}: {error_body}")
+                return "", "failed"  # 返回明确的失败状态
+
+            last_trajectory = ""
+            async for chunk in response.aiter_text():
+                if chunk == "":
+                    continue
+                try:
+                    if self.paused:
+                        await response.aclose()
+                        self.logger.debug(f"--- get paused request {uid}")
+                        return last_trajectory, "unfinished"
+                    chunk_data = chunk[len("data:") :].strip()  # Remove "data: " prefix
+                    if chunk_data == "[DONE]":
+                        self.logger.debug(f" --- get finished request {uid}")
+                        await response.aclose()
+                        return last_trajectory, "finished"
+                    else:
+                        if not (chunk_data.startswith("{") and chunk_data.endswith("}")):
+                            continue
+                        last_trajectory += json.loads(chunk_data)["choices"][0]["text"]
+                except json.JSONDecodeError as e:
+                    self.logger.error(f"JSON decode error for chunk in request {uid}: {chunk}, error: {e}")
+                    continue  # 选择跳过这个损坏的块
+                except Exception as e:
+                    self.logger.error(f"Error processing chunk for {uid}: {chunk}, error: {e}")
+                    return last_trajectory, "failed"  # 出现意外错误时，终止并返回失败
+        except httpx.RequestError as e:
+            self.logger.error(f"Request {uid} failed with a network error: {e}")
+            return "", "failed"
+        except Exception as e:
+            self.logger.error(f"An unexpected error occurred in rollout_task for {uid}: {e}")
+            return "", "failed"
+        finally:
+            # 确保在任何情况下都尝试关闭响应
+            if response:
+                await response.aclose()
 
     async def rollout(self, prompt: str, sample_params):
         return await self.rollout_task(prompt, sample_params)

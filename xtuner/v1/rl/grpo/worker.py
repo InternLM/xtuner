@@ -1,6 +1,7 @@
 import math
 import os
 import time
+from pathlib import Path
 from typing import Dict, List, TypeAlias, TypedDict, cast
 
 import ray
@@ -22,9 +23,10 @@ from xtuner.v1.ray.accelerator import SingleAcceleratorWorker
 from xtuner.v1.ray.config import RolloutConfig
 from xtuner.v1.rl.loss_context import LossContext
 from xtuner.v1.rl.utils import gather_logprobs, sp_split
-from xtuner.v1.utils import ParallelConfigException, get_logger
+from xtuner.v1.utils import ParallelConfigException, get_logger, log_format
 
 from ..loss_context import LossContextInputItem
+from ..loss_fn import kl_penalty
 from .config import WorkerConfig
 from .engine import GRPOTrainEngine
 
@@ -59,7 +61,11 @@ class TrainingWorker(SingleAcceleratorWorker):
         self._has_ref = False
         if worker_cfg.loss_cfg.use_kl_loss:
             self._has_ref = True
-            self._ref_model = self._build_ref_model(worker_cfg.model_cfg, worker_cfg.ref_model_fsdp_cfg)
+            if worker_cfg.ref_load_from is None:
+                worker_cfg.ref_load_from = worker_cfg.load_from
+            self._ref_model = self._build_ref_model(
+                worker_cfg.model_cfg, worker_cfg.ref_load_from, worker_cfg.ref_model_fsdp_cfg
+            )
 
         self.data_mesh = self._init_data_mesh(sp_size=worker_cfg.sp_size)
         self.sp_mesh = self.data_mesh["sp"]
@@ -75,11 +81,17 @@ class TrainingWorker(SingleAcceleratorWorker):
         self.endpoints: dict[str, str] = dict()
         self.endpoints["update_weights"] = "update_weights"
         # TODO: add lr scheduler
+        log_dir = worker_cfg.log_dir
+        if log_dir is not None:
+            log_dir = Path(log_dir) if isinstance(log_dir, str) else log_dir
+            logger.add(log_dir / f"train_rank{dist.get_rank()}.log", format=log_format(), backtrace=True, catch=True)
 
     def _build_engine(self, worker_cfg: WorkerConfig):
         pass
 
-    def _build_ref_model(self, ref_model_cfg: TransformerConfig, ref_model_fsdp_cfg: FSDPConfig | None = None):
+    def _build_ref_model(
+        self, ref_model_cfg: TransformerConfig, load_from: str | Path, ref_model_fsdp_cfg: FSDPConfig | None = None
+    ):
         with torch.device("meta"):
             model = ref_model_cfg.build()
         if ref_model_cfg.float8_cfg is not None and ref_model_cfg.float8_cfg.enable_float8:
@@ -92,6 +104,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         if ref_model_fsdp_cfg is None:
             ref_model_fsdp_cfg = FSDPConfig(recompute_ratio=0, cpu_offload=False, requires_grad=False)
         model = model.fully_shard(ref_model_fsdp_cfg, float8_handler)
+        model.from_hf(hf_path=load_from)
         model.eval()
         if float8_handler is not None:
             # As the ref model is not updated, we only compute params' scales once
@@ -132,7 +145,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                 data[key] = value.to(device)  # type: ignore
         return data
 
-    def fit(self, data_batches: list[WorkerInputItem]):
+    def fit(self, data_batches: list[WorkerInputItem], rollout_idx: int):
         num_batches = len(data_batches)
         iters_per_step = math.ceil(num_batches / self._optimizer_steps)
         if num_batches < self._optimizer_steps:
@@ -158,6 +171,8 @@ class TrainingWorker(SingleAcceleratorWorker):
                 cast(LossContextInputItem, data)["ref_logprobs"] = ref_logprobs
             self._ref_model.to_device("cpu")
 
+        rank_grad_tokens: torch.Tensor | None = None
+        sum_entropy: torch.Tensor | None = None
         for data in data_batches:
             seq_ctx = data["seq_ctx"]
             shifted_labels = data["shifted_labels"]
@@ -165,7 +180,41 @@ class TrainingWorker(SingleAcceleratorWorker):
                 shifted_labels = sp_split(shifted_labels, sp_mesh=self.sp_mesh, split_dim=1, padding_value=-100)
             output = self._engine.forward_only(seq_ctx=seq_ctx)
             old_logprobs = gather_logprobs(output["logits"], shifted_labels)
+            mask = shifted_labels != -100
+            grad_tokens = mask.sum()
+            rank_grad_tokens = grad_tokens if rank_grad_tokens is None else rank_grad_tokens + grad_tokens
+            entropy = -(old_logprobs * mask).sum()
+            sum_entropy = entropy if sum_entropy is None else sum_entropy + entropy
             cast(LossContextInputItem, data)["old_logprobs"] = old_logprobs
+
+        rank_grad_tokens = cast(torch.Tensor, rank_grad_tokens)
+        sum_entropy = cast(torch.Tensor, sum_entropy)
+        dist.all_reduce(sum_entropy, op=dist.ReduceOp.SUM)
+        global_grad_tokens = rank_grad_tokens
+        dist.all_reduce(global_grad_tokens, op=dist.ReduceOp.SUM)
+        avg_gen_entropy = sum_entropy / global_grad_tokens if global_grad_tokens > 0 else 0
+        logger.info(f"Rollout {rollout_idx}: avg generation entropy: {avg_gen_entropy:.4f}")
+
+        if self._has_ref:
+            kl_div_sum: torch.Tensor | None = None
+            for data in data_batches:
+                old_logprobs = cast(LossContextInputItem, data)["old_logprobs"]
+                ref_logprobs = cast(LossContextInputItem, data)["ref_logprobs"]
+                ref_logprobs = cast(torch.Tensor, ref_logprobs)
+                shifted_labels = data["shifted_labels"]
+                if self.sp_mesh.size() > 1:
+                    shifted_labels = sp_split(shifted_labels, sp_mesh=self.sp_mesh, split_dim=1, padding_value=-100)
+                mask = shifted_labels != -100
+                kl_div = kl_penalty(
+                    old_logprobs,
+                    ref_logprobs,
+                    loss_weights=mask,
+                    kl_penalty="low_var_kl",
+                )
+                kl_div_sum = kl_div if kl_div_sum is None else kl_div_sum + kl_div
+            dist.all_reduce(kl_div_sum, op=dist.ReduceOp.SUM)
+            avg_kl_div = kl_div_sum / global_grad_tokens if global_grad_tokens > 0 else 0
+            logger.info(f"Rollout {rollout_idx}: avg KL divergence: {avg_kl_div:.4f}")
 
         for i in range(0, len(data_batches), iters_per_step):
             data_batch = data_batches[i : i + iters_per_step]
@@ -177,7 +226,16 @@ class TrainingWorker(SingleAcceleratorWorker):
             )
             grad_norm = self._engine.clip_grad_norm()
             self._engine.step_optimizer(grad_norm)
-            logger.info(f"grad_norm: {grad_norm.item()}")
+            log_info = dict()
+            log_info.update(loss_log)
+            log_info.update(other_log)
+            log_info["grad_norm"] = grad_norm.item()
+            log_str = ", ".join(
+                f"{key}={value:.4f}" if isinstance(value, float) else f"{key}={value}"
+                for key, value in log_info.items()
+            )
+            log_str = f"Rollout {rollout_idx} Step {i}: " + log_str
+            logger.info(log_str)
 
     def save_hf(self, hf_dir: str, save_dtype: torch.dtype = torch.bfloat16):
         self._engine.save_hf(hf_dir, save_dtype)
@@ -289,15 +347,15 @@ class TrainingWorker(SingleAcceleratorWorker):
             reshard_duration.append(time.perf_counter() - start)
 
         if dist.get_rank() == 0:
-            logger.info(
+            logger.debug(
                 f"Rank 0 Gather decoder layers done, total {sum(gather_duration):.2f}s, avg "
                 f"{sum(gather_duration) / len(gather_duration):.2f}s"
             )
-            logger.info(
+            logger.debug(
                 f"Rank 0 migrate/save decoder layers done, total {sum(weight_duration):.2f}s, avg "
                 f"{sum(weight_duration) / len(weight_duration):.2f}s"
             )
-            logger.info(
+            logger.debug(
                 f"Rank 0 reshard decoder layers done, total {sum(reshard_duration):.2f}s, avg "
                 f"{sum(reshard_duration) / len(reshard_duration):.2f}s"
             )

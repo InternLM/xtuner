@@ -132,4 +132,4 @@ class TestGRPOTrain(unittest.TestCase):
 
     def test_grpo_train(self):
         train_controller = self.build_train_controller()
-        ray.get(train_controller.fit.remote(self.data_batches, pack_max_length=1024))
+        ray.get(train_controller.fit.remote(self.data_batches, pack_max_length=1024, rollout_idx=0))

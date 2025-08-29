@@ -38,7 +38,7 @@ class LMDeployWorker(RolloutWorker):
         self.server_func = run_lmdeploy_server_wrapper
         self.router_func_str = "lmdeploy.serve.proxy.proxy.proxy"
         self.endpoints["health_generate"] = "health"
-        self.endpoints["generate"] = "v1/chat/completions"
+        self.endpoints["generate"] = "v1/completions"
         self.endpoints["output_ids"] = "output_ids"
         self.endpoints["response"] = "text"
         self.endpoints["sleep"] = "sleep"
@@ -59,12 +59,9 @@ class LMDeployWorker(RolloutWorker):
             "Authorization": f"Bearer {self.api_keys}",  # 如果需要鉴权
         }
         payload = {
-            "request_id": uid,
-            "messages": [
-                {"role": "system", "content": "You are a helpful assistant."},
-                {"role": "user", "content": prompt},
-            ],
-            "model": self.model_name,
+            "model": self.config.model_name,
+            "id": uid,
+            "prompt": prompt,
             "stream": True,
         }
         payload.update(sample_params)
@@ -172,10 +169,13 @@ class LMDeployWorker(RolloutWorker):
                         "LMDEPLOY_DP_MASTER_PORT": dist_port,
                     }
                 )
+            if "uvicorn_log_level" in lmdeploy_config_kwargs:
+                env["UVICORN_LOG_LEVEL"] = lmdeploy_config_kwargs["uvicorn_log_level"]
 
         if "backend" in lmdeploy_config_kwargs:
             lmdeploy_config_kwargs.pop("backend")
 
+        lmdeploy_config_kwargs["log_level"] = "CRITICAL"  # disable logging
         return Namespace(
             model_path=self.config.model_path,
             model_name=self.model_name,

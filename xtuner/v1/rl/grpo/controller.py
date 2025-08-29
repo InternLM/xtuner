@@ -1,5 +1,4 @@
 import math
-import random
 from typing import Literal, TypedDict
 
 import ray
@@ -72,13 +71,16 @@ class TrainingController:
             label_list = [data_batches[i]["shifted_labels"] for i in indices]
             advantage_list = [data_batches[i]["advantage"] for i in indices]
             if pad_len > 0:
-                pad_token_ids = torch.full(
-                    (1, pad_len),
-                    0,
-                    dtype=data_batches[0]["seq_ctx"].input_ids.dtype,
-                    device=data_batches[0]["seq_ctx"].input_ids.device,
+                # Reduce the attn calculation time by using multiple short sequence packs
+                pad_tokens = tuple(
+                    torch.zeros(1, 1024, dtype=data_batches[0]["seq_ctx"].input_ids.dtype, device="cpu")
+                    for _ in range(pad_len // 1024)
                 )
-                pad_seq_ctx = SequenceContext.from_input_ids((pad_token_ids,), device=pad_token_ids.device)
+                if pad_len % 1024 > 0:
+                    pad_tokens = pad_tokens + (
+                        torch.zeros(1, pad_len % 1024, dtype=data_batches[0]["seq_ctx"].input_ids.dtype, device="cpu"),
+                    )
+                pad_seq_ctx = SequenceContext.from_input_ids(pad_tokens, device="cpu")
                 pad_seq_ctx.num_padding = pad_len
                 pad_labels = torch.full(
                     (1, pad_len),
@@ -88,8 +90,8 @@ class TrainingController:
                 )
                 seq_ctx_list.append(pad_seq_ctx)
                 label_list.append(pad_labels)
-                advantage_list.append(
-                    -100
+                advantage_list.extend(
+                    [-100] * math.ceil(pad_len / 1024)
                 )  # can be any number, pad tokens are excluded from the calculation of the loss function.
 
             seq_ctx = SequenceContext.pack(seq_ctx_list)
@@ -109,9 +111,12 @@ class TrainingController:
         return packed_data_batches
 
     def _grouped_by_max_length(self, packed_data_batches):
+        # sort 过后可能第一个 batch 会有很多 pad tokens，因为最后一个 pack 可能只有少量真实数据。
+        # 比如组成了 16 个 pack，第 16 个 pack 可能只有几条真实数据，剩下的都是 pad tokens。
+        # 排序后这条 pack 会被放在最前面，导致 rank0 的第一个 step 消耗的有效 token 数往往少于其他 rank，是正常现象。
         return sorted(packed_data_batches, key=lambda x: x["seq_ctx"].max_length_q, reverse=True)
 
-    def fit(self, data_batches: list[ColateItem], pack_max_length: int):
+    def fit(self, data_batches: list[ColateItem], pack_max_length: int, rollout_idx: int):
         packed_data_batches = self._packing(data_batches, pack_max_length)
         packed_data_batches = self._grouped_by_max_length(packed_data_batches)
 
@@ -121,11 +126,37 @@ class TrainingController:
         dp_size = len(self.workers) // data_replicate_size
         pad_num = math.ceil(num_packed_data_batches / dp_size) * dp_size - num_packed_data_batches
         if pad_num > 0:
-            pad_data_samples = (
-                random.sample(packed_data_batches, pad_num)
-                if pad_num <= len(packed_data_batches)
-                else random.choices(packed_data_batches, k=pad_num)
+            # Reduce the attn calculation time by using multiple short sequence packs
+            pad_tokens = tuple(
+                torch.zeros(1, 1024, dtype=data_batches[0]["seq_ctx"].input_ids.dtype, device="cpu")
+                for _ in range(pack_max_length // 1024)
             )
+            if pack_max_length % 1024 > 0:
+                pad_tokens = pad_tokens + (
+                    torch.zeros(
+                        1, pack_max_length % 1024, dtype=data_batches[0]["seq_ctx"].input_ids.dtype, device="cpu"
+                    ),
+                )
+            pad_seq_ctx = SequenceContext.from_input_ids(pad_tokens, device="cpu")  # type: ignore
+            pad_seq_ctx.num_padding = pack_max_length
+            pad_shifted_labels = torch.full(
+                (1, pack_max_length),
+                -100,
+                dtype=packed_data_batches[0]["shifted_labels"].dtype,
+                device="cpu",
+            )
+            pad_advantages = torch.full(
+                (1, pack_max_length),
+                -100,
+                dtype=packed_data_batches[0]["advantages"].dtype,
+                device="cpu",
+            )
+            pad_data = {
+                "seq_ctx": pad_seq_ctx,
+                "shifted_labels": pad_shifted_labels,
+                "advantages": pad_advantages,
+            }
+            pad_data_samples = [pad_data for _ in range(pad_num)]
             packed_data_batches = packed_data_batches + pad_data_samples
 
         print(f"len(packed_data_batches): {len(packed_data_batches)}")
@@ -133,7 +164,10 @@ class TrainingController:
         handles = []
         for worker_idx, worker in enumerate(self.workers):
             handles.append(
-                worker.fit.remote(data_batches=packed_data_batches[(worker_idx // data_replicate_size) :: dp_size])  # type: ignore[attr-defined]
+                worker.fit.remote(  # type: ignore[attr-defined]
+                    data_batches=packed_data_batches[(worker_idx // data_replicate_size) :: dp_size],
+                    rollout_idx=rollout_idx,
+                )
             )
         ray.get(handles)
 

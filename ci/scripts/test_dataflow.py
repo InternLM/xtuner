@@ -1,24 +1,26 @@
-import os
-import json
-import time
 import argparse
+import json
+import os
+import time
 from pathlib import Path
-from transformers import AutoTokenizer
 
 import ray
-from xtuner.v1.ray.environment import EnvController
-from xtuner.v1.ray.config.worker import RolloutConfig
-from xtuner.v1.ray.accelerator import AcceleratorResourcesConfig, AutoAcceleratorWorkers
-from xtuner.v1.ray.dataflow import DataFlow, DataFlowConfig
-from xtuner.v1.datasets import RLTextTokenizeFnConfig, build_datasets, build_dataloader
+from transformers import AutoTokenizer
+
 from xtuner.v1.config import (
     DataloaderConfig,
     DatasetConfig,
 )
+from xtuner.v1.datasets import RLTextTokenizeFnConfig
+from xtuner.v1.ray.accelerator import AcceleratorResourcesConfig, AutoAcceleratorWorkers
+from xtuner.v1.ray.config.worker import RolloutConfig
+from xtuner.v1.ray.dataflow import DataFlow, DataFlowConfig, ReplayBufferConfig
+from xtuner.v1.ray.environment import EnvController
 from xtuner.v1.ray.judger.controller import JudgerConfig
 
 MODEL_PATH = os.environ["ROLLOUT_MODEL_PATH"]
-DATA_PATH = os.environ["ROLLOUT_DATA_PATH"]
+TRAIN_DATA_PATH = os.environ["ROLLOUT_DATA_PATH"]
+TEST_DATA_PATH = os.environ["ROLLOUT_TEST_DATA_PATH"]
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Env Generate Test Script")
@@ -60,7 +62,7 @@ def main():
     dataset_cfg = [
         {
         "dataset": DatasetConfig(name="gsm8k",
-                                 anno_path=DATA_PATH,
+                                 anno_path=TRAIN_DATA_PATH,
                                  sample_ratio=1.0),
         "tokenize_fn": RLTextTokenizeFnConfig(max_length=16386),
         },
@@ -71,15 +73,14 @@ def main():
         pack_level='none',
     )
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
-    pg = AutoAcceleratorWorkers.build_placement_group(resources_cfg)
-    datasets = build_datasets(dataset_cfg, tokenizer)
-    dataloader = build_dataloader(
-        dataloader_config=dataloader_cfg,
-        datasets=datasets,
-        global_batch_size=1,
-        micro_batch_size=1,
-        seed=1,
+    replay_buffer_cfg = ReplayBufferConfig(
+        dataset_cfg=dataset_cfg,
+        dataloader_cfg=dataloader_cfg,
+        tokenizer=tokenizer,
+        postprocessor=None
     )
+    pg = AutoAcceleratorWorkers.build_placement_group(resources_cfg)
+    
     test_env = EnvController.remote(
         "test_env",
         pg,
@@ -88,9 +89,7 @@ def main():
     )
     test_flow = DataFlow.remote("test_env", 
                                 dataflow_cfg,
-                                datasets,
-                                dataloader,
-                                tokenizer,
+                                replay_buffer_cfg,
                                 test_env)
 
     reward_list = []
