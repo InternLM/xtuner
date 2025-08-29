@@ -31,7 +31,7 @@ def get_model_config_from_hf(model_path: Path):
         return Qwen3MoEConfig(
             vocab_size=cfg.vocab_size,
             max_position_embeddings=cfg.max_position_embeddings,
-            padding_idx=0,
+            pad_token_id=0,
             num_hidden_layers=cfg.num_hidden_layers,
             hidden_size=cfg.hidden_size,
             intermediate_size=cfg.intermediate_size,
@@ -60,7 +60,7 @@ def get_model_config_from_hf(model_path: Path):
         return Qwen3DenseConfig(
             vocab_size=cfg.vocab_size,
             max_position_embeddings=cfg.max_position_embeddings,
-            padding_idx=cfg.eos_token_id,
+            pad_token_id=cfg.eos_token_id,
             num_hidden_layers=cfg.num_hidden_layers,
             hidden_size=cfg.hidden_size,
             intermediate_size=cfg.intermediate_size,

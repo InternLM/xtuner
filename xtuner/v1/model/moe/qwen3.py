@@ -47,7 +47,7 @@ class Qwen3MoEConfig(MoEConfig):
 class Qwen3MoE30BA3Config(Qwen3MoEConfig):
     vocab_size: int = 151936
     max_position_embeddings: int = 40960
-    padding_idx: int = 0
+    pad_token_id: int = 151645  # eos_id
     num_hidden_layers: int = 48
     hidden_size: int = 2048
     intermediate_size: int = 6144
@@ -74,7 +74,7 @@ class Qwen3MoE30BA3Config(Qwen3MoEConfig):
 class Qwen3MoE235BA22Config(Qwen3MoEConfig):
     vocab_size: int = 151936
     max_position_embeddings: int = 40960
-    padding_idx: int = 0
+    pad_token_id: int = 151645  # eos_id
     num_hidden_layers: int = 94
     hidden_size: int = 4096
     intermediate_size: int = 12288

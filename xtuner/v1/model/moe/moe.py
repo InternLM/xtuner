@@ -433,7 +433,7 @@ class MoE(BaseModel):
         return MoEModelOutputs(**output)  # type: ignore[typeddict-item]
 
     def build_embeddings(self, config: MoEConfig):
-        return nn.Embedding(config.vocab_size, config.hidden_size, config.padding_idx)
+        return nn.Embedding(config.vocab_size, config.hidden_size, config.pad_token_id)
 
     def build_layers(self, config: MoEConfig) -> nn.ModuleDict:
         # 让 layers 是一个 nn.ModuleDict 方便做 pipeline parallel 的参数切分，
@@ -752,7 +752,7 @@ class MoE(BaseModel):
         return F.embedding(
             input,
             w,
-            self.padding_idx,
+            self.pad_token_id,
             self.max_norm,
             self.norm_type,
             self.scale_grad_by_freq,

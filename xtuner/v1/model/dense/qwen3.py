@@ -29,7 +29,7 @@ class Qwen3DenseConfig(TransformerConfig):
 class Qwen3_8BConfig(Qwen3DenseConfig):
     vocab_size: int = 151936
     max_position_embeddings: int = 40960
-    padding_idx: int = 151645  # eos_id
+    pad_token_id: int = 151645  # eos_id
     num_hidden_layers: int = 36
     hidden_size: int = 4096
     intermediate_size: int = 12288

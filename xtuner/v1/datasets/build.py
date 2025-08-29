@@ -129,7 +129,7 @@ def build_dataloader(
     collator = partial(
         dataloader_config.build_collator(),
         pack_max_length=dataloader_config.pack_max_length,
-        padding_token_idx=dataloader_config.padding_token_idx,
+        padding_token_idx=dataloader_config.pad_token_id if dataloader_config.pad_token_id is not None else 0,
     )
     dataloader = DataLoader(
         dataset,

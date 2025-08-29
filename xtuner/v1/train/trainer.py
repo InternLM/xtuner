@@ -199,6 +199,8 @@ class Trainer:
             global_batch_size = self.data_mesh["dp"].size()
         self._global_batch_size = global_batch_size
 
+        self.resolve_config_conflicts(self.tokenizer, model_cfg, dataloader_cfg)
+
         self._dataloader = self.build_dataloader(
             dataset_config=dataset_cfg,
             dataloader_config=dataloader_cfg,
@@ -281,6 +283,36 @@ class Trainer:
         )
         self.config = config
         return self
+
+    def resolve_config_conflicts(self, tokenizer, model_cfg, dataloader_cfg):
+        if hasattr(tokenizer, "pad_token_id"):
+            pad_token_id = tokenizer.pad_token_id
+        else:
+            pad_token_id = tokenizer.eos_token_id
+
+        # TODO: 后续配置会统一，因此不会有很多种情况
+        if isinstance(model_cfg, InternS1Config) and model_cfg.text_config.pad_token_id != pad_token_id:
+            logger.warning(
+                f"Model pad_token_id {model_cfg.text_config.pad_token_id} is different from tokenizer pad_token_id {pad_token_id}. "
+                f"Using tokenizer pad_token_id {pad_token_id}."
+            )
+            model_cfg.text_config.pad_token_id = pad_token_id
+
+        elif model_cfg.pad_token_id != pad_token_id:
+            logger.warning(
+                f"Model pad_token_id {model_cfg.pad_token_id} is different from tokenizer pad_token_id {pad_token_id}. "
+                f"Using tokenizer pad_token_id {pad_token_id}."
+            )
+            model_cfg.pad_token_id = pad_token_id
+
+        if dataloader_cfg.pad_token_id is None:
+            dataloader_cfg.pad_token_id = pad_token_id
+        elif dataloader_cfg.pad_token_id != pad_token_id:
+            logger.warning(
+                f"Dataloader pad_token_id {dataloader_cfg.pad_token_id} is different from tokenizer pad_token_id {pad_token_id}. "
+                f"Using tokenizer pad_token_id {pad_token_id}."
+            )
+            dataloader_cfg.pad_token_id = pad_token_id
 
     def fit(self):
         train_begin = time.time()
