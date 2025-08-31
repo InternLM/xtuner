@@ -35,17 +35,17 @@
 
 .. toctree::
    :hidden:
-   :maxdepth: 2
+   :maxdepth: 3
    :caption: 预训练与微调
 
-   pretrain_sft/user/index.rst
+   pretrain_sft/tutorial/index.rst
 
 .. toctree::
    :hidden:
-   :maxdepth: 2
+   :maxdepth: 3
    :caption: 强化学习
 
-   rl/user/index.rst
+   rl/tutorial/index.rst
 
 .. toctree::
    :hidden:
