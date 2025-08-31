@@ -752,7 +752,7 @@ class MoE(BaseModel):
         return F.embedding(
             input,
             w,
-            self.pad_token_id,
+            self.padding_idx,
             self.max_norm,
             self.norm_type,
             self.scale_grad_by_freq,

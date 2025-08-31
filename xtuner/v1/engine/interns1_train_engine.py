@@ -33,7 +33,7 @@ class InternS1TrainEngine(TrainEngine):
     ) -> None:
         super().__init__(*args, **kwargs)
 
-    def build_model(self, init_model_weights: bool = False) -> InternS1ForConditionalGeneration:
+    def build_model(self) -> InternS1ForConditionalGeneration:
         with torch.device("meta"):
             model: InternS1ForConditionalGeneration = self.model_cfg.build()
 

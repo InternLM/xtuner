@@ -134,7 +134,7 @@ class TestMoEEngine(DistributedTestBase):
             fsdp_cfg=fsdp_cfg,
         )
 
-        engine.init_model()
+        engine.init_model_weights()
         engine.from_hf(hf_path=QWEN3_MOE_PATH)
         engine.save_hf(
             hf_dir=temp_dir,

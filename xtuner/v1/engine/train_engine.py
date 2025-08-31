@@ -173,9 +173,6 @@ class TrainEngine:
             self.float8_handler.build_reduce_mesh(model, cast(DeviceMesh, model.fsdp_mesh))
         return model
 
-    def init_model(self):
-        self.model._init_weights()
-
     def build_optimizer(self, optim_cfg: OptimConfig) -> torch.optim.Optimizer:
         params = [p for p in self.model.parameters() if p.requires_grad]
 
