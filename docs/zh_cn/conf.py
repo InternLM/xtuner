@@ -89,30 +89,30 @@ html_static_path = ["_static"]
 html_css_files = ["custom.css"]
 
 # Mock out external dependencies here.
-autodoc_mock_imports = [
-    "cpuinfo",
-    "torch",
-    "transformers",
-    "psutil",
-    "prometheus_client",
-    "sentencepiece",
-    "vllm.cuda_utils",
-    "vllm._C",
-    "numpy",
-    "tqdm",
-]
+# autodoc_mock_imports = [
+#     "cpuinfo",
+#     "torch",
+#     "transformers",
+#     "psutil",
+#     "prometheus_client",
+#     "sentencepiece",
+#     "vllm.cuda_utils",
+#     "vllm._C",
+#     "numpy",
+#     "tqdm",
+# ]
 
 
-class MockedClassDocumenter(autodoc.ClassDocumenter):
-    """Remove note about base class when a class is derived from object."""
-
-    def add_line(self, line: str, source: str, *lineno: int) -> None:
-        if line == "   Bases: :py:class:`object`":
-            return
-        super().add_line(line, source, *lineno)
-
-
-autodoc.ClassDocumenter = MockedClassDocumenter
+# class MockedClassDocumenter(autodoc.ClassDocumenter):
+#     """Remove note about base class when a class is derived from object."""
+#
+#     def add_line(self, line: str, source: str, *lineno: int) -> None:
+#         if line == "   Bases: :py:class:`object`":
+#             return
+#         super().add_line(line, source, *lineno)
+#
+#
+# autodoc.ClassDocumenter = MockedClassDocumenter
 
 navigation_with_keys = False
 

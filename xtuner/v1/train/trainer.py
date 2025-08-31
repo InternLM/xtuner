@@ -21,6 +21,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, LinearLR, Sequ
 from typing_extensions import NotRequired, Self
 
 from transformers import AutoTokenizer
+from transformers.tokenization_utils import PreTrainedTokenizer
 from xtuner.utils.device import get_device, get_torch_device
 from xtuner.v1.config import DataloaderConfig, DatasetConfigList, FSDPConfig, LRConfig, OptimConfig
 from xtuner.v1.config.base_model import TransformerConfig
@@ -86,10 +87,46 @@ class XTunerMeta(BaseModel):
 
 
 class Trainer:
-    META_PATH = ".xtuner"
+    """Trainer class for fine-tuning transformer models with FSDP support.
+
+    This class provides a high-level interface for training transformer models
+    with configurable distributed training, optimization, and checkpointing.
+    It supports various training configurations including sequence parallelism,
+    tensor parallelism, and data parallelism.
+
+    Args:
+        load_from (str | Path | None): Path to Huggingface model or saved trainer checkpoint.
+        model_cfg (TransformerConfig | InternS1Config): Configuration for the transformer model architecture.
+        optim_cfg (OptimConfig): Configuration for the optimizer.
+        fsdp_cfg (FSDPConfig | None): Configuration for Fully Sharded Data Parallel (FSDP).
+        dataset_cfg (DatasetConfigList): Configuration for training datasets.
+        dataloader_cfg (DataloaderConfig): Configuration for the data loader.
+        loss_ctx (CELossContext | None): Context for the cross-entropy loss function.
+        lr_cfg (LRConfig): Configuration for the learning rate scheduler.
+        tokenizer_path (str | Path | None): Path to the tokenizer.
+        global_batch_size (int | None): Global batch size for training.
+        work_dir (Path | str | None): Directory for saving experiment outputs.
+        log_dir (Path | str | None): Directory for log files.
+        sp_size (int): Sequence parallel size.
+        total_step (int | None): Total training steps.
+        epoch_num (int | None): Number of training epochs.
+        resume_config (ResumeConfig | None): Configuration for resuming training.
+        strict_load (bool): Whether to strictly load model weights.
+        hf_interval (int | None): Interval for saving Huggingface format checkpoints.
+        hf_max_keep (int | None): Maximum number of Huggingface checkpoints to keep.
+        profile_step (int | None): Step to perform profiling.
+        profile_time (bool): Whether to profile training time.
+        profile_memory (bool): Whether to profile memory usage.
+        intra_layer_micro_batch (int): Intra-layer micro batch size.
+        seed (int): Random seed for reproducibility.
+        debug (bool): Whether to enable debug mode.
+        backend (str): Backend for distributed training.
+    """
+
     config: TrainerConfig | None
-    profile_time_path = "profilling_time"
-    profile_memory_path = "profilling_memory"
+    _META_PATH = ".xtuner"
+    _PROFILE_TIME_PATH = "profilling_time"
+    _PROFILE_MEMORY_PATH = "profilling_memory"
 
     def __init__(
         self,
@@ -199,7 +236,7 @@ class Trainer:
             global_batch_size = self.data_mesh["dp"].size()
         self._global_batch_size = global_batch_size
 
-        self.resolve_config_conflicts(self.tokenizer, model_cfg, dataloader_cfg)
+        self._resolve_config_conflicts(self.tokenizer, model_cfg, dataloader_cfg)
 
         self._dataloader = self.build_dataloader(
             dataset_config=dataset_cfg,
@@ -242,10 +279,10 @@ class Trainer:
         """Create a Trainer instance from a TrainerConfig.
 
         Args:
-            config: TrainerConfig instance containing all configuration parameters
+            config (TrainerConfig): TrainerConfig instance containing all configuration parameters.
 
         Returns:
-            Trainer instance initialized with the provided config
+            Self: Trainer instance initialized with the provided config.
         """
         if config.chunked_loss:
             if is_installed("liger_kernel"):
@@ -287,47 +324,22 @@ class Trainer:
         self.config = config
         return self
 
-    def resolve_config_conflicts(self, tokenizer, model_cfg, dataloader_cfg):
-        if hasattr(tokenizer, "pad_token_id"):
-            pad_token_id = tokenizer.pad_token_id
-        else:
-            pad_token_id = tokenizer.eos_token_id
-
-        # TODO: 后续配置会统一，因此不会有很多种情况
-        if isinstance(model_cfg, InternS1Config) and model_cfg.text_config.pad_token_id != pad_token_id:
-            logger.warning(
-                f"Model pad_token_id {model_cfg.text_config.pad_token_id} is different from tokenizer pad_token_id {pad_token_id}. "
-                f"Using tokenizer pad_token_id {pad_token_id}."
-            )
-            model_cfg.text_config.pad_token_id = pad_token_id
-
-        elif model_cfg.pad_token_id != pad_token_id:
-            logger.warning(
-                f"Model pad_token_id {model_cfg.pad_token_id} is different from tokenizer pad_token_id {pad_token_id}. "
-                f"Using tokenizer pad_token_id {pad_token_id}."
-            )
-            model_cfg.pad_token_id = pad_token_id
-
-        if dataloader_cfg.pad_token_id is None:
-            dataloader_cfg.pad_token_id = pad_token_id
-        elif dataloader_cfg.pad_token_id != pad_token_id:
-            logger.warning(
-                f"Dataloader pad_token_id {dataloader_cfg.pad_token_id} is different from tokenizer pad_token_id {pad_token_id}. "
-                f"Using tokenizer pad_token_id {pad_token_id}."
-            )
-            dataloader_cfg.pad_token_id = pad_token_id
-
     def fit(self):
+        """Run the training loop.
+
+        This method executes the main training loop, iterating through the dataset and performing training steps. It
+        handles data loading, forward pass, backward pass, optimization, logging, and checkpointing.
+        """
         train_begin = time.time()
         time_before_get_data = time.time()
-        for data_batch in self.data_iter():
+        for data_batch in self._data_iter():
             DEVICE_MODULE.reset_peak_memory_stats()
 
             time_before_train_step = time.time()
             data_time = time_before_train_step - time_before_get_data
 
             data_batch = self.loss_ctx.build_list_ctx(data_batch, self.data_mesh, DEVICE)
-            with self.maybe_profilling():
+            with self._maybe_profilling():
                 loss_log, other_log = self._engine.train_step(data_batch)
 
             grad_norm = self._engine.clip_grad_norm()
@@ -352,18 +364,34 @@ class Trainer:
 
             time_before_get_data = time.time()
             self._maybe_save_hf()
-            self.maybe_save()
+            self._maybe_save()
 
     @property
     def world_size(self) -> int:
+        """Get the total number of processes in the distributed training group.
+
+        Returns:
+            int: Total number of processes.
+        """
         return get_world_size()
 
     @property
     def rank(self) -> int:
+        """Get the rank of the current process in the distributed training
+        group.
+
+        Returns:
+            int: Rank of the current process.
+        """
         return get_rank()
 
     @property
     def micro_batch_size(self) -> int:
+        """Calculate the micro batch size per data parallel rank.
+
+        Returns:
+            int: Micro batch size for the current rank.
+        """
         if self._micro_batch_size is None:
             micro_batch_size = self.global_batch_size / self.data_mesh["dp"].size()
             if not micro_batch_size.is_integer():
@@ -377,11 +405,21 @@ class Trainer:
         return self._micro_batch_size
 
     @property
-    def global_batch_size(self):
+    def global_batch_size(self) -> int:
+        """Get the global batch size across all data parallel ranks.
+
+        Returns:
+            int: Global batch size.
+        """
         return self._global_batch_size
 
     @property
-    def total_step(self):
+    def total_step(self) -> int:
+        """Calculate the total number of training steps.
+
+        Returns:
+            int: Total training steps.
+        """
         if self._total_step is None:
             assert isinstance(self._dataloader, Sized), (
                 f"`epoch_num` should be set for a Mapped dataset, but got {self._dataloader.dataset}"
@@ -390,7 +428,12 @@ class Trainer:
         return self._total_step
 
     @property
-    def cur_step(self):
+    def cur_step(self) -> int:
+        """Get the current training step.
+
+        Returns:
+            int: Current step number.
+        """
         return self._cur_step
 
     def _init_logger(self, work_dir: Path):
@@ -436,16 +479,6 @@ class Trainer:
         )
         return data_mesh
 
-    def data_iter(self):
-        data_iter = iter(self._dataloader)
-        for i in range(self.total_step):
-            try:
-                data = next(data_iter)
-            except StopIteration:
-                data_iter = iter(self._dataloader)
-                data = next(data_iter)
-            yield data
-
     def build_engine(
         self,
         model_path: Path | None,
@@ -456,6 +489,20 @@ class Trainer:
         intra_layer_micro_batch: int = 1,
         strict: bool = True,
     ):
+        """Build the training engine for the transformer model.
+
+        Args:
+            model_path (Path | None): Path to the model checkpoint or None for new initialization.
+            model_config (TransformerConfig | InternS1Config): Model configuration.
+            optim_config (OptimConfig): Optimizer configuration.
+            fsdp_config (FSDPConfig): FSDP configuration for distributed training.
+            resume_config (ResumeConfig | None): Resume configuration for continuing training.
+            intra_layer_micro_batch (int): Intra-layer micro batch size for gradient accumulation.
+            strict (bool): Whether to strictly load model weights.
+
+        Returns:
+            TrainEngine: Initialized training engine.
+        """
         from xtuner.v1.engine import InternS1TrainEngine, TrainEngine
 
         if isinstance(model_config, InternS1Config):
@@ -488,6 +535,21 @@ class Trainer:
         seed,
         resume_config: ResumeConfig | None = None,
     ):
+        """Build the dataloader for training.
+
+        Args:
+            dataloader_config (DataloaderConfig): Configuration for the data loader.
+            dataset_config (DatasetConfigList): Configuration for training datasets.
+            tokenizer (AutoTokenizer): Tokenizer for processing text data.
+            dp_mesh (DeviceMesh): Device mesh for data parallelism.
+            global_batch_size (int): Global batch size across all ranks.
+            micro_batch_size (int): Micro batch size per rank.
+            seed: Random seed for reproducibility.
+            resume_config (ResumeConfig | None): Resume configuration for continuing training.
+
+        Returns:
+            DataLoader: Configured dataloader for training.
+        """
         # TODO: Support resume
         # 1. load dataloader state
         # 2. set cur step
@@ -502,6 +564,14 @@ class Trainer:
         )
 
     def build_lr_scheduler(self, lr_cfg: LRConfig) -> torch.optim.lr_scheduler.LRScheduler:
+        """Build the learning rate scheduler.
+
+        Args:
+            lr_cfg (LRConfig): Configuration for the learning rate scheduler.
+
+        Returns:
+            torch.optim.lr_scheduler.LRScheduler: Configured learning rate scheduler.
+        """
         total_step = self.total_step
         warmup_steps = int(lr_cfg.warmup_ratio * total_step)
 
@@ -533,21 +603,46 @@ class Trainer:
         )
         return lr_scheduler
 
-    def maybe_save(self):
+    def _maybe_save(self):
         ...
         # TODO: save latest information in `meta`
 
     @property
     def work_dir(self) -> Path:
+        """Get the working directory for the trainer.
+
+        Returns:
+            Path: Working directory path.
+        """
         return self._work_dir
 
     @property
     def exp_dir(self) -> Path:
+        """Get the experiment directory for the current run.
+
+        Returns:
+            Path: Experiment directory path.
+        """
         return Path(self._meta.latest_exp.exp_dir)
 
     @property
     def meta(self) -> XTunerMeta:
+        """Get the XTuner metadata for tracking experiments.
+
+        Returns:
+            XTunerMeta: Experiment metadata tracker.
+        """
         return self._meta
+
+    def _data_iter(self):
+        data_iter = iter(self._dataloader)
+        for i in range(self.total_step):
+            try:
+                data = next(data_iter)
+            except StopIteration:
+                data_iter = iter(self._dataloader)
+                data = next(data_iter)
+            yield data
 
     def _set_deterministic(self):
         if XTUNER_DETERMINISTIC:
@@ -566,7 +661,7 @@ class Trainer:
             if self.rank == 0:
                 work_dir.mkdir(parents=True, exist_ok=True)
 
-        meta_path = work_dir / self.META_PATH
+        meta_path = work_dir / self._META_PATH
         if not meta_path.exists() and self.rank == 0:
             meta = XTunerMeta(exps=[])
             with open(meta_path, "w") as f:
@@ -647,16 +742,16 @@ class Trainer:
         return meta
 
     @contextmanager
-    def maybe_profilling(self):
+    def _maybe_profilling(self):
         """Check if profiling is enabled and perform profiling if necessary."""
         if self._profile_step is not None and self._cur_step == self._profile_step:
             with contextlib.ExitStack() as stack:
                 if self._profile_time:
-                    time_dir = self.work_dir / self.profile_time_path / f"step-{self._cur_step}"
+                    time_dir = self.work_dir / self._PROFILE_TIME_PATH / f"step-{self._cur_step}"
                     stack.enter_context(profilling_time(time_dir))
 
                 if self._profile_memory:
-                    memory_dir = self.work_dir / self.profile_memory_path / f"step-{self._cur_step}"
+                    memory_dir = self.work_dir / self._PROFILE_MEMORY_PATH / f"step-{self._cur_step}"
                     stack.enter_context(profilling_memory(memory_dir))
                 yield
         else:
@@ -718,7 +813,7 @@ class Trainer:
                     rmtree(hf_dir)
 
         self._engine.save_hf(str(save_hf_path))
-        meta_path = self.work_dir / self.META_PATH
+        meta_path = self.work_dir / self._META_PATH
 
         if self.rank == 0:
             with meta_path.open("w") as f:
@@ -746,3 +841,49 @@ class Trainer:
         for model in self._engine.model.modules():
             if isinstance(model, nn.Module):
                 model.register_forward_hook(module_debug_forward_hook)
+
+    def _resolve_config_conflicts(
+        self,
+        tokenizer: PreTrainedTokenizer,
+        model_cfg: TransformerConfig | InternS1Config,
+        dataloader_cfg: DataloaderConfig,
+    ):
+        if hasattr(tokenizer, "pad_token_id"):
+            pad_token_id = tokenizer.pad_token_id
+        else:
+            pad_token_id = tokenizer.eos_token_id
+
+        if not isinstance(pad_token_id, int):
+            logger.warning(
+                f"Tokenizer pad_token_id is {pad_token_id}, which is not an integer. Setting pad_token_id to 0."
+            )
+
+        if isinstance(pad_token_id, list):
+            pad_token_id = pad_token_id[0]
+
+        assert isinstance(pad_token_id, int), f"pad_token_id should be an integer, but got {pad_token_id}"
+
+        # TODO: 后续配置会统一，因此不会有很多种情况
+        if isinstance(model_cfg, InternS1Config):
+            if model_cfg.text_config.pad_token_id != pad_token_id:
+                logger.warning(
+                    f"Model pad_token_id {model_cfg.text_config.pad_token_id} is different from tokenizer "
+                    f"pad_token_id {pad_token_id}. Using tokenizer pad_token_id {pad_token_id}."
+                )
+                model_cfg.text_config.pad_token_id = pad_token_id
+
+        elif model_cfg.pad_token_id != pad_token_id:
+            logger.warning(
+                f"Model pad_token_id {model_cfg.pad_token_id} is different from tokenizer pad_token_id "
+                f"{pad_token_id}. Using tokenizer pad_token_id {pad_token_id}."
+            )
+            model_cfg.pad_token_id = pad_token_id
+
+        if dataloader_cfg.pad_token_id is None:
+            dataloader_cfg.pad_token_id = pad_token_id
+        elif dataloader_cfg.pad_token_id != pad_token_id:
+            logger.warning(
+                f"Dataloader pad_token_id {dataloader_cfg.pad_token_id} is different from tokenizer "
+                f"pad_token_id {pad_token_id}. Using tokenizer pad_token_id {pad_token_id}."
+            )
+            dataloader_cfg.pad_token_id = pad_token_id

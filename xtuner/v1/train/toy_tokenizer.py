@@ -6,7 +6,7 @@ import torch
 from transformers.tokenization_utils_base import BatchEncoding
 
 
-def replace_token_ids(text, ids, special_str, special_id):
+def _replace_token_ids(text, ids, special_str, special_id):
     if special_str in text:
         _positions = []
         start = 0
@@ -32,10 +32,23 @@ def replace_token_ids(text, ids, special_str, special_id):
 
 
 class UTF8ByteTokenizer:
-    """字节级 UTF-8 tokenizer：
+    """A simple byte-level tokenizer that encodes text as UTF-8 bytes with
+    special token handling.
 
-    - 普通字节的 token id 范围为 [0, 255]
-    - 可选特殊符号会占用 256 以上的 id
+    This tokenizer converts text into a sequence of byte values (0-255) and supports
+    special tokens for text boundaries and image-related placeholders. It provides
+    basic encoding/decoding functionality compatible with transformers' tokenizer interface.
+
+    Args:
+        bos_token_id (int, optional): Beginning of sequence token ID. Defaults to 256.
+        eos_token_id (int, optional): End of sequence token ID. Defaults to 257.
+        pad_token_id (int, optional): Padding token ID. Defaults to 258.
+        image_start_id_map (dict[str, int], optional): Mapping from image start string
+            to token ID. Defaults to {"<img>": 259}.
+        image_context_id_map (dict[str, int], optional): Mapping from image context string
+            to token ID. Defaults to {"<IMG_CONTEXT>": 260}.
+        image_end_id_map (dict[str, int], optional): Mapping from image end string
+            to token ID. Defaults to {"</img>": 261}.
     """
 
     def __init__(
@@ -69,13 +82,25 @@ class UTF8ByteTokenizer:
         self.vocab_size = 256 + len(self.special_ids) + 3
 
     def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
+        """Encode text into a sequence of token IDs.
+
+        Converts text to UTF-8 bytes and replaces special image tokens with their
+        corresponding IDs. Optionally adds BOS/EOS tokens.
+
+        Args:
+            text (str): The text to encode.
+            add_special_tokens (bool, optional): Whether to add BOS/EOS tokens. Defaults to False.
+
+        Returns:
+            list[int]: List of token IDs representing the encoded text.
+        """
         # 严格 UTF-8 编码，遇到非法字符会抛错；如需忽略可用 errors='ignore'
         b = text.encode("utf-8", errors="strict")
         ids = list(b)  # 每个字节 0..255
 
-        ids = replace_token_ids(text, ids, self.image_start_str, self.image_start_id)
-        ids = replace_token_ids(text, ids, self.image_context_str, self.image_context_id)
-        ids = replace_token_ids(text, ids, self.image_end_str, self.image_end_id)
+        ids = _replace_token_ids(text, ids, self.image_start_str, self.image_start_id)
+        ids = _replace_token_ids(text, ids, self.image_context_str, self.image_context_id)
+        ids = _replace_token_ids(text, ids, self.image_end_str, self.image_end_id)
 
         if add_special_tokens and self.bos_token_id is not None:
             ids = [self.bos_token_id] + ids
@@ -84,6 +109,21 @@ class UTF8ByteTokenizer:
         return ids
 
     def decode(self, ids: list[int], skip_special_tokens: bool = True) -> str:
+        """Decode a sequence of token IDs back to text.
+
+        Converts byte-level token IDs back to UTF-8 text. Special tokens are either
+        skipped or kept as-is based on skip_special_tokens parameter.
+
+        Args:
+            ids (list[int]): List of token IDs to decode.
+            skip_special_tokens (bool, optional): Whether to skip special tokens during decoding. Defaults to True.
+
+        Returns:
+            str: The decoded text.
+
+        Raises:
+            ValueError: If any token ID is negative.
+        """
         bytes_list = []
         for t in ids:
             if t < 0:
@@ -97,13 +137,28 @@ class UTF8ByteTokenizer:
                 # 其余 >=256 的非特殊 id 直接忽略
         return bytes(bytes_list).decode("utf-8", errors="strict")
 
-    def convert_tokens_to_ids(self, token: str) -> Union[int, list[int]]:
+    def _convert_tokens_to_ids(self, token: str) -> Union[int, list[int]]:
         ids = self.encode(token)
         if len(ids) == 1:
             return ids[0]
         return ids
 
     def __call__(self, text: list[str], return_tensors: Literal["np", "pt"] = "np", **kwargs):
+        """Encode a batch of texts into token IDs with tensor format.
+
+        Processes multiple texts simultaneously and returns them in the specified
+        tensor format compatible with transformers library.
+
+        Args:
+            text (list[str]): List of texts to encode.
+            return_tensors (Literal["np", "pt"], optional): Format of returned tensors.
+                "np" for numpy arrays, "pt" for PyTorch tensors. Defaults to "np".
+            **kwargs: Additional arguments passed to encode method, including
+                add_special_tokens (bool).
+
+        Returns:
+            BatchEncoding: Object containing encoded token IDs with the specified tensor type.
+        """
         batch_ids = []
         for _text in text:
             ids = self.encode(_text, add_special_tokens=kwargs.get("add_special_tokens", False))
