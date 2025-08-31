@@ -219,7 +219,7 @@ def main():
     os.environ["DG_CACHE_DIR"] = f"/tmp/.deep_gemm-{os.getenv('RANK', '0')}"
 
     moe_cfgs = [
-        (Qwen3MoE30BA3Config(balancing_loss_cfg=BalancingLossConfig(), z_loss_cfg=ZLossConfig()), "ep1"),
+        (Qwen3MoE30BA3Config(balancing_loss_cfg=BalancingLossConfig()), "ep1"),
         (Qwen3MoE30BA3Config(ep_size=8, dispatcher="all2all"), "ep8"),
         # (
         #     Qwen3MoE30BA3Config(
