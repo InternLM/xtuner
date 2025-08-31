@@ -54,6 +54,12 @@
 
    legacy_index.rst
 
+.. toctree::
+   :maxdepth: 2
+   :caption: API
+
+   Pretrain & SFT Trainer  <api/trainer>
+
 
 
 写在前面
