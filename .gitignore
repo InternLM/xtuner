@@ -122,3 +122,8 @@ work_dirs/
 # srun
 *.out
 batchscript-*
+
+docs/en/_build/
+docs/en/api/generated/
+docs/zh_cn/_build/
+docs/zh_cn/api/generated/
