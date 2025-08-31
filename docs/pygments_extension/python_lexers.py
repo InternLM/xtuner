@@ -3,7 +3,7 @@ from pygments.lexers.python import *
 from sphinx.highlighting import lexers
 import keyword
 
-from pygments.lexer import include, \
+from pygments.lexer import RegexLexer, include, \
     bygroups, using, default, words, combined, this
 from pygments.token import Text, Comment, Operator, Keyword, Name, String, \
     Number, Punctuation, Whitespace
@@ -15,7 +15,7 @@ glacier = "#55bfe3"
 
 # tokens = deepcopy(PythonLexer.tokens)
 
-class XTunerPythonLexer(PythonLexer):
+class XTunerPythonLexer(RegexLexer):
     name = 'Python'
     url = 'https://www.python.org'
     aliases = ['python', 'py', 'sage', 'python3', 'py3', 'bazel', 'starlark', 'pyi']
@@ -102,8 +102,13 @@ class XTunerPythonLexer(PythonLexer):
         ],
         'expr': [
             (
-                rf'({PythonLexer.uni_name})(\()[\n\s]*({PythonLexer.uni_name})(=)',
-                bygroups(Name, Punctuation, Name.Keyword, Punctuation),
+                rf'({PythonLexer.uni_name})(\()([\n\s]*)({PythonLexer.uni_name})(=)',
+                bygroups(Name, Punctuation, Whitespace, Name.Keyword, Punctuation),
+                'arg-assign'
+            ),
+            (
+                rf'({PythonLexer.uni_name})(\()([\n]*)({PythonLexer.uni_name})',
+                bygroups(Name, Punctuation, Whitespace, Name),
                 'arg-assign'
             ),
             # raw f-strings
