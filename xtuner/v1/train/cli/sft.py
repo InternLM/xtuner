@@ -10,25 +10,28 @@ from xtuner.v1.train.trainer import Trainer
 from xtuner.v1.utils import Config
 
 
-app = App(name="entrypoint of sft & pretrain")
+app = App(
+    name="entrypoint of sft & pretrain",
+    help="XTuner's entry point for fine-tuning and training, launched using configuration files or arguments.",
+)
 
 
 @app.default()
 def main(
     *,
-    trainer_cfg_path: Annotated[Path | None, Parameter(group=Group("config-path", sort_key=0))] = None,
+    config: Annotated[Path | None, Parameter(group=Group("config-path", sort_key=0))] = None,
     arguments: Annotated[
         TrainingArguments | None, Parameter(group=Group("Training Arguments", sort_key=1), name="*")
     ] = None,
 ):
     if arguments is not None:
-        if trainer_cfg_path is not None:
-            raise ValueError("Cannot specify both `trainer_cfg_path` and `arguments`.")
+        if config is not None:
+            raise ValueError("Cannot specify both `config` and `arguments`.")
         trainer_cfg = arguments.to_trainer_config()
     else:
-        if trainer_cfg_path is None:
-            raise ValueError("Must specify either `trainer_cfg_path` or `arguments`.")
-        trainer_cfg = Config.fromfile(trainer_cfg_path)["trainer"]
+        if config is None:
+            raise ValueError("Must specify either `config` or `arguments`.")
+        trainer_cfg = Config.fromfile(config)["trainer"]
 
     trainer = Trainer.from_config(trainer_cfg)
     trainer.fit()

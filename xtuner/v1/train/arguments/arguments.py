@@ -51,6 +51,8 @@ class TrainingArguments(BaseModel):
         DataloaderConfig | None,
         Parameter(group=dataset_group, help="dataset config path or jsonl file or dir", name="*"),
     ] = DataloaderConfig(pack_max_length=4096)
+    cache_dir: Annotated[Path | None, Parameter(group=dataset_group, help="dataset cache directory")] = None
+    cache_tag: Annotated[Path | None, Parameter(group=dataset_group, help="The tag of the cache version")] = None
     max_length: Annotated[int, Parameter(group=dataset_group, help="max sequence length")] = 4096
     # optimizer
     lr: Annotated[float, Parameter(group=optimizer_group, help="learning rate")] = 6e-5
@@ -151,7 +153,7 @@ class TrainingArguments(BaseModel):
                 if not jsonl_file.exists():
                     raise FileNotFoundError(f"Dataset file {jsonl_file} does not exist.")
                 tokenize = FTDPTokenizeFnConfig()
-                dataset = DatasetConfig(anno_path=jsonl_file)
+                dataset = DatasetConfig(anno_path=jsonl_file, cache_dir=self.cache_dir, cache_tag=self.cache_tag)
                 ret.append({"dataset": dataset, "tokenize_fn": tokenize})
             return ret
 

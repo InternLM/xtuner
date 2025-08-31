@@ -11,6 +11,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from functools import partial
 from io import BytesIO
 from multiprocessing import Process, Queue
+from pathlib import Path
 from threading import Lock
 from typing import Callable, cast
 
@@ -181,7 +182,7 @@ class JsonlDataset(torch.utils.data.Dataset):
         sample_ratio: float = 1.0,
         tokenize_fn: CachableTokenizeFunction | None = None,
         name: str = "default",
-        cache_dir: str | None = None,
+        cache_dir: str | Path | None = None,
         max_length: int | None = None,  # TODO: Remove max_length in dataset
         cache_tag: str | None = None,
     ):
