@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 class DatasetConfig(BaseModel):
     model_config = ConfigDict(title="Base dataset config for xtuner", extra="allow")
     anno_path: Annotated[str | Path, Parameter(group="dataset")]
-    cache_dir: str | None = None
+    cache_dir: str | Path | None = None
     cache_tag: str | None = None
     name: Annotated[str, Parameter(group="dataset")] = "default"
     class_name: Annotated[str, Parameter(group="dataset")] = "JsonlDataset"

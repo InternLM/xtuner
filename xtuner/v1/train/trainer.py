@@ -234,6 +234,9 @@ class Trainer:
         if debug:
             self._register_debug_hook()
 
+        if self._load_from is not None and is_hf_model_path(self._load_from) and self._hf_interval is None:
+            self._hf_interval = self.total_step
+
     @classmethod
     def from_config(cls, config: TrainerConfig) -> Self:
         """Create a Trainer instance from a TrainerConfig.
