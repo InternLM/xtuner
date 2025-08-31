@@ -10,7 +10,7 @@ from torch.testing._internal.common_distributed import DistributedTestBase
 from transformers import AutoTokenizer
 
 from xtuner.v1.model.moe.moe import SequenceContext
-from xtuner.v1.config import AdamWConfig, Float8Config, FSDPConfig, LRConfig,  BalancingLossConfig, ZLossConfig
+from xtuner.v1.config import AdamWConfig, Float8Config, FSDPConfig, LRConfig,  BalancingLossConfig
 from xtuner.v1.engine.train_engine import TrainEngine
 from xtuner.v1.float8.float8_tensor import ScalingGranularity
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
@@ -37,7 +37,6 @@ class TestMoEEngineFloat8(DistributedTestBase):
 
         moe_cfg = Qwen3MoE30BA3Config(
             balancing_loss_cfg=BalancingLossConfig(),
-            z_loss_cfg=ZLossConfig(),
             float8_cfg=Float8Config(
                 scaling_granularity_gemm=ScalingGranularity.TILEWISE,
                 scaling_granularity_grouped_gemm=ScalingGranularity.TILEWISE,
@@ -112,7 +111,6 @@ class TestMoEEngineFloat8(DistributedTestBase):
         moe_cfg = Qwen3MoE30BA3Config(
             ep_size=ep_size,
             balancing_loss_cfg=BalancingLossConfig(),
-            z_loss_cfg=ZLossConfig(),
             float8_cfg=Float8Config(
                 scaling_granularity_gemm=ScalingGranularity.TENSORWISE,
                 scaling_granularity_grouped_gemm=ScalingGranularity.TILEWISE,
@@ -193,7 +191,6 @@ class TestMoEEngineFloat8(DistributedTestBase):
         moe_cfg = Qwen3MoE30BA3Config(
             ep_size=ep_size,
             balancing_loss_cfg=BalancingLossConfig(),
-            z_loss_cfg=ZLossConfig(),
             float8_cfg=Float8Config(
                 scaling_granularity_gemm=ScalingGranularity.TILEWISE,
                 scaling_granularity_grouped_gemm=ScalingGranularity.TILEWISE,
@@ -300,7 +297,6 @@ class TestMoEEngineFloat8Case2(DistributedTestBase):
         moe_cfg = Qwen3MoE30BA3Config(
             ep_size=ep_size,
             balancing_loss_cfg=BalancingLossConfig(),
-            z_loss_cfg=ZLossConfig(),
         )
         optim_cfg: AdamWConfig = AdamWConfig()
         fsdp_cfg: FSDPConfig = FSDPConfig(
@@ -326,7 +322,6 @@ class TestMoEEngineFloat8Case2(DistributedTestBase):
 
         moe_cfg_fp8 = Qwen3MoE30BA3Config(
             balancing_loss_cfg=BalancingLossConfig(),
-            z_loss_cfg=ZLossConfig(),
             float8_cfg=Float8Config(
                 scaling_granularity_gemm=ScalingGranularity.TILEWISE,
                 scaling_granularity_grouped_gemm=ScalingGranularity.TILEWISE,
