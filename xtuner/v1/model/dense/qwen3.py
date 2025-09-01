@@ -1,5 +1,5 @@
 import re
-
+from typing import Any
 from xtuner.v1.config import TransformerConfig
 from xtuner.v1.module.attention import MHAConfig
 
@@ -21,6 +21,20 @@ class Qwen3Dense(Dense):
 
 
 class Qwen3DenseConfig(TransformerConfig):
+
+    use_sliding_window: bool = False
+    max_window_layers: int = 100000000  # max layers
+
+    def model_post_init(self, context: Any) -> None:
+        if self.use_sliding_window is True:
+            if self.layer_types is None:
+                self.layer_types = [
+                    "sliding_attention"
+                    if i >= self.max_window_layers
+                    else "full_attention"
+                    for i in range(self.num_hidden_layers)
+                ]
+
     def build(self) -> Qwen3Dense:
         return Qwen3Dense(self)
 
@@ -31,10 +45,16 @@ class Qwen3_8BConfig(Qwen3DenseConfig):
     max_position_embeddings: int = 40960
     pad_token_id: int = 151645  # eos_id
     num_hidden_layers: int = 36
+    max_window_layers: int = 36
     hidden_size: int = 4096
     intermediate_size: int = 12288
     rms_norm_eps: float = 1e-6
     rope_theta: float = 1000000.0
     hidden_act: str = "silu"
-    attention: MHAConfig = MHAConfig(num_attention_heads=32, num_key_value_heads=8, head_dim=128, qk_norm=True)
+
+    attention: MHAConfig = MHAConfig(num_attention_heads=32,
+                                     num_key_value_heads=8,
+                                     head_dim=128,
+                                     qk_norm=True,
+                                     sliding_window=1024)
     tie_word_embeddings: bool = False

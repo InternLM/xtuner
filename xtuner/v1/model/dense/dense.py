@@ -108,6 +108,7 @@ class Dense(BaseModel):
                 attention_config=config.attention,
                 generate_config=config.generate_config,
                 float8_cfg=config.float8_cfg,
+                layer_type=config.layer_types[layer_idx] if config.layer_types is not None else None,
                 layer_idx=layer_idx,
             )
         return layers

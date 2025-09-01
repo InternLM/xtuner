@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-
+from typing import Literal
 from transformers.activations import ACT2FN
 from xtuner.v1.config.base_model import BaseAttnConfig, GenerateConfig
 from xtuner.v1.config.float8 import Float8Config
@@ -43,12 +43,14 @@ class DenseDecoderLayer(nn.Module):
         attention_config: BaseAttnConfig[MultiHeadAttention | MultiLatentAttention],
         generate_config: GenerateConfig | None = None,
         float8_cfg: Float8Config | None = None,
+        layer_type: Literal['full_attention', 'sliding_attention'] | None = None,
         layer_idx: int = 0,
     ):
         super().__init__()
         self.hidden_size = hidden_size
         self.self_attn = attention_config.build(
             hidden_size=hidden_size,
+            layer_type=layer_type,
             layer_idx=layer_idx,
             generate_config=generate_config,
             float8_cfg=float8_cfg,

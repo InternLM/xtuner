@@ -1,6 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import math
-from typing import cast
+from typing import cast, Literal
 
 import torch
 from torch import nn
@@ -30,6 +30,7 @@ class MLAConfig(BaseAttnConfig["MultiLatentAttention"]):
     def build(
         self,
         hidden_size: int,
+        layer_type: Literal["full_attention", "sliding_attention"] | None = None,
         layer_idx: int = 0,
         generate_config: GenerateConfig | None = None,
         float8_cfg: Float8Config | None = None,
@@ -37,6 +38,7 @@ class MLAConfig(BaseAttnConfig["MultiLatentAttention"]):
         return MultiLatentAttention(
             **self.model_dump(),
             hidden_size=hidden_size,
+            layer_type=layer_type,
             layer_idx=layer_idx,
             generate_config=generate_config,
             float8_cfg=float8_cfg,
@@ -157,6 +159,8 @@ class MultiLatentAttention(nn.Module):
         rope_scaling_config: RopeScalingConfig | None = None,
         float8_cfg: Float8Config | None = None,
         generate_config: GenerateConfig | None = None,
+        layer_type: Literal["full_attention", "sliding_attention"] | None = None,
+        sliding_window: int = -1,
         layer_idx: int = 0,
     ):
         super().__init__()
@@ -233,6 +237,10 @@ class MultiLatentAttention(nn.Module):
                 mscale = yarn_get_mscale(scaling_factor, mscale_all_dim)
                 self.softmax_scale = self.softmax_scale * mscale * mscale
 
+        self.window_size = (-1, -1)
+        if layer_type == "sliding_attention":
+            self.window_size = (sliding_window, sliding_window)
+
     def forward_training(
         self,
         hidden_states: torch.Tensor,
@@ -290,6 +298,7 @@ class MultiLatentAttention(nn.Module):
             max_seqlen_q=attn_meta.max_length_q,
             max_seqlen_k=attn_meta.max_length_k,
             dropout_p=self.dropout,
+            window_size=self.window_size,
             softmax_scale=self.softmax_scale,
             causal=True,
             deterministic=XTUNER_DETERMINISTIC,
@@ -366,6 +375,9 @@ class MultiLatentAttention(nn.Module):
         assert seq_ctx.block_table is not None
         bs = seq_ctx.block_table.size(0)
         from lmdeploy.pytorch.kernels import fill_kv_cache
+
+        # TODO: support sliding attention in prefilling
+        assert self.window_size == (-1, -1), "Sliding attention in prefilling is not supported yet."
 
         fill_kv_cache(
             torch.cat([compressed_kv, k_pe], dim=-1),
@@ -487,6 +499,9 @@ class MultiLatentAttention(nn.Module):
             [compressed_kv, k_pe], dim=-1
         )
         # past_key_values[self.layer_idx][0][block_index, (seq_lens_k[:bs] - 1) % block_size, :, self.kv_lora_rank:] = k_pe
+
+        # TODO: support sliding attention in prefilling
+        assert self.window_size == (-1, -1), "Sliding attention in prefilling is not supported yet."
 
         attn_output = flash_mla_decoding(
             query_states.view(q_len, bsz, self.num_heads, -1),
