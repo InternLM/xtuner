@@ -1,5 +1,4 @@
 import re
-from typing import Any
 
 from xtuner.v1.config import BaseRouterConfig, MoEConfig
 from xtuner.v1.config.loss import BalancingLossConfig, ZLossConfig
@@ -41,17 +40,6 @@ class Qwen3MoE(MoE):
 
 
 class Qwen3MoEConfig(MoEConfig):
-    use_sliding_window: bool = False
-    max_window_layers: int = 100000000  # max layers
-
-    def model_post_init(self, context: Any) -> None:
-        if self.use_sliding_window is True:
-            if self.layer_types is None:
-                self.layer_types = [
-                    "sliding_attention" if i >= self.max_window_layers else "full_attention"
-                    for i in range(self.num_hidden_layers)
-                ]
-
     def build(self) -> Qwen3MoE:
         return Qwen3MoE(self)
 

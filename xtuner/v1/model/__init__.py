@@ -50,7 +50,6 @@ def get_model_config_from_hf(model_path: Path):
                 qk_norm=True,
             ),
             use_sliding_window=cfg.use_sliding_window,
-            layer_types=cfg.layer_types,
             tie_word_embeddings=cfg.tie_word_embeddings,
             n_routed_experts=cfg.num_experts,
             n_shared_experts=0,
@@ -83,7 +82,6 @@ def get_model_config_from_hf(model_path: Path):
                 qk_norm=True,
             ),
             use_sliding_window=cfg.use_sliding_window,
-            layer_types=cfg.layer_types,
             tie_word_embeddings=cfg.tie_word_embeddings,
         )
 

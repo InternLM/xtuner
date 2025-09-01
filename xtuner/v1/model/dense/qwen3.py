@@ -1,5 +1,4 @@
 import re
-from typing import Any
 
 from xtuner.v1.config import TransformerConfig
 from xtuner.v1.module.attention import MHAConfig
@@ -23,15 +22,6 @@ class Qwen3Dense(Dense):
 
 class Qwen3DenseConfig(TransformerConfig):
     use_sliding_window: bool = False
-    max_window_layers: int = 100000000  # max layers
-
-    def model_post_init(self, context: Any) -> None:
-        if self.use_sliding_window is True:
-            if self.layer_types is None:
-                self.layer_types = [
-                    "sliding_attention" if i >= self.max_window_layers else "full_attention"
-                    for i in range(self.num_hidden_layers)
-                ]
 
     def build(self) -> Qwen3Dense:
         return Qwen3Dense(self)
