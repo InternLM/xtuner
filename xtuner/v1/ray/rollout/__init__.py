@@ -1,6 +1,6 @@
 import os
 
-from .controller import RolloutController
+from .controller import RolloutController, SampleParams
 from .worker import RolloutWorker
 
 

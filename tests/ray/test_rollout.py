@@ -8,13 +8,14 @@ from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.ray.judger.controller import JudgerConfig
 from xtuner.v1.ray.accelerator import AcceleratorResourcesConfig, AutoAcceleratorWorkers
 from xtuner.v1.ray.dataflow import DataFlow, DataFlowConfig, ReplayBufferConfig
-from xtuner.v1.ray.environment import EnvController, SampleParams
+from xtuner.v1.ray.environment import SingleTurnEnvironment
+from xtuner.v1.ray.rollout import RolloutController
+from xtuner.v1.ray.judger import JudgerController
 from xtuner.v1.datasets import RLTextTokenizeFnConfig, build_datasets, build_dataloader
 from xtuner.v1.config import (
     DataloaderConfig,
     DatasetConfig,
 )
-
 
 MODEL_PATH = os.environ["ROLLOUT_MODEL_PATH"]
 TRAIN_DATA_PATH = os.environ["ROLLOUT_DATA_PATH"]
@@ -48,8 +49,8 @@ class TestRollout(unittest.TestCase):
         self.dataflow_cfg = DataFlowConfig(
             env="test",
             max_concurrent=32,
-            prompt_repeat_k=8,
-            global_batch_size=4,
+            prompt_repeat_k=2,
+            global_batch_size=2,
             enable_partial_rollout=0
         )
         self.train_dataset_cfg = [
@@ -78,7 +79,6 @@ class TestRollout(unittest.TestCase):
         self.model_path = MODEL_PATH
         self.init_config()
         self.pg = AutoAcceleratorWorkers.build_placement_group(self.resources_cfg)
-        self.test_env = None
         
     def tearDown(self):
         ray.shutdown()
@@ -86,30 +86,10 @@ class TestRollout(unittest.TestCase):
     @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
     def test_lmdeploy_backend(self):
         self.dataflow_cfg.enable_partial_rollout = 0
-        self.test_env = EnvController.remote(
+        self.test_env = SingleTurnEnvironment.remote(
             "test_env",
             self.pg,
-            self.rollout_cfg,
-            self.judger_cfg
-        )
-        self.test_flow = DataFlow.remote("test_env", 
-                                        self.dataflow_cfg,
-                                        self.replay_buffer_cfg,
-                                        self.test_env
-                                    )
-        responses = ray.get(self.test_flow.run.remote(), timeout=300)
-        dataflow_state = ray.get(self.test_flow.state.remote(), timeout=300)
-        self.assertEqual(len(responses), self.dataflow_cfg.global_batch_size)
-        ray.get(self.test_flow.shutdown.remote(), timeout=300)
-        
-    @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
-    def test_lmdeploy_async_backend(self):
-        self.dataflow_cfg.enable_partial_rollout = 1
-        self.test_env = EnvController.remote(
-            "test_env",
-            self.pg,
-            self.rollout_cfg,
-            self.judger_cfg
+            rollout_cfg=self.rollout_cfg,
         )
         self.test_flow = DataFlow.remote("test_env", 
                                          self.dataflow_cfg,
@@ -119,7 +99,25 @@ class TestRollout(unittest.TestCase):
         responses = ray.get(self.test_flow.run.remote(), timeout=300)
         dataflow_state = ray.get(self.test_flow.state.remote(), timeout=300)
         self.assertEqual(len(responses), self.dataflow_cfg.global_batch_size)
-        ray.get(self.test_flow.shutdown.remote())
+        ray.get(self.test_env.shutdown.remote(), timeout=300)
+        
+    @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
+    def test_lmdeploy_async_backend(self):
+        self.dataflow_cfg.enable_partial_rollout = 1
+        self.test_env = SingleTurnEnvironment.remote(
+            "test_env",
+            self.pg,
+            rollout_cfg=self.rollout_cfg,
+        )
+        self.test_flow = DataFlow.remote("test_env", 
+                                         self.dataflow_cfg,
+                                         self.replay_buffer_cfg,
+                                         self.test_env
+                                        )
+        responses = ray.get(self.test_flow.run.remote(), timeout=300)
+        dataflow_state = ray.get(self.test_flow.state.remote(), timeout=300)
+        self.assertEqual(len(responses), self.dataflow_cfg.global_batch_size)
+        ray.get(self.test_env.shutdown.remote())
 
 if __name__ == "__main__":
     unittest.main()

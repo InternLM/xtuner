@@ -2,7 +2,7 @@ import copy
 import itertools
 import uuid
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Union
 from uuid import uuid4
 
@@ -40,14 +40,14 @@ class ReplayBufferConfig(BaseModel):
 
 @dataclass
 class ReplayMeta:
-    env: str
-    group_id: int
-    action_id: int
-    action_refs: List[ObjectRef]  # multi-turn action
-    observation_ids: List[int]  # multi-turn action and partial rollout
-    observation_refs: List[ObjectRef]  # multi-turn action and partial rollout
-    observation_versions: List[int]  # partial rollout
-    rewards: List[int]
+    env: str = ""
+    group_id: int = 0
+    action_id: int = 0
+    action_refs: List[ObjectRef] = field(default_factory=list)  # multi-turn action
+    observation_ids: List[int] = field(default_factory=list)  # multi-turn action and partial rollout
+    observation_refs: List[ObjectRef] = field(default_factory=list)  # multi-turn action and partial rollout
+    observation_versions: List[int] = field(default_factory=list)  # partial rollout
+    rewards: List[float] = field(default_factory=list)
     state: str = ""
     ground_truth: str = ""
 
@@ -88,8 +88,7 @@ class Sampler:
                 {"role": "user", "content": f"{latest_prompt}"},
                 {"role": "assistant", "content": f"{latest_observation}"},
             ]
-            prompt = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-            data_item = self.storage.replaymeta2dataitem(replay_meta, prompt_str=prompt)
+            data_item = self.storage.replaymeta2dataitem(replay_meta, messages=messages)
             group_samples.append(data_item)
         return group_samples
 
@@ -128,36 +127,44 @@ class ReplayBufferStorage:
         self._observations2states: Dict[int, str] = {}  # observation_id: state_str
         self.logger = get_logger()
 
-    def replaymeta2dataitem(self, replay_meta, prompt_str=None, input_ids=None) -> RLTextDataItem:
-        prompt_str = prompt_str or ray.get(replay_meta.action_refs[-1])
+    def replaymeta2dataitem(self, replay_meta: ReplayMeta, messages=None, input_ids=None) -> RLTextDataItem:
+        messages = messages or (
+            ray.get(replay_meta.action_refs[-1])
+            if replay_meta.action_refs and len(replay_meta.action_refs) > 0
+            else ""
+        )
         input_ids = input_ids or []
         num_tokens = len(input_ids)
-        response_str = ray.get(replay_meta.observation_refs[0])
+        response_str = (
+            ray.get(replay_meta.observation_refs[0])
+            if replay_meta.observation_refs and len(replay_meta.observation_refs) > 0
+            else ""
+        )
         return RLTextDataItem(
             env=replay_meta.env,
             group_id=replay_meta.group_id,
             prompt_id=replay_meta.action_id,
-            prompt_str=prompt_str,
+            messages=messages,
             input_ids=input_ids,
             num_tokens=num_tokens,
             response_str=response_str,
             reward_model={"ground_truth": replay_meta.ground_truth},
-            reward=replay_meta.rewards[-1],
+            reward=replay_meta.rewards[-1] if replay_meta.rewards and len(replay_meta.rewards) > 0 else None,
             state=replay_meta.state,
         )
 
-    def dataitem2replaymeta(self, data_item) -> ReplayMeta:
+    def dataitem2replaymeta(self, data_item: RLTextDataItem) -> ReplayMeta:
         return ReplayMeta(
             env=data_item["env"],
             group_id=data_item["group_id"],
             action_id=data_item["prompt_id"],
-            action_refs=[ray.put(data_item["prompt_str"])],
+            action_refs=[ray.put(data_item["messages"])] if "messages" in data_item else [],
             observation_ids=[uuid.uuid4().int],
-            observation_refs=[ray.put(data_item["response_str"])],
+            observation_refs=[ray.put(data_item["response_str"])] if "response_str" in data_item else [],
             observation_versions=[1],
-            state=data_item["state"],
+            state=data_item["state"] if "state" in data_item else "",
             ground_truth=data_item["reward_model"]["ground_truth"],
-            rewards=[data_item["reward"]],
+            rewards=[data_item["reward"]] if "reward" in data_item and data_item["reward"] is not None else [],
         )
 
     def add(self, grouped_dataitem: List[RLTextDataItem]):

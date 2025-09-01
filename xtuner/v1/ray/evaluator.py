@@ -11,7 +11,8 @@ from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1.config import DatasetConfigList
 from xtuner.v1.datasets import build_datasets
 from xtuner.v1.datasets.data_item import RLTextDataItem
-from xtuner.v1.ray.environment import EnvController, SampleParams
+from xtuner.v1.ray.environment import BaseEnvironment
+from xtuner.v1.ray.rollout import SampleParams
 from xtuner.v1.ray.utils import create_task
 from xtuner.v1.utils import get_logger
 
@@ -34,7 +35,11 @@ class EvaluatorConfig(BaseModel):
     eval_sample_ratio: Annotated[
         float,
         Parameter(help="Ratio of samples to evaluate from the generated samples."),
-    ] = 1.0
+    ] = 0
+    eval_sample_num: Annotated[
+        int,
+        Parameter(help="Number of samples to evaluate from the generated samples."),
+    ] = 0
     max_retry_times: Annotated[int, Parameter(help="Maximum number of retry attempts for failed tasks.")] = 2
     evaluate_step: Annotated[int, Parameter(help="Step interval for evaluation.")] = 1
     compute_metric_func: Annotated[
@@ -45,13 +50,18 @@ class EvaluatorConfig(BaseModel):
 
 @ray.remote
 class Evaluator:
-    def __init__(self, config: EvaluatorConfig, env_controller: EnvController):
+    def __init__(self, config: EvaluatorConfig, env_controller: BaseEnvironment):
         self.config = config
         self.dataset = build_datasets(config.dataset_cfg, config.tokenizer)[0]
         self.dataloader = iter(self.dataset)
         self.env_controller = env_controller
         self.return_list: List[RLTextDataItem] = []
-        self.eval_batch_size = int(len(self.dataset) * self.config.eval_sample_ratio)
+        if self.config.eval_sample_ratio > 0:
+            self.eval_batch_size = int(len(self.dataset) * self.config.eval_sample_ratio)
+        elif self.config.eval_sample_num > 0:
+            self.eval_batch_size = self.config.eval_sample_num
+        else:
+            self.eval_batch_size = len(self.dataset)
         if self.config.compute_metric_func is not None:
             self.compute_metric = self.config.compute_metric_func
         else:
@@ -63,8 +73,8 @@ class Evaluator:
 
     async def eval_worker_task(self, sample: RLTextDataItem):
         try:
-            samples = await self.env_controller.run.remote(sample, self.sample_params)  # type: ignore[attr-defined]
-            self.return_list.append(samples)
+            sample = await self.env_controller.run.remote(sample, self.sample_params)  # type: ignore[attr-defined]
+            self.return_list.append(sample)
         except Exception as e:
             if sample is not None:
                 self.logger.error(f"Worker task failed with exception: {e}. Returning meta for retry.", exc_info=True)
@@ -78,6 +88,7 @@ class Evaluator:
     async def concurrent_eval_task_runner(self):
         waiting_tasks = set()
         self.logger.info(f"Start to generate {self.eval_batch_size} samples for evaluate")
+        self.logger.info(f"Evaluate sample parameters set to {self.sample_params}.")
         with tqdm(total=self.eval_batch_size, desc="Rollout for eval samples") as pbar:
             update_step = max(1, int(self.eval_batch_size * 0.1))
             next_update_threshold = update_step
@@ -108,7 +119,7 @@ class Evaluator:
                             retry_task = create_task(self.eval_worker_task(result))
                             pending_tasks.add(retry_task)
                         else:
-                            self.logger.error(f"Max retry reached for {result[0]['prompt_id']}. Not retrying.")
+                            self.logger.error(f"Max retry reached for {result['prompt_id']}. Not retrying.")
                             self.failed_samples_count += 1
 
                 waiting_tasks = pending_tasks

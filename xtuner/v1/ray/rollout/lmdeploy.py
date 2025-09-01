@@ -1,6 +1,6 @@
 import os
 from argparse import Namespace
-from typing import List
+from typing import Dict, List
 
 import ray
 import requests
@@ -38,7 +38,7 @@ class LMDeployWorker(RolloutWorker):
         self.server_func = run_lmdeploy_server_wrapper
         self.router_func_str = "lmdeploy.serve.proxy.proxy.proxy"
         self.endpoints["health_generate"] = "health"
-        self.endpoints["generate"] = "v1/completions"
+        self.endpoints["generate"] = "v1/chat/completions"
         self.endpoints["output_ids"] = "output_ids"
         self.endpoints["response"] = "text"
         self.endpoints["sleep"] = "sleep"
@@ -49,24 +49,25 @@ class LMDeployWorker(RolloutWorker):
     async def _create_request(
         self,
         url: str,
-        uid: str,
-        prompt: str,
-        sample_params: dict = dict(),
-        extra_params: dict = dict(),
+        prompt: List[Dict[str, str]],
+        tools: List,  # reserved for agent tool use
+        tool_choice: str,  # reserved for agent tool use
+        sample_params: dict,
+        extra_params: dict,
     ):
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.api_keys}",  # 如果需要鉴权
         }
         payload = {
-            "model": self.config.model_name,
-            "id": uid,
-            "prompt": prompt,
+            "model": self.model_name,
+            "messages": prompt,
+            "tools": tools,
+            "tool_choice": tool_choice,
             "stream": True,
         }
         payload.update(sample_params)
         payload.update(extra_params)
-
         req = self.client.build_request(
             "POST",
             url,
@@ -80,7 +81,6 @@ class LMDeployWorker(RolloutWorker):
         pass
 
     def generate(self, input_ids, sampling_params):
-        # 直接调用engine.generate方法
         pass
 
     def sleep(self, level: int = 1):
@@ -91,14 +91,25 @@ class LMDeployWorker(RolloutWorker):
         assert response.status_code == 200, response.status_code
         return response.text
 
+    def offload_weights(self):
+        return self.sleep(level=1)
+
+    def offload_weights_and_kvcache(self):
+        return self.sleep(level=2)
+
     def wake_up(self, tags: List[str] | None = None):
-        self.paused = False
         url = f"{self.server_url}/{self.endpoints['wake_up']}"
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {self.api_keys}"}
         data = {"tags": tags}
         response = requests.post(url, headers=headers, params=data)
         assert response.status_code == 200, response.status_code
         return response.text
+
+    def onload_weights(self):
+        return self.wake_up(tags=["weights"])
+
+    def onload_kvcache(self):
+        return self.wake_up(tags=["kv_cache"])
 
     def pause_generation(self):
         pass

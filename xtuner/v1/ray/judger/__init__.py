@@ -1,1 +1,1 @@
-from .controller import JudgerController
+from .controller import JudgerConfig, JudgerController

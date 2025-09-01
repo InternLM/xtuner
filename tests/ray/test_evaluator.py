@@ -7,8 +7,10 @@ from transformers import AutoTokenizer
 from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.ray.judger.controller import JudgerConfig
 from xtuner.v1.ray.accelerator import AcceleratorResourcesConfig, AutoAcceleratorWorkers
-from xtuner.v1.ray.environment import EnvController, SampleParams
+from xtuner.v1.ray.environment import SingleTurnEnvironment
 from xtuner.v1.ray.evaluator import Evaluator, EvaluatorConfig
+from xtuner.v1.ray.rollout import RolloutController, SampleParams
+from xtuner.v1.ray.judger import JudgerController
 from xtuner.v1.datasets import RLTextTokenizeFnConfig
 from xtuner.v1.config import DatasetConfig
 
@@ -48,7 +50,7 @@ class TestEvaluator(unittest.TestCase):
         ]
         self.tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
         self.pg = AutoAcceleratorWorkers.build_placement_group(self.resources_cfg)
-        self.test_env = EnvController.remote(
+        self.test_env = SingleTurnEnvironment.remote(
             "test_env",
             self.pg,
             self.rollout_cfg,

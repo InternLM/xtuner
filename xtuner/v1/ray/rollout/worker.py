@@ -2,7 +2,8 @@ import json
 import multiprocessing
 import time
 import uuid
-from typing import Callable, Optional
+from abc import abstractmethod
+from typing import Callable, Dict, List, Optional
 
 import httpx
 import ray
@@ -134,16 +135,62 @@ class RolloutWorker(SingleAcceleratorWorker):
             ray.cancel(self.server_task)
             raise TimeoutError("Server failed to start within the timeout period.")
 
-    async def rollout_task(self, prompt: str, sample_params):
+    def _adapt_input_to_openai_spec(self, prompts, tools, tool_choice):
+        openai_prompts = []
+        openai_tools = []
+        # transform claude spec to openai spec
+        # 1. transform system prompt: concat provided system_prompt to input prompt
+        system_prompt = self.config.sample_params.pop("system", None)
+        if system_prompt:
+            system_prompt_json = {"role": "system", "content": f"{system_prompt}"}
+            prompts.insert(0, system_prompt_json)
+        # 2. transform multi-modal usage
+        for prompt in prompts:
+            if prompt["type"] == "image":
+                if prompt["source"]["type"] == "base64":
+                    openai_url = f"data:{prompt['source']['media_type']};base64,{prompt['source']['data']}"
+                if prompt["source"]["type"] == "url":
+                    openai_url = prompt["source"]["url"]
+                new_prompt = {"type": "image_url", "image_url": {"url": openai_url}}
+                openai_prompts.append(new_prompt)
+            else:
+                openai_prompts.append(prompt)
+        # 3. transform tool use
+        for tool in tools:
+            openai_tool = {
+                "type": "function",
+                "function": {
+                    "name": tool["name"],
+                    "description": tool["description"],
+                    "parameters": tool["input_schema"],
+                },
+            }
+            openai_tools.append(openai_tool)
+        return openai_prompts, openai_tools
+
+    async def rollout_task(
+        self,
+        prompts: List[Dict[str, str]],
+        tools: List,
+        tool_choice: str,
+        sample_params: dict,
+        extra_params: dict,
+        format: str,
+    ):
         uid = str(uuid.uuid4())
         response = None
         try:
+            if format == "openai":
+                openai_prompts, openai_tools = prompts, tools
+            else:
+                openai_prompts, openai_tools = self._adapt_input_to_openai_spec(prompts, tools, tool_choice)
             response = await self._create_request(
                 f"{self.server_url}/{self.endpoints['generate']}",
-                uid,
-                prompt,
-                sample_params=sample_params or {},
-                extra_params={},
+                openai_prompts,
+                openai_tools,
+                tool_choice,
+                sample_params=sample_params,
+                extra_params=extra_params,
             )
             self.logger.debug(f" +++ send request {uid} to worker: {self.rank}")
 
@@ -169,7 +216,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                     else:
                         if not (chunk_data.startswith("{") and chunk_data.endswith("}")):
                             continue
-                        last_trajectory += json.loads(chunk_data)["choices"][0]["text"]
+                        last_trajectory += json.loads(chunk_data)["choices"][0]["delta"]["content"]
                 except json.JSONDecodeError as e:
                     self.logger.error(f"JSON decode error for chunk in request {uid}: {chunk}, error: {e}")
                     continue  # 选择跳过这个损坏的块
@@ -187,8 +234,16 @@ class RolloutWorker(SingleAcceleratorWorker):
             if response:
                 await response.aclose()
 
-    async def rollout(self, prompt: str, sample_params):
-        return await self.rollout_task(prompt, sample_params)
+    async def rollout(
+        self,
+        prompt: List[Dict[str, str]],
+        tools: List = [],
+        tool_choice: str = "auto",
+        sample_params: dict = dict(),
+        extra_params: dict = dict(),
+        format: str = "openai",
+    ):
+        return await self.rollout_task(prompt, tools, tool_choice, sample_params, extra_params, format=format)
 
     def pause(self):
         self.paused = True
@@ -218,37 +273,55 @@ class RolloutWorker(SingleAcceleratorWorker):
             self.logger.debug(f"Worker {self.rank} server process and its children terminated.")
             return
 
-    # not implemented functions
+    @abstractmethod
     async def _create_request(
         self,
         url: str,
-        uid: str,
-        prompt: str,
-        sample_params: dict = dict(),
-        extra_params: dict = dict(),
+        prompt: List[Dict[str, str]],
+        tools: List,
+        tool_choice: str,
+        sample_params: dict,
+        extra_params: dict,
     ):
-        raise NotImplementedError("_create_request must be implemented in subclass")
+        pass
 
+    @abstractmethod
     def _transform_rollout_config_to_server_configs(self):
-        raise NotImplementedError("_transform_rollout_config_to_server_configs must be implemented in subclass")
+        """子类需实现：将rollout配置转为服务配置。"""
+        pass
 
+    @abstractmethod
     def get_logprobs(self, input_ids, sampling_params):
-        raise NotImplementedError("get_logprobs must be implemented in subclass")
+        pass
 
+    @abstractmethod
     def update_weights(self):
-        raise NotImplementedError("update_weights must be implemented in subclass")
+        pass
 
+    @abstractmethod
     def reset_prefix_cache(self):
-        raise NotImplementedError("reset_prefix_cache must be implemented in subclass")
+        pass
 
-    def sleep(self):
-        raise NotImplementedError("sleep must be implemented in subclass")
+    @abstractmethod
+    def offload_weights(self):
+        pass
 
-    def wake_up(self):
-        raise NotImplementedError("wake_up must be implemented in subclass")
+    @abstractmethod
+    def offload_weights_and_kvcache(self):
+        pass
 
+    @abstractmethod
+    def onload_weights(self):
+        pass
+
+    @abstractmethod
+    def onload_kvcache(self):
+        pass
+
+    @abstractmethod
     def pause_generation(self):
-        raise NotImplementedError("pause_generation must be implemented in subclass")
+        pass
 
+    @abstractmethod
     def continue_generation(self):
-        raise NotImplementedError("continue_generation must be implemented in subclass")
+        pass

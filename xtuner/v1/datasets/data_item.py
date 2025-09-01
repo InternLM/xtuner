@@ -1,3 +1,5 @@
+from typing import Dict, List
+
 import torch
 from typing_extensions import TypedDict
 
@@ -24,7 +26,8 @@ class RLTextDataItem(TypedDict, total=False):
     group_id: int
     prompt_id: int
     input_ids: list[int]
-    prompt_str: str
+    messages: List[Dict[str, str]]
+    prompt: str
     num_tokens: int
     data_source: dict | None  # e.g., {"math" : "0.8", "code": "0.2"}
     ability: str | None  # math, code
