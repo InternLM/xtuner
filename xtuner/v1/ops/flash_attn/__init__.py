@@ -4,14 +4,17 @@ from .protocol import FlashAttnVarlenProtocol, cpu_flash_varlen_attn
 
 
 def get_flash_attn_varlen() -> FlashAttnVarlenProtocol:
-    if not torch.accelerator.is_available():
+    from xtuner.v1.utils.device import get_device
+
+    device = get_device()
+    if device == "cpu":
         return cpu_flash_varlen_attn
 
-    elif torch.accelerator.current_accelerator().type == "npu":
+    elif device == "npu":
         from .npu import npu_flash_varlen_attn
 
         return npu_flash_varlen_attn
-    elif torch.accelerator.current_accelerator().type == "cuda":
+    elif device == "cuda":
         # TODO: #  Uniofiy "1" and "true"
         # For the optional feature, we should collect all information to logs
         import os

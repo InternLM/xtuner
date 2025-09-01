@@ -9,14 +9,17 @@ from .protocol import (
 
 
 def get_attn_colwise_parallel() -> AttnColwiseParallelProtocol:
-    if torch.accelerator.is_available() is False:
+    from xtuner.v1.utils.device import get_device
+
+    device = get_device()
+    if device == "cpu":
         return cpu_column_parallel_forward
 
-    elif torch.accelerator.current_accelerator().type == "cuda":
+    elif device == "cuda":
         from .cuda import attn_column_parallel_forward
 
         return attn_column_parallel_forward
-    elif torch.accelerator.current_accelerator().type == "npu":
+    elif device == "npu":
         from .npu import attn_column_parallel_forward
 
         return attn_column_parallel_forward

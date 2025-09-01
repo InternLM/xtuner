@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from shutil import rmtree
-from typing import Sized, TypedDict, cast
+from typing import Sized, cast
 
 import torch
 import torch.distributed as dist
@@ -18,7 +18,7 @@ from pydantic import BaseModel
 from torch.distributed import init_process_group
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, LinearLR, SequentialLR
-from typing_extensions import NotRequired, Self
+from typing_extensions import NotRequired, Self, TypedDict
 
 from transformers import AutoTokenizer
 from transformers.tokenization_utils import PreTrainedTokenizer
@@ -157,7 +157,7 @@ class Trainer:
         intra_layer_micro_batch: int = 1,
         seed: int = 42,
         debug: bool = False,
-        backend: str = "cpu:gloo,cuda:nccl",
+        backend: str | None = None,
     ):
         self._micro_batch_size: int | None = None
         self._dataset_config = dataset_cfg
@@ -651,7 +651,15 @@ class Trainer:
     def _set_random_seed(self, seed: int):
         set_random_seed(seed)
 
-    def _init_dist(self, backend: str):
+    def _init_dist(self, backend: str | None = None):
+        if backend is None:
+            if torch.accelerator.current_accelerator().type == "cuda":
+                backend = "cpu:gloo,cuda:nccl"
+            elif torch.accelerator.current_accelerator().type == "npu":
+                backend = "cpu:gloo,npu:hccl"
+            else:
+                raise NotImplementedError
+
         if not dist.is_initialized():
             init_process_group(backend=backend)
         torch.accelerator.set_device_index(int(os.environ["LOCAL_RANK"]))

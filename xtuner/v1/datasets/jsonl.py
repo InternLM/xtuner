@@ -69,7 +69,13 @@ def tokenize_worker(
     out_queue: Queue,
     cpu_ids: list[int],
 ):
-    os.sched_setaffinity(os.getpid(), cpu_ids)
+    try:
+        os.sched_setaffinity(os.getpid(), cpu_ids)
+    except OSError as e:
+        import warnings
+
+        warnings.warn(f"Failed to set CPU affinity: {e}")
+
     shared_memory = SharedMemory(name=shm_name, create=False)
     # f = open("/cpfs01/user/yehaochen/codebase/xpuyu-image/tmp1/part-6853cd7cb0ee-000074.jsonl" , "rb")
     while True:

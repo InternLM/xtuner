@@ -2,7 +2,7 @@ import math
 import os
 import time
 from pathlib import Path
-from typing import Dict, List, TypeAlias, TypedDict, cast
+from typing import Dict, List, TypeAlias, cast
 
 import ray
 import requests
@@ -11,6 +11,7 @@ import torch.distributed as dist
 import tqdm
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed.tensor import DTensor
+from typing_extensions import TypedDict
 
 from xtuner.utils.device import get_device, get_torch_device
 from xtuner.v1.config.base_model import MoEConfig, TransformerConfig

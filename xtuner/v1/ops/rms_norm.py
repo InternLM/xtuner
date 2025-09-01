@@ -20,9 +20,12 @@ def npu_rms_norm(x: torch.Tensor, weight: torch.Tensor, epsilon: float) -> torch
 
 
 def get_rms_norm() -> RMSNormProtocol:
-    if not torch.accelerator.is_available():
+    from xtuner.v1.utils.device import get_device
+
+    device = get_device()
+    if device == "cpu":
         return native_rms_norm
-    elif torch.accelerator.current_accelerator().type == "npu":
+    elif device == "npu":
         return npu_rms_norm
     else:
         return native_rms_norm

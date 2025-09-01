@@ -1,8 +1,9 @@
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Literal, Optional, Protocol, TypedDict, runtime_checkable
+from typing import TYPE_CHECKING, Annotated, Literal, Optional, Protocol, runtime_checkable
 
 from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict, TypeAdapter
+from typing_extensions import TypedDict
 
 
 if TYPE_CHECKING:

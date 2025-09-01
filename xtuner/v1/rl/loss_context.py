@@ -1,9 +1,9 @@
-from typing import Protocol, TypedDict, cast, runtime_checkable
+from typing import Protocol, cast, runtime_checkable
 
 import torch
 import torch.nn as nn
 from pydantic import BaseModel
-from typing_extensions import NotRequired
+from typing_extensions import NotRequired, TypedDict
 
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 

@@ -11,9 +11,12 @@ from .protocol import (
 
 
 def get_group_gemm() -> GroupGemmProtocol:
-    if torch.accelerator.is_available() is False:
+    from xtuner.v1.utils.device import get_device
+
+    device = get_device()
+    if device == "cpu":
         return cpu_group_gemm
-    elif torch.accelerator.current_accelerator().type == "cuda":
+    elif device == "cuda":
         import os
 
         if os.getenv("XTUNER_GROUP_GEMM", "triton") == "cutlass":
@@ -23,7 +26,7 @@ def get_group_gemm() -> GroupGemmProtocol:
 
         return cuda_group_gemm
 
-    elif torch.accelerator.current_accelerator().type == "npu":
+    elif device == "npu":
         from .npu import npu_group_gemm
 
         return npu_group_gemm
@@ -32,14 +35,17 @@ def get_group_gemm() -> GroupGemmProtocol:
 
 
 def get_token_permute() -> MoePermuteProtocol:
-    if torch.accelerator.is_available() is False:
+    from xtuner.v1.utils.device import get_device
+
+    device = get_device()
+    if device == "cpu":
         return cpu_permute
 
-    elif torch.accelerator.current_accelerator().type == "cuda":
+    elif device == "cuda":
         from .cuda import cuda_token_permute
 
         return cuda_token_permute
-    elif torch.accelerator.current_accelerator().type == "npu":
+    elif device == "npu":
         from .npu import npu_token_permute
 
         return npu_token_permute

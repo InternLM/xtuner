@@ -25,6 +25,7 @@ from tqdm import tqdm
 from xtuner.v1.ops import flash_attn_varlen_func
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_device, get_torch_device_module, init_params
 from xtuner.v1.model import BaseModel
+from xtuner.v1.module import RMSNorm
 from xtuner.v1.config import FSDPConfig
 from .interns1_config import InternS1VisionConfig
 from xtuner.v1.float8.float8_handler import Float8Handler
@@ -75,8 +76,8 @@ class InternS1VisionAttention(nn.Module):
         self.projection_layer = nn.Linear(self.embed_dim, self.embed_dim)
         self.projection_dropout = nn.Dropout(proj_dropout) if proj_dropout > 0 else nn.Identity()
 
-        self.q_norm = InternVLVisionRMSNorm(self.embed_dim) if qk_norm else nn.Identity()
-        self.k_norm = InternVLVisionRMSNorm(self.embed_dim) if qk_norm else nn.Identity()
+        self.q_norm = RMSNorm(self.embed_dim) if qk_norm else nn.Identity()
+        self.k_norm = RMSNorm(self.embed_dim) if qk_norm else nn.Identity()
 
     def forward(
             self,

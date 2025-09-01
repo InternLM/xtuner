@@ -1,9 +1,9 @@
-from typing import TYPE_CHECKING, Annotated, Generic, Literal, Optional, TypedDict, TypeVar
+from typing import TYPE_CHECKING, Annotated, Generic, Literal, Optional, TypeVar
 
 import torch
 from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict, computed_field
-from typing_extensions import NotRequired
+from typing_extensions import NotRequired, TypedDict
 
 from xtuner.v1.config.float8 import Float8Config
 from xtuner.v1.config.loss import BalancingLossConfig, ZLossConfig

@@ -1,7 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import torch
 from torch import nn
-from torch.distributed.tensor import DTensor, Partial
+from torch.distributed.tensor import DTensor
 
 from xtuner.v1.ops import rms_norm
 
@@ -17,7 +17,7 @@ class RMSNorm(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         if isinstance(self.weight, DTensor):
-            weight = self.weight.to_local(grad_placements=(Partial("avg"),))
+            weight = self.weight.to_local()
         else:
             weight = self.weight
 

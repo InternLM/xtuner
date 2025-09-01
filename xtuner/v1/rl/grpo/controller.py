@@ -1,8 +1,9 @@
 import math
-from typing import Literal, TypedDict
+from typing import Literal
 
 import ray
 import torch
+from typing_extensions import TypedDict
 
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 

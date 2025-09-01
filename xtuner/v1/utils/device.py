@@ -1,34 +1,32 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+
 import torch
 
 
-def get_device():
-    device = None
-    if torch.cuda.is_available():
-        device = "cuda"
-    else:
-        try:
-            import torch_npu  # noqa: F401
+SUPPORTED_DEVICES = ("cpu", "cuda", "npu")
+_DEVICE = None
 
-            device = "npu"
-        except ImportError:
-            pass
-    try:
-        import torch_mlu  # noqa: F401
 
-        device = "mlu"
-    except ImportError:
-        pass
+def get_device() -> str:
+    global _DEVICE
+    if _DEVICE is None:
+        if torch.accelerator.is_available():
+            device = torch.accelerator.current_accelerator().type
+            if device == "npu":
+                from torch_npu.contrib import transfer_to_npu  # noqa
+        else:
+            device = "cpu"
 
-    if device is None:
-        # raise NotImplementedError(
-        #     "Supports only CUDA or NPU. If your device is CUDA or NPU, "
-        #     "please make sure that your environmental settings are "
-        #     "configured correctly."
-        # )
-        device = "cpu"
+        if device not in SUPPORTED_DEVICES:
+            raise NotImplementedError(
+                "Supports only CPU, CUDA or NPU. If your accelerator is CUDA or NPU, "
+                "please make sure that your environmental settings are "
+                "configured correctly."
+            )
 
-    return device
+        _DEVICE = device
+
+    return _DEVICE
 
 
 def get_torch_device_module():

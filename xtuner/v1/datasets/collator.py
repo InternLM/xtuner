@@ -1,6 +1,5 @@
-from typing import TypedDict
-
 import torch
+from typing_extensions import TypedDict
 
 from xtuner.utils import IGNORE_INDEX
 from xtuner.v1.data_proto import SequenceContext

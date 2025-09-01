@@ -20,7 +20,10 @@ from xtuner.v1.loss import CELossContext
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
 from xtuner.v1.train.trainer import Trainer
 from xtuner.v1.utils.compile import maybe_compile
+from xtuner.v1.utils.device import get_device
 import argparse
+
+
 
 QWEN3_MOE_PATH = os.environ["QWEN3_MOE_PATH"]
 ALPACA_PATH = os.environ["ALPACA_PATH"]
@@ -234,7 +237,7 @@ def main():
         optim_cfg = AdamWConfig(lr=6e-05)
         lr_cfg = LRConfig(lr_type="cosine", lr_min=1e-6)
         fsdp_cfg = FSDPConfig(
-            torch_compile=True,
+            torch_compile=get_device() == "cuda",
             cpu_offload=False,
             ep_size=moe_cfg.ep_size,
             # hsdp_sharding_size=4,
@@ -250,7 +253,7 @@ def main():
             pack_max_length=16384
         )
         work_dir = f"{args.work_dir}-{name}"
-        loss_ctx = CELossContext(loss_class="liger_cross_entropy")
+        loss_ctx = CELossContext(loss_class="chunk_cross_entropy")
         trainer = Trainer(
             load_from=QWEN3_MOE_PATH,
             model_cfg=moe_cfg,

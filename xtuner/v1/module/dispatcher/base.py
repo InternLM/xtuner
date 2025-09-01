@@ -3,12 +3,11 @@ from typing import (
     Generic,
     Literal,
     TypeAlias,
-    TypedDict,
     TypeVar,
 )
 
 import torch
-from typing_extensions import override
+from typing_extensions import TypedDict, override
 
 from xtuner.v1.config.base_model import MoEConfig
 from xtuner.v1.ops import permute, unpermute

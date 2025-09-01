@@ -5,7 +5,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 from shutil import rmtree
-from typing import TypedDict, cast
+from typing import cast
 
 import ray
 import torch
@@ -14,7 +14,7 @@ from mmengine.dist import get_rank
 from mmengine.runner import set_random_seed
 from pydantic import BaseModel
 from ray.actor import ActorClass
-from typing_extensions import NotRequired
+from typing_extensions import NotRequired, TypedDict
 
 from transformers import AutoTokenizer
 from xtuner.utils.device import get_device, get_torch_device

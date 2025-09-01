@@ -5,7 +5,7 @@ from functools import reduce
 from itertools import chain
 from pathlib import Path
 from shutil import copy, copytree
-from typing import Generator, TypedDict, cast
+from typing import Generator, cast
 
 import torch
 import torch.distributed as dist
@@ -15,6 +15,7 @@ from safetensors.torch import save_file
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, Placement, Shard
 from torch.distributed.tensor._utils import compute_local_shape_and_global_offset
+from typing_extensions import TypedDict
 
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.config.base_model import MoEConfig, TransformerConfig
@@ -24,8 +25,6 @@ from xtuner.v1.float8.fsdp_utils import (
     WeightWithDynamicTensorWiseFloat8CastTensor,
     WeightWithDynamicTilewiseFloat8CastTensor,
 )
-from xtuner.v1.float8.triton_kernels import per_block_dequant_gemm
-from xtuner.v1.float8.triton_kernels.per_block_quant_gemm import per_block_quant_torch
 from xtuner.v1.loss import CELossContext
 from xtuner.v1.ops.comm.foreach_allgather import foreach_all_gather
 from xtuner.v1.utils import get_device, get_torch_device_module, profile_time_and_memory
@@ -236,6 +235,9 @@ class BaseModel(nn.Module):
                 gathered_tensor_list_new.append(gathered_tensor)
                 name_list_new.append(name)
                 continue
+
+            from xtuner.v1.float8.triton_kernels.per_block_quant_gemm import per_block_quant_torch
+
             gathered_tensor_fp8, scale = per_block_quant_torch(gathered_tensor, block_size=128, float8_dtype=dtype)
             gathered_tensor_list_new.extend([gathered_tensor_fp8, scale])
             name_list_new.extend([name, f"{name}_scale_inv"])
@@ -622,7 +624,7 @@ class BaseModel(nn.Module):
 
         with profile_time_and_memory("[HF loading cost]"):
             _load_params_from_module(self, "")  # type: ignore
-            torch.cuda.synchronize()
+            torch.accelerator.synchronize()
             torch.cpu.synchronize()
 
         if missing_keys and strict:
@@ -643,6 +645,9 @@ class BaseModel(nn.Module):
         loaded_tensor_scales = checkpoint_loader.load(hf_key_scale_inv)
         if loaded_tensor_fp8 is None or loaded_tensor_scales is None:
             return None
+
+        from xtuner.v1.float8.triton_kernels import per_block_dequant_gemm
+
         loaded_tensor = per_block_dequant_gemm(
             loaded_tensor_fp8.to(DEVICE),
             loaded_tensor_scales.to(DEVICE),
