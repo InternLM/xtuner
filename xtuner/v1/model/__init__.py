@@ -8,13 +8,16 @@ from xtuner.v1.module.attention import MHAConfig
 from xtuner.v1.module.router.greedy import GreedyRouterConfig
 
 from .base import BaseModel
-from .dense.qwen3 import Qwen3_8BConfig, Qwen3DenseConfig
+from .dense.qwen3 import Qwen3Dense8BConfig, Qwen3DenseConfig
+from .interns1.interns1_config import InternS1Config, InternS1MiniConfig
 from .moe.qwen3 import Qwen3MoE30BA3Config, Qwen3MoEConfig
 
 
 model_mapping = {
     "qwen3-moe-30BA3": Qwen3MoE30BA3Config(),
-    "qwen3-8B": Qwen3_8BConfig(),
+    "qwen3-8B": Qwen3Dense8BConfig(),
+    "interns1": InternS1Config(),
+    "interns1-mini": InternS1MiniConfig(),
 }
 
 

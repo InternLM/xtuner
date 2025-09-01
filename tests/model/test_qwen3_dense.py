@@ -12,7 +12,7 @@ from safetensors import safe_open
 
 from xtuner.v1.module.attention import MHAConfig
 from xtuner.v1.data_proto import SequenceContext
-from xtuner.v1.model.dense.qwen3 import Qwen3_8BConfig
+from xtuner.v1.model.dense.qwen3 import Qwen3Dense8BConfig
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.utils.compile import maybe_compile
 from xtuner.v1.loss import CELossContext
@@ -52,7 +52,7 @@ class TestQwen3Dense(DistributedTestBase):
         torch.cuda.empty_cache()
 
         with torch.device("meta"):
-            cfg = Qwen3_8BConfig()
+            cfg = Qwen3Dense8BConfig()
             qwen_model = cfg.build().to(torch.bfloat16)
 
         shift_input_ids = input_ids[:, :-1]
@@ -98,7 +98,7 @@ class TestQwen3Dense(DistributedTestBase):
         torch.cuda.empty_cache()
 
         with torch.device("meta"):
-            cfg = Qwen3_8BConfig()
+            cfg = Qwen3Dense8BConfig()
             qwen_model = cfg.build().to(torch.bfloat16)
 
         fsdp_config = FSDPConfig(
@@ -141,7 +141,7 @@ class TestQwen3Dense(DistributedTestBase):
                                   head_dim=128,
                                   qk_norm=True,
                                   sliding_window=sliding_window)
-            cfg = Qwen3_8BConfig(num_hidden_layers=num_hidden_layers,
+            cfg = Qwen3Dense8BConfig(num_hidden_layers=num_hidden_layers,
                                  use_sliding_window=use_sliding_window,
                                  max_window_layers=max_window_layers,
                                  attention=attention)
@@ -168,7 +168,7 @@ class TestQwen3Dense(DistributedTestBase):
                                       head_dim=128,
                                       qk_norm=True,
                                       sliding_window=sliding_window)
-                cfg = Qwen3_8BConfig(num_hidden_layers=num_hidden_layers,
+                cfg = Qwen3Dense8BConfig(num_hidden_layers=num_hidden_layers,
                                      use_sliding_window=use_sliding_window,
                                      max_window_layers=max_window_layers,
                                      attention=attention)
@@ -202,7 +202,7 @@ class TestQwen3Dense(DistributedTestBase):
     def test_save_hf(self, device, tp_size):
         self.create_pg(device)
         with torch.device("meta"):
-            cfg = Qwen3_8BConfig()
+            cfg = Qwen3Dense8BConfig()
             qwen_model = cfg.build().to(torch.bfloat16)
 
         fsdp_config = FSDPConfig(

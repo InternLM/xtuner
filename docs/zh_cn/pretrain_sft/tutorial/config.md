@@ -51,9 +51,9 @@ XTuner 采用 Python 风格的配置文件，让你可以充分利用 Python 的
 ```{code-block} python
 :caption: 构建模型配置
 
-from xtuner.v1.model import Qwen3_8BConfig
+from xtuner.v1.model import Qwen3Dense8BConfig
 
-model_cfg = Qwen3_8BConfig()
+model_cfg = Qwen3Dense8BConfig()
 ```
 
 ### 构建数据配置

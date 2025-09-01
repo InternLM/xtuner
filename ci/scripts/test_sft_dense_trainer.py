@@ -17,7 +17,7 @@ from xtuner.v1.config import (
 )
 from xtuner.v1.datasets import FTDPTokenizeFnConfig
 from xtuner.v1.loss import CELossContext
-from xtuner.v1.model.dense.qwen3 import Qwen3_8BConfig
+from xtuner.v1.model.dense.qwen3 import Qwen3Dense8BConfig
 from xtuner.v1.train.trainer import Trainer
 from xtuner.v1.utils.compile import maybe_compile
 import argparse
@@ -219,7 +219,7 @@ def main():
     os.environ["DG_CACHE_DIR"] = f"/tmp/.deep_gemm-{os.getenv('RANK', '0')}"
 
     dense_cfgs = [
-        (Qwen3_8BConfig(), "tp1"),
+        (Qwen3Dense8BConfig(), "tp1"),
     ]
     for dense_cfg, name in dense_cfgs:
         optim_cfg = AdamWConfig(lr=6e-05)

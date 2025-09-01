@@ -21,7 +21,7 @@ from xtuner.v1.config import (
 from xtuner.v1.datasets import FTDPTokenizeFnConfig
 from xtuner.v1.loss import CELossContext
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
-from xtuner.v1.model.dense.qwen3 import Qwen3_8BConfig
+from xtuner.v1.model.dense.qwen3 import Qwen3Dense8BConfig
 from xtuner.v1.train.trainer import Trainer
 from xtuner.v1.utils.compile import maybe_compile
 from xtuner.v1.ray.accelerator import AcceleratorResourcesConfig
@@ -142,7 +142,7 @@ def main(args):
         postprocessor=None
     )
     train_worker_cfg: WorkerConfig = WorkerConfig(
-        model_cfg=Qwen3_8BConfig(),
+        model_cfg=Qwen3Dense8BConfig(),
         optim_cfg=AdamWConfig(lr=1e-6, foreach=False if args.optimizer_disable_foreach else None),
         loss_cfg=LossConfig(
             policy_loss_cfg=dict(

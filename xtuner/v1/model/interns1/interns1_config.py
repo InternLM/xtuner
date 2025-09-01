@@ -4,6 +4,8 @@ from pydantic import BaseModel, ConfigDict
 
 from xtuner.v1.config.base_model import MoEConfig, TransformerConfig
 from xtuner.v1.config.float8 import Float8Config
+from xtuner.v1.model.dense.qwen3 import Qwen3Dense8BConfig
+from xtuner.v1.model.moe.qwen3 import Qwen3MoE235BA22Config
 
 
 if TYPE_CHECKING:
@@ -58,14 +60,15 @@ class InternS1ProjectorConfig(BaseModel):
         return InternS1MultiModalProjector(self)
 
 
-class InternS1Config(BaseModel):
+class InternS1BaseConfig(BaseModel):
     model_config = ConfigDict(
         title="Base model config for xtuner",
         extra="allow",
     )
     vision_config: InternS1VisionConfig
     projector_config: InternS1ProjectorConfig
-    text_config: MoEConfig | TransformerConfig
+    text_config: TransformerConfig
+
     vision_feature_layer: int = -1
     downsample_ratio: float = 0.5
     dynamic_image_size: bool = True
@@ -82,3 +85,19 @@ class InternS1Config(BaseModel):
         from xtuner.v1.model.interns1.modeling_interns1 import InternS1ForConditionalGeneration
 
         return InternS1ForConditionalGeneration(self)
+
+
+class InternS1Config(InternS1BaseConfig):
+    vision_config: InternS1VisionConfig = InternS1VisionConfig(
+        hidden_size=3200, intermediate_size=12800, num_hidden_layers=45, use_qk_norm=True, num_attention_heads=25
+    )
+    projector_config: InternS1ProjectorConfig = InternS1ProjectorConfig(
+        vision_hidden_size=3200, text_hidden_size=12800
+    )
+    text_config: MoEConfig = Qwen3MoE235BA22Config(vocab_size=153216)
+
+
+class InternS1MiniConfig(InternS1BaseConfig):
+    vision_config: InternS1VisionConfig = InternS1VisionConfig(drop_path_rate=0)
+    projector_config: InternS1ProjectorConfig = InternS1ProjectorConfig()
+    text_config: Qwen3Dense8BConfig = Qwen3Dense8BConfig(vocab_size=153216)
