@@ -33,10 +33,12 @@ class BaseAttnConfig(BaseModel, Generic[T]):
     # casual: bool = True
     qkv_bias: Annotated[bool, Parameter(group="attention")] = False
     o_bias: Annotated[bool, Parameter(group="attention")] = False
+    sliding_window: Annotated[int, Parameter(group="attention")] = -1
 
     def build(
         self,
         hidden_size: int,
+        layer_type: Literal["full_attention", "sliding_attention"] | None = None,
         layer_idx: int = 0,
         generate_config: GenerateConfig | None = None,
         float8_cfg: Optional["Float8Config"] = None,
@@ -82,6 +84,9 @@ class TransformerConfig(BaseModel):
     rope_theta: Annotated[float, Parameter(group="model")]  # required by transformers's build rope
     hidden_act: Annotated[str, Parameter(group="model")]  # key defined in `transformers.activations.ACT2CLS`
     attention: BaseAttnConfig
+    layer_types: Annotated[list[Literal["full_attention", "sliding_attention"]] | None, Parameter(group="model")] = (
+        None
+    )
     mlp_bias: Annotated[bool, Parameter(group="model")] = False
     tie_word_embeddings: Annotated[bool, Parameter(group="model")] = False
     model_type: Annotated[Literal["qwen"] | None, Parameter(group="model")] = None

@@ -1,6 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-from typing import cast
 
+from typing import cast, Literal
 import torch
 from torch import nn
 
@@ -31,6 +31,7 @@ class MHAConfig(BaseAttnConfig["MultiHeadAttention"]):
     def build(
         self,
         hidden_size: int,
+        layer_type: Literal["full_attention", "sliding_attention"] | None = None,
         layer_idx: int = 0,
         generate_config: GenerateConfig | None = None,
         float8_cfg: Float8Config | None = None,
@@ -38,6 +39,7 @@ class MHAConfig(BaseAttnConfig["MultiHeadAttention"]):
         return MultiHeadAttention(
             **self.model_dump(),
             hidden_size=hidden_size,
+            layer_type=layer_type,
             layer_idx=layer_idx,
             generate_config=generate_config,
             float8_cfg=float8_cfg,
@@ -99,6 +101,8 @@ class MultiHeadAttention(nn.Module):
         o_bias: bool = False,
         float8_cfg: Float8Config | None = None,
         generate_config: GenerateConfig | None = None,
+        layer_type: Literal["full_attention", "sliding_attention"] | None = None,
+        sliding_window: int = -1,
         layer_idx: int = 0,
     ):
         super().__init__()
@@ -147,6 +151,10 @@ class MultiHeadAttention(nn.Module):
             self.q_norm = RMSNorm(self.head_dim, eps=self.rms_norm_eps)
             self.k_norm = RMSNorm(self.head_dim, eps=self.rms_norm_eps)
 
+        self.window_size = (-1, -1)
+        if layer_type == "sliding_attention":
+            self.window_size = (sliding_window, sliding_window)
+
     def prefilling(
         self,
         hidden_states: torch.Tensor,
@@ -168,6 +176,8 @@ class MultiHeadAttention(nn.Module):
         cos, sin = position_embeddings
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
+        # TODO: support sliding attention in prefilling
+        assert self.window_size == (-1, -1), "Sliding attention in prefilling is not supported yet."
         fill_paged_kv_cache(
             key_states,
             value_states,
@@ -241,6 +251,7 @@ class MultiHeadAttention(nn.Module):
         past_key_values[self.layer_idx][0][block_index, (seq_lens_k[:bs] - 1) % block_size] = _key_states
         past_key_values[self.layer_idx][1][block_index, (seq_lens_k[:bs] - 1) % block_size] = _value_states
 
+        assert self.window_size == (-1, -1), "Sliding attention in prefilling is not supported yet."
         attn_output = paged_attention_decoding(
             query_states,
             past_key_values[self.layer_idx][0],
@@ -339,6 +350,7 @@ class MultiHeadAttention(nn.Module):
                 cu_seqlens_k=seq_ctx.cu_seq_lens_k,
                 max_seqlen_q=seq_ctx.max_length_q,
                 max_seqlen_k=seq_ctx.max_length_k,
+                window_size=self.window_size,
                 dropout_p=self.dropout,
                 causal=True,
                 deterministic=XTUNER_DETERMINISTIC,

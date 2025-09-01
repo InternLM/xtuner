@@ -10,12 +10,12 @@ import tempfile
 from pathlib import Path
 from safetensors import safe_open
 
+from xtuner.v1.module.attention import MHAConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.model.dense.qwen3 import Qwen3_8BConfig
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.utils.compile import maybe_compile
 from xtuner.v1.loss import CELossContext
-
 
 # Qwen3 8B
 QWEN3_PATH = os.environ["QWEN3_PATH"]
@@ -124,6 +124,76 @@ class TestQwen3Dense(DistributedTestBase):
         self.assertTrue(torch.allclose(loss, expected_loss.to(loss.dtype), atol=1e-2, rtol=1e-2))
 
     @parametrize.parametrize(
+        "use_sliding_window, max_window_layers, sliding_window",
+        [
+            (False, 6, 1024),
+            (True, 6, 1024),
+            (True, 4, 2048),
+        ],
+    )
+    def test_sliding_windows(self, use_sliding_window, max_window_layers, sliding_window):
+        self.create_pg('cuda')
+        # test param
+        with torch.device("meta"):
+            num_hidden_layers = 6
+            attention = MHAConfig(num_attention_heads=32,
+                                  num_key_value_heads=8,
+                                  head_dim=128,
+                                  qk_norm=True,
+                                  sliding_window=sliding_window)
+            cfg = Qwen3_8BConfig(num_hidden_layers=num_hidden_layers,
+                                 use_sliding_window=use_sliding_window,
+                                 max_window_layers=max_window_layers,
+                                 attention=attention)
+            qwen_model = cfg.build().to(torch.bfloat16)
+
+        if use_sliding_window is False or max_window_layers >= num_hidden_layers:
+            expected_sliding_window_size_list = [(-1, -1) for _ in range(num_hidden_layers)]
+        else:
+            expected_sliding_window_size_list = [(-1, -1) for _ in range(max_window_layers)]
+            expected_sliding_window_size_list += [(sliding_window, sliding_window) for _ in range(num_hidden_layers - max_window_layers)]
+
+        model_sliding_window_size_list = []
+        for layer in qwen_model.layers.values():
+            model_sliding_window_size_list.append(layer.self_attn.window_size)
+
+        self.assertListEqual(model_sliding_window_size_list, expected_sliding_window_size_list)
+
+        # test forward
+        if use_sliding_window is True:
+            with torch.device("meta"):
+                num_hidden_layers = 6
+                attention = MHAConfig(num_attention_heads=32,
+                                      num_key_value_heads=8,
+                                      head_dim=128,
+                                      qk_norm=True,
+                                      sliding_window=sliding_window)
+                cfg = Qwen3_8BConfig(num_hidden_layers=num_hidden_layers,
+                                     use_sliding_window=use_sliding_window,
+                                     max_window_layers=max_window_layers,
+                                     attention=attention)
+                qwen_model = cfg.build().to(torch.bfloat16)
+
+            fsdp_config = FSDPConfig()
+            tokenizer = AutoTokenizer.from_pretrained(QWEN3_PATH, trust_remote_code=True)
+            input_ids = tokenizer("吃葡萄不吐葡萄皮", return_tensors="pt").input_ids.to("cuda")
+            shift_input_ids = input_ids[:, :-1]
+            shift_labels = input_ids[:, 1:]
+            seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids.to('cuda'),))
+            data_batch = [{'seq_ctx': seq_ctx, 'labels': shift_labels}]
+            loss_ctx = CELossContext()
+            data_batch = loss_ctx.build_list_ctx(data_batch, device='cuda')[0]
+            qwen_model.fully_shard(fsdp_config=fsdp_config)
+            qwen_model.from_hf(QWEN3_PATH, strict=False)
+
+            with torch.no_grad():
+                output = qwen_model(
+                    seq_ctx=data_batch['seq_ctx'],
+                    loss_ctx=data_batch['loss_ctx'],
+                )
+            assert "loss" in output
+
+    @parametrize.parametrize(
         "device,tp_size",
         [
             ("cuda", 1),
@@ -150,7 +220,7 @@ class TestQwen3Dense(DistributedTestBase):
             qwen_model.save_hf(tmpdir)
 
             origin_hf_path = Path(QWEN3_PATH)
-            origin_index_path= origin_hf_path / "model.safetensors.index.json"
+            origin_index_path = origin_hf_path / "model.safetensors.index.json"
             saved_index_path = tmpdir / "model.safetensors.index.json"
 
             # Test saved hf tensor value match the origin hf tensor value

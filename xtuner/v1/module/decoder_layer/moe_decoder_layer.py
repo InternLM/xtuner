@@ -151,6 +151,7 @@ class MoEDecoderLayer(nn.Module):
         n_shared_experts: int,
         hidden_factor: float = 1.0,
         attention_config: BaseAttnConfig[MultiHeadAttention | MultiLatentAttention],
+        layer_type: Literal['full_attention', 'sliding_attention'] | None = None,
         generate_config: GenerateConfig | None = None,
         router_config: BaseRouterConfig[GreedyRouter | NoAuxRouter],
         float8_cfg: Float8Config | None = None,
@@ -169,6 +170,7 @@ class MoEDecoderLayer(nn.Module):
             hidden_size=hidden_size,
             layer_idx=layer_idx,
             generate_config=generate_config,
+            layer_type=layer_type,
             float8_cfg=float8_cfg,
         )
         self.input_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps)
