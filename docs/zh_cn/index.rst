@@ -49,6 +49,14 @@
 
 .. toctree::
    :hidden:
+   :maxdepth: 3
+   :caption: 进阶教程
+
+   pretrain_sft/advanced_tutorial/index.rst
+   rl/advanced_tutorial/index.rst
+
+.. toctree::
+   :hidden:
    :maxdepth: 1
    :caption: 旧版文档
 
