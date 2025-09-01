@@ -18,7 +18,7 @@ from .modeling_vision import InternS1VisionModel, init_world_mesh
 from .modeling_projector import InternS1MultiModalProjector
 from typing_extensions import override
 from xtuner.v1.config import FSDPConfig
-from .interns1_config import InternS1Config
+from .interns1_config import InternS1BaseConfig
 from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.loss import CELossContext
 from torch.distributed.fsdp import (
@@ -52,7 +52,7 @@ def to_hf_key_list_wrapper(fn: Callable[[str], list[str]], convertor: Callable[[
 
 
 class InternS1ForConditionalGeneration(BaseModel):
-    def __init__(self, config: InternS1Config):
+    def __init__(self, config: InternS1BaseConfig):
         super().__init__()
         self.config = config
         self.select_layer = config.vision_feature_layer

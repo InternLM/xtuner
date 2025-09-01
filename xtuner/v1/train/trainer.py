@@ -28,7 +28,7 @@ from xtuner.v1.config.base_model import TransformerConfig
 from xtuner.v1.config.trainer import ResumeConfig, TrainerConfig
 from xtuner.v1.datasets.build import build_dataloader, build_datasets
 from xtuner.v1.loss import CELossContext
-from xtuner.v1.model.interns1 import InternS1Config
+from xtuner.v1.model.interns1 import InternS1BaseConfig
 from xtuner.v1.profiler import profilling_memory, profilling_time
 from xtuner.v1.utils import (
     XTUNER_DETERMINISTIC,
@@ -96,7 +96,7 @@ class Trainer:
 
     Args:
         load_from (str | Path | None): Path to Huggingface model or saved trainer checkpoint.
-        model_cfg (TransformerConfig | InternS1Config): Configuration for the transformer model architecture.
+        model_cfg (TransformerConfig | InternS1BaseConfig): Configuration for the transformer model architecture.
         optim_cfg (OptimConfig): Configuration for the optimizer.
         fsdp_cfg (FSDPConfig | None): Configuration for Fully Sharded Data Parallel (FSDP).
         dataset_cfg (DatasetConfigList): Configuration for training datasets.
@@ -132,8 +132,8 @@ class Trainer:
         self,
         *,
         load_from: str | Path | None = None,  # Huggingface model path or saved trainer_path
-        # TODO: InternS1Config 是组合配置，后续应该专门写一个组合 base model cfg，就可以通用
-        model_cfg: TransformerConfig | InternS1Config,
+        # TODO: InternS1BaseConfig 是组合配置，后续应该专门写一个组合 base model cfg，就可以通用
+        model_cfg: TransformerConfig | InternS1BaseConfig,
         optim_cfg: OptimConfig,
         fsdp_cfg: FSDPConfig | None = None,
         dataset_cfg: DatasetConfigList,
@@ -482,7 +482,7 @@ class Trainer:
     def build_engine(
         self,
         model_path: Path | None,
-        model_config: TransformerConfig | InternS1Config,
+        model_config: TransformerConfig | InternS1BaseConfig,
         optim_config: OptimConfig,
         fsdp_config: FSDPConfig,
         resume_config: ResumeConfig | None = None,
@@ -493,7 +493,7 @@ class Trainer:
 
         Args:
             model_path (Path | None): Path to the model checkpoint or None for new initialization.
-            model_config (TransformerConfig | InternS1Config): Model configuration.
+            model_config (TransformerConfig | InternS1BaseConfig): Model configuration.
             optim_config (OptimConfig): Optimizer configuration.
             fsdp_config (FSDPConfig): FSDP configuration for distributed training.
             resume_config (ResumeConfig | None): Resume configuration for continuing training.
@@ -505,7 +505,7 @@ class Trainer:
         """
         from xtuner.v1.engine import InternS1TrainEngine, TrainEngine
 
-        if isinstance(model_config, InternS1Config):
+        if isinstance(model_config, InternS1BaseConfig):
             engine = InternS1TrainEngine(
                 optim_cfg=optim_config,
                 fsdp_cfg=fsdp_config,
@@ -853,7 +853,7 @@ class Trainer:
     def _resolve_config_conflicts(
         self,
         tokenizer: PreTrainedTokenizer,
-        model_cfg: TransformerConfig | InternS1Config,
+        model_cfg: TransformerConfig | InternS1BaseConfig,
         dataloader_cfg: DataloaderConfig,
     ):
         if hasattr(tokenizer, "pad_token_id"):
@@ -872,7 +872,7 @@ class Trainer:
         assert isinstance(pad_token_id, int), f"pad_token_id should be an integer, but got {pad_token_id}"
 
         # TODO: 后续配置会统一，因此不会有很多种情况
-        if isinstance(model_cfg, InternS1Config):
+        if isinstance(model_cfg, InternS1BaseConfig):
             if model_cfg.text_config.pad_token_id != pad_token_id:
                 logger.warning(
                     f"Model pad_token_id {model_cfg.text_config.pad_token_id} is different from tokenizer "

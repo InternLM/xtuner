@@ -40,7 +40,7 @@ class Qwen3DenseConfig(TransformerConfig):
 
 
 # TODO: Unify the config name style
-class Qwen3_8BConfig(Qwen3DenseConfig):
+class Qwen3Dense8BConfig(Qwen3DenseConfig):
     vocab_size: int = 151936
     max_position_embeddings: int = 40960
     pad_token_id: int = 151645  # eos_id

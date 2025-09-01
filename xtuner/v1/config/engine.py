@@ -8,7 +8,7 @@ from .optim import OptimConfig
 
 if TYPE_CHECKING:
     from xtuner.v1.model.base import BaseModel
-    from xtuner.v1.model.interns1 import InternS1Config
+    from xtuner.v1.model.interns1 import InternS1BaseConfig
 
 
 @runtime_checkable
@@ -29,7 +29,7 @@ class EngineConfig(BaseModel):
         from xtuner.v1.engine.interns1_train_engine import InternS1TrainEngine
         from xtuner.v1.engine.train_engine import TrainEngine
 
-        if isinstance(self.model_cfg, InternS1Config):
+        if isinstance(self.model_cfg, InternS1BaseConfig):
             return InternS1TrainEngine(model_cfg=self.model_cfg, optim_cfg=self.optim_cfg, fsdp_cfg=self.fsdp_cfg)
         else:
             return TrainEngine(model_cfg=self.model_cfg, optim_cfg=self.optim_cfg, fsdp_cfg=self.fsdp_cfg)

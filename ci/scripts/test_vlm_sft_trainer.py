@@ -14,9 +14,8 @@ from xtuner.v1.config import (
     LRConfig
 )
 from xtuner.v1.datasets import InternS1TokenizeFnConfig
-from xtuner.v1.model.interns1 import InternS1Config, InternS1VisionConfig, InternS1ProjectorConfig
+from xtuner.v1.model.interns1 import InternS1MiniConfig
 from xtuner.v1.loss import CELossContext
-from xtuner.v1.model.dense.qwen3 import Qwen3_8BConfig
 from xtuner.v1.train.trainer import Trainer
 from xtuner.v1.utils.compile import maybe_compile
 import argparse
@@ -216,11 +215,7 @@ def main():
     args = parse_args()
     maybe_compile.clear_compile_targets()
 
-    vision_cfg = InternS1VisionConfig()
-    projector_cfg = InternS1ProjectorConfig()
-
-    llm_cfg = Qwen3_8BConfig(vocab_size=153216)
-    model_cfg_1 = InternS1Config(vision_config=vision_cfg, text_config=llm_cfg, projector_config=projector_cfg)
+    model_cfg_1 = InternS1MiniConfig()
 
     model_cfgs = [
         (model_cfg_1, 1),

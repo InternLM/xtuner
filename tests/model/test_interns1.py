@@ -10,9 +10,9 @@ from pathlib import Path
 import json
 from safetensors import safe_open
 
-from xtuner.v1.model.interns1 import InternS1Config, InternS1VisionConfig, InternS1ProjectorConfig
+from xtuner.v1.model.interns1 import InternS1MiniConfig
 from xtuner.v1.model.moe.moe import SequenceContext
-from xtuner.v1.model.dense.qwen3 import Qwen3_8BConfig
+from xtuner.v1.model.dense.qwen3 import Qwen3Dense8BConfig
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.utils.compile import maybe_compile
 from xtuner.v1.loss import CELossContext
@@ -63,10 +63,7 @@ class TestInternS1(DistributedTestBase):
         torch.cuda.empty_cache()
 
         with torch.device("meta"):
-            vision_cfg = InternS1VisionConfig()
-            projector_cfg = InternS1ProjectorConfig()
-            llm_cfg = Qwen3_8BConfig(vocab_size=153216)
-            model_cfg = InternS1Config(vision_config=vision_cfg, text_config=llm_cfg, projector_config=projector_cfg)
+            model_cfg = InternS1MiniConfig()
             interns1_model = model_cfg.build().to(torch.bfloat16)
 
         shift_input_ids = input_ids[:, :-1]
@@ -157,10 +154,7 @@ class TestInternS1(DistributedTestBase):
         torch.cuda.empty_cache()
 
         with torch.device("meta"):
-            vision_cfg = InternS1VisionConfig()
-            projector_cfg = InternS1ProjectorConfig()
-            llm_cfg = Qwen3_8BConfig(vocab_size=153216)
-            model_cfg = InternS1Config(vision_config=vision_cfg, text_config=llm_cfg, projector_config=projector_cfg)
+            model_cfg = InternS1MiniConfig()
             interns1_model = model_cfg.build().to(torch.bfloat16)
 
         shift_input_ids = input_ids[:, :-1]
@@ -224,10 +218,7 @@ class TestInternS1(DistributedTestBase):
         torch.cuda.empty_cache()
 
         with torch.device("meta"):
-            vision_cfg = InternS1VisionConfig()
-            projector_cfg = InternS1ProjectorConfig()
-            llm_cfg = Qwen3_8BConfig(vocab_size=153216)
-            model_cfg = InternS1Config(vision_config=vision_cfg, text_config=llm_cfg, projector_config=projector_cfg)
+            model_cfg = InternS1MiniConfig()
             interns1_model = model_cfg.build().to(torch.bfloat16)
 
         fsdp_config = FSDPConfig(
@@ -327,10 +318,7 @@ class TestInternS1(DistributedTestBase):
         torch.cuda.empty_cache()
 
         with torch.device("meta"):
-            vision_cfg = InternS1VisionConfig()
-            projector_cfg = InternS1ProjectorConfig()
-            llm_cfg = Qwen3_8BConfig(vocab_size=153216)
-            model_cfg = InternS1Config(vision_config=vision_cfg, text_config=llm_cfg, projector_config=projector_cfg)
+            model_cfg = InternS1MiniConfig()
             interns1_model = model_cfg.build().to(torch.bfloat16)
 
         fsdp_config = FSDPConfig(
@@ -374,10 +362,7 @@ class TestInternS1(DistributedTestBase):
     def test_save_hf(self, device, tp_size):
         self.create_pg(device)
         with torch.device("meta"):
-            vision_cfg = InternS1VisionConfig()
-            projector_cfg = InternS1ProjectorConfig()
-            llm_cfg = Qwen3_8BConfig(vocab_size=153216)
-            model_cfg = InternS1Config(vision_config=vision_cfg, text_config=llm_cfg, projector_config=projector_cfg)
+            model_cfg = InternS1MiniConfig()
             interns1_model = model_cfg.build().to(torch.bfloat16)
 
         fsdp_config = FSDPConfig(

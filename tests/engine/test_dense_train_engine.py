@@ -10,7 +10,7 @@ from transformers import AutoTokenizer
 
 from xtuner.v1.model.moe.moe import SequenceContext
 from xtuner.v1.loss import CELossContext
-from xtuner.v1.model.dense.qwen3 import Qwen3_8BConfig
+from xtuner.v1.model.dense.qwen3 import Qwen3Dense8BConfig
 from xtuner.v1.config import FSDPConfig, LRConfig, AdamWConfig
 from xtuner.v1.engine.train_engine import TrainEngine
 from torch.optim.lr_scheduler import LambdaLR
@@ -35,7 +35,7 @@ class TestDenseEngine(DistributedTestBase):
     def test_dense_engine_train(self, device, tp_size, sp_size):
         pg = self.create_pg(device)
 
-        dense_cfg = Qwen3_8BConfig()
+        dense_cfg = Qwen3Dense8BConfig()
         optim_cfg: AdamWConfig = AdamWConfig()
         lr_cfg: LRConfig = LRConfig()
         fsdp_cfg: FSDPConfig = FSDPConfig(
@@ -110,7 +110,7 @@ class TestDenseEngine(DistributedTestBase):
             temp_dir = [None]
         dist.broadcast_object_list(temp_dir, src=0)
         temp_dir = temp_dir[0]
-        moe_cfg = Qwen3_8BConfig()
+        moe_cfg = Qwen3Dense8BConfig()
         optim_cfg: AdamWConfig = AdamWConfig()
         fsdp_cfg: FSDPConfig = FSDPConfig(
             torch_compile=True,

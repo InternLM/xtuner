@@ -10,9 +10,9 @@ Trainer 通过配置文件的方式来构建模型，我们以 XTuner 内置支�
 ```{code-block} python
 :caption: 构建模型配置
 
-from xtuner.v1.model import Qwen3_8BConfig
+from xtuner.v1.model import Qwen3Dense8BConfig
 
-model_cfg = Qwen3_8BConfig()
+model_cfg = Qwen3Dense8BConfig()
 ```
 
 如果我们想修改模型的某些参数，例如减少模型层数，可以这样：
@@ -20,13 +20,13 @@ model_cfg = Qwen3_8BConfig()
 ```{tip}
 :class: margin
 
-不妨跳转到 Qwen3_8BConfig 的源码处，看看它都有哪些参数可以配置
+不妨跳转到 Qwen3Dense8BConfig 的源码处，看看它都有哪些参数可以配置
 ```
 
 ```{code-block} python
 :caption: 修改模型层数
 
-model_cfg = Qwen3_8BConfig(num_hidden_layers=16)
+model_cfg = Qwen3Dense8BConfig(num_hidden_layers=16)
 ```
 
 
@@ -100,12 +100,12 @@ trainer = Trainer(
 
 ````{toggle}
 ```python
-from xtuner.v1.model import Qwen3_8BConfig
+from xtuner.v1.model import Qwen3Dense8BConfig
 from xtuner.v1.config import LRConfig, AdamWConfig
 from xtuner.v1.train.trainer import Trainer
 
 
-model_cfg = Qwen3_8BConfig()
+model_cfg = Qwen3Dense8BConfig()
 dataset_cfg = []
 optim_cfg = AdamWConfig(lr=6e-05)
 lr_cfg = LRConfig(lr_type="cosine", lr_min=1e-6)

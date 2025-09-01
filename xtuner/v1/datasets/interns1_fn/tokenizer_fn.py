@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict
 
 from transformers import PreTrainedTokenizer
 from xtuner.v1.datasets.data_item import InternS1DataItem
-from xtuner.v1.model.interns1 import InternS1Config
+from xtuner.v1.model.interns1 import InternS1BaseConfig
 from xtuner.v1.utils import get_logger
 
 from ..utils import CachableTokenizeFunction, tokenizer_xxhash
@@ -56,7 +56,7 @@ class InternS1TokenizeFunction(CachableTokenizeFunction[InternS1DataItem]):
     def __init__(
         self,
         tokenizer: PreTrainedTokenizer,
-        model_cfg: InternS1Config,
+        model_cfg: InternS1BaseConfig,
         anno_name: str,
         max_dynamic_patch: int | None = None,
         min_dynamic_patch: int | None = None,
@@ -593,7 +593,7 @@ class InternS1TokenizeFunction(CachableTokenizeFunction[InternS1DataItem]):
 
 class InternS1TokenizeFnConfig(BaseModel):
     model_config = ConfigDict(title="Base dataset config for xtuner", extra="allow")
-    model_cfg: InternS1Config
+    model_cfg: InternS1BaseConfig
     max_length: int | None = None
     max_dynamic_patch: int | None = None
     min_dynamic_patch: int | None = None

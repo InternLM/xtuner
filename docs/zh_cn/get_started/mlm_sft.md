@@ -22,7 +22,7 @@ torchrun --nproc-per-node=8 xtuner/v1/train/cli/sft.py --trainer-cfg-path exampl
 ```{code-block} python
 vision_cfg = InternS1VisionConfig(drop_path_rate=0) # sft 时候可以禁用 drop_path
 projector_cfg = InternS1ProjectorConfig()
-llm_cfg = Qwen3_8BConfig(vocab_size=153216)
+llm_cfg = Qwen3Dense8BConfig(vocab_size=153216)
 model_cfg = InternS1Config(vision_config=vision_cfg,
                            text_config=llm_cfg,
                            projector_config=projector_cfg,
@@ -34,7 +34,7 @@ model_cfg = InternS1Config(vision_config=vision_cfg,
 InternS1 包括 3 个核心模块，分别对于 3 个配置类：
 - `InternS1VisionConfig`： 视觉编码器配置
 - `InternS1ProjectorConfig`： 视觉-语言投影层配置
-- `Qwen3_8BConfig`： 语言模型配置
+- `Qwen3Dense8BConfig`： 语言模型配置
 
 请注意： 如果你想完全加载 HF 官方权重，则默认参数都不能修改，否则后续会出现权重加载不上情况。
 
