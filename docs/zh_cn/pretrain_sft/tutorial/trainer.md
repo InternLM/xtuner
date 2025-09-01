@@ -127,9 +127,17 @@ trainer.fit()
 
 
 ```{code-block} python
-:caption: 启动训练
+:caption: toy_train.py
 
 trainer.fit()
+```
+
+写完脚本后，我们就能通过 `torchrun` 启动分布式训练了：
+
+```{code-block} bash
+:caption: 启动训练
+
+torchrun --nproc_per_node=8 toy_train.py
 ```
 
 恭喜你，已经自己实现了一个 XTuner 的训练入口！你可以在这个脚本里尽情地发挥，定制化自己的训练参数。
