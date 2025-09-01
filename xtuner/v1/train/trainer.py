@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from shutil import rmtree
-from typing import Sized, cast
+from typing import Literal, Sized, cast
 
 import torch
 import torch.distributed as dist
@@ -22,6 +22,7 @@ from typing_extensions import NotRequired, Self, TypedDict
 
 from transformers import AutoTokenizer
 from transformers.tokenization_utils import PreTrainedTokenizer
+from xtuner.v1._writer import get_writer
 from xtuner.v1.config import DataloaderConfig, DatasetConfigList, FSDPConfig, LRConfig, OptimConfig
 from xtuner.v1.config.base_model import TransformerConfig
 from xtuner.v1.config.trainer import ResumeConfig, TrainerConfig
@@ -130,6 +131,7 @@ class Trainer:
     _META_PATH = ".xtuner"
     _PROFILE_TIME_PATH = "profilling_time"
     _PROFILE_MEMORY_PATH = "profilling_memory"
+    _EXP_TRACKING_PATH = "exp_tracking"
 
     def __init__(
         self,
@@ -154,6 +156,7 @@ class Trainer:
         strict_load: bool = True,
         hf_interval: int | None = None,
         hf_max_keep: int | None = None,
+        exp_tracker: Literal["tensorboard", "jsonl"] = "jsonl",
         profile_step: int | None = None,
         profile_time: bool = True,
         profile_memory: bool = False,
@@ -228,6 +231,7 @@ class Trainer:
             log_dir = Path(log_dir)
 
         self.logger = self._init_logger(log_dir)
+        self._exp_tracker = self._init_tracker(exp_tracker, log_dir / f"{self._EXP_TRACKING_PATH}/rank{self.rank}")
 
         self.data_mesh = self._init_data_mesh(
             fsdp_cfg.tp_size,
@@ -306,6 +310,7 @@ class Trainer:
             strict_load=config.strict_load,
             hf_interval=config.hf_interval,
             hf_max_keep=config.hf_max_keep,
+            exp_tracker=config.exp_tracker,
             profile_step=config.profile_step,
             profile_time=config.profile_time,
             profile_memory=config.profile_memory,
@@ -384,7 +389,7 @@ class Trainer:
                 data_time=data_time,
                 step_time=step_time,
                 train_time=time_after_train_step - train_begin,
-                grad_norm=grad_norm,
+                grad_norm=grad_norm.item(),
             )
 
             time_before_get_data = time.time()
@@ -468,6 +473,10 @@ class Trainer:
         logger.add(work_dir / f"rank{get_rank()}.log", format=log_format(), backtrace=True, catch=True)
         logger.add(sys.stderr, format=log_format(rank=get_rank()))
         return logger
+
+    def _init_tracker(self, exp_tracker: Literal["tensorboard", "jsonl"], log_dir: Path):
+        writer = get_writer(writer_type=exp_tracker, log_dir=log_dir)
+        return writer
 
     def _init_data_mesh(
         self,
@@ -804,8 +813,9 @@ class Trainer:
         tgs = step_consumed_tokens / step_time
         e2e_tgs = total_consumed_tokens / train_time
         lr = self._lr_scheduler.get_last_lr()[0]
-        total_loss = loss_log["total_loss"]
-        reduced_llm_loss = loss_log["reduced_llm_loss"]
+
+        loss_log_list = [f"{k}: {v:.3f}" for k, v in loss_log.items()]
+        loss_log_str = ", ".join(loss_log_list)
 
         max_memory = DEVICE_MODULE.max_memory_allocated()  # type: ignore[attr-defined]
         reserved_memory = DEVICE_MODULE.max_memory_reserved()  # type: ignore[attr-defined]
@@ -813,14 +823,29 @@ class Trainer:
         self.logger.info(
             f"Step {self.cur_step}/{self.total_step} data_time: {data_time:.4f} lr: {lr:.6f} time: {step_time:.4f} "
             f"text_tokens: {step_consumed_tokens} "
-            f"total_loss: {total_loss:.3f} "
-            f"reduced_llm_loss: {reduced_llm_loss:.3f} "
+            f"{loss_log_str} "
             f"max_memory: {max_memory / (1024**3):.2f} GB "
             f"reserved_memory: {reserved_memory / (1024**3):.2f} GB "
             f"grad_norm: {grad_norm:.3f} "
             f"tgs: {tgs:.1f} "
             f"e2e_tgs: {e2e_tgs:.1f} "
         )
+
+        log_scalars = {
+            "lr": lr,
+            "time/data_time": round(data_time, 4),
+            "time/step_time": round(step_time, 4),
+            "time/train_time": round(train_time, 4),
+            "runtime_info/text_tokens": step_consumed_tokens,
+            "runtime_info/tgs": tgs,
+            "runtime_info/e2e_tgs": e2e_tgs,
+            "memory/max_memory_GB": round(max_memory / (1024**3), 3),
+            "memory/reserved_memory_GB": round(reserved_memory / (1024**3), 3),
+            "grad_norm": round(grad_norm, 3),
+        }
+        log_scalars.update({f"loss/{k}": v for k, v in loss_log.items()})
+        self._exp_tracker.add_scalars(tag_scalar_dict=log_scalars, global_step=self.cur_step)
+
         DEVICE_MODULE.reset_peak_memory_stats()  # type: ignore[attr-defined]
 
     def _maybe_save_hf(self):

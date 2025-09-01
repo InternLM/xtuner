@@ -35,7 +35,7 @@ class FakeEngine:
 
     def train_step(self, *args, **kwargs):
         self.train_step_calls += 1
-        return {"total_loss": 1.0, "reduced_llm_loss": 0.8}, {"consumed_tokens": 100, "grad_norm": 1.0}
+        return {"total_loss": 1.0, "reduced_llm_loss": 0.8}, {"consumed_tokens": 100, "grad_norm": torch.Tensor(1.0)}
 
     def save_hf(self, hf_path):
         self.save_hf_calls.append(hf_path)
