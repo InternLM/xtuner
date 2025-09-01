@@ -67,9 +67,15 @@ class JudgerController:
                 final_rewards[list(active_judgers.keys())[name_index]] = reward_list
             return final_rewards
 
-    async def run(self, group_data_item: List[RLTextDataItem]) -> List[float]:
+    async def run(
+        self, group_data_item: RLTextDataItem | List[RLTextDataItem]
+    ) -> RLTextDataItem | List[RLTextDataItem]:
         if not group_data_item:
             return []
+        input_list = True
+        if not isinstance(group_data_item, List):
+            group_data_item = [group_data_item]
+            input_list = False
         batch_responses = [item["response_str"] or "" for item in group_data_item]
         batch_labels = [item["reward_model"]["ground_truth"] for item in group_data_item]
         data_source = group_data_item[0]["data_source"]
@@ -87,4 +93,9 @@ class JudgerController:
                 weight = data_source.get(name, 1.0)
                 final_rewards[i] += scores[i] * weight
 
-        return final_rewards
+        assert len(final_rewards) == num_samples
+        for i, item in enumerate(group_data_item):
+            item["reward"] = final_rewards[i]
+        if not input_list:
+            return group_data_item[0]
+        return group_data_item

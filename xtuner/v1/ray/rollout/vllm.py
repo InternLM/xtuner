@@ -1,5 +1,5 @@
 from argparse import Namespace
-from typing import List
+from typing import Dict, List
 
 import ray
 import uvloop
@@ -31,7 +31,7 @@ class vLLMWorker(RolloutWorker):
         self.server_func = run_vllm_server_wrapper
         self.router_func = ""
         self.endpoints["health_generate"] = "health"
-        self.endpoints["generate"] = "v1/completions"
+        self.endpoints["generate"] = "v1/chat/completions"
         self.endpoints["output_ids"] = "output_ids"
         self.endpoints["response"] = "text"
         self.endpoints["sleep"] = "sleep"
@@ -41,10 +41,11 @@ class vLLMWorker(RolloutWorker):
     async def _create_request(
         self,
         url: str,
-        uid: str,
-        prompt: str,
-        sample_params: dict = dict(),
-        extra_params: dict = dict(),
+        prompt: List[Dict[str, str]],
+        tools: List,  # reserved for agent tool use
+        tool_choice: str,  # reserved for agent tool use
+        sample_params: dict,
+        extra_params: dict,
     ):
         headers = {
             "Content-Type": "application/json",
@@ -52,8 +53,7 @@ class vLLMWorker(RolloutWorker):
         }
         payload = {
             "model": self.config.model_name,
-            "request_id": uid,
-            "prompt": prompt,
+            "messages": prompt,
             "stream": True,
         }
         payload.update(sample_params)
@@ -72,7 +72,6 @@ class vLLMWorker(RolloutWorker):
         pass
 
     def generate(self, input_ids, sampling_params):
-        # 直接调用engine.generate方法
         pass
 
     def sleep(self, level=1, tags: List[str] | None = None):

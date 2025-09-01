@@ -1,53 +1,3 @@
-# Tested successfully on the hiyouga/verl:ngc-th2.6.0-cu126-vllm0.8.4-flashinfer0.2.2-cxx11abi0 image.
-# It outperforms the Qwen2 7B base model by two percentage points on the test set of GSM8K.
-
-# set -x
-# export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libstdc++.so.6
-# export PYTHONPATH="$(pwd)"
-
-# python3 -m verl.trainer.main_ppo \
-#     algorithm.adv_estimator=grpo \
-#     data.train_files=data/gsm8k/train.parquet \
-#     data.val_files=data/gsm8k/test.parquet \
-#     data.train_batch_size=1024 \
-#     data.max_prompt_length=512 \
-#     data.max_response_length=1024 \
-#     data.filter_overlong_prompts=True \
-#     data.truncation='error' \
-#     actor_rollout_ref.model.path=/cpfs01/shared/llm_razor/huanghaian/new_model/Qwen3-8B \
-#     actor_rollout_ref.actor.optim.lr=1e-6 \
-#     actor_rollout_ref.model.use_remove_padding=True \
-#     actor_rollout_ref.actor.ppo_mini_batch_size=256 \
-#     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=32 \
-#     actor_rollout_ref.actor.use_kl_loss=True \
-#     actor_rollout_ref.actor.kl_loss_coef=0.001 \
-#     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
-#     actor_rollout_ref.actor.entropy_coeff=0 \
-#     actor_rollout_ref.actor.strategy="fsdp2" \
-#     actor_rollout_ref.model.use_fused_kernels=True \
-#     actor_rollout_ref.model.enable_gradient_checkpointing=True \
-#     actor_rollout_ref.actor.fsdp_config.param_offload=False \
-#     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
-#     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=32 \
-#     actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
-#     actor_rollout_ref.rollout.name=vllm \
-#     actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
-#     actor_rollout_ref.rollout.n=5 \
-#     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=32 \
-#     actor_rollout_ref.ref.fsdp_config.param_offload=True \
-#     algorithm.use_kl_in_reward=False \
-#     trainer.critic_warmup=0 \
-#     trainer.logger='["console"]' \
-#     trainer.project_name='verl_grpo_example_gsm8k' \
-#     trainer.experiment_name='qwen3_8b_function_rm' \
-#     trainer.n_gpus_per_node=8 \
-#     trainer.nnodes=1 \
-#     trainer.save_freq=200 \
-#     trainer.test_freq=10 \
-#     trainer.total_epochs=15 \
-#     2>&1 | tee -a "outputs/gsk8k_grpo_0818_training_log.txt"
-
-
 import os
 import re
 from pathlib import Path
@@ -77,7 +27,7 @@ from xtuner.v1.utils.compile import maybe_compile
 from xtuner.v1.ray.accelerator import AcceleratorResourcesConfig
 from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.ray.dataflow import DataFlowConfig, ReplayBufferConfig
-from xtuner.v1.ray.environment import SampleParams
+from xtuner.v1.ray.rollout import SampleParams
 from xtuner.v1.ray.evaluator import EvaluatorConfig
 from xtuner.v1.datasets import RLTextTokenizeFnConfig
 from xtuner.v1.config import (
@@ -93,7 +43,6 @@ from xtuner.v1.config import (
 from xtuner.v1.ray.judger.controller import JudgerConfig
 from xtuner.v1.rl.grpo.config import WorkerConfig, LossConfig
 from xtuner.v1.rl.grpo.trainer import Trainer
-from xtuner.v1.ray.environment import SampleParams
 
 MODEL_PATH = os.environ["ROLLOUT_MODEL_PATH"]
 TRAIN_DATA_PATH = os.environ["ROLLOUT_DATA_PATH"]
@@ -116,6 +65,9 @@ def parse_args():
     parser.add_argument("--max-response-length", type=int, default=1024)
     parser.add_argument("--optimizer-disable-foreach", action="store_true")  # save memory usage during opt.step()
     parser.add_argument("--policy-loss-type", type=str, default="vanilla")
+    parser.add_argument("--enable-evaluate", action="store_true")
+    parser.add_argument("--evaluate-step", type=int, default=1)
+    parser.add_argument("--evaluate-ratio", type=float, default=1)
     return parser.parse_args()
 
 
@@ -179,8 +131,8 @@ def main(args):
         dataset_cfg=eval_dataset_cfg,
         tokenizer=tokenizer, 
         max_concurrent=args.max_concurrent,
-        eval_sample_ratio=1, 
-        evaluate_step=1,
+        eval_sample_ratio=args.evaluate_ratio, 
+        evaluate_step=args.evaluate_step,
         compute_metric_func=None
     )
     replay_buffer_cfg = ReplayBufferConfig(
@@ -227,6 +179,7 @@ def main(args):
         tokenizer_path=args.model_path,
         work_dir=args.work_dir,
         total_epochs=args.total_epochs,
+        enable_evaluate=args.enable_evaluate
     )
     trainer.fit()
 

@@ -1,11 +1,33 @@
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import ray
+from cyclopts import Parameter
+from pydantic import BaseModel
+from typing_extensions import Annotated
 
 from transformers import AutoTokenizer
 from xtuner.v1.ray.config.worker import RolloutConfig
 
 from .worker import RolloutWorker
+
+
+class SampleParams(BaseModel):
+    n: Annotated[int, Parameter(help="Number of samples to generate.")] = 1
+    top_k: Annotated[
+        int, Parameter(help="The number of highest probability vocabulary tokens to keep for top-k-filtering.")
+    ] = 0
+    top_p: Annotated[float, Parameter(help="The cumulative probability for nucleus sampling.")] = 1.0
+    temperature: Annotated[float, Parameter(help="The value used to module the next token probabilities.")] = 1.0
+    repetition_penalty: Annotated[float, Parameter(help="The parameter for repetition penalty.")] = 1.0
+    presence_penalty: Annotated[float, Parameter(help="The parameter for presence penalty.")] = 0.0
+    frequency_penalty: Annotated[float, Parameter(help="The parameter for frequency penalty.")] = 0.0
+    min_tokens: Annotated[int, Parameter(help="Minimum number of tokens to generate.")] = 0
+    max_tokens: Annotated[int, Parameter(help="Maximum number of tokens to generate.")] = 2048
+    stops: Annotated[List[str], Parameter(help="List of stop sequences.")] = []
+    stop_token_ids: Annotated[List[int], Parameter(help="List of stop token IDs.")] = []
+    logprobs: Annotated[int, Parameter(help="Number of log probabilities to return.")] = 0
+    skip_special_tokens: Annotated[bool, Parameter(help="Whether to skip special tokens.")] = True
+    do_sample: Annotated[bool, Parameter(help="Whether to sample or not.")] = True
 
 
 @ray.remote
@@ -28,6 +50,7 @@ class RolloutController:
         self.engine_mesh_list, self.server_url_dict = self.init_workers()
         # todo(@duanyanhui): add router to replace native round robin
         self.worker_index = 0  # round robin index
+        self.sample_params = SampleParams()
 
     def get_rollout_info(self):
         return dict(
@@ -69,17 +92,27 @@ class RolloutController:
         self.worker_server_urls = list(worker_server_urls_map.values())
         return engine_mesh_list, worker_server_urls_map
 
-    async def rollout(self, prompt: str, sample_params):
+    async def rollout(
+        self,
+        prompt: List[str],
+        tools: List = [],
+        tool_choice: str = "auto",
+        sample_params: Optional[SampleParams] = None,
+        extra_params: dict = dict(),
+        format: str = "openai",
+    ):
         index = self.worker_index % len(self.active_rollout_workers)
-        response_ref = self.active_rollout_workers[index].rollout.remote(prompt, sample_params)  # type: ignore[attr-defined]
+        final_sample_params = sample_params if sample_params else self.sample_params
+        response_ref = self.active_rollout_workers[index].rollout.remote(  # type: ignore[attr-defined]
+            prompt,
+            tools=tools,
+            tool_choice=tool_choice,
+            sample_params=final_sample_params,
+            extra_params=extra_params,
+            format=format,
+        )
         self.worker_index += 1
         return await response_ref
-
-    def pause(self):
-        return ray.get([worker.pause.remote() for worker in self.active_rollout_workers])
-
-    def restart(self):
-        return ray.get([worker.restart.remote() for worker in self.active_rollout_workers])
 
     # internal functions
     def _update_dist_init_addr(self, nodes_per_engine, dist_init_addrs, tp_size):
@@ -102,16 +135,35 @@ class RolloutController:
         active_servers_count = int((gpu_nums // tp_size) * nodes_per_engine)
         return active_servers_count, nodes_per_engine
 
-    def reset_prefix_cache(self):
-        return [worker.reset_prefix_cache.remote() for worker in self.active_rollout_workers]
+    def _broadcast_to_active_workers(self, method_name: str, block: bool):
+        """Helper function to call a method on all active workers."""
+        futures = [getattr(worker, method_name).remote() for worker in self.active_rollout_workers]
+        if not block:
+            return futures
 
-    def offload(self, *args, **kwargs):
-        ray.get([worker.sleep.remote(*args, **kwargs) for worker in self.active_rollout_workers])
-        return
+        results = ray.get(futures)
+        return results
 
-    def onload(self, *args, **kwargs):
-        ray.get([worker.wake_up.remote(*args, **kwargs) for worker in self.active_rollout_workers])
-        return
+    def pause(self, block=True):
+        return self._broadcast_to_active_workers("pause", block)
 
-    def shutdown(self):
-        return ray.get([worker.shutdown.remote() for worker in self.active_rollout_workers])
+    def restart(self, block=True):
+        return self._broadcast_to_active_workers("restart", block)
+
+    def reset_prefix_cache(self, block=True):
+        return self._broadcast_to_active_workers("reset_prefix_cache", block)
+
+    def offload_weights(self, block=True):
+        return self._broadcast_to_active_workers("offload_weights", block)
+
+    def offload_weights_and_kvcache(self, block=True):
+        return self._broadcast_to_active_workers("offload_weights_and_kvcache", block)
+
+    def onload_weights(self, block=True):
+        return self._broadcast_to_active_workers("onload_weights", block)
+
+    def onload_kvcache(self, block=True):
+        return self._broadcast_to_active_workers("onload_kvcache", block)
+
+    def shutdown(self, block=True):
+        return self._broadcast_to_active_workers("shutdown", block)

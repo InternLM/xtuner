@@ -39,7 +39,6 @@ class RolloutConfig(BaseModel):
         ),
     ] = None
     gpus_per_node: Annotated[int, Parameter(group=infer_group, help="Number of GPUs allocated per node.")] = 8
-    do_sample: Annotated[bool, Parameter(group=infer_group, help="Whether to use sampling.")] = True
     dtype: Annotated[
         str,
         Parameter(group=infer_group, help="Data type for the model, e.g., 'bfloat16', 'float16', 'int8'."),
@@ -113,6 +112,13 @@ class RolloutConfig(BaseModel):
             help="Timeout duration (in seconds) for rollout requests.",
         ),
     ] = 3600.0
+    system_prompt: Annotated[
+        Optional[str],
+        Parameter(
+            group=infer_group,
+            help="System prompt for the rollout worker.",
+        ),
+    ] = None
 
 
 if __name__ == "__main__":

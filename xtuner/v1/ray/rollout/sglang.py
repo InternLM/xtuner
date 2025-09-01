@@ -1,4 +1,5 @@
 import os
+from typing import Dict, List
 
 import ray
 from sglang.srt.entrypoints.http_server import launch_server
@@ -30,10 +31,11 @@ class SGLangWorker(RolloutWorker):
     async def _create_request(
         self,
         url: str,
-        uid: str,
-        prompt: str,
-        sample_params: dict = dict(),
-        extra_params: dict = dict(),
+        prompt: List[Dict[str, str]],
+        tools: List,
+        tool_choice: str,
+        sample_params: dict,
+        extra_params: dict,
     ):
         # default params
         sample_params["max_new_tokens"] = sample_params.get("max_tokens", 128)

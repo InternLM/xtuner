@@ -7,10 +7,10 @@ import ray
 import unittest
 import numpy as np
 
-from xtuner.v1.ray.environment import EnvController
+from xtuner.v1.ray.environment import SingleTurnEnvironment
 from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.ray.accelerator import AcceleratorResourcesConfig, AutoAcceleratorWorkers
-from xtuner.v1.ray.judger.controller import JudgerConfig
+from xtuner.v1.ray.judger.controller import JudgerController, JudgerConfig
 from xtuner.v1.datasets.data_item import RLTextDataItem
 
 
@@ -18,9 +18,10 @@ MODEL_PATH = os.environ["ROLLOUT_MODEL_PATH"]
 DATA_PATH = os.environ["ROLLOUT_DATA_PATH"]
 VERL_ROLLOUT_DATA_PATH = os.environ["VERL_ROLLOUT_DATA_PATH"]
 
-FAKE_ROLLOUT_INPUT_STR = '<|im_start|>user\nNatalia sold clips to 48 of her friends in April, and then she sold half as many clips in May. How many clips did Natalia sell altogether in April and May? Let\'s think step by step and output the final answer after "####".<|im_end|>\n<|im_start|>assistant\n'
 FAKE_INPUT_DATA_ITEM = {
-    'prompt_str': '<|im_start|>user\nNatalia sold clips to 48 of her friends in April, and then she sold half as many clips in May. How many clips did Natalia sell altogether in April and May? Let\'s think step by step and output the final answer after "####".<|im_end|>\n<|im_start|>assistant\n',
+    'messages': [{ 
+        'role': 'user', 'content': 'Natalia sold clips to 48 of her friends in April, and then she sold half as many clips in May. How many clips did Natalia sell altogether in April and May? Let\'s think step by step and output the final answer after "####"'
+    }],
     'num_tokens': 62,
     'reward_model': {'ground_truth': '72', 'style': 'rule'},
     'ability': 'math',
@@ -44,7 +45,7 @@ def construct_judger_data(data_path):
             # 去除行尾的空白字符并解析JSON
             data = json.loads(line.strip())
             data_item = RLTextDataItem(
-                prompt_str=data['input'],
+                messages=data['input'],
                 reward_model={"ground_truth": data["gts"]},
                 response_str=data["output"],
                 data_source={"openai/gsm8k": 1.0}
@@ -77,15 +78,10 @@ class TestJudgerController(unittest.TestCase):
         judger_cfg = JudgerConfig(
             reward_judger_configs={"openai/gsm8k": gsm8k_judger_config}
         )
-        test_judger_env = EnvController.remote(
-            "test_judger",
-            self.pg,
-            rollout_cfg = None,
-            judger_cfg = judger_cfg
-        )
-        res1 = ray.get(test_judger_env.run.remote(FAKE_JUDGER_INPUT_ITEM))
+        judger_controller = JudgerController.remote(judger_cfg)
+        res1 = ray.get(judger_controller.run.remote(FAKE_JUDGER_INPUT_ITEM))
         self.assertEqual(res1["reward"], 1.0)
-        res2 = ray.get(test_judger_env.run.remote(FAKE_JUDGER_INPUT_ITEM_MULTI_DATA))
+        res2 = ray.get(judger_controller.run.remote(FAKE_JUDGER_INPUT_ITEM_MULTI_DATA))
         self.assertEqual(res2[0]["reward"], 1.0)
         self.assertEqual(res2[1]["reward"], 1.0)
 
@@ -98,13 +94,8 @@ class TestJudgerController(unittest.TestCase):
                 "openai/gsm8k-1": gsm8k_judger_config_1,
                 "openai/gsm8k-2": gsm8k_judger_config_2,}
         )
-        test_multi_judger_env = EnvController.remote(
-            "test_multi_judger",
-            self.pg,
-            rollout_cfg = None,
-            judger_cfg = judger_cfg
-        )
-        res3 = ray.get(test_multi_judger_env.run.remote(FAKE_JUDGER_INPUT_ITEM_MULTI_SOURCE))
+        judger_controller = JudgerController.remote(judger_cfg)
+        res3 = ray.get(judger_controller.run.remote(FAKE_JUDGER_INPUT_ITEM_MULTI_SOURCE))
         self.assertEqual(res3["reward"], 1.0)
         
     def test_gsm8k_judger_score(self):
@@ -114,11 +105,9 @@ class TestJudgerController(unittest.TestCase):
         judger_cfg = JudgerConfig(
             reward_judger_configs={"openai/gsm8k": gsm8k_judger_config}
         )
-        test_judger_env = EnvController.remote(
-            "test_judger", self.pg, rollout_cfg=None, judger_cfg=judger_cfg
-        )
+        judger_controller = JudgerController.remote(judger_cfg)
         judger_data = construct_judger_data(VERL_ROLLOUT_DATA_PATH)
-        group_data = ray.get(test_judger_env.run.remote(judger_data))
+        group_data = ray.get(judger_controller.run.remote(judger_data))
         reward = []
         for data in group_data:
             reward.append(data["reward"])

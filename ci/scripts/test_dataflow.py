@@ -15,8 +15,8 @@ from xtuner.v1.datasets import RLTextTokenizeFnConfig
 from xtuner.v1.ray.accelerator import AcceleratorResourcesConfig, AutoAcceleratorWorkers
 from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.ray.dataflow import DataFlow, DataFlowConfig, ReplayBufferConfig
-from xtuner.v1.ray.environment import EnvController
-from xtuner.v1.ray.judger.controller import JudgerConfig
+from xtuner.v1.ray.environment import SingleTurnEnvironment
+from xtuner.v1.ray.judger import JudgerConfig
 
 MODEL_PATH = os.environ["ROLLOUT_MODEL_PATH"]
 TRAIN_DATA_PATH = os.environ["ROLLOUT_DATA_PATH"]
@@ -25,9 +25,9 @@ TEST_DATA_PATH = os.environ["ROLLOUT_TEST_DATA_PATH"]
 def parse_args():
     parser = argparse.ArgumentParser(description="Env Generate Test Script")
     parser.add_argument("--work-dir", type=str, default="work_dir")
-    parser.add_argument("--global-batch-size", type=int, default=128)
+    parser.add_argument("--global-batch-size", type=int, default=8)
     parser.add_argument("--prompt-repeat-k", type=int, default=1)
-    parser.add_argument("--repeat-times", type=int, default=1)
+    parser.add_argument("--repeat-times", type=int, default=2)
     parser.add_argument("--enable-partial-rollout", type=int, default=0)
     return parser.parse_args()
 
@@ -80,8 +80,7 @@ def main():
         postprocessor=None
     )
     pg = AutoAcceleratorWorkers.build_placement_group(resources_cfg)
-    
-    test_env = EnvController.remote(
+    test_env = SingleTurnEnvironment.remote(
         "test_env",
         pg,
         rollout_cfg,
@@ -106,7 +105,7 @@ def main():
                     group_response_list.append(data["response_str"])
                     group_reward_list.append(data["reward"])
                 item = {
-                    "prompt": group[0]["prompt_str"],
+                    "messages": group[0]["messages"],
                     "response": group_response_list,
                     "label": group[0]["reward_model"]["ground_truth"],
                     "reward": group_reward_list,
@@ -116,7 +115,7 @@ def main():
                 reward_list.extend(group_reward_list)
         time.sleep(1)
     print(f"Average reward: {sum(reward_list) / len(reward_list)}")
-    ray.get(test_flow.shutdown.remote())
+    ray.get(test_env.shutdown.remote())
 
 if __name__ == "__main__":
     main()

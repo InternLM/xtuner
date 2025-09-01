@@ -23,9 +23,10 @@ from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.ray.accelerator import AcceleratorResourcesConfig, AutoAcceleratorWorkers
 from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.ray.dataflow import DataFlow, DataFlowConfig, ReplayBufferConfig
-from xtuner.v1.ray.environment import EnvController
+from xtuner.v1.ray.environment import SingleTurnEnvironment
 from xtuner.v1.ray.evaluator import Evaluator, EvaluatorConfig
-from xtuner.v1.ray.judger.controller import JudgerConfig
+from xtuner.v1.ray.judger import JudgerConfig
+from xtuner.v1.ray.rollout import SampleParams
 from xtuner.v1.rl.grpo.config import WorkerConfig
 from xtuner.v1.rl.grpo.controller import GRPOTrainingController
 from xtuner.v1.rl.grpo.worker import GRPOTrainingWorker
@@ -107,6 +108,7 @@ class Trainer:
         work_dir: Path | str | None = None,
         log_dir: Path | str | None = None,
         total_epochs: int,
+        enable_evaluate: bool,
         resume_config: ResumeConfig | None = None,
         strict_load: bool = True,
         hf_interval: int | None = None,
@@ -138,7 +140,7 @@ class Trainer:
 
         self._debug = debug
         self._seed = seed
-
+        self._enable_evaluate = enable_evaluate
         self._set_deterministic()
         self._set_random_seed(seed)
 
@@ -173,14 +175,17 @@ class Trainer:
             judger_cfg=judger_config,
             replay_buffer_config=replay_buffer_config,
         )
-        self._evaluator = Evaluator.remote(evaluator_config, self._rollout_env_controller)  # type: ignore
+        self._evaluator = Evaluator.remote(evaluator_config, self._rollout_env_controller)  # type: ignore[attr-defined]
+        self._evaluator_sample_params = SampleParams(
+            top_p=1.0, temperature=0.0, do_sample=False, max_tokens=dataflow_config.sample_params.max_tokens, top_k=1
+        )
         self._global_batch_size = dataflow_config.global_batch_size
         self._eval_step = evaluator_config.evaluate_step
         self._rollout_steps = (
-            ray.get(self._rollout_dataflow.get_train_dataset_length.remote())
+            ray.get(self._rollout_dataflow.get_train_dataset_length.remote())  # type: ignore[attr-defined]
             // dataflow_config.global_batch_size
             * total_epochs
-        )  # type: ignore
+        )
         bind_train_rollout(train_controller=self._train_controller, env_controller=self._rollout_env_controller)
         ray.get(self._train_controller.offload.remote(target="all"))
 
@@ -193,7 +198,7 @@ class Trainer:
         judger_cfg: JudgerConfig,
         replay_buffer_config: ReplayBufferConfig,
     ):
-        env = cast(ActorClass, EnvController).remote("grpo", self._pg, rollout_cfg, judger_cfg)
+        env = cast(ActorClass, SingleTurnEnvironment).remote("grpo", self._pg, rollout_cfg, judger_cfg)
         flow = cast(ActorClass, DataFlow).remote("grpo", dataflow_cfg, replay_buffer_config, env)
         return env, flow
 
@@ -209,14 +214,17 @@ class Trainer:
 
     def fit(self):
         self.logger.info("start training")
-        scores, eval_data_groups = ray.get(self._evaluator.run.remote(return_samples=True))
-        trajectory_save_path = self.exp_dir / "initial_trajectory.jsonl"
-        self._save_trajectories(eval_data_groups, trajectory_save_path)
-        self.logger.info(f"Initial rollout evaluate scores {scores} and start training")
+        if self._enable_evaluate:
+            scores, eval_data_groups = ray.get(
+                self._evaluator.run.remote(return_samples=True, sample_params=self._evaluator_sample_params)
+            )
+            trajectory_save_path = self.exp_dir / "initial_trajectory.jsonl"
+            self._save_trajectories(eval_data_groups, trajectory_save_path)
+            self.logger.info(f"Initial rollout evaluate scores {scores} and start training")
         for rollout_idx in range(1, self._rollout_steps + 1):
             data_groups = ray.get(self._rollout_dataflow.run.remote())
             time.sleep(3)
-            ray.get(self._rollout_env_controller.offload.remote(level=2))
+            ray.get(self._rollout_env_controller.offload_weights_and_kvcache.remote())
             trajectory_save_path = self.exp_dir / f"rollout_idx_{rollout_idx}_trajectory.jsonl"
             self._save_trajectories(data_groups, trajectory_save_path)
             self.logger.info(f"rollout_idx {rollout_idx} finished, saved trajectories to {trajectory_save_path}")
@@ -230,14 +238,14 @@ class Trainer:
                 )
             )
             ray.get(self._train_controller.offload.remote(target="optimizer"))
-            ray.get(self._rollout_env_controller.onload.remote(tags=["weights"]))
+            ray.get(self._rollout_env_controller.onload_weights.remote())
             ray.get(self._train_controller.update_weights.remote())
             self.logger.info("update weights done!!!")
             ray.get(self._train_controller.offload.remote(target="model"))
-            ray.get(self._rollout_env_controller.onload.remote(tags=["kv_cache"]))
+            ray.get(self._rollout_env_controller.onload_kvcache.remote())
             # evaluate
-            if rollout_idx % self._eval_step == 0:
-                scores = ray.get(self._evaluator.run.remote())
+            if self._enable_evaluate and rollout_idx % self._eval_step == 0:
+                scores = ray.get(self._evaluator.run.remote(sample_params=self._evaluator_sample_params))
                 self.logger.info(f"evaluate idx {rollout_idx} scores {scores}")
             self._cur_epoch += 1
             self._maybe_save_hf()
@@ -247,7 +255,10 @@ class Trainer:
     def _prepare_train_data(self, data_groups, pack_max_length):
         data_batches = []
         for group in data_groups:
-            prompt_ids = self.tokenizer(group[0]["prompt_str"], return_tensors="pt")["input_ids"].flatten().tolist()
+            prompt = self.tokenizer.apply_chat_template(
+                group[0]["messages"], add_generation_prompt=True, tokenize=False
+            )
+            prompt_ids = self.tokenizer(prompt, return_tensors="pt")["input_ids"].flatten().tolist()
             rewards = [data["reward"] for data in group]
             rewards = torch.tensor(rewards, dtype=torch.float32)
             advantages = (rewards - rewards.mean(0)) / (rewards.std(0) + 1e-8)
@@ -282,7 +293,7 @@ class Trainer:
                     response_list.append(data["response_str"])
                     reward_list.append(data["reward"])
                 item = {
-                    "prompt": group[0]["prompt_str"],
+                    "messages": group[0]["messages"],
                     "response": response_list,
                     "label": group[0]["reward_model"]["ground_truth"],
                     "reward": reward_list,
