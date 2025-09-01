@@ -33,7 +33,7 @@ class BaseAttnConfig(BaseModel, Generic[T]):
     # casual: bool = True
     qkv_bias: Annotated[bool, Parameter(group="attention")] = False
     o_bias: Annotated[bool, Parameter(group="attention")] = False
-    sliding_window: Annotated[int, Parameter(group="attention")] = -1
+    sliding_window: Annotated[int | None, Parameter(group="attention")] = -1
 
     def build(
         self,
@@ -84,15 +84,14 @@ class TransformerConfig(BaseModel):
     rope_theta: Annotated[float, Parameter(group="model")]  # required by transformers's build rope
     hidden_act: Annotated[str, Parameter(group="model")]  # key defined in `transformers.activations.ACT2CLS`
     attention: BaseAttnConfig
-    layer_types: Annotated[list[Literal["full_attention", "sliding_attention"]] | None, Parameter(group="model")] = (
-        None
-    )
     mlp_bias: Annotated[bool, Parameter(group="model")] = False
     tie_word_embeddings: Annotated[bool, Parameter(group="model")] = False
     model_type: Annotated[Literal["qwen"] | None, Parameter(group="model")] = None
     generate_config: GenerateConfig | None = None
     float8_cfg: Optional["Float8Config"] = None
     return_hidden_states: Annotated[bool, Parameter(group="model")] = False
+    use_sliding_window: Annotated[bool, Parameter(group="model")] = False
+    max_window_layers: Annotated[int | None, Parameter(group="model")] = None
 
     @computed_field
     def num_attention_heads(self) -> int:
@@ -101,6 +100,18 @@ class TransformerConfig(BaseModel):
     @computed_field
     def head_dim(self) -> int:
         return self.attention.head_dim
+
+    @computed_field
+    def layers_type(self) -> list[Literal["full_attention", "sliding_attention"]]:
+        if not self.use_sliding_window:
+            return ["full_attention"] * self.num_hidden_layers
+        else:
+            if self.max_window_layers is None:
+                return ["sliding_attention"] * self.num_hidden_layers
+            return [
+                "sliding_attention" if i >= self.max_window_layers else "full_attention"
+                for i in range(self.num_hidden_layers)
+            ]
 
     def build(self) -> "_BaseModel":
         raise NotImplementedError
