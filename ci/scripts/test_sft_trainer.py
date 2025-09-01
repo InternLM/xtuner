@@ -1,6 +1,6 @@
 import os
-import re
 from pathlib import Path
+import json
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -13,13 +13,11 @@ from xtuner.v1.config import (
     FSDPConfig,
     LRConfig,
     BalancingLossConfig,
-    ZLossConfig
 )
 from xtuner.v1.datasets import FTDPTokenizeFnConfig
 from xtuner.v1.loss import CELossContext
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
 from xtuner.v1.train.trainer import Trainer
-from xtuner.v1.utils.compile import maybe_compile
 from xtuner.v1.utils.device import get_device
 from xtuner.v1.loss import CELossConfig
 import argparse
@@ -156,9 +154,6 @@ def parse_args():
 
 
 def extract_data_from_log(logfile: Path):
-    pattern_str = r"\[XTuner\].*Step.*lr:\s(\d+.\d*)\s.*text_tokens:\s(\d+.\d*)\s.*reduced_llm_loss:\s(\d+.\d*)\s.*max_memory:\s(\d+.\d*)\s*GB\s.*grad_norm:\s(\d+.\d*)\s.*(?<!e2e_)tgs:\s(\d+.\d*)"
-    compiled_pattern = re.compile(pattern_str)
-
     cur_lr = []
     cur_reduced_llm = []
     cur_grad_norm = []
@@ -166,15 +161,16 @@ def extract_data_from_log(logfile: Path):
     cur_text_tokens = []
     cur_tgs = []
 
-    with open(logfile) as f:
-        for data in f:
-            if match := compiled_pattern.search(data):
-                cur_lr.append(float(match.group(1)))
-                cur_text_tokens.append(float(match.group(2)))
-                cur_reduced_llm.append(float(match.group(3)))
-                cur_max_memory.append(float(match.group(4)))
-                cur_grad_norm.append(float(match.group(5)))
-                cur_tgs.append(float(match.group(6)))
+    with logfile.open("r") as f:
+        for line in f:
+            data = json.loads(line)
+            cur_lr.append(data["lr"])
+            cur_reduced_llm.append(data["loss/reduced_llm_loss"])
+            cur_grad_norm.append(data["grad_norm"])
+            cur_max_memory.append(data["memory/max_memory_GB"])
+            cur_text_tokens.append(data["runtime_info/text_tokens"])
+            cur_tgs.append(data["runtime_info/tgs"])
+
     return (
         cur_lr,
         cur_text_tokens,
@@ -272,7 +268,7 @@ def main():
         )
         trainer.fit()
         if dist.get_rank() == 0:
-            rank0_log_path = Path(trainer.exp_dir) / "rank0.log"
+            rank0_log_path = Path(trainer.exp_dir) / trainer._EXP_TRACKING_PATH / "rank0/tracker.jsonl"
             (
                 cur_lr,
                 cur_text_tokens,
