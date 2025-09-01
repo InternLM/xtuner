@@ -8,7 +8,10 @@ class ApplyRotaryEmbProtocol(Protocol):
 
 
 def get_apply_rotary_emb() -> ApplyRotaryEmbProtocol:
-    if torch.accelerator.is_available() and torch.accelerator.current_accelerator().type == "npu":
+    from xtuner.v1.utils.device import get_device
+
+    device = get_device()
+    if device == "npu":
 
         def npu_apply_rotary_pos_emb(query_states, key_states, cos, sin) -> Tuple[torch.Tensor, torch.Tensor]:
             import torch_npu

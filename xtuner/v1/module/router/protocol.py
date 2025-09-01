@@ -1,6 +1,7 @@
-from typing import Protocol, TypedDict
+from typing import Protocol
 
 import torch
+from typing_extensions import TypedDict
 
 from xtuner.v1.config import MoEConfig
 

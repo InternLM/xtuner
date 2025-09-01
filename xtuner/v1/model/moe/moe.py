@@ -1,4 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import os
 import types
 from itertools import accumulate
 from pathlib import Path
@@ -36,6 +37,7 @@ from xtuner.v1.utils import (
     get_device,
     get_logger,
 )
+from xtuner.v1.utils.activation_offload import async_save_on_cpu
 from xtuner.v1.utils.compile import maybe_compile
 
 
@@ -385,11 +387,28 @@ class MoE(BaseModel):
                     seq_ctx=seq_ctx,
                 )
             else:
-                hidden_states, router_results = decoder_layer(
-                    hidden_states,
-                    position_embeddings=position_embeddings,
-                    seq_ctx=seq_ctx,
-                )
+                if int(os.getenv("XTUNER_ACTIVATION_OFFLOAD", "0")) == 1:
+                    offload_stream = decoder_layer._get_fsdp_state()._comm_ctx.all_gather_stream
+                    with async_save_on_cpu(
+                        h2d_stream=offload_stream,
+                        d2h_stream=offload_stream,
+                        block_idx=int(idx),
+                        depth=len(self.layers),
+                        custom_check_fn=lambda x: x.data_ptr() == hidden_states.data_ptr(),
+                    ):
+                        hidden_states, router_results = decoder_layer(
+                            hidden_states,
+                            position_embeddings=position_embeddings,
+                            seq_ctx=seq_ctx,
+                        )
+
+                else:
+                    hidden_states, router_results = decoder_layer(
+                        hidden_states,
+                        position_embeddings=position_embeddings,
+                        seq_ctx=seq_ctx,
+                    )
+
                 output["router_logits"][f"layer{idx}"] = router_results
 
             if self.config.return_hidden_states:
@@ -599,8 +618,6 @@ class MoE(BaseModel):
         for _, module in self.named_modules():
             if isinstance(module, nn.Embedding):
                 module.forward = types.MethodType(self.patched_emb_forward, module)  # type: ignore
-            elif isinstance(module, RMSNorm):
-                module.forward = types.MethodType(self.patched_rms_norm_forward, module)  # type: ignore
 
         self.to_empty(device=self.device)
         return self
@@ -727,21 +744,6 @@ class MoE(BaseModel):
                 maybe_compile.remove_compile_target(
                     "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer.forward"
                 )
-
-    # TODO: Remove patch before opensource
-    @staticmethod
-    def patched_rms_norm_forward(self, input):
-        if hasattr(self, "weight"):
-            if isinstance(self.weight, DTensor):
-                w = self.weight.to_local()
-            else:
-                w = self.weight
-        else:
-            if isinstance(self.norm.weight, DTensor):
-                w = self.norm.weight.to_local()
-            else:
-                w = self.norm.weight
-        return F.rms_norm(input, w.shape, w, self.variance_epsilon)
 
     @staticmethod
     def patched_emb_forward(self, input):

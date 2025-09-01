@@ -1,8 +1,9 @@
 from pathlib import Path
-from typing import Annotated, TypedDict
+from typing import Annotated
 
 from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict, model_validator
+from typing_extensions import TypedDict
 
 from xtuner.v1.config.base_model import TransformerConfig
 

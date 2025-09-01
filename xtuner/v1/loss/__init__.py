@@ -1,6 +1,5 @@
 from .ce_loss import BaseChunkLoss, CEForwardItem, CELossContext, ChunkCELoss, CrossEntropyLoss
 from .chunk_loss import ChunkLoss
-from .liger_with_weights import LigerFusedLinearCrossEntropyLossWithWeights
 from .moe_loss import BalancingLoss, ZLoss
 
 
@@ -15,3 +14,11 @@ __all__ = [
     "CEForwardItem",
     "ChunkLoss",
 ]
+
+import torch
+
+
+if torch.accelerator.is_available() and torch.accelerator.current_accelerator().type == "cuda":
+    from .liger_with_weights import LigerFusedLinearCrossEntropyLossWithWeights
+
+    __all__.append("LigerFusedLinearCrossEntropyLossWithWeights")

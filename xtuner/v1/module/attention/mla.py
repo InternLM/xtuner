@@ -3,7 +3,6 @@ import math
 from typing import cast
 
 import torch
-from flash_attn import flash_attn_varlen_func
 from torch import nn
 from torch.distributed.tensor import DTensor
 from torch.nn import functional as F
@@ -11,6 +10,7 @@ from torch.nn import functional as F
 from xtuner.v1.config import BaseAttnConfig, Float8Config, GenerateConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.module.rope import RopeScalingConfig
+from xtuner.v1.ops import flash_attn_varlen_func
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger
 
 from ..linear.linear import build_linear

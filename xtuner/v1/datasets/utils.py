@@ -3,9 +3,10 @@ import hashlib
 import tempfile
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Generic, Literal, TypedDict, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar
 
 import xxhash
+from typing_extensions import TypedDict
 
 
 T = TypeVar("T")

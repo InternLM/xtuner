@@ -3,6 +3,11 @@ from typing import Any, Dict, Optional
 
 import torch
 
+from xtuner.v1.utils.device import get_device
+
+
+TARGET_DEVICE = get_device()
+
 
 class MaybeCompile:
     """A decorator class for conditional torch.compile functionality.
@@ -86,6 +91,10 @@ class MaybeCompile:
 
     def _should_compile(self, module_name: str, func_qualname: str) -> bool:
         """Check if a function or method should be compiled."""
+
+        if TARGET_DEVICE != "cuda":
+            return False
+
         # First check if function is explicitly excluded
         target_key = (module_name, func_qualname)
         if target_key in self._excluded_targets:

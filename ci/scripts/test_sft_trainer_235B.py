@@ -28,6 +28,7 @@ from xtuner.v1.loss import CELossContext
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE235BA22Config
 from xtuner.v1.train.trainer import Trainer
 from xtuner.v1.utils.compile import maybe_compile
+from xtuner.v1.utils.device import get_device
 import argparse
 
 QWEN3_MOE_PATH = os.environ["QWEN3_MOE_PATH"]
@@ -227,6 +228,15 @@ def main():
     args = parse_args()
     os.environ["DG_CACHE_DIR"] = f"/tmp/.deep_gemm-{os.getenv('RANK', '0')}"
 
+    if get_device() == "cuda":
+        sp_size = 1
+        torch_compile = True
+    elif get_device() == "npu":
+        sp_size = 2
+        torch_compile = False
+    else:
+        raise NotImplementedError
+
     moe_cfgs = [
         (Qwen3MoE235BA22Config(balancing_loss_cfg=BalancingLossConfig(), z_loss_cfg=ZLossConfig()), "ep1"),
         # (Qwen3MoE235BA22Config(ep_size=8, dispatcher="all2all"), "ep8"),
@@ -245,12 +255,12 @@ def main():
         fsdp_cfg = FSDPConfig(
             cpu_offload=False,
             ep_size=moe_cfg.ep_size,
-            torch_compile=True,
+            torch_compile=torch_compile,
             # hsdp_sharding_size=4,
         )
         dataset_config = [
             {
-                "dataset": DatasetConfig(name="alpaca", anno_path=ALPACA_PATH, sample_ratio=100, cache_dir="/mnt/shared-storage-user/yehaochen/cache/"),
+                "dataset": DatasetConfig(name="alpaca", anno_path=ALPACA_PATH, sample_ratio=100),
                 "tokenize_fn": FTDPTokenizeFnConfig(max_length=4096),
             },
         ]
@@ -269,6 +279,7 @@ def main():
             fsdp_cfg=fsdp_cfg,
             dataset_cfg=dataset_config,
             dataloader_cfg=dataloader_config,
+            sp_size=sp_size,
             loss_ctx=loss_ctx,
             lr_cfg=lr_cfg,
             tokenizer_path=QWEN3_MOE_PATH,

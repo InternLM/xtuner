@@ -21,7 +21,10 @@ def npu_swiglu(fused_x: torch.Tensor, split_dim: int = -1) -> torch.Tensor:
 
 
 def get_swiglu() -> SwigluProtocol:
-    if torch.accelerator.is_available() and torch.accelerator.current_accelerator().type == "npu":
+    from xtuner.v1.utils.device import get_device
+
+    device = get_device()
+    if device == "npu":
         return npu_swiglu
     else:
         return native_swiglu

@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 from torch.autograd.function import Function
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.tensor import DTensor, Partial
+from torch.distributed.tensor import DTensor
 from torch.nn import functional as F
 
 from transformers.activations import ACT2FN
@@ -23,6 +23,7 @@ from xtuner.v1.module.dispatcher import (
 from xtuner.v1.module.dispatcher.base import PostCombineResult
 from xtuner.v1.module.grouped_linear.moe_group_linear import build_grouped_linear
 from xtuner.v1.module.router import GreedyRouter, NoAuxRouter
+from xtuner.v1.ops import swiglu
 from xtuner.v1.utils import ForwardState
 from xtuner.v1.utils.compile import maybe_compile
 
@@ -83,7 +84,7 @@ class MoEGate(nn.Module):
         hidden_states = hidden_states.view(-1, h)
 
         if isinstance(self.weight, DTensor):
-            weight = self.weight.to_local(grad_placements=(Partial("avg"),))
+            weight = self.weight.to_local()
         else:
             weight = self.weight
         logits = F.linear(hidden_states.float(), weight.float(), None)
@@ -127,13 +128,9 @@ class MoEBlock(nn.Module):
     @maybe_compile(fullgraph=True)
     def forward(self, x, tokens_per_expert, decoding):
         gate_up_out = self.fused_w1w3(x, tokens_per_expert, decoding)
-        gate_out, up_out = gate_up_out.chunk(2, dim=-1)
-        # up_out = self.fused_w1(x, tokens_per_expert, decoding)
-        # gate_out = self.fused_w3(x, tokens_per_expert, decoding)
-        gate_out = F.silu(gate_out)
-        out = gate_out * up_out
-
+        out = swiglu(gate_up_out, split_dim=-1)
         res = self.fused_w2(out, tokens_per_expert, decoding)
+
         return res
 
 
