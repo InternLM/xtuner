@@ -46,16 +46,15 @@ class RLTextTokenizeFn(CachableTokenizeFunction[RLTextDataItem]):
         raw_prompt = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
         model_inputs = self.tokenizer(raw_prompt, return_tensors="pt", add_special_tokens=False)
         input_ids = model_inputs.pop("input_ids")[0]
+
         num_tokens = len(input_ids)
         if self.max_length is not None and num_tokens > self.max_length:
             num_tokens = 0  # will be filtered out by the dataset filter
 
         extra_info = item.get("extra_info", {})
-        extra_info["raw_prompt"] = raw_prompt
-
         rl_out_data = {
             # "input_ids": input_ids,
-            "messages": messages,
+            "messages": raw_prompt,
             "num_tokens": num_tokens,
             "reward_model": item["reward_model"],
             "ability": item.get("ability", None),

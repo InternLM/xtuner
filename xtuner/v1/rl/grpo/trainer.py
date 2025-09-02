@@ -223,7 +223,7 @@ class Trainer:
         for rollout_idx in range(1, self._rollout_steps + 1):
             data_groups = ray.get(self._rollout_dataflow.run.remote())
             time.sleep(3)
-            ray.get(self._rollout_env_controller.offload_weights_and_kvcache.remote())
+            ray.get(self._rollout_env_controller.offload.remote())
             trajectory_save_path = self.exp_dir / f"rollout_idx_{rollout_idx}_trajectory.jsonl"
             self._save_trajectories(data_groups, trajectory_save_path)
             self.logger.info(f"rollout_idx {rollout_idx} finished, saved trajectories to {trajectory_save_path}")
@@ -254,10 +254,7 @@ class Trainer:
     def _prepare_train_data(self, data_groups, pack_max_length):
         data_batches = []
         for group in data_groups:
-            prompt = self.tokenizer.apply_chat_template(
-                group[0]["messages"], add_generation_prompt=True, tokenize=False
-            )
-            prompt_ids = self.tokenizer(prompt, return_tensors="pt")["input_ids"].flatten().tolist()
+            prompt_ids = self.tokenizer(group[0]["messages"], return_tensors="pt")["input_ids"].flatten().tolist()
             rewards = [data["reward"] for data in group]
             rewards = torch.tensor(rewards, dtype=torch.float32)
             advantages = (rewards - rewards.mean(0)) / (rewards.std(0) + 1e-8)
