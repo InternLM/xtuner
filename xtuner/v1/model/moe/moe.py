@@ -28,7 +28,7 @@ from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.loss import BalancingLoss, CELossContext, ZLoss
 from xtuner.v1.model.base import BaseModel
-from xtuner.v1.model.utils import checkpoint_wrapper
+from xtuner.v1.model.utils import checkpoint_wrapper, module_dict_repr
 from xtuner.v1.module import LMHead, RMSNorm, RotaryEmbedding
 from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayer
 from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEBlock, MoEDecoderLayer
@@ -493,6 +493,7 @@ class MoE(BaseModel):
                     dispatcher=config.dispatcher,
                     ep_mesh=self.ep_mesh,
                 )
+        layers.__class__.__repr__ = module_dict_repr  # type: ignore[method-assign]
         return layers
 
     def build_rotary_embedding(self, config: MoEConfig) -> RotaryEmbedding:
