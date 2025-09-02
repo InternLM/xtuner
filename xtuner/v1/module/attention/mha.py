@@ -1,6 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 
-from typing import cast, Literal
+from typing import Literal, cast
+
 import torch
 from torch import nn
 
