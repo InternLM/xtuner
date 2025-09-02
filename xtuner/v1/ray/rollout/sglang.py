@@ -1,5 +1,5 @@
 import os
-from typing import Dict, List
+from typing import Any, Dict, List, Union
 
 import ray
 from sglang.srt.entrypoints.http_server import launch_server
@@ -31,7 +31,7 @@ class SGLangWorker(RolloutWorker):
     async def _create_request(
         self,
         url: str,
-        prompt: List[Dict[str, str]],
+        prompt: Union[str, List[Dict[str, Any]]],
         tools: List,
         tool_choice: str,
         sample_params: dict,

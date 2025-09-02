@@ -97,8 +97,5 @@ class BaseEnvironment(ABC):
     def onload_kvcache(self, block=True):
         return self._call_rollout_func("onload_kvcache", block)
 
-    def offload_weights(self, block=True):
-        return self._call_rollout_func("offload_weights", block)
-
-    def offload_weights_and_kvcache(self, block=True):
-        return self._call_rollout_func("offload_weights_and_kvcache", block)
+    def offload(self, block=True):
+        return self._call_rollout_func("offload", block)

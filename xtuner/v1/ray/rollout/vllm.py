@@ -1,5 +1,5 @@
 from argparse import Namespace
-from typing import Dict, List
+from typing import Any, Dict, List, Union
 
 import ray
 import uvloop
@@ -41,7 +41,7 @@ class vLLMWorker(RolloutWorker):
     async def _create_request(
         self,
         url: str,
-        prompt: List[Dict[str, str]],
+        prompt: Union[str, List[Dict[str, Any]]],
         tools: List,  # reserved for agent tool use
         tool_choice: str,  # reserved for agent tool use
         sample_params: dict,
@@ -52,7 +52,7 @@ class vLLMWorker(RolloutWorker):
             "Authorization": f"Bearer {self.api_keys}",  # 如果需要鉴权
         }
         payload = {
-            "model": self.config.model_name,
+            "model": self.config.model_path,
             "messages": prompt,
             "stream": True,
         }

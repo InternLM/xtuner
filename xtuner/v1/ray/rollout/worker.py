@@ -1,9 +1,10 @@
+import copy
 import json
 import multiprocessing
 import time
 import uuid
 from abc import abstractmethod
-from typing import Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Union
 
 import httpx
 import ray
@@ -64,7 +65,7 @@ class RolloutWorker(SingleAcceleratorWorker):
         server_configs = self._transform_rollout_config_to_server_configs()
         timeout = 3600.0  # Increased timeout to 5 minutes for downloading large models
         start_time = time.perf_counter()
-
+        last_log_time = start_time
         headers = {
             "Content-Type": "application/json; charset=utf-8",
             "Authorization": f"Bearer {server_configs.api_key}",
@@ -90,6 +91,14 @@ class RolloutWorker(SingleAcceleratorWorker):
                         self.logger.error(
                             f"can't connect to server url {self.server_url}/{self.endpoints['health_generate']} because {e}"
                         )
+
+                    current_time = time.perf_counter()
+                    if current_time - last_log_time >= 15:
+                        self.logger.info(
+                            f"Still waiting for server to start... Elapsed time: {current_time - start_time:.2f}s"
+                        )
+                        last_log_time = current_time
+
                     time.sleep(5)
             process.terminate()
             raise TimeoutError("Server failed to start within the timeout period.")
@@ -131,7 +140,13 @@ class RolloutWorker(SingleAcceleratorWorker):
                     except Exception as e:
                         raise e
 
-                    time.sleep(2)
+                    current_time = time.perf_counter()
+                    if current_time - last_log_time >= 15:
+                        self.logger.info(
+                            f"Still waiting for server to start... Elapsed time: {current_time - start_time:.2f}s"
+                        )
+                        last_log_time = current_time
+
             ray.cancel(self.server_task)
             raise TimeoutError("Server failed to start within the timeout period.")
 
@@ -140,21 +155,27 @@ class RolloutWorker(SingleAcceleratorWorker):
         openai_tools = []
         # transform claude spec to openai spec
         # 1. transform system prompt: concat provided system_prompt to input prompt
-        system_prompt = self.config.sample_params.pop("system", None)
+        system_prompt = self.config.system_prompt
         if system_prompt:
             system_prompt_json = {"role": "system", "content": f"{system_prompt}"}
             prompts.insert(0, system_prompt_json)
         # 2. transform multi-modal usage
         for prompt in prompts:
-            if prompt["type"] == "image":
-                if prompt["source"]["type"] == "base64":
-                    openai_url = f"data:{prompt['source']['media_type']};base64,{prompt['source']['data']}"
-                if prompt["source"]["type"] == "url":
-                    openai_url = prompt["source"]["url"]
-                new_prompt = {"type": "image_url", "image_url": {"url": openai_url}}
-                openai_prompts.append(new_prompt)
-            else:
-                openai_prompts.append(prompt)
+            content = prompt["content"]
+            openai_content = []
+            for item in content:
+                if item["type"] == "image":
+                    if item["source"]["type"] == "base64":
+                        openai_url = f"data:{item['source']['media_type']};base64,{item['source']['data']}"
+                    if item["source"]["type"] == "url":
+                        openai_url = item["source"]["url"]
+                    new_prompt = {"type": "image_url", "image_url": {"url": openai_url}}
+                    openai_content.append(new_prompt)
+                elif item["type"] == "text":
+                    openai_content.append(item)
+            new_prompt = copy.deepcopy(prompt)
+            new_prompt["content"] = openai_content
+            openai_prompts.append(new_prompt)
         # 3. transform tool use
         for tool in tools:
             openai_tool = {
@@ -170,7 +191,7 @@ class RolloutWorker(SingleAcceleratorWorker):
 
     async def rollout_task(
         self,
-        prompts: List[Dict[str, str]],
+        prompts: Union[str, List[Dict[str, Any]]],
         tools: List,
         tool_choice: str,
         sample_params: dict,
@@ -236,7 +257,7 @@ class RolloutWorker(SingleAcceleratorWorker):
 
     async def rollout(
         self,
-        prompt: List[Dict[str, str]],
+        prompt: Union[str, List[Dict[str, Any]]],
         tools: List = [],
         tool_choice: str = "auto",
         sample_params: dict = dict(),
@@ -277,7 +298,7 @@ class RolloutWorker(SingleAcceleratorWorker):
     async def _create_request(
         self,
         url: str,
-        prompt: List[Dict[str, str]],
+        prompt: Union[str, List[Dict[str, Any]]],
         tools: List,
         tool_choice: str,
         sample_params: dict,
@@ -303,11 +324,7 @@ class RolloutWorker(SingleAcceleratorWorker):
         pass
 
     @abstractmethod
-    def offload_weights(self):
-        pass
-
-    @abstractmethod
-    def offload_weights_and_kvcache(self):
+    def offload(self):
         pass
 
     @abstractmethod

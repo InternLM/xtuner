@@ -1,6 +1,6 @@
 import os
 from argparse import Namespace
-from typing import Dict, List
+from typing import Any, Dict, List, Union
 
 import ray
 import requests
@@ -49,7 +49,7 @@ class LMDeployWorker(RolloutWorker):
     async def _create_request(
         self,
         url: str,
-        prompt: List[Dict[str, str]],
+        prompt: Union[str, List[Dict[str, Any]]],
         tools: List,  # reserved for agent tool use
         tool_choice: str,  # reserved for agent tool use
         sample_params: dict,
@@ -83,7 +83,7 @@ class LMDeployWorker(RolloutWorker):
     def generate(self, input_ids, sampling_params):
         pass
 
-    def sleep(self, level: int = 1):
+    def _sleep(self, level: int = 1):
         url = f"{self.server_url}/{self.endpoints['sleep']}"
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {self.api_keys}"}
         data = {"level": level}
@@ -91,11 +91,8 @@ class LMDeployWorker(RolloutWorker):
         assert response.status_code == 200, response.status_code
         return response.text
 
-    def offload_weights(self):
-        return self.sleep(level=1)
-
-    def offload_weights_and_kvcache(self):
-        return self.sleep(level=2)
+    def offload(self):
+        return self._sleep(level=2)
 
     def wake_up(self, tags: List[str] | None = None):
         url = f"{self.server_url}/{self.endpoints['wake_up']}"
@@ -118,11 +115,9 @@ class LMDeployWorker(RolloutWorker):
         pass
 
     def update_weights(self, ipc_handles):
-        # todo
         pass
 
     def reset_prefix_cache(self):
-        # todo
         pass
 
     def _transform_rollout_config_to_server_configs(self) -> Namespace:

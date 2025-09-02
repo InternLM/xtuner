@@ -115,6 +115,25 @@ class TestJudgerController(unittest.TestCase):
         verl_score = 0.2418
         self.assertLessEqual(float(np.abs(avg_score - verl_score)), 0.001)
 
+    def test_gsm8k_remote_judger(self):
+        from xtuner.v1.utils.rl_test_utils import JudgerServer, GSM8KRemoteJudgerConfig
+
+        server = JudgerServer(port=8018) 
+        server.start()
+
+        remote_judger_config = GSM8KRemoteJudgerConfig(remote_url=server.url)
+        judger_cfg = JudgerConfig(
+            reward_judger_configs={"openai/gsm8k": remote_judger_config}
+        )
+        judger_controller = JudgerController.remote(judger_cfg)
+        judger_data = construct_judger_data(VERL_ROLLOUT_DATA_PATH)
+        group_data = ray.get(judger_controller.run.remote(judger_data))
+
+        reward = [data["reward"] for data in group_data]
+        avg_score = np.mean(reward)
+        verl_score = 0.2418
+        self.assertLessEqual(float(np.abs(avg_score - verl_score)), 0.001)
+
     def tearDown(self):
         ray.shutdown()
     

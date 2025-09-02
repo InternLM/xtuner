@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import ray
 from cyclopts import Parameter
@@ -94,7 +94,7 @@ class RolloutController:
 
     async def rollout(
         self,
-        prompt: List[str],
+        prompt: Union[str, List[Dict[str, Any]]],
         tools: List = [],
         tool_choice: str = "auto",
         sample_params: Optional[SampleParams] = None,
@@ -153,11 +153,8 @@ class RolloutController:
     def reset_prefix_cache(self, block=True):
         return self._broadcast_to_active_workers("reset_prefix_cache", block)
 
-    def offload_weights(self, block=True):
-        return self._broadcast_to_active_workers("offload_weights", block)
-
-    def offload_weights_and_kvcache(self, block=True):
-        return self._broadcast_to_active_workers("offload_weights_and_kvcache", block)
+    def offload(self, block=True):
+        return self._broadcast_to_active_workers("offload", block)
 
     def onload_weights(self, block=True):
         return self._broadcast_to_active_workers("onload_weights", block)

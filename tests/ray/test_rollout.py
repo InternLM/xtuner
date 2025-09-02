@@ -17,6 +17,7 @@ from xtuner.v1.config import (
     DatasetConfig,
 )
 
+TEST_TEXT_MESSAGES=[{"role": "user", "content": "Hello!"}]
 MODEL_PATH = os.environ["ROLLOUT_MODEL_PATH"]
 TRAIN_DATA_PATH = os.environ["ROLLOUT_DATA_PATH"]
 TEST_DATA_PATH = os.environ["ROLLOUT_TEST_DATA_PATH"]
@@ -84,7 +85,22 @@ class TestRollout(unittest.TestCase):
         ray.shutdown()
 
     @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
-    def test_lmdeploy_backend(self):
+    def test_lmdeploy_generate(self):
+        from xtuner.v1.ray.rollout import SampleParams, LMDeployWorker
+        rollout_workers_map = AutoAcceleratorWorkers.from_placement_group(
+            LMDeployWorker, self.rollout_cfg, self.pg
+        )
+        sample_params = SampleParams(temperature=0.0)
+        rollout_controller = RolloutController.remote(self.rollout_cfg, rollout_workers_map)  # type: ignore[attr-defined]
+        new_prompt = self.tokenizer.apply_chat_template(TEST_TEXT_MESSAGES, add_generation_prompt=True, tokenize=False)
+        ref1 = rollout_controller.rollout.remote(prompt=[new_prompt], sample_params=sample_params)
+        ref2 = rollout_controller.rollout.remote(prompt=[new_prompt], sample_params=sample_params)
+        results = ray.get([ref1, ref2])
+        self.assertEqual(results[0], results[1], f"results[0] != results[1], results[0]={results[0]}, results[1]={results[1]}")
+        ray.get(rollout_controller.shutdown.remote(), timeout=300)
+
+    @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
+    def test_lmdeploy_dataflow(self):
         self.dataflow_cfg.enable_partial_rollout = 0
         self.test_env = SingleTurnEnvironment.remote(
             "test_env",
@@ -97,12 +113,12 @@ class TestRollout(unittest.TestCase):
                                          self.test_env
                                         )
         responses = ray.get(self.test_flow.run.remote(), timeout=300)
-        dataflow_state = ray.get(self.test_flow.state.remote(), timeout=300)
-        self.assertEqual(len(responses), self.dataflow_cfg.global_batch_size)
+        finished_samples_count = sum(1 for data in responses for item in data if item.get("state") == "finished")
+        self.assertEqual(finished_samples_count // self.dataflow_cfg.prompt_repeat_k, self.dataflow_cfg.global_batch_size)
         ray.get(self.test_env.shutdown.remote(), timeout=300)
         
     @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
-    def test_lmdeploy_async_backend(self):
+    def test_lmdeploy_async_dataflow(self):
         self.dataflow_cfg.enable_partial_rollout = 1
         self.test_env = SingleTurnEnvironment.remote(
             "test_env",
@@ -115,8 +131,8 @@ class TestRollout(unittest.TestCase):
                                          self.test_env
                                         )
         responses = ray.get(self.test_flow.run.remote(), timeout=300)
-        dataflow_state = ray.get(self.test_flow.state.remote(), timeout=300)
-        self.assertEqual(len(responses), self.dataflow_cfg.global_batch_size)
+        finished_samples_count = sum(1 for data in responses for item in data if item.get("state") == "finished")
+        self.assertEqual(finished_samples_count // self.dataflow_cfg.prompt_repeat_k, self.dataflow_cfg.global_batch_size)
         ray.get(self.test_env.shutdown.remote())
 
 if __name__ == "__main__":

@@ -5,7 +5,6 @@ from asyncio import AbstractEventLoop, Task
 from typing import TYPE_CHECKING, Callable, Coroutine, List, Optional, cast
 
 import ray
-import torch
 
 
 if TYPE_CHECKING:
@@ -15,8 +14,10 @@ if TYPE_CHECKING:
 
 
 def get_ray_accelerator() -> "AcceleratorType":
+    from xtuner.v1.utils.device import get_device
+
     accelerator = None
-    if torch.cuda.is_available():
+    if get_device() == "cuda":
         accelerator = "GPU"
         return "GPU"
     else:
