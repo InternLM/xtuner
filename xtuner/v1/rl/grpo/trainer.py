@@ -17,7 +17,6 @@ from ray.actor import ActorClass
 from typing_extensions import NotRequired, TypedDict
 
 from transformers import AutoTokenizer
-from xtuner.v1.utils.device import get_device, get_torch_device_module
 from xtuner.v1.config.trainer import ResumeConfig
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.ray.accelerator import AcceleratorResourcesConfig, AutoAcceleratorWorkers
@@ -36,6 +35,7 @@ from xtuner.v1.utils import (
     log_format,
     record_git_info,
 )
+from xtuner.v1.utils.device import get_device, get_torch_device_module
 
 
 # TODO: Move DEVICE to `xtuner.utils.device`

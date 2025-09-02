@@ -66,8 +66,7 @@ class TrainingArguments(BaseModel):
     ] = "cosine"
     warmup_ratio: Annotated[float, Parameter(group=lr_scheduler_group, help="warmup ratio")] = 0.03
     # loss
-    loss_config: Annotated[CELossConfig, Parameter(group=loss_group, help="loss configuration")] \
-        = CELossConfig()
+    loss_config: Annotated[CELossConfig, Parameter(group=loss_group, help="loss configuration")] = CELossConfig()
     # training
     total_step: Annotated[int | None, Parameter(group=training_group, help="total training steps")] = None
     epoch_num: Annotated[int | None, Parameter(group=training_group, help="number of epochs")] = None
