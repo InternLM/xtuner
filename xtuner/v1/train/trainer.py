@@ -31,6 +31,7 @@ from xtuner.v1.loss import CELossConfig
 from xtuner.v1.loss.ce_loss import CELossContextInputItem
 from xtuner.v1.model import InternS1BaseConfig
 from xtuner.v1.model.base import ModelItem
+from xtuner.v1.model.interns1 import InternS1BaseConfig
 from xtuner.v1.profiler import profilling_memory, profilling_time
 from xtuner.v1.utils import (
     XTUNER_DETERMINISTIC,
