@@ -58,6 +58,57 @@ sft_trainer_check_metric:
       done 
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event" && ($CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "main" || $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "refactor")
+
+# Yidian集群SFT训练任务
+sft_trainer_yidian:
+  tags:
+    - yidian_a3  # 使用yidian专用runner
+  stage: sft_test
+  needs: []
+  allow_failure: false
+  script:
+    - unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
+    - command="printenv; torchrun --nproc-per-node 16 --master_addr=\${MASTER_ADDR} --master_port=\${MASTER_PORT} --nnodes=\${WORLD_SIZE} --node_rank=\${RANK} ci/scripts/test_sft_trainer.py ../${CI_JOB_NAME}_${CI_JOB_ID}"
+    - python ci/scripts/run_yidian.py "$YIDIAN_IMAGE" "$YIDIAN_ENV" "$command" --nodes 1
+    - |
+      dirs=( ../${CI_JOB_NAME}_${CI_JOB_ID}*/ )
+      for dir in "${dirs[@]}"; do
+          dir_name="${dir%/}"
+          rsync -av --exclude='ckpt-*' --exclude='hf-*' $dir_name ./
+      done 
+    - work_dir=${CI_JOB_NAME}_${CI_JOB_ID} && echo "work_dir=$work_dir" >> variables_yidian.env 
+    - run_py="ci/scripts/test_sft_trainer.py" && echo "run_py=$run_py" >> variables_yidian.env
+  artifacts:
+    paths:
+      - ./${CI_JOB_NAME}_${CI_JOB_ID}*
+    reports:
+      dotenv: variables_yidian.env
+    expire_in: 1 week
+    when: always
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event" && ($CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "main" || $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "refactor")
+
+# Yidian集群metric检查任务
+sft_trainer_yidian_check_metric:
+  tags:
+    - yidian_a3
+  stage: check_metric
+  needs:
+    - job: sft_trainer_yidian
+      artifacts: true
+  allow_failure: true
+  script:
+    - export PYTHONPYCACHEPREFIX=/tmp
+    - |
+      dirs=( $work_dir*/ )
+      for dir in "${dirs[@]}"; do
+          dir_name="${dir%/}"
+          rank0_log=( $dir_name/*/rank0.log )
+          echo "beginning check $rank0_log"
+          python ./ci/scripts/check_metric.py $rank0_log $run_py --check_metric '{"reduced_llm_loss":0.01,"grad_norm":0.02}'
+      done 
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event" && ($CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "main" || $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "refactor")
       changes:
         - "xtuner/**/*"
         - "ci/workflow/sft.yaml"
