@@ -22,15 +22,14 @@ from typing_extensions import NotRequired, Self, TypedDict
 
 from transformers import AutoTokenizer
 from transformers.tokenization_utils import PreTrainedTokenizer
-from xtuner.utils.device import get_device, get_torch_device
 from xtuner.v1.config import DataloaderConfig, DatasetConfigList, FSDPConfig, LRConfig, OptimConfig
 from xtuner.v1.config.base_model import TransformerConfig
 from xtuner.v1.config.trainer import ResumeConfig, TrainerConfig
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.datasets.build import build_dataloader, build_datasets
-from xtuner.v1.model.interns1 import InternS1BaseConfig
 from xtuner.v1.loss import CELossConfig
 from xtuner.v1.loss.ce_loss import CELossContextInputItem
+from xtuner.v1.model import InternS1BaseConfig
 from xtuner.v1.model.base import ModelItem
 from xtuner.v1.profiler import profilling_memory, profilling_time
 from xtuner.v1.utils import (
@@ -41,13 +40,14 @@ from xtuner.v1.utils import (
     log_format,
     record_git_info,
 )
+from xtuner.v1.utils.device import get_device, get_torch_device_module
 
 from .toy_tokenizer import UTF8ByteTokenizer
 
 
 # TODO: Move DEVICE to `xtuner.utils.device`
 DEVICE = get_device()
-DEVICE_MODULE = get_torch_device()
+DEVICE_MODULE = get_torch_device_module()
 
 
 logger = get_logger()

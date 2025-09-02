@@ -4,7 +4,7 @@ import torch
 
 from functools import partial
 
-# TODO: 等 interns1 合入后全部换成 interns1 的实现
+# TODO: 等 intern-s1 合入后全部换成 interns1 的实现
 try:
     from transformers.models.internvl.modeling_internvl import ACT2FN
 except:
@@ -13,7 +13,7 @@ except:
 from xtuner.v1.utils import get_device, get_torch_device_module, init_params
 from xtuner.v1.model import BaseModel
 from xtuner.v1.config import FSDPConfig
-from .interns1_config import InternS1ProjectorConfig
+from .intern_s1_config import InternS1ProjectorConfig
 from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.utils.compile import maybe_compile
 from torch.distributed.fsdp import (

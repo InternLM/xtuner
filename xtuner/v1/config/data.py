@@ -66,14 +66,18 @@ class BaseTokenizeFnConfig(Protocol):
 
 class DataloaderConfig(BaseModel):
     model_config = ConfigDict(title="Base dataloader config for xtuner", extra="allow")
-    collator: Literal["sft_llm_collator", "sft_vllm_collator", "fake_collator"] = "sft_llm_collator"
-    pack_level: Annotated[str, Parameter()] = "soft"  # TODO: (huanghaian) Only provide 1 pad level
-    pack_max_length: Annotated[int, Parameter()] = 32768
-    global_pack: Annotated[bool, Parameter()] = True
-    group_by_length: Annotated[bool, Parameter()] = True
-    pack_extra_buffer_size: Annotated[int, Parameter()] = 100
-    num_workers: Annotated[int, Parameter()] = 0
-    pad_token_id: Annotated[int | None, Parameter()] = None
+    collator: Annotated[
+        Literal["sft_llm_collator", "sft_vllm_collator", "fake_collator"], Parameter(help="collator func name")
+    ] = "sft_llm_collator"
+    pack_level: Annotated[Literal["soft", "expand_soft", "none"], Parameter(help="pack mode")] = "soft"
+    pack_max_length: Annotated[int, Parameter(help="pack max length")] = 32768
+    global_pack: Annotated[bool, Parameter(help="enable or disable global pack mode")] = True
+    group_by_length: Annotated[bool, Parameter(help="enable or disable group by length mode")] = True
+    pack_extra_buffer_size: Annotated[
+        int, Parameter(help="pack extra buffer size when pack_level is expand_soft model")
+    ] = 100
+    num_workers: Annotated[int, Parameter(help="dataloader num workers")] = 0
+    pad_token_id: Annotated[int | None, Parameter(help="padding token id")] = None
 
     def build_collator(self):
         from xtuner.v1.datasets import fake_collator, sft_llm_collator, sft_vllm_collator

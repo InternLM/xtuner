@@ -110,7 +110,7 @@ def build_transform(is_train, input_size, pad2square=False, normalize_type="imag
     return transform
 
 
-def preprocess_interns1(
+def preprocess_intern_s1(
     sources,
     tokenizer: transformers.PreTrainedTokenizer,
     num_image_token_list: list,

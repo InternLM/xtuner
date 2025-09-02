@@ -6,12 +6,17 @@ from xtuner.v1.config import (
     TrainerConfig,
 )
 from xtuner.v1.datasets import InternS1TokenizeFnConfig
-from xtuner.v1.model.dense.qwen3 import Qwen3Dense8BConfig
-from xtuner.v1.model.interns1 import InternS1MiniConfig
+from xtuner.v1.model import Qwen3Dense8BConfig, InternS1MiniConfig
 from xtuner.v1.loss import CELossConfig
 
 # model config
-model_cfg = InternS1MiniConfig()  # fake tokenizer vocab size for tiny model
+text_cfg = Qwen3Dense8BConfig(num_hidden_layers=8,
+                              hidden_size=1024,
+                              intermediate_size=4096,
+                              vocab_size=300)
+model_cfg = InternS1MiniConfig(text_config=text_cfg,
+                               # xtuner/v1/train/toy_tokenizer.py
+                               image_token_id=260)  # fake tokenizer vocab size for tiny model
 
 # dataset and dataloader config
 sample_max_length = 4096

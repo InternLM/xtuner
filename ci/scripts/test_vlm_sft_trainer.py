@@ -14,7 +14,7 @@ from xtuner.v1.config import (
     LRConfig
 )
 from xtuner.v1.datasets import InternS1TokenizeFnConfig
-from xtuner.v1.model.interns1 import InternS1MiniConfig
+from xtuner.v1.model import InternS1MiniConfig
 from xtuner.v1.loss import CELossContext
 from xtuner.v1.train.trainer import Trainer
 from xtuner.v1.utils.compile import maybe_compile

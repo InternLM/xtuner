@@ -16,7 +16,7 @@ from xtuner.v1.config import FSDPConfig, LRConfig, AdamWConfig
 from xtuner.v1.engine.train_engine import TrainEngine
 from torch.optim.lr_scheduler import LambdaLR
 from xtuner.v1.utils import pad_to_max_length
-from xtuner.utils.device import get_device
+from xtuner.v1.utils.device import get_device
 from xtuner.v1.utils.test_utils import init_data_mesh
 
 

@@ -9,7 +9,6 @@ __all__ = [
     "ZLoss",
     "CELossContext",
     "CELossConfig",
-    "LigerFusedLinearCrossEntropyLossWithWeights",
     "ChunkLoss",
     "BaseLossConfig",
     "BaseLossContext",

@@ -1,9 +1,8 @@
 import torch
 from typing_extensions import TypedDict
 
-from xtuner.utils import IGNORE_INDEX
 from xtuner.v1.data_proto import SequenceContext
-from xtuner.v1.utils import get_logger
+from xtuner.v1.utils import IGNORE_INDEX, get_logger
 from xtuner.v1.utils.pad import pad_to_max_length
 
 from .data_item import DataItem, InternS1DataItem

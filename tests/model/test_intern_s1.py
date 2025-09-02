@@ -9,16 +9,16 @@ import tempfile
 from pathlib import Path
 import json
 from safetensors import safe_open
+from PIL import Image
 
-from xtuner.v1.model.interns1 import InternS1MiniConfig
+from xtuner.v1.model import InternS1MiniConfig
 from xtuner.v1.loss.ce_loss import CELossConfig, CELossContextInputItem
 from xtuner.v1.model.moe.moe import SequenceContext
-from xtuner.v1.model.dense.qwen3 import Qwen3Dense8BConfig
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.utils.compile import maybe_compile
-from xtuner.v1.datasets.interns1_fn.process import build_transform,  dynamic_preprocess, preprocess_interns1
+from xtuner.v1.datasets.intern_s1_fn.process import build_transform,  dynamic_preprocess, preprocess_intern_s1
 from xtuner.v1.utils.test_utils import init_data_mesh
-from PIL import Image
+
 
 # Intern-S1-mini
 INTERNS1_DENSE_PATH = os.environ["INTERNS1_DENSE_PATH"]
@@ -144,7 +144,7 @@ class TestInternS1(DistributedTestBase):
         # Ensure that there is only one patch if dynamic image size is not enabled
         num_patches = pixel_values.size(0)
 
-        ret = preprocess_interns1(
+        ret = preprocess_intern_s1(
             [conversations],
             tokenizer,
             [256 * num_patches]
@@ -342,7 +342,7 @@ class TestInternS1(DistributedTestBase):
         # Ensure that there is only one patch if dynamic image size is not enabled
         num_patches = pixel_values.size(0)
 
-        ret = preprocess_interns1(
+        ret = preprocess_intern_s1(
             [conversations],
             tokenizer,
             [256 * num_patches]

@@ -1,4 +1,4 @@
-from xtuner.v1.model.interns1 import InternS1MiniConfig
+from xtuner.v1.model import InternS1MiniConfig
 from xtuner.v1.config import TrainerConfig
 from xtuner.v1.config import (
     AdamWConfig,

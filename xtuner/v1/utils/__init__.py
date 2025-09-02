@@ -14,6 +14,8 @@ from .state import ForwardState
 from .type_helper import copy_method_signature, copy_signature
 
 
+IGNORE_INDEX = -100
+
 __all__ = [
     "get_logger",
     "SharedMemory",
@@ -38,4 +40,5 @@ __all__ = [
     "copy_method_signature",
     "init_params",
     "default_init_weights",
+    "IGNORE_INDEX",
 ]

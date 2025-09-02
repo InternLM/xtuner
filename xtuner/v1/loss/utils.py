@@ -4,8 +4,8 @@ import torch
 from mmengine.dist import dist
 from torch.distributed.device_mesh import DeviceMesh
 
-from xtuner.utils.device import get_device
 from xtuner.v1.data_proto.utils import pad_to_multiple_of, split_for_sequence_parallel
+from xtuner.v1.utils.device import get_device
 
 
 DEVICE = get_device()

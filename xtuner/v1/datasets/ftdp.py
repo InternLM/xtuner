@@ -7,9 +7,8 @@ from typing import TYPE_CHECKING, Annotated, Dict, List, cast
 from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict
 
-from xtuner.utils import IGNORE_INDEX
 from xtuner.v1.datasets.data_item import DataItem
-from xtuner.v1.utils import get_logger
+from xtuner.v1.utils import IGNORE_INDEX, get_logger
 
 from .utils import CachableTokenizeFunction, tokenizer_xxhash
 

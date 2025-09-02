@@ -2,6 +2,7 @@
    :maxdepth: 1
    :caption: 微调与预训练
 
-   trainer.md
+   llm_trainer.md
+   mllm_trainer.md
    config.md
    dataset.md

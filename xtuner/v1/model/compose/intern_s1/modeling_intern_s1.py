@@ -1,8 +1,6 @@
 import types
 from typing import cast, Callable
-from typing_extensions import override
 from pathlib import Path
-from functools import partial
 
 import torch
 import torch.distributed as dist
@@ -18,7 +16,7 @@ from .modeling_vision import InternS1VisionModel, init_world_mesh
 from .modeling_projector import InternS1MultiModalProjector
 from typing_extensions import override
 from xtuner.v1.config import FSDPConfig
-from .interns1_config import InternS1BaseConfig
+from .intern_s1_config import InternS1BaseConfig
 from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.loss import CELossContext
 from torch.distributed.fsdp import (
@@ -26,8 +24,6 @@ from torch.distributed.fsdp import (
     MixedPrecisionPolicy,
     fully_shard,
 )
-from xtuner.v1.model.utils import checkpoint_wrapper
-from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl
 
 DEVICE = get_device()
 logger = get_logger()
