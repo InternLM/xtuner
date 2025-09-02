@@ -103,5 +103,5 @@ torchrun --nproc-per-node 8  xtuner/v1/train/cli/sft.py  --load-from <模型路�
 ```{hint}
 想进一步了解更多训练参数和配置选项？不妨来看看这些教程:
 - [配置文件启动训练](../pretrain_sft/tutorial/config.md)
-- [Python 代码启动训练]。(../pretrain_sft/tutorial/trainer.md)。
+- [Python 代码启动训练]。(../pretrain_sft/tutorial/llm_trainer.md)。
 ```

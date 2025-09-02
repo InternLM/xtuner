@@ -1,10 +1,11 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from abc import ABC, abstractmethod
-from typing import Generic, Literal, TypeVar
+from typing import Annotated, Generic, Literal, TypeVar
 
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.nn.functional import all_reduce
@@ -44,7 +45,7 @@ from .chunk_loss import ChunkLoss
 class BaseLossKwargs(BaseModel):
     """Everything needed to compute the loss."""
 
-    model_config = ConfigDict(title="RL loss keyword arguments", extra="allow", arbitrary_types_allowed=True)
+    model_config = ConfigDict(title="loss keyword arguments", extra="allow", arbitrary_types_allowed=True)
     shifted_labels: torch.Tensor
 
     def chunk(self, chunk_size) -> list["BaseLossKwargs"]:
@@ -67,9 +68,9 @@ class BaseLossKwargs(BaseModel):
 
 class BaseLossConfig(BaseModel):
     model_config = {"arbitrary_types_allowed": True}
-    ignore_idx: int = -100
-    mode: Literal["eager", "chunk"] = "eager"
-    chunk_size: int | None = None
+    ignore_idx: Annotated[int, Parameter(help="ignore index for loss calculation")] = -100
+    mode: Annotated[Literal["eager", "chunk"], Parameter(help="loss calculation mode")] = "eager"
+    chunk_size: Annotated[int | None, Parameter(help="chunk size when mode is chunk")] = None
 
     @property
     def loss_ctx_cls(self) -> type["BaseLossContext"]:
@@ -139,7 +140,7 @@ class BaseLossContext(nn.Module, ABC, Generic[LossContextInputItem]):
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         assert self.loss_kwargs is not None, "loss_kwargs must be set before calling forward"
         if head_bias is not None:
-            raise NotImplementedError("RL Loss does not support head_bias yet.")
+            raise NotImplementedError("Loss does not support head_bias yet.")
 
         if self.loss_cfg.mode == "eager":
             loss, logits = self.eager_mode(hidden_states, head_weight, head_bias, self.loss_kwargs)

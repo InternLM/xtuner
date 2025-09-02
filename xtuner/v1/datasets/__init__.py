@@ -1,7 +1,7 @@
 from .build import build_dataloader, build_datasets
 from .collator import fake_collator, sft_llm_collator, sft_vllm_collator
 from .ftdp import FTDPTokenizeFnConfig, FtdpTokenizeFunction
-from .interns1_fn.tokenizer_fn import InternS1TokenizeFnConfig, InternS1TokenizeFunction
+from .intern_s1_fn.tokenizer_fn import InternS1TokenizeFnConfig, InternS1TokenizeFunction
 from .jsonl import JsonlDataset
 from .packing import ExpandSoftPackDataset, SoftPackDataset
 from .rl_tokenize_fn import RLTextTokenizeFnConfig

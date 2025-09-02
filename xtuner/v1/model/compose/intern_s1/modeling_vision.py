@@ -5,7 +5,7 @@ from typing import cast, Union, Optional
 from typing_extensions import override
 import numpy as np
 
-# TODO: 等 interns1 合入后全部换成 interns1 的实现
+# TODO: 等 intern-s1 合入后全部换成 interns1 的实现
 try:
     from transformers.models.internvl.modeling_internvl import InternVLVisionRMSNorm, \
         InternVLVisionEmbeddings, InternVLVisionMLP, NORM2FN
@@ -27,7 +27,7 @@ from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_device, get_torch_device_m
 from xtuner.v1.model import BaseModel
 from xtuner.v1.module import RMSNorm
 from xtuner.v1.config import FSDPConfig
-from .interns1_config import InternS1VisionConfig
+from .intern_s1_config import InternS1VisionConfig
 from xtuner.v1.float8.float8_handler import Float8Handler
 from torch.distributed.device_mesh import init_device_mesh
 import torch.distributed as dist

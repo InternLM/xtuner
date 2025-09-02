@@ -9,7 +9,7 @@ from xtuner.v1.model.moe.qwen3 import Qwen3MoE235BA22Config
 
 
 if TYPE_CHECKING:
-    from xtuner.v1.model.interns1.modeling_interns1 import InternS1ForConditionalGeneration
+    from .modeling_intern_s1 import InternS1ForConditionalGeneration
 
 
 class InternS1VisionConfig(BaseModel):
@@ -29,7 +29,7 @@ class InternS1VisionConfig(BaseModel):
     norm_type: str = "layer_norm"
     layer_norm_eps: float = 1e-6
     dropout: float = 0.0
-    drop_path_rate: float = 0.1
+    drop_path_rate: float = 0.0
     attention_bias: bool = True
     attention_dropout: float = 0.0
     initializer_range: float = 0.02
@@ -43,7 +43,7 @@ class InternS1VisionConfig(BaseModel):
     float8_cfg: Optional["Float8Config"] = None
 
     def build(self):
-        from xtuner.v1.model.interns1.modeling_vision import InternS1VisionModel
+        from .modeling_vision import InternS1VisionModel
 
         return InternS1VisionModel(self)
 
@@ -55,7 +55,7 @@ class InternS1ProjectorConfig(BaseModel):
     float8_cfg: Optional["Float8Config"] = None
 
     def build(self):
-        from xtuner.v1.model.interns1.modeling_projector import InternS1MultiModalProjector
+        from .modeling_projector import InternS1MultiModalProjector
 
         return InternS1MultiModalProjector(self)
 
@@ -82,7 +82,7 @@ class InternS1BaseConfig(BaseModel):
     freeze_language: bool = False
 
     def build(self) -> "InternS1ForConditionalGeneration":
-        from xtuner.v1.model.interns1.modeling_interns1 import InternS1ForConditionalGeneration
+        from .modeling_intern_s1 import InternS1ForConditionalGeneration
 
         return InternS1ForConditionalGeneration(self)
 
@@ -98,6 +98,6 @@ class InternS1Config(InternS1BaseConfig):
 
 
 class InternS1MiniConfig(InternS1BaseConfig):
-    vision_config: InternS1VisionConfig = InternS1VisionConfig(drop_path_rate=0)
+    vision_config: InternS1VisionConfig = InternS1VisionConfig()
     projector_config: InternS1ProjectorConfig = InternS1ProjectorConfig()
     text_config: Qwen3Dense8BConfig = Qwen3Dense8BConfig(vocab_size=153216)

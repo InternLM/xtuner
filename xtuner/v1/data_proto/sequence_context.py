@@ -36,7 +36,7 @@ class SequenceContext:
     device: str | torch.device = "cpu"  # TODO: 这个地方有点乱，到处是 device
     position_ids: torch.LongTensor | None = None
 
-    # internS1
+    # Intern-S1
     image_flags: torch.LongTensor | None = None
 
     # vllm model

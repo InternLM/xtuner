@@ -9,7 +9,7 @@ from xtuner.v1.engine.train_engine import TrainEngine
 # todo: 如何 import
 from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.model.base import ModelItem
-from xtuner.v1.model.interns1 import InternS1BaseConfig, InternS1ForConditionalGeneration
+from xtuner.v1.model.compose.intern_s1 import InternS1BaseConfig, InternS1ForConditionalGeneration
 from xtuner.v1.module.router import NoAuxRouterConfig
 from xtuner.v1.utils import get_device, get_logger, get_torch_device_module
 

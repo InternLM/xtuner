@@ -5,5 +5,5 @@
    xtuner_v1.md
    installation.md
    sft.md
-   mlm_sft.md
+   mllm_sft.md
    grpo.md

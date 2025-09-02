@@ -178,17 +178,20 @@ class TrainEngine:
 
         trainable_parameters_names = self.model.trainable_parameters()
         trainable_names = [name for name, _ in trainable_parameters_names]
+        untrainable_names = []
         num_total_requires_grad = 0
         num_total = 0
         for name, params_ in self.model.named_parameters():
             num_total += params_.numel()
             num_total_requires_grad += params_.numel() if name in trainable_names else 0
+            if name not in trainable_names:
+                untrainable_names.append(name)
 
         if dist.get_rank() == 0:
             logger.info(
                 f"Total trainable parameters: {num_total_requires_grad // 1e6}M, total parameters: {num_total // 1e6}M"
             )
-            logger.info(f"Trainable parameters names: {trainable_names}")
+            logger.info(f"Untrainable parameters names: {untrainable_names}")
         return optim_cfg.build(params)
 
     @property

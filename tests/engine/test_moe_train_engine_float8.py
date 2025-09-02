@@ -15,10 +15,11 @@ from xtuner.v1.engine.train_engine import TrainEngine
 from xtuner.v1.float8.float8_tensor import ScalingGranularity
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
 from xtuner.v1.utils import pad_to_max_length
-from torch.optim.lr_scheduler import  LambdaLR
+from torch.optim.lr_scheduler import LambdaLR
+from xtuner.v1.utils.device import get_device
 from xtuner.v1.model.base import ModelItem
 from xtuner.v1.loss.ce_loss import CELossConfig, CELossContextInputItem
-from xtuner.utils.device import get_device
+
 
 # Qwen3 30B A3
 QWEN3_MOE_PATH = os.environ["QWEN3_MOE_PATH"]

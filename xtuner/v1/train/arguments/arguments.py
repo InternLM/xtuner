@@ -25,9 +25,10 @@ model_group = Group("model", sort_key=0)
 dataset_group = Group("dataset", sort_key=1)
 optimizer_group = Group("optimizer", sort_key=2)
 lr_scheduler_group = Group("lr-scheduler", sort_key=3)
-training_group = Group("training", sort_key=4)
-checkpoint_group = Group("checkpoint", sort_key=5)
-parallel_group = Group("fsdp-parallel", sort_key=6)
+loss_group = Group("loss", sort_key=4)
+training_group = Group("training", sort_key=5)
+checkpoint_group = Group("checkpoint", sort_key=6)
+parallel_group = Group("fsdp-parallel", sort_key=7)
 
 
 @Parameter(name="*")
@@ -54,16 +55,19 @@ class TrainingArguments(BaseModel):
     ] = DataloaderConfig(pack_max_length=4096)
     cache_dir: Annotated[Path | None, Parameter(group=dataset_group, help="dataset cache directory")] = None
     cache_tag: Annotated[Path | None, Parameter(group=dataset_group, help="The tag of the cache version")] = None
-    max_length: Annotated[int, Parameter(group=dataset_group, help="max sequence length")] = 4096
+    max_length: Annotated[int, Parameter(group=dataset_group, help="max single sequence length")] = 4096
     # optimizer
     lr: Annotated[float, Parameter(group=optimizer_group, help="learning rate")] = 6e-5
     optim: Annotated[Literal["AdamW"], Parameter(group=optimizer_group, help="optimizer type")] = "AdamW"
     # lr-scheduler
     lr_min: Annotated[float, Parameter(group=lr_scheduler_group, help="minimum learning rate")] = 1e-6
-    scheudler_type: Annotated[
+    scheduler_type: Annotated[
         Literal["cosine", "linear", "constant"], Parameter(group=lr_scheduler_group, help="scheduler type")
     ] = "cosine"
     warmup_ratio: Annotated[float, Parameter(group=lr_scheduler_group, help="warmup ratio")] = 0.03
+    # loss
+    loss_config: Annotated[CELossConfig, Parameter(group=loss_group, help="loss configuration")] \
+        = CELossConfig()
     # training
     total_step: Annotated[int | None, Parameter(group=training_group, help="total training steps")] = None
     epoch_num: Annotated[int | None, Parameter(group=training_group, help="number of epochs")] = None
@@ -99,7 +103,7 @@ class TrainingArguments(BaseModel):
         optim_cfg = AdamWConfig(lr=self.lr, foreach=False)
 
         # Create learning rate scheduler config
-        lr_cfg = LRConfig(lr_type=self.scheudler_type, warmup_ratio=self.warmup_ratio, lr_min=self.lr_min)
+        lr_cfg = LRConfig(lr_type=self.scheduler_type, warmup_ratio=self.warmup_ratio, lr_min=self.lr_min)
 
         # Create dataloader config (using defaults for now)
         dataloader_cfg = self.dataloader_cfg or DataloaderConfig()
@@ -111,7 +115,8 @@ class TrainingArguments(BaseModel):
 
         if self.total_step is None and self.epoch_num is None:
             self.epoch_num = 1
-        loss_cfg = CELossConfig()
+
+        loss_cfg = self.loss_config
 
         return TrainerConfig(
             model_cfg=model_cfg,

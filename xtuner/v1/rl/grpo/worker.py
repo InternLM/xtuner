@@ -14,7 +14,7 @@ from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed.tensor import DTensor
 from typing_extensions import TypedDict
 
-from xtuner.utils.device import get_device, get_torch_device
+from xtuner.v1.utils.device import get_device, get_torch_device_module
 from xtuner.v1.config.base_model import TransformerConfig
 from xtuner.v1.config.fsdp import FSDPConfig
 from xtuner.v1.config.optim import LRConfig, OptimConfig
@@ -36,7 +36,7 @@ from .loss import GRPOLossConfig, RLLossContextInputItem
 DeviceMeshRaw: TypeAlias = List[List[int]]  # A list of lists representing device mesh indices
 ServiceUrlMap: TypeAlias = Dict[int, str]  # A dictionary mapping service names to their URLs
 DEVICE = get_device()
-DEVICE_MODULE = get_torch_device()
+DEVICE_MODULE = get_torch_device_module()
 logger = get_logger()
 
 

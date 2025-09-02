@@ -1,4 +1,4 @@
-# 使用 Trainer 进行微调
+# 使用 Trainer 进行大模型微调
 
 在之前的[教程](../../get_started/sft.md)中我们通过命令行,用最简单的方式启动了一次微调训练，而在这快速启动的背后，则是 XTuner 的核心组件 `Trainer` 在发挥作用。这一节我们将初识 Trainer，用更加细力度的方式控制训练的各个环节。
 
@@ -125,14 +125,7 @@ trainer.fit()
 ```
 ````
 
-
-```{code-block} python
-:caption: toy_train.py
-
-trainer.fit()
-```
-
-写完脚本后，我们就能通过 `torchrun` 启动分布式训练了：
+写完上述 python 脚本后，命名为 `toy_train.py`，我们就能通过 `torchrun` 启动分布式训练了：
 
 ```{code-block} bash
 :caption: 启动训练

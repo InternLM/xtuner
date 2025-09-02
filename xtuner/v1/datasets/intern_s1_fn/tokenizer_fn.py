@@ -13,12 +13,12 @@ from pydantic import BaseModel, ConfigDict
 
 from transformers import PreTrainedTokenizer
 from xtuner.v1.datasets.data_item import InternS1DataItem
-from xtuner.v1.model.interns1 import InternS1BaseConfig
+from xtuner.v1.model import InternS1BaseConfig
 from xtuner.v1.utils import get_logger
 
 from ..utils import CachableTokenizeFunction, tokenizer_xxhash
 from ..vlm_utils import TCSLoader, apply_exif_orientation
-from .process import build_transform, dynamic_num_patch, dynamic_preprocess, preprocess_interns1
+from .process import build_transform, dynamic_num_patch, dynamic_preprocess, preprocess_intern_s1
 
 
 logger = get_logger()
@@ -142,7 +142,7 @@ class InternS1TokenizeFunction(CachableTokenizeFunction[InternS1DataItem]):
             num_patches = 1
 
         try:
-            ret = preprocess_interns1(
+            ret = preprocess_intern_s1(
                 [deepcopy(data_item["conversations"])],
                 self.tokenizer,
                 [self.num_image_token * num_patches],
@@ -203,7 +203,7 @@ class InternS1TokenizeFunction(CachableTokenizeFunction[InternS1DataItem]):
             assert num_patches == 1, f"The number of patches should be 1, but got {num_patches}."
 
         # Preprocess the conversations and generate the return dictionary
-        process_result = preprocess_interns1(
+        process_result = preprocess_intern_s1(
             [deepcopy(data_item["conversations"])],
             self.tokenizer,
             [self.num_image_token * num_patches],
@@ -234,7 +234,7 @@ class InternS1TokenizeFunction(CachableTokenizeFunction[InternS1DataItem]):
         if self.only_prompt:
             return {"num_tokens": -1}
         try:
-            ret = preprocess_interns1(
+            ret = preprocess_intern_s1(
                 [deepcopy(data_item["conversations"])],
                 self.tokenizer,
                 [0],
@@ -280,7 +280,7 @@ class InternS1TokenizeFunction(CachableTokenizeFunction[InternS1DataItem]):
         assert num_patches == 1, f"The number of patches should be 1, but got {num_patches}."
 
         # Preprocess the conversations and generate the return dictionary
-        process_result = preprocess_interns1(
+        process_result = preprocess_intern_s1(
             [deepcopy(data_item["conversations"])],
             self.tokenizer,
             [0],
@@ -343,7 +343,7 @@ class InternS1TokenizeFunction(CachableTokenizeFunction[InternS1DataItem]):
 
         num_image_tokens = [self.num_image_token * num_tile for num_tile in num_tiles]
         try:
-            ret = preprocess_interns1(
+            ret = preprocess_intern_s1(
                 [deepcopy(data_item["conversations"])],
                 self.tokenizer,
                 num_image_tokens,
@@ -409,7 +409,7 @@ class InternS1TokenizeFunction(CachableTokenizeFunction[InternS1DataItem]):
 
         # Preprocess the conversations and generate the return dictionary
         num_image_tokens = [self.num_image_token * num_tile for num_tile in num_tiles]
-        process_result = preprocess_interns1(
+        process_result = preprocess_intern_s1(
             [deepcopy(data_item["conversations"])],
             self.tokenizer,
             num_image_tokens,
@@ -458,7 +458,7 @@ class InternS1TokenizeFunction(CachableTokenizeFunction[InternS1DataItem]):
         num_tiles = [1] * n_frames
         num_image_tokens = [self.num_image_token * num_tile for num_tile in num_tiles]
         try:
-            ret = preprocess_interns1(
+            ret = preprocess_intern_s1(
                 [deepcopy(data_item["conversations"])],
                 self.tokenizer,
                 num_image_tokens,
@@ -508,7 +508,7 @@ class InternS1TokenizeFunction(CachableTokenizeFunction[InternS1DataItem]):
         num_patches = pixel_values.size(0)
 
         num_image_tokens = [self.num_image_token] * num_patches
-        process_result = preprocess_interns1(
+        process_result = preprocess_intern_s1(
             [deepcopy(data_item["conversations"])],
             self.tokenizer,
             num_image_tokens,

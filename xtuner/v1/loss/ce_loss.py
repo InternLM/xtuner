@@ -1,9 +1,10 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-from typing import Literal, cast
+from typing import Annotated, Literal, cast
 
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
+from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict
 from torch.distributed.device_mesh import DeviceMesh
 from typing_extensions import Self
@@ -14,7 +15,7 @@ from .utils import sp_gather, sp_split
 
 
 class CELossConfig(BaseLossConfig):
-    loss_reduction: Literal["token", "sample", "square"] = "token"
+    loss_reduction: Annotated[Literal["token", "sample", "square"], Parameter(help="loss reduction mode")] = "token"
 
     @property
     def loss_ctx_cls(self) -> type["CELossContext"]:
@@ -86,6 +87,10 @@ class CELossContext(BaseLossContext[CELossContextInputItem]):
                     loss_weight = sp_split(loss_weight, sp_mesh=sp_mesh, split_dim=1, padding_value=0.0)
 
             loss_weight[shifted_labels == loss_cfg.ignore_idx] = 0.0
+            if torch.isnan(loss_weight).any() or torch.isinf(loss_weight).any():
+                raise AssertionError(
+                    "loss_weight contains NaN or Inf values. Please filter out samples with no valid tokens."
+                )
             loss_weight_list.append(loss_weight)
 
         # Compute the denominator used in the global calibration of the loss
@@ -99,7 +104,7 @@ class CELossContext(BaseLossContext[CELossContextInputItem]):
         for i, item in enumerate(data_batches):
             shifted_labels = shifted_labels_list[i]
             loss_weight = loss_weight_list[i]
-            loss_weight = loss_weight / global_denominator
+            loss_weight = loss_weight / (global_denominator + 1e-12)
             loss_kwargs = CELossKwargs(
                 shifted_labels=shifted_labels,
                 loss_weight=loss_weight,
@@ -125,7 +130,7 @@ class CELossContext(BaseLossContext[CELossContextInputItem]):
         shifted_labels = shifted_labels.flatten()
         loss_weight = loss_weight.flatten()
 
-        rank_grad_tokens = (shifted_labels >= 0).sum()
+        rank_grad_tokens = (shifted_labels != self.loss_cfg.ignore_idx).sum()
         if rank_grad_tokens == 0:
             loss = logits.sum() * 0
         else:

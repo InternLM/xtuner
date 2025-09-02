@@ -7,8 +7,8 @@ from .optim import OptimConfig
 
 
 if TYPE_CHECKING:
+    from xtuner.v1.model import InternS1BaseConfig
     from xtuner.v1.model.base import BaseModel
-    from xtuner.v1.model.interns1 import InternS1BaseConfig
 
 
 @runtime_checkable
@@ -26,7 +26,7 @@ class EngineConfig(BaseModel):
     model_cfg: ModelConfigProto
 
     def build(self):
-        from xtuner.v1.engine.interns1_train_engine import InternS1TrainEngine
+        from xtuner.v1.engine.intern_s1_train_engine import InternS1TrainEngine
         from xtuner.v1.engine.train_engine import TrainEngine
 
         if isinstance(self.model_cfg, InternS1BaseConfig):
