@@ -11,11 +11,11 @@ import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 import torch.nn as nn
 import torch.nn.functional as F
-from xtuner.v1.rl.loss_context import LossContext
+from xtuner.v1.rl.oreal.loss import OrealLossConfig
+from xtuner.v1.rl.grpo import RLLossContextInputItem
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.rl.utils import sp_split, gather_logprobs
 from xtuner.v1.rl.loss_fn import kl_penalty
-from xtuner.v1.rl.oreal import LossConfig
 from xtuner.v1.data_proto.utils import unpack_sequence
 from xtuner.v1.utils.test_utils import init_data_mesh
 
@@ -182,7 +182,7 @@ class TestOrealLoss(DistributedTestBase):
         loss_ref.backward()
 
         # 8 gpus
-        loss_cfg = LossConfig(
+        loss_cfg = OrealLossConfig(
             policy_loss_cfg=dict(
                 cliprange_high=cliprange_high,
                 cliprange_low=cliprange_low,
@@ -198,7 +198,6 @@ class TestOrealLoss(DistributedTestBase):
             kl_loss_coef=kl_loss_coef,
             kl_loss_type="low_var_kl",
         )
-        loss_ctx = LossContext(loss_cfg=loss_cfg)
 
         input_ids_list_rank = input_ids_list[dp_rank::dp_size]
         shifted_labels_list_rank = shifted_labels_list[dp_rank::dp_size]
@@ -209,41 +208,41 @@ class TestOrealLoss(DistributedTestBase):
             advantages = torch.tensor([advantage] * length, dtype=torch.float32, device=device).view(1, -1)
             advantages_list_rank[iter_idx] = advantages
         
-        old_logprobs_list = []
-        if kl_loss_coef > 0:
-            ref_logprobs_list = []
-        with torch.no_grad():
-            for iter_idx in range(grad_acc):
-                input_ids = input_ids_list_rank[iter_idx]
-                shifted_labels = shifted_labels_list_rank[iter_idx]
-                if sp_mesh.size() > 1:
-                    input_ids = sp_split(input_ids, sp_mesh=sp_mesh, split_dim=1, padding_value=0)
-                    shifted_labels = sp_split(shifted_labels, sp_mesh=sp_mesh, split_dim=1, padding_value=-100)
-                logits = lm_head2_old(emb2_old(input_ids)).float()
-                old_logprobs = gather_logprobs(logits, shifted_labels)
-                old_logprobs_list.append(old_logprobs)
-                if kl_loss_coef > 0:
-                    ref_logprobs_list.append(old_logprobs.clone())
-        
-        data_batches = []
+        seq_ctx_list: list[SequenceContext] = []
+        loss_ctx_input_list: list[RLLossContextInputItem] = []
         for iter_idx in range(grad_acc):
             input_ids = input_ids_list_rank[iter_idx]
             seq_ctx = SequenceContext.from_input_ids((input_ids,), device=device)
-            if sp_mesh.size() > 1:
-                seq_ctx = seq_ctx.split(sp_mesh)
-            data = dict(
-                seq_ctx=seq_ctx,
+            loss_ctx_input = RLLossContextInputItem(
                 shifted_labels=shifted_labels_list_rank[iter_idx],
-                old_logprobs=old_logprobs_list[iter_idx],
                 advantages=advantages_list_rank[iter_idx],
-                ref_logprobs=ref_logprobs_list[iter_idx] if kl_loss_coef > 0 else None,
             )
-            data_batches.append(data)
+            if sp_size > 1:
+                seq_ctx = seq_ctx.split(sp_mesh)
+                loss_ctx_input = loss_ctx_input.sp_split(sp_mesh)
+            seq_ctx_list.append(seq_ctx)
+            loss_ctx_input_list.append(loss_ctx_input)
+
+        with torch.no_grad():
+            for iter_idx in range(grad_acc):
+                seq_ctx = seq_ctx_list[iter_idx]
+                loss_ctx_input = loss_ctx_input_list[iter_idx]
+                logits = lm_head2_old(emb2_old(seq_ctx.input_ids)).float()
+                old_logprobs = gather_logprobs(logits, loss_ctx_input.shifted_labels)
+                loss_ctx_input.old_logprobs = old_logprobs
+                if kl_loss_coef > 0:
+                    loss_ctx_input.ref_logprobs = old_logprobs.clone()
         
-        out_list = loss_ctx.build_list_ctx(data_batches)
+        LossContext = loss_cfg.loss_ctx_cls
+        batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
+            loss_ctx_input_list, 
+            loss_cfg,
+        )
+
         for iter_idx in range(grad_acc):
-            seq_ctx = out_list[iter_idx]['seq_ctx']
-            loss_ctx = out_list[iter_idx]['loss_ctx']
+            seq_ctx = seq_ctx_list[iter_idx]
+            loss_kwargs = batches_loss_kwargs[iter_idx]
+            loss_ctx = LossContext(loss_cfg, loss_kwargs)
 
             hidden_states = emb2(seq_ctx.input_ids)
             head_weight = lm_head2.weight

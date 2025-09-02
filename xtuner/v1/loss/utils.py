@@ -1,10 +1,35 @@
+from typing import Any
+
 import torch
 from mmengine.dist import dist
+from torch.distributed.device_mesh import DeviceMesh
 
 from xtuner.utils.device import get_device
+from xtuner.v1.data_proto.utils import pad_to_multiple_of, split_for_sequence_parallel
 
 
 DEVICE = get_device()
+
+
+def sp_split(
+    tensor,
+    sp_mesh: DeviceMesh,
+    split_dim: int,
+    padding_value: Any,
+):
+    if sp_mesh.size() == 1:
+        return tensor
+    tensor = pad_to_multiple_of(tensor, padding_value, sp_mesh.size(), split_dim)
+    tensor = split_for_sequence_parallel(tensor, dim=split_dim, sp_mesh=sp_mesh)
+    return tensor
+
+
+def sp_gather(tensor, sp_mesh: DeviceMesh, dim: int):
+    if sp_mesh.size() == 1:
+        return tensor
+    tensor_list = [torch.empty_like(tensor) for _ in range(sp_mesh.size())]
+    dist.all_gather(tensor_list, tensor, group=sp_mesh)
+    return torch.cat(tensor_list, dim=dim)
 
 
 def len2weight(x, loss_reduction):
@@ -46,7 +71,9 @@ def cal_global_sum_loss_weight(
         for _labels in labels_list_:
             num_effective_tokens = (_labels >= 0).sum().item()
             loss_weight = len2weight(num_effective_tokens, loss_reduction)
-            loss_weights_list.append(torch.full(_labels.shape, loss_weight, device=_labels.device))
+            loss_weight = torch.full(_labels.shape, loss_weight, device=_labels.device)
+            loss_weight[_labels == -100] = 0.0
+            loss_weights_list.append(loss_weight)
         loss_weights = torch.cat(loss_weights_list, dim=1)
         batch_loss_weights.append(loss_weights)
         global_sum_loss_weight += loss_weights.sum()

@@ -423,13 +423,13 @@ if __name__ == "__main__":
     dataset_cfg=dataset_config,
     dataloader_cfg=dataloader_config,
     lr_cfg=lr_cfg,
+    loss_cfg=CELossConfig(mode="chunk", chunk_size=1024),  # 使用 chunk loss 可以显著减少显存占用，推荐总是开启
     tokenizer_path=hf_model_path,
     # 全局 batch size
     # 假设是 8 卡训练，那么每张卡的 forward shape 是 (1, pack_max_length)，梯度累加次数是 1
     # 假设是 4 卡训练，那么每张卡的 forward shape 是 (1, pack_max_length)，梯度累加次数是 2 (自动折算)
     global_batch_size=8, 
     epoch_num=2,
-    chunked_loss=True, # 可以显著减少显存占用，推荐总是开启
     work_dir='work_dirs'
 )"""
 

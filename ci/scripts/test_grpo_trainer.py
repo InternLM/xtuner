@@ -41,7 +41,8 @@ from xtuner.v1.config import (
     ZLossConfig,
 )
 from xtuner.v1.ray.judger.controller import JudgerConfig
-from xtuner.v1.rl.grpo.config import WorkerConfig, LossConfig
+from xtuner.v1.rl.grpo import GRPOLossConfig, WorkerConfig
+# from xtuner.v1.rl.grpo.config import WorkerConfig, LossConfig
 from xtuner.v1.rl.grpo.trainer import Trainer
 
 MODEL_PATH = os.environ["ROLLOUT_MODEL_PATH"]
@@ -144,7 +145,7 @@ def main(args):
     train_worker_cfg: WorkerConfig = WorkerConfig(
         model_cfg=Qwen3Dense8BConfig(),
         optim_cfg=AdamWConfig(lr=1e-6, foreach=False if args.optimizer_disable_foreach else None),
-        loss_cfg=LossConfig(
+        loss_cfg=GRPOLossConfig(
             policy_loss_cfg=dict(
                 cliprange_high=0.2,
                 cliprange_low=0.2,

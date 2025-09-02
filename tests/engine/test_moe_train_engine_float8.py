@@ -16,7 +16,8 @@ from xtuner.v1.float8.float8_tensor import ScalingGranularity
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
 from xtuner.v1.utils import pad_to_max_length
 from torch.optim.lr_scheduler import  LambdaLR
-from xtuner.v1.loss import CELossContext
+from xtuner.v1.model.base import ModelItem
+from xtuner.v1.loss.ce_loss import CELossConfig, CELossContextInputItem
 from xtuner.utils.device import get_device
 
 # Qwen3 30B A3
@@ -57,6 +58,8 @@ class TestMoEEngineFloat8(DistributedTestBase):
         )
         engine.from_hf(hf_path=QWEN3_MOE_PATH)
 
+        loss_cfg = CELossConfig()
+
         total_steps = 1000
         warmup_steps = total_steps * lr_cfg.warmup_ratio
         def warmup_fn(x):
@@ -80,10 +83,18 @@ class TestMoEEngineFloat8(DistributedTestBase):
             seq_ctx = SequenceContext.from_input_ids((input_ids,), device=DEVICE)
             labels = labels.to(DEVICE)
             seq_ctx.num_padding = pack_len
-            data_batch = [{'seq_ctx': seq_ctx, 'labels': labels}]
-            loss_ctx = CELossContext()
-            data_batch = loss_ctx.build_list_ctx(data_batch, device=DEVICE)
-            loss_log, _ = engine.train_step(data_batch)
+            seq_ctx_list = [seq_ctx]
+            loss_ctx_input_list: list[CELossContextInputItem] = [CELossContextInputItem(shifted_labels=labels)]
+            LossContext = loss_cfg.loss_ctx_cls
+            batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
+                loss_ctx_input_list, 
+                loss_cfg,
+            )
+            loss_kwargs = batches_loss_kwargs[0]
+            loss_ctx = LossContext(loss_cfg, loss_kwargs)
+            seq_ctx = seq_ctx_list[0]
+            engine_input = [ModelItem(seq_ctx=seq_ctx, loss_ctx=loss_ctx)]
+            loss_log, _ = engine.train_step(engine_input)
             grad_norm = engine.clip_grad_norm()
             engine.step_optimizer(grad_norm)
             lr_scheduler.step()
@@ -130,6 +141,8 @@ class TestMoEEngineFloat8(DistributedTestBase):
         )
         engine.from_hf(hf_path=QWEN3_MOE_PATH)
 
+        loss_cfg = CELossConfig()
+
         total_steps = 1000
         warmup_steps = total_steps * lr_cfg.warmup_ratio
         def warmup_fn(x):
@@ -153,10 +166,18 @@ class TestMoEEngineFloat8(DistributedTestBase):
             seq_ctx = SequenceContext.from_input_ids((input_ids,), device=DEVICE)
             labels = labels.to(DEVICE)
             seq_ctx.num_padding = pack_len
-            data_batch = [{'seq_ctx': seq_ctx, 'labels': labels}]
-            loss_ctx = CELossContext()
-            data_batch = loss_ctx.build_list_ctx(data_batch, device=DEVICE)
-            loss_log, _ = engine.train_step(data_batch)
+            seq_ctx_list = [seq_ctx]
+            loss_ctx_input_list: list[CELossContextInputItem] = [CELossContextInputItem(shifted_labels=labels)]
+            LossContext = loss_cfg.loss_ctx_cls
+            batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
+                loss_ctx_input_list, 
+                loss_cfg,
+            )
+            loss_kwargs = batches_loss_kwargs[0]
+            loss_ctx = LossContext(loss_cfg, loss_kwargs)
+            seq_ctx = seq_ctx_list[0]
+            engine_input = [ModelItem(seq_ctx=seq_ctx, loss_ctx=loss_ctx)]
+            loss_log, _ = engine.train_step(engine_input)
             grad_norm = engine.clip_grad_norm()
             engine.step_optimizer(grad_norm)
             lr_scheduler.step()
@@ -204,6 +225,7 @@ class TestMoEEngineFloat8(DistributedTestBase):
             ep_size=ep_size,
             # hsdp_sharding_size=hsdp_sharding_size,
         )
+        loss_cfg = CELossConfig()
         engine = TrainEngine(
             model_cfg=moe_cfg,
             optim_cfg=optim_cfg,
@@ -246,10 +268,18 @@ class TestMoEEngineFloat8(DistributedTestBase):
             labels = labels.to(DEVICE)
             seq_ctx.num_padding = pad_len
             seq_ctx.to('cuda')
-            data_batch = [{'seq_ctx': seq_ctx, 'labels': labels}]
-            loss_ctx = CELossContext()
-            data_batch = loss_ctx.build_list_ctx(data_batch, device=DEVICE)
-            loss_log, _ = engine.train_step(data_batch)
+            seq_ctx_list = [seq_ctx]
+            loss_ctx_input_list: list[CELossContextInputItem] = [CELossContextInputItem(shifted_labels=labels)]
+            LossContext = loss_cfg.loss_ctx_cls
+            batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
+                loss_ctx_input_list, 
+                loss_cfg,
+            )
+            loss_kwargs = batches_loss_kwargs[0]
+            loss_ctx = LossContext(loss_cfg, loss_kwargs)
+            seq_ctx = seq_ctx_list[0]
+            engine_input = [ModelItem(seq_ctx=seq_ctx, loss_ctx=loss_ctx)]
+            loss_log, _ = engine.train_step(engine_input)
             grad_norm = engine.clip_grad_norm()
             engine.step_optimizer(grad_norm)
             lr_scheduler.step()

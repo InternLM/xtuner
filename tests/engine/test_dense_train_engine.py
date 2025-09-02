@@ -9,8 +9,9 @@ from torch.testing._internal.common_distributed import DistributedTestBase
 from transformers import AutoTokenizer
 
 from xtuner.v1.model.moe.moe import SequenceContext
-from xtuner.v1.loss import CELossContext
 from xtuner.v1.model.dense.qwen3 import Qwen3Dense8BConfig
+from xtuner.v1.model.base import ModelItem
+from xtuner.v1.loss.ce_loss import CELossConfig, CELossContextInputItem
 from xtuner.v1.config import FSDPConfig, LRConfig, AdamWConfig
 from xtuner.v1.engine.train_engine import TrainEngine
 from torch.optim.lr_scheduler import LambdaLR
@@ -49,6 +50,8 @@ class TestDenseEngine(DistributedTestBase):
         )
         engine.from_hf(hf_path=QWEN3_PATH)
 
+        loss_cfg = CELossConfig()
+
         total_steps = 1000
         warmup_steps = total_steps * lr_cfg.warmup_ratio
 
@@ -76,10 +79,18 @@ class TestDenseEngine(DistributedTestBase):
             seq_ctx = SequenceContext.from_input_ids((input_ids,), device=DEVICE)
             labels = labels.to(DEVICE)
             seq_ctx.num_padding = pack_len
-            data_batch = [{'seq_ctx': seq_ctx, 'labels': labels}]
-            loss_ctx = CELossContext()
-            data_batch = loss_ctx.build_list_ctx(data_batch, device=DEVICE, data_mesh=data_mesh)
-            loss_log, _ = engine.train_step(data_batch)
+            seq_ctx_list = [seq_ctx]
+            loss_ctx_input_list: list[CELossContextInputItem] = [CELossContextInputItem(shifted_labels=labels)]
+            LossContext = loss_cfg.loss_ctx_cls
+            batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
+                loss_ctx_input_list, 
+                loss_cfg,
+            )
+            loss_kwargs = batches_loss_kwargs[0]
+            loss_ctx = LossContext(loss_cfg, loss_kwargs)
+            seq_ctx = seq_ctx_list[0]
+            engine_input = [ModelItem(seq_ctx=seq_ctx, loss_ctx=loss_ctx)]
+            loss_log, _ = engine.train_step(engine_input)
             grad_norm = engine.clip_grad_norm()
             engine.step_optimizer(grad_norm)
             lr_scheduler.step()

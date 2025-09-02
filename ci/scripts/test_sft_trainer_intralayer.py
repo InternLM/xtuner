@@ -233,7 +233,6 @@ def main():
         #             scaling_granularity_gemm=ScalingGranularity.TILEWISE,
         #             scaling_granularity_grouped_gemm=ScalingGranularity.TILEWISE,
         #     ),
-        #     chunked_loss=False,
         # ), "fp8"),
     ]
     for moe_cfg, name in moe_cfgs:

@@ -21,6 +21,7 @@ from xtuner.v1.model.dense.qwen3 import Qwen3Dense8BConfig
 from xtuner.v1.train.trainer import Trainer
 from xtuner.v1.utils.compile import maybe_compile
 import argparse
+from xtuner.v1.loss import CELossConfig
 
 QWEN3_PATH = os.environ["QWEN3_PATH"]
 ALPACA_PATH = os.environ["ALPACA_PATH"]
@@ -239,7 +240,7 @@ def main():
             pack_max_length=16384
         )
         work_dir = f"{args.work_dir}-{name}"
-        loss_ctx = CELossContext()
+        loss_cfg = CELossConfig(mode="chunk", chunk_size=1024, ignore_idx=-100)
         trainer = Trainer(
             load_from=QWEN3_PATH,
             model_cfg=dense_cfg,
@@ -247,7 +248,7 @@ def main():
             fsdp_cfg=fsdp_cfg,
             dataset_cfg=dataset_config,
             dataloader_cfg=dataloader_config,
-            loss_ctx=loss_ctx,
+            loss_cfg=loss_cfg,
             lr_cfg=lr_cfg,
             tokenizer_path=QWEN3_PATH,
             global_batch_size=16,

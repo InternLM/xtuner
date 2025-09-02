@@ -21,6 +21,7 @@ from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
 from xtuner.v1.train.trainer import Trainer
 from xtuner.v1.utils.compile import maybe_compile
 from xtuner.v1.utils.device import get_device
+from xtuner.v1.loss import CELossConfig
 import argparse
 
 
@@ -253,7 +254,7 @@ def main():
             pack_max_length=16384
         )
         work_dir = f"{args.work_dir}-{name}"
-        loss_ctx = CELossContext(loss_class="chunk_cross_entropy")
+        loss_cfg = CELossConfig(mode="chunk", chunk_size=1024, ignore_idx=-100)
         trainer = Trainer(
             load_from=QWEN3_MOE_PATH,
             model_cfg=moe_cfg,
@@ -261,7 +262,7 @@ def main():
             fsdp_cfg=fsdp_cfg,
             dataset_cfg=dataset_config,
             dataloader_cfg=dataloader_config,
-            loss_ctx=loss_ctx,
+            loss_cfg=loss_cfg,
             lr_cfg=lr_cfg,
             tokenizer_path=QWEN3_MOE_PATH,
             global_batch_size=16,

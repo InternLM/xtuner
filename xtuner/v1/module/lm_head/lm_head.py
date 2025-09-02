@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributed.tensor import DTensor
 
-from xtuner.v1.loss import CEForwardItem, CELossContext
+from xtuner.v1.loss import CELossContext
 
 
 Loss: TypeAlias = torch.Tensor
@@ -14,9 +14,6 @@ Weight: TypeAlias = torch.Tensor | DTensor
 Bias: TypeAlias = torch.Tensor | DTensor | None
 HiddenStates: TypeAlias = torch.Tensor
 Labels: TypeAlias = torch.Tensor
-
-
-LossFn = Callable[[HiddenStates, Weight, CEForwardItem, Bias], tuple[Loss | None, Logits | None]]
 
 
 class LMHead(nn.Linear):

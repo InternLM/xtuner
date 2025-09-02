@@ -1,18 +1,15 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from abc import ABC, abstractmethod
-from typing import Literal
+from typing import Generic, Literal, TypeVar
 
 import torch
 import torch.distributed as dist
 import torch.nn as nn
 from pydantic import BaseModel, ConfigDict
-
-# from mmengine.dist import dist
+from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.nn.functional import all_reduce
 
-from xtuner.v1.loss import ChunkLoss
-
-from .loss_context import ForwardItem
+from .chunk_loss import ChunkLoss
 
 
 # Do loss calibration among dp, sp and grad accumulation:
@@ -49,14 +46,9 @@ class BaseLossKwargs(BaseModel):
 
     model_config = ConfigDict(title="RL loss keyword arguments", extra="allow", arbitrary_types_allowed=True)
     shifted_labels: torch.Tensor
-    old_logprobs: torch.Tensor
-    advantages: torch.Tensor
-    policy_loss_weight: torch.Tensor
-    ref_logprobs: torch.Tensor | None = None
-    kl_loss_weight: torch.Tensor | None = None
 
-    def chunk(self, chunk_size):
-        tensor_fields: dict[str, list[torch.Tensor]] = {}
+    def chunk(self, chunk_size) -> list["BaseLossKwargs"]:
+        tensor_fields: dict[str, tuple[torch.Tensor, ...]] = {}
         for field_name, field_value in self.__dict__.items():
             if isinstance(field_value, torch.Tensor):
                 tensor_fields[field_name] = torch.split(field_value, chunk_size, dim=1)
@@ -69,18 +61,42 @@ class BaseLossKwargs(BaseModel):
             chunk_dict = {}
             for field_name, splits in tensor_fields.items():
                 chunk_dict[field_name] = splits[i]
-            chunks.append(BaseLossKwargs(**chunk_dict))
+            chunks.append(type(self)(**chunk_dict))
         return chunks
 
 
-class BaseLoss(nn.Module, ABC):
+class BaseLossConfig(BaseModel):
+    model_config = {"arbitrary_types_allowed": True}
+    ignore_idx: int = -100
     mode: Literal["eager", "chunk"] = "eager"
     chunk_size: int | None = None
 
-    def __init__(self, mode: Literal["eager", "chunk"] = "eager", chunk_size: int | None = None, *args, **kwargs):
+    @property
+    def loss_ctx_cls(self) -> type["BaseLossContext"]:
+        raise NotImplementedError
+
+
+LossContextInputItem = TypeVar("LossContextInputItem")
+
+
+class BaseLossContext(nn.Module, ABC, Generic[LossContextInputItem]):
+    def __init__(self, loss_cfg: BaseLossConfig, loss_kwargs: BaseLossKwargs):
         super().__init__()
-        self.mode = mode
-        self.chunk_size = chunk_size
+        self.loss_cfg = loss_cfg
+        self.loss_kwargs = loss_kwargs
+
+    @classmethod
+    @abstractmethod
+    def build_batches_loss_kwargs(
+        cls,
+        data_batches: list[LossContextInputItem],
+        loss_cfg: BaseLossConfig,
+        # The following two parameters need to be passed in only when sp is enabled
+        # and calculating loss_kwargs requires the complete shifted_labels.
+        # (For example, the sample-wise loss)
+        cu_seq_lens_list: list[torch.Tensor] | None = None,
+        sp_mesh: DeviceMesh | None = None,
+    ) -> list[BaseLossKwargs]: ...
 
     @abstractmethod
     def loss_fn(
@@ -109,30 +125,28 @@ class BaseLoss(nn.Module, ABC):
         head_bias: torch.Tensor | None,
         loss_kwargs: BaseLossKwargs,
     ):
-        assert self.chunk_size is not None, "chunk_size must be set in chunk mode"
+        assert self.loss_cfg.chunk_size is not None, "chunk_size must be set in chunk mode"
 
-        chunks = loss_kwargs.chunk(self.chunk_size)
-        loss = ChunkLoss.apply(hidden_states, head_weight, head_bias, self.loss_fn, chunks, self.chunk_size)
+        chunks = loss_kwargs.chunk(self.loss_cfg.chunk_size)
+        loss = ChunkLoss.apply(hidden_states, head_weight, head_bias, self.loss_fn, chunks, self.loss_cfg.chunk_size)
         return loss, None
-
-    @abstractmethod
-    def build_loss_kwargs(self, forward_item: ForwardItem) -> BaseLossKwargs: ...
 
     def forward(
         self,
         hidden_states: torch.Tensor,
         head_weight: torch.Tensor,
-        head_bias: torch.Tensor | None,
-        forward_item: ForwardItem,
+        head_bias: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        loss_kwargs = self.build_loss_kwargs(forward_item)
+        assert self.loss_kwargs is not None, "loss_kwargs must be set before calling forward"
+        if head_bias is not None:
+            raise NotImplementedError("RL Loss does not support head_bias yet.")
 
-        if self.mode == "eager":
-            loss, logits = self.eager_mode(hidden_states, head_weight, head_bias, loss_kwargs)
+        if self.loss_cfg.mode == "eager":
+            loss, logits = self.eager_mode(hidden_states, head_weight, head_bias, self.loss_kwargs)
         else:
-            loss, logits = self.chunk_mode(hidden_states, head_weight, head_bias, loss_kwargs)
+            loss, logits = self.chunk_mode(hidden_states, head_weight, head_bias, self.loss_kwargs)
 
         # Step 2.c in the loss calculation
-        loss = all_reduce(loss, op=dist.ReduceOp.SUM, group=dist.group.WORLD)
-        print(loss)
+        if dist.is_initialized():
+            loss = all_reduce(loss, op=dist.ReduceOp.SUM, group=dist.group.WORLD)
         return loss, logits

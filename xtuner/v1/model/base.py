@@ -25,7 +25,7 @@ from xtuner.v1.float8.fsdp_utils import (
     WeightWithDynamicTensorWiseFloat8CastTensor,
     WeightWithDynamicTilewiseFloat8CastTensor,
 )
-from xtuner.v1.loss import CELossContext
+from xtuner.v1.loss import BaseLossContext
 from xtuner.v1.ops.comm.foreach_allgather import foreach_all_gather
 from xtuner.v1.utils import get_device, get_torch_device_module, profile_time_and_memory
 from xtuner.v1.utils.compile import maybe_compile
@@ -44,7 +44,7 @@ def _is_float8_available():
 
 class ModelItem(TypedDict):
     seq_ctx: SequenceContext
-    loss_ctx: CELossContext
+    loss_ctx: BaseLossContext
 
 
 def is_float8_weight(tensor):

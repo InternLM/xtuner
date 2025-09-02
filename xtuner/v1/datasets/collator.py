@@ -14,7 +14,7 @@ logger = get_logger()
 
 class ColateItem(TypedDict):
     seq_ctx: SequenceContext
-    labels: torch.Tensor
+    shifted_labels: torch.Tensor
 
 
 def fake_collator(instances: list[DataItem], **kwargs):
@@ -50,20 +50,22 @@ def sft_llm_collator(
         input_ids = torch.cat([torch.tensor(i["input_ids"]).view(1, -1) for i in instance], dim=-1)
         labels = torch.cat([torch.tensor(i["labels"]).view(1, -1) for i in instance], dim=-1)
         input_ids = input_ids[:, :-1]
-        labels = labels[:, 1:]
+        shifted_labels = labels[:, 1:]
         num_tokens = [i["num_tokens"] for i in instance]
         if num_tokens[-1] == 1:
             num_tokens = num_tokens[:-1]  # remove the last sample if it is a single token
         else:
             num_tokens[-1] -= 1  # remove the last token if it is not a single token
 
-        assert input_ids.shape == labels.shape, f"input_ids shape {input_ids.shape} != labels shape {labels.shape}"
+        assert input_ids.shape == shifted_labels.shape, (
+            f"input_ids shape {input_ids.shape} != shifted_labels shape {shifted_labels.shape}"
+        )
 
         pad_len = pack_max_length - input_ids.shape[-1]
 
         if pad_len > 0:
             input_ids = pad_to_max_length(input_ids, padding_token_idx, max_length=pack_max_length, dim=-1)
-            labels = pad_to_max_length(labels, IGNORE_INDEX, max_length=pack_max_length, dim=-1)
+            shifted_labels = pad_to_max_length(shifted_labels, IGNORE_INDEX, max_length=pack_max_length, dim=-1)
             num_tokens = [0] + num_tokens + [pad_len]
 
         elif pad_len < 0:
@@ -87,7 +89,7 @@ def sft_llm_collator(
         ret.append(
             {
                 "seq_ctx": seq_ctx,
-                "labels": labels,
+                "shifted_labels": shifted_labels,
             }
         )
 
@@ -116,20 +118,22 @@ def sft_vllm_collator(
         input_ids = torch.cat([torch.tensor(i["input_ids"]).view(1, -1) for i in instance], dim=-1)
         labels = torch.cat([torch.tensor(i["labels"]).view(1, -1) for i in instance], dim=-1)
         input_ids = input_ids[:, :-1]
-        labels = labels[:, 1:]
+        shifted_labels = labels[:, 1:]
         num_tokens = [i["num_tokens"] for i in instance]
         if num_tokens[-1] == 1:
             num_tokens = num_tokens[:-1]  # remove the last sample if it is a single token
         else:
             num_tokens[-1] -= 1  # remove the last token if it is not a single token
 
-        assert input_ids.shape == labels.shape, f"input_ids shape {input_ids.shape} != labels shape {labels.shape}"
+        assert input_ids.shape == shifted_labels.shape, (
+            f"input_ids shape {input_ids.shape} != shifted_labels shape {shifted_labels.shape}"
+        )
 
         pad_len = pack_max_length - input_ids.shape[-1]
 
         if pad_len > 0:
             input_ids = pad_to_max_length(input_ids, padding_token_idx, max_length=pack_max_length, dim=-1)
-            labels = pad_to_max_length(labels, IGNORE_INDEX, max_length=pack_max_length, dim=-1)
+            shifted_labels = pad_to_max_length(shifted_labels, IGNORE_INDEX, max_length=pack_max_length, dim=-1)
             num_tokens = [0] + num_tokens + [pad_len]
 
         elif pad_len < 0:
@@ -166,7 +170,7 @@ def sft_vllm_collator(
         ret.append(
             {
                 "seq_ctx": seq_ctx,
-                "labels": labels,
+                "shifted_labels": shifted_labels,
             }
         )
 

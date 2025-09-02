@@ -6,6 +6,7 @@ from xtuner.v1.config import (
     DatasetConfig,
     LRConfig,
 )
+from xtuner.v1.loss import CELossConfig
 from xtuner.v1.datasets import InternS1TokenizeFnConfig
 
 # model config
@@ -51,9 +52,9 @@ trainer = TrainerConfig(
     dataset_cfg=dataset_config,
     dataloader_cfg=dataloader_config,
     lr_cfg=lr_cfg,
+    loss_cfg=CELossConfig(mode="chunk", chunk_size=1024),
     tokenizer_path=hf_model_path,
     global_batch_size=8,
     epoch_num=2,
-    chunked_loss=True,
     work_dir='work_dirs'
 )

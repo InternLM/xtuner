@@ -1,13 +1,13 @@
-from .config import LossConfig, WorkerConfig
 from .controller import GRPOTrainingController
-from .loss import GRPOLoss
-from .worker import GRPOTrainingWorker
+from .loss import GRPOLossConfig, GRPOLossContext, RLLossContextInputItem
+from .worker import GRPOTrainingWorker, WorkerConfig
 
 
 __all__ = [
-    "LossConfig",
+    "GRPOLossConfig",
     "WorkerConfig",
     "GRPOTrainingController",
-    "GRPOLoss",
+    "GRPOLossContext",
     "GRPOTrainingWorker",
+    "RLLossContextInputItem",
 ]

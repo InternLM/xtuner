@@ -123,6 +123,7 @@ class TestTrainerSaveHF(DistributedTestBase):
 
         # Run training
         trainer.fit()
+        dist.barrier()
 
         # Verify save_hf was called at expected intervals
         expected_saves = [3, 6, 9, 10]  # steps 3, 6, 9, 10
