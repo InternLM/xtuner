@@ -14,7 +14,6 @@ from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed.tensor import DTensor
 from typing_extensions import TypedDict
 
-from xtuner.v1.utils.device import get_device, get_torch_device_module
 from xtuner.v1.config.base_model import TransformerConfig
 from xtuner.v1.config.fsdp import FSDPConfig
 from xtuner.v1.config.optim import LRConfig, OptimConfig
@@ -27,6 +26,7 @@ from xtuner.v1.ray.accelerator import SingleAcceleratorWorker
 from xtuner.v1.ray.config import RolloutConfig
 from xtuner.v1.rl.utils import gather_logprobs
 from xtuner.v1.utils import ParallelConfigException, get_logger, log_format
+from xtuner.v1.utils.device import get_device, get_torch_device_module
 
 from ..loss_fn import kl_penalty
 from .engine import GRPOTrainEngine

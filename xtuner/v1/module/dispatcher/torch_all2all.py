@@ -102,13 +102,9 @@ def _dispatch(
     )
     output_splits = tokens_per_expert_group.to(device=torch.device("cpu")).sum(dim=-1).tolist()
 
-    hidden_size = hidden_states.size(-1)
-    out = hidden_states.new_empty(size=(sum(output_splits), hidden_size))
-
     hidden_states = hidden_states.contiguous()
 
-    dist.all_to_all_single(
-        out,
+    out = all_to_all_single_autograd(
         hidden_states,
         output_split_sizes=output_splits,
         input_split_sizes=input_splits,
