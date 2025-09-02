@@ -15,7 +15,7 @@ from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.model.dense.qwen3 import Qwen3Dense8BConfig
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.utils.compile import maybe_compile
-from xtuner.v1.loss import CELossContext
+from xtuner.v1.loss.ce_loss import CELossConfig, CELossContextInputItem
 
 # Qwen3 8B
 QWEN3_PATH = os.environ["QWEN3_PATH"]
@@ -56,17 +56,27 @@ class TestQwen3Dense(DistributedTestBase):
             qwen_model = cfg.build().to(torch.bfloat16)
 
         shift_input_ids = input_ids[:, :-1]
-        shift_labels = input_ids[:, 1:]
+        shifted_labels = input_ids[:, 1:]
         seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids.to('cuda'),))
-        data_batch = [{'seq_ctx': seq_ctx, 'labels': shift_labels}]
-        loss_ctx = CELossContext()
-        data_batch = loss_ctx.build_list_ctx(data_batch, device='cuda')[0]
+
+        loss_cfg = CELossConfig()
+        seq_ctx_list = [seq_ctx]
+        loss_ctx_input_list: list[CELossContextInputItem] = [CELossContextInputItem(shifted_labels=shifted_labels)]
+        LossContext = loss_cfg.loss_ctx_cls
+        batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
+            loss_ctx_input_list, 
+            loss_cfg,
+        )
+        loss_kwargs = batches_loss_kwargs[0]
+        loss_ctx = LossContext(loss_cfg, loss_kwargs)
+        seq_ctx = seq_ctx_list[0]
+
         qwen_model.from_hf(QWEN3_PATH)
 
         with torch.no_grad():
             output = qwen_model(
-                seq_ctx=data_batch['seq_ctx'],
-                loss_ctx=data_batch['loss_ctx'],
+                seq_ctx=seq_ctx,
+                loss_ctx=loss_ctx,
             )
         loss = output["loss"]
         self.assertTrue(torch.allclose(loss, expected_loss.to(loss.dtype), atol=tol, rtol=tol))
@@ -105,20 +115,28 @@ class TestQwen3Dense(DistributedTestBase):
             tp_size=tp_size,
             cpu_offload=False,
         )
+        loss_cfg = CELossConfig()
 
         shift_input_ids = input_ids[:, :-1]
-        shift_labels = input_ids[:, 1:]
+        shifted_labels = input_ids[:, 1:]
         seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids.to('cuda'),))
-        data_batch = [{'seq_ctx': seq_ctx, 'labels': shift_labels}]
-        loss_ctx = CELossContext()
-        data_batch = loss_ctx.build_list_ctx(data_batch, device='cuda')[0]
+        seq_ctx_list = [seq_ctx]
+        loss_ctx_input_list: list[CELossContextInputItem] = [CELossContextInputItem(shifted_labels=shifted_labels)]
+        LossContext = loss_cfg.loss_ctx_cls
+        batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
+            loss_ctx_input_list, 
+            loss_cfg,
+        )
+        loss_kwargs = batches_loss_kwargs[0]
+        loss_ctx = LossContext(loss_cfg, loss_kwargs)
+        seq_ctx = seq_ctx_list[0]
         qwen_model.fully_shard(fsdp_config=fsdp_config)
         qwen_model.from_hf(QWEN3_PATH)
 
         with torch.no_grad():
             output = qwen_model(
-                seq_ctx=data_batch['seq_ctx'],
-                loss_ctx=data_batch['loss_ctx'],
+                seq_ctx=seq_ctx,
+                loss_ctx=loss_ctx,
             )
         loss = output["loss"]
         self.assertTrue(torch.allclose(loss, expected_loss.to(loss.dtype), atol=1e-2, rtol=1e-2))
@@ -146,6 +164,7 @@ class TestQwen3Dense(DistributedTestBase):
                                  max_window_layers=max_window_layers,
                                  attention=attention)
             qwen_model = cfg.build().to(torch.bfloat16)
+        loss_cfg = CELossConfig()
 
         if use_sliding_window is False or max_window_layers >= num_hidden_layers:
             expected_sliding_window_size_list = [(-1, -1) for _ in range(num_hidden_layers)]
@@ -178,18 +197,25 @@ class TestQwen3Dense(DistributedTestBase):
             tokenizer = AutoTokenizer.from_pretrained(QWEN3_PATH, trust_remote_code=True)
             input_ids = tokenizer("吃葡萄不吐葡萄皮", return_tensors="pt").input_ids.to("cuda")
             shift_input_ids = input_ids[:, :-1]
-            shift_labels = input_ids[:, 1:]
+            shifted_labels = input_ids[:, 1:]
             seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids.to('cuda'),))
-            data_batch = [{'seq_ctx': seq_ctx, 'labels': shift_labels}]
-            loss_ctx = CELossContext()
-            data_batch = loss_ctx.build_list_ctx(data_batch, device='cuda')[0]
+            seq_ctx_list = [seq_ctx]
+            loss_ctx_input_list: list[CELossContextInputItem] = [CELossContextInputItem(shifted_labels=shifted_labels)]
+            LossContext = loss_cfg.loss_ctx_cls
+            batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
+                loss_ctx_input_list, 
+                loss_cfg,
+            )
+            loss_kwargs = batches_loss_kwargs[0]
+            loss_ctx = LossContext(loss_cfg, loss_kwargs)
+            seq_ctx = seq_ctx_list[0]
             qwen_model.fully_shard(fsdp_config=fsdp_config)
             qwen_model.from_hf(QWEN3_PATH, strict=False)
 
             with torch.no_grad():
                 output = qwen_model(
-                    seq_ctx=data_batch['seq_ctx'],
-                    loss_ctx=data_batch['loss_ctx'],
+                    seq_ctx=seq_ctx,
+                    loss_ctx=loss_ctx,
                 )
             assert "loss" in output
 

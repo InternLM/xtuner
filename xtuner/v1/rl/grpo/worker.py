@@ -9,27 +9,28 @@ import requests
 import torch
 import torch.distributed as dist
 import tqdm
+from pydantic import BaseModel, ConfigDict
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed.tensor import DTensor
 from typing_extensions import TypedDict
 
 from xtuner.utils.device import get_device, get_torch_device
-from xtuner.v1.config.base_model import MoEConfig, TransformerConfig
+from xtuner.v1.config.base_model import TransformerConfig
 from xtuner.v1.config.fsdp import FSDPConfig
+from xtuner.v1.config.optim import LRConfig, OptimConfig
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.float8.float8_tensor import Float8Tensor
 from xtuner.v1.float8.fsdp_utils import WeightWithDynamicTilewiseFloat8CastTensor
+from xtuner.v1.model.base import ModelItem
 from xtuner.v1.ray.accelerator import SingleAcceleratorWorker
 from xtuner.v1.ray.config import RolloutConfig
-from xtuner.v1.rl.loss_context import LossContext
-from xtuner.v1.rl.utils import gather_logprobs, sp_split
+from xtuner.v1.rl.utils import gather_logprobs
 from xtuner.v1.utils import ParallelConfigException, get_logger, log_format
 
-from ..loss_context import LossContextInputItem
 from ..loss_fn import kl_penalty
-from .config import WorkerConfig
 from .engine import GRPOTrainEngine
+from .loss import GRPOLossConfig, RLLossContextInputItem
 
 
 DeviceMeshRaw: TypeAlias = List[List[int]]  # A list of lists representing device mesh indices
@@ -37,6 +38,22 @@ ServiceUrlMap: TypeAlias = Dict[int, str]  # A dictionary mapping service names 
 DEVICE = get_device()
 DEVICE_MODULE = get_torch_device()
 logger = get_logger()
+
+
+class WorkerConfig(BaseModel):
+    model_config = ConfigDict(title="Worker config", extra="allow", arbitrary_types_allowed=True)
+    model_cfg: TransformerConfig
+    optim_cfg: OptimConfig
+    loss_cfg: GRPOLossConfig
+    lr_cfg: LRConfig
+    fsdp_cfg: FSDPConfig
+    load_from: str | Path  # TODO: 把 actor 和 ref 配置分离
+    optimizer_steps: int = 1
+    sp_size: int = 1
+    pack_max_length: int
+    ref_load_from: str | Path | None = None
+    ref_model_fsdp_cfg: FSDPConfig | None = None
+    log_dir: str | Path | None = None
 
 
 class WorkerInputItem(TypedDict):
@@ -56,6 +73,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         accelerator: str = "GPU",
     ):
         super().__init__(worker_cfg, rank, master_addr, master_port, world_size, accelerator)
+        self.config = cast(WorkerConfig, self.config)
         torch.accelerator.set_device_index(int(os.environ["LOCAL_RANK"]))
         self._engine = self._build_engine(worker_cfg)
 
@@ -71,8 +89,6 @@ class TrainingWorker(SingleAcceleratorWorker):
         self.data_mesh = self._init_data_mesh(sp_size=worker_cfg.sp_size)
         self.sp_mesh = self.data_mesh["sp"]
         self._optimizer_steps = worker_cfg.optimizer_steps
-
-        self.loss_ctx = LossContext(loss_cfg=worker_cfg.loss_cfg)
 
         # Used to update weight to rollout engine
         self.rank = rank
@@ -136,15 +152,26 @@ class TrainingWorker(SingleAcceleratorWorker):
         )
         return data_mesh
 
-    def _put_data_to_device(
-        self,
-        data: WorkerInputItem,
-        device: torch.device | str,
-    ) -> WorkerInputItem:
-        for key, value in data.items():
-            if isinstance(value, (torch.Tensor, SequenceContext)):
-                data[key] = value.to(device)  # type: ignore
-        return data
+    def compute_actor_logprobs(
+        self, seq_ctx_list: list[SequenceContext], loss_ctx_input_list: list[RLLossContextInputItem]
+    ) -> list[RLLossContextInputItem]:
+        for seq_ctx, loss_ctx_input in zip(seq_ctx_list, loss_ctx_input_list):
+            output = self._engine.forward_only(seq_ctx=seq_ctx)
+            loss_ctx_input.old_logprobs = gather_logprobs(output["logits"], loss_ctx_input.shifted_labels)
+        return loss_ctx_input_list
+
+    def compute_ref_logprobs(
+        self, seq_ctx_list: list[SequenceContext], loss_ctx_input_list: list[RLLossContextInputItem]
+    ) -> list[RLLossContextInputItem]:
+        assert self._has_ref
+        self._ref_model.to_device(DEVICE)
+        for seq_ctx, loss_ctx_input in zip(seq_ctx_list, loss_ctx_input_list):
+            with torch.no_grad():
+                ref_output = self._ref_model(seq_ctx=seq_ctx, loss_ctx=None)
+            ref_logprobs = gather_logprobs(ref_output["logits"], loss_ctx_input.shifted_labels)
+            loss_ctx_input.ref_logprobs = ref_logprobs
+        self._ref_model.to_device("cpu")
+        return loss_ctx_input_list
 
     def fit(self, data_batches: list[WorkerInputItem], rollout_idx: int):
         num_batches = len(data_batches)
@@ -154,74 +181,82 @@ class TrainingWorker(SingleAcceleratorWorker):
                 f"Optimizer only step once because num_batches {num_batches} < optimizer_steps {self._optimizer_steps}."
             )
 
+        seq_ctx_list: list[SequenceContext] = []
+        loss_ctx_input_list: list[RLLossContextInputItem] = []
         for data in data_batches:
-            self._put_data_to_device(data, DEVICE)
+            seq_ctx = data["seq_ctx"].to(DEVICE)
+            loss_ctx_input = RLLossContextInputItem(
+                shifted_labels=data["shifted_labels"],
+                advantages=data["advantages"],
+            ).to(DEVICE)
             if self.sp_mesh.size() > 1:
-                data["seq_ctx"] = data["seq_ctx"].split(self.sp_mesh)
+                seq_ctx = seq_ctx.split(self.sp_mesh)
+                loss_ctx_input = loss_ctx_input.sp_split(self.sp_mesh)
+            seq_ctx_list.append(seq_ctx)
+            loss_ctx_input_list.append(loss_ctx_input)
 
-        if self._has_ref:
-            self._ref_model.to_device(DEVICE)
-            for data in data_batches:
-                seq_ctx = data["seq_ctx"]
-                with torch.no_grad():
-                    if isinstance(self.config.model_cfg, MoEConfig):
-                        ref_output = self._ref_model(seq_ctx=seq_ctx, loss_ctx=None)
-                    else:
-                        ref_output = self._ref_model(seq_ctx=seq_ctx, loss_ctx=None)
-                ref_logprobs = gather_logprobs(ref_output["logits"], data["shifted_labels"])
-                cast(LossContextInputItem, data)["ref_logprobs"] = ref_logprobs
-            self._ref_model.to_device("cpu")
+        del data_batches
 
         rank_grad_tokens: torch.Tensor | None = None
-        sum_entropy: torch.Tensor | None = None
-        for data in data_batches:
-            seq_ctx = data["seq_ctx"]
-            shifted_labels = data["shifted_labels"]
-            if self.sp_mesh.size() > 1:
-                shifted_labels = sp_split(shifted_labels, sp_mesh=self.sp_mesh, split_dim=1, padding_value=-100)
-            output = self._engine.forward_only(seq_ctx=seq_ctx)
-            old_logprobs = gather_logprobs(output["logits"], shifted_labels)
-            mask = shifted_labels != -100
+        for loss_ctx_input in loss_ctx_input_list:
+            mask = loss_ctx_input.shifted_labels != -100
             grad_tokens = mask.sum()
             rank_grad_tokens = grad_tokens if rank_grad_tokens is None else rank_grad_tokens + grad_tokens
-            entropy = -(old_logprobs * mask).sum()
-            sum_entropy = entropy if sum_entropy is None else sum_entropy + entropy
-            cast(LossContextInputItem, data)["old_logprobs"] = old_logprobs
-
         rank_grad_tokens = cast(torch.Tensor, rank_grad_tokens)
-        sum_entropy = cast(torch.Tensor, sum_entropy)
-        dist.all_reduce(sum_entropy, op=dist.ReduceOp.SUM)
         global_grad_tokens = rank_grad_tokens
         dist.all_reduce(global_grad_tokens, op=dist.ReduceOp.SUM)
+
+        # old logprobs are inplaced updated in compute_actor_logprobs
+        loss_ctx_input_list = self.compute_actor_logprobs(seq_ctx_list, loss_ctx_input_list)
+        sum_entropy: torch.Tensor | None = None
+        for loss_ctx_input in loss_ctx_input_list:
+            mask = loss_ctx_input.shifted_labels != -100
+            entropy = -(cast(torch.Tensor, loss_ctx_input.old_logprobs) * mask).sum()
+            sum_entropy = entropy if sum_entropy is None else sum_entropy + entropy
+        sum_entropy = cast(torch.Tensor, sum_entropy)
+        dist.all_reduce(sum_entropy, op=dist.ReduceOp.SUM)
         avg_gen_entropy = sum_entropy / global_grad_tokens if global_grad_tokens > 0 else 0
         logger.info(f"Rollout {rollout_idx}: avg generation entropy: {avg_gen_entropy:.4f}")
 
         if self._has_ref:
+            # ref logprobs are inplaced updated in compute_actor_logprobs
+            loss_ctx_input_list = self.compute_ref_logprobs(seq_ctx_list, loss_ctx_input_list)
             kl_div_sum: torch.Tensor | None = None
-            for data in data_batches:
-                old_logprobs = cast(LossContextInputItem, data)["old_logprobs"]
-                ref_logprobs = cast(LossContextInputItem, data)["ref_logprobs"]
-                ref_logprobs = cast(torch.Tensor, ref_logprobs)
-                shifted_labels = data["shifted_labels"]
-                if self.sp_mesh.size() > 1:
-                    shifted_labels = sp_split(shifted_labels, sp_mesh=self.sp_mesh, split_dim=1, padding_value=-100)
-                mask = shifted_labels != -100
+            for loss_ctx_input in loss_ctx_input_list:
+                mask = loss_ctx_input.shifted_labels != -100
                 kl_div = kl_penalty(
-                    old_logprobs,
-                    ref_logprobs,
+                    cast(torch.Tensor, loss_ctx_input.old_logprobs),
+                    cast(torch.Tensor, loss_ctx_input.ref_logprobs),
                     loss_weights=mask,
                     kl_penalty="low_var_kl",
                 )
                 kl_div_sum = kl_div if kl_div_sum is None else kl_div_sum + kl_div
+
+            kl_div_sum = cast(torch.Tensor, kl_div_sum)
             dist.all_reduce(kl_div_sum, op=dist.ReduceOp.SUM)
             avg_kl_div = kl_div_sum / global_grad_tokens if global_grad_tokens > 0 else 0
             logger.info(f"Rollout {rollout_idx}: avg KL divergence: {avg_kl_div:.4f}")
 
-        for i in range(0, len(data_batches), iters_per_step):
-            data_batch = data_batches[i : i + iters_per_step]
-            engine_input = self.loss_ctx.build_list_ctx(
-                data_batch=cast(list[LossContextInputItem], data_batch),
-            )
+        for i in range(0, len(seq_ctx_list), iters_per_step):
+            batches_seq_ctx = seq_ctx_list[i : i + iters_per_step]
+            batches_loss_ctx_input = loss_ctx_input_list[i : i + iters_per_step]
+
+            loss_cfg = self.config.loss_cfg
+            LossContext = loss_cfg.loss_ctx_cls
+            batches_loss_kwargs = LossContext.build_batches_loss_kwargs(batches_loss_ctx_input, loss_cfg)
+            engine_input = []
+            for seq_ctx, loss_kwargs in zip(batches_seq_ctx, batches_loss_kwargs):
+                loss_ctx = LossContext(
+                    loss_cfg=loss_cfg,
+                    loss_kwargs=loss_kwargs,
+                )
+                engine_input.append(
+                    ModelItem(
+                        seq_ctx=seq_ctx,
+                        loss_ctx=loss_ctx,
+                    )
+                )
+
             loss_log, other_log = self._engine.train_step(
                 data_batches=engine_input,
             )

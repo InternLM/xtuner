@@ -11,11 +11,11 @@ import json
 from safetensors import safe_open
 
 from xtuner.v1.model.interns1 import InternS1MiniConfig
+from xtuner.v1.loss.ce_loss import CELossConfig, CELossContextInputItem
 from xtuner.v1.model.moe.moe import SequenceContext
 from xtuner.v1.model.dense.qwen3 import Qwen3Dense8BConfig
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.utils.compile import maybe_compile
-from xtuner.v1.loss import CELossContext
 from xtuner.v1.datasets.interns1_fn.process import build_transform,  dynamic_preprocess, preprocess_interns1
 from xtuner.v1.utils.test_utils import init_data_mesh
 from PIL import Image
@@ -65,22 +65,33 @@ class TestInternS1(DistributedTestBase):
         with torch.device("meta"):
             model_cfg = InternS1MiniConfig()
             interns1_model = model_cfg.build().to(torch.bfloat16)
+        
+        interns1_model.from_hf(INTERNS1_DENSE_PATH)
+        interns1_model.eval()  # avoid open drop_path
+        
+        loss_cfg = CELossConfig()
 
         shift_input_ids = input_ids[:, :-1]
-        shift_labels = input_ids[:, 1:]
+        shifted_labels = input_ids[:, 1:]
 
         data_mesh = None
         seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids.to(device),))
-        data_batch = [{'seq_ctx': seq_ctx, 'labels': shift_labels}]
-        loss_ctx = CELossContext()
-        data_batch = loss_ctx.build_list_ctx(data_batch, device=device, data_mesh=data_mesh)[0]
-        interns1_model.from_hf(INTERNS1_DENSE_PATH)
-        interns1_model.eval()  # avoid open drop_path
+        
+        seq_ctx_list = [seq_ctx]
+        loss_ctx_input_list: list[CELossContextInputItem] = [CELossContextInputItem(shifted_labels=shifted_labels)]
+        LossContext = loss_cfg.loss_ctx_cls
+        batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
+            loss_ctx_input_list, 
+            loss_cfg,
+        )
+        loss_kwargs = batches_loss_kwargs[0]
+        loss_ctx = LossContext(loss_cfg, loss_kwargs)
+        seq_ctx = seq_ctx_list[0]
 
         with torch.no_grad():
             output = interns1_model(
-                seq_ctx=data_batch['seq_ctx'],
-                loss_ctx=data_batch['loss_ctx'],
+                seq_ctx=seq_ctx,
+                loss_ctx=loss_ctx,
             )
         loss = output["loss"]
         self.assertTrue(torch.allclose(loss, expected_loss.to(loss.dtype), atol=tol, rtol=tol))
@@ -156,28 +167,48 @@ class TestInternS1(DistributedTestBase):
         with torch.device("meta"):
             model_cfg = InternS1MiniConfig()
             interns1_model = model_cfg.build().to(torch.bfloat16)
+        
+        interns1_model.from_hf(INTERNS1_DENSE_PATH)
+        interns1_model.eval()  # avoid open drop_path
 
+        loss_cfg = CELossConfig()
+        
         shift_input_ids = input_ids[:, :-1]
-        shift_labels = input_ids[:, 1:]
+        shifted_labels = input_ids[:, 1:]
 
         data_mesh = None
+        sp_mesh = None
         if sp_size > 1:
             data_mesh = init_data_mesh(device, sp_size=sp_size)
+            sp_mesh = data_mesh["sp"]
 
         seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids.to('cuda'),))
         seq_ctx.image_flags = image_flags
         seq_ctx.pixel_values = pixel_values
         seq_ctx.to('cuda')
-        data_batch = [{'seq_ctx': seq_ctx, 'labels': shift_labels}]
-        loss_ctx = CELossContext()
-        data_batch = loss_ctx.build_list_ctx(data_batch, device='cuda', data_mesh=data_mesh)[0]
-        interns1_model.from_hf(INTERNS1_DENSE_PATH)
-        interns1_model.eval()  # avoid open drop_path
+        loss_ctx_input = CELossContextInputItem(shifted_labels=shifted_labels)
+        loss_ctx_input = loss_ctx_input.to('cuda')
+
+        if sp_size > 1:
+            seq_ctx = seq_ctx.split(sp_mesh)
+            loss_ctx_input = loss_ctx_input.sp_split(sp_mesh)
+
+        seq_ctx_list = [seq_ctx]
+        loss_ctx_input_list: list[CELossContextInputItem] = [loss_ctx_input]
+
+        LossContext = loss_cfg.loss_ctx_cls
+        batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
+            loss_ctx_input_list, 
+            loss_cfg,
+        )
+        loss_kwargs = batches_loss_kwargs[0]
+        loss_ctx = LossContext(loss_cfg, loss_kwargs)
+        seq_ctx = seq_ctx_list[0]
 
         with torch.no_grad():
             output = interns1_model(
-                seq_ctx=data_batch['seq_ctx'],
-                loss_ctx=data_batch['loss_ctx'],
+                seq_ctx=seq_ctx,
+                loss_ctx=loss_ctx,
             )
         loss = output["loss"]
         self.assertTrue(torch.allclose(loss, expected_loss.to(loss.dtype), atol=tol, rtol=tol))
@@ -220,29 +251,43 @@ class TestInternS1(DistributedTestBase):
         with torch.device("meta"):
             model_cfg = InternS1MiniConfig()
             interns1_model = model_cfg.build().to(torch.bfloat16)
-
+        
         fsdp_config = FSDPConfig(
             cpu_offload=False,
         )
         data_mesh = None
-        shift_input_ids = input_ids[:, :-1]
-        shift_labels = input_ids[:, 1:]
-        seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids.to('cuda'),))
-        data_batch = [{'seq_ctx': seq_ctx, 'labels': shift_labels}]
-        loss_ctx = CELossContext()
-        data_batch = loss_ctx.build_list_ctx(data_batch, device='cuda', data_mesh=data_mesh)[0]
+
         interns1_model.language_model.fully_shard(fsdp_config=fsdp_config)
         interns1_model.vision_tower.fully_shard(fsdp_config=fsdp_config)
         interns1_model.multi_modal_projector.fully_shard(fsdp_config=fsdp_config)
         interns1_model.fully_shard(fsdp_config=fsdp_config)
-
+        
         interns1_model.from_hf(INTERNS1_DENSE_PATH)
         interns1_model.eval()  # avoid open drop_path
 
+        shift_input_ids = input_ids[:, :-1]
+        shifted_labels = input_ids[:, 1:]
+        seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids.to('cuda'),))
+        loss_ctx_input = CELossContextInputItem(shifted_labels=shifted_labels)
+        loss_ctx_input = loss_ctx_input.to('cuda')
+
+        seq_ctx_list = [seq_ctx]
+        loss_ctx_input_list: list[CELossContextInputItem] = [loss_ctx_input]
+
+        loss_cfg = CELossConfig()
+        LossContext = loss_cfg.loss_ctx_cls
+        batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
+            loss_ctx_input_list, 
+            loss_cfg,
+        )
+        loss_kwargs = batches_loss_kwargs[0]
+        loss_ctx = LossContext(loss_cfg, loss_kwargs)
+        seq_ctx = seq_ctx_list[0]
+
         with torch.no_grad():
             output = interns1_model(
-                seq_ctx=data_batch['seq_ctx'],
-                loss_ctx=data_batch['loss_ctx'],
+                seq_ctx=seq_ctx,
+                loss_ctx=loss_ctx,
             )
         loss = output["loss"]
         self.assertTrue(torch.allclose(loss, expected_loss.to(loss.dtype), atol=tol, rtol=tol))
@@ -325,18 +370,11 @@ class TestInternS1(DistributedTestBase):
             cpu_offload=False,
         )
         data_mesh = None
+        sp_mesh = None
         if sp_size > 1:
             data_mesh = init_data_mesh(device, sp_size=sp_size)
-
-        shift_input_ids = input_ids[:, :-1]
-        shift_labels = input_ids[:, 1:]
-        seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids.to('cuda'),))
-        seq_ctx.image_flags = image_flags
-        seq_ctx.pixel_values = pixel_values
-        seq_ctx.to('cuda')
-        data_batch = [{'seq_ctx': seq_ctx, 'labels': shift_labels}]
-        loss_ctx = CELossContext()
-        data_batch = loss_ctx.build_list_ctx(data_batch, device='cuda', data_mesh=data_mesh)[0]
+            sp_mesh = data_mesh["sp"]
+        
         interns1_model.language_model.fully_shard(fsdp_config=fsdp_config)
         interns1_model.vision_tower.fully_shard(fsdp_config=fsdp_config)
         interns1_model.multi_modal_projector.fully_shard(fsdp_config=fsdp_config)
@@ -345,10 +383,36 @@ class TestInternS1(DistributedTestBase):
         interns1_model.from_hf(INTERNS1_DENSE_PATH)
         interns1_model.eval()  # avoid open drop_path
 
+        shift_input_ids = input_ids[:, :-1]
+        shifted_labels = input_ids[:, 1:]
+        seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids.to('cuda'),))
+        seq_ctx.image_flags = image_flags
+        seq_ctx.pixel_values = pixel_values
+        seq_ctx.to('cuda')
+        loss_ctx_input = CELossContextInputItem(shifted_labels=shifted_labels)
+        loss_ctx_input = loss_ctx_input.to('cuda')
+
+        if sp_size > 1:
+            seq_ctx = seq_ctx.split(sp_mesh)
+            loss_ctx_input = loss_ctx_input.sp_split(sp_mesh)
+
+        seq_ctx_list = [seq_ctx]
+        loss_ctx_input_list: list[CELossContextInputItem] = [loss_ctx_input]
+
+        loss_cfg = CELossConfig()
+        LossContext = loss_cfg.loss_ctx_cls
+        batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
+            loss_ctx_input_list, 
+            loss_cfg,
+        )
+        loss_kwargs = batches_loss_kwargs[0]
+        loss_ctx = LossContext(loss_cfg, loss_kwargs)
+        seq_ctx = seq_ctx_list[0]
+
         with torch.no_grad():
             output = interns1_model(
-                seq_ctx=data_batch['seq_ctx'],
-                loss_ctx=data_batch['loss_ctx'],
+                seq_ctx=seq_ctx,
+                loss_ctx=loss_ctx,
             )
         loss = output["loss"]
         self.assertTrue(torch.allclose(loss, expected_loss.to(loss.dtype), atol=tol, rtol=tol))

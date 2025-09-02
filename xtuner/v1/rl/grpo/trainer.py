@@ -27,9 +27,8 @@ from xtuner.v1.ray.environment import SingleTurnEnvironment
 from xtuner.v1.ray.evaluator import Evaluator, EvaluatorConfig
 from xtuner.v1.ray.judger import JudgerConfig
 from xtuner.v1.ray.rollout import SampleParams
-from xtuner.v1.rl.grpo.config import WorkerConfig
 from xtuner.v1.rl.grpo.controller import GRPOTrainingController
-from xtuner.v1.rl.grpo.worker import GRPOTrainingWorker
+from xtuner.v1.rl.grpo.worker import GRPOTrainingWorker, WorkerConfig
 from xtuner.v1.utils import (
     XTUNER_DETERMINISTIC,
     get_logger,

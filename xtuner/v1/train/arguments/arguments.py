@@ -12,6 +12,7 @@ from xtuner.v1.config.base_model import TransformerConfig
 from xtuner.v1.config.data import DataloaderConfig, DatasetConfig, DatasetConfigList
 from xtuner.v1.config.optim import AdamWConfig, LRConfig
 from xtuner.v1.datasets import FTDPTokenizeFnConfig
+from xtuner.v1.loss.ce_loss import CELossConfig
 from xtuner.v1.model import get_model_config, get_model_config_from_hf
 from xtuner.v1.utils import Config, get_logger, is_hf_model_path
 
@@ -110,6 +111,7 @@ class TrainingArguments(BaseModel):
 
         if self.total_step is None and self.epoch_num is None:
             self.epoch_num = 1
+        loss_cfg = CELossConfig()
 
         return TrainerConfig(
             model_cfg=model_cfg,
@@ -119,13 +121,13 @@ class TrainingArguments(BaseModel):
             dataloader_cfg=dataloader_cfg,
             optim_cfg=optim_cfg,
             lr_cfg=lr_cfg,
+            loss_cfg=loss_cfg,
             fsdp_cfg=self.fsdp_config,
             global_batch_size=self.global_batch_size,
             total_step=self.total_step,
             epoch_num=self.epoch_num,
             resume=resume_cfg,
             work_dir=self.work_dir,
-            chunked_loss=True,
         )
 
     def _get_dataset_config(self) -> DatasetConfigList:

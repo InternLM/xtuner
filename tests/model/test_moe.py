@@ -5,7 +5,7 @@ from xtuner.v1.module.attention import MHAConfig
 from torch.distributed.device_mesh import init_device_mesh
 import os
 from copy import deepcopy
-from xtuner.v1.loss import CELossContext
+from xtuner.v1.loss.ce_loss import CELossContext, CELossConfig, CELossContextInputItem
 
 from torch.testing._internal.common_distributed import DistributedTestBase
 import parametrize
@@ -50,21 +50,26 @@ class TestMoE:
         )
         model = MoE(config=config).to(dtype).to(device)
         model.cuda()
+        loss_cfg = CELossConfig()
 
         input_ids = torch.randint(
             0, config.vocab_size, (1, 128), dtype=torch.int64, device="cuda"
         )
         shift_input_ids = input_ids[:, :-1]
-        shift_labels = input_ids[:, 1:]
+        shifted_labels = input_ids[:, 1:]
         seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids.to('cuda'),))
 
-        data_batch = [{'seq_ctx': seq_ctx, 'labels': shift_labels}]
-        loss_ctx = CELossContext()
-        data_batch = loss_ctx.build_list_ctx(data_batch, device='cuda')[0]
-        model(
-            seq_ctx=data_batch['seq_ctx'],
-            loss_ctx=data_batch['loss_ctx'],
+        seq_ctx_list = [seq_ctx]
+        loss_ctx_input_list: list[CELossContextInputItem] = [CELossContextInputItem(shifted_labels=shifted_labels)]
+        LossContext = loss_cfg.loss_ctx_cls
+        batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
+            loss_ctx_input_list, 
+            loss_cfg,
         )
+        loss_kwargs = batches_loss_kwargs[0]
+        loss_ctx = LossContext(loss_cfg, loss_kwargs)
+        seq_ctx = seq_ctx_list[0]
+        model(seq_ctx=seq_ctx, loss_ctx=loss_ctx)
 
 
 class TestDistributedMoE(DistributedTestBase):
@@ -104,7 +109,6 @@ class TestDistributedMoE(DistributedTestBase):
             attention=attention_config,
             tie_word_embeddings=False,
             training_dtype="bf16",
-            chunked_loss=False,
             n_routed_experts=32,
             n_shared_experts=n_shared_experts,
             num_experts_per_tok=2,
@@ -113,6 +117,7 @@ class TestDistributedMoE(DistributedTestBase):
             moe_intermediate_size=256,  # grouped linear kernel need this to be multiple of 256
             router=router_config,
         )
+        loss_cfg = CELossConfig()
 
         model = MoE(config=config).to(dtype).to(device)
         parallel_config = deepcopy(config)
@@ -128,21 +133,23 @@ class TestDistributedMoE(DistributedTestBase):
             0, config.vocab_size, (1, 128), dtype=torch.int64, device="cuda"
         )
         shift_input_ids = input_ids[:, :-1]
-        shift_labels = input_ids[:, 1:]
+        shifted_labels = input_ids[:, 1:]
         seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids.to('cuda'),))
-        data_batch = [{'seq_ctx': seq_ctx, 'labels': shift_labels}]
-        loss_ctx = CELossContext()
-        data_batch = loss_ctx.build_list_ctx(data_batch, device='cuda')[0]
 
-        loss_parallel = parallel_model(
-            seq_ctx=data_batch['seq_ctx'],
-            loss_ctx=data_batch['loss_ctx'],
-        )["loss"]
+        seq_ctx_list = [seq_ctx]
+        loss_ctx_input_list: list[CELossContextInputItem] = [CELossContextInputItem(shifted_labels=shifted_labels)]
+        LossContext = loss_cfg.loss_ctx_cls
+        batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
+            loss_ctx_input_list, 
+            loss_cfg,
+        )
+        loss_kwargs = batches_loss_kwargs[0]
+        loss_ctx = LossContext(loss_cfg, loss_kwargs)
+        seq_ctx = seq_ctx_list[0]
 
-        loss_expected = model(
-            seq_ctx=data_batch['seq_ctx'],
-            loss_ctx=data_batch['loss_ctx'],
-        )["loss"]
+        loss_parallel = parallel_model(seq_ctx=seq_ctx, loss_ctx=loss_ctx)["loss"]
+
+        loss_expected = model(seq_ctx=seq_ctx, loss_ctx=loss_ctx)["loss"]
 
         torch.allclose(loss_expected, loss_parallel, atol=1e-6, rtol=1e-4)
 

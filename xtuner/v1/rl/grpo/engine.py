@@ -2,9 +2,8 @@ import torch
 
 from xtuner.v1.config import FSDPConfig, MoEConfig, OptimConfig
 from xtuner.v1.engine.train_engine import TrainEngine
+from xtuner.v1.model.base import ModelItem
 from xtuner.v1.utils import get_device, get_logger, get_torch_device_module
-
-from ..loss_context import EngineInputItem
 
 
 logger = get_logger()
@@ -25,7 +24,7 @@ class GRPOTrainEngine(TrainEngine):
             fsdp_cfg=fsdp_cfg,
         )
 
-    def train_step(self, data_batches: list[EngineInputItem]):  # type: ignore
+    def train_step(self, data_batches: list[ModelItem]):  # type: ignore
         # TODO: support intra-layer micro-batch
         if self.float8_handler is not None and self.float8_handler.enabled:
             self.float8_handler.precompute_float8_dynamic_scale_for_fsdp(self.model)

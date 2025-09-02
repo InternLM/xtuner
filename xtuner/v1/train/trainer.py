@@ -11,7 +11,7 @@ from typing import Sized, cast
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from mmengine import is_installed, load
+from mmengine import load
 from mmengine.dist import get_rank, get_world_size
 from mmengine.runner import set_random_seed
 from pydantic import BaseModel
@@ -26,9 +26,12 @@ from xtuner.utils.device import get_device, get_torch_device
 from xtuner.v1.config import DataloaderConfig, DatasetConfigList, FSDPConfig, LRConfig, OptimConfig
 from xtuner.v1.config.base_model import TransformerConfig
 from xtuner.v1.config.trainer import ResumeConfig, TrainerConfig
+from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.datasets.build import build_dataloader, build_datasets
-from xtuner.v1.loss import CELossContext
 from xtuner.v1.model.interns1 import InternS1BaseConfig
+from xtuner.v1.loss import CELossConfig
+from xtuner.v1.loss.ce_loss import CELossContextInputItem
+from xtuner.v1.model.base import ModelItem
 from xtuner.v1.profiler import profilling_memory, profilling_time
 from xtuner.v1.utils import (
     XTUNER_DETERMINISTIC,
@@ -101,7 +104,7 @@ class Trainer:
         fsdp_cfg (FSDPConfig | None): Configuration for Fully Sharded Data Parallel (FSDP).
         dataset_cfg (DatasetConfigList): Configuration for training datasets.
         dataloader_cfg (DataloaderConfig): Configuration for the data loader.
-        loss_ctx (CELossContext | None): Context for the cross-entropy loss function.
+        loss_cfg (CELossConfig | None): Config for the cross-entropy loss function.
         lr_cfg (LRConfig): Configuration for the learning rate scheduler.
         tokenizer_path (str | Path | None): Path to the tokenizer.
         global_batch_size (int | None): Global batch size for training.
@@ -138,7 +141,7 @@ class Trainer:
         fsdp_cfg: FSDPConfig | None = None,
         dataset_cfg: DatasetConfigList,
         dataloader_cfg: DataloaderConfig,
-        loss_ctx: CELossContext | None = None,
+        loss_cfg: CELossConfig | None = None,
         lr_cfg: LRConfig,
         tokenizer_path: str | Path | None = None,
         global_batch_size: int | None,
@@ -261,11 +264,10 @@ class Trainer:
             intra_layer_micro_batch=intra_layer_micro_batch,
         )
         self._lr_scheduler = self.build_lr_scheduler(lr_cfg)
-        # TODO: (huanghaian) The impl of CELossContext should be decoupled with config
-        if loss_ctx is None:
-            self.loss_ctx = CELossContext()
+        if loss_cfg is None:
+            self.loss_cfg = CELossConfig()
         else:
-            self.loss_ctx = loss_ctx
+            self.loss_cfg = loss_cfg
         # TODO: TMP hardcode here
         #
         if debug:
@@ -284,15 +286,6 @@ class Trainer:
         Returns:
             Self: Trainer instance initialized with the provided config.
         """
-        if config.chunked_loss:
-            if is_installed("liger_kernel"):
-                loss_class = "liger_cross_entropy"
-            else:
-                loss_class = "chunk_cross_entropy"
-        else:
-            loss_class = "cross_entropy"
-
-        loss_ctx = CELossContext(loss_class=loss_class)
         self = cls(
             load_from=config.load_from,
             model_cfg=config.model_cfg,
@@ -300,7 +293,7 @@ class Trainer:
             fsdp_cfg=config.fsdp_cfg,
             dataset_cfg=config.dataset_cfg,
             dataloader_cfg=config.dataloader_cfg,
-            loss_ctx=loss_ctx,
+            loss_cfg=config.loss_cfg,
             lr_cfg=config.lr_cfg,
             tokenizer_path=config.tokenizer_path,
             global_batch_size=config.global_batch_size,
@@ -338,9 +331,41 @@ class Trainer:
             time_before_train_step = time.time()
             data_time = time_before_train_step - time_before_get_data
 
-            data_batch = self.loss_ctx.build_list_ctx(data_batch, self.data_mesh, DEVICE)
+            seq_ctx_list: list[SequenceContext] = []
+            loss_ctx_input_list: list[CELossContextInputItem] = []
+            for data in data_batch:
+                seq_ctx = data["seq_ctx"].to(DEVICE)
+                loss_ctx_input = CELossContextInputItem(shifted_labels=data["shifted_labels"]).to(DEVICE)
+                if self.sp_mesh.size() > 1:
+                    seq_ctx = seq_ctx.split(sequence_parallel_mesh=self.sp_mesh)
+                    loss_ctx_input = loss_ctx_input.sp_split(self.sp_mesh)
+                seq_ctx_list.append(seq_ctx)
+                loss_ctx_input_list.append(loss_ctx_input)
+
+            del data_batch
+
+            LossContext = self.loss_cfg.loss_ctx_cls
+            batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
+                loss_ctx_input_list,
+                self.loss_cfg,
+                cu_seq_lens_list=[seq_ctx.cu_seq_lens_q for seq_ctx in seq_ctx_list],
+                sp_mesh=self.sp_mesh,
+            )
+            engine_input = []
+            for seq_ctx, loss_kwargs in zip(seq_ctx_list, batches_loss_kwargs):
+                loss_ctx = LossContext(
+                    loss_cfg=self.loss_cfg,
+                    loss_kwargs=loss_kwargs,
+                )
+                engine_input.append(
+                    ModelItem(
+                        seq_ctx=seq_ctx,
+                        loss_ctx=loss_ctx,
+                    )
+                )
+
             with self._maybe_profilling():
-                loss_log, other_log = self._engine.train_step(data_batch)
+                loss_log, other_log = self._engine.train_step(engine_input)
 
             grad_norm = self._engine.clip_grad_norm()
             self._engine.step_optimizer(grad_norm)

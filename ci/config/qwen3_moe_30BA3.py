@@ -9,6 +9,7 @@ from xtuner.v1.config import (
     LRConfig,
 )
 from xtuner.v1.datasets import FTDPTokenizeFnConfig
+from xtuner.v1.loss.ce_loss import CELossConfig
 
 
 QWEN3_MOE_PATH = os.environ["QWEN3_MOE_PATH"]
@@ -35,6 +36,8 @@ dataloader_config = DataloaderConfig(
     pack_max_length=16384
 )
 
+loss_cfg = CELossConfig()
+
 
 trainer = TrainerConfig(
     load_from=QWEN3_MOE_PATH,
@@ -44,10 +47,10 @@ trainer = TrainerConfig(
     dataset_cfg=dataset_config,
     dataloader_cfg=dataloader_config,
     lr_cfg=lr_cfg,
+    loss_cfg=loss_cfg,
     tokenizer_path=QWEN3_MOE_PATH,
     global_batch_size=16,
     epoch_num=1,
     work_dir="/tmp/qwen3_moe_30BA3",
-    chunked_loss=True,
     seed=0,
 )

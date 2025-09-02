@@ -1,4 +1,5 @@
-from .ce_loss import BaseChunkLoss, CEForwardItem, CELossContext, ChunkCELoss, CrossEntropyLoss
+from .base_loss_ctx import BaseLossConfig, BaseLossContext, BaseLossKwargs
+from .ce_loss import CELossConfig, CELossContext
 from .chunk_loss import ChunkLoss
 from .moe_loss import BalancingLoss, ZLoss
 
@@ -6,13 +7,13 @@ from .moe_loss import BalancingLoss, ZLoss
 __all__ = [
     "BalancingLoss",
     "ZLoss",
-    "BaseChunkLoss",
-    "CrossEntropyLoss",
     "CELossContext",
-    "ChunkCELoss",
+    "CELossConfig",
     "LigerFusedLinearCrossEntropyLossWithWeights",
-    "CEForwardItem",
     "ChunkLoss",
+    "BaseLossConfig",
+    "BaseLossContext",
+    "BaseLossKwargs",
 ]
 
 import torch

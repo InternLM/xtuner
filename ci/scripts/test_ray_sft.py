@@ -19,6 +19,7 @@ from xtuner.v1.ray.train import TrainingWorker
 from xtuner.v1.ray.accelerator import AutoAcceleratorWorkers, AcceleratorResourcesConfig
 from xtuner.v1.config.trainer import TrainerConfig
 from xtuner.v1.train.trainer import Trainer
+from xtuner.v1.loss.ce_loss import CELossConfig
 import torch
 
 
@@ -86,6 +87,8 @@ if __name__ == "__main__":
     )
     lr_cfg = LRConfig(lr_type="cosine", lr_min=1e-6)
 
+    loss_cfg = CELossConfig()
+
     trainer_cfg = TrainerConfig(
         model_cfg=moe_cfg,
         load_from=args.model_path,
@@ -95,6 +98,7 @@ if __name__ == "__main__":
         optim_cfg=optim_cfg,
         lr_cfg=lr_cfg,
         fsdp_cfg=fsdp_cfg,
+        loss_cfg=loss_cfg,
         global_batch_size=16,
         epoch_num=1,
         work_dir="/tmp/qwen3_moe_test",

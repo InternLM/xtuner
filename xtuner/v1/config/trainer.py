@@ -7,6 +7,8 @@ from typing_extensions import TypedDict
 
 from xtuner.v1.config.base_model import TransformerConfig
 
+#
+from ..loss.ce_loss import CELossConfig
 from .data import DataloaderConfig, DatasetConfigList
 from .fsdp import FSDPConfig
 from .optim import LRConfig, OptimConfig
@@ -28,6 +30,7 @@ class TrainerConfig(BaseModel):
     dataloader_cfg: DataloaderConfig
     optim_cfg: OptimConfig
     lr_cfg: LRConfig
+    loss_cfg: CELossConfig = CELossConfig()
     fsdp_cfg: FSDPConfig | None = None
     global_batch_size: int | None
     work_dir: Path | str | None = None
@@ -46,7 +49,6 @@ class TrainerConfig(BaseModel):
     seed: int = 42
     dist_backend: str = "cpu:gloo,cuda:nccl"
     debug: bool = False
-    chunked_loss: Annotated[bool, Parameter(group="model")] = False
 
     @model_validator(mode="after")
     def _convert_work_dir(self):

@@ -18,6 +18,7 @@ from xtuner.v1.model.interns1 import InternS1MiniConfig
 from xtuner.v1.loss import CELossContext
 from xtuner.v1.train.trainer import Trainer
 from xtuner.v1.utils.compile import maybe_compile
+from xtuner.v1.loss import CELossConfig
 import argparse
 
 INTERNS1_DENSE_PATH = os.environ["INTERNS1_DENSE_PATH"]
@@ -258,7 +259,7 @@ def main():
             max_length=8192,
         )
         work_dir = f"{args.work_dir}-{name}"
-        loss_ctx = CELossContext()
+        loss_cfg = CELossConfig(mode="chunk", chunk_size=1024, ignore_idx=-100)
         trainer = Trainer(
             load_from=INTERNS1_DENSE_PATH,
             model_cfg=model_cfg,
@@ -266,7 +267,7 @@ def main():
             fsdp_cfg=fsdp_cfg,
             dataset_cfg=dataset_config,
             dataloader_cfg=dataloader_config,
-            loss_ctx=loss_ctx,
+            loss_cfg=loss_cfg,
             lr_cfg=lr_cfg,
             sp_size=sp_size,
             tokenizer_path=INTERNS1_DENSE_PATH,

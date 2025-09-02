@@ -1,13 +1,12 @@
 from ..grpo import GRPOTrainingController as OrealTrainingController
 from ..grpo import GRPOTrainingWorker as OrealTrainingWorker
-from .config import LossConfig, WorkerConfig
-from .loss import OrealLoss
+from ..grpo import WorkerConfig
+from .loss import OrealLossConfig
 
 
 __all__ = [
-    "LossConfig",
     "WorkerConfig",
     "OrealTrainingController",
-    "OrealLoss",
+    "OrealLossConfig",
     "OrealTrainingWorker",
 ]

@@ -8,6 +8,7 @@ from xtuner.v1.config import (
 from xtuner.v1.datasets import InternS1TokenizeFnConfig
 from xtuner.v1.model.dense.qwen3 import Qwen3Dense8BConfig
 from xtuner.v1.model.interns1 import InternS1MiniConfig
+from xtuner.v1.loss import CELossConfig
 
 # model config
 model_cfg = InternS1MiniConfig()  # fake tokenizer vocab size for tiny model
@@ -56,8 +57,8 @@ trainer = TrainerConfig(
     dataset_cfg=dataset_config,
     dataloader_cfg=dataloader_config,
     lr_cfg=lr_cfg,
+    loss_cfg=CELossConfig(mode="chunk", chunk_size=1024),
     global_batch_size=1,
     epoch_num=1,
-    chunked_loss=True,
     work_dir="work_dirs",
 )

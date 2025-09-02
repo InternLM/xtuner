@@ -21,8 +21,9 @@ from xtuner.v1.config import (
     BalancingLossConfig,
     ZLossConfig,
 )
-from xtuner.v1.rl.grpo.config import WorkerConfig, LossConfig
-from xtuner.v1.rl.grpo.worker import GRPOTrainingWorker as TrainingWorker
+# from xtuner.v1.rl.grpo.config import WorkerConfig, LossConfig
+from xtuner.v1.rl.grpo.loss import GRPOLossConfig as LossConfig
+from xtuner.v1.rl.grpo.worker import WorkerConfig, GRPOTrainingWorker as TrainingWorker
 from xtuner.v1.rl.grpo.controller import GRPOTrainingController as TrainingController
 
 
@@ -32,7 +33,7 @@ QWEN3_MOE_PATH = os.environ["QWEN3_MOE_PATH"]
 
 class TestGRPOTrain(unittest.TestCase):
     def setUp(self):
-        ray.init(num_cpus=70)
+        ray.init(num_cpus=70, ignore_reinit_error=True)
 
         resources = AcceleratorResourcesConfig(
             accelerator="GPU",

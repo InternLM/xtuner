@@ -74,7 +74,7 @@ class TestRollout(unittest.TestCase):
         )
 
     def setUp(self):
-        ray.init(num_cpus=80)
+        ray.init(num_cpus=80, ignore_reinit_error=True)
         self.data_path = TRAIN_DATA_PATH
         self.model_path = MODEL_PATH
         self.init_config()
