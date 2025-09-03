@@ -9,6 +9,19 @@ _SOLUTION_CLIP_CHARS = 300
 
 
 def extract_solution(solution_str, method="strict"):
+    """Extract the numerical solution from a string.
+
+    Args:
+        solution_str (str): The string containing the solution.
+        method (str): The extraction method, either "strict" or "flexible".
+            "strict" requires the solution to be in the format "#### <number>".
+            "flexible" extracts the last numerical value found.
+            Defaults to "strict".
+
+    Returns:
+        str or None: The extracted numerical solution as a string, or None if
+            not found.
+    """
     assert method in ["strict", "flexible"]
 
     # Optimization: Regular expression matching on very long strings can be slow.
@@ -41,6 +54,18 @@ def extract_solution(solution_str, method="strict"):
 
 
 def compute_reward(response, label, extra_info):
+    """Compute the reward for a given response based on the GSM8K dataset and
+    criteria.
+
+    Args:
+        response (str): The model's generated response.
+        label (str): The ground-truth answer.
+        extra_info (dict): A dictionary containing scoring information,
+            e.g., `{"score": 1, "format_score": 0}`.
+
+    Returns:
+        int or float: The calculated reward.
+    """
     predict_str = response
     ground_truth = label
     answer = extract_solution(predict_str)
@@ -54,7 +79,14 @@ def compute_reward(response, label, extra_info):
 
 
 class GSM8KJudgerConfig(BaseModel):
+    """Configuration for the GSM8K judger."""
+
     extra_info: dict = {"score": 1, "format_score": 0}
 
     def build(self):
+        """Build a NativeJudger instance from the configuration.
+
+        Returns:
+            NativeJudger: An instance of the NativeJudger configured for GSM8K.
+        """
         return NativeJudger(reward_func=compute_reward, extra_info=self.extra_info)

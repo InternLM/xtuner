@@ -17,6 +17,8 @@ T = TypeVar("T")
 
 
 class AcceleratorResourcesConfig(BaseModel):
+    """Configuration for accelerator resources in a placement group."""
+
     num_accelerators_per_worker: Annotated[
         float,
         Parameter(help="Number of accelerators to allocate for each worker in the placement group."),
@@ -34,6 +36,9 @@ class AcceleratorResourcesConfig(BaseModel):
 
 
 class SingleAcceleratorWorker:
+    """A base class for a worker that utilizes a single accelerator and
+    initializes a distributed process group."""
+
     def __init__(
         self,
         config,
@@ -43,12 +48,35 @@ class SingleAcceleratorWorker:
         world_size: int,
         accelerator: str = "GPU",
     ):
+        """Initialize the SingleAcceleratorWorker.
+
+        Args:
+            config: The configuration object for the worker.
+            rank (int): The rank of this worker in the distributed world.
+            master_addr (str): The address of the master node for distributed
+                initialization.
+            master_port (int): The port of the master node.
+            world_size (int): The total number of workers in the distributed
+                world.
+            accelerator (str): The type of accelerator being used ('GPU' or
+                'NPU'). Defaults to "GPU".
+        """
         self.config = config
         self.accelerator = accelerator
         self.setup_distributed(rank, master_addr, master_port, world_size)
 
     @property
     def device_visible_env_name(self):
+        """Get the environment variable name for device visibility based on the
+        accelerator type.
+
+        Returns:
+            str: The name of the environment variable (e.g.,
+                'CUDA_VISIBLE_DEVICES').
+
+        Raises:
+            ValueError: If the accelerator type is unsupported.
+        """
         if self.accelerator == "GPU":
             return "CUDA_VISIBLE_DEVICES"
         elif self.accelerator == "NPU":
@@ -57,8 +85,20 @@ class SingleAcceleratorWorker:
             raise ValueError(f"Unsupported accelerator type: {self.accelerator}")
 
     def setup_distributed(self, rank: int, master_addr: str, master_port: int, world_size: int):
-        """Setup method to initialize the worker."""
+        """Set up the distributed environment for the worker.
 
+        This method configures the necessary environment variables and
+        initializes the `torch.distributed` process group.
+
+        Args:
+            rank (int): The rank of this worker.
+            master_addr (str): The address of the master node.
+            master_port (int): The port of the master node.
+            world_size (int): The total number of workers.
+
+        Raises:
+            ValueError: If the accelerator architecture is unsupported.
+        """
         os.environ["MASTER_ADDR"] = master_addr
         os.environ["MASTER_PORT"] = str(master_port)
         os.environ["RANK"] = str(rank)
@@ -82,17 +122,32 @@ class SingleAcceleratorWorker:
         )
 
     def test_all_reduce(self):
-        """Perform all-reduce operation on the given tensor."""
+        """Perform a test all-reduce operation to verify distributed setup.
+
+        Returns:
+            torch.Tensor: The tensor after the all-reduce operation.
+        """
         tensor = torch.tensor([1.0], device=torch.accelerator.current_accelerator())
         dist.all_reduce(tensor)
         return tensor
 
 
 class AutoAcceleratorWorkers:
+    """A utility class for automatically creating and managing distributed
+    workers on accelerators within a Ray PlacementGroup."""
+
     @staticmethod
     def build_placement_group(resources_config: AcceleratorResourcesConfig):
-        """Build a placement group based on the provided resources
-        configuration."""
+        """Build a Ray PlacementGroup based on the provided resource
+        configuration.
+
+        Args:
+            resources_config (AcceleratorResourcesConfig): The configuration
+                specifying the resources for each worker bundle.
+
+        Returns:
+            PlacementGroup: The created Ray PlacementGroup.
+        """
         bundles = [
             {
                 "CPU": resources_config.num_cpus_per_worker,
@@ -108,6 +163,18 @@ class AutoAcceleratorWorkers:
 
     @staticmethod
     def get_device_type(pg: PlacementGroup) -> AcceleratorType:
+        """Determine the type of accelerator used in a PlacementGroup.
+
+        Args:
+            pg (PlacementGroup): The placement group to inspect.
+
+        Returns:
+            AcceleratorType: The type of accelerator ('GPU' or 'NPU').
+
+        Raises:
+            ValueError: If mixed accelerator types are detected or no
+                accelerators are found.
+        """
         bundles = pg.bundle_specs
         if all("GPU" in bundle for bundle in bundles):
             return "GPU"
@@ -120,6 +187,22 @@ class AutoAcceleratorWorkers:
 
     @staticmethod
     def get_pg_options(pg: PlacementGroup) -> Dict:
+        """Provide a dictionary of resource requests for Ray tasks or actors
+        that need to be scheduled on a node with a specific accelerator.
+
+        By requesting a fractional amount (e.g., 0.01) of a CPU and an accelerator,
+        it ensures the task is co-located with the target hardware without
+        blocking the main workload from acquiring the full accelerator.
+
+        Args:
+            pg (PlacementGroup): The placement group to get options for.
+
+        Returns:
+            Dict: A dictionary of Ray resource options for `task.options()`.
+
+        Raises:
+            ValueError: If the accelerator architecture is unsupported.
+        """
         accelerator = AutoAcceleratorWorkers.get_device_type(pg)
 
         if accelerator == "GPU":
@@ -131,9 +214,28 @@ class AutoAcceleratorWorkers:
 
     @staticmethod
     def get_spmd_info(pg: PlacementGroup) -> Tuple[List[int], str, int, int]:
-        """Get the SPMD (Single Program Multiple Data) information from the
-        placement group."""
+        """Get SPMD (Single Program, Multiple Data) info from the placement
+        group.
 
+        This includes the sorted bundle indices, master address, master port,
+        and world size, which are essential for initializing a distributed
+        process group.
+
+        Args:
+            pg (PlacementGroup): The placement group.
+
+        Returns:
+            Tuple[List[int], str, int, int]: A tuple containing:
+                - sorted_bundle_idxs (List[int]): The bundle indices sorted by
+                  node and local rank.
+                - master_addr (str): The address of the master worker (rank 0).
+                - master_port (int): The port for distributed communication.
+                - world_size (int): The total number of workers.
+
+        Raises:
+            RuntimeError: If Ray is not initialized.
+            AssertionError: If a bundle does not have exactly one accelerator.
+        """
         if not ray.is_initialized():
             raise RuntimeError("Ray is not initialized. Please initialize Ray before calling this method.")
 
@@ -176,7 +278,19 @@ class AutoAcceleratorWorkers:
 
     @classmethod
     def from_config(cls, worker_cls, worker_config, accelerator_config: AcceleratorResourcesConfig):
-        """Create workers based on the provided configuration."""
+        """Create workers and a placement group from configuration objects.
+
+        Args:
+            worker_cls: The class of the worker to instantiate.
+            worker_config: The configuration for each worker instance.
+            accelerator_config (AcceleratorResourcesConfig): The configuration
+                for the accelerator resources.
+
+        Returns:
+            Tuple[Dict[T, Tuple[int, int]], PlacementGroup]: A tuple
+                containing a map of worker instances to their (rank,
+                bundle_index) and the created placement group.
+        """
         pg = AutoAcceleratorWorkers.build_placement_group(accelerator_config)
         workers_bundle_idx_map = cls.from_placement_group(worker_cls, worker_config, pg)
 
@@ -184,8 +298,17 @@ class AutoAcceleratorWorkers:
 
     @classmethod
     def from_placement_group(cls, worker_cls, worker_config, pg: PlacementGroup):
-        """Create workers based on the provided configuration."""
+        """Create workers from an existing placement group.
 
+        Args:
+            worker_cls: The class of the worker to instantiate.
+            worker_config: The configuration for each worker instance.
+            pg (PlacementGroup): The existing placement group to use.
+
+        Returns:
+            Dict[T, Tuple[int, int]]: A map of worker instances to their
+                (rank, bundle_index).
+        """
         pg_options = cls.get_pg_options(pg)
         device_type = cls.get_device_type(pg)
         sorted_bundle_idxs, master_addr, master_port, world_size = cls.get_spmd_info(pg)

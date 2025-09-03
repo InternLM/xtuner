@@ -34,7 +34,21 @@ DEVICE_MODULE = get_torch_device_module()
     },
 )
 class TrainingWorker(SingleAcceleratorWorker):
-    """Worker class for training tasks."""
+    """Worker class for training tasks.
+
+    This class extends `SingleAcceleratorWorker` to provide functionalities
+    specific to training, such as fitting the model and updating weights for
+    rollout workers.
+
+    Args:
+        config (TrainerConfig): The configuration for the trainer.
+        rank (int): The rank of this worker in the distributed setup.
+        master_addr (str): The address of the master worker.
+        master_port (int): The port of the master worker.
+        world_size (int): The total number of workers.
+        accelerator (str): The type of accelerator to use (e.g., "GPU").
+            Defaults to "GPU".
+    """
 
     def __init__(
         self,
@@ -57,16 +71,33 @@ class TrainingWorker(SingleAcceleratorWorker):
         self.endpoints["update_weights"] = "update_weights"
 
     def get_data_replicate_size(self) -> int:
-        """Get the data parallel size for the training worker."""
+        """Get the data parallel size for the training worker.
+
+        Returns:
+            int: The data parallel size, which is 1 for this worker.
+        """
         return 1
 
     def fit(self):
+        """Starts the training process by calling the trainer's `fit`
+        method."""
         self.trainer.fit()
 
     def update_rollout_info(
         self, engine_mesh_list: DeviceMeshRaw, server_url_dict: ServiceUrlMap, rollout_config: RolloutConfig
     ):
-        """Update the rollout information for the training worker."""
+        """Update the rollout information for the training worker.
+
+        This method sets up the device mesh and other configuration details
+        needed to communicate with the rollout workers.
+
+        Args:
+            engine_mesh_list (DeviceMeshRaw): A list of lists representing the
+                device mesh for the rollout engines.
+            server_url_dict (ServiceUrlMap): A dictionary mapping service names
+                to their URLs.
+            rollout_config (RolloutConfig): The configuration for the rollout.
+        """
         tp = rollout_config.tensor_parallel_size
         ep = rollout_config.expert_parallel_size
         assert tp == 1 or ep == 1, "Either tensor parallel size or engine parallel size must be 1."
@@ -82,7 +113,11 @@ class TrainingWorker(SingleAcceleratorWorker):
         )
 
     def update_weights(self):
-        """Update the model weights."""
+        """Update the model weights for the rollout workers.
+
+        This method gathers the model weights, handles different tensor types (including Float8Tensors), and sends the
+        updated weights to the rollout workers.
+        """
         self.endpoints["update_weights"] = "update_weights"
         assert self.rollout_device_mesh is not None
 
@@ -182,6 +217,17 @@ class TrainingWorker(SingleAcceleratorWorker):
         return
 
     def request_update_params(self, state_dict, finished=False):
+        """Send a request to update the parameters on the rollout workers.
+
+        This method serializes the state dictionary and sends it to the
+        appropriate rollout worker via an HTTP request.
+
+        Args:
+            state_dict (dict): The state dictionary containing the model
+                parameters to update.
+            finished (bool): A flag indicating whether this is the final
+                batch of updates. Defaults to False.
+        """
         cpu_mesh = self.rollout_device_mesh["engine_parallel"]
         cpu_group = cpu_mesh.get_group()
         head_rank = cpu_mesh.mesh[0].item()

@@ -12,6 +12,9 @@ from .worker import RolloutWorker
 
 
 class SampleParams(BaseModel):
+    """Parameters for controlling the sampling process during text
+    generation."""
+
     n: Annotated[int, Parameter(help="Number of samples to generate.")] = 1
     top_k: Annotated[
         int, Parameter(help="The number of highest probability vocabulary tokens to keep for top-k-filtering.")
@@ -32,11 +35,21 @@ class SampleParams(BaseModel):
 
 @ray.remote
 class RolloutController:
+    """Controller for managing and coordinating multiple RolloutWorker
+    actors."""
+
     def __init__(
         self,
         infer_config: RolloutConfig,
         workers_bundle_idx_map: Dict[RolloutWorker, Tuple[int, int]],
     ):
+        """Initialize the RolloutController.
+
+        Args:
+            infer_config (RolloutConfig): The configuration for the rollout.
+            workers_bundle_idx_map (Dict[RolloutWorker, Tuple[int, int]]): A map
+                from worker actors to their (head_rank, bundle_index) tuple.
+        """
         self.config = infer_config
         self.num_workers = 0
         self.worker_server_urls: List[str] = []
@@ -53,6 +66,12 @@ class RolloutController:
         self.sample_params = SampleParams()
 
     def get_rollout_info(self):
+        """Get information about the current rollout setup.
+
+        Returns:
+            dict: A dictionary containing the engine mesh list, server URL
+                dictionary, and the rollout configuration.
+        """
         return dict(
             engine_mesh_list=self.engine_mesh_list,
             server_url_dict=self.server_url_dict,
@@ -60,6 +79,22 @@ class RolloutController:
         )
 
     def init_workers(self):
+        """Initializes and configures the pool of RolloutWorker actors.
+
+        This method configures distributed inference engines by grouping
+        workers, where each group forms a tensor-parallel inference engine. It
+        determines the `active_workers` to act as the head of each engine,
+        constructs the `engine_mesh_list` to define engine topology, acquires
+        necessary distributed communication ports, and finally launches servers
+        on the `active_workers` to get their addresses.
+
+        Returns:
+            Tuple[List, Dict]: A tuple where the first element is
+            `engine_mesh_list`, a list of lists containing the ranks of workers
+            in each engine, and the second element is `worker_server_urls_map`,
+            a dictionary mapping the ID of each active worker to its
+            corresponding server URL.
+        """
         workers = list(self.workers_bundle_idx_map.keys())
         active_servers_count, nodes_per_engine = self._get_active_servers_count(self.config, len(workers))
         interval = len(workers) // active_servers_count
@@ -101,6 +136,25 @@ class RolloutController:
         extra_params: dict = dict(),
         format: str = "openai",
     ):
+        """Perform a rollout using one of the workers in a round-robin fashion.
+
+        Args:
+            prompt (List[str]): The prompt to send to the model.
+            tools (List, optional): A list of tools the model can call.
+                Defaults to [].
+            tool_choice (str, optional): The tool choice strategy.
+                Defaults to "auto".
+            sample_params (Optional[SampleParams], optional): The sampling
+                parameters for generation. If None, the default `sample_params`
+                of the controller will be used. Defaults to None.
+            extra_params (dict, optional): Extra parameters for the worker.
+                Defaults to dict().
+            format (str, optional): The format of the response.
+                Defaults to "openai".
+
+        Returns:
+            The response from the rollout worker.
+        """
         index = self.worker_index % len(self.active_rollout_workers)
         final_sample_params = sample_params if sample_params else self.sample_params
         response_ref = self.active_rollout_workers[index].rollout.remote(  # type: ignore[attr-defined]
@@ -116,6 +170,18 @@ class RolloutController:
 
     # internal functions
     def _update_dist_init_addr(self, nodes_per_engine, dist_init_addrs, tp_size):
+        """Update the distributed initialization addresses for workers.
+
+        This is used to group workers that belong to the same inference engine.
+
+        Args:
+            nodes_per_engine (int): The number of nodes per inference engine.
+            dist_init_addrs (list): The list of initial addresses.
+            tp_size (int): The tensor parallel size.
+
+        Returns:
+            list: The updated list of distributed initialization addresses.
+        """
         if nodes_per_engine > 1:
             index = list(range(0, self.num_workers + 1, tp_size)) + [self.num_workers]
             for i in range(1, len(index)):
@@ -123,6 +189,18 @@ class RolloutController:
         return dist_init_addrs
 
     def _get_active_servers_count(self, infer_config: RolloutConfig, gpu_nums: int):
+        """Calculate the number of active servers and nodes per engine.
+
+        This calculation depends on the inference backend and parallelism settings.
+
+        Args:
+            infer_config (RolloutConfig): The rollout configuration.
+            gpu_nums (int): The total number of GPUs available.
+
+        Returns:
+            Tuple[int, int]: A tuple containing the number of active servers
+                and the number of nodes per engine.
+        """
         # NOTE：Since different inference engines have different launch methods,
         # the number of nodes contained in each engine is not consistent.
         # For example: sglang requires starting an inference engine for each node,
@@ -136,7 +214,15 @@ class RolloutController:
         return active_servers_count, nodes_per_engine
 
     def _broadcast_to_active_workers(self, method_name: str, block: bool):
-        """Helper function to call a method on all active workers."""
+        """Helper function to call a method on all active workers.
+
+        Args:
+            method_name (str): The name of the method to call.
+            block (bool): Whether to block until the call completes.
+
+        Returns:
+            A list of futures if `block` is False, otherwise a list of results.
+        """
         futures = [getattr(worker, method_name).remote() for worker in self.active_rollout_workers]
         if not block:
             return futures
@@ -145,22 +231,57 @@ class RolloutController:
         return results
 
     def pause(self, block=True):
+        """Pauses all active rollout workers.
+
+        Args:
+            block (bool): Whether to block until the operation completes.
+        """
         return self._broadcast_to_active_workers("pause", block)
 
     def restart(self, block=True):
+        """Restarts all active rollout workers.
+
+        Args:
+            block (bool): Whether to block until the operation completes.
+        """
         return self._broadcast_to_active_workers("restart", block)
 
     def reset_prefix_cache(self, block=True):
+        """Resets the prefix cache on all active rollout workers.
+
+        Args:
+            block (bool): Whether to block until the operation completes.
+        """
         return self._broadcast_to_active_workers("reset_prefix_cache", block)
 
     def offload(self, block=True):
+        """Offloads model weights and KV cache on all active rollout workers.
+
+        Args:
+            block (bool): Whether to block until the operation completes.
+        """
         return self._broadcast_to_active_workers("offload", block)
 
     def onload_weights(self, block=True):
+        """Onloads model weights on all active rollout workers.
+
+        Args:
+            block (bool): Whether to block until the operation completes.
+        """
         return self._broadcast_to_active_workers("onload_weights", block)
 
     def onload_kvcache(self, block=True):
+        """Onloads KV cache on all active rollout workers.
+
+        Args:
+            block (bool): Whether to block until the operation completes.
+        """
         return self._broadcast_to_active_workers("onload_kvcache", block)
 
     def shutdown(self, block=True):
+        """Shuts down all active rollout workers.
+
+        Args:
+            block (bool): Whether to block until the operation completes.
+        """
         return self._broadcast_to_active_workers("shutdown", block)

@@ -18,6 +18,8 @@ from xtuner.v1.utils import get_logger
 
 
 class EvaluatorConfig(BaseModel):
+    """Configuration for the Evaluator."""
+
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     dataset_cfg: Annotated[
@@ -50,7 +52,21 @@ class EvaluatorConfig(BaseModel):
 
 @ray.remote
 class Evaluator:
+    """A Ray actor for evaluating a model's performance on a given dataset.
+
+    The Evaluator generates responses using an environment controller or rollout controller, then it use default or
+    custom computes metrics function to compute scores for generated samples. It returns the evaluation scores and
+    generated samples.
+    """
+
     def __init__(self, config: EvaluatorConfig, env_controller: BaseEnvironment):
+        """Initialize the Evaluator.
+
+        Args:
+            config (EvaluatorConfig): The configuration for the evaluator.
+            env_controller (EnvController): The environment controller used for
+                generating responses.
+        """
         self.config = config
         self.dataset = build_datasets(config.dataset_cfg, config.tokenizer)[0]
         self.dataloader = iter(self.dataset)
@@ -69,9 +85,32 @@ class Evaluator:
         self.logger = get_logger()
 
     def default_compute_metric(self, samples):
+        """Default metric computation function.
+
+        Calculates accuracy based on whether the reward is positive.
+
+        Args:
+            samples (list): A list of RLTextDataItem samples.
+
+        Returns:
+            dict: A dictionary containing the accuracy score.
+        """
         return {"accuracy": sum(s["reward"] > 0 for s in samples) / len(samples)}
 
     async def eval_worker_task(self, sample: RLTextDataItem):
+        """A single worker task to evaluate one sample.
+
+        This task calls the environment controller to run the model on a
+        sample. If it fails, it returns the sample with an incremented
+        retry count.
+
+        Args:
+            sample (RLTextDataItem): The data item to evaluate.
+
+        Returns:
+            RLTextDataItem or None: The sample with retry information if it
+                failed, or None if it succeeded or failed without a sample.
+        """
         try:
             sample = await self.env_controller.run.remote(sample, self.sample_params)  # type: ignore[attr-defined]
             self.return_list.append(sample)
@@ -86,6 +125,13 @@ class Evaluator:
                 self.logger.warning(f"Worker task failed with exception: {e}. No samples to return.")
 
     async def concurrent_eval_task_runner(self):
+        """Runs evaluation tasks concurrently to generate a batch of samples.
+
+        This method orchestrates the evaluation process by creating and managing
+        a pool of asynchronous worker tasks. It continuously fetches data from
+        the dataloader and submits evaluation tasks until the desired number of
+        samples (`self.eval_batch_size`) has been successfully processed.
+        """
         waiting_tasks = set()
         self.logger.info(f"Start to generate {self.eval_batch_size} samples for evaluate")
         self.logger.info(f"Evaluate sample parameters set to {self.sample_params}.")
@@ -134,6 +180,21 @@ class Evaluator:
             await asyncio.wait_for(asyncio.gather(*waiting_tasks, return_exceptions=True), timeout=10)
 
     async def run(self, sample_params: Optional[SampleParams] = None, return_samples=False):
+        """Run the full evaluation process.
+
+        This method resets the state, runs the concurrent task runner,
+        computes the final metrics, and returns the results.
+
+        Args:
+            sample_params (Optional[SampleParams]): Sampling parameters for
+                generation. Defaults to a greedy strategy.
+            return_samples (bool): Whether to return the generated samples
+                along with the scores. Defaults to False.
+
+        Returns:
+            dict or Tuple[dict, list]: The evaluation scores, and optionally
+                the generated samples.
+        """
         self.return_list = []
         self.dataloader = iter(self.dataset)
         self.sample_params = sample_params if sample_params else SampleParams()
