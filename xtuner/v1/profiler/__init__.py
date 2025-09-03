@@ -1,23 +1,12 @@
 from contextlib import contextmanager
 from pathlib import Path
 
-import torch
+from xtuner.v1.utils import get_device
 
 
-if not torch.accelerator.is_available():
-
-    @contextmanager
-    def profilling_time(profile_dir: Path):
-        yield
-
-    @contextmanager
-    def profilling_memory(profile_dir: Path):
-        yield
-
-elif torch.accelerator.current_accelerator().type == "cuda":
+if get_device() == "cuda":
     from .cuda_profile import profilling_memory, profilling_time
-
-elif torch.accelerator.current_accelerator().type == "npu":
+elif get_device() == "npu":
     from .npu_profile import profilling_memory, profilling_time
 
 else:

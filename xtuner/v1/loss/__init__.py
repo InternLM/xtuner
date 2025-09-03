@@ -17,8 +17,10 @@ __all__ = [
 
 import torch
 
+from xtuner.v1.utils import get_device
 
-if torch.accelerator.is_available() and torch.accelerator.current_accelerator().type == "cuda":
+
+if get_device() == "cuda":
     from .liger_with_weights import LigerFusedLinearCrossEntropyLossWithWeights
 
     __all__.append("LigerFusedLinearCrossEntropyLossWithWeights")

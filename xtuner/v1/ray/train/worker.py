@@ -13,7 +13,7 @@ from xtuner.v1.config.trainer import TrainerConfig
 from xtuner.v1.float8.float8_tensor import Float8Tensor
 from xtuner.v1.float8.fsdp_utils import WeightWithDynamicTilewiseFloat8CastTensor
 from xtuner.v1.train.trainer import Trainer
-from xtuner.v1.utils.device import get_device, get_torch_device_module
+from xtuner.v1.utils import get_device, get_torch_device_module
 
 from ..accelerator import SingleAcceleratorWorker
 from ..config import RolloutConfig

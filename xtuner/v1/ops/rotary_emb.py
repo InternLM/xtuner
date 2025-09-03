@@ -8,7 +8,7 @@ class ApplyRotaryEmbProtocol(Protocol):
 
 
 def get_apply_rotary_emb() -> ApplyRotaryEmbProtocol:
-    from xtuner.v1.utils.device import get_device
+    from xtuner.v1.utils import get_device
 
     device = get_device()
     if device == "npu":

@@ -4,7 +4,7 @@ from .protocol import FlashAttnVarlenProtocol, cpu_flash_varlen_attn
 
 
 def get_flash_attn_varlen() -> FlashAttnVarlenProtocol:
-    from xtuner.v1.utils.device import get_device
+    from xtuner.v1.utils import get_device
 
     device = get_device()
     if device == "cpu":

@@ -487,6 +487,7 @@ def serialize_state_dict(state_dict: dict) -> str:
         "env_vars": {
             "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
             "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
+            "HCCL_NPU_SOCKET_PORT_RANGE": "auto",
         }
     },
 )
