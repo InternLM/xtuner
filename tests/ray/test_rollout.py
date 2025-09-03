@@ -2,6 +2,7 @@ import os
 import unittest
 
 import ray
+import torch
 from transformers import AutoTokenizer
 
 from xtuner.v1.ray.config.worker import RolloutConfig
@@ -21,12 +22,16 @@ TEST_TEXT_MESSAGES=[{"role": "user", "content": "Hello!"}]
 MODEL_PATH = os.environ["ROLLOUT_MODEL_PATH"]
 TRAIN_DATA_PATH = os.environ["ROLLOUT_DATA_PATH"]
 TEST_DATA_PATH = os.environ["ROLLOUT_TEST_DATA_PATH"]
+resource_map = {
+    "npu": "NPU",
+    "cuda": "GPU",
+}
 
 
 class TestRollout(unittest.TestCase):
     def init_config(self):
         self.resources_cfg = AcceleratorResourcesConfig(
-            accelerator="GPU",
+            accelerator=resource_map[torch.accelerator.current_accelerator().type],
             num_workers=8,
             cpu_memory_per_worker=16 * 1024**3,  # 16 GB
         )

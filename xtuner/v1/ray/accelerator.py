@@ -187,13 +187,14 @@ class AutoAcceleratorWorkers:
         """Create workers based on the provided configuration."""
 
         pg_options = cls.get_pg_options(pg)
+        device_type = cls.get_device_type(pg)
         sorted_bundle_idxs, master_addr, master_port, world_size = cls.get_spmd_info(pg)
 
         workers_bundle_idx_map = dict()
         for rank, bundle_idx in enumerate(sorted_bundle_idxs):
             worker = worker_cls.options(
                 placement_group=pg, placement_group_bundle_index=bundle_idx, **pg_options
-            ).remote(worker_config, rank, master_addr, master_port, world_size)
+            ).remote(worker_config, rank, master_addr, master_port, world_size, device_type)
             workers_bundle_idx_map[worker] = (rank, bundle_idx)
 
         return workers_bundle_idx_map

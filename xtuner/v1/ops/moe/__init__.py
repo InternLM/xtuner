@@ -11,7 +11,7 @@ from .protocol import (
 
 
 def get_group_gemm() -> GroupGemmProtocol:
-    from xtuner.v1.utils.device import get_device
+    from xtuner.v1.utils import get_device
 
     device = get_device()
     if device == "cpu":
@@ -35,7 +35,7 @@ def get_group_gemm() -> GroupGemmProtocol:
 
 
 def get_token_permute() -> MoePermuteProtocol:
-    from xtuner.v1.utils.device import get_device
+    from xtuner.v1.utils import get_device
 
     device = get_device()
     if device == "cpu":
@@ -54,13 +54,16 @@ def get_token_permute() -> MoePermuteProtocol:
 
 
 def get_token_unpermute() -> MoeUnpermuteProtocol:
-    if torch.accelerator.is_available() is False:
+    from xtuner.v1.utils import get_device
+
+    device = get_device()
+    if device == "cpu":
         return cpu_unpermute
-    elif torch.accelerator.current_accelerator().type == "cuda":
+    elif device == "cuda":
         from .cuda import cuda_token_unpermute
 
         return cuda_token_unpermute
-    if torch.accelerator.current_accelerator().type == "npu":
+    elif device == "npu":
         from .npu import npu_token_unpermute
 
         return npu_token_unpermute

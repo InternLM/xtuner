@@ -123,6 +123,11 @@ class LMDeployWorker(RolloutWorker):
     def _transform_rollout_config_to_server_configs(self) -> Namespace:
         from lmdeploy import PytorchEngineConfig, TurbomindEngineConfig
 
+        accelerator_to_device_type = {
+            "GPU": "cuda",
+            "NPU": "ascend",
+        }
+
         extra_config = self.config.extra_rollout_config or dict()
         lmdeploy_config_kwargs = {
             k.replace("lmdeploy_", ""): v for k, v in extra_config.items() if k.startswith("lmdeploy_")
@@ -140,6 +145,7 @@ class LMDeployWorker(RolloutWorker):
                 empty_init=self.config.skip_load_weights,
                 distributed_executor_backend=distributed_executor_backend,
                 mp_engine_backend="ray",  # force ray to pass placement group
+                device_type=accelerator_to_device_type[self.accelerator],
             )
             if backend == "pytorch"
             else TurbomindEngineConfig(
@@ -148,6 +154,8 @@ class LMDeployWorker(RolloutWorker):
                 empty_init=self.config.skip_load_weights,
             )
         )
+        if backend == "pytorch" and self.accelerator == "NPU":
+            backend_config.eager_mode = True
 
         env = dict()
         if backend == "pytorch":
@@ -159,6 +167,16 @@ class LMDeployWorker(RolloutWorker):
                 "LMDEPLOY_RAY_EXTERNAL_PG_NAME": current_pg_name,
                 "LMDEPLOY_RAY_EXTERNAL_PG_BUNDLES": ",".join(map(str, self.engine_bundle_idxs)),
             }
+
+            if self.accelerator == "NPU":
+                env.update(
+                    {
+                        "ASCEND_SET_RT_VISIBLE_DEVICES_BY_RAY": "1",
+                        "HCCL_NPU_SOCKET_PORT_RANGE": "auto",
+                        "DLINFER_RESET_MOE_UPDATE_WEIGHTS": "1",
+                    }
+                )
+
             if tp_size > 1:
                 dist_addr, dist_port = self.dist_init_addr.split(":")[:2]
                 env.update(

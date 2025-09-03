@@ -10,11 +10,14 @@ _DEVICE = None
 def get_device() -> str:
     global _DEVICE
     if _DEVICE is None:
-        if torch.accelerator.is_available():
-            device = torch.accelerator.current_accelerator().type
-            if device == "npu":
-                from torch_npu.contrib import transfer_to_npu  # noqa
-        else:
+        try:
+            if torch.accelerator.is_available():
+                device = torch.accelerator.current_accelerator().type
+                if device == "npu":
+                    from torch_npu.contrib import transfer_to_npu  # noqa
+            else:
+                device = "cpu"
+        except Exception:
             device = "cpu"
 
         if device not in SUPPORTED_DEVICES:

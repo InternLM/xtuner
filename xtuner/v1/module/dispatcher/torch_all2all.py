@@ -21,7 +21,7 @@ from .base import (
 )
 
 
-if torch.accelerator.is_available() and torch.accelerator.current_accelerator().type == "npu":
+if get_device() == "npu":
     from torch_npu.contrib import transfer_to_npu  # noqa
 
 

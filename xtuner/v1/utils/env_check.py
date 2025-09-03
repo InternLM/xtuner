@@ -11,7 +11,7 @@ def check_torch_accelerator_available():
         import torch
 
         return torch.accelerator.is_available()
-    except ImportError:
+    except Exception:
         return False
 
 

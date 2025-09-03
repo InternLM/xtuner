@@ -12,7 +12,7 @@ import requests  # type: ignore[import-untyped]
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 from xtuner.v1.ray import find_master_addr_and_port
-from xtuner.v1.ray.accelerator import SingleAcceleratorWorker
+from xtuner.v1.ray.accelerator import AutoAcceleratorWorkers, SingleAcceleratorWorker
 from xtuner.v1.ray.config import RolloutConfig
 from xtuner.v1.utils import get_logger
 
@@ -117,7 +117,11 @@ class RolloutWorker(SingleAcceleratorWorker):
             )
             self.server_task = (
                 ray.remote(self.server_func)
-                .options(scheduling_strategy=scheduling_strategy, num_cpus=1, num_gpus=0.01, **ray_kwargs)
+                .options(
+                    scheduling_strategy=scheduling_strategy,
+                    **AutoAcceleratorWorkers.get_pg_options(current_pg),
+                    **ray_kwargs,
+                )
                 .remote(server_configs)
             )
 
