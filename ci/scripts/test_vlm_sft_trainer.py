@@ -4,6 +4,7 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+import torch
 import torch.distributed as dist
 import json
 from xtuner.v1.config import (
@@ -15,7 +16,6 @@ from xtuner.v1.config import (
 )
 from xtuner.v1.datasets import InternS1TokenizeFnConfig
 from xtuner.v1.model import InternS1MiniConfig
-from xtuner.v1.loss import CELossContext
 from xtuner.v1.train.trainer import Trainer
 from xtuner.v1.utils.compile import maybe_compile
 from xtuner.v1.loss import CELossConfig
@@ -27,130 +27,185 @@ INTERNS1_DATA_META = os.environ["INTERNS1_DATA_META"]
 lr = [
     0.000060,
     0.000059,
-    0.000058,
-    0.000056,
-    0.000052,
-    0.000048,
-    0.000044,
-    0.000039,
-    0.000033,
-    0.000028,
-    0.000022,
-    0.000017,
-    0.000013,
-    0.000009,
-    0.000005,
-    0.000003,
+    0.000057,
+    0.000053,
+    0.000047,
+    0.000041,
+    0.000034,
+    0.000027,
+    0.000020,
+    0.000014,
+    0.000008,
+    0.000004,
     0.000002,
 ]
-reduced_llm_loss = [
-    2.453,
-    1.465,
-    1.492,
-    1.404,
-    1.267,
-    1.261,
-    1.238,
-    1.218,
-    1.201,
-    1.206,
-    1.195,
-    1.189,
-    1.188,
-    1.188,
-    1.169,
-    1.199,
-    1.141,
+reduced_llm_loss_sp1 = [
+    2.118,
+    1.991,
+    2.061,
+    1.959,
+    1.985,
+    1.979,
+    1.870,
+    1.943,
+    1.797,
+    1.815,
+    1.881,
+    1.906,
+    1.490,
 ]
-grad_norm = [
-    23.950,
-    5.20,
-    6.07,
-    4.25,
-    2.27,
-    0.87,
-    1.59,
-    1.03,
-    0.65,
-    1.05,
-    0.83,
-    0.58,
-    0.47,
-    0.52,
-    0.51,
-    0.52,
-    0.59,
+reduced_llm_loss_sp2 = [
+    2.077,
+    1.968,
+    2.138,
+    2.079,
+    1.981,
+    1.929,
+    1.912,
+    1.903,
+    1.828,
+    1.902,
+    1.856,
+    1.832,
+    1.449,
 ]
-max_memory = [
-    34.5,
-    37.5,
-    37.5,
-    37.4,
-    37.5,
-    37.4,
-    37.4,
-    37.5,
-    37.5,
-    37.4,
-    37.4,
-    37.5,
-    37.5,
-    37.4,
-    37.5,
-    37.5,
-    37.4,
+grad_norm_sp1 = [
+    6.966,
+    2.800,
+    11.252,
+    5.580,
+    2.915,
+    2.135,
+    3.095,
+    2.321,
+    2.023,
+    1.198,
+    2.579,
+    2.132,
+    3.048,
 ]
-text_tokens = [
-    16302.0,
-    16364.0,
-    16376.0,
-    15874.0,
-    16360.0,
-    16328.0,
-    16341.0,
-    16377.0,
-    16356.0,
-    16254.0,
-    16329.0,
-    16347.0,
-    16359.0,
-    15998.0,
-    16356.0,
-    16371.0,
-    16307.0,
+grad_norm_sp2 = [
+    6.724,
+    3.378,
+    14.701,
+    2.938,
+    2.848,
+    1.837,
+    1.979,
+    1.623,
+    2.565,
+    4.422,
+    1.780,
+    2.792,
+    1.905,
 ]
-tgs = [
-    516,
-    1369,
-    2219,
-    2373,
-    2429,
-    2517,
-    2758,
-    2795,
-    2812,
-    2591,
-    2622,
-    2676,
-    2663,
-    2628,
-    2872,
-    2734,
-    2920,
+max_memory_sp1 = [
+    23.46,
+    31.79,
+    31.49,
+    31.43,
+    31.43,
+    31.43,
+    31.85,
+    31.43,
+    31.79,
+    31.79,
+    31.43,
+    31.85,
+    31.43,
+]
+max_memory_sp2 = [
+    25.58,
+    33.28,
+    29.35,
+    29.58,
+    29.44,
+    29.42,
+    29.44,
+    29.43,
+    29.18,
+    29.58,
+    29.56,
+    29.51,
+    29.57,
+]
+text_tokens_sp1 = [
+    13677.0,
+    14123.0,
+    11721.0,
+    12677.0,
+    13060.0,
+    11776.0,
+    14724.0,
+    12467.0,
+    12731.0,
+    15550.0,
+    13933.0,
+    13479.0,
+    13193.0,
+]
+
+text_tokens_sp2 = [
+    16384.0,
+    16384.0,
+    16384.0,
+    16384.0,
+    16384.0,
+    16384.0,
+    16384.0,
+    16384.0,
+    16384.0,
+    16384.0,
+    16384.0,
+    16384.0,
+    16384.0,
+]
+
+tgs_sp1 = [
+    1649.5,
+    2301.6,
+    2514.0,
+    2682.9,
+    2820.4,
+    2869.1,
+    3003.4,
+    3037.3,
+    3076.0,
+    3169.7,
+    3216.4,
+    3248.6,
+    3269.7,
+]
+tgs_sp2 = [
+    1743.4,
+    2049.7,
+    2371.3,
+    2565.2,
+    2703.9,
+    2804.6,
+    2878.6,
+    2938.1,
+    2986.9,
+    3025.1,
+    3057.5,
+    3085.5,
+    3109.9,
 ]
 
 
+# Note: export XTUNER_DETERMINISTIC=true
 def parse_args():
-    parser = argparse.ArgumentParser(description="Test VLLM SFT Trainer")
+    parser = argparse.ArgumentParser(description="Test MLLM SFT Trainer")
     parser.add_argument(
-        "work_dir",
+        "--work_dir",
         type=str,
+        default='work_dirs'
     )
     return parser.parse_args()
 
 
 def extract_data_from_log(logfile: Path):
-    pattern_str = r"\[XTuner\].*Step.*lr:\s(\d+.\d*)\s.*text_tokens:\s(\d+.\d*)\s.*reduced_llm_loss:\s(\d+.\d*)\s.*max_memory:\s(\d+.\d*)\s*GB\s.*grad_norm:\s(\d+.\d*)\s.*tgs:\s(\d+.\d*)"
+    pattern_str = r"\[XTuner\].*Step.*lr:\s(\d+.\d*)\s.*text_tokens:\s(\d+.\d*)\s.*reduced_llm_loss:\s(\d+.\d*)\s.*max_memory:\s(\d+.\d*)\s*GB\s.*grad_norm:\s(\d+.\d*)\s.*e2e_tgs:\s(\d+.\d*)"
     compiled_pattern = re.compile(pattern_str)
 
     cur_lr = []
@@ -225,6 +280,7 @@ def main():
 
     ds_collections = json.loads(open(INTERNS1_DATA_META).read())
 
+    exp_paths = []
     for model_cfg, sp_size in model_cfgs:
         optim_cfg = AdamWConfig(lr=6e-05, foreach=False)
         lr_cfg = LRConfig(lr_type="cosine", lr_min=1e-6)
@@ -255,10 +311,10 @@ def main():
 
         dataloader_config = DataloaderConfig(
             collator="sft_vllm_collator",
-            pack_max_length=8192,
-            max_length=8192,
+            num_workers=8,
+            pack_max_length=8192
         )
-        work_dir = f"{args.work_dir}-{name}"
+        work_dir = f"{args.work_dir}-sp{sp_size}-intern-s1-mini"
         loss_cfg = CELossConfig(mode="chunk", chunk_size=1024, ignore_idx=-100)
         trainer = Trainer(
             load_from=INTERNS1_DENSE_PATH,
@@ -274,37 +330,44 @@ def main():
             global_batch_size=16,
             work_dir=work_dir,
             seed=0,
-            total_step=5,
+            epoch_num=1,
         )
         trainer.fit()
         if dist.get_rank() == 0:
-            rank0_log_path = Path(work_dir) / "rank0.log"
-            (
-                cur_lr,
-                cur_text_tokens,
-                cur_reduced_llm,
-                cur_max_memory,
-                cur_grad_norm,
-                cur_tgs,
-            ) = extract_data_from_log(rank0_log_path)
-            work_dir = Path(work_dir)
-            plot_dir = work_dir / "plots"
-            plot_dir.mkdir(parents=True, exist_ok=True)
-            plot_comparison_curves(lr, cur_lr, "lr", output_root=plot_dir)
-            plot_comparison_curves(
-                reduced_llm_loss, cur_reduced_llm, "reduced-loss", output_root=plot_dir
-            )
-            plot_comparison_curves(
-                grad_norm, cur_grad_norm, "grad_norm", output_root=plot_dir
-            )
-            plot_comparison_curves(
-                max_memory, cur_max_memory, "max_memory", output_root=plot_dir
-            )
-            plot_comparison_curves(
-                text_tokens, cur_text_tokens, "text_tokens", output_root=plot_dir
-            )
-            plot_comparison_curves(tgs, cur_tgs, "tgs", output_root=plot_dir)
-        # del trainer
+            exp_paths.append(trainer.exp_dir)
+
+        dist.barrier()
+        del trainer
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+
+    sp_sizes = [sp_size for _, sp_size in model_cfgs]
+    for exp_path, sp_size in zip(exp_paths, sp_sizes):
+        rank0_log_path = Path(exp_path) / "rank0.log"
+        (
+            cur_lr,
+            cur_text_tokens,
+            cur_reduced_llm,
+            cur_max_memory,
+            cur_grad_norm,
+            cur_tgs,
+        ) = extract_data_from_log(rank0_log_path)
+        plot_dir = Path(exp_path) / "plots"
+        plot_dir.mkdir(parents=True, exist_ok=True)
+        plot_comparison_curves(lr, cur_lr, "lr", output_root=plot_dir)
+        plot_comparison_curves(
+            eval(f'reduced_llm_loss_sp{sp_size}'), cur_reduced_llm, "reduced-loss", output_root=plot_dir
+        )
+        plot_comparison_curves(
+            eval(f'grad_norm_sp{sp_size}'), cur_grad_norm, "grad_norm", output_root=plot_dir
+        )
+        plot_comparison_curves(
+            eval(f'max_memory_sp{sp_size}'), cur_max_memory, "max_memory", output_root=plot_dir
+        )
+        plot_comparison_curves(
+            eval(f'text_tokens_sp{sp_size}'), cur_text_tokens, "text_tokens", output_root=plot_dir
+        )
+        plot_comparison_curves(eval(f'tgs_sp{sp_size}'), cur_tgs, "tgs", output_root=plot_dir)
 
 
 if __name__ == "__main__":
