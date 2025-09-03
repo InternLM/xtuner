@@ -52,9 +52,11 @@ class RLTextTokenizeFn(CachableTokenizeFunction[RLTextDataItem]):
             num_tokens = 0  # will be filtered out by the dataset filter
 
         extra_info = item.get("extra_info", {})
+        extra_info["raw_prompt"] = raw_prompt
+
         rl_out_data = {
             # "input_ids": input_ids,
-            "messages": raw_prompt,
+            "messages": messages,
             "num_tokens": num_tokens,
             "reward_model": item["reward_model"],
             "ability": item.get("ability", None),

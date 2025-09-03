@@ -254,7 +254,10 @@ class Trainer:
     def _prepare_train_data(self, data_groups, pack_max_length):
         data_batches = []
         for group in data_groups:
-            prompt_ids = self.tokenizer(group[0]["messages"], return_tensors="pt")["input_ids"].flatten().tolist()
+            prompt = self.tokenizer.apply_chat_template(
+                group[0]["messages"], add_generation_prompt=True, tokenize=False
+            )
+            prompt_ids = self.tokenizer(prompt, return_tensors="pt")["input_ids"].flatten().tolist()
             rewards = [data["reward"] for data in group]
             rewards = torch.tensor(rewards, dtype=torch.float32)
             advantages = (rewards - rewards.mean(0)) / (rewards.std(0) + 1e-8)
