@@ -97,11 +97,9 @@ class TestRollout(unittest.TestCase):
         )
         sample_params = SampleParams(temperature=0.0)
         rollout_controller = RolloutController.remote(self.rollout_cfg, rollout_workers_map)  # type: ignore[attr-defined]
-        new_prompt = self.tokenizer.apply_chat_template(TEST_TEXT_MESSAGES, add_generation_prompt=True, tokenize=False)
-        ref1 = rollout_controller.rollout.remote(prompt=[new_prompt], sample_params=sample_params)
-        ref2 = rollout_controller.rollout.remote(prompt=[new_prompt], sample_params=sample_params)
-        results = ray.get([ref1, ref2])
-        self.assertEqual(results[0], results[1], f"results[0] != results[1], results[0]={results[0]}, results[1]={results[1]}")
+        res1 = ray.get(rollout_controller.rollout.remote(prompt=TEST_TEXT_MESSAGES, sample_params=sample_params))
+        res2 = ray.get(rollout_controller.rollout.remote(prompt=TEST_TEXT_MESSAGES, sample_params=sample_params))
+        self.assertEqual(res1, res2, f"res1 != res2, res1={res1}, res2={res2}")
         ray.get(rollout_controller.shutdown.remote(), timeout=300)
 
     @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
