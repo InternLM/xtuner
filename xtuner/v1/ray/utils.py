@@ -16,6 +16,17 @@ if TYPE_CHECKING:
 def get_ray_accelerator() -> "AcceleratorType":
     from xtuner.v1.utils.device import get_device
 
+    """Get the type of accelerator available in the Ray environment.
+
+    This function checks for the availability of CUDA and NPU devices and
+    returns the corresponding accelerator type.
+
+    Returns:
+        AcceleratorType: The type of accelerator ("GPU" or "NPU").
+
+    Raises:
+        NotImplementedError: If neither CUDA nor NPU is available.
+    """
     accelerator = None
     if get_device() == "cuda":
         accelerator = "GPU"
@@ -51,7 +62,18 @@ def load_function(path):
 
 @ray.remote
 def find_master_addr_and_port(nums=1):
-    """自动找到一个可用的端口号."""
+    """Finds an available master address and a specified number of ports.
+
+    This remote function gets the node's IP address and binds to one or more
+    available ports, which can be used for distributed communication.
+
+    Args:
+        nums (int): The number of ports to find. Defaults to 1.
+
+    Returns:
+        A tuple containing the address and a single port if `nums` is 1,
+        or a list of ports if `nums` is greater than 1.
+    """
     addr = ray.util.get_node_ip_address()
     ports = []
     sockets = []
@@ -83,13 +105,33 @@ def bind_train_rollout(
     train_workers,
     rollout_controller,
 ) -> None:
-    """Bind the training and rollout workers for update weights."""
+    """Bind the training and rollout workers for updating weights.
+
+    This function retrieves rollout information from the rollout controller
+    and distributes it to the training workers, enabling them to update the
+    rollout models' weights.
+
+    Args:
+        train_workers: A list of training worker actors.
+        rollout_controller: The rollout controller actor.
+    """
     info_dict = ray.get(rollout_controller.get_rollout_info.remote())  # type: ignore[attr-defined]
     ray.get([worker.update_rollout_info.remote(**info_dict) for worker in train_workers])  # type: ignore[attr-defined]
     return
 
 
 def handle_task_exception(task: Task):
+    """Handles exceptions from an asyncio Task.
+
+    This function checks if a task has raised an exception and, if so,
+    re-raises it. It ignores `asyncio.CancelledError`.
+
+    Args:
+        task (Task): The asyncio task to check for exceptions.
+
+    Raises:
+        Exception: The exception raised by the task.
+    """
     try:
         exc = task.exception()
         if exc is not None:
@@ -103,6 +145,23 @@ def create_task(
     loop: Optional[AbstractEventLoop] = None,
     done_callbacks: Optional[List[Callable[[Task], object]]] = None,
 ) -> asyncio.tasks.Task:
+    """Creates and configures an asyncio Task.
+
+    This function creates a task from a coroutine and attaches specified
+    done callbacks. By default, it includes a callback to handle exceptions.
+
+    Args:
+        coro (Coroutine): The coroutine to wrap in a task.
+        loop (Optional[AbstractEventLoop], optional): The event loop to run
+            the task in. If None, the current event loop is used.
+            Defaults to None.
+        done_callbacks (Optional[List[Callable[[Task], object]]], optional):
+            A list of callbacks to add to the task. If None, a default
+            exception handler is used. Defaults to None.
+
+    Returns:
+        asyncio.tasks.Task: The created asyncio task.
+    """
     if loop is None:
         loop = asyncio.get_event_loop()
     if done_callbacks is None:

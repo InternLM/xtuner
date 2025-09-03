@@ -17,6 +17,8 @@ from .replay_buffer import ReplayBuffer, ReplayBufferConfig
 
 
 class DataFlowConfig(BaseModel):
+    """Configuration for the DataFlow class."""
+
     env: Annotated[
         str,
         Parameter(help="Environment name to set for the dataflow."),
@@ -54,6 +56,13 @@ class DataFlowConfig(BaseModel):
 
 @ray.remote
 class DataFlow:
+    """A Ray actor that manages the data flow for reinforcement learning.
+
+    This class is responsible for sampling prompts, interacting with the environment or to generate responses,
+    processing the results, and storing them in a replay buffer. It orchestrates the asynchronous generation of
+    training data.
+    """
+
     def __init__(
         self,
         env: str,
@@ -61,6 +70,17 @@ class DataFlow:
         replay_buffer_cfg: ReplayBufferConfig,
         environment: SingleTurnEnvironment,
     ):
+        """Initializes the DataFlow actor.
+
+        Args:
+            env (str): The name of the environment.
+            dataflow_cfg (DataFlowConfig): Configuration for the data flow.
+            replay_buffer_cfg (ReplayBufferConfig): Configuration for the
+                replay buffer.
+            environment (EnvController): The environment controller actor.
+            postprocessor (Optional[Callable]): An optional function to
+                post-process the generated samples.
+        """
         self.env = env
         self.config = dataflow_cfg
         self.replay_buffer = ReplayBuffer.remote(replay_buffer_cfg)  # type: ignore[attr-defined]
@@ -73,9 +93,27 @@ class DataFlow:
         self.target_batch_size = self.config.global_batch_size
 
     def get_train_dataset_length(self):
+        """Gets the length of the training dataset from the replay buffer."""
         return ray.get(self.replay_buffer.get_train_dataset_length.remote())
 
     async def worker_task(self, group_samples_for_retry: Optional[List[RLTextDataItem]] = None):
+        """A single worker task to generate and process a group of samples.
+
+        This task performs the following steps:
+        1. Samples a prompt from the replay buffer (or uses a sample for retry).
+        2. Calls the environment controller or rollout controller to generate a response.
+        3. Post-processes the generated samples use default postprocessor and custom postprocessor.
+        4. Adds the filtered samples to the replay buffer.
+
+        Args:
+            group_samples_for_retry (Optional[List[RLTextDataItem]]): A group
+                of samples to retry if a previous attempt failed. Defaults to
+                None.
+
+        Returns:
+            Optional[List[RLTextDataItem]]: The group of samples if the task
+            fails and needs to be retried, otherwise None.
+        """
         group_samples = group_samples_for_retry
         try:
             # step 1: sample
@@ -112,6 +150,26 @@ class DataFlow:
                 self.logger.warning(f"Worker task failed with exception: {e}. No samples to return.")
 
     async def concurrent_task_runner(self):
+        """Orchestrates the concurrent execution of worker tasks to generate a
+        batch of training data.
+
+        This method manages a pool of asynchronous worker tasks to collect a
+        specified number of samples (`self.global_batch_size`). It handles
+        task scheduling, retries for failed tasks, and progress tracking.
+
+        The process is as follows:
+        1.  Continuously spawns new `worker_task` instances until the
+            number of in-flight tasks reaches `self.config.max_concurrent`.
+        2.  Uses `asyncio.wait` to efficiently handle completed tasks.
+        3.  If a task fails but is retryable, it is rescheduled with the same
+            data, up to `self.config.max_retry_times`.
+        4.  If a task fails permanently, it is logged and counted.
+        5.  A progress bar (`tqdm`) is updated as samples are successfully
+            processed.
+        6.  Once `global_batch_size` is reached, the environment controller is
+            paused, and the method waits for any remaining tasks to finish
+            before completing.
+        """
         waiting_tasks = set()
         with tqdm(total=self.target_batch_size, desc="rollout_controller for training samples") as pbar:
             update_step = max(1, int(self.target_batch_size * 0.1))
@@ -163,6 +221,14 @@ class DataFlow:
         )
 
     async def run(self, num: Optional[int] = None, sample_params: Optional[SampleParams] = None):
+        """Starts the data generation process.
+
+        This method resets the internal state and runs the concurrent task
+        runner to collect a new batch of samples.
+
+        Returns:
+            List[RLTextDataItem]: A list of collected training samples.
+        """
         ray.get(self.env_controller.restart.remote())  # type: ignore[attr-defined]
         self.send_samples_count = 0
         self.finished_samples_count = 0

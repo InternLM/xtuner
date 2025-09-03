@@ -12,13 +12,15 @@ infer_group = Group("inference", help="Inference worker configuration.")
 
 
 class TrainingWorkerConfig(BaseModel):
-    """Configuration for the TraingWorker."""
+    """Configuration for the TrainingWorker."""
 
     type: Literal["train"] = "train"
     train_model_path: Annotated[str, Parameter(group=train_group, help="Path to the training model.")]
 
 
 class RolloutConfig(BaseModel):
+    """Configuration for the RolloutWorker."""
+
     # base config
     env: Annotated[
         str,
@@ -128,7 +130,11 @@ if __name__ == "__main__":
 
     @app.default
     def test_command(*, config: RolloutConfig):
-        """A test command to verify the command line interface."""
+        """A test command to verify the command line interface.
+
+        Args:
+            config: The rollout configuration.
+        """
         print("This is a test command.")
 
     app()

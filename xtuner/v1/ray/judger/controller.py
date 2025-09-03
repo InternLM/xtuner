@@ -13,6 +13,8 @@ from .native import NativeJudger
 
 
 class JudgerConfig(BaseModel):
+    """Configuration for the Judger."""
+
     enable_batch_reward: Annotated[
         bool, Parameter(help="Whether to enable batch reward calculation for multiple samples at once.")
     ] = False
@@ -24,7 +26,16 @@ class JudgerConfig(BaseModel):
 
 @ray.remote
 class JudgerController:
+    """Controller for judging model outputs and calculating rewards."""
+
     def __init__(self, judger_config: JudgerConfig, placement_group=None):
+        """Initialize the JudgerController.
+
+        Args:
+            judger_config (JudgerConfig): The configuration for the judger.
+            placement_group: The Ray placement group for resource allocation.
+                Defaults to None.
+        """
         self.judger_config = judger_config
         # note: placement_group is used to control the placement of Ray tasks.
         # It will be implemented when gpu judger is needed
@@ -40,6 +51,18 @@ class JudgerController:
         responses: List[str],
         labels: List[str],
     ) -> Dict[str, List[float]]:
+        """Call custom reward judgers to calculate rewards.
+
+        Args:
+            active_judgers (Dict[str, NativeJudger]): A dictionary of active
+                judgers.
+            responses (List[str]): A list of model-generated responses.
+            labels (List[str]): A list of ground-truth labels.
+
+        Returns:
+            Dict[str, List[float]]: A dictionary where keys are judger names
+                and values are lists of calculated rewards for each sample.
+        """
         group_size = len(responses)
         if self.judger_config.enable_batch_reward:
             tasks = {name: judger.judge(responses, labels) for name, judger in active_judgers.items()}
@@ -70,6 +93,15 @@ class JudgerController:
     async def run(
         self, group_data_item: RLTextDataItem | List[RLTextDataItem]
     ) -> RLTextDataItem | List[RLTextDataItem]:
+        """Run the judging process for a group of data items.
+
+        Args:
+            group_data_item (List[RLTextDataItem]): A list of RLTextDataItem,
+                each containing the response and other relevant information.
+
+        Returns:
+            List[float]: A list of final calculated rewards for each data item.
+        """
         if not group_data_item:
             return []
         input_list = True
