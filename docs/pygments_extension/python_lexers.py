@@ -1,5 +1,6 @@
 # from pygments.lexers.python import PythonLexer, bygroups, Name, Operator, Punctuation, include, Text, Comment, String, combined
 from pygments.lexers.python import *
+from pygments.lexers.python import Generic
 from sphinx.highlighting import lexers
 import keyword
 
@@ -101,16 +102,7 @@ class XTunerPythonLexer(RegexLexer):
             include('expr'),
         ],
         'expr': [
-            (
-                rf'({PythonLexer.uni_name})(\()([\n\s]*)({PythonLexer.uni_name})(=)',
-                bygroups(Name, Punctuation, Whitespace, Name.Keyword, Punctuation),
-                'arg-assign'
-            ),
-            (
-                rf'({PythonLexer.uni_name})(\()([\n]*)({PythonLexer.uni_name})',
-                bygroups(Name, Punctuation, Whitespace, Name),
-                'arg-assign'
-            ),
+            (rf'({PythonLexer.uni_name})(\()', bygroups(Name, Punctuation), 'arg-assign'),
             # raw f-strings
             ('(?i)(rf|fr)(""")',
              bygroups(String.Affix, String.Double),
@@ -397,6 +389,7 @@ class XTunerPythonLexer(RegexLexer):
             (r'\n', String.Single)
         ],
         "arg-assign": [
+            (r'(?:>>>|\.\.\.)[ \t]*', Generic.Prompt),
             (rf'({PythonLexer.uni_name})\s*(=)',
             bygroups(Name.Keyword, Punctuation)),
             (r'#.*$', Comment.Single),
@@ -414,24 +407,17 @@ class XTunerPythonLexer(RegexLexer):
 
 lexers["python"] = XTunerPythonLexer()
 
+text = """from mmengine.runner import Runner
+>>> cfg = dict(
+>>>     model=dict(type='ToyModel'),
+>>>     work_dir='path/of/work_dir',
+>>>     train_dataloader=dict(
+>>>     dataset=dict(type='ToyDataset'),
+>>>     sampler=dict(type='DefaultSampler', shuffle=True),
+>>>     batch_size=1,
+>>>     num_workers=0),
+"""
 
 if __name__ == "__main__":
-    text = """trainer = TrainerConfig(
-    load_from=hf_model_path, # 如果是微调模式，必须指定，否则会重头训练
-    model_cfg=model_cfg,
-    optim_cfg=optim_cfg,
-    dataset_cfg=dataset_config,
-    dataloader_cfg=dataloader_config,
-    lr_cfg=lr_cfg,
-    loss_cfg=CELossConfig(mode="chunk", chunk_size=1024),  # 使用 chunk loss 可以显著减少显存占用，推荐总是开启
-    tokenizer_path=hf_model_path,
-    # 全局 batch size
-    # 假设是 8 卡训练，那么每张卡的 forward shape 是 (1, pack_max_length)，梯度累加次数是 1
-    # 假设是 4 卡训练，那么每张卡的 forward shape 是 (1, pack_max_length)，梯度累加次数是 2 (自动折算)
-    global_batch_size=8, 
-    epoch_num=2,
-    work_dir='work_dirs'
-)"""
-
     for token in XTunerPythonLexer().get_tokens(text):
         print(token)
