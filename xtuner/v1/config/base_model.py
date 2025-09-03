@@ -26,6 +26,26 @@ class GenerateConfig(BaseModel):
 
 
 class BaseAttnConfig(BaseModel, Generic[T]):
+    """Base attention configuration for transformer attention mechanisms.
+
+    This class defines the fundamental parameters for attention configurations
+    in transformer models. It serves as a base class for specific attention
+    implementations and provides common attention-related parameters.
+
+    Attributes:
+        num_attention_heads (int): Number of attention heads in the multi-head
+            attention mechanism.
+        head_dim (int): Dimension of each attention head.
+        dropout (bool): Whether to apply dropout to attention weights.
+            Defaults to False.
+        qkv_bias (bool): Whether to use bias in the query, key, and value
+            projection layers. Defaults to False.
+        o_bias (bool): Whether to use bias in the output projection layer.
+            Defaults to False.
+        sliding_window (int | None): Size of the sliding window for local
+            attention. Use -1 to disable sliding window attention. Defaults to -1.
+    """
+
     model_config = ConfigDict(title="Base attention config for xtuner", extra="allow")
     num_attention_heads: Annotated[int, Parameter(group="attention")]
     head_dim: Annotated[int, Parameter(group="attention")]
@@ -43,6 +63,21 @@ class BaseAttnConfig(BaseModel, Generic[T]):
         generate_config: GenerateConfig | None = None,
         float8_cfg: Optional["Float8Config"] = None,
     ) -> T:
+        """Build the attention module.
+
+        Args:
+            hidden_size (int): Hidden size of the transformer model.
+            layer_type (Literal["full_attention", "sliding_attention"] | None): Type of
+                attention layer to build. If None, uses default behavior.
+            layer_idx (int): Index of the current layer. Defaults to 0.
+            generate_config (GenerateConfig | None): Configuration for generation.
+                Defaults to None.
+            float8_cfg (Float8Config | None): Float8 quantization configuration.
+                Defaults to None.
+
+        Returns:
+            T: The subclass attention module.
+        """
         raise NotImplementedError
 
 
@@ -61,13 +96,47 @@ class BaseRouterConfig(BaseModel, Generic[T]):
 
 
 class TransformerConfig(BaseModel):
-    """XTuner follows the principle that all modules are constructed from the
+    """Transformer model configuration for XTuner.
+
+    XTuner follows the principle that all modules are constructed from the
     top-level model config, which inevitably leads to lower-level modules
     depending on upper-level interfaces.
 
     If the model config were declared in the model module, it would cause sub-modules like attention to import the
     model, resulting in circular import issues. For this reason, we choose to declare the base class for ModelConfig in
     the base config.
+
+    This class defines the fundamental configuration parameters for transformer-based
+    language models, including vocabulary size, model dimensions, attention
+    configurations, and various model-specific settings.
+
+    Attributes:
+        vocab_size (int): Size of the vocabulary (number of unique tokens).
+        max_position_embeddings (int): Maximum sequence length that the model
+            can handle.
+        pad_token_id (int): ID of the padding token in the vocabulary.
+        num_hidden_layers (int): Number of transformer blocks/layers in the model.
+        hidden_size (int): Dimension of the hidden states throughout the model.
+        intermediate_size (int): Dimension of the feed-forward network's
+            intermediate layer.
+        rms_norm_eps (float): Epsilon value for RMS normalization layers.
+        rope_theta (float): Base frequency for RoPE (Rotary Position Embedding).
+        hidden_act (str): Activation function used in the feed-forward network.
+        attention (BaseAttnConfig): Configuration for the attention mechanism.
+        mlp_bias (bool): Whether to use bias in the MLP layers. Defaults to False.
+        tie_word_embeddings (bool): Whether to tie input and output word embeddings.
+            Defaults to False.
+        generate_config (GenerateConfig | None): Configuration for text generation.
+            Defaults to None.
+        float8_cfg (Float8Config | None): Float8 quantization configuration.
+            Defaults to None.
+        return_hidden_states (bool): Whether to return all hidden states from
+            all layers. Defaults to False.
+        use_sliding_window (bool): Whether to use sliding window attention.
+            Defaults to False.
+        max_window_layers (int | None): Number of layers to use sliding window
+            attention for. If None, uses sliding window for all layers when
+            `use_sliding_window` is True. Defaults to None.
     """
 
     model_config = ConfigDict(
@@ -86,7 +155,7 @@ class TransformerConfig(BaseModel):
     attention: BaseAttnConfig
     mlp_bias: Annotated[bool, Parameter(group="model")] = False
     tie_word_embeddings: Annotated[bool, Parameter(group="model")] = False
-    model_type: Annotated[Literal["qwen"] | None, Parameter(group="model")] = None
+    model_type: Annotated[str | None, Parameter(group="model")] = None  # TODO: yehaochen maybe should be removed
     generate_config: GenerateConfig | None = None
     float8_cfg: Optional["Float8Config"] = None
     return_hidden_states: Annotated[bool, Parameter(group="model")] = False

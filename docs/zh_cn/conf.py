@@ -10,6 +10,7 @@
 # add these directories to sys.path here. If the directory is relative to the
 # documentation root, use os.path.abspath to make it absolute, like shown here.
 
+from enum import auto
 import os
 import sys
 
@@ -18,6 +19,7 @@ from sphinx.ext import autodoc
 sys.path.insert(0, os.path.abspath("../.."))
 
 import docs.pygments_extension
+import docs.sphinx_patch
 
 
 # -- Project information -----------------------------------------------------
@@ -62,8 +64,9 @@ templates_path = ["_templates"]
 exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
 
 # Exclude the prompt "$" when copying code
-copybutton_prompt_text = r"\$ "
+copybutton_prompt_text = r'>>> |\.\.\. '
 copybutton_prompt_is_regexp = True
+
 
 language = "zh_CN"
 
@@ -89,18 +92,11 @@ html_static_path = ["_static"]
 html_css_files = ["custom.css"]
 
 # Mock out external dependencies here.
-# autodoc_mock_imports = [
-#     "cpuinfo",
-#     "torch",
-#     "transformers",
-#     "psutil",
-#     "prometheus_client",
-#     "sentencepiece",
-#     "vllm.cuda_utils",
-#     "vllm._C",
-#     "numpy",
-#     "tqdm",
-# ]
+autodoc_mock_imports = [
+    "pydantic",
+    "deepspeed",
+]
+
 
 
 # class MockedClassDocumenter(autodoc.ClassDocumenter):
