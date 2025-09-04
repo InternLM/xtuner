@@ -27,5 +27,7 @@ python ci/scripts/test_grpo_trainer.py \
     --pack-max-length 32768 \
     --max-prompt-length 512 \
     --max-response-length 1024 \
+    --enable-evaluate \
+    --evaluate-step 10 \
     --optimizer-disable-foreach \
     2>&1 | tee -a "${OUTPUT_DIR}/training_log.txt"

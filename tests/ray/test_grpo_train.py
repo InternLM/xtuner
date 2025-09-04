@@ -22,9 +22,11 @@ from xtuner.v1.config import (
     ZLossConfig,
 )
 # from xtuner.v1.rl.grpo.config import WorkerConfig, LossConfig
+from xtuner.v1.rl.base import WorkerConfig, TrainingController, TrainingWorker as BaseTrainingWorker
 from xtuner.v1.rl.grpo.loss import GRPOLossConfig as LossConfig
-from xtuner.v1.rl.grpo.worker import WorkerConfig, GRPOTrainingWorker as TrainingWorker
-from xtuner.v1.rl.grpo.controller import GRPOTrainingController as TrainingController
+# from xtuner.v1.rl.grpo.loss import GRPOLossConfig as LossConfig
+# from xtuner.v1.rl.grpo.worker import WorkerConfig, GRPOTrainingWorker as TrainingWorker
+# from xtuner.v1.rl.grpo.controller import GRPOTrainingController as TrainingController
 
 
 # Qwen3 30B A3
@@ -119,6 +121,15 @@ class TestGRPOTrain(unittest.TestCase):
             work_dir=self.temp_dir,
             pack_max_length=8192,
         )
+        
+        TrainingWorker = ray.remote(
+            runtime_env={
+                "env_vars": {
+                    "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
+                    "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
+                }
+            },
+        )(BaseTrainingWorker)
         train_workers = AutoAcceleratorWorkers.from_placement_group(
             TrainingWorker, worker_cfg, self.pg
         )

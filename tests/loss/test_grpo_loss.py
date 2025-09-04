@@ -7,7 +7,8 @@ from torch.testing._internal.common_distributed import DistributedTestBase
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from xtuner.v1.rl.grpo import GRPOLossConfig, RLLossContextInputItem
+from xtuner.v1.rl.grpo import GRPOLossConfig
+from xtuner.v1.rl.base import RLLossContextInputItem
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.rl.utils import gather_logprobs
 from xtuner.v1.rl.loss_fn import kl_penalty

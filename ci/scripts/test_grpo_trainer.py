@@ -41,9 +41,12 @@ from xtuner.v1.config import (
     ZLossConfig,
 )
 from xtuner.v1.ray.judger.controller import JudgerConfig
-from xtuner.v1.rl.grpo import GRPOLossConfig, WorkerConfig
+from xtuner.v1.rl.base import WorkerConfig
+from xtuner.v1.rl.grpo import GRPOLossConfig
+# from xtuner.v1.rl.grpo import GRPOLossConfig, WorkerConfig
 # from xtuner.v1.rl.grpo.config import WorkerConfig, LossConfig
-from xtuner.v1.rl.grpo.trainer import Trainer
+# from xtuner.v1.rl.grpo.trainer import Trainer
+from xtuner.v1.train.rl_trainer import RLTrainer
 
 MODEL_PATH = os.environ["ROLLOUT_MODEL_PATH"]
 TRAIN_DATA_PATH = os.environ["ROLLOUT_DATA_PATH"]
@@ -168,7 +171,7 @@ def main(args):
         optimizer_steps=args.train_optimizer_steps,
         pack_max_length=args.pack_max_length,
     )
-    trainer = Trainer(
+    trainer = RLTrainer(
         load_from=load_from,
         resources=resources,
         rollout_config=rollout_config,
