@@ -18,7 +18,46 @@ from xtuner.v1.utils import get_logger
 
 
 class EvaluatorConfig(BaseModel):
-    """Configuration for the Evaluator."""
+    """Configuration for the Evaluator in XTuner.
+
+    This class defines the configuration parameters for model evaluation in XTuner, including four main aspects:
+
+    - Dataset configuration: Specifies the evaluation dataset and tokenizer for text processing
+
+    - Evaluator control logic: Manages concurrency levels and retry mechanisms for robust evaluation
+
+    - Evaluation scheduling: Controls evaluation step intervals and sample size (either by ratio or absolute count)
+
+    - Custom metric computation: Supports user-defined functions for specialized metric calculations
+
+    Args:
+        dataset_cfg (DatasetConfigList): Configuration for the evaluation dataset.
+        tokenizer (PreTrainedTokenizer | PreTrainedTokenizerFast): Tokenizer used for text processing.
+        evaluate_step (int): Step interval for triggering evaluation. Defaults to 1.
+        eval_sample_ratio (float): Ratio of samples to evaluate from the generated samples. If > 0, overrides eval_sample_num. Defaults to 0 (use all samples).
+        eval_sample_num (int): Number of samples to evaluate from the generated samples. Used if eval_sample_ratio is 0. Defaults to 0 (use all samples).
+        max_concurrent (int): Maximum number of concurrent evaluation tasks. Defaults to 8.
+        max_retry_times (int): Maximum number of retry attempts for failed evaluation tasks. Defaults to 2.
+        compute_metric_func (Optional[Callable]): Optional function to compute or filter metrics for generated data groups. If None, uses default metric computation.
+
+    **Examples:**
+
+    Example configuration for evaluator with GSM8K dataset::
+
+        from transformers import AutoTokenizer
+
+        config = EvaluatorConfig(
+            dataset_cfg=[{
+                "dataset": DatasetConfig(name="gsm8k", anno_path="test_data.json"),
+                "tokenize_fn": RLTextTokenizeFnConfig(max_length=512)
+            }],
+            tokenizer=AutoTokenizer.from_pretrained("model_path"),
+            max_concurrent=32,
+            eval_sample_ratio=0.8,  # Use 80% of samples
+            evaluate_step=10,
+            compute_metric_func=custom_accuracy_metric
+        )
+    """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 

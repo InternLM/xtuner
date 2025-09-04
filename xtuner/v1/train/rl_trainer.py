@@ -60,6 +60,76 @@ def bind_train_rollout(
 
 
 class RLTrainer:
+    """Universal Reinforcement Learning Trainer for XTuner.
+
+    A flexible RL training orchestrator that supports multiple RL algorithms
+    through pluggable training workers and controllers. Manages the complete
+    RL training workflow including rollout generation, policy updates,
+    evaluation, and checkpoint management.
+
+    **Training Workflow:**
+        1. Initialize distributed workers and rollout environment
+        2. Generate experiences using current policy
+        3. Update policy using algorithm-specific training logic
+        4. Synchronize weights between training and rollout workers
+        5. Evaluate model performance and save checkpoints
+
+    Args:
+        load_from (str | Path): Path to the base model to load. Should be a HuggingFace
+            model path (e.g., "meta-llama/Llama-2-7b-hf") or local model directory.
+        resources (AcceleratorResourcesConfig): Configuration for distributed computing
+            resources including number of workers, GPU allocation, and placement groups.
+        rollout_config (RolloutConfig): Configuration for rollout workers that generate
+            experiences by interacting with the environment.
+        dataflow_config (DataFlowConfig): Data orchestration configuration controlling
+            experience collection, batch formation, and data distribution across workers.
+        judger_config (JudgerConfig): Configuration for the reward model or scoring system
+            that evaluates generated responses and provides training signals.
+        replay_buffer_config (ReplayBufferConfig): Settings for experience replay buffer
+            including capacity, sampling strategy, and data retention policies.
+        evaluator_config (EvaluatorConfig): Evaluation configuration specifying metrics,
+            evaluation datasets, and assessment frequency for monitoring training progress.
+        train_worker_cfg (WorkerConfig): Configuration for distributed training workers
+            including model architecture, optimizer settings, loss functions, and parallelism.
+        tokenizer_path (str | Path): Path to the tokenizer for text preprocessing.
+            Should be compatible with the base model specified in load_from.
+        work_dir (Path | str | None): Working directory for experiment outputs,
+            checkpoints, and logs. Defaults to None.
+        log_dir (Path | str | None): Directory for training logs and monitoring outputs.
+            Defaults to None.
+        total_epochs (int): Total number of training epochs to execute.
+        enable_evaluate (bool): Whether to perform periodic evaluation during training.
+        resume_config (ResumeConfig | None): Configuration for resuming training from
+            a previous checkpoint. Defaults to None.
+        strict_load (bool): Whether to strictly enforce checkpoint loading compatibility.
+            Defaults to True.
+        hf_interval (int | None): Interval (in epochs) for saving HuggingFace format
+            checkpoints. Defaults to None.
+        hf_max_keep (int | None): Maximum number of HuggingFace checkpoints to retain.
+            Defaults to None.
+        seed (int): Random seed for reproducible training. Defaults to 42.
+        debug (bool): Enable debug mode with additional logging. Defaults to False.
+
+    **Examples:**
+
+    Example configuration for GRPO RL training setup::
+
+        trainer = RLTrainer(
+            load_from="Qwen3-8B",
+            resources=resources_config,
+            rollout_config=rollout_cfg,
+            dataflow_config=dataflow_cfg,
+            judger_config=judger_cfg,
+            replay_buffer_config=buffer_cfg,
+            evaluator_config=eval_cfg,
+            train_worker_cfg=worker_cfg,
+            tokenizer_path="Qwen3-8B",
+            total_epochs=10,
+            enable_evaluate=True
+        )
+        trainer.fit()
+    """
+
     META_PATH = ".xtuner_grpo"
 
     def __init__(
@@ -85,6 +155,7 @@ class RLTrainer:
         seed: int = 42,
         debug: bool = False,
     ):
+        """Initialize the RL training system."""
         # TODO
         rollout_config.model_path = load_from
         train_worker_cfg.load_from = load_from
@@ -191,6 +262,12 @@ class RLTrainer:
         return train_controller
 
     def fit(self):
+        """Run the RL training loop.
+
+        This method executes the main rl training loop, iterating generating through the dataset and performing
+        training steps. It handles rollout, prepare training data, update policy , synchronize model weights, and
+        evaluation.
+        """
         self.logger.info("start training")
         if self._enable_evaluate:
             scores, eval_data_groups = ray.get(

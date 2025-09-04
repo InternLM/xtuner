@@ -17,7 +17,37 @@ T = TypeVar("T")
 
 
 class AcceleratorResourcesConfig(BaseModel):
-    """Configuration for accelerator resources in a placement group."""
+    """Configuration for accelerator resources in a placement group for XTuner.
+
+    This class defines the fundamental configuration parameters for managing
+    accelerator resources in Ray placement groups, including resource allocation
+    per worker, memory management, and accelerator type specification. It provides
+    a unified interface for controlling distributed training resource allocation
+    and hardware utilization.
+
+    Args:
+        num_accelerators_per_worker (float): Number of accelerators to allocate for
+            each worker in the placement group. Defaults to 1.
+        num_cpus_per_worker (float): Number of CPUs to allocate per worker in the
+            placement group. Defaults to 8.
+        cpu_memory_per_worker (int): Amount of CPU memory (in bytes) to allocate
+            for each worker in the placement group.
+        num_workers (int): Total number of workers in the placement group.
+        accelerator (AcceleratorType): Type of accelerator architecture to use
+            (e.g., 'GPU', 'NPU').
+
+    **Examples:**
+
+    Example configuration for resources::
+
+        resources = AcceleratorResourcesConfig(
+            accelerator="GPU",
+            num_accelerators_per_worker=1,
+            num_cpus_per_worker=12,
+            num_workers=args.num_workers,
+            cpu_memory_per_worker=16 * 1024**3,  # 16 GB
+        )
+    """
 
     num_accelerators_per_worker: Annotated[
         float,

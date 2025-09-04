@@ -63,6 +63,46 @@ def serialize_state_dict(state_dict: dict) -> str:
 
 
 class WorkerConfig(BaseModel):
+    """Training worker configuration for XTuner RL.
+
+    Configuration for RL training workers managing model training, optimization,
+    and distributed computing in reinforcement learning workflows.
+
+    Args:
+        model_cfg (TransformerConfig): Model architecture configuration.
+        optim_cfg (OptimConfig): Optimizer configuration for training.
+        loss_cfg (BaseRLLossConfig): Loss function configuration for RL training.
+        lr_cfg (LRConfig): Learning rate scheduler configuration.
+        fsdp_cfg (FSDPConfig): Fully Sharded Data Parallel configuration.
+        load_from (str | Path): Path to load the main model from.
+        optimizer_steps (int): Number of optimizer steps per training iteration. Defaults to 1.
+        sp_size (int): Sequence parallel size for distributed training. Defaults to 1.
+        pack_max_length (int): Maximum sequence length for data packing.
+        ref_load_from (str | Path | None): Path to load reference model from.
+            If None, uses same as load_from. Defaults to None.
+        ref_model_fsdp_cfg (FSDPConfig | None): FSDP configuration for reference model.
+            Defaults to None.
+        log_dir (str | Path | None): Directory for training logs. Defaults to None.
+
+    **Examples:**
+
+    Example configuration for Basic worker::
+
+        config = WorkerConfig(
+            model_cfg=TransformerConfig(model_name="llama2-7b"),
+            optim_cfg=OptimConfig(optimizer="adamw"),
+            loss_cfg=PPOLossConfig(),
+            lr_cfg=LRConfig(lr=1e-5),
+            fsdp_cfg=FSDPConfig(),
+            load_from="meta-llama/Llama-2-7b-hf",
+            pack_max_length=2048
+        )
+
+    .. note::
+       When ``use_kl_loss=True`` in loss_cfg, a reference model will be loaded
+       for KL divergence computation during training.
+    """
+
     model_config = ConfigDict(title="Worker config", extra="allow", arbitrary_types_allowed=True)
     model_cfg: TransformerConfig
     optim_cfg: OptimConfig

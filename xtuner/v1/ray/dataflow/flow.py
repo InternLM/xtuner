@@ -17,7 +17,32 @@ from .replay_buffer import ReplayBuffer, ReplayBufferConfig
 
 
 class DataFlowConfig(BaseModel):
-    """Configuration for the DataFlow class."""
+    """Data flow configuration for XTuner.
+
+    Simple configuration for managing concurrent data generation workflows
+    in reinforcement learning training.
+
+    Args:
+        env (str): Environment identifier. Defaults to "".
+        max_concurrent (int): Maximum concurrent tasks. Defaults to 8.
+        prompt_repeat_k (int): Times to repeat each prompt. Defaults to 1.
+        global_batch_size (int): Target samples to collect. Defaults to 8.
+        max_retry_times (int): Maximum retry attempts. Defaults to 1.
+        enable_partial_rollout (int): Enable async mode (1) or disable (0). Defaults to 0.
+        sample_params (SampleParams): Model sampling parameters. Defaults to SampleParams().
+
+    **Examples:**
+
+    Example configuration for dataflow::
+
+        config = DataFlowConfig(
+            env="test_env",
+            max_concurrent=256,
+            global_batch_size=1024,
+            prompt_repeat_k=8,
+            sample_params=SampleParams(max_tokens=2048),
+        )
+    """
 
     env: Annotated[
         str,
@@ -27,6 +52,10 @@ class DataFlowConfig(BaseModel):
         int,
         Parameter(help="Maximum number of concurrent tasks."),
     ] = 8
+    max_retry_times: Annotated[
+        int,
+        Parameter(help="Maximum number of retry task for failed samples."),
+    ] = 1
     prompt_repeat_k: Annotated[
         int,
         Parameter(help="Number of times to repeat each prompt."),
@@ -35,19 +64,6 @@ class DataFlowConfig(BaseModel):
         int,
         Parameter(help="Target number of samples to collect before stopping."),
     ] = 8
-    max_retry_times: Annotated[
-        int,
-        Parameter(help="Maximum number of retry task for failed samples."),
-    ] = 1
-    # async generate config
-    replay_ratio: Annotated[
-        float,
-        Parameter(help="Ratio of samples to replay from the buffer."),
-    ] = 0
-    replay_weights: Annotated[
-        dict,
-        Parameter(help="Weights for different states in the replay buffer."),
-    ] = {}
     enable_partial_rollout: Annotated[
         int, Parameter(help="Whether to enable async rollout_controller. 1 for enabled, 0 for disabled")
     ] = 0
@@ -122,8 +138,6 @@ class DataFlow:
                     self.env,
                     self.config.enable_partial_rollout,
                     self.config.prompt_repeat_k,
-                    self.config.replay_ratio,
-                    self.config.replay_weights,
                 )
                 self.send_samples_count += 1
                 self.logger.debug(
