@@ -20,8 +20,41 @@ from xtuner.v1.utils import get_logger
 
 
 class ReplayBufferConfig(BaseModel):
-    """Configuration for the ReplayBuffer, including dataset, dataloader,
-    tokenizer, and postprocessor."""
+    """Replay buffer configuration for XTuner.
+
+    This class defines configuration parameters for the replay buffer system in XTuner,
+    managing dataset handling, data loading, text processing, and post-processing
+    operations for reinforcement learning experience replay.
+
+    Args:
+        dataset_cfg (List): Configuration for datasets used to sample initial prompts.
+        dataloader_cfg (DataloaderConfig): Configuration for the PyTorch DataLoader
+            that iterates over the dataset.
+        tokenizer (PreTrainedTokenizer | PreTrainedTokenizerFast): Tokenizer for
+            processing text data, including support for partial rollouts.
+        postprocessor_func (Optional[Callable]): Optional function to filter or
+            modify data groups after generation. Defaults to None.
+        replay_ratio (float): Ratio of samples to replay from the buffer versus
+            sampling new data. Defaults to 0.
+        replay_weights (dict): Weights for different states in the replay buffer
+            to control sampling priorities. Defaults to empty dict.
+
+    **Examples:**
+
+    Example configuration for ReplayBuffer with GSM8K dataset config and base dataloader config::
+
+        from transformers import AutoTokenizer
+
+        config = ReplayBufferConfig(
+            dataset_cfg=[{
+                "dataset": DatasetConfig(name="gsm8k", anno_path="path/to/data"),
+                "tokenize_fn": RLTextTokenizeFnConfig(max_length=512)
+            }],
+            dataloader_cfg=DataloaderConfig(collator='fake_collator'),
+            tokenizer=AutoTokenizer.from_pretrained("model_path"),
+            postprocessor_func=None,
+        )
+    """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -39,6 +72,14 @@ class ReplayBufferConfig(BaseModel):
         Optional[Callable],
         Parameter(help="An optional function to filter or modify data groups after they are generated."),
     ] = None
+    replay_ratio: Annotated[
+        float,
+        Parameter(help="Ratio of samples to replay from the buffer."),
+    ] = 0
+    replay_weights: Annotated[
+        dict,
+        Parameter(help="Weights for different states in the replay buffer."),
+    ] = {}
 
 
 @dataclass
@@ -118,14 +159,7 @@ class Sampler:
             group_samples.append(data_item)
         return group_samples
 
-    def sample(
-        self,
-        env: str,
-        enable_partial_rollout: int,
-        prompt_repeat_k: int,
-        replay_ratio: float,
-        replay_weights: dict,
-    ) -> List[RLTextDataItem]:
+    def sample(self, env: str, enable_partial_rollout: int, prompt_repeat_k: int) -> List[RLTextDataItem]:
         """Selects a sampling strategy and returns a group of samples.
 
         It decides whether to sample from the unfinished buffer (for partial
@@ -135,8 +169,6 @@ class Sampler:
             env (str): The environment name.
             enable_partial_rollout (int): Flag to enable partial rollout.
             prompt_repeat_k (int): Number of times to repeat the prompt.
-            replay_ratio (float): Ratio for replaying samples.
-            replay_weights (dict): Weights for different replay states.
 
         Returns:
             List[RLTextDataItem]: A list of sampled data items.
@@ -367,27 +399,18 @@ class ReplayBuffer:
             return group_samples
         return group_samples
 
-    def sample(
-        self,
-        env,
-        enable_partial_rollout: int,
-        prompt_repeat_k: int,
-        replay_ratio: float,
-        replay_weights: dict,
-    ):
+    def sample(self, env, enable_partial_rollout: int, prompt_repeat_k: int):
         """Samples a batch of experiences from the replay buffer.
 
         Args:
             env: The environment name.
             enable_partial_rollout (int): Flag to enable partial rollouts.
             prompt_repeat_k (int): Number of times to repeat a prompt.
-            replay_ratio (float): Ratio of samples to replay.
-            replay_weights (dict): Weights for different replay states.
 
         Returns:
             A list of sampled data items.
         """
-        return self.sampler.sample(env, enable_partial_rollout, prompt_repeat_k, replay_ratio, replay_weights)
+        return self.sampler.sample(env, enable_partial_rollout, prompt_repeat_k)
 
     def get_samples(
         self,

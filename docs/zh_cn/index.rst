@@ -69,7 +69,8 @@
 
    Pretrain & SFT Trainer  <api/trainer>
    Config <api/config>
-
+   RL Trainer <api/rl_trainer>
+   RL Config <api/rl_config>
 
 
 写在前面

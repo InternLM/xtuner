@@ -13,7 +13,50 @@ from .native import NativeJudger
 
 
 class JudgerConfig(BaseModel):
-    """Configuration for the Judger."""
+    """Judger configuration for XTuner.
+
+    Configuration for the judging system managing batch processing and custom judger
+    implementations for model evaluation and reward computation.
+
+    Args:
+        enable_batch_reward (bool): Enable calculate reward within the data group of repeat_prompt_k. Defaults to False.
+
+        reward_judger_configs (Dict[str, BaseModel]): Dictionary mapping judger names
+            to their configuration objects. We provided the example GSM8KJudgerConfig
+            for GSM8K mathematical reasoning tasks (see ``xtuner/v1/ray/judger/gsm8k.py``). Defaults to empty dict.
+
+    **Examples:**
+
+        Example configuration for single judger::
+
+            config = JudgerConfig(
+                enable_batch_reward=False,
+                reward_judger_configs={
+                    "gsm8k": GSM8KJudgerConfig(...)
+                }
+            )
+
+        Example configuration for multiple judgers::
+
+            config = JudgerConfig(
+                reward_judger_configs={
+                    "gsm8k": GSM8KJudgerConfig(...),
+                    "math_qa": MathQAJudgerConfig(...),
+                    "custom_eval": CustomJudgerConfig(...)
+                }
+            )
+
+    .. note::
+        You should ensure each dataset item specifies data_source with dictionary mapping judger names to their weight ratios
+
+        Example dataset item::
+
+            data_item = {
+                "data_source": {"gsm8k": 0.7, "math_qa": 0.3},
+                "response_str": "...",
+                "reward_model": {"ground_truth": "..."}
+            }
+    """
 
     enable_batch_reward: Annotated[
         bool, Parameter(help="Whether to enable batch reward calculation for multiple samples at once.")

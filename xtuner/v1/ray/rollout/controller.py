@@ -12,8 +12,36 @@ from .worker import RolloutWorker
 
 
 class SampleParams(BaseModel):
-    """Parameters for controlling the sampling process during text
-    generation."""
+    """Sampling parameters configuration for text generation in XTuner.
+
+    Args:
+        n (int): Number of samples to generate for each input. Defaults to 1.
+        top_k (int): Number of highest probability vocabulary tokens to keep for
+            top-k filtering. Set to 0 to disable. Defaults to 0.
+        top_p (float): Cumulative probability threshold for nucleus (top-p) sampling.
+            Defaults to 1.0.
+        temperature (float): Sampling temperature to control randomness. Lower values
+            make output more deterministic. Defaults to 1.0.
+        repetition_penalty (float): Penalty applied to tokens that have already
+            appeared in the sequence. Defaults to 1.0 (no penalty).
+        presence_penalty (float): Penalty applied based on token presence in the
+            generated text. Defaults to 0.0.
+        frequency_penalty (float): Penalty applied based on token frequency in the
+            generated text. Defaults to 0.0.
+        min_tokens (int): Minimum number of tokens to generate before considering
+            stop conditions. Defaults to 0.
+        max_tokens (int): Maximum number of tokens to generate. Defaults to 2048.
+        stops (List[str]): List of string sequences that will stop generation when
+            encountered. Defaults to empty list.
+        stop_token_ids (List[int]): List of token IDs that will stop generation when
+            encountered. Defaults to empty list.
+        logprobs (int): Number of log probabilities to return for each token.
+            Set to 0 to disable. Defaults to 0.
+        skip_special_tokens (bool): Whether to skip special tokens during decoding.
+            Defaults to True.
+        do_sample (bool): Whether to use sampling (True) or greedy decoding (False).
+            Defaults to True.
+    """
 
     n: Annotated[int, Parameter(help="Number of samples to generate.")] = 1
     top_k: Annotated[
