@@ -133,7 +133,8 @@ class TestJudgerController(unittest.TestCase):
         avg_score = np.mean(reward)
         verl_score = 0.2418
         self.assertLessEqual(float(np.abs(avg_score - verl_score)), 0.001)
-
+        server.stop()
+        
     def tearDown(self):
         ray.shutdown()
     
