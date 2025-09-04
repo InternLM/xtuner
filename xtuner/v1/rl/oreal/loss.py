@@ -8,7 +8,7 @@ from torch.distributed.device_mesh import DeviceMesh
 
 from xtuner.v1.loss import BaseLossConfig, BaseLossContext, BaseLossKwargs
 
-from ..grpo.loss import RLLossContextInputItem
+from ..base.loss import RLLossContextInputItem
 from ..loss_fn import get_policy_loss_fn, kl_penalty, sft_loss_fn
 from ..utils import gather_logprobs
 
