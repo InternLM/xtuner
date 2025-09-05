@@ -57,6 +57,13 @@
 
 .. toctree::
    :hidden:
+   :maxdepth: 3
+   :caption: Benchmark
+
+   benchmark/index.rst
+
+.. toctree::
+   :hidden:
    :maxdepth: 1
    :caption: 旧版文档
 
