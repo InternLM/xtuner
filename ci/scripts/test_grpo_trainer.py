@@ -72,11 +72,15 @@ def parse_args():
     parser.add_argument("--enable-evaluate", action="store_true")
     parser.add_argument("--evaluate-step", type=int, default=1)
     parser.add_argument("--evaluate-ratio", type=float, default=1)
+    parser.add_argument("--ray-cluster-url", type=str, default="")
     return parser.parse_args()
 
 
 def main(args):
-    ray.init(num_cpus=128, ignore_reinit_error=True)
+    if args.ray_cluster_url == "":
+        ray.init(num_cpus=128, ignore_reinit_error=True)
+    else:
+        ray.init(address=args.ray_cluster_url, ignore_reinit_error=True)
     load_from = args.model_path
     resources = AcceleratorResourcesConfig(
         accelerator="GPU",

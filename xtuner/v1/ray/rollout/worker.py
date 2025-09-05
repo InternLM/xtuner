@@ -59,7 +59,6 @@ class RolloutWorker(SingleAcceleratorWorker):
         self.server_task = None
         self.engine_bundle_idxs: list[int] = []
         self.server_process: Optional[multiprocessing.Process] = None
-        self.init_dist_port()  # server port, nccl port, dist port
         self.logger = get_logger()
 
     def init_dist_port(self):
@@ -72,7 +71,14 @@ class RolloutWorker(SingleAcceleratorWorker):
         Returns:
             str: The distributed initialization address (host:port).
         """
-        self.host, self.ports = ray.get(find_master_addr_and_port.remote(3))
+        scheduling_strategy = PlacementGroupSchedulingStrategy(
+            placement_group=ray.util.get_current_placement_group(),
+            placement_group_capture_child_tasks=True,
+            placement_group_bundle_index=self.engine_bundle_idxs[0],
+        )
+        self.host, self.ports = ray.get(
+            find_master_addr_and_port.options(scheduling_strategy=scheduling_strategy).remote(3)
+        )
         self.dist_port = self.ports[0]
         self.server_port = self.ports[1]
         self.nccl_port = self.ports[2]
@@ -414,7 +420,8 @@ class RolloutWorker(SingleAcceleratorWorker):
 
     @abstractmethod
     def offload(self):
-        """ Abstract method to offload the model and KVcache.
+        """Abstract method to offload the model and KVcache.
+
         Must be implemented by subclasses.
         """
         raise NotImplementedError("reset_prefix_cache must be implemented in subclass")
