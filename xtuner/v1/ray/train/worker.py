@@ -243,8 +243,11 @@ class TrainingWorker(SingleAcceleratorWorker):
                 dst=head_rank,
                 group=cpu_group,
             )
-        else:
+        elif self.rollout_cfg_info["backend"] == "pytorch":
             serialized_data = serialize_state_dict(state_dict)
+        else:
+            # for turbomind backend, only head_rank should serialize data
+            serialized_data = serialize_state_dict(state_dict) if dist.get_rank() == head_rank else None
 
         if dist.get_rank() == head_rank:
             headers = {

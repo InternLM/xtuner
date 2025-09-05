@@ -29,6 +29,8 @@ def run_lmdeploy_server_wrapper(lmdeploy_config_namespace: Namespace):
     if lmdeploy_serve_kwargs.get("backend") == "pytorch":
         for k, v in env.items():
             os.environ[k] = str(v)
+    else:  # turbomind
+        os.environ.pop("CUDA_VISIBLE_DEVICES", None)
     serve(**lmdeploy_serve_kwargs)
 
 
@@ -221,7 +223,7 @@ class LMDeployWorker(RolloutWorker):
             if backend == "pytorch"
             else TurbomindEngineConfig(
                 tp=tp_size,
-                dp=dp_size,
+                devices=[bundle_idxs % self.config.gpus_per_node for bundle_idxs in self.engine_bundle_idxs],
                 empty_init=self.config.skip_load_weights,
             )
         )

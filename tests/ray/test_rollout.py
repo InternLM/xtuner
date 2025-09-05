@@ -110,7 +110,7 @@ class TestRollout(unittest.TestCase):
             self.pg,
             rollout_cfg=self.rollout_cfg,
         )
-        self.test_flow = DataFlow.remote("test_env", 
+        self.test_flow = DataFlow.remote("test_env",
                                          self.dataflow_cfg,
                                          self.replay_buffer_cfg,
                                          self.test_env
@@ -137,6 +137,20 @@ class TestRollout(unittest.TestCase):
         finished_samples_count = sum(1 for data in responses for item in data if item.get("state") == "finished")
         self.assertEqual(finished_samples_count // self.dataflow_cfg.prompt_repeat_k, self.dataflow_cfg.global_batch_size)
         ray.get(self.test_env.shutdown.remote())
+
+    @unittest.skip("skip lmdeploy turbomind generate test due to ci environment issue")
+    def test_lmdeploy_turbomind_generate(self):
+        from xtuner.v1.ray.rollout import SampleParams, LMDeployWorker
+        self.rollout_cfg.extra_rollout_config["lmdeploy_backend"] = "turbomind"
+        rollout_workers_map = AutoAcceleratorWorkers.from_placement_group(
+            LMDeployWorker, self.rollout_cfg, self.pg
+        )
+        sample_params = SampleParams(temperature=0.0)
+        rollout_controller = RolloutController.remote(self.rollout_cfg, rollout_workers_map)  # type: ignore[attr-defined]
+        res1 = ray.get(rollout_controller.rollout.remote(prompt=TEST_TEXT_MESSAGES, sample_params=sample_params))
+        res2 = ray.get(rollout_controller.rollout.remote(prompt=TEST_TEXT_MESSAGES, sample_params=sample_params))
+        self.assertEqual(res1, res2, f"res1 != res2, res1={res1}, res2={res2}")
+        ray.get(rollout_controller.shutdown.remote(), timeout=300)
 
 if __name__ == "__main__":
     unittest.main()
