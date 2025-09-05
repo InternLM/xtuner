@@ -87,8 +87,8 @@ class RLTrainer:
             that evaluates generated responses and provides training signals.
         replay_buffer_config (ReplayBufferConfig): Settings for experience replay buffer
             including capacity, sampling strategy, and data retention policies.
-        evaluator_config (EvaluatorConfig): Evaluation configuration specifying metrics,
-            evaluation datasets, and assessment frequency for monitoring training progress.
+        evaluator_config (EvaluatorConfig | None): Evaluation configuration specifying metrics,
+            evaluation datasets, and assessment frequency for monitoring training progress. Defaults to None.
         train_worker_cfg (WorkerConfig): Configuration for distributed training workers
             including model architecture, optimizer settings, loss functions, and parallelism.
         tokenizer_path (str | Path): Path to the tokenizer for text preprocessing.
@@ -141,8 +141,8 @@ class RLTrainer:
         dataflow_config: DataFlowConfig,
         judger_config: JudgerConfig,
         replay_buffer_config: ReplayBufferConfig,
-        evaluator_config: EvaluatorConfig,
         train_worker_cfg: WorkerConfig,
+        evaluator_config: EvaluatorConfig | None = None,
         tokenizer_path: str | Path,
         work_dir: Path | str | None = None,
         log_dir: Path | str | None = None,
@@ -215,12 +215,22 @@ class RLTrainer:
             judger_cfg=judger_config,
             replay_buffer_config=replay_buffer_config,
         )
-        self._evaluator = Evaluator.remote(evaluator_config, self._rollout_env_controller)  # type: ignore[attr-defined]
-        self._evaluator_sample_params = SampleParams(
-            top_p=1.0, temperature=0.0, do_sample=False, max_tokens=dataflow_config.sample_params.max_tokens, top_k=1
-        )
+        if self._enable_evaluate and evaluator_config:
+            self._evaluator = Evaluator.remote(evaluator_config, self._rollout_env_controller)  # type: ignore[attr-defined]
+            self._evaluator_sample_params = SampleParams(
+                top_p=1.0,
+                temperature=0.0,
+                do_sample=False,
+                max_tokens=dataflow_config.sample_params.max_tokens,
+                top_k=1,
+            )
+            self._eval_step = evaluator_config.evaluate_step
+        else:
+            self._evaluator = None
+            self._evaluator_sample_params = SampleParams()
+            self._eval_step = 0
+
         self._global_batch_size = dataflow_config.global_batch_size
-        self._eval_step = evaluator_config.evaluate_step
         self._rollout_steps = (
             ray.get(self._rollout_dataflow.get_train_dataset_length.remote())  # type: ignore[attr-defined]
             // dataflow_config.global_batch_size
@@ -269,7 +279,7 @@ class RLTrainer:
         evaluation.
         """
         self.logger.info("start training")
-        if self._enable_evaluate:
+        if self._enable_evaluate and self._evaluator:
             scores, eval_data_groups = ray.get(
                 self._evaluator.run.remote(return_samples=True, sample_params=self._evaluator_sample_params)
             )
@@ -299,7 +309,7 @@ class RLTrainer:
             ray.get(self._train_controller.offload.remote(target="model"))
             ray.get(self._rollout_env_controller.onload_kvcache.remote())
             # evaluate
-            if self._enable_evaluate and rollout_idx % self._eval_step == 0:
+            if self._enable_evaluate and self._evaluator and rollout_idx % self._eval_step == 0:
                 scores = ray.get(self._evaluator.run.remote(sample_params=self._evaluator_sample_params))
                 self.logger.info(f"evaluate idx {rollout_idx} scores {scores}")
             self._cur_epoch += 1
