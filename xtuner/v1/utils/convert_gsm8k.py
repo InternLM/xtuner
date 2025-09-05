@@ -1,6 +1,4 @@
-"""
-Preprocess the GSM8k dataset to parquet format
-"""
+"""Preprocess the GSM8k dataset to parquet format."""
 
 import argparse
 import os
@@ -9,7 +7,7 @@ import re
 import datasets
 
 
-# refer from verl
+# Adapted from https://github.com/volcengine/verl/blob/main/examples/data_preprocess/gsm8k.py
 def extract_solution(solution_str):
     solution = re.search("#### (\\-?[0-9\\.\\,]+)", solution_str)
     assert solution is not None
@@ -20,8 +18,8 @@ def extract_solution(solution_str):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input_dir", default="openai/gsm8k")
-    parser.add_argument("--out_dir")
+    parser.add_argument("--input-dir", default="openai/gsm8k")
+    parser.add_argument("--out-dir")
 
     args = parser.parse_args()
 
