@@ -18,8 +18,6 @@ from xtuner.v1.config.optim import LRConfig, OptimConfig
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.engine.train_engine import TrainEngine
 from xtuner.v1.float8.float8_handler import Float8Handler
-from xtuner.v1.float8.float8_tensor import Float8Tensor
-from xtuner.v1.float8.fsdp_utils import WeightWithDynamicTilewiseFloat8CastTensor
 from xtuner.v1.model.base import ModelItem
 from xtuner.v1.ray.accelerator import SingleAcceleratorWorker
 from xtuner.v1.ray.config import RolloutConfig
@@ -395,103 +393,246 @@ class TrainingWorker(SingleAcceleratorWorker):
         """Update the model weights."""
         self.endpoints["update_weights"] = "update_weights"
         assert self.rollout_device_mesh is not None
+        time1 = time.time()
 
         model = self._engine.model
         DEVICE_MODULE.empty_cache()
 
-        saved_keys = []
-        gather_duration = []
-        weight_duration = []
-        reshard_duration = []
+        if (model.config.float8_cfg is not None) and (model.config.float8_cfg.enable_float8):
+            dtype = torch.float8_e4m3fn
+        else:
+            dtype = torch.bfloat16
 
-        # update decoder layers
+        def get_params(tensor_list, name_list, save_dtype):
+            _tensor_list, _spec_list = list(zip(*tensor_list))
+            fsdp_unshard_tensor_list = model._fsdp_foreach_allgather(_tensor_list, _spec_list)
+            if save_dtype == torch.float8_e4m3fn:
+                fsdp_unshard_tensor_list, name_list = model._to_float8(
+                    fsdp_unshard_tensor_list, name_list, _tensor_list, save_dtype
+                )
+            return fsdp_unshard_tensor_list, name_list
+
+        saved_list = []
         for i, layer in tqdm.tqdm(model.layers.items(), desc="[gather weight]"):
-            start = time.perf_counter()
-            layer.unshard()
-            layer_state_dict = {}
-
-            for sub_name, param in layer.named_parameters():
-                if "_checkpoint_wrapped_module." in sub_name:
-                    sub_name = sub_name.replace("_checkpoint_wrapped_module.", "")
-                if isinstance(param, DTensor):
-                    param = param.to_local()
-
-                if isinstance(param, WeightWithDynamicTilewiseFloat8CastTensor):
-                    param = param._tensor
-
-                if isinstance(param, Float8Tensor):
-                    scale_name = f"model.layers.{i}.{sub_name}_scale_inv"
-                    assert "fused_w1w3" in sub_name or "fused_w2" in sub_name
-                    # save scale_inv parameter to state_dict
-                    scale_tensor = param._scale
-                    quant_tensor = param._data
-                    ep_mesh = model.ep_mesh
-                    if ep_mesh.size() > 1:
-                        scale_tensor = torch.cat(dist.nn.all_gather(scale_tensor, group=ep_mesh.get_group()), dim=0)
-                        quant_tensor = torch.cat(dist.nn.all_gather(quant_tensor, group=ep_mesh.get_group()), dim=0)
-                    layer_state_dict[scale_name] = scale_tensor.detach()
-                    # set `param` which will be added to state_dict at the bottom of the for-block
-                    param = quant_tensor
-
-                param = param.to(DEVICE)
+            tensor_list = []
+            name_list = []
+            for sub_name, param in layer.state_dict().items():
+                saved_list.append(f"layers.{i}.{sub_name}")
+                local_tensor = param._local_tensor if isinstance(param, DTensor) else param
+                local_tensor = local_tensor.bfloat16()
+                load_spec = model.load_spec_mapping.get(f"layers.{i}.{sub_name}")
                 name = f"model.layers.{i}.{sub_name}"
-                saved_keys.append(name.replace("model.", ""))
-                if ".experts." in name and ".mlp." not in name:
+                if ".experts." in name and ".mlp.experts." not in name:
                     name = name.replace(".experts.", ".mlp.experts.")
-                if ".gate." in name and ".mlp." not in name:
+                if ".gate." in name and ".mlp.gate." not in name:
                     name = name.replace(".gate.", ".mlp.gate.")
-                layer_state_dict[name] = param.detach()
-            gather_duration.append(time.perf_counter() - start)
-            start = time.perf_counter()
-            self.request_update_params(layer_state_dict)
-            weight_duration.append(time.perf_counter() - start)
+                name_list.append(name)
+                tensor_list.append((local_tensor, load_spec))
+            fsdp_unshard_tensor_list, name_list = get_params(tensor_list, name_list, dtype)
+            state_dict = dict(zip(name_list, fsdp_unshard_tensor_list))
+            self.request_update_params(state_dict)
 
-            start = time.perf_counter()
-            del layer_state_dict
-            layer.reshard()
-            reshard_duration.append(time.perf_counter() - start)
-
-        if dist.get_rank() == 0:
-            logger.debug(
-                f"Rank 0 Gather decoder layers done, total {sum(gather_duration):.2f}s, avg "
-                f"{sum(gather_duration) / len(gather_duration):.2f}s"
-            )
-            logger.debug(
-                f"Rank 0 migrate/save decoder layers done, total {sum(weight_duration):.2f}s, avg "
-                f"{sum(weight_duration) / len(weight_duration):.2f}s"
-            )
-            logger.debug(
-                f"Rank 0 reshard decoder layers done, total {sum(reshard_duration):.2f}s, avg "
-                f"{sum(reshard_duration) / len(reshard_duration):.2f}s"
-            )
-
-        # update other params
-        model.norm.unshard()
-        model.lm_head.unshard()
-        model.embed_tokens.unshard()
-        others_state_dict = {}
-        for name, param in model.named_parameters():
-            if "_checkpoint_wrapped_module." in name:
+        tensor_list = []
+        name_list = []
+        for name, param in model.state_dict().items():
+            if name in saved_list:
                 continue
-            if name not in saved_keys:
-                saved_keys.append(name)
-                if name == "norm.weight":
-                    name = "model.norm.weight"
-                if name == "embed_tokens.weight":
-                    name = "model.embed_tokens.weight"
-                if isinstance(param, DTensor):
-                    param = param.to_local()
-                others_state_dict[name] = param.detach()
-        self.request_update_params(others_state_dict, finished=True)
-        model.norm.reshard()
-        model.lm_head.reshard()
-        model.embed_tokens.reshard()
-        del others_state_dict
-        del param
+            local_tensor = param._local_tensor if isinstance(param, DTensor) else param
+            local_tensor = local_tensor.bfloat16()
+            load_spec = model.load_spec_mapping.get(name)
+            if name == "norm.weight":
+                name = "model.norm.weight"
+            elif name == "embed_tokens.weight":
+                name = "model.embed_tokens.weight"
+            tensor_list = [(local_tensor, load_spec)]
+            name_list = [name]
+            fsdp_unshard_tensor_list, name_list = get_params(tensor_list, name_list, dtype)
+            state_dict = dict(zip(name_list, fsdp_unshard_tensor_list))
+            self.request_update_params(state_dict)
+
+        self.request_update_params({}, finished=True)
 
         dist.barrier()
+        logger.info(f"update weights time: {time.time() - time1}")
         DEVICE_MODULE.empty_cache()
         return
+
+    # def update_weights1(self):
+    #     """Update the model weights."""
+    #     self.endpoints["update_weights"] = "update_weights"
+    #     assert self.rollout_device_mesh is not None
+    #     time1 = time.time()
+
+    #     model = self._engine.model
+    #     DEVICE_MODULE.empty_cache()
+
+    #     if (model.config.float8_cfg is not None) and (model.config.float8_cfg.enable_float8):
+    #         dtype = torch.float8_e4m3fn
+    #     else:
+    #         dtype = torch.bfloat16
+
+    #     fused_params = []
+    #     for name, param in model.state_dict().items():
+    #         load_spec = model.load_spec_mapping.get(name)
+    #         if load_spec.load_enum == LoadEnum.FUSED:
+    #             fused_params.append((name, param, load_spec))
+
+    #     # TODO: decouple update_weights from the model structure
+    #     bucket_size = 1024**3
+    #     safetensor_size = 0
+    #     tensor_list: list[tuple[torch.Tensor, LoadSpec]] = []
+    #     name_list: list[str] = []
+    #     for name, param, load_spec in fused_params:
+    #         local_tensor = param._local_tensor if isinstance(param, DTensor) else param
+    #         local_tensor = local_tensor.bfloat16()
+    #         if safetensor_size + model._get_tensor_size(param, dtype) > bucket_size:
+    #             _tensor_list, _spec_list = list(zip(*tensor_list))
+    #             fsdp_unshard_tensor_list = model._fsdp_foreach_allgather(_tensor_list, _spec_list)
+    #             if dtype == torch.float8_e4m3fn:
+    #                 fsdp_unshard_tensor_list, name_list = model._to_float8(
+    #                     fsdp_unshard_tensor_list, name_list, _tensor_list, dtype
+    #                 )
+    #             state_dict = dict(zip(name_list, fsdp_unshard_tensor_list))
+    #             self.request_update_params(state_dict)
+    #             safetensor_size = 0
+    #             tensor_list = [(local_tensor, load_spec)]
+    #             name_list = ["model." + name.replace(".experts.", ".mlp.experts.")]
+    #             continue
+    #         safetensor_size += model._get_tensor_size(param, dtype)
+    #         tensor_list.append((local_tensor, load_spec))
+    #         name_list.append("model." + name.replace(".experts.", ".mlp.experts."))
+
+    #     if tensor_list:
+    #         assert len(name_list) == len(tensor_list)
+    #         _tensor_list, _spec_list = list(zip(*tensor_list))
+    #         fsdp_unshard_tensor_list = model._fsdp_foreach_allgather(_tensor_list, _spec_list)
+    #         if dtype == torch.float8_e4m3fn:
+    #             fsdp_unshard_tensor_list, name_list = model._to_float8(
+    #                 fsdp_unshard_tensor_list, name_list, _tensor_list, dtype
+    #             )
+    #         state_dict = dict(zip(name_list, fsdp_unshard_tensor_list))
+    #         self.request_update_params(state_dict)
+
+    #     same_gen = model._get_same_hf_param(
+    #         model._group_param_by_load_spec(LoadEnum.SAME),
+    #         dtype=dtype,
+    #         device="cuda",
+    #         bucket_size=1024**3,
+    #     )
+    #     for name_list, gathered_tensor_list in tqdm.tqdm(same_gen, desc="[update dense weights]"):
+    #         state_dict = dict(zip(name_list, gathered_tensor_list))
+    #         self.request_update_params(state_dict)
+    #         del state_dict
+
+    #     self.request_update_params({}, finished=True)
+
+    #     dist.barrier()
+    #     logger.info(f"update weights time: {time.time() - time1}")
+    #     DEVICE_MODULE.empty_cache()
+    #     return
+
+    # def update_weights(self):
+    #     """Update the model weights."""
+    #     self.endpoints["update_weights"] = "update_weights"
+    #     assert self.rollout_device_mesh is not None
+
+    #     model = self._engine.model
+    #     DEVICE_MODULE.empty_cache()
+
+    #     saved_keys = []
+    #     gather_duration = []
+    #     weight_duration = []
+    #     reshard_duration = []
+
+    #     # update decoder layers
+    #     for i, layer in tqdm.tqdm(model.layers.items(), desc="[gather weight]"):
+    #         start = time.perf_counter()
+    #         layer.unshard()
+    #         layer_state_dict = {}
+
+    #         for sub_name, param in layer.named_parameters():
+    #             if "_checkpoint_wrapped_module." in sub_name:
+    #                 sub_name = sub_name.replace("_checkpoint_wrapped_module.", "")
+    #             if isinstance(param, DTensor):
+    #                 param = param.to_local()
+
+    #             if isinstance(param, WeightWithDynamicTilewiseFloat8CastTensor):
+    #                 param = param._tensor
+
+    #             if isinstance(param, Float8Tensor):
+    #                 scale_name = f"model.layers.{i}.{sub_name}_scale_inv"
+    #                 assert "fused_w1w3" in sub_name or "fused_w2" in sub_name
+    #                 # save scale_inv parameter to state_dict
+    #                 scale_tensor = param._scale
+    #                 quant_tensor = param._data
+    #                 ep_mesh = model.ep_mesh
+    #                 if ep_mesh.size() > 1:
+    #                     scale_tensor = torch.cat(dist.nn.all_gather(scale_tensor, group=ep_mesh.get_group()), dim=0)
+    #                     quant_tensor = torch.cat(dist.nn.all_gather(quant_tensor, group=ep_mesh.get_group()), dim=0)
+    #                 layer_state_dict[scale_name] = scale_tensor.detach()
+    #                 # set `param` which will be added to state_dict at the bottom of the for-block
+    #                 param = quant_tensor
+
+    #             param = param.to(DEVICE)
+    #             name = f"model.layers.{i}.{sub_name}"
+    #             saved_keys.append(name.replace("model.", ""))
+    #             if ".experts." in name and ".mlp." not in name:
+    #                 name = name.replace(".experts.", ".mlp.experts.")
+    #             if ".gate." in name and ".mlp." not in name:
+    #                 name = name.replace(".gate.", ".mlp.gate.")
+    #             layer_state_dict[name] = param.detach()
+    #         gather_duration.append(time.perf_counter() - start)
+    #         start = time.perf_counter()
+    #         self.request_update_params(layer_state_dict, finished=True)
+    #         breakpoint()
+    #         weight_duration.append(time.perf_counter() - start)
+
+    #         start = time.perf_counter()
+    #         del layer_state_dict
+    #         layer.reshard()
+    #         reshard_duration.append(time.perf_counter() - start)
+
+    #     if dist.get_rank() == 0:
+    #         logger.debug(
+    #             f"Rank 0 Gather decoder layers done, total {sum(gather_duration):.2f}s, avg "
+    #             f"{sum(gather_duration) / len(gather_duration):.2f}s"
+    #         )
+    #         logger.debug(
+    #             f"Rank 0 migrate/save decoder layers done, total {sum(weight_duration):.2f}s, avg "
+    #             f"{sum(weight_duration) / len(weight_duration):.2f}s"
+    #         )
+    #         logger.debug(
+    #             f"Rank 0 reshard decoder layers done, total {sum(reshard_duration):.2f}s, avg "
+    #             f"{sum(reshard_duration) / len(reshard_duration):.2f}s"
+    #         )
+
+    #     # update other params
+    #     model.norm.unshard()
+    #     model.lm_head.unshard()
+    #     model.embed_tokens.unshard()
+    #     others_state_dict = {}
+    #     for name, param in model.named_parameters():
+    #         if "_checkpoint_wrapped_module." in name:
+    #             continue
+    #         if name not in saved_keys:
+    #             saved_keys.append(name)
+    #             if name == "norm.weight":
+    #                 name = "model.norm.weight"
+    #             if name == "embed_tokens.weight":
+    #                 name = "model.embed_tokens.weight"
+    #             if isinstance(param, DTensor):
+    #                 param = param.to_local()
+    #             others_state_dict[name] = param.detach()
+    #     self.request_update_params(others_state_dict, finished=True)
+    #     model.norm.reshard()
+    #     model.lm_head.reshard()
+    #     model.embed_tokens.reshard()
+    #     del others_state_dict
+    #     del param
+
+    #     dist.barrier()
+    #     DEVICE_MODULE.empty_cache()
+    #     return
 
     def request_update_params(self, state_dict, finished=False):
         cpu_mesh = self.rollout_device_mesh["engine_parallel"]
