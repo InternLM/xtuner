@@ -27,6 +27,7 @@ from xtuner.v1.config import (
     FSDPConfig,
     LRConfig,
 )
+from xtuner.v1.config.float8 import Float8Config, ScalingGranularity
 from xtuner.v1.ray.judger.controller import JudgerConfig
 from xtuner.v1.rl.base import WorkerConfig
 from xtuner.v1.rl.grpo import GRPOLossConfig
@@ -61,6 +62,7 @@ def parse_args():
     parser.add_argument("--evaluate-step", type=int, default=1)
     parser.add_argument("--evaluate-ratio", type=float, default=1)
     parser.add_argument("--ray-cluster-url", type=str, default="")
+    parser.add_argument("--enable-fp8", action="store_true")
     return parser.parse_args()
 
 
@@ -88,6 +90,7 @@ def main(args):
         gpus_per_node=args.gpus_per_node, # gpu: 8, npu: 16
         dtype="bfloat16",
         skip_load_weights=False,
+        enable_fp8=args.enable_fp8,
     )
     dataflow_config = DataFlowConfig(
         env="test",
@@ -137,8 +140,15 @@ def main(args):
         tokenizer=tokenizer,
         postprocessor=None
     )
+    if args.enable_fp8:
+        float8_cfg = Float8Config(
+            scaling_granularity_gemm=ScalingGranularity.TILEWISE,
+            scaling_granularity_grouped_gemm=ScalingGranularity.TILEWISE,
+        )
+    else:
+        float8_cfg = None
     train_worker_cfg: WorkerConfig = WorkerConfig(
-        model_cfg=Qwen3Dense8BConfig(),
+        model_cfg=Qwen3Dense8BConfig(float8_cfg=float8_cfg),
         optim_cfg=AdamWConfig(lr=1e-6, foreach=False if args.optimizer_disable_foreach else None),
         loss_cfg=GRPOLossConfig(
             policy_loss_cfg=dict(

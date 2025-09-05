@@ -24,18 +24,10 @@ def _is_sm89_or_later():
     return torch.cuda.is_available() and torch.cuda.get_device_capability() >= (8, 9)
 
 
-def default_linear_filter_fn(mod: nn.Module, fqn: str):
-    return fqn != "lm_head" and fqn[-4:] != "gate"
-
-
-def default_grouped_linear_filter_fn(mod: nn.Module, fqn: str):
-    return True
-
-
 # handler 要跟 Engine 一一对应？
 class Float8Handler:
-    scaling_granularity_gemm: ScalingGranularity
-    scaling_granularity_grouped_gemm: ScalingGranularity
+    scaling_granularity_gemm: ScalingGranularity | None
+    scaling_granularity_grouped_gemm: ScalingGranularity | None
     fsdp_mesh: Optional[DeviceMesh] = None
     tilewise_reduce_mesh_devided_64: Optional[DeviceMesh] = None
     tilewise_reduce_mesh_mapping: Dict[Tuple[int, int], DeviceMesh] = {}
@@ -53,12 +45,14 @@ class Float8Handler:
             )
             return
 
-        assert scaling_granularity_gemm in (ScalingGranularity.TILEWISE, ScalingGranularity.TENSORWISE), (
-            "scaling_granularity_gemm must be TILEWISE or TENSORWISE."
+        assert scaling_granularity_gemm in (ScalingGranularity.TILEWISE, ScalingGranularity.TENSORWISE, None), (
+            "scaling_granularity_gemm must be TILEWISE, TENSORWISE or None."
         )
-        assert scaling_granularity_grouped_gemm in (ScalingGranularity.TILEWISE, ScalingGranularity.TENSORWISE), (
-            "scaling_granularity_grouped_gemm must be TILEWISE or TENSORWISE."
-        )
+        assert scaling_granularity_grouped_gemm in (
+            ScalingGranularity.TILEWISE,
+            ScalingGranularity.TENSORWISE,
+            None,
+        ), "scaling_granularity_grouped_gemm must be TILEWISE, TENSORWISE or None."
 
         self.scaling_granularity_gemm = scaling_granularity_gemm
         self.scaling_granularity_grouped_gemm = scaling_granularity_grouped_gemm

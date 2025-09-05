@@ -198,7 +198,10 @@ class TrainEngine:
         return self.fsdp_cfg.tp_size
 
     @torch.no_grad()
-    def forward_only(self, seq_ctx: SequenceContext):
+    def forward_only(self, seq_ctx: SequenceContext, is_first: bool = True):
+        # If we call forward_only multiple times, we only need to precompute float8 scale once.
+        if is_first and self.float8_handler is not None and self.float8_handler.enabled:
+            self.float8_handler.precompute_float8_dynamic_scale_for_fsdp(self.model)
         output = self.model(seq_ctx=seq_ctx, loss_ctx=None)
         return output
 

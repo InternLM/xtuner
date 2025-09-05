@@ -17,12 +17,10 @@ from xtuner.v1.config import (
     LRConfig,
 )
 from xtuner.v1.model.moe.moe import BalancingLossConfig, ZLossConfig
-# from xtuner.v1.rl.grpo.config import WorkerConfig, LossConfig
 from xtuner.v1.rl.base import WorkerConfig, TrainingController, TrainingWorker as BaseTrainingWorker
 from xtuner.v1.rl.grpo.loss import GRPOLossConfig as LossConfig
-# from xtuner.v1.rl.grpo.loss import GRPOLossConfig as LossConfig
-# from xtuner.v1.rl.grpo.worker import WorkerConfig, GRPOTrainingWorker as TrainingWorker
-# from xtuner.v1.rl.grpo.controller import GRPOTrainingController as TrainingController
+from xtuner.v1.float8.config import Float8Config
+from xtuner.v1.float8.config import ScalingGranularity
 
 
 # Qwen3 30B A3
@@ -80,12 +78,16 @@ class TestGRPOTrain(unittest.TestCase):
         shutil.rmtree(self.temp_dir)
         ray.shutdown()
     
-    def build_train_controller(self):
+    def build_train_controller(self, test_fp8):
         moe_cfg = Qwen3MoE30BA3Config(
             ep_size=1,
             balancing_loss_cfg=BalancingLossConfig(),
             z_loss_cfg=ZLossConfig(),
         )
+        if test_fp8:
+            moe_cfg.float8_cfg = Float8Config(
+                scaling_granularity_gemm=ScalingGranularity.TILEWISE, 
+                scaling_granularity_grouped_gemm=ScalingGranularity.TILEWISE)
         optim_cfg: AdamWConfig = AdamWConfig(lr=5e-7, foreach=False)
         fsdp_cfg: FSDPConfig = FSDPConfig(
             torch_compile=True,
@@ -140,4 +142,8 @@ class TestGRPOTrain(unittest.TestCase):
 
     def test_grpo_train(self):
         train_controller = self.build_train_controller()
-        ray.get(train_controller.fit.remote(self.data_batches, pack_max_length=1024, rollout_idx=0))
+        ray.get(train_controller.fit.remote(self.data_batches, pack_max_length=8192, rollout_idx=0))
+    
+    def test_grpo_train_fp8(self):
+        train_controller = self.build_train_controller(test_fp8=True)
+        ray.get(train_controller.fit.remote(self.data_batches, pack_max_length=8192, rollout_idx=0))

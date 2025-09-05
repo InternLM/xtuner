@@ -189,9 +189,14 @@ class TrainingWorker(SingleAcceleratorWorker):
         model = model.fully_shard(ref_model_fsdp_cfg, float8_handler)
         model.from_hf(hf_path=load_from)
         model.eval()
+        self._ref_float8_handler: Float8Handler | None
         if float8_handler is not None:
+            float8_handler.build_reduce_mesh(model, cast(DeviceMesh, model.fsdp_mesh))
             # As the ref model is not updated, we only compute params' scales once
             float8_handler.precompute_float8_dynamic_scale_for_fsdp(model)
+            self._ref_float8_handler = float8_handler
+        else:
+            self._ref_float8_handler = None
         model.to_device("cpu")
         DEVICE_MODULE.empty_cache()  # type: ignore
         return model
@@ -221,8 +226,8 @@ class TrainingWorker(SingleAcceleratorWorker):
     def compute_actor_logprobs(
         self, seq_ctx_list: list[SequenceContext], loss_ctx_input_list: list[RLLossContextInputItem]
     ) -> list[RLLossContextInputItem]:
-        for seq_ctx, loss_ctx_input in zip(seq_ctx_list, loss_ctx_input_list):
-            output = self._engine.forward_only(seq_ctx=seq_ctx)
+        for i, (seq_ctx, loss_ctx_input) in enumerate(zip(seq_ctx_list, loss_ctx_input_list)):
+            output = self._engine.forward_only(seq_ctx=seq_ctx, is_first=(i == 0))
             loss_ctx_input.old_logprobs = gather_logprobs(output["logits"], loss_ctx_input.shifted_labels)
         return loss_ctx_input_list
 
@@ -231,6 +236,8 @@ class TrainingWorker(SingleAcceleratorWorker):
     ) -> list[RLLossContextInputItem]:
         assert self._has_ref
         self._ref_model.to_device(DEVICE)
+        if self._ref_float8_handler is not None:
+            self._ref_float8_handler.precompute_float8_dynamic_scale_for_fsdp(self._ref_model)
         for seq_ctx, loss_ctx_input in zip(seq_ctx_list, loss_ctx_input_list):
             with torch.no_grad():
                 ref_output = self._ref_model(seq_ctx=seq_ctx, loss_ctx=None)

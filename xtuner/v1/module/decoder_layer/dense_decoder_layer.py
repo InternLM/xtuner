@@ -10,7 +10,7 @@ from xtuner.v1.float8.config import Float8Config
 from xtuner.v1.module import MHAConfig, MLAConfig, RMSNorm
 from xtuner.v1.utils import ForwardState
 
-from ..linear.linear import _Linear
+from ..linear.linear import build_linear
 
 
 class DenseMLP(nn.Module):
@@ -21,11 +21,12 @@ class DenseMLP(nn.Module):
         intermediate_size: int,
         bias: bool = False,
         hidden_act: str,
+        float8_cfg: Float8Config | None = None,
     ):
         super().__init__()
-        self.gate_proj = _Linear(hidden_size, intermediate_size, bias=bias)
-        self.up_proj = _Linear(hidden_size, intermediate_size, bias=bias)
-        self.down_proj = _Linear(intermediate_size, hidden_size, bias=bias)
+        self.gate_proj = build_linear(hidden_size, intermediate_size, bias=bias, float8_cfg=float8_cfg)
+        self.up_proj = build_linear(hidden_size, intermediate_size, bias=bias, float8_cfg=float8_cfg)
+        self.down_proj = build_linear(intermediate_size, hidden_size, bias=bias, float8_cfg=float8_cfg)
         self.act_fn = ACT2FN[hidden_act]
 
     def forward(self, x):
@@ -64,6 +65,7 @@ class DenseDecoderLayer(nn.Module):
             intermediate_size=intermediate_size,
             bias=mlp_bias,
             hidden_act=hidden_act,
+            float8_cfg=float8_cfg,
         )
         self.input_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps)

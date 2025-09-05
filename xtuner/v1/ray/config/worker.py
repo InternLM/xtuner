@@ -167,6 +167,13 @@ class RolloutConfig(BaseModel):
             help="System prompt for the rollout worker.",
         ),
     ] = None
+    enable_fp8: Annotated[
+        bool,
+        Parameter(
+            group=infer_group,
+            help="Whether to enable FP8 quantization for the rollout worker.",
+        ),
+    ] = False
 
 
 if __name__ == "__main__":

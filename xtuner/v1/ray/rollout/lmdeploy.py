@@ -219,6 +219,7 @@ class LMDeployWorker(RolloutWorker):
                 distributed_executor_backend=distributed_executor_backend,
                 mp_engine_backend="ray",  # force ray to pass placement group
                 device_type=accelerator_to_device_type[self.accelerator],
+                model_format="fp8" if self.config.enable_fp8 else None,
             )
             if backend == "pytorch"
             else TurbomindEngineConfig(
