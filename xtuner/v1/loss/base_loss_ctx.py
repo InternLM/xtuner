@@ -22,7 +22,7 @@ from .chunk_loss import ChunkLoss
 # iter1 loss                 l10, l11      l12, l13
 #       loss weight          w10, w11      w12, w13
 #       loss mask (0 or 1)   m10, m11      m12, m13
-# There are 2 steps to compute the calibrated loss:
+# There are 3 steps to compute the calibrated loss:
 # 1. Compute the global loss mask sum among dp, sp and grad accumulation:
 #    global_loss_mask_sum = all_reduce(sum([loss_mask.sum() for loss_mask in loss_masks_grad_acc]), op=dist.ReduceOp.SUM, group=world)
 #                           = (m00 + m01 + m02 + m03 + m10 + m11 + m12 + m13)
@@ -70,7 +70,7 @@ class BaseLossConfig(BaseModel):
     model_config = {"arbitrary_types_allowed": True}
     ignore_idx: Annotated[int, Parameter(help="ignore index for loss calculation")] = -100
     mode: Annotated[Literal["eager", "chunk"], Parameter(help="loss calculation mode")] = "eager"
-    chunk_size: Annotated[int | None, Parameter(help="chunk size when mode is chunk")] = None
+    chunk_size: Annotated[int | None, Parameter(help="chunk size when mode is chunk")] = 1024
 
     @property
     def loss_ctx_cls(self) -> type["BaseLossContext"]:

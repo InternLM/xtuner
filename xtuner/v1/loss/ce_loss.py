@@ -15,6 +15,18 @@ from .utils import sp_gather, sp_split
 
 
 class CELossConfig(BaseLossConfig):
+    """Cross-entropy loss configuration.
+
+    Args:
+        ignore_idx (int): The index to ignore in the loss computation.
+            Defaults to -100.
+        mode (str): The mode for loss computation. Options are "eager" and "chunk".
+            Defaults to "eager".
+        chunk_size (int | None): The chunk size for "chunk" mode. Ignored if mode is "eager".
+            Defaults to 1024.
+        loss_reduction (str): The reduction mode for the loss. Options are "token", "sample", and "square".
+    """
+
     loss_reduction: Annotated[Literal["token", "sample", "square"], Parameter(help="loss reduction mode")] = "token"
 
     @property
@@ -23,11 +35,24 @@ class CELossConfig(BaseLossConfig):
 
 
 class CELossKwargs(BaseLossKwargs):
+    """Keyword arguments for cross-entropy loss computation.
+
+    Args:
+        shifted_labels (torch.Tensor): The shifted labels for the input sequences.
+        loss_weight (torch.Tensor): The weight for each token in the loss computation.
+    """
+
     shifted_labels: torch.Tensor
     loss_weight: torch.Tensor
 
 
 class CELossContextInputItem(BaseModel):
+    """Input item for cross-entropy loss context.
+
+    Args:
+        shifted_labels (torch.Tensor): The shifted labels for the input sequences.
+    """
+
     model_config = ConfigDict(title="CELossContextInputItem", extra="allow", arbitrary_types_allowed=True)
     shifted_labels: torch.Tensor
 
@@ -41,6 +66,13 @@ class CELossContextInputItem(BaseModel):
 
 
 class CELossContext(BaseLossContext[CELossContextInputItem]):
+    """Cross-entropy loss context for language models.
+
+    Args:
+        loss_cfg (CELossConfig): The configuration for the cross-entropy loss.
+        loss_kwargs (CELossKwargs): The keyword arguments for the cross-entropy loss.
+    """
+
     loss_cfg: CELossConfig
     loss_kwargs: CELossKwargs
 
