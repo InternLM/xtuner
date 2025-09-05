@@ -86,7 +86,8 @@ sft_trainer_yidian:
     expire_in: 1 week
     when: always
   rules:
-    - if: $CI_PIPELINE_SOURCE == "merge_request_event" && ($CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "main" || $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "refactor")
+    #- if: $CI_PIPELINE_SOURCE == "merge_request_event" && ($CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "main" || $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "refactor")
+    - if: $CI_PIPELINE_SOURCE == "schedule"
 
 # Yidian集群metric检查任务
 sft_trainer_yidian_check_metric:
@@ -108,7 +109,7 @@ sft_trainer_yidian_check_metric:
           python ./ci/scripts/check_metric.py $rank0_log $run_py --check_metric '{"reduced_llm_loss":0.01,"grad_norm":0.02}'
       done 
   rules:
-    - if: $CI_PIPELINE_SOURCE == "merge_request_event" && ($CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "main" || $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "refactor")
+    - if: $CI_PIPELINE_SOURCE == "schedule"
       changes:
         - "xtuner/**/*"
         - "ci/workflow/sft.yaml"
