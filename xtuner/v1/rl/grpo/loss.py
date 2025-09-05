@@ -18,12 +18,37 @@ logger = get_logger()
 
 
 class GRPOLossConfig(BaseRLLossConfig):
+    """Configuration for GRPO loss computation in XTuner RL.
+
+    Args:
+        policy_loss_cfg (dict[str, Any]): Configuration parameters for the main policy loss.
+            Contains algorithm-specific parameters for policy optimization.
+        use_kl_loss (bool): Whether to include KL divergence penalty in the loss.
+            When True, requires a reference model for KL computation. Defaults to False.
+        kl_loss_coef (float): Coefficient for weighting the KL divergence penalty.
+            Controls the strength of regularization against the reference policy. Defaults to 0.001.
+        kl_loss_type (Literal["kl", "k1", "abs", "mse", "k2", "low_var_kl", "k3"] | None):
+            Type of KL penalty computation method. Different types provide various
+            regularization behaviors and numerical stability properties. Defaults to None.
+    """
+
     @property
     def loss_ctx_cls(self) -> type["GRPOLossContext"]:
         return GRPOLossContext
 
 
 class GRPOLossKwargs(BaseLossKwargs):
+    """Keyword arguments for GRPO loss computation.
+
+    Args:
+        shifted_labels (torch.Tensor): The shifted labels for the input sequences.
+        old_logprobs (torch.Tensor): Log probabilities from the old policy.
+        advantages (torch.Tensor): Advantage estimates for the actions taken.
+        policy_loss_weight (torch.Tensor): Weights for each token in the policy loss computation.
+        ref_logprobs (torch.Tensor | None): Reference log probabilities for KL penalty, if used.
+        kl_loss_weight (torch.Tensor | None): Weights for each token in the KL loss computation, if used.
+    """
+
     shifted_labels: torch.Tensor
     old_logprobs: torch.Tensor
     advantages: torch.Tensor
@@ -33,6 +58,13 @@ class GRPOLossKwargs(BaseLossKwargs):
 
 
 class GRPOLossContext(BaseLossContext[RLLossContextInputItem]):
+    """GRPO loss context for reinforcement learning.
+
+    Args:
+        loss_cfg (GRPOLossConfig): Configuration for GRPO loss computation.
+        loss_kwargs (GRPOLossKwargs): Keyword arguments required for loss calculation.
+    """
+
     loss_cfg: GRPOLossConfig
     loss_kwargs: GRPOLossKwargs
 

@@ -41,22 +41,23 @@ class BaseRLLossConfig(BaseLossConfig):
 
     Example configuration for basic RL loss ::
 
-        config = PPOLossConfig(
-            policy_loss_cfg={
-                "clip_ratio": 0.2,
-                "value_loss_coef": 0.5,
-                "entropy_coef": 0.01
-            },
+        config = GRPOLossConfig(
+            policy_loss_cfg=dict(
+                cliprange_high=0.2,
+                cliprange_low=0.2,
+                loss_type='vanilla',
+            ),
             use_kl_loss=False
         )
 
     Example configuration RL loss with KL regularization::
 
         config = GRPOLossConfig(
-            policy_loss_cfg={
-                "beta": 0.1,
-                "label_smoothing": 0.0
-            },
+            policy_loss_cfg=dict(
+                cliprange_high=0.2,
+                cliprange_low=0.2,
+                loss_type='vanilla',
+            ),
             use_kl_loss=True,
             kl_loss_coef=0.001,
             kl_loss_type="low_var_kl"
@@ -78,6 +79,15 @@ class BaseRLLossConfig(BaseLossConfig):
 
 
 class RLLossContextInputItem(BaseModel):
+    """Input item for reinforcement learning loss context.
+
+    Args:
+        shifted_labels (torch.Tensor): The shifted labels for the input sequences.
+        advantages (torch.Tensor): Advantage estimates for the actions taken.
+        old_logprobs (torch.Tensor | None): Log probabilities from the old policy.
+        ref_logprobs (torch.Tensor | None): Reference log probabilities for KL penalty, if used.
+    """
+
     model_config = ConfigDict(title="RLLossContextInputItem", extra="allow", arbitrary_types_allowed=True)
     shifted_labels: torch.Tensor
     advantages: torch.Tensor
