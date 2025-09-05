@@ -290,7 +290,11 @@ class BaseModel(nn.Module):
             yield name_list, _get_hf_params(tensor_list)
 
     def _get_fused_hf_param(
-        self, params: list[tuple[torch.Tensor, LoadSpec]], dtype: torch.dtype
+        self,
+        params: list[tuple[torch.Tensor, LoadSpec]],
+        dtype: torch.dtype,
+        device="cpu",
+        bucket_size=None,
     ) -> Generator[tuple[list[str], list[torch.Tensor]], None, None]:
         if not params:
             return
@@ -325,6 +329,8 @@ class BaseModel(nn.Module):
 
             return hf_tensor_list, name_list
 
+        if bucket_size is None:
+            bucket_size = self.SAFETENSOR_SIZE
         safetensor_size = 0
         tensor_list: list[tuple[torch.Tensor, LoadSpec]] = []
         name_list: list[str] = []
@@ -332,7 +338,7 @@ class BaseModel(nn.Module):
         for param, load_spec in params:
             local_tensor = param._local_tensor if isinstance(param, DTensor) else param
             local_tensor = local_tensor.bfloat16()
-            if safetensor_size + self._get_tensor_size(param, dtype) > self.SAFETENSOR_SIZE:
+            if safetensor_size + self._get_tensor_size(param, dtype) > bucket_size:
                 if self.fsdp_mesh is not None:
                     hf_params, name_list = _get_hf_params(tensor_list, name_list)
                 else:
@@ -345,7 +351,7 @@ class BaseModel(nn.Module):
                     else:
                         raise NotImplementedError(f"dtype {dtype} is not supported for fused hf param")
                 safetensor_size = 0
-                hf_params = [t.cpu() for t in hf_params]
+                hf_params = [t.to(device=device) for t in hf_params]
                 yield name_list, hf_params
                 name_list = load_spec.hf_keys.copy()
                 tensor_list = [(local_tensor, load_spec)]
@@ -366,14 +372,20 @@ class BaseModel(nn.Module):
                     )
                 else:
                     raise NotImplementedError(f"dtype {dtype} is not supported for fused hf param")
-            hf_params = [t.cpu() for t in hf_params]
+            hf_params = [t.to(device=device) for t in hf_params]
             yield name_list, hf_params
 
     def _get_same_hf_param(
-        self, params: list[tuple[torch.Tensor, LoadSpec]], dtype: torch.dtype
+        self,
+        params: list[tuple[torch.Tensor, LoadSpec]],
+        dtype: torch.dtype,
+        device: torch.device | str = "cpu",
+        bucket_size: int | None = None,
     ) -> Generator[tuple[list[str], list[torch.Tensor]], None, None]:
         if not params:
             return
+        if bucket_size is None:
+            bucket_size = self.SAFETENSOR_SIZE
         safetensor_size = 0
         tensor_list: list[torch.Tensor] = []
         load_spec_list: list[LoadSpec] = []
@@ -382,7 +394,7 @@ class BaseModel(nn.Module):
         for param, load_spec in params:
             local_tensor = param._local_tensor if isinstance(param, DTensor) else param
             local_tensor = local_tensor.bfloat16()
-            if safetensor_size + self._get_tensor_size(param, dtype) > self.SAFETENSOR_SIZE:
+            if safetensor_size + self._get_tensor_size(param, dtype) > bucket_size:
                 if self.fsdp_mesh is not None:
                     gathered_tensor_list = self._fsdp_foreach_allgather(tensor_list, load_spec_list)
                 else:
@@ -392,7 +404,7 @@ class BaseModel(nn.Module):
                     gathered_tensor_list, name_list = self._to_float8(
                         gathered_tensor_list, name_list, tensor_list, dtype
                     )
-                gathered_tensor_list = [t.cpu() for t in gathered_tensor_list]
+                gathered_tensor_list = [t.to(device=device) for t in gathered_tensor_list]
                 yield name_list, gathered_tensor_list
                 name_list = load_spec.hf_keys.copy()
                 tensor_list = [local_tensor]
@@ -410,7 +422,7 @@ class BaseModel(nn.Module):
                 gathered_tensor_list = tensor_list
             if dtype == torch.float8_e4m3fn:
                 gathered_tensor_list, name_list = self._to_float8(gathered_tensor_list, name_list, tensor_list, dtype)
-            gathered_tensor_list = [t.cpu() for t in gathered_tensor_list]
+            gathered_tensor_list = [t.to(device=device) for t in gathered_tensor_list]
             yield name_list, gathered_tensor_list
 
     def _clean_param_name(self, name: str) -> str:
