@@ -330,7 +330,7 @@ def main():
             global_batch_size=16,
             work_dir=work_dir,
             seed=0,
-            epoch_num=1,
+            total_epoch=1,
         )
         trainer.fit()
         if dist.get_rank() == 0:

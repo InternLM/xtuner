@@ -20,7 +20,7 @@ from torch.distributed.fsdp import (
 )
 from torch.distributed.tensor import DTensor, Replicate, distribute_tensor
 from tqdm import tqdm
-from typing_extensions import overload, override
+from typing_extensions import overload, override, Self
 
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.config.base_model import MoEConfig, MoEModelOutputs
@@ -504,14 +504,11 @@ class MoE(BaseModel):
     def build_rotary_embedding(self, config: MoEConfig) -> RotaryEmbedding:
         return RotaryEmbedding(config=config)
 
-    def _apply(self, fn, recurse: bool = True):
-        super()._apply(fn)
-        self.rotary_emb.to(torch.float32)
-        return self
-
     @override
     def from_hf(self, hf_path: str | Path, strict: bool = True) -> tuple:
         loaded_keys, unloaded_keys, missing_keys = super().from_hf(hf_path, strict)
+        # If model is builded on meta device, we need to rebuild rotary embedding since from_hf will not
+        # load the `inv_freq` of RotaryEmbedding which is a inpersisitent buffer. 
         self.rotary_emb = self.build_rotary_embedding(self.config)
         return loaded_keys, unloaded_keys, missing_keys
 
@@ -627,7 +624,7 @@ class MoE(BaseModel):
             if isinstance(module, nn.Embedding):
                 module.forward = types.MethodType(self.patched_emb_forward, module)  # type: ignore
 
-        self.to_empty(device=self.device)
+        self._to_empty_meta()
         return self
 
     @torch.no_grad  # type: ignore
@@ -792,6 +789,7 @@ class MoE(BaseModel):
             max_length_q=(cat_seq_lens_q[1:] - cat_seq_lens_q[:-1]).max().item(),  # type: ignore[arg-type]
             max_length_k=(cat_seq_lens_q[1:] - cat_seq_lens_q[:-1]).max().item(),  # type: ignore[arg-type]
         )
+
 
     # NOTE: Add this overload for inferring the return type for easier type checking and using
     @overload  # type: ignore

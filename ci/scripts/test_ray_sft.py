@@ -100,7 +100,7 @@ if __name__ == "__main__":
         fsdp_cfg=fsdp_cfg,
         loss_cfg=loss_cfg,
         global_batch_size=16,
-        epoch_num=1,
+        total_epoch=1,
         work_dir="/tmp/qwen3_moe_test",
         seed=42,
     )

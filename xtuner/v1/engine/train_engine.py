@@ -2,16 +2,14 @@ import json
 import os
 import threading
 import time
-from concurrent.futures import Future, wait
+from concurrent.futures import wait
 from contextlib import contextmanager
-from datetime import timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, cast
 
 import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
-from mmengine import mkdir_or_exist
 from safetensors import safe_open
 from torch.distributed._tensor import DTensor, Replicate, Shard
 from torch.distributed.checkpoint.state_dict import (
@@ -414,105 +412,67 @@ class TrainEngine:
         """
         self.model.save_hf(hf_dir=hf_dir, save_dtype=save_dtype)
 
+    # TODO: Support async save
     def save_dcp(
         self,
-        dcp_dir: str,
-        is_snapshot: bool,
-        checkpoint_drop_optimizer: bool,
-        dcp_task_coordinator: Optional[CPUThreadTaskCoordinator] = None,
-    ) -> List[Future]:
-        """Save the dcp model to the given directory.
-
-        Args:
-            dcp_dir (str): The directory to save the model.
-        """
-        if is_snapshot:
-            checkpoint_drop_optimizer = False
-        logger.info(f"[DCP Checkpoint] Start saving PT checkpoint to {dcp_dir} .........")
+        model_dir: Path,
+        optimizer_dir: Path | None = None,
+    ):
         rank = dist.get_rank()
+
         if rank == 0:
-            mkdir_or_exist(dcp_dir)
+            model_dir.mkdir(parents=True, exist_ok=True)
+            if optimizer_dir is not None:
+                optimizer_dir.mkdir(parents=True, exist_ok=True)
 
-        with profile_time_and_memory("[DCP Checkpoint]"):
-            if dcp_task_coordinator is not None:
-                dcp_task_coordinator.wait()
-
-            # todo: save lr scheduler state dict
-            # if rank == 0:
-            #     torch.save(self.lr_scheduler.state_dict(), os.path.join(dcp_dir, "lr_scheduler.pt"))
-
-            _options = StateDictOptions(cpu_offload=True, ignore_frozen_params=True)
-
-            if not checkpoint_drop_optimizer:
-                shard_optimizer_state_dict = get_optimizer_state_dict(self.model, self.optimizer, options=_options)
-                shard_optimizer_state_dict = {"optimizer": shard_optimizer_state_dict}  # type: ignore
-                optimizer_dcp_dir = os.path.join(dcp_dir, "optimizer")
-
-                # Must set different gloo group, otherwise empty save
-                _optimizer_gloo_group = dist.new_group(backend="gloo", timeout=timedelta(minutes=30))
-                optimizer_handle = dcp.async_save(
-                    shard_optimizer_state_dict,
-                    checkpoint_id=optimizer_dcp_dir,
-                    process_group=_optimizer_gloo_group,
-                )
-
-            shard_model_state_dict = get_model_state_dict(self.model, options=_options)
-            model_state_dict = {"model": shard_model_state_dict}
-            model_dcp_dir = os.path.join(dcp_dir, "model")
-            # Must set different gloo group, otherwise empty save
-            _model_gloo_group = dist.new_group(backend="gloo", timeout=timedelta(minutes=20))
-            model_handle = dcp.async_save(
-                model_state_dict, checkpoint_id=model_dcp_dir, process_group=_model_gloo_group
+        _options = StateDictOptions(cpu_offload=True, ignore_frozen_params=True)
+        with profile_time_and_memory(f"[DCP Checkpoint to {model_dir}]"):
+            model_state = get_model_state_dict(self.model, options=_options)
+            dcp.save(
+                model_state,
+                checkpoint_id=model_dir,
             )
 
-            futures = [model_handle]
-            if not checkpoint_drop_optimizer:
-                futures.append(optimizer_handle)
+        with profile_time_and_memory(f"[DCP Checkpoint to {optimizer_dir}]"):
+            if optimizer_dir is not None:
+                shard_optimizer_state_dict = get_optimizer_state_dict(self.model, self.optimizer, options=_options)
+                dcp.save(
+                    shard_optimizer_state_dict,
+                    checkpoint_id=optimizer_dir,
+                )
 
-        return futures
-
-    def load_dcp(self, dcp_dir: str, skip_load_optimizer: bool):
+    def load_dcp(self, model_dir: Path, optimizer_dir: Path | None = None):
         """Load the dcp model from the given directory.
 
         Args:
             dcp_dir (str): The directory to load the model from.
         """
-        logger.info(f"Load dcp checkpoint in {dcp_dir}")
-        with profile_time_and_memory("[Load DCP]"):
-            _load_options = StateDictOptions(cpu_offload=True, ignore_frozen_params=True)
-            _set_options = StateDictOptions(cpu_offload=True, strict=False)
-            if not skip_load_optimizer:
+        _load_options = StateDictOptions(cpu_offload=True, ignore_frozen_params=True)
+        _set_options = StateDictOptions(cpu_offload=True, strict=True)
+        with profile_time_and_memory(f"[Load DCP Model from {model_dir}]"):
+            shard_model_state_dict = get_model_state_dict(self.model, options=_load_options)
+            # inplace state_dict
+            dcp.load(
+                state_dict=shard_model_state_dict,
+                checkpoint_id=model_dir,
+            )
+            set_model_state_dict(self.model, shard_model_state_dict, options=_set_options)
+
+        if optimizer_dir is not None:
+            with profile_time_and_memory(f"[Load DCP Optimizer] from {optimizer_dir}"):
                 shard_optimizer_state_dict = get_optimizer_state_dict(
                     self.model, self.optimizer, options=_load_options
                 )
-                logger.info("====== Loading optimizer state dict ======")
-                optimizer_state_dict = {"optimizer": shard_optimizer_state_dict}
                 dcp.load(
-                    state_dict=optimizer_state_dict,
-                    checkpoint_id=os.path.join(dcp_dir, "optimizer"),
+                    state_dict=shard_optimizer_state_dict,
+                    checkpoint_id=optimizer_dir,
                 )
                 set_optimizer_state_dict(
                     self.model,
                     self.optimizer,
-                    optim_state_dict=optimizer_state_dict["optimizer"],
+                    optim_state_dict=shard_optimizer_state_dict,
                     options=_set_options,
                 )
-
-            # todo: resume lr scheduler
-            # if not skip_load_scheduler:
-            #     logger.info("====== Loading scheduler state dict ======")
-            #     lr_scheduler_state_dict = torch.load(os.path.join(dcp_dir, "lr_scheduler.pt"))
-            #     self.lr_scheduler.load_state_dict(lr_scheduler_state_dict)
-
-            shard_model_state_dict = get_model_state_dict(self.model, options=_load_options)
-            logger.info("====== Loading model state dict ======")
-            model_state_dict = {"model": shard_model_state_dict}
-            # inplace state_dict
-            dcp.load(
-                state_dict=model_state_dict,
-                checkpoint_id=os.path.join(dcp_dir, "model"),
-            )
-            set_model_state_dict(self.model, model_state_dict["model"], options=_set_options)
 
     def put_model_to_device(self, device: torch.device | str):
         """Put the model to the given device."""

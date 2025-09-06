@@ -1,8 +1,8 @@
 import os
-from os.path import samefile
 import tempfile
 from pathlib import Path
 from unittest.mock import patch, Mock
+from typing import cast
 
 import torch
 import torch.distributed as dist
@@ -11,7 +11,7 @@ from torch.testing._internal.common_distributed import DistributedTestBase
 
 from xtuner.v1.config import AdamWConfig, FSDPConfig, DataloaderConfig, LRConfig, DatasetConfig
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
-from xtuner.v1.train.trainer import Trainer
+from xtuner.v1.train.trainer import Trainer, ResumeConfig
 from xtuner.v1.datasets import FTDPTokenizeFnConfig
 
 from xtuner.v1.utils.device import get_device
@@ -55,6 +55,13 @@ class FakeEngine:
     def clip_grad_norm(self):
         self.grad_norm_calls += 1
         return torch.tensor(1.0)
+
+    load_dcp = Mock()
+
+    def save_dcp(self, model_dir: Path, optimizer_dir: Path | None):
+        model_dir.mkdir(parents=True, exist_ok=True)
+        if optimizer_dir is not None:
+            optimizer_dir.mkdir(parents=True, exist_ok=True)
 
 
 def prepare(fn):
@@ -153,6 +160,173 @@ class TestTrainerSaveHF(DistributedTestBase):
             self.assertTrue(config_file.exists())
             self.assertEqual(model_file.read_text(), "fake model weights")
             self.assertEqual(config_file.read_text(), '{"model_type": "fake_model"}')
+
+    @patch("xtuner.v1.train.trainer.is_hf_model_path", Mock(return_value=True))
+    @prepare
+    def test_save_checkpoint_interval(self):
+        self.create_pg(DEVICE)
+        work_dir_list = [self.work_dir]
+        dist.broadcast_object_list(work_dir_list, src=0)
+        self.work_dir = Path(work_dir_list[0])
+        model_cfg = Qwen3MoE30BA3Config()
+        optim_cfg = AdamWConfig(lr=1e-4, weight_decay=0.01)
+        fsdp_cfg = FSDPConfig(tp_size=1)
+        dataset_cfg = [
+            {
+                "dataset": DatasetConfig(name="alpaca", anno_path=self.alpaca_path, sample_ratio=1.0),
+                "tokenize_fn": FTDPTokenizeFnConfig(),
+            },
+        ]
+        dataloader_cfg = DataloaderConfig()
+        lr_cfg = LRConfig(lr_type="constant", warmup_ratio=0.1, lr_min=1e-6)
+
+        # 1. Only save checkpoint at last step
+        Trainer.build_engine = Mock(return_value=FakeEngine())
+        trainer = Trainer(
+            load_from=str(self.fake_hf_model_dir),
+            model_cfg=model_cfg,
+            optim_cfg=optim_cfg,
+            fsdp_cfg=fsdp_cfg,
+            dataset_cfg=dataset_cfg,
+            dataloader_cfg=dataloader_cfg,
+            lr_cfg=lr_cfg,
+            tokenizer_path=self.tokenizer_path,
+            global_batch_size=2,
+            total_step=10,
+            work_dir=str(self.work_dir),
+            hf_interval=3,
+            hf_max_keep=2,
+            seed=42,
+            debug=False,
+            checkpoint_interval=5,
+        )
+
+        trainer.fit()
+        dist.barrier()
+        assert len(trainer.meta.latest_exp.checkpoint_list) == 2
+        for checkpoint, step in zip(trainer.meta.latest_exp.checkpoint_list, [5, 10]):
+            assert f"step-{step}" in str(checkpoint)
+            assert os.path.exists(checkpoint)
+
+        # save checkpoint at step 3 6 9 10 
+        trainer = Trainer(
+            load_from=str(self.fake_hf_model_dir),
+            model_cfg=model_cfg,
+            optim_cfg=optim_cfg,
+            fsdp_cfg=fsdp_cfg,
+            dataset_cfg=dataset_cfg,
+            dataloader_cfg=dataloader_cfg,
+            lr_cfg=lr_cfg,
+            tokenizer_path=self.tokenizer_path,
+            global_batch_size=2,
+            total_step=10,
+            work_dir=str(self.work_dir),
+            hf_interval=3,
+            hf_max_keep=2,
+            seed=42,
+            debug=False,
+            checkpoint_interval=3,
+        )
+
+        trainer.fit()
+        dist.barrier()
+        assert len(trainer.meta.latest_exp.checkpoint_list) == 4
+        for checkpoint, step in zip(trainer.meta.latest_exp.checkpoint_list, [3, 6, 9, 10]):
+            assert f"step-{step}" in str(checkpoint)
+            assert os.path.exists(checkpoint)
+
+    @patch("xtuner.v1.train.trainer.is_hf_model_path", Mock(return_value=True))
+    @prepare
+    def test_resume(self):
+        self.create_pg(DEVICE)
+        work_dir_list = [self.work_dir]
+        dist.broadcast_object_list(work_dir_list, src=0)
+        self.work_dir = Path(work_dir_list[0])
+        model_cfg = Qwen3MoE30BA3Config()
+        optim_cfg = AdamWConfig(lr=1e-4, weight_decay=0.01)
+        fsdp_cfg = FSDPConfig(tp_size=1)
+        dataset_cfg = [
+            {
+                "dataset": DatasetConfig(name="alpaca", anno_path=self.alpaca_path, sample_ratio=1.0),
+                "tokenize_fn": FTDPTokenizeFnConfig(),
+            },
+        ]
+        dataloader_cfg = DataloaderConfig()
+        lr_cfg = LRConfig(lr_type="constant", warmup_ratio=0.1, lr_min=1e-6)
+
+        # 1. Only save checkpoint at last step
+        Trainer.build_engine = Mock(return_value=FakeEngine())
+        trainer = Trainer(
+            load_from=str(self.fake_hf_model_dir),
+            model_cfg=model_cfg,
+            optim_cfg=optim_cfg,
+            fsdp_cfg=fsdp_cfg,
+            dataset_cfg=dataset_cfg,
+            dataloader_cfg=dataloader_cfg,
+            lr_cfg=lr_cfg,
+            tokenizer_path=self.tokenizer_path,
+            global_batch_size=2,
+            total_step=10,
+            work_dir=str(self.work_dir),
+            hf_interval=3,
+            hf_max_keep=2,
+            seed=42,
+            debug=False,
+            checkpoint_interval=5,
+        )
+
+        trainer.fit()
+        dist.barrier()
+
+        # Test resume
+        # TODO: It's hard to test the accuracy of resuming in unit test now, need to improve
+        # 1. Test auto resume
+        resume_trainer1 = Trainer(
+            load_from=str(self.fake_hf_model_dir),
+            model_cfg=model_cfg,
+            optim_cfg=optim_cfg,
+            fsdp_cfg=fsdp_cfg,
+            dataset_cfg=dataset_cfg,
+            dataloader_cfg=dataloader_cfg,
+            lr_cfg=lr_cfg,
+            tokenizer_path=self.tokenizer_path,
+            global_batch_size=2,
+            total_step=10,
+            work_dir=str(self.work_dir),
+            hf_interval=3,
+            hf_max_keep=2,
+            seed=42,
+            debug=False,
+            checkpoint_interval=3,
+            resume_cfg=ResumeConfig(
+                auto_resume=True,
+            ),
+        )
+        assert resume_trainer1.cur_step == 10
+        assert resume_trainer1.exp_dir == trainer.exp_dir
+
+        resume_trainer2 = Trainer(
+            load_from=str(self.fake_hf_model_dir),
+            model_cfg=model_cfg,
+            optim_cfg=optim_cfg,
+            fsdp_cfg=fsdp_cfg,
+            dataset_cfg=dataset_cfg,
+            dataloader_cfg=dataloader_cfg,
+            lr_cfg=lr_cfg,
+            tokenizer_path=self.tokenizer_path,
+            global_batch_size=2,
+            total_step=10,
+            work_dir=str(self.work_dir),
+            hf_interval=3,
+            hf_max_keep=2,
+            seed=42,
+            debug=False,
+            checkpoint_interval=3,
+            resume_cfg=ResumeConfig(
+                resume_from=trainer.meta.latest_exp.checkpoint_list[-2],
+            ),
+        )
+        assert resume_trainer2.cur_step == 5 
 
     @property
     def world_size(self) -> int:

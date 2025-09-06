@@ -64,6 +64,6 @@ trainer = TrainerConfig(
     lr_cfg=lr_cfg,
     loss_cfg=CELossConfig(mode="chunk", chunk_size=1024),
     global_batch_size=1,
-    epoch_num=1,
+    total_epoch=1,
     work_dir="work_dirs",
 )

@@ -55,6 +55,6 @@ trainer = TrainerConfig(
     loss_cfg=CELossConfig(mode="chunk", chunk_size=1024),
     tokenizer_path=hf_model_path,
     global_batch_size=8,
-    epoch_num=2,
+    total_epoch=2,
     work_dir='work_dirs'
 )
