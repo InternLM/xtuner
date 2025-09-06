@@ -72,7 +72,7 @@ def main():
         lr_cfg=lr_cfg,
         tokenizer_path=args.model_path,
         global_batch_size=16,
-        epoch_num=1,
+        total_epoch=1,
         work_dir=args.work_dir,
         hf_interval=30,
         seed=0,

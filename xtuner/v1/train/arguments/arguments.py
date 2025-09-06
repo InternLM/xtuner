@@ -129,7 +129,7 @@ class TrainingArguments(BaseModel):
             fsdp_cfg=self.fsdp_config,
             global_batch_size=self.global_batch_size,
             total_step=self.total_step,
-            epoch_num=self.epoch_num,
+            total_epoch=self.epoch_num,
             resume=resume_cfg,
             work_dir=self.work_dir,
         )

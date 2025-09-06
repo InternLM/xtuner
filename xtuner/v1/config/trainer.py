@@ -3,7 +3,6 @@ from typing import Annotated, Literal
 
 from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict, model_validator
-from typing_extensions import TypedDict
 
 from xtuner.v1.config.base_model import TransformerConfig
 
@@ -14,11 +13,12 @@ from .fsdp import FSDPConfig
 from .optim import LRConfig, OptimConfig
 
 
-class ResumeConfig(TypedDict):
-    resume_from: str | Path | None
-    load_optimizer: bool
-    load_dataset: bool
-    load_scheduler: bool
+class ResumeConfig(BaseModel):
+    resume_from: str | Path | None = None
+    auto_resume: bool = False
+    load_optimizer: bool = True
+    load_dataset: bool = True
+    load_scheduler: bool = True
 
 
 class TrainerConfig(BaseModel):
@@ -37,7 +37,7 @@ class TrainerConfig(BaseModel):
     log_dir: Path | str | None = None
     sp_size: int = 1
     total_step: int | None = None
-    epoch_num: int | None = None
+    total_epoch: int | None = None
     resume: ResumeConfig | None = None
     strict_load: bool = True
     hf_interval: int | None = None

@@ -2,6 +2,7 @@
 import types
 from pathlib import Path
 from typing import cast
+from typing_extensions import Self
 
 import torch
 import torch.distributed as dist
@@ -134,7 +135,9 @@ class Dense(BaseModel):
     @override
     def from_hf(self, hf_path: str | Path, strict: bool = True) -> tuple:
         loaded_keys, unloaded_keys, missing_keys = super().from_hf(hf_path, strict)
-        self.rotary_emb = self.build_rotary_embedding(self.config)
+        # If model is builded on meta device, we need to rebuild rotary embedding since from_hf will not
+        # load the `inv_freq` of RotaryEmbedding which is a inpersisitent buffer. 
+        self.rotary_emb  = self.build_rotary_embedding(self.config)
         return loaded_keys, unloaded_keys, missing_keys
 
     @override
@@ -237,7 +240,7 @@ class Dense(BaseModel):
                 module.forward = types.MethodType(self.patched_emb_forward, module)  # type: ignore
             elif isinstance(module, RMSNorm):
                 module.forward = types.MethodType(self.patched_rms_norm_forward, module)  # type: ignore
-        self.to_empty(device=self.device)
+        self._to_empty_meta()
         return self
 
     # TODO: 支持 tp

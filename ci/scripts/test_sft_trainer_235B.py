@@ -286,7 +286,7 @@ def main():
             global_batch_size=256,
             work_dir=work_dir,
             seed=0,
-            epoch_num=10,
+            total_epoch=10,
             profile_step=20,
             profile_memory=True,
         )

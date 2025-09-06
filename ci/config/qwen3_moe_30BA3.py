@@ -50,7 +50,7 @@ trainer = TrainerConfig(
     loss_cfg=loss_cfg,
     tokenizer_path=QWEN3_MOE_PATH,
     global_batch_size=16,
-    epoch_num=1,
+    total_epoch=1,
     work_dir="/tmp/qwen3_moe_30BA3",
     seed=0,
 )

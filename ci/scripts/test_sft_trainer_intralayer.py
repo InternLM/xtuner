@@ -267,7 +267,7 @@ def main():
             lr_cfg=lr_cfg,
             tokenizer_path=QWEN3_MOE_PATH,
             global_batch_size=32,
-            epoch_num=1,
+            total_epoch=1,
             work_dir=work_dir,
             intra_layer_micro_batch=2,
             seed=0,

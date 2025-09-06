@@ -252,7 +252,7 @@ def main():
             lr_cfg=lr_cfg,
             tokenizer_path=QWEN3_PATH,
             global_batch_size=16,
-            epoch_num=1,
+            total_epoch=1,
             work_dir=work_dir,
             hf_interval=5,
             hf_max_keep=2,

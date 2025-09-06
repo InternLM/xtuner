@@ -992,3 +992,10 @@ class BaseModel(nn.Module):
             assert (ep_size is None) or (ep_size == 1), "Only support fp8 pad for MoE with ep_size == 1"
             assert self.config.float8_cfg is not None
             local_tensor[padding_start:].copy_(0.0)  # type: ignore  # padded part must be set to 0
+
+    def _to_empty_meta(self):
+        for module in self.modules():
+            if self._has_meta_param(module):
+                module.to_empty(device=self.device, recurse=False)
+        DEVICE_MODULE.synchronize()
+        return

@@ -262,14 +262,14 @@ def main():
             loss_cfg=loss_cfg,
             lr_cfg=lr_cfg,
             tokenizer_path=QWEN3_MOE_PATH,
-            global_batch_size=8,
-            epoch_num=1,
+            global_batch_size=16,
+            total_epoch=1,
             work_dir=work_dir,
             seed=0,
         )
         trainer.fit()
         if dist.get_rank() == 0:
-            rank0_log_path = Path(trainer.exp_dir) / trainer._EXP_TRACKING_PATH / "rank0/tracker.jsonl"
+            rank0_log_path = Path(trainer.log_dir) / trainer._EXP_TRACKING_PATH / "rank0/tracker.jsonl"
             (
                 cur_lr,
                 cur_text_tokens,
