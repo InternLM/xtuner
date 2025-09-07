@@ -1,7 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import os
 import types
-from itertools import accumulate
 from pathlib import Path
 from typing import Annotated, Literal, cast
 
@@ -224,8 +223,8 @@ class MoE(BaseModel):
 
         for i_layer in range(n_layer):
             # 前 l 层是 mlp 层，跳过
-            gate = cast(MoEDecoderLayer, self.layers[first_k_dense_replace + i_layer]).gate
-            e_score_correction_bias = cast(NoAuxRouter, gate).e_score_correction_bias
+            gate = cast(MoEDecoderLayer, self.layers[str(first_k_dense_replace + i_layer)]).gate
+            e_score_correction_bias = cast(NoAuxRouter, gate.router).e_score_correction_bias
             expected_load = expected_loads[i_layer]
             current_loads = total_expert_counts_pre_iter[i_layer]
 
@@ -302,7 +301,7 @@ class MoE(BaseModel):
 
         # Process through layers
         cat_seq_ctx: SequenceContext | None = None
-        cat_position_embeddings: torch.Tensor | None = None
+        cat_position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None
         cat_hidden_states: torch.Tensor | None = None
 
         for idx, decoder_layer in self.layers.items():
@@ -310,8 +309,10 @@ class MoE(BaseModel):
 
             if layer_idx < self.config.first_k_dense_replace:
                 if cat_seq_ctx is None:
-                    cat_seq_ctx = self._cat_seq_ctx(seq_ctx_list)
-                    cat_position_embeddings = torch.cat(position_embeddings_list, dim=1)
+                    cat_seq_ctx = SequenceContext.pack(seq_ctx_list)
+                    cos = torch.cat([pe[0] for pe in position_embeddings_list], dim=1)
+                    sin = torch.cat([pe[1] for pe in position_embeddings_list], dim=1)
+                    cat_position_embeddings = (cos, sin)
                     cat_hidden_states = torch.cat(hidden_states_list, dim=1)
                 # Dense decoder layer - process concated hidden states
                 cat_hidden_states = decoder_layer(
@@ -321,7 +322,7 @@ class MoE(BaseModel):
                 )
             else:
                 if cat_hidden_states is not None:
-                    hidden_states_list = cat_hidden_states.split(len(seq_ctx_list), dim=1)
+                    hidden_states_list = list(cat_hidden_states.chunk(len(seq_ctx_list), dim=1))
 
                 layer_results = decoder_layer(
                     *hidden_states_list,
@@ -820,30 +821,6 @@ class MoE(BaseModel):
             self.norm_type,
             self.scale_grad_by_freq,
             self.sparse,
-        )
-
-    def _cat_seq_ctx(self, seq_ctx_list: list[SequenceContext]) -> SequenceContext:
-        """Concatenate multiple SequenceContext objects into one."""
-        if len(seq_ctx_list) == 1:
-            return seq_ctx_list[0]
-
-        input_ids = torch.cat([ctx.input_ids for ctx in seq_ctx_list], dim=0)
-        position_ids = torch.cat([cast(torch.Tensor, ctx.position_ids) for ctx in seq_ctx_list], dim=0)
-
-        cu_seq_len_offset = [0] + [seq_ctx.cu_seq_lens_q[-1] for seq_ctx in seq_ctx_list[:-1]]
-        cu_offsets = torch.tensor(list(accumulate(cu_seq_len_offset)))
-        shifted_offsets = [seq_ctx.cu_seq_lens_q + offset for offset, seq_ctx in zip(cu_offsets, seq_ctx_list)]
-        cat_seq_lens_q = torch.cat(
-            [ctx.cu_seq_lens_q + offset for ctx, offset in zip(seq_ctx_list, shifted_offsets)], dim=0
-        )
-
-        return SequenceContext(
-            input_ids=input_ids,  # type: ignore[arg-type]
-            position_ids=position_ids,  # type: ignore[arg-type]
-            cu_seq_lens_q=cat_seq_lens_q,  # type: ignore[arg-type]
-            cu_seq_lens_k=cat_seq_lens_q,  # type: ignore[arg-type]
-            max_length_q=(cat_seq_lens_q[1:] - cat_seq_lens_q[:-1]).max().item(),  # type: ignore[arg-type]
-            max_length_k=(cat_seq_lens_q[1:] - cat_seq_lens_q[:-1]).max().item(),  # type: ignore[arg-type]
         )
 
     # NOTE: Add this overload for inferring the return type for easier type checking and using

@@ -6,6 +6,8 @@ import torch.nn as nn
 from cyclopts import Parameter
 from pydantic import BaseModel
 
+from xtuner.v1.utils.device import get_device
+
 from .protocol import RouterProtocol, RouterResults
 
 
@@ -52,7 +54,9 @@ class NoAuxRouter(nn.Module, RouterProtocol):
         self.topk_group = topk_group
 
         self.norm_topk_prob = norm_topk_prob
-        self.register_buffer("e_score_correction_bias", torch.empty((self.n_routed_experts), dtype=torch.float32))
+        self.register_buffer(
+            "e_score_correction_bias", torch.empty((self.n_routed_experts), device=get_device(), dtype=torch.float32)
+        )
 
     def forward(self, logits) -> RouterResults:
         if os.getenv("XTUNER_ROUTER_DEBUG") == "true":

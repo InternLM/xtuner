@@ -106,6 +106,7 @@ class Dense(BaseModel):
                 rms_norm_eps=config.rms_norm_eps,
                 attention_config=config.attention,
                 generate_config=config.generate_config,
+                rope_scaling_cfg=config.rope_scaling,
                 float8_cfg=config.float8_cfg,
                 layer_type=config.layers_type[layer_idx] if config.layers_type is not None else None,
                 layer_idx=layer_idx,

@@ -22,7 +22,6 @@ from xtuner.v1.module.dispatcher import (
     PreDispatchResult,
     build_dispatcher,
 )
-from xtuner.v1.module.dispatcher.base import PostCombineResult
 from xtuner.v1.module.grouped_linear.moe_group_linear import build_grouped_linear
 from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.utils import ForwardState
@@ -210,7 +209,7 @@ class MoEDecoderLayer(nn.Module):
             hidden_size=hidden_size,
             layer_idx=layer_idx,
             generate_config=generate_config,
-            rope_scaling_cfg=rope_scaling_cfg,
+            rope_scaling=rope_scaling_cfg,
             layer_type=layer_type,
             float8_cfg=float8_cfg,
         )
@@ -222,7 +221,7 @@ class MoEDecoderLayer(nn.Module):
             self.shared_experts = MoEMLP(
                 hidden_size=hidden_size,
                 n_shared_experts=n_shared_experts,
-                moe_intermediate_size=intermediate_size,
+                moe_intermediate_size=moe_intermediate_size,
                 hidden_act=hidden_act,
                 mlp_bias=mlp_bias,
                 float8_cfg=float8_cfg,
@@ -318,9 +317,8 @@ class MoEDecoderLayer(nn.Module):
         origin_shape = hidden_states.shape
 
         # reshape hidden_states to (batch_size * seq_len, hidden_size)
-        hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
         pre_dispatched = self.dispatcher.dispatch_preprocess(
-            hidden_states=hidden_states,
+            hidden_states=hidden_states.view(-1, hidden_states.shape[-1]),
             topk_ids=router_results["topk_ids"],
         )
         dispatched = self.dispatcher.dispatch(
@@ -359,11 +357,12 @@ class MoEDecoderLayer(nn.Module):
             pre_combined=pre_combined,
             combined=combined,
         )
-        hidden_states = post_combined["hidden_states"]
-        hidden_states = hidden_states.view(*origin_shape)
+        combined_hidden_states = post_combined["hidden_states"]
+        combined_hidden_states = combined_hidden_states.view(*origin_shape)
 
         hidden_states = self._post_moe_forward(
             hidden_states=hidden_states,
+            combined_hidden_states=combined_hidden_states,
             residual=residual,
         )
         return hidden_states, router_results["logits"]
@@ -378,11 +377,13 @@ class MoEDecoderLayer(nn.Module):
         assert all(hidden_states.shape == origin_shape for hidden_states in hidden_states_list), (
             "All hidden states should have the same shape"
         )
+        intra_layer_micro_batch = len(hidden_states_list)
         residual_list: list[torch.Tensor] = []
         router_results_list: list[RouterResults] = []
 
         pre_dispatched_list: list[PreDispatchResult] = []
         dispatched_list: list[DispatchResult] = []
+        pre_moe_forward_out_list: list[torch.Tensor] = []
 
         # Attention + gate + pre-dispatch
         for (
@@ -400,6 +401,7 @@ class MoEDecoderLayer(nn.Module):
                 position_embeddings=position_embeddings,
                 state=ForwardState.TRAINING,
             )
+            pre_moe_forward_out_list.append(hidden_states)
             hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
             pre_dispatched = self.dispatcher.dispatch_preprocess(
                 hidden_states=hidden_states,
@@ -450,8 +452,6 @@ class MoEDecoderLayer(nn.Module):
             dispatched_list.append(dispatched)
             pre_combined_list.append(pre_combined)
 
-        post_combined_list: list[PostCombineResult] = []
-
         for pre_combined, pre_dispatched, dispatched, post_dispatched in zip(
             pre_combined_list,
             pre_dispatched_list,
@@ -468,9 +468,18 @@ class MoEDecoderLayer(nn.Module):
             combined_list.append(combined)
 
         hidden_states_out_list: list[torch.Tensor] = []
-        for combine_result, residual in zip(post_combined_list, residual_list):
+        for i in range(intra_layer_micro_batch):
+            post_combined = self.dispatcher.combine_postprocess(
+                pre_dispatched=pre_dispatched_list[i],
+                dispatched=dispatched_list[i],
+                post_dispatched=post_dispatched_list[i],
+                pre_combined=pre_combined_list[i],
+                combined=combined_list[i],
+                async_op=True,
+            )
             hidden_states = self._post_moe_forward(
-                hidden_states=combine_result["hidden_states"],
+                hidden_states=pre_moe_forward_out_list[i],
+                combined_hidden_states=post_combined["hidden_states"].view(*pre_moe_forward_out_list[i].shape),
                 residual=residual,
             )
             hidden_states_out_list.append(hidden_states)
@@ -530,15 +539,16 @@ class MoEDecoderLayer(nn.Module):
     def _post_moe_forward(
         self,
         hidden_states: torch.Tensor,
+        combined_hidden_states: torch.Tensor,
         residual: torch.Tensor,
     ) -> torch.Tensor:
         # This part can be fullgraph compiled
         if self.n_shared_experts > 0:
             assert self.shared_experts is not None, "Shared experts should be initialized when n_shared_experts > 0"
             shared_experts_out = self.shared_experts(hidden_states)
-            return (hidden_states + shared_experts_out) * self.hidden_factor + residual
-        else:
-            return hidden_states * self.hidden_factor + residual
+            combined_hidden_states = combined_hidden_states + shared_experts_out
+
+        return combined_hidden_states * self.hidden_factor + residual
 
     def build_kv_cache(
         self, max_batch_size: int | None = None, max_length: int | None = None, block_size: int | None = None

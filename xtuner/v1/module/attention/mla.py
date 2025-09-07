@@ -51,8 +51,6 @@ class MLAConfig(BaseModel):
     # casual: bool = True
     qkv_bias: Annotated[bool, Parameter(group="attention")] = False
     o_bias: Annotated[bool, Parameter(group="attention")] = False
-    sliding_window: Annotated[int | None, Parameter(group="attention")] = -1
-    with_sink: Annotated[bool, Parameter(group="attention")] = False
     kv_lora_rank: int
     q_lora_rank: int | None
     qk_rope_head_dim: int
@@ -64,7 +62,7 @@ class MLAConfig(BaseModel):
         hidden_size: int,
         layer_type: Literal["full_attention", "sliding_attention"] | None = None,
         layer_idx: int = 0,
-        rope_scaling_cfg: RopeScalingConfig | None = None,
+        rope_scaling: dict | None = None,
         generate_config: GenerateConfig | None = None,
         float8_cfg: Float8Config | None = None,
     ) -> "MultiLatentAttention":
@@ -73,13 +71,13 @@ class MLAConfig(BaseModel):
             hidden_size=hidden_size,
             layer_type=layer_type,
             layer_idx=layer_idx,
-            rope_scaling_cfg=rope_scaling_cfg,
+            rope_scaling=rope_scaling,
             generate_config=generate_config,
             float8_cfg=float8_cfg,
         )
 
 
-@torch.library.custom_op("xpuyu::flash_mla_decoding", mutates_args=())
+@torch.library.custom_op("xtuner::flash_mla_decoding", mutates_args=())
 def flash_mla_decoding(
     query_states: torch.Tensor,
     key_cache: torch.Tensor,
@@ -179,7 +177,7 @@ class MultiLatentAttention(nn.Module):
         *,
         head_dim: int,
         hidden_size: int,
-        num_heads: int = 1,
+        num_attention_heads: int = 1,
         kv_lora_rank: int,
         qk_rope_head_dim: int,
         qk_nope_head_dim: int,
@@ -190,7 +188,7 @@ class MultiLatentAttention(nn.Module):
         qkv_bias: bool = False,
         qk_norm: bool = False,
         o_bias: bool = False,
-        rope_scaling_cfg: RopeScalingConfig | None = None,
+        rope_scaling: dict | None = None,
         float8_cfg: Float8Config | None = None,
         generate_config: GenerateConfig | None = None,
         layer_type: Literal["full_attention", "sliding_attention"] | None = None,
@@ -206,7 +204,7 @@ class MultiLatentAttention(nn.Module):
         self.v_head_dim = v_head_dim
         self.q_lora_rank = q_lora_rank
         self.dropout = dropout
-        self.num_heads = num_heads
+        self.num_attention_heads = num_attention_heads
         # self.causal = casual
         self.qkv_bias = qkv_bias
         self.o_bias = o_bias
@@ -220,7 +218,7 @@ class MultiLatentAttention(nn.Module):
         if self.q_lora_rank is None:
             self.q_proj = build_linear(
                 self.hidden_size,
-                self.num_heads * self.q_head_dim,
+                self.num_attention_heads * self.q_head_dim,
                 bias=False,
                 float8_cfg=self.float8_cfg,
             )
@@ -234,7 +232,7 @@ class MultiLatentAttention(nn.Module):
             self.q_a_layernorm = RMSNorm(self.q_lora_rank)
             self.q_b_proj = build_linear(
                 self.q_lora_rank,
-                self.num_heads * self.q_head_dim,
+                self.num_attention_heads * self.q_head_dim,
                 bias=False,
                 float8_cfg=self.float8_cfg,
             )
@@ -248,13 +246,13 @@ class MultiLatentAttention(nn.Module):
         self.kv_a_layernorm = RMSNorm(self.kv_lora_rank)
         self.kv_b_proj = build_linear(
             self.kv_lora_rank,
-            self.num_heads * (self.q_head_dim - self.qk_rope_head_dim + self.v_head_dim),
+            self.num_attention_heads * (self.q_head_dim - self.qk_rope_head_dim + self.v_head_dim),
             bias=False,
             float8_cfg=self.float8_cfg,
         )
 
         self.o_proj = build_linear(
-            self.num_heads * self.v_head_dim,
+            self.num_attention_heads * self.v_head_dim,
             self.hidden_size,
             bias=self.o_bias,
             float8_cfg=self.float8_cfg,
@@ -262,9 +260,10 @@ class MultiLatentAttention(nn.Module):
 
         self.softmax_scale = self.q_head_dim ** (-0.5)
 
-        if rope_scaling_cfg is not None:
-            mscale_all_dim = rope_scaling_cfg.mscale_all_dim if rope_scaling_cfg.mscale_all_dim is not None else 0.0
-            scaling_factor = rope_scaling_cfg.factor
+        if rope_scaling is not None:
+            rope_scaling = RopeScalingConfig(**rope_scaling)
+            mscale_all_dim = rope_scaling.mscale_all_dim if rope_scaling.mscale_all_dim is not None else 0.0
+            scaling_factor = rope_scaling.factor
             if mscale_all_dim:
                 mscale = yarn_get_mscale(scaling_factor, mscale_all_dim)
                 self.softmax_scale = self.softmax_scale * mscale * mscale
@@ -285,7 +284,7 @@ class MultiLatentAttention(nn.Module):
             q = self.q_proj(hidden_states)
         else:
             q = self.q_b_proj(self.q_a_layernorm(self.q_a_proj(hidden_states)))
-        q = q.view(bsz, q_len, self.num_heads, self.q_head_dim).transpose(1, 2)
+        q = q.view(bsz, q_len, self.num_attention_heads, self.q_head_dim).transpose(1, 2)
         q_nope, q_pe = torch.split(q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
 
         # Flash attention requires the input to have the shape
@@ -296,22 +295,20 @@ class MultiLatentAttention(nn.Module):
         k_pe = k_pe.view(bsz, q_len, 1, self.qk_rope_head_dim).transpose(1, 2)
         kv = (
             self.kv_b_proj(self.kv_a_layernorm(compressed_kv))
-            .view(bsz, q_len, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
+            .view(bsz, q_len, self.num_attention_heads, self.qk_nope_head_dim + self.v_head_dim)
             .transpose(1, 2)
         )
 
         k_nope, value_states = torch.split(kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
 
         cos, sin = position_embeddings
-        # cos = torch.load('cos.pth').cuda()
-        # sin = torch.load('sin.pth').cuda()
         q_pe, k_pe = mla_apply_rotary_pos_emb(q_pe, k_pe, cos, sin)
 
-        query_states = k_pe.new_empty(bsz, self.num_heads, q_len, self.q_head_dim)
+        query_states = k_pe.new_empty(bsz, self.num_attention_heads, q_len, self.q_head_dim)
         query_states[:, :, :, : self.qk_nope_head_dim] = q_nope
         query_states[:, :, :, self.qk_nope_head_dim :] = q_pe
 
-        key_states = k_pe.new_empty(bsz, self.num_heads, q_len, self.q_head_dim)
+        key_states = k_pe.new_empty(bsz, self.num_attention_heads, q_len, self.q_head_dim)
         key_states[:, :, :, : self.qk_nope_head_dim] = k_nope
         key_states[:, :, :, self.qk_nope_head_dim :] = k_pe
 
@@ -339,7 +336,7 @@ class MultiLatentAttention(nn.Module):
         if self.q_head_dim != self.v_head_dim:
             attn_output = attn_output[:, :, : self.v_head_dim]
 
-        attn_output = attn_output.reshape(bsz, q_len, self.num_heads * self.v_head_dim).contiguous()
+        attn_output = attn_output.reshape(bsz, q_len, self.num_attention_heads * self.v_head_dim).contiguous()
 
         attn_output = self.o_proj(attn_output)
 
@@ -358,7 +355,7 @@ class MultiLatentAttention(nn.Module):
             q = self.q_proj(hidden_states)
         else:
             q = self.q_b_proj(self.q_a_layernorm(self.q_a_proj(hidden_states)))
-        q = q.view(bsz, q_len, self.num_heads, self.q_head_dim)
+        q = q.view(bsz, q_len, self.num_attention_heads, self.q_head_dim)
         q_nope, q_pe = torch.split(q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
 
         # Flash attention requires the input to have the shape
@@ -373,7 +370,9 @@ class MultiLatentAttention(nn.Module):
         k_pe = k_pe.view(bsz, q_len, -1, self.qk_rope_head_dim)
 
         # k_pe = k_pe.view(bsz, q_len, 1, self.qk_rope_head_dim).transpose(1, 2)
-        kv = self.kv_b_proj(compressed_kv).view(bsz, q_len, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
+        kv = self.kv_b_proj(compressed_kv).view(
+            bsz, q_len, self.num_attention_heads, self.qk_nope_head_dim + self.v_head_dim
+        )
 
         compressed_kv = compressed_kv.view(bsz, q_len, -1, self.kv_lora_rank)
 
@@ -391,13 +390,13 @@ class MultiLatentAttention(nn.Module):
         else:
             wkv_b = self.kv_b_proj.weight
 
-        wkv_b = wkv_b.view(self.num_heads, -1, self.kv_lora_rank)
+        wkv_b = wkv_b.view(self.num_attention_heads, -1, self.kv_lora_rank)
 
-        query_states = k_pe.new_empty(bsz, q_len, self.num_heads, self.q_head_dim)
+        query_states = k_pe.new_empty(bsz, q_len, self.num_attention_heads, self.q_head_dim)
         query_states[:, :, :, : self.qk_nope_head_dim] = q_nope
         query_states[:, :, :, self.qk_nope_head_dim :] = q_pe
 
-        key_states = k_pe.new_empty(bsz, q_len, self.num_heads, self.q_head_dim)
+        key_states = k_pe.new_empty(bsz, q_len, self.num_attention_heads, self.q_head_dim)
         key_states[:, :, :, : self.qk_nope_head_dim] = k_nope
         key_states[:, :, :, self.qk_nope_head_dim :] = k_pe
 
@@ -439,7 +438,7 @@ class MultiLatentAttention(nn.Module):
         if self.q_head_dim != self.v_head_dim:
             attn_output = attn_output[:, :, : self.v_head_dim]
 
-        attn_output = attn_output.reshape(bsz, q_len, self.num_heads * self.v_head_dim).contiguous()
+        attn_output = attn_output.reshape(bsz, q_len, self.num_attention_heads * self.v_head_dim).contiguous()
 
         attn_output = self.o_proj(attn_output)
 
@@ -458,7 +457,7 @@ class MultiLatentAttention(nn.Module):
             q = self.q_proj(hidden_states)
         else:
             q = self.q_b_proj(self.q_a_layernorm(self.q_a_proj(hidden_states)))
-        q = q.view(bsz, q_len, self.num_heads, self.q_head_dim)
+        q = q.view(bsz, q_len, self.num_attention_heads, self.q_head_dim)
         # q_nope, q_pe = torch.split(
         #     q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
         # )
@@ -510,7 +509,7 @@ class MultiLatentAttention(nn.Module):
         else:
             wkv_b = self.kv_b_proj.weight
 
-        wkv_b = wkv_b.view(self.num_heads, -1, self.kv_lora_rank)
+        wkv_b = wkv_b.view(self.num_attention_heads, -1, self.kv_lora_rank)
 
         q_nope = torch.einsum("bshd,hdc->bshc", q_nope, wkv_b[:, : self.qk_nope_head_dim])
 
@@ -536,13 +535,13 @@ class MultiLatentAttention(nn.Module):
         assert self.window_size == (-1, -1), "Sliding attention in prefilling is not supported yet."
 
         attn_output = flash_mla_decoding(
-            query_states.view(q_len, bsz, self.num_heads, -1),
+            query_states.view(q_len, bsz, self.num_attention_heads, -1),
             past_key_values[self.layer_idx][0],
             cache_seqlens=seq_ctx.seq_lens_k,
             softmax_scale=self.softmax_scale,
             block_table=seq_ctx.block_table,
             head_dim_v=self.kv_lora_rank,
-            num_heads=self.num_heads,
+            num_heads=self.num_attention_heads,
         )
 
         attn_output = torch.einsum("bshc,hdc->bshd", attn_output, wkv_b[:, -self.v_head_dim :])
@@ -565,7 +564,7 @@ class MultiLatentAttention(nn.Module):
             q = self.q_proj(hidden_states)
         else:
             q = self.q_b_proj(self.q_a_layernorm(self.q_a_proj(hidden_states)))
-        q = q.view(bsz, q_len, self.num_heads, self.q_head_dim).transpose(1, 2)
+        q = q.view(bsz, q_len, self.num_attention_heads, self.q_head_dim).transpose(1, 2)
         q_nope, q_pe = torch.split(q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
 
         # Flash attention requires the input to have the shape
@@ -576,7 +575,7 @@ class MultiLatentAttention(nn.Module):
         k_pe = k_pe.view(bsz, q_len, 1, self.qk_rope_head_dim).transpose(1, 2)
         kv = (
             self.kv_b_proj(self.kv_a_layernorm(compressed_kv))
-            .view(bsz, q_len, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
+            .view(bsz, q_len, self.num_attention_heads, self.qk_nope_head_dim + self.v_head_dim)
             .transpose(1, 2)
         )
 
@@ -587,11 +586,11 @@ class MultiLatentAttention(nn.Module):
         # sin = torch.load('sin.pth').cuda()
         q_pe, k_pe = mla_apply_rotary_pos_emb(q_pe, k_pe, cos, sin)
 
-        query_states = k_pe.new_empty(bsz, self.num_heads, q_len, self.q_head_dim)
+        query_states = k_pe.new_empty(bsz, self.num_attention_heads, q_len, self.q_head_dim)
         query_states[:, :, :, : self.qk_nope_head_dim] = q_nope
         query_states[:, :, :, self.qk_nope_head_dim :] = q_pe
 
-        key_states = k_pe.new_empty(bsz, self.num_heads, q_len, self.q_head_dim)
+        key_states = k_pe.new_empty(bsz, self.num_attention_heads, q_len, self.q_head_dim)
         key_states[:, :, :, : self.qk_nope_head_dim] = k_nope
         key_states[:, :, :, self.qk_nope_head_dim :] = k_pe
 
@@ -617,7 +616,7 @@ class MultiLatentAttention(nn.Module):
         if self.q_head_dim != self.v_head_dim:
             attn_output = attn_output[:, :, : self.v_head_dim]
 
-        attn_output = attn_output.reshape(bsz, q_len, self.num_heads * self.v_head_dim).contiguous()
+        attn_output = attn_output.reshape(bsz, q_len, self.num_attention_heads * self.v_head_dim).contiguous()
 
         attn_output = self.o_proj(attn_output)
 
