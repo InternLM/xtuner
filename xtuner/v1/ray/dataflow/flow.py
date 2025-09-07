@@ -230,11 +230,17 @@ class DataFlow:
             await asyncio.wait_for(asyncio.gather(*waiting_tasks, return_exceptions=True), timeout=10)
 
         self.unfinished_samples_count = ray.get(self.replay_buffer.get_unfinished_samples.remote())
-        self.logger.info(
-            f"send_samples_count: {self.send_samples_count}, unfinished_samples_count:{self.unfinished_samples_count}, finished_samples: {self.finished_samples_count}, failed_samples: {self.failed_samples_count}"
-        )
+        self.state()
 
-    async def run(self, num: Optional[int] = None, sample_params: Optional[SampleParams] = None):
+    async def run(
+        self,
+        num: Optional[int] = None,
+        sample_params: Optional[SampleParams] = None,
+        dump: bool = False,
+        dump_path: Optional[str] = None,
+        resume: bool = False,
+        resume_path: Optional[str] = None,
+    ):
         """Starts the data generation process.
 
         This method resets the internal state and runs the concurrent task
@@ -252,7 +258,19 @@ class DataFlow:
         self.logger.info(f"Target batch size set to {self.target_batch_size}.")
         self.sample_params = sample_params if sample_params else self.config.sample_params
         self.logger.info(f"Sample parameters set to {self.sample_params}.")
+
+        if resume:
+            assert resume_path, "Resuming is enabled but no resume path is provided."
+            self.logger.info(f"resuming replay buffer from {resume_path}")
+            await self.replay_buffer.resume.remote(resume_path)
+
         await self.concurrent_task_runner()
+
+        if dump:
+            assert dump_path, "Dumping is enabled but no dump path is provided."
+            self.logger.info(f"dump replay buffer from {dump_path}")
+            await self.replay_buffer.dump.remote(dump_path)
+
         return await self.replay_buffer.get_samples.remote(self.target_batch_size)  # type: ignore[attr-defined]
 
     def state(self):
