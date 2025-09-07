@@ -71,6 +71,7 @@ class TestRollout(unittest.TestCase):
             pack_max_length=self.max_prompt_length,
             collator='fake_collator',
             pack_level='none',
+            group_by_length=False,
         )
         self.tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
         self.replay_buffer_cfg = ReplayBufferConfig(
