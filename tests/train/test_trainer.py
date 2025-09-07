@@ -328,6 +328,8 @@ class TestTrainerSaveHF(DistributedTestBase):
             ),
         )
         assert resume_trainer2.cur_step == 5 
+        resume_trainer2.fit()
+        assert resume_trainer2.cur_step == 10
 
     @property
     def world_size(self) -> int:

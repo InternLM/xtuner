@@ -1,3 +1,4 @@
+import traceback
 from functools import lru_cache
 
 import torch
@@ -15,8 +16,16 @@ from torch.nn.attention.flex_attention import (
 
 from transformers.models.llama.modeling_llama import repeat_kv
 
-from .flash_attn import flash_attn_varlen_func
-from .flash_attn.flash_sink_varlen_attn_gpt_oss import flash_sink_attn_varlen_func
+
+try:
+    from .flash_attn import flash_attn_varlen_func
+    from .flash_attn.flash_sink_varlen_attn_gpt_oss import flash_sink_attn_varlen_func
+
+    flash_attn_exception = None
+except ImportError as e:
+    flash_attn_varlen_func = None  # type: ignore[assignment]
+    flash_sink_attn_varlen_func = None  # type: ignore[assignment]
+    flash_attn_exception = e
 
 
 # flex_attention_compiled =  torch.compile(torch_flex_attention,dynamic=False)
@@ -179,6 +188,9 @@ def flex_attention(
 
 
 def flash_attention(q, k, v, window_size=(-1, -1), s_aux=None, **kwargs) -> torch.Tensor:
+    if flash_attn_exception is not None:
+        traceback.print_exception(flash_attn_exception)
+        raise flash_attn_exception
     # q, k, v: [b, n_head, seq , head_dim]
     assert q.size(0) == 1, "Only support batch size 1 for flash attention"
     q = q.transpose(1, 2).squeeze(0)  # [seq, head, dim]

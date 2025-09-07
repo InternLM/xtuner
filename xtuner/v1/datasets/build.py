@@ -107,7 +107,6 @@ def build_dataloader(
     sampler: LengthGroupedSampler | ParallelSampler | RandomSampler | SequentialSampler
     if dataloader_config.group_by_length:
         assert shuffle, "Currently only shuffling is supported for LengthGroupedSampler."
-        assert dataloader_config.pack_level != "none", "LengthGroupedSampler requires packing."
         assert isinstance(dataset, (ExpandSoftPackDataset, _LegacySoftPackDataset)), (
             "Internal Error, LengthGroupedSampler requires ExpandSoftPackDataset or _LegacySoftPackDataset, "
             f"but got {type(dataset)}"
