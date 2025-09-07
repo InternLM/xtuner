@@ -14,8 +14,8 @@ from xtuner.v1.config import (
     LRConfig,
     BalancingLossConfig,
 )
-from xtuner.v1.datasets import FTDPTokenizeFnConfig
-from xtuner.v1.loss import CELossContext
+from xtuner.v1.datasets.sft_tokenize_fn import OpenaiTokenizeFunctionConfig
+
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
 from xtuner.v1.train.trainer import Trainer
 from xtuner.v1.utils.device import get_device
@@ -234,7 +234,7 @@ def main():
         optim_cfg = AdamWConfig(lr=6e-05)
         lr_cfg = LRConfig(lr_type="cosine", lr_min=1e-6)
         fsdp_cfg = FSDPConfig(
-            torch_compile=get_device() == "cuda",
+            torch_compile=False, #get_device() == "cuda",
             cpu_offload=False,
             ep_size=moe_cfg.ep_size,
             # hsdp_sharding_size=4,
@@ -242,7 +242,8 @@ def main():
         dataset_config = [
             {
                 "dataset": DatasetConfig(name="alpaca", anno_path=ALPACA_PATH, sample_ratio=1.0),
-                "tokenize_fn": FTDPTokenizeFnConfig(max_length=16386),
+                "tokenize_fn": OpenaiTokenizeFunctionConfig(max_length=16386, chat_template="qwen3"),
+                # "tokenize_fn": FTDPTokenizeFnConfig(max_length=16386),
             },
         ]
 
@@ -261,7 +262,7 @@ def main():
             loss_cfg=loss_cfg,
             lr_cfg=lr_cfg,
             tokenizer_path=QWEN3_MOE_PATH,
-            global_batch_size=16,
+            global_batch_size=8,
             epoch_num=1,
             work_dir=work_dir,
             seed=0,

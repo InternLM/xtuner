@@ -1,22 +1,16 @@
-from unittest import TestCase
-import torch
-import torch.nn as nn
-from xtuner.v1.loss.ce_loss import CELossConfig, CELossContextInputItem
-from xtuner.v1.data_proto import SequenceContext
-from xtuner.v1.utils.test_utils import assert_verbose_allclose
-from xtuner.v1.loss.utils import cal_global_grad_tokens, cal_global_sum_loss_weight, len2weight
-from torch.testing._internal.common_distributed import DistributedTestBase
+from datetime import datetime
 import os
-import torch.distributed as dist
-from xtuner.v1.data_proto.utils import pad_to_multiple_of, split_for_sequence_parallel
-from xtuner.v1.utils.test_utils import init_data_mesh
 import parametrize
-from functools import wraps
+from unittest import TestCase
+from transformers import AutoTokenizer
+
 from xtuner.v1.data_proto.templates import CHAT_TEMPLATE_MAP 
 from xtuner.v1.data_proto.messages import ChatMessages
-from transformers import AutoTokenizer
-from datetime import datetime
 
+
+QWEN3_PATH = os.environ["QWEN3_PATH"]
+GPT_OSS_MINI_PATH = os.environ["GPT_OSS_MINI_PATH"]
+DEEPSEEK_V3_PATH = os.environ["DEEPSEEK_V3_PATH"]
 
 class TestChatTemplate(TestCase):
 
@@ -38,8 +32,7 @@ class TestChatTemplate(TestCase):
     @parametrize.parametrize(
         "template_type, tokenizer",
         [   
-            ("qwen3", 'Qwen/Qwen3-4B'),
-            ("qwen3", 'Qwen/Qwen3-4B-Instruct-2507'),
+            ("qwen3", QWEN3_PATH),
         ],
     )
     def test_qwen3_template(self, template_type, tokenizer):
@@ -73,7 +66,7 @@ class TestChatTemplate(TestCase):
     @parametrize.parametrize(
         "template_type, tokenizer",
         [   
-            ("gpt-oss", 'openai/gpt-oss-20b'),
+            ("gpt-oss", GPT_OSS_MINI_PATH),
         ],
     )
     def test_gpt_oss_template(self, template_type, tokenizer):
@@ -116,7 +109,7 @@ class TestChatTemplate(TestCase):
     @parametrize.parametrize(
         "template_type, thinking, tokenizer",
         [   
-            ("deepseek-v3", False, 'deepseek-ai/DeepSeek-V3.1'),
+            ("deepseek-v3", False, DEEPSEEK_V3_PATH),
         ],
     )
     def test_deepseek_v3_template(self, template_type,thinking, tokenizer):
