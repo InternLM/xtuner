@@ -2,7 +2,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal, Optional, Protocol, runtime_checkable
 
 from cyclopts import Parameter
-from pydantic import BaseModel, ConfigDict, TypeAdapter
+from pydantic import BaseModel, ConfigDict, TypeAdapter, model_validator
 from typing_extensions import TypedDict
 
 
@@ -92,6 +92,20 @@ class DataloaderConfig(BaseModel):
             return fake_collator  # for RL
         else:
             raise ValueError(f"Unsupported collator: {self.collator}")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _infer_group_by_length(cls, data) -> None:
+        if "pack_level" in data and "group_by_length" not in data:
+            if data["pack_level"] == "none":
+                data["group_by_length"] = False
+            else:
+                data["group_by_length"] = True
+
+        if "group_by_length" in data and "pack_level" in data:
+            if data["pack_level"] == "none" and data["group_by_length"] is True:
+                raise ValueError("group_by_length must be False when pack_level is none.")
+        return data
 
 
 class DatasetCombine(TypedDict):

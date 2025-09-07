@@ -1,3 +1,4 @@
+import traceback
 from typing import Optional
 
 import torch
@@ -7,8 +8,15 @@ import triton
 try:
     from liger_kernel.ops.cross_entropy import liger_cross_entropy_kernel
     from liger_kernel.ops.utils import amp_custom_bwd, amp_custom_fwd, element_mul_kernel, is_hip
-except Exception:
-    pass
+
+    liger_installed_exception = None
+except ImportError as e:
+    amp_custom_bwd = lambda x: x  # noqa: E731
+    amp_custom_fwd = lambda x: x  # noqa: E731
+    liger_cross_entropy_kernel = None
+    element_mul_kernel = None
+    is_hip = lambda: False  # noqa: E731
+    liger_installed_exception = e
 
 MAX_FUSED_SIZE = 65536 // 2
 
@@ -293,6 +301,9 @@ class LigerFusedLinearCrossEntropyLossWithWeights(torch.nn.Module):
         softcap: Optional[float] = None,
         return_z_loss: bool = False,
     ):
+        if liger_installed_exception is not None:
+            traceback.print_exception(liger_installed_exception)
+            raise liger_installed_exception
         super().__init__()
         assert (label_smoothing >= 0) and (label_smoothing <= 1), (
             f"label_smoothing must be between 0.0 and 1.0. Got: {label_smoothing}"

@@ -29,4 +29,8 @@ def get_flash_attn_varlen() -> FlashAttnVarlenProtocol:
         raise RuntimeError
 
 
-flash_attn_varlen_func = get_flash_attn_varlen()
+# TODO: Enhance the optional requirement for flash attention
+try:
+    flash_attn_varlen_func = get_flash_attn_varlen()
+except ImportError:
+    flash_attn_varlen_func = None  # type: ignore[assignment]

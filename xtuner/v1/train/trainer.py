@@ -748,18 +748,6 @@ class Trainer:
         scheduler_path = checkpoint_path / self._SAVE_SCHEDULER_DIR
         train_state_path = checkpoint_path / self._SAVE_TRAIN_STATE_PATH
 
-        with train_state_path.open("w") as f:
-            f.write(
-                json.dumps(
-                    {
-                        "cur_step": self.cur_step,
-                        "cur_epoch": self._cur_epoch,
-                        "consumed_samples": self._consumed_samples,
-                        "consumed_tokens": self._consumed_tokens,
-                    }
-                )
-            )
-
         self._engine.save_dcp(
             model_dir=model_path,
             optimizer_dir=optimizer_path,
@@ -790,6 +778,18 @@ class Trainer:
         current_exp.consumed_tokens = self._consumed_tokens
 
         if self.rank == 0:
+            with train_state_path.open("w") as f:
+                f.write(
+                    json.dumps(
+                        {
+                            "cur_step": self.cur_step,
+                            "cur_epoch": self._cur_epoch,
+                            "consumed_samples": self._consumed_samples,
+                            "consumed_tokens": self._consumed_tokens,
+                        }
+                    )
+                )
+
             with meta_path.open("w") as f:
                 f.write(self.meta.model_dump_json(indent=2))
 
@@ -797,6 +797,8 @@ class Trainer:
             ckpt_to_remove = current_exp.checkpoint_list.pop(0)
             if self.rank == 0:
                 rmtree(ckpt_to_remove)
+
+        dist.barrier()
 
     @property
     def work_dir(self) -> Path:
@@ -840,7 +842,7 @@ class Trainer:
 
     def _data_iter(self):
         data_iter = iter(self._dataloader)
-        for i in range(self.total_step):
+        while self._cur_step < self.total_step:
             try:
                 data = next(data_iter)
                 self._consumed_samples += len(data)

@@ -4,6 +4,7 @@ from typing import Annotated, Literal, cast
 
 import torch
 from cyclopts import Parameter
+from mmengine import is_installed
 from pydantic import BaseModel, ConfigDict
 from torch import nn
 from torch.distributed.tensor import DTensor
@@ -38,6 +39,13 @@ class MHAConfig(BaseModel):
     o_bias: Annotated[bool, Parameter(group="attention")] = False
     sliding_window: Annotated[int | None, Parameter(group="attention")] = -1
     with_sink: Annotated[bool, Parameter(group="attention")] = False
+    attn_impl: Literal["flash_attention", "flex_attention", "eager_attention"] = "flash_attention"
+
+    def model_post_init(self, _):
+        if not is_installed("flash-attn") and self.attn_impl == "flash_attention":
+            logger.warning("flash-attn is not installed, using `flex_attention` instead.")
+            self.attn_impl = "flex_attention"
+        return self
 
     def build(
         self,
@@ -176,6 +184,7 @@ class MultiHeadAttention(nn.Module):
             self.window_size = (sliding_window, sliding_window)
 
         self.apply_rotary_emb = get_apply_rotary_emb()  # type: ignore
+
         self.attn_impl_func = attn_impl_mapping[attn_impl]
 
     def prefilling(

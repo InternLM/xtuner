@@ -1,3 +1,5 @@
+import traceback
+
 import torch
 
 from .protocol import (
@@ -20,6 +22,11 @@ def get_group_gemm() -> GroupGemmProtocol:
         import os
 
         if os.getenv("XTUNER_GROUP_GEMM", "triton") == "cutlass":
+            from .cuda import cutlass_import_exception
+
+            if cutlass_import_exception is not None:
+                traceback.print_exception(cutlass_import_exception)
+                raise cutlass_import_exception
             from .cuda import cutlass_group_gemm as cuda_group_gemm
         else:
             from .cuda import triton_group_gemm as cuda_group_gemm
