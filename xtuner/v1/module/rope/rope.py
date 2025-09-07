@@ -5,7 +5,6 @@ import torch.nn as nn
 from pydantic import BaseModel
 
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
-from xtuner.v1.config.base_model import TransformerConfig
 
 
 class RopeScalingConfig(BaseModel):
@@ -28,7 +27,10 @@ class RopeScalingConfig(BaseModel):
 class RotaryEmbedding(nn.Module):
     inv_freq: torch.Tensor
 
-    def __init__(self, config: TransformerConfig, device=None):
+    def __init__(self, config, device=None):
+        from xtuner.v1.model.base import TransformerConfig
+
+        config = cast(TransformerConfig, config)
         super().__init__()
         rope_scaling = getattr(config, "rope_scaling_cfg", None)
         if rope_scaling is None:

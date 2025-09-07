@@ -1,14 +1,17 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import math
-from typing import Literal, cast
+from typing import Annotated, Literal, cast
 
 import torch
+from cyclopts import Parameter
+from pydantic import BaseModel, ConfigDict
 from torch import nn
 from torch.distributed.tensor import DTensor
 from torch.nn import functional as F
 
-from xtuner.v1.config import BaseAttnConfig, Float8Config, GenerateConfig
+from xtuner.v1.config import GenerateConfig
 from xtuner.v1.data_proto import SequenceContext
+from xtuner.v1.float8.config import Float8Config
 from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.ops import flash_attn_varlen_func
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger
@@ -20,7 +23,36 @@ from ..rms_norm import RMSNorm
 logger = get_logger()
 
 
-class MLAConfig(BaseAttnConfig["MultiLatentAttention"]):
+class MLAConfig(BaseModel):
+    """Base attention configuration for transformer attention mechanisms.
+
+    This class defines the fundamental parameters for attention configurations
+    in transformer models. It serves as a base class for specific attention
+    implementations and provides common attention-related parameters.
+
+    Attributes:
+        num_attention_heads (int): Number of attention heads in the multi-head
+            attention mechanism.
+        head_dim (int): Dimension of each attention head.
+        dropout (bool): Whether to apply dropout to attention weights.
+            Defaults to False.
+        qkv_bias (bool): Whether to use bias in the query, key, and value
+            projection layers. Defaults to False.
+        o_bias (bool): Whether to use bias in the output projection layer.
+            Defaults to False.
+        sliding_window (int | None): Size of the sliding window for local
+            attention. Use -1 to disable sliding window attention. Defaults to -1.
+    """
+
+    model_config = ConfigDict(title="Base attention config for xtuner", extra="allow")
+    num_attention_heads: Annotated[int, Parameter(group="attention")]
+    head_dim: Annotated[int, Parameter(group="attention")]
+    dropout: Annotated[bool, Parameter(group="attention")] = False
+    # casual: bool = True
+    qkv_bias: Annotated[bool, Parameter(group="attention")] = False
+    o_bias: Annotated[bool, Parameter(group="attention")] = False
+    sliding_window: Annotated[int | None, Parameter(group="attention")] = -1
+    with_sink: Annotated[bool, Parameter(group="attention")] = False
     kv_lora_rank: int
     q_lora_rank: int | None
     qk_rope_head_dim: int

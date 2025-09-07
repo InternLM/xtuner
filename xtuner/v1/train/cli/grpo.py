@@ -6,12 +6,11 @@ import ray
 from transformers import AutoTokenizer
 from xtuner.v1.config import (
     AdamWConfig,
-    DataloaderConfig,
-    DatasetConfig,
     FSDPConfig,
     LRConfig,
 )
 from xtuner.v1.datasets import RLTextTokenizeFnConfig
+from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.model.dense.qwen3 import Qwen3Dense8BConfig
 from xtuner.v1.ray.accelerator import AcceleratorResourcesConfig
 from xtuner.v1.ray.config.worker import RolloutConfig

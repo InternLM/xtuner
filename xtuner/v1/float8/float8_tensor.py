@@ -2,7 +2,7 @@ from typing import Dict, Literal
 
 import torch
 
-from xtuner.v1.config.float8 import ScalingGranularity
+from xtuner.v1.float8.config import ScalingGranularity
 
 
 class Float8Tensor(torch.Tensor):

@@ -4,8 +4,7 @@ import pickle
 
 import torch
 
-from xtuner.v1.datasets import build_dataloader, build_datasets, get_dataloader_state, load_dataloader_state, FTDPTokenizeFnConfig
-from xtuner.v1.config.data import DataloaderConfig, DatasetConfig
+from xtuner.v1.datasets import build_dataloader, build_datasets, get_dataloader_state, load_dataloader_state, FTDPTokenizeFnConfig, DatasetConfig, DataloaderConfig
 from xtuner.v1.train.toy_tokenizer import UTF8ByteTokenizer
 from torch.multiprocessing import spawn, get_context
 from torch.distributed.device_mesh import init_device_mesh

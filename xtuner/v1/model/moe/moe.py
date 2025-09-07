@@ -3,11 +3,13 @@ import os
 import types
 from itertools import accumulate
 from pathlib import Path
-from typing import cast
+from typing import Annotated, Literal, cast
 
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
+from cyclopts import Parameter
+from pydantic import ConfigDict
 from torch import nn
 from torch.distributed._functional_collectives import all_reduce
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl
@@ -20,19 +22,17 @@ from torch.distributed.fsdp import (
 )
 from torch.distributed.tensor import DTensor, Replicate, distribute_tensor
 from tqdm import tqdm
-from typing_extensions import overload, override, Self
+from typing_extensions import NotRequired, overload, override
 
 from xtuner.v1.config import FSDPConfig
-from xtuner.v1.config.base_model import MoEConfig, MoEModelOutputs
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.loss import BalancingLoss, CELossContext, ZLoss
-from xtuner.v1.model.base import BaseModel
+from xtuner.v1.model.base import BaseModel, ModelOutputs, TransformerConfig
 from xtuner.v1.model.utils import checkpoint_wrapper, module_dict_repr
-from xtuner.v1.module import LMHead, RMSNorm, RotaryEmbedding
+from xtuner.v1.module import GreedyRouterConfig, LMHead, NoAuxRouter, NoAuxRouterConfig, RMSNorm, RotaryEmbedding
 from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayer
-from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEBlock, MoEDecoderLayer
-from xtuner.v1.module.router import NoAuxRouter, NoAuxRouterConfig
+from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEActFnConfig, MoEBlock, MoEDecoderLayer
 from xtuner.v1.utils import (
     get_device,
     get_logger,
@@ -43,6 +43,62 @@ from xtuner.v1.utils.compile import maybe_compile
 
 DEVICE = get_device()
 logger = get_logger()
+
+
+class MoEModelOutputs(ModelOutputs):
+    router_logits: NotRequired[dict[str, torch.Tensor]]
+    balancing_loss: NotRequired[torch.Tensor]
+    z_loss: NotRequired[torch.Tensor]
+    tokens_per_expert_global: NotRequired[torch.Tensor]
+
+
+class BalancingLossConfig(BaseModel):
+    balancing_loss_alpha: float = 0.001
+    balancing_loss_global_average: bool = True
+
+    def build(self, router_scoring_func) -> BalancingLoss:
+        return BalancingLoss(
+            self.balancing_loss_alpha,
+            self.balancing_loss_global_average,
+            router_scoring_func=router_scoring_func,
+        )
+
+
+class ZLossConfig(BaseModel):
+    z_loss_alpha: float = 0.001
+    z_loss_global_average: bool = True
+
+    def build(self) -> "ZLoss":
+        from xtuner.v1.loss import ZLoss
+
+        return ZLoss(
+            self.z_loss_alpha,
+            self.z_loss_global_average,
+        )
+
+
+class MoEConfig(TransformerConfig):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    n_routed_experts: Annotated[int, Parameter(group="moe")]
+    n_shared_experts: Annotated[int, Parameter(group="moe")]
+    num_experts_per_tok: Annotated[int, Parameter(group="moe")]
+    first_k_dense_replace: Annotated[int, Parameter(group="moe")] = 0
+    hidden_factor: Annotated[float, Parameter(group="moe")] = 1.0
+    moe_intermediate_size: Annotated[int, Parameter(group="moe")]
+    ep_size: Annotated[int, Parameter(group="moe")] = 1
+    dispatcher: Annotated[Literal["deepep", "all2all"] | None, Parameter(group="moe")] = None
+    router: GreedyRouterConfig | NoAuxRouterConfig
+    balancing_loss_cfg: BalancingLossConfig | None = BalancingLossConfig()
+    z_loss_cfg: ZLossConfig | None = None
+    return_router_results: bool = False
+    gate_bias: bool = False
+    moe_bias: bool = False
+    moe_act_fn_cfg: MoEActFnConfig = MoEActFnConfig()
+
+    def build(self) -> "MoE":
+        from xtuner.v1.model.moe.moe import MoE
+
+        return MoE(self)
 
 
 class MoE(BaseModel):
@@ -507,8 +563,8 @@ class MoE(BaseModel):
     @override
     def from_hf(self, hf_path: str | Path, strict: bool = True) -> tuple:
         loaded_keys, unloaded_keys, missing_keys = super().from_hf(hf_path, strict)
-        # If model is builded on meta device, we need to rebuild rotary embedding since from_hf will not
-        # load the `inv_freq` of RotaryEmbedding which is a inpersisitent buffer. 
+        # If model is built on meta device, we need to rebuild rotary embedding since from_hf will not
+        # load the `inv_freq` of RotaryEmbedding which is a inpersisitent buffer.
         self.rotary_emb = self.build_rotary_embedding(self.config)
         return loaded_keys, unloaded_keys, missing_keys
 
@@ -789,7 +845,6 @@ class MoE(BaseModel):
             max_length_q=(cat_seq_lens_q[1:] - cat_seq_lens_q[:-1]).max().item(),  # type: ignore[arg-type]
             max_length_k=(cat_seq_lens_q[1:] - cat_seq_lens_q[:-1]).max().item(),  # type: ignore[arg-type]
         )
-
 
     # NOTE: Add this overload for inferring the return type for easier type checking and using
     @overload  # type: ignore

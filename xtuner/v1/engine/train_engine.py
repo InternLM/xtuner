@@ -26,10 +26,10 @@ from torch.utils._foreach_utils import (
     _has_foreach_support,
 )
 
-from xtuner.v1.config import FSDPConfig, OptimConfig, TransformerConfig
+from xtuner.v1.config import FSDPConfig, OptimConfig
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.float8.float8_handler import Float8Handler
-from xtuner.v1.model.base import BaseModel, ModelItem
+from xtuner.v1.model.base import BaseModel, ModelItem, TransformerConfig
 from xtuner.v1.module.router import NoAuxRouterConfig
 from xtuner.v1.utils import get_device, get_logger, get_torch_device_module
 

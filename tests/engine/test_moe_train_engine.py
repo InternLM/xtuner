@@ -13,7 +13,8 @@ from xtuner.v1.model.moe.moe import SequenceContext
 from xtuner.v1.model.base import ModelItem
 from xtuner.v1.loss.ce_loss import CELossConfig, CELossContextInputItem
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
-from xtuner.v1.config import FSDPConfig, LRConfig, AdamWConfig, BalancingLossConfig, ZLossConfig
+from xtuner.v1.config import FSDPConfig, LRConfig, AdamWConfig
+from xtuner.v1.model.moe.moe import BalancingLossConfig, ZLossConfig
 from xtuner.v1.engine.train_engine import TrainEngine
 from torch.optim.lr_scheduler import LambdaLR
 from xtuner.v1.utils import pad_to_max_length

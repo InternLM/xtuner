@@ -7,13 +7,14 @@ from cyclopts.group import Group
 from mmengine import list_dir_or_file
 from pydantic import BaseModel, ConfigDict
 
-from xtuner.v1.config import FSDPConfig, TrainerConfig
-from xtuner.v1.config.base_model import TransformerConfig
-from xtuner.v1.config.data import DataloaderConfig, DatasetConfig, DatasetConfigList
+from xtuner.v1.config import FSDPConfig
 from xtuner.v1.config.optim import AdamWConfig, LRConfig
 from xtuner.v1.datasets import FTDPTokenizeFnConfig
+from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig, DatasetConfigList
 from xtuner.v1.loss.ce_loss import CELossConfig
 from xtuner.v1.model import get_model_config, get_model_config_from_hf
+from xtuner.v1.model.base import TransformerConfig
+from xtuner.v1.train import TrainerConfig
 from xtuner.v1.utils import Config, get_logger, is_hf_model_path
 
 

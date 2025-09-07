@@ -6,7 +6,7 @@ import torch.distributed as dist
 from torch.testing._internal.common_distributed import DistributedTestBase
 
 from xtuner.v1.module.dispatcher.deepep import DeepEPDispatcher
-from xtuner.v1.config import TransformerConfig
+from xtuner.v1.model.base import TransformerConfig
 from xtuner.v1.module.dispatcher.base import NaiveDispatcher, GenericDispatcher
 import parametrize
 

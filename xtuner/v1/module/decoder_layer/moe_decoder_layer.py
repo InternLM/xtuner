@@ -1,18 +1,19 @@
-from typing import Literal, TypeAlias
+from functools import partial
+from typing import Literal, Protocol, TypeAlias
 
 import torch
 import torch.nn as nn
+from pydantic import BaseModel
 from torch.autograd.function import Function
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 from torch.nn import functional as F
 
 from transformers.activations import ACT2FN
-from xtuner.v1.config.base_model import BaseAttnConfig, BaseRouterConfig, GenerateConfig
-from xtuner.v1.config.float8 import Float8Config
-from xtuner.v1.config.moe_act import MoEActFnConfig
+from xtuner.v1.config.generate import GenerateConfig
 from xtuner.v1.data_proto import SequenceContext
-from xtuner.v1.module import MultiHeadAttention, MultiLatentAttention, RMSNorm, RouterResults
+from xtuner.v1.float8 import Float8Config
+from xtuner.v1.module import GreedyRouterConfig, MHAConfig, MLAConfig, NoAuxRouterConfig, RMSNorm, RouterResults
 from xtuner.v1.module.dispatcher import (
     CombineResult,
     DispatchResult,
@@ -24,7 +25,6 @@ from xtuner.v1.module.dispatcher import (
 from xtuner.v1.module.dispatcher.base import PostCombineResult
 from xtuner.v1.module.grouped_linear.moe_group_linear import build_grouped_linear
 from xtuner.v1.module.rope import RopeScalingConfig
-from xtuner.v1.module.router import GreedyRouter, NoAuxRouter
 from xtuner.v1.utils import ForwardState
 from xtuner.v1.utils.compile import maybe_compile
 
@@ -33,6 +33,26 @@ from ..linear.linear import build_linear
 
 RouterLogits: TypeAlias = torch.Tensor
 HiddenStates: TypeAlias = torch.Tensor
+
+
+class MoEActFnProtocol(Protocol):
+    def __call__(self, fused_x: torch.Tensor, split_dim: int = -1) -> torch.Tensor: ...
+
+
+class MoEActFnConfig(BaseModel):
+    act_type: Literal["clipped_swiglu", "swiglu"] = "swiglu"
+
+    clip_alpha: float | None = None
+    clip_limit: float | None = None
+
+    def build(self) -> MoEActFnProtocol:
+        from xtuner.v1.ops.moe_act_fn import get_moe_act_fn
+
+        act_fn = get_moe_act_fn(self.act_type)
+
+        if self.act_type == "clipped_swiglu":
+            act_fn = partial(act_fn, alpha=self.clip_alpha, limit=self.clip_limit)
+        return act_fn
 
 
 class MoEMLP(nn.Module):
@@ -66,7 +86,7 @@ class MoEGate(nn.Module):
         hidden_size: int,
         n_routed_experts: int,
         num_experts_per_tok: int,
-        router_config: BaseRouterConfig[GreedyRouter | NoAuxRouter],
+        router_config: GreedyRouterConfig | NoAuxRouterConfig,
         gate_bias: bool = False,
     ):
         super().__init__()
@@ -168,11 +188,11 @@ class MoEDecoderLayer(nn.Module):
         n_routed_experts: int,
         n_shared_experts: int,
         hidden_factor: float = 1.0,
-        attention_config: BaseAttnConfig[MultiHeadAttention | MultiLatentAttention],
+        attention_config: MHAConfig | MLAConfig,
         rope_scaling_cfg: RopeScalingConfig | None = None,
         layer_type: Literal["full_attention", "sliding_attention"] | None = None,
         generate_config: GenerateConfig | None = None,
-        router_config: BaseRouterConfig[GreedyRouter | NoAuxRouter],
+        router_config: GreedyRouterConfig | NoAuxRouterConfig,
         moe_act_fn_cfg: MoEActFnConfig,
         float8_cfg: Float8Config | None = None,
         layer_idx: int = 0,

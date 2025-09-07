@@ -1,13 +1,12 @@
 from xtuner.v1.config import (
     AdamWConfig,
-    DataloaderConfig,
-    DatasetConfig,
     LRConfig,
-    TrainerConfig,
 )
+from xtuner.v1.train import TrainerConfig
 from xtuner.v1.datasets import InternS1TokenizeFnConfig
 from xtuner.v1.model import Qwen3Dense8BConfig, InternS1MiniConfig
 from xtuner.v1.loss import CELossConfig
+from xtuner.v1.datasets.config import DatasetConfig, DataloaderConfig
 
 # model config
 text_cfg = Qwen3Dense8BConfig(num_hidden_layers=8,

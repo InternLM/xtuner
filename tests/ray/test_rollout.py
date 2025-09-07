@@ -13,7 +13,7 @@ from xtuner.v1.ray.environment import SingleTurnEnvironment
 from xtuner.v1.ray.rollout import RolloutController
 from xtuner.v1.ray.judger import JudgerController
 from xtuner.v1.datasets import RLTextTokenizeFnConfig, build_datasets, build_dataloader
-from xtuner.v1.config import (
+from xtuner.v1.datasets.config import (
     DataloaderConfig,
     DatasetConfig,
 )

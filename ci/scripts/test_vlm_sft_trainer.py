@@ -9,11 +9,10 @@ import torch.distributed as dist
 import json
 from xtuner.v1.config import (
     AdamWConfig,
-    DataloaderConfig,
-    DatasetConfig,
     FSDPConfig,
     LRConfig
 )
+from xtuner.v1.datasets.config import DatasetConfig, DataloaderConfig
 from xtuner.v1.datasets import InternS1TokenizeFnConfig
 from xtuner.v1.model import InternS1MiniConfig
 from xtuner.v1.train.trainer import Trainer

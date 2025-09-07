@@ -8,7 +8,7 @@ import torch.nn as nn
 from torch.distributed._tensor import DTensor
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 
-from xtuner.v1.float8.float8_tensor import ScalingGranularity
+from xtuner.v1.float8.config import ScalingGranularity
 from xtuner.v1.float8.fsdp_utils import (
     precompute_tensorwise_float8_scale_for_fsdp,
     precompute_tilewise_float8_scale_for_fsdp,
@@ -118,71 +118,6 @@ class Float8Handler:
 
         if callback_after_pad is not None:
             callback_after_pad()
-
-    # def convert_to_float8_training(
-    #         self,
-    #         model: nn.Module,
-    #         fsdp_mesh: Optional[DeviceMesh] = None,
-    #         linear_filter_fn: Optional[callable] = default_linear_filter_fn,
-    #         grouped_linear_filter_fn: Optional[callable] = default_grouped_linear_filter_fn,
-    # ):
-    #     """
-    #     Convert the model to use float8 training.
-    #     Args:
-    #         model (nn.Module): The model to convert.
-    #         fsdp_mesh (DeviceMesh, optional): The FSDP mesh. If None, will use the default device mesh.
-    #         linear_filter_fn (callable, optional): A filter function for linear modules.
-    #         grouped_linear_filter_fn (callable, optional): A filter function for grouped linear modules.
-    #     """
-    #     from xtuner.v1.float8.float8_linear_tile_wise import TileWiseFloat8Linear
-    #     from xtuner.v1.float8.float8_gmm_tile_wise import TileWiseFloat8GroupedLinear
-
-    #     if not self.enabled:
-    #         logger.warning("Float8 training is not enabled.")
-    #         return
-
-    #     def convert_to_tilewise_float8_linear_training(module: nn.Module, prefix: str):
-    #         for name, child in module.named_children():
-    #             if isinstance(child, nn.Linear) and linear_filter_fn(child, prefix + name):
-    #                 ctx = torch.device('meta') if child.weight.device == torch.device('meta') else nullcontext()
-    #                 with ctx:
-    #                     # make fsdp compatible with block-wise fp8
-    #                     # use size(-1) to support hsdp
-    #                     padded_out_features = self.get_num_features_after_pad(
-    #                         child.weight.size(), 0, fsdp_mesh.size(-1), 128)
-    #                     fp8_linear = TileWiseFloat8Linear.from_float(
-    #                         child,
-    #                         padded_out_features=padded_out_features
-    #                     )
-    #                 module.add_module(name, fp8_linear)
-    #             else:
-    #                 convert_to_tilewise_float8_linear_training(child, prefix + name + ".")
-
-    #     def convert_to_tilewise_float8_grouped_linear_training(module: nn.Module, prefix: str):
-    #         for name, child in module.named_children():
-    #             if isinstance(child, GroupedLinear) and grouped_linear_filter_fn(child, prefix + name):
-    #                 ctx = torch.device('meta') if child.weight.device == torch.device('meta') else nullcontext()
-    #                 with ctx:
-    #                     # make fsdp compatible with block-wise fp8
-    #                     # use size(-1) to support hsdp
-    #                     padded_out_features = self.get_num_features_after_pad(
-    #                         child.weight.size(), 0, fsdp_mesh.size(-1), 128)
-    #                     fp8_grouped_linear = TileWiseFloat8GroupedLinear.from_float(
-    #                         child,
-    #                         padded_out_features=padded_out_features
-    #                     )
-    #                 module.add_module(name, fp8_grouped_linear)
-    #             else:
-    #                 convert_to_tilewise_float8_grouped_linear_training(child, prefix + name + ".")
-
-    #     if self.scaling_granularity_gemm == ScalingGranularity.TILEWISE:
-    #         assert fsdp_mesh is not None
-    #         convert_to_tilewise_float8_linear_training(model, "")
-    #         logger.info("Tile-wise FP8 Linear training enabled.")
-    #     if self.scaling_granularity_grouped_gemm == ScalingGranularity.TILEWISE:
-    #         assert fsdp_mesh is not None
-    #         convert_to_tilewise_float8_grouped_linear_training(model, "")
-    #         logger.info("Tile-wise FP8 Grouped Linear training enabled.")
 
     def build_reduce_mesh(self, model: nn.Module, fsdp_mesh: DeviceMesh):
         if not self.enabled:

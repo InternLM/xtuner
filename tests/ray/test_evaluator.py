@@ -9,10 +9,9 @@ from xtuner.v1.ray.judger.controller import JudgerConfig
 from xtuner.v1.ray.accelerator import AcceleratorResourcesConfig, AutoAcceleratorWorkers
 from xtuner.v1.ray.environment import SingleTurnEnvironment
 from xtuner.v1.ray.evaluator import Evaluator, EvaluatorConfig
-from xtuner.v1.ray.rollout import RolloutController, SampleParams
-from xtuner.v1.ray.judger import JudgerController
-from xtuner.v1.datasets import RLTextTokenizeFnConfig
-from xtuner.v1.config import DatasetConfig
+from xtuner.v1.ray.rollout import SampleParams
+from xtuner.v1.datasets import RLTextTokenizeFnConfig, DatasetConfig
+
 
 
 MODEL_PATH = os.environ["ROLLOUT_MODEL_PATH"]

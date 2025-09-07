@@ -8,12 +8,11 @@ import torch.distributed as dist
 
 from xtuner.v1.config import (
     AdamWConfig,
-    DataloaderConfig,
-    DatasetConfig,
     FSDPConfig,
     LRConfig,
-    BalancingLossConfig,
 )
+from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
+from xtuner.v1.model.moe.moe import BalancingLossConfig
 from xtuner.v1.datasets.sft_tokenize_fn import OpenaiTokenizeFunctionConfig
 
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
@@ -221,14 +220,6 @@ def main():
     moe_cfgs = [
         (Qwen3MoE30BA3Config(balancing_loss_cfg=BalancingLossConfig()), "ep1"),
         (Qwen3MoE30BA3Config(ep_size=8, dispatcher="all2all"), "ep8"),
-        # (
-        #     Qwen3MoE30BA3Config(
-        #         ep_size=1,
-        #         float8_cfg=Float8Config(
-        #             scaling_granularity_gemm=ScalingGranularity.TILEWISE,
-        #             scaling_granularity_grouped_gemm=ScalingGranularity.TILEWISE,
-        #     ),
-        # ), "fp8"),
     ]
     for moe_cfg, name in moe_cfgs:
         optim_cfg = AdamWConfig(lr=6e-05)

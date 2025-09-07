@@ -1,5 +1,13 @@
 from .build import build_dataloader, build_datasets
 from .collator import fake_collator, sft_llm_collator, sft_vllm_collator
+from .config import (
+    BaseTokenizeFnConfig,
+    DataloaderConfig,
+    DatasetCombine,
+    DatasetConfig,
+    DatasetConfigList,
+    DatasetConfigListAdatper,
+)
 from .ftdp import FTDPTokenizeFnConfig, FtdpTokenizeFunction
 from .intern_s1_fn.tokenizer_fn import InternS1TokenizeFnConfig, InternS1TokenizeFunction
 from .jsonl import JsonlDataset
@@ -35,4 +43,10 @@ __all__ = [
     "RLTextTokenizeFnConfig",
     "get_dataloader_state",
     "load_dataloader_state",
+    "DatasetConfigList",
+    "DataloaderConfig",
+    "BaseTokenizeFnConfig",
+    "DatasetCombine",
+    "DatasetConfigListAdatper",
+    "DatasetConfig",
 ]

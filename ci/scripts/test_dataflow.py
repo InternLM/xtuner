@@ -7,7 +7,7 @@ from pathlib import Path
 import ray
 from transformers import AutoTokenizer
 
-from xtuner.v1.config import (
+from xtuner.v1.datasets.config import (
     DataloaderConfig,
     DatasetConfig,
 )

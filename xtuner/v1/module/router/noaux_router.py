@@ -1,15 +1,18 @@
 import os
-from typing import Literal
+from typing import Annotated, Literal
 
 import torch
 import torch.nn as nn
-
-from xtuner.v1.config import BaseRouterConfig
+from cyclopts import Parameter
+from pydantic import BaseModel
 
 from .protocol import RouterProtocol, RouterResults
 
 
-class NoAuxRouterConfig(BaseRouterConfig):
+class NoAuxRouterConfig(BaseModel):
+    scoring_func: Annotated[Literal["sigmoid", "softmax"], Parameter(group="router")]
+    router_scaling_factor: Annotated[float, Parameter(group="router")]
+    norm_topk_prob: Annotated[bool, Parameter(group="router")]
     n_group: int
     topk_group: int
     router_bias_update_speed: float = 0.001

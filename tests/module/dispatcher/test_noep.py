@@ -1,9 +1,7 @@
 from unittest import TestCase
-from unittest.mock import Mock
 
 import torch
 from xtuner.v1.module.dispatcher.base import NaiveDispatcher
-from xtuner.v1.config import MoEConfig
 import parametrize
 
 

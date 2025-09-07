@@ -6,7 +6,7 @@ import torch
 import torch.distributed as dist
 import torch.distributed.nn.functional as distF
 
-from xtuner.v1.config.base_model import MoEModelOutputs
+from xtuner.v1.model.moe.moe import MoEModelOutputs
 from xtuner.v1.model.moe.moe import SequenceContext
 from xtuner.v1.ops.comm import split_for_sequence_parallel
 from xtuner.v1.utils import get_logger, get_padding_length, get_device

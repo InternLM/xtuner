@@ -13,8 +13,8 @@ from ray import ObjectRef
 from typing_extensions import Annotated
 
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
-from xtuner.v1.config import DataloaderConfig
 from xtuner.v1.datasets import build_dataloader, build_datasets
+from xtuner.v1.datasets.config import DataloaderConfig
 from xtuner.v1.datasets.data_item import RLTextDataItem
 from xtuner.v1.utils import get_logger
 

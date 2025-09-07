@@ -8,15 +8,16 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from shutil import rmtree
-from typing import Literal, Sized, cast
+from typing import Annotated, Literal, Sized, cast
 
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+from cyclopts import Parameter
 from mmengine import load
 from mmengine.dist import get_rank, get_world_size
 from mmengine.runner import set_random_seed
-from pydantic import BaseModel, computed_field
+from pydantic import BaseModel, ConfigDict, computed_field, model_validator
 from torch.distributed import init_process_group
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, LinearLR, SequentialLR
@@ -25,16 +26,15 @@ from typing_extensions import NotRequired, Self, TypedDict
 from transformers import AutoTokenizer
 from transformers.tokenization_utils import PreTrainedTokenizer
 from xtuner.v1._writer import get_writer
-from xtuner.v1.config import DataloaderConfig, DatasetConfigList, FSDPConfig, LRConfig, OptimConfig
-from xtuner.v1.config.base_model import TransformerConfig
-from xtuner.v1.config.trainer import ResumeConfig, TrainerConfig
+from xtuner.v1.config import FSDPConfig, LRConfig, OptimConfig
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.datasets.build import build_dataloader, build_datasets
+from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfigList
 from xtuner.v1.datasets.resume import get_dataloader_state, load_dataloader_state
 from xtuner.v1.loss import CELossConfig
 from xtuner.v1.loss.ce_loss import CELossContextInputItem
 from xtuner.v1.model import InternS1BaseConfig
-from xtuner.v1.model.base import ModelItem
+from xtuner.v1.model.base import ModelItem, TransformerConfig
 from xtuner.v1.profiler import profilling_memory, profilling_time
 from xtuner.v1.utils import (
     XTUNER_DETERMINISTIC,
@@ -108,6 +108,53 @@ class XTunerMeta(BaseModel):
                 if cp == checkpoint:
                     return exp
         return None
+
+
+class ResumeConfig(BaseModel):
+    resume_from: str | Path | None = None
+    auto_resume: bool = False
+    load_optimizer: bool = True
+    load_dataset: bool = True
+    load_scheduler: bool = True
+
+
+class TrainerConfig(BaseModel):
+    model_config = ConfigDict(title="Trainer config", extra="allow", arbitrary_types_allowed=True)
+    model_cfg: BaseModel | TransformerConfig  # TODO: Config refactpr
+    load_from: str | Path | None = None
+    tokenizer_path: str | Path | None = None
+    dataset_cfg: Annotated[DatasetConfigList, Parameter(show_default=False)]
+    dataloader_cfg: DataloaderConfig
+    optim_cfg: OptimConfig
+    lr_cfg: LRConfig
+    loss_cfg: CELossConfig = CELossConfig()
+    fsdp_cfg: FSDPConfig | None = None
+    global_batch_size: int | None
+    work_dir: Path | str | None = None
+    log_dir: Path | str | None = None
+    sp_size: int = 1
+    total_step: int | None = None
+    total_epoch: int | None = None
+    resume: ResumeConfig | None = None
+    strict_load: bool = True
+    hf_interval: int | None = None
+    hf_max_keep: int | None = None
+    exp_tracker: Literal["tensorboard", "jsonl"] = "jsonl"
+    profile_step: int | None = None
+    profile_time: bool = True
+    profile_memory: bool = False
+    intra_layer_micro_batch: int = 1
+    seed: int = 42
+    dist_backend: str = "cpu:gloo,cuda:nccl"
+    debug: bool = False
+
+    @model_validator(mode="after")
+    def _convert_work_dir(self):
+        if isinstance(self.work_dir, str):
+            self.work_dir = Path(self.work_dir)
+        elif self.work_dir is None:
+            self.work_dir = Path.cwd()
+        return self
 
 
 class Trainer:

@@ -12,13 +12,12 @@ from pydantic import BaseModel, ConfigDict
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed.tensor import DTensor
 
-from xtuner.v1.config.base_model import TransformerConfig
 from xtuner.v1.config.fsdp import FSDPConfig
 from xtuner.v1.config.optim import LRConfig, OptimConfig
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.engine.train_engine import TrainEngine
 from xtuner.v1.float8.float8_handler import Float8Handler
-from xtuner.v1.model.base import ModelItem
+from xtuner.v1.model.base import ModelItem, TransformerConfig
 from xtuner.v1.ray.accelerator import SingleAcceleratorWorker
 from xtuner.v1.ray.config import RolloutConfig
 from xtuner.v1.rl.utils import gather_logprobs

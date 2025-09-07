@@ -15,7 +15,6 @@ from mmengine.runner import set_random_seed
 from ray.actor import ActorClass
 
 from transformers import AutoTokenizer
-from xtuner.v1.config.trainer import ResumeConfig
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.ray.accelerator import AcceleratorResourcesConfig, AutoAcceleratorWorkers
 from xtuner.v1.ray.config.worker import RolloutConfig
@@ -29,6 +28,7 @@ from xtuner.v1.ray.rollout import SampleParams
 # from xtuner.v1.rl.base.worker import TrainingWorker, WorkerConfig
 from xtuner.v1.rl.base import TrainingController, WorkerConfig
 from xtuner.v1.rl.base import TrainingWorker as BaseTrainingWorker
+from xtuner.v1.train import ResumeConfig
 
 # from xtuner.v1.rl.grpo.controller import GRPOTrainingController
 # from xtuner.v1.rl.grpo.worker import GRPOTrainingWorker, WorkerConfig

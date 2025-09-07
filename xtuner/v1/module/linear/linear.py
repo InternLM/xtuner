@@ -3,9 +3,9 @@ import torch.nn as nn
 from torch.distributed.tensor import DTensor
 from torch.nn import functional as F
 
+from xtuner.v1.float8.config import ScalingGranularity
 from xtuner.v1.float8.float8_linear_tensor_wise import TensorWiseFloat8Linear
 from xtuner.v1.float8.float8_linear_tile_wise import TileWiseFloat8Linear
-from xtuner.v1.float8.float8_tensor import ScalingGranularity
 
 
 class _Linear(nn.Linear):

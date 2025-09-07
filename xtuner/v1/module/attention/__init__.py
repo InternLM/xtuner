@@ -3,7 +3,6 @@ from typing import Protocol
 
 import torch
 
-from xtuner.v1.config import TransformerConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.utils import ForwardState
 
@@ -13,12 +12,6 @@ from .mla import MLAConfig, MultiLatentAttention
 
 class AttentionProtocol(Protocol):
     """Protocol for attention modules."""
-
-    def __init__(
-        self,
-        config: TransformerConfig,
-        layer_idx: int = 0,
-    ): ...
 
     def forward(
         self,
