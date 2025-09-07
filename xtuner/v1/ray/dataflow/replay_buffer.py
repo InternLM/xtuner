@@ -113,7 +113,7 @@ class Sampler:
         """
         self.train_dataset = dataset
         self.train_dataloader = dataloader
-        self.train_dataloader_iter = itertools.cycle(self.train_dataloader)
+        self.train_dataloader_iter = iter(self.train_dataloader)
         self.tokenizer = tokenizer
         self.storage = storage
 
@@ -132,7 +132,8 @@ class Sampler:
         try:
             data = next(self.train_dataloader_iter)[0]
         except StopIteration:
-            return group_samples
+            self.train_dataloader_iter = iter(self.train_dataloader)
+            data = next(self.train_dataloader_iter)[0]
         for _ in range(repeat_prompt_k):
             prompt_id = uuid4().int
             data_item = copy.deepcopy(data)
@@ -183,6 +184,9 @@ class Sampler:
             # note: Sample grouped sample at once. They share the same prompt and
             # prompt id but different action_id.
             return self.sample_from_datasets(env, prompt_repeat_k)
+
+    def resume(self, num):
+        self.train_dataloader_iter = itertools.islice(self.train_dataloader, num, None)
 
 
 class ReplayBufferStorage:
@@ -322,21 +326,114 @@ class ReplayBufferStorage:
             return samples
 
     def print(self):
-        """Prints the current state and statistics of the storage."""
-        self.logger.info("ReplayBufferStorage states: ")
-        self.logger.info(
-            f"rollout_state: finished: {len(self._rollout_states['finished'])}, unfinished: {len(self._rollout_states['unfinished'])}"
+        finished_count = len(self._rollout_states["finished"])
+        unfinished_count = len(self._rollout_states["unfinished"])
+        group_count = len(self._prompt2actions)
+        action_count = len(self._actions)
+        observation_count = len(self._observations)
+
+        log_message = (
+            "ReplayBufferStorage states:\n"
+            f"  - Rollout States: Finished={finished_count}, Unfinished={unfinished_count}\n"
+            f"  - Sent Grouped Samples: {group_count}\n"
+            f"  - History Actions: {action_count}\n"
+            f"  - History Observations: {observation_count}"
         )
-        self.logger.info(f"group: {len(self._prompt2actions)}")
-        self.logger.info(f"action: {len(self._actions)}")
-        self.logger.info(f"observations: {len(self._observations)}")
+        self.logger.info(log_message)
 
-    def dump(self):
-        """Dumps the state of the replay buffer to a file.
+    def dump(self, file_path: str):
+        """Dumps the entire state of the replay buffer storage to a single
+        file, resolving all ray.ObjectRefs to their actual values.
 
-        (Not implemented)
+        Args:
+            file_path (str): The path to the file where the state will be
+                saved.
         """
-        pass
+        import os
+        import pickle
+
+        self.logger.info(f"Starting to dump ReplayBufferStorage state to {file_path}...")
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+
+        # Deepcopy the state to avoid modifying the live buffer and to resolve
+        # ObjectRefs in-place.
+        actions_copy = copy.deepcopy(self._actions)
+        # observations_copy = copy.deepcopy(self._observations)
+        self.logger.info("Resolving ObjectRefs. This may take time and memory...")
+
+        for replay_meta in actions_copy.values():
+            if replay_meta.action_refs and all(isinstance(ref, ray.ObjectRef) for ref in replay_meta.action_refs):
+                actions_list = []
+                for ref in replay_meta.action_refs:
+                    actions_list.append(ray.get(ref))
+                replay_meta.action_refs = actions_list
+            if replay_meta.observation_refs and all(
+                isinstance(ref, ray.ObjectRef) for ref in replay_meta.observation_refs
+            ):
+                observations_list = []
+                for ref in replay_meta.observation_refs:
+                    observations_list.append(ray.get(ref))
+                replay_meta.observation_refs = observations_list
+
+        # Since _observations points to the same ReplayMeta objects as _actions,
+        # we can reconstruct it on resume.
+        state_to_dump = {
+            "_states": self._states,
+            "_rollout_states": self._rollout_states,
+            "_actions": actions_copy,
+            "_observations": self._observations,
+            "_prompt2actions": self._prompt2actions,
+            "_action2observations": self._action2observations,
+            "_observations2states": self._observations2states,
+        }
+
+        with open(file_path, "wb") as f:
+            pickle.dump(state_to_dump, f)
+        self.logger.info(f"ReplayBufferStorage state dumped to {file_path}")
+
+    def resume(self, file_path: str):
+        """Resumes the replay buffer storage from a single file.
+
+        Args:
+            file_path (str): The path to the file from which to restore the
+                state.
+        """
+        import os
+        import pickle
+
+        self.logger.info(f"Starting to resume ReplayBufferStorage state from {file_path}...")
+        if not os.path.exists(file_path):
+            self.logger.error(f"State file not found: {file_path}. Cannot resume.")
+            return
+
+        with open(file_path, "rb") as f:
+            state_to_load = pickle.load(f)
+
+        # Restore all components
+        self._states = state_to_load["_states"]
+        self._rollout_states = state_to_load["_rollout_states"]
+        actions = state_to_load["_actions"]
+        self._actions = {}
+        self._observations = {}
+        for action_id, replay_meta in actions.items():
+            action_refs_list = []
+            for action in replay_meta.action_refs:
+                action_refs_list.append(ray.put(action))
+            replay_meta.action_refs = action_refs_list
+            observe_refs_list = []
+            for observe in replay_meta.observation_refs:
+                observe_refs_list.append(ray.put(observe))
+            replay_meta.observation_refs = observe_refs_list
+            self._actions[action_id] = replay_meta
+            for observ_id in replay_meta.observation_ids:
+                self._observations[observ_id] = replay_meta
+        self._prompt2actions = state_to_load["_prompt2actions"]
+        self._action2observations = state_to_load["_action2observations"]
+        self._observations2states = state_to_load["_observations2states"]
+
+        self.logger.info(f"ReplayBufferStorage state successfully resumed from {file_path}")
+
+        self.print()
 
     def get_finished_samples(self):
         """Returns the number of finished sample groups."""
@@ -345,6 +442,9 @@ class ReplayBufferStorage:
     def get_unfinished_samples(self):
         """Returns the number of unfinished sample groups."""
         return len(self._rollout_states["unfinished"])
+
+    def get_prompt_num(self):
+        return len(self._rollout_states)
 
 
 @ray.remote
@@ -439,13 +539,24 @@ class ReplayBuffer:
         """Prints the current state of the replay buffer storage."""
         self.storage.print()
 
-    def dump(self):
-        """Dumps the replay buffer state.
+    def dump(self, file_path: str):
+        """Dumps the replay buffer's storage to a file.
 
-        (Not implemented)
+        Args:
+            file_path (str): The path to the file for saving the data.
         """
-        # todo: support dump replaybuffer
-        self.storage.dump()
+        self.storage.dump(file_path)
+
+    def resume(self, file_path: str):
+        """Resumes the replay buffer's storage from a file.
+
+        Args:
+            file_path (str): The path to the file from which to restore the
+                state.
+        """
+        self.storage.resume(file_path)
+        num = self.storage.get_prompt_num()
+        self.sampler.resume(num)
 
     def get_finished_samples(self):
         """Returns the number of finished sample groups in the storage."""
