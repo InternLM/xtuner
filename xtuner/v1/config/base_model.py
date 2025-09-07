@@ -8,6 +8,8 @@ from typing_extensions import NotRequired, TypedDict
 from xtuner.v1.config.float8 import Float8Config
 from xtuner.v1.config.loss import BalancingLossConfig, ZLossConfig
 
+from .moe_act import MoEActFnConfig
+
 
 if TYPE_CHECKING:
     from xtuner.v1.model.base import BaseModel as _BaseModel
@@ -54,12 +56,14 @@ class BaseAttnConfig(BaseModel, Generic[T]):
     qkv_bias: Annotated[bool, Parameter(group="attention")] = False
     o_bias: Annotated[bool, Parameter(group="attention")] = False
     sliding_window: Annotated[int | None, Parameter(group="attention")] = -1
+    with_sink: Annotated[bool, Parameter(group="attention")] = False
 
     def build(
         self,
         hidden_size: int,
         layer_type: Literal["full_attention", "sliding_attention"] | None = None,
         layer_idx: int = 0,
+        rope_scaling_cfg: Optional[BaseModel] = None,  # "RopeScalingConfig"
         generate_config: GenerateConfig | None = None,
         float8_cfg: Optional["Float8Config"] = None,
     ) -> T:
@@ -161,6 +165,7 @@ class TransformerConfig(BaseModel):
     return_hidden_states: Annotated[bool, Parameter(group="model")] = False
     use_sliding_window: Annotated[bool, Parameter(group="model")] = False
     max_window_layers: Annotated[int | None, Parameter(group="model")] = None
+    rope_scaling_cfg: Optional[BaseModel] = None  # "RopeScalingConfig"
 
     @computed_field
     def num_attention_heads(self) -> int:
@@ -199,6 +204,9 @@ class MoEConfig(TransformerConfig):
     balancing_loss_cfg: BalancingLossConfig | None = BalancingLossConfig()
     z_loss_cfg: Optional["ZLossConfig"] = None
     return_router_results: bool = False
+    gate_bias: bool = False
+    moe_bias: bool = False
+    moe_act_fn_cfg: MoEActFnConfig = MoEActFnConfig()
 
     def build(self) -> "MoE":
         from xtuner.v1.model.moe.moe import MoE

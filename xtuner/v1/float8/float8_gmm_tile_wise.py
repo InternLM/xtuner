@@ -212,9 +212,16 @@ class view_weight(torch.autograd.Function):
 
 class TileWiseFloat8GroupedLinear(torch.nn.Module):
     def __init__(
-        self, in_features: int, out_features: int, num_routed_experts: int, ep_mesh: DeviceMesh | None = None
+        self,
+        in_features: int,
+        out_features: int,
+        num_routed_experts: int,
+        moe_bias: bool = False,
+        ep_mesh: DeviceMesh | None = None,
     ) -> None:
         super().__init__()
+
+        assert moe_bias is False, "TileWiseFloat8GroupedLinear only supports moe_bias=False for now."
 
         assert DEEPGEMM_INSTALLED, (
             "Please install deep_gemm:"

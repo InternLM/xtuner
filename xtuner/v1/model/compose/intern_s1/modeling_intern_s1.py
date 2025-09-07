@@ -106,7 +106,8 @@ class InternS1ForConditionalGeneration(BaseModel):
         self,
         fsdp_config: FSDPConfig,
         float8_handler: Float8Handler | None = None,
-    ):
+    ):  
+        self.fsdp_config = fsdp_config
         # TODO: 判断其余模块是否已经被 fsdp 切分了
 
         # NOTE: 暂时只能在这个地方进行 checkpoint_wrapper

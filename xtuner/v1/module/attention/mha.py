@@ -4,11 +4,13 @@ from typing import Literal, cast
 
 import torch
 from torch import nn
+from torch.distributed.tensor import DTensor
 
 from transformers.models.llama.modeling_llama import repeat_kv
 from xtuner.v1.config import BaseAttnConfig, Float8Config, GenerateConfig
 from xtuner.v1.data_proto import SequenceContext
-from xtuner.v1.ops import apply_rotary_pos_emb, flash_attn_varlen_func
+from xtuner.v1.module.rope import RopeScalingConfig
+from xtuner.v1.ops import attn_impl_mapping, flash_attn_varlen_func, get_apply_rotary_emb
 from xtuner.v1.ops.comm.all_to_all import ulysses_all_to_all
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger
 
@@ -34,6 +36,7 @@ class MHAConfig(BaseAttnConfig["MultiHeadAttention"]):
         hidden_size: int,
         layer_type: Literal["full_attention", "sliding_attention"] | None = None,
         layer_idx: int = 0,
+        rope_scaling_cfg: RopeScalingConfig | None = None,
         generate_config: GenerateConfig | None = None,
         float8_cfg: Float8Config | None = None,
     ) -> "MultiHeadAttention":
@@ -42,6 +45,7 @@ class MHAConfig(BaseAttnConfig["MultiHeadAttention"]):
             hidden_size=hidden_size,
             layer_type=layer_type,
             layer_idx=layer_idx,
+            rope_scaling_cfg=rope_scaling_cfg,
             generate_config=generate_config,
             float8_cfg=float8_cfg,
         )
@@ -100,6 +104,9 @@ class MultiHeadAttention(nn.Module):
         qk_norm: bool = False,
         rms_norm_eps: float = 1e-6,
         o_bias: bool = False,
+        with_sink: bool = False,
+        attn_impl: Literal["flash_attention", "flex_attention", "eager_attention"] = "flash_attention",
+        rope_scaling_cfg: RopeScalingConfig | None = None,
         float8_cfg: Float8Config | None = None,
         generate_config: GenerateConfig | None = None,
         layer_type: Literal["full_attention", "sliding_attention"] | None = None,
@@ -152,9 +159,16 @@ class MultiHeadAttention(nn.Module):
             self.q_norm = RMSNorm(self.head_dim, eps=self.rms_norm_eps)
             self.k_norm = RMSNorm(self.head_dim, eps=self.rms_norm_eps)
 
+        self.with_sink = with_sink
+        if self.with_sink:
+            self.sinks = nn.Parameter(torch.empty(self.num_attention_heads))
+
         self.window_size = (-1, -1)
         if layer_type == "sliding_attention":
             self.window_size = (sliding_window, sliding_window)
+
+        self.apply_rotary_emb = get_apply_rotary_emb()  # type: ignore
+        self.attn_impl_func = attn_impl_mapping[attn_impl]
 
     def prefilling(
         self,
@@ -175,7 +189,7 @@ class MultiHeadAttention(nn.Module):
             key_states = self.k_norm(key_states)
 
         cos, sin = position_embeddings
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+        query_states, key_states = self.apply_rotary_emb(query_states, key_states, cos, sin)
 
         # TODO: support sliding attention in prefilling
         assert self.window_size == (-1, -1), "Sliding attention in prefilling is not supported yet."
@@ -194,6 +208,7 @@ class MultiHeadAttention(nn.Module):
         assert query_states.size(0) == 1
         assert key_states.size(0) == 1
         assert value_states.size(0) == 1
+
         attn_output = cast(
             torch.Tensor,
             flash_attn_varlen_func(
@@ -235,7 +250,7 @@ class MultiHeadAttention(nn.Module):
             key_states = self.k_norm(key_states)
 
         cos, sin = position_embeddings
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+        query_states, key_states = self.apply_rotary_emb(query_states, key_states, cos, sin)
 
         seq_lens_k = seq_ctx.seq_lens_k
         block_table = seq_ctx.block_table
@@ -292,7 +307,7 @@ class MultiHeadAttention(nn.Module):
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
 
-        query_states = self.q_proj(hidden_states).view(hidden_shape)
+        query_states = self.q_proj(hidden_states).view(hidden_shape)  # [b, seq,  n_head, head_dim]
         key_states = self.k_proj(hidden_states).view(hidden_shape)
         value_states = self.v_proj(hidden_states).view(hidden_shape)
 
@@ -300,13 +315,13 @@ class MultiHeadAttention(nn.Module):
             query_states = self.q_norm(query_states)
             key_states = self.k_norm(key_states)
 
-        query_states = query_states.transpose(1, 2)
+        query_states = query_states.transpose(1, 2)  # [b, n_head, seq , head_dim]
         key_states = key_states.transpose(1, 2)
         value_states = value_states.transpose(1, 2)
 
         cos, sin = position_embeddings
 
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+        query_states, key_states = self.apply_rotary_emb(query_states, key_states, cos, sin)
 
         if seq_ctx.sequence_parallel_mesh and seq_ctx.sequence_parallel_mesh.size() > 1:
             sp_size = seq_ctx.sequence_parallel_mesh.size()
@@ -341,28 +356,36 @@ class MultiHeadAttention(nn.Module):
 
         assert isinstance(seq_ctx.max_length_q, int)
         assert isinstance(seq_ctx.max_length_k, int)
-        attn_output: torch.Tensor = cast(
-            torch.Tensor,
-            flash_attn_varlen_func(
-                query_states.transpose(1, 2).squeeze(0),
-                key_states.transpose(1, 2).squeeze(0),
-                value_states.transpose(1, 2).squeeze(0),
-                cu_seqlens_q=seq_ctx.cu_seq_lens_q,
-                cu_seqlens_k=seq_ctx.cu_seq_lens_k,
-                max_seqlen_q=seq_ctx.max_length_q,
-                max_seqlen_k=seq_ctx.max_length_k,
-                window_size=self.window_size,
-                dropout_p=self.dropout,
-                causal=True,
-                deterministic=XTUNER_DETERMINISTIC,
-            ),
+
+        kwargs = {}
+        if self.with_sink:
+            if isinstance(self.sinks, DTensor):
+                sinks = self.sinks.to_local()
+            else:
+                sinks = self.sinks
+            kwargs["s_aux"] = sinks
+        # [b, n_head, seq, head_dim]
+        attn_output: torch.Tensor = self.attn_impl_func(  # type: ignore
+            query_states,
+            key_states,
+            value_states,
+            cu_seqlens_q=seq_ctx.cu_seq_lens_q,
+            cu_seqlens_k=seq_ctx.cu_seq_lens_k,
+            max_seqlen_q=seq_ctx.max_length_q,
+            max_seqlen_k=seq_ctx.max_length_k,
+            window_size=self.window_size,
+            dropout_p=self.dropout,
+            softmax_scale=self.scaling,
+            causal=True,
+            deterministic=XTUNER_DETERMINISTIC,
+            **kwargs,
         )
 
         if seq_ctx.sequence_parallel_mesh and seq_ctx.sequence_parallel_mesh.size() > 1:
             attn_output = ulysses_all_to_all(
                 attn_output,
-                scatter_dim=0,
-                gather_dim=1,
+                scatter_dim=1,
+                gather_dim=2,
                 mesh=seq_ctx.sequence_parallel_mesh,
             )
 

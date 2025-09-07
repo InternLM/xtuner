@@ -12,6 +12,7 @@ class LoadEnum(StrEnum):
 
 class LoadSpec(BaseModel):
     # TODO: (yehaochen) Add more description
+    name: str
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
     hf_keys: list[str]
     shape: tuple[int, ...]
@@ -30,6 +31,6 @@ class LoadSpec(BaseModel):
             assert self.dim == 0, "dim should be 0 when load_enum is FUSED"
         elif self.load_enum == LoadEnum.SHARD:
             assert self.dim is not None, "dim should not be None when load_enum is SHARD"
-            assert len(self.hf_keys) > 1, "hf_keys should have more than one key when load_enum is SHARD"
+            assert len(self.hf_keys) == 1, "hf_keys should have more than one key when load_enum is SHARD"
             assert self.shard_start is not None, "shard_start should not be None when load_enum is SHARD"
             assert self.shard_end is not None, "shard_end should not be None when load_enum is SHARD"

@@ -3,11 +3,12 @@ from .comm import all_to_all_single_autograd, ulysses_all_to_all
 
 __all__ = ["all_to_all_single_autograd", "ulysses_all_to_all"]
 
+from .attn_imp import attn_impl_mapping
 from .flash_attn import flash_attn_varlen_func
 from .moe import group_gemm, permute, unpermute
+from .moe_act_fn import get_moe_act_fn
 from .rms_norm import rms_norm
-from .rotary_emb import apply_rotary_pos_emb
-from .swiglu import swiglu
+from .rotary_emb import get_apply_rotary_emb
 from .tensor_parallel import attn_column_parallel, attn_row_parallel
 
 
