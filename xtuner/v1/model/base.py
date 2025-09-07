@@ -108,6 +108,46 @@ class BaseModel(nn.Module):
         with profile_time_and_memory(f"[Saving HF to {hf_dir} cost]"):
             self._save_hf(hf_dir=hf_dir, save_dtype=save_dtype)
 
+    def safetensors_to_params(
+        self,
+        safetensors: list[torch.Tensor],
+        local_tensor: torch.Tensor,
+        param_name: str,
+        start: int | None,
+        end: int | None,
+        dim: int | None,
+    ):
+        if len(safetensors) > 1:
+            assert dim is not None, "Internal Error dim must not be None when len(safetensors) > 1"
+            loaded_tensor = torch.cat(safetensors, dim=dim)
+        else:
+            loaded_tensor = safetensors[0]
+
+        if start is not None and end is not None:
+            assert self.fsdp_config is not None, (
+                "Internal Error. fsdp_config must not be None when start and end is not None"
+            )
+            start = min(start, loaded_tensor.shape[self.FSDP_SHARD_DIM])
+            end = min(end, loaded_tensor.shape[self.FSDP_SHARD_DIM])
+            loaded_tensor_slice = loaded_tensor.index_select(
+                dim=self.FSDP_SHARD_DIM, index=torch.arange(start, end, dtype=torch.int64, device=loaded_tensor.device)
+            )
+            non_pad_len = end - start
+            local_tensor[:non_pad_len].copy_(loaded_tensor_slice)
+
+            if non_pad_len < local_tensor.shape[self.FSDP_SHARD_DIM]:
+                assert self.config.float8_cfg is not None
+                local_tensor[non_pad_len:].copy_(0.0)  # type: ignore  # padded part must be set to 0
+        else:
+            local_tensor.copy_(loaded_tensor)
+
+    def param_to_safetensor(
+        self,
+        safetensor: torch.Tensor,
+        hf_param_name: str,
+    ):
+        return safetensor
+
     @property
     def device(self) -> torch.device:
         if self.fsdp_config is not None and self.fsdp_config.cpu_offload:
@@ -167,18 +207,31 @@ class BaseModel(nn.Module):
                 local_shape = param._local_tensor.shape
                 global_size = param.shape[dim]
 
-                start_hf_key_idx = start / global_size * len(hf_keys)
-                assert start_hf_key_idx.is_integer(), "Internal xtuner error, please report this issue"
-                start_hf_key_idx = int(start_hf_key_idx)
+                if len(hf_keys) > 1:
+                    start_hf_key_idx = start / global_size * len(hf_keys)
 
-                end_hf_key_idx = end / global_size * len(hf_keys)
-                # TODO: (yehaochen) Support TP
-                assert end_hf_key_idx.is_integer(), "Internal xtuner error, please report this issue"
-                end_hf_key_idx = int(end_hf_key_idx)
+                    assert start_hf_key_idx.is_integer(), "Internal xtuner error, please report this issue"
+                    start_hf_key_idx = int(start_hf_key_idx)
+
+                    end_hf_key_idx = end / global_size * len(hf_keys)
+                    # TODO: (yehaochen) Support TP
+                    assert end_hf_key_idx.is_integer(), "Internal xtuner error, please report this issue"
+                    load_type = LoadEnum.FUSED
+                    end_hf_key_idx = int(end_hf_key_idx)
+                elif len(hf_keys) == 1:
+                    start_hf_key_idx = start / global_size
+                    end_hf_key_idx = end / global_size
+                    if start_hf_key_idx == 0 and end_hf_key_idx == 1:
+                        load_type = LoadEnum.SAME
+                    else:
+                        load_type = LoadEnum.SHARD
+                else:
+                    raise RuntimeError
 
                 # TP shard
-                if start_hf_key_idx == end_hf_key_idx:
+                if load_type is LoadEnum.SHARD:
                     load_spec = LoadSpec(
+                        name=name,
                         hf_keys=hf_keys,
                         shape=local_shape,
                         dim=dim,
@@ -188,8 +241,9 @@ class BaseModel(nn.Module):
                         group=param.device_mesh.get_group(),
                     )
                 # Replicate
-                elif len(hf_keys) == 1:
+                elif load_type == LoadEnum.SAME:
                     load_spec = LoadSpec(
+                        name=name,
                         hf_keys=hf_keys,
                         shape=local_shape,
                         dim=dim,
@@ -199,6 +253,7 @@ class BaseModel(nn.Module):
                 # EPSHard
                 else:
                     load_spec = LoadSpec(
+                        name=name,
                         hf_keys=hf_keys[start_hf_key_idx:end_hf_key_idx],
                         shape=local_shape,
                         dim=dim,
@@ -208,12 +263,14 @@ class BaseModel(nn.Module):
             else:
                 if len(hf_keys) == 1:
                     load_spec = LoadSpec(
+                        name=name,
                         hf_keys=hf_keys,
                         shape=param.shape,
                         load_enum=LoadEnum.SAME,
                     )
                 else:
                     load_spec = LoadSpec(
+                        name=name,
                         hf_keys=hf_keys,
                         shape=param.shape,
                         load_enum=LoadEnum.FUSED,
@@ -254,19 +311,25 @@ class BaseModel(nn.Module):
         load_spec0 = params[0][1]
         assert load_spec0.group is not None
 
-        for _, load_spec in params[1:]:
-            assert load_spec0 == load_spec, "All params should have the same load spec for sharded params"
-
         def _get_hf_params(fsdp_tensor_list: list[tuple[torch.Tensor, LoadSpec]]) -> list[torch.Tensor]:
             # Get fsdp unsharded params
             _tensor_list, _spec_list = list(zip(*fsdp_tensor_list))
-            fsdp_unsharded_tensor_list = self._fsdp_foreach_allgather(_tensor_list, _spec_list)  # type: ignore
+            if self.fsdp_mesh is not None:
+                fsdp_unsharded_tensor_list = self._fsdp_foreach_allgather(_tensor_list, _spec_list)  # type: ignore
+            else:
+                fsdp_unsharded_tensor_list = _tensor_list  # type: ignore
 
             # Get unsharded params
             _unsharded_tensor_list = foreach_all_gather(fsdp_unsharded_tensor_list, load_spec0.group)
             unsharded_tensor_list = [
                 torch.cat([i.to(dtype) for i in tensors], dim=load_spec0.dim) for tensors in _unsharded_tensor_list
             ]
+            name_list = [spec.hf_keys[0] for _, spec in fsdp_tensor_list]
+            unsharded_tensor_list = [
+                self.param_to_safetensor(safetensor, name)
+                for safetensor, name in zip(unsharded_tensor_list, name_list)
+            ]
+            unsharded_tensor_list = [t.cpu() for t in unsharded_tensor_list]
             return unsharded_tensor_list
 
         safetensor_size = 0
@@ -278,7 +341,9 @@ class BaseModel(nn.Module):
             local_tensor = local_tensor.to(dtype=dtype)
             if safetensor_size + self._get_tensor_size(param, dtype) > self.SAFETENSOR_SIZE:
                 safetensor_size = 0
-                yield name_list, _get_hf_params(tensor_list)
+                hf_params = _get_hf_params(tensor_list)
+
+                yield name_list, hf_params
                 name_list = load_spec.hf_keys.copy()
                 tensor_list = [(local_tensor, load_spec)]
                 continue
@@ -287,7 +352,8 @@ class BaseModel(nn.Module):
             name_list.append(load_spec.hf_keys[0])
 
         if tensor_list:
-            yield name_list, _get_hf_params(tensor_list)
+            hf_params = _get_hf_params(tensor_list)
+            yield name_list, hf_params
 
     def _get_fused_hf_param(
         self,
@@ -320,6 +386,10 @@ class BaseModel(nn.Module):
                 hf_tensor_list.extend(hf_tensor)
                 fsdp_shard_tensor_list.extend([shard_tensor] * len(hf_tensor))
             assert len(name_list) == len(hf_tensor_list)
+
+            hf_tensor_list = [
+                self.param_to_safetensor(safetensor, name) for safetensor, name in zip(hf_tensor_list, name_list)
+            ]
 
             if dtype == torch.float8_e4m3fn:
                 hf_tensor_list_new, name_list_new = self._to_float8(
@@ -364,12 +434,11 @@ class BaseModel(nn.Module):
             if self.fsdp_mesh is not None:
                 hf_params, name_list = _get_hf_params(tensor_list, name_list)
             else:
-                if dtype == torch.bfloat16:
-                    hf_params = [t for t, _ in tensor_list]
-                elif dtype == torch.float8_e4m3fn:
-                    hf_params, name_list = self._to_float8(
-                        [t for t, _ in tensor_list], name_list, [t for t, _ in tensor_list], dtype
-                    )
+                hf_params = [
+                    self.param_to_safetensor(safetensor[0], name) for safetensor, name in zip(tensor_list, name_list)
+                ]
+                if dtype == torch.float8_e4m3fn:
+                    hf_params, name_list = self._to_float8(hf_params, name_list, hf_params, dtype)
                 else:
                     raise NotImplementedError(f"dtype {dtype} is not supported for fused hf param")
             hf_params = [t.to(device=device) for t in hf_params]
@@ -400,6 +469,10 @@ class BaseModel(nn.Module):
                 else:
                     gathered_tensor_list = tensor_list
                 safetensor_size = 0
+                gathered_tensor_list = [
+                    self.param_to_safetensor(safetensor, name)
+                    for safetensor, name in zip(gathered_tensor_list, name_list)
+                ]
                 if dtype == torch.float8_e4m3fn:
                     gathered_tensor_list, name_list = self._to_float8(
                         gathered_tensor_list, name_list, tensor_list, dtype
@@ -420,6 +493,10 @@ class BaseModel(nn.Module):
                 gathered_tensor_list = self._fsdp_foreach_allgather(tensor_list, load_spec_list)
             else:
                 gathered_tensor_list = tensor_list
+
+            gathered_tensor_list = [
+                self.param_to_safetensor(safetensor, name) for safetensor, name in zip(gathered_tensor_list, name_list)
+            ]
             if dtype == torch.float8_e4m3fn:
                 gathered_tensor_list, name_list = self._to_float8(gathered_tensor_list, name_list, tensor_list, dtype)
             gathered_tensor_list = [t.to(device=device) for t in gathered_tensor_list]
@@ -503,7 +580,10 @@ class BaseModel(nn.Module):
             else:
                 is_fused_save_rank = self.fsdp_mesh.get_local_rank() == 0
         else:
-            is_fused_save_rank = dist.get_rank() == 0
+            if dist.is_initialized():
+                is_fused_save_rank = dist.get_rank() == 0
+            else:
+                is_fused_save_rank = True
 
         is_others_save_rank = not dist.is_initialized() or dist.get_rank() == 0
 
@@ -560,14 +640,24 @@ class BaseModel(nn.Module):
 
         if save_executor is not None:
             wait(save_futures)
+            for future in save_futures:
+                if future.exception():
+                    raise future.exception()  # type: ignore
             save_executor.shutdown()
 
-        weight_map_list: list[dict] | list[None] = [None for _ in range(dist.get_world_size())]
-        dist.all_gather_object(weight_map_list, weight_map)
+        if dist.is_initialized():
+            world_size = dist.get_world_size()
+        else:
+            world_size = 1
+        weight_map_list: list[dict] | list[None] = [None for _ in range(world_size)]
+        if dist.is_initialized():
+            dist.all_gather_object(weight_map_list, weight_map)
+        else:
+            weight_map_list = [weight_map]
         weight_map_list = cast(list[dict], weight_map_list)
         weight_map = reduce(lambda x, y: x | y, weight_map_list)
 
-        if dist.get_rank() == 0:
+        if not dist.is_initialized() or dist.get_rank() == 0:
             for file in cast(Path, self._hf_path).iterdir():
                 if file.suffix != ".safetensors":
                     # Copy the model config and tokenizer files to the save path
@@ -578,10 +668,11 @@ class BaseModel(nn.Module):
                         copytree(file, target_path)
 
             with open(hf_dir / "model.safetensors.index.json", "w") as f:
-                index = {"weight_map": weight_map}
+                index = {"weight_map": weight_map, "metadata": {}}
                 json.dump(index, f, indent=2, ensure_ascii=False)
 
-        torch.distributed.barrier()
+        if dist.is_initialized():
+            torch.distributed.barrier()
 
     def _load_params(self, checkpoint_loader: HFCheckpointLoader, strict=True) -> tuple:
         matched_hf_keys: set[str] = set(checkpoint_loader.weight_map)
@@ -698,20 +789,10 @@ class BaseModel(nn.Module):
         else:
             start = None
             end = None
-        if start is not None and end is not None:
-            # fp8 pad
-            start = min(start, loaded_tensor.shape[self.FSDP_SHARD_DIM])
-            end = min(end, loaded_tensor.shape[self.FSDP_SHARD_DIM])
-            loaded_tensor_slice = loaded_tensor.index_select(
-                dim=self.FSDP_SHARD_DIM, index=torch.arange(start, end, dtype=torch.int64, device=loaded_tensor.device)
-            )
-            non_pad_len = loaded_tensor_slice.shape[self.FSDP_SHARD_DIM]
-            local_tensor[:non_pad_len].copy_(loaded_tensor_slice)
-            if non_pad_len < local_tensor.shape[self.FSDP_SHARD_DIM]:
-                assert self.config.float8_cfg is not None
-                local_tensor[non_pad_len:].copy_(0.0)  # type: ignore  # padded part must be set to 0
-        else:
-            local_tensor.copy_(loaded_tensor)
+
+        self.safetensors_to_params(
+            [loaded_tensor], local_tensor, param_name=load_spec.name, start=start, end=end, dim=load_spec.dim
+        )
         return []
 
     def _load_fused_hf_param(
@@ -780,32 +861,16 @@ class BaseModel(nn.Module):
                 continue
             _loaded_tensor.append(weight.to(local_tensor.device))
 
-        if _loaded_tensor:
-            loaded_tensor = torch.cat(tuple(_loaded_tensor), dim=load_spec.dim)
-        else:
-            if not hf_keys:
-                # fp8 pad
-                assert self.config.float8_cfg is not None
-                assert cast(MoEConfig, self.config).ep_size == 1, "Only support fp8 pad for MoE with ep_size == 1"
-                local_tensor.zero_()  # type: ignore  # padded part must be set to 0
+        if not hf_keys:
+            # fp8 pad
+            assert self.config.float8_cfg is not None
+            assert cast(MoEConfig, self.config).ep_size == 1, "Only support fp8 pad for MoE with ep_size == 1"
+            local_tensor.zero_()  # type: ignore  # padded part must be set to 0
             return missing_keys
 
-        if start is not None and end is not None:
-            # dist.breakpoint(1)
-            start = min(start, loaded_tensor.shape[self.FSDP_SHARD_DIM])
-            end = min(end, loaded_tensor.shape[self.FSDP_SHARD_DIM])
-            loaded_tensor_slice = loaded_tensor.index_select(
-                dim=self.FSDP_SHARD_DIM, index=torch.arange(start, end, dtype=torch.int64, device=loaded_tensor.device)
-            )
-            non_pad_len = loaded_tensor_slice.shape[self.FSDP_SHARD_DIM]
-            local_tensor[:non_pad_len].copy_(loaded_tensor_slice)
-            if non_pad_len < local_tensor.shape[self.FSDP_SHARD_DIM]:
-                ep_size = cast(MoEConfig, self.config).ep_size
-                assert (ep_size is None) or (ep_size == 1), "Only support fp8 pad for MoE with ep_size == 1"
-                assert self.config.float8_cfg is not None
-                local_tensor[non_pad_len:].copy_(0.0)  # type: ignore  # padded part must be set to 0
-        else:
-            local_tensor.copy_(loaded_tensor)
+        self.safetensors_to_params(
+            _loaded_tensor, local_tensor, param_name=load_spec.name, start=start, end=end, dim=load_spec.dim
+        )
         return missing_keys
 
     def _load_shard_hf_param(
@@ -825,6 +890,10 @@ class BaseModel(nn.Module):
 
         loaded_tensor = loaded_tensor.to(local_tensor.device)
 
+        assert load_spec.shard_start is not None and load_spec.shard_end is not None, (
+            "load_spec.shard_start and load_spec.shard_end should not be None for sharded params"
+        )
+
         if self.fsdp_mesh is not None:
             shape_before_fsdp = load_spec.shape
             _, _offset = compute_local_shape_and_global_offset(
@@ -833,31 +902,20 @@ class BaseModel(nn.Module):
             fsdp_start = _offset[self.FSDP_SHARD_DIM]
             fsdp_end = fsdp_start + local_tensor.shape[self.FSDP_SHARD_DIM]
 
-            start = fsdp_start
-            end = fsdp_end
+            start = fsdp_start + load_spec.shard_start
+            end = fsdp_end + load_spec.shard_start
         else:
-            start = None
-            end = None
+            start = load_spec.shard_start
+            end = load_spec.shard_end
 
-        assert load_spec.shard_start is not None and load_spec.shard_end is not None, (
-            "load_spec.shard_start and load_spec.shard_end should not be None for sharded params"
-        )
-
-        # Get the sharded tensor before FSDP
-        sharded_loaded_tensor = loaded_tensor.index_select(
+        self.safetensors_to_params(
+            safetensors=[loaded_tensor],
+            local_tensor=local_tensor,
+            param_name=load_spec.name,
+            start=start,
+            end=end,
             dim=load_spec.dim,
-            index=torch.arange(load_spec.shard_start, load_spec.shard_end, dtype=torch.int64),
         )
-
-        if start is not None and end is not None:
-            local_tensor.copy_(
-                sharded_loaded_tensor.index_select(
-                    dim=self.FSDP_SHARD_DIM,
-                    index=torch.arange(start, end, dtype=torch.int64, device=sharded_loaded_tensor.device),
-                ),
-            )
-        else:
-            local_tensor.copy_(sharded_loaded_tensor)
         return []
 
     def _has_meta_param(self, module: nn.Module, recurse: bool = False) -> bool:
@@ -902,7 +960,7 @@ class BaseModel(nn.Module):
             cat_tensor = torch.index_select(
                 torch.cat(tensors, dim=self.FSDP_SHARD_DIM),
                 dim=self.FSDP_SHARD_DIM,
-                index=torch.arange(0, size, dtype=torch.int64, device=DEVICE),
+                index=torch.arange(0, size, dtype=torch.int64, device=tensors[0].device),
             )
             fsdp_unsharded_tensor_list.append(cat_tensor)
 
@@ -925,3 +983,12 @@ class BaseModel(nn.Module):
         self.to(device, non_blocking=True)
         DEVICE_MODULE.synchronize()
         return
+
+    def _fp8_pad(self, local_tensor: torch.Tensor, padding_start: int):
+        assert self.config.float8_cfg is not None
+        if self.fsdp_mesh is not None:
+            assert isinstance(self.config, MoEConfig)
+            ep_size = self.config.ep_size
+            assert (ep_size is None) or (ep_size == 1), "Only support fp8 pad for MoE with ep_size == 1"
+            assert self.config.float8_cfg is not None
+            local_tensor[padding_start:].copy_(0.0)  # type: ignore  # padded part must be set to 0

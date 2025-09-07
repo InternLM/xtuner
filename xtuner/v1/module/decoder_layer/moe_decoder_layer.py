@@ -10,6 +10,7 @@ from torch.nn import functional as F
 from transformers.activations import ACT2FN
 from xtuner.v1.config.base_model import BaseAttnConfig, BaseRouterConfig, GenerateConfig
 from xtuner.v1.config.float8 import Float8Config
+from xtuner.v1.config.moe_act import MoEActFnConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.module import MultiHeadAttention, MultiLatentAttention, RMSNorm, RouterResults
 from xtuner.v1.module.dispatcher import (
@@ -22,8 +23,8 @@ from xtuner.v1.module.dispatcher import (
 )
 from xtuner.v1.module.dispatcher.base import PostCombineResult
 from xtuner.v1.module.grouped_linear.moe_group_linear import build_grouped_linear
+from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.module.router import GreedyRouter, NoAuxRouter
-from xtuner.v1.ops import swiglu
 from xtuner.v1.utils import ForwardState
 from xtuner.v1.utils.compile import maybe_compile
 
@@ -66,6 +67,7 @@ class MoEGate(nn.Module):
         n_routed_experts: int,
         num_experts_per_tok: int,
         router_config: BaseRouterConfig[GreedyRouter | NoAuxRouter],
+        gate_bias: bool = False,
     ):
         super().__init__()
         self.n_routed_experts = n_routed_experts
@@ -78,6 +80,10 @@ class MoEGate(nn.Module):
             num_experts_per_tok=num_experts_per_tok,
         )
 
+        self.gate_bias = gate_bias
+        if self.gate_bias:
+            self.bias = nn.Parameter(torch.zeros(self.n_routed_experts))
+
     def forward(self, hidden_states: torch.Tensor) -> RouterResults:
         _, _, h = hidden_states.shape
         ### compute gating score
@@ -87,7 +93,13 @@ class MoEGate(nn.Module):
             weight = self.weight.to_local()
         else:
             weight = self.weight
-        logits = F.linear(hidden_states.float(), weight.float(), None)
+
+        bias = None
+        if self.gate_bias:
+            bias = self.bias.to_local() if isinstance(self.bias, DTensor) else self.bias
+            bias = bias.float()
+
+        logits = F.linear(hidden_states.float(), weight.float(), bias)
 
         return self.router(logits)
 
@@ -99,8 +111,10 @@ class MoEBlock(nn.Module):
         hidden_size: int,
         moe_intermediate_size: int,
         n_routed_experts: int,
+        moe_bias: bool = False,
         ep_mesh: DeviceMesh | None = None,
         float8_cfg: Float8Config | None = None,
+        moe_act_fn_cfg: MoEActFnConfig,
     ):
         super().__init__()
         self.hidden_size = hidden_size
@@ -114,6 +128,7 @@ class MoEBlock(nn.Module):
             self.hidden_size,
             2 * self.intermediate_size,
             self.num_routed_experts,
+            moe_bias=moe_bias,
             ep_mesh=self.ep_mesh,
             float8_cfg=float8_cfg,
         )
@@ -121,16 +136,17 @@ class MoEBlock(nn.Module):
             self.intermediate_size,
             self.hidden_size,
             self.num_routed_experts,
+            moe_bias=moe_bias,
             ep_mesh=self.ep_mesh,
             float8_cfg=float8_cfg,
         )
+        self.moe_act = moe_act_fn_cfg.build()
 
     @maybe_compile(fullgraph=True)
     def forward(self, x, tokens_per_expert, decoding):
         gate_up_out = self.fused_w1w3(x, tokens_per_expert, decoding)
-        out = swiglu(gate_up_out, split_dim=-1)
+        out = self.moe_act(gate_up_out, split_dim=-1)
         res = self.fused_w2(out, tokens_per_expert, decoding)
-
         return res
 
 
@@ -144,6 +160,8 @@ class MoEDecoderLayer(nn.Module):
         intermediate_size: int,
         moe_intermediate_size: int,
         mlp_bias: bool = False,
+        gate_bias: bool = False,
+        moe_bias: bool = False,
         hidden_act: str,
         rms_norm_eps: float = 1e-6,
         num_experts_per_tok: int,
@@ -151,9 +169,11 @@ class MoEDecoderLayer(nn.Module):
         n_shared_experts: int,
         hidden_factor: float = 1.0,
         attention_config: BaseAttnConfig[MultiHeadAttention | MultiLatentAttention],
+        rope_scaling_cfg: RopeScalingConfig | None = None,
         layer_type: Literal["full_attention", "sliding_attention"] | None = None,
         generate_config: GenerateConfig | None = None,
         router_config: BaseRouterConfig[GreedyRouter | NoAuxRouter],
+        moe_act_fn_cfg: MoEActFnConfig,
         float8_cfg: Float8Config | None = None,
         layer_idx: int = 0,
         dispatcher: Literal["deepep", "all2all"] | None,
@@ -170,6 +190,7 @@ class MoEDecoderLayer(nn.Module):
             hidden_size=hidden_size,
             layer_idx=layer_idx,
             generate_config=generate_config,
+            rope_scaling_cfg=rope_scaling_cfg,
             layer_type=layer_type,
             float8_cfg=float8_cfg,
         )
@@ -196,13 +217,16 @@ class MoEDecoderLayer(nn.Module):
             n_routed_experts=n_routed_experts,
             num_experts_per_tok=num_experts_per_tok,
             router_config=router_config,
+            gate_bias=gate_bias,
         )
         self.experts = MoEBlock(
             hidden_size=hidden_size,
             moe_intermediate_size=moe_intermediate_size,
             n_routed_experts=n_routed_experts,
+            moe_bias=moe_bias,
             ep_mesh=ep_mesh,
             float8_cfg=float8_cfg,
+            moe_act_fn_cfg=moe_act_fn_cfg,
         )
         # TODO: (yehaochen) Maybe should be replaced by build_dispatcher
         process_group = ep_mesh.get_group() if ep_mesh is not None else None

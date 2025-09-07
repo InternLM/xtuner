@@ -314,7 +314,8 @@ class InternS1VisionModel(BaseModel):
         self,
         fsdp_config: FSDPConfig,
         float8_handler: Float8Handler | None = None,
-    ):
+    ):  
+        self.fsdp_config = fsdp_config
         assert float8_handler is None
 
         mp_policy = MixedPrecisionPolicy(
