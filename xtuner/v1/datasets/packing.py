@@ -1,6 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import multiprocessing
-import os
 import random
 from concurrent.futures import ProcessPoolExecutor
 from functools import partial
@@ -14,23 +13,28 @@ from tqdm import tqdm
 
 from xtuner.v1.utils import get_logger
 
+from .jsonl import JsonlDataset
+
 
 logger = get_logger()
 
 
-class SoftPackDataset(torch.utils.data.Dataset):
-    def __init__(self, datasets, target=2048, blend=False, seed: int | None = None):
+class _LegacySoftPackDataset(torch.utils.data.Dataset):
+    def __init__(self, datasets, pack_max_length=2048, global_pack=False, seed: int | None = None):
         self.random = random.Random()
         if seed is not None:
             self.random = random.Random(seed)
 
-        if blend:
+        if global_pack:
             num_tokens = [np.concatenate([dset.num_tokens for dset in datasets])]
             datasets = [ConcatDataset(datasets)]
         else:
             num_tokens = [dset.num_tokens for dset in datasets]
+
         self.datasets = datasets
-        self.target = target
+        self.seed = seed
+        self.global_pack = global_pack
+        self.pack_max_length = pack_max_length
 
         pack_infos = []
         for i, dataset in enumerate(self.datasets):
@@ -52,7 +56,7 @@ class SoftPackDataset(torch.utils.data.Dataset):
 
         pack_infos = []
         for shfl_i in inds:
-            if num_tokens[shfl_i] + sum(length_buffer) <= self.target:
+            if num_tokens[shfl_i] + sum(length_buffer) <= self.pack_max_length:
                 item_buffer.append(shfl_i)
                 length_buffer.append(num_tokens[shfl_i])
                 longest = max(longest, num_tokens[shfl_i])
@@ -89,6 +93,31 @@ class SoftPackDataset(torch.utils.data.Dataset):
         indices = self.pack_infos[item]["indices"]
         dataset_id = self.pack_infos[item]["dataset_id"]
         return [self.datasets[dataset_id][i] for i in indices]
+
+    def load_state_dict(self, state_dict):
+        if self.seed != state_dict["seed"]:
+            raise ValueError(
+                f"Cannot load state dict with different seed . Origin: {state_dict['seed']}, New: {self.seed}"
+            )
+
+        if self.pack_max_length != state_dict["pack_max_length"]:
+            raise ValueError(
+                "Cannot load state dict with different pack_max_length "
+                f". Origin: {state_dict['pack_max_length']}, New: {self.pack_max_length}"
+            )
+
+        if self.global_pack != state_dict["global_pack"]:
+            raise ValueError(
+                "Cannot load state dict with different global_pack "
+                f". Origin: {state_dict['global_pack']}, New: {self.global_pack}"
+            )
+
+    def get_state_dict(self):
+        return {
+            "pack_max_length": self.pack_max_length,
+            "seed": self.seed,
+            "global_pack": self.global_pack,
+        }
 
 
 def closest_sum_indices(buffer, value):
@@ -197,42 +226,55 @@ def get_pack_chunk_infos(
     return pack_infos
 
 
-class ExpandSoftPackDataset(SoftPackDataset):
+class ExpandSoftPackDataset(_LegacySoftPackDataset):
     def __init__(
         self,
-        *args,
+        datasets: list[JsonlDataset],
+        pack_max_length: int = 2048,
+        global_pack: bool = False,
         pack_len_type="total_block",
-        flash_attn_block_size=128,
-        pack_extra_buffer_size=1000,
+        flash_attn_block_size: int = 128,
+        pack_extra_buffer_size: int = 1000,
+        pack_chunk_size: int = 10000,
+        pack_workers: int = 8,
         seed: int | None = None,
-        **kwargs,
     ):
         self.pack_len_type = pack_len_type
         assert self.pack_len_type in ["total_block", "max_block"], f"Invalid pack_len_type: {self.pack_len_type}"
         self.flash_attn_block_size = flash_attn_block_size
         self.pack_extra_buffer_size = pack_extra_buffer_size
-        self.pack_workers = int(os.environ.get("XTUNER_PACK_WORKERS", 1))
+        self.pack_workers = pack_workers
         self.torch_random_generator = torch.Generator()
+        self.pack_chunk_size = pack_chunk_size
         if seed is not None:
             self.torch_random_generator.manual_seed(seed)
         logger.info(f"Using {self.pack_workers} pack workers for packing datasets.")
-        super().__init__(*args, **kwargs)
+
+        super().__init__(
+            datasets=datasets,
+            pack_max_length=pack_max_length,
+            global_pack=global_pack,
+            seed=seed,
+        )
 
     def get_pack_infos(self, dataset, dataset_id, num_tokens):
         inds = torch.randperm(len(dataset), generator=self.torch_random_generator).tolist()
         if self.pack_workers <= 1:
-            pack_infos = get_pack_chunk_infos(
-                inds,
-                dataset_id,
-                self.target,
-                self.flash_attn_block_size,
-                self.pack_len_type,
-                self.pack_extra_buffer_size,
-                num_tokens,
-            )
+            pack_infos = []
+            for i in range(0, len(inds), self.pack_chunk_size):
+                chunk_inds = inds[i : i + self.pack_chunk_size]
+                chunk_pack_infos = get_pack_chunk_infos(
+                    chunk_inds,
+                    dataset_id,
+                    self.pack_max_length,
+                    self.flash_attn_block_size,
+                    self.pack_len_type,
+                    self.pack_extra_buffer_size,
+                    num_tokens,
+                )
+                pack_infos.extend(chunk_pack_infos)
         else:
-            chunk_size = (len(inds) + self.pack_workers - 1) // self.pack_workers
-            chunks_inds = [inds[i : i + chunk_size] for i in range(0, len(inds), chunk_size)]
+            chunks_inds = [inds[i : i + self.pack_chunk_size] for i in range(0, len(inds), self.pack_chunk_size)]
 
             shm = shared_memory.SharedMemory(create=True, size=num_tokens.nbytes)
             shm_array = np.ndarray(num_tokens.shape, dtype=num_tokens.dtype, buffer=shm.buf)
@@ -242,7 +284,7 @@ class ExpandSoftPackDataset(SoftPackDataset):
             process_chunk_with_args = partial(
                 get_pack_chunk_infos,
                 dataset_id=dataset_id,
-                target=self.target,
+                target=self.pack_max_length,
                 flash_attn_block_size=self.flash_attn_block_size,
                 pack_len_type=self.pack_len_type,
                 pack_extra_buffer_size=self.pack_extra_buffer_size,

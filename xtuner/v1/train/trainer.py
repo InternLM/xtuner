@@ -171,6 +171,7 @@ class Trainer:
         self._total_step = total_step
         self._epoch_num = epoch_num
         self._cur_step = 0
+        self._epoch = 1
 
         self._profile_step = profile_step
         self._profile_time = profile_time
@@ -674,6 +675,8 @@ class Trainer:
             try:
                 data = next(data_iter)
             except StopIteration:
+                self._epoch += 1
+                self._dataloader.sampler.set_epoch(self._epoch)
                 data_iter = iter(self._dataloader)
                 data = next(data_iter)
             yield data

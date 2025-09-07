@@ -594,3 +594,9 @@ class JsonlDataset(torch.utils.data.Dataset):
         tok_hash = tokenizer_fn.hash()
 
         return meta.get("tags", {}).get(tag, {}).get(self.path, {}).get(tok_hash)
+
+    # JsonlDataset does not need to save or load state dict for resuming.
+    def load_state_dict(self, state_dict: dict): ...
+
+    def get_state_dict(self):
+        return {}

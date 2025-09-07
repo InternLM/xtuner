@@ -14,7 +14,8 @@ from xtuner.v1.utils import get_logger
 
 from ..config.data import DataloaderConfig, DatasetConfig
 from ..datasets.collator import ColateItem
-from .packing import ExpandSoftPackDataset, SoftPackDataset
+from .jsonl import JsonlDataset
+from .packing import ExpandSoftPackDataset, _LegacySoftPackDataset
 from .sampler import LengthGroupedSampler, ParallelSampler
 
 
@@ -27,8 +28,8 @@ def build_datasets(
     dataset_config: DatasetConfigList,
     tokenizer,
     model_cfg: dict | None = None,
-):
-    datasets = []
+) -> list[JsonlDataset]:
+    datasets: list[JsonlDataset] = []
     assert len(dataset_config) > 0
     for config in dataset_config:
         _dataset_config = config["dataset"]
@@ -60,7 +61,7 @@ def build_datasets(
 
 def build_dataloader(
     dataloader_config: DataloaderConfig,
-    datasets: list,
+    datasets: list[JsonlDataset],
     global_batch_size: int,
     micro_batch_size: int,
     seed: int,
@@ -73,47 +74,52 @@ def build_dataloader(
         num_tokens = sum(dset.num_tokens.sum() for dset in datasets)
         logger.debug(f"[Dataset] {num_tokens} tokens.")
 
+    dataset: ExpandSoftPackDataset | _LegacySoftPackDataset | ConcatDataset
     if dataloader_config.pack_level == "soft":
-        logger.info("[Dataset] Start packing data of SoftPackDataset.")
-        dataset = SoftPackDataset(
-            datasets,
-            target=dataloader_config.pack_max_length,
-            blend=dataloader_config.global_pack,
-            seed=seed,
-        )
-    elif dataloader_config.pack_level == "expand_soft":
         logger.info("[Dataset] Start packing data of ExpandSoftPackDataset.")
         dataset = ExpandSoftPackDataset(
             datasets,
-            target=dataloader_config.pack_max_length,
-            blend=dataloader_config.global_pack,
+            pack_max_length=dataloader_config.pack_max_length,
+            pack_chunk_size=dataloader_config.pack_chunk_size,
+            pack_workers=dataloader_config.pack_workers,
+            global_pack=dataloader_config.global_pack,
             pack_extra_buffer_size=dataloader_config.pack_extra_buffer_size,
             seed=seed,
         )
-    elif dataloader_config.pack_level == "hard":
-        raise NotImplementedError
-    else:
+    elif dataloader_config.pack_level == "none":
         dataset = ConcatDataset(datasets)  # type: ignore
+    elif dataloader_config.pack_level == "__legacy":
+        logger.info("[Dataset] Start packing data of _LegacySoftPackDataset.")
+        dataset = _LegacySoftPackDataset(
+            datasets,
+            pack_max_length=dataloader_config.pack_max_length,
+            global_pack=dataloader_config.global_pack,
+            seed=seed,
+        )
+    else:
+        raise NotImplementedError(f"Unsupported pack level: {dataloader_config.pack_level}")
 
-    if dataloader_config.pack_level != "none" and get_rank() == 0:
+    if dataloader_config.pack_level in ("soft", "__legacy") and get_rank() == 0:
         ori_samples = sum([len(dset) for dset in datasets])
         packed_samples = len(dataset)
         logger.info(f"[Dataset] (Original) {ori_samples} samples.")
         logger.info(f"[Dataset] (Packed) {packed_samples} samples.")
 
     sampler: LengthGroupedSampler | ParallelSampler | RandomSampler | SequentialSampler
-    if dp_mesh is not None:
-        if dataloader_config.group_by_length:
-            assert shuffle, "Currently only shuffling is supported for LengthGroupedSampler."
-            sampler = LengthGroupedSampler(dataset, dp_mesh, global_batch_size, seed=seed)
-        else:
-            sampler = ParallelSampler(dataset, dp_mesh, global_batch_size, shuffle=shuffle)
+    if dataloader_config.group_by_length:
+        assert shuffle, "Currently only shuffling is supported for LengthGroupedSampler."
+        assert dataloader_config.pack_level != "none", "LengthGroupedSampler requires packing."
+        assert isinstance(dataset, (ExpandSoftPackDataset, _LegacySoftPackDataset)), (
+            "Internal Error, LengthGroupedSampler requires ExpandSoftPackDataset or _LegacySoftPackDataset, "
+            f"but got {type(dataset)}"
+        )
+        sampler = LengthGroupedSampler(
+            dataset=dataset, dp_mesh=dp_mesh, global_batch_size=global_batch_size, seed=seed
+        )
     else:
-        if shuffle:
-            sampler = RandomSampler(dataset)
-        else:
-            # TODO: SequentialSampler 可能有点问题，训练莫名其妙卡住
-            sampler = SequentialSampler(dataset)
+        sampler = ParallelSampler(
+            dataset=dataset, dp_mesh=dp_mesh, global_batch_size=global_batch_size, shuffle=shuffle, seed=seed
+        )
 
     ctx = torch.multiprocessing.get_context("fork")
     # Using `fork` here since `torchrun` uses the spawn method by default.

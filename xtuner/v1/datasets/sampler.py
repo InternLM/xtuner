@@ -1,13 +1,21 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import math
 import random
-from typing import Iterator, Optional, Sized
+from typing import Iterator, Optional
 
 import torch
 from mmengine.dist import sync_random_seed
 from torch.distributed.device_mesh import DeviceMesh
 from torch.utils.data import ConcatDataset as TorchConcatDataset
 from torch.utils.data import Sampler
+
+from xtuner.v1.utils import get_logger
+
+from .jsonl import JsonlDataset
+from .packing import _LegacySoftPackDataset
+
+
+logger = get_logger()
 
 
 class ParallelSampler(Sampler):
@@ -41,16 +49,20 @@ class ParallelSampler(Sampler):
 
     def __init__(
         self,
-        dataset: Sized,
-        dp_mesh: DeviceMesh,
+        dataset: TorchConcatDataset[JsonlDataset] | _LegacySoftPackDataset,
         global_batch_size: int,
+        dp_mesh: DeviceMesh | None = None,
         shuffle: bool = True,
         seed: Optional[int] = None,
         round_up: bool = True,
     ) -> None:
         super().__init__()
-        rank = dp_mesh.get_local_rank()
-        world_size = dp_mesh.size()
+        if dp_mesh is not None:
+            rank = dp_mesh.get_local_rank()
+            world_size = dp_mesh.size()
+        else:
+            rank = 0
+            world_size = 1
 
         assert global_batch_size % world_size == 0
         self.global_batch_size = global_batch_size
@@ -88,15 +100,16 @@ class ParallelSampler(Sampler):
             indices = (indices * int(self.total_size / len(indices) + 1))[: self.total_size]
 
         # subsample
-        indices = indices[self.rank : self.total_size : self.world_size]
+        indices = indices[self.step + self.rank : self.total_size : self.world_size]
 
-        return iter(indices[self.step :])
+        yield from iter(indices)
+        self.step = 0
 
     def __len__(self) -> int:
         """The number of samples in this rank."""
         return self.num_samples - self.step
 
-    def set_epoch(self, epoch: int, step=0) -> None:
+    def set_epoch(self, epoch: int) -> None:
         """Sets the epoch for this sampler.
 
         When :attr:`shuffle=True`, this ensures all replicas use a different
@@ -107,18 +120,44 @@ class ParallelSampler(Sampler):
             epoch (int): Epoch number.
         """
         self.epoch = epoch
-        self.step = step
+
+    def load_state_dict(self, state_dict) -> None:
+        """Load the sampler state.
+
+        Args:
+            state_dict (dict): The state of the sampler.
+        """
+        self.epoch = state_dict["epoch"]
+        self.step = state_dict["step"]
+
+        if self.shuffle != state_dict["shuffle"]:
+            raise ValueError(
+                f"The shuffle in the state_dict ({state_dict.get('shuffle')}) "
+                f"is different from the current shuffle ({self.shuffle})."
+            )
+
+    def get_state_dict(self, step: int):
+        self.step = step % self.total_size
+        return {
+            "epoch": self.epoch,
+            "step": self.step,
+            "world_size": self.world_size,
+            "shuffle": self.shuffle,
+            "round_up": self.round_up,
+            "num_samples": self.num_samples,
+            "total_size": self.total_size,
+        }
 
 
 def get_length_grouped_indices(
-    max_lengths, group_batch_size, dp_size, torch_generator: torch.Generator, random_generator: random.Random
+    max_lengths, group_batch_size, group_size, torch_generator: torch.Generator, random_generator: random.Random
 ):
     indices = torch.randperm(len(max_lengths), generator=torch_generator)
     megabatches = [indices[i : i + group_batch_size].tolist() for i in range(0, len(max_lengths), group_batch_size)]
     output = []
     for megabatch in megabatches:
         megabatch = sorted(megabatch, key=lambda i: max_lengths[i], reverse=True)
-        grouped_megabatch = [megabatch[i : i + dp_size] for i in range(0, len(megabatch), dp_size)]
+        grouped_megabatch = [megabatch[i : i + group_size] for i in range(0, len(megabatch), group_size)]
         random_generator.shuffle(grouped_megabatch)
         for group in grouped_megabatch:
             output.extend(group)
@@ -127,19 +166,26 @@ def get_length_grouped_indices(
 
 
 class LengthGroupedSampler(Sampler):
+    GROUP_BATCH_FACTOR = 4
+    MAX_GROUP_BATCH_SIZE = 50
+
     def __init__(
         self,
-        dataset: Sized,
-        dp_mesh: DeviceMesh,
+        dataset: _LegacySoftPackDataset,
         global_batch_size: int,
-        length_attr: str = "longest",
-        mega_batch_mult: Optional[int] = None,
+        dp_mesh: DeviceMesh | None = None,
         seed: Optional[int] = None,
         round_up: bool = True,
     ) -> None:
         super().__init__()
-        rank = dp_mesh.get_local_rank()
-        world_size = dp_mesh.size()
+
+        if dp_mesh is not None:
+            rank = dp_mesh.get_local_rank()
+            world_size = dp_mesh.size()
+        else:
+            rank = 0
+            world_size = 1
+
         self.rank = rank
         self.world_size = world_size
         self.torch_generator = torch.Generator()
@@ -161,26 +207,18 @@ class LengthGroupedSampler(Sampler):
             self.num_samples = math.ceil((len(self.dataset) - rank) / world_size)
             self.total_size = len(self.dataset)
 
-        if mega_batch_mult is None:
-            # Default for mega_batch_mult: 50 or the number to get 4
-            # megabatches, whichever is smaller.
-            mega_batch_mult = min(len(self.dataset) // (global_batch_size * 4), 50)
-            # Just in case, for tiny datasets
-            if mega_batch_mult == 0:
-                mega_batch_mult = 1
+        # Default for mega_batch_mult: 50 or the number to get 4
+        # megabatches, whichever is smaller.
+        mega_batch_mult = min(
+            len(self.dataset) // (global_batch_size * self.GROUP_BATCH_FACTOR), self.MAX_GROUP_BATCH_SIZE
+        )
+        # Just in case, for tiny datasets
+        if mega_batch_mult == 0:
+            mega_batch_mult = 1
         self.group_batch_size = mega_batch_mult * global_batch_size
+        self.group_size = self.world_size
 
-        if isinstance(self.dataset, TorchConcatDataset):
-            max_lengths = []
-            for sub_dataset in self.dataset.datasets:
-                if hasattr(sub_dataset, length_attr):
-                    max_lengths.extend(getattr(sub_dataset, length_attr))
-                else:
-                    raise ValueError
-            self.max_lengths = max_lengths
-        else:
-            if hasattr(self.dataset, length_attr):
-                self.max_lengths = getattr(self.dataset, length_attr)
+        self.max_lengths = self.dataset.longest
         assert isinstance(self.max_lengths, (list, tuple))
 
         self.global_batch_size = global_batch_size
@@ -193,7 +231,7 @@ class LengthGroupedSampler(Sampler):
         indices = get_length_grouped_indices(
             max_lengths=self.max_lengths,
             group_batch_size=self.group_batch_size,
-            dp_size=self.world_size,
+            group_size=self.group_size,
             torch_generator=self.torch_generator,
             random_generator=self.random_generator,
         )
@@ -203,15 +241,16 @@ class LengthGroupedSampler(Sampler):
             indices = (indices * int(self.total_size / len(indices) + 1))[: self.total_size]
         # subsample
         assert len(indices) == self.total_size
-        indices = indices[self.rank : self.total_size : self.world_size]
-        assert len(indices) == self.num_samples
-        return iter(indices[self.step :])
+        indices = indices[self.step + self.rank : self.total_size : self.world_size]
+        assert len(indices) == self.num_samples - self.step // self.world_size
+        yield from iter(indices)
+        self.step = 0
 
     def __len__(self) -> int:
         """The number of samples in this rank."""
-        return self.num_samples - self.step
+        return self.num_samples
 
-    def set_epoch(self, epoch: int, step=0) -> None:
+    def set_epoch(self, epoch: int) -> None:
         """Sets the epoch for this sampler.
 
         When :attr:`shuffle=True`, this ensures all replicas use a different
@@ -222,4 +261,44 @@ class LengthGroupedSampler(Sampler):
             epoch (int): Epoch number.
         """
         self.epoch = epoch
-        self.step = step
+
+    def load_state_dict(self, state_dict: dict) -> None:
+        """Load the sampler state.
+
+        Args:
+            state_dict (dict): The state of the sampler.
+        """
+        self.epoch = state_dict["epoch"]
+        self.step = state_dict["step"]
+
+        if self.group_batch_size != (origin_group_batch_size := state_dict["group_batch_size"]):
+            logger.warning(
+                f"The group_batch_size in the state_dict ({origin_group_batch_size}) "
+                f"is different from the current group_batch_size ({self.group_batch_size})."
+            )
+
+        if self.group_size != (origin_group_size := state_dict["group_size"]):
+            logger.warning(
+                f"The group_size in the state_dict ({state_dict.get('group_size')}) "
+                f"is different from the current group_size ({self.group_size}). "
+                "The balance of grouped sampling may be affected, which will slow down training."
+            )
+            self.group_size = origin_group_size
+
+    def get_state_dict(self, step: int):
+        """Get the sampler state dict.
+
+        Returns:
+            dict: The state of the sampler.
+        """
+        self.step = step % self.total_size
+        return {
+            "epoch": self.epoch,
+            "step": self.step,
+            "world_size": self.world_size,
+            "round_up": self.round_up,
+            "num_samples": self.num_samples,
+            "total_size": self.total_size,
+            "group_batch_size": self.group_batch_size,
+            "group_size": self.group_size,
+        }

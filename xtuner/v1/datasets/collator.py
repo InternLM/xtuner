@@ -26,6 +26,9 @@ def sft_llm_collator(
     ret: list[ColateItem] = []
     for instance in instances:
         # If the token number of the packed sample is larger than the packed_max_lenghth
+        if isinstance(instance, dict):
+            instance = [instance]
+
         if (total_num_tokens := sum(i["num_tokens"] for i in instance)) > pack_max_length:
             logger.warning(
                 f"Found packed sample with {total_num_tokens} tokens, which is larger than the `pack_max_length`"
