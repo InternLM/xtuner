@@ -9,11 +9,10 @@ from mmengine.fileio import list_dir_or_file
 from torch.distributed.device_mesh import DeviceMesh
 from torch.utils.data import ConcatDataset, DataLoader, RandomSampler, SequentialSampler
 
-from xtuner.v1.config import DatasetConfigList
 from xtuner.v1.utils import get_logger
 
-from ..config.data import DataloaderConfig, DatasetConfig
 from ..datasets.collator import ColateItem
+from .config import DataloaderConfig, DatasetConfig, DatasetConfigList
 from .jsonl import JsonlDataset
 from .packing import ExpandSoftPackDataset, _LegacySoftPackDataset
 from .sampler import LengthGroupedSampler, ParallelSampler

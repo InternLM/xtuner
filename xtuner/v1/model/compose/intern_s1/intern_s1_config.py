@@ -2,9 +2,9 @@ from typing import TYPE_CHECKING, Optional
 
 from pydantic import BaseModel, ConfigDict
 
-from xtuner.v1.config.base_model import MoEConfig, TransformerConfig
-from xtuner.v1.config.float8 import Float8Config
+from xtuner.v1.float8 import Float8Config
 from xtuner.v1.model.dense.qwen3 import Qwen3Dense8BConfig
+from xtuner.v1.model.moe.moe import MoEConfig, TransformerConfig
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE235BA22Config
 
 

@@ -5,19 +5,16 @@ from xtuner.v1.engine import EngineConfig
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
 from xtuner.v1.config import (
     AdamWConfig,
-    DataloaderConfig,
-    DatasetConfig,
-    Float8Config,
     FSDPConfig,
     LRConfig,
-    BalancingLossConfig,
-    ZLossConfig,
 )
+from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
+from xtuner.v1.model.moe.moe import BalancingLossConfig, ZLossConfig
 from xtuner.v1.datasets import FTDPTokenizeFnConfig
 import ray
 from xtuner.v1.ray.train import TrainingWorker
 from xtuner.v1.ray.accelerator import AutoAcceleratorWorkers, AcceleratorResourcesConfig
-from xtuner.v1.config.trainer import TrainerConfig
+from xtuner.v1.train import TrainerConfig
 from xtuner.v1.train.trainer import Trainer
 from xtuner.v1.loss.ce_loss import CELossConfig
 import torch

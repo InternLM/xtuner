@@ -9,13 +9,11 @@ import gc
 
 from xtuner.v1.config import (
     AdamWConfig,
-    DataloaderConfig,
-    DatasetConfig,
     FSDPConfig,
     LRConfig,
-    BalancingLossConfig,
-    ZLossConfig
 )
+from xtuner.v1.model.moe.moe import BalancingLossConfig, ZLossConfig
+from xtuner.v1.datasets import DatasetConfig, DataloaderConfig
 from xtuner.v1.datasets import FTDPTokenizeFnConfig
 from xtuner.v1.loss import CELossContext
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config

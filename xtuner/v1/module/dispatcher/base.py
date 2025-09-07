@@ -9,7 +9,6 @@ from typing import (
 import torch
 from typing_extensions import TypedDict, override
 
-from xtuner.v1.config.base_model import MoEConfig
 from xtuner.v1.ops import permute, unpermute
 
 
@@ -81,7 +80,6 @@ class GenericDispatcher(
 ):
     _n_routed_experts: int
     _process_group: torch.distributed.ProcessGroup | None
-    _config: MoEConfig
 
     def __init__(
         self,

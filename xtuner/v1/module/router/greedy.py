@@ -1,17 +1,21 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import os
-from typing import Literal
+from typing import Annotated, Literal
 
 import torch
+from cyclopts import Parameter
+from pydantic import BaseModel
 from torch import nn
 from torch.nn import functional as F
-
-from xtuner.v1.config import BaseRouterConfig
 
 from .protocol import RouterProtocol, RouterResults
 
 
-class GreedyRouterConfig(BaseRouterConfig):
+class GreedyRouterConfig(BaseModel):
+    scoring_func: Annotated[Literal["sigmoid", "softmax"], Parameter(group="router")]
+    router_scaling_factor: Annotated[float, Parameter(group="router")]
+    norm_topk_prob: Annotated[bool, Parameter(group="router")]
+
     def build(
         self,
         n_routed_experts: int,

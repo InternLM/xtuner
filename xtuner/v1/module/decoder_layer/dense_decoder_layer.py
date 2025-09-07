@@ -4,10 +4,10 @@ import torch
 import torch.nn as nn
 
 from transformers.activations import ACT2FN
-from xtuner.v1.config.base_model import BaseAttnConfig, GenerateConfig
-from xtuner.v1.config.float8 import Float8Config
+from xtuner.v1.config import GenerateConfig
 from xtuner.v1.data_proto import SequenceContext
-from xtuner.v1.module import MultiHeadAttention, MultiLatentAttention, RMSNorm, RopeScalingConfig
+from xtuner.v1.float8.config import Float8Config
+from xtuner.v1.module import MHAConfig, MLAConfig, RMSNorm, RopeScalingConfig
 from xtuner.v1.utils import ForwardState
 
 from ..linear.linear import _Linear
@@ -42,7 +42,7 @@ class DenseDecoderLayer(nn.Module):
         mlp_bias: bool = False,
         hidden_act: str,
         rms_norm_eps: float = 1e-6,
-        attention_config: BaseAttnConfig[MultiHeadAttention | MultiLatentAttention],
+        attention_config: MLAConfig | MHAConfig,
         rope_scaling_cfg: RopeScalingConfig | None = None,
         generate_config: GenerateConfig | None = None,
         float8_cfg: Float8Config | None = None,

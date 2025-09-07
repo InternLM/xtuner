@@ -3,7 +3,7 @@
 import hashlib
 import os
 from copy import deepcopy
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -13,7 +13,6 @@ from pydantic import BaseModel, ConfigDict
 
 from transformers import PreTrainedTokenizer
 from xtuner.v1.datasets.data_item import InternS1DataItem
-from xtuner.v1.model import InternS1BaseConfig
 from xtuner.v1.utils import get_logger
 
 from ..utils import CachableTokenizeFunction, tokenizer_xxhash
@@ -56,7 +55,7 @@ class InternS1TokenizeFunction(CachableTokenizeFunction[InternS1DataItem]):
     def __init__(
         self,
         tokenizer: PreTrainedTokenizer,
-        model_cfg: InternS1BaseConfig,
+        model_cfg,  # InternS1BaseConfig
         anno_name: str,
         max_dynamic_patch: int | None = None,
         min_dynamic_patch: int | None = None,
@@ -70,6 +69,9 @@ class InternS1TokenizeFunction(CachableTokenizeFunction[InternS1DataItem]):
         hash: str | None = None,
         only_prompt: bool = False,
     ):
+        from xtuner.v1.model import InternS1BaseConfig
+
+        model_cfg = cast(InternS1BaseConfig, model_cfg)
         self._hash = hash
         self._tokenizer_hash = tokenizer_hash
         self.tcs_loader = tcs_loader
@@ -593,7 +595,9 @@ class InternS1TokenizeFunction(CachableTokenizeFunction[InternS1DataItem]):
 
 class InternS1TokenizeFnConfig(BaseModel):
     model_config = ConfigDict(title="Base dataset config for xtuner", extra="allow")
-    model_cfg: InternS1BaseConfig
+    model_cfg: (
+        BaseModel  # TODO: (huanghaian)  Using model config protocol rather than directly using InternS1BaseConfig
+    )
     max_length: int | None = None
     max_dynamic_patch: int | None = None
     min_dynamic_patch: int | None = None
@@ -605,8 +609,11 @@ class InternS1TokenizeFnConfig(BaseModel):
 
     def build(
         self, tokenizer, tokenizer_hash: str | None = None, anno_name: str = "", **kwargs
-    ) -> "InternS1TokenizeFunction":
+    ) -> InternS1TokenizeFunction:
         from xtuner.v1.datasets import InternS1TokenizeFunction
+        from xtuner.v1.model import InternS1BaseConfig
+
+        assert isinstance(self.model_cfg, InternS1BaseConfig), "model_cfg must be a pydantic BaseModel"
 
         return InternS1TokenizeFunction(
             tokenizer,

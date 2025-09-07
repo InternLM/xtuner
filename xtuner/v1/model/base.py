@@ -5,27 +5,32 @@ from functools import reduce
 from itertools import chain
 from pathlib import Path
 from shutil import copy, copytree
-from typing import Generator, cast
+from typing import Annotated, Generator, Literal, cast
 
 import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
+from cyclopts import Parameter
+from pydantic import BaseModel as PydanticBaseModel
+from pydantic import ConfigDict, computed_field
 from safetensors.torch import save_file
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, Placement, Shard
 from torch.distributed.tensor._utils import compute_local_shape_and_global_offset
-from typing_extensions import TypedDict
+from typing_extensions import NotRequired, TypedDict
 
-from xtuner.v1.config import FSDPConfig
-from xtuner.v1.config.base_model import MoEConfig, TransformerConfig
+from xtuner.v1.config import FSDPConfig, GenerateConfig
 from xtuner.v1.data_proto import SequenceContext
+from xtuner.v1.float8.config import Float8Config
 from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.float8.fsdp_utils import (
     WeightWithDynamicTensorWiseFloat8CastTensor,
     WeightWithDynamicTilewiseFloat8CastTensor,
 )
 from xtuner.v1.loss import BaseLossContext
+from xtuner.v1.module.attention import MHAConfig, MLAConfig
+from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.ops.comm.foreach_allgather import foreach_all_gather
 from xtuner.v1.utils import get_device, get_torch_device_module, profile_time_and_memory
 from xtuner.v1.utils.compile import maybe_compile
@@ -35,6 +40,61 @@ from xtuner.v1.utils.loader import HFCheckpointLoader
 
 DEVICE_MODULE = get_torch_device_module()
 DEVICE = get_device()
+
+
+class TransformerConfig(PydanticBaseModel):
+    model_config = ConfigDict(
+        title="Base model config for xtuner",
+        extra="allow",
+    )
+    vocab_size: Annotated[int, Parameter(group="model")]
+    max_position_embeddings: Annotated[int, Parameter(group="model")]
+    pad_token_id: Annotated[int, Parameter(group="model")]
+    num_hidden_layers: Annotated[int, Parameter(group="model")]
+    hidden_size: Annotated[int, Parameter(group="model")]
+    intermediate_size: Annotated[int, Parameter(group="model")]
+    rms_norm_eps: Annotated[float, Parameter(group="model")]
+    rope_theta: Annotated[float, Parameter(group="model")]  # required by transformers's build rope
+    hidden_act: Annotated[str, Parameter(group="model")]  # key defined in `transformers.activations.ACT2CLS`
+    attention: MLAConfig | MHAConfig
+    mlp_bias: Annotated[bool, Parameter(group="model")] = False
+    tie_word_embeddings: Annotated[bool, Parameter(group="model")] = False
+    model_type: Annotated[str | None, Parameter(group="model")] = None  # TODO: yehaochen maybe should be removed
+    generate_config: GenerateConfig | None = None
+    float8_cfg: Float8Config | None = None
+    return_hidden_states: Annotated[bool, Parameter(group="model")] = False
+    use_sliding_window: Annotated[bool, Parameter(group="model")] = False
+    max_window_layers: Annotated[int | None, Parameter(group="model")] = None
+    rope_scaling_cfg: RopeScalingConfig | None = None
+
+    @computed_field
+    def num_attention_heads(self) -> int:
+        return self.attention.num_attention_heads
+
+    @computed_field
+    def head_dim(self) -> int:
+        return self.attention.head_dim
+
+    @computed_field
+    def layers_type(self) -> list[Literal["full_attention", "sliding_attention"]]:
+        if not self.use_sliding_window:
+            return ["full_attention"] * self.num_hidden_layers
+        else:
+            if self.max_window_layers is None:
+                return ["sliding_attention"] * self.num_hidden_layers
+            return [
+                "sliding_attention" if i >= self.max_window_layers else "full_attention"
+                for i in range(self.num_hidden_layers)
+            ]
+
+    def build(self) -> "BaseModel":
+        raise NotImplementedError
+
+
+class ModelOutputs(TypedDict):
+    hidden_states: NotRequired[list[torch.Tensor]]
+    logits: NotRequired[torch.Tensor]
+    loss: torch.Tensor
 
 
 def _is_float8_available():
@@ -864,7 +924,9 @@ class BaseModel(nn.Module):
         if not hf_keys:
             # fp8 pad
             assert self.config.float8_cfg is not None
-            assert cast(MoEConfig, self.config).ep_size == 1, "Only support fp8 pad for MoE with ep_size == 1"
+            assert self.fsdp_config is not None and self.fsdp_config.ep_size == 1, (
+                "Only support fp8 pad for MoE with ep_size == 1"
+            )
             local_tensor.zero_()  # type: ignore  # padded part must be set to 0
             return missing_keys
 
@@ -983,15 +1045,6 @@ class BaseModel(nn.Module):
         self.to(device, non_blocking=True)
         DEVICE_MODULE.synchronize()
         return
-
-    def _fp8_pad(self, local_tensor: torch.Tensor, padding_start: int):
-        assert self.config.float8_cfg is not None
-        if self.fsdp_mesh is not None:
-            assert isinstance(self.config, MoEConfig)
-            ep_size = self.config.ep_size
-            assert (ep_size is None) or (ep_size == 1), "Only support fp8 pad for MoE with ep_size == 1"
-            assert self.config.float8_cfg is not None
-            local_tensor[padding_start:].copy_(0.0)  # type: ignore  # padded part must be set to 0
 
     def _to_empty_meta(self):
         for module in self.modules():

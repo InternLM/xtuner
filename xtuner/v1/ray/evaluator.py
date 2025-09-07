@@ -8,8 +8,8 @@ from tqdm.auto import tqdm
 from typing_extensions import Annotated
 
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
-from xtuner.v1.config import DatasetConfigList
 from xtuner.v1.datasets import build_datasets
+from xtuner.v1.datasets.config import DatasetConfigList
 from xtuner.v1.datasets.data_item import RLTextDataItem
 from xtuner.v1.ray.environment import BaseEnvironment
 from xtuner.v1.ray.rollout import SampleParams

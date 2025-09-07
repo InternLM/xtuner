@@ -3,8 +3,8 @@ import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, Shard, distribute_tensor
 
+from xtuner.v1.float8.config import ScalingGranularity
 from xtuner.v1.float8.float8_gmm_tile_wise import TileWiseFloat8GroupedLinear
-from xtuner.v1.float8.float8_tensor import ScalingGranularity
 from xtuner.v1.ops import group_gemm
 
 

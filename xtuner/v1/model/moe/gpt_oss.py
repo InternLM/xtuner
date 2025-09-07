@@ -4,10 +4,9 @@ from typing import Literal
 import torch
 from pydantic import computed_field
 
-from xtuner.v1.config import BaseRouterConfig, MoEConfig
-from xtuner.v1.config.loss import BalancingLossConfig
-from xtuner.v1.config.moe_act import MoEActFnConfig
+from xtuner.v1.model.moe.moe import BalancingLossConfig, MoEConfig
 from xtuner.v1.module.attention import MHAConfig
+from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEActFnConfig
 from xtuner.v1.module.router.greedy import GreedyRouterConfig
 
 from .moe import MoE
@@ -154,7 +153,7 @@ class GptOss21BA3P6Config(GptOssConfig):
     num_experts_per_tok: int = 4
     hidden_factor: float = 1.0
     moe_intermediate_size: int = 2880
-    router: BaseRouterConfig = GreedyRouterConfig(
+    router: GreedyRouterConfig = GreedyRouterConfig(
         scoring_func="softmax",
         norm_topk_prob=True,
         router_scaling_factor=1.0,

@@ -2,7 +2,6 @@
 import types
 from pathlib import Path
 from typing import cast
-from typing_extensions import Self
 
 import torch
 import torch.distributed as dist
@@ -20,11 +19,10 @@ from tqdm import tqdm
 from typing_extensions import overload, override
 
 from xtuner.v1.config import FSDPConfig
-from xtuner.v1.config.base_model import ModelOutputs, TransformerConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.loss import CELossContext
-from xtuner.v1.model.base import BaseModel
+from xtuner.v1.model.base import BaseModel, ModelOutputs, TransformerConfig
 from xtuner.v1.model.utils import checkpoint_wrapper
 from xtuner.v1.module import LMHead, RMSNorm, RotaryEmbedding
 from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayer
@@ -135,9 +133,9 @@ class Dense(BaseModel):
     @override
     def from_hf(self, hf_path: str | Path, strict: bool = True) -> tuple:
         loaded_keys, unloaded_keys, missing_keys = super().from_hf(hf_path, strict)
-        # If model is builded on meta device, we need to rebuild rotary embedding since from_hf will not
-        # load the `inv_freq` of RotaryEmbedding which is a inpersisitent buffer. 
-        self.rotary_emb  = self.build_rotary_embedding(self.config)
+        # If model is built on meta device, we need to rebuild rotary embedding since from_hf will not
+        # load the `inv_freq` of RotaryEmbedding which is a inpersisitent buffer.
+        self.rotary_emb = self.build_rotary_embedding(self.config)
         return loaded_keys, unloaded_keys, missing_keys
 
     @override

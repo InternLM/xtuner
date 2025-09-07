@@ -4,7 +4,7 @@ from cyclopts import Group, Parameter
 from pydantic import BaseModel, Field
 from typing_extensions import Annotated
 
-from xtuner.v1.config import EngineConfig
+from xtuner.v1.engine.config import EngineConfig
 from xtuner.v1.ray.accelerator import AcceleratorResourcesConfig
 from xtuner.v1.ray.config.worker import RolloutConfig
 

@@ -1,7 +1,6 @@
 import re
 
-from xtuner.v1.config import BaseRouterConfig, MoEConfig
-from xtuner.v1.config.loss import BalancingLossConfig, ZLossConfig
+from xtuner.v1.model.moe.moe import BalancingLossConfig, MoEConfig, ZLossConfig
 from xtuner.v1.module.attention import MHAConfig
 from xtuner.v1.module.router.greedy import GreedyRouterConfig
 
@@ -65,7 +64,7 @@ class Qwen3MoE30BA3Config(Qwen3MoEConfig):
     first_k_dense_replace: int = 0
     hidden_factor: float = 1.0
     moe_intermediate_size: int = 768
-    router: BaseRouterConfig = GreedyRouterConfig(
+    router: GreedyRouterConfig = GreedyRouterConfig(
         scoring_func="softmax",
         norm_topk_prob=True,
         router_scaling_factor=1.0,
@@ -95,7 +94,7 @@ class Qwen3MoE235BA22Config(Qwen3MoEConfig):
     first_k_dense_replace: int = 0
     hidden_factor: float = 1.0
     moe_intermediate_size: int = 1536
-    router: BaseRouterConfig = GreedyRouterConfig(
+    router: GreedyRouterConfig = GreedyRouterConfig(
         scoring_func="softmax",
         norm_topk_prob=True,
         router_scaling_factor=1.0,

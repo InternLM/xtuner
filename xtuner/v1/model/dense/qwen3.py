@@ -1,6 +1,6 @@
 import re
 
-from xtuner.v1.config import TransformerConfig
+from xtuner.v1.model.base import TransformerConfig
 from xtuner.v1.module.attention import MHAConfig
 
 from .dense import Dense

@@ -13,14 +13,10 @@ from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
 from xtuner.v1.config import (
     AdamWConfig,
-    DataloaderConfig,
-    DatasetConfig,
-    Float8Config,
     FSDPConfig,
     LRConfig,
-    BalancingLossConfig,
-    ZLossConfig,
 )
+from xtuner.v1.model.moe.moe import BalancingLossConfig, ZLossConfig
 # from xtuner.v1.rl.grpo.config import WorkerConfig, LossConfig
 from xtuner.v1.rl.base import WorkerConfig, TrainingController, TrainingWorker as BaseTrainingWorker
 from xtuner.v1.rl.grpo.loss import GRPOLossConfig as LossConfig

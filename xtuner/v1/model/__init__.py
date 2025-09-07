@@ -3,13 +3,14 @@ from typing import cast
 
 from transformers import AutoConfig
 from transformers.models.qwen3_moe import Qwen3MoeConfig
-from xtuner.v1.config.loss import BalancingLossConfig
 from xtuner.v1.module.attention import MHAConfig
 from xtuner.v1.module.router.greedy import GreedyRouterConfig
 
-from .base import BaseModel
+from .base import BaseModel, TransformerConfig
 from .compose.intern_s1 import InternS1BaseConfig, InternS1Config, InternS1MiniConfig
+from .dense.dense import Dense
 from .dense.qwen3 import Qwen3Dense8BConfig, Qwen3DenseConfig
+from .moe.moe import BalancingLossConfig, MoE, MoEModelOutputs, ZLossConfig
 from .moe.qwen3 import Qwen3MoE30BA3Config, Qwen3MoEConfig
 
 
@@ -86,3 +87,24 @@ def get_model_config_from_hf(model_path: Path):
         )
 
     raise ValueError(f"Unsupported model type: {cfg.model_type}")
+
+
+__all__ = [
+    "BaseModel",
+    "TransformerConfig",
+    "Qwen3DenseConfig",
+    "Qwen3Dense8BConfig",
+    "Qwen3MoEConfig",
+    "Qwen3MoE30BA3Config",
+    "InternS1Config",
+    "InternS1MiniConfig",
+    "InternS1BaseConfig",
+    "get_model_config",
+    "get_model_config_from_hf",
+    "MoE",
+    "MoEModelOutputs",
+    "BalancingLossConfig",
+    "ZLossConfig",
+    "GreedyRouterConfig",
+    "Dense",
+]

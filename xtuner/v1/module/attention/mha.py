@@ -1,14 +1,17 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 
-from typing import Literal, cast
+from typing import Annotated, Literal, cast
 
 import torch
+from cyclopts import Parameter
+from pydantic import BaseModel, ConfigDict
 from torch import nn
 from torch.distributed.tensor import DTensor
 
 from transformers.models.llama.modeling_llama import repeat_kv
-from xtuner.v1.config import BaseAttnConfig, Float8Config, GenerateConfig
+from xtuner.v1.config import GenerateConfig
 from xtuner.v1.data_proto import SequenceContext
+from xtuner.v1.float8.config import Float8Config
 from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.ops import attn_impl_mapping, flash_attn_varlen_func, get_apply_rotary_emb
 from xtuner.v1.ops.comm.all_to_all import ulysses_all_to_all
@@ -22,14 +25,19 @@ from .kv_cache import fill_paged_kv_cache
 logger = get_logger()
 
 
-class MHAConfig(BaseAttnConfig["MultiHeadAttention"]):
+class MHAConfig(BaseModel):
+    model_config = ConfigDict(title="Base attention config for xtuner", extra="allow")
+    num_attention_heads: Annotated[int, Parameter(group="attention")]
     num_key_value_heads: int
-    dropout: bool = False
-    # causal: bool = True
-    qkv_bias: bool = False
+    head_dim: Annotated[int, Parameter(group="attention")]
+    dropout: Annotated[bool, Parameter(group="attention")] = False
+    # casual: bool = True
+    qkv_bias: Annotated[bool, Parameter(group="attention")] = False
     qk_norm: bool = False
     rms_norm_eps: float = 1e-06
-    o_bias: bool = False
+    o_bias: Annotated[bool, Parameter(group="attention")] = False
+    sliding_window: Annotated[int | None, Parameter(group="attention")] = -1
+    with_sink: Annotated[bool, Parameter(group="attention")] = False
 
     def build(
         self,

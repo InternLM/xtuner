@@ -9,7 +9,8 @@ import torch.distributed as dist
 import torch.nn as nn
 from torch.testing._internal.common_distributed import DistributedTestBase
 
-from xtuner.v1.config import AdamWConfig, FSDPConfig, DataloaderConfig, LRConfig, DatasetConfig
+from xtuner.v1.config import AdamWConfig, FSDPConfig, LRConfig
+from xtuner.v1.datasets.config import DatasetConfig, DataloaderConfig
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
 from xtuner.v1.train.trainer import Trainer, ResumeConfig
 from xtuner.v1.datasets import FTDPTokenizeFnConfig
