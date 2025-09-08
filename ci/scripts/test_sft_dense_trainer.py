@@ -214,7 +214,7 @@ def plot_comparison_curves(history_data, current_data, title, output_root: Path)
 
 def main():
     args = parse_args()
-    os.environ["DG_CACHE_DIR"] = f"/tmp/.deep_gemm-{os.getenv('RANK', '0')}"
+    os.environ["DG_CACHE_DIR"] = f"/tmp/.adaptive_gemm-{os.getenv('RANK', '0')}"
 
     dense_cfgs = [
         (Qwen3Dense8BConfig(), "tp1"),

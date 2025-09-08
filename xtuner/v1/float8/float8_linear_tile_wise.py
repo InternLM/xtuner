@@ -14,14 +14,14 @@ from xtuner.v1.float8.fsdp_utils import WeightWithDynamicTilewiseFloat8CastTenso
 from xtuner.v1.float8.triton_kernels import per_tile_quant, trans_per_block_quant_gemm, trans_per_tile_quant_gemm
 
 
-DEEPGEMM_INSTALLED = False
+ADAPTIVEGEMM_INSTALLED = False
 
 try:
-    from deep_gemm import gemm_fp8_fp8_bf16_nt
+    from adaptive_gemm import gemm_fp8_fp8_bf16_nt
 
-    DEEPGEMM_INSTALLED = True
+    ADAPTIVEGEMM_INSTALLED = True
 except ImportError:
-    deep_gemm = None
+    adaptive_gemm = None
 
 
 def _get_min_alignment(size: int, alignment_value: int) -> int:
