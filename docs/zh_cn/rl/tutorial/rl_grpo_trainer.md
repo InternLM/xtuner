@@ -44,7 +44,7 @@ dataflow_config = DataFlowConfig(
 
 ### 1.2 ReplayBufferConfig
 
-经验回放池(`Replay Buffer`)就像一个"数据仓库"，它的工作很简单：**收集数据、存储数据、提供数据**。在强化学习中，模型生成的样本会先存到这个"仓库"里，然后训练时再从这里取出数据来训练模型。
+经验回放池（`Replay Buffer`）就像一个"数据仓库"，它的工作很简单：**采样数据、存储数据、按照一定规则提供数据**。在强化学习中，模型生成的样本会先存到这个"仓库"里，然后训练时再从这里取出数据来训练模型。
 
 **对于大多数用户来说，您只需要修改`ReplayBufferConfig`中四个关键参数就能正常使用**：
 - `model_path`：模型路径
@@ -82,7 +82,7 @@ replay_buffer_cfg = ReplayBufferConfig(
 
 `RolloutConfig` 负责配置模型推理环境，它决定了如何使用模型来生成训练所需的样本数据。可以把它理解为"推理引擎的配置文件"。
 
-在本示例中，您只需要指定模型路径即可开始使用。系统会自动处理其他细节：
+在本示例中，您只需要指定模型路径即可开始使用。其他使用默认配置。
 
 ```{tip}
 :class: margin
@@ -264,4 +264,4 @@ trainer.fit()
 XTUNER_USE_LMDEPLOY=1 python train_grpo.py
 ```
 
-恭喜你！现在你已经掌握了通过 Python 代码定制化 `RLTrainer` 的方法，可以更灵活地进行强化学习实验了。
+恭喜你！现在你已经掌握了通过 Python 代码自定义 `RLTrainer` 的方法，可以更灵活地进行强化学习实验了。

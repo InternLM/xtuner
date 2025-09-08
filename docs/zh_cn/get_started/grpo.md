@@ -7,7 +7,7 @@ XTuner 的 RL（强化学习）功能目前为 Beta 版本，RL功能特性持�
 
 
 
-在体验了 SFT 微调后，让我们进一步探索如何使用 XTuner 进行强化学习（RL）训练。我们将以 GRPO（Generative RePolicy Optimization）算法为例，介绍 RL 训练的基本流程。
+在体验了 SFT 微调后，让我们进一步探索如何使用 XTuner 进行强化学习（RL）训练。我们将以 GRPO（Group Relative Policy Optimization）算法为例，介绍 RL 训练的基本流程。
 
 ## 准备模型
 
@@ -31,7 +31,7 @@ huggingface-cli download Qwen/Qwen3-8B --local-dir </path/to/qwen3-8B>
 
 强化学习（RL）的数据集在SFT微调的基础上，需要增加奖励模型（Reward Model）所需的评估信息，如 `ground_truth`（标准答案）。我们以 `gsm8k` 数据集为例，XTuner 提供了脚本将其从 Hugging Face Hub 直接转换为符合要求的格式。
 
-**您也可以直接使用我们提供的测试数据集 `tests/resource/gsm8k_train_example_data.jsonl `**
+**您也可以直接使用我们提供的示例测试数据集 `tests/resource/gsm8k_train_example_data.jsonl `**
 
 ```{code-block} bash 
 :caption: 准备数据集
@@ -107,7 +107,7 @@ rollout_controller for training samples: 100%|██████████| 12
 
 ```{hint}
 想进一步了解 RL 训练的详细配置和自定义流程吗？
-- [使用 Python 代码启动 RL 训练](../rl/tutorial/rl_grpo_trainer.rst)
+- [使用 Python 代码自定义 GRPO 训练](../rl/tutorial/rl_grpo_trainer.rst)
 - [RL Trainer详解](../api/rl_trainer.rst)
 - [RL 训练配置详解](../api/rl_config.rst)
 ```
