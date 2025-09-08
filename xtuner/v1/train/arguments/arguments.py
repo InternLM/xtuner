@@ -11,6 +11,8 @@ from xtuner.v1.config import FSDPConfig
 from xtuner.v1.config.optim import AdamWConfig, LRConfig
 from xtuner.v1.datasets import FTDPTokenizeFnConfig
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig, DatasetConfigList
+from xtuner.v1.datasets.sft_tokenize_fn import OpenaiTokenizeFunctionConfig
+from xtuner.v1.float8.config import Float8Config
 from xtuner.v1.loss.ce_loss import CELossConfig
 from xtuner.v1.model import get_model_config, get_model_config_from_hf
 from xtuner.v1.model.base import TransformerConfig
@@ -41,6 +43,14 @@ class TrainingArguments(BaseModel):
         str | None,
         Parameter(group=model_group, help="model config path or name, choose one of from ['qwen3-moe-30BA3']"),
     ] = None
+    chat_template: Annotated[
+        Literal["internlm2", "qwen3", "gpt-oss", "deepseek-v3"],
+        Parameter(group=model_group, help="chat template name"),
+    ]
+    tokenize_fn: Annotated[
+        Literal["ftdp", "openai"],
+        Parameter(group=model_group, help="tokenize function path or name"),
+    ] = "openai"
     tokenizer_path: Annotated[
         Path | None,
         Parameter(
@@ -83,6 +93,7 @@ class TrainingArguments(BaseModel):
         True
     )
     fsdp_config: Annotated[FSDPConfig | None, Parameter(group=parallel_group, help="FSDP configuration")] = None
+    float8_config: Annotated[Float8Config | None, Parameter(group=parallel_group, help="use float8 training")] = None
 
     def model_post_init(self, _):
         if self.tokenizer_path is None:
@@ -96,9 +107,6 @@ class TrainingArguments(BaseModel):
     def to_trainer_config(self):
         # Load dataset config
         dataset_cfg = self._get_dataset_config()
-        for ds in dataset_cfg:
-            ds["tokenize_fn"].max_length = self.max_length
-
         # Create optimizer config
         optim_cfg = AdamWConfig(lr=self.lr, foreach=False)
 
@@ -108,6 +116,10 @@ class TrainingArguments(BaseModel):
         # Create dataloader config (using defaults for now)
         dataloader_cfg = self.dataloader_cfg or DataloaderConfig()
         model_cfg = self._get_model_config()
+
+        if self.float8_config is not None:
+            model_cfg.float8_cfg = self.float8_config
+
         resume_cfg = None
 
         if self.total_step is not None and self.epoch_num is not None:
@@ -151,15 +163,27 @@ class TrainingArguments(BaseModel):
             if dataset_path.is_file():
                 assert dataset_path.suffix in [".jsonl"], "Dataset file must be a JSONL or JSON file."
                 jsonl_list = [dataset_path]
-            else:
-                assert dataset_path.is_dir(), "Dataset path must be a directory or a JSONL file."
+            elif dataset_path.is_dir():
                 jsonl_list = [dataset_path / f for f in list_dir_or_file(dataset_path, suffix="jsonl", list_dir=False)]
+            else:
+                import glob
+
+                jsonl_list = [Path(f) for f in glob.glob(str(dataset_path))]
+                jsonl_list = [f for f in jsonl_list if f.suffix == ".jsonl"]
 
             ret: DatasetConfigList = []
             for jsonl_file in jsonl_list:
                 if not jsonl_file.exists():
                     raise FileNotFoundError(f"Dataset file {jsonl_file} does not exist.")
-                tokenize = FTDPTokenizeFnConfig()
+
+                if self.tokenize_fn == "openai":
+                    tokenize = OpenaiTokenizeFunctionConfig(
+                        chat_template=self.chat_template, max_length=self.max_length
+                    )
+                elif self.tokenize_fn == "ftdp":
+                    tokenize = FTDPTokenizeFnConfig(chat_template=self.chat_template, max_length=self.max_length)
+                else:
+                    raise ValueError(f"Unsupported tokenize function: {self.tokenize_fn}")
                 dataset = DatasetConfig(anno_path=jsonl_file, cache_dir=self.cache_dir, cache_tag=self.cache_tag)
                 ret.append({"dataset": dataset, "tokenize_fn": tokenize})
             return ret
