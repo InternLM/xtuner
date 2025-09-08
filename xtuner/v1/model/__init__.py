@@ -1,13 +1,12 @@
 from pathlib import Path
-from typing import cast
 
 from transformers import AutoConfig
-from transformers.models.qwen3_moe import Qwen3MoeConfig
 from xtuner.v1.module.attention import MHAConfig
 from xtuner.v1.module.router.greedy import GreedyRouterConfig
 
 from .base import BaseModel, TransformerConfig
 from .compose.intern_s1 import InternS1BaseConfig, InternS1Config, InternS1MiniConfig
+from .compose.internvl import InternVL3P5Dense8BConfig, InternVL3P5MoE30BA3Config, InternVLBaseConfig
 from .dense.dense import Dense
 from .dense.qwen3 import Qwen3Dense8BConfig, Qwen3DenseConfig
 from .moe.gpt_oss import GptOss21BA3P6Config, GptOss117BA5P8Config, GptOssConfig
@@ -22,6 +21,8 @@ model_mapping = {
     "intern-s1-mini": InternS1MiniConfig(),
     "gpt-oss-20b": GptOss21BA3P6Config(),
     "gpt-oss-120b": GptOss117BA5P8Config(),
+    "internvl-3.5-8b-hf": InternVL3P5Dense8BConfig(),
+    "internvl-3.5-30b-a3b-hf": InternVL3P5MoE30BA3Config(),
 }
 
 
@@ -31,14 +32,14 @@ def get_model_config(model_alias: str):
 
 
 def get_model_config_from_hf(model_path: Path):
-    """Convert HuggingFace config to XTuner Qwen3MoEConfig."""
-    cfg = cast(Qwen3MoeConfig, AutoConfig.from_pretrained(model_path))
+    """Convert HuggingFace config to XTuner."""
+    cfg = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
 
     if cfg.model_type == "qwen3_moe":
         return Qwen3MoEConfig(
             vocab_size=cfg.vocab_size,
             max_position_embeddings=cfg.max_position_embeddings,
-            pad_token_id=0,
+            pad_token_id=cfg.eos_token_id,
             num_hidden_layers=cfg.num_hidden_layers,
             max_window_layers=cfg.num_hidden_layers,
             hidden_size=cfg.hidden_size,
@@ -137,6 +138,9 @@ __all__ = [
     "GptOssConfig",
     "GptOss21BA3P6Config",
     "GptOss117BA5P8Config",
+    "InternVLBaseConfig",
+    "InternVL3P5Dense8BConfig",
+    "InternVL3P5MoE30BA3Config",
     "get_model_config",
     "get_model_config_from_hf",
     "MoE",

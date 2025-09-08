@@ -19,3 +19,4 @@ pydantic
 tensorboard
 xxhash
 imageio
+timm

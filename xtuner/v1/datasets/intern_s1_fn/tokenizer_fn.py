@@ -611,9 +611,6 @@ class InternS1TokenizeFnConfig(BaseModel):
         self, tokenizer, tokenizer_hash: str | None = None, anno_name: str = "", **kwargs
     ) -> InternS1TokenizeFunction:
         from xtuner.v1.datasets import InternS1TokenizeFunction
-        from xtuner.v1.model import InternS1BaseConfig
-
-        assert isinstance(self.model_cfg, InternS1BaseConfig), "model_cfg must be a pydantic BaseModel"
 
         return InternS1TokenizeFunction(
             tokenizer,
