@@ -4,8 +4,13 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+import torch
 import torch.distributed as dist
-import gc
+
+
+import torch._dynamo
+torch._dynamo.config.verbose = "1"
+
 
 from xtuner.v1.config import (
     AdamWConfig,
@@ -13,19 +18,18 @@ from xtuner.v1.config import (
     LRConfig,
 )
 from xtuner.v1.model.moe.moe import BalancingLossConfig, ZLossConfig
-from xtuner.v1.datasets import DatasetConfig, DataloaderConfig
-from xtuner.v1.datasets import FTDPTokenizeFnConfig
-from xtuner.v1.loss import CELossContext
-from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
+from xtuner.v1.datasets.config import DatasetConfig, DataloaderConfig
+
+from xtuner.v1.model.moe.deepseek_v3 import DeepSeekV3Config
 from xtuner.v1.train.trainer import Trainer
-from xtuner.v1.utils.compile import maybe_compile
+
+from xtuner.v1.utils.device import get_device
+from xtuner.v1.loss import CELossConfig
+from xtuner.v1.datasets.sft_tokenize_fn import OpenaiTokenizeFunctionConfig
 import argparse
 
 
-gc.disable()
-
-
-QWEN3_MOE_PATH = os.environ["QWEN3_MOE_PATH"]
+DEEPSEEK_V3_PATH = os.environ["DEEPSEEK_V3_PATH"]
 ALPACA_PATH = os.environ["ALPACA_PATH"]
 
 
@@ -218,65 +222,72 @@ def plot_comparison_curves(history_data, current_data, title, output_root: Path)
 
 
 def main():
+    # maybe_compile.clear_compile_targets()
     args = parse_args()
-    os.environ["DG_CACHE_DIR"] = f"/tmp/.adaptive_gemm-{os.getenv('RANK', '0')}"
+    os.environ["DG_CACHE_DIR"] = f"/tmp/.deep_gemm-{os.getenv('RANK', '0')}"
+
+    if get_device() == "cuda":
+        sp_size = 1
+        torch_compile = False
+    elif get_device() == "npu":
+        sp_size = 2
+        torch_compile = False
+    else:
+        raise NotImplementedError
 
     moe_cfgs = [
-        (Qwen3MoE30BA3Config(dispatcher="all2all", ep_size=8, balancing_loss_cfg=BalancingLossConfig(), z_loss_cfg=ZLossConfig()), "ep1"),
-        # (Qwen3MoE30BA3Config(ep_size=8, dispatcher="all2all"), "ep8"),
-        # (
-        #     Qwen3MoE30BA3Config(
-        #         ep_size=1,
-        #         float8_cfg=Float8Config(
-        #             scaling_granularity_gemm=ScalingGranularity.TILEWISE,
-        #             scaling_granularity_grouped_gemm=ScalingGranularity.TILEWISE,
-        #     ),
-        # ), "fp8"),
+        (DeepSeekV3Config(
+            ep_size=8, balancing_loss_cfg=BalancingLossConfig(), z_loss_cfg=ZLossConfig(), 
+            num_hidden_layers=2, first_k_dense_replace=1,
+            n_routed_experts=64, 
+            ), "ep8"),
     ]
     for moe_cfg, name in moe_cfgs:
-        optim_cfg = AdamWConfig(lr=6e-05, foreach=False)
+        optim_cfg = AdamWConfig(lr=6e-05)
         lr_cfg = LRConfig(lr_type="cosine", lr_min=1e-6)
         fsdp_cfg = FSDPConfig(
-            torch_compile=True,
             cpu_offload=False,
             ep_size=moe_cfg.ep_size,
+            torch_compile=torch_compile,
             # hsdp_sharding_size=4,
         )
         dataset_config = [
             {
-                "dataset": DatasetConfig(name="alpaca", anno_path=ALPACA_PATH, sample_ratio=1.0),
-                "tokenize_fn": FTDPTokenizeFnConfig(max_length=4096),
+                "dataset": DatasetConfig(name="alpaca", anno_path=ALPACA_PATH, sample_ratio=100),
+                "tokenize_fn": OpenaiTokenizeFunctionConfig(max_length=4096, chat_template="deepseek-v3"),
+                # "tokenize_fn": FTDPTokenizeFnConfig(max_length=4096),
             },
         ]
 
         dataloader_config = DataloaderConfig(
-            pack_max_length=8192,
+            pack_max_length=4096,
+            num_workers=8,
         )
         work_dir = f"{args.work_dir}-{name}"
-        loss_ctx = CELossContext(loss_class="liger_cross_entropy")
+        loss_cfg = CELossConfig(mode="chunk", chunk_size=1024, ignore_idx=-100)
         trainer = Trainer(
-            load_from=QWEN3_MOE_PATH,
+            # load_from=DEEPSEEK_V3_PATH,
             model_cfg=moe_cfg,
             optim_cfg=optim_cfg,
             fsdp_cfg=fsdp_cfg,
             dataset_cfg=dataset_config,
             dataloader_cfg=dataloader_config,
-            loss_ctx=loss_ctx,
+            sp_size=sp_size,
+            loss_cfg=loss_cfg,
             lr_cfg=lr_cfg,
-            tokenizer_path=QWEN3_MOE_PATH,
-            global_batch_size=32,
-            total_epoch=1,
+            tokenizer_path=DEEPSEEK_V3_PATH,
+            global_batch_size=16,
             work_dir=work_dir,
-            intra_layer_micro_batch=2,
             seed=0,
-            debug=False,
-            profile_memory=False,
-            # profile_step=10,
-            # profile_time=True,
+            total_epoch=10,
+            profile_step=20,
+            profile_memory=True,
+            strict_load=False,
+            intra_layer_micro_batch=2,
         )
         trainer.fit()
         if dist.get_rank() == 0:
-            rank0_log_path = Path(trainer.exp_dir) / "rank0.log"
+            rank0_log_path = Path(work_dir) / "rank0.log"
             (
                 cur_lr,
                 cur_text_tokens,
@@ -286,7 +297,7 @@ def main():
                 cur_tgs,
             ) = extract_data_from_log(rank0_log_path)
             work_dir = Path(work_dir)
-            plot_dir = trainer.exp_dir / "plots"
+            plot_dir = work_dir / "plots"
             plot_dir.mkdir(parents=True, exist_ok=True)
             plot_comparison_curves(lr, cur_lr, "lr", output_root=plot_dir)
             plot_comparison_curves(

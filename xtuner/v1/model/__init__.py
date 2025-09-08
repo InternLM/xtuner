@@ -1,8 +1,9 @@
 from pathlib import Path
 
 from transformers import AutoConfig
-from xtuner.v1.module.attention import MHAConfig
+from xtuner.v1.module.attention import MHAConfig, MLAConfig
 from xtuner.v1.module.router.greedy import GreedyRouterConfig
+from xtuner.v1.module.router.noaux_router import NoAuxRouterConfig
 
 from .base import BaseModel, TransformerConfig
 from .compose.intern_s1 import InternS1BaseConfig, InternS1Config, InternS1MiniConfig
@@ -10,6 +11,7 @@ from .compose.internvl import InternVL3P5Dense8BConfig, InternVL3P5MoE30BA3Confi
 from .dense.dense import Dense
 from .dense.qwen3 import Qwen3Dense8BConfig, Qwen3DenseConfig
 from .moe.gpt_oss import GptOss21BA3P6Config, GptOss117BA5P8Config, GptOssConfig
+from .moe.deepseek_v3 import DeepSeekV3Config
 from .moe.moe import BalancingLossConfig, MoE, MoEModelOutputs, ZLossConfig
 from .moe.qwen3 import Qwen3MoE30BA3Config, Qwen3MoEConfig
 
@@ -118,6 +120,54 @@ def get_model_config_from_hf(model_path: Path):
                 scoring_func="softmax",
                 norm_topk_prob=True,
                 router_scaling_factor=1.0,
+            ))
+    elif cfg.model_type == "deepseek_v3":
+        return DeepSeekV3Config(
+            vocab_size=cfg.vocab_size,
+            max_position_embeddings=cfg.max_position_embeddings,
+            pad_token_id=cfg.eos_token_id,
+            num_hidden_layers=cfg.num_hidden_layers,
+            first_k_dense_replace=cfg.first_k_dense_replace,
+            max_window_layers=cfg.num_hidden_layers,
+            hidden_size=cfg.hidden_size,
+            intermediate_size=cfg.intermediate_size,
+            rms_norm_eps=cfg.rms_norm_eps,
+            rope_theta=cfg.rope_theta,
+            rope_scaling=dict(
+                type=cfg.rope_scaling.get("type", "yarn"),
+                beta_fast=cfg.rope_scaling.get("beta_fast", 32),
+                beta_slow=cfg.rope_scaling.get("beta_slow", 1),
+                factor=cfg.rope_scaling.get("factor", 40.0),
+                mscale=cfg.rope_scaling.get("mscale", 1.0),
+                mscale_all_dim=cfg.rope_scaling.get("mscale_all_dim", 1.0),
+                original_max_position_embeddings=cfg.rope_scaling.get("original_max_position_embeddings", 4096),
+            )
+            if cfg.rope_scaling is not None
+            else None,
+            hidden_act=cfg.hidden_act,
+            attention=MLAConfig(
+                kv_lora_rank=cfg.kv_lora_rank,
+                q_lora_rank=cfg.q_lora_rank,
+                qk_nope_head_dim=cfg.qk_nope_head_dim,
+                qk_rope_head_dim=cfg.qk_rope_head_dim,
+                v_head_dim=cfg.v_head_dim,
+                head_dim=cfg.qk_rope_head_dim,
+                num_attention_heads=cfg.num_attention_heads,
+                qkv_bias=cfg.attention_bias,
+                o_bias=cfg.attention_bias,
+            ),
+            tie_word_embeddings=cfg.tie_word_embeddings,
+            n_routed_experts=cfg.n_routed_experts,
+            n_shared_experts=cfg.n_shared_experts,
+            num_experts_per_tok=cfg.num_experts_per_tok,
+            hidden_factor=1.0,
+            moe_intermediate_size=cfg.moe_intermediate_size,
+            router=NoAuxRouterConfig(
+                n_group=cfg.n_group,
+                topk_group=cfg.topk_group,
+                scoring_func=cfg.scoring_func,
+                norm_topk_prob=cfg.norm_topk_prob,
+                router_scaling_factor=cfg.routed_scaling_factor,
             ),
             balancing_loss_cfg=BalancingLossConfig(),
         )

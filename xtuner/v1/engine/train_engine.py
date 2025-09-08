@@ -228,7 +228,12 @@ class TrainEngine:
             and self.model_cfg.router.router_bias_update_speed > 0
         )
         if moe_need_update_bias:
-            tokens_per_expert_global_for_bias = torch.tensor(0, device=DEVICE)
+            tokens_per_expert_global_for_bias = torch.zeros(
+                self.model_cfg.num_hidden_layers - self.model_cfg.first_k_dense_replace,
+                self.model_cfg.n_routed_experts,
+                dtype=torch.int64,
+                device=DEVICE,
+            )
 
         step_loss = torch.tensor(0.0, device=DEVICE)
         step_llm_loss = torch.tensor(0.0, device=DEVICE)
