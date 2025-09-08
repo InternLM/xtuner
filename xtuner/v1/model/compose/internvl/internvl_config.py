@@ -45,7 +45,7 @@ class InternVLVisionConfig(BaseModel):
     use_mask_token: bool = False
     use_mean_pooling: bool = True
     float8_cfg: Optional["Float8Config"] = None
-    attn_impl: Literal["flash_attention", "flex_attention", "eager_attention"] = "flex_attention"
+    attn_impl: Literal["flash_attention", "flex_attention", "eager_attention"] = "flash_attention"
 
     def model_post_init(self, _):
         if not is_installed("flash-attn") and self.attn_impl == "flash_attention":
