@@ -96,7 +96,7 @@ def k_grouped_gemm_kernel(
 
         a_ptr = (A + group_start * M).to(tl.pointer_type(dtypeA))
         b_ptr = (B + group_start * N).to(tl.pointer_type(dtypeB))
-        c_ptr = (C).to(tl.pointer_type(dtypeC))
+        c_ptr = (C + group * M * N).to(tl.pointer_type(dtypeC))
 
         a_desc = tl.make_tensor_descriptor(
             a_ptr,
@@ -113,7 +113,7 @@ def k_grouped_gemm_kernel(
         )
         c_desc = tl.make_tensor_descriptor(
             c_ptr,
-            shape=[num_groups * M, N],
+            shape=[M, N],
             strides=[N, 1],
             block_shape=[BLOCK_M, BLOCK_N],
         )
@@ -127,7 +127,7 @@ def k_grouped_gemm_kernel(
             offs_k += BLOCK_K
 
         c = accumulator.to(dtypeC)
-        offs_cm = pid_m * BLOCK_M + group * M
+        offs_cm = pid_m * BLOCK_M
         offs_cn = offs_bn
         c_desc.store([offs_cm, offs_cn], c)
 
@@ -163,8 +163,8 @@ def k_grouped_gemm(A: Tensor, B: Tensor, size_per_group: torch.Tensor) -> Tensor
     NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
 
     def grid(META):
-        assert N % META["BLOCK_N"] == 0, "Only support when N is a multiple of BLOCK_N"
-        assert M % META["BLOCK_M"] == 0, "Only support when M is a multiple of BLOCK_M"
+        # assert N % META["BLOCK_N"] == 0, "Only support when N is a multiple of BLOCK_N"
+        # assert M % META["BLOCK_M"] == 0, "Only support when M is a multiple of BLOCK_M"
 
         return (NUM_SMS,)
 
@@ -233,7 +233,7 @@ if __name__ == "__main__":
     batch_sizes_cpu = batch_sizes.cpu()
     K = batch_sizes.sum().item()
 
-    for m, n in ((768 * 2, 2048), (2048, 768), (1536 * 2, 4096), (4096, 1536)):
+    for m, n in ((768 * 2 + 32, 2048 + 32), (768 * 2, 2048), (2048, 768), (1536 * 2, 4096), (4096, 1536)):
         torch.cuda.empty_cache()
         a = torch.randn(K, m, dtype=torch.bfloat16, device="cuda").view(K, -1)  # type: ignore
         b = torch.randn(K, n, dtype=torch.bfloat16, device="cuda").view(K, -1)  # type: ignore

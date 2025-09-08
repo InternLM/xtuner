@@ -294,7 +294,7 @@ def m_grouped_gemm(
 
 
     def grid(META):
-        assert N % META["BLOCK_N"] == 0, "Only support when N is a multiple of BLOCK_N"
+        # assert N % META["BLOCK_N"] == 0, "Only support when N is a multiple of BLOCK_N"
         
         return (NUM_SMS,)
 
@@ -365,7 +365,7 @@ if __name__ == "__main__":
     batch_sizes_cpu = batch_sizes.cpu()
     M = batch_sizes.sum().item()
 
-    for n, k in ((768 * 2, 2048), (2048, 768), (1536 * 2, 4096), (4096, 1536)):
+    for n, k in ((256+32, 256+32), (768 * 2, 2048), (2048, 768), (1536 * 2, 4096), (4096 +32, 1536)):
         torch.cuda.empty_cache()
         a = torch.randn(M, k, dtype=torch.bfloat16, device="cuda").view(-1, k).requires_grad_(True)  # type: ignore
         b = (
