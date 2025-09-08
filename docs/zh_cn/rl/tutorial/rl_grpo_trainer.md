@@ -261,7 +261,7 @@ trainer.fit()
 将以上所有配置组合并保存为 Python 文件（例如 `train_grpo.py`），即可通过以下命令启动训练：
 
 ```bash
-XTUNER_USE_LMDEPLOY=1 python train_grpo.py
+XTUNER_USE_FA3=1 XTUNER_USE_LMDEPLOY=1 python train_grpo.py
 ```
 
 恭喜你！现在你已经掌握了通过 Python 代码自定义 `RLTrainer` 的方法，可以更灵活地进行强化学习实验了。

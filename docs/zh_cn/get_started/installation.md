@@ -37,20 +37,16 @@ pip install git+https://github.com/InternLM/AdaptiveGEMM.git@main
 对于 Hopper 架构的 GPU，可以额外安装 fa3，并通过 `export XTUNER_USE_FA3=1` 启用 fa3
 ```
 
-此外，XTuner 推荐安装 flash-attn，能够显著提升训练速度。可以参考[官方文档](https://github.com/Dao-AILab/flash-attention)进行安装。
+此外，XTuner 推荐安装 flash-attn，RL 推荐安装 flash-attn-3，能够显著提升训练速度。可以参考[官方文档](https://github.com/Dao-AILab/flash-attention)进行安装。
 
 
-
-如果想抢先体验 RL 相关功能，则需要执行下述命令来安装 RL 部分依赖。除此之外，需要安装你选择的推理引擎。以LMDeploy为例，可参考[官网文档](https://github.com/InternLM/lmdeploy/)进行安装，也可以使用下面的命令pip安装。
+如果想抢先体验 RL 相关功能，则需要执行下述命令来安装 RL 部分依赖。除此之外，需要安装你选择的推理引擎。以LMDeploy为例，可参考[官网文档](https://github.com/InternLM/lmdeploy/)进行安装。
 
 ```{code-block} shell
 :caption: 安装 rl 相关依赖
 pip install -r requirements/rl.txt
 # 或者直接安装
 # pip install -e '.[rl]'
-
-# pip 安装 lmdeploy
-pip install lmdeplpy==0.10.0 --no-deps
 ```
 
 ## XTuner 校验
