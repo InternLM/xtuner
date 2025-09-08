@@ -50,11 +50,11 @@ Trainer 也通过配置文件的方式来构建数据集，我们以之前教程
 ```{code-block} python
 :caption: 构建数据配置
 
-from xtuner.v1.config import (
+from xtuner.v1.datasets import (
     DataloaderConfig,
     DatasetConfig,
+    InternS1TokenizeFnConfig
 )
-from xtuner.v1.datasets import InternS1TokenizeFnConfig
 
 sample_max_length = 8192 # 单条样本的最大长度，超过会被截断，并且会有警告输出
 pack_max_length = 16384 # 训练一次 iter 所能包含的最大长度，pack 机制会尽可能将多条样本拼接在一起，减少 padding
@@ -82,7 +82,6 @@ dataset_config = [
 # dataloader 配置
 dataloader_config = DataloaderConfig(pack_max_length=pack_max_length, 
                                      num_workers=8,
-                                     pack_level="expand_soft", # pack 样本有 2 种策略，默认选择更高效的 expand_soft 策略
                                      collator='sft_vllm_collator')
 
 ```
@@ -94,13 +93,10 @@ dataloader_config = DataloaderConfig(pack_max_length=pack_max_length,
 
 ## 选择优化器和学习率调度器：
 
-[TODO](@yehaochen，修改 config 的 import 路径)
-
 ```{code-block} python
 :caption: Optimizer & LR Scheduler
 
 from xtuner.v1.config import LRConfig, AdamWConfig
-
 
 optim_cfg = AdamWConfig(lr=1e-6, foreach=False) # 不同模块的 device mesh 有差别，foreach 必须是 False
 lr_cfg = LRConfig(lr_type="cosine", warmup_ratio=0)
@@ -114,7 +110,7 @@ lr_cfg = LRConfig(lr_type="cosine", warmup_ratio=0)
 ```{code-block} python
 :caption: 构建 Trainer
 
-from xtuner.v1.train.trainer import Trainer
+from xtuner.v1.train import Trainer
 from xtuner.v1.loss import CELossConfig
 
 load_from = "<模型路径>" # 如果是微调模式，必须指定，否则会重头训练
@@ -134,7 +130,6 @@ trainer = TrainerConfig(
     global_batch_size=8, 
     epoch_num=2,
     loss_cfg=CELossConfig(mode="chunk", chunk_size=1024), # 可以显著减少显存占用，推荐总是开启
-    work_dir='work_dirs'
 )
 
 ```
@@ -146,15 +141,14 @@ trainer = TrainerConfig(
 
 ````{toggle}
 ```python
-from xtuner.v1.model.interns1 import InternS1MiniConfig
-from xtuner.v1.config import TrainerConfig
+from xtuner.v1.model import InternS1MiniConfig
+from xtuner.v1.train import TrainerConfig
 from xtuner.v1.config import (
     AdamWConfig,
-    DataloaderConfig,
-    DatasetConfig,
-    LRConfig,
+    LRConfig
 )
-from xtuner.v1.datasets import InternS1TokenizeFnConfig
+
+from xtuner.v1.datasets import InternS1TokenizeFnConfig, DataloaderConfig, DatasetConfig,
 from xtuner.v1.loss import CELossConfig
 
 # model config
@@ -204,8 +198,7 @@ trainer = TrainerConfig(
     tokenizer_path=tokenizer,
     global_batch_size=8,
     epoch_num=2,
-    loss_cfg=CELossConfig(mode="chunk", chunk_size=1024),
-    work_dir='work_dirs'
+    loss_cfg=CELossConfig(mode="chunk", chunk_size=1024)
 )
 trainer.fit()
 ```

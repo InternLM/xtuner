@@ -92,7 +92,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from xtuner.v1.loss.ce_loss import CELossConfig, CELossContextInputItem, CELossContext
-import time
 from mmengine.dist import infer_launcher, init_dist
 import torch.distributed as dist
 

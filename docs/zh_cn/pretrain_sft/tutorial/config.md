@@ -58,7 +58,6 @@ model_cfg = Qwen3Dense8BConfig()
 
 ### 构建数据配置
 
-[TODO](@gaojianfei，使用 xtuner dataset 的配置方式)
 数据集格式参考[文档](../../get_started/sft.md#sft-dataset)
 
 ```{tip}
@@ -78,8 +77,6 @@ dataloader_cfg =
 
 ### 构建优化器和学习率调度器
 
-[TODO](@yehaochen，修改 config 的 import 路径)
-
 ```{code-block} python
 :caption: 优化器 & 学习率调度器配置
 
@@ -94,14 +91,12 @@ lr_cfg = LRConfig(lr_type="cosine", lr_min=1e-6)
 (TrainerConfig)=
 ### 构建 TrainerConfig
 
-[TODO](@yehaochen，修改 config 的 import 路径)
-
 终于要整合所有配置啦！看这里：
 
 ```{code-block} python
 :caption: 构建完整的 TrainerConfig
 
-from xtuner.v1.config import TrainerConfig
+from xtuner.v1.train import TrainerConfig
 
 # 基础路径配置
 load_from = "<模型路径>"  # 微调模式下必须指定，否则会从零开始训练

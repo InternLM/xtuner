@@ -159,3 +159,34 @@ class GptOss21BA3P6Config(GptOssConfig):
         router_scaling_factor=1.0,
     )
     balancing_loss_cfg: BalancingLossConfig | None = BalancingLossConfig()
+
+
+class GptOss117BA5P8Config(GptOssConfig):
+    vocab_size: int = 201088
+    max_position_embeddings: int = 131072
+    pad_token_id: int = 199999
+    num_hidden_layers: int = 36
+    hidden_size: int = 2880
+    intermediate_size: int = 2880
+    rms_norm_eps: float = 1e-5
+    rope_theta: float = 150000
+    hidden_act: str = "silu"
+    attention: MHAConfig = MHAConfig(
+        with_sink=True,
+        num_attention_heads=64,
+        num_key_value_heads=8,
+        head_dim=64,
+        sliding_window=128,
+        qkv_bias=True,
+        o_bias=True,
+        rms_norm_eps=1e-5,
+    )
+    n_routed_experts: int = 128
+    num_experts_per_tok: int = 4
+    moe_intermediate_size: int = 2880
+    router: GreedyRouterConfig = GreedyRouterConfig(
+        scoring_func="softmax",
+        norm_topk_prob=True,
+        router_scaling_factor=1.0,
+    )
+    balancing_loss_cfg: BalancingLossConfig | None = BalancingLossConfig()
