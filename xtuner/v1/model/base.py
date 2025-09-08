@@ -431,7 +431,10 @@ class BaseModel(nn.Module):
         ) -> tuple[list[torch.Tensor], list[str]]:
             # Get fsdp unsharded params
             _tensor_list, _spec_list = list(zip(*fsdp_tensor_list))
-            fsdp_unshard_tensor_list = self._fsdp_foreach_allgather(_tensor_list, _spec_list)  # type: ignore
+            if self.fsdp_mesh is not None:
+                fsdp_unshard_tensor_list = self._fsdp_foreach_allgather(_tensor_list, _spec_list)  # type: ignore
+            else:
+                fsdp_unshard_tensor_list = _tensor_list  # type: ignore
 
             # Split the fused tensor into hf tensors
             hf_tensor_list: list[torch.Tensor] = []
@@ -457,6 +460,8 @@ class BaseModel(nn.Module):
                 )
                 return hf_tensor_list_new, name_list_new
 
+            hf_tensor_list = [t.to(device=device) for t in hf_tensor_list]
+
             return hf_tensor_list, name_list
 
         if bucket_size is None:
@@ -469,19 +474,8 @@ class BaseModel(nn.Module):
             local_tensor = param._local_tensor if isinstance(param, DTensor) else param
             local_tensor = local_tensor.bfloat16()
             if safetensor_size + self._get_tensor_size(param, dtype) > bucket_size:
-                if self.fsdp_mesh is not None:
-                    hf_params, name_list = _get_hf_params(tensor_list, name_list)
-                else:
-                    if dtype == torch.bfloat16:
-                        hf_params = [t for t, _ in tensor_list]
-                    elif dtype == torch.float8_e4m3fn:
-                        hf_params, name_list = self._to_float8(
-                            [t for t, _ in tensor_list], name_list, [t for t, _ in tensor_list], dtype
-                        )
-                    else:
-                        raise NotImplementedError(f"dtype {dtype} is not supported for fused hf param")
                 safetensor_size = 0
-                hf_params = [t.to(device=device) for t in hf_params]
+                hf_params, name_list = _get_hf_params(tensor_list, name_list)
                 yield name_list, hf_params
                 name_list = load_spec.hf_keys.copy()
                 tensor_list = [(local_tensor, load_spec)]
@@ -491,17 +485,7 @@ class BaseModel(nn.Module):
             name_list.extend(load_spec.hf_keys)
 
         if tensor_list:
-            if self.fsdp_mesh is not None:
-                hf_params, name_list = _get_hf_params(tensor_list, name_list)
-            else:
-                hf_params = [
-                    self.param_to_safetensor(safetensor[0], name) for safetensor, name in zip(tensor_list, name_list)
-                ]
-                if dtype == torch.float8_e4m3fn:
-                    hf_params, name_list = self._to_float8(hf_params, name_list, hf_params, dtype)
-                else:
-                    raise NotImplementedError(f"dtype {dtype} is not supported for fused hf param")
-            hf_params = [t.to(device=device) for t in hf_params]
+            hf_params, name_list = _get_hf_params(tensor_list, name_list)
             yield name_list, hf_params
 
     def _get_same_hf_param(

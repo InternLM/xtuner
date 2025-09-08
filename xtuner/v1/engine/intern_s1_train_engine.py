@@ -10,6 +10,7 @@ from xtuner.v1.engine.train_engine import TrainEngine
 from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.model.base import ModelItem
 from xtuner.v1.model.compose.intern_s1 import InternS1BaseConfig, InternS1ForConditionalGeneration
+from xtuner.v1.model.compose.internvl import InternVLBaseConfig, InternVLForConditionalGeneration
 from xtuner.v1.module.router import NoAuxRouterConfig
 from xtuner.v1.utils import get_device, get_logger, get_torch_device_module
 
@@ -20,8 +21,8 @@ DEVICE_MODULE = get_torch_device_module()
 
 
 class InternS1TrainEngine(TrainEngine):
-    model_cfg: InternS1BaseConfig
-    model: InternS1ForConditionalGeneration
+    model_cfg: InternS1BaseConfig | InternVLBaseConfig
+    model: InternS1ForConditionalGeneration | InternVLForConditionalGeneration
     llm_float8_handler: Float8Handler | None
     vision_float8_handler: Float8Handler | None
     projector_float8_handler: Float8Handler | None
@@ -33,9 +34,9 @@ class InternS1TrainEngine(TrainEngine):
     ) -> None:
         super().__init__(*args, **kwargs)
 
-    def build_model(self) -> InternS1ForConditionalGeneration:
+    def build_model(self) -> InternS1ForConditionalGeneration | InternVLForConditionalGeneration:
         with torch.device("meta"):
-            model: InternS1ForConditionalGeneration = self.model_cfg.build()
+            model: InternS1ForConditionalGeneration | InternVLForConditionalGeneration = self.model_cfg.build()
 
         self.llm_float8_handler = None
         self.vision_float8_handler = None
