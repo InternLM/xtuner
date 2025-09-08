@@ -79,19 +79,4 @@
    RL Trainer <api/rl_trainer>
    RL Config <api/rl_config>
    Loss Context <api/loss_ctx>
-
-
-写在前面
-==================================
-1111
-
-
-
-食用指南
-==================================
-1111
-
-
-致谢
-==================================
-本项目 RL（强化学习）部分的设计与部分实现，充分参考和借鉴了业界优秀的开源强化学习框架，包括 verl（https://github.com/volcengine/verl/）、slime（https://github.com/THUDM/slime）、AReaL（https://github.com/inclusionAI/AReaL）等。这些项目在 RL 算法优化、工程实现和社区生态等方面为我们提供了宝贵的经验和灵感。在此，向这些开源项目的开发者和社区表示衷心感谢！
+   
