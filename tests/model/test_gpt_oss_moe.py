@@ -41,11 +41,6 @@ class TestGptOss(DistributedTestBase):
     )
     @prepare
     def test_gpt_oss_run(self, device, dispatcher, ep_size, compile, tol, loss_class):
-        os.environ["XTUNER_GROUP_GEMM"] = 'cutlass'
-        from xtuner.v1.ops import moe
-        from xtuner.v1.module.grouped_linear import moe_group_linear
-        moe_group_linear.group_gemm = lambda *args, **kwargs: moe.get_group_gemm()(*args, **kwargs)
-        
         os.environ["TRITON_CACHE_DIR"] = str(Path(self.temp_dir.name) / "triton_cache")
         self.create_pg(device)
         if not compile:

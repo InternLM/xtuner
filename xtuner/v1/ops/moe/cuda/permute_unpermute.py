@@ -200,3 +200,49 @@ def cuda_token_permute(
 
 def cuda_token_unpermute(input_act, row_id_map, probs=None) -> Tensor:
     return UnpermuteMoE_topK.apply(input_act, row_id_map, probs)  # type: ignore[return-value]
+
+
+def cuda_token_permute_torch(
+    input_act, indices, num_topK: int | None = None, num_out_tokens=0, num_negative_one_in_indices=0
+) -> tuple[Tensor, Tensor]:
+    assert num_topK is None and num_out_tokens == 0 and num_negative_one_in_indices == 0, (
+        f"Unexpected arguments: num_topK={num_topK}, num_out_tokens={num_out_tokens}, num_negative_one_in_indices={num_negative_one_in_indices}"
+    )
+    if indices.dim() == 1:
+        topk = 1
+    else:
+        topk = indices.size(1)
+    flatten_indices = indices.view(-1)
+    sorted_indices = torch.argsort(flatten_indices, stable=True)
+
+    permuted_tokens = input_act.index_select(0, sorted_indices // topk)
+    return permuted_tokens, sorted_indices
+
+
+def cuda_token_unpermute_torch(
+    input_act: torch.Tensor,
+    row_id_map: torch.Tensor,
+    probs: torch.Tensor | None = None,
+) -> Tensor:
+    assert row_id_map.numel() == input_act.size(0)
+    if probs is not None:
+        # Unpermute and merge the tokens with their probs
+        num_unpermuted_tokens = probs.numel()
+        topk = probs.size(1)
+    else:
+        # Unpermute the tokens without merge
+        num_unpermuted_tokens = input_act.size(0)
+        topk = 1
+
+    unpermuted_tokens = torch.zeros(
+        [num_unpermuted_tokens, input_act.shape[-1]],
+        dtype=input_act.dtype,
+        device=input_act.device,
+    )
+    unpermuted_tokens.index_put_((row_id_map,), input_act, accumulate=False)
+    unpermuted_tokens = unpermuted_tokens.reshape(-1, topk, input_act.size(-1))
+    if probs is not None:
+        unpermuted_tokens = unpermuted_tokens * probs.unsqueeze(-1)
+    unpermuted_tokens = unpermuted_tokens.sum(dim=1)
+
+    return unpermuted_tokens

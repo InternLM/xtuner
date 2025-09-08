@@ -20,22 +20,7 @@ def get_group_gemm() -> GroupGemmProtocol:
     if device == "cpu":
         return cpu_group_gemm
     elif device == "cuda":
-        import os
-
-        use_cutlass = (
-            digit_version(torch.__version__) > digit_version("2.6.0")
-            or os.getenv("XTUNER_GROUP_GEMM", "triton") == "cutlass"
-        )
-
-        if use_cutlass:
-            from .cuda import cutlass_import_exception
-
-            if cutlass_import_exception is not None:
-                traceback.print_exception(cutlass_import_exception)
-                raise cutlass_import_exception
-            from .cuda import cutlass_group_gemm as cuda_group_gemm
-        else:
-            from .cuda import triton_group_gemm as cuda_group_gemm
+        from .cuda import triton_group_gemm as cuda_group_gemm
 
         return cuda_group_gemm
 
