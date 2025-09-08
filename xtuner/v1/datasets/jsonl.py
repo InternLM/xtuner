@@ -195,7 +195,7 @@ class JsonlDataset(torch.utils.data.Dataset):
         super().__init__()
 
         self.tokenize_fn = tokenize_fn
-        self.path = anno_path
+        self.path = str(anno_path)
         self.name = name
         self.tokenizer_workers = int(os.environ.get("XTUNER_TOKENIZE_WORKERS", 8))
         self._shared_memory = self._init_shared_memory(anno_path)
