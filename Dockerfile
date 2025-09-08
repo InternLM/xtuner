@@ -67,10 +67,10 @@ RUN mkdir -p $CODESPACE
 WORKDIR ${CODESPACE}
 
 RUN git clone -c https.proxy=$HTTPS_PROXY $(echo ${ADAPTIVE_GEMM_URL} | cut -d '@' -f 1) && \
-    cd ${CODESPACE}/AdaptiveGemm && \
+    cd ${CODESPACE}/AdaptiveGEMM && \
     git checkout $(echo ${ADAPTIVE_GEMM_URL} | cut -d '@' -f 2)
 
-WORKDIR ${CODESPACE}/AdaptiveGemm
+WORKDIR ${CODESPACE}/AdaptiveGEMM
 
 RUN git submodule update --init --recursive --force
 RUN pip wheel -w ${ADAPTIVE_GEMM_DIR} -v --no-deps .
@@ -86,10 +86,10 @@ RUN mkdir -p $CODESPACE
 WORKDIR ${CODESPACE}
 
 RUN git clone -c https.proxy=$HTTPS_PROXY $(echo ${GROUPED_GEMM_URL} | cut -d '@' -f 1) && \
-    cd ${CODESPACE}/grouped_gemm && \
+    cd ${CODESPACE}/GroupedGEMM && \
     git checkout $(echo ${GROUPED_GEMM_URL} | cut -d '@' -f 2)
 
-WORKDIR ${CODESPACE}/grouped_gemm
+WORKDIR ${CODESPACE}/GroupedGEMM
 
 RUN git submodule update --init --recursive --force
 RUN pip wheel -w ${GROUPED_GEMM_DIR} -v --no-deps .
