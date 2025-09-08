@@ -28,8 +28,12 @@ except ImportError as e:
     flash_attn_exception = e
 
 
-# flex_attention_compiled =  torch.compile(torch_flex_attention,dynamic=False)
-flex_attention_compiled = torch_flex_attention
+def get_flex_attention_compiled():
+    torch._dynamo.config.cache_size_limit = 128
+    return torch.compile(torch_flex_attention, dynamic=False)
+
+
+flex_attention_compiled = None
 
 
 # Refer to TorchTune
@@ -47,6 +51,9 @@ def compile_friendly_flex_attention(
     enable_gqa: bool = False,
     scale: float | None = None,
 ) -> torch.Tensor:
+    global flex_attention_compiled
+    if flex_attention_compiled is None:
+        flex_attention_compiled = get_flex_attention_compiled()
     return flex_attention_compiled(  # type: ignore
         q, k, v, block_mask=block_mask, score_mod=score_mod, scale=scale, enable_gqa=enable_gqa
     )
@@ -90,10 +97,7 @@ def _create_windowed_grouped_causal_mask(document_ids, window_size):
 
 
 @lru_cache
-def create_packing_block_causal_mask(
-    seq_lens: torch.Tensor,
-    window_size=(-1, -1),
-) -> BlockMask:
+def create_packing_block_causal_mask(seq_lens: torch.Tensor, window_size=(-1, -1), causal=True) -> BlockMask:
     document_ids = _get_document_ids_from_seq_lens(seq_lens)
     _, max_seq_len = document_ids.shape
 
@@ -101,11 +105,14 @@ def create_packing_block_causal_mask(
         causal_mask = q_idx >= kv_idx
         document_mask = document_ids[b, q_idx] == document_ids[b, kv_idx]
 
-        document_causal_mask = causal_mask & document_mask
+        if causal:
+            document_causal_mask = causal_mask & document_mask
+        else:
+            document_causal_mask = document_mask
 
         if window_size != (-1, -1):
             window_mask = q_idx - kv_idx < window_size[0]
-            causal_mask = document_causal_mask & window_mask
+            document_causal_mask = document_causal_mask & window_mask
         return document_causal_mask
 
     return create_block_causal_mask_flex(mask_mod, None, None, max_seq_len, max_seq_len)
@@ -156,7 +163,7 @@ def eager_attention(
 
 
 def flex_attention(
-    q, k, v, cu_seqlens_q, softmax_scale=None, window_size=(-1, -1), dropout_p=0.0, s_aux=None, **kwargs
+    q, k, v, cu_seqlens_q, softmax_scale=None, window_size=(-1, -1), dropout_p=0.0, s_aux=None, causal=True, **kwargs
 ) -> torch.Tensor:
     # q, k, v: [b, n_head, seq, head_dim]
     assert dropout_p == 0.0, "Dropout is not supported in flex attention"
@@ -171,7 +178,7 @@ def flex_attention(
     else:
         score_mod_fn = score_mod
 
-    mask = create_packing_block_causal_mask(cu_seqlens_q, window_size=window_size)
+    mask = create_packing_block_causal_mask(cu_seqlens_q, window_size=window_size, causal=causal)
     enable_gqa = k.size(1) != q.size(1)
 
     attention_output = compile_friendly_flex_attention(
