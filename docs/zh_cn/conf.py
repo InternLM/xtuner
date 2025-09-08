@@ -95,6 +95,7 @@ html_css_files = ["custom.css"]
 autodoc_mock_imports = [
     "pydantic",
     "deepspeed",
+    "ray",
 ]
 
 

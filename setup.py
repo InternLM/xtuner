@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # Copyright (c) OpenMMLab. All rights reserved.
-from setuptools import find_packages, setup
+from setuptools import find_namespace_packages, setup
 
 
 def readme():
@@ -109,7 +109,7 @@ if __name__ == "__main__":
         author_email="openmmlab@gmail.com",
         keywords="large language model, parameter-efficient fine-tuning",
         url="https://github.com/InternLM/xtuner",
-        packages=find_packages(),
+        packages=find_namespace_packages(),
         include_package_data=True,
         classifiers=[
             "Development Status :: 4 - Beta",
@@ -133,6 +133,7 @@ if __name__ == "__main__":
             + parse_requirements("requirements/deepspeed.txt"),
             "modelscope": parse_requirements("requirements/runtime.txt")
             + parse_requirements("requirements/modelscope.txt"),
+            "rl": parse_requirements("requirements/rl.txt")
         },
         zip_safe=False,
         entry_points={"console_scripts": ["xtuner = xtuner:cli"]},

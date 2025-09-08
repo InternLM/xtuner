@@ -9,7 +9,7 @@ scikit-image
 scipy
 SentencePiece
 tiktoken
-torch>=2.7.0
+torch==2.6.0
 torchvision
 transformers==4.56.0
 cyclopts

@@ -4,20 +4,43 @@
 ## 环境准备
 
 
-```{note}
-:class: margin
-
-满血版 XTuner 会需要源码编译一些依赖包，详情参考[额外依赖安装](额外依赖安装)
-```
-
 确保显卡驱动正确安装即可，例如在 NVIDIA GPU 设备上，`nvidia-smi` 的 Driver Version 需要大于 `550.127.08` 
 
 ## XTuner 安装
 
-```shell
+```{code-block} shell
+:caption: 安装 SFT 和 Pretrain 相关依赖
+
 git clone https://github.com/InternLM/xtuner.git
 cd xtuner
 pip install -e .
+```
+
+不同的任务 xtuner 依赖会有所不同，例如想训练 gpt-oss 模型，就需要强制安装`torch2.8`，并且在此基础上额外安装 `grouped_gemm`
+
+```{code-block} shell
+:caption: 安装 grouped_gemm
+
+pip install git+https://github.com/CyCle1024/grouped_gemm.git@ca903309984a012888f3ef904e029a4cb66e6457
+```
+
+此外，XTuner 推荐安装 flash-attn，能够显著提升训练速度。可以参考[官方文档](https://github.com/Dao-AILab/flash-attention)进行安装。
+
+```{tip}
+:class: margin
+
+对于 Hopper 架构的 GPU，可以额外安装 fa3，并通过 `export XTUNER_USE_FA3=1` 启用 fa3
+```
+
+```
+
+如果想抢先体验 rl 相关功能，则需要执行：
+
+```{code-block} shell
+:caption: 安装 rl 相关依赖
+pip install -r requirements/rl.txt
+# 或者直接安装
+# pip install -e '.[rl]'
 ```
 
 
@@ -26,6 +49,13 @@ pip install -e .
 ### LLM 大模型微调
 
 单卡启动一次简单的 LLM 微调任务，验证安装是否成功：
+
+```{note}
+:class: margin
+
+运行出现问题？不然看看 [常见问题](faq) 
+```
+
 
 ```{code-block} shell
 :caption: dense 模型微调示例
@@ -237,9 +267,14 @@ WARNING: input_ids length 4171 exceeds model_max_length 4096. truncated!
 
 上述日志显示最大仅需 10G 显存即可运行，如果你还想降低显存占用，可以考虑修改 `examples/v1/sft_intern_s1_tiny_config.py` 中的 `llm_cfg` 字典相关参数。
 
+(faq)=
+# 常见问题
 
-(额外依赖安装)=
-## 额外依赖安装
+1. ImportError: libGL.so.1: cannot open shared object file: No such file or directory
 
-TODO
+   解决方法：
 
+   ```bash
+   pip uninstall opencv-python
+   pip install opencv-python-headless
+   ```

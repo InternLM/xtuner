@@ -1,6 +1,7 @@
 import traceback
 
 import torch
+from mmengine import digit_version
 
 from .protocol import (
     GroupGemmProtocol,
@@ -21,7 +22,12 @@ def get_group_gemm() -> GroupGemmProtocol:
     elif device == "cuda":
         import os
 
-        if os.getenv("XTUNER_GROUP_GEMM", "triton") == "cutlass":
+        use_cutlass = (
+            digit_version(torch.__version__) >= digit_version("2.6.0")
+            or os.getenv("XTUNER_GROUP_GEMM", "triton") == "cutlass"
+        )
+
+        if use_cutlass:
             from .cuda import cutlass_import_exception
 
             if cutlass_import_exception is not None:
