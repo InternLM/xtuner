@@ -1,15 +1,19 @@
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Literal, Optional
 
+from mmengine import is_installed
 from pydantic import BaseModel, ConfigDict
 
 from xtuner.v1.float8 import Float8Config
 from xtuner.v1.model.dense.qwen3 import Qwen3Dense8BConfig
 from xtuner.v1.model.moe.moe import MoEConfig, TransformerConfig
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE235BA22Config
+from xtuner.v1.utils import get_logger
 
 
 if TYPE_CHECKING:
     from .modeling_intern_s1 import InternS1ForConditionalGeneration
+
+logger = get_logger()
 
 
 class InternS1VisionConfig(BaseModel):
@@ -41,6 +45,13 @@ class InternS1VisionConfig(BaseModel):
     use_mask_token: bool = False
     use_mean_pooling: bool = True
     float8_cfg: Optional["Float8Config"] = None
+    attn_impl: Literal["flash_attention", "flex_attention", "eager_attention"] = "flash_attention"
+
+    def model_post_init(self, _):
+        if not is_installed("flash-attn") and self.attn_impl == "flash_attention":
+            logger.warning("flash-attn is not installed, using `flex_attention` instead.")
+            self.attn_impl = "flex_attention"
+        return self
 
     def build(self):
         from .modeling_vision import InternS1VisionModel
