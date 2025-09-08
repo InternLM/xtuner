@@ -23,7 +23,7 @@ def get_group_gemm() -> GroupGemmProtocol:
         import os
 
         use_cutlass = (
-            digit_version(torch.__version__) >= digit_version("2.6.0")
+            digit_version(torch.__version__) > digit_version("2.6.0")
             or os.getenv("XTUNER_GROUP_GEMM", "triton") == "cutlass"
         )
 
