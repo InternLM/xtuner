@@ -14,7 +14,6 @@ except:
     InternVLVisionRMSNorm = None
     BaseModelOutput = None
 
-
 try:
     from timm.layers import DropPath
 
@@ -23,6 +22,7 @@ except:
     has_timm = False
 from tqdm import tqdm
 from xtuner.v1.ops import flash_attn_varlen_func
+from xtuner.v1.ops.attn_imp import flex_attention as torch_flex_attention
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_device, get_torch_device_module, init_params
 from xtuner.v1.model import BaseModel
 from xtuner.v1.module import RMSNorm
@@ -79,6 +79,8 @@ class InternS1VisionAttention(nn.Module):
         self.q_norm = RMSNorm(self.embed_dim) if qk_norm else nn.Identity()
         self.k_norm = RMSNorm(self.embed_dim) if qk_norm else nn.Identity()
 
+        self.attn_impl = config.attn_impl
+
     def forward(
             self,
             hidden_states: torch.Tensor
@@ -95,25 +97,39 @@ class InternS1VisionAttention(nn.Module):
         query_states = query_states.reshape(batch_size, seq_len, self.num_heads, self.head_dim).flatten(0, 1)
         key_states = key_states.reshape(batch_size, seq_len, self.num_heads, self.head_dim).flatten(0, 1)
         value_states = value_states.view(batch_size, seq_len, self.num_heads, self.head_dim).flatten(0, 1)
-
         cu_seq_lens = torch.arange(0, (batch_size + 1) * seq_len, step=seq_len,
                                    dtype=torch.int32,
                                    device=hidden_states.device)
-        attn_output: torch.Tensor = cast(
-            torch.Tensor,
-            flash_attn_varlen_func(
-                query_states,
-                key_states,
-                value_states,
-                cu_seqlens_q=cu_seq_lens,
-                cu_seqlens_k=cu_seq_lens,
-                max_seqlen_q=seq_len,
-                max_seqlen_k=seq_len,
-                dropout_p=0.0 if not self.training else self.attention_dropout,
-                causal=False,
-                deterministic=XTUNER_DETERMINISTIC,
-            ),
-        )
+        attn_output: torch.Tensor
+        # TODO: Unify attn impl interface
+        if self.attn_impl == 'flash_attention':
+            attn_output = cast(
+                torch.Tensor,
+                flash_attn_varlen_func(
+                    query_states,
+                    key_states,
+                    value_states,
+                    cu_seqlens_q=cu_seq_lens,
+                    cu_seqlens_k=cu_seq_lens,
+                    max_seqlen_q=seq_len,
+                    max_seqlen_k=seq_len,
+                    dropout_p=0.0 if not self.training else self.attention_dropout,
+                    causal=False,
+                    deterministic=XTUNER_DETERMINISTIC,
+                ),
+            )
+        elif self.attn_impl == 'flex_attention':
+            query_states = query_states[None].transpose(1, 2)
+            key_states = key_states[None].transpose(1, 2)
+            value_states = value_states[None].transpose(1, 2)
+            attn_output = torch_flex_attention(query_states,
+                                               key_states,
+                                               value_states,
+                                               cu_seq_lens,
+                                               softmax_scale=self.scale,
+                                               causal=False)
+        else:
+            raise NotImplementedError
 
         attn_output = attn_output.reshape(batch_size, seq_len, self.embed_dim)
         output = self.projection_layer(attn_output)
@@ -283,10 +299,10 @@ class InternS1VisionModel(BaseModel):
             raise RuntimeError(f"{missing} is not initialized")
 
     def forward(
-            self,
-            pixel_values: torch.Tensor,
-            bool_masked_pos: Optional[torch.BoolTensor] = None,
-            output_hidden_states: Optional[bool] = None,
+        self,
+        pixel_values: torch.Tensor,
+        bool_masked_pos: Optional[torch.BoolTensor] = None,
+        output_hidden_states: Optional[bool] = None,
     ) -> Union[tuple, BaseModelOutput]:
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -307,14 +323,14 @@ class InternS1VisionModel(BaseModel):
         )
 
     def to_hf_key_list(self, key: str) -> list[str]:
-        return [self._hf_prefix+key]
+        return [self._hf_prefix + key]
 
     @override
     def fully_shard(
         self,
         fsdp_config: FSDPConfig,
         float8_handler: Float8Handler | None = None,
-    ):  
+    ):
         self.fsdp_config = fsdp_config
         assert float8_handler is None
 
