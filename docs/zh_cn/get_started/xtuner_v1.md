@@ -6,9 +6,9 @@ Tuner V1 是一个专为超大规模 MoE 模型打造的新一代大模型训练
 
 ## 🚀 Speed Benchmark
 
-```{figure} https://github.com/user-attachments/assets/98519a93-1ce8-49f0-a7ab-d7968c9d67a6
+```{figure} ../_static/image/benchmark.png
 :align: center
-:width: 90%
+:width: 100%
 ```
 
 ### 核心特性
@@ -31,7 +31,7 @@ Tuner V1 是一个专为超大规模 MoE 模型打造的新一代大模型训练
 - **硬件优化：** 在 Ascend A3 NPU 超节点上，训练效率超越 NVIDIA H800
 
 
-```{figure} https://github.com/user-attachments/assets/fa42d587-068d-427b-b88c-25a164b3511c
+```{figure} ../_static/image/xtuner.png
 :align: center
 :width: 90%
 ```
