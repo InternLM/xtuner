@@ -7,5 +7,8 @@ Pretrain & SFT trainer
    :toctree: generated
    :nosignatures:
 
-   TransformerConfig
-   BaseAttnConfig
+   FSDPConfig
+   OptimConfig
+   AdamWConfig
+   LRConfig
+   GenerateConfig

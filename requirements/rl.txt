@@ -1,0 +1,3 @@
+ray[default]
+lmdeploy>0.9.3 --no-deps
+httpx
