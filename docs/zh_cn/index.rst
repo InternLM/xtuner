@@ -83,12 +83,12 @@
 ..    Loss Context <api/loss_ctx>
   
 
-Tuner V1 是一个专为超大规模 MoE 模型打造的新一代大模型训练引擎。与传统 3D 并行训练架构相比，XTuner V1 针对当前学术界主流的 MoE 训练场景进行了深度优化。
+XTuner V1 是一个专为超大规模 MoE 模型打造的新一代大模型训练引擎。与传统 3D 并行训练架构相比，XTuner V1 针对当前学术界主流的 MoE 训练场景进行了深度优化。
 
 🚀 Speed Benchmark
 ==================================
 
-.. figure:: https://private-user-images.githubusercontent.com/67539920/486694623-fa42d587-068d-427b-b88c-25a164b3511c.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NTczMzI3MDIsIm5iZiI6MTc1NzMzMjQwMiwicGF0aCI6Ii82NzUzOTkyMC80ODY2OTQ2MjMtZmE0MmQ1ODctMDY4ZC00MjdiLWI4OGMtMjVhMTY0YjM1MTFjLnBuZz9YLUFtei1BbGdvcml0aG09QVdTNC1ITUFDLVNIQTI1NiZYLUFtei1DcmVkZW50aWFsPUFLSUFWQ09EWUxTQTUzUFFLNFpBJTJGMjAyNTA5MDglMkZ1cy1lYXN0LTElMkZzMyUyRmF3czRfcmVxdWVzdCZYLUFtei1EYXRlPTIwMjUwOTA4VDExNTMyMlomWC1BbXotRXhwaXJlcz0zMDAmWC1BbXotU2lnbmF0dXJlPTVkY2M3OTIzNTg3MzM3ZTE5NjVmOTVkYjUzMzFkNzU4MmRhMGViYjhjY2Y2Y2NmMmZiMzA3YjIyOGM0MGVjYWEmWC1BbXotU2lnbmVkSGVhZGVycz1ob3N0In0.-Vm3n4oLx9wG3Q7B8VmbK0fKYZtDhkJFtYoqeySSKDU
+.. figure:: ../assets/images/benchmark/benchmark.png
    :align: center
    :width: 90%
 
@@ -112,7 +112,7 @@ Tuner V1 是一个专为超大规模 MoE 模型打造的新一代大模型训练
 - **硬件优化：** 在 Ascend A3 NPU 超节点上，训练效率超越 NVIDIA H800
 
 
-.. figure:: https://private-user-images.githubusercontent.com/67539920/486606372-98519a93-1ce8-49f0-a7ab-d7968c9d67a6.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NTczMzI3MDIsIm5iZiI6MTc1NzMzMjQwMiwicGF0aCI6Ii82NzUzOTkyMC80ODY2MDYzNzItOTg1MTlhOTMtMWNlOC00OWYwLWE3YWItZDc5NjhjOWQ2N2E2LnBuZz9YLUFtei1BbGdvcml0aG09QVdTNC1ITUFDLVNIQTI1NiZYLUFtei1DcmVkZW50aWFsPUFLSUFWQ09EWUxTQTUzUFFLNFpBJTJGMjAyNTA5MDglMkZ1cy1lYXN0LTElMkZzMyUyRmF3czRfcmVxdWVzdCZYLUFtei1EYXRlPTIwMjUwOTA4VDExNTMyMlomWC1BbXotRXhwaXJlcz0zMDAmWC1BbXotU2lnbmF0dXJlPTE1NjA0MzM1Mzg0NGMzZDgwMjE0OTljNWViNzcyNzA3YmVjZTU1NjJkZWY4MzdjYTdmZGY2ZjdiMzg4Yzc1MjcmWC1BbXotU2lnbmVkSGVhZGVycz1ob3N0In0.1-ehfwVsnPc7LOnIRaZZfbfIPCfouvJBAoQxJ4vbgdg
+.. figure:: ../assets/images/benchmark/structure.png
    :align: center
    :width: 90%
    :alt: Performance comparison
