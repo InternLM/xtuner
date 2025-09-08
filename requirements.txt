@@ -1,3 +1,2 @@
 -r requirements/runtime.txt
--r requirements/deepspeed.txt
--r requirements/modelscope.txt
+-r requirements/docs.txt

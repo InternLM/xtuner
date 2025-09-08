@@ -69,14 +69,14 @@
 
    legacy_index.rst
 
-.. toctree::
-   :hidden:
-   :maxdepth: 2
-   :caption: API
-
-   Pretrain & SFT Trainer  <api/trainer>
-   Config <api/config>
-   RL Trainer <api/rl_trainer>
-   RL Config <api/rl_config>
-   Loss Context <api/loss_ctx>
+.. .. toctree::
+..    :hidden:
+..    :maxdepth: 2
+..    :caption: API
+..
+..    Pretrain & SFT Trainer  <api/trainer>
+..    Config <api/config>
+..    RL Trainer <api/rl_trainer>
+..    RL Config <api/rl_config>
+..    Loss Context <api/loss_ctx>
    
