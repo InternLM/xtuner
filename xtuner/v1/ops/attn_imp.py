@@ -28,7 +28,12 @@ except ImportError as e:
     flash_attn_exception = e
 
 
-flex_attention_compiled = torch.compile(torch_flex_attention, dynamic=False)
+def get_flex_attention_compiled():
+    torch._dynamo.config.cache_size_limit = 128
+    return torch.compile(torch_flex_attention, dynamic=False)
+
+
+flex_attention_compiled = None
 
 
 # Refer to TorchTune
@@ -46,6 +51,9 @@ def compile_friendly_flex_attention(
     enable_gqa: bool = False,
     scale: float | None = None,
 ) -> torch.Tensor:
+    global flex_attention_compiled
+    if flex_attention_compiled is None:
+        flex_attention_compiled = get_flex_attention_compiled()
     return flex_attention_compiled(  # type: ignore
         q, k, v, block_mask=block_mask, score_mod=score_mod, scale=scale, enable_gqa=enable_gqa
     )
