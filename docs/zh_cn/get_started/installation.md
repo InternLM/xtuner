@@ -16,12 +16,19 @@ cd xtuner
 pip install -e .
 ```
 
-不同的任务 xtuner 依赖会有所不同，例如想训练 gpt-oss 模型，就需要强制安装`torch2.8`，并且在此基础上额外安装 `grouped_gemm`
+不同的任务 xtuner 依赖会有所不同，比如训练 `MoE` 模型建议额外安装 `GroupedGEMM`。
 
 ```{code-block} shell
-:caption: 安装 grouped_gemm
+:caption: 安装 GroupedGEMM
 
-pip install git+https://github.com/CyCle1024/grouped_gemm.git@ca903309984a012888f3ef904e029a4cb66e6457
+pip install git+https://github.com/InternLM/GroupedGEMM.git@main
+```
+
+如果需要训练 `FP8 MoE` 模型，除了安装上述 `GroupedGEMM` 外建议安装 `AdaptiveGEMM`。
+```{code-block} shell
+:caption: 安装 AdaptiveGEMM
+
+pip install git+https://github.com/InternLM/AdaptiveGEMM.git@main
 ```
 
 ```{tip}

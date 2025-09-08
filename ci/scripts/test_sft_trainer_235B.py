@@ -223,7 +223,7 @@ def plot_comparison_curves(history_data, current_data, title, output_root: Path)
 def main():
     # maybe_compile.clear_compile_targets()
     args = parse_args()
-    os.environ["DG_CACHE_DIR"] = f"/tmp/.deep_gemm-{os.getenv('RANK', '0')}"
+    os.environ["DG_CACHE_DIR"] = f"/tmp/.adaptive_gemm-{os.getenv('RANK', '0')}"
 
     if get_device() == "cuda":
         sp_size = 1

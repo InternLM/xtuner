@@ -23,17 +23,17 @@ from xtuner.v1.float8.triton_kernels import (
 # from xtuner.v1.module.grouped_linear.moe_group_linear import GroupedLinear
 
 
-DEEPGEMM_INSTALLED = False
+ADAPTIVEGEMM_INSTALLED = False
 
 try:
-    from deep_gemm import (
+    from adaptive_gemm import (
         k_grouped_gemm_dw_fp8_fp8_bf16_tn_contiguous,
         m_grouped_varlen_gemm_fp8_fp8_bf16_nt_contiguous,
     )
 
-    DEEPGEMM_INSTALLED = True
+    ADAPTIVEGEMM_INSTALLED = True
 except ImportError:
-    deep_gemm = None
+    adaptive_gemm = None
 
 
 # Use torch._dynamo.allow_in_graph to allow the fwd out is a Float8Tensor but the
@@ -223,9 +223,9 @@ class TileWiseFloat8GroupedLinear(torch.nn.Module):
 
         assert moe_bias is False, "TileWiseFloat8GroupedLinear only supports moe_bias=False for now."
 
-        assert DEEPGEMM_INSTALLED, (
-            "Please install deep_gemm:"
-            "1. git clone --recursive git@github.com:sukoncon/DeepGemm.git\n"
+        assert ADAPTIVEGEMM_INSTALLED, (
+            "Please install adaptive_gemm:"
+            "1. git clone --recursive git@github.com:InternLM/AdaptiveGEMM.git\n"
             "2. python setup.py develop"
         )
 
