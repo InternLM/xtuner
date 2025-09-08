@@ -34,9 +34,9 @@ class RotaryEmbedding(nn.Module):
         super().__init__()
         rope_scaling = getattr(config, "rope_scaling_cfg", None)
         if rope_scaling is None:
-            rope_scaling = RopeScalingConfig()
-
-        self.rope_type = rope_scaling.type
+            self.rope_type = "default"
+        else:
+            self.rope_type = rope_scaling["type"]
 
         self.max_seq_len_cached = config.max_position_embeddings
         self.original_max_seq_len = config.max_position_embeddings

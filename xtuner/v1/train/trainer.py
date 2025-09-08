@@ -180,7 +180,7 @@ class Trainer:
         log_dir (Path | str | None): Directory for log files.
         sp_size (int): Sequence parallel size.
         total_step (int | None): Total training steps.
-        epoch_num (int | None): Number of training epochs.
+        total_epoch (int | None): Number of training epochs.
         resume_cfg (ResumeConfig | None): Configuration for resuming training.
         strict_load (bool): Whether to strictly load model weights.
         hf_interval (int | None): Interval for saving Huggingface format checkpoints.
@@ -271,9 +271,9 @@ class Trainer:
         self._hf_max_keep = hf_max_keep
         self._hf_interval = hf_interval
 
-        assert total_epoch is not None or total_step is not None, "`epoch_num` or `total_step` should be set"
+        assert total_epoch is not None or total_step is not None, "`total_epoch` or `total_step` should be set"
         assert total_epoch is None or total_step is None, (
-            f"`epoch_num`: {total_epoch}, `total_step`: {total_step} should not be set at the same time"
+            f"`total_epoch`: {total_epoch}, `total_step`: {total_step} should not be set at the same time"
         )
 
         if tokenizer_path is not None:
@@ -537,7 +537,7 @@ class Trainer:
         """
         if self._total_step is None:
             assert isinstance(self._dataloader, Sized), (
-                f"`epoch_num` should be set for a Mapped dataset, but got {self._dataloader.dataset}"
+                f"`total_epoch` should be set for a Mapped dataset, but got {self._dataloader.dataset}"
             )
             self._total_step = len(self._dataloader) * cast(int, self._total_epoch)
         return self._total_step
@@ -636,6 +636,7 @@ class Trainer:
                 optim_cfg=optim_config,
                 fsdp_cfg=fsdp_config,
                 model_cfg=model_config,
+                intra_layer_micro_batch=intra_layer_micro_batch,
             )
         if model_path is not None and resume_cfg.resume_from is None:
             engine.from_hf(hf_path=model_path, strict=strict)
