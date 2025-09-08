@@ -26,7 +26,7 @@ English | [简体中文](README_zh-CN.md)
 ## 🚀 Speed Benchmark
 
 <div align=center>
-  <img src="https://github.com/user-attachments/assets/98519a93-1ce8-49f0-a7ab-d7968c9d67a6" style="width:80%">
+  <img src="https://github.com/user-attachments/assets/fa42d587-068d-427b-b88c-25a164b3511c" style="width:80%">
 </div>
 
 ## 🎉 News
@@ -57,7 +57,7 @@ XTuner V1 is a next-generation LLM training engine specifically designed for ult
 
 
 <div align=center>
-  <img src="https://github.com/user-attachments/assets/73da28df-386a-48ca-9cf7-10a374c6621c" style="width:90%">
+  <img src="https://github.com/user-attachments/assets/98519a93-1ce8-49f0-a7ab-d7968c9d67a6" style="width:90%">
 </div>
 
 
