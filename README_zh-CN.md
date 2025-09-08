@@ -64,7 +64,7 @@ XTuner V1 是一个专为超大规模 MoE 模型打造的新一代大模型训�
 
 
 <div align=center>
-  <img src="https://github.com/user-attachments/assets/73da28df-386a-48ca-9cf7-10a374c6621c" style="width:90%">
+  <img src="https://github.com/user-attachments/assets/fa42d587-068d-427b-b88c-25a164b3511c" style="width:90%">
 </div>
 
 
