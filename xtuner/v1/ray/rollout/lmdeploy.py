@@ -274,26 +274,6 @@ class LMDeployWorker(RolloutWorker):
 
         lmdeploy_config_kwargs["log_level"] = "CRITICAL"  # disable logging
 
-        # todo(@duanyanhui): remove qwen3_chat_template when lmdeploy support tokenizer
-        # apply_chat_template in PR: https://github.com/InternLM/lmdeploy/pull/3845
-        from lmdeploy.model import ChatTemplateConfig
-
-        qwen3_chat_template = ChatTemplateConfig(
-            model_name="qwen3",
-            system="",
-            eosys="",
-            user="<|im_start|>user\n",
-            eoh="<|im_end|>\n",
-            assistant="<|im_start|>assistant\n",
-            eoa="<|im_end|>",
-            separator="\n",
-            capability="chat",
-            stop_words=["<|im_end|>"],
-        )
-        assert "qwen3" in self.config.model_path.lower(), (
-            "qwen3_chat_template only for qwen3 model, you should provide ChatTemplateConfig for other model"
-        )
-
         return Namespace(
             model_path=self.config.model_path,
             model_name=self.model_name,
@@ -304,7 +284,6 @@ class LMDeployWorker(RolloutWorker):
             api_key=self.api_keys,
             api_keys=self.api_keys,
             ray_runtime_env={"env_vars": env},
-            chat_template_config=qwen3_chat_template,
             **lmdeploy_config_kwargs,
         )
 

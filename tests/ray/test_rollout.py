@@ -18,6 +18,9 @@ from xtuner.v1.datasets.config import (
     DatasetConfig,
 )
 
+# RL默认使用FA3
+os.environ["XTUNER_USE_FA3"] = "1"
+
 TEST_TEXT_MESSAGES=[{"role": "user", "content": "Hello!"}]
 MODEL_PATH = os.environ["ROLLOUT_MODEL_PATH"]
 TRAIN_DATA_PATH = os.environ["ROLLOUT_DATA_PATH"]
