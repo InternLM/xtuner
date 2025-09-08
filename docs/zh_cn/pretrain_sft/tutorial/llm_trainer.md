@@ -36,8 +36,6 @@ Trainer 也通过配置文件的方式来构建数据集，我们以之前教程
 
 数据集格式参考[文档](../../get_started/sft.md#sft-dataset)
 
-[TODO](@gaojianfei，使用 xtuner dataset 的配置方式)
-
 ```{tip}
 :class: margin
 
@@ -55,8 +53,6 @@ dataloader_cfg =
 
 
 ## 选择优化器和学习率调度器：
-
-[TODO](@yehaochen，修改 config 的 import 路径)
 
 ```{code-block} python
 :caption: Optimizer & LR Scheduler
@@ -76,7 +72,7 @@ lr_cfg = LRConfig(lr_type="cosine", lr_min=1e-6)
 ```{code-block} python
 :caption: 构建 Trainer
 
-from xtuner.v1.train.trainer import Trainer
+from xtuner.v1.train import Trainer
 
 
 load_from = "<模型路径>" # 如果是微调模式，必须指定，否则会重头训练
@@ -102,7 +98,7 @@ trainer = Trainer(
 ```python
 from xtuner.v1.model import Qwen3Dense8BConfig
 from xtuner.v1.config import LRConfig, AdamWConfig
-from xtuner.v1.train.trainer import Trainer
+from xtuner.v1.train import Trainer
 
 
 model_cfg = Qwen3Dense8BConfig()

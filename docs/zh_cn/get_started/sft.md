@@ -71,7 +71,7 @@ OOM 怎么办？试试 `--fsdp-config.cpu-offload` 吧！
 ```
 ```{code-block} bash
 :caption: 启动微调训练
-torchrun --nproc-per-node 8  xtuner/v1/train/cli/sft.py  --load-from <模型路径>  --dataset <数据集路径>  --total-step 100 --work-dir <目标工作目录>
+torchrun --nproc-per-node 8  xtuner/v1/train/cli/sft.py  --load-from <模型路径>  --chat_template qwen3 --dataset <数据集路径>  --total-step 100 --work-dir <目标工作目录>
 ```
 
 执行命令后，可以看到以下日志：

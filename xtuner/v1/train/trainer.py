@@ -775,7 +775,7 @@ class Trainer:
         current_exp.cur_step = self.cur_step
         current_exp.cur_epoch = self._cur_epoch
         current_exp.consumed_samples = self._consumed_samples
-        current_exp.consumed_tokens = self._consumed_tokens
+        current_exp.consumed_tokens = int(self._consumed_tokens)
 
         if self.rank == 0:
             with train_state_path.open("w") as f:

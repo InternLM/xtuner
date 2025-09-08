@@ -2,7 +2,7 @@
 
 在开始本教程之前，推荐先前置阅读以下任一文档：
 
-- [使用 Trainer 进行微调](./trainer.md)
+- [使用 Trainer 进行微调](./llm_trainer.md)
 - [配置文件启动训练](./config.md)
 
 ## 数据缓存
@@ -22,7 +22,7 @@
 ```{code-block} python
 :caption: 启用缓存
 
-from xtuner.v1.config import DatasetConfig
+from xtuner.v1.datasets import DatasetConfig
 
 dataset_cfg = DatasetConfig(
     cache_dir='work_dirs/dataset_cache', # 指定缓存目录

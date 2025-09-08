@@ -137,7 +137,7 @@ class UTF8ByteTokenizer:
                 # 其余 >=256 的非特殊 id 直接忽略
         return bytes(bytes_list).decode("utf-8", errors="strict")
 
-    def _convert_tokens_to_ids(self, token: str) -> Union[int, list[int]]:
+    def convert_tokens_to_ids(self, token: str) -> Union[int, list[int]]:
         ids = self.encode(token)
         if len(ids) == 1:
             return ids[0]
