@@ -4,9 +4,13 @@ https://github.com/fanshiqing/grouped_gemm/blob/v1.1.4/grouped_gemm/ops.py
 Support torch compile."""
 
 import torch
-from grouped_gemm import backend
 from torch import Tensor
 
+
+try:
+    from grouped_gemm import backend
+except ImportError:
+    backend = None
 
 # TODO: (yehaochen) maybe replace inherit from `torch.autograd.Function` with `register_autograd`
 
