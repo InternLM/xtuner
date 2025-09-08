@@ -96,6 +96,27 @@ autodoc_mock_imports = [
     "pydantic",
     "deepspeed",
     "ray",
+    "transformers",
+    "torch",
+    "mmengine",
+    "tqdm",
+    "numpy",
+    "cyclopts",
+    "safetensors",
+    "loguru",
+    "datasets",
+    "scikit-image",
+    "scipy"
+    "torchvision",
+    "xxhash",
+    "timm",
+    "imageio",
+    "torchvision",
+    "httpx",
+    "cv2",
+    "addict",
+    "torchvision",
+    "PIL",
 ]
 
 

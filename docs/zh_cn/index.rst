@@ -71,16 +71,16 @@
 
    legacy_index.rst
 
-.. .. toctree::
-..    :hidden:
-..    :maxdepth: 2
-..    :caption: API
-..
-..    Pretrain & SFT Trainer  <api/trainer>
-..    Config <api/config>
-..    RL Trainer <api/rl_trainer>
-..    RL Config <api/rl_config>
-..    Loss Context <api/loss_ctx>
+.. toctree::
+   :hidden:
+   :maxdepth: 2
+   :caption: API
+
+   Pretrain & SFT Trainer  <api/trainer>
+   Config <api/config>
+   RL Trainer <api/rl_trainer>
+   RL Config <api/rl_config>
+   Loss Context <api/loss_ctx>
   
 
 XTuner V1 是一个专为超大规模 MoE 模型打造的新一代大模型训练引擎。与传统 3D 并行训练架构相比，XTuner V1 针对当前学术界主流的 MoE 训练场景进行了深度优化。
