@@ -44,3 +44,21 @@ class Qwen3Dense8BConfig(Qwen3DenseConfig):
         num_attention_heads=32, num_key_value_heads=8, head_dim=128, qk_norm=True, sliding_window=1024
     )
     tie_word_embeddings: bool = False
+
+
+class Qwen3Dense4BConfig(Qwen3DenseConfig):
+    vocab_size: int = 151936
+    max_position_embeddings: int = 262144
+    pad_token_id: int = 151645  # eos_id
+    num_hidden_layers: int = 36
+    max_window_layers: int = 36
+    hidden_size: int = 2560
+    intermediate_size: int = 9728
+    rms_norm_eps: float = 1e-6
+    rope_theta: float = 5000000.0
+    hidden_act: str = "silu"
+
+    attention: MHAConfig = MHAConfig(
+        num_attention_heads=32, num_key_value_heads=8, head_dim=128, qk_norm=True, sliding_window=1024
+    )
+    tie_word_embeddings: bool = True
