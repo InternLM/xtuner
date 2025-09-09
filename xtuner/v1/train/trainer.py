@@ -260,8 +260,9 @@ class Trainer:
         self._profile_memory = profile_memory
         self._load_from = Path(load_from) if isinstance(load_from, str) else load_from
         self._load_from_hf = load_from is not None and is_hf_model_path(load_from)
+        self._can_save_hf = model_cfg.hf_config is not None
 
-        if not self._load_from_hf:
+        if not self._can_save_hf:
             assert hf_interval is None and hf_max_keep is None, (
                 "`hf_interval` and `hf_max_keep` should be None when `load_from` is not a Huggingface model path, "
             )
@@ -356,7 +357,7 @@ class Trainer:
         if debug:
             self._register_debug_hook()
 
-        if self._load_from is not None and is_hf_model_path(self._load_from) and self._hf_interval is None:
+        if self._can_save_hf and self._hf_interval is None:
             self._hf_interval = self.total_step
 
         if self._resume_cfg.resume_from is not None:
@@ -651,7 +652,7 @@ class Trainer:
         self,
         dataloader_config: DataloaderConfig,
         dataset_config: DatasetConfigList,
-        tokenizer: AutoTokenizer,
+        tokenizer: PreTrainedTokenizer,
         dp_mesh: DeviceMesh,
         global_batch_size: int,
         micro_batch_size: int,
@@ -1035,15 +1036,13 @@ class Trainer:
         if self._hf_interval is None:
             return
 
-        assert self._load_from_hf, (
-            "Only support saving to Huggingface format when loading from Huggingface! "
-            "You meet this error means `load_from` of trainer is not a Huggingface model path."
-        )
+        assert self._can_save_hf, "Model does not support saving in Huggingface format."
 
         if self.cur_step % self._hf_interval != 0 and self.cur_step != self.total_step:
             return
 
         save_hf_path = self.exp_dir / f"hf-{self.cur_step}"
+
         self.meta.latest_exp.hf_checkpoint_list.append(str(save_hf_path))
 
         if self._hf_max_keep is not None and len(self.meta.latest_exp.hf_checkpoint_list) > self._hf_max_keep:
@@ -1053,6 +1052,7 @@ class Trainer:
                 if self.rank == 0:
                     rmtree(hf_dir)
 
+        self.tokenizer.save_pretrained(str(save_hf_path))
         self._engine.save_hf(str(save_hf_path))
         meta_path = self.work_dir / self._META_PATH
 
