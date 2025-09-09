@@ -209,25 +209,19 @@ class ChatMessages(BaseMessages):
 
 
 if __name__ == "__main__":
-    messages = [
-        {"role": "developer", "content": "You are a helpful assistant."},  # 注入到 developer
-        {"role": "user", "content": "Explain what MXFP4 quantization is."},
-        {"role": "assistant", "thinking": "xxxxxxxxxx.", "content": "Okay!"},
-        {"role": "user", "content": "很好的呀？"},
-        {"role": "assistant", "thinking": "yyyyyy", "content": "不ok!"},
-    ]
-    data = {"messages": messages}
-    from xtuner.v1.data_proto.templates import CHAT_TEMPLATE_MAP
+    data = {
+        "messages": [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hello!"},
+        ]
+    }
 
     messages = ChatMessages.from_dict(data)
-
-    chat_template = CHAT_TEMPLATE_MAP["gpt-oss"]
-    # tokenized = messages.tokenize(self.tokenizer, self.chat_template)
-    # chat_template = ChatTemplate(
-    #     system="<|im_start|>system\n{system}<|im_end|>\n",
-    #     user="<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n",
-    #     assistant="{assistant}<|im_end|>\n",
-    #     stop_words=["<|im_end|>"],
-    # )
+    chat_template = ChatTemplate(
+        system="<|im_start|>system\n{system}<|im_end|>\n",
+        user="<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n",
+        assistant="{assistant}<|im_end|>\n",
+        stop_words=["<|im_end|>"],
+    )
 
     print(messages.get_prompt(chat_template))
