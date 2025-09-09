@@ -8,8 +8,8 @@ from transformers import PreTrainedTokenizer
 from xtuner.utils import IGNORE_INDEX
 from xtuner.v1.utils import get_logger
 
-from ..templates import ChatTemplate, HybridChatTemplate
-from .base import BaseMessages
+from xtuner.v1.data_proto.templates import ChatTemplate, HybridChatTemplate
+from xtuner.v1.data_proto.messages.base import BaseMessages
 
 
 logger = get_logger()
@@ -39,9 +39,12 @@ class ChatMsg(BaseModel):
     role: Literal["assistant", "user", "system", "developer"]
     content: ContentType
     loss: Optional[bool] = None
+    thinking: Optional[str] = None  # only for assistant
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        if self.role != "assistant":
+            assert self.thinking is None, "Only assistant can have thinking."
         if self.loss is None:
             if self.role == "system":
                 self.loss = False
@@ -82,7 +85,10 @@ class ChatMsg(BaseModel):
         elif self.role == "user":
             prompt = chat_template.decorate_user(text)
         elif self.role == "assistant":
-            prompt = chat_template.decorate_assistant(text)
+            prompt = ""
+            if self.thinking is not None:
+                prompt = chat_template.decorate_thinking(self.thinking)
+            prompt += chat_template.decorate_assistant(text)
         else:
             raise NotImplementedError
 
@@ -120,6 +126,19 @@ class ChatMessages(BaseMessages):
     def get_prompt(self, chat_template: ChatTemplate) -> str:
         prompt = ""
 
+        if chat_template.default_system is not None and self.messages[0].role != "system":
+            self.messages.insert(
+                0, ChatMsg(role="system", content=chat_template.default_system, loss=False)
+            )
+
+        is_last_thinking = True
+        for msg in self.messages[::-1]:
+            if msg.role == "assistant" and msg.thinking is not None:
+                if is_last_thinking:
+                    is_last_thinking = False
+                else:
+                    msg.thinking = None
+
         for msg in self.messages:
             prompt += msg.get_prompt(chat_template)
             if msg.role == "assistant":
@@ -130,6 +149,19 @@ class ChatMessages(BaseMessages):
         input_ids = tokenizer.encode("", add_special_tokens=False)
         labels = [IGNORE_INDEX for _ in input_ids]
         image_urls = []
+
+        if chat_template.default_system is not None and self.messages[0].role != "system":
+            self.messages.insert(
+                0, ChatMsg(role="system", content=chat_template.default_system, loss=False)
+            )
+
+        is_last_thinking = True
+        for msg in self.messages[::-1]:
+            if msg.role == "assistant" and msg.thinking is not None:
+                if is_last_thinking:
+                    is_last_thinking = False
+                else:
+                    msg.thinking = None
 
         for msg in self.messages:
             res = msg.tokenize(tokenizer, chat_template)
@@ -178,19 +210,26 @@ class ChatMessages(BaseMessages):
 
 
 if __name__ == "__main__":
+    messages = [
+        {"role": "developer", "content": "You are a helpful assistant."},  # 注入到 developer
+        {"role": "user", "content": "Explain what MXFP4 quantization is."},
+        {"role": "assistant", "thinking": "xxxxxxxxxx.", "content": "Okay!"},
+        {"role": "user", "content": "很好的呀？"},
+        {"role": "assistant", "thinking": "yyyyyy", "content": "不ok!"},
+    ]
     data = {
-        "messages": [
-            {"role": "user", "content": "hello"},
-            {"role": "assistant", "content": "hello!"},
-        ]
+        "messages": messages
     }
-
+    from xtuner.v1.data_proto.templates import CHAT_TEMPLATE_MAP
     messages = ChatMessages.from_dict(data)
-    chat_template = ChatTemplate(
-        system="<|im_start|>system\n{system}<|im_end|>\n",
-        user="<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n",
-        assistant="{assistant}<|im_end|>\n",
-        stop_words=["<|im_end|>"],
-    )
+
+    chat_template = CHAT_TEMPLATE_MAP["gpt-oss"]
+    # tokenized = messages.tokenize(self.tokenizer, self.chat_template)
+    # chat_template = ChatTemplate(
+    #     system="<|im_start|>system\n{system}<|im_end|>\n",
+    #     user="<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n",
+    #     assistant="{assistant}<|im_end|>\n",
+    #     stop_words=["<|im_end|>"],
+    # )
 
     print(messages.get_prompt(chat_template))

@@ -16,6 +16,8 @@ class ChatTemplate(BaseModel):
     assistant: str  # Assistant message format
     stop_words: List[str]  # List of stop words
     sep: str = "\n"
+    thinking: str | None = None  # Thinking message format, not role
+    default_system: str | None = None
 
     def decorate_system(self, text: str) -> str:
         """Decorate text with the `system` template."""
@@ -24,6 +26,12 @@ class ChatTemplate(BaseModel):
     def decorate_assistant(self, text: str) -> str:
         """Decorate text with the `assistant` template."""
         return self.assistant.format(assistant=text)
+
+    def decorate_thinking(self, text: str) -> str:
+        """Decorate text with the `thinking` template."""
+        if self.thinking is None:
+            raise ValueError("thinking template is not defined.")
+        return self.thinking.format(assistant=text)
 
     def decorate_user(self, text: str) -> str:
         """Decorate text with the `user` template."""
