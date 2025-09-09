@@ -5,11 +5,10 @@ export XTUNER_COMMIT=$(git rev-parse HEAD)
 export XTUNER_URL=https://github.com/InternLM/xtuner@${XTUNER_COMMIT}
 export FLASH_ATTN_URL=https://github.com/Dao-AILab/flash-attention@060c9188beec3a8b62b33a3bfa6d5d2d44975fab
 export ADAPTIVE_GEMM_URL=https://github.com/InternLM/AdaptiveGEMM@f0314fa6b6c54da0aa98b3718025ab8e860fdff4
-export GROUPED_GEMM_URL=https://github.com/InternLM/GroupedGEMM.git@3ae328844bb13679ef2ae4f704a8eb615cca7571
-export TORCH_VERSION=${TORCH_VERSION:-"2.6.0"}
-# export LMDEPLOY_VERSION="0.10.0"
-export LMDEPLOY_VERSION=""
-export LMDEPLOY_URL=https://github.com/InternLM/lmdeploy@d8622b946f712fa5eaa583df98b0197964528b04
+export GROUPED_GEMM_URL=https://github.com/InternLM/GroupedGEMM@3ae328844bb13679ef2ae4f704a8eb615cca7571
+export TORCH_VERSION=${TORCH_VERSION:-"2.8.0"}
+export LMDEPLOY_VERSION="0.10.0"
+export LMDEPLOY_URL=https://github.com/InternLM/lmdeploy@11b9726de4cef1fca132c47a4bb98f4003c7ae27
 export PPA_SOURCE="https://mirrors.aliyun.com"
 
 image_name=${IMAGE_NAME:-"xtuner"}
