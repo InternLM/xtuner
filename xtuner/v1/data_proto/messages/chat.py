@@ -89,7 +89,7 @@ class ChatMsg(BaseModel):
             if self.thinking is not None:
                 prompt = chat_template.decorate_thinking(self.thinking)
 
-            if chat_template.loss_assistant_format_mapping is not None:
+            if chat_template.loss_assistant_format_mapping is not None and self.loss:
                 old_prompt = chat_template.decorate_assistant(text)
                 for k, v in chat_template.loss_assistant_format_mapping.items():
                     old_prompt = old_prompt.replace(k, v)
@@ -121,6 +121,23 @@ class ChatMsg(BaseModel):
         }
 
 
+def process_message(messages:List[ChatMsg], chat_template:ChatTemplate):
+    if chat_template.default_system is not None and messages[0].role != "system":
+        messages.insert(
+            0, ChatMsg(role="system", content=chat_template.default_system, loss=False)
+        )
+
+    # Only look at the last round, if there is thinking, keep it, otherwise remove it all
+    for msg in messages[:-1]:
+        msg.thinking = None
+
+    # only compute loss on the last assistant response when only_last_assistant_loss is True
+    last_msg = messages[-1]
+    if last_msg.role == 'assistant' and chat_template.only_last_assistant_loss:
+        for msg in messages[:-1]:
+            if msg.role == 'assistant':
+                msg.loss = False
+
 class ChatMessages(BaseMessages):
     messages: List[ChatMsg]
 
@@ -131,21 +148,7 @@ class ChatMessages(BaseMessages):
         return self.messages.pop()
 
     def get_prompt(self, chat_template: ChatTemplate) -> str:
-        if chat_template.default_system is not None and self.messages[0].role != "system":
-            self.messages.insert(
-                0, ChatMsg(role="system", content=chat_template.default_system, loss=False)
-            )
-
-        # Only look at the last round, if there is thinking, keep it, otherwise remove it all
-        for msg in self.messages[:-1]:
-            msg.thinking = None
-
-        # only compute loss on the last assistant response when only_last_assistant_loss is True
-        last_msg = self.messages[-1]
-        if last_msg.role == 'assistant' and chat_template.only_last_assistant_loss:
-            for msg in self.messages[:-1]:
-                if msg.role == 'assistant':
-                    msg.loss = False
+        process_message(self.messages, chat_template)
 
         prompt = ""
         for msg in self.messages:
@@ -159,14 +162,7 @@ class ChatMessages(BaseMessages):
         labels = [IGNORE_INDEX for _ in input_ids]
         image_urls = []
 
-        if chat_template.default_system is not None and self.messages[0].role != "system":
-            self.messages.insert(
-                0, ChatMsg(role="system", content=chat_template.default_system, loss=False)
-            )
-
-        # Only look at the last round, if there is thinking, keep it, otherwise remove it all
-        for msg in self.messages[:-1]:
-            msg.thinking = None
+        process_message(self.messages, chat_template)
 
         for msg in self.messages:
             res = msg.tokenize(tokenizer, chat_template)

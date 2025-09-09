@@ -36,7 +36,7 @@ CHAT_TEMPLATE_MAP = {
         default_system=f'You are ChatGPT, a large language model trained by OpenAI.\nKnowledge cutoff: 2024-06\nCurrent date: {current_date}\n\nReasoning: medium\n\n# Valid channels: analysis, commentary, final. Channel must be included for every message.',
         user="<|start|>user<|message|>{user}<|end|><|start|>assistant",
         assistant="<|channel|>final<|message|>{assistant}<|end|>",
-        thinking="<|channel|>analysis<|message|>{thinking}<|end|>",
+        thinking="<|channel|>analysis<|message|>{thinking}<|end|><|start|>assistant",
         stop_words=["<|return|>"],
         sep="",
         # only compute loss on the last assistant response ignoring the multiple rounds of assistant
