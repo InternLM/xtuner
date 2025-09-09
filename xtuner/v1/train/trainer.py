@@ -1146,12 +1146,9 @@ class Trainer:
             dataloader_cfg.pad_token_id = pad_token_id
 
     def _resolve_resume_cfg(self, resume_cfg: ResumeConfig):
-        if resume_cfg.resume_from is None and resume_cfg.auto_resume:
-            resume_latest_checkpoint = self.meta.latest_exp.latest_checkpoint
-            if resume_latest_checkpoint is None:
-                return resume_cfg
-            else:
-                resume_cfg.resume_from = Path(resume_latest_checkpoint)
+        latest_checkpoint = self.meta.latest_exp.latest_checkpoint
+        if latest_checkpoint is not None and resume_cfg.auto_resume:
+            resume_cfg.resume_from = Path(latest_checkpoint)
         return resume_cfg
 
     def _resume(self):
