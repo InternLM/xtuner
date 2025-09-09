@@ -37,8 +37,13 @@ CHAT_TEMPLATE_MAP = {
         user="<|start|>user<|message|>{user}<|end|><|start|>assistant",
         assistant="<|channel|>final<|message|>{assistant}<|end|>",
         thinking="<|channel|>analysis<|message|>{thinking}<|end|>",
-        stop_words=["<|end|>", "<|return|>"],
+        stop_words=["<|return|>"],
         sep="",
+        # only compute loss on the last assistant response ignoring the multiple rounds of assistant
+        only_last_assistant_loss=True,
+        # if assistant calculates loss, use "<|channel|>final<|message|>{assistant}<|end|>"
+        # else "<|channel|>final<|message|>{assistant}<|return|>"
+        loss_assistant_format_mapping={'<|end|>': "<|return|>"}
     ),
     "deepseek-v3": HybridChatTemplate(
         system="<｜begin▁of▁sentence｜>{system}",

@@ -19,6 +19,10 @@ class HybridChatTemplate(BaseModel):
     thinking: str | None = None  # Thinking message format, not role
     default_system: Optional[str] = None
 
+    # only compute loss on the last assistant response ignoring the multiple rounds of assistant
+    only_last_assistant_loss: bool = False  # gpt_oss is True
+    loss_assistant_format_mapping: Dict[str, str] = {}  # gpt_oss is {'<|end|>': '<|return|>'}
+
     # Multimodal Chat
     # Predefined token and index for images
     image_token: str = "<image>"

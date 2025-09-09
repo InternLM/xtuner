@@ -1,5 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-from typing import List
+from typing import List, Dict
 
 from pydantic import BaseModel, field_validator
 
@@ -18,6 +18,10 @@ class ChatTemplate(BaseModel):
     sep: str = "\n"
     thinking: str | None = None  # Thinking message format, not role
     default_system: str | None = None
+
+    # only compute loss on the last assistant response ignoring the multiple rounds of assistant
+    only_last_assistant_loss: bool = False  # gpt_oss is True
+    loss_assistant_format_mapping: Dict[str, str] | None = None  # gpt_oss is {'<|end|>': '<|return|>'}
 
     def decorate_system(self, text: str) -> str:
         """Decorate text with the `system` template."""

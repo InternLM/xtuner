@@ -80,7 +80,6 @@ class TestChatTemplate(TestCase):
                 {"role": "assistant", "content": "Hi! How can I help you today?"},
                 {"role": "user", "content": "Can you tell me a joke?"},
                 {"role": "assistant", "content": "Sure!"},
-                {"role": "user", "content": "Please!"},
             ]
         }
         messages_thinking = {
