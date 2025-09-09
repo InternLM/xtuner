@@ -19,7 +19,7 @@ OpenAI 开源的 [GPT-OSS](https://huggingface.co/openai/gpt-oss-20b) 模型内�
 
 如果你的数据集中存在推理数据即 assistant 字段中还包括了 thinking 字段，如下所示：
 
-```python
+```{code-block} python
 messages = [
       {"role": "user", "content": "Hello!"},
       {"role": "assistant", "content": "Hi! How can I help you today?"},
@@ -32,7 +32,7 @@ messages = [
 
 则在训练时候会把除了最后一个 thinking 同时为 assistant 的 content 外，所有的 thinking 字段都去掉，变成如下形式：
 
-```python
+```{code-block} python
 messages = [
       {"role": "user", "content": "Hello!"},
       {"role": "assistant", "content": "Hi! How can I help you today?"},
