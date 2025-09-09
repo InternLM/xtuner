@@ -9,9 +9,9 @@ from .base import BaseModel, TransformerConfig
 from .compose.intern_s1 import InternS1BaseConfig, InternS1Config, InternS1MiniConfig
 from .compose.internvl import InternVL3P5Dense8BConfig, InternVL3P5MoE30BA3Config, InternVLBaseConfig
 from .dense.dense import Dense
-from .dense.qwen3 import Qwen3Dense8BConfig, Qwen3Dense4BConfig, Qwen3DenseConfig
-from .moe.gpt_oss import GptOss21BA3P6Config, GptOss117BA5P8Config, GptOssConfig
+from .dense.qwen3 import Qwen3Dense4BConfig, Qwen3Dense8BConfig, Qwen3DenseConfig
 from .moe.deepseek_v3 import DeepSeekV3Config
+from .moe.gpt_oss import GptOss21BA3P6Config, GptOss117BA5P8Config, GptOssConfig
 from .moe.moe import BalancingLossConfig, MoE, MoEModelOutputs, ZLossConfig
 from .moe.qwen3 import Qwen3MoE30BA3Config, Qwen3MoEConfig
 
@@ -121,7 +121,8 @@ def get_model_config_from_hf(model_path: Path):
                 scoring_func="softmax",
                 norm_topk_prob=True,
                 router_scaling_factor=1.0,
-            ))
+            ),
+        )
     elif cfg.model_type == "deepseek_v3":
         return DeepSeekV3Config(
             vocab_size=cfg.vocab_size,
