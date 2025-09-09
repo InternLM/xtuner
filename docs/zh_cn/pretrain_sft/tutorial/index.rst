@@ -6,3 +6,4 @@
    mllm_trainer.md
    config.md
    dataset.md
+   chat_template.md

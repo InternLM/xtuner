@@ -62,7 +62,6 @@ class TestChatTemplate(TestCase):
         self.assertTrue((input_ids == input_ids_ref))
 
 
-
     @parametrize.parametrize(
         "template_type, tokenizer",
         [   
@@ -73,38 +72,44 @@ class TestChatTemplate(TestCase):
 
         chat_template = CHAT_TEMPLATE_MAP[template_type]
         tokenizer = AutoTokenizer.from_pretrained(tokenizer, trust_remote_code=True)
-        
-        current_date = datetime.now().strftime('%Y-%m-%d')
 
-        messages = {
+        messages_simple = {
             "messages": [
-                {"role": "system", "content": f"You are ChatGPT, a large language model trained by OpenAI.\nKnowledge cutoff: 2024-06\nCurrent date: {current_date}\n\nReasoning: medium\n\n# Valid channels: analysis, commentary, final. Channel must be included for every message."},
                 {"role": "developer", "content": "You are a helpful assistant."},
                 {"role": "user", "content": "Hello!"},
                 {"role": "assistant", "content": "Hi! How can I help you today?"},
                 {"role": "user", "content": "Can you tell me a joke?"},
                 {"role": "assistant", "content": "Sure!"},
-                {"role": "user", "content": "Please!"},
             ]
         }
-        
-       
-        prompt_ref = tokenizer.apply_chat_template(
-            messages["messages"][1:],
-            tokenize=False,
-            add_generation_prompt=True,
-        )  
+        messages_thinking = {
+            "messages": [
+                {"role": "developer", "content": "You are a helpful assistant."},
+                {"role": "user", "content": "Hello!"},
+                {"role": "assistant", "content": "Hi! How can I help you today?"},
+                {"role": "user", "content": "Can you tell me a joke?"},
+                {"role": "assistant", "thinking": "Thinking real hard...", "content": "Okay!"},
+                {"role": "user", "content": "Please!"},
+                {"role": "assistant", "thinking": "Thinking real hard...Thinking real hard...", "content": "Sure!"},
+            ]
+        }
 
-        _messages = ChatMessages(**messages)
-        prompt = _messages.get_prompt(chat_template)
-     
-        self.assertEqual(prompt, prompt_ref)
+        for messages in [messages_simple, messages_thinking]:
+            prompt_ref = tokenizer.apply_chat_template(
+                messages["messages"],
+                tokenize=False,
+                add_generation_prompt=False,
+            )
 
-        input_ids_ref = tokenizer.encode(prompt_ref, add_special_tokens=False)
+            _messages = ChatMessages(**messages)
+            prompt = _messages.get_prompt(chat_template)
 
-        input_ids = _messages.tokenize(tokenizer, chat_template)['input_ids']
-        self.assertTrue((input_ids == input_ids_ref))
+            self.assertEqual(prompt, prompt_ref)
 
+            input_ids_ref = tokenizer.encode(prompt_ref, add_special_tokens=False)
+
+            input_ids = _messages.tokenize(tokenizer, chat_template)['input_ids']
+            self.assertTrue((input_ids == input_ids_ref))
 
     @parametrize.parametrize(
         "template_type, thinking, tokenizer",

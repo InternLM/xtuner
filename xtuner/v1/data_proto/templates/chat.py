@@ -1,5 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-from typing import List
+from typing import Dict, List
 
 from pydantic import BaseModel, field_validator
 
@@ -16,6 +16,12 @@ class ChatTemplate(BaseModel):
     assistant: str  # Assistant message format
     stop_words: List[str]  # List of stop words
     sep: str = "\n"
+    thinking: str | None = None  # Thinking message format, not role
+    default_system: str | None = None
+
+    # only compute loss on the last assistant response ignoring the multiple rounds of assistant
+    only_last_assistant_loss: bool = False  # gpt_oss is True
+    loss_assistant_format_mapping: Dict[str, str] | None = None  # gpt_oss is {'<|end|>': '<|return|>'}
 
     def decorate_system(self, text: str) -> str:
         """Decorate text with the `system` template."""
@@ -24,6 +30,12 @@ class ChatTemplate(BaseModel):
     def decorate_assistant(self, text: str) -> str:
         """Decorate text with the `assistant` template."""
         return self.assistant.format(assistant=text)
+
+    def decorate_thinking(self, text: str) -> str:
+        """Decorate text with the `thinking` template."""
+        if self.thinking is None:
+            raise ValueError("thinking template is not defined.")
+        return self.thinking.format(assistant=text)
 
     def decorate_user(self, text: str) -> str:
         """Decorate text with the `user` template."""

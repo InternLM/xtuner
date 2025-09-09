@@ -1209,7 +1209,6 @@ class Trainer:
             "XTUNER_TOKENIZE_WORKERS": os.getenv("XTUNER_TOKENIZE_WORKERS"),
             "XTUNER_ACTIVATION_OFFLOAD": os.getenv("XTUNER_ACTIVATION_OFFLOAD"),
             "XTUNER_USE_FA3": os.getenv("XTUNER_USE_FA3"),
-            "XTUNER_GROUP_GEMM": os.getenv("XTUNER_GROUP_GEMM"),
             "XTUNER_DISPATCHER_DEBUG": os.getenv("XTUNER_DISPATCHER_DEBUG"),
             "XTUNER_ROUTER_DEBUG": os.getenv("XTUNER_ROUTER_DEBUG"),
         }
