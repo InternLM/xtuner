@@ -82,16 +82,14 @@ class RolloutController:
         self.num_workers = 0
         self.worker_server_urls: List[str] = []
         self.active_rollout_workers: List[RolloutWorker] = []
-        self.tokenizer = (
-            AutoTokenizer.from_pretrained(infer_config.model_path, trust_remote_code=True)
-            if infer_config.tokenizer_path
-            else None
-        )
+        self.tokenizer = AutoTokenizer.from_pretrained(infer_config.model_path, trust_remote_code=True)
         self.workers_bundle_idx_map = workers_bundle_idx_map
         self.engine_mesh_list, self.server_url_dict = self.init_workers()
         # todo(@duanyanhui): add router to replace native round robin
         self.worker_index = 0  # round robin index
-        self.sample_params = SampleParams()
+        self.sample_params = SampleParams(
+            stops=[self.tokenizer.decode(self.tokenizer.eos_token_id)], stop_token_ids=[self.tokenizer.eos_token_id]
+        )
 
     def get_rollout_info(self):
         """Get information about the current rollout setup.
@@ -185,11 +183,14 @@ class RolloutController:
         """
         index = self.worker_index % len(self.active_rollout_workers)
         final_sample_params = sample_params if sample_params else self.sample_params
+        # note(@duanyanhui): ensure stops and stop_token_ids are set to append eos in response
+        final_sample_params.stops = final_sample_params.stops or self.sample_params.stops
+        final_sample_params.stop_token_ids = final_sample_params.stop_token_ids or self.sample_params.stop_token_ids
         response_ref = self.active_rollout_workers[index].rollout.remote(  # type: ignore[attr-defined]
             prompt,
             tools=tools,
             tool_choice=tool_choice,
-            sample_params=final_sample_params,
+            sample_params=final_sample_params.dict(),
             extra_params=extra_params,
             format=format,
         )

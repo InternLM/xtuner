@@ -285,29 +285,42 @@ class RolloutWorker(SingleAcceleratorWorker):
                 return "", "failed"  # 返回明确的失败状态
 
             last_trajectory = ""
-            async for chunk in response.aiter_text():
-                if chunk == "":
+            async for chunk in response.aiter_lines():
+                if not chunk.startswith("data:"):
                     continue
                 try:
                     if self.paused:
                         await response.aclose()
                         self.logger.debug(f"--- get paused request {uid}")
                         return last_trajectory, "unfinished"
-                    chunk_data = chunk[len("data:") :].strip()  # Remove "data: " prefix
-                    if chunk_data == "[DONE]":
+
+                    chunk_data_str = chunk[len("data:") :].strip()
+                    if chunk_data_str == "[DONE]":
                         self.logger.debug(f" --- get finished request {uid}")
                         await response.aclose()
                         return last_trajectory, "finished"
-                    else:
-                        if not (chunk_data.startswith("{") and chunk_data.endswith("}")):
-                            continue
-                        last_trajectory += json.loads(chunk_data)["choices"][0]["delta"]["content"]
+
+                    if not (chunk_data_str.startswith("{") and chunk_data_str.endswith("}")):
+                        continue
+
+                    chunk_data = json.loads(chunk_data_str)
+
+                    delta_content = chunk_data["choices"][0]["delta"].get("content")
+                    if delta_content:
+                        last_trajectory += delta_content
+
+                    # todo(@duanyanhui): remove appending stop tokens manually after lmdeploy support return stop_token_ids.
+                    finish_reason = chunk_data["choices"][0].get("finish_reason")
+                    if finish_reason == "stop":
+                        assert len(sample_params["stops"]) == 1
+                        last_trajectory += sample_params["stops"][0]
+
                 except json.JSONDecodeError as e:
                     self.logger.error(f"JSON decode error for chunk in request {uid}: {chunk}, error: {e}")
-                    continue  # 选择跳过这个损坏的块
+                    continue
                 except Exception as e:
                     self.logger.error(f"Error processing chunk for {uid}: {chunk}, error: {e}")
-                    return last_trajectory, "failed"  # 出现意外错误时，终止并返回失败
+                    return last_trajectory, "failed"
         except httpx.RequestError as e:
             self.logger.error(f"Request {uid} failed with a network error: {e}")
             return "", "failed"
