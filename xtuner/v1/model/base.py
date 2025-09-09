@@ -685,7 +685,6 @@ class BaseModel(nn.Module):
                         unique_hf_tensor_list.append(hf_tensor)
                         weight_map[name] = safetensor_name
 
-                # weight_map.update({name: safetensor_name for name in name_list})
                 assert save_executor is not None, "Internal Error, save_executor should not be None"
                 future = save_executor.submit(
                     _save_file,
