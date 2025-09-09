@@ -6,10 +6,9 @@ from pydantic import BaseModel
 
 from transformers import PreTrainedTokenizer
 from xtuner.utils import IGNORE_INDEX
-from xtuner.v1.utils import get_logger
-
-from xtuner.v1.data_proto.templates import ChatTemplate, HybridChatTemplate
 from xtuner.v1.data_proto.messages.base import BaseMessages
+from xtuner.v1.data_proto.templates import ChatTemplate, HybridChatTemplate
+from xtuner.v1.utils import get_logger
 
 
 logger = get_logger()
@@ -121,11 +120,9 @@ class ChatMsg(BaseModel):
         }
 
 
-def process_message(messages:List[ChatMsg], chat_template:ChatTemplate):
+def process_message(messages: List[ChatMsg], chat_template: ChatTemplate):
     if chat_template.default_system is not None and messages[0].role != "system":
-        messages.insert(
-            0, ChatMsg(role="system", content=chat_template.default_system, loss=False)
-        )
+        messages.insert(0, ChatMsg(role="system", content=chat_template.default_system, loss=False))
 
     # Only look at the last round, if there is thinking, keep it, otherwise remove it all
     for msg in messages[:-1]:
@@ -133,10 +130,11 @@ def process_message(messages:List[ChatMsg], chat_template:ChatTemplate):
 
     # only compute loss on the last assistant response when only_last_assistant_loss is True
     last_msg = messages[-1]
-    if last_msg.role == 'assistant' and chat_template.only_last_assistant_loss:
+    if last_msg.role == "assistant" and chat_template.only_last_assistant_loss:
         for msg in messages[:-1]:
-            if msg.role == 'assistant':
+            if msg.role == "assistant":
                 msg.loss = False
+
 
 class ChatMessages(BaseMessages):
     messages: List[ChatMsg]
@@ -218,10 +216,9 @@ if __name__ == "__main__":
         {"role": "user", "content": "很好的呀？"},
         {"role": "assistant", "thinking": "yyyyyy", "content": "不ok!"},
     ]
-    data = {
-        "messages": messages
-    }
+    data = {"messages": messages}
     from xtuner.v1.data_proto.templates import CHAT_TEMPLATE_MAP
+
     messages = ChatMessages.from_dict(data)
 
     chat_template = CHAT_TEMPLATE_MAP["gpt-oss"]

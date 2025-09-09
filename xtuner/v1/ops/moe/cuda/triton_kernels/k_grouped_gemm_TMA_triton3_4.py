@@ -1,5 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from typing import Optional
+
 import torch
 import triton
 import triton.language as tl
@@ -131,7 +132,6 @@ def k_grouped_gemm_kernel(
         offs_cn = offs_bn
         c_desc.store([offs_cm, offs_cn], c)
 
-       
 
 @torch.library.custom_op("moe::k_grouped_gemm", mutates_args=())
 def k_grouped_gemm(A: Tensor, B: Tensor, size_per_group: torch.Tensor) -> Tensor:
@@ -228,7 +228,8 @@ if __name__ == "__main__":
     trans_b = False
     trans_a = True
     batch_sizes = torch.Tensor(generate_random_list(groups, groups * 4096)).cuda().to(torch.int64).abs()
-    batch_sizes[1] = 0; batch_sizes[10] = 0
+    batch_sizes[1] = 0
+    batch_sizes[10] = 0
     # batch_sizes = batch_sizes // 512 * 512
     batch_sizes_cpu = batch_sizes.cpu()
     K = batch_sizes.sum().item()

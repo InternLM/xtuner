@@ -1,9 +1,11 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from typing import Optional
+
 import torch
 import triton
 import triton.language as tl
 from torch import Tensor
+
 
 # from .utils import TmaAutoTuneHelper
 
@@ -44,7 +46,9 @@ def grouped_launch(pid, m, n, block_m: tl.constexpr, block_n: tl.constexpr, grou
 @triton.autotune(configs=get_cuda_autotune_config(), key=["N", "K"])
 @triton.jit
 def m_grouped_gemm_bKmajor_kernel(
-    A, B, C,
+    A,
+    B,
+    C,
     pad_starts,
     pad_ends,
     group_starts,
@@ -76,8 +80,6 @@ def m_grouped_gemm_bKmajor_kernel(
     num_tiles = num_pid_m * num_pid_n
 
     for tile_id in tl.range(start_pid, num_tiles, BLOCKS):
-
-
         pid_m, pid_n = grouped_launch(tile_id, M_pad, N, BLOCK_M, BLOCK_N, GROUP_M)
 
         group = tl.load(m_indices_pad + pid_m)
@@ -130,7 +132,6 @@ def m_grouped_gemm_bKmajor_kernel(
         c_desc.store([offs_cm, offs_cn], c)
 
 
-
 @triton.autotune(configs=get_cuda_autotune_config(), key=["N", "K"])
 @triton.jit
 def m_grouped_gemm_bNmajor_kernel(
@@ -180,7 +181,6 @@ def m_grouped_gemm_bNmajor_kernel(
         offs_bn = (pid_n * BLOCK_N).to(tl.int32)
         offs_k = 0
         offs_bk = 0
-
 
         a_ptr = (A + group_start * K).to(tl.pointer_type(dtypeA))
         b_ptr = (B + group * K * N).to(tl.pointer_type(dtypeB))
@@ -292,12 +292,10 @@ def m_grouped_gemm(
     dtype_b = dtype_mapping.get(B.dtype, -1)
     dtype_c = dtype_mapping.get(C.dtype, -1)
 
-
     def grid(META):
         # assert N % META["BLOCK_N"] == 0, "Only support when N is a multiple of BLOCK_N"
-        
-        return (NUM_SMS,)
 
+        return (NUM_SMS,)
 
     # TMA descriptors require a global memory allocation
     def alloc_fn(size: int, alignment: int, stream: Optional[int]):
@@ -308,7 +306,9 @@ def m_grouped_gemm(
     m_grouped_gemm_kernel = m_grouped_gemm_bKmajor_kernel if trans_b else m_grouped_gemm_bNmajor_kernel
 
     m_grouped_gemm_kernel[grid](
-        A, B, C,
+        A,
+        B,
+        C,
         pad_start,
         pad_end,
         group_start,
@@ -359,13 +359,14 @@ if __name__ == "__main__":
     trans_b = True
     print(f"{trans_b = }")
     batch_sizes = torch.Tensor(generate_random_list(groups, groups * 4096)).cuda().to(torch.int64)
-    batch_sizes[1] = 0; batch_sizes[10] = 0
+    batch_sizes[1] = 0
+    batch_sizes[10] = 0
     print(f"{batch_sizes = }")
 
     batch_sizes_cpu = batch_sizes.cpu()
     M = batch_sizes.sum().item()
 
-    for n, k in ((256+32, 256+32), (768 * 2, 2048), (2048, 768), (1536 * 2, 4096), (4096 +32, 1536)):
+    for n, k in ((256 + 32, 256 + 32), (768 * 2, 2048), (2048, 768), (1536 * 2, 4096), (4096 + 32, 1536)):
         torch.cuda.empty_cache()
         a = torch.randn(M, k, dtype=torch.bfloat16, device="cuda").view(-1, k).requires_grad_(True)  # type: ignore
         b = (

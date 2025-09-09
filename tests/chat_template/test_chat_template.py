@@ -111,8 +111,6 @@ class TestChatTemplate(TestCase):
             input_ids = _messages.tokenize(tokenizer, chat_template)['input_ids']
             self.assertTrue((input_ids == input_ids_ref))
 
-
-
     @parametrize.parametrize(
         "template_type, thinking, tokenizer",
         [   
