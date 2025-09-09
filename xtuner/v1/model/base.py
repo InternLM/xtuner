@@ -117,7 +117,8 @@ def _save_file(
     filename,
     metadata=None,
 ):
-    torch.cpu.synchronize()
+    if not tensors:
+        return
     save_file(tensors, filename, metadata=metadata)
 
 
@@ -663,7 +664,7 @@ class BaseModel(nn.Module):
                 weight_map.update({name: safetensor_name for name in name_list})
                 assert save_executor is not None, "Internal Error, save_executor should not be None"
                 future = save_executor.submit(
-                    save_file,
+                    _save_file,
                     dict(zip(name_list, hf_tensor_list)),
                     hf_dir / safetensor_name,
                 )
@@ -673,12 +674,21 @@ class BaseModel(nn.Module):
         for name_list, hf_tensor_list in chain(same_gen, shard_gen):
             safetensor_index += 1
             safetensor_name = f"model-{safetensor_index:04d}-others-save_rank{save_rank}.safetensors"
+
             if is_others_save_rank:
-                weight_map.update({name: safetensor_name for name in name_list})
+                # for tie_word_embeddings, we need to make sure each key is only saved once
+                unique_name_list = []
+                unique_hf_tensor_list = []
+                for name, hf_tensor in zip(name_list, hf_tensor_list):
+                    if name not in weight_map:
+                        unique_name_list.append(name)
+                        unique_hf_tensor_list.append(hf_tensor)
+                        weight_map[name] = safetensor_name
+
                 assert save_executor is not None, "Internal Error, save_executor should not be None"
                 future = save_executor.submit(
-                    save_file,
-                    dict(zip(name_list, hf_tensor_list)),
+                    _save_file,
+                    dict(zip(unique_name_list, unique_hf_tensor_list)),
                     hf_dir / safetensor_name,
                 )
                 save_futures.append(future)

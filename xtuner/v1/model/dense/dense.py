@@ -49,6 +49,10 @@ class Dense(BaseModel):
         self.rotary_emb = self.build_rotary_embedding(config)
         self.embed_tokens = self.build_embeddings(config)
 
+        # Make sure it works properly when not using fsdp
+        if config.tie_word_embeddings:
+            self.lm_head.weight = self.embed_tokens.weight
+
         # TODO(@yehaochen): 把这两行移除 _maybe_compile_layers 要把 compile 相关的 setting 放到 fsdp_config 之外
         # _init_load_spec 放到 post init 里
         self._init_load_spec()
@@ -240,6 +244,10 @@ class Dense(BaseModel):
             elif isinstance(module, RMSNorm):
                 module.forward = types.MethodType(self.patched_rms_norm_forward, module)  # type: ignore
         self._to_empty_meta()
+
+        # Make sure it works properly when using fsdp
+        if self.config.tie_word_embeddings:
+            self.lm_head.weight = self.embed_tokens.weight
         return self
 
     # TODO: 支持 tp

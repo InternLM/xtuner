@@ -18,9 +18,6 @@ from xtuner.v1.datasets.config import (
     DatasetConfig,
 )
 
-# RL默认使用FA3
-os.environ["XTUNER_USE_FA3"] = "1"
-
 TEST_TEXT_MESSAGES=[{"role": "user", "content": "Hello!"}]
 MODEL_PATH = os.environ["ROLLOUT_MODEL_PATH"]
 TRAIN_DATA_PATH = os.environ["ROLLOUT_DATA_PATH"]
@@ -32,6 +29,14 @@ resource_map = {
 
 
 class TestRollout(unittest.TestCase):
+
+    def setUpClass(cls) -> None:
+        # RL默认使用FA3
+        os.environ["XTUNER_USE_FA3"] = "1"
+
+    def tearDownClass(cls) -> None:
+        del os.environ["XTUNER_USE_FA3"]
+
     def init_config(self):
         self.resources_cfg = AcceleratorResourcesConfig(
             accelerator=resource_map[torch.accelerator.current_accelerator().type],
