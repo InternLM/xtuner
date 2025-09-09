@@ -106,10 +106,6 @@ class TestGptOss(DistributedTestBase):
         ],
     )
     def test_fsdp_accuracy(self, device, dispatcher, ep_size):
-        os.environ["XTUNER_GROUP_GEMM"] = 'cutlass'
-        from xtuner.v1.ops import moe
-        from xtuner.v1.module.grouped_linear import moe_group_linear
-        moe_group_linear.group_gemm = lambda *args, **kwargs: moe.get_group_gemm()(*args, **kwargs)
         self.create_pg(device)
         maybe_compile.clear_compile_targets()
 

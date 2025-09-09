@@ -480,7 +480,7 @@ class MoEDecoderLayer(nn.Module):
             hidden_states = self._post_moe_forward(
                 hidden_states=pre_moe_forward_out_list[i],
                 combined_hidden_states=post_combined["hidden_states"].view(*pre_moe_forward_out_list[i].shape),
-                residual=residual,
+                residual=residual_list[i],
             )
             hidden_states_out_list.append(hidden_states)
 

@@ -10,12 +10,18 @@ class HybridChatTemplate(BaseModel):
     and results."""
 
     # Normal Chat
-    system: str  # System message format
-    developer: str | None = None  # Developer message format
-    user: str  # User message format
-    assistant: str  # Assistant message format
+    system: str  # System message format, role
+    developer: str | None = None  # Developer message format, role
+    user: str  # User message format, role
+    assistant: str  # Assistant message format, role
     stop_words: List[str]  # List of stop words
     sep: str = "\n"
+    thinking: str | None = None  # Thinking message format, not role
+    default_system: Optional[str] = None
+
+    # only compute loss on the last assistant response ignoring the multiple rounds of assistant
+    only_last_assistant_loss: bool = False  # gpt_oss is True
+    loss_assistant_format_mapping: Dict[str, str] = {}  # gpt_oss is {'<|end|>': '<|return|>'}
 
     # Multimodal Chat
     # Predefined token and index for images
@@ -59,6 +65,12 @@ class HybridChatTemplate(BaseModel):
     def decorate_assistant(self, text: str) -> str:
         """Decorate text with the `assistant` template."""
         return self.assistant.format(assistant=text)
+
+    def decorate_thinking(self, text: str) -> str:
+        """Decorate text with the `thinking` template."""
+        if self.thinking is None:
+            raise ValueError("thinking template is not defined.")
+        return self.thinking.format(thinking=text)
 
     def decorate_user(self, text: str) -> str:
         """Decorate text with the `user` template."""

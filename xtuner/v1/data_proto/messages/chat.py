@@ -6,10 +6,9 @@ from pydantic import BaseModel
 
 from transformers import PreTrainedTokenizer
 from xtuner.utils import IGNORE_INDEX
+from xtuner.v1.data_proto.messages.base import BaseMessages
+from xtuner.v1.data_proto.templates import ChatTemplate, HybridChatTemplate
 from xtuner.v1.utils import get_logger
-
-from ..templates import ChatTemplate, HybridChatTemplate
-from .base import BaseMessages
 
 
 logger = get_logger()
@@ -39,9 +38,12 @@ class ChatMsg(BaseModel):
     role: Literal["assistant", "user", "system", "developer"]
     content: ContentType
     loss: Optional[bool] = None
+    thinking: Optional[str] = None  # only for assistant
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        if self.role != "assistant":
+            assert self.thinking is None, "Only assistant can have thinking."
         if self.loss is None:
             if self.role == "system":
                 self.loss = False
@@ -82,7 +84,17 @@ class ChatMsg(BaseModel):
         elif self.role == "user":
             prompt = chat_template.decorate_user(text)
         elif self.role == "assistant":
-            prompt = chat_template.decorate_assistant(text)
+            prompt = ""
+            if self.thinking is not None:
+                prompt = chat_template.decorate_thinking(self.thinking)
+
+            if chat_template.loss_assistant_format_mapping is not None and self.loss:
+                old_prompt = chat_template.decorate_assistant(text)
+                for k, v in chat_template.loss_assistant_format_mapping.items():
+                    old_prompt = old_prompt.replace(k, v)
+            else:
+                old_prompt = chat_template.decorate_assistant(text)
+            prompt += old_prompt
         else:
             raise NotImplementedError
 
@@ -108,6 +120,22 @@ class ChatMsg(BaseModel):
         }
 
 
+def process_message(messages: List[ChatMsg], chat_template: ChatTemplate):
+    if chat_template.default_system is not None and messages[0].role != "system":
+        messages.insert(0, ChatMsg(role="system", content=chat_template.default_system, loss=False))
+
+    # Only look at the last round, if there is thinking, keep it, otherwise remove it all
+    for msg in messages[:-1]:
+        msg.thinking = None
+
+    # only compute loss on the last assistant response when only_last_assistant_loss is True
+    last_msg = messages[-1]
+    if last_msg.role == "assistant" and chat_template.only_last_assistant_loss:
+        for msg in messages[:-1]:
+            if msg.role == "assistant":
+                msg.loss = False
+
+
 class ChatMessages(BaseMessages):
     messages: List[ChatMsg]
 
@@ -118,8 +146,9 @@ class ChatMessages(BaseMessages):
         return self.messages.pop()
 
     def get_prompt(self, chat_template: ChatTemplate) -> str:
-        prompt = ""
+        process_message(self.messages, chat_template)
 
+        prompt = ""
         for msg in self.messages:
             prompt += msg.get_prompt(chat_template)
             if msg.role == "assistant":
@@ -130,6 +159,8 @@ class ChatMessages(BaseMessages):
         input_ids = tokenizer.encode("", add_special_tokens=False)
         labels = [IGNORE_INDEX for _ in input_ids]
         image_urls = []
+
+        process_message(self.messages, chat_template)
 
         for msg in self.messages:
             res = msg.tokenize(tokenizer, chat_template)

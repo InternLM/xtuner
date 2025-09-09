@@ -1,7 +1,11 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+from datetime import datetime
+
 from .chat import ChatTemplate
 from .hybrid import HybridChatTemplate
 
+
+current_date = datetime.now().strftime("%Y-%m-%d")
 
 CHAT_TEMPLATE_MAP = {
     "intern-s1": HybridChatTemplate(
@@ -31,10 +35,17 @@ CHAT_TEMPLATE_MAP = {
     "gpt-oss": HybridChatTemplate(
         system="<|start|>system<|message|>{system}<|end|>",
         developer="<|start|>developer<|message|># Instructions\n\n{developer}\n\n<|end|>",
+        default_system=f"You are ChatGPT, a large language model trained by OpenAI.\nKnowledge cutoff: 2024-06\nCurrent date: {current_date}\n\nReasoning: medium\n\n# Valid channels: analysis, commentary, final. Channel must be included for every message.",
         user="<|start|>user<|message|>{user}<|end|><|start|>assistant",
         assistant="<|channel|>final<|message|>{assistant}<|end|>",
-        stop_words=["<|end|>", "<|return|>"],
+        thinking="<|channel|>analysis<|message|>{thinking}<|end|><|start|>assistant",
+        stop_words=["<|return|>"],
         sep="",
+        # only compute loss on the last assistant response ignoring the multiple rounds of assistant
+        only_last_assistant_loss=True,
+        # if assistant calculates loss, use "<|channel|>final<|message|>{assistant}<|end|>"
+        # else "<|channel|>final<|message|>{assistant}<|return|>"
+        loss_assistant_format_mapping={"<|end|>": "<|return|>"},
     ),
     "deepseek-v3": HybridChatTemplate(
         system="<｜begin▁of▁sentence｜>{system}",

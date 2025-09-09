@@ -15,6 +15,8 @@
 
 ```
 
+如果你训练的是 GPT-OSS 推理模型，请阅读 [GPT-OSS 对话模板说明](../pretrain_sft/tutorial/chat_template.md#gpt-oss-)
+
 
 ## 准备模型
 
