@@ -38,6 +38,7 @@ from xtuner.v1.train.rl_trainer import RLTrainer
 MODEL_PATH = os.environ["ROLLOUT_MODEL_PATH"]
 TRAIN_DATA_PATH = os.environ["ROLLOUT_DATA_PATH"]
 TEST_DATA_PATH = os.environ["ROLLOUT_TEST_DATA_PATH"]
+os.environ['XTUNER_USE_FA3'] = "1"
 
 def parse_args():
     parser = argparse.ArgumentParser(description="VLLM Rollout Test Script")

@@ -78,7 +78,7 @@ class RolloutConfig(BaseModel):
     ] = "lmdeploy"
     model_path: Annotated[str | Path, Parameter(group=infer_group, help="Path to the SGLang model.")]
     model_name: Annotated[str, Parameter(group=infer_group, help="Name of the model to be used in the LMDeploy.")]
-    tokenizer_path: Annotated[str, Parameter(group=infer_group, help="Path to the tokenizer for the model.")] = ""
+    tokenizer_path: Annotated[str, Parameter(group=infer_group, help="Path to the tokenizer for the model.")]
     api_key: Annotated[
         Optional[Union[List[str], str]],
         Parameter(
