@@ -1,10 +1,31 @@
-from typing import Any, Iterator
+from typing import Any, Iterator, _ProtocolMeta
 import types
 from importlib import import_module
+from abc import ABCMeta
 mock = import_module("sphinx.ext.autodoc.mock")
 
 
-class _MockObject:
+class _MockType(_ProtocolMeta):
+    __display_name__ = '_MockObject'
+    __name__ = ''
+    __sphinx_mock__ = True
+    __sphinx_decorator_args__: tuple[Any, ...] = ()
+    # Attributes listed here should not be mocked and rather raise an Attribute error:
+    __sphinx_empty_attrs__: set[str] = {'__typing_subst__'}
+
+    def __new__(mcls, name, bases, namespace, /, **kwargs):
+        return type.__new__(mcls, name, bases, namespace)
+
+    def __init__(cls, *args, **kwargs):
+        type.__init__(cls, *args, **kwargs)
+
+    def __getattr__(cls, key: str) -> Any:
+        if key in cls.__sphinx_empty_attrs__:
+            raise AttributeError
+        return _make_subclass(str(key), cls.__display_name__, _MockObject)()
+
+
+class _MockObject(metaclass=_MockType):
     """Used by autodoc_mock_imports."""
     __display_name__ = '_MockObject'
     __name__ = ''
@@ -53,6 +74,9 @@ class _MockObject:
     def __or__(self, value: Any, /) -> types.UnionType:
         return value | self.__class__
 
+    def __ror__(self, value: Any, /) -> types.UnionType:
+        return value | self.__class__
+
 def _make_subclass(name: str, module: str, superclass: Any = _MockObject,
                    attributes: Any = None, decorator_args: tuple = ()) -> Any:
     attrs = {'__module__': module,
@@ -61,7 +85,7 @@ def _make_subclass(name: str, module: str, superclass: Any = _MockObject,
              '__sphinx_decorator_args__': decorator_args}
     attrs.update(attributes or {})
 
-    return type(name, (superclass,), attrs)
+    return _MockType(name, (superclass,), attrs)
 
 
 mock._make_subclass = _make_subclass  # type: ignore[attr-defined])
