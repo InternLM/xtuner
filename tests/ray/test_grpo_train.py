@@ -10,7 +10,6 @@ import tempfile
 import ray
 from xtuner.v1.ray.accelerator import AcceleratorResourcesConfig, AutoAcceleratorWorkers
 from xtuner.v1.data_proto.sequence_context import SequenceContext
-from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
 from xtuner.v1.config import (
     AdamWConfig,
     FSDPConfig,
@@ -20,14 +19,11 @@ from xtuner.v1.model.moe.moe import BalancingLossConfig, ZLossConfig
 # from xtuner.v1.rl.grpo.config import WorkerConfig, LossConfig
 from xtuner.v1.rl.base import WorkerConfig, TrainingController, TrainingWorker as BaseTrainingWorker
 from xtuner.v1.rl.grpo.loss import GRPOLossConfig as LossConfig
-# from xtuner.v1.rl.grpo.loss import GRPOLossConfig as LossConfig
-# from xtuner.v1.rl.grpo.worker import WorkerConfig, GRPOTrainingWorker as TrainingWorker
-# from xtuner.v1.rl.grpo.controller import GRPOTrainingController as TrainingController
+from xtuner.v1.model.dense.qwen3 import Qwen3Dense8BConfig
 
 
 # Qwen3 30B A3
-QWEN3_MOE_PATH = os.environ["QWEN3_MOE_PATH"]
-
+QWEN3_PATH = os.environ["QWEN3_PATH"]
 
 class TestGRPOTrain(unittest.TestCase):
     def setUp(self):
@@ -45,7 +41,7 @@ class TestGRPOTrain(unittest.TestCase):
         self.pg = pg
 
         self.temp_dir = tempfile.mkdtemp()
-        tokenizer = AutoTokenizer.from_pretrained(QWEN3_MOE_PATH, trust_remote_code=True)
+        tokenizer = AutoTokenizer.from_pretrained(QWEN3_PATH, trust_remote_code=True)
         self.tokenizer = tokenizer
         self.prompt_repeat_k = 8
         file = './tests/ray/rollout_output.jsonl'
@@ -81,7 +77,7 @@ class TestGRPOTrain(unittest.TestCase):
         ray.shutdown()
     
     def build_train_controller(self):
-        moe_cfg = Qwen3MoE30BA3Config(
+        model_cfg = Qwen3Dense8BConfig(
             ep_size=1,
             balancing_loss_cfg=BalancingLossConfig(),
             z_loss_cfg=ZLossConfig(),
@@ -95,7 +91,7 @@ class TestGRPOTrain(unittest.TestCase):
         )
         lr_cfg = LRConfig(lr_type="constant", warmup_ratio=0, lr_min=5e-7)
         worker_cfg: WorkerConfig = WorkerConfig(
-            model_cfg=moe_cfg,
+            model_cfg=model_cfg,
             optim_cfg=optim_cfg,
             loss_cfg=LossConfig(
                 policy_loss_cfg=dict(
@@ -110,8 +106,8 @@ class TestGRPOTrain(unittest.TestCase):
                 mode="eager"),
             lr_cfg=lr_cfg,
             fsdp_cfg=fsdp_cfg,
-            load_from=QWEN3_MOE_PATH,
-            tokenizer_path=QWEN3_MOE_PATH,
+            load_from=QWEN3_PATH,
+            tokenizer_path=QWEN3_PATH,
             sp_size=1,
             global_batch_size=8,
             work_dir=self.temp_dir,
@@ -138,6 +134,8 @@ class TestGRPOTrain(unittest.TestCase):
         ray.get(train_controller.__ray_ready__.remote())
         return train_controller
 
-    def test_grpo_train(self):
+    def test_grpo_train_and_save(self):
         train_controller = self.build_train_controller()
         ray.get(train_controller.fit.remote(self.data_batches, pack_max_length=1024, rollout_idx=0))
+        save_path = os.path.join(self.temp_dir, "hf_test")
+        ray.get(train_controller.save_hf.remote(str(save_path)))

@@ -267,7 +267,11 @@ class LMDeployWorker(RolloutWorker):
                     }
                 )
             if "uvicorn_log_level" in lmdeploy_config_kwargs:
-                env["UVICORN_LOG_LEVEL"] = lmdeploy_config_kwargs["uvicorn_log_level"]
+                env.update({"UVICORN_LOG_LEVEL": lmdeploy_config_kwargs["uvicorn_log_level"]})
+        else:
+            env.update({"RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1"})
+            if "tm_log_level" in lmdeploy_config_kwargs:
+                env.update({"TM_LOG_LEVEL": lmdeploy_config_kwargs["tm_log_level"]})
 
         if "backend" in lmdeploy_config_kwargs:
             lmdeploy_config_kwargs.pop("backend")
