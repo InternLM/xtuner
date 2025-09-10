@@ -13,7 +13,7 @@ from xtuner.v1.config import (
 )
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.model.moe.moe import BalancingLossConfig
-from xtuner.v1.datasets.sft_tokenize_fn import OpenaiTokenizeFunctionConfig
+from xtuner.v1.datasets.sft_tokenize_fn import OpenaiTokenizeFnConfig
 
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
 from xtuner.v1.train.trainer import Trainer
@@ -233,7 +233,7 @@ def main():
         dataset_config = [
             {
                 "dataset": DatasetConfig(name="alpaca", anno_path=ALPACA_PATH, sample_ratio=1.0),
-                "tokenize_fn": OpenaiTokenizeFunctionConfig(max_length=16386, chat_template="qwen3"),
+                "tokenize_fn": OpenaiTokenizeFnConfig(max_length=16386, chat_template="qwen3"),
                 # "tokenize_fn": FTDPTokenizeFnConfig(max_length=16386),
             },
         ]

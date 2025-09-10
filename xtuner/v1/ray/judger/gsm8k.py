@@ -8,6 +8,7 @@ from .native import NativeJudger
 _SOLUTION_CLIP_CHARS = 300
 
 
+# Adapted from https://github.com/volcengine/verl/blob/main/verl/utils/reward_score/gsm8k.py
 def extract_solution(solution_str, method="strict"):
     """Extract the numerical solution from a string.
 
@@ -53,6 +54,7 @@ def extract_solution(solution_str, method="strict"):
     return final_answer
 
 
+# Adapted from https://github.com/volcengine/verl/blob/main/verl/utils/reward_score/gsm8k.py
 def compute_reward(response, label, extra_info):
     """Compute the reward for a given response based on the GSM8K dataset and
     criteria.

@@ -1,1 +1,1 @@
-from .openai import OpenaiTokenizeFunction, OpenaiTokenizeFunctionConfig
+from .openai import OpenaiTokenizeFnConfig, OpenaiTokenizeFunction

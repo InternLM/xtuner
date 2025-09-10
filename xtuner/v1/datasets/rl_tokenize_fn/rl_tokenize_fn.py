@@ -1,0 +1,96 @@
+# Copyright (c) OpenMMLab. All rights reserved.
+from pydantic import BaseModel, ConfigDict
+
+from xtuner.v1.datasets.data_item import RLTextDataItem
+from xtuner.v1.utils import get_logger
+
+from ..intern_s1_fn.tokenizer_fn import InternS1TokenizeFunction
+from ..utils import CachableTokenizeFunction
+
+
+logger = get_logger()
+
+
+# https://github.com/volcengine/verl/blob/main/verl/utils/dataset/rl_dataset.py
+class RLTokenizeFn(CachableTokenizeFunction[RLTextDataItem]):
+    def __init__(self, tokenizer_fn: CachableTokenizeFunction, max_length: int | None = None, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.tokenizer_fn = tokenizer_fn
+        self.max_length = max_length
+
+    def __call__(self, item: dict, **kwargs) -> RLTextDataItem:
+        """example:
+        item = {
+                "data_source": data_source,
+                "prompt": [
+                    {
+                        "role": "user",
+                        "content": question,
+                    }
+                ],
+                "ability": "math",
+                "reward_model": {"style": "rule", "ground_truth": solution},
+                "extra_info": {
+                    "split": split,
+                    "index": idx,
+                    "answer": answer_raw,
+                    "question": question_raw,
+                },
+                "image": image_path, # if multi-modal
+                "image_wh": [[640, 480]] # if multi-modal
+            }
+        """
+        messages = item["prompt"]
+        extra_info = item.get("extra_info", {})
+        # TODO: 多模态需要支持 openai message 格式输入，否则这个地方要特殊处理
+        if isinstance(self.tokenizer_fn, InternS1TokenizeFunction):
+            new_jsonl_dict = {"image": item["image"], "image_wh": item["image_wh"]}
+            conversations = []
+            for message in messages:
+                if message["role"] == "user":
+                    conversations.append({"from": "human", "value": message["content"]})
+                elif message["role"] == "assistant":
+                    conversations.append({"from": "gpt", "value": message["content"]})
+                else:
+                    raise ValueError(message["role"])
+            new_jsonl_dict["conversations"] = conversations
+            num_tokens = self.tokenizer_fn(new_jsonl_dict)["num_tokens"]
+
+            extra_info["image"] = item["image"]
+            extra_info["image_wh"] = item["image_wh"]
+        else:
+            num_tokens = self.tokenizer_fn(item)["num_tokens"]
+
+        rl_out_data = {
+            # "input_ids": input_ids,
+            "messages": messages,
+            "num_tokens": num_tokens,
+            "reward_model": item["reward_model"],
+            "ability": item.get("ability", None),
+            "data_source": {item.get("data_source"): 1.0},
+            "extra_info": extra_info,
+        }
+
+        return rl_out_data  # type: ignore
+
+    def hash(self) -> str:
+        raise ValueError("不应该触发这个方法, 因为 RLTokenizeFn 不需要缓存。")
+
+
+class RLTokenizeFnConfig(BaseModel):
+    model_config = ConfigDict(title="Base RL dataset config for xtuner", extra="allow")
+    sft_tokenizer_fn_config: BaseModel  # TODO: 如何写 typehint
+
+    def build(
+        self, tokenizer, tokenizer_hash: str | None = None, anno_name: str | None = None, **kwargs
+    ) -> RLTokenizeFn:
+        sft_tokenizer_fn = self.sft_tokenizer_fn_config.build(
+            tokenizer=tokenizer,
+            tokenizer_hash=tokenizer_hash,
+            anno_name=anno_name,
+            **kwargs,
+        )
+        return RLTokenizeFn(
+            sft_tokenizer_fn,
+            max_length=self.max_length,
+        )

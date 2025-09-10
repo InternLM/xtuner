@@ -11,7 +11,7 @@ from xtuner.v1.config import FSDPConfig
 from xtuner.v1.config.optim import AdamWConfig, LRConfig
 from xtuner.v1.datasets import FTDPTokenizeFnConfig
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig, DatasetConfigList
-from xtuner.v1.datasets.sft_tokenize_fn import OpenaiTokenizeFunctionConfig
+from xtuner.v1.datasets.sft_tokenize_fn import OpenaiTokenizeFnConfig
 from xtuner.v1.float8.config import Float8Config
 from xtuner.v1.loss.ce_loss import CELossConfig
 from xtuner.v1.model import get_model_config, get_model_config_from_hf
@@ -181,9 +181,7 @@ class TrainingArguments(BaseModel):
                     raise FileNotFoundError(f"Dataset file {jsonl_file} does not exist.")
 
                 if self.tokenize_fn == "openai":
-                    tokenize = OpenaiTokenizeFunctionConfig(
-                        chat_template=self.chat_template, max_length=self.max_length
-                    )
+                    tokenize = OpenaiTokenizeFnConfig(chat_template=self.chat_template, max_length=self.max_length)
                 elif self.tokenize_fn == "ftdp":
                     tokenize = FTDPTokenizeFnConfig(chat_template=self.chat_template, max_length=self.max_length)
                 else:

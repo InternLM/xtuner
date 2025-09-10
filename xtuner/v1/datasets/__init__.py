@@ -13,8 +13,9 @@ from .intern_s1_fn.tokenizer_fn import InternS1TokenizeFnConfig, InternS1Tokeniz
 from .jsonl import JsonlDataset
 from .packing import ExpandSoftPackDataset, _LegacySoftPackDataset
 from .resume import get_dataloader_state, load_dataloader_state
-from .rl_tokenize_fn import RLTextTokenizeFnConfig
+from .rl_tokenize_fn import RLTokenizeFnConfig
 from .sampler import LengthGroupedSampler, ParallelSampler
+from .sft_tokenize_fn import OpenaiTokenizeFnConfig
 from .utils import CachableTokenizeFunction, CacheObj, calculate_file_sha256, calculate_xxhash, tokenizer_hash
 from .vlm_jsonl import VLMJsonlDataset
 
@@ -39,8 +40,9 @@ __all__ = [
     "VLMJsonlDataset",
     "FTDPTokenizeFnConfig",
     "InternS1TokenizeFnConfig",
+    "OpenaiTokenizeFnConfig",
     "fake_collator",
-    "RLTextTokenizeFnConfig",
+    "RLTokenizeFnConfig",
     "get_dataloader_state",
     "load_dataloader_state",
     "DatasetConfigList",

@@ -21,7 +21,7 @@ from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.ray.dataflow import DataFlowConfig, ReplayBufferConfig
 from xtuner.v1.ray.rollout import SampleParams
 from xtuner.v1.ray.evaluator import EvaluatorConfig
-from xtuner.v1.datasets import RLTextTokenizeFnConfig
+from xtuner.v1.datasets import RLTokenizeFnConfig, OpenaiTokenizeFnConfig
 from xtuner.v1.config import (
     AdamWConfig,
     FSDPConfig,
@@ -102,12 +102,14 @@ def main(args):
     judger_cfg = JudgerConfig(
         reward_judger_configs={"openai/gsm8k": gsm8k_judger_config}
     )
+
+    sft_tokenize_fn_cfg = OpenaiTokenizeFnConfig(max_length=args.max_prompt_length, chat_template='qwen3')
     train_dataset_cfg = [
         {
         "dataset": DatasetConfig(name="gsm8k",
                                  anno_path=args.data_path,
                                  sample_ratio=1.0),
-        "tokenize_fn": RLTextTokenizeFnConfig(max_length=args.max_prompt_length),
+        "tokenize_fn": RLTokenizeFnConfig(sft_tokenizer_fn_config=sft_tokenize_fn_cfg),
         },
     ]
     eval_dataset_cfg = [
@@ -115,7 +117,7 @@ def main(args):
         "dataset": DatasetConfig(name="gsm8k",
                                  anno_path=args.eval_data_path,
                                  sample_ratio=1.0),
-        "tokenize_fn": RLTextTokenizeFnConfig(max_length=args.max_prompt_length),
+        "tokenize_fn": RLTokenizeFnConfig(sft_tokenizer_fn_config=sft_tokenize_fn_cfg),
         },
     ]
     dataloader_cfg = DataloaderConfig(
