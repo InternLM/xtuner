@@ -1,4 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import bisect
+import itertools
 import multiprocessing
 import random
 from concurrent.futures import ProcessPoolExecutor
@@ -309,3 +311,179 @@ class ExpandSoftPackDataset(_LegacySoftPackDataset):
 
         pack_infos = Dataset.from_list(pack_infos)
         return pack_infos
+
+
+class HardPackDataset(torch.utils.data.Dataset):
+    def __init__(self, datasets, target=2048, global_pack=True):
+        if global_pack:
+            num_tokens = [np.concatenate([dset.num_tokens for dset in datasets])]
+            datasets = [ConcatDataset(datasets)]
+        else:
+            num_tokens = [dset.num_tokens for dset in datasets]
+        self.datasets = datasets
+        self.target = target
+
+        pack_infos = []
+        for i, dataset in enumerate(self.datasets):
+            _info = self.get_pack_info(dataset, i, num_tokens[i])
+            pack_infos.append(_info)
+
+        _ranges_left = []
+        _ranges_right = []
+        _num_packed_samples = []
+        _indices = []
+        _max_length_per_pack = []
+        _dataset_id = []
+        for info in pack_infos:
+            _ranges_left.extend(info["begin_indices"])
+            _ranges_right.extend(info["end_indices"])
+            _num_packed_samples.append(info["num_packed_samples"])
+            _indices.extend(info["indices"])
+            _max_length_per_pack.extend(info["longest_per_pack"])
+            _dataset_id.extend(info["dataset_id"])
+
+        self.pack_infos = {
+            "begin_indices": _ranges_left,
+            "end_indices": _ranges_right,
+            "num_packed_samples": _num_packed_samples,
+            "indices": _indices,
+            "longest_per_pack": _max_length_per_pack,
+            "dataset_id": _dataset_id,
+        }
+
+    @classmethod
+    def _cal_max_length(cls, begin, end, shfl_item_begin_indices, shfl_item_end_indices):
+        left = bisect.bisect_right(shfl_item_begin_indices, begin)
+        right = bisect.bisect_left(shfl_item_end_indices, end)
+        max_length = 0
+        for i in range(left, right):
+            item_begin = shfl_item_begin_indices[i]
+            item_end = shfl_item_end_indices[i]
+            inner_l = max(begin, item_begin) - item_begin
+            inner_r = min(end, item_end) - item_begin
+            trunc_size = inner_r - inner_l
+            max_length = max(max_length, trunc_size)
+        return max_length
+
+    def get_pack_info(self, dataset, dataset_id, num_tokens):
+        # The number of data items after packing
+        num_packed_samples = int(num_tokens.sum() / self.target)
+
+        # Shuffle the order of the original dataset
+        # The packing will proceed according to the order after shuffle.
+        # Assume the following conditions hold:
+        #   (1) shfl_inds = [3, 1, 2, 0]
+        #   (2) self._ori_lens[3] + self._ori_lens[1] = max_length
+        #   (3) self._ori_lens[2] + self._ori_lens[0] = max_length
+        # Ultimately, dataset[3] and dataset[1] will be combined into a new
+        # data, and dataset[2] and dataset[0] will be combined into a new data.
+        inds = [i for i in range(len(dataset))]
+        # if seed is not None:
+        #     random.seed(seed)
+        random.shuffle(inds)
+        shfl_inds = inds
+
+        # shuffled cumulative lengths
+        shfl_lens = [num_tokens[i] for i in shfl_inds]
+        shfl_cu_lens = list(itertools.accumulate(shfl_lens))
+
+        shfl_item_begin_indices = [0] + shfl_cu_lens[:-1]
+        shfl_item_end_indices = shfl_cu_lens
+
+        max_length_per_pack = []
+        belong_dataset_ids = []
+        for i in range(num_packed_samples):
+            begin = i * self.target
+            end = (i + 1) * self.target
+            max_length_per_pack.append(
+                self._cal_max_length(begin, end, shfl_item_begin_indices, shfl_item_end_indices)
+            )
+            belong_dataset_ids.append(dataset_id)
+
+        pack_infos = {
+            "begin_indices": shfl_item_begin_indices,
+            "end_indices": shfl_item_end_indices,
+            "num_packed_samples": num_packed_samples,
+            "indices": shfl_inds,
+            "dataset_id": belong_dataset_ids,
+            "longest_per_pack": max_length_per_pack,
+        }
+
+        # pack_infos = Dataset.from_list(pack_infos)
+
+        return pack_infos
+
+    def _pack_ids_and_labels_in_range(self, begin: int, end: int):
+        """Packs ids and labels in a given range using bisection method.
+
+        Args:
+            begin: Index indicating the beginning of the range.
+            end: Index indicating the end of the range.
+
+        Returns:
+            A tuple containing packed ids, labels, and cumulative lengths.
+        """
+
+        # Use binary search to find dataset positions that fall within begin
+        # and end range
+        left = bisect.bisect_right(self.pack_infos["begin_indices"], begin)
+        right = bisect.bisect_left(self.pack_infos["end_indices"], end)
+
+        trunc_input_ids = []
+        trunc_labels = []
+        trunc_sizes = []
+
+        for i in range(left, right):
+            # Determine the real range we will cut in current original item
+            item_begin = self.pack_infos["begin_indices"][i]
+            item_end = self.pack_infos["end_indices"][i]
+
+            # Calculate exact positions within current dataset item
+            inner_l = max(begin, item_begin) - item_begin
+            inner_r = min(end, item_end) - item_begin
+
+            # Get original data and labels
+            ori_idx = self.pack_infos["indices"][i]
+            ori_dataset_id = self.pack_infos["dataset_id"][i]
+            ori_input_ids = self.datasets[ori_dataset_id][ori_idx]["input_ids"]
+            ori_labels = self.datasets[ori_dataset_id][ori_idx]["labels"]
+
+            # Add original data and labels from calculated positions
+            # to trunc_ids and trunc_labels
+            trunc_input_ids.extend(ori_input_ids[inner_l:inner_r])
+            trunc_labels.extend(ori_labels[inner_l:inner_r])
+            trunc_sizes.append(inner_r - inner_l)
+
+        # return populated lists of truncated ids, labels and their cumulative
+        # lengths
+        return trunc_input_ids, trunc_labels, trunc_sizes
+
+    def __len__(self):
+        return len(self.pack_infos["indices"])
+
+    def __getitem__(self, item):
+        """Returns a dict containing packed data in the given item.
+
+        Args:
+            item: An index to retrieve packed data.
+
+        Returns:
+            A dict including packed input_ids, labels, and cumulative_len.
+        """
+        # The cumulative length from the start position of this data
+        begin = item * self.target
+        # The cumulative length from the end position of this data
+        end = (item + 1) * self.target
+
+        # Extract data within the range from the shuffled original dataset.
+        _res = self._pack_ids_and_labels_in_range(begin, end)
+        packed_input_ids, packed_labels, num_tokens = _res
+        assert self.target == len(packed_input_ids) == len(packed_labels)
+
+        packed = {
+            "input_ids": packed_input_ids,
+            "labels": packed_labels,
+            "num_tokens": num_tokens,
+        }
+
+        return packed
