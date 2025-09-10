@@ -4,6 +4,7 @@ from concurrent.futures import ProcessPoolExecutor, wait
 from functools import reduce
 from itertools import chain
 from pathlib import Path
+from shutil import copy, copytree
 from typing import Annotated, Generator, Literal, cast
 
 import torch
@@ -645,8 +646,10 @@ class BaseModel(nn.Module):
             hf_dir (str): The directory to save the model.
             save_dtype (torch.dtype): The dtype to save the model parameters, bfloat16 or float8.
         """
-        # if self._hf_path is None:
-        #     raise RuntimeError("Please call from_hf() before save_hf().")
+        if self._hf_path is None and self.config.hf_config is None:
+            raise NotImplementedError(
+                "The model is not loaded from Huggingface, and the `hf_config` property is not implemented, so it cannot be saved in Huggingface format."
+            )
 
         if isinstance(hf_dir, str):
             hf_dir = Path(hf_dir)
@@ -757,20 +760,20 @@ class BaseModel(nn.Module):
         weight_map = reduce(lambda x, y: x | y, weight_map_list)
 
         if not dist.is_initialized() or dist.get_rank() == 0:
-            # for file in cast(Path, self._hf_path).iterdir():
-            #     if file.suffix != ".safetensors":
-            #         # Copy the model config and tokenizer files to the save path
-            #         target_path = hf_dir / file.name
-            #         if file.is_file():
-            #             copy(file, target_path)
-            #         else:
-            #             copytree(file, target_path)
+            if self.config.hf_config is not None:
+                self.config.hf_config.save_pretrained(hf_dir)
+            elif self._hf_path is not None:
+                for file in cast(Path, self._hf_path).iterdir():
+                    if file.suffix != ".safetensors":
+                        # Copy the model config and tokenizer files to the save path
+                        target_path = hf_dir / file.name
+                        if file.is_file():
+                            copy(file, target_path)
+                        else:
+                            copytree(file, target_path)
 
-            try:
-                self.config.save_hf(hf_dir)
-            except NotImplementedError as e:
-                logger.error(f"Model {self.config.__class__.__name__} does not support saving to Huggingface. {e}")
-                raise e
+            else:
+                raise RuntimeError("Internal Error, both self.config.hf_config and self._hf_path are None")
 
             with open(hf_dir / "model.safetensors.index.json", "w") as f:
                 index = {"weight_map": weight_map, "metadata": {}}

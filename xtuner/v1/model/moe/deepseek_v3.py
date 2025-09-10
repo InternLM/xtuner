@@ -102,11 +102,9 @@ class DeepSeekV3Config(MoEConfig):
 
     @classmethod
     def from_hf(cls, hf_path: str | Path) -> "DeepSeekV3Config":
-        from transformers.models.deepseek_v3 import DeepseekV3Config as HFConfig
+        cfg = HFDeepseekV3Config.from_pretrained(hf_path)
 
-        cfg = HFConfig.from_pretrained(hf_path)
-
-        assert isinstance(cfg, HFConfig)
+        assert isinstance(cfg, HFDeepseekV3Config)
 
         config = cls(
             vocab_size=cfg.vocab_size,
@@ -159,11 +157,6 @@ class DeepSeekV3Config(MoEConfig):
         )
 
         return config
-
-    @property
-    def can_save_hf(self) -> bool:
-        """Check if the configuration can be saved in HuggingFace format."""
-        return True
 
     @property
     def hf_config(self):
