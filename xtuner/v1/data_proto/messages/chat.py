@@ -121,6 +121,9 @@ class ChatMsg(BaseModel):
 
 
 def process_message(messages: List[ChatMsg], chat_template: ChatTemplate):
+    if not messages:
+        return messages
+
     if chat_template.default_system is not None and messages[0].role != "system":
         messages.insert(0, ChatMsg(role="system", content=chat_template.default_system, loss=False))
 

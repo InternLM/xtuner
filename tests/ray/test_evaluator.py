@@ -18,10 +18,12 @@ TEST_DATA_PATH = os.environ["ROLLOUT_TEST_DATA_PATH"]
 
 class TestEvaluator(unittest.TestCase):
 
+    @classmethod
     def setUpClass(cls) -> None:
         # RL默认使用FA3
         os.environ["XTUNER_USE_FA3"] = "1"
 
+    @classmethod
     def tearDownClass(cls) -> None:
         del os.environ["XTUNER_USE_FA3"]
 
