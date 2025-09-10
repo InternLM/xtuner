@@ -1,1 +1,0 @@
-from .text import PretrainTokenizeFunction

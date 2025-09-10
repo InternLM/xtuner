@@ -1,11 +1,10 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-import bisect
-import itertools
 import multiprocessing
 import random
 from concurrent.futures import ProcessPoolExecutor
 from functools import partial
 from multiprocessing import shared_memory
+from typing import Sized
 
 import numpy as np
 import torch
@@ -313,177 +312,226 @@ class ExpandSoftPackDataset(_LegacySoftPackDataset):
         return pack_infos
 
 
-class HardPackDataset(torch.utils.data.Dataset):
-    def __init__(self, datasets, target=2048, global_pack=True):
-        if global_pack:
-            num_tokens = [np.concatenate([dset.num_tokens for dset in datasets])]
-            datasets = [ConcatDataset(datasets)]
+def _hard_pack_chunk_core(
+    i_chunk: list[int],
+    *,
+    dataset_id: int,
+    pack_max_length: int,
+    cu: np.ndarray,
+    inds_arr: np.ndarray,
+) -> list[dict]:
+    lengths = cu[1:] - cu[:-1]
+    out: list[dict] = []
+    for i in i_chunk:
+        begin = i * pack_max_length
+        end = (i + 1) * pack_max_length
+
+        s_idx = int(np.searchsorted(cu, begin, side="right") - 1)
+        e_idx = int(np.searchsorted(cu, end - 1, side="right") - 1)
+
+        s_off = int(begin - cu[s_idx])
+        e_off = int(end - cu[e_idx])
+
+        if s_idx == e_idx:
+            longest = int(e_off - s_off)
         else:
-            num_tokens = [dset.num_tokens for dset in datasets]
-        self.datasets = datasets
-        self.target = target
+            len_first = int(lengths[s_idx] - s_off)
+            len_last = int(e_off)
+            mid_max = int(lengths[s_idx + 1 : e_idx].max()) if e_idx - s_idx > 1 else 0
+            longest = max(len_first, len_last, mid_max)
 
-        pack_infos = []
-        for i, dataset in enumerate(self.datasets):
-            _info = self.get_pack_info(dataset, i, num_tokens[i])
-            pack_infos.append(_info)
+        out.append(
+            {
+                "dataset_id": dataset_id,
+                "indices": inds_arr[s_idx : e_idx + 1].tolist(),
+                "start_offset": s_off,
+                "end_offset": e_off,
+                "longest": longest,
+            }
+        )
+    return out
 
-        _ranges_left = []
-        _ranges_right = []
-        _num_packed_samples = []
-        _indices = []
-        _max_length_per_pack = []
-        _dataset_id = []
-        for info in pack_infos:
-            _ranges_left.extend(info["begin_indices"])
-            _ranges_right.extend(info["end_indices"])
-            _num_packed_samples.append(info["num_packed_samples"])
-            _indices.extend(info["indices"])
-            _max_length_per_pack.extend(info["longest_per_pack"])
-            _dataset_id.extend(info["dataset_id"])
 
-        self.pack_infos = {
-            "begin_indices": _ranges_left,
-            "end_indices": _ranges_right,
-            "num_packed_samples": _num_packed_samples,
-            "indices": _indices,
-            "longest_per_pack": _max_length_per_pack,
-            "dataset_id": _dataset_id,
+def _hard_pack_chunk(
+    i_chunk: list[int],
+    *,
+    dataset_id: int,
+    pack_max_length: int,
+    cu_shm_name: str,
+    cu_shape,
+    cu_dtype,
+    inds_shm_name: str,
+    inds_shape,
+    inds_dtype,
+):
+    existing_cu = shared_memory.SharedMemory(name=cu_shm_name)
+    cu: np.ndarray = np.ndarray(cu_shape, dtype=cu_dtype, buffer=existing_cu.buf)
+
+    existing_inds = shared_memory.SharedMemory(name=inds_shm_name)
+    inds_arr: np.ndarray = np.ndarray(inds_shape, dtype=inds_dtype, buffer=existing_inds.buf)
+
+    out = _hard_pack_chunk_core(
+        i_chunk,
+        dataset_id=dataset_id,
+        pack_max_length=pack_max_length,
+        cu=cu,
+        inds_arr=inds_arr,
+    )
+
+    existing_cu.close()
+    existing_inds.close()
+    return out
+
+
+class HardPackDataset(_LegacySoftPackDataset):
+    def __init__(
+        self, datasets, pack_max_length=2048, global_pack=False, seed: int | None = None, pack_workers: int = 1
+    ):
+        self.pack_workers = pack_workers
+        super().__init__(
+            datasets=datasets,
+            pack_max_length=pack_max_length,
+            global_pack=global_pack,
+            seed=seed,
+        )
+
+    def _get_single_pack_info(self, begin: int, end: int, cu_seq_lens: np.ndarray, inds: list[int]) -> dict:
+        # cu_seq_lens: e.g. [0, 1241, 2141, 3141], strictly increasing
+        cu = np.asarray(cu_seq_lens, dtype=np.int64).reshape(-1)
+        if cu.ndim != 1 or cu.size < 2:
+            raise ValueError(
+                "cu_seq_lens must be a 1-D increasing sequence with at least two elements (including 0 and total)."
+            )
+
+        total = int(cu[-1])
+        if not (0 <= begin < end <= total):
+            raise ValueError(f"Invalid range: begin={begin}, end={end}, total={total}")
+
+        # Find the sample index containing 'begin' (interval [cu[i], cu[i+1]))
+        start_sample_idx = int(np.searchsorted(cu, begin, side="right") - 1)
+        # Find the sample index containing 'end - 1'
+        end_sample_idx = int(np.searchsorted(cu, end - 1, side="right") - 1)
+
+        # Offsets inside the start/end samples
+        start_offset = int(begin - cu[start_sample_idx])
+        end_offset = int(end - cu[end_sample_idx])
+
+        # Max original sample length among [start_sample_idx, end_sample_idx]
+        lengths = cu[1:] - cu[:-1]
+        if start_sample_idx == end_sample_idx:
+            # If the interval falls entirely within a single sample, the maximum length equals that sample’s
+            # sliced segment length.
+            longest = int(end_offset - start_offset)
+        else:
+            # The effective length of the first sample is its original length minus the start offset.
+            len_first = int(lengths[start_sample_idx] - start_offset)
+            # The effective length of the last sample is the end_offset.
+            len_last = int(end_offset)
+            # For middle samples, take the maximum of their original lengths (0 if there are no middle samples).
+            mid_max = (
+                int(lengths[start_sample_idx + 1 : end_sample_idx].max())
+                if end_sample_idx - start_sample_idx > 1
+                else 0
+            )
+            longest = max(len_first, len_last, mid_max)
+
+        return {
+            "indices": inds[start_sample_idx : end_sample_idx + 1],
+            "start_offset": start_offset,
+            "end_offset": end_offset,
+            "longest": longest,
         }
 
-    @classmethod
-    def _cal_max_length(cls, begin, end, shfl_item_begin_indices, shfl_item_end_indices):
-        left = bisect.bisect_right(shfl_item_begin_indices, begin)
-        right = bisect.bisect_left(shfl_item_end_indices, end)
-        max_length = 0
-        for i in range(left, right):
-            item_begin = shfl_item_begin_indices[i]
-            item_end = shfl_item_end_indices[i]
-            inner_l = max(begin, item_begin) - item_begin
-            inner_r = min(end, item_end) - item_begin
-            trunc_size = inner_r - inner_l
-            max_length = max(max_length, trunc_size)
-        return max_length
+    def get_pack_infos(self, dataset: Sized, dataset_id: int, num_tokens: np.ndarray):
+        # number of packed samples
+        num_packed_samples = int(num_tokens.sum() / self.pack_max_length)
 
-    def get_pack_info(self, dataset, dataset_id, num_tokens):
-        # The number of data items after packing
-        num_packed_samples = int(num_tokens.sum() / self.target)
-
-        # Shuffle the order of the original dataset
-        # The packing will proceed according to the order after shuffle.
-        # Assume the following conditions hold:
-        #   (1) shfl_inds = [3, 1, 2, 0]
-        #   (2) self._ori_lens[3] + self._ori_lens[1] = max_length
-        #   (3) self._ori_lens[2] + self._ori_lens[0] = max_length
-        # Ultimately, dataset[3] and dataset[1] will be combined into a new
-        # data, and dataset[2] and dataset[0] will be combined into a new data.
-        inds = [i for i in range(len(dataset))]
-        # if seed is not None:
-        #     random.seed(seed)
-        random.shuffle(inds)
+        # shuffled indices
+        inds = list(range(len(dataset)))
+        self.random.shuffle(inds)
         shfl_inds = inds
 
-        # shuffled cumulative lengths
-        shfl_lens = [num_tokens[i] for i in shfl_inds]
-        shfl_cu_lens = list(itertools.accumulate(shfl_lens))
+        # shuffled cumulative lengths with leading 0
+        shfl_lens: np.ndarray = np.take(num_tokens, shfl_inds)
+        shfl_cu_lens = np.cumsum(shfl_lens, dtype=np.int64)
+        shfl_cu_lens = np.insert(shfl_cu_lens, 0, 0).astype(np.int64, copy=False)
 
-        shfl_item_begin_indices = [0] + shfl_cu_lens[:-1]
-        shfl_item_end_indices = shfl_cu_lens
+        # shared memory for cu and inds
+        cu_arr = np.asarray(shfl_cu_lens, dtype=np.int64).reshape(-1)
+        inds_arr = np.asarray(shfl_inds, dtype=np.int64).reshape(-1)
 
-        max_length_per_pack = []
-        belong_dataset_ids = []
-        for i in range(num_packed_samples):
-            begin = i * self.target
-            end = (i + 1) * self.target
-            max_length_per_pack.append(
-                self._cal_max_length(begin, end, shfl_item_begin_indices, shfl_item_end_indices)
+        # chunk tasks
+        chunk_size = 10000
+        i_all = list(range(num_packed_samples))
+        chunks = [i_all[i : i + chunk_size] for i in range(0, len(i_all), chunk_size)]
+
+        pack_infos_list = []
+
+        if self.pack_workers > 1:
+            # Use fork to inherit read-only arrays; no extra shared memory copy needed
+            mp_context = multiprocessing.get_context("fork")
+            fn = partial(
+                _hard_pack_chunk_core,
+                dataset_id=dataset_id,
+                pack_max_length=self.pack_max_length,
+                cu=cu_arr,
+                inds_arr=inds_arr,
             )
-            belong_dataset_ids.append(dataset_id)
+            with ProcessPoolExecutor(max_workers=self.pack_workers, mp_context=mp_context) as ex:
+                for res in tqdm(ex.map(fn, chunks), total=len(chunks)):
+                    pack_infos_list.extend(res)
+        else:
+            # single-process path, reuse the same core
+            for i_chunk in tqdm(chunks, total=len(chunks)):
+                pack_infos_list.extend(
+                    _hard_pack_chunk_core(
+                        i_chunk,
+                        dataset_id=dataset_id,
+                        pack_max_length=self.pack_max_length,
+                        cu=cu_arr,
+                        inds_arr=inds_arr,
+                    )
+                )
 
-        pack_infos = {
-            "begin_indices": shfl_item_begin_indices,
-            "end_indices": shfl_item_end_indices,
-            "num_packed_samples": num_packed_samples,
-            "indices": shfl_inds,
-            "dataset_id": belong_dataset_ids,
-            "longest_per_pack": max_length_per_pack,
-        }
-
-        # pack_infos = Dataset.from_list(pack_infos)
-
+        pack_infos = Dataset.from_list(pack_infos_list)
         return pack_infos
 
-    def _pack_ids_and_labels_in_range(self, begin: int, end: int):
-        """Packs ids and labels in a given range using bisection method.
-
-        Args:
-            begin: Index indicating the beginning of the range.
-            end: Index indicating the end of the range.
-
-        Returns:
-            A tuple containing packed ids, labels, and cumulative lengths.
-        """
-
-        # Use binary search to find dataset positions that fall within begin
-        # and end range
-        left = bisect.bisect_right(self.pack_infos["begin_indices"], begin)
-        right = bisect.bisect_left(self.pack_infos["end_indices"], end)
-
-        trunc_input_ids = []
-        trunc_labels = []
-        trunc_sizes = []
-
-        for i in range(left, right):
-            # Determine the real range we will cut in current original item
-            item_begin = self.pack_infos["begin_indices"][i]
-            item_end = self.pack_infos["end_indices"][i]
-
-            # Calculate exact positions within current dataset item
-            inner_l = max(begin, item_begin) - item_begin
-            inner_r = min(end, item_end) - item_begin
-
-            # Get original data and labels
-            ori_idx = self.pack_infos["indices"][i]
-            ori_dataset_id = self.pack_infos["dataset_id"][i]
-            ori_input_ids = self.datasets[ori_dataset_id][ori_idx]["input_ids"]
-            ori_labels = self.datasets[ori_dataset_id][ori_idx]["labels"]
-
-            # Add original data and labels from calculated positions
-            # to trunc_ids and trunc_labels
-            trunc_input_ids.extend(ori_input_ids[inner_l:inner_r])
-            trunc_labels.extend(ori_labels[inner_l:inner_r])
-            trunc_sizes.append(inner_r - inner_l)
-
-        # return populated lists of truncated ids, labels and their cumulative
-        # lengths
-        return trunc_input_ids, trunc_labels, trunc_sizes
-
     def __len__(self):
-        return len(self.pack_infos["indices"])
+        return len(self.pack_infos)
 
     def __getitem__(self, item):
-        """Returns a dict containing packed data in the given item.
+        info = self.pack_infos[item]
+        dataset_id = info["dataset_id"]
+        ds = self.datasets[dataset_id]
 
-        Args:
-            item: An index to retrieve packed data.
+        indices = info["indices"]
+        s_off = info["start_offset"]
+        e_off = info["end_offset"]
 
-        Returns:
-            A dict including packed input_ids, labels, and cumulative_len.
-        """
-        # The cumulative length from the start position of this data
-        begin = item * self.target
-        # The cumulative length from the end position of this data
-        end = (item + 1) * self.target
+        packed_list: list[dict] = []
 
-        # Extract data within the range from the shuffled original dataset.
-        _res = self._pack_ids_and_labels_in_range(begin, end)
-        packed_input_ids, packed_labels, num_tokens = _res
-        assert self.target == len(packed_input_ids) == len(packed_labels)
+        for i in range(len(indices)):
+            idx = indices[i]
+            sample = ds[idx]
+            ids = sample["input_ids"]
+            labs = sample.get("labels", None)
 
-        packed = {
-            "input_ids": packed_input_ids,
-            "labels": packed_labels,
-            "num_tokens": num_tokens,
-        }
+            st = 0 if i != 0 else s_off
+            ed = len(ids) if i != len(indices) - 1 else e_off
 
-        return packed
+            packed_list.append(
+                {
+                    "input_ids": ids[st:ed],
+                    "labels": labs[st:ed] if labs is not None else None,
+                    "num_tokens": ed - st,
+                }
+            )
+        assert (total_num_tokens := sum(i["num_tokens"] for i in packed_list)) == self.pack_max_length, (
+            f"Internal Error! Found size: {total_num_tokens} mismatch after hard packing."
+        )
+        return packed_list
+
+    def get_state_dict(self):
+        return {}
+
+    def load_state_dict(self, state_dict): ...

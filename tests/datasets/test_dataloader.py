@@ -68,7 +68,7 @@ def _create_fake_dataset(tmp_path: Path, dataset_num: int = 5, max_depth: int = 
         return
 
     for _ in range(dataset_num):
-        _create_fake_dataset(tmp_path / str(max_depth), 1, max_depth - 1)
+        _create_fake_dataset(tmp_path / str(max_depth), 1, max_depth - 1, dup_times)
 
 
 
@@ -149,15 +149,21 @@ def test_consistant():
 
 
 @pytest.mark.parametrize(
-    "pack_level,num_workers,group_by_length",
+    "pack_level,num_workers,group_by_length,pack_workers",
     [
-        ("none", 0, False),
-        ("soft", 0, True),
-        ("soft", 4, True),
-        ("soft", 4, True),
+        ("hard", 0, False, 1),
+        ("hard", 0, True, 1),
+        ("hard", 0, True, 1),
+        ("hard", 4, True, 1),
+        ("hard", 4, True, 3),
+        ("none", 0, False, 1),
+        ("soft", 0, True, 1),
+        ("soft", 4, True, 1),
+        ("soft", 4, True, 1),
+        ("soft", 4, True, 3),
     ]
 )
-def test_dataloader_resume_single_process(tmp_path, pack_level, num_workers, group_by_length):
+def test_dataloader_resume_single_process(tmp_path, pack_level, num_workers, group_by_length, pack_workers):
     RESUME_ITER = 10
     AFTER_RESUME_ITER = 10
     BATCH_SIZE = 8
@@ -173,7 +179,7 @@ def test_dataloader_resume_single_process(tmp_path, pack_level, num_workers, gro
     dataset_configs = [
         {
             "dataset": DatasetConfig(anno_path=str(data_dir1)),
-            "tokenize_fn": FTDPTokenizeFnConfig()
+            "tokenize_fn": FTDPTokenizeFnConfig(max_length=1024)
         },
     ]
 
@@ -182,6 +188,7 @@ def test_dataloader_resume_single_process(tmp_path, pack_level, num_workers, gro
         pack_level=pack_level,
         num_workers=num_workers,
         group_by_length=group_by_length,
+        pack_workers=pack_workers,
     )
 
     datasets = build_datasets(
@@ -280,7 +287,7 @@ def _test_resume_spmd(
     os.environ["LOCAL_RANK"] = str(rank)
     os.environ["WORLD_SIZE"] = str(world_size)
     os.environ["MASTER_ADDR"] = "localhost"
-    os.environ["MASTER_PORT"] = "29500"
+    os.environ["MASTER_PORT"] = "29505"
 
 
     torch.distributed.init_process_group(backend="nccl", rank=rank, world_size=world_size)
@@ -368,6 +375,9 @@ def _test_resume_spmd(
 @pytest.mark.parametrize(
     "pack_level,num_workers,group_by_length",
     [
+        ("hard", 0, True),
+        ("hard", 0, False),
+        ("hard", 4, True),
         ("none", 0, False),
         ("soft", 0, True),
         ("soft", 4, True),
@@ -379,9 +389,9 @@ def test_dataloader_resume_multi_process(tmp_path, pack_level, num_workers, grou
     BATCH_SIZE = 8
 
     data_dir1 = tmp_path / "data1"
-    _create_fake_dataset(data_dir1 / f"depth1", dataset_num=3, max_depth=1, dup_times=3)
-    _create_fake_dataset(data_dir1 / f"depth2", dataset_num=3, max_depth=2, dup_times=2)
-    _create_fake_dataset(data_dir1 / f"depth3", dataset_num=3, max_depth=3, dup_times=3)
+    _create_fake_dataset(data_dir1 / f"depth1", dataset_num=3, max_depth=1, dup_times=10)
+    _create_fake_dataset(data_dir1 / f"depth2", dataset_num=3, max_depth=2, dup_times=8)
+    _create_fake_dataset(data_dir1 / f"depth3", dataset_num=3, max_depth=3, dup_times=9)
 
     # 1. Test resuming with the same world size
     dataloader_config = DataloaderConfig(
@@ -394,7 +404,7 @@ def test_dataloader_resume_multi_process(tmp_path, pack_level, num_workers, grou
     dataset_configs = [
         {
             "dataset": DatasetConfig(anno_path=str(data_dir1)),
-            "tokenize_fn": FTDPTokenizeFnConfig()
+            "tokenize_fn": FTDPTokenizeFnConfig(max_length=1024)
         },
     ]
 
