@@ -40,7 +40,7 @@ class OpenaiTokenizeFunction(CachableTokenizeFunction[DataItem]):
         self.max_length = max_length
 
     def __call__(self, item: dict | list, **kwargs) -> DataItem:
-        if "messages" in item:
+        if isinstance(item, dict) and "messages" in item:
             item = item["messages"]
         messages = ChatMessages(messages=item)
         tokenized = messages.tokenize(self.tokenizer, self.chat_template)
