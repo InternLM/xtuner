@@ -20,6 +20,7 @@ from xtuner.v1.train.trainer import Trainer
 from xtuner.v1.utils.device import get_device
 from xtuner.v1.loss import CELossConfig
 import argparse
+from xtuner.v1.float8.config import Float8Config, ScalingGranularity
 
 
 
@@ -217,9 +218,14 @@ def main():
     args = parse_args()
     os.environ["DG_CACHE_DIR"] = f"/tmp/.adaptive_gemm-{os.getenv('RANK', '0')}"
 
+    float8_cfg = Float8Config(
+        scaling_granularity_gemm=ScalingGranularity.TILEWISE,
+        scaling_granularity_grouped_gemm=ScalingGranularity.TILEWISE,
+    )
     moe_cfgs = [
         (Qwen3MoE30BA3Config(balancing_loss_cfg=BalancingLossConfig()), "ep1"),
         (Qwen3MoE30BA3Config(ep_size=8, dispatcher="all2all"), "ep8"),
+        # (Qwen3MoE30BA3Config(balancing_loss_cfg=BalancingLossConfig(), float8_cfg=float8_cfg), "ep1"),
     ]
     for moe_cfg, name in moe_cfgs:
         optim_cfg = AdamWConfig(lr=6e-05)
@@ -243,6 +249,7 @@ def main():
         )
         work_dir = f"{args.work_dir}-{name}"
         loss_cfg = CELossConfig(mode="chunk", chunk_size=1024, ignore_idx=-100)
+        # loss_cfg = CELossConfig(mode="liger", chunk_size=1024, ignore_idx=-100)
         trainer = Trainer(
             load_from=QWEN3_MOE_PATH,
             model_cfg=moe_cfg,
@@ -257,6 +264,7 @@ def main():
             total_epoch=1,
             work_dir=work_dir,
             seed=0,
+            # profile_step=5,
         )
         trainer.fit()
         if dist.get_rank() == 0:
