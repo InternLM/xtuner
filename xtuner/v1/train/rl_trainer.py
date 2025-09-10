@@ -303,6 +303,7 @@ class RLTrainer:
                 )
             )
             ray.get(self._train_controller.offload.remote(target="optimizer"))
+            self._maybe_save_hf()
             ray.get(self._rollout_env_controller.onload_weights.remote())
             ray.get(self._train_controller.update_weights.remote())
             self.logger.info("update weights done!!!")
@@ -313,7 +314,6 @@ class RLTrainer:
                 scores = ray.get(self._evaluator.run.remote(sample_params=self._evaluator_sample_params))
                 self.logger.info(f"evaluate idx {rollout_idx} scores {scores}")
             self._cur_epoch += 1
-            self._maybe_save_hf()
 
     # TODO: advantage 是在 DataFlow 里算好，还是在 train controller 里算？
     # 因为可能有根据 advantage 来判断数据能否进 rl 训练的需求。暂时先放在这
@@ -404,6 +404,7 @@ class RLTrainer:
             return
 
         save_hf_path = self.exp_dir / f"hf-{self.cur_epoch}"
+        self.logger.info(f"save_hf_path: {save_hf_path}")
         self.meta.latest_exp.hf_checkpoint_list.append(str(save_hf_path))
 
         if self._hf_max_keep is not None and len(self.meta.latest_exp.hf_checkpoint_list) > self._hf_max_keep:

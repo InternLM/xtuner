@@ -203,5 +203,6 @@ class TrainingController:
         return
 
     def save_hf(self, hf_dir: str, save_dtype: torch.dtype = torch.bfloat16):
-        ray.get(self.workers[0].save_hf.remote(hf_dir, save_dtype))  # type: ignore
+        handles = [worker.save_hf.remote(hf_dir, save_dtype) for worker in self.workers]  # type: ignore
+        ray.get(handles)
         return
