@@ -13,10 +13,9 @@ logger = get_logger()
 
 # https://github.com/volcengine/verl/blob/main/verl/utils/dataset/rl_dataset.py
 class RLTokenizeFn(CachableTokenizeFunction[RLTextDataItem]):
-    def __init__(self, tokenizer_fn: CachableTokenizeFunction, max_length: int | None = None, *args, **kwargs):
+    def __init__(self, tokenizer_fn: CachableTokenizeFunction,  *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.tokenizer_fn = tokenizer_fn
-        self.max_length = max_length
 
     def __call__(self, item: dict, **kwargs) -> RLTextDataItem:
         """example:
@@ -59,7 +58,7 @@ class RLTokenizeFn(CachableTokenizeFunction[RLTextDataItem]):
             extra_info["image"] = item["image"]
             extra_info["image_wh"] = item["image_wh"]
         else:
-            num_tokens = self.tokenizer_fn(item)["num_tokens"]
+            num_tokens = self.tokenizer_fn(messages)["num_tokens"]
 
         rl_out_data = {
             # "input_ids": input_ids,
@@ -79,12 +78,12 @@ class RLTokenizeFn(CachableTokenizeFunction[RLTextDataItem]):
 
 class RLTokenizeFnConfig(BaseModel):
     model_config = ConfigDict(title="Base RL dataset config for xtuner", extra="allow")
-    sft_tokenizer_fn_config: BaseModel  # TODO: 如何写 typehint
+    sft_tokenize_fn_cfg: BaseModel  # TODO: 如何写 typehint
 
     def build(
         self, tokenizer, tokenizer_hash: str | None = None, anno_name: str | None = None, **kwargs
     ) -> RLTokenizeFn:
-        sft_tokenizer_fn = self.sft_tokenizer_fn_config.build(
+        sft_tokenizer_fn = self.sft_tokenize_fn_cfg.build(
             tokenizer=tokenizer,
             tokenizer_hash=tokenizer_hash,
             anno_name=anno_name,
@@ -92,5 +91,4 @@ class RLTokenizeFnConfig(BaseModel):
         )
         return RLTokenizeFn(
             sft_tokenizer_fn,
-            max_length=self.max_length,
         )

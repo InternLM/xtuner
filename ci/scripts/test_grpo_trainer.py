@@ -110,7 +110,7 @@ def main(args):
             "dataset": DatasetConfig(name="gsm8k",
                                      anno_path=args.data_path,
                                      sample_ratio=1.0),
-            "tokenize_fn": RLTokenizeFnConfig(sft_tokenizer_fn_config=sft_tokenize_fn_cfg),
+            "tokenize_fn": RLTokenizeFnConfig(sft_tokenize_fn_cfg=sft_tokenize_fn_cfg),
         },
     ]
     eval_dataset_cfg = [
@@ -118,7 +118,7 @@ def main(args):
             "dataset": DatasetConfig(name="gsm8k",
                                      anno_path=args.eval_data_path,
                                      sample_ratio=1.0),
-            "tokenize_fn": RLTokenizeFnConfig(sft_tokenizer_fn_config=sft_tokenize_fn_cfg),
+            "tokenize_fn": RLTokenizeFnConfig(sft_tokenize_fn_cfg=sft_tokenize_fn_cfg),
         },
     ]
     dataloader_cfg = DataloaderConfig(
