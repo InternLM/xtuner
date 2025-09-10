@@ -1,10 +1,13 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-from typing import Annotated, Literal, cast
+from typing import Annotated, Any, Literal, cast
 
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 from cyclopts import Parameter
+from liger_kernel.transformers.fused_linear_cross_entropy import (
+    LigerFusedLinearCrossEntropyLoss,
+)
 from pydantic import BaseModel, ConfigDict
 from torch.distributed.device_mesh import DeviceMesh
 from typing_extensions import Self
@@ -27,11 +30,16 @@ class CELossConfig(BaseLossConfig):
         loss_reduction (str): The reduction mode for the loss. Options are "token", "sample", and "square".
     """
 
+    mode: Annotated[Literal["eager", "chunk", "liger"], Parameter(help="loss calculation mode")] = "eager"  # type: ignore
     loss_reduction: Annotated[Literal["token", "sample", "square"], Parameter(help="loss reduction mode")] = "token"
 
     @property
     def loss_ctx_cls(self) -> type["CELossContext"]:
         return CELossContext
+
+    def model_post_init(self, __context: Any) -> None:
+        if self.mode == "liger":
+            assert self.loss_reduction == "token", "Currently, cannot use liger kernel with sample or square reduction"
 
 
 class CELossKwargs(BaseLossKwargs):
@@ -170,3 +178,29 @@ class CELossContext(BaseLossContext[CELossContextInputItem]):
             loss = (loss * loss_weight).sum()
 
         return loss, logits
+
+    def chunk_mode(
+        self,
+        hidden_states: torch.Tensor,
+        head_weight: torch.Tensor,
+        head_bias: torch.Tensor | None,
+        loss_kwargs: CELossKwargs,
+    ):
+        if self.loss_cfg.mode == "chunk":
+            return super().chunk_mode(hidden_states, head_weight, head_bias, loss_kwargs)
+
+        assert self.loss_cfg.mode == "liger"
+
+        shifted_labels = loss_kwargs.shifted_labels  # (bs, seq_len)
+        loss_weight = loss_kwargs.loss_weight  # (bs, seq_len)
+
+        bs, seq, dim = hidden_states.shape
+        hidden_states = hidden_states.reshape(bs * seq, dim)
+        shifted_labels = shifted_labels.flatten()
+        # liger kernel dont support reduction=="none"
+        loss_fct = LigerFusedLinearCrossEntropyLoss(reduction="sum")
+        loss = loss_fct(head_weight, hidden_states, shifted_labels)
+        mask = loss_weight != 0
+        w = loss_weight.sum() / mask.sum()
+        loss = loss * w
+        return loss, None
