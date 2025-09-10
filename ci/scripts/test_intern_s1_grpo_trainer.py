@@ -6,7 +6,6 @@ from transformers import AutoTokenizer
 
 from xtuner.v1.model import InternS1MiniConfig
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
-from xtuner.v1.model.dense.qwen3 import Qwen3Dense8BConfig
 from xtuner.v1.ray.accelerator import AcceleratorResourcesConfig
 from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.ray.dataflow import DataFlowConfig, ReplayBufferConfig
@@ -118,6 +117,7 @@ def main(args):
         collator='fake_collator',
         pack_level='none',
         num_workers=8,
+        group_by_length=False,
     )
     tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True)
     evaluator_cfg = EvaluatorConfig(

@@ -40,6 +40,7 @@ TRAIN_DATA_PATH = os.environ["ROLLOUT_DATA_PATH"]
 TEST_DATA_PATH = os.environ["ROLLOUT_TEST_DATA_PATH"]
 os.environ['XTUNER_USE_FA3'] = "1"
 
+
 def parse_args():
     parser = argparse.ArgumentParser(description="VLLM Rollout Test Script")
     parser.add_argument("--total-epochs", type=int)
@@ -76,7 +77,7 @@ def main(args):
         num_accelerators_per_worker=1,
         num_cpus_per_worker=12,
         num_workers=args.num_workers,
-        cpu_memory_per_worker=16 * 1024**3,  # 16 GB
+        cpu_memory_per_worker=16 * 1024 ** 3,  # 16 GB
     )
     rollout_config = RolloutConfig(
         env="test_env",
@@ -86,7 +87,7 @@ def main(args):
         rollout_cross_node_comm=False,
         tensor_parallel_size=2,
         expert_parallel_size=1,
-        gpus_per_node=args.gpus_per_node, # gpu: 8, npu: 16
+        gpus_per_node=args.gpus_per_node,  # gpu: 8, npu: 16
         dtype="bfloat16",
         skip_load_weights=False,
     )
@@ -106,18 +107,18 @@ def main(args):
     sft_tokenize_fn_cfg = OpenaiTokenizeFnConfig(max_length=args.max_prompt_length, chat_template='qwen3')
     train_dataset_cfg = [
         {
-        "dataset": DatasetConfig(name="gsm8k",
-                                 anno_path=args.data_path,
-                                 sample_ratio=1.0),
-        "tokenize_fn": RLTokenizeFnConfig(sft_tokenizer_fn_config=sft_tokenize_fn_cfg),
+            "dataset": DatasetConfig(name="gsm8k",
+                                     anno_path=args.data_path,
+                                     sample_ratio=1.0),
+            "tokenize_fn": RLTokenizeFnConfig(sft_tokenizer_fn_config=sft_tokenize_fn_cfg),
         },
     ]
     eval_dataset_cfg = [
         {
-        "dataset": DatasetConfig(name="gsm8k",
-                                 anno_path=args.eval_data_path,
-                                 sample_ratio=1.0),
-        "tokenize_fn": RLTokenizeFnConfig(sft_tokenizer_fn_config=sft_tokenize_fn_cfg),
+            "dataset": DatasetConfig(name="gsm8k",
+                                     anno_path=args.eval_data_path,
+                                     sample_ratio=1.0),
+            "tokenize_fn": RLTokenizeFnConfig(sft_tokenizer_fn_config=sft_tokenize_fn_cfg),
         },
     ]
     dataloader_cfg = DataloaderConfig(
@@ -128,9 +129,9 @@ def main(args):
     tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True)
     evaluator_cfg = EvaluatorConfig(
         dataset_cfg=eval_dataset_cfg,
-        tokenizer=tokenizer, 
+        tokenizer=tokenizer,
         max_concurrent=args.max_concurrent,
-        eval_sample_ratio=args.evaluate_ratio, 
+        eval_sample_ratio=args.evaluate_ratio,
         evaluate_step=args.evaluate_step,
         compute_metric_func=None
     )
@@ -153,7 +154,7 @@ def main(args):
             use_kl_loss=True,
             kl_loss_coef=0.001,
             kl_loss_type="low_var_kl",
-            mode="chunk", 
+            mode="chunk",
             chunk_size=512),
         lr_cfg=LRConfig(lr_type="constant", warmup_ratio=0, lr_min=1e-6),
         fsdp_cfg=FSDPConfig(

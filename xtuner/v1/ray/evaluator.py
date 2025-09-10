@@ -49,7 +49,7 @@ class EvaluatorConfig(BaseModel):
         config = EvaluatorConfig(
             dataset_cfg=[{
                 "dataset": DatasetConfig(name="gsm8k", anno_path="test_data.json"),
-                "tokenize_fn": RLTextTokenizeFnConfig(max_length=512)
+                "tokenize_fn": RLTokenizeFnConfig(max_length=512)
             }],
             tokenizer=AutoTokenizer.from_pretrained("model_path"),
             max_concurrent=32,

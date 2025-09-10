@@ -46,7 +46,7 @@ if __name__ == "__main__":
 
             image_path = os.path.join("images", f"{split}_{idx}.jpg")
             image.save(os.path.join(args.out_dir, image_path))
-
+            image_wh = [[image.width, image.height]]
             data = {
                 "data_source": "hiyouga/geometry3k",
                 "prompt": [
@@ -56,6 +56,7 @@ if __name__ == "__main__":
                     }
                 ],
                 "images": image_path,
+                "image_wh": image_wh,
                 "ability": "math",
                 "reward_model": {"style": "rule", "ground_truth": answer},
                 "extra_info": {

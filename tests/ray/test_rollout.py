@@ -11,14 +11,13 @@ from xtuner.v1.ray.accelerator import AcceleratorResourcesConfig, AutoAccelerato
 from xtuner.v1.ray.dataflow import DataFlow, DataFlowConfig, ReplayBufferConfig
 from xtuner.v1.ray.environment import SingleTurnEnvironment
 from xtuner.v1.ray.rollout import RolloutController
-from xtuner.v1.ray.judger import JudgerController
-from xtuner.v1.datasets import RLTextTokenizeFnConfig, build_datasets, build_dataloader
+from xtuner.v1.datasets import RLTokenizeFnConfig, OpenaiTokenizeFnConfig
 from xtuner.v1.datasets.config import (
     DataloaderConfig,
     DatasetConfig,
 )
 
-TEST_TEXT_MESSAGES=[{"role": "user", "content": "Hello!"}]
+TEST_TEXT_MESSAGES = [{"role": "user", "content": "Hello!"}]
 MODEL_PATH = os.environ["ROLLOUT_MODEL_PATH"]
 TRAIN_DATA_PATH = os.environ["ROLLOUT_DATA_PATH"]
 TEST_DATA_PATH = os.environ["ROLLOUT_TEST_DATA_PATH"]
@@ -43,7 +42,7 @@ class TestRollout(unittest.TestCase):
         self.resources_cfg = AcceleratorResourcesConfig(
             accelerator=resource_map[torch.accelerator.current_accelerator().type],
             num_workers=8,
-            cpu_memory_per_worker=16 * 1024**3,  # 16 GB
+            cpu_memory_per_worker=16 * 1024 ** 3,  # 16 GB
         )
         self.max_prompt_length = 512
         self.rollout_cfg = RolloutConfig(
@@ -54,7 +53,7 @@ class TestRollout(unittest.TestCase):
             rollout_cross_node_comm=False,
             tensor_parallel_size=8,
             expert_parallel_size=1,
-            gpus_per_node=8, # gpu: 8, npu: 16
+            gpus_per_node=8,  # gpu: 8, npu: 16
             dtype="bfloat16",
         )
         from xtuner.v1.ray.judger.gsm8k import GSM8KJudgerConfig
@@ -69,16 +68,16 @@ class TestRollout(unittest.TestCase):
             global_batch_size=2,
             enable_partial_rollout=0
         )
+        sft_tokenize_fn_cfg = OpenaiTokenizeFnConfig(max_length=self.max_prompt_length, chat_template='qwen3')
         self.train_dataset_cfg = [
             {
-            "dataset": DatasetConfig(name="gsm8k",
-                                    anno_path=TRAIN_DATA_PATH,
-                                    sample_ratio=1.0),
-            "tokenize_fn": RLTextTokenizeFnConfig(max_length=self.max_prompt_length),
+                "dataset": DatasetConfig(name="gsm8k",
+                                         anno_path=TRAIN_DATA_PATH,
+                                         sample_ratio=1.0),
+                "tokenize_fn": RLTokenizeFnConfig(sft_tokenize_fn_cfg=sft_tokenize_fn_cfg),
             },
         ]
         self.dataloader_cfg = DataloaderConfig(
-            pack_max_length=self.max_prompt_length,
             collator='fake_collator',
             pack_level='none',
             group_by_length=False,
@@ -96,7 +95,7 @@ class TestRollout(unittest.TestCase):
         self.model_path = MODEL_PATH
         self.init_config()
         self.pg = AutoAcceleratorWorkers.build_placement_group(self.resources_cfg)
-        
+
     def tearDown(self):
         ray.shutdown()
 
@@ -107,7 +106,8 @@ class TestRollout(unittest.TestCase):
             LMDeployWorker, self.rollout_cfg, self.pg
         )
         sample_params = SampleParams(temperature=0.0)
-        rollout_controller = RolloutController.remote(self.rollout_cfg, rollout_workers_map)  # type: ignore[attr-defined]
+        rollout_controller = RolloutController.remote(self.rollout_cfg,
+                                                      rollout_workers_map)  # type: ignore[attr-defined]
         res1 = ray.get(rollout_controller.rollout.remote(prompt=TEST_TEXT_MESSAGES, sample_params=sample_params))
         res2 = ray.get(rollout_controller.rollout.remote(prompt=TEST_TEXT_MESSAGES, sample_params=sample_params))
         self.assertEqual(res1, res2, f"res1 != res2, res1={res1}, res2={res2}")
@@ -125,12 +125,13 @@ class TestRollout(unittest.TestCase):
                                          self.dataflow_cfg,
                                          self.replay_buffer_cfg,
                                          self.test_env
-                                        )
+                                         )
         responses = ray.get(self.test_flow.run.remote(), timeout=300)
         finished_samples_count = sum(1 for data in responses for item in data if item.get("state") == "finished")
-        self.assertEqual(finished_samples_count // self.dataflow_cfg.prompt_repeat_k, self.dataflow_cfg.global_batch_size)
+        self.assertEqual(finished_samples_count // self.dataflow_cfg.prompt_repeat_k,
+                         self.dataflow_cfg.global_batch_size)
         ray.get(self.test_env.shutdown.remote(), timeout=300)
-        
+
     @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
     def test_lmdeploy_async_dataflow(self):
         self.dataflow_cfg.enable_partial_rollout = 1
@@ -139,14 +140,15 @@ class TestRollout(unittest.TestCase):
             self.pg,
             rollout_cfg=self.rollout_cfg,
         )
-        self.test_flow = DataFlow.remote("test_env", 
+        self.test_flow = DataFlow.remote("test_env",
                                          self.dataflow_cfg,
                                          self.replay_buffer_cfg,
                                          self.test_env
-                                        )
+                                         )
         responses = ray.get(self.test_flow.run.remote(), timeout=300)
         finished_samples_count = sum(1 for data in responses for item in data if item.get("state") == "finished")
-        self.assertEqual(finished_samples_count // self.dataflow_cfg.prompt_repeat_k, self.dataflow_cfg.global_batch_size)
+        self.assertEqual(finished_samples_count // self.dataflow_cfg.prompt_repeat_k,
+                         self.dataflow_cfg.global_batch_size)
         ray.get(self.test_env.shutdown.remote())
 
     @unittest.skip("skip lmdeploy turbomind generate test due to ci environment issue")
@@ -157,11 +159,13 @@ class TestRollout(unittest.TestCase):
             LMDeployWorker, self.rollout_cfg, self.pg
         )
         sample_params = SampleParams(temperature=0.0)
-        rollout_controller = RolloutController.remote(self.rollout_cfg, rollout_workers_map)  # type: ignore[attr-defined]
+        rollout_controller = RolloutController.remote(self.rollout_cfg,
+                                                      rollout_workers_map)  # type: ignore[attr-defined]
         res1 = ray.get(rollout_controller.rollout.remote(prompt=TEST_TEXT_MESSAGES, sample_params=sample_params))
         res2 = ray.get(rollout_controller.rollout.remote(prompt=TEST_TEXT_MESSAGES, sample_params=sample_params))
         self.assertEqual(res1, res2, f"res1 != res2, res1={res1}, res2={res2}")
         ray.get(rollout_controller.shutdown.remote(), timeout=300)
+
 
 if __name__ == "__main__":
     unittest.main()
