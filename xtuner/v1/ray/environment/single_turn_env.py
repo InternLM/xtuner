@@ -1,5 +1,5 @@
 import asyncio
-from typing import List, Union
+from typing import List
 
 import ray
 
@@ -25,34 +25,25 @@ class SingleTurnEnvironment(BaseEnvironment):
     def __init__(self, environment: str, placement_group, rollout_cfg=None, judger_cfg=None):
         super().__init__(environment, placement_group, rollout_cfg, judger_cfg)
 
-    async def generate(
-        self, data: Union[list[str], RLTextDataItem, List[RLTextDataItem]], sample_params: None
-    ) -> Union[list[str], RLTextDataItem, List[RLTextDataItem]]:
-        """Generates responses for the given data using the rollout controller.
+    async def generate(self, group_samples: List[RLTextDataItem], sample_params: None) -> List[RLTextDataItem]:
+        """Generate responses for a batch of RLTextDataItem using the rollout
+        controller.
 
-        This method takes input data, which can be a single prompt, a list of prompts,
-        or `RLTextDataItem` objects, and uses the rollout controller to generate
-        responses. The generated responses and their states are then added to the
-        input data items.
+        Each item in `group_samples` will be sent to the rollout controller for response generation
+        with the provided sampling parameters. The generated response string and state will be
+        added to each RLTextDataItem in-place as `response_str` and `state` fields.
 
         Args:
-            data: The input data for generation. Can be a list of strings,
-                a single `RLTextDataItem`, or a list of `RLTextDataItem`.
-            sample_params: Sampling parameters for the generation process.
+            group_samples (List[RLTextDataItem]):
+                A list of RLTextDataItem objects containing the prompts/messages for generation.
+            sample_params: Sampling parameters for the generation process. The type should match
+                the rollout controller's expected sampling parameter type (e.g., SampleParams or dict).
 
         Returns:
-            The data enriched with the generated responses. The format of the return
-            value matches the format of the input `data`.
+            List[RLTextDataItem]:
+                The same list of RLTextDataItem, with each item enriched with the generated response
+                and state from the rollout controller.
         """
-        if not isinstance(data, list):
-            group_samples = [data]
-        elif len(data) == 0:
-            return []
-        elif isinstance(data[0], str):
-            group_samples = [RLTextDataItem(messages=data)]  # type: ignore[typeddict-item]
-        else:
-            group_samples = data  # type: ignore[assignment]
-
         if self.rollout_controller:
             response_future = [
                 self.rollout_controller.rollout.remote(prompt=sample["messages"], sample_params=sample_params)
@@ -60,18 +51,12 @@ class SingleTurnEnvironment(BaseEnvironment):
             ]
             response = await asyncio.gather(*response_future)
             for i in range(len(group_samples)):
-                group_samples[i]["response_str"] = response[i][0]
-                group_samples[i]["state"] = response[i][1]
-        if isinstance(data, str):
-            return group_samples[0]["response_str"] or ""
-        elif not isinstance(data, list):
-            return group_samples[0]
-        else:
-            return group_samples
+                group_samples[i]["response_str"] = response[i].response
+                group_samples[i]["state"] = response[i].finish_reason
 
-    async def run(
-        self, data: Union[list[str], RLTextDataItem, List[RLTextDataItem]], sample_params: None
-    ) -> Union[list[str], RLTextDataItem, List[RLTextDataItem]]:
+        return group_samples
+
+    async def run(self, group_samples: List[RLTextDataItem], sample_params: None) -> List[RLTextDataItem]:
         """Runs a full generation and judger cycle.
 
         This method first generates responses using the `generate` method and then,
@@ -87,16 +72,7 @@ class SingleTurnEnvironment(BaseEnvironment):
             The data enriched with generated responses and evaluation results.
             The format of the return value matches the format of the input `data`.
         """
-        if not isinstance(data, list):
-            group_samples = [data]
-        elif not isinstance(data[0], str):
-            group_samples = data  # type: ignore[assignment]
-        else:
-            return await self.generate(data, sample_params)
-
         group_samples = await self.generate(group_samples, sample_params)  # type: ignore[assignment]
         if self.judger_controller:
             group_samples = await self.judger_controller.run.remote(group_samples)
-        if not isinstance(data, list) and not isinstance(data, str):
-            return group_samples[0]
         return group_samples

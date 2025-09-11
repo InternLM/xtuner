@@ -9,12 +9,82 @@ from typing import Any, Callable, Dict, List, Optional, Union
 import httpx
 import ray
 import requests  # type: ignore[import-untyped]
+from cyclopts import Parameter
+from pydantic import BaseModel, Field
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
+from typing_extensions import Annotated
 
 from xtuner.v1.ray import find_master_addr_and_port
 from xtuner.v1.ray.accelerator import AutoAcceleratorWorkers, SingleAcceleratorWorker
 from xtuner.v1.ray.config import RolloutConfig
 from xtuner.v1.utils import get_logger
+
+
+class SampleParams(BaseModel):
+    """Sampling parameters configuration for text generation in XTuner.
+
+    Args:
+        n (int): Number of samples to generate for each input. Defaults to 1.
+        top_k (int): Number of highest probability vocabulary tokens to keep for
+            top-k filtering. Set to 0 to disable. Defaults to 0.
+        top_p (float): Cumulative probability threshold for nucleus (top-p) sampling.
+            Defaults to 1.0.
+        temperature (float): Sampling temperature to control randomness. Lower values
+            make output more deterministic. Defaults to 1.0.
+        repetition_penalty (float): Penalty applied to tokens that have already
+            appeared in the sequence. Defaults to 1.0 (no penalty).
+        presence_penalty (float): Penalty applied based on token presence in the
+            generated text. Defaults to 0.0.
+        frequency_penalty (float): Penalty applied based on token frequency in the
+            generated text. Defaults to 0.0.
+        min_tokens (int): Minimum number of tokens to generate before considering
+            stop conditions. Defaults to 0.
+        max_tokens (int): Maximum number of tokens to generate. Defaults to 2048.
+        stops (List[str]): List of string sequences that will stop generation when
+            encountered. Defaults to empty list.
+        stop_token_ids (List[int]): List of token IDs that will stop generation when
+            encountered. Defaults to empty list.
+        logprobs (int): Number of log probabilities to return for each token.
+            Set to 0 to disable. Defaults to 0.
+        skip_special_tokens (bool): Whether to skip special tokens during decoding.
+            Defaults to True.
+        do_sample (bool): Whether to use sampling (True) or greedy decoding (False).
+            Defaults to True.
+    """
+
+    n: Annotated[int, Parameter(help="Number of samples to generate.")] = 1
+    top_k: Annotated[
+        int, Parameter(help="The number of highest probability vocabulary tokens to keep for top-k-filtering.")
+    ] = 0
+    top_p: Annotated[float, Parameter(help="The cumulative probability for nucleus sampling.")] = 1.0
+    temperature: Annotated[float, Parameter(help="The value used to module the next token probabilities.")] = 1.0
+    repetition_penalty: Annotated[float, Parameter(help="The parameter for repetition penalty.")] = 1.0
+    presence_penalty: Annotated[float, Parameter(help="The parameter for presence penalty.")] = 0.0
+    frequency_penalty: Annotated[float, Parameter(help="The parameter for frequency penalty.")] = 0.0
+    min_tokens: Annotated[int, Parameter(help="Minimum number of tokens to generate.")] = 0
+    max_tokens: Annotated[int, Parameter(help="Maximum number of tokens to generate.")] = 2048
+    stops: Annotated[List[str], Parameter(help="List of stop sequences.")] = []
+    stop_token_ids: Annotated[List[int], Parameter(help="List of stop token IDs.")] = []
+    logprobs: Annotated[int, Parameter(help="Number of log probabilities to return.")] = 0
+    skip_special_tokens: Annotated[bool, Parameter(help="Whether to skip special tokens.")] = True
+    do_sample: Annotated[bool, Parameter(help="Whether to sample or not.")] = True
+
+
+class RolloutRequest(BaseModel):
+    messages: Union[str, List[Dict[str, Any]]]
+    tools: List = Field(default_factory=list)
+    tool_choice: str = "auto"
+    sample_params: SampleParams = Field(default_factory=SampleParams)
+    extra_params: Dict[str, Any] = Field(default_factory=dict)
+
+
+class RolloutResponse(BaseModel):
+    response: str = ""
+    logprobs: float = 0.0
+    finish_reason: str = ""
+    reasoning_content: str = ""
+    usage: dict = Field(default_factory=dict)
+    tool_calls: List[str] = Field(default_factory=list)
 
 
 class RolloutWorker(SingleAcceleratorWorker):
@@ -261,7 +331,7 @@ class RolloutWorker(SingleAcceleratorWorker):
         sample_params: dict,
         extra_params: dict,
         format: str,
-    ):
+    ) -> RolloutResponse:
         uid = str(uuid.uuid4())
         response = None
         try:
@@ -279,38 +349,37 @@ class RolloutWorker(SingleAcceleratorWorker):
             )
             self.logger.debug(f" +++ send request {uid} to worker: {self.rank}")
 
+            failed_rollout_response = RolloutResponse(
+                response="",
+                finish_reason="failed",
+            )
             if response.status_code != 200:
                 error_body = await response.atext()
                 self.logger.error(f"Request {uid} failed with status {response.status_code}: {error_body}")
-                return "", "failed"  # 返回明确的失败状态
+                return failed_rollout_response
 
             last_trajectory = ""
+            finish_reason = ""
+
             async for chunk in response.aiter_lines():
+                # chunk example
+                # data: {"id":"1","object":"chat.completion.chunk","created":1757495636,"model":"qwen3-8b","choices":[{"index":0,"delta":{"role":"assistant","content":"<think>","reasoning_content":null,"tool_calls":[]},"logprobs":null,"finish_reason":null}],"usage":null}
                 if not chunk.startswith("data:"):
                     continue
                 try:
-                    if self.paused:
-                        await response.aclose()
-                        self.logger.debug(f"--- get paused request {uid}")
-                        return last_trajectory, "unfinished"
-
                     chunk_data_str = chunk[len("data:") :].strip()
-                    if chunk_data_str == "[DONE]":
-                        self.logger.debug(f" --- get finished request {uid}")
-                        await response.aclose()
-                        return last_trajectory, "finished"
-
+                    if self.paused or chunk_data_str == "[DONE]":
+                        finish_reason = "paused" if self.paused else finish_reason
+                        break
                     if not (chunk_data_str.startswith("{") and chunk_data_str.endswith("}")):
                         continue
 
                     chunk_data = json.loads(chunk_data_str)
-
                     delta_content = chunk_data["choices"][0]["delta"].get("content")
-                    if delta_content:
-                        last_trajectory += delta_content
+                    last_trajectory = last_trajectory + delta_content if delta_content else last_trajectory
+                    finish_reason = chunk_data["choices"][0].get("finish_reason")
 
                     # todo(@duanyanhui): remove appending stop tokens manually after lmdeploy support return stop_token_ids.
-                    finish_reason = chunk_data["choices"][0].get("finish_reason")
                     if finish_reason == "stop":
                         assert len(sample_params["stops"]) == 1
                         last_trajectory += sample_params["stops"][0]
@@ -320,13 +389,24 @@ class RolloutWorker(SingleAcceleratorWorker):
                     continue
                 except Exception as e:
                     self.logger.error(f"Error processing chunk for {uid}: {chunk}, error: {e}")
-                    return last_trajectory, "failed"
+                    return failed_rollout_response
+
+            assert finish_reason in ["stop", "length", "tool_call", "paused", "failed"], (
+                f"Unexpected finish_reason: {finish_reason}"
+            )
+
+            rollout_response = RolloutResponse(
+                response=last_trajectory,
+                finish_reason=finish_reason,
+            )
+            return rollout_response
+
         except httpx.RequestError as e:
             self.logger.error(f"Request {uid} failed with a network error: {e}")
-            return "", "failed"
+            return failed_rollout_response
         except Exception as e:
             self.logger.error(f"An unexpected error occurred in rollout_task for {uid}: {e}")
-            return "", "failed"
+            return failed_rollout_response
         finally:
             # 确保在任何情况下都尝试关闭响应
             if response:
@@ -340,7 +420,7 @@ class RolloutWorker(SingleAcceleratorWorker):
         sample_params: dict = dict(),
         extra_params: dict = dict(),
         format: str = "openai",
-    ):
+    ) -> RolloutResponse:
         """Public method to initiate a rollout.
 
         Args:
