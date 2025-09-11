@@ -1,56 +1,206 @@
-# type: ignore
 from typing import Literal, TypeAlias, cast
 
+from numpy import disp
 import torch
+import torch.distributed as dist
+from torch.autograd.function import Function
+from typing_extensions import override
 from mmengine.utils import is_installed
-from typing_extensions import Required, overload, override
 
-from xtuner.v1.ops import buffer_capture, deep_ep_combine, deep_ep_dispatch, get_low_latency_buffer
-from xtuner.v1.ops.moe_permute import permute, unpermute
+from xtuner.v1.ops.comm.deepep_op import dispatch_forward, dispatch_backward, combine_forward, combine_backward, buffer_capture
+from xtuner.v1.ops import permute, unpermute
+from deep_ep import EventOverlap
+from xtuner.v1.ops.comm.all_to_all import all_to_all_single_autograd
+from xtuner.v1.utils import copy_method_signature, get_device, get_logger
+from xtuner.v1.utils.debug import register_grad_hook
 
+from . import XTUNER_DISPATCHER_DEBUG
 from .base import (
-    DecodingCombineResult,
-    DecodingDispatchResult,
+    CombineResult,
+    DispatchResult,
     GenericDispatcher,
-    HiddenStates,
+    PostCombineResult,
+    PostDispatchResult,
+    PreCombineResult,
     PreDispatchResult,
-    PrefillingCombineResult,
-    PrefillingDispatchResult,
 )
 
 
+if get_device() == "npu":
+    from torch_npu.contrib import transfer_to_npu  # noqa
+
+
+DEVICE = get_device()
+logger = get_logger()
+
+
+DeepEPHandle = tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
 # DeepEP handle include 6 tensor:
 # (rank_prefix_matrix, channel_prefix_matrix, recv_channel_prefix_matrix, recv_src_idx, is_token_in_rank, send_head)
-DeepEPHandle = tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
-
-DeepEPPreDispatchResult: TypeAlias = PreDispatchResult
-
-
-# TODO: Broken inheritance, we should fix it later
-class DeepEPPrefillingDispatchResult(PrefillingDispatchResult):
-    handle: Required[DeepEPHandle]  # type: ignore
-    row_id_map: torch.Tensor
+class DeepEPPreDispatchResult(PreDispatchResult):
+    backward_previous_event: EventOverlap | None
+    forward_finished_event: EventOverlap | None
 
 
-# TODO: Broken inheritance, we should fix it later
-class DeepEPDecodingDispatchResult(DecodingDispatchResult):
-    handle: DeepEPHandle  # type: ignore
+class DeepEPDispatchResult(DispatchResult):
+    handle: DeepEPHandle
+    topk_ids: torch.Tensor
+    num_recv_tokens_per_expert_list: list[int]
+    forward_finished_event: EventOverlap | None
 
 
-DeepEPPrefillingCombineResult: TypeAlias = PrefillingCombineResult
-DeepEPDecodingCombineResult: TypeAlias = DecodingCombineResult
+class DeepEPPostDispatchResult(PostDispatchResult):
+    row_ids_map: torch.Tensor
+
+
+class DeepEPPreCombineResult(PreCombineResult):
+    backward_previous_event: EventOverlap | None
+    forward_finished_event: EventOverlap | None
+
+
+class DeepEPCombineResult(CombineResult):
+    forward_finished_event: EventOverlap | None
+
+
+DeepEPPostCombineResult = PostCombineResult
+
+
+HiddenStates: TypeAlias = torch.Tensor
+
+
+class DeepEPDispatch(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx,
+        x: torch.Tensor,
+        topk_idx: torch.Tensor,
+        topk_weights: torch.Tensor,
+        num_experts: int,
+        group: dist.ProcessGroup,
+        forward_previous_event: EventOverlap | None = None,
+        backward_finished_event: EventOverlap | None = None,
+    ) -> tuple[
+        torch.Tensor | tuple[torch.Tensor, torch.Tensor], torch.Tensor, torch.Tensor, list, tuple, EventOverlap,
+    ]:
+        (
+            recv_x,
+            recv_topk_idx,
+            recv_topk_weights,
+            num_recv_tokens_per_expert_list,
+            handle,
+            event,
+        ) = dispatch_forward(x, topk_idx, topk_weights, num_experts, group, forward_previous_event)
+        # save deep comm handle
+        ctx.save_for_backward(*handle)
+        ctx.group = group
+        ctx.num_experts = num_experts
+        ctx.backward_finished_event = backward_finished_event
+        return (
+            recv_x,
+            recv_topk_idx,
+            recv_topk_weights,
+            num_recv_tokens_per_expert_list,
+            handle,
+            event,
+        )
+
+    @staticmethod
+    def backward(  # type: ignore[invalid-override]
+        ctx,
+        grad_recv_x: torch.Tensor,
+        grad_recv_topk_idx: torch.Tensor,
+        grad_recv_topk_weights: torch.Tensor,
+        *args,
+    ) -> tuple[torch.Tensor, None, torch.Tensor | None, None, None, None, None, None, None]:
+        # load saved comm handle
+        handle = ctx.saved_tensors
+        combined_grad_x, combined_grad_recv_topk_weights, event = dispatch_backward(
+            grad_recv_x, grad_recv_topk_weights, ctx.num_experts, handle, ctx.group, buffer_capture()
+        )
+        if ctx.backward_finished_event is not None:
+            ctx.backward_finished_event.event = event.event
+        return (
+            combined_grad_x,
+            None,
+            combined_grad_recv_topk_weights,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+
+
+_async_dispatch = copy_method_signature(DeepEPDispatch.forward)(DeepEPDispatch.apply)
+
+
+class DeepEPCombine(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx,
+        x: torch.Tensor,
+        num_experts: int,
+        handle: DeepEPHandle,
+        group: dist.ProcessGroup,
+        forward_previous_event: EventOverlap | None = None,
+        backward_finished_event: EventOverlap | None = None,
+    ) -> tuple[torch.Tensor, EventOverlap]:
+        combined_x, event = combine_forward(x, num_experts, handle, group, forward_previous_event)
+        # save deep comm handle
+        ctx.save_for_backward(*handle)
+        ctx.group = group
+        ctx.num_experts = num_experts
+        ctx.backward_finished_event = backward_finished_event
+        return combined_x, event
+
+    @staticmethod
+    def backward(  # type: ignore[invalid-override]
+        ctx, grad_combined_x: torch.Tensor, *args
+    ) -> tuple[torch.Tensor | tuple[torch.Tensor, torch.Tensor], None, None, None, None, None]:
+        # load saved comm handle
+        handle = ctx.saved_tensors
+        grad_x, event = combine_backward(grad_combined_x, ctx.num_experts, handle, ctx.group, buffer_capture())
+        ctx.backward_finished_event.event = event.event
+        return grad_x, None, None, None, None, None
+
+
+_async_combine = copy_method_signature(DeepEPCombine.forward)(DeepEPCombine.apply)
+
+
+def get_backward_pre_hook(backward_previous_event: EventOverlap, name: str | None = None, debug: bool = False):
+    def _backward_pre_hook(*_):
+        if debug:
+            logger.info(f"[{name}] backward pre hook")
+        if backward_previous_event is not None:
+            backward_previous_event.current_stream_wait()
+
+    return _backward_pre_hook
+
+
+def get_backward_hook(backward_finished_event: EventOverlap, name: str | None = None, debug: bool = False):
+    def _backward_hook(*_):
+        if debug:
+            logger.info(f"[{name}] backward hook")
+        if backward_finished_event is not None:
+            event = buffer_capture()
+            backward_finished_event.event = event.event
+
+    return _backward_hook
 
 
 class DeepEPDispatcher(
     GenericDispatcher[
         DeepEPPreDispatchResult,
-        DeepEPPrefillingDispatchResult,
-        DeepEPDecodingDispatchResult,
-        DeepEPPrefillingCombineResult,
-        DeepEPDecodingCombineResult,
+        DeepEPDispatchResult,
+        DeepEPPostDispatchResult,
+        DeepEPPreCombineResult,
+        DeepEPCombineResult,
+        DeepEPPostCombineResult,
     ]
 ):
-    _process_group: torch.distributed.ProcessGroup
+    _comm_stream = None
+    _process_group: dist.ProcessGroup
 
     def __init__(
         self,
@@ -68,41 +218,10 @@ class DeepEPDispatcher(
             training_dtype=training_dtype,
             generate_dtype=generate_dtype,
         )
-
-    @overload
-    def dispatch(
-        self,
-        *,
-        pre_dispatched: DeepEPPreDispatchResult,
-        decoding: Literal[True],
-    ) -> DeepEPDecodingDispatchResult: ...
-
-    @overload
-    def dispatch(
-        self,
-        *,
-        pre_dispatched: DeepEPPreDispatchResult,
-        decoding: Literal[False],
-    ) -> DeepEPPrefillingDispatchResult: ...
-
-    @override
-    def dispatch(
-        self,
-        *,
-        pre_dispatched: DeepEPPreDispatchResult,
-        decoding: bool = False,
-    ) -> DeepEPPrefillingDispatchResult | DeepEPDecodingDispatchResult:
-        if not decoding:
-            return self._dispatch_prefilling(
-                hidden_states=pre_dispatched["hidden_states"],
-                topk_weights=pre_dispatched["topk_weights"],
-                topk_ids=pre_dispatched["topk_ids"],
-            )
-        else:
-            return self._dispatch_decoding(
-                hidden_states=pre_dispatched["hidden_states"],
-                topk_ids=pre_dispatched["topk_ids"],
-            )
+        assert self._process_group is not None, (
+            "Process group must be provided for `DeepEPDispatcher`. "
+            "If you are training a MoE model, it means that `expert parallel` is not enabled in the config."
+        )
 
     @override
     def dispatch_preprocess(
@@ -110,115 +229,39 @@ class DeepEPDispatcher(
         *,
         hidden_states: torch.Tensor,
         topk_ids: torch.Tensor,
-        topk_weights: torch.Tensor,
+        async_op: bool = False,
     ) -> DeepEPPreDispatchResult:
+        if async_op:
+            backward_previous_event = EventOverlap(None)
+            forward_finished_event = buffer_capture()
+            if hidden_states.grad_fn is not None:
+               hidden_states.grad_fn.register_prehook(
+                    get_backward_pre_hook(
+                        backward_previous_event=backward_previous_event,
+                        name="TorchAll2AllDispatcher.dispatch_preprocess",
+                        debug=XTUNER_DISPATCHER_DEBUG,
+                    )
+                )
+        else:
+            forward_finished_event = None
+            backward_previous_event = None
+
         return DeepEPPreDispatchResult(
             hidden_states=hidden_states,
-            topk_ids=topk_ids,
-            topk_weights=topk_weights,
+            topk_ids=topk_ids.to(torch.int64),
+            backward_previous_event=backward_previous_event,
+            forward_finished_event=forward_finished_event,
         )
 
-    @overload
-    def combine(
-        self,
-        *,
-        hidden_states: torch.Tensor,
-        pre_dispatched: PreDispatchResult,
-        dispatch_result: DeepEPPrefillingDispatchResult,
-        decoding: Literal[False],
-    ) -> DeepEPPrefillingCombineResult: ...
-
-    @overload
-    def combine(
-        self,
-        *,
-        hidden_states: torch.Tensor,
-        pre_dispatched: PreDispatchResult,
-        dispatch_result: DeepEPDecodingDispatchResult,
-        decoding: Literal[True],
-    ) -> DeepEPDecodingCombineResult: ...
-
     @override
-    def combine(
-        self,
-        *,
-        hidden_states: torch.Tensor,
-        pre_dispatched: PreDispatchResult,
-        dispatch_result: DeepEPPrefillingDispatchResult | DeepEPDecodingDispatchResult,
-        decoding: bool = False,
-    ) -> DeepEPPrefillingCombineResult | DeepEPDecodingCombineResult:
-        if not decoding:
-            return self._combine_prefilling(
-                hidden_states=hidden_states,
-                dispatched_result=cast(DeepEPPrefillingDispatchResult, dispatch_result),
-            )
-        else:
-            return self._combine_decoding(
-                hidden_states=hidden_states,
-                pre_dispatched=cast(DeepEPPreDispatchResult, dispatch_result),
-                dispatched_result=cast(DeepEPDecodingDispatchResult, dispatch_result),
-            )
-
-    @override
-    def combine_post_process(
+    def dispatch(
         self,
         *,
         pre_dispatched: DeepEPPreDispatchResult,
-        dispatch_result: DeepEPPrefillingDispatchResult | DeepEPDecodingDispatchResult,
-        combine_result: DeepEPPrefillingCombineResult | DeepEPDecodingCombineResult,
-    ) -> HiddenStates:
-        return combine_result["hidden_states"]
-
-    def _dispatch_decoding(
-        self,
-        hidden_states: torch.Tensor,
-        topk_ids: torch.Tensor,
-    ) -> DeepEPDecodingDispatchResult:
-        hidden_size = hidden_states.shape[-1]
-        x = hidden_states.view(-1, hidden_states.size()[-1])
-        _buffer = get_low_latency_buffer(self._process_group, hidden=hidden_size, num_experts=self._n_routed_experts)
-
-        # Do MoE dispatch, compatible with CUDA graph (but you may restore some buffer status once you replay)
-        recv_x, tokens_per_expert, handle, _, _ = _buffer.low_latency_dispatch(
-            x,
-            topk_ids,
-            x.size(0),
-            self._n_routed_experts,
-            async_finish=False,
-            use_fp8=self._training_dtype == "fp8",
-            return_recv_hook=False,
-        )
-
-        # NOTES: the actual tensor will not be received only if you call `hook()`,
-        # it is useful for double-batch overlapping, but **without any SM occupation**
-        # If you don't want to overlap, please set `return_recv_hook=False`
-        # Later, you can use our GEMM library to do the computation with this specific format
-        if self._training_dtype == "fp8":
-            assert isinstance(recv_x, tuple), "When using FP8, `recv_x` should be a tuple."
-            hidden_states, fp_8_scale = recv_x
-            return DeepEPDecodingDispatchResult(
-                hidden_states=hidden_states,
-                tokens_per_experts=tokens_per_expert,
-                fp8_scale=fp_8_scale,
-                handle=handle,
-            )
-        else:
-            raise NotImplementedError("DeepEP decoding dispatch only supports FP8 for now.")
-
-    def _dispatch_prefilling(
-        self,
-        hidden_states: torch.Tensor,
         topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-    ) -> DeepEPPrefillingDispatchResult:
-        hidden_dim = hidden_states.shape[-1]
-        hidden_states = hidden_states.view(-1, hidden_dim)
-        hidden_states = hidden_states.view(-1, hidden_dim)
-
-        topk_ids = topk_ids.to(torch.int64)
-
-        # TODO: Maybe we should decouple the sync and async interface of deepep
-        previous_event = buffer_capture()
+        async_op: bool = False,
+        decoding: bool = False,
+    ) -> DeepEPDispatchResult:
         (
             dispatched_hidden_states,
             dispatched_topk_idx,
@@ -226,113 +269,163 @@ class DeepEPDispatcher(
             num_recv_tokens_per_expert_list,
             dispatch_handle,
             event,
-        ) = deep_ep_dispatch(
-            x=hidden_states,
-            topk_idx=topk_ids,
-            topk_weights=topk_weights,
-            num_routed_experts=self._n_routed_experts,
-            group=self._process_group,
-            previous_event=previous_event,
+        ) = _async_dispatch(
+            pre_dispatched["hidden_states"],
+            pre_dispatched["topk_ids"],
+            topk_weights,
+            self._n_routed_experts,
+            self._process_group,
+            pre_dispatched["forward_finished_event"],
+            pre_dispatched["backward_previous_event"],
         )
-        event.current_stream_wait()
 
-        permuted_hidden_states, row_id_map = self._training_permute_dispatched(
-            dispatched_hidden_states=dispatched_hidden_states,
-            dispatched_topk_ids=dispatched_topk_idx,
-            num_recv_tokens_per_expert_list=num_recv_tokens_per_expert_list,
-        )
-        tokens_per_experts = torch.tensor(
-            num_recv_tokens_per_expert_list,
-            dtype=torch.long,
-            device=topk_weights.device,
-        )
-        return DeepEPPrefillingDispatchResult(
-            hidden_states=permuted_hidden_states,
-            tokens_per_experts=tokens_per_experts,
-            handle=dispatch_handle,
+        if not async_op:
+            event.current_stream_wait()
+            forward_finished_event = None
+        else:
+            forward_finished_event = event
+
+        ret = DeepEPDispatchResult(
+            hidden_states=cast(HiddenStates, dispatched_hidden_states),
             topk_weights=dispatched_topk_weights,
-            row_id_map=row_id_map,
+            topk_ids=dispatched_topk_idx,
+            handle=dispatch_handle,
+            num_recv_tokens_per_expert_list=num_recv_tokens_per_expert_list,
+            forward_finished_event=forward_finished_event,
         )
+        return ret
 
-    def _training_permute_dispatched(
+
+    @override
+    def dispatch_postprocess(
         self,
         *,
-        dispatched_hidden_states: torch.Tensor,
-        dispatched_topk_ids: torch.Tensor,
-        num_recv_tokens_per_expert_list,
-    ):
-        num_out_tokens = sum(num_recv_tokens_per_expert_list)
-        recv_topk_idx_numel = dispatched_topk_ids.numel()
+        pre_dispatched: DeepEPPreDispatchResult,
+        dispatched: DeepEPDispatchResult,
+        async_op: bool = False,
+        decoding: bool = False,
+    ) -> DeepEPPostDispatchResult:
+        if async_op:
+            assert dispatched["forward_finished_event"] is not None, "Please use `async_op=True` for dispatch!"
+            dispatched["forward_finished_event"].current_stream_wait()
+
+        num_recv_tokens_per_expert_list = dispatched["num_recv_tokens_per_expert_list"]
+        num_out_tokens = sum(dispatched["num_recv_tokens_per_expert_list"])
+        recv_topk_idx_numel = dispatched["topk_ids"].numel()
         num_neg_one_idx = recv_topk_idx_numel - num_out_tokens
 
-        permuted_hidden_states, row_id_map = permute(
-            dispatched_hidden_states,
-            dispatched_topk_ids.int(),
+        permuted_hidden_states, row_ids_map = permute(
+            dispatched["hidden_states"],
+            dispatched["topk_ids"].int(),
             num_out_tokens=num_out_tokens,
             num_negative_one_in_indices=num_neg_one_idx,
         )
-        return permuted_hidden_states, row_id_map
+        tokens_per_expert = torch.tensor(
+            num_recv_tokens_per_expert_list,
+            dtype=torch.long,
+            device=dispatched["topk_weights"].device,
+        )
 
-    def _combine_prefilling(
+        if decoding:
+            raise NotImplementedError
+        else:
+            return DeepEPPostDispatchResult(
+                hidden_states=permuted_hidden_states,
+                row_ids_map=row_ids_map,
+                tokens_per_expert=tokens_per_expert,
+            )
+
+    @override
+    def combine_preprocess(
         self,
-        hidden_states: torch.Tensor,
-        dispatched_result: DeepEPPrefillingDispatchResult,
-    ):
-        unpermuted_hidden_states = self._training_unpermute_activation(
-            hidden_states=hidden_states,
-            row_id_map=dispatched_result["row_id_map"],
-            topk_weights=dispatched_result["topk_weights"],
-        )
-
-        # TODO: Maybe we should decouple the sync and async interface of deepep
-        event = buffer_capture()
-        combined_hidden_states, event = deep_ep_combine(
-            x=unpermuted_hidden_states,
-            num_experts=self._n_routed_experts,
-            deepep_comm_handle=dispatched_result["handle"],
-            group=self._process_group,
-        )
-        event.current_stream_wait()
-        # For event management, please refer to the docs of the `EventOverlap` class
-        return DeepEPPrefillingCombineResult(
-            hidden_states=combined_hidden_states,
-        )
-
-    def _combine_decoding(
-        self,
+        *,
         hidden_states: torch.Tensor,
         pre_dispatched: DeepEPPreDispatchResult,
-        dispatched_result: DeepEPDecodingDispatchResult,
-    ):
-        hidden_size = hidden_states.shape[-1]
-        _buffer = get_low_latency_buffer(
-            self._process_group,
-            hidden=hidden_size,
-            num_experts=self._n_routed_experts,
+        dispatched: DeepEPDispatchResult,
+        post_dispatched: DeepEPPostDispatchResult,
+        async_op: bool = False,
+        decoding: bool = False,
+    ) -> DeepEPPreCombineResult:
+        hidden_states = unpermute(
+            hidden_states,
+            post_dispatched["row_ids_map"],
+            probs=dispatched["topk_weights"],
         )
 
-        # Do MoE combine, compatible with CUDA graph (but you may restore some buffer status once you replay)
-        combined_x, _, _ = _buffer.low_latency_combine(
-            x=hidden_states,
-            topk_idx=pre_dispatched["topk_ids"],
-            topk_weights=pre_dispatched["topk_weights"],
-            handle=dispatched_result["handle"],
-            async_finish=False,
-            return_recv_hook=False,
-        )
+        if async_op:
+            backward_previous_event = EventOverlap(None)
+            forward_finished_event = buffer_capture()
+            if hidden_states.grad_fn is not None:
+                hidden_states.grad_fn.register_prehook(
+                    get_backward_pre_hook(
+                        backward_previous_event=backward_previous_event,
+                        name="TorchAll2AllDispatcher.combine_preprocess",
+                        debug=XTUNER_DISPATCHER_DEBUG,
+                    )
+                )
+        else:
+            backward_previous_event = None
+            forward_finished_event = None
 
-        return DeepEPDecodingCombineResult(hidden_states=combined_x)
+        if decoding:
+            raise NotImplementedError
+        else:
+            return DeepEPPreCombineResult(
+                hidden_states=hidden_states,
+                forward_finished_event=forward_finished_event,
+                backward_previous_event=backward_previous_event,
+            )
 
-    def _training_unpermute_activation(
+    @override
+    def combine(
         self,
-        hidden_states: torch.Tensor,
-        row_id_map: torch.Tensor,
-        topk_weights: torch.Tensor | None = None,
-    ):
-        # assert self.ep_mesh.size() > 1
-        activation = unpermute(
-            input_act=hidden_states,
-            row_id_map=row_id_map,
-            probs=topk_weights,
+        *,
+        pre_dispatched: DeepEPPreDispatchResult,
+        dispatched: DeepEPDispatchResult,
+        post_dispatched: DeepEPPostDispatchResult,
+        pre_combined: DeepEPPreCombineResult,
+        async_op: bool = False,
+        decoding: bool = False,
+    ) -> CombineResult:
+        if async_op:
+            assert pre_combined["forward_finished_event"] is not None, "Please use `async_op=True` for combine!"
+            pre_combined["forward_finished_event"].current_stream_wait()
+
+        combined_hidden_states, event = _async_combine(
+            pre_combined["hidden_states"],
+            self._n_routed_experts,
+            dispatched["handle"],
+            self._process_group,
+            pre_combined["forward_finished_event"],
+            pre_combined["backward_previous_event"],
         )
-        return activation
+        if not async_op:
+            event.current_stream_wait()
+
+        if not decoding:
+            return DeepEPCombineResult(
+                hidden_states=combined_hidden_states,
+                forward_finished_event=event,
+            )
+        else:
+            raise NotImplementedError
+
+    @override
+    def combine_postprocess(
+        self,
+        *,
+        pre_dispatched: DeepEPPreDispatchResult,
+        dispatched: DeepEPDispatchResult,
+        post_dispatched: DeepEPPostDispatchResult,
+        pre_combined: DeepEPPreCombineResult,
+        combined: DeepEPCombineResult,
+        async_op: bool = False,
+    ) -> PostCombineResult:
+        hidden_states = combined["hidden_states"]
+        forward_previous_event = combined["forward_finished_event"]
+
+        if async_op:
+            assert forward_previous_event is not None, "Please use `async_op=True` for combine!"
+            forward_previous_event.current_stream_wait()
+        return PostCombineResult(hidden_states=hidden_states)
+
