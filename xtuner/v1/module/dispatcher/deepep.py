@@ -1,18 +1,20 @@
 from typing import Literal, TypeAlias, cast
 
-from numpy import disp
 import torch
 import torch.distributed as dist
-from torch.autograd.function import Function
-from typing_extensions import override
-from mmengine.utils import is_installed
-
-from xtuner.v1.ops.comm.deepep_op import dispatch_forward, dispatch_backward, combine_forward, combine_backward, buffer_capture
-from xtuner.v1.ops import permute, unpermute
 from deep_ep import EventOverlap
-from xtuner.v1.ops.comm.all_to_all import all_to_all_single_autograd
+from mmengine.utils import is_installed
+from typing_extensions import override
+
+from xtuner.v1.ops import permute, unpermute
+from xtuner.v1.ops.comm.deepep_op import (
+    buffer_capture,
+    combine_backward,
+    combine_forward,
+    dispatch_backward,
+    dispatch_forward,
+)
 from xtuner.v1.utils import copy_method_signature, get_device, get_logger
-from xtuner.v1.utils.debug import register_grad_hook
 
 from . import XTUNER_DISPATCHER_DEBUG
 from .base import (
@@ -35,6 +37,8 @@ logger = get_logger()
 
 
 DeepEPHandle = tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+
+
 # DeepEP handle include 6 tensor:
 # (rank_prefix_matrix, channel_prefix_matrix, recv_channel_prefix_matrix, recv_src_idx, is_token_in_rank, send_head)
 class DeepEPPreDispatchResult(PreDispatchResult):
@@ -60,6 +64,7 @@ class DeepEPPreCombineResult(PreCombineResult):
 
 class DeepEPCombineResult(CombineResult):
     forward_finished_event: EventOverlap | None
+    backward_previous_event: EventOverlap | None
 
 
 DeepEPPostCombineResult = PostCombineResult
@@ -80,7 +85,12 @@ class DeepEPDispatch(torch.autograd.Function):
         forward_previous_event: EventOverlap | None = None,
         backward_finished_event: EventOverlap | None = None,
     ) -> tuple[
-        torch.Tensor | tuple[torch.Tensor, torch.Tensor], torch.Tensor, torch.Tensor, list, tuple, EventOverlap,
+        torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        torch.Tensor,
+        torch.Tensor,
+        list,
+        tuple,
+        EventOverlap,
     ]:
         (
             recv_x,
@@ -144,6 +154,7 @@ class DeepEPCombine(torch.autograd.Function):
         handle: DeepEPHandle,
         group: dist.ProcessGroup,
         forward_previous_event: EventOverlap | None = None,
+        backward_previous_event: EventOverlap | None = None,
         backward_finished_event: EventOverlap | None = None,
     ) -> tuple[torch.Tensor, EventOverlap]:
         combined_x, event = combine_forward(x, num_experts, handle, group, forward_previous_event)
@@ -152,17 +163,20 @@ class DeepEPCombine(torch.autograd.Function):
         ctx.group = group
         ctx.num_experts = num_experts
         ctx.backward_finished_event = backward_finished_event
+        ctx.backward_previous_event = backward_previous_event
         return combined_x, event
 
     @staticmethod
     def backward(  # type: ignore[invalid-override]
         ctx, grad_combined_x: torch.Tensor, *args
-    ) -> tuple[torch.Tensor | tuple[torch.Tensor, torch.Tensor], None, None, None, None, None]:
+    ) -> tuple[torch.Tensor | tuple[torch.Tensor, torch.Tensor], None, None, None, None, None, None]:
         # load saved comm handle
         handle = ctx.saved_tensors
-        grad_x, event = combine_backward(grad_combined_x, ctx.num_experts, handle, ctx.group, buffer_capture())
+        grad_x, event = combine_backward(
+            grad_combined_x, ctx.num_experts, handle, ctx.group, ctx.backward_previous_event
+        )
         ctx.backward_finished_event.event = event.event
-        return grad_x, None, None, None, None, None
+        return grad_x, None, None, None, None, None, None
 
 
 _async_combine = copy_method_signature(DeepEPCombine.forward)(DeepEPCombine.apply)
@@ -235,7 +249,7 @@ class DeepEPDispatcher(
             backward_previous_event = EventOverlap(None)
             forward_finished_event = buffer_capture()
             if hidden_states.grad_fn is not None:
-               hidden_states.grad_fn.register_prehook(
+                hidden_states.grad_fn.register_prehook(
                     get_backward_pre_hook(
                         backward_previous_event=backward_previous_event,
                         name="TorchAll2AllDispatcher.dispatch_preprocess",
@@ -294,7 +308,6 @@ class DeepEPDispatcher(
             forward_finished_event=forward_finished_event,
         )
         return ret
-
 
     @override
     def dispatch_postprocess(
@@ -388,8 +401,11 @@ class DeepEPDispatcher(
         decoding: bool = False,
     ) -> CombineResult:
         if async_op:
+            backward_previous_event = EventOverlap(None)
             assert pre_combined["forward_finished_event"] is not None, "Please use `async_op=True` for combine!"
             pre_combined["forward_finished_event"].current_stream_wait()
+        else:
+            backward_previous_event = None
 
         combined_hidden_states, event = _async_combine(
             pre_combined["hidden_states"],
@@ -397,6 +413,7 @@ class DeepEPDispatcher(
             dispatched["handle"],
             self._process_group,
             pre_combined["forward_finished_event"],
+            backward_previous_event,
             pre_combined["backward_previous_event"],
         )
         if not async_op:
@@ -406,6 +423,7 @@ class DeepEPDispatcher(
             return DeepEPCombineResult(
                 hidden_states=combined_hidden_states,
                 forward_finished_event=event,
+                backward_previous_event=backward_previous_event,
             )
         else:
             raise NotImplementedError
@@ -424,8 +442,18 @@ class DeepEPDispatcher(
         hidden_states = combined["hidden_states"]
         forward_previous_event = combined["forward_finished_event"]
 
+        hidden_states = hidden_states.view_as(hidden_states)
+
+        if hidden_states.grad_fn is not None:
+            hidden_states.grad_fn.register_hook(
+                get_backward_hook(
+                    backward_finished_event=combined["backward_previous_event"],
+                    name="DeeEPDispatcher.combine_postprocess",
+                    debug=XTUNER_DISPATCHER_DEBUG,
+                )
+            )
+
         if async_op:
             assert forward_previous_event is not None, "Please use `async_op=True` for combine!"
             forward_previous_event.current_stream_wait()
         return PostCombineResult(hidden_states=hidden_states)
-
