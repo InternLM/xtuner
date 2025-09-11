@@ -344,7 +344,7 @@ def main():
 
     sp_sizes = [sp_size for _, sp_size in model_cfgs]
     for exp_path, sp_size in zip(exp_paths, sp_sizes):
-        rank0_log_path = Path(exp_path) / "rank0.log"
+        rank0_log_path = Path(exp_path) / "logs" / "rank0.log"
         (
             cur_lr,
             cur_text_tokens,

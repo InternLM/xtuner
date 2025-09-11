@@ -2,7 +2,7 @@
 
 在阅读本教程前，请先阅读 [语言模型微调](./sft.md)。
 
-本小结将以 [Intern-S1-mini](https://huggingface.co/internlm/Intern-S1-mini) 科学多模态大模型为例，，体验最简单的微调训练启动方式。
+本小结将以 [Intern-S1-mini](https://huggingface.co/internlm/Intern-S1-mini) 科学多模态大模型为例，体验最简单的微调训练启动方式。如果想微调 InternVL 模型则只需要把模型路径换掉就可以。
 
 (sft-dataset)=
 ## 准备数据集
