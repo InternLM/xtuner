@@ -20,7 +20,8 @@ _buffer: Optional[Buffer] = None
 _low_latency_buffer: Optional[Buffer] = None
 # Set the number of SMs to use
 # NOTES: this is a static variable
-Buffer.set_num_sms(24)
+# Buffer.set_num_sms(24)
+Buffer.set_num_sms(20)
 
 
 # You may call this function at the framework initialization

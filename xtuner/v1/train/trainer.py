@@ -43,6 +43,7 @@ from xtuner.v1.utils import (
     record_git_info,
 )
 from xtuner.v1.utils.device import get_device, get_torch_device_module
+import gc
 
 from .toy_tokenizer import UTF8ByteTokenizer
 
@@ -142,7 +143,7 @@ class TrainerConfig(BaseModel):
     hf_interval: int | None = None
     hf_max_keep: int | None = None
     exp_tracker: Literal["tensorboard", "jsonl"] = "jsonl"
-    profile_step: int | None = None
+    profile_step: list | int | None = None
     profile_time: bool = True
     profile_memory: bool = False
     intra_layer_micro_batch: int = 1
@@ -237,7 +238,7 @@ class Trainer:
         hf_interval: int | None = None,
         hf_max_keep: int | None = None,
         exp_tracker: Literal["tensorboard", "jsonl"] = "jsonl",
-        profile_step: int | None = None,
+        profile_step: list | None = None,
         profile_time: bool = True,
         profile_memory: bool = False,
         intra_layer_micro_batch: int = 1,
@@ -257,6 +258,8 @@ class Trainer:
 
         self._micro_batch_size: int | None = None
 
+        if type(profile_step) is int:
+            profile_step = [profile_step]
         self._profile_step = profile_step
         self._profile_time = profile_time
         self._profile_memory = profile_memory
@@ -491,6 +494,9 @@ class Trainer:
             self._maybe_save()
 
             time_before_get_data = time.time()
+
+            if self.cur_step % 50 == 0:
+                gc.collect()
 
     @property
     def world_size(self) -> int:
@@ -944,7 +950,7 @@ class Trainer:
     @contextmanager
     def _maybe_profiling(self):
         """Check if profiling is enabled and perform profiling if necessary."""
-        if self._profile_step is not None and self._cur_step == self._profile_step:
+        if self._profile_step is not None and self._cur_step in self._profile_step:
             with contextlib.ExitStack() as stack:
                 if self._profile_time:
                     time_dir = self.exp_dir / self._PROFILE_TIME_PATH / f"step-{self._cur_step}"
@@ -1177,6 +1183,7 @@ class Trainer:
         self._dataloader.load_state_dict(dataloader_state)
 
     def _setup_env(self):
+        gc.disable()
         os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
         log_str = "\n============XTuner Training Environment============\n"
