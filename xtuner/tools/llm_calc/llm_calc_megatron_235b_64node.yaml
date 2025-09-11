@@ -1,0 +1,52 @@
+# system params
+nodes: 64
+gpu_per_node: 8
+capacity: 1.0
+
+# parallel params
+zero_stage: 1
+ep: 8
+pp: 32
+vpp: 3
+tp: 2
+TP_sp: true
+etp: 1
+cp: 1
+ulysses: 1
+
+# data type
+param_type: 2
+grad_type: 4
+act_type: 2
+linear_act_type: 2
+os_type: 4
+master_type: 4
+master_grad_type: 4
+
+# train params
+MBS: 1
+L: 4096
+MBN: 16
+
+# model params
+model: "Qwen3-235B-A22B"
+vocab_size: 151936
+D: 4096
+LN: 94
+LN_add_for_pp_first_stage: 1
+LN_add_for_pp_last_stage: 1
+
+qn: 64
+kvn: 4
+H: 128
+flash_attn: true
+
+mH: 1536
+topk: 8
+mlp_act_dim: 2
+e: 128
+topk_weights_position: "before_fc2"
+
+# recompute params
+recompute: false
+recompute_swiglu: false
