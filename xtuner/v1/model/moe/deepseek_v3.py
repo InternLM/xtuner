@@ -2,6 +2,7 @@ import re
 
 from xtuner.v1.model.moe.moe import BalancingLossConfig, MoEConfig, ZLossConfig
 from xtuner.v1.module.attention import MLAConfig
+from xtuner.v1.module.router.greedy import GreedyRouterConfig
 from xtuner.v1.module.router.noaux_router import NoAuxRouterConfig
 from xtuner.v1.utils import get_logger
 
@@ -85,7 +86,7 @@ class DeepSeekV3Config(MoEConfig):
     num_experts_per_tok: int = 8
     hidden_factor: float = 1.0
     moe_intermediate_size: int = 2048
-    router: NoAuxRouterConfig = NoAuxRouterConfig(
+    router: NoAuxRouterConfig | GreedyRouterConfig = NoAuxRouterConfig(
         n_group=8,
         topk_group=4,
         scoring_func="sigmoid",
