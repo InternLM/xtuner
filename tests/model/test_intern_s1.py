@@ -16,7 +16,7 @@ from xtuner.v1.loss.ce_loss import CELossConfig, CELossContextInputItem
 from xtuner.v1.model.moe.moe import SequenceContext
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.utils.compile import maybe_compile
-from xtuner.v1.datasets.intern_s1_fn.process import build_transform,  dynamic_preprocess, preprocess_intern_s1
+from xtuner.v1.datasets.mllm_tokenize_fn.intern_s1_vl_process import build_transform,  dynamic_preprocess, preprocess_intern_s1
 from xtuner.v1.utils.test_utils import init_data_mesh
 
 

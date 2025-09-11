@@ -45,10 +45,19 @@ class OpenaiTokenizeFunction(CachableTokenizeFunction[DataItem]):
         messages = ChatMessages(messages=item)
         tokenized = messages.tokenize(self.tokenizer, self.chat_template)
 
+        input_ids = tokenized["input_ids"]
+        labels = tokenized["labels"]
+        if self.max_length is not None and len(input_ids) > self.max_length:
+            logger.info(
+                f"WARNING: input_ids length {len(input_ids)} exceeds model_max_length {self.max_length}. truncated!"
+            )
+            input_ids = input_ids[: self.max_length]
+            labels = labels[: self.max_length]
+
         return DataItem(
-            input_ids=tokenized["input_ids"],
-            labels=tokenized["labels"],
-            num_tokens=tokenized["num_tokens"],
+            input_ids=input_ids,
+            labels=labels,
+            num_tokens=len(input_ids),
         )
 
     def hash(self) -> str:

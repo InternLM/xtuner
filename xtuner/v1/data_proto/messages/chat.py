@@ -27,7 +27,7 @@ class ImageContentItem(BaseModel):
     image_url: str
 
     def apply_chat_template(self, chat_template: HybridChatTemplate) -> str:
-        return chat_template.image_token
+        return ""
 
 
 MultModalContentType = Union[TextContentItem, ImageContentItem]
@@ -70,10 +70,7 @@ class ChatMsg(BaseModel):
         elif isinstance(self.content, list):
             text = ""
             for i, item in enumerate(self.content):
-                if i == 0:
-                    text += item.apply_chat_template(chat_template)
-                else:
-                    text += "\n" + item.apply_chat_template(chat_template)
+                text += item.apply_chat_template(chat_template)
         else:
             raise NotImplementedError
 
