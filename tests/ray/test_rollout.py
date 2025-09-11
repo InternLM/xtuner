@@ -1,6 +1,7 @@
 import os
 import unittest
-
+import requests
+import json
 import ray
 import torch
 from transformers import AutoTokenizer
@@ -52,7 +53,7 @@ class TestRollout(unittest.TestCase):
             model_name=os.path.basename(MODEL_PATH).lower(),
             tokenizer_path=MODEL_PATH,
             rollout_cross_node_comm=False,
-            tensor_parallel_size=8,
+            tensor_parallel_size=1,
             expert_parallel_size=1,
             gpus_per_node=8, # gpu: 8, npu: 16
             dtype="bfloat16",
@@ -109,8 +110,24 @@ class TestRollout(unittest.TestCase):
         sample_params = SampleParams(temperature=0.0)
         rollout_controller = RolloutController.remote(self.rollout_cfg, rollout_workers_map)  # type: ignore[attr-defined]
         res1 = ray.get(rollout_controller.rollout.remote(prompt=TEST_TEXT_MESSAGES, sample_params=sample_params))
-        res2 = ray.get(rollout_controller.rollout.remote(prompt=TEST_TEXT_MESSAGES, sample_params=sample_params))
-        self.assertEqual(res1, res2, f"res1 != res2, res1={res1}, res2={res2}")
+
+        api_url = "http://localhost:8000/v1/chat/completions"
+        headers = {"Content-Type": "application/json"}
+        payload = {
+            "messages": [
+                {"role": "user", "content": "Hello!"}
+            ],
+            "sample_params": SampleParams(temperature=0.0).dict(),
+        }
+
+        response = requests.post(api_url, headers=headers, data=json.dumps(payload))
+        response_data = response.json()
+        self.assertEqual(response.status_code, 200, f"API request failed with status {response.status_code}")
+        self.assertEqual(res1.finish_reason, "stop")
+        self.assertEqual(response_data["finish_reason"], "stop")
+        self.assertEqual(res1.response, response_data["response"], f"response from function: {res1.response} != response from api server: {response_data["response"]}")
+        print("Response from function:", res1.response)
+        print("Response from API:", response_data["response"])
         ray.get(rollout_controller.shutdown.remote(), timeout=300)
 
     @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
@@ -127,7 +144,7 @@ class TestRollout(unittest.TestCase):
                                          self.test_env
                                         )
         responses = ray.get(self.test_flow.run.remote(), timeout=300)
-        finished_samples_count = sum(1 for data in responses for item in data if item.get("state") == "finished")
+        finished_samples_count = sum(1 for data in responses for item in data if item.get("state") == "stop" or item.get("state") == "length")
         self.assertEqual(finished_samples_count // self.dataflow_cfg.prompt_repeat_k, self.dataflow_cfg.global_batch_size)
         ray.get(self.test_env.shutdown.remote(), timeout=300)
         
@@ -145,7 +162,7 @@ class TestRollout(unittest.TestCase):
                                          self.test_env
                                         )
         responses = ray.get(self.test_flow.run.remote(), timeout=300)
-        finished_samples_count = sum(1 for data in responses for item in data if item.get("state") == "finished")
+        finished_samples_count = sum(1 for data in responses for item in data if item.get("state") == "stop" or item.get("state") == "length")
         self.assertEqual(finished_samples_count // self.dataflow_cfg.prompt_repeat_k, self.dataflow_cfg.global_batch_size)
         ray.get(self.test_env.shutdown.remote())
 

@@ -86,6 +86,10 @@ class RolloutConfig(BaseModel):
             help="API keys for the rollout service. Can be a single key or a list of keys.",
         ),
     ] = None
+    api_port: Annotated[
+        Optional[int],
+        Parameter(group=infer_group, help="Port number for the rollout API server. If not set, 8000 will be used."),
+    ] = 8000
     gpus_per_node: Annotated[int, Parameter(group=infer_group, help="Number of GPUs allocated per node.")] = 8
     dtype: Annotated[
         str,
