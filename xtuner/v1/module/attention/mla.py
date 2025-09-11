@@ -324,6 +324,7 @@ class MultiLatentAttention(nn.Module):
             value_states.transpose(1, 2).squeeze(0),
             cu_seqlens_q=attn_meta.cu_seq_lens_q,
             cu_seqlens_k=attn_meta.cu_seq_lens_k,
+            cu_seqlens_pad_len=attn_meta.cu_seq_lens_pad_len,
             max_seqlen_q=attn_meta.max_length_q,
             max_seqlen_k=attn_meta.max_length_k,
             dropout_p=self.dropout,
@@ -349,6 +350,8 @@ class MultiLatentAttention(nn.Module):
         seq_ctx: SequenceContext,
         past_key_values: list[list[torch.Tensor]],
     ) -> torch.Tensor:
+        if seq_ctx.cu_seq_lens_pad_len != 0:
+            raise NotImplementedError
         bsz, q_len, _ = hidden_states.size()
 
         if self.q_lora_rank is None:
@@ -451,6 +454,8 @@ class MultiLatentAttention(nn.Module):
         seq_ctx: SequenceContext,
         past_key_values: list[list[torch.Tensor]],
     ) -> torch.Tensor:
+        if seq_ctx.cu_seq_lens_pad_len != 0:
+            raise NotImplementedError
         bsz, q_len, _ = hidden_states.size()
 
         if self.q_lora_rank is None:
@@ -606,6 +611,7 @@ class MultiLatentAttention(nn.Module):
             value_states.transpose(1, 2).squeeze(0),
             cu_seqlens_q=seq_ctx.cu_seq_lens_q,
             cu_seqlens_k=seq_ctx.cu_seq_lens_k,
+            cu_seqlens_pad_len=seq_ctx.cu_seq_lens_pad_len,
             max_seqlen_q=seq_ctx.max_length_q,
             max_seqlen_k=seq_ctx.max_length_k,
             dropout_p=self.dropout,

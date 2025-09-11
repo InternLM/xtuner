@@ -216,6 +216,7 @@ class MultiHeadAttention(nn.Module):
             past_key_values[self.layer_idx][1],
             seq_ctx.cu_seq_lens_q,
             seq_ctx.cu_seq_lens_k,
+            seq_ctx.cu_seq_lens_pad_len,
             seq_ctx.max_length_q,
             seq_ctx.max_length_k,
             seq_ctx.block_table,
@@ -233,6 +234,7 @@ class MultiHeadAttention(nn.Module):
                 value_states.transpose(1, 2).squeeze(0),
                 cu_seqlens_q=seq_ctx.cu_seq_lens_q,
                 cu_seqlens_k=seq_ctx.cu_seq_lens_k,
+                cu_seqlens_pad_len=seq_ctx.cu_seq_lens_pad_len,
                 max_seqlen_q=seq_ctx.max_length_q,
                 max_seqlen_k=seq_ctx.max_length_k,
                 dropout_p=self.dropout,
@@ -253,6 +255,8 @@ class MultiHeadAttention(nn.Module):
     ) -> torch.Tensor:
         assert seq_ctx.block_table is not None
         assert self.layer_idx is not None
+        if seq_ctx.cu_seq_lens_pad_len != 0:
+            raise NotImplementedError
 
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
@@ -387,6 +391,7 @@ class MultiHeadAttention(nn.Module):
             value_states,
             cu_seqlens_q=seq_ctx.cu_seq_lens_q,
             cu_seqlens_k=seq_ctx.cu_seq_lens_k,
+            cu_seqlens_pad_len=seq_ctx.cu_seq_lens_pad_len,
             max_seqlen_q=seq_ctx.max_length_q,
             max_seqlen_k=seq_ctx.max_length_k,
             window_size=self.window_size,

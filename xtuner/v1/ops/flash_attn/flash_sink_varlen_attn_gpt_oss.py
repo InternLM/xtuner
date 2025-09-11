@@ -480,6 +480,7 @@ class FlashSinkVarlenAttention(torch.autograd.Function):
         v: torch.Tensor,
         sink: torch.Tensor,
         cu_seqlen: torch.Tensor,
+        cu_seqlens_pad_len: int,
         window_size=None,
     ):
         if window_size == -1:
@@ -492,6 +493,7 @@ class FlashSinkVarlenAttention(torch.autograd.Function):
         )
 
         ctx.save_for_backward(q, k, v, o, lse)
+        ctx.cu_seqlens_pad_len = cu_seqlens_pad_len
         ctx.sink = sink
         ctx.window_size = window_size
         ctx.cu_seqlen = cu_seqlen

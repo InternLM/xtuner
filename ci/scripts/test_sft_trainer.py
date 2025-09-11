@@ -261,7 +261,7 @@ def main():
             loss_cfg=loss_cfg,
             lr_cfg=lr_cfg,
             tokenizer_path=QWEN3_MOE_PATH,
-            global_batch_size=16,
+            global_batch_size=8,
             total_epoch=1,
             work_dir=work_dir,
             seed=0,
