@@ -169,8 +169,6 @@ class InternS1VLTokenizeFunction(CachableTokenizeFunction[InternS1DataItem]):
 
     def replace_image_token(self, messages, num_image_token_list):
         current_image_idx = 0
-        # import debugpy
-        # debugpy.connect(('10.130.129.122',5681))
         for msg in messages.messages:
             if msg.role == "user":
                 content = msg.content
