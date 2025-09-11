@@ -2,15 +2,12 @@ bitsandbytes==0.45.0
 datasets<4.0.0
 einops
 loguru
-mmengine@git+https://github.com/open-mmlab/mmengine.git@c1724c6
 openpyxl
 peft>=0.14.0
 scikit-image
 scipy
 SentencePiece
 tiktoken
-torch>=2.6.0
-torchvision
 transformers==4.56.0
 cyclopts
 transformers_stream_generator

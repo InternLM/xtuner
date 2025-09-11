@@ -68,7 +68,7 @@ class TransformerConfig(PydanticBaseModel):
     max_window_layers: Annotated[int | None, Parameter(group="model")] = None
     rope_scaling_cfg: RopeScalingConfig | None = None
 
-    @computed_field
+    @computed_field # 模型初始化之后，根据现有字段动态计算出一个新字段
     def num_attention_heads(self) -> int:
         return self.attention.num_attention_heads
 

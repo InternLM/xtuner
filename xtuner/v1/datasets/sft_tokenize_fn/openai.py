@@ -2,7 +2,7 @@
 import hashlib
 import inspect
 from typing import TYPE_CHECKING, Annotated
-
+import json
 from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict
 
@@ -22,6 +22,7 @@ logger = get_logger()
 
 
 class OpenaiTokenizeFunction(CachableTokenizeFunction[DataItem]):
+    """custom implementation "TokenizeFunction" of tutorial: https://xtuner.readthedocs.io/zh-cn/latest/pretrain_sft/tutorial/dataset.html"""
     def __init__(
         self,
         tokenizer: "PreTrainedTokenizer",
@@ -40,7 +41,9 @@ class OpenaiTokenizeFunction(CachableTokenizeFunction[DataItem]):
         self.max_length = max_length
 
     def __call__(self, item: dict | list, **kwargs) -> DataItem:
-        messages = ChatMessages(messages=item)
+        # @elian: my dataset item is dict {"messages": list}
+        data = item if isinstance(item, dict) else json.loads(item)
+        messages = ChatMessages(messages=data["messages"])
         tokenized = messages.tokenize(self.tokenizer, self.chat_template)
 
         return DataItem(

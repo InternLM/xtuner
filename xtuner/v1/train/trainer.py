@@ -148,8 +148,8 @@ class TrainerConfig(BaseModel):
     dist_backend: str = "cpu:gloo,cuda:nccl"
     debug: bool = False
 
-    @model_validator(mode="after")
-    def _convert_work_dir(self):
+    @model_validator(mode="after") # 模型校验器, 在字段校验完成之后执行
+    def _convert_work_dir(self): # 把 work_dir 字段规范化
         if isinstance(self.work_dir, str):
             self.work_dir = Path(self.work_dir)
         elif self.work_dir is None:
@@ -321,7 +321,7 @@ class Trainer:
             global_batch_size = self.data_mesh["dp"].size()
         self._global_batch_size = global_batch_size
 
-        self._resolve_config_conflicts(self.tokenizer, model_cfg, dataloader_cfg)
+        self._resolve_config_conflicts(self.tokenizer, model_cfg, dataloader_cfg) # reslove pad_id problem
 
         self._dataloader = self.build_dataloader(
             dataset_config=dataset_cfg,
@@ -586,7 +586,7 @@ class Trainer:
                 "`tp_size * sp_size` size must be a divisor of world size."
             )
 
-        dp_size = self.world_size // (tp_size * sp_size)
+        dp_size = self.world_size // (tp_size * sp_size) # 16 // (2 * 2) = 4
 
         # TODO: fsdp_config could be None
         device = str(DEVICE) if self._fsdp_config.cpu_offload else "cpu"
@@ -858,6 +858,7 @@ class Trainer:
         return self.checkpoint_dir / f"epoch-{epoch}-step-{step}"
 
     def _set_deterministic(self):
+        # 确定性: 避免使用非确定性算子
         if XTUNER_DETERMINISTIC:
             torch.use_deterministic_algorithms(True, warn_only=True)
 
@@ -882,12 +883,12 @@ class Trainer:
             if self.rank == 0:
                 work_dir.mkdir(parents=True, exist_ok=True)
 
-        meta_path = work_dir / self._META_PATH
+        meta_path = work_dir / self._META_PATH # example: /home/xtuner/train/save/.xtuner
         if not meta_path.exists() and self.rank == 0:
             meta = XTunerMeta(exps=[])
             with open(meta_path, "w") as f:
                 f.write(meta.model_dump_json(indent=2))
-        dist.barrier()
+        dist.barrier() # Wait for all distributed processes to arrive here. Prevent processes with rank != 0 from trying to read a file when it is not yet created
 
         meta = cast(XTunerMeta, XTunerMeta.model_validate(load(meta_path, file_format="json")))
 
@@ -999,7 +1000,7 @@ class Trainer:
 
         max_memory = DEVICE_MODULE.max_memory_allocated()  # type: ignore[attr-defined]
         reserved_memory = DEVICE_MODULE.max_memory_reserved()  # type: ignore[attr-defined]
-
+        # TODO 打印步长作为参数
         self.logger.info(
             f"Step {self.cur_step}/{self.total_step} data_time: {data_time:.4f} lr: {lr:.6f} time: {step_time:.4f} "
             f"text_tokens: {step_consumed_tokens} "
@@ -1147,7 +1148,8 @@ class Trainer:
 
     def _resolve_resume_cfg(self, resume_cfg: ResumeConfig):
         latest_checkpoint = self.meta.latest_exp.latest_checkpoint
-        if latest_checkpoint is not None and resume_cfg.auto_resume:
+        # @elianDO: found a bug -> if resume_from is passed in, it will become invalid.
+        if latest_checkpoint is not None and resume_cfg.auto_resume and resume_cfg.resume_from is None:
             resume_cfg.resume_from = Path(latest_checkpoint)
         return resume_cfg
 

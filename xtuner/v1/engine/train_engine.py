@@ -187,7 +187,7 @@ class TrainEngine:
 
         if dist.get_rank() == 0:
             logger.info(
-                f"Total trainable parameters: {num_total_requires_grad // 1e6}M, total parameters: {num_total // 1e6}M"
+                f"Total trainable parameters: {(num_total_requires_grad // 1e6)//1000}B, total parameters: {(num_total // 1e6//1000)}B"
             )
             logger.info(f"Untrainable parameters names: {untrainable_names}")
         return optim_cfg.build(params)
