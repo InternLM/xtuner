@@ -1,27 +1,17 @@
 import os
-import re
-from pathlib import Path
 import ray
 import argparse
 
-import matplotlib.pyplot as plt
-import numpy as np
-import torch.distributed as dist
 from transformers import AutoTokenizer
 
-from xtuner.v1.config import (
-    AdamWConfig,
-    FSDPConfig,
-    LRConfig,
-)
+from xtuner.v1.model import InternS1MiniConfig
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
-from xtuner.v1.model.dense.qwen3 import Qwen3Dense8BConfig
 from xtuner.v1.ray.accelerator import AcceleratorResourcesConfig
 from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.ray.dataflow import DataFlowConfig, ReplayBufferConfig
 from xtuner.v1.ray.rollout import SampleParams
 from xtuner.v1.ray.evaluator import EvaluatorConfig
-from xtuner.v1.datasets import RLTokenizeFnConfig, OpenaiTokenizeFnConfig
+from xtuner.v1.datasets import RLTokenizeFnConfig, InternS1TokenizeFnConfig
 from xtuner.v1.config import (
     AdamWConfig,
     FSDPConfig,
@@ -30,14 +20,11 @@ from xtuner.v1.config import (
 from xtuner.v1.ray.judger.controller import JudgerConfig
 from xtuner.v1.rl.base import WorkerConfig
 from xtuner.v1.rl.grpo import GRPOLossConfig
-# from xtuner.v1.rl.grpo import GRPOLossConfig, WorkerConfig
-# from xtuner.v1.rl.grpo.config import WorkerConfig, LossConfig
-# from xtuner.v1.rl.grpo.trainer import Trainer
 from xtuner.v1.train.rl_trainer import RLTrainer
 
-MODEL_PATH = os.environ["ROLLOUT_MODEL_PATH"]
-TRAIN_DATA_PATH = os.environ["ROLLOUT_DATA_PATH"]
-TEST_DATA_PATH = os.environ["ROLLOUT_TEST_DATA_PATH"]
+MODEL_PATH = os.environ["INTERNS1_DENSE_PATH"]
+TRAIN_DATA_PATH = os.environ["ROLLOUT_GEO3K_PATH"]
+TEST_DATA_PATH = os.environ["ROLLOUT_TEST_GEO3K_PATH"]
 os.environ['XTUNER_USE_FA3'] = "1"
 
 
@@ -98,33 +85,39 @@ def main(args):
         global_batch_size=args.rollout_global_batch_size,
         sample_params=SampleParams(max_tokens=args.max_response_length),
     )
-    from xtuner.v1.ray.judger.gsm8k import GSM8KJudgerConfig
-    gsm8k_judger_config = GSM8KJudgerConfig()
+    from xtuner.v1.ray.judger.geo3k import GEO3KJudgerConfig
+    geo3k_judger_config = GEO3KJudgerConfig()
     judger_cfg = JudgerConfig(
-        reward_judger_configs={"openai/gsm8k": gsm8k_judger_config}
+        reward_judger_configs={"hiyouga/geometry3k": geo3k_judger_config}
     )
 
-    sft_tokenize_fn_cfg = OpenaiTokenizeFnConfig(max_length=args.max_prompt_length, chat_template='qwen3')
+    # TODO: model_cfg 应该从 args.model_path 中自动构建，而不是写死
+    sft_tokenize_fn_cfg = InternS1TokenizeFnConfig(model_cfg=InternS1MiniConfig())
     train_dataset_cfg = [
         {
-            "dataset": DatasetConfig(name="gsm8k",
+            "dataset": DatasetConfig(name="geo3k",
                                      anno_path=args.data_path,
+                                     media_root=args.data_path,
+                                     class_name='VLMJsonlDataset',
                                      sample_ratio=1.0),
             "tokenize_fn": RLTokenizeFnConfig(sft_tokenize_fn_cfg=sft_tokenize_fn_cfg),
         },
     ]
     eval_dataset_cfg = [
         {
-            "dataset": DatasetConfig(name="gsm8k",
+            "dataset": DatasetConfig(name="geo3k",
                                      anno_path=args.eval_data_path,
+                                     media_root=args.eval_data_path,
+                                     class_name='VLMJsonlDataset',
                                      sample_ratio=1.0),
             "tokenize_fn": RLTokenizeFnConfig(sft_tokenize_fn_cfg=sft_tokenize_fn_cfg),
         },
     ]
     dataloader_cfg = DataloaderConfig(
-        pack_max_length=args.pack_max_length,
         collator='fake_collator',
         pack_level='none',
+        num_workers=8,
+        group_by_length=False,
     )
     tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True)
     evaluator_cfg = EvaluatorConfig(
@@ -142,7 +135,7 @@ def main(args):
         postprocessor=None
     )
     train_worker_cfg: WorkerConfig = WorkerConfig(
-        model_cfg=Qwen3Dense8BConfig(),
+        model_cfg=InternS1MiniConfig(),
         optim_cfg=AdamWConfig(lr=1e-6, foreach=False if args.optimizer_disable_foreach else None),
         loss_cfg=GRPOLossConfig(
             policy_loss_cfg=dict(

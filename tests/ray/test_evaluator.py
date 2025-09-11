@@ -3,14 +3,13 @@ import unittest
 import ray
 from transformers import AutoTokenizer
 
-
 from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.ray.judger.controller import JudgerConfig
 from xtuner.v1.ray.accelerator import AcceleratorResourcesConfig, AutoAcceleratorWorkers
 from xtuner.v1.ray.environment import SingleTurnEnvironment
 from xtuner.v1.ray.evaluator import Evaluator, EvaluatorConfig
 from xtuner.v1.ray.rollout import SampleParams
-from xtuner.v1.datasets import RLTextTokenizeFnConfig, DatasetConfig
+from xtuner.v1.datasets import RLTokenizeFnConfig, DatasetConfig, OpenaiTokenizeFnConfig
 
 MODEL_PATH = os.environ["ROLLOUT_MODEL_PATH"]
 TEST_DATA_PATH = os.environ["ROLLOUT_TEST_DATA_PATH"]
@@ -31,7 +30,7 @@ class TestEvaluator(unittest.TestCase):
         self.resources_cfg = AcceleratorResourcesConfig(
             accelerator="GPU",
             num_workers=8,
-            cpu_memory_per_worker=16 * 1024**3,  # 16 GB
+            cpu_memory_per_worker=16 * 1024 ** 3,  # 16 GB
         )
         self.max_prompt_length = 512
         self.rollout_cfg = RolloutConfig(
@@ -46,13 +45,13 @@ class TestEvaluator(unittest.TestCase):
         self.judger_cfg = JudgerConfig(
             reward_judger_configs={"openai/gsm8k": gsm8k_judger_config}
         )
-        
+        sft_tokenize_fn_cfg = OpenaiTokenizeFnConfig(max_length=self.max_prompt_length, chat_template='qwen3')
         self.eval_dataset_cfg = [
             {
-            "dataset": DatasetConfig(name="gsm8k",
-                                    anno_path=TEST_DATA_PATH,
-                                    sample_ratio=1.0),
-            "tokenize_fn": RLTextTokenizeFnConfig(max_length=self.max_prompt_length),
+                "dataset": DatasetConfig(name="gsm8k",
+                                         anno_path=TEST_DATA_PATH,
+                                         sample_ratio=1.0),
+                "tokenize_fn": RLTokenizeFnConfig(sft_tokenize_fn_cfg=sft_tokenize_fn_cfg),
             },
         ]
         self.tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
@@ -64,10 +63,10 @@ class TestEvaluator(unittest.TestCase):
             self.judger_cfg
         )
         self.sample_params = SampleParams(
-            top_p=1.0, 
-            temperature=0.0, 
-            do_sample=False, 
-            max_tokens=1024, 
+            top_p=1.0,
+            temperature=0.0,
+            do_sample=False,
+            max_tokens=1024,
             top_k=1
         )
 
@@ -75,7 +74,7 @@ class TestEvaluator(unittest.TestCase):
         ray.init(num_cpus=80)
         self.model_path = MODEL_PATH
         self.init_config()
-        
+
     def tearDown(self):
         ray.shutdown()
 

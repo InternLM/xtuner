@@ -9,7 +9,7 @@ from xtuner.v1.config import (
     FSDPConfig,
     LRConfig,
 )
-from xtuner.v1.datasets import RLTextTokenizeFnConfig
+from xtuner.v1.datasets import OpenaiTokenizeFnConfig, RLTokenizeFnConfig
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.model.dense.qwen3 import Qwen3Dense8BConfig
 from xtuner.v1.ray.accelerator import AcceleratorResourcesConfig
@@ -81,24 +81,24 @@ def main(args):
 
     gsm8k_judger_config = GSM8KJudgerConfig()
     judger_cfg = JudgerConfig(reward_judger_configs={"openai/gsm8k": gsm8k_judger_config})
+    sft_tokenize_fn_cfg = OpenaiTokenizeFnConfig(max_length=args.max_prompt_length, chat_template="qwen3")
     train_dataset_cfg = [
         {
             "dataset": DatasetConfig(name="gsm8k", anno_path=args.data_path, sample_ratio=1.0),
-            "tokenize_fn": RLTextTokenizeFnConfig(max_length=args.max_prompt_length),
+            "tokenize_fn": RLTokenizeFnConfig(sft_tokenize_fn_cfg=sft_tokenize_fn_cfg),
         },
     ]
     if args.eval_data_path:
         eval_dataset_cfg = [
             {
                 "dataset": DatasetConfig(name="gsm8k", anno_path=args.eval_data_path, sample_ratio=1.0),
-                "tokenize_fn": RLTextTokenizeFnConfig(max_length=args.max_prompt_length),
+                "tokenize_fn": RLTokenizeFnConfig(sft_tokenize_fn_cfg=sft_tokenize_fn_cfg),
             },
         ]
     else:
         eval_dataset_cfg = None
 
     dataloader_cfg = DataloaderConfig(
-        pack_max_length=args.pack_max_length,
         collator="fake_collator",
         pack_level="none",
     )

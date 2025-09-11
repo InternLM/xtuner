@@ -25,7 +25,7 @@ from xtuner.v1.train.trainer import Trainer
 
 from xtuner.v1.utils.device import get_device
 from xtuner.v1.loss import CELossConfig
-from xtuner.v1.datasets.sft_tokenize_fn import OpenaiTokenizeFunctionConfig
+from xtuner.v1.datasets.sft_tokenize_fn import OpenaiTokenizeFnConfig
 import argparse
 
 
@@ -254,7 +254,7 @@ def main():
         dataset_config = [
             {
                 "dataset": DatasetConfig(name="alpaca", anno_path=ALPACA_PATH, sample_ratio=100),
-                "tokenize_fn": OpenaiTokenizeFunctionConfig(max_length=4096, chat_template="deepseek-v3"),
+                "tokenize_fn": OpenaiTokenizeFnConfig(max_length=4096, chat_template="deepseek-v3"),
                 # "tokenize_fn": FTDPTokenizeFnConfig(max_length=4096),
             },
         ]

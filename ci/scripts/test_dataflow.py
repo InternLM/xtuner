@@ -11,7 +11,7 @@ from xtuner.v1.datasets.config import (
     DataloaderConfig,
     DatasetConfig,
 )
-from xtuner.v1.datasets import RLTextTokenizeFnConfig
+from xtuner.v1.datasets import RLTokenizeFnConfig, OpenaiTokenizeFnConfig
 from xtuner.v1.ray.accelerator import AcceleratorResourcesConfig, AutoAcceleratorWorkers
 from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.ray.dataflow import DataFlow, DataFlowConfig, ReplayBufferConfig
@@ -59,12 +59,13 @@ def main():
         global_batch_size=args.global_batch_size,
         enable_partial_rollout=args.enable_partial_rollout
     )
+    sft_tokenize_fn_cfg = OpenaiTokenizeFnConfig(max_length=16384, chat_template='qwen3')
     dataset_cfg = [
         {
         "dataset": DatasetConfig(name="gsm8k",
                                  anno_path=TRAIN_DATA_PATH,
                                  sample_ratio=1.0),
-        "tokenize_fn": RLTextTokenizeFnConfig(max_length=16386),
+        "tokenize_fn": RLTokenizeFnConfig(sft_tokenize_fn_cfg=sft_tokenize_fn_cfg),
         },
     ]
     dataloader_cfg = DataloaderConfig(

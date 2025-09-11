@@ -49,7 +49,7 @@ class EvaluatorConfig(BaseModel):
         config = EvaluatorConfig(
             dataset_cfg=[{
                 "dataset": DatasetConfig(name="gsm8k", anno_path="test_data.json"),
-                "tokenize_fn": RLTextTokenizeFnConfig(max_length=512)
+                "tokenize_fn": RLTokenizeFnConfig(max_length=512)
             }],
             tokenizer=AutoTokenizer.from_pretrained("model_path"),
             max_concurrent=32,
@@ -154,14 +154,11 @@ class Evaluator:
             sample = await self.env_controller.run.remote(sample, self.sample_params)  # type: ignore[attr-defined]
             self.return_list.append(sample)
         except Exception as e:
-            if sample is not None:
-                self.logger.error(f"Worker task failed with exception: {e}. Returning meta for retry.", exc_info=True)
-                if "retry_times" not in sample:
-                    sample["retry_times"] = 0
-                sample["retry_times"] += 1
-                return sample
-            else:
-                self.logger.warning(f"Worker task failed with exception: {e}. No samples to return.")
+            self.logger.error(f"Worker task failed with exception: {e}. Returning meta for retry.", exc_info=True)
+            if "retry_times" not in sample:
+                sample["retry_times"] = 0
+            sample["retry_times"] += 1
+            return sample
 
     async def concurrent_eval_task_runner(self):
         """Runs evaluation tasks concurrently to generate a batch of samples.
