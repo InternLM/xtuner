@@ -35,6 +35,7 @@ class SequenceContext:
     block_table: torch.Tensor | None = None
     device: str | torch.device = "cpu"  # TODO: 这个地方有点乱，到处是 device
     position_ids: torch.LongTensor | None = None
+    cu_seq_lens_pad_len: int = 0  # 用于记录 cu_seq_lens pad 的长度，方便在 pad_cu_seq_lens 中恢复
 
     # Intern-S1
     image_flags: torch.LongTensor | None = None
@@ -56,6 +57,8 @@ class SequenceContext:
                 position_ids = split_for_sequence_parallel(position_ids, dim=1, sp_mesh=self.sequence_parallel_mesh)
 
             self.position_ids = position_ids
+
+        self.pad_cu_seq_lens()
 
     @classmethod
     def from_input_ids(
@@ -98,15 +101,27 @@ class SequenceContext:
             )
             new_padding = pad_input_ids.numel() - self.input_ids.numel()
             if new_padding > 0:
-                if self.num_padding > 0:
-                    new_cu_seq_lens = self.cu_seq_lens_q.clone()
-                    new_cu_seq_lens[-1] += new_padding
+                if self.cu_seq_lens_pad_len == 0:
+                    if self.num_padding > 0:
+                        new_cu_seq_lens = self.cu_seq_lens_q.clone()
+                        new_cu_seq_lens[-1] += new_padding
+                    else:
+                        new_cu_seq_lens = torch.ones(
+                            self.cu_seq_lens_q.numel() + 1, dtype=torch.int32, device=self.device
+                        )
+                        new_cu_seq_lens[: self.cu_seq_lens_q.numel()] = self.cu_seq_lens_q.clone()
+                        new_cu_seq_lens[-1] = self.cu_seq_lens_q[-1] + new_padding
                 else:
-                    new_cu_seq_lens = torch.ones(self.cu_seq_lens_q.numel() + 1, dtype=torch.int32, device=self.device)
-                    new_cu_seq_lens[: self.cu_seq_lens_q.numel()] = self.cu_seq_lens_q.clone()
-                    new_cu_seq_lens[-1] = self.cu_seq_lens_q[-1] + new_padding
+                    new_cu_seq_lens = self.cu_seq_lens_q.clone()
+                    if self.num_padding > 0:
+                        new_cu_seq_lens[-(self.cu_seq_lens_pad_len + 1) :].add_(new_padding)
+                    else:
+                        new_cu_seq_lens[-self.cu_seq_lens_pad_len :].add_(new_padding)
+                        # 有一个 cu_seq_lens 的元素从没有意义的 cu_seq_lens pad 变得有实际意义了（虽然对应的是 pad tokens）
+                        self.cu_seq_lens_pad_len -= 1
             else:
                 new_cu_seq_lens = self.cu_seq_lens_q.clone()
+
             new_cu_seq_lens = cast(torch.IntTensor, new_cu_seq_lens)
             new_max_length = cast(int, max(self.seq_lens_q.max().item(), new_padding))
             num_non_padding = self.input_ids.shape[1] - self.num_padding
@@ -142,21 +157,26 @@ class SequenceContext:
         num_padding = 0
         device = []
         inputs_embeds = []
-        for seq_ctx in sequence_context_list:
+        cu_seq_lens_is_padded = False
+        for i, seq_ctx in enumerate(sequence_context_list):
             assert seq_ctx.sequence_parallel_mesh is None
             # todo: support vlm model
             assert seq_ctx.pixel_values is None
             packed_input_ids.append(seq_ctx.input_ids)
-            cu_seq_lens_q.append(
-                seq_ctx.cu_seq_lens_q  # type: ignore
-                if len(cu_seq_lens_q) == 0
-                else (seq_ctx.cu_seq_lens_q + cu_seq_lens_q[-1][-1])[1:]
-            )
-            cu_seq_lens_k.append(
-                seq_ctx.cu_seq_lens_k  # type: ignore
-                if len(cu_seq_lens_k) == 0
-                else (seq_ctx.cu_seq_lens_k + cu_seq_lens_k[-1][-1])[1:]
-            )
+            if seq_ctx.cu_seq_lens_pad_len != 0:
+                new_cu_seq_lens_q = seq_ctx.cu_seq_lens_q.clone()
+                new_cu_seq_lens_k = seq_ctx.cu_seq_lens_k.clone()
+                new_cu_seq_lens_q = new_cu_seq_lens_q[: -seq_ctx.cu_seq_lens_pad_len]
+                new_cu_seq_lens_k = new_cu_seq_lens_k[: -seq_ctx.cu_seq_lens_pad_len]
+                cu_seq_lens_is_padded = True
+            else:
+                new_cu_seq_lens_q = seq_ctx.cu_seq_lens_q.clone()
+                new_cu_seq_lens_k = seq_ctx.cu_seq_lens_k.clone()
+            if i > 0:
+                new_cu_seq_lens_q = (new_cu_seq_lens_q + cu_seq_lens_q[-1][-1])[1:]
+                new_cu_seq_lens_k = (new_cu_seq_lens_k + cu_seq_lens_k[-1][-1])[1:]
+            cu_seq_lens_q.append(new_cu_seq_lens_q)
+            cu_seq_lens_k.append(new_cu_seq_lens_k)
             max_length_q = max(max_length_q, seq_ctx.max_length_q)
             max_length_k = max(max_length_k, seq_ctx.max_length_k)
             num_padding += seq_ctx.num_padding
@@ -165,7 +185,7 @@ class SequenceContext:
                 inputs_embeds.append(seq_ctx.inputs_embeds)
         assert len(set(device)) == 1, f"All sequence contexts must be on the same device. Got {set(device)}"
 
-        return cls(
+        out = cls(
             input_ids=torch.cat(packed_input_ids, dim=1),  # type: ignore
             cu_seq_lens_q=torch.cat(cu_seq_lens_q, dim=0),  # type: ignore
             cu_seq_lens_k=torch.cat(cu_seq_lens_k, dim=0),  # type: ignore
@@ -175,6 +195,11 @@ class SequenceContext:
             device=device[0],
             inputs_embeds=torch.cat(inputs_embeds, dim=1) if inputs_embeds else None,  # type: ignore
         )
+
+        if cu_seq_lens_is_padded:
+            out = out.pad_cu_seq_lens()
+
+        return out
 
     @property
     def mask(self) -> torch.BoolTensor:
@@ -189,14 +214,19 @@ class SequenceContext:
 
     @property
     def seq_lens_q(self) -> torch.LongTensor:
+        # 这里不能把 pad 的 cu_seq_lens slice 掉，否则又会把不同 shape 的 cu_seq_lens 暴露给 torch compile
         return self.cu_seq_lens_q[1:] - self.cu_seq_lens_q[:-1]  # type: ignore
 
     @property
     def seq_lens_k(self) -> torch.LongTensor:
+        # 这里不能把 pad 的 cu_seq_lens slice 掉，否则又会把不同 shape 的 cu_seq_lens 暴露给 torch compile
         return self.cu_seq_lens_k[1:] - self.cu_seq_lens_k[:-1]  # type: ignore
 
     # TODO: 暂时没有用到，可能要删掉
     def chunk(self, num_chunks: int) -> list[Self]:
+        # 暂时没用，就先不支持 cu_seq_lens pad 了
+        if self.pad_cu_seq_lens is not None and self.pad_cu_seq_lens != 0:
+            raise NotImplementedError
         n = self.seq_lens_q.numel()
         assert n // num_chunks
         n_per_chunk = n // num_chunks
@@ -231,6 +261,42 @@ class SequenceContext:
     def set_sp_mesh(self, sp_mesh: DeviceMesh) -> Self:
         """Set the sequence parallel mesh."""
         self.sequence_parallel_mesh = sp_mesh
+        return self
+
+    def pad_cu_seq_lens(self) -> Self:
+        """Pad the cumulative sequence lengths to the specified maximum length.
+
+        In large-scale training (1024 GPUs or more), varying data leads to different
+        cu_seq_lens shapes, causing frequent recompilations when using torch.compile
+        for optimization and significantly slowing down training.
+        To address this, we pad cu_seq_lens to a fixed shape (inferred from seq_len)
+        and slice out the padded content during attention calculation using torch.library.custom_op,
+        ensuring training behavior remains unaffected.
+
+        Args:
+            max_len: The target maximum length for padding.
+
+        Returns:
+            Self: The context with padded cumulative sequence lengths.
+        """
+        current_len = self.cu_seq_lens_q.shape[0]
+        seq_len = self.input_ids.shape[1]
+        cu_seq_lens_max_len_estimation = seq_len // 64 + 1
+        if self.cu_seq_lens_pad_len != 0:
+            assert current_len == cu_seq_lens_max_len_estimation
+        # assert self.cu_seq_lens_pad_len == 0, "pad_cu_seq_lens should only be called once."
+        if current_len >= cu_seq_lens_max_len_estimation:
+            return self
+        pad_len = cu_seq_lens_max_len_estimation - current_len
+        self.cu_seq_lens_pad_len = pad_len
+        assert torch.equal(self.cu_seq_lens_q, self.cu_seq_lens_k), (
+            "cu_seq_lens_q and cu_seq_lens_k must be equal to pad."
+        )
+        pad_tensor = torch.full(
+            (pad_len,), self.cu_seq_lens_q[-1], dtype=self.cu_seq_lens_q.dtype, device=self.cu_seq_lens_q.device
+        )
+        self.cu_seq_lens_q = torch.cat([self.cu_seq_lens_q, pad_tensor], dim=0)
+        self.cu_seq_lens_k = torch.cat([self.cu_seq_lens_k, pad_tensor], dim=0)
         return self
 
     def to(self, device: torch.device | str):

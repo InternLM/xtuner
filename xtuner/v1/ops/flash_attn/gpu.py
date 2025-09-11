@@ -9,6 +9,7 @@ def _flash_attn_varlen_forward_v3(
     v: torch.Tensor,
     cu_seqlens_q: torch.Tensor,
     cu_seqlens_k: torch.Tensor,
+    cu_seqlens_pad_len: int,
     max_seqlen_q: int,
     max_seqlen_k: int,
     softmax_scale: float,
@@ -17,6 +18,9 @@ def _flash_attn_varlen_forward_v3(
     window_size_right: int = -1,
     softcap: float = 0.0,  # 0.0 means deactivated
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    if cu_seqlens_pad_len > 0:
+        cu_seqlens_q = cu_seqlens_q[:-cu_seqlens_pad_len]
+        cu_seqlens_k = cu_seqlens_k[:-cu_seqlens_pad_len]
     out, softmax_lse, *rest = flash_attn_3_cuda.fwd(
         q,
         k,
@@ -63,6 +67,7 @@ def _flash_attn_varlen_forward_v3_fake(
     v: torch.Tensor,
     cu_seqlens_q: torch.Tensor,
     cu_seqlens_k: torch.Tensor,
+    cu_seqlens_pad_len: int,
     max_seqlen_q: int,
     max_seqlen_k: int,
     softmax_scale: float,
@@ -89,6 +94,7 @@ def _flash_attn_varlen_backward_v3(
     softmax_lse: torch.Tensor,
     cu_seqlens_q: torch.Tensor,
     cu_seqlens_k: torch.Tensor,
+    cu_seqlens_pad_len: int,
     max_seqlen_q: int,
     max_seqlen_k: int,
     dq: torch.Tensor,
@@ -101,6 +107,9 @@ def _flash_attn_varlen_backward_v3(
     softcap: float = 0.0,
     deterministic: bool = False,
 ) -> None:
+    if cu_seqlens_pad_len > 0:
+        cu_seqlens_q = cu_seqlens_q[:-cu_seqlens_pad_len]
+        cu_seqlens_k = cu_seqlens_k[:-cu_seqlens_pad_len]
     flash_attn_3_cuda.bwd(
         dout,
         q,
@@ -137,6 +146,7 @@ def _flash_attn_varlen_backward_v3_fake(
     softmax_lse: torch.Tensor,
     cu_seqlens_q: torch.Tensor,
     cu_seqlens_k: torch.Tensor,
+    cu_seqlens_pad_len: int,
     max_seqlen_q: int,
     max_seqlen_k: int,
     dq: torch.Tensor,
@@ -161,6 +171,7 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
         v,
         cu_seqlens_q,
         cu_seqlens_k,
+        cu_seqlens_pad_len,
         max_seqlen_q,
         max_seqlen_k,
         softmax_scale,
@@ -182,6 +193,7 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
             v,
             cu_seqlens_q,
             cu_seqlens_k,
+            cu_seqlens_pad_len,
             max_seqlen_q,
             max_seqlen_k,
             softmax_scale,
@@ -193,6 +205,7 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
         ctx.save_for_backward(q, k, v, out, softmax_lse, cu_seqlens_q, cu_seqlens_k)
         ctx.max_seqlen_q = max_seqlen_q
         ctx.max_seqlen_k = max_seqlen_k
+        ctx.cu_seqlens_pad_len = cu_seqlens_pad_len
         ctx.softmax_scale = softmax_scale
         ctx.causal = causal
         ctx.window_size_left = window_size[0]
@@ -218,6 +231,7 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
             softmax_lse,
             cu_seqlens_q,
             cu_seqlens_k,
+            ctx.cu_seqlens_pad_len,
             ctx.max_seqlen_q,
             ctx.max_seqlen_k,
             dq,
@@ -233,7 +247,7 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
         dq = dq[..., : q.shape[-1]]  # We could have padded the head dimension
         dk = dk[..., : k.shape[-1]]
         dv = dv[..., : v.shape[-1]]
-        return dq, dk, dv, None, None, None, None, None, None, None, None, None, None
+        return dq, dk, dv, None, None, None, None, None, None, None, None, None, None, None
 
 
 def gpu_flash_varlen_attn_v3(
@@ -242,6 +256,7 @@ def gpu_flash_varlen_attn_v3(
     v,
     cu_seqlens_q,
     cu_seqlens_k,
+    cu_seqlens_pad_len,
     max_seqlen_q,
     max_seqlen_k,
     dropout_p=0.0,
@@ -263,6 +278,7 @@ def gpu_flash_varlen_attn_v3(
         v,
         cu_seqlens_q,
         cu_seqlens_k,
+        cu_seqlens_pad_len,
         max_seqlen_q,
         max_seqlen_k,
         softmax_scale,

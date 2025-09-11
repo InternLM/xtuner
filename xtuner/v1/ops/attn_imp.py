@@ -210,7 +210,10 @@ def flash_attention(q, k, v, window_size=(-1, -1), s_aux=None, **kwargs) -> torc
         attention_output = flash_attn_varlen_func(q, k, v, **kwargs)
     else:
         cu_seqlens_q = kwargs["cu_seqlens_q"]
-        attention_output = flash_sink_attn_varlen_func(q, k, v, s_aux, cu_seqlens_q, window_size[0])
+        cu_seqlens_pad_len = kwargs["cu_seqlens_pad_len"]
+        attention_output = flash_sink_attn_varlen_func(
+            q, k, v, s_aux, cu_seqlens_q, cu_seqlens_pad_len, window_size[0]
+        )
     return attention_output[None]
 
 

@@ -231,7 +231,7 @@ def main():
         optim_cfg = AdamWConfig(lr=6e-05)
         lr_cfg = LRConfig(lr_type="cosine", lr_min=1e-6)
         fsdp_cfg = FSDPConfig(
-            torch_compile=False, #get_device() == "cuda",
+            torch_compile=True, #get_device() == "cuda",
             cpu_offload=False,
             ep_size=moe_cfg.ep_size,
             # hsdp_sharding_size=4,
@@ -260,7 +260,7 @@ def main():
             loss_cfg=loss_cfg,
             lr_cfg=lr_cfg,
             tokenizer_path=QWEN3_MOE_PATH,
-            global_batch_size=16,
+            global_batch_size=8,
             total_epoch=1,
             work_dir=work_dir,
             seed=0,
