@@ -959,11 +959,11 @@ class Trainer:
         if self._profile_step is not None and self._cur_step == self._profile_step:
             with contextlib.ExitStack() as stack:
                 if self._profile_time:
-                    time_dir = self.work_dir / self._PROFILE_TIME_PATH / f"step-{self._cur_step}"
+                    time_dir = self.exp_dir / self._PROFILE_TIME_PATH / f"step-{self._cur_step}"
                     stack.enter_context(profiling_time(time_dir))
 
                 if self._profile_memory:
-                    memory_dir = self.work_dir / self._PROFILE_MEMORY_PATH / f"step-{self._cur_step}"
+                    memory_dir = self.exp_dir / self._PROFILE_MEMORY_PATH / f"step-{self._cur_step}"
                     stack.enter_context(profiling_memory(memory_dir))
                 yield
         else:
