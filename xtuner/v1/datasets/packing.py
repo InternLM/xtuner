@@ -4,6 +4,7 @@ import random
 from concurrent.futures import ProcessPoolExecutor
 from functools import partial
 from multiprocessing import shared_memory
+from typing import Sized
 
 import numpy as np
 import torch
@@ -309,3 +310,228 @@ class ExpandSoftPackDataset(_LegacySoftPackDataset):
 
         pack_infos = Dataset.from_list(pack_infos)
         return pack_infos
+
+
+def _hard_pack_chunk_core(
+    i_chunk: list[int],
+    *,
+    dataset_id: int,
+    pack_max_length: int,
+    cu: np.ndarray,
+    inds_arr: np.ndarray,
+) -> list[dict]:
+    lengths = cu[1:] - cu[:-1]
+    out: list[dict] = []
+    for i in i_chunk:
+        begin = i * pack_max_length
+        end = (i + 1) * pack_max_length
+
+        s_idx = int(np.searchsorted(cu, begin, side="right") - 1)
+        e_idx = int(np.searchsorted(cu, end - 1, side="right") - 1)
+
+        s_off = int(begin - cu[s_idx])
+        e_off = int(end - cu[e_idx])
+
+        if s_idx == e_idx:
+            longest = int(e_off - s_off)
+        else:
+            len_first = int(lengths[s_idx] - s_off)
+            len_last = int(e_off)
+            mid_max = int(lengths[s_idx + 1 : e_idx].max()) if e_idx - s_idx > 1 else 0
+            longest = max(len_first, len_last, mid_max)
+
+        out.append(
+            {
+                "dataset_id": dataset_id,
+                "indices": inds_arr[s_idx : e_idx + 1].tolist(),
+                "start_offset": s_off,
+                "end_offset": e_off,
+                "longest": longest,
+            }
+        )
+    return out
+
+
+def _hard_pack_chunk(
+    i_chunk: list[int],
+    *,
+    dataset_id: int,
+    pack_max_length: int,
+    cu_shm_name: str,
+    cu_shape,
+    cu_dtype,
+    inds_shm_name: str,
+    inds_shape,
+    inds_dtype,
+):
+    existing_cu = shared_memory.SharedMemory(name=cu_shm_name)
+    cu: np.ndarray = np.ndarray(cu_shape, dtype=cu_dtype, buffer=existing_cu.buf)
+
+    existing_inds = shared_memory.SharedMemory(name=inds_shm_name)
+    inds_arr: np.ndarray = np.ndarray(inds_shape, dtype=inds_dtype, buffer=existing_inds.buf)
+
+    out = _hard_pack_chunk_core(
+        i_chunk,
+        dataset_id=dataset_id,
+        pack_max_length=pack_max_length,
+        cu=cu,
+        inds_arr=inds_arr,
+    )
+
+    existing_cu.close()
+    existing_inds.close()
+    return out
+
+
+class HardPackDataset(_LegacySoftPackDataset):
+    def __init__(
+        self, datasets, pack_max_length=2048, global_pack=False, seed: int | None = None, pack_workers: int = 1
+    ):
+        self.pack_workers = pack_workers
+        super().__init__(
+            datasets=datasets,
+            pack_max_length=pack_max_length,
+            global_pack=global_pack,
+            seed=seed,
+        )
+
+    def _get_single_pack_info(self, begin: int, end: int, cu_seq_lens: np.ndarray, inds: list[int]) -> dict:
+        # cu_seq_lens: e.g. [0, 1241, 2141, 3141], strictly increasing
+        cu = np.asarray(cu_seq_lens, dtype=np.int64).reshape(-1)
+        if cu.ndim != 1 or cu.size < 2:
+            raise ValueError(
+                "cu_seq_lens must be a 1-D increasing sequence with at least two elements (including 0 and total)."
+            )
+
+        total = int(cu[-1])
+        if not (0 <= begin < end <= total):
+            raise ValueError(f"Invalid range: begin={begin}, end={end}, total={total}")
+
+        # Find the sample index containing 'begin' (interval [cu[i], cu[i+1]))
+        start_sample_idx = int(np.searchsorted(cu, begin, side="right") - 1)
+        # Find the sample index containing 'end - 1'
+        end_sample_idx = int(np.searchsorted(cu, end - 1, side="right") - 1)
+
+        # Offsets inside the start/end samples
+        start_offset = int(begin - cu[start_sample_idx])
+        end_offset = int(end - cu[end_sample_idx])
+
+        # Max original sample length among [start_sample_idx, end_sample_idx]
+        lengths = cu[1:] - cu[:-1]
+        if start_sample_idx == end_sample_idx:
+            # If the interval falls entirely within a single sample, the maximum length equals that sample’s
+            # sliced segment length.
+            longest = int(end_offset - start_offset)
+        else:
+            # The effective length of the first sample is its original length minus the start offset.
+            len_first = int(lengths[start_sample_idx] - start_offset)
+            # The effective length of the last sample is the end_offset.
+            len_last = int(end_offset)
+            # For middle samples, take the maximum of their original lengths (0 if there are no middle samples).
+            mid_max = (
+                int(lengths[start_sample_idx + 1 : end_sample_idx].max())
+                if end_sample_idx - start_sample_idx > 1
+                else 0
+            )
+            longest = max(len_first, len_last, mid_max)
+
+        return {
+            "indices": inds[start_sample_idx : end_sample_idx + 1],
+            "start_offset": start_offset,
+            "end_offset": end_offset,
+            "longest": longest,
+        }
+
+    def get_pack_infos(self, dataset: Sized, dataset_id: int, num_tokens: np.ndarray):
+        # number of packed samples
+        num_packed_samples = int(num_tokens.sum() / self.pack_max_length)
+
+        # shuffled indices
+        inds = list(range(len(dataset)))
+        self.random.shuffle(inds)
+        shfl_inds = inds
+
+        # shuffled cumulative lengths with leading 0
+        shfl_lens: np.ndarray = np.take(num_tokens, shfl_inds)
+        shfl_cu_lens = np.cumsum(shfl_lens, dtype=np.int64)
+        shfl_cu_lens = np.insert(shfl_cu_lens, 0, 0).astype(np.int64, copy=False)
+
+        # shared memory for cu and inds
+        cu_arr = np.asarray(shfl_cu_lens, dtype=np.int64).reshape(-1)
+        inds_arr = np.asarray(shfl_inds, dtype=np.int64).reshape(-1)
+
+        # chunk tasks
+        chunk_size = 10000
+        i_all = list(range(num_packed_samples))
+        chunks = [i_all[i : i + chunk_size] for i in range(0, len(i_all), chunk_size)]
+
+        pack_infos_list = []
+
+        if self.pack_workers > 1:
+            # Use fork to inherit read-only arrays; no extra shared memory copy needed
+            mp_context = multiprocessing.get_context("fork")
+            fn = partial(
+                _hard_pack_chunk_core,
+                dataset_id=dataset_id,
+                pack_max_length=self.pack_max_length,
+                cu=cu_arr,
+                inds_arr=inds_arr,
+            )
+            with ProcessPoolExecutor(max_workers=self.pack_workers, mp_context=mp_context) as ex:
+                for res in tqdm(ex.map(fn, chunks), total=len(chunks)):
+                    pack_infos_list.extend(res)
+        else:
+            # single-process path, reuse the same core
+            for i_chunk in tqdm(chunks, total=len(chunks)):
+                pack_infos_list.extend(
+                    _hard_pack_chunk_core(
+                        i_chunk,
+                        dataset_id=dataset_id,
+                        pack_max_length=self.pack_max_length,
+                        cu=cu_arr,
+                        inds_arr=inds_arr,
+                    )
+                )
+
+        pack_infos = Dataset.from_list(pack_infos_list)
+        return pack_infos
+
+    def __len__(self):
+        return len(self.pack_infos)
+
+    def __getitem__(self, item):
+        info = self.pack_infos[item]
+        dataset_id = info["dataset_id"]
+        ds = self.datasets[dataset_id]
+
+        indices = info["indices"]
+        s_off = info["start_offset"]
+        e_off = info["end_offset"]
+
+        packed_list: list[dict] = []
+
+        for i in range(len(indices)):
+            idx = indices[i]
+            sample = ds[idx]
+            ids = sample["input_ids"]
+            labs = sample.get("labels", None)
+
+            st = 0 if i != 0 else s_off
+            ed = len(ids) if i != len(indices) - 1 else e_off
+
+            packed_list.append(
+                {
+                    "input_ids": ids[st:ed],
+                    "labels": labs[st:ed] if labs is not None else None,
+                    "num_tokens": ed - st,
+                }
+            )
+        assert (total_num_tokens := sum(i["num_tokens"] for i in packed_list)) == self.pack_max_length, (
+            f"Internal Error! Found size: {total_num_tokens} mismatch after hard packing."
+        )
+        return packed_list
+
+    def get_state_dict(self):
+        return {}
+
+    def load_state_dict(self, state_dict): ...

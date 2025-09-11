@@ -14,7 +14,7 @@ from xtuner.v1.utils import get_logger
 from ..datasets.collator import ColateItem
 from .config import DataloaderConfig, DatasetConfig, DatasetConfigList
 from .jsonl import JsonlDataset
-from .packing import ExpandSoftPackDataset, _LegacySoftPackDataset
+from .packing import ExpandSoftPackDataset, HardPackDataset, _LegacySoftPackDataset
 from .sampler import LengthGroupedSampler, ParallelSampler
 
 
@@ -73,7 +73,7 @@ def build_dataloader(
         num_tokens = sum(dset.num_tokens.sum() for dset in datasets)
         logger.debug(f"[Dataset] {num_tokens} tokens.")
 
-    dataset: ExpandSoftPackDataset | _LegacySoftPackDataset | ConcatDataset
+    dataset: ExpandSoftPackDataset | _LegacySoftPackDataset | ConcatDataset | HardPackDataset
     if dataloader_config.pack_level == "soft":
         logger.info("[Dataset] Start packing data of ExpandSoftPackDataset.")
         dataset = ExpandSoftPackDataset(
@@ -83,6 +83,14 @@ def build_dataloader(
             pack_workers=dataloader_config.pack_workers,
             global_pack=dataloader_config.global_pack,
             pack_extra_buffer_size=dataloader_config.pack_extra_buffer_size,
+            seed=seed,
+        )
+    elif dataloader_config.pack_level == "hard":
+        logger.info("[Dataset] Start packing data of HardPackDataset.")
+        dataset = HardPackDataset(
+            datasets,
+            pack_max_length=dataloader_config.pack_max_length,
+            global_pack=dataloader_config.global_pack,
             seed=seed,
         )
     elif dataloader_config.pack_level == "none":
@@ -107,7 +115,7 @@ def build_dataloader(
     sampler: LengthGroupedSampler | ParallelSampler | RandomSampler | SequentialSampler
     if dataloader_config.group_by_length:
         assert shuffle, "Currently only shuffling is supported for LengthGroupedSampler."
-        assert isinstance(dataset, (ExpandSoftPackDataset, _LegacySoftPackDataset)), (
+        assert isinstance(dataset, (ExpandSoftPackDataset, _LegacySoftPackDataset, HardPackDataset)), (
             "Internal Error, LengthGroupedSampler requires ExpandSoftPackDataset or _LegacySoftPackDataset, "
             f"but got {type(dataset)}"
         )

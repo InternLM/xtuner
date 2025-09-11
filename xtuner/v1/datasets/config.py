@@ -69,7 +69,9 @@ class DataloaderConfig(BaseModel):
     collator: Annotated[
         Literal["sft_llm_collator", "sft_vllm_collator", "fake_collator"], Parameter(help="collator func name")
     ] = "sft_llm_collator"
-    pack_level: Annotated[Literal["soft", "none", "__legacy"], Parameter(help="__legacy is only for debug")] = "soft"
+    pack_level: Annotated[
+        Literal["soft", "none", "__legacy", "hard"], Parameter(help="__legacy is only for debug")
+    ] = "soft"
     pack_max_length: Annotated[int, Parameter(help="pack max length")] = 32768
     pack_chunk_size: Annotated[int, Parameter(help="pack chunk size")] = 10000
     pack_workers: Annotated[int, Parameter(help="pack workers")] = 8
