@@ -6,15 +6,15 @@ from transformers import AutoTokenizer, AutoProcessor
 import json
 from xtuner.v1.model import InternVL3P5Dense8BConfig
 
-INTERN_VL_4B_PATH = os.environ["INTERN_VL_4B_PATH"]
+INTERN_VL_1B_PATH = os.environ["INTERN_VL_1B_PATH"]
 
 
 class TestMLLMTokenizeFn(TestCase):
     def setUp(self):
         model_cfg = InternVL3P5Dense8BConfig()
-        tokenizer = AutoTokenizer.from_pretrained(INTERN_VL_4B_PATH, trust_remote_code=True)
+        tokenizer = AutoTokenizer.from_pretrained(INTERN_VL_1B_PATH, trust_remote_code=True)
         self.tokenize_fn = InternS1VLTokenizeFnConfig(model_cfg=model_cfg).build(tokenizer)
-        self.processor = AutoProcessor.from_pretrained(INTERN_VL_4B_PATH, trust_remote_code=True)
+        self.processor = AutoProcessor.from_pretrained(INTERN_VL_1B_PATH, trust_remote_code=True)
 
     def test_intern_vl_single_image(self):
         data_path = 'tests/resource/mllm_sft_media_example_data.jsonl'
