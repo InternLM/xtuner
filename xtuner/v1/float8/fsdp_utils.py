@@ -22,7 +22,6 @@ DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
 
 
-@maybe_compile(fullgraph=True)
 def tensor_to_per_block_fp8_devided_64_scales(
     tensor: "WeightWithDynamicTilewiseFloat8CastTensor",
     reduce_mesh_devided_64: Optional[DeviceMesh] = None,
@@ -224,7 +223,6 @@ def cast_to_per_block_fp8_with_scales(
     return tensor_bits_fp8
 
 
-@maybe_compile(fullgraph=True)
 def cast_to_per_block_fp8_devided_64_with_scales(
     tensor: torch.Tensor,
     scales: torch.Tensor,

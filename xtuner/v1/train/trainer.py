@@ -45,6 +45,7 @@ from xtuner.v1.utils import (
     record_git_info,
 )
 from xtuner.v1.utils.device import get_device, get_torch_device_module
+import gc
 
 from .toy_tokenizer import UTF8ByteTokenizer
 
@@ -480,6 +481,9 @@ class Trainer:
             self._maybe_save()
 
             time_before_get_data = time.time()
+
+            if self.cur_step % 50 == 0:
+                gc.collect()
 
     @property
     def world_size(self) -> int:
@@ -1032,13 +1036,13 @@ class Trainer:
         if self._hf_interval is None:
             return
 
+        if self.cur_step % self._hf_interval != 0 and self.cur_step != self.total_step:
+            return
+
         assert self._load_from_hf, (
             "Only support saving to Huggingface format when loading from Huggingface! "
             "You meet this error means `load_from` of trainer is not a Huggingface model path."
         )
-
-        if self.cur_step % self._hf_interval != 0 and self.cur_step != self.total_step:
-            return
 
         save_hf_path = self.exp_dir / f"hf-{self.cur_step}"
         self.meta.latest_exp.hf_checkpoint_list.append(str(save_hf_path))
@@ -1196,6 +1200,7 @@ class Trainer:
         self._consumed_tokens = train_state["consumed_tokens"]
 
     def _setup_env(self):
+        gc.disable()
         os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
         log_str = "\n============XTuner Training Environment============\n"
