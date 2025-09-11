@@ -5,7 +5,7 @@ capacity: 1.0
 
 # parallel params
 zero_stage: 3
-ep: 8
+ep: 1
 pp: 1
 vpp: 1
 tp: 1
@@ -24,7 +24,7 @@ master_type: 4
 master_grad_type: 4
 
 # train params
-MBS: 2  # 2 for ep domino intra_layer_micro_batch_size
+MBS: 1  # 2 for ep domino intra_layer_micro_batch_size
 L: 16384
 MBN: 1
 

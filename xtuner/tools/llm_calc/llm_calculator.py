@@ -306,12 +306,17 @@ class Calculator:
         #     self.os_denom = C.dp
         #     self.mlp_os_denom = C.edp
         else:  # C.zero_stage == 3
-            self.param_denom = C.dp
-            self.grad_denom = C.dp
-            self.os_denom = C.dp
-            self.mlp_param_denom = C.edp
-            self.mlp_grad_denom = C.edp
-            self.mlp_os_denom = C.edp
+            # xtuner实现逻辑，只在 (fsdp, ep) 或者 (fsdp, tp) 的fsdp维度上切
+            if C.ep > 1:
+                fsdp = C.edp
+            else:  # 不开ep时，取决于tp
+                fsdp = C.dp
+            self.param_denom = fsdp
+            self.grad_denom = fsdp
+            self.os_denom = fsdp
+            self.mlp_param_denom = fsdp
+            self.mlp_grad_denom = fsdp
+            self.mlp_os_denom = fsdp
 
     def run(self, output_path):
         self.calc_part_info()
@@ -394,12 +399,13 @@ class Calculator:
         forward_last += perlayer_acts + self.head_acts
         if C.recompute:
             # 全部剩余layer激活值的checkpoint
+            # todo: 是否加上 embed_acts? 即 embed_layer是否重计算 ?
             forward_last += self.perlayer_ckp_acts * (C.LN_per_gpu - 1)  # type: ignore
         else:
             forward_last += self.embed_acts + perlayer_acts * (C.LN_per_gpu - 1)  # type: ignore
         micro1_forward_last = static_mem + forward_last
 
-        ########## 第1个micro batch反向最后时的显存 ##########
+        ########## 第1个micro batch反向最后时(第1个layer)的显存 ##########
         # 静态显存: 增加master梯度
         static_grad_mem = self.attn_master_grads + self.mlp_master_grads + self.embed_master_grads + self.head_master_grads
         micro1_backward_last = static_mem + static_grad_mem
@@ -417,6 +423,7 @@ class Calculator:
         ####### show memory ##########
         total_ckp = self.perlayer_ckp_acts * C.LN_per_gpu  # type: ignore
         print(f"static_mem: {static_mem / 1024**3} GiB, total_ckp: {total_ckp / 1024**3} GiB, static_grad_mem: {static_grad_mem / 1024**3} GiB")
+        print(f"embed_params: {self.embed_params / 1024**3} GiB, embed_grads: {self.embed_grads / 1024**3} GiB, embed_opt_states: {self.embed_opt_states / 1024**3} GiB, embed_master_params: {self.embed_master_params / 1024**3} GiB, embed_master_grads: {self.embed_master_grads / 1024**3} GiB, embed_acts: {self.embed_acts / 1024**3} GiB")
         print(f"head_params: {self.head_params / 1024**3} GiB, head_acts: {self.head_acts / 1024**3} GiB")
         print(f"perlayer_params: {perlayer_params / 1024**3} GiB, perlayer_acts: {perlayer_acts / 1024**3} GiB, perlayer_grads: {perlayer_grads / 1024**3} GiB")
         max_mem1 = max(micro1_forward_last, micro1_backward_last)
@@ -666,11 +673,13 @@ class Calculator:
     def mlp(self):
         # 模型参数量: fc1_W=D*mH*le*mlp_act_dim, fc2_W=mH*D*le, 
         fc_params_num_per_layer = C.D * C.mH * C.le * C.mlp_act_dim + C.mH * C.D * C.le  # type: ignore
+
         # shared experts params: fc1=D*mH*n_shared_experts*mlp_act_dim, fc2=mH*D*n_shared_experts
         shared_params_num_per_layer = C.D * C.mH * C.n_shared_experts * C.mlp_act_dim + C.mH * C.D * C.n_shared_experts
         # gate_W=D*e
         router_params_num_per_layer = C.D * C.e  # type: ignore
         nonfc_params_num_per_layer = router_params_num_per_layer + self.post_attn_ln_params_num_per_layer + shared_params_num_per_layer
+
         self.mlp_params_num_per_layer = fc_params_num_per_layer + nonfc_params_num_per_layer
         self.mlp_params_num = (fc_params_num_per_layer * C.ep + nonfc_params_num_per_layer) * C.LN
 
@@ -764,7 +773,7 @@ if __name__ == "__main__":
 
     print("setting:".center(100, "-"))
     print(f"model:{C.model} zero_stage:{C.zero_stage} tp:{C.tp} pp:{C.pp} dp:{C.dp} ep:{C.ep} vpp:{C.vpp} nodes:{C.nodes} " 
-          f"mbs:{C.MBS} gbs:{C.GBS} L:{C.L} recompute:{C.recompute} flash_attn:{C.flash_attn} capacity:{C.capacity}")
+          f"mbs:{C.MBS} gbs:{C.GBS} L:{C.L} recompute:{C.recompute} flash_attn:{C.flash_attn} capacity:{C.capacity} LN:{C.LN}")
     print("-" * 100)
 
     calc = Calculator()
