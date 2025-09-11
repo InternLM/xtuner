@@ -1,64 +1,15 @@
+import threading
+from itertools import cycle
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import ray
-from cyclopts import Parameter
-from pydantic import BaseModel
-from typing_extensions import Annotated
+import uvicorn
+from fastapi import FastAPI
 
 from transformers import AutoTokenizer
 from xtuner.v1.ray.config.worker import RolloutConfig
 
-from .worker import RolloutWorker
-
-
-class SampleParams(BaseModel):
-    """Sampling parameters configuration for text generation in XTuner.
-
-    Args:
-        n (int): Number of samples to generate for each input. Defaults to 1.
-        top_k (int): Number of highest probability vocabulary tokens to keep for
-            top-k filtering. Set to 0 to disable. Defaults to 0.
-        top_p (float): Cumulative probability threshold for nucleus (top-p) sampling.
-            Defaults to 1.0.
-        temperature (float): Sampling temperature to control randomness. Lower values
-            make output more deterministic. Defaults to 1.0.
-        repetition_penalty (float): Penalty applied to tokens that have already
-            appeared in the sequence. Defaults to 1.0 (no penalty).
-        presence_penalty (float): Penalty applied based on token presence in the
-            generated text. Defaults to 0.0.
-        frequency_penalty (float): Penalty applied based on token frequency in the
-            generated text. Defaults to 0.0.
-        min_tokens (int): Minimum number of tokens to generate before considering
-            stop conditions. Defaults to 0.
-        max_tokens (int): Maximum number of tokens to generate. Defaults to 2048.
-        stops (List[str]): List of string sequences that will stop generation when
-            encountered. Defaults to empty list.
-        stop_token_ids (List[int]): List of token IDs that will stop generation when
-            encountered. Defaults to empty list.
-        logprobs (int): Number of log probabilities to return for each token.
-            Set to 0 to disable. Defaults to 0.
-        skip_special_tokens (bool): Whether to skip special tokens during decoding.
-            Defaults to True.
-        do_sample (bool): Whether to use sampling (True) or greedy decoding (False).
-            Defaults to True.
-    """
-
-    n: Annotated[int, Parameter(help="Number of samples to generate.")] = 1
-    top_k: Annotated[
-        int, Parameter(help="The number of highest probability vocabulary tokens to keep for top-k-filtering.")
-    ] = 0
-    top_p: Annotated[float, Parameter(help="The cumulative probability for nucleus sampling.")] = 1.0
-    temperature: Annotated[float, Parameter(help="The value used to module the next token probabilities.")] = 1.0
-    repetition_penalty: Annotated[float, Parameter(help="The parameter for repetition penalty.")] = 1.0
-    presence_penalty: Annotated[float, Parameter(help="The parameter for presence penalty.")] = 0.0
-    frequency_penalty: Annotated[float, Parameter(help="The parameter for frequency penalty.")] = 0.0
-    min_tokens: Annotated[int, Parameter(help="Minimum number of tokens to generate.")] = 0
-    max_tokens: Annotated[int, Parameter(help="Maximum number of tokens to generate.")] = 2048
-    stops: Annotated[List[str], Parameter(help="List of stop sequences.")] = []
-    stop_token_ids: Annotated[List[int], Parameter(help="List of stop token IDs.")] = []
-    logprobs: Annotated[int, Parameter(help="Number of log probabilities to return.")] = 0
-    skip_special_tokens: Annotated[bool, Parameter(help="Whether to skip special tokens.")] = True
-    do_sample: Annotated[bool, Parameter(help="Whether to sample or not.")] = True
+from .worker import RolloutRequest, RolloutResponse, RolloutWorker, SampleParams
 
 
 @ray.remote
@@ -85,8 +36,8 @@ class RolloutController:
         self.tokenizer = AutoTokenizer.from_pretrained(infer_config.model_path, trust_remote_code=True)
         self.workers_bundle_idx_map = workers_bundle_idx_map
         self.engine_mesh_list, self.server_url_dict = self.init_workers()
+        self.start_api_server()
         # todo(@duanyanhui): add router to replace native round robin
-        self.worker_index = 0  # round robin index
         self.sample_params = SampleParams(
             stops=[self.tokenizer.decode(self.tokenizer.eos_token_id)], stop_token_ids=[self.tokenizer.eos_token_id]
         )
@@ -130,8 +81,8 @@ class RolloutController:
         set_bundle_idxs_objectref = []
         engine_mesh_list = []
         for active_worker in self.active_rollout_workers:
-            head_rank, start_bundle_idx = self.workers_bundle_idx_map[active_worker]
-            engine_workers = workers[start_bundle_idx : start_bundle_idx + interval]
+            head_rank, _ = self.workers_bundle_idx_map[active_worker]
+            engine_workers = workers[head_rank : head_rank + interval]
             engine_bundle_idxs = [self.workers_bundle_idx_map[worker][1] for worker in engine_workers]
             set_bundle_idxs_objectref.append(active_worker.set_engine_bundle_idxs.remote(engine_bundle_idxs))  # type: ignore[attr-defined]
             engine_mesh_list.append([self.workers_bundle_idx_map[worker][0] for worker in engine_workers])
@@ -151,6 +102,7 @@ class RolloutController:
             )
         )
         self.worker_server_urls = list(worker_server_urls_map.values())
+        self.worker_cycler = cycle(self.active_rollout_workers)
         return engine_mesh_list, worker_server_urls_map
 
     async def rollout(
@@ -161,7 +113,7 @@ class RolloutController:
         sample_params: Optional[SampleParams] = None,
         extra_params: dict = dict(),
         format: str = "openai",
-    ):
+    ) -> RolloutResponse:
         """Perform a rollout using one of the workers in a round-robin fashion.
 
         Args:
@@ -181,12 +133,12 @@ class RolloutController:
         Returns:
             The response from the rollout worker.
         """
-        index = self.worker_index % len(self.active_rollout_workers)
+        worker = next(self.worker_cycler)
         final_sample_params = sample_params if sample_params else self.sample_params
         # note(@duanyanhui): ensure stops and stop_token_ids are set to append eos in response
         final_sample_params.stops = final_sample_params.stops or self.sample_params.stops
         final_sample_params.stop_token_ids = final_sample_params.stop_token_ids or self.sample_params.stop_token_ids
-        response_ref = self.active_rollout_workers[index].rollout.remote(  # type: ignore[attr-defined]
+        response_ref = worker.rollout.remote(  # type: ignore[attr-defined]
             prompt,
             tools=tools,
             tool_choice=tool_choice,
@@ -194,8 +146,28 @@ class RolloutController:
             extra_params=extra_params,
             format=format,
         )
-        self.worker_index += 1
         return await response_ref
+
+    def start_api_server(self, host: str = "0.0.0.0", port: int = 8000):
+        """Starts the API server to expose the rollout functionality."""
+        app = FastAPI()
+        port = self.config.api_port if self.config.api_port else port
+
+        @app.post("/v1/chat/completions")
+        async def chat_completions(request: RolloutRequest) -> RolloutResponse:
+            response = await self.rollout(
+                prompt=request.messages,
+                tools=request.tools,
+                tool_choice=request.tool_choice,
+                sample_params=request.sample_params,
+                extra_params=request.extra_params,
+            )
+            return response
+
+        config = uvicorn.Config(app, host=host, port=port)
+        server = uvicorn.Server(config)
+        server_thread = threading.Thread(target=server.run, daemon=True)
+        server_thread.start()
 
     # internal functions
     def _update_dist_init_addr(self, nodes_per_engine, dist_init_addrs, tp_size):
