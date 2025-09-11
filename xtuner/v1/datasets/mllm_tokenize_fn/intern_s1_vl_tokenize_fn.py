@@ -138,14 +138,14 @@ class InternS1VLTokenizeFunction(CachableTokenizeFunction[InternS1DataItem]):
         image_paths = []
         video_paths = []
         for msg in messages:
-            if msg.role == "user":
-                content = msg.content
+            if msg["role"] == "user":
+                content = msg["content"]
                 if isinstance(content, list):
                     for c in content:
-                        if c.type == "image_url":
-                            image_paths.append(c.image_url)
-                        if c.type == "video_url":
-                            video_paths.append(c.video_url)
+                        if c["type"] == "image_url":
+                            image_paths.append(c["image_url"])
+                        if c["type"] == "video_url":
+                            video_paths.append(c["video_url"])
         return image_paths, video_paths
 
     def _load_image(self, image_path):
@@ -169,7 +169,9 @@ class InternS1VLTokenizeFunction(CachableTokenizeFunction[InternS1DataItem]):
 
     def replace_image_token(self, messages, num_image_token_list):
         current_image_idx = 0
-        for msg in messages:
+        # import debugpy
+        # debugpy.connect(('10.130.129.122',5681))
+        for msg in messages.messages:
             if msg.role == "user":
                 content = msg.content
                 if isinstance(content, list):
