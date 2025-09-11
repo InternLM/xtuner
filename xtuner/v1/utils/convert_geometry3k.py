@@ -47,14 +47,21 @@ if __name__ == "__main__":
             image_path = os.path.join("images", f"{split}_{idx}.jpg")
             image.save(os.path.join(args.out_dir, image_path))
             image_wh = [[image.width, image.height]]
+
+            # openai format
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "url": image_path},
+                        {"type": "text", "text": prompt},
+                    ],
+                }
+            ]
+
             data = {
                 "data_source": "hiyouga/geometry3k",
-                "prompt": [
-                    {
-                        "role": "user",
-                        "content": prompt,
-                    }
-                ],
+                "prompt": messages,
                 "images": image_path,
                 "image_wh": image_wh,
                 "ability": "math",

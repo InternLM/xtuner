@@ -1,5 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from pydantic import BaseModel, ConfigDict
+import os
 
 from xtuner.v1.datasets.data_item import RLTextDataItem
 from xtuner.v1.utils import get_logger
@@ -43,22 +44,19 @@ class RLTokenizeFn(CachableTokenizeFunction[RLTextDataItem]):
         extra_info = item.get("extra_info", {})
         # TODO: 多模态需要支持 openai message 格式输入，否则这个地方要特殊处理
         if isinstance(self.tokenizer_fn, InternS1TokenizeFunction):
+            assert 'media_root' in kwargs
             new_jsonl_dict = {"image": item["image"], "image_wh": item["image_wh"]}
-            conversations = []
-            for message in messages:
-                if message["role"] == "user":
-                    conversations.append({"from": "human", "value": message["content"]})
-                elif message["role"] == "assistant":
-                    conversations.append({"from": "gpt", "value": message["content"]})
-                else:
-                    raise ValueError(message["role"])
-            new_jsonl_dict["conversations"] = conversations
-            num_tokens = self.tokenizer_fn(new_jsonl_dict)["num_tokens"]
 
-            extra_info["image"] = item["image"]
+            # TODO: Hard code now
+            prompt = "<image>" + messages[0]['content'][1]['text']
+            conversations = [{"from": "human", "value": prompt}]
+            new_jsonl_dict["conversations"] = conversations
+            num_tokens = self.tokenizer_fn(new_jsonl_dict, media_root=kwargs['media_root'])["num_tokens"]
+
+            extra_info["image"] = os.path.join(kwargs['media_root'], item["image"])
             extra_info["image_wh"] = item["image_wh"]
         else:
-            num_tokens = self.tokenizer_fn(messages)["num_tokens"]
+            num_tokens = self.tokenizer_fn(messages,)["num_tokens"]
 
         rl_out_data = {
             # "input_ids": input_ids,
