@@ -11,7 +11,6 @@ from xtuner.v1.utils import Config
 
 
 app = App(
-    name="entrypoint of sft & pretrain",
     help="XTuner's entry point for fine-tuning and training, launched using configuration files or arguments.",
 )
 
