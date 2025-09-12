@@ -36,7 +36,7 @@ dataset_config = [
     {
         "dataset": DatasetConfig(
             name="media",
-            anno_path="tests/resource/mllm_sft_media_example_data.jsonl",
+            anno_path="tests/resource/mllm_sft_single_image_example_data.jsonl",
             media_root="tests/",
             sample_ratio=2.0,
             class_name="VLMJsonlDataset",
