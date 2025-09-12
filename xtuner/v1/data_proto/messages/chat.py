@@ -38,7 +38,7 @@ class VideoContentItem(BaseModel):
         return ""
 
 
-MultModalContentType = Union[TextContentItem, ImageContentItem]
+MultModalContentType = Union[TextContentItem, ImageContentItem, VideoContentItem]
 ContentType = Union[str, List[MultModalContentType]]
 
 
