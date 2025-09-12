@@ -52,6 +52,9 @@ def generate_random_int_from_dict(input_dict, min_num, max_num):
     return rng.integers(min_num, max_num + 1)
 
 
+ALIAS = "XTUNER-ALIAS-ALIAS-XTUNER-2025"
+
+
 class InternS1VLTokenizeFunction(CachableTokenizeFunction[InternS1DataItem]):
     def __init__(
         self,
@@ -177,11 +180,13 @@ class InternS1VLTokenizeFunction(CachableTokenizeFunction[InternS1DataItem]):
                         if c.type == "text":
                             text = c.text
                             assert "<IMG_CONTEXT>" in text
-                            image_cnt = text.count("<IMG_CONTEXT>")
-                            for i in range(image_cnt):
+                            text = text.replace("<IMG_CONTEXT>", ALIAS)
+                            image_cnt = text.count(ALIAS)
+                            for _ in range(image_cnt):
                                 image_tokens = f"{self.chat_template.image_start_token}{self.chat_template.image_context_token * num_image_token_list[current_image_idx]}{self.chat_template.image_end_token}"
-                                c.text = text.replace("<IMG_CONTEXT>", image_tokens, 1)
+                                text = text.replace(ALIAS, image_tokens, 1)
                                 current_image_idx += 1
+                            c.text = text
             # if current_image_idx < num_image, it means <image> placeholder is less than num_image
             assert current_image_idx == len(num_image_token_list), (
                 f"ERROR: current_image_idx: {current_image_idx} != num_image: {len(num_image_token_list)}"
