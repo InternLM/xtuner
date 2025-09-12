@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import torch
 from typing_extensions import TypedDict
@@ -14,10 +14,10 @@ class DataItem(CacheItem):
 
 
 class BaseMLLMDataItem(DataItem):
-    num_img_tokens: list[int] | None
-    num_imgs: list[int] | None
-    num_patches: list[int] | None
-    pixel_values: Optional[torch.Tensor]
+    num_img_tokens: list[int]
+    num_imgs: list[int]
+    num_patches: list[int]
+    pixel_values: torch.Tensor
 
 
 class InternS1DataItem(BaseMLLMDataItem):

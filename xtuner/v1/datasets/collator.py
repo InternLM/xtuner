@@ -150,9 +150,9 @@ def sft_vllm_collator(
 
         num_img_tokens: list[int] = []
         for data in instance:
-            num_img_tokens.extend(data["num_img_tokens"])  # type: ignore
+            num_img_tokens.extend(data["num_img_tokens"])
 
-        pixel_values = torch.cat([i["pixel_values"] for i in instance], dim=0)  # type: ignore
+        pixel_values = torch.cat([i["pixel_values"] for i in instance], dim=0)
 
         image_flags: torch.LongTensor | None = None
         if "image_flags" in instance[0]:
