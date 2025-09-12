@@ -133,6 +133,7 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[BaseMLLMDataItem]):
 
 class BaseMLLMTokenizeFnConfig(BaseModel):
     model_config = ConfigDict(title="Base dataset config for xtuner", extra="allow")
+    system_message: str | None = None
     max_length: int | None = None
     hash: str | None = None
 
