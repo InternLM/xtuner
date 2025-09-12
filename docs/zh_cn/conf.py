@@ -117,6 +117,8 @@ autodoc_mock_imports = [
     "addict",
     "torchvision",
     "PIL",
+    "uvicorn",
+    "fastapi",
 ]
 
 
