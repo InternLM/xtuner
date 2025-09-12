@@ -19,7 +19,7 @@ from xtuner.v1.utils import get_logger
 from ..utils import CachableTokenizeFunction, tokenizer_xxhash
 from ..vlm_utils import TCSLoader, apply_exif_orientation
 from .intern_s1_vl_process import build_transform, dynamic_num_patch, dynamic_preprocess
-
+from .video_utils import read_frames_decord
 
 logger = get_logger()
 
@@ -57,21 +57,21 @@ ALIAS = "XTUNER-ALIAS-ALIAS-XTUNER-2025"
 
 class InternS1VLTokenizeFunction(CachableTokenizeFunction[InternS1DataItem]):
     def __init__(
-        self,
-        tokenizer: PreTrainedTokenizer,
-        model_cfg,  # InternS1BaseConfig
-        anno_name: str,
-        max_dynamic_patch: int | None = None,
-        min_dynamic_patch: int | None = None,
-        min_num_frames: int = 4,
-        max_num_frames: int = 24,
-        data_augment: bool = False,
-        system_message: str | None = None,
-        tcs_loader: TCSLoader | None = None,
-        tokenizer_hash: str | None = None,
-        max_length: int | None = None,
-        hash: str | None = None,
-        only_prompt: bool = False,
+            self,
+            tokenizer: PreTrainedTokenizer,
+            model_cfg,  # InternS1BaseConfig
+            anno_name: str,
+            max_dynamic_patch: int | None = None,
+            min_dynamic_patch: int | None = None,
+            min_num_frames: int = 4,
+            max_num_frames: int = 24,
+            data_augment: bool = False,
+            system_message: str | None = None,
+            tcs_loader: TCSLoader | None = None,
+            tokenizer_hash: str | None = None,
+            max_length: int | None = None,
+            hash: str | None = None,
+            only_prompt: bool = False,
     ):
         super().__init__()
         from xtuner.v1.model import InternS1BaseConfig, InternVLBaseConfig
@@ -111,7 +111,7 @@ class InternS1VLTokenizeFunction(CachableTokenizeFunction[InternS1DataItem]):
             f"use_thumbnail: {self.use_thumbnail} data_aug: {self.data_augment} for training."
         )
         self.downsample_ratio = model_cfg.downsample_ratio
-        self.num_image_token = int((self.image_size // self.patch_size) ** 2 * (self.downsample_ratio**2))
+        self.num_image_token = int((self.image_size // self.patch_size) ** 2 * (self.downsample_ratio ** 2))
         self.system_message = system_message
 
         # Note: 比较重要，防止改了参数但是没有重新 cache
@@ -185,6 +185,32 @@ class InternS1VLTokenizeFunction(CachableTokenizeFunction[InternS1DataItem]):
                             for _ in range(image_cnt):
                                 image_tokens = f"{self.chat_template.image_start_token}{self.chat_template.image_context_token * num_image_token_list[current_image_idx]}{self.chat_template.image_end_token}"
                                 text = text.replace(ALIAS, image_tokens, 1)
+                                current_image_idx += 1
+                            c.text = text
+            # if current_image_idx < num_image, it means <image> placeholder is less than num_image
+            assert current_image_idx == len(num_image_token_list), (
+                f"ERROR: current_image_idx: {current_image_idx} != num_image: {len(num_image_token_list)}"
+            )
+
+    def replace_video_token(self, messages, num_image_token_list):
+        current_image_idx = 0
+        n_frames = len(num_image_token_list)
+        for msg in messages.messages:
+            if msg.role == "user":
+                content = msg.content
+                if isinstance(content, list):
+                    for c in content:
+                        if c.type == "text":
+                            text = c.text
+                            assert "<IMG_CONTEXT>" in text
+                            text = text.replace("<IMG_CONTEXT>", ALIAS)
+                            image_cnt = text.count(ALIAS)
+                            for _ in range(image_cnt):
+                                special_tokens = '\n'.join(
+                                    ['Frame-{}: {}}'.format(frame_idx + 1, ALIAS) for frame_idx in range(n_frames)])
+                                text = text.replace(ALIAS, special_tokens)
+                                image_tokens = f"{self.chat_template.image_start_token}{self.chat_template.image_context_token * num_image_token_list[current_image_idx]}{self.chat_template.image_end_token}"
+                                text = text.replace(ALIAS, image_tokens)
                                 current_image_idx += 1
                             c.text = text
             # if current_image_idx < num_image, it means <image> placeholder is less than num_image
@@ -365,21 +391,73 @@ class InternS1VLTokenizeFunction(CachableTokenizeFunction[InternS1DataItem]):
         )
         return ret
 
-    def _prepare_video_get_item(self, data_item):
-        if "system_message" in data_item:
-            system_message = data_item["system_message"]
-        else:
-            system_message = self.system_message
-
-        random_frame_num = generate_random_int_from_dict(data_item, self.min_num_frames, self.max_num_frames)
-
-        return data_item, system_message, random_frame_num
-
     def calc_num_tokens_video_get_item(self, data_item):
-        raise NotImplementedError
+        # TODO: 目前只支持一个视频
+        # 根据 data_item 生成一个确定性的随机整数
+        random_frame_num = generate_random_int_from_dict(data_item, self.min_num_frames, self.max_num_frames)
+        # 根据采样的帧数（min_num_frames, max_num_frames+1），计算token数量，实际可能采样不到这么多帧（比如视频一共只有10帧），算出来num_tokens可能会偏大
+        n_frames = random_frame_num
+        num_tiles = [1] * n_frames
+        num_image_tokens = [self.num_image_token * num_tile for num_tile in num_tiles]
+        if isinstance(data_item, dict) and "messages" in data_item:
+            message = data_item["messages"]
+        else:
+            message = data_item
+        messages = ChatMessages(messages=message)
+
+        try:
+            self.replace_video_token(messages, num_image_tokens)
+            tokenized = messages.tokenize(self.tokenizer, self.chat_template)
+            input_ids = tokenized["input_ids"]
+            labels = tokenized["labels"]
+            input_ids, _ = self._truncated_input_and_labels(input_ids, labels)
+            return {"num_tokens": len(input_ids)}
+        except Exception as e:
+            print(
+                f"ERROR of Preprocess function: {e}, data_name: {self.data_name}, "
+                # f"conversations: {data_item['conversations']}"
+            )
+            return {"num_tokens": 0}
 
     def video_get_item(self, data_item, media_root) -> InternS1DataItem:
-        raise NotImplementedError
+        assert len(self._video_path) == 1, "Only one video is supported for now."
+        video_path = os.path.join(media_root, self._video_path[0])
+
+        # 根据 data_item 生成一个确定性的随机整数
+        random_frame_num = generate_random_int_from_dict(data_item, self.min_num_frames, self.max_num_frames)
+
+        assert video_path.endswith(('.mp4', '.avi', '.mov', '.webm', '.mkv', '.ts', '.rmvb', '.flv'))
+        image_list = read_frames_decord(video_path, num_frames=self.max_num_frames, min_num_frames=self.min_num_frames,
+                                        sample='rand', clip=data_item.get('clip', None),
+                                        random_frame_num=random_frame_num)
+
+        transform = self._get_transform()
+        pixel_values = [transform(image) for image in image_list]
+        pixel_values = torch.stack(pixel_values)
+        num_patches = pixel_values.size(0)
+        num_image_tokens = [self.num_image_token] * num_patches
+
+        if isinstance(data_item, dict) and "messages" in data_item:
+            message = data_item["messages"]
+        else:
+            message = data_item
+        messages = ChatMessages(messages=message)
+        self.replace_video_token(messages, num_image_tokens)
+        tokenized = messages.tokenize(self.tokenizer, self.chat_template)
+        input_ids = tokenized["input_ids"]
+        labels = tokenized["labels"]
+        input_ids, labels = self._truncated_input_and_labels(input_ids, labels)
+        ret = InternS1DataItem(
+            input_ids=input_ids,
+            labels=labels,
+            pixel_values=pixel_values,
+            image_flags=torch.tensor([1] * num_patches, dtype=torch.long),
+            num_tokens=len(input_ids),
+            num_img_tokens=num_image_tokens,
+            num_imgs=[len(self._image_path)],
+            num_patches=[num_patches],
+        )
+        return ret
 
     def __call__(self, item: Any, media_root: str = "") -> InternS1DataItem:  # type: ignore[override]
         if isinstance(item, dict) and "messages" in item:
@@ -393,7 +471,6 @@ class InternS1VLTokenizeFunction(CachableTokenizeFunction[InternS1DataItem]):
             else:
                 ret = self.multi_modal_get_item(item, media_root)
         elif len(self._video_path) > 0:
-            # TODO: 暂时没有验证
             if self.state == "cache":
                 ret = self.calc_num_tokens_video_get_item(item)
             else:
@@ -437,7 +514,7 @@ class InternS1VLTokenizeFnConfig(BaseModel):
     hash: str | None = None
 
     def build(
-        self, tokenizer, tokenizer_hash: str | None = None, anno_name: str = "", **kwargs
+            self, tokenizer, tokenizer_hash: str | None = None, anno_name: str = "", **kwargs
     ) -> InternS1VLTokenizeFunction:
         return InternS1VLTokenizeFunction(
             tokenizer,

@@ -30,6 +30,14 @@ class ImageContentItem(BaseModel):
         return ""
 
 
+class VideoContentItem(BaseModel):
+    type: Literal["video_url"] = "video_url"
+    video_url: str
+
+    def apply_chat_template(self, chat_template: HybridChatTemplate) -> str:
+        return ""
+
+
 MultModalContentType = Union[TextContentItem, ImageContentItem]
 ContentType = Union[str, List[MultModalContentType]]
 
