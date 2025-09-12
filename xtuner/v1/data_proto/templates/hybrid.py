@@ -26,7 +26,6 @@ class HybridChatTemplate(BaseModel):
     # Multimodal Chat
     # Predefined token and index for images
     image_context_token: str | None = None
-    image_token: str = "<IMAGE_TOKEN>"
     image_start_token: str = ""
     image_end_token: str = ""
     image_token_index: int = -100
