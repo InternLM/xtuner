@@ -16,8 +16,7 @@ from ..data_item import InternS1DataItem
 from .base_mllm_tokenize_fn import BaseMLLMTokenizeFunction, get_image_path, load_image, BaseMLLMTokenizeFnConfig
 from ..vlm_utils import TCSLoader, apply_exif_orientation
 from .intern_s1_vl_process import build_transform, dynamic_num_patch, dynamic_preprocess
-from .video_utils import read_frames_decord
-from . import ALIAS
+from .video_utils import read_frames_decord, IMAGE_TOKEN_ALIAS
 
 logger = get_logger()
 
@@ -135,11 +134,11 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction):
                         if c.type == "text":
                             text = c.text
                             assert "<IMG_CONTEXT>" in text
-                            text = text.replace("<IMG_CONTEXT>", ALIAS)
-                            image_cnt = text.count(ALIAS)
+                            text = text.replace("<IMG_CONTEXT>", IMAGE_TOKEN_ALIAS)
+                            image_cnt = text.count(IMAGE_TOKEN_ALIAS)
                             for _ in range(image_cnt):
                                 image_tokens = f"{self.chat_template.image_start_token}{self.chat_template.image_context_token * num_image_token_list[current_image_idx]}{self.chat_template.image_end_token}"
-                                text = text.replace(ALIAS, image_tokens, 1)
+                                text = text.replace(IMAGE_TOKEN_ALIAS, image_tokens, 1)
                                 current_image_idx += 1
                             c.text = text
             # if current_image_idx < num_image, it means <image> placeholder is less than num_image
@@ -158,16 +157,16 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction):
                         if c.type == "text":
                             text = c.text
                             assert "<IMG_CONTEXT>" in text
-                            text = text.replace("<IMG_CONTEXT>", ALIAS)
-                            image_cnt = text.count(ALIAS)
+                            text = text.replace("<IMG_CONTEXT>", IMAGE_TOKEN_ALIAS)
+                            image_cnt = text.count(IMAGE_TOKEN_ALIAS)
                             assert image_cnt == 1, "Only one <IMG_CONTEXT> is supported for video."
                             for _ in range(image_cnt):
                                 special_tokens = "\n".join(
-                                    [f"Frame-{frame_idx + 1}: {ALIAS}" for frame_idx in range(n_frames)]
+                                    [f"Frame-{frame_idx + 1}: {IMAGE_TOKEN_ALIAS}" for frame_idx in range(n_frames)]
                                 )
-                                text = text.replace(ALIAS, special_tokens)
+                                text = text.replace(IMAGE_TOKEN_ALIAS, special_tokens)
                                 image_tokens = f"{self.chat_template.image_start_token}{self.chat_template.image_context_token * num_image_token_list[current_image_idx]}{self.chat_template.image_end_token}"
-                                text = text.replace(ALIAS, image_tokens)
+                                text = text.replace(IMAGE_TOKEN_ALIAS, image_tokens)
                                 current_image_idx += n_frames
                             c.text = text
             # if current_image_idx < num_image, it means <image> placeholder is less than num_image

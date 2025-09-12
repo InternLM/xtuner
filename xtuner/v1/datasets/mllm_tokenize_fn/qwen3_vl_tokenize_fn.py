@@ -19,7 +19,7 @@ from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
 from .base_mllm_tokenize_fn import BaseMLLMTokenizeFunction,BaseMLLMTokenizeFnConfig
 from ..utils import CachableTokenizeFunction
 from ..vlm_utils import TCSLoader, apply_exif_orientation
-from . import ALIAS
+from .video_utils import IMAGE_TOKEN_ALIAS
 
 logger = get_logger()
 
