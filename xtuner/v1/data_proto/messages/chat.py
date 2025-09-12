@@ -22,19 +22,24 @@ class TextContentItem(BaseModel):
         return self.text
 
 
+class ImageURL(BaseModel):
+    url: str
+    detail: Optional[Literal["auto", "low", "high"]] = None
+
+
 class ImageContentItem(BaseModel):
     type: Literal["image_url"] = "image_url"
-    image_url: str
+    image_url: ImageURL
 
-    def apply_chat_template(self, chat_template: HybridChatTemplate) -> str:
+    def apply_chat_template(self, *args, **kwarg) -> str:
         return ""
 
 
 class VideoContentItem(BaseModel):
     type: Literal["video_url"] = "video_url"
-    video_url: str
+    video_url: ImageURL
 
-    def apply_chat_template(self, chat_template: HybridChatTemplate) -> str:
+    def apply_chat_template(self, *args, **kwargs) -> str:
         return ""
 
 
@@ -63,14 +68,6 @@ class ChatMsg(BaseModel):
                 self.loss = True
             else:
                 raise NotImplementedError
-
-    def collect_img_urls(self) -> List[str]:
-        img_urls = []
-        if isinstance(self.content, list):
-            for item in self.content:
-                if isinstance(item, ImageContentItem):
-                    img_urls.append(item.image_url)
-        return img_urls
 
     def get_prompt(self, chat_template: ChatTemplate) -> str:
         if isinstance(self.content, str):

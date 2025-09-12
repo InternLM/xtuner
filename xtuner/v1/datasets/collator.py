@@ -5,7 +5,7 @@ from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.utils import IGNORE_INDEX, get_logger
 from xtuner.v1.utils.pad import pad_to_max_length
 
-from .data_item import DataItem, BaseMLLMDataItem
+from .data_item import BaseMLLMDataItem, DataItem
 
 
 logger = get_logger()
@@ -148,11 +148,11 @@ def sft_vllm_collator(
 
         cu_seq_lens = torch.cumsum(torch.IntTensor(num_tokens), dim=0).int()
 
-        num_img_tokens = []
+        num_img_tokens: list[int] = []
         for data in instance:
-            num_img_tokens.extend(data["num_img_tokens"])
+            num_img_tokens.extend(data["num_img_tokens"])  # type: ignore
 
-        pixel_values = torch.cat([i["pixel_values"] for i in instance], dim=0)
+        pixel_values = torch.cat([i["pixel_values"] for i in instance], dim=0)  # type: ignore
 
         image_flags: torch.LongTensor | None = None
         if "image_flags" in instance[0]:

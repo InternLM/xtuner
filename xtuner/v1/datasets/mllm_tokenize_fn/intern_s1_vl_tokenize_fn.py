@@ -2,6 +2,7 @@
 
 import hashlib
 import os
+
 import numpy as np
 import torch
 from PIL import Image
@@ -13,10 +14,11 @@ from xtuner.v1.data_proto.templates import CHAT_TEMPLATE_MAP
 from xtuner.v1.utils import get_logger
 
 from ..data_item import InternS1DataItem
-from .base_mllm_tokenize_fn import BaseMLLMTokenizeFunction, get_image_path, load_image, BaseMLLMTokenizeFnConfig
 from ..vlm_utils import TCSLoader, apply_exif_orientation
+from .base_mllm_tokenize_fn import BaseMLLMTokenizeFnConfig, BaseMLLMTokenizeFunction, get_image_path, load_image
 from .intern_s1_vl_process import build_transform, dynamic_num_patch, dynamic_preprocess
-from .video_utils import read_frames_decord, IMAGE_TOKEN_ALIAS
+from .video_utils import IMAGE_TOKEN_ALIAS, read_frames_decord
+
 
 logger = get_logger()
 
@@ -49,7 +51,7 @@ def generate_random_int_from_dict(input_dict, min_num, max_num):
     return rng.integers(min_num, max_num + 1)
 
 
-class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction):
+class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
     def __init__(
         self,
         tokenizer: PreTrainedTokenizer,
@@ -68,6 +70,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction):
         only_prompt: bool = False,
     ):
         from xtuner.v1.model import InternS1BaseConfig, InternVLBaseConfig
+
         assert isinstance(model_cfg, (InternS1BaseConfig, InternVLBaseConfig))
 
         self.tcs_loader = tcs_loader
@@ -98,7 +101,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction):
             f"use_thumbnail: {self.use_thumbnail} data_aug: {self.data_augment} for training."
         )
         self.downsample_ratio = model_cfg.downsample_ratio
-        self.num_image_token = int((self.image_size // self.patch_size) ** 2 * (self.downsample_ratio ** 2))
+        self.num_image_token = int((self.image_size // self.patch_size) ** 2 * (self.downsample_ratio**2))
         self.system_message = system_message
 
         # Note: 比较重要，防止改了参数但是没有重新 cache
@@ -198,11 +201,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction):
         # Ensure there is only one patch
         assert num_patches == 1, f"The number of patches should be 1, but got {num_patches}."
 
-        if isinstance(data_item, dict) and "messages" in data_item:
-            message = data_item["messages"]
-        else:
-            message = data_item
-        messages = ChatMessages(messages=message)
+        messages = ChatMessages(messages=data_item["messages"])
         tokenized = messages.tokenize(self.tokenizer, self.chat_template)
         input_ids = tokenized["input_ids"]
         labels = tokenized["labels"]
@@ -220,7 +219,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction):
         )
         return ret
 
-    def calc_num_tokens_multi_modal_get_item(self, data_item) -> dict:
+    def calc_num_tokens_multi_modal_get_item(self, data_item: dict) -> dict:
         try:
             assert "image_wh" in data_item, "image must have `hw` attribute when packing data"
             image_size = data_item["image_wh"]  # eta: [[100,120]] or [[100,120],[200,240]]
@@ -229,10 +228,10 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction):
             for size in image_size:
                 if size[0] == 0 or size[1] == 0:
                     # Image is corrupted, flag=0, and this data will be removed later
-                    return {"num_tokens": 0}
+                    return {"num_tokens": 0}  # type: ignore
         except Exception as e:
             print(f"ERROR of image_wh: {e}, data_name: {self.data_name}")
-            return {"num_tokens": 0}
+            return {"num_tokens": 0}  # type: ignore
 
         num_tiles = []
         if self.dynamic_image_size:  # If dynamic image size is enabled, preprocess the image dynamically
@@ -250,11 +249,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction):
 
         num_image_tokens = [self.num_image_token * num_tile for num_tile in num_tiles]
 
-        if isinstance(data_item, dict) and "messages" in data_item:
-            message = data_item["messages"]
-        else:
-            message = data_item
-        messages = ChatMessages(messages=message)
+        messages = ChatMessages(messages=data_item["messages"])
 
         try:
             self.replace_image_token(messages, num_image_tokens)
@@ -270,7 +265,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction):
             )
             return {"num_tokens": 0}
 
-    def multi_modal_get_item(self, data_item:dict, media_root:str='') -> InternS1DataItem:
+    def multi_modal_get_item(self, data_item: dict, media_root: str = "") -> InternS1DataItem:
         image_sizes = data_item.get("image_wh", None)
         if image_sizes:
             if not isinstance(image_sizes[0], list):
@@ -313,11 +308,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction):
 
         # Preprocess the conversations and generate the return dictionary
         num_image_tokens = [self.num_image_token * num_tile for num_tile in num_tiles]
-        if isinstance(data_item, dict) and "messages" in data_item:
-            message = data_item["messages"]
-        else:
-            message = data_item
-        messages = ChatMessages(messages=message)
+        messages = ChatMessages(messages=data_item["messages"])
         self.replace_image_token(messages, num_image_tokens)
         tokenized = messages.tokenize(self.tokenizer, self.chat_template)
         input_ids = tokenized["input_ids"]
@@ -343,11 +334,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction):
         n_frames = random_frame_num
         num_tiles = [1] * n_frames
         num_image_tokens = [self.num_image_token * num_tile for num_tile in num_tiles]
-        if isinstance(data_item, dict) and "messages" in data_item:
-            message = data_item["messages"]
-        else:
-            message = data_item
-        messages = ChatMessages(messages=message)
+        messages = ChatMessages(messages=data_item["messages"])
 
         try:
             self.replace_video_token(messages, num_image_tokens)
@@ -363,7 +350,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction):
             )
             return {"num_tokens": 0}
 
-    def video_get_item(self, data_item: dict, media_root: str = '') -> InternS1DataItem:
+    def video_get_item(self, data_item: dict, media_root: str = "") -> InternS1DataItem:
         assert len(self._video_path) == 1, "Only one video is supported for now."
         video_path = os.path.join(media_root, self._video_path[0])
 
@@ -386,11 +373,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction):
         num_patches = pixel_values.size(0)  # type: ignore
         num_image_tokens = [self.num_image_token] * num_patches
 
-        if isinstance(data_item, dict) and "messages" in data_item:
-            message = data_item["messages"]
-        else:
-            message = data_item
-        messages = ChatMessages(messages=message)
+        messages = ChatMessages(messages=data_item["messages"])
         self.replace_video_token(messages, num_image_tokens)
         tokenized = messages.tokenize(self.tokenizer, self.chat_template)
         input_ids = tokenized["input_ids"]
@@ -421,7 +404,7 @@ class InternS1VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
     data_augment: bool = False
 
     def build(
-            self, tokenizer, tokenizer_hash: str | None = None, anno_name: str = "", **kwargs
+        self, tokenizer, tokenizer_hash: str | None = None, anno_name: str = "", **kwargs
     ) -> InternS1VLTokenizeFunction:
         return InternS1VLTokenizeFunction(
             tokenizer,

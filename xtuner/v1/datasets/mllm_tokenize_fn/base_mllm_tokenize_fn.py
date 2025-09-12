@@ -1,14 +1,17 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import os
-from typing import Any
+from typing import Any, TypeVar
+
 import xxhash
 from PIL import Image
-from pydantic import BaseModel, ConfigDict
+from pydantic import ConfigDict, Protocol
+
 from xtuner.v1.data_proto.messages import ChatMessages
 from xtuner.v1.data_proto.templates import ChatTemplate
 from xtuner.v1.utils import get_logger
+
 from ..utils import CachableTokenizeFunction, tokenizer_xxhash
-from ..data_item import BaseMLLMDataItem
+
 
 logger = get_logger()
 
@@ -22,9 +25,9 @@ def collect_image_video_paths(messages):
             if isinstance(content, list):
                 for c in content:
                     if c["type"] == "image_url":
-                        image_paths.append(c["image_url"])
+                        image_paths.append(c["image_url"]["url"])
                     if c["type"] == "video_url":
-                        video_paths.append(c["video_url"])
+                        video_paths.append(c["video_url"]["url"])
     return image_paths, video_paths
 
 
@@ -41,45 +44,47 @@ def get_image_path(image_path, media_root):
     return image_path
 
 
-class BaseMLLMTokenizeFunction(CachableTokenizeFunction[BaseMLLMDataItem]):
-    def __init__(self, tokenizer,
-                 chat_template: ChatTemplate | None = None,
-                 max_length: int | None = None,
-                 tokenizer_hash: str | None = None,
-                 hash: str | None = None):
+T = TypeVar("T")
+
+
+class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
+    def __init__(
+        self,
+        tokenizer,
+        chat_template: ChatTemplate,
+        max_length: int | None = None,
+        tokenizer_hash: str | None = None,
+        hash: str | None = None,
+    ):
         super().__init__()
         self.tokenizer = tokenizer
-        self.chat_template = chat_template
         self.max_length = max_length
         self._tokenizer_hash = tokenizer_hash
         self._hash = hash
-        self._hash_str = ''
+        self._hash_str = ""
+        self.chat_template = chat_template
 
-    def calc_num_tokens_multi_modal_get_item(self, item: Any) -> BaseMLLMDataItem:
+    def calc_num_tokens_multi_modal_get_item(self, item: dict) -> dict:
         raise NotImplementedError
 
-    def multi_modal_get_item(self, item: Any, media_root: str = "") -> BaseMLLMDataItem:
+    def multi_modal_get_item(self, item: dict, media_root: str = "") -> T:
         raise NotImplementedError
 
-    def calc_num_tokens_video_get_item(self, item: Any) -> BaseMLLMDataItem:
+    def calc_num_tokens_video_get_item(self, item: dict) -> dict:
         raise NotImplementedError
 
-    def video_get_item(self, item: Any, media_root: str = "") -> BaseMLLMDataItem:
+    def video_get_item(self, item: dict, media_root: str = "") -> T:
         raise NotImplementedError
 
-    def calc_num_tokens_pure_text_get_item(self, data_item):
-        if isinstance(data_item, dict) and "messages" in data_item:
-            message = data_item["messages"]
-        else:
-            message = data_item
-        messages = ChatMessages(messages=message)
+    def calc_num_tokens_pure_text_get_item(self, data_item) -> dict:
+        messages = ChatMessages(messages=data_item["messages"])
         tokenized = messages.tokenize(self.tokenizer, self.chat_template)
         input_ids = tokenized["input_ids"]
         labels = tokenized["labels"]
         input_ids, _ = self._truncated_input_and_labels(input_ids, labels)
         return {"num_tokens": len(input_ids)}
 
-    def pure_text_get_item(self, item: Any) -> BaseMLLMDataItem:
+    def pure_text_get_item(self, item: Any) -> T:
         raise NotImplementedError
 
     def _truncated_input_and_labels(self, input_ids, labels):
@@ -91,28 +96,24 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[BaseMLLMDataItem]):
             labels = labels[: self.max_length]
         return input_ids, labels
 
-    def __call__(self, item: Any, media_root: str = "") -> BaseMLLMDataItem:  # type: ignore[override]
-        if isinstance(item, dict) and "messages" in item:
-            message = item["messages"]
-        else:
-            message = item
-        self._image_path, self._video_path = collect_image_video_paths(message)
+    def __call__(self, item: dict, media_root: str = "") -> T:  # type: ignore[override]
+        self._image_path, self._video_path = collect_image_video_paths(item["messages"])
         if len(self._image_path) > 0:
             if self.state == "cache":
                 ret = self.calc_num_tokens_multi_modal_get_item(item)
             else:
-                ret = self.multi_modal_get_item(item, media_root)
+                ret = self.multi_modal_get_item(item, media_root)  # type: ignore
         elif len(self._video_path) > 0:
             if self.state == "cache":
                 ret = self.calc_num_tokens_video_get_item(item)
             else:
-                ret = self.video_get_item(item, media_root)
+                ret = self.video_get_item(item, media_root)  # type: ignore
         else:
             if self.state == "cache":
                 ret = self.calc_num_tokens_pure_text_get_item(item)
             else:
-                ret = self.pure_text_get_item(item)
-        return ret
+                ret = self.pure_text_get_item(item)  # type: ignore
+        return ret  # type: ignore
 
     def hash(self) -> str:
         if self._hash is None:
@@ -131,18 +132,13 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[BaseMLLMDataItem]):
         return self._hash
 
 
-class BaseMLLMTokenizeFnConfig(BaseModel):
+class BaseMLLMTokenizeFnConfig(Protocol):
     model_config = ConfigDict(title="Base dataset config for xtuner", extra="allow")
     system_message: str | None = None
     max_length: int | None = None
     hash: str | None = None
 
     def build(
-            self, tokenizer, tokenizer_hash: str | None = None, anno_name: str = "", **kwargs
+        self, tokenizer, tokenizer_hash: str | None = None, anno_name: str = "", **kwargs
     ) -> BaseMLLMTokenizeFunction:
-        return BaseMLLMTokenizeFunction(
-            tokenizer,
-            max_length=self.max_length,
-            tokenizer_hash=tokenizer_hash,
-            hash=self.hash,
-        )
+        raise NotImplementedError("The 'build' method must be implemented.")
