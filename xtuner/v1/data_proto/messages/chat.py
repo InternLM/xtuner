@@ -163,7 +163,6 @@ class ChatMessages(BaseMessages):
     def tokenize(self, tokenizer: PreTrainedTokenizer, chat_template: ChatTemplate) -> Dict:
         input_ids = tokenizer.encode("", add_special_tokens=False)
         labels = [IGNORE_INDEX for _ in input_ids]
-        image_urls = []
 
         process_message(self.messages, chat_template)
 
@@ -173,8 +172,6 @@ class ChatMessages(BaseMessages):
 
             input_ids.extend(token_ids)
             labels.extend(label_ids)
-
-            image_urls.extend(msg.collect_img_urls())
 
             if msg.role == "assistant":
                 sep = chat_template.sep
@@ -195,10 +192,6 @@ class ChatMessages(BaseMessages):
             "labels": labels,
             "num_tokens": len(input_ids),
         }
-
-        if len(image_urls) > 0:
-            training_data["image_urls"] = image_urls
-
         return training_data
 
     @classmethod

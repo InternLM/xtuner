@@ -4,7 +4,7 @@ from typing import Any, TypeVar
 
 import xxhash
 from PIL import Image
-from pydantic import ConfigDict, Protocol
+from pydantic import BaseModel, ConfigDict
 
 from xtuner.v1.data_proto.messages import ChatMessages
 from xtuner.v1.data_proto.templates import ChatTemplate
@@ -132,7 +132,7 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
         return self._hash
 
 
-class BaseMLLMTokenizeFnConfig(Protocol):
+class BaseMLLMTokenizeFnConfig(BaseModel):
     model_config = ConfigDict(title="Base dataset config for xtuner", extra="allow")
     system_message: str | None = None
     max_length: int | None = None
