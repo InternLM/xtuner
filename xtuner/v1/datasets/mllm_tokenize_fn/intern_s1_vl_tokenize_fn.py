@@ -2,25 +2,22 @@
 
 import hashlib
 import os
-from typing import Any
-
 import numpy as np
 import torch
-import xxhash
 from PIL import Image
 from pydantic import BaseModel, ConfigDict
 
 from transformers import PreTrainedTokenizer
 from xtuner.v1.data_proto.messages import ChatMessages
 from xtuner.v1.data_proto.templates import CHAT_TEMPLATE_MAP
-from xtuner.v1.datasets.data_item import InternS1DataItem
 from xtuner.v1.utils import get_logger
 
-from ..utils import CachableTokenizeFunction, tokenizer_xxhash
+from ..data_item import InternS1DataItem
+from .base_mllm_tokenize_fn import BaseMLLMTokenizeFunction, get_image_path, load_image, BaseMLLMTokenizeFnConfig
 from ..vlm_utils import TCSLoader, apply_exif_orientation
 from .intern_s1_vl_process import build_transform, dynamic_num_patch, dynamic_preprocess
 from .video_utils import read_frames_decord
-
+from . import ALIAS
 
 logger = get_logger()
 
@@ -53,10 +50,7 @@ def generate_random_int_from_dict(input_dict, min_num, max_num):
     return rng.integers(min_num, max_num + 1)
 
 
-ALIAS = "XTUNER-ALIAS-ALIAS-XTUNER-2025"
-
-
-class InternS1VLTokenizeFunction(CachableTokenizeFunction[InternS1DataItem]):
+class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction):
     def __init__(
         self,
         tokenizer: PreTrainedTokenizer,
@@ -74,18 +68,11 @@ class InternS1VLTokenizeFunction(CachableTokenizeFunction[InternS1DataItem]):
         hash: str | None = None,
         only_prompt: bool = False,
     ):
-        super().__init__()
         from xtuner.v1.model import InternS1BaseConfig, InternVLBaseConfig
-
         assert isinstance(model_cfg, (InternS1BaseConfig, InternVLBaseConfig))
-        chat_template = "intern-s1"
 
-        self._hash = hash
-        self._tokenizer_hash = tokenizer_hash
         self.tcs_loader = tcs_loader
-        self.tokenizer = tokenizer
         self.only_prompt = only_prompt
-        self.max_length = max_length
 
         self.image_size = model_cfg.vision_config.image_size[0]
         self.patch_size = model_cfg.vision_config.patch_size[0]
@@ -104,7 +91,7 @@ class InternS1VLTokenizeFunction(CachableTokenizeFunction[InternS1DataItem]):
 
         self.dynamic_image_size = model_cfg.dynamic_image_size
         self.use_thumbnail = model_cfg.use_thumbnail
-        self.data_name = anno_name
+        self.data_name = os.path.basename(anno_name)
         self.data_augment = data_augment
         logger.info(
             f"[{self.data_name}] Using dynamic image size: {self.dynamic_image_size} and "
@@ -112,7 +99,7 @@ class InternS1VLTokenizeFunction(CachableTokenizeFunction[InternS1DataItem]):
             f"use_thumbnail: {self.use_thumbnail} data_aug: {self.data_augment} for training."
         )
         self.downsample_ratio = model_cfg.downsample_ratio
-        self.num_image_token = int((self.image_size // self.patch_size) ** 2 * (self.downsample_ratio**2))
+        self.num_image_token = int((self.image_size // self.patch_size) ** 2 * (self.downsample_ratio ** 2))
         self.system_message = system_message
 
         # Note: 比较重要，防止改了参数但是没有重新 cache
@@ -122,48 +109,15 @@ class InternS1VLTokenizeFunction(CachableTokenizeFunction[InternS1DataItem]):
             f"_{self.min_dynamic_patch}_{self.max_dynamic_patch}"
         )
 
-        self.chat_template = CHAT_TEMPLATE_MAP[chat_template]
+        self.chat_template = CHAT_TEMPLATE_MAP["intern-s1"]
         if system_message is not None:
             self.chat_template.default_system = system_message
 
         self._image_path: list[str] = []
         self._video_path: list[str] = []
 
-    def _truncated_input_and_labels(self, input_ids, labels):
-        if self.max_length is not None and len(input_ids) > self.max_length:
-            logger.info(
-                f"WARNING: input_ids length {len(input_ids)} exceeds model_max_length {self.max_length}. truncated!"
-            )
-            input_ids = input_ids[: self.max_length]
-            labels = labels[: self.max_length]
-        return input_ids, labels
-
-    def _collect_image_video_paths(self, messages):
-        image_paths = []
-        video_paths = []
-        for msg in messages:
-            if msg["role"] == "user":
-                content = msg["content"]
-                if isinstance(content, list):
-                    for c in content:
-                        if c["type"] == "image_url":
-                            image_paths.append(c["image_url"])
-                        if c["type"] == "video_url":
-                            video_paths.append(c["video_url"])
-        return image_paths, video_paths
-
-    def _load_image(self, image_path):
-        # Load the image using tcs_loader if available, otherwise use PIL
-        if self.tcs_loader is not None and "s3://" in image_path:
-            return self.tcs_loader(image_path)
-        return Image.open(image_path).convert("RGB")
-
-    def _get_image_path(self, image_path, media_root):
-        if image_path.startswith("s3://"):  # for ceph
-            image_path = media_root + image_path
-        else:  # for local image
-            image_path = os.path.join(media_root, image_path)
-        return image_path
+        # 必须要最后调用
+        super().__init__(tokenizer, self.chat_template, max_length, tokenizer_hash, hash)
 
     def _get_transform(self):
         transform = build_transform(
@@ -221,19 +175,7 @@ class InternS1VLTokenizeFunction(CachableTokenizeFunction[InternS1DataItem]):
                 f"ERROR: current_image_idx: {current_image_idx} != num_image: {len(num_image_token_list)}"
             )
 
-    def calc_num_tokens_pure_text_get_item(self, data_item):
-        if isinstance(data_item, dict) and "messages" in data_item:
-            message = data_item["messages"]
-        else:
-            message = data_item
-        messages = ChatMessages(messages=message)
-        tokenized = messages.tokenize(self.tokenizer, self.chat_template)
-        input_ids = tokenized["input_ids"]
-        labels = tokenized["labels"]
-        input_ids, _ = self._truncated_input_and_labels(input_ids, labels)
-        return {"num_tokens": len(input_ids)}
-
-    def pure_text_get_item(self, data_item) -> InternS1DataItem:
+    def pure_text_get_item(self, data_item: dict) -> InternS1DataItem:
         # Build transformation function
         transform = self._get_transform()
 
@@ -279,7 +221,7 @@ class InternS1VLTokenizeFunction(CachableTokenizeFunction[InternS1DataItem]):
         )
         return ret
 
-    def calc_num_tokens_multi_modal_get_item(self, data_item):
+    def calc_num_tokens_multi_modal_get_item(self, data_item) -> dict:
         try:
             assert "image_wh" in data_item, "image must have `hw` attribute when packing data"
             image_size = data_item["image_wh"]  # eta: [[100,120]] or [[100,120],[200,240]]
@@ -329,7 +271,7 @@ class InternS1VLTokenizeFunction(CachableTokenizeFunction[InternS1DataItem]):
             )
             return {"num_tokens": 0}
 
-    def multi_modal_get_item(self, data_item, media_root) -> InternS1DataItem:
+    def multi_modal_get_item(self, data_item:dict, media_root:str='') -> InternS1DataItem:
         image_sizes = data_item.get("image_wh", None)
         if image_sizes:
             if not isinstance(image_sizes[0], list):
@@ -341,8 +283,8 @@ class InternS1VLTokenizeFunction(CachableTokenizeFunction[InternS1DataItem]):
         num_tiles = []
         images = []
         for i, image_path_ in enumerate(self._image_path):
-            image_path_ = self._get_image_path(image_path_, media_root)
-            image = self._load_image(image_path_)
+            image_path_ = get_image_path(image_path_, media_root)
+            image = load_image(image_path_)
             image = apply_exif_orientation(image)
 
             if image_sizes is not None:
@@ -394,7 +336,7 @@ class InternS1VLTokenizeFunction(CachableTokenizeFunction[InternS1DataItem]):
         )
         return ret
 
-    def calc_num_tokens_video_get_item(self, data_item):
+    def calc_num_tokens_video_get_item(self, data_item) -> dict:
         # TODO: 目前只支持一个视频
         # 根据 data_item 生成一个确定性的随机整数
         random_frame_num = generate_random_int_from_dict(data_item, self.min_num_frames, self.max_num_frames)
@@ -422,7 +364,7 @@ class InternS1VLTokenizeFunction(CachableTokenizeFunction[InternS1DataItem]):
             )
             return {"num_tokens": 0}
 
-    def video_get_item(self, data_item, media_root) -> InternS1DataItem:
+    def video_get_item(self, data_item: dict, media_root: str = '') -> InternS1DataItem:
         assert len(self._video_path) == 1, "Only one video is supported for now."
         video_path = os.path.join(media_root, self._video_path[0])
 
@@ -467,62 +409,20 @@ class InternS1VLTokenizeFunction(CachableTokenizeFunction[InternS1DataItem]):
         )
         return ret
 
-    def __call__(self, item: Any, media_root: str = "") -> InternS1DataItem:  # type: ignore[override]
-        if isinstance(item, dict) and "messages" in item:
-            message = item["messages"]
-        else:
-            message = item
-        self._image_path, self._video_path = self._collect_image_video_paths(message)
-        if len(self._image_path) > 0:
-            if self.state == "cache":
-                ret = self.calc_num_tokens_multi_modal_get_item(item)
-            else:
-                ret = self.multi_modal_get_item(item, media_root)
-        elif len(self._video_path) > 0:
-            if self.state == "cache":
-                ret = self.calc_num_tokens_video_get_item(item)
-            else:
-                ret = self.video_get_item(item, media_root)
-        else:
-            if self.state == "cache":
-                ret = self.calc_num_tokens_pure_text_get_item(item)
-            else:
-                ret = self.pure_text_get_item(item)
-        return ret
 
-    def hash(self) -> str:
-        if self._hash is None:
-            # truncate to 16 characters prevent too long cache directory
-            if self._tokenizer_hash is None:
-                _tokenizer_hash = tokenizer_xxhash(self.tokenizer)[:16]
-            else:
-                _tokenizer_hash = self._tokenizer_hash
-            _init_hash = xxhash.xxh64(self._hash_str.encode()).hexdigest()[:16]
-            self._hash = f"{_tokenizer_hash}_{_init_hash}"
-        else:
-            assert isinstance(self._hash, str), (
-                "hash is not a valid string, it means `InternS1TokenizeFunction._hash` is modified by user."
-            )
-
-        return self._hash
-
-
-class InternS1VLTokenizeFnConfig(BaseModel):
+class InternS1VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
     model_config = ConfigDict(title="Base dataset config for xtuner", extra="allow")
     model_cfg: (
         BaseModel  # TODO: (huanghaian)  Using model config protocol rather than directly using InternS1BaseConfig
     )
-    max_length: int | None = None
     max_dynamic_patch: int | None = None
     min_dynamic_patch: int | None = None
     min_num_frames: int = 4
     max_num_frames: int = 24
     data_augment: bool = False
-    system_message: str | None = None
-    hash: str | None = None
 
     def build(
-        self, tokenizer, tokenizer_hash: str | None = None, anno_name: str = "", **kwargs
+            self, tokenizer, tokenizer_hash: str | None = None, anno_name: str = "", **kwargs
     ) -> InternS1VLTokenizeFunction:
         return InternS1VLTokenizeFunction(
             tokenizer,

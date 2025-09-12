@@ -1,4 +1,4 @@
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import torch
 from typing_extensions import TypedDict
@@ -10,15 +10,18 @@ class DataItem(TypedDict):
     num_tokens: int
 
 
-class InternS1DataItem(TypedDict):
+class BaseMLLMDataItem(TypedDict):
     input_ids: list[int]
     labels: list[int]
-    pixel_values: torch.Tensor
     num_tokens: int
+    num_img_tokens: list[int] | None
+    num_imgs: list[int] | None
+    num_patches: list[int] | None
+    pixel_values: Optional[torch.Tensor]
+
+
+class InternS1DataItem(BaseMLLMDataItem, total=False):
     image_flags: torch.Tensor
-    num_img_tokens: list[int]
-    num_imgs: list[int]
-    num_patches: list[int]
 
 
 class RLTextDataItem(TypedDict, total=False):
