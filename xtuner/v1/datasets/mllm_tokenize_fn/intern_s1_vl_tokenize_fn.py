@@ -13,7 +13,7 @@ from xtuner.v1.data_proto.messages import ChatMessages
 from xtuner.v1.data_proto.templates import CHAT_TEMPLATE_MAP
 from xtuner.v1.utils import get_logger
 
-from ..data_item import InternS1DataItem
+from ..data_item import CacheItem, InternS1DataItem
 from ..vlm_utils import TCSLoader, apply_exif_orientation
 from .base_mllm_tokenize_fn import BaseMLLMTokenizeFnConfig, BaseMLLMTokenizeFunction, get_image_path, load_image
 from .intern_s1_vl_process import build_transform, dynamic_num_patch, dynamic_preprocess
@@ -219,7 +219,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         )
         return ret
 
-    def calc_num_tokens_multi_modal_get_item(self, data_item: dict) -> dict:
+    def calc_num_tokens_multi_modal_get_item(self, data_item: dict) -> CacheItem:
         try:
             assert "image_wh" in data_item, "image must have `hw` attribute when packing data"
             image_size = data_item["image_wh"]  # eta: [[100,120]] or [[100,120],[200,240]]
@@ -326,7 +326,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         )
         return ret
 
-    def calc_num_tokens_video_get_item(self, data_item) -> dict:
+    def calc_num_tokens_video_get_item(self, data_item) -> CacheItem:
         # TODO: 目前只支持一个视频
         # 根据 data_item 生成一个确定性的随机整数
         random_frame_num = generate_random_int_from_dict(data_item, self.min_num_frames, self.max_num_frames)
@@ -390,6 +390,9 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
             num_patches=[num_patches],
         )
         return ret
+
+    def __call__(self, item: dict, media_root: str = "", **kwargs) -> InternS1DataItem | CacheItem:
+        return super().__call__(item, media_root)
 
 
 class InternS1VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):

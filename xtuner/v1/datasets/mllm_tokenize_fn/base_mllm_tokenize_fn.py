@@ -10,6 +10,7 @@ from xtuner.v1.data_proto.messages import ChatMessages
 from xtuner.v1.data_proto.templates import ChatTemplate
 from xtuner.v1.utils import get_logger
 
+from ..data_item import BaseMLLMDataItem, CacheItem
 from ..utils import CachableTokenizeFunction, tokenizer_xxhash
 
 
@@ -44,7 +45,7 @@ def get_image_path(image_path, media_root):
     return image_path
 
 
-T = TypeVar("T")
+T = TypeVar("T", bound=BaseMLLMDataItem)
 
 
 class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
@@ -64,19 +65,19 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
         self._hash_str = ""
         self.chat_template = chat_template
 
-    def calc_num_tokens_multi_modal_get_item(self, item: dict) -> dict:
+    def calc_num_tokens_multi_modal_get_item(self, item: dict) -> CacheItem:
         raise NotImplementedError
 
-    def multi_modal_get_item(self, item: dict, media_root: str = "") -> T:
+    def multi_modal_get_item(self, item: dict, media_root: str = "") -> BaseMLLMDataItem:
         raise NotImplementedError
 
-    def calc_num_tokens_video_get_item(self, item: dict) -> dict:
+    def calc_num_tokens_video_get_item(self, item: dict) -> CacheItem:
         raise NotImplementedError
 
-    def video_get_item(self, item: dict, media_root: str = "") -> T:
+    def video_get_item(self, item: dict, media_root: str = "") -> BaseMLLMDataItem:
         raise NotImplementedError
 
-    def calc_num_tokens_pure_text_get_item(self, data_item) -> dict:
+    def calc_num_tokens_pure_text_get_item(self, data_item) -> CacheItem:
         messages = ChatMessages(messages=data_item["messages"])
         tokenized = messages.tokenize(self.tokenizer, self.chat_template)
         input_ids = tokenized["input_ids"]
@@ -84,7 +85,7 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
         input_ids, _ = self._truncated_input_and_labels(input_ids, labels)
         return {"num_tokens": len(input_ids)}
 
-    def pure_text_get_item(self, item: Any) -> T:
+    def pure_text_get_item(self, item: Any) -> BaseMLLMDataItem:
         raise NotImplementedError
 
     def _truncated_input_and_labels(self, input_ids, labels):
@@ -96,24 +97,24 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
             labels = labels[: self.max_length]
         return input_ids, labels
 
-    def __call__(self, item: dict, media_root: str = "") -> T:  # type: ignore[override]
+    def __call__(self, item: dict, media_root: str = "", **kwargs) -> T | CacheItem:  # type: ignore[override]
         self._image_path, self._video_path = collect_image_video_paths(item["messages"])
         if len(self._image_path) > 0:
             if self.state == "cache":
                 ret = self.calc_num_tokens_multi_modal_get_item(item)
             else:
-                ret = self.multi_modal_get_item(item, media_root)  # type: ignore
+                ret = self.multi_modal_get_item(item, media_root)
         elif len(self._video_path) > 0:
             if self.state == "cache":
                 ret = self.calc_num_tokens_video_get_item(item)
             else:
-                ret = self.video_get_item(item, media_root)  # type: ignore
+                ret = self.video_get_item(item, media_root)
         else:
             if self.state == "cache":
                 ret = self.calc_num_tokens_pure_text_get_item(item)
             else:
-                ret = self.pure_text_get_item(item)  # type: ignore
-        return ret  # type: ignore
+                ret = self.pure_text_get_item(item)
+        return ret
 
     def hash(self) -> str:
         if self._hash is None:

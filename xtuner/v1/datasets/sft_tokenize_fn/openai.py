@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict
 
 from xtuner.v1.data_proto.messages import ChatMessages
 from xtuner.v1.data_proto.templates import CHAT_TEMPLATE_MAP
-from xtuner.v1.datasets.data_item import DataItem
+from xtuner.v1.datasets.data_item import CacheItem, DataItem
 from xtuner.v1.utils import get_logger
 
 from ..utils import CachableTokenizeFunction, tokenizer_xxhash
@@ -39,7 +39,7 @@ class OpenaiTokenizeFunction(CachableTokenizeFunction[DataItem]):
         self._tokenizer_hash = tokenizer_hash
         self.max_length = max_length
 
-    def __call__(self, item: dict | list, **kwargs) -> DataItem:
+    def __call__(self, item: dict | list, **kwargs) -> DataItem | CacheItem:
         if isinstance(item, dict) and "messages" in item:
             item = item["messages"]
         messages = ChatMessages(messages=item)

@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar
 import xxhash
 from typing_extensions import TypedDict
 
+from .data_item import CacheItem
+
 
 T = TypeVar("T")
 
@@ -24,7 +26,7 @@ class CachableTokenizeFunction(ABC, Generic[T]):
         self.state = "runtime"
 
     @abstractmethod
-    def __call__(self, item: Any, **kwargs) -> T:
+    def __call__(self, item: Any, **kwargs) -> T | CacheItem:
         raise NotImplementedError
 
     @abstractmethod
