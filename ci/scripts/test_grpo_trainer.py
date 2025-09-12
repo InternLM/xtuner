@@ -35,9 +35,6 @@ from xtuner.v1.rl.grpo import GRPOLossConfig
 # from xtuner.v1.rl.grpo.trainer import Trainer
 from xtuner.v1.train.rl_trainer import RLTrainer
 
-MODEL_PATH = os.environ["ROLLOUT_MODEL_PATH"]
-TRAIN_DATA_PATH = os.environ["ROLLOUT_DATA_PATH"]
-TEST_DATA_PATH = os.environ["ROLLOUT_TEST_DATA_PATH"]
 os.environ['XTUNER_USE_FA3'] = "1"
 
 def parse_args():
@@ -118,11 +115,6 @@ def main(args):
         "tokenize_fn": RLTextTokenizeFnConfig(max_length=args.max_prompt_length),
         },
     ]
-    dataloader_cfg = DataloaderConfig(
-        pack_max_length=args.pack_max_length,
-        collator='fake_collator',
-        pack_level='none',
-    )
     tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True)
     evaluator_cfg = EvaluatorConfig(
         dataset_cfg=eval_dataset_cfg,
@@ -134,7 +126,6 @@ def main(args):
     )
     replay_buffer_cfg = ReplayBufferConfig(
         dataset_cfg=train_dataset_cfg,
-        dataloader_cfg=dataloader_cfg,
         tokenizer=tokenizer,
         postprocessor=None
     )

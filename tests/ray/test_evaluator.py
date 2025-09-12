@@ -93,7 +93,7 @@ class TestEvaluator(unittest.TestCase):
         )
         evaluator = Evaluator.remote(evaluator_cfg, self.test_env)
         correctness = ray.get(evaluator.run.remote(sample_params=self.sample_params))
-
+        print("Correctness:", correctness)
         custom_evaluator_cfg = EvaluatorConfig(
             dataset_cfg=self.eval_dataset_cfg,
             tokenizer=self.tokenizer,

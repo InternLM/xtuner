@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from xtuner.v1.ray.judger.gsm8k import compute_reward
 from xtuner.v1.ray.judger.native import NativeJudger
 
+from xtuner.v1.data_proto.rl_data import RLDataFlowItem, RLJudgerResponseItem
 
 app = FastAPI()
 
@@ -70,14 +71,23 @@ class JudgerServer:
 
 
 def custom_postprocessor_for_gsm8k(result):
-    return result["reward"]
+    if not isinstance(result, list):
+        result = [result]
+    judger_response_item = [RLJudgerResponseItem(reward={key: value}) for key, value in enumerate(result)]
+    # self.logger.info(f"Postprocessed result: {judger_response_item}")
+    return judger_response_item
+    # return result["reward"]
 
 
 class GSM8KRemoteJudgerConfig(BaseModel):
+    judger_name: str
     remote_url: str
     extra_info: dict = {"score": 1, "format_score": 0}
 
     def build(self):
         return NativeJudger(
-            remote_url=self.remote_url, postprocess_func=custom_postprocessor_for_gsm8k, extra_info=self.extra_info
+            judger_name = self.judger_name,
+            remote_url=self.remote_url, 
+            postprocess_func=custom_postprocessor_for_gsm8k, 
+            extra_info=self.extra_info
         )
