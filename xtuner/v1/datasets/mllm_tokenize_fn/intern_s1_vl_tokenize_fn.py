@@ -213,7 +213,7 @@ class InternS1VLTokenizeFunction(CachableTokenizeFunction[InternS1DataItem]):
                                 text = text.replace(ALIAS, special_tokens)
                                 image_tokens = f"{self.chat_template.image_start_token}{self.chat_template.image_context_token * num_image_token_list[current_image_idx]}{self.chat_template.image_end_token}"
                                 text = text.replace(ALIAS, image_tokens)
-                                current_image_idx += 1
+                                current_image_idx += n_frames
                             c.text = text
             # if current_image_idx < num_image, it means <image> placeholder is less than num_image
             assert current_image_idx == len(num_image_token_list), (
