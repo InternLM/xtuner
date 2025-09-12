@@ -151,17 +151,15 @@ class Evaluator:
                 failed, or None if it succeeded or failed without a sample.
         """
         try:
-            sample = await self.env_controller.run.remote(sample, self.sample_params)  # type: ignore[attr-defined]
-            self.return_list.append(sample)
+            # note: In the evaluator, we convert the input sample to a list to adapt to the input format of single_turn_env
+            samples = await self.env_controller.run.remote([sample], self.sample_params)  # type: ignore[attr-defined]
+            self.return_list.append(samples[0])
         except Exception as e:
-            if sample is not None:
-                self.logger.error(f"Worker task failed with exception: {e}. Returning meta for retry.", exc_info=True)
-                if "retry_times" not in sample:
-                    sample["retry_times"] = 0
-                sample["retry_times"] += 1
-                return sample
-            else:
-                self.logger.warning(f"Worker task failed with exception: {e}. No samples to return.")
+            self.logger.error(f"Worker task failed with exception: {e}. Returning meta for retry.", exc_info=True)
+            if "retry_times" not in sample:
+                sample["retry_times"] = 0
+            sample["retry_times"] += 1
+            return sample
 
     async def concurrent_eval_task_runner(self):
         """Runs evaluation tasks concurrently to generate a batch of samples.
@@ -205,8 +203,6 @@ class Evaluator:
                             pending_tasks.add(retry_task)
                         else:
                             self.logger.error(f"Max retry reached for {result['prompt_id']}. Not retrying.")
-                            self.failed_samples_count += 1
-
                 waiting_tasks = pending_tasks
 
             pbar.n = len(self.return_list)
