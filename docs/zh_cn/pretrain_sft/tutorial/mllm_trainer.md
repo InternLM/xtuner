@@ -53,7 +53,7 @@ Trainer 也通过配置文件的方式来构建数据集，我们以之前教程
 from xtuner.v1.datasets import (
     DataloaderConfig,
     DatasetConfig,
-    InternS1TokenizeFnConfig
+    InternS1VLTokenizeFnConfig
 )
 
 sample_max_length = 8192 # 单条样本的最大长度，超过会被截断，并且会有警告输出
@@ -68,15 +68,15 @@ dataset_config = [
                                  sample_ratio=5.0, # 数据采样比例，这里是重复 5 遍，可以是小数
                                  class_name='VLMJsonlDataset'), # 对应的 dataset 类名
         # 一个 dataset 要配一个对应的 tokenizer fun 函数用于处理 dataset 输出的单条 item 数据
-        "tokenize_fn": InternS1TokenizeFnConfig(model_cfg=model_cfg, max_length=sample_max_length),
+        "tokenize_fn": InternS1VLTokenizeFnConfig(model_cfg=model_cfg, max_length=sample_max_length),
     },
     {
         "dataset": DatasetConfig(name='media', # 数据别名
-                                 anno_path='tests/resource/mllm_sft_media_example_data.jsonl', # 多模态数据
+                                 anno_path='tests/resource/mllm_sft_single_image_example_data.jsonl', # 多模态数据
                                  media_root='tests/',
                                  sample_ratio=20.0,
                                  class_name='VLMJsonlDataset'),
-        "tokenize_fn": InternS1TokenizeFnConfig(model_cfg=model_cfg, max_length=sample_max_length),
+        "tokenize_fn": InternS1VLTokenizeFnConfig(model_cfg=model_cfg, max_length=sample_max_length),
     },
 ]
 # dataloader 配置
@@ -148,7 +148,7 @@ from xtuner.v1.config import (
     LRConfig
 )
 
-from xtuner.v1.datasets import InternS1TokenizeFnConfig, DataloaderConfig, DatasetConfig,
+from xtuner.v1.datasets import InternS1VLTokenizeFnConfig, DataloaderConfig, DatasetConfig,
 from xtuner.v1.loss import CELossConfig
 
 # model config
@@ -164,15 +164,15 @@ dataset_config = [
                                  anno_path='tests/resource/mllm_sft_text_example_data.jsonl',
                                  sample_ratio=5.0,
                                  class_name='VLMJsonlDataset'),
-        "tokenize_fn": InternS1TokenizeFnConfig(model_cfg=model_cfg, max_length=sample_max_length),
+        "tokenize_fn": InternS1VLTokenizeFnConfig(model_cfg=model_cfg, max_length=sample_max_length),
     },
     {
         "dataset": DatasetConfig(name='media',
-                                 anno_path='tests/resource/mllm_sft_media_example_data.jsonl',
+                                 anno_path='tests/resource/mllm_sft_single_image_example_data.jsonl',
                                  media_root='tests/',
                                  sample_ratio=20.0,
                                  class_name='VLMJsonlDataset'),
-        "tokenize_fn": InternS1TokenizeFnConfig(model_cfg=model_cfg, max_length=sample_max_length),
+        "tokenize_fn": InternS1VLTokenizeFnConfig(model_cfg=model_cfg, max_length=sample_max_length),
     },
 ]
 dataloader_config = DataloaderConfig(pack_max_length=pack_max_length,

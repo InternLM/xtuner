@@ -13,7 +13,7 @@ from io import BytesIO
 from multiprocessing import Process, Queue
 from pathlib import Path
 from threading import Lock
-from typing import Callable, cast
+from typing import Callable, TypeVar, cast
 
 import numpy as np
 import torch
@@ -22,12 +22,13 @@ from mmengine.dist import barrier, get_rank
 from torch import distributed as dist
 from tqdm import tqdm
 
-from xtuner.v1.datasets.data_item import DataItem
+from xtuner.v1.datasets.data_item import CacheItem
 from xtuner.v1.utils import SharedMemory, get_logger
 
 from .utils import CachableTokenizeFunction, CacheObj, calculate_xxhash
 
 
+T = TypeVar("T")
 logger = get_logger()
 _lock = Lock()
 
@@ -176,7 +177,7 @@ def parallel_execute(
     return results
 
 
-class JsonlDataset(torch.utils.data.Dataset):
+class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
     _process_group: dist.ProcessGroup | None = None
     _thread_executor: ThreadPoolExecutor | None = None
     # TODO: Using shared memory should be optional since the size of `/dev/shm` could be not enough for some devices
@@ -186,7 +187,7 @@ class JsonlDataset(torch.utils.data.Dataset):
         self,
         anno_path,
         sample_ratio: float = 1.0,
-        tokenize_fn: CachableTokenizeFunction | None = None,
+        tokenize_fn: CachableTokenizeFunction[T] | None = None,
         name: str = "default",
         cache_dir: str | Path | None = None,
         max_length: int | None = None,  # TODO: Remove max_length in dataset
@@ -506,7 +507,7 @@ class JsonlDataset(torch.utils.data.Dataset):
     def __len__(self):
         return len(self.offsets)
 
-    def __getitem__(self, item) -> DataItem:
+    def __getitem__(self, item) -> T | CacheItem:
         """Returns a dict containing packed data in the given item.
 
         Args:
@@ -521,7 +522,7 @@ class JsonlDataset(torch.utils.data.Dataset):
 
         raw_data = json.loads(line)
 
-        if self.tokenize_fn:
+        if self.tokenize_fn is not None:
             tokenized_data = self.tokenize_fn(raw_data)
             return tokenized_data
         else:

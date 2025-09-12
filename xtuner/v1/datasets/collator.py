@@ -5,7 +5,7 @@ from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.utils import IGNORE_INDEX, get_logger
 from xtuner.v1.utils.pad import pad_to_max_length
 
-from .data_item import DataItem, InternS1DataItem
+from .data_item import BaseMLLMDataItem, DataItem
 
 
 logger = get_logger()
@@ -99,7 +99,7 @@ def sft_llm_collator(
 
 
 def sft_vllm_collator(
-    instances: list[list[InternS1DataItem]], pack_max_length: int, padding_token_idx: int
+    instances: list[list[BaseMLLMDataItem]], pack_max_length: int, padding_token_idx: int
 ) -> list[ColateItem]:
     ret: list[ColateItem] = []
     for instance in instances:
@@ -148,7 +148,7 @@ def sft_vllm_collator(
 
         cu_seq_lens = torch.cumsum(torch.IntTensor(num_tokens), dim=0).int()
 
-        num_img_tokens = []
+        num_img_tokens: list[int] = []
         for data in instance:
             num_img_tokens.extend(data["num_img_tokens"])
 

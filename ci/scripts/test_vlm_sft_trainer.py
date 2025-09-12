@@ -13,7 +13,7 @@ from xtuner.v1.config import (
     LRConfig
 )
 from xtuner.v1.datasets.config import DatasetConfig, DataloaderConfig
-from xtuner.v1.datasets import InternS1TokenizeFnConfig
+from xtuner.v1.datasets import InternS1VLTokenizeFnConfig
 from xtuner.v1.model import InternS1MiniConfig
 from xtuner.v1.train.trainer import Trainer
 from xtuner.v1.utils.compile import maybe_compile
@@ -296,15 +296,17 @@ def main():
                                                   media_root=_data.get('media_root', ''),
                                                   sample_ratio=_data.get('sample_ratio', 1.0),
                                                   class_name='VLMJsonlDataset'),
-                         "tokenize_fn": InternS1TokenizeFnConfig(model_cfg=model_cfg,
-                                                                 max_dynamic_patch=_data.get('max_dynamic_patch', None),
-                                                                 min_dynamic_patch=_data.get('min_dynamic_patch', None),
-                                                                 min_num_frames=_data.get('min_num_frames', 4),
-                                                                 max_num_frames=_data.get('max_num_frames', 24),
-                                                                 data_augment=_data.get('data_augment', False),
-                                                                 system_message=_data.get('system_message', None),
-                                                                 hash=_data.get('hash', None)
-                                                                 )
+                         "tokenize_fn": InternS1VLTokenizeFnConfig(model_cfg=model_cfg,
+                                                                   max_dynamic_patch=_data.get('max_dynamic_patch',
+                                                                                               None),
+                                                                   min_dynamic_patch=_data.get('min_dynamic_patch',
+                                                                                               None),
+                                                                   min_num_frames=_data.get('min_num_frames', 4),
+                                                                   max_num_frames=_data.get('max_num_frames', 24),
+                                                                   data_augment=_data.get('data_augment', False),
+                                                                   system_message=_data.get('system_message', None),
+                                                                   hash=_data.get('hash', None)
+                                                                   )
                          }
             dataset_config.append(_data_cfg)
 
@@ -342,7 +344,7 @@ def main():
 
     sp_sizes = [sp_size for _, sp_size in model_cfgs]
     for exp_path, sp_size in zip(exp_paths, sp_sizes):
-        rank0_log_path = Path(exp_path) / "rank0.log"
+        rank0_log_path = Path(exp_path) / "logs" / "rank0.log"
         (
             cur_lr,
             cur_text_tokens,

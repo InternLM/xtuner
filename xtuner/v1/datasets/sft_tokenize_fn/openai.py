@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict
 
 from xtuner.v1.data_proto.messages import ChatMessages
 from xtuner.v1.data_proto.templates import CHAT_TEMPLATE_MAP
-from xtuner.v1.datasets.data_item import DataItem
+from xtuner.v1.datasets.data_item import CacheItem, DataItem
 from xtuner.v1.utils import get_logger
 
 from ..utils import CachableTokenizeFunction, tokenizer_xxhash
@@ -39,16 +39,25 @@ class OpenaiTokenizeFunction(CachableTokenizeFunction[DataItem]):
         self._tokenizer_hash = tokenizer_hash
         self.max_length = max_length
 
-    def __call__(self, item: dict | list, **kwargs) -> DataItem:
+    def __call__(self, item: dict | list, **kwargs) -> DataItem | CacheItem:
         if isinstance(item, dict) and "messages" in item:
             item = item["messages"]
         messages = ChatMessages(messages=item)
         tokenized = messages.tokenize(self.tokenizer, self.chat_template)
 
+        input_ids = tokenized["input_ids"]
+        labels = tokenized["labels"]
+        if self.max_length is not None and len(input_ids) > self.max_length:
+            logger.info(
+                f"WARNING: input_ids length {len(input_ids)} exceeds model_max_length {self.max_length}. truncated!"
+            )
+            input_ids = input_ids[: self.max_length]
+            labels = labels[: self.max_length]
+
         return DataItem(
-            input_ids=tokenized["input_ids"],
-            labels=tokenized["labels"],
-            num_tokens=tokenized["num_tokens"],
+            input_ids=input_ids,
+            labels=labels,
+            num_tokens=len(input_ids),
         )
 
     def hash(self) -> str:

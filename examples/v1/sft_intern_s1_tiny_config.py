@@ -3,7 +3,7 @@ from xtuner.v1.config import (
     LRConfig,
 )
 from xtuner.v1.train import TrainerConfig
-from xtuner.v1.datasets import InternS1TokenizeFnConfig
+from xtuner.v1.datasets import InternS1VLTokenizeFnConfig
 from xtuner.v1.model import Qwen3Dense8BConfig, InternS1MiniConfig
 from xtuner.v1.loss import CELossConfig
 from xtuner.v1.datasets.config import DatasetConfig, DataloaderConfig
@@ -29,19 +29,19 @@ dataset_config = [
             sample_ratio=1.0,
             class_name="VLMJsonlDataset",
         ),
-        "tokenize_fn": InternS1TokenizeFnConfig(
+        "tokenize_fn": InternS1VLTokenizeFnConfig(
             model_cfg=model_cfg, max_length=sample_max_length
         ),
     },
     {
         "dataset": DatasetConfig(
             name="media",
-            anno_path="tests/resource/mllm_sft_media_example_data.jsonl",
+            anno_path="tests/resource/mllm_sft_single_image_example_data.jsonl",
             media_root="tests/",
             sample_ratio=2.0,
             class_name="VLMJsonlDataset",
         ),
-        "tokenize_fn": InternS1TokenizeFnConfig(
+        "tokenize_fn": InternS1VLTokenizeFnConfig(
             model_cfg=model_cfg, max_length=sample_max_length
         ),
     },
