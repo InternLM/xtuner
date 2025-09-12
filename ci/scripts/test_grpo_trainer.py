@@ -30,30 +30,25 @@ from xtuner.v1.config import (
 from xtuner.v1.ray.judger.controller import JudgerConfig
 from xtuner.v1.rl.base import WorkerConfig
 from xtuner.v1.rl.grpo import GRPOLossConfig
-# from xtuner.v1.rl.grpo import GRPOLossConfig, WorkerConfig
-# from xtuner.v1.rl.grpo.config import WorkerConfig, LossConfig
-# from xtuner.v1.rl.grpo.trainer import Trainer
 from xtuner.v1.train.rl_trainer import RLTrainer
 
-MODEL_PATH = os.environ["ROLLOUT_MODEL_PATH"]
-TRAIN_DATA_PATH = os.environ["ROLLOUT_DATA_PATH"]
-TEST_DATA_PATH = os.environ["ROLLOUT_TEST_DATA_PATH"]
 os.environ['XTUNER_USE_FA3'] = "1"
-
 def parse_args():
-    parser = argparse.ArgumentParser(description="VLLM Rollout Test Script")
+    parser = argparse.ArgumentParser(description="GRPO Training test scripts")
     parser.add_argument("--total-epochs", type=int)
+    parser.add_argument("--model-path", type=str)
+    parser.add_argument("--data-path", type=str)
+    parser.add_argument("--eval-data-path", type=str)
     parser.add_argument("--work-dir", type=str, default="work_dir")
-    parser.add_argument("--model-path", type=str, default=MODEL_PATH)
-    parser.add_argument("--data-path", type=str, default=TRAIN_DATA_PATH)
-    parser.add_argument("--eval-data-path", type=str, default=TEST_DATA_PATH)
     parser.add_argument("--num-workers", type=int, default=8)
     parser.add_argument("--gpus-per-node", type=int, default=8)
     parser.add_argument("--rollout-global-batch-size", type=int, default=128)
+    parser.add_argument("--rollout-tp-size", type=int, default=1)
+    parser.add_argument("--rollout-ep-size", type=int, default=1)
     parser.add_argument("--train-optimizer-steps", type=int, default=1)
-    parser.add_argument("--max-concurrent", type=int, default=8)
+    parser.add_argument("--max-concurrent", type=int, default=512)
     parser.add_argument("--prompt-repeat-k", type=int, default=8)
-    parser.add_argument("--pack-max-length", type=int, default=8192)
+    parser.add_argument("--pack-max-length", type=int, default=32768)
     parser.add_argument("--max-prompt-length", type=int, default=512)
     parser.add_argument("--max-response-length", type=int, default=1024)
     parser.add_argument("--optimizer-disable-foreach", action="store_true")  # save memory usage during opt.step()
@@ -84,8 +79,8 @@ def main(args):
         model_name=os.path.basename(args.model_path).lower(),
         tokenizer_path=args.model_path,
         rollout_cross_node_comm=False,
-        tensor_parallel_size=2,
-        expert_parallel_size=1,
+        tensor_parallel_size=args.rollout_tp_size,
+        expert_parallel_size=args.rollout_ep_size,
         gpus_per_node=args.gpus_per_node, # gpu: 8, npu: 16
         dtype="bfloat16",
         skip_load_weights=False,
