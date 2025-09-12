@@ -22,9 +22,9 @@ echo "CUDA version used: $($CUDA_HOME/bin/nvcc --version | grep 'release' | awk 
 
 # node
 NUM_NODES=1
-GPU_LIST="0,3"
+GPU_LIST="0,1,2,3"
 NUM_GPUS_PER_NODE=$(echo $GPU_LIST | awk -F',' '{print NF}')
-export NPROC_PER_NODE=2
+export NPROC_PER_NODE=4
 export NNODES=1
 export NODE_RANK=0
 export PORT=10171

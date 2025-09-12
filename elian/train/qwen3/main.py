@@ -15,7 +15,8 @@ app = App(
 @app.default()
 def main():
     cfg = TrainConfig()
-    model_cfg = Qwen3Dense4BConfig()
+    print(cfg)
+    model_cfg = Qwen3Dense4BConfig(max_position_embeddings = cfg.max_position_embeddings)
     optim_cfg = AdamWConfig(lr=cfg.lr)
     lr_cfg = LRConfig(lr_type=cfg.lr_type, lr_min=cfg.lr_min)
     trainer = Trainer(

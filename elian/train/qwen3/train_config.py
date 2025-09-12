@@ -12,13 +12,17 @@ from xtuner.v1.datasets.sft_tokenize_fn.openai import OpenaiTokenizeFunctionConf
 class TrainConfig:
     # base path
     model_path: str = "/data1/nuist_llm/TrainLLM/ModelCkpt/qwen3-4b/instruct-base"
-    work_dir: str = "/data1/nuist_llm/TrainLLM/SFT-elian/xtuner/elian/save/elianTest"
-    log_dir: str = "/data1/nuist_llm/TrainLLM/SFT-elian/xtuner/elian/log/elianTest"
+    work_dir: str = "/data1/nuist_llm/TrainLLM/SFT-elian/xtuner/elian/save/model-01"
+    log_dir: str = "/data1/nuist_llm/TrainLLM/SFT-elian/xtuner/elian/save/model-01"
 
     # data params
     dataset_cfg: list = field(default_factory=lambda: [
         "/data1/nuist_llm/TrainLLM/datasets/SFT/math/category/code/Nemotron-Post-Training-V2-code-coldStart.jsonl",
-        "/data1/nuist_llm/TrainLLM/datasets/SFT/math/category/other/chat-00000-of-00012.jsonl"
+        "/data1/nuist_llm/TrainLLM/datasets/SFT/math/category/code/Nemotron-Post-Training-V2-code.jsonl",
+        "/data1/nuist_llm/TrainLLM/datasets/SFT/math/category/math/Nemotron-Post-Training-V2-math.jsonl",
+        "/data1/nuist_llm/TrainLLM/datasets/SFT/math/category/other/Nemotron-Post-Training-V2-math-coldStart.jsonl"
+    ] + [f"/data1/nuist_llm/TrainLLM/datasets/SFT/math/category/other/chat-0000{i}-of-00012.jsonl" for i in range(10)] + [
+        "/data1/nuist_llm/TrainLLM/datasets/SFT/math/category/other/chat-00010-of-00012.jsonl","/data1/nuist_llm/TrainLLM/datasets/SFT/math/category/other/chat-00011-of-00012.jsonl"
     ])
     cache_dir: str = "/data1/nuist_llm/cacheTem/elianXtuner"
     class_name: str = "JsonlDataset" # TODO @elian: new parquest
@@ -26,20 +30,21 @@ class TrainConfig:
     cache_tag: str = "elian-xtuner"
     message_template: str = "qwen3"
     max_token_size: int = 4096
+    max_position_embeddings: int = 4096
     collator: str = "sft_llm_collator" # ["sft_llm_collator", "sft_vllm_collator", "fake_collator"]
     pack_level: str = "soft" # ["soft", "none"] # soft is True, none is False for Pack
-    pack_max_length: int = 32768 # max_position_size
+    pack_max_length: int = 8024 # max_position_size
     pack_workers: int = 8
     num_workers: int = 8
 
 
     # train params
-    global_batch_size: int = 2
+    global_batch_size: int = 1
     total_epoch: int = 1
 
     # fsdp params
     sp_size: int = 2
-    tp_size: int = 1
+    tp_size: int = 2
     ep_size: int = 1
     recompute_ratio:float = 1.0
     cpu_offload: bool = False
