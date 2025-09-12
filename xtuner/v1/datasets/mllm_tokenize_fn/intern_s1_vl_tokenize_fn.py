@@ -206,6 +206,7 @@ class InternS1VLTokenizeFunction(CachableTokenizeFunction[InternS1DataItem]):
                             assert "<IMG_CONTEXT>" in text
                             text = text.replace("<IMG_CONTEXT>", ALIAS)
                             image_cnt = text.count(ALIAS)
+                            assert image_cnt == 1, "Only one <IMG_CONTEXT> is supported for video."
                             for _ in range(image_cnt):
                                 special_tokens = "\n".join(
                                     [f"Frame-{frame_idx + 1}: {ALIAS}" for frame_idx in range(n_frames)]
