@@ -57,7 +57,7 @@ class PretrainTokenizeFunction(CachableTokenizeFunction[DataItem]):
             self._hash = f"{_tokenizer_hash}_{_source_hash}_{self.add_special_tokens}_{self.add_eos_token}"
         else:
             assert isinstance(self._hash, str), (
-                "hash is not a valid string, it means `FtdpTokenizeFunction._hash` is modified by user."
+                "hash is not a valid string, it means `PretrainTokenizeFunction._hash` is modified by user."
             )
 
         return self._hash
