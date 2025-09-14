@@ -80,4 +80,5 @@ class PretrainTokenizeFunctionConfig(BaseModel):
             add_eos_token=self.add_eos_token,
             add_special_tokens=self.add_special_tokens,
             tokenizer_hash=tokenizer_hash,
+            hash=self.hash,
         )
