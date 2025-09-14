@@ -13,9 +13,22 @@ CHAT_TEMPLATE_MAP = {
         user="<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n",
         assistant="{assistant}<|im_end|>",
         stop_words=["<|im_end|>"],
+        image_start_token="<img>",
+        image_end_token="</img>",
+        image_context_token="<IMG_CONTEXT>",
+    ),
+    "qwen3-vl": HybridChatTemplate(
+        system="<|im_start|>system\n{system}<|im_end|>\n",
+        default_system="You are a helpful assistant.",
+        user="<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n",
+        stop_words=["<|im_end|>", "<|endoftext|>"],
+        assistant="{assistant}<|im_end|>",
+        image_start_token="<|vision_start|>",
+        image_end_token="<|vision_end|>",
+        image_context_token="<|image_pad|>",
     ),
     "llama3": HybridChatTemplate(
-        system=("<|start_header_id|>system<|end_header_id|>\n\n{system}<|eot_id|>"),
+        system="<|start_header_id|>system<|end_header_id|>\n\n{system}<|eot_id|>",
         user=(
             "<|start_header_id|>user<|end_header_id|>\n\n{user}<|eot_id|>"
             "<|start_header_id|>assistant<|end_header_id|>\n\n"

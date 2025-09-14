@@ -1,28 +1,25 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict
 
-from xtuner.v1.datasets.data_item import RLTextDataItem
+from transformers import PreTrainedTokenizer
+from xtuner.v1.datasets.data_item import CacheItem, RLTextDataItem
 from xtuner.v1.utils import get_logger
 
 from ..utils import CachableTokenizeFunction
 
-
-if TYPE_CHECKING:
-    from transformers import PreTrainedTokenizer
 
 logger = get_logger()
 
 
 # https://github.com/volcengine/verl/blob/main/verl/utils/dataset/rl_dataset.py
 class RLTextTokenizeFn(CachableTokenizeFunction[RLTextDataItem]):
-    def __init__(self, tokenizer: "PreTrainedTokenizer", max_length: int | None = None, *args, **kwargs):
+    def __init__(self, tokenizer: PreTrainedTokenizer, max_length: int | None = None, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.tokenizer = tokenizer
         self.max_length = max_length
 
-    def __call__(self, item: dict, **kwargs) -> RLTextDataItem:
+    def __call__(self, item: dict, **kwargs) -> RLTextDataItem | CacheItem:
         """example:
         item = {
                 "data_source": data_source,

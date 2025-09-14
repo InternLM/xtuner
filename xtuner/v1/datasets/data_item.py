@@ -4,31 +4,33 @@ import torch
 from typing_extensions import TypedDict
 
 
-class DataItem(TypedDict):
-    input_ids: list[int]
-    labels: list[int]
+class CacheItem(TypedDict):
     num_tokens: int
 
 
-class InternS1DataItem(TypedDict):
+class DataItem(CacheItem):
     input_ids: list[int]
     labels: list[int]
-    pixel_values: torch.Tensor
-    num_tokens: int
-    image_flags: torch.Tensor
+
+
+class BaseMLLMDataItem(DataItem):
     num_img_tokens: list[int]
     num_imgs: list[int]
     num_patches: list[int]
+    pixel_values: torch.Tensor
 
 
-class RLTextDataItem(TypedDict, total=False):
+class InternS1DataItem(BaseMLLMDataItem):
+    image_flags: torch.Tensor
+
+
+class RLTextDataItem(CacheItem, total=False):
     env: str
     group_id: int
     prompt_id: int
     input_ids: list[int]
     messages: str | List[Dict[str, Any]]
     prompt: str
-    num_tokens: int
     data_source: dict | None  # e.g., {"math" : "0.8", "code": "0.2"}
     ability: str | None  # math, code
     reward_model: dict

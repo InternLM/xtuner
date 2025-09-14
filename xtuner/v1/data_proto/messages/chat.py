@@ -22,15 +22,28 @@ class TextContentItem(BaseModel):
         return self.text
 
 
+class ImageURL(BaseModel):
+    url: str
+    detail: Optional[Literal["auto", "low", "high"]] = None
+
+
 class ImageContentItem(BaseModel):
     type: Literal["image_url"] = "image_url"
-    image_url: str
+    image_url: ImageURL
 
-    def apply_chat_template(self, chat_template: HybridChatTemplate) -> str:
-        return chat_template.image_token
+    def apply_chat_template(self, *args, **kwarg) -> str:
+        return ""
 
 
-MultModalContentType = Union[TextContentItem, ImageContentItem]
+class VideoContentItem(BaseModel):
+    type: Literal["video_url"] = "video_url"
+    video_url: ImageURL
+
+    def apply_chat_template(self, *args, **kwargs) -> str:
+        return ""
+
+
+MultModalContentType = Union[TextContentItem, ImageContentItem, VideoContentItem]
 ContentType = Union[str, List[MultModalContentType]]
 
 
@@ -56,24 +69,13 @@ class ChatMsg(BaseModel):
             else:
                 raise NotImplementedError
 
-    def collect_img_urls(self) -> List[str]:
-        img_urls = []
-        if isinstance(self.content, list):
-            for item in self.content:
-                if isinstance(item, ImageContentItem):
-                    img_urls.append(item.image_url)
-        return img_urls
-
     def get_prompt(self, chat_template: ChatTemplate) -> str:
         if isinstance(self.content, str):
             text = self.content
         elif isinstance(self.content, list):
             text = ""
             for i, item in enumerate(self.content):
-                if i == 0:
-                    text += item.apply_chat_template(chat_template)
-                else:
-                    text += "\n" + item.apply_chat_template(chat_template)
+                text += item.apply_chat_template(chat_template)
         else:
             raise NotImplementedError
 
@@ -161,7 +163,6 @@ class ChatMessages(BaseMessages):
     def tokenize(self, tokenizer: PreTrainedTokenizer, chat_template: ChatTemplate) -> Dict:
         input_ids = tokenizer.encode("", add_special_tokens=False)
         labels = [IGNORE_INDEX for _ in input_ids]
-        image_urls = []
 
         process_message(self.messages, chat_template)
 
@@ -171,8 +172,6 @@ class ChatMessages(BaseMessages):
 
             input_ids.extend(token_ids)
             labels.extend(label_ids)
-
-            image_urls.extend(msg.collect_img_urls())
 
             if msg.role == "assistant":
                 sep = chat_template.sep
@@ -193,10 +192,6 @@ class ChatMessages(BaseMessages):
             "labels": labels,
             "num_tokens": len(input_ids),
         }
-
-        if len(image_urls) > 0:
-            training_data["image_urls"] = image_urls
-
         return training_data
 
     @classmethod

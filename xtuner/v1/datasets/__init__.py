@@ -9,8 +9,8 @@ from .config import (
     DatasetConfigListAdatper,
 )
 from .ftdp import FTDPTokenizeFnConfig, FtdpTokenizeFunction
-from .intern_s1_fn.tokenizer_fn import InternS1TokenizeFnConfig, InternS1TokenizeFunction
 from .jsonl import JsonlDataset
+from .mllm_tokenize_fn import InternS1VLTokenizeFnConfig, InternS1VLTokenizeFunction
 from .packing import ExpandSoftPackDataset, _LegacySoftPackDataset
 from .resume import get_dataloader_state, load_dataloader_state
 from .rl_tokenize_fn import RLTextTokenizeFnConfig
@@ -35,10 +35,10 @@ __all__ = [
     "sft_llm_collator",
     "sft_vllm_collator",
     "FtdpTokenizeFunction",
-    "InternS1TokenizeFunction",
+    "InternS1VLTokenizeFunction",
     "VLMJsonlDataset",
     "FTDPTokenizeFnConfig",
-    "InternS1TokenizeFnConfig",
+    "InternS1VLTokenizeFnConfig",
     "fake_collator",
     "RLTextTokenizeFnConfig",
     "get_dataloader_state",
