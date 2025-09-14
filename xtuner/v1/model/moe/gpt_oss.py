@@ -1,6 +1,6 @@
 import re
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Self
 
 import torch
 from pydantic import computed_field
@@ -131,7 +131,7 @@ class GptOssConfig(MoEConfig):
         return GptOss(self)
 
     @classmethod
-    def from_hf(cls, hf_path: str | Path) -> "GptOssConfig":
+    def from_hf(cls, hf_path: str | Path) -> Self:
         cfg = HFGptOssConfig.from_pretrained(hf_path)
 
         assert isinstance(cfg, HFGptOssConfig)

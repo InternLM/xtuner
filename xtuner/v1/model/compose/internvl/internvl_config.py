@@ -103,8 +103,30 @@ class InternVL3P5Dense8BConfig(InternVLBaseConfig):
     projector_config: InternVLProjectorConfig = InternVLProjectorConfig()
     text_config: Qwen3Dense8BConfig = Qwen3Dense8BConfig()
 
+    @property
+    def hf_config(self):
+        # TODO(pppppM) Support saving HuggingFace format config
+        logger.warning(
+            f"{type(self)} does not support conversion to HuggingFace config format. "
+            "Only the original HuggingFace config will be retained in the saved HuggingFace format checkpoint. "
+            f"If you have changed the default values in {type(self)}, it may cause the config in the saved "
+            "HuggingFace format checkpoint to not match the weights."
+        )
+        return None
+
 
 class InternVL3P5MoE30BA3Config(InternVLBaseConfig):
     vision_config: InternVLVisionConfig = InternVLVisionConfig()
     projector_config: InternVLProjectorConfig = InternVLProjectorConfig(text_hidden_size=2049)
     text_config: Qwen3MoE30BA3Config = Qwen3MoE30BA3Config()
+
+    @property
+    def hf_config(self):
+        # TODO(pppppM) Support saving HuggingFace format config
+        logger.warning(
+            f"{type(self)} does not support conversion to HuggingFace config format. "
+            "Only the original HuggingFace config will be retained in the saved HuggingFace format checkpoint. "
+            f"If you have changed the default values in {type(self)}, it may cause the config in the saved "
+            "HuggingFace format checkpoint to not match the weights."
+        )
+        return None

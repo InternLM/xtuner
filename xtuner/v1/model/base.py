@@ -5,7 +5,7 @@ from functools import reduce
 from itertools import chain
 from pathlib import Path
 from shutil import copy, copytree
-from typing import Annotated, Generator, Literal, cast
+from typing import Annotated, Generator, Literal, Self, cast
 
 import torch
 import torch.distributed as dist
@@ -95,7 +95,7 @@ class TransformerConfig(PydanticBaseModel):
         raise NotImplementedError
 
     @classmethod
-    def from_hf(cls, hf_path: str | Path) -> "TransformerConfig":
+    def from_hf(cls, hf_path: str | Path) -> Self:
         """Build a `TransformerConfig` from a pre-trained HuggingFace model.
 
         This method creates a configuration object based on a `PretrainedConfig` loaded from the specified HuggingFace model path.

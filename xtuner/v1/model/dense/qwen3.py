@@ -1,5 +1,6 @@
 import re
 from pathlib import Path
+from typing import Self
 
 import torch
 
@@ -34,7 +35,7 @@ class Qwen3DenseConfig(TransformerConfig):
         return Qwen3Dense(self)
 
     @classmethod
-    def from_hf(cls, hf_path: str | Path) -> "Qwen3DenseConfig":
+    def from_hf(cls, hf_path: str | Path) -> Self:
         from transformers import AutoConfig
         from transformers.models.qwen3 import Qwen3Config as HFConfig
 

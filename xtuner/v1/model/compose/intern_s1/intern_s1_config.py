@@ -1,4 +1,5 @@
-from typing import TYPE_CHECKING, Literal, Optional
+from pathlib import Path
+from typing import TYPE_CHECKING, Literal, Optional, Self
 
 from mmengine import is_installed
 from pydantic import BaseModel, ConfigDict
@@ -97,6 +98,10 @@ class InternS1BaseConfig(BaseModel):
 
         return InternS1ForConditionalGeneration(self)
 
+    @classmethod
+    def from_hf(cls, hf_path: str | Path) -> Self:
+        raise NotImplementedError
+
 
 class InternS1Config(InternS1BaseConfig):
     vision_config: InternS1VisionConfig = InternS1VisionConfig(
@@ -107,8 +112,30 @@ class InternS1Config(InternS1BaseConfig):
     )
     text_config: MoEConfig = Qwen3MoE235BA22Config(vocab_size=153216)
 
+    @property
+    def hf_config(self):
+        # TODO(pppppM) Support saving HuggingFace format config
+        logger.warning(
+            f"{type(self)} does not support conversion to HuggingFace config format. "
+            "Only the original HuggingFace config will be retained in the saved HuggingFace format checkpoint. "
+            f"If you have changed the default values in {type(self)}, it may cause the config in the saved "
+            "HuggingFace format checkpoint to not match the weights."
+        )
+        return None
+
 
 class InternS1MiniConfig(InternS1BaseConfig):
     vision_config: InternS1VisionConfig = InternS1VisionConfig()
     projector_config: InternS1ProjectorConfig = InternS1ProjectorConfig()
     text_config: Qwen3Dense8BConfig = Qwen3Dense8BConfig(vocab_size=153216)
+
+    @property
+    def hf_config(self):
+        # TODO(pppppM) Support saving HuggingFace format config
+        logger.warning(
+            f"{type(self)} does not support conversion to HuggingFace config format. "
+            "Only the original HuggingFace config will be retained in the saved HuggingFace format checkpoint. "
+            f"If you have changed the default values in {type(self)}, it may cause the config in the saved "
+            "HuggingFace format checkpoint to not match the weights."
+        )
+        return None

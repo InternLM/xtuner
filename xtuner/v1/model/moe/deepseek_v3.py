@@ -1,5 +1,6 @@
 import re
 from pathlib import Path
+from typing import Self
 
 from transformers.models.deepseek_v3 import DeepseekV3Config as HFDeepseekV3Config
 from xtuner.v1.model.moe.moe import BalancingLossConfig, MoEConfig, ZLossConfig
@@ -101,7 +102,7 @@ class DeepSeekV3Config(MoEConfig):
         return DeepSeekV3(self)
 
     @classmethod
-    def from_hf(cls, hf_path: str | Path) -> "DeepSeekV3Config":
+    def from_hf(cls, hf_path: str | Path) -> Self:
         cfg = HFDeepseekV3Config.from_pretrained(hf_path)
 
         assert isinstance(cfg, HFDeepseekV3Config)

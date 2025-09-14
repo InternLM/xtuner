@@ -1,5 +1,6 @@
 import re
 from pathlib import Path
+from typing import Self
 
 from transformers.models.qwen3_moe import Qwen3MoeConfig as HFQwen3MoeConfig
 from xtuner.v1.model.moe.moe import BalancingLossConfig, MoEConfig, ZLossConfig
@@ -45,7 +46,7 @@ class Qwen3MoEConfig(MoEConfig):
         return Qwen3MoE(self)
 
     @classmethod
-    def from_hf(cls, hf_path: str | Path) -> "Qwen3MoEConfig":
+    def from_hf(cls, hf_path: str | Path) -> Self:
         hf_config = HFQwen3MoeConfig.from_pretrained(hf_path)
 
         assert isinstance(hf_config, HFQwen3MoeConfig)
