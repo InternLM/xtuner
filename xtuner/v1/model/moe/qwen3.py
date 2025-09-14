@@ -42,6 +42,8 @@ class Qwen3MoE(MoE):
 
 
 class Qwen3MoEConfig(MoEConfig):
+    bos_token_id: int
+
     def build(self) -> Qwen3MoE:
         return Qwen3MoE(self)
 
@@ -56,6 +58,8 @@ class Qwen3MoEConfig(MoEConfig):
             vocab_size=hf_config.vocab_size,
             max_position_embeddings=hf_config.max_position_embeddings,
             pad_token_id=hf_config.eos_token_id,
+            bos_token_id=hf_config.bos_token_id,
+            eos_token_id=hf_config.eos_token_id,
             num_hidden_layers=hf_config.num_hidden_layers,
             max_window_layers=hf_config.max_window_layers,
             hidden_size=hf_config.hidden_size,
@@ -91,9 +95,11 @@ class Qwen3MoEConfig(MoEConfig):
         """HuggingFace configuration."""
         assert isinstance(self.router, GreedyRouterConfig), "Only support saving GreedyRouter to HF Qwen3MoE format."
         return HFQwen3MoeConfig(
+            architectures=["Qwen3MoeForCausalLM"],
             vocab_size=self.vocab_size,
             max_position_embeddings=self.max_position_embeddings,
-            eos_token_id=self.pad_token_id,
+            bos_token_id=self.bos_token_id,
+            eos_token_id=self.eos_token_id,
             pad_token_id=self.pad_token_id,
             num_hidden_layers=self.num_hidden_layers,
             hidden_size=self.hidden_size,
@@ -118,6 +124,8 @@ class Qwen3MoE30BA3Config(Qwen3MoEConfig):
     vocab_size: int = 151936
     max_position_embeddings: int = 40960
     pad_token_id: int = 151645  # eos_id
+    eos_token_id: int = 151645
+    bos_token_id: int = 151643
     num_hidden_layers: int = 48
     max_window_layers: int = 48
     hidden_size: int = 2048
@@ -148,6 +156,8 @@ class Qwen3MoE235BA22Config(Qwen3MoEConfig):
     vocab_size: int = 151936
     max_position_embeddings: int = 40960
     pad_token_id: int = 151645  # eos_id
+    eos_token_id: int = 151645
+    bos_token_id: int = 151643
     num_hidden_layers: int = 94
     max_window_layers: int = 94
     hidden_size: int = 4096

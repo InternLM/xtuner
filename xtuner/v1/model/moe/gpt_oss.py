@@ -141,6 +141,7 @@ class GptOssConfig(MoEConfig):
             vocab_size=cfg.vocab_size,
             max_position_embeddings=cfg.max_position_embeddings,
             pad_token_id=cfg.pad_token_id,
+            eos_token_id=cfg.eos_token_id,
             num_hidden_layers=cfg.num_hidden_layers,
             hidden_size=cfg.hidden_size,
             intermediate_size=cfg.intermediate_size,
@@ -173,11 +174,14 @@ class GptOssConfig(MoEConfig):
     @property
     def hf_config(self) -> HFGptOssConfig:
         assert isinstance(self.router, GreedyRouterConfig), "Only support saving GreedyRouter to HF GptOss format."
+
         return HFGptOssConfig(
+            architectures=["GptOssForCausalLM"],
             layer_types=self.layers_type,
             vocab_size=self.vocab_size,
             max_position_embeddings=self.max_position_embeddings,
             pad_token_id=self.pad_token_id,
+            eos_token_id=self.eos_token_id,
             num_hidden_layers=self.num_hidden_layers,
             hidden_size=self.hidden_size,
             intermediate_size=self.intermediate_size,
@@ -195,6 +199,7 @@ class GptOssConfig(MoEConfig):
             qkv_bias=True,
             o_bias=True,
             dtype=torch.bfloat16,
+            swiglu_limit=self.moe_act_fn_cfg.clip_limit,
         )
 
 
@@ -202,6 +207,7 @@ class GptOss21BA3P6Config(GptOssConfig):
     vocab_size: int = 201088
     max_position_embeddings: int = 131072
     pad_token_id: int = 199999
+    eos_token_id: int = 200002
     num_hidden_layers: int = 24
     hidden_size: int = 2880
     intermediate_size: int = 2880
@@ -234,6 +240,7 @@ class GptOss117BA5P8Config(GptOssConfig):
     vocab_size: int = 201088
     max_position_embeddings: int = 131072
     pad_token_id: int = 199999
+    eos_token_id: int = 200002
     num_hidden_layers: int = 36
     hidden_size: int = 2880
     intermediate_size: int = 2880

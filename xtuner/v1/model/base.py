@@ -52,6 +52,7 @@ class TransformerConfig(PydanticBaseModel):
     )
     vocab_size: Annotated[int, Parameter(group="model")]
     max_position_embeddings: Annotated[int, Parameter(group="model")]
+    eos_token_id: Annotated[int, Parameter(group="model")]
     pad_token_id: Annotated[int, Parameter(group="model")]
     num_hidden_layers: Annotated[int, Parameter(group="model")]
     hidden_size: Annotated[int, Parameter(group="model")]

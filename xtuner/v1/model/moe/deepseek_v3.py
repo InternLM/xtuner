@@ -164,6 +164,7 @@ class DeepSeekV3Config(MoEConfig):
         """HuggingFace configuration."""
         assert isinstance(self.router, NoAuxRouterConfig), "Only support saving NoAuxRouter to HF DeepSeekV3 format."
         return HFDeepseekV3Config(
+            architectures=["DeepseekV3ForCausalLM"],
             vocab_size=self.vocab_size,
             max_position_embeddings=self.max_position_embeddings,
             eos_token_id=self.pad_token_id,

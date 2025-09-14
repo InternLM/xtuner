@@ -30,6 +30,7 @@ class Qwen3Dense(Dense):
 
 class Qwen3DenseConfig(TransformerConfig):
     use_sliding_window: bool = False
+    bos_token_id: int
 
     def build(self) -> Qwen3Dense:
         return Qwen3Dense(self)
@@ -48,6 +49,8 @@ class Qwen3DenseConfig(TransformerConfig):
             vocab_size=hf_config.vocab_size,
             max_position_embeddings=hf_config.max_position_embeddings,
             pad_token_id=hf_config.eos_token_id,
+            bos_token_id=hf_config.bos_token_id,
+            eos_token_id=hf_config.eos_token_id,
             num_hidden_layers=hf_config.num_hidden_layers,
             max_window_layers=hf_config.max_window_layers,
             hidden_size=hf_config.hidden_size,
@@ -72,11 +75,12 @@ class Qwen3DenseConfig(TransformerConfig):
     def hf_config(self) -> HFQwen3DenseConfig:
         """Check if the configuration can be saved in HuggingFace format."""
         return HFQwen3DenseConfig(
+            architectures=["Qwen3ForCausalLM"],
             vocab_size=self.vocab_size,
             max_position_embeddings=self.max_position_embeddings,
             max_window_layers=self.max_window_layers,
             bos_token_id=self.bos_token_id,
-            eos_token_id=self.pad_token_id,
+            eos_token_id=self.eos_token_id,
             pad_token_id=self.pad_token_id,
             num_hidden_layers=self.num_hidden_layers,
             hidden_size=self.hidden_size,
@@ -99,6 +103,8 @@ class Qwen3Dense8BConfig(Qwen3DenseConfig):
     vocab_size: int = 151936
     max_position_embeddings: int = 40960
     pad_token_id: int = 151645  # eos_id
+    eos_token_id: int = 151645
+    bos_token_id: int = 151643
     num_hidden_layers: int = 36
     max_window_layers: int = 36
     hidden_size: int = 4096
@@ -117,6 +123,8 @@ class Qwen3Dense4BConfig(Qwen3DenseConfig):
     vocab_size: int = 151936
     max_position_embeddings: int = 262144
     pad_token_id: int = 151645  # eos_id
+    eos_token_id: int = 151645
+    bos_token_id: int = 151643
     num_hidden_layers: int = 36
     max_window_layers: int = 36
     hidden_size: int = 2560
