@@ -5,15 +5,15 @@ from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict, TypeAdapter, model_validator
 from typing_extensions import TypedDict
 
-from xtuner.v1.datasets import (
-    CachableTokenizeFunction,
-    JsonlDataset,
-    VLMJsonlDataset,
+from .collator import (
     fake_collator,
     intern_s1_vl_sft_collator,
     qwen3_vl_sft_collator,
     sft_llm_collator,
 )
+from .jsonl import JsonlDataset
+from .utils import CachableTokenizeFunction
+from .vlm_jsonl import VLMJsonlDataset
 
 
 # TODO: Enhance the configurable fields of dataset config
