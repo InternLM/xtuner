@@ -5,7 +5,7 @@ from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.utils import IGNORE_INDEX, get_logger
 from xtuner.v1.utils.pad import pad_to_max_length
 
-from .data_item import DataItem, QwenVL3DataItem
+from .data_item import DataItem, InternS1DataItem, QwenVL3DataItem
 
 
 logger = get_logger()
@@ -99,7 +99,7 @@ def sft_llm_collator(
 
 
 def intern_s1_vl_sft_collator(
-    instances: list[list[QwenVL3DataItem]], pack_max_length: int, padding_token_idx: int
+    instances: list[list[InternS1DataItem]], pack_max_length: int, padding_token_idx: int
 ) -> list[ColateItem]:
     ret: list[ColateItem] = []
     for instance in instances:
