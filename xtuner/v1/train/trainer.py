@@ -132,11 +132,12 @@ class TrainerConfig(BaseModel):
     global_batch_size: int | None
     work_dir: Path | str | None = None
     log_dir: Path | str | None = None
-    sp_size: int = 1
     total_step: int | None = None
     total_epoch: int | None = None
     resume: ResumeConfig | None = None
     strict_load: bool = True
+    checkpoint_interval: int | None = -1
+    checkpoint_maxkeep: int | None = -1
     hf_interval: int | None = None
     hf_max_keep: int | None = None
     exp_tracker: Literal["tensorboard", "jsonl"] = "jsonl"
@@ -178,11 +179,12 @@ class Trainer:
         global_batch_size (int | None): Global batch size for training.
         work_dir (Path | str | None): Directory for saving experiment outputs.
         log_dir (Path | str | None): Directory for log files.
-        sp_size (int): Sequence parallel size.
         total_step (int | None): Total training steps.
         total_epoch (int | None): Number of training epochs.
         resume_cfg (ResumeConfig | None): Configuration for resuming training.
         strict_load (bool): Whether to strictly load model weights.
+        checkpoint_interval (int | None): Interval for saving checkpoints.
+        checkpoint_maxkeep (int | None): Maximum number of checkpoints to keep.
         hf_interval (int | None): Interval for saving Huggingface format checkpoints.
         hf_max_keep (int | None): Maximum number of Huggingface checkpoints to keep.
         profile_step (int | None): Step to perform profiling.
@@ -224,7 +226,6 @@ class Trainer:
         global_batch_size: int | None,
         work_dir: Path | str | None = None,
         log_dir: Path | str | None = None,
-        sp_size: int = 1,
         total_step: int | None = None,
         total_epoch: int | None = None,
         resume_cfg: ResumeConfig | None = ResumeConfig(),
@@ -286,7 +287,6 @@ class Trainer:
             fsdp_cfg = FSDPConfig()
         self._fsdp_config = fsdp_cfg
         self._optim_config = optim_cfg
-        self._sp_size = sp_size
         self._debug = debug
         self._seed = seed
 
@@ -313,7 +313,7 @@ class Trainer:
 
         self.data_mesh = self._init_data_mesh(
             fsdp_cfg.tp_size,
-            sp_size,
+            fsdp_cfg.sp_size,
         )
         self.sp_mesh = self.data_mesh["sp"]
 
@@ -385,11 +385,12 @@ class Trainer:
             global_batch_size=config.global_batch_size,
             work_dir=config.work_dir,
             log_dir=config.log_dir,
-            sp_size=config.sp_size,
             total_step=config.total_step,
             total_epoch=config.total_epoch,
             resume_cfg=config.resume,
             strict_load=config.strict_load,
+            checkpoint_interval=config.checkpoint_interval,
+            checkpoint_maxkeep=config.checkpoint_maxkeep,
             hf_interval=config.hf_interval,
             hf_max_keep=config.hf_max_keep,
             exp_tracker=config.exp_tracker,
@@ -576,7 +577,7 @@ class Trainer:
 
         if self.world_size % sp_size != 0:
             raise ParallelConfigException(
-                f"Found sp_size {self._sp_size}, world_size {self.world_size}."
+                f"Found sp_size {sp_size}, world_size {self.world_size}."
                 "sequence parallel size must be a divisor of world size."
             )
 
