@@ -270,6 +270,7 @@ class Calculator:
         self.attn_opt_states = 0
         self.attn_master_params = 0
         self.attn_master_grads = 0
+        self.perlayer_attn_master_grads = 0
         self.perlayer_attn_acts = 0
 
         self.perlayer_ckp_acts = 0
@@ -282,6 +283,7 @@ class Calculator:
         self.mlp_opt_states = 0
         self.mlp_master_params = 0
         self.mlp_master_grads = 0
+        self.perlayer_mlp_master_grads = 0
         self.perlayer_mlp_acts = 0
 
         self.head_params_num = 0
@@ -426,6 +428,10 @@ class Calculator:
         print(f"embed_params: {self.embed_params / 1024**3} GiB, embed_grads: {self.embed_grads / 1024**3} GiB, embed_opt_states: {self.embed_opt_states / 1024**3} GiB, embed_master_params: {self.embed_master_params / 1024**3} GiB, embed_master_grads: {self.embed_master_grads / 1024**3} GiB, embed_acts: {self.embed_acts / 1024**3} GiB")
         print(f"head_params: {self.head_params / 1024**3} GiB, head_acts: {self.head_acts / 1024**3} GiB")
         print(f"perlayer_params: {perlayer_params / 1024**3} GiB, perlayer_acts: {perlayer_acts / 1024**3} GiB, perlayer_grads: {perlayer_grads / 1024**3} GiB")
+        print(f"per_layer_attn_params: {self.perlayer_attn_params / 1024**3} GiB, per_layer_attn_acts: {self.perlayer_attn_acts / 1024**3} GiB, per_layer_attn_grads: {self.perlayer_attn_grads / 1024**3} GiB")
+        print(f"per_layer_mlp_params: {self.perlayer_mlp_params / 1024**3} GiB, per_layer_mlp_acts: {self.perlayer_mlp_acts / 1024**3} GiB, per_layer_mlp_grads: {self.perlayer_mlp_grads / 1024**3} GiB")
+        print(f"per_layer_attn_master_grads: {self.perlayer_attn_master_grads / 1024**3} GiB, per_layer_mlp_master_grads: {self.perlayer_mlp_master_grads / 1024**3} GiB")
+        print(f"head_params: {self.head_params / 1024**3} GiB, head_acts: {self.head_acts / 1024**3} GiB, head_grads: {self.head_grads / 1024**3} GiB, head_opt_states: {self.head_opt_states / 1024**3} GiB, head_master_params: {self.head_master_params / 1024**3} GiB, head_master_grads: {self.head_master_grads / 1024**3} GiB")
         max_mem1 = max(micro1_forward_last, micro1_backward_last)
         print(f"Max_mem for microbatch=1: {max_mem1 / 1024**3} GiB. micro1_forward_last: {micro1_forward_last / 1024**3} GiB, micro1_backward_last: {micro1_backward_last / 1024**3} GiB")
         max_mem = max(micro1_forward_last, micro1_backward_last, micro2_forward_last)
@@ -596,6 +602,7 @@ class Calculator:
         # 3. 优化器状态及因为混合精度训练而维护的master参数和梯度分片: Q_S=D*qD, K_S=D*kvD, V_S=D*kvD, O_S=D*qD
         self.attn_opt_states += 2 * self.attn_params_num_per_layer * C.LN_per_gpu * C.os_type / self.os_denom
         self.attn_master_params += self.attn_params_num_per_layer * C.LN_per_gpu * C.master_type / self.os_denom
+        self.perlayer_attn_master_grads = self.attn_params_num_per_layer* C.master_grad_type / self.os_denom
         self.attn_master_grads += self.attn_params_num_per_layer * C.LN_per_gpu * C.master_grad_type / self.os_denom
 
         # 4. 激活值
@@ -691,6 +698,7 @@ class Calculator:
         # 2 for adam's momentum and variance
         self.mlp_opt_states += 2 * (fc_params_num_per_layer / self.mlp_os_denom + nonfc_params_num_per_layer / self.os_denom) * C.LN_per_gpu * C.os_type  # type: ignore
         self.mlp_master_params += (fc_params_num_per_layer / self.mlp_os_denom + nonfc_params_num_per_layer / self.os_denom) * C.LN_per_gpu * C.master_type  # type: ignore
+        self.perlayer_mlp_master_grads = (fc_params_num_per_layer / self.mlp_os_denom + nonfc_params_num_per_layer / self.os_denom) * C.master_grad_type # type: ignore
         self.mlp_master_grads += (fc_params_num_per_layer / self.mlp_os_denom + nonfc_params_num_per_layer / self.os_denom) * C.LN_per_gpu * C.master_grad_type  # type: ignore
 
         # 4. 激活值
