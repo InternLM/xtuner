@@ -132,6 +132,7 @@ class TrainerConfig(BaseModel):
     global_batch_size: int | None
     work_dir: Path | str | None = None
     log_dir: Path | str | None = None
+    sp_size: int = 1
     total_step: int | None = None
     total_epoch: int | None = None
     resume: ResumeConfig | None = None
@@ -179,6 +180,7 @@ class Trainer:
         global_batch_size (int | None): Global batch size for training.
         work_dir (Path | str | None): Directory for saving experiment outputs.
         log_dir (Path | str | None): Directory for log files.
+        sp_size (int): Sequence parallel size.
         total_step (int | None): Total training steps.
         total_epoch (int | None): Number of training epochs.
         resume_cfg (ResumeConfig | None): Configuration for resuming training.
@@ -226,6 +228,7 @@ class Trainer:
         global_batch_size: int | None,
         work_dir: Path | str | None = None,
         log_dir: Path | str | None = None,
+        sp_size: int = 1,
         total_step: int | None = None,
         total_epoch: int | None = None,
         resume_cfg: ResumeConfig | None = ResumeConfig(),
@@ -287,6 +290,7 @@ class Trainer:
             fsdp_cfg = FSDPConfig()
         self._fsdp_config = fsdp_cfg
         self._optim_config = optim_cfg
+        self._sp_size = sp_size
         self._debug = debug
         self._seed = seed
 
@@ -313,7 +317,7 @@ class Trainer:
 
         self.data_mesh = self._init_data_mesh(
             fsdp_cfg.tp_size,
-            fsdp_cfg.sp_size,
+            sp_size,
         )
         self.sp_mesh = self.data_mesh["sp"]
 
@@ -385,6 +389,7 @@ class Trainer:
             global_batch_size=config.global_batch_size,
             work_dir=config.work_dir,
             log_dir=config.log_dir,
+            sp_size=config.sp_size,
             total_step=config.total_step,
             total_epoch=config.total_epoch,
             resume_cfg=config.resume,
