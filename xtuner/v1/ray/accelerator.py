@@ -16,6 +16,26 @@ AcceleratorType = Literal["GPU", "NPU"]
 T = TypeVar("T")
 
 
+class ResourceMap:
+    name_mapping = {
+        "npu": "NPU",
+        "cuda": "GPU",
+    }
+
+    worker_num_mapping = {
+        "npu": 16,
+        "cuda": 8,
+    }
+
+    @classmethod
+    def get(cls, key: str, default=None):
+        return cls.name_mapping.get(key, default)
+
+    @classmethod
+    def get_num_workers(cls, key: str, default=None):
+        return cls.worker_num_mapping.get(key, default)
+
+
 class AcceleratorResourcesConfig(BaseModel):
     """Configuration for accelerator resources in a placement group for XTuner.
 
