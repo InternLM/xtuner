@@ -45,8 +45,8 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         anno_name: str,
         min_pixels: int | None = None,  # Max image pixels (H*W) for image
         max_pixels: int | None = None,  # Min image pixels (H*W) for image
-        video_min_frames: int = 4,  # Max frames per video
-        video_max_frames: int = 8,  # Min frames per video
+        video_min_frames: int = 4,  # Min frames per video
+        video_max_frames: int = 8,  # Max frames per video
         base_interval: int = 2,  # Sampling time interval (seconds) between frames
         video_max_total_pixels: int = 1664 * 28 * 28,  # Max pixels within a frame
         video_min_total_pixels: int = 256 * 28 * 28,  # Min pixels within a frame
@@ -91,7 +91,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         # 如果 input_ids 超过单条最大长度会被截断，那么 position_ids 也要被截断
         if position_ids is not None:
             assert position_ids.size(-1) == len(input_ids), (
-                f"position_ids.shape {position_ids.shape} <= len(input_ids) {input_ids}. "
+                f"position_ids.shape {position_ids.shape} != len(input_ids) {input_ids}. "
             )
         if self.max_length is not None and len(input_ids) > self.max_length:
             logger.info(
@@ -217,7 +217,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         num_image_tokens_2 = torch.stack(grid_thw_merged, dim=0).sum()
         # assert 会被捕获，该数据会丢弃
         assert num_image_tokens_1.shape == num_image_tokens_2.shape, (
-            f"num_image_tokens_1.shape {num_image_tokens_1} != num_image_tokens_2.shape {num_image_tokens_2}, "
+            f"num_image_tokens_1.shape {num_image_tokens_1.shape} != num_image_tokens_2.shape {num_image_tokens_2.shape}, "
             f"data_name: {self.data_name}, data_id: {data_item.get('id', '')}. Discard this data."
         )
 
