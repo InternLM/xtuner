@@ -762,7 +762,7 @@ class BaseModel(nn.Module):
 
         if not dist.is_initialized() or dist.get_rank() == 0:
             if self.config.hf_config is not None:
-                self.config.hf_config.save_pretrained(hf_dir)
+                self.config.save_hf(hf_dir)
             elif self._hf_path is not None:
                 for file in cast(Path, self._hf_path).iterdir():
                     if file.suffix != ".safetensors":
