@@ -1,6 +1,6 @@
 import os
 from unittest import TestCase
-
+import torch
 from xtuner.v1.datasets import InternS1VLTokenizeFnConfig
 from transformers import AutoTokenizer, AutoProcessor
 import json
@@ -8,6 +8,7 @@ from xtuner.v1.model import InternVL3P5Dense8BConfig
 
 INTERN_VL_1B_PATH = os.environ["INTERN_VL_1B_PATH"]
 VIDEO_ROOT = os.environ["VIDEO_ROOT"]
+
 
 class TestMLLMTokenizeFn(TestCase):
     def setUp(self):
@@ -27,12 +28,14 @@ class TestMLLMTokenizeFn(TestCase):
 
                 ret = self.tokenize_fn(raw_data, media_root='tests/')
                 input_ids_xtuner = ret['input_ids']
+                pixel_values_xtuner: torch.Tensor = ret['pixel_values']
 
                 # to hf openai format
                 messages = raw_data['messages']
                 messages[0]['content'][0]['type'] = 'image'
                 messages[0]['content'][0]['path'] = 'tests/' + messages[0]['content'][0]['image_url']['url']
                 del messages[0]['content'][0]['image_url']
+                # 需要把 \n 去掉，因为 internvl chat_template 里面会加上 \n
                 messages[0]['content'][1]['text'] = messages[0]['content'][1]['text'].replace('<IMG_CONTEXT>\n', '')
                 for msg in messages:
                     if not isinstance(msg['content'], list):
@@ -41,7 +44,9 @@ class TestMLLMTokenizeFn(TestCase):
                 ret = self.processor.apply_chat_template(messages, add_generation_prompt=False, tokenize=True,
                                                          return_dict=True)
                 input_ids_hf = ret['input_ids'][0]
-                assert input_ids_xtuner == input_ids_hf
+                pixel_values_hf = torch.stack(ret['pixel_values'])
+                self.assertTrue(input_ids_xtuner, input_ids_hf)
+                self.assertTrue(pixel_values_xtuner.shape, pixel_values_hf.shape)
 
     def test_intern_vl_multi_image(self):
         data_path = 'tests/resource/mllm_sft_multi_image_example_data.jsonl'
@@ -91,6 +96,9 @@ class TestMLLMTokenizeFn(TestCase):
                 input_str = input_str.replace('<img></img>', '<IMG_CONTEXT>')
                 expected_str = "<|im_start|>user\nFrame-1: <IMG_CONTEXT>\nFrame-2: <IMG_CONTEXT>\nFrame-3: " \
                                "<IMG_CONTEXT>\nFrame-4: <IMG_CONTEXT>\nFrame-5: <IMG_CONTEXT>\nFrame-6: " \
+                               "<IMG_CONTEXT>\nFrame-7: <IMG_CONTEXT>\nFrame-8: <IMG_CONTEXT>\nFrame-9: " \
+                               "<IMG_CONTEXT>\nFrame-10: <IMG_CONTEXT>\nFrame-11: <IMG_CONTEXT>\nFrame-12: " \
+                               "<IMG_CONTEXT>\nFrame-13: " \
                                "<IMG_CONTEXT>\n请描述下视频内容？<|im_end|>\n<|im_start|>assistant\n一男一女在打网球<|im_end|>\n" \
                                "<|im_start|>user\n请简要解释下网球<|im_end|>\n<|im_start|>assistant\n" \
                                "网球是一项运动，运动员使用球拍将球击打过网进入对方场地。目标是通过让球落入对方场地且对方无法回击来得分。网球可以单人对战（单打）或双人组队对战（双打）。<|im_end|>"

@@ -38,6 +38,8 @@ class SequenceContext:
 
     # Intern-S1
     image_flags: torch.LongTensor | None = None
+    # Qwenvl3
+    image_grid_thw: torch.Tensor | None = None
 
     # vllm model
     pixel_values: torch.FloatTensor | None = None
@@ -127,6 +129,7 @@ class SequenceContext:
                 # TODO: 没有 copy 方法比较难受,容易漏掉变量
                 image_flags=self.image_flags,
                 pixel_values=self.pixel_values,
+                image_grid_thw=self.image_grid_thw,
             )
             return sp_seq_ctx
         else:
@@ -260,6 +263,9 @@ class SequenceContext:
 
         if self.inputs_embeds is not None and hasattr(self.inputs_embeds, "to"):
             self.inputs_embeds = self.inputs_embeds.to(device)  # type: ignore
+
+        if self.image_grid_thw is not None and hasattr(self.image_grid_thw, "to"):
+            self.image_grid_thw = self.image_grid_thw.to(device)  # type: ignore
 
         self.device = device
 

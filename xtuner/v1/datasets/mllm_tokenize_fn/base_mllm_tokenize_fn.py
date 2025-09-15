@@ -7,7 +7,7 @@ from PIL import Image
 from pydantic import BaseModel, ConfigDict
 
 from xtuner.v1.data_proto.messages import ChatMessages
-from xtuner.v1.data_proto.templates import ChatTemplate
+from xtuner.v1.data_proto.templates import ChatTemplate, HybridChatTemplate
 from xtuner.v1.utils import get_logger
 
 from ..data_item import BaseMLLMDataItem, CacheItem
@@ -16,8 +16,10 @@ from ..utils import CachableTokenizeFunction, tokenizer_xxhash
 
 logger = get_logger()
 
+IMAGE_TOKEN_ALIAS = "XTUNER-ALIAS-ALIAS-XTUNER-2025"
 
-def collect_image_video_paths(messages):
+
+def collect_image_video_paths(messages: list[dict]):
     image_paths = []
     video_paths = []
     for msg in messages:
@@ -32,12 +34,35 @@ def collect_image_video_paths(messages):
     return image_paths, video_paths
 
 
-def load_image(image_path):
+def replace_image_token(messages: ChatMessages, chat_template: HybridChatTemplate, num_image_token_list: list[int]):
+    current_image_idx = 0
+    for msg in messages.messages:
+        if msg.role == "user":
+            content = msg.content
+            if isinstance(content, list):
+                for c in content:
+                    if c.type == "text":
+                        text = c.text
+                        assert "<IMG_CONTEXT>" in text
+                        text = text.replace("<IMG_CONTEXT>", IMAGE_TOKEN_ALIAS)
+                        image_cnt = text.count(IMAGE_TOKEN_ALIAS)
+                        for _ in range(image_cnt):
+                            image_tokens = f"{chat_template.image_start_token}{chat_template.image_context_token * num_image_token_list[current_image_idx]}{chat_template.image_end_token}"  # type: ignore
+                            text = text.replace(IMAGE_TOKEN_ALIAS, image_tokens, 1)
+                            current_image_idx += 1
+                        c.text = text
+        # if current_image_idx < num_image, it means <image> placeholder is less than num_image
+        assert current_image_idx == len(num_image_token_list), (
+            f"ERROR: current_image_idx: {current_image_idx} != num_image: {len(num_image_token_list)}"
+        )
+
+
+def load_image(image_path: str):
     # Load the image using tcs_loader if available, otherwise use PIL
     return Image.open(image_path).convert("RGB")
 
 
-def get_image_path(image_path, media_root):
+def get_image_path(image_path: str, media_root: str):
     if image_path.startswith("s3://"):  # for ceph
         image_path = media_root + image_path
     else:  # for local image
@@ -65,16 +90,16 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
         self._hash_str = ""
         self.chat_template = chat_template
 
-    def calc_num_tokens_multi_modal_get_item(self, item: dict) -> CacheItem:
+    def calc_num_tokens_multi_modal_get_item(self, data_item: dict) -> CacheItem:
         raise NotImplementedError
 
-    def multi_modal_get_item(self, item: dict, media_root: str = "") -> BaseMLLMDataItem:
+    def multi_modal_get_item(self, data_item: dict, media_root: str = "") -> BaseMLLMDataItem:
         raise NotImplementedError
 
-    def calc_num_tokens_video_get_item(self, item: dict) -> CacheItem:
+    def calc_num_tokens_video_get_item(self, data_item: dict) -> CacheItem:
         raise NotImplementedError
 
-    def video_get_item(self, item: dict, media_root: str = "") -> BaseMLLMDataItem:
+    def video_get_item(self, data_item: dict, media_root: str = "") -> BaseMLLMDataItem:
         raise NotImplementedError
 
     def calc_num_tokens_pure_text_get_item(self, data_item) -> CacheItem:
@@ -85,7 +110,7 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
         input_ids, _ = self._truncated_input_and_labels(input_ids, labels)
         return {"num_tokens": len(input_ids)}
 
-    def pure_text_get_item(self, item: Any) -> BaseMLLMDataItem:
+    def pure_text_get_item(self, data_item: Any) -> BaseMLLMDataItem:
         raise NotImplementedError
 
     def _truncated_input_and_labels(self, input_ids, labels):

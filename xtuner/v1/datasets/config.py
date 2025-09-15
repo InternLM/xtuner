@@ -1,16 +1,19 @@
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Literal, Optional, Protocol, runtime_checkable
+from typing import Annotated, Literal, Optional, Protocol, runtime_checkable
 
 from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict, TypeAdapter, model_validator
 from typing_extensions import TypedDict
 
-
-if TYPE_CHECKING:
-    from xtuner.v1.datasets import (
-        CachableTokenizeFunction,
-        JsonlDataset,
-    )
+from .collator import (
+    fake_collator,
+    intern_s1_vl_sft_collator,
+    qwen3_vl_sft_collator,
+    sft_llm_collator,
+)
+from .jsonl import JsonlDataset
+from .utils import CachableTokenizeFunction
+from .vlm_jsonl import VLMJsonlDataset
 
 
 # TODO: Enhance the configurable fields of dataset config
@@ -29,8 +32,6 @@ class DatasetConfig(BaseModel):
         tokenize_fn: Optional["CachableTokenizeFunction"] = None,
     ) -> "JsonlDataset":
         if self.class_name == "JsonlDataset":
-            from xtuner.v1.datasets import JsonlDataset
-
             return JsonlDataset(
                 tokenize_fn=tokenize_fn,
                 anno_path=self.anno_path,
@@ -40,8 +41,6 @@ class DatasetConfig(BaseModel):
                 cache_tag=self.cache_tag,
             )
         elif self.class_name == "VLMJsonlDataset":
-            from xtuner.v1.datasets import VLMJsonlDataset
-
             return VLMJsonlDataset(
                 tokenize_fn=tokenize_fn,
                 anno_path=self.anno_path,
@@ -67,7 +66,8 @@ class BaseTokenizeFnConfig(Protocol):
 class DataloaderConfig(BaseModel):
     model_config = ConfigDict(title="Base dataloader config for xtuner", extra="allow")
     collator: Annotated[
-        Literal["sft_llm_collator", "sft_vllm_collator", "fake_collator"], Parameter(help="collator func name")
+        Literal["sft_llm_collator", "intern_s1_vl_sft_collator", "qwen3_vl_sft_collator", "fake_collator"],
+        Parameter(help="collator func name"),
     ] = "sft_llm_collator"
     pack_level: Annotated[
         Literal["soft", "none", "__legacy", "hard"], Parameter(help="__legacy is only for debug")
@@ -84,12 +84,12 @@ class DataloaderConfig(BaseModel):
     pad_token_id: Annotated[int | None, Parameter(help="padding token id")] = None
 
     def build_collator(self):
-        from xtuner.v1.datasets import fake_collator, sft_llm_collator, sft_vllm_collator
-
         if self.collator == "sft_llm_collator":
             return sft_llm_collator
-        elif self.collator == "sft_vllm_collator":
-            return sft_vllm_collator
+        elif self.collator == "intern_s1_vl_sft_collator":
+            return intern_s1_vl_sft_collator
+        elif self.collator == "qwen3_vl_sft_collator":
+            return qwen3_vl_sft_collator
         elif self.collator == "fake_collator":
             return fake_collator  # for RL
         else:

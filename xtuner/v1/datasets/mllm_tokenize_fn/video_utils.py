@@ -11,9 +11,6 @@ except Exception:
     VideoReader = None
 
 
-IMAGE_TOKEN_ALIAS = "XTUNER-ALIAS-ALIAS-XTUNER-2025"
-
-
 def get_frame_indices(num_frames, vlen, sample="rand", fix_start=None, input_fps=1, max_num_frames=-1):
     if sample in ["rand", "middle"]:  # uniform sampling
         acc_samples = min(num_frames, vlen)

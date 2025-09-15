@@ -10,14 +10,22 @@ from pydantic import BaseModel, ConfigDict
 
 from transformers import PreTrainedTokenizer
 from xtuner.v1.data_proto.messages import ChatMessages
-from xtuner.v1.data_proto.templates import CHAT_TEMPLATE_MAP
+from xtuner.v1.data_proto.templates import CHAT_TEMPLATE_MAP, HybridChatTemplate
+from xtuner.v1.model import InternS1BaseConfig, InternVLBaseConfig
 from xtuner.v1.utils import get_logger
 
 from ..data_item import CacheItem, InternS1DataItem
 from ..vlm_utils import TCSLoader, apply_exif_orientation
-from .base_mllm_tokenize_fn import BaseMLLMTokenizeFnConfig, BaseMLLMTokenizeFunction, get_image_path, load_image
+from .base_mllm_tokenize_fn import (
+    IMAGE_TOKEN_ALIAS,
+    BaseMLLMTokenizeFnConfig,
+    BaseMLLMTokenizeFunction,
+    get_image_path,
+    load_image,
+    replace_image_token,
+)
 from .intern_s1_vl_process import build_transform, dynamic_num_patch, dynamic_preprocess
-from .video_utils import IMAGE_TOKEN_ALIAS, read_frames_decord
+from .video_utils import read_frames_decord
 
 
 logger = get_logger()
@@ -51,6 +59,35 @@ def generate_random_int_from_dict(input_dict, min_num, max_num):
     return rng.integers(min_num, max_num + 1)
 
 
+def replace_video_token(messages: ChatMessages, chat_template: HybridChatTemplate, num_image_token_list: list[int]):
+    current_image_idx = 0
+    n_frames = len(num_image_token_list)
+    for msg in messages.messages:
+        if msg.role == "user":
+            content = msg.content
+            if isinstance(content, list):
+                for c in content:
+                    if c.type == "text":
+                        text = c.text
+                        assert "<VIDEO_CONTEXT>" in text
+                        text = text.replace("<VIDEO_CONTEXT>", IMAGE_TOKEN_ALIAS)
+                        image_cnt = text.count(IMAGE_TOKEN_ALIAS)
+                        assert image_cnt == 1, "Only one <VIDEO_CONTEXT> is supported for video."
+                        for _ in range(image_cnt):
+                            special_tokens = "\n".join(
+                                [f"Frame-{frame_idx + 1}: {IMAGE_TOKEN_ALIAS}" for frame_idx in range(n_frames)]
+                            )
+                            text = text.replace(IMAGE_TOKEN_ALIAS, special_tokens)
+                            image_tokens = f"{chat_template.image_start_token}{chat_template.video_context_token * num_image_token_list[current_image_idx]}{chat_template.image_end_token}"  # type: ignore
+                            text = text.replace(IMAGE_TOKEN_ALIAS, image_tokens)
+                            current_image_idx += n_frames
+                        c.text = text
+        # if current_image_idx < num_image, it means <image> placeholder is less than num_image
+        assert current_image_idx == len(num_image_token_list), (
+            f"ERROR: current_image_idx: {current_image_idx} != num_image: {len(num_image_token_list)}"
+        )
+
+
 class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
     def __init__(
         self,
@@ -69,8 +106,6 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         hash: str | None = None,
         only_prompt: bool = False,
     ):
-        from xtuner.v1.model import InternS1BaseConfig, InternVLBaseConfig
-
         assert isinstance(model_cfg, (InternS1BaseConfig, InternVLBaseConfig))
 
         self.tcs_loader = tcs_loader
@@ -126,56 +161,6 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
             is_train=self.data_augment, input_size=self.image_size, pad2square=False, normalize_type="imagenet"
         )
         return transform
-
-    def replace_image_token(self, messages, num_image_token_list):
-        current_image_idx = 0
-        for msg in messages.messages:
-            if msg.role == "user":
-                content = msg.content
-                if isinstance(content, list):
-                    for c in content:
-                        if c.type == "text":
-                            text = c.text
-                            assert "<IMG_CONTEXT>" in text
-                            text = text.replace("<IMG_CONTEXT>", IMAGE_TOKEN_ALIAS)
-                            image_cnt = text.count(IMAGE_TOKEN_ALIAS)
-                            for _ in range(image_cnt):
-                                image_tokens = f"{self.chat_template.image_start_token}{self.chat_template.image_context_token * num_image_token_list[current_image_idx]}{self.chat_template.image_end_token}"
-                                text = text.replace(IMAGE_TOKEN_ALIAS, image_tokens, 1)
-                                current_image_idx += 1
-                            c.text = text
-            # if current_image_idx < num_image, it means <image> placeholder is less than num_image
-            assert current_image_idx == len(num_image_token_list), (
-                f"ERROR: current_image_idx: {current_image_idx} != num_image: {len(num_image_token_list)}"
-            )
-
-    def replace_video_token(self, messages, num_image_token_list):
-        current_image_idx = 0
-        n_frames = len(num_image_token_list)
-        for msg in messages.messages:
-            if msg.role == "user":
-                content = msg.content
-                if isinstance(content, list):
-                    for c in content:
-                        if c.type == "text":
-                            text = c.text
-                            assert "<IMG_CONTEXT>" in text
-                            text = text.replace("<IMG_CONTEXT>", IMAGE_TOKEN_ALIAS)
-                            image_cnt = text.count(IMAGE_TOKEN_ALIAS)
-                            assert image_cnt == 1, "Only one <IMG_CONTEXT> is supported for video."
-                            for _ in range(image_cnt):
-                                special_tokens = "\n".join(
-                                    [f"Frame-{frame_idx + 1}: {IMAGE_TOKEN_ALIAS}" for frame_idx in range(n_frames)]
-                                )
-                                text = text.replace(IMAGE_TOKEN_ALIAS, special_tokens)
-                                image_tokens = f"{self.chat_template.image_start_token}{self.chat_template.image_context_token * num_image_token_list[current_image_idx]}{self.chat_template.image_end_token}"
-                                text = text.replace(IMAGE_TOKEN_ALIAS, image_tokens)
-                                current_image_idx += n_frames
-                            c.text = text
-            # if current_image_idx < num_image, it means <image> placeholder is less than num_image
-            assert current_image_idx == len(num_image_token_list), (
-                f"ERROR: current_image_idx: {current_image_idx} != num_image: {len(num_image_token_list)}"
-            )
 
     def pure_text_get_item(self, data_item: dict) -> InternS1DataItem:
         # Build transformation function
@@ -252,7 +237,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         messages = ChatMessages(messages=data_item["messages"])
 
         try:
-            self.replace_image_token(messages, num_image_tokens)
+            replace_image_token(messages, self.chat_template, num_image_tokens)
             tokenized = messages.tokenize(self.tokenizer, self.chat_template)
             input_ids = tokenized["input_ids"]
             labels = tokenized["labels"]
@@ -309,7 +294,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         # Preprocess the conversations and generate the return dictionary
         num_image_tokens = [self.num_image_token * num_tile for num_tile in num_tiles]
         messages = ChatMessages(messages=data_item["messages"])
-        self.replace_image_token(messages, num_image_tokens)
+        replace_image_token(messages, self.chat_template, num_image_tokens)
         tokenized = messages.tokenize(self.tokenizer, self.chat_template)
         input_ids = tokenized["input_ids"]
         labels = tokenized["labels"]
@@ -337,7 +322,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         messages = ChatMessages(messages=data_item["messages"])
 
         try:
-            self.replace_video_token(messages, num_image_tokens)
+            replace_video_token(messages, self.chat_template, num_image_tokens)
             tokenized = messages.tokenize(self.tokenizer, self.chat_template)
             input_ids = tokenized["input_ids"]
             labels = tokenized["labels"]
@@ -374,7 +359,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         num_image_tokens = [self.num_image_token] * num_patches
 
         messages = ChatMessages(messages=data_item["messages"])
-        self.replace_video_token(messages, num_image_tokens)
+        replace_video_token(messages, self.chat_template, num_image_tokens)
         tokenized = messages.tokenize(self.tokenizer, self.chat_template)
         input_ids = tokenized["input_ids"]
         labels = tokenized["labels"]
@@ -386,7 +371,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
             image_flags=torch.tensor([1] * num_patches, dtype=torch.long),
             num_tokens=len(input_ids),
             num_img_tokens=num_image_tokens,
-            num_imgs=[len(self._image_path)],
+            num_imgs=[len(image_list)],
             num_patches=[num_patches],
         )
         return ret

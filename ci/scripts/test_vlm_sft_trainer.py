@@ -311,7 +311,7 @@ def main():
             dataset_config.append(_data_cfg)
 
         dataloader_config = DataloaderConfig(
-            collator="sft_vllm_collator",
+            collator="intern_s1_vl_sft_collator",
             num_workers=8,
             pack_max_length=8192
         )
