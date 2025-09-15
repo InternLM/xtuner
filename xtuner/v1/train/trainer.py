@@ -642,6 +642,9 @@ class Trainer:
             engine.from_hf(hf_path=model_path, strict=strict)
         elif resume_cfg.resume_from is None:
             engine.init_model_weights()
+
+        if model_path is not None:
+            engine.model.set_hf(model_path)
         return engine
 
     def build_dataloader(
