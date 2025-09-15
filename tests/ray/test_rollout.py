@@ -8,7 +8,7 @@ from transformers import AutoTokenizer
 
 from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.ray.judger.controller import JudgerConfig
-from xtuner.v1.ray.accelerator import AcceleratorResourcesConfig, AutoAcceleratorWorkers
+from xtuner.v1.ray.accelerator import ResourceMap, AcceleratorResourcesConfig, AutoAcceleratorWorkers
 from xtuner.v1.ray.dataflow import DataFlow, DataFlowConfig, ReplayBufferConfig
 from xtuner.v1.ray.environment import SingleTurnEnvironment
 from xtuner.v1.ray.rollout import RolloutController
@@ -23,11 +23,6 @@ TEST_TEXT_MESSAGES=[{"role": "user", "content": "Hello!"}]
 MODEL_PATH = os.environ["ROLLOUT_MODEL_PATH"]
 TRAIN_DATA_PATH = os.environ["ROLLOUT_DATA_PATH"]
 TEST_DATA_PATH = os.environ["ROLLOUT_TEST_DATA_PATH"]
-resource_map = {
-    "npu": "NPU",
-    "cuda": "GPU",
-}
-
 
 class TestRollout(unittest.TestCase):
 
@@ -41,9 +36,10 @@ class TestRollout(unittest.TestCase):
         del os.environ["XTUNER_USE_FA3"]
 
     def init_config(self):
+        device_type = torch.accelerator.current_accelerator().type
         self.resources_cfg = AcceleratorResourcesConfig(
-            accelerator=resource_map[torch.accelerator.current_accelerator().type],
-            num_workers=8,
+            accelerator=ResourceMap.get(device_type),
+            num_workers=ResourceMap.get_num_workers(device_type),
             cpu_memory_per_worker=16 * 1024**3,  # 16 GB
         )
         self.max_prompt_length = 512
