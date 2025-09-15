@@ -47,7 +47,7 @@ dataset_config = [
     },
 ]
 dataloader_config = DataloaderConfig(
-    pack_max_length=pack_max_length, collator="sft_vllm_collator"
+    pack_max_length=pack_max_length, collator="intern_s1_vl_sft_collator"
 )
 
 # optimizer and lr config

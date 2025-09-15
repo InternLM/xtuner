@@ -82,7 +82,7 @@ dataset_config = [
 # dataloader 配置
 dataloader_config = DataloaderConfig(pack_max_length=pack_max_length, 
                                      num_workers=8,
-                                     collator='sft_vllm_collator')
+                                     collator='intern_s1_vl_sft_collator')
 
 ```
 
@@ -178,7 +178,7 @@ dataset_config = [
 dataloader_config = DataloaderConfig(pack_max_length=pack_max_length,
                                      num_workers=8,
                                      pack_level="expand_soft",
-                                     collator='sft_vllm_collator')
+                                     collator='intern_s1_vl_sft_collator')
 
 # optimizer and lr config
 optim_cfg = AdamWConfig(lr=1e-6, foreach=False)

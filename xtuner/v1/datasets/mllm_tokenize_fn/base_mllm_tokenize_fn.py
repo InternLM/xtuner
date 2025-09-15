@@ -13,6 +13,7 @@ from xtuner.v1.utils import get_logger
 from ..data_item import BaseMLLMDataItem, CacheItem
 from ..utils import CachableTokenizeFunction, tokenizer_xxhash
 
+
 logger = get_logger()
 
 IMAGE_TOKEN_ALIAS = "XTUNER-ALIAS-ALIAS-XTUNER-2025"
@@ -74,12 +75,12 @@ T = TypeVar("T", bound=BaseMLLMDataItem)
 
 class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
     def __init__(
-            self,
-            tokenizer,
-            chat_template: ChatTemplate,
-            max_length: int | None = None,
-            tokenizer_hash: str | None = None,
-            hash: str | None = None,
+        self,
+        tokenizer,
+        chat_template: ChatTemplate,
+        max_length: int | None = None,
+        tokenizer_hash: str | None = None,
+        hash: str | None = None,
     ):
         super().__init__()
         self.tokenizer = tokenizer
@@ -164,6 +165,6 @@ class BaseMLLMTokenizeFnConfig(BaseModel):
     hash: str | None = None
 
     def build(
-            self, tokenizer, tokenizer_hash: str | None = None, anno_name: str = "", **kwargs
+        self, tokenizer, tokenizer_hash: str | None = None, anno_name: str = "", **kwargs
     ) -> BaseMLLMTokenizeFunction:
         raise NotImplementedError("The 'build' method must be implemented.")

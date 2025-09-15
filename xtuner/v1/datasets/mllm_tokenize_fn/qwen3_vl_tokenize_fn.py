@@ -1,23 +1,23 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 
-import os
 import copy
+import os
 from collections.abc import Sequence
+
 import torch
-from typing import Any, TypeVar, Optional, List
-from PIL import Image
 from pydantic import ConfigDict
 
 from transformers import AutoProcessor, PreTrainedTokenizer
 from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
+from xtuner.v1.data_proto.messages import ChatMessages
 from xtuner.v1.data_proto.templates import CHAT_TEMPLATE_MAP
 from xtuner.v1.utils import get_logger
-from xtuner.v1.data_proto.messages import ChatMessages
 
+from ..data_item import CacheItem, QwenVL3DataItem
 from ..vlm_utils import apply_exif_orientation
-from ..data_item import QwenVL3DataItem, CacheItem
-from .base_mllm_tokenize_fn import BaseMLLMTokenizeFnConfig, BaseMLLMTokenizeFunction, replace_image_token
+from .base_mllm_tokenize_fn import BaseMLLMTokenizeFnConfig, BaseMLLMTokenizeFunction, load_image, replace_image_token
 from .qwenvl_rope2d import get_rope_index
+
 
 logger = get_logger()
 
@@ -39,21 +39,21 @@ def smart_get_thw(image_size, image_processor):
 
 class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
     def __init__(
-            self,
-            tokenizer: PreTrainedTokenizer,
-            processor_path: str,
-            anno_name: str,
-            min_pixels: int | None = None,  # Max image pixels (H*W) for image
-            max_pixels: int | None = None,  # Min image pixels (H*W) for image
-            video_min_frames: int = 4,  # Max frames per video
-            video_max_frames: int = 8,  # Min frames per video
-            base_interval: int = 2,  # Sampling time interval (seconds) between frames
-            video_max_total_pixels: int = 1664 * 28 * 28,  # Max pixels within a frame
-            video_min_total_pixels: int = 256 * 28 * 28,  # Min pixels within a frame
-            system_message: str | None = None,
-            max_length: int | None = None,
-            tokenizer_hash: str | None = None,
-            hash: str | None = None,
+        self,
+        tokenizer: PreTrainedTokenizer,
+        processor_path: str,
+        anno_name: str,
+        min_pixels: int | None = None,  # Max image pixels (H*W) for image
+        max_pixels: int | None = None,  # Min image pixels (H*W) for image
+        video_min_frames: int = 4,  # Max frames per video
+        video_max_frames: int = 8,  # Min frames per video
+        base_interval: int = 2,  # Sampling time interval (seconds) between frames
+        video_max_total_pixels: int = 1664 * 28 * 28,  # Max pixels within a frame
+        video_min_total_pixels: int = 256 * 28 * 28,  # Min pixels within a frame
+        system_message: str | None = None,
+        max_length: int | None = None,
+        tokenizer_hash: str | None = None,
+        hash: str | None = None,
     ):
         self.image_processor = AutoProcessor.from_pretrained(processor_path).image_processor
         self.video_max_total_pixels = video_max_total_pixels
@@ -66,7 +66,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             self.image_processor.max_pixels = max_pixels
         self.image_processor.size["longest_edge"] = self.image_processor.max_pixels
         self.image_processor.size["shortest_edge"] = self.image_processor.min_pixels
-        self.merge_length = self.image_processor.merge_size ** 2
+        self.merge_length = self.image_processor.merge_size**2
 
         self.data_name = os.path.basename(anno_name)
         logger.info(
@@ -85,12 +85,14 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         # 必须要最后调用
         super().__init__(tokenizer, self.chat_template, max_length, tokenizer_hash, hash)
 
-    def _truncated_data_item(self, input_ids: list[int], labels: list[int] | None = None,
-                             position_ids: torch.Tensor | None = None):
+    def _truncated_data_item(
+        self, input_ids: list[int], labels: list[int] | None = None, position_ids: torch.Tensor | None = None
+    ):
         # 如果 input_ids 超过单条最大长度会被截断，那么 position_ids 也要被截断
         if position_ids is not None:
-            assert position_ids.size(-1) == len(input_ids), \
-                f'position_ids.shape {position_ids.shape} <= len(input_ids) {input_ids}. '
+            assert position_ids.size(-1) == len(input_ids), (
+                f"position_ids.shape {position_ids.shape} <= len(input_ids) {input_ids}. "
+            )
         if self.max_length is not None and len(input_ids) > self.max_length:
             logger.info(
                 f"WARNING: input_ids length {len(input_ids)} exceeds model_max_length {self.max_length}. truncated!"
@@ -99,12 +101,12 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             if labels is not None:
                 labels = labels[: self.max_length]
             if position_ids is not None:
-                position_ids = position_ids[..., :self.max_length]
+                position_ids = position_ids[..., : self.max_length]
         return input_ids, labels, position_ids
 
     def process_image_unified(self, image_file, media_root: str = ""):
         processor = copy.deepcopy(self.image_processor)
-        image = Image.open(os.path.join(media_root, image_file)).convert("RGB")
+        image = load_image(os.path.join(media_root, image_file))
         image = apply_exif_orientation(image)
 
         visual_processed = processor.preprocess(image, return_tensors="pt")
@@ -114,7 +116,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         grid_thw = visual_processed["image_grid_thw"][0]
         return image_tensor, grid_thw
 
-    def pure_text_get_item(self, data_item: Any) -> QwenVL3DataItem:
+    def pure_text_get_item(self, data_item: dict) -> QwenVL3DataItem:
         messages = ChatMessages(messages=data_item["messages"])
         tokenized = messages.tokenize(self.tokenizer, self.chat_template)
         input_ids = tokenized["input_ids"]
@@ -157,8 +159,8 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         media_grid_thw = []
         for size in image_size:
             media_grid_thw.append(smart_get_thw(size, self.image_processor))
-        media_grid_thw = torch.tensor(media_grid_thw, dtype=torch.int).reshape(-1, 3)
-        sum_media_grid_thw = media_grid_thw.prod(dim=1) // self.merge_length
+        media_grid_thw = torch.tensor(media_grid_thw, dtype=torch.int).reshape(-1, 3)  # type: ignore
+        sum_media_grid_thw = media_grid_thw.prod(dim=1) // self.merge_length  # type: ignore
 
         messages = ChatMessages(messages=data_item["messages"])
         replace_image_token(messages, self.chat_template, sum_media_grid_thw)
@@ -195,10 +197,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         if not isinstance(grid_thw, Sequence):
             grid_thw_merged = [grid_thw_merged]
             grid_thw = [grid_thw]
-        grid_thw_merged = [
-            merged_thw.prod() // self.merge_length
-            for merged_thw in grid_thw_merged
-        ]
+        grid_thw_merged = [merged_thw.prod() // self.merge_length for merged_thw in grid_thw_merged]  # type: ignore
         messages = ChatMessages(messages=data_item["messages"])
         replace_image_token(messages, self.chat_template, grid_thw_merged)
         tokenized = messages.tokenize(self.tokenizer, self.chat_template)
@@ -208,7 +207,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         position_ids, _ = get_rope_index(
             torch.tensor(input_ids).unsqueeze(0),
             self.image_processor.merge_size,
-            image_grid_thw=torch.stack(grid_thw, dim=0)
+            image_grid_thw=torch.stack(grid_thw, dim=0),
         )
 
         input_ids, labels, position_ids = self._truncated_data_item(input_ids, labels, position_ids)
@@ -228,11 +227,11 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             input_ids=input_ids,
             labels=labels,
             pixel_values=torch.cat(image, dim=0),
-            image_grid_thw=torch.cat([thw.unsqueeze(0) for thw in grid_thw], dim=0),
+            image_grid_thw=torch.cat([_thw.unsqueeze(0) for _thw in grid_thw], dim=0),  # b,3
             position_ids=position_ids,
             num_tokens=len(input_ids),
             num_img_tokens=[num_img_tokens],
-            num_imgs=[0],
+            num_imgs=[len(self._image_path)],
             num_patches=[0],
         )
         return ret
@@ -247,7 +246,7 @@ class Qwen3VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
     video_max_total_pixels: int = 1664 * 28 * 28
 
     def build(
-            self, tokenizer, tokenizer_hash: str | None = None, anno_name: str = "", **kwargs
+        self, tokenizer, tokenizer_hash: str | None = None, anno_name: str = "", **kwargs
     ) -> Qwen3VLTokenizeFunction:
         return Qwen3VLTokenizeFunction(
             tokenizer,

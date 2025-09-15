@@ -15,7 +15,14 @@ from xtuner.v1.utils import get_logger
 
 from ..data_item import CacheItem, InternS1DataItem
 from ..vlm_utils import TCSLoader, apply_exif_orientation
-from .base_mllm_tokenize_fn import BaseMLLMTokenizeFnConfig, BaseMLLMTokenizeFunction, get_image_path, load_image, replace_image_token, IMAGE_TOKEN_ALIAS
+from .base_mllm_tokenize_fn import (
+    IMAGE_TOKEN_ALIAS,
+    BaseMLLMTokenizeFnConfig,
+    BaseMLLMTokenizeFunction,
+    get_image_path,
+    load_image,
+    replace_image_token,
+)
 from .intern_s1_vl_process import build_transform, dynamic_num_patch, dynamic_preprocess
 from .video_utils import read_frames_decord
 
@@ -61,16 +68,16 @@ def replace_video_token(messages, chat_template, num_image_token_list):
                 for c in content:
                     if c.type == "text":
                         text = c.text
-                        assert "<IMG_CONTEXT>" in text
-                        text = text.replace("<IMG_CONTEXT>", IMAGE_TOKEN_ALIAS)
+                        assert "<VIDEO_CONTEXT>" in text
+                        text = text.replace("<VIDEO_CONTEXT>", IMAGE_TOKEN_ALIAS)
                         image_cnt = text.count(IMAGE_TOKEN_ALIAS)
-                        assert image_cnt == 1, "Only one <IMG_CONTEXT> is supported for video."
+                        assert image_cnt == 1, "Only one <VIDEO_CONTEXT> is supported for video."
                         for _ in range(image_cnt):
                             special_tokens = "\n".join(
                                 [f"Frame-{frame_idx + 1}: {IMAGE_TOKEN_ALIAS}" for frame_idx in range(n_frames)]
                             )
                             text = text.replace(IMAGE_TOKEN_ALIAS, special_tokens)
-                            image_tokens = f"{chat_template.image_start_token}{chat_template.image_context_token * num_image_token_list[current_image_idx]}{chat_template.image_end_token}"
+                            image_tokens = f"{chat_template.image_start_token}{chat_template.video_context_token * num_image_token_list[current_image_idx]}{chat_template.image_end_token}"
                             text = text.replace(IMAGE_TOKEN_ALIAS, image_tokens)
                             current_image_idx += n_frames
                         c.text = text
@@ -365,7 +372,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
             image_flags=torch.tensor([1] * num_patches, dtype=torch.long),
             num_tokens=len(input_ids),
             num_img_tokens=num_image_tokens,
-            num_imgs=[len(self._image_path)],
+            num_imgs=[len(image_list)],
             num_patches=[num_patches],
         )
         return ret

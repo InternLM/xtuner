@@ -5,7 +5,8 @@ from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.utils import IGNORE_INDEX, get_logger
 from xtuner.v1.utils.pad import pad_to_max_length
 
-from .data_item import InternS1DataItem, QwenVL3DataItem, DataItem
+from .data_item import DataItem, QwenVL3DataItem
+
 
 logger = get_logger()
 
@@ -20,7 +21,7 @@ def fake_collator(instances: list[DataItem], **kwargs):
 
 
 def sft_llm_collator(
-        instances: list[list[DataItem]], pack_max_length: int, padding_token_idx: int
+    instances: list[list[DataItem]], pack_max_length: int, padding_token_idx: int
 ) -> list[ColateItem]:
     ret: list[ColateItem] = []
     for instance in instances:
@@ -98,7 +99,7 @@ def sft_llm_collator(
 
 
 def intern_s1_vl_sft_collator(
-        instances: list[list[QwenVL3DataItem]], pack_max_length: int, padding_token_idx: int
+    instances: list[list[QwenVL3DataItem]], pack_max_length: int, padding_token_idx: int
 ) -> list[ColateItem]:
     ret: list[ColateItem] = []
     for instance in instances:
@@ -179,7 +180,7 @@ def intern_s1_vl_sft_collator(
 
 
 def qwen3_vl_sft_collator(
-        instances: list[list[InternS1DataItem]], pack_max_length: int, padding_token_idx: int
+    instances: list[list[QwenVL3DataItem]], pack_max_length: int, padding_token_idx: int
 ) -> list[ColateItem]:
     ret: list[ColateItem] = []
     for instance in instances:
@@ -235,8 +236,8 @@ def qwen3_vl_sft_collator(
         for data in instance:
             num_img_tokens.extend(data["num_img_tokens"])
 
-        pixel_values = torch.cat([i["pixel_values"] for i in instance if 'pixel_values' in i], dim=0)
-        image_grid_thw = torch.cat([i["image_grid_thw"] for i in instance if 'image_grid_thw' in i], dim=0)
+        pixel_values = torch.cat([i["pixel_values"] for i in instance if "pixel_values" in i], dim=0)
+        image_grid_thw = torch.cat([i["image_grid_thw"] for i in instance if "image_grid_thw" in i], dim=0)
 
         seq_ctx = SequenceContext(
             input_ids=input_ids,  # type: ignore
@@ -245,7 +246,7 @@ def qwen3_vl_sft_collator(
             max_length_q=max(num_tokens),
             max_length_k=max(num_tokens),
             num_padding=pad_len,
-            position_ids=position_ids,
+            position_ids=position_ids,  # type: ignore
             pixel_values=pixel_values,  # type: ignore
             image_grid_thw=image_grid_thw,
             num_img_tokens=num_img_tokens,

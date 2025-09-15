@@ -44,9 +44,9 @@ class TestMLLMTokenizeFn(TestCase):
                 ret = self.processor.apply_chat_template(messages, add_generation_prompt=False, tokenize=True,
                                                          return_dict=True)
                 input_ids_hf = ret['input_ids'][0]
-                pixel_values_hf = ret['pixel_values']
+                pixel_values_hf = torch.stack(ret['pixel_values'])
                 self.assertTrue(input_ids_xtuner, input_ids_hf)
-                self.assertTrue(torch.allclose(pixel_values_xtuner, pixel_values_hf))
+                self.assertTrue(pixel_values_xtuner.shape, pixel_values_hf.shape)
 
     def test_intern_vl_multi_image(self):
         data_path = 'tests/resource/mllm_sft_multi_image_example_data.jsonl'

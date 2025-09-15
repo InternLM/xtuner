@@ -39,7 +39,7 @@ class SequenceContext:
     # Intern-S1
     image_flags: torch.LongTensor | None = None
     # Qwenvl3
-    image_grid_thw: torch.LongTensor | None = None
+    image_grid_thw: torch.Tensor | None = None
 
     # vllm model
     pixel_values: torch.FloatTensor | None = None
@@ -265,7 +265,7 @@ class SequenceContext:
             self.inputs_embeds = self.inputs_embeds.to(device)  # type: ignore
 
         if self.image_grid_thw is not None and hasattr(self.image_grid_thw, "to"):
-            self.image_grid_thw = self.image_grid_thw.to(device) # type: ignore
+            self.image_grid_thw = self.image_grid_thw.to(device)  # type: ignore
 
         self.device = device
 

@@ -16,6 +16,7 @@ CHAT_TEMPLATE_MAP = {
         image_start_token="<img>",
         image_end_token="</img>",
         image_context_token="<IMG_CONTEXT>",
+        video_context_token="<IMG_CONTEXT>",
     ),
     "qwen3-vl": HybridChatTemplate(
         system="<|im_start|>system\n{system}<|im_end|>\n",
