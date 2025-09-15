@@ -1,6 +1,6 @@
 import os
 from unittest import TestCase
-
+import torch
 from xtuner.v1.datasets import InternS1VLTokenizeFnConfig
 from transformers import AutoTokenizer, AutoProcessor
 import json
@@ -8,6 +8,7 @@ from xtuner.v1.model import InternVL3P5Dense8BConfig
 
 INTERN_VL_1B_PATH = os.environ["INTERN_VL_1B_PATH"]
 VIDEO_ROOT = os.environ["VIDEO_ROOT"]
+
 
 class TestMLLMTokenizeFn(TestCase):
     def setUp(self):
@@ -27,6 +28,7 @@ class TestMLLMTokenizeFn(TestCase):
 
                 ret = self.tokenize_fn(raw_data, media_root='tests/')
                 input_ids_xtuner = ret['input_ids']
+                pixel_values_xtuner: torch.Tensor = ret['pixel_values']
 
                 # to hf openai format
                 messages = raw_data['messages']
@@ -42,7 +44,9 @@ class TestMLLMTokenizeFn(TestCase):
                 ret = self.processor.apply_chat_template(messages, add_generation_prompt=False, tokenize=True,
                                                          return_dict=True)
                 input_ids_hf = ret['input_ids'][0]
-                assert input_ids_xtuner == input_ids_hf
+                pixel_values_hf = ret['pixel_values']
+                self.assertTrue(input_ids_xtuner, input_ids_hf)
+                self.assertTrue(torch.allclose(pixel_values_xtuner, pixel_values_hf))
 
     def test_intern_vl_multi_image(self):
         data_path = 'tests/resource/mllm_sft_multi_image_example_data.jsonl'
