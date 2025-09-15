@@ -1,6 +1,73 @@
 [build-system]
-requires = ["setuptools >= 64.0"]
-build-backend = "setuptools.build_meta:__legacy__"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+dynamic = ["version"]
+name = "xtuner"
+description = "A Next-Generation Training Engine Built for Ultra-Large MoE Models"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "Apache License 2.0"}
+authors = [
+    {name = "The XTuner Authors", email = "openmmlab@gmail.com"}
+]
+keywords = ["large language model", "parameter-efficient", "fine-tuning"]
+classifiers = [
+      "Development Status :: 4 - Beta",
+      "License :: OSI Approved :: Apache Software License",
+      "Operating System :: OS Independent",
+      "Programming Language :: Python :: 3.10",
+      "Programming Language :: Python :: 3.11",
+      "Programming Language :: Python :: 3.12",
+      "Topic :: Utilities",
+]
+dependencies = [
+  "bitsandbytes==0.45.0",
+  "datasets<4.0.0",
+  "einops",
+  "loguru",
+  "mmengine==0.11.0rc0",
+  "openpyxl",
+  "peft>=0.14.0",
+  "scikit-image",
+  "scipy",
+  "SentencePiece",
+  "tiktoken",
+  "torch>=2.6.0",
+  "torchvision",
+  "transformers==4.56.0",
+  "cyclopts",
+  "transformers_stream_generator",
+  "opencv-python-headless",
+  "pydantic",
+  "tensorboard",
+  "xxhash",
+  "imageio",
+  "timm",
+]
+
+[project.urls]
+Homepage = "https://github.com/InternLM/xtuner"
+Documentation = "https://xtuner.readthedocs.io/zh-cn/latest/"
+Repository = "https://github.com/InternLM/xtuner"
+
+[tool.hatch.version]
+path = "xtuner/version.py"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[project.optional-dependencies]
+rl = [
+  "ray[default]",
+  "httpx",
+  "fastapi",
+  "uvicorn",
+]
+video = [
+  "decord",
+]
 
 [tool.mypy]
 ignore_missing_imports = true
