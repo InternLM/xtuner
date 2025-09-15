@@ -67,7 +67,7 @@ class BaseTokenizeFnConfig(Protocol):
 class DataloaderConfig(BaseModel):
     model_config = ConfigDict(title="Base dataloader config for xtuner", extra="allow")
     collator: Annotated[
-        Literal["sft_llm_collator", "sft_vllm_collator", "fake_collator"], Parameter(help="collator func name")
+        Literal["sft_llm_collator", "intern_s1_vl_sft_collator", "qwen3_vl_sft_collator", "fake_collator"], Parameter(help="collator func name")
     ] = "sft_llm_collator"
     pack_level: Annotated[
         Literal["soft", "none", "__legacy", "hard"], Parameter(help="__legacy is only for debug")
@@ -84,12 +84,14 @@ class DataloaderConfig(BaseModel):
     pad_token_id: Annotated[int | None, Parameter(help="padding token id")] = None
 
     def build_collator(self):
-        from xtuner.v1.datasets import fake_collator, sft_llm_collator, sft_vllm_collator
+        from xtuner.v1.datasets import fake_collator, sft_llm_collator, intern_s1_vl_sft_collator, qwen3_vl_sft_collator
 
         if self.collator == "sft_llm_collator":
             return sft_llm_collator
-        elif self.collator == "sft_vllm_collator":
-            return sft_vllm_collator
+        elif self.collator == "intern_s1_vl_sft_collator":
+            return intern_s1_vl_sft_collator
+        elif self.collator == "qwen3_vl_sft_collator":
+            return qwen3_vl_sft_collator
         elif self.collator == "fake_collator":
             return fake_collator  # for RL
         else:

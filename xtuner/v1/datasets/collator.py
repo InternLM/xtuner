@@ -178,7 +178,7 @@ def intern_s1_vl_sft_collator(
     return ret
 
 
-def qwen3vl_sft_collator(
+def qwen3_vl_sft_collator(
         instances: list[list[InternS1DataItem]], pack_max_length: int, padding_token_idx: int
 ) -> list[ColateItem]:
     ret: list[ColateItem] = []
