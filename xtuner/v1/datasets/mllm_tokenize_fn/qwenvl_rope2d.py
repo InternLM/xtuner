@@ -2,10 +2,10 @@ from typing import  Optional,Tuple
 import torch
 
 def get_rope_index(
+    input_ids: torch.Tensor,
     spatial_merge_size: Optional[int] = 2,
-    input_ids: Optional[torch.LongTensor] = None,
-    image_grid_thw: Optional[torch.LongTensor] = None,
-    video_grid_thw: Optional[torch.LongTensor] = None,
+    image_grid_thw: Optional[torch.Tensor] = None,
+    video_grid_thw: Optional[torch.Tensor] = None,
     second_per_grid_ts: Optional[torch.Tensor] = None,
     attention_mask: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -83,7 +83,6 @@ def get_rope_index(
         attention_mask = attention_mask.to(total_input_ids.device)
         for i, input_ids in enumerate(total_input_ids):
             input_ids = input_ids[attention_mask[i] == 1]
-            image_nums, video_nums = 0, 0
             vision_start_indices = torch.argwhere(
                 input_ids == vision_start_token_id
             ).squeeze(1)
@@ -198,6 +197,7 @@ def get_rope_index(
             )[0]
             mrope_position_deltas = max_position_ids + 1 - attention_mask.shape[-1]
         else:
+            assert input_ids is not None, "input_ids and attention_mask can not be None at the same time."
             position_ids = (
                 torch.arange(input_ids.shape[1], device=input_ids.device)
                 .view(1, 1, -1)

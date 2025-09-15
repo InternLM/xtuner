@@ -33,6 +33,7 @@ class TestMLLMTokenizeFn(TestCase):
                 messages[0]['content'][0]['type'] = 'image'
                 messages[0]['content'][0]['path'] = 'tests/' + messages[0]['content'][0]['image_url']['url']
                 del messages[0]['content'][0]['image_url']
+                # 需要把 \n 去掉，因为 internvl chat_template 里面会加上 \n
                 messages[0]['content'][1]['text'] = messages[0]['content'][1]['text'].replace('<IMG_CONTEXT>\n', '')
                 for msg in messages:
                     if not isinstance(msg['content'], list):

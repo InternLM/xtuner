@@ -123,8 +123,8 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         position_ids: torch.Tensor
 
         position_ids, _ = get_rope_index(
-            self.image_processor.merge_size,
             torch.tensor(input_ids).unsqueeze(0),
+            self.image_processor.merge_size,
         )
 
         input_ids, labels, position_ids = self._truncated_data_item(input_ids, labels, position_ids)
@@ -200,14 +200,14 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             for merged_thw in grid_thw_merged
         ]
         messages = ChatMessages(messages=data_item["messages"])
-        replace_image_token(messages, self.chat_template, sum_media_grid_thw)
+        replace_image_token(messages, self.chat_template, grid_thw_merged)
         tokenized = messages.tokenize(self.tokenizer, self.chat_template)
         input_ids = tokenized["input_ids"]
         labels = tokenized["labels"]
 
         position_ids, _ = get_rope_index(
-            self.image_processor.merge_size,
             torch.tensor(input_ids).unsqueeze(0),
+            self.image_processor.merge_size,
             image_grid_thw=torch.stack(grid_thw, dim=0)
         )
 
