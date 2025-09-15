@@ -10,7 +10,8 @@ from pydantic import BaseModel, ConfigDict
 
 from transformers import PreTrainedTokenizer
 from xtuner.v1.data_proto.messages import ChatMessages
-from xtuner.v1.data_proto.templates import CHAT_TEMPLATE_MAP
+from xtuner.v1.data_proto.templates import CHAT_TEMPLATE_MAP, HybridChatTemplate
+from xtuner.v1.model import InternS1BaseConfig, InternVLBaseConfig
 from xtuner.v1.utils import get_logger
 
 from ..data_item import CacheItem, InternS1DataItem
@@ -58,7 +59,7 @@ def generate_random_int_from_dict(input_dict, min_num, max_num):
     return rng.integers(min_num, max_num + 1)
 
 
-def replace_video_token(messages, chat_template, num_image_token_list):
+def replace_video_token(messages: ChatMessages, chat_template: HybridChatTemplate, num_image_token_list: list[int]):
     current_image_idx = 0
     n_frames = len(num_image_token_list)
     for msg in messages.messages:
@@ -77,7 +78,7 @@ def replace_video_token(messages, chat_template, num_image_token_list):
                                 [f"Frame-{frame_idx + 1}: {IMAGE_TOKEN_ALIAS}" for frame_idx in range(n_frames)]
                             )
                             text = text.replace(IMAGE_TOKEN_ALIAS, special_tokens)
-                            image_tokens = f"{chat_template.image_start_token}{chat_template.video_context_token * num_image_token_list[current_image_idx]}{chat_template.image_end_token}"
+                            image_tokens = f"{chat_template.image_start_token}{chat_template.video_context_token * num_image_token_list[current_image_idx]}{chat_template.image_end_token}"  # type: ignore
                             text = text.replace(IMAGE_TOKEN_ALIAS, image_tokens)
                             current_image_idx += n_frames
                         c.text = text
@@ -105,8 +106,6 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         hash: str | None = None,
         only_prompt: bool = False,
     ):
-        from xtuner.v1.model import InternS1BaseConfig, InternVLBaseConfig
-
         assert isinstance(model_cfg, (InternS1BaseConfig, InternVLBaseConfig))
 
         self.tcs_loader = tcs_loader

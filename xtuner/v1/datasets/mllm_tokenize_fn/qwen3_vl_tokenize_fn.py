@@ -104,7 +104,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
                 position_ids = position_ids[..., : self.max_length]
         return input_ids, labels, position_ids
 
-    def process_image_unified(self, image_file, media_root: str = ""):
+    def process_image_unified(self, image_file: str, media_root: str = ""):
         processor = copy.deepcopy(self.image_processor)
         image = load_image(os.path.join(media_root, image_file))
         image = apply_exif_orientation(image)
@@ -199,7 +199,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             grid_thw = [grid_thw]
         grid_thw_merged = [merged_thw.prod() // self.merge_length for merged_thw in grid_thw_merged]  # type: ignore
         messages = ChatMessages(messages=data_item["messages"])
-        replace_image_token(messages, self.chat_template, grid_thw_merged)
+        replace_image_token(messages, self.chat_template, grid_thw_merged)  # type: ignore
         tokenized = messages.tokenize(self.tokenizer, self.chat_template)
         input_ids = tokenized["input_ids"]
         labels = tokenized["labels"]

@@ -1,11 +1,12 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import hashlib
 import inspect
-from typing import TYPE_CHECKING, Annotated
+from typing import Annotated
 
 from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict
 
+from transformers import PreTrainedTokenizer
 from xtuner.v1.data_proto.messages import ChatMessages
 from xtuner.v1.data_proto.templates import CHAT_TEMPLATE_MAP
 from xtuner.v1.datasets.data_item import CacheItem, DataItem
@@ -14,17 +15,13 @@ from xtuner.v1.utils import get_logger
 from ..utils import CachableTokenizeFunction, tokenizer_xxhash
 
 
-if TYPE_CHECKING:
-    from transformers import PreTrainedTokenizer
-
-
 logger = get_logger()
 
 
 class OpenaiTokenizeFunction(CachableTokenizeFunction[DataItem]):
     def __init__(
         self,
-        tokenizer: "PreTrainedTokenizer",
+        tokenizer: PreTrainedTokenizer,
         chat_template: str,
         tokenizer_hash: str | None = None,
         max_length: int | None = None,

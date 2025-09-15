@@ -7,7 +7,7 @@ from PIL import Image
 from pydantic import BaseModel, ConfigDict
 
 from xtuner.v1.data_proto.messages import ChatMessages
-from xtuner.v1.data_proto.templates import ChatTemplate
+from xtuner.v1.data_proto.templates import ChatTemplate, HybridChatTemplate
 from xtuner.v1.utils import get_logger
 
 from ..data_item import BaseMLLMDataItem, CacheItem
@@ -19,7 +19,7 @@ logger = get_logger()
 IMAGE_TOKEN_ALIAS = "XTUNER-ALIAS-ALIAS-XTUNER-2025"
 
 
-def collect_image_video_paths(messages):
+def collect_image_video_paths(messages: list[dict]):
     image_paths = []
     video_paths = []
     for msg in messages:
@@ -34,7 +34,7 @@ def collect_image_video_paths(messages):
     return image_paths, video_paths
 
 
-def replace_image_token(messages, chat_template, num_image_token_list):
+def replace_image_token(messages: ChatMessages, chat_template: HybridChatTemplate, num_image_token_list: list[int]):
     current_image_idx = 0
     for msg in messages.messages:
         if msg.role == "user":
@@ -47,7 +47,7 @@ def replace_image_token(messages, chat_template, num_image_token_list):
                         text = text.replace("<IMG_CONTEXT>", IMAGE_TOKEN_ALIAS)
                         image_cnt = text.count(IMAGE_TOKEN_ALIAS)
                         for _ in range(image_cnt):
-                            image_tokens = f"{chat_template.image_start_token}{chat_template.image_context_token * num_image_token_list[current_image_idx]}{chat_template.image_end_token}"
+                            image_tokens = f"{chat_template.image_start_token}{chat_template.image_context_token * num_image_token_list[current_image_idx]}{chat_template.image_end_token}"  # type: ignore
                             text = text.replace(IMAGE_TOKEN_ALIAS, image_tokens, 1)
                             current_image_idx += 1
                         c.text = text
@@ -57,12 +57,12 @@ def replace_image_token(messages, chat_template, num_image_token_list):
         )
 
 
-def load_image(image_path):
+def load_image(image_path: str):
     # Load the image using tcs_loader if available, otherwise use PIL
     return Image.open(image_path).convert("RGB")
 
 
-def get_image_path(image_path, media_root):
+def get_image_path(image_path: str, media_root: str):
     if image_path.startswith("s3://"):  # for ceph
         image_path = media_root + image_path
     else:  # for local image
