@@ -21,8 +21,8 @@ class EngineConfig(PydanticBaseModel):
     model_cfg: ModelConfigProto
 
     def build(self):
-        from xtuner.v1.engine.intern_s1_train_engine import InternS1TrainEngine
         from xtuner.v1.engine.train_engine import TrainEngine
+        from xtuner.v1.engine.vision_compose_train_engine import InternS1TrainEngine
 
         # TODO: (hha) Remove this hardcode. Use Composable Engine rather than InternS1BaseEngine
         if isinstance(self.model_cfg, InternS1BaseConfig):
