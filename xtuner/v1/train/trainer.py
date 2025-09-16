@@ -145,7 +145,7 @@ class TrainerConfig(BaseModel):
     profile_memory: bool = False
     intra_layer_micro_batch: int = 1
     seed: int = 42
-    dist_backend: str = "cpu:gloo,cuda:nccl"
+    dist_backend: str | None = None
     debug: bool = False
 
     @model_validator(mode="after")
