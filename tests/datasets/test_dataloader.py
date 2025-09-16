@@ -153,12 +153,10 @@ def test_consistant():
     [
         ("hard", 0, False, 1),
         ("hard", 0, True, 1),
-        ("hard", 0, True, 1),
         ("hard", 4, True, 1),
         ("hard", 4, True, 3),
         ("none", 0, False, 1),
         ("soft", 0, True, 1),
-        ("soft", 4, True, 1),
         ("soft", 4, True, 1),
         ("soft", 4, True, 3),
     ]
@@ -213,6 +211,10 @@ def test_dataloader_resume_single_process(tmp_path, pack_level, num_workers, gro
 
     dataloader_state = get_dataloader_state(dataloader1, consumed_sample)
     expected_data = []
+    for _ in range(AFTER_RESUME_ITER):
+        batch = next(dataloader_iter)
+        consumed_sample += len(batch)
+        expected_data.append(batch)
 
     new_dataloader1 = build_dataloader(
         dataloader_config=dataloader_config,
@@ -342,7 +344,7 @@ def _test_resume_spmd(
     all_data_list = list(chain(*zip(*all_data_list)))
     all_expected_data = list(chain(*zip(*all_expected_data)))
     # [
-    #    [[0 2 4 6 8], [10, 12, 14, 16]]
+    #    [[0 2 4 6 8], [10, 12, 14, 16]],
     #    [[1 3 5 7 9], [11, 13, 15, 17]]
     # ]
     #
