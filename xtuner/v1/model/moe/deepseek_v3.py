@@ -1,6 +1,7 @@
 import re
 from pathlib import Path
-from typing import Self
+
+from typing_extensions import Self
 
 from transformers.models.deepseek_v3 import DeepseekV3Config as HFDeepseekV3Config
 from xtuner.v1.model.moe.moe import BalancingLossConfig, MoEConfig, ZLossConfig

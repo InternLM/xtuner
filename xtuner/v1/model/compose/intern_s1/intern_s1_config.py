@@ -1,8 +1,9 @@
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, Optional, Self
+from typing import TYPE_CHECKING, Literal, Optional
 
 from mmengine import is_installed
 from pydantic import BaseModel, ConfigDict
+from typing_extensions import Self
 
 from xtuner.v1.float8 import Float8Config
 from xtuner.v1.model.dense.qwen3 import Qwen3Dense8BConfig

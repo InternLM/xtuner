@@ -1,18 +1,24 @@
-from typing import List, cast
+from pathlib import Path
+from typing import List, Protocol, cast, runtime_checkable
 
 import torch
 import torch.distributed as dist
+from pydantic import BaseModel
 from torch.distributed.device_mesh import DeviceMesh
+from typing_extensions import Self
 
-from xtuner.v1.engine.train_engine import TrainEngine
-
-# todo: 如何 import
+from transformers.configuration_utils import PretrainedConfig
+from xtuner.v1.config import FSDPConfig
+from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.float8_handler import Float8Handler
-from xtuner.v1.model.base import ModelItem
-from xtuner.v1.model.compose.intern_s1 import InternS1BaseConfig, InternS1ForConditionalGeneration
-from xtuner.v1.model.compose.internvl import InternVLBaseConfig, InternVLForConditionalGeneration
+from xtuner.v1.loss import BaseLossContext
+from xtuner.v1.model.base import BaseModel as XTunerBaseModel
+from xtuner.v1.model.base import ModelItem, ModelOutputs, TransformerConfig
+from xtuner.v1.model.moe.moe import MoEModelOutputs
 from xtuner.v1.module.router import NoAuxRouterConfig
 from xtuner.v1.utils import get_device, get_logger, get_torch_device_module
+
+from .train_engine import TrainEngine
 
 
 logger = get_logger()
@@ -20,23 +26,57 @@ DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
 
 
-class InternS1TrainEngine(TrainEngine):
-    model_cfg: InternS1BaseConfig | InternVLBaseConfig
-    model: InternS1ForConditionalGeneration | InternVLForConditionalGeneration
+class VisionComposeModelProtocol(Protocol):
+    vision_tower: XTunerBaseModel
+    multi_modal_projector: XTunerBaseModel
+    language_model: XTunerBaseModel
+
+    def set_hf(self, hf_path: str | Path): ...
+
+    def fully_shard(self, fsdp_cfg: FSDPConfig) -> Self: ...
+
+    def forward(
+        self,
+        seq_ctx: list[SequenceContext] | SequenceContext,
+        loss_ctx: list[BaseLossContext] | BaseLossContext | None,
+    ) -> ModelOutputs | MoEModelOutputs: ...
+
+    def __call__(
+        self,
+        seq_ctx: list[SequenceContext] | SequenceContext,
+        loss_ctx: list[BaseLossContext] | BaseLossContext | None,
+    ) -> ModelOutputs | MoEModelOutputs: ...
+
+
+@runtime_checkable
+class VisionComposeConfigProtocol(Protocol):
+    vision_config: BaseModel
+    projector_config: BaseModel
+    text_config: TransformerConfig
+
+    def build(self) -> VisionComposeModelProtocol: ...
+
+    def hf_config(self) -> PretrainedConfig | None: ...
+
+
+class VisionComposeTrainEngine(TrainEngine):
+    model_cfg: VisionComposeConfigProtocol  # type: ignore
+    model: VisionComposeModelProtocol  # type: ignore
     llm_float8_handler: Float8Handler | None
     vision_float8_handler: Float8Handler | None
     projector_float8_handler: Float8Handler | None
 
     def __init__(
         self,
+        model_cfg: VisionComposeConfigProtocol,
         *args,
         **kwargs,
     ) -> None:
-        super().__init__(*args, **kwargs)
+        super().__init__(model_cfg, *args, **kwargs)  # type: ignore
 
-    def build_model(self) -> InternS1ForConditionalGeneration | InternVLForConditionalGeneration:
+    def build_model(self) -> VisionComposeModelProtocol:  # type: ignore
         with torch.device("meta"):
-            model: InternS1ForConditionalGeneration | InternVLForConditionalGeneration = self.model_cfg.build()
+            model = self.model_cfg.build()
 
         self.llm_float8_handler = None
         self.vision_float8_handler = None
@@ -67,7 +107,7 @@ class InternS1TrainEngine(TrainEngine):
         model.vision_tower.fully_shard(self.fsdp_cfg, self.vision_float8_handler)
         model.multi_modal_projector.fully_shard(self.fsdp_cfg, self.projector_float8_handler)
         model = model.fully_shard(self.fsdp_cfg)
-        model.to_empty(device=model.device)
+        model.to_empty(device=model.device)  # type: ignore
 
         if dist.get_rank() == 0:
             logger.info(model)
@@ -143,6 +183,7 @@ class InternS1TrainEngine(TrainEngine):
 
             loss = llm_loss
             if "balancing_loss" in output:
+                output = cast(MoEModelOutputs, output)
                 loss = loss + output["balancing_loss"] / iters_per_step
                 step_balancing_loss = (
                     output["balancing_loss"]
@@ -150,10 +191,12 @@ class InternS1TrainEngine(TrainEngine):
                     else step_balancing_loss + output["balancing_loss"]
                 )
             if "z_loss" in output:
+                output = cast(MoEModelOutputs, output)
                 loss = loss + output["z_loss"] / iters_per_step
                 step_z_loss = output["z_loss"] if step_z_loss is None else step_z_loss + output["z_loss"]
 
             if moe_need_update_bias:
+                output = cast(MoEModelOutputs, output)
                 assert "tokens_per_expert_global" in output, "tokens_per_expert_global is required for bias update."
                 tokens_per_expert_global_for_bias += output["tokens_per_expert_global"]
 

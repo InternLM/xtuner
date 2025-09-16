@@ -1,8 +1,8 @@
 import re
 from pathlib import Path
-from typing import Self
 
 import torch
+from typing_extensions import Self
 
 from transformers.models.qwen3 import Qwen3Config as HFQwen3DenseConfig
 from xtuner.v1.model.base import TransformerConfig

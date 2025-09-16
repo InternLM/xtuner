@@ -1,6 +1,7 @@
 import re
 from pathlib import Path
-from typing import Self
+
+from typing_extensions import Self
 
 from transformers.models.qwen3_moe import Qwen3MoeConfig as HFQwen3MoeConfig
 from xtuner.v1.model.moe.moe import BalancingLossConfig, MoEConfig, ZLossConfig
