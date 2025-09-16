@@ -4,15 +4,9 @@ import torch
 from typing import Union, Optional
 from typing_extensions import override
 import numpy as np
-import collections.abc
 
-# TODO: 等 intern-s1 合入后全部换成 interns1 的实现
-try:
-    from transformers.models.internvl.modeling_internvl import InternVLVisionPatchEmbeddings, InternVLVisionEmbeddings
-    from transformers.modeling_outputs import BaseModelOutput
-except:
-    InternVLVisionRMSNorm = None
-    BaseModelOutput = None
+from transformers.models.internvl.modeling_internvl import InternVLVisionEmbeddings
+from transformers.modeling_outputs import BaseModelOutput
 
 try:
     from timm.layers import DropPath
