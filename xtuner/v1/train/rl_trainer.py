@@ -401,7 +401,7 @@ class RLTrainer:
                         "label": group[0]["reward_model"]["ground_truth"],
                         "reward": data["reward"],
                     }
-                    json.dump(item, f)
+                    json.dump(item, f, ensure_ascii=False)
                     f.write("\n")
 
     def _load_trajectories(self, save_path):
