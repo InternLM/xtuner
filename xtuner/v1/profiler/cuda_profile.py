@@ -97,13 +97,13 @@ class MemoryProfiler:
 
 
 @contextmanager
-def profilling_time(profile_dir: Path):
+def profiling_time(profile_dir: Path):
     with TimeProfiler(profile_dir=profile_dir):
         yield
 
 
 @contextmanager
-def profilling_memory(profile_dir: Path):
+def profiling_memory(profile_dir: Path):
     profiler = MemoryProfiler(profile_dir)
     yield
     try:

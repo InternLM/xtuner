@@ -35,7 +35,7 @@ from xtuner.v1.engine.vision_compose_train_engine import VisionComposeConfigProt
 from xtuner.v1.loss import CELossConfig
 from xtuner.v1.loss.ce_loss import CELossContextInputItem
 from xtuner.v1.model.base import ModelItem, TransformerConfig
-from xtuner.v1.profiler import profilling_memory, profilling_time
+from xtuner.v1.profiler import profiling_memory, profiling_time
 from xtuner.v1.utils import (
     XTUNER_DETERMINISTIC,
     ParallelConfigException,
@@ -196,8 +196,8 @@ class Trainer:
 
     config: TrainerConfig | None
     _META_PATH = ".xtuner"
-    _PROFILE_TIME_PATH = "profilling_time"
-    _PROFILE_MEMORY_PATH = "profilling_memory"
+    _PROFILE_TIME_PATH = "profiling_time"
+    _PROFILE_MEMORY_PATH = "profiling_memory"
     _EXP_TRACKING_PATH = "exp_tracking"
     _CHECKPOINT_DIR = "checkpoints"
 
@@ -452,7 +452,7 @@ class Trainer:
                     )
                 )
 
-            with self._maybe_profilling():
+            with self._maybe_profiling():
                 loss_log, other_log = self._engine.train_step(engine_input)
 
             grad_norm = self._engine.clip_grad_norm()
@@ -965,17 +965,17 @@ class Trainer:
         return meta
 
     @contextmanager
-    def _maybe_profilling(self):
+    def _maybe_profiling(self):
         """Check if profiling is enabled and perform profiling if necessary."""
         if self._profile_step is not None and self._cur_step == self._profile_step:
             with contextlib.ExitStack() as stack:
                 if self._profile_time:
                     time_dir = self.work_dir / self._PROFILE_TIME_PATH / f"step-{self._cur_step}"
-                    stack.enter_context(profilling_time(time_dir))
+                    stack.enter_context(profiling_time(time_dir))
 
                 if self._profile_memory:
                     memory_dir = self.work_dir / self._PROFILE_MEMORY_PATH / f"step-{self._cur_step}"
-                    stack.enter_context(profilling_memory(memory_dir))
+                    stack.enter_context(profiling_memory(memory_dir))
                 yield
         else:
             yield

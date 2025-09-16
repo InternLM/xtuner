@@ -38,7 +38,7 @@ class MemoryProfiler:
 
 
 @contextmanager
-def profilling_memory(profile_dir: Path):
+def profiling_memory(profile_dir: Path):
     profiler = MemoryProfiler(profile_dir)
     yield
     try:
@@ -48,7 +48,7 @@ def profilling_memory(profile_dir: Path):
 
 
 @contextmanager
-def profilling_time(profile_dir: Path):
+def profiling_time(profile_dir: Path):
     # experimental_config = torch_npu.profiler._ExperimentalConfig(
     #     export_type=[
     #         torch_npu.profiler.ExportType.Text,
