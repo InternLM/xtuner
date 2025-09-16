@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from shutil import rmtree
-from typing import Annotated, Literal, Sized, cast
+from typing import Annotated, Literal, Sized, Union, cast
 
 import torch
 import torch.distributed as dist
@@ -23,8 +23,7 @@ from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, LinearLR, SequentialLR
 from typing_extensions import NotRequired, Self, TypedDict
 
-from transformers import AutoTokenizer
-from transformers.tokenization_utils import PreTrainedTokenizer
+from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1._writer import get_writer
 from xtuner.v1.config import FSDPConfig, LRConfig, OptimConfig
 from xtuner.v1.data_proto.sequence_context import SequenceContext
@@ -260,8 +259,9 @@ class Trainer:
         self._profile_memory = profile_memory
         self._load_from = Path(load_from) if isinstance(load_from, str) else load_from
         self._load_from_hf = load_from is not None and is_hf_model_path(load_from)
+        self._can_save_hf = model_cfg.hf_config is not None or self._load_from_hf
 
-        if not self._load_from_hf:
+        if not self._can_save_hf:
             assert hf_interval is None and hf_max_keep is None, (
                 "`hf_interval` and `hf_max_keep` should be None when `load_from` is not a Huggingface model path, "
             )
@@ -356,7 +356,7 @@ class Trainer:
         if debug:
             self._register_debug_hook()
 
-        if self._load_from is not None and is_hf_model_path(self._load_from) and self._hf_interval is None:
+        if self._can_save_hf and self._hf_interval is None:
             self._hf_interval = self.total_step
 
         if self._resume_cfg.resume_from is not None:
@@ -651,7 +651,7 @@ class Trainer:
         self,
         dataloader_config: DataloaderConfig,
         dataset_config: DatasetConfigList,
-        tokenizer: AutoTokenizer,
+        tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
         dp_mesh: DeviceMesh,
         global_batch_size: int,
         micro_batch_size: int,
@@ -1035,15 +1035,13 @@ class Trainer:
         if self._hf_interval is None:
             return
 
-        assert self._load_from_hf, (
-            "Only support saving to Huggingface format when loading from Huggingface! "
-            "You meet this error means `load_from` of trainer is not a Huggingface model path."
-        )
+        assert self._can_save_hf, "Model does not support saving in Huggingface format."
 
         if self.cur_step % self._hf_interval != 0 and self.cur_step != self.total_step:
             return
 
         save_hf_path = self.exp_dir / f"hf-{self.cur_step}"
+
         self.meta.latest_exp.hf_checkpoint_list.append(str(save_hf_path))
 
         if self._hf_max_keep is not None and len(self.meta.latest_exp.hf_checkpoint_list) > self._hf_max_keep:
@@ -1054,6 +1052,9 @@ class Trainer:
                     rmtree(hf_dir)
 
         self._engine.save_hf(str(save_hf_path))
+        if isinstance(self.tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast)):
+            self.tokenizer.save_pretrained(str(save_hf_path))
+
         meta_path = self.work_dir / self._META_PATH
 
         if self.rank == 0:
@@ -1104,7 +1105,7 @@ class Trainer:
 
     def _resolve_config_conflicts(
         self,
-        tokenizer: PreTrainedTokenizer,
+        tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
         model_cfg: TransformerConfig | InternS1BaseConfig | InternVLBaseConfig,
         dataloader_cfg: DataloaderConfig,
     ):
