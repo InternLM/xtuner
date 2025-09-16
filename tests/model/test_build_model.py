@@ -24,6 +24,8 @@ class TestBuildModel(TestCase):
             vocab_size=151936,
             max_position_embeddings=4096,
             pad_token_id=0,
+            bos_token_id=1,
+            eos_token_id=2,
             num_hidden_layers=48,
             hidden_size=2048,
             intermediate_size=6144,
