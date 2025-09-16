@@ -4,12 +4,7 @@ import torch
 
 from functools import partial
 
-# TODO: 等 intern-s1 合入后全部换成 interns1 的实现
-try:
-    from transformers.models.internvl.modeling_internvl import ACT2FN
-except:
-    ACT2FN = None
-
+from xtuner.v1.ops.act_fn import get_act_fn
 from xtuner.v1.utils import get_device, get_torch_device_module, init_params
 from xtuner.v1.model import BaseModel
 from xtuner.v1.config import FSDPConfig
@@ -36,7 +31,7 @@ class InternS1MultiModalProjector(BaseModel):
         self.linear_1 = nn.Linear(
             config.vision_config.hidden_size * int(1 / config.downsample_ratio) ** 2, config.text_config.hidden_size
         )
-        self.act = ACT2FN[config.projector_hidden_act]
+        self.act = get_act_fn(config.projector_hidden_act)
         self.linear_2 = nn.Linear(config.text_config.hidden_size, config.text_config.hidden_size)
 
         self._hf_prefix = "model.multi_modal_projector."

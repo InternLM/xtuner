@@ -3,11 +3,11 @@ from typing import Literal
 import torch
 import torch.nn as nn
 
-from transformers.activations import ACT2FN
 from xtuner.v1.config import GenerateConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.config import Float8Config
 from xtuner.v1.module import MHAConfig, MLAConfig, RMSNorm
+from xtuner.v1.ops.act_fn import get_act_fn
 from xtuner.v1.utils import ForwardState
 
 from ..linear.linear import _Linear
@@ -26,7 +26,7 @@ class DenseMLP(nn.Module):
         self.gate_proj = _Linear(hidden_size, intermediate_size, bias=bias)
         self.up_proj = _Linear(hidden_size, intermediate_size, bias=bias)
         self.down_proj = _Linear(intermediate_size, hidden_size, bias=bias)
-        self.act_fn = ACT2FN[hidden_act]
+        self.act_fn = get_act_fn(hidden_act)
 
     def forward(self, x):
         down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
