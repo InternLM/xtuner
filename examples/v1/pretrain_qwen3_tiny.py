@@ -25,7 +25,7 @@ dataset_config = [
             sample_ratio=10000.0,
         ),
         "tokenize_fn": PretrainTokenizeFunctionConfig(
-            add_special_tokens=True,
+            add_bos_token=False,
             add_eos_token=True,
         ),
     },
@@ -38,13 +38,14 @@ dataset_config = [
             sample_ratio=20000.0,
         ),
         "tokenize_fn": PretrainTokenizeFunctionConfig(
-            add_special_tokens=False,
+            add_bos_token=False,
             add_eos_token=True,
         ),
     },
 ]
 dataloader_config = DataloaderConfig(
-    pack_max_length=pack_max_length
+    pack_max_length=pack_max_length,
+    num_workers=4,
 )
 
 # optimizer and lr config

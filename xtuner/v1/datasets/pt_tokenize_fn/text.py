@@ -17,25 +17,27 @@ class PretrainTokenizeFunction(CachableTokenizeFunction[DataItem]):
         self,
         tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
         add_eos_token: bool = True,
-        add_special_tokens: bool = False,
+        add_bos_token: bool = False,
         tokenizer_hash: str | None = None,
         hash: str | None = None,
     ):
         self.tokenizer = tokenizer
         self.add_eos_token = add_eos_token
-        self.add_special_tokens = add_special_tokens
+        self.add_bos_token = add_bos_token
         self._tokenizer_hash = tokenizer_hash
         self._hash = hash
 
     def __call__(self, item: dict, **kwargs) -> DataItem | CacheItem:
         text = item["content"]
 
-        # if self.add_bos_token:
-        #     text = self.tokenizer.bos_token + text
+        if self.add_bos_token:
+            assert self.tokenizer.bos_token is not None, "tokenizer has no bos_token"
+            text = self.tokenizer.bos_token + text
         if self.add_eos_token:
+            assert self.tokenizer.eos_token is not None, "tokenizer has no eos_token"
             text = text + self.tokenizer.eos_token
 
-        input_ids = self.tokenizer.encode(text, add_special_tokens=self.add_special_tokens)
+        input_ids = self.tokenizer.encode(text, add_special_tokens=False)
         num_tokens = len(input_ids)
         labels = copy.deepcopy(input_ids)
         labels[0] = -100
@@ -54,7 +56,7 @@ class PretrainTokenizeFunction(CachableTokenizeFunction[DataItem]):
                 + hashlib.sha256(inspect.getsource(self.__class__.__init__).encode()).hexdigest()[:16]
             )
 
-            self._hash = f"{_tokenizer_hash}_{_source_hash}_{self.add_special_tokens}_{self.add_eos_token}"
+            self._hash = f"{_tokenizer_hash}_{_source_hash}_{self.add_bos_token}_{self.add_eos_token}"
         else:
             assert isinstance(self._hash, str), (
                 "hash is not a valid string, it means `PretrainTokenizeFunction._hash` is modified by user."
@@ -65,7 +67,7 @@ class PretrainTokenizeFunction(CachableTokenizeFunction[DataItem]):
 
 class PretrainTokenizeFunctionConfig(BaseModel):
     add_eos_token: Annotated[bool, Parameter(group="tokenize_fn")] = True
-    add_special_tokens: Annotated[bool, Parameter(group="tokenize_fn")] = False
+    add_bos_token: Annotated[bool, Parameter(group="tokenize_fn")] = False
     hash: Annotated[str | None, Parameter(group="tokenize_fn")] = None
 
     def build(
@@ -78,7 +80,7 @@ class PretrainTokenizeFunctionConfig(BaseModel):
         return PretrainTokenizeFunction(
             tokenizer=tokenizer,
             add_eos_token=self.add_eos_token,
-            add_special_tokens=self.add_special_tokens,
+            add_bos_token=self.add_bos_token,
             tokenizer_hash=tokenizer_hash,
             hash=self.hash,
         )
