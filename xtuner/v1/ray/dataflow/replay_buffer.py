@@ -13,6 +13,7 @@ from ray import ObjectRef
 from typing_extensions import Annotated
 
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
+from transformers import AutoTokenizer
 from xtuner.v1.datasets import build_dataloader, build_datasets
 from xtuner.v1.datasets.config import DataloaderConfig
 from xtuner.v1.datasets.data_item import RLTextDataItem
@@ -65,7 +66,7 @@ class ReplayBufferConfig(BaseModel):
     ]
 
     tokenizer: Annotated[
-        Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+        Union[PreTrainedTokenizer, PreTrainedTokenizerFast, str],
         Parameter(help="The tokenizer for processing text data, e.g., for partial rollouts."),
     ]
     postprocessor_func: Annotated[
@@ -114,7 +115,7 @@ class Sampler:
         self.train_dataset = dataset
         self.train_dataloader = dataloader
         self.train_dataloader_iter = iter(self.train_dataloader)
-        self.tokenizer = tokenizer
+        self.tokenizer = tokenizer if isinstance(tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast)) else AutoTokenizer.from_pretrained(tokenizer, trust_remote_code=True)
         self.storage = storage
 
     def sample_from_datasets(self, env: str, repeat_prompt_k: int) -> List[RLTextDataItem]:
