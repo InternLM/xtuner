@@ -138,6 +138,9 @@ class BaseModel(nn.Module):
 
         self._hf_path: Path | None = None
 
+    def set_hf(self, hf_path: str | Path):
+        self._hf_path = Path(hf_path)
+
     def from_hf(self, hf_path: str | Path, strict: bool = True) -> tuple:
         self._hf_path = Path(hf_path)
 
