@@ -326,11 +326,27 @@ class MoE(BaseModel):
                     hidden_states_list = list(cat_hidden_states.chunk(len(seq_ctx_list), dim=1))
                     moe_forawrd = True
 
-                layer_results = decoder_layer(
-                    *hidden_states_list,
-                    position_embeddings=position_embeddings_list,
-                    seq_ctx=seq_ctx_list,
-                )
+                if int(os.getenv("XTUNER_ACTIVATION_OFFLOAD", "0")) == 1:
+                    offload_stream = decoder_layer._get_fsdp_state()._comm_ctx.all_gather_stream
+                    with async_save_on_cpu(
+                        h2d_stream=offload_stream,
+                        d2h_stream=offload_stream,
+                        block_idx=int(idx),
+                        depth=len(self.layers),
+                        custom_check_fn=lambda x: x.data_ptr() in [hs.data_ptr() for hs in hidden_states_list],
+                    ):
+                        layer_results = decoder_layer(
+                            *hidden_states_list,
+                            position_embeddings=position_embeddings_list,
+                            seq_ctx=seq_ctx_list,
+                        )
+                else:
+                    layer_results = decoder_layer(
+                        *hidden_states_list,
+                        position_embeddings=position_embeddings_list,
+                        seq_ctx=seq_ctx_list,
+                    )
+
                 hidden_states = layer_results[: len(hidden_states_list)]
                 router_logits = layer_results[len(hidden_states_list) :]
 

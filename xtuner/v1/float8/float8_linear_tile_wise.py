@@ -17,7 +17,7 @@ from xtuner.v1.float8.triton_kernels import per_tile_quant, trans_per_block_quan
 ADAPTIVEGEMM_INSTALLED = False
 
 try:
-    from adaptive_gemm import gemm_fp8_fp8_bf16_nt
+    from deep_gemm import gemm_fp8_fp8_bf16_nt
 
     ADAPTIVEGEMM_INSTALLED = True
 except ImportError:

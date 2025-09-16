@@ -224,9 +224,9 @@ def main():
         scaling_granularity_grouped_gemm=ScalingGranularity.TILEWISE,
     )
     moe_cfgs = [
-        # (Qwen3MoE30BA3Config(balancing_loss_cfg=BalancingLossConfig()), "ep1"),
+        (Qwen3MoE30BA3Config(balancing_loss_cfg=BalancingLossConfig()), "ep1"),
         # (Qwen3MoE30BA3Config(dispatcher="deepep", ep_size=8, num_hidden_layers=16), "ep8"),
-        (DeepSeekV3Config(ep_size=8, dispatcher="deepep", num_hidden_layers=3, n_routed_experts=32, first_k_dense_replace=1), "ep8"),
+        # (DeepSeekV3Config(ep_size=8, dispatcher="deepep", num_hidden_layers=3, n_routed_experts=32, first_k_dense_replace=1, float8_cfg=float8_cfg), "ep8"),
         # (Qwen3MoE30BA3Config(balancing_loss_cfg=BalancingLossConfig(), float8_cfg=float8_cfg), "ep1"),
     ]
     for moe_cfg, name in moe_cfgs:
@@ -241,18 +241,19 @@ def main():
         dataset_config = [
             {
                 "dataset": DatasetConfig(name="alpaca", anno_path=ALPACA_PATH, sample_ratio=1.0),
-                "tokenize_fn": OpenaiTokenizeFunctionConfig(max_length=512, chat_template="qwen3"),
+                "tokenize_fn": OpenaiTokenizeFunctionConfig(max_length=16384, chat_template="qwen3"),
                 # "tokenize_fn": FTDPTokenizeFnConfig(max_length=16386),
             },
         ]
 
         dataloader_config = DataloaderConfig(
-            pack_max_length=512
+            pack_max_length=16384
         )
         work_dir = f"{args.work_dir}-{name}"
         loss_cfg = CELossConfig(mode="liger", chunk_size=1024, ignore_idx=-100)
         # loss_cfg = CELossConfig(mode="liger", chunk_size=1024, ignore_idx=-100)
         trainer = Trainer(
+            load_from=QWEN3_MOE_PATH,
             model_cfg=moe_cfg,
             optim_cfg=optim_cfg,
             fsdp_cfg=fsdp_cfg,
@@ -261,13 +262,13 @@ def main():
             loss_cfg=loss_cfg,
             lr_cfg=lr_cfg,
             tokenizer_path=QWEN3_MOE_PATH,
-            global_batch_size=16,
+            global_batch_size=8,
             total_epoch=1,
             work_dir=work_dir,
             seed=0,
             profile_step=10,
             strict_load=False,
-            intra_layer_micro_batch=2,
+            # intra_layer_micro_batch=2,
         )
         trainer.fit()
         if dist.get_rank() == 0:

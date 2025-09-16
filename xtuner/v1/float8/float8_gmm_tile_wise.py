@@ -26,7 +26,7 @@ from xtuner.v1.float8.triton_kernels import (
 ADAPTIVEGEMM_INSTALLED = False
 
 try:
-    from adaptive_gemm import (
+    from deep_gemm import (
         k_grouped_gemm_dw_fp8_fp8_bf16_tn_contiguous,
         m_grouped_varlen_gemm_fp8_fp8_bf16_nt_contiguous,
     )

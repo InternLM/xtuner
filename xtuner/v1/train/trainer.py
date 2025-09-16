@@ -141,7 +141,7 @@ class TrainerConfig(BaseModel):
     hf_interval: int | None = None
     hf_max_keep: int | None = None
     exp_tracker: Literal["tensorboard", "jsonl"] = "jsonl"
-    profile_step: int | None = None
+    profile_step: list | int | None = None
     profile_time: bool = True
     profile_memory: bool = False
     intra_layer_micro_batch: int = 1
@@ -235,7 +235,7 @@ class Trainer:
         hf_interval: int | None = None,
         hf_max_keep: int | None = None,
         exp_tracker: Literal["tensorboard", "jsonl"] = "jsonl",
-        profile_step: int | None = None,
+        profile_step: list | None = None,
         profile_time: bool = True,
         profile_memory: bool = False,
         intra_layer_micro_batch: int = 1,
@@ -256,6 +256,8 @@ class Trainer:
 
         self._micro_batch_size: int | None = None
 
+        if type(profile_step) is int:
+            profile_step = [profile_step]
         self._profile_step = profile_step
         self._profile_time = profile_time
         self._profile_memory = profile_memory
@@ -295,6 +297,13 @@ class Trainer:
         self._consumed_samples = 0
 
         self._init_dist(backend)
+
+        if os.getenv("XTUNER_ENABLE_CUSTOM_ALLGATHER"):
+            print("enable custom allgather")
+            import ib_wrapper
+            group = dist.new_group(list(range(dist.get_world_size())))
+            buffer = ib_wrapper.Buffer(group, 0, 128, low_latency_mode=1, num_qps_per_rank=2, explicitly_destroy=True)
+
         self._set_deterministic()
         self._set_random_seed(seed)
         self._setup_env()
@@ -970,7 +979,7 @@ class Trainer:
     @contextmanager
     def _maybe_profilling(self):
         """Check if profiling is enabled and perform profiling if necessary."""
-        if self._profile_step is not None and self._cur_step == self._profile_step:
+        if self._profile_step is not None and self._cur_step in self._profile_step:
             with contextlib.ExitStack() as stack:
                 if self._profile_time:
                     time_dir = self.exp_dir / self._PROFILE_TIME_PATH / f"step-{self._cur_step}"
