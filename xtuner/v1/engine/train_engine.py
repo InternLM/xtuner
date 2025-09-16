@@ -271,16 +271,23 @@ class TrainEngine:
             step_llm_loss += llm_loss.detach().clone()
 
             loss = llm_loss
+
             if "balancing_loss" in output:
-                loss = loss + output["balancing_loss"] / iters_per_step
-                step_balancing_loss = (
-                    output["balancing_loss"]
-                    if step_balancing_loss is None
-                    else step_balancing_loss + output["balancing_loss"]
-                )
+                balancing_loss = output["balancing_loss"] / iters_per_step
+                loss = loss + balancing_loss
+                if step_balancing_loss is None:
+                    step_balancing_loss = balancing_loss
+                else:
+                    step_balancing_loss += balancing_loss
+
             if "z_loss" in output:
-                loss = loss + output["z_loss"] / iters_per_step
-                step_z_loss = output["z_loss"] if step_z_loss is None else step_z_loss + output["z_loss"]
+                z_loss = output["z_loss"] / iters_per_step
+                loss = loss + z_loss
+
+                if step_z_loss is None:
+                    step_z_loss = z_loss
+                else:
+                    step_z_loss += z_loss
 
             if moe_need_update_bias:
                 assert "tokens_per_expert_global" in output, "tokens_per_expert_global is required for bias update."
