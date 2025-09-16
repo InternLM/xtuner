@@ -9,7 +9,6 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 from torch.nn import functional as F
 
-from transformers.activations import ACT2FN
 from xtuner.v1.config.generate import GenerateConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8 import Float8Config
@@ -24,6 +23,7 @@ from xtuner.v1.module.dispatcher import (
 )
 from xtuner.v1.module.grouped_linear.moe_group_linear import build_grouped_linear
 from xtuner.v1.module.rope import RopeScalingConfig
+from xtuner.v1.ops.act_fn import get_act_fn
 from xtuner.v1.utils import ForwardState
 from xtuner.v1.utils.compile import maybe_compile
 
@@ -45,9 +45,7 @@ class MoEActFnConfig(BaseModel):
     clip_limit: float | None = None
 
     def build(self) -> MoEActFnProtocol:
-        from xtuner.v1.ops.moe_act_fn import get_moe_act_fn
-
-        act_fn = get_moe_act_fn(self.act_type)
+        act_fn = get_act_fn(self.act_type)
 
         if self.act_type == "clipped_swiglu":
             act_fn = partial(act_fn, alpha=self.clip_alpha, limit=self.clip_limit)
@@ -71,7 +69,7 @@ class MoEMLP(nn.Module):
         self.gate_proj = build_linear(self.hidden_size, self.intermediate_size, bias=mlp_bias, float8_cfg=float8_cfg)
         self.up_proj = build_linear(self.hidden_size, self.intermediate_size, bias=mlp_bias, float8_cfg=float8_cfg)
         self.down_proj = build_linear(self.intermediate_size, self.hidden_size, bias=mlp_bias, float8_cfg=float8_cfg)
-        self.act_fn = ACT2FN[hidden_act]
+        self.act_fn = get_act_fn(hidden_act)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))

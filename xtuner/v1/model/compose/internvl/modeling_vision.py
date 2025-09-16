@@ -1,15 +1,16 @@
 from torch import nn
 import numpy as np
-try:
-    from transformers.models.internvl.modeling_internvl import InternVLVisionMLP
-except:
-    InternVLVisionMLP = None
+
 
 from .internvl_config import InternVLVisionConfig
-from ..intern_s1.modeling_vision import InternS1VisionAttention, InternS1VisionLayer, InternS1VisionEncoder, InternS1VisionModel
+from ..intern_s1.modeling_vision import InternS1VisionAttention, InternS1VisionLayer, InternS1VisionEncoder, InternS1VisionModel,InternS1VisionMLP
 
 
 class InternVLVisionAttention(InternS1VisionAttention):
+    pass
+
+
+class InternVLVisionMLP(InternS1VisionMLP):
     pass
 
 

@@ -1,18 +1,12 @@
 from functools import partial
 from torch import nn
 import torch
-from typing import cast, Union, Optional
+from typing import Union, Optional
 from typing_extensions import override
 import numpy as np
 
-# TODO: 等 intern-s1 合入后全部换成 interns1 的实现
-try:
-    from transformers.models.internvl.modeling_internvl import InternVLVisionRMSNorm, \
-        InternVLVisionEmbeddings, InternVLVisionMLP, NORM2FN
-    from transformers.modeling_outputs import BaseModelOutput
-except:
-    InternVLVisionRMSNorm = None
-    BaseModelOutput = None
+from transformers.models.internvl.modeling_internvl import InternVLVisionEmbeddings
+from transformers.modeling_outputs import BaseModelOutput
 
 try:
     from timm.layers import DropPath
@@ -21,11 +15,8 @@ try:
 except:
     has_timm = False
 from tqdm import tqdm
-from xtuner.v1.ops import flash_attn_varlen_func
-from xtuner.v1.ops.attn_imp import flex_attention as torch_flex_attention
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_device, get_torch_device_module, init_params
 from xtuner.v1.model import BaseModel
-from xtuner.v1.module import RMSNorm
 from xtuner.v1.config import FSDPConfig
 from .intern_s1_config import InternS1VisionConfig
 from xtuner.v1.float8.float8_handler import Float8Handler
@@ -37,9 +28,12 @@ from torch.distributed.fsdp import (
     MixedPrecisionPolicy,
     fully_shard,
 )
+from xtuner.v1.ops.attn_imp import attn_impl_mapping
 from xtuner.v1.model.utils.checkpointing import checkpoint_wrapper
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl
-
+from xtuner.v1.module import RMSNorm
+from xtuner.v1.ops.others import Dropout
+from xtuner.v1.ops.act_fn import get_act_fn
 DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
 
@@ -51,6 +45,9 @@ def init_world_mesh():
     # TODO: Support hsdp_sharding_size
     fsdp_mesh = init_device_mesh(device, (world_size,))
     return fsdp_mesh
+
+
+NORM2FN = {"layer_norm": nn.LayerNorm, "rms_norm": RMSNorm}
 
 
 class InternS1VisionAttention(nn.Module):
@@ -74,12 +71,12 @@ class InternS1VisionAttention(nn.Module):
         self.k_proj = nn.Linear(self.embed_dim, self.num_heads * self.head_dim, bias=config.attention_bias)
         self.v_proj = nn.Linear(self.embed_dim, self.num_heads * self.head_dim, bias=config.attention_bias)
         self.projection_layer = nn.Linear(self.embed_dim, self.embed_dim)
-        self.projection_dropout = nn.Dropout(proj_dropout) if proj_dropout > 0 else nn.Identity()
+        self.projection_dropout = Dropout(proj_dropout) if proj_dropout > 0 else nn.Identity()
 
         self.q_norm = RMSNorm(self.embed_dim) if qk_norm else nn.Identity()
         self.k_norm = RMSNorm(self.embed_dim) if qk_norm else nn.Identity()
 
-        self.attn_impl = config.attn_impl
+        self.attn_impl_func = attn_impl_mapping[config.attn_impl]
 
     def forward(
             self,
@@ -100,41 +97,39 @@ class InternS1VisionAttention(nn.Module):
         cu_seq_lens = torch.arange(0, (batch_size + 1) * seq_len, step=seq_len,
                                    dtype=torch.int32,
                                    device=hidden_states.device)
-        attn_output: torch.Tensor
-        # TODO: Unify attn impl interface
-        if self.attn_impl == 'flash_attention':
-            attn_output = cast(
-                torch.Tensor,
-                flash_attn_varlen_func(
-                    query_states,
-                    key_states,
-                    value_states,
-                    cu_seqlens_q=cu_seq_lens,
-                    cu_seqlens_k=cu_seq_lens,
-                    max_seqlen_q=seq_len,
-                    max_seqlen_k=seq_len,
-                    dropout_p=0.0 if not self.training else self.attention_dropout,
-                    causal=False,
-                    deterministic=XTUNER_DETERMINISTIC,
-                ),
-            )
-        elif self.attn_impl == 'flex_attention':
-            query_states = query_states[None].transpose(1, 2)
-            key_states = key_states[None].transpose(1, 2)
-            value_states = value_states[None].transpose(1, 2)
-            attn_output = torch_flex_attention(query_states,
-                                               key_states,
-                                               value_states,
-                                               cu_seq_lens,
-                                               softmax_scale=self.scale,
-                                               causal=False)
-        else:
-            raise NotImplementedError
 
+        attn_output: torch.Tensor = self.attn_impl_func(  # type: ignore
+            query_states[None].transpose(1, 2),  # [b, n_head, seq, head_dim]
+            key_states[None].transpose(1, 2),
+            value_states[None].transpose(1, 2),
+            cu_seqlens_q=cu_seq_lens,
+            cu_seqlens_k=cu_seq_lens,
+            max_seqlen_q=seq_len,
+            max_seqlen_k=seq_len,
+            dropout_p=0.0 if not self.training else self.attention_dropout,
+            softmax_scale=self.scale,
+            causal=False,
+            deterministic=XTUNER_DETERMINISTIC
+        )
         attn_output = attn_output.reshape(batch_size, seq_len, self.embed_dim)
         output = self.projection_layer(attn_output)
         output = self.projection_dropout(output)
         return output
+
+
+class InternS1VisionMLP(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.activation_fn = get_act_fn(config.hidden_act)
+        self.fc1 = nn.Linear(config.hidden_size, config.intermediate_size)
+        self.fc2 = nn.Linear(config.intermediate_size, config.hidden_size)
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        hidden_states = self.fc1(hidden_states)
+        hidden_states = self.activation_fn(hidden_states)
+        hidden_states = self.fc2(hidden_states)
+        return hidden_states
 
 
 class InternS1VisionLayer(nn.Module):
@@ -145,7 +140,7 @@ class InternS1VisionLayer(nn.Module):
         self.config = config
         self.seq_len_dim = 1
         self.attention = InternS1VisionAttention(config)
-        self.mlp = InternVLVisionMLP(config)
+        self.mlp = InternS1VisionMLP(config)
 
         self.layernorm_before = NORM2FN[config.norm_type](config.hidden_size, eps=config.layer_norm_eps)
         self.layernorm_after = NORM2FN[config.norm_type](config.hidden_size, eps=config.layer_norm_eps)
@@ -153,9 +148,10 @@ class InternS1VisionLayer(nn.Module):
         init_values = config.layer_scale_init_value
         self.lambda_1 = nn.Parameter(init_values * torch.ones(config.hidden_size), requires_grad=True)
         self.lambda_2 = nn.Parameter(init_values * torch.ones(config.hidden_size), requires_grad=True)
-        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+        self.dropout = Dropout(config.hidden_dropout_prob)
 
-        assert has_timm, 'timm is not installed, please install it to use DropPath'
+        if drop_path_rate > 0.0:
+            assert has_timm, 'timm is not installed, please install it to use DropPath'
         self.drop_path1 = DropPath(drop_path_rate) if drop_path_rate > 0. else nn.Identity()
         self.drop_path2 = DropPath(drop_path_rate) if drop_path_rate > 0. else nn.Identity()
 
@@ -170,7 +166,7 @@ class InternS1VisionLayer(nn.Module):
                     init_params(module.bias, torch.nn.init.zeros_)
                     initialized_params.add(f"{name}.bias")
 
-            elif isinstance(module, (nn.LayerNorm, InternVLVisionRMSNorm)):
+            elif isinstance(module, (nn.LayerNorm, RMSNorm)):
                 init_params(module.weight, torch.nn.init.ones_)
                 init_params(module.bias, torch.nn.init.zeros_)
                 initialized_params.add(f"{name}.weight")
@@ -246,6 +242,12 @@ class InternS1VisionEncoder(nn.Module):
         )
 
 
+class InternS1VisionEmbeddings(InternVLVisionEmbeddings):
+    def __init__(self, config: InternS1VisionConfig) -> None:
+        super().__init__(config)
+        self.dropout = Dropout(config.hidden_dropout_prob)
+
+
 class InternS1VisionModel(BaseModel):
     config: InternS1VisionConfig
 
@@ -253,7 +255,7 @@ class InternS1VisionModel(BaseModel):
         super().__init__()
         self.config = config
 
-        self.embeddings = InternVLVisionEmbeddings(config)
+        self.embeddings = InternS1VisionEmbeddings(config)
         self.encoder = InternS1VisionEncoder(config)
 
         self.layernorm = (
@@ -288,11 +290,12 @@ class InternS1VisionModel(BaseModel):
                     init_params(module.bias, torch.nn.init.zeros_)
                     initialized_params.add(f"embeddings.{name}.bias")
 
-            elif isinstance(module, (nn.LayerNorm, InternVLVisionRMSNorm)):
+            elif isinstance(module, (nn.LayerNorm, RMSNorm)):
                 init_params(module.weight, torch.nn.init.ones_)
-                init_params(module.bias, torch.nn.init.zeros_)
                 initialized_params.add(f"embeddings.{name}.weight")
-                initialized_params.add(f"embeddings.{name}.bias")
+                if module.bias is not None:
+                    init_params(module.bias, torch.nn.init.zeros_) # type: ignore
+                    initialized_params.add(f"embeddings.{name}.bias")
 
         expected_param_name = {self._clean_param_name(name) for name, _ in self.named_parameters()}
         if (missing := expected_param_name - initialized_params):

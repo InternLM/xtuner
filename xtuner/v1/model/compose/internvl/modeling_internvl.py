@@ -9,9 +9,9 @@ from ..intern_s1.modeling_intern_s1 import InternS1ForConditionalGeneration, to_
 
 def convert_llm_to_hf_keys(key):
     if 'lm_head' in key:
-        key = key.replace('lm_head','language_model.lm_head')
+        key = key.replace('lm_head', 'language_model.lm_head')
     else:
-        key = key.replace('model.','language_model.model.')
+        key = key.replace('model.', 'language_model.model.')
     return key
 
 

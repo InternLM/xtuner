@@ -1,9 +1,8 @@
 import torch
+from torch.nn import functional as F
 
 
 def native_swiglu(fused_x: torch.Tensor, split_dim=-1) -> torch.Tensor:
-    from torch.nn import functional as F
-
     x1, x2 = torch.chunk(fused_x, 2, dim=split_dim)
     return F.silu(x1) * x2
 
@@ -23,18 +22,39 @@ def native_clipped_swiglu(fused_x: torch.Tensor, split_dim=-1, alpha=1.702, limi
     return gated_output
 
 
+def native_gelu(x: torch.Tensor) -> torch.Tensor:
+    return F.gelu(x)
+
+
+def npu_gelu(x: torch.Tensor) -> torch.Tensor:
+    import torch_npu
+
+    return torch_npu.npu_gelu(x)
+
+
 def npu_clipped_swiglu(fused_x: torch.Tensor, split_dim=-1, alpha=1.702, limit=7) -> torch.Tensor:
     raise NotImplementedError
 
 
-act_fn_type_map_cuda = {"swiglu": native_swiglu, "clipped_swiglu": native_clipped_swiglu}
+def native_silu(x: torch.Tensor) -> torch.Tensor:
+    return F.silu(x)
+
+
+act_fn_type_map_cuda = {
+    "swiglu": native_swiglu,
+    "clipped_swiglu": native_clipped_swiglu,
+    "gelu": native_gelu,
+    "silu": native_silu,
+}
 act_fn_type_map_npu = {
     "swiglu": npu_swiglu,
     "clipped_swiglu": npu_clipped_swiglu,
+    "gelu": npu_gelu,
+    "silu": native_silu,
 }
 
 
-def get_moe_act_fn(act_type):
+def get_act_fn(act_type):
     from xtuner.v1.utils.device import get_device
 
     device = get_device()
