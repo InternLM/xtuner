@@ -1,9 +1,10 @@
 import re
 from pathlib import Path
-from typing import Literal, Self
+from typing import Literal
 
 import torch
 from pydantic import computed_field
+from typing_extensions import Self
 
 from transformers.models.gpt_oss import GptOssConfig as HFGptOssConfig
 from xtuner.v1.model.moe.moe import BalancingLossConfig, MoEConfig

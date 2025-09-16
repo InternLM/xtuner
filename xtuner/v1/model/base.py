@@ -5,7 +5,7 @@ from functools import reduce
 from itertools import chain
 from pathlib import Path
 from shutil import copy, copytree
-from typing import Annotated, Generator, Literal, Self, cast
+from typing import Annotated, Generator, Literal, cast
 
 import torch
 import torch.distributed as dist
@@ -18,7 +18,7 @@ from safetensors.torch import save_file
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, Placement, Shard
 from torch.distributed.tensor._utils import compute_local_shape_and_global_offset
-from typing_extensions import NotRequired, TypedDict
+from typing_extensions import NotRequired, Self, TypedDict
 
 from transformers.configuration_utils import PretrainedConfig
 from xtuner.v1.config import FSDPConfig, GenerateConfig

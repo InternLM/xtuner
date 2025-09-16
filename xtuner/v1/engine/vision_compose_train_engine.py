@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from torch.distributed.device_mesh import DeviceMesh
 from typing_extensions import Self
 
+from transformers.configuration_utils import PretrainedConfig
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.float8_handler import Float8Handler
@@ -54,6 +55,8 @@ class VisionComposeConfigProtocol(Protocol):
     text_config: TransformerConfig
 
     def build(self) -> VisionComposeModelProtocol: ...
+
+    def hf_config(self) -> PretrainedConfig | None: ...
 
 
 class VisionComposeTrainEngine(TrainEngine):
