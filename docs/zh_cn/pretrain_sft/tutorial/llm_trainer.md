@@ -83,7 +83,7 @@ trainer = Trainer(
     tokenizer_path=tokenizer,
     load_from=load_from,
     optim_cfg=optim_cfg,
-    dataset_cfg=dataset_cfg,
+    dataloader_cfg=dataloader_cfg,
     lr_cfg=lr_cfg,
 )
 
@@ -103,6 +103,7 @@ from xtuner.v1.train import Trainer
 
 model_cfg = Qwen3Dense8BConfig()
 dataset_cfg = []
+dataloader_cfg = 
 optim_cfg = AdamWConfig(lr=6e-05)
 lr_cfg = LRConfig(lr_type="cosine", lr_min=1e-6)
 
@@ -114,7 +115,7 @@ trainer = Trainer(
     tokenizer_path=tokenizer,
     load_from=load_from,
     optim_cfg=optim_cfg,
-    dataset_cfg=dataset_cfg,
+    dataloader_cfg=dataloader_cfg,
     lr_cfg=lr_cfg,
 )
 trainer.fit()

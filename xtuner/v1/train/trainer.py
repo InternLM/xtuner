@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from shutil import rmtree
-from typing import Annotated, Literal, Sized, Union, cast
+from typing import Annotated, Literal, Sized, cast
 
 import torch
 import torch.distributed as dist
@@ -19,7 +19,7 @@ from mmengine.dist import get_rank, get_world_size
 from mmengine.runner import set_random_seed
 from pydantic import BaseModel, ConfigDict, computed_field, model_validator
 from torch.distributed import init_process_group
-from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
+from torch.distributed.device_mesh import init_device_mesh
 from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, LinearLR, SequentialLR
 from typing_extensions import NotRequired, Self, TypedDict
 
@@ -27,9 +27,7 @@ from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizer
 from xtuner.v1._writer import get_writer
 from xtuner.v1.config import FSDPConfig, LRConfig, OptimConfig
 from xtuner.v1.data_proto.sequence_context import SequenceContext
-from xtuner.v1.datasets.build import build_dataloader, build_datasets
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfigList
-from xtuner.v1.datasets.resume import get_dataloader_state, load_dataloader_state
 from xtuner.v1.engine import TrainEngine
 from xtuner.v1.engine.vision_compose_train_engine import VisionComposeConfigProtocol, VisionComposeTrainEngine
 from xtuner.v1.loss import CELossConfig
@@ -219,7 +217,7 @@ class Trainer:
         model_cfg: TransformerConfig | VisionComposeConfigProtocol,
         optim_cfg: OptimConfig,
         fsdp_cfg: FSDPConfig | None = FSDPConfig(),
-        dataset_cfg: DatasetConfigList,
+        dataset_cfg: DatasetConfigList | None = None,  # TODO: Removed in version 1.1.0
         dataloader_cfg: DataloaderConfig,
         loss_cfg: CELossConfig | None = CELossConfig(),
         lr_cfg: LRConfig,
@@ -246,7 +244,6 @@ class Trainer:
         backend: str | None = None,
         trainer_cfg: TrainerConfig | None = None,
     ):
-        self._dataset_config = dataset_cfg
         self._dataloader_config = dataloader_cfg
 
         self._total_step = total_step
@@ -274,11 +271,6 @@ class Trainer:
         self._checkpoint_maxkeep = checkpoint_maxkeep
         self._hf_max_keep = hf_max_keep
         self._hf_interval = hf_interval
-
-        assert total_epoch is not None or total_step is not None, "`total_epoch` or `total_step` should be set"
-        assert total_epoch is None or total_step is None, (
-            f"`total_epoch`: {total_epoch}, `total_step`: {total_step} should not be set at the same time"
-        )
 
         if tokenizer_path is not None:
             self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
@@ -327,14 +319,24 @@ class Trainer:
 
         self._resolve_config_conflicts(self.tokenizer, model_cfg, dataloader_cfg)
 
-        self._dataloader = self.build_dataloader(
-            dataset_config=dataset_cfg,
-            dataloader_config=dataloader_cfg,
-            dp_mesh=self.data_mesh["dp"],
+        if dataset_cfg is not None:  # TODO: Removed in version 1.1.0
+            # For backward compatibility, reserve the dataset_cfg interface, remove it later
+            if dataloader_cfg.dataset_config_list is not None:
+                logger.warning("Outside dataset_cfg will override inner dataset_config_list")
+            dataloader_cfg.dataset_config_list = dataset_cfg
+
+        self._dataloader = dataloader_cfg.build(
             tokenizer=self.tokenizer,
+            dp_mesh=self.data_mesh["dp"],
             global_batch_size=self.global_batch_size,
             micro_batch_size=self.micro_batch_size,
             seed=seed,
+        )
+
+        # streaming dataloader may override `total_step`, so we may move this check after `build_dataloader` later.
+        assert total_epoch is not None or total_step is not None, "`total_epoch` or `total_step` should be set"
+        assert total_epoch is None or total_step is None, (
+            f"`total_epoch`: {total_epoch}, `total_step`: {total_step} should not be set at the same time"
         )
 
         if isinstance(load_from, str):
@@ -651,45 +653,6 @@ class Trainer:
             engine.model.set_hf(model_path)
         return engine
 
-    def build_dataloader(
-        self,
-        dataloader_config: DataloaderConfig,
-        dataset_config: DatasetConfigList,
-        tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
-        dp_mesh: DeviceMesh,
-        global_batch_size: int,
-        micro_batch_size: int,
-        seed,
-        resume_cfg: ResumeConfig | None = None,
-    ):
-        """Build the dataloader for training.
-
-        Args:
-            dataloader_config (DataloaderConfig): Configuration for the data loader.
-            dataset_config (DatasetConfigList): Configuration for training datasets.
-            tokenizer (AutoTokenizer): Tokenizer for processing text data.
-            dp_mesh (DeviceMesh): Device mesh for data parallelism.
-            global_batch_size (int): Global batch size across all ranks.
-            micro_batch_size (int): Micro batch size per rank.
-            seed: Random seed for reproducibility.
-            resume_cfg (ResumeConfig | None): Resume configuration for continuing training.
-
-        Returns:
-            DataLoader: Configured dataloader for training.
-        """
-        # TODO: Support resume
-        # 1. load dataloader state
-        # 2. set cur step
-        datasets = build_datasets(dataset_config, tokenizer)
-        return build_dataloader(
-            dataloader_config=dataloader_config,
-            datasets=datasets,
-            dp_mesh=dp_mesh,
-            global_batch_size=global_batch_size,
-            micro_batch_size=micro_batch_size,
-            seed=seed,
-        )
-
     def build_lr_scheduler(self, lr_cfg: LRConfig) -> torch.optim.lr_scheduler.LRScheduler:
         """Build the learning rate scheduler.
 
@@ -762,7 +725,7 @@ class Trainer:
         )
 
         if self.rank == 0:
-            dataloader_state = get_dataloader_state(self._dataloader, global_consumed_samples)
+            dataloader_state = self._dataloader.get_state_dict(global_consumed_samples)
             torch.save(dataloader_state, dataloader_path)
             lr_scheduler_state = self._lr_scheduler.state_dict()
             torch.save(lr_scheduler_state, scheduler_path)
@@ -856,7 +819,7 @@ class Trainer:
                 self._consumed_samples += len(data)
             except StopIteration:
                 self._cur_epoch += 1
-                self._dataloader.sampler.set_epoch(self._cur_epoch)
+                self._dataloader.set_epoch(self._cur_epoch)
                 data_iter = iter(self._dataloader)
                 data = next(data_iter)
             yield data
@@ -1190,7 +1153,7 @@ class Trainer:
             if not dataloader_path.exists():
                 raise FileNotFoundError(f"Dataloader path {dataloader_path} does not exist.")
             dataloader_state = torch.load(dataloader_path, map_location=DEVICE)
-            load_dataloader_state(self._dataloader, dataloader_state)
+            self._dataloader.load_state_dict(dataloader_state)
 
         train_state_path = resume_from / self._SAVE_TRAIN_STATE_PATH
 

@@ -44,6 +44,7 @@ dataset_config = [
     },
 ]
 dataloader_config = DataloaderConfig(
+    dataset_config_list=dataset_config,
     pack_max_length=pack_max_length,
     num_workers=4,
 )
@@ -56,7 +57,7 @@ lr_cfg = LRConfig(lr_type="constant", warmup_ratio=0)
 trainer = TrainerConfig(
     model_cfg=model_cfg,
     optim_cfg=optim_cfg,
-    dataset_cfg=dataset_config,
+    # dataset_cfg=dataset_config,
     dataloader_cfg=dataloader_config,
     tokenizer_path="Qwen/Qwen3-4B",
     lr_cfg=lr_cfg,
