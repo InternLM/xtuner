@@ -39,8 +39,13 @@ class PretrainTokenizeFunction(CachableTokenizeFunction[DataItem]):
 
         input_ids = self.tokenizer.encode(text, add_special_tokens=False)
         num_tokens = len(input_ids)
-        labels = copy.deepcopy(input_ids)
-        labels[0] = -100
+
+        if num_tokens == 0:
+            labels = []
+        else:
+            labels = copy.deepcopy(input_ids)
+            labels[0] = -100
+
         return {"input_ids": input_ids, "labels": labels, "num_tokens": num_tokens}
 
     def hash(self) -> str:
