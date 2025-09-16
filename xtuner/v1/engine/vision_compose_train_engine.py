@@ -63,6 +63,14 @@ class VisionComposeTrainEngine(TrainEngine):
     vision_float8_handler: Float8Handler | None
     projector_float8_handler: Float8Handler | None
 
+    def __init__(
+        self,
+        model_cfg: VisionComposeConfigProtocol,
+        *args,
+        **kwargs,
+    ) -> None:
+        super().__init__(model_cfg, *args, **kwargs)  # type: ignore
+
     def build_model(self) -> VisionComposeModelProtocol:  # type: ignore
         with torch.device("meta"):
             model = self.model_cfg.build()

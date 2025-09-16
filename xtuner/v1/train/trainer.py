@@ -626,7 +626,7 @@ class Trainer:
             engine = VisionComposeTrainEngine(
                 optim_cfg=optim_config,
                 fsdp_cfg=fsdp_config,
-                model_cfg=model_config,  # type: ignore
+                model_cfg=model_config,
                 intra_layer_micro_batch=intra_layer_micro_batch,
             )
         else:
