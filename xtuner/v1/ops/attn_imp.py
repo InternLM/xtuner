@@ -19,13 +19,19 @@ from transformers.models.llama.modeling_llama import repeat_kv
 
 try:
     from .flash_attn import flash_attn_varlen_func
-    from .flash_attn.flash_sink_varlen_attn_gpt_oss import flash_sink_attn_varlen_func
 
     flash_attn_exception = None
-except ImportError as e:
+except (ImportError, ModuleNotFoundError) as e:
     flash_attn_varlen_func = None  # type: ignore[assignment]
-    flash_sink_attn_varlen_func = None  # type: ignore[assignment]
     flash_attn_exception = e
+
+try:
+    from .flash_attn.flash_sink_varlen_attn_gpt_oss import flash_sink_attn_varlen_func
+
+    flash_sink_attn_exception = None
+except (ImportError, ModuleNotFoundError) as e:
+    flash_sink_attn_varlen_func = None  # type: ignore[assignment]
+    flash_sink_attn_exception = e
 
 
 def get_flex_attention_compiled():
@@ -195,9 +201,6 @@ def flex_attention(
 
 
 def flash_attention(q, k, v, window_size=(-1, -1), s_aux=None, **kwargs) -> torch.Tensor:
-    if flash_attn_exception is not None:
-        traceback.print_exception(flash_attn_exception)
-        raise flash_attn_exception
     # q, k, v: [b, n_head, seq , head_dim]
     assert q.size(0) == 1, "Only support batch size 1 for flash attention"
     q = q.transpose(1, 2).squeeze(0)  # [seq, head, dim]
@@ -207,8 +210,14 @@ def flash_attention(q, k, v, window_size=(-1, -1), s_aux=None, **kwargs) -> torc
     attention_output: torch.Tensor
 
     if s_aux is None:
+        if flash_attn_exception is not None:
+            traceback.print_exception(flash_attn_exception)
+            raise flash_attn_exception
         attention_output = flash_attn_varlen_func(q, k, v, **kwargs)
     else:
+        if flash_sink_attn_exception is not None:
+            traceback.print_exception(flash_sink_attn_exception)
+            raise flash_sink_attn_exception
         cu_seqlens_q = kwargs["cu_seqlens_q"]
         attention_output = flash_sink_attn_varlen_func(q, k, v, s_aux, cu_seqlens_q, window_size[0])
     return attention_output[None]
