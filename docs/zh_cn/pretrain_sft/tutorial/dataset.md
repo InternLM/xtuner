@@ -63,7 +63,7 @@ dataset_cfg = DatasetConfig(
 
 {
     'input_ids': [...], # 输入的 token id 列表，用于实际训练
-    'labels': [...],    # 未经便宜的 labels，长度和 `input_ids` 一致，不算 loss 的位置用 -100 填充
+    'labels': [...],    # 未经偏移的 labels，长度和 `input_ids` 一致，不算 loss 的位置用 -100 填充
     'num_tokens': ...   # 当前样本有多少个 token，方便用于基于长度的均衡采样
 }
 ```
@@ -106,7 +106,7 @@ class MyTokenizeFn(CachableTokenizeFunction):
     # 这个 hash 用于数据缓存，当 max_length 或者 tokenizer 变化时，需要重新触发缓存
     def hash(self):
         if self._hash is None:
-            self._hash = f"tokenizer_xxhash(self.tokenizer)_{self.max_length}"
+            self._hash = f"{tokenizer_xxhash(self.tokenizer)}_{self.max_length}"
 
         return self._hash
 
