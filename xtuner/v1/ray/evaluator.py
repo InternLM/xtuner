@@ -7,8 +7,7 @@ from pydantic import BaseModel, ConfigDict
 from tqdm.auto import tqdm
 from typing_extensions import Annotated
 
-from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1.datasets import build_datasets
 from xtuner.v1.datasets.config import DatasetConfigList
 from xtuner.v1.datasets.data_item import RLTextDataItem
@@ -108,7 +107,13 @@ class Evaluator:
                 generating responses.
         """
         self.config = config
-        self.dataset = build_datasets(config.dataset_cfg, config.tokenizer)[0] if isinstance(config.tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast)) else build_datasets(config.dataset_cfg, AutoTokenizer.from_pretrained(config.tokenizer, trust_remote_code=True))[0]
+        self.dataset = (
+            build_datasets(config.dataset_cfg, config.tokenizer)[0]
+            if isinstance(config.tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast))
+            else build_datasets(
+                config.dataset_cfg, AutoTokenizer.from_pretrained(config.tokenizer, trust_remote_code=True)
+            )[0]
+        )
         self.dataloader = iter(self.dataset)
         self.env_controller = env_controller
         self.return_list: List[RLTextDataItem] = []

@@ -2,8 +2,7 @@
 
 from pydantic import BaseModel, ConfigDict
 
-from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1.datasets.data_item import CacheItem, RLTextDataItem
 from xtuner.v1.utils import get_logger
 
@@ -17,7 +16,11 @@ logger = get_logger()
 class RLTextTokenizeFn(CachableTokenizeFunction[RLTextDataItem]):
     def __init__(self, tokenizer: PreTrainedTokenizer, max_length: int | None = None, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.tokenizer = tokenizer if isinstance(tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast)) else AutoTokenizer.from_pretrained(tokenizer, trust_remote_code=True)
+        self.tokenizer = (
+            tokenizer
+            if isinstance(tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast))
+            else AutoTokenizer.from_pretrained(tokenizer, trust_remote_code=True)
+        )
         self.max_length = max_length
 
     def __call__(self, item: dict, **kwargs) -> RLTextDataItem | CacheItem:
