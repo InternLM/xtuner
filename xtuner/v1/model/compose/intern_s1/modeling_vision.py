@@ -8,7 +8,7 @@ import collections.abc
 
 # TODO: 等 intern-s1 合入后全部换成 interns1 的实现
 try:
-    from transformers.models.internvl.modeling_internvl import InternVLVisionPatchEmbeddings
+    from transformers.models.internvl.modeling_internvl import InternVLVisionPatchEmbeddings, InternVLVisionEmbeddings
     from transformers.modeling_outputs import BaseModelOutput
 except:
     InternVLVisionRMSNorm = None
@@ -248,32 +248,9 @@ class InternS1VisionEncoder(nn.Module):
         )
 
 
-class InternS1VisionEmbeddings(nn.Module):
-    """Construct the CLS token, position and patch embeddings.
-
-    Optionally, also the mask token.
-    """
-
+class InternS1VisionEmbeddings(InternVLVisionEmbeddings):
     def __init__(self, config: InternS1VisionConfig) -> None:
-        super().__init__()
-
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, config.hidden_size))
-        if config.use_mask_token:
-            self.mask_token = nn.Parameter(torch.zeros(1, 1, config.hidden_size))
-        else:
-            self.mask_token = None # type: ignore
-        self.patch_embeddings = InternVLVisionPatchEmbeddings(config)
-        self.patch_size = config.patch_size
-        self.image_size = (
-            config.image_size
-            if isinstance(config.image_size, collections.abc.Iterable)
-            else (config.image_size, config.image_size)
-        )
-        num_patches = self.patch_embeddings.num_patches
-        if config.use_absolute_position_embeddings:
-            self.position_embeddings = nn.Parameter(torch.zeros(1, num_patches + 1, config.hidden_size))
-        else:
-            self.position_embeddings = None # type: ignore
+        super().__init__(config)
         self.dropout = Dropout(config.hidden_dropout_prob)
 
 
