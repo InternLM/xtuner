@@ -5,7 +5,7 @@ from functools import reduce
 from itertools import chain
 from pathlib import Path
 from shutil import copy, copytree
-from typing import Annotated, Generator, Literal, cast
+from typing import Annotated, Generator, Literal, Self, cast
 
 import torch
 import torch.distributed as dist
@@ -20,6 +20,7 @@ from torch.distributed.tensor import DTensor, Placement, Shard
 from torch.distributed.tensor._utils import compute_local_shape_and_global_offset
 from typing_extensions import NotRequired, TypedDict
 
+from transformers.configuration_utils import PretrainedConfig
 from xtuner.v1.config import FSDPConfig, GenerateConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.config import Float8Config
@@ -32,11 +33,13 @@ from xtuner.v1.loss import BaseLossContext
 from xtuner.v1.module.attention import MHAConfig, MLAConfig
 from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.ops.comm.foreach_allgather import foreach_all_gather
-from xtuner.v1.utils import get_device, get_torch_device_module, profile_time_and_memory
+from xtuner.v1.utils import get_device, get_logger, get_torch_device_module, profile_time_and_memory
 from xtuner.v1.utils.compile import maybe_compile
 from xtuner.v1.utils.load_spec import LoadEnum, LoadSpec
 from xtuner.v1.utils.loader import HFCheckpointLoader
 
+
+logger = get_logger()
 
 DEVICE_MODULE = get_torch_device_module()
 DEVICE = get_device()
@@ -49,6 +52,7 @@ class TransformerConfig(PydanticBaseModel):
     )
     vocab_size: Annotated[int, Parameter(group="model")]
     max_position_embeddings: Annotated[int, Parameter(group="model")]
+    eos_token_id: Annotated[int, Parameter(group="model")]
     pad_token_id: Annotated[int, Parameter(group="model")]
     num_hidden_layers: Annotated[int, Parameter(group="model")]
     hidden_size: Annotated[int, Parameter(group="model")]
@@ -90,6 +94,45 @@ class TransformerConfig(PydanticBaseModel):
 
     def build(self) -> "BaseModel":
         raise NotImplementedError
+
+    @classmethod
+    def from_hf(cls, hf_path: str | Path) -> Self:
+        """Build a `TransformerConfig` from a pre-trained HuggingFace model.
+
+        This method creates a configuration object based on a `PretrainedConfig` loaded from the specified HuggingFace model path.
+        If you want to use this method, you must implement it in a subclass to correctly extract and map configuration parameters.
+
+        Note:
+            The `hf_config` field needs to be set to the `PretrainedConfig` object loaded from `hf_path`,
+            otherwise it cannot be saved in HuggingFace format.
+
+        Args:
+            hf_path (str | Path): Path to the HuggingFace model.
+
+        Returns:
+            TransformerConfig: A configuration object populated with values from the pre-trained model.
+
+        Raises:
+            NotImplementedError: This method must be implemented by subclasses.
+        """
+        raise NotImplementedError
+
+    @property
+    def hf_config(self) -> PretrainedConfig | None:
+        """HuggingFace configuration."""
+        return None
+
+    def save_hf(self, hf_path: str | Path):
+        """Save the configuration to a HuggingFace-compatible format.
+
+        Args:
+            hf_path (str | Path): Path where the configuration should be saved.
+        """
+
+        if self.hf_config is None:
+            raise NotImplementedError("The `hf_config` property must be implemented to save in HuggingFace format.")
+
+        self.hf_config.save_pretrained(hf_path)
 
 
 class ModelOutputs(TypedDict):
@@ -604,8 +647,10 @@ class BaseModel(nn.Module):
             hf_dir (str): The directory to save the model.
             save_dtype (torch.dtype): The dtype to save the model parameters, bfloat16 or float8.
         """
-        if self._hf_path is None:
-            raise RuntimeError("Please call from_hf() before save_hf().")
+        if self._hf_path is None and self.config.hf_config is None:
+            raise NotImplementedError(
+                "The model is not loaded from Huggingface, and the `hf_config` property is not implemented, so it cannot be saved in Huggingface format."
+            )
 
         if isinstance(hf_dir, str):
             hf_dir = Path(hf_dir)
@@ -716,14 +761,20 @@ class BaseModel(nn.Module):
         weight_map = reduce(lambda x, y: x | y, weight_map_list)
 
         if not dist.is_initialized() or dist.get_rank() == 0:
-            for file in cast(Path, self._hf_path).iterdir():
-                if file.suffix != ".safetensors":
-                    # Copy the model config and tokenizer files to the save path
-                    target_path = hf_dir / file.name
-                    if file.is_file():
-                        copy(file, target_path)
-                    else:
-                        copytree(file, target_path)
+            if self.config.hf_config is not None:
+                self.config.save_hf(hf_dir)
+            elif self._hf_path is not None:
+                for file in cast(Path, self._hf_path).iterdir():
+                    if file.suffix != ".safetensors":
+                        # Copy the model config and tokenizer files to the save path
+                        target_path = hf_dir / file.name
+                        if file.is_file():
+                            copy(file, target_path)
+                        else:
+                            copytree(file, target_path)
+
+            else:
+                raise RuntimeError("Internal Error, both self.config.hf_config and self._hf_path are None")
 
             with open(hf_dir / "model.safetensors.index.json", "w") as f:
                 index = {"weight_map": weight_map, "metadata": {}}

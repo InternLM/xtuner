@@ -1,5 +1,8 @@
 import re
+from pathlib import Path
+from typing import Self
 
+from transformers.models.deepseek_v3 import DeepseekV3Config as HFDeepseekV3Config
 from xtuner.v1.model.moe.moe import BalancingLossConfig, MoEConfig, ZLossConfig
 from xtuner.v1.module.attention import MLAConfig
 from xtuner.v1.module.router.noaux_router import NoAuxRouterConfig
@@ -97,3 +100,97 @@ class DeepSeekV3Config(MoEConfig):
 
     def build(self) -> DeepSeekV3:
         return DeepSeekV3(self)
+
+    @classmethod
+    def from_hf(cls, hf_path: str | Path) -> Self:
+        cfg = HFDeepseekV3Config.from_pretrained(hf_path)
+
+        assert isinstance(cfg, HFDeepseekV3Config)
+
+        config = cls(
+            vocab_size=cfg.vocab_size,
+            max_position_embeddings=cfg.max_position_embeddings,
+            pad_token_id=cfg.eos_token_id,
+            num_hidden_layers=cfg.num_hidden_layers,
+            first_k_dense_replace=cfg.first_k_dense_replace,
+            max_window_layers=cfg.num_hidden_layers,
+            hidden_size=cfg.hidden_size,
+            intermediate_size=cfg.intermediate_size,
+            rms_norm_eps=cfg.rms_norm_eps,
+            rope_theta=cfg.rope_theta,
+            rope_scaling=dict(
+                type=cfg.rope_scaling.get("type", "yarn"),
+                beta_fast=cfg.rope_scaling.get("beta_fast", 32),
+                beta_slow=cfg.rope_scaling.get("beta_slow", 1),
+                factor=cfg.rope_scaling.get("factor", 40.0),
+                mscale=cfg.rope_scaling.get("mscale", 1.0),
+                mscale_all_dim=cfg.rope_scaling.get("mscale_all_dim", 1.0),
+                original_max_position_embeddings=cfg.rope_scaling.get("original_max_position_embeddings", 4096),
+            )
+            if cfg.rope_scaling is not None
+            else None,
+            hidden_act=cfg.hidden_act,
+            attention=MLAConfig(
+                kv_lora_rank=cfg.kv_lora_rank,
+                q_lora_rank=cfg.q_lora_rank,
+                qk_nope_head_dim=cfg.qk_nope_head_dim,
+                qk_rope_head_dim=cfg.qk_rope_head_dim,
+                v_head_dim=cfg.v_head_dim,
+                head_dim=cfg.qk_rope_head_dim,
+                num_attention_heads=cfg.num_attention_heads,
+                qkv_bias=cfg.attention_bias,
+                o_bias=cfg.attention_bias,
+            ),
+            tie_word_embeddings=cfg.tie_word_embeddings,
+            n_routed_experts=cfg.n_routed_experts,
+            n_shared_experts=cfg.n_shared_experts,
+            num_experts_per_tok=cfg.num_experts_per_tok,
+            hidden_factor=1.0,
+            moe_intermediate_size=cfg.moe_intermediate_size,
+            router=NoAuxRouterConfig(
+                n_group=cfg.n_group,
+                topk_group=cfg.topk_group,
+                scoring_func=cfg.scoring_func,
+                norm_topk_prob=cfg.norm_topk_prob,
+                router_scaling_factor=cfg.routed_scaling_factor,
+            ),
+            balancing_loss_cfg=BalancingLossConfig(),
+        )
+
+        return config
+
+    @property
+    def hf_config(self):
+        """HuggingFace configuration."""
+        assert isinstance(self.router, NoAuxRouterConfig), "Only support saving NoAuxRouter to HF DeepSeekV3 format."
+        return HFDeepseekV3Config(
+            architectures=["DeepseekV3ForCausalLM"],
+            vocab_size=self.vocab_size,
+            max_position_embeddings=self.max_position_embeddings,
+            eos_token_id=self.pad_token_id,
+            num_hidden_layers=self.num_hidden_layers,
+            first_k_dense_replace=self.first_k_dense_replace,
+            hidden_size=self.hidden_size,
+            intermediate_size=self.intermediate_size,
+            moe_intermediate_size=self.moe_intermediate_size,
+            rms_norm_eps=self.rms_norm_eps,
+            rope_theta=self.rope_theta,
+            rope_scaling=self.rope_scaling,
+            hidden_act=self.hidden_act,
+            num_attention_heads=self.attention.num_attention_heads,
+            kv_lora_rank=self.attention.kv_lora_rank,
+            q_lora_rank=self.attention.q_lora_rank,
+            qk_nope_head_dim=self.attention.qk_nope_head_dim,
+            qk_rope_head_dim=self.attention.qk_rope_head_dim,
+            v_head_dim=self.attention.v_head_dim,
+            attention_bias=self.attention.qkv_bias or self.attention.o_bias,
+            n_routed_experts=self.n_routed_experts,
+            n_shared_experts=self.n_shared_experts,
+            num_experts_per_tok=self.num_experts_per_tok,
+            n_group=self.router.n_group,
+            topk_group=self.router.topk_group,
+            scoring_func=self.router.scoring_func,
+            norm_topk_prob=self.router.norm_topk_prob,
+            routed_scaling_factor=self.router.router_scaling_factor,
+            tie_word_embeddings=self.tie_word_embeddings,
+        )

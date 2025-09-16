@@ -1,9 +1,11 @@
 import re
-from typing import Literal
+from pathlib import Path
+from typing import Literal, Self
 
 import torch
 from pydantic import computed_field
 
+from transformers.models.gpt_oss import GptOssConfig as HFGptOssConfig
 from xtuner.v1.model.moe.moe import BalancingLossConfig, MoEConfig
 from xtuner.v1.module.attention import MHAConfig
 from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEActFnConfig
@@ -128,11 +130,84 @@ class GptOssConfig(MoEConfig):
     def build(self) -> GptOss:
         return GptOss(self)
 
+    @classmethod
+    def from_hf(cls, hf_path: str | Path) -> Self:
+        cfg = HFGptOssConfig.from_pretrained(hf_path)
+
+        assert isinstance(cfg, HFGptOssConfig)
+
+        config = cls(
+            hf_config=cfg,
+            vocab_size=cfg.vocab_size,
+            max_position_embeddings=cfg.max_position_embeddings,
+            pad_token_id=cfg.pad_token_id,
+            eos_token_id=cfg.eos_token_id,
+            num_hidden_layers=cfg.num_hidden_layers,
+            hidden_size=cfg.hidden_size,
+            intermediate_size=cfg.intermediate_size,
+            moe_intermediate_size=cfg.intermediate_size,
+            rms_norm_eps=cfg.rms_norm_eps,
+            rope_theta=cfg.rope_theta,
+            hidden_act=cfg.hidden_act,
+            attention=MHAConfig(
+                num_attention_heads=cfg.num_attention_heads,
+                num_key_value_heads=cfg.num_key_value_heads,
+                head_dim=cfg.head_dim,
+                rms_norm_eps=cfg.rms_norm_eps,
+                sliding_window=cfg.sliding_window,
+                with_sink=True,
+                qkv_bias=True,
+                o_bias=True,
+            ),
+            n_routed_experts=cfg.num_local_experts,
+            num_experts_per_tok=cfg.num_experts_per_tok,
+            tie_word_embeddings=cfg.tie_word_embeddings,
+            router=GreedyRouterConfig(
+                scoring_func="softmax",
+                norm_topk_prob=True,
+                router_scaling_factor=1.0,
+            ),
+        )
+
+        return config
+
+    @property
+    def hf_config(self) -> HFGptOssConfig:
+        assert isinstance(self.router, GreedyRouterConfig), "Only support saving GreedyRouter to HF GptOss format."
+
+        return HFGptOssConfig(
+            architectures=["GptOssForCausalLM"],
+            layer_types=self.layers_type,
+            vocab_size=self.vocab_size,
+            max_position_embeddings=self.max_position_embeddings,
+            pad_token_id=self.pad_token_id,
+            eos_token_id=self.eos_token_id,
+            num_hidden_layers=self.num_hidden_layers,
+            hidden_size=self.hidden_size,
+            intermediate_size=self.intermediate_size,
+            rms_norm_eps=self.rms_norm_eps,
+            rope_theta=self.rope_theta,
+            hidden_act=self.hidden_act,
+            num_attention_heads=self.attention.num_attention_heads,
+            num_key_value_heads=self.attention.num_key_value_heads,
+            head_dim=self.attention.head_dim,
+            sliding_window=self.attention.sliding_window,
+            tie_word_embeddings=self.tie_word_embeddings,
+            num_local_experts=self.n_routed_experts,
+            num_experts_per_tok=self.num_experts_per_tok,
+            norm_topk_prob=self.router.norm_topk_prob,
+            qkv_bias=True,
+            o_bias=True,
+            dtype=torch.bfloat16,
+            swiglu_limit=self.moe_act_fn_cfg.clip_limit,
+        )
+
 
 class GptOss21BA3P6Config(GptOssConfig):
     vocab_size: int = 201088
     max_position_embeddings: int = 131072
     pad_token_id: int = 199999
+    eos_token_id: int = 200002
     num_hidden_layers: int = 24
     hidden_size: int = 2880
     intermediate_size: int = 2880
@@ -165,6 +240,7 @@ class GptOss117BA5P8Config(GptOssConfig):
     vocab_size: int = 201088
     max_position_embeddings: int = 131072
     pad_token_id: int = 199999
+    eos_token_id: int = 200002
     num_hidden_layers: int = 36
     hidden_size: int = 2880
     intermediate_size: int = 2880
