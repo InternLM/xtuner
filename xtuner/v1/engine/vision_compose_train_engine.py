@@ -1,14 +1,19 @@
+from pathlib import Path
 from typing import List, Protocol, cast, runtime_checkable
 
 import torch
 import torch.distributed as dist
 from pydantic import BaseModel
 from torch.distributed.device_mesh import DeviceMesh
+from typing_extensions import Self
 
 from xtuner.v1.config import FSDPConfig
+from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.float8_handler import Float8Handler
+from xtuner.v1.loss import BaseLossContext
 from xtuner.v1.model.base import BaseModel as XTunerBaseModel
-from xtuner.v1.model.base import ModelItem, TransformerConfig
+from xtuner.v1.model.base import ModelItem, ModelOutputs, TransformerConfig
+from xtuner.v1.model.moe.moe import MoEModelOutputs
 from xtuner.v1.module.router import NoAuxRouterConfig
 from xtuner.v1.utils import get_device, get_logger, get_torch_device_module
 
@@ -25,7 +30,21 @@ class VisionComposeModelProtocol(Protocol):
     multi_modal_projector: XTunerBaseModel
     language_model: XTunerBaseModel
 
-    def fully_shard(self, fsdp_cfg: FSDPConfig) -> "VisionComposeModelProtocol": ...
+    def set_hf(self, hf_path: str | Path): ...
+
+    def fully_shard(self, fsdp_cfg: FSDPConfig) -> Self: ...
+
+    def forward(
+        self,
+        seq_ctx: list[SequenceContext] | SequenceContext,
+        loss_ctx: list[BaseLossContext] | BaseLossContext | None,
+    ) -> ModelOutputs | MoEModelOutputs: ...
+
+    def __call__(
+        self,
+        seq_ctx: list[SequenceContext] | SequenceContext,
+        loss_ctx: list[BaseLossContext] | BaseLossContext | None,
+    ) -> ModelOutputs | MoEModelOutputs: ...
 
 
 @runtime_checkable
@@ -146,13 +165,14 @@ class VisionComposeTrainEngine(TrainEngine):
                 step_consumed_tokens += seq_ctx.mask.sum()
 
             # todo: support intra_layer_micro_batch
-            output = self.model(seq_ctx=seq_ctx_list[0], loss_ctx=loss_ctx_list[0])  # type: ignore
+            output = self.model(seq_ctx=seq_ctx_list[0], loss_ctx=loss_ctx_list[0])
             # llm loss has been global averaged
             llm_loss = output["loss"]
             step_llm_loss += llm_loss.detach().clone()
 
             loss = llm_loss
             if "balancing_loss" in output:
+                output = cast(MoEModelOutputs, output)
                 loss = loss + output["balancing_loss"] / iters_per_step
                 step_balancing_loss = (
                     output["balancing_loss"]
@@ -160,10 +180,12 @@ class VisionComposeTrainEngine(TrainEngine):
                     else step_balancing_loss + output["balancing_loss"]
                 )
             if "z_loss" in output:
+                output = cast(MoEModelOutputs, output)
                 loss = loss + output["z_loss"] / iters_per_step
                 step_z_loss = output["z_loss"] if step_z_loss is None else step_z_loss + output["z_loss"]
 
             if moe_need_update_bias:
+                output = cast(MoEModelOutputs, output)
                 assert "tokens_per_expert_global" in output, "tokens_per_expert_global is required for bias update."
                 tokens_per_expert_global_for_bias += output["tokens_per_expert_global"]
 

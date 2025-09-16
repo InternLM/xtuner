@@ -3,6 +3,8 @@ from typing import Protocol, runtime_checkable
 from pydantic import BaseModel as PydanticBaseModel
 
 from xtuner.v1.config import FSDPConfig, OptimConfig
+from xtuner.v1.engine.train_engine import TrainEngine
+from xtuner.v1.engine.vision_compose_train_engine import VisionComposeConfigProtocol, VisionComposeTrainEngine
 from xtuner.v1.model.base import BaseModel
 
 
@@ -20,9 +22,6 @@ class EngineConfig(PydanticBaseModel):
     model_cfg: ModelConfigProto
 
     def build(self):
-        from xtuner.v1.engine.train_engine import TrainEngine
-        from xtuner.v1.engine.vision_compose_train_engine import VisionComposeConfigProtocol, VisionComposeTrainEngine
-
         if isinstance(self.model_cfg, VisionComposeConfigProtocol):
             return VisionComposeTrainEngine(model_cfg=self.model_cfg, optim_cfg=self.optim_cfg, fsdp_cfg=self.fsdp_cfg)
         else:
