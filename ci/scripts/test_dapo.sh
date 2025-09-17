@@ -14,8 +14,9 @@ if [ ! -d "$OUTPUT_DIR" ]; then
 fi
 
 #export ROLLOUT_MODEL_PATH="/cpfs01/shared/llm_razor/huanghaian/code/verl/DAPO/DAPO-Qwen2.5-7b-MATH-0527a1/global_step_100/actor/huggingface"
-export ROLLOUT_MODEL_PATH='/cpfs01/shared/llm_ddd/lishuaibin/ckpt/Qwen/Qwen2.5-Math-7B'
+ export ROLLOUT_MODEL_PATH='/cpfs01/shared/llm_ddd/lishuaibin/ckpt/Qwen/Qwen2.5-Math-7B'
 export ROLLOUT_DATA_PATH="/cpfs01/shared/llm_razor/lishuaibin/math_dapo_data/dapo-math-17k.jsonl"
+export ROLLOUT_TEST_DATA_PATH="/cpfs01/shared/llm_razor/lishuaibin/math_dapo_data/aime-2024.jsonl"
 
 python ci/scripts/test_dapo_trainer.py \
     --total-epochs 1 \
@@ -31,5 +32,5 @@ python ci/scripts/test_dapo_trainer.py \
     --max-response-length 8192 \
     --optimizer-disable-foreach \
     --enable-evaluate \
-    --eval-data-path /cpfs01/shared/llm_razor/lishuaibin/math_dapo_data/aime-2024.jsonl \
+    --evaluate-step 5 \
     2>&1 | tee -a "${OUTPUT_DIR}/training_log.txt"
