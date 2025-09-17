@@ -80,7 +80,8 @@ dataset_config = [
     },
 ]
 # dataloader 配置
-dataloader_config = DataloaderConfig(pack_max_length=pack_max_length, 
+dataloader_config = DataloaderConfig(dataset_config_list=dataset_config,
+                                     pack_max_length=pack_max_length, 
                                      num_workers=8,
                                      collator='intern_s1_vl_sft_collator')
 
@@ -120,7 +121,6 @@ trainer = TrainerConfig(
     load_from=load_from, # 如果是微调模式，必须指定，否则会重头训练
     model_cfg=model_cfg,
     optim_cfg=optim_cfg,
-    dataset_cfg=dataset_config,
     dataloader_cfg=dataloader_config,
     lr_cfg=lr_cfg,
     tokenizer_path=tokenizer,
@@ -175,7 +175,8 @@ dataset_config = [
         "tokenize_fn": InternS1VLTokenizeFnConfig(model_cfg=model_cfg, max_length=sample_max_length),
     },
 ]
-dataloader_config = DataloaderConfig(pack_max_length=pack_max_length,
+dataloader_config = DataloaderConfig(dataset_config_list=dataset_config,
+                                     pack_max_length=pack_max_length,
                                      num_workers=8,
                                      pack_level="expand_soft",
                                      collator='intern_s1_vl_sft_collator')
@@ -192,7 +193,6 @@ trainer = TrainerConfig(
     load_from=load_from,
     model_cfg=model_cfg,
     optim_cfg=optim_cfg,
-    dataset_cfg=dataset_config,
     dataloader_cfg=dataloader_config,
     lr_cfg=lr_cfg,
     tokenizer_path=tokenizer,

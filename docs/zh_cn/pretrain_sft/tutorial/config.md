@@ -108,7 +108,6 @@ trainer = TrainerConfig(
     tokenizer_path=tokenizer_path,
     load_from=load_from,
     optim_cfg=optim_cfg,
-    dataset_cfg=dataset_cfg,
     dataloader_cfg=dataloader_cfg,
     lr_cfg=lr_cfg,
     work_dir="<目标工作目录>",
