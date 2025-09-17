@@ -137,6 +137,8 @@ class TrainerConfig(BaseModel):
     total_epoch: int | None = None
     resume: ResumeConfig | None = None
     strict_load: bool = True
+    checkpoint_interval: int | None = -1
+    checkpoint_maxkeep: int | None = -1
     hf_interval: int | None = None
     hf_max_keep: int | None = None
     exp_tracker: Literal["tensorboard", "jsonl"] = "jsonl"
@@ -183,6 +185,8 @@ class Trainer:
         total_epoch (int | None): Number of training epochs.
         resume_cfg (ResumeConfig | None): Configuration for resuming training.
         strict_load (bool): Whether to strictly load model weights.
+        checkpoint_interval (int | None): Interval for saving checkpoints.
+        checkpoint_maxkeep (int | None): Maximum number of checkpoints to keep.
         hf_interval (int | None): Interval for saving Huggingface format checkpoints.
         hf_max_keep (int | None): Maximum number of Huggingface checkpoints to keep.
         profile_step (int | None): Step to perform profiling.
@@ -390,6 +394,8 @@ class Trainer:
             total_epoch=config.total_epoch,
             resume_cfg=config.resume,
             strict_load=config.strict_load,
+            checkpoint_interval=config.checkpoint_interval,
+            checkpoint_maxkeep=config.checkpoint_maxkeep,
             hf_interval=config.hf_interval,
             hf_max_keep=config.hf_max_keep,
             exp_tracker=config.exp_tracker,
@@ -576,7 +582,7 @@ class Trainer:
 
         if self.world_size % sp_size != 0:
             raise ParallelConfigException(
-                f"Found sp_size {self._sp_size}, world_size {self.world_size}."
+                f"Found sp_size {sp_size}, world_size {self.world_size}."
                 "sequence parallel size must be a divisor of world size."
             )
 
