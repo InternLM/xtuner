@@ -106,7 +106,7 @@ def main(args):
     if eval_dataset_cfg:
         evaluator_cfg = EvaluatorConfig(
             dataset_cfg=eval_dataset_cfg,
-            tokenizer=tokenizer,
+            tokenizer=args.model_path,
             max_concurrent=args.max_concurrent,
             eval_sample_ratio=args.evaluate_ratio,
             evaluate_step=args.evaluate_step,
@@ -116,7 +116,7 @@ def main(args):
         evaluator_cfg = None
 
     replay_buffer_cfg = ReplayBufferConfig(
-        dataset_cfg=train_dataset_cfg, dataloader_cfg=dataloader_cfg, tokenizer=tokenizer, postprocessor=None
+        dataset_cfg=train_dataset_cfg, dataloader_cfg=dataloader_cfg, tokenizer=args.model_path, postprocessor=None
     )
     train_worker_cfg: WorkerConfig = WorkerConfig(
         model_cfg=Qwen3Dense8BConfig(),
