@@ -1,7 +1,7 @@
 import re
+from typing import Any, Optional
 
 from pydantic import BaseModel, Field
-from typing import Any, Optional
 
 from .native import NativeJudger
 
@@ -55,9 +55,6 @@ from .native import NativeJudger
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # Adapted from https://github.com/EleutherAI/lm-evaluation-harness/blob/main/lm_eval/tasks/hendrycks_math/utils.py
-
-import re
-from typing import Optional
 
 
 def last_boxed_only_string(string: str) -> Optional[str]:
@@ -225,10 +222,11 @@ def is_correct_minerva(
     pred = normalize_final_answer(extracted_answer)
 
     # Process ground truth
-    if gt_need_extract:
-        gt = normalize_final_answer(remove_boxed(last_boxed_only_string(gt)))
-    else:
-        gt = normalize_final_answer(gt)
+    # if gt_need_extract:
+    #     gt = normalize_final_answer(remove_boxed(last_boxed_only_string(gt)))
+    # else:
+    assert not gt_need_extract
+    gt = normalize_final_answer(gt)
 
     return (pred == gt), pred
 
@@ -263,7 +261,7 @@ def is_correct_strict_box(
 
 def verify(
     solution_str: str, answer: str, strict_box_verify: bool = False, pause_tokens_index: Optional[list[int]] = None
-) -> bool:
+) -> tuple[bool, str | None]:
     """Verify if the solution is correct.
 
     Args:
@@ -307,7 +305,7 @@ def compute_score(
     correct, pred = verify(solution_str, ground_truth, strict_box_verify, pause_tokens_index)
 
     reward = 1.0 if correct else -1.0
-    acc = correct
+    # acc = correct
 
     return reward
     # return {
@@ -317,19 +315,20 @@ def compute_score(
     # }
 
 
-
 def compute_reward(response, label, extra_info):
     predict_str = response
-    ground_truth = label
+    # ground_truth = label
 
     reward = compute_score(response, label)
     overlong_reward = 0
     if extra_info.get("enable_overlong_buffer", None):
-        overlong_buffer_len = extra_info['overlong_buffer_len']
-        expected_len = extra_info['max_response_len'] - overlong_buffer_len
-        valid_response_length = len(extra_info['tokenizer'](predict_str, return_tensors="pt")["input_ids"].flatten().tolist())
+        overlong_buffer_len = extra_info["overlong_buffer_len"]
+        expected_len = extra_info["max_response_len"] - overlong_buffer_len
+        valid_response_length = len(
+            extra_info["tokenizer"](predict_str, return_tensors="pt")["input_ids"].flatten().tolist()
+        )
         exceed_len = valid_response_length - expected_len
-        overlong_penalty_factor = extra_info['overlong_penalty_factor']
+        overlong_penalty_factor = extra_info["overlong_penalty_factor"]
         overlong_reward = min(-exceed_len / overlong_buffer_len * overlong_penalty_factor, 0)
     reward += overlong_reward
     return reward
@@ -343,40 +342,51 @@ class DapoMathJudgerConfig(BaseModel):
     overlong_penalty_factor: Optional[float] = None
     tokenizer: Any = None
 
-    def __init__(self, enable_overlong_buffer: bool, max_response_len: Optional[int], overlong_buffer_len: Optional[int], overlong_penalty_factor: Optional[float], tokenizer: Any):
+    def __init__(
+        self,
+        enable_overlong_buffer: bool,
+        max_response_len: Optional[int],
+        overlong_buffer_len: Optional[int],
+        overlong_penalty_factor: Optional[float],
+        tokenizer: Any,
+    ):
         # 初始化基类
         super().__init__(
             enable_overlong_buffer=enable_overlong_buffer,
             max_response_len=max_response_len,
             overlong_buffer_len=overlong_buffer_len,
             overlong_penalty_factor=overlong_penalty_factor,
-            tokenizer=tokenizer
+            tokenizer=tokenizer,
         )
-        
+
         # 根据条件更新 extra_info
         if enable_overlong_buffer:
             assert max_response_len is not None
             assert overlong_buffer_len is not None
             assert overlong_penalty_factor is not None
             assert tokenizer is not None
-            self.extra_info.update({
-                "enable_overlong_buffer": enable_overlong_buffer,
-                "max_response_len": max_response_len,
-                "overlong_buffer_len": overlong_buffer_len,
-                "overlong_penalty_factor": overlong_penalty_factor,
-                "tokenizer": tokenizer,
-            })
+            self.extra_info.update(
+                {
+                    "enable_overlong_buffer": enable_overlong_buffer,
+                    "max_response_len": max_response_len,
+                    "overlong_buffer_len": overlong_buffer_len,
+                    "overlong_penalty_factor": overlong_penalty_factor,
+                    "tokenizer": tokenizer,
+                }
+            )
 
     def build(self):
         return NativeJudger(reward_func=compute_reward, extra_info=self.extra_info)
-
 
 
 if __name__ == "__main__":
     import json
 
     data = []
-    with open('/cpfs01/user/lishuaibin/projects/202508/xtuner/work_dirs/dapo_math_qwen25-7B/20250828103011/t_1.jsonl', 'r', encoding='utf-8') as file:
+    with open(
+        "/cpfs01/user/lishuaibin/projects/202508/xtuner/work_dirs/dapo_math_qwen25-7B/20250828103011/t_1.jsonl",
+        encoding="utf-8",
+    ) as file:
         for line in file:
             line = line.strip()
             if line:  # Skip empty lines
@@ -393,5 +403,5 @@ if __name__ == "__main__":
     for res in responses:
         reward = compute_reward(res, label, {})
         # reward = compute_score(res, label, True)
-        
+
         print(reward)
