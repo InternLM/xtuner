@@ -16,6 +16,7 @@ from xtuner.v1.config import (
 )
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.model.dense.qwen3 import Qwen3Dense8BConfig
+from xtuner.v1.model.dense.qwen2 import Qwen2Dense7BConfig
 from xtuner.v1.ray.accelerator import AcceleratorResourcesConfig
 from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.ray.dataflow import DataFlowConfig, ReplayBufferConfig
@@ -134,7 +135,7 @@ def main(args):
         postprocessor=None
     )
     train_worker_cfg: WorkerConfig = WorkerConfig(
-        model_cfg=Qwen3Dense8BConfig(),
+        model_cfg=Qwen2Dense7BConfig(),
         optim_cfg=AdamWConfig(lr=1e-6, foreach=False if args.optimizer_disable_foreach else None),
         loss_cfg=GRPOLossConfig(
             policy_loss_cfg=dict(

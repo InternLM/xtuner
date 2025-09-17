@@ -19,6 +19,7 @@ from xtuner.v1.train.trainer import Trainer
 from xtuner.v1.utils.compile import maybe_compile
 import argparse
 from xtuner.v1.loss import CELossConfig
+from xtuner.v1.model.dense.qwen2 import Qwen2Dense7BConfig
 
 QWEN3_PATH = os.environ["QWEN3_PATH"]
 ALPACA_PATH = os.environ["ALPACA_PATH"]
@@ -217,7 +218,7 @@ def main():
     os.environ["DG_CACHE_DIR"] = f"/tmp/.adaptive_gemm-{os.getenv('RANK', '0')}"
 
     dense_cfgs = [
-        (Qwen3Dense8BConfig(), "tp1"),
+        (Qwen2Dense7BConfig(), "dense"),
     ]
     for dense_cfg, name in dense_cfgs:
         optim_cfg = AdamWConfig(lr=6e-05)

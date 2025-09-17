@@ -296,7 +296,7 @@ class RLTrainer:
             ray.get(self._train_controller.onload.remote(target="all"))
             self.logger.info("Training controller loaded")
             data_batches, data_info = self._prepare_train_data(data_groups, self._train_worker_cfg.pack_max_length)
-            self.logger.info(f"Prepared {len(data_batches)} training data batches")
+            self.logger.info(f"Prepared {len(data_batches)} prompts and {len(data_batches) * len(data_batches[0])} responses training data batches")
             self.logger.info(f"DataInfo {data_info}")
 
             # save_dir = f"/cpfs01/shared/llm_razor/lishuaibin/xtuner_v1_outputs/lmdeploy1/train_data/global_step{rollout_idx}.pt"
@@ -304,7 +304,10 @@ class RLTrainer:
 
             ray.get(
                 self._train_controller.fit.remote(
-                    data_batches, pack_max_length=self._train_worker_cfg.pack_max_length, rollout_idx=rollout_idx
+                    data_batches, 
+                    pack_max_length=self._train_worker_cfg.pack_max_length, 
+                    optimizer_steps=self._train_worker_cfg.optimizer_steps,
+                    rollout_idx=rollout_idx
                 )
             )
             ray.get(self._train_controller.offload.remote(target="optimizer"))
@@ -343,6 +346,7 @@ class RLTrainer:
             # advantages_list.extend(advantages.tolist())
 
             prompt_repeat_k = len(group)
+            data_batches_group = []
             for i in range(prompt_repeat_k):
                 item = group[i]["response_str"]
                 response_ids = self.tokenizer(item, return_tensors="pt")["input_ids"].flatten().tolist()
@@ -358,13 +362,15 @@ class RLTrainer:
                     shifted_labels = shifted_labels[:pack_max_length]
                 input_ids = torch.tensor(input_ids, dtype=torch.int64).unsqueeze(0)
                 shifted_labels = torch.tensor(shifted_labels, dtype=torch.int64).unsqueeze(0)
-                data_batches.append(
+                data_batches_group.append(
                     dict(
                         seq_ctx=SequenceContext.from_input_ids((input_ids,), device="cpu"),
                         shifted_labels=shifted_labels,
                         advantage=advantages[i].item(),
                     )
                 )
+            data_batches.append(data_batches_group)
+        
         advantages_list = np.array(advantages_list)
         self.logger.info(f"============ advantages: {advantages_list.shape}")
         info_dict = {
@@ -384,7 +390,7 @@ class RLTrainer:
             "prompt_len/min": np.min(prompt_len_list),
             "prompt_len/max": np.max(prompt_len_list),
         }
-        random.shuffle(data_batches)
+        random.shuffle(data_batches)  # shuffle in groups
         return data_batches, info_dict
 
     def _save_trajectories(self, data_groups, save_path):

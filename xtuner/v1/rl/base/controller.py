@@ -1,8 +1,9 @@
 import math
-from typing import Literal, TypedDict
+from typing import Literal, TypedDict, cast
 
 import ray
 import torch
+import random
 
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 
@@ -117,11 +118,12 @@ class TrainingController:
         # 排序后这条 pack 会被放在最前面，导致 rank0 的第一个 step 消耗的有效 token 数往往少于其他 rank，是正常现象。
         return sorted(packed_data_batches, key=lambda x: x["seq_ctx"].max_length_q, reverse=True)
 
-    def fit(self, data_batches: list[ColateItem], pack_max_length: int, rollout_idx: int):
+    def _pack_and_pad(self, data_batches: list[list[ColateItem]], pack_max_length: int) -> list[ColateItem]:
+        data_batches = cast(list[ColateItem], sum(data_batches, []))
+        random.shuffle(data_batches)
         packed_data_batches = self._packing(data_batches, pack_max_length)
         packed_data_batches = self._grouped_by_max_length(packed_data_batches)
 
-        # todo: support round up
         num_packed_data_batches = len(packed_data_batches)
         data_replicate_size = ray.get(self.workers[0].get_data_replicate_size.remote())  # type: ignore[attr-defined]
         dp_size = len(self.workers) // data_replicate_size
@@ -152,25 +154,94 @@ class TrainingController:
                 dtype=packed_data_batches[0]["advantages"].dtype,
                 device="cpu",
             )
-            pad_data = {
-                "seq_ctx": pad_seq_ctx,
-                "shifted_labels": pad_shifted_labels,
-                "advantages": pad_advantages,
-            }
+            pad_data = ColateItem(
+                seq_ctx=pad_seq_ctx,
+                shifted_labels=pad_shifted_labels,
+                advantages=pad_advantages,
+            )
             pad_data_samples = [pad_data for _ in range(pad_num)]
             packed_data_batches = packed_data_batches + pad_data_samples
+        return packed_data_batches
 
-        print(f"len(packed_data_batches): {len(packed_data_batches)}")
-
+    def fit(self, data_batches: list[list[ColateItem]], pack_max_length: int, optimizer_steps: int, rollout_idx: int):
+        optimizer_steps = min(optimizer_steps, len(data_batches))
+        n_groups_per_step = math.ceil(len(data_batches) / optimizer_steps)
+        packed_data_batches_all_steps: list[list[ColateItem]] = []
+        for i in range(optimizer_steps):
+            packed_data_batches_all_steps.append(
+                self._pack_and_pad(
+                    data_batches[i * n_groups_per_step : (i + 1) * n_groups_per_step],
+                    pack_max_length,
+                )
+            )
+        
         handles = []
+        data_replicate_size = ray.get(self.workers[0].get_data_replicate_size.remote())  # type: ignore[attr-defined]
+        dp_size = len(self.workers) // data_replicate_size
         for worker_idx, worker in enumerate(self.workers):
+            packed_data_batches_all_steps_cur = [data[(worker_idx // data_replicate_size) :: dp_size] for data in packed_data_batches_all_steps]
             handles.append(
                 worker.fit.remote(  # type: ignore[attr-defined]
-                    data_batches=packed_data_batches[(worker_idx // data_replicate_size) :: dp_size],
+                    data_batches=packed_data_batches_all_steps_cur,
                     rollout_idx=rollout_idx,
                 )
             )
         ray.get(handles)
+        return
+
+        # packed_data_batches = self._packing(data_batches, pack_max_length)
+        # packed_data_batches = self._grouped_by_max_length(packed_data_batches)
+
+        # # todo: support round up
+        # num_packed_data_batches = len(packed_data_batches)
+        # data_replicate_size = ray.get(self.workers[0].get_data_replicate_size.remote())  # type: ignore[attr-defined]
+        # dp_size = len(self.workers) // data_replicate_size
+        # pad_num = math.ceil(num_packed_data_batches / dp_size) * dp_size - num_packed_data_batches
+        # if pad_num > 0:
+        #     # Reduce the attn calculation time by using multiple short sequence packs
+        #     pad_tokens = tuple(
+        #         torch.zeros(1, 1024, dtype=data_batches[0]["seq_ctx"].input_ids.dtype, device="cpu")
+        #         for _ in range(pack_max_length // 1024)
+        #     )
+        #     if pack_max_length % 1024 > 0:
+        #         pad_tokens = pad_tokens + (
+        #             torch.zeros(
+        #                 1, pack_max_length % 1024, dtype=data_batches[0]["seq_ctx"].input_ids.dtype, device="cpu"
+        #             ),
+        #         )
+        #     pad_seq_ctx = SequenceContext.from_input_ids(pad_tokens, device="cpu")  # type: ignore
+        #     pad_seq_ctx.num_padding = pack_max_length
+        #     pad_shifted_labels = torch.full(
+        #         (1, pack_max_length),
+        #         -100,
+        #         dtype=packed_data_batches[0]["shifted_labels"].dtype,
+        #         device="cpu",
+        #     )
+        #     pad_advantages = torch.full(
+        #         (1, pack_max_length),
+        #         -100,
+        #         dtype=packed_data_batches[0]["advantages"].dtype,
+        #         device="cpu",
+        #     )
+        #     pad_data = {
+        #         "seq_ctx": pad_seq_ctx,
+        #         "shifted_labels": pad_shifted_labels,
+        #         "advantages": pad_advantages,
+        #     }
+        #     pad_data_samples = [pad_data for _ in range(pad_num)]
+        #     packed_data_batches = packed_data_batches + pad_data_samples
+
+        # print(f"len(packed_data_batches): {len(packed_data_batches)}")
+
+        # handles = []
+        # for worker_idx, worker in enumerate(self.workers):
+        #     handles.append(
+        #         worker.fit.remote(  # type: ignore[attr-defined]
+        #             data_batches=packed_data_batches[(worker_idx // data_replicate_size) :: dp_size],
+        #             rollout_idx=rollout_idx,
+        #         )
+        #     )
+        # ray.get(handles)
 
     def offload(self, target: Literal["model", "optimizer", "all"] = "all"):
         if target == "model":

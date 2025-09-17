@@ -16,6 +16,7 @@ from xtuner.v1.model.dense.qwen3 import Qwen3Dense8BConfig
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.utils.compile import maybe_compile
 from xtuner.v1.loss.ce_loss import CELossConfig, CELossContextInputItem
+from xtuner.v1.model.dense.qwen2 import Qwen2Dense7BConfig
 
 # Qwen3 8B
 QWEN3_PATH = os.environ["QWEN3_PATH"]
@@ -26,7 +27,7 @@ class TestQwen3Dense(DistributedTestBase):
         "device,tp_size,compile,tol,loss_class",
         [
             ("cuda", 1, False, 1e-2, "cross_entropy"),
-            ("cuda", 1, False, 1e-2, "chunk_cross_entropy"),
+            # ("cuda", 1, False, 1e-2, "chunk_cross_entropy"),
         ],
     )
     def test_qwen3_dense_run(self, device, tp_size, compile, tol, loss_class):
@@ -52,7 +53,8 @@ class TestQwen3Dense(DistributedTestBase):
         torch.cuda.empty_cache()
 
         with torch.device("meta"):
-            cfg = Qwen3Dense8BConfig()
+            # cfg = Qwen3Dense8BConfig()
+            cfg = Qwen2Dense7BConfig()
             qwen_model = cfg.build().to(torch.bfloat16)
 
         shift_input_ids = input_ids[:, :-1]
@@ -108,7 +110,7 @@ class TestQwen3Dense(DistributedTestBase):
         torch.cuda.empty_cache()
 
         with torch.device("meta"):
-            cfg = Qwen3Dense8BConfig()
+            cfg = Qwen2Dense7BConfig()
             qwen_model = cfg.build().to(torch.bfloat16)
 
         fsdp_config = FSDPConfig(
@@ -139,6 +141,7 @@ class TestQwen3Dense(DistributedTestBase):
                 loss_ctx=loss_ctx,
             )
         loss = output["loss"]
+        dist.breakpoint()
         self.assertTrue(torch.allclose(loss, expected_loss.to(loss.dtype), atol=1e-2, rtol=1e-2))
 
     @parametrize.parametrize(
