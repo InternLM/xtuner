@@ -30,7 +30,7 @@ class ChunkLoss(torch.autograd.Function):
             hidden_states_chunk = hidden_states_chunks[i]
             grad_inputs_chunk = grad_inputs_chunks[i]
 
-            (chunk_grad_input, chunk_grad_weight), (chunk_loss, _, ratio) = torch.func.grad_and_value(
+            (chunk_grad_input, chunk_grad_weight), (chunk_loss, (_, ratio)) = torch.func.grad_and_value(
                 loss_forward, argnums=(0, 1), has_aux=True
             )(hidden_states_chunk, head_weight, None, loss_kwargs_chunks[i])
 

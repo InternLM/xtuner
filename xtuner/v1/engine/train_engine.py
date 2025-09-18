@@ -270,6 +270,7 @@ class TrainEngine:
 
             # llm loss has been global averaged
             llm_loss = output["loss"]
+            max_ratio.append(output["max_ratio"].item())
             grad_acc_loss.append(llm_loss.detach().clone().item())
             step_loss += llm_loss.detach().clone()
 
