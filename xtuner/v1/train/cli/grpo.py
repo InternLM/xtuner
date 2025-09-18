@@ -3,7 +3,6 @@ import os
 
 import ray
 
-from transformers import AutoTokenizer
 from xtuner.v1.config import (
     AdamWConfig,
     FSDPConfig,
@@ -79,8 +78,8 @@ def main(args):
     )
     from xtuner.v1.ray.judger.gsm8k import GSM8KJudgerConfig
 
-    gsm8k_judger_config = GSM8KJudgerConfig()
-    judger_cfg = JudgerConfig(reward_judger_configs={"openai/gsm8k": gsm8k_judger_config})
+    gsm8k_judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k")
+    judger_cfg = JudgerConfig(reward_judger_configs=[gsm8k_judger_config])
     train_dataset_cfg = [
         {
             "dataset": DatasetConfig(name="gsm8k", anno_path=args.data_path, sample_ratio=1.0),
@@ -102,7 +101,6 @@ def main(args):
         collator="fake_collator",
         pack_level="none",
     )
-    tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True)
     if eval_dataset_cfg:
         evaluator_cfg = EvaluatorConfig(
             dataset_cfg=eval_dataset_cfg,

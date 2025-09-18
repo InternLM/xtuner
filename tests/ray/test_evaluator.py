@@ -42,9 +42,9 @@ class TestEvaluator(unittest.TestCase):
             tensor_parallel_size=8,
         )
         from xtuner.v1.ray.judger.gsm8k import GSM8KJudgerConfig
-        gsm8k_judger_config = GSM8KJudgerConfig()
+        gsm8k_judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k")
         self.judger_cfg = JudgerConfig(
-            reward_judger_configs={"openai/gsm8k": gsm8k_judger_config}
+            reward_judger_configs=[gsm8k_judger_config]
         )
         
         self.eval_dataset_cfg = [
@@ -82,7 +82,7 @@ class TestEvaluator(unittest.TestCase):
     @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
     def test_lmdeploy_evaluator(self):
         def custom_compute_metric(samples):
-            return {"custom_accuracy": sum(s["reward"] > 0 for s in samples) / len(samples)}
+            return {"custom_accuracy": sum(s.env.judger.reward["weighted_reward"] > 0 for s in samples) / len(samples)}
 
         evaluator_cfg = EvaluatorConfig(
             dataset_cfg=self.eval_dataset_cfg,
@@ -93,7 +93,6 @@ class TestEvaluator(unittest.TestCase):
         )
         evaluator = Evaluator.remote(evaluator_cfg, self.test_env)
         correctness = ray.get(evaluator.run.remote(sample_params=self.sample_params))
-
         custom_evaluator_cfg = EvaluatorConfig(
             dataset_cfg=self.eval_dataset_cfg,
             tokenizer=self.tokenizer,

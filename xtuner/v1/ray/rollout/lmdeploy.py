@@ -215,16 +215,20 @@ class LMDeployWorker(RolloutWorker):
                 tp=tp_size,
                 ep=ep_size,
                 dp=dp_size,
+                max_batch_size=self.config.rollout_max_batch_size,
                 empty_init=self.config.skip_load_weights,
                 distributed_executor_backend=distributed_executor_backend,
                 mp_engine_backend="ray",  # force ray to pass placement group
                 device_type=accelerator_to_device_type[self.accelerator],
+                logprobs_mode="raw_logprobs",
             )
             if backend == "pytorch"
             else TurbomindEngineConfig(
                 tp=tp_size,
+                max_batch_size=self.config.rollout_max_batch_size,
                 devices=[bundle_idxs % self.config.gpus_per_node for bundle_idxs in self.engine_bundle_idxs],
                 empty_init=self.config.skip_load_weights,
+                logprobs_mode="raw_logprobs",
             )
         )
         if backend == "pytorch" and self.accelerator == "NPU":

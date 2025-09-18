@@ -59,9 +59,9 @@ class TestRollout(unittest.TestCase):
             dtype="bfloat16",
         )
         from xtuner.v1.ray.judger.gsm8k import GSM8KJudgerConfig
-        gsm8k_judger_config = GSM8KJudgerConfig()
+        gsm8k_judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k")
         self.judger_cfg = JudgerConfig(
-            reward_judger_configs={"openai/gsm8k": gsm8k_judger_config}
+            reward_judger_configs=[gsm8k_judger_config]
         )
         self.dataflow_cfg = DataFlowConfig(
             env="test",
@@ -109,8 +109,9 @@ class TestRollout(unittest.TestCase):
         )
         sample_params = SampleParams(temperature=0.0)
         rollout_controller = RolloutController.remote(self.rollout_cfg, rollout_workers_map)  # type: ignore[attr-defined]
-        res1 = ray.get(rollout_controller.rollout.remote(prompt=TEST_TEXT_MESSAGES, sample_params=sample_params))
-
+        extra_params = {"logprobs": True, "top_logprobs": 1, "return_token_ids": True}
+        res1 = ray.get(rollout_controller.rollout.remote(prompt=TEST_TEXT_MESSAGES, sample_params=sample_params, extra_params=extra_params))
+       
         api_url = "http://localhost:8000/v1/chat/completions"
         headers = {"Content-Type": "application/json"}
         payload = {
@@ -126,8 +127,8 @@ class TestRollout(unittest.TestCase):
         self.assertEqual(res1.finish_reason, "stop")
         self.assertEqual(response_data["finish_reason"], "stop")
         self.assertEqual(res1.response, response_data["response"], f"response from function: {res1.response} != response from api server: {response_data["response"]}")
-        print("Response from function:", res1.response)
-        print("Response from API:", response_data["response"])
+        print("Response from function:", res1)
+        print("Response from API:", response_data)
         ray.get(rollout_controller.shutdown.remote(), timeout=300)
 
     @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
@@ -144,7 +145,7 @@ class TestRollout(unittest.TestCase):
                                          self.test_env
                                         )
         responses = ray.get(self.test_flow.run.remote(), timeout=300)
-        finished_samples_count = sum(1 for data in responses for item in data if item.get("state") == "stop" or item.get("state") == "length")
+        finished_samples_count = sum(1 for data in responses for item in data if item.env.rollout.finish_reason == "stop" or item.env.rollout.finish_reason == "length")
         self.assertEqual(finished_samples_count // self.dataflow_cfg.prompt_repeat_k, self.dataflow_cfg.global_batch_size)
         ray.get(self.test_env.shutdown.remote(), timeout=300)
         
@@ -162,7 +163,7 @@ class TestRollout(unittest.TestCase):
                                          self.test_env
                                         )
         responses = ray.get(self.test_flow.run.remote(), timeout=300)
-        finished_samples_count = sum(1 for data in responses for item in data if item.get("state") == "stop" or item.get("state") == "length")
+        finished_samples_count = sum(1 for data in responses for item in data if item.env.rollout.finish_reason == "stop" or item.env.rollout.finish_reason == "length")
         self.assertEqual(finished_samples_count // self.dataflow_cfg.prompt_repeat_k, self.dataflow_cfg.global_batch_size)
         ray.get(self.test_env.shutdown.remote())
 
