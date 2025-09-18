@@ -144,6 +144,7 @@ class GRPOLossContext(BaseLossContext[RLLossContextInputItem]):
             policy_loss_weight,
             self.loss_cfg.policy_loss_cfg,
         )
+        ratio = (logprobs - old_logprobs.detach()).exp()
 
         if self.loss_cfg.use_kl_loss:
             ref_logprobs = loss_kwargs.ref_logprobs
@@ -154,4 +155,4 @@ class GRPOLossContext(BaseLossContext[RLLossContextInputItem]):
             kl_loss = kl_penalty(logprobs, ref_logprobs, kl_loss_weight, self.loss_cfg.kl_loss_type)
             loss = loss + kl_loss
 
-        return loss, logits
+        return loss, logits, ratio.max()

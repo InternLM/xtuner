@@ -25,20 +25,22 @@ class ChunkLoss(torch.autograd.Function):
         grad_inputs_chunks = torch.split(grad_inputs, chunk_size, dim=1)
         hidden_states_chunks = torch.split(hidden_states, chunk_size, dim=1)
 
+        max_ratio = []
         for i in range(len(hidden_states_chunks)):
             hidden_states_chunk = hidden_states_chunks[i]
             grad_inputs_chunk = grad_inputs_chunks[i]
 
-            (chunk_grad_input, chunk_grad_weight), (chunk_loss, _) = torch.func.grad_and_value(
+            (chunk_grad_input, chunk_grad_weight), (chunk_loss, _, ratio) = torch.func.grad_and_value(
                 loss_forward, argnums=(0, 1), has_aux=True
             )(hidden_states_chunk, head_weight, None, loss_kwargs_chunks[i])
 
             accumulated_loss.add_(chunk_loss)
             grad_inputs_chunk.copy_(chunk_grad_input)
             grad_weight.add_(chunk_grad_weight)
+            max_ratio.append(ratio)
 
         ctx.save_for_backward(grad_inputs, grad_weight)
-        return accumulated_loss
+        return accumulated_loss, torch.stack(max_ratio).max()
 
     @staticmethod
     def backward(ctx, *grad_output):

@@ -163,7 +163,10 @@ class TrainingController:
         print(f"len(packed_data_batches): {len(packed_data_batches)}")
 
         handles = []
+        index = list(range(len(packed_data_batches)))
         for worker_idx, worker in enumerate(self.workers):
+            _index = index[(worker_idx // data_replicate_size):: dp_size]
+            print(f"worker_idx: {worker_idx}, index: {_index}")
             handles.append(
                 worker.fit.remote(  # type: ignore[attr-defined]
                     data_batches=packed_data_batches[(worker_idx // data_replicate_size) :: dp_size],

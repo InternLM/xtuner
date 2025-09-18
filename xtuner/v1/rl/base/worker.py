@@ -327,6 +327,13 @@ class TrainingWorker(SingleAcceleratorWorker):
                 data_batches=engine_input,
             )
             grad_norm = self._engine.clip_grad_norm()
+
+            if i == 0 and grad_norm > 100:
+                logger.info(f"{loss_log['total_loss'], other_log['grad_acc_loss'], other_log['max_ratio']}")
+                torch.save(engine_input, f'./temp/engine_input_rank_{self.rank}.pth')
+                self.save_hf(f'./temp/model')
+                raise RuntimeError('DEBUG 退出')
+
             self._engine.step_optimizer(grad_norm)
             log_info = dict()
             log_info.update(loss_log)
@@ -338,6 +345,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             )
             log_str = f"Rollout {rollout_idx} Step {i}: " + log_str
             logger.info(log_str)
+
 
     def save_hf(self, hf_dir: str, save_dtype: torch.dtype = torch.bfloat16):
         self._engine.save_hf(hf_dir, save_dtype)

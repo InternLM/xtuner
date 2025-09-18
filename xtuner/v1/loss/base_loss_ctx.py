@@ -129,8 +129,8 @@ class BaseLossContext(nn.Module, ABC, Generic[LossContextInputItem]):
         assert self.loss_cfg.chunk_size is not None, "chunk_size must be set in chunk mode"
 
         chunks = loss_kwargs.chunk(self.loss_cfg.chunk_size)
-        loss = ChunkLoss.apply(hidden_states, head_weight, head_bias, self.loss_fn, chunks, self.loss_cfg.chunk_size)
-        return loss, None
+        loss, max_ratio = ChunkLoss.apply(hidden_states, head_weight, head_bias, self.loss_fn, chunks, self.loss_cfg.chunk_size)
+        return loss, None, max_ratio
 
     def forward(
         self,
@@ -145,9 +145,9 @@ class BaseLossContext(nn.Module, ABC, Generic[LossContextInputItem]):
         if self.loss_cfg.mode == "eager":
             loss, logits = self.eager_mode(hidden_states, head_weight, head_bias, self.loss_kwargs)
         else:
-            loss, logits = self.chunk_mode(hidden_states, head_weight, head_bias, self.loss_kwargs)
+            loss, logits, max_ratio = self.chunk_mode(hidden_states, head_weight, head_bias, self.loss_kwargs)
 
         # Step 2.c in the loss calculation
-        if dist.is_initialized():
-            loss = all_reduce(loss, op=dist.ReduceOp.SUM, group=dist.group.WORLD)
-        return loss, logits
+        # if dist.is_initialized():
+        #     loss = all_reduce(loss, op=dist.ReduceOp.SUM, group=dist.group.WORLD)
+        return loss, logits, max_ratio
