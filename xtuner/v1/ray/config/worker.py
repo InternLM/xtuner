@@ -107,6 +107,13 @@ class RolloutConfig(BaseModel):
             help="Whether to enable cross-node communication for the rollout worker.",
         ),
     ] = False
+    rollout_max_batch_size: Annotated[
+        Optional[int],
+        Parameter(
+            group=infer_group,
+            help="Maximum batch size for the rollout worker. If not set, it will be determined automatically based on the model and GPU memory.",
+        ),
+    ] = None
     tensor_parallel_size: Annotated[
         int,
         Parameter(

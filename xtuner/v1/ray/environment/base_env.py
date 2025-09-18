@@ -1,5 +1,7 @@
 from abc import ABC, abstractmethod
-from typing import Any, List, Union
+from typing import Any, List
+
+from xtuner.v1.data_proto.rl_data import RLDataFlowItem
 
 
 class BaseEnvironment(ABC):
@@ -85,7 +87,7 @@ class BaseEnvironment(ABC):
         return judger_controller
 
     @abstractmethod
-    async def generate(self, data: Union[list, Any, List[Any]], sample_params: Any) -> Union[list, Any, List[Any]]:
+    async def generate(self, data: List[RLDataFlowItem], sample_params: Any) -> List[RLDataFlowItem]:
         """Generates responses from the model for the given data using the
         inference engine. This method is primarily used for single-step
         inference.
@@ -100,7 +102,7 @@ class BaseEnvironment(ABC):
         pass
 
     @abstractmethod
-    async def run(self, data: Union[list, Any, List[Any]], sample_params: Any) -> Union[list, Any, List[Any]]:
+    async def run(self, data: List[RLDataFlowItem], sample_params: Any) -> List[RLDataFlowItem]:
         """Executes a full cycle of generation and interpretation, such as
         generating a response and then evaluating it with a judger. This method
         can be extended to support complex interactions like multi-turn
