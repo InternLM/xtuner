@@ -140,7 +140,7 @@ class Evaluator:
         Returns:
             dict: A dictionary containing the accuracy score.
         """
-        return {"accuracy": sum(s["reward"] > 0 for s in samples) / len(samples)}
+        return {"accuracy": sum(s["acc"] > 0 for s in samples) / len(samples)}
 
     async def eval_worker_task(self, sample: RLTextDataItem):
         """A single worker task to evaluate one sample.

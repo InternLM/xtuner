@@ -218,17 +218,15 @@ class RLTrainer:
         if self._enable_evaluate and evaluator_config:
             self._evaluator = Evaluator.remote(evaluator_config, self._rollout_env_controller)  # type: ignore[attr-defined]
             self._evaluator_sample_params = SampleParams(
-                top_p=1.0,
-                temperature=0.0,
-                do_sample=False,
+                top_p=0.7,
+                temperature=1.0,
+                do_sample=True,
                 max_tokens=dataflow_config.sample_params.max_tokens,
                 top_k=1,
             )
             self._eval_step = evaluator_config.evaluate_step
         else:
-            self._evaluator = None
-            self._evaluator_sample_params = SampleParams()
-            self._eval_step = 0
+            pass
 
         self._global_batch_size = dataflow_config.global_batch_size
         self._rollout_steps = (
