@@ -163,14 +163,17 @@ class JudgerController:
         num_samples = len(group_data_item)
         final_rewards = [0.0] * num_samples
 
+        acc_list = []
         for i in range(num_samples):
             for name, scores in rewards_by_name.items():
                 weight = data_source.get(name, 1.0)
-                final_rewards[i] += scores[i] * weight
+                final_rewards[i] += scores[i]['score'] * weight
+                acc_list.append(scores[i]['acc'])
 
         assert len(final_rewards) == num_samples
         for i, item in enumerate(group_data_item):
             item["reward"] = final_rewards[i]
+            item["acc"] = acc_list[i]
         if not input_list:
             return group_data_item[0]
         return group_data_item

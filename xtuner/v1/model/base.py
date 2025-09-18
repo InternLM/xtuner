@@ -139,6 +139,7 @@ class ModelOutputs(TypedDict):
     hidden_states: NotRequired[list[torch.Tensor]]
     logits: NotRequired[torch.Tensor]
     loss: torch.Tensor
+    max_ratio: torch.Tensor
 
 
 def _is_float8_available():
