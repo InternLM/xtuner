@@ -33,7 +33,9 @@ class LMHead(nn.Linear):
             b = self.bias
         if loss_ctx is None:
             logits = F.linear(hidden_states, w, b)
-            return None, logits
+            # Note: the loss calculation will convert logits to float32, so for alignment,
+            # we also need to convert it to float32 here to prevent the ratio from being 1 during rl training
+            return None, logits.float()
         else:
             return loss_ctx.forward(hidden_states, w, b)
 
