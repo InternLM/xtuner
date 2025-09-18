@@ -303,8 +303,6 @@ class TrainEngine:
 
             del output
             loss.backward()
-            step_loss += loss.detach().clone()
-            grad_acc_loss.append(loss.detach().clone().item())
 
         if moe_need_update_bias:
             avg_count_load = tokens_per_expert_global_for_bias.float().mean(1)
