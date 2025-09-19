@@ -8,7 +8,8 @@ on:
       - "docs/**"
       - "**.md"
 env:
-  WORKSPACE_PREFIX: $(echo $GITHUB_WORKSPACE |cut -d '/' -f 1-4)
+  WORKSPACE_PREFIX: $(echo $GITHUB_WORKSPACE |cut -d '/' -f 1-5)
+  WORKSPACE_PREFIX_SHORT: $(echo $GITHUB_WORKSPACE |cut -d '/' -f 1-3)
   IMAGE: registry.h.pjlab.org.cn/ailab-puyu-puyu_gpu/xtuner:pt28_20250911_6652194
 
 concurrency:
@@ -22,15 +23,13 @@ jobs:
     - name: mask env
       run: |
         echo "::add-mask::${{env.WORKSPACE_PREFIX}}"
-        echo "::add-mask::$path_prefix"
+        echo "::add-mask::${{env.WORKSPACE_PREFIX_SHORT}}"
     - uses: actions/checkout@v3
 
     - name: sft-train
       run: |
-        pwd
         export PYTHONPYCACHEPREFIX=/tmp
         result_dir=../${GITHUB_JOB}_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}
-        echo $result_dir
         command="torchrun --nproc-per-node 8 --master_addr=\${MASTER_ADDR} --master_port=\${MASTER_PORT} --nnodes=\${WORLD_SIZE} --node_rank=\${RANK} ci/scripts/test_sft_trainer.py ${result_dir}"
         python ci/scripts/run_yidian.py "$IMAGE" "$CI_IMPORT" "$command" --nodes 2
         dirs=( ${result_dir}*/ )
