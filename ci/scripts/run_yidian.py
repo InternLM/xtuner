@@ -56,9 +56,9 @@ def main():
         job_name=f"xtuner-ci-{job_id}-{commit_branch}-{commit_id}",
         image=args.image,
         cmd=cmd,
-        gpus_per_task=16,       # Yidian使用16个GPU per node
-        cpus_per_task=512,      # 更多CPU资源（基于test_clusterx_sft.py）
-        memory_per_task="1800", # 更大内存（基于test_clusterx_sft.py的1800G配置）
+        gpus_per_task=8,       # Yidian使用16个GPU per node
+        cpus_per_task=120,      # 更多CPU资源（基于test_clusterx_sft.py）
+        memory_per_task="800", # 更大内存（基于test_clusterx_sft.py的1800G配置）
         num_nodes=args.nodes,
         no_env=True             # 不继承环境变量，使用自定义环境
     )
