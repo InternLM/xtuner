@@ -143,7 +143,7 @@ class TrainerConfig(BaseModel):
     hf_interval: int | None = None
     hf_max_keep: int | None = None
     exp_tracker: Literal["tensorboard", "jsonl"] = "jsonl"
-    profile_step: list | int | None = None
+    profile_step: list[int] | int | None = None
     profile_time: bool = True
     profile_memory: bool = False
     intra_layer_micro_batch: int = 1
@@ -190,7 +190,7 @@ class Trainer:
         checkpoint_maxkeep (int | None): Maximum number of checkpoints to keep.
         hf_interval (int | None): Interval for saving Huggingface format checkpoints.
         hf_max_keep (int | None): Maximum number of Huggingface checkpoints to keep.
-        profile_step (int | None): Step to perform profiling.
+        profile_step (list[int] | int | None): Step to perform profiling.
         profile_time (bool): Whether to profile training time.
         profile_memory (bool): Whether to profile memory usage.
         intra_layer_micro_batch (int): Intra-layer micro batch size.
@@ -238,7 +238,7 @@ class Trainer:
         hf_interval: int | None = None,
         hf_max_keep: int | None = None,
         exp_tracker: Literal["tensorboard", "jsonl"] = "jsonl",
-        profile_step: list | None = None,
+        profile_step: list[int] | int | None = None,
         profile_time: bool = True,
         profile_memory: bool = False,
         intra_layer_micro_batch: int = 1,
@@ -258,7 +258,7 @@ class Trainer:
 
         self._micro_batch_size: int | None = None
 
-        if type(profile_step) is int:
+        if isinstance(profile_step, int):
             profile_step = [profile_step]
         self._profile_step = profile_step
         self._profile_time = profile_time
