@@ -43,12 +43,12 @@ jobs:
         run_py="ci/scripts/test_sft_trainer.py" && echo "run_py=$run_py" >> "$GITHUB_ENV"
 
     - name: Upload Artifacts
-       uses: actions/upload-artifact@v4
-       with:
-         if-no-files-found: error
-         path: ./${GITHUB_JOB}_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}
-         retention-days: 7
-         name: artifact-${GITHUB_JOB}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}
+      uses: actions/upload-artifact@v4
+      with:
+        if-no-files-found: error
+        path: ./${GITHUB_JOB}_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}
+        retention-days: 7
+        name: artifact-${GITHUB_JOB}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}
 
     - name: check-metric
       run: |
