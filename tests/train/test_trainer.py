@@ -2,7 +2,7 @@ import os
 import tempfile
 from pathlib import Path
 from unittest.mock import patch, Mock
-from typing import cast
+import pickle
 
 import torch
 import torch.distributed as dist
@@ -11,9 +11,19 @@ from torch.testing._internal.common_distributed import DistributedTestBase
 
 from xtuner.v1.config import AdamWConfig, FSDPConfig, LRConfig
 from xtuner.v1.datasets.config import DatasetConfig, DataloaderConfig
-from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
+from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config, Qwen3MoE235BA22Config
+from xtuner.v1.model.dense.qwen3 import Qwen3Dense4BConfig, Qwen3Dense8BConfig
+from xtuner.v1.model.compose.intern_s1 import InternS1Config, InternS1MiniConfig
+from xtuner.v1.model.compose.internvl import (
+    InternVL3P5Dense8BConfig,
+    InternVL3P5MoE30BA3Config,
+)
 from xtuner.v1.train.trainer import Trainer, ResumeConfig
 from xtuner.v1.datasets import FTDPTokenizeFnConfig
+from xtuner.v1.datasets.sft_tokenize_fn import OpenaiTokenizeFunctionConfig
+from xtuner.v1.train.trainer import TrainerConfig
+from xtuner.v1.loss import CELossConfig
+from unittest import TestCase
 
 from xtuner.v1.utils.device import get_device
 
@@ -334,3 +344,61 @@ class TestTrainerSaveHF(DistributedTestBase):
     @property
     def world_size(self) -> int:
         return int(os.getenv("XTUNER_TEST_WORLD_SIZE", "2"))
+
+
+class TestTrainerConfig(TestCase):
+    def setUp(self):
+        self.dataset_config = [
+            {
+                "dataset": DatasetConfig(name="alpaca", anno_path="", sample_ratio=1.0),
+                "tokenize_fn": OpenaiTokenizeFunctionConfig(
+                    max_length=16386, chat_template="qwen3"
+                ),
+                # "tokenize_fn": FTDPTokenizeFnConfig(max_length=16386),
+            },
+        ]
+        self.dataloader_config = DataloaderConfig(pack_max_length=100)
+
+        self.optim_cfg = AdamWConfig(lr=0.1, weight_decay=0.1)
+        self.lr_cfg = LRConfig(lr_type="cosine", lr_min=0.001, warmup_ratio=0.03)
+
+        self.fsdp_cfg = FSDPConfig(torch_compile=True)
+
+    def build_trainer(self, model_cfg):
+        return TrainerConfig(
+            model_cfg=model_cfg,
+            optim_cfg=self.optim_cfg,
+            dataset_cfg=self.dataset_config,
+            dataloader_cfg=self.dataloader_config,
+            lr_cfg=self.lr_cfg,
+            loss_cfg=CELossConfig(mode="chunk", chunk_size=1024),
+            global_batch_size=1,
+            sp_size=1,
+            total_epoch=10,
+            load_from="",
+            seed=42,
+            checkpoint_interval=1,
+            tokenizer_path="",
+            work_dir="",
+        )
+
+    def test_dump_trainer_config(self):
+        model_cfg_list = [
+            Qwen3Dense4BConfig(),
+            Qwen3Dense8BConfig(),
+            Qwen3MoE30BA3Config(),
+            Qwen3MoE235BA22Config(),
+            InternS1MiniConfig(),
+            InternS1Config(),
+            InternVL3P5Dense8BConfig(),
+            InternVL3P5MoE30BA3Config(),
+        ]
+
+        for model_cfg in model_cfg_list:
+            trainer_cfg = self.build_trainer(model_cfg)
+            self._dump_trainer_config(trainer_cfg)
+
+    def _dump_trainer_config(self, trainer_cfg: TrainerConfig):
+        trainer_cfg.model_dump_json()
+        trainer_cfg.model_dump()
+        pickle.dumps(trainer_cfg)
