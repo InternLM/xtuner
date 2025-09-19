@@ -56,6 +56,7 @@ class VisionComposeConfigProtocol(Protocol):
 
     def build(self) -> VisionComposeModelProtocol: ...
 
+    @property
     def hf_config(self) -> PretrainedConfig | None: ...
 
 

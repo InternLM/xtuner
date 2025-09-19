@@ -8,6 +8,7 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 from cyclopts import Parameter
+from pydantic import BaseModel as PydanticBaseModel
 from pydantic import ConfigDict
 from torch import nn
 from torch.distributed._functional_collectives import all_reduce
@@ -51,7 +52,7 @@ class MoEModelOutputs(ModelOutputs):
     tokens_per_expert_global: NotRequired[torch.Tensor]
 
 
-class BalancingLossConfig(BaseModel):
+class BalancingLossConfig(PydanticBaseModel):
     balancing_loss_alpha: float = 0.001
     balancing_loss_global_average: bool = True
 
@@ -63,7 +64,7 @@ class BalancingLossConfig(BaseModel):
         )
 
 
-class ZLossConfig(BaseModel):
+class ZLossConfig(PydanticBaseModel):
     z_loss_alpha: float = 0.001
     z_loss_global_average: bool = True
 
