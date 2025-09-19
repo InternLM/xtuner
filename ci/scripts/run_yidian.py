@@ -37,16 +37,16 @@ def main():
     
     current_dir = os.getcwd()
     cmd = f"cd {current_dir}; {args.env}; {args.cmd}"
-    print(f"Running command: {cmd}")
+    # print(f"Running command: {cmd}")
     
     assert params_cls is not None and cluster_cls is not None, (
         f"Cluster {CLUSTER} is not available in current ci machine!"
     )
     
     # 获取GitLab CI环境变量
-    commit_id = os.environ.get('CI_COMMIT_SHORT_SHA', 'test')
-    commit_branch = os.environ.get('CI_COMMIT_REF_NAME', 'test')
-    job_id = os.environ.get('CI_JOB_ID', '0')
+    commit_id = os.environ.get('GITHUB_SHA', 'test')
+    commit_branch = os.environ.get('GITHUB_REF_NAME', 'test')
+    job_id = os.environ.get('GITHUB_RUN_ID', '0')
     
     # 清理分支名中的非法字符，避免Kubernetes标签错误
     commit_branch = commit_branch.replace('/', '-').replace('\\', '-').replace('_', '-')

@@ -1,0 +1,66 @@
+name: sft
+on:
+  pull_request:
+    branches:
+      - "main"
+      - "refactor"
+    paths-ignore:
+      - "docs/**"
+      - "**.md"
+env:
+  WORKSPACE_PREFIX: $(echo $GITHUB_WORKSPACE |cut -d '/' -f 1-4)
+  IMAGE: registry.h.pjlab.org.cn/ailab-puyu-puyu_gpu/xtuner:pt28_20250911_6652194
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sft_trainer:
+    runs-on: [h_cluster]
+    steps:
+    - name: mask env
+      run: |
+        echo "::add-mask::${{env.WORKSPACE_PREFIX}}"
+        echo "::add-mask::$path_prefix"
+    - uses: actions/checkout@v3
+
+    - name: sft-train
+      run: |
+        pwd
+        export PYTHONPYCACHEPREFIX=/tmp
+        result_dir=../${GITHUB_JOB}_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}
+        echo $result_dir
+        command="torchrun --nproc-per-node 8 --master_addr=\${MASTER_ADDR} --master_port=\${MASTER_PORT} --nnodes=\${WORLD_SIZE} --node_rank=\${RANK} ci/scripts/test_sft_trainer.py ${result_dir}"
+        python ci/scripts/run_yidian.py "$IMAGE" "$CI_IMPORT" "$command" --nodes 2
+        dirs=( ${result_dir}*/ )
+        for dir in "${dirs[@]}"; do
+            dir_name="${dir%/}"
+            rsync -av --exclude='ckpt-*' --exclude='hf-*' $dir_name ./
+        done
+        ls
+        work_dir=${result_dir} && echo "work_dir=$work_dir" >> "$GITHUB_ENV"
+        run_py="ci/scripts/test_sft_trainer.py" && echo "run_py=$run_py" >> "$GITHUB_ENV"
+
+    - name: Upload Artifacts
+       uses: actions/upload-artifact@v4
+       with:
+         if-no-files-found: error
+         path: ./${GITHUB_JOB}_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}
+         retention-days: 7
+         name: artifact-${GITHUB_JOB}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}
+
+    - name: check-metric
+      run: |
+        export PYTHONPYCACHEPREFIX=/tmp
+        dirs=( $work_dir*/ )
+        for dir in "${dirs[@]}"; do
+          dir_name="${dir%/}"
+          rank0_log=( $dir_name/*/rank0.log )
+          echo "begining check $rank0_log"
+          if [[ "$dir_name" == *"ep8"* ]]; then
+              python ./ci/scripts/check_metric.py $rank0_log $run_py --check_metric '{"lr":0,"text_tokens":0,"reduced_llm_loss":0.01,"grad_norm":0.02}'
+          else
+              python ./ci/scripts/check_metric.py $rank0_log $run_py
+          fi
+        done
