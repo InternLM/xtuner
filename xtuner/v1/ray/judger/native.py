@@ -80,7 +80,7 @@ class NativeJudger:
         """
 
         assert len(data_item) == 1, "Default preprocess only supports single data item."
-        # todo: 支持api server来计算batch_reward
+        # TODO: Support batch reward calculation via API server
         response = data_item[0].env.rollout.response
         assert data_item[0].data.reward_model is not None
         label = data_item[0].data.reward_model["ground_truth"]

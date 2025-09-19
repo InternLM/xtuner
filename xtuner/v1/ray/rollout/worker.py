@@ -312,7 +312,6 @@ class RolloutWorker(SingleAcceleratorWorker):
                     last_trajectory = last_trajectory + delta_content if delta_content else last_trajectory
                     last_token_id = chunk_data["choices"][0]["delta"].get("gen_tokens")
                     if last_token_id is not None:
-                        self.logger.info(f"{chunk_data['choices'][0]['delta']}")
                         last_token_ids.extend(last_token_id)
                     finish_reason = chunk_data["choices"][0].get("finish_reason")
                     logprobs_content = chunk_data["choices"][0]["logprobs"]

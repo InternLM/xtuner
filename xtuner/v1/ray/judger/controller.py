@@ -157,7 +157,7 @@ class JudgerController:
         if not isinstance(group_data_item, list):
             input_type_is_list = False
             group_data_item = [group_data_item]
-        # 这里认为所有数据的data_source是一样的
+        # Assume all data have the same data_source
         data_source = group_data_item[0].data.data_source
         assert data_source, "No data source found for the given datasets"
 

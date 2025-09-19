@@ -199,21 +199,20 @@ class ReplayBufferStorage:
         action_id = replay_meta.action_id
         state_str = replay_meta.state
 
-        # 记录没完成rollut的group_id,用于下次续roll
+        # Here, partial rollout is handled based on whether finish_reason is "paused".
+        # The logic for "paused" is user-defined, indicating that this data was
+        # interrupted before inference was completed. Other states are returned
+        # by the inference engine.
         if state_str == "paused":
             self._paused.append(action_id)
         elif state_str == "returned":
             self._returned.append(action_id)
 
-        # grpo算法下，一个prompt是一个action-id,如果prompt发生了变化，那就是新的action_id
-        # 一个prompt的不同回答对应不同的observation_id
-        # 多轮的情况下：当prompt发生变化，则会有新的action_id,通过root_id标识数据的最初来源
-
-        # action相关
+        # action
         self._root2actions[root_id].append(action_id)
         self._actions[action_id] = replay_meta
 
-        # observation相关
+        # observation
         for observation_id in replay_meta.observation_ids:
             self._action2observations[action_id].append(observation_id)
             self._observations[observation_id] = replay_meta

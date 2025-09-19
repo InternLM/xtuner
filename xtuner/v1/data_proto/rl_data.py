@@ -14,6 +14,16 @@ from typing_extensions import Annotated
 
 
 class RLUIDItem(BaseModel):
+    """A unique identifier for tracking data items within the dataflow.
+
+    Attributes:
+        env (str): The environment name.
+        root_id (int): The root ID for grouping related data items.
+        action_id (int): The ID for a specific action in prompt.
+        observation_id (int): The ID for a specific observation in response.
+        version (int): The version number of the data item.
+    """
+
     model_config = ConfigDict(extra="forbid")
     env: str = ""
     root_id: int = -1
@@ -22,8 +32,19 @@ class RLUIDItem(BaseModel):
     version: int = -1
 
 
-# dataset部分输出的数据结构
 class RLDatasetItem(BaseModel):
+    """Represents the data structure output from the dataset.
+
+    Attributes:
+        messages (Optional[List[Dict[str, Any]]]): The message list for the prompt.
+        input_ids (Optional[List[int]]): The tokenized input IDs.
+        num_tokens (Optional[int]): The number of tokens in the input.
+        ability (Optional[str]): The ability or category of the data.
+        reward_model (Optional[Dict[str, Any]]): Data required by the reward model, like ground truth.
+        data_source (Optional[Dict[str, Any]]): The source of the data, used for weighting rewards.
+        extra_info (Dict[str, Any]): Additional user-defined information.
+    """
+
     model_config = ConfigDict(extra="forbid")
     messages: Optional[List[Dict[str, Any]]] = None
     input_ids: Optional[List[int]] = None
@@ -34,8 +55,18 @@ class RLDatasetItem(BaseModel):
     extra_info: Dict[str, Any] = dict()
 
 
-# rollout部分输出的数据结构
 class RLRolloutResponseItem(BaseModel):
+    """Represents the data structure output from the rollout process.
+
+    Attributes:
+        response (Optional[str]): The generated text response from the model.
+        response_ids (Optional[List[int]]): The token IDs of the generated response.
+        num_return_tokens (Optional[int]): The number of tokens in the response.
+        finish_reason (Optional[str]): The reason why the generation finished (e.g., 'stop', 'length').
+        logprobs (Optional[List[float]]): The log probabilities of the generated tokens.
+        extra_info (Dict[str, Any]): Additional user-defined information.
+    """
+
     model_config = ConfigDict(extra="forbid")
     response: Optional[str] = None
     response_ids: Optional[List[int]] = None
@@ -45,22 +76,38 @@ class RLRolloutResponseItem(BaseModel):
     extra_info: Dict[str, Any] = dict()
 
 
-# judger部分输出数据结构
 class RLJudgerResponseItem(BaseModel):
+    """Represents the data structure output from the judger.
+
+    Attributes:
+        uid (Optional[int]): A unique ID to identify which input the result corresponds to.
+        reward (Dict[str, Any]): A dictionary of reward scores, e.g., {"judger_type": reward_score, "weighted_scores": score}.
+        extra_info (Dict[str, Any]): Additional user-defined information.
+    """
+
     model_config = ConfigDict(extra="forbid")
-    uid: Optional[int] = None  # 必须需要uid来标识是哪个输入数据的结果
-    reward: Dict[str, Any] = dict()  # example: {"judger_type": reward_score}
+    uid: Optional[int] = None
+    reward: Dict[str, Any] = dict()
     extra_info: Dict[str, Any] = dict()
 
 
-# agent部分输出数据结构
 class RLAgentDataItem(BaseModel):
+    # todo: define agent output data structure
     model_config = ConfigDict(extra="forbid")
     extra_info: Dict[str, Any] = dict()
 
 
-# 包含env内部的数据结构，作为observation存储的字段
 class RLEnvDataItem(BaseModel):
+    """Contains the internal data structures of the environment, stored as an
+    observation.
+
+    Attributes:
+        rollout (RLRolloutResponseItem): Data from the rollout stage.
+        judger (RLJudgerResponseItem): Data from the judger stage.
+        agent (RLAgentDataItem): Data from the agent stage.
+        extra_info (Dict[str, Any]): Additional user-defined information.
+    """
+
     model_config = ConfigDict(extra="forbid")
     rollout: RLRolloutResponseItem = RLRolloutResponseItem()
     judger: RLJudgerResponseItem = RLJudgerResponseItem()
@@ -68,14 +115,33 @@ class RLEnvDataItem(BaseModel):
     extra_info: Dict[str, Any] = dict()
 
 
-# 其他部分，不属于某个环节的数据。预留
 class RLExtraDataItem(BaseModel):
+    """Reserved for data that does not belong to a specific stage of the
+    dataflow.
+
+    Attributes:
+        retry_times (int): The number of times the data processing has been retried.
+        extra_info (Dict[str, Any]): Additional user-defined information.
+    """
+
     model_config = ConfigDict(extra="forbid")
     retry_times: int = 0
     extra_info: Dict[str, Any] = dict()
 
 
 class RLDataFlowItem(BaseModel):
+    """The core data structure that flows through the dataflow and environment.
+
+    It encapsulates all information related to a single data point, including its
+    unique ID, the original data, environment outputs, and extra metadata.
+
+    Attributes:
+        uid (RLUIDItem): The unique identifier for the data item.
+        data (RLDatasetItem): The original data from the dataset.
+        env (RLEnvDataItem): The collected outputs from the environment stages.
+        extra_info (RLExtraDataItem): Additional reserved information.
+    """
+
     model_config = ConfigDict(extra="forbid")
     uid: RLUIDItem = RLUIDItem()
     data: RLDatasetItem = RLDatasetItem()
@@ -84,6 +150,24 @@ class RLDataFlowItem(BaseModel):
 
 
 def update_dataflow_item(group_data_items, target_key, target_value):
+    """Update a list of RLDataFlowItem objects by setting a nested attribute
+    for each item.
+
+    Args:
+        group_data_items (List[RLDataFlowItem]): List of data items to update.
+        target_key (str): Dot-separated path to the attribute to update (e.g., 'env.rollout.response').
+        target_value (List[Any]): List of values to set, one for each data item.
+
+    Returns:
+        List[RLDataFlowItem]: The updated list of data items.
+
+    Example:
+        >>> # Suppose you want to update the 'response' field in env.rollout for each item
+        >>> items = [RLDataFlowItem(), RLDataFlowItem()]
+        >>> responses = ["hello", "world"]
+        >>> update_dataflow_item(items, "env.rollout.response", responses)
+        # Now items[0].env.rollout.response == "hello", items[1].env.rollout.response == "world"
+    """
     group_length = len(group_data_items)
     assert group_length == len(target_value)
 
@@ -137,15 +221,29 @@ class RLRolloutRequestItem(BaseModel):
 
 @dataclass
 class ReplayMeta:
-    # replaymeta会包含一个prompt的所有版本的数据，在转为dataitem时会拆分
+    """ReplayMeta aggregates all versions of data related to a single prompt in
+    the replay buffer.
+
+    Attributes:
+        env (str): Name or identifier of the environment.
+        root_id (int): Identifier for grouping related prompts (e.g., for GRPO or multi-turn scenarios).
+        action_id (int): Unique identifier for the prompt. If the prompt changes (such as in a multi-turn scenario), a new action_id is assigned.
+        action_ref (ObjectRef): Ray object reference to the prompt data (corresponds to RLDatasetItem in RLDataFlowItem).
+        observation_ids (List[int]): IDs for different responses to the same prompt. Each response has a unique observation_id.
+        observation_refs (List[ObjectRef]): Ray object references to environment data for each observation (corresponds to RLEnvDataItem in RLDataFlowItem).
+        observation_versions (List[int]): Version numbers for each observation, supporting async rollout.
+        state (str): Overall state of the prompt (e.g., "paused" for partial rollout, or other rollout states).
+        extra_info (Dict[str, Any]): Additional metadata or information.
+    """
+
     env: str = ""
     root_id: int = 0  # designed for grpo
     action_id: int = 0  # same prompt share the same action_id
     action_ref: ObjectRef = None
-    observation_ids: List[int] = field(default_factory=list)  # 一个prompt不同版本的observation
+    observation_ids: List[int] = field(default_factory=list)  # observation IDs for different versions
     observation_refs: List[ObjectRef] = field(default_factory=list)
-    observation_versions: List[int] = field(default_factory=list)  # 为异步rollout预留
-    state: str = ""  # 暂时还没定义，应该会包含rollout的states的定义
+    observation_versions: List[int] = field(default_factory=list)  # reserved for async rollout
+    state: str = ""  # overall state, e.g., for partial rollout
     extra_info: Dict[str, Any] = field(default_factory=dict)
 
 
