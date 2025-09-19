@@ -291,9 +291,12 @@ class TileWiseFloat8GroupedLinear(torch.nn.Module):
             weight_fp8 = view_weight.apply(weight_fp8, self.ori_local_shape)
         else:
             weight = weight.view(*self.ori_local_shape)
-            weight_fp8 = weight_to_per_block_float8_dynamic.apply(weight, torch.float8_e4m3fn, group_size=128)
+            weight_fp8 = weight_to_per_block_float8_dynamic.apply(weight, torch.float8_e4m3fn, 128)
 
+        orig_shape = input.shape
+        input = input.view(-1, input.shape[-1])
         out = fp8_gmm_weight_per_block_act_per_tile.apply(input, weight_fp8, tokens_per_expert)
+        out = out.view(*orig_shape[:-1], -1)
         return out
 
     @property

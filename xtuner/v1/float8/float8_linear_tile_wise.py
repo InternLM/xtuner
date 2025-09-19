@@ -229,7 +229,7 @@ class TileWiseFloat8Linear(nn.Linear):
             weight_fp8 = slice_weight.apply(weight, self.ori_shape) if self.is_padded else weight
         else:
             weight = weight.view(*self.ori_shape)
-            weight_fp8 = weight_to_per_block_float8_dynamic.apply(weight, torch.float8_e4m3fn, group_size=128)
+            weight_fp8 = weight_to_per_block_float8_dynamic.apply(weight, torch.float8_e4m3fn, 128)
 
         out = fp8_matmul_weight_per_block_act_per_tile.apply(input, weight_fp8)
 

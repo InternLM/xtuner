@@ -8,4 +8,5 @@
    model.md
    dataset.md
    loss.md
+   float8.md
    profile.md

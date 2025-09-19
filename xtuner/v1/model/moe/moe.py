@@ -305,6 +305,7 @@ class MoE(BaseModel):
         cat_position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None
         cat_hidden_states: torch.Tensor | None = None
 
+        moe_forawrd = False
         for idx, decoder_layer in self.layers.items():
             layer_idx = int(idx)
 
@@ -322,8 +323,9 @@ class MoE(BaseModel):
                     seq_ctx=cat_seq_ctx,
                 )
             else:
-                if cat_hidden_states is not None:
+                if cat_hidden_states is not None and not moe_forawrd:
                     hidden_states_list = list(cat_hidden_states.chunk(len(seq_ctx_list), dim=1))
+                    moe_forawrd = True
 
                 layer_results = decoder_layer(
                     *hidden_states_list,
