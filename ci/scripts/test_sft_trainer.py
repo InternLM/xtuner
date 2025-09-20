@@ -20,6 +20,7 @@ from xtuner.v1.train.trainer import Trainer
 from xtuner.v1.utils.device import get_device
 from xtuner.v1.loss import CELossConfig
 import argparse
+from xtuner.v1.model.dense.qwen2 import Qwen2Dense7BConfig
 
 
 
@@ -218,8 +219,9 @@ def main():
     os.environ["DG_CACHE_DIR"] = f"/tmp/.adaptive_gemm-{os.getenv('RANK', '0')}"
 
     moe_cfgs = [
-        (Qwen3MoE30BA3Config(balancing_loss_cfg=BalancingLossConfig()), "ep1"),
-        (Qwen3MoE30BA3Config(ep_size=8, dispatcher="all2all"), "ep8"),
+        # (Qwen3MoE30BA3Config(balancing_loss_cfg=BalancingLossConfig()), "ep1"),
+        # (Qwen3MoE30BA3Config(ep_size=8, dispatcher="all2all"), "ep8"),
+        (Qwen2Dense7BConfig(), "dense")
     ]
     for moe_cfg, name in moe_cfgs:
         optim_cfg = AdamWConfig(lr=6e-05)
@@ -227,7 +229,7 @@ def main():
         fsdp_cfg = FSDPConfig(
             torch_compile=False, #get_device() == "cuda",
             cpu_offload=False,
-            ep_size=moe_cfg.ep_size,
+            ep_size=1,
             # hsdp_sharding_size=4,
         )
         dataset_config = [

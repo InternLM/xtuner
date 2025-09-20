@@ -1,4 +1,3 @@
-import math
 import os
 import time
 from pathlib import Path
@@ -239,17 +238,16 @@ class TrainingWorker(SingleAcceleratorWorker):
         self._ref_model.to_device("cpu")
         return loss_ctx_input_list
 
-    def fit(self, data_batches: list[WorkerInputItem], rollout_idx: int):
-        num_batches = len(data_batches)
-        iters_per_step = math.ceil(num_batches / self._optimizer_steps)
-        if num_batches < self._optimizer_steps:
-            logger.info(
-                f"Optimizer only step once because num_batches {num_batches} < optimizer_steps {self._optimizer_steps}."
-            )
+    def fit(self, data_batches: list[list[WorkerInputItem]], rollout_idx: int):
+        iters_per_step = [len(data) for data in data_batches]
+        accum_iters = [0]
+        for iters in iters_per_step:
+            accum_iters.append(accum_iters[-1] + iters)
+        data_batches_flatten: list[WorkerInputItem] = sum(data_batches, [])  # type: ignore
 
         seq_ctx_list: list[SequenceContext] = []
         loss_ctx_input_list: list[RLLossContextInputItem] = []
-        for data in data_batches:
+        for data in data_batches_flatten:
             seq_ctx = data["seq_ctx"].to(DEVICE)
             loss_ctx_input = RLLossContextInputItem(
                 shifted_labels=data["shifted_labels"],
@@ -261,7 +259,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             seq_ctx_list.append(seq_ctx)
             loss_ctx_input_list.append(loss_ctx_input)
 
-        del data_batches
+        del data_batches, data_batches_flatten
 
         rank_grad_tokens: torch.Tensor | None = None
         for loss_ctx_input in loss_ctx_input_list:
@@ -303,9 +301,12 @@ class TrainingWorker(SingleAcceleratorWorker):
             avg_kl_div = kl_div_sum / global_grad_tokens if global_grad_tokens > 0 else 0
             logger.info(f"Rollout {rollout_idx}: avg KL divergence: {avg_kl_div:.4f}")
 
-        for i in range(0, len(seq_ctx_list), iters_per_step):
-            batches_seq_ctx = seq_ctx_list[i : i + iters_per_step]
-            batches_loss_ctx_input = loss_ctx_input_list[i : i + iters_per_step]
+        for step_idx in range(self._optimizer_steps):
+            batches_seq_ctx = seq_ctx_list[accum_iters[step_idx] : accum_iters[step_idx + 1]]
+            batches_loss_ctx_input = loss_ctx_input_list[accum_iters[step_idx] : accum_iters[step_idx + 1]]
+            # for i in range(0, len(seq_ctx_list), iters_per_step):
+            #     batches_seq_ctx = seq_ctx_list[i : i + iters_per_step]
+            #     batches_loss_ctx_input = loss_ctx_input_list[i : i + iters_per_step]
 
             loss_cfg = self.config.loss_cfg
             LossContext = loss_cfg.loss_ctx_cls
@@ -336,7 +337,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                 f"{key}={value:.4f}" if isinstance(value, float) else f"{key}={value}"
                 for key, value in log_info.items()
             )
-            log_str = f"Rollout {rollout_idx} Step {i}: " + log_str
+            log_str = f"Rollout {rollout_idx} Step {step_idx}: " + log_str
             logger.info(log_str)
 
     def save_hf(self, hf_dir: str, save_dtype: torch.dtype = torch.bfloat16):
