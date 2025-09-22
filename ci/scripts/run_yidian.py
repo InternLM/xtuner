@@ -46,7 +46,7 @@ def main():
     # 获取GitLab CI环境变量
     commit_id = os.environ.get('GITHUB_SHA', 'test')[0:8]
     commit_branch = os.environ.get('GITHUB_HEAD_REF', 'test')
-    job_id = os.environ.get('GITHUB_RUN_ID', '0')
+    job_id = os.environ.get('GITHUB_RUN_ID', '0') + '-'  + os.environ.get('GITHUB_RUN_ATTEMPT', '0')
     
     # 清理分支名中的非法字符，避免Kubernetes标签错误
     commit_branch = commit_branch.replace('/', '-').replace('\\', '-').replace('_', '-')

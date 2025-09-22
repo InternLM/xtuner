@@ -28,8 +28,6 @@ jobs:
 
     - name: sft-train
       run: |
-        echo $USER
-        ls -al /mnt/shared-storage-user/caoweihan/qa-caif-cicd
         export PYTHONPYCACHEPREFIX=/tmp
         result_dir=../${GITHUB_JOB}_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}
         command="torchrun --nproc-per-node 8 --master_addr=\${MASTER_ADDR} --master_port=\${MASTER_PORT} --nnodes=\${WORLD_SIZE} --node_rank=\${RANK} ci/scripts/test_sft_trainer.py ${result_dir}"
@@ -37,7 +35,7 @@ jobs:
         dirs=( ${result_dir}*/ )
         for dir in "${dirs[@]}"; do
             dir_name="${dir%/}"
-            rsync -av --exclude='ckpt-*' --exclude='hf-*' $dir_name ./
+            rsync -av --exclude='checkpoints' --exclude='hf-*' $dir_name ./
         done
         ls
         work_dir=${result_dir} && echo "work_dir=$work_dir" >> "$GITHUB_ENV"
@@ -47,7 +45,7 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         if-no-files-found: error
-        path: ./${GITHUB_JOB}_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}
+        path: ./${GITHUB_JOB}_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}*
         retention-days: 7
         name: artifact-${GITHUB_JOB}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}
 
