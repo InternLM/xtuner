@@ -29,7 +29,7 @@ jobs:
     - name: sft-train
       run: |
         echo $USER
-        ls -al /mnt/shared-storage-user/qa-caif-cicd
+        ls -al /mnt/shared-storage-user/caoweihan/qa-caif-cicd
         export PYTHONPYCACHEPREFIX=/tmp
         result_dir=../${GITHUB_JOB}_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}
         command="torchrun --nproc-per-node 8 --master_addr=\${MASTER_ADDR} --master_port=\${MASTER_PORT} --nnodes=\${WORLD_SIZE} --node_rank=\${RANK} ci/scripts/test_sft_trainer.py ${result_dir}"
