@@ -10,10 +10,14 @@ def fill_paged_kv_cache(
     value_cache: torch.Tensor,
     cu_seq_lens_q: torch.Tensor,
     cu_seq_lens_k: torch.Tensor,
+    cu_seqlens_pad_len: int,
     max_length_q: int,
     max_length_k: int,
     block_table: torch.Tensor,
 ) -> None:
+    if cu_seqlens_pad_len > 0:
+        cu_seq_lens_q = cu_seq_lens_q[:-cu_seqlens_pad_len]
+        cu_seq_lens_k = cu_seq_lens_k[:-cu_seqlens_pad_len]
     bs = block_table.size(0)
     from lmdeploy.pytorch.kernels import fill_kv_cache
 
@@ -40,6 +44,7 @@ def fill_paged_kv_cache_fake(
     value_cache: torch.Tensor,
     cu_seq_lens_q: torch.Tensor,
     cu_seq_lens_k: torch.Tensor,
+    cu_seqlens_pad_len: int,
     max_length_q: int,
     max_length_k: int,
     block_table: torch.Tensor,
