@@ -328,11 +328,11 @@ class TrainingWorker(SingleAcceleratorWorker):
             )
             grad_norm = self._engine.clip_grad_norm()
 
-            if i == 0 and grad_norm > 100:
-                logger.info(f"{loss_log['total_loss'], other_log['grad_acc_loss'], other_log['max_ratio'], grad_norm}")
-                torch.save(engine_input, f'./temp/engine_input_rank_{self.rank}.pth')
-                self.save_hf(f'./temp/model')
-                raise RuntimeError('DEBUG 退出')
+            # if i == 0 and grad_norm > 100:
+            #     logger.info(f"{loss_log['total_loss'], other_log['grad_acc_loss'], other_log['max_ratio'], grad_norm}")
+            #     torch.save(engine_input, f'./temp/engine_input_rank_{self.rank}.pth')
+            #     self.save_hf(f'./temp/model')
+            #     raise RuntimeError('DEBUG 退出')
 
             self._engine.step_optimizer(grad_norm)
             log_info = dict()

@@ -348,21 +348,17 @@ class RLTrainer:
         return data_batches
 
     def _save_trajectories(self, data_groups, save_path):
-        with open(save_path, "w") as f:
+        with open(save_path, "w", encoding='utf-8') as f:
             for group in data_groups:
-                response_list = []
-                reward_list = []
                 for data in group:
-                    response_list.append(data["response_str"])
-                    reward_list.append(data["reward"])
-                item = {
-                    "messages": group[0]["messages"],
-                    "response": response_list,
-                    "label": group[0]["reward_model"]["ground_truth"],
-                    "reward": reward_list,
-                }
-                json.dump(item, f)
-                f.write("\n")
+                    item = {
+                        "messages": data["messages"],
+                        "response": data["response_str"],
+                        "label": data["reward_model"]["ground_truth"],
+                        "reward": data["reward"],
+                    }
+                    json.dump(item, f, ensure_ascii=False, indent=2)
+                    f.write("\n")
 
     def _load_trajectories(self, save_path):
         data_groups = []

@@ -10,6 +10,7 @@ from .compose.intern_s1 import InternS1BaseConfig, InternS1Config, InternS1MiniC
 from .compose.internvl import InternVL3P5Dense8BConfig, InternVL3P5MoE30BA3Config, InternVLBaseConfig
 from .dense.dense import Dense
 from .dense.qwen3 import Qwen3Dense4BConfig, Qwen3Dense8BConfig, Qwen3DenseConfig
+from .dense.qwen2 import Qwen2Dense7BConfig, Qwen2DenseConfig
 from .moe.deepseek_v3 import DeepSeekV3Config
 from .moe.gpt_oss import GptOss21BA3P6Config, GptOss117BA5P8Config, GptOssConfig
 from .moe.moe import BalancingLossConfig, MoE, MoEModelOutputs, ZLossConfig
@@ -42,6 +43,8 @@ def get_model_config_from_hf(model_path: Path):
         return Qwen3MoEConfig.from_hf(model_path)
     elif cfg.model_type == "qwen3":
         return Qwen3DenseConfig.from_hf(model_path)
+    elif cfg.model_type == "qwen2":
+        return Qwen2DenseConfig.from_hf(model_path)
     elif cfg.model_type == "gpt_oss":
         return GptOssConfig.from_hf(model_path)
     elif cfg.model_type == "deepseek_v3":
