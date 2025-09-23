@@ -351,9 +351,11 @@ class RLTrainer:
         with open(save_path, "w", encoding='utf-8') as f:
             for group in data_groups:
                 for data in group:
+                    response_ids = self.tokenizer.encode(data["response_str"], add_special_tokens=False)
                     item = {
                         "messages": data["messages"],
                         "response": data["response_str"],
+                        "response_len": len(response_ids),
                         "label": data["reward_model"]["ground_truth"],
                         "reward": data["reward"],
                     }
