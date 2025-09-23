@@ -101,6 +101,7 @@ class Qwen2DenseConfig(TransformerConfig):
 class Qwen2Dense7BConfig(Qwen2DenseConfig):
     vocab_size: int = 152064
     max_position_embeddings: int = 32768
+    bos_token_id: int = 151643
     pad_token_id: int = 151643  # eos_id
     eos_token_id: int = 151643  # eos_id
     num_hidden_layers: int = 28
