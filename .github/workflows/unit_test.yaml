@@ -17,7 +17,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  sft_trainer:
+  unit_test:
     runs-on: [h_cluster]
     steps:
     - name: mask env

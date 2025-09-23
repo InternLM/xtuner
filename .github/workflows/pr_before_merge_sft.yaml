@@ -44,8 +44,8 @@ jobs:
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
-        if-no-files-found: error
-        path: ./${GITHUB_JOB}_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}*
+        if-no-files-found: warn
+        path: ./${{ env.GITHUB_JOB }}_${{ env.GITHUB_RUN_ID }}_${{ env.GITHUB_RUN_ATTEMPT }}*
         retention-days: 7
         name: artifact-${GITHUB_JOB}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}
 
