@@ -15,6 +15,8 @@ export ROLLOUT_MODEL_PATH='/mnt/shared-storage-user/llmrazor-share/model/Qwen2.5
 export ROLLOUT_DATA_PATH="/mnt/shared-storage-user/huanghaian/code/verl/data/dapo_math/dapo-math-17k.jsonl"
 export ROLLOUT_TEST_DATA_PATH="/mnt/shared-storage-user/huanghaian/code/verl/data/dapo_math/aime-2024.jsonl"
 
+ray stop --force
+
 python ci/scripts/test_dapo_trainer.py \
     --total-epochs 1 \
     --work-dir "$OUTPUT_DIR" \

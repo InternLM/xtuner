@@ -240,8 +240,8 @@ class Evaluator:
         self.dataloader = iter(self.dataset)
         self.sample_params = sample_params if sample_params else SampleParams()
         # set greedy sample for evaluator
-        self.sample_params.temperature = 0.0
-        self.sample_params.top_k = 1
+        # self.sample_params.temperature = 0.0
+        # self.sample_params.top_k = 1
         ray.get(self.env_controller.restart.remote())  # type: ignore[attr-defined]
         await self.concurrent_eval_task_runner()
         scores = self.compute_metric(self.return_list)
