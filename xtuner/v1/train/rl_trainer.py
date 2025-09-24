@@ -223,7 +223,7 @@ class RLTrainer:
                 temperature=1.0,
                 do_sample=True,
                 max_tokens=dataflow_config.sample_params.max_tokens,
-                top_k=1,
+                top_k=0,
             )
             self._eval_step = evaluator_config.evaluate_step
         else:
@@ -282,7 +282,7 @@ class RLTrainer:
             scores, eval_data_groups = ray.get(
                 self._evaluator.run.remote(return_samples=True, sample_params=self._evaluator_sample_params)
             )
-            trajectory_save_path = self.exp_dir / "initial_trajectory.jsonl"
+            trajectory_save_path = self.exp_dir / "eval_0_trajectory.jsonl"
             self._save_trajectories(eval_data_groups, trajectory_save_path)
             self.logger.info(f"Initial rollout evaluate scores {scores} and start training")
         for rollout_idx in range(1, self._rollout_steps + 1):
@@ -311,7 +311,10 @@ class RLTrainer:
             ray.get(self._rollout_env_controller.onload_kvcache.remote())
             # evaluate
             if self._enable_evaluate and self._evaluator and rollout_idx % self._eval_step == 0:
-                scores = ray.get(self._evaluator.run.remote(sample_params=self._evaluator_sample_params))
+                scores, eval_data_groups = ray.get(self._evaluator.run.remote(return_samples=True,
+                                                                              sample_params=self._evaluator_sample_params))
+                trajectory_save_path = self.exp_dir / f"eval_{rollout_idx}_trajectory.jsonl"
+                self._save_trajectories(eval_data_groups, trajectory_save_path)
                 self.logger.info(f"evaluate idx {rollout_idx} scores {scores}")
             self._cur_epoch += 1
 
