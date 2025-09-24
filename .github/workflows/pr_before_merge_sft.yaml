@@ -10,7 +10,8 @@ on:
 env:
   WORKSPACE_PREFIX: $(echo $GITHUB_WORKSPACE |cut -d '/' -f 1-5)
   WORKSPACE_PREFIX_SHORT: $(echo $GITHUB_WORKSPACE |cut -d '/' -f 1-3)
-  IMAGE: registry.h.pjlab.org.cn/ailab-puyu-puyu_gpu/xtuner:pt28_20250911_6652194
+  IMAGE: registry.h.pjlab.org.cn/ailab-llmrazor/xtuner:pt28_20250911_6652194_fix_pip
+  UP_FOLDER: ${GITHUB_JOB}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -45,9 +46,9 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         if-no-files-found: warn
-        path: ./${{ env.GITHUB_JOB }}_${{ env.GITHUB_RUN_ID }}_${{ env.GITHUB_RUN_ATTEMPT }}*
+        path: ./${{ env.UP_FOLDER }}*
         retention-days: 7
-        name: artifact-${GITHUB_JOB}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}
+        name: artifact-${{ env.UP_FOLDER }}
 
     - name: check-metric
       run: |
@@ -55,7 +56,7 @@ jobs:
         dirs=( $work_dir*/ )
         for dir in "${dirs[@]}"; do
           dir_name="${dir%/}"
-          rank0_log=( $dir_name/*/rank0.log )
+          rank0_log=( $dir_name/*/*/rank0.log )
           echo "begining check $rank0_log"
           if [[ "$dir_name" == *"ep8"* ]]; then
               python ./ci/scripts/check_metric.py $rank0_log $run_py --check_metric '{"lr":0,"text_tokens":0,"reduced_llm_loss":0.01,"grad_norm":0.02}'
