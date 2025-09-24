@@ -122,6 +122,8 @@ class vLLMWorker(RolloutWorker):
         args.disable_log_requests = True
         args.disable_log_stats = True
         args.tensor_parallel_size = self.config.tensor_parallel_size
+        # https://github.com/vllm-project/vllm/blob/main/docs/serving/openai_compatible_server.md?plain=1#L38
+        args.generation_config = 'vllm'
         if args.expert_parallel_size > 1:
             args.tensor_parallel_size = self.config.expert_parallel_size
             args.enable_expert_parallel = True
