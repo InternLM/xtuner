@@ -32,11 +32,10 @@ def collect_image_video_paths_and_extra(messages: list[dict]):
                         image_paths.append(c["image_url"]["url"])
                         if "image_wh" in c["image_url"]:
                             image_wh = c["image_url"]["image_wh"]
-                            assert len(image_wh) == 1
                             if isinstance(image_wh[0], (list, tuple)):
-                                image_wh_list.append(image_wh[0])
-                            else:
-                                image_wh_list.append(image_wh)
+                                image_wh = image_wh[0]
+                            image_wh_list.append(image_wh)
+                            assert len(image_wh) == 2
                     if c["type"] == "video_url":
                         video_paths.append(c["video_url"]["url"])
     if len(image_wh_list) > 0:
