@@ -11,7 +11,6 @@ env:
   WORKSPACE_PREFIX: $(echo $GITHUB_WORKSPACE |cut -d '/' -f 1-5)
   WORKSPACE_PREFIX_SHORT: $(echo $GITHUB_WORKSPACE |cut -d '/' -f 1-3)
   IMAGE: registry.h.pjlab.org.cn/ailab-llmrazor/xtuner:pt28_20250911_6652194_fix_pip
-  UP_FOLDER: ${GITHUB_JOB}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -38,7 +37,6 @@ jobs:
             dir_name="${dir%/}"
             rsync -av --exclude='checkpoints' --exclude='hf-*' $dir_name ./
         done
-        ls
         work_dir=${result_dir} && echo "work_dir=$work_dir" >> "$GITHUB_ENV"
         run_py="ci/scripts/test_sft_trainer.py" && echo "run_py=$run_py" >> "$GITHUB_ENV"
 
@@ -46,9 +44,9 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         if-no-files-found: warn
-        path: ./${{ env.UP_FOLDER }}*
+        path: ./${{ github.job }}_${{ github.run_id }}_${{ github.run_attempt }}*
         retention-days: 7
-        name: artifact-${{ env.UP_FOLDER }}
+        name: artifact-${{ github.job }}_${{ github.run_id }}_${{ github.run_attempt }}
 
     - name: check-metric
       run: |
