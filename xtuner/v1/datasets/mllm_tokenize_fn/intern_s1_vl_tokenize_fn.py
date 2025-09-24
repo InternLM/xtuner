@@ -150,9 +150,6 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         if system_message is not None:
             self.chat_template.default_system = system_message
 
-        self._image_path: list[str] = []
-        self._video_path: list[str] = []
-
         # 必须要最后调用
         super().__init__(tokenizer, self.chat_template, max_length, tokenizer_hash, hash)
 
@@ -206,11 +203,8 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
 
     def calc_num_tokens_multi_modal_get_item(self, data_item: dict) -> CacheItem:
         try:
-            assert "image_wh" in data_item, "image must have `hw` attribute when packing data"
-            image_size = data_item["image_wh"]  # eta: [[100,120]] or [[100,120],[200,240]]
-            if not isinstance(image_size[0], list):
-                image_size = [image_size]
-            for size in image_size:
+            assert len(self._image_wh_list) >= 1, "image must have `hw` attribute when packing data"
+            for size in self._image_wh_list:
                 if size[0] == 0 or size[1] == 0:
                     # Image is corrupted, flag=0, and this data will be removed later
                     return {"num_tokens": 0}  # type: ignore
@@ -220,7 +214,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
 
         num_tiles = []
         if self.dynamic_image_size:  # If dynamic image size is enabled, preprocess the image dynamically
-            for size in image_size:
+            for size in self._image_wh_list:
                 num_patches = dynamic_num_patch(
                     size,
                     min_num=self.min_dynamic_patch,
@@ -230,7 +224,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
                 )
                 num_tiles.append(num_patches)
         else:  # Otherwise, use the original image as a single patch
-            num_tiles = [1] * len(image_size)
+            num_tiles = [1] * len(self._image_wh_list)
 
         num_image_tokens = [self.num_image_token * num_tile for num_tile in num_tiles]
 
@@ -251,14 +245,6 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
             return {"num_tokens": 0}
 
     def multi_modal_get_item(self, data_item: dict, media_root: str = "") -> InternS1DataItem:
-        image_sizes = data_item.get("image_wh", None)
-        if image_sizes:
-            if not isinstance(image_sizes[0], list):
-                image_sizes = [image_sizes]
-            if len(image_sizes) != len(self._image_path):
-                logger.warning(f"Image sizes {image_sizes} do not match image paths {self._image_path}")
-                raise RuntimeError("Image sizes do not match image paths, please check the annotation file.")
-
         num_tiles = []
         images = []
         for i, image_path_ in enumerate(self._image_path):
@@ -266,8 +252,8 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
             image = load_image(image_path_)
             image = apply_exif_orientation(image)
 
-            if image_sizes is not None:
-                image_size = image_sizes[i]
+            if len(self._image_wh_list) >= 1:
+                image_size = self._image_wh_list[i]
                 if tuple(image_size) != image.size:
                     logger.warning(f"Image size mismatch: {image_size} vs {image.size} for image {image_path_}")
                     raise RuntimeError("Image size mismatch, please check the image file or the annotation file.")
