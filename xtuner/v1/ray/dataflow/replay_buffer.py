@@ -64,6 +64,10 @@ class ReplayBufferConfig(BaseModel):
 
     dataset_cfg: Annotated[List, Parameter(help="The dataset object to sample initial prompts from.")]
 
+    dataloader_cfg: Annotated[
+        Optional[DataloaderConfig], Parameter(help="The PyTorch DataLoader for iterating over the dataset.")
+    ] = None
+
     tokenizer: Annotated[
         Union[PreTrainedTokenizer, PreTrainedTokenizerFast, str],
         Parameter(help="The tokenizer for processing text data, e.g., for partial rollouts."),
@@ -356,12 +360,15 @@ class ReplayBuffer:
         self.tokenizer = config.tokenizer
         self.datasets = build_datasets(config.dataset_cfg, self.tokenizer)
 
-        self.fake_dataloader_cfg = DataloaderConfig(
-            collator="fake_collator",
-            pack_level="none",
-        )
+        if config.dataloader_cfg is not None:
+            self.dataloader_cfg = config.dataloader_cfg
+        else:
+            self.dataloader_cfg = DataloaderConfig(
+                collator="fake_collator",
+                pack_level="none",
+            )
         self.dataloader = build_dataloader(
-            dataloader_config=self.fake_dataloader_cfg,
+            dataloader_config=self.dataloader_cfg,
             datasets=self.datasets,
             global_batch_size=1,
             micro_batch_size=1,

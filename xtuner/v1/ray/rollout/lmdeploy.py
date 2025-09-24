@@ -105,8 +105,19 @@ class LMDeployWorker(RolloutWorker):
             "tool_choice": tool_choice,
             "stream": True,
         }
+
+        # todo(@duanyanhui): it will be supported after lmdeploy supports stop tokens in release version.
+        # if self.config.return_stop_tokens:
+        #     payload["include_stop_str_in_output"] = True
+
         payload.update(sample_params)
         payload.update(extra_params)
+
+        if "logprobs" in payload and payload["logprobs"]:
+            self.logger.warning(
+                "LMDeploy can't return stop tokens' logprobs now. It will be supported in next release version."
+            )
+
         req = self.client.build_request(
             "POST",
             url,
@@ -279,8 +290,6 @@ class LMDeployWorker(RolloutWorker):
 
         if "backend" in lmdeploy_config_kwargs:
             lmdeploy_config_kwargs.pop("backend")
-
-        lmdeploy_config_kwargs["log_level"] = "CRITICAL"  # disable logging
 
         return Namespace(
             model_path=self.config.model_path,

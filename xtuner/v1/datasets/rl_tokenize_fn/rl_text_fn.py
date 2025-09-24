@@ -15,7 +15,7 @@ logger = get_logger()
 
 # https://github.com/volcengine/verl/blob/main/verl/utils/dataset/rl_dataset.py
 class RLTextTokenizeFn(CachableTokenizeFunction[RLDatasetItem]):
-    def __init__(self, tokenizer: "PreTrainedTokenizer", max_length: int | None = None, *args, **kwargs):
+    def __init__(self, tokenizer: PreTrainedTokenizer, max_length: int | None = None, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.tokenizer = (
             tokenizer

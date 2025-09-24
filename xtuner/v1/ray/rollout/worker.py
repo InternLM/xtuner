@@ -265,6 +265,10 @@ class RolloutWorker(SingleAcceleratorWorker):
     ) -> RLRolloutResponseItem:
         uid = str(uuid.uuid4())
         response = None
+        failed_rollout_response = RLRolloutResponseItem(
+            response="",
+            finish_reason="failed",
+        )
         try:
             if format == "openai":
                 openai_prompts, openai_tools = prompts, tools
@@ -279,11 +283,6 @@ class RolloutWorker(SingleAcceleratorWorker):
                 extra_params=extra_params,
             )
             self.logger.debug(f" +++ send request {uid} to worker: {self.rank}")
-
-            failed_rollout_response = RLRolloutResponseItem(
-                response="",
-                finish_reason="failed",
-            )
             if response.status_code != 200:
                 error_body = await response.atext()
                 self.logger.error(f"Request {uid} failed with status {response.status_code}: {error_body}")

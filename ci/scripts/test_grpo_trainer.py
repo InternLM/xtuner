@@ -84,6 +84,9 @@ def main(args):
         gpus_per_node=args.gpus_per_node, # gpu: 8, npu: 16
         dtype="bfloat16",
         skip_load_weights=False,
+        extra_rollout_config={
+            "lmdeploy_log_level": "CRITICAL",
+        }
     )
     dataflow_config = DataFlowConfig(
         env="test",

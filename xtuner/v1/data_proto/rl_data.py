@@ -200,7 +200,6 @@ class SampleParams(BaseModel):
     max_tokens: Annotated[int, Parameter(help="Maximum number of tokens to generate.")] = 2048
     stops: Annotated[List[str], Parameter(help="List of stop sequences.")] = []
     stop_token_ids: Annotated[List[int], Parameter(help="List of stop token IDs.")] = []
-    logprobs: Annotated[int, Parameter(help="Number of log probabilities to return.")] = 0
     skip_special_tokens: Annotated[bool, Parameter(help="Whether to skip special tokens.")] = True
     do_sample: Annotated[bool, Parameter(help="Whether to sample or not.")] = True
 
@@ -237,7 +236,7 @@ class ReplayMeta:
     """
 
     env: str = ""
-    root_id: int = 0  # designed for grpo
+    root_id: int = 0
     action_id: int = 0  # same prompt share the same action_id
     action_ref: ObjectRef = None
     observation_ids: List[int] = field(default_factory=list)  # observation IDs for different versions

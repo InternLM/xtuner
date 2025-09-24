@@ -178,6 +178,13 @@ class RolloutConfig(BaseModel):
             help="System prompt for the rollout worker.",
         ),
     ] = None
+    return_stop_tokens: Annotated[
+        bool,
+        Parameter(
+            group=infer_group,
+            help="Whether to return stop tokens in the rollout response.",
+        ),
+    ] = True
 
 
 if __name__ == "__main__":
