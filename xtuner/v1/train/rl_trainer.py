@@ -387,8 +387,8 @@ class RLTrainer:
                 response_ids = self.tokenizer.encode(data["response_str"], add_special_tokens=False)
                 response_len_list.append(len(response_ids))
 
-        rewards = torch.tensor(rewards)
-        response_lens = torch.tensor(response_len_list)
+        rewards = torch.tensor(rewards).float()
+        response_lens = torch.tensor(response_len_list).float()
 
         _count = 0
         with open(save_path, "w", encoding="utf-8") as f:
@@ -452,7 +452,7 @@ class RLTrainer:
             "You meet this error means `load_from` of trainer is not a Huggingface model path."
         )
 
-        if self.cur_epoch % self._hf_interval != 0 and self.cur_epoch != self.total_epoch:
+        if (self.cur_epoch+1) % self._hf_interval != 0 and (self.cur_epoch+1) != self.total_epoch:
             return
 
         save_hf_path = self.exp_dir / f"hf-{self.cur_epoch}"
