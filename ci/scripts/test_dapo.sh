@@ -32,4 +32,5 @@ python ci/scripts/test_dapo_trainer.py \
     --optimizer-disable-foreach \
     --enable-evaluate \
     --evaluate-step 5 \
+    --hf-interval 50 \
     2>&1 | tee -a "${OUTPUT_DIR}/training_log.txt"

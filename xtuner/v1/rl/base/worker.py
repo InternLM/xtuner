@@ -346,7 +346,6 @@ class TrainingWorker(SingleAcceleratorWorker):
             log_str = f"Rollout {rollout_idx} Step {i}: " + log_str
             logger.info(log_str)
 
-
     def save_hf(self, hf_dir: str, save_dtype: torch.dtype = torch.bfloat16):
         self._engine.save_hf(hf_dir, save_dtype)
 

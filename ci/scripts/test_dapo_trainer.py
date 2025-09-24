@@ -63,6 +63,7 @@ def parse_args():
     parser.add_argument("--enable-evaluate", action="store_true")
     parser.add_argument("--evaluate-step", type=int, default=1)
     parser.add_argument("--evaluate-ratio", type=float, default=1)
+    parser.add_argument("--hf-interval", type=float, default=50)
     parser.add_argument("--ray-cluster-url", type=str, default="")
     return parser.parse_args()
 
@@ -196,7 +197,8 @@ def main(args):
         tokenizer_path=args.model_path,
         work_dir=args.work_dir,
         total_epochs=args.total_epochs,
-        enable_evaluate=args.enable_evaluate
+        enable_evaluate=args.enable_evaluate,
+        hf_interval=args.hf_interval
     )
     trainer.fit()
 

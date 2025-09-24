@@ -1,11 +1,12 @@
 import re
-
-from xtuner.v1.model.base import TransformerConfig
-from xtuner.v1.module.attention import MHAConfig
-from transformers.models.qwen2 import Qwen2Config as HFQwen2DenseConfig
 from pathlib import Path
+
 import torch
 from typing_extensions import Self
+
+from transformers.models.qwen2 import Qwen2Config as HFQwen2DenseConfig
+from xtuner.v1.model.base import TransformerConfig
+from xtuner.v1.module.attention import MHAConfig
 
 from .dense import Dense
 

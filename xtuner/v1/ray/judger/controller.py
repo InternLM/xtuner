@@ -167,8 +167,8 @@ class JudgerController:
         for i in range(num_samples):
             for name, scores in rewards_by_name.items():
                 weight = data_source.get(name, 1.0)
-                final_rewards[i] += scores[i]['score'] * weight
-                acc_list.append(scores[i]['acc'])
+                final_rewards[i] += scores[i]["score"] * weight
+                acc_list.append(scores[i]["acc"])
 
         assert len(final_rewards) == num_samples
         for i, item in enumerate(group_data_item):

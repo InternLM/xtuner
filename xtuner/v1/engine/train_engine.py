@@ -20,6 +20,7 @@ from torch.distributed.checkpoint.state_dict import (
     set_optimizer_state_dict,
 )
 from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.nn.functional import all_reduce
 from torch.distributed.tensor.placement_types import Placement
 from torch.utils._foreach_utils import (
     _device_has_foreach_support,
@@ -32,7 +33,7 @@ from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.model.base import BaseModel, ModelItem, TransformerConfig
 from xtuner.v1.module.router import NoAuxRouterConfig
 from xtuner.v1.utils import get_device, get_logger, get_torch_device_module
-from torch.distributed.nn.functional import all_reduce
+
 
 logger = get_logger()
 DEVICE = get_device()
@@ -50,7 +51,7 @@ def profile_time_and_memory(desc):
     max_memory = torch_device.max_memory_allocated()
     cost_time = time.time() - start_t
 
-    logger.success(f"{desc} Elapsed time {cost_time:.2f} seconds, peak gpu memory {max_memory / 1024 ** 3:.1f}G")
+    logger.success(f"{desc} Elapsed time {cost_time:.2f} seconds, peak gpu memory {max_memory / 1024**3:.1f}G")
 
 
 threading_lock = threading.Lock()
@@ -138,11 +139,11 @@ class TrainEngine:
     float8_handler: Optional[Float8Handler]
 
     def __init__(
-            self,
-            model_cfg: TransformerConfig,
-            optim_cfg: OptimConfig,
-            fsdp_cfg: FSDPConfig,
-            intra_layer_micro_batch: int = 1,
+        self,
+        model_cfg: TransformerConfig,
+        optim_cfg: OptimConfig,
+        fsdp_cfg: FSDPConfig,
+        intra_layer_micro_batch: int = 1,
     ) -> None:
         self.model_cfg = model_cfg
         self.optim_cfg = optim_cfg
@@ -224,8 +225,8 @@ class TrainEngine:
         iters_per_step = self.grad_accumulation_steps(len(data_batches))
 
         moe_need_update_bias = (
-                isinstance(getattr(self.model_cfg, "router", None), NoAuxRouterConfig)
-                and self.model_cfg.router.router_bias_update_speed > 0
+            isinstance(getattr(self.model_cfg, "router", None), NoAuxRouterConfig)
+            and self.model_cfg.router.router_bias_update_speed > 0
         )
         if moe_need_update_bias:
             tokens_per_expert_global_for_bias = torch.zeros(
@@ -248,7 +249,7 @@ class TrainEngine:
         grad_acc_loss = []
         max_ratio = []
         for i in range(0, len(data_batches), intra_layer_micro_batch):
-            data_batch = data_batches[i: i + intra_layer_micro_batch]
+            data_batch = data_batches[i : i + intra_layer_micro_batch]
             seq_ctx_list = []
             loss_ctx_list = []
             for data in data_batch:
@@ -358,7 +359,7 @@ class TrainEngine:
         device = tensors[0].device
         norms: Tuple[DTensor, ...]
         if (foreach is None and _has_foreach_support(tensors, device)) or (  # type: ignore
-                foreach and _device_has_foreach_support(device)
+            foreach and _device_has_foreach_support(device)
         ):
             norms = torch._foreach_norm(tensors, norm_type)  # type: ignore
         elif foreach:
@@ -370,7 +371,7 @@ class TrainEngine:
             torch.stack([norm.to_local() for norm in norms]), norm_type, dtype=torch.float32
         )
         if norm_type == 2:
-            local_norm_squared = local_norm ** 2
+            local_norm_squared = local_norm**2
             for i, placement in enumerate(placements):
                 if isinstance(placement, Shard):
                     # When using ep + fsdp, the placement corresponding to fsdp mesh is _StridedShard
@@ -380,7 +381,7 @@ class TrainEngine:
                     pass
                 else:
                     raise ValueError(f"Unsupported placement type {placement} in clip_grad_norm")
-            global_norm = local_norm_squared ** 0.5
+            global_norm = local_norm_squared**0.5
         else:
             raise NotImplementedError
         return global_norm
@@ -435,9 +436,9 @@ class TrainEngine:
 
     # TODO: Support async save
     def save_dcp(
-            self,
-            model_dir: Path,
-            optimizer_dir: Path | None = None,
+        self,
+        model_dir: Path,
+        optimizer_dir: Path | None = None,
     ):
         rank = dist.get_rank()
 

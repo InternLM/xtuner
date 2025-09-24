@@ -3,12 +3,10 @@ from abc import ABC, abstractmethod
 from typing import Annotated, Generic, Literal, TypeVar
 
 import torch
-import torch.distributed as dist
 import torch.nn as nn
 from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.nn.functional import all_reduce
 
 from .chunk_loss import ChunkLoss
 
@@ -129,7 +127,9 @@ class BaseLossContext(nn.Module, ABC, Generic[LossContextInputItem]):
         assert self.loss_cfg.chunk_size is not None, "chunk_size must be set in chunk mode"
 
         chunks = loss_kwargs.chunk(self.loss_cfg.chunk_size)
-        loss, max_ratio = ChunkLoss.apply(hidden_states, head_weight, head_bias, self.loss_fn, chunks, self.loss_cfg.chunk_size)
+        loss, max_ratio = ChunkLoss.apply(
+            hidden_states, head_weight, head_bias, self.loss_fn, chunks, self.loss_cfg.chunk_size
+        )
         return loss, None, max_ratio
 
     def forward(

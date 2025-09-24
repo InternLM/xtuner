@@ -1,9 +1,10 @@
 import re
-
-from pydantic import BaseModel, Field
 from typing import Any, Optional
 
+from pydantic import BaseModel, Field
+
 from .native import NativeJudger
+
 
 # _SOLUTION_CLIP_CHARS = 300
 
@@ -55,9 +56,6 @@ from .native import NativeJudger
 # limitations under the License.
 # Adapted from https://github.com/EleutherAI/lm-evaluation-harness/blob/main/lm_eval/tasks/hendrycks_math/utils.py
 
-import re
-from typing import Optional
-
 
 def last_boxed_only_string(string: str) -> Optional[str]:
     """Extract the last LaTeX boxed expression from a string.
@@ -86,7 +84,7 @@ def last_boxed_only_string(string: str) -> Optional[str]:
                 break
         i += 1
 
-    return string[idx: right_brace_idx + 1] if right_brace_idx is not None else None
+    return string[idx : right_brace_idx + 1] if right_brace_idx is not None else None
 
 
 def remove_boxed(s: str) -> str:
@@ -101,7 +99,7 @@ def remove_boxed(s: str) -> str:
     left = "\\boxed{"
     assert s[: len(left)] == left, f"box error: {s}"
     assert s[-1] == "}", f"box error: {s}"
-    return s[len(left): -1]
+    return s[len(left) : -1]
 
 
 # Constants for normalization
@@ -205,7 +203,7 @@ def normalize_final_answer(final_answer: str) -> str:
 
 
 def is_correct_minerva(
-        solution_str: str, gt: str, gt_need_extract: bool = False, answer_pattern: str = r"(?i)Answer\s*:\s*([^\n]+)"
+    solution_str: str, gt: str, gt_need_extract: bool = False, answer_pattern: str = r"(?i)Answer\s*:\s*([^\n]+)"
 ) -> tuple[bool, str]:
     """Check if the solution is correct according to Minerva criteria.
 
@@ -233,7 +231,7 @@ def is_correct_minerva(
 
 
 def is_correct_strict_box(
-        pred: str, gt: str, pause_tokens_index: Optional[list[int]] = None
+    pred: str, gt: str, pause_tokens_index: Optional[list[int]] = None
 ) -> tuple[int, Optional[str]]:
     """Check if the prediction is correct using strict boxed answer criteria.
 
@@ -248,7 +246,7 @@ def is_correct_strict_box(
     # Extract the relevant part of the prediction
     if pause_tokens_index is not None:
         assert len(pause_tokens_index) == 4
-        pred = pred[pause_tokens_index[-1] - 100:]
+        pred = pred[pause_tokens_index[-1] - 100 :]
     else:
         pred = pred[-100:]
 
@@ -261,7 +259,7 @@ def is_correct_strict_box(
 
 
 def verify(
-        solution_str: str, answer: str, strict_box_verify: bool = False, pause_tokens_index: Optional[list[int]] = None
+    solution_str: str, answer: str, strict_box_verify: bool = False, pause_tokens_index: Optional[list[int]] = None
 ) -> bool:
     """Verify if the solution is correct.
 
@@ -283,10 +281,10 @@ def verify(
 
 
 def compute_score(
-        solution_str: str,
-        ground_truth: str,
-        strict_box_verify: bool = False,
-        pause_tokens_index: Optional[list[int]] = None,
+    solution_str: str,
+    ground_truth: str,
+    strict_box_verify: bool = False,
+    pause_tokens_index: Optional[list[int]] = None,
 ) -> dict:
     """Compute the reward score for a solution.
 
@@ -308,51 +306,56 @@ def compute_score(
     reward = 1.0 if correct else -1.0
     acc = correct
 
-    return {
-        "score": reward,
-        "acc": acc
-    }
+    return {"score": reward, "acc": acc}
 
 
 def compute_reward(response, label, extra_info):
     predict_str = response
 
-    eos_token = extra_info['eos_token']
+    eos_token = extra_info["eos_token"]
     if response.endswith(eos_token):
         response = response[: -len(eos_token)]
 
     out = compute_score(response, label)
-    reward = out['score']
+    reward = out["score"]
 
     overlong_reward = 0
     if extra_info.get("enable_overlong_buffer", None):
-        overlong_buffer_len = extra_info['overlong_buffer_len']
-        expected_len = extra_info['max_response_len'] - overlong_buffer_len
-        valid_response_length = len(extra_info['tokenizer'](predict_str, return_tensors="pt")["input_ids"].flatten().tolist())
+        overlong_buffer_len = extra_info["overlong_buffer_len"]
+        expected_len = extra_info["max_response_len"] - overlong_buffer_len
+        valid_response_length = len(
+            extra_info["tokenizer"](predict_str, return_tensors="pt")["input_ids"].flatten().tolist()
+        )
         exceed_len = valid_response_length - expected_len
-        overlong_penalty_factor = extra_info['overlong_penalty_factor']
+        overlong_penalty_factor = extra_info["overlong_penalty_factor"]
         overlong_reward = min(-exceed_len / overlong_buffer_len * overlong_penalty_factor, 0)
     reward += overlong_reward
-    return {'score': reward, 'acc': out['acc']}
+    return {"score": reward, "acc": out["acc"]}
 
 
 class DapoMathJudgerConfig(BaseModel):
-    extra_info: dict = Field(default={"score": 1, "format_score": 0, "eos_token": '<|endoftext|>'})
+    extra_info: dict = Field(default={"score": 1, "format_score": 0, "eos_token": "<|endoftext|>"})
     enable_overlong_buffer: bool
     max_response_len: Optional[int] = None
     overlong_buffer_len: Optional[int] = None
     overlong_penalty_factor: Optional[float] = None
     tokenizer: Any = None
 
-    def __init__(self, enable_overlong_buffer: bool, max_response_len: Optional[int],
-                 overlong_buffer_len: Optional[int], overlong_penalty_factor: Optional[float], tokenizer: Any):
+    def __init__(
+        self,
+        enable_overlong_buffer: bool,
+        max_response_len: Optional[int],
+        overlong_buffer_len: Optional[int],
+        overlong_penalty_factor: Optional[float],
+        tokenizer: Any,
+    ):
         # 初始化基类
         super().__init__(
             enable_overlong_buffer=enable_overlong_buffer,
             max_response_len=max_response_len,
             overlong_buffer_len=overlong_buffer_len,
             overlong_penalty_factor=overlong_penalty_factor,
-            tokenizer=tokenizer
+            tokenizer=tokenizer,
         )
 
         # 根据条件更新 extra_info
@@ -361,13 +364,15 @@ class DapoMathJudgerConfig(BaseModel):
             assert overlong_buffer_len is not None
             assert overlong_penalty_factor is not None
             assert tokenizer is not None
-            self.extra_info.update({
-                "enable_overlong_buffer": enable_overlong_buffer,
-                "max_response_len": max_response_len,
-                "overlong_buffer_len": overlong_buffer_len,
-                "overlong_penalty_factor": overlong_penalty_factor,
-                "tokenizer": tokenizer,
-            })
+            self.extra_info.update(
+                {
+                    "enable_overlong_buffer": enable_overlong_buffer,
+                    "max_response_len": max_response_len,
+                    "overlong_buffer_len": overlong_buffer_len,
+                    "overlong_penalty_factor": overlong_penalty_factor,
+                    "tokenizer": tokenizer,
+                }
+            )
 
     def build(self):
         return NativeJudger(reward_func=compute_reward, extra_info=self.extra_info)

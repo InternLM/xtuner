@@ -7,6 +7,7 @@ from pathlib import Path
 from shutil import rmtree
 from typing import cast
 
+import numpy as np
 import ray
 import torch
 from mmengine import load
@@ -293,8 +294,9 @@ class RLTrainer:
             self.logger.info(f"rollout_idx {rollout_idx} finished, saved trajectories to {trajectory_save_path}")
             ray.get(self._train_controller.onload.remote(target="all"))
             self.logger.info("Training controller loaded")
-            data_batches = self._prepare_train_data(data_groups, self._train_worker_cfg.pack_max_length)
+            data_batches, data_info = self._prepare_train_data(data_groups, self._train_worker_cfg.pack_max_length)
             self.logger.info(f"Prepared {len(data_batches)} training data batches")
+            self.logger.info(f"DataInfo {data_info}")
             ray.get(
                 self._train_controller.fit.remote(
                     data_batches, pack_max_length=self._train_worker_cfg.pack_max_length, rollout_idx=rollout_idx
@@ -316,6 +318,11 @@ class RLTrainer:
     # TODO: advantage 是在 DataFlow 里算好，还是在 train controller 里算？
     # 因为可能有根据 advantage 来判断数据能否进 rl 训练的需求。暂时先放在这
     def _prepare_train_data(self, data_groups, pack_max_length):
+        rewards_list = []
+        advantages_list = []
+        prompt_len_list = []
+        response_len_list = []
+
         data_batches = []
         for group in data_groups:
             prompt = self.tokenizer.apply_chat_template(
@@ -323,6 +330,7 @@ class RLTrainer:
             )
             prompt_ids = self.tokenizer(prompt, return_tensors="pt")["input_ids"].flatten().tolist()
             rewards = [data["reward"] for data in group]
+            rewards_list.extend(rewards)
             rewards = torch.tensor(rewards, dtype=torch.float32)
             advantages = (rewards - rewards.mean(0)) / (rewards.std(0) + 1e-8)
 
@@ -331,6 +339,11 @@ class RLTrainer:
                 item = group[i]["response_str"]
                 response_ids = self.tokenizer(item, return_tensors="pt")["input_ids"].flatten().tolist()
                 input_ids = prompt_ids + response_ids
+
+                prompt_len_list.append(len(prompt_ids))
+                response_len_list.append(len(response_ids))
+                advantages_list.extend([advantages[i]] * len(response_ids))
+
                 shifted_labels = [-100] * (len(prompt_ids) - 1) + response_ids + [-100]
                 if len(input_ids) > pack_max_length:
                     input_ids = input_ids[:pack_max_length]
@@ -345,22 +358,65 @@ class RLTrainer:
                     )
                 )
         random.shuffle(data_batches)
-        return data_batches
+
+        advantages_list = np.array(advantages_list)
+        info_dict = {
+            "batch_size": len(rewards_list),
+            "rewards/mean": np.mean(rewards_list),
+            "rewards/min": np.min(rewards_list),
+            "rewards/max": np.max(rewards_list),
+            "advantages/mean": np.mean(advantages_list),
+            "advantages/min": np.min(advantages_list),
+            "advantages/max": np.max(advantages_list),
+            "response_len/mean": np.mean(response_len_list),
+            "response_len/min": np.min(response_len_list),
+            "response_len/max": np.max(response_len_list),
+            "response_len/std": np.std(response_len_list),
+            "prompt_len/mean": np.mean(prompt_len_list),
+            "prompt_len/min": np.min(prompt_len_list),
+            "prompt_len/max": np.max(prompt_len_list),
+        }
+        return data_batches, info_dict
 
     def _save_trajectories(self, data_groups, save_path):
-        with open(save_path, "w", encoding='utf-8') as f:
+        rewards = []
+        response_len_list = []
+        for group in data_groups:
+            for data in group:
+                rewards.append(data["reward"])
+                response_ids = self.tokenizer.encode(data["response_str"], add_special_tokens=False)
+                response_len_list.append(len(response_ids))
+
+        rewards = torch.tensor(rewards)
+        response_lens = torch.tensor(response_len_list)
+
+        _count = 0
+        with open(save_path, "w", encoding="utf-8") as f:
+            item = {
+                "reward_mean": rewards.mean().item(),
+                "reward_std": rewards.std().item(),
+                "reward_max": rewards.max().item(),
+                "reward_min": rewards.min().item(),
+                "response_len_mean": response_lens.mean().item(),
+                "response_len_std": response_lens.std().item(),
+                "response_len_max": response_lens.max().item(),
+                "response_len_min": response_lens.min().item(),
+                "total_len": len(rewards),
+            }
+            json.dump(item, f, ensure_ascii=False, indent=2)
+            f.write("\n")
             for group in data_groups:
                 for data in group:
-                    response_ids = self.tokenizer.encode(data["response_str"], add_special_tokens=False)
                     item = {
                         "messages": data["messages"],
                         "response": data["response_str"],
-                        "response_len": len(response_ids),
+                        "response_len": response_len_list[_count],
                         "label": data["reward_model"]["ground_truth"],
                         "reward": data["reward"],
                     }
                     json.dump(item, f, ensure_ascii=False, indent=2)
                     f.write("\n")
+                    _count += 1
 
     def _load_trajectories(self, save_path):
         data_groups = []
