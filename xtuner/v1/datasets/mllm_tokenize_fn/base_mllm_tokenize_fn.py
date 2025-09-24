@@ -33,9 +33,12 @@ def collect_image_video_paths_and_extra(messages: list[dict]):
                         if "image_wh" in c["image_url"]:
                             image_wh = c["image_url"]["image_wh"]
                             if isinstance(image_wh[0], (list, tuple)):
+                                assert len(image_wh) == 1, (
+                                    f"Only one image size is supported for each image. but got {image_wh}"
+                                )
                                 image_wh = image_wh[0]
                             image_wh_list.append(image_wh)
-                            assert len(image_wh) == 2
+                            assert len(image_wh) == 2, f"image_wh should be [width, height], but got {image_wh}"
                     if c["type"] == "video_url":
                         video_paths.append(c["video_url"]["url"])
     if len(image_wh_list) > 0:

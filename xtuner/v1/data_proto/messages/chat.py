@@ -39,7 +39,7 @@ class ImageContentItem(BaseModel):
 class VideoURL(BaseModel):
     url: str
     detail: Optional[Literal["auto", "low", "high"]] = None
-    video_length: Optional[int] = None  # width, height
+    video_length: Optional[int] = None  # duration or frame count
 
 
 class VideoContentItem(BaseModel):
