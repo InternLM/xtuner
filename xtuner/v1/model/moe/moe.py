@@ -177,7 +177,13 @@ class MoE(BaseModel):
         )  # [num_layers, intra_layer_micro_batch * seq, num_experts]
         attn_mask = torch.stack(attn_mask_list, dim=0)  # type: ignore  # [intra_layer_micro_batch, 1, seq]
         attn_mask = attn_mask.flatten()
-        router_logits = router_logits[:, attn_mask].contiguous().float()  # [num_layers, non_pad_seq, num_experts]
+
+        # router_logits = router_logits[:, attn_mask].contiguous().float()
+        indices = torch.nonzero(attn_mask, as_tuple=True)[0]
+        router_logits = (
+            torch.index_select(router_logits, 1, indices).contiguous().float()
+        )  # [num_layers, non_pad_seq, num_experts]
+
         return router_logits
 
     @torch.no_grad()
@@ -470,10 +476,10 @@ class MoE(BaseModel):
                 )
             else:
                 if int(os.getenv("XTUNER_ACTIVATION_OFFLOAD", "0")) == 1:
-                    offload_stream = decoder_layer._get_fsdp_state()._comm_ctx.all_gather_stream
+                    offload_stream = decoder_layer._get_fsdp_state()._comm_ctx.all_gather_copy_in_stream
                     with async_save_on_cpu(
-                        h2d_stream=offload_stream,
-                        d2h_stream=offload_stream,
+                        h2d_stream=offload_stream,  # type: ignore
+                        d2h_stream=offload_stream,  # type: ignore
                         block_idx=int(idx),
                         depth=len(self.layers),
                         custom_check_fn=lambda x: x.data_ptr() == hidden_states.data_ptr(),
@@ -636,7 +642,8 @@ class MoE(BaseModel):
                 param.requires_grad = False
 
         if self.ep_mesh.size() > 1:
-            self._replicate_other_params(self)
+            for layer in self.layers.values():
+                self._replicate_other_params(layer)
 
         self.rotary_emb = self.build_rotary_embedding(self.config)
 
@@ -671,7 +678,7 @@ class MoE(BaseModel):
 
         fully_shard(
             self.embed_tokens,
-            mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
+            mesh=None if self.hsdp_mesh is None else self.hsdp_mesh,
             mp_policy=mp_policy,
             reshard_after_forward=self.fsdp_config.reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
@@ -679,7 +686,7 @@ class MoE(BaseModel):
 
         fully_shard(
             self.norm,
-            mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
+            mesh=None if self.hsdp_mesh is None else self.hsdp_mesh,
             mp_policy=mp_policy,
             reshard_after_forward=self.fsdp_config.reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
@@ -687,7 +694,7 @@ class MoE(BaseModel):
 
         fully_shard(
             self.lm_head,
-            mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
+            mesh=None if self.hsdp_mesh is None else self.hsdp_mesh,
             mp_policy=mp_policy,
             reshard_after_forward=self.fsdp_config.reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
