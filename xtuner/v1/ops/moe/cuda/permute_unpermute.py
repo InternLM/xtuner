@@ -245,4 +245,4 @@ def cuda_token_unpermute_torch(
         unpermuted_tokens = unpermuted_tokens * probs.unsqueeze(-1)
     unpermuted_tokens = unpermuted_tokens.sum(dim=1)
 
-    return unpermuted_tokens
+    return unpermuted_tokens.to(input_act.dtype)
