@@ -1,5 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-
+import os
 from typing import Annotated, Literal, cast
 
 import torch
@@ -331,15 +331,19 @@ class MultiHeadAttention(nn.Module):
             query_states = self.q_norm(query_states)
             key_states = self.k_norm(key_states)
 
-        query_states = query_states.transpose(1, 2)  # [b, n_head, seq , head_dim]
-        key_states = key_states.transpose(1, 2)
-        value_states = value_states.transpose(1, 2)
+        rope_rm_transpose = os.getenv("XTUNER_ROPE_RM_TRANSPOSE", "0") != "1"
+        if rope_rm_transpose:
+            query_states = query_states.transpose(1, 2)  # [b, n_head, seq , head_dim]
+            key_states = key_states.transpose(1, 2)
+            value_states = value_states.transpose(1, 2)
 
         cos, sin = position_embeddings
 
         query_states, key_states = self.apply_rotary_emb(query_states, key_states, cos, sin)
 
         if seq_ctx.sequence_parallel_mesh and seq_ctx.sequence_parallel_mesh.size() > 1:
+            # TODO: support rope_rm_transpose in sequence parallel
+            assert not rope_rm_transpose, "Do not support rope_rm_transpose in sequence parallel yet."
             sp_size = seq_ctx.sequence_parallel_mesh.size()
             num_kv_heads = key_states.size(1)
             if sp_size > num_kv_heads:
