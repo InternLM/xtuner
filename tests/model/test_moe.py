@@ -82,7 +82,7 @@ class TestDistributedMoE(DistributedTestBase):
             (torch.bfloat16, "cuda", "all2all", 0, 0),
         ],
     )
-    def test_parralel_accuracy(self, dtype, device, dispatcher, n_shared_experts, first_k_dense_replace):
+    def test_parallel_accuracy(self, dtype, device, dispatcher, n_shared_experts, first_k_dense_replace):
         self.create_pg(device)
         router_config = NoAuxRouterConfig(
             scoring_func="sigmoid",
