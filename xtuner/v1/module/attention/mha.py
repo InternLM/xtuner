@@ -1,5 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-
+import os
 from typing import Annotated, Literal, cast
 
 import torch
@@ -331,9 +331,10 @@ class MultiHeadAttention(nn.Module):
             query_states = self.q_norm(query_states)
             key_states = self.k_norm(key_states)
 
-        query_states = query_states.transpose(1, 2)  # [b, n_head, seq , head_dim]
-        key_states = key_states.transpose(1, 2)
-        value_states = value_states.transpose(1, 2)
+        if os.getenv("XTUNER_ROPE_RM_TRANSPOSE", "0") != "1":
+            query_states = query_states.transpose(1, 2)  # [b, n_head, seq , head_dim]
+            key_states = key_states.transpose(1, 2)
+            value_states = value_states.transpose(1, 2)
 
         cos, sin = position_embeddings
 

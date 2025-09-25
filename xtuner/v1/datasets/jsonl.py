@@ -71,7 +71,8 @@ def tokenize_worker(
     cpu_ids: list[int],
 ):
     try:
-        os.sched_setaffinity(os.getpid(), cpu_ids)
+        # os.sched_setaffinity(os.getpid(), cpu_ids)
+        pass
     except OSError as e:
         import warnings
 
