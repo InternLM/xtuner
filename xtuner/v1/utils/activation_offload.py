@@ -1,24 +1,12 @@
-"""
-This file is adapted from: https://gitee.com/ascend/MindSpeed-MM/blob/master/mindspeed_mm/utils/async_offload.py
-Original Author: liyx616
-Original License: MIT
-Modifications: To enable compatibility on both GPU and NPU, replace all torch.npu with torch.cuda, and then use the transfer_to_npu interface
-"""
-
 import torch
+import torch_npu
 from torch.autograd.graph import saved_tensors_hooks
-
-from xtuner.v1.utils.device import get_device
-
-
-if get_device() == "npu":
-    from torch_npu.contrib import transfer_to_npu  # noqa
 
 
 def base_check_fn(tensor):
     if isinstance(tensor._base, torch.nn.parameter.Parameter) or isinstance(tensor, torch.nn.parameter.Parameter):
         return False
-    if tensor.storage().size() <= 0:
+    if tensor.untyped_storage().size() <= 0:
         return False
     return True
 
@@ -70,17 +58,17 @@ class SwapTensor:
         self.stat = "device"
         self.key = key
 
-        self.h2d_event = torch.cuda.Event()
+        self.h2d_event = torch_npu.npu.Event()
 
     # device to host
     def launch_d2h(self, stream):
         if self.stat != "device":
             return
 
-        forward_event = torch.cuda.Event()
+        forward_event = torch_npu.npu.Event()
         forward_event.record()
         with torch.no_grad():
-            with torch.cuda.stream(stream):
+            with torch_npu.npu.stream(stream):
                 stream.wait_event(forward_event)
                 if self.is_slice_tensor:
                     self.tensor_cpu.copy_(self.tensor, non_blocking=True)
@@ -93,8 +81,8 @@ class SwapTensor:
         if self.stat != "host":
             return
         if flag:
-            torch.cuda.current_stream().wait_stream(stream)
-            torch.cuda.default_stream().wait_stream(stream)
+            torch_npu.npu.current_stream().wait_stream(stream)
+            torch_npu.npu.default_stream().wait_stream(stream)
         self.tensor.storage().resize_(0)
         self.stat = "host"
 
@@ -102,12 +90,12 @@ class SwapTensor:
     def launch_h2d(self, h2d_stream, flag, working_stream):
         if self.stat != "host":
             return
-        backward_event = torch.cuda.Event()
+        backward_event = torch_npu.npu.Event()
         backward_event.record()
         if flag:
             self.tensor.storage().resize_(self.storage_size)
         with torch.no_grad():
-            with torch.cuda.stream(h2d_stream):
+            with torch_npu.npu.stream(h2d_stream):
                 h2d_stream.wait_event(backward_event)
                 if self.is_slice_tensor:
                     self.tensor.copy_(self.tensor_cpu, non_blocking=True)
@@ -122,12 +110,12 @@ class SwapTensor:
     def prefetch_launch_h2d(self, h2dstream, flag):
         if self.stat != "host":
             return
-        backward_event = torch.cuda.Event()
+        backward_event = torch_npu.npu.Event()
         backward_event.record()
         if flag:
             self.tensor.storage().resize_(self.storage_size)
         with torch.no_grad():
-            with torch.cuda.stream(h2dstream):
+            with torch_npu.npu.stream(h2dstream):
                 h2dstream.wait_event(backward_event)
                 if self.is_slice_tensor:
                     self.tensor.copy_(self.tensor_cpu, non_blocking=True)
@@ -135,15 +123,14 @@ class SwapTensor:
                     self.tensor.storage().copy_(self.tensor_cpu.storage(), non_blocking=True)
                 self.h2d_event.record()
                 self.stat = "device"
-                self.tensor.record_stream(h2dstream)
 
     # synchronize h2d
     def wait_h2d_finished(self):
         if self.stat != "device":
             return
         if self.h2d_event:
-            torch.cuda.current_stream().wait_event(self.h2d_event)
-            torch.cuda.default_stream().wait_event(self.h2d_event)
+            torch_npu.npu.current_stream().wait_event(self.h2d_event)
+            torch_npu.npu.default_stream().wait_event(self.h2d_event)
         self.stat = "device"
 
 
@@ -181,8 +168,9 @@ class OffloadManager(metaclass=SingletonMeta):
     def __init__(self, check=False):
         self.items = {}
         self.check = check
-        self.device_item = []
+        self.npu_item = []
         self.getcnt = GetCnt()
+        self.may_npu_tensors = {}
 
     def get_cnt(self, block_idx):
         return self.getcnt.get_cnt(block_idx)
@@ -207,12 +195,20 @@ class OffloadManager(metaclass=SingletonMeta):
             self.items[key] = OffloadItem(act, 1, event)
 
     def put_npu_tensor(self, act):
-        self.device_item.append(act)
+        self.npu_item.append(act)
 
     def del_npu_tensor(self, prefile_key, d2h_stream):
         for key in self.items.keys():
             if key.startswith(prefile_key):
                 self.items[key].act.wait_d2h_finished(d2h_stream, True)
+
+    def del_may_npu_tensor(self, prefile_key, h2d_stream):
+        may_npu_tensor_keys = list(self.may_npu_tensors.keys())
+        for key in may_npu_tensor_keys:
+            if key.startswith(prefile_key):
+                with torch.cuda.stream(h2d_stream):
+                    h2d_stream.wait_event(self.may_npu_tensors[key].act.h2d_event)
+                    del self.may_npu_tensors[key]
 
     def get(self, key):
         self.assert_exist(key)
@@ -224,7 +220,9 @@ class OffloadManager(metaclass=SingletonMeta):
 
         item.ref_cnt -= 1
         if item.ref_cnt == 0:
-            self.clear(key)
+            # self.clear(key)
+            self.assert_exist(key)
+            self.may_npu_tensors.update({key: self.items.pop(key)})
         return act
 
     def prefetch_get(self, block_idx, tensor_idx, h2d_stream, d2h_stream):
@@ -234,7 +232,7 @@ class OffloadManager(metaclass=SingletonMeta):
                 prefetch_swap_tensor = self.get(prefetch_key)
                 d2h_stream.wait_stream(h2d_stream)
                 prefetch_swap_tensor.prefetch_launch_h2d(h2d_stream, True)
-                prefetch_swap_tensor.tensor.record_stream(h2d_stream)
+                # prefetch_swap_tensor.tensor.record_stream(h2d_stream)
 
     def empty(self):
         return len(self.items) == 0
@@ -247,7 +245,6 @@ class OffloadManager(metaclass=SingletonMeta):
             self.items.pop(key)
 
     # event interface #
-
     def get_event(self, key):
         self.assert_exist(key)
         item = self.items[key]
@@ -278,7 +275,7 @@ class async_save_on_cpu(saved_tensors_hooks):
             swap_tensor = SwapTensor(tensor, key)
 
             if block_idx < depth - 1:
-                working_stream = torch.cuda.current_stream()
+                working_stream = torch_npu.npu.current_stream()
                 d2h_stream.wait_stream(working_stream)
                 swap_tensor.launch_d2h(d2h_stream)
 
@@ -289,16 +286,19 @@ class async_save_on_cpu(saved_tensors_hooks):
             if isinstance(swap_tensor, torch.Tensor):
                 return swap_tensor
 
-            working_stream = torch.cuda.current_stream()
+            working_stream = torch_npu.npu.current_stream()
             working_stream.wait_stream(h2d_stream)  # make sure all d2h copy is done before into backward
 
             h2d_stream.wait_stream(working_stream)
 
+            block_idx, tensor_idx = swap_tensor.key.split("_")
+
+            OffloadManager().del_may_npu_tensor(f"{int(block_idx) + 1}_", h2d_stream)
             swap_tensor.launch_h2d(h2d_stream, True, working_stream)
 
             if prefetch:
-                block_idx, tensor_idx = swap_tensor.key.split("_")
                 OffloadManager().prefetch_get(int(block_idx), int(tensor_idx), h2d_stream, d2h_stream)
+
             return swap_tensor.tensor
 
         super().__init__(_pack_to_cpu, _unpack_from_cpu)

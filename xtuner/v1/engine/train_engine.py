@@ -172,7 +172,8 @@ class TrainEngine:
         return model
 
     def build_optimizer(self, optim_cfg: OptimConfig) -> torch.optim.Optimizer:
-        params = [p for p in self.model.parameters() if p.requires_grad]
+        params = cast(list[torch.Tensor], [p for p in self.model.parameters() if p.requires_grad])
+        group_params = self.group_tensors_by_device_mesh_and_placements(params)
 
         trainable_parameters_names = self.model.trainable_parameters()
         trainable_names = [name for name, _ in trainable_parameters_names]
@@ -190,7 +191,7 @@ class TrainEngine:
                 f"Total trainable parameters: {num_total_requires_grad // 1e6}M, total parameters: {num_total // 1e6}M"
             )
             logger.info(f"Untrainable parameters names: {untrainable_names}")
-        return optim_cfg.build(params)
+        return optim_cfg.build([{"params": _params} for _params in group_params.values()])
 
     @property
     def data_replicate_size(self) -> int:

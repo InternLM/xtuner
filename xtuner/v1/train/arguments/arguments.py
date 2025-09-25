@@ -36,7 +36,10 @@ parallel_group = Group("fsdp-parallel", sort_key=7)
 
 @Parameter(name="*")
 class TrainingArguments(BaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+    model_config = ConfigDict(
+        arbitrary_types_allowed=True,
+        protected_namespaces=(),
+    )
     # model
     load_from: Annotated[str | None, Parameter(group=model_group, help="load checkpoint from")] = None
     model_cfg: Annotated[

@@ -52,10 +52,19 @@ def apply_rotary_pos_emb_npu(
     position_ids: torch.Tensor | None = None,
     unsqueeze_dim: int = 1,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    import os
+
     import torch_npu
 
-    query_states = torch_npu.npu_rotary_mul(q, cos.unsqueeze(1), sin.unsqueeze(1))
-    key_states = torch_npu.npu_rotary_mul(k, cos.unsqueeze(1), sin.unsqueeze(1))
+    if os.getenv("XTUNER_ROPE_RM_TRANSPOSE", "0") != "1":
+        cos = cos.unsqueeze(1)
+        sin = sin.unsqueeze(1)
+    else:
+        cos = cos.unsqueeze(2)
+        sin = sin.unsqueeze(2)
+
+    query_states = torch_npu.npu_rotary_mul(q, cos, sin)
+    key_states = torch_npu.npu_rotary_mul(k, cos, sin)
     return query_states, key_states
 
 

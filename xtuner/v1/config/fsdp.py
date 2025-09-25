@@ -2,11 +2,15 @@ from typing import Any, Optional, Tuple
 
 import torch
 from cyclopts import Parameter
-from pydantic import BaseModel, field_serializer, field_validator
+from pydantic import BaseModel, ConfigDict, field_serializer, field_validator
 from typing_extensions import Annotated
 
 
 class FSDPConfig(BaseModel):
+    model_config = ConfigDict(
+        arbitrary_types_allowed=True,
+        protected_namespaces=(),
+    )
     tp_size: Annotated[int, Parameter(help="Tensor parallel size")] = 1
     sp_size: Annotated[int, Parameter(help="Sequence parallel size")] = 1
     ep_size: Annotated[int, Parameter(help="Expert parallel size")] = 1
@@ -30,13 +34,6 @@ class FSDPConfig(BaseModel):
     hsdp_sharding_size: Annotated[
         Optional[int], Parameter(help="Sharding size for HSDP (Hybrid Sharding Data Parallel)")
     ] = None
-
-    # todo
-
-    # Unable to generate pydantic-core schema for <class 'torch.dtype'>.
-    # Set `arbitrary_types_allowed=True` in the model_config to ignore this error
-    class Config:
-        arbitrary_types_allowed = True
 
     def model_post_init(self, __context: Any) -> None:
         if self.hsdp_sharding_size is not None:
