@@ -298,7 +298,6 @@ class DataloaderConfig(BaseDataloaderConfig):
         micro_batch_size: int,
         seed: int,
         shuffle: bool = True,
-        total_step: int | None = None,
     ) -> Dataloader:
         if self.dataset_config_list is None:
             raise ValueError("dataset_config_list is required.")

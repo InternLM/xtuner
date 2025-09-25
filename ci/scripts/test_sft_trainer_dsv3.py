@@ -283,7 +283,8 @@ def main():
             profile_step=20,
             profile_memory=True,
             strict_load=False,
-            intra_layer_micro_batch=2,
+            packed_samples_per_forward=2,
+            domino_forward=True,
         )
         trainer.fit()
         if dist.get_rank() == 0:

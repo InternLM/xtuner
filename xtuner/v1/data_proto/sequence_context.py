@@ -137,6 +137,9 @@ class SequenceContext:
 
     @classmethod
     def pack(cls, sequence_context_list: list["SequenceContext"]):
+        if len(sequence_context_list) == 1:
+            return sequence_context_list[0]
+
         packed_input_ids: list[torch.Tensor] = []
         cu_seq_lens_q: list[torch.IntTensor] = []
         cu_seq_lens_k: list[torch.IntTensor] = []
