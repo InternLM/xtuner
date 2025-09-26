@@ -157,25 +157,25 @@ class MoE(BaseModel):
     ) -> torch.Tensor:
         assert len(router_logits_list) > 0, "router_logits_list should not be empty"
         if isinstance(router_logits_list[0], torch.Tensor):
-            router_logits_list = [cast(list[torch.Tensor], router_logits_list)]  # intra_layer_micro_batch is 1
+            router_logits_list = [cast(list[torch.Tensor], router_logits_list)]  # packed_samples_per_forward is 1
             attn_mask_list = [cast(torch.Tensor, attn_mask_list)]
-        # router_logits_list [intra_layer_micro_batch, num_layers][seq, num_experts]
-        # attn_mask_list [intra_layer_micro_batch, ][1, seq]
-        intra_layer_micro_batch = len(router_logits_list)
+        # router_logits_list [packed_samples_per_forward, num_layers][seq, num_experts]
+        # attn_mask_list [packed_samples_per_forward, ][1, seq]
+        packed_samples_per_forward = len(router_logits_list)
         num_layers = len(router_logits_list[0])
 
-        router_logits_list_new = []  # [num_layers, intra_layer_micro_batch] -> [num_layers * intra_layer_micro_batch]
+        router_logits_list_new = []  # [num_layers, packed_samples_per_forward] -> [num_layers * packed_samples_per_forward]
         for layer_idx in range(num_layers):
-            for micro_batch_idx in range(intra_layer_micro_batch):
+            for micro_batch_idx in range(packed_samples_per_forward):
                 router_logits_list_new.append(router_logits_list[micro_batch_idx][layer_idx])
 
         router_logits = torch.stack(
             router_logits_list_new, dim=0
-        )  # [num_layers * intra_layer_micro_batch, seq, num_experts]
+        )  # [num_layers * packed_samples_per_forward, seq, num_experts]
         router_logits = router_logits.view(
             num_layers, -1, router_logits.shape[-1]
-        )  # [num_layers, intra_layer_micro_batch * seq, num_experts]
-        attn_mask = torch.stack(attn_mask_list, dim=0)  # type: ignore  # [intra_layer_micro_batch, 1, seq]
+        )  # [num_layers, packed_samples_per_forward * seq, num_experts]
+        attn_mask = torch.stack(attn_mask_list, dim=0)  # type: ignore  # [packed_samples_per_forward, 1, seq]
         attn_mask = attn_mask.flatten()
         router_logits = router_logits[:, attn_mask].contiguous().float()  # [num_layers, non_pad_seq, num_experts]
         return router_logits

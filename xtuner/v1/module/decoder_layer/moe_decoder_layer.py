@@ -375,7 +375,7 @@ class MoEDecoderLayer(nn.Module):
         assert all(hidden_states.shape == origin_shape for hidden_states in hidden_states_list), (
             "All hidden states should have the same shape"
         )
-        intra_layer_micro_batch = len(hidden_states_list)
+        packed_samples_per_forward = len(hidden_states_list)
         residual_list: list[torch.Tensor] = []
         router_results_list: list[RouterResults] = []
 
@@ -466,7 +466,7 @@ class MoEDecoderLayer(nn.Module):
             combined_list.append(combined)
 
         hidden_states_out_list: list[torch.Tensor] = []
-        for i in range(intra_layer_micro_batch):
+        for i in range(packed_samples_per_forward):
             post_combined = self.dispatcher.combine_postprocess(
                 pre_dispatched=pre_dispatched_list[i],
                 dispatched=dispatched_list[i],

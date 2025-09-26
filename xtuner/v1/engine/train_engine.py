@@ -29,7 +29,7 @@ from torch.utils._foreach_utils import (
 from xtuner.v1.config import FSDPConfig, OptimConfig
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.float8.float8_handler import Float8Handler
-from xtuner.v1.model.base import BaseModel, ModelItem, TransformerConfig
+from xtuner.v1.model.base import BaseLossContext, BaseModel, ModelItem, TransformerConfig
 from xtuner.v1.module.router import NoAuxRouterConfig
 from xtuner.v1.utils import get_device, get_logger, get_torch_device_module
 
@@ -142,14 +142,16 @@ class TrainEngine:
         model_cfg: TransformerConfig,
         optim_cfg: OptimConfig,
         fsdp_cfg: FSDPConfig,
-        intra_layer_micro_batch: int = 1,
+        packed_samples_per_forward: int = 1,
+        domino_forward: bool = False,
     ) -> None:
         self.model_cfg = model_cfg
         self.optim_cfg = optim_cfg
         self.fsdp_cfg = fsdp_cfg
         self.model = self.build_model()
         self.optimizer = self.build_optimizer(optim_cfg)
-        self.intra_layer_micro_batch = intra_layer_micro_batch
+        self.packed_samples_per_forward = packed_samples_per_forward
+        self.domino_forward = domino_forward
         self._count = 0
 
     def build_model(self) -> BaseModel:
@@ -203,8 +205,7 @@ class TrainEngine:
         return output
 
     def grad_accumulation_steps(self, data_batches_len: int):
-        intra_layer_micro_batch = self.intra_layer_micro_batch
-        return data_batches_len // intra_layer_micro_batch
+        return data_batches_len // self.packed_samples_per_forward
 
     def train_step(self, data_batches: list[ModelItem]):
         """Perform a training step with the given data batches and mesh.
@@ -217,9 +218,9 @@ class TrainEngine:
 
         loss_log = {}
         other_log = {}
-        intra_layer_micro_batch = self.intra_layer_micro_batch
-        assert len(data_batches) % intra_layer_micro_batch == 0, (
-            f"data_batches length {len(data_batches)} is not divisible by intra_layer_micro_batch {intra_layer_micro_batch}"
+        packed_samples_per_forward = self.packed_samples_per_forward
+        assert len(data_batches) % self.packed_samples_per_forward == 0, (
+            f"data_batches length {len(data_batches)} is not divisible by num_packed_sample {packed_samples_per_forward}"
         )
         iters_per_step = self.grad_accumulation_steps(len(data_batches))
 
@@ -245,10 +246,10 @@ class TrainEngine:
             logger.info(f"grad_accumulation_steps: {iters_per_step}")
             self._count += 1
 
-        for i in range(0, len(data_batches), intra_layer_micro_batch):
-            data_batch = data_batches[i : i + intra_layer_micro_batch]
-            seq_ctx_list = []
-            loss_ctx_list = []
+        for i in range(0, len(data_batches), packed_samples_per_forward):
+            data_batch = data_batches[i : i + packed_samples_per_forward]
+            seq_ctx_list: list[SequenceContext] = []
+            loss_ctx_list: list[BaseLossContext] = []
             for data in data_batch:
                 seq_ctx = data["seq_ctx"]
                 loss_ctx = data["loss_ctx"]
@@ -256,10 +257,12 @@ class TrainEngine:
                 loss_ctx_list.append(loss_ctx)
                 step_consumed_tokens += seq_ctx.mask.sum()
 
-            if self.intra_layer_micro_batch == 1:
-                output = self.model(seq_ctx=seq_ctx_list[0], loss_ctx=loss_ctx_list[0])
+            if not self.domino_forward:
+                cat_seq_ctx = seq_ctx_list[0].__class__.pack(seq_ctx_list)
+                cat_loss_ctx = loss_ctx_list[0].__class__.pack(loss_ctx_list)
+                output = self.model(seq_ctx=cat_seq_ctx, loss_ctx=cat_loss_ctx)
             else:
-                # For intra_layer_micro_batch > 1, we need to handle the data batches differently.
+                # For packed_samples_per_forward > 1, we need to handle the data batches differently.
                 # Here we assume that the model can handle a list of seq_ctx and loss_ctx.
                 output = self.model(
                     seq_ctx=seq_ctx_list,

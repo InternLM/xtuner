@@ -9,6 +9,7 @@ from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.nn.functional import all_reduce
+from typing_extensions import Self
 
 from .chunk_loss import ChunkLoss
 
@@ -151,3 +152,8 @@ class BaseLossContext(nn.Module, ABC, Generic[LossContextInputItem]):
         if dist.is_initialized():
             loss = all_reduce(loss, op=dist.ReduceOp.SUM, group=dist.group.WORLD)
         return loss, logits
+
+    @classmethod
+    def pack(cls, loss_ctx_list: list[Self]) -> Self:
+        # TODO: Imp pack for all loss_ctx
+        raise NotImplementedError

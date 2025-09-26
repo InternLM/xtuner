@@ -170,3 +170,14 @@ class CELossContext(BaseLossContext[CELossContextInputItem]):
             loss = (loss * loss_weight).sum()
 
         return loss, logits
+
+    @classmethod
+    def pack(cls, loss_ctx_list: list[Self]) -> Self:  # type: ignore
+        if len(loss_ctx_list) == 0:
+            return loss_ctx_list
+        loss_cfg = loss_ctx_list[0].loss_cfg
+        loss_kwargs = [i.loss_kwargs for i in loss_ctx_list]
+        shifted_labels = torch.cat([i.shifted_labels for i in loss_kwargs], dim=-1)
+        shifted_loss_weights = torch.cat([i.loss_weight for i in loss_kwargs], dim=-1)
+        cat_loss_kwargs = CELossKwargs(shifted_labels=shifted_labels, loss_weight=shifted_loss_weights)
+        return cls(loss_cfg=loss_cfg, loss_kwargs=cat_loss_kwargs)

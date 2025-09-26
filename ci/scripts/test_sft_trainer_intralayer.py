@@ -15,10 +15,9 @@ from xtuner.v1.config import (
 from xtuner.v1.model.moe.moe import BalancingLossConfig, ZLossConfig
 from xtuner.v1.datasets import DatasetConfig, DataloaderConfig
 from xtuner.v1.datasets import FTDPTokenizeFnConfig
-from xtuner.v1.loss import CELossContext
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
 from xtuner.v1.train.trainer import Trainer
-from xtuner.v1.utils.compile import maybe_compile
+from xtuner.v1.loss import CELossConfig
 import argparse
 
 
@@ -250,10 +249,10 @@ def main():
         ]
 
         dataloader_config = DataloaderConfig(
-            pack_max_length=8192,
+            pack_max_length=16384,
         )
         work_dir = f"{args.work_dir}-{name}"
-        loss_ctx = CELossContext(loss_class="liger_cross_entropy")
+        loss_cfg = CELossConfig(mode="chunk", chunk_size=1024, ignore_idx=-100)
         trainer = Trainer(
             load_from=QWEN3_MOE_PATH,
             model_cfg=moe_cfg,
@@ -261,13 +260,14 @@ def main():
             fsdp_cfg=fsdp_cfg,
             dataset_cfg=dataset_config,
             dataloader_cfg=dataloader_config,
-            loss_ctx=loss_ctx,
+            loss_cfg=loss_cfg,
             lr_cfg=lr_cfg,
             tokenizer_path=QWEN3_MOE_PATH,
             global_batch_size=32,
             total_epoch=1,
             work_dir=work_dir,
-            intra_layer_micro_batch=2,
+            packed_samples_per_forward=2,
+            domino_forward=True,
             seed=0,
             debug=False,
             profile_memory=False,
