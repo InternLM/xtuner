@@ -31,25 +31,30 @@ from xtuner.v1.config import (
 from xtuner.v1.ray.judger.controller import JudgerConfig
 from xtuner.v1.rl.base import WorkerConfig
 from xtuner.v1.rl.grpo import GRPOLossConfig
+# from xtuner.v1.rl.grpo import GRPOLossConfig, WorkerConfig
+# from xtuner.v1.rl.grpo.config import WorkerConfig, LossConfig
+# from xtuner.v1.rl.grpo.trainer import Trainer
 from xtuner.v1.train.rl_trainer import RLTrainer
 
+MODEL_PATH = os.environ["ROLLOUT_MODEL_PATH"]
+TRAIN_DATA_PATH = os.environ["ROLLOUT_DATA_PATH"]
+TEST_DATA_PATH = os.environ["ROLLOUT_TEST_DATA_PATH"]
 os.environ['XTUNER_USE_FA3'] = "1"
+
 def parse_args():
-    parser = argparse.ArgumentParser(description="GRPO Training test scripts")
+    parser = argparse.ArgumentParser(description="VLLM Rollout Test Script")
     parser.add_argument("--total-epochs", type=int)
-    parser.add_argument("--model-path", type=str)
-    parser.add_argument("--data-path", type=str)
-    parser.add_argument("--eval-data-path", type=str)
     parser.add_argument("--work-dir", type=str, default="work_dir")
+    parser.add_argument("--model-path", type=str, default=MODEL_PATH)
+    parser.add_argument("--data-path", type=str, default=TRAIN_DATA_PATH)
+    parser.add_argument("--eval-data-path", type=str, default=TEST_DATA_PATH)
     parser.add_argument("--num-workers", type=int, default=8)
     parser.add_argument("--gpus-per-node", type=int, default=8)
     parser.add_argument("--rollout-global-batch-size", type=int, default=128)
-    parser.add_argument("--rollout-tp-size", type=int, default=1)
-    parser.add_argument("--rollout-ep-size", type=int, default=1)
     parser.add_argument("--train-optimizer-steps", type=int, default=1)
-    parser.add_argument("--max-concurrent", type=int, default=512)
+    parser.add_argument("--max-concurrent", type=int, default=8)
     parser.add_argument("--prompt-repeat-k", type=int, default=8)
-    parser.add_argument("--pack-max-length", type=int, default=32768)
+    parser.add_argument("--pack-max-length", type=int, default=8192)
     parser.add_argument("--max-prompt-length", type=int, default=512)
     parser.add_argument("--max-response-length", type=int, default=1024)
     parser.add_argument("--optimizer-disable-foreach", action="store_true")  # save memory usage during opt.step()
@@ -80,8 +85,8 @@ def main(args):
         model_name=os.path.basename(args.model_path).lower(),
         tokenizer_path=args.model_path,
         rollout_cross_node_comm=False,
-        tensor_parallel_size=args.rollout_tp_size,
-        expert_parallel_size=args.rollout_ep_size,
+        tensor_parallel_size=2,
+        expert_parallel_size=1,
         gpus_per_node=args.gpus_per_node, # gpu: 8, npu: 16
         dtype="bfloat16",
         skip_load_weights=False,
@@ -91,16 +96,37 @@ def main(args):
         max_concurrent=args.max_concurrent,
         prompt_repeat_k=args.prompt_repeat_k,
         global_batch_size=args.rollout_global_batch_size,
-        sample_params=SampleParams(max_tokens=args.max_response_length),
+        sample_params=SampleParams(
+            max_tokens=args.max_response_length,
+            # ###### greedy
+            # top_k=20,
+            # # temperature=1e-6,
+            ##########
+            top_k=0,
+            top_p=1.0,
+            temperature=1.0,
+
+            min_tokens=0,
+            # stop_token_ids= [],
+            # logprobs= 0,
+            # skip_special_tokens= True,
+            do_sample=True,
+            ),
     )
-    from xtuner.v1.ray.judger.gsm8k import GSM8KJudgerConfig
-    gsm8k_judger_config = GSM8KJudgerConfig()
+    # from xtuner.v1.ray.judger.gsm8k import GSM8KJudgerConfig
+    # gsm8k_judger_config = GSM8KJudgerConfig()
+    # judger_cfg = JudgerConfig(
+    #     reward_judger_configs={"openai/gsm8k": gsm8k_judger_config}
+    # )
+    tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True)
+    from xtuner.v1.ray.judger.dapo_math import DapoMathJudgerConfig
+    dapomath_judger_config = DapoMathJudgerConfig(True, args.max_response_length, 4096, 1.0, tokenizer)
     judger_cfg = JudgerConfig(
-        reward_judger_configs={"openai/gsm8k": gsm8k_judger_config}
+        reward_judger_configs={"math_dapo": dapomath_judger_config}
     )
     train_dataset_cfg = [
         {
-        "dataset": DatasetConfig(name="gsm8k",
+        "dataset": DatasetConfig(name="dapo_math",
                                  anno_path=args.data_path,
                                  sample_ratio=1.0),
         "tokenize_fn": RLTextTokenizeFnConfig(max_length=args.max_prompt_length),
@@ -119,7 +145,7 @@ def main(args):
         collator='fake_collator',
         pack_level='none',
     )
-    tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True)
+    # tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True)
     evaluator_cfg = EvaluatorConfig(
         dataset_cfg=eval_dataset_cfg,
         tokenizer=tokenizer, 
@@ -135,17 +161,18 @@ def main(args):
         postprocessor=None
     )
     train_worker_cfg: WorkerConfig = WorkerConfig(
+        # model_cfg=Qwen3Dense8BConfig(),
         model_cfg=Qwen2Dense7BConfig(),
-        optim_cfg=AdamWConfig(lr=1e-6, foreach=False if args.optimizer_disable_foreach else None),
+        optim_cfg=AdamWConfig(lr=1e-6, betas=(0.9, 0.999), max_grad_norm=1.0, weight_decay=0.1, foreach=False if args.optimizer_disable_foreach else None),
         loss_cfg=GRPOLossConfig(
             policy_loss_cfg=dict(
-                cliprange_high=0.2,
+                cliprange_high=0.28,
                 cliprange_low=0.2,
                 loss_type=args.policy_loss_type,
             ),
             ignore_idx=-100,
-            use_kl_loss=True,
-            kl_loss_coef=0.001,
+            use_kl_loss=False,
+            kl_loss_coef=0.0,
             kl_loss_type="low_var_kl",
             mode="chunk", 
             chunk_size=512),
