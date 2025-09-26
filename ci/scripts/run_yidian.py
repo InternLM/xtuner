@@ -37,16 +37,16 @@ def main():
     
     current_dir = os.getcwd()
     cmd = f"cd {current_dir}; {args.env}; {args.cmd}"
-    print(f"Running command: {cmd}")
+    # print(f"Running command: {cmd}")
     
     assert params_cls is not None and cluster_cls is not None, (
         f"Cluster {CLUSTER} is not available in current ci machine!"
     )
     
     # 获取GitLab CI环境变量
-    commit_id = os.environ.get('CI_COMMIT_SHORT_SHA', 'test')
-    commit_branch = os.environ.get('CI_COMMIT_REF_NAME', 'test')
-    job_id = os.environ.get('CI_JOB_ID', '0')
+    commit_id = os.environ.get('GITHUB_SHA', 'test')[0:8]
+    commit_branch = os.environ.get('GITHUB_HEAD_REF', 'test')
+    job_id = os.environ.get('GITHUB_RUN_ID', '0') + '-'  + os.environ.get('GITHUB_RUN_ATTEMPT', '0')
     
     # 清理分支名中的非法字符，避免Kubernetes标签错误
     commit_branch = commit_branch.replace('/', '-').replace('\\', '-').replace('_', '-')
@@ -56,9 +56,9 @@ def main():
         job_name=f"xtuner-ci-{job_id}-{commit_branch}-{commit_id}",
         image=args.image,
         cmd=cmd,
-        gpus_per_task=16,       # Yidian使用16个GPU per node
-        cpus_per_task=512,      # 更多CPU资源（基于test_clusterx_sft.py）
-        memory_per_task="1800", # 更大内存（基于test_clusterx_sft.py的1800G配置）
+        gpus_per_task=8,       # Yidian使用16个GPU per node
+        cpus_per_task=120,      # 更多CPU资源（基于test_clusterx_sft.py）
+        memory_per_task="800", # 更大内存（基于test_clusterx_sft.py的1800G配置）
         num_nodes=args.nodes,
         no_env=True             # 不继承环境变量，使用自定义环境
     )
