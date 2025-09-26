@@ -1,3 +1,4 @@
+import os
 import traceback
 from functools import lru_cache
 
@@ -203,9 +204,14 @@ def flex_attention(
 def flash_attention(q, k, v, window_size=(-1, -1), s_aux=None, **kwargs) -> torch.Tensor:
     # q, k, v: [b, n_head, seq , head_dim]
     assert q.size(0) == 1, "Only support batch size 1 for flash attention"
-    q = q.transpose(1, 2).squeeze(0)  # [seq, head, dim]
-    k = k.transpose(1, 2).squeeze(0)
-    v = v.transpose(1, 2).squeeze(0)
+    if os.getenv("XTUNER_ROPE_RM_TRANSPOSE", "0") != "1":
+        q = q.transpose(1, 2).squeeze(0)  # [seq, head, dim]
+        k = k.transpose(1, 2).squeeze(0)
+        v = v.transpose(1, 2).squeeze(0)
+    else:
+        q = q.squeeze(0)  # [seq, head, dim]
+        k = k.squeeze(0)
+        v = v.squeeze(0)
 
     attention_output: torch.Tensor
 

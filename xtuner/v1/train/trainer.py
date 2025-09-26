@@ -117,7 +117,12 @@ class ResumeConfig(BaseModel):
 
 
 class TrainerConfig(BaseModel):
-    model_config = ConfigDict(title="Trainer config", extra="allow", arbitrary_types_allowed=True)
+    model_config = ConfigDict(
+        title="Trainer config",
+        extra="allow",
+        arbitrary_types_allowed=True,
+        protected_namespaces=(),
+    )
     model_cfg: TransformerConfig | VisionComposeConfigProtocol
     load_from: str | Path | None = None
     tokenizer_path: str | Path | None = None
