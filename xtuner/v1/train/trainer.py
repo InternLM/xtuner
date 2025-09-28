@@ -295,6 +295,12 @@ class Trainer:
         self._consumed_samples = 0
 
         self._init_dist(backend)
+        if os.getenv("XTUNER_ENABLE_CUSTOM_ALLGATHER"):
+            print("enable custom allgather")
+            import ib_wrapper
+            group = dist.new_group(list(range(dist.get_world_size())))
+            buffer = ib_wrapper.Buffer(group, explicitly_destroy=True)
+
         self._set_deterministic()
         self._set_random_seed(seed)
         self._setup_env()

@@ -124,6 +124,7 @@ class MoE(BaseModel):
         else:
             self.ep_mesh = None
         self.config = config
+        self.offload_stream = torch.cuda.Stream()
 
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.lm_head = LMHead(config.hidden_size, config.vocab_size, bias=False)
@@ -327,11 +328,27 @@ class MoE(BaseModel):
                     hidden_states_list = list(cat_hidden_states.chunk(len(seq_ctx_list), dim=1))
                     moe_forawrd = True
 
-                layer_results = decoder_layer(
-                    *hidden_states_list,
-                    position_embeddings=position_embeddings_list,
-                    seq_ctx=seq_ctx_list,
-                )
+                if int(os.getenv("XTUNER_ACTIVATION_OFFLOAD", "0")) == 1:
+                    offload_stream = self.offload_stream
+                    with async_save_on_cpu(
+                        h2d_stream=offload_stream,  # type: ignore
+                        d2h_stream=offload_stream,  # type: ignore
+                        block_idx=layer_idx,
+                        depth=len(self.layers),
+                        custom_check_fn=lambda x: x.data_ptr()
+                        in [hidden_states.data_ptr() for hidden_states in hidden_states_list],
+                    ):
+                        layer_results = decoder_layer(
+                            *hidden_states_list,
+                            position_embeddings=position_embeddings_list,
+                            seq_ctx=seq_ctx_list,
+                        )
+                else:
+                    layer_results = decoder_layer(
+                        *hidden_states_list,
+                        position_embeddings=position_embeddings_list,
+                        seq_ctx=seq_ctx_list,
+                    )
                 hidden_states = layer_results[: len(hidden_states_list)]
                 router_logits = layer_results[len(hidden_states_list) :]
 
@@ -784,7 +801,7 @@ class MoE(BaseModel):
     def _maybe_compile_layers(self):
         if self.fsdp_config is not None:
             if self.fsdp_config.torch_compile:
-                torch._dynamo.config.cache_size_limit = 128
+                torch._dynamo.config.cache_size_limit = 256
                 if self.fsdp_config.compile_targets is None:
                     if self.ep_mesh.size() > 1:
                         # all_to_all_single_autograd in TorchAll2AllDispatcher.dispatch can not be compiled even if the fullgraph=False

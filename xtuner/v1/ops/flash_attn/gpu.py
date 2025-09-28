@@ -72,6 +72,7 @@ def _flash_attn_varlen_forward_v3_fake(
     softcap: float = 0.0,  # 0.0 means deactivated
 ) -> tuple[torch.Tensor, torch.Tensor]:
     total_q, num_heads, _ = q.shape
+    q = q.contiguous()
     out = torch.empty_like(q)
     softmax_lse = torch.empty((num_heads, total_q), dtype=torch.float32, device=q.device, layout=q.layout)
     return out, softmax_lse
@@ -190,6 +191,7 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
             window_size[1],
             softcap,
         )
+        # torch.distributed.breakpoint()
         ctx.save_for_backward(q, k, v, out, softmax_lse, cu_seqlens_q, cu_seqlens_k)
         ctx.max_seqlen_q = max_seqlen_q
         ctx.max_seqlen_k = max_seqlen_k
