@@ -144,7 +144,10 @@ class GRPOLossContext(BaseLossContext[RLLossContextInputItem]):
             policy_loss_weight,
             self.loss_cfg.policy_loss_cfg,
         )
+
+        # 只看响应部分
         ratio = (logprobs - old_logprobs.detach()).exp()
+        ratio = ratio * policy_loss_weight.float()
 
         if self.loss_cfg.use_kl_loss:
             ref_logprobs = loss_kwargs.ref_logprobs
