@@ -6,7 +6,7 @@ import time
 import parametrize
 import torch
 import torch.distributed as dist
-from torch.testing._internal.common_distributed import DistributedTestBase
+from xtuner._testing import DeterministicDDPTestCase
 from transformers import AutoTokenizer
 
 from xtuner.v1.model.moe.moe import SequenceContext
@@ -22,12 +22,13 @@ from xtuner.v1.loss.ce_loss import CELossConfig, CELossContextInputItem
 from xtuner.v1.model.moe.moe import BalancingLossConfig
 
 
+
 # Qwen3 30B A3
 QWEN3_MOE_PATH = os.environ["QWEN3_MOE_PATH"]
 DEVICE = get_device()
 
 
-class TestMoEEngineFloat8(DistributedTestBase):
+class TestMoEEngineFloat8(DeterministicDDPTestCase):
 
     @parametrize.parametrize(
         "device,ep_size,hsdp_sharding_size",
@@ -101,17 +102,16 @@ class TestMoEEngineFloat8(DistributedTestBase):
             engine.step_optimizer(grad_norm)
             lr_scheduler.step()
             losses.append(loss_log["reduced_llm_loss"])
-        losses_ref = [2.41, 2.41, 1.79, 1.39, 1.02, 0.68, 0.52, 0.31, 0.18, 0.12]
+        losses = torch.tensor(losses)
+        losses_ref = torch.tensor([2.41, 2.41, 1.79, 1.39, 1.02, 0.68, 0.52, 0.31, 0.18, 0.12])
 
-        for loss, loss_ref in zip(losses, losses_ref):
-            self.assertTrue(abs(loss - loss_ref) < 0.2)
-        
+        self._check_loss_curve(losses, losses_ref, sim_tol=0.02, rtol=0.2)
         torch.cuda.empty_cache()
         try:
             dist.destroy_process_group(pg)
         except:
             pass
-    
+
     @parametrize.parametrize(
         "device,ep_size,hsdp_sharding_size",
         [
@@ -184,17 +184,18 @@ class TestMoEEngineFloat8(DistributedTestBase):
             engine.step_optimizer(grad_norm)
             lr_scheduler.step()
             losses.append(loss_log["reduced_llm_loss"])
-        losses_ref = [2.45, 2.45, 1.78, 1.31, 0.95, 0.67, 0.45, 0.31, 0.18, 0.12]
 
-        for loss, loss_ref in zip(losses, losses_ref):
-            self.assertTrue(abs(loss - loss_ref) < 0.2)
-        
+        losses_ref = torch.tensor([2.45, 2.45, 1.78, 1.31, 0.95, 0.67, 0.45, 0.31, 0.18, 0.12])
+        losses = torch.tensor(losses)
+
+        self._check_loss_curve(losses, losses_ref, sim_tol=0.02, rtol=0.1)
+
         torch.cuda.empty_cache()
         try:
             dist.destroy_process_group(pg)
         except:
             pass
-    
+
     @parametrize.parametrize(
         "device,ep_size,hsdp_sharding_size",
         [
@@ -286,20 +287,19 @@ class TestMoEEngineFloat8(DistributedTestBase):
             engine.step_optimizer(grad_norm)
             lr_scheduler.step()
             losses.append(loss_log["reduced_llm_loss"])
-        losses_ref = [2.41, 2.41, 2.47, 2.42, 2.44, 2.44, 2.42, 2.38, 2.31, 2.30]
-
-        for loss, loss_ref in zip(losses, losses_ref):
-            self.assertTrue(abs(loss - loss_ref) < 0.2)
+        losses_ref = torch.tensor([2.41, 2.41, 2.47, 2.42, 2.44, 2.44, 2.42, 2.38, 2.31, 2.30])
+        losses = torch.tensor(losses)
+        self._check_loss_curve(losses, losses_ref)
 
         if dist.get_rank() == 0:
             shutil.rmtree(temp_dir)
-        
+
         torch.cuda.empty_cache()
         try:
             dist.destroy_process_group(pg)
         except:
             pass
-    
+
     @property
     def world_size(self) -> int:
         return int(os.getenv("XTUNER_TEST_WORLD_SIZE", "8"))
@@ -309,7 +309,7 @@ class TestMoEEngineFloat8(DistributedTestBase):
         return False
 
 
-class TestMoEEngineFloat8Case2(DistributedTestBase):
+class TestMoEEngineFloat8Case2(DeterministicDDPTestCase):
 
     @parametrize.parametrize(
         "device,ep_size,hsdp_sharding_size",

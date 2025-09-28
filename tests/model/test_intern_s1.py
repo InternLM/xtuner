@@ -2,7 +2,7 @@ import os
 
 import parametrize
 import torch
-from torch.testing._internal.common_distributed import DistributedTestBase
+from xtuner._testing import patch_hf_rms_norm, DeterministicDDPTestCase
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 import torch.distributed as dist
 import tempfile
@@ -24,7 +24,7 @@ from xtuner.v1.utils.test_utils import init_data_mesh, preprocess_intern_s1
 INTERNS1_DENSE_PATH = os.environ["INTERNS1_DENSE_PATH"]
 
 
-class TestInternS1(DistributedTestBase):
+class TestInternS1(DeterministicDDPTestCase):
     @parametrize.parametrize(
         "device,tol",
         [
@@ -48,6 +48,7 @@ class TestInternS1(DistributedTestBase):
             trust_remote_code=True,
             device_map="cuda"
         ).eval()  # avoid open drop_path
+        patch_hf_rms_norm(hf_model)
 
         tokenizer = AutoTokenizer.from_pretrained(INTERNS1_DENSE_PATH, trust_remote_code=True)
         input_ids = tokenizer("吃葡萄不吐葡萄皮", return_tensors="pt").input_ids.to(device)
@@ -118,6 +119,7 @@ class TestInternS1(DistributedTestBase):
             trust_remote_code=True,
             device_map=device
         ).eval()  # avoid open drop_path
+        patch_hf_rms_norm(hf_model)
 
         tokenizer = AutoTokenizer.from_pretrained(INTERNS1_DENSE_PATH, trust_remote_code=True)
 
@@ -233,6 +235,7 @@ class TestInternS1(DistributedTestBase):
             trust_remote_code=True,
             device_map="cuda"
         ).eval()  # avoid open drop_path
+        patch_hf_rms_norm(hf_model)
 
         tokenizer = AutoTokenizer.from_pretrained(INTERNS1_DENSE_PATH, trust_remote_code=True)
         input_ids = tokenizer("吃葡萄不吐葡萄皮", return_tensors="pt").input_ids.to("cuda")
@@ -317,6 +320,7 @@ class TestInternS1(DistributedTestBase):
             trust_remote_code=True,
             device_map="cuda"
         ).eval()  # avoid open drop_path
+        patch_hf_rms_norm(hf_model)
 
         tokenizer = AutoTokenizer.from_pretrained(INTERNS1_DENSE_PATH, trust_remote_code=True)
         conversations = [{"from": "human", "value": '<image>\nPlease describe the image shortly.'}]

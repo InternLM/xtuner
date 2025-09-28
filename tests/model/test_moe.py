@@ -7,13 +7,15 @@ import os
 from copy import deepcopy
 from xtuner.v1.loss.ce_loss import CELossContext, CELossConfig, CELossContextInputItem
 
-from torch.testing._internal.common_distributed import DistributedTestBase
+from xtuner._testing import DeterministicDDPTestCase
+from xtuner.v1.utils.compile import maybe_compile
 import parametrize
 
 
 class TestMoE:
     @parametrize.parametrize("dtype,device", [(torch.bfloat16, "cuda")])
     def test_moe_config(self, dtype, device):
+        maybe_compile.clear_compile_targets()
         router_config = NoAuxRouterConfig(
             scoring_func="sigmoid",
             router_scaling_factor=1.0,
@@ -46,7 +48,7 @@ class TestMoE:
             num_experts_per_tok=2,
             first_k_dense_replace=1,
             hidden_factor=1.0,
-            moe_intermediate_size=256,  # grouped linear kernel need this to be multiple of 256
+            moe_intermediate_size=512,  # TODO: Restriction of triton grouped gemm, should be optimizer
             router=router_config,
         )
         model = MoE(config=config).to(dtype).to(device)
@@ -73,7 +75,7 @@ class TestMoE:
         model(seq_ctx=seq_ctx, loss_ctx=loss_ctx)
 
 
-class TestDistributedMoE(DistributedTestBase):
+class TestDistributedMoE(DeterministicDDPTestCase):
     @parametrize.parametrize(
         "dtype,device,dispatcher,n_shared_experts,first_k_dense_replace",
         [
@@ -116,7 +118,7 @@ class TestDistributedMoE(DistributedTestBase):
             num_experts_per_tok=2,
             first_k_dense_replace=first_k_dense_replace,
             hidden_factor=1.0,
-            moe_intermediate_size=256,  # grouped linear kernel need this to be multiple of 256
+            moe_intermediate_size=512,  # TODO: Restriction of triton grouped gemm, should be optimizer
             router=router_config,
         )
         loss_cfg = CELossConfig()
