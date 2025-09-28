@@ -17,6 +17,7 @@ from xtuner.v1.config import (
     FSDPConfig,
     LRConfig,
 )
+from xtuner.v1.float8 import Float8Config, ScalingGranularity
 from xtuner.v1.model.moe.moe import BalancingLossConfig, ZLossConfig
 from xtuner.v1.datasets.config import DatasetConfig, DataloaderConfig
 from xtuner.v1.datasets import FtdpTokenizeFunction, FTDPTokenizeFnConfig
@@ -235,7 +236,16 @@ def main():
         raise NotImplementedError
 
     moe_cfgs = [
-        (Qwen3MoE235BA22Config(balancing_loss_cfg=BalancingLossConfig(), z_loss_cfg=ZLossConfig()), "ep1"),
+        # (Qwen3MoE235BA22Config(balancing_loss_cfg=BalancingLossConfig(), z_loss_cfg=ZLossConfig()), "ep1"),
+        (
+            Qwen3MoE235BA22Config(
+                ep_size=1,
+                # num_hidden_layers=32,
+                float8_cfg=Float8Config(
+                    scaling_granularity_gemm=ScalingGranularity.TILEWISE,
+                    scaling_granularity_grouped_gemm=ScalingGranularity.TILEWISE,
+            ),
+        ), "fp8"),
     ]
     for moe_cfg, name in moe_cfgs:
         optim_cfg = AdamWConfig(lr=6e-05)
@@ -258,7 +268,7 @@ def main():
             num_workers=8,
         )
         work_dir = f"{args.work_dir}-{name}"
-        loss_cfg = CELossConfig(mode="chunk", chunk_size=1024, ignore_idx=-100)
+        loss_cfg = CELossConfig(mode="liger", chunk_size=1024, ignore_idx=-100)
         trainer = Trainer(
             load_from=QWEN3_MOE_PATH,
             model_cfg=moe_cfg,

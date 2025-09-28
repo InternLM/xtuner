@@ -27,9 +27,11 @@ from xtuner.v1.utils.device import get_device
 from xtuner.v1.loss import CELossConfig
 from xtuner.v1.datasets.sft_tokenize_fn import OpenaiTokenizeFunctionConfig
 import argparse
+from xtuner.v1.float8 import Float8Config, ScalingGranularity
 
 
-DEEPSEEK_V3_PATH = os.environ["DEEPSEEK_V3_PATH"]
+# DEEPSEEK_V3_PATH = os.environ["DEEPSEEK_V3_PATH"]
+DEEPSEEK_V3_PATH = "/cpfs01/shared/llm_ddd/opencompass/models/hf_hub/models--deepseek-ai--DeepSeek-V3.1/snapshots/3fd2c2ee85a62273a668725b3eb1a7771a26978c"
 ALPACA_PATH = os.environ["ALPACA_PATH"]
 
 
@@ -235,12 +237,20 @@ def main():
     else:
         raise NotImplementedError
 
+    float8_cfg = Float8Config(
+        scaling_granularity_gemm=ScalingGranularity.TILEWISE,
+        scaling_granularity_grouped_gemm=ScalingGranularity.TILEWISE,
+    )
+    # float8_cfg = None
     moe_cfgs = [
         (DeepSeekV3Config(
-            ep_size=8, balancing_loss_cfg=BalancingLossConfig(), z_loss_cfg=ZLossConfig(), 
-            num_hidden_layers=2, first_k_dense_replace=1,
-            n_routed_experts=64, 
-            ), "ep8"),
+            ep_size=8,
+            dispatcher="deepep",
+            balancing_loss_cfg=None,
+            num_hidden_layers=15,
+            eos_token_id=1,
+            float8_cfg=float8_cfg,
+        ), "ep8"),
     ]
     for moe_cfg, name in moe_cfgs:
         optim_cfg = AdamWConfig(lr=6e-05)
@@ -248,7 +258,7 @@ def main():
         fsdp_cfg = FSDPConfig(
             cpu_offload=False,
             ep_size=moe_cfg.ep_size,
-            torch_compile=torch_compile,
+            torch_compile=True,
             # hsdp_sharding_size=4,
         )
         dataset_config = [
@@ -260,13 +270,16 @@ def main():
         ]
 
         dataloader_config = DataloaderConfig(
-            pack_max_length=4096,
+            pack_max_length=8192,
+            pack_extra_buffer_size=5,
+            pack_level="hard",
+            pack_workers=32,
             num_workers=8,
         )
         work_dir = f"{args.work_dir}-{name}"
-        loss_cfg = CELossConfig(mode="chunk", chunk_size=1024, ignore_idx=-100)
+        loss_cfg = CELossConfig(mode="liger", chunk_size=1024, ignore_idx=-100)
         trainer = Trainer(
-            # load_from=DEEPSEEK_V3_PATH,
+            load_from=DEEPSEEK_V3_PATH,
             model_cfg=moe_cfg,
             optim_cfg=optim_cfg,
             fsdp_cfg=fsdp_cfg,
@@ -276,7 +289,7 @@ def main():
             loss_cfg=loss_cfg,
             lr_cfg=lr_cfg,
             tokenizer_path=DEEPSEEK_V3_PATH,
-            global_batch_size=16,
+            global_batch_size=512,
             work_dir=work_dir,
             seed=0,
             total_epoch=10,

@@ -1080,7 +1080,7 @@ class BaseModel(nn.Module):
     def _maybe_compile_layers(self):
         if self.fsdp_config is not None:
             if self.fsdp_config.torch_compile:
-                torch._dynamo.config.cache_size_limit = 128
+                torch._dynamo.config.cache_size_limit = 256
                 if self.fsdp_config.compile_targets is not None:
                     maybe_compile.clear_compile_targets()
                     for target in self.fsdp_config.compile_targets:

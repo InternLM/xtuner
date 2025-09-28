@@ -35,7 +35,7 @@ except (ImportError, ModuleNotFoundError) as e:
 
 
 def get_flex_attention_compiled():
-    torch._dynamo.config.cache_size_limit = 128
+    torch._dynamo.config.cache_size_limit = 256
     return torch.compile(torch_flex_attention, dynamic=False)
 
 
