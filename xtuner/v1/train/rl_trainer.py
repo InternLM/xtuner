@@ -292,6 +292,7 @@ class RLTrainer:
             trajectory_save_path = self.exp_dir / f"rollout_idx_{rollout_idx}_trajectory.jsonl"
             self._save_trajectories(data_groups, trajectory_save_path)
             self.logger.info(f"rollout_idx {rollout_idx} finished, saved trajectories to {trajectory_save_path}")
+            time.sleep(3)
             ray.get(self._train_controller.onload.remote(target="all"))
             self.logger.info("Training controller loaded")
             data_batches, data_info = self._prepare_train_data(data_groups, self._train_worker_cfg.pack_max_length)

@@ -56,6 +56,10 @@ class BaseEnvironment(ABC):
             from xtuner.v1.ray.rollout import vLLMWorker
 
             rollout_workers_map = AutoAcceleratorWorkers.from_placement_group(vLLMWorker, rollout_cfg, placement_group)
+        elif rollout_cfg.backend == "sglang":
+            from xtuner.v1.ray.rollout import SGLangWorker
+
+            rollout_workers_map = AutoAcceleratorWorkers.from_placement_group(SGLangWorker, rollout_cfg, placement_group)
         else:
             raise NotImplementedError(f"Rollout backend '{rollout_cfg.backend}' is not supported.")
 

@@ -81,17 +81,29 @@ def main(args):
         num_workers=args.num_workers,
         cpu_memory_per_worker=16 * 1024 ** 3,  # 16 GB
     )
+
+    if os.environ.get("XTUNER_USE_SGLANG", "0") == "1":
+        backend = 'sglang'
+        launch_server_method = 'multiprocessing'
+    elif os.environ.get("XTUNER_USE_VLLM", "0") == "1":
+        backend = 'vllm'
+        launch_server_method = 'ray'
+    else:
+        backend = 'lmdeploy'
+        launch_server_method = 'ray'
     rollout_config = RolloutConfig(
         env="test_env",
         model_path=args.model_path,
         model_name=os.path.basename(args.model_path).lower(),
         tokenizer_path=args.model_path,
         rollout_cross_node_comm=False,
-        tensor_parallel_size=2,
+        tensor_parallel_size=1,  # TODO： 暂时写死
         expert_parallel_size=1,
         gpus_per_node=args.gpus_per_node,  # gpu: 8, npu: 16
         dtype="bfloat16",
         skip_load_weights=False,
+        backend=backend,
+        launch_server_method=launch_server_method,
     )
     dataflow_config = DataFlowConfig(
         env="test",
