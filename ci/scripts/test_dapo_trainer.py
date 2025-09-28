@@ -39,8 +39,10 @@ from xtuner.v1.train.rl_trainer import RLTrainer
 MODEL_PATH = os.environ["ROLLOUT_MODEL_PATH"]
 TRAIN_DATA_PATH = os.environ["ROLLOUT_DATA_PATH"]
 TEST_DATA_PATH = os.environ["ROLLOUT_TEST_DATA_PATH"]
-os.environ['XTUNER_USE_FA3'] = "1"
 
+os.environ['XTUNER_USE_FA3'] = "1"
+if os.environ['XTUNER_USE_FA3'] == "1":
+    from flash_attn_interface import flash_attn_3_cuda
 
 def parse_args():
     parser = argparse.ArgumentParser(description="VLLM Rollout Test Script")
@@ -97,7 +99,7 @@ def main(args):
         model_name=os.path.basename(args.model_path).lower(),
         tokenizer_path=args.model_path,
         rollout_cross_node_comm=False,
-        tensor_parallel_size=1,  # TODO： 暂时写死
+        tensor_parallel_size=1,  # TODO： sglang 暂时写死
         expert_parallel_size=1,
         gpus_per_node=args.gpus_per_node,  # gpu: 8, npu: 16
         dtype="bfloat16",
