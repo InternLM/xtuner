@@ -324,9 +324,8 @@ class async_save_on_cpu(saved_tensors_hooks):
 
             working_stream = torch.cuda.current_stream()
 
-            working_stream.wait_stream(d2h_stream)  # make sure all d2h copy is done before into backward
+            # working_stream.wait_stream(d2h_stream)  # make sure all d2h copy is done before into backward
             h2d_stream.wait_stream(working_stream)
-            h2d_stream.wait_stream(d2h_stream)
 
             block_idx, tensor_idx = swap_tensor.key.split("_")
 

@@ -329,7 +329,8 @@ class MoE(BaseModel):
                     moe_forawrd = True
 
                 if int(os.getenv("XTUNER_ACTIVATION_OFFLOAD", "0")) == 1:
-                    offload_stream = self.offload_stream
+                    offload_stream = decoder_layer._get_fsdp_state()._comm_ctx.all_gather_copy_in_stream
+                    # offload_stream = self.offload_stream
                     with async_save_on_cpu(
                         h2d_stream=offload_stream,  # type: ignore
                         d2h_stream=offload_stream,  # type: ignore
