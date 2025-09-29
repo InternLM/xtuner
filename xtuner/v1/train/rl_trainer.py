@@ -329,10 +329,13 @@ class RLTrainer:
 
         data_batches = []
         for group in data_groups:
-            prompt = self.tokenizer.apply_chat_template(
-                group[0]["messages"], add_generation_prompt=True, tokenize=False
-            )
-            prompt_ids = self.tokenizer(prompt, return_tensors="pt")["input_ids"].flatten().tolist()
+            text_prompt = self.tokenizer.apply_chat_template(group[0]["messages"], tokenize=False, add_generation_prompt=True)
+            prompt_ids = self.tokenizer(text_prompt, add_special_tokens=False)["input_ids"].flatten().tolist()
+
+            # prompt = self.tokenizer.apply_chat_template(
+            #     group[0]["messages"], add_generation_prompt=True, tokenize=False
+            # )
+            # prompt_ids = self.tokenizer(prompt, return_tensors="pt")["input_ids"].flatten().tolist()
             rewards = [data["reward"] for data in group]
             rewards_list.extend(rewards)
             rewards = torch.tensor(rewards, dtype=torch.float32)
@@ -341,7 +344,12 @@ class RLTrainer:
             prompt_repeat_k = len(group)
             for i in range(prompt_repeat_k):
                 item = group[i]["response_str"]
-                response_ids = self.tokenizer(item, return_tensors="pt")["input_ids"].flatten().tolist()
+                if 'response_ids' in group[i] and group[i]['response_ids'] is not None:
+                    response_ids = group[i]['response_ids']
+                    if isinstance(response_ids, torch.Tensor):
+                        response_ids = response_ids.flatten().tolist()
+                else:
+                    response_ids = self.tokenizer(item, return_tensors="pt")["input_ids"].flatten().tolist()
                 input_ids = prompt_ids + response_ids
 
                 prompt_len_list.append(len(prompt_ids))

@@ -43,6 +43,7 @@ class RLTextDataItem(CacheItem, total=False):
     reward: float | None
     num_return_tokens: int | None
     response_ids: list[int] | None
+    logprobs: list | None
     response_str: str | None
     state: str
     retry_times: int

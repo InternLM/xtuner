@@ -53,6 +53,8 @@ class SingleTurnEnvironment(BaseEnvironment):
             for i in range(len(group_samples)):
                 group_samples[i]["response_str"] = response[i].response
                 group_samples[i]["state"] = response[i].finish_reason
+                group_samples[i]["logprobs"] = response[i].logprobs
+                group_samples[i]["response_ids"] = response[i].response_ids
 
         return group_samples
 

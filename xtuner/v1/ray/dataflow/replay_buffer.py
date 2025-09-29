@@ -179,9 +179,9 @@ class Sampler:
             List[RLTextDataItem]: A list of sampled data items.
         """
         if (
-            enable_partial_rollout
-            and "unfinished" in self.storage._rollout_states
-            and len(self.storage._rollout_states["unfinished"]) > 0
+                enable_partial_rollout
+                and "unfinished" in self.storage._rollout_states
+                and len(self.storage._rollout_states["unfinished"]) > 0
         ):
             return self.sample_from_unfinished_buffer()
         else:
@@ -230,10 +230,10 @@ class ReplayBufferStorage:
         )
         input_ids = input_ids or []
         num_tokens = len(input_ids)
-        response_str = (
+        response_dict = (
             ray.get(replay_meta.observation_refs[0])
             if replay_meta.observation_refs and len(replay_meta.observation_refs) > 0
-            else ""
+            else {}
         )
         return RLTextDataItem(
             env=replay_meta.env,
@@ -242,7 +242,9 @@ class ReplayBufferStorage:
             messages=messages,
             input_ids=input_ids,
             num_tokens=num_tokens,
-            response_str=response_str,
+            response_str=response_dict['response_str'],
+            logprobs=response_dict['logprobs'],
+            response_ids=response_dict['response_ids'],
             reward_model={"ground_truth": replay_meta.ground_truth},
             reward=replay_meta.rewards[-1] if replay_meta.rewards and len(replay_meta.rewards) > 0 else None,
             state=replay_meta.state,
@@ -263,7 +265,10 @@ class ReplayBufferStorage:
             action_id=data_item["prompt_id"],
             action_refs=[ray.put(data_item["messages"])] if "messages" in data_item else [],
             observation_ids=[uuid.uuid4().int],
-            observation_refs=[ray.put(data_item["response_str"])] if "response_str" in data_item else [],
+            observation_refs=[ray.put({'response_str': data_item["response_str"],
+                                       'logprobs': data_item["logprobs"],
+                                       'response_ids': data_item["response_ids"]
+                                       })] if "response_str" in data_item else [],
             observation_versions=[1],
             state=data_item["state"] if "state" in data_item else "",
             ground_truth=data_item["reward_model"]["ground_truth"],
@@ -372,7 +377,7 @@ class ReplayBufferStorage:
                     actions_list.append(ray.get(ref))
                 replay_meta.action_refs = actions_list
             if replay_meta.observation_refs and all(
-                isinstance(ref, ray.ObjectRef) for ref in replay_meta.observation_refs
+                    isinstance(ref, ray.ObjectRef) for ref in replay_meta.observation_refs
             ):
                 observations_list = []
                 for ref in replay_meta.observation_refs:
@@ -457,8 +462,8 @@ class ReplayBuffer:
     learning."""
 
     def __init__(
-        self,
-        config: ReplayBufferConfig,
+            self,
+            config: ReplayBufferConfig,
     ):
         """Initializes the ReplayBuffer actor.
 
@@ -517,8 +522,8 @@ class ReplayBuffer:
         return self.sampler.sample(env, enable_partial_rollout, prompt_repeat_k)
 
     def get_samples(
-        self,
-        global_batch_size: int,
+            self,
+            global_batch_size: int,
     ):
         """Gets a batch of finished samples from the storage.
 
