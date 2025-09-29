@@ -274,7 +274,8 @@ class TrainingWorker(SingleAcceleratorWorker):
                 loss_ctx_input = loss_ctx_input.sp_split(self.sp_mesh)
             seq_ctx_list.append(seq_ctx)
             loss_ctx_input_list.append(loss_ctx_input)
-            rollout_logprobs_list.append(data["rollout_logprobs"])
+            if "rollout_logprobs" in data and data["rollout_logprobs"] is not None:
+                rollout_logprobs_list.append(data["rollout_logprobs"].to(DEVICE))
 
         del data_batches
 
@@ -290,10 +291,51 @@ class TrainingWorker(SingleAcceleratorWorker):
         # old logprobs are inplaced updated in compute_actor_logprobs
         loss_ctx_input_list = self.compute_actor_logprobs(seq_ctx_list, loss_ctx_input_list)
         sum_entropy: torch.Tensor | None = None
-        for loss_ctx_input in loss_ctx_input_list:
+        if len(rollout_logprobs_list) > 0:
+            assert len(rollout_logprobs_list) == len(
+                loss_ctx_input_list), f'rollout_logprobs_list {len(rollout_logprobs_list)} vs loss_ctx_input_list {len(loss_ctx_input_list)}'
+
+        all_diffs = []
+        for i, loss_ctx_input in enumerate(loss_ctx_input_list):
             mask = loss_ctx_input.shifted_labels != -100
             entropy = -(cast(torch.Tensor, loss_ctx_input.old_logprobs) * mask).sum()
             sum_entropy = entropy if sum_entropy is None else sum_entropy + entropy
+
+            if len(rollout_logprobs_list) > 0:
+                rollout_logprobs = rollout_logprobs_list[i][mask]
+                old_logprobs = loss_ctx_input.old_logprobs[mask]
+
+                # 计算差异
+                assert len(
+                    rollout_logprobs.size()) == 1, f"len(rollout_logprobs.size()): {len(rollout_logprobs.size())}"
+                assert rollout_logprobs.shape == old_logprobs.shape, f'rollout_logprobs {rollout_logprobs.shape} vs old_logprobs {old_logprobs.shape}'
+                if rollout_logprobs.numel() == 0:  # pad 情况下是空的
+                    min_diff = torch.tensor(0)
+                    max_diff = min_diff
+                    std_diff = min_diff
+                    mean_diff = min_diff
+                else:
+                    min_diff = torch.min(rollout_logprobs - old_logprobs)
+                    max_diff = torch.max(rollout_logprobs - old_logprobs)
+                    mean_diff = torch.mean(rollout_logprobs - old_logprobs)
+                    if rollout_logprobs.numel() == 1:
+                        std_diff = torch.tensor(0)
+                    else:
+                        std_diff = torch.std(rollout_logprobs - old_logprobs)
+                all_diffs.append((min_diff, max_diff, mean_diff, std_diff))
+
+        if len(rollout_logprobs_list) > 0:
+            all_diffs_tensor = torch.stack([torch.tensor(d).to(DEVICE) for d in all_diffs])  # n, 4
+            min_diff = torch.min(all_diffs_tensor[:, 0]).item()
+            max_diff = torch.max(all_diffs_tensor[:, 1]).item()
+            mean_diff = torch.mean(all_diffs_tensor[:, 2]).item()
+            if all_diffs_tensor[:, 3].numel() <= 1:
+                std_diff = 0
+            else:
+                std_diff = torch.std(all_diffs_tensor[:, 3]).item()
+            logger.info(
+                f"Rollout {rollout_idx}: logprobs diff min {min_diff:.4f}, max {max_diff:.4f}, mean {mean_diff:.4f}, std {std_diff:.4f}")
+
         sum_entropy = cast(torch.Tensor, sum_entropy)
         dist.all_reduce(sum_entropy, op=dist.ReduceOp.SUM)
         avg_gen_entropy = sum_entropy / global_grad_tokens if global_grad_tokens > 0 else 0

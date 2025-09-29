@@ -326,7 +326,6 @@ class RLTrainer:
         advantages_list = []
         prompt_len_list = []
         response_len_list = []
-        rollout_logprobs_list = []
 
         data_batches = []
         for group in data_groups:
@@ -346,11 +345,15 @@ class RLTrainer:
             prompt_repeat_k = len(group)
             for i in range(prompt_repeat_k):
                 item = group[i]["response_str"]
+                logprobs = None
                 if 'response_ids' in group[i] and group[i]['response_ids'] is not None:
                     response_ids = group[i]['response_ids']
                     if isinstance(response_ids, torch.Tensor):
                         response_ids = response_ids.flatten().tolist()
-                    rollout_logprobs_list.extend(group[i]["logprobs"])
+                    logprobs = group[i]["logprobs"]
+                    assert len(logprobs) == len(response_ids), f'{len(logprobs)} vs {len(response_ids)}'
+                    # 只有 response 部分有 logprobs, 需要前面追加
+                    logprobs = [0] * (len(prompt_ids) - 1) + logprobs + [0]
                 else:
                     response_ids = self.tokenizer(item, return_tensors="pt")["input_ids"].flatten().tolist()
                 input_ids = prompt_ids + response_ids
@@ -361,14 +364,17 @@ class RLTrainer:
 
                 shifted_labels = [-100] * (len(prompt_ids) - 1) + response_ids + [-100]
                 if len(input_ids) > pack_max_length:
+                    print('....... 这是不正常的 ......')
                     input_ids = input_ids[:pack_max_length]
                     shifted_labels = shifted_labels[:pack_max_length]
+                    if logprobs is not None:
+                        logprobs = logprobs[:pack_max_length]
                 input_ids = torch.tensor(input_ids, dtype=torch.int64).unsqueeze(0)
                 shifted_labels = torch.tensor(shifted_labels, dtype=torch.int64).unsqueeze(0)
 
-                if len(rollout_logprobs_list) > 0:
-                    rollout_logprobs = torch.tensor(rollout_logprobs_list, dtype=torch.float32).unsqueeze(0)
-                    assert rollout_logprobs.size() == shifted_labels.size()
+                if logprobs is not None:
+                    rollout_logprobs = torch.tensor(logprobs, dtype=torch.float32).unsqueeze(0)
+                    assert rollout_logprobs.size() == shifted_labels.size(), f'{rollout_logprobs.size()} vs {shifted_labels.size()}'
                 else:
                     rollout_logprobs = None
 
