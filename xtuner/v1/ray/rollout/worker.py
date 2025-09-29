@@ -358,54 +358,62 @@ class RolloutWorker(SingleAcceleratorWorker):
                 response="",
                 finish_reason="failed",
             )
-            if response.status_code != 200:
-                error_body = await response.atext()
-                self.logger.error(f"Request {uid} failed with status {response.status_code}: {error_body}")
-                return failed_rollout_response
-
             last_trajectory = ""
             finish_reason = ""
 
-            async for chunk in response.aiter_lines():
-                # chunk example
-                # data: {"id":"1","object":"chat.completion.chunk","created":1757495636,"model":"qwen3-8b","choices":[{"index":0,"delta":{"role":"assistant","content":"<think>","reasoning_content":null,"tool_calls":[]},"logprobs":null,"finish_reason":null}],"usage":null}
-                if not chunk.startswith("data:"):
-                    continue
-                try:
-                    chunk_data_str = chunk[len("data:"):].strip()
-                    if self.paused or chunk_data_str == "[DONE]":
-                        finish_reason = "paused" if self.paused else finish_reason
-                        break
-                    if not (chunk_data_str.startswith("{") and chunk_data_str.endswith("}")):
-                        continue
-
-                    chunk_data = json.loads(chunk_data_str)
-                    if os.environ.get("ID_INPUT_OUTPUT", '0') == '1':
-                        # TODO: 不太懂，好像是一个假的流式，每次返回的都会包括之前的？
-                        last_trajectory = chunk_data['text']
-                        if "output_token_logprobs" in chunk_data["meta_info"]:
-                            new_response_tokens = [item[1] for item in chunk_data["meta_info"]["output_token_logprobs"]]
-                            new_response_log_probs = [item[0] for item in chunk_data["meta_info"]["output_token_logprobs"]]
-                        finish_reason = chunk_data["meta_info"].get("finish_reason")
-                        if finish_reason is not None:
-                            assert isinstance(finish_reason, dict)
-                            finish_reason = finish_reason['type']
-                    else:
-                        delta_content = chunk_data["choices"][0]["delta"].get("content")
-                        last_trajectory = last_trajectory + delta_content if delta_content else last_trajectory
-                        finish_reason = chunk_data["choices"][0].get("finish_reason")
-
-                        # todo(@duanyanhui): remove appending stop tokens manually after lmdeploy support return stop_token_ids.
-                        if finish_reason == "stop":
-                            assert len(sample_params["stops"]) == 1
-                            last_trajectory += sample_params["stops"][0]
-
-                except json.JSONDecodeError as e:
-                    self.logger.error(f"JSON decode error for chunk in request {uid}: {chunk}, error: {e}")
-                    continue
-                except Exception as e:
-                    self.logger.error(f"Error processing chunk for {uid}: {chunk}, error: {e}")
+            if os.environ.get("ID_INPUT_OUTPUT", '0') == '1':
+                # 非 stream 模式
+                if "output_token_logprobs" in response["meta_info"]:
+                    new_response_tokens = [item[1] for item in response["meta_info"]["output_token_logprobs"]]
+                    new_response_log_probs = [item[0] for item in response["meta_info"]["output_token_logprobs"]]
+                    assert len(new_response_tokens) <= sample_params["max_tokens"], f'生成长度超过限制，生成长度 {len(new_response_tokens)}，限制 {sample_params["max_tokens"]}'
+                last_trajectory = response['text']
+                finish_reason = response["meta_info"]["finish_reason"]["type"]
+            else:
+                if response.status_code != 200:
+                    error_body = await response.atext()
+                    self.logger.error(f"Request {uid} failed with status {response.status_code}: {error_body}")
                     return failed_rollout_response
+                async for chunk in response.aiter_lines():
+                    # chunk example
+                    # data: {"id":"1","object":"chat.completion.chunk","created":1757495636,"model":"qwen3-8b","choices":[{"index":0,"delta":{"role":"assistant","content":"<think>","reasoning_content":null,"tool_calls":[]},"logprobs":null,"finish_reason":null}],"usage":null}
+                    if not chunk.startswith("data:"):
+                        continue
+                    try:
+                        chunk_data_str = chunk[len("data:"):].strip()
+                        if self.paused or chunk_data_str == "[DONE]":
+                            finish_reason = "paused" if self.paused else finish_reason
+                            break
+                        if not (chunk_data_str.startswith("{") and chunk_data_str.endswith("}")):
+                            continue
+
+                        chunk_data = json.loads(chunk_data_str)
+                        if os.environ.get("ID_INPUT_OUTPUT", '0') == '1':
+                            # TODO: 不太懂，好像是一个假的流式，每次返回的都会包括之前的？
+                            last_trajectory = chunk_data['text']
+                            if "output_token_logprobs" in chunk_data["meta_info"]:
+                                new_response_tokens = [item[1] for item in chunk_data["meta_info"]["output_token_logprobs"]]
+                                new_response_log_probs = [item[0] for item in chunk_data["meta_info"]["output_token_logprobs"]]
+                            finish_reason = chunk_data["meta_info"].get("finish_reason")
+                            if finish_reason is not None:
+                                assert isinstance(finish_reason, dict)
+                                finish_reason = finish_reason['type']
+                        else:
+                            delta_content = chunk_data["choices"][0]["delta"].get("content")
+                            last_trajectory = last_trajectory + delta_content if delta_content else last_trajectory
+                            finish_reason = chunk_data["choices"][0].get("finish_reason")
+
+                            # todo(@duanyanhui): remove appending stop tokens manually after lmdeploy support return stop_token_ids.
+                            if finish_reason == "stop":
+                                assert len(sample_params["stops"]) == 1
+                                last_trajectory += sample_params["stops"][0]
+
+                    except json.JSONDecodeError as e:
+                        self.logger.error(f"JSON decode error for chunk in request {uid}: {chunk}, error: {e}")
+                        continue
+                    except Exception as e:
+                        self.logger.error(f"Error processing chunk for {uid}: {chunk}, error: {e}")
+                        return failed_rollout_response
 
             assert finish_reason in ["stop", "length", "tool_call", "paused", "failed"], (
                 f"Unexpected finish_reason: {finish_reason}"
@@ -432,9 +440,10 @@ class RolloutWorker(SingleAcceleratorWorker):
             self.logger.error(f"An unexpected error occurred in rollout_task for {uid}: {e}")
             return failed_rollout_response
         finally:
-            # 确保在任何情况下都尝试关闭响应
-            if response:
-                await response.aclose()
+            if os.environ.get("ID_INPUT_OUTPUT", '0') == '0':
+                # 确保在任何情况下都尝试关闭响应
+                if response:
+                    await response.aclose()
 
     async def rollout(
         self,

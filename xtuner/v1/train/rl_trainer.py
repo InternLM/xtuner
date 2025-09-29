@@ -410,14 +410,40 @@ class RLTrainer:
     def _save_trajectories(self, data_groups, save_path):
         rewards = []
         response_len_list = []
+
+        rollout_response_len_list = []
+        rollout_id_to_str = []
+        revert_rollout_ids = []
         for group in data_groups:
             for data in group:
                 rewards.append(data["reward"])
+                if "response_ids" in data and data["response_ids"] is not None:
+                    if isinstance(data["response_ids"], torch.Tensor):
+                        response_ids = data["response_ids"].flatten().tolist()
+                    else:
+                        response_ids = data["response_ids"]
+                    rollout_response_len_list.append(len(response_ids))
+
+                    response_str = self.tokenizer.decode(response_ids, skip_special_tokens=False)
+                    revert_encode_response_ids = self.tokenizer.encode(response_str, add_special_tokens=False)
+
+                    if response_ids != revert_encode_response_ids:
+                        print("Warning: response_ids and revert_encode_response_ids are not the same!")
+                        revert_rollout_ids.append(response_ids)
+                    else:
+                        revert_rollout_ids.append(None)
+
+                    rollout_id_to_str.append(response_str)
+
                 response_ids = self.tokenizer.encode(data["response_str"], add_special_tokens=False)
                 response_len_list.append(len(response_ids))
 
         rewards = torch.tensor(rewards).float()
         response_lens = torch.tensor(response_len_list).float()
+
+        rollout_response_lens = None
+        if len(rollout_response_len_list) > 0:
+            rollout_response_lens = torch.tensor(rollout_response_len_list).float()
 
         _count = 0
         with open(save_path, "w", encoding="utf-8") as f:
@@ -432,6 +458,14 @@ class RLTrainer:
                 "response_len_min": response_lens.min().item(),
                 "total_len": len(rewards),
             }
+            if len(rollout_response_len_list) > 0:
+                item.update({
+                    "rollout_response_len_mean": rollout_response_lens.mean().item(),
+                    "rollout_response_len_std": rollout_response_lens.std().item(),
+                    "rollout_response_len_max": rollout_response_lens.max().item(),
+                    "rollout_response_len_min": rollout_response_lens.min().item(),
+                })
+
             json.dump(item, f, ensure_ascii=False, indent=2)
             f.write("\n")
             for group in data_groups:
@@ -443,6 +477,17 @@ class RLTrainer:
                         "label": data["reward_model"]["ground_truth"],
                         "reward": data["reward"],
                     }
+
+                    if len(rollout_id_to_str) > 0:
+                        revert_rollout_id = revert_rollout_ids[_count]
+                        if revert_rollout_id is not None:
+                            item["rollout_ids"] = revert_rollout_id
+
+                    if response_len_list[_count] != rollout_response_len_list[_count]:
+                        item["rollout_response_len"] = rollout_response_len_list[_count]
+                    if len(rollout_id_to_str) > 0 and data["response_str"] != rollout_id_to_str[_count]:
+                        item["rollout_id_to_str"] = rollout_id_to_str[_count]
+
                     json.dump(item, f, ensure_ascii=False, indent=2)
                     f.write("\n")
                     _count += 1

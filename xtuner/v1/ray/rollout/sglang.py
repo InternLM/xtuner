@@ -50,7 +50,8 @@ class SGLangWorker(RolloutWorker):
             "Authorization": f"Bearer {self.api_keys}",  # 如果需要鉴权
         }
         if os.environ.get("ID_INPUT_OUTPUT", '0') == '1':
-            payload = {"model": self.model_name, "stream": True, "return_logprob": True}
+            stream = False
+            payload = {"model": self.model_name, "stream": stream, "return_logprob": True}
             text_prompt = self.tokenizer.apply_chat_template(prompt, tokenize=False, add_generation_prompt=True)
             prompt_token_ids = self.tokenizer(text_prompt, add_special_tokens=False)["input_ids"]
             payload["input_ids"] = prompt_token_ids
@@ -61,14 +62,15 @@ class SGLangWorker(RolloutWorker):
                                  "top_k": sample_params['top_k'],
                                  "no_stop_trim": True,
                                  "skip_special_tokens": False,
-                                 "spaces_between_special_tokens":False,
+                                 "spaces_between_special_tokens": False,
                                  }
             payload['sampling_params'] = new_sample_params
         else:
+            stream = True
             payload = {
                 "model": self.model_name,
                 "messages": prompt,
-                "stream": True,
+                "stream": stream,
             }
             payload.update(sample_params)
             payload.update(extra_params)
@@ -78,7 +80,14 @@ class SGLangWorker(RolloutWorker):
             headers=headers,
             json=payload,
         )
-        r = await self.client.send(req, stream=True)
+        r = await self.client.send(req, stream=stream)
+
+        if stream == False:
+            r.raise_for_status()
+            try:
+                r = r.json()
+            except:
+                r = r.text
         return r
 
     def _make_request(self, endpoint: str, payload=None):
