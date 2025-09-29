@@ -333,10 +333,11 @@ class MoE(BaseModel):
                     with async_save_on_cpu(
                         h2d_stream=offload_stream,  # type: ignore
                         d2h_stream=offload_stream,  # type: ignore
-                        block_idx=layer_idx,
-                        depth=len(self.layers),
+                        block_idx=layer_idx - self.config.first_k_dense_replace,
+                        depth=len(self.layers) - self.config.first_k_dense_replace,
                         custom_check_fn=lambda x: x.data_ptr()
                         in [hidden_states.data_ptr() for hidden_states in hidden_states_list],
+                        prefetch=True,
                     ):
                         layer_results = decoder_layer(
                             *hidden_states_list,

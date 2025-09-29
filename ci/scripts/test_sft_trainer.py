@@ -16,6 +16,7 @@ from xtuner.v1.model.moe.moe import BalancingLossConfig
 from xtuner.v1.datasets.sft_tokenize_fn import OpenaiTokenizeFunctionConfig
 
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
+from xtuner.v1.model.moe.deepseek_v3 import DeepSeekV3Config
 from xtuner.v1.train.trainer import Trainer
 from xtuner.v1.utils.device import get_device
 from xtuner.v1.loss import CELossConfig
@@ -216,11 +217,20 @@ def plot_comparison_curves(history_data, current_data, title, output_root: Path)
 def main():
     args = parse_args()
     os.environ["DG_CACHE_DIR"] = f"/tmp/.adaptive_gemm-{os.getenv('RANK', '0')}"
-
     moe_cfgs = [
-        (Qwen3MoE30BA3Config(balancing_loss_cfg=BalancingLossConfig()), "ep1"),
-        (Qwen3MoE30BA3Config(ep_size=8, dispatcher="all2all"), "ep8"),
-    ]
+            (DeepSeekV3Config(
+                ep_size=2, dispatcher="all2all", balancing_loss_cfg=BalancingLossConfig(), 
+                num_hidden_layers=5, first_k_dense_replace=1,
+                eos_token_id=0,
+                hidden_size=4096,
+                n_routed_experts=64, 
+                # float8_cfg=Float8Config(
+                #         scaling_granularity_gemm=ScalingGranularity.TILEWISE,
+                #         scaling_granularity_grouped_gemm=ScalingGranularity.TILEWISE,
+                # ),
+            ), "ep8"),
+        ]
+
     for moe_cfg, name in moe_cfgs:
         optim_cfg = AdamWConfig(lr=6e-05)
         lr_cfg = LRConfig(lr_type="cosine", lr_min=1e-6)
@@ -233,18 +243,17 @@ def main():
         dataset_config = [
             {
                 "dataset": DatasetConfig(name="alpaca", anno_path=ALPACA_PATH, sample_ratio=1.0),
-                "tokenize_fn": OpenaiTokenizeFunctionConfig(max_length=16386, chat_template="qwen3"),
+                "tokenize_fn": OpenaiTokenizeFunctionConfig(max_length=4096, chat_template="qwen3"),
                 # "tokenize_fn": FTDPTokenizeFnConfig(max_length=16386),
             },
         ]
 
         dataloader_config = DataloaderConfig(
-            pack_max_length=16384
+            pack_max_length=4096
         )
         work_dir = f"{args.work_dir}-{name}"
-        loss_cfg = CELossConfig(mode="chunk", chunk_size=1024, ignore_idx=-100)
+        loss_cfg = CELossConfig(mode="liger", chunk_size=1024, ignore_idx=-100)
         trainer = Trainer(
-            load_from=QWEN3_MOE_PATH,
             model_cfg=moe_cfg,
             optim_cfg=optim_cfg,
             fsdp_cfg=fsdp_cfg,
@@ -253,10 +262,13 @@ def main():
             loss_cfg=loss_cfg,
             lr_cfg=lr_cfg,
             tokenizer_path=QWEN3_MOE_PATH,
-            global_batch_size=16,
+            global_batch_size=32,
             total_epoch=1,
             work_dir=work_dir,
             seed=0,
+            strict_load=False,
+            intra_layer_micro_batch=2,
+            profile_step=10
         )
         trainer.fit()
         if dist.get_rank() == 0:

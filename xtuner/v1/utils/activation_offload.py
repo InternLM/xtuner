@@ -5,6 +5,7 @@ Original License: MIT
 Modifications: To enable compatibility on both GPU and NPU, replace all torch.npu with torch.cuda, and then use the transfer_to_npu interface
 """
 
+from numpy import block
 import torch
 from torch.autograd.graph import saved_tensors_hooks
 
@@ -101,15 +102,16 @@ class SwapTensor:
     # resize storage_size and host to device
     def launch_h2d(self, h2d_stream, flag, working_stream):
         if self.stat != "host":
-            working_stream.wait_event(self.h2d_event)
+            working_stream.wait_stream(h2d_stream)
+            h2d_stream.wait_stream(working_stream)
             return
         if flag:
             self.tensor.storage().resize_(self.storage_size)
         with torch.no_grad():
             if self.is_slice_tensor:
-                self.tensor.copy_(self.tensor_cpu, non_blocking=True)
+                self.tensor.copy_(self.tensor_cpu)
             else:
-                self.tensor.storage().copy_(self.tensor_cpu.storage(), non_blocking=True)
+                self.tensor.storage().copy_(self.tensor_cpu.storage())
             self.stat = "device"
 
     # resize storage_size and host to device
@@ -124,8 +126,8 @@ class SwapTensor:
                     self.tensor.copy_(self.tensor_cpu, non_blocking=True)
                 else:
                     self.tensor.storage().copy_(self.tensor_cpu.storage(), non_blocking=True)
-                self.h2d_event.record()
                 self.stat = "device"
+                self.tensor.record_stream(h2dstream)
 
 
 class SingletonMeta(type):
@@ -253,7 +255,7 @@ class async_save_on_cpu(saved_tensors_hooks):
             key, after_block = OffloadManager().get_cnt(block_idx)
 
             if after_block:
-                OffloadManager().del_npu_tensor(f"{block_idx - 1}_", d2h_stream)
+                OffloadManager().del_npu_tensor(f"{block_idx - 1}_", d2h_stream, tensor)
 
             swap_tensor = SwapTensor(tensor, key)
 
@@ -270,6 +272,7 @@ class async_save_on_cpu(saved_tensors_hooks):
 
             working_stream = torch.cuda.current_stream()
             working_stream.wait_stream(d2h_stream)  # make sure all d2h copy is done before into backward
+            h2d_stream.wait_stream(d2h_stream)
 
             swap_tensor.launch_h2d(h2d_stream, True, working_stream)
 

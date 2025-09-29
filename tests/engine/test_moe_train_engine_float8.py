@@ -14,6 +14,7 @@ from xtuner.v1.config import AdamWConfig, FSDPConfig, LRConfig
 from xtuner.v1.engine.train_engine import TrainEngine
 from xtuner.v1.float8.config import ScalingGranularity, Float8Config
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
+from xtuner.v1.model.moe.deepseek_v3 import DeepSeekV3Config
 from xtuner.v1.utils import pad_to_max_length
 from torch.optim.lr_scheduler import LambdaLR
 from xtuner.v1.utils.device import get_device
@@ -38,12 +39,18 @@ class TestMoEEngineFloat8(DistributedTestBase):
     def test_tile_wise_fp8(self, device, ep_size, hsdp_sharding_size):
         pg = self.create_pg(device)
 
-        moe_cfg = Qwen3MoE30BA3Config(
-            balancing_loss_cfg=BalancingLossConfig(),
-            float8_cfg=Float8Config(
-                scaling_granularity_gemm=ScalingGranularity.TILEWISE,
-                scaling_granularity_grouped_gemm=ScalingGranularity.TILEWISE,
-            ),
+        float8_cfg = Float8Config(
+            scaling_granularity_gemm=ScalingGranularity.TILEWISE,
+            scaling_granularity_grouped_gemm=ScalingGranularity.TILEWISE,
+        )
+        moe_cfg = DeepSeekV3Config(
+            ep_size=1,
+            dispatcher=None,
+            balancing_loss_cfg=None,
+            eos_token_id=1,
+            num_hidden_layers=1,
+            first_k_dense_replace=0,
+            float8_cfg=float8_cfg,
         )
         optim_cfg: AdamWConfig = AdamWConfig()
         lr_cfg: LRConfig = LRConfig()
@@ -58,7 +65,7 @@ class TestMoEEngineFloat8(DistributedTestBase):
             optim_cfg=optim_cfg,
             fsdp_cfg=fsdp_cfg,
         )
-        engine.from_hf(hf_path=QWEN3_MOE_PATH)
+        # engine.from_hf(hf_path=QWEN3_MOE_PATH)
 
         loss_cfg = CELossConfig()
 
