@@ -7,8 +7,9 @@ from sglang.srt.server_args import ServerArgs
 from urllib3.exceptions import NewConnectionError
 
 from xtuner.v1.ray.config import RolloutConfig
-
+from transformers import AutoTokenizer
 from .worker import RolloutWorker
+import os
 
 
 @ray.remote
@@ -25,7 +26,11 @@ class SGLangWorker(RolloutWorker):
         super().__init__(config, rank, master_addr, master_port, world_size, accelerator)
         self.server_func = launch_server
         self.endpoints["health_generate"] = "health_generate"
-        self.endpoints["generate"] = "v1/chat/completions"
+        if os.environ.get("ID_INPUT_OUTPUT", '0') == '1':
+            self.endpoints["generate"] = "generate"
+            self.tokenizer = AutoTokenizer.from_pretrained(self.config.model_path)
+        else:
+            self.endpoints["generate"] = "v1/chat/completions"
         self.api_keys = self.config.api_key
         self.model_name = self.config.model_name
 
@@ -44,13 +49,26 @@ class SGLangWorker(RolloutWorker):
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.api_keys}",  # 如果需要鉴权
         }
-        payload = {
-            "model": self.model_name,
-            "messages": prompt,
-            "stream": True,
-        }
-        payload.update(sample_params)
-        payload.update(extra_params)
+        if os.environ.get("ID_INPUT_OUTPUT", '0') == '1':
+            payload = {"model": self.model_name, "stream": True, "return_logprob": True}
+            text_prompt = self.tokenizer.apply_chat_template(prompt, tokenize=False, add_generation_prompt=True)
+            prompt_token_ids = self.tokenizer(text_prompt, add_special_tokens=False)["input_ids"]
+            payload["input_ids"] = prompt_token_ids
+
+            new_sample_params = {"max_new_tokens": sample_params['max_tokens'],
+                                 "temperature": sample_params['temperature'],
+                                 "top_p": sample_params['top_p'],
+                                 "top_k": sample_params['top_k']
+                                 }
+            payload['sampling_params'] = new_sample_params
+        else:
+            payload = {
+                "model": self.model_name,
+                "messages": prompt,
+                "stream": True,
+            }
+            payload.update(sample_params)
+            payload.update(extra_params)
         req = self.client.build_request(
             "POST",
             url,

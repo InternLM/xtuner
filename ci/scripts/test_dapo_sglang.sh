@@ -3,6 +3,7 @@ set -ex
 export XTUNER_USE_SGLANG=1 # 最好训练用 fa3，暂时是 fa2
 export PYTHONPATH=/mnt/shared-storage-user/huanghaian/code/lmdeploy/:$PYTHONPATH
 export UVICORN_LOG_LEVEL="CRITICAl"
+#export ID_INPUT_OUTPUT=1
 
 # 不支持
 # export PYTORCH_CUDA_ALLOC_CONF='expandable_segments:True'

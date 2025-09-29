@@ -5,7 +5,7 @@ import time
 import uuid
 from abc import abstractmethod
 from typing import Any, Callable, Dict, List, Optional, Union
-
+import os
 import httpx
 import ray
 import requests  # type: ignore[import-untyped]
@@ -80,7 +80,8 @@ class RolloutRequest(BaseModel):
 
 class RolloutResponse(BaseModel):
     response: str = ""
-    logprobs: float = 0.0
+    logprobs: list = []
+    response_ids: list = []
     finish_reason: str = ""
     reasoning_content: str = ""
     usage: dict = Field(default_factory=dict)
@@ -130,6 +131,10 @@ class RolloutWorker(SingleAcceleratorWorker):
         self.engine_bundle_idxs: list[int] = []
         self.server_process: Optional[multiprocessing.Process] = None
         self.logger = get_logger()
+
+        if os.environ.get("ID_INPUT_OUTPUT", '0') == '1':
+            from transformers import AutoTokenizer
+            self.tokenizer = AutoTokenizer.from_pretrained(self.config.model_path)
 
     def init_dist_port(self):
         """Initialize distributed communication ports.
@@ -367,7 +372,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                 if not chunk.startswith("data:"):
                     continue
                 try:
-                    chunk_data_str = chunk[len("data:") :].strip()
+                    chunk_data_str = chunk[len("data:"):].strip()
                     if self.paused or chunk_data_str == "[DONE]":
                         finish_reason = "paused" if self.paused else finish_reason
                         break
@@ -375,14 +380,25 @@ class RolloutWorker(SingleAcceleratorWorker):
                         continue
 
                     chunk_data = json.loads(chunk_data_str)
-                    delta_content = chunk_data["choices"][0]["delta"].get("content")
-                    last_trajectory = last_trajectory + delta_content if delta_content else last_trajectory
-                    finish_reason = chunk_data["choices"][0].get("finish_reason")
+                    if os.environ.get("ID_INPUT_OUTPUT", '0') == '1':
+                        # TODO: 不太懂，好像是一个假的流式，每次返回的都会包括之前的？
+                        last_trajectory = chunk_data['text']
+                        if "output_token_logprobs" in chunk_data["meta_info"]:
+                            new_response_tokens = [item[1] for item in chunk_data["meta_info"]["output_token_logprobs"]]
+                            new_response_log_probs = [item[0] for item in chunk_data["meta_info"]["output_token_logprobs"]]
+                        finish_reason = chunk_data["meta_info"].get("finish_reason")
+                        if finish_reason is not None:
+                            assert isinstance(finish_reason, dict)
+                            finish_reason = finish_reason['type']
+                    else:
+                        delta_content = chunk_data["choices"][0]["delta"].get("content")
+                        last_trajectory = last_trajectory + delta_content if delta_content else last_trajectory
+                        finish_reason = chunk_data["choices"][0].get("finish_reason")
 
-                    # todo(@duanyanhui): remove appending stop tokens manually after lmdeploy support return stop_token_ids.
-                    if finish_reason == "stop":
-                        assert len(sample_params["stops"]) == 1
-                        last_trajectory += sample_params["stops"][0]
+                        # todo(@duanyanhui): remove appending stop tokens manually after lmdeploy support return stop_token_ids.
+                        if finish_reason == "stop":
+                            assert len(sample_params["stops"]) == 1
+                            last_trajectory += sample_params["stops"][0]
 
                 except json.JSONDecodeError as e:
                     self.logger.error(f"JSON decode error for chunk in request {uid}: {chunk}, error: {e}")
@@ -395,10 +411,18 @@ class RolloutWorker(SingleAcceleratorWorker):
                 f"Unexpected finish_reason: {finish_reason}"
             )
 
-            rollout_response = RolloutResponse(
-                response=last_trajectory,
-                finish_reason=finish_reason,
-            )
+            if os.environ.get("ID_INPUT_OUTPUT", '0') == '1':
+                rollout_response = RolloutResponse(
+                    logprobs=new_response_log_probs,
+                    response_ids=new_response_tokens,
+                    response=last_trajectory,
+                    finish_reason=finish_reason,
+                )
+            else:
+                rollout_response = RolloutResponse(
+                    response=last_trajectory,
+                    finish_reason=finish_reason,
+                )
             return rollout_response
 
         except httpx.RequestError as e:
