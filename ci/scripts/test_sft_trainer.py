@@ -21,6 +21,7 @@ from xtuner.v1.train.trainer import Trainer
 from xtuner.v1.utils.device import get_device
 from xtuner.v1.loss import CELossConfig
 import argparse
+from xtuner.v1.float8 import Float8Config, ScalingGranularity
 
 
 
@@ -219,15 +220,15 @@ def main():
     os.environ["DG_CACHE_DIR"] = f"/tmp/.adaptive_gemm-{os.getenv('RANK', '0')}"
     moe_cfgs = [
             (DeepSeekV3Config(
-                ep_size=2, dispatcher="all2all", balancing_loss_cfg=BalancingLossConfig(), 
+                ep_size=2, dispatcher="all2all", balancing_loss_cfg=None, 
                 num_hidden_layers=5, first_k_dense_replace=1,
                 eos_token_id=0,
                 hidden_size=4096,
                 n_routed_experts=64, 
-                # float8_cfg=Float8Config(
-                #         scaling_granularity_gemm=ScalingGranularity.TILEWISE,
-                #         scaling_granularity_grouped_gemm=ScalingGranularity.TILEWISE,
-                # ),
+                float8_cfg=Float8Config(
+                        scaling_granularity_gemm=ScalingGranularity.TILEWISE,
+                        scaling_granularity_grouped_gemm=ScalingGranularity.TILEWISE,
+                ),
             ), "ep8"),
         ]
 

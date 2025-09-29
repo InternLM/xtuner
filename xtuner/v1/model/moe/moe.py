@@ -325,7 +325,7 @@ class MoE(BaseModel):
                 )
             else:
                 if cat_hidden_states is not None and not moe_forawrd:
-                    hidden_states_list = list(cat_hidden_states.chunk(len(seq_ctx_list), dim=1))
+                    hidden_states_list = list(i.clone() for i in cat_hidden_states.chunk(len(seq_ctx_list), dim=1))
                     moe_forawrd = True
 
                 if int(os.getenv("XTUNER_ACTIVATION_OFFLOAD", "0")) == 1:

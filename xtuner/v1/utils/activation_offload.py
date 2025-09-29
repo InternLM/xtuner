@@ -5,11 +5,11 @@ Original License: MIT
 Modifications: To enable compatibility on both GPU and NPU, replace all torch.npu with torch.cuda, and then use the transfer_to_npu interface
 """
 
-from adaptive_gemm.jit import Runtime
 import torch
 from torch.autograd.graph import saved_tensors_hooks
 
 from xtuner.v1.utils.device import get_device
+from torch.autograd.profiler import record_function
 
 
 if get_device() == "npu":
@@ -84,9 +84,9 @@ class SwapTensor:
             with torch.cuda.stream(stream):
                 stream.wait_event(forward_event)
                 if self.is_slice_tensor:
-                    self.tensor_cpu.copy_(self.tensor)
+                    self.tensor_cpu.copy_(self.tensor, non_blocking=True)
                 else:
-                    self.tensor_cpu.storage().copy_(self.tensor.storage())
+                    self.tensor_cpu.storage().copy_(self.tensor.storage(), non_blocking=True)
                 self.stat = "host"
 
     # synchronize d2h and resize 0
@@ -102,8 +102,8 @@ class SwapTensor:
     # resize storage_size and host to device
     def launch_h2d(self, h2d_stream: torch.cuda.Stream, flag, working_stream):
         if self.stat != "host":
-            # working_stream.wait_event(self.h2d_event)
-            working_stream.wait_stream(h2d_stream)
+            working_stream.wait_event(self.h2d_event)
+            # working_stream.wait_stream(h2d_stream)
             return
         if flag:
             self.tensor.storage().resize_(self.storage_size)
@@ -115,6 +115,18 @@ class SwapTensor:
             else:
                 self.tensor.storage().copy_(self.tensor_cpu.storage())
             self.stat = "device"
+
+    def load(self):
+        self.tensor.storage().resize_(self.storage_size)
+        with torch.no_grad():
+            # if self.tensor_cpu.isnan().any():
+            #     raise RuntimeError("d2h error")
+            if self.is_slice_tensor:
+                self.tensor.copy_(self.tensor_cpu)
+            else:
+                self.tensor.storage().copy_(self.tensor_cpu.storage())
+            self.stat = "device"
+
 
     # resize storage_size and host to device
     def prefetch_launch_h2d(self, h2dstream, flag):
@@ -130,9 +142,9 @@ class SwapTensor:
                 #     raise RuntimeError("d2h error")
                 h2dstream.wait_event(backward_event)
                 if self.is_slice_tensor:
-                    self.tensor.copy_(self.tensor_cpu)
+                    self.tensor.copy_(self.tensor_cpu, non_blocking=True)
                 else:
-                    self.tensor.storage().copy_(self.tensor_cpu.storage())
+                    self.tensor.storage().copy_(self.tensor_cpu.storage(), non_blocking=True)
                 self.h2d_event.record()
                 self.tensor.record_stream(h2dstream)
                 self.stat = "device"
@@ -318,11 +330,18 @@ class async_save_on_cpu(saved_tensors_hooks):
 
             block_idx, tensor_idx = swap_tensor.key.split("_")
 
-            # OffloadManager().del_may_npu_tensor(f"{int(block_idx) + 1}_", h2d_stream)
+            OffloadManager().del_may_npu_tensor(f"{int(block_idx) + 1}_", h2d_stream)
             swap_tensor.launch_h2d(h2d_stream, True, working_stream)
+            # if block_idx in ["0", "2", "3"]:
+            # if block_idx in ["0"]:
+            #     torch.cuda.synchronize()
 
-            if prefetch:
+            if prefetch and block_idx != 0 :
                 OffloadManager().prefetch_get(int(block_idx), int(tensor_idx), h2d_stream, d2h_stream)
+
+            # if block_idx in ["0"] and tensor_idx == "1":
+            #     swap_tensor.load()
+                # torch.cuda.synchronize()
             return swap_tensor.tensor
 
         super().__init__(_pack_to_cpu, _unpack_from_cpu)
