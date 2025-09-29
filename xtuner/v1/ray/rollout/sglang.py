@@ -58,7 +58,10 @@ class SGLangWorker(RolloutWorker):
             new_sample_params = {"max_new_tokens": sample_params['max_tokens'],
                                  "temperature": sample_params['temperature'],
                                  "top_p": sample_params['top_p'],
-                                 "top_k": sample_params['top_k']
+                                 "top_k": sample_params['top_k'],
+                                 "no_stop_trim": True,
+                                 "skip_special_tokens": False,
+                                 "spaces_between_special_tokens":False,
                                  }
             payload['sampling_params'] = new_sample_params
         else:

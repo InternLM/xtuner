@@ -326,11 +326,13 @@ class RLTrainer:
         advantages_list = []
         prompt_len_list = []
         response_len_list = []
+        rollout_logprobs_list = []
 
         data_batches = []
         for group in data_groups:
-            text_prompt = self.tokenizer.apply_chat_template(group[0]["messages"], tokenize=False, add_generation_prompt=True)
-            prompt_ids = self.tokenizer(text_prompt, add_special_tokens=False)["input_ids"].flatten().tolist()
+            text_prompt = self.tokenizer.apply_chat_template(group[0]["messages"], tokenize=False,
+                                                             add_generation_prompt=True)
+            prompt_ids = self.tokenizer(text_prompt, add_special_tokens=False)["input_ids"]
 
             # prompt = self.tokenizer.apply_chat_template(
             #     group[0]["messages"], add_generation_prompt=True, tokenize=False
@@ -348,6 +350,7 @@ class RLTrainer:
                     response_ids = group[i]['response_ids']
                     if isinstance(response_ids, torch.Tensor):
                         response_ids = response_ids.flatten().tolist()
+                    rollout_logprobs_list.extend(group[i]["logprobs"])
                 else:
                     response_ids = self.tokenizer(item, return_tensors="pt")["input_ids"].flatten().tolist()
                 input_ids = prompt_ids + response_ids
@@ -362,11 +365,19 @@ class RLTrainer:
                     shifted_labels = shifted_labels[:pack_max_length]
                 input_ids = torch.tensor(input_ids, dtype=torch.int64).unsqueeze(0)
                 shifted_labels = torch.tensor(shifted_labels, dtype=torch.int64).unsqueeze(0)
+
+                if len(rollout_logprobs_list) > 0:
+                    rollout_logprobs = torch.tensor(rollout_logprobs_list, dtype=torch.float32).unsqueeze(0)
+                    assert rollout_logprobs.size() == shifted_labels.size()
+                else:
+                    rollout_logprobs = None
+
                 data_batches.append(
                     dict(
                         seq_ctx=SequenceContext.from_input_ids((input_ids,), device="cpu"),
                         shifted_labels=shifted_labels,
                         advantage=advantages[i].item(),
+                        rollout_logprobs=rollout_logprobs,
                     )
                 )
         random.shuffle(data_batches)

@@ -131,6 +131,7 @@ class WorkerInputItem(TypedDict):
     seq_ctx: SequenceContext
     shifted_labels: torch.LongTensor
     advantages: torch.Tensor
+    rollout_logprobs: torch.Tensor | None
 
 
 class TrainingWorker(SingleAcceleratorWorker):
@@ -261,6 +262,7 @@ class TrainingWorker(SingleAcceleratorWorker):
 
         seq_ctx_list: list[SequenceContext] = []
         loss_ctx_input_list: list[RLLossContextInputItem] = []
+        rollout_logprobs_list: list[torch.Tensor | None] = []
         for data in data_batches:
             seq_ctx = data["seq_ctx"].to(DEVICE)
             loss_ctx_input = RLLossContextInputItem(
@@ -272,6 +274,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                 loss_ctx_input = loss_ctx_input.sp_split(self.sp_mesh)
             seq_ctx_list.append(seq_ctx)
             loss_ctx_input_list.append(loss_ctx_input)
+            rollout_logprobs_list.append(data["rollout_logprobs"])
 
         del data_batches
 
