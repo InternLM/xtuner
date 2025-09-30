@@ -187,7 +187,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         if ref_model_fsdp_cfg is None:
             ref_model_fsdp_cfg = FSDPConfig(recompute_ratio=0, cpu_offload=False, requires_grad=False)
         model = model.fully_shard(ref_model_fsdp_cfg, float8_handler)
-        model.from_hf(hf_path=load_from)
+        model.from_hf(hf_path=load_from, strict=False)
         model.eval()
         if float8_handler is not None:
             # As the ref model is not updated, we only compute params' scales once
