@@ -45,7 +45,6 @@ class Qwen3DenseConfig(TransformerConfig):
         assert isinstance(hf_config, HFConfig)
 
         config = cls(
-            hf_config=hf_config,
             vocab_size=hf_config.vocab_size,
             max_position_embeddings=hf_config.max_position_embeddings,
             pad_token_id=hf_config.eos_token_id,
