@@ -6,6 +6,8 @@ export PYTHONPATH=/mnt/shared-storage-user/huanghaian/code/lmdeploy/:$PYTHONPATH
 export UVICORN_LOG_LEVEL="CRITICAl"
 export PYTORCH_CUDA_ALLOC_CONF='expandable_segments:True'
 
+#export ID_INPUT_OUTPUT=1
+
 OUTPUT_DIR='work_dirs/dapo_math_7B_newlmdeploy_nogroup'
 if [ ! -d "$OUTPUT_DIR" ]; then
   mkdir -p "$OUTPUT_DIR"

@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Union
 import ray
 import requests
 from ray.util.placement_group import placement_group_table
-
+from transformers import AutoTokenizer
 from xtuner.v1.ray.config import RolloutConfig
 
 from .worker import RolloutWorker
@@ -62,7 +62,11 @@ class LMDeployWorker(RolloutWorker):
         self.server_func = run_lmdeploy_server_wrapper
         self.router_func_str = "lmdeploy.serve.proxy.proxy.proxy"
         self.endpoints["health_generate"] = "health"
-        self.endpoints["generate"] = "v1/chat/completions"
+        if os.environ.get("ID_INPUT_OUTPUT", '0') == '1':
+            self.endpoints["generate"] = "generate"
+            self.tokenizer = AutoTokenizer.from_pretrained(self.config.model_path)
+        else:
+            self.endpoints["generate"] = "v1/chat/completions"
         self.endpoints["output_ids"] = "output_ids"
         self.endpoints["response"] = "text"
         self.endpoints["sleep"] = "sleep"
@@ -98,22 +102,45 @@ class LMDeployWorker(RolloutWorker):
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.api_keys}",  # 如果需要鉴权
         }
-        payload = {
-            "model": self.model_name,
-            "messages": prompt,
-            "tools": tools,
-            "tool_choice": tool_choice,
-            "stream": True,
-        }
-        payload.update(sample_params)
-        payload.update(extra_params)
+        if os.environ.get("ID_INPUT_OUTPUT", '0') == '1':
+            stream = False
+            payload = {"model": self.model_name, "stream": stream, "return_logprob": True}
+            text_prompt = self.tokenizer.apply_chat_template(prompt, tokenize=False, add_generation_prompt=True)
+            prompt_token_ids = self.tokenizer(text_prompt, add_special_tokens=False)["input_ids"]
+            payload["input_ids"] = prompt_token_ids
+
+            new_sample_params = {"max_tokens": sample_params['max_tokens'],
+                                 "temperature": sample_params['temperature'],
+                                 "top_p": sample_params['top_p'],
+                                 "top_k": sample_params['top_k'],
+                                 "include_stop_str_in_output": True,
+                                 "skip_special_tokens": False,
+                                 "spaces_between_special_tokens": False,
+                                 }
+            payload.update(new_sample_params)
+        else:
+            stream = True
+            payload = {
+                "model": self.model_name,
+                "messages": prompt,
+                "stream": stream,
+            }
+            payload.update(sample_params)
+            payload.update(extra_params)
         req = self.client.build_request(
             "POST",
             url,
             headers=headers,
             json=payload,
         )
-        r = await self.client.send(req, stream=True)
+        r = await self.client.send(req, stream=stream)
+
+        if stream == False:
+            r.raise_for_status()
+            try:
+                r = r.json()
+            except:
+                r = r.text
         return r
 
     def get_logprobs(self, input_ids, sampling_params):
@@ -277,6 +304,9 @@ class LMDeployWorker(RolloutWorker):
             lmdeploy_config_kwargs.pop("backend")
 
         lmdeploy_config_kwargs["log_level"] = "CRITICAL"  # disable logging
+
+        if os.environ.get("ID_INPUT_OUTPUT", '0') == '1':
+            backend_config.logprobs_mode = 'raw_logprobs'  # TODO: 只支持 pytorch 后端
 
         return Namespace(
             model_path=self.config.model_path,
