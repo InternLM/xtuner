@@ -6,7 +6,7 @@ import json
 
 import parametrize
 import torch
-from torch.testing._internal.common_distributed import DistributedTestBase
+from xtuner._testing import DeterministicDDPTestCase, patch_hf_rms_norm
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 import tempfile
 from pathlib import Path
@@ -30,7 +30,7 @@ def prepare(fn):
     return wrapper
 
 
-class TestGptOss(DistributedTestBase):
+class TestGptOss(DeterministicDDPTestCase):
     @parametrize.parametrize(
         "device,dispatcher,ep_size,compile,tol,loss_class",
         [
@@ -56,6 +56,7 @@ class TestGptOss(DistributedTestBase):
             device_map="cuda"
         )
         hf_model.train()
+        patch_hf_rms_norm((hf_model))
         tokenizer = AutoTokenizer.from_pretrained(GPT_OSS_MINI_PATH)
         input_ids = tokenizer("吃葡萄不吐葡萄皮", return_tensors="pt").input_ids.to("cuda")
         # assert input_ids.size(1) > 128
@@ -117,6 +118,7 @@ class TestGptOss(DistributedTestBase):
             config=hf_config,
             device_map="cuda"
         )
+        patch_hf_rms_norm((hf_model))
         hf_model.train()
         tokenizer = AutoTokenizer.from_pretrained(GPT_OSS_MINI_PATH)
         input_ids = tokenizer("吃葡萄不吐葡萄皮", return_tensors="pt").input_ids.to("cuda")

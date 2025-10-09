@@ -1,6 +1,6 @@
 import torch
 import random
-from xtuner.v1.ops import grouped_gemm_triton
+from xtuner.v1.ops import group_gemm
 
 
 def grouped_gemm_torch(x, w, tokens_per_expert):
@@ -56,7 +56,7 @@ def test_grouped_gemm_triton():
         x_ref = x.clone().detach().requires_grad_(True)
         w_ref = w.clone().detach().requires_grad_(True)
         out_ref = grouped_gemm_torch(x_ref, w_ref, tokens_per_expert)
-        out = grouped_gemm_triton(x, w, tokens_per_expert)
+        out = group_gemm(x, w, tokens_per_expert)
         out.mean().backward()
         out_ref.mean().backward()
         assert torch.allclose(out, out_ref, rtol=1e-2, atol=1e-2), "Output mismatch between Triton and PyTorch implementations"

@@ -68,6 +68,13 @@ rl = [
 video = [
   "decord",
 ]
+all = [
+  "decord",
+  "ray[default]",
+  "httpx",
+  "fastapi",
+  "uvicorn",
+]
 
 [tool.mypy]
 ignore_missing_imports = true
