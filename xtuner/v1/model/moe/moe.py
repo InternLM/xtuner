@@ -806,7 +806,7 @@ class MoE(BaseModel):
     def _maybe_compile_layers(self):
         if self.fsdp_config is not None:
             if self.fsdp_config.torch_compile:
-                torch._dynamo.config.cache_size_limit = 128
+                torch._dynamo.config.cache_size_limit = 256
                 if self.fsdp_config.compile_targets is None:
                     if self.ep_mesh.size() > 1:
                         # all_to_all_single_autograd in TorchAll2AllDispatcher.dispatch can not be compiled even if the fullgraph=False
