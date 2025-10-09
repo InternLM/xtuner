@@ -4,7 +4,6 @@ from functools import wraps
 
 import parametrize
 import torch
-from torch.testing._internal.common_distributed import DistributedTestBase
 import torch.distributed as dist
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import tempfile
@@ -17,23 +16,18 @@ from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.utils.compile import maybe_compile
 from xtuner.v1.loss.ce_loss import CELossConfig, CELossContextInputItem
+from xtuner._testing import patch_hf_rms_norm, DeterministicDDPTestCase
+
 
 # Qwen3 30B A3
 QWEN3_MOE_PATH = os.environ["QWEN3_MOE_PATH"]
 
 
-def prepare(fn):
-    @wraps(fn)
-    def wrapper(self, *args, **kwargs):
+class TestQwen3MoE(DeterministicDDPTestCase):
+    def prepare(self):
         self.temp_dir = tempfile.TemporaryDirectory()
-        ret = fn(self, *args, **kwargs)
         self.temp_dir.cleanup()
-        return ret
 
-    return wrapper
-
-
-class TestQwen3MoE(DistributedTestBase):
     @parametrize.parametrize(
         "device,dispatcher,ep_size,compile,tol,loss_class",
         [
@@ -44,7 +38,6 @@ class TestQwen3MoE(DistributedTestBase):
             ("cuda", None, 1, False, 1e-2, "chunk_cross_entropy"),
         ],
     )
-    @prepare
     def test_qwen3_moe_run(self, device, dispatcher, ep_size, compile, tol, loss_class):
         os.environ["TRITON_CACHE_DIR"] = str(Path(self.temp_dir.name) / "triton_cache")
         self.create_pg(device)
@@ -57,6 +50,7 @@ class TestQwen3MoE(DistributedTestBase):
             trust_remote_code=True,
             device_map="cuda"
         )
+        patch_hf_rms_norm(hf_model)
         tokenizer = AutoTokenizer.from_pretrained(QWEN3_MOE_PATH, trust_remote_code=True)
         input_ids = tokenizer("吃葡萄不吐葡萄皮", return_tensors="pt").input_ids.to("cuda")
         with torch.no_grad():

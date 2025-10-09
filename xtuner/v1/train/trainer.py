@@ -5,7 +5,7 @@ import pickle
 import sys
 import time
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from shutil import rmtree
 from typing import Annotated, Literal, Sized, cast
@@ -27,7 +27,7 @@ from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizer
 from xtuner.v1._writer import get_writer
 from xtuner.v1.config import FSDPConfig, LRConfig, OptimConfig
 from xtuner.v1.data_proto.sequence_context import SequenceContext
-from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfigList
+from xtuner.v1.datasets.config import BaseDataloaderConfig, DataloaderConfig, DatasetConfigList
 from xtuner.v1.engine import TrainEngine
 from xtuner.v1.engine.vision_compose_train_engine import VisionComposeConfigProtocol, VisionComposeTrainEngine
 from xtuner.v1.loss import CELossConfig
@@ -121,8 +121,10 @@ class TrainerConfig(BaseModel):
     model_cfg: TransformerConfig | VisionComposeConfigProtocol
     load_from: str | Path | None = None
     tokenizer_path: str | Path | None = None
-    dataset_cfg: Annotated[DatasetConfigList, Parameter(show_default=False)]
-    dataloader_cfg: DataloaderConfig
+    dataset_cfg: Annotated[DatasetConfigList | None, Parameter(show_default=False)] = (
+        None  # TODO: Removed in version 1.1.0
+    )
+    dataloader_cfg: BaseDataloaderConfig
     optim_cfg: OptimConfig
     lr_cfg: LRConfig
     loss_cfg: CELossConfig = CELossConfig()
@@ -289,6 +291,9 @@ class Trainer:
         self._consumed_tokens = 0
         self._consumed_samples = 0
 
+        self._train_time = 0
+        self._train_time_offset = 0
+
         self._init_dist(backend)
         self._set_deterministic()
         self._set_random_seed(seed)
@@ -331,6 +336,7 @@ class Trainer:
             global_batch_size=self.global_batch_size,
             micro_batch_size=self.micro_batch_size,
             seed=seed,
+            total_step=total_step,
         )
 
         # streaming dataloader may override `total_step`, so we may move this check after `build_dataloader` later.
@@ -471,6 +477,7 @@ class Trainer:
 
             self._cur_step += 1
             self._consumed_tokens += step_consumed_tokens
+            self._train_time = time_after_train_step - train_begin
 
             # TODO: This log should be move before lr_scheduler.step, but for CI BC, keep it temporarily
             self._log_step(
@@ -479,7 +486,7 @@ class Trainer:
                 total_consumed_tokens=self._consumed_tokens,
                 data_time=data_time,
                 step_time=step_time,
-                train_time=time_after_train_step - train_begin,
+                train_time=self._train_time + self._train_time_offset,
                 grad_norm=grad_norm.item(),
             )
 
@@ -704,10 +711,6 @@ class Trainer:
         elif self.cur_step % self._checkpoint_interval != 0 and self._cur_step != self.total_step:
             return
 
-        _gathered_list = [None for _ in range(self.data_mesh["dp"].size())]
-        dist.all_gather_object(_gathered_list, self._consumed_samples, group=self.data_mesh["dp"].get_group())
-        global_consumed_samples = sum(_gathered_list)  # type: ignore[arg-type]
-
         checkpoint_path = self._get_checkpoint_path(epoch=self._cur_epoch, step=self.cur_step)
         checkpoint_path.mkdir(parents=True, exist_ok=True)
 
@@ -724,9 +727,9 @@ class Trainer:
             optimizer_dir=optimizer_path,
         )
 
+        self._save_dataloader(dataloader_path)
+
         if self.rank == 0:
-            dataloader_state = self._dataloader.get_state_dict(global_consumed_samples)
-            torch.save(dataloader_state, dataloader_path)
             lr_scheduler_state = self._lr_scheduler.state_dict()
             torch.save(lr_scheduler_state, scheduler_path)
 
@@ -757,6 +760,7 @@ class Trainer:
                             "cur_epoch": self._cur_epoch,
                             "consumed_samples": self._consumed_samples,
                             "consumed_tokens": self._consumed_tokens,
+                            "train_time_offset": self._train_time + self._train_time_offset,
                         }
                     )
                 )
@@ -770,6 +774,15 @@ class Trainer:
                 rmtree(ckpt_to_remove)
 
         dist.barrier()
+
+    def _save_dataloader(self, dataloader_path: Path | str):
+        _gathered_list = [None for _ in range(self.data_mesh["dp"].size())]
+        dist.all_gather_object(_gathered_list, self._consumed_samples, group=self.data_mesh["dp"].get_group())
+        global_consumed_samples = sum(_gathered_list)  # type: ignore[arg-type]
+
+        if self.rank == 0:
+            dataloader_state = self._dataloader.get_state_dict(global_consumed_samples)
+            torch.save(dataloader_state, dataloader_path)
 
     @property
     def work_dir(self) -> Path:
@@ -829,6 +842,7 @@ class Trainer:
 
     def _set_deterministic(self):
         if XTUNER_DETERMINISTIC:
+            os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
             torch.use_deterministic_algorithms(True, warn_only=True)
 
     def _set_random_seed(self, seed: int):
@@ -964,6 +978,12 @@ class Trainer:
         e2e_tgs = total_consumed_tokens / train_time
         lr = self._lr_scheduler.get_last_lr()[0]
 
+        remaining_steps = self.total_step - self.cur_step
+        avg_tokens_per_step = total_consumed_tokens / self.cur_step
+        remaining_tokens = remaining_steps * avg_tokens_per_step
+        eta_seconds = remaining_tokens / tgs
+        eta_hms = str(timedelta(seconds=int(eta_seconds)))
+
         loss_log_list = [f"{k}: {v:.3f}" for k, v in loss_log.items()]
         loss_log_str = ", ".join(loss_log_list)
 
@@ -979,6 +999,7 @@ class Trainer:
             f"grad_norm: {grad_norm:.3f} "
             f"tgs: {tgs:.1f} "
             f"e2e_tgs: {e2e_tgs:.1f} "
+            f"eta: {eta_hms} "
         )
 
         log_scalars = {
@@ -986,6 +1007,7 @@ class Trainer:
             "time/data_time": round(data_time, 4),
             "time/step_time": round(step_time, 4),
             "time/train_time": round(train_time, 4),
+            "time/eta_seconds": round(eta_seconds, 1),
             "runtime_info/text_tokens": step_consumed_tokens,
             "runtime_info/tgs": tgs,
             "runtime_info/e2e_tgs": e2e_tgs,
@@ -1150,10 +1172,7 @@ class Trainer:
 
         if resume_cfg.load_dataset:
             dataloader_path = resume_from / self._SAVE_DATALOADER_DIR
-            if not dataloader_path.exists():
-                raise FileNotFoundError(f"Dataloader path {dataloader_path} does not exist.")
-            dataloader_state = torch.load(dataloader_path, map_location=DEVICE)
-            self._dataloader.load_state_dict(dataloader_state)
+            self._resume_dataloader(dataloader_path)
 
         train_state_path = resume_from / self._SAVE_TRAIN_STATE_PATH
 
@@ -1164,6 +1183,13 @@ class Trainer:
         self._cur_epoch = train_state["cur_epoch"]
         self._consumed_samples = train_state["consumed_samples"]
         self._consumed_tokens = train_state["consumed_tokens"]
+        self._train_time_offset = train_state["train_time_offset"]
+
+    def _resume_dataloader(self, dataloader_path: Path):
+        if not dataloader_path.exists():
+            raise FileNotFoundError(f"Dataloader path {dataloader_path} does not exist.")
+        dataloader_state = torch.load(dataloader_path, map_location=DEVICE)
+        self._dataloader.load_state_dict(dataloader_state)
 
     def _setup_env(self):
         os.environ["TOKENIZERS_PARALLELISM"] = "true"

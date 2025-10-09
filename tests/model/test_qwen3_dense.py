@@ -16,12 +16,13 @@ from xtuner.v1.model.dense.qwen3 import Qwen3Dense8BConfig
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.utils.compile import maybe_compile
 from xtuner.v1.loss.ce_loss import CELossConfig, CELossContextInputItem
+from xtuner._testing import patch_hf_rms_norm, DeterministicDDPTestCase
 
 # Qwen3 8B
 QWEN3_PATH = os.environ["QWEN3_PATH"]
 
 
-class TestQwen3Dense(DistributedTestBase):
+class TestQwen3Dense(DeterministicDDPTestCase):
     @parametrize.parametrize(
         "device,tp_size,compile,tol,loss_class",
         [
@@ -39,6 +40,7 @@ class TestQwen3Dense(DistributedTestBase):
             torch_dtype=torch.bfloat16,
             device_map="cuda"
         )
+        patch_hf_rms_norm(hf_model)
         tokenizer = AutoTokenizer.from_pretrained(QWEN3_PATH)
         input_ids = tokenizer("吃葡萄不吐葡萄皮", return_tensors="pt").input_ids.to("cuda")
         with torch.no_grad():

@@ -6,7 +6,7 @@ from torch.distributed.device_mesh import init_device_mesh
 import parametrize
 import torch
 import torch.distributed as dist
-from torch.testing._internal.common_distributed import DistributedTestBase
+from xtuner._testing import DeterministicDDPTestCase
 from transformers import AutoTokenizer
 
 from xtuner.v1.model.moe.moe import SequenceContext
@@ -21,12 +21,13 @@ from xtuner.v1.utils import pad_to_max_length
 from xtuner.v1.utils.device import get_device
 from xtuner.v1.utils.test_utils import init_data_mesh
 
+
 # Qwen3 30B A3
 QWEN3_MOE_PATH = os.environ["QWEN3_MOE_PATH"]
 DEVICE = get_device()
 
 
-class TestMoEEngine(DistributedTestBase):
+class TestMoEEngine(DeterministicDDPTestCase):
     @parametrize.parametrize(
         "device,ep_size,sp_size",
         [
@@ -101,9 +102,9 @@ class TestMoEEngine(DistributedTestBase):
             lr_scheduler.step()
             losses.append(loss_log["reduced_llm_loss"])
 
-        losses_ref = [2.44, 2.44, 2.42, 2.41, 2.34, 2.33, 2.16, 2.13, 1.71, 1.55]
-        for loss, loss_ref in zip(losses, losses_ref):
-            self.assertTrue(abs(loss - loss_ref) / loss_ref < 0.02)
+        losses_ref = torch.tensor([2.44, 2.44, 2.42, 2.41, 2.34, 2.33, 2.16, 2.13, 1.71, 1.55])
+        losses = torch.tensor(losses)
+        self._check_loss_curve(losses, losses_ref)
 
         torch.cuda.empty_cache()
         try:
