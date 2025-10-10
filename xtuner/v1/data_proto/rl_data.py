@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TypedDict
 
 import ray
 from cyclopts import Parameter
@@ -70,9 +70,10 @@ class RLRolloutResponseItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
     response: Optional[str] = None
     response_ids: Optional[List[int]] = None
+    response_len: Optional[List[int]] = None
     num_return_tokens: Optional[int] = None
     finish_reason: Optional[str] = None
-    logprobs: Optional[List[float]] = None
+    logprobs: Optional[List[Any]] = None
     extra_info: Dict[str, Any] = dict()
 
 
@@ -201,6 +202,18 @@ class SampleParams(BaseModel):
     stops: Annotated[List[str], Parameter(help="List of stop sequences.")] = []
     stop_token_ids: Annotated[List[int], Parameter(help="List of stop token IDs.")] = []
     skip_special_tokens: Annotated[bool, Parameter(help="Whether to skip special tokens.")] = True
+
+
+class RolloutExtraParams(TypedDict):
+    stream: bool
+    return_logprob: bool
+    top_logprobs: int
+    return_token_ids: bool
+    include_stop_str_in_output: bool
+    no_stop_trim: bool
+    skip_special_tokens: bool
+    spaces_between_special_tokens: bool
+
 
 # 说明： 这里没定义API server情况数据格式，因为直接使用openai server的格式
 class RLRolloutRequestItem(BaseModel):

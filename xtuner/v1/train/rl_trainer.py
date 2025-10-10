@@ -313,7 +313,7 @@ class RLTrainer:
                 group[0].data.messages, add_generation_prompt=True, tokenize=False
             )
             prompt_ids = self.tokenizer(prompt, return_tensors="pt")["input_ids"].flatten().tolist()
-            rewards = [data.env.judger.reward["weighted_reward"] for data in group]
+            rewards = [data.env.judger.reward["score"] for data in group]
             rewards = torch.tensor(rewards, dtype=torch.float32)
             advantages = (rewards - rewards.mean(0)) / (rewards.std(0) + 1e-8)
 
@@ -345,7 +345,7 @@ class RLTrainer:
                 reward_list = []
                 for data in group:
                     response_list.append(data.env.rollout.response)
-                    reward_list.append(data.env.judger.reward["weighted_reward"])
+                    reward_list.append(data.env.judger.reward["score"])
                 item = {
                     "messages": group[0].data.messages,
                     "response": response_list,

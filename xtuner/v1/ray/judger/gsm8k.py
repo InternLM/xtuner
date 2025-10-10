@@ -73,9 +73,9 @@ def compute_reward(response, label, extra_info):
         return 0
     else:
         if answer == ground_truth:
-            return extra_info["score"]
+            return {"score": extra_info["score"]}
         else:
-            return extra_info["format_score"]
+            return {"score": extra_info["format_score"]}
 
 
 class GSM8KJudgerConfig(BaseModel):

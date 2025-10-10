@@ -84,7 +84,7 @@ class TestEvaluator(unittest.TestCase):
     @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
     def test_lmdeploy_evaluator(self):
         def custom_compute_metric(samples):
-            return {"custom_accuracy": sum(s.env.judger.reward["weighted_reward"] > 0 for s in samples) / len(samples)}
+            return {"custom_accuracy": sum(s.env.judger.reward["score"] > 0 for s in samples) / len(samples)}
 
         evaluator_cfg = EvaluatorConfig(
             dataset_cfg=self.eval_dataset_cfg,
