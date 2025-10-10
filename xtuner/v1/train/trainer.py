@@ -136,7 +136,7 @@ class TrainerConfig(BaseModel):
     sp_size: int = 1
     total_step: int | None = None
     total_epoch: int | None = None
-    resume: ResumeConfig | None = None
+    resume_cfg: ResumeConfig | None = None
     strict_load: bool = True
     checkpoint_interval: int | None = -1
     checkpoint_maxkeep: int | None = -1
@@ -405,7 +405,7 @@ class Trainer:
             sp_size=config.sp_size,
             total_step=config.total_step,
             total_epoch=config.total_epoch,
-            resume_cfg=config.resume,
+            resume_cfg=config.resume_cfg,
             strict_load=config.strict_load,
             checkpoint_interval=config.checkpoint_interval,
             checkpoint_maxkeep=config.checkpoint_maxkeep,
