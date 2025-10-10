@@ -147,7 +147,7 @@ class TrainingArguments(BaseModel):
             global_batch_size=self.global_batch_size,
             total_step=self.total_step,
             total_epoch=self.epoch_num,
-            resume=resume_cfg,
+            resume_cfg=resume_cfg,
             work_dir=self.work_dir,
         )
 
