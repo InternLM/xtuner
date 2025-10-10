@@ -1,21 +1,25 @@
-import copy
 import itertools
-import uuid
 from collections import defaultdict
-from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Union
 from uuid import uuid4
 
 import ray
 from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict
-from ray import ObjectRef
 from typing_extensions import Annotated
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
+from xtuner.v1.data_proto.rl_data import (
+    ReplayMeta,
+    RLDataFlowItem,
+    RLDatasetItem,
+    RLExtraDataItem,
+    RLUIDItem,
+    mapping_dataitem_to_replaymeta,
+    mapping_replaymeta_to_dataitem,
+)
 from xtuner.v1.datasets import build_dataloader, build_datasets
 from xtuner.v1.datasets.config import DataloaderConfig
-from xtuner.v1.datasets.data_item import RLTextDataItem
 from xtuner.v1.utils import get_logger
 
 
@@ -61,8 +65,8 @@ class ReplayBufferConfig(BaseModel):
     dataset_cfg: Annotated[List, Parameter(help="The dataset object to sample initial prompts from.")]
 
     dataloader_cfg: Annotated[
-        DataloaderConfig, Parameter(help="The PyTorch DataLoader for iterating over the dataset.")
-    ]
+        Optional[DataloaderConfig], Parameter(help="The PyTorch DataLoader for iterating over the dataset.")
+    ] = None
 
     tokenizer: Annotated[
         Union[PreTrainedTokenizer, PreTrainedTokenizerFast, str],
@@ -80,23 +84,6 @@ class ReplayBufferConfig(BaseModel):
         dict,
         Parameter(help="Weights for different states in the replay buffer."),
     ] = {}
-
-
-@dataclass
-class ReplayMeta:
-    """A dataclass to store metadata for a single action-observation step in
-    the replay buffer."""
-
-    env: str = ""
-    group_id: int = 0
-    action_id: int = 0
-    action_refs: List[ObjectRef] = field(default_factory=list)  # multi-turn action
-    observation_ids: List[int] = field(default_factory=list)  # multi-turn action and partial rollout
-    observation_refs: List[ObjectRef] = field(default_factory=list)  # multi-turn action and partial rollout
-    observation_versions: List[int] = field(default_factory=list)  # partial rollout
-    rewards: List[float] = field(default_factory=list)
-    state: str = ""
-    ground_truth: str = ""
 
 
 class Sampler:
@@ -121,7 +108,7 @@ class Sampler:
         )
         self.storage = storage
 
-    def sample_from_datasets(self, env: str, repeat_prompt_k: int) -> List[RLTextDataItem]:
+    def sample_from_datasets(self, env: str, repeat_prompt_k: int) -> List[RLDataFlowItem]:
         """Samples a new group of prompts from the original dataset.
 
         Args:
@@ -129,42 +116,36 @@ class Sampler:
             repeat_prompt_k (int): The number of times to repeat the prompt.
 
         Returns:
-            List[RLTextDataItem]: A list of data items for the data group contains repeat_prompt_k samples from same data.
+            List[RLDataFlowItem]: A list of data items for the data group contains repeat_prompt_k samples from same data.
         """
-        group_id = uuid4().int
-        group_samples: List[RLTextDataItem] = []
+        root_id = uuid4().int
+        action_id = uuid4().int
+        group_data_item: List[RLDataFlowItem] = [RLDataFlowItem() for _ in range(repeat_prompt_k)]
         try:
             data = next(self.train_dataloader_iter)[0]
         except StopIteration:
             self.train_dataloader_iter = iter(self.train_dataloader)
             data = next(self.train_dataloader_iter)[0]
-        for _ in range(repeat_prompt_k):
-            prompt_id = uuid4().int
-            data_item = copy.deepcopy(data)
-            data_item["env"] = env
-            data_item["group_id"] = group_id
-            data_item["prompt_id"] = prompt_id
-            data_item["retry_times"] = 0
-            group_samples.append(data_item)
-        return group_samples
 
-    def sample_from_unfinished_buffer(self):
+        for data_item in group_data_item:
+            data_item.uid = RLUIDItem(
+                env=env,
+                root_id=root_id,
+                action_id=action_id,
+                observation_id=uuid4().int,
+            )
+            data_item.data = RLDatasetItem(**data)
+            data_item.extra_info = RLExtraDataItem(retry_times=0)
+        return group_data_item
+
+    def sample_from_unfinished_buffer(self) -> List[RLDataFlowItem]:
         """Samples a prompt from a partially completed (unfinished) rollout."""
-        prompt_id = self.storage._rollout_states["unfinished"].pop(0)
-        group_replay_meta = [self.storage._actions[action_id] for action_id in self.storage._prompt2actions[prompt_id]]
-        group_samples = []
-        for replay_meta in group_replay_meta:
-            latest_prompt = ray.get(replay_meta.action_refs[-1])
-            latest_observation = ray.get(replay_meta.observation_refs[-1]) if replay_meta.observation_refs else ""
-            messages = [
-                {"role": "user", "content": f"{latest_prompt}"},
-                {"role": "assistant", "content": f"{latest_observation}"},
-            ]
-            data_item = self.storage.replaymeta2dataitem(replay_meta, messages=messages)
-            group_samples.append(data_item)
+        action_id = self.storage._paused.pop(0)
+        replay_meta = self.storage._actions[action_id]
+        group_samples = mapping_replaymeta_to_dataitem(replay_meta)
         return group_samples
 
-    def sample(self, env: str, enable_partial_rollout: int, prompt_repeat_k: int) -> List[RLTextDataItem]:
+    def sample(self, env: str, enable_partial_rollout: int, prompt_repeat_k: int) -> List[RLDataFlowItem]:
         """Selects a sampling strategy and returns a group of samples.
 
         It decides whether to sample from the unfinished buffer (for partial
@@ -176,20 +157,15 @@ class Sampler:
             prompt_repeat_k (int): Number of times to repeat the prompt.
 
         Returns:
-            List[RLTextDataItem]: A list of sampled data items.
+            List[RLDataFlowItem]: A list of sampled data items.
         """
-        if (
-            enable_partial_rollout
-            and "unfinished" in self.storage._rollout_states
-            and len(self.storage._rollout_states["unfinished"]) > 0
-        ):
+        if enable_partial_rollout > 0 and len(self.storage._paused) > 0:
             return self.sample_from_unfinished_buffer()
         else:
-            # note: Sample grouped sample at once. They share the same prompt and
-            # prompt id but different action_id.
+            # note: Sample grouped sample at once. They share the same action_id
             return self.sample_from_datasets(env, prompt_repeat_k)
 
-    def resume(self, num):
+    def resume(self, num: int) -> None:
         self.train_dataloader_iter = itertools.islice(self.train_dataloader, num, None)
 
 
@@ -198,110 +174,56 @@ class ReplayBufferStorage:
 
     def __init__(self):
         """Initializes the data structures for storing replay data."""
-        self._states: Dict[str, List[int]] = defaultdict(list)  # str: [observation_id, observation_id, ...]
-        self._rollout_states: Dict[str, List[int]] = defaultdict(
-            list
-        )  # str: [group_id, group_id, ...], designed for partial rollout
+        self._paused: List[int] = []  # List of paused action_id,
+        self._returned: List[int] = []  # List of returned action_id,
         self._actions: Dict[int, ReplayMeta] = {}  # action_id: ReplayMeta
+        self._root2actions: Dict[int, List[int]] = defaultdict(
+            list
+        )  # root_id: [action_id, action_id, ...], designed for grpo
         self._observations: Dict[int, ReplayMeta] = {}  # observation_id: ReplayMeta
-        self._prompt2actions: Dict[int, List[int]] = defaultdict(list)  # group_id: [action_id, action_id, ...]
+        self._observations2states: Dict[int, str] = {}  # observation_id: state_str
+        self._states: Dict[str, List[int]] = defaultdict(list)  # str: [observation_id, observation_id, ...]
         self._action2observations: Dict[int, List[int]] = defaultdict(
             list
         )  # action_id: [observation_id, observation_id, ...]
-        self._observations2states: Dict[int, str] = {}  # observation_id: state_str
         self.logger = get_logger()
 
-    def replaymeta2dataitem(self, replay_meta: ReplayMeta, messages=None, input_ids=None) -> RLTextDataItem:
-        """Converts a ReplayMeta object to an RLTextDataItem.
-
-        Args:
-            replay_meta: The ReplayMeta object.
-            prompt_str (Optional[str]): The prompt string. If None, it's
-                retrieved from the replay_meta.
-            input_ids (Optional[list]): The input IDs. Defaults to an empty list.
-
-        Returns:
-            RLTextDataItem: The converted data item.
-        """
-        messages = messages or (
-            ray.get(replay_meta.action_refs[-1])
-            if replay_meta.action_refs and len(replay_meta.action_refs) > 0
-            else ""
-        )
-        input_ids = input_ids or []
-        num_tokens = len(input_ids)
-        response_str = (
-            ray.get(replay_meta.observation_refs[0])
-            if replay_meta.observation_refs and len(replay_meta.observation_refs) > 0
-            else ""
-        )
-        return RLTextDataItem(
-            env=replay_meta.env,
-            group_id=replay_meta.group_id,
-            prompt_id=replay_meta.action_id,
-            messages=messages,
-            input_ids=input_ids,
-            num_tokens=num_tokens,
-            response_str=response_str,
-            reward_model={"ground_truth": replay_meta.ground_truth},
-            reward=replay_meta.rewards[-1] if replay_meta.rewards and len(replay_meta.rewards) > 0 else None,
-            state=replay_meta.state,
-        )
-
-    def dataitem2replaymeta(self, data_item: RLTextDataItem) -> ReplayMeta:
-        """Converts an RLTextDataItem to a ReplayMeta object.
-
-        Args:
-            data_item: The RLTextDataItem to convert.
-
-        Returns:
-            ReplayMeta: The converted metadata object.
-        """
-        return ReplayMeta(
-            env=data_item["env"],
-            group_id=data_item["group_id"],
-            action_id=data_item["prompt_id"],
-            action_refs=[ray.put(data_item["messages"])] if "messages" in data_item else [],
-            observation_ids=[uuid.uuid4().int],
-            observation_refs=[ray.put(data_item["response_str"])] if "response_str" in data_item else [],
-            observation_versions=[1],
-            state=data_item["state"] if "state" in data_item else "",
-            ground_truth=data_item["reward_model"]["ground_truth"],
-            rewards=[data_item["reward"]] if "reward" in data_item and data_item["reward"] is not None else [],
-        )
-
-    def add(self, grouped_dataitem: List[RLTextDataItem]):
+    def add(self, grouped_dataitem: List[RLDataFlowItem]):
         """Adds a group of data items to the storage.
 
         Args:
-            grouped_dataitem (List[RLTextDataItem]): A list of data items
+            grouped_dataitem (List[RLDataFlowItem]): A list of data items
                 belonging to the same group.
         """
         if len(grouped_dataitem) == 0:
             return
 
-        rollout_state = (
-            "unfinished" if any(data_item["state"] == "unfinished" for data_item in grouped_dataitem) else "finished"
-        )
-        group_id = grouped_dataitem[0]["group_id"]
-        self._rollout_states[rollout_state].append(group_id)
+        replay_meta = mapping_dataitem_to_replaymeta(grouped_dataitem)
+        root_id = replay_meta.root_id
+        action_id = replay_meta.action_id
+        state_str = replay_meta.state
 
-        for data_item in grouped_dataitem:
-            replay_meta = self.dataitem2replaymeta(data_item)
-            group_id = replay_meta.group_id
-            action_id = replay_meta.action_id
-            if action_id not in self._prompt2actions[group_id]:
-                self._prompt2actions[group_id].append(action_id)
-            self._actions[action_id] = replay_meta
-            for observation_id in replay_meta.observation_ids:
-                if observation_id not in self._states[replay_meta.state]:
-                    self._states[replay_meta.state].append(observation_id)
-                if observation_id not in self._action2observations[action_id]:
-                    self._action2observations[action_id].append(observation_id)
-                self._observations[observation_id] = replay_meta
-                self._observations2states[observation_id] = replay_meta.state
+        # Here, partial rollout is handled based on whether finish_reason is "paused".
+        # The logic for "paused" is user-defined, indicating that this data was
+        # interrupted before inference was completed. Other states are returned
+        # by the inference engine.
+        if state_str == "paused":
+            self._paused.append(action_id)
+        elif state_str == "returned":
+            self._returned.append(action_id)
 
-    def get(self, global_batch_size: int) -> List[List[RLTextDataItem]]:
+        # action
+        self._root2actions[root_id].append(action_id)
+        self._actions[action_id] = replay_meta
+
+        # observation
+        for observation_id in replay_meta.observation_ids:
+            self._action2observations[action_id].append(observation_id)
+            self._observations[observation_id] = replay_meta
+            self._observations2states[observation_id] = replay_meta.state
+            self._states[replay_meta.state].append(observation_id)
+
+    def get(self, global_batch_size: int) -> List[List[RLDataFlowItem]]:
         """Retrieves a batch of finished sample groups from the buffer.
 
         Args:
@@ -312,34 +234,46 @@ class ReplayBufferStorage:
                 to meet the `global_batch_size`.
 
         Returns:
-            List[List[RLTextDataItem]]: A list of sample groups. Each inner
+            List[List[RLDataFlowItem]]: A list of sample groups. Each inner
             list contains a group of data items that were generated from the
             same initial prompt, repeated `repeat_prompt_k` times.
         """
         samples = []
-        if len(self._rollout_states["finished"]) < global_batch_size:
+        if len(self._returned) < global_batch_size:
             raise ValueError("Not enough finished samples in replay buffer")
+            return []
         else:
-            target_finished_list = self._rollout_states["finished"][:global_batch_size]
-            remain_finished_list = self._rollout_states["finished"][global_batch_size:]
-            for group_id in target_finished_list:
-                group_replay_meta = [self._actions[action_id] for action_id in self._prompt2actions[group_id]]
-                group_samples = [self.replaymeta2dataitem(replay_meta) for replay_meta in group_replay_meta]
+            target_finished_list = self._returned[:global_batch_size]
+            remain_finished_list = self._returned[global_batch_size:]
+            for action_id in target_finished_list:
+                replay_meta = self._actions[action_id]
+                # todo: add an unified state management
+                replay_meta.state = "history"
+                group_samples = mapping_replaymeta_to_dataitem(self._actions[action_id])
                 samples.append(group_samples)
-            self._rollout_states["finished"] = remain_finished_list
+            self._returned = remain_finished_list
             return samples
 
+    def get_finished_samples(self):
+        """Returns the number of finished sample groups."""
+        return len(self._returned)
+
+    def get_unfinished_samples(self):
+        """Returns the number of unfinished sample groups."""
+        return len(self._paused)
+
+    def get_prompt_num(self):
+        return len(self._action2observations)
+
     def print(self):
-        finished_count = len(self._rollout_states["finished"])
-        unfinished_count = len(self._rollout_states["unfinished"])
-        group_count = len(self._prompt2actions)
+        rollout_finished_count = len(self._returned)
+        rollout_paused_count = len(self._paused)
         action_count = len(self._actions)
         observation_count = len(self._observations)
 
         log_message = (
             "ReplayBufferStorage states:\n"
-            f"  - Rollout States: Finished={finished_count}, Unfinished={unfinished_count}\n"
-            f"  - Sent Grouped Samples: {group_count}\n"
+            f"  - Rollout States: Returned={rollout_finished_count}, Paused={rollout_paused_count}\n"
             f"  - History Actions: {action_count}\n"
             f"  - History Observations: {observation_count}"
         )
@@ -359,40 +293,13 @@ class ReplayBufferStorage:
         self.logger.info(f"Starting to dump ReplayBufferStorage state to {file_path}...")
         os.makedirs(os.path.dirname(file_path), exist_ok=True)
 
-        # Deepcopy the state to avoid modifying the live buffer and to resolve
-        # ObjectRefs in-place.
-        actions_copy = copy.deepcopy(self._actions)
-        # observations_copy = copy.deepcopy(self._observations)
-        self.logger.info("Resolving ObjectRefs. This may take time and memory...")
-
-        for replay_meta in actions_copy.values():
-            if replay_meta.action_refs and all(isinstance(ref, ray.ObjectRef) for ref in replay_meta.action_refs):
-                actions_list = []
-                for ref in replay_meta.action_refs:
-                    actions_list.append(ray.get(ref))
-                replay_meta.action_refs = actions_list
-            if replay_meta.observation_refs and all(
-                isinstance(ref, ray.ObjectRef) for ref in replay_meta.observation_refs
-            ):
-                observations_list = []
-                for ref in replay_meta.observation_refs:
-                    observations_list.append(ray.get(ref))
-                replay_meta.observation_refs = observations_list
-
-        # Since _observations points to the same ReplayMeta objects as _actions,
-        # we can reconstruct it on resume.
-        state_to_dump = {
-            "_states": self._states,
-            "_rollout_states": self._rollout_states,
-            "_actions": actions_copy,
-            "_observations": self._observations,
-            "_prompt2actions": self._prompt2actions,
-            "_action2observations": self._action2observations,
-            "_observations2states": self._observations2states,
-        }
+        all_data_items = []
+        for replay_meta in self._actions.values():
+            group_data_items = mapping_replaymeta_to_dataitem(replay_meta)
+            all_data_items.append(group_data_items)
 
         with open(file_path, "wb") as f:
-            pickle.dump(state_to_dump, f)
+            pickle.dump(all_data_items, f)
         self.logger.info(f"ReplayBufferStorage state dumped to {file_path}")
 
     def resume(self, file_path: str):
@@ -411,44 +318,28 @@ class ReplayBufferStorage:
             return
 
         with open(file_path, "rb") as f:
-            state_to_load = pickle.load(f)
+            all_data_items = pickle.load(f)
 
-        # Restore all components
-        self._states = state_to_load["_states"]
-        self._rollout_states = state_to_load["_rollout_states"]
-        actions = state_to_load["_actions"]
-        self._actions = {}
-        self._observations = {}
-        for action_id, replay_meta in actions.items():
-            action_refs_list = []
-            for action in replay_meta.action_refs:
-                action_refs_list.append(ray.put(action))
-            replay_meta.action_refs = action_refs_list
-            observe_refs_list = []
-            for observe in replay_meta.observation_refs:
-                observe_refs_list.append(ray.put(observe))
-            replay_meta.observation_refs = observe_refs_list
+        for group_data_items in all_data_items:
+            replay_meta = mapping_dataitem_to_replaymeta(group_data_items)
+            root_id = replay_meta.root_id
+            action_id = replay_meta.action_id
+            state_str = replay_meta.state
+            if state_str == "paused":
+                self._paused.append(action_id)
+            elif state_str == "returned":
+                self._returned.append(action_id)
+            self._root2actions[root_id].append(action_id)
             self._actions[action_id] = replay_meta
-            for observ_id in replay_meta.observation_ids:
-                self._observations[observ_id] = replay_meta
-        self._prompt2actions = state_to_load["_prompt2actions"]
-        self._action2observations = state_to_load["_action2observations"]
-        self._observations2states = state_to_load["_observations2states"]
+            for observation_id in replay_meta.observation_ids:
+                self._action2observations[action_id].append(observation_id)
+                self._observations[observation_id] = replay_meta
+                self._observations2states[observation_id] = replay_meta.state
+                self._states[replay_meta.state].append(observation_id)
 
         self.logger.info(f"ReplayBufferStorage state successfully resumed from {file_path}")
 
         self.print()
-
-    def get_finished_samples(self):
-        """Returns the number of finished sample groups."""
-        return len(self._rollout_states["finished"])
-
-    def get_unfinished_samples(self):
-        """Returns the number of unfinished sample groups."""
-        return len(self._rollout_states["unfinished"])
-
-    def get_prompt_num(self):
-        return len(self._rollout_states)
 
 
 @ray.remote
@@ -469,8 +360,15 @@ class ReplayBuffer:
         self.tokenizer = config.tokenizer
         self.datasets = build_datasets(config.dataset_cfg, self.tokenizer)
 
+        if config.dataloader_cfg is not None:
+            self.dataloader_cfg = config.dataloader_cfg
+        else:
+            self.dataloader_cfg = DataloaderConfig(
+                collator="fake_collator",
+                pack_level="none",
+            )
         self.dataloader = build_dataloader(
-            dataloader_config=config.dataloader_cfg,
+            dataloader_config=self.dataloader_cfg,
             datasets=self.datasets,
             global_batch_size=1,
             micro_batch_size=1,
@@ -503,7 +401,7 @@ class ReplayBuffer:
             return group_samples
         return group_samples
 
-    def sample(self, env, enable_partial_rollout: int, prompt_repeat_k: int):
+    def sample(self, env, enable_partial_rollout: int, prompt_repeat_k: int) -> List[RLDataFlowItem]:
         """Samples a batch of experiences from the replay buffer.
 
         Args:
@@ -530,11 +428,11 @@ class ReplayBuffer:
         """
         return self.storage.get(global_batch_size)
 
-    def add(self, grouped_dataitem: List[RLTextDataItem]):
+    def add(self, grouped_dataitem: List[RLDataFlowItem]):
         """Adds a group of data items to the replay buffer storage.
 
         Args:
-            grouped_dataitem (List[RLTextDataItem]): A list of data items
+            grouped_dataitem (List[RLDataFlowItem]): A list of data items
                 from the same group.
         """
         self.storage.add(grouped_dataitem)

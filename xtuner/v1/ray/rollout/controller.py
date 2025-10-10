@@ -7,9 +7,10 @@ import uvicorn
 from fastapi import FastAPI
 
 from transformers import AutoTokenizer
+from xtuner.v1.data_proto.rl_data import RLRolloutRequestItem, RLRolloutResponseItem, SampleParams
 from xtuner.v1.ray.config.worker import RolloutConfig
 
-from .worker import RolloutRequest, RolloutResponse, RolloutWorker, SampleParams
+from .worker import RolloutWorker
 
 
 @ray.remote
@@ -113,7 +114,8 @@ class RolloutController:
         sample_params: Optional[SampleParams] = None,
         extra_params: dict = dict(),
         format: str = "openai",
-    ) -> RolloutResponse:
+    ) -> RLRolloutResponseItem:
+        # 这个函数接受标准的openapi chat create接口，所以不需要再额外定义输入的形式
         """Perform a rollout using one of the workers in a round-robin fashion.
 
         Args:
@@ -154,7 +156,7 @@ class RolloutController:
         port = self.config.api_port if self.config.api_port else port
 
         @app.post("/v1/chat/completions")
-        async def chat_completions(request: RolloutRequest) -> RolloutResponse:
+        async def chat_completions(request: RLRolloutRequestItem) -> RLRolloutResponseItem:
             response = await self.rollout(
                 prompt=request.messages,
                 tools=request.tools,

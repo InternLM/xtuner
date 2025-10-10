@@ -84,6 +84,9 @@ def main(args):
         gpus_per_node=args.gpus_per_node, # gpu: 8, npu: 16
         dtype="bfloat16",
         skip_load_weights=False,
+        extra_rollout_config={
+            "lmdeploy_log_level": "CRITICAL",
+        }
     )
     dataflow_config = DataFlowConfig(
         env="test",
@@ -93,9 +96,9 @@ def main(args):
         sample_params=SampleParams(max_tokens=args.max_response_length),
     )
     from xtuner.v1.ray.judger.gsm8k import GSM8KJudgerConfig
-    gsm8k_judger_config = GSM8KJudgerConfig()
+    gsm8k_judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k")
     judger_cfg = JudgerConfig(
-        reward_judger_configs={"openai/gsm8k": gsm8k_judger_config}
+        reward_judger_configs=[gsm8k_judger_config]
     )
     train_dataset_cfg = [
         {

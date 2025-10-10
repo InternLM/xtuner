@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from tqdm.auto import tqdm
 from typing_extensions import Annotated
 
-from xtuner.v1.datasets.data_item import RLTextDataItem
+from xtuner.v1.data_proto.rl_data import RLDataFlowItem
 from xtuner.v1.ray.environment import SingleTurnEnvironment
 from xtuner.v1.ray.rollout.controller import SampleParams
 from xtuner.v1.ray.utils import create_task
@@ -112,7 +112,7 @@ class DataFlow:
         """Gets the length of the training dataset from the replay buffer."""
         return ray.get(self.replay_buffer.get_train_dataset_length.remote())
 
-    async def worker_task(self, group_samples_for_retry: Optional[List[RLTextDataItem]] = None):
+    async def worker_task(self, group_samples_for_retry: Optional[List[RLDataFlowItem]] = None):
         """A single worker task to generate and process a group of samples.
 
         This task performs the following steps:
@@ -122,43 +122,36 @@ class DataFlow:
         4. Adds the filtered samples to the replay buffer.
 
         Args:
-            group_samples_for_retry (Optional[List[RLTextDataItem]]): A group
+            group_samples_for_retry (Optional[List[RLDataFlowItem]]): A group
                 of samples to retry if a previous attempt failed. Defaults to
                 None.
 
         Returns:
-            Optional[List[RLTextDataItem]]: The group of samples if the task
+            Optional[List[RLDataFlowItem]]: The group of samples if the task
             fails and needs to be retried, otherwise None.
         """
         group_samples = group_samples_for_retry
         try:
+            # 该函数中所有的数据结构都是RLDataFlowItem
             # step 1: sample
-            if group_samples is None:
-                group_samples = await self.replay_buffer.sample.remote(  # type: ignore[attr-defined]
-                    self.env,
-                    self.config.enable_partial_rollout,
-                    self.config.prompt_repeat_k,
-                )
-                self.send_samples_count += 1
-                self.logger.debug(
-                    f"Get 1 sample and dataflow have sent {self.send_samples_count} to rollout_controller"
-                )
-            else:
-                self.logger.debug("Retrying the failed sample")
+            group_data_items = await self.replay_buffer.sample.remote(  # type: ignore[attr-defined]
+                self.env,
+                self.config.enable_partial_rollout,
+                self.config.prompt_repeat_k,
+            )
+            self.send_samples_count += 1
+            self.logger.debug(f"Get 1 sample and dataflow have sent {self.send_samples_count} to rollout_controller")
             # step 2: env generate
-            group_samples = await self.env_controller.run.remote(group_samples, self.sample_params)  # type: ignore[attr-defined]
+            group_data_items = await self.env_controller.run.remote(group_data_items, self.sample_params)  # type: ignore[attr-defined]
             # step 3: filter
-            filtered_group_samples = await self.replay_buffer.post_processor.remote(group_samples)  # type: ignore[attr-defined]
+            filtered_group_data_items = await self.replay_buffer.post_processor.remote(group_data_items)  # type: ignore[attr-defined]
             # step 4: add to replay buffer
-            await self.replay_buffer.add.remote(filtered_group_samples)  # type: ignore[attr-defined]
-
+            await self.replay_buffer.add.remote(filtered_group_data_items)  # type: ignore[attr-defined]
         except Exception as e:
             if group_samples is not None and len(group_samples) > 0:
                 self.logger.error(f"Worker task failed with exception: {e}. Returning meta for retry.", exc_info=True)
                 for sample in group_samples:
-                    if "retry_times" not in sample:
-                        sample["retry_times"] = 0
-                    sample["retry_times"] += 1
+                    sample.extra_info.retry_times += 1
                 return group_samples
             else:
                 self.logger.warning(f"Worker task failed with exception: {e}. No samples to return.")
@@ -247,7 +240,7 @@ class DataFlow:
         runner to collect a new batch of samples.
 
         Returns:
-            List[RLTextDataItem]: A list of collected training samples.
+            List[RLDataFlowItem]: A list of collected training samples.
         """
         ray.get(self.env_controller.restart.remote())  # type: ignore[attr-defined]
         self.send_samples_count = 0

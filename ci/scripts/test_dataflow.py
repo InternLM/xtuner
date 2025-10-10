@@ -48,9 +48,9 @@ def main():
         tensor_parallel_size=8,
     )
     from xtuner.v1.ray.judger.gsm8k import GSM8KJudgerConfig
-    gsm8k_judger_config = GSM8KJudgerConfig()
+    gsm8k_judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k")
     judger_cfg = JudgerConfig(
-        reward_judger_configs={"openai/gsm8k": gsm8k_judger_config}
+        reward_judger_configs=[gsm8k_judger_config]
     )
 
     dataflow_cfg = DataFlowConfig(

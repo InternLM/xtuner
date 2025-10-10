@@ -8,9 +8,9 @@ from tqdm.auto import tqdm
 from typing_extensions import Annotated
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
+from xtuner.v1.data_proto.rl_data import RLDataFlowItem, RLDatasetItem
 from xtuner.v1.datasets import build_datasets
 from xtuner.v1.datasets.config import DatasetConfigList
-from xtuner.v1.datasets.data_item import RLTextDataItem
 from xtuner.v1.ray.environment import BaseEnvironment
 from xtuner.v1.ray.rollout import SampleParams
 from xtuner.v1.ray.utils import create_task
@@ -116,7 +116,7 @@ class Evaluator:
         )
         self.dataloader = iter(self.dataset)
         self.env_controller = env_controller
-        self.return_list: List[RLTextDataItem] = []
+        self.return_list: List[RLDataFlowItem] = []
         if self.config.eval_sample_ratio > 0:
             self.eval_batch_size = int(len(self.dataset) * self.config.eval_sample_ratio)
         elif self.config.eval_sample_num > 0:
@@ -135,14 +135,14 @@ class Evaluator:
         Calculates accuracy based on whether the reward is positive.
 
         Args:
-            samples (list): A list of RLTextDataItem samples.
+            samples (list): A list of RLDataFlowItem samples.
 
         Returns:
             dict: A dictionary containing the accuracy score.
         """
-        return {"accuracy": sum(s["reward"] > 0 for s in samples) / len(samples)}
+        return {"accuracy": sum(s.env.judger.reward["weighted_reward"] > 0 for s in samples) / len(samples)}
 
-    async def eval_worker_task(self, sample: RLTextDataItem):
+    async def eval_worker_task(self, sample: RLDataFlowItem):
         """A single worker task to evaluate one sample.
 
         This task calls the environment controller to run the model on a
@@ -150,21 +150,19 @@ class Evaluator:
         retry count.
 
         Args:
-            sample (RLTextDataItem): The data item to evaluate.
+            sample (RLDataFlowItem): The data item to evaluate.
 
         Returns:
-            RLTextDataItem or None: The sample with retry information if it
+            RLDataFlowItem or None: The sample with retry information if it
                 failed, or None if it succeeded or failed without a sample.
         """
         try:
             # note: In the evaluator, we convert the input sample to a list to adapt to the input format of single_turn_env
-            samples = await self.env_controller.run.remote([sample], self.sample_params)  # type: ignore[attr-defined]
-            self.return_list.append(samples[0])
+            group_sample = await self.env_controller.run.remote([sample], self.sample_params)  # type: ignore[attr-defined]
+            self.return_list.append(group_sample[0])
         except Exception as e:
-            self.logger.error(f"Worker task failed with exception: {e}. Returning meta for retry.", exc_info=True)
-            if "retry_times" not in sample:
-                sample["retry_times"] = 0
-            sample["retry_times"] += 1
+            self.logger.error(f"Worker task failed with exception: {e}. Returning meta for retry.")
+            sample.extra_info.retry_times += 1
             return sample
 
     async def concurrent_eval_task_runner(self):
@@ -190,10 +188,11 @@ class Evaluator:
                     if len(self.return_list) + len(waiting_tasks) >= self.eval_batch_size:
                         break
                     try:
-                        sample = next(self.dataloader)
+                        data = next(self.dataloader)
                     except StopIteration:
                         break
-                    task = create_task(self.eval_worker_task(sample))
+                    data_item = RLDataFlowItem(data=RLDatasetItem(**data))
+                    task = create_task(self.eval_worker_task(data_item))
                     waiting_tasks.add(task)
 
                 assert len(waiting_tasks) > 0
@@ -203,12 +202,13 @@ class Evaluator:
                 for task in done_tasks:
                     result = task.result()
                     if result is not None:
-                        if result["retry_times"] < self.config.max_retry_times:
+                        if result.extra_info.retry_times < self.config.max_retry_times:
                             # If the retry count is less than max_retry_times, retry the task
                             retry_task = create_task(self.eval_worker_task(result))
                             pending_tasks.add(retry_task)
                         else:
-                            self.logger.error(f"Max retry reached for {result['prompt_id']}. Not retrying.")
+                            self.logger.error(f"Max retry reached for {result.uid.action_id}. Not retrying.")
+
                 waiting_tasks = pending_tasks
 
             pbar.n = len(self.return_list)
