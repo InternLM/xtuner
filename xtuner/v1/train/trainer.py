@@ -987,7 +987,7 @@ class Trainer:
     ):
         """Log the training step information."""
         if step_consumed_tokens == 0:
-            logger.warning("step_consumed_tokens is 0 due to padding")
+            logger.warning("step_consumed_tokens is 0 due to all tokens being padding tokens")
         tgs = max(1, step_consumed_tokens / step_time)
         e2e_tgs = max(1, total_consumed_tokens / train_time)
         lr = self._lr_scheduler.get_last_lr()[0]
