@@ -305,6 +305,7 @@ class MoE(BaseModel):
         cat_position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None
         cat_hidden_states: torch.Tensor | None = None
 
+        moe_forawrd = False
         for idx, decoder_layer in self.layers.items():
             layer_idx = int(idx)
 
@@ -322,14 +323,37 @@ class MoE(BaseModel):
                     seq_ctx=cat_seq_ctx,
                 )
             else:
-                if cat_hidden_states is not None:
-                    hidden_states_list = list(cat_hidden_states.chunk(len(seq_ctx_list), dim=1))
+                if cat_hidden_states is not None and not moe_forawrd:
+                    # TODO: `i.clone()` here is weird. However, the current Implementation of
+                    # `async_save_on_cpu` is not friendly with `chunk` op (maybe caused by shared storage? not sure),
+                    # resulting in nan grad norm. So we have to clone the chunked tensors here to make sure each
+                    # hidden state has its own storage. This workaround may introduce extra memory and time cost, and
+                    # should be optimized in the future.
+                    hidden_states_list = [i.clone() for i in cat_hidden_states.chunk(len(seq_ctx_list), dim=1)]
+                    moe_forawrd = True
 
-                layer_results = decoder_layer(
-                    *hidden_states_list,
-                    position_embeddings=position_embeddings_list,
-                    seq_ctx=seq_ctx_list,
-                )
+                if int(os.getenv("XTUNER_ACTIVATION_OFFLOAD", "0")) == 1:
+                    offload_stream = decoder_layer._get_fsdp_state()._comm_ctx.all_gather_copy_in_stream
+                    with async_save_on_cpu(
+                        h2d_stream=offload_stream,  # type: ignore
+                        d2h_stream=offload_stream,  # type: ignore
+                        block_idx=layer_idx - self.config.first_k_dense_replace,
+                        depth=len(self.layers) - self.config.first_k_dense_replace,
+                        custom_check_fn=lambda x: x.data_ptr()
+                        in [hidden_states.data_ptr() for hidden_states in hidden_states_list],
+                        prefetch=True,
+                    ):
+                        layer_results = decoder_layer(
+                            *hidden_states_list,
+                            position_embeddings=position_embeddings_list,
+                            seq_ctx=seq_ctx_list,
+                        )
+                else:
+                    layer_results = decoder_layer(
+                        *hidden_states_list,
+                        position_embeddings=position_embeddings_list,
+                        seq_ctx=seq_ctx_list,
+                    )
                 hidden_states = layer_results[: len(hidden_states_list)]
                 router_logits = layer_results[len(hidden_states_list) :]
 
@@ -782,7 +806,7 @@ class MoE(BaseModel):
     def _maybe_compile_layers(self):
         if self.fsdp_config is not None:
             if self.fsdp_config.torch_compile:
-                torch._dynamo.config.cache_size_limit = 128
+                torch._dynamo.config.cache_size_limit = 256
                 if self.fsdp_config.compile_targets is None:
                     if self.ep_mesh.size() > 1:
                         # all_to_all_single_autograd in TorchAll2AllDispatcher.dispatch can not be compiled even if the fullgraph=False
