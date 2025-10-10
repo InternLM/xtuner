@@ -8,7 +8,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from typing_extensions import Self
 
 from transformers.configuration_utils import PretrainedConfig
-from xtuner.v1.config import FSDPConfig
+from xtuner.v1.config import FSDPConfig, OptimConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.loss import BaseLossContext
@@ -70,10 +70,20 @@ class VisionComposeTrainEngine(TrainEngine):
     def __init__(
         self,
         model_cfg: VisionComposeConfigProtocol,
-        *args,
-        **kwargs,
+        optim_cfg: OptimConfig,
+        fsdp_cfg: FSDPConfig,
+        packed_samples_per_forward: int = 1,
+        domino_forward: bool = False,
     ) -> None:
-        super().__init__(model_cfg, *args, **kwargs)  # type: ignore
+        if domino_forward:
+            raise NotImplementedError
+        super().__init__(
+            model_cfg=model_cfg,  # type: ignore
+            optim_cfg=optim_cfg,
+            fsdp_cfg=fsdp_cfg,
+            packed_samples_per_forward=packed_samples_per_forward,
+            domino_forward=domino_forward,
+        )
 
     def build_model(self) -> VisionComposeModelProtocol:  # type: ignore
         with torch.device("meta"):
@@ -141,9 +151,9 @@ class VisionComposeTrainEngine(TrainEngine):
 
         loss_log = {}
         other_log = {}
-        intra_layer_micro_batch = self.intra_layer_micro_batch
-        assert len(data_batches) % intra_layer_micro_batch == 0, (
-            f"data_batches length {len(data_batches)} is not divisible by intra_layer_micro_batch {intra_layer_micro_batch}"
+        packed_samples_per_forward = self.packed_samples_per_forward
+        assert len(data_batches) % packed_samples_per_forward == 0, (
+            f"data_batches length {len(data_batches)} is not divisible by num_packed_sample {packed_samples_per_forward}"
         )
         iters_per_step = self.grad_accumulation_steps(len(data_batches))
 
@@ -164,10 +174,10 @@ class VisionComposeTrainEngine(TrainEngine):
         step_z_loss: torch.Tensor | None = None
         step_consumed_tokens = torch.tensor(0.0, device=DEVICE)
 
-        for i in range(0, len(data_batches), intra_layer_micro_batch):
-            data_batch = data_batches[i : i + intra_layer_micro_batch]
-            seq_ctx_list = []
-            loss_ctx_list = []
+        for i in range(0, len(data_batches), packed_samples_per_forward):
+            data_batch = data_batches[i : i + packed_samples_per_forward]
+            seq_ctx_list: list[SequenceContext] = []
+            loss_ctx_list: list[BaseLossContext] = []
             for data in data_batch:
                 seq_ctx = data["seq_ctx"]
                 loss_ctx = data["loss_ctx"]
@@ -175,8 +185,10 @@ class VisionComposeTrainEngine(TrainEngine):
                 loss_ctx_list.append(loss_ctx)
                 step_consumed_tokens += seq_ctx.mask.sum()
 
-            # todo: support intra_layer_micro_batch
-            output = self.model(seq_ctx=seq_ctx_list[0], loss_ctx=loss_ctx_list[0])
+            # todo: support packed_samples_per_forward
+            cat_seq_ctx = seq_ctx_list[0].__class__.pack(seq_ctx_list)
+            cat_loss_ctx = loss_ctx_list[0].__class__.pack(loss_ctx_list)
+            output = self.model(seq_ctx=cat_seq_ctx, loss_ctx=cat_loss_ctx)
             # llm loss has been global averaged
             llm_loss = output["loss"]
             step_llm_loss += llm_loss.detach().clone()

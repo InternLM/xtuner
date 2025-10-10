@@ -147,7 +147,8 @@ class TrainerConfig(BaseModel):
     profile_step: int | None = None
     profile_time: bool = True
     profile_memory: bool = False
-    intra_layer_micro_batch: int = 1
+    packed_samples_per_forward: int = 1
+    domino_forward: bool = False
     seed: int = 42
     dist_backend: str | None = None
     debug: bool = False
@@ -194,7 +195,6 @@ class Trainer:
         profile_step (int | None): Step to perform profiling.
         profile_time (bool): Whether to profile training time.
         profile_memory (bool): Whether to profile memory usage.
-        intra_layer_micro_batch (int): Intra-layer micro batch size.
         seed (int): Random seed for reproducibility.
         debug (bool): Whether to enable debug mode.
         backend (str): Backend for distributed training.
@@ -243,7 +243,8 @@ class Trainer:
         profile_step: int | None = None,
         profile_time: bool = True,
         profile_memory: bool = False,
-        intra_layer_micro_batch: int = 1,
+        packed_samples_per_forward: int = 1,
+        domino_forward: bool = False,
         seed: int = 42,
         debug: bool = False,
         backend: str | None = None,
@@ -255,6 +256,9 @@ class Trainer:
         self._total_epoch = total_epoch
         self._cur_epoch = 1
         self._cur_step = 0
+
+        self._packed_samples_per_forward = packed_samples_per_forward
+        self._domino_forward = domino_forward
 
         self._trainer_cfg = trainer_cfg
 
@@ -328,20 +332,9 @@ class Trainer:
         self._global_batch_size = global_batch_size
 
         self._resolve_config_conflicts(self.tokenizer, model_cfg, dataloader_cfg)
-
-        if dataset_cfg is not None:  # TODO: Removed in version 1.1.0
-            # For backward compatibility, reserve the dataset_cfg interface, remove it later
-            if dataloader_cfg.dataset_config_list is not None:
-                logger.warning("Outside dataset_cfg will override inner dataset_config_list")
-            dataloader_cfg.dataset_config_list = dataset_cfg
-
-        self._dataloader = dataloader_cfg.build(
-            tokenizer=self.tokenizer,
-            dp_mesh=self.data_mesh["dp"],
-            global_batch_size=self.global_batch_size,
-            micro_batch_size=self.micro_batch_size,
-            seed=seed,
-            total_step=total_step,
+        self._dataloader = self._build_dataloader(
+            dataset_cfg,
+            dataloader_cfg,
         )
 
         # streaming dataloader may override `total_step`, so we may move this check after `build_dataloader` later.
@@ -360,7 +353,8 @@ class Trainer:
             fsdp_config=fsdp_cfg,
             resume_cfg=resume_cfg,
             strict=strict_load,
-            intra_layer_micro_batch=intra_layer_micro_batch,
+            packed_samples_per_forward=self._packed_samples_per_forward,
+            domino_forward=self._domino_forward,
         )
         self._lr_scheduler = self.build_lr_scheduler(lr_cfg)
 
@@ -416,7 +410,8 @@ class Trainer:
             profile_step=config.profile_step,
             profile_time=config.profile_time,
             profile_memory=config.profile_memory,
-            intra_layer_micro_batch=config.intra_layer_micro_batch,
+            packed_samples_per_forward=config.packed_samples_per_forward,
+            domino_forward=config.domino_forward,
             seed=config.seed,
             backend=config.dist_backend,
             debug=config.debug,
@@ -626,7 +621,8 @@ class Trainer:
         optim_config: OptimConfig,
         fsdp_config: FSDPConfig,
         resume_cfg: ResumeConfig,
-        intra_layer_micro_batch: int = 1,
+        packed_samples_per_forward: int = 1,
+        domino_forward: bool = False,
         strict: bool = True,
     ):
         """Build the training engine for the transformer model.
@@ -637,7 +633,6 @@ class Trainer:
             optim_config (OptimConfig): Optimizer configuration.
             fsdp_config (FSDPConfig): FSDP configuration for distributed training.
             resume_cfg (ResumeConfig | None): Resume configuration for continuing training.
-            intra_layer_micro_batch (int): Intra-layer micro batch size for gradient accumulation.
             strict (bool): Whether to strictly load model weights.
 
         Returns:
@@ -648,14 +643,15 @@ class Trainer:
                 optim_cfg=optim_config,
                 fsdp_cfg=fsdp_config,
                 model_cfg=model_config,
-                intra_layer_micro_batch=intra_layer_micro_batch,
+                packed_samples_per_forward=packed_samples_per_forward,
             )
         else:
             engine = TrainEngine(  # type: ignore
                 optim_cfg=optim_config,
                 fsdp_cfg=fsdp_config,
                 model_cfg=model_config,
-                intra_layer_micro_batch=intra_layer_micro_batch,
+                packed_samples_per_forward=packed_samples_per_forward,
+                domino_forward=domino_forward,
             )
         if model_path is not None and resume_cfg.resume_from is None:
             engine.from_hf(hf_path=model_path, strict=strict)
@@ -1216,3 +1212,30 @@ class Trainer:
             log_str += f"{k}: {v}\n"
         log_str += "=================================================="
         logger.info(log_str)
+
+    def _build_dataloader(
+        self,
+        dataset_cfg: DatasetConfigList | None,
+        dataloader_cfg: DataloaderConfig,
+    ):
+        if self._domino_forward:
+            if not self._packed_samples_per_forward > 1:
+                raise ValueError(
+                    "`domino_forward` is only valid for `packed_samples_per_forward` > 1g "
+                    f"but got {self._packed_samples_per_forward}"
+                )
+
+        if dataset_cfg is not None:  # TODO: Removed in version 1.1.0
+            # For backward compatibility, reserve the dataset_cfg interface, remove it later
+            if dataloader_cfg.dataset_config_list is not None:
+                logger.warning("Outside dataset_cfg will override inner dataset_config_list")
+            dataloader_cfg.dataset_config_list = dataset_cfg
+
+        dataloader = dataloader_cfg.build(
+            tokenizer=self.tokenizer,
+            dp_mesh=self.data_mesh["dp"],
+            global_batch_size=self.global_batch_size,
+            micro_batch_size=self.micro_batch_size,
+            seed=self._seed,
+        )
+        return dataloader
