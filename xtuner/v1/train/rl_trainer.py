@@ -23,7 +23,6 @@ from xtuner.v1.ray.dataflow import DataFlow, DataFlowConfig, ReplayBufferConfig
 from xtuner.v1.ray.environment import SingleTurnEnvironment
 from xtuner.v1.ray.evaluator import Evaluator, EvaluatorConfig
 from xtuner.v1.ray.judger import JudgerConfig
-from xtuner.v1.ray.rollout import SampleParams
 
 # from xtuner.v1.rl.base.controller import TrainingController
 # from xtuner.v1.rl.base.worker import TrainingWorker, WorkerConfig
@@ -218,18 +217,9 @@ class RLTrainer:
         )
         if self._enable_evaluate and evaluator_config:
             self._evaluator = Evaluator.remote(evaluator_config, self._rollout_env_controller)  # type: ignore[attr-defined]
-            self._evaluator_sample_params = SampleParams(
-                top_p=1.0,
-                temperature=0.0,
-                do_sample=False,
-                max_tokens=dataflow_config.sample_params.max_tokens,
-                top_k=1,
-            )
             self._eval_step = evaluator_config.evaluate_step
         else:
-            self._evaluator = None
-            self._evaluator_sample_params = SampleParams()
-            self._eval_step = 0
+            pass
 
         self._global_batch_size = dataflow_config.global_batch_size
         self._rollout_steps = (
@@ -281,10 +271,8 @@ class RLTrainer:
         """
         self.logger.info("start training")
         if self._enable_evaluate and self._evaluator:
-            scores, eval_data_groups = ray.get(
-                self._evaluator.run.remote(return_samples=True, sample_params=self._evaluator_sample_params)
-            )
-            trajectory_save_path = self.exp_dir / "initial_trajectory.jsonl"
+            scores, eval_data_groups = ray.get(self._evaluator.run.remote(return_samples=True))
+            trajectory_save_path = self.exp_dir / "eval_0_trajectory.jsonl"
             self._save_trajectories(eval_data_groups, trajectory_save_path)
             self.logger.info(f"Initial rollout evaluate scores {scores} and start training")
         for rollout_idx in range(1, self._rollout_steps + 1):
@@ -312,7 +300,7 @@ class RLTrainer:
             ray.get(self._rollout_env_controller.onload_kvcache.remote())
             # evaluate
             if self._enable_evaluate and self._evaluator and rollout_idx % self._eval_step == 0:
-                scores = ray.get(self._evaluator.run.remote(sample_params=self._evaluator_sample_params))
+                scores = ray.get(self._evaluator.run.remote())
                 self.logger.info(f"evaluate idx {rollout_idx} scores {scores}")
             self._cur_epoch += 1
 

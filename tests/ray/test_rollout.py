@@ -103,7 +103,7 @@ class TestRollout(unittest.TestCase):
 
     @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
     def test_lmdeploy_generate(self):
-        from xtuner.v1.ray.rollout import SampleParams, LMDeployWorker
+        from xtuner.v1.data_proto.rl_data import SampleParams, LMDeployWorker
         rollout_workers_map = AutoAcceleratorWorkers.from_placement_group(
             LMDeployWorker, self.rollout_cfg, self.pg
         )
@@ -169,7 +169,7 @@ class TestRollout(unittest.TestCase):
 
     @unittest.skip("skip lmdeploy turbomind generate test due to ci environment issue")
     def test_lmdeploy_turbomind_generate(self):
-        from xtuner.v1.ray.rollout import SampleParams, LMDeployWorker
+        from xtuner.v1.data_proto.rl_data import SampleParams, LMDeployWorker
         self.rollout_cfg.extra_rollout_config["lmdeploy_backend"] = "turbomind"
         rollout_workers_map = AutoAcceleratorWorkers.from_placement_group(
             LMDeployWorker, self.rollout_cfg, self.pg

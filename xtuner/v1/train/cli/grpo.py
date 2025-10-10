@@ -8,6 +8,7 @@ from xtuner.v1.config import (
     FSDPConfig,
     LRConfig,
 )
+from xtuner.v1.data_proto.rl_data import SampleParams
 from xtuner.v1.datasets import RLTextTokenizeFnConfig
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.model.dense.qwen3 import Qwen3Dense8BConfig
@@ -16,7 +17,6 @@ from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.ray.dataflow import DataFlowConfig, ReplayBufferConfig
 from xtuner.v1.ray.evaluator import EvaluatorConfig
 from xtuner.v1.ray.judger.controller import JudgerConfig
-from xtuner.v1.ray.rollout import SampleParams
 from xtuner.v1.rl.base import WorkerConfig
 from xtuner.v1.rl.grpo import GRPOLossConfig
 from xtuner.v1.train.rl_trainer import RLTrainer

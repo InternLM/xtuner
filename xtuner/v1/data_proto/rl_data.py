@@ -201,8 +201,6 @@ class SampleParams(BaseModel):
     stops: Annotated[List[str], Parameter(help="List of stop sequences.")] = []
     stop_token_ids: Annotated[List[int], Parameter(help="List of stop token IDs.")] = []
     skip_special_tokens: Annotated[bool, Parameter(help="Whether to skip special tokens.")] = True
-    do_sample: Annotated[bool, Parameter(help="Whether to sample or not.")] = True
-
 
 # 说明： 这里没定义API server情况数据格式，因为直接使用openai server的格式
 class RLRolloutRequestItem(BaseModel):
