@@ -1,6 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import os
-from typing import Any, TypeVar
+from typing import Any, Literal, TypeVar
 
 import xxhash
 from PIL import Image
@@ -69,8 +69,10 @@ def replace_image_token(messages: ChatMessages, chat_template: HybridChatTemplat
         )
 
 
-def load_image(image_path: str):
+def load_image(image_path: str, tcs_loader=None):
     # Load the image using tcs_loader if available, otherwise use PIL
+    if tcs_loader is not None and "s3://" in image_path:
+        return tcs_loader(image_path)
     return Image.open(image_path).convert("RGB")
 
 
@@ -185,3 +187,8 @@ class BaseMLLMTokenizeFnConfig(BaseModel):
         self, tokenizer, tokenizer_hash: str | None = None, anno_name: str = "", **kwargs
     ) -> BaseMLLMTokenizeFunction:
         raise NotImplementedError("The 'build' method must be implemented.")
+
+
+class TCSLoaderConfig(BaseModel):
+    backend: Literal["petrel"] = "petrel"
+    backend_kwargs: dict = {}

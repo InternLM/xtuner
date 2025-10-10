@@ -3,18 +3,17 @@ import io
 import os
 import random
 import re
+from typing import Literal
 
 import cv2
 import imageio
 import numpy as np
 from PIL import Image
 
+from xtuner.v1.utils.oss_utils import get_oss_backend
+
 
 try:
-    if os.environ.get("CEPH_CLIENT", "petrel") == "petrel":
-        from petrel_client.client import Client
-    elif os.environ.get("CEPH_CLIENT", "petrel") == "boto3":
-        from xpuyu.utils.s3_fileio import Client
     from decord import VideoReader
 except ImportError:
     pass
@@ -227,10 +226,16 @@ def read_frames_decord(
 
 
 class TCSLoader:
-    def __init__(self, conf_path, sc_config_key="sensecore"):
-        print(f"[TCSLoader] config_path: {conf_path}")
-        self.client = Client(conf_path)
-        self.sc_config_key = sc_config_key
+    # Singleton instance
+    _instance = None
+
+    def __new__(cls, *args, **kwargs):
+        if not cls._instance:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __init__(self, backend: Literal["petrel"] = "petrel", **kwargs):
+        self.client = get_oss_backend(backend, **kwargs)
 
     def __call__(
         self,

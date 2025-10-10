@@ -20,6 +20,7 @@ from .base_mllm_tokenize_fn import (
     IMAGE_TOKEN_ALIAS,
     BaseMLLMTokenizeFnConfig,
     BaseMLLMTokenizeFunction,
+    TCSLoaderConfig,
     get_image_path,
     load_image,
     replace_image_token,
@@ -100,7 +101,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         max_num_frames: int = 24,
         data_augment: bool = False,
         system_message: str | None = None,
-        tcs_loader: TCSLoader | None = None,
+        tcs_loader_cfg: TCSLoaderConfig | None = None,
         tokenizer_hash: str | None = None,
         max_length: int | None = None,
         hash: str | None = None,
@@ -108,7 +109,10 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
     ):
         assert isinstance(model_cfg, (InternS1BaseConfig, InternVLBaseConfig))
 
-        self.tcs_loader = tcs_loader
+        self.tcs_loader = None
+        if tcs_loader_cfg is not None:
+            self.tcs_loader = TCSLoader(backend=tcs_loader_cfg.backend, **tcs_loader_cfg.backend_kwargs)
+
         self.only_prompt = only_prompt
 
         self.image_size = model_cfg.vision_config.image_size[0]
@@ -249,7 +253,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         images = []
         for i, image_path_ in enumerate(self._image_path):
             image_path_ = get_image_path(image_path_, media_root)
-            image = load_image(image_path_)
+            image = load_image(image_path_, self.tcs_loader)
             image = apply_exif_orientation(image)
 
             if len(self._image_wh_list) >= 1:
@@ -328,15 +332,26 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         # 根据 data_item 生成一个确定性的随机整数
         random_frame_num = generate_random_int_from_dict(data_item, self.min_num_frames, self.max_num_frames)
 
-        assert video_path.endswith((".mp4", ".avi", ".mov", ".webm", ".mkv", ".ts", ".rmvb", ".flv"))
-        image_list = read_frames_decord(
-            video_path,
-            num_frames=self.max_num_frames,
-            min_num_frames=self.min_num_frames,
-            sample="rand",
-            clip=data_item.get("clip", None),
-            random_frame_num=random_frame_num,
-        )
+        if self.tcs_loader is not None:
+            image_list = self.tcs_loader(
+                video_path,
+                image_type="video",
+                max_num_frames=self.max_num_frames,
+                min_num_frames=self.min_num_frames,
+                sample="rand",
+                clip=data_item.get("clip", None),
+                random_frame_num=random_frame_num,
+            )
+        else:
+            assert video_path.endswith((".mp4", ".avi", ".mov", ".webm", ".mkv", ".ts", ".rmvb", ".flv"))
+            image_list = read_frames_decord(
+                video_path,
+                num_frames=self.max_num_frames,
+                min_num_frames=self.min_num_frames,
+                sample="rand",
+                clip=data_item.get("clip", None),
+                random_frame_num=random_frame_num,
+            )
 
         transform = self._get_transform()
         pixel_values = [transform(image) for image in image_list]
@@ -376,6 +391,7 @@ class InternS1VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
     min_num_frames: int = 4
     max_num_frames: int = 24
     data_augment: bool = False
+    tcs_loader_cfg: TCSLoaderConfig | None = None
 
     def build(
         self, tokenizer, tokenizer_hash: str | None = None, anno_name: str = "", **kwargs
@@ -392,5 +408,6 @@ class InternS1VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
             system_message=self.system_message,
             min_num_frames=self.min_num_frames,
             max_num_frames=self.max_num_frames,
+            tcs_loader_cfg=self.tcs_loader_cfg,
             hash=self.hash,
         )
