@@ -58,8 +58,8 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         self.image_processor = AutoProcessor.from_pretrained(processor_path).image_processor
         self.video_max_total_pixels = video_max_total_pixels
         self.video_min_total_pixels = video_min_total_pixels
-        # default min_pixels 3136=56x56=28x28x2x2=56x56 pix 一张图片输出给 llm 会占 4 个 token
-        # default max_pixels 12845056=28x28x128x128=3584x3584 一张图片输出给 llm 会占 16384 个 token
+        # default min_pixels 4096=4x32x32=4x16x16x2x2 pix 一张图片 patch size=16x16，然后 merge size=2x2, 最终输出给 llm 占 4 个 token
+        # default max_pixels 16777216=16384x32x32 pix 一张图片输出给 llm 会占 16384 个 token
         if min_pixels is not None:
             self.image_processor.min_pixels = min_pixels
         if max_pixels is not None:
