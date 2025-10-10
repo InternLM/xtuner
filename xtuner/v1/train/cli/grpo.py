@@ -101,6 +101,7 @@ def main(args):
         collator="fake_collator",
         pack_level="none",
     )
+    # tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True)
     if eval_dataset_cfg:
         evaluator_cfg = EvaluatorConfig(
             dataset_cfg=eval_dataset_cfg,

@@ -5,7 +5,7 @@ import time
 import parametrize
 import torch
 import torch.distributed as dist
-from torch.testing._internal.common_distributed import DistributedTestBase
+from xtuner._testing import DeterministicDDPTestCase
 from transformers import AutoTokenizer
 
 from xtuner.v1.model.moe.moe import SequenceContext
@@ -25,7 +25,7 @@ QWEN3_PATH = os.environ["QWEN3_PATH"]
 DEVICE = get_device()
 
 
-class TestDenseEngine(DistributedTestBase):
+class TestDenseEngine(DeterministicDDPTestCase):
     @parametrize.parametrize(
         "device,tp_size,sp_size",
         [

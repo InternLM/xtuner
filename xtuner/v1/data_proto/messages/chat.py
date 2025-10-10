@@ -25,6 +25,7 @@ class TextContentItem(BaseModel):
 class ImageURL(BaseModel):
     url: str
     detail: Optional[Literal["auto", "low", "high"]] = None
+    image_wh: Optional[List[int]] = None  # width, height
 
 
 class ImageContentItem(BaseModel):
@@ -35,9 +36,15 @@ class ImageContentItem(BaseModel):
         return ""
 
 
+class VideoURL(BaseModel):
+    url: str
+    detail: Optional[Literal["auto", "low", "high"]] = None
+    video_length: Optional[int] = None  # duration or frame count
+
+
 class VideoContentItem(BaseModel):
     type: Literal["video_url"] = "video_url"
-    video_url: ImageURL
+    video_url: VideoURL
 
     def apply_chat_template(self, *args, **kwargs) -> str:
         return ""

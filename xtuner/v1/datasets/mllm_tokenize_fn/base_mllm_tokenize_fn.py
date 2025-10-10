@@ -19,8 +19,9 @@ logger = get_logger()
 IMAGE_TOKEN_ALIAS = "XTUNER-ALIAS-ALIAS-XTUNER-2025"
 
 
-def collect_image_video_paths(messages: list[dict]):
+def collect_image_video_paths_and_extra(messages: list[dict]):
     image_paths = []
+    image_wh_list = []
     video_paths = []
     for msg in messages:
         if msg["role"] == "user":
@@ -29,9 +30,20 @@ def collect_image_video_paths(messages: list[dict]):
                 for c in content:
                     if c["type"] == "image_url":
                         image_paths.append(c["image_url"]["url"])
+                        if "image_wh" in c["image_url"]:
+                            image_wh = c["image_url"]["image_wh"]
+                            if isinstance(image_wh[0], (list, tuple)):
+                                assert len(image_wh) == 1, (
+                                    f"Only one image size is supported for each image. but got {image_wh}"
+                                )
+                                image_wh = image_wh[0]
+                            image_wh_list.append(image_wh)
+                            assert len(image_wh) == 2, f"image_wh should be [width, height], but got {image_wh}"
                     if c["type"] == "video_url":
                         video_paths.append(c["video_url"]["url"])
-    return image_paths, video_paths
+    if len(image_wh_list) > 0:
+        assert len(image_wh_list) == len(image_paths), "If image_wh is provided, it should match the number of images."
+    return image_paths, video_paths, {"image_wh": image_wh_list}
 
 
 def replace_image_token(messages: ChatMessages, chat_template: HybridChatTemplate, num_image_token_list: list[int]):
@@ -90,6 +102,10 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
         self._hash_str = ""
         self.chat_template = chat_template
 
+        self._image_path: list[str] = []
+        self._video_path: list[str] = []
+        self._image_wh_list: list[list] = []
+
     def calc_num_tokens_multi_modal_get_item(self, data_item: dict) -> CacheItem:
         raise NotImplementedError
 
@@ -123,7 +139,8 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
         return input_ids, labels
 
     def __call__(self, item: dict, media_root: str = "", **kwargs) -> T | CacheItem:  # type: ignore[override]
-        self._image_path, self._video_path = collect_image_video_paths(item["messages"])
+        self._image_path, self._video_path, extra_info = collect_image_video_paths_and_extra(item["messages"])
+        self._image_wh_list = extra_info["image_wh"]
         if len(self._image_path) > 0:
             if self.state == "cache":
                 ret = self.calc_num_tokens_multi_modal_get_item(item)

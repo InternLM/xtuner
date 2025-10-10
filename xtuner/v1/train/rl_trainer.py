@@ -1,4 +1,5 @@
 import json
+import os
 import random
 import sys
 import time
@@ -429,6 +430,7 @@ class RLTrainer:
 
     def _set_deterministic(self):
         if XTUNER_DETERMINISTIC:
+            os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
             torch.use_deterministic_algorithms(True, warn_only=True)
 
     def _set_random_seed(self, seed: int):

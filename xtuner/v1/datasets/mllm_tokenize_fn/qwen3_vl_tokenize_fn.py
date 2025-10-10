@@ -80,8 +80,6 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
 
         self.image_token_id = tokenizer.convert_tokens_to_ids(self.chat_template.image_context_token)
 
-        self._image_path: list[str] = []
-        self._video_path: list[str] = []
         # 必须要最后调用
         super().__init__(tokenizer, self.chat_template, max_length, tokenizer_hash, hash)
 
@@ -144,11 +142,8 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
 
     def calc_num_tokens_multi_modal_get_item(self, data_item: dict) -> CacheItem:
         try:
-            assert "image_wh" in data_item, "image must have `hw` attribute when packing data"
-            image_size = data_item["image_wh"]  # eta: [[100,120]] or [[100,120],[200,240]]
-            if not isinstance(image_size[0], list):
-                image_size = [image_size]
-            for size in image_size:
+            assert len(self._image_wh_list) >= 1, "image must have `hw` attribute when packing data"
+            for size in self._image_wh_list:
                 if size[0] == 0 or size[1] == 0:
                     # Image is corrupted, flag=0, and this data will be removed later
                     return {"num_tokens": 0}  # type: ignore
@@ -157,7 +152,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             return {"num_tokens": 0}  # type: ignore
 
         media_grid_thw = []
-        for size in image_size:
+        for size in self._image_wh_list:
             media_grid_thw.append(smart_get_thw(size, self.image_processor))
         media_grid_thw = torch.tensor(media_grid_thw, dtype=torch.int).reshape(-1, 3)  # type: ignore
         sum_media_grid_thw = media_grid_thw.prod(dim=1) // self.merge_length  # type: ignore
@@ -182,14 +177,6 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         return {"num_tokens": len(input_ids)}
 
     def multi_modal_get_item(self, data_item: dict, media_root: str = "") -> QwenVL3DataItem:
-        image_sizes = data_item.get("image_wh", None)
-        if image_sizes:
-            if not isinstance(image_sizes[0], list):
-                image_sizes = [image_sizes]
-            if len(image_sizes) != len(self._image_path):
-                logger.warning(f"Image sizes {image_sizes} do not match image paths {self._image_path}")
-                raise RuntimeError("Image sizes do not match image paths, please check the annotation file.")
-
         results = [self.process_image_unified(file, media_root) for file in self._image_path]
         image, grid_thw = zip(*results)
 
