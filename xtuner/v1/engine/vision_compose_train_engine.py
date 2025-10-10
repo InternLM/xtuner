@@ -108,7 +108,6 @@ class VisionComposeTrainEngine(TrainEngine):
         model.vision_tower.fully_shard(self.fsdp_cfg, self.vision_float8_handler)
         model.multi_modal_projector.fully_shard(self.fsdp_cfg, self.projector_float8_handler)
         model = model.fully_shard(self.fsdp_cfg)
-        model.to_empty(device=model.device)  # type: ignore
 
         if dist.get_rank() == 0:
             logger.info(model)

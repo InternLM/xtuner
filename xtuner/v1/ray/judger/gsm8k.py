@@ -81,6 +81,7 @@ def compute_reward(response, label, extra_info):
 class GSM8KJudgerConfig(BaseModel):
     """Configuration for the GSM8K judger."""
 
+    judger_name: str = "gsm8k_judger"
     extra_info: dict = {"score": 1, "format_score": 0}
 
     def build(self):
@@ -89,4 +90,4 @@ class GSM8KJudgerConfig(BaseModel):
         Returns:
             NativeJudger: An instance of the NativeJudger configured for GSM8K.
         """
-        return NativeJudger(reward_func=compute_reward, extra_info=self.extra_info)
+        return NativeJudger(judger_name=self.judger_name, reward_func=compute_reward, extra_info=self.extra_info)

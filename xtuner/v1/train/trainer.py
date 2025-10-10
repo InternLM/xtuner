@@ -33,6 +33,7 @@ from xtuner.v1.engine.vision_compose_train_engine import VisionComposeConfigProt
 from xtuner.v1.loss import CELossConfig
 from xtuner.v1.loss.ce_loss import CELossContextInputItem
 from xtuner.v1.model.base import ModelItem, TransformerConfig
+from xtuner.v1.patch import patch_default_save_plan
 from xtuner.v1.profiler import profiling_memory, profiling_time
 from xtuner.v1.utils import (
     XTUNER_DETERMINISTIC,
@@ -135,10 +136,11 @@ class TrainerConfig(BaseModel):
     sp_size: int = 1
     total_step: int | None = None
     total_epoch: int | None = None
-    resume: ResumeConfig | None = None
+    resume_cfg: ResumeConfig | None = None
     strict_load: bool = True
     checkpoint_interval: int | None = -1
     checkpoint_maxkeep: int | None = -1
+    skip_checkpoint_validation: bool = False  # Suggest enabled if fsdp_size is larger than 512
     hf_interval: int | None = None
     hf_max_keep: int | None = None
     exp_tracker: Literal["tensorboard", "jsonl"] = "jsonl"
@@ -234,6 +236,7 @@ class Trainer:
         strict_load: bool = True,
         checkpoint_interval: int | None = -1,
         checkpoint_maxkeep: int | None = -1,
+        skip_checkpoint_validation: bool = False,  # Suggest enabled if fsdp_size is larger than 512
         hf_interval: int | None = None,
         hf_max_keep: int | None = None,
         exp_tracker: Literal["tensorboard", "jsonl"] = "jsonl",
@@ -256,6 +259,8 @@ class Trainer:
         self._trainer_cfg = trainer_cfg
 
         self._micro_batch_size: int | None = None
+        if skip_checkpoint_validation:
+            patch_default_save_plan()
 
         self._profile_step = profile_step
         self._profile_time = profile_time
@@ -400,10 +405,11 @@ class Trainer:
             sp_size=config.sp_size,
             total_step=config.total_step,
             total_epoch=config.total_epoch,
-            resume_cfg=config.resume,
+            resume_cfg=config.resume_cfg,
             strict_load=config.strict_load,
             checkpoint_interval=config.checkpoint_interval,
             checkpoint_maxkeep=config.checkpoint_maxkeep,
+            skip_checkpoint_validation=config.skip_checkpoint_validation,
             hf_interval=config.hf_interval,
             hf_max_keep=config.hf_max_keep,
             exp_tracker=config.exp_tracker,
