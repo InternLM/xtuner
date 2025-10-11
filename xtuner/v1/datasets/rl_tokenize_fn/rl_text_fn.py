@@ -3,7 +3,8 @@
 from pydantic import BaseModel, ConfigDict
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
-from xtuner.v1.datasets.data_item import CacheItem, RLTextDataItem
+from xtuner.v1.data_proto.rl_data import RLDatasetItem
+from xtuner.v1.datasets.data_item import CacheItem
 from xtuner.v1.utils import get_logger
 
 from ..utils import CachableTokenizeFunction
@@ -13,7 +14,7 @@ logger = get_logger()
 
 
 # https://github.com/volcengine/verl/blob/main/verl/utils/dataset/rl_dataset.py
-class RLTextTokenizeFn(CachableTokenizeFunction[RLTextDataItem]):
+class RLTextTokenizeFn(CachableTokenizeFunction[RLDatasetItem]):
     def __init__(self, tokenizer: PreTrainedTokenizer, max_length: int | None = None, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.tokenizer = (
@@ -23,7 +24,7 @@ class RLTextTokenizeFn(CachableTokenizeFunction[RLTextDataItem]):
         )
         self.max_length = max_length
 
-    def __call__(self, item: dict, **kwargs) -> RLTextDataItem | CacheItem:
+    def __call__(self, item: dict, **kwargs) -> RLDatasetItem | CacheItem:
         """example:
         item = {
                 "data_source": data_source,
@@ -56,7 +57,6 @@ class RLTextTokenizeFn(CachableTokenizeFunction[RLTextDataItem]):
         extra_info["raw_prompt"] = raw_prompt
 
         rl_out_data = {
-            # "input_ids": input_ids,
             "messages": messages,
             "num_tokens": num_tokens,
             "reward_model": item["reward_model"],

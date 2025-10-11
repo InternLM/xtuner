@@ -59,10 +59,6 @@ class NoAuxRouter(nn.Module, RouterProtocol):
         )
 
     def forward(self, logits) -> RouterResults:
-        if os.getenv("XTUNER_ROUTER_DEBUG") == "true":
-            noise = torch.randn_like(logits) * 50
-            logits = logits + noise
-
         if self.scoring_func == "sigmoid":
             scores = logits.sigmoid()
         else:
@@ -70,6 +66,10 @@ class NoAuxRouter(nn.Module, RouterProtocol):
             raise NotImplementedError(f"insupportable scoring function for MoE gating: {self.scoring_func}")
 
         scores_for_choice = scores + self.e_score_correction_bias.unsqueeze(0)
+
+        if os.getenv("XTUNER_ROUTER_DEBUG") == "true":
+            noise = torch.randn_like(scores) * 50
+            scores_for_choice = scores + noise
 
         # select top-k experts
         # (only applicable when ep_size >= 64. when ep_size=32 (4 nodes), there is no need to employ this strategy)

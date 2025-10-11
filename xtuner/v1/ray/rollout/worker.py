@@ -9,82 +9,13 @@ from typing import Any, Callable, Dict, List, Optional, Union
 import httpx
 import ray
 import requests  # type: ignore[import-untyped]
-from cyclopts import Parameter
-from pydantic import BaseModel, Field
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
-from typing_extensions import Annotated
 
+from xtuner.v1.data_proto.rl_data import RLRolloutResponseItem
 from xtuner.v1.ray import find_master_addr_and_port
 from xtuner.v1.ray.accelerator import AutoAcceleratorWorkers, SingleAcceleratorWorker
 from xtuner.v1.ray.config import RolloutConfig
 from xtuner.v1.utils import get_logger
-
-
-class SampleParams(BaseModel):
-    """Sampling parameters configuration for text generation in XTuner.
-
-    Args:
-        n (int): Number of samples to generate for each input. Defaults to 1.
-        top_k (int): Number of highest probability vocabulary tokens to keep for
-            top-k filtering. Set to 0 to disable. Defaults to 0.
-        top_p (float): Cumulative probability threshold for nucleus (top-p) sampling.
-            Defaults to 1.0.
-        temperature (float): Sampling temperature to control randomness. Lower values
-            make output more deterministic. Defaults to 1.0.
-        repetition_penalty (float): Penalty applied to tokens that have already
-            appeared in the sequence. Defaults to 1.0 (no penalty).
-        presence_penalty (float): Penalty applied based on token presence in the
-            generated text. Defaults to 0.0.
-        frequency_penalty (float): Penalty applied based on token frequency in the
-            generated text. Defaults to 0.0.
-        min_tokens (int): Minimum number of tokens to generate before considering
-            stop conditions. Defaults to 0.
-        max_tokens (int): Maximum number of tokens to generate. Defaults to 2048.
-        stops (List[str]): List of string sequences that will stop generation when
-            encountered. Defaults to empty list.
-        stop_token_ids (List[int]): List of token IDs that will stop generation when
-            encountered. Defaults to empty list.
-        logprobs (int): Number of log probabilities to return for each token.
-            Set to 0 to disable. Defaults to 0.
-        skip_special_tokens (bool): Whether to skip special tokens during decoding.
-            Defaults to True.
-        do_sample (bool): Whether to use sampling (True) or greedy decoding (False).
-            Defaults to True.
-    """
-
-    n: Annotated[int, Parameter(help="Number of samples to generate.")] = 1
-    top_k: Annotated[
-        int, Parameter(help="The number of highest probability vocabulary tokens to keep for top-k-filtering.")
-    ] = 0
-    top_p: Annotated[float, Parameter(help="The cumulative probability for nucleus sampling.")] = 1.0
-    temperature: Annotated[float, Parameter(help="The value used to module the next token probabilities.")] = 1.0
-    repetition_penalty: Annotated[float, Parameter(help="The parameter for repetition penalty.")] = 1.0
-    presence_penalty: Annotated[float, Parameter(help="The parameter for presence penalty.")] = 0.0
-    frequency_penalty: Annotated[float, Parameter(help="The parameter for frequency penalty.")] = 0.0
-    min_tokens: Annotated[int, Parameter(help="Minimum number of tokens to generate.")] = 0
-    max_tokens: Annotated[int, Parameter(help="Maximum number of tokens to generate.")] = 2048
-    stops: Annotated[List[str], Parameter(help="List of stop sequences.")] = []
-    stop_token_ids: Annotated[List[int], Parameter(help="List of stop token IDs.")] = []
-    logprobs: Annotated[int, Parameter(help="Number of log probabilities to return.")] = 0
-    skip_special_tokens: Annotated[bool, Parameter(help="Whether to skip special tokens.")] = True
-    do_sample: Annotated[bool, Parameter(help="Whether to sample or not.")] = True
-
-
-class RolloutRequest(BaseModel):
-    messages: Union[str, List[Dict[str, Any]]]
-    tools: List = Field(default_factory=list)
-    tool_choice: str = "auto"
-    sample_params: SampleParams = Field(default_factory=SampleParams)
-    extra_params: Dict[str, Any] = Field(default_factory=dict)
-
-
-class RolloutResponse(BaseModel):
-    response: str = ""
-    logprobs: float = 0.0
-    finish_reason: str = ""
-    reasoning_content: str = ""
-    usage: dict = Field(default_factory=dict)
-    tool_calls: List[str] = Field(default_factory=list)
 
 
 class RolloutWorker(SingleAcceleratorWorker):
@@ -331,9 +262,13 @@ class RolloutWorker(SingleAcceleratorWorker):
         sample_params: dict,
         extra_params: dict,
         format: str,
-    ) -> RolloutResponse:
+    ) -> RLRolloutResponseItem:
         uid = str(uuid.uuid4())
         response = None
+        failed_rollout_response = RLRolloutResponseItem(
+            response="",
+            finish_reason="failed",
+        )
         try:
             if format == "openai":
                 openai_prompts, openai_tools = prompts, tools
@@ -348,17 +283,14 @@ class RolloutWorker(SingleAcceleratorWorker):
                 extra_params=extra_params,
             )
             self.logger.debug(f" +++ send request {uid} to worker: {self.rank}")
-
-            failed_rollout_response = RolloutResponse(
-                response="",
-                finish_reason="failed",
-            )
             if response.status_code != 200:
                 error_body = await response.atext()
                 self.logger.error(f"Request {uid} failed with status {response.status_code}: {error_body}")
                 return failed_rollout_response
 
             last_trajectory = ""
+            last_token_ids = []
+            last_logprobs = []
             finish_reason = ""
 
             async for chunk in response.aiter_lines():
@@ -377,12 +309,20 @@ class RolloutWorker(SingleAcceleratorWorker):
                     chunk_data = json.loads(chunk_data_str)
                     delta_content = chunk_data["choices"][0]["delta"].get("content")
                     last_trajectory = last_trajectory + delta_content if delta_content else last_trajectory
+                    last_token_id = chunk_data["choices"][0]["delta"].get("gen_tokens")
+                    if last_token_id is not None:
+                        last_token_ids.extend(last_token_id)
                     finish_reason = chunk_data["choices"][0].get("finish_reason")
-
+                    logprobs_content = chunk_data["choices"][0]["logprobs"]
+                    if logprobs_content is not None:
+                        for content_item in logprobs_content["content"]:
+                            last_logprobs.append(content_item["logprob"])
                     # todo(@duanyanhui): remove appending stop tokens manually after lmdeploy support return stop_token_ids.
                     if finish_reason == "stop":
                         assert len(sample_params["stops"]) == 1
                         last_trajectory += sample_params["stops"][0]
+                        if len(last_token_ids) > 0:
+                            last_token_ids.append(sample_params["stop_token_ids"][0])
 
                 except json.JSONDecodeError as e:
                     self.logger.error(f"JSON decode error for chunk in request {uid}: {chunk}, error: {e}")
@@ -394,10 +334,13 @@ class RolloutWorker(SingleAcceleratorWorker):
             assert finish_reason in ["stop", "length", "tool_call", "paused", "failed"], (
                 f"Unexpected finish_reason: {finish_reason}"
             )
-
-            rollout_response = RolloutResponse(
+            self.logger.debug(f" --- request {uid} finished with reason: {finish_reason}")
+            rollout_response = RLRolloutResponseItem(
                 response=last_trajectory,
+                response_ids=last_token_ids if len(last_token_ids) > 0 else None,
+                num_return_tokens=len(last_token_ids),
                 finish_reason=finish_reason,
+                logprobs=last_logprobs,
             )
             return rollout_response
 
@@ -420,7 +363,7 @@ class RolloutWorker(SingleAcceleratorWorker):
         sample_params: dict = dict(),
         extra_params: dict = dict(),
         format: str = "openai",
-    ) -> RolloutResponse:
+    ) -> RLRolloutResponseItem:
         """Public method to initiate a rollout.
 
         Args:

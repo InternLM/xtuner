@@ -1,12 +1,12 @@
 import asyncio
-from typing import Dict, List
+from typing import List
 
 import ray
 from cyclopts import Parameter
 from pydantic import BaseModel
 from typing_extensions import Annotated
 
-from xtuner.v1.datasets.data_item import RLTextDataItem
+from xtuner.v1.data_proto.rl_data import RLDataFlowItem, RLJudgerResponseItem
 from xtuner.v1.utils import get_logger
 
 from .native import NativeJudger
@@ -62,9 +62,9 @@ class JudgerConfig(BaseModel):
         bool, Parameter(help="Whether to enable batch reward calculation for multiple samples at once.")
     ] = False
     reward_judger_configs: Annotated[
-        Dict[str, BaseModel],
+        List[BaseModel],
         Parameter(help="A custom Python function for computing reward given model output and label."),
-    ] = {}
+    ] = []
 
 
 @ray.remote
@@ -83,17 +83,17 @@ class JudgerController:
         # note: placement_group is used to control the placement of Ray tasks.
         # It will be implemented when gpu judger is needed
         self.placement_group = placement_group
-        self.reward_judger = {}
-        for name, config in self.judger_config.reward_judger_configs.items():
-            self.reward_judger[name] = config.build()
+        self.reward_judger = []
+        for config in self.judger_config.reward_judger_configs:
+            self.reward_judger.append(config.build())
+
         self.logger = get_logger()
 
     async def _call_custom_reward_judger(
         self,
-        active_judgers: Dict[str, NativeJudger],
-        responses: List[str],
-        labels: List[str],
-    ) -> Dict[str, List[float]]:
+        active_judgers: List[NativeJudger],
+        group_data_item: List[RLDataFlowItem],
+    ) -> List[RLJudgerResponseItem]:
         """Call custom reward judgers to calculate rewards.
 
         Args:
@@ -106,36 +106,44 @@ class JudgerController:
             Dict[str, List[float]]: A dictionary where keys are judger names
                 and values are lists of calculated rewards for each sample.
         """
-        group_size = len(responses)
+        results = []
         if self.judger_config.enable_batch_reward:
-            tasks = {name: judger.judge(responses, labels) for name, judger in active_judgers.items()}
-            results = await asyncio.gather(*tasks.values())
-            return dict(zip(tasks.keys(), [results] * group_size))
-
+            tasks = [judger.judge(group_data_item) for judger in active_judgers]
+            results = await asyncio.gather(*tasks)
         else:
             tasks_per_sample = [
-                [(name, judger.judge(responses[i], labels[i])) for name, judger in active_judgers.items()]
-                for i in range(len(responses))
+                [(judger.judge([group_data_item[i]])) for judger in active_judgers]
+                for i in range(len(group_data_item))
             ]
 
             flat_tasks_with_names = [task for sample_tasks in tasks_per_sample for task in sample_tasks]
-            coroutines = [item[1] for item in flat_tasks_with_names]
+            results = await asyncio.gather(*flat_tasks_with_names)
 
-            flat_results = await asyncio.gather(*coroutines)
-            final_rewards: Dict[str, List[float]] = {
-                name: [] for name in active_judgers
-            }  # name: [sample1, sample2, ...]
-            active_reward_size = len(active_judgers)
-            for name_index in range(active_reward_size):
-                reward_list = []
-                for index in range(group_size):
-                    reward_list.append(flat_results[index * active_reward_size + name_index])
-                final_rewards[list(active_judgers.keys())[name_index]] = reward_list
-            return final_rewards
+        import collections.abc
+
+        def flatten(results):
+            for item in results:
+                if isinstance(item, collections.abc.Iterable) and not isinstance(item, (str, bytes, dict)):
+                    yield from item
+                else:
+                    yield item
+
+        flat_results = list(flatten(results))
+        assert len(flat_results) == len(group_data_item) * len(active_judgers), (
+            f"Expected {len(group_data_item) * len(active_judgers)} results, but got {len(flat_results)}"
+        )
+        # 将不同Judger的RLJudgerResponseItem进行组装
+        uid_list = [item.uid.observation_id for item in group_data_item]
+        judger_response_items_dict = {uid: RLJudgerResponseItem(uid=uid) for uid in uid_list}
+        for result in flat_results:
+            return_uid = result.uid
+            judger_response_items_dict[return_uid].reward.update(result.reward)
+            judger_response_items_dict[return_uid].extra_info.update(result.extra_info)
+        return list(judger_response_items_dict.values())
 
     async def run(
-        self, group_data_item: RLTextDataItem | List[RLTextDataItem]
-    ) -> RLTextDataItem | List[RLTextDataItem]:
+        self, group_data_item: RLDataFlowItem | List[RLDataFlowItem]
+    ) -> RLJudgerResponseItem | List[RLJudgerResponseItem]:
         """Run the judging process for a group of data items.
 
         Args:
@@ -145,32 +153,28 @@ class JudgerController:
         Returns:
             List[float]: A list of final calculated rewards for each data item.
         """
-        if not group_data_item:
-            return []
-        input_list = True
-        if not isinstance(group_data_item, List):
+        input_type_is_list = True
+        if not isinstance(group_data_item, list):
+            input_type_is_list = False
             group_data_item = [group_data_item]
-            input_list = False
-        batch_responses = [item["response_str"] or "" for item in group_data_item]
-        batch_labels = [item["reward_model"]["ground_truth"] for item in group_data_item]
-        data_source = group_data_item[0]["data_source"]
-        assert data_source, "No data source found for the given datsetes"
+        # Assume all data have the same data_source
+        data_source = group_data_item[0].data.data_source
+        assert data_source, "No data source found for the given datasets"
 
-        active_reward_judger = {name: func for name, func in self.reward_judger.items() if name in data_source}
-        assert active_reward_judger, f"No active reward judger found for the given data source {data_source}."
+        judger_names = [judger.judger_name for judger in self.reward_judger]
+        active_reward_judger = [func for func in self.reward_judger if func.judger_name in data_source]
+        assert active_reward_judger, (
+            f"No active reward judger in {judger_names} found for the given data source {data_source}."
+        )
 
-        rewards_by_name = await self._call_custom_reward_judger(active_reward_judger, batch_responses, batch_labels)
-        num_samples = len(group_data_item)
-        final_rewards = [0.0] * num_samples
+        judger_response_item = await self._call_custom_reward_judger(active_reward_judger, group_data_item)
+        for item in judger_response_item:
+            final_reward = 0
+            for name, weight in data_source.items():
+                if name in item.reward:
+                    final_reward += item.reward[name] * weight
+            item.reward["weighted_reward"] = final_reward
 
-        for i in range(num_samples):
-            for name, scores in rewards_by_name.items():
-                weight = data_source.get(name, 1.0)
-                final_rewards[i] += scores[i] * weight
-
-        assert len(final_rewards) == num_samples
-        for i, item in enumerate(group_data_item):
-            item["reward"] = final_rewards[i]
-        if not input_list:
-            return group_data_item[0]
-        return group_data_item
+        if input_type_is_list is False:
+            return judger_response_item[0]
+        return judger_response_item

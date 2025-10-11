@@ -322,16 +322,16 @@ class RLTrainer:
         data_batches = []
         for group in data_groups:
             prompt = self.tokenizer.apply_chat_template(
-                group[0]["messages"], add_generation_prompt=True, tokenize=False
+                group[0].data.messages, add_generation_prompt=True, tokenize=False
             )
             prompt_ids = self.tokenizer(prompt, return_tensors="pt")["input_ids"].flatten().tolist()
-            rewards = [data["reward"] for data in group]
+            rewards = [data.env.judger.reward["weighted_reward"] for data in group]
             rewards = torch.tensor(rewards, dtype=torch.float32)
             advantages = (rewards - rewards.mean(0)) / (rewards.std(0) + 1e-8)
 
             prompt_repeat_k = len(group)
             for i in range(prompt_repeat_k):
-                item = group[i]["response_str"]
+                item = group[i].env.rollout.response
                 response_ids = self.tokenizer(item, return_tensors="pt")["input_ids"].flatten().tolist()
                 input_ids = prompt_ids + response_ids
                 shifted_labels = [-100] * (len(prompt_ids) - 1) + response_ids + [-100]
@@ -356,12 +356,12 @@ class RLTrainer:
                 response_list = []
                 reward_list = []
                 for data in group:
-                    response_list.append(data["response_str"])
-                    reward_list.append(data["reward"])
+                    response_list.append(data.env.rollout.response)
+                    reward_list.append(data.env.judger.reward["weighted_reward"])
                 item = {
-                    "messages": group[0]["messages"],
+                    "messages": group[0].data.messages,
                     "response": response_list,
-                    "label": group[0]["reward_model"]["ground_truth"],
+                    "label": group[0].data.reward_model["ground_truth"],
                     "reward": reward_list,
                 }
                 json.dump(item, f)

@@ -343,9 +343,7 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
             offsets = self.count_offsets()
             num_tokens = None
             if tokenize_fn is not None:
-                tokenize_fn.set_state("cache")
                 num_tokens = self.count_tokens(offsets)
-                tokenize_fn.set_state("runtime")
 
         # offset starts from 0 and endwith `file_size`
         # The size of offsets is `num_samples + 1`
@@ -442,6 +440,8 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
         return {"num_tokens": tokenized["num_tokens"]}
 
     def count_tokens(self, offsets, cache_dir=None):
+        self.tokenize_fn.set_state("cache")
+
         num_samples = len(offsets)
 
         if dist.is_initialized():
@@ -502,6 +502,7 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
             save_path = os.path.join(cache_dir, "num_tokens.npy")
             np.save(save_path, num_tokens)
 
+        self.tokenize_fn.set_state("runtime")
         return num_tokens
 
     def __len__(self):

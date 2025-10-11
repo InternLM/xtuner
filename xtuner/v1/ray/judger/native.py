@@ -3,6 +3,9 @@ from typing import Any, Callable, List, Optional
 
 import httpx
 
+from xtuner.v1.data_proto.rl_data import RLDataFlowItem, RLJudgerResponseItem
+from xtuner.v1.utils import get_logger
+
 
 class NativeJudger:
     """Base class for judgers, providing a standard interface for executing a
@@ -16,6 +19,7 @@ class NativeJudger:
 
     def __init__(
         self,
+        judger_name: str = "native_judger",
         reward_func: Optional[Callable] = None,
         remote_url: Optional[str] = None,
         preprocess_func: Optional[Callable] = None,
@@ -47,7 +51,7 @@ class NativeJudger:
         """
         if (reward_func is None and remote_url is None) or (reward_func is not None and remote_url is not None):
             raise ValueError("Exactly one of 'reward_func' or 'remote_url' must be provided.")
-
+        self.judger_name = judger_name
         self.extra_info = extra_info
         self.reward_func = reward_func
         self.remote_url = remote_url
@@ -63,20 +67,31 @@ class NativeJudger:
         elif self.remote_url:
             self.http_client = httpx.AsyncClient(timeout=request_timeout)
             self.execute_func = self._remote_executor
+        self.logger = get_logger(__name__)
 
-    def _default_preprocess(self, responses: str | List[str], labels: str | List[str]) -> Any:
+    def _default_preprocess(self, data_item: List[RLDataFlowItem], extra_info: dict) -> Any:
         """Default preprocessing function.
 
         Args:
-            responses (str | List[str]): The model's response(s).
-            labels (str | List[str]): The ground-truth label(s).
+            data_item (RLDataFlowItem | List[RLDataFlowItem]): The data item(s) to preprocess.
 
         Returns:
             Any: A dictionary containing the responses, labels, and extra info.
         """
-        return {"response": responses, "label": labels, "extra_info": self.extra_info}
 
-    def _default_postprocess(self, result: Any) -> Any:
+        assert len(data_item) == 1, "Default preprocess only supports single data item."
+        # TODO: Support batch reward calculation via API server
+        response = data_item[0].env.rollout.response
+        assert data_item[0].data.reward_model is not None
+        label = data_item[0].data.reward_model["ground_truth"]
+        return {
+            "response": response,
+            "label": label,
+            "extra_info": extra_info,
+        }
+
+    def _default_postprocess(self, result: Any) -> List[RLJudgerResponseItem]:
+        ## 将结果包装成 RLJudgerResponseItem
         """Default postprocessing function.
 
         Args:
@@ -85,9 +100,12 @@ class NativeJudger:
         Returns:
             Any: The result, unchanged.
         """
-        return result
+        if not isinstance(result, list):
+            result = [result]
+        judger_response_item = [RLJudgerResponseItem(reward={self.judger_name: result[i]}) for i in range(len(result))]
+        return judger_response_item
 
-    async def _local_executor(self, responses: str | List[str], labels: str | List[str]) -> Any:
+    async def _local_executor(self, data_item: List[RLDataFlowItem]) -> List[RLJudgerResponseItem]:
         """Executes the reward function locally.
 
         Args:
@@ -98,14 +116,20 @@ class NativeJudger:
             Any: The postprocessed result of the reward function.
         """
         assert self.reward_func is not None, "reward_func cannot be None for local execution."
-        kwargs = self.preprocess_func(responses, labels)
+        # 记录每个judger请求的uid, 方便后续结果合并
+        uid_list = [item.uid.observation_id for item in data_item]
+        kwargs = self.preprocess_func(data_item, self.extra_info)
         if inspect.iscoroutinefunction(self.reward_func):
             result = await self.reward_func(**kwargs)
         else:
             result = self.reward_func(**kwargs)
-        return self.postprocess_func(result)
 
-    async def _remote_executor(self, responses: str | List[str], labels: str | List[str]) -> Any:
+        result = self.postprocess_func(result)
+        for i in range(len(result)):
+            result[i].uid = uid_list[i]
+        return result
+
+    async def _remote_executor(self, data_item: List[RLDataFlowItem]) -> List[RLJudgerResponseItem]:
         """Executes the reward function by calling a remote service.
 
         Args:
@@ -119,17 +143,19 @@ class NativeJudger:
         assert self.remote_url is not None and self.http_client is not None, (
             "remote_url cannot be None for remote execution."
         )
-        payload = self.preprocess_func(responses, labels)
+        payload = self.preprocess_func(data_item, self.extra_info)
         try:
             response = await self.http_client.post(self.remote_url, json=payload)
             response.raise_for_status()
             result = response.json()
+            # 重要，必须加
+            result["uid"] = data_item[0].uid.observation_id
             return self.postprocess_func(result)
         except httpx.RequestError as exc:
-            print(f"An error occurred while requesting {exc.request.url}: {exc}")
-            return None
+            self.logger.error(f"An error occurred while requesting {exc.request.url}: {exc}")
+            return []
 
-    async def judge(self, responses: str | List[str], labels: str | List[str]) -> Any:
+    async def judge(self, data_item: List[RLDataFlowItem]) -> List[RLJudgerResponseItem]:
         """The main public method to run the judging pipeline.
 
         Args:
@@ -145,4 +171,4 @@ class NativeJudger:
         """
         if self.execute_func is None:
             raise RuntimeError("Judger is not properly initialized.")
-        return await self.execute_func(responses, labels)
+        return await self.execute_func(data_item)
