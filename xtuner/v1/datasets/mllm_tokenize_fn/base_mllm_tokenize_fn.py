@@ -71,10 +71,10 @@ def replace_image_token(
                             text = text.replace(IMAGE_TOKEN_ALIAS, image_tokens, 1)
                             current_image_idx += 1
                         c.text = text
-        # if current_image_idx < num_image, it means <image> placeholder is less than num_image
-        assert current_image_idx == len(num_image_token_list), (
-            f"ERROR: current_image_idx: {current_image_idx} != num_image: {len(num_image_token_list)}"
-        )
+    # if current_image_idx < num_image, it means <image> placeholder is less than num_image
+    assert current_image_idx == len(num_image_token_list), (
+        f"ERROR: current_image_idx: {current_image_idx} != num_image: {len(num_image_token_list)}"
+    )
 
 
 def load_image(image_path: str):
