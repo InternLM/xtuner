@@ -143,7 +143,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         self._hash_str = (
             f"{self.downsample_ratio}_{self.num_image_token}_{self.system_message}_{self.use_thumbnail}"
             f"_{self.dynamic_image_size}_{self.max_num_frames}_{self.min_num_frames}"
-            f"_{self.min_dynamic_patch}_{self.max_dynamic_patch}"
+            f"_{self.min_dynamic_patch}_{self.max_dynamic_patch}_{max_length}"
         )
 
         self.chat_template = CHAT_TEMPLATE_MAP["intern-s1"]
