@@ -62,7 +62,7 @@ class MLAConfig(BaseModel):
         hidden_size: int,
         layer_type: Literal["full_attention", "sliding_attention"] | None = None,
         layer_idx: int = 0,
-        rope_scaling: dict | None = None,
+        rope_scaling_cfg: RopeScalingConfig | None = None,
         generate_config: GenerateConfig | None = None,
         float8_cfg: Float8Config | None = None,
     ) -> "MultiLatentAttention":
@@ -71,7 +71,7 @@ class MLAConfig(BaseModel):
             hidden_size=hidden_size,
             layer_type=layer_type,
             layer_idx=layer_idx,
-            rope_scaling=rope_scaling,
+            rope_scaling_cfg=rope_scaling_cfg,
             generate_config=generate_config,
             float8_cfg=float8_cfg,
         )
@@ -188,7 +188,7 @@ class MultiLatentAttention(nn.Module):
         qkv_bias: bool = False,
         qk_norm: bool = False,
         o_bias: bool = False,
-        rope_scaling: dict | None = None,
+        rope_scaling_cfg: RopeScalingConfig | None = None,
         float8_cfg: Float8Config | None = None,
         generate_config: GenerateConfig | None = None,
         layer_type: Literal["full_attention", "sliding_attention"] | None = None,
@@ -260,10 +260,9 @@ class MultiLatentAttention(nn.Module):
 
         self.softmax_scale = self.q_head_dim ** (-0.5)
 
-        if rope_scaling is not None:
-            rope_scaling = RopeScalingConfig(**rope_scaling)
-            mscale_all_dim = rope_scaling.mscale_all_dim if rope_scaling.mscale_all_dim is not None else 0.0
-            scaling_factor = rope_scaling.factor
+        if rope_scaling_cfg is not None:
+            mscale_all_dim = rope_scaling_cfg.mscale_all_dim if rope_scaling_cfg.mscale_all_dim is not None else 0.0
+            scaling_factor = rope_scaling_cfg.factor
             if mscale_all_dim:
                 mscale = yarn_get_mscale(scaling_factor, mscale_all_dim)
                 self.softmax_scale = self.softmax_scale * mscale * mscale
