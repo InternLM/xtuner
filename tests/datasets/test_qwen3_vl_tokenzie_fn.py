@@ -1,7 +1,8 @@
 import os
-from unittest import TestCase
-
+from unittest import TestCase, skipIf
+from packaging import version
 from xtuner.v1.datasets import Qwen3VLTokenizeFnConfig
+import transformers
 from transformers import AutoTokenizer, AutoProcessor
 import json
 import torch
@@ -10,6 +11,8 @@ QWEN3_VL_PATH = os.environ["QWEN3_VL_PATH"]
 VIDEO_ROOT = os.environ["VIDEO_ROOT"]
 
 
+@skipIf(version.parse(transformers.__version__) < version.parse("4.57.0"),
+                 "transformers version must be >= 4.57.0")
 class TestMLLMTokenizeFn(TestCase):
     def setUp(self):
         tokenizer = AutoTokenizer.from_pretrained(QWEN3_VL_PATH)
