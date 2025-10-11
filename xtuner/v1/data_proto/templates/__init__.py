@@ -20,7 +20,6 @@ CHAT_TEMPLATE_MAP = {
     ),
     "qwen3-vl": HybridChatTemplate(
         system="<|im_start|>system\n{system}<|im_end|>\n",
-        default_system="You are a helpful assistant.",
         user="<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n",
         stop_words=["<|im_end|>", "<|endoftext|>"],
         assistant="{assistant}<|im_end|>",
