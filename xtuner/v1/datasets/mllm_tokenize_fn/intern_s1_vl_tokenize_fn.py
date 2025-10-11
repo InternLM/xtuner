@@ -15,18 +15,18 @@ from xtuner.v1.model import InternS1BaseConfig, InternVLBaseConfig
 from xtuner.v1.utils import get_logger
 
 from ..data_item import CacheItem, InternS1DataItem
-from ..vlm_utils import TCSLoader, apply_exif_orientation
+from ..utils import apply_exif_orientation
 from .base_mllm_tokenize_fn import (
     IMAGE_TOKEN_ALIAS,
     BaseMLLMTokenizeFnConfig,
     BaseMLLMTokenizeFunction,
-    TCSLoaderConfig,
+    OSSLoaderConfig,
     get_image_path,
     load_image,
     replace_image_token,
 )
 from .intern_s1_vl_process import build_transform, dynamic_num_patch, dynamic_preprocess
-from .video_utils import read_frames_decord
+from .intern_s1_vl_utils import InternS1VLOSSLoader, read_frames_decord
 
 
 logger = get_logger()
@@ -101,7 +101,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         max_num_frames: int = 24,
         data_augment: bool = False,
         system_message: str | None = None,
-        tcs_loader_cfg: TCSLoaderConfig | None = None,
+        oss_loader_cfg: OSSLoaderConfig | None = None,
         tokenizer_hash: str | None = None,
         max_length: int | None = None,
         hash: str | None = None,
@@ -109,9 +109,9 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
     ):
         assert isinstance(model_cfg, (InternS1BaseConfig, InternVLBaseConfig))
 
-        self.tcs_loader = None
-        if tcs_loader_cfg is not None:
-            self.tcs_loader = TCSLoader(backend=tcs_loader_cfg.backend, **tcs_loader_cfg.backend_kwargs)
+        self.oss_loader = None
+        if oss_loader_cfg is not None:
+            self.oss_loader = InternS1VLOSSLoader(backend=oss_loader_cfg.backend, **oss_loader_cfg.backend_kwargs)
 
         self.only_prompt = only_prompt
 
@@ -253,7 +253,11 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         images = []
         for i, image_path_ in enumerate(self._image_path):
             image_path_ = get_image_path(image_path_, media_root)
-            image = load_image(image_path_, self.tcs_loader)
+            if self.oss_loader is not None and "s3://" in image_path_:
+                image = self.oss_loader(image_path_, image_type="image")
+            else:
+                assert "s3://" not in image_path_, "Please use oss_loader_cfg to load image from s3."
+                image = load_image(image_path_)
             image = apply_exif_orientation(image)
 
             if len(self._image_wh_list) >= 1:
@@ -332,8 +336,8 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         # 根据 data_item 生成一个确定性的随机整数
         random_frame_num = generate_random_int_from_dict(data_item, self.min_num_frames, self.max_num_frames)
 
-        if self.tcs_loader is not None:
-            image_list = self.tcs_loader(
+        if self.oss_loader is not None:
+            image_list = self.oss_loader(
                 video_path,
                 image_type="video",
                 max_num_frames=self.max_num_frames,
@@ -344,6 +348,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
             )
         else:
             assert video_path.endswith((".mp4", ".avi", ".mov", ".webm", ".mkv", ".ts", ".rmvb", ".flv"))
+            assert "s3://" not in video_path, "Please use oss_loader_cfg to load video from s3."
             image_list = read_frames_decord(
                 video_path,
                 num_frames=self.max_num_frames,
@@ -391,7 +396,7 @@ class InternS1VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
     min_num_frames: int = 4
     max_num_frames: int = 24
     data_augment: bool = False
-    tcs_loader_cfg: TCSLoaderConfig | None = None
+    oss_loader_cfg: OSSLoaderConfig | None = None
 
     def build(
         self, tokenizer, tokenizer_hash: str | None = None, anno_name: str = "", **kwargs
@@ -408,6 +413,6 @@ class InternS1VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
             system_message=self.system_message,
             min_num_frames=self.min_num_frames,
             max_num_frames=self.max_num_frames,
-            tcs_loader_cfg=self.tcs_loader_cfg,
+            oss_loader_cfg=self.oss_loader_cfg,
             hash=self.hash,
         )

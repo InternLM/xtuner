@@ -69,10 +69,7 @@ def replace_image_token(messages: ChatMessages, chat_template: HybridChatTemplat
         )
 
 
-def load_image(image_path: str, tcs_loader=None):
-    # Load the image using tcs_loader if available, otherwise use PIL
-    if tcs_loader is not None and "s3://" in image_path:
-        return tcs_loader(image_path)
+def load_image(image_path: str):
     return Image.open(image_path).convert("RGB")
 
 
@@ -189,6 +186,6 @@ class BaseMLLMTokenizeFnConfig(BaseModel):
         raise NotImplementedError("The 'build' method must be implemented.")
 
 
-class TCSLoaderConfig(BaseModel):
+class OSSLoaderConfig(BaseModel):
     backend: Literal["petrel"] = "petrel"
     backend_kwargs: dict = {}
