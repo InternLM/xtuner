@@ -46,7 +46,12 @@ def collect_image_video_paths_and_extra(messages: list[dict]):
     return image_paths, video_paths, {"image_wh": image_wh_list}
 
 
-def replace_image_token(messages: ChatMessages, chat_template: HybridChatTemplate, num_image_token_list: list[int], add_vision_id: bool = False):
+def replace_image_token(
+    messages: ChatMessages,
+    chat_template: HybridChatTemplate,
+    num_image_token_list: list[int],
+    add_vision_id: bool = False,
+):
     current_image_idx = 0
     for msg in messages.messages:
         if msg.role == "user":
@@ -62,7 +67,7 @@ def replace_image_token(messages: ChatMessages, chat_template: HybridChatTemplat
                             image_tokens = f"{chat_template.image_start_token}{chat_template.image_context_token * num_image_token_list[current_image_idx]}{chat_template.image_end_token}"  # type: ignore
                             if add_vision_id and image_cnt > 1:
                                 # add vision id for each image when there are multiple images
-                                image_tokens = f'Picture {i+1}: ' + image_tokens
+                                image_tokens = f"Picture {i + 1}: " + image_tokens
                             text = text.replace(IMAGE_TOKEN_ALIAS, image_tokens, 1)
                             current_image_idx += 1
                         c.text = text

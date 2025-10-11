@@ -29,8 +29,8 @@ def smart_get_thw(image_size, image_processor):
         orig_height,
         orig_width,
         factor=image_processor.patch_size * image_processor.merge_size,
-        min_pixels=image_processor.min_pixels,
-        max_pixels=image_processor.max_pixels,
+        min_pixels=image_processor.size["shortest_edge"],
+        max_pixels=image_processor.size["longest_edge"],
     )
     grid_t = 1  # 单图
     grid_h, grid_w = resized_height // image_processor.patch_size, resized_width // image_processor.patch_size
@@ -62,18 +62,18 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         # default min_pixels 4096=4x32x32=4x16x16x2x2 pix 一张图片 patch size=16x16，然后 merge size=2x2, 最终输出给 llm 占 4 个 token
         # default max_pixels 16777216=16384x32x32 pix 一张图片输出给 llm 会占 16384 个 token
         if min_pixels is not None:
-            self.image_processor.min_pixels = min_pixels
+            self.image_processor.size["shortest_edge"] = min_pixels
         if max_pixels is not None:
-            self.image_processor.max_pixels = max_pixels
-        self.image_processor.size["longest_edge"] = self.image_processor.max_pixels
-        self.image_processor.size["shortest_edge"] = self.image_processor.min_pixels
+            self.image_processor.size["longest_edge"] = max_pixels
         self.merge_length = self.image_processor.merge_size**2
         self.add_vision_id = add_vision_id
 
         self.data_name = os.path.basename(anno_name)
         logger.info(
-            f"[{self.data_name}] min_pixels: {self.image_processor.min_pixels}, max_pixels: {self.image_processor.max_pixels},"
-            f"video_min_total_pixels: {self.video_min_total_pixels}, video_max_total_pixels: {self.video_max_total_pixels}"
+            f"[{self.data_name}] min_pixels: {self.image_processor.size['shortest_edge']}, "
+            f"max_pixels: {self.image_processor.size['longest_edge']},"
+            f"video_min_total_pixels: {self.video_min_total_pixels}, "
+            f"video_max_total_pixels: {self.video_max_total_pixels}"
         )
 
         self.chat_template = CHAT_TEMPLATE_MAP["qwen3-vl"]
@@ -84,8 +84,8 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
 
         # Note: 比较重要，防止改了参数但是没有重新 cache
         self._hash_str = (
-            f"{self.image_processor.min_pixels}_{self.image_processor.max_pixels}_{self.video_min_total_pixels}"
-            f"_{self.video_max_total_pixels}_{self.add_vision_id}_{system_message}_{self.max_length}"
+            f"{self.image_processor.size['shortest_edge']}_{self.image_processor.size['longest_edge']}_{self.video_min_total_pixels}"
+            f"_{self.video_max_total_pixels}_{self.add_vision_id}_{system_message}_{max_length}"
         )
 
         # 必须要最后调用
@@ -194,7 +194,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             grid_thw = [grid_thw]
         grid_thw_merged = [merged_thw.prod() // self.merge_length for merged_thw in grid_thw_merged]  # type: ignore
         messages = ChatMessages(messages=data_item["messages"])
-        replace_image_token(messages, self.chat_template, grid_thw_merged, add_vision_id=self.add_vision_id) # type: ignore
+        replace_image_token(messages, self.chat_template, grid_thw_merged, add_vision_id=self.add_vision_id)  # type: ignore
         tokenized = messages.tokenize(self.tokenizer, self.chat_template)
         input_ids = tokenized["input_ids"]
         labels = tokenized["labels"]

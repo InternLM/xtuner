@@ -1,4 +1,4 @@
-from typing import Optional, Tuple
+from typing import Optional
 
 import torch
 
@@ -14,10 +14,10 @@ def get_rope_index_3(
     image_token_id: int = 151655,
     video_token_id: int = 151656,
     vision_start_token_id: int = 151652,
-    spatial_merge_size: Optional[int] = 2,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-
-    """Different from the original implementation, Qwen3VL use timestamps rather than absolute time position ids."""
+    spatial_merge_size: int = 2,
+) -> torch.Tensor:
+    """Different from the original implementation, Qwen3VL use timestamps
+    rather than absolute time position ids."""
     # Since we use timestamps to separate videos, like
     # <t1> <vision_start> <frame1> <vision_end> <t2> <vision_start> <frame2> <vision_end>,
     # the video_grid_thw should also be split
@@ -25,7 +25,6 @@ def get_rope_index_3(
         video_grid_thw = torch.repeat_interleave(video_grid_thw, video_grid_thw[:, 0], dim=0)
         video_grid_thw[:, 0] = 1
 
-    mrope_position_deltas = []
     if input_ids is not None and (image_grid_thw is not None or video_grid_thw is not None):
         total_input_ids = input_ids
         if attention_mask is None:
@@ -59,6 +58,7 @@ def get_rope_index_3(
                 else:
                     ed_video = len(input_tokens) + 1
                 if ed_image < ed_video:
+                    assert image_grid_thw is not None
                     t, h, w = (
                         image_grid_thw[image_index][0],
                         image_grid_thw[image_index][1],
@@ -69,6 +69,7 @@ def get_rope_index_3(
                     ed = ed_image
 
                 else:
+                    assert video_grid_thw is not None
                     t, h, w = (
                         video_grid_thw[video_index][0],
                         video_grid_thw[video_index][1],
@@ -88,11 +89,11 @@ def get_rope_index_3(
                 llm_pos_ids_list.append(torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx)
 
                 # t_index is always 0 because llm_grid_t is always 1 (we use timestamps to encode the temporal information for videos)
-                t_index = torch.arange(llm_grid_t).view(-1, 1).expand(-1, llm_grid_h * llm_grid_w).flatten()
-                h_index = torch.arange(llm_grid_h).view(1, -1, 1).expand(llm_grid_t, -1, llm_grid_w).flatten()
-                w_index = torch.arange(llm_grid_w).view(1, 1, -1).expand(llm_grid_t, llm_grid_h, -1).flatten()
+                t_index = torch.arange(llm_grid_t).view(-1, 1).expand(-1, llm_grid_h * llm_grid_w).flatten()  # type: ignore
+                h_index = torch.arange(llm_grid_h).view(1, -1, 1).expand(llm_grid_t, -1, llm_grid_w).flatten()  # type: ignore
+                w_index = torch.arange(llm_grid_w).view(1, 1, -1).expand(llm_grid_t, llm_grid_h, -1).flatten()  # type: ignore
                 llm_pos_ids_list.append(torch.stack([t_index, h_index, w_index]) + text_len + st_idx)
-                st = ed + llm_grid_t * llm_grid_h * llm_grid_w
+                st = ed + llm_grid_t * llm_grid_h * llm_grid_w  # type: ignore
 
             if st < len(input_tokens):
                 st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
@@ -101,27 +102,17 @@ def get_rope_index_3(
 
             llm_positions = torch.cat(llm_pos_ids_list, dim=1).reshape(3, -1)
             position_ids[..., i, attention_mask[i] == 1] = llm_positions.to(position_ids.device)
-            mrope_position_deltas.append(llm_positions.max() + 1 - len(total_input_ids[i]))
-        mrope_position_deltas = torch.tensor(mrope_position_deltas, device=input_ids.device).unsqueeze(1)
-        return position_ids, mrope_position_deltas
+        return position_ids
     else:
         if attention_mask is not None:
             position_ids = attention_mask.long().cumsum(-1) - 1
             position_ids.masked_fill_(attention_mask == 0, 1)
             position_ids = position_ids.unsqueeze(0).expand(3, -1, -1).to(attention_mask.device)
-            max_position_ids = position_ids.max(0, keepdim=False)[0].max(-1, keepdim=True)[0]
-            mrope_position_deltas = max_position_ids + 1 - attention_mask.shape[-1]
         else:
             position_ids = (
                 torch.arange(input_ids.shape[1], device=input_ids.device)
                 .view(1, 1, -1)
                 .expand(3, input_ids.shape[0], -1)
             )
-            mrope_position_deltas = torch.zeros(
-                [input_ids.shape[0], 1],
-                device=input_ids.device,
-                dtype=input_ids.dtype,
-            )
 
-        return position_ids, mrope_position_deltas
-
+        return position_ids
