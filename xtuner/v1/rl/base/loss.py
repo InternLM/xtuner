@@ -72,6 +72,9 @@ class BaseRLLossConfig(BaseLossConfig):
     use_kl_loss: bool = False
     kl_loss_coef: float = 0.001
     kl_loss_type: Literal["kl", "k1", "abs", "mse", "k2", "low_var_kl", "k3"] | None = None
+    clip_ratio_c: float = 3.0
+    log_prob_diff_min: float = -20.0
+    log_prob_diff_max: float = 20.0
 
     @property
     def loss_ctx_cls(self) -> type[BaseLossContext]:

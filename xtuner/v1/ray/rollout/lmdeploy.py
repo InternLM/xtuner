@@ -77,7 +77,8 @@ class LMDeployWorker(RolloutWorker):
     async def _create_request(
         self,
         url: str,
-        prompt: Union[str, List[Dict[str, Any]]],
+        prompt: Union[str, List[Dict[str, Any]]] | None,
+        input_ids: List[int] | None,
         tools: List,  # reserved for agent tool use
         tool_choice: str,  # reserved for agent tool use
         sample_params: dict,
@@ -113,9 +114,14 @@ class LMDeployWorker(RolloutWorker):
             payload["messages"] = prompt
         else:
             if "return_token_ids" in extra_params and extra_params["return_token_ids"]:
-                text_prompt = self.tokenizer.apply_chat_template(prompt, tokenize=False, add_generation_prompt=True)
-                prompt_token_ids = self.tokenizer(text_prompt, add_special_tokens=False)["input_ids"]
-                payload["input_ids"] = prompt_token_ids
+                if input_ids is not None:
+                    payload["input_ids"] = input_ids
+                else:
+                    text_prompt = self.tokenizer.apply_chat_template(
+                        prompt, tokenize=False, add_generation_prompt=True
+                    )
+                    prompt_token_ids = self.tokenizer(text_prompt, add_special_tokens=False)["input_ids"]
+                    payload["input_ids"] = prompt_token_ids
             else:
                 payload["messages"] = prompt
 

@@ -260,7 +260,8 @@ class RolloutWorker(SingleAcceleratorWorker):
 
     async def rollout_task(
         self,
-        prompts: Union[str, List[Dict[str, Any]]],
+        prompts: Union[str, List[Dict[str, Any]]] | None,
+        input_ids: List[int] | None,
         tools: List,
         tool_choice: str,
         sample_params: dict,
@@ -295,15 +296,18 @@ class RolloutWorker(SingleAcceleratorWorker):
                 response = await self._create_request(
                     f"{self.server_url}/{self.endpoints['generate']}",
                     openai_prompts,
+                    input_ids,
                     openai_tools,
                     tool_choice,
                     sample_params=sample_params,
                     extra_params=extra_params,
                 )
             else:
+                assert prompts is not None, "prompts should not be None when you call v1/chat/completions API"
                 response = await self._create_request(
                     f"{self.server_url}/{self.endpoints['v1/chat/completions']}",
                     openai_prompts,
+                    None,
                     openai_tools,
                     tool_choice,
                     sample_params=sample_params,
@@ -400,7 +404,8 @@ class RolloutWorker(SingleAcceleratorWorker):
 
     async def rollout(
         self,
-        prompt: Union[str, List[Dict[str, Any]]],
+        prompt: Union[str, List[Dict[str, Any]]] | None = None,
+        input_ids: Optional[List[int]] | None = None,
         tools: List = [],
         tool_choice: str = "auto",
         sample_params: dict = dict(),
@@ -416,7 +421,9 @@ class RolloutWorker(SingleAcceleratorWorker):
         Returns:
             The result of the `rollout_task`.
         """
-        return await self.rollout_task(prompt, tools, tool_choice, sample_params, extra_params, format=format)
+        return await self.rollout_task(
+            prompt, input_ids, tools, tool_choice, sample_params, extra_params, format=format
+        )
 
     def pause(self):
         """Pause the worker's generation process."""
@@ -453,7 +460,8 @@ class RolloutWorker(SingleAcceleratorWorker):
     async def _create_request(
         self,
         url: str,
-        prompt: Union[str, List[Dict[str, Any]]],
+        prompt: Union[str, List[Dict[str, Any]]] | None,
+        input_ids: List[int] | None,
         tools: List,
         tool_choice: str,
         sample_params: dict,

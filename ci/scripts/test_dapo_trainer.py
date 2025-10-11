@@ -97,6 +97,7 @@ def main(args):
         dtype="bfloat16",
         skip_load_weights=False,
         launch_server_method=launch_server_method,
+        gpu_memory_utilization=0.7,
     )
     dataflow_config = DataFlowConfig(
         env="test",
@@ -168,6 +169,7 @@ def main(args):
                 cliprange_high=0.28,
                 cliprange_low=0.2,
                 loss_type=args.policy_loss_type,
+                clip_ratio_c=10.0,
             ),
             ignore_idx=-100,
             use_kl_loss=False,

@@ -36,14 +36,13 @@ class SGLangWorker(RolloutWorker):
     async def _create_request(
         self,
         url: str,
-        prompt: Union[str, List[Dict[str, Any]]],
+        prompt: Union[str, List[Dict[str, Any]]] | None,
+        input_ids: List[int] | None,
         tools: List,
         tool_choice: str,
         sample_params: dict,
         extra_params: dict,
     ):
-        sample_params["top_k"] = -1  # TODO： 暂时写死
-
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.api_keys}",  # 如果需要鉴权
@@ -55,9 +54,14 @@ class SGLangWorker(RolloutWorker):
             self.logger.warning("Using stream mode for SGLangWorker is not supported yet.")
         else:
             if "return_token_ids" in extra_params and extra_params["return_token_ids"]:
-                text_prompt = self.tokenizer.apply_chat_template(prompt, tokenize=False, add_generation_prompt=True)
-                prompt_token_ids = self.tokenizer(text_prompt, add_special_tokens=False)["input_ids"]
-                payload["input_ids"] = prompt_token_ids
+                if input_ids is not None:
+                    payload["input_ids"] = input_ids
+                else:
+                    text_prompt = self.tokenizer.apply_chat_template(
+                        prompt, tokenize=False, add_generation_prompt=True
+                    )
+                    prompt_token_ids = self.tokenizer(text_prompt, add_special_tokens=False)["input_ids"]
+                    payload["input_ids"] = prompt_token_ids
             else:
                 payload["messages"] = prompt
 
@@ -143,8 +147,9 @@ class SGLangWorker(RolloutWorker):
         sglang_server_args.nnodes = max(1, self.config.tensor_parallel_size // self.config.gpus_per_node)
         sglang_server_args.skip_server_warmup = True
         sglang_server_args.tp_size = self.config.tensor_parallel_size
-        sglang_server_args.mem_fraction_static = 0.7  # 关键
-        sglang_server_args.enable_memory_saver = True  # 关键，否则显存释放不了
+        sglang_server_args.mem_fraction_static = self.config.gpu_memory_utilization
+        # note: 非共卡模式下无需设置,共卡模式下需要offload必须设置，否则显存释放不了
+        sglang_server_args.enable_memory_saver = True
 
         if sglang_server_args.nnodes > 1:
             sglang_server_args.node_rank = self.rank // self.config.gpus_per_node
@@ -153,6 +158,8 @@ class SGLangWorker(RolloutWorker):
         return sglang_server_args
 
     def _transform_sample_params(self, sample_params: Dict):
+        if sample_params["top_p"] > 0:
+            sample_params["top_k"] = -1  # top_p优先级更高
         sglang_sample_params = {
             "n": sample_params["n"],
             "top_k": sample_params["top_k"],

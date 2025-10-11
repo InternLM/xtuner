@@ -341,19 +341,16 @@ class RLTrainer:
     def _save_trajectories(self, data_groups, save_path):
         with open(save_path, "w") as f:
             for group in data_groups:
-                response_list = []
-                reward_list = []
                 for data in group:
-                    response_list.append(data.env.rollout.response)
-                    reward_list.append(data.env.judger.reward["score"])
-                item = {
-                    "messages": group[0].data.messages,
-                    "response": response_list,
-                    "label": group[0].data.reward_model["ground_truth"],
-                    "reward": reward_list,
-                }
-                json.dump(item, f)
-                f.write("\n")
+                    item = {
+                        "messages": data.data.messages,
+                        "response": data.env.rollout.response,
+                        "response_len": data.env.rollout.response_len,
+                        "label": data.data.reward_model["ground_truth"],
+                        "reward": data.env.judger.reward["score"],
+                    }
+                    json.dump(item, f)
+                    f.write("\n")
 
     def _load_trajectories(self, save_path):
         data_groups = []

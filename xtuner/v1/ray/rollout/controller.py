@@ -1,3 +1,4 @@
+import os
 import threading
 from itertools import cycle
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -116,13 +117,17 @@ class RolloutController:
                 ]
             )
         )
+        # note: sglang infer with tp>1 will be supported as soon.
+        if os.environ.get("XTUNER_USE_SGLANG", "0") == "1":
+            assert self.config.tensor_parallel_size == 1, "tp_size > 1 is not supported for SGLang now."
         self.worker_server_urls = list(worker_server_urls_map.values())
         self.worker_cycler = cycle(self.active_rollout_workers)
         return engine_mesh_list, worker_server_urls_map
 
     async def rollout(
         self,
-        prompt: Union[str, List[Dict[str, Any]]],
+        prompt: Union[str, List[Dict[str, Any]]] | None = None,
+        input_ids: Optional[List[int]] | None = None,
         tools: List = [],
         tool_choice: str = "auto",
         sample_params: Optional[SampleParams] = None,
@@ -157,8 +162,10 @@ class RolloutController:
             # 通过print_params_flag控制只打印一次参数
             self.logger.info(f"Rollout with sample params: {self.sample_params}, extra params: {self.extra_params}")
             self.print_params_flag = False
+        assert prompt is not None or input_ids is not None, "Either prompt or input_ids must be provided."
         response_ref = worker.rollout.remote(  # type: ignore[attr-defined]
-            prompt,
+            prompt=prompt,
+            input_ids=input_ids,
             tools=tools,
             tool_choice=tool_choice,
             sample_params=self.sample_params,
