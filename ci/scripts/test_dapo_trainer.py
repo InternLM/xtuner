@@ -170,6 +170,8 @@ def main(args):
                 cliprange_low=0.2,
                 loss_type=args.policy_loss_type,
                 clip_ratio_c=10.0,
+                log_prob_diff_min=-20.0,
+                log_prob_diff_max=20.0,
             ),
             ignore_idx=-100,
             use_kl_loss=False,
