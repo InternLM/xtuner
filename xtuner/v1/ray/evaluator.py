@@ -163,7 +163,7 @@ class Evaluator:
         """
         try:
             # note: In the evaluator, we convert the input sample to a list to adapt to the input format of single_turn_env
-            group_sample = await self.env_controller.run.remote([sample], self.sample_params)  # type: ignore[attr-defined]
+            group_sample = await self.env_controller.run.remote([sample], sample_params=self.sample_params)  # type: ignore[attr-defined]
             self.return_list.append(group_sample[0])
         except Exception as e:
             self.logger.error(f"Worker task failed with exception: {e}. Returning meta for retry.")

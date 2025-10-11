@@ -152,7 +152,7 @@ class RolloutController:
         worker = next(self.worker_cycler)
         # update sample params and extra params
         self.sample_params.update(sample_params.dict() if sample_params else {})
-        self.extra_params.update(extra_params)
+        self.extra_params.update(extra_params if extra_params else {})
         if self.print_params_flag:
             # 通过print_params_flag控制只打印一次参数
             self.logger.info(f"Rollout with sample params: {self.sample_params}, extra params: {self.extra_params}")

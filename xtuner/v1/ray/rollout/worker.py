@@ -64,6 +64,7 @@ class RolloutWorker(SingleAcceleratorWorker):
         self.server_process: Optional[multiprocessing.Process] = None
         self.logger = get_logger()
         self.tokenizer = AutoTokenizer.from_pretrained(self.config.tokenizer_path)
+        self.print_flag = True  # only print once
 
     def init_dist_port(self):
         """Initialize distributed communication ports.
@@ -272,21 +273,25 @@ class RolloutWorker(SingleAcceleratorWorker):
             response="",
             finish_reason="failed",
         )
-        streaming_infer = False
-        if "stream" in extra_params and extra_params["stream"] is True:
-            streaming_infer = True
-            extra_params["stream"] = True
         if "return_token_ids" in extra_params and extra_params["return_token_ids"]:
             if os.environ.get("XTUNER_USE_VLLM", "0") == "1":
                 self.logger.error("VLLM backend does not support return token ids now")
-            streaming_infer = False
+            # todo: test streaming infer with return_token_ids
             extra_params["stream"] = False
+            if self.print_flag:
+                self.logger.warning("streaming infer is not supported when return_token_ids is True")
         try:
             if format == "openai":
                 openai_prompts, openai_tools = prompts, tools
             else:
                 openai_prompts, openai_tools = self._adapt_input_to_openai_spec(prompts, tools, tool_choice)
             if "return_token_ids" in extra_params and extra_params["return_token_ids"]:
+                if os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "1":
+                    if self.print_flag:
+                        self.logger.warning(
+                            "you should use lmdeploy main branch > v0.10.1 to support return_token_ids"
+                        )
+                        self.print_flag = False
                 response = await self._create_request(
                     f"{self.server_url}/{self.endpoints['generate']}",
                     openai_prompts,
@@ -308,7 +313,7 @@ class RolloutWorker(SingleAcceleratorWorker):
 
             rollout_response = (
                 await self._handle_stream_response(uid, sample_params, response)
-                if streaming_infer
+                if extra_params["stream"]
                 else await self._handle_non_stream_response(uid, sample_params, response)
             )
             if rollout_response is None:

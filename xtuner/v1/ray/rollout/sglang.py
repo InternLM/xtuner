@@ -73,6 +73,7 @@ class SGLangWorker(RolloutWorker):
             json=payload,
         )
         r = await self.client.send(req, stream=stream)
+        r.raise_for_status()
         return r
 
     def _make_request(self, endpoint: str, payload=None):

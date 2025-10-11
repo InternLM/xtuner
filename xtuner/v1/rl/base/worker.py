@@ -684,8 +684,8 @@ class TrainingWorker(SingleAcceleratorWorker):
                 serialized_data = serialize_state_dict(state_dict) if dist.get_rank() == head_rank else None
         else:
             # sglang
-            from sglang.srt.patch_torch import monkey_patch_torch_reductions
             from sglang.srt.utils import MultiprocessingSerializer
+            from sglang.srt.utils.patch_torch import monkey_patch_torch_reductions
 
             try:
                 from sglang.srt.model_executor.model_runner import FlattenedTensorBucket

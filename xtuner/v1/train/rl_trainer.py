@@ -161,7 +161,7 @@ class RLTrainer:
         train_worker_cfg.load_from = load_from
 
         self._total_epochs = total_epochs
-        self._cur_epoch = 0
+        self._cur_step = 0
 
         self._load_from = Path(load_from) if isinstance(load_from, str) else load_from
         self._load_from_hf = load_from is not None and is_hf_model_path(load_from)
@@ -302,7 +302,7 @@ class RLTrainer:
             if self._enable_evaluate and self._evaluator and rollout_idx % self._eval_step == 0:
                 scores = ray.get(self._evaluator.run.remote())
                 self.logger.info(f"evaluate idx {rollout_idx} scores {scores}")
-            self._cur_epoch += 1
+            self._cur_step += 1
 
     # TODO: advantage 是在 DataFlow 里算好，还是在 train controller 里算？
     # 因为可能有根据 advantage 来判断数据能否进 rl 训练的需求。暂时先放在这
@@ -389,10 +389,10 @@ class RLTrainer:
             "You meet this error means `load_from` of trainer is not a Huggingface model path."
         )
 
-        if self.cur_epoch % self._hf_interval != 0 and self.cur_epoch != self.total_epoch:
+        if self.cur_step % self._hf_interval != 0 and self.cur_step != self._rollout_steps:
             return
 
-        save_hf_path = self.exp_dir / f"hf-{self.cur_epoch}"
+        save_hf_path = self.exp_dir / f"hf-{self.cur_step}"
         self.logger.info(f"save_hf_path: {save_hf_path}")
         self.meta.latest_exp.hf_checkpoint_list.append(str(save_hf_path))
 
@@ -507,8 +507,8 @@ class RLTrainer:
         return self._meta
 
     @property
-    def cur_epoch(self):
-        return self._cur_epoch
+    def cur_step(self):
+        return self._cur_step
 
     @property
     def total_epoch(self):
