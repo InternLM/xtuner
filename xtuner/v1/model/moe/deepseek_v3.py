@@ -60,7 +60,7 @@ class DeepSeekV3Config(MoEConfig):
     intermediate_size: int = 18432
     rms_norm_eps: float = 1e-6
     rope_theta: float = 10000.0
-    rope_scaling_cfg = RopeScalingConfig(
+    rope_scaling_cfg: RopeScalingConfig = RopeScalingConfig(
         type="yarn",
         beta_fast=32,
         beta_slow=1,
