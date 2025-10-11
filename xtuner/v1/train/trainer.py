@@ -1222,7 +1222,6 @@ class Trainer:
             "XTUNER_USE_FA3": os.getenv("XTUNER_USE_FA3"),
             "XTUNER_DISPATCHER_DEBUG": os.getenv("XTUNER_DISPATCHER_DEBUG"),
             "XTUNER_ROUTER_DEBUG": os.getenv("XTUNER_ROUTER_DEBUG"),
-            "XTUNER_ROPE_RM_TRANSPOSE": os.getenv("XTUNER_ROPE_RM_TRANSPOSE"),
         }
 
         for k, v in env.items():
