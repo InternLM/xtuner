@@ -15,7 +15,7 @@ class Qwen3VLVisionConfig(BaseModel):
         title="Base model config for xtuner",
         extra="allow",
     )
-    num_channels: int = 3
+    in_channels: int = 3
     depth: int = 27
     hidden_size: int = 1152
     num_attention_heads: int = 16
@@ -38,9 +38,9 @@ class Qwen3VLVisionConfig(BaseModel):
         return self
 
     def build(self):
-        from .modeling_vision import InternS1VisionModel
+        from .modeling_vision import Qwen3VLVisionModel
 
-        return InternS1VisionModel(self)
+        return Qwen3VLVisionModel(self)
 
 
 class Qwen3VLProjectorConfig(BaseModel):
@@ -51,9 +51,9 @@ class Qwen3VLProjectorConfig(BaseModel):
     float8_cfg: Optional["Float8Config"] = None
 
     def build(self):
-        from .modeling_projector import InternS1MultiModalProjector
+        from .modeling_projector import Qwen3VLProjector
 
-        return InternS1MultiModalProjector(self)
+        return Qwen3VLProjector(self)
 
 
 class Qwen3VLBaseConfig(BaseModel):
@@ -73,7 +73,7 @@ class Qwen3VLBaseConfig(BaseModel):
     freeze_projector: bool = False
     freeze_language: bool = False
 
-    def build(self) -> "InternS1ForConditionalGeneration":
+    def build(self):
         from .modeling_intern_s1 import InternS1ForConditionalGeneration
 
         return InternS1ForConditionalGeneration(self)

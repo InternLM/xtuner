@@ -58,6 +58,16 @@ class Dense(BaseModel):
         self._init_load_spec()
         self._maybe_compile_layers()
 
+    # QwenVL3
+    def _deepstack_process(
+        self, hidden_states: torch.Tensor, visual_pos_masks: torch.Tensor, visual_embeds: torch.Tensor
+    ):
+        visual_pos_masks = visual_pos_masks.to(hidden_states.device)
+        visual_embeds = visual_embeds.to(hidden_states.device, hidden_states.dtype)
+        local_this = hidden_states[visual_pos_masks, :].clone() + visual_embeds
+        hidden_states[visual_pos_masks, :] = local_this
+        return hidden_states
+    
     def forward(
         self,
         seq_ctx: SequenceContext,  # todo(@yehaochen): support intra layer micro-batch
@@ -77,13 +87,25 @@ class Dense(BaseModel):
         output: dict = {}
         if self.config.return_hidden_states:
             output["hidden_states"] = []
-
+            
+        # QwenVL-3
+        deepstack_visual_embeds=seq_ctx.deepstack_visual_embeds
+        visual_pos_masks=seq_ctx.visual_pos_masks
+        
         for idx, decoder_layer in self.layers.items():
             hidden_states = decoder_layer(
                 hidden_states,
                 position_embeddings=position_embeddings,
                 seq_ctx=seq_ctx,
             )
+            
+            if deepstack_visual_embeds is not None and idx in range(len(deepstack_visual_embeds)):
+                hidden_states = self._deepstack_process(
+                    hidden_states,
+                    visual_pos_masks,
+                    deepstack_visual_embeds[idx],
+                )
+            
             if self.config.return_hidden_states:
                 output["hidden_states"].append(hidden_states)
 
