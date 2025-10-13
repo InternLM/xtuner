@@ -8,6 +8,7 @@ from xtuner.v1.module.router.noaux_router import NoAuxRouterConfig
 from .base import BaseModel, TransformerConfig
 from .compose.intern_s1 import InternS1BaseConfig, InternS1Config, InternS1MiniConfig
 from .compose.internvl import InternVL3P5Dense8BConfig, InternVL3P5MoE30BA3Config, InternVLBaseConfig
+from .compose.qwen3_vl import Qwen3VLMoE30BA3Config
 from .dense.dense import Dense
 from .dense.qwen3 import Qwen3Dense4BConfig, Qwen3Dense8BConfig, Qwen3DenseConfig
 from .moe.deepseek_v3 import DeepSeekV3Config
@@ -25,7 +26,7 @@ model_mapping = {
     "gpt-oss-20b": GptOss21BA3P6Config(),
     "gpt-oss-120b": GptOss117BA5P8Config(),
     "internvl-3.5-8b-hf": InternVL3P5Dense8BConfig(),
-    "internvl-3.5-30b-a3b-hf": InternVL3P5MoE30BA3Config(),
+    "internvl-3.5-30b-a3b-hf": InternVL3P5MoE30BA3Config()
 }
 
 
@@ -40,6 +41,8 @@ def get_model_config_from_hf(model_path: Path):
 
     if cfg.model_type == "qwen3_moe":
         return Qwen3MoEConfig.from_hf(model_path)
+    elif cfg.model_type == "qwen3_vl_moe":
+        return Qwen3DenseConfig.from_hf(model_path)
     elif cfg.model_type == "qwen3":
         return Qwen3DenseConfig.from_hf(model_path)
     elif cfg.model_type == "gpt_oss":
@@ -74,4 +77,5 @@ __all__ = [
     "ZLossConfig",
     "GreedyRouterConfig",
     "Dense",
+    "Qwen3VLMoE30BA3Config",
 ]
