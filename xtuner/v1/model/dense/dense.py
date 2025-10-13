@@ -24,7 +24,7 @@ from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.loss import CELossContext
 from xtuner.v1.model.base import BaseModel, ModelOutputs, TransformerConfig
 from xtuner.v1.model.utils import checkpoint_wrapper
-from xtuner.v1.module import LMHead, RMSNorm, RotaryEmbedding
+from xtuner.v1.module import LMHead, RMSNorm, get_rope_embedding, RotaryEmbeddingProtocol
 from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayer
 from xtuner.v1.utils import (
     get_device,
@@ -139,8 +139,8 @@ class Dense(BaseModel):
             )
         return layers
 
-    def build_rotary_embedding(self, config: TransformerConfig) -> RotaryEmbedding:
-        return RotaryEmbedding(config=config)
+    def build_rotary_embedding(self, config: TransformerConfig) -> RotaryEmbeddingProtocol:
+        return get_rope_embedding(config=config)
 
     # NOTE: Add this overload for inferring the return type for easier type checking and using
     @overload  # type: ignore

@@ -1,4 +1,4 @@
-import torch 
+import torch
 from xtuner.v1.model import BaseModel
 from .qwen3_vl_config import Qwen3VLBaseConfig
 from .modeling_vision import Qwen3VLVisionModel
@@ -18,21 +18,20 @@ from xtuner.v1.config import FSDPConfig
 from xtuner.v1.model.moe.moe import MoEModelOutputs
 from xtuner.v1.float8.float8_handler import Float8Handler
 
-
 logger = get_logger()
 
 
 class Qwen3VLForConditionalGeneration(BaseModel):
     config: Qwen3VLBaseConfig
-    
+
     def __init__(self, config: Qwen3VLBaseConfig):
         super().__init__()
         self.config = config
-        
+
         self.vision_tower = Qwen3VLVisionModel(config.vision_config)
-        
+
         self.multi_modal_projector = Qwen3VLProjector(config.projector_config)
-        
+
         self.language_model = config.text_config.build()
         # TODO(YHC): This is a hack to make the language model compatible with HF
         _hf_prefix = "model.language_model."
@@ -79,9 +78,9 @@ class Qwen3VLForConditionalGeneration(BaseModel):
         self.multi_modal_projector.init_weights()
 
     def fully_shard(
-        self,
-        fsdp_config: FSDPConfig,
-        float8_handler: Float8Handler | None = None,
+            self,
+            fsdp_config: FSDPConfig,
+            float8_handler: Float8Handler | None = None,
     ):
         self.fsdp_config = fsdp_config
         # TODO: 判断其余模块是否已经被 fsdp 切分了
@@ -110,8 +109,8 @@ class Qwen3VLForConditionalGeneration(BaseModel):
         if isinstance(hf_path, Path):
             hf_path = str(hf_path)
 
-        _, _, missing_llm_keys = self.language_model.from_hf(hf_path,  strict=False)
-        _, _, missing_vision_keys = self.vision_tower.from_hf(hf_path,  strict=False)
+        _, _, missing_llm_keys = self.language_model.from_hf(hf_path, strict=False)
+        _, _, missing_vision_keys = self.vision_tower.from_hf(hf_path, strict=False)
         _, _, missing_project_keys = self.multi_modal_projector.from_hf(hf_path, strict=False)
 
         missing = missing_llm_keys | missing_vision_keys | missing_project_keys
@@ -122,34 +121,34 @@ class Qwen3VLForConditionalGeneration(BaseModel):
     def scale_and_reduce_grad(self):
         self.language_model.scale_and_reduce_grad()
 
-    def get_visual_features(self, pixel_values: torch.FloatTensor, image_grid_thw: torch.LongTensor):
+    def get_visual_features(self, pixel_values: torch.Tensor, grid_thw: torch.Tensor):
         """
         Encodes images into continuous embeddings that can be forwarded to the language model. The deepstack visual features are also returned.
 
         Args:
             pixel_values (`torch.FloatTensor` of shape `(batch_size, num_channels, image_size, image_size)`):
                 The tensors corresponding to the input images.
-            image_grid_thw (`torch.LongTensor` of shape `(num_images, 3)`):
+            grid_thw (`torch.LongTensor` of shape `(num_images, 3)`):
                 The temporal, height and width of feature shape of each image in LLM.
         """
         pixel_values = pixel_values.type(self.vision_tower.dtype)
-        image_embeds, deepstack_image_embeds = self.vision_tower(pixel_values, grid_thw=image_grid_thw)
-        
+        image_embeds, deepstack_image_embeds = self.vision_tower(pixel_values, grid_thw=grid_thw)
+
         # merge
         image_embeds = self.multi_modal_projector(image_embeds)
         for i, _image_embeds in enumerate(deepstack_image_embeds):
             _image_embeds = self.multi_modal_projector(_image_embeds)
             deepstack_image_embeds[i] = _image_embeds
-            
-        split_sizes = (image_grid_thw.prod(-1) // self.vision_tower.spatial_merge_size**2).tolist()
+
+        split_sizes = (grid_thw.prod(-1) // self.vision_tower.spatial_merge_size ** 2).tolist()
         image_embeds = torch.split(image_embeds, split_sizes)
         return image_embeds, deepstack_image_embeds
 
     def get_placeholder_mask(
-        self,
-        input_ids: torch.LongTensor,
-        inputs_embeds: torch.FloatTensor,
-        visual_features: torch.FloatTensor,
+            self,
+            input_ids: torch.Tensor,
+            inputs_embeds: torch.Tensor,
+            visual_features: torch.Tensor,
     ):
         """
         Obtains multimodal placeholder mask from `input_ids` or `inputs_embeds`, and checks that the placeholder token count is
@@ -168,17 +167,17 @@ class Qwen3VLForConditionalGeneration(BaseModel):
         return special_visual_mask
 
     def forward(
-        self,
-        seq_ctx: SequenceContext,
-        loss_ctx: CELossContext
+            self,
+            seq_ctx: SequenceContext,
+            loss_ctx: CELossContext
     ) -> MoEModelOutputs:
         input_ids = seq_ctx.input_ids
         pixel_values = seq_ctx.pixel_values
         image_grid_thw = seq_ctx.image_grid_thw
         sequence_parallel_mesh = seq_ctx.sequence_parallel_mesh
-        
+
         inputs_embeds = self.language_model.embed_tokens(input_ids)  # type: ignore
-        
+
         if pixel_values is not None:
             viusal_embeds, deepstack_visual_embeds = self.get_visual_features(pixel_values, image_grid_thw)
             viusal_embeds = torch.cat(viusal_embeds, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
@@ -188,14 +187,20 @@ class Qwen3VLForConditionalGeneration(BaseModel):
             inputs_embeds = inputs_embeds.masked_scatter(visual_pos_masks, viusal_embeds)
         else:
             # 构建假数据，考虑到 moe 特性，最好不要构建全 0 数据
-            pass
-        
+            pixel_values = torch.randn(4, 1536, device=inputs_embeds.device, dtype=inputs_embeds.dtype)
+            image_grid_thw = torch.tensor([1, 2, 2], device=inputs_embeds.device)
+            viusal_embeds, _ = self.get_visual_features(pixel_values, image_grid_thw)
+            viusal_embeds = torch.cat(viusal_embeds, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
+            inputs_embeds = inputs_embeds + viusal_embeds.sum() * 0.0
+            deepstack_visual_embeds = None
+            visual_pos_masks = None
+
         seq_ctx.pixel_values = None
         seq_ctx.input_ids = None  # type: ignore
         seq_ctx.inputs_embeds = inputs_embeds
         seq_ctx.deepstack_visual_embeds = deepstack_visual_embeds
         seq_ctx.visual_pos_masks = visual_pos_masks
-                
+
         outputs = self.language_model(
             seq_ctx,
             loss_ctx

@@ -6,6 +6,7 @@ from xtuner.v1.float8 import Float8Config
 from xtuner.v1.model import TransformerConfig, Qwen3MoE30BA3Config
 from mmengine import is_installed
 from xtuner.v1.utils import get_logger
+from xtuner.v1.module.rope import RopeScalingConfig
 
 logger = get_logger()
 
@@ -87,15 +88,9 @@ class Qwen3VLMoE30BA3Config(Qwen3VLBaseConfig):
     vision_config: Qwen3VLVisionConfig = Qwen3VLVisionConfig()
     projector_config: Qwen3VLProjectorConfig = Qwen3VLProjectorConfig()
     text_config: Qwen3MoE30BA3Config = Qwen3MoE30BA3Config(
+        rope_type='qwen3_vl',
         max_position_embeddings=262144,
-        rope_scaling={
-            "mrope_interleaved": True,
-            "mrope_section": [
-                24,
-                20,
-                20
-            ],
-            "rope_type": "default"
-        },
-        rope_theta=5000000
+        rope_theta=5000000,
+        rope_scaling_cfg=RopeScalingConfig(rope_type='qwen3_vl',
+                                           mrope_section=[24, 20, 20])
     )

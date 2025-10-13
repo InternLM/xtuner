@@ -30,7 +30,7 @@ from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.loss import BalancingLoss, CELossContext, ZLoss
 from xtuner.v1.model.base import BaseModel, ModelOutputs, TransformerConfig
 from xtuner.v1.model.utils import checkpoint_wrapper, module_dict_repr
-from xtuner.v1.module import GreedyRouterConfig, LMHead, NoAuxRouter, NoAuxRouterConfig, RMSNorm, RotaryEmbedding
+from xtuner.v1.module import GreedyRouterConfig, LMHead, NoAuxRouter, NoAuxRouterConfig, RMSNorm, get_rope_embedding, RotaryEmbeddingProtocol
 from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayer
 from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEActFnConfig, MoEBlock, MoEDecoderLayer
 from xtuner.v1.utils import (
@@ -442,9 +442,8 @@ class MoE(BaseModel):
             # output["router_logits"] = router_logits_dict
 
         return MoEModelOutputs(**output, logits=final_logits)  # type: ignore[typeddict-item]
-    
-    
-    # QwenVL3
+
+    # Qwen3VL
     def _deepstack_process(
         self, hidden_states: torch.Tensor, visual_pos_masks: torch.Tensor, visual_embeds: torch.Tensor
     ):
@@ -609,8 +608,8 @@ class MoE(BaseModel):
         layers.__class__.__repr__ = module_dict_repr  # type: ignore[method-assign]
         return layers
 
-    def build_rotary_embedding(self, config: MoEConfig) -> RotaryEmbedding:
-        return RotaryEmbedding(config=config)
+    def build_rotary_embedding(self, config: MoEConfig) -> RotaryEmbeddingProtocol:
+        return get_rope_embedding(config=config)
 
     @override
     def from_hf(self, hf_path: str | Path, strict: bool = True) -> tuple:
