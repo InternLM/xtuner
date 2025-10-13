@@ -47,7 +47,7 @@ class Qwen3VLVisionConfig(BaseModel):
 
 class Qwen3VLProjectorConfig(BaseModel):
     vision_hidden_size: int = 1152
-    text_hidden_size: int = 3584
+    text_hidden_size: int = 2048
     spatial_merge_size: int = 2
     deepstack_visual_indexes: list[int] = [8, 16, 24]
     float8_cfg: Optional["Float8Config"] = None

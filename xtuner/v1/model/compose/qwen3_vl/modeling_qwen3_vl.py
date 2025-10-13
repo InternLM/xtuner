@@ -122,24 +122,20 @@ class Qwen3VLForConditionalGeneration(BaseModel):
             grid_thw (`torch.LongTensor` of shape `(num_images, 3)`):
                 The temporal, height and width of feature shape of each image in LLM.
         """
-        pixel_values = pixel_values.type(self.vision_tower.dtype)
         image_embeds, deepstack_image_embeds = self.vision_tower(pixel_values, grid_thw=grid_thw)
 
         # merge
-        image_embeds = self.multi_modal_projector(image_embeds)
-        for i, _image_embeds in enumerate(deepstack_image_embeds):
-            _image_embeds = self.multi_modal_projector(_image_embeds)
-            deepstack_image_embeds[i] = _image_embeds
+        image_embeds, deepstack_image_embeds = self.multi_modal_projector(image_embeds, deepstack_image_embeds)
 
         split_sizes = (grid_thw.prod(-1) // self.vision_tower.spatial_merge_size ** 2).tolist()
         image_embeds = torch.split(image_embeds, split_sizes)
         return image_embeds, deepstack_image_embeds
 
     def get_placeholder_mask(
-            self,
-            input_ids: torch.Tensor,
-            inputs_embeds: torch.Tensor,
-            visual_features: torch.Tensor,
+        self,
+        input_ids: torch.Tensor,
+        inputs_embeds: torch.Tensor,
+        visual_features: torch.Tensor,
     ):
         """
         Obtains multimodal placeholder mask from `input_ids` or `inputs_embeds`, and checks that the placeholder token count is
@@ -179,7 +175,7 @@ class Qwen3VLForConditionalGeneration(BaseModel):
         else:
             # 构建假数据，考虑到 moe 特性，最好不要构建全 0 数据
             pixel_values = torch.randn(4, 1536, device=inputs_embeds.device, dtype=inputs_embeds.dtype)
-            image_grid_thw = torch.tensor([1, 2, 2], device=inputs_embeds.device)
+            image_grid_thw = torch.tensor([[1, 2, 2]], device=inputs_embeds.device)
             viusal_embeds, _ = self.get_visual_features(pixel_values, image_grid_thw)
             viusal_embeds = torch.cat(viusal_embeds, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
             inputs_embeds = inputs_embeds + viusal_embeds.sum() * 0.0

@@ -114,7 +114,7 @@ class Qwen3VLVisionAttention(nn.Module):
         self.num_key_value_groups = 1  # needed for eager attention
         self.qkv = nn.Linear(self.dim, self.dim * 3, bias=True)
         self.proj = nn.Linear(self.dim, self.dim)
-        self.scaling = self.head_dim**-0.5
+        self.scale = self.head_dim ** -0.5
         self.config = config
         self.attention_dropout = 0.0
         self.attn_impl_func = attn_impl_mapping[config.attn_impl]
@@ -429,7 +429,7 @@ class Qwen3VLVisionModel(BaseModel):
         seq_len, _ = hidden_states.size()
         hidden_states = hidden_states.reshape(seq_len, -1)
         rotary_pos_emb = rotary_pos_emb.reshape(seq_len, -1)
-        emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
+        emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1).to(hidden_states.device)
         position_embeddings = (emb.cos(), emb.sin())
 
         cu_seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]).cumsum(
