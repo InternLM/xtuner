@@ -106,6 +106,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         max_length: int | None = None,
         hash: str | None = None,
         only_prompt: bool = False,
+        template_name: str = "intern-s1",
     ):
         assert isinstance(model_cfg, (InternS1BaseConfig, InternVLBaseConfig))
 
@@ -150,7 +151,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
             f"_{self.min_dynamic_patch}_{self.max_dynamic_patch}"
         )
 
-        self.chat_template = CHAT_TEMPLATE_MAP["intern-s1"]
+        self.chat_template = CHAT_TEMPLATE_MAP[template_name]
         if system_message is not None:
             self.chat_template.default_system = system_message
 
@@ -397,6 +398,7 @@ class InternS1VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
     max_num_frames: int = 24
     data_augment: bool = False
     oss_loader_cfg: OSSLoaderConfig | None = None
+    template_name: str = "intern-s1"
 
     def build(
         self, tokenizer, tokenizer_hash: str | None = None, anno_name: str = "", **kwargs
@@ -415,4 +417,5 @@ class InternS1VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
             max_num_frames=self.max_num_frames,
             oss_loader_cfg=self.oss_loader_cfg,
             hash=self.hash,
+            template_name=self.template_name,
         )

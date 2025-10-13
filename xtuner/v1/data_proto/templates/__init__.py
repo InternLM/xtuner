@@ -17,6 +17,18 @@ CHAT_TEMPLATE_MAP = {
         image_end_token="</img>",
         image_context_token="<IMG_CONTEXT>",
         video_context_token="<IMG_CONTEXT>",
+        default_system="你是书生大模型，英文名是Intern-S1，是由上海人工智能实验室开发的多模态大语言模型。",
+    ),
+    "internvl-3.5": HybridChatTemplate(
+        system="<|im_start|>system\n{system}<|im_end|>\n",
+        user="<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n",
+        assistant="{assistant}<|im_end|>",
+        stop_words=["<|im_end|>"],
+        image_start_token="<img>",
+        image_end_token="</img>",
+        image_context_token="<IMG_CONTEXT>",
+        video_context_token="<IMG_CONTEXT>",
+        default_system="你是书生·万象，英文名是InternVL，是由上海人工智能实验室、清华大学及多家合作单位联合开发的多模态大语言模型。",
     ),
     "qwen3-vl": HybridChatTemplate(
         system="<|im_start|>system\n{system}<|im_end|>\n",
