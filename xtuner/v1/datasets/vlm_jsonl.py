@@ -1,8 +1,6 @@
 import json
 import os
 
-import torch
-
 from xtuner.v1.utils import get_logger
 
 from .jsonl import JsonlDataset
