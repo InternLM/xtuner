@@ -57,7 +57,10 @@ class RolloutWorker(SingleAcceleratorWorker):
         self.server_func: Callable
         self.endpoints: dict[str, str] = dict()
         # handle stream response
-        self.client = httpx.AsyncClient(timeout=self.config.rollout_timeout)
+        limits = httpx.Limits(
+            max_connections=int(os.environ.get("XTUNER_MAX_CONCURRENCY", 2000)), max_keepalive_connections=100
+        )
+        self.client = httpx.AsyncClient(limits=limits, timeout=self.config.rollout_timeout)
         self.paused = False
         self.server_task = None
         self.engine_bundle_idxs: list[int] = []
