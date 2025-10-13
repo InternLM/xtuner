@@ -59,7 +59,6 @@ class TransformerConfig(PydanticBaseModel):
     intermediate_size: Annotated[int, Parameter(group="model")]
     rms_norm_eps: Annotated[float, Parameter(group="model")]
     rope_theta: Annotated[float, Parameter(group="model")]  # required by transformers's build rope
-    rope_scaling: Annotated[dict | None, Parameter(group="model")] = None
     hidden_act: Annotated[str, Parameter(group="model")]  # key defined in `transformers.activations.ACT2CLS`
     attention: MLAConfig | MHAConfig
     mlp_bias: Annotated[bool, Parameter(group="model")] = False

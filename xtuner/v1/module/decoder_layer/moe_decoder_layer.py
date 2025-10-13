@@ -207,7 +207,7 @@ class MoEDecoderLayer(nn.Module):
             hidden_size=hidden_size,
             layer_idx=layer_idx,
             generate_config=generate_config,
-            rope_scaling=rope_scaling_cfg,
+            rope_scaling_cfg=rope_scaling_cfg,
             layer_type=layer_type,
             float8_cfg=float8_cfg,
         )
