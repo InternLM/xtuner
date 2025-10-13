@@ -241,7 +241,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
             input_ids = tokenized["input_ids"]
             labels = tokenized["labels"]
             input_ids, _ = self._truncated_input_and_labels(input_ids, labels)
-            assert (input_ids == self.image_token_id).sum() == sum(num_image_tokens), f'ERROR: image tokens are truncated'
+            assert (torch.tensor(input_ids) == self.image_token_id).sum() == sum(num_image_tokens), f'ERROR: image tokens are truncated'
             return {"num_tokens": len(input_ids)}
         except Exception as e:
             print(
@@ -295,7 +295,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         input_ids = tokenized["input_ids"]
         labels = tokenized["labels"]
         input_ids, labels = self._truncated_input_and_labels(input_ids, labels)
-        assert (input_ids == self.image_token_id).sum() == sum(num_image_tokens), f'ERROR: image tokens are truncated'
+        assert (torch.tensor(input_ids) == self.image_token_id).sum() == sum(num_image_tokens), f'ERROR: image tokens are truncated'
         ret = InternS1DataItem(
             input_ids=input_ids,
             labels=labels,
@@ -324,7 +324,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
             input_ids = tokenized["input_ids"]
             labels = tokenized["labels"]
             input_ids, _ = self._truncated_input_and_labels(input_ids, labels)
-            assert (input_ids == self.image_token_id).sum() == sum(num_image_tokens), f'ERROR: video tokens are truncated'
+            assert (torch.tensor(input_ids) == self.image_token_id).sum() == sum(num_image_tokens), f'ERROR: video tokens are truncated'
             return {"num_tokens": len(input_ids)}
         except Exception as e:
             print(
@@ -374,7 +374,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         input_ids = tokenized["input_ids"]
         labels = tokenized["labels"]
         input_ids, labels = self._truncated_input_and_labels(input_ids, labels)
-        assert (input_ids == self.image_token_id).sum() == sum(num_image_tokens), f'ERROR: video tokens are truncated'
+        assert (torch.tensor(input_ids) == self.image_token_id).sum() == sum(num_image_tokens), f'ERROR: video tokens are truncated'
         ret = InternS1DataItem(
             input_ids=input_ids,
             labels=labels,
