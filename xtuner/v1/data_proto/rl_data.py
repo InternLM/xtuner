@@ -73,7 +73,7 @@ class RLRolloutResponseItem(BaseModel):
     response_len: Optional[List[int]] = None
     num_return_tokens: Optional[int] = None
     finish_reason: Optional[str] = None
-    logprobs: Optional[List[Any]] = None
+    logprobs: Optional[List[float]] = None
     extra_info: Dict[str, Any] = dict()
 
 
@@ -88,7 +88,7 @@ class RLJudgerResponseItem(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     uid: Optional[int] = None
-    reward: Dict[str, Any] = dict()
+    reward: Dict[str, Any] = Field(default_factory=lambda: {"score": 0.0, "val": 0.0})
     extra_info: Dict[str, Any] = dict()
 
 

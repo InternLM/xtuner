@@ -1,4 +1,3 @@
-import os
 import threading
 from itertools import cycle
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -117,9 +116,6 @@ class RolloutController:
                 ]
             )
         )
-        # note: sglang infer with tp>1 will be supported as soon.
-        if os.environ.get("XTUNER_USE_SGLANG", "0") == "1":
-            assert self.config.tensor_parallel_size == 1, "tp_size > 1 is not supported for SGLang now."
         self.worker_server_urls = list(worker_server_urls_map.values())
         self.worker_cycler = cycle(self.active_rollout_workers)
         return engine_mesh_list, worker_server_urls_map

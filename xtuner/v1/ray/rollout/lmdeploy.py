@@ -70,7 +70,7 @@ class LMDeployWorker(RolloutWorker):
         self.endpoints["response"] = "text"
         self.endpoints["sleep"] = "sleep"
         self.endpoints["wake_up"] = "wakeup"
-        self.tokenizer = AutoTokenizer.from_pretrained(self.config.tokenizer_path)
+        self.tokenizer = AutoTokenizer.from_pretrained(self.config.tokenizer_path, trust_remote_code=True)
         self.api_keys = self.config.api_key
         self.model_name = self.config.model_name
 

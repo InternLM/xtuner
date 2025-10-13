@@ -70,7 +70,7 @@ def compute_reward(response, label, extra_info):
     ground_truth = label
     answer = extract_solution(predict_str)
     if answer is None:
-        return 0
+        return {"score": 0}
     else:
         if answer == ground_truth:
             return {"score": extra_info["score"]}

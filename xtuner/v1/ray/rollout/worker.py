@@ -63,7 +63,7 @@ class RolloutWorker(SingleAcceleratorWorker):
         self.engine_bundle_idxs: list[int] = []
         self.server_process: Optional[multiprocessing.Process] = None
         self.logger = get_logger()
-        self.tokenizer = AutoTokenizer.from_pretrained(self.config.tokenizer_path)
+        self.tokenizer = AutoTokenizer.from_pretrained(self.config.tokenizer_path, trust_remote_code=True)
         self.print_flag = True  # only print once
 
     def init_dist_port(self):
@@ -320,8 +320,6 @@ class RolloutWorker(SingleAcceleratorWorker):
                 if extra_params["stream"]
                 else await self._handle_non_stream_response(uid, sample_params, response)
             )
-            if rollout_response is None:
-                return failed_rollout_response
             return rollout_response
 
         except httpx.RequestError as e:
@@ -335,7 +333,7 @@ class RolloutWorker(SingleAcceleratorWorker):
             if response:
                 await response.aclose()
 
-    async def _handle_stream_response(self, uid, sample_params, response) -> RLRolloutResponseItem | None:
+    async def _handle_stream_response(self, uid, sample_params, response) -> RLRolloutResponseItem:
         last_trajectory = ""
         last_token_ids = []
         last_logprobs = []
@@ -370,7 +368,10 @@ class RolloutWorker(SingleAcceleratorWorker):
                 continue
             except Exception as e:
                 self.logger.error(f"Error processing chunk for {uid}: {chunk}, error: {e}")
-                return None
+                return RLRolloutResponseItem(
+                    response="",
+                    finish_reason="failed",
+                )
 
         assert finish_reason in ["stop", "length", "tool_call", "paused", "failed"], (
             f"Unexpected finish_reason: {finish_reason}"
@@ -386,11 +387,13 @@ class RolloutWorker(SingleAcceleratorWorker):
 
     async def _handle_non_stream_response(self, uid, sample_params, response) -> RLRolloutResponseItem:
         response = response.json()
-        last_token_ids = response["output_ids"]
-        last_logprobs = response["meta_info"]["output_token_logprobs"]
-        assert len(last_token_ids) <= sample_params["max_tokens"], (
-            f"生成长度超过限制，生成长度 {len(last_token_ids)}，限制 {sample_params['max_tokens']}"
-        )
+
+        if "output_token_logprobs" in response["meta_info"]:
+            last_token_ids = [item[1] for item in response["meta_info"]["output_token_logprobs"]]
+            last_logprobs = [item[0] for item in response["meta_info"]["output_token_logprobs"]]
+            assert len(last_token_ids) <= sample_params["max_tokens"], (
+                f"生成长度超过限制，生成长度 {len(last_token_ids)}，限制 {sample_params['max_tokens']}"
+            )
         last_trajectory = response["text"]
         finish_reason = response["meta_info"]["finish_reason"]["type"]
         rollout_response = RLRolloutResponseItem(

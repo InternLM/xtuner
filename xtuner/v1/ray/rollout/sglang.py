@@ -29,7 +29,7 @@ class SGLangWorker(RolloutWorker):
         self.endpoints["health_generate"] = "health_generate"
         self.endpoints["generate"] = "generate"
         self.endpoints["v1/chat/completions"] = "v1/chat/completions"
-        self.tokenizer = AutoTokenizer.from_pretrained(self.config.model_path)
+        self.tokenizer = AutoTokenizer.from_pretrained(self.config.model_path, trust_remote_code=True)
         self.api_keys = self.config.api_key
         self.model_name = self.config.model_name
 
@@ -52,6 +52,7 @@ class SGLangWorker(RolloutWorker):
         payload = {"model": self.model_name}
         if stream:
             self.logger.warning("Using stream mode for SGLangWorker is not supported yet.")
+            raise NotImplementedError("Streaming mode is not supported for SGLangWorker.")
         else:
             if "return_token_ids" in extra_params and extra_params["return_token_ids"]:
                 if input_ids is not None:

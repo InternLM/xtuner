@@ -54,10 +54,9 @@ def pg_loss_fn(
     check_config(["cliprange_low", "cliprange_high"], policy_loss_cfg)
     cliprange_low = policy_loss_cfg["cliprange_low"]
     cliprange_high = policy_loss_cfg["cliprange_high"]
-    clip_ratio_c = policy_loss_cfg["clip_ratio_c"] if "clip_ratio_c" in policy_loss_cfg else 3.0
-    log_prob_diff_min = policy_loss_cfg["log_prob_diff_min"] if "log_prob_diff_min" in policy_loss_cfg else -20.0
-    log_prob_diff_max = policy_loss_cfg["log_prob_diff_max"] if "log_prob_diff_max" in policy_loss_cfg else 20.0
-
+    clip_ratio_c = policy_loss_cfg.get("clip_ratio_c", 3.0)
+    log_prob_diff_min = policy_loss_cfg.get("log_prob_diff_min", -20.0)
+    log_prob_diff_max = policy_loss_cfg.get("log_prob_diff_max", 20.0)
     advantages = advantages.to(log_prob.dtype)
     negative_approx_kl = log_prob - old_log_prob.detach()
     # Clamp negative_approx_kl for stability

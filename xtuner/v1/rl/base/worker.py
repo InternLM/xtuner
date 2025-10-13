@@ -695,20 +695,45 @@ class TrainingWorker(SingleAcceleratorWorker):
                 use_flattened_tensor_bucket = False
 
             monkey_patch_torch_reductions()
-            if use_flattened_tensor_bucket:
-                flattened_tensor_bucket = FlattenedTensorBucket(named_tensors=state_dict)
-                metadata = flattened_tensor_bucket.get_metadata()
+            if self.rollout_cfg_info["tp"] == 1:
+                if use_flattened_tensor_bucket:
+                    flattened_tensor_bucket = FlattenedTensorBucket(named_tensors=state_dict)
+                    metadata = flattened_tensor_bucket.get_metadata()
 
-                flattened_tensor_data = {
-                    "flattened_tensor": flattened_tensor_bucket.get_flattened_tensor(),
-                    "metadata": metadata,
-                }
-                serialized_data = MultiprocessingSerializer.serialize(flattened_tensor_data, output_str=True)
+                    flattened_tensor_data = {
+                        "flattened_tensor": flattened_tensor_bucket.get_flattened_tensor(),
+                        "metadata": metadata,
+                    }
+                    serialized_data = MultiprocessingSerializer.serialize(flattened_tensor_data, output_str=True)
+                else:
+                    serialized_data = MultiprocessingSerializer.serialize(state_dict, output_str=True)
+
+                serialized_data = [serialized_data]
             else:
-                serialized_data = MultiprocessingSerializer.serialize(state_dict, output_str=True)
+                serialized_data = [None] * self.rollout_cfg_info["tp"]
+                if use_flattened_tensor_bucket:
+                    flattened_tensor_bucket = FlattenedTensorBucket(named_tensors=state_dict)
+                    metadata = flattened_tensor_bucket.get_metadata()
 
-            # TODO: 支持 tp
-            serialized_data = [serialized_data]
+                    flattened_tensor_data = {
+                        "flattened_tensor": flattened_tensor_bucket.get_flattened_tensor(),
+                        "metadata": metadata,
+                    }
+                    tp_serialized_data = MultiprocessingSerializer.serialize(flattened_tensor_data, output_str=True)
+                    dist.gather_object(
+                        tp_serialized_data,
+                        serialized_data if dist.get_rank() == head_rank else None,
+                        dst=head_rank,
+                        group=cpu_group,
+                    )
+                else:
+                    tp_serialized_data = MultiprocessingSerializer.serialize(state_dict, output_str=True)
+                    dist.gather_object(
+                        tp_serialized_data,
+                        serialized_data if dist.get_rank() == head_rank else None,
+                        dst=head_rank,
+                        group=cpu_group,
+                    )
 
         if dist.get_rank() == head_rank:
             headers = {

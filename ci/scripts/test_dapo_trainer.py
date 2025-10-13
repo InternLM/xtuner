@@ -41,6 +41,9 @@ os.environ['XTUNER_USE_FA3'] = "1"
 if os.environ['XTUNER_USE_FA3'] == "1":
     from flash_attn_interface import flash_attn_3_cuda
 
+def dapo_compute_metric(samples):
+    return {"accuracy": sum(s.env.judger.reward["acc"] > 0 for s in samples) / len(samples)}
+
 def parse_args():
     parser = argparse.ArgumentParser(description="VLLM Rollout Test Script")
     parser.add_argument("--total-epochs", type=int)
@@ -91,13 +94,13 @@ def main(args):
         model_name=os.path.basename(args.model_path).lower(),
         tokenizer_path=args.model_path,
         rollout_cross_node_comm=False,
-        tensor_parallel_size=1,  # TODO： sglang 暂时写死
+        tensor_parallel_size=4,  
         expert_parallel_size=1,
         gpus_per_node=args.gpus_per_node,  # gpu: 8, npu: 16
         dtype="bfloat16",
         skip_load_weights=False,
         launch_server_method=launch_server_method,
-        gpu_memory_utilization=0.7,
+        gpu_memory_utilization=0.8,
     )
     dataflow_config = DataFlowConfig(
         env="test",
@@ -146,7 +149,7 @@ def main(args):
         max_concurrent=args.max_concurrent,
         eval_sample_ratio=args.evaluate_ratio,
         evaluate_step=args.evaluate_step,
-        compute_metric_func=None,
+        compute_metric_func=dapo_compute_metric,
         sample_params=SampleParams(
             top_p=0.7,
             temperature=1.0,
