@@ -83,10 +83,10 @@ def replace_video_token(messages: ChatMessages, chat_template: HybridChatTemplat
                             text = text.replace(IMAGE_TOKEN_ALIAS, image_tokens)
                             current_image_idx += n_frames
                         c.text = text
-        # if current_image_idx < num_image, it means <image> placeholder is less than num_image
-        assert current_image_idx == len(num_image_token_list), (
-            f"ERROR: current_image_idx: {current_image_idx} != num_image: {len(num_image_token_list)}"
-        )
+    # if current_image_idx < num_image, it means <image> placeholder is less than num_image
+    assert current_image_idx == len(num_image_token_list), (
+        f"ERROR: current_image_idx: {current_image_idx} != num_image: {len(num_image_token_list)}"
+    )
 
 
 class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
@@ -129,6 +129,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         self.min_dynamic_patch = min_num
         self.min_num_frames = min_num_frames
         self.max_num_frames = max_num_frames
+        self.image_token_id = model_cfg.image_token_id
 
         self.dynamic_image_size = model_cfg.dynamic_image_size
         self.use_thumbnail = model_cfg.use_thumbnail
@@ -240,6 +241,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
             input_ids = tokenized["input_ids"]
             labels = tokenized["labels"]
             input_ids, _ = self._truncated_input_and_labels(input_ids, labels)
+            assert (input_ids == self.image_token_id).sum() == sum(num_image_tokens), f'ERROR: image tokens are truncated'
             return {"num_tokens": len(input_ids)}
         except Exception as e:
             print(
@@ -293,6 +295,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         input_ids = tokenized["input_ids"]
         labels = tokenized["labels"]
         input_ids, labels = self._truncated_input_and_labels(input_ids, labels)
+        assert (input_ids == self.image_token_id).sum() == sum(num_image_tokens), f'ERROR: image tokens are truncated'
         ret = InternS1DataItem(
             input_ids=input_ids,
             labels=labels,
@@ -321,6 +324,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
             input_ids = tokenized["input_ids"]
             labels = tokenized["labels"]
             input_ids, _ = self._truncated_input_and_labels(input_ids, labels)
+            assert (input_ids == self.image_token_id).sum() == sum(num_image_tokens), f'ERROR: video tokens are truncated'
             return {"num_tokens": len(input_ids)}
         except Exception as e:
             print(
@@ -370,6 +374,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         input_ids = tokenized["input_ids"]
         labels = tokenized["labels"]
         input_ids, labels = self._truncated_input_and_labels(input_ids, labels)
+        assert (input_ids == self.image_token_id).sum() == sum(num_image_tokens), f'ERROR: video tokens are truncated'
         ret = InternS1DataItem(
             input_ids=input_ids,
             labels=labels,
