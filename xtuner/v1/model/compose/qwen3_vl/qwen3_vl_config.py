@@ -95,3 +95,15 @@ class Qwen3VLMoE30BA3Config(Qwen3VLBaseConfig):
         rope_scaling_cfg=RopeScalingConfig(rope_type='qwen3_vl',
                                            mrope_section=[24, 20, 20])
     )
+
+    @property
+    def hf_config(self):
+        # TODO(pppppM) Support saving HuggingFace format config
+        logger.warning(
+            f"{type(self)} does not support conversion to HuggingFace config format. "
+            "Only the original HuggingFace config will be retained in the saved HuggingFace format checkpoint. "
+            f"If you have changed the default values in {type(self)}, it may cause the config in the saved "
+            "HuggingFace format checkpoint to not match the weights."
+        )
+        return None
+

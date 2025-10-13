@@ -16,6 +16,7 @@ from .modeling_vision import init_world_mesh
 from typing_extensions import override
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.model.moe.moe import MoEModelOutputs
+from xtuner.v1.model.moe.qwen3vl_text import Qwen3VLTextMoE
 from xtuner.v1.float8.float8_handler import Float8Handler
 
 logger = get_logger()
@@ -108,6 +109,31 @@ class Qwen3VLForConditionalGeneration(BaseModel):
         if strict:
             if missing:
                 raise RuntimeError(f"Missing parameters from {hf_path}: {list(missing)}. ")
+
+    # llm 中的 param_to_safetensor 不会被触发，只能重写
+    def param_to_safetensor(
+        self,
+        safetensor: torch.Tensor,
+        hf_param_name: str,
+    ):
+        assert isinstance(hf_param_name, str)
+        if isinstance(self.language_model, Qwen3VLTextMoE):
+            if "gate_up_proj" in hf_param_name:
+                # xtuner: num_experts * 2 * expert_dim, hidden_size
+                # hf: num_experts, hidden_size, 2 * expert_dim
+                num_experts = self.language_model.config.n_routed_experts
+                hidden_size = safetensor.size(1)
+                safetensor = safetensor.reshape(num_experts, -1, hidden_size)  # num_experts, 2 * expert_dim, hidden_size
+                safetensor = safetensor.transpose(1, 2).contiguous()  # num_experts, hidden_size, 2 * expert_dim
+            elif "down_proj" in hf_param_name:
+                # xtuner: num_experts * hidden_size, expert_dim
+                # hf: num_experts, expert_dim, hidden_size
+                num_experts = self.language_model.config.n_routed_experts
+                expert_dim = safetensor.size(1)
+                safetensor = safetensor.reshape(num_experts, -1, expert_dim).transpose(1, 2).contiguous()
+        else:
+            safetensor = super().param_to_safetensor(safetensor, hf_param_name)
+        return safetensor
 
     def scale_and_reduce_grad(self):
         self.language_model.scale_and_reduce_grad()
