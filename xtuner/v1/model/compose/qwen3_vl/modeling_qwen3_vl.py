@@ -1,10 +1,9 @@
 import torch 
 from xtuner.v1.model import BaseModel
-from type import Optional
 from .qwen3_vl_config import Qwen3VLBaseConfig
 from .modeling_vision import Qwen3VLVisionModel
 from .modeling_projector import Qwen3VLProjector
-
+from pathlib import Path
 from xtuner.v1.loss import CELossContext
 from torch.distributed.fsdp import (
     CPUOffloadPolicy,
@@ -12,6 +11,15 @@ from torch.distributed.fsdp import (
     fully_shard,
 )
 from xtuner.v1.model.moe.moe import SequenceContext
+from xtuner.v1.utils import get_logger
+from .modeling_vision import init_world_mesh
+from typing_extensions import override
+from xtuner.v1.config import FSDPConfig
+from xtuner.v1.model.moe.moe import MoEModelOutputs
+from xtuner.v1.float8.float8_handler import Float8Handler
+
+
+logger = get_logger()
 
 
 class Qwen3VLForConditionalGeneration(BaseModel):
@@ -26,7 +34,94 @@ class Qwen3VLForConditionalGeneration(BaseModel):
         self.multi_modal_projector = Qwen3VLProjector(config.projector_config)
         
         self.language_model = config.text_config.build()
-        
+        # TODO(YHC): This is a hack to make the language model compatible with HF
+        _hf_prefix = "model.language_model."
+        self.language_model.to_hf_key_list = types.MethodType(to_hf_key_list_wrapper(  # type: ignore
+            fn=self.language_model.to_hf_key_list,
+            convertor=lambda x: x.replace('model.', _hf_prefix)),
+            self.language_model)
+        self.language_model._init_load_spec()
+
+        self._hf_path: Path | None = None
+
+        # Note: global load spec mapping for save_hf
+        self.load_spec_mapping = {}
+        for key, value in self.vision_tower.load_spec_mapping.items():
+            self.load_spec_mapping['vision_tower.' + key] = value
+        for key, value in self.multi_modal_projector.load_spec_mapping.items():
+            self.load_spec_mapping['multi_modal_projector.' + key] = value
+        for key, value in self.language_model.load_spec_mapping.items():
+            self.load_spec_mapping['language_model.' + key] = value
+
+        self._freeze_modules()
+
+    def _freeze_modules(self):
+        freeze_vision = self.config.freeze_vision
+        if freeze_vision:
+            self.vision_tower.requires_grad_(False)
+            self.vision_tower.eval()
+            logger.info("Freeze vision tower")
+        freeze_projector = self.config.freeze_projector
+        if freeze_projector:
+            self.multi_modal_projector.requires_grad_(False)
+            self.multi_modal_projector.eval()
+            logger.info("Freeze multi modal projector")
+        freeze_language = self.config.freeze_language
+        if freeze_language:
+            self.language_model.requires_grad_(False)
+            self.language_model.eval()
+            logger.info("Freeze language model")
+
+    @override
+    def init_weights(self) -> None:
+        self.vision_tower.init_weights()
+        self.language_model.init_weights()
+        self.multi_modal_projector.init_weights()
+
+    def fully_shard(
+        self,
+        fsdp_config: FSDPConfig,
+        float8_handler: Float8Handler | None = None,
+    ):
+        self.fsdp_config = fsdp_config
+        # TODO: 判断其余模块是否已经被 fsdp 切分了
+
+        mp_policy = MixedPrecisionPolicy(
+            param_dtype=fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
+        )
+
+        self.fsdp_mesh = init_world_mesh()
+        # Note: 非常关键，不能删除这个 assert
+        assert self.fsdp_mesh is not None
+
+        fully_shard(
+            self,
+            mesh=self.fsdp_mesh,
+            mp_policy=mp_policy,
+            reshard_after_forward=fsdp_config.reshard_after_forward,
+            offload_policy=CPUOffloadPolicy() if fsdp_config.cpu_offload else None,
+        )
+        self._to_empty_meta()
+        return self
+
+    def from_hf(self, hf_path: str | Path, strict=True):
+        self._hf_path = Path(hf_path)
+
+        if isinstance(hf_path, Path):
+            hf_path = str(hf_path)
+
+        _, _, missing_llm_keys = self.language_model.from_hf(hf_path,  strict=False)
+        _, _, missing_vision_keys = self.vision_tower.from_hf(hf_path,  strict=False)
+        _, _, missing_project_keys = self.multi_modal_projector.from_hf(hf_path, strict=False)
+
+        missing = missing_llm_keys | missing_vision_keys | missing_project_keys
+        if strict:
+            if missing:
+                raise RuntimeError(f"Missing parameters from {hf_path}: {list(missing)}. ")
+
+    def scale_and_reduce_grad(self):
+        self.language_model.scale_and_reduce_grad()
+
     def get_visual_features(self, pixel_values: torch.FloatTensor, image_grid_thw: torch.LongTensor):
         """
         Encodes images into continuous embeddings that can be forwarded to the language model. The deepstack visual features are also returned.
@@ -106,4 +201,3 @@ class Qwen3VLForConditionalGeneration(BaseModel):
             loss_ctx
         )
         return outputs
- 

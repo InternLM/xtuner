@@ -1,7 +1,7 @@
 from pydantic import BaseModel, ConfigDict
 from typing_extensions import Self
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, Optional
+from typing import Literal, Optional
 from xtuner.v1.float8 import Float8Config
 from xtuner.v1.model import TransformerConfig, Qwen3MoE30BA3Config
 from mmengine import is_installed
@@ -47,7 +47,7 @@ class Qwen3VLProjectorConfig(BaseModel):
     vision_hidden_size: int = 1152
     text_hidden_size: int = 3584
     spatial_merge_size: int = 2
-    use_postshuffle_norm: bool = True
+    deepstack_visual_indexes: list[int] = [8, 16, 24],
     float8_cfg: Optional["Float8Config"] = None
 
     def build(self):
@@ -74,9 +74,9 @@ class Qwen3VLBaseConfig(BaseModel):
     freeze_language: bool = False
 
     def build(self):
-        from .modeling_intern_s1 import InternS1ForConditionalGeneration
+        from .modeling_qwen3_vl import Qwen3VLForConditionalGeneration
 
-        return InternS1ForConditionalGeneration(self)
+        return Qwen3VLForConditionalGeneration(self)
 
     @classmethod
     def from_hf(cls, hf_path: str | Path) -> Self:

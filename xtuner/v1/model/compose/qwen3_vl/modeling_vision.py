@@ -1,10 +1,40 @@
+from typing import List
 from xtuner.v1.ops.act_fn import get_act_fn
 import torch.nn as nn
 import torch
+from typing_extensions import override
 from .qwen3_vl_config import Qwen3VLVisionConfig
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_device, get_torch_device_module, init_params
 from xtuner.v1.ops.attn_imp import attn_impl_mapping
 import torch.nn.functional as F
+from pathlib import Path
+from xtuner.v1.model import BaseModel
+from functools import partial
+from xtuner.v1.config import FSDPConfig
+from torch.distributed.fsdp import (
+    CPUOffloadPolicy,
+    MixedPrecisionPolicy,
+    fully_shard,
+)
+from xtuner.v1.float8.float8_handler import Float8Handler
+from torch.distributed.device_mesh import init_device_mesh
+import torch.distributed as dist
+from xtuner.v1.utils.compile import maybe_compile
+from xtuner.v1.model.utils.checkpointing import checkpoint_wrapper
+from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl
+from tqdm import tqdm
+
+DEVICE = get_device()
+DEVICE_MODULE = get_torch_device_module()
+
+
+def init_world_mesh():
+    device = DEVICE
+    world_size = dist.get_world_size()
+
+    # TODO: Support hsdp_sharding_size
+    fsdp_mesh = init_device_mesh(device, (world_size,))
+    return fsdp_mesh
 
 
 class Qwen3VLVisionMLP(nn.Module):
@@ -87,7 +117,6 @@ class Qwen3VLVisionAttention(nn.Module):
         self.scaling = self.head_dim**-0.5
         self.config = config
         self.attention_dropout = 0.0
-        self.is_causal = False
         self.attn_impl_func = attn_impl_mapping[config.attn_impl]
     
     def forward(
@@ -134,8 +163,9 @@ class Qwen3VLVisionLayer(nn.Module):
         self.norm1 = nn.LayerNorm(config.hidden_size, eps=1e-6)
         self.norm2 = nn.LayerNorm(config.hidden_size, eps=1e-6)
         self.attn = Qwen3VLVisionAttention(config=config)
-        self.mlp = Qwen3VLVisionMLP(config=config)    
-    
+        self.mlp = Qwen3VLVisionMLP(config=config)
+
+    @maybe_compile(fullgraph=True)
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -151,7 +181,9 @@ class Qwen3VLVisionLayer(nn.Module):
         return hidden_states
 
 
-class Qwen3VLVisionModel(nn.Module):
+class Qwen3VLVisionModel(BaseModel):
+    config: Qwen3VLVisionConfig
+
     def __init__(self, config: Qwen3VLVisionConfig) -> None:
         super().__init__()
         self.config = config
@@ -164,13 +196,128 @@ class Qwen3VLVisionModel(nn.Module):
         self.pos_embed = nn.Embedding(config.num_position_embeddings, config.hidden_size)
         self.num_grid_per_side = int(config.num_position_embeddings**0.5)
 
-        head_dim = config.hidden_size // config.num_attention_heads
-        self.rotary_pos_emb = Qwen3VLVisionRotaryEmbedding(head_dim // 2)
+        self.rotary_pos_emb = self.build_rotary_embedding(config)
 
         self.blocks = nn.ModuleList([Qwen3VLVisionLayer(config) for _ in range(config.depth)])
 
         self.deepstack_visual_indexes = config.deepstack_visual_indexes
-    
+
+        self._hf_prefix = "model.visual."
+        self._init_load_spec()
+
+    def build_rotary_embedding(self, config: Qwen3VLVisionConfig):
+        head_dim = config.hidden_size // config.num_attention_heads
+        return Qwen3VLVisionRotaryEmbedding(head_dim // 2)
+
+    @torch.no_grad()
+    def init_weights(self):
+        # If the model is trained from scratch, this will be triggered. It has not been strictly tested.
+        initialized_params: set[str] = set()
+
+        init_params(self.patch_embed.proj.weight,
+                    partial(torch.nn.init.normal_, mean=0.0, std=self.config.initializer_range))
+        initialized_params.add(f"patch_embed.proj.weight")
+        if self.patch_embed.proj.bias is not None:
+            init_params(self.patch_embed.proj.bias, torch.nn.init.zeros_)
+            initialized_params.add(f"patch_embed.proj.bias")
+
+        init_params(self.pos_embed.weight,
+                    partial(torch.nn.init.normal_, mean=0.0, std=self.config.initializer_range))
+        initialized_params.add(f"pos_embed.weight")
+
+        for layer_idx, layer in enumerate(self.blocks):
+            for name, module in layer.named_modules():
+                if isinstance(module, nn.Linear):
+                    init_params(module.weight,
+                                partial(torch.nn.init.normal_, mean=0.0, std=self.config.initializer_range))
+                    initialized_params.add(f"blocks.{layer_idx}.{name}.weight")
+                    if module.bias is not None:
+                        init_params(module.bias, torch.nn.init.zeros_)
+                        initialized_params.add(f"blocks.{layer_idx}.{name}.bias")
+
+                elif isinstance(module, nn.LayerNorm):
+                    init_params(module.weight, torch.nn.init.ones_)
+                    init_params(module.bias, torch.nn.init.zeros_)
+                    initialized_params.add(f"blocks.{layer_idx}.{name}.weight")
+                    initialized_params.add(f"blocks.{layer_idx}.{name}.bias")
+
+        expected_param_name = {self._clean_param_name(name) for name, _ in self.named_parameters()}
+        if (missing := expected_param_name - initialized_params):
+            raise RuntimeError(f"{missing} is not initialized")
+
+    def to_hf_key_list(self, key: str) -> list[str]:
+        return [self._hf_prefix + key]
+
+    @override
+    def from_hf(self, hf_path: str | Path, strict: bool = True) -> tuple:
+        loaded_keys, unloaded_keys, missing_keys = super().from_hf(hf_path, strict)
+        # If model is built on meta device, we need to rebuild rotary embedding since from_hf will not
+        # load the `inv_freq` of RotaryEmbedding which is a inpersisitent buffer.
+        self.rotary_pos_emb = self.build_rotary_embedding(self.config)
+        return loaded_keys, unloaded_keys, missing_keys
+
+    @override
+    def fully_shard(
+        self,
+        fsdp_config: FSDPConfig,
+        float8_handler: Float8Handler | None = None,
+    ):
+        self.fsdp_config = fsdp_config
+        assert float8_handler is None
+
+        mp_policy = MixedPrecisionPolicy(
+            param_dtype=fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
+        )
+
+        # NOTE: 在 cpu_offload 模式下，mesh 应该是 cuda 的，在 meta fully_shard 后在调用 .to_empty(device=cpu)
+        self.fsdp_mesh = init_world_mesh()
+        assert self.fsdp_mesh is not None
+
+        if fsdp_config.requires_grad:
+            for module in self.modules():
+                for p_name, param in module.named_parameters(recurse=False):
+                    if param.requires_grad:
+                        param_fp32 = torch.nn.Parameter(param.to(dtype=torch.float32))
+                        setattr(module, p_name, param_fp32)
+        else:
+            for param in self.parameters():
+                param.requires_grad = False
+
+        self.rotary_pos_emb = self.build_rotary_embedding(self.config)
+        self._maybe_compile_layers()
+
+        recompute_ratio = 1.0
+        num_recompute_layers = int(len(self.blocks) * recompute_ratio)
+        for layer_idx in tqdm(list(range(len(self.blocks))), desc="[Vision Fully Shard]"):
+            layer = self.blocks[layer_idx]
+
+            if layer_idx < num_recompute_layers:
+                layer = checkpoint_wrapper(layer, checkpoint_impl=CheckpointImpl.REENTRANT)
+
+            self.blocks[layer_idx] = layer
+
+            fully_shard(
+                layer,
+                mesh=self.fsdp_mesh,
+                mp_policy=mp_policy,
+                reshard_after_forward=True,
+                offload_policy=CPUOffloadPolicy()
+                if fsdp_config.cpu_offload
+                else None,
+            )
+
+        for layer_cur, layer_next in zip(self.blocks[:-1],  self.blocks[1:]):
+            layer_cur.set_modules_to_forward_prefetch([layer_next])
+
+        fully_shard(
+            self,
+            mesh=self.fsdp_mesh,
+            mp_policy=mp_policy,
+            reshard_after_forward=True,
+            offload_policy=CPUOffloadPolicy() if fsdp_config.cpu_offload else None,
+        )
+        return self
+
     def fast_pos_embed_interpolate(self, grid_thw):
         grid_ts, grid_hs, grid_ws = grid_thw[:, 0], grid_thw[:, 1], grid_thw[:, 2]
 
@@ -271,7 +418,7 @@ class Qwen3VLVisionModel(nn.Module):
         embeddings = embeddings.flatten(1)
         return embeddings
 
-    def forward(self, hidden_states: torch.Tensor, grid_thw: torch.Tensor) -> torch.Tensor, list[torch.Tensor]:
+    def forward(self, hidden_states: torch.Tensor, grid_thw: torch.Tensor) -> tuple[torch.Tensor, list[torch.Tensor]]:
         hidden_states = self.patch_embed(hidden_states)
 
         pos_embeds = self.fast_pos_embed_interpolate(grid_thw)
@@ -303,5 +450,3 @@ class Qwen3VLVisionModel(nn.Module):
                 deepstack_feature_lists.append(deepstack_feature)
      
         return hidden_states, deepstack_feature_lists
-        
-    
