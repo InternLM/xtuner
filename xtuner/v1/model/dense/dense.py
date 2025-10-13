@@ -87,25 +87,14 @@ class Dense(BaseModel):
         output: dict = {}
         if self.config.return_hidden_states:
             output["hidden_states"] = []
-            
-        # QwenVL-3
-        deepstack_visual_embeds=seq_ctx.deepstack_visual_embeds
-        visual_pos_masks=seq_ctx.visual_pos_masks
-        
+
         for idx, decoder_layer in self.layers.items():
             hidden_states = decoder_layer(
                 hidden_states,
                 position_embeddings=position_embeddings,
                 seq_ctx=seq_ctx,
             )
-            
-            if deepstack_visual_embeds is not None and idx in range(len(deepstack_visual_embeds)):
-                hidden_states = self._deepstack_process(
-                    hidden_states,
-                    visual_pos_masks,
-                    deepstack_visual_embeds[idx],
-                )
-            
+
             if self.config.return_hidden_states:
                 output["hidden_states"].append(hidden_states)
 

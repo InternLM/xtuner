@@ -3,7 +3,8 @@ from typing_extensions import Self
 from pathlib import Path
 from typing import Literal, Optional
 from xtuner.v1.float8 import Float8Config
-from xtuner.v1.model import TransformerConfig, Qwen3MoE30BA3Config
+from xtuner.v1.model.base import TransformerConfig
+from xtuner.v1.model.moe.qwen3vl_text import Qwen3VLTextMoE30BA3Config
 from mmengine import is_installed
 from xtuner.v1.utils import get_logger
 from xtuner.v1.module.rope import RopeScalingConfig
@@ -24,10 +25,10 @@ class Qwen3VLVisionConfig(BaseModel):
     num_hidden_layers: int = 24
     hidden_act: str = "gelu_pytorch_tanh"
     patch_size: int = 16
-    spatial_merge_size: int = 2,
-    temporal_patch_size: int = 2,
-    num_position_embeddings: int = 2304,
-    deepstack_visual_indexes: list[int] = [8, 16, 24],
+    spatial_merge_size: int = 2
+    temporal_patch_size: int = 2
+    num_position_embeddings: int = 2304
+    deepstack_visual_indexes: list[int] = [8, 16, 24]
     initializer_range: float = 0.02
     float8_cfg: Optional["Float8Config"] = None
     attn_impl: Literal["flash_attention", "flex_attention", "eager_attention"] = "flash_attention"
@@ -48,7 +49,7 @@ class Qwen3VLProjectorConfig(BaseModel):
     vision_hidden_size: int = 1152
     text_hidden_size: int = 3584
     spatial_merge_size: int = 2
-    deepstack_visual_indexes: list[int] = [8, 16, 24],
+    deepstack_visual_indexes: list[int] = [8, 16, 24]
     float8_cfg: Optional["Float8Config"] = None
 
     def build(self):
@@ -87,7 +88,7 @@ class Qwen3VLBaseConfig(BaseModel):
 class Qwen3VLMoE30BA3Config(Qwen3VLBaseConfig):
     vision_config: Qwen3VLVisionConfig = Qwen3VLVisionConfig()
     projector_config: Qwen3VLProjectorConfig = Qwen3VLProjectorConfig()
-    text_config: Qwen3MoE30BA3Config = Qwen3MoE30BA3Config(
+    text_config: Qwen3VLTextMoE30BA3Config = Qwen3VLTextMoE30BA3Config(
         rope_type='qwen3_vl',
         max_position_embeddings=262144,
         rope_theta=5000000,

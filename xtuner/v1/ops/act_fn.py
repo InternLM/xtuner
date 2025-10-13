@@ -1,6 +1,6 @@
 import torch
 from torch.nn import functional as F
-
+from functools import partial
 
 def native_swiglu(fused_x: torch.Tensor, split_dim=-1) -> torch.Tensor:
     x1, x2 = torch.chunk(fused_x, 2, dim=split_dim)
@@ -22,13 +22,16 @@ def native_clipped_swiglu(fused_x: torch.Tensor, split_dim=-1, alpha=1.702, limi
     return gated_output
 
 
-def native_gelu(x: torch.Tensor) -> torch.Tensor:
+def native_gelu(x: torch.Tensor, approximate: str | None = None) -> torch.Tensor:
+    if approximate is not None:
+        return F.gelu(x, approximate=approximate)
     return F.gelu(x)
 
 
-def npu_gelu(x: torch.Tensor) -> torch.Tensor:
+def npu_gelu(x: torch.Tensor, approximate: str | None = None) -> torch.Tensor:
     import torch_npu
-
+    if approximate is not None:
+        return torch_npu.npu_gelu(x, approximate=approximate)
     return torch_npu.npu_gelu(x)
 
 
@@ -44,12 +47,14 @@ act_fn_type_map_cuda = {
     "swiglu": native_swiglu,
     "clipped_swiglu": native_clipped_swiglu,
     "gelu": native_gelu,
+    "gelu_pytorch_tanh": partial(native_gelu, approximate="tanh"),
     "silu": native_silu,
 }
 act_fn_type_map_npu = {
     "swiglu": npu_swiglu,
     "clipped_swiglu": npu_clipped_swiglu,
     "gelu": npu_gelu,
+    "gelu_pytorch_tanh": partial(npu_gelu, approximate="tanh"),
     "silu": native_silu,
 }
 

@@ -29,17 +29,8 @@ class Qwen3VLForConditionalGeneration(BaseModel):
         self.config = config
 
         self.vision_tower = Qwen3VLVisionModel(config.vision_config)
-
         self.multi_modal_projector = Qwen3VLProjector(config.projector_config)
-
         self.language_model = config.text_config.build()
-        # TODO(YHC): This is a hack to make the language model compatible with HF
-        _hf_prefix = "model.language_model."
-        self.language_model.to_hf_key_list = types.MethodType(to_hf_key_list_wrapper(  # type: ignore
-            fn=self.language_model.to_hf_key_list,
-            convertor=lambda x: x.replace('model.', _hf_prefix)),
-            self.language_model)
-        self.language_model._init_load_spec()
 
         self._hf_path: Path | None = None
 
