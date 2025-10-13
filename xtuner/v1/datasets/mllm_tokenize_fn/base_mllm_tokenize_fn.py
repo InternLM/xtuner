@@ -1,6 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import os
-from typing import Any, TypeVar
+from typing import Any, Literal, TypeVar
 
 import xxhash
 from PIL import Image
@@ -71,14 +71,13 @@ def replace_image_token(
                             text = text.replace(IMAGE_TOKEN_ALIAS, image_tokens, 1)
                             current_image_idx += 1
                         c.text = text
-        # if current_image_idx < num_image, it means <image> placeholder is less than num_image
-        assert current_image_idx == len(num_image_token_list), (
-            f"ERROR: current_image_idx: {current_image_idx} != num_image: {len(num_image_token_list)}"
-        )
+    # if current_image_idx < num_image, it means <image> placeholder is less than num_image
+    assert current_image_idx == len(num_image_token_list), (
+        f"ERROR: current_image_idx: {current_image_idx} != num_image: {len(num_image_token_list)}"
+    )
 
 
 def load_image(image_path: str):
-    # Load the image using tcs_loader if available, otherwise use PIL
     return Image.open(image_path).convert("RGB")
 
 
@@ -193,3 +192,8 @@ class BaseMLLMTokenizeFnConfig(BaseModel):
         self, tokenizer, tokenizer_hash: str | None = None, anno_name: str = "", **kwargs
     ) -> BaseMLLMTokenizeFunction:
         raise NotImplementedError("The 'build' method must be implemented.")
+
+
+class OSSLoaderConfig(BaseModel):
+    backend: Literal["petrel"] = "petrel"
+    backend_kwargs: dict = {}

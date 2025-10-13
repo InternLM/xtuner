@@ -20,7 +20,7 @@ class TestMLLMTokenizeFn(TestCase):
     def test_intern_vl_single_image(self):
         data_path = 'tests/resource/mllm_sft_single_image_example_data.jsonl'
         total_step = 5
-        with open(data_path) as f:
+        with open(data_path, encoding='utf-8') as f:
             for i, line in enumerate(f):
                 if i >= total_step:
                     break
@@ -49,40 +49,45 @@ class TestMLLMTokenizeFn(TestCase):
                 self.assertTrue(pixel_values_xtuner.shape, pixel_values_hf.shape)
 
     def test_intern_vl_multi_image(self):
-        data_path = 'tests/resource/mllm_sft_multi_image_example_data.jsonl'
-        total_step = 5
-        # input_ids 天然就对不齐,因为 hf 里面实现的是错误的。当多图时候，max_num 应该要缩小，但是 hf 里面是独立处理，导致 <IMG_CONTEXT> 数目必然对不上
-        with open(data_path) as f:
-            for i, line in enumerate(f):
-                if i >= total_step:
-                    break
-                raw_data = json.loads(line)
+        for data_path in ['tests/resource/mllm_sft_multi_image_example_data.jsonl', 'tests/resource/mllm_sft_multi_image_example_data2.jsonl']:
+            total_step = 5
+            # input_ids 天然就对不齐,因为 hf 里面实现的是错误的。当多图时候，max_num 应该要缩小，但是 hf 里面是独立处理，导致 <IMG_CONTEXT> 数目必然对不上
+            with open(data_path, encoding='utf-8') as f:
+                for i, line in enumerate(f):
+                    if i >= total_step:
+                        break
+                    raw_data = json.loads(line)
 
-                ret = self.tokenize_fn(raw_data, media_root='tests/')
-                input_ids_xtuner = ret['input_ids']
-                input_str = self.tokenize_fn.tokenizer.decode(input_ids_xtuner, skip_special_tokens=False)
-                input_str = input_str.replace('<IMG_CONTEXT>', '')
-                input_xtuner_str = input_str.replace('<img></img>', '<IMG_CONTEXT>')
+                    ret = self.tokenize_fn(raw_data, media_root='tests/')
+                    input_ids_xtuner = ret['input_ids']
+                    input_str = self.tokenize_fn.tokenizer.decode(input_ids_xtuner, skip_special_tokens=False)
+                    input_str = input_str.replace('<IMG_CONTEXT>', '')
+                    input_xtuner_str = input_str.replace('<img></img>', '<IMG_CONTEXT>')
+                    # to hf openai format
+                    messages = raw_data['messages']
+                    
+                    # 处理所有消息中的图片内容
+                    for msg in messages:
+                        if isinstance(msg['content'], list):
+                            # 处理包含图片的消息
+                            for content_item in msg['content']:
+                                if isinstance(content_item, dict) and 'image_url' in content_item:
+                                    content_item['type'] = 'image'
+                                    content_item['path'] = 'tests/' + content_item['image_url']['url']
+                                    del content_item['image_url']
+                                elif isinstance(content_item, dict) and 'text' in content_item:
+                                    # 处理文本内容中的 <IMG_CONTEXT>
+                                    content_item['text'] = content_item['text'].replace('<IMG_CONTEXT>\n', '')
+                        else:
+                            # 处理纯文本消息
+                            msg['content'] = [{"type": "text", "text": msg['content']}]
 
-                # to hf openai format
-                messages = raw_data['messages']
-                messages[0]['content'][0]['type'] = 'image'
-                messages[0]['content'][0]['path'] = 'tests/' + messages[0]['content'][0]['image_url']['url']
-                messages[0]['content'][1]['type'] = 'image'
-                messages[0]['content'][1]['path'] = 'tests/' + messages[0]['content'][1]['image_url']['url']
-                del messages[0]['content'][0]['image_url']
-                del messages[0]['content'][1]['image_url']
-                messages[0]['content'][2]['text'] = messages[0]['content'][2]['text'].replace('<IMG_CONTEXT>\n', '')
-                for msg in messages:
-                    if not isinstance(msg['content'], list):
-                        msg['content'] = [{"type": "text", "text": msg['content']}]
-
-                input_hf_str = self.processor.apply_chat_template(messages, add_generation_prompt=False, tokenize=False, return_dict=True)
-                self.assertEqual(input_xtuner_str, input_hf_str)
+                    input_hf_str = self.processor.apply_chat_template(messages, add_generation_prompt=False, tokenize=False, return_dict=True)
+                    self.assertEqual(input_xtuner_str, input_hf_str)
 
     def test_intern_vl_video(self):
         data_path = 'tests/resource/mllm_sft_video_example_data.jsonl'
-        with open(data_path) as f:
+        with open(data_path, encoding='utf-8') as f:
             for i, line in enumerate(f):
                 if i >= 1:
                     break
@@ -107,7 +112,7 @@ class TestMLLMTokenizeFn(TestCase):
     def test_intern_vl_pure_text(self):
         data_path = 'tests/resource/mllm_sft_text_example_data.jsonl'
         total_step = 5
-        with open(data_path) as f:
+        with open(data_path, encoding='utf-8') as f:
             for i, line in enumerate(f):
                 if i >= total_step:
                     break

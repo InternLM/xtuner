@@ -6,6 +6,7 @@ from typing_extensions import Self
 from transformers.models.deepseek_v3 import DeepseekV3Config as HFDeepseekV3Config
 from xtuner.v1.model.moe.moe import BalancingLossConfig, MoEConfig, ZLossConfig
 from xtuner.v1.module.attention import MLAConfig
+from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.module.router.noaux_router import NoAuxRouterConfig
 from xtuner.v1.utils import get_logger
 
@@ -59,7 +60,7 @@ class DeepSeekV3Config(MoEConfig):
     intermediate_size: int = 18432
     rms_norm_eps: float = 1e-6
     rope_theta: float = 10000.0
-    rope_scaling: dict = dict(
+    rope_scaling_cfg: RopeScalingConfig = RopeScalingConfig(
         type="yarn",
         beta_fast=32,
         beta_slow=1,
@@ -79,9 +80,6 @@ class DeepSeekV3Config(MoEConfig):
         num_attention_heads=128,
         qkv_bias=False,
         o_bias=False,
-        # rope_scaling=dict(
-        #     type="yarn",beta_fast=32, beta_slow=1, factor=40, mscale=1.0, mscale_all_dim=1.0, original_max_position_embeddings=4096
-        # ),
     )
     tie_word_embeddings: bool = False
     n_routed_experts: int = 256
@@ -119,7 +117,7 @@ class DeepSeekV3Config(MoEConfig):
             intermediate_size=cfg.intermediate_size,
             rms_norm_eps=cfg.rms_norm_eps,
             rope_theta=cfg.rope_theta,
-            rope_scaling=dict(
+            rope_scaling_cfg=RopeScalingConfig(
                 type=cfg.rope_scaling.get("type", "yarn"),
                 beta_fast=cfg.rope_scaling.get("beta_fast", 32),
                 beta_slow=cfg.rope_scaling.get("beta_slow", 1),
@@ -176,7 +174,7 @@ class DeepSeekV3Config(MoEConfig):
             moe_intermediate_size=self.moe_intermediate_size,
             rms_norm_eps=self.rms_norm_eps,
             rope_theta=self.rope_theta,
-            rope_scaling=self.rope_scaling,
+            rope_scaling=self.rope_scaling_cfg.model_dump() if self.rope_scaling_cfg is not None else None,
             hidden_act=self.hidden_act,
             num_attention_heads=self.attention.num_attention_heads,
             kv_lora_rank=self.attention.kv_lora_rank,

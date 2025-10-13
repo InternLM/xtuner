@@ -14,7 +14,7 @@ from xtuner.v1.data_proto.templates import CHAT_TEMPLATE_MAP
 from xtuner.v1.utils import get_logger
 
 from ..data_item import CacheItem, QwenVL3DataItem
-from ..vlm_utils import apply_exif_orientation
+from ..utils import apply_exif_orientation
 from .base_mllm_tokenize_fn import BaseMLLMTokenizeFnConfig, BaseMLLMTokenizeFunction, load_image, replace_image_token
 from .qwenvl_rope2d import get_rope_index_3
 
