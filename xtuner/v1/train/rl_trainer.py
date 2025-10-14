@@ -15,7 +15,7 @@ from mmengine.dist import get_rank
 from mmengine.runner import set_random_seed
 from ray.actor import ActorClass
 
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.ray.accelerator import AcceleratorResourcesConfig, AutoAcceleratorWorkers
 from xtuner.v1.ray.config.worker import RolloutConfig
@@ -400,6 +400,8 @@ class RLTrainer:
                 rmtree(hf_dir)
 
         ray.get(self._train_controller.save_hf.remote(str(save_hf_path)))
+        if isinstance(self.tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast)):
+            self.tokenizer.save_pretrained(str(save_hf_path))
         meta_path = self.work_dir / self.META_PATH
 
         with meta_path.open("w") as f:
