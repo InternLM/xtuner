@@ -11,7 +11,7 @@ from xtuner.v1.ray.config import RolloutConfig
 from .worker import RolloutWorker
 
 
-@ray.remote
+@ray.remote(max_concurrency=int(os.environ.get("XTUNER_MAX_CONCURRENCY", 2000)))
 class SGLangWorker(RolloutWorker):
     def __init__(
         self,
@@ -151,6 +151,7 @@ class SGLangWorker(RolloutWorker):
         sglang_server_args.mem_fraction_static = self.config.gpu_memory_utilization
         # note: 非共卡模式下无需设置,共卡模式下需要offload必须设置，否则显存释放不了
         sglang_server_args.enable_memory_saver = True
+        sglang_server_args.max_running_requests = int(os.environ.get("XTUNER_MAX_CONCURRENCY", 2000))
 
         if sglang_server_args.nnodes > 1:
             sglang_server_args.node_rank = self.rank // self.config.gpus_per_node
