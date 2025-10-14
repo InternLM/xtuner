@@ -125,7 +125,7 @@ class Qwen3VLVisionAttention(nn.Module):
         cu_seqlens: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
     ):
-        seq_length = hidden_states.shape[0] # s,
+        seq_length = hidden_states.shape[0]  # s, d
         query_states, key_states, value_states = (
             self.qkv(hidden_states).reshape(seq_length, 3, self.num_heads, -1).permute(1, 0, 2, 3).unbind(0)
         )
@@ -139,9 +139,9 @@ class Qwen3VLVisionAttention(nn.Module):
         max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
         
         attn_output: torch.Tensor = self.attn_impl_func(  # type: ignore
-            query_states.transpose(1, 2),  # [b, n_head, seq, head_dim]
-            key_states.transpose(1, 2),
-            value_states.transpose(1, 2),
+            query_states,  # [b, n_head, seq, head_dim]
+            key_states,
+            value_states,
             cu_seqlens_q=cu_seqlens,
             cu_seqlens_k=cu_seqlens,
             max_seqlen_q=max_seqlen,
@@ -150,9 +150,9 @@ class Qwen3VLVisionAttention(nn.Module):
             softmax_scale=self.scale,
             causal=False,
             deterministic=XTUNER_DETERMINISTIC
-        )
+        )  # [b, seq, n_head, head_dim]
         
-        attn_output = attn_output.reshape(seq_length, -1).contiguous()
+        attn_output = attn_output[0].reshape(seq_length, -1).contiguous()  # s, d
         attn_output = self.proj(attn_output)
         return attn_output
 
