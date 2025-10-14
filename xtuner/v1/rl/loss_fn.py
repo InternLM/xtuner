@@ -45,8 +45,8 @@ def check_config(keys_needed: list[str], config: dict[str, Any]) -> None:
 
 @register_policy_loss("vanilla")
 def pg_loss_fn(
-    logprobs: torch.Tensor,
-    old_logprobs: torch.Tensor,
+    log_prob: torch.Tensor,
+    old_log_prob: torch.Tensor,
     advantages: torch.Tensor,
     loss_weights: torch.Tensor,
     policy_loss_cfg: dict,
@@ -54,12 +54,21 @@ def pg_loss_fn(
     check_config(["cliprange_low", "cliprange_high"], policy_loss_cfg)
     cliprange_low = policy_loss_cfg["cliprange_low"]
     cliprange_high = policy_loss_cfg["cliprange_high"]
-    ratio = (logprobs - old_logprobs.detach()).exp()
-    advantages = advantages.to(logprobs.dtype)
-    loss1 = -ratio * advantages
-    loss2 = -ratio.clamp(1 - cliprange_low, 1 + cliprange_high) * advantages
-    loss_max = torch.max(loss1, loss2)
-    loss = (loss_max * loss_weights.to(loss_max.dtype)).sum()
+    clip_ratio_c = policy_loss_cfg.get("clip_ratio_c", 3.0)
+    log_prob_diff_min = policy_loss_cfg.get("log_prob_diff_min", -20.0)
+    log_prob_diff_max = policy_loss_cfg.get("log_prob_diff_max", 20.0)
+    advantages = advantages.to(log_prob.dtype)
+    negative_approx_kl = log_prob - old_log_prob.detach()
+    # Clamp negative_approx_kl for stability
+    negative_approx_kl = torch.clamp(negative_approx_kl, min=log_prob_diff_min, max=log_prob_diff_max)
+    ratio = torch.exp(negative_approx_kl)
+    pg_losses1 = -ratio * advantages
+    pg_losses2 = -torch.clamp(ratio, 1 - cliprange_low, 1 + cliprange_high) * advantages
+    clip_pg_losses1 = torch.maximum(pg_losses1, pg_losses2)
+    pg_losses3 = -clip_ratio_c * advantages
+    clip_pg_losses2 = torch.min(pg_losses3, clip_pg_losses1)
+    pg_losses = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
+    loss = (pg_losses * loss_weights.to(pg_losses.dtype)).sum()
     return loss
 
 

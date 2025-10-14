@@ -1,5 +1,5 @@
 import asyncio
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import ray
 from cyclopts import Parameter
@@ -68,6 +68,7 @@ class DataFlowConfig(BaseModel):
         int, Parameter(help="Whether to enable async rollout_controller. 1 for enabled, 0 for disabled")
     ] = 0
     sample_params: Annotated[SampleParams, Parameter(help="Parameters for sampling from the model.")] = SampleParams()
+    extra_params: Annotated[Dict, Parameter(help="Extra parameters for rollout.")] = {}
 
 
 @ray.remote
@@ -142,7 +143,9 @@ class DataFlow:
             self.send_samples_count += 1
             self.logger.debug(f"Get 1 sample and dataflow have sent {self.send_samples_count} to rollout_controller")
             # step 2: env generate
-            group_data_items = await self.env_controller.run.remote(group_data_items, self.sample_params)  # type: ignore[attr-defined]
+            group_data_items = await self.env_controller.run.remote(  # type: ignore[attr-defined]
+                group_data_items, sample_params=self.sample_params, extra_params=self.extra_params
+            )
             # step 3: filter
             filtered_group_data_items = await self.replay_buffer.post_processor.remote(group_data_items)  # type: ignore[attr-defined]
             # step 4: add to replay buffer
@@ -229,6 +232,7 @@ class DataFlow:
         self,
         num: Optional[int] = None,
         sample_params: Optional[SampleParams] = None,
+        extra_params: Optional[Dict] = None,
         dump: bool = False,
         dump_path: Optional[str] = None,
         resume: bool = False,
@@ -250,6 +254,7 @@ class DataFlow:
         self.target_batch_size = num if num and num > 0 else self.config.global_batch_size
         self.logger.info(f"Target batch size set to {self.target_batch_size}.")
         self.sample_params = sample_params if sample_params else self.config.sample_params
+        self.extra_params = extra_params if extra_params else self.config.extra_params
         self.logger.info(f"Sample parameters set to {self.sample_params}.")
 
         if resume:

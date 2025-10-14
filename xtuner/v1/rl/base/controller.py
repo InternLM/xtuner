@@ -119,7 +119,7 @@ class TrainingController:
 
     def fit(self, data_batches: list[ColateItem], pack_max_length: int, rollout_idx: int):
         packed_data_batches = self._packing(data_batches, pack_max_length)
-        packed_data_batches = self._grouped_by_max_length(packed_data_batches)
+        # packed_data_batches = self._grouped_by_max_length(packed_data_batches)
 
         # todo: support round up
         num_packed_data_batches = len(packed_data_batches)

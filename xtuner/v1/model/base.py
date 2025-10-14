@@ -49,6 +49,7 @@ class TransformerConfig(PydanticBaseModel):
     model_config = ConfigDict(
         title="Base model config for xtuner",
         extra="allow",
+        protected_namespaces=(),
     )
     vocab_size: Annotated[int, Parameter(group="model")]
     max_position_embeddings: Annotated[int, Parameter(group="model")]

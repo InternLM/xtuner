@@ -8,11 +8,10 @@ from tqdm.auto import tqdm
 from typing_extensions import Annotated
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
-from xtuner.v1.data_proto.rl_data import RLDataFlowItem, RLDatasetItem
+from xtuner.v1.data_proto.rl_data import RLDataFlowItem, RLDatasetItem, SampleParams
 from xtuner.v1.datasets import build_datasets
 from xtuner.v1.datasets.config import DatasetConfigList
 from xtuner.v1.ray.environment import BaseEnvironment
-from xtuner.v1.ray.rollout import SampleParams
 from xtuner.v1.ray.utils import create_task
 from xtuner.v1.utils import get_logger
 
@@ -87,6 +86,10 @@ class EvaluatorConfig(BaseModel):
         Optional[Callable],
         Parameter(help="An optional function to filter or modify data groups after they are generated."),
     ] = None
+    sample_params: Annotated[
+        SampleParams,
+        Parameter(help="Sampling parameters for evaluation."),
+    ] = SampleParams()
 
 
 @ray.remote
@@ -107,6 +110,7 @@ class Evaluator:
                 generating responses.
         """
         self.config = config
+        self.sample_params = self.config.sample_params
         self.dataset = (
             build_datasets(config.dataset_cfg, config.tokenizer)[0]
             if isinstance(config.tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast))
@@ -116,6 +120,7 @@ class Evaluator:
         )
         self.dataloader = iter(self.dataset)
         self.env_controller = env_controller
+        self.failed_samples_count = 0
         self.return_list: List[RLDataFlowItem] = []
         if self.config.eval_sample_ratio > 0:
             self.eval_batch_size = int(len(self.dataset) * self.config.eval_sample_ratio)
@@ -140,7 +145,7 @@ class Evaluator:
         Returns:
             dict: A dictionary containing the accuracy score.
         """
-        return {"accuracy": sum(s.env.judger.reward["weighted_reward"] > 0 for s in samples) / len(samples)}
+        return {"accuracy": sum(s.env.judger.reward["score"] > 0 for s in samples) / len(samples)}
 
     async def eval_worker_task(self, sample: RLDataFlowItem):
         """A single worker task to evaluate one sample.
@@ -158,7 +163,7 @@ class Evaluator:
         """
         try:
             # note: In the evaluator, we convert the input sample to a list to adapt to the input format of single_turn_env
-            group_sample = await self.env_controller.run.remote([sample], self.sample_params)  # type: ignore[attr-defined]
+            group_sample = await self.env_controller.run.remote([sample], sample_params=self.sample_params)  # type: ignore[attr-defined]
             self.return_list.append(group_sample[0])
         except Exception as e:
             self.logger.error(f"Worker task failed with exception: {e}. Returning meta for retry.")
@@ -190,12 +195,16 @@ class Evaluator:
                     try:
                         data = next(self.dataloader)
                     except StopIteration:
-                        break
+                        self.dataloader = iter(self.dataset)
+                        data = next(self.dataloader)
+                        self.logger.warning("Restarting the evaluation dataset.")
                     data_item = RLDataFlowItem(data=RLDatasetItem(**data))
                     task = create_task(self.eval_worker_task(data_item))
                     waiting_tasks.add(task)
 
-                assert len(waiting_tasks) > 0
+                if len(waiting_tasks) == 0:
+                    break
+
                 done_tasks, pending_tasks = await asyncio.wait(
                     waiting_tasks, timeout=0.1, return_when=asyncio.FIRST_COMPLETED
                 )
@@ -208,19 +217,22 @@ class Evaluator:
                             pending_tasks.add(retry_task)
                         else:
                             self.logger.error(f"Max retry reached for {result.uid.action_id}. Not retrying.")
+                            self.failed_samples_count += 1
 
                 waiting_tasks = pending_tasks
 
             pbar.n = len(self.return_list)
             pbar.refresh()
 
-        self.logger.info("Target batch size reached. Pausing rollout controller.")
+        self.logger.info(
+            f"Target batch size reached, but {self.failed_samples_count} samples failed and were skipped. Pausing rollout controller."
+        )
         ray.get(self.env_controller.pause.remote())
 
         if waiting_tasks:
             await asyncio.wait_for(asyncio.gather(*waiting_tasks, return_exceptions=True), timeout=10)
 
-    async def run(self, sample_params: Optional[SampleParams] = None, return_samples=False):
+    async def run(self, return_samples=False):
         """Run the full evaluation process.
 
         This method resets the state, runs the concurrent task runner,
@@ -238,10 +250,6 @@ class Evaluator:
         """
         self.return_list = []
         self.dataloader = iter(self.dataset)
-        self.sample_params = sample_params if sample_params else SampleParams()
-        # set greedy sample for evaluator
-        self.sample_params.temperature = 0.0
-        self.sample_params.top_k = 1
         ray.get(self.env_controller.restart.remote())  # type: ignore[attr-defined]
         await self.concurrent_eval_task_runner()
         scores = self.compute_metric(self.return_list)
