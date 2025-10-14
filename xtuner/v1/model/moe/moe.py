@@ -377,7 +377,7 @@ class MoE(BaseModel):
         logits_list: list[torch.Tensor] = []
 
         for hidden_states, loss_ctx_single in zip(hidden_states_list, loss_ctx_list):
-            loss, logits = self.lm_head(hidden_states, loss_ctx_single)  # type: ignore
+            loss, (logits, _) = self.lm_head(hidden_states, loss_ctx_single)  # type: ignore
             loss_list.append(loss)
             if logits is not None:
                 logits_list.append(logits)

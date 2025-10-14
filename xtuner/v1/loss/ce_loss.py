@@ -167,7 +167,7 @@ class CELossContext(BaseLossContext[CELossContextInputItem]):
         head_weight: torch.Tensor,
         head_bias: torch.Tensor | None,
         loss_kwargs: CELossKwargs,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor | None, torch.Tensor | None]]:
         # We do linear forward here to simplify the implementation of chunk loss (saving memory).
         logits = F.linear(hidden_states, head_weight, head_bias)
         logits = logits.float()  # (bs, seq_len, vocab_size)
@@ -186,7 +186,7 @@ class CELossContext(BaseLossContext[CELossContextInputItem]):
             loss = F.cross_entropy(logits, shifted_labels, reduction="none", ignore_index=self.loss_cfg.ignore_idx)
             loss = (loss * loss_weight).sum()
 
-        return loss, logits
+        return loss, (logits, None)
 
     def chunk_mode(
         self,

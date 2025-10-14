@@ -1,5 +1,6 @@
 import itertools
 from collections import defaultdict
+from pathlib import Path
 from typing import Callable, Dict, List, Optional, Union
 from uuid import uuid4
 
@@ -84,6 +85,7 @@ class ReplayBufferConfig(BaseModel):
         dict,
         Parameter(help="Weights for different states in the replay buffer."),
     ] = {}
+    worker_log_dir: Annotated[Path, Parameter(help="Directory to save worker logs.")] = Path.cwd() / "work_dir"
 
 
 class Sampler:
@@ -172,7 +174,7 @@ class Sampler:
 class ReplayBufferStorage:
     """Handles the storage of experiences for the replay buffer."""
 
-    def __init__(self):
+    def __init__(self, worker_log_dir):
         """Initializes the data structures for storing replay data."""
         self._paused: List[int] = []  # List of paused action_id,
         self._returned: List[int] = []  # List of returned action_id,
@@ -186,7 +188,7 @@ class ReplayBufferStorage:
         self._action2observations: Dict[int, List[int]] = defaultdict(
             list
         )  # action_id: [observation_id, observation_id, ...]
-        self.logger = get_logger()
+        self.logger = get_logger(log_dir=worker_log_dir, tag="ReplayBuffer")
 
     def add(self, grouped_dataitem: List[RLDataFlowItem]):
         """Adds a group of data items to the storage.
@@ -272,7 +274,7 @@ class ReplayBufferStorage:
         observation_count = len(self._observations)
 
         log_message = (
-            "ReplayBufferStorage states:\n"
+            "[ReplayBuffer] ReplayBufferStorage states:\n"
             f"  - Rollout States: Returned={rollout_finished_count}, Paused={rollout_paused_count}\n"
             f"  - History Actions: {action_count}\n"
             f"  - History Observations: {observation_count}"
@@ -356,7 +358,7 @@ class ReplayBuffer:
         Args:
             config (ReplayBufferConfig): The configuration object.
         """
-        self.storage = ReplayBufferStorage()
+        self.storage = ReplayBufferStorage(config.worker_log_dir)
         self.tokenizer = config.tokenizer
         self.datasets = build_datasets(config.dataset_cfg, self.tokenizer)
 

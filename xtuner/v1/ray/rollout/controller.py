@@ -56,7 +56,7 @@ class RolloutController:
             )
         )
         self.print_params_flag = True
-        self.logger = get_logger()
+        self.logger = get_logger(log_dir=infer_config.worker_log_dir, tag="RolloutController")
 
     def get_rollout_info(self):
         """Get information about the current rollout setup.

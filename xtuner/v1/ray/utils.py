@@ -2,6 +2,7 @@ import asyncio
 import importlib
 import socket
 from asyncio import AbstractEventLoop, Task
+from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Coroutine, List, Optional, cast
 
 import ray
@@ -170,3 +171,13 @@ def create_task(
     for callback in done_callbacks:
         task.add_done_callback(callback)
     return task
+
+
+def init_rollout_logger(work_dir: Path, module_name: str):
+    from xtuner.v1.utils import get_logger
+
+    if not isinstance(work_dir, Path):
+        work_dir = Path(work_dir)
+    logger = get_logger(log_dir=work_dir, tag=module_name)
+    module_logger = logger.bind(tag=module_name)
+    return module_logger

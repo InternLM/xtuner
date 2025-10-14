@@ -65,7 +65,7 @@ class RolloutWorker(SingleAcceleratorWorker):
         self.server_task = None
         self.engine_bundle_idxs: list[int] = []
         self.server_process: Optional[multiprocessing.Process] = None
-        self.logger = get_logger()
+        self.logger = get_logger(log_dir=config.worker_log_dir, tag="RolloutWorker")
         self.tokenizer = AutoTokenizer.from_pretrained(self.config.tokenizer_path, trust_remote_code=True)
         self.print_flag = True  # only print once
 
@@ -139,7 +139,7 @@ class RolloutWorker(SingleAcceleratorWorker):
             "Authorization": f"Bearer {server_configs.api_key}",
         }
 
-        self.logger.info(f"launch server task on server_url: {self.server_url}")
+        self.logger.info(f"Launch server task on server_url: {self.server_url}")
 
         # note(@duanyanhui): launch server as multiprocessing for sglang temporarily
         if self.config.launch_server_method == "multiprocessing":
@@ -163,7 +163,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                     current_time = time.perf_counter()
                     if current_time - last_log_time >= 15:
                         self.logger.info(
-                            f"Still waiting for server to start... Elapsed time: {current_time - start_time:.2f}s"
+                            f"Waiting for server to start, Elapsed time: {current_time - start_time:.2f}s"
                         )
                         last_log_time = current_time
 
@@ -215,7 +215,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                     current_time = time.perf_counter()
                     if current_time - last_log_time >= 15:
                         self.logger.info(
-                            f"Still waiting for server to start... Elapsed time: {current_time - start_time:.2f}s"
+                            f"Waiting for server to start... Elapsed time: {current_time - start_time:.2f}s"
                         )
                         last_log_time = current_time
 
@@ -283,19 +283,16 @@ class RolloutWorker(SingleAcceleratorWorker):
             # todo: test streaming infer with return_token_ids
             extra_params["stream"] = False
             if self.print_flag:
-                self.logger.warning("streaming infer is not supported when return_token_ids is True")
+                self.logger.warning("Streaming infer is not supported when return_token_ids is True")
+                if os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "1":
+                    self.logger.warning("You should use lmdeploy main branch > v0.10.1 to support return_token_ids")
+                self.print_flag = False
         try:
             if format == "openai":
                 openai_prompts, openai_tools = prompts, tools
             else:
                 openai_prompts, openai_tools = self._adapt_input_to_openai_spec(prompts, tools, tool_choice)
             if "return_token_ids" in extra_params and extra_params["return_token_ids"]:
-                if os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "1":
-                    if self.print_flag:
-                        self.logger.warning(
-                            "you should use lmdeploy main branch > v0.10.1 to support return_token_ids"
-                        )
-                        self.print_flag = False
                 response = await self._create_request(
                     f"{self.server_url}/{self.endpoints['generate']}",
                     openai_prompts,

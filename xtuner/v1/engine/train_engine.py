@@ -20,6 +20,7 @@ from torch.distributed.checkpoint.state_dict import (
     set_optimizer_state_dict,
 )
 from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.nn.functional import all_reduce
 from torch.distributed.tensor.placement_types import Placement
 from torch.utils._foreach_utils import (
     _device_has_foreach_support,
@@ -245,6 +246,8 @@ class TrainEngine:
             logger.info(f"grad_accumulation_steps: {iters_per_step}")
             self._count += 1
 
+        grad_acc_loss = []
+        max_ratio = []
         for i in range(0, len(data_batches), intra_layer_micro_batch):
             data_batch = data_batches[i : i + intra_layer_micro_batch]
             seq_ctx_list = []
@@ -268,9 +271,15 @@ class TrainEngine:
 
             # llm loss has been global averaged
             llm_loss = output["loss"]
-            step_llm_loss += llm_loss.detach().clone()
+            max_ratio.append(output["max_ratio"].item())
+            grad_acc_loss.append(llm_loss.detach().clone().item())
+            step_loss += llm_loss.detach().clone()
+
+            if dist.is_initialized():
+                llm_loss = all_reduce(llm_loss, op=dist.ReduceOp.SUM, group=dist.group.WORLD)
 
             loss = llm_loss
+            step_llm_loss += llm_loss.detach().clone()
 
             if "balancing_loss" in output:
                 balancing_loss = output["balancing_loss"] / iters_per_step
@@ -295,7 +304,6 @@ class TrainEngine:
 
             del output
             loss.backward()
-            step_loss += loss.detach().clone()
 
         if moe_need_update_bias:
             avg_count_load = tokens_per_expert_global_for_bias.float().mean(1)
@@ -319,6 +327,8 @@ class TrainEngine:
             dist.all_reduce(reduced_z_loss.div_(dist.get_world_size()))
             loss_log["reduced_z_loss"] = reduced_z_loss.item()
         other_log["consumed_tokens"] = step_consumed_tokens.item()
+        other_log["grad_acc_loss"] = max(grad_acc_loss)  # type: ignore[assignment]
+        other_log["max_ratio"] = max(max_ratio)  # type: ignore[assignment]
         return loss_log, other_log
 
     def from_hf(self, hf_path: str | Path, strict: bool = False):

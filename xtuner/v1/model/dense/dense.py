@@ -89,9 +89,11 @@ class Dense(BaseModel):
 
         hidden_states = self.norm(hidden_states)
 
-        loss, logits = self.lm_head(hidden_states, loss_ctx)  # type: ignore
+        loss, (logits, max_ratio) = self.lm_head(hidden_states, loss_ctx)
         output["loss"] = loss
         output["logits"] = logits
+        if max_ratio is not None:
+            output["max_ratio"] = max_ratio
         return ModelOutputs(**output)  # type: ignore[typeddict-item]
 
     def build_embeddings(self, config: TransformerConfig):
