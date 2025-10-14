@@ -26,7 +26,7 @@ from .base_mllm_tokenize_fn import (
     replace_image_token,
 )
 from .intern_s1_vl_process import build_transform, dynamic_num_patch, dynamic_preprocess
-from .intern_s1_vl_utils import InternS1VLOSSLoader, read_frames_decord
+from .intern_s1_vl_utils import InternS1VLOSSLoader, read_interns1_vl_video
 
 
 logger = get_logger()
@@ -357,11 +357,9 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
                 random_frame_num=random_frame_num,
             )
         else:
-            assert video_path.endswith((".mp4", ".avi", ".mov", ".webm", ".mkv", ".ts", ".rmvb", ".flv"))
-            assert "s3://" not in video_path, "Please use oss_loader_cfg to load video from s3."
-            image_list = read_frames_decord(
+            image_list = read_interns1_vl_video(
                 video_path,
-                num_frames=self.max_num_frames,
+                max_num_frames=self.max_num_frames,
                 min_num_frames=self.min_num_frames,
                 sample="rand",
                 clip=data_item.get("clip", None),
