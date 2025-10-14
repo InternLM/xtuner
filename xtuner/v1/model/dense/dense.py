@@ -24,7 +24,7 @@ from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.loss import CELossContext
 from xtuner.v1.model.base import BaseModel, ModelOutputs, TransformerConfig
 from xtuner.v1.model.utils import checkpoint_wrapper
-from xtuner.v1.module import LMHead, RMSNorm, get_rope_embedding, RotaryEmbeddingProtocol
+from xtuner.v1.module import LMHead, RMSNorm, RotaryEmbeddingProtocol, get_rope_embedding
 from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayer
 from xtuner.v1.utils import (
     get_device,
@@ -67,7 +67,7 @@ class Dense(BaseModel):
         local_this = hidden_states[visual_pos_masks, :].clone() + visual_embeds
         hidden_states[visual_pos_masks, :] = local_this
         return hidden_states
-    
+
     def forward(
         self,
         seq_ctx: SequenceContext,  # todo(@yehaochen): support intra layer micro-batch
@@ -82,6 +82,7 @@ class Dense(BaseModel):
             hidden_states = seq_ctx.inputs_embeds
 
         # create position embeddings to be shared across the decoder layers
+        assert position_ids is not None
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
         output: dict = {}
@@ -143,7 +144,7 @@ class Dense(BaseModel):
 
     def _apply(self, fn, recurse: bool = True):
         super()._apply(fn)
-        self.rotary_emb.to(torch.float32)
+        self.rotary_emb.to(torch.float32)  # type: ignore
         return self
 
     @override

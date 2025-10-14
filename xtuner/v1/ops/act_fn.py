@@ -1,6 +1,8 @@
+from functools import partial
+
 import torch
 from torch.nn import functional as F
-from functools import partial
+
 
 def native_swiglu(fused_x: torch.Tensor, split_dim=-1) -> torch.Tensor:
     x1, x2 = torch.chunk(fused_x, 2, dim=split_dim)
@@ -30,6 +32,7 @@ def native_gelu(x: torch.Tensor, approximate: str | None = None) -> torch.Tensor
 
 def npu_gelu(x: torch.Tensor, approximate: str | None = None) -> torch.Tensor:
     import torch_npu
+
     if approximate is not None:
         return torch_npu.npu_gelu(x, approximate=approximate)
     return torch_npu.npu_gelu(x)

@@ -58,7 +58,7 @@ class Qwen3VLVisionPatchEmbed(nn.Module):
         self.in_channels = config.in_channels
         self.embed_dim = config.hidden_size
 
-        kernel_size = [self.temporal_patch_size, self.patch_size, self.patch_size]
+        kernel_size = (self.temporal_patch_size, self.patch_size, self.patch_size)
         self.proj = nn.Conv3d(self.in_channels, self.embed_dim, kernel_size=kernel_size, stride=kernel_size, bias=True)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:

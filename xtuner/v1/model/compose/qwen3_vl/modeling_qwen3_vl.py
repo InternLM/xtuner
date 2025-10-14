@@ -139,8 +139,8 @@ class Qwen3VLForConditionalGeneration(BaseModel):
         self.language_model.scale_and_reduce_grad()
 
     def get_visual_features(self, pixel_values: torch.Tensor, grid_thw: torch.Tensor):
-        """
-        Encodes images into continuous embeddings that can be forwarded to the language model. The deepstack visual features are also returned.
+        """Encodes images into continuous embeddings that can be forwarded to
+        the language model. The deepstack visual features are also returned.
 
         Args:
             pixel_values (`torch.FloatTensor` of shape `(batch_size, num_channels, image_size, image_size)`):
@@ -163,9 +163,11 @@ class Qwen3VLForConditionalGeneration(BaseModel):
         inputs_embeds: torch.Tensor,
         visual_features: torch.Tensor,
     ):
-        """
-        Obtains multimodal placeholder mask from `input_ids` or `inputs_embeds`, and checks that the placeholder token count is
-        equal to the length of multimodal features. If the lengths are different, an error is raised.
+        """Obtains multimodal placeholder mask from `input_ids` or
+        `inputs_embeds`, and checks that the placeholder token count is equal
+        to the length of multimodal features.
+
+        If the lengths are different, an error is raised.
         """
         special_image_mask = input_ids == self.config.image_token_id
         special_video_mask = input_ids == self.config.video_token_id
@@ -192,6 +194,7 @@ class Qwen3VLForConditionalGeneration(BaseModel):
         inputs_embeds = self.language_model.embed_tokens(input_ids)  # type: ignore
 
         if pixel_values is not None:
+            assert image_grid_thw is not None
             viusal_embeds, deepstack_visual_embeds = self.get_visual_features(pixel_values, image_grid_thw)
             viusal_embeds = torch.cat(viusal_embeds, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
             visual_pos_masks = self.get_placeholder_mask(
@@ -200,9 +203,9 @@ class Qwen3VLForConditionalGeneration(BaseModel):
             inputs_embeds = inputs_embeds.masked_scatter(visual_pos_masks, viusal_embeds)
         else:
             # 构建假数据，考虑到 moe 特性，最好不要构建全 0 数据
-            pixel_values = torch.randn(4, 1536, device=inputs_embeds.device, dtype=inputs_embeds.dtype)
+            pixel_values_dump = torch.randn(4, 1536, device=inputs_embeds.device, dtype=inputs_embeds.dtype)
             image_grid_thw = torch.tensor([[1, 2, 2]], device=inputs_embeds.device)
-            viusal_embeds, _ = self.get_visual_features(pixel_values, image_grid_thw)
+            viusal_embeds, _ = self.get_visual_features(pixel_values_dump, image_grid_thw)
             viusal_embeds = torch.cat(viusal_embeds, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
             inputs_embeds = inputs_embeds + viusal_embeds.sum() * 0.0
             deepstack_visual_embeds = None

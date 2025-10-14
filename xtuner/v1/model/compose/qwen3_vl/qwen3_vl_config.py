@@ -1,13 +1,16 @@
-from pydantic import BaseModel, ConfigDict
-from typing_extensions import Self
 from pathlib import Path
 from typing import Literal, Optional
+
+from mmengine import is_installed
+from pydantic import BaseModel, ConfigDict
+from typing_extensions import Self
+
 from xtuner.v1.float8 import Float8Config
 from xtuner.v1.model.base import TransformerConfig
 from xtuner.v1.model.moe.qwen3vl_text import Qwen3VLTextMoE30BA3Config
-from mmengine import is_installed
-from xtuner.v1.utils import get_logger
 from xtuner.v1.module.rope import RopeScalingConfig
+from xtuner.v1.utils import get_logger
+
 
 logger = get_logger()
 
@@ -89,11 +92,10 @@ class Qwen3VLMoE30BA3Config(Qwen3VLBaseConfig):
     vision_config: Qwen3VLVisionConfig = Qwen3VLVisionConfig()
     projector_config: Qwen3VLProjectorConfig = Qwen3VLProjectorConfig()
     text_config: Qwen3VLTextMoE30BA3Config = Qwen3VLTextMoE30BA3Config(
-        rope_type='qwen3_vl',
+        rope_type="qwen3_vl",
         max_position_embeddings=262144,
         rope_theta=5000000,
-        rope_scaling_cfg=RopeScalingConfig(rope_type='qwen3_vl',
-                                           mrope_section=[24, 20, 20])
+        rope_scaling_cfg=RopeScalingConfig(rope_type="qwen3_vl", mrope_section=[24, 20, 20]),
     )
 
     @property
@@ -106,4 +108,3 @@ class Qwen3VLMoE30BA3Config(Qwen3VLBaseConfig):
             "HuggingFace format checkpoint to not match the weights."
         )
         return None
-

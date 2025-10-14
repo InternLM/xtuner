@@ -1,7 +1,9 @@
-from typing import Literal, cast, Protocol
+from typing import Literal, Protocol, cast
+
 import torch
 import torch.nn as nn
 from pydantic import BaseModel
+from typing_extensions import overload
 
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 
@@ -31,12 +33,11 @@ class RotaryEmbeddingProtocol(Protocol):
     """Protocol for attention modules."""
 
     @torch.no_grad()
-    def forward(self, x: torch.Tensor, position_ids: torch.Tensor):
+    def forward(self, x: torch.Tensor, position_ids: torch.LongTensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Forward pass of the rope module."""
         ...
 
-    def __call__(self, x: torch.Tensor, position_ids: torch.Tensor) -> torch.Tensor:
-        ...
+    def __call__(self, x: torch.Tensor, position_ids: torch.LongTensor) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 
 class RotaryEmbedding(nn.Module):
@@ -60,7 +61,7 @@ class RotaryEmbedding(nn.Module):
         self.register_buffer("inv_freq", inv_freq, persistent=False)
         self.original_inv_freq = self.inv_freq
 
-    def _dynamic_frequency_update(self, position_ids: torch.Tensor, device: torch.device):
+    def _dynamic_frequency_update(self, position_ids: torch.LongTensor, device: torch.device):
         """Dynamic RoPE layers should recompute `inv_freq` in the following
         situations:
 
@@ -81,7 +82,7 @@ class RotaryEmbedding(nn.Module):
             self.max_seq_len_cached = self.original_max_seq_len
 
     @torch.no_grad()
-    def forward(self, x: torch.Tensor, position_ids: torch.Tensor):
+    def forward(self, x: torch.Tensor, position_ids: torch.LongTensor) -> tuple[torch.Tensor, torch.Tensor]:
         if "dynamic" in self.rope_type:
             self._dynamic_frequency_update(position_ids, device=x.device)
 
@@ -102,6 +103,13 @@ class RotaryEmbedding(nn.Module):
         sin = sin * self.attention_scaling
 
         return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
+
+    @overload  # type: ignore
+    def __call__(  # type: ignore
+        self, x: torch.Tensor, position_ids: torch.LongTensor
+    ) -> tuple[torch.Tensor, torch.Tensor]: ...
+
+    __call__ = nn.Module.__call__
 
 
 class Qwen3VLTextRotaryEmbedding(nn.Module):
@@ -130,6 +138,7 @@ class Qwen3VLTextRotaryEmbedding(nn.Module):
 
     def apply_interleaved_mrope(self, freqs, mrope_section):
         """Apply interleaved MRoPE to 3D rotary embeddings.
+
         Reorganizes frequency layout from chunked [TTT...HHH...WWW] to
         interleaved [THTHWHTHW...TT], preserving frequency continuity.
         args:
@@ -146,9 +155,9 @@ class Qwen3VLTextRotaryEmbedding(nn.Module):
         return freqs_t
 
     @torch.no_grad()
-    def forward(self, x: torch.Tensor, position_ids: torch.Tensor):
+    def forward(self, x: torch.Tensor, position_ids: torch.LongTensor) -> tuple[torch.Tensor, torch.Tensor]:
         if position_ids.ndim == 2:
-            position_ids = position_ids[None, ...].expand(3, position_ids.shape[0], -1)
+            position_ids = position_ids[None, ...].expand(3, position_ids.shape[0], -1)  # type: ignore
         inv_freq_expanded = self.inv_freq[None, None, :, None].float().expand(3, position_ids.shape[1], -1, 1)
         position_ids_expanded = position_ids[:, :, None, :].float()  # shape (3, bs, 1, positions)
 
@@ -162,9 +171,17 @@ class Qwen3VLTextRotaryEmbedding(nn.Module):
 
         return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
 
+    @overload  # type: ignore
+    def __call__(  # type: ignore
+        self, x: torch.Tensor, position_ids: torch.LongTensor
+    ) -> tuple[torch.Tensor, torch.Tensor]: ...
+
+    __call__ = nn.Module.__call__
+
 
 def get_rope_embedding(config, device=None) -> RotaryEmbeddingProtocol:
     from xtuner.v1.model import TransformerConfig
+
     config = cast(TransformerConfig, config)
     rope_scaling_cfg = config.rope_scaling_cfg
     if rope_scaling_cfg is not None and rope_scaling_cfg.type == "qwen3_vl":

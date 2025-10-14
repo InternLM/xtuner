@@ -26,7 +26,7 @@ model_mapping = {
     "gpt-oss-20b": GptOss21BA3P6Config(),
     "gpt-oss-120b": GptOss117BA5P8Config(),
     "internvl-3.5-8b-hf": InternVL3P5Dense8BConfig(),
-    "internvl-3.5-30b-a3b-hf": InternVL3P5MoE30BA3Config()
+    "internvl-3.5-30b-a3b-hf": InternVL3P5MoE30BA3Config(),
 }
 
 

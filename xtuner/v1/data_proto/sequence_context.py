@@ -268,7 +268,7 @@ class SequenceContext:
 
         if self.image_grid_thw is not None and hasattr(self.image_grid_thw, "to"):
             self.image_grid_thw = self.image_grid_thw.to(device)  # type: ignore
-        
+
         self.device = device
 
         return self

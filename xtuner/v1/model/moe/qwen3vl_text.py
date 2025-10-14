@@ -1,12 +1,15 @@
+import os
 import re
+
 import torch
-from .qwen3 import Qwen3MoE,Qwen3MoE30BA3Config
+
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.loss import CELossContext
-from .moe import MoEModelOutputs
-from xtuner.v1.utils.activation_offload import async_save_on_cpu
-import os
 from xtuner.v1.module import NoAuxRouterConfig
+from xtuner.v1.utils.activation_offload import async_save_on_cpu
+
+from .moe import MoEModelOutputs
+from .qwen3 import Qwen3MoE, Qwen3MoE30BA3Config
 
 
 class Qwen3VLTextMoE(Qwen3MoE):
@@ -96,9 +99,9 @@ class Qwen3VLTextMoE(Qwen3MoE):
         return safetensor
 
     def _forward(
-            self,
-            seq_ctx: SequenceContext,  # todo(@yehaochen): support intra layer micro-batch
-            loss_ctx: CELossContext | None,
+        self,
+        seq_ctx: SequenceContext,  # todo(@yehaochen): support intra layer micro-batch
+        loss_ctx: CELossContext | None,
     ) -> MoEModelOutputs:
         input_ids = seq_ctx.input_ids
         position_ids = seq_ctx.position_ids
@@ -109,6 +112,7 @@ class Qwen3VLTextMoE(Qwen3MoE):
             hidden_states = seq_ctx.inputs_embeds
 
         # create position embeddings to be shared across the decoder layers
+        assert position_ids is not None
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
         output: dict = {}  # type: ignore
@@ -133,11 +137,11 @@ class Qwen3VLTextMoE(Qwen3MoE):
                 if int(os.getenv("XTUNER_ACTIVATION_OFFLOAD", "0")) == 1:
                     offload_stream = decoder_layer._get_fsdp_state()._comm_ctx.all_gather_stream
                     with async_save_on_cpu(
-                            h2d_stream=offload_stream,
-                            d2h_stream=offload_stream,
-                            block_idx=int(idx),
-                            depth=len(self.layers),
-                            custom_check_fn=lambda x: x.data_ptr() == hidden_states.data_ptr(),
+                        h2d_stream=offload_stream,
+                        d2h_stream=offload_stream,
+                        block_idx=int(idx),
+                        depth=len(self.layers),
+                        custom_check_fn=lambda x: x.data_ptr() == hidden_states.data_ptr(),
                     ):
                         hidden_states, router_results = decoder_layer(
                             hidden_states,
@@ -155,6 +159,7 @@ class Qwen3VLTextMoE(Qwen3MoE):
                 output["router_logits"][f"layer{idx}"] = router_results
 
             if deepstack_visual_embeds is not None and idx in range(len(deepstack_visual_embeds)):
+                assert visual_pos_masks is not None
                 hidden_states = self._deepstack_process(
                     hidden_states,
                     visual_pos_masks,
