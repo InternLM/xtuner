@@ -1,6 +1,7 @@
 import copy
 import json
 import multiprocessing
+import os
 import time
 import uuid
 from abc import abstractmethod
@@ -11,6 +12,7 @@ import ray
 import requests  # type: ignore[import-untyped]
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
+from transformers import AutoTokenizer
 from xtuner.v1.data_proto.rl_data import RLRolloutResponseItem
 from xtuner.v1.ray import find_master_addr_and_port
 from xtuner.v1.ray.accelerator import AutoAcceleratorWorkers, SingleAcceleratorWorker
@@ -61,6 +63,8 @@ class RolloutWorker(SingleAcceleratorWorker):
         self.engine_bundle_idxs: list[int] = []
         self.server_process: Optional[multiprocessing.Process] = None
         self.logger = get_logger()
+        self.tokenizer = AutoTokenizer.from_pretrained(self.config.tokenizer_path, trust_remote_code=True)
+        self.print_flag = True  # only print once
 
     def init_dist_port(self):
         """Initialize distributed communication ports.
@@ -256,7 +260,8 @@ class RolloutWorker(SingleAcceleratorWorker):
 
     async def rollout_task(
         self,
-        prompts: Union[str, List[Dict[str, Any]]],
+        prompts: Union[str, List[Dict[str, Any]]] | None,
+        input_ids: List[int] | None,
         tools: List,
         tool_choice: str,
         sample_params: dict,
@@ -269,78 +274,51 @@ class RolloutWorker(SingleAcceleratorWorker):
             response="",
             finish_reason="failed",
         )
+        if "return_token_ids" in extra_params and extra_params["return_token_ids"]:
+            if os.environ.get("XTUNER_USE_VLLM", "0") == "1":
+                self.logger.error("VLLM backend does not support return token ids now")
+            # todo: test streaming infer with return_token_ids
+            extra_params["stream"] = False
+            if self.print_flag:
+                self.logger.warning("streaming infer is not supported when return_token_ids is True")
         try:
             if format == "openai":
                 openai_prompts, openai_tools = prompts, tools
             else:
                 openai_prompts, openai_tools = self._adapt_input_to_openai_spec(prompts, tools, tool_choice)
-            response = await self._create_request(
-                f"{self.server_url}/{self.endpoints['generate']}",
-                openai_prompts,
-                openai_tools,
-                tool_choice,
-                sample_params=sample_params,
-                extra_params=extra_params,
-            )
+            if "return_token_ids" in extra_params and extra_params["return_token_ids"]:
+                if os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "1":
+                    if self.print_flag:
+                        self.logger.warning(
+                            "you should use lmdeploy main branch > v0.10.1 to support return_token_ids"
+                        )
+                        self.print_flag = False
+                response = await self._create_request(
+                    f"{self.server_url}/{self.endpoints['generate']}",
+                    openai_prompts,
+                    input_ids,
+                    openai_tools,
+                    tool_choice,
+                    sample_params=sample_params,
+                    extra_params=extra_params,
+                )
+            else:
+                assert prompts is not None, "prompts should not be None when you call v1/chat/completions API"
+                response = await self._create_request(
+                    f"{self.server_url}/{self.endpoints['v1/chat/completions']}",
+                    openai_prompts,
+                    None,
+                    openai_tools,
+                    tool_choice,
+                    sample_params=sample_params,
+                    extra_params=extra_params,
+                )
             self.logger.debug(f" +++ send request {uid} to worker: {self.rank}")
-            if response.status_code != 200:
-                error_body = await response.atext()
-                self.logger.error(f"Request {uid} failed with status {response.status_code}: {error_body}")
-                return failed_rollout_response
 
-            last_trajectory = ""
-            last_token_ids = []
-            last_logprobs = []
-            finish_reason = ""
-
-            async for chunk in response.aiter_lines():
-                # chunk example
-                # data: {"id":"1","object":"chat.completion.chunk","created":1757495636,"model":"qwen3-8b","choices":[{"index":0,"delta":{"role":"assistant","content":"<think>","reasoning_content":null,"tool_calls":[]},"logprobs":null,"finish_reason":null}],"usage":null}
-                if not chunk.startswith("data:"):
-                    continue
-                try:
-                    chunk_data_str = chunk[len("data:") :].strip()
-                    if self.paused or chunk_data_str == "[DONE]":
-                        finish_reason = "paused" if self.paused else finish_reason
-                        break
-                    if not (chunk_data_str.startswith("{") and chunk_data_str.endswith("}")):
-                        continue
-
-                    chunk_data = json.loads(chunk_data_str)
-                    delta_content = chunk_data["choices"][0]["delta"].get("content")
-                    last_trajectory = last_trajectory + delta_content if delta_content else last_trajectory
-                    last_token_id = chunk_data["choices"][0]["delta"].get("gen_tokens")
-                    if last_token_id is not None:
-                        last_token_ids.extend(last_token_id)
-                    finish_reason = chunk_data["choices"][0].get("finish_reason")
-                    logprobs_content = chunk_data["choices"][0]["logprobs"]
-                    if logprobs_content is not None:
-                        for content_item in logprobs_content["content"]:
-                            last_logprobs.append(content_item["logprob"])
-                    # todo(@duanyanhui): remove appending stop tokens manually after lmdeploy support return stop_token_ids.
-                    if finish_reason == "stop":
-                        assert len(sample_params["stops"]) == 1
-                        last_trajectory += sample_params["stops"][0]
-                        if len(last_token_ids) > 0:
-                            last_token_ids.append(sample_params["stop_token_ids"][0])
-
-                except json.JSONDecodeError as e:
-                    self.logger.error(f"JSON decode error for chunk in request {uid}: {chunk}, error: {e}")
-                    continue
-                except Exception as e:
-                    self.logger.error(f"Error processing chunk for {uid}: {chunk}, error: {e}")
-                    return failed_rollout_response
-
-            assert finish_reason in ["stop", "length", "tool_call", "paused", "failed"], (
-                f"Unexpected finish_reason: {finish_reason}"
-            )
-            self.logger.debug(f" --- request {uid} finished with reason: {finish_reason}")
-            rollout_response = RLRolloutResponseItem(
-                response=last_trajectory,
-                response_ids=last_token_ids if len(last_token_ids) > 0 else None,
-                num_return_tokens=len(last_token_ids),
-                finish_reason=finish_reason,
-                logprobs=last_logprobs,
+            rollout_response = (
+                await self._handle_stream_response(uid, sample_params, response)
+                if extra_params["stream"]
+                else await self._handle_non_stream_response(uid, sample_params, response)
             )
             return rollout_response
 
@@ -355,9 +333,82 @@ class RolloutWorker(SingleAcceleratorWorker):
             if response:
                 await response.aclose()
 
+    async def _handle_stream_response(self, uid, sample_params, response) -> RLRolloutResponseItem:
+        last_trajectory = ""
+        last_token_ids = []
+        last_logprobs = []
+        finish_reason = ""
+        async for chunk in response.aiter_lines():
+            # chunk example
+            # data: {"id":"1","object":"chat.completion.chunk","created":1757495636,"model":"qwen3-8b","choices":[{"index":0,"delta":{"role":"assistant","content":"<think>","reasoning_content":null,"tool_calls":[]},"logprobs":null,"finish_reason":null}],"usage":null}
+            if not chunk.startswith("data:"):
+                continue
+            try:
+                chunk_data_str = chunk[len("data:") :].strip()
+                if self.paused or chunk_data_str == "[DONE]":
+                    finish_reason = "paused" if self.paused else finish_reason
+                    break
+                if not (chunk_data_str.startswith("{") and chunk_data_str.endswith("}")):
+                    continue
+
+                chunk_data = json.loads(chunk_data_str)
+                delta_content = chunk_data["choices"][0]["delta"].get("content")
+                last_trajectory = last_trajectory + delta_content if delta_content else last_trajectory
+                last_token_id = chunk_data["choices"][0]["delta"].get("gen_tokens")
+                if last_token_id is not None:
+                    last_token_ids.extend(last_token_id)
+                finish_reason = chunk_data["choices"][0].get("finish_reason")
+                logprobs_content = chunk_data["choices"][0]["logprobs"]
+                if logprobs_content is not None:
+                    for content_item in logprobs_content["content"]:
+                        last_logprobs.append(content_item["logprob"])
+
+            except json.JSONDecodeError as e:
+                self.logger.error(f"JSON decode error for chunk in request {uid}: {chunk}, error: {e}")
+                continue
+            except Exception as e:
+                self.logger.error(f"Error processing chunk for {uid}: {chunk}, error: {e}")
+                return RLRolloutResponseItem(
+                    response="",
+                    finish_reason="failed",
+                )
+
+        assert finish_reason in ["stop", "length", "tool_call", "paused", "failed"], (
+            f"Unexpected finish_reason: {finish_reason}"
+        )
+        rollout_response = RLRolloutResponseItem(
+            response=last_trajectory,
+            response_ids=last_token_ids if len(last_token_ids) > 0 else None,
+            num_return_tokens=len(last_token_ids) if len(last_token_ids) > 0 else None,
+            finish_reason=finish_reason,
+            logprobs=last_logprobs,
+        )
+        return rollout_response
+
+    async def _handle_non_stream_response(self, uid, sample_params, response) -> RLRolloutResponseItem:
+        response = response.json()
+
+        if "output_token_logprobs" in response["meta_info"]:
+            last_token_ids = [item[1] for item in response["meta_info"]["output_token_logprobs"]]
+            last_logprobs = [item[0] for item in response["meta_info"]["output_token_logprobs"]]
+            assert len(last_token_ids) <= sample_params["max_tokens"], (
+                f"生成长度超过限制，生成长度 {len(last_token_ids)}，限制 {sample_params['max_tokens']}"
+            )
+        last_trajectory = response["text"]
+        finish_reason = response["meta_info"]["finish_reason"]["type"]
+        rollout_response = RLRolloutResponseItem(
+            response=last_trajectory,
+            response_ids=last_token_ids if len(last_token_ids) > 0 else None,
+            num_return_tokens=len(last_token_ids) if len(last_token_ids) > 0 else None,
+            finish_reason=finish_reason,
+            logprobs=last_logprobs,
+        )
+        return rollout_response
+
     async def rollout(
         self,
-        prompt: Union[str, List[Dict[str, Any]]],
+        prompt: Union[str, List[Dict[str, Any]]] | None = None,
+        input_ids: Optional[List[int]] | None = None,
         tools: List = [],
         tool_choice: str = "auto",
         sample_params: dict = dict(),
@@ -373,7 +424,9 @@ class RolloutWorker(SingleAcceleratorWorker):
         Returns:
             The result of the `rollout_task`.
         """
-        return await self.rollout_task(prompt, tools, tool_choice, sample_params, extra_params, format=format)
+        return await self.rollout_task(
+            prompt, input_ids, tools, tool_choice, sample_params, extra_params, format=format
+        )
 
     def pause(self):
         """Pause the worker's generation process."""
@@ -410,7 +463,8 @@ class RolloutWorker(SingleAcceleratorWorker):
     async def _create_request(
         self,
         url: str,
-        prompt: Union[str, List[Dict[str, Any]]],
+        prompt: Union[str, List[Dict[str, Any]]] | None,
+        input_ids: List[int] | None,
         tools: List,
         tool_choice: str,
         sample_params: dict,
@@ -424,6 +478,14 @@ class RolloutWorker(SingleAcceleratorWorker):
 
     @abstractmethod
     def _transform_rollout_config_to_server_configs(self):
+        """Abstract method to transform rollout config to server configs.
+
+        Must be implemented by subclasses.
+        """
+        raise NotImplementedError("_transform_rollout_config_to_server_configs must be implemented in subclass")
+
+    @abstractmethod
+    def _transform_sample_params(self, sample_params: Dict):
         """Abstract method to transform rollout config to server configs.
 
         Must be implemented by subclasses.

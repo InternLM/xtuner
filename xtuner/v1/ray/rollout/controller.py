@@ -7,8 +7,9 @@ import uvicorn
 from fastapi import FastAPI
 
 from transformers import AutoTokenizer
-from xtuner.v1.data_proto.rl_data import RLRolloutRequestItem, RLRolloutResponseItem, SampleParams
+from xtuner.v1.data_proto.rl_data import RLRolloutRequestItem, RLRolloutResponseItem, RolloutExtraParams, SampleParams
 from xtuner.v1.ray.config.worker import RolloutConfig
+from xtuner.v1.utils import get_logger
 
 from .worker import RolloutWorker
 
@@ -34,14 +35,27 @@ class RolloutController:
         self.num_workers = 0
         self.worker_server_urls: List[str] = []
         self.active_rollout_workers: List[RolloutWorker] = []
-        self.tokenizer = AutoTokenizer.from_pretrained(infer_config.model_path, trust_remote_code=True)
+        self.tokenizer = AutoTokenizer.from_pretrained(infer_config.tokenizer_path, trust_remote_code=True)
         self.workers_bundle_idx_map = workers_bundle_idx_map
         self.engine_mesh_list, self.server_url_dict = self.init_workers()
         self.start_api_server()
         # todo(@duanyanhui): add router to replace native round robin
-        self.sample_params = SampleParams(
-            stops=[self.tokenizer.decode(self.tokenizer.eos_token_id)], stop_token_ids=[self.tokenizer.eos_token_id]
+        self.sample_params = SampleParams().dict()
+        # note: 目前默认使用return_token_ids和return_logprob，并且不使用流式
+        self.extra_params = dict(
+            RolloutExtraParams(
+                stream=False,
+                include_stop_str_in_output=True,
+                no_stop_trim=True,
+                return_logprob=True,
+                return_token_ids=True,
+                skip_special_tokens=False,
+                spaces_between_special_tokens=False,
+                top_logprobs=1,
+            )
         )
+        self.print_params_flag = True
+        self.logger = get_logger()
 
     def get_rollout_info(self):
         """Get information about the current rollout setup.
@@ -108,7 +122,8 @@ class RolloutController:
 
     async def rollout(
         self,
-        prompt: Union[str, List[Dict[str, Any]]],
+        prompt: Union[str, List[Dict[str, Any]]] | None = None,
+        input_ids: Optional[List[int]] | None = None,
         tools: List = [],
         tool_choice: str = "auto",
         sample_params: Optional[SampleParams] = None,
@@ -136,16 +151,21 @@ class RolloutController:
             The response from the rollout worker.
         """
         worker = next(self.worker_cycler)
-        final_sample_params = sample_params if sample_params else self.sample_params
-        # note(@duanyanhui): ensure stops and stop_token_ids are set to append eos in response
-        final_sample_params.stops = final_sample_params.stops or self.sample_params.stops
-        final_sample_params.stop_token_ids = final_sample_params.stop_token_ids or self.sample_params.stop_token_ids
+        # update sample params and extra params
+        self.sample_params.update(sample_params.dict() if sample_params else {})
+        self.extra_params.update(extra_params if extra_params else {})
+        if self.print_params_flag:
+            # 通过print_params_flag控制只打印一次参数
+            self.logger.info(f"Rollout with sample params: {self.sample_params}, extra params: {self.extra_params}")
+            self.print_params_flag = False
+        assert prompt is not None or input_ids is not None, "Either prompt or input_ids must be provided."
         response_ref = worker.rollout.remote(  # type: ignore[attr-defined]
-            prompt,
+            prompt=prompt,
+            input_ids=input_ids,
             tools=tools,
             tool_choice=tool_choice,
-            sample_params=final_sample_params.dict(),
-            extra_params=extra_params,
+            sample_params=self.sample_params,
+            extra_params=self.extra_params,
             format=format,
         )
         return await response_ref

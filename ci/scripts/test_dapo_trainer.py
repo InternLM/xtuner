@@ -1,40 +1,61 @@
-import argparse
 import os
-
+import re
+from pathlib import Path
 import ray
+import argparse
+
+import matplotlib.pyplot as plt
+import numpy as np
+import torch.distributed as dist
+from transformers import AutoTokenizer
 
 from xtuner.v1.config import (
     AdamWConfig,
     FSDPConfig,
     LRConfig,
 )
-from xtuner.v1.data_proto.rl_data import SampleParams
-from xtuner.v1.datasets import RLTextTokenizeFnConfig
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.model.dense.qwen3 import Qwen3Dense8BConfig
+from xtuner.v1.model.dense.qwen2 import Qwen2Dense7BConfig
 from xtuner.v1.ray.accelerator import AcceleratorResourcesConfig
 from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.ray.dataflow import DataFlowConfig, ReplayBufferConfig
+from xtuner.v1.data_proto.rl_data import SampleParams
 from xtuner.v1.ray.evaluator import EvaluatorConfig
+from xtuner.v1.datasets import RLTextTokenizeFnConfig
+from xtuner.v1.config import (
+    AdamWConfig,
+    FSDPConfig,
+    LRConfig,
+)
 from xtuner.v1.ray.judger.controller import JudgerConfig
 from xtuner.v1.rl.base import WorkerConfig
 from xtuner.v1.rl.grpo import GRPOLossConfig
+# from xtuner.v1.rl.grpo import GRPOLossConfig, WorkerConfig
+# from xtuner.v1.rl.grpo.config import WorkerConfig, LossConfig
+# from xtuner.v1.rl.grpo.trainer import Trainer
 from xtuner.v1.train.rl_trainer import RLTrainer
 
+os.environ['XTUNER_USE_FA3'] = "1"
+
+if os.environ['XTUNER_USE_FA3'] == "1":
+    from flash_attn_interface import flash_attn_3_cuda
+
+def dapo_compute_metric(samples):
+    return {"accuracy": sum(s.env.judger.reward["acc"] > 0 for s in samples) / len(samples)}
 
 def parse_args():
     parser = argparse.ArgumentParser(description="VLLM Rollout Test Script")
-
+    parser.add_argument("--total-epochs", type=int)
     parser.add_argument("--model-path", type=str)
     parser.add_argument("--data-path", type=str)
-    parser.add_argument("--total-epochs", type=int, default=1)
-    parser.add_argument("--eval-data-path", type=str, default=None)
+    parser.add_argument("--eval-data-path", type=str)
     parser.add_argument("--work-dir", type=str, default="work_dir")
     parser.add_argument("--num-workers", type=int, default=8)
     parser.add_argument("--gpus-per-node", type=int, default=8)
     parser.add_argument("--rollout-global-batch-size", type=int, default=128)
     parser.add_argument("--train-optimizer-steps", type=int, default=1)
-    parser.add_argument("--max-concurrent", type=int, default=512)
+    parser.add_argument("--max-concurrent", type=int, default=8)
     parser.add_argument("--prompt-repeat-k", type=int, default=8)
     parser.add_argument("--pack-max-length", type=int, default=8192)
     parser.add_argument("--max-prompt-length", type=int, default=512)
@@ -44,95 +65,123 @@ def parse_args():
     parser.add_argument("--enable-evaluate", action="store_true")
     parser.add_argument("--evaluate-step", type=int, default=1)
     parser.add_argument("--evaluate-ratio", type=float, default=1)
+    parser.add_argument("--hf-interval", type=float, default=50)
+    parser.add_argument("--ray-cluster-url", type=str, default="")
     return parser.parse_args()
 
 
 def main(args):
-    ray.init(num_cpus=128, ignore_reinit_error=True)
+    if args.ray_cluster_url == "":
+        ray.init(num_cpus=128, ignore_reinit_error=True)
+    else:
+        ray.init(address=args.ray_cluster_url, ignore_reinit_error=True)
     load_from = args.model_path
     resources = AcceleratorResourcesConfig(
         accelerator="GPU",
         num_accelerators_per_worker=1,
         num_cpus_per_worker=12,
         num_workers=args.num_workers,
-        cpu_memory_per_worker=16 * 1024**3,  # 16 GB
+        cpu_memory_per_worker=16 * 1024 ** 3,  # 16 GB
     )
+
+    if os.environ.get("XTUNER_USE_SGLANG", "0") == "1":
+        launch_server_method = 'multiprocessing'
+    else:
+        launch_server_method = 'ray'
     rollout_config = RolloutConfig(
         env="test_env",
         model_path=args.model_path,
         model_name=os.path.basename(args.model_path).lower(),
         tokenizer_path=args.model_path,
         rollout_cross_node_comm=False,
-        tensor_parallel_size=2,
+        tensor_parallel_size=4,  
         expert_parallel_size=1,
         gpus_per_node=args.gpus_per_node,  # gpu: 8, npu: 16
         dtype="bfloat16",
         skip_load_weights=False,
+        launch_server_method=launch_server_method,
+        gpu_memory_utilization=0.8,
     )
     dataflow_config = DataFlowConfig(
         env="test",
         max_concurrent=args.max_concurrent,
         prompt_repeat_k=args.prompt_repeat_k,
         global_batch_size=args.rollout_global_batch_size,
-        sample_params=SampleParams(max_tokens=args.max_response_length),
+        sample_params=SampleParams(
+            max_tokens=args.max_response_length,
+            top_k=0,
+            top_p=1.0,
+            temperature=1.0,
+            min_tokens=0,
+        ),
     )
-    from xtuner.v1.ray.judger.gsm8k import GSM8KJudgerConfig
-
-    gsm8k_judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k")
-    judger_cfg = JudgerConfig(reward_judger_configs=[gsm8k_judger_config])
+    tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True)
+    from xtuner.v1.ray.judger.dapo_math import DapoMathJudgerConfig
+    dapomath_judger_config = DapoMathJudgerConfig("dapo_math", True, args.max_response_length, 4096, 1.0, tokenizer)
+    judger_cfg = JudgerConfig(
+        reward_judger_configs=[dapomath_judger_config]
+    )
     train_dataset_cfg = [
         {
-            "dataset": DatasetConfig(name="gsm8k", anno_path=args.data_path, sample_ratio=1.0),
+            "dataset": DatasetConfig(name="dapo_math",
+                                     anno_path=args.data_path,
+                                     sample_ratio=1.0),
             "tokenize_fn": RLTextTokenizeFnConfig(max_length=args.max_prompt_length),
         },
     ]
-    if args.eval_data_path:
-        eval_dataset_cfg = [
-            {
-                "dataset": DatasetConfig(name="gsm8k", anno_path=args.eval_data_path, sample_ratio=1.0),
-                "tokenize_fn": RLTextTokenizeFnConfig(max_length=args.max_prompt_length),
-            },
-        ]
-    else:
-        eval_dataset_cfg = None
-
+    eval_dataset_cfg = [
+        {
+            "dataset": DatasetConfig(name="dapo_math",
+                                     anno_path=args.eval_data_path,
+                                     sample_ratio=1.0),
+            "tokenize_fn": RLTextTokenizeFnConfig(max_length=args.max_prompt_length),
+        },
+    ]
     dataloader_cfg = DataloaderConfig(
         pack_max_length=args.pack_max_length,
-        collator="fake_collator",
-        pack_level="none",
+        collator='fake_collator',
+        pack_level='none',
     )
     # tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True)
-    if eval_dataset_cfg:
-        evaluator_cfg = EvaluatorConfig(
-            dataset_cfg=eval_dataset_cfg,
-            tokenizer=args.model_path,
-            max_concurrent=args.max_concurrent,
-            eval_sample_ratio=args.evaluate_ratio,
-            evaluate_step=args.evaluate_step,
-            compute_metric_func=None,
+    evaluator_cfg = EvaluatorConfig(
+        dataset_cfg=eval_dataset_cfg,
+        tokenizer=tokenizer,
+        max_concurrent=args.max_concurrent,
+        eval_sample_ratio=args.evaluate_ratio,
+        evaluate_step=args.evaluate_step,
+        compute_metric_func=dapo_compute_metric,
+        sample_params=SampleParams(
+            top_p=0.7,
+            temperature=1.0,
+            max_tokens=dataflow_config.sample_params.max_tokens,
+            top_k=0,
         )
-    else:
-        evaluator_cfg = None
-
+    )
     replay_buffer_cfg = ReplayBufferConfig(
-        dataset_cfg=train_dataset_cfg, dataloader_cfg=dataloader_cfg, tokenizer=args.model_path, postprocessor=None
+        dataset_cfg=train_dataset_cfg,
+        dataloader_cfg=dataloader_cfg,
+        tokenizer=tokenizer,
+        postprocessor=None
     )
     train_worker_cfg: WorkerConfig = WorkerConfig(
-        model_cfg=Qwen3Dense8BConfig(),
-        optim_cfg=AdamWConfig(lr=1e-6, foreach=False if args.optimizer_disable_foreach else None),
+        model_cfg=Qwen2Dense7BConfig(),
+        optim_cfg=AdamWConfig(lr=1e-6, betas=(0.9, 0.999), max_grad_norm=1.0, weight_decay=0.1,
+                              foreach=False if args.optimizer_disable_foreach else None),
         loss_cfg=GRPOLossConfig(
             policy_loss_cfg=dict(
-                cliprange_high=0.2,
+                cliprange_high=0.28,
                 cliprange_low=0.2,
                 loss_type=args.policy_loss_type,
+                clip_ratio_c=10.0,
+                log_prob_diff_min=-20.0,
+                log_prob_diff_max=20.0,
             ),
             ignore_idx=-100,
-            use_kl_loss=True,
-            kl_loss_coef=0.001,
+            use_kl_loss=False,
+            kl_loss_coef=0.0,
             kl_loss_type="low_var_kl",
             mode="chunk",
-            chunk_size=512,
-        ),
+            chunk_size=512),
         lr_cfg=LRConfig(lr_type="constant", warmup_ratio=0, lr_min=1e-6),
         fsdp_cfg=FSDPConfig(
             torch_compile=False,
@@ -157,6 +206,7 @@ def main(args):
         work_dir=args.work_dir,
         total_epochs=args.total_epochs,
         enable_evaluate=args.enable_evaluate,
+        hf_interval=args.hf_interval
     )
     trainer.fit()
 

@@ -23,7 +23,6 @@ from xtuner.v1.ray.dataflow import DataFlow, DataFlowConfig, ReplayBufferConfig
 from xtuner.v1.ray.environment import SingleTurnEnvironment
 from xtuner.v1.ray.evaluator import Evaluator, EvaluatorConfig
 from xtuner.v1.ray.judger import JudgerConfig
-from xtuner.v1.ray.rollout import SampleParams
 
 # from xtuner.v1.rl.base.controller import TrainingController
 # from xtuner.v1.rl.base.worker import TrainingWorker, WorkerConfig
@@ -162,7 +161,7 @@ class RLTrainer:
         train_worker_cfg.load_from = load_from
 
         self._total_epochs = total_epochs
-        self._cur_epoch = 0
+        self._cur_step = 0
 
         self._load_from = Path(load_from) if isinstance(load_from, str) else load_from
         self._load_from_hf = load_from is not None and is_hf_model_path(load_from)
@@ -218,18 +217,9 @@ class RLTrainer:
         )
         if self._enable_evaluate and evaluator_config:
             self._evaluator = Evaluator.remote(evaluator_config, self._rollout_env_controller)  # type: ignore[attr-defined]
-            self._evaluator_sample_params = SampleParams(
-                top_p=1.0,
-                temperature=0.0,
-                do_sample=False,
-                max_tokens=dataflow_config.sample_params.max_tokens,
-                top_k=1,
-            )
             self._eval_step = evaluator_config.evaluate_step
         else:
-            self._evaluator = None
-            self._evaluator_sample_params = SampleParams()
-            self._eval_step = 0
+            pass
 
         self._global_batch_size = dataflow_config.global_batch_size
         self._rollout_steps = (
@@ -281,10 +271,8 @@ class RLTrainer:
         """
         self.logger.info("start training")
         if self._enable_evaluate and self._evaluator:
-            scores, eval_data_groups = ray.get(
-                self._evaluator.run.remote(return_samples=True, sample_params=self._evaluator_sample_params)
-            )
-            trajectory_save_path = self.exp_dir / "initial_trajectory.jsonl"
+            scores, eval_data_groups = ray.get(self._evaluator.run.remote(return_samples=True))
+            trajectory_save_path = self.exp_dir / "eval_0_trajectory.jsonl"
             self._save_trajectories(eval_data_groups, trajectory_save_path)
             self.logger.info(f"Initial rollout evaluate scores {scores} and start training")
         for rollout_idx in range(1, self._rollout_steps + 1):
@@ -312,9 +300,9 @@ class RLTrainer:
             ray.get(self._rollout_env_controller.onload_kvcache.remote())
             # evaluate
             if self._enable_evaluate and self._evaluator and rollout_idx % self._eval_step == 0:
-                scores = ray.get(self._evaluator.run.remote(sample_params=self._evaluator_sample_params))
+                scores = ray.get(self._evaluator.run.remote())
                 self.logger.info(f"evaluate idx {rollout_idx} scores {scores}")
-            self._cur_epoch += 1
+            self._cur_step += 1
 
     # TODO: advantage 是在 DataFlow 里算好，还是在 train controller 里算？
     # 因为可能有根据 advantage 来判断数据能否进 rl 训练的需求。暂时先放在这
@@ -325,7 +313,7 @@ class RLTrainer:
                 group[0].data.messages, add_generation_prompt=True, tokenize=False
             )
             prompt_ids = self.tokenizer(prompt, return_tensors="pt")["input_ids"].flatten().tolist()
-            rewards = [data.env.judger.reward["weighted_reward"] for data in group]
+            rewards = [data.env.judger.reward["score"] for data in group]
             rewards = torch.tensor(rewards, dtype=torch.float32)
             advantages = (rewards - rewards.mean(0)) / (rewards.std(0) + 1e-8)
 
@@ -353,19 +341,16 @@ class RLTrainer:
     def _save_trajectories(self, data_groups, save_path):
         with open(save_path, "w") as f:
             for group in data_groups:
-                response_list = []
-                reward_list = []
                 for data in group:
-                    response_list.append(data.env.rollout.response)
-                    reward_list.append(data.env.judger.reward["weighted_reward"])
-                item = {
-                    "messages": group[0].data.messages,
-                    "response": response_list,
-                    "label": group[0].data.reward_model["ground_truth"],
-                    "reward": reward_list,
-                }
-                json.dump(item, f)
-                f.write("\n")
+                    item = {
+                        "messages": data.data.messages,
+                        "response": data.env.rollout.response,
+                        "response_len": data.env.rollout.response_len,
+                        "label": data.data.reward_model["ground_truth"],
+                        "reward": data.env.judger.reward["score"],
+                    }
+                    json.dump(item, f)
+                    f.write("\n")
 
     def _load_trajectories(self, save_path):
         data_groups = []
@@ -401,10 +386,10 @@ class RLTrainer:
             "You meet this error means `load_from` of trainer is not a Huggingface model path."
         )
 
-        if self.cur_epoch % self._hf_interval != 0 and self.cur_epoch != self.total_epoch:
+        if self.cur_step % self._hf_interval != 0 and self.cur_step != self._rollout_steps:
             return
 
-        save_hf_path = self.exp_dir / f"hf-{self.cur_epoch}"
+        save_hf_path = self.exp_dir / f"hf-{self.cur_step}"
         self.logger.info(f"save_hf_path: {save_hf_path}")
         self.meta.latest_exp.hf_checkpoint_list.append(str(save_hf_path))
 
@@ -519,8 +504,8 @@ class RLTrainer:
         return self._meta
 
     @property
-    def cur_epoch(self):
-        return self._cur_epoch
+    def cur_step(self):
+        return self._cur_step
 
     @property
     def total_epoch(self):

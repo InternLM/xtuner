@@ -27,7 +27,9 @@ class SingleTurnEnvironment(BaseEnvironment):
         super().__init__(environment, placement_group, rollout_cfg, judger_cfg)
         self.logger = get_logger(__name__)
 
-    async def generate(self, group_data_items: List[RLDataFlowItem], sample_params: None) -> List[RLDataFlowItem]:
+    async def generate(
+        self, group_data_items: List[RLDataFlowItem], sample_params=None, extra_params=None
+    ) -> List[RLDataFlowItem]:
         """Generate responses for a batch of RLTextDataItem using the rollout
         controller.
 
@@ -50,14 +52,18 @@ class SingleTurnEnvironment(BaseEnvironment):
             # 在env中对输入的数据进行转换，是为了支持rollout_controller单独作为rollout engine使用，使各个模块进行解耦
             # 每个模块返回独立的data item, 在env中进行更新
             response_future = [
-                self.rollout_controller.rollout.remote(prompt=sample.data.messages, sample_params=sample_params)
+                self.rollout_controller.rollout.remote(
+                    prompt=sample.data.messages, sample_params=sample_params, extra_params=extra_params
+                )
                 for sample in group_data_items
             ]
             rollout_responses = await asyncio.gather(*response_future)  # RLRolloutResponseItem
             group_data_items = update_dataflow_item(group_data_items, "env.rollout", rollout_responses)
         return group_data_items
 
-    async def run(self, group_data_items: List[RLDataFlowItem], sample_params: None) -> List[RLDataFlowItem]:
+    async def run(
+        self, group_data_items: List[RLDataFlowItem], sample_params=None, extra_params=None
+    ) -> List[RLDataFlowItem]:
         """Runs a full generation and judger cycle.
 
         This method first generates responses using the `generate` method and then,
@@ -73,7 +79,7 @@ class SingleTurnEnvironment(BaseEnvironment):
             The data enriched with generated responses and evaluation results.
             The format of the return value matches the format of the input `data`.
         """
-        group_data_items = await self.generate(group_data_items, sample_params)  # type: ignore[assignment]
+        group_data_items = await self.generate(group_data_items, sample_params, extra_params)  # type: ignore[assignment]
         if self.judger_controller:
             judger_responses: RLJudgerResponseItem = await self.judger_controller.run.remote(group_data_items)
             group_data_items = update_dataflow_item(group_data_items, "env.judger", judger_responses)
