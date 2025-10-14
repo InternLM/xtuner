@@ -384,9 +384,12 @@ class TrainingWorker(SingleAcceleratorWorker):
         self.rollout_cfg_info["tp"] = tp
         self.rollout_cfg_info["ep"] = ep
         self.rollout_cfg_info["api_key"] = rollout_config.api_key
-        self.rollout_cfg_info["backend"] = (rollout_config.extra_rollout_config or dict()).get(
-            "lmdeploy_backend", "pytorch"
-        )
+        if os.environ.get("XTUNER_USE_SGLANG", "0") == "1":
+            self.rollout_cfg_info["backend"] = "sglang"
+        else:
+            self.rollout_cfg_info["backend"] = (rollout_config.extra_rollout_config or dict()).get(
+                "lmdeploy_backend", "pytorch"
+            )
 
     def update_weights(self):
         """Update the model weights."""
@@ -428,8 +431,14 @@ class TrainingWorker(SingleAcceleratorWorker):
                 name_list.append(name)
                 tensor_list.append((local_tensor, load_spec))
             fsdp_unshard_tensor_list, name_list = get_params(tensor_list, name_list, dtype)
-            state_dict = dict(zip(name_list, fsdp_unshard_tensor_list))
-            self.request_update_params(state_dict)
+            if self.rollout_cfg_info["backend"] == "pytorch":
+                state_dict = dict(zip(name_list, fsdp_unshard_tensor_list))
+                self.request_update_params(state_dict)
+            else:
+                state_dict = []
+                for name, tensor in zip(name_list, fsdp_unshard_tensor_list):
+                    state_dict.append((name, tensor))
+                self.request_update_params(state_dict)
 
         tensor_list = []
         name_list = []
@@ -446,10 +455,17 @@ class TrainingWorker(SingleAcceleratorWorker):
             tensor_list = [(local_tensor, load_spec)]
             name_list = [name]
             fsdp_unshard_tensor_list, name_list = get_params(tensor_list, name_list, dtype)
-            state_dict = dict(zip(name_list, fsdp_unshard_tensor_list))
-            self.request_update_params(state_dict)
+            if self.rollout_cfg_info["backend"] == "pytorch":
+                state_dict = dict(zip(name_list, fsdp_unshard_tensor_list))
+                self.request_update_params(state_dict)
+            else:
+                state_dict = []
+                for name, tensor in zip(name_list, fsdp_unshard_tensor_list):
+                    state_dict.append((name, tensor))
+                self.request_update_params(state_dict)
 
-        self.request_update_params({}, finished=True)
+        if self.rollout_cfg_info["backend"] == "pytorch":
+            self.request_update_params({}, finished=True)
 
         dist.barrier()
         logger.info(f"update weights time: {time.time() - time1}")
@@ -634,31 +650,118 @@ class TrainingWorker(SingleAcceleratorWorker):
     #     return
 
     def request_update_params(self, state_dict, finished=False):
+        """Send a request to update the parameters on the rollout workers.
+
+        This method serializes the state dictionary and sends it to the
+        appropriate rollout worker via an HTTP request.
+
+        Args:
+            state_dict (dict | list): The state dictionary containing the model
+                parameters to update.
+            finished (bool): A flag indicating whether this is the final
+                batch of updates. Defaults to False.
+        """
         cpu_mesh = self.rollout_device_mesh["engine_parallel"]
         cpu_group = cpu_mesh.get_group()
         head_rank = cpu_mesh.mesh[0].item()
 
-        if self.rollout_cfg_info["backend"] == "pytorch" and self.rollout_cfg_info["tp"] > 1:
-            serialized_data = [None] * self.rollout_cfg_info["tp"]
-            tmp_serialized_data = serialize_state_dict(state_dict)
-            dist.gather_object(
-                tmp_serialized_data,
-                serialized_data if dist.get_rank() == head_rank else None,
-                dst=head_rank,
-                group=cpu_group,
-            )
+        if self.rollout_cfg_info["backend"] == "pytorch":
+            # TODO(chenchiyu): remove lmdeploy related code
+            from lmdeploy.utils import serialize_state_dict
+
+            if self.rollout_cfg_info["backend"] == "pytorch" and self.rollout_cfg_info["tp"] > 1:
+                serialized_data = [None] * self.rollout_cfg_info["tp"]
+                dist.gather_object(
+                    serialize_state_dict(state_dict),
+                    serialized_data if dist.get_rank() == head_rank else None,
+                    dst=head_rank,
+                    group=cpu_group,
+                )
+            elif self.rollout_cfg_info["backend"] == "pytorch":
+                serialized_data = serialize_state_dict(state_dict)
+            else:
+                # for turbomind backend, only head_rank should serialize data
+                serialized_data = serialize_state_dict(state_dict) if dist.get_rank() == head_rank else None
         else:
-            serialized_data = serialize_state_dict(state_dict)
+            # sglang
+            from sglang.srt.utils import MultiprocessingSerializer
+            from sglang.srt.utils.patch_torch import monkey_patch_torch_reductions
+
+            try:
+                from sglang.srt.model_executor.model_runner import FlattenedTensorBucket
+
+                use_flattened_tensor_bucket = True
+            except Exception:
+                use_flattened_tensor_bucket = False
+
+            monkey_patch_torch_reductions()
+            if self.rollout_cfg_info["tp"] == 1:
+                if use_flattened_tensor_bucket:
+                    flattened_tensor_bucket = FlattenedTensorBucket(named_tensors=state_dict)
+                    metadata = flattened_tensor_bucket.get_metadata()
+
+                    flattened_tensor_data = {
+                        "flattened_tensor": flattened_tensor_bucket.get_flattened_tensor(),
+                        "metadata": metadata,
+                    }
+                    serialized_data = MultiprocessingSerializer.serialize(flattened_tensor_data, output_str=True)
+                else:
+                    serialized_data = MultiprocessingSerializer.serialize(state_dict, output_str=True)
+
+                serialized_data = [serialized_data]
+            else:
+                serialized_data = [None] * self.rollout_cfg_info["tp"]
+                if use_flattened_tensor_bucket:
+                    flattened_tensor_bucket = FlattenedTensorBucket(named_tensors=state_dict)
+                    metadata = flattened_tensor_bucket.get_metadata()
+
+                    flattened_tensor_data = {
+                        "flattened_tensor": flattened_tensor_bucket.get_flattened_tensor(),
+                        "metadata": metadata,
+                    }
+                    tp_serialized_data = MultiprocessingSerializer.serialize(flattened_tensor_data, output_str=True)
+                    dist.gather_object(
+                        tp_serialized_data,
+                        serialized_data if dist.get_rank() == head_rank else None,
+                        dst=head_rank,
+                        group=cpu_group,
+                    )
+                else:
+                    tp_serialized_data = MultiprocessingSerializer.serialize(state_dict, output_str=True)
+                    dist.gather_object(
+                        tp_serialized_data,
+                        serialized_data if dist.get_rank() == head_rank else None,
+                        dst=head_rank,
+                        group=cpu_group,
+                    )
 
         if dist.get_rank() == head_rank:
             headers = {
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {self.rollout_cfg_info['api_key']}",
             }
-            data = dict(serialized_named_tensors=serialized_data, finished=finished)
-            response = requests.post(
-                f"{self.rollout_url}/{self.endpoints['update_weights']}", headers=headers, json=data
-            )
+            if self.rollout_cfg_info["backend"] == "sglang":
+                payload = {
+                    "serialized_named_tensors": serialized_data,
+                    "flush_cache": False,
+                }
+                try:
+                    from sglang.srt.model_executor.model_runner import FlattenedTensorBucket
+
+                    use_flattened_tensor_bucket = True
+                except Exception:
+                    use_flattened_tensor_bucket = False
+                if use_flattened_tensor_bucket:
+                    payload["load_format"] = "flattened_bucket"
+
+                url = f"{self.rollout_url}/update_weights_from_tensor"
+                response = requests.post(url, json=payload or {})
+                response.raise_for_status()
+            else:
+                data = dict(serialized_named_tensors=serialized_data, finished=finished)
+                response = requests.post(
+                    f"{self.rollout_url}/{self.endpoints['update_weights']}", headers=headers, json=data
+                )
             assert response.status_code == 200, f"response.status_code = {response.status_code}"
 
         if finished:

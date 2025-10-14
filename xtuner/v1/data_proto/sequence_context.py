@@ -246,8 +246,12 @@ class SequenceContext:
             Self: The context with tensors moved to the target device.
         """
         self.input_ids = self.input_ids.to(device)  # type: ignore
-        self.cu_seq_lens_q = self.cu_seq_lens_q.to(device)  # type: ignore
-        self.cu_seq_lens_k = self.cu_seq_lens_k.to(device)  # type: ignore
+        if device == "npu" or isinstance(device, torch.device) and device.type == "npu":
+            self.cu_seq_lens_q = self.cu_seq_lens_q.cpu()  # type: ignore
+            self.cu_seq_lens_k = self.cu_seq_lens_k.cpu()  # type: ignore
+        else:
+            self.cu_seq_lens_q = self.cu_seq_lens_q.to(device)  # type: ignore
+            self.cu_seq_lens_k = self.cu_seq_lens_k.to(device)  # type: ignore
 
         if self.position_ids is not None and hasattr(self.position_ids, "to"):
             self.position_ids = self.position_ids.to(device)  # type: ignore

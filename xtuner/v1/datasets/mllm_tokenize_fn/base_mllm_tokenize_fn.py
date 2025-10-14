@@ -1,6 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import os
-from typing import Any, TypeVar
+from typing import Any, Literal, TypeVar
 
 import xxhash
 from PIL import Image
@@ -78,7 +78,6 @@ def replace_image_token(
 
 
 def load_image(image_path: str):
-    # Load the image using tcs_loader if available, otherwise use PIL
     return Image.open(image_path).convert("RGB")
 
 
@@ -184,7 +183,11 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
 
 
 class BaseMLLMTokenizeFnConfig(BaseModel):
-    model_config = ConfigDict(title="Base dataset config for xtuner", extra="allow")
+    model_config = ConfigDict(
+        title="Base dataset config for xtuner",
+        extra="allow",
+        protected_namespaces=(),
+    )
     system_message: str | None = None
     max_length: int | None = None
     hash: str | None = None
@@ -193,3 +196,8 @@ class BaseMLLMTokenizeFnConfig(BaseModel):
         self, tokenizer, tokenizer_hash: str | None = None, anno_name: str = "", **kwargs
     ) -> BaseMLLMTokenizeFunction:
         raise NotImplementedError("The 'build' method must be implemented.")
+
+
+class OSSLoaderConfig(BaseModel):
+    backend: Literal["petrel"] = "petrel"
+    backend_kwargs: dict = {}

@@ -41,7 +41,8 @@ class vLLMWorker(RolloutWorker):
     async def _create_request(
         self,
         url: str,
-        prompt: Union[str, List[Dict[str, Any]]],
+        prompt: Union[str, List[Dict[str, Any]]] | None,
+        input_ids: List[int] | None,
         tools: List,  # reserved for agent tool use
         tool_choice: str,  # reserved for agent tool use
         sample_params: dict,

@@ -48,16 +48,24 @@ class BaseEnvironment(ABC):
         rollout_controller = None
         if rollout_cfg is None:
             return rollout_controller
-        if rollout_cfg.backend == "lmdeploy":
+        import os
+
+        if os.environ.get("XTUNER_USE_LMDEPLOY") == "1":
             from xtuner.v1.ray.rollout import LMDeployWorker
 
             rollout_workers_map = AutoAcceleratorWorkers.from_placement_group(
                 LMDeployWorker, rollout_cfg, placement_group
             )
-        elif rollout_cfg.backend == "vllm":
+        elif os.environ.get("XTUNER_USE_VLLM") == "1":
             from xtuner.v1.ray.rollout import vLLMWorker
 
             rollout_workers_map = AutoAcceleratorWorkers.from_placement_group(vLLMWorker, rollout_cfg, placement_group)
+        elif os.environ.get("XTUNER_USE_SGLANG") == "1":
+            from xtuner.v1.ray.rollout import SGLangWorker
+
+            rollout_workers_map = AutoAcceleratorWorkers.from_placement_group(
+                SGLangWorker, rollout_cfg, placement_group
+            )
         else:
             raise NotImplementedError(f"Rollout backend '{rollout_cfg.backend}' is not supported.")
 
@@ -87,7 +95,9 @@ class BaseEnvironment(ABC):
         return judger_controller
 
     @abstractmethod
-    async def generate(self, data: List[RLDataFlowItem], sample_params: Any) -> List[RLDataFlowItem]:
+    async def generate(
+        self, data: List[RLDataFlowItem], sample_params: Any, extra_params: Any
+    ) -> List[RLDataFlowItem]:
         """Generates responses from the model for the given data using the
         inference engine. This method is primarily used for single-step
         inference.
@@ -102,7 +112,7 @@ class BaseEnvironment(ABC):
         pass
 
     @abstractmethod
-    async def run(self, data: List[RLDataFlowItem], sample_params: Any) -> List[RLDataFlowItem]:
+    async def run(self, data: List[RLDataFlowItem], sample_params: Any, extra_params: Any) -> List[RLDataFlowItem]:
         """Executes a full cycle of generation and interpretation, such as
         generating a response and then evaluating it with a judger. This method
         can be extended to support complex interactions like multi-turn

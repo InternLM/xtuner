@@ -1,3 +1,4 @@
+import copy
 import os
 from argparse import Namespace
 from typing import Any, Dict, List, Union
@@ -6,6 +7,7 @@ import ray
 import requests
 from ray.util.placement_group import placement_group_table
 
+from transformers import AutoTokenizer
 from xtuner.v1.ray.config import RolloutConfig
 
 from .worker import RolloutWorker
@@ -62,18 +64,21 @@ class LMDeployWorker(RolloutWorker):
         self.server_func = run_lmdeploy_server_wrapper
         self.router_func_str = "lmdeploy.serve.proxy.proxy.proxy"
         self.endpoints["health_generate"] = "health"
-        self.endpoints["generate"] = "v1/chat/completions"
+        self.endpoints["generate"] = "generate"
+        self.endpoints["v1/chat/completions"] = "v1/chat/completions"
         self.endpoints["output_ids"] = "output_ids"
         self.endpoints["response"] = "text"
         self.endpoints["sleep"] = "sleep"
         self.endpoints["wake_up"] = "wakeup"
+        self.tokenizer = AutoTokenizer.from_pretrained(self.config.tokenizer_path, trust_remote_code=True)
         self.api_keys = self.config.api_key
         self.model_name = self.config.model_name
 
     async def _create_request(
         self,
         url: str,
-        prompt: Union[str, List[Dict[str, Any]]],
+        prompt: Union[str, List[Dict[str, Any]]] | None,
+        input_ids: List[int] | None,
         tools: List,  # reserved for agent tool use
         tool_choice: str,  # reserved for agent tool use
         sample_params: dict,
@@ -98,33 +103,39 @@ class LMDeployWorker(RolloutWorker):
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.api_keys}",  # 如果需要鉴权
         }
+        stream = extra_params["stream"]
+        # note: 此处默认使用tokne_id的话，则不使用流式；异步rollout+token_id进出后续修复
         payload = {
             "model": self.model_name,
-            "messages": prompt,
-            "tools": tools,
-            "tool_choice": tool_choice,
-            "stream": True,
+            "tools": tools if len(tools) > 0 else None,
+            "tool_choice": tool_choice if tool_choice else None,
         }
+        if stream:
+            payload["messages"] = prompt
+        else:
+            if "return_token_ids" in extra_params and extra_params["return_token_ids"]:
+                if input_ids is not None:
+                    payload["input_ids"] = input_ids
+                else:
+                    text_prompt = self.tokenizer.apply_chat_template(
+                        prompt, tokenize=False, add_generation_prompt=True
+                    )
+                    prompt_token_ids = self.tokenizer(text_prompt, add_special_tokens=False)["input_ids"]
+                    payload["input_ids"] = prompt_token_ids
+            else:
+                payload["messages"] = prompt
 
-        # todo(@duanyanhui): it will be supported after lmdeploy supports stop tokens in release version.
-        # if self.config.return_stop_tokens:
-        #     payload["include_stop_str_in_output"] = True
-
-        payload.update(sample_params)
-        payload.update(extra_params)
-
-        if "logprobs" in payload and payload["logprobs"]:
-            self.logger.warning(
-                "LMDeploy can't return stop tokens' logprobs now. It will be supported in next release version."
-            )
-
+        lmdeploy_sample_params = self._transform_sample_params(sample_params, extra_params)
+        payload.update(lmdeploy_sample_params)
+        # self.logger.info(f"Request payload: {payload}")
         req = self.client.build_request(
             "POST",
             url,
             headers=headers,
             json=payload,
         )
-        r = await self.client.send(req, stream=True)
+        r = await self.client.send(req, stream=stream)
+        r.raise_for_status()
         return r
 
     def get_logprobs(self, input_ids, sampling_params):
@@ -239,7 +250,6 @@ class LMDeployWorker(RolloutWorker):
                 max_batch_size=self.config.rollout_max_batch_size,
                 devices=[bundle_idxs % self.config.gpus_per_node for bundle_idxs in self.engine_bundle_idxs],
                 empty_init=self.config.skip_load_weights,
-                logprobs_mode="raw_logprobs",
             )
         )
         if backend == "pytorch" and self.accelerator == "NPU":
@@ -304,7 +314,8 @@ class LMDeployWorker(RolloutWorker):
             **lmdeploy_config_kwargs,
         )
 
-    def _transform_rollout_config_to_router_configs(self):
-        """This method will be implemented for the LMDeploy worker in the
-        future."""
-        pass
+    def _transform_sample_params(self, sample_params: Dict, extra_params: Dict = {}):
+        lmdeploy_sample_params = copy.deepcopy(sample_params)
+        if extra_params:
+            lmdeploy_sample_params.update(extra_params)
+        return lmdeploy_sample_params

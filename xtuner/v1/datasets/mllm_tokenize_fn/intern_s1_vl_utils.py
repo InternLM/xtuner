@@ -3,69 +3,20 @@ import io
 import os
 import random
 import re
+from typing import Literal
 
 import cv2
 import imageio
 import numpy as np
 from PIL import Image
 
+from xtuner.v1.utils.oss_utils import get_oss_backend
+
 
 try:
-    if os.environ.get("CEPH_CLIENT", "petrel") == "petrel":
-        from petrel_client.client import Client
-    elif os.environ.get("CEPH_CLIENT", "petrel") == "boto3":
-        from xpuyu.utils.s3_fileio import Client
     from decord import VideoReader
 except ImportError:
     pass
-
-_EXIF_ORIENT = 274  # exif 'Orientation' tag
-
-
-def apply_exif_orientation(image):
-    """Applies the exif orientation correctly.
-
-    This code exists per the bug:
-      https://github.com/python-pillow/Pillow/issues/3973
-    with the function `ImageOps.exif_transpose`. The Pillow source raises errors with
-    various methods, especially `tobytes`
-
-    Function based on:
-      https://github.com/wkentaro/labelme/blob/v4.5.4/labelme/utils/image.py#L59
-      https://github.com/python-pillow/Pillow/blob/7.1.2/src/PIL/ImageOps.py#L527
-
-    Args:
-        image (PIL.Image): a PIL image
-
-    Returns:
-        (PIL.Image): the PIL image with exif orientation applied, if applicable
-    """
-    if not hasattr(image, "getexif"):
-        return image
-
-    try:
-        exif = image.getexif()
-    except Exception:  # https://github.com/facebookresearch/detectron2/issues/1885
-        exif = None
-
-    if exif is None:
-        return image
-
-    orientation = exif.get(_EXIF_ORIENT)
-
-    method = {
-        2: Image.FLIP_LEFT_RIGHT,
-        3: Image.ROTATE_180,
-        4: Image.FLIP_TOP_BOTTOM,
-        5: Image.TRANSPOSE,
-        6: Image.ROTATE_270,
-        7: Image.TRANSVERSE,
-        8: Image.ROTATE_90,
-    }.get(orientation)
-
-    if method is not None:
-        return image.transpose(method)
-    return image
 
 
 def pil_loader(img_str):
@@ -226,11 +177,17 @@ def read_frames_decord(
     return frames
 
 
-class TCSLoader:
-    def __init__(self, conf_path, sc_config_key="sensecore"):
-        print(f"[TCSLoader] config_path: {conf_path}")
-        self.client = Client(conf_path)
-        self.sc_config_key = sc_config_key
+class InternS1VLOSSLoader:
+    # Singleton instance
+    _instance = None
+
+    def __new__(cls, *args, **kwargs):
+        if not cls._instance:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __init__(self, backend: Literal["petrel"] = "petrel", **kwargs):
+        self.client = get_oss_backend(backend, **kwargs)
 
     def __call__(
         self,
