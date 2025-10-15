@@ -62,6 +62,7 @@ def generate_random_int_from_dict(input_dict, min_num, max_num):
 
 def replace_video_token(messages: ChatMessages, chat_template: HybridChatTemplate, num_image_token_list: list[int]):
     current_image_idx = 0
+    # one video contains n_frames frames
     n_frames = len(num_image_token_list)
     for msg in messages.messages:
         if msg.role == "user":
@@ -70,11 +71,11 @@ def replace_video_token(messages: ChatMessages, chat_template: HybridChatTemplat
                 for c in content:
                     if c.type == "text":
                         text = c.text
-                        assert "<VIDEO_CONTEXT>" in text
+                        # assert "<VIDEO_CONTEXT>" in text
                         text = text.replace("<VIDEO_CONTEXT>", IMAGE_TOKEN_ALIAS)
-                        image_cnt = text.count(IMAGE_TOKEN_ALIAS)
-                        assert image_cnt == 1, "Only one <VIDEO_CONTEXT> is supported for video."
-                        for _ in range(image_cnt):
+                        video_cnt = text.count(IMAGE_TOKEN_ALIAS)
+                        assert video_cnt == 1, "Only one <VIDEO_CONTEXT> is supported for video."
+                        for _ in range(video_cnt):
                             special_tokens = "\n".join(
                                 [f"Frame-{frame_idx + 1}: {IMAGE_TOKEN_ALIAS}" for frame_idx in range(n_frames)]
                             )
@@ -83,10 +84,10 @@ def replace_video_token(messages: ChatMessages, chat_template: HybridChatTemplat
                             text = text.replace(IMAGE_TOKEN_ALIAS, image_tokens)
                             current_image_idx += n_frames
                         c.text = text
-        # if current_image_idx < num_image, it means <image> placeholder is less than num_image
-        assert current_image_idx == len(num_image_token_list), (
-            f"ERROR: current_image_idx: {current_image_idx} != num_image: {len(num_image_token_list)}"
-        )
+    # if current_image_idx < num_image, it means <image> placeholder is less than num_image
+    assert current_image_idx == len(num_image_token_list), (
+        f"ERROR: current_image_idx: {current_image_idx} != num_image: {len(num_image_token_list)}"
+    )
 
 
 class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
@@ -130,6 +131,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         self.min_dynamic_patch = min_num
         self.min_num_frames = min_num_frames
         self.max_num_frames = max_num_frames
+        self.image_token_id = model_cfg.image_token_id
 
         self.dynamic_image_size = model_cfg.dynamic_image_size
         self.use_thumbnail = model_cfg.use_thumbnail
@@ -241,6 +243,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
             input_ids = tokenized["input_ids"]
             labels = tokenized["labels"]
             input_ids, _ = self._truncated_input_and_labels(input_ids, labels)
+            assert (torch.tensor(input_ids) == self.image_token_id).sum() == sum(num_image_tokens), f'ERROR: image tokens are truncated'
             return {"num_tokens": len(input_ids)}
         except Exception as e:
             print(
@@ -294,6 +297,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         input_ids = tokenized["input_ids"]
         labels = tokenized["labels"]
         input_ids, labels = self._truncated_input_and_labels(input_ids, labels)
+        assert (torch.tensor(input_ids) == self.image_token_id).sum() == sum(num_image_tokens), f'ERROR: image tokens are truncated'
         ret = InternS1DataItem(
             input_ids=input_ids,
             labels=labels,
@@ -322,6 +326,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
             input_ids = tokenized["input_ids"]
             labels = tokenized["labels"]
             input_ids, _ = self._truncated_input_and_labels(input_ids, labels)
+            assert (torch.tensor(input_ids) == self.image_token_id).sum() == sum(num_image_tokens), f'ERROR: video tokens are truncated'
             return {"num_tokens": len(input_ids)}
         except Exception as e:
             print(
@@ -333,7 +338,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
     def video_get_item(self, data_item: dict, media_root: str = "") -> InternS1DataItem:
         assert len(self._video_path) == 1, "Only one video is supported for now."
         video_path = os.path.join(media_root, self._video_path[0])
-
+        
         # 根据 data_item 生成一个确定性的随机整数
         random_frame_num = generate_random_int_from_dict(data_item, self.min_num_frames, self.max_num_frames)
 
@@ -371,6 +376,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         input_ids = tokenized["input_ids"]
         labels = tokenized["labels"]
         input_ids, labels = self._truncated_input_and_labels(input_ids, labels)
+        assert (torch.tensor(input_ids) == self.image_token_id).sum() == sum(num_image_tokens), f'ERROR: video tokens are truncated'
         ret = InternS1DataItem(
             input_ids=input_ids,
             labels=labels,

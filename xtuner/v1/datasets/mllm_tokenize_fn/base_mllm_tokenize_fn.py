@@ -55,7 +55,7 @@ def replace_image_token(messages: ChatMessages, chat_template: HybridChatTemplat
                 for c in content:
                     if c.type == "text":
                         text = c.text
-                        assert "<IMG_CONTEXT>" in text
+                        # assert "<IMG_CONTEXT>" in text
                         text = text.replace("<IMG_CONTEXT>", IMAGE_TOKEN_ALIAS)
                         image_cnt = text.count(IMAGE_TOKEN_ALIAS)
                         for _ in range(image_cnt):

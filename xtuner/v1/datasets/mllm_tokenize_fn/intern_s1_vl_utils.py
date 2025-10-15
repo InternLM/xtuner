@@ -89,9 +89,11 @@ def read_frames_folder(
 ):
     if "s3://" in video_path:
         image_list = sort_frames(client.list(video_path))
+        image_list = [os.path.join(video_path.split(image.split('/')[0])[0], image) for image in image_list]
         frames = []
         for image in image_list:
-            fp = os.path.join(video_path, image)
+            # fp = os.path.join(video_path, image)
+            fp = image
             frame = Image.open(io.BytesIO(client.get(fp)))
             frames.append(frame)
     else:
