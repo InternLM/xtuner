@@ -6,6 +6,7 @@ import torch.distributed as dist
 from pydantic import BaseModel
 from torch.distributed.device_mesh import DeviceMesh
 from typing_extensions import Self
+
 from transformers import AutoProcessor
 from transformers.configuration_utils import PretrainedConfig
 from xtuner.v1.config import FSDPConfig
@@ -133,7 +134,8 @@ class VisionComposeTrainEngine(TrainEngine):
 
     def save_hf(self, hf_dir: str, save_dtype: torch.dtype = torch.bfloat16):
         super().save_hf(hf_dir, save_dtype)
-        self._processor.save_pretrained(hf_dir)
+        if self._processor is not None:
+            self._processor.save_pretrained(hf_dir)
 
     def train_step(self, data_batches: List[ModelItem]):
         """Perform a training step with the given data batches and mesh.
