@@ -40,7 +40,7 @@ class TestQwen3VL(DeterministicDDPTestCase):
             attn_implementation="flash_attention_2",
             device_map="cuda"
         ).eval()
-        patch_hf_rms_norm(hf_model)
+        # patch_hf_rms_norm(hf_model)
 
         rank = dist.get_rank()
         tokenizer = AutoTokenizer.from_pretrained(QWEN3_VL_DENSE_PATH)
@@ -111,7 +111,7 @@ class TestQwen3VL(DeterministicDDPTestCase):
         rank = dist.get_rank()
         tokenizer = AutoTokenizer.from_pretrained(QWEN3_VL_DENSE_PATH)
         image_str = '<|vision_start|><|image_pad|><|vision_end|>'
-        input_ids = tokenizer(image_str + f"今天天气不错，是学习的好日子", return_tensors="pt").input_ids.to("cuda")
+        input_ids = tokenizer(image_str + "吃葡萄不吐葡萄皮" * 20, return_tensors="pt").input_ids.to("cuda")
         pixel_values = torch.randn(4, 1536, device='cuda', dtype=torch.bfloat16)
         # TODO: 不合理，为啥一定要每个 rank 数据完全一样才能通过 CI ?
         dist.broadcast(pixel_values, src=0)
@@ -126,7 +126,6 @@ class TestQwen3VL(DeterministicDDPTestCase):
                 image_grid_thw=image_grid_thw,
             )
         expected_loss = output.loss
-        # dist.all_reduce(expected_loss.div_(dist.get_world_size()), op=dist.ReduceOp.SUM)
 
         del hf_model
         torch.cuda.empty_cache()
@@ -280,7 +279,7 @@ class TestQwen3VL(DeterministicDDPTestCase):
         rank = dist.get_rank()
         tokenizer = AutoTokenizer.from_pretrained(QWEN3_VL_DENSE_PATH)
         image_str = '<|vision_start|><|image_pad|><|vision_end|>'
-        input_ids = tokenizer(image_str + f"今天天气不错，是学习的好日子", return_tensors="pt").input_ids.to("cuda")
+        input_ids = tokenizer(image_str + "吃葡萄不吐葡萄皮" * 20, return_tensors="pt").input_ids.to("cuda")
         pixel_values = torch.randn(4, 1536, device='cuda', dtype=torch.bfloat16)
         # TODO: 不合理，为啥一定要每个 rank 数据完全一样才能通过 CI ?
         dist.broadcast(pixel_values, src=0)

@@ -123,6 +123,7 @@ class Qwen3VLVisionAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
         cu_seqlens: torch.Tensor,
+        max_seqlen: int,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
     ):
         seq_length = hidden_states.shape[0]  # s, d
@@ -135,9 +136,7 @@ class Qwen3VLVisionAttention(nn.Module):
         query_states = query_states.transpose(0, 1).unsqueeze(0)
         key_states = key_states.transpose(0, 1).unsqueeze(0)
         value_states = value_states.transpose(0, 1).unsqueeze(0)
-        
-        max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
-        
+
         attn_output: torch.Tensor = self.attn_impl_func(  # type: ignore
             query_states,  # [b, n_head, seq, head_dim]
             key_states,
@@ -170,11 +169,13 @@ class Qwen3VLVisionLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         cu_seqlens: torch.Tensor,
+        max_seqlen: int,
         position_embeddings: tuple[torch.Tensor, torch.Tensor]
     ) -> torch.Tensor:
         hidden_states = hidden_states + self.attn(
             self.norm1(hidden_states),
             cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
             position_embeddings=position_embeddings
         )
         hidden_states = hidden_states + self.mlp(self.norm2(hidden_states))
@@ -437,12 +438,14 @@ class Qwen3VLVisionModel(BaseModel):
             dtype=torch.int32,
         )
         cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
+        max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
 
         deepstack_feature_lists = []
         for layer_num, blk in enumerate(self.blocks):
             hidden_states = blk(
                 hidden_states,
                 cu_seqlens=cu_seqlens,
+                max_seqlen=max_seqlen,
                 position_embeddings=position_embeddings
             )
             if layer_num in self.deepstack_visual_indexes:
