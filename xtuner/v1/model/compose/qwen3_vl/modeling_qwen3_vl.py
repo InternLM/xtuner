@@ -200,7 +200,11 @@ class Qwen3VLForConditionalGeneration(BaseModel):
             visual_pos_masks = self.get_placeholder_mask(
                 input_ids, inputs_embeds=inputs_embeds, visual_features=viusal_embeds
             )
-            inputs_embeds = inputs_embeds.masked_scatter(visual_pos_masks, viusal_embeds)
+            try:
+                inputs_embeds = inputs_embeds.masked_scatter(visual_pos_masks, viusal_embeds)
+            except RuntimeError as e:
+                print(f"!!!Warning: {e}, but continue anyway!!!!")
+                inputs_embeds = inputs_embeds + viusal_embeds.sum() * 0.0
         else:
             # 构建假数据，考虑到 moe 特性，最好不要构建全 0 数据
             pixel_values_dump = torch.randn(4, 1536, device=inputs_embeds.device, dtype=inputs_embeds.dtype)

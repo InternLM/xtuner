@@ -93,10 +93,9 @@ class Qwen3VLMoE30BA3Config(Qwen3VLBaseConfig):
     vision_config: Qwen3VLVisionConfig = Qwen3VLVisionConfig()
     projector_config: Qwen3VLProjectorConfig = Qwen3VLProjectorConfig()
     text_config: Qwen3VLTextMoE30BA3Config = Qwen3VLTextMoE30BA3Config(
-        rope_type="qwen3_vl",
         max_position_embeddings=262144,
         rope_theta=5000000,
-        rope_scaling_cfg=RopeScalingConfig(rope_type="qwen3_vl", mrope_section=[24, 20, 20]),
+        rope_scaling_cfg=RopeScalingConfig(type="qwen3_vl", mrope_section=[24, 20, 20]),
     )
 
     @property
@@ -115,10 +114,9 @@ class Qwen3VLMoE235BA22Config(Qwen3VLBaseConfig):
     vision_config: Qwen3VLVisionConfig = Qwen3VLVisionConfig()
     projector_config: Qwen3VLProjectorConfig = Qwen3VLProjectorConfig(text_hidden_size=4096)
     text_config: Qwen3VLTextMoE235BA22Config = Qwen3VLTextMoE235BA22Config(
-        rope_type="qwen3_vl",
         max_position_embeddings=262144,
         rope_theta=5000000,
-        rope_scaling_cfg=RopeScalingConfig(rope_type="qwen3_vl", mrope_section=[24, 20, 20]),
+        rope_scaling_cfg=RopeScalingConfig(type="qwen3_vl", mrope_section=[24, 20, 20]),
     )
 
     @property
@@ -141,10 +139,9 @@ class Qwen3VLDense4BConfig(Qwen3VLBaseConfig):
         vision_hidden_size=1024, text_hidden_size=2560, deepstack_visual_indexes=[5, 11, 17]
     )
     text_config: Qwen3VLTextDense4BConfig = Qwen3VLTextDense4BConfig(
-        rope_type="qwen3_vl",
         max_position_embeddings=262144,
         rope_theta=5000000,
-        rope_scaling_cfg=RopeScalingConfig(rope_type="qwen3_vl", mrope_section=[24, 20, 20]),
+        rope_scaling_cfg=RopeScalingConfig(type="qwen3_vl", mrope_section=[24, 20, 20]),
     )
 
     @property
@@ -163,10 +160,9 @@ class Qwen3VLDense8BConfig(Qwen3VLBaseConfig):
     vision_config: Qwen3VLVisionConfig = Qwen3VLVisionConfig()
     projector_config: Qwen3VLProjectorConfig = Qwen3VLProjectorConfig(text_hidden_size=4096)
     text_config: Qwen3VLTextDense8BConfig = Qwen3VLTextDense8BConfig(
-        rope_type="qwen3_vl",
         max_position_embeddings=262144,
         rope_theta=5000000,
-        rope_scaling_cfg=RopeScalingConfig(rope_type="qwen3_vl", mrope_section=[24, 20, 20]),
+        rope_scaling_cfg=RopeScalingConfig(type="qwen3_vl", mrope_section=[24, 20, 20]),
     )
 
     @property
