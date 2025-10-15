@@ -455,16 +455,6 @@ class MoE(BaseModel):
 
         return MoEModelOutputs(**output, logits=final_logits)  # type: ignore[typeddict-item]
 
-    # Qwen3VL
-    def _deepstack_process(
-        self, hidden_states: torch.Tensor, visual_pos_masks: torch.Tensor, visual_embeds: torch.Tensor
-    ):
-        visual_pos_masks = visual_pos_masks.to(hidden_states.device)
-        visual_embeds = visual_embeds.to(hidden_states.device, hidden_states.dtype)
-        local_this = hidden_states[visual_pos_masks, :].clone() + visual_embeds
-        hidden_states[visual_pos_masks, :] = local_this
-        return hidden_states
-
     def _forward(
         self,
         seq_ctx: SequenceContext,  # todo(@yehaochen): support intra layer micro-batch
