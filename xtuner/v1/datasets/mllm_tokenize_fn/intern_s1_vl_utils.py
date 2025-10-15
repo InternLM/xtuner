@@ -88,6 +88,7 @@ def read_frames_folder(
     random_frame_num=None,
 ):
     if "s3://" in video_path:
+        assert client is not None, "client should be provided for s3 backend"
         image_list = sort_frames(client.list(video_path))
         frames = []
         for image in image_list:
@@ -118,6 +119,7 @@ def read_frames_gif(
     video_path, num_frames, sample="rand", fix_start=None, client=None, min_num_frames=4, random_frame_num=None
 ):
     if "s3://" in video_path:
+        assert client is not None, "client should be provided for s3 backend"
         video_bytes = client.get(video_path)
         gif = imageio.get_reader(io.BytesIO(video_bytes))
     else:
@@ -150,6 +152,7 @@ def read_frames_decord(
     random_frame_num=None,
 ):
     if "s3://" in video_path:
+        assert client is not None, "client should be provided for s3 backend"
         video_bytes = client.get(video_path)
         video_reader = VideoReader(io.BytesIO(video_bytes), num_threads=1)
     else:
@@ -174,6 +177,52 @@ def read_frames_decord(
         frame_indices = [f + start_index for f in frame_indices]
     frames = video_reader.get_batch(frame_indices).asnumpy()  # (T, H, W, C), np.uint8
     frames = [Image.fromarray(frames[i]) for i in range(frames.shape[0])]
+    return frames
+
+
+def read_interns1_vl_video(
+    path, min_num_frames, max_num_frames, random_frame_num, sample="rand", clip=None, client=None
+):
+    if path.endswith("/"):
+        frames = read_frames_folder(
+            path,
+            num_frames=max_num_frames,
+            min_num_frames=min_num_frames,
+            client=client,
+            sample=sample,
+            random_frame_num=random_frame_num,
+        )
+    elif path.endswith(".gif"):
+        frames = read_frames_gif(
+            path,
+            num_frames=max_num_frames,
+            min_num_frames=min_num_frames,
+            client=client,
+            sample=sample,
+            random_frame_num=random_frame_num,
+        )
+    elif (
+        path.endswith(".mp4")
+        or path.endswith(".avi")
+        or path.endswith(".mov")
+        or path.endswith(".webm")
+        or path.endswith(".flv")
+        or path.endswith(".wmv")
+        or path.endswith(".mkv")
+        or path.endswith(".rmvb")
+        or path.endswith(".ts")
+    ):
+        frames = read_frames_decord(
+            path,
+            num_frames=max_num_frames,
+            min_num_frames=min_num_frames,
+            client=client,
+            sample=sample,
+            clip=clip,
+            random_frame_num=random_frame_num,
+        )
+    else:
+        raise ValueError(f"Unsupported video format: {path}")
     return frames
 
 
@@ -205,44 +254,12 @@ class InternS1VLOSSLoader:
             return img
 
         elif image_type == "video":
-            if path.endswith("/"):
-                frames = read_frames_folder(
-                    path,
-                    num_frames=max_num_frames,
-                    min_num_frames=min_num_frames,
-                    client=self.client,
-                    sample=sample,
-                    random_frame_num=random_frame_num,
-                )
-            elif path.endswith(".gif"):
-                frames = read_frames_gif(
-                    path,
-                    num_frames=max_num_frames,
-                    min_num_frames=min_num_frames,
-                    client=self.client,
-                    sample=sample,
-                    random_frame_num=random_frame_num,
-                )
-            elif (
-                path.endswith(".mp4")
-                or path.endswith(".avi")
-                or path.endswith(".mov")
-                or path.endswith(".webm")
-                or path.endswith(".flv")
-                or path.endswith(".wmv")
-                or path.endswith(".mkv")
-                or path.endswith(".rmvb")
-                or path.endswith(".ts")
-            ):
-                frames = read_frames_decord(
-                    path,
-                    num_frames=max_num_frames,
-                    min_num_frames=min_num_frames,
-                    client=self.client,
-                    sample=sample,
-                    clip=clip,
-                    random_frame_num=random_frame_num,
-                )
-            else:
-                raise ValueError(f"Unsupported video format: {path}")
-            return frames
+            return read_interns1_vl_video(
+                path,
+                min_num_frames,
+                max_num_frames,
+                random_frame_num=random_frame_num,
+                sample=sample,
+                clip=clip,
+                client=self.client,
+            )

@@ -19,7 +19,7 @@ from xtuner.v1.model.dense.qwen3 import Qwen3Dense8BConfig
 from xtuner.v1.ray.accelerator import AcceleratorResourcesConfig
 from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.ray.dataflow import DataFlowConfig, ReplayBufferConfig
-from xtuner.v1.ray.rollout import SampleParams
+from xtuner.v1.data_proto.rl_data import SampleParams
 from xtuner.v1.ray.evaluator import EvaluatorConfig
 from xtuner.v1.datasets import RLTextTokenizeFnConfig
 from xtuner.v1.config import (
@@ -128,7 +128,13 @@ def main(args):
         max_concurrent=args.max_concurrent,
         eval_sample_ratio=args.evaluate_ratio, 
         evaluate_step=args.evaluate_step,
-        compute_metric_func=None
+        compute_metric_func=None,
+        sample_params=SampleParams(
+            top_p=1.0,
+            temperature=0.0,
+            max_tokens=dataflow_config.sample_params.max_tokens,
+            top_k=1,
+        )
     )
     replay_buffer_cfg = ReplayBufferConfig(
         dataset_cfg=train_dataset_cfg,

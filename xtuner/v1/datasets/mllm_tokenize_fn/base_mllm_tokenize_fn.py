@@ -60,7 +60,6 @@ def replace_image_token(
                 for c in content:
                     if c.type == "text":
                         text = c.text
-                        assert "<IMG_CONTEXT>" in text
                         text = text.replace("<IMG_CONTEXT>", IMAGE_TOKEN_ALIAS)
                         image_cnt = text.count(IMAGE_TOKEN_ALIAS)
                         for i in range(image_cnt):
@@ -183,7 +182,11 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
 
 
 class BaseMLLMTokenizeFnConfig(BaseModel):
-    model_config = ConfigDict(title="Base dataset config for xtuner", extra="allow")
+    model_config = ConfigDict(
+        title="Base dataset config for xtuner",
+        extra="allow",
+        protected_namespaces=(),
+    )
     system_message: str | None = None
     max_length: int | None = None
     hash: str | None = None

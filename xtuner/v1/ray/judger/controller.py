@@ -61,6 +61,9 @@ class JudgerConfig(BaseModel):
     enable_batch_reward: Annotated[
         bool, Parameter(help="Whether to enable batch reward calculation for multiple samples at once.")
     ] = False
+    enable_weighted_judgers: Annotated[
+        bool, Parameter(help="Whether to enable weighted reward calculation on multi judgers.")
+    ] = False
     reward_judger_configs: Annotated[
         List[BaseModel],
         Parameter(help="A custom Python function for computing reward given model output and label."),
@@ -86,7 +89,9 @@ class JudgerController:
         self.reward_judger = []
         for config in self.judger_config.reward_judger_configs:
             self.reward_judger.append(config.build())
-
+        self.enable_weighted_judgers = (
+            False if len(self.reward_judger) == 1 else self.judger_config.enable_weighted_judgers
+        )
         self.logger = get_logger()
 
     async def _call_custom_reward_judger(
@@ -157,23 +162,28 @@ class JudgerController:
         if not isinstance(group_data_item, list):
             input_type_is_list = False
             group_data_item = [group_data_item]
-        # Assume all data have the same data_source
-        data_source = group_data_item[0].data.data_source
-        assert data_source, "No data source found for the given datasets"
 
-        judger_names = [judger.judger_name for judger in self.reward_judger]
-        active_reward_judger = [func for func in self.reward_judger if func.judger_name in data_source]
-        assert active_reward_judger, (
-            f"No active reward judger in {judger_names} found for the given data source {data_source}."
-        )
-
-        judger_response_item = await self._call_custom_reward_judger(active_reward_judger, group_data_item)
-        for item in judger_response_item:
-            final_reward = 0
-            for name, weight in data_source.items():
-                if name in item.reward:
-                    final_reward += item.reward[name] * weight
-            item.reward["weighted_reward"] = final_reward
+        if self.enable_weighted_judgers:
+            # todo: 支持多个judger返回多个value的加权/不加权的逻辑
+            pass
+            # data_source = group_data_item[0].data.data_source
+            # # 如果要使用多个judger并且进行加权打分，则必须在数据集中指定data_source的分数
+            # assert data_source , "No data source found for the given datasets"
+            # judger_names = [judger.judger_name for judger in self.reward_judger]
+            # active_reward_judger = [func for func in self.reward_judger if func.judger_name in data_source]
+            # assert active_reward_judger, (
+            #     f"No active reward judger in {judger_names} found for the given data source {data_source}."
+            # )
+            # judger_response_item = await self._call_custom_reward_judger(active_reward_judger, group_data_item)
+            # judger_return_item = [f"weight_{name}" for name, _ in judger_response_item[0].reward.items()]
+            # for item in judger_response_item:
+            #     final_reward = 0
+            #     for name, weight in data_source.items():
+            #         if name in item.reward:
+            #             final_reward += item.reward[name] * weight
+            #     item.reward["weighted_reward"] = final_reward
+        else:
+            judger_response_item = await self._call_custom_reward_judger(self.reward_judger, group_data_item)
 
         if input_type_is_list is False:
             return judger_response_item[0]

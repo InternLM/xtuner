@@ -22,7 +22,7 @@ class JudgeRequest(BaseModel):
 
 
 class JudgeResponse(BaseModel):
-    reward: float
+    score: float
 
 
 @app.post("/judge", response_model=JudgeResponse)
@@ -31,7 +31,7 @@ async def judge(request: JudgeRequest):
     # The compute_reward function returns a float, we wrap it in a dict
     # to match what the client-side post-processing function might expect.
     reward_value = compute_reward(request.response, request.label, request.extra_info)
-    return {"reward": reward_value}
+    return reward_value
 
 
 def run_server(host="127.0.0.1", port=8000):
@@ -73,9 +73,7 @@ class JudgerServer:
 def custom_postprocessor_for_gsm8k(result):
     if not isinstance(result, list):
         result = [result]
-    judger_response_item = [
-        RLJudgerResponseItem(uid=result[i]["uid"], reward={"reward": result[i]["reward"]}) for i in range(len(result))
-    ]
+    judger_response_item = [RLJudgerResponseItem(uid=result[i]["uid"], reward=result[i]) for i in range(len(result))]
     return judger_response_item
 
 

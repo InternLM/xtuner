@@ -72,10 +72,6 @@ class RolloutConfig(BaseModel):
         str,
         Parameter(group=infer_group, help="Environment variables to set for the rollout."),
     ] = ""
-    backend: Annotated[
-        str,
-        Parameter(group=infer_group, help="Backend framework for the rollout worker, e.g., 'vllm', 'lmdeploy'."),
-    ] = "lmdeploy"
     model_path: Annotated[str | Path, Parameter(group=infer_group, help="Path to the SGLang model.")]
     model_name: Annotated[str, Parameter(group=infer_group, help="Name of the model to be used in the LMDeploy.")]
     tokenizer_path: Annotated[str, Parameter(group=infer_group, help="Path to the tokenizer for the model.")]
@@ -150,13 +146,6 @@ class RolloutConfig(BaseModel):
             help="Whether to skip loading weights for the rollout worker.",
         ),
     ] = False
-    extra_rollout_config: Annotated[
-        Optional[dict],
-        Parameter(
-            group=infer_group,
-            help='Extra configuration for different rollout worker. vllm parameters will start with prefix "vllm", etc.',
-        ),
-    ] = dict()
     launch_server_method: Annotated[
         Literal["ray", "multiprocessing"],
         Parameter(
@@ -171,20 +160,13 @@ class RolloutConfig(BaseModel):
             help="Timeout duration (in seconds) for rollout requests.",
         ),
     ] = 3600.0
-    system_prompt: Annotated[
-        Optional[str],
+    extra_rollout_config: Annotated[
+        dict,
         Parameter(
             group=infer_group,
-            help="System prompt for the rollout worker.",
+            help='Extra configuration for different rollout worker. vllm parameters will start with prefix "vllm", etc.',
         ),
-    ] = None
-    return_stop_tokens: Annotated[
-        bool,
-        Parameter(
-            group=infer_group,
-            help="Whether to return stop tokens in the rollout response.",
-        ),
-    ] = True
+    ] = {"lmdeploy_log_level": "CRITICAL", "lmdeploy_uvicorn_log_level": "CRITICAL"}
 
 
 if __name__ == "__main__":
