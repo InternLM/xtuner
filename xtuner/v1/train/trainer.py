@@ -287,7 +287,6 @@ class Trainer:
         self._hf_max_keep = hf_max_keep
         self._hf_interval = hf_interval
 
-        self._hf_processor = None
         if tokenizer_path is not None:
             self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
         else:
