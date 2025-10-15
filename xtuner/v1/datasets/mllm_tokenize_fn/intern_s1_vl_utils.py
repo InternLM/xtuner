@@ -90,10 +90,10 @@ def read_frames_folder(
     if "s3://" in video_path:
         assert client is not None, "client should be provided for s3 backend"
         image_list = sort_frames(client.list(video_path))
+        image_list = [os.path.join(video_path.split(image.split("/")[0])[0], image) for image in image_list]
         frames = []
         for image in image_list:
-            fp = os.path.join(video_path, image)
-            frame = Image.open(io.BytesIO(client.get(fp)))
+            frame = Image.open(io.BytesIO(client.get(image)))
             frames.append(frame)
     else:
         image_list = sort_frames(list(os.listdir(video_path)))

@@ -24,7 +24,7 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, LinearLR, SequentialLR
 from typing_extensions import NotRequired, Self, TypedDict
 
-from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
+from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast, AutoProcessor
 from xtuner.v1._writer import get_writer
 from xtuner.v1.config import FSDPConfig, LRConfig, OptimConfig
 from xtuner.v1.data_proto.sequence_context import SequenceContext
@@ -287,8 +287,15 @@ class Trainer:
         self._hf_max_keep = hf_max_keep
         self._hf_interval = hf_interval
 
+        self._hf_processor = None
         if tokenizer_path is not None:
             self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
+
+            # MLLM: Only need to consider the processor saving problem in non-remote mode
+            try:
+                self._hf_processor = AutoProcessor.from_pretrained(tokenizer_path)
+            except Exception as e:
+                pass
         else:
             self.tokenizer = UTF8ByteTokenizer()
             logger.info(f"Using toy tokenizer: {self.tokenizer}!")
@@ -1058,7 +1065,10 @@ class Trainer:
                     rmtree(hf_dir)
 
         self._engine.save_hf(str(save_hf_path))
-        if isinstance(self.tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast)):
+        if self._hf_processor is not None:
+            # hf_processor will save tokenizer when saving
+            self._hf_processor.save_pretrained(str(save_hf_path))
+        elif isinstance(self.tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast)):
             self.tokenizer.save_pretrained(str(save_hf_path))
 
         meta_path = self.work_dir / self._META_PATH

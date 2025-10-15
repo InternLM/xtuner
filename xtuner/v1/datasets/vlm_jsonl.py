@@ -13,9 +13,11 @@ class VLMJsonlDataset(JsonlDataset):
     def __init__(
         self,
         *args,
-        media_root: str = "",
+        media_root: str | None = "",
         **kwargs,
     ):
+        if media_root is None:
+            media_root = ""
         self.media_root = media_root
 
         super().__init__(*args, **kwargs)
