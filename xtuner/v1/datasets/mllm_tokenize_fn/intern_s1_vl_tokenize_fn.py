@@ -2,6 +2,7 @@
 
 import hashlib
 import os
+from typing import Literal
 
 import numpy as np
 import torch
@@ -70,11 +71,11 @@ def replace_video_token(messages: ChatMessages, chat_template: HybridChatTemplat
                 for c in content:
                     if c.type == "text":
                         text = c.text
-                        assert "<VIDEO_CONTEXT>" in text
+                        # assert "<VIDEO_CONTEXT>" in text
                         text = text.replace("<VIDEO_CONTEXT>", IMAGE_TOKEN_ALIAS)
-                        image_cnt = text.count(IMAGE_TOKEN_ALIAS)
-                        assert image_cnt == 1, "Only one <VIDEO_CONTEXT> is supported for video."
-                        for _ in range(image_cnt):
+                        video_cnt = text.count(IMAGE_TOKEN_ALIAS)
+                        assert video_cnt == 1, "Only one <VIDEO_CONTEXT> is supported for video."
+                        for _ in range(video_cnt):
                             special_tokens = "\n".join(
                                 [f"Frame-{frame_idx + 1}: {IMAGE_TOKEN_ALIAS}" for frame_idx in range(n_frames)]
                             )
@@ -106,6 +107,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         max_length: int | None = None,
         hash: str | None = None,
         only_prompt: bool = False,
+        template_name: Literal["intern-s1", "internvl-3.5"] = "intern-s1",
     ):
         assert isinstance(model_cfg, (InternS1BaseConfig, InternVLBaseConfig))
 
@@ -151,7 +153,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
             f"_{self.min_dynamic_patch}_{self.max_dynamic_patch}_{max_length}"
         )
 
-        self.chat_template = CHAT_TEMPLATE_MAP["intern-s1"]
+        self.chat_template = CHAT_TEMPLATE_MAP[template_name]
         if system_message is not None:
             self.chat_template.default_system = system_message
 
@@ -408,6 +410,7 @@ class InternS1VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
     max_num_frames: int = 24
     data_augment: bool = False
     oss_loader_cfg: OSSLoaderConfig | None = None
+    template_name: Literal["intern-s1", "internvl-3.5"] = "intern-s1"
 
     def build(
         self, tokenizer, tokenizer_hash: str | None = None, anno_name: str = "", **kwargs
@@ -425,5 +428,6 @@ class InternS1VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
             min_num_frames=self.min_num_frames,
             max_num_frames=self.max_num_frames,
             oss_loader_cfg=self.oss_loader_cfg,
+            template_name=self.template_name,
             hash=self.hash,
         )
