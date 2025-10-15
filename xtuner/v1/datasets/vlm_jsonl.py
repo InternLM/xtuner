@@ -1,8 +1,6 @@
 import json
 import os
 
-import torch
-
 from xtuner.v1.utils import get_logger
 
 from .jsonl import JsonlDataset
@@ -24,9 +22,9 @@ class VLMJsonlDataset(JsonlDataset):
 
         self.fake_data = {
             "id": -1,
-            "conversations": [
-                {"from": "human", "value": "你好"},
-                {"from": "gpt", "value": "你好呀！很高兴为你服务～有什么问题或需要帮忙的地方，随时告诉我哦！"},
+            "messages": [
+                {"from": "user", "content": "你好"},
+                {"from": "assistant", "content": "你好呀！很高兴为你服务～有什么问题或需要帮忙的地方，随时告诉我哦！"},
             ],
         }
 
@@ -48,5 +46,5 @@ class VLMJsonlDataset(JsonlDataset):
             data = self.tokenize_fn(self.fake_data)
             assert isinstance(data, dict), f"Expected dict, got {type(data)}"
             if "labels" in data:
-                data["labels"] = torch.ones_like(data["input_ids"]) * -100
+                data["labels"] = len(data["input_ids"]) * [-100]
         return data
