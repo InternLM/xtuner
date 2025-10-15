@@ -9,7 +9,7 @@ from xtuner.v1.module import NoAuxRouterConfig
 from xtuner.v1.utils.activation_offload import async_save_on_cpu
 
 from .moe import MoEModelOutputs
-from .qwen3 import Qwen3MoE, Qwen3MoE30BA3Config
+from .qwen3 import Qwen3MoE, Qwen3MoE30BA3Config, Qwen3MoE235BA22Config
 
 
 class Qwen3VLTextMoE(Qwen3MoE):
@@ -208,5 +208,10 @@ class Qwen3VLTextMoE(Qwen3MoE):
 
 
 class Qwen3VLTextMoE30BA3Config(Qwen3MoE30BA3Config):
+    def build(self) -> Qwen3MoE:
+        return Qwen3VLTextMoE(self)
+
+
+class Qwen3VLTextMoE235BA22Config(Qwen3MoE235BA22Config):
     def build(self) -> Qwen3MoE:
         return Qwen3VLTextMoE(self)

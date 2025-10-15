@@ -7,7 +7,8 @@ from typing_extensions import Self
 
 from xtuner.v1.float8 import Float8Config
 from xtuner.v1.model.base import TransformerConfig
-from xtuner.v1.model.moe.qwen3vl_text import Qwen3VLTextMoE30BA3Config
+from xtuner.v1.model.dense.qwen3vl_text import Qwen3VLTextDense4BConfig, Qwen3VLTextDense8BConfig
+from xtuner.v1.model.moe.qwen3vl_text import Qwen3VLTextMoE30BA3Config, Qwen3VLTextMoE235BA22Config
 from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.utils import get_logger
 
@@ -92,6 +93,72 @@ class Qwen3VLMoE30BA3Config(Qwen3VLBaseConfig):
     vision_config: Qwen3VLVisionConfig = Qwen3VLVisionConfig()
     projector_config: Qwen3VLProjectorConfig = Qwen3VLProjectorConfig()
     text_config: Qwen3VLTextMoE30BA3Config = Qwen3VLTextMoE30BA3Config(
+        rope_type="qwen3_vl",
+        max_position_embeddings=262144,
+        rope_theta=5000000,
+        rope_scaling_cfg=RopeScalingConfig(rope_type="qwen3_vl", mrope_section=[24, 20, 20]),
+    )
+
+    @property
+    def hf_config(self):
+        # TODO(pppppM) Support saving HuggingFace format config
+        logger.warning(
+            f"{type(self)} does not support conversion to HuggingFace config format. "
+            "Only the original HuggingFace config will be retained in the saved HuggingFace format checkpoint. "
+            f"If you have changed the default values in {type(self)}, it may cause the config in the saved "
+            "HuggingFace format checkpoint to not match the weights."
+        )
+        return None
+
+
+class Qwen3VLMoE235BA22Config(Qwen3VLBaseConfig):
+    vision_config: Qwen3VLVisionConfig = Qwen3VLVisionConfig()
+    projector_config: Qwen3VLProjectorConfig = Qwen3VLProjectorConfig(text_hidden_size=4096)
+    text_config: Qwen3VLTextMoE235BA22Config = Qwen3VLTextMoE235BA22Config(
+        rope_type="qwen3_vl",
+        max_position_embeddings=262144,
+        rope_theta=5000000,
+        rope_scaling_cfg=RopeScalingConfig(rope_type="qwen3_vl", mrope_section=[24, 20, 20]),
+    )
+
+    @property
+    def hf_config(self):
+        # TODO(pppppM) Support saving HuggingFace format config
+        logger.warning(
+            f"{type(self)} does not support conversion to HuggingFace config format. "
+            "Only the original HuggingFace config will be retained in the saved HuggingFace format checkpoint. "
+            f"If you have changed the default values in {type(self)}, it may cause the config in the saved "
+            "HuggingFace format checkpoint to not match the weights."
+        )
+        return None
+
+
+class Qwen3VLDense4BConfig(Qwen3VLBaseConfig):
+    vision_config: Qwen3VLVisionConfig = Qwen3VLVisionConfig()
+    projector_config: Qwen3VLProjectorConfig = Qwen3VLProjectorConfig(text_hidden_size=2560)
+    text_config: Qwen3VLTextDense4BConfig = Qwen3VLTextDense4BConfig(
+        rope_type="qwen3_vl",
+        max_position_embeddings=262144,
+        rope_theta=5000000,
+        rope_scaling_cfg=RopeScalingConfig(rope_type="qwen3_vl", mrope_section=[24, 20, 20]),
+    )
+
+    @property
+    def hf_config(self):
+        # TODO(pppppM) Support saving HuggingFace format config
+        logger.warning(
+            f"{type(self)} does not support conversion to HuggingFace config format. "
+            "Only the original HuggingFace config will be retained in the saved HuggingFace format checkpoint. "
+            f"If you have changed the default values in {type(self)}, it may cause the config in the saved "
+            "HuggingFace format checkpoint to not match the weights."
+        )
+        return None
+
+
+class Qwen3VLDense8BConfig(Qwen3VLBaseConfig):
+    vision_config: Qwen3VLVisionConfig = Qwen3VLVisionConfig()
+    projector_config: Qwen3VLProjectorConfig = Qwen3VLProjectorConfig(text_hidden_size=4096)
+    text_config: Qwen3VLTextDense8BConfig = Qwen3VLTextDense8BConfig(
         rope_type="qwen3_vl",
         max_position_embeddings=262144,
         rope_theta=5000000,

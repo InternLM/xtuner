@@ -11,14 +11,15 @@ import json
 from safetensors import safe_open
 from unittest import skipIf
 import transformers
-from xtuner.v1.model import Qwen3VLMoE30BA3Config
+from xtuner.v1.model import Qwen3VLMoE30BA3Config, Qwen3Dense4BConfig
 from xtuner.v1.loss.ce_loss import CELossConfig, CELossContextInputItem
 from xtuner.v1.model.moe.moe import SequenceContext
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.utils.compile import maybe_compile
 from xtuner.v1.utils.test_utils import init_data_mesh
 
-QWEN3_VL_PATH = os.environ["QWEN3_VL_MOE_PATH"]
+QWEN3_VL_MOE_PATH = os.environ["QWEN3_VL_MOE_PATH"]
+QWEN3_VL_DENSE_PATH = os.environ["QWEN3_VL_DENSE_PATH"]
 
 
 @skipIf(version.parse(transformers.__version__) < version.parse("4.57.0"),
@@ -34,7 +35,7 @@ class TestQwen3VL(DeterministicDDPTestCase):
         self.create_pg(device)
         maybe_compile.clear_compile_targets()
         hf_model = AutoModelForImageTextToText.from_pretrained(
-            QWEN3_VL_PATH,
+            QWEN3_VL_DENSE_PATH,
             dtype=torch.bfloat16,
             attn_implementation="flash_attention_2",
             device_map="cuda"
@@ -42,7 +43,7 @@ class TestQwen3VL(DeterministicDDPTestCase):
         patch_hf_rms_norm(hf_model)
 
         rank = dist.get_rank()
-        tokenizer = AutoTokenizer.from_pretrained(QWEN3_VL_PATH)
+        tokenizer = AutoTokenizer.from_pretrained(QWEN3_VL_DENSE_PATH)
         input_ids = tokenizer(f"今天天气不错，是学习的好日子。请听题： 1+{rank} 等于多少？",
                               return_tensors="pt").input_ids.to(device)
 
@@ -58,10 +59,10 @@ class TestQwen3VL(DeterministicDDPTestCase):
         torch.cuda.empty_cache()
 
         with torch.device("meta"):
-            model_cfg = Qwen3VLMoE30BA3Config()
+            model_cfg = Qwen3Dense4BConfig()
             qwen3vl_model = model_cfg.build().to(torch.bfloat16)
 
-        qwen3vl_model.from_hf(QWEN3_VL_PATH)
+        qwen3vl_model.from_hf(QWEN3_VL_DENSE_PATH)
         qwen3vl_model.eval()
 
         loss_cfg = CELossConfig()
@@ -100,7 +101,7 @@ class TestQwen3VL(DeterministicDDPTestCase):
         self.create_pg(device)
         maybe_compile.clear_compile_targets()
         hf_model = AutoModelForImageTextToText.from_pretrained(
-            QWEN3_VL_PATH,
+            QWEN3_VL_DENSE_PATH,
             dtype=torch.bfloat16,
             attn_implementation="flash_attention_2",
             device_map="cuda"
@@ -108,7 +109,7 @@ class TestQwen3VL(DeterministicDDPTestCase):
         # patch_hf_rms_norm(hf_model)
 
         rank = dist.get_rank()
-        tokenizer = AutoTokenizer.from_pretrained(QWEN3_VL_PATH)
+        tokenizer = AutoTokenizer.from_pretrained(QWEN3_VL_DENSE_PATH)
         image_str = '<|vision_start|><|image_pad|><|vision_end|>'
         input_ids = tokenizer(image_str + f"今天天气不错，是学习的好日子", return_tensors="pt").input_ids.to("cuda")
         pixel_values = torch.randn(4, 1536, device='cuda', dtype=torch.bfloat16)
@@ -131,10 +132,10 @@ class TestQwen3VL(DeterministicDDPTestCase):
         torch.cuda.empty_cache()
 
         with torch.device("meta"):
-            model_cfg = Qwen3VLMoE30BA3Config()
+            model_cfg = Qwen3Dense4BConfig()
             qwen3vl_model = model_cfg.build().to(torch.bfloat16)
 
-        qwen3vl_model.from_hf(QWEN3_VL_PATH)
+        qwen3vl_model.from_hf(QWEN3_VL_DENSE_PATH)
         qwen3vl_model.eval()
 
         loss_cfg = CELossConfig()
@@ -176,7 +177,6 @@ class TestQwen3VL(DeterministicDDPTestCase):
                 loss_ctx=loss_ctx,
             )
         loss = output["loss"]
-        print(loss, expected_loss, 'xxxxx')
         self.assertTrue(torch.allclose(loss, expected_loss.to(loss.dtype), atol=tol, rtol=tol))
 
     @parametrize.parametrize(
@@ -189,7 +189,7 @@ class TestQwen3VL(DeterministicDDPTestCase):
         self.create_pg(device)
         maybe_compile.clear_compile_targets()
         hf_model = AutoModelForImageTextToText.from_pretrained(
-            QWEN3_VL_PATH,
+            QWEN3_VL_DENSE_PATH,
             dtype=torch.bfloat16,
             attn_implementation="flash_attention_2",
             device_map="cuda"
@@ -197,7 +197,7 @@ class TestQwen3VL(DeterministicDDPTestCase):
         patch_hf_rms_norm(hf_model)
 
         rank = dist.get_rank()
-        tokenizer = AutoTokenizer.from_pretrained(QWEN3_VL_PATH)
+        tokenizer = AutoTokenizer.from_pretrained(QWEN3_VL_DENSE_PATH)
         input_ids = tokenizer(f"今天天气不错，是学习的好日子。请听题： 1+{rank} 等于多少？",
                               return_tensors="pt").input_ids.to(device)
 
@@ -213,7 +213,7 @@ class TestQwen3VL(DeterministicDDPTestCase):
         torch.cuda.empty_cache()
 
         with torch.device("meta"):
-            model_cfg = Qwen3VLMoE30BA3Config()
+            model_cfg = Qwen3Dense4BConfig()
             qwen3vl_model = model_cfg.build().to(torch.bfloat16)
 
         fsdp_config = FSDPConfig(
@@ -225,7 +225,7 @@ class TestQwen3VL(DeterministicDDPTestCase):
         qwen3vl_model.multi_modal_projector.fully_shard(fsdp_config=fsdp_config)
         qwen3vl_model.fully_shard(fsdp_config=fsdp_config)
 
-        qwen3vl_model.from_hf(QWEN3_VL_PATH)
+        qwen3vl_model.from_hf(QWEN3_VL_DENSE_PATH)
         qwen3vl_model.eval()
 
         shift_input_ids = input_ids[:, :-1]
@@ -270,7 +270,7 @@ class TestQwen3VL(DeterministicDDPTestCase):
             maybe_compile.clear_compile_targets()
 
         hf_model = AutoModelForImageTextToText.from_pretrained(
-            QWEN3_VL_PATH,
+            QWEN3_VL_DENSE_PATH,
             dtype=torch.bfloat16,
             attn_implementation="flash_attention_2",
             device_map="cuda"
@@ -278,7 +278,7 @@ class TestQwen3VL(DeterministicDDPTestCase):
         # patch_hf_rms_norm(hf_model)
 
         rank = dist.get_rank()
-        tokenizer = AutoTokenizer.from_pretrained(QWEN3_VL_PATH)
+        tokenizer = AutoTokenizer.from_pretrained(QWEN3_VL_DENSE_PATH)
         image_str = '<|vision_start|><|image_pad|><|vision_end|>'
         input_ids = tokenizer(image_str + f"今天天气不错，是学习的好日子", return_tensors="pt").input_ids.to("cuda")
         pixel_values = torch.randn(4, 1536, device='cuda', dtype=torch.bfloat16)
@@ -299,7 +299,7 @@ class TestQwen3VL(DeterministicDDPTestCase):
         torch.cuda.empty_cache()
 
         with torch.device("meta"):
-            model_cfg = Qwen3VLMoE30BA3Config()
+            model_cfg = Qwen3Dense4BConfig()
             qwen3vl_model = model_cfg.build().to(torch.bfloat16)
 
         fsdp_config = FSDPConfig(
@@ -315,7 +315,7 @@ class TestQwen3VL(DeterministicDDPTestCase):
         qwen3vl_model.multi_modal_projector.fully_shard(fsdp_config=fsdp_config)
         qwen3vl_model.fully_shard(fsdp_config=fsdp_config)
 
-        qwen3vl_model.from_hf(QWEN3_VL_PATH)
+        qwen3vl_model.from_hf(QWEN3_VL_DENSE_PATH)
         qwen3vl_model.eval()
 
         shift_input_ids = input_ids[:, :-1]
@@ -378,10 +378,10 @@ class TestQwen3VL(DeterministicDDPTestCase):
             qwen3vl_model.vision_tower.fully_shard(fsdp_config=fsdp_config)
             qwen3vl_model.multi_modal_projector.fully_shard(fsdp_config=fsdp_config)
             qwen3vl_model.fully_shard(fsdp_config=fsdp_config)
-            qwen3vl_model.from_hf(QWEN3_VL_PATH)
+            qwen3vl_model.from_hf(QWEN3_VL_MOE_PATH)
             qwen3vl_model.save_hf(tmpdir)
 
-            origin_hf_path = Path(QWEN3_VL_PATH)
+            origin_hf_path = Path(QWEN3_VL_MOE_PATH)
             origin_index_path = origin_hf_path / "model.safetensors.index.json"
             saved_index_path = tmpdir / "model.safetensors.index.json"
 
