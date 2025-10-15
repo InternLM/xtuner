@@ -290,12 +290,6 @@ class Trainer:
         self._hf_processor = None
         if tokenizer_path is not None:
             self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
-
-            # MLLM: Only need to consider the processor saving problem in non-remote mode
-            try:
-                self._hf_processor = AutoProcessor.from_pretrained(tokenizer_path)
-            except Exception as e:
-                pass
         else:
             self.tokenizer = UTF8ByteTokenizer()
             logger.info(f"Using toy tokenizer: {self.tokenizer}!")
@@ -1065,10 +1059,7 @@ class Trainer:
                     rmtree(hf_dir)
 
         self._engine.save_hf(str(save_hf_path))
-        if self._hf_processor is not None:
-            # hf_processor will save tokenizer when saving
-            self._hf_processor.save_pretrained(str(save_hf_path))
-        elif isinstance(self.tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast)):
+        if isinstance(self.tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast)):
             self.tokenizer.save_pretrained(str(save_hf_path))
 
         meta_path = self.work_dir / self._META_PATH
