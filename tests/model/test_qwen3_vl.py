@@ -11,7 +11,7 @@ import json
 from safetensors import safe_open
 from unittest import skipIf
 import transformers
-from xtuner.v1.model import Qwen3VLMoE30BA3Config, Qwen3Dense4BConfig
+from xtuner.v1.model import Qwen3VLMoE30BA3Config, Qwen3VLDense4BConfig
 from xtuner.v1.loss.ce_loss import CELossConfig, CELossContextInputItem
 from xtuner.v1.model.moe.moe import SequenceContext
 from xtuner.v1.config import FSDPConfig
@@ -59,7 +59,7 @@ class TestQwen3VL(DeterministicDDPTestCase):
         torch.cuda.empty_cache()
 
         with torch.device("meta"):
-            model_cfg = Qwen3Dense4BConfig()
+            model_cfg = Qwen3VLDense4BConfig()
             qwen3vl_model = model_cfg.build().to(torch.bfloat16)
 
         qwen3vl_model.from_hf(QWEN3_VL_DENSE_PATH)
@@ -132,7 +132,7 @@ class TestQwen3VL(DeterministicDDPTestCase):
         torch.cuda.empty_cache()
 
         with torch.device("meta"):
-            model_cfg = Qwen3Dense4BConfig()
+            model_cfg = Qwen3VLDense4BConfig()
             qwen3vl_model = model_cfg.build().to(torch.bfloat16)
 
         qwen3vl_model.from_hf(QWEN3_VL_DENSE_PATH)
@@ -213,7 +213,7 @@ class TestQwen3VL(DeterministicDDPTestCase):
         torch.cuda.empty_cache()
 
         with torch.device("meta"):
-            model_cfg = Qwen3Dense4BConfig()
+            model_cfg = Qwen3VLDense4BConfig()
             qwen3vl_model = model_cfg.build().to(torch.bfloat16)
 
         fsdp_config = FSDPConfig(
@@ -299,7 +299,7 @@ class TestQwen3VL(DeterministicDDPTestCase):
         torch.cuda.empty_cache()
 
         with torch.device("meta"):
-            model_cfg = Qwen3Dense4BConfig()
+            model_cfg = Qwen3VLDense4BConfig()
             qwen3vl_model = model_cfg.build().to(torch.bfloat16)
 
         fsdp_config = FSDPConfig(

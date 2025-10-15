@@ -134,8 +134,8 @@ class Qwen3VLMoE235BA22Config(Qwen3VLBaseConfig):
 
 
 class Qwen3VLDense4BConfig(Qwen3VLBaseConfig):
-    vision_config: Qwen3VLVisionConfig = Qwen3VLVisionConfig()
-    projector_config: Qwen3VLProjectorConfig = Qwen3VLProjectorConfig(text_hidden_size=2560)
+    vision_config: Qwen3VLVisionConfig = Qwen3VLVisionConfig(hidden_size=1024, intermediate_size=4096)
+    projector_config: Qwen3VLProjectorConfig = Qwen3VLProjectorConfig(vision_hidden_size=1024, text_hidden_size=2560)
     text_config: Qwen3VLTextDense4BConfig = Qwen3VLTextDense4BConfig(
         rope_type="qwen3_vl",
         max_position_embeddings=262144,

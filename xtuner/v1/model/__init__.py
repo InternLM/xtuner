@@ -82,7 +82,7 @@ __all__ = [
     "GreedyRouterConfig",
     "Dense",
     "Qwen3VLMoE30BA3Config",
-    "Qwen3Dense4BConfig",
-    "Qwen3Dense8BConfig",
+    "Qwen3VLDense4BConfig",
+    "Qwen3VLDense8BConfig",
     "Qwen3VLMoE235BA22Config",
 ]
