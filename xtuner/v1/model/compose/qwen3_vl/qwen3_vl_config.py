@@ -12,6 +12,7 @@ from xtuner.v1.model.moe.qwen3vl_text import Qwen3VLTextMoE30BA3Config, Qwen3VLT
 from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.utils import get_logger
 
+
 logger = get_logger()
 
 
@@ -133,13 +134,12 @@ class Qwen3VLMoE235BA22Config(Qwen3VLBaseConfig):
 
 
 class Qwen3VLDense4BConfig(Qwen3VLBaseConfig):
-    vision_config: Qwen3VLVisionConfig = Qwen3VLVisionConfig(depth=24,
-                                                             hidden_size=1024,
-                                                             intermediate_size=4096,
-                                                             deepstack_visual_indexes=[5, 11, 17])
-    projector_config: Qwen3VLProjectorConfig = Qwen3VLProjectorConfig(vision_hidden_size=1024,
-                                                                      text_hidden_size=2560,
-                                                                      deepstack_visual_indexes=[5, 11, 17])
+    vision_config: Qwen3VLVisionConfig = Qwen3VLVisionConfig(
+        depth=24, hidden_size=1024, intermediate_size=4096, deepstack_visual_indexes=[5, 11, 17]
+    )
+    projector_config: Qwen3VLProjectorConfig = Qwen3VLProjectorConfig(
+        vision_hidden_size=1024, text_hidden_size=2560, deepstack_visual_indexes=[5, 11, 17]
+    )
     text_config: Qwen3VLTextDense4BConfig = Qwen3VLTextDense4BConfig(
         rope_type="qwen3_vl",
         max_position_embeddings=262144,
