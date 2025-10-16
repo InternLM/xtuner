@@ -1,6 +1,5 @@
 import os
 import json
-from functools import wraps
 
 import parametrize
 import torch
@@ -51,14 +50,24 @@ class TestQwen3MoE(DeterministicDDPTestCase):
             device_map="cuda"
         )
         patch_hf_rms_norm(hf_model)
+
+        text_list = [
+            "数据应该像山间的清泉，自然地流向它该去的地方",
+            "当异常来临时，就像秋风中飘落的叶子， 应该被温柔地接住，而不是粗暴地丢弃",
+            "当函数被调用时，它应该像春天的第一缕阳光，温柔地唤醒沉睡的数据结构",
+            "就像老树拥抱归巢的鸟儿，内存管理应该给予每个对象足够的安全感",
+        ]
+        expected_losses = []
         tokenizer = AutoTokenizer.from_pretrained(QWEN3_MOE_PATH, trust_remote_code=True)
-        input_ids = tokenizer("吃葡萄不吐葡萄皮", return_tensors="pt").input_ids.to("cuda")
-        with torch.no_grad():
-            output = hf_model(
-                input_ids=input_ids,
-                labels=input_ids.clone(),
-            )
-        expected_loss = output.loss
+        for text in text_list:
+            input_ids = tokenizer(text, return_tensors="pt").input_ids.to("cuda")
+            with torch.no_grad():
+                output = hf_model(
+                    input_ids=input_ids,
+                    labels=input_ids.clone(),
+                )
+            expected_loss = output.loss
+            expected_losses.append(expected_loss)
 
         del hf_model
         torch.cuda.empty_cache()
@@ -68,30 +77,35 @@ class TestQwen3MoE(DeterministicDDPTestCase):
             cfg.dispatcher = dispatcher
             cfg.ep_size = ep_size
             qwen_model = cfg.build().to(torch.bfloat16)
-
-        shift_input_ids = input_ids[:, :-1]
-        shifted_labels = input_ids[:, 1:]
-        seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids.to('cuda'),))
-        loss_cfg = CELossConfig()
-        seq_ctx_list = [seq_ctx]
-        loss_ctx_input_list: list[CELossContextInputItem] = [CELossContextInputItem(shifted_labels=shifted_labels)]
-        LossContext = loss_cfg.loss_ctx_cls
-        batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
-            loss_ctx_input_list, 
-            loss_cfg,
-        )
-        loss_kwargs = batches_loss_kwargs[0]
-        loss_ctx = LossContext(loss_cfg, loss_kwargs)
-        seq_ctx = seq_ctx_list[0]
         qwen_model.from_hf(QWEN3_MOE_PATH)
 
-        with torch.no_grad():
-            output = qwen_model(
-                seq_ctx=seq_ctx,
-                loss_ctx=loss_ctx,
+        losses = []
+
+        for text in text_list:
+            input_ids = tokenizer(text, return_tensors="pt").input_ids.to("cuda")
+            shift_input_ids = input_ids[:, :-1]
+            shifted_labels = input_ids[:, 1:]
+            seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids.to('cuda'),))
+            loss_cfg = CELossConfig()
+            seq_ctx_list = [seq_ctx]
+            loss_ctx_input_list: list[CELossContextInputItem] = [CELossContextInputItem(shifted_labels=shifted_labels)]
+            LossContext = loss_cfg.loss_ctx_cls
+            batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
+                loss_ctx_input_list, 
+                loss_cfg,
             )
-        loss = output["loss"]
-        self.assertTrue(torch.allclose(loss, expected_loss.to(loss.dtype), atol=tol, rtol=tol))
+            loss_kwargs = batches_loss_kwargs[0]
+            loss_ctx = LossContext(loss_cfg, loss_kwargs)
+            seq_ctx = seq_ctx_list[0]
+
+            with torch.no_grad():
+                output = qwen_model(
+                    seq_ctx=seq_ctx,
+                    loss_ctx=loss_ctx,
+                )
+            loss = output["loss"]
+            losses.append(loss)
+        self._check_loss_curve( losses=torch.tensor(losses), losses_ref=torch.tensor(expected_losses), sim_tol=tol, rtol=tol,)
 
     @parametrize.parametrize(
         "device,dispatcher,ep_size",
@@ -104,20 +118,32 @@ class TestQwen3MoE(DeterministicDDPTestCase):
     def test_fsdp_accuracy(self, device, dispatcher, ep_size):
         self.create_pg(device)
         maybe_compile.clear_compile_targets()
+
         hf_model = AutoModelForCausalLM.from_pretrained(
             QWEN3_MOE_PATH,
             torch_dtype=torch.bfloat16,
             trust_remote_code=True,
             device_map="cuda"
         )
+        patch_hf_rms_norm(hf_model)
+
+        text_list = [
+            "数据应该像山间的清泉，自然地流向它该去的地方",
+            "当异常来临时，就像秋风中飘落的叶子， 应该被温柔地接住，而不是粗暴地丢弃",
+            "当函数被调用时，它应该像春天的第一缕阳光，温柔地唤醒沉睡的数据结构",
+            "就像老树拥抱归巢的鸟儿，内存管理应该给予每个对象足够的安全感",
+        ]
+        expected_losses = []
         tokenizer = AutoTokenizer.from_pretrained(QWEN3_MOE_PATH, trust_remote_code=True)
-        input_ids = tokenizer("吃葡萄不吐葡萄皮", return_tensors="pt").input_ids.to("cuda")
-        with torch.no_grad():
-            output = hf_model(
-                input_ids=input_ids,
-                labels=input_ids.clone(),
-            )
-        expected_loss = output.loss
+        for text in text_list:
+            input_ids = tokenizer(text, return_tensors="pt").input_ids.to("cuda")
+            with torch.no_grad():
+                output = hf_model(
+                    input_ids=input_ids,
+                    labels=input_ids.clone(),
+                )
+            expected_loss = output.loss
+            expected_losses.append(expected_loss)
 
         del hf_model
         torch.cuda.empty_cache()
@@ -132,31 +158,37 @@ class TestQwen3MoE(DeterministicDDPTestCase):
             ep_size=ep_size,
             cpu_offload=False,
         )
-
-        shift_input_ids = input_ids[:, :-1]
-        shifted_labels = input_ids[:, 1:]
-        seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids.to('cuda'),))
-        loss_cfg = CELossConfig()
-        seq_ctx_list = [seq_ctx]
-        loss_ctx_input_list: list[CELossContextInputItem] = [CELossContextInputItem(shifted_labels=shifted_labels)]
-        LossContext = loss_cfg.loss_ctx_cls
-        batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
-            loss_ctx_input_list, 
-            loss_cfg,
-        )
-        loss_kwargs = batches_loss_kwargs[0]
-        loss_ctx = LossContext(loss_cfg, loss_kwargs)
-        seq_ctx = seq_ctx_list[0]
         qwen_model.fully_shard(fsdp_config=fsdp_config)
         qwen_model.from_hf(QWEN3_MOE_PATH)
 
-        with torch.no_grad():
-            output = qwen_model(
-                seq_ctx=seq_ctx,
-                loss_ctx=loss_ctx,
+        losses = []
+
+        for text in text_list:
+            input_ids = tokenizer(text, return_tensors="pt").input_ids.to("cuda")
+            shift_input_ids = input_ids[:, :-1]
+            shifted_labels = input_ids[:, 1:]
+            seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids.to('cuda'),))
+            loss_cfg = CELossConfig()
+            seq_ctx_list = [seq_ctx]
+            loss_ctx_input_list: list[CELossContextInputItem] = [CELossContextInputItem(shifted_labels=shifted_labels)]
+            LossContext = loss_cfg.loss_ctx_cls
+            batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
+                loss_ctx_input_list,
+                loss_cfg,
             )
-        loss = output["loss"]
-        self.assertTrue(torch.allclose(loss, expected_loss.to(loss.dtype), atol=1e-2, rtol=1e-2))
+            loss_kwargs = batches_loss_kwargs[0]
+            loss_ctx = LossContext(loss_cfg, loss_kwargs)
+            seq_ctx = seq_ctx_list[0]
+
+            with torch.no_grad():
+                output = qwen_model(
+                    seq_ctx=seq_ctx,
+                    loss_ctx=loss_ctx,
+                )
+            loss = output["loss"]
+            losses.append(loss)
+
+        self._check_loss_curve(losses=torch.tensor(losses), losses_ref=torch.tensor(expected_losses), sim_tol=1e-2, rtol=1e-2)
 
     @parametrize.parametrize(
         "use_sliding_window, max_window_layers, sliding_window",
