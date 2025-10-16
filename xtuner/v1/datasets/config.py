@@ -44,7 +44,7 @@ class DatasetConfig(BaseModel):
     name: Annotated[str, Parameter(group="dataset")] = "default"
     class_name: Annotated[str, Parameter(group="dataset")] = "JsonlDataset"
     sample_ratio: Annotated[float, Parameter(group="dataset")] = 1.0
-    media_root: Annotated[str, Parameter(group="dataset")] = ""
+    media_root: Annotated[str | None, Parameter(group="dataset")] = ""
 
     def build(
         self,
