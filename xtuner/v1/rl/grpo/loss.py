@@ -123,7 +123,7 @@ class GRPOLossContext(BaseLossContext[RLLossContextInputItem]):
         head_weight: torch.Tensor,
         head_bias: torch.Tensor | None,
         loss_kwargs: GRPOLossKwargs,
-    ) -> tuple[torch.Tensor, tuple[torch.Tensor | None, torch.Tensor | None]]:
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor | None, dict[str, list[torch.Tensor]]]]:
         """Step 2.a and 2.b in the loss calculation in
         xtuner/v1/loss/base_loss_ctx.py."""
         # We do linear forward here to simplify the implementation of chunk loss (saving memory).
@@ -147,6 +147,7 @@ class GRPOLossContext(BaseLossContext[RLLossContextInputItem]):
 
         ratio = (logprobs - old_logprobs.detach()).exp()
         ratio = ratio * (shifted_labels != self.loss_cfg.ignore_idx).float()
+        extra_info = {"max_ratio": ratio.max()}
 
         if self.loss_cfg.use_kl_loss:
             ref_logprobs = loss_kwargs.ref_logprobs
@@ -157,4 +158,4 @@ class GRPOLossContext(BaseLossContext[RLLossContextInputItem]):
             kl_loss = kl_penalty(logprobs, ref_logprobs, kl_loss_weight, self.loss_cfg.kl_loss_type)
             loss = loss + kl_loss
 
-        return loss, (logits, ratio.max())
+        return loss, (logits, extra_info)

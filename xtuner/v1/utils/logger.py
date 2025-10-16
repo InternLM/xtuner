@@ -43,6 +43,7 @@ def get_logger(level="INFO", log_dir=None, tag=None):
                 logger.add(sys.stderr, level=log_level, format=log_format(debug=log_level == "DEBUG"), enqueue=True)
                 _LOGGER = logger
 
+    # note: 部分推理后端会清除logger的handler，导致日志输出至文件有异常，所以这里重新add file handler
     if log_dir is not None:
         log_level = os.environ.get("XTUNER_LOG_LEVEL", level).upper()
         add_log_dir = True

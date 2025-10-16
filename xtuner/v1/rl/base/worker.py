@@ -163,6 +163,9 @@ class TrainingWorker(SingleAcceleratorWorker):
             self.log_level = os.environ.get("XTUNER_LOG_LEVEL", "INFO").upper()
             self.logger = get_logger(log_dir=self.log_dir, tag="TrainingWorker")
 
+        else:
+            self.logger = get_logger()
+
     def _build_engine(self, worker_cfg: WorkerConfig) -> TrainEngine:
         engine = TrainEngine(
             optim_cfg=worker_cfg.optim_cfg,
@@ -241,8 +244,22 @@ class TrainingWorker(SingleAcceleratorWorker):
         self._ref_model.to_device("cpu")
         return loss_ctx_input_list
 
+    def _update_other_log(self, other_log: dict):
+        if "max_ratio" in other_log["extra_info"]:
+            max_ratio_list = []
+            for item in other_log["extra_info"]["max_ratio"]:
+                max_ratio_list.append(torch.max(item, dim=0).values.item())
+            other_log["extra_info"]["max_ratio"] = max(max_ratio_list)
+
+        if "local_loss" in other_log["extra_info"]:
+            local_loss_list = []
+            for item in other_log["extra_info"]["local_loss"]:
+                local_loss_list.append(item.item())
+            other_log["extra_info"]["local_loss"] = sum(local_loss_list)
+        return other_log
+
     def fit(self, data_batches: list[WorkerInputItem], rollout_idx: int):
-        # sglang会清除logger handle, 重新创建
+        # NOTE: sglang会清除logger handle, 重新创建
         self.logger = get_logger(log_dir=self.log_dir, tag="TrainingWorker")
         num_batches = len(data_batches)
         iters_per_step = math.ceil(num_batches / self._optimizer_steps)
@@ -380,11 +397,17 @@ class TrainingWorker(SingleAcceleratorWorker):
             loss_log, other_log = self._engine.train_step(
                 data_batches=engine_input,
             )
+            other_log = self._update_other_log(other_log)
             grad_norm = self._engine.clip_grad_norm()
             self._engine.step_optimizer(grad_norm)
             log_info = dict()
             log_info.update(loss_log)
-            log_info.update(other_log)
+            for k, v in other_log.items():
+                if k == "extra_info":
+                    for extra_k, extra_v in v.items():
+                        log_info[extra_k] = extra_v.item() if isinstance(extra_v, torch.Tensor) else extra_v
+                else:
+                    log_info[k] = v.item() if isinstance(v, torch.Tensor) else v
             log_info["grad_norm"] = grad_norm.item()
             log_str = ", ".join(
                 f"{key}={value:.4f}" if isinstance(value, float) else f"{key}={value}"

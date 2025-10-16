@@ -119,7 +119,6 @@ class DataFlow:
             "post_process": [],
             "put_to_buffer": [],
         }
-        self.get_time = 0.0
 
     def get_train_dataset_length(self):
         """Gets the length of the training dataset from the replay buffer."""
@@ -245,7 +244,7 @@ class DataFlow:
             pbar.n = self.finished_samples_count
             pbar.refresh()
 
-        self.logger.info("[DATAFLOW] Target batch size reached. Pausing env controller.")
+        self.logger.info("Target batch size reached. Pausing env controller.")
         ray.get(self.env_controller.pause.remote())
 
         if waiting_tasks:
@@ -279,21 +278,21 @@ class DataFlow:
         self.unfinished_samples_count = 0
         self.failed_samples_count = 0
         self.target_batch_size = num if num and num > 0 else self.config.global_batch_size
-        self.logger.info(f"[DATAFLOW] Target batch size set to {self.target_batch_size}.")
+        self.logger.info(f"Target batch size set to {self.target_batch_size}.")
         self.sample_params = sample_params if sample_params else self.config.sample_params
         self.extra_params = extra_params if extra_params else self.config.extra_params
-        self.logger.info(f"[DATAFLOW] Sample parameters set to {self.sample_params}.")
+        self.logger.info(f"Sample parameters set to {self.sample_params}.")
 
         if resume:
             assert resume_path, "Resuming is enabled but no resume path is provided."
-            self.logger.info(f"[DATAFLOW] Resuming replay buffer from {resume_path}")
+            self.logger.info(f"Resuming replay buffer from {resume_path}")
             await self.replay_buffer.resume.remote(resume_path)
 
         await self.concurrent_task_runner()
 
         if dump:
             assert dump_path, "Dumping is enabled but no dump path is provided."
-            self.logger.info(f"[DATAFLOW] Dump replay buffer from {dump_path}")
+            self.logger.info(f"Dump replay buffer from {dump_path}")
             await self.replay_buffer.dump.remote(dump_path)
 
         return await self.replay_buffer.get_samples.remote(self.target_batch_size)  # type: ignore[attr-defined]
@@ -304,6 +303,7 @@ class DataFlow:
     def logging_timing_perf(self):
         log_messages = ["[TIME] Single sample average time cost: "]
         for name, times in self.timings.items():
+            avg_time_str = "N/A"
             if times:
                 avg_time = sum(times) / len(times)
                 avg_time_str = f"{avg_time:.4f}s"

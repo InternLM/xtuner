@@ -14,13 +14,13 @@ Weight: TypeAlias = torch.Tensor | DTensor
 Bias: TypeAlias = torch.Tensor | DTensor | None
 HiddenStates: TypeAlias = torch.Tensor
 Labels: TypeAlias = torch.Tensor
-Max_ratio: TypeAlias = torch.Tensor
+ExtraInfo: TypeAlias = dict[str, list[torch.Tensor]]
 
 
 class LMHead(nn.Linear):
     def forward(  # type: ignore[override]
         self, hidden_states: torch.Tensor, loss_ctx: CELossContext | None = None
-    ) -> tuple[Loss | None, tuple[Logits | None, Max_ratio | None]]:
+    ) -> tuple[Loss | None, tuple[Logits | None, ExtraInfo]]:
         """Forward pass of the language model head."""
         if isinstance(self.weight, DTensor):
             w = self.weight.to_local()
@@ -34,10 +34,8 @@ class LMHead(nn.Linear):
             b = self.bias
         if loss_ctx is None:
             logits = F.linear(hidden_states, w, b)
-            return None, (logits.float(), None)
+            return None, (logits.float(), {})
         else:
             return loss_ctx.forward(hidden_states, w, b)
 
-    __call__: Callable[
-        ["LMHead", HiddenStates, CELossContext | None], tuple[Loss, tuple[Logits | None, Max_ratio | None]]
-    ]
+    __call__: Callable[["LMHead", HiddenStates, CELossContext | None], tuple[Loss, tuple[Logits | None, ExtraInfo]]]

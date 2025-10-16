@@ -3,10 +3,12 @@ from abc import ABC, abstractmethod
 from typing import Annotated, Generic, Literal, TypeVar
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict
 from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.nn.functional import all_reduce
 
 from .chunk_loss import ChunkLoss
 
@@ -104,7 +106,7 @@ class BaseLossContext(nn.Module, ABC, Generic[LossContextInputItem]):
         head_weight: torch.Tensor,
         head_bias: torch.Tensor | None,
         loss_kwargs: BaseLossKwargs,
-    ) -> tuple[torch.Tensor, tuple[torch.Tensor | None, torch.Tensor | None]]:
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor | None, dict[str, list[torch.Tensor]]]]:
         """Step 2.a and 2.b in the loss calculation."""
         ...
 
@@ -127,25 +129,30 @@ class BaseLossContext(nn.Module, ABC, Generic[LossContextInputItem]):
         assert self.loss_cfg.chunk_size is not None, "chunk_size must be set in chunk mode"
 
         chunks = loss_kwargs.chunk(self.loss_cfg.chunk_size)
-        loss, max_ratio = ChunkLoss.apply(
+        loss, extra_info = ChunkLoss.apply(
             hidden_states, head_weight, head_bias, self.loss_fn, chunks, self.loss_cfg.chunk_size
         )
-        return loss, None, max_ratio
+        return loss, (None, extra_info)
 
     def forward(
         self,
         hidden_states: torch.Tensor,
         head_weight: torch.Tensor,
         head_bias: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, tuple[torch.Tensor | None, torch.Tensor | None]]:
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor | None, dict[str, list[torch.Tensor]]]]:
         assert self.loss_kwargs is not None, "loss_kwargs must be set before calling forward"
         if head_bias is not None:
             raise NotImplementedError("Loss does not support head_bias yet.")
 
         if self.loss_cfg.mode == "eager":
-            loss, logits, max_ratio = self.eager_mode(hidden_states, head_weight, head_bias, self.loss_kwargs)
+            loss, (logits, extra_info) = self.eager_mode(hidden_states, head_weight, head_bias, self.loss_kwargs)
         else:
-            loss, logits, max_ratio = self.chunk_mode(hidden_states, head_weight, head_bias, self.loss_kwargs)
+            loss, (logits, extra_info) = self.chunk_mode(hidden_states, head_weight, head_bias, self.loss_kwargs)
+
+        extra_info["local_loss"] = loss.detach().clone()
 
         # Step 2.c in the loss calculation
-        return loss, (logits, max_ratio)
+        if dist.is_initialized():
+            loss = all_reduce(loss, op=dist.ReduceOp.SUM, group=dist.group.WORLD)
+
+        return loss, (logits, extra_info)

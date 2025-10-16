@@ -5,7 +5,7 @@ import time
 from concurrent.futures import wait
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, cast
+from typing import Any, Dict, List, Optional, Tuple, cast
 
 import torch
 import torch.distributed as dist
@@ -20,7 +20,6 @@ from torch.distributed.checkpoint.state_dict import (
     set_optimizer_state_dict,
 )
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.nn.functional import all_reduce
 from torch.distributed.tensor.placement_types import Placement
 from torch.utils._foreach_utils import (
     _device_has_foreach_support,
@@ -217,7 +216,7 @@ class TrainEngine:
             self.float8_handler.precompute_float8_dynamic_scale_for_fsdp(self.model)
 
         loss_log = {}
-        other_log = {}
+        other_log: Dict[str, Any] = {}
         intra_layer_micro_batch = self.intra_layer_micro_batch
         assert len(data_batches) % intra_layer_micro_batch == 0, (
             f"data_batches length {len(data_batches)} is not divisible by intra_layer_micro_batch {intra_layer_micro_batch}"
@@ -237,7 +236,6 @@ class TrainEngine:
             )
 
         step_loss = torch.tensor(0.0, device=DEVICE)
-        step_llm_loss = torch.tensor(0.0, device=DEVICE)
         step_balancing_loss: torch.Tensor | None = None
         step_z_loss: torch.Tensor | None = None
         step_consumed_tokens = torch.tensor(0.0, device=DEVICE)
@@ -246,8 +244,7 @@ class TrainEngine:
             logger.info(f"grad_accumulation_steps: {iters_per_step}")
             self._count += 1
 
-        grad_acc_loss = []
-        max_ratio = []
+        extra_info_dict: dict[str, list[torch.Tensor]] = {}
         for i in range(0, len(data_batches), intra_layer_micro_batch):
             data_batch = data_batches[i : i + intra_layer_micro_batch]
             seq_ctx_list = []
@@ -270,16 +267,16 @@ class TrainEngine:
                 )
 
             # llm loss has been global averaged
-            llm_loss = output["loss"]
-            max_ratio.append(output["max_ratio"].item())
-            grad_acc_loss.append(llm_loss.detach().clone().item())
+            llm_loss = output["loss"]  # reduced_loss
             step_loss += llm_loss.detach().clone()
 
-            if dist.is_initialized():
-                llm_loss = all_reduce(llm_loss, op=dist.ReduceOp.SUM, group=dist.group.WORLD)
-
             loss = llm_loss
-            step_llm_loss += llm_loss.detach().clone()
+            if "extra_info" in output:
+                for k, v in output["extra_info"].items():
+                    if k in extra_info_dict:
+                        extra_info_dict[k].append(v)
+                    else:
+                        extra_info_dict[k] = [v]
 
             if "balancing_loss" in output:
                 balancing_loss = output["balancing_loss"] / iters_per_step
@@ -313,11 +310,10 @@ class TrainEngine:
             self.model.update_bias(tokens_per_expert_global_for_bias, avg_count_load)  # type: ignore
             other_log["maxvio"] = maxvio.item()
 
-        reduced_llm_loss = step_llm_loss
+        reduced_llm_loss = step_loss
         dist.all_reduce(reduced_llm_loss.div_(dist.get_world_size()))
 
-        loss_log["total_loss"] = step_loss.item()
-        loss_log["reduced_llm_loss"] = reduced_llm_loss.item()
+        loss_log["reduced_llm_loss"] = step_loss.item()
         if step_balancing_loss is not None:
             reduced_balancing_loss = step_balancing_loss
             dist.all_reduce(reduced_balancing_loss.div_(dist.get_world_size()))
@@ -327,8 +323,7 @@ class TrainEngine:
             dist.all_reduce(reduced_z_loss.div_(dist.get_world_size()))
             loss_log["reduced_z_loss"] = reduced_z_loss.item()
         other_log["consumed_tokens"] = step_consumed_tokens.item()
-        other_log["grad_acc_loss"] = max(grad_acc_loss)  # type: ignore[assignment]
-        other_log["max_ratio"] = max(max_ratio)  # type: ignore[assignment]
+        other_log["extra_info"] = extra_info_dict
         return loss_log, other_log
 
     def from_hf(self, hf_path: str | Path, strict: bool = False):

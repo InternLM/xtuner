@@ -10,6 +10,7 @@ from typing import Any, Callable, Dict, List, Optional, Union
 import httpx
 import ray
 import requests  # type: ignore[import-untyped]
+from packaging.version import Version
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 from transformers import AutoTokenizer
@@ -67,7 +68,7 @@ class RolloutWorker(SingleAcceleratorWorker):
         self.server_process: Optional[multiprocessing.Process] = None
         self.logger = get_logger(log_dir=config.worker_log_dir, tag="RolloutWorker")
         self.tokenizer = AutoTokenizer.from_pretrained(self.config.tokenizer_path, trust_remote_code=True)
-        self.print_flag = True  # only print once
+        self.check_flag = True  # only print once
 
     def init_dist_port(self):
         """Initialize distributed communication ports.
@@ -261,6 +262,25 @@ class RolloutWorker(SingleAcceleratorWorker):
             openai_tools.append(openai_tool)
         return openai_prompts, openai_tools
 
+    def _check_infer_engine_version(self, return_token_ids: bool, input_ids: bool):
+        if self.check_flag:
+            if os.environ.get("XTUNER_USE_VLLM", "0") == "1":
+                if return_token_ids or input_ids:
+                    self.logger.error(
+                        "VLLM backend does not support return_token_ids or generate with input_ids as input now"
+                    )
+            elif os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "1":
+                import lmdeploy
+
+                lmdeploy_version = lmdeploy.__version__
+                if return_token_ids and Version(lmdeploy_version) < Version("0.10.1"):
+                    self.logger.error("You should use lmdeploy >= v0.10.1 to support return_token_ids")
+                if input_ids:
+                    self.logger.error(
+                        "You should use lmdeploy main branch contain commit 49f632483e93cfd3d09ef743508c07a68a763e26 to support generate with input_ids as input"
+                    )
+            self.check_flag = False
+
     async def rollout_task(
         self,
         prompts: Union[str, List[Dict[str, Any]]] | None,
@@ -277,16 +297,17 @@ class RolloutWorker(SingleAcceleratorWorker):
             response="",
             finish_reason="failed",
         )
-        if "return_token_ids" in extra_params and extra_params["return_token_ids"]:
-            if os.environ.get("XTUNER_USE_VLLM", "0") == "1":
-                self.logger.error("VLLM backend does not support return token ids now")
-            # todo: test streaming infer with return_token_ids
-            extra_params["stream"] = False
-            if self.print_flag:
-                self.logger.warning("Streaming infer is not supported when return_token_ids is True")
-                if os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "1":
-                    self.logger.warning("You should use lmdeploy main branch > v0.10.1 to support return_token_ids")
-                self.print_flag = False
+        self._check_infer_engine_version(
+            "return_token_ids" in extra_params and extra_params["return_token_ids"], input_ids is not None
+        )
+
+        # TODO(@duanyanhui): support streaming infer with return_token_ids
+        extra_params["stream"] = (
+            False
+            if "return_token_ids" in extra_params and extra_params["return_token_ids"]
+            else extra_params.get("stream", False)
+        )
+
         try:
             if format == "openai":
                 openai_prompts, openai_tools = prompts, tools

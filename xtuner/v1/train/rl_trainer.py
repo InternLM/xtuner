@@ -317,7 +317,7 @@ class RLTrainer:
                 scores, eval_data_groups = ray.get(self._evaluator.run.remote(return_samples=True))
                 trajectory_save_path = self.exp_dir / f"eval_{rollout_idx}_trajectory.jsonl"
                 self._save_trajectories(eval_data_groups, trajectory_save_path)
-                self.logger.info(f"[EVAL] evaluate idx {rollout_idx} scores {scores}")
+                self.logger.info(f"Evaluate idx {rollout_idx} scores {scores}")
             self._cur_step += 1
 
     def _log_data_info(self, rollout_idx: int, data_info: dict):
@@ -420,7 +420,6 @@ class RLTrainer:
         response_len_list = []
 
         rollout_response_len_list = []
-        rollout_id_to_str = []
         mismatch_token_ids_count = 0
         for group in data_groups:
             for data in group:
@@ -437,8 +436,6 @@ class RLTrainer:
 
                     if response_ids != revert_encode_response_ids:
                         mismatch_token_ids_count += 1
-
-                    rollout_id_to_str.append(response_str)
 
                 response_ids = self.tokenizer.encode(data.env.rollout.response, add_special_tokens=False)
                 response_len_list.append(len(response_ids))
@@ -479,7 +476,7 @@ class RLTrainer:
             for group in data_groups:
                 for data in group:
                     item = {
-                        "messages": data.data.messages,
+                        "prompt": data.data.extra_info["raw_prompt"],
                         "response": data.env.rollout.response,
                         "response_len": response_len_list[_count],
                         "label": data.data.reward_model["ground_truth"],
@@ -488,8 +485,6 @@ class RLTrainer:
 
                     if response_len_list[_count] != rollout_response_len_list[_count]:
                         item["rollout_response_len"] = rollout_response_len_list[_count]
-                    if len(rollout_id_to_str) > 0 and data.env.rollout.response != rollout_id_to_str[_count]:
-                        item["rollout_id_to_str"] = rollout_id_to_str[_count]
 
                     json.dump(item, f, ensure_ascii=False, indent=2)
                     f.write("\n")
@@ -533,7 +528,7 @@ class RLTrainer:
             return
 
         save_hf_path = self.exp_dir / f"hf-{self.cur_step}"
-        self.logger.info(f"Saving step {self.cur_step} checkpoints to: {save_hf_path}")
+        self.logger.info(f"Saving step {self.cur_step + 1} checkpoints to: {save_hf_path}")
         self.meta.latest_exp.hf_checkpoint_list.append(str(save_hf_path))
 
         if self._hf_max_keep is not None and len(self.meta.latest_exp.hf_checkpoint_list) > self._hf_max_keep:
