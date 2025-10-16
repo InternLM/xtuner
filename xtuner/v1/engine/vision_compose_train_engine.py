@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from torch.distributed.device_mesh import DeviceMesh
 from typing_extensions import Self
 
+from transformers import AutoProcessor
 from transformers.configuration_utils import PretrainedConfig
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.data_proto import SequenceContext
@@ -73,6 +74,7 @@ class VisionComposeTrainEngine(TrainEngine):
         *args,
         **kwargs,
     ) -> None:
+        self._processor = None  # only for save
         super().__init__(model_cfg, *args, **kwargs)  # type: ignore
 
     def build_model(self) -> VisionComposeModelProtocol:  # type: ignore
@@ -125,6 +127,15 @@ class VisionComposeTrainEngine(TrainEngine):
                 model.multi_modal_projector, cast(DeviceMesh, model.multi_modal_projector.fsdp_mesh)
             )
         return model
+
+    def from_hf(self, hf_path: str | Path, strict: bool = False):
+        super().from_hf(hf_path, strict)
+        self._processor = AutoProcessor.from_pretrained(hf_path, trust_remote_code=True)
+
+    def save_hf(self, hf_dir: str, save_dtype: torch.dtype = torch.bfloat16):
+        super().save_hf(hf_dir, save_dtype)
+        if self._processor is not None:
+            self._processor.save_pretrained(hf_dir)
 
     def train_step(self, data_batches: List[ModelItem]):
         """Perform a training step with the given data batches and mesh.

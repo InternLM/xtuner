@@ -2,6 +2,7 @@
 
 import hashlib
 import os
+from typing import Literal
 
 import numpy as np
 import torch
@@ -26,7 +27,7 @@ from .base_mllm_tokenize_fn import (
     replace_image_token,
 )
 from .intern_s1_vl_process import build_transform, dynamic_num_patch, dynamic_preprocess
-from .intern_s1_vl_utils import InternS1VLOSSLoader, read_frames_decord
+from .intern_s1_vl_utils import InternS1VLOSSLoader, read_interns1_vl_video
 
 
 logger = get_logger()
@@ -70,11 +71,11 @@ def replace_video_token(messages: ChatMessages, chat_template: HybridChatTemplat
                 for c in content:
                     if c.type == "text":
                         text = c.text
-                        assert "<VIDEO_CONTEXT>" in text
+                        # assert "<VIDEO_CONTEXT>" in text
                         text = text.replace("<VIDEO_CONTEXT>", IMAGE_TOKEN_ALIAS)
-                        image_cnt = text.count(IMAGE_TOKEN_ALIAS)
-                        assert image_cnt == 1, "Only one <VIDEO_CONTEXT> is supported for video."
-                        for _ in range(image_cnt):
+                        video_cnt = text.count(IMAGE_TOKEN_ALIAS)
+                        assert video_cnt == 1, "Only one <VIDEO_CONTEXT> is supported for video."
+                        for _ in range(video_cnt):
                             special_tokens = "\n".join(
                                 [f"Frame-{frame_idx + 1}: {IMAGE_TOKEN_ALIAS}" for frame_idx in range(n_frames)]
                             )
@@ -83,10 +84,10 @@ def replace_video_token(messages: ChatMessages, chat_template: HybridChatTemplat
                             text = text.replace(IMAGE_TOKEN_ALIAS, image_tokens)
                             current_image_idx += n_frames
                         c.text = text
-        # if current_image_idx < num_image, it means <image> placeholder is less than num_image
-        assert current_image_idx == len(num_image_token_list), (
-            f"ERROR: current_image_idx: {current_image_idx} != num_image: {len(num_image_token_list)}"
-        )
+    # if current_image_idx < num_image, it means <image> placeholder is less than num_image
+    assert current_image_idx == len(num_image_token_list), (
+        f"ERROR: current_image_idx: {current_image_idx} != num_image: {len(num_image_token_list)}"
+    )
 
 
 class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
@@ -106,6 +107,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         max_length: int | None = None,
         hash: str | None = None,
         only_prompt: bool = False,
+        template_name: Literal["intern-s1", "internvl-3.5"] = "intern-s1",
     ):
         assert isinstance(model_cfg, (InternS1BaseConfig, InternVLBaseConfig))
 
@@ -129,6 +131,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         self.min_dynamic_patch = min_num
         self.min_num_frames = min_num_frames
         self.max_num_frames = max_num_frames
+        self.image_token_id = model_cfg.image_token_id
 
         self.dynamic_image_size = model_cfg.dynamic_image_size
         self.use_thumbnail = model_cfg.use_thumbnail
@@ -150,7 +153,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
             f"_{self.min_dynamic_patch}_{self.max_dynamic_patch}_{max_length}"
         )
 
-        self.chat_template = CHAT_TEMPLATE_MAP["intern-s1"]
+        self.chat_template = CHAT_TEMPLATE_MAP[template_name]
         if system_message is not None:
             self.chat_template.default_system = system_message
 
@@ -240,6 +243,9 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
             input_ids = tokenized["input_ids"]
             labels = tokenized["labels"]
             input_ids, _ = self._truncated_input_and_labels(input_ids, labels)
+            assert (torch.tensor(input_ids) == self.image_token_id).sum() == sum(num_image_tokens), (
+                "ERROR: image tokens are truncated"
+            )
             return {"num_tokens": len(input_ids)}
         except Exception as e:
             print(
@@ -293,6 +299,9 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         input_ids = tokenized["input_ids"]
         labels = tokenized["labels"]
         input_ids, labels = self._truncated_input_and_labels(input_ids, labels)
+        assert (torch.tensor(input_ids) == self.image_token_id).sum() == sum(num_image_tokens), (
+            "ERROR: image tokens are truncated"
+        )
         ret = InternS1DataItem(
             input_ids=input_ids,
             labels=labels,
@@ -321,6 +330,9 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
             input_ids = tokenized["input_ids"]
             labels = tokenized["labels"]
             input_ids, _ = self._truncated_input_and_labels(input_ids, labels)
+            assert (torch.tensor(input_ids) == self.image_token_id).sum() == sum(num_image_tokens), (
+                "ERROR: video tokens are truncated"
+            )
             return {"num_tokens": len(input_ids)}
         except Exception as e:
             print(
@@ -347,11 +359,9 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
                 random_frame_num=random_frame_num,
             )
         else:
-            assert video_path.endswith((".mp4", ".avi", ".mov", ".webm", ".mkv", ".ts", ".rmvb", ".flv"))
-            assert "s3://" not in video_path, "Please use oss_loader_cfg to load video from s3."
-            image_list = read_frames_decord(
+            image_list = read_interns1_vl_video(
                 video_path,
-                num_frames=self.max_num_frames,
+                max_num_frames=self.max_num_frames,
                 min_num_frames=self.min_num_frames,
                 sample="rand",
                 clip=data_item.get("clip", None),
@@ -370,6 +380,9 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         input_ids = tokenized["input_ids"]
         labels = tokenized["labels"]
         input_ids, labels = self._truncated_input_and_labels(input_ids, labels)
+        assert (torch.tensor(input_ids) == self.image_token_id).sum() == sum(num_image_tokens), (
+            "ERROR: video tokens are truncated"
+        )
         ret = InternS1DataItem(
             input_ids=input_ids,
             labels=labels,
@@ -397,6 +410,7 @@ class InternS1VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
     max_num_frames: int = 24
     data_augment: bool = False
     oss_loader_cfg: OSSLoaderConfig | None = None
+    template_name: Literal["intern-s1", "internvl-3.5"] = "intern-s1"
 
     def build(
         self, tokenizer, tokenizer_hash: str | None = None, anno_name: str = "", **kwargs
@@ -414,5 +428,6 @@ class InternS1VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
             min_num_frames=self.min_num_frames,
             max_num_frames=self.max_num_frames,
             oss_loader_cfg=self.oss_loader_cfg,
+            template_name=self.template_name,
             hash=self.hash,
         )

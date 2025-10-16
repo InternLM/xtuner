@@ -1,3 +1,4 @@
+import os
 import threading
 from itertools import cycle
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -14,7 +15,7 @@ from xtuner.v1.utils import get_logger
 from .worker import RolloutWorker
 
 
-@ray.remote
+@ray.remote(max_concurrency=int(os.environ.get("XTUNER_MAX_CONCURRENCY", 2000)))
 class RolloutController:
     """Controller for managing and coordinating multiple RolloutWorker
     actors."""
