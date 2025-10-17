@@ -8,7 +8,7 @@ import json
 import torch
 import parametrize
 
-QWEN3_VL_PATH = os.environ["QWEN3_VL_PATH"]
+QWEN3_VL_PATH = os.environ["QWEN3_VL_MOE_PATH"]
 VIDEO_ROOT = os.environ["VIDEO_ROOT"]
 
 

@@ -9,12 +9,17 @@ from transformers import  AutoTokenizer
 import tempfile
 from pathlib import Path
 from safetensors import safe_open
+from unittest import skipIf
+import transformers
+from packaging import version
 
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.model.dense.qwen3 import Qwen3Dense4BConfig
+from xtuner.v1.model.compose.qwen3_vl import Qwen3VLDense4BConfig
 from xtuner.v1.loss.ce_loss import CELossConfig, CELossContextInputItem
 from xtuner.v1.config import FSDPConfig, LRConfig, AdamWConfig
 from xtuner.v1.engine.train_engine import TrainEngine
+from xtuner.v1.engine.vision_compose_train_engine import VisionComposeTrainEngine
 from torch.optim.lr_scheduler import LambdaLR
 from xtuner.v1.utils import pad_to_max_length
 from xtuner.v1.utils.device import get_device
@@ -22,6 +27,7 @@ from xtuner.v1.model.base import ModelItem
 
 # Qwen3 4B
 QWEN3_PATH = os.environ["QWEN3_4B_PATH"]
+QWEN3_VL_DENSE_PATH = os.environ["QWEN3_VL_DENSE_PATH"]
 DEVICE = get_device()
 
 
@@ -90,6 +96,87 @@ class TestQwen3Dense4B(DistributedTestBase):
 
             embedding_weight = engine.model.embed_tokens.weight.full_tensor().mean().item()
             lm_head_weight = engine.model.lm_head.weight.full_tensor().mean().item()
+            self.assertEqual(embedding_weight, lm_head_weight)
+
+        torch.cuda.empty_cache()
+        try:
+            dist.destroy_process_group(pg)
+        except:
+            pass
+
+
+    @parametrize.parametrize(
+        "device,tp_size",
+        [
+            ("cuda", 1),
+        ],
+    )
+    @skipIf(version.parse(transformers.__version__) < version.parse("4.57.0"),
+            "transformers version must be >= 4.57.0")
+    def test_qwen3vl_tie_embedding(self, device, tp_size):
+        pg = self.create_pg(device)
+        dense_cfg = Qwen3VLDense4BConfig()
+        optim_cfg: AdamWConfig = AdamWConfig()
+        lr_cfg: LRConfig = LRConfig(lr_min=1e-3)
+        fsdp_cfg: FSDPConfig = FSDPConfig(
+            torch_compile=True,
+            cpu_offload=False,
+            tp_size=tp_size
+        )
+        engine = VisionComposeTrainEngine(
+            model_cfg=dense_cfg, optim_cfg=optim_cfg, fsdp_cfg=fsdp_cfg
+        )
+        engine.from_hf(hf_path=QWEN3_VL_DENSE_PATH)
+
+        loss_cfg = CELossConfig()
+
+        total_steps = 100
+        warmup_steps = total_steps * lr_cfg.warmup_ratio
+
+        def warmup_fn(x):
+            return x / warmup_steps if x < warmup_steps else 1
+
+        lr_scheduler = LambdaLR(engine.optimizer, warmup_fn)
+
+        tok = AutoTokenizer.from_pretrained(QWEN3_VL_DENSE_PATH)
+        image_str = '<|vision_start|><|image_pad|><|vision_end|>'
+        txt = image_str+"根据国际地球自转和参考系服务机构的数据，今年夏天是自2020年以来第六次地球自转加速。7月9日将成为有史以来最短的一天，比平时短1.3到1.6毫秒。 "
+        input_ids = tok.encode(txt, return_tensors="pt").view(1, -1)
+        labels = input_ids.clone()
+        input_ids = input_ids[:, :-1]
+        labels = labels[:, 1:]
+        pack_len = 8192 - input_ids.shape[1]
+        input_ids = pad_to_max_length(input_ids, 0, max_length=8192)
+        labels = pad_to_max_length(labels, -100, max_length=8192)
+
+        for _ in range(10):
+            seq_ctx = SequenceContext.from_input_ids((input_ids,), device=DEVICE)
+
+            pixel_values = torch.randn(4, 1536, device='cuda', dtype=torch.bfloat16)
+            image_grid_thw = torch.tensor([[1, 2, 2]], device='cuda')
+            seq_ctx.pixel_values = pixel_values
+            seq_ctx.image_grid_thw = image_grid_thw
+
+            labels = labels.to(DEVICE)
+            seq_ctx.num_padding = pack_len
+            seq_ctx_list = [seq_ctx]
+            loss_ctx_input_list: list[CELossContextInputItem] = [CELossContextInputItem(shifted_labels=labels)]
+            LossContext = loss_cfg.loss_ctx_cls
+            batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
+                loss_ctx_input_list,
+                loss_cfg,
+            )
+            loss_kwargs = batches_loss_kwargs[0]
+            loss_ctx = LossContext(loss_cfg, loss_kwargs)
+            seq_ctx = seq_ctx_list[0]
+            engine_input = [ModelItem(seq_ctx=seq_ctx, loss_ctx=loss_ctx)]
+            loss_log, _ = engine.train_step(engine_input)
+            grad_norm = engine.clip_grad_norm()
+            engine.step_optimizer(grad_norm)
+            lr_scheduler.step()
+
+            embedding_weight = engine.model.language_model.embed_tokens.weight.full_tensor().mean().item()
+            lm_head_weight = engine.model.language_model.lm_head.weight.full_tensor().mean().item()
             self.assertEqual(embedding_weight, lm_head_weight)
 
         torch.cuda.empty_cache()

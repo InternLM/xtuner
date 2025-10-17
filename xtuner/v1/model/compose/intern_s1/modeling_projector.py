@@ -27,12 +27,12 @@ class InternS1MultiModalProjector(BaseModel):
 
     def __init__(self, config: InternS1ProjectorConfig):
         super().__init__()
-        self.layer_norm = nn.LayerNorm(config.vision_config.hidden_size * int(1 / config.downsample_ratio) ** 2)
+        self.layer_norm = nn.LayerNorm(config.vision_hidden_size * int(1 / config.downsample_ratio) ** 2)
         self.linear_1 = nn.Linear(
-            config.vision_config.hidden_size * int(1 / config.downsample_ratio) ** 2, config.text_config.hidden_size
+            config.vision_hidden_size * int(1 / config.downsample_ratio) ** 2, config.text_hidden_size
         )
-        self.act = get_act_fn(config.projector_hidden_act)
-        self.linear_2 = nn.Linear(config.text_config.hidden_size, config.text_config.hidden_size)
+        self.act = get_act_fn(config.hidden_act)
+        self.linear_2 = nn.Linear(config.text_hidden_size, config.text_hidden_size)
 
         self._hf_prefix = "model.multi_modal_projector."
         self._init_load_spec()

@@ -38,10 +38,12 @@ class SequenceContext:
 
     # Intern-S1
     image_flags: torch.LongTensor | None = None
-    # Qwenvl3
+    # Qwen3VL
     image_grid_thw: torch.Tensor | None = None
+    deepstack_visual_embeds: list[torch.Tensor] | None = None
+    visual_pos_masks: torch.Tensor | None = None
 
-    # vllm model
+    # mllm model
     pixel_values: torch.FloatTensor | None = None
     inputs_embeds: torch.FloatTensor | None = None
     num_img_tokens: list[int] | None = None

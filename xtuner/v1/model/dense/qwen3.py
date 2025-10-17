@@ -101,7 +101,7 @@ class Qwen3DenseConfig(TransformerConfig):
 class Qwen3Dense8BConfig(Qwen3DenseConfig):
     vocab_size: int = 151936
     max_position_embeddings: int = 40960
-    pad_token_id: int = 151645  # eos_id
+    pad_token_id: int = 151643
     eos_token_id: int = 151645
     bos_token_id: int = 151643
     num_hidden_layers: int = 36
@@ -121,7 +121,7 @@ class Qwen3Dense8BConfig(Qwen3DenseConfig):
 class Qwen3Dense4BConfig(Qwen3DenseConfig):
     vocab_size: int = 151936
     max_position_embeddings: int = 262144
-    pad_token_id: int = 151645  # eos_id
+    pad_token_id: int = 151643
     eos_token_id: int = 151645
     bos_token_id: int = 151643
     num_hidden_layers: int = 36

@@ -1,13 +1,17 @@
 from pathlib import Path
 
 from transformers import AutoConfig
-from xtuner.v1.module.attention import MHAConfig, MLAConfig
 from xtuner.v1.module.router.greedy import GreedyRouterConfig
-from xtuner.v1.module.router.noaux_router import NoAuxRouterConfig
 
 from .base import BaseModel, TransformerConfig
 from .compose.intern_s1 import InternS1BaseConfig, InternS1Config, InternS1MiniConfig
 from .compose.internvl import InternVL3P5Dense8BConfig, InternVL3P5MoE30BA3Config, InternVLBaseConfig
+from .compose.qwen3_vl import (
+    Qwen3VLDense4BConfig,
+    Qwen3VLDense8BConfig,
+    Qwen3VLMoE30BA3Config,
+    Qwen3VLMoE235BA22Config,
+)
 from .dense.dense import Dense
 from .dense.qwen2 import Qwen2Dense7BConfig, Qwen2DenseConfig
 from .dense.qwen3 import Qwen3Dense4BConfig, Qwen3Dense8BConfig, Qwen3DenseConfig
@@ -77,4 +81,8 @@ __all__ = [
     "ZLossConfig",
     "GreedyRouterConfig",
     "Dense",
+    "Qwen3VLMoE30BA3Config",
+    "Qwen3VLDense4BConfig",
+    "Qwen3VLDense8BConfig",
+    "Qwen3VLMoE235BA22Config",
 ]
