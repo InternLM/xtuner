@@ -139,8 +139,8 @@ class ExtraInfo(TypedDict, total=False):
     # ExtraInfo 可根据需要扩展更多字段, 在 RL 训练流程中，extra_info 会在 TrainingWorker 中进行处理。
     # max_ratio: 该字段为列表，每个元素是一个 micro-batch 的 max_ratio 张量，形状为 [n_chunk, 1], 多个 chunk 的张量会在第 0 维进行拼接。
     max_ratio: list[torch.Tensor]
-    # local_loss: 不包含chunk信息，list中每个元素是每个micro-batch的loss
-    local_loss: list[torch.Tensor]
+    # log_rank_loss: 不包含chunk信息，list中每个元素是每个micro-batch的loss
+    log_rank_loss: list[torch.Tensor]
 
 
 class ModelOutputs(TypedDict):

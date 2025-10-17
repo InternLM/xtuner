@@ -489,6 +489,12 @@ class Trainer:
             step_time = time_after_train_step - time_before_train_step
             step_consumed_tokens = other_log["consumed_tokens"]
 
+            if "log_rank_loss" in other_log.get("extra_info", {}):
+                log_rank_loss = 0.0
+                for item in other_log["extra_info"]["log_rank_loss"]:
+                    log_rank_loss += item.item()
+                loss_log["loss"] = log_rank_loss
+
             self._cur_step += 1
             self._consumed_tokens += step_consumed_tokens
             self._train_time = time_after_train_step - train_begin

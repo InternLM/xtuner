@@ -1,6 +1,4 @@
 import asyncio
-import time
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -14,7 +12,7 @@ from xtuner.v1.data_proto.rl_data import RLDataFlowItem
 from xtuner.v1.ray.environment import SingleTurnEnvironment
 from xtuner.v1.ray.rollout.controller import SampleParams
 from xtuner.v1.ray.utils import create_task
-from xtuner.v1.utils import get_logger
+from xtuner.v1.utils import get_logger, timer
 
 from .replay_buffer import ReplayBuffer, ReplayBufferConfig
 
@@ -113,25 +111,11 @@ class DataFlow:
         self.failed_samples_count = 0
         self.logger = get_logger(log_dir=self.config.worker_log_dir, tag="DataFlow")
         self.target_batch_size = self.config.global_batch_size
-        self.timings: Dict[str, List[float]] = {
-            "sample": [],
-            "generate": [],
-            "post_process": [],
-            "put_to_buffer": [],
-        }
+        self.timer_dict: dict[str, float] = {}
 
     def get_train_dataset_length(self):
         """Gets the length of the training dataset from the replay buffer."""
         return ray.get(self.replay_buffer.get_train_dataset_length.remote())
-
-    @contextmanager
-    def time_block(self, name: str):
-        """A context manager to time a block of code."""
-        start_time = time.time()
-        yield
-        end_time = time.time()
-        if name in self.timings:
-            self.timings[name].append(end_time - start_time)
 
     async def worker_task(self, group_samples_for_retry: Optional[List[RLDataFlowItem]] = None):
         """A single worker task to generate and process a group of samples.
@@ -155,7 +139,7 @@ class DataFlow:
         try:
             # 该函数中所有的数据结构都是RLDataFlowItem
             # step 1: sample
-            with self.time_block("sample"):
+            with timer("sample", self.timer_dict):
                 group_data_items = await self.replay_buffer.sample.remote(  # type: ignore[attr-defined]
                     self.env,
                     self.config.enable_partial_rollout,
@@ -166,16 +150,16 @@ class DataFlow:
                     f"[ROLLOUT] Get 1 sample and dataflow have sent {self.send_samples_count} to rollout_controller"
                 )
             # step 2: env generate
-            with self.time_block("generate"):
+            with timer("generate", self.timer_dict):
                 group_data_items = await self.env_controller.run.remote(  # type: ignore[attr-defined]
                     group_data_items, sample_params=self.sample_params, extra_params=self.extra_params
                 )
             # step 3: filter
-            with self.time_block("post_process"):
+            with timer("post_process", self.timer_dict):
                 filtered_group_data_items = await self.replay_buffer.post_processor.remote(group_data_items)  # type: ignore[attr-defined]
 
             # step 4: add to replay buffer
-            with self.time_block("put_to_buffer"):
+            with timer("put_to_buffer", self.timer_dict):
                 await self.replay_buffer.add.remote(filtered_group_data_items)  # type: ignore[attr-defined]
 
         except Exception as e:
@@ -301,11 +285,11 @@ class DataFlow:
         ray.get(self.replay_buffer.print.remote())
 
     def logging_timing_perf(self):
-        log_messages = ["[TIME] Single sample average time cost: "]
-        for name, times in self.timings.items():
+        log_messages = ["Single sample average time cost: "]
+        for name, times in self.timer_dict.items():
             avg_time_str = "N/A"
             if times:
-                avg_time = sum(times) / len(times)
+                avg_time = times / self.finished_samples_count
                 avg_time_str = f"{avg_time:.4f}s"
 
             formatted_name = name.replace("_", " ")

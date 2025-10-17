@@ -251,11 +251,11 @@ class TrainingWorker(SingleAcceleratorWorker):
                 max_ratio_list.append(torch.max(item, dim=0).values.item())
             other_log["extra_info"]["max_ratio"] = max(max_ratio_list)
 
-        if "local_loss" in other_log["extra_info"]:
-            local_loss_list = []
-            for item in other_log["extra_info"]["local_loss"]:
-                local_loss_list.append(item.item())
-            other_log["extra_info"]["local_loss"] = sum(local_loss_list)
+        if "log_rank_loss" in other_log["extra_info"]:
+            log_rank_loss_list = []
+            for item in other_log["extra_info"]["log_rank_loss"]:
+                log_rank_loss_list.append(item.item())
+            other_log["extra_info"]["loss"] = sum(log_rank_loss_list)
         return other_log
 
     def fit(self, data_batches: list[WorkerInputItem], rollout_idx: int):

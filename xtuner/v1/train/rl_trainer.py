@@ -28,7 +28,7 @@ from xtuner.v1.ray.judger import JudgerConfig
 from xtuner.v1.rl.base import TrainingController, WorkerConfig
 from xtuner.v1.rl.base import TrainingWorker as BaseTrainingWorker
 from xtuner.v1.train import ResumeConfig
-from xtuner.v1.utils import XTUNER_DETERMINISTIC, StepTimer, get_logger, is_hf_model_path, record_git_info
+from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger, is_hf_model_path, record_git_info, timer, timer_logger
 from xtuner.v1.utils.device import get_device, get_torch_device_module
 
 from .trainer import ExpHistory, ExpInfo, GitInfo, XTunerMeta
@@ -272,45 +272,48 @@ class RLTrainer:
             self._save_trajectories(eval_data_groups, trajectory_save_path)
             self.logger.info(f"Initial rollout evaluate scores {scores} and start training")
         for rollout_idx in range(1, self._rollout_steps + 1):
-            timer = StepTimer()
+            step_timer_dict = {}
             # 1. Rollout
-            data_groups = ray.get(self._rollout_dataflow.run.remote())
-            timer.lap("Rollout generation")
+            with timer("generation", step_timer_dict):
+                data_groups = ray.get(self._rollout_dataflow.run.remote())
 
             # 2. Offload rollout models and save trajectories
-            ray.get(self._rollout_env_controller.offload.remote())
-            trajectory_save_path = self.exp_dir / f"rollout_idx_{rollout_idx}_trajectory.jsonl"
-            self._save_trajectories(data_groups, trajectory_save_path)
-            self.logger.info(f"Rollout_idx {rollout_idx} finished, saved trajectories to {trajectory_save_path}")
-            timer.lap("Offload & Save trajectory")
+            with timer("offload_and_dump", step_timer_dict):
+                ray.get(self._rollout_env_controller.offload.remote())
+                trajectory_save_path = self.exp_dir / f"rollout_idx_{rollout_idx}_trajectory.jsonl"
+                self._save_trajectories(data_groups, trajectory_save_path)
+                self.logger.info(f"Rollout_idx {rollout_idx} finished, saved trajectories to {trajectory_save_path}")
 
             # 3. Onload training models and prepare data
-            ray.get(self._train_controller.onload.remote(target="all"))
-            self.logger.info("Training controller loaded")
-            data_batches, data_info = self._prepare_train_data(data_groups, self._train_worker_cfg.pack_max_length)
-            self.logger.info(f"Prepared {len(data_batches)} training data batches")
-            self._log_data_info(rollout_idx, data_info)
-            timer.lap("Onload & Prepare data")
+            with timer("onload_and_prepare_data", step_timer_dict):
+                ray.get(self._train_controller.onload.remote(target="all"))
+                self.logger.info("Training controller loaded")
+                data_batches, data_info = self._prepare_train_data(data_groups, self._train_worker_cfg.pack_max_length)
+                self.logger.info(f"Prepared {len(data_batches)} training data batches")
+                self._log_data_info(rollout_idx, data_info)
 
             # 4. Training Step
-            ray.get(
-                self._train_controller.fit.remote(
-                    data_batches, pack_max_length=self._train_worker_cfg.pack_max_length, rollout_idx=rollout_idx
+            with timer("training", step_timer_dict):
+                ray.get(
+                    self._train_controller.fit.remote(
+                        data_batches, pack_max_length=self._train_worker_cfg.pack_max_length, rollout_idx=rollout_idx
+                    )
                 )
-            )
-            timer.lap("Training")
 
-            # 5. Sync weights
-            ray.get(self._train_controller.offload.remote(target="optimizer"))
-            self._maybe_save_hf()
-            ray.get(self._rollout_env_controller.onload_weights.remote())
-            ray.get(self._train_controller.update_weights.remote())
-            self.logger.info("Model weights synchronized successfully.")
-            ray.get(self._train_controller.offload.remote(target="model"))
-            ray.get(self._rollout_env_controller.onload_kvcache.remote())
-            timer.lap("Weight synchronization")
+            # 5. Saving and sync weights
+            with timer("saving and sync_weight", step_timer_dict):
+                ray.get(self._train_controller.offload.remote(target="optimizer"))
+                self._maybe_save_hf()
+                ray.get(self._rollout_env_controller.onload_weights.remote())
+                ray.get(self._train_controller.update_weights.remote())
+                self.logger.info("Model weights synchronized successfully.")
+                ray.get(self._train_controller.offload.remote(target="model"))
+                ray.get(self._rollout_env_controller.onload_kvcache.remote())
 
-            self.logger.info(timer.format_results())
+            timer_log_str = f"Rollout {rollout_idx} timing: \n"
+            timer_log_str += timer_logger(step_timer_dict)
+
+            self.logger.info(timer_log_str)
 
             # evaluate
             if self._enable_evaluate and self._evaluator and rollout_idx % self._eval_step == 0:
