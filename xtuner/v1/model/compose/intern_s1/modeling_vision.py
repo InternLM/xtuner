@@ -341,15 +341,15 @@ class InternS1VisionModel(BaseModel):
         assert float8_handler is None
 
         checkpoint_preserve_rng_state = fsdp_config.checkpoint_preserve_rng_state
-        if checkpoint_preserve_rng_state and self.config.drop_path_rate > 0.0:
-            checkpoint_preserve_rng_state = False
-            logger.warning("When using drop_path, checkpoint_preserve_rng_state is set to False to avoid issues.")
-        if checkpoint_preserve_rng_state and self.config.dropout > 0.0:
-            checkpoint_preserve_rng_state = False
-            logger.warning(f"When using dropout[{self.config.dropout}], checkpoint_preserve_rng_state is set to False to avoid issues.")
-        if checkpoint_preserve_rng_state and self.config.attention_dropout > 0.0:
-            checkpoint_preserve_rng_state = False
-            logger.warning(f"When using dropout[{self.config.attention_dropout}], checkpoint_preserve_rng_state is set to False to avoid issues.")
+        if not checkpoint_preserve_rng_state and self.config.drop_path_rate > 0.0:
+            checkpoint_preserve_rng_state = True
+            logger.warning("When using drop_path, checkpoint_preserve_rng_state is set to True to avoid issues.")
+        if not checkpoint_preserve_rng_state and self.config.dropout > 0.0:
+            checkpoint_preserve_rng_state = True
+            logger.warning(f"When using dropout[{self.config.dropout}], checkpoint_preserve_rng_state is set to True to avoid issues.")
+        if not checkpoint_preserve_rng_state and self.config.attention_dropout > 0.0:
+            checkpoint_preserve_rng_state = True
+            logger.warning(f"When using dropout[{self.config.attention_dropout}], checkpoint_preserve_rng_state is set to True to avoid issues.")
 
         mp_policy = MixedPrecisionPolicy(
             param_dtype=fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype

@@ -160,9 +160,9 @@ class Dense(BaseModel):
             )
 
         checkpoint_preserve_rng_state = fsdp_config.checkpoint_preserve_rng_state
-        if checkpoint_preserve_rng_state and self.config.attention.dropout > 0.0:
-            checkpoint_preserve_rng_state = False
-            logger.warning("When using dropout, checkpoint_preserve_rng_state is set to False to avoid issues.")
+        if not checkpoint_preserve_rng_state and self.config.attention.dropout > 0.0:
+            checkpoint_preserve_rng_state = True
+            logger.warning("When using dropout, checkpoint_preserve_rng_state is set to True to avoid issues.")
 
         # Just for narrowing the type of self.fsdp_mesh and self.ep_mesh
         assert self.fsdp_mesh is not None
