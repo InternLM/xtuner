@@ -34,8 +34,11 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import Checkpoi
 from xtuner.v1.module import RMSNorm
 from xtuner.v1.ops.others import Dropout
 from xtuner.v1.ops.act_fn import get_act_fn
+from xtuner.v1.utils import get_logger
+
 DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
+logger = get_logger()
 
 
 def init_world_mesh():
@@ -294,7 +297,7 @@ class InternS1VisionModel(BaseModel):
                 init_params(module.weight, torch.nn.init.ones_)
                 initialized_params.add(f"embeddings.{name}.weight")
                 if module.bias is not None:
-                    init_params(module.bias, torch.nn.init.zeros_) # type: ignore
+                    init_params(module.bias, torch.nn.init.zeros_)  # type: ignore
                     initialized_params.add(f"embeddings.{name}.bias")
 
         expected_param_name = {self._clean_param_name(name) for name, _ in self.named_parameters()}
@@ -302,10 +305,10 @@ class InternS1VisionModel(BaseModel):
             raise RuntimeError(f"{missing} is not initialized")
 
     def forward(
-        self,
-        pixel_values: torch.Tensor,
-        bool_masked_pos: Optional[torch.BoolTensor] = None,
-        output_hidden_states: Optional[bool] = None,
+            self,
+            pixel_values: torch.Tensor,
+            bool_masked_pos: Optional[torch.BoolTensor] = None,
+            output_hidden_states: Optional[bool] = None,
     ) -> Union[tuple, BaseModelOutput]:
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -330,17 +333,27 @@ class InternS1VisionModel(BaseModel):
 
     @override
     def fully_shard(
-        self,
-        fsdp_config: FSDPConfig,
-        float8_handler: Float8Handler | None = None,
+            self,
+            fsdp_config: FSDPConfig,
+            float8_handler: Float8Handler | None = None,
     ):
         self.fsdp_config = fsdp_config
         assert float8_handler is None
 
+        checkpoint_preserve_rng_state = fsdp_config.checkpoint_preserve_rng_state
+        if checkpoint_preserve_rng_state and self.config.drop_path_rate > 0.0:
+            checkpoint_preserve_rng_state = False
+            logger.warning("When using drop_path, checkpoint_preserve_rng_state is set to False to avoid issues.")
+        if checkpoint_preserve_rng_state and self.config.dropout > 0.0:
+            checkpoint_preserve_rng_state = False
+            logger.warning(f"When using dropout[{self.config.dropout}], checkpoint_preserve_rng_state is set to False to avoid issues.")
+        if checkpoint_preserve_rng_state and self.config.attention_dropout > 0.0:
+            checkpoint_preserve_rng_state = False
+            logger.warning(f"When using dropout[{self.config.attention_dropout}], checkpoint_preserve_rng_state is set to False to avoid issues.")
+
         mp_policy = MixedPrecisionPolicy(
             param_dtype=fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
         )
-        device = "cpu" if fsdp_config.cpu_offload else str(DEVICE)
 
         # NOTE: 在 cpu_offload 模式下，mesh 应该是 cuda 的，在 meta fully_shard 后在调用 .to_empty(device=cpu)
         self.fsdp_mesh = init_world_mesh()
@@ -356,13 +369,23 @@ class InternS1VisionModel(BaseModel):
             for param in self.parameters():
                 param.requires_grad = False
 
-        recompute_ratio = 1.0
+        recompute_ratio = fsdp_config.vision_recompute_ratio
         num_recompute_layers = int(len(self.encoder.layer) * recompute_ratio)
-        for layer_idx in tqdm(list(range(len(self.encoder.layer))), desc="[Vision Fully Shard]"):
+
+        generator = torch.Generator()
+        generator.manual_seed(dist.get_rank())
+        shuffled_layers_idxs = torch.randperm(len(self.encoder.layer), generator=generator)
+
+        for layer_idx in tqdm(shuffled_layers_idxs, desc="[Vision Fully Shard]"):
             layer = self.encoder.layer[layer_idx]
 
             if layer_idx < num_recompute_layers:
-                layer = checkpoint_wrapper(layer, checkpoint_impl=CheckpointImpl.REENTRANT)
+                layer = checkpoint_wrapper(layer,
+                                           preserve_rng_state=checkpoint_preserve_rng_state,
+                                           checkpoint_impl=CheckpointImpl.REENTRANT)
+                # TODO: 可以加速，但是需要验证对性能有没有影响，目测 loss 会偏高
+                # 一旦开启这个，layer 本身的 maybe_compile 需要手动移除，否则会报错
+                # layer = torch.compile(layer, fullgraph=True)
 
             self.encoder.layer[layer_idx] = layer
 

@@ -21,7 +21,7 @@ def fake_collator(instances: list[DataItem], **kwargs):
 
 
 def sft_llm_collator(
-    instances: list[list[DataItem]], pack_max_length: int, padding_token_idx: int
+    instances: list[list[DataItem]], pack_max_length: int, padding_token_idx: int, pack_to_max_length: bool = True
 ) -> list[ColateItem]:
     ret: list[ColateItem] = []
     for instance in instances:
@@ -62,8 +62,10 @@ def sft_llm_collator(
         assert input_ids.shape == shifted_labels.shape, (
             f"input_ids shape {input_ids.shape} != shifted_labels shape {shifted_labels.shape}"
         )
-
-        pad_len = pack_max_length - input_ids.shape[-1]
+        if pack_to_max_length:
+            pad_len = pack_max_length - input_ids.shape[-1]
+        else:
+            pad_len = 0
 
         if pad_len > 0:
             input_ids = pad_to_max_length(input_ids, padding_token_idx, max_length=pack_max_length, dim=-1)
@@ -76,7 +78,7 @@ def sft_llm_collator(
                 f"packed_max_lenghth {pack_max_length}. Please report the bug to xtuner"
             )
         else:
-            num_tokens = [0] + [i["num_tokens"] for i in instance]
+            num_tokens = [0] + num_tokens
 
         cu_seq_lens = torch.cumsum(torch.IntTensor(num_tokens), dim=0).int()
 
@@ -99,7 +101,10 @@ def sft_llm_collator(
 
 
 def intern_s1_vl_sft_collator(
-    instances: list[list[InternS1DataItem]], pack_max_length: int, padding_token_idx: int
+    instances: list[list[InternS1DataItem]],
+    pack_max_length: int,
+    padding_token_idx: int,
+    pack_to_max_length: bool = True,
 ) -> list[ColateItem]:
     ret: list[ColateItem] = []
     for instance in instances:
@@ -132,7 +137,10 @@ def intern_s1_vl_sft_collator(
             f"input_ids shape {input_ids.shape} != shifted_labels shape {shifted_labels.shape}"
         )
 
-        pad_len = pack_max_length - input_ids.shape[-1]
+        if pack_to_max_length:
+            pad_len = pack_max_length - input_ids.shape[-1]
+        else:
+            pad_len = 0
 
         if pad_len > 0:
             input_ids = pad_to_max_length(input_ids, padding_token_idx, max_length=pack_max_length, dim=-1)
@@ -145,7 +153,7 @@ def intern_s1_vl_sft_collator(
                 f"packed_max_lenghth {pack_max_length}. Please report the bug to xtuner"
             )
         else:
-            num_tokens = [0] + [i["num_tokens"] for i in instance]
+            num_tokens = [0] + num_tokens
 
         cu_seq_lens = torch.cumsum(torch.IntTensor(num_tokens), dim=0).int()
 
@@ -180,7 +188,10 @@ def intern_s1_vl_sft_collator(
 
 
 def qwen3_vl_sft_collator(
-    instances: list[list[QwenVL3DataItem]], pack_max_length: int, padding_token_idx: int
+    instances: list[list[QwenVL3DataItem]],
+    pack_max_length: int,
+    padding_token_idx: int,
+    pack_to_max_length: bool = True,
 ) -> list[ColateItem]:
     ret: list[ColateItem] = []
     for instance in instances:
@@ -214,7 +225,10 @@ def qwen3_vl_sft_collator(
             f"input_ids shape {input_ids.shape} != shifted_labels shape {shifted_labels.shape}"
         )
 
-        pad_len = pack_max_length - input_ids.shape[-1]
+        if pack_to_max_length:
+            pad_len = pack_max_length - input_ids.shape[-1]
+        else:
+            pad_len = 0
 
         if pad_len > 0:
             input_ids = pad_to_max_length(input_ids, padding_token_idx, max_length=pack_max_length, dim=-1)
@@ -228,7 +242,7 @@ def qwen3_vl_sft_collator(
                 f"packed_max_lenghth {pack_max_length}. Please report the bug to xtuner"
             )
         else:
-            num_tokens = [0] + [i["num_tokens"] for i in instance]
+            num_tokens = [0] + num_tokens
 
         cu_seq_lens = torch.cumsum(torch.IntTensor(num_tokens), dim=0).int()
 
