@@ -1,0 +1,32 @@
+name: unit_test
+on:
+  pull_request:
+    branches:
+      - "main"
+      - "refactor"
+    paths-ignore:
+      - "docs/**"
+      - "**.md"
+env:
+  WORKSPACE_PREFIX: $(echo $GITHUB_WORKSPACE |cut -d '/' -f 1-5)
+  WORKSPACE_PREFIX_SHORT: $(echo $GITHUB_WORKSPACE |cut -d '/' -f 1-3)
+  IMAGE: registry.h.pjlab.org.cn/ailab-llmrazor/xtuner:pt28_20250911_6652194_fix_pip
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit_test:
+    runs-on: [h_cluster]
+    steps:
+    - name: mask env
+      run: |
+        echo "::add-mask::${{env.WORKSPACE_PREFIX}}"
+        echo "::add-mask::${{env.WORKSPACE_PREFIX_SHORT}}"
+    - uses: actions/checkout@v3
+
+    - name: unit-test
+      run: |
+        export PYTHONPYCACHEPREFIX=/tmp
+        python ci/scripts/run_yidian.py "$IMAGE" "$CI_IMPORT" "export PYTHONPATH=$PWD:$LM_DEPLOY:$PYTHONPATH; pytest tests --ignore=./tests/module/dispatcher/test_deepep.py"
