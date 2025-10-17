@@ -1,8 +1,6 @@
 import time
 from contextlib import contextmanager
 
-from codetiming import Timer
-
 from xtuner.v1.utils import get_logger, get_torch_device_module
 
 
@@ -26,6 +24,9 @@ def profile_time_and_memory(desc):
 # Adapted from https://github.com/volcengine/verl/blob/main/verl/utils/profiler/performance.py
 @contextmanager
 def timer(name: str, timer_dict: dict[str, float]):
+    # TODO: install codetiming in xtuner latest images
+    from codetiming import Timer
+
     with Timer(name=name, logger=None) as t:
         yield
     if name not in timer_dict:
