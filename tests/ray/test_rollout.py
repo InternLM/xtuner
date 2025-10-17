@@ -58,6 +58,7 @@ class TestRollout(unittest.TestCase):
             expert_parallel_size=1,
             gpus_per_node=8, # gpu: 8, npu: 16
             dtype="bfloat16",
+            launch_server_method="ray",
         )
         from xtuner.v1.ray.judger.gsm8k import GSM8KJudgerConfig
         gsm8k_judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k")
@@ -170,6 +171,7 @@ class TestRollout(unittest.TestCase):
     @unittest.skipIf(os.environ.get("XTUNER_USE_SGLANG", "0") == "0", "lmdeploy backend is not enabled")
     def test_sglang_generate(self):
         from xtuner.v1.ray.rollout import SGLangWorker
+        self.rollout_cfg.launch_server_method="multiprocessing"
         rollout_workers_map = AutoAcceleratorWorkers.from_placement_group(
             SGLangWorker, self.rollout_cfg, self.pg
         )
@@ -183,6 +185,7 @@ class TestRollout(unittest.TestCase):
     @unittest.skipIf(os.environ.get("XTUNER_USE_SGLANG", "0") == "0", "lmdeploy backend is not enabled")
     def test_sglang_dataflow(self):
         self.dataflow_cfg.enable_partial_rollout = 0
+        self.rollout_cfg.launch_server_method="multiprocessing"
         self.test_env = SingleTurnEnvironment.remote(
             "test_env",
             self.pg,
