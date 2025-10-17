@@ -202,7 +202,7 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
         self._shared_memory = self._init_shared_memory(anno_path)
         self.meta_path = os.path.join(cache_dir, CACHE_META) if cache_dir else None
 
-        logger.info(f"Start loading [{self.name}]{self.path} with sample_ratio={sample_ratio}.")
+        logger.info(f"[Dataset] Start loading [{self.name}]{self.path} with sample_ratio={sample_ratio}.")
 
         if cache_tag is not None and (cached := self._get_cached_tag(cache_tag, tokenize_fn)) is not None:
             offset_path, num_tokens_path = cached["offsets"], cached["num_tokens"]

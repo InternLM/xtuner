@@ -9,7 +9,7 @@ from .loader import HFCheckpointLoader
 from .logger import get_logger, log_format
 from .misc import XTUNER_DETERMINISTIC, SharedMemory, get_padding_length, is_hf_model_path, record_git_info
 from .pad import pad_to_max_length, pad_to_multiple_of
-from .profile import profile_time_and_memory
+from .profile import profile_time_and_memory, timer, timer_logger
 from .state import ForwardState
 from .type_helper import copy_method_signature, copy_signature
 
@@ -30,6 +30,8 @@ __all__ = [
     "maybe_compile",
     "is_evenly_distributed",
     "profile_time_and_memory",
+    "timer",
+    "timer_logger",
     "ParallelConfigException",
     "log_format",
     "XTUNER_DETERMINISTIC",

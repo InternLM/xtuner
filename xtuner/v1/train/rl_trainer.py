@@ -1,13 +1,12 @@
 import json
 import os
 import random
-import sys
-import time
 from datetime import datetime
 from pathlib import Path
 from shutil import rmtree
 from typing import cast
 
+import numpy as np
 import ray
 import torch
 from mmengine import load
@@ -29,16 +28,7 @@ from xtuner.v1.ray.judger import JudgerConfig
 from xtuner.v1.rl.base import TrainingController, WorkerConfig
 from xtuner.v1.rl.base import TrainingWorker as BaseTrainingWorker
 from xtuner.v1.train import ResumeConfig
-
-# from xtuner.v1.rl.grpo.controller import GRPOTrainingController
-# from xtuner.v1.rl.grpo.worker import GRPOTrainingWorker, WorkerConfig
-from xtuner.v1.utils import (
-    XTUNER_DETERMINISTIC,
-    get_logger,
-    is_hf_model_path,
-    log_format,
-    record_git_info,
-)
+from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger, is_hf_model_path, record_git_info, timer, timer_logger
 from xtuner.v1.utils.device import get_device, get_torch_device_module
 
 from .trainer import ExpHistory, ExpInfo, GitInfo, XTunerMeta
@@ -148,6 +138,7 @@ class RLTrainer:
         log_dir: Path | str | None = None,
         total_epochs: int,
         enable_evaluate: bool,
+        enable_initial_evaluate: bool = False,
         resume_config: ResumeConfig | None = None,
         strict_load: bool = True,
         hf_interval: int | None = None,
@@ -181,6 +172,7 @@ class RLTrainer:
         self._debug = debug
         self._seed = seed
         self._enable_evaluate = enable_evaluate
+        self._enable_initial_evaluate = enable_initial_evaluate
         self._set_deterministic()
         self._set_random_seed(seed)
 
@@ -203,6 +195,10 @@ class RLTrainer:
 
         self.logger = self._init_logger(log_dir)
         train_worker_cfg.log_dir = log_dir
+        dataflow_config.worker_log_dir = log_dir
+        rollout_config.worker_log_dir = log_dir
+        if evaluator_config:
+            evaluator_config.worker_log_dir = log_dir
 
         self._pg = AutoAcceleratorWorkers.build_placement_group(resources)
         # We need to build train controller first, and then build rollout dataflow to make
@@ -269,88 +265,233 @@ class RLTrainer:
         training steps. It handles rollout, prepare training data, update policy , synchronize model weights, and
         evaluation.
         """
-        self.logger.info("start training")
-        if self._enable_evaluate and self._evaluator:
+        self.logger.info("Start RL training")
+        if self._enable_initial_evaluate and self._enable_evaluate and self._evaluator:
             scores, eval_data_groups = ray.get(self._evaluator.run.remote(return_samples=True))
             trajectory_save_path = self.exp_dir / "eval_0_trajectory.jsonl"
             self._save_trajectories(eval_data_groups, trajectory_save_path)
             self.logger.info(f"Initial rollout evaluate scores {scores} and start training")
         for rollout_idx in range(1, self._rollout_steps + 1):
-            data_groups = ray.get(self._rollout_dataflow.run.remote())
-            time.sleep(3)
-            ray.get(self._rollout_env_controller.offload.remote())
-            trajectory_save_path = self.exp_dir / f"rollout_idx_{rollout_idx}_trajectory.jsonl"
-            self._save_trajectories(data_groups, trajectory_save_path)
-            self.logger.info(f"rollout_idx {rollout_idx} finished, saved trajectories to {trajectory_save_path}")
-            ray.get(self._train_controller.onload.remote(target="all"))
-            self.logger.info("Training controller loaded")
-            data_batches = self._prepare_train_data(data_groups, self._train_worker_cfg.pack_max_length)
-            self.logger.info(f"Prepared {len(data_batches)} training data batches")
-            ray.get(
-                self._train_controller.fit.remote(
-                    data_batches, pack_max_length=self._train_worker_cfg.pack_max_length, rollout_idx=rollout_idx
+            step_timer_dict = {}
+            # 1. Rollout
+            with timer("generation", step_timer_dict):
+                data_groups = ray.get(self._rollout_dataflow.run.remote())
+
+            # 2. Offload rollout models and save trajectories
+            with timer("offload_and_dump", step_timer_dict):
+                ray.get(self._rollout_env_controller.offload.remote())
+                trajectory_save_path = self.exp_dir / f"rollout_idx_{rollout_idx}_trajectory.jsonl"
+                self._save_trajectories(data_groups, trajectory_save_path)
+                self.logger.info(f"Rollout_idx {rollout_idx} finished, saved trajectories to {trajectory_save_path}")
+
+            # 3. Onload training models and prepare data
+            with timer("onload_and_prepare_data", step_timer_dict):
+                ray.get(self._train_controller.onload.remote(target="all"))
+                self.logger.info("Training controller loaded")
+                data_batches, data_info = self._prepare_train_data(data_groups, self._train_worker_cfg.pack_max_length)
+                self.logger.info(f"Prepared {len(data_batches)} training data batches")
+                self._log_data_info(rollout_idx, data_info)
+
+            # 4. Training Step
+            with timer("training", step_timer_dict):
+                ray.get(
+                    self._train_controller.fit.remote(
+                        data_batches, pack_max_length=self._train_worker_cfg.pack_max_length, rollout_idx=rollout_idx
+                    )
                 )
-            )
-            ray.get(self._train_controller.offload.remote(target="optimizer"))
-            self._maybe_save_hf()
-            ray.get(self._rollout_env_controller.onload_weights.remote())
-            ray.get(self._train_controller.update_weights.remote())
-            self.logger.info("update weights done!!!")
-            ray.get(self._train_controller.offload.remote(target="model"))
-            ray.get(self._rollout_env_controller.onload_kvcache.remote())
+
+            # 5. Saving and sync weights
+            with timer("saving and sync_weight", step_timer_dict):
+                ray.get(self._train_controller.offload.remote(target="optimizer"))
+                self._maybe_save_hf()
+                ray.get(self._rollout_env_controller.onload_weights.remote())
+                ray.get(self._train_controller.update_weights.remote())
+                self.logger.info("Model weights synchronized successfully.")
+                ray.get(self._train_controller.offload.remote(target="model"))
+                ray.get(self._rollout_env_controller.onload_kvcache.remote())
+
+            timer_log_str = f"Rollout {rollout_idx} timing: \n"
+            timer_log_str += timer_logger(step_timer_dict)
+
+            self.logger.info(timer_log_str)
+
             # evaluate
             if self._enable_evaluate and self._evaluator and rollout_idx % self._eval_step == 0:
-                scores = ray.get(self._evaluator.run.remote())
-                self.logger.info(f"evaluate idx {rollout_idx} scores {scores}")
+                scores, eval_data_groups = ray.get(self._evaluator.run.remote(return_samples=True))
+                trajectory_save_path = self.exp_dir / f"eval_{rollout_idx}_trajectory.jsonl"
+                self._save_trajectories(eval_data_groups, trajectory_save_path)
+                self.logger.info(f"Evaluate idx {rollout_idx} scores {scores}")
             self._cur_step += 1
+
+    def _log_data_info(self, rollout_idx: int, data_info: dict):
+        """Formats and logs the data statistics dictionary."""
+        log_lines = [f"Rollout {rollout_idx} data statistics:"]
+        for key, value in data_info.items():
+            if isinstance(value, float):
+                log_lines.append(f"  - {key:<20}: {value:.4f}")
+            else:
+                log_lines.append(f"  - {key:<20}: {value}")
+        self.logger.info("\n".join(log_lines))
 
     # TODO: advantage 是在 DataFlow 里算好，还是在 train controller 里算？
     # 因为可能有根据 advantage 来判断数据能否进 rl 训练的需求。暂时先放在这
     def _prepare_train_data(self, data_groups, pack_max_length):
+        rewards_list = []
+        advantages_list = []
+        prompt_len_list = []
+        response_len_list = []
+
         data_batches = []
         for group in data_groups:
-            prompt = self.tokenizer.apply_chat_template(
+            text_prompt = self.tokenizer.apply_chat_template(
                 group[0].data.messages, add_generation_prompt=True, tokenize=False
             )
-            prompt_ids = self.tokenizer(prompt, return_tensors="pt")["input_ids"].flatten().tolist()
+            prompt_ids = self.tokenizer(text_prompt, return_tensors="pt")["input_ids"].flatten().tolist()
             rewards = [data.env.judger.reward["score"] for data in group]
+            rewards_list.extend(rewards)
             rewards = torch.tensor(rewards, dtype=torch.float32)
             advantages = (rewards - rewards.mean(0)) / (rewards.std(0) + 1e-8)
 
             prompt_repeat_k = len(group)
             for i in range(prompt_repeat_k):
                 item = group[i].env.rollout.response
-                response_ids = self.tokenizer(item, return_tensors="pt")["input_ids"].flatten().tolist()
+                logprobs = None
+                if group[i].env.rollout.response_ids is not None:
+                    response_ids = group[i].env.rollout.response_ids
+                    if isinstance(response_ids, torch.Tensor):
+                        response_ids = response_ids.flatten().tolist()
+                    logprobs = group[i].env.rollout.logprobs
+                    assert len(logprobs) == len(response_ids), f"{len(logprobs)} vs {len(response_ids)}"
+                    # 只有 response 部分有 logprobs, 需要前面追加
+                    logprobs = [0] * (len(prompt_ids) - 1) + logprobs + [0]
+                else:
+                    response_ids = self.tokenizer(item, return_tensors="pt")["input_ids"].flatten().tolist()
                 input_ids = prompt_ids + response_ids
+
+                prompt_len_list.append(len(prompt_ids))
+                response_len_list.append(len(response_ids))
+                advantages_list.extend([advantages[i]] * len(response_ids))
+
                 shifted_labels = [-100] * (len(prompt_ids) - 1) + response_ids + [-100]
                 if len(input_ids) > pack_max_length:
                     input_ids = input_ids[:pack_max_length]
                     shifted_labels = shifted_labels[:pack_max_length]
+                    if logprobs is not None:
+                        logprobs = logprobs[:pack_max_length]
                 input_ids = torch.tensor(input_ids, dtype=torch.int64).unsqueeze(0)
                 shifted_labels = torch.tensor(shifted_labels, dtype=torch.int64).unsqueeze(0)
+
+                if logprobs is not None:
+                    rollout_logprobs = torch.tensor(logprobs, dtype=torch.float32).unsqueeze(0)
+                    assert rollout_logprobs.size() == shifted_labels.size(), (
+                        f"{rollout_logprobs.size()} vs {shifted_labels.size()}"
+                    )
+                else:
+                    rollout_logprobs = None
+
                 data_batches.append(
                     dict(
                         seq_ctx=SequenceContext.from_input_ids((input_ids,), device="cpu"),
                         shifted_labels=shifted_labels,
                         advantage=advantages[i].item(),
+                        rollout_logprobs=rollout_logprobs,
                     )
                 )
         random.shuffle(data_batches)
-        return data_batches
+
+        advantages_list = np.array(advantages_list)
+        info_dict = {
+            "batch_size": len(rewards_list),
+            "rewards/mean": np.mean(rewards_list),
+            "rewards/min": np.min(rewards_list),
+            "rewards/max": np.max(rewards_list),
+            "advantages/mean": np.mean(advantages_list),
+            "advantages/min": np.min(advantages_list),
+            "advantages/max": np.max(advantages_list),
+            "response_len/mean": np.mean(response_len_list),
+            "response_len/min": np.min(response_len_list),
+            "response_len/max": np.max(response_len_list),
+            "response_len/std": np.std(response_len_list),
+            "prompt_len/mean": np.mean(prompt_len_list),
+            "prompt_len/min": np.min(prompt_len_list),
+            "prompt_len/max": np.max(prompt_len_list),
+        }
+        return data_batches, info_dict
 
     def _save_trajectories(self, data_groups, save_path):
-        with open(save_path, "w") as f:
+        rewards = []
+        response_len_list = []
+
+        rollout_response_len_list = []
+        mismatch_token_ids_count = 0
+        for group in data_groups:
+            for data in group:
+                rewards.append(data.env.judger.reward["score"])
+                if data.env.rollout.response_ids is not None:
+                    if isinstance(data.env.rollout.response_ids, torch.Tensor):
+                        response_ids = data.env.rollout.response_ids.flatten().tolist()
+                    else:
+                        response_ids = data.env.rollout.response_ids
+                    rollout_response_len_list.append(len(response_ids))
+
+                    response_str = self.tokenizer.decode(response_ids, skip_special_tokens=False)
+                    revert_encode_response_ids = self.tokenizer.encode(response_str, add_special_tokens=False)
+
+                    if response_ids != revert_encode_response_ids:
+                        mismatch_token_ids_count += 1
+
+                response_ids = self.tokenizer.encode(data.env.rollout.response, add_special_tokens=False)
+                response_len_list.append(len(response_ids))
+
+        rewards = torch.tensor(rewards).float()
+        response_lens = torch.tensor(response_len_list).float()
+
+        rollout_response_lens = None
+        if len(rollout_response_len_list) > 0:
+            rollout_response_lens = torch.tensor(rollout_response_len_list).float()
+
+        _count = 0
+        with open(save_path, "w", encoding="utf-8") as f:
+            item = {
+                "reward_mean": rewards.mean().item(),
+                "reward_std": rewards.std().item(),
+                "reward_max": rewards.max().item(),
+                "reward_min": rewards.min().item(),
+                "response_len_mean": response_lens.mean().item(),
+                "response_len_std": response_lens.std().item(),
+                "response_len_max": response_lens.max().item(),
+                "response_len_min": response_lens.min().item(),
+                "total_len": len(rewards),
+                "mismatch_token_ids_count": mismatch_token_ids_count,
+            }
+            if len(rollout_response_len_list) > 0:
+                item.update(
+                    {
+                        "rollout_response_len_mean": rollout_response_lens.mean().item(),
+                        "rollout_response_len_std": rollout_response_lens.std().item(),
+                        "rollout_response_len_max": rollout_response_lens.max().item(),
+                        "rollout_response_len_min": rollout_response_lens.min().item(),
+                    }
+                )
+
+            json.dump(item, f, ensure_ascii=False, indent=2)
+            f.write("\n")
             for group in data_groups:
                 for data in group:
                     item = {
-                        "messages": data.data.messages,
+                        "prompt": data.data.extra_info["raw_prompt"],
                         "response": data.env.rollout.response,
-                        "response_len": data.env.rollout.response_len,
+                        "response_len": response_len_list[_count],
                         "label": data.data.reward_model["ground_truth"],
                         "reward": data.env.judger.reward["score"],
                     }
-                    json.dump(item, f)
+
+                    if response_len_list[_count] != rollout_response_len_list[_count]:
+                        item["rollout_response_len"] = rollout_response_len_list[_count]
+
+                    json.dump(item, f, ensure_ascii=False, indent=2)
                     f.write("\n")
+                    _count += 1
 
     def _load_trajectories(self, save_path):
         data_groups = []
@@ -386,11 +527,11 @@ class RLTrainer:
             "You meet this error means `load_from` of trainer is not a Huggingface model path."
         )
 
-        if self.cur_step % self._hf_interval != 0 and self.cur_step != self._rollout_steps:
+        if (self.cur_step + 1) % self._hf_interval != 0 and (self.cur_step + 1) != self._rollout_steps:
             return
 
         save_hf_path = self.exp_dir / f"hf-{self.cur_step}"
-        self.logger.info(f"save_hf_path: {save_hf_path}")
+        self.logger.info(f"Saving step {self.cur_step + 1} checkpoints to: {save_hf_path}")
         self.meta.latest_exp.hf_checkpoint_list.append(str(save_hf_path))
 
         if self._hf_max_keep is not None and len(self.meta.latest_exp.hf_checkpoint_list) > self._hf_max_keep:
@@ -409,10 +550,7 @@ class RLTrainer:
 
     def _init_logger(self, work_dir: Path):
         # Logging system maybe need better design
-        logger = get_logger()
-        logger.remove()
-        logger.add(work_dir / f"rank{get_rank()}.log", format=log_format(), backtrace=True, catch=True)
-        logger.add(sys.stderr, format=log_format(rank=get_rank()))
+        logger = get_logger(log_dir=work_dir, tag="RLTrainer")
         return logger
 
     def _set_deterministic(self):

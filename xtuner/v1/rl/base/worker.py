@@ -1,6 +1,5 @@
 import math
 import os
-import time
 from pathlib import Path
 from typing import Dict, List, TypeAlias, TypedDict, cast
 
@@ -21,7 +20,7 @@ from xtuner.v1.model.base import ModelItem, TransformerConfig
 from xtuner.v1.ray.accelerator import SingleAcceleratorWorker
 from xtuner.v1.ray.config import RolloutConfig
 from xtuner.v1.rl.utils import gather_logprobs
-from xtuner.v1.utils import ParallelConfigException, get_device, get_logger, get_torch_device_module, log_format
+from xtuner.v1.utils import ParallelConfigException, get_device, get_logger, get_torch_device_module
 
 from ..loss_fn import kl_penalty
 from .loss import BaseRLLossConfig, RLLossContextInputItem
@@ -31,7 +30,6 @@ DeviceMeshRaw: TypeAlias = List[List[int]]  # A list of lists representing devic
 ServiceUrlMap: TypeAlias = Dict[int, str]  # A dictionary mapping service names to their URLs
 DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
-logger = get_logger()
 
 
 def serialize_state_dict(state_dict: dict) -> str:
@@ -119,6 +117,7 @@ class WorkerInputItem(TypedDict):
     seq_ctx: SequenceContext
     shifted_labels: torch.LongTensor
     advantages: torch.Tensor
+    rollout_logprobs: torch.Tensor | None
 
 
 class TrainingWorker(SingleAcceleratorWorker):
@@ -158,9 +157,14 @@ class TrainingWorker(SingleAcceleratorWorker):
         self.endpoints["update_weights"] = "update_weights"
         # TODO: add lr scheduler
         log_dir = worker_cfg.log_dir
+        self.log_dir = None
         if log_dir is not None:
-            log_dir = Path(log_dir) if isinstance(log_dir, str) else log_dir
-            logger.add(log_dir / f"train_rank{dist.get_rank()}.log", format=log_format(), backtrace=True, catch=True)
+            self.log_dir = Path(log_dir) if isinstance(log_dir, str) else log_dir
+            self.log_level = os.environ.get("XTUNER_LOG_LEVEL", "INFO").upper()
+            self.logger = get_logger(log_dir=self.log_dir, tag="TrainingWorker")
+
+        else:
+            self.logger = get_logger()
 
     def _build_engine(self, worker_cfg: WorkerConfig) -> TrainEngine:
         engine = TrainEngine(
@@ -170,6 +174,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         )
         if worker_cfg.load_from is not None:
             engine.from_hf(worker_cfg.load_from)
+
         return engine
 
     def _build_ref_model(
@@ -239,16 +244,33 @@ class TrainingWorker(SingleAcceleratorWorker):
         self._ref_model.to_device("cpu")
         return loss_ctx_input_list
 
+    def _update_other_log(self, other_log: dict):
+        if "max_ratio" in other_log["extra_info"]:
+            max_ratio_list = []
+            for item in other_log["extra_info"]["max_ratio"]:
+                max_ratio_list.append(torch.max(item, dim=0).values.item())
+            other_log["extra_info"]["max_ratio"] = max(max_ratio_list)
+
+        if "log_rank_loss" in other_log["extra_info"]:
+            log_rank_loss_list = []
+            for item in other_log["extra_info"]["log_rank_loss"]:
+                log_rank_loss_list.append(item.item())
+            other_log["extra_info"]["loss"] = sum(log_rank_loss_list)
+        return other_log
+
     def fit(self, data_batches: list[WorkerInputItem], rollout_idx: int):
+        # NOTE: sglang会清除logger handle, 重新创建
+        self.logger = get_logger(log_dir=self.log_dir, tag="TrainingWorker")
         num_batches = len(data_batches)
         iters_per_step = math.ceil(num_batches / self._optimizer_steps)
         if num_batches < self._optimizer_steps:
-            logger.info(
+            self.logger.info(
                 f"Optimizer only step once because num_batches {num_batches} < optimizer_steps {self._optimizer_steps}."
             )
 
         seq_ctx_list: list[SequenceContext] = []
         loss_ctx_input_list: list[RLLossContextInputItem] = []
+        rollout_logprobs_list: list[torch.Tensor | None] = []
         for data in data_batches:
             seq_ctx = data["seq_ctx"].to(DEVICE)
             loss_ctx_input = RLLossContextInputItem(
@@ -260,6 +282,8 @@ class TrainingWorker(SingleAcceleratorWorker):
                 loss_ctx_input = loss_ctx_input.sp_split(self.sp_mesh)
             seq_ctx_list.append(seq_ctx)
             loss_ctx_input_list.append(loss_ctx_input)
+            if "rollout_logprobs" in data and data["rollout_logprobs"] is not None:
+                rollout_logprobs_list.append(data["rollout_logprobs"].to(DEVICE))
 
         del data_batches
 
@@ -275,14 +299,61 @@ class TrainingWorker(SingleAcceleratorWorker):
         # old logprobs are inplaced updated in compute_actor_logprobs
         loss_ctx_input_list = self.compute_actor_logprobs(seq_ctx_list, loss_ctx_input_list)
         sum_entropy: torch.Tensor | None = None
-        for loss_ctx_input in loss_ctx_input_list:
+        if len(rollout_logprobs_list) > 0:
+            assert len(rollout_logprobs_list) == len(loss_ctx_input_list), (
+                f"rollout_logprobs_list {len(rollout_logprobs_list)} vs loss_ctx_input_list {len(loss_ctx_input_list)}"
+            )
+
+        all_diffs = []
+        for i, loss_ctx_input in enumerate(loss_ctx_input_list):
             mask = loss_ctx_input.shifted_labels != -100
             entropy = -(cast(torch.Tensor, loss_ctx_input.old_logprobs) * mask).sum()
             sum_entropy = entropy if sum_entropy is None else sum_entropy + entropy
+
+            if len(rollout_logprobs_list) > 0:
+                rollout_logprobs = rollout_logprobs_list[i][mask]  # type: ignore[index]
+                old_logprobs = loss_ctx_input.old_logprobs[mask]  # type: ignore[index]
+
+                # 计算差异
+                assert len(rollout_logprobs.size()) == 1, (
+                    f"len(rollout_logprobs.size()): {len(rollout_logprobs.size())}"
+                )
+                assert rollout_logprobs.shape == old_logprobs.shape, (
+                    f"rollout_logprobs {rollout_logprobs.shape} vs old_logprobs {old_logprobs.shape}"
+                )
+                if rollout_logprobs.numel() == 0:  # pad 情况下是空的
+                    min_diff = torch.tensor(0)
+                    max_diff = min_diff
+                    std_diff = min_diff
+                    mean_diff = min_diff
+                else:
+                    min_diff = torch.min(rollout_logprobs - old_logprobs)
+                    max_diff = torch.max(rollout_logprobs - old_logprobs)
+                    mean_diff = torch.mean(rollout_logprobs - old_logprobs)
+                    if rollout_logprobs.numel() == 1:
+                        std_diff = torch.tensor(0)
+                    else:
+                        std_diff = torch.std(rollout_logprobs - old_logprobs)
+                all_diffs.append((min_diff, max_diff, mean_diff, std_diff))
+
+        logger_msg = f"Rollout {rollout_idx}: "
+
+        if len(rollout_logprobs_list) > 0:
+            all_diffs_tensor = torch.stack([torch.tensor(d).to(DEVICE) for d in all_diffs])  # n, 4
+            min_diff_val = torch.min(all_diffs_tensor[:, 0]).item()
+            max_diff_val = torch.max(all_diffs_tensor[:, 1]).item()
+            mean_diff_val = torch.mean(all_diffs_tensor[:, 2]).item()
+            if all_diffs_tensor[:, 3].numel() <= 1:
+                std_diff_val = 0.0
+            else:
+                std_diff_val = torch.std(all_diffs_tensor[:, 3]).item()
+            logger_msg += f"logprobs diff min {float(min_diff_val):.4f}, max {float(max_diff_val):.4f}, mean {float(mean_diff_val):.4f}, std {float(std_diff_val):.4f}, "
+
         sum_entropy = cast(torch.Tensor, sum_entropy)
         dist.all_reduce(sum_entropy, op=dist.ReduceOp.SUM)
         avg_gen_entropy = sum_entropy / global_grad_tokens if global_grad_tokens > 0 else 0
-        logger.info(f"Rollout {rollout_idx}: avg generation entropy: {avg_gen_entropy:.4f}")
+        logger_msg += f"avg generation entropy: {avg_gen_entropy:.4f}"
+        self.logger.info(logger_msg)
 
         if self._has_ref:
             # ref logprobs are inplaced updated in compute_actor_logprobs
@@ -301,7 +372,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             kl_div_sum = cast(torch.Tensor, kl_div_sum)
             dist.all_reduce(kl_div_sum, op=dist.ReduceOp.SUM)
             avg_kl_div = kl_div_sum / global_grad_tokens if global_grad_tokens > 0 else 0
-            logger.info(f"Rollout {rollout_idx}: avg KL divergence: {avg_kl_div:.4f}")
+            self.logger.info(f"Rollout {rollout_idx}: avg KL divergence: {avg_kl_div:.4f}")
 
         for i in range(0, len(seq_ctx_list), iters_per_step):
             batches_seq_ctx = seq_ctx_list[i : i + iters_per_step]
@@ -326,18 +397,24 @@ class TrainingWorker(SingleAcceleratorWorker):
             loss_log, other_log = self._engine.train_step(
                 data_batches=engine_input,
             )
+            other_log = self._update_other_log(other_log)
             grad_norm = self._engine.clip_grad_norm()
             self._engine.step_optimizer(grad_norm)
             log_info = dict()
             log_info.update(loss_log)
-            log_info.update(other_log)
+            for k, v in other_log.items():
+                if k == "extra_info":
+                    for extra_k, extra_v in v.items():
+                        log_info[extra_k] = extra_v.item() if isinstance(extra_v, torch.Tensor) else extra_v
+                else:
+                    log_info[k] = v.item() if isinstance(v, torch.Tensor) else v
             log_info["grad_norm"] = grad_norm.item()
             log_str = ", ".join(
                 f"{key}={value:.4f}" if isinstance(value, float) else f"{key}={value}"
                 for key, value in log_info.items()
             )
             log_str = f"Rollout {rollout_idx} Step {i}: " + log_str
-            logger.info(log_str)
+            self.logger.info(log_str)
 
     def save_hf(self, hf_dir: str, save_dtype: torch.dtype = torch.bfloat16):
         self._engine.save_hf(hf_dir, save_dtype)
@@ -351,7 +428,7 @@ class TrainingWorker(SingleAcceleratorWorker):
     def offload_model(self):
         self._engine.put_model_to_device("cpu")
         DEVICE_MODULE.empty_cache()
-        logger.info(
+        self.logger.info(
             f"Offloaded model to CPU. Current allocate {DEVICE_MODULE.memory_allocated() / (1024**2)} MB, reserved: {DEVICE_MODULE.memory_reserved() / (1024**2)} MB"
         )
 
@@ -359,7 +436,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         """Offload the optimizer of the training worker."""
         self._engine.put_optimizer_to_device("cpu")
         DEVICE_MODULE.empty_cache()
-        logger.info(
+        self.logger.info(
             f"Offloaded optimizer to CPU. Current allocate {DEVICE_MODULE.memory_allocated() / (1024**2)} MB, "
             f"reserved: {DEVICE_MODULE.memory_reserved() / (1024**2)} MB"
         )
@@ -395,7 +472,6 @@ class TrainingWorker(SingleAcceleratorWorker):
         """Update the model weights."""
         self.endpoints["update_weights"] = "update_weights"
         assert self.rollout_device_mesh is not None
-        time1 = time.time()
 
         model = self._engine.model
         DEVICE_MODULE.empty_cache()
@@ -468,7 +544,6 @@ class TrainingWorker(SingleAcceleratorWorker):
             self.request_update_params({}, finished=True)
 
         dist.barrier()
-        logger.info(f"update weights time: {time.time() - time1}")
         DEVICE_MODULE.empty_cache()
         return
 

@@ -63,6 +63,7 @@ def parse_args():
     parser.add_argument("--optimizer-disable-foreach", action="store_true")  # save memory usage during opt.step()
     parser.add_argument("--policy-loss-type", type=str, default="vanilla")
     parser.add_argument("--enable-evaluate", action="store_true")
+    parser.add_argument("--enable-initial-evaluate", action="store_true")
     parser.add_argument("--evaluate-step", type=int, default=1)
     parser.add_argument("--evaluate-ratio", type=float, default=1)
     parser.add_argument("--hf-interval", type=float, default=50)
@@ -115,6 +116,7 @@ def main(args):
             min_tokens=0,
         ),
     )
+
     tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True)
     from xtuner.v1.ray.judger.dapo_math import DapoMathJudgerConfig
     dapomath_judger_config = DapoMathJudgerConfig("dapo_math", True, args.max_response_length, 4096, 1.0, tokenizer)
@@ -155,7 +157,7 @@ def main(args):
             temperature=1.0,
             max_tokens=dataflow_config.sample_params.max_tokens,
             top_k=0,
-        )
+        ),
     )
     replay_buffer_cfg = ReplayBufferConfig(
         dataset_cfg=train_dataset_cfg,
@@ -206,6 +208,7 @@ def main(args):
         work_dir=args.work_dir,
         total_epochs=args.total_epochs,
         enable_evaluate=args.enable_evaluate,
+        enable_initial_evaluate=args.enable_initial_evaluate,
         hf_interval=args.hf_interval
     )
     trainer.fit()

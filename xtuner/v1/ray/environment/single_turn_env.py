@@ -26,7 +26,8 @@ class SingleTurnEnvironment(BaseEnvironment):
 
     def __init__(self, environment: str, placement_group, rollout_cfg=None, judger_cfg=None):
         super().__init__(environment, placement_group, rollout_cfg, judger_cfg)
-        self.logger = get_logger(__name__)
+        worker_log_dir = rollout_cfg.worker_log_dir if rollout_cfg else judger_cfg.worker_log_dir
+        self.logger = get_logger(log_dir=worker_log_dir, tag="SingleTurnEnv")
 
     async def generate(
         self, group_data_items: List[RLDataFlowItem], sample_params=None, extra_params=None
