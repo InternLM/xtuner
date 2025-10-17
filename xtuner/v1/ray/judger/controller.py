@@ -1,4 +1,5 @@
 import asyncio
+from pathlib import Path
 from typing import List
 
 import ray
@@ -68,6 +69,7 @@ class JudgerConfig(BaseModel):
         List[BaseModel],
         Parameter(help="A custom Python function for computing reward given model output and label."),
     ] = []
+    worker_log_dir: Annotated[Path, Parameter(help="Directory to save worker logs.")] = Path.cwd() / "work_dir"
 
 
 @ray.remote
@@ -92,7 +94,7 @@ class JudgerController:
         self.enable_weighted_judgers = (
             False if len(self.reward_judger) == 1 else self.judger_config.enable_weighted_judgers
         )
-        self.logger = get_logger()
+        self.logger = get_logger(log_dir=judger_config.worker_log_dir, tag="Judger")
 
     async def _call_custom_reward_judger(
         self,

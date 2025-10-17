@@ -375,15 +375,18 @@ class MoE(BaseModel):
         # Process final outputs for each micro-batch
         loss_list: list[torch.Tensor] = []
         logits_list: list[torch.Tensor] = []
-
+        extra_info_list: list[dict] = []
         for hidden_states, loss_ctx_single in zip(hidden_states_list, loss_ctx_list):
-            loss, logits = self.lm_head(hidden_states, loss_ctx_single)  # type: ignore
+            loss, (logits, extra_info) = self.lm_head(hidden_states, loss_ctx_single)  # type: ignore
             loss_list.append(loss)
             if logits is not None:
                 logits_list.append(logits)
+            if extra_info:
+                extra_info_list.append(extra_info)
 
         # Aggregate losses (mean across micro-batches)
         output["loss"] = torch.stack(loss_list).sum() if loss_list else None
+        output["extra_info"] = extra_info_list
 
         # Handle router results for all micro-batches
         all_router_logits = []
@@ -537,6 +540,7 @@ class MoE(BaseModel):
         else:
             output["router_logits"] = None
 
+        output["extra_info"] = {}
         return MoEModelOutputs(**output)  # type: ignore[typeddict-item]
 
     def build_embeddings(self, config: MoEConfig):

@@ -51,7 +51,6 @@ class SGLangWorker(RolloutWorker):
         # note: 此处默认使用tokne_id的话，则不使用流式；异步rollout+token_id进出后续修复
         payload = {"model": self.model_name}
         if stream:
-            self.logger.warning("Using stream mode for SGLangWorker is not supported yet.")
             raise NotImplementedError("Streaming mode is not supported for SGLangWorker.")
         else:
             if "return_token_ids" in extra_params and extra_params["return_token_ids"]:
@@ -70,7 +69,7 @@ class SGLangWorker(RolloutWorker):
         payload["sampling_params"] = sglang_sample_params
         sglang_extra_params = self._transform_extra_params(extra_params)
         payload.update(sglang_extra_params)
-        # self.logger.info(f"Request payload: {payload}")
+
         req = self.client.build_request(
             "POST",
             url,

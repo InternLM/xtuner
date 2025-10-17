@@ -13,6 +13,7 @@ class ColateItem(TypedDict):
     seq_ctx: SequenceContext
     shifted_labels: torch.Tensor
     advantage: float
+    rollout_logprobs: torch.Tensor | None
 
 
 @ray.remote
@@ -71,6 +72,11 @@ class TrainingController:
             seq_ctx_list = [data_batches[i]["seq_ctx"] for i in indices]
             label_list = [data_batches[i]["shifted_labels"] for i in indices]
             advantage_list = [data_batches[i]["advantage"] for i in indices]
+
+            rollout_logprobs_list = None
+            if "rollout_logprobs" in data_batches[0] and data_batches[0]["rollout_logprobs"] is not None:
+                rollout_logprobs_list = [data_batches[i]["rollout_logprobs"] for i in indices]
+
             if pad_len > 0:
                 # Reduce the attn calculation time by using multiple short sequence packs
                 pad_tokens = tuple(
@@ -95,6 +101,15 @@ class TrainingController:
                     [-100] * math.ceil(pad_len / 1024)
                 )  # can be any number, pad tokens are excluded from the calculation of the loss function.
 
+                if rollout_logprobs_list is not None:
+                    pad_rollout_logprobs = torch.zeros(
+                        1,
+                        pad_len,
+                        dtype=data_batches[0]["rollout_logprobs"].dtype,
+                        device=data_batches[0]["shifted_labels"].device,
+                    )
+                    rollout_logprobs_list.append(pad_rollout_logprobs)
+
             seq_ctx = SequenceContext.pack(seq_ctx_list)
             shifted_labels = torch.cat(label_list, dim=1)  # (1, max_len)
             advantages = torch.tensor(advantage_list).float().unsqueeze(0)  # (1, num_samples)
@@ -102,11 +117,16 @@ class TrainingController:
             num_tokens = cu_seq_lens_q[1:] - cu_seq_lens_q[:-1]
             advantages = torch.repeat_interleave(advantages, num_tokens, dim=1)  # (1, max_len)
 
+            rollout_logprobs = None
+            if rollout_logprobs_list is not None:
+                rollout_logprobs = torch.cat(rollout_logprobs_list, dim=1)  # (1, max_len)
+
             packed_data_batches.append(
                 {
                     "seq_ctx": seq_ctx,
                     "shifted_labels": shifted_labels,
                     "advantages": advantages,
+                    "rollout_logprobs": rollout_logprobs,
                 }
             )
         return packed_data_batches
@@ -152,10 +172,17 @@ class TrainingController:
                 dtype=packed_data_batches[0]["advantages"].dtype,
                 device="cpu",
             )
+
+            pad_rollout_logprobs = None
+            if "rollout_logprobs" in packed_data_batches[0] and packed_data_batches[0]["rollout_logprobs"] is not None:
+                pad_rollout_logprobs = torch.zeros(
+                    1, pack_max_length, dtype=packed_data_batches[0]["rollout_logprobs"].dtype, device="cpu"
+                )
             pad_data = {
                 "seq_ctx": pad_seq_ctx,
                 "shifted_labels": pad_shifted_labels,
                 "advantages": pad_advantages,
+                "rollout_logprobs": pad_rollout_logprobs,
             }
             pad_data_samples = [pad_data for _ in range(pad_num)]
             packed_data_batches = packed_data_batches + pad_data_samples

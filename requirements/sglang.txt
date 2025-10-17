@@ -1,4 +1,4 @@
-sglang
+sglang>=0.5.3
 sgl_kernel
 pybase64
 orjson
