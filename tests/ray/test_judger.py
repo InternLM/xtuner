@@ -100,7 +100,6 @@ class TestJudgerController(unittest.TestCase):
         self.assertEqual(res2[0].reward["score"], 1.0)
         self.assertEqual(res2[1].reward["score"], 1.0)
 
-    @unittest.skip("暂时不支持一个judger配置创建多个实例")
     def test_gsm8k_multi_judger(self):
         from xtuner.v1.ray.judger.gsm8k import GSM8KJudgerConfig
         # 支持一个GSM8KJudgerConfig创建多个实例
@@ -110,11 +109,12 @@ class TestJudgerController(unittest.TestCase):
             reward_judger_configs=[
                 gsm8k_judger_config_1,
                 gsm8k_judger_config_2
-            ]
+            ],
+            enable_weighted_judgers=True,
         )
         judger_controller = JudgerController.remote(judger_cfg)
         res3 = ray.get(judger_controller.run.remote(FAKE_JUDGER_INPUT_ITEM_MULTI_SOURCE))
-        self.assertEqual(res3.reward["score"], 1.0) # weighted_reward为固定字段，表示加权后的reward
+        self.assertEqual(res3.reward["weighted_score"], 1.0) # weighted_score为固定字段，表示加权后的reward
         
     def test_gsm8k_judger_score(self):
         """Test the judger functionality with single and multiple data sources."""
