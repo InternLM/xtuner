@@ -47,7 +47,7 @@ class MLAConfig(BaseModel):
     model_config = ConfigDict(title="Base attention config for xtuner", extra="allow")
     num_attention_heads: Annotated[int, Parameter(group="attention")]
     head_dim: Annotated[int, Parameter(group="attention")]
-    dropout: Annotated[bool, Parameter(group="attention")] = False
+    dropout: Annotated[float, Parameter(group="attention")] = 0.0
     # casual: bool = True
     qkv_bias: Annotated[bool, Parameter(group="attention")] = False
     o_bias: Annotated[bool, Parameter(group="attention")] = False
@@ -183,7 +183,7 @@ class MultiLatentAttention(nn.Module):
         qk_nope_head_dim: int,
         v_head_dim: int,
         q_lora_rank: int | None = None,
-        dropout: float = False,
+        dropout: float = 0.0,
         # casual: bool = True,
         qkv_bias: bool = False,
         qk_norm: bool = False,

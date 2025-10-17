@@ -31,7 +31,7 @@ class MHAConfig(BaseModel):
     num_attention_heads: Annotated[int, Parameter(group="attention")]
     num_key_value_heads: int
     head_dim: Annotated[int, Parameter(group="attention")]
-    dropout: Annotated[bool, Parameter(group="attention")] = False
+    dropout: Annotated[float, Parameter(group="attention")] = 0.0
     # casual: bool = True
     qkv_bias: Annotated[bool, Parameter(group="attention")] = False
     qk_norm: bool = False
@@ -114,7 +114,7 @@ class MultiHeadAttention(nn.Module):
         hidden_size: int,
         num_attention_heads: int,
         num_key_value_heads: int,
-        dropout: float = False,
+        dropout: float = 0.0,
         # casual: bool = True,
         qkv_bias: bool = False,
         qk_norm: bool = False,

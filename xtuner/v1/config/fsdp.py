@@ -16,6 +16,8 @@ class FSDPConfig(BaseModel):
     ep_size: Annotated[int, Parameter(help="Expert parallel size")] = 1
     reshard_after_forward: Annotated[bool, Parameter(help="Reshard model parameters after forward pass")] = True
     recompute_ratio: Annotated[float, Parameter(help="Gradient checkpointing ratio for memory optimization")] = 1.0
+    vision_recompute_ratio: Annotated[float, Parameter(help="Recompute ratio for vision modules")] = 1.0
+    checkpoint_preserve_rng_state: Annotated[bool, Parameter(help="Preserve RNG state during checkpointing")] = True
     cpu_offload: Annotated[bool, Parameter(help="Enable CPU offloading for memory optimization")] = False
     # TODO: (caoweihan) Convert `torch.dtype` to `Annotated` for compatibility with cyclopts
     param_dtype: Annotated[torch.dtype, Parameter(help="Data type for model parameters")] = torch.bfloat16

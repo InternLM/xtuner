@@ -44,6 +44,7 @@ def pixel_shuffle(x, scale_factor=0.5):
 def to_hf_key_list_wrapper(fn: Callable[[str], list[str]], convertor: Callable[[str], str]):
     def wrapper(self, *args, **kwargs):
         return [convertor(i) for i in fn(*args, **kwargs)]
+
     return wrapper
 
 
@@ -106,7 +107,7 @@ class InternS1ForConditionalGeneration(BaseModel):
         self,
         fsdp_config: FSDPConfig,
         float8_handler: Float8Handler | None = None,
-    ):  
+    ):
         self.fsdp_config = fsdp_config
         # TODO: 判断其余模块是否已经被 fsdp 切分了
 
@@ -130,6 +131,14 @@ class InternS1ForConditionalGeneration(BaseModel):
             reshard_after_forward=fsdp_config.reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if fsdp_config.cpu_offload else None,
         )
+
+        self.language_model.embed_tokens.set_modules_to_forward_prefetch(   # type: ignore
+            [self.vision_tower.encoder.layer[0]])
+        self.vision_tower.encoder.layer[-1].set_modules_to_forward_prefetch(   # type: ignore
+            [self.multi_modal_projector])
+        self.multi_modal_projector.set_modules_to_forward_prefetch([self.language_model])  # type: ignore
+        self.language_model.set_modules_to_forward_prefetch([self.language_model.layers["0"]])  # type: ignore
+
         self._to_empty_meta()
         return self
 
@@ -139,8 +148,8 @@ class InternS1ForConditionalGeneration(BaseModel):
         if isinstance(hf_path, Path):
             hf_path = str(hf_path)
 
-        _, _, missing_llm_keys = self.language_model.from_hf(hf_path,  strict=False)
-        _, _, missing_vision_keys = self.vision_tower.from_hf(hf_path,  strict=False)
+        _, _, missing_llm_keys = self.language_model.from_hf(hf_path, strict=False)
+        _, _, missing_vision_keys = self.vision_tower.from_hf(hf_path, strict=False)
         _, _, missing_project_keys = self.multi_modal_projector.from_hf(hf_path, strict=False)
 
         missing = missing_llm_keys | missing_vision_keys | missing_project_keys

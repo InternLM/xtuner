@@ -250,6 +250,7 @@ class DataloaderConfig(BaseDataloaderConfig):
         Literal["sft_llm_collator", "intern_s1_vl_sft_collator", "qwen3_vl_sft_collator", "fake_collator"],
         Parameter(help="collator func name"),
     ] = "sft_llm_collator"
+    pack_to_max_length: Annotated[bool, Parameter(help="whether to pack to max length")] = True
     pack_level: Annotated[
         Literal["soft", "none", "__legacy", "hard"], Parameter(help="__legacy is only for debug")
     ] = "soft"
@@ -379,6 +380,7 @@ class DataloaderConfig(BaseDataloaderConfig):
         collator = partial(
             self.build_collator(),
             pack_max_length=self.pack_max_length,
+            pack_to_max_length=self.pack_to_max_length,
             padding_token_idx=self.pad_token_id if self.pad_token_id is not None else 0,
         )
         dataloader = Dataloader(
