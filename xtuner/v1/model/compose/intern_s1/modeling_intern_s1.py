@@ -104,9 +104,9 @@ class InternS1ForConditionalGeneration(BaseModel):
 
     @override
     def fully_shard(
-            self,
-            fsdp_config: FSDPConfig,
-            float8_handler: Float8Handler | None = None,
+        self,
+        fsdp_config: FSDPConfig,
+        float8_handler: Float8Handler | None = None,
     ):
         self.fsdp_config = fsdp_config
         # TODO: 判断其余模块是否已经被 fsdp 切分了

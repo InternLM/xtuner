@@ -224,9 +224,9 @@ class InternS1VisionEncoder(nn.Module):
             InternS1VisionLayer(config, dpr[idx]) for idx in range(config.num_hidden_layers)])
 
     def forward(
-            self,
-            hidden_states: torch.Tensor,
-            output_hidden_states: bool = False,
+        self,
+        hidden_states: torch.Tensor,
+        output_hidden_states: bool = False,
     ) -> Union[tuple, BaseModelOutput]:
         all_hidden_states = () if output_hidden_states else None
 
@@ -305,10 +305,10 @@ class InternS1VisionModel(BaseModel):
             raise RuntimeError(f"{missing} is not initialized")
 
     def forward(
-            self,
-            pixel_values: torch.Tensor,
-            bool_masked_pos: Optional[torch.BoolTensor] = None,
-            output_hidden_states: Optional[bool] = None,
+        self,
+        pixel_values: torch.Tensor,
+        bool_masked_pos: Optional[torch.BoolTensor] = None,
+        output_hidden_states: Optional[bool] = None,
     ) -> Union[tuple, BaseModelOutput]:
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -333,9 +333,9 @@ class InternS1VisionModel(BaseModel):
 
     @override
     def fully_shard(
-            self,
-            fsdp_config: FSDPConfig,
-            float8_handler: Float8Handler | None = None,
+        self,
+        fsdp_config: FSDPConfig,
+        float8_handler: Float8Handler | None = None,
     ):
         self.fsdp_config = fsdp_config
         assert float8_handler is None
