@@ -179,6 +179,7 @@ class RolloutConfig(BaseModel):
 
     def __init__(self, **kwargs):
         if "model_name" not in kwargs:
+            model_name_from_config = None
             model_path = Path(kwargs["model_path"])
             config_json_path = model_path / "config.json"
             try:

@@ -13,25 +13,19 @@ export EVAL_DATA_PATH=$EVAL_DATA_PATH
 export XTUNER_USE_FA3=1
 export XTUNER_MAX_CONCURRENCY=2048
 export XTUNER_LOG_LEVEL="INFO"
-export PYTHONPATH=$(pwd):$PYTHONPATH;
+export PYTHONPATH=$(pwd):$PYTHONPATH
 
 # rollout infer engine config 
 infer_backend_lower=$(echo "$INFER_BACKEND" | tr '[:upper:]' '[:lower:]')
 if [ "$infer_backend_lower" = "sglang" ]; then
   export XTUNER_USE_SGLANG=1
-  export XTUNER_USE_LMDEPLOY=0
-  export XTUNER_USE_VLLM=0
   unset PYTORCH_CUDA_ALLOC_CONF
 elif [ "$infer_backend_lower" = "lmdeploy" ]; then
   export XTUNER_USE_LMDEPLOY=1
-  export XTUNER_USE_SGLANG=0
-  export XTUNER_USE_VLLM=0
   export PYTORCH_CUDA_ALLOC_CONF='expandable_segments:True'
   export PYTHONPATH=$LMDEPLOY_PATH:$PYTHONPATH
 elif [ "$infer_backend_lower" = "vllm" ]; then
   export XTUNER_USE_VLLM=1
-  export XTUNER_USE_LMDEPLOY=0
-  export XTUNER_USE_SGLANG=0
   export PYTORCH_CUDA_ALLOC_CONF='expandable_segments:True'
 else
   echo "Error: INFER_BACKEND '$INFER_BACKEND' is not supported or not specified!"

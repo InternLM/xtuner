@@ -62,7 +62,6 @@ class RLTrainerConfig(BaseModel):
     log_dir: Path | str | None = None
     total_epochs: int
     resume_config: ResumeConfig | None = None
-    resume_cfg: ResumeConfig | None = None
     strict_load: bool = True
     hf_interval: int | None = None
     hf_max_keep: int | None = None
@@ -360,6 +359,7 @@ class RLTrainer:
             self._save_trajectories(eval_data_groups, trajectory_save_path)
             self.logger.info(f"Initial rollout evaluate scores {scores} and start training")
         for rollout_idx in range(1, self._rollout_steps + 1):
+            timer_log_str = f"Rollout {rollout_idx} start \n"
             step_timer_dict = {}
             # 1. Rollout
             with timer("generation", step_timer_dict):
@@ -398,7 +398,7 @@ class RLTrainer:
                 ray.get(self._train_controller.offload.remote(target="model"))
                 ray.get(self._rollout_env_controller.onload_kvcache.remote())
 
-            timer_log_str = f"Rollout {rollout_idx} timing: \n"
+            timer_log_str = f"Rollout {rollout_idx} training finished and timing listed: \n"
             timer_log_str += timer_logger(step_timer_dict)
 
             self.logger.info(timer_log_str)
