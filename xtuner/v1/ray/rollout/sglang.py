@@ -151,6 +151,8 @@ class SGLangWorker(RolloutWorker):
         # note: 非共卡模式下无需设置,共卡模式下需要offload必须设置，否则显存释放不了
         sglang_server_args.enable_memory_saver = True
         sglang_server_args.max_running_requests = int(os.environ.get("XTUNER_MAX_CONCURRENCY", 2000))
+        if "interns1" in self.model_name.lower():
+            sglang_server_args.grammar_backend = "none"
 
         if sglang_server_args.nnodes > 1:
             sglang_server_args.node_rank = self.rank // self.config.gpus_per_node
