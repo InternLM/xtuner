@@ -44,6 +44,7 @@ class DatasetConfig(BaseModel):
     name: Annotated[str, Parameter(group="dataset")] = "default"
     class_name: Annotated[str, Parameter(group="dataset")] = "JsonlDataset"
     sample_ratio: Annotated[float, Parameter(group="dataset")] = 1.0
+    enable_sequential_sampler: Annotated[bool, Parameter(group="dataset")] = False
     media_root: Annotated[str | None, Parameter(group="dataset")] = ""
 
     def build(
@@ -55,6 +56,7 @@ class DatasetConfig(BaseModel):
                 tokenize_fn=tokenize_fn,
                 anno_path=self.anno_path,
                 sample_ratio=self.sample_ratio,
+                enable_sequential_sampler=self.enable_sequential_sampler,
                 name=self.name,
                 cache_dir=self.cache_dir,
                 cache_tag=self.cache_tag,
@@ -64,6 +66,7 @@ class DatasetConfig(BaseModel):
                 tokenize_fn=tokenize_fn,
                 anno_path=self.anno_path,
                 sample_ratio=self.sample_ratio,
+                enable_sequential_sampler=self.enable_sequential_sampler,
                 name=self.name,
                 media_root=self.media_root,
                 cache_dir=self.cache_dir,
