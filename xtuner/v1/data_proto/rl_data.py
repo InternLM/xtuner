@@ -1,10 +1,7 @@
-from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, TypedDict
 
-import ray
 from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict, Field
-from ray import ObjectRef
 from typing_extensions import Annotated
 
 
@@ -222,90 +219,3 @@ class RLRolloutRequestItem(BaseModel):
     tool_choice: str = "auto"
     sample_params: SampleParams = Field(default_factory=SampleParams)
     extra_params: Dict[str, Any] = Field(default_factory=dict)
-
-
-# ==============================================
-# ====== ReplayBuffer 数据流  =====================
-# ==============================================
-
-
-@dataclass
-class ReplayMeta:
-    """ReplayMeta aggregates all versions of data related to a single prompt in
-    the replay buffer.
-
-    Attributes:
-        env (str): Name or identifier of the environment.
-        root_id (int): Identifier for grouping related prompts (e.g., for GRPO or multi-turn scenarios).
-        action_id (int): Unique identifier for the prompt. If the prompt changes (such as in a multi-turn scenario), a new action_id is assigned.
-        action_ref (ObjectRef): Ray object reference to the prompt data (corresponds to RLDatasetItem in RLDataFlowItem).
-        observation_ids (List[int]): IDs for different responses to the same prompt. Each response has a unique observation_id.
-        observation_refs (List[ObjectRef]): Ray object references to environment data for each observation (corresponds to RLEnvDataItem in RLDataFlowItem).
-        observation_versions (List[int]): Version numbers for each observation, supporting async rollout.
-        state (str): Overall state of the prompt (e.g., "paused" for partial rollout, or other rollout states).
-        extra_info (Dict[str, Any]): Additional metadata or information.
-    """
-
-    env: str = ""
-    root_id: int = 0
-    action_id: int = 0  # same prompt share the same action_id
-    action_ref: ObjectRef = None
-    observation_ids: List[int] = field(default_factory=list)  # observation IDs for different versions
-    observation_refs: List[ObjectRef] = field(default_factory=list)
-    observation_versions: List[int] = field(default_factory=list)  # reserved for async rollout
-    state: str = ""  # overall state, e.g., for partial rollout
-    extra_info: Dict[str, Any] = field(default_factory=dict)
-
-
-def mapping_dataitem_to_replaymeta(grouped_dataitem: List[RLDataFlowItem]) -> ReplayMeta:
-    assert len(grouped_dataitem) > 0
-
-    env_str = grouped_dataitem[0].uid.env
-    root_id = grouped_dataitem[0].uid.root_id
-    action_id = grouped_dataitem[0].uid.action_id
-    data = grouped_dataitem[0].data
-    observation_ids = []
-    observation_refs = []
-    observation_versions = []
-
-    group_states = []
-    for item in grouped_dataitem:
-        version = item.uid.version
-        observation_ids.append(item.uid.observation_id)
-        observation_refs.append(ray.put(item.env))
-        observation_versions.append(version)
-        group_states.append(item.env.rollout.finish_reason)
-
-    state_str = "paused" if "paused" in group_states else "returned"
-    replay_meta = ReplayMeta(
-        env=env_str,
-        root_id=root_id,
-        action_id=action_id,
-        action_ref=ray.put(data),
-        observation_ids=observation_ids,
-        observation_refs=observation_refs,
-        observation_versions=observation_versions,
-        state=state_str,  # 指代一个prompt的整体状态，用于partial rollout
-        extra_info={},
-    )
-    return replay_meta
-
-
-def mapping_replaymeta_to_dataitem(replay_meta: ReplayMeta) -> List[RLDataFlowItem]:
-    env_str = replay_meta.env
-    root_id = replay_meta.root_id
-    action_id = replay_meta.action_id
-    data_ref = ray.get(replay_meta.action_ref)
-    group_data_item = []
-    for obs_id, obs_ref, version in zip(
-        replay_meta.observation_ids, replay_meta.observation_refs, replay_meta.observation_versions
-    ):
-        env_data = ray.get(obs_ref)
-        item = RLDataFlowItem(
-            uid=RLUIDItem(env=env_str, root_id=root_id, action_id=action_id, observation_id=obs_id, version=version),
-            data=data_ref,
-            env=env_data,
-            extra_info=RLExtraDataItem(),
-        )
-        group_data_item.append(item)
-    return group_data_item
