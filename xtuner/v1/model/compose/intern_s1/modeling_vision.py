@@ -383,9 +383,8 @@ class InternS1VisionModel(BaseModel):
                 layer = checkpoint_wrapper(layer,
                                            preserve_rng_state=checkpoint_preserve_rng_state,
                                            checkpoint_impl=CheckpointImpl.REENTRANT)
-                # TODO: 可以加速，但是需要验证对性能有没有影响，目测 loss 会偏高
-                # 一旦开启这个，layer 本身的 maybe_compile 需要手动移除，否则会报错
-                # layer = torch.compile(layer, fullgraph=True)
+                # __class__ without self attribute
+                layer.__class__.forward = maybe_compile(layer.__class__.forward, fullgraph=True)
 
             self.encoder.layer[layer_idx] = layer
 

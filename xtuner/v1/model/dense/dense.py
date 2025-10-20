@@ -18,6 +18,7 @@ from torch.distributed.tensor import DTensor
 from tqdm import tqdm
 from typing_extensions import overload, override
 
+from xtuner.v1.utils.compile import maybe_compile
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.float8_handler import Float8Handler
@@ -198,8 +199,8 @@ class Dense(BaseModel):
                 layer = checkpoint_wrapper(
                     layer, preserve_rng_state=checkpoint_preserve_rng_state, checkpoint_impl=CheckpointImpl.REENTRANT
                 )
-                # TODO: 可以加速，但是 loss 不对，后续修复
-                # layer = torch.compile(layer, fullgraph=True)
+                # __class__ without self attribute
+                layer.__class__.forward = maybe_compile(layer.__class__.forward, fullgraph=True)
 
             self.layers[str(layer_idx)] = layer
             fully_shard(

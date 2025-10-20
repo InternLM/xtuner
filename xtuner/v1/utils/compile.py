@@ -57,27 +57,27 @@ class MaybeCompile:
             func_name = original_func.__qualname__
             func_id = f"{module_name}.{func_name}"
 
+            # Check if this function should be compiled
+            should_compile = self._should_compile(module_name, func_name)
+
+            # Compile if needed and not already compiled
+            if should_compile and func_id not in self._compiled_funcs:
+                # Get any specific compile kwargs for this function
+                func_compile_kwargs = compile_kwargs
+                if self._mode == "selective":
+                    target_kwargs = self._get_compile_kwargs(module_name, func_name)
+                    if target_kwargs:
+                        func_compile_kwargs = {**compile_kwargs, **target_kwargs}
+
+                # Compile the function
+                self._compiled_funcs[func_id] = torch.compile(original_func, **func_compile_kwargs)
+
             @functools.wraps(func)
             def wrapper(*args, **kwargs):
-                # Check if this function should be compiled
-                should_compile = self._should_compile(module_name, func_name)
-
-                # Compile if needed and not already compiled
-                if should_compile and func_id not in self._compiled_funcs:
-                    # Get any specific compile kwargs for this function
-                    func_compile_kwargs = compile_kwargs
-                    if self._mode == "selective":
-                        target_kwargs = self._get_compile_kwargs(module_name, func_name)
-                        if target_kwargs:
-                            func_compile_kwargs = {**compile_kwargs, **target_kwargs}
-
-                    # Compile the function
-                    self._compiled_funcs[func_id] = torch.compile(original_func, **func_compile_kwargs)
-
                 # torch.distributed.breakpoint()
                 # print(func_id)
                 # Use compiled or original function
-                if should_compile and func_id in self._compiled_funcs:
+                if func_id in self._compiled_funcs:
                     return self._compiled_funcs[func_id](*args, **kwargs)
                 else:
                     return original_func(*args, **kwargs)
