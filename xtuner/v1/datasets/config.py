@@ -15,7 +15,7 @@ from torch.utils.data import DataLoader as TorchDataLoader
 from typing_extensions import TypedDict
 
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
-from xtuner.v1.utils import get_logger
+from xtuner.v1.utils import get_logger, profile_time_and_memory
 
 from ..datasets.collator import ColateItem
 from .collator import (
@@ -28,7 +28,7 @@ from .dataloader import BaseDataloader, Dataloader
 from .jsonl import JsonlDataset
 from .packing import ExpandSoftPackDataset, HardPackDataset, _LegacySoftPackDataset
 from .sampler import LengthGroupedSampler, ParallelSampler
-from .utils import CachableTokenizeFunction
+from .utils import CachableTokenizeFunction, tokenizer_xxhash
 from .vlm_jsonl import VLMJsonlDataset
 
 
@@ -95,11 +95,12 @@ DatasetConfigListAdatper = TypeAdapter(DatasetConfigList, config=ConfigDict(arbi
 # TODO: (huanghaian) Moving arguments to dataset config
 def build_datasets(
     dataset_config: DatasetConfigList,
-    tokenizer,
-    model_cfg: dict | None = None,
+    tokenizer
 ) -> list[JsonlDataset]:
     datasets: list[JsonlDataset] = []
     assert len(dataset_config) > 0
+
+    tokenizer_hash = tokenizer_xxhash(tokenizer)
     for config in dataset_config:
         _dataset_config = config["dataset"]
         assert isinstance(_dataset_config, DatasetConfig)
@@ -117,7 +118,7 @@ def build_datasets(
             _dataset_config = copy.deepcopy(_dataset_config)
             _dataset_config.anno_path = anno_path
             anno_name = os.path.basename(anno_path)  # for debug
-            _tokenize_fn = _tokenize_fn_name.build(tokenizer, anno_name=anno_name)
+            _tokenize_fn = _tokenize_fn_name.build(tokenizer, tokenizer_hash=tokenizer_hash, anno_name=anno_name)
             _dataset = _dataset_config.build(_tokenize_fn)
             if get_rank() == 0:
                 logger.info(
@@ -304,7 +305,8 @@ class DataloaderConfig(BaseDataloaderConfig):
         if self.dataset_config_list is None:
             raise ValueError("dataset_config_list is required.")
 
-        datasets = build_datasets(self.dataset_config_list, tokenizer)
+        with profile_time_and_memory('[Build Datasets]'):
+            datasets = build_datasets(self.dataset_config_list, tokenizer)
 
         assert isinstance(datasets, list), "datasets must be a list of datasets."
 
@@ -312,38 +314,39 @@ class DataloaderConfig(BaseDataloaderConfig):
             num_tokens = sum(dset.num_tokens.sum() for dset in datasets)
             logger.debug(f"[Dataset] {num_tokens} tokens.")
 
-        dataset: ExpandSoftPackDataset | _LegacySoftPackDataset | ConcatDataset | HardPackDataset
-        if self.pack_level == "soft":
-            logger.info("[Dataset] Start packing data of ExpandSoftPackDataset.")
-            dataset = ExpandSoftPackDataset(
-                datasets,
-                pack_max_length=self.pack_max_length,
-                pack_chunk_size=self.pack_chunk_size,
-                pack_workers=self.pack_workers,
-                global_pack=self.global_pack,
-                pack_extra_buffer_size=self.pack_extra_buffer_size,
-                seed=seed,
-            )
-        elif self.pack_level == "hard":
-            logger.info("[Dataset] Start packing data of HardPackDataset.")
-            dataset = HardPackDataset(
-                datasets,
-                pack_max_length=self.pack_max_length,
-                global_pack=self.global_pack,
-                seed=seed,
-            )
-        elif self.pack_level == "none":
-            dataset = ConcatDataset(datasets)  # type: ignore
-        elif self.pack_level == "__legacy":
-            logger.info("[Dataset] Start packing data of _LegacySoftPackDataset.")
-            dataset = _LegacySoftPackDataset(
-                datasets,
-                pack_max_length=self.pack_max_length,
-                global_pack=self.global_pack,
-                seed=seed,
-            )
-        else:
-            raise NotImplementedError(f"Unsupported pack level: {self.pack_level}")
+        with profile_time_and_memory('[Pack Datasets]'):
+            dataset: ExpandSoftPackDataset | _LegacySoftPackDataset | ConcatDataset | HardPackDataset
+            if self.pack_level == "soft":
+                logger.info("[Dataset] Start packing data of ExpandSoftPackDataset.")
+                dataset = ExpandSoftPackDataset(
+                    datasets,
+                    pack_max_length=self.pack_max_length,
+                    pack_chunk_size=self.pack_chunk_size,
+                    pack_workers=self.pack_workers,
+                    global_pack=self.global_pack,
+                    pack_extra_buffer_size=self.pack_extra_buffer_size,
+                    seed=seed,
+                )
+            elif self.pack_level == "hard":
+                logger.info("[Dataset] Start packing data of HardPackDataset.")
+                dataset = HardPackDataset(
+                    datasets,
+                    pack_max_length=self.pack_max_length,
+                    global_pack=self.global_pack,
+                    seed=seed,
+                )
+            elif self.pack_level == "none":
+                dataset = ConcatDataset(datasets)  # type: ignore
+            elif self.pack_level == "__legacy":
+                logger.info("[Dataset] Start packing data of _LegacySoftPackDataset.")
+                dataset = _LegacySoftPackDataset(
+                    datasets,
+                    pack_max_length=self.pack_max_length,
+                    global_pack=self.global_pack,
+                    seed=seed,
+                )
+            else:
+                raise NotImplementedError(f"Unsupported pack level: {self.pack_level}")
 
         if self.pack_level in ("soft", "__legacy") and get_rank() == 0:
             ori_samples = sum([len(dset) for dset in datasets])
