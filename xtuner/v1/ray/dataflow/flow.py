@@ -52,7 +52,7 @@ class DataFlowConfig(BaseModel):
     max_concurrent: Annotated[
         int,
         Parameter(help="Maximum number of concurrent tasks."),
-    ] = 8
+    ] = 512
     max_retry_times: Annotated[
         int,
         Parameter(help="Maximum number of retry task for failed samples."),
@@ -71,6 +71,11 @@ class DataFlowConfig(BaseModel):
     sample_params: Annotated[SampleParams, Parameter(help="Parameters for sampling from the model.")] = SampleParams()
     extra_params: Annotated[Dict, Parameter(help="Extra parameters for rollout.")] = {}
     worker_log_dir: Annotated[Path, Parameter(help="Directory to save worker logs.")] = Path.cwd() / "work_dir"
+
+    def __init__(self, **kwargs):
+        # TODO: calculate max_concurrent based on env and resources
+        super().__init__(**kwargs)
+        self.worker_log_dir.mkdir(parents=True, exist_ok=True)
 
 
 @ray.remote
@@ -112,6 +117,7 @@ class DataFlow:
         self.logger = get_logger(log_dir=self.config.worker_log_dir, tag="DataFlow")
         self.target_batch_size = self.config.global_batch_size
         self.timer_dict: dict[str, float] = {}
+        self.logger.info(f"DataFlowConfig:\n{self.config.model_dump_json(indent=2)}")
 
     def get_train_dataset_length(self):
         """Gets the length of the training dataset from the replay buffer."""
@@ -262,7 +268,7 @@ class DataFlow:
         self.unfinished_samples_count = 0
         self.failed_samples_count = 0
         self.target_batch_size = num if num and num > 0 else self.config.global_batch_size
-        self.logger.info(f"Target batch size set to {self.target_batch_size}.")
+        self.logger.info(f"Start generate dataflow and target batch size set to {self.target_batch_size}.")
         self.sample_params = sample_params if sample_params else self.config.sample_params
         self.extra_params = extra_params if extra_params else self.config.extra_params
         self.logger.info(f"Sample parameters set to {self.sample_params}.")

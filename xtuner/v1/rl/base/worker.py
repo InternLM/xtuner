@@ -256,6 +256,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             for item in other_log["extra_info"]["log_rank_loss"]:
                 log_rank_loss_list.append(item.item())
             other_log["extra_info"]["loss"] = sum(log_rank_loss_list)
+            other_log["extra_info"].pop("log_rank_loss")
         return other_log
 
     def fit(self, data_batches: list[WorkerInputItem], rollout_idx: int):
