@@ -93,10 +93,7 @@ DatasetConfigListAdatper = TypeAdapter(DatasetConfigList, config=ConfigDict(arbi
 
 # TODO: (huanghaian) Fix the return type hint static check
 # TODO: (huanghaian) Moving arguments to dataset config
-def build_datasets(
-    dataset_config: DatasetConfigList,
-    tokenizer
-) -> list[JsonlDataset]:
+def build_datasets(dataset_config: DatasetConfigList, tokenizer) -> list[JsonlDataset]:
     datasets: list[JsonlDataset] = []
     assert len(dataset_config) > 0
 
@@ -305,7 +302,7 @@ class DataloaderConfig(BaseDataloaderConfig):
         if self.dataset_config_list is None:
             raise ValueError("dataset_config_list is required.")
 
-        with profile_time_and_memory('[Build Datasets]'):
+        with profile_time_and_memory("[Build Datasets]"):
             datasets = build_datasets(self.dataset_config_list, tokenizer)
 
         assert isinstance(datasets, list), "datasets must be a list of datasets."
@@ -314,7 +311,7 @@ class DataloaderConfig(BaseDataloaderConfig):
             num_tokens = sum(dset.num_tokens.sum() for dset in datasets)
             logger.debug(f"[Dataset] {num_tokens} tokens.")
 
-        with profile_time_and_memory('[Pack Datasets]'):
+        with profile_time_and_memory("[Pack Datasets]"):
             dataset: ExpandSoftPackDataset | _LegacySoftPackDataset | ConcatDataset | HardPackDataset
             if self.pack_level == "soft":
                 logger.info("[Dataset] Start packing data of ExpandSoftPackDataset.")

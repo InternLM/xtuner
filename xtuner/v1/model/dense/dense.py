@@ -18,7 +18,6 @@ from torch.distributed.tensor import DTensor
 from tqdm import tqdm
 from typing_extensions import overload, override
 
-from xtuner.v1.utils.compile import maybe_compile
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.float8_handler import Float8Handler
@@ -31,6 +30,7 @@ from xtuner.v1.utils import (
     get_device,
     get_logger,
 )
+from xtuner.v1.utils.compile import maybe_compile
 
 
 DEVICE = get_device()
