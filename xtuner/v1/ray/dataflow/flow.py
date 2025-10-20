@@ -135,7 +135,7 @@ class DataFlow:
             Optional[List[RLDataFlowItem]]: The group of samples if the task
             fails and needs to be retried, otherwise None.
         """
-        group_samples = group_samples_for_retry
+        group_data_items = group_samples_for_retry
         try:
             # 该函数中所有的数据结构都是RLDataFlowItem
             # step 1: sample
@@ -164,9 +164,9 @@ class DataFlow:
 
         except Exception as e:
             self.logger.error(f"Worker task failed with exception: {e}. Returning meta for retry.", exc_info=True)
-            for sample in group_samples:  # type: ignore[union-attr]
+            for sample in group_data_items:  # type: ignore[union-attr]
                 sample.extra_info.retry_times += 1
-            return group_samples
+            return group_data_items
 
     async def concurrent_task_runner(self):
         """Orchestrates the concurrent execution of worker tasks to generate a
