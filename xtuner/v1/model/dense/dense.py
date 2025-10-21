@@ -30,6 +30,7 @@ from xtuner.v1.utils import (
     get_device,
     get_logger,
 )
+from xtuner.v1.utils.compile import maybe_compile
 
 
 DEVICE = get_device()
@@ -81,8 +82,8 @@ class Dense(BaseModel):
         for idx, decoder_layer in self.layers.items():
             hidden_states = decoder_layer(
                 hidden_states,
-                position_embeddings=position_embeddings,
-                seq_ctx=seq_ctx,
+                position_embeddings,
+                seq_ctx,
             )
             if self.config.return_hidden_states:
                 output["hidden_states"].append(hidden_states)
@@ -160,6 +161,11 @@ class Dense(BaseModel):
                 self, cast(DeviceMesh, self.fsdp_mesh), callback_after_pad=self._init_load_spec
             )
 
+        checkpoint_preserve_rng_state = fsdp_config.checkpoint_preserve_rng_state
+        if not checkpoint_preserve_rng_state and self.config.attention.dropout > 0.0:
+            checkpoint_preserve_rng_state = True
+            logger.warning("When using dropout, checkpoint_preserve_rng_state is set to True to avoid issues.")
+
         # Just for narrowing the type of self.fsdp_mesh and self.ep_mesh
         assert self.fsdp_mesh is not None
         assert self.fsdp_config is not None
@@ -182,21 +188,26 @@ class Dense(BaseModel):
         )
         num_recompute_layers = int(self.config.num_hidden_layers * self.fsdp_config.recompute_ratio)
 
-        for layer_idx, layer in tqdm(self.layers.items(), desc="[FSDP Sharding]"):
+        generator = torch.Generator()
+        generator.manual_seed(dist.get_rank())
+        shuffled_layers_idxs = torch.randperm(len(self.layers), generator=generator)
+
+        for layer_idx in tqdm(shuffled_layers_idxs, desc="[FSDP Sharding]"):
+            layer = self.layers[str(int(layer_idx))]
             layer_idx = int(layer_idx)
-            if layer_idx < num_recompute_layers - 1:
-                layer = checkpoint_wrapper(layer, checkpoint_impl=CheckpointImpl.REENTRANT)
+            if layer_idx < num_recompute_layers:
+                layer = checkpoint_wrapper(
+                    layer, preserve_rng_state=checkpoint_preserve_rng_state, checkpoint_impl=CheckpointImpl.REENTRANT
+                )
+                # __class__ without self attribute
+                layer.__class__.forward = maybe_compile(layer.__class__.forward, fullgraph=True)
 
             self.layers[str(layer_idx)] = layer
-            if layer_idx >= len(self.layers) - 1:
-                reshard_after_forward = False
-            else:
-                reshard_after_forward = self.fsdp_config.reshard_after_forward
             fully_shard(
                 layer,
                 mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
                 mp_policy=mp_policy,
-                reshard_after_forward=reshard_after_forward,
+                reshard_after_forward=self.fsdp_config.reshard_after_forward,
                 offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
             )
 
