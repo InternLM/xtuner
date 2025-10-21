@@ -75,10 +75,10 @@ class AcceleratorResourcesConfig(BaseModel):
         assert kwargs["num_workers"] <= available_gpus, "Not enough available GPUS in Ray cluster."
         # TODO: manage single controller's cpu resource to replace "10" here
         assert (kwargs["num_cpus_per_worker"] * kwargs["num_workers"]) + 10 <= available_cpus, (
-            "Not enough available CPUs in Ray cluster."
+            f"Not enough available CPUs in Ray cluster, available_cpus is {available_cpus} but xtuner needs {kwargs['num_cpus_per_worker'] * kwargs['num_workers'] + 10}."
         )
         assert kwargs["cpu_memory_per_worker"] * kwargs["num_workers"] <= available_memory, (
-            "Not enough available memory in Ray cluster."
+            f"Not enough available memory in Ray cluster, available_memory is {available_memory} but xtuner needs {kwargs['cpu_memory_per_worker'] * kwargs['num_workers']}."
         )
 
         super().__init__(**kwargs)

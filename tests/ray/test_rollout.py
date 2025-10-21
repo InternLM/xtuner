@@ -45,6 +45,7 @@ class TestRollout(unittest.TestCase):
         self.resources_cfg = AcceleratorResourcesConfig(
             accelerator=resource_map[torch.accelerator.current_accelerator().type],
             num_workers=8,
+            num_cpus_per_worker=8,
             cpu_memory_per_worker=16 * 1024**3,  # 16 GB
         )
         self.max_prompt_length = 512

@@ -75,7 +75,7 @@ class RolloutConfig(BaseModel):
         str,
         Parameter(group=infer_group, help="Environment variables to set for the rollout."),
     ] = ""
-    device: Annotated[str, Parameter(group=infer_group, help="Device to be used for the rollout worker.")] = "cuda"
+    device: Annotated[str, Parameter(group=infer_group, help="Device to be used for the rollout worker.")] = "GPU"
     model_path: Annotated[str | Path, Parameter(group=infer_group, help="Path to the SGLang model.")]
     model_name: Annotated[
         str | None, Parameter(group=infer_group, help="Name of the model to be used in the LMDeploy.")
@@ -207,7 +207,7 @@ class RolloutConfig(BaseModel):
                     port += 1
         kwargs["api_port"] = port
 
-        if kwargs["device"] == "NPU":
+        if "device" in kwargs and kwargs["device"] == "NPU":
             kwargs["gpus_per_node"] = 16
 
         rollout_backend = ""

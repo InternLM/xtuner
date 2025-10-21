@@ -31,6 +31,7 @@ class TestEvaluator(unittest.TestCase):
         self.resources_cfg = AcceleratorResourcesConfig(
             accelerator="GPU",
             num_workers=8,
+            num_cpus_per_worker=8,
             cpu_memory_per_worker=16 * 1024**3,  # 16 GB
         )
         self.max_prompt_length = 512
