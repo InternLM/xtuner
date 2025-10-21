@@ -1,4 +1,7 @@
 set -ex
+# examples of usage:
+# qwen3_8B_grpo_gsm8k training: bash examples/v1/scripts/run_rl.sh examples/v1/config/rl_qwen3_8B_grpo.py $MODEL_PATH $DATA_PATH $EVAL_DATA_PATH "sglang"
+# qwen2.5_7B_dapo_math training: bash examples/v1/scripts/run_rl.sh examples/v1/config/rl_qwen2.5_7B_dapo.py $MODEL_PATH $DATA_PATH $EVAL_DATA_PATH "sglang"
 
 CONFIG_PATH=$1
 MODEL_PATH=$2
@@ -34,7 +37,10 @@ fi
 
 # log dir
 current_time=$(date "+%m%d%H")
-export WORK_DIR='work_dirs/qwen2.5-7B_dapo_math_gpu'
+# 取模型路径的最后一级作为model_name，取数据路径的倒数第二级作为data_name
+model_dir_name=$(basename "$MODEL_PATH")
+data_dir_name=$(basename "$(dirname "$MODEL_PATH")")
+export WORK_DIR="work_dirs/${model_dir_name}_${data_dir_name}_${infer_backend_lower}"
 if [ ! -d "$WORK_DIR" ]; then
   mkdir -p "$WORK_DIR"
 fi
