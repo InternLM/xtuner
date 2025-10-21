@@ -32,7 +32,7 @@ class SessionRouter:
         self._max_idle = max_idle_seconds
 
         # OrderedDict: key=session_id -> value=(worker, last_used_ts)
-        self._map: OrderedDict[str, tuple[Any, float]] = OrderedDict()
+        self._map: OrderedDict[int, tuple[Any, float]] = OrderedDict()
         self._worker_cycler = cycle(self._workers)
         self._lock = asyncio.Lock()
 
@@ -57,7 +57,7 @@ class SessionRouter:
         while len(self._map) > self._max_sessions:
             self._map.popitem(last=False)
 
-    async def get_worker(self, session_id: str) -> Any:
+    async def get_worker(self, session_id: int) -> Any:
         async with self._lock:
             self._evict_expired()
 
@@ -188,7 +188,7 @@ class RolloutController:
         sample_params: Optional[SampleParams] = None,
         extra_params: dict = dict(),
         format: str = "openai",
-        session_id=None,
+        session_id: Optional[int] = None,
     ) -> RLRolloutResponseItem:
         # 这个函数接受标准的openapi chat create接口，所以不需要再额外定义输入的形式
         """Perform a rollout using one of the workers in a round-robin fashion.
