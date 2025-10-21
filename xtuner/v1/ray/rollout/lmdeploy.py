@@ -127,7 +127,7 @@ class LMDeployWorker(RolloutWorker):
 
         lmdeploy_sample_params = self._transform_sample_params(sample_params, extra_params)
         payload.update(lmdeploy_sample_params)
-        # self.logger.info(f"Request payload: {payload}")
+
         req = self.client.build_request(
             "POST",
             url,

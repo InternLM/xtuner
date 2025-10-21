@@ -135,10 +135,19 @@ class TransformerConfig(PydanticBaseModel):
         self.hf_config.save_pretrained(hf_path)
 
 
+class ExtraInfo(TypedDict, total=False):
+    # ExtraInfo 可根据需要扩展更多字段, 在 RL 训练流程中，extra_info 会在 TrainingWorker 中进行处理。
+    # max_ratio: 该字段为列表，每个元素是一个 micro-batch 的 max_ratio 张量，形状为 [n_chunk, 1], 多个 chunk 的张量会在第 0 维进行拼接。
+    max_ratio: list[torch.Tensor]
+    # log_rank_loss: 不包含chunk信息，list中每个元素是每个micro-batch的loss
+    log_rank_loss: list[torch.Tensor]
+
+
 class ModelOutputs(TypedDict):
     hidden_states: NotRequired[list[torch.Tensor]]
     logits: NotRequired[torch.Tensor]
     loss: torch.Tensor
+    extra_info: ExtraInfo
 
 
 def _is_float8_available():
@@ -660,7 +669,6 @@ class BaseModel(nn.Module):
         assert save_dtype in [torch.float8_e4m3fn, torch.bfloat16], f"save_dtype {save_dtype} is not supported"
 
         # TODO: Support fp8 saving
-
         shard_gen = self._get_shard_hf_param(self._group_param_by_load_spec(LoadEnum.SHARD), dtype=save_dtype)
         same_gen = self._get_same_hf_param(self._group_param_by_load_spec(LoadEnum.SAME), dtype=save_dtype)
         fused_gen = self._get_fused_hf_param(self._group_param_by_load_spec(LoadEnum.FUSED), dtype=save_dtype)

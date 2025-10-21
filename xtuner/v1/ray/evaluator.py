@@ -1,4 +1,5 @@
 import asyncio
+from pathlib import Path
 from typing import Callable, List, Optional, Union
 
 import ray
@@ -90,6 +91,7 @@ class EvaluatorConfig(BaseModel):
         SampleParams,
         Parameter(help="Sampling parameters for evaluation."),
     ] = SampleParams()
+    worker_log_dir: Annotated[Path, Parameter(help="Directory to save worker logs.")] = Path.cwd() / "work_dir"
 
 
 @ray.remote
@@ -132,7 +134,7 @@ class Evaluator:
             self.compute_metric = self.config.compute_metric_func
         else:
             self.compute_metric = self.default_compute_metric
-        self.logger = get_logger()
+        self.logger = get_logger(log_dir=config.worker_log_dir, tag="Evaluator")
 
     def default_compute_metric(self, samples):
         """Default metric computation function.
@@ -225,7 +227,7 @@ class Evaluator:
             pbar.refresh()
 
         self.logger.info(
-            f"Target batch size reached, but {self.failed_samples_count} samples failed and were skipped. Pausing rollout controller."
+            f"Target batch size reached, and {self.failed_samples_count} samples failed and were skipped. Pausing rollout controller."
         )
         ray.get(self.env_controller.pause.remote())
 

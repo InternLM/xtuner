@@ -120,7 +120,7 @@ class OrealLossContext(BaseLossContext[RLLossContextInputItem]):
         head_weight: torch.Tensor,
         head_bias: torch.Tensor | None,
         loss_kwargs: OrealLossKwargs,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor | None, dict[str, list[torch.Tensor]]]]:
         """Step 2.a and 2.b in the loss calculation in
         xtuner/v1/loss/base_loss_ctx.py."""
         # We do linear forward here to simplify the implementation of chunk loss (saving memory).
@@ -155,4 +155,4 @@ class OrealLossContext(BaseLossContext[RLLossContextInputItem]):
             kl_loss = kl_penalty(logprobs, ref_logprobs, kl_loss_weight, self.loss_cfg.kl_loss_type)
             loss = loss + kl_loss
 
-        return loss, logits
+        return loss, (logits, {})

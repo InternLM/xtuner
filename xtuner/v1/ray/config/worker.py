@@ -167,6 +167,7 @@ class RolloutConfig(BaseModel):
             help='Extra configuration for different rollout worker. vllm parameters will start with prefix "vllm", etc.',
         ),
     ] = {"lmdeploy_log_level": "CRITICAL", "lmdeploy_uvicorn_log_level": "CRITICAL"}
+    worker_log_dir: Annotated[Path, Parameter(help="Directory to save worker logs.")] = Path.cwd() / "work_dir"
 
 
 if __name__ == "__main__":
