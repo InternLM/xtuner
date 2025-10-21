@@ -95,10 +95,10 @@ class TestJudgerController(unittest.TestCase):
         judger_controller = JudgerController.remote(judger_cfg) 
         # 返回的形式为：RLJudgerResponseItem(uid=112750990920317762694895938380669501546, reward={'openai/gsm8k': 1}, extra_info={})
         res1 = ray.get(judger_controller.run.remote(FAKE_JUDGER_INPUT_ITEM)) 
-        self.assertEqual(res1.reward["openai/gsm8k"], 1.0)
+        self.assertEqual(res1.reward["score"], 1.0)
         res2 = ray.get(judger_controller.run.remote(FAKE_JUDGER_INPUT_ITEM_MULTI_DATA))
-        self.assertEqual(res2[0].reward["openai/gsm8k"], 1.0)
-        self.assertEqual(res2[1].reward["openai/gsm8k"], 1.0)
+        self.assertEqual(res2[0].reward["score"], 1.0)
+        self.assertEqual(res2[1].reward["score"], 1.0)
 
     def test_gsm8k_multi_judger(self):
         from xtuner.v1.ray.judger.gsm8k import GSM8KJudgerConfig
@@ -109,11 +109,12 @@ class TestJudgerController(unittest.TestCase):
             reward_judger_configs=[
                 gsm8k_judger_config_1,
                 gsm8k_judger_config_2
-            ]
+            ],
+            enable_weighted_judgers=True,
         )
         judger_controller = JudgerController.remote(judger_cfg)
         res3 = ray.get(judger_controller.run.remote(FAKE_JUDGER_INPUT_ITEM_MULTI_SOURCE))
-        self.assertEqual(res3.reward["weighted_reward"], 1.0) # weighted_reward为固定字段，表示加权后的reward
+        self.assertEqual(res3.reward["weighted_score"], 1.0) # weighted_score为固定字段，表示加权后的reward
         
     def test_gsm8k_judger_score(self):
         """Test the judger functionality with single and multiple data sources."""
@@ -125,7 +126,7 @@ class TestJudgerController(unittest.TestCase):
         judger_controller = JudgerController.remote(judger_cfg)
         judger_data = construct_judger_data(VERL_ROLLOUT_DATA_PATH)
         group_data = ray.get(judger_controller.run.remote(judger_data))
-        reward = [data.reward["weighted_reward"] for data in group_data]
+        reward = [data.reward["score"] for data in group_data]
         avg_score = np.mean(reward)
         verl_score = 0.2418
         self.assertLessEqual(float(np.abs(avg_score - verl_score)), 0.001)
@@ -143,7 +144,7 @@ class TestJudgerController(unittest.TestCase):
         judger_controller = JudgerController.remote(judger_cfg)
         judger_data = construct_judger_data(VERL_ROLLOUT_DATA_PATH)
         group_data = ray.get(judger_controller.run.remote(judger_data))
-        reward = [data.reward["reward"] for data in group_data]
+        reward = [data.reward["score"] for data in group_data]
         avg_score = np.mean(reward)
         verl_score = 0.2418
         self.assertLessEqual(float(np.abs(avg_score - verl_score)), 0.001)

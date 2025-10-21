@@ -177,7 +177,13 @@ class MoE(BaseModel):
         )  # [num_layers, intra_layer_micro_batch * seq, num_experts]
         attn_mask = torch.stack(attn_mask_list, dim=0)  # type: ignore  # [intra_layer_micro_batch, 1, seq]
         attn_mask = attn_mask.flatten()
-        router_logits = router_logits[:, attn_mask].contiguous().float()  # [num_layers, non_pad_seq, num_experts]
+
+        # router_logits = router_logits[:, attn_mask].contiguous().float()
+        indices = torch.nonzero(attn_mask, as_tuple=True)[0]
+        router_logits = (
+            torch.index_select(router_logits, 1, indices).contiguous().float()
+        )  # [num_layers, non_pad_seq, num_experts]
+
         return router_logits
 
     @torch.no_grad()
@@ -335,8 +341,8 @@ class MoE(BaseModel):
                 if int(os.getenv("XTUNER_ACTIVATION_OFFLOAD", "0")) == 1:
                     offload_stream = decoder_layer._get_fsdp_state()._comm_ctx.all_gather_copy_in_stream
                     with async_save_on_cpu(
-                        h2d_stream=offload_stream,  # type: ignore
-                        d2h_stream=offload_stream,  # type: ignore
+                        h2d_stream=offload_stream,
+                        d2h_stream=offload_stream,
                         block_idx=layer_idx - self.config.first_k_dense_replace,
                         depth=len(self.layers) - self.config.first_k_dense_replace,
                         custom_check_fn=lambda x: x.data_ptr()
@@ -369,15 +375,18 @@ class MoE(BaseModel):
         # Process final outputs for each micro-batch
         loss_list: list[torch.Tensor] = []
         logits_list: list[torch.Tensor] = []
-
+        extra_info_list: list[dict] = []
         for hidden_states, loss_ctx_single in zip(hidden_states_list, loss_ctx_list):
-            loss, logits = self.lm_head(hidden_states, loss_ctx_single)  # type: ignore
+            loss, (logits, extra_info) = self.lm_head(hidden_states, loss_ctx_single)  # type: ignore
             loss_list.append(loss)
             if logits is not None:
                 logits_list.append(logits)
+            if extra_info:
+                extra_info_list.append(extra_info)
 
         # Aggregate losses (mean across micro-batches)
         output["loss"] = torch.stack(loss_list).sum() if loss_list else None
+        output["extra_info"] = extra_info_list
 
         # Handle router results for all micro-batches
         all_router_logits = []
@@ -470,7 +479,7 @@ class MoE(BaseModel):
                 )
             else:
                 if int(os.getenv("XTUNER_ACTIVATION_OFFLOAD", "0")) == 1:
-                    offload_stream = decoder_layer._get_fsdp_state()._comm_ctx.all_gather_stream
+                    offload_stream = decoder_layer._get_fsdp_state()._comm_ctx.all_gather_copy_in_stream
                     with async_save_on_cpu(
                         h2d_stream=offload_stream,
                         d2h_stream=offload_stream,
@@ -531,6 +540,7 @@ class MoE(BaseModel):
         else:
             output["router_logits"] = None
 
+        output["extra_info"] = {}
         return MoEModelOutputs(**output)  # type: ignore[typeddict-item]
 
     def build_embeddings(self, config: MoEConfig):

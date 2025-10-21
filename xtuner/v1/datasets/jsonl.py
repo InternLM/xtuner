@@ -192,6 +192,7 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
         cache_dir: str | Path | None = None,
         max_length: int | None = None,  # TODO: Remove max_length in dataset
         cache_tag: str | None = None,
+        enable_sequential_sampler: bool = False,
     ):
         super().__init__()
 
@@ -202,7 +203,7 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
         self._shared_memory = self._init_shared_memory(anno_path)
         self.meta_path = os.path.join(cache_dir, CACHE_META) if cache_dir else None
 
-        logger.info(f"Start loading [{self.name}]{self.path} with sample_ratio={sample_ratio}.")
+        logger.info(f"[Dataset] Start loading [{self.name}]{self.path} with sample_ratio={sample_ratio}.")
 
         if cache_tag is not None and (cached := self._get_cached_tag(cache_tag, tokenize_fn)) is not None:
             offset_path, num_tokens_path = cached["offsets"], cached["num_tokens"]
@@ -367,7 +368,10 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
 
         _target_num_samples = int(len(_sampled) * sample_ratio)
         self.sampled = _sampled * int(sample_ratio)
-        self.sampled.extend(random.sample(_sampled, _target_num_samples - len(self.sampled)))
+        if enable_sequential_sampler:
+            self.sampled.extend(_sampled[: _target_num_samples - len(self.sampled)])
+        else:
+            self.sampled.extend(random.sample(_sampled, _target_num_samples - len(self.sampled)))
 
         if num_tokens is not None:
             num_tokens = num_tokens[self.sampled]

@@ -7,6 +7,7 @@ from xtuner.v1.config import GenerateConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.config import Float8Config
 from xtuner.v1.module import MHAConfig, MLAConfig, RMSNorm
+from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.ops.act_fn import get_act_fn
 from xtuner.v1.utils import ForwardState
 from xtuner.v1.utils.compile import maybe_compile
@@ -45,7 +46,7 @@ class DenseDecoderLayer(nn.Module):
         hidden_act: str,
         rms_norm_eps: float = 1e-6,
         attention_config: MLAConfig | MHAConfig,
-        rope_scaling_cfg: dict | None = None,
+        rope_scaling_cfg: RopeScalingConfig | None = None,
         generate_config: GenerateConfig | None = None,
         float8_cfg: Float8Config | None = None,
         layer_type: Literal["full_attention", "sliding_attention"] | None = None,
@@ -57,7 +58,7 @@ class DenseDecoderLayer(nn.Module):
             hidden_size=hidden_size,
             layer_type=layer_type,
             layer_idx=layer_idx,
-            rope_scaling=rope_scaling_cfg,
+            rope_scaling_cfg=rope_scaling_cfg,
             generate_config=generate_config,
             float8_cfg=float8_cfg,
         )

@@ -2,6 +2,7 @@
 
 import hashlib
 import os
+from typing import Literal
 
 import numpy as np
 import torch
@@ -26,7 +27,7 @@ from .base_mllm_tokenize_fn import (
     replace_image_token,
 )
 from .intern_s1_vl_process import build_transform, dynamic_num_patch, dynamic_preprocess
-from .intern_s1_vl_utils import InternS1VLOSSLoader, read_frames_decord
+from .intern_s1_vl_utils import InternS1VLOSSLoader, read_interns1_vl_video
 
 
 logger = get_logger()
@@ -107,7 +108,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         max_length: int | None = None,
         hash: str | None = None,
         only_prompt: bool = False,
-        template_name: str = "intern-s1",
+        template_name: Literal["intern-s1", "internvl-3.5"] = "intern-s1",
     ):
         assert isinstance(model_cfg, (InternS1BaseConfig, InternVLBaseConfig))
 
@@ -150,7 +151,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         self._hash_str = (
             f"{self.downsample_ratio}_{self.num_image_token}_{self.system_message}_{self.use_thumbnail}"
             f"_{self.dynamic_image_size}_{self.max_num_frames}_{self.min_num_frames}"
-            f"_{self.min_dynamic_patch}_{self.max_dynamic_patch}"
+            f"_{self.min_dynamic_patch}_{self.max_dynamic_patch}_{max_length}"
         )
 
         self.chat_template = CHAT_TEMPLATE_MAP[template_name]
@@ -243,7 +244,9 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
             input_ids = tokenized["input_ids"]
             labels = tokenized["labels"]
             input_ids, _ = self._truncated_input_and_labels(input_ids, labels)
-            assert (torch.tensor(input_ids) == self.image_token_id).sum() == sum(num_image_tokens), f'ERROR: image tokens are truncated'
+            assert (torch.tensor(input_ids) == self.image_token_id).sum() == sum(num_image_tokens), (
+                "ERROR: image tokens are truncated"
+            )
             return {"num_tokens": len(input_ids)}
         except Exception as e:
             print(
@@ -297,7 +300,9 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         input_ids = tokenized["input_ids"]
         labels = tokenized["labels"]
         input_ids, labels = self._truncated_input_and_labels(input_ids, labels)
-        assert (torch.tensor(input_ids) == self.image_token_id).sum() == sum(num_image_tokens), f'ERROR: image tokens are truncated'
+        assert (torch.tensor(input_ids) == self.image_token_id).sum() == sum(num_image_tokens), (
+            "ERROR: image tokens are truncated"
+        )
         ret = InternS1DataItem(
             input_ids=input_ids,
             labels=labels,
@@ -326,7 +331,9 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
             input_ids = tokenized["input_ids"]
             labels = tokenized["labels"]
             input_ids, _ = self._truncated_input_and_labels(input_ids, labels)
-            assert (torch.tensor(input_ids) == self.image_token_id).sum() == sum(num_image_tokens), f'ERROR: video tokens are truncated'
+            assert (torch.tensor(input_ids) == self.image_token_id).sum() == sum(num_image_tokens), (
+                "ERROR: video tokens are truncated"
+            )
             return {"num_tokens": len(input_ids)}
         except Exception as e:
             print(
@@ -430,11 +437,9 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
                 random_frame_num=random_frame_num,
             )
         else:
-            assert video_path.endswith((".mp4", ".avi", ".mov", ".webm", ".mkv", ".ts", ".rmvb", ".flv"))
-            assert "s3://" not in video_path, "Please use oss_loader_cfg to load video from s3."
-            image_list = read_frames_decord(
+            image_list = read_interns1_vl_video(
                 video_path,
-                num_frames=self.max_num_frames,
+                max_num_frames=self.max_num_frames,
                 min_num_frames=self.min_num_frames,
                 sample="rand",
                 clip=data_item.get("clip", None),
@@ -453,7 +458,9 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         input_ids = tokenized["input_ids"]
         labels = tokenized["labels"]
         input_ids, labels = self._truncated_input_and_labels(input_ids, labels)
-        assert (torch.tensor(input_ids) == self.image_token_id).sum() == sum(num_image_tokens), f'ERROR: video tokens are truncated'
+        assert (torch.tensor(input_ids) == self.image_token_id).sum() == sum(num_image_tokens), (
+            "ERROR: video tokens are truncated"
+        )
         ret = InternS1DataItem(
             input_ids=input_ids,
             labels=labels,
@@ -481,7 +488,7 @@ class InternS1VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
     max_num_frames: int = 24
     data_augment: bool = False
     oss_loader_cfg: OSSLoaderConfig | None = None
-    template_name: str = "intern-s1"
+    template_name: Literal["intern-s1", "internvl-3.5"] = "intern-s1"
 
     def build(
         self, tokenizer, tokenizer_hash: str | None = None, anno_name: str = "", **kwargs
@@ -499,6 +506,6 @@ class InternS1VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
             min_num_frames=self.min_num_frames,
             max_num_frames=self.max_num_frames,
             oss_loader_cfg=self.oss_loader_cfg,
-            hash=self.hash,
             template_name=self.template_name,
+            hash=self.hash,
         )

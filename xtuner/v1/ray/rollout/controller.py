@@ -1,19 +1,79 @@
+import asyncio
+import os
 import threading
+import time
+from collections import OrderedDict
 from itertools import cycle
 from typing import Any, Dict, List, Optional, Tuple, Union
+from uuid import uuid4
 
 import ray
 import uvicorn
 from fastapi import FastAPI
 
 from transformers import AutoTokenizer
-from xtuner.v1.data_proto.rl_data import RLRolloutRequestItem, RLRolloutResponseItem, SampleParams
+from xtuner.v1.data_proto.rl_data import RLRolloutRequestItem, RLRolloutResponseItem, RolloutExtraParams, SampleParams
 from xtuner.v1.ray.config.worker import RolloutConfig
+from xtuner.v1.utils import get_logger
 
 from .worker import RolloutWorker
 
 
-@ray.remote
+class SessionRouter:
+    def __init__(
+        self,
+        workers: List[Any],
+        max_sessions: int = 10000,
+        max_idle_seconds: Optional[float] = 3600.0,
+    ):
+        assert len(workers) > 0
+        self._workers = list(workers)
+        self._max_sessions = max_sessions
+        self._max_idle = max_idle_seconds
+
+        # OrderedDict: key=session_id -> value=(worker, last_used_ts)
+        self._map: OrderedDict[int, tuple[Any, float]] = OrderedDict()
+        self._worker_cycler = cycle(self._workers)
+        self._lock = asyncio.Lock()
+
+    def _now(self) -> float:
+        return time.time()
+
+    def _evict_expired(self):
+        if self._max_idle is None:
+            return
+        now = self._now()
+
+        to_delete = []
+        for sid, (_, last_used) in self._map.items():
+            if now - last_used > self._max_idle:
+                to_delete.append(sid)
+            else:
+                break
+        for sid in to_delete:
+            self._map.pop(sid, None)
+
+    def _evict_lru_to_capacity(self):
+        while len(self._map) > self._max_sessions:
+            self._map.popitem(last=False)
+
+    async def get_worker(self, session_id: int) -> Any:
+        async with self._lock:
+            self._evict_expired()
+
+            if session_id in self._map:
+                worker, _ = self._map.pop(session_id)
+                self._map[session_id] = (worker, self._now())
+                return worker
+
+            worker = next(self._worker_cycler)
+            self._map[session_id] = (worker, self._now())
+
+            self._evict_lru_to_capacity()
+            return worker
+
+
+@ray.remote(max_concurrency=int(os.environ.get("XTUNER_MAX_CONCURRENCY", 2000)))
 class RolloutController:
     """Controller for managing and coordinating multiple RolloutWorker
     actors."""
@@ -34,14 +94,28 @@ class RolloutController:
         self.num_workers = 0
         self.worker_server_urls: List[str] = []
         self.active_rollout_workers: List[RolloutWorker] = []
-        self.tokenizer = AutoTokenizer.from_pretrained(infer_config.model_path, trust_remote_code=True)
+        self.tokenizer = AutoTokenizer.from_pretrained(infer_config.tokenizer_path, trust_remote_code=True)
         self.workers_bundle_idx_map = workers_bundle_idx_map
         self.engine_mesh_list, self.server_url_dict = self.init_workers()
         self.start_api_server()
         # todo(@duanyanhui): add router to replace native round robin
-        self.sample_params = SampleParams(
-            stops=[self.tokenizer.decode(self.tokenizer.eos_token_id)], stop_token_ids=[self.tokenizer.eos_token_id]
+        self.router = SessionRouter(self.active_rollout_workers)
+        self.sample_params = SampleParams().dict()
+        # note: 目前默认使用return_token_ids和return_logprob，并且不使用流式
+        self.extra_params = dict(
+            RolloutExtraParams(
+                stream=False,
+                include_stop_str_in_output=True,
+                no_stop_trim=True,
+                return_logprob=True,
+                return_token_ids=True,
+                skip_special_tokens=False,
+                spaces_between_special_tokens=False,
+                top_logprobs=1,
+            )
         )
+        self.print_params_flag = True
+        self.logger = get_logger(log_dir=infer_config.worker_log_dir, tag="RolloutController")
 
     def get_rollout_info(self):
         """Get information about the current rollout setup.
@@ -103,17 +177,18 @@ class RolloutController:
             )
         )
         self.worker_server_urls = list(worker_server_urls_map.values())
-        self.worker_cycler = cycle(self.active_rollout_workers)
         return engine_mesh_list, worker_server_urls_map
 
     async def rollout(
         self,
-        prompt: Union[str, List[Dict[str, Any]]],
+        prompt: Union[str, List[Dict[str, Any]]] | None = None,
+        input_ids: Optional[List[int]] | None = None,
         tools: List = [],
         tool_choice: str = "auto",
         sample_params: Optional[SampleParams] = None,
         extra_params: dict = dict(),
         format: str = "openai",
+        session_id: Optional[int] = None,
     ) -> RLRolloutResponseItem:
         # 这个函数接受标准的openapi chat create接口，所以不需要再额外定义输入的形式
         """Perform a rollout using one of the workers in a round-robin fashion.
@@ -135,17 +210,23 @@ class RolloutController:
         Returns:
             The response from the rollout worker.
         """
-        worker = next(self.worker_cycler)
-        final_sample_params = sample_params if sample_params else self.sample_params
-        # note(@duanyanhui): ensure stops and stop_token_ids are set to append eos in response
-        final_sample_params.stops = final_sample_params.stops or self.sample_params.stops
-        final_sample_params.stop_token_ids = final_sample_params.stop_token_ids or self.sample_params.stop_token_ids
+        session_id = session_id if session_id else uuid4().int
+        worker = await self.router.get_worker(session_id)
+        # update sample params and extra params
+        self.sample_params.update(sample_params.dict() if sample_params else {})
+        self.extra_params.update(extra_params if extra_params else {})
+        if self.print_params_flag:
+            # 通过print_params_flag控制只打印一次参数
+            self.logger.info(f"Rollout with sample params: {self.sample_params}, extra params: {self.extra_params}")
+            self.print_params_flag = False
+        assert prompt is not None or input_ids is not None, "Either prompt or input_ids must be provided."
         response_ref = worker.rollout.remote(  # type: ignore[attr-defined]
-            prompt,
+            prompt=prompt,
+            input_ids=input_ids,
             tools=tools,
             tool_choice=tool_choice,
-            sample_params=final_sample_params.dict(),
-            extra_params=extra_params,
+            sample_params=self.sample_params,
+            extra_params=self.extra_params,
             format=format,
         )
         return await response_ref

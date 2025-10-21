@@ -29,7 +29,7 @@ def extract_var_value(file, var):
 
 
 def extract_data_from_log(logfile):
-    pattern_str = r"\[XTuner\].*Step.*lr:\s(\d+.\d*)\s.*text_tokens:\s(\d+.\d*)\s.*reduced_llm_loss:\s(\d+.\d*)\s.*max_memory:\s(\d+.\d*)\s*GB\s.*grad_norm:\s(\d+.\d*)\s.*(?<!e2e_)tgs:\s(\d+.\d*)"
+    pattern_str = r"\[XTuner\].*?Step.*?lr:\s*(\d+\.\d+).*?text_tokens:\s*(\d+\.\d+).*?reduced_llm_loss:\s*(\d+\.\d+).*?max_memory:\s*(\d+\.\d+)\s*GB.*?grad_norm:\s*(\d+\.\d+).*?\btgs:\s*(\d+\.\d+)"
     compiled_pattern = re.compile(pattern_str)
 
     cur_lr = []

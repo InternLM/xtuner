@@ -13,6 +13,7 @@ from transformers.models.llama.modeling_llama import repeat_kv
 from xtuner.v1.config import GenerateConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.config import Float8Config
+from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.ops import attn_impl_mapping, flash_attn_varlen_func, get_apply_rotary_emb
 from xtuner.v1.ops.comm.all_to_all import ulysses_all_to_all
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_device, get_logger
@@ -30,7 +31,7 @@ class MHAConfig(BaseModel):
     num_attention_heads: Annotated[int, Parameter(group="attention")]
     num_key_value_heads: int
     head_dim: Annotated[int, Parameter(group="attention")]
-    dropout: Annotated[bool, Parameter(group="attention")] = False
+    dropout: Annotated[float, Parameter(group="attention")] = 0.0
     # casual: bool = True
     qkv_bias: Annotated[bool, Parameter(group="attention")] = False
     qk_norm: bool = False
@@ -51,7 +52,7 @@ class MHAConfig(BaseModel):
         hidden_size: int,
         layer_type: Literal["full_attention", "sliding_attention"] | None = None,
         layer_idx: int = 0,
-        rope_scaling: dict | None = None,
+        rope_scaling_cfg: RopeScalingConfig | None = None,
         generate_config: GenerateConfig | None = None,
         float8_cfg: Float8Config | None = None,
     ) -> "MultiHeadAttention":
@@ -60,7 +61,7 @@ class MHAConfig(BaseModel):
             hidden_size=hidden_size,
             layer_type=layer_type,
             layer_idx=layer_idx,
-            rope_scaling=rope_scaling,
+            rope_scaling_cfg=rope_scaling_cfg,
             generate_config=generate_config,
             float8_cfg=float8_cfg,
         )
@@ -113,7 +114,7 @@ class MultiHeadAttention(nn.Module):
         hidden_size: int,
         num_attention_heads: int,
         num_key_value_heads: int,
-        dropout: float = False,
+        dropout: float = 0.0,
         # casual: bool = True,
         qkv_bias: bool = False,
         qk_norm: bool = False,
@@ -121,7 +122,7 @@ class MultiHeadAttention(nn.Module):
         o_bias: bool = False,
         with_sink: bool = False,
         attn_impl: Literal["flash_attention", "flex_attention", "eager_attention"] = "flash_attention",
-        rope_scaling: dict | None = None,
+        rope_scaling_cfg: RopeScalingConfig | None = None,
         float8_cfg: Float8Config | None = None,
         generate_config: GenerateConfig | None = None,
         layer_type: Literal["full_attention", "sliding_attention"] | None = None,

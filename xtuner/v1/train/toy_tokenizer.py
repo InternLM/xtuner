@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import Literal, Union
 
 import numpy as np
@@ -142,6 +143,9 @@ class UTF8ByteTokenizer:
         if len(ids) == 1:
             return ids[0]
         return ids
+
+    def save_pretrained(self, save_directory: str | Path):
+        pass
 
     def __call__(self, text: list[str], return_tensors: Literal["np", "pt"] = "np", **kwargs):
         """Encode a batch of texts into token IDs with tensor format.

@@ -102,7 +102,8 @@ class NativeJudger:
         """
         if not isinstance(result, list):
             result = [result]
-        judger_response_item = [RLJudgerResponseItem(reward={self.judger_name: result[i]}) for i in range(len(result))]
+        # todo: 支持多个judger结果的返回
+        judger_response_item = [RLJudgerResponseItem(reward=result[i]) for i in range(len(result))]
         return judger_response_item
 
     async def _local_executor(self, data_item: List[RLDataFlowItem]) -> List[RLJudgerResponseItem]:
@@ -120,11 +121,12 @@ class NativeJudger:
         uid_list = [item.uid.observation_id for item in data_item]
         kwargs = self.preprocess_func(data_item, self.extra_info)
         if inspect.iscoroutinefunction(self.reward_func):
-            result = await self.reward_func(**kwargs)
+            json_result = await self.reward_func(**kwargs)
         else:
-            result = self.reward_func(**kwargs)
+            json_result = self.reward_func(**kwargs)
 
-        result = self.postprocess_func(result)
+        # transform json to RLJudgerResponseItem
+        result = self.postprocess_func(json_result)
         for i in range(len(result)):
             result[i].uid = uid_list[i]
         return result
@@ -147,10 +149,11 @@ class NativeJudger:
         try:
             response = await self.http_client.post(self.remote_url, json=payload)
             response.raise_for_status()
-            result = response.json()
+            json_result = response.json()
             # 重要，必须加
-            result["uid"] = data_item[0].uid.observation_id
-            return self.postprocess_func(result)
+            json_result["uid"] = data_item[0].uid.observation_id
+            # transform json to RLJudgerResponseItem
+            return self.postprocess_func(json_result)
         except httpx.RequestError as exc:
             self.logger.error(f"An error occurred while requesting {exc.request.url}: {exc}")
             return []

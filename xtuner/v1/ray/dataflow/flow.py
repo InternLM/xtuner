@@ -1,5 +1,6 @@
 import asyncio
-from typing import List, Optional
+from pathlib import Path
+from typing import Dict, List, Optional
 
 import ray
 from cyclopts import Parameter
@@ -11,7 +12,7 @@ from xtuner.v1.data_proto.rl_data import RLDataFlowItem
 from xtuner.v1.ray.environment import SingleTurnEnvironment
 from xtuner.v1.ray.rollout.controller import SampleParams
 from xtuner.v1.ray.utils import create_task
-from xtuner.v1.utils import get_logger
+from xtuner.v1.utils import get_logger, timer
 
 from .replay_buffer import ReplayBuffer, ReplayBufferConfig
 
@@ -68,6 +69,8 @@ class DataFlowConfig(BaseModel):
         int, Parameter(help="Whether to enable async rollout_controller. 1 for enabled, 0 for disabled")
     ] = 0
     sample_params: Annotated[SampleParams, Parameter(help="Parameters for sampling from the model.")] = SampleParams()
+    extra_params: Annotated[Dict, Parameter(help="Extra parameters for rollout.")] = {}
+    worker_log_dir: Annotated[Path, Parameter(help="Directory to save worker logs.")] = Path.cwd() / "work_dir"
 
 
 @ray.remote
@@ -99,14 +102,16 @@ class DataFlow:
         """
         self.env = env
         self.config = dataflow_cfg
+        replay_buffer_cfg.worker_log_dir = self.config.worker_log_dir
         self.replay_buffer = ReplayBuffer.remote(replay_buffer_cfg)  # type: ignore[attr-defined]
         self.env_controller = environment
         self.send_samples_count = 0
         self.finished_samples_count = 0
         self.unfinished_samples_count = 0
         self.failed_samples_count = 0
-        self.logger = get_logger()
+        self.logger = get_logger(log_dir=self.config.worker_log_dir, tag="DataFlow")
         self.target_batch_size = self.config.global_batch_size
+        self.timer_dict: dict[str, float] = {}
 
     def get_train_dataset_length(self):
         """Gets the length of the training dataset from the replay buffer."""
@@ -130,31 +135,38 @@ class DataFlow:
             Optional[List[RLDataFlowItem]]: The group of samples if the task
             fails and needs to be retried, otherwise None.
         """
-        group_samples = group_samples_for_retry
+        group_data_items = group_samples_for_retry
         try:
             # 该函数中所有的数据结构都是RLDataFlowItem
             # step 1: sample
-            group_data_items = await self.replay_buffer.sample.remote(  # type: ignore[attr-defined]
-                self.env,
-                self.config.enable_partial_rollout,
-                self.config.prompt_repeat_k,
-            )
-            self.send_samples_count += 1
-            self.logger.debug(f"Get 1 sample and dataflow have sent {self.send_samples_count} to rollout_controller")
+            with timer("sample", self.timer_dict):
+                group_data_items = await self.replay_buffer.sample.remote(  # type: ignore[attr-defined]
+                    self.env,
+                    self.config.enable_partial_rollout,
+                    self.config.prompt_repeat_k,
+                )
+                self.send_samples_count += 1
+                self.logger.debug(
+                    f"[ROLLOUT] Get 1 sample and dataflow have sent {self.send_samples_count} to rollout_controller"
+                )
             # step 2: env generate
-            group_data_items = await self.env_controller.run.remote(group_data_items, self.sample_params)  # type: ignore[attr-defined]
+            with timer("generate", self.timer_dict):
+                group_data_items = await self.env_controller.run.remote(  # type: ignore[attr-defined]
+                    group_data_items, sample_params=self.sample_params, extra_params=self.extra_params
+                )
             # step 3: filter
-            filtered_group_data_items = await self.replay_buffer.post_processor.remote(group_data_items)  # type: ignore[attr-defined]
+            with timer("post_process", self.timer_dict):
+                filtered_group_data_items = await self.replay_buffer.post_processor.remote(group_data_items)  # type: ignore[attr-defined]
+
             # step 4: add to replay buffer
-            await self.replay_buffer.add.remote(filtered_group_data_items)  # type: ignore[attr-defined]
+            with timer("put_to_buffer", self.timer_dict):
+                await self.replay_buffer.add.remote(filtered_group_data_items)  # type: ignore[attr-defined]
+
         except Exception as e:
-            if group_samples is not None and len(group_samples) > 0:
-                self.logger.error(f"Worker task failed with exception: {e}. Returning meta for retry.", exc_info=True)
-                for sample in group_samples:
-                    sample.extra_info.retry_times += 1
-                return group_samples
-            else:
-                self.logger.warning(f"Worker task failed with exception: {e}. No samples to return.")
+            self.logger.error(f"Worker task failed with exception: {e}. Returning meta for retry.", exc_info=True)
+            for sample in group_data_items:  # type: ignore[union-attr]
+                sample.extra_info.retry_times += 1
+            return group_data_items
 
     async def concurrent_task_runner(self):
         """Orchestrates the concurrent execution of worker tasks to generate a
@@ -223,12 +235,14 @@ class DataFlow:
             await asyncio.wait_for(asyncio.gather(*waiting_tasks, return_exceptions=True), timeout=10)
 
         self.unfinished_samples_count = ray.get(self.replay_buffer.get_unfinished_samples.remote())
-        self.state()
+        self.logging_replaybuffer_state()
+        self.logging_timing_perf()
 
     async def run(
         self,
         num: Optional[int] = None,
         sample_params: Optional[SampleParams] = None,
+        extra_params: Optional[Dict] = None,
         dump: bool = False,
         dump_path: Optional[str] = None,
         resume: bool = False,
@@ -250,21 +264,35 @@ class DataFlow:
         self.target_batch_size = num if num and num > 0 else self.config.global_batch_size
         self.logger.info(f"Target batch size set to {self.target_batch_size}.")
         self.sample_params = sample_params if sample_params else self.config.sample_params
+        self.extra_params = extra_params if extra_params else self.config.extra_params
         self.logger.info(f"Sample parameters set to {self.sample_params}.")
 
         if resume:
             assert resume_path, "Resuming is enabled but no resume path is provided."
-            self.logger.info(f"resuming replay buffer from {resume_path}")
+            self.logger.info(f"Resuming replay buffer from {resume_path}")
             await self.replay_buffer.resume.remote(resume_path)
 
         await self.concurrent_task_runner()
 
         if dump:
             assert dump_path, "Dumping is enabled but no dump path is provided."
-            self.logger.info(f"dump replay buffer from {dump_path}")
+            self.logger.info(f"Dump replay buffer from {dump_path}")
             await self.replay_buffer.dump.remote(dump_path)
 
         return await self.replay_buffer.get_samples.remote(self.target_batch_size)  # type: ignore[attr-defined]
 
-    def state(self):
+    def logging_replaybuffer_state(self):
         ray.get(self.replay_buffer.print.remote())
+
+    def logging_timing_perf(self):
+        log_messages = ["Single sample average time cost: "]
+        for name, times in self.timer_dict.items():
+            avg_time_str = "N/A"
+            if times:
+                avg_time = times / self.finished_samples_count
+                avg_time_str = f"{avg_time:.4f}s"
+
+            formatted_name = name.replace("_", " ")
+            log_messages.append(f"{formatted_name}: {avg_time_str}, ")
+
+        self.logger.info("".join(log_messages))

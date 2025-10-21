@@ -9,7 +9,7 @@ from xtuner.v1.ray.judger.controller import JudgerConfig
 from xtuner.v1.ray.accelerator import AcceleratorResourcesConfig, AutoAcceleratorWorkers
 from xtuner.v1.ray.environment import SingleTurnEnvironment
 from xtuner.v1.ray.evaluator import Evaluator, EvaluatorConfig
-from xtuner.v1.ray.rollout import SampleParams
+from xtuner.v1.data_proto.rl_data import SampleParams
 from xtuner.v1.datasets import RLTextTokenizeFnConfig, DatasetConfig
 
 MODEL_PATH = os.environ["ROLLOUT_MODEL_PATH"]
@@ -40,6 +40,9 @@ class TestEvaluator(unittest.TestCase):
             model_name=os.path.basename(MODEL_PATH).lower(),
             tokenizer_path=MODEL_PATH,
             tensor_parallel_size=8,
+            extra_rollout_config={
+                "lmdeploy_log_level": "CRITICAL",
+            }
         )
         from xtuner.v1.ray.judger.gsm8k import GSM8KJudgerConfig
         gsm8k_judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k")
@@ -65,8 +68,7 @@ class TestEvaluator(unittest.TestCase):
         )
         self.sample_params = SampleParams(
             top_p=1.0, 
-            temperature=0.0, 
-            do_sample=False, 
+            temperature=0.0,
             max_tokens=1024, 
             top_k=1
         )
@@ -82,26 +84,28 @@ class TestEvaluator(unittest.TestCase):
     @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
     def test_lmdeploy_evaluator(self):
         def custom_compute_metric(samples):
-            return {"custom_accuracy": sum(s.env.judger.reward["weighted_reward"] > 0 for s in samples) / len(samples)}
+            return {"custom_accuracy": sum(s.env.judger.reward["score"] > 0 for s in samples) / len(samples)}
 
         evaluator_cfg = EvaluatorConfig(
             dataset_cfg=self.eval_dataset_cfg,
             tokenizer=self.tokenizer,
-            max_concurrent=1,
+            max_concurrent=16,
             eval_sample_ratio=0.004,  # generate 5 samples
-            compute_metric_func=None
+            compute_metric_func=None,
+            sample_params=self.sample_params
         )
         evaluator = Evaluator.remote(evaluator_cfg, self.test_env)
-        correctness = ray.get(evaluator.run.remote(sample_params=self.sample_params))
+        correctness = ray.get(evaluator.run.remote())
         custom_evaluator_cfg = EvaluatorConfig(
             dataset_cfg=self.eval_dataset_cfg,
             tokenizer=self.tokenizer,
-            max_concurrent=1,
+            max_concurrent=16,
             eval_sample_ratio=0.004,  # generate 5 samples
-            compute_metric_func=custom_compute_metric
+            compute_metric_func=custom_compute_metric,
+            sample_params=self.sample_params
         )
         custom_evaluator = Evaluator.remote(custom_evaluator_cfg, self.test_env)
-        custom_correctness = ray.get(custom_evaluator.run.remote(sample_params=self.sample_params))
+        custom_correctness = ray.get(custom_evaluator.run.remote())
         self.assertEqual(correctness['accuracy'], custom_correctness['custom_accuracy'])
 
 
