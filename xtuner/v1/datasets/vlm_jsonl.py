@@ -25,8 +25,8 @@ class VLMJsonlDataset(JsonlDataset):
         self.fake_data = {
             "id": -1,
             "messages": [
-                {"from": "user", "content": "你好"},
-                {"from": "assistant", "content": "你好呀！很高兴为你服务～有什么问题或需要帮忙的地方，随时告诉我哦！"},
+                {"role": "user", "content": "你好"},
+                {"role": "assistant", "content": "你好呀！很高兴为你服务～有什么问题或需要帮忙的地方，随时告诉我哦！"},
             ],
         }
 
