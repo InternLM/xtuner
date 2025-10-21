@@ -26,6 +26,7 @@ work_dir = os.environ["WORK_DIR"]
 model_path = os.environ["MODEL_PATH"]
 data_path = os.environ["DATA_PATH"]
 eval_data_path = os.environ["EVAL_DATA_PATH"]
+enable_evaluate = True if eval_data_path != "" else False
 
 # basic settings
 experimental_name = "dapo_math"
@@ -75,12 +76,12 @@ evaluation_sample_params.top_p = 0.7
 
 # dataset
 train_dataset = DatasetConfig(name=experimental_name, anno_path=data_path)
-eval_dataset = DatasetConfig(name=experimental_name, anno_path=eval_data_path)
+eval_dataset = DatasetConfig(name=experimental_name, anno_path=eval_data_path) if enable_evaluate else None
 tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
 tokenizer_config = RLTextTokenizeFnConfig(max_length=max_prompt_length)
 
 train_dataset_cfg = [{"dataset": train_dataset, "tokenize_fn": tokenizer_config}]
-eval_dataset_cfg = [{"dataset": eval_dataset, "tokenize_fn": tokenizer_config}]
+eval_dataset_cfg = [{"dataset": eval_dataset, "tokenize_fn": tokenizer_config}] if enable_evaluate else []
 
 dataloader_config = DataloaderConfig(pack_max_length=pack_max_length, collator="fake_collator", pack_level="none")
 
@@ -115,7 +116,7 @@ evaluator_cfg = EvaluatorConfig(
     evaluate_step=evaluate_step,
     compute_metric_func=dapo_compute_metric,
     sample_params=evaluation_sample_params,
-)
+) if enable_evaluate else None
 
 replay_buffer_cfg = ReplayBufferConfig(
     dataset_cfg=train_dataset_cfg, dataloader_cfg=dataloader_config, tokenizer=tokenizer

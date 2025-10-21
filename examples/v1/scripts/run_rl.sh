@@ -1,13 +1,14 @@
 set -ex
 # examples of usage:
-# qwen3_8B_grpo_gsm8k training: bash examples/v1/scripts/run_rl.sh examples/v1/config/rl_qwen3_8B_grpo.py $MODEL_PATH $DATA_PATH $EVAL_DATA_PATH "sglang"
-# qwen2.5_7B_dapo_math training: bash examples/v1/scripts/run_rl.sh examples/v1/config/rl_qwen2.5_7B_dapo.py $MODEL_PATH $DATA_PATH $EVAL_DATA_PATH "sglang"
+# qwen3_8B_grpo_gsm8k training: bash examples/v1/scripts/run_rl.sh "sglang" examples/v1/config/rl_qwen3_8B_grpo.py $MODEL_PATH $DATA_PATH $EVAL_DATA_PATH
+# qwen2.5_7B_dapo_math training: bash examples/v1/scripts/run_rl.sh "sglang" examples/v1/config/rl_qwen2.5_7B_dapo.py $MODEL_PATH $DATA_PATH $EVAL_DATA_PATH
 
 CONFIG_PATH=$1
-MODEL_PATH=$2
-DATA_PATH=$3
-EVAL_DATA_PATH=$4
-INFER_BACKEND=$5
+INFER_BACKEND=$2
+MODEL_PATH=$3
+DATA_PATH=$4
+EVAL_DATA_PATH=${5:-""}
+
 
 export MODEL_PATH=$MODEL_PATH
 export DATA_PATH=$DATA_PATH

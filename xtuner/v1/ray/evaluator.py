@@ -64,11 +64,11 @@ class EvaluatorConfig(BaseModel):
     enable_evaluate: Annotated[
         bool,
         Parameter(help="Flag to enable or disable evaluation during training."),
-    ] = True
+    ] = False
     enable_initial_evaluate: Annotated[
         bool,
         Parameter(help="Flag to enable or disable initial evaluation before training starts."),
-    ] = True
+    ] = False
     dataset_cfg: Annotated[
         DatasetConfigList,
         Parameter(help="Configuration for the dataset."),

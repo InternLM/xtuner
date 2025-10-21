@@ -25,45 +25,23 @@ from xtuner.v1.train.rl_trainer import RLTrainerConfig
 work_dir = os.environ["WORK_DIR"]
 model_path = os.environ["MODEL_PATH"]
 data_path = os.environ["DATA_PATH"]
-eval_data_path = os.environ["EVAL_DATA_PATH"]
 
 # basic settings
-experimental_name = "grpo_gsm8k"
-total_epochs = 15
-global_batch_size = 1024
-prompt_repeat_k = 5
-rollout_tp_size = 2
+experimental_name = "grpo_gsm8k_tiny"
+total_epochs = 1
+global_batch_size = 128
+prompt_repeat_k = 1
+rollout_tp_size = 1
 rollout_ep_size = 1
 max_prompt_length = 512
 max_response_length = 1024
 pack_max_length = 32768
-train_optimizer_steps = 4
-hf_interval = 15
-enable_evaluate = True
-enable_initial_evaluate = True
-evaluate_step = 10
-
-# grpo quick test settings for rapid accuracy validation within ~30 minutes:
-# - Initial eval accuracy: ~25%
-# - After training: ~88% eval accuracy
-# total_epochs = 3
-# global_batch_size = 64
-# prompt_repeat_k = 5
-# rollout_tp_size = 1
-# rollout_ep_size = 1
-# max_prompt_length = 512
-# max_response_length = 1024
-# pack_max_length = 32768
-# train_optimizer_steps = 1
-# hf_interval = 100
-# enable_evaluate = True
-# enable_initial_evaluate = True
-# evaluate_step = 15
+train_optimizer_steps = 1
 
 # 1. resources
 resources = AcceleratorResourcesConfig(
     accelerator="GPU",
-    num_workers=8,
+    num_workers=1,
     num_cpus_per_worker=12,
     cpu_memory_per_worker=16 * 1024**3,  # 16 GB
 )
@@ -83,20 +61,12 @@ rollout_config = RolloutConfig(
 training_sample_params = SampleParams(
     max_tokens=max_response_length,
 )
-evaluation_sample_params = deepcopy(training_sample_params)
-evaluation_sample_params.top_p = 1.0
-evaluation_sample_params.temperature = 0.0
-evaluation_sample_params.top_k = 1
 
 # dataset: 不需要修改
-train_dataset = DatasetConfig(name=experimental_name, anno_path=data_path)
-eval_dataset = DatasetConfig(name=experimental_name, anno_path=eval_data_path)
 tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
 tokenizer_config = RLTextTokenizeFnConfig(max_length=max_prompt_length)
-
+train_dataset = DatasetConfig(name=experimental_name, anno_path=data_path)
 train_dataset_cfg = [{"dataset": train_dataset, "tokenize_fn": tokenizer_config}]
-eval_dataset_cfg = [{"dataset": eval_dataset, "tokenize_fn": tokenizer_config}]
-
 dataloader_config = DataloaderConfig(pack_max_length=pack_max_length, collator="fake_collator", pack_level="none")
 
 # 3. judger
@@ -109,16 +79,6 @@ dataflow_config = DataFlowConfig(
     prompt_repeat_k=prompt_repeat_k,
     global_batch_size=global_batch_size,
     sample_params=training_sample_params,
-)
-
-evaluator_cfg = EvaluatorConfig(
-    enable_evaluate=enable_evaluate,
-    enable_initial_evaluate=enable_initial_evaluate,
-    dataset_cfg=eval_dataset_cfg,
-    tokenizer=tokenizer,
-    evaluate_step=evaluate_step,
-    compute_metric_func=None,
-    sample_params=evaluation_sample_params,
 )
 
 # replay buffer config: : 不需要修改
@@ -165,10 +125,8 @@ trainer = RLTrainerConfig(
     dataflow_config=dataflow_config,
     judger_config=judger_cfg,
     replay_buffer_config=replay_buffer_cfg,
-    evaluator_config=evaluator_cfg,
     train_worker_config=train_worker_cfg,
     tokenizer_path=model_path,
     work_dir=work_dir,
     total_epochs=total_epochs,
-    hf_interval=hf_interval,
 )
