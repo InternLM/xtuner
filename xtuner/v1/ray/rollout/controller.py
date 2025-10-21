@@ -1,7 +1,11 @@
+import asyncio
 import os
 import threading
+import time
+from collections import OrderedDict
 from itertools import cycle
 from typing import Any, Dict, List, Optional, Tuple, Union
+from uuid import uuid4
 
 import ray
 import uvicorn
@@ -13,6 +17,60 @@ from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.utils import get_logger
 
 from .worker import RolloutWorker
+
+
+class SessionRouter:
+    def __init__(
+        self,
+        workers: List[Any],
+        max_sessions: int = 10000,
+        max_idle_seconds: Optional[float] = 3600.0,
+    ):
+        assert len(workers) > 0
+        self._workers = list(workers)
+        self._max_sessions = max_sessions
+        self._max_idle = max_idle_seconds
+
+        # OrderedDict: key=session_id -> value=(worker, last_used_ts)
+        self._map: OrderedDict[int, tuple[Any, float]] = OrderedDict()
+        self._worker_cycler = cycle(self._workers)
+        self._lock = asyncio.Lock()
+
+    def _now(self) -> float:
+        return time.time()
+
+    def _evict_expired(self):
+        if self._max_idle is None:
+            return
+        now = self._now()
+
+        to_delete = []
+        for sid, (_, last_used) in self._map.items():
+            if now - last_used > self._max_idle:
+                to_delete.append(sid)
+            else:
+                break
+        for sid in to_delete:
+            self._map.pop(sid, None)
+
+    def _evict_lru_to_capacity(self):
+        while len(self._map) > self._max_sessions:
+            self._map.popitem(last=False)
+
+    async def get_worker(self, session_id: int) -> Any:
+        async with self._lock:
+            self._evict_expired()
+
+            if session_id in self._map:
+                worker, _ = self._map.pop(session_id)
+                self._map[session_id] = (worker, self._now())
+                return worker
+
+            worker = next(self._worker_cycler)
+            self._map[session_id] = (worker, self._now())
+
+            self._evict_lru_to_capacity()
+            return worker
 
 
 @ray.remote(max_concurrency=int(os.environ.get("XTUNER_MAX_CONCURRENCY", 2000)))
@@ -41,6 +99,7 @@ class RolloutController:
         self.engine_mesh_list, self.server_url_dict = self.init_workers()
         self.start_api_server()
         # todo(@duanyanhui): add router to replace native round robin
+        self.router = SessionRouter(self.active_rollout_workers)
         self.sample_params = SampleParams().dict()
         # note: 目前默认使用return_token_ids和return_logprob，并且不使用流式
         self.extra_params = dict(
@@ -118,7 +177,6 @@ class RolloutController:
             )
         )
         self.worker_server_urls = list(worker_server_urls_map.values())
-        self.worker_cycler = cycle(self.active_rollout_workers)
         return engine_mesh_list, worker_server_urls_map
 
     async def rollout(
@@ -130,6 +188,7 @@ class RolloutController:
         sample_params: Optional[SampleParams] = None,
         extra_params: dict = dict(),
         format: str = "openai",
+        session_id: Optional[int] = None,
     ) -> RLRolloutResponseItem:
         # 这个函数接受标准的openapi chat create接口，所以不需要再额外定义输入的形式
         """Perform a rollout using one of the workers in a round-robin fashion.
@@ -151,7 +210,8 @@ class RolloutController:
         Returns:
             The response from the rollout worker.
         """
-        worker = next(self.worker_cycler)
+        session_id = session_id if session_id else uuid4().int
+        worker = await self.router.get_worker(session_id)
         # update sample params and extra params
         self.sample_params.update(sample_params.dict() if sample_params else {})
         self.extra_params.update(extra_params if extra_params else {})
