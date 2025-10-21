@@ -112,6 +112,7 @@ class vLLMWorker(RolloutWorker):
     def _transform_rollout_config_to_server_configs(self) -> Namespace:
         # use vllm FlexibleArgumentParser to parse the config
         # and return the args as the default server config
+        # vllm server_args: vllm/vllm/engine/arg_utils.py
         parser = FlexibleArgumentParser()
         parser = make_arg_parser(parser)
         args = parser.parse_args([])
@@ -126,5 +127,5 @@ class vLLMWorker(RolloutWorker):
         if args.expert_parallel_size > 1:
             args.tensor_parallel_size = self.config.expert_parallel_size
             args.enable_expert_parallel = True
-
+        args.max_model_length = self.config.context_length
         return args

@@ -93,9 +93,12 @@ class SGLangWorker(RolloutWorker):
         # flush cache will not return status_code 200 when there are pending requests
         while True:
             try:
-                response = requests.get(f"{self.server_url}/flush_cache")
+                response = requests.get(f"{self.server_url}/flush_cache", timeout=60)
                 if response.status_code == 200:
                     break
+            except requests.exceptions.Timeout:
+                print("Timeout occurred while flushing cache. Exiting loop.")
+                break
             except NewConnectionError as e:
                 raise e
             except Exception as e:
@@ -151,8 +154,12 @@ class SGLangWorker(RolloutWorker):
         # note: 非共卡模式下无需设置,共卡模式下需要offload必须设置，否则显存释放不了
         sglang_server_args.enable_memory_saver = True
         sglang_server_args.max_running_requests = int(os.environ.get("XTUNER_MAX_CONCURRENCY", 2000))
+        sglang_server_args.trust_remote_code = True
         if "interns1" in self.model_name.lower():
             sglang_server_args.grammar_backend = "none"
+
+        if self.config.context_length is not None:
+            sglang_server_args.context_length = self.config.context_length
 
         if sglang_server_args.nnodes > 1:
             sglang_server_args.node_rank = self.rank // self.config.gpus_per_node
