@@ -24,7 +24,7 @@ jobs:
       run: |
         echo "::add-mask::${{env.WORKSPACE_PREFIX}}"
         echo "::add-mask::${{env.WORKSPACE_PREFIX_SHORT}}"
-        cd $GITHUB_WORKSPACE && sudo git clean -ffdx
+        pwd && echo "$GITHUB_WORKSPACE" && cd $GITHUB_WORKSPACE && sudo git clean -ffdx
     - uses: actions/checkout@v3
 
     - name: unit-test
