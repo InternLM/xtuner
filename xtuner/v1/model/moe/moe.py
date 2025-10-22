@@ -28,8 +28,8 @@ from xtuner.v1.config import FSDPConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.loss import BalancingLoss, CELossContext, ZLoss
-from xtuner.v1.model.base import BaseModel, ExtraInfo, ModelOutputs, TransformerConfig
-from xtuner.v1.model.utils import checkpoint_wrapper, module_dict_repr
+from xtuner.v1.model.base import BaseModel, ModelOutputs, TransformerConfig
+from xtuner.v1.model.utils import ModelForwardExtraLogInfo, checkpoint_wrapper, module_dict_repr
 from xtuner.v1.module import GreedyRouterConfig, LMHead, NoAuxRouter, NoAuxRouterConfig, RMSNorm, RotaryEmbedding
 from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayer
 from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEActFnConfig, MoEBlock, MoEDecoderLayer
@@ -375,7 +375,7 @@ class MoE(BaseModel):
         # Process final outputs for each micro-batch
         loss_list: list[torch.Tensor] = []
         logits_list: list[torch.Tensor] = []
-        moe_extra_info = ExtraInfo()
+        moe_extra_info = ModelForwardExtraLogInfo()
         for hidden_states, loss_ctx_single in zip(hidden_states_list, loss_ctx_list):
             loss, (logits, extra_info) = self.lm_head(hidden_states, loss_ctx_single)  # type: ignore
             loss_list.append(loss)

@@ -14,8 +14,9 @@ from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.loss import BaseLossContext
 from xtuner.v1.model.base import BaseModel as XTunerBaseModel
-from xtuner.v1.model.base import ExtraInfo, ModelItem, ModelOutputs, TransformerConfig
+from xtuner.v1.model.base import ModelItem, ModelOutputs, TransformerConfig
 from xtuner.v1.model.moe.moe import MoEModelOutputs
+from xtuner.v1.model.utils import ModelForwardExtraLogInfo
 from xtuner.v1.module.router import NoAuxRouterConfig
 from xtuner.v1.utils import get_device, get_logger, get_torch_device_module
 
@@ -174,7 +175,7 @@ class VisionComposeTrainEngine(TrainEngine):
         step_z_loss: torch.Tensor | None = None
         step_consumed_tokens = torch.tensor(0.0, device=DEVICE)
 
-        train_engine_extra_info = ExtraInfo()
+        train_engine_extra_info = ModelForwardExtraLogInfo()
         for i in range(0, len(data_batches), intra_layer_micro_batch):
             data_batch = data_batches[i : i + intra_layer_micro_batch]
             seq_ctx_list = []

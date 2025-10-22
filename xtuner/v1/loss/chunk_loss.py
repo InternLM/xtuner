@@ -25,9 +25,9 @@ class ChunkLoss(torch.autograd.Function):
         grad_inputs_chunks = torch.split(grad_inputs, chunk_size, dim=1)
         hidden_states_chunks = torch.split(hidden_states, chunk_size, dim=1)
 
-        from xtuner.v1.model.base import ExtraInfo
+        from xtuner.v1.model.utils import ModelForwardExtraLogInfo
 
-        chunked_extra_info = ExtraInfo()
+        chunked_extra_info = ModelForwardExtraLogInfo()
         for i in range(len(hidden_states_chunks)):
             hidden_states_chunk = hidden_states_chunks[i]
             grad_inputs_chunk = grad_inputs_chunks[i]

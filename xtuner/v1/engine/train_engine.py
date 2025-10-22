@@ -27,7 +27,8 @@ from torch.utils._foreach_utils import (
 from xtuner.v1.config import FSDPConfig, OptimConfig
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.float8.float8_handler import Float8Handler
-from xtuner.v1.model.base import BaseModel, ExtraInfo, ModelItem, TransformerConfig
+from xtuner.v1.model.base import BaseModel, ModelItem, TransformerConfig
+from xtuner.v1.model.utils import ModelForwardExtraLogInfo
 from xtuner.v1.module.router import NoAuxRouterConfig
 from xtuner.v1.utils import get_device, get_logger, get_torch_device_module, profile_time_and_memory
 
@@ -227,7 +228,7 @@ class TrainEngine:
             logger.info(f"grad_accumulation_steps: {iters_per_step}")
             self._count += 1
 
-        train_engine_extra_info = ExtraInfo()
+        train_engine_extra_info = ModelForwardExtraLogInfo()
         for i in range(0, len(data_batches), intra_layer_micro_batch):
             data_batch = data_batches[i : i + intra_layer_micro_batch]
             seq_ctx_list = []

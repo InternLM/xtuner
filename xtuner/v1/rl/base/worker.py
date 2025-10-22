@@ -16,7 +16,7 @@ from xtuner.v1.config.optim import LRConfig, OptimConfig
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.engine.train_engine import TrainEngine
 from xtuner.v1.float8.float8_handler import Float8Handler
-from xtuner.v1.model.base import ExtraInfo, ModelItem, TransformerConfig
+from xtuner.v1.model.base import ModelItem, TransformerConfig
 from xtuner.v1.ray.accelerator import SingleAcceleratorWorker
 from xtuner.v1.ray.config import RolloutConfig
 from xtuner.v1.rl.utils import gather_logprobs
@@ -245,11 +245,13 @@ class TrainingWorker(SingleAcceleratorWorker):
         return loss_ctx_input_list
 
     def _update_other_log(self, other_log: dict):
+        from xtuner.v1.model.utils import ModelForwardExtraLogInfo
+
         extra_info = other_log.get("extra_info", {})
-        if isinstance(extra_info, ExtraInfo):
+        if isinstance(extra_info, ModelForwardExtraLogInfo):
             extra_info_dict = extra_info.get()
         else:
-            extra_info_updated = ExtraInfo(extra_info)
+            extra_info_updated = ModelForwardExtraLogInfo(extra_info)
             extra_info_dict = extra_info_updated.get()
         other_log["extra_info"] = extra_info_dict
         return other_log
