@@ -1,4 +1,3 @@
-import os
 from pathlib import Path
 from typing import Annotated
 
@@ -21,12 +20,8 @@ def main(
     *,
     config: Annotated[Path, Parameter(group=Group("config-path", sort_key=0))],
 ):
-    ray_cluster_url = os.getenv("RAY_CLUSTER_URL", "auto")
-    if ray_cluster_url == "auto":
-        ray.init(num_cpus=128, ignore_reinit_error=True)
-    else:
-        ray.init(address=ray_cluster_url, ignore_reinit_error=True)
-
+    if not ray.is_initialized():
+        ray.init()
     trainer_cfg = Config.fromfile(config)["trainer"]
     trainer = RLTrainer.from_config(trainer_cfg)
     trainer.fit()
