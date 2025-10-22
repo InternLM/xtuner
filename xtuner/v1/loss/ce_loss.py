@@ -167,7 +167,7 @@ class CELossContext(BaseLossContext[CELossContextInputItem]):
         head_weight: torch.Tensor,
         head_bias: torch.Tensor | None,
         loss_kwargs: CELossKwargs,
-    ) -> tuple[torch.Tensor, tuple[torch.Tensor | None, dict[str, list[torch.Tensor]]]]:
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor | None, dict[str, Any]]]:
         # We do linear forward here to simplify the implementation of chunk loss (saving memory).
         logits = F.linear(hidden_states, head_weight, head_bias)
         logits = logits.float()  # (bs, seq_len, vocab_size)

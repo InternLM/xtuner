@@ -5,7 +5,7 @@ from functools import reduce
 from itertools import chain
 from pathlib import Path
 from shutil import copy, copytree
-from typing import Annotated, Generator, Literal, cast
+from typing import Annotated, Any, Generator, Literal, cast
 
 import torch
 import torch.distributed as dist
@@ -135,12 +135,54 @@ class TransformerConfig(PydanticBaseModel):
         self.hf_config.save_pretrained(hf_path)
 
 
-class ExtraInfo(TypedDict, total=False):
-    # ExtraInfo 可根据需要扩展更多字段, 在 RL 训练流程中，extra_info 会在 TrainingWorker 中进行处理。
-    # max_ratio: 该字段为列表，每个元素是一个 micro-batch 的 max_ratio 张量，形状为 [n_chunk, 1], 多个 chunk 的张量会在第 0 维进行拼接。
-    max_ratio: list[torch.Tensor]
-    # log_rank_loss: 不包含chunk信息，list中每个元素是每个micro-batch的loss
-    log_rank_loss: list[torch.Tensor]
+class ExtraInfo(dict):
+    """An extensible dictionary for carrying extra information in the model's
+    output.
+
+    In the Reinforcement Learning (RL) training process, this information will be processed by the `TrainingWorker`.
+    In the SFT/Pretraining process, this information will be processed by the `Trainer`.
+    """
+
+    # max_ratio:
+    #   - 标准模型：形状为 `[n_chunk, 1]`，多个 chunk 的张量在 `dim=0` 上拼接。
+    #   - MoE 模型 (当 intra_layer_micro_batch > 1 时)，形状为 `[n_chunk, intra_layer_micro_batch, 1]`
+    max_ratio: torch.Tensor
+
+    # log_rank_loss:
+    #   - 标准模型：形状为 `[1]`，已累加所有 chunk 的 loss。
+    #   - MoE 模型 (当 intra_layer_micro_batch > 1 时)，形状为 `[intra_layer_micro_batch, 1]`。
+    log_rank_loss: torch.Tensor
+
+    def __init__(self, init_dict: dict[str, Any] = {}):
+        super().__init__()
+        if init_dict:
+            for k, v in init_dict.items():
+                self[k] = v
+
+    def append(self, input_info: dict[str, Any]):
+        for key, tensor in input_info.items():
+            # 统一处理为 2D 张量后在第 0 维拼接
+            if tensor.dim() == 0:
+                tensor = tensor.unsqueeze(0)
+            tensor = tensor.unsqueeze(0)
+            if key in self:
+                self[key] = torch.cat([self[key], tensor], dim=0)
+            else:
+                self[key] = tensor
+
+    def get(self):
+        return_dict = {}
+        if "max_ratio" in self:
+            while self["max_ratio"].dim() >= 1:
+                self["max_ratio"] = torch.max(self["max_ratio"], dim=-1).values
+            max_ratio_value = self["max_ratio"].item()
+            return_dict["max_ratio"] = max_ratio_value
+        if "log_rank_loss" in self:
+            while self["log_rank_loss"].dim() >= 1:
+                self["log_rank_loss"] = torch.sum(self["log_rank_loss"], dim=-1)
+            log_rank_loss_value = self["log_rank_loss"].item()
+            return_dict["loss"] = log_rank_loss_value
+        return return_dict
 
 
 class ModelOutputs(TypedDict):
