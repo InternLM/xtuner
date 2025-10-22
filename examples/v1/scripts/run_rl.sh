@@ -30,6 +30,7 @@ infer_backend_lower=$(echo "$INFER_BACKEND" | tr '[:upper:]' '[:lower:]')
 if [ "$infer_backend_lower" = "sglang" ]; then
   export XTUNER_USE_SGLANG=1
   unset PYTORCH_CUDA_ALLOC_CONF
+  export SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN=1
 elif [ "$infer_backend_lower" = "lmdeploy" ]; then
   export XTUNER_USE_LMDEPLOY=1
   export PYTORCH_CUDA_ALLOC_CONF='expandable_segments:True'
