@@ -447,4 +447,5 @@ class InternS1VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
             template_name=self.template_name,
             hash=self.hash,
             debug=self.debug,
+            oss_time_log_thr=self.oss_time_log_thr
         )

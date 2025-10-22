@@ -202,7 +202,7 @@ def read_interns1_vl_video(
     clip=None,
     client=None,
     debug=False,
-    oss_time_log_thr=10,
+    oss_time_log_thr=10
 ):
     start_time = time.time()
     ceph_read_time = 0
