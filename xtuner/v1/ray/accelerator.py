@@ -77,7 +77,7 @@ class AcceleratorResourcesConfig(BaseModel):
         assert (kwargs["num_cpus_per_worker"] * kwargs["num_workers"]) + 10 <= available_cpus, (
             f"Not enough available CPUs in Ray cluster, available_cpus is {available_cpus} but xtuner needs {kwargs['num_cpus_per_worker'] * kwargs['num_workers'] + 10}."
         )
-        assert kwargs["cpu_memory_per_worker"] * kwargs["num_workers"] <= available_memory, (
+        assert kwargs["cpu_memory_per_worker"] * kwargs["num_workers"] + 10 * 1024**3 <= available_memory, (
             f"Not enough available memory in Ray cluster, available_memory is {available_memory} but xtuner needs {kwargs['cpu_memory_per_worker'] * kwargs['num_workers']}."
         )
 
