@@ -245,17 +245,15 @@ class TrainingWorker(SingleAcceleratorWorker):
         return loss_ctx_input_list
 
     def _update_other_log(self, other_log: dict):
-        if "max_ratio" in other_log["extra_info"]:
-            max_ratio_list = []
-            for item in other_log["extra_info"]["max_ratio"]:
-                max_ratio_list.append(torch.max(item, dim=0).values.item())
-            other_log["extra_info"]["max_ratio"] = max(max_ratio_list)
+        from xtuner.v1.model.utils import ModelForwardExtraLogInfo
 
-        if "log_rank_loss" in other_log["extra_info"]:
-            log_rank_loss_list = []
-            for item in other_log["extra_info"]["log_rank_loss"]:
-                log_rank_loss_list.append(item.item())
-            other_log["extra_info"]["loss"] = sum(log_rank_loss_list)
+        extra_info = other_log.get("extra_info", {})
+        if isinstance(extra_info, ModelForwardExtraLogInfo):
+            extra_info_dict = extra_info.get()
+        else:
+            extra_info_updated = ModelForwardExtraLogInfo(extra_info)
+            extra_info_dict = extra_info_updated.get()
+        other_log["extra_info"] = extra_info_dict
         return other_log
 
     def fit(self, data_batches: list[WorkerInputItem], rollout_idx: int):
