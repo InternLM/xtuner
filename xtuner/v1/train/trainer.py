@@ -1228,6 +1228,7 @@ class Trainer:
             "XTUNER_USE_FA3": os.getenv("XTUNER_USE_FA3"),
             "XTUNER_DISPATCHER_DEBUG": os.getenv("XTUNER_DISPATCHER_DEBUG"),
             "XTUNER_ROUTER_DEBUG": os.getenv("XTUNER_ROUTER_DEBUG"),
+            "XTUNER_DECORD_VIDEO_THREADS": os.getenv("XTUNER_DECORD_VIDEO_THREADS"),
         }
 
         for k, v in env.items():

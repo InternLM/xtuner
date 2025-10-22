@@ -9,7 +9,7 @@ import cv2
 import imageio
 import numpy as np
 from PIL import Image
-
+import os
 from xtuner.v1.utils.oss_utils import get_oss_backend
 
 
@@ -151,12 +151,13 @@ def read_frames_decord(
     min_num_frames=4,
     random_frame_num=None,
 ):
+    decord_video_threads = int(os.getenv("XTUNER_DECORD_VIDEO_THREADS", 0))
     if "s3://" in video_path:
         assert client is not None, "client should be provided for s3 backend"
         video_bytes = client.get(video_path)
-        video_reader = VideoReader(io.BytesIO(video_bytes), num_threads=1)
+        video_reader = VideoReader(io.BytesIO(video_bytes), num_threads=decord_video_threads)
     else:
-        video_reader = VideoReader(video_path, num_threads=1)
+        video_reader = VideoReader(video_path, num_threads=decord_video_threads)
     vlen = len(video_reader)
     fps = video_reader.get_avg_fps()
     duration = vlen / float(fps)

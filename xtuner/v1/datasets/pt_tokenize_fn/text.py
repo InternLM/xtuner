@@ -28,7 +28,12 @@ class PretrainTokenizeFunction(CachableTokenizeFunction[DataItem]):
         self._hash = hash
 
     def __call__(self, item: dict, **kwargs) -> DataItem | CacheItem:
-        text = item["content"]
+        if 'messages' in item:
+            messages = item['messages']
+            assert messages[0]['role'] == 'pretrain', 'messages[0] must be pretrain role'
+            text = messages[0]['content']
+        else:
+            text = item["content"]
 
         if self.add_bos_token:
             assert self.tokenizer.bos_token is not None, "tokenizer has no bos_token"
