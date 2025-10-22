@@ -2,6 +2,7 @@
 
 import hashlib
 import os
+import time
 from typing import Literal
 
 import numpy as np
@@ -27,7 +28,7 @@ from .base_mllm_tokenize_fn import (
     replace_image_token,
 )
 from .intern_s1_vl_process import build_transform, dynamic_num_patch, dynamic_preprocess
-from .intern_s1_vl_utils import InternS1VLOSSLoader, read_interns1_vl_video
+from .intern_s1_vl_utils import InternS1VLOSSLoader, pil_loader, read_interns1_vl_video
 
 
 logger = get_logger()
@@ -108,12 +109,21 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         hash: str | None = None,
         only_prompt: bool = False,
         template_name: Literal["intern-s1", "internvl-3.5"] = "intern-s1",
+        debug: bool = False,
+        oss_time_log_thr: int = 10,  # 10s
     ):
         assert isinstance(model_cfg, (InternS1BaseConfig, InternVLBaseConfig))
 
         self.oss_loader = None
+        self.debug = debug
+        self.oss_time_log_thr = oss_time_log_thr
         if oss_loader_cfg is not None:
-            self.oss_loader = InternS1VLOSSLoader(backend=oss_loader_cfg.backend, **oss_loader_cfg.backend_kwargs)
+            self.oss_loader = InternS1VLOSSLoader(
+                backend=oss_loader_cfg.backend,
+                debug=self.debug,
+                oss_time_log_thr=self.oss_time_log_thr,
+                **oss_loader_cfg.backend_kwargs,
+            )
 
         self.only_prompt = only_prompt
 
@@ -240,9 +250,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         try:
             replace_image_token(messages, self.chat_template, num_image_tokens)
             tokenized = messages.tokenize(self.tokenizer, self.chat_template)
-            input_ids = tokenized["input_ids"]
-            labels = tokenized["labels"]
-            input_ids, _ = self._truncated_input_and_labels(input_ids, labels)
+            input_ids, _ = self._truncated_input_and_labels(tokenized["input_ids"])
             assert (torch.tensor(input_ids) == self.image_token_id).sum() == sum(num_image_tokens), (
                 "ERROR: image tokens are truncated"
             )
@@ -257,10 +265,14 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
     def multi_modal_get_item(self, data_item: dict, media_root: str = "") -> InternS1DataItem:
         num_tiles = []
         images = []
+        ceph_image_times = 0.0
         for i, image_path_ in enumerate(self._image_path):
             image_path_ = get_image_path(image_path_, media_root)
             if self.oss_loader is not None and "s3://" in image_path_:
-                image = self.oss_loader(image_path_, image_type="image")
+                ceph_start_time = time.time()
+                img_value_str = self.oss_loader.client.get(image_path_)
+                ceph_image_times += time.time() - ceph_start_time
+                image = pil_loader(img_value_str)
             else:
                 assert "s3://" not in image_path_, "Please use oss_loader_cfg to load image from s3."
                 image = load_image(image_path_)
@@ -302,6 +314,10 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         assert (torch.tensor(input_ids) == self.image_token_id).sum() == sum(num_image_tokens), (
             "ERROR: image tokens are truncated"
         )
+
+        if self.debug and ceph_image_times > self.oss_time_log_thr:
+            logger.info(f"[Warning] OSS read {len(self._image_path)} image cost {ceph_image_times} seconds")
+
         ret = InternS1DataItem(
             input_ids=input_ids,
             labels=labels,
@@ -430,4 +446,5 @@ class InternS1VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
             oss_loader_cfg=self.oss_loader_cfg,
             template_name=self.template_name,
             hash=self.hash,
+            debug=self.debug,
         )

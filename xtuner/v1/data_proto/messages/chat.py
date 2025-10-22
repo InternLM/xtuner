@@ -55,7 +55,7 @@ ContentType = Union[str, List[MultModalContentType]]
 
 
 class ChatMsg(BaseModel):
-    role: Literal["assistant", "user", "system", "developer"]
+    role: Literal["assistant", "user", "system", "developer", "pretrain"]
     content: ContentType
     loss: Optional[bool] = None
     thinking: Optional[str] = None  # only for assistant
@@ -72,6 +72,8 @@ class ChatMsg(BaseModel):
             elif self.role == "user":
                 self.loss = False
             elif self.role == "assistant":
+                self.loss = True
+            elif self.role == "pretrain":
                 self.loss = True
             else:
                 raise NotImplementedError
@@ -92,6 +94,8 @@ class ChatMsg(BaseModel):
             prompt = chat_template.decorate_developer(text)
         elif self.role == "user":
             prompt = chat_template.decorate_user(text)
+        elif self.role == "pretrain":
+            prompt = text
         elif self.role == "assistant":
             prompt = ""
             if self.thinking is not None:

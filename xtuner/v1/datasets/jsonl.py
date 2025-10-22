@@ -558,7 +558,7 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
         return cast(ThreadPoolExecutor, cls._thread_executor)
 
     def _release_shared_memory(self):
-        """Release shared memory"""
+        """Release shared memory."""
         if dist.is_initialized():
             dist.barrier()
             self._shared_memory.close()
