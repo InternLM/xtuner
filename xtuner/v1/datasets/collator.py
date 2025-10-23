@@ -7,6 +7,7 @@ from xtuner.v1.utils.pad import pad_to_max_length
 
 from .data_item import DataItem, InternS1DataItem, QwenVL3DataItem
 
+
 logger = get_logger()
 
 
@@ -20,7 +21,7 @@ def fake_collator(instances: list[DataItem], **kwargs):
 
 
 def sft_llm_collator(
-        instances: list[list[DataItem]], pack_max_length: int, padding_token_idx: int, pack_to_max_length: bool = True
+    instances: list[list[DataItem]], pack_max_length: int, padding_token_idx: int, pack_to_max_length: bool = True
 ) -> list[ColateItem]:
     ret: list[ColateItem] = []
     for instance in instances:
@@ -100,10 +101,10 @@ def sft_llm_collator(
 
 
 def intern_s1_vl_sft_collator(
-        instances: list[list[InternS1DataItem]],
-        pack_max_length: int,
-        padding_token_idx: int,
-        pack_to_max_length: bool = True,
+    instances: list[list[InternS1DataItem]],
+    pack_max_length: int,
+    padding_token_idx: int,
+    pack_to_max_length: bool = True,
 ) -> list[ColateItem]:
     ret: list[ColateItem] = []
     for instance in instances:
@@ -160,11 +161,14 @@ def intern_s1_vl_sft_collator(
         for data in instance:
             num_img_tokens.extend(data.get("num_img_tokens", [0]))
 
+        pixel_values: list | torch.Tensor | None
         pixel_values = [i["pixel_values"] for i in instance if "pixel_values" in i]
         if pixel_values:
             pixel_values = torch.cat(pixel_values, dim=0)
         else:
             pixel_values = None
+
+        image_flags: list | torch.LongTensor | None
         image_flags = [i["image_flags"] for i in instance if "image_flags" in i]
 
         if image_flags:
@@ -172,7 +176,9 @@ def intern_s1_vl_sft_collator(
         else:
             image_flags = None
 
-        if image_flags or pixel_values:
+        if image_flags is not None or pixel_values is not None:
+            assert isinstance(image_flags, torch.Tensor)
+            assert isinstance(pixel_values, torch.Tensor)
             assert len(image_flags) == len(pixel_values), (
                 f"image_flags length {len(image_flags)} != instance length {len(pixel_values)}"
             )
@@ -199,10 +205,10 @@ def intern_s1_vl_sft_collator(
 
 
 def qwen3_vl_sft_collator(
-        instances: list[list[QwenVL3DataItem]],
-        pack_max_length: int,
-        padding_token_idx: int,
-        pack_to_max_length: bool = True,
+    instances: list[list[QwenVL3DataItem]],
+    pack_max_length: int,
+    padding_token_idx: int,
+    pack_to_max_length: bool = True,
 ) -> list[ColateItem]:
     ret: list[ColateItem] = []
     for instance in instances:

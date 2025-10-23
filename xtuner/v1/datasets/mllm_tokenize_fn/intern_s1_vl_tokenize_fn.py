@@ -7,7 +7,6 @@ from typing import Literal
 
 import numpy as np
 import torch
-from PIL import Image
 from pydantic import BaseModel, ConfigDict
 
 from transformers import PreTrainedTokenizer
@@ -29,6 +28,7 @@ from .base_mllm_tokenize_fn import (
 )
 from .intern_s1_vl_process import build_transform, dynamic_num_patch, dynamic_preprocess
 from .intern_s1_vl_utils import InternS1VLOSSLoader, pil_loader, read_interns1_vl_video
+
 
 logger = get_logger()
 
@@ -94,26 +94,26 @@ def replace_video_token(messages: ChatMessages, chat_template: HybridChatTemplat
 
 class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
     def __init__(
-            self,
-            tokenizer: PreTrainedTokenizer,
-            model_cfg,
-            anno_name: str,
-            max_dynamic_patch: int | None = None,
-            min_dynamic_patch: int | None = None,
-            min_num_frames: int = 4,
-            max_num_frames: int = 24,
-            data_augment: bool = False,
-            system_message: str | None = None,
-            oss_loader_cfg: OSSLoaderConfig | None = None,
-            tokenizer_hash: str | None = None,
-            max_length: int | None = None,
-            hash: str | None = None,
-            only_prompt: bool = False,
-            template_name: Literal["intern-s1", "internvl-3.5"] = "intern-s1",
-            debug: bool = False,
-            oss_time_log_thr: int = 10,  # 10s
-            add_eos_token: bool = True,  # for mllm pretrain
-            add_bos_token: bool = False,  # for mllm pretrain
+        self,
+        tokenizer: PreTrainedTokenizer,
+        model_cfg,
+        anno_name: str,
+        max_dynamic_patch: int | None = None,
+        min_dynamic_patch: int | None = None,
+        min_num_frames: int = 4,
+        max_num_frames: int = 24,
+        data_augment: bool = False,
+        system_message: str | None = None,
+        oss_loader_cfg: OSSLoaderConfig | None = None,
+        tokenizer_hash: str | None = None,
+        max_length: int | None = None,
+        hash: str | None = None,
+        only_prompt: bool = False,
+        template_name: Literal["intern-s1", "internvl-3.5"] = "intern-s1",
+        debug: bool = False,
+        oss_time_log_thr: int = 10,  # 10s
+        add_eos_token: bool = True,  # for mllm pretrain
+        add_bos_token: bool = False,  # for mllm pretrain
     ):
         assert isinstance(model_cfg, (InternS1BaseConfig, InternVLBaseConfig))
 
@@ -155,7 +155,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
             f"use_thumbnail: {self.use_thumbnail} data_aug: {self.data_augment} for training."
         )
         self.downsample_ratio = model_cfg.downsample_ratio
-        self.num_image_token = int((self.image_size // self.patch_size) ** 2 * (self.downsample_ratio ** 2))
+        self.num_image_token = int((self.image_size // self.patch_size) ** 2 * (self.downsample_ratio**2))
         self.system_message = system_message
 
         # Note: 比较重要，防止改了参数但是没有重新 cache
@@ -484,7 +484,7 @@ class InternS1VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
     template_name: Literal["intern-s1", "internvl-3.5"] = "intern-s1"
 
     def build(
-            self, tokenizer, tokenizer_hash: str | None = None, anno_name: str = "", **kwargs
+        self, tokenizer, tokenizer_hash: str | None = None, anno_name: str = "", **kwargs
     ) -> InternS1VLTokenizeFunction:
         return InternS1VLTokenizeFunction(
             tokenizer,
@@ -504,5 +504,5 @@ class InternS1VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
             debug=self.debug,
             oss_time_log_thr=self.oss_time_log_thr,
             add_eos_token=self.add_eos_token,  # for mllm pretrain
-            add_bos_token=self.add_bos_token  # for mllm pretrain
+            add_bos_token=self.add_bos_token,  # for mllm pretrain
         )
