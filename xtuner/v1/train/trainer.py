@@ -257,6 +257,7 @@ class Trainer:
         backend: str | None = None,
         debug_skip_save: bool = False,
         trainer_cfg: TrainerConfig | None = None,
+        debug_skip_save: bool = False,
     ):
         self._dataloader_config = dataloader_cfg
 
@@ -386,6 +387,10 @@ class Trainer:
 
         if self._can_save_hf and self._hf_interval is None:
             self._hf_interval = self.total_step
+        
+        if debug_skip_save:
+            self._hf_interval = None
+            self._checkpoint_interval = None
 
         if debug_skip_save:
             self._hf_interval = None
