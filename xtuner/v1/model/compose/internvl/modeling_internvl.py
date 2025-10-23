@@ -22,8 +22,7 @@ class InternVLForConditionalGeneration(InternS1ForConditionalGeneration):
         self.config = config
         self.select_layer = config.vision_feature_layer
         self.downsample_ratio = config.downsample_ratio
-        image_size = config.vision_config.image_size[0]
-        self.fake_pixel_values = torch.randn(1, 3, image_size, image_size)
+        self.image_size = config.vision_config.image_size[0]
 
         vision_config = config.vision_config
         text_config = config.text_config
