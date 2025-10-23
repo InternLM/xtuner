@@ -88,7 +88,7 @@ def read_frames_folder(
     min_num_frames=4,
     random_frame_num=None,
 ):
-    ceph_read_time = 0
+    oss_read_time = 0
     if "s3://" in video_path:
         assert client is not None, "client should be provided for s3 backend"
         image_list = sort_frames(client.list(video_path))
@@ -98,7 +98,7 @@ def read_frames_folder(
         for image in image_list:
             start_time = time.time()
             image_byte = client.get(image)
-            ceph_read_time += time.time() - start_time
+            oss_read_time += time.time() - start_time
             frame = Image.open(io.BytesIO(image_byte))
             frames.append(frame)
     else:
@@ -118,7 +118,7 @@ def read_frames_folder(
     if vlen > t_num_frames:
         frame_indices = get_frame_indices(t_num_frames, vlen, sample=sample, fix_start=fix_start)
         frames = [frames[i] for i in frame_indices]
-    return frames, ceph_read_time, vlen
+    return frames, oss_read_time, vlen
 
 
 def read_frames_gif(
@@ -159,11 +159,11 @@ def read_frames_decord(
 ):
     decord_video_threads = int(os.getenv("XTUNER_DECORD_VIDEO_THREADS", 0))
     start_time = time.time()
-    ceph_read_time = 0
+    oss_read_time = 0
     if "s3://" in video_path:
         assert client is not None, "client should be provided for s3 backend"
         video_bytes = client.get(video_path)
-        ceph_read_time = time.time() - start_time
+        oss_read_time = time.time() - start_time
         video_reader = VideoReader(io.BytesIO(video_bytes), num_threads=decord_video_threads)
         start_time = time.time()
     else:
@@ -190,7 +190,7 @@ def read_frames_decord(
     frames = video_reader.get_batch(frame_indices).asnumpy()  # (T, H, W, C), np.uint8
     video_get_batch_time = time.time() - start_time
     frames = [Image.fromarray(frames[i]) for i in range(frames.shape[0])]
-    return frames, ceph_read_time, video_get_batch_time, vlen
+    return frames, oss_read_time, video_get_batch_time, vlen
 
 
 def read_interns1_vl_video(
@@ -205,11 +205,11 @@ def read_interns1_vl_video(
     oss_time_log_thr=10
 ):
     start_time = time.time()
-    ceph_read_time = 0
+    oss_read_time = 0
     vlen = 0
     video_get_batch_time = 0
     if path.endswith("/"):
-        frames, ceph_read_time, vlen = read_frames_folder(
+        frames, oss_read_time, vlen = read_frames_folder(
             path,
             num_frames=max_num_frames,
             min_num_frames=min_num_frames,
@@ -237,7 +237,7 @@ def read_interns1_vl_video(
         or path.endswith(".rmvb")
         or path.endswith(".ts")
     ):
-        frames, ceph_read_time, video_get_batch_time, vlen = read_frames_decord(
+        frames, oss_read_time, video_get_batch_time, vlen = read_frames_decord(
             path,
             num_frames=max_num_frames,
             min_num_frames=min_num_frames,
@@ -252,7 +252,7 @@ def read_interns1_vl_video(
     if debug and end_time > oss_time_log_thr:
         print(
             f"[Warning] OSS read video {path} cost {end_time} seconds, "
-            f"ceph_read_time {ceph_read_time}, video_get_batch_time {video_get_batch_time}, vlen {vlen}"
+            f"oss_read_time {oss_read_time}, video_get_batch_time {video_get_batch_time}, vlen {vlen}"
         )
     return frames
 

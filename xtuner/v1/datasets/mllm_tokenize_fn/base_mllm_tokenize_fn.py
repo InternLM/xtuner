@@ -55,6 +55,8 @@ def replace_image_token(
 ):
     current_image_idx = 0
     for msg in messages.messages:
+        if msg.role == "pretrain":
+            assert len(messages.messages) == 1, "pretrain message should only have one message"
         if msg.role == "user" or msg.role == "pretrain":
             content = msg.content
             if isinstance(content, list):

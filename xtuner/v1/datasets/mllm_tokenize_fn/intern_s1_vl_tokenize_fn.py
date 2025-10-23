@@ -30,7 +30,6 @@ from .base_mllm_tokenize_fn import (
 from .intern_s1_vl_process import build_transform, dynamic_num_patch, dynamic_preprocess
 from .intern_s1_vl_utils import InternS1VLOSSLoader, pil_loader, read_interns1_vl_video
 
-
 logger = get_logger()
 
 
@@ -66,7 +65,9 @@ def replace_video_token(messages: ChatMessages, chat_template: HybridChatTemplat
     current_image_idx = 0
     n_frames = len(num_image_token_list)
     for msg in messages.messages:
-        if msg.role == "user":
+        if msg.role == "pretrain":
+            assert len(messages.messages) == 1, "pretrain message should only have one message"
+        if msg.role == "user" or msg.role == "pretrain":
             content = msg.content
             if isinstance(content, list):
                 for c in content:
@@ -93,24 +94,24 @@ def replace_video_token(messages: ChatMessages, chat_template: HybridChatTemplat
 
 class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
     def __init__(
-        self,
-        tokenizer: PreTrainedTokenizer,
-        model_cfg,
-        anno_name: str,
-        max_dynamic_patch: int | None = None,
-        min_dynamic_patch: int | None = None,
-        min_num_frames: int = 4,
-        max_num_frames: int = 24,
-        data_augment: bool = False,
-        system_message: str | None = None,
-        oss_loader_cfg: OSSLoaderConfig | None = None,
-        tokenizer_hash: str | None = None,
-        max_length: int | None = None,
-        hash: str | None = None,
-        only_prompt: bool = False,
-        template_name: Literal["intern-s1", "internvl-3.5"] = "intern-s1",
-        debug: bool = False,
-        oss_time_log_thr: int = 10,  # 10s
+            self,
+            tokenizer: PreTrainedTokenizer,
+            model_cfg,
+            anno_name: str,
+            max_dynamic_patch: int | None = None,
+            min_dynamic_patch: int | None = None,
+            min_num_frames: int = 4,
+            max_num_frames: int = 24,
+            data_augment: bool = False,
+            system_message: str | None = None,
+            oss_loader_cfg: OSSLoaderConfig | None = None,
+            tokenizer_hash: str | None = None,
+            max_length: int | None = None,
+            hash: str | None = None,
+            only_prompt: bool = False,
+            template_name: Literal["intern-s1", "internvl-3.5"] = "intern-s1",
+            debug: bool = False,
+            oss_time_log_thr: int = 10,  # 10s
     ):
         assert isinstance(model_cfg, (InternS1BaseConfig, InternVLBaseConfig))
 
@@ -141,7 +142,6 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         self.min_dynamic_patch = min_num
         self.min_num_frames = min_num_frames
         self.max_num_frames = max_num_frames
-        self.image_token_id = model_cfg.image_token_id
 
         self.dynamic_image_size = model_cfg.dynamic_image_size
         self.use_thumbnail = model_cfg.use_thumbnail
@@ -153,7 +153,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
             f"use_thumbnail: {self.use_thumbnail} data_aug: {self.data_augment} for training."
         )
         self.downsample_ratio = model_cfg.downsample_ratio
-        self.num_image_token = int((self.image_size // self.patch_size) ** 2 * (self.downsample_ratio**2))
+        self.num_image_token = int((self.image_size // self.patch_size) ** 2 * (self.downsample_ratio ** 2))
         self.system_message = system_message
 
         # Note: 比较重要，防止改了参数但是没有重新 cache
@@ -166,6 +166,11 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         self.chat_template = CHAT_TEMPLATE_MAP[template_name]
         if system_message is not None:
             self.chat_template.default_system = system_message
+
+        self.img_start_token_id = tokenizer.convert_tokens_to_ids(self.chat_template.image_start_token)
+        self.img_context_token_id = tokenizer.convert_tokens_to_ids(self.chat_template.image_context_token)
+        self.video_context_token_id = tokenizer.convert_tokens_to_ids(self.chat_template.video_context_token)
+        self.img_end_token_id = tokenizer.convert_tokens_to_ids(self.chat_template.image_end_token)
 
         # 必须要最后调用
         super().__init__(tokenizer, self.chat_template, max_length, tokenizer_hash, hash)
@@ -251,7 +256,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
             replace_image_token(messages, self.chat_template, num_image_tokens)
             tokenized = messages.tokenize(self.tokenizer, self.chat_template)
             input_ids, _ = self._truncated_input_and_labels(tokenized["input_ids"])
-            assert (torch.tensor(input_ids) == self.image_token_id).sum() == sum(num_image_tokens), (
+            assert (torch.tensor(input_ids) == self.img_context_token_id).sum() == sum(num_image_tokens), (
                 "ERROR: image tokens are truncated"
             )
             return {"num_tokens": len(input_ids)}
@@ -265,13 +270,13 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
     def multi_modal_get_item(self, data_item: dict, media_root: str = "") -> InternS1DataItem:
         num_tiles = []
         images = []
-        ceph_image_times = 0.0
+        oss_image_times = 0.0
         for i, image_path_ in enumerate(self._image_path):
             image_path_ = get_image_path(image_path_, media_root)
             if self.oss_loader is not None and "s3://" in image_path_:
-                ceph_start_time = time.time()
+                oss_start_time = time.time()
                 img_value_str = self.oss_loader.client.get(image_path_)
-                ceph_image_times += time.time() - ceph_start_time
+                oss_image_times += time.time() - oss_start_time
                 image = pil_loader(img_value_str)
             else:
                 assert "s3://" not in image_path_, "Please use oss_loader_cfg to load image from s3."
@@ -311,12 +316,21 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         input_ids = tokenized["input_ids"]
         labels = tokenized["labels"]
         input_ids, labels = self._truncated_input_and_labels(input_ids, labels)
-        assert (torch.tensor(input_ids) == self.image_token_id).sum() == sum(num_image_tokens), (
+        assert (torch.tensor(input_ids) == self.img_context_token_id).sum() == sum(num_image_tokens), (
             "ERROR: image tokens are truncated"
         )
 
-        if self.debug and ceph_image_times > self.oss_time_log_thr:
-            logger.info(f"[Warning] OSS read {len(self._image_path)} image cost {ceph_image_times} seconds")
+        is_pretrain = False
+        if len(messages.messages) == 1 and messages.messages[0].role == "pretrain":
+            is_pretrain = True
+
+        if is_pretrain:
+            labels[labels == self.img_start_token_id] = -100
+            labels[labels == self.img_context_token_id] = -100
+            labels[labels == self.img_end_token_id] = -100
+
+        if self.debug and oss_image_times > self.oss_time_log_thr:
+            logger.info(f"[Warning] OSS read {len(self._image_path)} image cost {oss_image_times} seconds")
 
         ret = InternS1DataItem(
             input_ids=input_ids,
@@ -343,10 +357,8 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         try:
             replace_video_token(messages, self.chat_template, num_image_tokens)
             tokenized = messages.tokenize(self.tokenizer, self.chat_template)
-            input_ids = tokenized["input_ids"]
-            labels = tokenized["labels"]
-            input_ids, _ = self._truncated_input_and_labels(input_ids, labels)
-            assert (torch.tensor(input_ids) == self.image_token_id).sum() == sum(num_image_tokens), (
+            input_ids, _ = self._truncated_input_and_labels(tokenized["input_ids"])
+            assert (torch.tensor(input_ids) == self.video_context_token_id).sum() == sum(num_image_tokens), (
                 "ERROR: video tokens are truncated"
             )
             return {"num_tokens": len(input_ids)}
@@ -396,9 +408,19 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         input_ids = tokenized["input_ids"]
         labels = tokenized["labels"]
         input_ids, labels = self._truncated_input_and_labels(input_ids, labels)
-        assert (torch.tensor(input_ids) == self.image_token_id).sum() == sum(num_image_tokens), (
+        assert (torch.tensor(input_ids) == self.video_context_token_id).sum() == sum(num_image_tokens), (
             "ERROR: video tokens are truncated"
         )
+
+        is_pretrain = False
+        if len(messages.messages) == 1 and messages.messages[0].role == "pretrain":
+            is_pretrain = True
+
+        if is_pretrain:
+            labels[labels == self.img_start_token_id] = -100
+            labels[labels == self.video_context_token_id] = -100
+            labels[labels == self.img_end_token_id] = -100
+
         ret = InternS1DataItem(
             input_ids=input_ids,
             labels=labels,
@@ -429,7 +451,7 @@ class InternS1VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
     template_name: Literal["intern-s1", "internvl-3.5"] = "intern-s1"
 
     def build(
-        self, tokenizer, tokenizer_hash: str | None = None, anno_name: str = "", **kwargs
+            self, tokenizer, tokenizer_hash: str | None = None, anno_name: str = "", **kwargs
     ) -> InternS1VLTokenizeFunction:
         return InternS1VLTokenizeFunction(
             tokenizer,
