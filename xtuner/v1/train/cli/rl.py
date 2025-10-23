@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from typing import Annotated
 
@@ -21,7 +22,10 @@ def main(
     config: Annotated[Path, Parameter(group=Group("config-path", sort_key=0))],
 ):
     if not ray.is_initialized():
-        ray.init()
+        master_addr = os.getenv("RAY_MASTER_ADDR", "127.0.0.1")
+        client_port = os.getenv("RAY_CLIENT_PORT", "10001")
+        ray_head_address = f"ray://{master_addr}:{client_port}"
+        ray.init(address=ray_head_address)
     trainer_cfg = Config.fromfile(config)["trainer"]
     trainer = RLTrainer.from_config(trainer_cfg)
     trainer.fit()
