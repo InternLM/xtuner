@@ -517,7 +517,7 @@ class HardPackDataset(_LegacySoftPackDataset):
         ...
 
 
-class MLLMPretrainHybridPacking(_LegacySoftPackDataset):
+class MLLMPretrainHybridPackDataset(_LegacySoftPackDataset):
     def __init__(
             self,
             datasets: list[JsonlDataset],

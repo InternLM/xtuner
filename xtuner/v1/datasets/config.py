@@ -26,7 +26,7 @@ from .collator import (
 )
 from .dataloader import BaseDataloader, Dataloader
 from .jsonl import JsonlDataset
-from .packing import ExpandSoftPackDataset, HardPackDataset, _LegacySoftPackDataset
+from .packing import ExpandSoftPackDataset, HardPackDataset, _LegacySoftPackDataset, MLLMPretrainHybridPackDataset
 from .sampler import LengthGroupedSampler, ParallelSampler
 from .utils import CachableTokenizeFunction, tokenizer_xxhash
 from .vlm_jsonl import VLMJsonlDataset
@@ -145,10 +145,21 @@ def build_dataloader(
         num_tokens = sum(dset.num_tokens.sum() for dset in datasets)
         logger.debug(f"[Dataset] {num_tokens} tokens.")
 
-    dataset: ExpandSoftPackDataset | _LegacySoftPackDataset | ConcatDataset | HardPackDataset
+    dataset: ExpandSoftPackDataset | _LegacySoftPackDataset | ConcatDataset | HardPackDataset | MLLMPretrainHybridPackDataset
     if dataloader_config.pack_level == "soft":
         logger.info("[Dataset] Start packing data of ExpandSoftPackDataset.")
         dataset = ExpandSoftPackDataset(
+            datasets,
+            pack_max_length=dataloader_config.pack_max_length,
+            pack_chunk_size=dataloader_config.pack_chunk_size,
+            pack_workers=dataloader_config.pack_workers,
+            global_pack=dataloader_config.global_pack,
+            pack_extra_buffer_size=dataloader_config.pack_extra_buffer_size,
+            seed=seed,
+        )
+    if dataloader_config.pack_level == "mllm_hybrid":
+        logger.info("[Dataset] Start packing data of MLLMPretrainHybridPackDataset.")
+        dataset = MLLMPretrainHybridPackDataset(
             datasets,
             pack_max_length=dataloader_config.pack_max_length,
             pack_chunk_size=dataloader_config.pack_chunk_size,
@@ -187,7 +198,7 @@ def build_dataloader(
     sampler: LengthGroupedSampler | ParallelSampler | RandomSampler | SequentialSampler
     if dataloader_config.group_by_length:
         assert shuffle, "Currently only shuffling is supported for LengthGroupedSampler."
-        assert isinstance(dataset, (ExpandSoftPackDataset, _LegacySoftPackDataset, HardPackDataset)), (
+        assert isinstance(dataset, (ExpandSoftPackDataset, _LegacySoftPackDataset, HardPackDataset, MLLMPretrainHybridPackDataset)), (
             "Internal Error, LengthGroupedSampler requires ExpandSoftPackDataset or _LegacySoftPackDataset, "
             f"but got {type(dataset)}"
         )
@@ -253,7 +264,7 @@ class DataloaderConfig(BaseDataloaderConfig):
     ] = "sft_llm_collator"
     pack_to_max_length: Annotated[bool, Parameter(help="whether to pack to max length")] = True
     pack_level: Annotated[
-        Literal["soft", "none", "__legacy", "hard"], Parameter(help="__legacy is only for debug")
+        Literal["soft", "none", "__legacy", "hard", 'mllm_hybrid'], Parameter(help="__legacy is only for debug")
     ] = "soft"
     pack_max_length: Annotated[int, Parameter(help="pack max length")] = 32768
     pack_chunk_size: Annotated[int, Parameter(help="pack chunk size")] = 10000
