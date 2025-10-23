@@ -16,6 +16,7 @@ from .mllm_tokenize_fn import (
     Qwen3VLTokenizeFnConfig,
     Qwen3VLTokenizeFunction,
 )
+from .pt_tokenize_fn import PretrainTokenizeFunctionConfig, PretrainTokenizeFunction
 from .packing import ExpandSoftPackDataset, _LegacySoftPackDataset, HardPackDataset, MLLMPretrainHybridPackDataset
 from .resume import get_dataloader_state, load_dataloader_state
 from .rl_tokenize_fn import RLTextTokenizeFnConfig
@@ -35,6 +36,8 @@ __all__ = [
     "ExpandSoftPackDataset",
     "HardPackDataset",
     "MLLMPretrainHybridPackDataset",
+    "PretrainTokenizeFunctionConfig",
+    "PretrainTokenizeFunction",
     "ParallelSampler",
     "LengthGroupedSampler",
     "build_datasets",

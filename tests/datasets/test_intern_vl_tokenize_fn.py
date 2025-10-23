@@ -1,7 +1,7 @@
 import os
 from unittest import TestCase
 import torch
-from xtuner.v1.datasets import InternS1VLTokenizeFnConfig
+from xtuner.v1.datasets import InternS1VLTokenizeFnConfig, PretrainTokenizeFunction
 from transformers import AutoTokenizer, AutoProcessor
 import json
 from xtuner.v1.model import InternVL3P5Dense8BConfig
@@ -139,6 +139,7 @@ class TestMLLMTokenizeFn(TestCase):
 
     def test_intern_vl_pretrain_pure_text(self):
         data_path = 'tests/resource/pretrain_example_data.jsonl'
+        tokenize_fn = PretrainTokenizeFunction(self.tokenizer)
         total_step = 5
         with open(data_path, encoding='utf-8') as f:
             for i, line in enumerate(f):
@@ -146,8 +147,8 @@ class TestMLLMTokenizeFn(TestCase):
                     break
                 raw_data = json.loads(line)
 
-                ret = self.tokenize_fn(raw_data)
-                input_ids_xtuner = ret['input_ids']
+                ret = tokenize_fn(raw_data)
+                input_ids_xtuner = ret['input_ids'][:-1]  # remove eos_token_id
 
                 content = raw_data['messages'][0]['content']
                 input_ids_hf = self.tokenizer(content)['input_ids']
@@ -171,7 +172,7 @@ class TestMLLMTokenizeFn(TestCase):
                 ground_truth_content = raw_data['messages'][0]
                 for item in ground_truth_content['content']:
                     if item['type'] == 'text':
-                        ground_truth_str = item['text']
+                        ground_truth_str = item['text'] + "<|im_end|>"
                 self.assertEqual(input_xtuner_str.strip(), ground_truth_str.strip())
                 self.assertTrue((labels_xtuner == self.tokenize_fn.img_context_token_id).sum() == 0)
 

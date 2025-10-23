@@ -196,6 +196,8 @@ class BaseMLLMTokenizeFnConfig(BaseModel):
     hash: str | None = None
     debug: bool = False
     oss_time_log_thr: int = 10  # 10s
+    add_eos_token: bool = True  # for mllm pretrain
+    add_bos_token: bool = False  # for mllm pretrain
 
     def build(
         self, tokenizer, tokenizer_hash: str | None = None, anno_name: str = "", **kwargs
