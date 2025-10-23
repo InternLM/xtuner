@@ -29,8 +29,16 @@ from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.loss import BalancingLoss, CELossContext, ZLoss
 from xtuner.v1.model.base import BaseModel, ModelOutputs, TransformerConfig
-from xtuner.v1.model.utils import checkpoint_wrapper, module_dict_repr
-from xtuner.v1.module import GreedyRouterConfig, LMHead, NoAuxRouter, NoAuxRouterConfig, RMSNorm, RotaryEmbedding
+from xtuner.v1.model.utils import ModelForwardExtraLogInfo, checkpoint_wrapper, module_dict_repr
+from xtuner.v1.module import (
+    GreedyRouterConfig,
+    LMHead,
+    NoAuxRouter,
+    NoAuxRouterConfig,
+    RMSNorm,
+    RotaryEmbeddingProtocol,
+    get_rope_embedding,
+)
 from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayer
 from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEActFnConfig, MoEBlock, MoEDecoderLayer
 from xtuner.v1.utils import (
@@ -262,6 +270,7 @@ class MoE(BaseModel):
             )
             if loss_ctx is None:
                 raise NotImplementedError("loss_ctx must be provided for intra-layer bsz > 1")
+
             return self._micro_batch_forward(
                 seq_ctx_list=seq_ctx,
                 loss_ctx_list=loss_ctx,
@@ -296,6 +305,7 @@ class MoE(BaseModel):
                 hidden_states = ctx.inputs_embeds
 
             # create position embeddings to be shared across the decoder layers
+            assert position_ids is not None
             position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
             hidden_states_list.append(hidden_states)
@@ -375,18 +385,18 @@ class MoE(BaseModel):
         # Process final outputs for each micro-batch
         loss_list: list[torch.Tensor] = []
         logits_list: list[torch.Tensor] = []
-        extra_info_list: list[dict] = []
+        moe_extra_info = ModelForwardExtraLogInfo()
         for hidden_states, loss_ctx_single in zip(hidden_states_list, loss_ctx_list):
             loss, (logits, extra_info) = self.lm_head(hidden_states, loss_ctx_single)  # type: ignore
             loss_list.append(loss)
             if logits is not None:
                 logits_list.append(logits)
             if extra_info:
-                extra_info_list.append(extra_info)
+                moe_extra_info.append(extra_info)
 
         # Aggregate losses (mean across micro-batches)
         output["loss"] = torch.stack(loss_list).sum() if loss_list else None
-        output["extra_info"] = extra_info_list
+        output["extra_info"] = moe_extra_info
 
         # Handle router results for all micro-batches
         all_router_logits = []
@@ -462,6 +472,7 @@ class MoE(BaseModel):
             hidden_states = seq_ctx.inputs_embeds
 
         # create position embeddings to be shared across the decoder layers
+        assert position_ids is not None
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
         output: dict = {}  # type: ignore
@@ -507,9 +518,10 @@ class MoE(BaseModel):
 
         hidden_states = self.norm(hidden_states)
 
-        loss, logits = self.lm_head(hidden_states, loss_ctx)  # type: ignore
+        loss, (logits, extra_info) = self.lm_head(hidden_states, loss_ctx)  # type: ignore
         output["loss"] = loss
         output["logits"] = logits
+        output["extra_info"] = extra_info
 
         router_logits_list = list(output["router_logits"].values())  # type: ignore
         router_logits = self._select_non_pad_router_logits(router_logits_list, seq_ctx.mask)
@@ -540,7 +552,6 @@ class MoE(BaseModel):
         else:
             output["router_logits"] = None
 
-        output["extra_info"] = {}
         return MoEModelOutputs(**output)  # type: ignore[typeddict-item]
 
     def build_embeddings(self, config: MoEConfig):
@@ -593,8 +604,8 @@ class MoE(BaseModel):
         layers.__class__.__repr__ = module_dict_repr  # type: ignore[method-assign]
         return layers
 
-    def build_rotary_embedding(self, config: MoEConfig) -> RotaryEmbedding:
-        return RotaryEmbedding(config=config)
+    def build_rotary_embedding(self, config: MoEConfig) -> RotaryEmbeddingProtocol:
+        return get_rope_embedding(config=config)
 
     @override
     def from_hf(self, hf_path: str | Path, strict: bool = True) -> tuple:

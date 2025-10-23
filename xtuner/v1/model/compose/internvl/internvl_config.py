@@ -63,6 +63,7 @@ class InternVLProjectorConfig(BaseModel):
     vision_hidden_size: int = 1024
     text_hidden_size: int = 4096
     downsample_ratio: float = 0.5
+    hidden_act: str = "gelu"
     float8_cfg: Optional["Float8Config"] = None
 
     def build(self):
@@ -86,7 +87,6 @@ class InternVLBaseConfig(BaseModel):
     use_thumbnail: bool = True
     min_dynamic_patch: int = 1
     max_dynamic_patch: int = 12
-    projector_hidden_act: str = "gelu"
     image_token_id: int = 151671
     freeze_vision: bool = False
     freeze_projector: bool = False

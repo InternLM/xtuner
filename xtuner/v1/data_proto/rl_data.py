@@ -67,7 +67,6 @@ class RLRolloutResponseItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
     response: Optional[str] = None
     response_ids: Optional[List[int]] = None
-    response_len: Optional[List[int]] = None
     num_return_tokens: Optional[int] = None
     finish_reason: Optional[str] = None
     logprobs: Optional[List[float]] = None

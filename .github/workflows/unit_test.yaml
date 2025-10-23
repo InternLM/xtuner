@@ -30,4 +30,4 @@ jobs:
     - name: unit-test
       run: |
         export PYTHONPYCACHEPREFIX=/tmp
-        python ci/scripts/run_yidian.py "$IMAGE" "$CI_IMPORT" "export PYTHONPATH=$PWD:$LM_DEPLOY:$PYTHONPATH; pytest tests --ignore=./tests/module/dispatcher/test_deepep.py"
+        python ci/scripts/xtuner_unittest.py "$IMAGE" "$CI_IMPORT" "export PYTHONPATH=$PWD:$LM_DEPLOY:$PYTHONPATH; pytest tests --ignore=./tests/module/dispatcher/test_deepep.py"
