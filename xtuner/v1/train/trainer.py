@@ -1019,6 +1019,7 @@ class Trainer:
         self.logger.info(
             f"Step {self.cur_step}/{self.total_step} data_time: {data_time:.4f} lr: {lr:.6f} time: {step_time:.4f} "
             f"text_tokens: {step_consumed_tokens} "
+            f"total_consumed_tokens: {total_consumed_tokens} "
             f"{loss_log_str} "
             f"max_memory: {max_memory / (1024**3):.2f} GB "
             f"reserved_memory: {reserved_memory / (1024**3):.2f} GB "
@@ -1035,6 +1036,7 @@ class Trainer:
             "time/train_time": round(train_time, 4),
             "time/eta_seconds": round(eta_seconds, 1),
             "runtime_info/text_tokens": step_consumed_tokens,
+            "runtime_info/total_consumed_tokens": total_consumed_tokens,
             "runtime_info/tgs": tgs,
             "runtime_info/e2e_tgs": e2e_tgs,
             "memory/max_memory_GB": round(max_memory / (1024**3), 3),
