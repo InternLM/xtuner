@@ -7,7 +7,6 @@ from xtuner.v1.utils.pad import pad_to_max_length
 
 from .data_item import DataItem, InternS1DataItem, QwenVL3DataItem
 
-
 logger = get_logger()
 
 
@@ -21,7 +20,7 @@ def fake_collator(instances: list[DataItem], **kwargs):
 
 
 def sft_llm_collator(
-    instances: list[list[DataItem]], pack_max_length: int, padding_token_idx: int, pack_to_max_length: bool = True
+        instances: list[list[DataItem]], pack_max_length: int, padding_token_idx: int, pack_to_max_length: bool = True
 ) -> list[ColateItem]:
     ret: list[ColateItem] = []
     for instance in instances:
@@ -101,10 +100,10 @@ def sft_llm_collator(
 
 
 def intern_s1_vl_sft_collator(
-    instances: list[list[InternS1DataItem]],
-    pack_max_length: int,
-    padding_token_idx: int,
-    pack_to_max_length: bool = True,
+        instances: list[list[InternS1DataItem]],
+        pack_max_length: int,
+        padding_token_idx: int,
+        pack_to_max_length: bool = True,
 ) -> list[ColateItem]:
     ret: list[ColateItem] = []
     for instance in instances:
@@ -168,13 +167,15 @@ def intern_s1_vl_sft_collator(
             pixel_values = None
         image_flags = [i["image_flags"] for i in instance if "image_flags" in i]
 
-        assert len(image_flags) == len(instance), (
-            f"image_flags length {len(image_flags)} != instance length {len(instance)}"
-        )
         if image_flags:
             image_flags = torch.cat(image_flags, dim=0)  # type: ignore
         else:
             image_flags = None
+
+        if image_flags or pixel_values:
+            assert len(image_flags) == len(pixel_values), (
+                f"image_flags length {len(image_flags)} != instance length {len(pixel_values)}"
+            )
 
         seq_ctx = SequenceContext(
             input_ids=input_ids,  # type: ignore
@@ -198,10 +199,10 @@ def intern_s1_vl_sft_collator(
 
 
 def qwen3_vl_sft_collator(
-    instances: list[list[QwenVL3DataItem]],
-    pack_max_length: int,
-    padding_token_idx: int,
-    pack_to_max_length: bool = True,
+        instances: list[list[QwenVL3DataItem]],
+        pack_max_length: int,
+        padding_token_idx: int,
+        pack_to_max_length: bool = True,
 ) -> list[ColateItem]:
     ret: list[ColateItem] = []
     for instance in instances:

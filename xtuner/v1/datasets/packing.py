@@ -554,8 +554,11 @@ class MLLMPretrainHybridPackDataset(_LegacySoftPackDataset):
                 hard_pack_groups.append(dset)
 
         if global_pack:
-            num_tokens = [np.concatenate([dset.num_tokens for dset in hard_pack_groups])]
-            hard_pack_datasets = [ConcatDataset(datasets)]
+
+            hard_pack_datasets = []
+            if len(hard_pack_groups) > 0:
+                num_tokens = [np.concatenate([dset.num_tokens for dset in hard_pack_groups])]
+                hard_pack_datasets = [ConcatDataset(datasets)]
 
             pack_infos_list = []
             new_dataset_ids = -1
@@ -563,15 +566,16 @@ class MLLMPretrainHybridPackDataset(_LegacySoftPackDataset):
                 new_dataset_ids += 1
                 _infos = self.get_hard_pack_infos(dataset, new_dataset_ids, num_tokens[i])
                 pack_infos_list.extend(_infos)
-
             hard_pack_len = len(pack_infos_list)
 
-            num_tokens = [np.concatenate([dset.num_tokens for dset in soft_pack_groups])]
-            soft_pack_datasets = [ConcatDataset(datasets)]
-            for i, dataset in enumerate(soft_pack_datasets):
-                new_dataset_ids += 1
-                _infos = self.get_soft_pack_infos(dataset, new_dataset_ids, num_tokens[i])
-                pack_infos_list.extend(_infos)
+            soft_pack_datasets = []
+            if len(soft_pack_groups) > 0:
+                num_tokens = [np.concatenate([dset.num_tokens for dset in soft_pack_groups])]
+                soft_pack_datasets = [ConcatDataset(datasets)]
+                for i, dataset in enumerate(soft_pack_datasets):
+                    new_dataset_ids += 1
+                    _infos = self.get_soft_pack_infos(dataset, new_dataset_ids, num_tokens[i])
+                    pack_infos_list.extend(_infos)
             pack_infos = Dataset.from_list(pack_infos_list)
 
         else:
@@ -610,7 +614,7 @@ class MLLMPretrainHybridPackDataset(_LegacySoftPackDataset):
                 }
             )
         assert (total_num_tokens := sum(i["num_tokens"] for i in packed_list)) == self.pack_max_length, (
-               f"Internal Error! Found size: {total_num_tokens} mismatch after hard packing."
+            f"Internal Error! Found size: {total_num_tokens} mismatch after hard packing."
         )
         return packed_list
 

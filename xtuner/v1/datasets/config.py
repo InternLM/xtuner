@@ -157,7 +157,7 @@ def build_dataloader(
             pack_extra_buffer_size=dataloader_config.pack_extra_buffer_size,
             seed=seed,
         )
-    if dataloader_config.pack_level == "mllm_hybrid":
+    elif dataloader_config.pack_level == "mllm_hybrid":
         logger.info("[Dataset] Start packing data of MLLMPretrainHybridPackDataset.")
         dataset = MLLMPretrainHybridPackDataset(
             datasets,
@@ -326,10 +326,21 @@ class DataloaderConfig(BaseDataloaderConfig):
             logger.debug(f"[Dataset] {num_tokens} tokens.")
 
         with profile_time_and_memory("[Pack Datasets]"):
-            dataset: ExpandSoftPackDataset | _LegacySoftPackDataset | ConcatDataset | HardPackDataset
+            dataset: ExpandSoftPackDataset | _LegacySoftPackDataset | ConcatDataset | HardPackDataset | MLLMPretrainHybridPackDataset
             if self.pack_level == "soft":
                 logger.info("[Dataset] Start packing data of ExpandSoftPackDataset.")
                 dataset = ExpandSoftPackDataset(
+                    datasets,
+                    pack_max_length=self.pack_max_length,
+                    pack_chunk_size=self.pack_chunk_size,
+                    pack_workers=self.pack_workers,
+                    global_pack=self.global_pack,
+                    pack_extra_buffer_size=self.pack_extra_buffer_size,
+                    seed=seed,
+                )
+            elif self.pack_level == "mllm_hybrid":
+                logger.info("[Dataset] Start packing data of MLLMPretrainHybridPackDataset.")
+                dataset = MLLMPretrainHybridPackDataset(
                     datasets,
                     pack_max_length=self.pack_max_length,
                     pack_chunk_size=self.pack_chunk_size,
