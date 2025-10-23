@@ -216,7 +216,6 @@ class LMDeployWorker(RolloutWorker):
         Returns:
             Namespace: A namespace object containing the server configuration.
         """
-        from lmdeploy import PytorchEngineConfig, TurbomindEngineConfig
 
         accelerator_to_device_type = {
             "GPU": "cuda",
@@ -232,30 +231,27 @@ class LMDeployWorker(RolloutWorker):
         tp_size = self.config.tensor_parallel_size
         dp_size = ep_size = self.config.expert_parallel_size
         distributed_executor_backend = lmdeploy_config_kwargs.get("distributed_executor_backend", "ray")
-        backend_config = (
-            PytorchEngineConfig(
-                tp=tp_size,
-                ep=ep_size,
-                dp=dp_size,
-                max_batch_size=self.config.rollout_max_batch_size,
-                empty_init=self.config.skip_load_weights,
-                distributed_executor_backend=distributed_executor_backend,
-                mp_engine_backend="ray",  # force ray to pass placement group
-                device_type=accelerator_to_device_type[self.accelerator],
-                logprobs_mode="raw_logprobs",
-                session_length=self.config.context_length,
-            )
-            if backend == "pytorch"
-            else TurbomindEngineConfig(
-                tp=tp_size,
-                max_batch_size=self.config.rollout_max_batch_size,
-                devices=[bundle_idxs % self.config.gpus_per_node for bundle_idxs in self.engine_bundle_idxs],
-                empty_init=self.config.skip_load_weights,
-                session_length=self.config.context_length,
-            )
-        )
-        if backend == "pytorch" and self.accelerator == "NPU":
-            backend_config.eager_mode = True
+        # load default engine config
+        launch_args = self.config.rollout_engine_launch_args
+        # override args in RolloutConfig
+        launch_args.tp = tp_size
+        launch_args.ep = ep_size
+        launch_args.dp = dp_size
+        launch_args.max_batch_size = self.config.rollout_max_batch_size
+        launch_args.empty_init = self.config.skip_load_weights
+        launch_args.session_len = self.config.context_length
+
+        if backend == "pytorch":
+            launch_args.distributed_executor_backend = distributed_executor_backend
+            launch_args.mp_engine_backend = "ray"  # force ray to pass placement group
+            launch_args.device_type = accelerator_to_device_type[self.accelerator]
+            launch_args.logprobs_mode = "raw_logprobs"
+            if self.accelerator == "NPU":
+                launch_args.eager_mode = True
+        else:
+            launch_args.devices = [bundle_idxs % self.config.gpus_per_node for bundle_idxs in self.engine_bundle_idxs]
+        # get lmdeploy engine config
+        backend_config = launch_args.to_lmdeploy_engine_config()
 
         env = dict()
         if backend == "pytorch":
@@ -295,6 +291,8 @@ class LMDeployWorker(RolloutWorker):
                 )
             if "uvicorn_log_level" in lmdeploy_config_kwargs:
                 env.update({"UVICORN_LOG_LEVEL": lmdeploy_config_kwargs["uvicorn_log_level"]})
+            if "log_level" in lmdeploy_config_kwargs:
+                env.update({"LOG_LEVEL": lmdeploy_config_kwargs["log_level"]})
         else:
             env.update({"RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1"})
             if "tm_log_level" in lmdeploy_config_kwargs:

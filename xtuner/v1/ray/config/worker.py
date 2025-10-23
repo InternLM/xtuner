@@ -1,8 +1,11 @@
+import json
+import os
+import socket
 from pathlib import Path
 from typing import List, Literal, Optional, Union
 
 from cyclopts import Group, Parameter
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from typing_extensions import Annotated
 
 
@@ -66,6 +69,8 @@ class RolloutConfig(BaseModel):
             backend="lmdeploy",
         )
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     # base config
     env: Annotated[
@@ -167,14 +172,96 @@ class RolloutConfig(BaseModel):
             help="Context length for the rollout worker.",
         ),
     ] = None
+    rollout_engine_launch_args: Annotated[
+        Optional[BaseModel],
+        Parameter(
+            group=infer_group,
+            help="Path to the rollout backend configuration file.",
+        ),
+    ] = None
     extra_rollout_config: Annotated[
         dict,
         Parameter(
             group=infer_group,
             help='Extra configuration for different rollout worker. vllm parameters will start with prefix "vllm", etc.',
         ),
-    ] = {"lmdeploy_log_level": "CRITICAL", "lmdeploy_uvicorn_log_level": "CRITICAL"}
+    ] = {"lmdeploy_log_level": "CRITICAL", "lmdeploy_uvicorn_log_level": "CRITICAL", "lmdeploy_backend": "pytorch"}
     worker_log_dir: Annotated[Path, Parameter(help="Directory to save worker logs.")] = Path.cwd() / "work_dir"
+
+    def __init__(self, **kwargs):
+        if "model_name" not in kwargs:
+            model_name_from_config = None
+            model_path = Path(kwargs["model_path"])
+            config_json_path = model_path / "config.json"
+            try:
+                with open(config_json_path, encoding="utf-8") as f:
+                    config_data = json.load(f)
+                    model_name_from_config = config_data.get("model_type")
+            except (json.JSONDecodeError, OSError):
+                pass
+
+            if model_name_from_config:
+                kwargs["model_name"] = model_name_from_config
+            else:
+                kwargs["model_name"] = model_path.name
+
+        if "tokenizer_path" not in kwargs:
+            kwargs["tokenizer_path"] = str(kwargs["model_path"])
+
+        port = kwargs.get("api_port", 8000)
+        while True:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                try:
+                    s.bind(("localhost", port))
+                    break
+                except OSError:
+                    port += 1
+        kwargs["api_port"] = port
+
+        if "device" in kwargs and kwargs["device"] == "NPU":
+            kwargs["gpus_per_node"] = 16
+
+        rollout_backend = ""
+        if os.environ.get("XTUNER_USE_SGLANG", "0") == "1":
+            rollout_backend = "sglang"
+        elif os.environ.get("XTUNER_USE_VLLM", "0") == "1":
+            rollout_backend = "vllm"
+        elif os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "1":
+            rollout_backend = "lmdeploy"
+
+        assert rollout_backend in ["sglang", "vllm", "lmdeploy"], (
+            f"Unsupported rollout backend: {rollout_backend}. Please set XTUNER_USE_SGLANG, XTUNER_USE_VLLM, or XTUNER_USE_LMDEPLOY to 1."
+        )
+        if rollout_backend == "sglang":
+            kwargs["launch_server_method"] = "multiprocessing"
+            kwargs["rollout_cross_node_comm"] = False
+            if "rollout_engine_launch_args" not in kwargs or kwargs["rollout_engine_launch_args"] is None:
+                from xtuner.v1.ray.rollout.config.sglang_launch_config import SGLangDefaultServerArgs
+
+                kwargs["rollout_engine_launch_args"] = SGLangDefaultServerArgs()
+        elif rollout_backend == "lmdeploy":
+            kwargs["launch_server_method"] = "ray"
+            kwargs["rollout_cross_node_comm"] = True
+            if "rollout_engine_launch_args" not in kwargs or kwargs["rollout_engine_launch_args"] is None:
+                if (
+                    "lmdeploy_backend" in kwargs.get("extra_rollout_config", {})
+                    and kwargs["extra_rollout_config"]["lmdeploy_backend"] == "turbomind"
+                ):
+                    from xtuner.v1.ray.rollout.config.lmdeploy_launch_config import (
+                        LMDeployDefaultTurbomindEngineConfig,
+                    )
+
+                    kwargs["rollout_engine_launch_args"] = LMDeployDefaultTurbomindEngineConfig()
+                else:
+                    # default to pytorch backend
+                    from xtuner.v1.ray.rollout.config.lmdeploy_launch_config import LMDeployDefaultPytorchEngineConfig
+
+                    kwargs["rollout_engine_launch_args"] = LMDeployDefaultPytorchEngineConfig()
+        else:
+            kwargs["launch_server_method"] = "ray"
+            kwargs["rollout_cross_node_comm"] = True
+        super().__init__(**kwargs)
+        self.worker_log_dir.mkdir(parents=True, exist_ok=True)
 
 
 if __name__ == "__main__":
