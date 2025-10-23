@@ -50,6 +50,9 @@ class SGLangWorker(RolloutWorker):
         stream = extra_params["stream"]
         # note: 此处默认使用tokne_id的话，则不使用流式；异步rollout+token_id进出后续修复
         payload = {"model": self.model_name}
+        sglang_sample_params = self._transform_sample_params(sample_params)
+        sglang_extra_params = self._transform_extra_params(extra_params)
+        payload.update(sglang_extra_params)
         if stream:
             raise NotImplementedError("Streaming mode is not supported for SGLangWorker.")
         else:
@@ -62,13 +65,15 @@ class SGLangWorker(RolloutWorker):
                     )
                     prompt_token_ids = self.tokenizer(text_prompt, add_special_tokens=False)["input_ids"]
                     payload["input_ids"] = prompt_token_ids
+                payload["sampling_params"] = sglang_sample_params
             else:
                 payload["messages"] = prompt
-
-        sglang_sample_params = self._transform_sample_params(sample_params)
-        payload["sampling_params"] = sglang_sample_params
-        sglang_extra_params = self._transform_extra_params(extra_params)
-        payload.update(sglang_extra_params)
+                payload.update(sglang_sample_params)
+                # note: chat completions 接口需要传入 max_tokens 和 min_tokens 参数
+                payload["max_tokens"] = sglang_sample_params["max_new_tokens"]
+                payload["min_tokens"] = sglang_sample_params["min_new_tokens"]
+                payload.pop("max_new_tokens", None)
+                payload.pop("min_new_tokens", None)
 
         req = self.client.build_request(
             "POST",
@@ -93,9 +98,12 @@ class SGLangWorker(RolloutWorker):
         # flush cache will not return status_code 200 when there are pending requests
         while True:
             try:
-                response = requests.get(f"{self.server_url}/flush_cache")
+                response = requests.get(f"{self.server_url}/flush_cache", timeout=60)
                 if response.status_code == 200:
                     break
+            except requests.exceptions.Timeout:
+                print("Timeout occurred while flushing cache. Exiting loop.")
+                break
             except NewConnectionError as e:
                 raise e
             except Exception as e:
@@ -151,8 +159,12 @@ class SGLangWorker(RolloutWorker):
         # note: 非共卡模式下无需设置,共卡模式下需要offload必须设置，否则显存释放不了
         sglang_server_args.enable_memory_saver = True
         sglang_server_args.max_running_requests = int(os.environ.get("XTUNER_MAX_CONCURRENCY", 2000))
+        sglang_server_args.trust_remote_code = True
         if "interns1" in self.model_name.lower():
             sglang_server_args.grammar_backend = "none"
+
+        if self.config.context_length is not None:
+            sglang_server_args.context_length = self.config.context_length
 
         if sglang_server_args.nnodes > 1:
             sglang_server_args.node_rank = self.rank // self.config.gpus_per_node

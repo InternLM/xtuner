@@ -28,6 +28,7 @@ from xtuner.v1.config import FSDPConfig, OptimConfig
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.model.base import BaseModel, ModelItem, TransformerConfig
+from xtuner.v1.model.utils import ModelForwardExtraLogInfo
 from xtuner.v1.module.router import NoAuxRouterConfig
 from xtuner.v1.utils import get_device, get_logger, get_torch_device_module, profile_time_and_memory
 
@@ -227,7 +228,7 @@ class TrainEngine:
             logger.info(f"grad_accumulation_steps: {iters_per_step}")
             self._count += 1
 
-        extra_info_dict: dict[str, list[Any]] = {}
+        train_engine_extra_info = ModelForwardExtraLogInfo()
         for i in range(0, len(data_batches), intra_layer_micro_batch):
             data_batch = data_batches[i : i + intra_layer_micro_batch]
             seq_ctx_list = []
@@ -255,11 +256,7 @@ class TrainEngine:
 
             loss = llm_loss
             if "extra_info" in output:
-                for k, v in output["extra_info"].items():
-                    if k in extra_info_dict:
-                        extra_info_dict[k].append(v)
-                    else:
-                        extra_info_dict[k] = [v]
+                train_engine_extra_info.append(output["extra_info"])
 
             if "balancing_loss" in output:
                 balancing_loss = output["balancing_loss"] / iters_per_step
@@ -306,7 +303,7 @@ class TrainEngine:
             dist.all_reduce(reduced_z_loss.div_(dist.get_world_size()))
             loss_log["reduced_z_loss"] = reduced_z_loss.item()
         other_log["consumed_tokens"] = step_consumed_tokens.item()
-        other_log["extra_info"] = extra_info_dict
+        other_log["extra_info"] = train_engine_extra_info
         return loss_log, other_log
 
     def from_hf(self, hf_path: str | Path, strict: bool = False):

@@ -160,6 +160,13 @@ class RolloutConfig(BaseModel):
             help="Timeout duration (in seconds) for rollout requests.",
         ),
     ] = 3600.0
+    context_length: Annotated[
+        Optional[int],
+        Parameter(
+            group=infer_group,
+            help="Context length for the rollout worker.",
+        ),
+    ] = None
     extra_rollout_config: Annotated[
         dict,
         Parameter(

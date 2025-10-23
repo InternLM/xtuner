@@ -337,9 +337,9 @@ class RolloutWorker(SingleAcceleratorWorker):
             self.logger.debug(f" +++ send request {uid} to worker: {self.rank}")
 
             rollout_response = (
-                await self._handle_stream_response(uid, sample_params, response)
+                await self._handle_stream_response(uid, sample_params, extra_params, response)
                 if extra_params["stream"]
-                else await self._handle_non_stream_response(uid, sample_params, response)
+                else await self._handle_non_stream_response(uid, sample_params, extra_params, response)
             )
             return rollout_response
 
@@ -354,7 +354,7 @@ class RolloutWorker(SingleAcceleratorWorker):
             if response:
                 await response.aclose()
 
-    async def _handle_stream_response(self, uid, sample_params, response) -> RLRolloutResponseItem:
+    async def _handle_stream_response(self, uid, sample_params, extra_params, response) -> RLRolloutResponseItem:
         last_trajectory = ""
         last_token_ids = []
         last_logprobs = []
@@ -406,25 +406,42 @@ class RolloutWorker(SingleAcceleratorWorker):
         )
         return rollout_response
 
-    async def _handle_non_stream_response(self, uid, sample_params, response) -> RLRolloutResponseItem:
+    async def _handle_non_stream_response(self, uid, sample_params, extra_params, response) -> RLRolloutResponseItem:
         response = response.json()
+        if "return_token_ids" in extra_params and extra_params["return_token_ids"]:
+            # generate API response
+            last_token_ids = []
+            last_logprobs = []
+            if "output_token_logprobs" in response["meta_info"]:
+                last_token_ids = [item[1] for item in response["meta_info"]["output_token_logprobs"]]
+                last_logprobs = [item[0] for item in response["meta_info"]["output_token_logprobs"]]
+                assert len(last_token_ids) <= sample_params["max_tokens"], (
+                    f"生成长度超过限制，生成长度 {len(last_token_ids)}，限制 {sample_params['max_tokens']}"
+                )
+            else:
+                num_return_tokens = response["meta_info"].get("completion_tokens", 0)
+                last_token_ids = response["output_ids"][-num_return_tokens:] if num_return_tokens > 0 else []
 
-        if "output_token_logprobs" in response["meta_info"]:
-            last_token_ids = [item[1] for item in response["meta_info"]["output_token_logprobs"]]
-            last_logprobs = [item[0] for item in response["meta_info"]["output_token_logprobs"]]
-            assert len(last_token_ids) <= sample_params["max_tokens"], (
-                f"生成长度超过限制，生成长度 {len(last_token_ids)}，限制 {sample_params['max_tokens']}"
+            last_trajectory = response["text"]
+            finish_reason = response["meta_info"]["finish_reason"]["type"]
+            rollout_response = RLRolloutResponseItem(
+                response=last_trajectory,
+                response_ids=last_token_ids if len(last_token_ids) > 0 else None,
+                num_return_tokens=len(last_token_ids) if len(last_token_ids) > 0 else None,
+                finish_reason=finish_reason,
+                logprobs=last_logprobs if len(last_logprobs) > 0 else None,
             )
-        last_trajectory = response["text"]
-        finish_reason = response["meta_info"]["finish_reason"]["type"]
-        rollout_response = RLRolloutResponseItem(
-            response=last_trajectory,
-            response_ids=last_token_ids if len(last_token_ids) > 0 else None,
-            num_return_tokens=len(last_token_ids) if len(last_token_ids) > 0 else None,
-            finish_reason=finish_reason,
-            logprobs=last_logprobs,
-        )
-        return rollout_response
+            return rollout_response
+        else:
+            # v1/chat/completions API response
+            last_trajectory = response["choices"][0]["message"]["content"]
+            finish_reason = response["choices"][0]["finish_reason"]
+            rollout_response = RLRolloutResponseItem(
+                response=last_trajectory,
+                finish_reason=finish_reason,
+                num_return_tokens=response["usage"]["completion_tokens"],
+            )
+            return rollout_response
 
     async def rollout(
         self,
