@@ -151,7 +151,7 @@ class BaseLossContext(nn.Module, ABC, Generic[LossContextInputItem]):
 
         extra_info["log_rank_loss"] = loss.detach().clone()
 
-        # Step 2.c in the loss calculation
+        # Step 2.c in the loss calculation: reduce the loss over all ranks using all_reduce with autograd support
         if dist.is_initialized():
             loss = all_reduce(loss, op=dist.ReduceOp.SUM, group=dist.group.WORLD)
 
