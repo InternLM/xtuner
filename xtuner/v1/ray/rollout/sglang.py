@@ -143,34 +143,43 @@ class SGLangWorker(RolloutWorker):
     def _transform_rollout_config_to_server_configs(self):
         # remove the CUDA_VISIBLE_DEVICES set by ray and use base_gpu_id
         os.environ.pop("CUDA_VISIBLE_DEVICES", None)
-        from sglang.srt.server_args import ServerArgs
 
-        sglang_server_args = ServerArgs(model_path=self.config.model_path)
-        sglang_server_args.host = self.host
-        sglang_server_args.port = self.server_port
-        sglang_server_args.nccl_port = self.nccl_port
-        sglang_server_args.dist_init_addr = self.dist_init_addr
-        sglang_server_args.base_gpu_id = self.rank % self.config.gpus_per_node
-        sglang_server_args.gpu_id_step = 1
-        sglang_server_args.nnodes = max(1, self.config.tensor_parallel_size // self.config.gpus_per_node)
-        sglang_server_args.skip_server_warmup = True
-        sglang_server_args.tp_size = self.config.tensor_parallel_size
-        sglang_server_args.mem_fraction_static = self.config.gpu_memory_utilization
+        # get default launch config from rollout_backend_config
+        launch_args = self.config.rollout_engine_launch_args
+        self.logger.info(f"sglang_server_args: {launch_args}")
+
+        # override some args in RolloutConfig
+        launch_args.model_path = self.config.model_path
+        launch_args.host = self.host
+        launch_args.port = self.server_port
+        launch_args.nccl_port = self.nccl_port
+        launch_args.dist_init_addr = self.dist_init_addr
+        launch_args.base_gpu_id = self.rank % self.config.gpus_per_node
+        launch_args.gpu_id_step = 1
+        launch_args.nnodes = max(1, self.config.tensor_parallel_size // self.config.gpus_per_node)
+        launch_args.skip_server_warmup = True
+        launch_args.tp_size = self.config.tensor_parallel_size
+        launch_args.mem_fraction_static = self.config.gpu_memory_utilization
         # note: 非共卡模式下无需设置,共卡模式下需要offload必须设置，否则显存释放不了
-        sglang_server_args.enable_memory_saver = True
-        sglang_server_args.max_running_requests = int(os.environ.get("XTUNER_MAX_CONCURRENCY", 2000))
-        sglang_server_args.trust_remote_code = True
+        launch_args.enable_memory_saver = True
+        launch_args.max_running_requests = int(os.environ.get("XTUNER_MAX_CONCURRENCY", 2000))
+        launch_args.trust_remote_code = True
         if "interns1" in self.model_name.lower():
-            sglang_server_args.grammar_backend = "none"
+            launch_args.grammar_backend = "none"
 
         if self.config.context_length is not None:
-            sglang_server_args.context_length = self.config.context_length
+            launch_args.context_length = self.config.context_length
 
-        if sglang_server_args.nnodes > 1:
-            sglang_server_args.node_rank = self.rank // self.config.gpus_per_node
+        if launch_args.nnodes > 1:
+            launch_args.node_rank = self.rank // self.config.gpus_per_node
         else:
-            sglang_server_args.node_rank = 0
-        return sglang_server_args
+            launch_args.node_rank = 0
+
+        # transform to SGLang ServerArgs
+        sglang_launch_args = launch_args.to_sglang_server_args()
+        self.logger.info(f"updated sglang_server_args: {sglang_launch_args}")
+
+        return sglang_launch_args
 
     def _transform_sample_params(self, sample_params: Dict):
         if sample_params["top_p"] > 0:

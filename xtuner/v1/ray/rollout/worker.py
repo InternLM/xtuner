@@ -274,7 +274,9 @@ class RolloutWorker(SingleAcceleratorWorker):
 
                 lmdeploy_version = lmdeploy.__version__
                 if return_token_ids and Version(lmdeploy_version) < Version("0.10.1"):
-                    self.logger.error("You should use lmdeploy >= v0.10.1 to support return_token_ids")
+                    self.logger.error(
+                        f"You should use lmdeploy >= v0.10.1 to support return_token_ids, but current version is {lmdeploy_version}"
+                    )
                 if input_ids:
                     self.logger.error(
                         "You should use lmdeploy main branch contain commit 49f632483e93cfd3d09ef743508c07a68a763e26 to support generate with input_ids as input"
