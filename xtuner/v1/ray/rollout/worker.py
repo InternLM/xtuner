@@ -408,7 +408,6 @@ class RolloutWorker(SingleAcceleratorWorker):
 
     async def _handle_non_stream_response(self, uid, sample_params, extra_params, response) -> RLRolloutResponseItem:
         response = response.json()
-
         if "return_token_ids" in extra_params and extra_params["return_token_ids"]:
             # generate API response
             last_token_ids = []
@@ -419,6 +418,10 @@ class RolloutWorker(SingleAcceleratorWorker):
                 assert len(last_token_ids) <= sample_params["max_tokens"], (
                     f"生成长度超过限制，生成长度 {len(last_token_ids)}，限制 {sample_params['max_tokens']}"
                 )
+            else:
+                num_return_tokens = response["meta_info"].get("completion_tokens", 0)
+                last_token_ids = response["output_ids"][-num_return_tokens:] if num_return_tokens > 0 else []
+
             last_trajectory = response["text"]
             finish_reason = response["meta_info"]["finish_reason"]["type"]
             rollout_response = RLRolloutResponseItem(
