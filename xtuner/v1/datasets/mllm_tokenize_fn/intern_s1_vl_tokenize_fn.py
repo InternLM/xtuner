@@ -323,11 +323,12 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         is_pretrain = False
         if len(messages.messages) == 1 and messages.messages[0].role == "pretrain":
             is_pretrain = True
-
         if is_pretrain:
-            labels[labels == self.img_start_token_id] = -100
-            labels[labels == self.img_context_token_id] = -100
-            labels[labels == self.img_end_token_id] = -100
+            np_labels = np.array(labels)
+            np_labels[np_labels == self.img_start_token_id] = -100
+            np_labels[np_labels == self.img_context_token_id] = -100
+            np_labels[np_labels == self.img_end_token_id] = -100
+            labels = np_labels.tolist()
 
         if self.debug and oss_image_times > self.oss_time_log_thr:
             logger.info(f"[Warning] OSS read {len(self._image_path)} image cost {oss_image_times} seconds")
@@ -417,9 +418,11 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
             is_pretrain = True
 
         if is_pretrain:
-            labels[labels == self.img_start_token_id] = -100
-            labels[labels == self.video_context_token_id] = -100
-            labels[labels == self.img_end_token_id] = -100
+            np_labels = np.array(labels)
+            np_labels[np_labels == self.img_start_token_id] = -100
+            np_labels[np_labels == self.video_context_token_id] = -100
+            np_labels[np_labels == self.img_end_token_id] = -100
+            labels = np_labels.tolist()
 
         ret = InternS1DataItem(
             input_ids=input_ids,
