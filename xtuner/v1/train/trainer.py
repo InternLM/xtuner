@@ -1023,7 +1023,7 @@ class Trainer:
             f"{loss_log_str} "
             f"max_memory: {max_memory / (1024**3):.2f} GB "
             f"reserved_memory: {reserved_memory / (1024**3):.2f} GB "
-            f"grad_norm: {grad_norm:.3f} "
+            f"grad_norm: {grad_norm:.4f} "
             f"tgs: {tgs:.1f} "
             f"e2e_tgs: {e2e_tgs:.1f} "
             f"eta: {eta_hms} "
@@ -1041,7 +1041,7 @@ class Trainer:
             "runtime_info/e2e_tgs": e2e_tgs,
             "memory/max_memory_GB": round(max_memory / (1024**3), 3),
             "memory/reserved_memory_GB": round(reserved_memory / (1024**3), 3),
-            "grad_norm": round(grad_norm, 3),
+            "grad_norm": grad_norm,
         }
         log_scalars.update({f"loss/{k}": v for k, v in loss_log.items()})
         self._exp_tracker.add_scalars(tag_scalar_dict=log_scalars, global_step=self.cur_step)
