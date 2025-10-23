@@ -55,6 +55,9 @@ class InternS1ForConditionalGeneration(BaseModel):
         self.select_layer = config.vision_feature_layer
         self.downsample_ratio = config.downsample_ratio
 
+        image_size = config.vision_config.image_size[0]
+        self.fake_pixel_values = torch.randn(1, 3, image_size, image_size)
+
         vision_config = config.vision_config
         text_config = config.text_config
 
@@ -251,8 +254,8 @@ class InternS1ForConditionalGeneration(BaseModel):
                 inputs_embeds = split_for_sequence_parallel(inputs_embeds, dim=1, sp_mesh=sequence_parallel_mesh)
 
         else:
-            # in-place op on custom-function outputs will spoil autograd
-            inputs_embeds = inputs_embeds.clone()
+            vit_embeds = self.extract_feature(self.fake_pixel_values.to(inputs_embeds.device))
+            inputs_embeds = inputs_embeds + vit_embeds.sum() * 0
 
         seq_ctx.image_flags = None
         seq_ctx.pixel_values = None

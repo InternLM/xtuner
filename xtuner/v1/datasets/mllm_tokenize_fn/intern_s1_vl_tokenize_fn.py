@@ -171,7 +171,6 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         self.img_context_token_id = tokenizer.convert_tokens_to_ids(self.chat_template.image_context_token)
         self.video_context_token_id = tokenizer.convert_tokens_to_ids(self.chat_template.video_context_token)
         self.img_end_token_id = tokenizer.convert_tokens_to_ids(self.chat_template.image_end_token)
-
         # 必须要最后调用
         super().__init__(tokenizer, self.chat_template, max_length, tokenizer_hash, hash)
 
@@ -182,44 +181,20 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         return transform
 
     def pure_text_get_item(self, data_item: dict) -> InternS1DataItem:
-        # Build transformation function
-        transform = self._get_transform()
-
-        # Create a blank white image
-        image = Image.new("RGB", (224, 224), (255, 255, 255))
-
-        # Dynamically preprocess the image to generate patches
-        images = dynamic_preprocess(
-            image,
-            min_num=self.min_dynamic_patch,
-            max_num=1,
-            image_size=self.image_size,
-            use_thumbnail=self.use_thumbnail,
-        )
-
-        # Apply the transformation to each image patch and stack them into a tensor
-        pixel_values_list = [transform(image) for image in images]
-        pixel_values = torch.stack(pixel_values_list)
-        num_patches = pixel_values.size(0)
-
-        # Ensure there is only one patch
-        assert num_patches == 1, f"The number of patches should be 1, but got {num_patches}."
-
         messages = ChatMessages(messages=data_item["messages"])
         tokenized = messages.tokenize(self.tokenizer, self.chat_template)
         input_ids = tokenized["input_ids"]
         labels = tokenized["labels"]
         input_ids, labels = self._truncated_input_and_labels(input_ids, labels)
-
         ret = InternS1DataItem(
             input_ids=input_ids,
             labels=labels,
-            pixel_values=pixel_values,
-            image_flags=torch.tensor([0] * num_patches, dtype=torch.long),
+            pixel_values=torch.randn(1, 3, self.image_size, self.image_size),
+            image_flags=torch.tensor([0] * 1, dtype=torch.long),
             num_tokens=len(input_ids),
             num_img_tokens=[0],
             num_imgs=[0],
-            num_patches=[num_patches],
+            num_patches=[1],
         )
         return ret
 
