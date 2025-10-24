@@ -1,6 +1,6 @@
 import json
 import math
-from concurrent.futures import ProcessPoolExecutor, wait
+from concurrent.futures import ThreadPoolExecutor, wait
 from functools import reduce
 from itertools import chain
 from pathlib import Path
@@ -684,8 +684,8 @@ class BaseModel(nn.Module):
         is_others_save_rank = not dist.is_initialized() or dist.get_rank() == 0
 
         if is_fused_save_rank or is_others_save_rank:
-            # save_executor = ThreadPoolExecutor(max_workers=16)
-            save_executor = ProcessPoolExecutor(max_workers=16)
+            save_executor = ThreadPoolExecutor(max_workers=16)
+            # save_executor = ProcessPoolExecutor(max_workers=16)
         else:
             save_executor = None
 
