@@ -387,7 +387,7 @@ class Trainer:
 
         if self._can_save_hf and self._hf_interval is None:
             self._hf_interval = self.total_step
-        
+
         if debug_skip_save:
             self._hf_interval = None
             self._checkpoint_interval = None

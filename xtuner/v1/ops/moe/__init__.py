@@ -23,6 +23,7 @@ def get_group_gemm() -> GroupGemmProtocol:
     elif device == "cuda":
         if os.environ.get("XTUNER_USE_CUTLASS_GROUP_GEMM", "0") == "1":
             from .cuda import cutlass_group_gemm as cuda_group_gemm
+
             print("---------------------------Using cutlass group gemm-------------------------")
         else:
             from .cuda import triton_group_gemm as cuda_group_gemm
