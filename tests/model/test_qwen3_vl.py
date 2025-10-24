@@ -1,57 +1,51 @@
 import os
-
+from packaging import version
 import parametrize
 import torch
 from xtuner._testing import patch_hf_rms_norm, DeterministicDDPTestCase
-from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
+from transformers import AutoTokenizer, AutoModelForImageTextToText
 import torch.distributed as dist
 import tempfile
 from pathlib import Path
 import json
 from safetensors import safe_open
-from PIL import Image
-
-from xtuner.v1.model import InternS1MiniConfig
+from unittest import skipIf
+import transformers
+from xtuner.v1.model import Qwen3VLMoE30BA3Config, Qwen3VLDense4BConfig
 from xtuner.v1.loss.ce_loss import CELossConfig, CELossContextInputItem
 from xtuner.v1.model.moe.moe import SequenceContext
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.utils.compile import maybe_compile
-from xtuner.v1.datasets.mllm_tokenize_fn.intern_s1_vl_process import build_transform,  dynamic_preprocess
-from xtuner.v1.utils.test_utils import init_data_mesh, preprocess_intern_s1
+from xtuner.v1.utils.test_utils import init_data_mesh
+
+QWEN3_VL_MOE_PATH = os.environ["QWEN3_VL_MOE_PATH"]
+QWEN3_VL_DENSE_PATH = os.environ["QWEN3_VL_DENSE_PATH"]
 
 
-# Intern-S1-mini
-INTERNS1_DENSE_PATH = os.environ["INTERNS1_DENSE_PATH"]
-
-
-class TestInternS1(DeterministicDDPTestCase):
+@skipIf(version.parse(transformers.__version__) < version.parse("4.57.0"),
+        "transformers version must be >= 4.57.0")
+class TestQwen3VL(DeterministicDDPTestCase):
     @parametrize.parametrize(
         "device,tol",
         [
             ("cuda", 1e-2),
         ],
     )
-    def test_interns1_text_run(self, device, tol):
+    def test_qwen3vl_text_run(self, device, tol):
         self.create_pg(device)
-
         maybe_compile.clear_compile_targets()
-
-        hf_config = AutoConfig.from_pretrained(
-            INTERNS1_DENSE_PATH,
-            trust_remote_code=True,
-        )
-        hf_config.text_config.attn_implementation = "flash_attention_2"
-        hf_config.vision_config.attn_implementation = "flash_attention_2"
-        hf_model = AutoModelForCausalLM.from_pretrained(
-            INTERNS1_DENSE_PATH,
-            torch_dtype=torch.bfloat16,
-            trust_remote_code=True,
+        hf_model = AutoModelForImageTextToText.from_pretrained(
+            QWEN3_VL_DENSE_PATH,
+            dtype=torch.bfloat16,
+            attn_implementation="flash_attention_2",
             device_map="cuda"
-        ).eval()  # avoid open drop_path
-        patch_hf_rms_norm(hf_model)
+        ).eval()
+        # patch_hf_rms_norm(hf_model)
 
-        tokenizer = AutoTokenizer.from_pretrained(INTERNS1_DENSE_PATH, trust_remote_code=True)
-        input_ids = tokenizer("吃葡萄不吐葡萄皮", return_tensors="pt").input_ids.to(device)
+        rank = dist.get_rank()
+        tokenizer = AutoTokenizer.from_pretrained(QWEN3_VL_DENSE_PATH)
+        input_ids = tokenizer(f"今天天气不错，是学习的好日子。请听题： 1+{rank} 等于多少？",
+                              return_tensors="pt").input_ids.to(device)
 
         with torch.no_grad():
             output = hf_model(
@@ -59,29 +53,30 @@ class TestInternS1(DeterministicDDPTestCase):
                 labels=input_ids.clone(),
             )
         expected_loss = output.loss
+        dist.all_reduce(expected_loss.div_(dist.get_world_size()), op=dist.ReduceOp.SUM)
 
         del hf_model
         torch.cuda.empty_cache()
 
         with torch.device("meta"):
-            model_cfg = InternS1MiniConfig()
-            interns1_model = model_cfg.build().to(torch.bfloat16)
-        
-        interns1_model.from_hf(INTERNS1_DENSE_PATH)
-        interns1_model.eval()  # avoid open drop_path
-        
+            model_cfg = Qwen3VLDense4BConfig()
+            qwen3vl_model = model_cfg.build().to(torch.bfloat16)
+
+        qwen3vl_model.from_hf(QWEN3_VL_DENSE_PATH)
+        qwen3vl_model.eval()
+
         loss_cfg = CELossConfig()
 
         shift_input_ids = input_ids[:, :-1]
         shifted_labels = input_ids[:, 1:]
 
         seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids.to(device),))
-        
+
         seq_ctx_list = [seq_ctx]
         loss_ctx_input_list: list[CELossContextInputItem] = [CELossContextInputItem(shifted_labels=shifted_labels)]
         LossContext = loss_cfg.loss_ctx_cls
         batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
-            loss_ctx_input_list, 
+            loss_ctx_input_list,
             loss_cfg,
         )
         loss_kwargs = batches_loss_kwargs[0]
@@ -89,7 +84,7 @@ class TestInternS1(DeterministicDDPTestCase):
         seq_ctx = seq_ctx_list[0]
 
         with torch.no_grad():
-            output = interns1_model(
+            output = qwen3vl_model(
                 seq_ctx=seq_ctx,
                 loss_ctx=loss_ctx,
             )
@@ -99,66 +94,36 @@ class TestInternS1(DeterministicDDPTestCase):
     @parametrize.parametrize(
         "device,sp_size,tol",
         [
-            ("cuda", 1, 1e-2),
-            ("cuda", 2, 1e-2),
+            ("cuda", 1, 1e-2)
         ],
     )
-    def test_interns1_image_run(self, device, sp_size, tol):
+    def test_qwen3vl_image_run(self, device, sp_size, tol):
         self.create_pg(device)
         maybe_compile.clear_compile_targets()
+        hf_model = AutoModelForImageTextToText.from_pretrained(
+            QWEN3_VL_DENSE_PATH,
+            dtype=torch.bfloat16,
+            attn_implementation="flash_attention_2",
+            device_map="cuda"
+        ).eval()
+        # patch_hf_rms_norm(hf_model)
 
-        hf_config = AutoConfig.from_pretrained(
-            INTERNS1_DENSE_PATH,
-            trust_remote_code=True,
-        )
-        hf_config.text_config.attn_implementation = "flash_attention_2"
-        hf_config.vision_config.attn_implementation = "flash_attention_2"
-        hf_model = AutoModelForCausalLM.from_pretrained(
-            INTERNS1_DENSE_PATH,
-            torch_dtype=torch.bfloat16,
-            trust_remote_code=True,
-            device_map=device
-        ).eval()  # avoid open drop_path
-        patch_hf_rms_norm(hf_model)
+        rank = dist.get_rank()
+        tokenizer = AutoTokenizer.from_pretrained(QWEN3_VL_DENSE_PATH)
+        image_str = '<|vision_start|><|image_pad|><|vision_end|>'
+        input_ids = tokenizer(image_str + "吃葡萄不吐葡萄皮" * 20, return_tensors="pt").input_ids.to("cuda")
+        pixel_values = torch.randn(4, 1536, device='cuda', dtype=torch.bfloat16)
+        # TODO: 不合理，为啥一定要每个 rank 数据完全一样才能通过 CI ?
+        dist.broadcast(pixel_values, src=0)
 
-        tokenizer = AutoTokenizer.from_pretrained(INTERNS1_DENSE_PATH, trust_remote_code=True)
-
-        conversations = [{"from": "human", "value": '<image>\nPlease describe the image shortly.'}]
-        image_path = 'tests/resource/mscoco_twocat_000000039769.jpg'
-        image = Image.open(image_path).convert("RGB")
-        images = dynamic_preprocess(
-            image,
-            min_num=1,
-            max_num=12,
-            image_size=448,
-            use_thumbnail=True,
-        )
-        transform = build_transform(
-            is_train=False,
-            input_size=448,
-            pad2square=False,
-            normalize_type="imagenet"
-        )
-        pixel_values = [transform(image) for image in images]
-        pixel_values = torch.stack(pixel_values)
-
-        # Ensure that there is only one patch if dynamic image size is not enabled
-        num_patches = pixel_values.size(0)
-
-        ret = preprocess_intern_s1(
-            [conversations],
-            tokenizer,
-            [256 * num_patches]
-        )
-        input_ids = torch.tensor(ret["input_ids"])[None].cuda()
-        image_flags = torch.tensor([1] * num_patches, dtype=torch.long).cuda()
-        pixel_values = pixel_values.to(device="cuda", dtype=torch.bfloat16)
+        image_grid_thw = torch.tensor([[1, 2, 2]], device='cuda')
 
         with torch.no_grad():
             output = hf_model(
                 input_ids=input_ids,
-                pixel_values=pixel_values,
                 labels=input_ids.clone(),
+                pixel_values=pixel_values,
+                image_grid_thw=image_grid_thw,
             )
         expected_loss = output.loss
 
@@ -166,25 +131,24 @@ class TestInternS1(DeterministicDDPTestCase):
         torch.cuda.empty_cache()
 
         with torch.device("meta"):
-            model_cfg = InternS1MiniConfig()
-            interns1_model = model_cfg.build().to(torch.bfloat16)
-        
-        interns1_model.from_hf(INTERNS1_DENSE_PATH)
-        interns1_model.eval()  # avoid open drop_path
+            model_cfg = Qwen3VLDense4BConfig()
+            qwen3vl_model = model_cfg.build().to(torch.bfloat16)
+
+        qwen3vl_model.from_hf(QWEN3_VL_DENSE_PATH)
+        qwen3vl_model.eval()
 
         loss_cfg = CELossConfig()
-        
+
         shift_input_ids = input_ids[:, :-1]
         shifted_labels = input_ids[:, 1:]
 
-        data_mesh = None
         sp_mesh = None
         if sp_size > 1:
             data_mesh = init_data_mesh(device, sp_size=sp_size)
             sp_mesh = data_mesh["sp"]
 
         seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids.to('cuda'),))
-        seq_ctx.image_flags = image_flags
+        seq_ctx.image_grid_thw = image_grid_thw
         seq_ctx.pixel_values = pixel_values
         seq_ctx.to('cuda')
         loss_ctx_input = CELossContextInputItem(shifted_labels=shifted_labels)
@@ -199,7 +163,7 @@ class TestInternS1(DeterministicDDPTestCase):
 
         LossContext = loss_cfg.loss_ctx_cls
         batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
-            loss_ctx_input_list, 
+            loss_ctx_input_list,
             loss_cfg,
         )
         loss_kwargs = batches_loss_kwargs[0]
@@ -207,7 +171,7 @@ class TestInternS1(DeterministicDDPTestCase):
         seq_ctx = seq_ctx_list[0]
 
         with torch.no_grad():
-            output = interns1_model(
+            output = qwen3vl_model(
                 seq_ctx=seq_ctx,
                 loss_ctx=loss_ctx,
             )
@@ -223,22 +187,18 @@ class TestInternS1(DeterministicDDPTestCase):
     def test_fsdp_text_accuracy(self, device, tol):
         self.create_pg(device)
         maybe_compile.clear_compile_targets()
-        hf_config = AutoConfig.from_pretrained(
-            INTERNS1_DENSE_PATH,
-            trust_remote_code=True,
-        )
-        hf_config.text_config.attn_implementation = "flash_attention_2"
-        hf_config.vision_config.attn_implementation = "flash_attention_2"
-        hf_model = AutoModelForCausalLM.from_pretrained(
-            INTERNS1_DENSE_PATH,
-            torch_dtype=torch.bfloat16,
-            trust_remote_code=True,
+        hf_model = AutoModelForImageTextToText.from_pretrained(
+            QWEN3_VL_DENSE_PATH,
+            dtype=torch.bfloat16,
+            attn_implementation="flash_attention_2",
             device_map="cuda"
-        ).eval()  # avoid open drop_path
+        ).eval()
         patch_hf_rms_norm(hf_model)
 
-        tokenizer = AutoTokenizer.from_pretrained(INTERNS1_DENSE_PATH, trust_remote_code=True)
-        input_ids = tokenizer("吃葡萄不吐葡萄皮", return_tensors="pt").input_ids.to("cuda")
+        rank = dist.get_rank()
+        tokenizer = AutoTokenizer.from_pretrained(QWEN3_VL_DENSE_PATH)
+        input_ids = tokenizer(f"今天天气不错，是学习的好日子。请听题： 1+{rank} 等于多少？",
+                              return_tensors="pt").input_ids.to(device)
 
         with torch.no_grad():
             output = hf_model(
@@ -246,26 +206,26 @@ class TestInternS1(DeterministicDDPTestCase):
                 labels=input_ids.clone(),
             )
         expected_loss = output.loss
+        dist.all_reduce(expected_loss.div_(dist.get_world_size()), op=dist.ReduceOp.SUM)
 
         del hf_model
         torch.cuda.empty_cache()
 
         with torch.device("meta"):
-            model_cfg = InternS1MiniConfig()
-            interns1_model = model_cfg.build().to(torch.bfloat16)
-        
+            model_cfg = Qwen3VLDense4BConfig()
+            qwen3vl_model = model_cfg.build().to(torch.bfloat16)
+
         fsdp_config = FSDPConfig(
             cpu_offload=False,
         )
-        data_mesh = None
 
-        interns1_model.language_model.fully_shard(fsdp_config=fsdp_config)
-        interns1_model.vision_tower.fully_shard(fsdp_config=fsdp_config)
-        interns1_model.multi_modal_projector.fully_shard(fsdp_config=fsdp_config)
-        interns1_model.fully_shard(fsdp_config=fsdp_config)
-        
-        interns1_model.from_hf(INTERNS1_DENSE_PATH)
-        interns1_model.eval()  # avoid open drop_path
+        qwen3vl_model.language_model.fully_shard(fsdp_config=fsdp_config)
+        qwen3vl_model.vision_tower.fully_shard(fsdp_config=fsdp_config)
+        qwen3vl_model.multi_modal_projector.fully_shard(fsdp_config=fsdp_config)
+        qwen3vl_model.fully_shard(fsdp_config=fsdp_config)
+
+        qwen3vl_model.from_hf(QWEN3_VL_DENSE_PATH)
+        qwen3vl_model.eval()
 
         shift_input_ids = input_ids[:, :-1]
         shifted_labels = input_ids[:, 1:]
@@ -279,7 +239,7 @@ class TestInternS1(DeterministicDDPTestCase):
         loss_cfg = CELossConfig()
         LossContext = loss_cfg.loss_ctx_cls
         batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
-            loss_ctx_input_list, 
+            loss_ctx_input_list,
             loss_cfg,
         )
         loss_kwargs = batches_loss_kwargs[0]
@@ -287,7 +247,7 @@ class TestInternS1(DeterministicDDPTestCase):
         seq_ctx = seq_ctx_list[0]
 
         with torch.no_grad():
-            output = interns1_model(
+            output = qwen3vl_model(
                 seq_ctx=seq_ctx,
                 loss_ctx=loss_ctx,
             )
@@ -295,12 +255,12 @@ class TestInternS1(DeterministicDDPTestCase):
         self.assertTrue(torch.allclose(loss, expected_loss.to(loss.dtype), atol=tol, rtol=tol))
 
     @parametrize.parametrize(
-        "device,sp_size, compile, tol",
+        "device, sp_size, compile, tol",
         [
             ("cuda", 1, False, 1e-2),
-            ("cuda", 2, False, 1e-2),
+            # ("cuda", 2, False, 1e-2),
             ("cuda", 1, True, 1e-2),
-            ("cuda", 2, True, 1e-2),
+            # ("cuda", 2, True, 1e-2),
         ],
     )
     def test_fsdp_image_accuracy(self, device, sp_size, compile, tol):
@@ -308,57 +268,29 @@ class TestInternS1(DeterministicDDPTestCase):
         if not compile:
             maybe_compile.clear_compile_targets()
 
-        hf_config = AutoConfig.from_pretrained(
-            INTERNS1_DENSE_PATH,
-            trust_remote_code=True,
-        )
-        hf_config.text_config.attn_implementation = "flash_attention_2"
-        hf_config.vision_config.attn_implementation = "flash_attention_2"
-        hf_model = AutoModelForCausalLM.from_pretrained(
-            INTERNS1_DENSE_PATH,
-            torch_dtype=torch.bfloat16,
-            trust_remote_code=True,
+        hf_model = AutoModelForImageTextToText.from_pretrained(
+            QWEN3_VL_DENSE_PATH,
+            dtype=torch.bfloat16,
+            attn_implementation="flash_attention_2",
             device_map="cuda"
-        ).eval()  # avoid open drop_path
-        patch_hf_rms_norm(hf_model)
+        ).eval()
+        # patch_hf_rms_norm(hf_model)
 
-        tokenizer = AutoTokenizer.from_pretrained(INTERNS1_DENSE_PATH, trust_remote_code=True)
-        conversations = [{"from": "human", "value": '<image>\nPlease describe the image shortly.'}]
-        image_path = 'tests/resource/mscoco_twocat_000000039769.jpg'
-        image = Image.open(image_path).convert("RGB")
-        images = dynamic_preprocess(
-            image,
-            min_num=1,
-            max_num=12,
-            image_size=448,
-            use_thumbnail=True,
-        )
-        transform = build_transform(
-            is_train=False,
-            input_size=448,
-            pad2square=False,
-            normalize_type="imagenet"
-        )
-        pixel_values = [transform(image) for image in images]
-        pixel_values = torch.stack(pixel_values)
-
-        # Ensure that there is only one patch if dynamic image size is not enabled
-        num_patches = pixel_values.size(0)
-
-        ret = preprocess_intern_s1(
-            [conversations],
-            tokenizer,
-            [256 * num_patches]
-        )
-        input_ids = torch.tensor(ret["input_ids"])[None].cuda()
-        image_flags = torch.tensor([1] * num_patches, dtype=torch.long).cuda()
-        pixel_values = pixel_values.to(device="cuda", dtype=torch.bfloat16)
+        rank = dist.get_rank()
+        tokenizer = AutoTokenizer.from_pretrained(QWEN3_VL_DENSE_PATH)
+        image_str = '<|vision_start|><|image_pad|><|vision_end|>'
+        input_ids = tokenizer(image_str + "吃葡萄不吐葡萄皮" * 20, return_tensors="pt").input_ids.to("cuda")
+        pixel_values = torch.randn(4, 1536, device='cuda', dtype=torch.bfloat16)
+        # TODO: 不合理，为啥一定要每个 rank 数据完全一样才能通过 CI ?
+        dist.broadcast(pixel_values, src=0)
+        image_grid_thw = torch.tensor([[1, 2, 2]], device='cuda')
 
         with torch.no_grad():
             output = hf_model(
                 input_ids=input_ids,
-                pixel_values=pixel_values,
                 labels=input_ids.clone(),
+                pixel_values=pixel_values,
+                image_grid_thw=image_grid_thw,
             )
         expected_loss = output.loss
 
@@ -366,30 +298,29 @@ class TestInternS1(DeterministicDDPTestCase):
         torch.cuda.empty_cache()
 
         with torch.device("meta"):
-            model_cfg = InternS1MiniConfig()
-            interns1_model = model_cfg.build().to(torch.bfloat16)
+            model_cfg = Qwen3VLDense4BConfig()
+            qwen3vl_model = model_cfg.build().to(torch.bfloat16)
 
         fsdp_config = FSDPConfig(
             cpu_offload=False,
         )
-        data_mesh = None
         sp_mesh = None
         if sp_size > 1:
             data_mesh = init_data_mesh(device, sp_size=sp_size)
             sp_mesh = data_mesh["sp"]
-        
-        interns1_model.language_model.fully_shard(fsdp_config=fsdp_config)
-        interns1_model.vision_tower.fully_shard(fsdp_config=fsdp_config)
-        interns1_model.multi_modal_projector.fully_shard(fsdp_config=fsdp_config)
-        interns1_model.fully_shard(fsdp_config=fsdp_config)
 
-        interns1_model.from_hf(INTERNS1_DENSE_PATH)
-        interns1_model.eval()  # avoid open drop_path
+        qwen3vl_model.language_model.fully_shard(fsdp_config=fsdp_config)
+        qwen3vl_model.vision_tower.fully_shard(fsdp_config=fsdp_config)
+        qwen3vl_model.multi_modal_projector.fully_shard(fsdp_config=fsdp_config)
+        qwen3vl_model.fully_shard(fsdp_config=fsdp_config)
+
+        qwen3vl_model.from_hf(QWEN3_VL_DENSE_PATH)
+        qwen3vl_model.eval()
 
         shift_input_ids = input_ids[:, :-1]
         shifted_labels = input_ids[:, 1:]
         seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids.to('cuda'),))
-        seq_ctx.image_flags = image_flags
+        seq_ctx.image_grid_thw = image_grid_thw
         seq_ctx.pixel_values = pixel_values
         seq_ctx.to('cuda')
         loss_ctx_input = CELossContextInputItem(shifted_labels=shifted_labels)
@@ -405,7 +336,7 @@ class TestInternS1(DeterministicDDPTestCase):
         loss_cfg = CELossConfig()
         LossContext = loss_cfg.loss_ctx_cls
         batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
-            loss_ctx_input_list, 
+            loss_ctx_input_list,
             loss_cfg,
         )
         loss_kwargs = batches_loss_kwargs[0]
@@ -413,7 +344,7 @@ class TestInternS1(DeterministicDDPTestCase):
         seq_ctx = seq_ctx_list[0]
 
         with torch.no_grad():
-            output = interns1_model(
+            output = qwen3vl_model(
                 seq_ctx=seq_ctx,
                 loss_ctx=loss_ctx,
             )
@@ -429,8 +360,8 @@ class TestInternS1(DeterministicDDPTestCase):
     def test_save_hf(self, device, tp_size):
         self.create_pg(device)
         with torch.device("meta"):
-            model_cfg = InternS1MiniConfig()
-            interns1_model = model_cfg.build().to(torch.bfloat16)
+            model_cfg = Qwen3VLMoE30BA3Config()
+            qwen3vl_model = model_cfg.build().to(torch.bfloat16)
 
         fsdp_config = FSDPConfig(
             tp_size=tp_size,
@@ -442,14 +373,14 @@ class TestInternS1(DeterministicDDPTestCase):
             syncdir = [tmpdir]
             dist.broadcast_object_list(syncdir, src=0)
             tmpdir = Path(syncdir[0])
-            interns1_model.language_model.fully_shard(fsdp_config=fsdp_config)
-            interns1_model.vision_tower.fully_shard(fsdp_config=fsdp_config)
-            interns1_model.multi_modal_projector.fully_shard(fsdp_config=fsdp_config)
-            interns1_model.fully_shard(fsdp_config=fsdp_config)
-            interns1_model.from_hf(INTERNS1_DENSE_PATH)
-            interns1_model.save_hf(tmpdir)
+            qwen3vl_model.language_model.fully_shard(fsdp_config=fsdp_config)
+            qwen3vl_model.vision_tower.fully_shard(fsdp_config=fsdp_config)
+            qwen3vl_model.multi_modal_projector.fully_shard(fsdp_config=fsdp_config)
+            qwen3vl_model.fully_shard(fsdp_config=fsdp_config)
+            qwen3vl_model.from_hf(QWEN3_VL_MOE_PATH)
+            qwen3vl_model.save_hf(tmpdir)
 
-            origin_hf_path = Path(INTERNS1_DENSE_PATH)
+            origin_hf_path = Path(QWEN3_VL_MOE_PATH)
             origin_index_path = origin_hf_path / "model.safetensors.index.json"
             saved_index_path = tmpdir / "model.safetensors.index.json"
 

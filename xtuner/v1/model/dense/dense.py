@@ -24,12 +24,13 @@ from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.loss import CELossContext
 from xtuner.v1.model.base import BaseModel, ModelOutputs, TransformerConfig
 from xtuner.v1.model.utils import checkpoint_wrapper
-from xtuner.v1.module import LMHead, RMSNorm, RotaryEmbedding
+from xtuner.v1.module import LMHead, RMSNorm, RotaryEmbeddingProtocol, get_rope_embedding
 from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayer
 from xtuner.v1.utils import (
     get_device,
     get_logger,
 )
+from xtuner.v1.utils.compile import maybe_compile
 
 
 DEVICE = get_device()
@@ -72,6 +73,7 @@ class Dense(BaseModel):
             hidden_states = seq_ctx.inputs_embeds
 
         # create position embeddings to be shared across the decoder layers
+        assert position_ids is not None
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
         output: dict = {}
@@ -81,9 +83,10 @@ class Dense(BaseModel):
         for idx, decoder_layer in self.layers.items():
             hidden_states = decoder_layer(
                 hidden_states,
-                position_embeddings=position_embeddings,
-                seq_ctx=seq_ctx,
+                position_embeddings,
+                seq_ctx,
             )
+
             if self.config.return_hidden_states:
                 output["hidden_states"].append(hidden_states)
 
@@ -118,8 +121,8 @@ class Dense(BaseModel):
             )
         return layers
 
-    def build_rotary_embedding(self, config: TransformerConfig) -> RotaryEmbedding:
-        return RotaryEmbedding(config=config)
+    def build_rotary_embedding(self, config: TransformerConfig) -> RotaryEmbeddingProtocol:
+        return get_rope_embedding(config=config)
 
     # NOTE: Add this overload for inferring the return type for easier type checking and using
     @overload  # type: ignore
@@ -133,7 +136,7 @@ class Dense(BaseModel):
 
     def _apply(self, fn, recurse: bool = True):
         super()._apply(fn)
-        self.rotary_emb.to(torch.float32)
+        self.rotary_emb.to(torch.float32)  # type: ignore
         return self
 
     @override
@@ -160,6 +163,11 @@ class Dense(BaseModel):
                 self, cast(DeviceMesh, self.fsdp_mesh), callback_after_pad=self._init_load_spec
             )
 
+        checkpoint_preserve_rng_state = fsdp_config.checkpoint_preserve_rng_state
+        if not checkpoint_preserve_rng_state and self.config.attention.dropout > 0.0:
+            checkpoint_preserve_rng_state = True
+            logger.warning("When using dropout, checkpoint_preserve_rng_state is set to True to avoid issues.")
+
         # Just for narrowing the type of self.fsdp_mesh and self.ep_mesh
         assert self.fsdp_mesh is not None
         assert self.fsdp_config is not None
@@ -182,21 +190,26 @@ class Dense(BaseModel):
         )
         num_recompute_layers = int(self.config.num_hidden_layers * self.fsdp_config.recompute_ratio)
 
-        for layer_idx, layer in tqdm(self.layers.items(), desc="[FSDP Sharding]"):
+        generator = torch.Generator()
+        generator.manual_seed(dist.get_rank())
+        shuffled_layers_idxs = torch.randperm(len(self.layers), generator=generator)
+
+        for layer_idx in tqdm(shuffled_layers_idxs, desc="[FSDP Sharding]"):
+            layer = self.layers[str(int(layer_idx))]
             layer_idx = int(layer_idx)
-            if layer_idx < num_recompute_layers - 1:
-                layer = checkpoint_wrapper(layer, checkpoint_impl=CheckpointImpl.REENTRANT)
+            if layer_idx < num_recompute_layers:
+                layer = checkpoint_wrapper(
+                    layer, preserve_rng_state=checkpoint_preserve_rng_state, checkpoint_impl=CheckpointImpl.REENTRANT
+                )
+                # __class__ without self attribute
+                layer.__class__.forward = maybe_compile(layer.__class__.forward, fullgraph=True)
 
             self.layers[str(layer_idx)] = layer
-            if layer_idx >= len(self.layers) - 1:
-                reshard_after_forward = False
-            else:
-                reshard_after_forward = self.fsdp_config.reshard_after_forward
             fully_shard(
                 layer,
                 mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
                 mp_policy=mp_policy,
-                reshard_after_forward=reshard_after_forward,
+                reshard_after_forward=self.fsdp_config.reshard_after_forward,
                 offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
             )
 

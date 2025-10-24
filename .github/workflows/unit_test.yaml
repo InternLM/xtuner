@@ -24,9 +24,10 @@ jobs:
       run: |
         echo "::add-mask::${{env.WORKSPACE_PREFIX}}"
         echo "::add-mask::${{env.WORKSPACE_PREFIX_SHORT}}"
+        sudo git clean -ffdx
     - uses: actions/checkout@v3
 
     - name: unit-test
       run: |
         export PYTHONPYCACHEPREFIX=/tmp
-        python ci/scripts/run_yidian.py "$IMAGE" "$CI_IMPORT" "export PYTHONPATH=$PWD:$LM_DEPLOY:$PYTHONPATH; pytest tests --ignore=./tests/module/dispatcher/test_deepep.py"
+        python ci/scripts/xtuner_unittest.py "$IMAGE" "$CI_IMPORT" "export PYTHONPATH=$PWD:$LM_DEPLOY:$PYTHONPATH; pip install codetiming -i http://mirrors.h.pjlab.org.cn/pypi/simple/ --trusted-host mirrors.h.pjlab.org.cn --trusted-host pypi.i.h.pjlab.org.cn; export PYTHONPATH=/mnt/shared-storage-user/caoweihan/duanyanhui/lmdeploy:$PYTHONPATH; pytest tests/ --ignore=./tests/module/dispatcher/test_deepep.py"

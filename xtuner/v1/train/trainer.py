@@ -34,6 +34,7 @@ from xtuner.v1.engine.vision_compose_train_engine import VisionComposeConfigProt
 from xtuner.v1.loss import CELossConfig
 from xtuner.v1.loss.ce_loss import CELossContextInputItem
 from xtuner.v1.model.base import ModelItem, TransformerConfig
+from xtuner.v1.model.utils import ModelForwardExtraLogInfo
 from xtuner.v1.patch import patch_default_save_plan
 from xtuner.v1.profiler import profiling_memory, profiling_time
 from xtuner.v1.utils import (
@@ -489,11 +490,13 @@ class Trainer:
             step_time = time_after_train_step - time_before_train_step
             step_consumed_tokens = other_log["consumed_tokens"]
 
-            if "log_rank_loss" in other_log.get("extra_info", {}):
-                log_rank_loss = 0.0
-                for item in other_log["extra_info"]["log_rank_loss"]:
-                    log_rank_loss += item.item()
-                loss_log["loss"] = log_rank_loss
+            extra_info = other_log.get("extra_info", {})
+            if isinstance(extra_info, ModelForwardExtraLogInfo):
+                extra_info_dict = extra_info.get()
+            else:
+                extra_info_updated = ModelForwardExtraLogInfo(extra_info)
+                extra_info_dict = extra_info_updated.get()
+            loss_log.update(extra_info_dict)
 
             self._cur_step += 1
             self._consumed_tokens += step_consumed_tokens

@@ -25,7 +25,9 @@ class ChunkLoss(torch.autograd.Function):
         grad_inputs_chunks = torch.split(grad_inputs, chunk_size, dim=1)
         hidden_states_chunks = torch.split(hidden_states, chunk_size, dim=1)
 
-        chunked_extra_info: dict[str, torch.Tensor] = {}
+        from xtuner.v1.model.utils import ModelForwardExtraLogInfo
+
+        chunked_extra_info = ModelForwardExtraLogInfo()
         for i in range(len(hidden_states_chunks)):
             hidden_states_chunk = hidden_states_chunks[i]
             grad_inputs_chunk = grad_inputs_chunks[i]
@@ -38,17 +40,7 @@ class ChunkLoss(torch.autograd.Function):
             grad_inputs_chunk.copy_(chunk_grad_input)
             grad_weight.add_(chunk_grad_weight)
 
-            for k, v in extra_info.items():
-                if v.dim() == 0:
-                    v = v.unsqueeze(0)
-                # 扩充一维，对第一维进行拼接，新tensor的shape为(n, ...), 其中n为chunk的数量, ...为v原本的shape
-                v = v.unsqueeze(0)
-                if k in chunked_extra_info:
-                    last_value = chunked_extra_info[k]
-                    new_value = torch.concat([last_value, v], dim=0)
-                    chunked_extra_info[k] = new_value
-                else:
-                    chunked_extra_info[k] = v
+            chunked_extra_info.append(extra_info)
 
         ctx.save_for_backward(grad_inputs, grad_weight)
         return accumulated_loss, chunked_extra_info
