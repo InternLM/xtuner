@@ -20,7 +20,13 @@ from xtuner.v1.model.base import ModelItem, TransformerConfig
 from xtuner.v1.ray.accelerator import SingleAcceleratorWorker
 from xtuner.v1.ray.config import RolloutConfig
 from xtuner.v1.rl.utils import gather_logprobs
-from xtuner.v1.utils import ParallelConfigException, get_device, get_logger, get_torch_device_module
+from xtuner.v1.utils import (
+    ParallelConfigException,
+    get_device,
+    get_logger,
+    get_torch_device_module,
+    monkey_unpatch_torch_reductions,
+)
 
 from ..loss_fn import kl_penalty
 from .loss import BaseRLLossConfig, RLLossContextInputItem
@@ -807,7 +813,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                         dst=head_rank,
                         group=cpu_group,
                     )
-
+            monkey_unpatch_torch_reductions()
         if dist.get_rank() == head_rank:
             headers = {
                 "Content-Type": "application/json",

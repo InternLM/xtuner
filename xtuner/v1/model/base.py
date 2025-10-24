@@ -1,5 +1,6 @@
 import json
 import math
+import multiprocessing
 from concurrent.futures import ProcessPoolExecutor, wait
 from functools import reduce
 from itertools import chain
@@ -685,7 +686,8 @@ class BaseModel(nn.Module):
 
         if is_fused_save_rank or is_others_save_rank:
             # save_executor = ThreadPoolExecutor(max_workers=16)
-            save_executor = ProcessPoolExecutor(max_workers=16)
+            mp_context = multiprocessing.get_context("spawn")
+            save_executor = ProcessPoolExecutor(max_workers=16, mp_context=mp_context)
         else:
             save_executor = None
 

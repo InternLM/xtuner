@@ -618,7 +618,7 @@ class RLTrainer:
         if (self.cur_step + 1) % self._hf_interval != 0 and (self.cur_step + 1) != self._rollout_steps:
             return
 
-        save_hf_path = self.exp_dir / f"hf-{self.cur_step}"
+        save_hf_path = self.exp_dir / f"hf-{self.cur_step + 1}"
         self.logger.info(f"Saving step {self.cur_step + 1} checkpoints to: {save_hf_path}")
         self.meta.latest_exp.hf_checkpoint_list.append(str(save_hf_path))
 
