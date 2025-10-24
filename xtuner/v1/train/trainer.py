@@ -162,6 +162,7 @@ class TrainerConfig(BaseModel):
     dist_backend: str | None = None
     debug: bool = False
     debug_skip_save: bool = False
+    debug_skip_save: bool = False
 
     @model_validator(mode="after")
     def _convert_work_dir(self):
@@ -260,7 +261,6 @@ class Trainer:
         backend: str | None = None,
         debug_skip_save: bool = False,
         trainer_cfg: TrainerConfig | None = None,
-        debug_skip_save: bool = False,
     ):
         self._dataloader_config = dataloader_cfg
 
