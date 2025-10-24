@@ -69,6 +69,8 @@ class RolloutWorker(SingleAcceleratorWorker):
         self.logger = get_logger(log_dir=config.worker_log_dir, tag="RolloutWorker")
         self.tokenizer = AutoTokenizer.from_pretrained(self.config.tokenizer_path, trust_remote_code=True)
         self.check_flag = True  # only print once
+        if self.rank == 0:
+            self.logger.info(f"RolloutConfig:\n{self.config.model_dump_json(indent=2)}")
 
     def init_dist_port(self):
         """Initialize distributed communication ports.
