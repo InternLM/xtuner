@@ -158,6 +158,7 @@ class TrainerConfig(BaseModel):
     seed: int = 42
     dist_backend: str | None = None
     debug: bool = False
+    debug_skip_save: bool = False
 
     @model_validator(mode="after")
     def _convert_work_dir(self):
@@ -254,8 +255,8 @@ class Trainer:
         seed: int = 42,
         debug: bool = False,
         backend: str | None = None,
-        trainer_cfg: TrainerConfig | None = None,
         debug_skip_save: bool = False,
+        trainer_cfg: TrainerConfig | None = None,
     ):
         self._dataloader_config = dataloader_cfg
 
@@ -434,6 +435,7 @@ class Trainer:
             seed=config.seed,
             backend=config.dist_backend,
             debug=config.debug,
+            debug_skip_save=config.debug_skip_save,
             trainer_cfg=config,
         )
         self.config = config
