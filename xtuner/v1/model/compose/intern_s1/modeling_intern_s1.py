@@ -256,7 +256,9 @@ class InternS1ForConditionalGeneration(BaseModel):
                 inputs_embeds = split_for_sequence_parallel(inputs_embeds, dim=1, sp_mesh=sequence_parallel_mesh)
 
         else:
-            fake_pixel_values = torch.randn(1, 3, self.image_size, self.image_size, device=inputs_embeds.device)
+            fake_pixel_values = torch.randn(1, 3, self.image_size, self.image_size,
+                                            device=inputs_embeds.device,
+                                            dtype=inputs_embeds.dtype)
             vit_embeds = self.extract_feature(fake_pixel_values)
             inputs_embeds = inputs_embeds + vit_embeds.sum() * 0
 
