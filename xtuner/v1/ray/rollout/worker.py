@@ -146,7 +146,8 @@ class RolloutWorker(SingleAcceleratorWorker):
 
         # note(@duanyanhui): launch server as multiprocessing for sglang temporarily
         if self.config.launch_server_method == "multiprocessing":
-            process = multiprocessing.Process(target=self.server_func, args=(server_configs,))
+            ctx = multiprocessing.get_context('spawn')
+            process = ctx.Process(target=self.server_func, args=(server_configs,))
             process.start()
             self.server_process = process
             time.sleep(60)  # Wait for the server to start
@@ -459,6 +460,7 @@ class RolloutWorker(SingleAcceleratorWorker):
         sample_params: dict = dict(),
         extra_params: dict = dict(),
         format: str = "openai",
+        extra_infos: dict = dict(),
     ) -> RLRolloutResponseItem:
         """Public method to initiate a rollout.
 
@@ -470,7 +472,7 @@ class RolloutWorker(SingleAcceleratorWorker):
             The result of the `rollout_task`.
         """
         return await self.rollout_task(
-            prompt, input_ids, tools, tool_choice, sample_params, extra_params, format=format
+            prompt, input_ids, tools, tool_choice, sample_params, extra_params, format=format, extra_infos=extra_infos
         )
 
     def pause(self):

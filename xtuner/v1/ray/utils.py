@@ -182,6 +182,9 @@ def collect_media_data(prompt: list[dict], extra_infos: dict) -> tuple:
     Returns:
         List[dict]: A list of image data dictionaries.
     """
+    if not isinstance(prompt, list):
+        return [], []
+
     image_paths = []
     video_paths = []
     media_root = extra_infos.get("media_root", "")

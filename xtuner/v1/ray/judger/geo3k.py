@@ -37,7 +37,7 @@ def compute_reward(response, label, extra_info) -> dict:
 class GEO3KJudgerConfig(BaseModel):
     """Configuration for the GEO3K judger."""
 
-    judger_name: str = "geo3k_judger"
+    judger_name: str = "hiyouga/geometry3k"
     extra_info: dict = {"format_score": 0.1, "use_boxed": True}
 
     def build(self):
