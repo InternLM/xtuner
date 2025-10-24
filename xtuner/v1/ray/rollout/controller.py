@@ -199,7 +199,7 @@ class RolloutController:
         extra_params: dict = dict(),
         format: str = "openai",
         session_id: Optional[int] = None,
-        extra_infos: dict = dict()
+        extra_info: dict = dict()
     ) -> RLRolloutResponseItem:
         # 这个函数接受标准的openapi chat create接口，所以不需要再额外定义输入的形式
         """Perform a rollout using one of the workers in a round-robin fashion.
@@ -239,7 +239,7 @@ class RolloutController:
             sample_params=self.sample_params,
             extra_params=self.extra_params,
             format=format,
-            extra_infos=extra_infos
+            extra_info=extra_info
         )
         return await response_ref
 

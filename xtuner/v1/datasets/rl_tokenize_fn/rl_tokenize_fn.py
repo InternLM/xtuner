@@ -35,6 +35,8 @@ class RLTokenizeFn(CachableTokenizeFunction[RLDatasetItem]):
             }
         """
         messages = item["prompt"]
+
+        self.tokenizer_fn.state = self.state
         num_tokens = self.tokenizer_fn({'messages': messages}, **kwargs)["num_tokens"]
         if self.max_length is not None and num_tokens > self.max_length:
             num_tokens = 0  # will be filtered out by the dataset filter

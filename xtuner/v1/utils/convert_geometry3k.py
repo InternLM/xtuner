@@ -38,7 +38,7 @@ if __name__ == "__main__":
     # add a row to each data item that represents a unique id
     def make_map_fn(split):
         def process_fn(example, idx):
-            problem = example.pop("problem").repalce('<image>', '')
+            problem = example.pop("problem").repalce('<image>', '<IMG_CONTEXT>')
             prompt = problem + " " + instruction_following
             answer = example.pop("answer")
             images = example.pop("images")
