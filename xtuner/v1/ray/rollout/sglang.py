@@ -7,7 +7,7 @@ from urllib3.exceptions import NewConnectionError
 
 from transformers import AutoTokenizer
 from xtuner.v1.ray.config import RolloutConfig
-
+from xtuner.v1.ray.utils import collect_media_data
 from .worker import RolloutWorker
 
 
@@ -42,6 +42,7 @@ class SGLangWorker(RolloutWorker):
         tool_choice: str,
         sample_params: dict,
         extra_params: dict,
+        extra_infos: dict
     ):
         headers = {
             "Content-Type": "application/json",
@@ -64,6 +65,12 @@ class SGLangWorker(RolloutWorker):
                         prompt, tokenize=False, add_generation_prompt=True
                     )
                     prompt_token_ids = self.tokenizer(text_prompt, add_special_tokens=False)["input_ids"]
+
+                    image_data, _ = collect_media_data(prompt, extra_infos)
+                    if image_data:
+                        assert len(image_data) == 1, "SGLangWorker only support single image input."
+                        payload["image_data"] = image_data[0]
+
                     payload["input_ids"] = prompt_token_ids
                 payload["sampling_params"] = sglang_sample_params
             else:

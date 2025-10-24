@@ -83,6 +83,7 @@ class LMDeployWorker(RolloutWorker):
         tool_choice: str,  # reserved for agent tool use
         sample_params: dict,
         extra_params: dict,
+        extra_infos: dict
     ):
         """Create and send a streaming generation request to the server.
 

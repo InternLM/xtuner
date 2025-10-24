@@ -3,7 +3,7 @@ import importlib
 import socket
 from asyncio import AbstractEventLoop, Task
 from typing import TYPE_CHECKING, Callable, Coroutine, List, Optional, cast
-
+import os
 import ray
 
 
@@ -170,3 +170,29 @@ def create_task(
     for callback in done_callbacks:
         task.add_done_callback(callback)
     return task
+
+
+def collect_media_data(prompt: list[dict], extra_infos: dict) -> tuple:
+    """Collect image data from the prompt and extra_infos.
+
+    Args:
+        prompt (str): The input prompt containing image placeholders.
+        extra_infos (dict): Additional information containing image URLs.
+
+    Returns:
+        List[dict]: A list of image data dictionaries.
+    """
+    image_paths = []
+    video_paths = []
+    media_root = extra_infos.get("media_root", "")
+    for msg in prompt:
+        if msg["role"] == "user":
+            content = msg["content"]
+            if isinstance(content, list):
+                for c in content:
+                    if c["type"] == "image_url":
+                        image_paths.append(os.path.join(media_root, c["image_url"]["url"]))
+                    if c["type"] == "video_url":
+                        video_paths.append(os.path.join(media_root, c["video_url"]["url"]))
+
+    return image_paths, video_paths

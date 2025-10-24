@@ -55,7 +55,8 @@ class SingleTurnEnvironment(BaseEnvironment):
             # 每个模块返回独立的data item, 在env中进行更新
             response_future = [
                 self.rollout_controller.rollout.remote(
-                    prompt=sample.data.messages, sample_params=sample_params, extra_params=extra_params
+                    prompt=sample.data.messages, sample_params=sample_params, extra_params=extra_params,
+                    extra_infos=sample.data.extra_infos
                 )
                 for sample in group_data_items
             ]

@@ -294,6 +294,7 @@ class RolloutWorker(SingleAcceleratorWorker):
         sample_params: dict,
         extra_params: dict,
         format: str,
+        extra_infos: dict
     ) -> RLRolloutResponseItem:
         uid = str(uuid.uuid4())
         response = None
@@ -326,6 +327,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                     tool_choice,
                     sample_params=sample_params,
                     extra_params=extra_params,
+                    extra_infos=extra_infos
                 )
             else:
                 assert prompts is not None, "prompts should not be None when you call v1/chat/completions API"
@@ -337,6 +339,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                     tool_choice,
                     sample_params=sample_params,
                     extra_params=extra_params,
+                    extra_infos=extra_infos
                 )
             self.logger.debug(f" +++ send request {uid} to worker: {self.rank}")
 
@@ -511,6 +514,7 @@ class RolloutWorker(SingleAcceleratorWorker):
         tool_choice: str,
         sample_params: dict,
         extra_params: dict,
+        extra_infos: dict,
     ):
         """Abstract method to create a generation request.
 
