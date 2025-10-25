@@ -7,7 +7,7 @@ from urllib3.exceptions import NewConnectionError
 
 from transformers import AutoTokenizer
 from xtuner.v1.ray.config import RolloutConfig
-
+from xtuner.v1.ray.utils import replace_image_context_and_collect_media_data
 from .worker import RolloutWorker
 
 
@@ -42,6 +42,7 @@ class SGLangWorker(RolloutWorker):
         tool_choice: str,
         sample_params: dict,
         extra_params: dict,
+        extra_info: dict
     ):
         headers = {
             "Content-Type": "application/json",
@@ -60,10 +61,16 @@ class SGLangWorker(RolloutWorker):
                 if input_ids is not None:
                     payload["input_ids"] = input_ids
                 else:
+                    image_data, _ = replace_image_context_and_collect_media_data(prompt, extra_info)
+                    if image_data:
+                        assert len(image_data) == 1, "SGLangWorker only support single image input."
+                        payload["image_data"] = image_data[0]
+
                     text_prompt = self.tokenizer.apply_chat_template(
                         prompt, tokenize=False, add_generation_prompt=True
                     )
                     prompt_token_ids = self.tokenizer(text_prompt, add_special_tokens=False)["input_ids"]
+
                     payload["input_ids"] = prompt_token_ids
                 payload["sampling_params"] = sglang_sample_params
             else:

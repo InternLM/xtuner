@@ -81,7 +81,7 @@ def compute_reward(response, label, extra_info):
 class GSM8KJudgerConfig(BaseModel):
     """Configuration for the GSM8K judger."""
 
-    judger_name: str = "gsm8k_judger"
+    judger_name: str = "openai/gsm8k"
     extra_info: dict = {"score": 1, "format_score": 0}
 
     def build(self):

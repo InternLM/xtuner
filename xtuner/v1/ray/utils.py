@@ -3,9 +3,8 @@ import importlib
 import socket
 from asyncio import AbstractEventLoop, Task
 from typing import TYPE_CHECKING, Callable, Coroutine, List, Optional, cast
-
+import os
 import ray
-
 
 if TYPE_CHECKING:
     import ray.actor
@@ -102,8 +101,8 @@ def get_accelerator_ids(accelerator: str) -> list:
 
 
 def bind_train_rollout(
-    train_workers,
-    rollout_controller,
+        train_workers,
+        rollout_controller,
 ) -> None:
     """Bind the training and rollout workers for updating weights.
 
@@ -141,9 +140,9 @@ def handle_task_exception(task: Task):
 
 
 def create_task(
-    coro: Coroutine,
-    loop: Optional[AbstractEventLoop] = None,
-    done_callbacks: Optional[List[Callable[[Task], object]]] = None,
+        coro: Coroutine,
+        loop: Optional[AbstractEventLoop] = None,
+        done_callbacks: Optional[List[Callable[[Task], object]]] = None,
 ) -> asyncio.tasks.Task:
     """Creates and configures an asyncio Task.
 
@@ -170,3 +169,35 @@ def create_task(
     for callback in done_callbacks:
         task.add_done_callback(callback)
     return task
+
+
+def replace_image_context_and_collect_media_data(prompt: list[dict], extra_info: dict) -> tuple:
+    """Collect image data from the prompt and extra_info.
+
+    Args:
+        prompt (str): The input prompt containing image placeholders.
+        extra_info (dict): Additional information containing image URLs.
+
+    Returns:
+        List[dict]: A list of image data dictionaries.
+    """
+    if not isinstance(prompt, list):
+        return [], []
+
+    image_paths = []
+    video_paths = []
+    media_root = extra_info.get("media_root", "")
+    for msg in prompt:
+        if msg["role"] == "user":
+            content = msg["content"]
+            if isinstance(content, list):
+                for c in content:
+                    if c["type"] == "image_url":
+                        image_paths.append(os.path.join(media_root, c["image_url"]["url"]))
+                    elif c["type"] == "video_url":
+                        video_paths.append(os.path.join(media_root, c["video_url"]["url"]))
+                    elif c["type"] == "text":
+                        _c = c['text']
+                        c['text'] = _c.replace('<IMG_CONTEXT>', '')
+
+    return image_paths, video_paths
