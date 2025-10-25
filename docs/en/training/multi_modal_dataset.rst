@@ -1,2 +1,0 @@
-Multi-modal Dataset
-===================
