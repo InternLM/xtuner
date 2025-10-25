@@ -3,6 +3,7 @@ import io
 import os
 import random
 import re
+import time
 from typing import Literal
 
 import cv2
@@ -87,13 +88,18 @@ def read_frames_folder(
     min_num_frames=4,
     random_frame_num=None,
 ):
+    oss_read_time = 0
     if "s3://" in video_path:
         assert client is not None, "client should be provided for s3 backend"
         image_list = sort_frames(client.list(video_path))
         image_list = [os.path.join(video_path.split(image.split("/")[0])[0], image) for image in image_list]
         frames = []
+
         for image in image_list:
-            frame = Image.open(io.BytesIO(client.get(image)))
+            start_time = time.time()
+            image_byte = client.get(image)
+            oss_read_time += time.time() - start_time
+            frame = Image.open(io.BytesIO(image_byte))
             frames.append(frame)
     else:
         image_list = sort_frames(list(os.listdir(video_path)))
@@ -112,7 +118,7 @@ def read_frames_folder(
     if vlen > t_num_frames:
         frame_indices = get_frame_indices(t_num_frames, vlen, sample=sample, fix_start=fix_start)
         frames = [frames[i] for i in frame_indices]
-    return frames
+    return frames, oss_read_time, vlen
 
 
 def read_frames_gif(
@@ -151,12 +157,18 @@ def read_frames_decord(
     min_num_frames=4,
     random_frame_num=None,
 ):
+    decord_video_threads = int(os.getenv("XTUNER_DECORD_VIDEO_THREADS", 0))
+    start_time = time.time()
+    oss_read_time = 0
     if "s3://" in video_path:
         assert client is not None, "client should be provided for s3 backend"
         video_bytes = client.get(video_path)
-        video_reader = VideoReader(io.BytesIO(video_bytes), num_threads=1)
+        oss_read_time = time.time() - start_time
+        video_reader = VideoReader(io.BytesIO(video_bytes), num_threads=decord_video_threads)
+        start_time = time.time()
     else:
-        video_reader = VideoReader(video_path, num_threads=1)
+        video_reader = VideoReader(video_path, num_threads=decord_video_threads)
+        start_time = time.time()
     vlen = len(video_reader)
     fps = video_reader.get_avg_fps()
     duration = vlen / float(fps)
@@ -176,15 +188,28 @@ def read_frames_decord(
     if clip:
         frame_indices = [f + start_index for f in frame_indices]
     frames = video_reader.get_batch(frame_indices).asnumpy()  # (T, H, W, C), np.uint8
+    video_get_batch_time = time.time() - start_time
     frames = [Image.fromarray(frames[i]) for i in range(frames.shape[0])]
-    return frames
+    return frames, oss_read_time, video_get_batch_time, vlen
 
 
 def read_interns1_vl_video(
-    path, min_num_frames, max_num_frames, random_frame_num, sample="rand", clip=None, client=None
+    path,
+    min_num_frames,
+    max_num_frames,
+    random_frame_num,
+    sample="rand",
+    clip=None,
+    client=None,
+    debug=False,
+    oss_time_log_thr=10,
 ):
+    start_time = time.time()
+    oss_read_time = 0
+    vlen = 0
+    video_get_batch_time = 0
     if path.endswith("/"):
-        frames = read_frames_folder(
+        frames, oss_read_time, vlen = read_frames_folder(
             path,
             num_frames=max_num_frames,
             min_num_frames=min_num_frames,
@@ -212,7 +237,7 @@ def read_interns1_vl_video(
         or path.endswith(".rmvb")
         or path.endswith(".ts")
     ):
-        frames = read_frames_decord(
+        frames, oss_read_time, video_get_batch_time, vlen = read_frames_decord(
             path,
             num_frames=max_num_frames,
             min_num_frames=min_num_frames,
@@ -223,6 +248,12 @@ def read_interns1_vl_video(
         )
     else:
         raise ValueError(f"Unsupported video format: {path}")
+    end_time = time.time() - start_time
+    if debug and end_time > oss_time_log_thr:
+        print(
+            f"[Warning] OSS read video {path} cost {end_time} seconds, "
+            f"oss_read_time {oss_read_time}, video_get_batch_time {video_get_batch_time}, vlen {vlen}"
+        )
     return frames
 
 
@@ -235,8 +266,12 @@ class InternS1VLOSSLoader:
             cls._instance = super().__new__(cls)
         return cls._instance
 
-    def __init__(self, backend: Literal["petrel"] = "petrel", **kwargs):
+    def __init__(
+        self, backend: Literal["petrel"] = "petrel", debug: bool = False, oss_time_log_thr: int = 10, **kwargs
+    ):
         self.client = get_oss_backend(backend, **kwargs)
+        self.debug = debug
+        self.oss_time_log_thr = oss_time_log_thr
 
     def __call__(
         self,
@@ -249,7 +284,12 @@ class InternS1VLOSSLoader:
         random_frame_num=None,
     ):
         if image_type == "image":
+            start_time = time.time()
             img_value_str = self.client.get(path)
+            if self.debug:
+                end_time = time.time()
+                if end_time - start_time > self.oss_time_log_thr:
+                    print(f"[Warning] OSS read one image {path} cost {end_time - start_time} seconds")
             img = pil_loader(img_value_str)
             return img
 
@@ -262,4 +302,6 @@ class InternS1VLOSSLoader:
                 sample=sample,
                 clip=clip,
                 client=self.client,
+                debug=self.debug,
+                oss_time_log_thr=self.oss_time_log_thr,
             )

@@ -1,3 +1,3 @@
-{"content": "Stay hydrated by drinking plenty of water throughout the day.\n"}
-{"content": "Incorporate regular physical activity into your routine, such as walking or exercising.\n"}
-{"content": "Eat a balanced diet rich in fruits, vegetables, whole grains, and lean proteins.\n"}
+{"messages": [{"role": "pretrain", "content": "Stay hydrated by drinking plenty of water throughout the day.\n"}]}
+{"messages": [{"role": "pretrain", "content": "Incorporate regular physical activity into your routine, such as walking or exercising.\n"}]}
+{"messages": [{"role": "pretrain", "content": "Eat a balanced diet rich in fruits, vegetables, whole grains, and lean proteins.\n"}]}
