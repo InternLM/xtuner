@@ -213,7 +213,7 @@ def flash_attention(q, k, v, window_size=(-1, -1), s_aux=None, **kwargs) -> torc
         if flash_attn_exception is not None:
             traceback.print_exception(flash_attn_exception)
             raise flash_attn_exception
-        attention_output = flash_attn_varlen_func(q, k, v, **kwargs)
+        attention_output = flash_attn_varlen_func(q, k, v, window_size=window_size, **kwargs)
     else:
         if flash_sink_attn_exception is not None:
             traceback.print_exception(flash_sink_attn_exception)
