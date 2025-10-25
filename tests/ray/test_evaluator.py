@@ -90,7 +90,7 @@ class TestEvaluator(unittest.TestCase):
         evaluator_cfg = EvaluatorConfig(
             dataset_cfg=self.eval_dataset_cfg,
             tokenizer=self.tokenizer,
-            max_concurrent=16,
+            max_concurrent=1,
             eval_sample_ratio=0.004,  # generate 5 samples
             compute_metric_func=None,
             sample_params=self.sample_params
@@ -100,7 +100,7 @@ class TestEvaluator(unittest.TestCase):
         custom_evaluator_cfg = EvaluatorConfig(
             dataset_cfg=self.eval_dataset_cfg,
             tokenizer=self.tokenizer,
-            max_concurrent=16,
+            max_concurrent=1,
             eval_sample_ratio=0.004,  # generate 5 samples
             compute_metric_func=custom_compute_metric,
             sample_params=self.sample_params
