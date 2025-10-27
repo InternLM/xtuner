@@ -15,12 +15,14 @@ from xtuner.v1.config.fsdp import FSDPConfig
 from xtuner.v1.config.optim import LRConfig, OptimConfig
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.engine.train_engine import TrainEngine
+from xtuner.v1.engine.vision_compose_train_engine import VisionComposeTrainEngine
 from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.model.base import ModelItem, TransformerConfig
 from xtuner.v1.ray.accelerator import SingleAcceleratorWorker
 from xtuner.v1.ray.config import RolloutConfig
 from xtuner.v1.rl.utils import gather_logprobs
 from xtuner.v1.utils import ParallelConfigException, get_device, get_logger, get_torch_device_module
+from xtuner.v1.engine.vision_compose_train_engine import VisionComposeConfigProtocol
 
 from ..loss_fn import kl_penalty
 from .loss import BaseRLLossConfig, RLLossContextInputItem
@@ -99,7 +101,7 @@ class WorkerConfig(BaseModel):
     """
 
     model_config = ConfigDict(title="Worker config", extra="allow", arbitrary_types_allowed=True)
-    model_cfg: TransformerConfig
+    model_cfg: TransformerConfig | VisionComposeConfigProtocol
     optim_cfg: OptimConfig
     loss_cfg: BaseRLLossConfig
     lr_cfg: LRConfig
@@ -166,37 +168,57 @@ class TrainingWorker(SingleAcceleratorWorker):
         else:
             self.logger = get_logger()
 
-    def _build_engine(self, worker_cfg: WorkerConfig) -> TrainEngine:
-        engine = TrainEngine(
-            optim_cfg=worker_cfg.optim_cfg,
-            fsdp_cfg=worker_cfg.fsdp_cfg,
-            model_cfg=worker_cfg.model_cfg,
-        )
+    def _build_engine(self, worker_cfg: WorkerConfig) -> TrainEngine | VisionComposeTrainEngine:
+        if isinstance(worker_cfg.model_cfg, VisionComposeConfigProtocol):
+            engine = VisionComposeTrainEngine(
+                optim_cfg=worker_cfg.optim_cfg,
+                fsdp_cfg=worker_cfg.fsdp_cfg,
+                model_cfg=worker_cfg.model_cfg,
+            )
+        else:
+            engine = TrainEngine(  # type: ignore
+                optim_cfg=worker_cfg.optim_cfg,
+                fsdp_cfg=worker_cfg.fsdp_cfg,
+                model_cfg=worker_cfg.model_cfg,
+            )
+
         if worker_cfg.load_from is not None:
             engine.from_hf(worker_cfg.load_from)
-
+        # TODO: support resume
         return engine
 
     def _build_ref_model(
-        self, ref_model_cfg: TransformerConfig, load_from: str | Path, ref_model_fsdp_cfg: FSDPConfig | None = None
+        self, ref_model_cfg: TransformerConfig | VisionComposeConfigProtocol, load_from: str | Path, ref_model_fsdp_cfg: FSDPConfig | None = None
     ):
+        # TODO: 需要重构，使得能更优雅的兼容 mllm
         with torch.device("meta"):
             model = ref_model_cfg.build()
-        if ref_model_cfg.float8_cfg is not None and ref_model_cfg.float8_cfg.enable_float8:
-            float8_handler = Float8Handler(
-                scaling_granularity_gemm=ref_model_cfg.float8_cfg.scaling_granularity_gemm,
-                scaling_granularity_grouped_gemm=ref_model_cfg.float8_cfg.scaling_granularity_grouped_gemm,
-            )
+
+        if isinstance(ref_model_cfg, VisionComposeConfigProtocol):
+            assert ref_model_cfg.text_config.float8_cfg is None,  "VisionComposeConfigProtocol does not support float8"
+            model.language_model.fully_shard(ref_model_fsdp_cfg)
+            model.vision_tower.fully_shard(ref_model_fsdp_cfg)
+            model.multi_modal_projector.fully_shard(ref_model_fsdp_cfg)
+            model = model.fully_shard(ref_model_fsdp_cfg)
+            model.from_hf(hf_path=load_from)
+            model.eval()
         else:
-            float8_handler = None
-        if ref_model_fsdp_cfg is None:
-            ref_model_fsdp_cfg = FSDPConfig(recompute_ratio=0, cpu_offload=False, requires_grad=False)
-        model = model.fully_shard(ref_model_fsdp_cfg, float8_handler)
-        model.from_hf(hf_path=load_from)
-        model.eval()
-        if float8_handler is not None:
-            # As the ref model is not updated, we only compute params' scales once
-            float8_handler.precompute_float8_dynamic_scale_for_fsdp(model)
+            if ref_model_cfg.float8_cfg is not None and ref_model_cfg.float8_cfg.enable_float8:
+                float8_handler = Float8Handler(
+                    scaling_granularity_gemm=ref_model_cfg.float8_cfg.scaling_granularity_gemm,
+                    scaling_granularity_grouped_gemm=ref_model_cfg.float8_cfg.scaling_granularity_grouped_gemm,
+                )
+            else:
+                float8_handler = None
+            if ref_model_fsdp_cfg is None:
+                ref_model_fsdp_cfg = FSDPConfig(recompute_ratio=0, cpu_offload=False, requires_grad=False)
+            model = model.fully_shard(ref_model_fsdp_cfg, float8_handler)
+
+            model.from_hf(hf_path=load_from)
+            model.eval()
+            if float8_handler is not None:
+                # As the ref model is not updated, we only compute params' scales once
+                float8_handler.precompute_float8_dynamic_scale_for_fsdp(model)
         model.to_device("cpu")
         DEVICE_MODULE.empty_cache()  # type: ignore
         return model

@@ -10,7 +10,7 @@ logger = get_logger()
 
 class RLTokenizeFn(CachableTokenizeFunction[RLDatasetItem]):
     def __init__(self, tokenizer_fn: CachableTokenizeFunction, max_length: int | None = None, is_training: bool = True):
-        super().__init__()
+        super().__init__(tokenizer_fn.tokenizer)
         self.tokenizer_fn = tokenizer_fn
         self.max_length = max_length
         self.is_training = is_training
@@ -42,6 +42,8 @@ class RLTokenizeFn(CachableTokenizeFunction[RLDatasetItem]):
             extra_info['media_root'] = media_root
 
         messages = item["prompt"]
+        raw_prompt = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+        extra_info['raw_prompt'] = raw_prompt
 
         self.tokenizer_fn.state = self.state
         if not self.is_training:

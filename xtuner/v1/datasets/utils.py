@@ -23,7 +23,8 @@ class CacheObj(TypedDict, total=False):
 
 
 class CachableTokenizeFunction(ABC, Generic[T]):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, tokenizer, *args, **kwargs):
+        self.tokenizer = tokenizer
         self.state = "runtime"
 
     @abstractmethod
