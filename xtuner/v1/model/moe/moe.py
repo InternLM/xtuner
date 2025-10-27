@@ -873,6 +873,7 @@ class MoE(BaseModel):
             w = self.weight.to_local()
         else:
             w = self.weight
+        # print(f"Embedding forward args: type(self)={type(self)}, padding_idx={self.padding_idx}, max_norm={self.max_norm}, norm_type={self.norm_type}, scale_grad_by_freq={self.scale_grad_by_freq}, sparse={self.sparse}, self={str(self)}")
         return F.embedding(
             input,
             w,
