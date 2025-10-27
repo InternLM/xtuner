@@ -11,7 +11,7 @@ class OptimConfig(BaseModel):
     lr: Annotated[float, Parameter(help="Learning rate for optimization")] = 1e-5
     max_grad_norm: Annotated[float, Parameter(help="Maximum gradient norm for gradient clipping")] = 1.0
     skip_grad_norm_threshold: Annotated[
-        Optional[float], Parameter(help="Gradient norm threshold for skipping optimizer step.")
+        float | None, Parameter(help="Gradient norm threshold for skipping optimizer step.")
     ] = None
 
     @abstractmethod
