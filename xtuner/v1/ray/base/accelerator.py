@@ -368,7 +368,7 @@ class AutoAcceleratorWorkers:
                 for the accelerator resources.
 
         Returns:
-            Tuple[List[T], List[Tuple[int, int]]]: A tuple containing a list
+            Tuple[List[T], List[Tuple[int, int]], PlacementGroup]: A tuple containing a list
                 of worker instances, a list of their corresponding
                 (rank, bundle_index) and placement group.
         """
