@@ -12,7 +12,9 @@ import torch
 from mmengine import load
 from mmengine.dist import get_rank
 from mmengine.runner import set_random_seed
+from pydantic import BaseModel, field_serializer, model_validator
 from ray.actor import ActorClass
+from typing_extensions import Self
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1.data_proto.sequence_context import SequenceContext
@@ -22,9 +24,6 @@ from xtuner.v1.ray.dataflow import DataFlow, DataFlowConfig, ReplayBufferConfig
 from xtuner.v1.ray.environment import SingleTurnEnvironment
 from xtuner.v1.ray.evaluator import Evaluator, EvaluatorConfig
 from xtuner.v1.ray.judger import JudgerConfig
-
-# from xtuner.v1.rl.base.controller import TrainingController
-# from xtuner.v1.rl.base.worker import TrainingWorker, WorkerConfig
 from xtuner.v1.rl.base import TrainingController, WorkerConfig
 from xtuner.v1.rl.base import TrainingWorker as BaseTrainingWorker
 from xtuner.v1.train import ResumeConfig
@@ -47,6 +46,50 @@ def bind_train_rollout(
     info_dict = ray.get(env_controller.get_rollout_info.remote())  # type: ignore[attr-defined]
     ray.get(train_controller.update_rollout_info.remote(info_dict))
     return
+
+
+class RLTrainerConfig(BaseModel):
+    load_from: str | Path
+    resources: AcceleratorResourcesConfig
+    rollout_config: RolloutConfig
+    dataflow_config: DataFlowConfig
+    judger_config: JudgerConfig
+    replay_buffer_config: ReplayBufferConfig
+    train_worker_config: WorkerConfig
+    evaluator_config: EvaluatorConfig | None = None
+    tokenizer_path: str | Path
+    work_dir: Path | str | None = None
+    log_dir: Path | str | None = None
+    total_epochs: int
+    resume_config: ResumeConfig | None = None
+    strict_load: bool = True
+    hf_interval: int | None = None
+    hf_max_keep: int | None = None
+    seed: int = 42
+    debug: bool = False
+
+    @model_validator(mode="after")
+    def _convert_work_dir(self):
+        if isinstance(self.work_dir, str):
+            self.work_dir = Path(self.work_dir)
+        elif self.work_dir is None:
+            self.work_dir = Path.cwd()
+        return self
+
+    @field_serializer("replay_buffer_config")
+    def serialize_replay_buffer_cfg(self, replay_buffer_config: ReplayBufferConfig) -> str:
+        return replay_buffer_config.model_dump(include={"replay_ratio", "replay_weights"})
+
+    @field_serializer("evaluator_config")
+    def serialize_evaluator_cfg(self, evaluator_config: EvaluatorConfig) -> str:
+        if evaluator_config:
+            return evaluator_config.model_dump(exclude={"tokenizer", "dataset_cfg", "compute_metric_func"})
+        else:
+            return ""
+
+    @field_serializer("judger_config")
+    def serialize_judger_config(self, judger_config: JudgerConfig) -> str:
+        return judger_config.model_dump(exclude={"tokenizer", "reward_func"})
 
 
 class RLTrainer:
@@ -137,14 +180,13 @@ class RLTrainer:
         work_dir: Path | str | None = None,
         log_dir: Path | str | None = None,
         total_epochs: int,
-        enable_evaluate: bool,
-        enable_initial_evaluate: bool = False,
         resume_config: ResumeConfig | None = None,
         strict_load: bool = True,
         hf_interval: int | None = None,
         hf_max_keep: int | None = None,
         seed: int = 42,
         debug: bool = False,
+        trainer_cfg: RLTrainerConfig | None = None,
     ):
         """Initialize the RL training system."""
         # TODO
@@ -154,6 +196,7 @@ class RLTrainer:
         self._total_epochs = total_epochs
         self._cur_step = 0
 
+        self._rl_trainer_cfg = trainer_cfg
         self._load_from = Path(load_from) if isinstance(load_from, str) else load_from
         self._load_from_hf = load_from is not None and is_hf_model_path(load_from)
         if not self._load_from_hf:
@@ -171,8 +214,6 @@ class RLTrainer:
 
         self._debug = debug
         self._seed = seed
-        self._enable_evaluate = enable_evaluate
-        self._enable_initial_evaluate = enable_initial_evaluate
         self._set_deterministic()
         self._set_random_seed(seed)
 
@@ -197,9 +238,12 @@ class RLTrainer:
         train_worker_cfg.log_dir = log_dir
         dataflow_config.worker_log_dir = log_dir
         rollout_config.worker_log_dir = log_dir
+        self._enable_evaluate = False
+        self._enable_initial_evaluate = False
         if evaluator_config:
             evaluator_config.worker_log_dir = log_dir
-
+            self._enable_evaluate = evaluator_config.enable_evaluate
+            self._enable_initial_evaluate = evaluator_config.enable_initial_evaluate
         self._pg = AutoAcceleratorWorkers.build_placement_group(resources)
         # We need to build train controller first, and then build rollout dataflow to make
         # inference engines know how much memory they can utilize.
@@ -227,6 +271,49 @@ class RLTrainer:
         ray.get(self._train_controller.offload.remote(target="all"))
 
         self._train_worker_cfg = train_worker_cfg
+
+        if self._rl_trainer_cfg is not None and get_rank() == 0:
+            config_path = log_dir / "rl_trainer_config.json"
+            with config_path.open("w") as f:
+                f.write(self._rl_trainer_cfg.model_dump_json(indent=2))
+
+            env_path = log_dir / "env.json"
+            environment_variables = dict(os.environ)
+            with env_path.open("w") as f:
+                json.dump(environment_variables, f, indent=2)
+
+    @classmethod
+    def from_config(cls, config: RLTrainerConfig) -> Self:
+        """Create a Trainer instance from a TrainerConfig.
+
+        Args:
+            config (TrainerConfig): TrainerConfig instance containing all configuration parameters.
+
+        Returns:
+            Self: Trainer instance initialized with the provided config.
+        """
+        self = cls(
+            load_from=config.load_from,
+            resources=config.resources,
+            rollout_config=config.rollout_config,
+            dataflow_config=config.dataflow_config,
+            judger_config=config.judger_config,
+            replay_buffer_config=config.replay_buffer_config,
+            train_worker_cfg=config.train_worker_config,
+            evaluator_config=config.evaluator_config,
+            tokenizer_path=config.tokenizer_path,
+            work_dir=config.work_dir,
+            log_dir=config.log_dir,
+            total_epochs=config.total_epochs,
+            resume_config=config.resume_config,
+            strict_load=config.strict_load,
+            hf_interval=config.hf_interval,
+            hf_max_keep=config.hf_max_keep,
+            seed=config.seed,
+            debug=config.debug,
+            trainer_cfg=config,
+        )
+        return self
 
     def _build_rollout_dataflow(
         self,
@@ -272,6 +359,7 @@ class RLTrainer:
             self._save_trajectories(eval_data_groups, trajectory_save_path)
             self.logger.info(f"Initial rollout evaluate scores {scores} and start training")
         for rollout_idx in range(1, self._rollout_steps + 1):
+            timer_log_str = f"Rollout {rollout_idx} start \n"
             step_timer_dict = {}
             # 1. Rollout
             with timer("generation", step_timer_dict):
@@ -310,7 +398,7 @@ class RLTrainer:
                 ray.get(self._train_controller.offload.remote(target="model"))
                 ray.get(self._rollout_env_controller.onload_kvcache.remote())
 
-            timer_log_str = f"Rollout {rollout_idx} timing: \n"
+            timer_log_str = f"Rollout {rollout_idx} training finished and timing listed: \n"
             timer_log_str += timer_logger(step_timer_dict)
 
             self.logger.info(timer_log_str)

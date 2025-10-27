@@ -214,7 +214,7 @@ def qwen3_vl_sft_collator(
         position_ids = torch.cat([i["position_ids"] for i in instance], dim=-1)
         input_ids = input_ids[:, :-1]
         shifted_labels = labels[:, 1:]
-        position_ids = position_ids[:, :-1]
+        position_ids = position_ids[:, :, :-1]
         num_tokens = [i["num_tokens"] for i in instance]
         if num_tokens[-1] == 1:
             num_tokens = num_tokens[:-1]  # remove the last sample if it is a single token

@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Any, List, Protocol, cast, runtime_checkable
+from typing import List, Protocol, cast, runtime_checkable
 
 import torch
 import torch.distributed as dist
@@ -16,6 +16,7 @@ from xtuner.v1.loss import BaseLossContext
 from xtuner.v1.model.base import BaseModel as XTunerBaseModel
 from xtuner.v1.model.base import ModelItem, ModelOutputs, TransformerConfig
 from xtuner.v1.model.moe.moe import MoEModelOutputs
+from xtuner.v1.model.utils import ModelForwardExtraLogInfo
 from xtuner.v1.module.router import NoAuxRouterConfig
 from xtuner.v1.utils import get_device, get_logger, get_torch_device_module
 
@@ -170,11 +171,12 @@ class VisionComposeTrainEngine(TrainEngine):
             tokens_per_expert_global_for_bias = torch.tensor(0, device=DEVICE)
 
         step_loss = torch.tensor(0.0, device=DEVICE)
+        step_llm_loss = torch.tensor(0.0, device=DEVICE)
         step_balancing_loss: torch.Tensor | None = None
         step_z_loss: torch.Tensor | None = None
         step_consumed_tokens = torch.tensor(0.0, device=DEVICE)
 
-        extra_info_dict: dict[str, list[Any]] = {}
+        train_engine_extra_info = ModelForwardExtraLogInfo()
         for i in range(0, len(data_batches), intra_layer_micro_batch):
             data_batch = data_batches[i : i + intra_layer_micro_batch]
             seq_ctx_list = []
@@ -190,15 +192,11 @@ class VisionComposeTrainEngine(TrainEngine):
             output = self.model(seq_ctx=seq_ctx_list[0], loss_ctx=loss_ctx_list[0])
             # llm loss has been global averaged
             llm_loss = output["loss"]
-            step_loss += llm_loss.detach().clone()
+            step_llm_loss += llm_loss.detach().clone()
 
             loss = llm_loss
             if "extra_info" in output:
-                for k, v in output["extra_info"].items():
-                    if k in extra_info_dict:
-                        extra_info_dict[k].append(v)
-                    else:
-                        extra_info_dict[k] = [v]
+                train_engine_extra_info.append(output["extra_info"])
 
             if "balancing_loss" in output:
                 output = cast(MoEModelOutputs, output)
@@ -220,6 +218,7 @@ class VisionComposeTrainEngine(TrainEngine):
 
             del output
             loss.backward()
+            step_loss += loss.detach().clone()
 
         if moe_need_update_bias:
             avg_count_load = tokens_per_expert_global_for_bias.float().mean(1)
@@ -229,9 +228,10 @@ class VisionComposeTrainEngine(TrainEngine):
             self.model.language_model.update_bias(tokens_per_expert_global_for_bias, avg_count_load)  # type: ignore
             other_log["maxvio"] = maxvio.item()
 
-        reduced_llm_loss = step_loss
+        reduced_llm_loss = step_llm_loss
         dist.all_reduce(reduced_llm_loss.div_(dist.get_world_size()))
 
+        loss_log["total_loss"] = step_loss.item()
         loss_log["reduced_llm_loss"] = reduced_llm_loss.item()
         if step_balancing_loss is not None:
             reduced_balancing_loss = step_balancing_loss
@@ -242,5 +242,5 @@ class VisionComposeTrainEngine(TrainEngine):
             dist.all_reduce(reduced_z_loss.div_(dist.get_world_size()))
             loss_log["reduced_z_loss"] = reduced_z_loss.item()
         other_log["consumed_tokens"] = step_consumed_tokens.item()
-        other_log["extra_info"] = extra_info_dict  # type: ignore[assignment]
+        other_log["extra_info"] = train_engine_extra_info  # type: ignore[assignment]
         return loss_log, other_log

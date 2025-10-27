@@ -34,6 +34,7 @@ from xtuner.v1.engine.vision_compose_train_engine import VisionComposeConfigProt
 from xtuner.v1.loss import CELossConfig
 from xtuner.v1.loss.ce_loss import CELossContextInputItem
 from xtuner.v1.model.base import ModelItem, TransformerConfig
+from xtuner.v1.model.utils import ModelForwardExtraLogInfo
 from xtuner.v1.patch import patch_default_save_plan
 from xtuner.v1.profiler import profiling_memory, profiling_time
 from xtuner.v1.utils import (
@@ -157,6 +158,7 @@ class TrainerConfig(BaseModel):
     seed: int = 42
     dist_backend: str | None = None
     debug: bool = False
+    debug_skip_save: bool = False
 
     @model_validator(mode="after")
     def _convert_work_dir(self):
@@ -253,6 +255,7 @@ class Trainer:
         seed: int = 42,
         debug: bool = False,
         backend: str | None = None,
+        debug_skip_save: bool = False,
         trainer_cfg: TrainerConfig | None = None,
     ):
         self._dataloader_config = dataloader_cfg
@@ -384,6 +387,10 @@ class Trainer:
         if self._can_save_hf and self._hf_interval is None:
             self._hf_interval = self.total_step
 
+        if debug_skip_save:
+            self._hf_interval = None
+            self._checkpoint_interval = None
+
         if self._resume_cfg.resume_from is not None:
             self._resume()
 
@@ -428,6 +435,7 @@ class Trainer:
             seed=config.seed,
             backend=config.dist_backend,
             debug=config.debug,
+            debug_skip_save=config.debug_skip_save,
             trainer_cfg=config,
         )
         self.config = config
@@ -489,11 +497,13 @@ class Trainer:
             step_time = time_after_train_step - time_before_train_step
             step_consumed_tokens = other_log["consumed_tokens"]
 
-            if "log_rank_loss" in other_log.get("extra_info", {}):
-                log_rank_loss = 0.0
-                for item in other_log["extra_info"]["log_rank_loss"]:
-                    log_rank_loss += item.item()
-                loss_log["loss"] = log_rank_loss
+            extra_info = other_log.get("extra_info", {})
+            if isinstance(extra_info, ModelForwardExtraLogInfo):
+                extra_info_dict = extra_info.get()
+            else:
+                extra_info_updated = ModelForwardExtraLogInfo(extra_info)
+                extra_info_dict = extra_info_updated.get()
+            loss_log.update(extra_info_dict)
 
             self._cur_step += 1
             self._consumed_tokens += step_consumed_tokens
@@ -1007,19 +1017,19 @@ class Trainer:
         eta_seconds = remaining_tokens / tgs
         eta_hms = str(timedelta(seconds=int(eta_seconds)))
 
-        loss_log_list = [f"{k}: {v:.3f}" for k, v in loss_log.items()]
+        loss_log_list = [f"{k}: {v:.8f}" for k, v in loss_log.items()]
         loss_log_str = ", ".join(loss_log_list)
 
         max_memory = DEVICE_MODULE.max_memory_allocated()  # type: ignore[attr-defined]
         reserved_memory = DEVICE_MODULE.max_memory_reserved()  # type: ignore[attr-defined]
 
         self.logger.info(
-            f"Step {self.cur_step}/{self.total_step} data_time: {data_time:.4f} lr: {lr:.6f} time: {step_time:.4f} "
+            f"Step {self.cur_step}/{self.total_step} data_time: {data_time:.4f} lr: {lr:.6e} time: {step_time:.4f} "
             f"text_tokens: {step_consumed_tokens} "
             f"{loss_log_str} "
             f"max_memory: {max_memory / (1024**3):.2f} GB "
             f"reserved_memory: {reserved_memory / (1024**3):.2f} GB "
-            f"grad_norm: {grad_norm:.3f} "
+            f"grad_norm: {grad_norm:.8f} "
             f"tgs: {tgs:.1f} "
             f"e2e_tgs: {e2e_tgs:.1f} "
             f"eta: {eta_hms} "

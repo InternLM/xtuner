@@ -49,6 +49,8 @@ def to_hf_key_list_wrapper(fn: Callable[[str], list[str]], convertor: Callable[[
 
 
 class InternS1ForConditionalGeneration(BaseModel):
+    config: InternS1BaseConfig
+
     def __init__(self, config: InternS1BaseConfig):
         super().__init__()
         self.config = config
@@ -57,9 +59,10 @@ class InternS1ForConditionalGeneration(BaseModel):
 
         vision_config = config.vision_config
         text_config = config.text_config
+        projector_config = config.projector_config
 
         self.vision_tower = InternS1VisionModel(vision_config)
-        self.multi_modal_projector = InternS1MultiModalProjector(config)
+        self.multi_modal_projector = InternS1MultiModalProjector(projector_config)
 
         self.language_model = text_config.build()
 

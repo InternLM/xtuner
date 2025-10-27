@@ -27,7 +27,7 @@ QWEN3_PATH = os.environ["QWEN3_PATH"]
 
 class TestGRPOTrain(unittest.TestCase):
     def setUp(self):
-        ray.init(num_cpus=70, ignore_reinit_error=True)
+        ray.init(num_cpus=80, ignore_reinit_error=True)
 
         resources = AcceleratorResourcesConfig(
             accelerator="GPU",

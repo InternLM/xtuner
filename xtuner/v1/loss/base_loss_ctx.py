@@ -1,6 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from abc import ABC, abstractmethod
-from typing import Annotated, Generic, Literal, TypeVar
+from typing import Annotated, Any, Generic, Literal, TypeVar
 
 import torch
 import torch.distributed as dist
@@ -106,7 +106,7 @@ class BaseLossContext(nn.Module, ABC, Generic[LossContextInputItem]):
         head_weight: torch.Tensor,
         head_bias: torch.Tensor | None,
         loss_kwargs: BaseLossKwargs,
-    ) -> tuple[torch.Tensor, tuple[torch.Tensor | None, dict[str, list[torch.Tensor]]]]:
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor | None, dict[str, Any]]]:
         """Step 2.a and 2.b in the loss calculation."""
         ...
 
@@ -139,7 +139,7 @@ class BaseLossContext(nn.Module, ABC, Generic[LossContextInputItem]):
         hidden_states: torch.Tensor,
         head_weight: torch.Tensor,
         head_bias: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, tuple[torch.Tensor | None, dict[str, list[torch.Tensor]]]]:
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor | None, dict[str, Any]]]:
         assert self.loss_kwargs is not None, "loss_kwargs must be set before calling forward"
         if head_bias is not None:
             raise NotImplementedError("Loss does not support head_bias yet.")
@@ -151,7 +151,7 @@ class BaseLossContext(nn.Module, ABC, Generic[LossContextInputItem]):
 
         extra_info["log_rank_loss"] = loss.detach().clone()
 
-        # Step 2.c in the loss calculation
+        # Step 2.c in the loss calculation: reduce the loss over all ranks using all_reduce with autograd support
         if dist.is_initialized():
             loss = all_reduce(loss, op=dist.ReduceOp.SUM, group=dist.group.WORLD)
 

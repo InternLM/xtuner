@@ -24,9 +24,10 @@ class InternVLForConditionalGeneration(InternS1ForConditionalGeneration):
 
         vision_config = config.vision_config
         text_config = config.text_config
+        projector_config= config.projector_config
 
         self.vision_tower = InternVLVisionModel(vision_config)
-        self.multi_modal_projector = InternVLMultiModalProjector(config)
+        self.multi_modal_projector = InternVLMultiModalProjector(projector_config)
 
         self.language_model = text_config.build()
 

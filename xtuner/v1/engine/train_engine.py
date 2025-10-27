@@ -28,6 +28,7 @@ from xtuner.v1.config import FSDPConfig, OptimConfig
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.model.base import BaseModel, ModelItem, TransformerConfig
+from xtuner.v1.model.utils import ModelForwardExtraLogInfo
 from xtuner.v1.module.router import NoAuxRouterConfig
 from xtuner.v1.utils import get_device, get_logger, get_torch_device_module, profile_time_and_memory
 
@@ -219,6 +220,7 @@ class TrainEngine:
             )
 
         step_loss = torch.tensor(0.0, device=DEVICE)
+        step_llm_loss = torch.tensor(0.0, device=DEVICE)
         step_balancing_loss: torch.Tensor | None = None
         step_z_loss: torch.Tensor | None = None
         step_consumed_tokens = torch.tensor(0.0, device=DEVICE)
@@ -227,7 +229,7 @@ class TrainEngine:
             logger.info(f"grad_accumulation_steps: {iters_per_step}")
             self._count += 1
 
-        extra_info_dict: dict[str, list[Any]] = {}
+        train_engine_extra_info = ModelForwardExtraLogInfo()
         for i in range(0, len(data_batches), intra_layer_micro_batch):
             data_batch = data_batches[i : i + intra_layer_micro_batch]
             seq_ctx_list = []
@@ -250,16 +252,12 @@ class TrainEngine:
                 )
 
             # llm loss has been global averaged
-            llm_loss = output["loss"]  # reduced_loss
-            step_loss += llm_loss.detach().clone()
+            llm_loss = output["loss"]
+            step_llm_loss += llm_loss.detach().clone()
 
             loss = llm_loss
             if "extra_info" in output:
-                for k, v in output["extra_info"].items():
-                    if k in extra_info_dict:
-                        extra_info_dict[k].append(v)
-                    else:
-                        extra_info_dict[k] = [v]
+                train_engine_extra_info.append(output["extra_info"])
 
             if "balancing_loss" in output:
                 balancing_loss = output["balancing_loss"] / iters_per_step
@@ -284,6 +282,7 @@ class TrainEngine:
 
             del output
             loss.backward()
+            step_loss += loss.detach().clone()
 
         if moe_need_update_bias:
             avg_count_load = tokens_per_expert_global_for_bias.float().mean(1)
@@ -293,10 +292,11 @@ class TrainEngine:
             self.model.update_bias(tokens_per_expert_global_for_bias, avg_count_load)  # type: ignore
             other_log["maxvio"] = maxvio.item()
 
-        reduced_llm_loss = step_loss
+        reduced_llm_loss = step_llm_loss
         dist.all_reduce(reduced_llm_loss.div_(dist.get_world_size()))
 
-        loss_log["reduced_llm_loss"] = step_loss.item()
+        loss_log["total_loss"] = step_loss.item()
+        loss_log["reduced_llm_loss"] = reduced_llm_loss.item()
         if step_balancing_loss is not None:
             reduced_balancing_loss = step_balancing_loss
             dist.all_reduce(reduced_balancing_loss.div_(dist.get_world_size()))
@@ -306,7 +306,7 @@ class TrainEngine:
             dist.all_reduce(reduced_z_loss.div_(dist.get_world_size()))
             loss_log["reduced_z_loss"] = reduced_z_loss.item()
         other_log["consumed_tokens"] = step_consumed_tokens.item()
-        other_log["extra_info"] = extra_info_dict
+        other_log["extra_info"] = train_engine_extra_info
         return loss_log, other_log
 
     def from_hf(self, hf_path: str | Path, strict: bool = False):

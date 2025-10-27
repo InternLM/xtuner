@@ -24,7 +24,7 @@ from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.loss import CELossContext
 from xtuner.v1.model.base import BaseModel, ModelOutputs, TransformerConfig
 from xtuner.v1.model.utils import checkpoint_wrapper
-from xtuner.v1.module import LMHead, RMSNorm, RotaryEmbedding
+from xtuner.v1.module import LMHead, RMSNorm, RotaryEmbeddingProtocol, get_rope_embedding
 from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayer
 from xtuner.v1.utils import (
     get_device,
@@ -73,6 +73,7 @@ class Dense(BaseModel):
             hidden_states = seq_ctx.inputs_embeds
 
         # create position embeddings to be shared across the decoder layers
+        assert position_ids is not None
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
         output: dict = {}
@@ -85,6 +86,7 @@ class Dense(BaseModel):
                 position_embeddings,
                 seq_ctx,
             )
+
             if self.config.return_hidden_states:
                 output["hidden_states"].append(hidden_states)
 
@@ -119,8 +121,8 @@ class Dense(BaseModel):
             )
         return layers
 
-    def build_rotary_embedding(self, config: TransformerConfig) -> RotaryEmbedding:
-        return RotaryEmbedding(config=config)
+    def build_rotary_embedding(self, config: TransformerConfig) -> RotaryEmbeddingProtocol:
+        return get_rope_embedding(config=config)
 
     # NOTE: Add this overload for inferring the return type for easier type checking and using
     @overload  # type: ignore
@@ -134,7 +136,7 @@ class Dense(BaseModel):
 
     def _apply(self, fn, recurse: bool = True):
         super()._apply(fn)
-        self.rotary_emb.to(torch.float32)
+        self.rotary_emb.to(torch.float32)  # type: ignore
         return self
 
     @override

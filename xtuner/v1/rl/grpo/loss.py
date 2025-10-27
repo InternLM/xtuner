@@ -1,5 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-from typing import cast
+from typing import Any, cast
 
 import torch
 import torch.distributed as dist
@@ -123,7 +123,7 @@ class GRPOLossContext(BaseLossContext[RLLossContextInputItem]):
         head_weight: torch.Tensor,
         head_bias: torch.Tensor | None,
         loss_kwargs: GRPOLossKwargs,
-    ) -> tuple[torch.Tensor, tuple[torch.Tensor | None, dict[str, list[torch.Tensor]]]]:
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor | None, dict[str, Any]]]:
         """Step 2.a and 2.b in the loss calculation in
         xtuner/v1/loss/base_loss_ctx.py."""
         # We do linear forward here to simplify the implementation of chunk loss (saving memory).

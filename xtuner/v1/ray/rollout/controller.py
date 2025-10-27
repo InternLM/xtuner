@@ -1,5 +1,6 @@
 import asyncio
 import os
+import socket
 import threading
 import time
 from collections import OrderedDict
@@ -91,6 +92,7 @@ class RolloutController:
                 from worker actors to their (head_rank, bundle_index) tuple.
         """
         self.config = infer_config
+        self.logger = get_logger(log_dir=infer_config.worker_log_dir, tag="RolloutController")
         self.num_workers = 0
         self.worker_server_urls: List[str] = []
         self.active_rollout_workers: List[RolloutWorker] = []
@@ -115,7 +117,15 @@ class RolloutController:
             )
         )
         self.print_params_flag = True
-        self.logger = get_logger(log_dir=infer_config.worker_log_dir, tag="RolloutController")
+
+    def _is_port_in_use(self, host: str, port: int) -> bool:
+        """Check if a port is in use on the given host."""
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind((host, port))
+                return False
+            except OSError:
+                return True
 
     def get_rollout_info(self):
         """Get information about the current rollout setup.
@@ -235,6 +245,14 @@ class RolloutController:
         """Starts the API server to expose the rollout functionality."""
         app = FastAPI()
         port = self.config.api_port if self.config.api_port else port
+
+        original_port = port
+        while self._is_port_in_use(host, port):
+            self.logger.warning(f"Port {port} is in use, trying port {port + 1}")
+            port += 1
+
+        if original_port != port:
+            self.logger.info(f"API server will use port {port} instead of the originally configured {original_port}.")
 
         @app.post("/v1/chat/completions")
         async def chat_completions(request: RLRolloutRequestItem) -> RLRolloutResponseItem:
