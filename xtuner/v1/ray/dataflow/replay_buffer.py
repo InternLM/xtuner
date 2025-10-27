@@ -2,7 +2,7 @@ import itertools
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union, Tuple
 from uuid import uuid4
 
 import ray
@@ -210,6 +210,9 @@ class Sampler:
             self.train_dataloader_iter = iter(self.train_dataloader)
             data = next(self.train_dataloader_iter)[0]
 
+        multimodal_train_info = data.pop("multimodal_train_info", {})
+        self.storage.add_multimodal_train_info(action_id, multimodal_train_info)
+
         for data_item in group_data_item:
             data_item.uid = RLUIDItem(
                 env=env,
@@ -219,8 +222,10 @@ class Sampler:
             )
             data_item.data = RLDatasetItem(**data)
             data_item.extra_info = RLExtraDataItem(retry_times=0)
+
         return group_data_item
 
+    # TODO：Add multimodal_train_info
     def sample_from_unfinished_buffer(self) -> List[RLDataFlowItem]:
         """Samples a prompt from a partially completed (unfinished) rollout."""
         action_id = self.storage._paused.pop(0)
@@ -270,6 +275,10 @@ class ReplayBufferStorage:
             list
         )  # action_id: [observation_id, observation_id, ...]
         self.logger = get_logger(log_dir=worker_log_dir, tag="ReplayBuffer")
+        self._multimodal_train_infos: Dict[int, Dict[str, Any]] = {}
+
+    def add_multimodal_train_info(self, action_id: int, multimodal_train_info: Dict[str, Any]):
+        self._multimodal_train_infos[action_id] = multimodal_train_info
 
     def add(self, grouped_dataitem: List[RLDataFlowItem]):
         """Adds a group of data items to the storage.
@@ -306,7 +315,7 @@ class ReplayBufferStorage:
             self._observations2states[observation_id] = replay_meta.state
             self._states[replay_meta.state].append(observation_id)
 
-    def get(self, global_batch_size: int) -> List[List[RLDataFlowItem]]:
+    def get(self, global_batch_size: int) -> Tuple[List[List[RLDataFlowItem]], List[Dict[str, Any]]]:
         """Retrieves a batch of finished sample groups from the buffer.
 
         Args:
@@ -322,9 +331,9 @@ class ReplayBufferStorage:
             same initial prompt, repeated `repeat_prompt_k` times.
         """
         samples = []
+        multimodal_train_infos = []
         if len(self._returned) < global_batch_size:
             raise ValueError("Not enough finished samples in replay buffer")
-            return []
         else:
             target_finished_list = self._returned[:global_batch_size]
             remain_finished_list = self._returned[global_batch_size:]
@@ -334,8 +343,10 @@ class ReplayBufferStorage:
                 replay_meta.state = "history"
                 group_samples = mapping_replaymeta_to_dataitem(self._actions[action_id])
                 samples.append(group_samples)
+                multimodal_train_infos.append(self._multimodal_train_infos.pop(action_id))
             self._returned = remain_finished_list
-            return samples
+            assert len(self._multimodal_train_infos) == len(self._returned), "multimodal_train_infos and returned should have the same length"
+            return samples, multimodal_train_infos
 
     def get_finished_samples(self):
         """Returns the number of finished sample groups."""
@@ -495,6 +506,7 @@ class ReplayBuffer:
         Returns:
             A list of sampled data items.
         """
+
         return self.sampler.sample(env, enable_partial_rollout, prompt_repeat_k)
 
     def get_samples(

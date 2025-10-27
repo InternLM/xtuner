@@ -147,6 +147,12 @@ class SequenceContext:
         num_padding = 0
         device = []
         inputs_embeds = []
+
+        pixel_values = []
+        image_grid_thw = []
+        position_ids = []
+        image_flags = []
+
         for seq_ctx in sequence_context_list:
             assert seq_ctx.sequence_parallel_mesh is None
             # todo: support vlm model
@@ -168,6 +174,13 @@ class SequenceContext:
             device.append(torch.device(seq_ctx.device))
             if seq_ctx.inputs_embeds is not None:
                 inputs_embeds.append(seq_ctx.inputs_embeds)
+            if seq_ctx.pixel_values is not None:
+                pixel_values.append(seq_ctx.pixel_values)
+            if seq_ctx.image_grid_thw is not None:
+                image_grid_thw.append(seq_ctx.image_grid_thw)
+            if seq_ctx.image_flags is not None:
+                image_flags.append(seq_ctx.image_flags)
+            position_ids.append(seq_ctx.position_ids)
         assert len(set(device)) == 1, f"All sequence contexts must be on the same device. Got {set(device)}"
 
         return cls(
@@ -179,6 +192,10 @@ class SequenceContext:
             num_padding=num_padding,
             device=device[0],
             inputs_embeds=torch.cat(inputs_embeds, dim=1) if inputs_embeds else None,  # type: ignore
+            pixel_values=torch.cat(pixel_values, dim=0) if pixel_values else None,  # type: ignore
+            image_grid_thw=torch.cat(image_grid_thw, dim=0) if image_grid_thw else None,  # type: ignore
+            position_ids=torch.cat(position_ids, dim=-1) if position_ids else None,  # type: ignore
+            image_flags=torch.cat(image_flags, dim=0) if image_flags else None,  # type: ignore
         )
 
     @property

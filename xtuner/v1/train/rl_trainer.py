@@ -92,6 +92,16 @@ class RLTrainerConfig(BaseModel):
         return judger_config.model_dump(exclude={"tokenizer", "reward_func"})
 
 
+def get_train_seq_ctx(input_ids: torch.Tensor, multimodal_train_info: dict | None = None):
+    seq_ctx = SequenceContext.from_input_ids((input_ids,), device="cpu")
+    if multimodal_train_info and len(multimodal_train_info) > 0:
+        seq_ctx.position_ids = multimodal_train_info.get("position_ids")
+        seq_ctx.pixel_values = multimodal_train_info.get("pixel_values")
+        seq_ctx.image_grid_thw = multimodal_train_info.get("image_grid_thw")
+        seq_ctx.image_flags = multimodal_train_info.get("image_flags")
+    return seq_ctx
+
+
 class RLTrainer:
     """Universal Reinforcement Learning Trainer for XTuner.
 
@@ -363,7 +373,7 @@ class RLTrainer:
             step_timer_dict = {}
             # 1. Rollout
             with timer("generation", step_timer_dict):
-                data_groups = ray.get(self._rollout_dataflow.run.remote())
+                data_groups, multimodal_train_infos = ray.get(self._rollout_dataflow.run.remote())
 
             # 2. Offload rollout models and save trajectories
             with timer("offload_and_dump", step_timer_dict):
@@ -376,7 +386,8 @@ class RLTrainer:
             with timer("onload_and_prepare_data", step_timer_dict):
                 ray.get(self._train_controller.onload.remote(target="all"))
                 self.logger.info("Training controller loaded")
-                data_batches, data_info = self._prepare_train_data(data_groups, self._train_worker_cfg.pack_max_length)
+                data_batches, data_info = self._prepare_train_data(data_groups, self._train_worker_cfg.pack_max_length,
+                                                                   multimodal_train_infos)
                 self.logger.info(f"Prepared {len(data_batches)} training data batches")
                 self._log_data_info(rollout_idx, data_info)
 
@@ -423,18 +434,26 @@ class RLTrainer:
 
     # TODO: advantage 是在 DataFlow 里算好，还是在 train controller 里算？
     # 因为可能有根据 advantage 来判断数据能否进 rl 训练的需求。暂时先放在这
-    def _prepare_train_data(self, data_groups, pack_max_length):
+    def _prepare_train_data(self, data_groups, pack_max_length, multimodal_train_infos=None):
         rewards_list = []
         advantages_list = []
         prompt_len_list = []
         response_len_list = []
 
         data_batches = []
-        for group in data_groups:
-            text_prompt = self.tokenizer.apply_chat_template(
-                group[0].data.messages, add_generation_prompt=True, tokenize=False
-            )
-            prompt_ids = self.tokenizer(text_prompt, return_tensors="pt")["input_ids"].flatten().tolist()
+        is_multimodal = False
+        if multimodal_train_infos and len(multimodal_train_infos) > 0:
+            assert len(multimodal_train_infos) == len(
+                data_groups), f"{len(multimodal_train_infos)} vs {len(data_groups)}"
+            is_multimodal = True
+
+        for j, group in enumerate(data_groups):
+            if is_multimodal:
+                multimodal_train_info = multimodal_train_infos[j]
+            else:
+                multimodal_train_info = None
+
+            prompt_ids = group[0].data.extra_info['train_prompt_ids']
             rewards = [data.env.judger.reward["score"] for data in group]
             rewards_list.extend(rewards)
             rewards = torch.tensor(rewards, dtype=torch.float32)
@@ -461,11 +480,7 @@ class RLTrainer:
                 advantages_list.extend([advantages[i]] * len(response_ids))
 
                 shifted_labels = [-100] * (len(prompt_ids) - 1) + response_ids + [-100]
-                if len(input_ids) > pack_max_length:
-                    input_ids = input_ids[:pack_max_length]
-                    shifted_labels = shifted_labels[:pack_max_length]
-                    if logprobs is not None:
-                        logprobs = logprobs[:pack_max_length]
+                assert len(input_ids) <= pack_max_length, f"{len(input_ids)} vs {pack_max_length}"
                 input_ids = torch.tensor(input_ids, dtype=torch.int64).unsqueeze(0)
                 shifted_labels = torch.tensor(shifted_labels, dtype=torch.int64).unsqueeze(0)
 
@@ -477,9 +492,10 @@ class RLTrainer:
                 else:
                     rollout_logprobs = None
 
+                seq_ctx = get_train_seq_ctx(input_ids, multimodal_train_info)
                 data_batches.append(
                     dict(
-                        seq_ctx=SequenceContext.from_input_ids((input_ids,), device="cpu"),
+                        seq_ctx=seq_ctx,
                         shifted_labels=shifted_labels,
                         advantage=advantages[i].item(),
                         rollout_logprobs=rollout_logprobs,

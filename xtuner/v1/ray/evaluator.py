@@ -10,11 +10,12 @@ from typing_extensions import Annotated
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1.data_proto.rl_data import RLDataFlowItem, RLDatasetItem, SampleParams
-from xtuner.v1.datasets import build_datasets
+from xtuner.v1.datasets import build_dataloader, build_datasets
 from xtuner.v1.datasets.config import DatasetConfigList
 from xtuner.v1.ray.environment import BaseEnvironment
 from xtuner.v1.ray.utils import create_task
 from xtuner.v1.utils import get_logger
+from xtuner.v1.datasets.config import DataloaderConfig
 
 
 class EvaluatorConfig(BaseModel):
@@ -73,6 +74,10 @@ class EvaluatorConfig(BaseModel):
         DatasetConfigList,
         Parameter(help="Configuration for the dataset."),
     ]
+    dataloader_cfg: Annotated[
+        Optional[DataloaderConfig], Parameter(help="The PyTorch DataLoader for iterating over the dataset.")
+    ] = None
+
     tokenizer: Annotated[
         Union[PreTrainedTokenizer, PreTrainedTokenizerFast, str],
         Parameter(help="Tokenizer for text processing."),
@@ -128,7 +133,22 @@ class Evaluator:
                 config.dataset_cfg, AutoTokenizer.from_pretrained(config.tokenizer, trust_remote_code=True)
             )[0]
         )
-        self.dataloader = iter(self.dataset)
+
+        if config.dataloader_cfg is not None:
+            self.dataloader_cfg = config.dataloader_cfg
+        else:
+            self.dataloader_cfg = DataloaderConfig(
+                collator="fake_collator",
+                pack_level="none",
+            )
+        self.dataloader = build_dataloader(
+            dataloader_config=self.dataloader_cfg,
+            datasets=self.datasets,
+            global_batch_size=1,
+            micro_batch_size=1,
+            seed=1,
+        )
+
         self.env_controller = env_controller
         self.failed_samples_count = 0
         self.return_list: List[RLDataFlowItem] = []
@@ -205,7 +225,7 @@ class Evaluator:
                     try:
                         data = next(self.dataloader)
                     except StopIteration:
-                        self.dataloader = iter(self.dataset)
+                        self.dataloader = iter(self.dataloader)
                         data = next(self.dataloader)
                         self.logger.warning("Restarting the evaluation dataset.")
                     data_item = RLDataFlowItem(data=RLDatasetItem(**data))
@@ -259,7 +279,7 @@ class Evaluator:
                 the generated samples.
         """
         self.return_list = []
-        self.dataloader = iter(self.dataset)
+        self.dataloader = iter(self.dataloader)
         ray.get(self.env_controller.restart.remote())  # type: ignore[attr-defined]
         await self.concurrent_eval_task_runner()
         scores = self.compute_metric(self.return_list)
