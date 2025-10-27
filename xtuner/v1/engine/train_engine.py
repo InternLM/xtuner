@@ -31,6 +31,7 @@ from xtuner.v1.model.base import BaseModel, ModelItem, TransformerConfig
 from xtuner.v1.model.utils import ModelForwardExtraLogInfo
 from xtuner.v1.module.router import NoAuxRouterConfig
 from xtuner.v1.utils import get_device, get_logger, get_torch_device_module, profile_time_and_memory
+from xtuner.v1.prober.acc_prober import AccProber
 
 
 logger = get_logger()
@@ -365,6 +366,8 @@ class TrainEngine:
         return global_norm
 
     def clip_grad_norm(self):
+        # import torch.distributed as dist; dist.breakpoint()
+        AccProber.before_clip_grad_norm(self.model)
         self.model.scale_and_reduce_grad()
         params = self.model.trainable_parameters()
         grads = [p.grad for _, p in params if p.grad is not None]
@@ -384,6 +387,7 @@ class TrainEngine:
                 clip_coef_clamped_device = clip_coef_clamped.to(device)
                 for g in grads:
                     g.mul_(clip_coef_clamped_device)
+        # import torch.distributed as dist; dist.breakpoint()
         return grad_norm
 
     def step_optimizer(self, grad_norm):
