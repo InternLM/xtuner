@@ -159,17 +159,6 @@ class MoE(BaseModel):
         else:
             self.z_loss = None
 
-        self._freeze_modules()
-
-    def _freeze_modules(self):
-        freeze_routers = self.config.freeze_routers
-        if freeze_routers:
-            for name, layer in self.layers.items():
-                if isinstance(layer, MoEDecoderLayer):
-                    layer.gate.requires_grad_(False)
-                    layer.gate.eval()
-                    logger.info(f"Freeze MoE Router in layer {name}")
-
     def _select_non_pad_router_logits(
         self,
         router_logits_list: list[list[torch.Tensor]] | list[torch.Tensor],
@@ -616,6 +605,11 @@ class MoE(BaseModel):
                     dispatcher=config.dispatcher,
                     ep_mesh=self.ep_mesh,
                 )
+                if self.config.freeze_routers:
+                    layers[str(layer_idx)].gate.requires_grad_(False)
+                    layers[str(layer_idx)].gate.eval()
+                    logger.info(f"Freeze MoE Router in layer {layer_idx}")
+
         layers.__class__.__repr__ = module_dict_repr  # type: ignore[method-assign]
         return layers
 

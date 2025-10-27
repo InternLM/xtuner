@@ -114,6 +114,12 @@ class TestMoEEngine(DeterministicDDPTestCase):
         except:
             pass
 
+    @parametrize.parametrize(
+        "device,ep_size,sp_size",
+        [
+            ("cuda", 1, 1),
+        ],
+    )
     def test_moe_engine_train_freeze_routers(self, device, ep_size, sp_size):
         pg = self.create_pg(device)
 
@@ -166,10 +172,10 @@ class TestMoEEngine(DeterministicDDPTestCase):
         gate_stds = defaultdict(list)
         for name, layer in engine.model.layers.items():
             if isinstance(layer, MoEDecoderLayer):
-                self.assertFalse(layer.gate.requires_grad)
-                self.assertTrue(layer.gate.is_leaf)
-                gate_means[name].append(layer.gate.mean())
-                gate_stds[name].append(layer.gate.std())
+                self.assertFalse(layer.gate.weight.requires_grad)
+                self.assertTrue(layer.gate.weight.is_leaf)
+                gate_means[name].append(layer.gate.weight.full_tensor().mean())
+                gate_stds[name].append(layer.gate.weight.full_tensor().std())
 
         for _ in range(4):
             seq_ctx = SequenceContext.from_input_ids((input_ids,), device=DEVICE)
@@ -193,14 +199,14 @@ class TestMoEEngine(DeterministicDDPTestCase):
             losses.append(loss_log["reduced_llm_loss"])
             for name, layer in engine.model.layers.items():
                 if isinstance(layer, MoEDecoderLayer):
-                    assert torch.equal(layer.gate.mean(), gate_means[name][-1]), (
-                        f"Mismatch in gate mean in layer {name}, {layer.gate.mean()} and {gate_means[name][-1]}"
+                    assert torch.equal(layer.gate.weight.full_tensor().mean(), gate_means[name][-1]), (
+                        f"Mismatch in gate mean in layer {name}, {layer.gate.weight.full_tensor().mean()} and {gate_means[name][-1]}"
                     )
-                    assert torch.equal(layer.gate.std(), gate_stds[name][-1]), (
-                        f"Mismatch in gate std in layer {name}, {layer.gate.std()} and {gate_stds[name][-1]}"
+                    assert torch.equal(layer.gate.weight.full_tensor().std(), gate_stds[name][-1]), (
+                        f"Mismatch in gate std in layer {name}, {layer.gate.weight.full_tensor().std()} and {gate_stds[name][-1]}"
                     )
-                    gate_means[name].append(layer.gate.mean())
-                    gate_stds[name].append(layer.gate.std())
+                    gate_means[name].append(layer.gate.weight.full_tensor().mean())
+                    gate_stds[name].append(layer.gate.weight.full_tensor().std())
 
         torch.cuda.empty_cache()
         try:
