@@ -24,7 +24,7 @@ from xtuner.v1.module.dispatcher import (
 from xtuner.v1.module.grouped_linear.moe_group_linear import build_grouped_linear
 from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.ops.act_fn import get_act_fn
-from xtuner.v1.utils import ForwardState
+from xtuner.v1.utils import DEBUG_ACC, ForwardState
 from xtuner.v1.utils.compile import maybe_compile
 
 from ..linear.linear import build_linear
@@ -165,6 +165,8 @@ class MoEBlock(nn.Module):
         gate_up_out = self.fused_w1w3(x, tokens_per_expert, decoding)
         out = self.moe_act(gate_up_out, split_dim=-1)
         res = self.fused_w2(out, tokens_per_expert, decoding)
+        if DEBUG_ACC:
+            import torch.distributed as dist; dist.breakpoint()
         return res
 
 
@@ -329,6 +331,8 @@ class MoEDecoderLayer(nn.Module):
             pre_dispatched=pre_dispatched,
             dispatched=dispatched,
         )
+        if DEBUG_ACC:
+            import torch.distributed as dist; dist.breakpoint()
         experts_out = self.experts(
             post_dispatched["hidden_states"],
             post_dispatched["tokens_per_expert"],
@@ -364,6 +368,8 @@ class MoEDecoderLayer(nn.Module):
             combined_hidden_states=combined_hidden_states,
             residual=residual,
         )
+        if DEBUG_ACC:
+            import torch.distributed as dist; dist.breakpoint()
         return hidden_states, router_results["logits"]
 
     def _micro_batch_forward(
@@ -499,6 +505,8 @@ class MoEDecoderLayer(nn.Module):
         # attention, post-layernorm and gate are implemented in one function
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
+        if DEBUG_ACC:
+            import torch.distributed as dist; dist.breakpoint()
         # hidden_states =
 
         # Self Attention
@@ -525,13 +533,19 @@ class MoEDecoderLayer(nn.Module):
                 past_key_values=past_key_values,
             )
 
+        if DEBUG_ACC:
+            import torch.distributed as dist; dist.breakpoint()
         hidden_states = residual + hidden_states
 
         # Fully Connected
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
+        if DEBUG_ACC:
+            import torch.distributed as dist; dist.breakpoint()
 
         router_results: RouterResults = self.gate(hidden_states)
+        if DEBUG_ACC:
+            import torch.distributed as dist; dist.breakpoint()
         return residual, hidden_states, router_results
 
     @maybe_compile(fullgraph=True)
