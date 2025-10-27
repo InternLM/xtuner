@@ -23,17 +23,17 @@ tokenizer_cache_dir = "/mnt/shared-storage-user/intern7shared/internvl_a4s/xtune
 # 训练超参数
 sample_max_length = 32768
 pack_max_length = 32768
+num_workers = 8
 min_num_frames = 8
 max_num_frame = 36
 global_batch_size = 32
 # export_meta_internvl3_5_tiny大概有4~5M个样本，12B Token左右
 total_epoch = 1
-# total_step = 8000
-lr = 2e-5
-lr_min = 1e-6
 hf_interval = 1000
 checkpoint_interval = 1000
 checkpoint_maxkeep = 10
+lr = 2e-5
+lr_min = 1e-6
 weight_decay = 0.05
 warmup_ratio = 0.1
 recompute_ratio = 1.0
@@ -78,7 +78,7 @@ dataloader_config = DataloaderConfig(
     pack_max_length=pack_max_length,
     pack_to_max_length=False,
     collator="intern_s1_vl_sft_collator",
-    num_workers=8,
+    num_workers=num_workers,
     pack_extra_buffer_size=20,
 )
 
@@ -103,7 +103,6 @@ trainer = TrainerConfig(
     lr_cfg=lr_cfg,
     loss_cfg=CELossConfig(mode="chunk", chunk_size=1024, loss_reduction=loss_reduction),
     global_batch_size=global_batch_size,
-    # total_step=total_step,
     total_epoch=total_epoch,
     hf_interval=hf_interval,
     checkpoint_interval=checkpoint_interval,

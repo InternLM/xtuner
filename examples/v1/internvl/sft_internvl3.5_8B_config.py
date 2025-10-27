@@ -15,8 +15,7 @@ import os
 
 # 路径配置
 ceph_config = "/mnt/shared-storage-user/gaozhangwei/workspace_glx/petreloss.conf"
-# meta_data_path = '/mnt/shared-storage-user/gaozhangwei/workspace_ysl/reformat_new_data/export_meta.json'
-meta_data_path = '/mnt/shared-storage-user/gaozhangwei/workspace_ysl/reformat_new_data/export_meta_v2.json'
+meta_data_path = '/mnt/shared-storage-user/gaozhangwei/workspace_ysl/reformat_new_data/export_meta_internvl3_5.json'
 # meta_data_path = '/mnt/shared-storage-user/gaozhangwei/workspace_ysl/reformat_new_data/ceph_meta.json'
 # meta_data_path = '/mnt/shared-storage-user/gaozhangwei/workspace_ysl/reformat_new_data/local_meta.json'
 model_path = "/mnt/shared-storage-user/intern7shared/wangweiyun/OpenGVLab-rc1-hf/InternVL3_5-8B-CPT-HF" # 转换后的权重（hf官方格式）
@@ -28,9 +27,10 @@ tokenizer_cache_dir = "/mnt/shared-storage-user/intern7shared/internvl_a4s/xtune
 # 训练超参数
 sample_max_length = 32768
 pack_max_length = 32768
-min_num_frames=8
-max_num_frame=36
-global_batch_size = 256
+num_workers = 8
+min_num_frames = 8
+max_num_frame = 36
+global_batch_size = 512
 total_step = 8000
 hf_interval = 1000
 checkpoint_interval = 1000
@@ -56,6 +56,7 @@ for name, _data in ds_collections.items():
                                           media_root=_data.get('media_root', ''),
                                           sample_ratio=_data.get('sample_ratio', 1.0),
                                           class_name='VLMJsonlDataset',
+                                          cache_tag='cache_tags_v1',
                                           cache_dir=tokenizer_cache_dir),
                  "tokenize_fn": InternS1VLTokenizeFnConfig(model_cfg=model_cfg,
                                                            max_length=sample_max_length,
@@ -77,15 +78,16 @@ for name, _data in ds_collections.items():
 dataloader_config = DataloaderConfig(
     dataset_config_list=dataset_config,
     pack_max_length=pack_max_length,
+    pack_to_max_length=False,
     collator="intern_s1_vl_sft_collator",
-    num_workers=8,
+    num_workers=num_workers,
     pack_extra_buffer_size=20,
 )
-
 # optimizer and lr config
 optim_cfg = AdamWConfig(lr=lr, weight_decay=weight_decay, foreach=False)
 lr_cfg = LRConfig(lr_type="cosine", warmup_ratio=warmup_ratio, lr_min=lr_min)
-fsdp_cfg = FSDPConfig(sp_size=1, recompute_ratio=recompute_ratio, torch_compile=True)
+fsdp_cfg = FSDPConfig(sp_size=1, recompute_ratio=recompute_ratio, torch_compile=True,
+                      checkpoint_preserve_rng_state=False)
 
 resume_cfg = ResumeConfig(auto_resume=True)
 
