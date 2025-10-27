@@ -157,6 +157,8 @@ class AutoCPUWorkers:
             worker_cls: The class of the worker to instantiate.
             worker_config: The configuration for each worker instance.
             pg (PlacementGroup): The existing placement group to use.
+            num_workers (int): The number of workers to create. Defaults to -1,
+                the number of bundles in the placement group will be used.
 
         Returns:
             List[T]: List of created worker instances.
