@@ -540,7 +540,7 @@ class MoEDecoderLayer(nn.Module):
 
         # Self Attention
         if state == ForwardState.TRAINING:
-            hidden_states = self.self_attn(
+            hidden_states, _ = self.self_attn(
                 hidden_states=hidden_states,
                 position_embeddings=position_embeddings,
                 seq_ctx=seq_ctx,
