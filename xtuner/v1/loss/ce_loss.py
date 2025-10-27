@@ -173,11 +173,11 @@ class CELossContext(BaseLossContext[CELossContextInputItem]):
         head_bias: torch.Tensor | None,
         loss_kwargs: CELossKwargs,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor | None, dict[str, Any]]]:
-        import torch.distributed as dist; dist.breakpoint()
+        # import torch.distributed as dist; dist.breakpoint()
         # We do linear forward here to simplify the implementation of chunk loss (saving memory).
         logits = F.linear(hidden_states, head_weight, head_bias)
-        dist.breakpoint()
-        register_grad_hook(logits, "logits")
+        # dist.breakpoint()
+        # register_grad_hook(logits, "logits")
         # logits = logits.float()  # (bs, seq_len, vocab_size)
 
         shifted_labels = loss_kwargs.shifted_labels  # (bs, seq_len)
@@ -196,7 +196,7 @@ class CELossContext(BaseLossContext[CELossContextInputItem]):
             # loss = (loss * loss_weight).sum()
 
             loss = F.cross_entropy(logits, shifted_labels, reduction="sum", ignore_index=self.loss_cfg.ignore_idx)
-            register_grad_hook(loss, "loss")
+            # register_grad_hook(loss, "loss")
             # mask = loss_weight != 0
             # w = loss_weight.sum() / mask.sum()  # w equals to 1/global_denominator
             # loss = loss * w

@@ -46,6 +46,7 @@ from xtuner.v1.utils import (
     record_git_info,
 )
 from xtuner.v1.utils.device import get_device, get_torch_device_module
+from xtuner.v1.prober.acc_prober import AccProber
 
 from .toy_tokenizer import UTF8ByteTokenizer
 
@@ -342,7 +343,7 @@ class Trainer:
             global_batch_size = self.data_mesh["dp"].size()
         self._global_batch_size = global_batch_size
 
-        self._resolve_config_conflicts(self.tokenizer, model_cfg, dataloader_cfg)
+        # self._resolve_config_conflicts(self.tokenizer, model_cfg, dataloader_cfg)
 
         if dataset_cfg is not None:  # TODO: Removed in version 1.1.0
             # For backward compatibility, reserve the dataset_cfg interface, remove it later
@@ -401,6 +402,9 @@ class Trainer:
 
         if self._resume_cfg.resume_from is not None:
             self._resume()
+        
+        AccProber.setup(self.exp_dir, self._profile_step)
+
 
     @classmethod
     def from_config(cls, config: TrainerConfig) -> Self:
@@ -458,6 +462,8 @@ class Trainer:
         train_begin = time.time()
         time_before_get_data = time.time()
         for data_batch in self._data_iter():
+            self._cur_step += 1  # increment _cur_step at first, then can use correct self.cur_step everywhere below
+            AccProber.set_step(self._cur_step)
             DEVICE_MODULE.reset_peak_memory_stats()
 
             time_before_train_step = time.time()
@@ -513,7 +519,6 @@ class Trainer:
                 extra_info_dict = extra_info_updated.get()
             loss_log.update(extra_info_dict)
 
-            self._cur_step += 1
             self._consumed_tokens += step_consumed_tokens
             self._train_time = time_after_train_step - train_begin
 
@@ -1043,9 +1048,9 @@ class Trainer:
             f"Step {self.cur_step}/{self.total_step} data_time: {data_time:.4f} lr: {lr:.6e} time: {step_time:.4f} "
             f"text_tokens: {step_consumed_tokens} "
             f"{loss_log_str} "
+            f"grad_norm: {grad_norm:.8f} "
             f"max_memory: {max_memory / (1024**3):.2f} GB "
             f"reserved_memory: {reserved_memory / (1024**3):.2f} GB "
-            f"grad_norm: {grad_norm:.8f} "
             f"tgs: {tgs:.1f} "
             f"e2e_tgs: {e2e_tgs:.1f} "
             f"eta: {eta_hms} "
