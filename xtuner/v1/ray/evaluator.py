@@ -61,6 +61,14 @@ class EvaluatorConfig(BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
+    enable_evaluate: Annotated[
+        bool,
+        Parameter(help="Flag to enable or disable evaluation during training."),
+    ] = False
+    enable_initial_evaluate: Annotated[
+        bool,
+        Parameter(help="Flag to enable or disable initial evaluation before training starts."),
+    ] = False
     dataset_cfg: Annotated[
         DatasetConfigList,
         Parameter(help="Configuration for the dataset."),
@@ -72,7 +80,7 @@ class EvaluatorConfig(BaseModel):
     max_concurrent: Annotated[
         int,
         Parameter(help="Maximum number of concurrent tasks."),
-    ] = 8
+    ] = 512
     eval_sample_ratio: Annotated[
         float,
         Parameter(help="Ratio of samples to evaluate from the generated samples."),

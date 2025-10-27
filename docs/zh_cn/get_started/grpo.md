@@ -75,7 +75,7 @@ python xtuner/v1/utils/convert_gsm8k.py --input-dir ./gsm8k_data --out-dir ./gsm
 ```{code-block} bash
 :caption: 启动 GRPO 训练
 
-XTUNER_USE_FA3=1 XTUNER_USE_LMDEPLOY=1 python xtuner/v1/train/cli/grpo.py --model-path <模型路径> --data-path tests/resource/gsm8k_train_example_data.jsonl
+bash examples/v1/run_rl.sh xtuner/examples/v1/config/rl_qwen3_8B_grpo_tiny.py "lmdeploy" <qwen3-8B模型路径> tests/resource/gsm8k_train_example_data.jsonl
 
 ```
 

@@ -1,3 +1,4 @@
+import os
 import traceback
 
 import torch
@@ -20,7 +21,12 @@ def get_group_gemm() -> GroupGemmProtocol:
     if device == "cpu":
         return cpu_group_gemm
     elif device == "cuda":
-        from .cuda import triton_group_gemm as cuda_group_gemm
+        if os.environ.get("XTUNER_USE_CUTLASS_GROUP_GEMM", "0") == "1":
+            from .cuda import cutlass_group_gemm as cuda_group_gemm
+
+            print("---------------------------Using cutlass group gemm-------------------------")
+        else:
+            from .cuda import triton_group_gemm as cuda_group_gemm
 
         return cuda_group_gemm
 

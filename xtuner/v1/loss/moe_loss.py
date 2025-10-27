@@ -82,9 +82,9 @@ class BalancingLoss(nn.Module):
 
 def z_loss(router_logits: torch.Tensor, global_average: bool = False):
     router_logits = router_logits.float()  # (nlayers, seq, ne)
-    num_experts = router_logits.shape[-1]
+    num_seq = max(1, router_logits.shape[1])
     logsum_square = z_loss = torch.logsumexp(router_logits, dim=-1).square()
-    z_loss = (logsum_square.sum(dim=-1) / num_experts).sum()
+    z_loss = (logsum_square.sum(dim=-1) / num_seq).sum()
 
     if global_average and dist.is_initialized():
         unmasked_num = router_logits.shape[1]

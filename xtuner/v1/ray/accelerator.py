@@ -49,20 +49,39 @@ class AcceleratorResourcesConfig(BaseModel):
         )
     """
 
+    accelerator: Annotated[AcceleratorType, Parameter(help="Architecture of accelerator to use (e.g., 'GPU', 'NPU').")]
+    num_workers: Annotated[int, Parameter(help="Number of accelerators in the placement group.")]
+    num_cpus_per_worker: Annotated[float, Parameter(help="Number of CPUs to allocate for the placement group.")] = 12
+    cpu_memory_per_worker: Annotated[
+        int, Parameter(help="Amount of memory (in bytes) to allocate for the placement group.")
+    ] = 16 * 1024**3  # 16 GB
+    num_accelerators_per_node: Annotated[int, Parameter(help="Number of accelerators available per node.")] = 8
     num_accelerators_per_worker: Annotated[
         float,
         Parameter(help="Number of accelerators to allocate for each worker in the placement group."),
     ] = 1
 
-    num_cpus_per_worker: Annotated[float, Parameter(help="Number of CPUs to allocate for the placement group.")] = 8
+    def __init__(self, **kwargs):
+        if kwargs.get("accelerator") == "NPU":
+            # NOTE: Ascend 910 has 16 NPUs per node
+            kwargs["num_accelerators_per_node"] = 16
 
-    cpu_memory_per_worker: Annotated[
-        int, Parameter(help="Amount of memory (in bytes) to allocate for the placement group.")
-    ]
+        assert ray.is_initialized(), "Ray must be initialized before creating AcceleratorResourcesConfig."
+        available_resources = ray.available_resources()
+        available_cpus = available_resources.get("CPU", 0)
+        available_memory = available_resources.get("memory", 0)
+        available_gpus = available_resources.get("GPU", 0)
 
-    num_workers: Annotated[int, Parameter(help="Number of accelerators in the placement group.")]
+        assert kwargs["num_workers"] <= available_gpus, "Not enough available GPUS in Ray cluster."
+        # TODO: manage single controller's cpu resource to replace "10" here
+        assert (kwargs["num_cpus_per_worker"] * kwargs["num_workers"]) + 10 <= available_cpus, (
+            f"Not enough available CPUs in Ray cluster, available_cpus is {available_cpus} but xtuner needs {kwargs['num_cpus_per_worker'] * kwargs['num_workers'] + 10}."
+        )
+        assert kwargs["cpu_memory_per_worker"] * kwargs["num_workers"] + 10 * 1024**3 <= available_memory, (
+            f"Not enough available memory in Ray cluster, available_memory is {available_memory} but xtuner needs {kwargs['cpu_memory_per_worker'] * kwargs['num_workers']}."
+        )
 
-    accelerator: Annotated[AcceleratorType, Parameter(help="Architecture of accelerator to use (e.g., 'GPU', 'NPU').")]
+        super().__init__(**kwargs)
 
 
 class SingleAcceleratorWorker:
