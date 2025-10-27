@@ -196,6 +196,8 @@ class TrainingWorker(SingleAcceleratorWorker):
 
         if isinstance(ref_model_cfg, VisionComposeConfigProtocol):
             assert ref_model_cfg.text_config.float8_cfg is None,  "VisionComposeConfigProtocol does not support float8"
+            if ref_model_fsdp_cfg is None:
+                ref_model_fsdp_cfg = FSDPConfig(recompute_ratio=0, cpu_offload=False, requires_grad=False)
             model.language_model.fully_shard(ref_model_fsdp_cfg)
             model.vision_tower.fully_shard(ref_model_fsdp_cfg)
             model.multi_modal_projector.fully_shard(ref_model_fsdp_cfg)

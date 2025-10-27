@@ -65,6 +65,12 @@ class TrainingController:
             pack_max_length,
         )
         packed_data_batches = []
+
+        # TODO(hha): 这是 hard code，后续需要重构整个 pack 逻辑
+        is_qwen3_vl = False
+        if len(data_batches[0].position_ids.shape) == 3:
+            is_qwen3_vl = True
+
         for pack_info in pack_infos:
             indices = pack_info["indices"]
             total_len = sum([data_batches[i]["seq_ctx"].input_ids.shape[1] for i in indices])
@@ -95,6 +101,13 @@ class TrainingController:
                     dtype=data_batches[0]["shifted_labels"].dtype,
                     device=data_batches[0]["shifted_labels"].device,
                 )
+                if is_qwen3_vl:
+                    _position_ids_list = []
+                    for pad_token in pad_tokens:
+                        _position_ids = torch.arange(len(pad_token)).view(1, -1).expand(3, -1)
+                        _position_ids_list.append(_position_ids)
+                    pad_seq_ctx.position_ids = torch.cat(_position_ids_list, dim=-1)
+
                 seq_ctx_list.append(pad_seq_ctx)
                 label_list.append(pad_labels)
                 advantage_list.extend(
@@ -141,6 +154,11 @@ class TrainingController:
         packed_data_batches = self._packing(data_batches, pack_max_length)
         # packed_data_batches = self._grouped_by_max_length(packed_data_batches)
 
+        # TODO(hha): 这是 hard code，后续需要重构整个 pack 逻辑
+        is_qwen3_vl = False
+        if len(packed_data_batches[0]['seq_ctx'].position_ids.shape) == 3:
+            is_qwen3_vl = True
+
         # todo: support round up
         num_packed_data_batches = len(packed_data_batches)
         data_replicate_size = ray.get(self.workers[0].get_data_replicate_size.remote())  # type: ignore[attr-defined]
@@ -160,6 +178,13 @@ class TrainingController:
                 )
             pad_seq_ctx = SequenceContext.from_input_ids(pad_tokens, device="cpu")  # type: ignore
             pad_seq_ctx.num_padding = pack_max_length
+            if is_qwen3_vl:
+                _position_ids_list = []
+                for pad_token in pad_tokens:
+                    _position_ids = torch.arange(len(pad_token)).view(1, -1).expand(3, -1)
+                    _position_ids_list.append(_position_ids)
+                pad_seq_ctx.position_ids = torch.cat(_position_ids_list, dim=-1)
+
             pad_shifted_labels = torch.full(
                 (1, pack_max_length),
                 -100,

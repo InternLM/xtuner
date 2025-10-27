@@ -155,8 +155,6 @@ class SequenceContext:
 
         for seq_ctx in sequence_context_list:
             assert seq_ctx.sequence_parallel_mesh is None
-            # todo: support vlm model
-            assert seq_ctx.pixel_values is None
             packed_input_ids.append(seq_ctx.input_ids)
             cu_seq_lens_q.append(
                 seq_ctx.cu_seq_lens_q  # type: ignore
