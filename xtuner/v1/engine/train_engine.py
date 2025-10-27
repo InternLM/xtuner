@@ -389,6 +389,14 @@ class TrainEngine:
     def step_optimizer(self, grad_norm):
         """Step the optimizer to update the model parameters."""
         if torch.isnan(grad_norm) or torch.isinf(grad_norm):
+            logger.warning(f"Gradient norm {grad_norm} is invalid, skipping optimizer step.")
+            self.optimizer.zero_grad()
+        elif (
+            self.optim_cfg.skip_grad_norm_threshold is not None and grad_norm > self.optim_cfg.skip_grad_norm_threshold
+        ):
+            logger.warning(
+                f"Gradient norm {grad_norm} exceeds the threshold {self.optim_cfg.skip_grad_norm_threshold}, skipping optimizer step."
+            )
             self.optimizer.zero_grad()
         else:
             self.optimizer.step()
