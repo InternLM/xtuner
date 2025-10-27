@@ -92,10 +92,19 @@ class RLTrainerConfig(BaseModel):
         return judger_config.model_dump(exclude={"tokenizer", "reward_func"})
 
 
-def get_train_seq_ctx(input_ids: torch.Tensor, multimodal_train_info: dict | None = None):
+def get_train_seq_ctx(input_ids: torch.Tensor, multimodal_train_info: dict | None = None, len_response_ids: int = 0):
     seq_ctx = SequenceContext.from_input_ids((input_ids,), device="cpu")
     if multimodal_train_info and len(multimodal_train_info) > 0:
-        seq_ctx.position_ids = multimodal_train_info.get("position_ids")
+        position_ids = multimodal_train_info.get("position_ids")  # (1,n) or (3,1,n)
+        if len(position_ids.shape) == 3:
+            # qwen3vl 需要特殊处理，其余的不需要额外处理
+            max_value = position_ids.max(dim=-1).values  # (3,1)
+            response_position_ids = max_value.unsqueeze(-1).expand(-1, -1, len_response_ids) + torch.arange(1,
+                                                                                                            len_response_ids + 1,
+                                                                                                            device=max_value.device)
+            position_ids = torch.cat([position_ids, response_position_ids], dim=-1)
+
+        seq_ctx.position_ids = position_ids
         seq_ctx.pixel_values = multimodal_train_info.get("pixel_values")
         seq_ctx.image_grid_thw = multimodal_train_info.get("image_grid_thw")
         seq_ctx.image_flags = multimodal_train_info.get("image_flags")
@@ -199,8 +208,13 @@ class RLTrainer:
         trainer_cfg: RLTrainerConfig | None = None,
     ):
         """Initialize the RL training system."""
-        # TODO
-        rollout_config.model_path = load_from
+        if os.environ.get('XTUNER_USE_FA3', '0') == '1':
+            try:
+                from xtuner.v1.ops.flash_attn import get_flash_attn_varlen
+                get_flash_attn_varlen()
+            except RuntimeError as e:
+                raise RuntimeError(
+                    f"Flash attention v3 runtime error {e}, Please install it first or set XTUNER_USE_FA3=0.")
         train_worker_cfg.load_from = load_from
 
         self._total_epochs = total_epochs
@@ -492,7 +506,7 @@ class RLTrainer:
                 else:
                     rollout_logprobs = None
 
-                seq_ctx = get_train_seq_ctx(input_ids, multimodal_train_info)
+                seq_ctx = get_train_seq_ctx(input_ids, multimodal_train_info, len(response_ids))
                 data_batches.append(
                     dict(
                         seq_ctx=seq_ctx,

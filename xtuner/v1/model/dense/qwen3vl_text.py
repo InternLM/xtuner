@@ -80,9 +80,10 @@ class Qwen3VLTextDense(Qwen3Dense):
 
         hidden_states = self.norm(hidden_states)
 
-        loss, logits = self.lm_head(hidden_states, loss_ctx)  # type: ignore
+        loss, (logits, extra_info) = self.lm_head(hidden_states, loss_ctx)
         output["loss"] = loss
         output["logits"] = logits
+        output["extra_info"] = extra_info
         return ModelOutputs(**output)  # type: ignore[typeddict-item]
 
 

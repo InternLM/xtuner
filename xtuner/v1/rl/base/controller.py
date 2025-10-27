@@ -68,7 +68,7 @@ class TrainingController:
 
         # TODO(hha): 这是 hard code，后续需要重构整个 pack 逻辑
         is_qwen3_vl = False
-        if len(data_batches[0].position_ids.shape) == 3:
+        if len(data_batches[0]["seq_ctx"].position_ids.shape) == 3:
             is_qwen3_vl = True
 
         for pack_info in pack_infos:
@@ -104,7 +104,7 @@ class TrainingController:
                 if is_qwen3_vl:
                     _position_ids_list = []
                     for pad_token in pad_tokens:
-                        _position_ids = torch.arange(len(pad_token)).view(1, -1).expand(3, -1)
+                        _position_ids = torch.arange(pad_token.size(-1)).view(1, 1, -1).expand(3, 1, -1)
                         _position_ids_list.append(_position_ids)
                     pad_seq_ctx.position_ids = torch.cat(_position_ids_list, dim=-1)
 
@@ -181,7 +181,7 @@ class TrainingController:
             if is_qwen3_vl:
                 _position_ids_list = []
                 for pad_token in pad_tokens:
-                    _position_ids = torch.arange(len(pad_token)).view(1, -1).expand(3, -1)
+                    _position_ids = torch.arange(pad_token.size(-1)).view(1, 1, -1).expand(3, 1, -1)
                     _position_ids_list.append(_position_ids)
                 pad_seq_ctx.position_ids = torch.cat(_position_ids_list, dim=-1)
 

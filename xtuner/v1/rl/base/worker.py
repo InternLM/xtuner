@@ -498,10 +498,15 @@ class TrainingWorker(SingleAcceleratorWorker):
         model = self._engine.model
         DEVICE_MODULE.empty_cache()
 
-        if (model.config.float8_cfg is not None) and (model.config.float8_cfg.enable_float8):
-            dtype = torch.float8_e4m3fn
-        else:
+        # TODO: 这个逻辑和某个模型绑定死了。一定要重构掉
+        if isinstance(model.config, VisionComposeConfigProtocol):
+            # TODO: support float8 for vision compose model
             dtype = torch.bfloat16
+        else:
+            if (model.config.float8_cfg is not None) and (model.config.float8_cfg.enable_float8):
+                dtype = torch.float8_e4m3fn
+            else:
+                dtype = torch.bfloat16
 
         def get_params(tensor_list, name_list, save_dtype):
             _tensor_list, _spec_list = list(zip(*tensor_list))
@@ -513,15 +518,25 @@ class TrainingWorker(SingleAcceleratorWorker):
             return fsdp_unshard_tensor_list, name_list
 
         saved_list = []
-        for i, layer in tqdm.tqdm(model.layers.items(), desc="[gather weight]"):
+        if isinstance(model.config, VisionComposeConfigProtocol):
+            language_model = model.language_model
+        else:
+            language_model = model
+
+        for i, layer in tqdm.tqdm(language_model.layers.items(), desc="[gather weight]"):
             tensor_list = []
             name_list = []
             for sub_name, param in layer.state_dict().items():
                 saved_list.append(f"layers.{i}.{sub_name}")
                 local_tensor = param._local_tensor if isinstance(param, DTensor) else param
                 local_tensor = local_tensor.bfloat16()
-                load_spec = model.load_spec_mapping.get(f"layers.{i}.{sub_name}")
-                name = f"model.layers.{i}.{sub_name}"
+                load_spec = language_model.load_spec_mapping.get(f"layers.{i}.{sub_name}")
+                
+                if isinstance(model.config, VisionComposeConfigProtocol):
+                    name = f"model.language_model.layers.{i}.{sub_name}"
+                else:
+                    name = f"model.layers.{i}.{sub_name}"
+
                 if ".experts." in name and ".mlp.experts." not in name:
                     name = name.replace(".experts.", ".mlp.experts.")
                 if ".gate." in name and ".mlp.gate." not in name:
