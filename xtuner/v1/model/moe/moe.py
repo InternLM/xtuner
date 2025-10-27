@@ -42,6 +42,7 @@ from xtuner.v1.module import (
 from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayer
 from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEActFnConfig, MoEBlock, MoEDecoderLayer
 from xtuner.v1.utils import (
+    DEBUG_ACC,
     get_device,
     get_logger,
 )
@@ -474,6 +475,8 @@ class MoE(BaseModel):
             hidden_states = self.embed_tokens(input_ids)
         else:
             hidden_states = seq_ctx.inputs_embeds
+        if DEBUG_ACC:
+            import torch.distributed as dist; dist.breakpoint()
 
         # create position embeddings to be shared across the decoder layers
         assert position_ids is not None
@@ -517,6 +520,8 @@ class MoE(BaseModel):
 
                 output["router_logits"][f"layer{idx}"] = router_results
 
+            if DEBUG_ACC:
+                import torch.distributed as dist; dist.breakpoint()
             if self.config.return_hidden_states:
                 output["hidden_states"].append(hidden_states)
 
