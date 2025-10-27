@@ -887,6 +887,7 @@ class Trainer:
 
     def _set_deterministic(self):
         if XTUNER_DETERMINISTIC:
+            logger.info("Setting deterministic algorithms")
             os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
             torch.use_deterministic_algorithms(True, warn_only=True)
 
