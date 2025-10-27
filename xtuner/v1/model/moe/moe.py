@@ -532,7 +532,9 @@ class MoE(BaseModel):
 
         hidden_states = self.norm(hidden_states)
 
+        AccProber.before_lm_head(hidden_states, loss_ctx.loss_kwargs.shifted_labels)
         loss, (logits, extra_info) = self.lm_head(hidden_states, loss_ctx)  # type: ignore
+        AccProber.after_lm_head(loss, logits)
         output["loss"] = loss
         output["logits"] = logits
         output["extra_info"] = extra_info

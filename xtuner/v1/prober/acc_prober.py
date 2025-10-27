@@ -66,18 +66,30 @@ class AccProber:
             "tensor_sum": tensor.float().sum().item(),
             "shape": tensor.shape,
             "dtype": str(tensor.dtype),
+            "step": cls.cur_step,
+            "micro_batch_iter": cls.cur_micro_batch_iter,
             "tensor_info": str(tensor),
         }
         cls.forward_records.append(json.dumps(cur_json, ensure_ascii=False))
 
     @classmethod
     def before_embed_tokens(cls, input_ids: torch.Tensor):
-        cls.record_tensor(input_ids, "[embed_tokens]input_ids")
+        cls.record_tensor(input_ids, "[embed_tokens][before]input_ids")
 
     @classmethod
     def after_embed_tokens(cls, hidden_states: torch.Tensor):
-        cls.record_tensor(hidden_states, "[embed_tokens]hidden_states")
-    
+        cls.record_tensor(hidden_states, "[embed_tokens][after]hidden_states")
+
+    @classmethod
+    def before_lm_head(cls, hidden_states: torch.Tensor, shifted_labels: torch.Tensor):
+        cls.record_tensor(hidden_states, "[lm_head][before]hidden_states")
+        cls.record_tensor(shifted_labels, "[lm_head][before]shifted_labels")
+
+    @classmethod
+    def after_lm_head(cls, loss: torch.Tensor, logits: torch.Tensor):
+        cls.record_tensor(loss, "[lm_head][after]loss")
+        cls.record_tensor(logits, "[lm_head][after]logits")
+
     @classmethod
     def dump_forward_records(cls):
         if cls.skip():
