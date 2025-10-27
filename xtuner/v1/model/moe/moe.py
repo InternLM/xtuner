@@ -102,6 +102,7 @@ class MoEConfig(TransformerConfig):
     gate_bias: bool = False
     moe_bias: bool = False
     moe_act_fn_cfg: MoEActFnConfig = MoEActFnConfig()
+    freeze_routers: bool = False
 
     def build(self) -> "MoE":
         from xtuner.v1.model.moe.moe import MoE
@@ -157,6 +158,17 @@ class MoE(BaseModel):
             self.z_loss = self.config.z_loss_cfg.build()
         else:
             self.z_loss = None
+
+        self._freeze_modules()
+
+    def _freeze_modules(self):
+        freeze_routers = self.config.freeze_routers
+        if freeze_routers:
+            for name, layer in self.layers.items():
+                if isinstance(layer, MoEDecoderLayer):
+                    layer.gate.requires_grad_(False)
+                    layer.gate.eval()
+                    logger.info(f"Freeze MoE Router in layer {name}")
 
     def _select_non_pad_router_logits(
         self,
@@ -232,6 +244,9 @@ class MoE(BaseModel):
 
         TODO: refactor it later.
         """
+        if self.config.freeze_routers:
+            return
+
         first_k_dense_replace = self.config.first_k_dense_replace
         bias_update_speed = cast(NoAuxRouterConfig, self.config.router).router_bias_update_speed
         n_layer, _ = total_expert_counts_pre_iter.size()
