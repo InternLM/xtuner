@@ -126,12 +126,9 @@ class Evaluator:
         """
         self.config = config
         self.sample_params = self.config.sample_params
-        self.dataset = (
-            build_datasets(config.dataset_cfg, config.tokenizer)[0]
-            if isinstance(config.tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast))
-            else build_datasets(
-                config.dataset_cfg, AutoTokenizer.from_pretrained(config.tokenizer, trust_remote_code=True)
-            )[0]
+        self.dataset = build_datasets(config.dataset_cfg, config.tokenizer) if isinstance(config.tokenizer, (
+        PreTrainedTokenizer, PreTrainedTokenizerFast)) else build_datasets(
+            config.dataset_cfg, AutoTokenizer.from_pretrained(config.tokenizer, trust_remote_code=True)
         )
 
         if config.dataloader_cfg is not None:
@@ -143,7 +140,7 @@ class Evaluator:
             )
         self.dataloader = build_dataloader(
             dataloader_config=self.dataloader_cfg,
-            datasets=self.datasets,
+            datasets=self.dataset,
             global_batch_size=1,
             micro_batch_size=1,
             seed=1,
@@ -153,11 +150,11 @@ class Evaluator:
         self.failed_samples_count = 0
         self.return_list: List[RLDataFlowItem] = []
         if self.config.eval_sample_ratio > 0:
-            self.eval_batch_size = int(len(self.dataset) * self.config.eval_sample_ratio)
+            self.eval_batch_size = int(len(self.dataloader) * self.config.eval_sample_ratio)
         elif self.config.eval_sample_num > 0:
             self.eval_batch_size = self.config.eval_sample_num
         else:
-            self.eval_batch_size = len(self.dataset)
+            self.eval_batch_size = len(self.dataloader)
         if self.config.compute_metric_func is not None:
             self.compute_metric = self.config.compute_metric_func
         else:
@@ -193,7 +190,8 @@ class Evaluator:
         """
         try:
             # note: In the evaluator, we convert the input sample to a list to adapt to the input format of single_turn_env
-            group_sample = await self.env_controller.run.remote([sample], sample_params=self.sample_params)  # type: ignore[attr-defined]
+            group_sample = await self.env_controller.run.remote([sample],
+                                                                sample_params=self.sample_params)  # type: ignore[attr-defined]
             self.return_list.append(group_sample[0])
         except Exception as e:
             self.logger.error(f"Worker task failed with exception: {e}. Returning meta for retry.")
@@ -228,7 +226,7 @@ class Evaluator:
                         self.dataloader = iter(self.dataloader)
                         data = next(self.dataloader)
                         self.logger.warning("Restarting the evaluation dataset.")
-                    data_item = RLDataFlowItem(data=RLDatasetItem(**data))
+                    data_item = RLDataFlowItem(data=RLDatasetItem(**data[0]))
                     task = create_task(self.eval_worker_task(data_item))
                     waiting_tasks.add(task)
 

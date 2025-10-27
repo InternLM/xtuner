@@ -103,4 +103,4 @@ class RLTokenizeFnConfig(BaseModel):
             anno_name=anno_name,
             **kwargs,
         )
-        return RLTokenizeFn(sft_tokenizer_fn, max_length=self.max_length)
+        return RLTokenizeFn(sft_tokenizer_fn, max_length=self.max_length, is_training=self.is_training)
