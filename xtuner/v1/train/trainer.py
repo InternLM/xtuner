@@ -160,7 +160,6 @@ class TrainerConfig(BaseModel):
     dist_backend: str | None = None
     debug: bool = False
     debug_skip_save: bool = False
-    debug_skip_save: bool = False
 
     @model_validator(mode="after")
     def _convert_work_dir(self):
@@ -400,7 +399,7 @@ class Trainer:
         if self._resume_cfg.resume_from is not None:
             self._resume()
         
-        AccProber.setup(self.exp_dir, self._profile_step)
+        AccProber.setup(self.exp_dir, self._profile_step, self._engine.model)
 
 
     @classmethod
@@ -541,6 +540,7 @@ class Trainer:
 
         # TODO: Should use flush rather than close
         self._exp_tracker.close()
+        self.logger.info(f"Training finished in {time.time() - train_begin:.2f} seconds")
 
     @property
     def world_size(self) -> int:

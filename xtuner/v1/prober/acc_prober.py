@@ -4,6 +4,7 @@ import json
 import torch
 import torch.distributed as dist
 from torch.distributed.tensor import DTensor
+import torch.nn as nn
 
 
 def get_dtensor_meta(dtensor: torch.Tensor):
@@ -24,34 +25,86 @@ class AccProber:
     dump_dir: Path | None = None
     profile_step: list[int] | None = None
     cur_step: int = -1
+    model: nn.Module | None = None
+    initialized: bool = False
+    forward_records: list = []
+    cur_micro_batch_iter: int = 0
 
     @classmethod
-    def setup(cls, dump_home: Path, profile_step: list[int]):
+    def setup(cls, dump_home: Path, profile_step: list[int], model):
         cls.dump_dir = dump_home / "acc_prober"
         cls.dump_dir.mkdir(parents=True, exist_ok=True)
         cls.profile_step = profile_step
+        cls.model = model
+        cls.forward_records = []
+        cls.initialized = True
+    
+    @classmethod
+    def skip(cls):
+        if cls.cur_step not in cls.profile_step:
+            return True
+        if dist.get_rank() != 0:
+            return True
+        return False
     
     @classmethod
     def set_step(cls, step: int):
         cls.cur_step = step
+    
+    @classmethod
+    def set_micro_batch_iter(cls, iter: int):
+        cls.cur_micro_batch_iter = iter
+    
+    @classmethod
+    def record_tensor(cls, tensor: torch.Tensor, name: str):
+        if cls.skip():
+            return
+        assert cls.initialized, "AccProber is not initialized, please call setup() first"
+        tensor = tensor.detach().clone()
+        cur_json = {
+            "name": name,
+            "tensor_sum": tensor.float().sum().item(),
+            "shape": tensor.shape,
+            "dtype": str(tensor.dtype),
+            "tensor_info": str(tensor),
+        }
+        cls.forward_records.append(json.dumps(cur_json, ensure_ascii=False))
 
     @classmethod
-    def before_clip_grad_norm(cls, model):
-        assert cls.dump_dir is not None, "dump_dir is not set"
-        assert cls.profile_step is not None, "profile_step is not set"
-        assert cls.cur_step != -1, "cur_step is not set"
+    def before_embed_tokens(cls, input_ids: torch.Tensor):
+        cls.record_tensor(input_ids, "[embed_tokens]input_ids")
 
-        if cls.cur_step not in cls.profile_step:
+    @classmethod
+    def after_embed_tokens(cls, hidden_states: torch.Tensor):
+        cls.record_tensor(hidden_states, "[embed_tokens]hidden_states")
+    
+    @classmethod
+    def dump_forward_records(cls):
+        if cls.skip():
             return
+        assert cls.initialized, "AccProber is not initialized, please call setup() first"
+        dump_file = cls.dump_dir.joinpath(f"Step_{cls.cur_step}_MicroIter_{cls.cur_micro_batch_iter}_RANK_{dist.get_rank()}_forward_records.jsonl")
+        with open(dump_file, "w", encoding="utf-8") as f:
+            for record in cls.forward_records:
+                f.write(record + "\n")
+        print(f"Dump forward records to {dump_file}")
 
-        if dist.get_rank() != 0:
+        cls.forward_records = []
+
+    # Below is for checking gradient
+    @classmethod
+    def grad_dump(cls, suffix: str):
+        assert cls.initialized, "AccProber is not initialized, please call setup() first"
+        model = cls.model
+
+        if cls.skip():
             return
 
         res = []
         trainable_params = [(name, param) for name, param in model.named_parameters() if param.requires_grad]
         for name, param in trainable_params:
             assert param.grad is not None, "Internal Error: param.grad must not be None"
-            print(f"name: {name}, grad: {param.grad}")
+            # print(f"name: {name}, grad: {param.grad}")
             grad = param.grad.detach().clone().view(-1)
             grad_sum = grad.float().sum()
             cur_json = {
@@ -65,13 +118,16 @@ class AccProber:
             }
             res.append(cur_json)
         
-        dump_file = cls.dump_dir.joinpath(f"STEP_{cls.cur_step}_RANK_{dist.get_rank()}_before_clip_grad_norm.json")
+        dump_file = cls.dump_dir.joinpath(f"STEP_{cls.cur_step}_RANK_{dist.get_rank()}_{suffix}.jsonl")
         with open(dump_file, "w", encoding="utf-8") as f:
             for line in res:
                 f.write(json.dumps(line, ensure_ascii=False) + "\n")
-        print("Dump before_clip_grad_norm to ", dump_file)
-
+        print(f"Dump {suffix} to {dump_file}")
 
     @classmethod
-    def after_clip_grad_norm(cls, model):
-        pass
+    def before_clip_grad_norm(cls):
+        cls.grad_dump("before_clip_grad_norm")
+
+    @classmethod
+    def after_clip_grad_norm(cls):
+        cls.grad_dump("after_clip_grad_norm")

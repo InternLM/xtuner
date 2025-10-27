@@ -231,7 +231,10 @@ class TrainEngine:
             self._count += 1
 
         train_engine_extra_info = ModelForwardExtraLogInfo()
+        micro_batch_iter = 0
         for i in range(0, len(data_batches), intra_layer_micro_batch):
+            AccProber.set_micro_batch_iter(micro_batch_iter)
+            micro_batch_iter += 1
             data_batch = data_batches[i : i + intra_layer_micro_batch]
             seq_ctx_list = []
             loss_ctx_list = []
@@ -283,6 +286,8 @@ class TrainEngine:
 
             del output
             loss.backward()
+            # call dump_forward_records after backward to record the recomputed activations
+            AccProber.dump_forward_records()
             step_loss += loss.detach().clone()
 
         if moe_need_update_bias:
@@ -367,7 +372,7 @@ class TrainEngine:
 
     def clip_grad_norm(self):
         # import torch.distributed as dist; dist.breakpoint()
-        AccProber.before_clip_grad_norm(self.model)
+        AccProber.before_clip_grad_norm()
         self.model.scale_and_reduce_grad()
         params = self.model.trainable_parameters()
         grads = [p.grad for _, p in params if p.grad is not None]
@@ -388,6 +393,7 @@ class TrainEngine:
                 for g in grads:
                     g.mul_(clip_coef_clamped_device)
         # import torch.distributed as dist; dist.breakpoint()
+        AccProber.after_clip_grad_norm()
         return grad_norm
 
     def step_optimizer(self, grad_norm):

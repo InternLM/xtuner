@@ -48,6 +48,7 @@ from xtuner.v1.utils import (
 )
 from xtuner.v1.utils.activation_offload import async_save_on_cpu
 from xtuner.v1.utils.compile import maybe_compile
+from xtuner.v1.prober.acc_prober import AccProber
 
 
 DEVICE = get_device()
@@ -472,7 +473,9 @@ class MoE(BaseModel):
         position_ids = seq_ctx.position_ids
 
         if input_ids is not None:
+            AccProber.before_embed_tokens(input_ids)
             hidden_states = self.embed_tokens(input_ids)
+            AccProber.after_embed_tokens(hidden_states)
         else:
             hidden_states = seq_ctx.inputs_embeds
         if DEBUG_ACC:
