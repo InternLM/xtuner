@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field
 from typing_extensions import Annotated
 
 from xtuner.v1.engine.config import EngineConfig
-from xtuner.v1.ray.accelerator import AcceleratorResourcesConfig
+from xtuner.v1.ray.base import AcceleratorResourcesConfig
 from xtuner.v1.ray.config.worker import RolloutConfig
 
 
