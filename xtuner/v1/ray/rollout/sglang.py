@@ -153,7 +153,7 @@ class SGLangWorker(RolloutWorker):
             "grammar_backend", None
         )  # for intern-s1 series models, have to set the grammar_backend to "none"
 
-        sglang_server_args = ServerArgs(model_path=self.config.model_path, trust_remote_code=True)
+        sglang_server_args = ServerArgs(model_path=self.config.model_path)
         sglang_server_args.host = self.host
         sglang_server_args.port = self.server_port
         sglang_server_args.nccl_port = self.nccl_port
