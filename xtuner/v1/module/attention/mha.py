@@ -27,7 +27,7 @@ logger = get_logger()
 
 
 class MHAConfig(BaseModel):
-    model_config = ConfigDict(title="Base attention config for xtuner", extra="allow")
+    model_config = ConfigDict(title="Base attention config for xtuner", extra="forbid")
     num_attention_heads: Annotated[int, Parameter(group="attention")]
     num_key_value_heads: int
     head_dim: Annotated[int, Parameter(group="attention")]

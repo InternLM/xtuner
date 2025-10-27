@@ -44,7 +44,7 @@ class MLAConfig(BaseModel):
             attention. Use -1 to disable sliding window attention. Defaults to -1.
     """
 
-    model_config = ConfigDict(title="Base attention config for xtuner", extra="allow")
+    model_config = ConfigDict(title="Base attention config for xtuner", extra="forbid")
     num_attention_heads: Annotated[int, Parameter(group="attention")]
     head_dim: Annotated[int, Parameter(group="attention")]
     dropout: Annotated[float, Parameter(group="attention")] = 0.0

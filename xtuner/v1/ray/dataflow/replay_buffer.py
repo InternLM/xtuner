@@ -137,7 +137,7 @@ class ReplayBufferConfig(BaseModel):
         )
     """
 
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
     dataset_cfg: Annotated[List, Parameter(help="The dataset object to sample initial prompts from.")]
 

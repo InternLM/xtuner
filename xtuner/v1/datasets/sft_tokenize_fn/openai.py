@@ -82,7 +82,7 @@ class OpenaiTokenizeFunction(CachableTokenizeFunction[DataItem]):
 
 # TODO: Maybe rename
 class OpenaiTokenizeFunctionConfig(BaseModel):
-    model_config = ConfigDict(title="Base dataset config for xtuner", extra="allow")
+    model_config = ConfigDict(title="Base dataset config for xtuner", extra="forbid")
     chat_template: Annotated[str, Parameter(group="tokenize_fn")]
     max_length: int | None = None
     hash: Annotated[str | None, Parameter(group="tokenize_fn")] = None

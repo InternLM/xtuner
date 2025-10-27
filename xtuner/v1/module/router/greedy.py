@@ -4,7 +4,7 @@ from typing import Annotated, Literal
 
 import torch
 from cyclopts import Parameter
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from torch import nn
 from torch.nn import functional as F
 
@@ -12,6 +12,7 @@ from .protocol import RouterProtocol, RouterResults
 
 
 class GreedyRouterConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     scoring_func: Annotated[Literal["sigmoid", "softmax"], Parameter(group="router")]
     router_scaling_factor: Annotated[float, Parameter(group="router")]
     norm_topk_prob: Annotated[bool, Parameter(group="router")]

@@ -58,7 +58,7 @@ class CELossContextInputItem(BaseModel):
         shifted_labels (torch.Tensor): The shifted labels for the input sequences.
     """
 
-    model_config = ConfigDict(title="CELossContextInputItem", extra="allow", arbitrary_types_allowed=True)
+    model_config = ConfigDict(title="CELossContextInputItem", extra="forbid", arbitrary_types_allowed=True)
     shifted_labels: torch.Tensor
 
     def sp_split(self, sp_mesh: DeviceMesh) -> Self:

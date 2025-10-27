@@ -61,6 +61,7 @@ class MoEModelOutputs(ModelOutputs):
 
 
 class BalancingLossConfig(PydanticBaseModel):
+    model_config = ConfigDict(extra="forbid")
     balancing_loss_alpha: float = 0.001
     balancing_loss_global_average: bool = True
 
@@ -73,6 +74,7 @@ class BalancingLossConfig(PydanticBaseModel):
 
 
 class ZLossConfig(PydanticBaseModel):
+    model_config = ConfigDict(extra="forbid")
     z_loss_alpha: float = 0.001
     z_loss_global_average: bool = True
 
@@ -86,7 +88,7 @@ class ZLossConfig(PydanticBaseModel):
 
 
 class MoEConfig(TransformerConfig):
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
     n_routed_experts: Annotated[int, Parameter(group="moe")]
     n_shared_experts: Annotated[int, Parameter(group="moe")]
     num_experts_per_tok: Annotated[int, Parameter(group="moe")]

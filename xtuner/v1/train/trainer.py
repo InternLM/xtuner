@@ -18,7 +18,7 @@ from cyclopts import Parameter
 from mmengine import load
 from mmengine.dist import get_rank, get_world_size
 from mmengine.runner import set_random_seed
-from pydantic import BaseModel, ConfigDict, computed_field, model_validator
+from pydantic import BaseModel, ConfigDict, model_validator
 from torch.distributed import init_process_group
 from torch.distributed.device_mesh import init_device_mesh
 from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, LinearLR, SequentialLR
@@ -73,6 +73,7 @@ class ExpHistory(TypedDict):
 
 
 class ExpInfo(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     history: list[ExpHistory]
     exp_dir: str
     hf_checkpoint_list: list[str] = []
@@ -82,7 +83,7 @@ class ExpInfo(BaseModel):
     consumed_tokens: int = 0
     consumed_samples: int = 0
 
-    @computed_field  # type: ignore
+    @property
     def latest_checkpoint(self) -> str | None:
         if self.checkpoint_list:
             return self.checkpoint_list[-1]
@@ -90,6 +91,7 @@ class ExpInfo(BaseModel):
 
 
 class XTunerMeta(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     exps: list[ExpInfo]
 
     @property
@@ -112,6 +114,7 @@ class XTunerMeta(BaseModel):
 
 
 class ResumeConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     resume_from: str | Path | None = None
     auto_resume: bool = False
     load_optimizer: bool = True
@@ -122,7 +125,7 @@ class ResumeConfig(BaseModel):
 class TrainerConfig(BaseModel):
     model_config = ConfigDict(
         title="Trainer config",
-        extra="allow",
+        extra="forbid",
         arbitrary_types_allowed=True,
         protected_namespaces=(),
     )
@@ -982,7 +985,6 @@ class Trainer:
             new_exp = ExpInfo(
                 history=[new_history],
                 exp_dir=str(exp_dir),
-                latest_checkpoint=None,
             )
             meta.exps.append(new_exp)
         return meta

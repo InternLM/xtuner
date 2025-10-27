@@ -4,7 +4,7 @@ from typing import Dict, List, Optional
 
 import ray
 from cyclopts import Parameter
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from tqdm.auto import tqdm
 from typing_extensions import Annotated
 
@@ -44,6 +44,8 @@ class DataFlowConfig(BaseModel):
             sample_params=SampleParams(max_tokens=2048),
         )
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     env: Annotated[
         str,
