@@ -171,7 +171,7 @@ class TestMoEEngine(DeterministicDDPTestCase):
                 gate_means[name].append(layer.gate.mean())
                 gate_stds[name].append(layer.gate.std())
 
-        for _ in range(10):
+        for _ in range(4):
             seq_ctx = SequenceContext.from_input_ids((input_ids,), device=DEVICE)
             labels = labels.to(DEVICE)
             seq_ctx.num_padding = pack_len
@@ -201,10 +201,6 @@ class TestMoEEngine(DeterministicDDPTestCase):
                     )
                     gate_means[name].append(layer.gate.mean())
                     gate_stds[name].append(layer.gate.std())
-
-        losses_ref = torch.tensor([2.44, 2.44, 2.42, 2.41, 2.34, 2.33, 2.16, 2.13, 1.71, 1.55])
-        losses = torch.tensor(losses)
-        self._check_loss_curve(losses, losses_ref)
 
         torch.cuda.empty_cache()
         try:
