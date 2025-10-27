@@ -5,7 +5,17 @@ from typing import Union, Optional
 from typing_extensions import override
 import numpy as np
 
-from transformers.models.internvl.modeling_internvl import InternVLVisionEmbeddings
+try:
+    from transformers.models.internvl.modeling_internvl import InternVLVisionEmbeddings
+except:
+    class InternVLVisionEmbeddings(nn.Module):
+        def __init__(self, config):
+            super().__init__()
+            self.config = config
+
+        def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
+            return pixel_values
+
 from transformers.modeling_outputs import BaseModelOutput
 
 try:
