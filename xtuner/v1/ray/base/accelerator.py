@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from ray.util.placement_group import PlacementGroup, placement_group, placement_group_table
 from typing_extensions import Annotated
 
-from .utils import find_master_addr_and_port, get_accelerator_ids
+from ..utils import find_master_addr_and_port, get_accelerator_ids
 
 
 AcceleratorType = Literal["GPU", "NPU"]
@@ -82,6 +82,38 @@ class AcceleratorResourcesConfig(BaseModel):
         )
 
         super().__init__(**kwargs)
+
+    @classmethod
+    def from_total(
+        cls,
+        accelerator: AcceleratorType,
+        total_accelerators: float | int,
+        total_cpus: float | int,
+        total_memory: int,
+        num_workers: int,
+    ):
+        """Create an AcceleratorResourcesConfig from total accelerator, CPU,
+        and memory resources.
+
+        Args:
+            accelerator (AcceleratorType): Type of accelerator architecture to use
+                (e.g., 'GPU', 'NPU').
+            total_accelerators (float | int): Total number of accelerators to allocate
+                across all workers.
+            total_cpus (float | int): Total number of CPUs to allocate across all workers.
+            total_memory (int): Total amount of memory (in bytes) to allocate across all workers.
+            num_workers (int): Number of workers in the placement group.
+
+        Returns:
+            AcceleratorResourcesConfig: A configuration object with the specified resource allocations.
+        """
+        return cls(
+            accelerator=accelerator,
+            num_workers=num_workers,
+            num_accelerators_per_worker=total_accelerators / num_workers,
+            num_cpus_per_worker=total_cpus / num_workers,
+            cpu_memory_per_worker=total_memory / num_workers,
+        )
 
 
 class SingleAcceleratorWorker:
@@ -336,14 +368,14 @@ class AutoAcceleratorWorkers:
                 for the accelerator resources.
 
         Returns:
-            Tuple[Dict[T, Tuple[int, int]], PlacementGroup]: A tuple
-                containing a map of worker instances to their (rank,
-                bundle_index) and the created placement group.
+            Tuple[List[T], List[Tuple[int, int]], PlacementGroup]: A tuple containing a list
+                of worker instances, a list of their corresponding
+                (rank, bundle_index) and placement group.
         """
         pg = AutoAcceleratorWorkers.build_placement_group(accelerator_config)
-        workers_bundle_idx_map = cls.from_placement_group(worker_cls, worker_config, pg)
+        workers_list, rank_bundle_idx_list = cls.from_placement_group(worker_cls, worker_config, pg)
 
-        return workers_bundle_idx_map, pg
+        return workers_list, rank_bundle_idx_list, pg
 
     @classmethod
     def from_placement_group(cls, worker_cls, worker_config, pg: PlacementGroup):
@@ -355,18 +387,21 @@ class AutoAcceleratorWorkers:
             pg (PlacementGroup): The existing placement group to use.
 
         Returns:
-            Dict[T, Tuple[int, int]]: A map of worker instances to their
+            Tuple[List[T], List[Tuple[int, int]]]: A tuple containing a list
+                of worker instances and a list of their corresponding
                 (rank, bundle_index).
         """
         pg_options = cls.get_pg_options(pg)
         device_type = cls.get_device_type(pg)
         sorted_bundle_idxs, master_addr, master_port, world_size = cls.get_spmd_info(pg)
 
-        workers_bundle_idx_map = dict()
+        workers_list = []
+        rank_bundle_idx_list = []
         for rank, bundle_idx in enumerate(sorted_bundle_idxs):
             worker = worker_cls.options(
                 placement_group=pg, placement_group_bundle_index=bundle_idx, **pg_options
             ).remote(worker_config, rank, master_addr, master_port, world_size, device_type)
-            workers_bundle_idx_map[worker] = (rank, bundle_idx)
+            workers_list.append(worker)
+            rank_bundle_idx_list.append((rank, bundle_idx))
 
-        return workers_bundle_idx_map
+        return workers_list, rank_bundle_idx_list
