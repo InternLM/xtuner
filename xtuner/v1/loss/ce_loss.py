@@ -10,6 +10,8 @@ from torch.distributed.device_mesh import DeviceMesh
 from typing_extensions import Self
 
 from xtuner.v1.loss import BaseLossConfig, BaseLossContext, BaseLossKwargs
+from xtuner.v1.utils import DEBUG_ACC
+from xtuner.v1.utils.debug import register_grad_hook
 
 from .utils import sp_gather, sp_split
 
@@ -49,6 +51,7 @@ class CELossKwargs(BaseLossKwargs):
 
     shifted_labels: torch.Tensor
     loss_weight: torch.Tensor
+    global_denominator: torch.Tensor
 
 
 class CELossContextInputItem(BaseModel):
@@ -148,7 +151,7 @@ class CELossContext(BaseLossContext[CELossContextInputItem]):
         global_denominator = rank_denominator
         if dist.is_initialized():
             dist.all_reduce(global_denominator, op=dist.ReduceOp.SUM)
-
+        
         batches_loss_kwargs = []
         for i, item in enumerate(data_batches):
             shifted_labels = shifted_labels_list[i]
@@ -158,6 +161,7 @@ class CELossContext(BaseLossContext[CELossContextInputItem]):
             loss_kwargs = CELossKwargs(
                 shifted_labels=shifted_labels,
                 loss_weight=loss_weight,
+                global_denominator=global_denominator,
             )
             batches_loss_kwargs.append(loss_kwargs)
         return batches_loss_kwargs
@@ -169,9 +173,12 @@ class CELossContext(BaseLossContext[CELossContextInputItem]):
         head_bias: torch.Tensor | None,
         loss_kwargs: CELossKwargs,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor | None, dict[str, Any]]]:
+        import torch.distributed as dist; dist.breakpoint()
         # We do linear forward here to simplify the implementation of chunk loss (saving memory).
         logits = F.linear(hidden_states, head_weight, head_bias)
-        logits = logits.float()  # (bs, seq_len, vocab_size)
+        dist.breakpoint()
+        register_grad_hook(logits, "logits")
+        # logits = logits.float()  # (bs, seq_len, vocab_size)
 
         shifted_labels = loss_kwargs.shifted_labels  # (bs, seq_len)
         loss_weight = loss_kwargs.loss_weight  # (bs, seq_len)
@@ -184,9 +191,17 @@ class CELossContext(BaseLossContext[CELossContextInputItem]):
         if rank_grad_tokens == 0:
             loss = logits.sum() * 0
         else:
-            loss = F.cross_entropy(logits, shifted_labels, reduction="none", ignore_index=self.loss_cfg.ignore_idx)
+            # loss = F.cross_entropy(logits, shifted_labels, reduction="none", ignore_index=self.loss_cfg.ignore_idx)
             # Step 2.b in the loss calculation: sum the loss over all tokens
-            loss = (loss * loss_weight).sum()
+            # loss = (loss * loss_weight).sum()
+
+            loss = F.cross_entropy(logits, shifted_labels, reduction="sum", ignore_index=self.loss_cfg.ignore_idx)
+            register_grad_hook(loss, "loss")
+            # mask = loss_weight != 0
+            # w = loss_weight.sum() / mask.sum()  # w equals to 1/global_denominator
+            # loss = loss * w
+            loss = loss / int(loss_kwargs.global_denominator)
+            return loss, (None, {})
 
         return loss, (logits, {})
 
@@ -210,7 +225,9 @@ class CELossContext(BaseLossContext[CELossContextInputItem]):
             # liger kernel dont support reduction=="none"
             # step 2.b in the loss calculation: sum the loss over all tokens, then multiply the loss weight (i.e. divide by the global_denominator)
             loss = self.liger_loss_fct(head_weight, hidden_states, shifted_labels)
+            if DEBUG_ACC:
+                import torch.distributed as dist; dist.breakpoint()
             mask = loss_weight != 0
-            w = loss_weight.sum() / mask.sum()  # equal to the global_denominator
+            w = loss_weight.sum() / mask.sum()  # w equals to 1/global_denominator
             loss = loss * w
             return loss, (None, {})
