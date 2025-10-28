@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 from typing import Dict, List, TypeAlias, TypedDict, cast
 
+import ray
 import requests
 import torch
 import torch.distributed as dist
@@ -301,6 +302,15 @@ class TrainingWorker(SingleAcceleratorWorker):
         loss_ctx_input_list: list[RLLossContextInputItem] = []
         rollout_logprobs_list: list[torch.Tensor | None] = []
         for data in data_batches:
+            seq_ctx = data["seq_ctx"]
+            pixel_values = seq_ctx.pixel_values
+            if pixel_values is not None:
+                if not isinstance(pixel_values, torch.Tensor):
+                    assert isinstance(pixel_values, list), f"pixel_values should be list of tensor, got {type(pixel_values)}"
+                    pixel_values = [ray.get(pixel_obf) for pixel_obf in pixel_values]
+                    pixel_values = torch.cat(pixel_values, dim=0)
+                    seq_ctx.pixel_values = pixel_values
+
             seq_ctx = data["seq_ctx"].to(DEVICE)
             loss_ctx_input = RLLossContextInputItem(
                 shifted_labels=data["shifted_labels"],

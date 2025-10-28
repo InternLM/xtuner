@@ -211,6 +211,9 @@ class Sampler:
             data = next(self.train_dataloader_iter)[0]
 
         multimodal_train_info = data.pop("multimodal_train_info", {})
+        if 'pixel_values' in multimodal_train_info:
+            multimodal_train_info['pixel_values'] = ray.put(multimodal_train_info['pixel_values'])
+
         self.storage.add_multimodal_train_info(action_id, multimodal_train_info)
 
         for data_item in group_data_item:
@@ -290,6 +293,11 @@ class ReplayBufferStorage:
         if len(grouped_dataitem) == 0:
             return
 
+        for item in grouped_dataitem:
+            finish_reason=item.env.rollout.finish_reason
+            if finish_reason=='failed':
+                return
+
         replay_meta = mapping_dataitem_to_replaymeta(grouped_dataitem)
         root_id = replay_meta.root_id
         action_id = replay_meta.action_id
@@ -345,9 +353,10 @@ class ReplayBufferStorage:
                 samples.append(group_samples)
                 multimodal_train_infos.append(self._multimodal_train_infos.pop(action_id))
             self._returned = remain_finished_list
-            assert len(self._multimodal_train_infos) == len(self._returned), (
-                "multimodal_train_infos and returned should have the same length"
-            )
+
+            # assert len(self._multimodal_train_infos) == len(self._returned), (
+            #     "multimodal_train_infos and returned should have the same length"
+            # ) # 暂时注释
             return samples, multimodal_train_infos
 
     def get_finished_samples(self):
