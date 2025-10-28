@@ -175,7 +175,8 @@ class DeepEPCombine(torch.autograd.Function):
         grad_x, event = combine_backward(
             grad_combined_x, ctx.num_experts, handle, ctx.group, ctx.backward_previous_event
         )
-        ctx.backward_finished_event.event = event.event
+        if ctx.backward_finished_event is not None:
+            ctx.backward_finished_event.event = event.event
         return grad_x, None, None, None, None, None, None
 
 
