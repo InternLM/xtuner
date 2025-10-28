@@ -92,7 +92,7 @@ train_dataset = DatasetConfig(name=experimental_name, anno_path=data_path)
 eval_dataset = DatasetConfig(name=experimental_name, anno_path=eval_data_path) if enable_evaluate else None
 tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
 
-sft_tokenize_fn_cfg = Qwen3VLTokenizeFnConfig(processor_path=model_path)
+tokenize_fn_cfg = Qwen3VLTokenizeFnConfig(processor_path=model_path)
 train_dataset_cfg = [
     {
             "dataset": DatasetConfig(name="geo3k",
@@ -101,7 +101,7 @@ train_dataset_cfg = [
                                      media_root=media_root,
                                      sample_ratio=1.0),
             "tokenize_fn": RLTokenizeFnConfig(max_length=max_prompt_length,
-                                              sft_tokenize_fn_cfg=sft_tokenize_fn_cfg),
+                                              tokenize_fn_cfg=tokenize_fn_cfg),
     }
 ]
 
@@ -115,7 +115,7 @@ if enable_evaluate:
                                      media_root=media_root,
                                      sample_ratio=1.0),
             "tokenize_fn": RLTokenizeFnConfig(max_length=max_prompt_length,
-                                              sft_tokenize_fn_cfg=sft_tokenize_fn_cfg,
+                                              tokenize_fn_cfg=tokenize_fn_cfg,
                                               is_training=False),
         }
     ]
