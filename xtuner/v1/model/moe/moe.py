@@ -321,6 +321,7 @@ class MoE(BaseModel):
         output: dict = {}
 
         router_logits_list: list[dict[str, torch.Tensor]] = [{} for _ in range(len(seq_ctx_list))]
+        router_weights_list: list[dict[str, torch.Tensor]] = [{} for _ in range(len(seq_ctx_list))]
 
         # Process through layers
         cat_seq_ctx: SequenceContext | None = None
@@ -377,12 +378,14 @@ class MoE(BaseModel):
                         seq_ctx=seq_ctx_list,
                     )
                 hidden_states = layer_results[: len(hidden_states_list)]
-                router_logits = layer_results[len(hidden_states_list) :]
+                router_logits = layer_results[len(hidden_states_list) : len(hidden_states_list) * 2]
+                router_weights = layer_results[len(hidden_states_list) * 2 :]
 
                 # Update hidden states and collect router results
                 for i, hidden_states in enumerate(hidden_states):
                     hidden_states_list[i] = hidden_states
                     router_logits_list[i][f"layer{idx}"] = router_logits[i]
+                    router_weights_list[i][f"layer{idx}"] = router_weights[i]
 
         # Apply final norm to all micro-batches
         for i, hidden_states in enumerate(hidden_states_list):
@@ -406,22 +409,28 @@ class MoE(BaseModel):
 
         # Handle router results for all micro-batches
         all_router_logits = []
+        all_router_weights = []
 
-        for micro_batch_idx, micro_batch_router_logits in enumerate(router_logits_list):
+        for micro_batch_idx, (micro_batch_router_logits, micro_batch_router_weights) in enumerate(zip(router_logits_list, router_weights_list)):
             if micro_batch_router_logits:
                 _router_logits_list = list(micro_batch_router_logits.values())
+                _router_weights_list = list(micro_batch_router_weights.values())
+
                 attn_mask = seq_ctx_list[micro_batch_idx].mask
                 router_logits = self._select_non_pad_router_logits(_router_logits_list, attn_mask)
+                router_weights = self._select_non_pad_router_logits(_router_weights_list, attn_mask)
                 all_router_logits.append(router_logits)
+                all_router_weights.append(router_weights)
 
         if all_router_logits:
             # Concatenate router logits from all micro-batches
             combined_router_logits = torch.cat(all_router_logits, dim=1)  # [num_layers, total_seq, num_experts]
+            combined_router_weights = torch.cat(all_router_weights, dim=1)
 
             # Calculate balancing loss across all micro-batches
             if self.balancing_loss:
                 balancing_loss = self.balancing_loss(
-                    router_logits=combined_router_logits,
+                    router_weights=combined_router_weights,
                     n_routed_experts=self.config.n_routed_experts,
                     num_experts_per_tok=self.config.num_experts_per_tok,
                 )
@@ -486,6 +495,7 @@ class MoE(BaseModel):
             output["hidden_states"] = []
 
         output["router_logits"] = {}
+        output["router_weights"] = {}
 
         for idx, decoder_layer in self.layers.items():
             if int(idx) < self.config.first_k_dense_replace:
@@ -504,20 +514,21 @@ class MoE(BaseModel):
                         depth=len(self.layers),
                         custom_check_fn=lambda x: x.data_ptr() == hidden_states.data_ptr(),
                     ):
-                        hidden_states, router_results = decoder_layer(
+                        layer_results = decoder_layer(
                             hidden_states,
                             position_embeddings=position_embeddings,
                             seq_ctx=seq_ctx,
                         )
 
                 else:
-                    hidden_states, router_results = decoder_layer(
+                    layer_results = decoder_layer(
                         hidden_states,
                         position_embeddings=position_embeddings,
                         seq_ctx=seq_ctx,
                     )
-
+                hidden_states, router_results, router_weights = layer_results
                 output["router_logits"][f"layer{idx}"] = router_results
+                output["router_weights"][f"layer{idx}"] = router_weights
 
             if self.config.return_hidden_states:
                 output["hidden_states"].append(hidden_states)
@@ -530,11 +541,13 @@ class MoE(BaseModel):
         output["extra_info"] = extra_info
 
         router_logits_list = list(output["router_logits"].values())  # type: ignore
+        router_weights_list = list(output["router_weights"].values())  # type: ignore
         router_logits = self._select_non_pad_router_logits(router_logits_list, seq_ctx.mask)
+        router_weights = self._select_non_pad_router_logits(router_weights_list, seq_ctx.mask)
 
         if self.balancing_loss:
             balancing_loss = self.balancing_loss(
-                router_logits=router_logits,
+                router_weights=router_weights,
                 n_routed_experts=self.config.n_routed_experts,
                 num_experts_per_tok=self.config.num_experts_per_tok,
             )

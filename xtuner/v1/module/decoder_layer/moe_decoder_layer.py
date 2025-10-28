@@ -31,6 +31,7 @@ from ..linear.linear import build_linear
 
 
 RouterLogits: TypeAlias = torch.Tensor
+RouterWeights: TypeAlias = torch.Tensor
 HiddenStates: TypeAlias = torch.Tensor
 
 
@@ -304,7 +305,7 @@ class MoEDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         seq_ctx: SequenceContext,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
-    ) -> tuple[HiddenStates, RouterLogits]:
+    ) -> tuple[HiddenStates, RouterLogits, RouterWeights]:
         residual, hidden_states, router_results = self._pre_moe_forward(
             hidden_states=hidden_states,
             seq_ctx=seq_ctx,
@@ -380,7 +381,7 @@ class MoEDecoderLayer(nn.Module):
             combined_hidden_states=combined_hidden_states,
             residual=residual,
         )
-        return hidden_states, router_results["logits"]
+        return hidden_states, router_results["logits"], router_results["router_weights"]
 
     def _micro_batch_forward(
         self,
@@ -500,7 +501,8 @@ class MoEDecoderLayer(nn.Module):
             hidden_states_out_list.append(hidden_states)
 
         router_logits = [router_results["logits"] for router_results in router_results_list]
-        return tuple(hidden_states_out_list + router_logits)
+        router_weights = [router_results["router_weights"] for router_results in router_results_list]
+        return tuple(hidden_states_out_list + router_logits + router_weights)
 
     @maybe_compile(fullgraph=True)
     def _pre_moe_forward(
