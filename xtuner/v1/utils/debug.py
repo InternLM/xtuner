@@ -14,8 +14,8 @@ def get_grad_hook(message: str, grad_fn):
     def hook(g_in: tuple, g_out: tuple):
         global FOUND_NAN
         print(f"grad_fn: {grad_fn}")
-        torch.distributed.breakpoint()
         nextfunc = grad_fn.next_functions
+        torch.distributed.breakpoint()
         # if torch.distributed.get_rank() == 0:
         if FOUND_NAN:
             return

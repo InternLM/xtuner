@@ -49,6 +49,7 @@ from xtuner.v1.utils import (
 from xtuner.v1.utils.activation_offload import async_save_on_cpu
 from xtuner.v1.utils.compile import maybe_compile
 from xtuner.v1.prober.acc_prober import AccProber
+from xtuner.v1.utils.debug import register_grad_hook
 
 
 DEVICE = get_device()
@@ -532,6 +533,7 @@ class MoE(BaseModel):
 
         AccProber.before_lm_head(hidden_states, loss_ctx.loss_kwargs.shifted_labels)
         loss, (logits, extra_info) = self.lm_head(hidden_states, loss_ctx)  # type: ignore
+        # register_grad_hook(loss, "loss_autograd_reduce")
         AccProber.after_lm_head(loss, logits)
         output["loss"] = loss
         output["logits"] = logits
