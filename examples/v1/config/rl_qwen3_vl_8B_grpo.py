@@ -29,7 +29,7 @@ enable_evaluate = True if eval_data_path != "" else False
 media_root = os.environ["MEDIA_ROOT"]
 
 # basic settings
-experimental_name = "grpo_gsm8k"
+experimental_name = "grpo_geo3k"
 total_epochs = 15
 global_batch_size = 1024
 prompt_repeat_k = 5

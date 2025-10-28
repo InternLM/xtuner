@@ -55,6 +55,8 @@ class RLTokenizeFn(CachableTokenizeFunction[RLDatasetItem]):
 
         messages = item["prompt"]
         raw_prompt = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+        if "media_root" in kwargs:
+            raw_prompt = raw_prompt.replace("<IMG_CONTEXT>", "")
         extra_info["raw_prompt"] = raw_prompt
 
         if self.tokenizer_fn is None:
