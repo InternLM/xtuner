@@ -66,13 +66,6 @@ Welcome to XTuner V1 English Documentation
 
 .. toctree::
    :hidden:
-   :maxdepth: 1
-   :caption: Legacy Documentation
-
-   legacy_index.rst
-
-.. toctree::
-   :hidden:
    :maxdepth: 2
    :caption: API
 
