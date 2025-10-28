@@ -68,7 +68,7 @@ copybutton_prompt_text = r'>>> |\.\.\. '
 copybutton_prompt_is_regexp = True
 
 
-language = "zh_CN"
+language = "en"
 
 # -- Options for HTML output -------------------------------------------------
 
@@ -78,7 +78,7 @@ language = "zh_CN"
 html_theme = "sphinx_book_theme"
 html_logo = "_static/image/logo.png"
 html_theme_options = {
-    "path_to_docs": "docs/zh_cn",
+    "path_to_docs": "docs/en",
     "repository_url": "https://github.com/InternLM/xtuner",
     "use_repository_button": True,
     "pygments_light_style": "xtuner-emacs",
