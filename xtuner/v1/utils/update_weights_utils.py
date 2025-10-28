@@ -8,6 +8,7 @@ def monkey_unpatch_torch_reductions():
     # CPU tensors, which occurs when XTuner saves a model to the Hugging Face format.
     # This function reverts the monkey-patch to restore the original torch functionality,
     # ensuring that CPU tensors can be serialized correctly.
-    reductions.reduce_tensor = reductions._reduce_tensor_original
-    reductions.rebuild_cuda_tensor = reductions._rebuild_cuda_tensor_original
-    reductions.init_reductions()
+    if hasattr(reductions, "_reduce_tensor_original"):
+        reductions.reduce_tensor = reductions._reduce_tensor_original
+        reductions.rebuild_cuda_tensor = reductions._rebuild_cuda_tensor_original
+        reductions.init_reductions()
