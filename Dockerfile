@@ -19,6 +19,9 @@ RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
     apt clean && rm -rf /var/lib/apt/lists/*
 
 RUN if [ -d /etc/pip ] && [ -f /etc/pip/constraint.txt ]; then echo > /etc/pip/constraint.txt; fi
+RUN pip install pystack py-spy --no-cache-dir
+RUN git config --system --add safe.directory "*"
+
 RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
     if [ -n "${TORCH_VERSION}" ]; then \
         pip install torchvision torch==${TORCH_VERSION} \
@@ -145,27 +148,26 @@ RUN unzip ${GROUPED_GEMM_DIR}/*.whl -d ${PYTHON_SITE_PACKAGE_PATH}
 RUN unzip ${DEEP_EP_DIR}/*.whl -d ${PYTHON_SITE_PACKAGE_PATH}
 RUN unzip ${NVSHMEM_WHL_DIR}/*.whl -d ${PYTHON_SITE_PACKAGE_PATH}
 
-ARG XTUNER_URL
-ARG XTUNER_COMMIT
-ARG LMDEPLOY_VERSION
-ARG LMDEPLOY_URL
+# install sglang and its runtime requirements
 ARG SGLANG_VERSION
 
-# install sglang and its runtime requirements
 RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
    pip install sglang==${SGLANG_VERSION} sgl_kernel pybase64 orjson uvloop setproctitle msgspec \
    compressed_tensors python-multipart torch_memory_saver \
    grpcio-tools==1.75.1 hf_transfer interegular llguidance==0.7.11 \
-   xgrammar==0.1.24 blobfile==3.0.0 flashinfer_python==0.4.0rc3 --no-cache-dir --no-deps
+   xgrammar==0.1.24 blobfile==3.0.0 flashinfer_python==0.4.0 --no-cache-dir --no-deps
 
 # install lmdeploy and its missing runtime requirements
+ARG LMDEPLOY_VERSION
+ARG LMDEPLOY_URL
+
 RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
-    if [ -n "${LMDEPLOY_VERSION}" ]; then \
-        pip install lmdeploy==${LMDEPLOY_VERSION} --no-cache-dir; \
-    else \
-        pip install fastapi fire openai outlines \
+    pip install fastapi fire openai outlines \
         partial_json_parser ray[default] shortuuid uvicorn \
-        python-sat[aiger,approxmc,cryptosat,pblib] distance Faker --no-cache-dir && \
+        'pydantic>2' openai_harmony --no-cache-dir && \
+    if [ -n "${LMDEPLOY_VERSION}" ]; then \
+        pip install lmdeploy==${LMDEPLOY_VERSION} --no-deps --no-cache-dir; \
+    else \
         git clone $(echo ${LMDEPLOY_URL} | cut -d '@' -f 1) && \
         cd ${CODESPACE}/lmdeploy && \
         git checkout $(echo ${LMDEPLOY_URL} | cut -d '@' -f 2) && \
@@ -173,7 +175,8 @@ RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
     fi
 
 ## install xtuner
-
+ARG XTUNER_URL
+ARG XTUNER_COMMIT
 #RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
 #   git clone $(echo ${XTUNER_URL} | cut -d '@' -f 1) && \
 #   cd ${CODESPACE}/xtuner && \
@@ -182,8 +185,7 @@ COPY . ${CODESPACE}/xtuner
 
 WORKDIR ${CODESPACE}/xtuner
 RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
-  pip install liger-kernel parametrize --no-cache-dir \
-  && pip install .[all] -v --no-cache-dir
+    pip install .[all] -v --no-cache-dir
 
 WORKDIR ${CODESPACE}
 
