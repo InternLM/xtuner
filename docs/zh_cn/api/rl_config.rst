@@ -10,7 +10,8 @@ Generation Config
    :toctree: generated
    :nosignatures:
 
-   ray.accelerator.AcceleratorResourcesConfig
+   ray.base.accelerator.AcceleratorResourcesConfig
+   ray.base.cpu.CPUResourcesConfig
    ray.config.worker.RolloutConfig
    ray.judger.JudgerConfig
    ray.dataflow.ReplayBufferConfig 

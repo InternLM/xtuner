@@ -6,7 +6,7 @@ from transformers import AutoTokenizer
 
 from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.ray.judger.controller import JudgerConfig
-from xtuner.v1.ray.accelerator import AcceleratorResourcesConfig, AutoAcceleratorWorkers
+from xtuner.v1.ray.base import AcceleratorResourcesConfig, AutoAcceleratorWorkers
 from xtuner.v1.ray.environment import SingleTurnEnvironment
 from xtuner.v1.ray.evaluator import Evaluator, EvaluatorConfig
 from xtuner.v1.data_proto.rl_data import SampleParams
@@ -31,6 +31,7 @@ class TestEvaluator(unittest.TestCase):
         self.resources_cfg = AcceleratorResourcesConfig(
             accelerator="GPU",
             num_workers=8,
+            num_cpus_per_worker=8,
             cpu_memory_per_worker=16 * 1024**3,  # 16 GB
         )
         self.max_prompt_length = 512

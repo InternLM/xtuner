@@ -68,7 +68,7 @@ pip install -r requirements/rl.txt
 :caption: dense 模型微调示例
 :linenos:
 
-torchrun  xtuner/v1/train/cli/sft.py --model-cfg examples/v1/sft_qwen3_tiny.py --chat_template qwen3 --dataset tests/resource/openai_sft.jsonl
+torchrun  xtuner/v1/train/cli/sft.py --model-cfg examples/v1/config/sft_qwen3_tiny.py --chat_template qwen3 --dataset tests/resource/openai_sft.jsonl
 ```
 
 运行成功后，日志如下所示
@@ -91,7 +91,7 @@ torchrun  xtuner/v1/train/cli/sft.py --model-cfg examples/v1/sft_qwen3_tiny.py -
 ```
 ````
 
-上述日志显示最大仅需 8G 显存即可运行，如果你还想降低显存占用，可以考虑修改 `examples/v1/sft_qwen3_tiny.py` 中的 `num_hidden_layers` 和 `hidden_size` 参数。
+上述日志显示最大仅需 8G 显存即可运行，如果你还想降低显存占用，可以考虑修改 `examples/v1/config/sft_qwen3_tiny.py` 中的 `num_hidden_layers` 和 `hidden_size` 参数。
 
 ### MLLM 多模态大模型微调
 
@@ -103,7 +103,7 @@ torchrun  xtuner/v1/train/cli/sft.py --model-cfg examples/v1/sft_qwen3_tiny.py -
 :caption: Intern-S1 tiny 模型微调示例
 :linenos:
 
-torchrun xtuner/v1/train/cli/sft.py --config examples/v1/sft_intern_s1_tiny_config.py
+torchrun xtuner/v1/train/cli/sft.py --config examples/v1/config/sft_intern_s1_tiny_config.py
 ```
 
 运行成功后，日志如下所示
@@ -272,7 +272,7 @@ WARNING: input_ids length 4171 exceeds model_max_length 4096. truncated!
 ```
 ````
 
-上述日志显示最大仅需 10G 显存即可运行，如果你还想降低显存占用，可以考虑修改 `examples/v1/sft_intern_s1_tiny_config.py` 中的 `llm_cfg` 字典相关参数。
+上述日志显示最大仅需 10G 显存即可运行，如果你还想降低显存占用，可以考虑修改 `examples/v1/config/sft_intern_s1_tiny_config.py` 中的 `llm_cfg` 字典相关参数。
 
 (faq)=
 ## 常见问题

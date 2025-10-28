@@ -8,7 +8,7 @@ import shutil
 import tempfile
 
 import ray
-from xtuner.v1.ray.accelerator import AcceleratorResourcesConfig, AutoAcceleratorWorkers
+from xtuner.v1.ray.base import AcceleratorResourcesConfig, AutoAcceleratorWorkers
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.config import (
     AdamWConfig,
@@ -27,7 +27,7 @@ QWEN3_PATH = os.environ["QWEN3_PATH"]
 
 class TestGRPOTrain(unittest.TestCase):
     def setUp(self):
-        ray.init(num_cpus=70, ignore_reinit_error=True)
+        ray.init(num_cpus=80, ignore_reinit_error=True)
 
         resources = AcceleratorResourcesConfig(
             accelerator="GPU",
@@ -122,12 +122,11 @@ class TestGRPOTrain(unittest.TestCase):
                 }
             },
         )(BaseTrainingWorker)
-        train_workers = AutoAcceleratorWorkers.from_placement_group(
+        train_workers, _ = AutoAcceleratorWorkers.from_placement_group(
             TrainingWorker, worker_cfg, self.pg
         )
         futures = [ worker.test_all_reduce.remote() for worker in train_workers ]
         print(ray.get(futures))
-        train_workers = list(train_workers.keys())
         train_controller = TrainingController.remote(
             workers=train_workers,
         )
