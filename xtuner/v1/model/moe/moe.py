@@ -386,6 +386,7 @@ class MoE(BaseModel):
                 for i, hidden_states in enumerate(hidden_states):
                     hidden_states_list[i] = hidden_states
                     router_logits_list[i][f"layer{idx}"] = router_logits[i]
+            
 
         # Apply final norm to all micro-batches
         for i, hidden_states in enumerate(hidden_states_list):
@@ -495,6 +496,7 @@ class MoE(BaseModel):
         output["router_logits"] = {}
 
         for idx, decoder_layer in self.layers.items():
+            ProberList.before_layer(idx, hidden_states)
             if int(idx) < self.config.first_k_dense_replace:
                 hidden_states = decoder_layer(
                     hidden_states,
@@ -530,6 +532,8 @@ class MoE(BaseModel):
                 import torch.distributed as dist; dist.breakpoint()
             if self.config.return_hidden_states:
                 output["hidden_states"].append(hidden_states)
+
+            ProberList.after_layer(idx, hidden_states)
 
         hidden_states = self.norm(hidden_states)
 

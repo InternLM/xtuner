@@ -507,6 +507,7 @@ class Trainer:
             grad_norm = self._engine.clip_grad_norm(do_clip=False)  # TODO: do_clip is False for debug_acc
             self._engine.step_optimizer(grad_norm)
             time_after_train_step = time.time()
+            ProberList.after_step()
             step_time = time_after_train_step - time_before_train_step
             step_consumed_tokens = other_log["consumed_tokens"]
 

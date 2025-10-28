@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 import json
 import time
 from abc import ABC, abstractmethod
@@ -57,17 +58,25 @@ class BaseProber(ABC):
     def set_micro_batch_iter(cls, iter: int):
         cls.cur_micro_batch_iter = iter
     
-    # 钩子方法 - 子类选择性重写
     @classmethod
     def record_tensor(cls, tensor: torch.Tensor, name: str):
         pass
 
+    ############################## forward hooks #################################
     @classmethod
     def before_embed_tokens(cls, input_ids: torch.Tensor):
         pass
     
     @classmethod
     def after_embed_tokens(cls, hidden_states: torch.Tensor):
+        pass
+
+    @classmethod
+    def before_layer(cls, layer_idx: str|int, hidden_states: torch.Tensor):
+        pass
+
+    @classmethod
+    def after_layer(cls, layer_idx: str|int, hidden_states: torch.Tensor):
         pass
     
     @classmethod
@@ -78,16 +87,22 @@ class BaseProber(ABC):
     def after_lm_head(cls, loss: torch.Tensor, logits: torch.Tensor):
         pass
     
-    @classmethod
-    def dump_micro_iter_forward(cls):
-        pass
-    
+    ############################## hooks for gradient #################################
     @classmethod
     def before_clip_grad_norm(cls):
         pass
     
     @classmethod
     def after_clip_grad_norm(cls):
+        pass
+
+    ############################## hooks for step and iter #################################
+    @classmethod
+    def after_micro_iter_forward(cls):  # usually used for dumping forward activation records
+        pass
+
+    @classmethod
+    def after_step(cls):  # usually used for dumping timing records
         pass
 
 
@@ -120,6 +135,7 @@ class ProberList:
         for prober_cls in cls.prober_list:
             prober_cls.record_tensor(tensor, name)
 
+    ############################## forward hooks #################################
     @classmethod
     def before_embed_tokens(cls, input_ids: torch.Tensor):
         for prober_cls in cls.prober_list:
@@ -131,6 +147,16 @@ class ProberList:
             prober_cls.after_embed_tokens(hidden_states)
     
     @classmethod
+    def before_layer(cls, layer_idx: str|int, hidden_states: torch.Tensor):
+        for prober_cls in cls.prober_list:
+            prober_cls.before_layer(layer_idx, hidden_states)
+
+    @classmethod
+    def after_layer(cls, layer_idx: str|int, hidden_states: torch.Tensor):
+        for prober_cls in cls.prober_list:
+            prober_cls.after_layer(layer_idx, hidden_states)
+
+    @classmethod
     def before_lm_head(cls, hidden_states: torch.Tensor, shifted_labels: torch.Tensor):
         for prober_cls in cls.prober_list:
             prober_cls.before_lm_head(hidden_states, shifted_labels)
@@ -140,11 +166,7 @@ class ProberList:
         for prober_cls in cls.prober_list:
             prober_cls.after_lm_head(loss, logits)
     
-    @classmethod
-    def dump_micro_iter_forward(cls):
-        for prober_cls in cls.prober_list:
-            prober_cls.dump_micro_iter_forward()
-    
+    ############################## hooks for gradient #################################
     @classmethod
     def before_clip_grad_norm(cls):
         for prober_cls in cls.prober_list:
@@ -154,6 +176,17 @@ class ProberList:
     def after_clip_grad_norm(cls):
         for prober_cls in cls.prober_list:
             prober_cls.after_clip_grad_norm()
+    
+    ############################## hooks for step and iter #################################
+    @classmethod
+    def after_micro_iter_forward(cls):
+        for prober_cls in cls.prober_list:
+            prober_cls.after_micro_iter_forward()
+    
+    @classmethod
+    def after_step(cls):
+        for prober_cls in cls.prober_list:
+            prober_cls.after_step()
 
 
 class AccProber(BaseProber):
@@ -185,6 +218,7 @@ class AccProber(BaseProber):
         }
         cls.forward_records.append(json.dumps(cur_json, ensure_ascii=False))
     
+    ############################## forward hooks #################################
     @classmethod
     def before_embed_tokens(cls, input_ids: torch.Tensor):
         cls.record_tensor(input_ids, "[embed_tokens][before]input_ids")
@@ -192,6 +226,14 @@ class AccProber(BaseProber):
     @classmethod
     def after_embed_tokens(cls, hidden_states: torch.Tensor):
         cls.record_tensor(hidden_states, "[embed_tokens][after]hidden_states")
+    
+    @classmethod
+    def before_layer(cls, layer_idx: str|int, hidden_states: torch.Tensor):
+        cls.record_tensor(hidden_states, f"[layer{layer_idx}][before]hidden_states")
+    
+    @classmethod
+    def after_layer(cls, layer_idx: str|int, hidden_states: torch.Tensor):
+        cls.record_tensor(hidden_states, f"[layer{layer_idx}][after]hidden_states")
     
     @classmethod
     def before_lm_head(cls, hidden_states: torch.Tensor, shifted_labels: torch.Tensor):
@@ -204,7 +246,7 @@ class AccProber(BaseProber):
         cls.record_tensor(logits, "[lm_head][after]logits")
     
     @classmethod
-    def dump_micro_iter_forward(cls):
+    def after_micro_iter_forward(cls):
         if cls.skip():
             return
         assert cls.initialized, "AccProber is not initialized, please call setup() first"
@@ -218,6 +260,7 @@ class AccProber(BaseProber):
         print(f"[AccProber] Dump forward records to {dump_file}")
         cls.forward_records = []
     
+    ############################## hooks for gradient #################################
     @classmethod
     def _grad_dump(cls, suffix: str):
         if cls.skip():
@@ -258,7 +301,7 @@ class AccProber(BaseProber):
     @classmethod
     def after_clip_grad_norm(cls):
         cls._grad_dump("after_clip_grad_norm")
-
+    
 
 class TimeProber(BaseProber):
     """
@@ -266,6 +309,7 @@ class TimeProber(BaseProber):
     """
     timings: ClassVar[dict[str, list[float]]] = {}
     start_times: ClassVar[dict[str, float]] = {}
+    max_step: ClassVar[int] = 0
     
     @classmethod
     def setup(cls, dump_home: Path, profile_step: list[int], model: nn.Module):
@@ -274,6 +318,7 @@ class TimeProber(BaseProber):
         cls.dump_dir.mkdir(parents=True, exist_ok=True)
         cls.timings = {}
         cls.start_times = {}
+        cls.max_step = max(profile_step)
         print(f"TimeProber initialized at {cls.dump_dir}")
     
     @classmethod
@@ -300,6 +345,7 @@ class TimeProber(BaseProber):
             cls.timings[name] = []
         cls.timings[name].append(elapsed)
     
+    ############################## forward hooks #################################
     @classmethod
     def before_embed_tokens(cls, input_ids: torch.Tensor):
         cls._start_timer("embed_tokens")
@@ -309,6 +355,14 @@ class TimeProber(BaseProber):
         cls._end_timer("embed_tokens")
     
     @classmethod
+    def before_layer(cls, layer_idx: str|int, hidden_states: torch.Tensor):
+        cls._start_timer(f"layer{layer_idx}")
+    
+    @classmethod
+    def after_layer(cls, layer_idx: str|int, hidden_states: torch.Tensor):
+        cls._end_timer(f"layer{layer_idx}")
+    
+    @classmethod
     def before_lm_head(cls, hidden_states: torch.Tensor, shifted_labels: torch.Tensor):
         cls._start_timer("lm_head")
     
@@ -316,6 +370,7 @@ class TimeProber(BaseProber):
     def after_lm_head(cls, loss: torch.Tensor, logits: torch.Tensor):
         cls._end_timer("lm_head")
     
+    ############################## hooks for gradient #################################
     @classmethod
     def before_clip_grad_norm(cls):
         cls._start_timer("clip_grad_norm")
@@ -325,26 +380,52 @@ class TimeProber(BaseProber):
         cls._end_timer("clip_grad_norm")
     
     @classmethod
-    def dump_micro_iter_forward(cls):
+    def after_step(cls):
         """转储计时信息"""
         if cls.skip():
             return
         assert cls.initialized, "TimeProber is not initialized, please call setup() first"
+
+        # if cls.cur_step < cls.max_step:
+            # return
         
         # 计算统计信息
         stats = {}
         for name, times in cls.timings.items():
-            if times:
-                stats[name] = {
-                    "count": len(times),
-                    "total_ms": sum(times) * 1000,
-                    "avg_ms": sum(times) / len(times) * 1000,
-                    "min_ms": min(times) * 1000,
-                    "max_ms": max(times) * 1000,
+            if not times:
+                continue
+            stats[name] = {
+                "count": len(times),
+                "total_ms": sum(times) * 1000,
+                "avg_ms": sum(times) / len(times) * 1000,
+                "min_ms": min(times) * 1000,
+                "max_ms": max(times) * 1000,
+            }
+            if 'layer' not in name:
+                continue
+            # 聚合所有layer信息，将 "layer{idx}.xxx" 去掉idx，转换成 "layer.xxx"
+            # 注意 {idx} 是多位数字
+            layer_name = re.sub(r'layer(\d+)', 'layer', name)
+            if layer_name not in stats:
+                stats[layer_name] = {
+                    "count": 0,
+                    "total_ms": 0,
+                    "avg_ms": 0,
+                    "min_ms": float('inf'),
+                    "max_ms": float('-inf'),
                 }
+            last_count = stats[layer_name]["count"]
+            last_total_ms = stats[layer_name]["total_ms"]
+            last_min_ms = stats[layer_name]["min_ms"]
+            last_max_ms = stats[layer_name]["max_ms"]
+            stats[layer_name]["count"] = last_count + len(times)
+            stats[layer_name]["total_ms"] = last_total_ms + sum(times) * 1000
+            stats[layer_name]["avg_ms"] = stats[layer_name]["total_ms"] / stats[layer_name]["count"]
+            stats[layer_name]["min_ms"] = min(last_min_ms, min(times) * 1000)
+            stats[layer_name]["max_ms"] = max(last_max_ms, max(times) * 1000)
         
         dump_file = cls.dump_dir.joinpath(
-            f"Step_{cls.cur_step}_MicroIter_{cls.cur_micro_batch_iter}_"
+            f"Step_{cls.cur_step}_"
             f"RANK_{dist.get_rank()}_timings.json"
         )
         with open(dump_file, "w", encoding="utf-8") as f:
@@ -408,7 +489,7 @@ def example_usage():
             logits = torch.randn(2, 128, 50000)
             ProberList.after_lm_head(loss, logits)
             
-            ProberList.dump_micro_iter_forward()
+            ProberList.after_micro_iter_forward()
         
         # 梯度相关
         # ProberManager.before_clip_grad_norm()
