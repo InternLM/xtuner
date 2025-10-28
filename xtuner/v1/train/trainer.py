@@ -46,7 +46,7 @@ from xtuner.v1.utils import (
     record_git_info,
 )
 from xtuner.v1.utils.device import get_device, get_torch_device_module
-from xtuner.v1.prober.acc_prober import AccProber, TimeProber, ProberList
+from xtuner.v1.profiler.prober import ProberList, AccProber, TimeProber
 from .toy_tokenizer import UTF8ByteTokenizer
 
 
@@ -398,8 +398,8 @@ class Trainer:
         if self._resume_cfg.resume_from is not None:
             self._resume()
         
-        # ProberList.setup(self.exp_dir, self._profile_step, self._engine.model, [AccProber, TimeProber])
-        ProberList.setup(self.exp_dir, self._profile_step, self._engine.model, [AccProber])
+        ProberList.setup(self.exp_dir, self._profile_step, self._engine.model, [AccProber, TimeProber])
+        # ProberList.setup(self.exp_dir, self._profile_step, self._engine.model, [AccProber])
 
 
     @classmethod

@@ -31,7 +31,7 @@ from xtuner.v1.model.base import BaseModel, ModelItem, TransformerConfig
 from xtuner.v1.model.utils import ModelForwardExtraLogInfo
 from xtuner.v1.module.router import NoAuxRouterConfig
 from xtuner.v1.utils import get_device, get_logger, get_torch_device_module, profile_time_and_memory
-from xtuner.v1.prober.acc_prober import ProberList
+from xtuner.v1.profiler.prober import ProberList
 
 
 logger = get_logger()

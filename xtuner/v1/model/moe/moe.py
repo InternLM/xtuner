@@ -48,7 +48,7 @@ from xtuner.v1.utils import (
 )
 from xtuner.v1.utils.activation_offload import async_save_on_cpu
 from xtuner.v1.utils.compile import maybe_compile
-from xtuner.v1.prober.acc_prober import ProberList
+from xtuner.v1.profiler.prober import ProberList
 from xtuner.v1.utils.debug import register_grad_hook
 
 
