@@ -171,6 +171,7 @@ class VisionComposeTrainEngine(TrainEngine):
             tokens_per_expert_global_for_bias = torch.tensor(0, device=DEVICE)
 
         step_loss = torch.tensor(0.0, device=DEVICE)
+        step_llm_loss = torch.tensor(0.0, device=DEVICE)
         step_balancing_loss: torch.Tensor | None = None
         step_z_loss: torch.Tensor | None = None
         step_consumed_tokens = torch.tensor(0.0, device=DEVICE)
@@ -191,7 +192,7 @@ class VisionComposeTrainEngine(TrainEngine):
             output = self.model(seq_ctx=seq_ctx_list[0], loss_ctx=loss_ctx_list[0])
             # llm loss has been global averaged
             llm_loss = output["loss"]
-            step_loss += llm_loss.detach().clone()
+            step_llm_loss += llm_loss.detach().clone()
 
             loss = llm_loss
             if "extra_info" in output:
@@ -217,6 +218,7 @@ class VisionComposeTrainEngine(TrainEngine):
 
             del output
             loss.backward()
+            step_loss += loss.detach().clone()
 
         if moe_need_update_bias:
             avg_count_load = tokens_per_expert_global_for_bias.float().mean(1)
@@ -226,9 +228,10 @@ class VisionComposeTrainEngine(TrainEngine):
             self.model.language_model.update_bias(tokens_per_expert_global_for_bias, avg_count_load)  # type: ignore
             other_log["maxvio"] = maxvio.item()
 
-        reduced_llm_loss = step_loss
+        reduced_llm_loss = step_llm_loss
         dist.all_reduce(reduced_llm_loss.div_(dist.get_world_size()))
 
+        loss_log["total_loss"] = step_loss.item()
         loss_log["reduced_llm_loss"] = reduced_llm_loss.item()
         if step_balancing_loss is not None:
             reduced_balancing_loss = step_balancing_loss

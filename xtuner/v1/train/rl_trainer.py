@@ -18,7 +18,7 @@ from typing_extensions import Self
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1.data_proto.sequence_context import SequenceContext
-from xtuner.v1.ray.accelerator import AcceleratorResourcesConfig, AutoAcceleratorWorkers
+from xtuner.v1.ray.base import AcceleratorResourcesConfig, AutoAcceleratorWorkers
 from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.ray.dataflow import DataFlow, DataFlowConfig, ReplayBufferConfig
 from xtuner.v1.ray.environment import SingleTurnEnvironment
@@ -336,7 +336,7 @@ class RLTrainer:
                 }
             },
         )(BaseTrainingWorker)
-        train_workers = AutoAcceleratorWorkers.from_placement_group(TrainingWorker, train_worker_cfg, self._pg)
+        train_workers, _ = AutoAcceleratorWorkers.from_placement_group(TrainingWorker, train_worker_cfg, self._pg)
         ray.get([worker.__ray_ready__.remote() for worker in train_workers])
         train_workers = list(train_workers.keys())
         train_controller = cast(ActorClass, TrainingController).remote(
