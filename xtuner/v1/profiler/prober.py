@@ -1,5 +1,6 @@
 from pathlib import Path
 import re
+import sys
 import json
 import time
 from abc import ABC, abstractmethod
@@ -9,6 +10,10 @@ import torch
 import torch.distributed as dist
 from torch.distributed.tensor import DTensor
 import torch.nn as nn
+
+from xtuner.v1.utils import get_logger
+
+logger = get_logger()
 
 
 def get_dtensor_meta(dtensor: torch.Tensor):
@@ -111,13 +116,16 @@ class ProberList:
     
     @classmethod
     def setup(cls, dump_home: Path, profile_step: list[int], model: nn.Module, 
-              prober_classes: list[type[BaseProber]]):
+              prober_class_names: list[str]):
+        prober_classes = []
+        for prober_class_name in prober_class_names:
+            prober_classes.append(getattr(sys.modules[__name__], prober_class_name))
         cls.prober_list = prober_classes
         # 初始化每个Prober
         for prober_cls in cls.prober_list:
             prober_cls.setup(dump_home, profile_step, model)
         
-        print(f"ProberList initialized with {len(cls.prober_list)} probers: "
+        logger.info(f"ProberList initialized with {len(cls.prober_list)} probers: "
               f"{[p.__name__ for p in cls.prober_list]}")
     
     @classmethod
@@ -198,7 +206,7 @@ class AccProber(BaseProber):
         cls.dump_dir = dump_home / "acc_prober"
         cls.dump_dir.mkdir(parents=True, exist_ok=True)
         cls.forward_records = []
-        print(f"AccProber initialized at {cls.dump_dir}")
+        logger.info(f"AccProber initialized at {cls.dump_dir}")
     
     @classmethod
     def record_tensor(cls, tensor: torch.Tensor, name: str):
@@ -319,7 +327,7 @@ class TimeProber(BaseProber):
         cls.timings = {}
         cls.start_times = {}
         cls.max_step = max(profile_step)
-        print(f"TimeProber initialized at {cls.dump_dir}")
+        logger.info(f"TimeProber initialized at {cls.dump_dir}")
     
     @classmethod
     def _start_timer(cls, name: str):
@@ -337,7 +345,7 @@ class TimeProber(BaseProber):
             torch.cuda.synchronize()
         
         if name not in cls.start_times:
-            print(f"[TimeProber] Warning: {name} timer not started")
+            logger.warning(f"[TimeProber] Warning: {name} timer not started")
             return
         
         elapsed = time.perf_counter() - cls.start_times[name]
@@ -430,7 +438,7 @@ class TimeProber(BaseProber):
         )
         with open(dump_file, "w", encoding="utf-8") as f:
             json.dump(stats, f, indent=2, ensure_ascii=False)
-        print(f"[TimeProber] Dump timings to {dump_file}")
+        logger.info(f"[TimeProber] Dump timings to {dump_file}")
         
         # 清空本次记录
         cls.timings = {}
@@ -441,7 +449,7 @@ class TimeProber(BaseProber):
 
 def example_usage():
     """
-    使用示例 - 类似Java IO的组合方式
+    使用示例
     
     Java IO:
         InputStream in = new BufferedInputStream(
@@ -460,9 +468,9 @@ def example_usage():
         dump_home=dump_home,
         profile_step=profile_step,
         model=model,
-        prober_classes=[
-            AccProber,      # 准确性探测
-            TimeProber,     # 时间探测
+        prober_class_names=[
+            "AccProber",      # 准确性探测
+            "TimeProber",     # 时间探测
             # MemoryProber, # 内存探测（待实现）
             # DistProber,   # 分布式探测（待实现）
         ]
@@ -483,8 +491,8 @@ def example_usage():
             ProberList.after_embed_tokens(hidden_states)
             
             shifted_labels = torch.randint(0, 50000, (2, 128))
+
             ProberList.before_lm_head(hidden_states, shifted_labels)
-            
             loss = torch.tensor(3.14)
             logits = torch.randn(2, 128, 50000)
             ProberList.after_lm_head(loss, logits)

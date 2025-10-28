@@ -162,6 +162,7 @@ class TrainerConfig(BaseModel):
     dist_backend: str | None = None
     debug: bool = False
     debug_skip_save: bool = False
+    prober_list: list[str] = []
 
     @model_validator(mode="after")
     def _convert_work_dir(self):
@@ -259,6 +260,7 @@ class Trainer:
         debug: bool = False,
         backend: str | None = None,
         debug_skip_save: bool = False,
+        prober_list: list[str] = [],
         trainer_cfg: TrainerConfig | None = None,
     ):
         self._dataloader_config = dataloader_cfg
@@ -401,7 +403,8 @@ class Trainer:
         if self._resume_cfg.resume_from is not None:
             self._resume()
         
-        ProberList.setup(self.exp_dir, self._profile_step, self._engine.model, [AccProber, TimeProber])
+
+        ProberList.setup(self.exp_dir, self._profile_step, self._engine.model, prober_list)
         # ProberList.setup(self.exp_dir, self._profile_step, self._engine.model, [AccProber])
 
 
@@ -447,6 +450,7 @@ class Trainer:
             backend=config.dist_backend,
             debug=config.debug,
             debug_skip_save=config.debug_skip_save,
+            prober_list=config.prober_list,
             trainer_cfg=config,
         )
         self.config = config
