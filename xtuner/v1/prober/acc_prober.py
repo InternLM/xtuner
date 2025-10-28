@@ -67,6 +67,34 @@ class Prober:
             "tensor_info": str(tensor),
         }
         cls.forward_records.append(json.dumps(cur_json, ensure_ascii=False))
+    
+    @classmethod
+    def before_embed_tokens(cls, input_ids: torch.Tensor):
+        pass
+
+    @classmethod
+    def after_embed_tokens(cls, hidden_states: torch.Tensor):
+        pass
+
+    @classmethod
+    def before_lm_head(cls, hidden_states: torch.Tensor, shifted_labels: torch.Tensor):
+        pass
+
+    @classmethod
+    def after_lm_head(cls, loss: torch.Tensor, logits: torch.Tensor):
+        pass
+
+    @classmethod
+    def dump_micro_iter_forward(cls):
+        pass
+
+    @classmethod
+    def before_clip_grad_norm(cls):
+        pass
+
+    @classmethod
+    def after_clip_grad_norm(cls):
+        pass
 
 
 class AccProber(Prober):
@@ -99,7 +127,7 @@ class AccProber(Prober):
         cls.record_tensor(logits, "[lm_head][after]logits")
 
     @classmethod
-    def dump_forward_records(cls):
+    def dump_micro_iter_forward(cls):
         if cls.skip():
             return
         assert cls.initialized, "AccProber is not initialized, please call setup() first"
@@ -113,7 +141,7 @@ class AccProber(Prober):
 
     # Below is for checking gradient
     @classmethod
-    def grad_dump(cls, suffix: str):
+    def _grad_dump(cls, suffix: str):
         assert cls.initialized, "AccProber is not initialized, please call setup() first"
         model = cls.model
 
@@ -146,8 +174,8 @@ class AccProber(Prober):
 
     @classmethod
     def before_clip_grad_norm(cls):
-        cls.grad_dump("before_clip_grad_norm")
+        cls._grad_dump("before_clip_grad_norm")
 
     @classmethod
     def after_clip_grad_norm(cls):
-        cls.grad_dump("after_clip_grad_norm")
+        cls._grad_dump("after_clip_grad_norm")
