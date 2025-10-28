@@ -46,8 +46,7 @@ from xtuner.v1.utils import (
     record_git_info,
 )
 from xtuner.v1.utils.device import get_device, get_torch_device_module
-from xtuner.v1.prober.acc_prober import AccProber
-
+from xtuner.v1.prober.acc_prober import AccProber, TimeProber, ProberList
 from .toy_tokenizer import UTF8ByteTokenizer
 
 
@@ -402,7 +401,8 @@ class Trainer:
         if self._resume_cfg.resume_from is not None:
             self._resume()
         
-        AccProber.setup(self.exp_dir, self._profile_step, self._engine.model)
+        # ProberList.setup(self.exp_dir, self._profile_step, self._engine.model, [AccProber, TimeProber])
+        ProberList.setup(self.exp_dir, self._profile_step, self._engine.model, [AccProber])
 
 
     @classmethod
@@ -462,7 +462,7 @@ class Trainer:
         time_before_get_data = time.time()
         for data_batch in self._data_iter():
             self._cur_step += 1  # increment _cur_step at first, then can use correct self.cur_step everywhere below
-            AccProber.set_step(self._cur_step)
+            ProberList.set_step(self._cur_step)
             DEVICE_MODULE.reset_peak_memory_stats()
 
             time_before_train_step = time.time()
