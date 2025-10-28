@@ -102,6 +102,7 @@ class MoEConfig(TransformerConfig):
     gate_bias: bool = False
     moe_bias: bool = False
     moe_act_fn_cfg: MoEActFnConfig = MoEActFnConfig()
+    freeze_routers: bool = False
 
     def build(self) -> "MoE":
         from xtuner.v1.model.moe.moe import MoE
@@ -232,6 +233,9 @@ class MoE(BaseModel):
 
         TODO: refactor it later.
         """
+        if self.config.freeze_routers:
+            return
+
         first_k_dense_replace = self.config.first_k_dense_replace
         bias_update_speed = cast(NoAuxRouterConfig, self.config.router).router_bias_update_speed
         n_layer, _ = total_expert_counts_pre_iter.size()
@@ -601,6 +605,11 @@ class MoE(BaseModel):
                     dispatcher=config.dispatcher,
                     ep_mesh=self.ep_mesh,
                 )
+                if self.config.freeze_routers:
+                    layers[str(layer_idx)].gate.requires_grad_(False)
+                    layers[str(layer_idx)].gate.eval()
+                    logger.info(f"Freeze MoE Router in layer {layer_idx}")
+
         layers.__class__.__repr__ = module_dict_repr  # type: ignore[method-assign]
         return layers
 
