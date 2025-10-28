@@ -345,11 +345,11 @@ class TrainEngine:
         if (foreach is None and _has_foreach_support(tensors, device)) or (  # type: ignore
             foreach and _device_has_foreach_support(device)
         ):
-            norms = torch._foreach_norm(tensors, norm_type)  # type: ignore
+            norms = torch._foreach_norm(tensors, norm_type, dtype=torch.float32)  # type: ignore
         elif foreach:
             raise RuntimeError(f"foreach=True was passed, but can't use the foreach API on {device.type} tensors")
         else:
-            norms = tuple(torch.linalg.vector_norm(g, norm_type) for g in tensors)
+            norms = tuple(torch.linalg.vector_norm(g, norm_type, dtype=torch.float32) for g in tensors)
 
         local_norm = torch.linalg.vector_norm(
             torch.stack([norm.to_local() for norm in norms]), norm_type, dtype=torch.float32
@@ -370,7 +370,7 @@ class TrainEngine:
             raise NotImplementedError
         return global_norm
 
-    def clip_grad_norm(self):
+    def clip_grad_norm(self, do_clip: bool = True):
         # import torch.distributed as dist; dist.breakpoint()
         AccProber.before_clip_grad_norm()
         self.model.scale_and_reduce_grad()
@@ -382,16 +382,17 @@ class TrainEngine:
             total_norm = self.cal_total_norm(grads, norm_type=2.0, foreach=True)
             total_norms.append(total_norm)
         grad_norm = torch.linalg.vector_norm(torch.stack(total_norms), ord=2.0, dtype=torch.float32)
-        clip_coef = self.optim_cfg.max_grad_norm / (grad_norm + 1e-6)
-        clip_coef_clamped = torch.clamp(clip_coef, max=1.0)
-        for grads in grouped_grads.values():
-            device = grads[0].device
-            if _device_has_foreach_support(device):
-                torch._foreach_mul_(grads, clip_coef_clamped.to(device))
-            else:
-                clip_coef_clamped_device = clip_coef_clamped.to(device)
-                for g in grads:
-                    g.mul_(clip_coef_clamped_device)
+        if do_clip:
+            clip_coef = self.optim_cfg.max_grad_norm / (grad_norm + 1e-6)
+            clip_coef_clamped = torch.clamp(clip_coef, max=1.0)
+            for grads in grouped_grads.values():
+                device = grads[0].device
+                if _device_has_foreach_support(device):
+                    torch._foreach_mul_(grads, clip_coef_clamped.to(device))
+                else:
+                    clip_coef_clamped_device = clip_coef_clamped.to(device)
+                    for g in grads:
+                        g.mul_(clip_coef_clamped_device)
         # import torch.distributed as dist; dist.breakpoint()
         AccProber.after_clip_grad_norm()
         return grad_norm
