@@ -11,7 +11,7 @@ from typing_extensions import Self
 
 from xtuner.v1.loss import BaseLossConfig, BaseLossContext, BaseLossKwargs
 from xtuner.v1.utils import DEBUG_ACC
-from xtuner.v1.utils.debug import register_grad_hook
+from xtuner.v1.utils.debug import register_grad_hook, get_grad_hook
 from xtuner.v1.prober.acc_prober import AccProber
 
 from .utils import sp_gather, sp_split
@@ -178,8 +178,13 @@ class CELossContext(BaseLossContext[CELossContextInputItem]):
         # We do linear forward here to simplify the implementation of chunk loss (saving memory).
         logits = F.linear(hidden_states, head_weight, head_bias)
         # dist.breakpoint()
+        # grad_fn = logits.grad_fn
+        # nextfunc = grad_fn.next_functions
+        # next_grad_fn = nextfunc[0][0]
+        # next_grad_fn.register_hook(get_grad_hook("logits_mm", next_grad_fn))
         # register_grad_hook(logits, "logits")
-        # logits = logits.float()  # (bs, seq_len, vocab_size)
+
+        logits = logits.float()  # (bs, seq_len, vocab_size)  # TODO: rollback to float32 after debug_acc
 
         shifted_labels = loss_kwargs.shifted_labels  # (bs, seq_len)
         loss_weight = loss_kwargs.loss_weight  # (bs, seq_len)
@@ -202,7 +207,9 @@ class CELossContext(BaseLossContext[CELossContextInputItem]):
             # mask = loss_weight != 0
             # w = loss_weight.sum() / mask.sum()  # w equals to 1/global_denominator
             # loss = loss * w
+            print(f"loss_kwargs.global_denominator: {loss_kwargs.global_denominator}")
             loss = loss / int(loss_kwargs.global_denominator)
+            # register_grad_hook(loss, "loss_denorm")
             return loss, (logits, {})
 
         return loss, (logits, {})
