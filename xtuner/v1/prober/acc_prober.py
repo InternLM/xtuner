@@ -18,25 +18,21 @@ def get_dtensor_meta(dtensor: torch.Tensor):
         "placements": str(dtensor.placements),
     }
     
-        
 
-
-class AccProber:
+class Prober:
     dump_dir: Path | None = None
     profile_step: list[int] | None = None
-    cur_step: int = -1
     model: nn.Module | None = None
     initialized: bool = False
-    forward_records: list = []
+    cur_step: int = -1
     cur_micro_batch_iter: int = 0
 
     @classmethod
     def setup(cls, dump_home: Path, profile_step: list[int], model):
-        cls.dump_dir = dump_home / "acc_prober"
+        cls.dump_dir = dump_home
         cls.dump_dir.mkdir(parents=True, exist_ok=True)
         cls.profile_step = profile_step
         cls.model = model
-        cls.forward_records = []
         cls.initialized = True
     
     @classmethod
@@ -72,6 +68,18 @@ class AccProber:
         }
         cls.forward_records.append(json.dumps(cur_json, ensure_ascii=False))
 
+
+class AccProber(Prober):
+    forward_records: list = []
+
+    @classmethod
+    def setup(cls, dump_home: Path, profile_step: list[int], model):
+        super().setup(dump_home, profile_step, model)
+        cls.dump_dir = cls.dump_dir / "acc_prober"
+        cls.dump_dir.mkdir(parents=True, exist_ok=True)
+        cls.forward_records = []
+
+    # Below is for checking forward pass activations
     @classmethod
     def before_embed_tokens(cls, input_ids: torch.Tensor):
         cls.record_tensor(input_ids, "[embed_tokens][before]input_ids")
@@ -115,7 +123,7 @@ class AccProber:
         res = []
         trainable_params = [(name, param) for name, param in model.named_parameters() if param.requires_grad]
         for name, param in trainable_params:
-            assert param.grad is not None, "Internal Error: param.grad must not be None"
+            assert param.grad is not None, f"Error: {name} param.grad must not be None"
             # print(f"name: {name}, grad: {param.grad}")
             grad = param.grad.detach().clone().view(-1)
             grad_sum = grad.float().sum()
