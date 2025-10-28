@@ -450,15 +450,16 @@ class BaseModel(nn.Module):
         for param, load_spec in params:
             local_tensor = param._local_tensor if isinstance(param, DTensor) else param
             local_tensor = local_tensor.to(dtype=dtype)
-            if safetensor_size + self._get_tensor_size(param, dtype) > self.SAFETENSOR_SIZE:
-                safetensor_size = 0
+            tensor_size = self._get_tensor_size(param, dtype)
+            if safetensor_size + tensor_size > self.SAFETENSOR_SIZE and tensor_list:
                 hf_params = _get_hf_params(tensor_list)
 
                 yield name_list, hf_params
+                safetensor_size = tensor_size
                 name_list = load_spec.hf_keys.copy()
                 tensor_list = [(local_tensor, load_spec)]
                 continue
-            safetensor_size += self._get_tensor_size(param, dtype)
+            safetensor_size += tensor_size
             tensor_list.append((local_tensor, load_spec))
             name_list.append(load_spec.hf_keys[0])
 
@@ -524,14 +525,15 @@ class BaseModel(nn.Module):
         for param, load_spec in params:
             local_tensor = param._local_tensor if isinstance(param, DTensor) else param
             local_tensor = local_tensor.bfloat16()
-            if safetensor_size + self._get_tensor_size(param, dtype) > bucket_size:
-                safetensor_size = 0
+            tensor_size = self._get_tensor_size(param, dtype)
+            if safetensor_size + tensor_size > bucket_size and tensor_list:
                 hf_params, name_list = _get_hf_params(tensor_list, name_list)
                 yield name_list, hf_params
+                safetensor_size = tensor_size
                 name_list = load_spec.hf_keys.copy()
                 tensor_list = [(local_tensor, load_spec)]
                 continue
-            safetensor_size += self._get_tensor_size(param, dtype)
+            safetensor_size += tensor_size
             tensor_list.append((local_tensor, load_spec))
             name_list.extend(load_spec.hf_keys)
 
@@ -558,12 +560,12 @@ class BaseModel(nn.Module):
         for param, load_spec in params:
             local_tensor = param._local_tensor if isinstance(param, DTensor) else param
             local_tensor = local_tensor.bfloat16()
-            if safetensor_size + self._get_tensor_size(param, dtype) > bucket_size:
+            tensor_size = self._get_tensor_size(param, dtype)
+            if safetensor_size + tensor_size > bucket_size and tensor_list:
                 if self.fsdp_mesh is not None:
                     gathered_tensor_list = self._fsdp_foreach_allgather(tensor_list, load_spec_list)
                 else:
                     gathered_tensor_list = tensor_list
-                safetensor_size = 0
                 gathered_tensor_list = [
                     self.param_to_safetensor(safetensor, name)
                     for safetensor, name in zip(gathered_tensor_list, name_list)
@@ -574,11 +576,12 @@ class BaseModel(nn.Module):
                     )
                 gathered_tensor_list = [t.to(device=device) for t in gathered_tensor_list]
                 yield name_list, gathered_tensor_list
+                safetensor_size = tensor_size
                 name_list = load_spec.hf_keys.copy()
                 tensor_list = [local_tensor]
                 load_spec_list = [load_spec]
                 continue
-            safetensor_size += self._get_tensor_size(param, dtype)
+            safetensor_size += tensor_size
             tensor_list.append(local_tensor)
             name_list.append(load_spec.hf_keys[0])
             load_spec_list.append(load_spec)
