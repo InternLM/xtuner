@@ -773,6 +773,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             except Exception:
                 use_flattened_tensor_bucket = False
 
+            # NOTE: xtuner目前去掉sglang的patch也不会出问题，但为了保险起见，还是保留patch逻辑，并且在update_weights结束后unpatch
             monkey_patch_torch_reductions()
             if self.rollout_cfg_info["tp"] == 1:
                 if use_flattened_tensor_bucket:
@@ -813,7 +814,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                         dst=head_rank,
                         group=cpu_group,
                     )
-            monkey_unpatch_torch_reductions()
+
         if dist.get_rank() == head_rank:
             headers = {
                 "Content-Type": "application/json",
@@ -845,4 +846,6 @@ class TrainingWorker(SingleAcceleratorWorker):
 
         if finished:
             dist.barrier(group=cpu_group)
+
+        monkey_unpatch_torch_reductions()
         return
