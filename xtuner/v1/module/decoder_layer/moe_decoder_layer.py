@@ -363,7 +363,7 @@ class MoEDecoderLayer(nn.Module):
             combined_hidden_states=combined_hidden_states,
             residual=residual,
         )
-        return hidden_states, router_results["logits"]
+        return hidden_states, router_results["logits"], router_results["router_weights"]
 
     def _micro_batch_forward(
         self,
@@ -483,7 +483,8 @@ class MoEDecoderLayer(nn.Module):
             hidden_states_out_list.append(hidden_states)
 
         router_logits = [router_results["logits"] for router_results in router_results_list]
-        return tuple(hidden_states_out_list + router_logits)
+        router_weights = [router_results["router_weights"] for router_results in router_results_list]
+        return tuple(hidden_states_out_list + router_logits + router_weights)
 
     @maybe_compile(fullgraph=True)
     def _pre_moe_forward(

@@ -71,6 +71,38 @@ class NoAuxRouter(nn.Module, RouterProtocol):
             noise = torch.randn_like(scores) * 50
             scores_for_choice = scores + noise
 
+        if self.n_group != self.topk_group:
+            assert len(logits.shape) == 2, (
+                f"XTuner Interval bug, invalid logits shape: {logits.shape}, expected shape with "
+                "`(seq_len, hidden_states)`"
+            )
+            bsz = 1
+            seq_len, _ = logits.shape
+            group_scores = (
+                scores_for_choice.view(bsz * seq_len, self.n_group, -1)
+                .topk(2, dim=-1)[0]
+                .sum(dim=-1)
+            )  # [n, n_group]
+            group_idx = torch.topk(
+                group_scores, k=self.topk_group, dim=-1, sorted=False
+            )[
+                1
+            ]  # [n, top_k_group]
+            group_mask = torch.zeros_like(group_scores)  # [n, n_group]
+            group_mask.scatter_(1, group_idx, 1)  # [n, n_group]
+            score_mask = (
+                group_mask.unsqueeze(-1)
+                .expand(
+                    bsz * seq_len,
+                    self.n_group,
+                    self.n_routed_experts // self.n_group,
+                )
+                .reshape(bsz * seq_len, -1)
+            )  # [n, e]
+            scores_for_choice = scores_for_choice.masked_fill(
+                ~score_mask.bool(), 0.0
+            )  # [n, e]
+
         # select top-k experts
         # (only applicable when ep_size >= 64. when ep_size=32 (4 nodes), there is no need to employ this strategy)
         _, topk_idx = torch.topk(scores_for_choice, k=self.top_k, dim=-1)
@@ -91,6 +123,7 @@ class NoAuxRouter(nn.Module, RouterProtocol):
 
         return {
             "logits": logits,
+            "router_weights": scores_for_choice,
             "topk_weights": topk_weight,
             "topk_ids": topk_idx,
             "topkens_per_expert": tokens_per_expert,
