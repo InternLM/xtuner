@@ -12,7 +12,7 @@ from typing_extensions import Self
 from xtuner.v1.loss import BaseLossConfig, BaseLossContext, BaseLossKwargs
 from xtuner.v1.utils import DEBUG_ACC
 from xtuner.v1.utils.debug import register_grad_hook, get_grad_hook
-from xtuner.v1.prober.acc_prober import AccProber
+from xtuner.v1.prober.acc_prober import ProberList
 
 from .utils import sp_gather, sp_split
 
@@ -202,7 +202,7 @@ class CELossContext(BaseLossContext[CELossContextInputItem]):
             # loss = (loss * loss_weight).sum()
 
             loss = F.cross_entropy(logits, shifted_labels, reduction="sum", ignore_index=self.loss_cfg.ignore_idx)
-            AccProber.record_tensor(loss, "[lm_head.ce_loss][before calibration]loss")
+            ProberList.record_tensor(loss, "[lm_head.ce_loss][before calibration]loss")
             # register_grad_hook(loss, "loss")
             # mask = loss_weight != 0
             # w = loss_weight.sum() / mask.sum()  # w equals to 1/global_denominator

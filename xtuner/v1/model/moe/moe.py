@@ -48,7 +48,7 @@ from xtuner.v1.utils import (
 )
 from xtuner.v1.utils.activation_offload import async_save_on_cpu
 from xtuner.v1.utils.compile import maybe_compile
-from xtuner.v1.prober.acc_prober import AccProber
+from xtuner.v1.prober.acc_prober import ProberList
 from xtuner.v1.utils.debug import register_grad_hook
 
 
@@ -474,9 +474,9 @@ class MoE(BaseModel):
         position_ids = seq_ctx.position_ids
 
         if input_ids is not None:
-            AccProber.before_embed_tokens(input_ids)
+            ProberList.before_embed_tokens(input_ids)
             hidden_states = self.embed_tokens(input_ids)
-            AccProber.after_embed_tokens(hidden_states)
+            ProberList.after_embed_tokens(hidden_states)
         else:
             hidden_states = seq_ctx.inputs_embeds
         if DEBUG_ACC:
@@ -531,10 +531,10 @@ class MoE(BaseModel):
 
         hidden_states = self.norm(hidden_states)
 
-        AccProber.before_lm_head(hidden_states, loss_ctx.loss_kwargs.shifted_labels)
+        ProberList.before_lm_head(hidden_states, loss_ctx.loss_kwargs.shifted_labels)
         loss, (logits, extra_info) = self.lm_head(hidden_states, loss_ctx)  # type: ignore
         # register_grad_hook(loss, "loss_autograd_reduce")
-        AccProber.after_lm_head(loss, logits)
+        ProberList.after_lm_head(loss, logits)
         output["loss"] = loss
         output["logits"] = logits
         output["extra_info"] = extra_info

@@ -31,7 +31,7 @@ from xtuner.v1.model.base import BaseModel, ModelItem, TransformerConfig
 from xtuner.v1.model.utils import ModelForwardExtraLogInfo
 from xtuner.v1.module.router import NoAuxRouterConfig
 from xtuner.v1.utils import get_device, get_logger, get_torch_device_module, profile_time_and_memory
-from xtuner.v1.prober.acc_prober import AccProber
+from xtuner.v1.prober.acc_prober import ProberList
 
 
 logger = get_logger()
@@ -233,7 +233,7 @@ class TrainEngine:
         train_engine_extra_info = ModelForwardExtraLogInfo()
         micro_batch_iter = 0
         for i in range(0, len(data_batches), intra_layer_micro_batch):
-            AccProber.set_micro_batch_iter(micro_batch_iter)
+            ProberList.set_micro_batch_iter(micro_batch_iter)
             micro_batch_iter += 1
             data_batch = data_batches[i : i + intra_layer_micro_batch]
             seq_ctx_list = []
@@ -287,7 +287,7 @@ class TrainEngine:
             del output
             loss.backward()
             # call dump_forward_records after backward to record the recomputed activations
-            AccProber.dump_micro_iter_forward()
+            ProberList.dump_micro_iter_forward()
             step_loss += loss.detach().clone()
 
         if moe_need_update_bias:
@@ -372,7 +372,7 @@ class TrainEngine:
 
     def clip_grad_norm(self, do_clip: bool = True):
         # import torch.distributed as dist; dist.breakpoint()
-        AccProber.before_clip_grad_norm()
+        ProberList.before_clip_grad_norm()
         self.model.scale_and_reduce_grad()
         params = self.model.trainable_parameters()
         grads = [p.grad for _, p in params if p.grad is not None]
@@ -394,7 +394,7 @@ class TrainEngine:
                     for g in grads:
                         g.mul_(clip_coef_clamped_device)
         # import torch.distributed as dist; dist.breakpoint()
-        AccProber.after_clip_grad_norm()
+        ProberList.after_clip_grad_norm()
         return grad_norm
 
     def step_optimizer(self, grad_norm):
