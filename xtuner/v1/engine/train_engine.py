@@ -287,7 +287,7 @@ class TrainEngine:
             del output
             loss.backward()
             # call dump_forward_records after backward to record the recomputed activations
-            AccProber.dump_forward_records()
+            AccProber.dump_micro_iter_forward()
             step_loss += loss.detach().clone()
 
         if moe_need_update_bias:
