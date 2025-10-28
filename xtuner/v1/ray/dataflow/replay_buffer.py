@@ -2,7 +2,7 @@ import itertools
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Union, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from uuid import uuid4
 
 import ray
@@ -134,7 +134,7 @@ class ReplayBufferConfig(BaseModel):
         config = ReplayBufferConfig(
             dataset_cfg=[{
                 "dataset": DatasetConfig(name="gsm8k", anno_path="path/to/data"),
-                "tokenize_fn": RLTextTokenizeFnConfig(max_length=512)
+                "tokenize_fn": RLTokenizeFnConfig(max_length=512)
             }],
             dataloader_cfg=DataloaderConfig(collator='fake_collator'),
             tokenizer=AutoTokenizer.from_pretrained("model_path"),
@@ -345,7 +345,9 @@ class ReplayBufferStorage:
                 samples.append(group_samples)
                 multimodal_train_infos.append(self._multimodal_train_infos.pop(action_id))
             self._returned = remain_finished_list
-            assert len(self._multimodal_train_infos) == len(self._returned), "multimodal_train_infos and returned should have the same length"
+            assert len(self._multimodal_train_infos) == len(self._returned), (
+                "multimodal_train_infos and returned should have the same length"
+            )
             return samples, multimodal_train_infos
 
     def get_finished_samples(self):

@@ -57,7 +57,7 @@ dataflow_config = DataFlowConfig(
 from transformers import AutoTokenizer
 from xtuner.v1.config import DatasetConfig, DataloaderConfig
 from xtuner.v1.ray.dataflow import ReplayBufferConfig
-from xtuner.v1.datasets import RLTextTokenizeFnConfig
+from xtuner.v1.datasets import RLTokenizeFnConfig
 
 train_data_path = "./gsm8k/train.jsonl"    # 训练数据路径
 model_path = "/path/to/qwen3-8B"           # 模型路径
@@ -67,7 +67,7 @@ pack_max_length = 32768                    # 打包最大长度
 replay_buffer_cfg = ReplayBufferConfig(
     dataset_cfg=[{
         "dataset": DatasetConfig(name="gsm8k", anno_path=train_data_path),
-        "tokenize_fn": RLTextTokenizeFnConfig(max_length=max_prompt_length),
+        "tokenize_fn": RLTokenizeFnConfig(max_length=max_prompt_length),
     }],
     dataloader_cfg=DataloaderConfig(
         pack_max_length=pack_max_length,             

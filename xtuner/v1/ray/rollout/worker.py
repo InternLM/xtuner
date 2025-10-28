@@ -146,7 +146,7 @@ class RolloutWorker(SingleAcceleratorWorker):
 
         # note(@duanyanhui): launch server as multiprocessing for sglang temporarily
         if self.config.launch_server_method == "multiprocessing":
-            ctx = multiprocessing.get_context('spawn')
+            ctx = multiprocessing.get_context("spawn")
             process = ctx.Process(target=self.server_func, args=(server_configs,))
             process.start()
             self.server_process = process
@@ -295,7 +295,7 @@ class RolloutWorker(SingleAcceleratorWorker):
         sample_params: dict,
         extra_params: dict,
         format: str,
-        extra_info: dict
+        extra_info: dict,
     ) -> RLRolloutResponseItem:
         uid = str(uuid.uuid4())
         response = None
@@ -328,7 +328,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                     tool_choice,
                     sample_params=sample_params,
                     extra_params=extra_params,
-                    extra_info=extra_info
+                    extra_info=extra_info,
                 )
             else:
                 assert prompts is not None, "prompts should not be None when you call v1/chat/completions API"
@@ -340,7 +340,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                     tool_choice,
                     sample_params=sample_params,
                     extra_params=extra_params,
-                    extra_info=extra_info
+                    extra_info=extra_info,
                 )
             self.logger.debug(f" +++ send request {uid} to worker: {self.rank}")
 

@@ -28,6 +28,7 @@ DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
 
 
+@runtime_checkable
 class VisionComposeModelProtocol(Protocol):
     vision_tower: XTunerBaseModel
     multi_modal_projector: XTunerBaseModel

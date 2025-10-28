@@ -92,19 +92,22 @@ class RLTrainerConfig(BaseModel):
         return judger_config.model_dump(exclude={"tokenizer", "reward_func"})
 
 
-def get_train_seq_ctx(input_ids: torch.Tensor, multimodal_train_info: dict | None = None, len_response_ids: int = 0):
+def get_train_seq_ctx(
+    input_ids: torch.LongTensor, multimodal_train_info: dict | None = None, len_response_ids: int = 0
+):
     seq_ctx = SequenceContext.from_input_ids((input_ids,), device="cpu")
     if multimodal_train_info and len(multimodal_train_info) > 0:
         position_ids = multimodal_train_info.get("position_ids")  # (1,n) or (3,1,n)
+        assert position_ids is not None
         if len(position_ids.shape) == 3:
             # qwen3vl 需要特殊处理，其余的不需要额外处理
             max_value = position_ids.max(dim=-1).values  # (3,1)
-            response_position_ids = max_value.unsqueeze(-1).expand(-1, -1, len_response_ids) + torch.arange(1,
-                                                                                                            len_response_ids + 1,
-                                                                                                            device=max_value.device)
+            response_position_ids = max_value.unsqueeze(-1).expand(-1, -1, len_response_ids) + torch.arange(
+                1, len_response_ids + 1, device=max_value.device
+            )
             position_ids = torch.cat([position_ids, response_position_ids], dim=-1)
 
-        seq_ctx.position_ids = position_ids
+        seq_ctx.position_ids = position_ids  # type: ignore[assignment]
         seq_ctx.pixel_values = multimodal_train_info.get("pixel_values")
         seq_ctx.image_grid_thw = multimodal_train_info.get("image_grid_thw")
         seq_ctx.image_flags = multimodal_train_info.get("image_flags")
@@ -208,13 +211,15 @@ class RLTrainer:
         trainer_cfg: RLTrainerConfig | None = None,
     ):
         """Initialize the RL training system."""
-        if os.environ.get('XTUNER_USE_FA3', '0') == '1':
+        if os.environ.get("XTUNER_USE_FA3", "0") == "1":
             try:
                 from xtuner.v1.ops.flash_attn import get_flash_attn_varlen
+
                 get_flash_attn_varlen()
             except RuntimeError as e:
                 raise RuntimeError(
-                    f"Flash attention v3 runtime error {e}, Please install it first or set XTUNER_USE_FA3=0.")
+                    f"Flash attention v3 runtime error {e}, Please install it first or set XTUNER_USE_FA3=0."
+                )
         train_worker_cfg.load_from = load_from
 
         self._total_epochs = total_epochs
@@ -400,8 +405,9 @@ class RLTrainer:
             with timer("onload_and_prepare_data", step_timer_dict):
                 ray.get(self._train_controller.onload.remote(target="all"))
                 self.logger.info("Training controller loaded")
-                data_batches, data_info = self._prepare_train_data(data_groups, self._train_worker_cfg.pack_max_length,
-                                                                   multimodal_train_infos)
+                data_batches, data_info = self._prepare_train_data(
+                    data_groups, self._train_worker_cfg.pack_max_length, multimodal_train_infos
+                )
                 self.logger.info(f"Prepared {len(data_batches)} training data batches")
                 self._log_data_info(rollout_idx, data_info)
 
@@ -457,8 +463,9 @@ class RLTrainer:
         data_batches = []
         is_multimodal = False
         if multimodal_train_infos and len(multimodal_train_infos) > 0:
-            assert len(multimodal_train_infos) == len(
-                data_groups), f"{len(multimodal_train_infos)} vs {len(data_groups)}"
+            assert len(multimodal_train_infos) == len(data_groups), (
+                f"{len(multimodal_train_infos)} vs {len(data_groups)}"
+            )
             is_multimodal = True
 
         for j, group in enumerate(data_groups):
@@ -467,7 +474,7 @@ class RLTrainer:
             else:
                 multimodal_train_info = None
 
-            prompt_ids = group[0].data.extra_info['train_prompt_ids']
+            prompt_ids = group[0].data.extra_info["train_prompt_ids"]
             rewards = [data.env.judger.reward["score"] for data in group]
             rewards_list.extend(rewards)
             rewards = torch.tensor(rewards, dtype=torch.float32)

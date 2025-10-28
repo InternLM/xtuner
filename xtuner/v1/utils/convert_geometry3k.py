@@ -1,16 +1,17 @@
 """Preprocess the geometry3k dataset to parquet format."""
 
 import argparse
-import os
 import json
+import os
+
 import datasets
 from PIL import Image
 
 
 def save_jsonl(data_list, output_file):
-    with open(output_file, 'w', encoding='utf-8') as writer:
+    with open(output_file, "w", encoding="utf-8") as writer:
         for d in data_list:
-            writer.write(json.dumps(d, ensure_ascii=False) + '\n')
+            writer.write(json.dumps(d, ensure_ascii=False) + "\n")
 
 
 # Adapted from https://github.com/volcengine/verl/blob/main/examples/data_preprocess/geo3k.py
@@ -38,7 +39,7 @@ if __name__ == "__main__":
     # add a row to each data item that represents a unique id
     def make_map_fn(split):
         def process_fn(example, idx):
-            problem = example.pop("problem").repalce('<image>', '<IMG_CONTEXT>')
+            problem = example.pop("problem").repalce("<image>", "<IMG_CONTEXT>")
             prompt = problem + " " + instruction_following
             answer = example.pop("answer")
             images = example.pop("images")
@@ -81,40 +82,41 @@ if __name__ == "__main__":
 
         return process_fn
 
-
     train_dataset = train_dataset.map(function=make_map_fn("train"), with_indices=True, num_proc=8)
     test_dataset = test_dataset.map(function=make_map_fn("test"), with_indices=True, num_proc=8)
 
     out_dir = args.out_dir
     new_data = []
     for i, data_item in enumerate(train_dataset):
-        new_dict = {'prompt': [],
-                    'data_source': data_item['data_source'],
-                    'ability': data_item['ability'],
-                    'reward_model': data_item['reward_model'],
-                    'extra_info': data_item['extra_info'],
-                    }
-        content = data_item['prompt'][0]['content']
-        del content[0]['text']
-        del content[1]['image_url']
-        prompt = data_item['prompt']
-        new_dict['prompt'] = prompt
+        new_dict = {
+            "prompt": [],
+            "data_source": data_item["data_source"],
+            "ability": data_item["ability"],
+            "reward_model": data_item["reward_model"],
+            "extra_info": data_item["extra_info"],
+        }
+        content = data_item["prompt"][0]["content"]
+        del content[0]["text"]
+        del content[1]["image_url"]
+        prompt = data_item["prompt"]
+        new_dict["prompt"] = prompt
         new_data.append(new_dict)
     save_jsonl(new_data, os.path.join(out_dir, "train.jsonl"))
 
     new_data = []
     for i, data_item in enumerate(test_dataset):
-        new_dict = {'prompt': [],
-                    'data_source': data_item['data_source'],
-                    'ability': data_item['ability'],
-                    'reward_model': data_item['reward_model'],
-                    'extra_info': data_item['extra_info'],
-                    }
-        content = data_item['prompt'][0]['content']
-        del content[0]['text']
-        del content[1]['image_url']
-        prompt = data_item['prompt']
-        new_dict['prompt'] = prompt
+        new_dict = {
+            "prompt": [],
+            "data_source": data_item["data_source"],
+            "ability": data_item["ability"],
+            "reward_model": data_item["reward_model"],
+            "extra_info": data_item["extra_info"],
+        }
+        content = data_item["prompt"][0]["content"]
+        del content[0]["text"]
+        del content[1]["image_url"]
+        prompt = data_item["prompt"]
+        new_dict["prompt"] = prompt
         new_data.append(new_dict)
     save_jsonl(new_data, os.path.join(out_dir, "test.jsonl"))
 

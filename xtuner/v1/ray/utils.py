@@ -1,10 +1,12 @@
 import asyncio
 import importlib
+import os
 import socket
 from asyncio import AbstractEventLoop, Task
-from typing import TYPE_CHECKING, Callable, Coroutine, List, Optional, cast
-import os
+from typing import TYPE_CHECKING, Any, Callable, Coroutine, List, Optional, cast
+
 import ray
+
 
 if TYPE_CHECKING:
     import ray.actor
@@ -101,8 +103,8 @@ def get_accelerator_ids(accelerator: str) -> list:
 
 
 def bind_train_rollout(
-        train_workers,
-        rollout_controller,
+    train_workers,
+    rollout_controller,
 ) -> None:
     """Bind the training and rollout workers for updating weights.
 
@@ -140,9 +142,9 @@ def handle_task_exception(task: Task):
 
 
 def create_task(
-        coro: Coroutine,
-        loop: Optional[AbstractEventLoop] = None,
-        done_callbacks: Optional[List[Callable[[Task], object]]] = None,
+    coro: Coroutine,
+    loop: Optional[AbstractEventLoop] = None,
+    done_callbacks: Optional[List[Callable[[Task], object]]] = None,
 ) -> asyncio.tasks.Task:
     """Creates and configures an asyncio Task.
 
@@ -171,7 +173,7 @@ def create_task(
     return task
 
 
-def replace_image_context_and_collect_media_data(prompt: list[dict], extra_info: dict) -> tuple:
+def replace_image_context_and_collect_media_data(prompt: str | list[dict[str, Any]], extra_info: dict) -> tuple:
     """Collect image data from the prompt and extra_info.
 
     Args:
@@ -197,7 +199,7 @@ def replace_image_context_and_collect_media_data(prompt: list[dict], extra_info:
                     elif c["type"] == "video_url":
                         video_paths.append(os.path.join(media_root, c["video_url"]["url"]))
                     elif c["type"] == "text":
-                        _c = c['text']
-                        c['text'] = _c.replace('<IMG_CONTEXT>', '')
+                        _c = c["text"]
+                        c["text"] = _c.replace("<IMG_CONTEXT>", "")
 
     return image_paths, video_paths

@@ -1,5 +1,7 @@
 import re
+
 from pydantic import BaseModel
+
 
 try:
     from mathruler.grader import extract_boxed_content, grade_answer

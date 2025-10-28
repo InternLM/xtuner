@@ -14,7 +14,7 @@ from xtuner.v1.data_proto.rl_data import SampleParams
 from xtuner.v1.ray.environment import SingleTurnEnvironment
 from xtuner.v1.ray.rollout import RolloutController
 from xtuner.v1.ray.judger import JudgerController
-from xtuner.v1.datasets import RLTextTokenizeFnConfig, build_datasets, build_dataloader
+from xtuner.v1.datasets import RLTokenizeFnConfig, build_datasets, build_dataloader
 from xtuner.v1.datasets.config import (
     DataloaderConfig,
     DatasetConfig,
@@ -78,7 +78,7 @@ class TestRollout(unittest.TestCase):
             "dataset": DatasetConfig(name="gsm8k",
                                     anno_path=TRAIN_DATA_PATH,
                                     sample_ratio=1.0),
-            "tokenize_fn": RLTextTokenizeFnConfig(max_length=self.max_prompt_length),
+            "tokenize_fn": RLTokenizeFnConfig(max_length=self.max_prompt_length),
             },
         ]
         self.dataloader_cfg = DataloaderConfig(

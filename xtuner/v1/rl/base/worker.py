@@ -15,14 +15,17 @@ from xtuner.v1.config.fsdp import FSDPConfig
 from xtuner.v1.config.optim import LRConfig, OptimConfig
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.engine.train_engine import TrainEngine
-from xtuner.v1.engine.vision_compose_train_engine import VisionComposeTrainEngine
+from xtuner.v1.engine.vision_compose_train_engine import (
+    VisionComposeConfigProtocol,
+    VisionComposeModelProtocol,
+    VisionComposeTrainEngine,
+)
 from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.model.base import ModelItem, TransformerConfig
 from xtuner.v1.ray.accelerator import SingleAcceleratorWorker
 from xtuner.v1.ray.config import RolloutConfig
 from xtuner.v1.rl.utils import gather_logprobs
 from xtuner.v1.utils import ParallelConfigException, get_device, get_logger, get_torch_device_module
-from xtuner.v1.engine.vision_compose_train_engine import VisionComposeConfigProtocol
 
 from ..loss_fn import kl_penalty
 from .loss import BaseRLLossConfig, RLLossContextInputItem
@@ -188,23 +191,27 @@ class TrainingWorker(SingleAcceleratorWorker):
         return engine
 
     def _build_ref_model(
-        self, ref_model_cfg: TransformerConfig | VisionComposeConfigProtocol, load_from: str | Path, ref_model_fsdp_cfg: FSDPConfig | None = None
+        self,
+        ref_model_cfg: TransformerConfig | VisionComposeConfigProtocol,
+        load_from: str | Path,
+        ref_model_fsdp_cfg: FSDPConfig | None = None,
     ):
         # TODO: 需要重构，使得能更优雅的兼容 mllm
         with torch.device("meta"):
             model = ref_model_cfg.build()
 
-        if isinstance(ref_model_cfg, VisionComposeConfigProtocol):
-            assert ref_model_cfg.text_config.float8_cfg is None,  "VisionComposeConfigProtocol does not support float8"
+        if isinstance(model, VisionComposeModelProtocol):
+            assert ref_model_cfg.text_config.float8_cfg is None, "VisionComposeConfigProtocol does not support float8"
             if ref_model_fsdp_cfg is None:
                 ref_model_fsdp_cfg = FSDPConfig(recompute_ratio=0, cpu_offload=False, requires_grad=False)
             model.language_model.fully_shard(ref_model_fsdp_cfg)
             model.vision_tower.fully_shard(ref_model_fsdp_cfg)
             model.multi_modal_projector.fully_shard(ref_model_fsdp_cfg)
             model = model.fully_shard(ref_model_fsdp_cfg)
-            model.from_hf(hf_path=load_from)
-            model.eval()
+            model.from_hf(hf_path=load_from)  # type: ignore
+            model.eval()  # type: ignore
         else:
+            ref_model_cfg = cast(TransformerConfig, ref_model_cfg)
             if ref_model_cfg.float8_cfg is not None and ref_model_cfg.float8_cfg.enable_float8:
                 float8_handler = Float8Handler(
                     scaling_granularity_gemm=ref_model_cfg.float8_cfg.scaling_granularity_gemm,
@@ -221,8 +228,8 @@ class TrainingWorker(SingleAcceleratorWorker):
             if float8_handler is not None:
                 # As the ref model is not updated, we only compute params' scales once
                 float8_handler.precompute_float8_dynamic_scale_for_fsdp(model)
-        model.to_device("cpu")
-        DEVICE_MODULE.empty_cache()  # type: ignore
+        model.to_device("cpu")  # type: ignore
+        DEVICE_MODULE.empty_cache()
         return model
 
     def _init_data_mesh(
@@ -490,6 +497,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                 "lmdeploy_backend", "pytorch"
             )
 
+    # TODO(hha): 这个逻辑和某个模型绑定死了。一定要重构掉
     def update_weights(self):
         """Update the model weights."""
         self.endpoints["update_weights"] = "update_weights"
@@ -498,7 +506,6 @@ class TrainingWorker(SingleAcceleratorWorker):
         model = self._engine.model
         DEVICE_MODULE.empty_cache()
 
-        # TODO: 这个逻辑和某个模型绑定死了。一定要重构掉
         if isinstance(model.config, VisionComposeConfigProtocol):
             # TODO: support float8 for vision compose model
             dtype = torch.bfloat16
@@ -527,11 +534,11 @@ class TrainingWorker(SingleAcceleratorWorker):
             tensor_list = []
             name_list = []
             for sub_name, param in layer.state_dict().items():
-                saved_list.append(f"layers.{i}.{sub_name}")
+                saved_list.append(f"language_model.layers.{i}.{sub_name}")
                 local_tensor = param._local_tensor if isinstance(param, DTensor) else param
                 local_tensor = local_tensor.bfloat16()
                 load_spec = language_model.load_spec_mapping.get(f"layers.{i}.{sub_name}")
-                
+
                 if isinstance(model.config, VisionComposeConfigProtocol):
                     name = f"model.language_model.layers.{i}.{sub_name}"
                 else:
@@ -561,10 +568,23 @@ class TrainingWorker(SingleAcceleratorWorker):
             local_tensor = param._local_tensor if isinstance(param, DTensor) else param
             local_tensor = local_tensor.bfloat16()
             load_spec = model.load_spec_mapping.get(name)
-            if name == "norm.weight":
-                name = "model.norm.weight"
-            elif name == "embed_tokens.weight":
-                name = "model.embed_tokens.weight"
+
+            if isinstance(model.config, VisionComposeConfigProtocol):
+                if "vision_tower." in name:
+                    name = name.replace("vision_tower.", "model.visual.")
+                elif "multi_modal_projector." in name:
+                    name = name.replace("multi_modal_projector.", "model.visual.")
+                elif name == "language_model.norm.weight":
+                    name = "model.language_model.norm.weight"
+                elif name == "language_model.embed_tokens.weight":
+                    name = "model.language_model.embed_tokens.weight"
+                elif name == "language_model.lm_head.weight":
+                    name = "lm_head.weight"
+            else:
+                if name == "norm.weight":
+                    name = "model.norm.weight"
+                elif name == "embed_tokens.weight":
+                    name = "model.embed_tokens.weight"
             tensor_list = [(local_tensor, load_spec)]
             name_list = [name]
             fsdp_unshard_tensor_list, name_list = get_params(tensor_list, name_list, dtype)

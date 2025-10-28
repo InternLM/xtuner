@@ -8,6 +8,7 @@ from urllib3.exceptions import NewConnectionError
 from transformers import AutoTokenizer
 from xtuner.v1.ray.config import RolloutConfig
 from xtuner.v1.ray.utils import replace_image_context_and_collect_media_data
+
 from .worker import RolloutWorker
 
 
@@ -42,7 +43,7 @@ class SGLangWorker(RolloutWorker):
         tool_choice: str,
         sample_params: dict,
         extra_params: dict,
-        extra_info: dict
+        extra_info: dict,
     ):
         headers = {
             "Content-Type": "application/json",
@@ -61,6 +62,7 @@ class SGLangWorker(RolloutWorker):
                 if input_ids is not None:
                     payload["input_ids"] = input_ids
                 else:
+                    assert prompt is not None, "prompt is required when input_ids is None."
                     image_data, _ = replace_image_context_and_collect_media_data(prompt, extra_info)
                     if image_data:
                         assert len(image_data) == 1, "SGLangWorker only support single image input."

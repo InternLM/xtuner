@@ -1,6 +1,6 @@
 import asyncio
 from pathlib import Path
-from typing import Callable, List, Optional, Union
+from typing import Callable, List, Optional, Sized, Union
 
 import ray
 from cyclopts import Parameter
@@ -11,11 +11,10 @@ from typing_extensions import Annotated
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1.data_proto.rl_data import RLDataFlowItem, RLDatasetItem, SampleParams
 from xtuner.v1.datasets import build_dataloader, build_datasets
-from xtuner.v1.datasets.config import DatasetConfigList
+from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfigList
 from xtuner.v1.ray.environment import BaseEnvironment
 from xtuner.v1.ray.utils import create_task
 from xtuner.v1.utils import get_logger
-from xtuner.v1.datasets.config import DataloaderConfig
 
 
 class EvaluatorConfig(BaseModel):
@@ -50,7 +49,7 @@ class EvaluatorConfig(BaseModel):
         config = EvaluatorConfig(
             dataset_cfg=[{
                 "dataset": DatasetConfig(name="gsm8k", anno_path="test_data.json"),
-                "tokenize_fn": RLTextTokenizeFnConfig(max_length=512)
+                "tokenize_fn": RLTokenizeFnConfig(max_length=512)
             }],
             tokenizer=AutoTokenizer.from_pretrained("model_path"),
             max_concurrent=32,
@@ -126,9 +125,12 @@ class Evaluator:
         """
         self.config = config
         self.sample_params = self.config.sample_params
-        self.dataset = build_datasets(config.dataset_cfg, config.tokenizer) if isinstance(config.tokenizer, (
-        PreTrainedTokenizer, PreTrainedTokenizerFast)) else build_datasets(
-            config.dataset_cfg, AutoTokenizer.from_pretrained(config.tokenizer, trust_remote_code=True)
+        self.dataset = (
+            build_datasets(config.dataset_cfg, config.tokenizer)
+            if isinstance(config.tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast))
+            else build_datasets(
+                config.dataset_cfg, AutoTokenizer.from_pretrained(config.tokenizer, trust_remote_code=True)
+            )
         )
 
         if config.dataloader_cfg is not None:
@@ -145,6 +147,7 @@ class Evaluator:
             micro_batch_size=1,
             seed=1,
         )
+        assert isinstance(self.dataloader, Sized)
 
         self.env_controller = env_controller
         self.failed_samples_count = 0
@@ -190,8 +193,7 @@ class Evaluator:
         """
         try:
             # note: In the evaluator, we convert the input sample to a list to adapt to the input format of single_turn_env
-            group_sample = await self.env_controller.run.remote([sample],
-                                                                sample_params=self.sample_params)  # type: ignore[attr-defined]
+            group_sample = await self.env_controller.run.remote([sample], sample_params=self.sample_params)  # type: ignore[attr-defined]
             self.return_list.append(group_sample[0])
         except Exception as e:
             self.logger.error(f"Worker task failed with exception: {e}. Returning meta for retry.")
