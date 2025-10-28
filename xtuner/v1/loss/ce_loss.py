@@ -12,7 +12,7 @@ from typing_extensions import Self
 from xtuner.v1.loss import BaseLossConfig, BaseLossContext, BaseLossKwargs
 from xtuner.v1.utils import DEBUG_ACC
 from xtuner.v1.utils.debug import register_grad_hook, get_grad_hook
-from xtuner.v1.prober.acc_prober import ProberList
+from xtuner.v1.profiler.prober import ProberList
 
 from .utils import sp_gather, sp_split
 
