@@ -15,17 +15,22 @@ class BaseEnvironment(ABC):
 
     Args:
         environment (str): The name or identifier of the environment.
-        placement_group (Any): The placement group for scheduling Ray actors.
+        rollout_pg (Any): The placement group for scheduling rollout Ray actors.
         rollout_cfg (Any, optional): The configuration for the rollout controller. Defaults to None.
+        judger_pg (Any): The placement group for scheduling judger Ray actors.
+                         Defaults to None indicates using the rollout_pg.
         judger_cfg (Any, optional): The configuration for the judger controller. Defaults to None.
     """
 
-    def __init__(self, environment: str, placement_group: Any, rollout_cfg: Any = None, judger_cfg: Any = None):
+    def __init__(
+        self, environment: str, rollout_pg: Any, rollout_cfg: Any, judger_pg: Any = None, judger_cfg: Any = None
+    ):
+        judger_pg = judger_pg if judger_pg else rollout_pg
         self.environment = environment
-        self.rollout_controller = self.init_rollout_controller(placement_group, rollout_cfg)
-        self.judger_controller = self.init_judger_controller(placement_group, judger_cfg)
+        self.rollout_controller = self.init_rollout_controller(rollout_cfg, rollout_pg)
+        self.judger_controller = self.init_judger_controller(judger_cfg, judger_pg)
 
-    def init_rollout_controller(self, placement_group: Any, rollout_cfg: Any):
+    def init_rollout_controller(self, rollout_cfg: Any, placement_group: Any):
         """Initializes the rollout controller with the appropriate worker
         backend.
 
@@ -34,8 +39,8 @@ class BaseEnvironment(ABC):
         returns a `RolloutController` to manage these workers.
 
         Args:
-            placement_group (Any): The placement group for scheduling Ray actors.
             rollout_cfg (Any): The configuration for the rollout controller.
+            placement_group (Any): The placement group for scheduling Ray actors.
 
         Returns:
             The initialized rollout controller, or None if `rollout_cfg` is not provided.
@@ -43,46 +48,25 @@ class BaseEnvironment(ABC):
         Raises:
             NotImplementedError: If the specified rollout backend is not supported.
         """
-        from xtuner.v1.ray.accelerator import AutoAcceleratorWorkers
 
         rollout_controller = None
         if rollout_cfg is None:
             return rollout_controller
-        import os
-
-        if os.environ.get("XTUNER_USE_LMDEPLOY") == "1":
-            from xtuner.v1.ray.rollout import LMDeployWorker
-
-            rollout_workers_map = AutoAcceleratorWorkers.from_placement_group(
-                LMDeployWorker, rollout_cfg, placement_group
-            )
-        elif os.environ.get("XTUNER_USE_VLLM") == "1":
-            from xtuner.v1.ray.rollout import vLLMWorker
-
-            rollout_workers_map = AutoAcceleratorWorkers.from_placement_group(vLLMWorker, rollout_cfg, placement_group)
-        elif os.environ.get("XTUNER_USE_SGLANG") == "1":
-            from xtuner.v1.ray.rollout import SGLangWorker
-
-            rollout_workers_map = AutoAcceleratorWorkers.from_placement_group(
-                SGLangWorker, rollout_cfg, placement_group
-            )
-        else:
-            raise NotImplementedError(f"Rollout backend '{rollout_cfg.backend}' is not supported.")
 
         from xtuner.v1.ray.rollout.controller import RolloutController
 
-        rollout_controller = RolloutController.remote(rollout_cfg, rollout_workers_map)  # type: ignore[attr-defined]
+        rollout_controller = RolloutController.remote(rollout_cfg, placement_group)  # type: ignore[attr-defined]
         return rollout_controller
 
-    def init_judger_controller(self, placement_group: Any, judger_cfg: Any):
+    def init_judger_controller(self, judger_cfg: Any, placement_group: Any):
         """Initializes the judger controller.
 
         If a `judger_cfg` is provided, this method creates and returns a `JudgerController`
         to handle evaluation and judging tasks.
 
         Args:
-            placement_group (Any): The placement group for scheduling Ray actors.
             judger_cfg (Any): The configuration for the judger controller.
+            placement_group (Any): The placement group for scheduling Ray actors.
 
         Returns:
             The initialized judger controller, or None if `judger_cfg` is not provided.
@@ -91,7 +75,7 @@ class BaseEnvironment(ABC):
         if judger_cfg:
             from xtuner.v1.ray.judger.controller import JudgerController
 
-            judger_controller = JudgerController.remote(judger_cfg)  # type: ignore[attr-defined]
+            judger_controller = JudgerController.remote(judger_cfg, placement_group)  # type: ignore[attr-defined]
         return judger_controller
 
     @abstractmethod

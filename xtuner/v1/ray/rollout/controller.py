@@ -5,15 +5,17 @@ import threading
 import time
 from collections import OrderedDict
 from itertools import cycle
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Union
 from uuid import uuid4
 
 import ray
 import uvicorn
 from fastapi import FastAPI
+from ray.util.placement_group import PlacementGroup
 
 from transformers import AutoTokenizer
 from xtuner.v1.data_proto.rl_data import RLRolloutRequestItem, RLRolloutResponseItem, RolloutExtraParams, SampleParams
+from xtuner.v1.ray.base import AutoAcceleratorWorkers
 from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.utils import get_logger
 
@@ -82,14 +84,14 @@ class RolloutController:
     def __init__(
         self,
         infer_config: RolloutConfig,
-        workers_bundle_idx_map: Dict[RolloutWorker, Tuple[int, int]],
+        placement_group: PlacementGroup,
     ):
         """Initialize the RolloutController.
 
         Args:
             infer_config (RolloutConfig): The configuration for the rollout.
-            workers_bundle_idx_map (Dict[RolloutWorker, Tuple[int, int]]): A map
-                from worker actors to their (head_rank, bundle_index) tuple.
+            placement_group (PlacementGroup): The placement group for the
+                RolloutWorker actors.
         """
         self.config = infer_config
         self.logger = get_logger(log_dir=infer_config.worker_log_dir, tag="RolloutController")
@@ -97,7 +99,9 @@ class RolloutController:
         self.worker_server_urls: List[str] = []
         self.active_rollout_workers: List[RolloutWorker] = []
         self.tokenizer = AutoTokenizer.from_pretrained(infer_config.tokenizer_path, trust_remote_code=True)
-        self.workers_bundle_idx_map = workers_bundle_idx_map
+        self.workers, self.rank_bundle_idx_list = AutoAcceleratorWorkers.from_placement_group(
+            self._get_worker_cls(), infer_config, placement_group
+        )
         self.engine_mesh_list, self.server_url_dict = self.init_workers()
         self.start_api_server()
         # todo(@duanyanhui): add router to replace native round robin
@@ -117,6 +121,26 @@ class RolloutController:
             )
         )
         self.print_params_flag = True
+
+    def _get_worker_cls(self):
+        if os.environ.get("XTUNER_USE_LMDEPLOY") == "1":
+            from .lmdeploy import LMDeployWorker
+
+            return LMDeployWorker
+        elif os.environ.get("XTUNER_USE_VLLM") == "1":
+            from .vllm import vLLMWorker
+
+            return vLLMWorker
+        elif os.environ.get("XTUNER_USE_SGLANG") == "1":
+            from .sglang import SGLangWorker
+
+            return SGLangWorker
+        else:
+            raise NotImplementedError(
+                "Rollout backend is not supported."
+                "Please set XTUNER_USE_LMDEPLOY or XTUNER_USE_VLLM"
+                " or XTUNER_USE_SGLANG environment variable."
+            )
 
     def _is_port_in_use(self, host: str, port: int) -> bool:
         """Check if a port is in use on the given host."""
@@ -157,20 +181,21 @@ class RolloutController:
             a dictionary mapping the ID of each active worker to its
             corresponding server URL.
         """
-        workers = list(self.workers_bundle_idx_map.keys())
-        active_servers_count, nodes_per_engine = self._get_active_servers_count(self.config, len(workers))
-        interval = len(workers) // active_servers_count
-        self.active_rollout_workers = workers[::interval]
+        active_servers_count, nodes_per_engine = self._get_active_servers_count(self.config, len(self.workers))
+        interval = len(self.workers) // active_servers_count
+        self.active_rollout_workers = self.workers[::interval]
         self.num_workers = len(self.active_rollout_workers)
 
         set_bundle_idxs_objectref = []
         engine_mesh_list = []
+        activate_worker_idx = 0
         for active_worker in self.active_rollout_workers:
-            head_rank, _ = self.workers_bundle_idx_map[active_worker]
-            engine_workers = workers[head_rank : head_rank + interval]
-            engine_bundle_idxs = [self.workers_bundle_idx_map[worker][1] for worker in engine_workers]
+            head_rank, _ = self.rank_bundle_idx_list[activate_worker_idx]
+            engine_workers_meta = self.rank_bundle_idx_list[head_rank : head_rank + interval]
+            engine_bundle_idxs = [meta[1] for meta in engine_workers_meta]  # meta: (rank, bundle_idx)
             set_bundle_idxs_objectref.append(active_worker.set_engine_bundle_idxs.remote(engine_bundle_idxs))  # type: ignore[attr-defined]
-            engine_mesh_list.append([self.workers_bundle_idx_map[worker][0] for worker in engine_workers])
+            engine_mesh_list.append([meta[0] for meta in engine_workers_meta])
+            activate_worker_idx += interval
         ray.get(set_bundle_idxs_objectref)
         # init dist_init_addr for each worker according to parallel settings
         init_dist_init_addrs = ray.get([worker.init_dist_port.remote() for worker in self.active_rollout_workers])  # type: ignore[attr-defined]

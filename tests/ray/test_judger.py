@@ -9,7 +9,7 @@ import numpy as np
 from uuid import uuid4
 from xtuner.v1.ray.environment import SingleTurnEnvironment
 from xtuner.v1.ray.config.worker import RolloutConfig
-from xtuner.v1.ray.accelerator import AcceleratorResourcesConfig, AutoAcceleratorWorkers
+from xtuner.v1.ray.base import AcceleratorResourcesConfig, AutoAcceleratorWorkers
 from xtuner.v1.ray.judger.controller import JudgerController, JudgerConfig
 from xtuner.v1.data_proto.rl_data import RLDataFlowItem, RLDatasetItem, RLEnvDataItem, RLRolloutResponseItem, RLUIDItem
 

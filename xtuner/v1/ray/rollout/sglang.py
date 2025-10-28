@@ -145,6 +145,14 @@ class SGLangWorker(RolloutWorker):
         os.environ.pop("CUDA_VISIBLE_DEVICES", None)
         from sglang.srt.server_args import ServerArgs
 
+        extra_config = self.config.extra_rollout_config or dict()
+        sglang_config_kwargs = {
+            k.replace("sglang_", ""): v for k, v in extra_config.items() if k.startswith("sglang_")
+        }
+        grammar_backend = sglang_config_kwargs.get(
+            "grammar_backend", None
+        )  # for intern-s1 series models, have to set the grammar_backend to "none"
+
         sglang_server_args = ServerArgs(model_path=self.config.model_path)
         sglang_server_args.host = self.host
         sglang_server_args.port = self.server_port
@@ -160,8 +168,7 @@ class SGLangWorker(RolloutWorker):
         sglang_server_args.enable_memory_saver = True
         sglang_server_args.max_running_requests = int(os.environ.get("XTUNER_MAX_CONCURRENCY", 2000))
         sglang_server_args.trust_remote_code = True
-        if "interns1" in self.model_name.lower():
-            sglang_server_args.grammar_backend = "none"
+        sglang_server_args.grammar_backend = grammar_backend
 
         if self.config.context_length is not None:
             sglang_server_args.context_length = self.config.context_length
