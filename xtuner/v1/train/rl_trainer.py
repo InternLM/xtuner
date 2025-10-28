@@ -338,7 +338,6 @@ class RLTrainer:
         )(BaseTrainingWorker)
         train_workers, _ = AutoAcceleratorWorkers.from_placement_group(TrainingWorker, train_worker_cfg, self._pg)
         ray.get([worker.__ray_ready__.remote() for worker in train_workers])
-        train_workers = list(train_workers.keys())
         train_controller = cast(ActorClass, TrainingController).remote(
             workers=train_workers,
         )

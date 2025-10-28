@@ -12,12 +12,7 @@ from ray import ObjectRef
 from typing_extensions import Annotated
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
-from xtuner.v1.data_proto.rl_data import (
-    RLDataFlowItem,
-    RLDatasetItem,
-    RLExtraDataItem,
-    RLUIDItem,
-)
+from xtuner.v1.data_proto.rl_data import RLDataFlowItem, RLDatasetItem, RLExtraDataItem, RLUIDItem, check_dataflow_item
 from xtuner.v1.datasets import build_dataloader, build_datasets
 from xtuner.v1.datasets.config import DataloaderConfig
 from xtuner.v1.utils import get_logger
@@ -280,6 +275,7 @@ class ReplayBufferStorage:
         """
         if len(grouped_dataitem) == 0:
             return
+        assert check_dataflow_item(grouped_dataitem)
 
         replay_meta = mapping_dataitem_to_replaymeta(grouped_dataitem)
         root_id = replay_meta.root_id

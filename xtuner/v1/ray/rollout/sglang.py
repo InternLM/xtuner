@@ -168,7 +168,8 @@ class SGLangWorker(RolloutWorker):
         sglang_server_args.enable_memory_saver = True
         sglang_server_args.max_running_requests = int(os.environ.get("XTUNER_MAX_CONCURRENCY", 2000))
         sglang_server_args.trust_remote_code = True
-        sglang_server_args.grammar_backend = grammar_backend
+        if grammar_backend is not None:
+            sglang_server_args.grammar_backend = grammar_backend
 
         if self.config.context_length is not None:
             sglang_server_args.context_length = self.config.context_length
