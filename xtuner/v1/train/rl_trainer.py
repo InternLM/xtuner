@@ -508,10 +508,12 @@ class RLTrainer:
 
     def _save_trajectories(self, data_groups, save_path):
         rewards = []
-        response_len_list = []
 
         rollout_response_len_list = []
-        mismatch_token_ids_count = 0
+        # NOTE: Since we currently default to token-in token-out, the code for checking whether response_ids have Retokenization Drift is commented out.
+        # If you need to debug, you can uncomment it.
+        # mismatch_token_ids_count = 0
+        # response_len_list = []
         for group in data_groups:
             for data in group:
                 rewards.append(data.env.judger.reward["score"])
@@ -521,19 +523,27 @@ class RLTrainer:
                     else:
                         response_ids = data.env.rollout.response_ids
                     rollout_response_len_list.append(len(response_ids))
+                    # response_str = self.tokenizer.decode(response_ids, skip_special_tokens=False)
+                    # revert_encode_response_ids = self.tokenizer.encode(response_str, add_special_tokens=False)
 
-                    response_str = self.tokenizer.decode(response_ids, skip_special_tokens=False)
-                    revert_encode_response_ids = self.tokenizer.encode(response_str, add_special_tokens=False)
+                    # response_str_to_ids = self.tokenizer.encode(data.env.rollout.response, add_special_tokens=False)
+                    # response_len_list.append(len(response_str_to_ids))
 
-                    if response_ids != revert_encode_response_ids:
-                        mismatch_token_ids_count += 1
+                    # if response_ids != revert_encode_response_ids or response_ids != response_str_to_ids:
+                    #     mismatch_token_ids_count += 1
 
-                response_ids = self.tokenizer.encode(data.env.rollout.response, add_special_tokens=False)
-                response_len_list.append(len(response_ids))
+                elif data.env.rollout.response is not None:
+                    response_ids = self.tokenizer.encode(data.env.rollout.response, add_special_tokens=False)
+                    rollout_response_len_list.append(len(response_ids))
+
+                else:
+                    self.logger.error(
+                        f"Both response_ids and response string in rollout data_item {data.env.rollout} are None, check your rollout process."
+                    )
+                    rollout_response_len_list.append(0)
+                    continue
 
         rewards = torch.tensor(rewards).float()
-        response_lens = torch.tensor(response_len_list).float()
-
         rollout_response_lens = None
         if len(rollout_response_len_list) > 0:
             rollout_response_lens = torch.tensor(rollout_response_len_list).float()
@@ -545,23 +555,13 @@ class RLTrainer:
                 "reward_std": rewards.std().item(),
                 "reward_max": rewards.max().item(),
                 "reward_min": rewards.min().item(),
-                "response_len_mean": response_lens.mean().item(),
-                "response_len_std": response_lens.std().item(),
-                "response_len_max": response_lens.max().item(),
-                "response_len_min": response_lens.min().item(),
+                "response_len_mean": rollout_response_lens.mean().item(),
+                "response_len_std": rollout_response_lens.std().item(),
+                "response_len_max": rollout_response_lens.max().item(),
+                "response_len_min": rollout_response_lens.min().item(),
                 "total_len": len(rewards),
-                "mismatch_token_ids_count": mismatch_token_ids_count,
+                # "mismatch_token_ids_count": mismatch_token_ids_count,
             }
-            if len(rollout_response_len_list) > 0:
-                item.update(
-                    {
-                        "rollout_response_len_mean": rollout_response_lens.mean().item(),
-                        "rollout_response_len_std": rollout_response_lens.std().item(),
-                        "rollout_response_len_max": rollout_response_lens.max().item(),
-                        "rollout_response_len_min": rollout_response_lens.min().item(),
-                    }
-                )
-
             json.dump(item, f, ensure_ascii=False, indent=2)
             f.write("\n")
             for group in data_groups:
@@ -569,14 +569,10 @@ class RLTrainer:
                     item = {
                         "prompt": data.data.extra_info["raw_prompt"],
                         "response": data.env.rollout.response,
-                        "response_len": response_len_list[_count],
+                        "response_len": rollout_response_len_list[_count],
                         "label": data.data.reward_model["ground_truth"],
                         "reward": data.env.judger.reward["score"],
                     }
-
-                    if response_len_list[_count] != rollout_response_len_list[_count]:
-                        item["rollout_response_len"] = rollout_response_len_list[_count]
-
                     json.dump(item, f, ensure_ascii=False, indent=2)
                     f.write("\n")
                     _count += 1
