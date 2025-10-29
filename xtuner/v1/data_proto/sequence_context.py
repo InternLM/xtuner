@@ -148,7 +148,9 @@ class SequenceContext:
         device = []
         inputs_embeds = []
 
+        pixel_values: list | torch.Tensor | None
         pixel_values = []
+
         image_grid_thw = []
         position_ids = []
         image_flags = []

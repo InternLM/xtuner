@@ -18,9 +18,11 @@ from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.engine.train_engine import TrainEngine
 from xtuner.v1.engine.vision_compose_train_engine import (
     VisionComposeConfigProtocol,
+    VisionComposeModelProtocol,
     VisionComposeTrainEngine,
 )
 from xtuner.v1.float8.float8_handler import Float8Handler
+from xtuner.v1.model.base import BaseModel as XtunerBaseModel
 from xtuner.v1.model.base import ModelItem, TransformerConfig
 from xtuner.v1.model.compose.qwen3_vl import Qwen3VLForConditionalGeneration
 from xtuner.v1.ray.accelerator import SingleAcceleratorWorker
@@ -198,6 +200,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         ref_model_fsdp_cfg: FSDPConfig | None = None,
     ):
         # TODO: 需要重构，使得能更优雅的兼容 mllm
+        model: VisionComposeModelProtocol | XtunerBaseModel
         with torch.device("meta"):
             model = ref_model_cfg.build()
 
@@ -205,11 +208,11 @@ class TrainingWorker(SingleAcceleratorWorker):
             assert ref_model_cfg.text_config.float8_cfg is None, "VisionComposeConfigProtocol does not support float8"
             if ref_model_fsdp_cfg is None:
                 ref_model_fsdp_cfg = FSDPConfig(recompute_ratio=0, cpu_offload=False, requires_grad=False)
-            model.language_model.fully_shard(ref_model_fsdp_cfg)
-            model.vision_tower.fully_shard(ref_model_fsdp_cfg)
-            model.multi_modal_projector.fully_shard(ref_model_fsdp_cfg)
+            model.language_model.fully_shard(ref_model_fsdp_cfg)  # type: ignore
+            model.vision_tower.fully_shard(ref_model_fsdp_cfg)  # type: ignore
+            model.multi_modal_projector.fully_shard(ref_model_fsdp_cfg)  # type: ignore
             model = model.fully_shard(ref_model_fsdp_cfg)
-            model.from_hf(hf_path=load_from)  # type: ignore
+            model.from_hf(hf_path=load_from)
             model.eval()  # type: ignore
         else:
             ref_model_cfg = cast(TransformerConfig, ref_model_cfg)
@@ -222,13 +225,13 @@ class TrainingWorker(SingleAcceleratorWorker):
                 float8_handler = None
             if ref_model_fsdp_cfg is None:
                 ref_model_fsdp_cfg = FSDPConfig(recompute_ratio=0, cpu_offload=False, requires_grad=False)
-            model = model.fully_shard(ref_model_fsdp_cfg, float8_handler)
+            model = model.fully_shard(ref_model_fsdp_cfg, float8_handler)  # type: ignore
 
             model.from_hf(hf_path=load_from)
-            model.eval()
+            model.eval()  # type: ignore
             if float8_handler is not None:
                 # As the ref model is not updated, we only compute params' scales once
-                float8_handler.precompute_float8_dynamic_scale_for_fsdp(model)
+                float8_handler.precompute_float8_dynamic_scale_for_fsdp(model)  # type: ignore
         model.to_device("cpu")  # type: ignore
         DEVICE_MODULE.empty_cache()
         return model
@@ -306,7 +309,9 @@ class TrainingWorker(SingleAcceleratorWorker):
             pixel_values = seq_ctx.pixel_values
             if pixel_values is not None:
                 if not isinstance(pixel_values, torch.Tensor):
-                    assert isinstance(pixel_values, list), f"pixel_values should be list of tensor, got {type(pixel_values)}"
+                    assert isinstance(pixel_values, list), (
+                        f"pixel_values should be list of tensor, got {type(pixel_values)}"
+                    )
                     pixel_values = [ray.get(pixel_obf) for pixel_obf in pixel_values]
                     pixel_values = torch.cat(pixel_values, dim=0)
                     seq_ctx.pixel_values = pixel_values

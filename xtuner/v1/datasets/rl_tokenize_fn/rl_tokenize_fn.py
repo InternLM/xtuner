@@ -8,8 +8,9 @@ from xtuner.v1.data_proto.rl_data import RLDatasetItem
 from xtuner.v1.utils import get_logger
 
 from ..data_item import OmniDataItem
-from ..utils import CachableTokenizeFunction
 from ..mllm_tokenize_fn.qwen3_vl_tokenize_fn import Qwen3VLTokenizeFunction
+from ..utils import CachableTokenizeFunction
+
 
 logger = get_logger()
 

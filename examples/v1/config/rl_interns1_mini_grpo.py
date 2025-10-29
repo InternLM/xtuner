@@ -35,17 +35,15 @@ global_batch_size = 1024
 prompt_repeat_k = 5
 rollout_tp_size = 2
 rollout_ep_size = 1
-max_prompt_length = 512
-max_response_length = 1024
+max_prompt_length = 4096  # Note: 不设置大一点，大部分数据都会被过滤掉
+max_response_length = 2048
 pack_max_length = 32768
 train_optimizer_steps = 4
 hf_interval = 15
 enable_initial_evaluate = True
 evaluate_step = 10
 
-# grpo quick test settings for rapid accuracy validation within ~30 minutes:
-# - Initial eval accuracy: ~25%
-# - After training: ~88% eval accuracy
+# grpo quick test:
 # total_epochs = 3
 # global_batch_size = 64
 # prompt_repeat_k = 5
@@ -137,6 +135,7 @@ dataflow_config = DataFlowConfig(
     prompt_repeat_k=prompt_repeat_k,
     global_batch_size=global_batch_size,
     sample_params=training_sample_params,
+    max_concurrent=64,
 )
 
 evaluator_cfg = EvaluatorConfig(

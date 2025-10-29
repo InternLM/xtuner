@@ -34,6 +34,7 @@ class Qwen3VLVisionConfig(BaseModel):
     num_position_embeddings: int = 2304
     deepstack_visual_indexes: list[int] = [8, 16, 24]
     initializer_range: float = 0.02
+    float8_cfg: Optional["Float8Config"] = None
     attn_impl: Literal["flash_attention", "flex_attention", "eager_attention"] = "flash_attention"
 
     def model_post_init(self, _):

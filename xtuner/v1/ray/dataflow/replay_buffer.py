@@ -211,8 +211,8 @@ class Sampler:
             data = next(self.train_dataloader_iter)[0]
 
         multimodal_train_info = data.pop("multimodal_train_info", {})
-        if 'pixel_values' in multimodal_train_info:
-            multimodal_train_info['pixel_values'] = ray.put(multimodal_train_info['pixel_values'])
+        if "pixel_values" in multimodal_train_info:
+            multimodal_train_info["pixel_values"] = ray.put(multimodal_train_info["pixel_values"])
 
         self.storage.add_multimodal_train_info(action_id, multimodal_train_info)
 
@@ -294,8 +294,8 @@ class ReplayBufferStorage:
             return
 
         for item in grouped_dataitem:
-            finish_reason=item.env.rollout.finish_reason
-            if finish_reason=='failed':
+            finish_reason = item.env.rollout.finish_reason
+            if finish_reason == "failed":
                 return
 
         replay_meta = mapping_dataitem_to_replaymeta(grouped_dataitem)

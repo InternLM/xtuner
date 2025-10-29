@@ -173,7 +173,9 @@ def create_task(
     return task
 
 
-def replace_image_context_and_collect_media_data(prompt: str | list[dict[str, Any]], extra_info: dict, replace_image_ctx: bool) -> tuple:
+def replace_image_context_and_collect_media_data(
+    prompt: str | list[dict[str, Any]], extra_info: dict, replace_image_ctx: bool
+) -> tuple:
     """Collect image data from the prompt and extra_info.
 
     Args:

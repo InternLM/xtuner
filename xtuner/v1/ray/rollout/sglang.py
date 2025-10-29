@@ -5,7 +5,7 @@ import ray
 import requests
 from urllib3.exceptions import NewConnectionError
 
-from transformers import AutoTokenizer, Qwen2Tokenizer, Qwen2TokenizerFast
+from transformers import AutoTokenizer
 from xtuner.v1.ray.config import RolloutConfig
 from xtuner.v1.ray.utils import replace_image_context_and_collect_media_data
 
