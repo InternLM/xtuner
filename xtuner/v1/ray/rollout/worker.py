@@ -146,7 +146,8 @@ class RolloutWorker(SingleAcceleratorWorker):
 
         # note(@duanyanhui): launch server as multiprocessing for sglang temporarily
         if self.config.launch_server_method == "multiprocessing":
-            process = multiprocessing.Process(target=self.server_func, args=(server_configs,))
+            mp_ctx = multiprocessing.get_context("spawn")
+            process = mp_ctx.Process(target=self.server_func, args=(server_configs,))
             process.start()
             self.server_process = process
             time.sleep(60)  # Wait for the server to start
