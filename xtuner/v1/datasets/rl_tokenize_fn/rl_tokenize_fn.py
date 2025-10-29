@@ -116,7 +116,7 @@ class RLTokenizeFn(CachableTokenizeFunction[RLDatasetItem]):
 
 
 class RLTokenizeFnConfig(BaseModel):
-    model_config = ConfigDict(title="Base RL dataset config for xtuner", extra="allow")
+    model_config = ConfigDict(title="Base RL dataset config for xtuner", extra="forbid")
     tokenize_fn_cfg: BaseModel | None = None
     max_length: int | None = None
     is_training: bool = True  # only for mllm

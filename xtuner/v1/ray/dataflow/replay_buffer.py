@@ -463,6 +463,8 @@ class ReplayBuffer:
         """
         self.storage = ReplayBufferStorage(config.worker_log_dir)
         self.tokenizer = config.tokenizer
+        if isinstance(self.tokenizer, str):
+            self.tokenizer = AutoTokenizer.from_pretrained(self.tokenizer, trust_remote_code=True)
         self.datasets = build_datasets(config.dataset_cfg, self.tokenizer)
 
         if config.dataloader_cfg is not None:
