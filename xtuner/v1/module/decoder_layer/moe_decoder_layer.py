@@ -26,6 +26,7 @@ from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.ops.act_fn import get_act_fn
 from xtuner.v1.utils import DEBUG_ACC, ForwardState
 from xtuner.v1.utils.compile import maybe_compile
+from xtuner.v1.profiler.prober import ProberList
 
 from ..linear.linear import build_linear
 
@@ -503,12 +504,15 @@ class MoEDecoderLayer(nn.Module):
         # NOTE: In order to allow `torch.compile` to compile the ops before and after attention as much as possible,
         # attention, post-layernorm and gate are implemented in one function
         residual = hidden_states
+        ProberList.before_input_layernorm(self.layer_idx, hidden_states)
         hidden_states = self.input_layernorm(hidden_states)
+        ProberList.after_input_layernorm(self.layer_idx, hidden_states)
         if DEBUG_ACC:
             import torch.distributed as dist; dist.breakpoint()
         # hidden_states =
 
         # Self Attention
+        ProberList.before_self_attn(self.layer_idx, hidden_states)
         if state == ForwardState.TRAINING:
             hidden_states = self.self_attn(
                 hidden_states=hidden_states,
@@ -531,18 +535,22 @@ class MoEDecoderLayer(nn.Module):
                 seq_ctx=seq_ctx,
                 past_key_values=past_key_values,
             )
-
+        ProberList.after_self_attn(self.layer_idx, hidden_states)
         if DEBUG_ACC:
             import torch.distributed as dist; dist.breakpoint()
         hidden_states = residual + hidden_states
 
         # Fully Connected
+        ProberList.before_post_attention_layernorm(self.layer_idx, hidden_states)
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
+        ProberList.after_post_attention_layernorm(self.layer_idx, hidden_states)
         if DEBUG_ACC:
             import torch.distributed as dist; dist.breakpoint()
 
+        ProberList.before_router_gate(self.layer_idx, hidden_states)
         router_results: RouterResults = self.gate(hidden_states)
+        ProberList.after_router_gate(self.layer_idx, router_results["logits"], router_results["topk_weights"], router_results["topk_ids"])
         if DEBUG_ACC:
             import torch.distributed as dist; dist.breakpoint()
         return residual, hidden_states, router_results
