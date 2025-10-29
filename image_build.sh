@@ -9,8 +9,8 @@ export GROUPED_GEMM_URL=https://github.com/InternLM/GroupedGEMM@3ae328844bb13679
 export DEEP_EP_URL=https://github.com/deepseek-ai/DeepEP@9af0e0d0e74f3577af1979c9b9e1ac2cad0104ee # v1.2.1
 
 export TORCH_VERSION=${TORCH_VERSION:-"2.8.0"}
-# export LMDEPLOY_VERSION="0.10.1"
-export LMDEPLOY_URL=https://github.com/InternLM/lmdeploy@a9a24fbd8985374cb01ecb6021d1ce9668253c9c
+export LMDEPLOY_VERSION="0.10.2"
+# export LMDEPLOY_URL=https://github.com/InternLM/lmdeploy@a9a24fbd8985374cb01ecb6021d1ce9668253c9c
 export PPA_SOURCE="https://mirrors.aliyun.com"
 export SGLANG_VERSION="0.5.3"
 
