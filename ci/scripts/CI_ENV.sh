@@ -1,6 +1,6 @@
 #!/bin/bash
-export QWEN3_VL_MOE_PATH=${CI_BASE_LAGEL_MODEL}/hf_hub/models--Qwen--Qwen3-VL-30B-A3B-Instruct/snapshots/4b184fbdab8886057d8d80c09f35bcfc65fe640e
-export QWEN3_VL_DENSE_PATH=${CI_BASE_LAGEL_MODEL}/hf_hub/models--Qwen--Qwen3-VL-8B-Instruct/snapshots/cadac78306af287f801b75a5565ede58f323f472
+export QWEN3_VL_MOE_PATH=${CI_SHARE_MODEL}/Qwen3-VL-30B-A3B-Instruct_MOE
+export QWEN3_VL_DENSE_PATH=${CI_SHARE_MODEL}/Qwen3-VL-8B-Instruct_DENSE
 export INTERN_VL_1B_PATH=${CI_SHARE_MODEL}/InternVL3_5-1B-HF
 export VIDEO_ROOT=${CI_SHARE_DATA}/images
 export QWEN3_4B_PATH=${CI_SHARE_MODEL}/Qwen3-4B-Instruct-2507
@@ -25,7 +25,8 @@ export TRITON_CACHE_DIR=/tmp/.triton
 export PYTEST_ADDOPTS='-o cache_dir=/tmp/.pytest_cache'
 
 porxy_off
-pip install -e . -i http://mirrors.h.pjlab.org.cn/pypi/simple/ --trusted-host mirrors.h.pjlab.org.cn
-pip install numpy==1.26.4 -i http://mirrors.h.pjlab.org.cn/pypi/simple/ --trusted-host mirrors.h.pjlab.org.cn --trusted-host pypi.i.h.pjlab.org.cn
+echo "debuging..."
+#pip install -e . -i http://mirrors.h.pjlab.org.cn/pypi/simple/ --trusted-host mirrors.h.pjlab.org.cn
+#pip install numpy==1.26.4 -i http://mirrors.h.pjlab.org.cn/pypi/simple/ --trusted-host mirrors.h.pjlab.org.cn --trusted-host pypi.i.h.pjlab.org.cn
 
 export PYTHONPATH=${LM_DEPLOY}:$PYTHONPATH
