@@ -82,8 +82,7 @@ class SGLangWorker(RolloutWorker):
             json=payload,
         )
         r = await self.client.send(req, stream=stream)
-        r.raise_for_status()
-        return r
+        return payload, r
 
     def _make_request(self, endpoint: str, payload=None):
         # TODO: 支持 tp

@@ -314,13 +314,14 @@ class RolloutWorker(SingleAcceleratorWorker):
             else extra_params.get("stream", False)
         )
 
+        log_payload = {}
         try:
             if format == "openai":
                 openai_prompts, openai_tools = prompts, tools
             else:
                 openai_prompts, openai_tools = self._adapt_input_to_openai_spec(prompts, tools, tool_choice)
             if "return_token_ids" in extra_params and extra_params["return_token_ids"]:
-                response = await self._create_request(
+                payload, response = await self._create_request(
                     f"{self.server_url}/{self.endpoints['generate']}",
                     openai_prompts,
                     input_ids,
@@ -331,7 +332,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                 )
             else:
                 assert prompts is not None, "prompts should not be None when you call v1/chat/completions API"
-                response = await self._create_request(
+                payload, response = await self._create_request(
                     f"{self.server_url}/{self.endpoints['v1/chat/completions']}",
                     openai_prompts,
                     None,
@@ -340,8 +341,9 @@ class RolloutWorker(SingleAcceleratorWorker):
                     sample_params=sample_params,
                     extra_params=extra_params,
                 )
+            log_payload = payload
             self.logger.debug(f" +++ send request {uid} to worker: {self.rank}")
-
+            response.raise_for_status()
             rollout_response = (
                 await self._handle_stream_response(uid, sample_params, extra_params, response)
                 if extra_params["stream"]
@@ -350,9 +352,12 @@ class RolloutWorker(SingleAcceleratorWorker):
             return rollout_response
 
         except Exception as e:
+            if "input_ids" in log_payload and log_payload["input_ids"] is not None:
+                log_payload["input_ids"] = str(log_payload["input_ids"])
             error_details = {
                 "uid": uid,
                 "url": self.server_url,
+                "request_payload": log_payload,
                 "error_type": type(e).__name__,
                 "error_message": str(e),
                 "traceback": traceback.format_exc().splitlines(),
