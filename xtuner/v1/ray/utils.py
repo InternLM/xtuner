@@ -173,7 +173,7 @@ def create_task(
     return task
 
 
-def replace_image_context_and_collect_media_data(prompt: str | list[dict[str, Any]], extra_info: dict) -> tuple:
+def replace_image_context_and_collect_media_data(prompt: str | list[dict[str, Any]], extra_info: dict, replace_image_ctx: bool) -> tuple:
     """Collect image data from the prompt and extra_info.
 
     Args:
@@ -200,6 +200,7 @@ def replace_image_context_and_collect_media_data(prompt: str | list[dict[str, An
                         video_paths.append(os.path.join(media_root, c["video_url"]["url"]))
                     elif c["type"] == "text":
                         _c = c["text"]
-                        c["text"] = _c.replace("<IMG_CONTEXT>", "")
+                        if replace_image_ctx:
+                            c["text"] = _c.replace("<IMG_CONTEXT>", "")
 
     return image_paths, video_paths

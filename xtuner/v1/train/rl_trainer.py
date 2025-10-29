@@ -98,8 +98,7 @@ def get_train_seq_ctx(
     seq_ctx = SequenceContext.from_input_ids((input_ids,), device="cpu")
     if multimodal_train_info and len(multimodal_train_info) > 0:
         position_ids = multimodal_train_info.get("position_ids")  # (1,n) or (3,1,n)
-        assert position_ids is not None
-        if len(position_ids.shape) == 3:
+        if position_ids is not None and len(position_ids.shape) == 3:
             # qwen3vl 需要特殊处理，其余的不需要额外处理
             max_value = position_ids.max(dim=-1).values  # (3,1)
             response_position_ids = max_value.unsqueeze(-1).expand(-1, -1, len_response_ids) + torch.arange(

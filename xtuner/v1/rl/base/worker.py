@@ -23,6 +23,7 @@ from xtuner.v1.engine.vision_compose_train_engine import (
 )
 from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.model.base import ModelItem, TransformerConfig
+from xtuner.v1.model.compose.qwen3_vl import Qwen3VLForConditionalGeneration
 from xtuner.v1.ray.accelerator import SingleAcceleratorWorker
 from xtuner.v1.ray.config import RolloutConfig
 from xtuner.v1.rl.utils import gather_logprobs
@@ -535,10 +536,20 @@ class TrainingWorker(SingleAcceleratorWorker):
             return fsdp_unshard_tensor_list, name_list
 
         saved_list = []
+        is_qwen3vl = False
         if isinstance(model.config, VisionComposeConfigProtocol):
             language_model = model.language_model
+            if isinstance(model, Qwen3VLForConditionalGeneration):
+                is_qwen3vl = True
         else:
             language_model = model
+
+        if is_qwen3vl:
+            vision_hf_prefix = "model.visual."
+            projector_hf_prefix = "model.visual."
+        else:
+            vision_hf_prefix = "model.vision_tower."
+            projector_hf_prefix = "model.multi_modal_projector."
 
         for i, layer in tqdm.tqdm(language_model.layers.items(), desc="[gather weight]"):
             tensor_list = []
@@ -570,8 +581,6 @@ class TrainingWorker(SingleAcceleratorWorker):
                     state_dict.append((name, tensor))
                 self.request_update_params(state_dict)
 
-        tensor_list = []
-        name_list = []
         for name, param in model.state_dict().items():
             if name in saved_list:
                 continue
@@ -581,9 +590,9 @@ class TrainingWorker(SingleAcceleratorWorker):
 
             if isinstance(model.config, VisionComposeConfigProtocol):
                 if "vision_tower." in name:
-                    name = name.replace("vision_tower.", "model.visual.")
+                    name = name.replace("vision_tower.", vision_hf_prefix)
                 elif "multi_modal_projector." in name:
-                    name = name.replace("multi_modal_projector.", "model.visual.")
+                    name = name.replace("multi_modal_projector.", projector_hf_prefix)
                 elif name == "language_model.norm.weight":
                     name = "model.language_model.norm.weight"
                 elif name == "language_model.embed_tokens.weight":

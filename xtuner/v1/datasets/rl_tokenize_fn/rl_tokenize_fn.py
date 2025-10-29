@@ -9,7 +9,7 @@ from xtuner.v1.utils import get_logger
 
 from ..data_item import OmniDataItem
 from ..utils import CachableTokenizeFunction
-
+from ..mllm_tokenize_fn.qwen3_vl_tokenize_fn import Qwen3VLTokenizeFunction
 
 logger = get_logger()
 
@@ -55,10 +55,6 @@ class RLTokenizeFn(CachableTokenizeFunction[RLDatasetItem]):
 
         messages = item["prompt"]
         raw_prompt = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
-        if "media_root" in kwargs:
-            raw_prompt = raw_prompt.replace("<IMG_CONTEXT>", "")
-        extra_info["raw_prompt"] = raw_prompt
-
         if self.tokenizer_fn is None:
             # pure text
             data = self.tokenizer(raw_prompt, return_tensors="pt", add_special_tokens=False)
@@ -74,7 +70,13 @@ class RLTokenizeFn(CachableTokenizeFunction[RLDatasetItem]):
             data = self.tokenizer_fn({"messages": messages}, **kwargs)
             data = cast(OmniDataItem, data)
             num_tokens = data["num_tokens"]
+
+            if isinstance(self.tokenizer_fn, Qwen3VLTokenizeFunction):
+                # Qwen3-vl 中 <IMG_CONTEXT> 会自动在 tokenizer.apply_chat_template 中处理，所以需要移除
+                raw_prompt = raw_prompt.replace("<IMG_CONTEXT>", "")
+
         multimodal_train_info = {}
+        extra_info["raw_prompt"] = raw_prompt
 
         if self.state == "cache":
             if self.max_length is not None and num_tokens > self.max_length:

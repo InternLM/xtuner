@@ -5,7 +5,7 @@ import ray
 import requests
 from urllib3.exceptions import NewConnectionError
 
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, Qwen2Tokenizer, Qwen2TokenizerFast
 from xtuner.v1.ray.config import RolloutConfig
 from xtuner.v1.ray.utils import replace_image_context_and_collect_media_data
 
@@ -63,7 +63,11 @@ class SGLangWorker(RolloutWorker):
                     payload["input_ids"] = input_ids
                 else:
                     assert prompt is not None, "prompt is required when input_ids is None."
-                    image_data, _ = replace_image_context_and_collect_media_data(prompt, extra_info)
+                    if self.model_name == "qwen3-vl":
+                        replace_image_ctx = True
+                    else:
+                        replace_image_ctx = False
+                    image_data, _ = replace_image_context_and_collect_media_data(prompt, extra_info, replace_image_ctx)
                     if image_data:
                         assert len(image_data) == 1, "SGLangWorker only support single image input."
                         payload["image_data"] = image_data[0]
@@ -154,7 +158,7 @@ class SGLangWorker(RolloutWorker):
         os.environ.pop("CUDA_VISIBLE_DEVICES", None)
         from sglang.srt.server_args import ServerArgs
 
-        sglang_server_args = ServerArgs(model_path=self.config.model_path)
+        sglang_server_args = ServerArgs(model_path=self.config.model_path, trust_remote_code=True)
         sglang_server_args.host = self.host
         sglang_server_args.port = self.server_port
         sglang_server_args.nccl_port = self.nccl_port
