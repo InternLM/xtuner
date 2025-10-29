@@ -65,6 +65,7 @@ class TestEvaluator(unittest.TestCase):
             "test_env",
             self.pg,
             self.rollout_cfg,
+            self.pg,
             self.judger_cfg
         )
         self.sample_params = SampleParams(

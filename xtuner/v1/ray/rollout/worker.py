@@ -3,6 +3,7 @@ import json
 import multiprocessing
 import os
 import time
+import traceback
 import uuid
 from abc import abstractmethod
 from typing import Any, Callable, Dict, List, Optional, Union
@@ -348,14 +349,22 @@ class RolloutWorker(SingleAcceleratorWorker):
             )
             return rollout_response
 
-        except httpx.RequestError as e:
-            self.logger.error(f"Request {uid} failed with a network error: {e}")
-            return failed_rollout_response
         except Exception as e:
-            self.logger.error(f"An unexpected error occurred in rollout_task for {uid}: {e}")
+            error_details = {
+                "uid": uid,
+                "url": self.server_url,
+                "error_type": type(e).__name__,
+                "error_message": str(e),
+                "traceback": traceback.format_exc().splitlines(),
+            }
+            self.logger.error(f"An unexpected error occurred in rollout_task: {json.dumps(error_details, indent=2)}")
+            if response is not None:
+                try:
+                    self.logger.error(f"Response content on error: {await response.aread()}")
+                except Exception as resp_e:
+                    self.logger.error(f"Failed to read response content on error: {resp_e}")
             return failed_rollout_response
         finally:
-            # 确保在任何情况下都尝试关闭响应
             if response:
                 await response.aclose()
 

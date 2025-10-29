@@ -174,6 +174,10 @@ class Evaluator:
         try:
             # note: In the evaluator, we convert the input sample to a list to adapt to the input format of single_turn_env
             group_sample = await self.env_controller.run.remote([sample], sample_params=self.sample_params)  # type: ignore[attr-defined]
+            if group_sample is None or len(group_sample) == 0:
+                self.logger.error("Worker task returned empty result. Returning meta for retry.")
+                sample.extra_info.retry_times += 1
+                return sample
             self.return_list.append(group_sample[0])
         except Exception as e:
             self.logger.error(f"Worker task failed with exception: {e}. Returning meta for retry.")

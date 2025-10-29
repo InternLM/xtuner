@@ -41,3 +41,25 @@ def get_env_not_available_func(env_name_list: List[str]) -> Callable:
         raise RuntimeError(f"{' or '.join(env_name_list)} in environment is not available.")
 
     return env_not_available_func
+
+
+def get_rollout_engine_version() -> dict:
+    import os
+
+    if os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "1":
+        import lmdeploy
+
+        version = lmdeploy.__version__
+        return {"lmdeploy_version": version}
+    elif os.environ.get("XTUNER_USE_SGLANG", "0") == "1":
+        import sglang
+
+        version = sglang.__version__
+        return {"sglang_version": version}
+    elif os.environ.get("XTUNER_USE_VLLM", "0") == "1":
+        import vllm
+
+        version = vllm.__version__
+        return {"vllm_version": version}
+    else:
+        return {}

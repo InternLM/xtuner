@@ -153,7 +153,7 @@ class SGLangWorker(RolloutWorker):
             "grammar_backend", None
         )  # for intern-s1 series models, have to set the grammar_backend to "none"
 
-        sglang_server_args = ServerArgs(model_path=self.config.model_path)
+        sglang_server_args = ServerArgs(model_path=self.config.model_path, trust_remote_code=True)
         sglang_server_args.host = self.host
         sglang_server_args.port = self.server_port
         sglang_server_args.nccl_port = self.nccl_port
@@ -167,8 +167,8 @@ class SGLangWorker(RolloutWorker):
         # note: 非共卡模式下无需设置,共卡模式下需要offload必须设置，否则显存释放不了
         sglang_server_args.enable_memory_saver = True
         sglang_server_args.max_running_requests = int(os.environ.get("XTUNER_MAX_CONCURRENCY", 2000))
-        sglang_server_args.trust_remote_code = True
-        sglang_server_args.grammar_backend = grammar_backend
+        if grammar_backend is not None:
+            sglang_server_args.grammar_backend = grammar_backend
 
         if self.config.context_length is not None:
             sglang_server_args.context_length = self.config.context_length
