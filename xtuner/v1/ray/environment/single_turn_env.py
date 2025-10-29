@@ -4,7 +4,11 @@ from typing import List
 
 import ray
 
-from xtuner.v1.data_proto.rl_data import RLDataFlowItem, RLJudgerResponseItem, update_dataflow_item
+from xtuner.v1.data_proto.rl_data import (
+    RLDataFlowItem,
+    RLJudgerResponseItem,
+    update_dataflow_item,
+)
 from xtuner.v1.ray.environment.base_env import BaseEnvironment
 from xtuner.v1.utils import get_logger
 

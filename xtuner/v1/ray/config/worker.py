@@ -167,7 +167,7 @@ class RolloutConfig(BaseModel):
             group=infer_group,
             help="Timeout duration (in seconds) for rollout requests.",
         ),
-    ] = 3600.0
+    ] = 1200.0
     context_length: Annotated[
         Optional[int],
         Parameter(

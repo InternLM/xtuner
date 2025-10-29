@@ -1,18 +1,31 @@
+import json
 import multiprocessing
 import time
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 import requests
 import uvicorn
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
 
-from xtuner.v1.data_proto.rl_data import RLJudgerResponseItem
-from xtuner.v1.ray.judger.gsm8k import compute_reward
 from xtuner.v1.ray.judger.native import NativeJudger
 
 
 app = FastAPI()
+
+
+def get_eos_token_from_model_path(model_path: str, tokenizer=None) -> str | List[str]:
+    import os
+
+    generation_config_path = os.path.join(model_path, "generation_config.json")
+    with open(generation_config_path) as f:
+        generation_config = json.load(f)
+    eos_token_id = generation_config.get("eos_token_id")
+    if tokenizer is not None:
+        eos_token_str = tokenizer.convert_ids_to_tokens(eos_token_id)
+        return eos_token_str
+    else:
+        return eos_token_id
 
 
 class JudgeRequest(BaseModel):
@@ -27,6 +40,8 @@ class JudgeResponse(BaseModel):
 
 @app.post("/judge", response_model=JudgeResponse)
 async def judge(request: JudgeRequest):
+    from xtuner.v1.ray.judger.gsm8k import compute_reward
+
     """Endpoint to compute reward for a given response and label."""
     # The compute_reward function returns a float, we wrap it in a dict
     # to match what the client-side post-processing function might expect.
@@ -71,6 +86,8 @@ class JudgerServer:
 
 
 def custom_postprocessor_for_gsm8k(result):
+    from xtuner.v1.data_proto.rl_data import RLJudgerResponseItem
+
     if not isinstance(result, list):
         result = [result]
     judger_response_item = [RLJudgerResponseItem(uid=result[i]["uid"], reward=result[i]) for i in range(len(result))]

@@ -67,7 +67,7 @@ class vLLMWorker(RolloutWorker):
             json=payload,
         )
         r = await self.client.send(req, stream=True)
-        return r
+        return payload, r
 
     def get_logprobs(self, input_ids, sampling_params):
         pass

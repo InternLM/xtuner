@@ -105,6 +105,30 @@ class TestRollout(unittest.TestCase):
         ray.shutdown()
 
     @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
+    def test_lmdeploy_dataflow_with_failed_response(self):
+        failed_dataflow_cfg = DataFlowConfig(
+            env="test",
+            max_concurrent=1,
+            prompt_repeat_k=2,
+            global_batch_size=1,
+            enable_partial_rollout=0,
+            max_retry_times=1,
+        )
+        self.test_env = SingleTurnEnvironment.remote(
+            "test_env",
+            self.pg,
+            rollout_cfg=self.rollout_cfg,
+        )
+        self.test_flow = DataFlow.remote("test_env",
+                                        failed_dataflow_cfg,
+                                        self.replay_buffer_cfg,
+                                        self.test_env
+                                        )
+        sample_params = SampleParams(temperature=2.5)  # invalid temperature to trigger error
+        responses = ray.get(self.test_flow.run.remote(num=1, sample_params=sample_params), timeout=300)
+        self.assertEqual(len(responses),0)
+  
+    @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
     def test_lmdeploy_generate(self):
         sample_params = SampleParams(temperature=0.0)
         rollout_controller = RolloutController.remote(self.rollout_cfg, self.pg)  # type: ignore[attr-defined]

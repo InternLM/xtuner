@@ -86,8 +86,11 @@ eval_dataset_cfg = [{"dataset": eval_dataset, "tokenize_fn": tokenizer_config}] 
 dataloader_config = DataloaderConfig(pack_max_length=pack_max_length, collator="fake_collator", pack_level="none")
 
 # 3. judger
+from xtuner.v1.utils.rl_test_utils import get_eos_token_from_model_path
+eos_token_str = get_eos_token_from_model_path(model_path, tokenizer)
 dapomath_judger_config = DapoMathJudgerConfig(
-    judger_name = "dapo_math", 
+    judger_name="dapo_math", 
+    eos_token=eos_token_str,
     enable_overlong_buffer = True, 
     max_response_len =max_response_length, 
     overlong_buffer_len=4096, 

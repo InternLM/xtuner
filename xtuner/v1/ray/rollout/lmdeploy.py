@@ -135,8 +135,7 @@ class LMDeployWorker(RolloutWorker):
             json=payload,
         )
         r = await self.client.send(req, stream=stream)
-        r.raise_for_status()
-        return r
+        return payload, r
 
     def get_logprobs(self, input_ids, sampling_params):
         """This method will be implemented for the LMDeploy worker in the

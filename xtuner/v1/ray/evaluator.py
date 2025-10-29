@@ -9,7 +9,7 @@ from tqdm.auto import tqdm
 from typing_extensions import Annotated
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
-from xtuner.v1.data_proto.rl_data import RLDataFlowItem, RLDatasetItem, SampleParams
+from xtuner.v1.data_proto.rl_data import RLDataFlowItem, RLDatasetItem, SampleParams, check_dataflow_item
 from xtuner.v1.datasets import build_datasets
 from xtuner.v1.datasets.config import DatasetConfigList
 from xtuner.v1.ray.environment import BaseEnvironment
@@ -174,6 +174,9 @@ class Evaluator:
         try:
             # note: In the evaluator, we convert the input sample to a list to adapt to the input format of single_turn_env
             group_sample = await self.env_controller.run.remote([sample], sample_params=self.sample_params)  # type: ignore[attr-defined]
+            if not check_dataflow_item(group_sample):
+                group_sample[0].extra_info.retry_times += 1
+                return group_sample[0]
             self.return_list.append(group_sample[0])
         except Exception as e:
             self.logger.error(f"Worker task failed with exception: {e}. Returning meta for retry.")
@@ -194,7 +197,7 @@ class Evaluator:
         with tqdm(total=self.eval_batch_size, desc="Rollout for eval samples") as pbar:
             update_step = max(1, int(self.eval_batch_size * 0.1))
             next_update_threshold = update_step
-            while len(self.return_list) < self.eval_batch_size:
+            while len(self.return_list) < self.eval_batch_size and self.failed_samples_count < self.eval_batch_size:
                 if len(self.return_list) >= next_update_threshold:
                     pbar.n = len(self.return_list)
                     pbar.refresh()
@@ -226,7 +229,7 @@ class Evaluator:
                             retry_task = create_task(self.eval_worker_task(result))
                             pending_tasks.add(retry_task)
                         else:
-                            self.logger.error(f"Max retry reached for {result.uid.action_id}. Not retrying.")
+                            self.logger.error(f"Max retry reached for {result.data}. Not retrying.")
                             self.failed_samples_count += 1
 
                 waiting_tasks = pending_tasks
@@ -234,9 +237,14 @@ class Evaluator:
             pbar.n = len(self.return_list)
             pbar.refresh()
 
-        self.logger.info(
-            f"Target batch size reached, and {self.failed_samples_count} samples failed and were skipped. Pausing rollout controller."
-        )
+        if self.failed_samples_count == self.eval_batch_size:
+            self.logger.error(
+                f"{self.failed_samples_count} samples failed and were skipped. Pausing rollout controller."
+            )
+        else:
+            self.logger.error(
+                f"Target batch size reached, and {self.failed_samples_count} samples failed and were skipped. Pausing rollout controller."
+            )
         ray.get(self.env_controller.pause.remote())
 
         if waiting_tasks:
@@ -262,6 +270,9 @@ class Evaluator:
         self.dataloader = iter(self.dataset)
         ray.get(self.env_controller.restart.remote())  # type: ignore[attr-defined]
         await self.concurrent_eval_task_runner()
+        if len(self.return_list) == 0:
+            self.logger.warning("No valid samples were generated during evaluation.")
+            return {} if not return_samples else ({}, [])
         scores = self.compute_metric(self.return_list)
         # To match the training format : each group's data is a list
         self.eval_samples = [[sample] for sample in self.return_list]
