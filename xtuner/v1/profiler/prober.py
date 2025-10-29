@@ -115,6 +115,30 @@ class BaseProber(ABC):
     @classmethod
     def after_router_gate(cls, layer_idx: str|int, logits: torch.Tensor, topk_weights: torch.Tensor, topk_ids: torch.Tensor):
         pass
+
+    @classmethod
+    def before_dispatch(cls, layer_idx: str|int, hidden_states: torch.Tensor, topk_ids: torch.Tensor, topk_weights: torch.Tensor):
+        pass
+    
+    @classmethod
+    def after_dispatch(cls, layer_idx: str|int, hidden_states: torch.Tensor, tokens_per_expert: torch.Tensor, row_ids_map: torch.Tensor, topk_weights: torch.Tensor):
+        pass
+
+    @classmethod
+    def before_experts(cls, layer_idx: str|int, hidden_states: torch.Tensor, tokens_per_expert: torch.Tensor):
+        pass
+    
+    @classmethod
+    def after_experts(cls, layer_idx: str|int, experts_out: torch.Tensor):
+        pass
+    
+    @classmethod
+    def before_combine(cls, layer_idx: str|int, experts_out: torch.Tensor, row_ids_map: torch.Tensor, topk_weights: torch.Tensor):
+        pass
+    
+    @classmethod
+    def after_combine(cls, layer_idx: str|int, combined_hidden_states: torch.Tensor):
+        pass
     
     @classmethod
     def before_lm_head(cls, hidden_states: torch.Tensor, shifted_labels: torch.Tensor):
@@ -235,6 +259,36 @@ class ProberList:
     def after_router_gate(cls, layer_idx: str|int, logits: torch.Tensor, topk_weights: torch.Tensor, topk_ids: torch.Tensor):
         for prober_cls in cls.prober_list:
             prober_cls.after_router_gate(layer_idx, logits, topk_weights, topk_ids)
+    
+    @classmethod
+    def before_dispatch(cls, layer_idx: str|int, hidden_states: torch.Tensor, topk_ids: torch.Tensor, topk_weights: torch.Tensor):
+        for prober_cls in cls.prober_list:
+            prober_cls.before_dispatch(layer_idx, hidden_states, topk_ids, topk_weights)
+    
+    @classmethod
+    def after_dispatch(cls, layer_idx: str|int, hidden_states: torch.Tensor, tokens_per_expert: torch.Tensor, row_ids_map: torch.Tensor, topk_weights: torch.Tensor):
+        for prober_cls in cls.prober_list:
+            prober_cls.after_dispatch(layer_idx, hidden_states, tokens_per_expert, row_ids_map, topk_weights)
+    
+    @classmethod
+    def before_experts(cls, layer_idx: str|int, hidden_states: torch.Tensor, tokens_per_expert: torch.Tensor):
+        for prober_cls in cls.prober_list:
+            prober_cls.before_experts(layer_idx, hidden_states, tokens_per_expert)
+    
+    @classmethod
+    def after_experts(cls, layer_idx: str|int, experts_out: torch.Tensor):
+        for prober_cls in cls.prober_list:
+            prober_cls.after_experts(layer_idx, experts_out)
+    
+    @classmethod
+    def before_combine(cls, layer_idx: str|int, experts_out: torch.Tensor, row_ids_map: torch.Tensor, topk_weights: torch.Tensor):
+        for prober_cls in cls.prober_list:
+            prober_cls.before_combine(layer_idx, experts_out, row_ids_map, topk_weights)
+    
+    @classmethod
+    def after_combine(cls, layer_idx: str|int, combined_hidden_states: torch.Tensor):
+        for prober_cls in cls.prober_list:
+            prober_cls.after_combine(layer_idx, combined_hidden_states)
 
     @classmethod
     def before_lm_head(cls, hidden_states: torch.Tensor, shifted_labels: torch.Tensor):
@@ -348,6 +402,38 @@ class AccProber(BaseProber):
         cls.record_tensor(logits, f"[layers.{layer_idx}.router_gate][after]logits")
         cls.record_tensor(topk_weights, f"[layers.{layer_idx}.router_gate][after]topk_weights")
         cls.record_tensor(topk_ids, f"[layers.{layer_idx}.router_gate][after]topk_ids")
+    
+    @classmethod
+    def before_dispatch(cls, layer_idx: str|int, hidden_states: torch.Tensor, topk_ids: torch.Tensor, topk_weights: torch.Tensor):
+        cls.record_tensor(hidden_states, f"[layers.{layer_idx}.dispatch][before]hidden_states")
+        cls.record_tensor(topk_ids, f"[layers.{layer_idx}.dispatch][before]topk_ids")
+        cls.record_tensor(topk_weights, f"[layers.{layer_idx}.dispatch][before]topk_weights")
+    
+    @classmethod
+    def after_dispatch(cls, layer_idx: str|int, hidden_states: torch.Tensor, tokens_per_expert: torch.Tensor, row_ids_map: torch.Tensor, topk_weights: torch.Tensor):
+        cls.record_tensor(hidden_states, f"[layers.{layer_idx}.dispatch][after]hidden_states")
+        cls.record_tensor(tokens_per_expert, f"[layers.{layer_idx}.dispatch][after]tokens_per_expert")
+        cls.record_tensor(row_ids_map, f"[layers.{layer_idx}.dispatch][after]row_ids_map")
+        cls.record_tensor(topk_weights, f"[layers.{layer_idx}.dispatch][after]topk_weights")
+    
+    @classmethod
+    def before_experts(cls, layer_idx: str|int, hidden_states: torch.Tensor, tokens_per_expert: torch.Tensor):
+        cls.record_tensor(hidden_states, f"[layers.{layer_idx}.experts][before]hidden_states")
+        cls.record_tensor(tokens_per_expert, f"[layers.{layer_idx}.experts][before]tokens_per_expert")
+    
+    @classmethod
+    def after_experts(cls, layer_idx: str|int, experts_out: torch.Tensor):
+        cls.record_tensor(experts_out, f"[layers.{layer_idx}.experts][after]experts_out")
+    
+    @classmethod
+    def before_combine(cls, layer_idx: str|int, experts_out: torch.Tensor, row_ids_map: torch.Tensor, topk_weights: torch.Tensor):
+        cls.record_tensor(experts_out, f"[layers.{layer_idx}.combine][before]experts_out")
+        cls.record_tensor(row_ids_map, f"[layers.{layer_idx}.combine][before]row_ids_map")
+        cls.record_tensor(topk_weights, f"[layers.{layer_idx}.combine][before]topk_weights")
+    
+    @classmethod
+    def after_combine(cls, layer_idx: str|int, combined_hidden_states: torch.Tensor):
+        cls.record_tensor(combined_hidden_states, f"[layers.{layer_idx}.combine][after]combined_hidden_states")
     
     @classmethod
     def before_lm_head(cls, hidden_states: torch.Tensor, shifted_labels: torch.Tensor):

@@ -318,6 +318,7 @@ class MoEDecoderLayer(nn.Module):
         origin_shape = hidden_states.shape
 
         # reshape hidden_states to (batch_size * seq_len, hidden_size)
+        ProberList.before_dispatch(self.layer_idx, hidden_states, router_results["topk_ids"], router_results["topk_weights"])
         pre_dispatched = self.dispatcher.dispatch_preprocess(
             hidden_states=hidden_states.view(-1, hidden_states.shape[-1]),
             topk_ids=router_results["topk_ids"],
@@ -331,13 +332,18 @@ class MoEDecoderLayer(nn.Module):
             pre_dispatched=pre_dispatched,
             dispatched=dispatched,
         )
+        ProberList.after_dispatch(self.layer_idx, post_dispatched["hidden_states"], post_dispatched["tokens_per_expert"], 
+                                  post_dispatched["row_ids_map"], dispatched["topk_weights"])
         if DEBUG_ACC:
             import torch.distributed as dist; dist.breakpoint()
+        ProberList.before_experts(self.layer_idx, post_dispatched["hidden_states"], post_dispatched["tokens_per_expert"])
         experts_out = self.experts(
             post_dispatched["hidden_states"],
             post_dispatched["tokens_per_expert"],
             decoding=False,
         )
+        ProberList.after_experts(self.layer_idx, experts_out)
+        ProberList.before_combine(self.layer_idx, experts_out, post_dispatched["row_ids_map"], dispatched["topk_weights"])
         pre_combined = self.dispatcher.combine_preprocess(
             hidden_states=experts_out,
             pre_dispatched=pre_dispatched,
@@ -362,6 +368,7 @@ class MoEDecoderLayer(nn.Module):
         )
         combined_hidden_states = post_combined["hidden_states"]
         combined_hidden_states = combined_hidden_states.view(*origin_shape)
+        ProberList.after_combine(self.layer_idx, combined_hidden_states)
 
         hidden_states = self._post_moe_forward(
             hidden_states=hidden_states,
