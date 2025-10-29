@@ -434,7 +434,7 @@ class RLTrainer:
 
         data_batches = []
         for group in data_groups:
-            if check_dataflow_item(group) is False:
+            if not check_dataflow_item(group):
                 self.logger.error(f"Skip one data group {group} due to rollout failed or empty response.")
                 continue
             text_prompt = self.tokenizer.apply_chat_template(
@@ -521,7 +521,7 @@ class RLTrainer:
         # mismatch_token_ids_count = 0
         # response_len_list = []
         for group in data_groups:
-            if check_dataflow_item(group) is False:
+            if not check_dataflow_item(group):
                 self.logger.error(f"Skip one data group {group} due to rollout failed or empty response.")
                 continue
             for data in group:

@@ -273,9 +273,8 @@ class ReplayBufferStorage:
             grouped_dataitem (List[RLDataFlowItem]): A list of data items
                 belonging to the same group.
         """
-        if len(grouped_dataitem) == 0:
+        if not check_dataflow_item(grouped_dataitem):
             return
-        assert check_dataflow_item(grouped_dataitem)
 
         replay_meta = mapping_dataitem_to_replaymeta(grouped_dataitem)
         root_id = replay_meta.root_id
