@@ -85,6 +85,38 @@ class BaseProber(ABC):
         pass
     
     @classmethod
+    def before_input_layernorm(cls, layer_idx: str|int, hidden_states: torch.Tensor):
+        pass
+    
+    @classmethod
+    def after_input_layernorm(cls, layer_idx: str|int, hidden_states: torch.Tensor):
+        pass
+    
+    @classmethod
+    def before_self_attn(cls, layer_idx: str|int, hidden_states: torch.Tensor):
+        pass
+    
+    @classmethod
+    def after_self_attn(cls, layer_idx: str|int, hidden_states: torch.Tensor):
+        pass
+
+    @classmethod
+    def before_post_attention_layernorm(cls, layer_idx: str|int, hidden_states: torch.Tensor):
+        pass
+    
+    @classmethod
+    def after_post_attention_layernorm(cls, layer_idx: str|int, hidden_states: torch.Tensor):
+        pass
+    
+    @classmethod
+    def before_router_gate(cls, layer_idx: str|int, hidden_states: torch.Tensor):
+        pass
+    
+    @classmethod
+    def after_router_gate(cls, layer_idx: str|int, logits: torch.Tensor, topk_weights: torch.Tensor, topk_ids: torch.Tensor):
+        pass
+    
+    @classmethod
     def before_lm_head(cls, hidden_states: torch.Tensor, shifted_labels: torch.Tensor):
         pass
     
@@ -165,6 +197,46 @@ class ProberList:
             prober_cls.after_layer(layer_idx, hidden_states)
 
     @classmethod
+    def before_input_layernorm(cls, layer_idx: str|int, hidden_states: torch.Tensor):
+        for prober_cls in cls.prober_list:
+            prober_cls.before_input_layernorm(layer_idx, hidden_states)
+    
+    @classmethod
+    def after_input_layernorm(cls, layer_idx: str|int, hidden_states: torch.Tensor):
+        for prober_cls in cls.prober_list:
+            prober_cls.after_input_layernorm(layer_idx, hidden_states)
+    
+    @classmethod
+    def before_self_attn(cls, layer_idx: str|int, hidden_states: torch.Tensor):
+        for prober_cls in cls.prober_list:
+            prober_cls.before_self_attn(layer_idx, hidden_states)
+    
+    @classmethod
+    def after_self_attn(cls, layer_idx: str|int, hidden_states: torch.Tensor):
+        for prober_cls in cls.prober_list:
+            prober_cls.after_self_attn(layer_idx, hidden_states)
+    
+    @classmethod
+    def before_post_attention_layernorm(cls, layer_idx: str|int, hidden_states: torch.Tensor):
+        for prober_cls in cls.prober_list:
+            prober_cls.before_post_attention_layernorm(layer_idx, hidden_states)
+    
+    @classmethod
+    def after_post_attention_layernorm(cls, layer_idx: str|int, hidden_states: torch.Tensor):
+        for prober_cls in cls.prober_list:
+            prober_cls.after_post_attention_layernorm(layer_idx, hidden_states)
+    
+    @classmethod
+    def before_router_gate(cls, layer_idx: str|int, hidden_states: torch.Tensor):
+        for prober_cls in cls.prober_list:
+            prober_cls.before_router_gate(layer_idx, hidden_states)
+    
+    @classmethod
+    def after_router_gate(cls, layer_idx: str|int, logits: torch.Tensor, topk_weights: torch.Tensor, topk_ids: torch.Tensor):
+        for prober_cls in cls.prober_list:
+            prober_cls.after_router_gate(layer_idx, logits, topk_weights, topk_ids)
+
+    @classmethod
     def before_lm_head(cls, hidden_states: torch.Tensor, shifted_labels: torch.Tensor):
         for prober_cls in cls.prober_list:
             prober_cls.before_lm_head(hidden_states, shifted_labels)
@@ -237,11 +309,45 @@ class AccProber(BaseProber):
     
     @classmethod
     def before_layer(cls, layer_idx: str|int, hidden_states: torch.Tensor):
-        cls.record_tensor(hidden_states, f"[layer{layer_idx}][before]hidden_states")
+        cls.record_tensor(hidden_states, f"[layers.{layer_idx}][before]hidden_states")
     
     @classmethod
     def after_layer(cls, layer_idx: str|int, hidden_states: torch.Tensor):
-        cls.record_tensor(hidden_states, f"[layer{layer_idx}][after]hidden_states")
+        cls.record_tensor(hidden_states, f"[layers.{layer_idx}][after]hidden_states")
+    
+    @classmethod
+    def before_input_layernorm(cls, layer_idx: str|int, hidden_states: torch.Tensor):
+        cls.record_tensor(hidden_states, f"[layers.{layer_idx}.input_layernorm][before]hidden_states")
+    
+    @classmethod
+    def after_input_layernorm(cls, layer_idx: str|int, hidden_states: torch.Tensor):
+        cls.record_tensor(hidden_states, f"[layers.{layer_idx}.input_layernorm][after]hidden_states")
+    
+    @classmethod
+    def before_self_attn(cls, layer_idx: str|int, hidden_states: torch.Tensor):
+        cls.record_tensor(hidden_states, f"[layers.{layer_idx}.self_attn][before]hidden_states")
+    
+    @classmethod
+    def after_self_attn(cls, layer_idx: str|int, hidden_states: torch.Tensor):
+        cls.record_tensor(hidden_states, f"[layers.{layer_idx}.self_attn][after]hidden_states")
+    
+    @classmethod
+    def before_post_attention_layernorm(cls, layer_idx: str|int, hidden_states: torch.Tensor):
+        cls.record_tensor(hidden_states, f"[layers.{layer_idx}.post_attention_layernorm][before]hidden_states")
+    
+    @classmethod
+    def after_post_attention_layernorm(cls, layer_idx: str|int, hidden_states: torch.Tensor):
+        cls.record_tensor(hidden_states, f"[layers.{layer_idx}.post_attention_layernorm][after]hidden_states")
+    
+    @classmethod
+    def before_router_gate(cls, layer_idx: str|int, hidden_states: torch.Tensor):
+        cls.record_tensor(hidden_states, f"[layers.{layer_idx}.router_gate][before]hidden_states")
+    
+    @classmethod
+    def after_router_gate(cls, layer_idx: str|int, logits: torch.Tensor, topk_weights: torch.Tensor, topk_ids: torch.Tensor):
+        cls.record_tensor(logits, f"[layers.{layer_idx}.router_gate][after]logits")
+        cls.record_tensor(topk_weights, f"[layers.{layer_idx}.router_gate][after]topk_weights")
+        cls.record_tensor(topk_ids, f"[layers.{layer_idx}.router_gate][after]topk_ids")
     
     @classmethod
     def before_lm_head(cls, hidden_states: torch.Tensor, shifted_labels: torch.Tensor):
@@ -364,11 +470,11 @@ class TimeProber(BaseProber):
     
     @classmethod
     def before_layer(cls, layer_idx: str|int, hidden_states: torch.Tensor):
-        cls._start_timer(f"layer{layer_idx}")
+        cls._start_timer(f"layer.{layer_idx}")
     
     @classmethod
     def after_layer(cls, layer_idx: str|int, hidden_states: torch.Tensor):
-        cls._end_timer(f"layer{layer_idx}")
+        cls._end_timer(f"layer.{layer_idx}")
     
     @classmethod
     def before_lm_head(cls, hidden_states: torch.Tensor, shifted_labels: torch.Tensor):
@@ -411,9 +517,9 @@ class TimeProber(BaseProber):
             }
             if 'layer' not in name:
                 continue
-            # 聚合所有layer信息，将 "layer{idx}.xxx" 去掉idx，转换成 "layer.xxx"
+            # 聚合所有layer信息，将 "layer.{idx}.xxx" 去掉idx，转换成 "layer.xxx"
             # 注意 {idx} 是多位数字
-            layer_name = re.sub(r'layer(\d+)', 'layer', name)
+            layer_name = re.sub(r'layer\.(\d+)', 'layer', name)
             if layer_name not in stats:
                 stats[layer_name] = {
                     "count": 0,
@@ -438,7 +544,7 @@ class TimeProber(BaseProber):
         )
         with open(dump_file, "w", encoding="utf-8") as f:
             json.dump(stats, f, indent=2, ensure_ascii=False)
-        logger.info(f"[TimeProber] Dump timings to {dump_file}")
+        # logger.info(f"[TimeProber] Dump timings to {dump_file}")
         
         # 清空本次记录
         cls.timings = {}
