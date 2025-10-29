@@ -18,7 +18,6 @@ from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.engine.train_engine import TrainEngine
 from xtuner.v1.engine.vision_compose_train_engine import (
     VisionComposeConfigProtocol,
-    VisionComposeModelProtocol,
     VisionComposeTrainEngine,
 )
 from xtuner.v1.float8.float8_handler import Float8Handler
@@ -202,7 +201,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         with torch.device("meta"):
             model = ref_model_cfg.build()
 
-        if isinstance(model, VisionComposeModelProtocol):
+        if isinstance(ref_model_cfg, VisionComposeConfigProtocol):
             assert ref_model_cfg.text_config.float8_cfg is None, "VisionComposeConfigProtocol does not support float8"
             if ref_model_fsdp_cfg is None:
                 ref_model_fsdp_cfg = FSDPConfig(recompute_ratio=0, cpu_offload=False, requires_grad=False)
@@ -509,6 +508,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             )
 
     # TODO(hha): 这个逻辑和某个模型绑定死了。一定要重构掉
+    # TODO(hha): 如果有 freeze 参数应该不需要同步
     def update_weights(self):
         """Update the model weights."""
         self.endpoints["update_weights"] = "update_weights"

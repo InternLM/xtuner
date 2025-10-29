@@ -105,8 +105,7 @@ def get_train_seq_ctx(
                 1, len_response_ids + 1, device=max_value.device
             )
             position_ids = torch.cat([position_ids, response_position_ids], dim=-1)
-
-        seq_ctx.position_ids = position_ids  # type: ignore[assignment]
+            seq_ctx.position_ids = position_ids  # type: ignore[assignment]
         seq_ctx.pixel_values = multimodal_train_info.get("pixel_values")
         seq_ctx.image_grid_thw = multimodal_train_info.get("image_grid_thw")
         seq_ctx.image_flags = multimodal_train_info.get("image_flags")

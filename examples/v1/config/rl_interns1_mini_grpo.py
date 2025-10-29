@@ -76,6 +76,9 @@ rollout_config = RolloutConfig(
     tensor_parallel_size=rollout_tp_size,
     expert_parallel_size=rollout_ep_size,
     gpu_memory_utilization=0.75,
+    extra_rollout_config={
+            "sglang_grammar_backend": 'none',
+        }
 )
 
 # sampling params
