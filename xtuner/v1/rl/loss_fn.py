@@ -34,11 +34,10 @@ def get_policy_loss_fn(name):
             try:
                 import importlib
 
-                parsed_packages = loss_name.split(".")
-                package_name = ".".join(parsed_packages[:-1])
-                module_name = parsed_packages[-1]
-                module = importlib.import_module(package_name, module_name)
-                return module
+                package_name, module_name = loss_name.rsplit(".", 1)
+                print(f"Importing loss function from {package_name}.{module_name}")
+                module = importlib.import_module(package_name)
+                return getattr(module, module_name)
             except ImportError as e:
                 raise ImportError(f"Failed to import loss function: {loss_name}, error: {e}")
         raise ValueError(
