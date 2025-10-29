@@ -17,6 +17,7 @@ from ray.actor import ActorClass
 from typing_extensions import Self
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
+from xtuner.v1.data_proto.rl_data import check_dataflow_item
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.ray.base import AcceleratorResourcesConfig, AutoAcceleratorWorkers
 from xtuner.v1.ray.config.worker import RolloutConfig
@@ -29,6 +30,7 @@ from xtuner.v1.rl.base import TrainingWorker as BaseTrainingWorker
 from xtuner.v1.train import ResumeConfig
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger, is_hf_model_path, record_git_info, timer, timer_logger
 from xtuner.v1.utils.device import get_device, get_torch_device_module
+from xtuner.v1.utils.env_check import get_rollout_engine_version
 
 from .trainer import ExpHistory, ExpInfo, GitInfo, XTunerMeta
 
@@ -279,6 +281,8 @@ class RLTrainer:
 
             env_path = log_dir / "env.json"
             environment_variables = dict(os.environ)
+            infer_engine_version = get_rollout_engine_version()
+            environment_variables.update(infer_engine_version)
             with env_path.open("w") as f:
                 json.dump(environment_variables, f, indent=2)
 
@@ -430,6 +434,9 @@ class RLTrainer:
 
         data_batches = []
         for group in data_groups:
+            if check_dataflow_item(group) is False:
+                self.logger.error(f"Skip one data group {group} due to rollout failed or empty response.")
+                continue
             text_prompt = self.tokenizer.apply_chat_template(
                 group[0].data.messages, add_generation_prompt=True, tokenize=False
             )
@@ -514,6 +521,9 @@ class RLTrainer:
         # mismatch_token_ids_count = 0
         # response_len_list = []
         for group in data_groups:
+            if check_dataflow_item(group) is False:
+                self.logger.error(f"Skip one data group {group} due to rollout failed or empty response.")
+                continue
             for data in group:
                 rewards.append(data.env.judger.reward["score"])
                 if data.env.rollout.response_ids is not None:
@@ -530,17 +540,9 @@ class RLTrainer:
 
                     # if response_ids != revert_encode_response_ids or response_ids != response_str_to_ids:
                     #     mismatch_token_ids_count += 1
-
-                elif data.env.rollout.response is not None:
+                else:
                     response_ids = self.tokenizer.encode(data.env.rollout.response, add_special_tokens=False)
                     rollout_response_len_list.append(len(response_ids))
-
-                else:
-                    self.logger.error(
-                        f"Both response_ids and response string in rollout data_item {data.env.rollout} are None, check your rollout process."
-                    )
-                    rollout_response_len_list.append(0)
-                    continue
 
         rewards = torch.tensor(rewards).float()
         rollout_response_lens = None

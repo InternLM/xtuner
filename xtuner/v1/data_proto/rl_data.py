@@ -147,11 +147,17 @@ class RLDataFlowItem(BaseModel):
 
 
 def check_dataflow_item(group_data_items):
-    # checkout rollout failed response
-    for data_item in group_data_items:
-        if data_item.env.rollout.finish_reason == "failed":
-            return False
-    return True
+    if not group_data_items or len(group_data_items) == 0:
+        return False
+
+    no_failures = all(item.env.rollout.finish_reason != "failed" for item in group_data_items)
+    if not no_failures:
+        return False
+
+    all_responses_valid = all(item.env.rollout.response for item in group_data_items)
+    all_ids_valid = all(item.env.rollout.response_ids for item in group_data_items)
+
+    return all_responses_valid or all_ids_valid
 
 
 def update_dataflow_item(group_data_items, target_key, target_value):
