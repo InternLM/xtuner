@@ -24,9 +24,8 @@ export PYTHONPYCACHEPREFIX=/tmp
 export TRITON_CACHE_DIR=/tmp/.triton
 export PYTEST_ADDOPTS='-o cache_dir=/tmp/.pytest_cache'
 
-porxy_off
-echo "debuging..."
-#pip install -e . -i http://mirrors.h.pjlab.org.cn/pypi/simple/ --trusted-host mirrors.h.pjlab.org.cn
-#pip install numpy==1.26.4 -i http://mirrors.h.pjlab.org.cn/pypi/simple/ --trusted-host mirrors.h.pjlab.org.cn --trusted-host pypi.i.h.pjlab.org.cn
+proxy_off
+pip install -e . -i http://mirrors.h.pjlab.org.cn/pypi/simple/ --trusted-host mirrors.h.pjlab.org.cn
+pip install numpy==1.26.4 -i http://mirrors.h.pjlab.org.cn/pypi/simple/ --trusted-host mirrors.h.pjlab.org.cn --trusted-host pypi.i.h.pjlab.org.cn
 
 export PYTHONPATH=${LM_DEPLOY}:$PYTHONPATH
