@@ -30,6 +30,17 @@ def register_policy_loss(name: str) -> Callable[[PolicyLossFn], PolicyLossFn]:
 def get_policy_loss_fn(name):
     loss_name = name
     if loss_name not in POLICY_LOSS_REGISTRY:
+        if "." in loss_name:  # try to manually import the loss function from a custom path
+            try:
+                import importlib
+
+                parsed_packages = loss_name.split(".")
+                package_name = ".".join(parsed_packages[:-1])
+                module_name = parsed_packages[-1]
+                module = importlib.import_module(package_name, module_name)
+                return module
+            except ImportError as e:
+                raise ImportError(f"Failed to import loss function: {loss_name}, error: {e}")
         raise ValueError(
             f"Unsupported loss mode: {loss_name}. Supported modes are: {list(POLICY_LOSS_REGISTRY.keys())}"
         )
