@@ -142,8 +142,10 @@ class DataFlow:
             fails and needs to be retried, otherwise None.
         """
         try:
-            # 该函数中所有的数据结构都是RLDataFlowItem
             # step 1: sample
+            # TODO(@duanyanhui): More fine-grained control over group data generation:
+            # Pass n to the inference engine to ensure that the same data is processed by the same server, improving efficiency
+            # Resend only the failed prompts in a group when retrying worker_task to avoid wasted computation resources."
             if group_samples_for_retry is None or len(group_samples_for_retry) == 0:
                 with timer("sample", self.timer_dict):
                     group_data_items = await self.replay_buffer.sample.remote(  # type: ignore[attr-defined]
