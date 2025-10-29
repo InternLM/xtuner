@@ -17,6 +17,7 @@ from xtuner.v1.data_proto.rl_data import RLDataFlowItem, RLDatasetItem, RLEnvDat
 MODEL_PATH = os.environ["ROLLOUT_MODEL_PATH"]
 DATA_PATH = os.environ["ROLLOUT_DATA_PATH"]
 VERL_ROLLOUT_DATA_PATH = os.environ["VERL_ROLLOUT_DATA_PATH"]
+DAPO_DATA_PATH = os.environ.get("ROLLOUT_DAPO_DATA_PATH")
 
 FAKE_JUDGER_INPUT_ITEM = RLDataFlowItem(
     uid = RLUIDItem(action_id=uuid4().int,
@@ -134,6 +135,7 @@ class TestJudgerController(unittest.TestCase):
         self.assertEqual(res2[0].reward["score"], 1.0)
         self.assertEqual(res2[1].reward["score"], 1.0)
 
+    @unittest.skipIf(not DAPO_DATA_PATH, "Skipping Dapo judger test because ROLLOUT_DAPO_DATA_PATH is not set.")
     def test_dapo_judger(self):
         from xtuner.v1.ray.judger.dapo_math import DapoMathJudgerConfig
         from xtuner.v1.utils.rl_test_utils import get_eos_token_from_model_path
@@ -155,7 +157,6 @@ class TestJudgerController(unittest.TestCase):
             reward_judger_configs=[dapo_judger_config]
         )
         judger_controller = JudgerController.remote(judger_cfg)
-        DAPO_DATA_PATH = os.path.join(os.getcwd(), "tests/resource/dapo_math_response_data.jsonl")
         judger_data, save_reward = construct_dapo_judger_data(DAPO_DATA_PATH)
         group_data = ray.get(judger_controller.run.remote(judger_data)) 
         reward = [data.reward["score"] for data in group_data]
