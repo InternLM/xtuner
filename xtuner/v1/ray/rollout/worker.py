@@ -266,24 +266,21 @@ class RolloutWorker(SingleAcceleratorWorker):
             openai_tools.append(openai_tool)
         return openai_prompts, openai_tools
 
-    def _check_infer_engine_version(self, return_token_ids: bool, input_ids: bool):
+    def _check_infer_engine_version(self, return_token_ids: bool):
+        # TODO(@duanyanhui): remove this check when all backends support return_token_ids
         if self.check_flag:
             if os.environ.get("XTUNER_USE_VLLM", "0") == "1":
-                if return_token_ids or input_ids:
+                if return_token_ids:
                     self.logger.error(
-                        "VLLM backend does not support return_token_ids or generate with input_ids as input now"
+                        "VLLM backend does not support return_token_ids or generate with input_ids as input in Xtuner now"
                     )
             elif os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "1":
                 import lmdeploy
 
                 lmdeploy_version = lmdeploy.__version__
-                if return_token_ids and Version(lmdeploy_version) < Version("0.10.1"):
+                if return_token_ids and Version(lmdeploy_version) < Version("0.10.2"):
                     self.logger.error(
-                        f"You should use lmdeploy >= v0.10.1 to support return_token_ids, but current version is {lmdeploy_version}"
-                    )
-                if input_ids:
-                    self.logger.error(
-                        "You should use lmdeploy main branch contain commit 49f632483e93cfd3d09ef743508c07a68a763e26 to support generate with input_ids as input"
+                        f"You should use lmdeploy >= v0.10.2 to support return_token_ids, but current version is {lmdeploy_version}"
                     )
             self.check_flag = False
 
@@ -299,22 +296,13 @@ class RolloutWorker(SingleAcceleratorWorker):
     ) -> RLRolloutResponseItem:
         uid = str(uuid.uuid4())
         response = None
+        log_payload = {}
         failed_rollout_response = RLRolloutResponseItem(
             response="",
             finish_reason="failed",
         )
-        self._check_infer_engine_version(
-            "return_token_ids" in extra_params and extra_params["return_token_ids"], input_ids is not None
-        )
+        self._check_infer_engine_version("return_token_ids" in extra_params and extra_params["return_token_ids"])
 
-        # TODO(@duanyanhui): support streaming infer with return_token_ids
-        extra_params["stream"] = (
-            False
-            if "return_token_ids" in extra_params and extra_params["return_token_ids"]
-            else extra_params.get("stream", False)
-        )
-
-        log_payload = {}
         try:
             if format == "openai":
                 openai_prompts, openai_tools = prompts, tools
@@ -356,7 +344,6 @@ class RolloutWorker(SingleAcceleratorWorker):
                 log_payload["input_ids"] = str(log_payload["input_ids"])
             error_details = {
                 "uid": uid,
-                "url": self.server_url,
                 "request_payload": log_payload,
                 "error_type": type(e).__name__,
                 "error_message": str(e),
@@ -379,12 +366,11 @@ class RolloutWorker(SingleAcceleratorWorker):
         last_logprobs = []
         finish_reason = ""
         async for chunk in response.aiter_lines():
-            # chunk example
-            # data: {"id":"1","object":"chat.completion.chunk","created":1757495636,"model":"qwen3-8b","choices":[{"index":0,"delta":{"role":"assistant","content":"<think>","reasoning_content":null,"tool_calls":[]},"logprobs":null,"finish_reason":null}],"usage":null}
             if not chunk.startswith("data:"):
                 continue
             try:
                 chunk_data_str = chunk[len("data:") :].strip()
+                # self.logger.debug(f"chunk_data_str: {chunk_data_str}")
                 if self.paused or chunk_data_str == "[DONE]":
                     finish_reason = "paused" if self.paused else finish_reason
                     break
@@ -392,16 +378,29 @@ class RolloutWorker(SingleAcceleratorWorker):
                     continue
 
                 chunk_data = json.loads(chunk_data_str)
-                delta_content = chunk_data["choices"][0]["delta"].get("content")
-                last_trajectory = last_trajectory + delta_content if delta_content else last_trajectory
-                last_token_id = chunk_data["choices"][0]["delta"].get("gen_tokens")
-                if last_token_id is not None:
-                    last_token_ids.extend(last_token_id)
-                finish_reason = chunk_data["choices"][0].get("finish_reason")
-                logprobs_content = chunk_data["choices"][0]["logprobs"]
-                if logprobs_content is not None:
-                    for content_item in logprobs_content["content"]:
-                        last_logprobs.append(content_item["logprob"])
+                # lmdeploy, 在验证下sglang
+                if "return_token_ids" in extra_params and extra_params["return_token_ids"]:
+                    last_trajectory = last_trajectory + chunk_data.get("text", "")
+                    finish_reason = chunk_data["meta_info"].get("finish_reason")
+                    if finish_reason is not None:
+                        finish_reason = finish_reason["type"]
+
+                    output_token_logprobs = chunk_data["meta_info"].get("output_token_logprobs")
+                    if output_token_logprobs is not None:
+                        for token_logprob in output_token_logprobs:
+                            last_logprobs.append(token_logprob[0])
+                            last_token_ids.append(token_logprob[1])
+                else:
+                    delta_content = chunk_data["choices"][0]["delta"].get("content")
+                    last_trajectory = last_trajectory + delta_content if delta_content else last_trajectory
+                    last_token_id = chunk_data["choices"][0]["delta"].get("gen_tokens")
+                    if last_token_id is not None:
+                        last_token_ids.extend(last_token_id)
+                    finish_reason = chunk_data["choices"][0].get("finish_reason")
+                    logprobs_content = chunk_data["choices"][0]["logprobs"]
+                    if logprobs_content is not None:
+                        for content_item in logprobs_content["content"]:
+                            last_logprobs.append(content_item["logprob"])
 
             except json.JSONDecodeError as e:
                 self.logger.error(f"JSON decode error for chunk in request {uid}: {chunk}, error: {e}")

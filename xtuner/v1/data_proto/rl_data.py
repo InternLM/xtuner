@@ -154,6 +154,9 @@ def check_dataflow_item(group_data_items):
     if not no_failures:
         return False
 
+    is_paused = all(item.env.rollout.finish_reason == "paused" for item in group_data_items)
+    if is_paused:
+        return True
     all_responses_valid = all(item.env.rollout.response for item in group_data_items)
     all_ids_valid = all(item.env.rollout.response_ids for item in group_data_items)
 

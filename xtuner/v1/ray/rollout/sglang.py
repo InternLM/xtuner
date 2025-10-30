@@ -53,27 +53,23 @@ class SGLangWorker(RolloutWorker):
         sglang_sample_params = self._transform_sample_params(sample_params)
         sglang_extra_params = self._transform_extra_params(extra_params)
         payload.update(sglang_extra_params)
-        if stream:
-            raise NotImplementedError("Streaming mode is not supported for SGLangWorker.")
-        else:
-            if "return_token_ids" in extra_params and extra_params["return_token_ids"]:
-                if input_ids is not None:
-                    payload["input_ids"] = input_ids
-                else:
-                    text_prompt = self.tokenizer.apply_chat_template(
-                        prompt, tokenize=False, add_generation_prompt=True
-                    )
-                    prompt_token_ids = self.tokenizer(text_prompt, add_special_tokens=False)["input_ids"]
-                    payload["input_ids"] = prompt_token_ids
-                payload["sampling_params"] = sglang_sample_params
+
+        if "return_token_ids" in extra_params and extra_params["return_token_ids"]:
+            if input_ids is not None:
+                payload["input_ids"] = input_ids
             else:
-                payload["messages"] = prompt
-                payload.update(sglang_sample_params)
-                # note: chat completions 接口需要传入 max_tokens 和 min_tokens 参数
-                payload["max_tokens"] = sglang_sample_params["max_new_tokens"]
-                payload["min_tokens"] = sglang_sample_params["min_new_tokens"]
-                payload.pop("max_new_tokens", None)
-                payload.pop("min_new_tokens", None)
+                text_prompt = self.tokenizer.apply_chat_template(prompt, tokenize=False, add_generation_prompt=True)
+                prompt_token_ids = self.tokenizer(text_prompt, add_special_tokens=False)["input_ids"]
+                payload["input_ids"] = prompt_token_ids
+            payload["sampling_params"] = sglang_sample_params
+        else:
+            payload["messages"] = prompt
+            payload.update(sglang_sample_params)
+            # note: chat completions 接口需要传入 max_tokens 和 min_tokens 参数
+            payload["max_tokens"] = sglang_sample_params["max_new_tokens"]
+            payload["min_tokens"] = sglang_sample_params["min_new_tokens"]
+            payload.pop("max_new_tokens", None)
+            payload.pop("min_new_tokens", None)
 
         req = self.client.build_request(
             "POST",

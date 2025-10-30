@@ -169,6 +169,9 @@ class DataFlow:
                 )
                 # 需要在这里处理check_dataflow_item，因为要保留group_data_items的data信息，作为retry的输入
                 if not check_dataflow_item(group_data_items):
+                    self.logger.warning(
+                        f"Dataflow item check failed for {group_data_items[0].uid.action_id} response {group_data_items[0].env.rollout}. Returning meta for retry."
+                    )
                     return group_data_items
 
             # step 3: filter
@@ -179,6 +182,7 @@ class DataFlow:
             with timer("put_to_buffer", self.timer_dict):
                 await self.replay_buffer.add.remote(filtered_group_data_items)  # type: ignore[attr-defined]
 
+            self.logger.debug(f"Worker task completed successfully for {group_data_items[0].uid.action_id}.")
         except Exception as e:
             self.logger.error(f"Worker task failed with exception: {e}. Returning meta for retry.", exc_info=True)
             return group_data_items
@@ -250,17 +254,18 @@ class DataFlow:
             pbar.n = self.finished_samples_count
             pbar.refresh()
 
-        if self.finished_samples_count == self.target_batch_size:
+        if self.finished_samples_count >= self.target_batch_size:
             self.logger.info("Target batch size reached. Pausing env controller.")
-        if self.failed_samples_count == self.target_batch_size:
+        if self.failed_samples_count >= self.target_batch_size:
             self.logger.info("Max failed samples reached. Pausing env controller.")
 
         ray.get(self.env_controller.pause.remote())
 
         if waiting_tasks:
-            await asyncio.wait_for(asyncio.gather(*waiting_tasks, return_exceptions=True), timeout=10)
+            await asyncio.wait_for(asyncio.gather(*waiting_tasks, return_exceptions=True), timeout=60)
+            # await asyncio.gather(*waiting_tasks, return_exceptions=True)
 
-        if self.finished_samples_count == self.target_batch_size:
+        if self.finished_samples_count >= self.target_batch_size:
             self.unfinished_samples_count = ray.get(self.replay_buffer.get_unfinished_samples.remote())
             self.logging_replaybuffer_state()
             self.logging_timing_perf()
@@ -323,3 +328,9 @@ class DataFlow:
             log_messages.append(f"{formatted_name}: {avg_time_str}, ")
 
         self.logger.info("".join(log_messages))
+
+    def get_replaybuffer_status(self):
+        return ray.get(self.replay_buffer.status.remote())
+
+    def clear_replaybuffer(self):
+        return ray.get(self.replay_buffer.clear.remote())

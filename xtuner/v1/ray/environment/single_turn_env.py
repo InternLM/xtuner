@@ -88,7 +88,11 @@ class SingleTurnEnvironment(BaseEnvironment):
             The format of the return value matches the format of the input `data`.
         """
         group_data_items = await self.generate(group_data_items, sample_params, extra_params)  # type: ignore[assignment]
-        if self.judger_controller:
+        skip_judger = any(
+            item.env.rollout.finish_reason == "paused" or item.env.rollout.finish_reason == "failed"
+            for item in group_data_items
+        )
+        if self.judger_controller and not skip_judger:
             judger_responses: RLJudgerResponseItem = await self.judger_controller.run.remote(group_data_items)
             group_data_items = update_dataflow_item(group_data_items, "env.judger", judger_responses)
         return group_data_items
