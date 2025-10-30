@@ -9,7 +9,7 @@ from xtuner.v1.config import (
 )
 from xtuner.v1.data_proto.rl_data import SampleParams
 from xtuner.v1.model.compose.qwen3_vl import Qwen3VLDense8BConfig
-from xtuner.v1.ray.accelerator import AcceleratorResourcesConfig
+from xtuner.v1.ray.base import AcceleratorResourcesConfig
 from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.ray.dataflow import DataFlowConfig, ReplayBufferConfig
 from xtuner.v1.ray.evaluator import EvaluatorConfig

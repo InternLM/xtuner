@@ -56,7 +56,6 @@ evaluate_step = 10
 # pack_max_length = 32768
 # train_optimizer_steps = 1
 # hf_interval = 100
-# enable_evaluate = True
 # enable_initial_evaluate = True
 # evaluate_step = 15
 

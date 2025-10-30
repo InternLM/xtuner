@@ -465,7 +465,8 @@ class RLTrainer:
         is_multimodal = False
         if multimodal_train_infos and len(multimodal_train_infos) > 0:
             assert len(multimodal_train_infos) == len(data_groups), (
-                f"{len(multimodal_train_infos)} vs {len(data_groups)}")
+                f"{len(multimodal_train_infos)} vs {len(data_groups)}"
+            )
             is_multimodal = True
 
         for j, group in enumerate(data_groups):

@@ -336,7 +336,7 @@ class ReplayBufferStorage:
         multimodal_train_infos = []
         if len(self._returned) < global_batch_size:
             self.logger.error("Not enough finished samples in replay buffer")
-            return []
+            return [], []
         else:
             target_finished_list = self._returned[:global_batch_size]
             remain_finished_list = self._returned[global_batch_size:]
