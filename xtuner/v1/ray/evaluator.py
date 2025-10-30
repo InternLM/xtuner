@@ -211,6 +211,7 @@ class Evaluator:
         waiting_tasks = set()
         self.logger.info(f"Start to generate {self.eval_batch_size} samples for evaluate")
         self.logger.info(f"Evaluate sample parameters set to {self.sample_params}.")
+        data_iter = iter(self.dataloader)
         with tqdm(total=self.eval_batch_size, desc="Rollout for eval samples") as pbar:
             update_step = max(1, int(self.eval_batch_size * 0.1))
             next_update_threshold = update_step
@@ -223,10 +224,10 @@ class Evaluator:
                     if len(self.return_list) + len(waiting_tasks) >= self.eval_batch_size:
                         break
                     try:
-                        data = next(self.dataloader)
+                        data = next(data_iter)
                     except StopIteration:
-                        self.dataloader = iter(self.dataloader)
-                        data = next(self.dataloader)
+                        data_iter = iter(self.dataloader)
+                        data = next(data_iter)
                         self.logger.warning("Restarting the evaluation dataset.")
                     data_item = RLDataFlowItem(data=RLDatasetItem(**data[0]))
                     task = create_task(self.eval_worker_task(data_item))
@@ -279,7 +280,6 @@ class Evaluator:
                 the generated samples.
         """
         self.return_list = []
-        self.dataloader = iter(self.dataloader)
         ray.get(self.env_controller.restart.remote())  # type: ignore[attr-defined]
         await self.concurrent_eval_task_runner()
         scores = self.compute_metric(self.return_list)
