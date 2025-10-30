@@ -7,7 +7,6 @@ import ray
 from xtuner.v1.data_proto.rl_data import (
     RLDataFlowItem,
     RLJudgerResponseItem,
-    check_dataflow_item,
     update_dataflow_item,
 )
 from xtuner.v1.ray.environment.base_env import BaseEnvironment
@@ -92,6 +91,4 @@ class SingleTurnEnvironment(BaseEnvironment):
         if self.judger_controller:
             judger_responses: RLJudgerResponseItem = await self.judger_controller.run.remote(group_data_items)
             group_data_items = update_dataflow_item(group_data_items, "env.judger", judger_responses)
-        if not check_dataflow_item(group_data_items):
-            return []
         return group_data_items
