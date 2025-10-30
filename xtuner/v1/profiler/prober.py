@@ -51,8 +51,8 @@ class BaseProber(ABC):
     def skip(cls) -> bool:
         if cls.profile_step is None or cls.cur_step not in cls.profile_step:
             return True
-        if dist.get_rank() != 0:
-            return True
+        # if dist.get_rank() != 0:
+        #     return True
         return False
     
     @classmethod
@@ -84,6 +84,7 @@ class BaseProber(ABC):
     def after_layer(cls, layer_idx: str|int, hidden_states: torch.Tensor):
         pass
     
+    # ******************************* Attention Block *******************************
     @classmethod
     def before_input_layernorm(cls, layer_idx: str|int, hidden_states: torch.Tensor):
         pass
@@ -100,6 +101,7 @@ class BaseProber(ABC):
     def after_self_attn(cls, layer_idx: str|int, hidden_states: torch.Tensor):
         pass
 
+    # ******************************* MoE Block *******************************
     @classmethod
     def before_post_attention_layernorm(cls, layer_idx: str|int, hidden_states: torch.Tensor):
         pass
@@ -140,6 +142,7 @@ class BaseProber(ABC):
     def after_combine(cls, layer_idx: str|int, combined_hidden_states: torch.Tensor):
         pass
     
+    # ******************************* LM Head Block *******************************
     @classmethod
     def before_lm_head(cls, hidden_states: torch.Tensor, shifted_labels: torch.Tensor):
         pass
@@ -220,6 +223,7 @@ class ProberList:
         for prober_cls in cls.prober_list:
             prober_cls.after_layer(layer_idx, hidden_states)
 
+    # ******************************* Attention Block *******************************
     @classmethod
     def before_input_layernorm(cls, layer_idx: str|int, hidden_states: torch.Tensor):
         for prober_cls in cls.prober_list:
@@ -240,6 +244,7 @@ class ProberList:
         for prober_cls in cls.prober_list:
             prober_cls.after_self_attn(layer_idx, hidden_states)
     
+    # ******************************* MoE Block *******************************
     @classmethod
     def before_post_attention_layernorm(cls, layer_idx: str|int, hidden_states: torch.Tensor):
         for prober_cls in cls.prober_list:
@@ -290,6 +295,7 @@ class ProberList:
         for prober_cls in cls.prober_list:
             prober_cls.after_combine(layer_idx, combined_hidden_states)
 
+    # ******************************* LM Head Block *******************************
     @classmethod
     def before_lm_head(cls, hidden_states: torch.Tensor, shifted_labels: torch.Tensor):
         for prober_cls in cls.prober_list:
@@ -335,11 +341,14 @@ class AccProber(BaseProber):
         logger.info(f"AccProber initialized at {cls.dump_dir}")
     
     @classmethod
-    def record_tensor(cls, tensor: torch.Tensor, name: str):
+    def record_tensor(cls, tensor: torch.Tensor | None, name: str):
         """记录张量信息"""
         if cls.skip():
             return
         assert cls.initialized, "AccProber is not initialized, please call setup() first"
+        if tensor is None:
+            logger.warning(f"[AccProber] Warning: {name} is None, skip recording")
+            return
         tensor = tensor.detach().clone()
         cur_json = {
             "name": name,
@@ -457,7 +466,7 @@ class AccProber(BaseProber):
         with open(dump_file, "w", encoding="utf-8") as f:
             for record in cls.forward_records:
                 f.write(record + "\n")
-        print(f"[AccProber] Dump forward records to {dump_file}")
+        # logger.info(f"[AccProber] Dump forward records to {dump_file}")
         cls.forward_records = []
     
     ############################## hooks for gradient #################################
@@ -492,7 +501,7 @@ class AccProber(BaseProber):
         with open(dump_file, "w", encoding="utf-8") as f:
             for line in res:
                 f.write(json.dumps(line, ensure_ascii=False) + "\n")
-        print(f"[AccProber] Dump {suffix} to {dump_file}")
+        # logger.info(f"[AccProber] Dump {suffix} to {dump_file}")
     
     @classmethod
     def before_clip_grad_norm(cls):
@@ -642,14 +651,6 @@ class TimeProber(BaseProber):
 def example_usage():
     """
     使用示例
-    
-    Java IO:
-        InputStream in = new BufferedInputStream(
-                           new DataInputStream(
-                             new FileInputStream("file.txt")));
-    
-    这里:
-        ProberManager.setup(dump_home, steps, model, [AccProber, TimeProber])
     """
     dump_home = Path("./prober_dumps")
     profile_step = [0, 10, 20, 50, 100]
@@ -690,8 +691,11 @@ def example_usage():
             ProberList.after_lm_head(loss, logits)
             
             ProberList.after_micro_iter_forward()
+
         
         # 梯度相关
         # ProberManager.before_clip_grad_norm()
         # ... 梯度裁剪 ...
         # ProberManager.after_clip_grad_norm()
+
+        ProberList.after_step()

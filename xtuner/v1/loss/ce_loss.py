@@ -234,9 +234,11 @@ class CELossContext(BaseLossContext[CELossContextInputItem]):
             # liger kernel dont support reduction=="none"
             # step 2.b in the loss calculation: sum the loss over all tokens, then multiply the loss weight (i.e. divide by the global_denominator)
             loss = self.liger_loss_fct(head_weight, hidden_states, shifted_labels)
+            ProberList.record_tensor(loss, "[lm_head.ce_loss][before calibration]loss")
             if DEBUG_ACC:
                 import torch.distributed as dist; dist.breakpoint()
-            mask = loss_weight != 0
-            w = loss_weight.sum() / mask.sum()  # w equals to 1/global_denominator
-            loss = loss * w
+            # mask = loss_weight != 0
+            # w = loss_weight.sum() / mask.sum()  # w equals to 1/global_denominator
+            # loss = loss * w
+            loss = loss / int(loss_kwargs.global_denominator)
             return loss, (None, {})
