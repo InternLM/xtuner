@@ -88,7 +88,7 @@ while true; do
   if [ "$result" = "$expected_gpu_count.0" ]; then
     break
   else
-    echo "Waiting for GPU count to be 128, current: $result"
+    echo "Waiting for GPU count to be $expected_gpu_count, current: $result"
     sleep 2
   fi
 done
