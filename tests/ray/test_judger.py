@@ -135,7 +135,6 @@ class TestJudgerController(unittest.TestCase):
         self.assertEqual(res2[0].reward["score"], 1.0)
         self.assertEqual(res2[1].reward["score"], 1.0)
 
-    @unittest.skipIf(not DAPO_DATA_PATH, "Skipping Dapo judger test because ROLLOUT_DAPO_DATA_PATH is not set.")
     def test_dapo_judger(self):
         from xtuner.v1.ray.judger.dapo_math import DapoMathJudgerConfig
         from xtuner.v1.utils.rl_test_utils import get_eos_token_from_model_path

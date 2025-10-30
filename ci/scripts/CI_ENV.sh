@@ -16,6 +16,7 @@ export INTERNS1_DENSE_PATH=${CI_SHARE_MODEL}/intern-s1-mini
 export ROLLOUT_MODEL_PATH=${CI_SHARE_MODEL}/Qwen3-8B
 export ALPACA_PATH=${CI_SHARE_DATA}/alpaca
 export INTERNS1_DATA_META=${CI_SHARE_DATA}/vlm_ci_data.json
+export ROLLOUT_DAPO_DATA_PATH=${CI_SHARE_DATA}/rl_test_judger_dapo_math_data.jsonl
 export TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=0
 export XTUNER_DETERMINISTIC=true
 export XTUNER_USE_LMDEPLOY=1
