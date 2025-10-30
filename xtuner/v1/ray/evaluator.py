@@ -238,11 +238,11 @@ class Evaluator:
             pbar.refresh()
 
         if self.failed_samples_count == self.eval_batch_size:
-            self.logger.error(
+            self.logger.warning(
                 f"{self.failed_samples_count} samples failed and were skipped. Pausing rollout controller."
             )
         else:
-            self.logger.error(
+            self.logger.info(
                 f"Target batch size reached, and {self.failed_samples_count} samples failed and were skipped. Pausing rollout controller."
             )
         ray.get(self.env_controller.pause.remote())
