@@ -33,6 +33,7 @@ from xtuner.v1.model.utils import ModelForwardExtraLogInfo
 from xtuner.v1.module.router import NoAuxRouterConfig
 from xtuner.v1.utils import get_device, get_logger, get_torch_device_module, profile_time_and_memory
 from xtuner.v1.profiler.prober import ProberList
+from xtuner.v1.utils.grad_norm import cal_grad_norm
 
 
 logger = get_logger()
@@ -382,15 +383,15 @@ class TrainEngine:
         self.model.scale_and_reduce_grad()
         params = self.model.trainable_parameters()
         grads = [p.grad for _, p in params if p.grad is not None]
-        # grad_norm, grouped_grads = cal_grad_norm(grads, dtype=dtype)
-        grouped_grads = self.group_tensors_by_device_mesh_and_placements(grads)
-        print(f"clip_grad_norm dtype: {dtype}")
-        total_norms = []
-        for grads in grouped_grads.values():
-            total_norm = self.cal_total_norm(grads, norm_type=2.0, foreach=True, dtype=dtype)
-            total_norms.append(total_norm)
-        grad_norm = torch.linalg.vector_norm(torch.stack(total_norms), ord=2.0, dtype=dtype)
-        grad_norm = grad_norm.to(grads[0].dtype)
+        grad_norm, grouped_grads = cal_grad_norm(grads, dtype=dtype)
+        # grouped_grads = self.group_tensors_by_device_mesh_and_placements(grads)
+        # print(f"clip_grad_norm dtype: {dtype}")
+        # total_norms = []
+        # for grads in grouped_grads.values():
+        #     total_norm = self.cal_total_norm(grads, norm_type=2.0, foreach=True, dtype=dtype)
+        #     total_norms.append(total_norm)
+        # grad_norm = torch.linalg.vector_norm(torch.stack(total_norms), ord=2.0, dtype=dtype)
+        # grad_norm = grad_norm.to(grads[0].dtype)
         if do_clip:
             clip_coef = self.optim_cfg.max_grad_norm / (grad_norm + 1e-6)
             clip_coef_clamped = torch.clamp(clip_coef, max=1.0)
