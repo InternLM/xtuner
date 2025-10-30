@@ -208,8 +208,7 @@ class Sampler:
         multimodal_train_info = data.pop("multimodal_train_info", {})
         if "pixel_values" in multimodal_train_info:
             multimodal_train_info["pixel_values"] = ray.put(multimodal_train_info["pixel_values"])
-
-        self.storage.add_multimodal_train_info(action_id, multimodal_train_info)
+            data["multimodal_train_info"] = multimodal_train_info
 
         for data_item in group_data_item:
             data_item.uid = RLUIDItem(
@@ -223,7 +222,6 @@ class Sampler:
 
         return group_data_item
 
-    # TODO：Add multimodal_train_info
     def sample_from_unfinished_buffer(self) -> List[RLDataFlowItem]:
         """Samples a prompt from a partially completed (unfinished) rollout."""
         action_id = self.storage._paused.pop(0)
@@ -275,9 +273,6 @@ class ReplayBufferStorage:
         self.logger = get_logger(log_dir=worker_log_dir, tag="ReplayBuffer")
         self._multimodal_train_infos: Dict[int, Dict[str, Any]] = {}
 
-    def add_multimodal_train_info(self, action_id: int, multimodal_train_info: Dict[str, Any]):
-        self._multimodal_train_infos[action_id] = multimodal_train_info
-
     def add(self, grouped_dataitem: List[RLDataFlowItem]):
         """Adds a group of data items to the storage.
 
@@ -286,13 +281,6 @@ class ReplayBufferStorage:
                 belonging to the same group.
         """
         if not check_dataflow_item(grouped_dataitem):
-            # remove multimodal_train_info
-            action_id = grouped_dataitem[0].uid.action_id
-            if action_id in self._multimodal_train_infos:
-                if "pixel_values" in self._multimodal_train_infos[action_id]:
-                    # del ray obj ref
-                    del self._multimodal_train_infos[action_id]["pixel_values"]
-                del self._multimodal_train_infos[action_id]
             return
 
         replay_meta = mapping_dataitem_to_replaymeta(grouped_dataitem)
@@ -348,13 +336,16 @@ class ReplayBufferStorage:
                 # todo: add an unified state management
                 replay_meta.state = "history"
                 group_samples = mapping_replaymeta_to_dataitem(self._actions[action_id])
+                multimodal_train_info = None
+                # TODO: 是否需要额外返回不重复的 multimodal_train_infos？
+                for data_item in group_samples:
+                    if "multimodal_train_info" in data_item.data:
+                        multimodal_train_info = data_item.data.pop("multimodal_train_info")
                 samples.append(group_samples)
-                multimodal_train_infos.append(self._multimodal_train_infos.pop(action_id))
+                if multimodal_train_info is not None:
+                    multimodal_train_infos.append(multimodal_train_info)
             self._returned = remain_finished_list
 
-            assert len(self._multimodal_train_infos) == len(self._returned), (
-                "multimodal_train_infos and returned should have the same length"
-            )
             return samples, multimodal_train_infos
 
     def get_finished_samples(self):

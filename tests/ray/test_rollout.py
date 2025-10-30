@@ -126,7 +126,7 @@ class TestRollout(unittest.TestCase):
                                         )
         sample_params = SampleParams(temperature=2.5)  # invalid temperature to trigger error
         responses = ray.get(self.test_flow.run.remote(num=1, sample_params=sample_params), timeout=300)
-        self.assertEqual(len(responses),0)
+        self.assertEqual(len(responses[0]), 0)
   
     @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
     def test_lmdeploy_generate(self):
@@ -152,7 +152,7 @@ class TestRollout(unittest.TestCase):
                                          self.test_env
                                         )
         responses = ray.get(self.test_flow.run.remote(), timeout=300)
-        finished_samples_count = sum(1 for data in responses for item in data if item.env.rollout.finish_reason == "stop" or item.env.rollout.finish_reason == "length")
+        finished_samples_count = sum(1 for data in responses[0] for item in data if item.env.rollout.finish_reason == "stop" or item.env.rollout.finish_reason == "length")
         self.assertEqual(finished_samples_count // self.dataflow_cfg.prompt_repeat_k, self.dataflow_cfg.global_batch_size)
         ray.get(self.test_env.shutdown.remote(), timeout=300)
         
@@ -171,7 +171,7 @@ class TestRollout(unittest.TestCase):
                                         )
         extra_params = {"stream": True, "return_token_ids": False, "return_logprobs": False}
         responses = ray.get(self.test_flow.run.remote(extra_params=extra_params), timeout=300)
-        finished_samples_count = sum(1 for data in responses for item in data if item.env.rollout.finish_reason == "stop" or item.env.rollout.finish_reason == "length")
+        finished_samples_count = sum(1 for data in responses[0] for item in data if item.env.rollout.finish_reason == "stop" or item.env.rollout.finish_reason == "length")
         self.assertEqual(finished_samples_count // self.dataflow_cfg.prompt_repeat_k, self.dataflow_cfg.global_batch_size)
         ray.get(self.test_env.shutdown.remote())
 
@@ -212,7 +212,7 @@ class TestRollout(unittest.TestCase):
                                          self.test_env
                                         )
         responses = ray.get(self.test_flow.run.remote(), timeout=300)
-        finished_samples_count = sum(1 for data in responses for item in data if item.env.rollout.finish_reason == "stop" or item.env.rollout.finish_reason == "length")
+        finished_samples_count = sum(1 for data in responses[0] for item in data if item.env.rollout.finish_reason == "stop" or item.env.rollout.finish_reason == "length")
         self.assertEqual(finished_samples_count // self.dataflow_cfg.prompt_repeat_k, self.dataflow_cfg.global_batch_size)
         ray.get(self.test_env.shutdown.remote(), timeout=300)
         print("responses: ", responses)
