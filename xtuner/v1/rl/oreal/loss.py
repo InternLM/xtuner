@@ -94,6 +94,9 @@ class OrealLossContext(BaseLossContext[RLLossContextInputItem]):
             )
             policy_loss_weights[advantages <= 0] *= loss_cfg.negative_loss_factor / global_negative_tokens
 
+            if item.is_weights is not None:
+                policy_loss_weight = policy_loss_weight * item.is_weights
+
             # compute kl loss weights
             if loss_cfg.use_kl_loss:
                 assert item.ref_logprobs is not None, "ref_logprobs can not be None when use_kl_loss=True"
