@@ -17,7 +17,15 @@ app = FastAPI()
 def get_eos_token_from_model_path(model_path: str, tokenizer=None) -> str | List[str]:
     import os
 
+    from xtuner.v1.utils.logger import get_logger
+
+    logger = get_logger()
     generation_config_path = os.path.join(model_path, "generation_config.json")
+    if not os.path.exists(model_path):
+        logger.warning(
+            f"Model path {model_path} does not exist and thus cannot get eos_token. You must provide eos_token manually."
+        )
+        return []
     with open(generation_config_path) as f:
         generation_config = json.load(f)
     eos_token_id = generation_config.get("eos_token_id")

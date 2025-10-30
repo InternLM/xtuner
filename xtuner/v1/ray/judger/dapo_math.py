@@ -330,6 +330,8 @@ class DapoMathJudgerConfig(BaseModel):
             extra_info=extra_info,
         )
 
+        assert eos_token and len(eos_token) > 0, "eos_token must be provided"
+
         self.extra_info.update(
             {
                 "eos_token": eos_token,
