@@ -17,8 +17,9 @@ from ray.actor import ActorClass
 from typing_extensions import Self
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
+from xtuner.v1.data_proto.rl_data import check_dataflow_item
 from xtuner.v1.data_proto.sequence_context import SequenceContext
-from xtuner.v1.ray.accelerator import AcceleratorResourcesConfig, AutoAcceleratorWorkers
+from xtuner.v1.ray.base import AcceleratorResourcesConfig, AutoAcceleratorWorkers
 from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.ray.dataflow import DataFlow, DataFlowConfig, ReplayBufferConfig
 from xtuner.v1.ray.environment import SingleTurnEnvironment
@@ -29,6 +30,7 @@ from xtuner.v1.rl.base import TrainingWorker as BaseTrainingWorker
 from xtuner.v1.train import ResumeConfig
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger, is_hf_model_path, record_git_info, timer, timer_logger
 from xtuner.v1.utils.device import get_device, get_torch_device_module
+from xtuner.v1.utils.env_check import get_rollout_engine_version
 
 from .trainer import ExpHistory, ExpInfo, GitInfo, XTunerMeta
 
@@ -306,6 +308,8 @@ class RLTrainer:
 
             env_path = log_dir / "env.json"
             environment_variables = dict(os.environ)
+            infer_engine_version = get_rollout_engine_version()
+            environment_variables.update(infer_engine_version)
             with env_path.open("w") as f:
                 json.dump(environment_variables, f, indent=2)
 
@@ -349,7 +353,7 @@ class RLTrainer:
         judger_cfg: JudgerConfig,
         replay_buffer_config: ReplayBufferConfig,
     ):
-        env = cast(ActorClass, SingleTurnEnvironment).remote("grpo", self._pg, rollout_cfg, judger_cfg)
+        env = cast(ActorClass, SingleTurnEnvironment).remote("grpo", self._pg, rollout_cfg, self._pg, judger_cfg)
         flow = cast(ActorClass, DataFlow).remote("grpo", dataflow_cfg, replay_buffer_config, env)
         return env, flow
 
@@ -363,9 +367,8 @@ class RLTrainer:
                 }
             },
         )(BaseTrainingWorker)
-        train_workers = AutoAcceleratorWorkers.from_placement_group(TrainingWorker, train_worker_cfg, self._pg)
+        train_workers, _ = AutoAcceleratorWorkers.from_placement_group(TrainingWorker, train_worker_cfg, self._pg)
         ray.get([worker.__ray_ready__.remote() for worker in train_workers])
-        train_workers = list(train_workers.keys())
         train_controller = cast(ActorClass, TrainingController).remote(
             workers=train_workers,
         )
@@ -462,11 +465,13 @@ class RLTrainer:
         is_multimodal = False
         if multimodal_train_infos and len(multimodal_train_infos) > 0:
             assert len(multimodal_train_infos) == len(data_groups), (
-                f"{len(multimodal_train_infos)} vs {len(data_groups)}"
-            )
+                f"{len(multimodal_train_infos)} vs {len(data_groups)}")
             is_multimodal = True
 
         for j, group in enumerate(data_groups):
+            if not check_dataflow_item(group):
+                self.logger.error(f"Skip one data group {group} due to rollout failed or empty response.")
+                continue
             if is_multimodal:
                 multimodal_train_info = multimodal_train_infos[j]
             else:
@@ -543,11 +548,16 @@ class RLTrainer:
 
     def _save_trajectories(self, data_groups, save_path):
         rewards = []
-        response_len_list = []
 
         rollout_response_len_list = []
-        mismatch_token_ids_count = 0
+        # NOTE: Since we currently default to token-in token-out, the code for checking whether response_ids have Retokenization Drift is commented out.
+        # If you need to debug, you can uncomment it.
+        # mismatch_token_ids_count = 0
+        # response_len_list = []
         for group in data_groups:
+            if not check_dataflow_item(group):
+                self.logger.error(f"Skip one data group {group} due to rollout failed or empty response.")
+                continue
             for data in group:
                 rewards.append(data.env.judger.reward["score"])
                 if data.env.rollout.response_ids is not None:
@@ -556,19 +566,19 @@ class RLTrainer:
                     else:
                         response_ids = data.env.rollout.response_ids
                     rollout_response_len_list.append(len(response_ids))
+                    # response_str = self.tokenizer.decode(response_ids, skip_special_tokens=False)
+                    # revert_encode_response_ids = self.tokenizer.encode(response_str, add_special_tokens=False)
 
-                    response_str = self.tokenizer.decode(response_ids, skip_special_tokens=False)
-                    revert_encode_response_ids = self.tokenizer.encode(response_str, add_special_tokens=False)
+                    # response_str_to_ids = self.tokenizer.encode(data.env.rollout.response, add_special_tokens=False)
+                    # response_len_list.append(len(response_str_to_ids))
 
-                    if response_ids != revert_encode_response_ids:
-                        mismatch_token_ids_count += 1
-
-                response_ids = self.tokenizer.encode(data.env.rollout.response, add_special_tokens=False)
-                response_len_list.append(len(response_ids))
+                    # if response_ids != revert_encode_response_ids or response_ids != response_str_to_ids:
+                    #     mismatch_token_ids_count += 1
+                else:
+                    response_ids = self.tokenizer.encode(data.env.rollout.response, add_special_tokens=False)
+                    rollout_response_len_list.append(len(response_ids))
 
         rewards = torch.tensor(rewards).float()
-        response_lens = torch.tensor(response_len_list).float()
-
         rollout_response_lens = None
         if len(rollout_response_len_list) > 0:
             rollout_response_lens = torch.tensor(rollout_response_len_list).float()
@@ -580,23 +590,13 @@ class RLTrainer:
                 "reward_std": rewards.std().item(),
                 "reward_max": rewards.max().item(),
                 "reward_min": rewards.min().item(),
-                "response_len_mean": response_lens.mean().item(),
-                "response_len_std": response_lens.std().item(),
-                "response_len_max": response_lens.max().item(),
-                "response_len_min": response_lens.min().item(),
+                "response_len_mean": rollout_response_lens.mean().item(),
+                "response_len_std": rollout_response_lens.std().item(),
+                "response_len_max": rollout_response_lens.max().item(),
+                "response_len_min": rollout_response_lens.min().item(),
                 "total_len": len(rewards),
-                "mismatch_token_ids_count": mismatch_token_ids_count,
+                # "mismatch_token_ids_count": mismatch_token_ids_count,
             }
-            if len(rollout_response_len_list) > 0:
-                item.update(
-                    {
-                        "rollout_response_len_mean": rollout_response_lens.mean().item(),
-                        "rollout_response_len_std": rollout_response_lens.std().item(),
-                        "rollout_response_len_max": rollout_response_lens.max().item(),
-                        "rollout_response_len_min": rollout_response_lens.min().item(),
-                    }
-                )
-
             json.dump(item, f, ensure_ascii=False, indent=2)
             f.write("\n")
             for group in data_groups:
@@ -604,14 +604,10 @@ class RLTrainer:
                     item = {
                         "prompt": data.data.extra_info["raw_prompt"],
                         "response": data.env.rollout.response,
-                        "response_len": response_len_list[_count],
+                        "response_len": rollout_response_len_list[_count],
                         "label": data.data.reward_model["ground_truth"],
                         "reward": data.env.judger.reward["score"],
                     }
-
-                    if response_len_list[_count] != rollout_response_len_list[_count]:
-                        item["rollout_response_len"] = rollout_response_len_list[_count]
-
                     json.dump(item, f, ensure_ascii=False, indent=2)
                     f.write("\n")
                     _count += 1
@@ -653,7 +649,7 @@ class RLTrainer:
         if (self.cur_step + 1) % self._hf_interval != 0 and (self.cur_step + 1) != self._rollout_steps:
             return
 
-        save_hf_path = self.exp_dir / f"hf-{self.cur_step}"
+        save_hf_path = self.exp_dir / f"hf-{self.cur_step + 1}"
         self.logger.info(f"Saving step {self.cur_step + 1} checkpoints to: {save_hf_path}")
         self.meta.latest_exp.hf_checkpoint_list.append(str(save_hf_path))
 

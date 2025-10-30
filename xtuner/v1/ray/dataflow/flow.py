@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from tqdm.auto import tqdm
 from typing_extensions import Annotated
 
-from xtuner.v1.data_proto.rl_data import RLDataFlowItem
+from xtuner.v1.data_proto.rl_data import RLDataFlowItem, check_dataflow_item
 from xtuner.v1.ray.environment import SingleTurnEnvironment
 from xtuner.v1.ray.rollout.controller import SampleParams
 from xtuner.v1.ray.utils import create_task
@@ -56,7 +56,7 @@ class DataFlowConfig(BaseModel):
     max_retry_times: Annotated[
         int,
         Parameter(help="Maximum number of retry task for failed samples."),
-    ] = 1
+    ] = 3
     prompt_repeat_k: Annotated[
         int,
         Parameter(help="Number of times to repeat each prompt."),
@@ -141,25 +141,36 @@ class DataFlow:
             Optional[List[RLDataFlowItem]]: The group of samples if the task
             fails and needs to be retried, otherwise None.
         """
-        group_data_items = group_samples_for_retry
         try:
-            # 该函数中所有的数据结构都是RLDataFlowItem
             # step 1: sample
-            with timer("sample", self.timer_dict):
-                group_data_items = await self.replay_buffer.sample.remote(  # type: ignore[attr-defined]
-                    self.env,
-                    self.config.enable_partial_rollout,
-                    self.config.prompt_repeat_k,
-                )
-                self.send_samples_count += 1
-                self.logger.debug(
-                    f"[ROLLOUT] Get 1 sample and dataflow have sent {self.send_samples_count} to rollout_controller"
-                )
+            # TODO(@duanyanhui): More fine-grained control over group data generation:
+            # Pass n to the inference engine to ensure that the same data is processed by the same server, improving efficiency
+            # Resend only the failed prompts in a group when retrying worker_task to avoid wasted computation resources."
+            if group_samples_for_retry is None or len(group_samples_for_retry) == 0:
+                with timer("sample", self.timer_dict):
+                    group_data_items = await self.replay_buffer.sample.remote(  # type: ignore[attr-defined]
+                        self.env,
+                        self.config.enable_partial_rollout,
+                        self.config.prompt_repeat_k,
+                    )
+                    self.send_samples_count += 1
+                    self.logger.debug(
+                        f"[ROLLOUT] Get 1 sample and dataflow have sent {self.send_samples_count} to rollout_controller"
+                    )
+            else:
+                group_data_items = group_samples_for_retry
+                for data_item in group_samples_for_retry:
+                    data_item.extra_info.retry_times += 1
+
             # step 2: env generate
             with timer("generate", self.timer_dict):
                 group_data_items = await self.env_controller.run.remote(  # type: ignore[attr-defined]
                     group_data_items, sample_params=self.sample_params, extra_params=self.extra_params
                 )
+                # 需要在这里处理check_dataflow_item，因为要保留group_data_items的data信息，作为retry的输入
+                if not check_dataflow_item(group_data_items):
+                    return group_data_items
+
             # step 3: filter
             with timer("post_process", self.timer_dict):
                 filtered_group_data_items = await self.replay_buffer.post_processor.remote(group_data_items)  # type: ignore[attr-defined]
@@ -170,8 +181,6 @@ class DataFlow:
 
         except Exception as e:
             self.logger.error(f"Worker task failed with exception: {e}. Returning meta for retry.", exc_info=True)
-            for sample in group_data_items:  # type: ignore[union-attr]
-                sample.extra_info.retry_times += 1
             return group_data_items
 
     async def concurrent_task_runner(self):
@@ -199,7 +208,10 @@ class DataFlow:
         with tqdm(total=self.target_batch_size, desc="rollout_controller for training samples") as pbar:
             update_step = max(1, int(self.target_batch_size * 0.1))
             next_update_threshold = update_step
-            while self.finished_samples_count < self.target_batch_size:
+            while (
+                self.finished_samples_count < self.target_batch_size
+                and self.failed_samples_count < self.target_batch_size
+            ):
                 if self.finished_samples_count >= next_update_threshold:
                     pbar.n = self.finished_samples_count
                     pbar.refresh()
@@ -220,29 +232,38 @@ class DataFlow:
                 for task in done_tasks:
                     result = task.result()
                     if result is not None:
-                        if result[0]["retry_times"] < self.config.max_retry_times:
+                        if result[0].extra_info.retry_times < self.config.max_retry_times:
                             # If the retry count is less than max_retry_times, retry the task
+                            self.logger.info(
+                                f"Retrying task for {result[0].data}. Retry count: {result[0].extra_info.retry_times}"
+                            )
                             retry_task = create_task(self.worker_task(group_samples_for_retry=result))
                             pending_tasks.add(retry_task)
                         else:
-                            self.logger.error(f"Max retry reached for {result[0]['prompt_id']}. Not retrying.")
                             self.failed_samples_count += 1
-
+                            self.logger.error(
+                                f"Max retry reached for {result[0].data}. Not retrying. Current failed count: {self.failed_samples_count}"
+                            )
                 self.finished_samples_count = ray.get(self.replay_buffer.get_finished_samples.remote())
                 waiting_tasks = pending_tasks
 
             pbar.n = self.finished_samples_count
             pbar.refresh()
 
-        self.logger.info("Target batch size reached. Pausing env controller.")
+        if self.finished_samples_count == self.target_batch_size:
+            self.logger.info("Target batch size reached. Pausing env controller.")
+        if self.failed_samples_count == self.target_batch_size:
+            self.logger.info("Max failed samples reached. Pausing env controller.")
+
         ray.get(self.env_controller.pause.remote())
 
         if waiting_tasks:
             await asyncio.wait_for(asyncio.gather(*waiting_tasks, return_exceptions=True), timeout=10)
 
-        self.unfinished_samples_count = ray.get(self.replay_buffer.get_unfinished_samples.remote())
-        self.logging_replaybuffer_state()
-        self.logging_timing_perf()
+        if self.finished_samples_count == self.target_batch_size:
+            self.unfinished_samples_count = ray.get(self.replay_buffer.get_unfinished_samples.remote())
+            self.logging_replaybuffer_state()
+            self.logging_timing_perf()
 
     async def run(
         self,

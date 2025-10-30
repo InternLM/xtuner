@@ -95,8 +95,7 @@ class SGLangWorker(RolloutWorker):
             json=payload,
         )
         r = await self.client.send(req, stream=stream)
-        r.raise_for_status()
-        return r
+        return payload, r
 
     def _make_request(self, endpoint: str, payload=None):
         # TODO: 支持 tp
@@ -158,6 +157,14 @@ class SGLangWorker(RolloutWorker):
         os.environ.pop("CUDA_VISIBLE_DEVICES", None)
         from sglang.srt.server_args import ServerArgs
 
+        extra_config = self.config.extra_rollout_config or dict()
+        sglang_config_kwargs = {
+            k.replace("sglang_", ""): v for k, v in extra_config.items() if k.startswith("sglang_")
+        }
+        grammar_backend = sglang_config_kwargs.get(
+            "grammar_backend", None
+        )  # for intern-s1 series models, have to set the grammar_backend to "none"
+
         sglang_server_args = ServerArgs(model_path=self.config.model_path, trust_remote_code=True)
         sglang_server_args.host = self.host
         sglang_server_args.port = self.server_port
@@ -172,9 +179,8 @@ class SGLangWorker(RolloutWorker):
         # note: 非共卡模式下无需设置,共卡模式下需要offload必须设置，否则显存释放不了
         sglang_server_args.enable_memory_saver = True
         sglang_server_args.max_running_requests = int(os.environ.get("XTUNER_MAX_CONCURRENCY", 2000))
-        sglang_server_args.trust_remote_code = True
-        if "interns1" in self.model_name.lower():
-            sglang_server_args.grammar_backend = "none"
+        if grammar_backend is not None:
+            sglang_server_args.grammar_backend = grammar_backend
 
         if self.config.context_length is not None:
             sglang_server_args.context_length = self.config.context_length

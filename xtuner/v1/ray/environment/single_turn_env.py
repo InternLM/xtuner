@@ -4,7 +4,11 @@ from typing import List
 
 import ray
 
-from xtuner.v1.data_proto.rl_data import RLDataFlowItem, RLJudgerResponseItem, update_dataflow_item
+from xtuner.v1.data_proto.rl_data import (
+    RLDataFlowItem,
+    RLJudgerResponseItem,
+    update_dataflow_item,
+)
 from xtuner.v1.ray.environment.base_env import BaseEnvironment
 from xtuner.v1.utils import get_logger
 
@@ -19,13 +23,15 @@ class SingleTurnEnvironment(BaseEnvironment):
 
     Args:
         environment (str): The name of the environment.
-        placement_group: The placement group for scheduling Ray actors.
+        rollout_pg: The placement group for scheduling rollout Ray actors.
         rollout_cfg (optional): Configuration for the rollout controller. Defaults to None.
+        judger_pg (Any): The placement group for scheduling judger Ray actors.
+                         Defaults to None indicates using the rollout_pg.
         judger_cfg (optional): Configuration for the judger controller. Defaults to None.
     """
 
-    def __init__(self, environment: str, placement_group, rollout_cfg=None, judger_cfg=None):
-        super().__init__(environment, placement_group, rollout_cfg, judger_cfg)
+    def __init__(self, environment: str, rollout_pg, rollout_cfg=None, judger_pg=None, judger_cfg=None):
+        super().__init__(environment, rollout_pg, rollout_cfg, judger_pg, judger_cfg)
         worker_log_dir = rollout_cfg.worker_log_dir if rollout_cfg else judger_cfg.worker_log_dir
         self.logger = get_logger(log_dir=worker_log_dir, tag="SingleTurnEnv")
 

@@ -12,12 +12,7 @@ from ray import ObjectRef
 from typing_extensions import Annotated
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
-from xtuner.v1.data_proto.rl_data import (
-    RLDataFlowItem,
-    RLDatasetItem,
-    RLExtraDataItem,
-    RLUIDItem,
-)
+from xtuner.v1.data_proto.rl_data import RLDataFlowItem, RLDatasetItem, RLExtraDataItem, RLUIDItem, check_dataflow_item
 from xtuner.v1.datasets import build_dataloader, build_datasets
 from xtuner.v1.datasets.config import DataloaderConfig
 from xtuner.v1.utils import get_logger
@@ -290,13 +285,12 @@ class ReplayBufferStorage:
             grouped_dataitem (List[RLDataFlowItem]): A list of data items
                 belonging to the same group.
         """
-        if len(grouped_dataitem) == 0:
+        if not check_dataflow_item(grouped_dataitem):
+            # remove multimodal_train_info
+            action_id = grouped_dataitem[0].uid.action_id
+            if action_id in self._multimodal_train_infos:
+                del self._multimodal_train_infos[action_id]
             return
-
-        for item in grouped_dataitem:
-            finish_reason = item.env.rollout.finish_reason
-            if finish_reason == "failed":
-                return
 
         replay_meta = mapping_dataitem_to_replaymeta(grouped_dataitem)
         root_id = replay_meta.root_id
@@ -341,7 +335,8 @@ class ReplayBufferStorage:
         samples = []
         multimodal_train_infos = []
         if len(self._returned) < global_batch_size:
-            raise ValueError("Not enough finished samples in replay buffer")
+            self.logger.error("Not enough finished samples in replay buffer")
+            return []
         else:
             target_finished_list = self._returned[:global_batch_size]
             remain_finished_list = self._returned[global_batch_size:]
@@ -354,9 +349,9 @@ class ReplayBufferStorage:
                 multimodal_train_infos.append(self._multimodal_train_infos.pop(action_id))
             self._returned = remain_finished_list
 
-            # assert len(self._multimodal_train_infos) == len(self._returned), (
-            #     "multimodal_train_infos and returned should have the same length"
-            # ) # 暂时注释
+            assert len(self._multimodal_train_infos) == len(self._returned), (
+                "multimodal_train_infos and returned should have the same length"
+            )
             return samples, multimodal_train_infos
 
     def get_finished_samples(self):

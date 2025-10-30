@@ -9,7 +9,7 @@ import numpy as np
 from uuid import uuid4
 from xtuner.v1.ray.environment import SingleTurnEnvironment
 from xtuner.v1.ray.config.worker import RolloutConfig
-from xtuner.v1.ray.accelerator import AcceleratorResourcesConfig, AutoAcceleratorWorkers
+from xtuner.v1.ray.base import AcceleratorResourcesConfig, AutoAcceleratorWorkers
 from xtuner.v1.ray.judger.controller import JudgerController, JudgerConfig
 from xtuner.v1.data_proto.rl_data import RLDataFlowItem, RLDatasetItem, RLEnvDataItem, RLRolloutResponseItem, RLUIDItem
 
@@ -17,6 +17,7 @@ from xtuner.v1.data_proto.rl_data import RLDataFlowItem, RLDatasetItem, RLEnvDat
 MODEL_PATH = os.environ["ROLLOUT_MODEL_PATH"]
 DATA_PATH = os.environ["ROLLOUT_DATA_PATH"]
 VERL_ROLLOUT_DATA_PATH = os.environ["VERL_ROLLOUT_DATA_PATH"]
+DAPO_DATA_PATH = os.environ.get("ROLLOUT_DAPO_DATA_PATH")
 
 FAKE_JUDGER_INPUT_ITEM = RLDataFlowItem(
     uid = RLUIDItem(action_id=uuid4().int,
@@ -67,6 +68,39 @@ def construct_judger_data(data_path):
             dataitem.append(data_item)
     return dataitem
 
+def construct_dapo_judger_data(data_path):
+    data_item_list = []
+    save_reward = []
+    with open(data_path, 'r', encoding='utf-8') as f:
+        lines = f.readlines()
+        for i in range(0, len(lines), 7):
+            group = ''.join(lines[i:i+7]).strip()
+            if group:
+                try:
+                    item = json.loads(group)
+                    data_item = RLDataFlowItem(
+                        uid = RLUIDItem(
+                            action_id=uuid4().int,
+                            observation_id=uuid4().int
+                            ),
+                        data = RLDatasetItem(
+                            messages=[{
+                                'role': 'user', 
+                                'content': ""
+                            }],
+                            reward_model={"ground_truth": item["label"]},
+                            data_source={"dapo_math": 1.0}
+                        ),
+                        env = RLEnvDataItem(
+                            rollout=RLRolloutResponseItem(response=item['response'])
+                        )
+                    )
+                    data_item_list.append(data_item)
+                    save_reward.append(item["reward"])
+                except Exception as e:
+                    print(f"Error parsing group starting at line {i+12}: {e}")
+    return data_item_list, save_reward
+
 class TestJudgerController(unittest.TestCase):
 
     @classmethod
@@ -100,6 +134,33 @@ class TestJudgerController(unittest.TestCase):
         res2 = ray.get(judger_controller.run.remote(FAKE_JUDGER_INPUT_ITEM_MULTI_DATA))
         self.assertEqual(res2[0].reward["score"], 1.0)
         self.assertEqual(res2[1].reward["score"], 1.0)
+
+    def test_dapo_judger(self):
+        from xtuner.v1.ray.judger.dapo_math import DapoMathJudgerConfig
+        from xtuner.v1.utils.rl_test_utils import get_eos_token_from_model_path
+        from transformers import AutoTokenizer
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
+        eos_token_str = get_eos_token_from_model_path(MODEL_PATH, tokenizer)
+
+        dapo_judger_config = DapoMathJudgerConfig(
+            judger_name="dapo_math", 
+            eos_token=eos_token_str,
+            enable_overlong_buffer=True, 
+            max_response_len=32768, 
+            overlong_buffer_len=4096, 
+            overlong_penalty_factor=1.0, 
+            tokenizer=tokenizer
+        
+        )
+        judger_cfg = JudgerConfig(
+            reward_judger_configs=[dapo_judger_config]
+        )
+        judger_controller = JudgerController.remote(judger_cfg)
+        judger_data, save_reward = construct_dapo_judger_data(DAPO_DATA_PATH)
+        group_data = ray.get(judger_controller.run.remote(judger_data)) 
+        reward = [data.reward["score"] for data in group_data]
+        avg_score = np.mean(reward)
+        self.assertLessEqual(float(np.abs(avg_score - np.mean(save_reward))), 0.001)
 
     def test_gsm8k_multi_judger(self):
         from xtuner.v1.ray.judger.gsm8k import GSM8KJudgerConfig
