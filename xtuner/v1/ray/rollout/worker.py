@@ -370,7 +370,6 @@ class RolloutWorker(SingleAcceleratorWorker):
                 continue
             try:
                 chunk_data_str = chunk[len("data:") :].strip()
-                # self.logger.debug(f"chunk_data_str: {chunk_data_str}")
                 if self.paused or chunk_data_str == "[DONE]":
                     finish_reason = "paused" if self.paused else finish_reason
                     break
@@ -378,7 +377,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                     continue
 
                 chunk_data = json.loads(chunk_data_str)
-                # lmdeploy, 在验证下sglang
+
                 if "return_token_ids" in extra_params and extra_params["return_token_ids"]:
                     last_trajectory = last_trajectory + chunk_data.get("text", "")
                     finish_reason = chunk_data["meta_info"].get("finish_reason")
