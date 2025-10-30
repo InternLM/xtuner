@@ -43,11 +43,12 @@ hf_interval = 50
 enable_evaluate = True
 enable_initial_evaluate = True
 evaluate_step = 5
+num_workers = int(os.environ.get("NODE_COUNT")) * 8 if os.environ.get("NODE_COUNT") else 8
 
 # 1. resources
 resources = AcceleratorResourcesConfig(
     accelerator="GPU",
-    num_workers=8,
+    num_workers=num_workers,
     num_cpus_per_worker=12,
     cpu_memory_per_worker=16 * 1024**3,  # 16 GB
 )

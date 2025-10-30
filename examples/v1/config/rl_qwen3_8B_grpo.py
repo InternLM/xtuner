@@ -43,6 +43,7 @@ hf_interval = 15
 enable_evaluate = True
 enable_initial_evaluate = True
 evaluate_step = 10
+num_workers = int(os.environ.get("NODE_COUNT")) * 8 if os.environ.get("NODE_COUNT") else 8
 
 # grpo quick test settings for rapid accuracy validation within ~30 minutes:
 # - Initial eval accuracy: ~25%
@@ -64,7 +65,7 @@ evaluate_step = 10
 # 1. resources
 resources = AcceleratorResourcesConfig(
     accelerator="GPU",
-    num_workers=8,
+    num_workers=num_workers,
     num_cpus_per_worker=12,
     cpu_memory_per_worker=16 * 1024**3,  # 16 GB
 )
