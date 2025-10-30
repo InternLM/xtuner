@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from torch import distributed as dist
 from torch.distributed._functional_collectives import all_reduce
 
+from xtuner.v1.profiler.prober import ProberList
 
 class _AllReduce(torch.autograd.Function):
     @staticmethod
@@ -41,6 +42,7 @@ class BalancingLoss(nn.Module):
         if self.loss_weight == 0:
             return torch.tensor(0.0, device=router_logits.device, dtype=torch.float32)
 
+        ProberList.before_balancing_loss(router_logits)
         num_layers = router_logits.shape[0]
         router_logits = router_logits.float()  # (nlayers, seq, ne)
         if self.loss_type == "softmax":
@@ -77,6 +79,7 @@ class BalancingLoss(nn.Module):
         loss = scale_global * (tokens_per_expert_global * routing_weights_mean_global).sum(-1)
         loss = loss.sum()
 
+        ProberList.after_balancing_loss(loss, routing_weights_mean_global, tokens_per_expert_global, scale_global)
         return loss * self.loss_weight
 
 
