@@ -23,6 +23,7 @@ from torch.utils._foreach_utils import (
     _device_has_foreach_support,
     _has_foreach_support,
 )
+from torch.nn.utils.clip_grad import _no_grad
 
 from xtuner.v1.config import FSDPConfig, OptimConfig
 from xtuner.v1.data_proto.sequence_context import SequenceContext
@@ -333,26 +334,30 @@ class TrainEngine:
                 grouped_tensors[key] = [tensor]
         return grouped_tensors
 
-    def cal_total_norm(self, tensors: List[DTensor], norm_type: float = 2.0, foreach: Optional[bool] = None):
+    def cal_total_norm(self, tensors: List[DTensor], norm_type: float = 2.0, foreach: Optional[bool] = None, dtype=torch.float32):
         norm_type = float(norm_type)
         if len(tensors) == 0:
             return torch.tensor(0.0)
 
-        device_mesh: DeviceMesh = tensors[0].device_mesh
-        placements = tensors[0].placements
-        device = tensors[0].device
+        device_mesh: DeviceMesh = tensors[0].device_mesh  # For eg: DeviceMesh('cuda', [0, 1], mesh_dim_names=('default.fsdp',))
+        placements = tensors[0].placements  # For eg: (Shard(dim=0),)
+        device = tensors[0].device  # For eg: device(type='cuda', index=0)
         norms: Tuple[DTensor, ...]
         if (foreach is None and _has_foreach_support(tensors, device)) or (  # type: ignore
             foreach and _device_has_foreach_support(device)
         ):
-            norms = torch._foreach_norm(tensors, norm_type, dtype=torch.float32)  # type: ignore
+            norms = torch._foreach_norm(tensors, norm_type, dtype=dtype)  # type: ignore
+            # element of norms is dtensor with placement of _NormPartial
+            # For example: norms[0] = DTensor(local_tensor=0.04525977373123169, 
+            #                                 device_mesh=DeviceMesh('cuda', [0, 1], mesh_dim_names=('default.fsdp',)), 
+            #                                 placements=(_NormPartial(reduce_op='sum', norm_type=2.0),))
         elif foreach:
             raise RuntimeError(f"foreach=True was passed, but can't use the foreach API on {device.type} tensors")
         else:
-            norms = tuple(torch.linalg.vector_norm(g, norm_type, dtype=torch.float32) for g in tensors)
+            norms = tuple(torch.linalg.vector_norm(g, norm_type, dtype=dtype) for g in tensors)
 
         local_norm = torch.linalg.vector_norm(
-            torch.stack([norm.to_local() for norm in norms]), norm_type, dtype=torch.float32
+            torch.stack([norm.to_local() for norm in norms]), norm_type, dtype=dtype
         )
         if norm_type == 2:
             local_norm_squared = local_norm**2
@@ -370,18 +375,22 @@ class TrainEngine:
             raise NotImplementedError
         return global_norm
 
-    def clip_grad_norm(self, do_clip: bool = True):
+    @_no_grad
+    def clip_grad_norm(self, do_clip: bool = True, dtype=torch.float32):
         # import torch.distributed as dist; dist.breakpoint()
         ProberList.before_clip_grad_norm()
         self.model.scale_and_reduce_grad()
         params = self.model.trainable_parameters()
         grads = [p.grad for _, p in params if p.grad is not None]
+        # grad_norm, grouped_grads = cal_grad_norm(grads, dtype=dtype)
         grouped_grads = self.group_tensors_by_device_mesh_and_placements(grads)
+        print(f"clip_grad_norm dtype: {dtype}")
         total_norms = []
         for grads in grouped_grads.values():
-            total_norm = self.cal_total_norm(grads, norm_type=2.0, foreach=True)
+            total_norm = self.cal_total_norm(grads, norm_type=2.0, foreach=True, dtype=dtype)
             total_norms.append(total_norm)
-        grad_norm = torch.linalg.vector_norm(torch.stack(total_norms), ord=2.0, dtype=torch.float32)
+        grad_norm = torch.linalg.vector_norm(torch.stack(total_norms), ord=2.0, dtype=dtype)
+        grad_norm = grad_norm.to(grads[0].dtype)
         if do_clip:
             clip_coef = self.optim_cfg.max_grad_norm / (grad_norm + 1e-6)
             clip_coef_clamped = torch.clamp(clip_coef, max=1.0)
@@ -394,7 +403,7 @@ class TrainEngine:
                     for g in grads:
                         g.mul_(clip_coef_clamped_device)
         # import torch.distributed as dist; dist.breakpoint()
-        ProberList.after_clip_grad_norm()
+        ProberList.after_clip_grad_norm(grad_norm)
         return grad_norm
 
     def step_optimizer(self, grad_norm):
