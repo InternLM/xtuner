@@ -67,6 +67,7 @@ rl = [
   "httpx",
   "fastapi",
   "uvicorn",
+  "mathruler",
 ]
 video = [
   "decord",
@@ -80,6 +81,7 @@ all = [
   "uvicorn",
   "liger-kernel",
   "parametrize",
+  "mathruler",
 ]
 
 [tool.mypy]

@@ -566,7 +566,10 @@ class TrainingWorker(SingleAcceleratorWorker):
             tensor_list = []
             name_list = []
             for sub_name, param in layer.state_dict().items():
-                saved_list.append(f"language_model.layers.{i}.{sub_name}")
+                if isinstance(model.config, VisionComposeConfigProtocol):
+                    saved_list.append(f"language_model.layers.{i}.{sub_name}")
+                else:
+                    saved_list.append(f"layers.{i}.{sub_name}")
                 local_tensor = param._local_tensor if isinstance(param, DTensor) else param
                 local_tensor = local_tensor.bfloat16()
                 load_spec = language_model.load_spec_mapping.get(f"layers.{i}.{sub_name}")
