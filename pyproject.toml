@@ -48,6 +48,8 @@ dependencies = [
   "timm",
   "codetiming",
   "GitPython",
+  "mathruler",
+  "pylatexenc"
 ]
 
 [project.urls]
