@@ -155,4 +155,4 @@ class Qwen3Dense0P6BConfig(Qwen3DenseConfig):
     attention: MHAConfig = MHAConfig(
         num_attention_heads=16, num_key_value_heads=8, head_dim=128, qk_norm=True, sliding_window=None
     )
-    tie_word_embeddings: bool = False # 官方的是 False 
+    tie_word_embeddings: bool = False  # 官方的是 False
