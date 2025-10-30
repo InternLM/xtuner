@@ -8,32 +8,33 @@ from xtuner.v1.data_proto.rl_data import RLDatasetItem
 from xtuner.v1.utils import get_logger
 
 from ..data_item import OmniDataItem
-from ..mllm_tokenize_fn.qwen3_vl_tokenize_fn import Qwen3VLTokenizeFunction
 from ..mllm_tokenize_fn.intern_s1_vl_tokenize_fn import InternS1VLTokenizeFunction
+from ..mllm_tokenize_fn.qwen3_vl_tokenize_fn import Qwen3VLTokenizeFunction
 from ..utils import CachableTokenizeFunction, replace_image_context_and_collect_media_data
+
 
 logger = get_logger()
 
 
 class RLTokenizeFn(CachableTokenizeFunction[RLDatasetItem]):
     def __init__(
-            self,
-            tokenizer_fn: CachableTokenizeFunction | None,
-            tokenizer: PreTrainedTokenizer,
-            max_length: int | None = None,
-            ignore_mm_process: bool = False,
+        self,
+        tokenizer_fn: CachableTokenizeFunction | None,
+        tokenizer: PreTrainedTokenizer,
+        max_length: int | None = None,
+        ignore_mm_process: bool = False,
     ):
         super().__init__(tokenizer)
         self.tokenizer_fn = tokenizer_fn
         self.max_length = max_length
         self.ignore_mm_process = ignore_mm_process
 
-        self.model_name = 'default'
+        self.model_name = "default"
         if self.tokenizer_fn:
-            if isinstance(self, Qwen3VLTokenizeFunction):
-                self.model_name = 'qwen3_vl'
-            elif isinstance(self, InternS1VLTokenizeFunction):
-                self.model_name = 'intern_s1_vl'
+            if isinstance(self.tokenizer_fn, Qwen3VLTokenizeFunction):
+                self.model_name = "qwen3_vl"
+            elif isinstance(self.tokenizer_fn, InternS1VLTokenizeFunction):
+                self.model_name = "intern_s1_vl"
             else:
                 raise ValueError(f"Unsupported tokenizer_fn type: {type(self.tokenizer_fn)}")
 
@@ -77,10 +78,10 @@ class RLTokenizeFn(CachableTokenizeFunction[RLDatasetItem]):
             data = cast(OmniDataItem, data)
             num_tokens = data["num_tokens"]
 
-            media_root = kwargs.get("media_root", '')
-            if self.model_name == 'qwen3_vl':
+            media_root = kwargs.get("media_root", "")
+            if self.model_name == "qwen3_vl":
                 image_data, _ = replace_image_context_and_collect_media_data(messages, media_root, True)
-            elif self.model_name == 'intern_s1_vl':
+            elif self.model_name == "intern_s1_vl":
                 image_data, _ = replace_image_context_and_collect_media_data(messages, media_root, False)
             else:
                 raise ValueError(f"Unsupported model_name: {self.model_name}")
@@ -139,8 +140,7 @@ class RLTokenizeFnConfig(BaseModel):
     ignore_mm_process: bool = False
 
     def build(
-            self, tokenizer: PreTrainedTokenizer, tokenizer_hash: str | None = None, anno_name: str | None = None,
-            **kwargs
+        self, tokenizer: PreTrainedTokenizer, tokenizer_hash: str | None = None, anno_name: str | None = None, **kwargs
     ) -> RLTokenizeFn:
         tokenizer_fn = None
         if self.tokenize_fn_cfg:

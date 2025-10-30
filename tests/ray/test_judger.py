@@ -1,21 +1,17 @@
 import os
-import argparse
-from pathlib import Path
 import copy
 import json
 import ray
 import unittest
 import numpy as np
 from uuid import uuid4
-from xtuner.v1.ray.environment import SingleTurnEnvironment
-from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.ray.base import AcceleratorResourcesConfig, AutoAcceleratorWorkers
 from xtuner.v1.ray.judger.controller import JudgerController, JudgerConfig
 from xtuner.v1.data_proto.rl_data import RLDataFlowItem, RLDatasetItem, RLEnvDataItem, RLRolloutResponseItem, RLUIDItem
 
-
 MODEL_PATH = os.environ["ROLLOUT_MODEL_PATH"]
 DATA_PATH = os.environ["ROLLOUT_DATA_PATH"]
+GEO_ROLLOUT_DATA_PATH = os.environ["GEO_ROLLOUT_DATA_PATH"]
 VERL_ROLLOUT_DATA_PATH = os.environ["VERL_ROLLOUT_DATA_PATH"]
 DAPO_DATA_PATH = os.environ.get("ROLLOUT_DAPO_DATA_PATH")
 
@@ -68,7 +64,8 @@ def construct_judger_data(data_path):
             dataitem.append(data_item)
     return dataitem
 
-def construct_dapo_judger_data(data_path):
+
+def construct_new_judger_data(data_path, judger_name='dapo_math'):
     data_item_list = []
     save_reward = []
     with open(data_path, 'r', encoding='utf-8') as f:
@@ -89,7 +86,7 @@ def construct_dapo_judger_data(data_path):
                                 'content': ""
                             }],
                             reward_model={"ground_truth": item["label"]},
-                            data_source={"dapo_math": 1.0}
+                            data_source={judger_name: 1.0}
                         ),
                         env = RLEnvDataItem(
                             rollout=RLRolloutResponseItem(response=item['response'])
@@ -100,6 +97,7 @@ def construct_dapo_judger_data(data_path):
                 except Exception as e:
                     print(f"Error parsing group starting at line {i+12}: {e}")
     return data_item_list, save_reward
+
 
 class TestJudgerController(unittest.TestCase):
 
@@ -137,13 +135,14 @@ class TestJudgerController(unittest.TestCase):
 
     def test_dapo_judger(self):
         from xtuner.v1.ray.judger.dapo_math import DapoMathJudgerConfig
-        from xtuner.v1.utils.rl_test_utils import get_eos_token_from_model_path
+        from xtuner.v1.utils.rl_test_utils import get_eos_token
         from transformers import AutoTokenizer
         tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
-        eos_token_str = get_eos_token_from_model_path(MODEL_PATH, tokenizer)
+        eos_token = get_eos_token(MODEL_PATH)
+        eos_token_str = tokenizer.convert_ids_to_tokens(eos_token)
 
         dapo_judger_config = DapoMathJudgerConfig(
-            judger_name="dapo_math", 
+            judger_name="dapo_math",
             eos_token=eos_token_str,
             enable_overlong_buffer=True, 
             max_response_len=32768, 
@@ -156,11 +155,22 @@ class TestJudgerController(unittest.TestCase):
             reward_judger_configs=[dapo_judger_config]
         )
         judger_controller = JudgerController.remote(judger_cfg)
-        judger_data, save_reward = construct_dapo_judger_data(DAPO_DATA_PATH)
+        judger_data, save_reward = construct_new_judger_data(DAPO_DATA_PATH)
         group_data = ray.get(judger_controller.run.remote(judger_data)) 
         reward = [data.reward["score"] for data in group_data]
-        avg_score = np.mean(reward)
-        self.assertLessEqual(float(np.abs(avg_score - np.mean(save_reward))), 0.001)
+        self.assertEqual(np.mean(reward), np.mean(save_reward))
+
+    def test_geo_judger(self):
+        from xtuner.v1.ray.judger.geo3k import GEO3KJudgerConfig
+        geo_judger_config = GEO3KJudgerConfig()
+        judger_cfg = JudgerConfig(
+            reward_judger_configs=[geo_judger_config]
+        )
+        judger_controller = JudgerController.remote(judger_cfg)
+        judger_data, save_reward = construct_new_judger_data(GEO_ROLLOUT_DATA_PATH, judger_name="hiyouga/geometry3k")
+        group_data = ray.get(judger_controller.run.remote(judger_data))
+        reward = [data.reward["score"] for data in group_data]
+        self.assertEqual(np.mean(reward), np.mean(save_reward))
 
     def test_gsm8k_multi_judger(self):
         from xtuner.v1.ray.judger.gsm8k import GSM8KJudgerConfig
@@ -176,7 +186,7 @@ class TestJudgerController(unittest.TestCase):
         )
         judger_controller = JudgerController.remote(judger_cfg)
         res3 = ray.get(judger_controller.run.remote(FAKE_JUDGER_INPUT_ITEM_MULTI_SOURCE))
-        self.assertEqual(res3.reward["weighted_score"], 1.0) # weighted_score为固定字段，表示加权后的reward
+        self.assertEqual(res3.reward["weighted_score"], 1.0)  # weighted_score为固定字段，表示加权后的reward
         
     def test_gsm8k_judger_score(self):
         """Test the judger functionality with single and multiple data sources."""
@@ -189,9 +199,8 @@ class TestJudgerController(unittest.TestCase):
         judger_data = construct_judger_data(VERL_ROLLOUT_DATA_PATH)
         group_data = ray.get(judger_controller.run.remote(judger_data))
         reward = [data.reward["score"] for data in group_data]
-        avg_score = np.mean(reward)
         verl_score = 0.2418
-        self.assertLessEqual(float(np.abs(avg_score - verl_score)), 0.001)
+        self.assertEqual(np.mean(reward), verl_score)
 
     def test_gsm8k_remote_judger(self):
         from xtuner.v1.utils.rl_test_utils import JudgerServer, GSM8KRemoteJudgerConfig
@@ -207,9 +216,8 @@ class TestJudgerController(unittest.TestCase):
         judger_data = construct_judger_data(VERL_ROLLOUT_DATA_PATH)
         group_data = ray.get(judger_controller.run.remote(judger_data))
         reward = [data.reward["score"] for data in group_data]
-        avg_score = np.mean(reward)
         verl_score = 0.2418
-        self.assertLessEqual(float(np.abs(avg_score - verl_score)), 0.001)
+        self.assertEqual(np.mean(reward), verl_score)
         server.stop()
         
     def tearDown(self):

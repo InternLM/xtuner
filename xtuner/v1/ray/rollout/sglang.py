@@ -59,11 +59,11 @@ class SGLangWorker(RolloutWorker):
         else:
             if "return_token_ids" in extra_params and extra_params["return_token_ids"]:
                 # 多模态场景下，由于 input_ids 处理比较复杂，现在不支持 prompt 输入，必须要有 input_ids
-                if 'image_data' in extra_info:
+                if "image_data" in extra_info:
                     assert input_ids is not None, "input_ids is required when image_data is provided."
                 if input_ids is not None:
                     payload["input_ids"] = input_ids
-                    if 'image_data' in extra_info:
+                    if "image_data" in extra_info:
                         payload["image_data"] = extra_info["image_data"]
                 else:
                     text_prompt = self.tokenizer.apply_chat_template(

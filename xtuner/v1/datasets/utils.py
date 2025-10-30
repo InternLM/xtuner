@@ -1,10 +1,10 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import hashlib
+import os
 import tempfile
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar
-import os
 
 import xxhash
 from PIL import Image

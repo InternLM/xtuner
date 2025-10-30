@@ -289,6 +289,9 @@ class ReplayBufferStorage:
             # remove multimodal_train_info
             action_id = grouped_dataitem[0].uid.action_id
             if action_id in self._multimodal_train_infos:
+                if "pixel_values" in self._multimodal_train_infos[action_id]:
+                    # del ray obj ref
+                    del self._multimodal_train_infos[action_id]["pixel_values"]
                 del self._multimodal_train_infos[action_id]
             return
 
