@@ -18,9 +18,9 @@ class SequenceContext:
             Gets cumulative sequence length for query state.
         cu_seq_lens_k (`torch.LongTensor`, *optional*)
             Gets cumulative sequence length for key state.
-        max_length_q (`int`, *optional*):
+        max_length_q (`torch.Tensor | int`, *optional*):
             Maximum sequence length for query state.
-        max_length_k (`int`, *optional*):
+        max_length_k (`torch.Tensor | int`, *optional*):
             Maximum sequence length for key state.
     """
 
@@ -28,8 +28,8 @@ class SequenceContext:
     input_ids: torch.LongTensor  # shape (1, seq_len)
     cu_seq_lens_q: torch.IntTensor
     cu_seq_lens_k: torch.IntTensor
-    max_length_q: int
-    max_length_k: int
+    max_length_q: torch.Tensor
+    max_length_k: torch.Tensor
     num_padding: int = 0
     sequence_parallel_mesh: DeviceMesh | None = None
     block_table: torch.Tensor | None = None
@@ -48,18 +48,70 @@ class SequenceContext:
     inputs_embeds: torch.FloatTensor | None = None
     num_img_tokens: list[int] | None = None
 
-    def __post_init__(self):
-        if self.position_ids is None:
-            seq_lens_k = self.cu_seq_lens_k[1:] - self.cu_seq_lens_k[:-1]
-            seq_lens_q = self.cu_seq_lens_q[1:] - self.cu_seq_lens_q[:-1]
+    def __init__(
+        self,
+        input_ids: torch.LongTensor,  # shape (1, seq_len)
+        cu_seq_lens_q: torch.IntTensor,
+        cu_seq_lens_k: torch.IntTensor,
+        max_length_q: torch.Tensor | int,
+        max_length_k: torch.Tensor | int,
+        num_padding: int = 0,
+        sequence_parallel_mesh: DeviceMesh | None = None,
+        block_table: torch.Tensor | None = None,
+        device: str | torch.device = "cpu",  # TODO: 这个地方有点乱，到处是 device
+        position_ids: torch.LongTensor | None = None,
+        # Intern-S1
+        image_flags: torch.LongTensor | None = None,
+        # Qwen3VL
+        image_grid_thw: torch.Tensor | None = None,
+        deepstack_visual_embeds: list[torch.Tensor] | None = None,
+        visual_pos_masks: torch.Tensor | None = None,
+        # mllm model
+        pixel_values: torch.FloatTensor | None = None,
+        inputs_embeds: torch.FloatTensor | None = None,
+        num_img_tokens: list[int] | None = None,
+    ):
+        # Only to distinguish parameters accepted by the constructor from attributes. For example, for `max_length_q`,
+        # the argument can be an int, but as an attribute it can only be a tensor
+        self.input_ids = input_ids
+        self.cu_seq_lens_q = cu_seq_lens_q
+        self.cu_seq_lens_k = cu_seq_lens_k
+        if isinstance(max_length_q, int):
+            self.max_length_q = torch.tensor(max_length_q, device=cu_seq_lens_q.device)
+        else:
+            self.max_length_q = max_length_q
+        if isinstance(max_length_k, int):
+            self.max_length_k = torch.tensor(max_length_k, device=cu_seq_lens_k.device)
+        else:
+            self.max_length_k = max_length_k
+        self.num_padding = num_padding
+        self.sequence_parallel_mesh = sequence_parallel_mesh
+        self.block_table = block_table
+        self.device = device
+        self.position_ids = position_ids
+        self.image_flags = image_flags
+        self.image_grid_thw = image_grid_thw
+        self.deepstack_visual_embeds = deepstack_visual_embeds
+        self.visual_pos_masks = visual_pos_masks
+        self.pixel_values = pixel_values
+        self.inputs_embeds = inputs_embeds
+        self.num_img_tokens = num_img_tokens
 
-            _position_ids = [torch.arange(k - q, k) for q, k in zip(seq_lens_q, seq_lens_k)]
-            position_ids = torch.cat(_position_ids).unsqueeze(0).to(self.cu_seq_lens_k.device)
+        seq_lens_k = self.cu_seq_lens_k[1:] - self.cu_seq_lens_k[:-1]
+        seq_lens_q = self.cu_seq_lens_q[1:] - self.cu_seq_lens_q[:-1]
 
-            if self.sequence_parallel_mesh is not None:
-                position_ids = split_for_sequence_parallel(position_ids, dim=1, sp_mesh=self.sequence_parallel_mesh)
+        if isinstance(self.max_length_k, int):
+            self.max_length_k = torch.tensor(self.max_length_k, device=self.cu_seq_lens_k.device)
+        if isinstance(self.max_length_q, int):
+            self.max_length_q = torch.tensor(self.max_length_q, device=self.cu_seq_lens_q.device)
 
-            self.position_ids = position_ids
+        _position_ids = [torch.arange(k - q, k) for q, k in zip(seq_lens_q, seq_lens_k)]
+        position_ids = torch.cat(_position_ids).unsqueeze(0).to(self.cu_seq_lens_k.device)
+
+        if self.sequence_parallel_mesh is not None:
+            position_ids = split_for_sequence_parallel(position_ids, dim=1, sp_mesh=self.sequence_parallel_mesh)
+
+        self.position_ids = position_ids
 
     @classmethod
     def from_input_ids(
@@ -162,8 +214,8 @@ class SequenceContext:
                 if len(cu_seq_lens_k) == 0
                 else (seq_ctx.cu_seq_lens_k + cu_seq_lens_k[-1][-1])[1:]
             )
-            max_length_q = max(max_length_q, seq_ctx.max_length_q)
-            max_length_k = max(max_length_k, seq_ctx.max_length_k)
+            max_length_q = max(max_length_q, seq_ctx.max_length_q)  # type: ignore[call-overload]
+            max_length_k = max(max_length_k, seq_ctx.max_length_k)  # type: ignore[call-overload]
             num_padding += seq_ctx.num_padding
             device.append(torch.device(seq_ctx.device))
             if seq_ctx.inputs_embeds is not None:

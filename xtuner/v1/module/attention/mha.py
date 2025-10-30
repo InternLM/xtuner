@@ -371,9 +371,6 @@ class MultiHeadAttention(nn.Module):
         assert key_states.size(0) == 1
         assert value_states.size(0) == 1
 
-        assert isinstance(seq_ctx.max_length_q, int)
-        assert isinstance(seq_ctx.max_length_k, int)
-
         kwargs = {}
         if self.with_sink:
             if isinstance(self.sinks, DTensor):
