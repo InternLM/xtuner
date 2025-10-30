@@ -180,7 +180,8 @@ class TestRollout(unittest.TestCase):
                                          self.test_env
                                         )
         extra_params = {"stream": True, "return_token_ids": True, "return_logprobs": True}
-        responses = ray.get(self.test_flow.run.remote(extra_params=extra_params, dump=True, dump_path="/mnt/shared-storage-user/duanyanhui/xtuner-dev/xtuner/unfinished_buffer.pickle"))
+        dump_path = os.path.join(self.temp_dir.name, "unfinished_buffer.pickle")
+        responses = ray.get(self.test_flow.run.remote(extra_params=extra_params, dump=True, dump_path=dump_path))
         finished_samples_count = sum(1 for data in responses for item in data if item.env.rollout.finish_reason == "stop" or item.env.rollout.finish_reason == "length")
         self.assertEqual(finished_samples_count // self.dataflow_cfg.prompt_repeat_k, self.dataflow_cfg.global_batch_size)
         status = ray.get(self.test_flow.get_replaybuffer_status.remote())
@@ -191,7 +192,7 @@ class TestRollout(unittest.TestCase):
         self.assertEqual(len(responses), self.dataflow_cfg.global_batch_size)
 
         ray.get(self.test_flow.clear_replaybuffer.remote())
-        response_resume = ray.get(self.test_flow.run.remote(extra_params=extra_params, resume=True, resume_path="/mnt/shared-storage-user/duanyanhui/xtuner-dev/xtuner/unfinished_buffer.pickle"))
+        response_resume = ray.get(self.test_flow.run.remote(extra_params=extra_params, resume=True, resume_path=dump_path))
         finished_resume_samples_count = sum(1 for data in response_resume for item in data if item.env.rollout.finish_reason == "stop" or item.env.rollout.finish_reason == "length")
         self.assertEqual(finished_resume_samples_count // self.dataflow_cfg.prompt_repeat_k, self.dataflow_cfg.global_batch_size)
         status = ray.get(self.test_flow.get_replaybuffer_status.remote())
@@ -260,7 +261,8 @@ class TestRollout(unittest.TestCase):
                                          self.test_env
                                         )
         extra_params = {"stream": True, "return_token_ids": True, "return_logprobs": True}
-        responses = ray.get(self.test_flow.run.remote(num=1, extra_params=extra_params, dump=False, dump_path="/mnt/shared-storage-user/duanyanhui/xtuner-dev/xtuner/unfinished_buffer.pickle"))
+        dump_path = os.path.join(self.temp_dir.name, "unfinished_buffer.pickle")
+        responses = ray.get(self.test_flow.run.remote(num=1, extra_params=extra_params, dump=False, dump_path=dump_path))
         finished_samples_count = sum(1 for data in responses for item in data if item.env.rollout.finish_reason == "stop" or item.env.rollout.finish_reason == "length")
         self.assertEqual(finished_samples_count // self.dataflow_cfg.prompt_repeat_k, self.dataflow_cfg.global_batch_size)
         status = ray.get(self.test_flow.get_replaybuffer_status.remote())
@@ -271,7 +273,7 @@ class TestRollout(unittest.TestCase):
         self.assertEqual(len(responses), self.dataflow_cfg.global_batch_size)
 
         ray.get(self.test_flow.clear_replaybuffer.remote())
-        response_resume = ray.get(self.test_flow.run.remote(extra_params=extra_params, resume=True, resume_path="/mnt/shared-storage-user/duanyanhui/xtuner-dev/xtuner/unfinished_buffer.pickle"))
+        response_resume = ray.get(self.test_flow.run.remote(extra_params=extra_params, resume=True, resume_path=dump_path))
         finished_resume_samples_count = sum(1 for data in response_resume for item in data if item.env.rollout.finish_reason == "stop" or item.env.rollout.finish_reason == "length")
         self.assertEqual(finished_resume_samples_count // self.dataflow_cfg.prompt_repeat_k, self.dataflow_cfg.global_batch_size)
         status = ray.get(self.test_flow.get_replaybuffer_status.remote())
