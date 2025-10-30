@@ -14,7 +14,7 @@ from xtuner.v1.ray.judger.native import NativeJudger
 app = FastAPI()
 
 
-def get_eos_token_from_model_path(model_path: str, tokenizer=None) -> str | List[str]:
+def get_eos_token(model_path: str) -> int | List[int]:
     import os
 
     from xtuner.v1.utils.logger import get_logger
@@ -29,11 +29,7 @@ def get_eos_token_from_model_path(model_path: str, tokenizer=None) -> str | List
     with open(generation_config_path) as f:
         generation_config = json.load(f)
     eos_token_id = generation_config.get("eos_token_id")
-    if tokenizer is not None:
-        eos_token_str = tokenizer.convert_ids_to_tokens(eos_token_id)
-        return eos_token_str
-    else:
-        return eos_token_id
+    return eos_token_id
 
 
 class JudgeRequest(BaseModel):

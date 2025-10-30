@@ -316,6 +316,16 @@ class DapoMathJudgerConfig(BaseModel):
         format_score: int = 0,
         extra_info: dict = {},
     ):
+        if isinstance(eos_token, str):
+            assert eos_token.strip() != "", "eos_token string must not be empty"
+        elif isinstance(eos_token, list):
+            assert all(isinstance(e, str) and e.strip() != "" for e in eos_token), (
+                "All eos_token list elements must be non-empty strings"
+            )
+            assert len(eos_token) > 0, "eos_token list must not be empty"
+        else:
+            raise TypeError("eos_token must be a non-empty string or a non-empty list of strings")
+
         # 初始化基类
         super().__init__(
             judger_name=judger_name,
@@ -329,7 +339,6 @@ class DapoMathJudgerConfig(BaseModel):
             tokenizer=tokenizer,
             extra_info=extra_info,
         )
-        assert eos_token and len(eos_token) > 0, "eos_token must be provided"
 
         self.extra_info.update(
             {
