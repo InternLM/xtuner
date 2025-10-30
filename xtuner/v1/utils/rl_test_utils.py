@@ -21,9 +21,9 @@ def get_eos_token(model_path: str) -> int | List[int]:
 
     logger = get_logger()
     generation_config_path = os.path.join(model_path, "generation_config.json")
-    if not os.path.exists(model_path):
+    if not os.path.exists(generation_config_path):
         logger.warning(
-            f"Model path {model_path} does not exist and thus cannot get eos_token. You must provide eos_token manually."
+            f"Config {generation_config_path} does not exist and thus cannot get eos_token. You must provide eos_token manually."
         )
         return []
     with open(generation_config_path) as f:
