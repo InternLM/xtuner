@@ -146,6 +146,20 @@ class RLDataFlowItem(BaseModel):
     extra_info: RLExtraDataItem = RLExtraDataItem()
 
 
+def check_dataflow_item(group_data_items):
+    if not group_data_items or len(group_data_items) == 0:
+        return False
+
+    no_failures = all(item.env.rollout.finish_reason != "failed" for item in group_data_items)
+    if not no_failures:
+        return False
+
+    all_responses_valid = all(item.env.rollout.response for item in group_data_items)
+    all_ids_valid = all(item.env.rollout.response_ids for item in group_data_items)
+
+    return all_responses_valid or all_ids_valid
+
+
 def update_dataflow_item(group_data_items, target_key, target_value):
     """Update a list of RLDataFlowItem objects by setting a nested attribute
     for each item.

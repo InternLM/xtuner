@@ -56,7 +56,7 @@ class DataFlowConfig(BaseModel):
     max_retry_times: Annotated[
         int,
         Parameter(help="Maximum number of retry task for failed samples."),
-    ] = 1
+    ] = 3
     prompt_repeat_k: Annotated[
         int,
         Parameter(help="Number of times to repeat each prompt."),
@@ -141,6 +141,10 @@ class DataFlow:
             Optional[List[RLDataFlowItem]]: The group of samples if the task
             fails and needs to be retried, otherwise None.
         """
+        if group_samples_for_retry is not None:
+            for data_item in group_samples_for_retry:
+                data_item.extra_info.retry_times += 1
+
         group_data_items = group_samples_for_retry
         try:
             # 该函数中所有的数据结构都是RLDataFlowItem
@@ -160,6 +164,7 @@ class DataFlow:
                 group_data_items = await self.env_controller.run.remote(  # type: ignore[attr-defined]
                     group_data_items, sample_params=self.sample_params, extra_params=self.extra_params
                 )
+
             # step 3: filter
             with timer("post_process", self.timer_dict):
                 filtered_group_data_items = await self.replay_buffer.post_processor.remote(group_data_items)  # type: ignore[attr-defined]
@@ -220,7 +225,7 @@ class DataFlow:
                 for task in done_tasks:
                     result = task.result()
                     if result is not None:
-                        if result[0]["retry_times"] < self.config.max_retry_times:
+                        if result[0].extra_info.retry_times < self.config.max_retry_times:
                             # If the retry count is less than max_retry_times, retry the task
                             retry_task = create_task(self.worker_task(group_samples_for_retry=result))
                             pending_tasks.add(retry_task)

@@ -20,7 +20,13 @@ from xtuner.v1.model.base import ModelItem, TransformerConfig
 from xtuner.v1.ray.base import SingleAcceleratorWorker
 from xtuner.v1.ray.config import RolloutConfig
 from xtuner.v1.rl.utils import gather_logprobs
-from xtuner.v1.utils import ParallelConfigException, get_device, get_logger, get_torch_device_module
+from xtuner.v1.utils import (
+    ParallelConfigException,
+    get_device,
+    get_logger,
+    get_torch_device_module,
+    monkey_unpatch_torch_reductions,
+)
 
 from ..loss_fn import kl_penalty
 from .loss import BaseRLLossConfig, RLLossContextInputItem
@@ -767,6 +773,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             except Exception:
                 use_flattened_tensor_bucket = False
 
+            # NOTE: xtuner目前去掉sglang的patch也不会出问题，但为了保险起见，还是保留patch逻辑，并且在update_weights结束后unpatch
             monkey_patch_torch_reductions()
             if self.rollout_cfg_info["tp"] == 1:
                 if use_flattened_tensor_bucket:
@@ -839,4 +846,6 @@ class TrainingWorker(SingleAcceleratorWorker):
 
         if finished:
             dist.barrier(group=cpu_group)
+
+        monkey_unpatch_torch_reductions()
         return

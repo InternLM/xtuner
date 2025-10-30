@@ -12,6 +12,7 @@ from .pad import pad_to_max_length, pad_to_multiple_of
 from .profile import profile_time_and_memory, timer, timer_logger
 from .state import ForwardState
 from .type_helper import copy_method_signature, copy_signature
+from .update_weights_utils import monkey_unpatch_torch_reductions
 
 
 IGNORE_INDEX = -100
@@ -43,4 +44,5 @@ __all__ = [
     "init_params",
     "default_init_weights",
     "IGNORE_INDEX",
+    "monkey_unpatch_torch_reductions",
 ]
