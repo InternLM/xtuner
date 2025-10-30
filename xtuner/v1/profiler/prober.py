@@ -158,6 +158,14 @@ class BaseProber(ABC):
     @classmethod
     def after_balancing_loss(cls, loss: torch.Tensor, routing_weights_mean_global: torch.Tensor, tokens_per_expert_global: torch.Tensor, scale_global: torch.Tensor):
         pass
+
+    @classmethod
+    def before_z_loss(cls, router_logits: torch.Tensor):
+        pass
+    
+    @classmethod
+    def after_z_loss(cls, z_loss: torch.Tensor):
+        pass
     
     ############################## hooks for gradient #################################
     @classmethod
@@ -324,6 +332,16 @@ class ProberList:
         for prober_cls in cls.prober_list:
             prober_cls.after_balancing_loss(loss, routing_weights_mean_global, tokens_per_expert_global, scale_global)
     
+    @classmethod
+    def before_z_loss(cls, router_logits: torch.Tensor):
+        for prober_cls in cls.prober_list:
+            prober_cls.before_z_loss(router_logits)
+    
+    @classmethod
+    def after_z_loss(cls, z_loss: torch.Tensor):
+        for prober_cls in cls.prober_list:
+            prober_cls.after_z_loss(z_loss)
+    
     ############################## hooks for gradient #################################
     @classmethod
     def before_clip_grad_norm(cls):
@@ -485,6 +503,14 @@ class AccProber(BaseProber):
         cls.record_tensor(routing_weights_mean_global, "[balancing_loss][after]routing_weights_mean_global")
         cls.record_tensor(tokens_per_expert_global, "[balancing_loss][after]tokens_per_expert_global")
         cls.record_tensor(scale_global, "[balancing_loss][after]scale_global")
+    
+    @classmethod
+    def before_z_loss(cls, router_logits: torch.Tensor):
+        cls.record_tensor(router_logits, "[z_loss][before]router_logits")
+    
+    @classmethod
+    def after_z_loss(cls, z_loss: torch.Tensor):
+        cls.record_tensor(z_loss, "[z_loss][after]z_loss")
     
     ############################## hooks for step and iter #################################
     @classmethod

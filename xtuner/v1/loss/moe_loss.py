@@ -84,6 +84,7 @@ class BalancingLoss(nn.Module):
 
 
 def z_loss(router_logits: torch.Tensor, global_average: bool = False):
+    ProberList.before_z_loss(router_logits)
     router_logits = router_logits.float()  # (nlayers, seq, ne)
     num_seq = max(1, router_logits.shape[1])
     logsum_square = z_loss = torch.logsumexp(router_logits, dim=-1).square()
@@ -95,6 +96,8 @@ def z_loss(router_logits: torch.Tensor, global_average: bool = False):
         unmasked_num_global = all_reduce(unmasked_num_rank, "sum", dist.group.WORLD)  # type: ignore
         world_size = dist.get_world_size()
         z_loss = z_loss * unmasked_num * world_size / unmasked_num_global
+
+    ProberList.after_z_loss(z_loss)
     return z_loss
 
 
