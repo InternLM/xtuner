@@ -25,8 +25,8 @@ export TRITON_CACHE_DIR=/tmp/.triton
 export PYTEST_ADDOPTS='-o cache_dir=/tmp/.pytest_cache'
 
 proxy_off
-pip install -e . -i http://mirrors.h.pjlab.org.cn/pypi/simple/ --trusted-host mirrors.h.pjlab.org.cn
-pip install openai-harmony -i http://mirrors.h.pjlab.org.cn/pypi/simple/ --trusted-host mirrors.h.pjlab.org.cn --break-system-packages
-pip install numpy==1.26.4 -i http://mirrors.h.pjlab.org.cn/pypi/simple/ --trusted-host mirrors.h.pjlab.org.cn --trusted-host pypi.i.h.pjlab.org.cn
+pip install -e .
+pip install openai-harmony
+pip install numpy==1.26.4
 
 export PYTHONPATH=${LM_DEPLOY}:$PYTHONPATH
