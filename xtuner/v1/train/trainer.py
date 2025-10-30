@@ -160,6 +160,8 @@ class TrainerConfig(BaseModel):
     debug: bool = False
     debug_skip_save: bool = False
     prober_list: list[str] = []
+    do_clip: bool = True
+    grad_norm_dtype: torch.dtype = torch.float32
 
     @model_validator(mode="after")
     def _convert_work_dir(self):
@@ -258,8 +260,12 @@ class Trainer:
         backend: str | None = None,
         debug_skip_save: bool = False,
         prober_list: list[str] = [],
+        do_clip: bool = True,
+        grad_norm_dtype: torch.dtype = torch.float32,
         trainer_cfg: TrainerConfig | None = None,
     ):
+        self._do_clip = do_clip
+        self._grad_norm_dtype = grad_norm_dtype
         self._dataloader_config = dataloader_cfg
 
         self._total_step = total_step
@@ -448,6 +454,8 @@ class Trainer:
             debug=config.debug,
             debug_skip_save=config.debug_skip_save,
             prober_list=config.prober_list,
+            do_clip=config.do_clip,
+            grad_norm_dtype=config.grad_norm_dtype,
             trainer_cfg=config,
         )
         self.config = config
@@ -505,7 +513,7 @@ class Trainer:
             with self._maybe_profiling():
                 loss_log, other_log = self._engine.train_step(engine_input)
 
-            grad_norm = self._engine.clip_grad_norm(do_clip=False)  # TODO: do_clip is False for debug_acc
+            grad_norm = self._engine.clip_grad_norm(do_clip=self._do_clip, dtype=self._grad_norm_dtype)
             self._engine.step_optimizer(grad_norm)
             time_after_train_step = time.time()
             ProberList.after_step()

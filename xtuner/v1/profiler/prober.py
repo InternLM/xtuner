@@ -173,7 +173,7 @@ class BaseProber(ABC):
         pass
     
     @classmethod
-    def after_clip_grad_norm(cls):
+    def after_clip_grad_norm(cls, grad_norm: torch.Tensor):
         pass
 
     ############################## hooks for step and iter #################################
@@ -349,9 +349,9 @@ class ProberList:
             prober_cls.before_clip_grad_norm()
     
     @classmethod
-    def after_clip_grad_norm(cls):
+    def after_clip_grad_norm(cls, grad_norm: torch.Tensor):
         for prober_cls in cls.prober_list:
-            prober_cls.after_clip_grad_norm()
+            prober_cls.after_clip_grad_norm(grad_norm)
     
     ############################## hooks for step and iter #################################
     @classmethod
@@ -383,7 +383,7 @@ class AccProber(BaseProber):
             return
         assert cls.initialized, "AccProber is not initialized, please call setup() first"
         if tensor is None:
-            logger.warning(f"[AccProber] Warning: {name} is None, skip recording")
+            # logger.warning(f"[AccProber] Warning: {name} is None, skip recording")
             return
         tensor = tensor.detach().clone()
         cur_json = {
@@ -530,7 +530,7 @@ class AccProber(BaseProber):
     
     ############################## hooks for gradient #################################
     @classmethod
-    def _grad_dump(cls, suffix: str):
+    def _grad_dump(cls, suffix: str, grad_norm: torch.Tensor | None = None):
         if cls.skip():
             return
         assert cls.initialized, "AccProber is not initialized, please call setup() first"
@@ -543,16 +543,27 @@ class AccProber(BaseProber):
         for name, param in trainable_params:
             assert param.grad is not None, f"Error: {name} param.grad must not be None"
             grad = param.grad.detach().clone().view(-1)
-            grad_sum = grad.float().sum()
+            grad = grad.float()
             cur_json = {
                 "name": name,
-                "grad_sum": grad_sum.item(),
+                "grad_sum": grad.sum().item(),
+                "grad_mean": grad.mean().item(),
+                "grad_std": grad.to_local().std().item(),
                 "weight_sum": param.detach().clone().float().sum().item(),
                 "shape": list(param.shape),
                 "dtype": str(param.dtype),
                 "param_info": str(param),
             }
             res.append(cur_json)
+        if grad_norm is not None:
+            res.append({
+                "name": "grad_norm",
+                "grad_sum": grad_norm.detach().float().sum().item(),
+                "weight_sum": grad_norm.detach().float().sum().item(),
+                "shape": list(grad_norm.shape),
+                "dtype": str(grad_norm.dtype),
+                "param_info": str(grad_norm),
+            })
         
         dump_file = cls.dump_dir.joinpath(
             f"STEP_{cls.cur_step}_RANK_{dist.get_rank()}_{suffix}.jsonl"
@@ -567,8 +578,8 @@ class AccProber(BaseProber):
         cls._grad_dump("before_clip_grad_norm")
     
     @classmethod
-    def after_clip_grad_norm(cls):
-        cls._grad_dump("after_clip_grad_norm")
+    def after_clip_grad_norm(cls, grad_norm: torch.Tensor):
+        cls._grad_dump("after_clip_grad_norm", grad_norm)
     
 
 class TimeProber(BaseProber):
@@ -644,7 +655,7 @@ class TimeProber(BaseProber):
         cls._start_timer("clip_grad_norm")
     
     @classmethod
-    def after_clip_grad_norm(cls):
+    def after_clip_grad_norm(cls, grad_norm: torch.Tensor):
         cls._end_timer("clip_grad_norm")
     
     @classmethod
