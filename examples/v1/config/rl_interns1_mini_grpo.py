@@ -117,7 +117,7 @@ if enable_evaluate:
                                      sample_ratio=1.0),
             "tokenize_fn": RLTokenizeFnConfig(max_length=max_prompt_length,
                                               tokenize_fn_cfg=tokenize_fn_cfg,
-                                              is_training=False),
+                                              ignore_mm_process=True),
         }
     ]
 

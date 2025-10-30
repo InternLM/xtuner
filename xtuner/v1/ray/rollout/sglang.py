@@ -7,7 +7,6 @@ from urllib3.exceptions import NewConnectionError
 
 from transformers import AutoTokenizer
 from xtuner.v1.ray.config import RolloutConfig
-from xtuner.v1.ray.utils import replace_image_context_and_collect_media_data
 
 from .worker import RolloutWorker
 
@@ -59,24 +58,18 @@ class SGLangWorker(RolloutWorker):
             raise NotImplementedError("Streaming mode is not supported for SGLangWorker.")
         else:
             if "return_token_ids" in extra_params and extra_params["return_token_ids"]:
+                # 多模态场景下，由于 input_ids 处理比较复杂，现在不支持 prompt 输入，必须要有 input_ids
+                if 'image_data' in extra_info:
+                    assert input_ids is not None, "input_ids is required when image_data is provided."
                 if input_ids is not None:
                     payload["input_ids"] = input_ids
+                    if 'image_data' in extra_info:
+                        payload["image_data"] = extra_info["image_data"]
                 else:
-                    assert prompt is not None, "prompt is required when input_ids is None."
-                    if self.model_name == "qwen3-vl":
-                        replace_image_ctx = True
-                    else:
-                        replace_image_ctx = False
-                    image_data, _ = replace_image_context_and_collect_media_data(prompt, extra_info, replace_image_ctx)
-                    if image_data:
-                        assert len(image_data) == 1, "SGLangWorker only support single image input."
-                        payload["image_data"] = image_data[0]
-
                     text_prompt = self.tokenizer.apply_chat_template(
                         prompt, tokenize=False, add_generation_prompt=True
                     )
                     prompt_token_ids = self.tokenizer(text_prompt, add_special_tokens=False)["input_ids"]
-
                     payload["input_ids"] = prompt_token_ids
                 payload["sampling_params"] = sglang_sample_params
             else:

@@ -62,6 +62,7 @@ class SingleTurnEnvironment(BaseEnvironment):
             response_future = [
                 self.rollout_controller.rollout.remote(
                     prompt=sample.data.messages,
+                    input_ids=sample.data.input_ids,
                     sample_params=sample_params,
                     extra_params=extra_params,
                     extra_info=sample.data.extra_info,

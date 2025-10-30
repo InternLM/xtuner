@@ -9,24 +9,33 @@ from xtuner.v1.utils import get_logger
 
 from ..data_item import OmniDataItem
 from ..mllm_tokenize_fn.qwen3_vl_tokenize_fn import Qwen3VLTokenizeFunction
-from ..utils import CachableTokenizeFunction
-
+from ..mllm_tokenize_fn.intern_s1_vl_tokenize_fn import InternS1VLTokenizeFunction
+from ..utils import CachableTokenizeFunction, replace_image_context_and_collect_media_data
 
 logger = get_logger()
 
 
 class RLTokenizeFn(CachableTokenizeFunction[RLDatasetItem]):
     def __init__(
-        self,
-        tokenizer_fn: CachableTokenizeFunction | None,
-        tokenizer: PreTrainedTokenizer,
-        max_length: int | None = None,
-        is_training: bool = True,
+            self,
+            tokenizer_fn: CachableTokenizeFunction | None,
+            tokenizer: PreTrainedTokenizer,
+            max_length: int | None = None,
+            ignore_mm_process: bool = False,
     ):
         super().__init__(tokenizer)
         self.tokenizer_fn = tokenizer_fn
         self.max_length = max_length
-        self.is_training = is_training
+        self.ignore_mm_process = ignore_mm_process
+
+        self.model_name = 'default'
+        if self.tokenizer_fn:
+            if isinstance(self, Qwen3VLTokenizeFunction):
+                self.model_name = 'qwen3_vl'
+            elif isinstance(self, InternS1VLTokenizeFunction):
+                self.model_name = 'intern_s1_vl'
+            else:
+                raise ValueError(f"Unsupported tokenizer_fn type: {type(self.tokenizer_fn)}")
 
     def __call__(self, item: dict, **kwargs) -> RLDatasetItem:
         """example:
@@ -50,21 +59,17 @@ class RLTokenizeFn(CachableTokenizeFunction[RLDatasetItem]):
         """
 
         extra_info = item.get("extra_info", {})
-        if "media_root" in kwargs:
-            media_root = kwargs["media_root"]
-            extra_info["media_root"] = media_root
-
         messages = item["prompt"]
-        raw_prompt = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
         if self.tokenizer_fn is None:
             # pure text
-            data = self.tokenizer(raw_prompt, return_tensors="pt", add_special_tokens=False)
-            input_ids = data.pop("input_ids")[0]
-            num_tokens = len(input_ids)
+            raw_prompt = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+            data = self.tokenizer(raw_prompt, add_special_tokens=False)
+            prompt_token_ids = data["input_ids"]
+            num_tokens = len(data["input_ids"])
         else:
             # mllm
             self.tokenizer_fn.state = self.state
-            if not self.is_training:
+            if self.ignore_mm_process:
                 # 如果是评估模式下，不需要 pixel_values 等计算负担比较大的属性
                 self.tokenizer_fn.state = "cache"
 
@@ -72,9 +77,19 @@ class RLTokenizeFn(CachableTokenizeFunction[RLDatasetItem]):
             data = cast(OmniDataItem, data)
             num_tokens = data["num_tokens"]
 
-            if isinstance(self.tokenizer_fn, Qwen3VLTokenizeFunction):
-                # Qwen3-vl 中 <IMG_CONTEXT> 会自动在 tokenizer.apply_chat_template 中处理，所以需要移除
-                raw_prompt = raw_prompt.replace("<IMG_CONTEXT>", "")
+            media_root = kwargs.get("media_root", '')
+            if self.model_name == 'qwen3_vl':
+                image_data, _ = replace_image_context_and_collect_media_data(messages, media_root, True)
+            elif self.model_name == 'intern_s1_vl':
+                image_data, _ = replace_image_context_and_collect_media_data(messages, media_root, False)
+            else:
+                raise ValueError(f"Unsupported model_name: {self.model_name}")
+            if image_data:
+                assert len(image_data) == 1, "only support single image input."
+                extra_info["image_data"] = image_data
+
+            raw_prompt = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+            prompt_token_ids = self.tokenizer(raw_prompt, add_special_tokens=False)["input_ids"]
 
         multimodal_train_info = {}
         extra_info["raw_prompt"] = raw_prompt
@@ -85,7 +100,7 @@ class RLTokenizeFn(CachableTokenizeFunction[RLDatasetItem]):
         else:
             if self.max_length is not None:
                 assert num_tokens <= self.max_length, f"num_tokens {num_tokens} > max_length {self.max_length}"
-            if self.is_training:
+            if not self.ignore_mm_process:
                 if "pixel_values" in data:
                     multimodal_train_info["pixel_values"] = data["pixel_values"]
                 if "image_flags" in data:
@@ -103,6 +118,7 @@ class RLTokenizeFn(CachableTokenizeFunction[RLDatasetItem]):
 
         rl_out_data = {
             "messages": messages,
+            "input_ids": prompt_token_ids,
             "num_tokens": num_tokens,
             "reward_model": item["reward_model"],
             "ability": item.get("ability", None),
@@ -120,10 +136,11 @@ class RLTokenizeFnConfig(BaseModel):
     model_config = ConfigDict(title="Base RL dataset config for xtuner", extra="forbid")
     tokenize_fn_cfg: BaseModel | None = None
     max_length: int | None = None
-    is_training: bool = True  # only for mllm
+    ignore_mm_process: bool = False
 
     def build(
-        self, tokenizer: PreTrainedTokenizer, tokenizer_hash: str | None = None, anno_name: str | None = None, **kwargs
+            self, tokenizer: PreTrainedTokenizer, tokenizer_hash: str | None = None, anno_name: str | None = None,
+            **kwargs
     ) -> RLTokenizeFn:
         tokenizer_fn = None
         if self.tokenize_fn_cfg:
@@ -134,5 +151,5 @@ class RLTokenizeFnConfig(BaseModel):
                 **kwargs,
             )
         return RLTokenizeFn(
-            tokenizer_fn, tokenizer=tokenizer, max_length=self.max_length, is_training=self.is_training
+            tokenizer_fn, tokenizer=tokenizer, max_length=self.max_length, ignore_mm_process=self.ignore_mm_process
         )
