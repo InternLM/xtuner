@@ -1,5 +1,5 @@
 import re
-from typing import Any, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 from pydantic import BaseModel, Field
 
@@ -265,8 +265,14 @@ def compute_reward(response, label, extra_info):
     predict_str = response
 
     eos_token = extra_info["eos_token"]
-    if response.endswith(eos_token):
-        response = response[: -len(eos_token)]
+    if isinstance(eos_token, list):
+        for eos in eos_token:
+            if response.endswith(eos):
+                response = response[: -len(eos)]
+                break
+    else:
+        if response.endswith(eos_token):
+            response = response[: -len(eos_token)]
 
     out = compute_score(response, label)
     reward = out["score"]
@@ -287,33 +293,61 @@ def compute_reward(response, label, extra_info):
 
 class DapoMathJudgerConfig(BaseModel):
     judger_name: str = "dapo_math"
-    extra_info: dict = Field(default={"score": 1, "format_score": 0, "eos_token": "<|endoftext|>"})
+    eos_token: List[str] | str
     enable_overlong_buffer: bool
+    score: int = 1
+    format_score: int = 0
     max_response_len: Optional[int] = None
     overlong_buffer_len: Optional[int] = None
     overlong_penalty_factor: Optional[float] = None
     tokenizer: Any = None
+    extra_info: dict = Field(default_factory=dict)
 
     def __init__(
         self,
         judger_name: str,
+        eos_token: List[str] | str,
         enable_overlong_buffer: bool,
         max_response_len: Optional[int],
         overlong_buffer_len: Optional[int],
         overlong_penalty_factor: Optional[float],
         tokenizer: Any,
+        score: int = 1,
+        format_score: int = 0,
+        extra_info: dict = {},
     ):
+        if isinstance(eos_token, str):
+            assert eos_token.strip() != "", "eos_token string must not be empty"
+        elif isinstance(eos_token, list):
+            assert all(isinstance(e, str) and e.strip() != "" for e in eos_token), (
+                "All eos_token list elements must be non-empty strings"
+            )
+            assert len(eos_token) > 0, "eos_token list must not be empty"
+        else:
+            raise TypeError("eos_token must be a non-empty string or a non-empty list of strings")
+
         # 初始化基类
         super().__init__(
             judger_name=judger_name,
+            eos_token=eos_token,
             enable_overlong_buffer=enable_overlong_buffer,
+            score=score,
+            format_score=format_score,
             max_response_len=max_response_len,
             overlong_buffer_len=overlong_buffer_len,
             overlong_penalty_factor=overlong_penalty_factor,
             tokenizer=tokenizer,
+            extra_info=extra_info,
         )
 
-        # 根据条件更新 extra_info
+        self.extra_info.update(
+            {
+                "eos_token": eos_token,
+                "score": score,
+                "format_score": format_score,
+            }
+        )
+
         if enable_overlong_buffer:
             assert max_response_len is not None
             assert overlong_buffer_len is not None

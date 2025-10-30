@@ -318,7 +318,7 @@ class ReplayBufferStorage:
         """
         samples = []
         if len(self._returned) < global_batch_size:
-            raise ValueError("Not enough finished samples in replay buffer")
+            self.logger.error("Not enough finished samples in replay buffer")
             return []
         else:
             target_finished_list = self._returned[:global_batch_size]
