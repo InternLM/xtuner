@@ -150,6 +150,14 @@ class BaseProber(ABC):
     @classmethod
     def after_lm_head(cls, loss: torch.Tensor, logits: torch.Tensor):
         pass
+
+    @classmethod
+    def before_balancing_loss(cls, router_logits: torch.Tensor):
+        pass
+    
+    @classmethod
+    def after_balancing_loss(cls, loss: torch.Tensor, routing_weights_mean_global: torch.Tensor, tokens_per_expert_global: torch.Tensor, scale_global: torch.Tensor):
+        pass
     
     ############################## hooks for gradient #################################
     @classmethod
@@ -306,6 +314,16 @@ class ProberList:
         for prober_cls in cls.prober_list:
             prober_cls.after_lm_head(loss, logits)
     
+    @classmethod
+    def before_balancing_loss(cls, router_logits: torch.Tensor):
+        for prober_cls in cls.prober_list:
+            prober_cls.before_balancing_loss(router_logits)
+    
+    @classmethod
+    def after_balancing_loss(cls, loss: torch.Tensor, routing_weights_mean_global: torch.Tensor, tokens_per_expert_global: torch.Tensor, scale_global: torch.Tensor):
+        for prober_cls in cls.prober_list:
+            prober_cls.after_balancing_loss(loss, routing_weights_mean_global, tokens_per_expert_global, scale_global)
+    
     ############################## hooks for gradient #################################
     @classmethod
     def before_clip_grad_norm(cls):
@@ -378,6 +396,7 @@ class AccProber(BaseProber):
     def after_layer(cls, layer_idx: str|int, hidden_states: torch.Tensor):
         cls.record_tensor(hidden_states, f"[layers.{layer_idx}][after]hidden_states")
     
+    # ******************************* Attention Block *******************************
     @classmethod
     def before_input_layernorm(cls, layer_idx: str|int, hidden_states: torch.Tensor):
         cls.record_tensor(hidden_states, f"[layers.{layer_idx}.input_layernorm][before]hidden_states")
@@ -394,6 +413,7 @@ class AccProber(BaseProber):
     def after_self_attn(cls, layer_idx: str|int, hidden_states: torch.Tensor):
         cls.record_tensor(hidden_states, f"[layers.{layer_idx}.self_attn][after]hidden_states")
     
+    # ******************************* MoE Block *******************************
     @classmethod
     def before_post_attention_layernorm(cls, layer_idx: str|int, hidden_states: torch.Tensor):
         cls.record_tensor(hidden_states, f"[layers.{layer_idx}.post_attention_layernorm][before]hidden_states")
@@ -444,6 +464,7 @@ class AccProber(BaseProber):
     def after_combine(cls, layer_idx: str|int, combined_hidden_states: torch.Tensor):
         cls.record_tensor(combined_hidden_states, f"[layers.{layer_idx}.combine][after]combined_hidden_states")
     
+    # ******************************* LM Head Block *******************************
     @classmethod
     def before_lm_head(cls, hidden_states: torch.Tensor, shifted_labels: torch.Tensor):
         cls.record_tensor(hidden_states, "[lm_head][before]hidden_states")
@@ -454,6 +475,18 @@ class AccProber(BaseProber):
         cls.record_tensor(loss, "[lm_head][after]loss")
         cls.record_tensor(logits, "[lm_head][after]logits")
     
+    @classmethod
+    def before_balancing_loss(cls, router_logits: torch.Tensor):
+        cls.record_tensor(router_logits, "[balancing_loss][before]router_logits")
+    
+    @classmethod
+    def after_balancing_loss(cls, loss: torch.Tensor, routing_weights_mean_global: torch.Tensor, tokens_per_expert_global: torch.Tensor, scale_global: torch.Tensor):
+        cls.record_tensor(loss, "[balancing_loss][after]loss")
+        cls.record_tensor(routing_weights_mean_global, "[balancing_loss][after]routing_weights_mean_global")
+        cls.record_tensor(tokens_per_expert_global, "[balancing_loss][after]tokens_per_expert_global")
+        cls.record_tensor(scale_global, "[balancing_loss][after]scale_global")
+    
+    ############################## hooks for step and iter #################################
     @classmethod
     def after_micro_iter_forward(cls):
         if cls.skip():
