@@ -20,7 +20,7 @@ def format_reward(predict_str: str) -> float:
 
 def acc_reward(predict_str: str, ground_truth: str, use_boxed: bool = True) -> float:
     if extract_boxed_content is None:
-        raise ImportError("Please install mathruler by 'pip install mathruler'")
+        raise ImportError("Please install mathruler by 'pip install mathruler pylatexenc'")
     if use_boxed:
         answer = extract_boxed_content(predict_str)
     else:
