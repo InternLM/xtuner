@@ -73,6 +73,7 @@ class LMDeployWorker(RolloutWorker):
         self.tokenizer = AutoTokenizer.from_pretrained(self.config.tokenizer_path, trust_remote_code=True)
         self.api_keys = self.config.api_key
         self.model_name = self.config.model_name
+        self.enable_return_routed_experts = self.config.enable_return_routed_experts
 
     async def _create_request(
         self,
@@ -111,6 +112,9 @@ class LMDeployWorker(RolloutWorker):
             "tools": tools if len(tools) > 0 else None,
             "tool_choice": tool_choice if tool_choice else None,
         }
+        if self.enable_return_routed_experts:
+            payload["return_routed_experts"] = True
+
         if stream:
             payload["messages"] = prompt
         else:
@@ -244,6 +248,7 @@ class LMDeployWorker(RolloutWorker):
                 device_type=accelerator_to_device_type[self.accelerator],
                 logprobs_mode="raw_logprobs",
                 session_len=self.config.context_length,
+                enable_return_routed_experts=self.enable_return_routed_experts
             )
             if backend == "pytorch"
             else TurbomindEngineConfig(

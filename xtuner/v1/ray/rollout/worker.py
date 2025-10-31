@@ -70,6 +70,7 @@ class RolloutWorker(SingleAcceleratorWorker):
         self.logger = get_logger(log_dir=config.worker_log_dir, tag="RolloutWorker")
         self.tokenizer = AutoTokenizer.from_pretrained(self.config.tokenizer_path, trust_remote_code=True)
         self.check_flag = True  # only print once
+        self.enable_return_routed_experts = self.config.enable_return_routed_experts
         if self.rank == 0:
             self.logger.info(f"RolloutConfig:\n{self.config.model_dump_json(indent=2)}")
 
@@ -434,6 +435,7 @@ class RolloutWorker(SingleAcceleratorWorker):
             # generate API response
             last_token_ids = []
             last_logprobs = []
+            extra_info = None
             if "output_token_logprobs" in response["meta_info"]:
                 last_token_ids = [item[1] for item in response["meta_info"]["output_token_logprobs"]]
                 last_logprobs = [item[0] for item in response["meta_info"]["output_token_logprobs"]]
@@ -444,6 +446,13 @@ class RolloutWorker(SingleAcceleratorWorker):
                 num_return_tokens = response["meta_info"].get("completion_tokens", 0)
                 last_token_ids = response["output_ids"][-num_return_tokens:] if num_return_tokens > 0 else []
 
+            if self.enable_return_routed_experts:
+                assert "routed_experts" in response["meta_info"], (
+                    "enable_return_routed_experts is True, but routed_experts is not in meta_info"
+                )
+                routed_experts = response["meta_info"]["routed_experts"]  # token[layer[expert]]
+                extra_info = {"routed_experts": routed_experts}
+
             last_trajectory = response["text"]
             finish_reason = response["meta_info"]["finish_reason"]["type"]
             rollout_response = RLRolloutResponseItem(
@@ -452,6 +461,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                 num_return_tokens=len(last_token_ids) if len(last_token_ids) > 0 else None,
                 finish_reason=finish_reason,
                 logprobs=last_logprobs if len(last_logprobs) > 0 else None,
+                extra_info=extra_info if extra_info else None
             )
             return rollout_response
         else:
