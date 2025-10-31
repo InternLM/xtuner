@@ -158,6 +158,8 @@ class MoE(BaseModel):
             self.z_loss = self.config.z_loss_cfg.build()
         else:
             self.z_loss = None
+        
+        self.offload_stream = torch.cuda.Stream()
 
     def _select_non_pad_router_logits(
         self,
@@ -355,8 +357,8 @@ class MoE(BaseModel):
                 if int(os.getenv("XTUNER_ACTIVATION_OFFLOAD", "0")) == 1:
                     offload_stream = decoder_layer._get_fsdp_state()._comm_ctx.all_gather_copy_in_stream
                     with async_save_on_cpu(
-                        h2d_stream=offload_stream,
-                        d2h_stream=offload_stream,
+                        h2d_stream=self.offload_stream,
+                        d2h_stream=self.offload_stream,
                         block_idx=layer_idx - self.config.first_k_dense_replace,
                         depth=len(self.layers) - self.config.first_k_dense_replace,
                         custom_check_fn=lambda x: x.data_ptr()
@@ -496,8 +498,8 @@ class MoE(BaseModel):
                 if int(os.getenv("XTUNER_ACTIVATION_OFFLOAD", "0")) == 1:
                     offload_stream = decoder_layer._get_fsdp_state()._comm_ctx.all_gather_copy_in_stream
                     with async_save_on_cpu(
-                        h2d_stream=offload_stream,
-                        d2h_stream=offload_stream,
+                        h2d_stream=self.offload_stream,
+                        d2h_stream=self.offload_stream,
                         block_idx=int(idx),
                         depth=len(self.layers),
                         custom_check_fn=lambda x: x.data_ptr() == hidden_states.data_ptr(),
