@@ -38,6 +38,7 @@ from xtuner.v1.model.utils import ModelForwardExtraLogInfo
 from xtuner.v1.patch import patch_default_save_plan
 from xtuner.v1.profiler import profiling_memory, profiling_time
 from xtuner.v1.profiler.prober import ProberList
+from xtuner.v1.profiler.prober_utils import register_prober_list, setup_prober_list
 from xtuner.v1.utils import (
     XTUNER_DETERMINISTIC,
     ParallelConfigException,
@@ -407,7 +408,7 @@ class Trainer:
         if self._resume_cfg.resume_from is not None:
             self._resume()
 
-        ProberList.setup(self.exp_dir, self._profile_step, self._engine.model, prober_list)
+        setup_prober_list(self.exp_dir, self._profile_step, self._engine.model, prober_list)
 
     @classmethod
     def from_config(cls, config: TrainerConfig) -> Self:
