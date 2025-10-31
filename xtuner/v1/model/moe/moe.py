@@ -41,7 +41,6 @@ from xtuner.v1.module import (
 )
 from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayer
 from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEActFnConfig, MoEBlock, MoEDecoderLayer
-from xtuner.v1.profiler.prober import ProberList
 from xtuner.v1.utils import (
     get_device,
     get_logger,
