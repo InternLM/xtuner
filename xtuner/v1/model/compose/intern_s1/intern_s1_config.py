@@ -9,7 +9,7 @@ from xtuner.v1.float8 import Float8Config
 from xtuner.v1.model.dense.qwen3 import Qwen3Dense8BConfig
 from xtuner.v1.model.moe.moe import MoEConfig, TransformerConfig
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE235BA22Config
-from xtuner.v1.utils import get_logger
+from xtuner.v1.utils import get_logger, get_device
 
 
 if TYPE_CHECKING:
@@ -50,7 +50,7 @@ class InternS1VisionConfig(BaseModel):
     attn_impl: Literal["flash_attention", "flex_attention", "eager_attention"] = "flash_attention"
 
     def model_post_init(self, _):
-        if not is_installed("flash-attn") and self.attn_impl == "flash_attention":
+        if not is_installed("flash-attn") and self.attn_impl == "flash_attention" and get_device() == "cuda":
             logger.warning("flash-attn is not installed, using `flex_attention` instead.")
             self.attn_impl = "flex_attention"
         return self
