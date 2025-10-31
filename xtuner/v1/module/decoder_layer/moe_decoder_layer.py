@@ -134,12 +134,13 @@ class MoEBlock(nn.Module):
         ep_mesh: DeviceMesh | None = None,
         float8_cfg: Float8Config | None = None,
         moe_act_fn_cfg: MoEActFnConfig,
+        layer_idx: int = 0,
     ):
         super().__init__()
         self.hidden_size = hidden_size
         self.intermediate_size = moe_intermediate_size
         self.num_routed_experts = n_routed_experts
-
+        self.layer_idx = layer_idx
         self.ep_mesh = ep_mesh
         # self.fused_w1 = GroupedLinear(self.hidden_size, self.intermediate_size, self.num_routed_experts, ep_mesh)
         # self.fused_w3 = GroupedLinear(self.hidden_size, self.intermediate_size, self.num_routed_experts, ep_mesh)
@@ -246,6 +247,7 @@ class MoEDecoderLayer(nn.Module):
             ep_mesh=ep_mesh,
             float8_cfg=float8_cfg,
             moe_act_fn_cfg=moe_act_fn_cfg,
+            layer_idx=layer_idx,
         )
         # TODO: (yehaochen) Maybe should be replaced by build_dispatcher
         process_group = ep_mesh.get_group() if ep_mesh is not None else None
@@ -340,15 +342,11 @@ class MoEDecoderLayer(nn.Module):
             post_dispatched.get("row_ids_map"),  # type: ignore[arg-type]
             dispatched["topk_weights"],
         )
-        ProberList.before_experts(
-            self.layer_idx, post_dispatched["hidden_states"], post_dispatched["tokens_per_expert"]
-        )
         experts_out = self.experts(
             post_dispatched["hidden_states"],
             post_dispatched["tokens_per_expert"],
             decoding=False,
         )
-        ProberList.after_experts(self.layer_idx, experts_out)
         ProberList.before_combine(
             self.layer_idx,
             experts_out,

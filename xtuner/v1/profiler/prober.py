@@ -2,9 +2,11 @@ import json
 import re
 import sys
 import time
+import types
+import functools
 from abc import ABC
 from pathlib import Path
-from typing import ClassVar
+from typing import Callable, ClassVar
 
 import torch
 import torch.distributed as dist
@@ -12,6 +14,14 @@ import torch.nn as nn
 from torch.distributed.tensor import DTensor
 
 from xtuner.v1.utils import get_logger
+
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    # Don't import model and module here to avoid circular import.
+    # Because the model and module may import ProberList to debug.
+    from xtuner.v1.module.decoder_layer.moe_decoder_layer import RouterResults
+else:
+    RouterResults = dict
 
 
 logger = get_logger()
@@ -87,6 +97,14 @@ class BaseProber(ABC):
     def after_layer(cls, layer_idx: str | int, hidden_states: torch.Tensor):
         pass
 
+    @classmethod
+    def before_rms_norm(cls, name: str, hidden_states: torch.Tensor):
+        pass
+
+    @classmethod
+    def after_rms_norm(cls, name: str, hidden_states: torch.Tensor):
+        pass
+
     # ******************************* Attention Block *******************************
     @classmethod
     def before_input_layernorm(cls, layer_idx: str | int, hidden_states: torch.Tensor):
@@ -104,6 +122,14 @@ class BaseProber(ABC):
     def after_self_attn(cls, layer_idx: str | int, hidden_states: torch.Tensor):
         pass
 
+    @classmethod
+    def before_attention(cls, name: str, hidden_states: torch.Tensor):
+        pass
+
+    @classmethod
+    def after_attention(cls, name: str, outputs: torch.Tensor):
+        pass
+
     # ******************************* MoE Block *******************************
     @classmethod
     def before_post_attention_layernorm(cls, layer_idx: str | int, hidden_states: torch.Tensor):
@@ -111,6 +137,14 @@ class BaseProber(ABC):
 
     @classmethod
     def after_post_attention_layernorm(cls, layer_idx: str | int, hidden_states: torch.Tensor):
+        pass
+
+    @classmethod
+    def before_moe_gate(cls, name: str, hidden_states: torch.Tensor):
+        pass
+
+    @classmethod
+    def after_moe_gate(cls, name: str, router_results: RouterResults):
         pass
 
     @classmethod
@@ -179,9 +213,6 @@ class BaseProber(ABC):
     def after_balancing_loss(
         cls,
         loss: torch.Tensor,
-        routing_weights_mean_global: torch.Tensor,
-        tokens_per_expert_global: torch.Tensor,
-        scale_global: torch.Tensor,
     ):
         pass
 
@@ -230,7 +261,7 @@ class ProberList:
         logger.info(
             f"ProberList initialized with {len(cls.prober_list)} probers: {[p.__name__ for p in cls.prober_list]}"
         )
-
+    
     @classmethod
     def set_step(cls, step: int):
         for prober_cls in cls.prober_list:
@@ -245,6 +276,143 @@ class ProberList:
     def record_tensor(cls, tensor: torch.Tensor, name: str):
         for prober_cls in cls.prober_list:
             prober_cls.record_tensor(tensor, name)
+    
+    ############################# wrappers for forward hooks #################################
+    @classmethod
+    def wrap_embedding_forward(cls, forward: Callable):
+        @functools.wraps(forward)
+        def wrapped_forward(self, *args, **kwargs):
+            ProberList.before_embed_tokens(args[0])
+            hidden_states = forward(*args, **kwargs)
+            ProberList.after_embed_tokens(hidden_states)
+            return hidden_states
+        return wrapped_forward
+    
+    @classmethod
+    def wrap_decoder_layer_forward(cls, forward: Callable):
+        @functools.wraps(forward)
+        def wrapped_forward(self, *args, **kwargs):
+            if len(args) >= 1:
+                hidden_states = args[0]
+            else:
+                hidden_states = kwargs["hidden_states"]
+            ProberList.before_layer(self.layer_idx, hidden_states)
+            outputs = forward(*args, **kwargs)
+            if isinstance(outputs, tuple):  # for MoEDecoderLayer
+                hidden_states = outputs[0]
+            else:  # for DenseDecoderLayer
+                hidden_states = outputs
+            ProberList.after_layer(self.layer_idx, hidden_states)
+            return outputs
+        return wrapped_forward
+    
+    @classmethod
+    def wrap_rms_norm_forward(cls, forward: Callable, name: str):
+        @functools.wraps(forward)
+        def wrapped_forward(self, *args, **kwargs):
+            if len(args) >= 1:
+                hidden_states = args[0]
+            else:
+                hidden_states = kwargs["hidden_states"]
+            ProberList.before_rms_norm(name, hidden_states)
+            hidden_states = forward(*args, **kwargs)
+            ProberList.after_rms_norm(name, hidden_states)
+            return hidden_states
+        return wrapped_forward
+    
+    @classmethod
+    def wrap_attention_forward(cls, forward: Callable, name: str):
+        @functools.wraps(forward)
+        def wrapped_forward(self, *args, **kwargs):
+            if len(args) >= 1:
+                hidden_states = args[0]
+            else:
+                hidden_states = kwargs["hidden_states"]
+            ProberList.before_attention(name, hidden_states)
+            outputs = forward(*args, **kwargs)
+            ProberList.after_attention(name, outputs)
+            return outputs
+        return wrapped_forward
+    
+    @classmethod
+    def wrap_moe_gate_forward(cls, forward: Callable, name: str):
+        @functools.wraps(forward)
+        def wrapped_forward(self, *args, **kwargs):
+            if len(args) >= 1:
+                hidden_states = args[0]
+            else:
+                hidden_states = kwargs["hidden_states"]
+            ProberList.before_moe_gate(name, hidden_states)
+            router_results = forward(*args, **kwargs)
+            ProberList.after_moe_gate(name, router_results)
+            return router_results
+        return wrapped_forward
+
+    @classmethod
+    def wrap_moe_block_forward(cls, forward: Callable):
+        @functools.wraps(forward)
+        def wrapped_forward(self, *args, **kwargs):
+            if len(args) >= 1:
+                hidden_states = args[0]
+            else:
+                hidden_states = kwargs["x"]
+            if len(args) >= 2:
+                tokens_per_expert = args[1]
+            else:
+                tokens_per_expert = kwargs["tokens_per_expert"]
+            ProberList.before_experts(self.layer_idx, hidden_states, tokens_per_expert)
+            outputs = forward(*args, **kwargs)
+            ProberList.after_experts(self.layer_idx, outputs)
+            return outputs
+        return wrapped_forward
+    
+    @classmethod
+    def wrap_lm_head_forward(cls, forward: Callable):
+        @functools.wraps(forward)
+        def wrapped_forward(self, *args, **kwargs):
+            if len(args) >= 1:
+                hidden_states = args[0]
+            else:
+                hidden_states = kwargs["hidden_states"]
+            if len(args) >= 2:
+                loss_ctx = args[1]
+            else:
+                loss_ctx = kwargs.get("loss_ctx", None)
+            ProberList.before_lm_head(hidden_states, loss_ctx.loss_kwargs.shifted_labels if loss_ctx is not None else None)
+            outputs = forward(*args, **kwargs)
+            loss, (logits, extra_info) = outputs
+            ProberList.after_lm_head(loss, logits)
+            return outputs
+        return wrapped_forward
+
+    @classmethod
+    def wrap_balancing_loss_forward(cls, forward: Callable):
+        @functools.wraps(forward)
+        def wrapped_forward(self, *args, **kwargs):
+            if len(args) >= 1:
+                router_logits = args[0]
+            else:
+                router_logits = kwargs["router_logits"]
+            ProberList.before_balancing_loss(router_logits)
+            loss = forward(*args, **kwargs)
+            ProberList.after_balancing_loss(loss)
+            return loss
+        return wrapped_forward
+    
+    @classmethod
+    def wrap_z_loss_forward(cls, forward: Callable):
+        @functools.wraps(forward)
+        def wrapped_forward(self, *args, **kwargs):
+            if len(args) >= 1:
+                router_logits = args[0]
+            else:
+                router_logits = kwargs["router_logits"]
+            ProberList.before_z_loss(router_logits)
+            z_loss = forward(*args, **kwargs)
+            ProberList.after_z_loss(z_loss)
+            return z_loss
+        return wrapped_forward
+    
 
     ############################## forward hooks #################################
     @classmethod
@@ -267,6 +435,16 @@ class ProberList:
         for prober_cls in cls.prober_list:
             prober_cls.after_layer(layer_idx, hidden_states)
 
+    @classmethod
+    def before_rms_norm(cls, name: str, hidden_states: torch.Tensor):
+        for prober_cls in cls.prober_list:
+            prober_cls.before_rms_norm(name, hidden_states)
+
+    @classmethod
+    def after_rms_norm(cls, name: str, hidden_states: torch.Tensor):
+        for prober_cls in cls.prober_list:
+            prober_cls.after_rms_norm(name, hidden_states)
+
     # ******************************* Attention Block *******************************
     @classmethod
     def before_input_layernorm(cls, layer_idx: str | int, hidden_states: torch.Tensor):
@@ -287,6 +465,16 @@ class ProberList:
     def after_self_attn(cls, layer_idx: str | int, hidden_states: torch.Tensor):
         for prober_cls in cls.prober_list:
             prober_cls.after_self_attn(layer_idx, hidden_states)
+    
+    @classmethod
+    def before_attention(cls, name: str, hidden_states: torch.Tensor):
+        for prober_cls in cls.prober_list:
+            prober_cls.before_attention(name, hidden_states)
+
+    @classmethod
+    def after_attention(cls, name: str, outputs: torch.Tensor):
+        for prober_cls in cls.prober_list:
+            prober_cls.after_attention(name, outputs)
 
     # ******************************* MoE Block *******************************
     @classmethod
@@ -310,6 +498,16 @@ class ProberList:
     ):
         for prober_cls in cls.prober_list:
             prober_cls.after_router_gate(layer_idx, logits, topk_weights, topk_ids)
+    
+    @classmethod
+    def before_moe_gate(cls, name: str, hidden_states: torch.Tensor):
+        for prober_cls in cls.prober_list:
+            prober_cls.before_moe_gate(name, hidden_states)
+    
+    @classmethod
+    def after_moe_gate(cls, name: str, router_results: RouterResults):
+        for prober_cls in cls.prober_list:
+            prober_cls.after_moe_gate(name, router_results)
 
     @classmethod
     def before_dispatch(
@@ -376,12 +574,9 @@ class ProberList:
     def after_balancing_loss(
         cls,
         loss: torch.Tensor,
-        routing_weights_mean_global: torch.Tensor,
-        tokens_per_expert_global: torch.Tensor,
-        scale_global: torch.Tensor,
     ):
         for prober_cls in cls.prober_list:
-            prober_cls.after_balancing_loss(loss, routing_weights_mean_global, tokens_per_expert_global, scale_global)
+            prober_cls.after_balancing_loss(loss)
 
     @classmethod
     def before_z_loss(cls, router_logits: torch.Tensor):
@@ -465,6 +660,14 @@ class AccProber(BaseProber):
     def after_layer(cls, layer_idx: str | int, hidden_states: torch.Tensor):
         cls.record_tensor(hidden_states, f"[layers.{layer_idx}][after]hidden_states")
 
+    @classmethod
+    def before_rms_norm(cls, name: str, hidden_states: torch.Tensor):
+        cls.record_tensor(hidden_states, f"[{name}][before]hidden_states")
+
+    @classmethod
+    def after_rms_norm(cls, name: str, hidden_states: torch.Tensor):
+        cls.record_tensor(hidden_states, f"[{name}][after]hidden_states")
+
     # ******************************* Attention Block *******************************
     @classmethod
     def before_input_layernorm(cls, layer_idx: str | int, hidden_states: torch.Tensor):
@@ -481,6 +684,14 @@ class AccProber(BaseProber):
     @classmethod
     def after_self_attn(cls, layer_idx: str | int, hidden_states: torch.Tensor):
         cls.record_tensor(hidden_states, f"[layers.{layer_idx}.self_attn][after]hidden_states")
+    
+    @classmethod
+    def before_attention(cls, name: str, hidden_states: torch.Tensor):
+        cls.record_tensor(hidden_states, f"[{name}][before]hidden_states")
+
+    @classmethod
+    def after_attention(cls, name: str, outputs: torch.Tensor):
+        cls.record_tensor(outputs, f"[{name}][after]outputs")
 
     # ******************************* MoE Block *******************************
     @classmethod
@@ -502,6 +713,16 @@ class AccProber(BaseProber):
         cls.record_tensor(logits, f"[layers.{layer_idx}.router_gate][after]logits")
         cls.record_tensor(topk_weights, f"[layers.{layer_idx}.router_gate][after]topk_weights")
         cls.record_tensor(topk_ids, f"[layers.{layer_idx}.router_gate][after]topk_ids")
+    
+    @classmethod
+    def before_moe_gate(cls, name: str, hidden_states: torch.Tensor):
+        cls.record_tensor(hidden_states, f"[{name}][before]hidden_states")
+
+    @classmethod
+    def after_moe_gate(cls, name: str, router_results: RouterResults):
+        cls.record_tensor(router_results["logits"], f"[{name}][after]logits")
+        cls.record_tensor(router_results["topk_weights"], f"[{name}][after]topk_weights")
+        cls.record_tensor(router_results["topk_ids"], f"[{name}][after]topk_ids")
 
     @classmethod
     def before_dispatch(
@@ -569,14 +790,14 @@ class AccProber(BaseProber):
     def after_balancing_loss(
         cls,
         loss: torch.Tensor,
-        routing_weights_mean_global: torch.Tensor,
-        tokens_per_expert_global: torch.Tensor,
-        scale_global: torch.Tensor,
+        # routing_weights_mean_global: torch.Tensor,
+        # tokens_per_expert_global: torch.Tensor,
+        # scale_global: torch.Tensor,
     ):
         cls.record_tensor(loss, "[balancing_loss][after]loss")
-        cls.record_tensor(routing_weights_mean_global, "[balancing_loss][after]routing_weights_mean_global")
-        cls.record_tensor(tokens_per_expert_global, "[balancing_loss][after]tokens_per_expert_global")
-        cls.record_tensor(scale_global, "[balancing_loss][after]scale_global")
+        # cls.record_tensor(routing_weights_mean_global, "[balancing_loss][after]routing_weights_mean_global")
+        # cls.record_tensor(tokens_per_expert_global, "[balancing_loss][after]tokens_per_expert_global")
+        # cls.record_tensor(scale_global, "[balancing_loss][after]scale_global")
 
     @classmethod
     def before_z_loss(cls, router_logits: torch.Tensor):

@@ -474,9 +474,9 @@ class MoE(BaseModel):
         position_ids = seq_ctx.position_ids
 
         if input_ids is not None:
-            ProberList.before_embed_tokens(input_ids)
+            # ProberList.before_embed_tokens(input_ids)
             hidden_states = self.embed_tokens(input_ids)
-            ProberList.after_embed_tokens(hidden_states)
+            # ProberList.after_embed_tokens(hidden_states)
         else:
             hidden_states = seq_ctx.inputs_embeds
 
@@ -491,7 +491,7 @@ class MoE(BaseModel):
         output["router_logits"] = {}
 
         for idx, decoder_layer in self.layers.items():
-            ProberList.before_layer(idx, hidden_states)
+            # ProberList.before_layer(idx, hidden_states)
             if int(idx) < self.config.first_k_dense_replace:
                 hidden_states = decoder_layer(
                     hidden_states,
@@ -526,13 +526,13 @@ class MoE(BaseModel):
             if self.config.return_hidden_states:
                 output["hidden_states"].append(hidden_states)
 
-            ProberList.after_layer(idx, hidden_states)
+            # ProberList.after_layer(idx, hidden_states)
 
         hidden_states = self.norm(hidden_states)
 
-        ProberList.before_lm_head(hidden_states, loss_ctx.loss_kwargs.shifted_labels if loss_ctx is not None else None)
+        # ProberList.before_lm_head(hidden_states, loss_ctx.loss_kwargs.shifted_labels if loss_ctx is not None else None)
         loss, (logits, extra_info) = self.lm_head(hidden_states, loss_ctx)  # type: ignore
-        ProberList.after_lm_head(loss, logits)
+        # ProberList.after_lm_head(loss, logits)
         output["loss"] = loss
         output["logits"] = logits
         output["extra_info"] = extra_info
