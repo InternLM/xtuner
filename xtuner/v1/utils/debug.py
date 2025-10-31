@@ -13,8 +13,8 @@ def register_grad_hook(tensor: torch.Tensor, message):
 def get_grad_hook(message: str, grad_fn):
     def hook(g_out: tuple, g_in: tuple):
         global FOUND_NAN
-        # print(f"grad_fn: {grad_fn}")
         nextfunc = grad_fn.next_functions
+        print(f"nextfunc: {nextfunc}")
         torch.distributed.breakpoint()
         # if torch.distributed.get_rank() == 0:
         if FOUND_NAN:

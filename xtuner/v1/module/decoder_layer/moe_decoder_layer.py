@@ -1,5 +1,5 @@
 from functools import partial
-from typing import Literal, Protocol, TypeAlias
+from typing import Literal, Protocol, TypeAlias, cast
 
 import torch
 import torch.nn as nn
@@ -24,9 +24,9 @@ from xtuner.v1.module.dispatcher import (
 from xtuner.v1.module.grouped_linear.moe_group_linear import build_grouped_linear
 from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.ops.act_fn import get_act_fn
+from xtuner.v1.profiler.prober import ProberList
 from xtuner.v1.utils import ForwardState
 from xtuner.v1.utils.compile import maybe_compile
-from xtuner.v1.profiler.prober import ProberList
 
 from ..linear.linear import build_linear
 
@@ -316,7 +316,9 @@ class MoEDecoderLayer(nn.Module):
         origin_shape = hidden_states.shape
 
         # reshape hidden_states to (batch_size * seq_len, hidden_size)
-        ProberList.before_dispatch(self.layer_idx, hidden_states, router_results["topk_ids"], router_results["topk_weights"])
+        ProberList.before_dispatch(
+            self.layer_idx, hidden_states, router_results["topk_ids"], router_results["topk_weights"]
+        )
         pre_dispatched = self.dispatcher.dispatch_preprocess(
             hidden_states=hidden_states.view(-1, hidden_states.shape[-1]),
             topk_ids=router_results["topk_ids"],
@@ -330,16 +332,28 @@ class MoEDecoderLayer(nn.Module):
             pre_dispatched=pre_dispatched,
             dispatched=dispatched,
         )
-        ProberList.after_dispatch(self.layer_idx, post_dispatched["hidden_states"], post_dispatched["tokens_per_expert"], 
-                                  post_dispatched["row_ids_map"], dispatched["topk_weights"])
-        ProberList.before_experts(self.layer_idx, post_dispatched["hidden_states"], post_dispatched["tokens_per_expert"])
+        ProberList.after_dispatch(
+            self.layer_idx,
+            post_dispatched["hidden_states"],
+            post_dispatched["tokens_per_expert"],
+            cast(torch.Tensor | None, post_dispatched.get("row_ids_map")),
+            dispatched["topk_weights"],
+        )
+        ProberList.before_experts(
+            self.layer_idx, post_dispatched["hidden_states"], post_dispatched["tokens_per_expert"]
+        )
         experts_out = self.experts(
             post_dispatched["hidden_states"],
             post_dispatched["tokens_per_expert"],
             decoding=False,
         )
         ProberList.after_experts(self.layer_idx, experts_out)
-        ProberList.before_combine(self.layer_idx, experts_out, post_dispatched["row_ids_map"], dispatched["topk_weights"])
+        ProberList.before_combine(
+            self.layer_idx,
+            experts_out,
+            cast(torch.Tensor | None, post_dispatched.get("row_ids_map")),
+            dispatched["topk_weights"],
+        )
         pre_combined = self.dispatcher.combine_preprocess(
             hidden_states=experts_out,
             pre_dispatched=pre_dispatched,
@@ -544,7 +558,9 @@ class MoEDecoderLayer(nn.Module):
 
         ProberList.before_router_gate(self.layer_idx, hidden_states)
         router_results: RouterResults = self.gate(hidden_states)
-        ProberList.after_router_gate(self.layer_idx, router_results["logits"], router_results["topk_weights"], router_results["topk_ids"])
+        ProberList.after_router_gate(
+            self.layer_idx, router_results["logits"], router_results["topk_weights"], router_results["topk_ids"]
+        )
         return residual, hidden_states, router_results
 
     @maybe_compile(fullgraph=True)

@@ -38,7 +38,7 @@ class FakeEngine:
         self.grad_norm_calls = 0
         self.optimizer_step_calls = 0
 
-        model = nn.Linear(10, 10)
+        self.model = model = nn.Linear(10, 10)
         self.optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
     def grad_accumulation_steps(self, *args, **kwargs):
@@ -63,7 +63,7 @@ class FakeEngine:
         self.optimizer_step_calls += 1
         return 1.0
 
-    def clip_grad_norm(self):
+    def clip_grad_norm(self, do_clip: bool=True, dtype=torch.float32):
         self.grad_norm_calls += 1
         return torch.tensor(1.0)
 
