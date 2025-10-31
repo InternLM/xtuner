@@ -6,12 +6,7 @@ import torch
 from pydantic import computed_field
 from typing_extensions import Self
 
-try:
-    from transformers.models.gpt_oss import GptOssConfig as HFGptOssConfig
-except:
-    from transformers import PretrainedConfig
-    class HFGptOssConfig(PretrainedConfig):
-        pass
+from transformers.models.gpt_oss import GptOssConfig as HFGptOssConfig
 from xtuner.v1.model.moe.moe import BalancingLossConfig, MoEConfig
 from xtuner.v1.module.attention import MHAConfig
 from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEActFnConfig

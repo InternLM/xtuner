@@ -324,24 +324,21 @@ class MultiHeadAttention(nn.Module):
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
 
-        qin = self.q_proj(hidden_states)
-        query_states = qin.view(hidden_shape)  # [b, seq,  n_head, head_dim]
-        kin = self.k_proj(hidden_states)
-        key_states = kin.view(hidden_shape)
-        vin = self.v_proj(hidden_states)
-        value_states = vin.view(hidden_shape)
+        query_states = self.q_proj(hidden_states).view(hidden_shape)  # [b, seq,  n_head, head_dim]
+        key_states = self.k_proj(hidden_states).view(hidden_shape)
+        value_states = self.v_proj(hidden_states).view(hidden_shape)
 
         if self.qk_norm:
             query_states = self.q_norm(query_states)
             key_states = self.k_norm(key_states)
 
-        query_1 = query_states.transpose(1, 2)  # [b, n_head, seq , head_dim]
-        key_1 = key_states.transpose(1, 2)
+        query_states = query_states.transpose(1, 2)  # [b, n_head, seq , head_dim]
+        key_states = key_states.transpose(1, 2)
         value_states = value_states.transpose(1, 2)
 
         cos, sin = position_embeddings
 
-        query_states, key_states = self.apply_rotary_emb(query_1, key_1, cos, sin)
+        query_states, key_states = self.apply_rotary_emb(query_states, key_states, cos, sin)
         if DEBUG_ACC:
             import torch.distributed as dist; dist.breakpoint()
 

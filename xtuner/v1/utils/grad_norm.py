@@ -1,4 +1,4 @@
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, cast
 
 import torch
 import torch.distributed as dist
@@ -67,7 +67,7 @@ def cal_total_norm(tensors: List[DTensor], norm_type: float = 2.0, foreach: Opti
 
 def cal_grad_norm(grads: List[DTensor], dtype=torch.float32):
     grouped_grads = group_tensors_by_device_mesh_and_placements(grads)
-    print(f"clip_grad_norm dtype: {dtype}")
+    # print(f"clip_grad_norm dtype: {dtype}")
     total_norms = []
     for grads in grouped_grads.values():
         total_norm = cal_total_norm(grads, norm_type=2.0, foreach=True, dtype=dtype)
@@ -75,3 +75,4 @@ def cal_grad_norm(grads: List[DTensor], dtype=torch.float32):
     grad_norm = torch.linalg.vector_norm(torch.stack(total_norms), ord=2.0, dtype=dtype)
     grad_norm = grad_norm.to(grads[0].dtype)
     return grad_norm, grouped_grads
+
