@@ -529,6 +529,9 @@ class Trainer:
             if self.cur_step % 50 == 0:
                 gc.collect()
 
+        # TODO: Should use flush rather than close
+        self._exp_tracker.close()
+
     @property
     def world_size(self) -> int:
         """Get the total number of processes in the distributed training group.
