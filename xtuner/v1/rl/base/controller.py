@@ -73,7 +73,7 @@ class TrainingController:
             is_qwen3_vl = True
 
         has_rollout_routed_experts = False
-        if data_batches[0]["seq_ctx"].rollout_routed_experts is None:
+        if data_batches[0]["seq_ctx"].rollout_routed_experts is not None:
             has_rollout_routed_experts = True
             n_routed_experts = model_cfg.n_routed_experts
             num_experts_per_tok = model_cfg.num_experts_per_tok
@@ -118,7 +118,8 @@ class TrainingController:
 
                 if has_rollout_routed_experts:
                     pad_rand_index = torch.randint(low=0, high=n_routed_experts, size=(pad_len, num_hidden_layers, num_experts_per_tok))
-                    pad_seq_ctx.rollout_routed_experts = ray.put(pad_rand_index)
+                    # pad_seq_ctx.rollout_routed_experts = ray.put(pad_rand_index)
+                    pad_seq_ctx.rollout_routed_experts = pad_rand_index
 
                 seq_ctx_list.append(pad_seq_ctx)
                 label_list.append(pad_labels)
@@ -166,7 +167,7 @@ class TrainingController:
         has_rollout_routed_experts = False
         model_cfg = None
         if data_batches[0]["seq_ctx"].rollout_routed_experts is not None:
-            model_cfg = self.workers[0].get_model_cfg.remote()  # type: ignore[attr-defined]
+            model_cfg = ray.get(self.workers[0].get_model_cfg.remote())  # type: ignore[attr-defined]
             has_rollout_routed_experts = True
             n_routed_experts = model_cfg.n_routed_experts
             num_experts_per_tok = model_cfg.num_experts_per_tok
@@ -222,7 +223,8 @@ class TrainingController:
             if has_rollout_routed_experts:
                 pad_rand_index = torch.randint(low=0, high=n_routed_experts,
                                                size=(pack_max_length, num_hidden_layers, num_experts_per_tok))
-                pad_seq_ctx.rollout_routed_experts = ray.put(pad_rand_index)
+                # pad_seq_ctx.rollout_routed_experts = ray.put(pad_rand_index)
+                pad_seq_ctx.rollout_routed_experts = pad_rand_index
 
             pad_rollout_logprobs = None
             if "rollout_logprobs" in packed_data_batches[0] and packed_data_batches[0]["rollout_logprobs"] is not None:
