@@ -28,12 +28,15 @@ DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
 
 
+@runtime_checkable
 class VisionComposeModelProtocol(Protocol):
     vision_tower: XTunerBaseModel
     multi_modal_projector: XTunerBaseModel
     language_model: XTunerBaseModel
 
     def set_hf(self, hf_path: str | Path): ...
+
+    def from_hf(self, hf_path: str | Path, strict: bool = True) -> tuple: ...
 
     def fully_shard(self, fsdp_cfg: FSDPConfig) -> Self: ...
 

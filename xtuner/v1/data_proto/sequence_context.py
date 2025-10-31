@@ -147,10 +147,16 @@ class SequenceContext:
         num_padding = 0
         device = []
         inputs_embeds = []
+
+        pixel_values: list | torch.Tensor | None
+        pixel_values = []
+
+        image_grid_thw = []
+        position_ids = []
+        image_flags = []
+
         for seq_ctx in sequence_context_list:
             assert seq_ctx.sequence_parallel_mesh is None
-            # todo: support vlm model
-            assert seq_ctx.pixel_values is None
             packed_input_ids.append(seq_ctx.input_ids)
             cu_seq_lens_q.append(
                 seq_ctx.cu_seq_lens_q  # type: ignore
@@ -168,7 +174,20 @@ class SequenceContext:
             device.append(torch.device(seq_ctx.device))
             if seq_ctx.inputs_embeds is not None:
                 inputs_embeds.append(seq_ctx.inputs_embeds)
+            if seq_ctx.pixel_values is not None:
+                pixel_values.append(seq_ctx.pixel_values)
+            if seq_ctx.image_grid_thw is not None:
+                image_grid_thw.append(seq_ctx.image_grid_thw)
+            if seq_ctx.image_flags is not None:
+                image_flags.append(seq_ctx.image_flags)
+            position_ids.append(seq_ctx.position_ids)
         assert len(set(device)) == 1, f"All sequence contexts must be on the same device. Got {set(device)}"
+
+        if pixel_values:
+            if isinstance(pixel_values[0], torch.Tensor):
+                pixel_values = torch.cat(pixel_values, dim=0)
+        else:
+            pixel_values = None
 
         return cls(
             input_ids=torch.cat(packed_input_ids, dim=1),  # type: ignore
@@ -179,6 +198,10 @@ class SequenceContext:
             num_padding=num_padding,
             device=device[0],
             inputs_embeds=torch.cat(inputs_embeds, dim=1) if inputs_embeds else None,  # type: ignore
+            pixel_values=pixel_values,  # type: ignore
+            image_grid_thw=torch.cat(image_grid_thw, dim=0) if image_grid_thw else None,  # type: ignore
+            position_ids=torch.cat(position_ids, dim=-1) if position_ids else None,  # type: ignore
+            image_flags=torch.cat(image_flags, dim=0) if image_flags else None,  # type: ignore
         )
 
     @property
