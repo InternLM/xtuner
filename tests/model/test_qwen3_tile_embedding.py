@@ -111,8 +111,6 @@ class TestQwen3Dense4B(DistributedTestBase):
             ("cuda", 1),
         ],
     )
-    @skipIf(version.parse(transformers.__version__) < version.parse("4.57.0"),
-            "transformers version must be >= 4.57.0")
     def test_qwen3vl_tie_embedding(self, device, tp_size):
         pg = self.create_pg(device)
         dense_cfg = Qwen3VLDense4BConfig()

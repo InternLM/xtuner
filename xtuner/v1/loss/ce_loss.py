@@ -153,6 +153,7 @@ class CELossContext(BaseLossContext[CELossContextInputItem]):
         for i, item in enumerate(data_batches):
             shifted_labels = shifted_labels_list[i]
             loss_weight = loss_weight_list[i]
+            # Step 2.a in the loss calculation: normalize the loss weight by the global denominator
             loss_weight = loss_weight / (global_denominator + 1e-12)
             loss_kwargs = CELossKwargs(
                 shifted_labels=shifted_labels,
@@ -184,6 +185,7 @@ class CELossContext(BaseLossContext[CELossContextInputItem]):
             loss = logits.sum() * 0
         else:
             loss = F.cross_entropy(logits, shifted_labels, reduction="none", ignore_index=self.loss_cfg.ignore_idx)
+            # Step 2.b in the loss calculation: sum the loss over all tokens
             loss = (loss * loss_weight).sum()
 
         return loss, (logits, {})
@@ -206,8 +208,9 @@ class CELossContext(BaseLossContext[CELossContextInputItem]):
             hidden_states = hidden_states.reshape(bs * seq, dim)
             shifted_labels = shifted_labels.flatten()
             # liger kernel dont support reduction=="none"
+            # step 2.b in the loss calculation: sum the loss over all tokens, then multiply the loss weight (i.e. divide by the global_denominator)
             loss = self.liger_loss_fct(head_weight, hidden_states, shifted_labels)
             mask = loss_weight != 0
-            w = loss_weight.sum() / mask.sum()
+            w = loss_weight.sum() / mask.sum()  # equal to the global_denominator
             loss = loss * w
             return loss, (None, {})

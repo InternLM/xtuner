@@ -22,8 +22,6 @@ QWEN3_VL_MOE_PATH = os.environ["QWEN3_VL_MOE_PATH"]
 QWEN3_VL_DENSE_PATH = os.environ["QWEN3_VL_DENSE_PATH"]
 
 
-@skipIf(version.parse(transformers.__version__) < version.parse("4.57.0"),
-        "transformers version must be >= 4.57.0")
 class TestQwen3VL(DeterministicDDPTestCase):
     @parametrize.parametrize(
         "device,tol",

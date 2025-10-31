@@ -5,7 +5,12 @@ from xtuner.v1.module.router.greedy import GreedyRouterConfig
 
 from .base import BaseModel, TransformerConfig
 from .compose.intern_s1 import InternS1BaseConfig, InternS1Config, InternS1MiniConfig
-from .compose.internvl import InternVL3P5Dense8BConfig, InternVL3P5MoE30BA3Config, InternVLBaseConfig
+from .compose.internvl import (
+    InternVL3P5Dense1BConfig,
+    InternVL3P5Dense8BConfig,
+    InternVL3P5MoE30BA3Config,
+    InternVLBaseConfig,
+)
 from .compose.qwen3_vl import (
     Qwen3VLDense4BConfig,
     Qwen3VLDense8BConfig,
@@ -14,7 +19,7 @@ from .compose.qwen3_vl import (
 )
 from .dense.dense import Dense
 from .dense.qwen2 import Qwen2Dense7BConfig, Qwen2DenseConfig
-from .dense.qwen3 import Qwen3Dense4BConfig, Qwen3Dense8BConfig, Qwen3DenseConfig
+from .dense.qwen3 import Qwen3Dense0P6BConfig, Qwen3Dense4BConfig, Qwen3Dense8BConfig, Qwen3DenseConfig
 from .moe.deepseek_v3 import DeepSeekV3Config
 from .moe.gpt_oss import GptOss21BA3P6Config, GptOss117BA5P8Config, GptOssConfig
 from .moe.moe import BalancingLossConfig, MoE, MoEModelOutputs, ZLossConfig
@@ -30,6 +35,7 @@ model_mapping = {
     "gpt-oss-20b": GptOss21BA3P6Config(),
     "gpt-oss-120b": GptOss117BA5P8Config(),
     "internvl-3.5-8b-hf": InternVL3P5Dense8BConfig(),
+    "internvl-3.5-1b-hf": InternVL3P5Dense1BConfig(),
     "internvl-3.5-30b-a3b-hf": InternVL3P5MoE30BA3Config(),
 }
 
@@ -61,6 +67,7 @@ __all__ = [
     "BaseModel",
     "TransformerConfig",
     "Qwen3DenseConfig",
+    "Qwen3Dense0P6BConfig",
     "Qwen3Dense8BConfig",
     "Qwen3MoEConfig",
     "Qwen3MoE30BA3Config",
@@ -71,6 +78,7 @@ __all__ = [
     "GptOss21BA3P6Config",
     "GptOss117BA5P8Config",
     "InternVLBaseConfig",
+    "InternVL3P5Dense1BConfig",
     "InternVL3P5Dense8BConfig",
     "InternVL3P5MoE30BA3Config",
     "get_model_config",

@@ -12,24 +12,25 @@ import torch
 from mmengine import load
 from mmengine.dist import get_rank
 from mmengine.runner import set_random_seed
+from pydantic import BaseModel, field_serializer, model_validator
 from ray.actor import ActorClass
+from typing_extensions import Self
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
+from xtuner.v1.data_proto.rl_data import check_dataflow_item
 from xtuner.v1.data_proto.sequence_context import SequenceContext
-from xtuner.v1.ray.accelerator import AcceleratorResourcesConfig, AutoAcceleratorWorkers
+from xtuner.v1.ray.base import AcceleratorResourcesConfig, AutoAcceleratorWorkers
 from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.ray.dataflow import DataFlow, DataFlowConfig, ReplayBufferConfig
 from xtuner.v1.ray.environment import SingleTurnEnvironment
 from xtuner.v1.ray.evaluator import Evaluator, EvaluatorConfig
 from xtuner.v1.ray.judger import JudgerConfig
-
-# from xtuner.v1.rl.base.controller import TrainingController
-# from xtuner.v1.rl.base.worker import TrainingWorker, WorkerConfig
 from xtuner.v1.rl.base import TrainingController, WorkerConfig
 from xtuner.v1.rl.base import TrainingWorker as BaseTrainingWorker
 from xtuner.v1.train import ResumeConfig
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger, is_hf_model_path, record_git_info, timer, timer_logger
 from xtuner.v1.utils.device import get_device, get_torch_device_module
+from xtuner.v1.utils.env_check import get_rollout_engine_version
 
 from .trainer import ExpHistory, ExpInfo, GitInfo, XTunerMeta
 
@@ -47,6 +48,70 @@ def bind_train_rollout(
     info_dict = ray.get(env_controller.get_rollout_info.remote())  # type: ignore[attr-defined]
     ray.get(train_controller.update_rollout_info.remote(info_dict))
     return
+
+
+class RLTrainerConfig(BaseModel):
+    load_from: str | Path
+    resources: AcceleratorResourcesConfig
+    rollout_config: RolloutConfig
+    dataflow_config: DataFlowConfig
+    judger_config: JudgerConfig
+    replay_buffer_config: ReplayBufferConfig
+    train_worker_config: WorkerConfig
+    evaluator_config: EvaluatorConfig | None = None
+    tokenizer_path: str | Path
+    work_dir: Path | str | None = None
+    log_dir: Path | str | None = None
+    total_epochs: int
+    resume_config: ResumeConfig | None = None
+    strict_load: bool = True
+    hf_interval: int | None = None
+    hf_max_keep: int | None = None
+    seed: int = 42
+    debug: bool = False
+
+    @model_validator(mode="after")
+    def _convert_work_dir(self):
+        if isinstance(self.work_dir, str):
+            self.work_dir = Path(self.work_dir)
+        elif self.work_dir is None:
+            self.work_dir = Path.cwd()
+        return self
+
+    @field_serializer("replay_buffer_config")
+    def serialize_replay_buffer_cfg(self, replay_buffer_config: ReplayBufferConfig) -> str:
+        return replay_buffer_config.model_dump(include={"replay_ratio", "replay_weights"})
+
+    @field_serializer("evaluator_config")
+    def serialize_evaluator_cfg(self, evaluator_config: EvaluatorConfig) -> str:
+        if evaluator_config:
+            return evaluator_config.model_dump(exclude={"tokenizer", "dataset_cfg", "compute_metric_func"})
+        else:
+            return ""
+
+    @field_serializer("judger_config")
+    def serialize_judger_config(self, judger_config: JudgerConfig) -> str:
+        return judger_config.model_dump(exclude={"tokenizer", "reward_func"})
+
+
+def get_train_seq_ctx(
+    input_ids: torch.LongTensor, multimodal_train_info: dict | None = None, len_response_ids: int = 0
+):
+    seq_ctx = SequenceContext.from_input_ids((input_ids,), device="cpu")
+    if multimodal_train_info and len(multimodal_train_info) > 0:
+        position_ids = multimodal_train_info.get("position_ids")  # (1,n) or (3,1,n)
+        if position_ids is not None and len(position_ids.shape) == 3:
+            # qwen3vl 需要特殊处理，其余的不需要额外处理
+            max_value = position_ids.max(dim=-1).values  # (3,1)
+            response_position_ids = max_value.unsqueeze(-1).expand(-1, -1, len_response_ids) + torch.arange(
+                1, len_response_ids + 1, device=max_value.device
+            )
+            position_ids = torch.cat([position_ids, response_position_ids], dim=-1)
+            seq_ctx.position_ids = position_ids  # type: ignore[assignment]
+        seq_ctx.pixel_values = multimodal_train_info.get("pixel_values")
+        seq_ctx.image_grid_thw = multimodal_train_info.get("image_grid_thw")
+        seq_ctx.image_flags = multimodal_train_info.get("image_flags")
+    return seq_ctx
 
 
 class RLTrainer:
@@ -137,23 +202,30 @@ class RLTrainer:
         work_dir: Path | str | None = None,
         log_dir: Path | str | None = None,
         total_epochs: int,
-        enable_evaluate: bool,
-        enable_initial_evaluate: bool = False,
         resume_config: ResumeConfig | None = None,
         strict_load: bool = True,
         hf_interval: int | None = None,
         hf_max_keep: int | None = None,
         seed: int = 42,
         debug: bool = False,
+        trainer_cfg: RLTrainerConfig | None = None,
     ):
         """Initialize the RL training system."""
-        # TODO
-        rollout_config.model_path = load_from
+        if os.environ.get("XTUNER_USE_FA3", "0") == "1":
+            try:
+                from xtuner.v1.ops.flash_attn import get_flash_attn_varlen
+
+                get_flash_attn_varlen()
+            except RuntimeError as e:
+                raise RuntimeError(
+                    f"Flash attention v3 runtime error {e}, Please install it first or set XTUNER_USE_FA3=0."
+                )
         train_worker_cfg.load_from = load_from
 
         self._total_epochs = total_epochs
         self._cur_step = 0
 
+        self._rl_trainer_cfg = trainer_cfg
         self._load_from = Path(load_from) if isinstance(load_from, str) else load_from
         self._load_from_hf = load_from is not None and is_hf_model_path(load_from)
         if not self._load_from_hf:
@@ -171,8 +243,6 @@ class RLTrainer:
 
         self._debug = debug
         self._seed = seed
-        self._enable_evaluate = enable_evaluate
-        self._enable_initial_evaluate = enable_initial_evaluate
         self._set_deterministic()
         self._set_random_seed(seed)
 
@@ -197,9 +267,12 @@ class RLTrainer:
         train_worker_cfg.log_dir = log_dir
         dataflow_config.worker_log_dir = log_dir
         rollout_config.worker_log_dir = log_dir
+        self._enable_evaluate = False
+        self._enable_initial_evaluate = False
         if evaluator_config:
             evaluator_config.worker_log_dir = log_dir
-
+            self._enable_evaluate = evaluator_config.enable_evaluate
+            self._enable_initial_evaluate = evaluator_config.enable_initial_evaluate
         self._pg = AutoAcceleratorWorkers.build_placement_group(resources)
         # We need to build train controller first, and then build rollout dataflow to make
         # inference engines know how much memory they can utilize.
@@ -228,6 +301,51 @@ class RLTrainer:
 
         self._train_worker_cfg = train_worker_cfg
 
+        if self._rl_trainer_cfg is not None and get_rank() == 0:
+            config_path = log_dir / "rl_trainer_config.json"
+            with config_path.open("w") as f:
+                f.write(self._rl_trainer_cfg.model_dump_json(indent=2))
+
+            env_path = log_dir / "env.json"
+            environment_variables = dict(os.environ)
+            infer_engine_version = get_rollout_engine_version()
+            environment_variables.update(infer_engine_version)
+            with env_path.open("w") as f:
+                json.dump(environment_variables, f, indent=2)
+
+    @classmethod
+    def from_config(cls, config: RLTrainerConfig) -> Self:
+        """Create a Trainer instance from a TrainerConfig.
+
+        Args:
+            config (TrainerConfig): TrainerConfig instance containing all configuration parameters.
+
+        Returns:
+            Self: Trainer instance initialized with the provided config.
+        """
+        self = cls(
+            load_from=config.load_from,
+            resources=config.resources,
+            rollout_config=config.rollout_config,
+            dataflow_config=config.dataflow_config,
+            judger_config=config.judger_config,
+            replay_buffer_config=config.replay_buffer_config,
+            train_worker_cfg=config.train_worker_config,
+            evaluator_config=config.evaluator_config,
+            tokenizer_path=config.tokenizer_path,
+            work_dir=config.work_dir,
+            log_dir=config.log_dir,
+            total_epochs=config.total_epochs,
+            resume_config=config.resume_config,
+            strict_load=config.strict_load,
+            hf_interval=config.hf_interval,
+            hf_max_keep=config.hf_max_keep,
+            seed=config.seed,
+            debug=config.debug,
+            trainer_cfg=config,
+        )
+        return self
+
     def _build_rollout_dataflow(
         self,
         dataflow_cfg: DataFlowConfig,
@@ -235,7 +353,7 @@ class RLTrainer:
         judger_cfg: JudgerConfig,
         replay_buffer_config: ReplayBufferConfig,
     ):
-        env = cast(ActorClass, SingleTurnEnvironment).remote("grpo", self._pg, rollout_cfg, judger_cfg)
+        env = cast(ActorClass, SingleTurnEnvironment).remote("grpo", self._pg, rollout_cfg, self._pg, judger_cfg)
         flow = cast(ActorClass, DataFlow).remote("grpo", dataflow_cfg, replay_buffer_config, env)
         return env, flow
 
@@ -249,9 +367,8 @@ class RLTrainer:
                 }
             },
         )(BaseTrainingWorker)
-        train_workers = AutoAcceleratorWorkers.from_placement_group(TrainingWorker, train_worker_cfg, self._pg)
+        train_workers, _ = AutoAcceleratorWorkers.from_placement_group(TrainingWorker, train_worker_cfg, self._pg)
         ray.get([worker.__ray_ready__.remote() for worker in train_workers])
-        train_workers = list(train_workers.keys())
         train_controller = cast(ActorClass, TrainingController).remote(
             workers=train_workers,
         )
@@ -272,10 +389,11 @@ class RLTrainer:
             self._save_trajectories(eval_data_groups, trajectory_save_path)
             self.logger.info(f"Initial rollout evaluate scores {scores} and start training")
         for rollout_idx in range(1, self._rollout_steps + 1):
+            timer_log_str = f"Rollout {rollout_idx} start \n"
             step_timer_dict = {}
             # 1. Rollout
             with timer("generation", step_timer_dict):
-                data_groups = ray.get(self._rollout_dataflow.run.remote())
+                data_groups, multimodal_train_infos = ray.get(self._rollout_dataflow.run.remote())
 
             # 2. Offload rollout models and save trajectories
             with timer("offload_and_dump", step_timer_dict):
@@ -288,7 +406,9 @@ class RLTrainer:
             with timer("onload_and_prepare_data", step_timer_dict):
                 ray.get(self._train_controller.onload.remote(target="all"))
                 self.logger.info("Training controller loaded")
-                data_batches, data_info = self._prepare_train_data(data_groups, self._train_worker_cfg.pack_max_length)
+                data_batches, data_info = self._prepare_train_data(
+                    data_groups, self._train_worker_cfg.pack_max_length, multimodal_train_infos
+                )
                 self.logger.info(f"Prepared {len(data_batches)} training data batches")
                 self._log_data_info(rollout_idx, data_info)
 
@@ -310,7 +430,7 @@ class RLTrainer:
                 ray.get(self._train_controller.offload.remote(target="model"))
                 ray.get(self._rollout_env_controller.onload_kvcache.remote())
 
-            timer_log_str = f"Rollout {rollout_idx} timing: \n"
+            timer_log_str = f"Rollout {rollout_idx} training finished and timing listed: \n"
             timer_log_str += timer_logger(step_timer_dict)
 
             self.logger.info(timer_log_str)
@@ -335,18 +455,30 @@ class RLTrainer:
 
     # TODO: advantage 是在 DataFlow 里算好，还是在 train controller 里算？
     # 因为可能有根据 advantage 来判断数据能否进 rl 训练的需求。暂时先放在这
-    def _prepare_train_data(self, data_groups, pack_max_length):
+    def _prepare_train_data(self, data_groups, pack_max_length, multimodal_train_infos=None):
         rewards_list = []
         advantages_list = []
         prompt_len_list = []
         response_len_list = []
 
         data_batches = []
-        for group in data_groups:
-            text_prompt = self.tokenizer.apply_chat_template(
-                group[0].data.messages, add_generation_prompt=True, tokenize=False
+        is_multimodal = False
+        if multimodal_train_infos and len(multimodal_train_infos) > 0:
+            assert len(multimodal_train_infos) == len(data_groups), (
+                f"{len(multimodal_train_infos)} vs {len(data_groups)}"
             )
-            prompt_ids = self.tokenizer(text_prompt, return_tensors="pt")["input_ids"].flatten().tolist()
+            is_multimodal = True
+
+        for j, group in enumerate(data_groups):
+            if not check_dataflow_item(group):
+                self.logger.error(f"Skip one data group {group} due to rollout failed or empty response.")
+                continue
+            if is_multimodal:
+                multimodal_train_info = multimodal_train_infos[j]
+            else:
+                multimodal_train_info = None
+
+            prompt_ids = group[0].data.extra_info["train_prompt_ids"]
             rewards = [data.env.judger.reward["score"] for data in group]
             rewards_list.extend(rewards)
             rewards = torch.tensor(rewards, dtype=torch.float32)
@@ -373,11 +505,7 @@ class RLTrainer:
                 advantages_list.extend([advantages[i]] * len(response_ids))
 
                 shifted_labels = [-100] * (len(prompt_ids) - 1) + response_ids + [-100]
-                if len(input_ids) > pack_max_length:
-                    input_ids = input_ids[:pack_max_length]
-                    shifted_labels = shifted_labels[:pack_max_length]
-                    if logprobs is not None:
-                        logprobs = logprobs[:pack_max_length]
+                assert len(input_ids) <= pack_max_length, f"{len(input_ids)} vs {pack_max_length}"
                 input_ids = torch.tensor(input_ids, dtype=torch.int64).unsqueeze(0)
                 shifted_labels = torch.tensor(shifted_labels, dtype=torch.int64).unsqueeze(0)
 
@@ -389,9 +517,10 @@ class RLTrainer:
                 else:
                     rollout_logprobs = None
 
+                seq_ctx = get_train_seq_ctx(input_ids, multimodal_train_info, len(response_ids))
                 data_batches.append(
                     dict(
-                        seq_ctx=SequenceContext.from_input_ids((input_ids,), device="cpu"),
+                        seq_ctx=seq_ctx,
                         shifted_labels=shifted_labels,
                         advantage=advantages[i].item(),
                         rollout_logprobs=rollout_logprobs,
@@ -420,11 +549,16 @@ class RLTrainer:
 
     def _save_trajectories(self, data_groups, save_path):
         rewards = []
-        response_len_list = []
 
         rollout_response_len_list = []
-        mismatch_token_ids_count = 0
+        # NOTE: Since we currently default to token-in token-out, the code for checking whether response_ids have Retokenization Drift is commented out.
+        # If you need to debug, you can uncomment it.
+        # mismatch_token_ids_count = 0
+        # response_len_list = []
         for group in data_groups:
+            if not check_dataflow_item(group):
+                self.logger.error(f"Skip one data group {group} due to rollout failed or empty response.")
+                continue
             for data in group:
                 rewards.append(data.env.judger.reward["score"])
                 if data.env.rollout.response_ids is not None:
@@ -433,19 +567,19 @@ class RLTrainer:
                     else:
                         response_ids = data.env.rollout.response_ids
                     rollout_response_len_list.append(len(response_ids))
+                    # response_str = self.tokenizer.decode(response_ids, skip_special_tokens=False)
+                    # revert_encode_response_ids = self.tokenizer.encode(response_str, add_special_tokens=False)
 
-                    response_str = self.tokenizer.decode(response_ids, skip_special_tokens=False)
-                    revert_encode_response_ids = self.tokenizer.encode(response_str, add_special_tokens=False)
+                    # response_str_to_ids = self.tokenizer.encode(data.env.rollout.response, add_special_tokens=False)
+                    # response_len_list.append(len(response_str_to_ids))
 
-                    if response_ids != revert_encode_response_ids:
-                        mismatch_token_ids_count += 1
-
-                response_ids = self.tokenizer.encode(data.env.rollout.response, add_special_tokens=False)
-                response_len_list.append(len(response_ids))
+                    # if response_ids != revert_encode_response_ids or response_ids != response_str_to_ids:
+                    #     mismatch_token_ids_count += 1
+                else:
+                    response_ids = self.tokenizer.encode(data.env.rollout.response, add_special_tokens=False)
+                    rollout_response_len_list.append(len(response_ids))
 
         rewards = torch.tensor(rewards).float()
-        response_lens = torch.tensor(response_len_list).float()
-
         rollout_response_lens = None
         if len(rollout_response_len_list) > 0:
             rollout_response_lens = torch.tensor(rollout_response_len_list).float()
@@ -457,23 +591,13 @@ class RLTrainer:
                 "reward_std": rewards.std().item(),
                 "reward_max": rewards.max().item(),
                 "reward_min": rewards.min().item(),
-                "response_len_mean": response_lens.mean().item(),
-                "response_len_std": response_lens.std().item(),
-                "response_len_max": response_lens.max().item(),
-                "response_len_min": response_lens.min().item(),
+                "response_len_mean": rollout_response_lens.mean().item(),
+                "response_len_std": rollout_response_lens.std().item(),
+                "response_len_max": rollout_response_lens.max().item(),
+                "response_len_min": rollout_response_lens.min().item(),
                 "total_len": len(rewards),
-                "mismatch_token_ids_count": mismatch_token_ids_count,
+                # "mismatch_token_ids_count": mismatch_token_ids_count,
             }
-            if len(rollout_response_len_list) > 0:
-                item.update(
-                    {
-                        "rollout_response_len_mean": rollout_response_lens.mean().item(),
-                        "rollout_response_len_std": rollout_response_lens.std().item(),
-                        "rollout_response_len_max": rollout_response_lens.max().item(),
-                        "rollout_response_len_min": rollout_response_lens.min().item(),
-                    }
-                )
-
             json.dump(item, f, ensure_ascii=False, indent=2)
             f.write("\n")
             for group in data_groups:
@@ -481,14 +605,10 @@ class RLTrainer:
                     item = {
                         "prompt": data.data.extra_info["raw_prompt"],
                         "response": data.env.rollout.response,
-                        "response_len": response_len_list[_count],
+                        "response_len": rollout_response_len_list[_count],
                         "label": data.data.reward_model["ground_truth"],
                         "reward": data.env.judger.reward["score"],
                     }
-
-                    if response_len_list[_count] != rollout_response_len_list[_count]:
-                        item["rollout_response_len"] = rollout_response_len_list[_count]
-
                     json.dump(item, f, ensure_ascii=False, indent=2)
                     f.write("\n")
                     _count += 1
@@ -530,7 +650,7 @@ class RLTrainer:
         if (self.cur_step + 1) % self._hf_interval != 0 and (self.cur_step + 1) != self._rollout_steps:
             return
 
-        save_hf_path = self.exp_dir / f"hf-{self.cur_step}"
+        save_hf_path = self.exp_dir / f"hf-{self.cur_step + 1}"
         self.logger.info(f"Saving step {self.cur_step + 1} checkpoints to: {save_hf_path}")
         self.meta.latest_exp.hf_checkpoint_list.append(str(save_hf_path))
 

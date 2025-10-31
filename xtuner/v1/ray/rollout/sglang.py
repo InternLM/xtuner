@@ -42,6 +42,7 @@ class SGLangWorker(RolloutWorker):
         tool_choice: str,
         sample_params: dict,
         extra_params: dict,
+        extra_info: dict,
     ):
         headers = {
             "Content-Type": "application/json",
@@ -57,8 +58,13 @@ class SGLangWorker(RolloutWorker):
             raise NotImplementedError("Streaming mode is not supported for SGLangWorker.")
         else:
             if "return_token_ids" in extra_params and extra_params["return_token_ids"]:
+                # 多模态场景下，由于 input_ids 处理比较复杂，现在不支持 prompt 输入，必须要有 input_ids
+                if "image_data" in extra_info:
+                    assert input_ids is not None, "input_ids is required when image_data is provided."
                 if input_ids is not None:
                     payload["input_ids"] = input_ids
+                    if "image_data" in extra_info:
+                        payload["image_data"] = extra_info["image_data"]
                 else:
                     text_prompt = self.tokenizer.apply_chat_template(
                         prompt, tokenize=False, add_generation_prompt=True
@@ -82,8 +88,7 @@ class SGLangWorker(RolloutWorker):
             json=payload,
         )
         r = await self.client.send(req, stream=stream)
-        r.raise_for_status()
-        return r
+        return payload, r
 
     def _make_request(self, endpoint: str, payload=None):
         # TODO: 支持 tp
@@ -145,7 +150,15 @@ class SGLangWorker(RolloutWorker):
         os.environ.pop("CUDA_VISIBLE_DEVICES", None)
         from sglang.srt.server_args import ServerArgs
 
-        sglang_server_args = ServerArgs(model_path=self.config.model_path)
+        extra_config = self.config.extra_rollout_config or dict()
+        sglang_config_kwargs = {
+            k.replace("sglang_", ""): v for k, v in extra_config.items() if k.startswith("sglang_")
+        }
+        grammar_backend = sglang_config_kwargs.get(
+            "grammar_backend", None
+        )  # for intern-s1 series models, have to set the grammar_backend to "none"
+
+        sglang_server_args = ServerArgs(model_path=self.config.model_path, trust_remote_code=True)
         sglang_server_args.host = self.host
         sglang_server_args.port = self.server_port
         sglang_server_args.nccl_port = self.nccl_port
@@ -159,9 +172,8 @@ class SGLangWorker(RolloutWorker):
         # note: 非共卡模式下无需设置,共卡模式下需要offload必须设置，否则显存释放不了
         sglang_server_args.enable_memory_saver = True
         sglang_server_args.max_running_requests = int(os.environ.get("XTUNER_MAX_CONCURRENCY", 2000))
-        sglang_server_args.trust_remote_code = True
-        if "interns1" in self.model_name.lower():
-            sglang_server_args.grammar_backend = "none"
+        if grammar_backend is not None:
+            sglang_server_args.grammar_backend = grammar_backend
 
         if self.config.context_length is not None:
             sglang_server_args.context_length = self.config.context_length

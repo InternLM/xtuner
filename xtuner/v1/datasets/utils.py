@@ -1,5 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import hashlib
+import os
 import tempfile
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -23,7 +24,8 @@ class CacheObj(TypedDict, total=False):
 
 
 class CachableTokenizeFunction(ABC, Generic[T]):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, tokenizer, *args, **kwargs):
+        self.tokenizer = tokenizer
         self.state = "runtime"
 
     @abstractmethod
@@ -123,3 +125,38 @@ def apply_exif_orientation(image):
     if method is not None:
         return image.transpose(method)
     return image
+
+
+def replace_image_context_and_collect_media_data(
+    prompt: str | list[dict[str, Any]], media_root: str, replace_image_ctx: bool
+) -> tuple:
+    """Collect image data from the prompt and extra_info.
+
+    Args:
+        prompt (str): The input prompt containing image placeholders.
+        media_root (str): The root directory of the media files.
+        replace_image_ctx (bool): Whether to replace the image context in the prompt.
+
+    Returns:
+        List[dict]: A list of image data dictionaries.
+    """
+    if not isinstance(prompt, list):
+        return [], []
+
+    image_paths = []
+    video_paths = []
+    for msg in prompt:
+        if msg["role"] == "user":
+            content = msg["content"]
+            if isinstance(content, list):
+                for c in content:
+                    if c["type"] == "image_url":
+                        image_paths.append(os.path.join(media_root, c["image_url"]["url"]))
+                    elif c["type"] == "video_url":
+                        video_paths.append(os.path.join(media_root, c["video_url"]["url"]))
+                    elif c["type"] == "text":
+                        _c = c["text"]
+                        if replace_image_ctx:
+                            c["text"] = _c.replace("<IMG_CONTEXT>", "")
+
+    return image_paths, video_paths

@@ -103,8 +103,6 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
         tokenizer_hash: str | None = None,
         hash: str | None = None,
     ):
-        super().__init__()
-        self.tokenizer = tokenizer
         self.max_length = max_length
         self._tokenizer_hash = tokenizer_hash
         self._hash = hash
@@ -114,6 +112,7 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
         self._image_path: list[str] = []
         self._video_path: list[str] = []
         self._image_wh_list: list[list] = []
+        super().__init__(tokenizer)
 
     def calc_num_tokens_multi_modal_get_item(self, data_item: dict) -> CacheItem:
         raise NotImplementedError

@@ -78,6 +78,7 @@ class InternS1ForConditionalGeneration(BaseModel):
 
         self.img_context_token_id = config.image_token_id
         self._hf_path: Path | None = None
+        self.image_size = config.vision_config.image_size[0]
 
         # Note: global load spec mapping for save_hf
         self.load_spec_mapping = {}

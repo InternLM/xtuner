@@ -83,6 +83,7 @@ class LMDeployWorker(RolloutWorker):
         tool_choice: str,  # reserved for agent tool use
         sample_params: dict,
         extra_params: dict,
+        extra_info: dict,
     ):
         """Create and send a streaming generation request to the server.
 
@@ -135,8 +136,7 @@ class LMDeployWorker(RolloutWorker):
             json=payload,
         )
         r = await self.client.send(req, stream=stream)
-        r.raise_for_status()
-        return r
+        return payload, r
 
     def get_logprobs(self, input_ids, sampling_params):
         """This method will be implemented for the LMDeploy worker in the
@@ -243,7 +243,7 @@ class LMDeployWorker(RolloutWorker):
                 mp_engine_backend="ray",  # force ray to pass placement group
                 device_type=accelerator_to_device_type[self.accelerator],
                 logprobs_mode="raw_logprobs",
-                session_length=self.config.context_length,
+                session_len=self.config.context_length,
             )
             if backend == "pytorch"
             else TurbomindEngineConfig(
@@ -251,7 +251,7 @@ class LMDeployWorker(RolloutWorker):
                 max_batch_size=self.config.rollout_max_batch_size,
                 devices=[bundle_idxs % self.config.gpus_per_node for bundle_idxs in self.engine_bundle_idxs],
                 empty_init=self.config.skip_load_weights,
-                session_length=self.config.context_length,
+                session_len=self.config.context_length,
             )
         )
         if backend == "pytorch" and self.accelerator == "NPU":

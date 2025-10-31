@@ -3,14 +3,14 @@ import unittest
 import ray
 from transformers import AutoTokenizer
 
-
 from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.ray.judger.controller import JudgerConfig
-from xtuner.v1.ray.accelerator import AcceleratorResourcesConfig, AutoAcceleratorWorkers
+from xtuner.v1.ray.base import AcceleratorResourcesConfig, AutoAcceleratorWorkers
 from xtuner.v1.ray.environment import SingleTurnEnvironment
 from xtuner.v1.ray.evaluator import Evaluator, EvaluatorConfig
 from xtuner.v1.data_proto.rl_data import SampleParams
-from xtuner.v1.datasets import RLTextTokenizeFnConfig, DatasetConfig
+from xtuner.v1.datasets import RLTokenizeFnConfig, DatasetConfig, OpenaiTokenizeFunctionConfig
+
 
 MODEL_PATH = os.environ["ROLLOUT_MODEL_PATH"]
 TEST_DATA_PATH = os.environ["ROLLOUT_TEST_DATA_PATH"]
@@ -31,6 +31,7 @@ class TestEvaluator(unittest.TestCase):
         self.resources_cfg = AcceleratorResourcesConfig(
             accelerator="GPU",
             num_workers=8,
+            num_cpus_per_worker=8,
             cpu_memory_per_worker=16 * 1024**3,  # 16 GB
         )
         self.max_prompt_length = 512
@@ -49,13 +50,12 @@ class TestEvaluator(unittest.TestCase):
         self.judger_cfg = JudgerConfig(
             reward_judger_configs=[gsm8k_judger_config]
         )
-        
         self.eval_dataset_cfg = [
             {
             "dataset": DatasetConfig(name="gsm8k",
                                     anno_path=TEST_DATA_PATH,
                                     sample_ratio=1.0),
-            "tokenize_fn": RLTextTokenizeFnConfig(max_length=self.max_prompt_length),
+            "tokenize_fn": RLTokenizeFnConfig(max_length=self.max_prompt_length)
             },
         ]
         self.tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
@@ -64,6 +64,7 @@ class TestEvaluator(unittest.TestCase):
             "test_env",
             self.pg,
             self.rollout_cfg,
+            self.pg,
             self.judger_cfg
         )
         self.sample_params = SampleParams(
@@ -89,7 +90,7 @@ class TestEvaluator(unittest.TestCase):
         evaluator_cfg = EvaluatorConfig(
             dataset_cfg=self.eval_dataset_cfg,
             tokenizer=self.tokenizer,
-            max_concurrent=16,
+            max_concurrent=1,
             eval_sample_ratio=0.004,  # generate 5 samples
             compute_metric_func=None,
             sample_params=self.sample_params
@@ -99,7 +100,7 @@ class TestEvaluator(unittest.TestCase):
         custom_evaluator_cfg = EvaluatorConfig(
             dataset_cfg=self.eval_dataset_cfg,
             tokenizer=self.tokenizer,
-            max_concurrent=16,
+            max_concurrent=1,
             eval_sample_ratio=0.004,  # generate 5 samples
             compute_metric_func=custom_compute_metric,
             sample_params=self.sample_params
@@ -108,6 +109,19 @@ class TestEvaluator(unittest.TestCase):
         custom_correctness = ray.get(custom_evaluator.run.remote())
         self.assertEqual(correctness['accuracy'], custom_correctness['custom_accuracy'])
 
-
+    @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
+    def test_lmdeploy_evaluator_with_failed_response(self):
+        evaluator_cfg = EvaluatorConfig(
+            dataset_cfg=self.eval_dataset_cfg,
+            tokenizer=self.tokenizer,
+            max_concurrent=1,
+            eval_sample_ratio=1,  # generate 5 samples
+            sample_params=SampleParams(temperature=2.5),  # invalid temperature to trigger error
+            max_retry_times=1,
+        )
+        evaluator = Evaluator.remote(evaluator_cfg, self.test_env)
+        correctness = ray.get(evaluator.run.remote())
+        self.assertEqual(len(correctness), 0)
+        
 if __name__ == '__main__':
     unittest.main()

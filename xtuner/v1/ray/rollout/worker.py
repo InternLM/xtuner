@@ -3,6 +3,7 @@ import json
 import multiprocessing
 import os
 import time
+import traceback
 import uuid
 from abc import abstractmethod
 from typing import Any, Callable, Dict, List, Optional, Union
@@ -16,7 +17,7 @@ from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from transformers import AutoTokenizer
 from xtuner.v1.data_proto.rl_data import RLRolloutResponseItem
 from xtuner.v1.ray import find_master_addr_and_port
-from xtuner.v1.ray.accelerator import AutoAcceleratorWorkers, SingleAcceleratorWorker
+from xtuner.v1.ray.base import AutoAcceleratorWorkers, SingleAcceleratorWorker
 from xtuner.v1.ray.config import RolloutConfig
 from xtuner.v1.utils import get_logger
 
@@ -69,6 +70,8 @@ class RolloutWorker(SingleAcceleratorWorker):
         self.logger = get_logger(log_dir=config.worker_log_dir, tag="RolloutWorker")
         self.tokenizer = AutoTokenizer.from_pretrained(self.config.tokenizer_path, trust_remote_code=True)
         self.check_flag = True  # only print once
+        if self.rank == 0:
+            self.logger.info(f"RolloutConfig:\n{self.config.model_dump_json(indent=2)}")
 
     def init_dist_port(self):
         """Initialize distributed communication ports.
@@ -144,7 +147,8 @@ class RolloutWorker(SingleAcceleratorWorker):
 
         # note(@duanyanhui): launch server as multiprocessing for sglang temporarily
         if self.config.launch_server_method == "multiprocessing":
-            process = multiprocessing.Process(target=self.server_func, args=(server_configs,))
+            mp_ctx = multiprocessing.get_context("spawn")
+            process = mp_ctx.Process(target=self.server_func, args=(server_configs,))
             process.start()
             self.server_process = process
             time.sleep(60)  # Wait for the server to start
@@ -274,7 +278,9 @@ class RolloutWorker(SingleAcceleratorWorker):
 
                 lmdeploy_version = lmdeploy.__version__
                 if return_token_ids and Version(lmdeploy_version) < Version("0.10.1"):
-                    self.logger.error("You should use lmdeploy >= v0.10.1 to support return_token_ids")
+                    self.logger.error(
+                        f"You should use lmdeploy >= v0.10.1 to support return_token_ids, but current version is {lmdeploy_version}"
+                    )
                 if input_ids:
                     self.logger.error(
                         "You should use lmdeploy main branch contain commit 49f632483e93cfd3d09ef743508c07a68a763e26 to support generate with input_ids as input"
@@ -290,6 +296,7 @@ class RolloutWorker(SingleAcceleratorWorker):
         sample_params: dict,
         extra_params: dict,
         format: str,
+        extra_info: dict,
     ) -> RLRolloutResponseItem:
         uid = str(uuid.uuid4())
         response = None
@@ -308,13 +315,14 @@ class RolloutWorker(SingleAcceleratorWorker):
             else extra_params.get("stream", False)
         )
 
+        log_payload = {}
         try:
             if format == "openai":
                 openai_prompts, openai_tools = prompts, tools
             else:
                 openai_prompts, openai_tools = self._adapt_input_to_openai_spec(prompts, tools, tool_choice)
             if "return_token_ids" in extra_params and extra_params["return_token_ids"]:
-                response = await self._create_request(
+                payload, response = await self._create_request(
                     f"{self.server_url}/{self.endpoints['generate']}",
                     openai_prompts,
                     input_ids,
@@ -322,10 +330,11 @@ class RolloutWorker(SingleAcceleratorWorker):
                     tool_choice,
                     sample_params=sample_params,
                     extra_params=extra_params,
+                    extra_info=extra_info,
                 )
             else:
                 assert prompts is not None, "prompts should not be None when you call v1/chat/completions API"
-                response = await self._create_request(
+                payload, response = await self._create_request(
                     f"{self.server_url}/{self.endpoints['v1/chat/completions']}",
                     openai_prompts,
                     None,
@@ -333,9 +342,11 @@ class RolloutWorker(SingleAcceleratorWorker):
                     tool_choice,
                     sample_params=sample_params,
                     extra_params=extra_params,
+                    extra_info=extra_info,
                 )
+            log_payload = payload
             self.logger.debug(f" +++ send request {uid} to worker: {self.rank}")
-
+            response.raise_for_status()
             rollout_response = (
                 await self._handle_stream_response(uid, sample_params, extra_params, response)
                 if extra_params["stream"]
@@ -343,14 +354,25 @@ class RolloutWorker(SingleAcceleratorWorker):
             )
             return rollout_response
 
-        except httpx.RequestError as e:
-            self.logger.error(f"Request {uid} failed with a network error: {e}")
-            return failed_rollout_response
         except Exception as e:
-            self.logger.error(f"An unexpected error occurred in rollout_task for {uid}: {e}")
+            if "input_ids" in log_payload and log_payload["input_ids"] is not None:
+                log_payload["input_ids"] = str(log_payload["input_ids"])
+            error_details = {
+                "uid": uid,
+                "url": self.server_url,
+                "request_payload": log_payload,
+                "error_type": type(e).__name__,
+                "error_message": str(e),
+                "traceback": traceback.format_exc().splitlines(),
+            }
+            self.logger.error(f"An unexpected error occurred in rollout_task: {json.dumps(error_details, indent=2)}")
+            if response is not None:
+                try:
+                    self.logger.error(f"Response content on error: {await response.aread()}")
+                except Exception as resp_e:
+                    self.logger.error(f"Failed to read response content on error: {resp_e}")
             return failed_rollout_response
         finally:
-            # 确保在任何情况下都尝试关闭响应
             if response:
                 await response.aclose()
 
@@ -452,6 +474,7 @@ class RolloutWorker(SingleAcceleratorWorker):
         sample_params: dict = dict(),
         extra_params: dict = dict(),
         format: str = "openai",
+        extra_info: dict = dict(),
     ) -> RLRolloutResponseItem:
         """Public method to initiate a rollout.
 
@@ -463,7 +486,7 @@ class RolloutWorker(SingleAcceleratorWorker):
             The result of the `rollout_task`.
         """
         return await self.rollout_task(
-            prompt, input_ids, tools, tool_choice, sample_params, extra_params, format=format
+            prompt, input_ids, tools, tool_choice, sample_params, extra_params, format=format, extra_info=extra_info
         )
 
     def pause(self):
@@ -507,6 +530,7 @@ class RolloutWorker(SingleAcceleratorWorker):
         tool_choice: str,
         sample_params: dict,
         extra_params: dict,
+        extra_info: dict,
     ):
         """Abstract method to create a generation request.
 

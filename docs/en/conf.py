@@ -10,12 +10,17 @@
 # add these directories to sys.path here. If the directory is relative to the
 # documentation root, use os.path.abspath to make it absolute, like shown here.
 
+from enum import auto
 import os
 import sys
 
 from sphinx.ext import autodoc
 
 sys.path.insert(0, os.path.abspath("../.."))
+
+import docs.pygments_extension
+import docs.sphinx_patch
+
 
 # -- Project information -----------------------------------------------------
 
@@ -47,6 +52,7 @@ extensions = [
     "sphinx.ext.autosummary",
     "myst_parser",
     "sphinxarg.ext",
+    "sphinx_togglebutton",
 ]
 
 # Add any paths that contain templates here, relative to this directory.
@@ -58,8 +64,9 @@ templates_path = ["_templates"]
 exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
 
 # Exclude the prompt "$" when copying code
-copybutton_prompt_text = r"\$ "
+copybutton_prompt_text = r'>>> |\.\.\. '
 copybutton_prompt_is_regexp = True
+
 
 language = "en"
 
@@ -74,36 +81,59 @@ html_theme_options = {
     "path_to_docs": "docs/en",
     "repository_url": "https://github.com/InternLM/xtuner",
     "use_repository_button": True,
+    "pygments_light_style": "xtuner-emacs",
+    "pygments_dark_style": "xtuner-dracula",
+    "use_sidenotes": True,
 }
 # Add any paths that contain custom static files (such as style sheets) here,
 # relative to this directory. They are copied after the builtin static files,
 # so a file named "default.css" will overwrite the builtin "default.css".
-# html_static_path = ['_static']
+html_static_path = ["_static"]
+html_css_files = ["custom.css"]
 
 # Mock out external dependencies here.
 autodoc_mock_imports = [
-    "cpuinfo",
-    "torch",
+    "pydantic",
+    "deepspeed",
+    "ray",
     "transformers",
-    "psutil",
-    "prometheus_client",
-    "sentencepiece",
-    "vllm.cuda_utils",
-    "vllm._C",
-    "numpy",
+    "torch",
+    "mmengine",
     "tqdm",
+    "numpy",
+    "cyclopts",
+    "safetensors",
+    "loguru",
+    "datasets",
+    "scikit-image",
+    "scipy"
+    "torchvision",
+    "xxhash",
+    "timm",
+    "imageio",
+    "torchvision",
+    "httpx",
+    "cv2",
+    "addict",
+    "torchvision",
+    "PIL",
+    "uvicorn",
+    "fastapi",
 ]
 
 
-class MockedClassDocumenter(autodoc.ClassDocumenter):
-    """Remove note about base class when a class is derived from object."""
 
-    def add_line(self, line: str, source: str, *lineno: int) -> None:
-        if line == "   Bases: :py:class:`object`":
-            return
-        super().add_line(line, source, *lineno)
-
-
-autodoc.ClassDocumenter = MockedClassDocumenter
+# class MockedClassDocumenter(autodoc.ClassDocumenter):
+#     """Remove note about base class when a class is derived from object."""
+#
+#     def add_line(self, line: str, source: str, *lineno: int) -> None:
+#         if line == "   Bases: :py:class:`object`":
+#             return
+#         super().add_line(line, source, *lineno)
+#
+#
+# autodoc.ClassDocumenter = MockedClassDocumenter
 
 navigation_with_keys = False
+
+

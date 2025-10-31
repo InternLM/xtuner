@@ -1,6 +1,6 @@
 import asyncio
 from pathlib import Path
-from typing import Callable, List, Optional, Union
+from typing import Callable, List, Optional, Sized, Union
 
 import ray
 from cyclopts import Parameter
@@ -9,9 +9,9 @@ from tqdm.auto import tqdm
 from typing_extensions import Annotated
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
-from xtuner.v1.data_proto.rl_data import RLDataFlowItem, RLDatasetItem, SampleParams
-from xtuner.v1.datasets import build_datasets
-from xtuner.v1.datasets.config import DatasetConfigList
+from xtuner.v1.data_proto.rl_data import RLDataFlowItem, RLDatasetItem, SampleParams, check_dataflow_item
+from xtuner.v1.datasets import build_dataloader, build_datasets
+from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfigList
 from xtuner.v1.ray.environment import BaseEnvironment
 from xtuner.v1.ray.utils import create_task
 from xtuner.v1.utils import get_logger
@@ -49,7 +49,7 @@ class EvaluatorConfig(BaseModel):
         config = EvaluatorConfig(
             dataset_cfg=[{
                 "dataset": DatasetConfig(name="gsm8k", anno_path="test_data.json"),
-                "tokenize_fn": RLTextTokenizeFnConfig(max_length=512)
+                "tokenize_fn": RLTokenizeFnConfig(max_length=512)
             }],
             tokenizer=AutoTokenizer.from_pretrained("model_path"),
             max_concurrent=32,
@@ -61,10 +61,22 @@ class EvaluatorConfig(BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
+    enable_evaluate: Annotated[
+        bool,
+        Parameter(help="Flag to enable or disable evaluation during training."),
+    ] = False
+    enable_initial_evaluate: Annotated[
+        bool,
+        Parameter(help="Flag to enable or disable initial evaluation before training starts."),
+    ] = False
     dataset_cfg: Annotated[
         DatasetConfigList,
         Parameter(help="Configuration for the dataset."),
     ]
+    dataloader_cfg: Annotated[
+        Optional[DataloaderConfig], Parameter(help="The PyTorch DataLoader for iterating over the dataset.")
+    ] = None
+
     tokenizer: Annotated[
         Union[PreTrainedTokenizer, PreTrainedTokenizerFast, str],
         Parameter(help="Tokenizer for text processing."),
@@ -72,7 +84,7 @@ class EvaluatorConfig(BaseModel):
     max_concurrent: Annotated[
         int,
         Parameter(help="Maximum number of concurrent tasks."),
-    ] = 8
+    ] = 512
     eval_sample_ratio: Annotated[
         float,
         Parameter(help="Ratio of samples to evaluate from the generated samples."),
@@ -114,22 +126,38 @@ class Evaluator:
         self.config = config
         self.sample_params = self.config.sample_params
         self.dataset = (
-            build_datasets(config.dataset_cfg, config.tokenizer)[0]
+            build_datasets(config.dataset_cfg, config.tokenizer)
             if isinstance(config.tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast))
             else build_datasets(
                 config.dataset_cfg, AutoTokenizer.from_pretrained(config.tokenizer, trust_remote_code=True)
-            )[0]
+            )
         )
-        self.dataloader = iter(self.dataset)
+
+        if config.dataloader_cfg is not None:
+            self.dataloader_cfg = config.dataloader_cfg
+        else:
+            self.dataloader_cfg = DataloaderConfig(
+                collator="fake_collator",
+                pack_level="none",
+            )
+        self.dataloader = build_dataloader(
+            dataloader_config=self.dataloader_cfg,
+            datasets=self.dataset,
+            global_batch_size=1,
+            micro_batch_size=1,
+            seed=1,
+        )
+        assert isinstance(self.dataloader, Sized)
+
         self.env_controller = env_controller
         self.failed_samples_count = 0
         self.return_list: List[RLDataFlowItem] = []
         if self.config.eval_sample_ratio > 0:
-            self.eval_batch_size = int(len(self.dataset) * self.config.eval_sample_ratio)
+            self.eval_batch_size = int(len(self.dataloader) * self.config.eval_sample_ratio)
         elif self.config.eval_sample_num > 0:
             self.eval_batch_size = self.config.eval_sample_num
         else:
-            self.eval_batch_size = len(self.dataset)
+            self.eval_batch_size = len(self.dataloader)
         if self.config.compute_metric_func is not None:
             self.compute_metric = self.config.compute_metric_func
         else:
@@ -166,6 +194,9 @@ class Evaluator:
         try:
             # note: In the evaluator, we convert the input sample to a list to adapt to the input format of single_turn_env
             group_sample = await self.env_controller.run.remote([sample], sample_params=self.sample_params)  # type: ignore[attr-defined]
+            if not check_dataflow_item(group_sample):
+                group_sample[0].extra_info.retry_times += 1
+                return group_sample[0]
             self.return_list.append(group_sample[0])
         except Exception as e:
             self.logger.error(f"Worker task failed with exception: {e}. Returning meta for retry.")
@@ -183,10 +214,11 @@ class Evaluator:
         waiting_tasks = set()
         self.logger.info(f"Start to generate {self.eval_batch_size} samples for evaluate")
         self.logger.info(f"Evaluate sample parameters set to {self.sample_params}.")
+        data_iter = iter(self.dataloader)
         with tqdm(total=self.eval_batch_size, desc="Rollout for eval samples") as pbar:
             update_step = max(1, int(self.eval_batch_size * 0.1))
             next_update_threshold = update_step
-            while len(self.return_list) < self.eval_batch_size:
+            while len(self.return_list) < self.eval_batch_size and self.failed_samples_count < self.eval_batch_size:
                 if len(self.return_list) >= next_update_threshold:
                     pbar.n = len(self.return_list)
                     pbar.refresh()
@@ -195,12 +227,12 @@ class Evaluator:
                     if len(self.return_list) + len(waiting_tasks) >= self.eval_batch_size:
                         break
                     try:
-                        data = next(self.dataloader)
+                        data = next(data_iter)
                     except StopIteration:
-                        self.dataloader = iter(self.dataset)
-                        data = next(self.dataloader)
+                        data_iter = iter(self.dataloader)
+                        data = next(data_iter)
                         self.logger.warning("Restarting the evaluation dataset.")
-                    data_item = RLDataFlowItem(data=RLDatasetItem(**data))
+                    data_item = RLDataFlowItem(data=RLDatasetItem(**data[0]))
                     task = create_task(self.eval_worker_task(data_item))
                     waiting_tasks.add(task)
 
@@ -218,7 +250,7 @@ class Evaluator:
                             retry_task = create_task(self.eval_worker_task(result))
                             pending_tasks.add(retry_task)
                         else:
-                            self.logger.error(f"Max retry reached for {result.uid.action_id}. Not retrying.")
+                            self.logger.error(f"Max retry reached for {result.data}. Not retrying.")
                             self.failed_samples_count += 1
 
                 waiting_tasks = pending_tasks
@@ -226,9 +258,14 @@ class Evaluator:
             pbar.n = len(self.return_list)
             pbar.refresh()
 
-        self.logger.info(
-            f"Target batch size reached, and {self.failed_samples_count} samples failed and were skipped. Pausing rollout controller."
-        )
+        if self.failed_samples_count == self.eval_batch_size:
+            self.logger.warning(
+                f"{self.failed_samples_count} samples failed and were skipped. Pausing rollout controller."
+            )
+        else:
+            self.logger.info(
+                f"Target batch size reached, and {self.failed_samples_count} samples failed and were skipped. Pausing rollout controller."
+            )
         ray.get(self.env_controller.pause.remote())
 
         if waiting_tasks:
@@ -251,9 +288,11 @@ class Evaluator:
                 the generated samples.
         """
         self.return_list = []
-        self.dataloader = iter(self.dataset)
         ray.get(self.env_controller.restart.remote())  # type: ignore[attr-defined]
         await self.concurrent_eval_task_runner()
+        if len(self.return_list) == 0:
+            self.logger.warning("No valid samples were generated during evaluation.")
+            return {} if not return_samples else ({}, [])
         scores = self.compute_metric(self.return_list)
         # To match the training format : each group's data is a list
         self.eval_samples = [[sample] for sample in self.return_list]

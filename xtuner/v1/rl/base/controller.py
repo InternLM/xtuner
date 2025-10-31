@@ -21,6 +21,7 @@ class TrainingController:
     def __init__(self, workers: list[TrainingWorker]) -> None:
         self.workers = workers
 
+    # TODO(hha): 这个逻辑不够通用，应该复用 sft 函数，从而支持 expand soft pack
     def _get_pack_infos(self, dataset, num_tokens, target, random=None):
         inds = list(range(len(dataset)))
         if random is not None:
@@ -58,6 +59,7 @@ class TrainingController:
 
         return pack_infos
 
+    # TODO(hha): 这个逻辑不够通用，和模型绑定了
     def _packing(self, data_batches, pack_max_length):
         pack_infos = self._get_pack_infos(
             data_batches,
@@ -65,6 +67,11 @@ class TrainingController:
             pack_max_length,
         )
         packed_data_batches = []
+
+        is_qwen3_vl = False
+        if len(data_batches[0]["seq_ctx"].position_ids.shape) == 3:
+            is_qwen3_vl = True
+
         for pack_info in pack_infos:
             indices = pack_info["indices"]
             total_len = sum([data_batches[i]["seq_ctx"].input_ids.shape[1] for i in indices])
@@ -95,6 +102,13 @@ class TrainingController:
                     dtype=data_batches[0]["shifted_labels"].dtype,
                     device=data_batches[0]["shifted_labels"].device,
                 )
+                if is_qwen3_vl:
+                    _position_ids_list = []
+                    for pad_token in pad_tokens:
+                        _position_ids = torch.arange(pad_token.size(-1)).view(1, 1, -1).expand(3, 1, -1)
+                        _position_ids_list.append(_position_ids)
+                    pad_seq_ctx.position_ids = torch.cat(_position_ids_list, dim=-1)
+
                 seq_ctx_list.append(pad_seq_ctx)
                 label_list.append(pad_labels)
                 advantage_list.extend(
@@ -141,6 +155,11 @@ class TrainingController:
         packed_data_batches = self._packing(data_batches, pack_max_length)
         # packed_data_batches = self._grouped_by_max_length(packed_data_batches)
 
+        # TODO(hha): 这个逻辑不够通用，和模型绑定了
+        is_qwen3_vl = False
+        if len(packed_data_batches[0]["seq_ctx"].position_ids.shape) == 3:
+            is_qwen3_vl = True
+
         # todo: support round up
         num_packed_data_batches = len(packed_data_batches)
         data_replicate_size = ray.get(self.workers[0].get_data_replicate_size.remote())  # type: ignore[attr-defined]
@@ -160,6 +179,13 @@ class TrainingController:
                 )
             pad_seq_ctx = SequenceContext.from_input_ids(pad_tokens, device="cpu")  # type: ignore
             pad_seq_ctx.num_padding = pack_max_length
+            if is_qwen3_vl:
+                _position_ids_list = []
+                for pad_token in pad_tokens:
+                    _position_ids = torch.arange(pad_token.size(-1)).view(1, 1, -1).expand(3, 1, -1)
+                    _position_ids_list.append(_position_ids)
+                pad_seq_ctx.position_ids = torch.cat(_position_ids_list, dim=-1)  # type: ignore
+
             pad_shifted_labels = torch.full(
                 (1, pack_max_length),
                 -100,

@@ -8,13 +8,13 @@ from transformers import AutoTokenizer
 
 from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.ray.judger.controller import JudgerConfig
-from xtuner.v1.ray.accelerator import AcceleratorResourcesConfig, AutoAcceleratorWorkers
+from xtuner.v1.ray.base import AcceleratorResourcesConfig, AutoAcceleratorWorkers
 from xtuner.v1.ray.dataflow import DataFlow, DataFlowConfig, ReplayBufferConfig
 from xtuner.v1.data_proto.rl_data import SampleParams
 from xtuner.v1.ray.environment import SingleTurnEnvironment
 from xtuner.v1.ray.rollout import RolloutController
 from xtuner.v1.ray.judger import JudgerController
-from xtuner.v1.datasets import RLTextTokenizeFnConfig, build_datasets, build_dataloader
+from xtuner.v1.datasets import RLTokenizeFnConfig, build_datasets, build_dataloader
 from xtuner.v1.datasets.config import (
     DataloaderConfig,
     DatasetConfig,
@@ -45,6 +45,7 @@ class TestRollout(unittest.TestCase):
         self.resources_cfg = AcceleratorResourcesConfig(
             accelerator=resource_map[torch.accelerator.current_accelerator().type],
             num_workers=8,
+            num_cpus_per_worker=8,
             cpu_memory_per_worker=16 * 1024**3,  # 16 GB
         )
         self.max_prompt_length = 512
@@ -77,7 +78,7 @@ class TestRollout(unittest.TestCase):
             "dataset": DatasetConfig(name="gsm8k",
                                     anno_path=TRAIN_DATA_PATH,
                                     sample_ratio=1.0),
-            "tokenize_fn": RLTextTokenizeFnConfig(max_length=self.max_prompt_length),
+            "tokenize_fn": RLTokenizeFnConfig(max_length=self.max_prompt_length),
             },
         ]
         self.dataloader_cfg = DataloaderConfig(
@@ -104,13 +105,33 @@ class TestRollout(unittest.TestCase):
         ray.shutdown()
 
     @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
-    def test_lmdeploy_generate(self):
-        from xtuner.v1.ray.rollout import LMDeployWorker
-        rollout_workers_map = AutoAcceleratorWorkers.from_placement_group(
-            LMDeployWorker, self.rollout_cfg, self.pg
+    def test_lmdeploy_dataflow_with_failed_response(self):
+        failed_dataflow_cfg = DataFlowConfig(
+            env="test",
+            max_concurrent=1,
+            prompt_repeat_k=2,
+            global_batch_size=1,
+            enable_partial_rollout=0,
+            max_retry_times=1,
         )
+        self.test_env = SingleTurnEnvironment.remote(
+            "test_env",
+            self.pg,
+            rollout_cfg=self.rollout_cfg,
+        )
+        self.test_flow = DataFlow.remote("test_env",
+                                        failed_dataflow_cfg,
+                                        self.replay_buffer_cfg,
+                                        self.test_env
+                                        )
+        sample_params = SampleParams(temperature=2.5)  # invalid temperature to trigger error
+        responses = ray.get(self.test_flow.run.remote(num=1, sample_params=sample_params), timeout=300)
+        self.assertEqual(len(responses[0]), 0)
+  
+    @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
+    def test_lmdeploy_generate(self):
         sample_params = SampleParams(temperature=0.0)
-        rollout_controller = RolloutController.remote(self.rollout_cfg, rollout_workers_map)  # type: ignore[attr-defined]
+        rollout_controller = RolloutController.remote(self.rollout_cfg, self.pg)  # type: ignore[attr-defined]
         res1 = ray.get(rollout_controller.rollout.remote(prompt=TEST_TEXT_MESSAGES, sample_params=sample_params))
        
         self.assertEqual(res1.finish_reason, "stop") 
@@ -131,7 +152,7 @@ class TestRollout(unittest.TestCase):
                                          self.test_env
                                         )
         responses = ray.get(self.test_flow.run.remote(), timeout=300)
-        finished_samples_count = sum(1 for data in responses for item in data if item.env.rollout.finish_reason == "stop" or item.env.rollout.finish_reason == "length")
+        finished_samples_count = sum(1 for data in responses[0] for item in data if item.env.rollout.finish_reason == "stop" or item.env.rollout.finish_reason == "length")
         self.assertEqual(finished_samples_count // self.dataflow_cfg.prompt_repeat_k, self.dataflow_cfg.global_batch_size)
         ray.get(self.test_env.shutdown.remote(), timeout=300)
         
@@ -150,7 +171,7 @@ class TestRollout(unittest.TestCase):
                                         )
         extra_params = {"stream": True, "return_token_ids": False, "return_logprobs": False}
         responses = ray.get(self.test_flow.run.remote(extra_params=extra_params), timeout=300)
-        finished_samples_count = sum(1 for data in responses for item in data if item.env.rollout.finish_reason == "stop" or item.env.rollout.finish_reason == "length")
+        finished_samples_count = sum(1 for data in responses[0] for item in data if item.env.rollout.finish_reason == "stop" or item.env.rollout.finish_reason == "length")
         self.assertEqual(finished_samples_count // self.dataflow_cfg.prompt_repeat_k, self.dataflow_cfg.global_batch_size)
         ray.get(self.test_env.shutdown.remote())
 
@@ -158,11 +179,8 @@ class TestRollout(unittest.TestCase):
     def test_lmdeploy_turbomind_generate(self):
         from xtuner.v1.ray.rollout import LMDeployWorker
         self.rollout_cfg.extra_rollout_config["lmdeploy_backend"] = "turbomind"
-        rollout_workers_map = AutoAcceleratorWorkers.from_placement_group(
-            LMDeployWorker, self.rollout_cfg, self.pg
-        )
         sample_params = SampleParams(temperature=0.0)
-        rollout_controller = RolloutController.remote(self.rollout_cfg, rollout_workers_map)  # type: ignore[attr-defined]
+        rollout_controller = RolloutController.remote(self.rollout_cfg, self.pg)  # type: ignore[attr-defined]
         res1 = ray.get(rollout_controller.rollout.remote(prompt=TEST_TEXT_MESSAGES, sample_params=sample_params))
         res2 = ray.get(rollout_controller.rollout.remote(prompt=TEST_TEXT_MESSAGES, sample_params=sample_params))
         self.assertEqual(res1, res2, f"res1 != res2, res1={res1}, res2={res2}")
@@ -172,11 +190,8 @@ class TestRollout(unittest.TestCase):
     def test_sglang_generate(self):
         from xtuner.v1.ray.rollout import SGLangWorker
         self.rollout_cfg.launch_server_method="multiprocessing"
-        rollout_workers_map = AutoAcceleratorWorkers.from_placement_group(
-            SGLangWorker, self.rollout_cfg, self.pg
-        )
         sample_params = SampleParams(temperature=0.0)
-        rollout_controller = RolloutController.remote(self.rollout_cfg, rollout_workers_map)  # type: ignore[attr-defined]
+        rollout_controller = RolloutController.remote(self.rollout_cfg, self.pg)  # type: ignore[attr-defined]
         res1 = ray.get(rollout_controller.rollout.remote(prompt=TEST_TEXT_MESSAGES, sample_params=sample_params))
         self.assertEqual(res1.finish_reason, "stop")
         print("Response from SGLang infer:", res1)
@@ -197,7 +212,7 @@ class TestRollout(unittest.TestCase):
                                          self.test_env
                                         )
         responses = ray.get(self.test_flow.run.remote(), timeout=300)
-        finished_samples_count = sum(1 for data in responses for item in data if item.env.rollout.finish_reason == "stop" or item.env.rollout.finish_reason == "length")
+        finished_samples_count = sum(1 for data in responses[0] for item in data if item.env.rollout.finish_reason == "stop" or item.env.rollout.finish_reason == "length")
         self.assertEqual(finished_samples_count // self.dataflow_cfg.prompt_repeat_k, self.dataflow_cfg.global_batch_size)
         ray.get(self.test_env.shutdown.remote(), timeout=300)
         print("responses: ", responses)
