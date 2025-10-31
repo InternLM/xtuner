@@ -1,39 +1,55 @@
 # syntax=docker/dockerfile:1.10.0
 # builder
-ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:25.01-py3
+ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:25.03-py3
 
 ## build args
 FROM ${BASE_IMAGE} AS setup_env
 
-ARG CODESPACE=/root/codespace
-
-ARG FLASH_ATTN_DIR=/tmp/flash-attn
-ARG FLASH_ATTN3_DIR=/tmp/flash-attn3
-ARG ADAPTIVE_GEMM_DIR=/tmp/adaptive_gemm
-ARG GROUPED_GEMM_DIR=/tmp/grouped_gemm
-
 ARG TORCH_VERSION
-
 ARG PPA_SOURCE
 
-RUN if [ -d /etc/pip ] && [ -f /etc/pip/constraint.txt ]; then echo > /etc/pip/constraint.txt; fi
-RUN if [ -n "${TORCH_VERSION}" ]; then \
-        pip install torchvision torch==${TORCH_VERSION} --index-url https://download.pytorch.org/whl/cu126 --no-cache-dir; \
-    fi
-
-# set reasonable default for CUDA architectures when building ngc image
-ENV TORCH_CUDA_ARCH_LIST="7.5 8.0 8.6 9.0 10.0"
-
-RUN sed -i "s@http://.*.ubuntu.com@${PPA_SOURCE}@g" /etc/apt/sources.list.d/ubuntu.sources && \
+RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
+    sed -i "s@http://.*.ubuntu.com@${PPA_SOURCE}@g" /etc/apt/sources.list.d/ubuntu.sources && \
     apt update && \
     apt install --no-install-recommends ca-certificates -y && \
     apt install --no-install-recommends bc wget -y && \
     apt install --no-install-recommends build-essential sudo -y && \
     apt install --no-install-recommends git curl pkg-config tree unzip tmux \
-    openssh-server openssh-client nmap dnsutils iproute2 lsof net-tools -y && \
+    openssh-server openssh-client dnsutils iproute2 lsof net-tools zsh rclone \
+    iputils-ping telnet netcat-openbsd -y && \
     apt clean && rm -rf /var/lib/apt/lists/*
 
-RUN pip uninstall flash_attn -y
+RUN if [ -d /etc/pip ] && [ -f /etc/pip/constraint.txt ]; then echo > /etc/pip/constraint.txt; fi
+RUN pip install pystack py-spy --no-cache-dir
+RUN git config --system --add safe.directory "*"
+
+RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
+    if [ -n "${TORCH_VERSION}" ]; then \
+        pip install torchvision torch==${TORCH_VERSION} \
+        --index-url https://download.pytorch.org/whl/cu128 \
+        --extra-index-url https://download.pytorch.org/whl/cu126 \
+        --no-cache-dir; \
+    fi
+
+RUN if [ "x${TORCH_VERSION}" = "x2.6.0" ]; then \
+        pip install nvidia-nccl-cu12==2.25.1 --no-cache-dir; \
+    fi
+
+# set reasonable default for CUDA architectures when building ngc image
+ENV TORCH_CUDA_ARCH_LIST="7.5 8.0 8.6 9.0 10.0"
+
+RUN pip uninstall flash_attn opencv -y && rm -rf /usr/local/lib/python3.12/dist-packages/cv2
+
+ARG FLASH_ATTN_DIR=/tmp/flash-attn
+ARG CODESPACE=/root/codespace
+ARG FLASH_ATTN3_DIR=/tmp/flash-attn3
+ARG ADAPTIVE_GEMM_DIR=/tmp/adaptive_gemm
+ARG GROUPED_GEMM_DIR=/tmp/grouped_gemm
+ARG DEEP_EP_DIR=/tmp/deep_ep
+ARG NVSHMEM_PREFIX=/usr/local/nvshmem
+
+RUN mkdir -p $CODESPACE
+WORKDIR ${CODESPACE}
 
 # compile flash-attn
 FROM setup_env AS flash_attn
@@ -43,16 +59,14 @@ ARG FLASH_ATTN_DIR
 ARG FLASH_ATTN3_DIR
 ARG FLASH_ATTN_URL
 
-RUN mkdir -p $CODESPACE 
-WORKDIR ${CODESPACE}
-
-RUN git clone -c https.proxy=$HTTPS_PROXY $(echo ${FLASH_ATTN_URL} | cut -d '@' -f 1) && \
+RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
+    git clone $(echo ${FLASH_ATTN_URL} | cut -d '@' -f 1) && \
     cd ${CODESPACE}/flash-attention && \
-    git checkout $(echo ${FLASH_ATTN_URL} | cut -d '@' -f 2)
+    git checkout $(echo ${FLASH_ATTN_URL} | cut -d '@' -f 2) && \
+    git submodule update --init --recursive --force
 
 WORKDIR ${CODESPACE}/flash-attention
 
-RUN git submodule update --init --recursive --force
 RUN cd hopper && FLASH_ATTENTION_FORCE_BUILD=TRUE pip wheel -w ${FLASH_ATTN3_DIR} -v --no-deps .
 RUN FLASH_ATTENTION_FORCE_BUILD=TRUE pip wheel -w ${FLASH_ATTN_DIR} -v --no-deps .
 
@@ -63,16 +77,14 @@ ARG CODESPACE
 ARG ADAPTIVE_GEMM_DIR
 ARG ADAPTIVE_GEMM_URL
 
-RUN mkdir -p $CODESPACE
-WORKDIR ${CODESPACE}
-
-RUN git clone -c https.proxy=$HTTPS_PROXY $(echo ${ADAPTIVE_GEMM_URL} | cut -d '@' -f 1) && \
+RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
+    git clone $(echo ${ADAPTIVE_GEMM_URL} | cut -d '@' -f 1) && \
     cd ${CODESPACE}/AdaptiveGEMM && \
-    git checkout $(echo ${ADAPTIVE_GEMM_URL} | cut -d '@' -f 2)
+    git checkout $(echo ${ADAPTIVE_GEMM_URL} | cut -d '@' -f 2) && \
+    git submodule update --init --recursive --force
 
 WORKDIR ${CODESPACE}/AdaptiveGEMM
 
-RUN git submodule update --init --recursive --force
 RUN pip wheel -w ${ADAPTIVE_GEMM_DIR} -v --no-deps .
 
 # compile grouped_gemm(permute and unpermute)
@@ -82,18 +94,53 @@ ARG CODESPACE
 ARG GROUPED_GEMM_DIR
 ARG GROUPED_GEMM_URL
 
-RUN mkdir -p $CODESPACE
-WORKDIR ${CODESPACE}
-
-RUN git clone -c https.proxy=$HTTPS_PROXY $(echo ${GROUPED_GEMM_URL} | cut -d '@' -f 1) && \
+RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
+    git clone $(echo ${GROUPED_GEMM_URL} | cut -d '@' -f 1) && \
     cd ${CODESPACE}/GroupedGEMM && \
-    git checkout $(echo ${GROUPED_GEMM_URL} | cut -d '@' -f 2)
+    git checkout $(echo ${GROUPED_GEMM_URL} | cut -d '@' -f 2) && \
+    git submodule update --init --recursive --force
 
 WORKDIR ${CODESPACE}/GroupedGEMM
 
-RUN git submodule update --init --recursive --force
 RUN pip wheel -w ${GROUPED_GEMM_DIR} -v --no-deps .
 
+# pypi install nvshmem and compile deepep
+FROM setup_env AS deep_ep
+
+ARG CODESPACE
+ARG DEEP_EP_DIR
+ARG DEEP_EP_URL
+ARG NVSHMEM_WHL_DIR
+# build sm90 and sm100 for deep_ep for now
+ARG TORCH_CUDA_ARCH_LIST="9.0 10.0"
+
+RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
+    curl -LO https://github.com/NVIDIA/nvshmem/releases/download/v3.4.5-0/nvshmem_src_cuda-all-all-3.4.5.tar.gz && \
+    tar -zxvf nvshmem_src_cuda-all-all-3.4.5.tar.gz && \
+    cd ${CODESPACE}/nvshmem_src && \
+    NVSHMEM_SHMEM_SUPPORT=0 \
+    NVSHMEM_UCX_SUPPORT=0 \
+    NVSHMEM_USE_NCCL=0 \
+    NVSHMEM_MPI_SUPPORT=0 \
+    NVSHMEM_IBGDA_SUPPORT=1 \
+    NVSHMEM_USE_GDRCOPY=0 \
+    NVSHMEM_PMIX_SUPPORT=0 \
+    NVSHMEM_TIMEOUT_DEVICE_POLLING=0 \
+    NVSHMEM_BUILD_TESTS=0 \
+    NVSHMEM_BUILD_EXAMPLES=0 \
+    NVSHMEM_BUILD_HYDRA_LAUNCHER=0 \
+    NVSHMEM_BUILD_TXZ_PACKAGE=0 \
+    NVSHMEM_BUILD_PYTHON_LIB=OFF \
+    cmake -S . -B build/ -DCMAKE_INSTALL_PREFIX=${NVSHMEM_PREFIX} -DMLX5_lib=/lib/x86_64-linux-gnu/libmlx5.so.1 && \
+    cmake --build build --target install --parallel 32 && \
+    cd ${CODESPACE} && git clone $(echo ${DEEP_EP_URL} | cut -d '@' -f 1) && \
+    cd ${CODESPACE}/DeepEP && \
+    git checkout $(echo ${DEEP_EP_URL} | cut -d '@' -f 2) && \
+    git submodule update --init --recursive --force
+
+WORKDIR ${CODESPACE}/DeepEP
+
+RUN NVSHMEM_DIR=${NVSHMEM_PREFIX} pip wheel -w ${DEEP_EP_DIR} -v --no-deps .
 
 # integration xtuner
 FROM setup_env AS xtuner_dev
@@ -105,54 +152,36 @@ ARG FLASH_ATTN_DIR
 ARG FLASH_ATTN3_DIR
 ARG ADAPTIVE_GEMM_DIR
 ARG GROUPED_GEMM_DIR
+ARG DEEP_EP_DIR
+ARG NVSHMEM_WHL_DIR
 
 COPY --from=flash_attn ${FLASH_ATTN3_DIR} ${FLASH_ATTN3_DIR}
 COPY --from=flash_attn ${FLASH_ATTN_DIR} ${FLASH_ATTN_DIR}
 COPY --from=adaptive_gemm ${ADAPTIVE_GEMM_DIR} ${ADAPTIVE_GEMM_DIR}
 COPY --from=grouped_gemm ${GROUPED_GEMM_DIR} ${GROUPED_GEMM_DIR}
+COPY --from=deep_ep ${DEEP_EP_DIR} ${DEEP_EP_DIR}
+COPY --from=deep_ep ${NVSHMEM_PREFIX} ${NVSHMEM_PREFIX}
 
 RUN unzip ${FLASH_ATTN_DIR}/*.whl -d ${PYTHON_SITE_PACKAGE_PATH}
 RUN unzip ${FLASH_ATTN3_DIR}/*.whl -d ${PYTHON_SITE_PACKAGE_PATH}
 RUN unzip ${ADAPTIVE_GEMM_DIR}/*.whl -d ${PYTHON_SITE_PACKAGE_PATH}
 RUN unzip ${GROUPED_GEMM_DIR}/*.whl -d ${PYTHON_SITE_PACKAGE_PATH}
-
-ARG XTUNER_URL
-ARG XTUNER_COMMIT
-ARG LMDEPLOY_VERSION
-ARG LMDEPLOY_URL
+RUN unzip ${DEEP_EP_DIR}/*.whl -d ${PYTHON_SITE_PACKAGE_PATH}
 
 ## install xtuner
-RUN mkdir -p $CODESPACE
-WORKDIR ${CODESPACE}
-
-#RUN git clone -c https.proxy=$HTTPS_PROXY $(echo ${XTUNER_URL} | cut -d '@' -f 1) && \
-    #cd ${CODESPACE}/xtuner && \
-    #git checkout $(echo ${XTUNER_URL} | cut -d '@' -f 2) 
+ARG XTUNER_URL
+ARG XTUNER_COMMIT
+#RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
+#   git clone $(echo ${XTUNER_URL} | cut -d '@' -f 1) && \
+#   cd ${CODESPACE}/xtuner && \
+#   git checkout $(echo ${XTUNER_URL} | cut -d '@' -f 2)
 COPY . ${CODESPACE}/xtuner
 
 WORKDIR ${CODESPACE}/xtuner
-RUN export HTTPS_PROXY=$HTTPS_PROXY \
-  && export https_proxy=$HTTPS_PROXY \
-  && pip install liger-kernel parametrize --no-cache-dir \
-  && pip install . -v --no-cache-dir
+RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
+    pip install .[all] -v --no-cache-dir
 
-RUN pip install pystack py-spy --no-cache-dir
-RUN git config --system --add safe.directory "*"
-
-# install lmdeploy and its missing runtime requirements
-RUN pip install fastapi fire openai outlines \
-    partial_json_parser ray[default] shortuuid uvicorn \
-    'numpy<2.0.0' \
-    python-sat[aiger,approxmc,cryptosat,pblib] distance Faker --no-cache-dir
 WORKDIR ${CODESPACE}
-RUN if [ -n "${LMDEPLOY_VERSION}" ]; then \
-        pip install lmdeploy==${LMDEPLOY_VERSION} --no-deps --no-cache-dir; \
-    else \
-        git clone -c https.proxy=$HTTPS_PROXY $(echo ${LMDEPLOY_URL} | cut -d '@' -f 1) && \
-        cd ${CODESPACE}/lmdeploy && \
-        git checkout $(echo ${LMDEPLOY_URL} | cut -d '@' -f 2) && \
-        pip install . -v --no-deps --no-cache-dir; \
-    fi
 
 # setup sysctl
 RUN echo "fs.file-max=100000" >> /etc/sysctl.conf
