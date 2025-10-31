@@ -63,8 +63,8 @@ class Qwen3VLTextDense(Qwen3Dense):
         for idx, decoder_layer in self.layers.items():
             hidden_states = decoder_layer(
                 hidden_states,
-                position_embeddings=position_embeddings,
-                seq_ctx=seq_ctx,
+                position_embeddings,
+                seq_ctx,
             )
 
             if deepstack_visual_embeds is not None and idx in range(len(deepstack_visual_embeds)):
