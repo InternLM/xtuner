@@ -26,8 +26,8 @@ export PYTHONPYCACHEPREFIX=/tmp
 export TRITON_CACHE_DIR=/tmp/.triton
 export PYTEST_ADDOPTS='-o cache_dir=/tmp/.pytest_cache'
 
-proxy_off
-pip install -e .
+unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
+pip install -e .[all]
 pip install openai-harmony
 pip install numpy==1.26.4
 
