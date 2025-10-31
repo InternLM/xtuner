@@ -113,7 +113,7 @@ class LMDeployWorker(RolloutWorker):
             "tool_choice": tool_choice if tool_choice else None,
         }
         if self.enable_return_routed_experts:
-            payload["return_routed_experts"] = True
+            extra_params["return_routed_experts"] = True
 
         if stream:
             payload["messages"] = prompt
