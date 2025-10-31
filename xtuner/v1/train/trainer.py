@@ -349,7 +349,7 @@ class Trainer:
             global_batch_size = self.data_mesh["dp"].size()
         self._global_batch_size = global_batch_size
 
-        # self._resolve_config_conflicts(self.tokenizer, model_cfg, dataloader_cfg)
+        self._resolve_config_conflicts(self.tokenizer, model_cfg, dataloader_cfg)
 
         if dataset_cfg is not None:  # TODO: Removed in version 1.1.0
             # For backward compatibility, reserve the dataset_cfg interface, remove it later
@@ -408,10 +408,8 @@ class Trainer:
 
         if self._resume_cfg.resume_from is not None:
             self._resume()
-        
 
         ProberList.setup(self.exp_dir, self._profile_step, self._engine.model, prober_list)
-        # ProberList.setup(self.exp_dir, self._profile_step, self._engine.model, [AccProber])
 
 
     @classmethod
@@ -1180,20 +1178,23 @@ class Trainer:
 
         assert isinstance(pad_token_id, int), f"pad_token_id should be an integer, but got {pad_token_id}"
 
-        if isinstance(model_cfg, VisionComposeConfigProtocol):
-            if model_cfg.text_config.pad_token_id != pad_token_id:
-                logger.warning(
-                    f"Model pad_token_id {model_cfg.text_config.pad_token_id} is different from tokenizer "
-                    f"pad_token_id {pad_token_id}. Using tokenizer pad_token_id {pad_token_id}."
-                )
-                model_cfg.text_config.pad_token_id = pad_token_id
+        # Model's pad_token_id only affects the embedding module which acts specially for pad token.
+        # Model's pad_token_id may be different from tokenizer's pad_token_id.
+        # Note: Qwen3 Model's pad_token_id is None, which is different from Qwen tokenizer's pad_token_id.
+        # if isinstance(model_cfg, VisionComposeConfigProtocol):
+        #     if model_cfg.text_config.pad_token_id != pad_token_id:
+        #         logger.warning(
+        #             f"Model pad_token_id {model_cfg.text_config.pad_token_id} is different from tokenizer "
+        #             f"pad_token_id {pad_token_id}. Using tokenizer pad_token_id {pad_token_id}."
+        #         )
+        #         model_cfg.text_config.pad_token_id = pad_token_id
 
-        elif model_cfg.pad_token_id != pad_token_id:
-            logger.warning(
-                f"Model pad_token_id {model_cfg.pad_token_id} is different from tokenizer pad_token_id "
-                f"{pad_token_id}. Using tokenizer pad_token_id {pad_token_id}."
-            )
-            model_cfg.pad_token_id = pad_token_id
+        # elif model_cfg.pad_token_id != pad_token_id:
+        #     logger.warning(
+        #         f"Model pad_token_id {model_cfg.pad_token_id} is different from tokenizer pad_token_id "
+        #         f"{pad_token_id}. Using tokenizer pad_token_id {pad_token_id}."
+        #     )
+        #     model_cfg.pad_token_id = pad_token_id
 
         if dataloader_cfg.pad_token_id is None:
             dataloader_cfg.pad_token_id = pad_token_id
@@ -1273,6 +1274,9 @@ class Trainer:
             "XTUNER_DISPATCHER_DEBUG": os.getenv("XTUNER_DISPATCHER_DEBUG"),
             "XTUNER_ROUTER_DEBUG": os.getenv("XTUNER_ROUTER_DEBUG"),
             "XTUNER_DECORD_VIDEO_THREADS": os.getenv("XTUNER_DECORD_VIDEO_THREADS"),
+            "XTUNER_USE_CUTLASS_GROUP_GEMM": os.getenv("XTUNER_USE_CUTLASS_GROUP_GEMM"),
+            "GROUPED_GEMM_USE_CUTLASS": os.getenv("GROUPED_GEMM_USE_CUTLASS"),
+            "XTUNER_USE_NATIVE_RMSNORM": os.getenv("XTUNER_USE_NATIVE_RMSNORM"),
         }
 
         for k, v in env.items():
