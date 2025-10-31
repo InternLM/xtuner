@@ -197,20 +197,16 @@ class CELossContext(BaseLossContext[CELossContextInputItem]):
         if rank_grad_tokens == 0:
             loss = logits.sum() * 0
         else:
-            # loss = F.cross_entropy(logits, shifted_labels, reduction="none", ignore_index=self.loss_cfg.ignore_idx)
+            loss = F.cross_entropy(logits, shifted_labels, reduction="none", ignore_index=self.loss_cfg.ignore_idx)
             # Step 2.b in the loss calculation: sum the loss over all tokens
-            # loss = (loss * loss_weight).sum()
+            loss = (loss * loss_weight).sum()
 
-            loss = F.cross_entropy(logits, shifted_labels, reduction="sum", ignore_index=self.loss_cfg.ignore_idx)
-            ProberList.record_tensor(loss, "[lm_head.ce_loss][before calibration]loss")
+            # Below is the old implementation of loss calibration for accuracy regression
+            # loss = F.cross_entropy(logits, shifted_labels, reduction="sum", ignore_index=self.loss_cfg.ignore_idx)
+            # ProberList.record_tensor(loss, "[lm_head.ce_loss][before calibration]loss")
             # register_grad_hook(loss, "loss")
-            # mask = loss_weight != 0
-            # w = loss_weight.sum() / mask.sum()  # w equals to 1/global_denominator
-            # loss = loss * w
-            print(f"loss_kwargs.global_denominator: {loss_kwargs.global_denominator}")
-            loss = loss / int(loss_kwargs.global_denominator)
-            # register_grad_hook(loss, "loss_denorm")
-            return loss, (logits, {})
+            # print(f"loss_kwargs.global_denominator: {loss_kwargs.global_denominator}")
+            # loss = loss / int(loss_kwargs.global_denominator)
 
         return loss, (logits, {})
 
