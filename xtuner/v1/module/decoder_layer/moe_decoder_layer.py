@@ -1,5 +1,5 @@
 from functools import partial
-from typing import Literal, Protocol, TypeAlias, cast
+from typing import Literal, Protocol, TypeAlias
 
 import torch
 import torch.nn as nn
@@ -336,7 +336,7 @@ class MoEDecoderLayer(nn.Module):
             self.layer_idx,
             post_dispatched["hidden_states"],
             post_dispatched["tokens_per_expert"],
-            cast(torch.Tensor | None, post_dispatched.get("row_ids_map")),
+            post_dispatched.get("row_ids_map"),  # type: ignore[arg-type]
             dispatched["topk_weights"],
         )
         ProberList.before_experts(
@@ -351,7 +351,7 @@ class MoEDecoderLayer(nn.Module):
         ProberList.before_combine(
             self.layer_idx,
             experts_out,
-            cast(torch.Tensor | None, post_dispatched.get("row_ids_map")),
+            post_dispatched.get("row_ids_map"),  # type: ignore[arg-type]
             dispatched["topk_weights"],
         )
         pre_combined = self.dispatcher.combine_preprocess(
