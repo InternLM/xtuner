@@ -82,19 +82,19 @@ class BaseProber(ABC):
 
     ############################## forward hooks #################################
     @classmethod
-    def before_embed_tokens(cls, input_ids: torch.Tensor):
+    def before_embed_tokens(cls, name: str, input_ids: torch.Tensor):
         pass
 
     @classmethod
-    def after_embed_tokens(cls, hidden_states: torch.Tensor):
+    def after_embed_tokens(cls, name: str, hidden_states: torch.Tensor):
         pass
 
     @classmethod
-    def before_layer(cls, layer_idx: str | int, hidden_states: torch.Tensor):
+    def before_layer(cls, name: str, hidden_states: torch.Tensor):
         pass
 
     @classmethod
-    def after_layer(cls, layer_idx: str | int, hidden_states: torch.Tensor):
+    def after_layer(cls, name: str, hidden_states: torch.Tensor):
         pass
 
     @classmethod
@@ -107,22 +107,6 @@ class BaseProber(ABC):
 
     # ******************************* Attention Block *******************************
     @classmethod
-    def before_input_layernorm(cls, layer_idx: str | int, hidden_states: torch.Tensor):
-        pass
-
-    @classmethod
-    def after_input_layernorm(cls, layer_idx: str | int, hidden_states: torch.Tensor):
-        pass
-
-    @classmethod
-    def before_self_attn(cls, layer_idx: str | int, hidden_states: torch.Tensor):
-        pass
-
-    @classmethod
-    def after_self_attn(cls, layer_idx: str | int, hidden_states: torch.Tensor):
-        pass
-
-    @classmethod
     def before_attention(cls, name: str, hidden_states: torch.Tensor):
         pass
 
@@ -132,29 +116,11 @@ class BaseProber(ABC):
 
     # ******************************* MoE Block *******************************
     @classmethod
-    def before_post_attention_layernorm(cls, layer_idx: str | int, hidden_states: torch.Tensor):
-        pass
-
-    @classmethod
-    def after_post_attention_layernorm(cls, layer_idx: str | int, hidden_states: torch.Tensor):
-        pass
-
-    @classmethod
     def before_moe_gate(cls, name: str, hidden_states: torch.Tensor):
         pass
 
     @classmethod
     def after_moe_gate(cls, name: str, router_results: RouterResults):
-        pass
-
-    @classmethod
-    def before_router_gate(cls, layer_idx: str | int, hidden_states: torch.Tensor):
-        pass
-
-    @classmethod
-    def after_router_gate(
-        cls, layer_idx: str | int, logits: torch.Tensor, topk_weights: torch.Tensor, topk_ids: torch.Tensor
-    ):
         pass
 
     @classmethod
@@ -175,11 +141,11 @@ class BaseProber(ABC):
         pass
 
     @classmethod
-    def before_experts(cls, layer_idx: str | int, hidden_states: torch.Tensor, tokens_per_expert: torch.Tensor):
+    def before_experts(cls, name: str, hidden_states: torch.Tensor, tokens_per_expert: torch.Tensor):
         pass
 
     @classmethod
-    def after_experts(cls, layer_idx: str | int, experts_out: torch.Tensor):
+    def after_experts(cls, name: str, experts_out: torch.Tensor):
         pass
 
     @classmethod
@@ -198,30 +164,31 @@ class BaseProber(ABC):
 
     # ******************************* LM Head Block *******************************
     @classmethod
-    def before_lm_head(cls, hidden_states: torch.Tensor, shifted_labels: torch.Tensor | None):
+    def before_lm_head(cls, name: str, hidden_states: torch.Tensor, shifted_labels: torch.Tensor | None):
         pass
 
     @classmethod
-    def after_lm_head(cls, loss: torch.Tensor, logits: torch.Tensor | None):
+    def after_lm_head(cls, name: str, loss: torch.Tensor, logits: torch.Tensor | None):
         pass
 
     @classmethod
-    def before_balancing_loss(cls, router_logits: torch.Tensor):
+    def before_balancing_loss(cls, name: str, router_logits: torch.Tensor):
         pass
 
     @classmethod
     def after_balancing_loss(
         cls,
+        name: str,
         loss: torch.Tensor,
     ):
         pass
 
     @classmethod
-    def before_z_loss(cls, router_logits: torch.Tensor):
+    def before_z_loss(cls, name: str, router_logits: torch.Tensor):
         pass
 
     @classmethod
-    def after_z_loss(cls, z_loss: torch.Tensor):
+    def after_z_loss(cls, name: str, z_loss: torch.Tensor):
         pass
 
     ############################## hooks for gradient #################################
@@ -279,30 +246,30 @@ class ProberList:
     
     ############################# wrappers for forward hooks #################################
     @classmethod
-    def wrap_embedding_forward(cls, forward: Callable):
+    def wrap_embedding_forward(cls, forward: Callable, name: str):
         @functools.wraps(forward)
         def wrapped_forward(self, *args, **kwargs):
-            ProberList.before_embed_tokens(args[0])
+            ProberList.before_embed_tokens(name, args[0])
             hidden_states = forward(*args, **kwargs)
-            ProberList.after_embed_tokens(hidden_states)
+            ProberList.after_embed_tokens(name, hidden_states)
             return hidden_states
         return wrapped_forward
     
     @classmethod
-    def wrap_decoder_layer_forward(cls, forward: Callable):
+    def wrap_decoder_layer_forward(cls, forward: Callable, name: str):
         @functools.wraps(forward)
         def wrapped_forward(self, *args, **kwargs):
             if len(args) >= 1:
                 hidden_states = args[0]
             else:
                 hidden_states = kwargs["hidden_states"]
-            ProberList.before_layer(self.layer_idx, hidden_states)
+            ProberList.before_layer(name, hidden_states)
             outputs = forward(*args, **kwargs)
             if isinstance(outputs, tuple):  # for MoEDecoderLayer
                 hidden_states = outputs[0]
             else:  # for DenseDecoderLayer
                 hidden_states = outputs
-            ProberList.after_layer(self.layer_idx, hidden_states)
+            ProberList.after_layer(name, hidden_states)
             return outputs
         return wrapped_forward
     
@@ -349,7 +316,7 @@ class ProberList:
         return wrapped_forward
 
     @classmethod
-    def wrap_moe_block_forward(cls, forward: Callable):
+    def wrap_moe_block_forward(cls, forward: Callable, name: str):
         @functools.wraps(forward)
         def wrapped_forward(self, *args, **kwargs):
             if len(args) >= 1:
@@ -360,14 +327,14 @@ class ProberList:
                 tokens_per_expert = args[1]
             else:
                 tokens_per_expert = kwargs["tokens_per_expert"]
-            ProberList.before_experts(self.layer_idx, hidden_states, tokens_per_expert)
+            ProberList.before_experts(name, hidden_states, tokens_per_expert)
             outputs = forward(*args, **kwargs)
-            ProberList.after_experts(self.layer_idx, outputs)
+            ProberList.after_experts(name, outputs)
             return outputs
         return wrapped_forward
     
     @classmethod
-    def wrap_lm_head_forward(cls, forward: Callable):
+    def wrap_lm_head_forward(cls, forward: Callable, name: str):
         @functools.wraps(forward)
         def wrapped_forward(self, *args, **kwargs):
             if len(args) >= 1:
@@ -378,62 +345,62 @@ class ProberList:
                 loss_ctx = args[1]
             else:
                 loss_ctx = kwargs.get("loss_ctx", None)
-            ProberList.before_lm_head(hidden_states, loss_ctx.loss_kwargs.shifted_labels if loss_ctx is not None else None)
+            ProberList.before_lm_head(name, hidden_states, loss_ctx.loss_kwargs.shifted_labels if loss_ctx is not None else None)
             outputs = forward(*args, **kwargs)
             loss, (logits, extra_info) = outputs
-            ProberList.after_lm_head(loss, logits)
+            ProberList.after_lm_head(name, loss, logits)
             return outputs
         return wrapped_forward
 
     @classmethod
-    def wrap_balancing_loss_forward(cls, forward: Callable):
+    def wrap_balancing_loss_forward(cls, forward: Callable, name: str):
         @functools.wraps(forward)
         def wrapped_forward(self, *args, **kwargs):
             if len(args) >= 1:
                 router_logits = args[0]
             else:
                 router_logits = kwargs["router_logits"]
-            ProberList.before_balancing_loss(router_logits)
+            ProberList.before_balancing_loss(name, router_logits)
             loss = forward(*args, **kwargs)
-            ProberList.after_balancing_loss(loss)
+            ProberList.after_balancing_loss(name, loss)
             return loss
         return wrapped_forward
     
     @classmethod
-    def wrap_z_loss_forward(cls, forward: Callable):
+    def wrap_z_loss_forward(cls, forward: Callable, name: str):
         @functools.wraps(forward)
         def wrapped_forward(self, *args, **kwargs):
             if len(args) >= 1:
                 router_logits = args[0]
             else:
                 router_logits = kwargs["router_logits"]
-            ProberList.before_z_loss(router_logits)
+            ProberList.before_z_loss(name, router_logits)
             z_loss = forward(*args, **kwargs)
-            ProberList.after_z_loss(z_loss)
+            ProberList.after_z_loss(name, z_loss)
             return z_loss
         return wrapped_forward
     
 
     ############################## forward hooks #################################
     @classmethod
-    def before_embed_tokens(cls, input_ids: torch.Tensor):
+    def before_embed_tokens(cls, name: str, input_ids: torch.Tensor):
         for prober_cls in cls.prober_list:
-            prober_cls.before_embed_tokens(input_ids)
+            prober_cls.before_embed_tokens(name, input_ids)
 
     @classmethod
-    def after_embed_tokens(cls, hidden_states: torch.Tensor):
+    def after_embed_tokens(cls, name: str, hidden_states: torch.Tensor):
         for prober_cls in cls.prober_list:
-            prober_cls.after_embed_tokens(hidden_states)
+            prober_cls.after_embed_tokens(name, hidden_states)
 
     @classmethod
-    def before_layer(cls, layer_idx: str | int, hidden_states: torch.Tensor):
+    def before_layer(cls, name: str | int, hidden_states: torch.Tensor):
         for prober_cls in cls.prober_list:
-            prober_cls.before_layer(layer_idx, hidden_states)
+            prober_cls.before_layer(name, hidden_states)
 
     @classmethod
-    def after_layer(cls, layer_idx: str | int, hidden_states: torch.Tensor):
+    def after_layer(cls, name: str | int, hidden_states: torch.Tensor):
         for prober_cls in cls.prober_list:
-            prober_cls.after_layer(layer_idx, hidden_states)
+            prober_cls.after_layer(name, hidden_states)
 
     @classmethod
     def before_rms_norm(cls, name: str, hidden_states: torch.Tensor):
@@ -447,26 +414,6 @@ class ProberList:
 
     # ******************************* Attention Block *******************************
     @classmethod
-    def before_input_layernorm(cls, layer_idx: str | int, hidden_states: torch.Tensor):
-        for prober_cls in cls.prober_list:
-            prober_cls.before_input_layernorm(layer_idx, hidden_states)
-
-    @classmethod
-    def after_input_layernorm(cls, layer_idx: str | int, hidden_states: torch.Tensor):
-        for prober_cls in cls.prober_list:
-            prober_cls.after_input_layernorm(layer_idx, hidden_states)
-
-    @classmethod
-    def before_self_attn(cls, layer_idx: str | int, hidden_states: torch.Tensor):
-        for prober_cls in cls.prober_list:
-            prober_cls.before_self_attn(layer_idx, hidden_states)
-
-    @classmethod
-    def after_self_attn(cls, layer_idx: str | int, hidden_states: torch.Tensor):
-        for prober_cls in cls.prober_list:
-            prober_cls.after_self_attn(layer_idx, hidden_states)
-    
-    @classmethod
     def before_attention(cls, name: str, hidden_states: torch.Tensor):
         for prober_cls in cls.prober_list:
             prober_cls.before_attention(name, hidden_states)
@@ -477,28 +424,6 @@ class ProberList:
             prober_cls.after_attention(name, outputs)
 
     # ******************************* MoE Block *******************************
-    @classmethod
-    def before_post_attention_layernorm(cls, layer_idx: str | int, hidden_states: torch.Tensor):
-        for prober_cls in cls.prober_list:
-            prober_cls.before_post_attention_layernorm(layer_idx, hidden_states)
-
-    @classmethod
-    def after_post_attention_layernorm(cls, layer_idx: str | int, hidden_states: torch.Tensor):
-        for prober_cls in cls.prober_list:
-            prober_cls.after_post_attention_layernorm(layer_idx, hidden_states)
-
-    @classmethod
-    def before_router_gate(cls, layer_idx: str | int, hidden_states: torch.Tensor):
-        for prober_cls in cls.prober_list:
-            prober_cls.before_router_gate(layer_idx, hidden_states)
-
-    @classmethod
-    def after_router_gate(
-        cls, layer_idx: str | int, logits: torch.Tensor, topk_weights: torch.Tensor, topk_ids: torch.Tensor
-    ):
-        for prober_cls in cls.prober_list:
-            prober_cls.after_router_gate(layer_idx, logits, topk_weights, topk_ids)
-    
     @classmethod
     def before_moe_gate(cls, name: str, hidden_states: torch.Tensor):
         for prober_cls in cls.prober_list:
@@ -529,14 +454,14 @@ class ProberList:
             prober_cls.after_dispatch(layer_idx, hidden_states, tokens_per_expert, row_ids_map, topk_weights)
 
     @classmethod
-    def before_experts(cls, layer_idx: str | int, hidden_states: torch.Tensor, tokens_per_expert: torch.Tensor):
+    def before_experts(cls, name: str, hidden_states: torch.Tensor, tokens_per_expert: torch.Tensor):
         for prober_cls in cls.prober_list:
-            prober_cls.before_experts(layer_idx, hidden_states, tokens_per_expert)
+            prober_cls.before_experts(name, hidden_states, tokens_per_expert)
 
     @classmethod
-    def after_experts(cls, layer_idx: str | int, experts_out: torch.Tensor):
+    def after_experts(cls, name: str, experts_out: torch.Tensor):
         for prober_cls in cls.prober_list:
-            prober_cls.after_experts(layer_idx, experts_out)
+            prober_cls.after_experts(name, experts_out)
 
     @classmethod
     def before_combine(
@@ -556,37 +481,38 @@ class ProberList:
 
     # ******************************* LM Head Block *******************************
     @classmethod
-    def before_lm_head(cls, hidden_states: torch.Tensor, shifted_labels: torch.Tensor | None):
+    def before_lm_head(cls, name: str, hidden_states: torch.Tensor, shifted_labels: torch.Tensor | None):
         for prober_cls in cls.prober_list:
-            prober_cls.before_lm_head(hidden_states, shifted_labels)
+            prober_cls.before_lm_head(name, hidden_states, shifted_labels)
 
     @classmethod
-    def after_lm_head(cls, loss: torch.Tensor, logits: torch.Tensor | None):
+    def after_lm_head(cls, name: str, loss: torch.Tensor, logits: torch.Tensor | None):
         for prober_cls in cls.prober_list:
-            prober_cls.after_lm_head(loss, logits)
+            prober_cls.after_lm_head(name, loss, logits)
 
     @classmethod
-    def before_balancing_loss(cls, router_logits: torch.Tensor):
+    def before_balancing_loss(cls, name: str, router_logits: torch.Tensor):
         for prober_cls in cls.prober_list:
-            prober_cls.before_balancing_loss(router_logits)
+            prober_cls.before_balancing_loss(name, router_logits)
 
     @classmethod
     def after_balancing_loss(
         cls,
+        name: str,
         loss: torch.Tensor,
     ):
         for prober_cls in cls.prober_list:
-            prober_cls.after_balancing_loss(loss)
+            prober_cls.after_balancing_loss(name, loss)
 
     @classmethod
-    def before_z_loss(cls, router_logits: torch.Tensor):
+    def before_z_loss(cls, name: str, router_logits: torch.Tensor):
         for prober_cls in cls.prober_list:
-            prober_cls.before_z_loss(router_logits)
+            prober_cls.before_z_loss(name, router_logits)
 
     @classmethod
-    def after_z_loss(cls, z_loss: torch.Tensor):
+    def after_z_loss(cls, name: str, z_loss: torch.Tensor):
         for prober_cls in cls.prober_list:
-            prober_cls.after_z_loss(z_loss)
+            prober_cls.after_z_loss(name, z_loss)
 
     ############################## hooks for gradient #################################
     @classmethod
@@ -645,20 +571,20 @@ class AccProber(BaseProber):
 
     ############################## forward hooks #################################
     @classmethod
-    def before_embed_tokens(cls, input_ids: torch.Tensor):
-        cls.record_tensor(input_ids, "[embed_tokens][before]input_ids")
+    def before_embed_tokens(cls, name: str, input_ids: torch.Tensor):
+        cls.record_tensor(input_ids, f"[{name}][before]input_ids")
 
     @classmethod
-    def after_embed_tokens(cls, hidden_states: torch.Tensor):
-        cls.record_tensor(hidden_states, "[embed_tokens][after]hidden_states")
+    def after_embed_tokens(cls, name: str, hidden_states: torch.Tensor):
+        cls.record_tensor(hidden_states, f"[{name}][after]hidden_states")
 
     @classmethod
-    def before_layer(cls, layer_idx: str | int, hidden_states: torch.Tensor):
-        cls.record_tensor(hidden_states, f"[layers.{layer_idx}][before]hidden_states")
+    def before_layer(cls, name: str | int, hidden_states: torch.Tensor):
+        cls.record_tensor(hidden_states, f"[{name}][before]hidden_states")
 
     @classmethod
-    def after_layer(cls, layer_idx: str | int, hidden_states: torch.Tensor):
-        cls.record_tensor(hidden_states, f"[layers.{layer_idx}][after]hidden_states")
+    def after_layer(cls, name: str | int, hidden_states: torch.Tensor):
+        cls.record_tensor(hidden_states, f"[{name}][after]hidden_states")
 
     @classmethod
     def before_rms_norm(cls, name: str, hidden_states: torch.Tensor):
@@ -670,22 +596,6 @@ class AccProber(BaseProber):
 
     # ******************************* Attention Block *******************************
     @classmethod
-    def before_input_layernorm(cls, layer_idx: str | int, hidden_states: torch.Tensor):
-        cls.record_tensor(hidden_states, f"[layers.{layer_idx}.input_layernorm][before]hidden_states")
-
-    @classmethod
-    def after_input_layernorm(cls, layer_idx: str | int, hidden_states: torch.Tensor):
-        cls.record_tensor(hidden_states, f"[layers.{layer_idx}.input_layernorm][after]hidden_states")
-
-    @classmethod
-    def before_self_attn(cls, layer_idx: str | int, hidden_states: torch.Tensor):
-        cls.record_tensor(hidden_states, f"[layers.{layer_idx}.self_attn][before]hidden_states")
-
-    @classmethod
-    def after_self_attn(cls, layer_idx: str | int, hidden_states: torch.Tensor):
-        cls.record_tensor(hidden_states, f"[layers.{layer_idx}.self_attn][after]hidden_states")
-    
-    @classmethod
     def before_attention(cls, name: str, hidden_states: torch.Tensor):
         cls.record_tensor(hidden_states, f"[{name}][before]hidden_states")
 
@@ -694,26 +604,6 @@ class AccProber(BaseProber):
         cls.record_tensor(outputs, f"[{name}][after]outputs")
 
     # ******************************* MoE Block *******************************
-    @classmethod
-    def before_post_attention_layernorm(cls, layer_idx: str | int, hidden_states: torch.Tensor):
-        cls.record_tensor(hidden_states, f"[layers.{layer_idx}.post_attention_layernorm][before]hidden_states")
-
-    @classmethod
-    def after_post_attention_layernorm(cls, layer_idx: str | int, hidden_states: torch.Tensor):
-        cls.record_tensor(hidden_states, f"[layers.{layer_idx}.post_attention_layernorm][after]hidden_states")
-
-    @classmethod
-    def before_router_gate(cls, layer_idx: str | int, hidden_states: torch.Tensor):
-        cls.record_tensor(hidden_states, f"[layers.{layer_idx}.router_gate][before]hidden_states")
-
-    @classmethod
-    def after_router_gate(
-        cls, layer_idx: str | int, logits: torch.Tensor, topk_weights: torch.Tensor, topk_ids: torch.Tensor
-    ):
-        cls.record_tensor(logits, f"[layers.{layer_idx}.router_gate][after]logits")
-        cls.record_tensor(topk_weights, f"[layers.{layer_idx}.router_gate][after]topk_weights")
-        cls.record_tensor(topk_ids, f"[layers.{layer_idx}.router_gate][after]topk_ids")
-    
     @classmethod
     def before_moe_gate(cls, name: str, hidden_states: torch.Tensor):
         cls.record_tensor(hidden_states, f"[{name}][before]hidden_states")
@@ -747,13 +637,13 @@ class AccProber(BaseProber):
         cls.record_tensor(topk_weights, f"[layers.{layer_idx}.dispatch][after]topk_weights")
 
     @classmethod
-    def before_experts(cls, layer_idx: str | int, hidden_states: torch.Tensor, tokens_per_expert: torch.Tensor):
-        cls.record_tensor(hidden_states, f"[layers.{layer_idx}.experts][before]hidden_states")
-        cls.record_tensor(tokens_per_expert, f"[layers.{layer_idx}.experts][before]tokens_per_expert")
+    def before_experts(cls, name: str, hidden_states: torch.Tensor, tokens_per_expert: torch.Tensor):
+        cls.record_tensor(hidden_states, f"[{name}][before]hidden_states")
+        cls.record_tensor(tokens_per_expert, f"[{name}][before]tokens_per_expert")
 
     @classmethod
-    def after_experts(cls, layer_idx: str | int, experts_out: torch.Tensor):
-        cls.record_tensor(experts_out, f"[layers.{layer_idx}.experts][after]experts_out")
+    def after_experts(cls, name: str, experts_out: torch.Tensor):
+        cls.record_tensor(experts_out, f"[{name}][after]experts_out")
 
     @classmethod
     def before_combine(
@@ -773,39 +663,40 @@ class AccProber(BaseProber):
 
     # ******************************* LM Head Block *******************************
     @classmethod
-    def before_lm_head(cls, hidden_states: torch.Tensor, shifted_labels: torch.Tensor | None):
-        cls.record_tensor(hidden_states, "[lm_head][before]hidden_states")
-        cls.record_tensor(shifted_labels, "[lm_head][before]shifted_labels")
+    def before_lm_head(cls, name: str, hidden_states: torch.Tensor, shifted_labels: torch.Tensor | None):
+        cls.record_tensor(hidden_states, f"[{name}][before]hidden_states")
+        cls.record_tensor(shifted_labels, f"[{name}][before]shifted_labels")
 
     @classmethod
-    def after_lm_head(cls, loss: torch.Tensor, logits: torch.Tensor | None):
-        cls.record_tensor(loss, "[lm_head][after]loss")
-        cls.record_tensor(logits, "[lm_head][after]logits")
+    def after_lm_head(cls, name: str, loss: torch.Tensor, logits: torch.Tensor | None):
+        cls.record_tensor(loss, f"[{name}][after]loss")
+        cls.record_tensor(logits, f"[{name}][after]logits")
 
     @classmethod
-    def before_balancing_loss(cls, router_logits: torch.Tensor):
-        cls.record_tensor(router_logits, "[balancing_loss][before]router_logits")
+    def before_balancing_loss(cls, name: str, router_logits: torch.Tensor):
+        cls.record_tensor(router_logits, f"[{name}][before]router_logits")
 
     @classmethod
     def after_balancing_loss(
         cls,
+        name: str,
         loss: torch.Tensor,
         # routing_weights_mean_global: torch.Tensor,
         # tokens_per_expert_global: torch.Tensor,
         # scale_global: torch.Tensor,
     ):
-        cls.record_tensor(loss, "[balancing_loss][after]loss")
+        cls.record_tensor(loss, f"[{name}][after]loss")
         # cls.record_tensor(routing_weights_mean_global, "[balancing_loss][after]routing_weights_mean_global")
         # cls.record_tensor(tokens_per_expert_global, "[balancing_loss][after]tokens_per_expert_global")
         # cls.record_tensor(scale_global, "[balancing_loss][after]scale_global")
 
     @classmethod
-    def before_z_loss(cls, router_logits: torch.Tensor):
-        cls.record_tensor(router_logits, "[z_loss][before]router_logits")
+    def before_z_loss(cls, name: str, router_logits: torch.Tensor):
+        cls.record_tensor(router_logits, f"[{name}][before]router_logits")
 
     @classmethod
-    def after_z_loss(cls, z_loss: torch.Tensor):
-        cls.record_tensor(z_loss, "[z_loss][after]z_loss")
+    def after_z_loss(cls, name: str, z_loss: torch.Tensor):
+        cls.record_tensor(z_loss, f"[{name}][after]z_loss")
 
     ############################## hooks for step and iter #################################
     @classmethod
@@ -920,28 +811,28 @@ class TimeProber(BaseProber):
 
     ############################## forward hooks #################################
     @classmethod
-    def before_embed_tokens(cls, input_ids: torch.Tensor):
-        cls._start_timer("embed_tokens")
+    def before_embed_tokens(cls, name: str, input_ids: torch.Tensor):
+        cls._start_timer(name)
 
     @classmethod
-    def after_embed_tokens(cls, hidden_states: torch.Tensor):
-        cls._end_timer("embed_tokens")
+    def after_embed_tokens(cls, name: str, hidden_states: torch.Tensor):
+        cls._end_timer(name)
 
     @classmethod
-    def before_layer(cls, layer_idx: str | int, hidden_states: torch.Tensor):
-        cls._start_timer(f"layer.{layer_idx}")
+    def before_layer(cls, name: str | int, hidden_states: torch.Tensor):
+        cls._start_timer(name)
 
     @classmethod
-    def after_layer(cls, layer_idx: str | int, hidden_states: torch.Tensor):
-        cls._end_timer(f"layer.{layer_idx}")
+    def after_layer(cls, name: str | int, hidden_states: torch.Tensor):
+        cls._end_timer(name)
 
     @classmethod
-    def before_lm_head(cls, hidden_states: torch.Tensor, shifted_labels: torch.Tensor | None):
-        cls._start_timer("lm_head")
+    def before_lm_head(cls, name: str, hidden_states: torch.Tensor, shifted_labels: torch.Tensor | None):
+        cls._start_timer(name)
 
     @classmethod
-    def after_lm_head(cls, loss: torch.Tensor, logits: torch.Tensor | None):
-        cls._end_timer("lm_head")
+    def after_lm_head(cls, name: str, loss: torch.Tensor, logits: torch.Tensor | None):
+        cls._end_timer(name)
 
     ############################## hooks for gradient #################################
     @classmethod
@@ -1009,63 +900,11 @@ class TimeProber(BaseProber):
 
 class PdbProber(BaseProber):
     @classmethod
-    def before_layer(cls, layer_idx: str | int, hidden_states: torch.Tensor):
-        if cls.cur_step == 10 and cls.cur_micro_batch_iter == 0 and int(layer_idx) == 0:
+    def before_layer(cls, name: str | int, hidden_states: torch.Tensor):
+        if cls.cur_step == 10 and cls.cur_micro_batch_iter == 0 and 'layers.10' in name:
             dist.breakpoint()
 
     @classmethod
-    def before_router_gate(cls, layer_idx: str | int, hidden_states: torch.Tensor):
+    def before_moe_gate(cls, name: str, hidden_states: torch.Tensor):
         dist.breakpoint()
 
-
-# ==================== 使用示例 ====================
-
-
-def example_usage():
-    """使用示例."""
-    dump_home = Path("./prober_dumps")
-    profile_step = [0, 10, 20, 50, 100]
-    model = None  # 你的模型
-
-    # 初始化ProberManager，传入需要的Prober类列表
-    ProberList.setup(
-        dump_home=dump_home,
-        profile_step=profile_step,
-        model=model,
-        prober_class_names=[
-            "AccProber",  # 准确性探测
-            "TimeProber",  # 时间探测
-            # MemoryProber, # 内存探测（待实现）
-            # DistProber,   # 分布式探测（待实现）
-        ],
-    )
-
-    # 在训练循环中使用
-    for step in range(100):
-        ProberList.set_step(step)
-
-        for micro_iter in range(4):
-            ProberList.set_micro_batch_iter(micro_iter)
-
-            # 模拟训练过程
-            input_ids = torch.randn(2, 128)
-            ProberList.before_embed_tokens(input_ids)
-
-            hidden_states = torch.randn(2, 128, 768)
-            ProberList.after_embed_tokens(hidden_states)
-
-            shifted_labels = torch.randint(0, 50000, (2, 128))
-
-            ProberList.before_lm_head(hidden_states, shifted_labels)
-            loss = torch.tensor(3.14)
-            logits = torch.randn(2, 128, 50000)
-            ProberList.after_lm_head(loss, logits)
-
-            ProberList.after_micro_iter_forward()
-
-        # 梯度相关
-        # ProberManager.before_clip_grad_norm()
-        # ... 梯度裁剪 ...
-        # ProberManager.after_clip_grad_norm()
-
-        ProberList.after_step()

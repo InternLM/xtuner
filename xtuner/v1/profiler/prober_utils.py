@@ -13,10 +13,10 @@ from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEGate
 def register_prober_list(model: nn.Module):
     for name, module in model.named_modules():
         if isinstance(module, nn.Embedding):
-            wrapped = ProberList.wrap_embedding_forward(module.forward)
+            wrapped = ProberList.wrap_embedding_forward(module.forward, name)
             module.forward = types.MethodType(wrapped, module)
         elif isinstance(module, (DenseDecoderLayer, MoEDecoderLayer)):
-            wrapped = ProberList.wrap_decoder_layer_forward(module.forward)
+            wrapped = ProberList.wrap_decoder_layer_forward(module.forward, name)
             module.forward = types.MethodType(wrapped, module)
         elif isinstance(module, RMSNorm):
             wrapped = ProberList.wrap_rms_norm_forward(module.forward, name)
@@ -28,16 +28,16 @@ def register_prober_list(model: nn.Module):
             wrapped = ProberList.wrap_moe_gate_forward(module.forward, name)
             module.forward = types.MethodType(wrapped, module)
         elif isinstance(module, MoEBlock):
-            wrapped = ProberList.wrap_moe_block_forward(module.forward)
+            wrapped = ProberList.wrap_moe_block_forward(module.forward, name)
             module.forward = types.MethodType(wrapped, module)
         elif isinstance(module, LMHead):
-            wrapped = ProberList.wrap_lm_head_forward(module.forward)
+            wrapped = ProberList.wrap_lm_head_forward(module.forward, name)
             module.forward = types.MethodType(wrapped, module)
         elif isinstance(module, BalancingLoss):
-            wrapped = ProberList.wrap_balancing_loss_forward(module.forward)
+            wrapped = ProberList.wrap_balancing_loss_forward(module.forward, name)
             module.forward = types.MethodType(wrapped, module)
         elif isinstance(module, ZLoss):
-            wrapped = ProberList.wrap_z_loss_forward(module.forward)
+            wrapped = ProberList.wrap_z_loss_forward(module.forward, name)
             module.forward = types.MethodType(wrapped, module)
     
 
