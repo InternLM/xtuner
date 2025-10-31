@@ -18,7 +18,7 @@ from cyclopts import Parameter
 from mmengine import load
 from mmengine.dist import get_rank, get_world_size
 from mmengine.runner import set_random_seed
-from pydantic import BaseModel, ConfigDict, computed_field, model_validator
+from pydantic import BaseModel, ConfigDict, computed_field, field_serializer, field_validator, model_validator
 from torch.distributed import init_process_group
 from torch.distributed.device_mesh import init_device_mesh
 from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, LinearLR, SequentialLR
@@ -172,6 +172,23 @@ class TrainerConfig(BaseModel):
         elif self.work_dir is None:
             self.work_dir = Path.cwd()
         return self
+    
+    @field_serializer("grad_norm_dtype")
+    def serialize_dtype(self, value: torch.dtype) -> str:
+        return str(value)
+
+    @field_validator("grad_norm_dtype", mode="before")
+    @classmethod
+    def deserialize_dtype(cls, value: str) -> torch.dtype:
+        if "bfloat16" in value:
+            return torch.bfloat16
+        elif "float32" in value:
+            return torch.float32
+        elif "float64" in value:
+            return torch.float64
+        else:
+            raise ValueError()
+
 
 
 class Trainer:
