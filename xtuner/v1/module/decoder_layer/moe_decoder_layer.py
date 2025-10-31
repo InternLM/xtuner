@@ -134,13 +134,11 @@ class MoEBlock(nn.Module):
         ep_mesh: DeviceMesh | None = None,
         float8_cfg: Float8Config | None = None,
         moe_act_fn_cfg: MoEActFnConfig,
-        layer_idx: int = 0,
     ):
         super().__init__()
         self.hidden_size = hidden_size
         self.intermediate_size = moe_intermediate_size
         self.num_routed_experts = n_routed_experts
-        self.layer_idx = layer_idx
         self.ep_mesh = ep_mesh
         # self.fused_w1 = GroupedLinear(self.hidden_size, self.intermediate_size, self.num_routed_experts, ep_mesh)
         # self.fused_w3 = GroupedLinear(self.hidden_size, self.intermediate_size, self.num_routed_experts, ep_mesh)
@@ -319,9 +317,9 @@ class MoEDecoderLayer(nn.Module):
         origin_shape = hidden_states.shape
 
         # reshape hidden_states to (batch_size * seq_len, hidden_size)
-        ProberList.before_dispatch(
-            self.layer_idx, hidden_states, router_results["topk_ids"], router_results["topk_weights"]
-        )
+        # ProberList.before_dispatch(
+        #     self.layer_idx, hidden_states, router_results["topk_ids"], router_results["topk_weights"]
+        # )
         pre_dispatched = self.dispatcher.dispatch_preprocess(
             hidden_states=hidden_states.view(-1, hidden_states.shape[-1]),
             topk_ids=router_results["topk_ids"],
@@ -335,24 +333,24 @@ class MoEDecoderLayer(nn.Module):
             pre_dispatched=pre_dispatched,
             dispatched=dispatched,
         )
-        ProberList.after_dispatch(
-            self.layer_idx,
-            post_dispatched["hidden_states"],
-            post_dispatched["tokens_per_expert"],
-            post_dispatched.get("row_ids_map"),  # type: ignore[arg-type]
-            dispatched["topk_weights"],
-        )
+        # ProberList.after_dispatch(
+        #     self.layer_idx,
+        #     post_dispatched["hidden_states"],
+        #     post_dispatched["tokens_per_expert"],
+        #     post_dispatched.get("row_ids_map"),  # type: ignore[arg-type]
+        #     dispatched["topk_weights"],
+        # )
         experts_out = self.experts(
             post_dispatched["hidden_states"],
             post_dispatched["tokens_per_expert"],
             decoding=False,
         )
-        ProberList.before_combine(
-            self.layer_idx,
-            experts_out,
-            post_dispatched.get("row_ids_map"),  # type: ignore[arg-type]
-            dispatched["topk_weights"],
-        )
+        # ProberList.before_combine(
+        #     self.layer_idx,
+        #     experts_out,
+        #     post_dispatched.get("row_ids_map"),  # type: ignore[arg-type]
+        #     dispatched["topk_weights"],
+        # )
         pre_combined = self.dispatcher.combine_preprocess(
             hidden_states=experts_out,
             pre_dispatched=pre_dispatched,
@@ -377,7 +375,7 @@ class MoEDecoderLayer(nn.Module):
         )
         combined_hidden_states = post_combined["hidden_states"]
         combined_hidden_states = combined_hidden_states.view(*origin_shape)
-        ProberList.after_combine(self.layer_idx, combined_hidden_states)
+        # ProberList.after_combine(self.layer_idx, combined_hidden_states)
 
         hidden_states = self._post_moe_forward(
             hidden_states=hidden_states,
@@ -518,12 +516,9 @@ class MoEDecoderLayer(nn.Module):
         # NOTE: In order to allow `torch.compile` to compile the ops before and after attention as much as possible,
         # attention, post-layernorm and gate are implemented in one function
         residual = hidden_states
-        ProberList.before_input_layernorm(self.layer_idx, hidden_states)
         hidden_states = self.input_layernorm(hidden_states)
-        ProberList.after_input_layernorm(self.layer_idx, hidden_states)
 
         # Self Attention
-        ProberList.before_self_attn(self.layer_idx, hidden_states)
         if state == ForwardState.TRAINING:
             hidden_states = self.self_attn(
                 hidden_states=hidden_states,
@@ -546,20 +541,13 @@ class MoEDecoderLayer(nn.Module):
                 seq_ctx=seq_ctx,
                 past_key_values=past_key_values,
             )
-        ProberList.after_self_attn(self.layer_idx, hidden_states)
         hidden_states = residual + hidden_states
 
         # Fully Connected
-        ProberList.before_post_attention_layernorm(self.layer_idx, hidden_states)
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
-        ProberList.after_post_attention_layernorm(self.layer_idx, hidden_states)
 
-        ProberList.before_router_gate(self.layer_idx, hidden_states)
         router_results: RouterResults = self.gate(hidden_states)
-        ProberList.after_router_gate(
-            self.layer_idx, router_results["logits"], router_results["topk_weights"], router_results["topk_ids"]
-        )
         return residual, hidden_states, router_results
 
     @maybe_compile(fullgraph=True)
