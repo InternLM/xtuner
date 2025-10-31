@@ -24,7 +24,6 @@ from xtuner.v1.module.dispatcher import (
 from xtuner.v1.module.grouped_linear.moe_group_linear import build_grouped_linear
 from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.ops.act_fn import get_act_fn
-from xtuner.v1.profiler.prober import ProberList
 from xtuner.v1.utils import ForwardState
 from xtuner.v1.utils.compile import maybe_compile
 
@@ -245,7 +244,6 @@ class MoEDecoderLayer(nn.Module):
             ep_mesh=ep_mesh,
             float8_cfg=float8_cfg,
             moe_act_fn_cfg=moe_act_fn_cfg,
-            layer_idx=layer_idx,
         )
         # TODO: (yehaochen) Maybe should be replaced by build_dispatcher
         process_group = ep_mesh.get_group() if ep_mesh is not None else None
