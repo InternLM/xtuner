@@ -16,7 +16,7 @@ from xtuner.v1.float8.config import Float8Config
 from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.ops import attn_impl_mapping, flash_attn_varlen_func, get_apply_rotary_emb
 from xtuner.v1.ops.comm.all_to_all import ulysses_all_to_all
-from xtuner.v1.utils import DEBUG_ACC, XTUNER_DETERMINISTIC, get_device, get_logger
+from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_device, get_logger
 
 from ..linear.linear import build_linear
 from ..rms_norm import RMSNorm
@@ -279,7 +279,6 @@ class MultiHeadAttention(nn.Module):
         _key_states = key_states.transpose(1, 2).squeeze(0)
         _value_states = value_states.transpose(1, 2).squeeze(0)
 
-        # torch.distributed.breakpoint()
         block_index = block_table[:, 0] + (seq_lens_k[:bs] - 1) // block_size
         past_key_values[self.layer_idx][0][block_index, (seq_lens_k[:bs] - 1) % block_size] = _key_states
         past_key_values[self.layer_idx][1][block_index, (seq_lens_k[:bs] - 1) % block_size] = _value_states
@@ -339,8 +338,6 @@ class MultiHeadAttention(nn.Module):
         cos, sin = position_embeddings
 
         query_states, key_states = self.apply_rotary_emb(query_states, key_states, cos, sin)
-        if DEBUG_ACC:
-            import torch.distributed as dist; dist.breakpoint()
 
         if seq_ctx.sequence_parallel_mesh and seq_ctx.sequence_parallel_mesh.size() > 1:
             sp_size = seq_ctx.sequence_parallel_mesh.size()
@@ -409,11 +406,7 @@ class MultiHeadAttention(nn.Module):
             )
 
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
-        if DEBUG_ACC:
-            import torch.distributed as dist; dist.breakpoint()
         attn_output = self.o_proj(attn_output)
-        if DEBUG_ACC:
-            import torch.distributed as dist; dist.breakpoint()
         return attn_output
 
     def build_kv_cache(
