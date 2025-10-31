@@ -330,7 +330,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
                 labels = [self.bos_token] + labels
             if self.add_eos_token:
                 input_ids = input_ids + [self.eos_token]
-                labels = labels + [-100]
+                labels = labels + [self.eos_token]
             np_labels = np.array(labels)
             np_labels[np_labels == self.img_start_token_id] = -100
             np_labels[np_labels == self.img_context_token_id] = -100
@@ -442,7 +442,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
                 labels = [self.bos_token] + labels
             if self.add_eos_token:
                 input_ids = input_ids + [self.eos_token]
-                labels = labels + [-100]
+                labels = labels + [self.eos_token]
             np_labels = np.array(labels)
             np_labels[np_labels == self.img_start_token_id] = -100
             np_labels[np_labels == self.video_context_token_id] = -100

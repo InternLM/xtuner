@@ -57,8 +57,6 @@ class InternS1ForConditionalGeneration(BaseModel):
         self.select_layer = config.vision_feature_layer
         self.downsample_ratio = config.downsample_ratio
 
-        self.image_size = config.vision_config.image_size[0]
-
         vision_config = config.vision_config
         text_config = config.text_config
         projector_config = config.projector_config
