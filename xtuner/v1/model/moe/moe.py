@@ -161,6 +161,8 @@ class MoE(BaseModel):
         else:
             self.z_loss = None
 
+        self.offload_stream = torch.cuda.Stream()
+
     def _select_non_pad_router_logits(
         self,
         router_logits_list: list[list[torch.Tensor]] | list[torch.Tensor],
@@ -356,10 +358,9 @@ class MoE(BaseModel):
                     moe_forawrd = True
 
                 if int(os.getenv("XTUNER_ACTIVATION_OFFLOAD", "0")) == 1:
-                    offload_stream = decoder_layer._get_fsdp_state()._comm_ctx.all_gather_copy_in_stream
                     with async_save_on_cpu(
-                        h2d_stream=offload_stream,
-                        d2h_stream=offload_stream,
+                        h2d_stream=self.offload_stream,
+                        d2h_stream=self.offload_stream,
                         block_idx=layer_idx - self.config.first_k_dense_replace,
                         depth=len(self.layers) - self.config.first_k_dense_replace,
                         custom_check_fn=lambda x: x.data_ptr()
@@ -411,7 +412,9 @@ class MoE(BaseModel):
         all_router_logits = []
         all_router_weights = []
 
-        for micro_batch_idx, (micro_batch_router_logits, micro_batch_router_weights) in enumerate(zip(router_logits_list, router_weights_list)):
+        for micro_batch_idx, (micro_batch_router_logits, micro_batch_router_weights) in enumerate(
+            zip(router_logits_list, router_weights_list)
+        ):
             if micro_batch_router_logits:
                 _router_logits_list = list(micro_batch_router_logits.values())
                 _router_weights_list = list(micro_batch_router_weights.values())
@@ -506,10 +509,9 @@ class MoE(BaseModel):
                 )
             else:
                 if int(os.getenv("XTUNER_ACTIVATION_OFFLOAD", "0")) == 1:
-                    offload_stream = decoder_layer._get_fsdp_state()._comm_ctx.all_gather_copy_in_stream
                     with async_save_on_cpu(
-                        h2d_stream=offload_stream,
-                        d2h_stream=offload_stream,
+                        h2d_stream=self.offload_stream,
+                        d2h_stream=self.offload_stream,
                         block_idx=int(idx),
                         depth=len(self.layers),
                         custom_check_fn=lambda x: x.data_ptr() == hidden_states.data_ptr(),
