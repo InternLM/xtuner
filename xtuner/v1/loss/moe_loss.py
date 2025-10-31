@@ -8,6 +8,7 @@ from torch.distributed._functional_collectives import all_reduce
 
 from xtuner.v1.profiler.prober import ProberList
 
+
 class _AllReduce(torch.autograd.Function):
     @staticmethod
     def forward(ctx, op, group, tensor):

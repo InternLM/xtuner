@@ -41,14 +41,13 @@ from xtuner.v1.module import (
 )
 from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayer
 from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEActFnConfig, MoEBlock, MoEDecoderLayer
+from xtuner.v1.profiler.prober import ProberList
 from xtuner.v1.utils import (
     get_device,
     get_logger,
 )
 from xtuner.v1.utils.activation_offload import async_save_on_cpu
 from xtuner.v1.utils.compile import maybe_compile
-from xtuner.v1.profiler.prober import ProberList
-from xtuner.v1.utils.debug import register_grad_hook
 
 
 DEVICE = get_device()
@@ -385,7 +384,6 @@ class MoE(BaseModel):
                 for i, hidden_states in enumerate(hidden_states):
                     hidden_states_list[i] = hidden_states
                     router_logits_list[i][f"layer{idx}"] = router_logits[i]
-            
 
         # Apply final norm to all micro-batches
         for i, hidden_states in enumerate(hidden_states_list):
@@ -532,7 +530,7 @@ class MoE(BaseModel):
 
         hidden_states = self.norm(hidden_states)
 
-        ProberList.before_lm_head(hidden_states, loss_ctx.loss_kwargs.shifted_labels)
+        ProberList.before_lm_head(hidden_states, loss_ctx.loss_kwargs.shifted_labels if loss_ctx is not None else None)
         loss, (logits, extra_info) = self.lm_head(hidden_states, loss_ctx)  # type: ignore
         ProberList.after_lm_head(loss, logits)
         output["loss"] = loss

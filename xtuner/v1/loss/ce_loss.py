@@ -10,7 +10,6 @@ from torch.distributed.device_mesh import DeviceMesh
 from typing_extensions import Self
 
 from xtuner.v1.loss import BaseLossConfig, BaseLossContext, BaseLossKwargs
-from xtuner.v1.utils.debug import register_grad_hook, get_grad_hook
 from xtuner.v1.profiler.prober import ProberList
 
 from .utils import sp_gather, sp_split
@@ -51,7 +50,7 @@ class CELossKwargs(BaseLossKwargs):
 
     shifted_labels: torch.Tensor
     loss_weight: torch.Tensor
-    global_denominator: torch.Tensor
+    global_denominator: int
 
 
 class CELossContextInputItem(BaseModel):
@@ -151,7 +150,7 @@ class CELossContext(BaseLossContext[CELossContextInputItem]):
         global_denominator = rank_denominator
         if dist.is_initialized():
             dist.all_reduce(global_denominator, op=dist.ReduceOp.SUM)
-        
+
         batches_loss_kwargs = []
         for i, item in enumerate(data_batches):
             shifted_labels = shifted_labels_list[i]
@@ -161,7 +160,7 @@ class CELossContext(BaseLossContext[CELossContextInputItem]):
             loss_kwargs = CELossKwargs(
                 shifted_labels=shifted_labels,
                 loss_weight=loss_weight,
-                global_denominator=global_denominator,
+                global_denominator=int(global_denominator),
             )
             batches_loss_kwargs.append(loss_kwargs)
         return batches_loss_kwargs
@@ -197,7 +196,7 @@ class CELossContext(BaseLossContext[CELossContextInputItem]):
             # ProberList.record_tensor(loss, "[lm_head.ce_loss][before calibration]loss")
             # register_grad_hook(loss, "loss")
             # print(f"loss_kwargs.global_denominator: {loss_kwargs.global_denominator}")
-            # loss = loss / int(loss_kwargs.global_denominator)
+            # loss = loss / loss_kwargs.global_denominator
 
         return loss, (logits, {})
 
@@ -213,7 +212,7 @@ class CELossContext(BaseLossContext[CELossContextInputItem]):
         else:
             assert self.liger_loss_fct is not None, "liger_loss_fct must be initialized in liger mode"
             shifted_labels = loss_kwargs.shifted_labels  # (bs, seq_len)
-            loss_weight = loss_kwargs.loss_weight  # (bs, seq_len)
+            # loss_weight = loss_kwargs.loss_weight  # (bs, seq_len)
 
             bs, seq, dim = hidden_states.shape
             hidden_states = hidden_states.reshape(bs * seq, dim)
@@ -225,5 +224,5 @@ class CELossContext(BaseLossContext[CELossContextInputItem]):
             # mask = loss_weight != 0
             # w = loss_weight.sum() / mask.sum()  # w equals to 1/global_denominator
             # loss = loss * w
-            loss = loss / int(loss_kwargs.global_denominator)
+            loss = loss / loss_kwargs.global_denominator
             return loss, (None, {})
