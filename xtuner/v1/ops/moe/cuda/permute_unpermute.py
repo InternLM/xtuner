@@ -176,7 +176,6 @@ class UnpermuteMoE_topK(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, unpermuted_act_grad: Tensor) -> tuple[Tensor | None, None, Tensor | None]:  # type: ignore[override]
-        # import torch.distributed as dist; dist.breakpoint()
         if not unpermuted_act_grad.numel():
             return unpermuted_act_grad, None, ctx.probs
 

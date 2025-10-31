@@ -24,7 +24,7 @@ from xtuner.v1.module.dispatcher import (
 from xtuner.v1.module.grouped_linear.moe_group_linear import build_grouped_linear
 from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.ops.act_fn import get_act_fn
-from xtuner.v1.utils import DEBUG_ACC, ForwardState
+from xtuner.v1.utils import ForwardState
 from xtuner.v1.utils.compile import maybe_compile
 from xtuner.v1.profiler.prober import ProberList
 
@@ -165,8 +165,6 @@ class MoEBlock(nn.Module):
         gate_up_out = self.fused_w1w3(x, tokens_per_expert, decoding)
         out = self.moe_act(gate_up_out, split_dim=-1)
         res = self.fused_w2(out, tokens_per_expert, decoding)
-        if DEBUG_ACC:
-            import torch.distributed as dist; dist.breakpoint()
         return res
 
 
@@ -334,8 +332,6 @@ class MoEDecoderLayer(nn.Module):
         )
         ProberList.after_dispatch(self.layer_idx, post_dispatched["hidden_states"], post_dispatched["tokens_per_expert"], 
                                   post_dispatched["row_ids_map"], dispatched["topk_weights"])
-        if DEBUG_ACC:
-            import torch.distributed as dist; dist.breakpoint()
         ProberList.before_experts(self.layer_idx, post_dispatched["hidden_states"], post_dispatched["tokens_per_expert"])
         experts_out = self.experts(
             post_dispatched["hidden_states"],
@@ -375,8 +371,6 @@ class MoEDecoderLayer(nn.Module):
             combined_hidden_states=combined_hidden_states,
             residual=residual,
         )
-        if DEBUG_ACC:
-            import torch.distributed as dist; dist.breakpoint()
         return hidden_states, router_results["logits"]
 
     def _micro_batch_forward(
@@ -514,9 +508,6 @@ class MoEDecoderLayer(nn.Module):
         ProberList.before_input_layernorm(self.layer_idx, hidden_states)
         hidden_states = self.input_layernorm(hidden_states)
         ProberList.after_input_layernorm(self.layer_idx, hidden_states)
-        if DEBUG_ACC:
-            import torch.distributed as dist; dist.breakpoint()
-        # hidden_states =
 
         # Self Attention
         ProberList.before_self_attn(self.layer_idx, hidden_states)
@@ -543,8 +534,6 @@ class MoEDecoderLayer(nn.Module):
                 past_key_values=past_key_values,
             )
         ProberList.after_self_attn(self.layer_idx, hidden_states)
-        if DEBUG_ACC:
-            import torch.distributed as dist; dist.breakpoint()
         hidden_states = residual + hidden_states
 
         # Fully Connected
@@ -552,14 +541,10 @@ class MoEDecoderLayer(nn.Module):
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
         ProberList.after_post_attention_layernorm(self.layer_idx, hidden_states)
-        if DEBUG_ACC:
-            import torch.distributed as dist; dist.breakpoint()
 
         ProberList.before_router_gate(self.layer_idx, hidden_states)
         router_results: RouterResults = self.gate(hidden_states)
         ProberList.after_router_gate(self.layer_idx, router_results["logits"], router_results["topk_weights"], router_results["topk_ids"])
-        if DEBUG_ACC:
-            import torch.distributed as dist; dist.breakpoint()
         return residual, hidden_states, router_results
 
     @maybe_compile(fullgraph=True)

@@ -10,7 +10,6 @@ from torch.distributed.device_mesh import DeviceMesh
 from typing_extensions import Self
 
 from xtuner.v1.loss import BaseLossConfig, BaseLossContext, BaseLossKwargs
-from xtuner.v1.utils import DEBUG_ACC
 from xtuner.v1.utils.debug import register_grad_hook, get_grad_hook
 from xtuner.v1.profiler.prober import ProberList
 
@@ -174,17 +173,9 @@ class CELossContext(BaseLossContext[CELossContextInputItem]):
         head_bias: torch.Tensor | None,
         loss_kwargs: CELossKwargs,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor | None, dict[str, Any]]]:
-        # import torch.distributed as dist; dist.breakpoint()
         # We do linear forward here to simplify the implementation of chunk loss (saving memory).
         logits = F.linear(hidden_states, head_weight, head_bias)
-        # dist.breakpoint()
-        # grad_fn = logits.grad_fn
-        # nextfunc = grad_fn.next_functions
-        # next_grad_fn = nextfunc[0][0]
-        # next_grad_fn.register_hook(get_grad_hook("logits_mm", next_grad_fn))
-        # register_grad_hook(logits, "logits")
-
-        logits = logits.float()  # (bs, seq_len, vocab_size)  # TODO: rollback to float32 after debug_acc
+        logits = logits.float()  # (bs, seq_len, vocab_size)
 
         shifted_labels = loss_kwargs.shifted_labels  # (bs, seq_len)
         loss_weight = loss_kwargs.loss_weight  # (bs, seq_len)
@@ -231,8 +222,6 @@ class CELossContext(BaseLossContext[CELossContextInputItem]):
             # step 2.b in the loss calculation: sum the loss over all tokens, then multiply the loss weight (i.e. divide by the global_denominator)
             loss = self.liger_loss_fct(head_weight, hidden_states, shifted_labels)
             ProberList.record_tensor(loss, "[lm_head.ce_loss][before calibration]loss")
-            if DEBUG_ACC:
-                import torch.distributed as dist; dist.breakpoint()
             # mask = loss_weight != 0
             # w = loss_weight.sum() / mask.sum()  # w equals to 1/global_denominator
             # loss = loss * w

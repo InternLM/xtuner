@@ -716,6 +716,17 @@ class TimeProber(BaseProber):
         cls.start_times = {}
 
 
+class PdbProber(BaseProber):
+    @classmethod
+    def before_layer(cls, layer_idx: str|int, hidden_states: torch.Tensor):
+        if cls.cur_step == 10 and cls.cur_micro_batch_iter == 0 and int(layer_idx) == 0:
+            dist.breakpoint()
+    
+    @classmethod
+    def before_router_gate(cls, layer_idx: str|int, hidden_states: torch.Tensor):
+        dist.breakpoint()
+
+
 # ==================== 使用示例 ====================
 
 def example_usage():

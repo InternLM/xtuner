@@ -16,7 +16,6 @@ from xtuner.v1.utils import get_logger
 
 logger = get_logger()
 XTUNER_DETERMINISTIC = os.getenv("XTUNER_DETERMINISTIC") == "true"
-DEBUG_ACC = os.getenv("DEBUG_ACC") == "true"
 
 # https://github.com/python/cpython/issues/82300#issuecomment-2169035092
 if sys.version_info >= (3, 13):

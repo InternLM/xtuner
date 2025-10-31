@@ -8,7 +8,6 @@ from pydantic import BaseModel
 from torch import nn
 from torch.nn import functional as F
 
-from xtuner.v1.utils import DEBUG_ACC
 from .protocol import RouterProtocol, RouterResults
 
 
@@ -55,8 +54,6 @@ class GreedyRouter(nn.Module, RouterProtocol):
             routing_weights = logits.sigmoid()
         else:
             routing_weights = F.softmax(logits, dim=1, dtype=torch.float)
-        if DEBUG_ACC:
-            import torch.distributed as dist; dist.breakpoint()
         topk_weights, topk_ids = torch.topk(routing_weights, self.top_k, dim=-1)
 
         if self.norm_topk_prob:
@@ -68,8 +65,6 @@ class GreedyRouter(nn.Module, RouterProtocol):
         # moe forward
         # (e, )
         tokens_per_expert = torch.histc(topk_ids, bins=self.n_routed_experts, min=0, max=self.n_routed_experts)
-        if DEBUG_ACC:
-            import torch.distributed as dist; dist.breakpoint()
 
         return {
             "logits": logits,
