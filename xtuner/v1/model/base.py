@@ -925,6 +925,7 @@ class BaseModel(nn.Module):
         if self.fsdp_mesh is not None:
             shape_before_fsdp = load_spec.shape
             if is_float8_weight(local_tensor):
+                # fp8 weights may be padded, so we need to calculate the hf_key_size base on local_tensor._ori_shape
                 if load_spec.group is None:
                     hf_key_size = local_tensor._ori_shape[self.FSDP_SHARD_DIM] / len(hf_keys)  # type: ignore
                 else:
@@ -961,6 +962,7 @@ class BaseModel(nn.Module):
             start = None
             end = None
 
+        # dist.breakpoint(1)
         missing_keys: list[str] = []
         _loaded_tensor: list[torch.Tensor] = []
         for hf_key in hf_keys:
@@ -975,9 +977,9 @@ class BaseModel(nn.Module):
         if not hf_keys:
             # fp8 pad
             assert self.config.float8_cfg is not None
-            assert self.fsdp_config is not None and self.fsdp_config.ep_size == 1, (
-                "Only support fp8 pad for MoE with ep_size == 1"
-            )
+            # assert self.fsdp_config is not None and self.fsdp_config.ep_size == 1, (
+            #     "Only support fp8 pad for MoE with ep_size == 1"
+            # )
             local_tensor.zero_()  # type: ignore  # padded part must be set to 0
             return missing_keys
 
@@ -1070,11 +1072,18 @@ class BaseModel(nn.Module):
 
         # Concatenate the tensors along the FSDP shard dim
         for tensors, size in zip(_fsdp_unsharded_tensor_list, origin_fsdp_size):
+            tensor = torch.cat(tensors, dim=self.FSDP_SHARD_DIM)
             cat_tensor = torch.index_select(
-                torch.cat(tensors, dim=self.FSDP_SHARD_DIM),
+                tensor,
                 dim=self.FSDP_SHARD_DIM,
                 index=torch.arange(0, size, dtype=torch.int64, device=tensors[0].device),
             )
+            pad_tensor = torch.index_select(
+                tensor,
+                dim=self.FSDP_SHARD_DIM,
+                index=torch.arange(size, tensor.shape[0], dtype=torch.int64, device=tensors[0].device),
+            )
+            assert (pad_tensor == 0).all(), f"Internal Error, padded tensor is not zero {pad_tensor}!"
             fsdp_unsharded_tensor_list.append(cat_tensor)
 
         return fsdp_unsharded_tensor_list
