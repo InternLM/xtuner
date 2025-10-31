@@ -7,6 +7,7 @@ import traceback
 import uuid
 from abc import abstractmethod
 from typing import Any, Callable, Dict, List, Optional, Union
+import torch
 
 import httpx
 import ray
@@ -451,7 +452,8 @@ class RolloutWorker(SingleAcceleratorWorker):
                     "enable_return_routed_experts is True, but routed_experts is not in meta_info"
                 )
                 routed_experts = response["meta_info"]["routed_experts"]  # token[layer[expert]]
-                extra_info = {"routed_experts": routed_experts}
+                routed_experts = torch.tensor(routed_experts)  # n,layer,expert
+                extra_info = {"routed_experts": ray.put(routed_experts)}
 
             last_trajectory = response["text"]
             finish_reason = response["meta_info"]["finish_reason"]["type"]

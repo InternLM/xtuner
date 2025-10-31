@@ -498,7 +498,8 @@ class RLTrainer:
                     logprobs = [0] * (len(prompt_ids) - 1) + logprobs + [0]
                 else:
                     response_ids = self.tokenizer(item, return_tensors="pt")["input_ids"].flatten().tolist()
-                input_ids = prompt_ids + response_ids
+                # 返回的 routed_experts 不包括 eos 的值，实际上也不需要，需要减一
+                input_ids = prompt_ids + response_ids[:-1]
 
                 prompt_len_list.append(len(prompt_ids))
                 response_len_list.append(len(response_ids))
@@ -518,14 +519,15 @@ class RLTrainer:
                     rollout_logprobs = None
 
                 seq_ctx = get_train_seq_ctx(input_ids, multimodal_train_info, len(response_ids))
-                data_batches.append(
-                    dict(
-                        seq_ctx=seq_ctx,
-                        shifted_labels=shifted_labels,
-                        advantage=advantages[i].item(),
-                        rollout_logprobs=rollout_logprobs,
-                    )
-                )
+                data_dict = {'seq_ctx': seq_ctx, 'shifted_labels': shifted_labels, 'advantage': advantages[i].item(),
+                             'rollout_logprobs': rollout_logprobs}
+
+                if 'routed_experts' in group[i].env.rollout.extra_info:
+                    routed_experts = ray.get(group[i].env.rollout.extra_info['routed_experts'])  # n,layer*expert
+                    assert routed_experts.size(0) == len(input_ids), f"{routed_experts.size(0)} vs {len(input_ids)}"
+                    seq_ctx.rollout_routed_experts = routed_experts  # n,layer,expert
+
+                data_batches.append(data_dict)
         random.shuffle(data_batches)
 
         advantages_list = np.array(advantages_list)

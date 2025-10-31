@@ -60,7 +60,7 @@ class TrainingController:
         return pack_infos
 
     # TODO(hha): 这个逻辑不够通用，和模型绑定了
-    def _packing(self, data_batches, pack_max_length):
+    def _packing(self, data_batches, pack_max_length, model_cfg):
         pack_infos = self._get_pack_infos(
             data_batches,
             [data["seq_ctx"].input_ids.numel() for data in data_batches],
@@ -71,6 +71,13 @@ class TrainingController:
         is_qwen3_vl = False
         if len(data_batches[0]["seq_ctx"].position_ids.shape) == 3:
             is_qwen3_vl = True
+
+        has_rollout_routed_experts = False
+        if data_batches[0]["seq_ctx"].rollout_routed_experts is None:
+            has_rollout_routed_experts = True
+            n_routed_experts = model_cfg.n_routed_experts
+            num_experts_per_tok = model_cfg.num_experts_per_tok
+            num_hidden_layers = model_cfg.num_hidden_layers
 
         for pack_info in pack_infos:
             indices = pack_info["indices"]
@@ -108,6 +115,10 @@ class TrainingController:
                         _position_ids = torch.arange(pad_token.size(-1)).view(1, 1, -1).expand(3, 1, -1)
                         _position_ids_list.append(_position_ids)
                     pad_seq_ctx.position_ids = torch.cat(_position_ids_list, dim=-1)
+
+                if has_rollout_routed_experts:
+                    pad_rand_index = torch.randint(low=0, high=n_routed_experts, size=(pad_len, num_hidden_layers, num_experts_per_tok))
+                    pad_seq_ctx.rollout_routed_experts = ray.put(pad_rand_index)
 
                 seq_ctx_list.append(pad_seq_ctx)
                 label_list.append(pad_labels)
@@ -152,7 +163,16 @@ class TrainingController:
         return sorted(packed_data_batches, key=lambda x: x["seq_ctx"].max_length_q, reverse=True)
 
     def fit(self, data_batches: list[ColateItem], pack_max_length: int, rollout_idx: int):
-        packed_data_batches = self._packing(data_batches, pack_max_length)
+        has_rollout_routed_experts = False
+        model_cfg = None
+        if data_batches[0]["seq_ctx"].rollout_routed_experts is not None:
+            model_cfg = self.workers[0].get_model_cfg.remote()  # type: ignore[attr-defined]
+            has_rollout_routed_experts = True
+            n_routed_experts = model_cfg.n_routed_experts
+            num_experts_per_tok = model_cfg.num_experts_per_tok
+            num_hidden_layers = model_cfg.num_hidden_layers
+
+        packed_data_batches = self._packing(data_batches, pack_max_length, model_cfg)
         # packed_data_batches = self._grouped_by_max_length(packed_data_batches)
 
         # TODO(hha): 这个逻辑不够通用，和模型绑定了
@@ -198,6 +218,11 @@ class TrainingController:
                 dtype=packed_data_batches[0]["advantages"].dtype,
                 device="cpu",
             )
+
+            if has_rollout_routed_experts:
+                pad_rand_index = torch.randint(low=0, high=n_routed_experts,
+                                               size=(pack_max_length, num_hidden_layers, num_experts_per_tok))
+                pad_seq_ctx.rollout_routed_experts = ray.put(pad_rand_index)
 
             pad_rollout_logprobs = None
             if "rollout_logprobs" in packed_data_batches[0] and packed_data_batches[0]["rollout_logprobs"] is not None:

@@ -322,6 +322,13 @@ class TrainingWorker(SingleAcceleratorWorker):
                     pixel_values = torch.cat(pixel_values, dim=0)
                     seq_ctx.pixel_values = pixel_values
 
+            rollout_routed_experts = seq_ctx.rollout_routed_experts
+            if rollout_routed_experts is not None:
+                assert isinstance(rollout_routed_experts, list)
+                # list[n,l,e]
+                rollout_routed_experts = [ray.get(routed_experts) for routed_experts in rollout_routed_experts]
+                seq_ctx.rollout_routed_experts = torch.cat(rollout_routed_experts, dim=0)  # max_len,l,e
+
             seq_ctx = data["seq_ctx"].to(DEVICE)
             loss_ctx_input = RLLossContextInputItem(
                 shifted_labels=data["shifted_labels"],
@@ -474,6 +481,10 @@ class TrainingWorker(SingleAcceleratorWorker):
         # tp and pp will affect the data replicate size in engine
         # sp will affect the data replicate size in worker
         return self._engine.data_replicate_size * self.sp_mesh.size()
+
+    def get_model_cfg(self):
+        model_cfg = self._engine.model_cfg
+        return model_cfg
 
     def offload_model(self):
         self._engine.put_model_to_device("cpu")
