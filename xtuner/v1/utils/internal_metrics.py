@@ -76,15 +76,17 @@ class InternalMetricsRecorder:
             if extra_info.get("softmax_lse", None) is not None:
                 if layer_name not in self.metrics["attn_max_lse"]:
                     # original shape: [n_head, seq]
-                    self.metrics["attn_max_lse"][layer_name] = [extra_info["softmax_lse"].max()]
+                    self.metrics["attn_max_lse"][layer_name] = extra_info["softmax_lse"].max()
                 else:
-                    self.metrics["attn_max_lse"][layer_name].append(extra_info["softmax_lse"].max())
+                    prev_lse_max = self.metrics["attn_max_lse"][layer_name]
+                    self.metrics["attn_max_lse"][layer_name] = max(prev_lse_max, extra_info["softmax_lse"].max())
             if extra_info.get("attn_logits", None) is not None:
                 if layer_name not in self.metrics["attn_max_logits"]:
                     # original shape: [b, n_head, seq, seq]
-                    self.metrics["attn_max_logits"][layer_name] = [extra_info["attn_logits"].max()]
+                    self.metrics["attn_max_logits"][layer_name] = extra_info["attn_logits"].max()
                 else:
-                    self.metrics["attn_max_logits"][layer_name].append(extra_info["attn_logits"].max())
+                    prev_logits_max = self.metrics["attn_max_logits"][layer_name]
+                    self.metrics["attn_max_logits"][layer_name] = max(prev_logits_max, extra_info["attn_logits"].max())
 
         hook_handle = module.register_forward_hook(hook)
         self.hooks.append(hook_handle)
@@ -158,24 +160,22 @@ class InternalMetricsRecorder:
                 # [bsz/intra_layer_micro_batch, ]
                 local_router_logits_max = torch.max(torch.stack(router_logits_list))
                 dist.all_reduce(local_router_logits_max, op=dist.ReduceOp.MAX)
-                self.metrics[f"router_logits_max"][layer_name] = local_router_logits_max.item()
+                self.metrics["router_logits_max"][layer_name] = local_router_logits_max.item()
 
         if len(router_logits_mean) > 0:
             for layer_name, router_logits_list in router_logits_mean.items():
                 # [bsz/intra_layer_micro_batch, ]
                 local_router_logits_mean = torch.mean(torch.stack(router_logits_list))
                 dist.all_reduce(local_router_logits_mean.div_(dist.get_world_size()), op=dist.ReduceOp.SUM)
-                self.metrics[f"router_logits_mean"][layer_name] = local_router_logits_mean.item()
+                self.metrics["router_logits_mean"][layer_name] = local_router_logits_mean.item()
 
         if len(self.metrics["attn_max_lse"]) > 0:
-            for layer_name, attn_max_lse_list in self.metrics["attn_max_lse"].items():
-                local_attn_max_lse = torch.max(torch.stack(attn_max_lse_list))
+            for layer_name, local_attn_max_lse in self.metrics["attn_max_lse"].items():
                 dist.all_reduce(local_attn_max_lse, op=dist.ReduceOp.MAX)
                 self.metrics["attn_max_lse"][layer_name] = local_attn_max_lse.item()
 
         if len(self.metrics["attn_max_logits"]) > 0:
-            for layer_name, attn_max_logits_list in self.metrics["attn_max_logits"].items():
-                local_attn_max_logits = torch.max(torch.stack(attn_max_logits_list))
+            for layer_name, local_attn_max_logits in self.metrics["attn_max_logits"].items():
                 dist.all_reduce(local_attn_max_logits, op=dist.ReduceOp.MAX)
                 self.metrics["attn_max_logits"][layer_name] = local_attn_max_logits.item()
 
