@@ -18,17 +18,27 @@ class NoAuxRouterConfig(BaseModel):
     n_group: int
     topk_group: int
     router_bias_update_speed: float = 0.001
+    use_grouped_router: bool = False
 
     def build(
         self,
         n_routed_experts: int,
         num_experts_per_tok: int,
     ):
-        return NoAuxRouter(
-            **self.model_dump(),
-            n_routed_experts=n_routed_experts,
-            num_experts_per_tok=num_experts_per_tok,
-        )
+        cfg = self.model_dump()
+        use_grouped_router = cfg.pop("use_grouped_router")
+        if use_grouped_router:
+            return NoAuxGroupedRouter(
+                **cfg,
+                n_routed_experts=n_routed_experts,
+                num_experts_per_tok=num_experts_per_tok,
+            )
+        else:
+            return NoAuxRouter(
+                **cfg,
+                n_routed_experts=n_routed_experts,
+                num_experts_per_tok=num_experts_per_tok,
+            )
 
 
 class NoAuxRouter(nn.Module, RouterProtocol):
@@ -124,6 +134,61 @@ class NoAuxRouter(nn.Module, RouterProtocol):
         return {
             "logits": logits,
             "router_weights": scores_for_choice,
+            "topk_weights": topk_weight,
+            "topk_ids": topk_idx,
+            "topkens_per_expert": tokens_per_expert,
+        }
+
+
+class NoAuxGroupedRouter(NoAuxRouter):
+    """Only works for ep_size == topk."""
+
+    def forward(self, logits) -> RouterResults:
+        seq, ne = logits.shape
+        if self.scoring_func == "sigmoid":
+            scores = logits.sigmoid()
+        else:
+            # TODO: (yehaochen)support softmax
+            raise NotImplementedError(f"insupportable scoring function for MoE gating: {self.scoring_func}")
+
+        scores_for_choice = scores + self.e_score_correction_bias.unsqueeze(0)
+
+        if os.getenv("XTUNER_ROUTER_DEBUG") == "true":
+            noise = torch.randn_like(scores) * 50
+            scores_for_choice = scores + noise
+
+        # group-based selection (group size = n_routed_experts // 8) ---
+        n_groups = int(os.getenv("ROUTER_N_GROUPS", 8))
+        assert self.n_routed_experts % n_groups == 0, f"n_routed_experts must be divisible by {n_groups}"
+        assert self.top_k == 8, "top_k must be 8 for NoAuxRouterOpt"
+        group_size = max(1, self.n_routed_experts // n_groups)
+
+        scores_for_choice = scores_for_choice.view(seq, n_groups, group_size)
+        group_local_max_idx = torch.topk(scores_for_choice, k=self.top_k // n_groups, dim=2)[
+            1
+        ]  # [seq, n_groups, top_k_per_group]
+        group_offsets = (torch.arange(n_groups, device=scores_for_choice.device) * group_size).view(
+            1, -1, 1
+        )  # [1, n_groups, 1]
+        topk_idx = (group_local_max_idx + group_offsets).to(torch.long)  # [seq, n_groups, top_k_per_group]
+        scores_for_choice = scores_for_choice.view(seq, self.n_routed_experts)
+        topk_idx = topk_idx.view(seq, -1)  # [seq, top_k]
+        topk_weight = scores_for_choice.gather(1, topk_idx)  # [seq, n_groups]
+
+        if self.top_k > 1 and self.norm_topk_prob:
+            denominator = topk_weight.sum(dim=-1, keepdim=True) + 1e-20
+            topk_weight = topk_weight / denominator
+        topk_weight = topk_weight * self.router_scaling_factor  # must multiply the scaling factor
+
+        tokens_per_expert = torch.histc(
+            topk_idx,
+            bins=self.n_routed_experts,
+            min=0,
+            max=self.n_routed_experts,
+        )  # .view(self.ep_mesh.size(), -1)
+
+        return {
+            "logits": logits,
             "topk_weights": topk_weight,
             "topk_ids": topk_idx,
             "topkens_per_expert": tokens_per_expert,
