@@ -76,12 +76,14 @@ class SequenceContext:
         self.input_ids = input_ids
         self.cu_seq_lens_q = cu_seq_lens_q
         self.cu_seq_lens_k = cu_seq_lens_k
+        # force max_length_q and max_length_k be cpu tensors to avoid cuda synchronization
+        # max_length_q and max_length_k should be unpacked to int in attention implementation
         if isinstance(max_length_q, int):
-            self.max_length_q = torch.tensor(max_length_q, device=cu_seq_lens_q.device)
+            self.max_length_q = torch.tensor(max_length_q, device="cpu")
         else:
             self.max_length_q = max_length_q
         if isinstance(max_length_k, int):
-            self.max_length_k = torch.tensor(max_length_k, device=cu_seq_lens_k.device)
+            self.max_length_k = torch.tensor(max_length_k, device="cpu")
         else:
             self.max_length_k = max_length_k
         self.num_padding = num_padding
@@ -99,11 +101,6 @@ class SequenceContext:
 
         seq_lens_k = self.cu_seq_lens_k[1:] - self.cu_seq_lens_k[:-1]
         seq_lens_q = self.cu_seq_lens_q[1:] - self.cu_seq_lens_q[:-1]
-
-        if isinstance(self.max_length_k, int):
-            self.max_length_k = torch.tensor(self.max_length_k, device=self.cu_seq_lens_k.device)
-        if isinstance(self.max_length_q, int):
-            self.max_length_q = torch.tensor(self.max_length_q, device=self.cu_seq_lens_q.device)
 
         _position_ids = [torch.arange(k - q, k) for q, k in zip(seq_lens_q, seq_lens_k)]
         position_ids = torch.cat(_position_ids).unsqueeze(0).to(self.cu_seq_lens_k.device)
