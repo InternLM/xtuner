@@ -37,9 +37,11 @@ class OpenaiTokenizeFunction(CachableTokenizeFunction[DataItem]):
         super().__init__(tokenizer)
 
     def __call__(self, item: dict | list, **kwargs) -> DataItem | CacheItem:
+        tools = None
         if isinstance(item, dict) and "messages" in item:
             item = item["messages"]
-        messages = ChatMessages(messages=item)
+            tools = item.get('tools', None)
+        messages = ChatMessages(messages=item, tools=tools)
         tokenized = messages.tokenize(self.tokenizer, self.chat_template)
 
         input_ids = tokenized["input_ids"]

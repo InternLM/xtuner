@@ -59,11 +59,14 @@ class ChatMsg(BaseModel):
     content: ContentType
     loss: Optional[bool] = None
     thinking: Optional[str] = None  # only for assistant
+    tool_calls: Optional[List[Dict] | Dict] = None  # only for assistant
+    name: Optional[str] = None
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         if self.role != "assistant":
             assert self.thinking is None, "Only assistant can have thinking."
+            assert self.tool_calls is None, "Only assistant can have tool_calls."
         if self.loss is None:
             if self.role == "system":
                 self.loss = False
@@ -76,65 +79,12 @@ class ChatMsg(BaseModel):
             else:
                 raise NotImplementedError
 
-    def get_prompt(self, chat_template: ChatTemplate) -> str:
-        if isinstance(self.content, str):
-            text = self.content
-        elif isinstance(self.content, list):
-            text = ""
-            for i, item in enumerate(self.content):
-                text += item.apply_chat_template(chat_template)
-        else:
-            raise NotImplementedError
-
-        if self.role == "system":
-            prompt = chat_template.decorate_system(text)
-        elif self.role == "developer":
-            prompt = chat_template.decorate_developer(text)
-        elif self.role == "user":
-            prompt = chat_template.decorate_user(text)
-        elif self.role == "assistant":
-            prompt = ""
-            if self.thinking is not None:
-                prompt = chat_template.decorate_thinking(self.thinking)
-
-            if chat_template.loss_assistant_format_mapping is not None and self.loss:
-                old_prompt = chat_template.decorate_assistant(text)
-                for k, v in chat_template.loss_assistant_format_mapping.items():
-                    old_prompt = old_prompt.replace(k, v)
-            else:
-                old_prompt = chat_template.decorate_assistant(text)
-            prompt += old_prompt
-        else:
-            raise NotImplementedError
-
-        return prompt
-
-    def tokenize(
-        self,
-        tokenizer: PreTrainedTokenizer,
-        chat_template: ChatTemplate,
-    ):
-        decorated = self.get_prompt(chat_template)
-
-        token_ids = tokenizer.encode(decorated, add_special_tokens=False)
-
-        if self.loss:
-            label_ids = copy.deepcopy(token_ids)
-        else:
-            label_ids = [IGNORE_INDEX] * len(token_ids)
-
-        return {
-            "input_ids": token_ids,
-            "labels": label_ids,
-        }
-
-
 def process_message(messages: List[ChatMsg], chat_template: ChatTemplate):
     if not messages:
         return messages
 
-    if chat_template.default_system is not None and messages[0].role != "system":
-        messages.insert(0, ChatMsg(role="system", content=chat_template.default_system, loss=False))
+    # if chat_template.default_system is not None and messages[0].role != "system":
+    #     messages.insert(0, ChatMsg(role="system", content=chat_template.default_system, loss=False))
 
     # Only look at the last round, if there is thinking, keep it, otherwise remove it all
     for msg in messages[:-1]:
@@ -150,6 +100,7 @@ def process_message(messages: List[ChatMsg], chat_template: ChatTemplate):
 
 class ChatMessages(BaseMessages):
     messages: List[ChatMsg]
+    tools: Optional[List[Dict]] = None
 
     def add(self, role, content, loss=False):
         self.messages.append(ChatMsg(role=role, content=content, loss=loss))
@@ -157,34 +108,66 @@ class ChatMessages(BaseMessages):
     def pop(self):
         return self.messages.pop()
 
-    def get_prompt(self, chat_template: ChatTemplate) -> str:
+    def get_prompt(self, tokenizer: PreTrainedTokenizer, chat_template: ChatTemplate) -> str:
         process_message(self.messages, chat_template)
-
-        prompt = ""
-        for msg in self.messages:
-            prompt += msg.get_prompt(chat_template)
-            if msg.role == "assistant":
-                prompt += chat_template.sep
+        prompt = tokenizer.apply_chat_template(
+            self.messages,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
         return prompt
+
 
     def tokenize(self, tokenizer: PreTrainedTokenizer, chat_template: ChatTemplate) -> Dict:
         input_ids = tokenizer.encode("", add_special_tokens=False)
         labels = [IGNORE_INDEX for _ in input_ids]
 
         process_message(self.messages, chat_template)
+        def split_conversation(
+            messages: List[Dict[str, str]]
+        ) -> List[List[Dict[str, str]]]:
+            final_chunks = []
+            context_chunk = []
+            for message in messages:
+                if message.role == "assistant" and message.loss:
+                    if context_chunk:
+                        final_chunks.append(context_chunk)
+                    final_chunks.append([message])
+                    context_chunk = []
+                else:
+                    context_chunk.append(message)
+            return final_chunks
 
-        for msg in self.messages:
-            res = msg.tokenize(tokenizer, chat_template)
-            token_ids, label_ids = res["input_ids"], res["labels"]
+        for idx, msg in enumerate(split_conversation(self.messages)):
+            if msg[0].role == 'assistant':
+                assistant_with_gen = tokenizer.apply_chat_template(
+                    msg,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                    chat_template=chat_template.chat_template
+                )
+                assistant_without_gen = tokenizer.apply_chat_template(
+                    msg,
+                    tokenize=False,
+                    add_generation_prompt=False,
+                    chat_template=chat_template.chat_template,
+                )
+                prompt = assistant_without_gen[len(assistant_with_gen) - len(assistant_without_gen):]
+                token_ids = tokenizer.encode(prompt, add_special_tokens=False)
+                label_ids = copy.deepcopy(token_ids)
+            else:
+                token_ids = tokenizer.apply_chat_template(
+                    msg,
+                    tokenize=True,
+                    add_generation_prompt=True,
+                    add_special_tokens=False,
+                    chat_template=chat_template.chat_template,
+                    tools=self.tools if idx == 0 else None
+                )
+                label_ids = [IGNORE_INDEX] * len(token_ids)
 
             input_ids.extend(token_ids)
             labels.extend(label_ids)
-
-            if msg.role == "assistant":
-                sep = chat_template.sep
-                sep_tokens = tokenizer.encode(sep, add_special_tokens=False)
-                input_ids.extend(sep_tokens)
-                labels.extend([IGNORE_INDEX] * len(sep_tokens))
 
         if len(input_ids) != len(labels):
             logger.error(f"[messages] {self.messages}")
@@ -218,15 +201,74 @@ if __name__ == "__main__":
         "messages": [
             {"role": "user", "content": "hello"},
             {"role": "assistant", "content": "hello!"},
-        ]
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hello!"},
+        ],
+        "tools": [
+            {
+                'type': 'function',
+                'function': {
+                    'name': 'get_current_temperature',
+                    'description': 'Get current temperature at a location.',
+                    'parameters': {
+                        'type': 'object',
+                        'properties': {
+                            'location': {
+                                'type': 'string',
+                                'description': 'The location to get the temperature for, in the format \'City, State, Country\'.'
+                            },
+                            'unit': {
+                                'type': 'string',
+                                'enum': [
+                                    'celsius',
+                                    'fahrenheit'
+                                ],
+                                'description': 'The unit to return the temperature in. Defaults to \'celsius\'.'
+                            }
+                        },
+                        'required': [
+                            'location'
+                        ]
+                    }
+                }
+            }, {
+                'type': 'function',
+                'function': {
+                    'name': 'get_temperature_date',
+                    'description': 'Get temperature at a location and date.',
+                    'parameters': {
+                        'type': 'object',
+                        'properties': {
+                            'location': {
+                                'type': 'string',
+                                'description': 'The location to get the temperature for, in the format \'City, State, Country\'.'
+                            },
+                            'date': {
+                                'type': 'string',
+                                'description': 'The date to get the temperature for, in the format \'Year-Month-Day\'.'
+                            },
+                            'unit': {
+                                'type': 'string',
+                                'enum': [
+                                    'celsius',
+                                    'fahrenheit'
+                                ],
+                                'description': 'The unit to return the temperature in. Defaults to \'celsius\'.'
+                            }
+                        },
+                        'required': [
+                            'location',
+                            'date'
+                        ]
+                    }
+                }
+            }]
     }
 
+    from transformers import AutoTokenizer
+    MODEL_PATH = None
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
     messages = ChatMessages.from_dict(data)
     chat_template = ChatTemplate(
-        system="<|im_start|>system\n{system}<|im_end|>\n",
-        user="<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n",
-        assistant="{assistant}<|im_end|>\n",
-        stop_words=["<|im_end|>"],
     )
-
-    print(messages.get_prompt(chat_template))
+    print(messages.tokenize(tokenizer, chat_template))
