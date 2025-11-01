@@ -29,6 +29,7 @@ class NoAuxRouterConfig(BaseModel):
         cfg = self.model_dump()
         use_grouped_router = cfg.pop("use_grouped_router")
         if use_grouped_router:
+            print("Using NoAuxGroupedRouter")
             return NoAuxGroupedRouter(
                 **cfg,
                 n_routed_experts=n_routed_experts,
