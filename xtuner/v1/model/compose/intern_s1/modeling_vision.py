@@ -86,6 +86,7 @@ class InternS1VisionAttention(nn.Module):
             hidden_states: torch.Tensor
     ):
         batch_size, seq_len, _ = hidden_states.size()
+        seq_len_tensor = torch.tensor(seq_len, device="cpu")
 
         query_states = self.q_proj(hidden_states)
         key_states = self.k_proj(hidden_states)
@@ -107,8 +108,8 @@ class InternS1VisionAttention(nn.Module):
             value_states[None].transpose(1, 2),
             cu_seqlens_q=cu_seq_lens,
             cu_seqlens_k=cu_seq_lens,
-            max_seqlen_q=seq_len,
-            max_seqlen_k=seq_len,
+            max_seqlen_q=seq_len_tensor,
+            max_seqlen_k=seq_len_tensor,
             dropout_p=0.0 if not self.training else self.attention_dropout,
             softmax_scale=self.scale,
             causal=False,
