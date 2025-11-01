@@ -31,10 +31,6 @@ RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
         --no-cache-dir; \
     fi
 
-RUN if [ "x${TORCH_VERSION}" = "x2.6.0" ]; then \
-        pip install nvidia-nccl-cu12==2.25.1 --no-cache-dir; \
-    fi
-
 # set reasonable default for CUDA architectures when building ngc image
 ENV TORCH_CUDA_ARCH_LIST="7.5 8.0 8.6 9.0 10.0"
 
@@ -182,6 +178,11 @@ RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
     pip install .[all] -v --no-cache-dir
 
 WORKDIR ${CODESPACE}
+
+# nccl update for torch 2.6.0
+RUN if [ "x${TORCH_VERSION}" = "x2.6.0" ]; then \
+        pip install nvidia-nccl-cu12==2.25.1 --no-cache-dir; \
+    fi
 
 # setup sysctl
 RUN echo "fs.file-max=100000" >> /etc/sysctl.conf
