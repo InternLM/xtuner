@@ -48,6 +48,8 @@ dependencies = [
   "timm",
   "codetiming",
   "GitPython",
+  "mathruler",
+  "pylatexenc"
 ]
 
 [project.urls]
@@ -67,6 +69,8 @@ rl = [
   "httpx",
   "fastapi",
   "uvicorn",
+  "mathruler",
+  "pylatexenc"
 ]
 video = [
   "decord",
@@ -80,6 +84,8 @@ all = [
   "uvicorn",
   "liger-kernel",
   "parametrize",
+  "mathruler",
+  "pylatexenc"
 ]
 
 [tool.mypy]

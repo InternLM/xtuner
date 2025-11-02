@@ -57,9 +57,8 @@ XTuner V1 is a next-generation LLM training engine specifically designed for ult
 
 
 <div align=center>
-  <img src="https://github.com/user-attachments/assets/98519a93-1ce8-49f0-a7ab-d7968c9d67a6" style="width:90%">
+  <img src="https://github.com/user-attachments/assets/c4fb2bb4-56bd-4f1c-8188-7f5370314cf8" style="width:90%">
 </div>
-
 
 
 ## 🔥 Roadmap

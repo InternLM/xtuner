@@ -30,11 +30,11 @@ class OpenaiTokenizeFunction(CachableTokenizeFunction[DataItem]):
         assert chat_template in CHAT_TEMPLATE_MAP, (
             f"chat_template {chat_template} not found in {CHAT_TEMPLATE_MAP.keys()}"
         )
-        self.tokenizer = tokenizer
         self.chat_template = CHAT_TEMPLATE_MAP[chat_template]
         self._hash = hash
         self._tokenizer_hash = tokenizer_hash
         self.max_length = max_length
+        super().__init__(tokenizer)
 
     def __call__(self, item: dict | list, **kwargs) -> DataItem | CacheItem:
         if isinstance(item, dict) and "messages" in item:

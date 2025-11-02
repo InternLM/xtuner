@@ -9,7 +9,8 @@ from xtuner.v1.ray.base import AcceleratorResourcesConfig, AutoAcceleratorWorker
 from xtuner.v1.ray.environment import SingleTurnEnvironment
 from xtuner.v1.ray.evaluator import Evaluator, EvaluatorConfig
 from xtuner.v1.data_proto.rl_data import SampleParams
-from xtuner.v1.datasets import RLTextTokenizeFnConfig, DatasetConfig
+from xtuner.v1.datasets import RLTokenizeFnConfig, DatasetConfig, OpenaiTokenizeFunctionConfig
+
 
 MODEL_PATH = os.environ["ROLLOUT_MODEL_PATH"]
 TEST_DATA_PATH = os.environ["ROLLOUT_TEST_DATA_PATH"]
@@ -49,13 +50,12 @@ class TestEvaluator(unittest.TestCase):
         self.judger_cfg = JudgerConfig(
             reward_judger_configs=[gsm8k_judger_config]
         )
-        
         self.eval_dataset_cfg = [
             {
             "dataset": DatasetConfig(name="gsm8k",
                                     anno_path=TEST_DATA_PATH,
                                     sample_ratio=1.0),
-            "tokenize_fn": RLTextTokenizeFnConfig(max_length=self.max_prompt_length),
+            "tokenize_fn": RLTokenizeFnConfig(max_length=self.max_prompt_length)
             },
         ]
         self.tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)

@@ -8,7 +8,7 @@ from xtuner.v1.config import (
     LRConfig,
 )
 from xtuner.v1.data_proto.rl_data import SampleParams
-from xtuner.v1.datasets import RLTextTokenizeFnConfig
+from xtuner.v1.datasets import RLTokenizeFnConfig
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.model.dense.qwen3 import Qwen3Dense8BConfig
 from xtuner.v1.ray.base import AcceleratorResourcesConfig
@@ -40,7 +40,6 @@ max_response_length = 1024
 pack_max_length = 32768
 train_optimizer_steps = 4
 hf_interval = 15
-enable_evaluate = True
 enable_initial_evaluate = True
 evaluate_step = 10
 
@@ -57,7 +56,6 @@ evaluate_step = 10
 # pack_max_length = 32768
 # train_optimizer_steps = 1
 # hf_interval = 100
-# enable_evaluate = True
 # enable_initial_evaluate = True
 # evaluate_step = 15
 
@@ -93,7 +91,7 @@ evaluation_sample_params.top_k = 1
 train_dataset = DatasetConfig(name=experimental_name, anno_path=data_path)
 eval_dataset = DatasetConfig(name=experimental_name, anno_path=eval_data_path) if enable_evaluate else None
 tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-tokenizer_config = RLTextTokenizeFnConfig(max_length=max_prompt_length)
+tokenizer_config = RLTokenizeFnConfig(max_length=max_prompt_length)
 
 train_dataset_cfg = [{"dataset": train_dataset, "tokenize_fn": tokenizer_config}]
 eval_dataset_cfg = [{"dataset": eval_dataset, "tokenize_fn": tokenizer_config}] if enable_evaluate else []

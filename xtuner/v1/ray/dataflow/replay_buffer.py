@@ -2,7 +2,7 @@ import itertools
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from uuid import uuid4
 
 import ray
@@ -129,7 +129,7 @@ class ReplayBufferConfig(BaseModel):
         config = ReplayBufferConfig(
             dataset_cfg=[{
                 "dataset": DatasetConfig(name="gsm8k", anno_path="path/to/data"),
-                "tokenize_fn": RLTextTokenizeFnConfig(max_length=512)
+                "tokenize_fn": RLTokenizeFnConfig(max_length=512)
             }],
             dataloader_cfg=DataloaderConfig(collator='fake_collator'),
             tokenizer=AutoTokenizer.from_pretrained("model_path"),
@@ -205,6 +205,11 @@ class Sampler:
             self.train_dataloader_iter = iter(self.train_dataloader)
             data = next(self.train_dataloader_iter)[0]
 
+        multimodal_train_info = data.pop("multimodal_train_info", {})
+        if "pixel_values" in multimodal_train_info:
+            multimodal_train_info["pixel_values"] = ray.put(multimodal_train_info["pixel_values"])
+            data["multimodal_train_info"] = multimodal_train_info
+
         for data_item in group_data_item:
             data_item.uid = RLUIDItem(
                 env=env,
@@ -214,6 +219,7 @@ class Sampler:
             )
             data_item.data = RLDatasetItem(**data)
             data_item.extra_info = RLExtraDataItem(retry_times=0)
+
         return group_data_item
 
     def sample_from_unfinished_buffer(self) -> List[RLDataFlowItem]:
@@ -265,6 +271,7 @@ class ReplayBufferStorage:
             list
         )  # action_id: [observation_id, observation_id, ...]
         self.logger = get_logger(log_dir=worker_log_dir, tag="ReplayBuffer")
+        self._multimodal_train_infos: Dict[int, Dict[str, Any]] = {}
 
     def add(self, grouped_dataitem: List[RLDataFlowItem]):
         """Adds a group of data items to the storage.
@@ -301,7 +308,7 @@ class ReplayBufferStorage:
             self._observations2states[observation_id] = replay_meta.state
             self._states[replay_meta.state].append(observation_id)
 
-    def get(self, global_batch_size: int) -> List[List[RLDataFlowItem]]:
+    def get(self, global_batch_size: int) -> Tuple[List[List[RLDataFlowItem]], List[Dict[str, Any]]]:
         """Retrieves a batch of finished sample groups from the buffer.
 
         Args:
@@ -317,9 +324,10 @@ class ReplayBufferStorage:
             same initial prompt, repeated `repeat_prompt_k` times.
         """
         samples = []
+        multimodal_train_infos = []
         if len(self._returned) < global_batch_size:
             self.logger.error("Not enough finished samples in replay buffer")
-            return []
+            return [], []
         else:
             target_finished_list = self._returned[:global_batch_size]
             remain_finished_list = self._returned[global_batch_size:]
@@ -328,9 +336,17 @@ class ReplayBufferStorage:
                 # todo: add an unified state management
                 replay_meta.state = "history"
                 group_samples = mapping_replaymeta_to_dataitem(self._actions[action_id])
+                multimodal_train_info = None
+                # TODO: 是否需要额外返回不重复的 multimodal_train_infos？
+                for data_item in group_samples:
+                    if "multimodal_train_info" in data_item.data:
+                        multimodal_train_info = data_item.data.pop("multimodal_train_info")
                 samples.append(group_samples)
+                if multimodal_train_info is not None:
+                    multimodal_train_infos.append(multimodal_train_info)
             self._returned = remain_finished_list
-            return samples
+
+            return samples, multimodal_train_infos
 
     def get_finished_samples(self):
         """Returns the number of finished sample groups."""
@@ -435,11 +451,9 @@ class ReplayBuffer:
             config (ReplayBufferConfig): The configuration object.
         """
         self.storage = ReplayBufferStorage(config.worker_log_dir)
-        self.tokenizer = (
-            config.tokenizer
-            if isinstance(config.tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast))
-            else AutoTokenizer.from_pretrained(config.tokenizer, trust_remote_code=True)
-        )
+        self.tokenizer = config.tokenizer
+        if isinstance(self.tokenizer, str):
+            self.tokenizer = AutoTokenizer.from_pretrained(self.tokenizer, trust_remote_code=True)
         self.datasets = build_datasets(config.dataset_cfg, self.tokenizer)
 
         if config.dataloader_cfg is not None:
@@ -494,6 +508,7 @@ class ReplayBuffer:
         Returns:
             A list of sampled data items.
         """
+
         return self.sampler.sample(env, enable_partial_rollout, prompt_repeat_k)
 
     def get_samples(
