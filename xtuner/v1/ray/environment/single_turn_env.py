@@ -13,7 +13,7 @@ from xtuner.v1.ray.environment.base_env import BaseEnvironment
 from xtuner.v1.utils import get_logger
 
 
-@ray.remote(max_concurrency=int(os.environ.get("XTUNER_MAX_CONCURRENCY", 2000)))
+@ray.remote(max_concurrency=int(os.environ.get("RAY_MAX_CONCURRENCY", 512)))
 class SingleTurnEnvironment(BaseEnvironment):
     """A single-turn environment for handling generation and evaluation tasks.
 

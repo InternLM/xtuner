@@ -59,9 +59,7 @@ class RolloutWorker(SingleAcceleratorWorker):
         self.server_func: Callable
         self.endpoints: dict[str, str] = dict()
         # handle stream response
-        limits = httpx.Limits(
-            max_connections=int(os.environ.get("XTUNER_MAX_CONCURRENCY", 2000)), max_keepalive_connections=100
-        )
+        limits = httpx.Limits(max_connections=config.rollout_max_batch_size, max_keepalive_connections=100)
         self.client = httpx.AsyncClient(limits=limits, timeout=self.config.rollout_timeout)
         self.paused = False
         self.server_task = None
@@ -431,6 +429,7 @@ class RolloutWorker(SingleAcceleratorWorker):
             # generate API response
             last_token_ids = []
             last_logprobs = []
+            self.logger.info(f"response: {response}")
             if "output_token_logprobs" in response["meta_info"]:
                 last_token_ids = [item[1] for item in response["meta_info"]["output_token_logprobs"]]
                 last_logprobs = [item[0] for item in response["meta_info"]["output_token_logprobs"]]

@@ -209,7 +209,7 @@ class DataFlow:
         """
         waiting_tasks = set()
         with tqdm(total=self.target_batch_size, desc="rollout_controller for training samples") as pbar:
-            update_step = max(1, int(self.target_batch_size * 0.1))
+            update_step = max(1, int(self.target_batch_size * 0.01))
             next_update_threshold = update_step
             while (
                 self.finished_samples_count < self.target_batch_size
@@ -269,6 +269,7 @@ class DataFlow:
                 if len(pending_tasks) > 0:
                     await self.pause()
                 waiting_tasks = pending_tasks
+            self.logger.info("All worker tasks have completed after pausing env controller.")
 
         if self.finished_samples_count >= self.target_batch_size:
             self.unfinished_samples_count = ray.get(self.replay_buffer.get_unfinished_samples.remote())

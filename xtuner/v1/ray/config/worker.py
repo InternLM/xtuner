@@ -112,12 +112,19 @@ class RolloutConfig(BaseModel):
         ),
     ] = False
     rollout_max_batch_size: Annotated[
-        Optional[int],
+        int,
         Parameter(
             group=infer_group,
             help="Maximum batch size for the rollout worker. If not set, it will be determined automatically based on the model and GPU memory.",
         ),
-    ] = None
+    ] = 512
+    prompt_repeat_k: Annotated[
+        int,
+        Parameter(
+            group=infer_group,
+            help="Number of times to repeat the prompt for each request in the rollout worker.",
+        ),
+    ] = 8
     tensor_parallel_size: Annotated[
         int,
         Parameter(
@@ -216,6 +223,8 @@ class RolloutConfig(BaseModel):
 
         if "device" in kwargs and kwargs["device"] == "NPU":
             kwargs["gpus_per_node"] = 16
+        else:
+            kwargs["gpus_per_node"] = 8
 
         rollout_backend = ""
         if os.environ.get("XTUNER_USE_SGLANG", "0") == "1":
@@ -235,6 +244,11 @@ class RolloutConfig(BaseModel):
             kwargs["launch_server_method"] = "ray"
             kwargs["rollout_cross_node_comm"] = True
 
+        kwargs["rollout_max_batch_size"] = (
+            kwargs.get("rollout_max_batch_size", 512)
+            * kwargs.get("prompt_repeat_k", 1)
+            / (int(os.environ.get("NODE_COUNT", 1)) * kwargs["gpus_per_node"] / kwargs.get("tensor_parallel_size", 1))
+        )
         super().__init__(**kwargs)
         self.worker_log_dir.mkdir(parents=True, exist_ok=True)
 
