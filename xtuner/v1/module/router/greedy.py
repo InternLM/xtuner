@@ -44,7 +44,7 @@ class GreedyRouter(nn.Module, RouterProtocol):
         self.scoring_func = scoring_func
         self.router_scaling_factor = router_scaling_factor
 
-    def forward(self, logits: torch.Tensor) -> RouterResults:
+    def forward(self, logits: torch.Tensor, rollout_routed_experts: torch.Tensor | None = None) -> RouterResults:
         if os.getenv("XTUNER_ROUTER_DEBUG") == "true":
             noise = torch.randn_like(logits) * 50
             logits = logits + noise
@@ -54,7 +54,13 @@ class GreedyRouter(nn.Module, RouterProtocol):
             routing_weights = logits.sigmoid()
         else:
             routing_weights = F.softmax(logits, dim=1, dtype=torch.float)
-        topk_weights, topk_ids = torch.topk(routing_weights, self.top_k, dim=-1)
+        if rollout_routed_experts is not None:
+            # seq_l, expert
+            topk_ids = rollout_routed_experts
+            # seq_l, expert
+            topk_weights = routing_weights.gather(dim=1, index=topk_ids)
+        else:
+            topk_weights, topk_ids = torch.topk(routing_weights, self.top_k, dim=-1)
 
         if self.norm_topk_prob:
             topk_weights /= topk_weights.sum(dim=-1, keepdim=True)
