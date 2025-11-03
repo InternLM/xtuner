@@ -89,7 +89,7 @@ class SingleTurnEnvironment(BaseEnvironment):
         """
         group_data_items = await self.generate(group_data_items, sample_params, extra_params)  # type: ignore[assignment]
         skip_judger = any(
-            item.env.rollout.finish_reason == "paused" or item.env.rollout.finish_reason == "failed"
+            item.env.rollout.finish_reason == "abort" or item.env.rollout.finish_reason == "failed"
             for item in group_data_items
         )
         if self.judger_controller and not skip_judger:

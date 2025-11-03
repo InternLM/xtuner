@@ -412,3 +412,11 @@ class RolloutController:
             block (bool): Whether to block until the operation completes.
         """
         return self._broadcast_to_active_workers("shutdown", block)
+
+    def abort_request(self, block=True):
+        """Aborts ongoing requests on all active rollout workers.
+
+        Args:
+            block (bool): Whether to block until the operation completes.
+        """
+        return self._broadcast_to_active_workers("abort_request", block)

@@ -65,7 +65,7 @@ def mapping_dataitem_to_replaymeta(grouped_dataitem: List[RLDataFlowItem]) -> Re
         observation_versions.append(version)
         group_states.append(item.env.rollout.finish_reason)
 
-    state_str = "paused" if "paused" in group_states else "returned"
+    state_str = "abort" if "abort" in group_states else "returned"
     replay_meta = ReplayMeta(
         env=env_str,
         root_id=root_id,
@@ -185,6 +185,7 @@ class Sampler:
             else AutoTokenizer.from_pretrained(tokenizer, trust_remote_code=True)
         )
         self.storage = storage
+        self.sample_count = 0
         self.logger = get_logger()
 
     def sample_from_datasets(self, env: str, repeat_prompt_k: int) -> List[RLDataFlowItem]:
@@ -223,6 +224,9 @@ class Sampler:
         self.logger.debug(f"Sampling unfinished action_id: {action_id} from replay buffer")
         replay_meta = self.storage._actions[action_id]
         group_samples = mapping_replaymeta_to_dataitem(replay_meta)
+        self.sample_count += 1
+        if len(self.storage._paused) == 0:
+            self.logger.info(f"Sampled {self.sample_count} unfinished samples from replay buffer")
         return group_samples
 
     def sample(self, env: str, enable_partial_rollout: int, prompt_repeat_k: int) -> List[RLDataFlowItem]:
@@ -290,7 +294,7 @@ class ReplayBufferStorage:
         # interrupted before inference was completed. Other states are returned
         # by the inference engine.
 
-        if state_str == "paused":
+        if state_str == "abort":
             self._paused.append(action_id)
         elif state_str == "returned":
             self._returned.append(action_id)
@@ -436,7 +440,7 @@ class ReplayBufferStorage:
             root_id = replay_meta.root_id
             action_id = replay_meta.action_id
             state_str = replay_meta.state
-            if state_str == "paused":
+            if state_str == "abort":
                 self._paused.append(action_id)
             elif state_str == "returned":
                 self._returned.append(action_id)

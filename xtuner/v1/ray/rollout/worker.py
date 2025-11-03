@@ -330,7 +330,6 @@ class RolloutWorker(SingleAcceleratorWorker):
                     extra_params=extra_params,
                 )
             log_payload = payload
-            self.logger.debug(f" +++ send request {uid} to worker: {self.rank}")
             response.raise_for_status()
             rollout_response = (
                 await self._handle_stream_response(uid, sample_params, extra_params, response)
@@ -411,7 +410,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                     finish_reason="failed",
                 )
 
-        assert finish_reason in ["stop", "length", "tool_call", "paused", "failed"], (
+        assert finish_reason in ["stop", "length", "tool_call", "paused", "failed", "abort"], (
             f"Unexpected finish_reason: {finish_reason}"
         )
         rollout_response = RLRolloutResponseItem(
@@ -554,6 +553,14 @@ class RolloutWorker(SingleAcceleratorWorker):
         Must be implemented by subclasses.
         """
         raise NotImplementedError("get_logprobs must be implemented in subclass")
+
+    @abstractmethod
+    def abort_request(self):
+        """Abstract method to update model weights.
+
+        Must be implemented by subclasses.
+        """
+        raise NotImplementedError("abort_request must be implemented in subclass")
 
     @abstractmethod
     def update_weights(self):

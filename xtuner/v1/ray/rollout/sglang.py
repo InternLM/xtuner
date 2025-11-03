@@ -124,16 +124,17 @@ class SGLangWorker(RolloutWorker):
         return self._make_request("resume_memory_occupation", {"tags": ["kv_cache"]})
 
     def pause_generation(self):
-        pass
+        return self._make_request("pause_generation")
 
     def continue_generation(self):
-        pass
+        return self._make_request("continue_generation")
 
     def shutdown(self):
         pass
 
     def reset_prefix_cache(self):
-        pass
+        self.flush_cache()
+        return self._make_request("release_memory_occupation")
 
     def _transform_rollout_config_to_server_configs(self):
         # remove the CUDA_VISIBLE_DEVICES set by ray and use base_gpu_id
@@ -147,6 +148,8 @@ class SGLangWorker(RolloutWorker):
         grammar_backend = sglang_config_kwargs.get(
             "grammar_backend", None
         )  # for intern-s1 series models, have to set the grammar_backend to "none"
+        log_level = sglang_config_kwargs.get("log_level", "CRITICAL")
+        log_level_http = sglang_config_kwargs.get("log_level_http", "CRITICAL")
 
         sglang_server_args = ServerArgs(model_path=self.config.model_path, trust_remote_code=True)
         sglang_server_args.host = self.host
@@ -162,6 +165,8 @@ class SGLangWorker(RolloutWorker):
         # note: 非共卡模式下无需设置,共卡模式下需要offload必须设置，否则显存释放不了
         sglang_server_args.enable_memory_saver = True
         sglang_server_args.max_running_requests = int(os.environ.get("XTUNER_MAX_CONCURRENCY", 2000))
+        sglang_server_args.log_level = log_level
+        sglang_server_args.log_level_http = log_level_http
         if grammar_backend is not None:
             sglang_server_args.grammar_backend = grammar_backend
 

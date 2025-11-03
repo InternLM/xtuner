@@ -137,11 +137,11 @@ class TestJudgerController(unittest.TestCase):
 
     def test_dapo_judger(self):
         from xtuner.v1.ray.judger.dapo_math import DapoMathJudgerConfig
-        from xtuner.v1.utils.rl_test_utils import get_eos_token_from_model_path
+        from xtuner.v1.utils.rl_test_utils import get_eos_token
         from transformers import AutoTokenizer
         tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
-        eos_token_str = get_eos_token_from_model_path(MODEL_PATH, tokenizer)
-
+        eos_token_ids = get_eos_token(MODEL_PATH, tokenizer)
+        eos_token_str = tokenizer.convert_ids_to_tokens(eos_token_ids)
         dapo_judger_config = DapoMathJudgerConfig(
             judger_name="dapo_math", 
             eos_token=eos_token_str,
