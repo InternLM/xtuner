@@ -1,6 +1,6 @@
 import asyncio
 from pathlib import Path
-from typing import Callable, List, Optional, Union
+from typing import Callable, List, Optional, Sized, Union
 
 import ray
 from cyclopts import Parameter
@@ -10,8 +10,8 @@ from typing_extensions import Annotated
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1.data_proto.rl_data import RLDataFlowItem, RLDatasetItem, SampleParams, check_dataflow_item
-from xtuner.v1.datasets import build_datasets
-from xtuner.v1.datasets.config import DatasetConfigList
+from xtuner.v1.datasets import build_dataloader, build_datasets
+from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfigList
 from xtuner.v1.ray.environment import BaseEnvironment
 from xtuner.v1.ray.utils import create_task
 from xtuner.v1.utils import get_logger
@@ -49,7 +49,7 @@ class EvaluatorConfig(BaseModel):
         config = EvaluatorConfig(
             dataset_cfg=[{
                 "dataset": DatasetConfig(name="gsm8k", anno_path="test_data.json"),
-                "tokenize_fn": RLTextTokenizeFnConfig(max_length=512)
+                "tokenize_fn": RLTokenizeFnConfig(max_length=512)
             }],
             tokenizer=AutoTokenizer.from_pretrained("model_path"),
             max_concurrent=32,
@@ -73,6 +73,10 @@ class EvaluatorConfig(BaseModel):
         DatasetConfigList,
         Parameter(help="Configuration for the dataset."),
     ]
+    dataloader_cfg: Annotated[
+        Optional[DataloaderConfig], Parameter(help="The PyTorch DataLoader for iterating over the dataset.")
+    ] = None
+
     tokenizer: Annotated[
         Union[PreTrainedTokenizer, PreTrainedTokenizerFast, str],
         Parameter(help="Tokenizer for text processing."),
@@ -122,22 +126,38 @@ class Evaluator:
         self.config = config
         self.sample_params = self.config.sample_params
         self.dataset = (
-            build_datasets(config.dataset_cfg, config.tokenizer)[0]
+            build_datasets(config.dataset_cfg, config.tokenizer)
             if isinstance(config.tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast))
             else build_datasets(
                 config.dataset_cfg, AutoTokenizer.from_pretrained(config.tokenizer, trust_remote_code=True)
-            )[0]
+            )
         )
-        self.dataloader = iter(self.dataset)
+
+        if config.dataloader_cfg is not None:
+            self.dataloader_cfg = config.dataloader_cfg
+        else:
+            self.dataloader_cfg = DataloaderConfig(
+                collator="fake_collator",
+                pack_level="none",
+            )
+        self.dataloader = build_dataloader(
+            dataloader_config=self.dataloader_cfg,
+            datasets=self.dataset,
+            global_batch_size=1,
+            micro_batch_size=1,
+            seed=1,
+        )
+        assert isinstance(self.dataloader, Sized)
+
         self.env_controller = env_controller
         self.failed_samples_count = 0
         self.return_list: List[RLDataFlowItem] = []
         if self.config.eval_sample_ratio > 0:
-            self.eval_batch_size = int(len(self.dataset) * self.config.eval_sample_ratio)
+            self.eval_batch_size = int(len(self.dataloader) * self.config.eval_sample_ratio)
         elif self.config.eval_sample_num > 0:
             self.eval_batch_size = self.config.eval_sample_num
         else:
-            self.eval_batch_size = len(self.dataset)
+            self.eval_batch_size = len(self.dataloader)
         if self.config.compute_metric_func is not None:
             self.compute_metric = self.config.compute_metric_func
         else:
@@ -194,6 +214,7 @@ class Evaluator:
         waiting_tasks = set()
         self.logger.info(f"Start to generate {self.eval_batch_size} samples for evaluate")
         self.logger.info(f"Evaluate sample parameters set to {self.sample_params}.")
+        data_iter = iter(self.dataloader)
         with tqdm(total=self.eval_batch_size, desc="Rollout for eval samples") as pbar:
             update_step = max(1, int(self.eval_batch_size * 0.1))
             next_update_threshold = update_step
@@ -206,12 +227,12 @@ class Evaluator:
                     if len(self.return_list) + len(waiting_tasks) >= self.eval_batch_size:
                         break
                     try:
-                        data = next(self.dataloader)
+                        data = next(data_iter)
                     except StopIteration:
-                        self.dataloader = iter(self.dataset)
-                        data = next(self.dataloader)
+                        data_iter = iter(self.dataloader)
+                        data = next(data_iter)
                         self.logger.warning("Restarting the evaluation dataset.")
-                    data_item = RLDataFlowItem(data=RLDatasetItem(**data))
+                    data_item = RLDataFlowItem(data=RLDatasetItem(**data[0]))
                     task = create_task(self.eval_worker_task(data_item))
                     waiting_tasks.add(task)
 
@@ -267,7 +288,6 @@ class Evaluator:
                 the generated samples.
         """
         self.return_list = []
-        self.dataloader = iter(self.dataset)
         ray.get(self.env_controller.restart.remote())  # type: ignore[attr-defined]
         await self.concurrent_eval_task_runner()
         if len(self.return_list) == 0:

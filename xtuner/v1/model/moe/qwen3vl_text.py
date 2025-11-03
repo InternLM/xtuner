@@ -180,9 +180,10 @@ class Qwen3VLTextMoE(Qwen3MoE):
 
         hidden_states = self.norm(hidden_states)
 
-        loss, logits = self.lm_head(hidden_states, loss_ctx)  # type: ignore
+        loss, (logits, extra_info) = self.lm_head(hidden_states, loss_ctx)  # type: ignore
         output["loss"] = loss
         output["logits"] = logits
+        output["extra_info"] = extra_info
 
         router_logits_list = list(output["router_logits"].values())  # type: ignore
         router_logits = self._select_non_pad_router_logits(router_logits_list, seq_ctx.mask)

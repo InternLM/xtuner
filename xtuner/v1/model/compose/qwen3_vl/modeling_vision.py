@@ -444,9 +444,9 @@ class Qwen3VLVisionModel(BaseModel):
         for layer_num, blk in enumerate(self.blocks):
             hidden_states = blk(
                 hidden_states,
-                cu_seqlens=cu_seqlens,
-                max_seqlen=max_seqlen,
-                position_embeddings=position_embeddings
+                cu_seqlens,
+                max_seqlen,
+                position_embeddings
             )
             if layer_num in self.deepstack_visual_indexes:
                 deepstack_feature = hidden_states

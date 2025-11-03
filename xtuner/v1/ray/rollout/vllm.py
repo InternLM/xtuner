@@ -47,6 +47,7 @@ class vLLMWorker(RolloutWorker):
         tool_choice: str,  # reserved for agent tool use
         sample_params: dict,
         extra_params: dict,
+        extra_info: dict,
     ):
         headers = {
             "Content-Type": "application/json",

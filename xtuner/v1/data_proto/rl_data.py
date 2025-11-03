@@ -50,6 +50,7 @@ class RLDatasetItem(BaseModel):
     reward_model: Optional[Dict[str, Any]] = None
     data_source: Optional[Dict[str, Any]] = None
     extra_info: Dict[str, Any] = dict()
+    multimodal_train_info: Optional[Dict[str, Any]] = None
 
 
 class RLRolloutResponseItem(BaseModel):

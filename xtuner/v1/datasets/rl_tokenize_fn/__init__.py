@@ -1,6 +1,6 @@
-from .rl_text_fn import RLTextTokenizeFnConfig
+from .rl_tokenize_fn import RLTokenizeFnConfig
 
 
 __all__ = [
-    "RLTextTokenizeFnConfig",
+    "RLTokenizeFnConfig",
 ]

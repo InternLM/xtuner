@@ -4,7 +4,7 @@ from mmengine import is_installed
 from pydantic import BaseModel, ConfigDict
 
 from xtuner.v1.float8 import Float8Config
-from xtuner.v1.model.dense.qwen3 import Qwen3Dense8BConfig
+from xtuner.v1.model.dense.qwen3 import Qwen3Dense0P6BConfig, Qwen3Dense8BConfig
 from xtuner.v1.model.moe.moe import TransformerConfig
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
 from xtuner.v1.utils import get_logger
@@ -119,6 +119,23 @@ class InternVL3P5MoE30BA3Config(InternVLBaseConfig):
     vision_config: InternVLVisionConfig = InternVLVisionConfig()
     projector_config: InternVLProjectorConfig = InternVLProjectorConfig(text_hidden_size=2049)
     text_config: Qwen3MoE30BA3Config = Qwen3MoE30BA3Config()
+
+    @property
+    def hf_config(self):
+        # TODO(pppppM) Support saving HuggingFace format config
+        logger.warning(
+            f"{type(self)} does not support conversion to HuggingFace config format. "
+            "Only the original HuggingFace config will be retained in the saved HuggingFace format checkpoint. "
+            f"If you have changed the default values in {type(self)}, it may cause the config in the saved "
+            "HuggingFace format checkpoint to not match the weights."
+        )
+        return None
+
+
+class InternVL3P5Dense1BConfig(InternVLBaseConfig):
+    vision_config: InternVLVisionConfig = InternVLVisionConfig()
+    projector_config: InternVLProjectorConfig = InternVLProjectorConfig(text_hidden_size=1024)
+    text_config: Qwen3Dense0P6BConfig = Qwen3Dense0P6BConfig()
 
     @property
     def hf_config(self):

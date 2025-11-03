@@ -14,7 +14,7 @@ from xtuner.v1.data_proto.rl_data import SampleParams
 from xtuner.v1.ray.environment import SingleTurnEnvironment
 from xtuner.v1.ray.rollout import RolloutController
 from xtuner.v1.ray.judger import JudgerController
-from xtuner.v1.datasets import RLTextTokenizeFnConfig, build_datasets, build_dataloader
+from xtuner.v1.datasets import RLTokenizeFnConfig, build_datasets, build_dataloader
 from xtuner.v1.datasets.config import (
     DataloaderConfig,
     DatasetConfig,
@@ -88,7 +88,7 @@ class TestRollout(unittest.TestCase):
             "dataset": DatasetConfig(name="gsm8k",
                                     anno_path=TRAIN_DATA_PATH,
                                     sample_ratio=1.0),
-            "tokenize_fn": RLTextTokenizeFnConfig(max_length=self.max_prompt_length),
+            "tokenize_fn": RLTokenizeFnConfig(max_length=self.max_prompt_length),
             },
         ]
         self.dataloader_cfg = DataloaderConfig(
@@ -135,7 +135,7 @@ class TestRollout(unittest.TestCase):
                                         )
         sample_params = SampleParams(temperature=2.5)  # invalid temperature to trigger error
         responses = ray.get(self.test_flow.run.remote(num=1, sample_params=sample_params), timeout=300)
-        self.assertEqual(len(responses),0)
+        self.assertEqual(len(responses[0]), 0)
   
     @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
     def test_lmdeploy_generate(self):
@@ -161,7 +161,7 @@ class TestRollout(unittest.TestCase):
                                          self.test_env
                                         )
         responses = ray.get(self.test_flow.run.remote(), timeout=300)
-        finished_samples_count = sum(1 for data in responses for item in data if item.env.rollout.finish_reason == "stop" or item.env.rollout.finish_reason == "length")
+        finished_samples_count = sum(1 for data in responses[0] for item in data if item.env.rollout.finish_reason == "stop" or item.env.rollout.finish_reason == "length")
         self.assertEqual(finished_samples_count // self.dataflow_cfg.prompt_repeat_k, self.dataflow_cfg.global_batch_size)
         ray.get(self.test_env.shutdown.remote(), timeout=300)
     
@@ -179,10 +179,10 @@ class TestRollout(unittest.TestCase):
                                          self.replay_buffer_cfg,
                                          self.test_env
                                         )
-        extra_params = {"stream": True, "return_token_ids": True, "return_logprobs": True}
+        extra_params = {"stream": False, "return_token_ids": True, "return_logprobs": True}
         dump_path = os.path.join(self.temp_dir.name, "unfinished_buffer.pickle")
         responses = ray.get(self.test_flow.run.remote(extra_params=extra_params, dump=True, dump_path=dump_path))
-        finished_samples_count = sum(1 for data in responses for item in data if item.env.rollout.finish_reason == "stop" or item.env.rollout.finish_reason == "length")
+        finished_samples_count = sum(1 for data in responses[0] for item in data if item.env.rollout.finish_reason == "stop" or item.env.rollout.finish_reason == "length")
         self.assertEqual(finished_samples_count // self.dataflow_cfg.prompt_repeat_k, self.dataflow_cfg.global_batch_size)
         status = ray.get(self.test_flow.get_replaybuffer_status.remote())
         finished_count = status["rollout_finished_count"] # 已经去掉了data_flow返回的数量
@@ -193,7 +193,7 @@ class TestRollout(unittest.TestCase):
 
         ray.get(self.test_flow.clear_replaybuffer.remote())
         response_resume = ray.get(self.test_flow.run.remote(extra_params=extra_params, resume=True, resume_path=dump_path))
-        finished_resume_samples_count = sum(1 for data in response_resume for item in data if item.env.rollout.finish_reason == "stop" or item.env.rollout.finish_reason == "length")
+        finished_resume_samples_count = sum(1 for data in response_resume[0] for item in data if item.env.rollout.finish_reason == "stop" or item.env.rollout.finish_reason == "length")
         self.assertEqual(finished_resume_samples_count // self.dataflow_cfg.prompt_repeat_k, self.dataflow_cfg.global_batch_size)
         status = ray.get(self.test_flow.get_replaybuffer_status.remote())
         finished_count = status["rollout_finished_count"] 
@@ -240,7 +240,7 @@ class TestRollout(unittest.TestCase):
                                          self.test_env
                                         )
         responses = ray.get(self.test_flow.run.remote(), timeout=300)
-        finished_samples_count = sum(1 for data in responses for item in data if item.env.rollout.finish_reason == "stop" or item.env.rollout.finish_reason == "length")
+        finished_samples_count = sum(1 for data in responses[0] for item in data if item.env.rollout.finish_reason == "stop" or item.env.rollout.finish_reason == "length")
         self.assertEqual(finished_samples_count // self.dataflow_cfg.prompt_repeat_k, self.dataflow_cfg.global_batch_size)
         ray.get(self.test_env.shutdown.remote(), timeout=300)
         print("responses: ", responses)
@@ -263,7 +263,7 @@ class TestRollout(unittest.TestCase):
         extra_params = {"stream": True, "return_token_ids": True, "return_logprobs": True}
         dump_path = os.path.join(self.temp_dir.name, "unfinished_buffer.pickle")
         responses = ray.get(self.test_flow.run.remote(extra_params=extra_params, dump=False, dump_path=dump_path))
-        finished_samples_count = sum(1 for data in responses for item in data if item.env.rollout.finish_reason == "stop" or item.env.rollout.finish_reason == "length")
+        finished_samples_count = sum(1 for data in responses[0] for item in data if item.env.rollout.finish_reason == "stop" or item.env.rollout.finish_reason == "length")
         self.assertEqual(finished_samples_count // self.dataflow_cfg.prompt_repeat_k, self.dataflow_cfg.global_batch_size)
         status = ray.get(self.test_flow.get_replaybuffer_status.remote())
         finished_count = status["rollout_finished_count"] # 已经去掉了data_flow返回的数量
@@ -274,7 +274,7 @@ class TestRollout(unittest.TestCase):
 
         ray.get(self.test_flow.clear_replaybuffer.remote())
         response_resume = ray.get(self.test_flow.run.remote(extra_params=extra_params, resume=True, resume_path=dump_path))
-        finished_resume_samples_count = sum(1 for data in response_resume for item in data if item.env.rollout.finish_reason == "stop" or item.env.rollout.finish_reason == "length")
+        finished_resume_samples_count = sum(1 for data in response_resume[0] for item in data if item.env.rollout.finish_reason == "stop" or item.env.rollout.finish_reason == "length")
         self.assertEqual(finished_resume_samples_count // self.dataflow_cfg.prompt_repeat_k, self.dataflow_cfg.global_batch_size)
         status = ray.get(self.test_flow.get_replaybuffer_status.remote())
         finished_count = status["rollout_finished_count"] 
