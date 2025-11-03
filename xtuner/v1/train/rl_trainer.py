@@ -523,8 +523,7 @@ class RLTrainer:
                              'rollout_logprobs': rollout_logprobs}
 
                 if 'routed_experts' in group[i].env.rollout.extra_info:
-                    routed_experts = ray.get(group[i].env.rollout.extra_info['routed_experts'])  # n,layer*expert
-                    assert routed_experts.size(0) == input_ids.size(1), f"{routed_experts.size(0)} vs {input_ids.size(1)}"
+                    routed_experts = group[i].env.rollout.extra_info['routed_experts']  # n,layer*expert
                     seq_ctx.rollout_routed_experts = routed_experts  # n,layer,expert
 
                 data_batches.append(data_dict)

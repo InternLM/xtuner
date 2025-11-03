@@ -329,6 +329,10 @@ class TrainingWorker(SingleAcceleratorWorker):
                     if not isinstance(rollout_routed_experts[0], torch.Tensor):
                         rollout_routed_experts = [ray.get(routed_experts) for routed_experts in rollout_routed_experts]
                     seq_ctx.rollout_routed_experts = torch.cat(rollout_routed_experts, dim=0)  # max_len,l,e
+                else:
+                    seq_ctx.rollout_routed_experts = ray.get(rollout_routed_experts)
+
+                assert seq_ctx.rollout_routed_experts.size(0) == seq_ctx.input_ids.size(1)
 
             seq_ctx = data["seq_ctx"].to(DEVICE)
             loss_ctx_input = RLLossContextInputItem(
