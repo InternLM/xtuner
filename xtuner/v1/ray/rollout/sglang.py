@@ -148,8 +148,8 @@ class SGLangWorker(RolloutWorker):
         grammar_backend = sglang_config_kwargs.get(
             "grammar_backend", None
         )  # for intern-s1 series models, have to set the grammar_backend to "none"
-        log_level = sglang_config_kwargs.get("log_level", "CRITICAL")
-        log_level_http = sglang_config_kwargs.get("log_level_http", "CRITICAL")
+        log_level = sglang_config_kwargs.get("log_level", "critical")
+        log_level_http = sglang_config_kwargs.get("log_level_http", "critical")
 
         sglang_server_args = ServerArgs(model_path=self.config.model_path, trust_remote_code=True)
         sglang_server_args.host = self.host
