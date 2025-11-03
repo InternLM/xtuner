@@ -244,6 +244,10 @@ class RolloutConfig(BaseModel):
             kwargs["launch_server_method"] = "ray"
             kwargs["rollout_cross_node_comm"] = True
 
+        # `rollout_max_batch_size` is the max batch size for each inference engine.
+        # In Xtuner, It is derived from `max_concurrent` in `DataflowConfig`. `max_concurrent` represents the concurrency level for group data batch.
+        # The total data received by all inference workers is `max_concurrent * prompt_repeat_k`.
+        # This is then divided by the number of inference engines (i.e., workers with TP_RANK=0) to determine the max batch size per engine.
         kwargs["rollout_max_batch_size"] = (
             kwargs.get("rollout_max_batch_size", 512)
             * kwargs.get("prompt_repeat_k", 1)

@@ -2,6 +2,7 @@ import asyncio
 from pathlib import Path
 from typing import Dict, List, Optional
 
+import httpx
 import ray
 from cyclopts import Parameter
 from pydantic import BaseModel
@@ -12,7 +13,7 @@ from xtuner.v1.data_proto.rl_data import RLDataFlowItem, check_dataflow_item
 from xtuner.v1.ray.environment import SingleTurnEnvironment
 from xtuner.v1.ray.rollout.controller import SampleParams
 from xtuner.v1.ray.utils import create_task
-from xtuner.v1.utils import get_logger, timer
+from xtuner.v1.utils import get_logger
 
 from .replay_buffer import ReplayBuffer, ReplayBufferConfig
 
@@ -116,7 +117,6 @@ class DataFlow:
         self.failed_samples_count = 0
         self.logger = get_logger(log_dir=self.config.worker_log_dir, tag="DataFlow")
         self.target_batch_size = self.config.global_batch_size
-        self.timer_dict: dict[str, float] = {}
         self.logger.info(f"DataFlowConfig:\n{self.config.model_dump_json(indent=2)}")
         self.worker_url_dict = ray.get(self.env_controller.get_rollout_info.remote())["server_url_dict"]  # type: ignore[attr-defined]
         self.worker_url_list = list(self.worker_url_dict.values())
@@ -258,23 +258,21 @@ class DataFlow:
         if self.failed_samples_count >= self.target_batch_size:
             self.logger.info("Max failed samples reached. Pausing env controller.")
 
-        with timer("pause_env_controller", self.timer_dict):
-            # NOTE: Directly send pause requests to rollout workers because calling `rollout_controller.pause()`
-            # would be queued behind many worker tasks, causing a significant delay.
-            await self.pause()
-            while len(waiting_tasks) > 0:
-                done_tasks, pending_tasks = await asyncio.wait(
-                    waiting_tasks, timeout=0.1, return_when=asyncio.FIRST_COMPLETED
-                )
-                if len(pending_tasks) > 0:
-                    await self.pause()
-                waiting_tasks = pending_tasks
-            self.logger.info("All worker tasks have completed after pausing env controller.")
+        # NOTE: Directly send pause requests to rollout workers because calling `rollout_controller.pause()`
+        # would be queued behind many worker tasks, causing a significant delay.
+        await self.pause()
+        while len(waiting_tasks) > 0:
+            done_tasks, pending_tasks = await asyncio.wait(
+                waiting_tasks, timeout=0.1, return_when=asyncio.FIRST_COMPLETED
+            )
+            if len(pending_tasks) > 0:
+                await self.pause()
+            waiting_tasks = pending_tasks
+        self.logger.info("All worker tasks have completed after pausing env controller.")
 
         if self.finished_samples_count >= self.target_batch_size:
             self.unfinished_samples_count = ray.get(self.replay_buffer.get_unfinished_samples.remote())
             self.logging_replaybuffer_state()
-            self.logging_timing_perf()
 
     async def _send_abort_request(self, client, url, timeout):
         worker_url = f"{url}/abort_request"
@@ -288,24 +286,25 @@ class DataFlow:
             return url, False
 
     async def pause(self, timeout: float = 60.0):
-        import httpx
-
         """Asynchronously sends abort requests to all rollout workers."""
-        self.logger.debug(f"Sending abort requests to {len(self.worker_url_list)} workers...")
+        if not self.worker_url_list:
+            self.logger.info("No active rollout workers to pause.")
+            return
 
         async with httpx.AsyncClient() as client:
             tasks = [self._send_abort_request(client, url, timeout=timeout) for url in self.worker_url_list]
             results = await asyncio.gather(*tasks)
 
-        succeeded = [url for url, success in results if success]
-        failed = [url for url, success in results if not success]
+        failed_workers = [url for url, success in results if not success]
+        succeeded_count = len(self.worker_url_list) - len(failed_workers)
 
-        if failed:
+        if failed_workers:
             self.logger.warning(
-                f"Abort requests completed. Succeeded: {len(succeeded)}, Failed: {len(failed)}. Failed workers: {failed}"
+                f"Abort requests completed. Succeeded: {succeeded_count}, "
+                f"Failed: {len(failed_workers)}. Failed workers: {failed_workers}"
             )
         else:
-            self.logger.debug(f"All {len(succeeded)} abort requests sent successfully.")
+            self.logger.debug(f"All {succeeded_count} abort requests sent successfully.")
 
     async def run(
         self,
@@ -352,19 +351,6 @@ class DataFlow:
 
     def logging_replaybuffer_state(self):
         ray.get(self.replay_buffer.print.remote())
-
-    def logging_timing_perf(self):
-        log_messages = ["Single sample average time cost: "]
-        for name, times in self.timer_dict.items():
-            avg_time_str = "N/A"
-            if times:
-                avg_time = times / self.finished_samples_count
-                avg_time_str = f"{avg_time:.4f}s"
-
-            formatted_name = name.replace("_", " ")
-            log_messages.append(f"{formatted_name}: {avg_time_str}, ")
-
-        self.logger.info("".join(log_messages))
 
     def get_replaybuffer_status(self):
         return ray.get(self.replay_buffer.status.remote())
