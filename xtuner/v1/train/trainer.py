@@ -403,7 +403,7 @@ class Trainer:
             intra_layer_micro_batch=intra_layer_micro_batch,
         )
         self._lr_cfg = lr_cfg
-        self._lr_scheduler = self.build_lr_scheduler(lr_cfg)
+        self._lr_scheduler = self.build_lr_scheduler(lr_cfg, self.total_step)
 
         if loss_cfg is None:
             loss_cfg = CELossConfig()
@@ -734,7 +734,7 @@ class Trainer:
             engine.model.set_hf(model_path)
         return engine
 
-    def build_lr_scheduler(self, lr_cfg: LRConfig, scheduler_step: int | None = None) -> torch.optim.lr_scheduler.LRScheduler:
+    def build_lr_scheduler(self, lr_cfg: LRConfig, scheduler_step: int) -> torch.optim.lr_scheduler.LRScheduler:
         """Build the learning rate scheduler.
 
         Args:
@@ -743,10 +743,8 @@ class Trainer:
         Returns:
             torch.optim.lr_scheduler.LRScheduler: Configured learning rate scheduler.
         """
-        total_step = self.total_step
-        scheduler_step = scheduler_step or total_step
         if lr_cfg.warmup_ratio < 1:
-            warmup_steps = int(lr_cfg.warmup_ratio * total_step)
+            warmup_steps = int(lr_cfg.warmup_ratio * scheduler_step)
         else:
             warmup_steps = int(lr_cfg.warmup_ratio)
 
