@@ -804,7 +804,7 @@ class Trainer:
             for ckp_dir in deleted_checkpoints:
                 if self.rank == 0 and Path(ckp_dir).exists():
                     rmtree(ckp_dir)
-        
+
         # Must save meta after deleting checkpoints to ensure the checkpoint_list is updated in the meta file
         if self.rank == 0:
             with meta_path.open("w") as f:
