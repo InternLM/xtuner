@@ -59,7 +59,7 @@ logger = get_logger()
 
 
 class GitInfo(TypedDict):
-    commit: str
+    commit: str | None
     staged: str
     unstaged: str
 
