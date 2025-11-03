@@ -429,7 +429,15 @@ class RolloutWorker(SingleAcceleratorWorker):
             # generate API response
             last_token_ids = []
             last_logprobs = []
-            self.logger.info(f"response: {response}")
+            finish_reason = response["meta_info"]["finish_reason"]["type"]
+
+            if finish_reason == "abort":
+                rollout_response = RLRolloutResponseItem(
+                    response="",
+                    finish_reason="abort",
+                )
+                return rollout_response
+
             if "output_token_logprobs" in response["meta_info"]:
                 last_token_ids = [item[1] for item in response["meta_info"]["output_token_logprobs"]]
                 last_logprobs = [item[0] for item in response["meta_info"]["output_token_logprobs"]]
@@ -441,7 +449,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                 last_token_ids = response["output_ids"][-num_return_tokens:] if num_return_tokens > 0 else []
 
             last_trajectory = response["text"]
-            finish_reason = response["meta_info"]["finish_reason"]["type"]
+
             rollout_response = RLRolloutResponseItem(
                 response=last_trajectory,
                 response_ids=last_token_ids if len(last_token_ids) > 0 else None,
