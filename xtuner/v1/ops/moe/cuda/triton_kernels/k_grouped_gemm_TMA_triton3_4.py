@@ -95,26 +95,26 @@ def k_grouped_gemm_kernel(
         num_pid_k = tl.cdiv(tokens, BLOCK_K)
         offs_k = 0
 
-        a_ptr = (A + group_start * M).to(tl.pointer_type(dtypeA))
-        b_ptr = (B + group_start * N).to(tl.pointer_type(dtypeB))
-        c_ptr = (C + group * M * N).to(tl.pointer_type(dtypeC))
+        a_ptr = A.to(tl.pointer_type(dtypeA))
+        b_ptr = B.to(tl.pointer_type(dtypeB))
+        c_ptr = C.to(tl.pointer_type(dtypeC))
 
         a_desc = tl.make_tensor_descriptor(
             a_ptr,
-            shape=[(group_end - group_start), M],
+            shape=[(group_end - 0), M],
             strides=[M, 1],
             block_shape=[BLOCK_K, BLOCK_M],
         )
 
         b_desc = tl.make_tensor_descriptor(
             b_ptr,
-            shape=[(group_end - group_start), N],
+            shape=[(group_end - 0), N],
             strides=[N, 1],
             block_shape=[BLOCK_K, BLOCK_N],
         )
         c_desc = tl.make_tensor_descriptor(
             c_ptr,
-            shape=[M, N],
+            shape=[(group + 1) * M, N],
             strides=[N, 1],
             block_shape=[BLOCK_M, BLOCK_N],
         )
@@ -122,13 +122,13 @@ def k_grouped_gemm_kernel(
         accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
 
         for kk in range(0, num_pid_k):
-            a = a_desc.load([offs_k, offs_am])
-            b = b_desc.load([offs_k, offs_bn])
+            a = a_desc.load([group_start + offs_k, offs_am])
+            b = b_desc.load([group_start + offs_k, offs_bn])
             accumulator = tl.dot(a.T, b, acc=accumulator, input_precision="tf32x3")
             offs_k += BLOCK_K
 
         c = accumulator.to(dtypeC)
-        offs_cm = pid_m * BLOCK_M
+        offs_cm = group * M + pid_m * BLOCK_M
         offs_cn = offs_bn
         c_desc.store([offs_cm, offs_cn], c)
 
