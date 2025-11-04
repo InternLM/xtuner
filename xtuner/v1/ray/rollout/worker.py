@@ -570,14 +570,6 @@ class RolloutWorker(SingleAcceleratorWorker):
         raise NotImplementedError("get_logprobs must be implemented in subclass")
 
     @abstractmethod
-    def abort_request(self):
-        """Abstract method to update model weights.
-
-        Must be implemented by subclasses.
-        """
-        raise NotImplementedError("abort_request must be implemented in subclass")
-
-    @abstractmethod
     def update_weights(self):
         """Abstract method to update model weights.
 
