@@ -172,7 +172,7 @@ class TrainerConfig(BaseModel):
         elif self.work_dir is None:
             self.work_dir = Path.cwd()
         return self
-    
+
     @field_serializer("grad_norm_dtype")
     def serialize_dtype(self, value: torch.dtype) -> str:
         return str(value)
@@ -188,7 +188,6 @@ class TrainerConfig(BaseModel):
             return torch.float64
         else:
             raise ValueError()
-
 
 
 class Trainer:
