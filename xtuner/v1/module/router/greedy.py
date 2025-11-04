@@ -130,6 +130,7 @@ class GreedyGroupedRouter(GreedyRouter):
 
         return {
             "logits": logits,
+            "router_weights": routing_weights,
             "topk_weights": topk_weights,
             "topk_ids": topk_ids,
             "topkens_per_expert": tokens_per_expert,
