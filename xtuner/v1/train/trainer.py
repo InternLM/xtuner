@@ -18,7 +18,7 @@ from cyclopts import Parameter
 from mmengine import load
 from mmengine.dist import get_rank, get_world_size
 from mmengine.runner import set_random_seed
-from pydantic import BaseModel, ConfigDict, computed_field, model_validator
+from pydantic import BaseModel, ConfigDict, computed_field, field_serializer, field_validator, model_validator
 from torch.distributed import init_process_group
 from torch.distributed.device_mesh import init_device_mesh
 from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, LinearLR, SequentialLR
@@ -37,6 +37,8 @@ from xtuner.v1.model.base import ModelItem, TransformerConfig
 from xtuner.v1.model.utils import ModelForwardExtraLogInfo
 from xtuner.v1.patch import patch_default_save_plan
 from xtuner.v1.profiler import profiling_memory, profiling_time
+from xtuner.v1.profiler.prober import ProberList
+from xtuner.v1.profiler.prober_utils import setup_prober_list
 from xtuner.v1.utils import (
     XTUNER_DETERMINISTIC,
     ParallelConfigException,
@@ -159,6 +161,9 @@ class TrainerConfig(BaseModel):
     dist_backend: str | None = None
     debug: bool = False
     debug_skip_save: bool = False
+    prober_list: list[str] = []
+    do_clip: bool = True
+    grad_norm_dtype: torch.dtype = torch.float32
 
     @model_validator(mode="after")
     def _convert_work_dir(self):
@@ -167,6 +172,22 @@ class TrainerConfig(BaseModel):
         elif self.work_dir is None:
             self.work_dir = Path.cwd()
         return self
+
+    @field_serializer("grad_norm_dtype")
+    def serialize_dtype(self, value: torch.dtype) -> str:
+        return str(value)
+
+    @field_validator("grad_norm_dtype", mode="before")
+    @classmethod
+    def deserialize_dtype(cls, value: str) -> torch.dtype:
+        if "bfloat16" in value:
+            return torch.bfloat16
+        elif "float32" in value:
+            return torch.float32
+        elif "float64" in value:
+            return torch.float64
+        else:
+            raise ValueError()
 
 
 class Trainer:
@@ -256,8 +277,13 @@ class Trainer:
         debug: bool = False,
         backend: str | None = None,
         debug_skip_save: bool = False,
+        prober_list: list[str] = [],
+        do_clip: bool = True,
+        grad_norm_dtype: torch.dtype = torch.float32,
         trainer_cfg: TrainerConfig | None = None,
     ):
+        self._do_clip = do_clip
+        self._grad_norm_dtype = grad_norm_dtype
         self._dataloader_config = dataloader_cfg
 
         self._total_step = total_step
@@ -394,6 +420,8 @@ class Trainer:
         if self._resume_cfg.resume_from is not None:
             self._resume()
 
+        setup_prober_list(self.exp_dir, self._profile_step, self._engine.model, prober_list)
+
     @classmethod
     def from_config(cls, config: TrainerConfig) -> Self:
         """Create a Trainer instance from a TrainerConfig.
@@ -436,6 +464,9 @@ class Trainer:
             backend=config.dist_backend,
             debug=config.debug,
             debug_skip_save=config.debug_skip_save,
+            prober_list=config.prober_list,
+            do_clip=config.do_clip,
+            grad_norm_dtype=config.grad_norm_dtype,
             trainer_cfg=config,
         )
         self.config = config
@@ -450,6 +481,8 @@ class Trainer:
         train_begin = time.time()
         time_before_get_data = time.time()
         for data_batch in self._data_iter():
+            self._cur_step += 1  # increment _cur_step at first, then can use correct self.cur_step everywhere below
+            ProberList.set_step(self._cur_step)
             DEVICE_MODULE.reset_peak_memory_stats()
 
             time_before_train_step = time.time()
@@ -491,9 +524,10 @@ class Trainer:
             with self._maybe_profiling():
                 loss_log, other_log = self._engine.train_step(engine_input)
 
-            grad_norm = self._engine.clip_grad_norm()
+            grad_norm = self._engine.clip_grad_norm(do_clip=self._do_clip, dtype=self._grad_norm_dtype)
             self._engine.step_optimizer(grad_norm)
             time_after_train_step = time.time()
+            ProberList.after_step()
             step_time = time_after_train_step - time_before_train_step
             step_consumed_tokens = other_log["consumed_tokens"]
 
@@ -505,7 +539,6 @@ class Trainer:
                 extra_info_dict = extra_info_updated.get()
             loss_log.update(extra_info_dict)
 
-            self._cur_step += 1
             self._consumed_tokens += step_consumed_tokens
             self._train_time = time_after_train_step - train_begin
 
@@ -531,6 +564,7 @@ class Trainer:
 
         # TODO: Should use flush rather than close
         self._exp_tracker.close()
+        self.logger.info(f"Training finished in {time.time() - train_begin:.2f} seconds")
 
     @property
     def world_size(self) -> int:
@@ -882,6 +916,7 @@ class Trainer:
 
     def _set_deterministic(self):
         if XTUNER_DETERMINISTIC:
+            logger.info("Setting deterministic algorithms")
             os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
             torch.use_deterministic_algorithms(True, warn_only=True)
 
@@ -1034,9 +1069,9 @@ class Trainer:
             f"Step {self.cur_step}/{self.total_step} data_time: {data_time:.4f} lr: {lr:.6e} time: {step_time:.4f} "
             f"text_tokens: {step_consumed_tokens} "
             f"{loss_log_str} "
+            f"grad_norm: {grad_norm:.8f} "
             f"max_memory: {max_memory / (1024**3):.2f} GB "
             f"reserved_memory: {reserved_memory / (1024**3):.2f} GB "
-            f"grad_norm: {grad_norm:.8f} "
             f"tgs: {tgs:.1f} "
             f"e2e_tgs: {e2e_tgs:.1f} "
             f"eta: {eta_hms} "
@@ -1153,20 +1188,23 @@ class Trainer:
 
         assert isinstance(pad_token_id, int), f"pad_token_id should be an integer, but got {pad_token_id}"
 
-        if isinstance(model_cfg, VisionComposeConfigProtocol):
-            if model_cfg.text_config.pad_token_id != pad_token_id:
-                logger.warning(
-                    f"Model pad_token_id {model_cfg.text_config.pad_token_id} is different from tokenizer "
-                    f"pad_token_id {pad_token_id}. Using tokenizer pad_token_id {pad_token_id}."
-                )
-                model_cfg.text_config.pad_token_id = pad_token_id
+        # Model's pad_token_id only affects the embedding module which acts specially for pad token.
+        # Model's pad_token_id may be different from tokenizer's pad_token_id.
+        # Note: Qwen3 Model's pad_token_id is None, which is different from Qwen tokenizer's pad_token_id.
+        # if isinstance(model_cfg, VisionComposeConfigProtocol):
+        #     if model_cfg.text_config.pad_token_id != pad_token_id:
+        #         logger.warning(
+        #             f"Model pad_token_id {model_cfg.text_config.pad_token_id} is different from tokenizer "
+        #             f"pad_token_id {pad_token_id}. Using tokenizer pad_token_id {pad_token_id}."
+        #         )
+        #         model_cfg.text_config.pad_token_id = pad_token_id
 
-        elif model_cfg.pad_token_id != pad_token_id:
-            logger.warning(
-                f"Model pad_token_id {model_cfg.pad_token_id} is different from tokenizer pad_token_id "
-                f"{pad_token_id}. Using tokenizer pad_token_id {pad_token_id}."
-            )
-            model_cfg.pad_token_id = pad_token_id
+        # elif model_cfg.pad_token_id != pad_token_id:
+        #     logger.warning(
+        #         f"Model pad_token_id {model_cfg.pad_token_id} is different from tokenizer pad_token_id "
+        #         f"{pad_token_id}. Using tokenizer pad_token_id {pad_token_id}."
+        #     )
+        #     model_cfg.pad_token_id = pad_token_id
 
         if dataloader_cfg.pad_token_id is None:
             dataloader_cfg.pad_token_id = pad_token_id
@@ -1245,6 +1283,9 @@ class Trainer:
             "XTUNER_USE_FA3": os.getenv("XTUNER_USE_FA3"),
             "XTUNER_DISPATCHER_DEBUG": os.getenv("XTUNER_DISPATCHER_DEBUG"),
             "XTUNER_ROUTER_DEBUG": os.getenv("XTUNER_ROUTER_DEBUG"),
+            "XTUNER_USE_CUTLASS_GROUP_GEMM": os.getenv("XTUNER_USE_CUTLASS_GROUP_GEMM"),
+            "GROUPED_GEMM_USE_CUTLASS": os.getenv("GROUPED_GEMM_USE_CUTLASS"),
+            "XTUNER_USE_NATIVE_RMSNORM": os.getenv("XTUNER_USE_NATIVE_RMSNORM"),
         }
 
         for k, v in env.items():

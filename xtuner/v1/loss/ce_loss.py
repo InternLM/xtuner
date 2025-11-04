@@ -11,6 +11,7 @@ from typing_extensions import Self
 
 from xtuner.v1.loss import BaseLossConfig, BaseLossContext, BaseLossKwargs
 
+# from xtuner.v1.profiler.prober import ProberList
 from .utils import sp_gather, sp_split
 
 
@@ -49,6 +50,7 @@ class CELossKwargs(BaseLossKwargs):
 
     shifted_labels: torch.Tensor
     loss_weight: torch.Tensor
+    global_denominator: int
 
 
 class CELossContextInputItem(BaseModel):
@@ -158,6 +160,7 @@ class CELossContext(BaseLossContext[CELossContextInputItem]):
             loss_kwargs = CELossKwargs(
                 shifted_labels=shifted_labels,
                 loss_weight=loss_weight,
+                global_denominator=int(global_denominator),
             )
             batches_loss_kwargs.append(loss_kwargs)
         return batches_loss_kwargs
@@ -188,6 +191,13 @@ class CELossContext(BaseLossContext[CELossContextInputItem]):
             # Step 2.b in the loss calculation: sum the loss over all tokens
             loss = (loss * loss_weight).sum()
 
+            # Below is the old implementation of loss calibration for accuracy regression
+            # loss = F.cross_entropy(logits, shifted_labels, reduction="sum", ignore_index=self.loss_cfg.ignore_idx)
+            # ProberList.record_tensor(loss, "[lm_head.ce_loss][before calibration]loss")
+            # register_grad_hook(loss, "loss")
+            # print(f"loss_kwargs.global_denominator: {loss_kwargs.global_denominator}")
+            # loss = loss / loss_kwargs.global_denominator
+
         return loss, (logits, {})
 
     def chunk_mode(
@@ -202,7 +212,7 @@ class CELossContext(BaseLossContext[CELossContextInputItem]):
         else:
             assert self.liger_loss_fct is not None, "liger_loss_fct must be initialized in liger mode"
             shifted_labels = loss_kwargs.shifted_labels  # (bs, seq_len)
-            loss_weight = loss_kwargs.loss_weight  # (bs, seq_len)
+            # loss_weight = loss_kwargs.loss_weight  # (bs, seq_len)
 
             bs, seq, dim = hidden_states.shape
             hidden_states = hidden_states.reshape(bs * seq, dim)
@@ -210,7 +220,9 @@ class CELossContext(BaseLossContext[CELossContextInputItem]):
             # liger kernel dont support reduction=="none"
             # step 2.b in the loss calculation: sum the loss over all tokens, then multiply the loss weight (i.e. divide by the global_denominator)
             loss = self.liger_loss_fct(head_weight, hidden_states, shifted_labels)
-            mask = loss_weight != 0
-            w = loss_weight.sum() / mask.sum()  # equal to the global_denominator
-            loss = loss * w
+            # ProberList.record_tensor(loss, "[lm_head.ce_loss][before calibration]loss")
+            # mask = loss_weight != 0
+            # w = loss_weight.sum() / mask.sum()  # w equals to 1/global_denominator
+            # loss = loss * w
+            loss = loss / loss_kwargs.global_denominator
             return loss, (None, {})

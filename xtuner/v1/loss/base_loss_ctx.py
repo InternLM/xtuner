@@ -50,9 +50,12 @@ class BaseLossKwargs(BaseModel):
 
     def chunk(self, chunk_size) -> list["BaseLossKwargs"]:
         tensor_fields: dict[str, tuple[torch.Tensor, ...]] = {}
+        nontensor_fields: dict[str, Any] = {}
         for field_name, field_value in self.__dict__.items():
             if isinstance(field_value, torch.Tensor):
                 tensor_fields[field_name] = torch.split(field_value, chunk_size, dim=1)
+            else:
+                nontensor_fields[field_name] = field_value
 
         assert len(tensor_fields) > 0, "At least one field should be a tensor to chunk."
 
@@ -62,6 +65,8 @@ class BaseLossKwargs(BaseModel):
             chunk_dict = {}
             for field_name, splits in tensor_fields.items():
                 chunk_dict[field_name] = splits[i]
+            for field_name, field_value in nontensor_fields.items():
+                chunk_dict[field_name] = field_value
             chunks.append(type(self)(**chunk_dict))
         return chunks
 
