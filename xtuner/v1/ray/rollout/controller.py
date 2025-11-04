@@ -76,7 +76,7 @@ class SessionRouter:
             return worker
 
 
-@ray.remote(max_concurrency=int(os.environ.get("RAY_MAX_CONCURRENCY", 512)))
+@ray.remote(max_concurrency=int(os.environ.get("RAY_MAX_CONCURRENCY", 1000)))
 class RolloutController:
     """Controller for managing and coordinating multiple RolloutWorker
     actors."""
@@ -414,11 +414,3 @@ class RolloutController:
             block (bool): Whether to block until the operation completes.
         """
         return self._broadcast_to_active_workers("shutdown", block)
-
-    def abort_request(self, block=True):
-        """Aborts ongoing requests on all active rollout workers.
-
-        Args:
-            block (bool): Whether to block until the operation completes.
-        """
-        return self._broadcast_to_active_workers("abort_request", block)

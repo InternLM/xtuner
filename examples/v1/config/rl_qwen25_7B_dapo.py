@@ -1,5 +1,6 @@
 import os
 from copy import deepcopy
+from pathlib import Path
 
 from transformers import AutoTokenizer
 from xtuner.v1.config import (
@@ -27,6 +28,8 @@ model_path = os.environ["MODEL_PATH"]
 data_path = os.environ["DATA_PATH"]
 eval_data_path = os.environ["EVAL_DATA_PATH"]
 enable_evaluate = True if eval_data_path != "" else False
+enbale_partial_rollout = int(os.environ.get("ENBALE_PARTIAL_ROLLOUT", "0"))
+max_concurrent = int(os.environ.get("XTUNER_MAX_CONCURRENCY", "512"))
 
 # basic settings
 experimental_name = "dapo_math"
@@ -36,7 +39,7 @@ prompt_repeat_k = 16
 rollout_tp_size = 2
 rollout_ep_size = 1
 max_prompt_length = 2048
-max_response_length = 8192
+max_response_length = 32768
 pack_max_length = 32768
 train_optimizer_steps = 16
 hf_interval = 50
@@ -60,6 +63,9 @@ rollout_config = RolloutConfig(
     tensor_parallel_size=rollout_tp_size,
     expert_parallel_size=rollout_ep_size,
     gpu_memory_utilization=0.8,
+    context_length = max_response_length + 2048,
+    rollout_max_batch_size=max_concurrent,
+    prompt_repeat_k=prompt_repeat_k,
 )
 
 # sampling params
@@ -104,6 +110,8 @@ dataflow_config = DataFlowConfig(
     prompt_repeat_k=prompt_repeat_k,
     global_batch_size=global_batch_size,
     sample_params=training_sample_params,
+    enable_partial_rollout=enbale_partial_rollout,
+    max_concurrent=max_concurrent
 )
 
 

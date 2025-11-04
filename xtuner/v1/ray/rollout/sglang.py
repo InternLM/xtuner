@@ -11,7 +11,7 @@ from xtuner.v1.ray.config import RolloutConfig
 from .worker import RolloutWorker
 
 
-@ray.remote(max_concurrency=int(os.environ.get("RAY_MAX_CONCURRENCY", 512)))
+@ray.remote(max_concurrency=int(os.environ.get("RAY_MAX_CONCURRENCY", 1000)))
 class SGLangWorker(RolloutWorker):
     def __init__(
         self,
