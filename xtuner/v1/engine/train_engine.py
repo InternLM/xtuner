@@ -430,6 +430,10 @@ class TrainEngine:
                     state_dict=shard_optimizer_state_dict,
                     checkpoint_id=optimizer_dir,
                 )
+                lr = self.optim_cfg.lr
+                for param_group in shard_optimizer_state_dict["param_groups"]:
+                    param_group["initial_lr"] = lr  # type: ignore
+                    param_group["lr"] = lr  # type: ignore
                 set_optimizer_state_dict(
                     self.model,
                     self.optimizer,

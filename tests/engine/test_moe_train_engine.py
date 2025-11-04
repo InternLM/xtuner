@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 import tempfile
 import shutil
 import time
@@ -276,6 +277,58 @@ class TestMoEEngine(DeterministicDDPTestCase):
 
         if dist.get_rank() == 0:
             shutil.rmtree(temp_dir)
+
+        torch.cuda.empty_cache()
+        try:
+            dist.destroy_process_group(pg)
+        except:
+            pass
+    
+    @parametrize.parametrize(
+        "device",
+        [
+            ("cuda",),
+        ],
+    )
+    def test_load_optimizer_with_new_lr(self, device):
+        pg = self.create_pg(device)
+
+        temp_dir = tempfile.mkdtemp()
+        if dist.get_rank() == 0:
+            temp_dir = [temp_dir]
+        else:
+            temp_dir = [None]
+        dist.broadcast_object_list(temp_dir, src=0)
+        temp_dir = Path(temp_dir[0])
+        model_dir = temp_dir / "model"
+        optimizer_dir = temp_dir / "optimizer"
+        moe_cfg = Qwen3MoE30BA3Config(
+            num_hidden_layers=2,
+        )
+        lr1 = 1e-4
+        optim_cfg: AdamWConfig = AdamWConfig(lr=lr1)
+        fsdp_cfg: FSDPConfig = FSDPConfig()
+        engine = TrainEngine(
+            model_cfg=moe_cfg,
+            optim_cfg=optim_cfg,
+            fsdp_cfg=fsdp_cfg,
+        )
+        engine.init_model_weights()
+        engine.save_dcp(model_dir=model_dir, optimizer_dir=optimizer_dir)
+        dist.barrier()
+        time.sleep(1)
+
+        lr2 = 1e-3
+        optim_cfg2: AdamWConfig = AdamWConfig(lr=lr2)
+        engine2 = TrainEngine(
+            model_cfg=moe_cfg,
+            optim_cfg=optim_cfg2,
+            fsdp_cfg=fsdp_cfg,
+        )
+        engine2.load_dcp(model_dir=model_dir, optimizer_dir=optimizer_dir)
+        for param_group in engine2.optimizer.param_groups:
+            # print(f"param_group['lr']: {param_group['lr']}")
+            assert param_group['lr'] == lr2
 
         torch.cuda.empty_cache()
         try:
