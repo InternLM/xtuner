@@ -91,15 +91,9 @@ class NoAuxRouter(nn.Module, RouterProtocol):
             bsz = 1
             seq_len, _ = logits.shape
             group_scores = (
-                scores_for_choice.view(bsz * seq_len, self.n_group, -1)
-                .topk(2, dim=-1)[0]
-                .sum(dim=-1)
+                scores_for_choice.view(bsz * seq_len, self.n_group, -1).topk(2, dim=-1)[0].sum(dim=-1)
             )  # [n, n_group]
-            group_idx = torch.topk(
-                group_scores, k=self.topk_group, dim=-1, sorted=False
-            )[
-                1
-            ]  # [n, top_k_group]
+            group_idx = torch.topk(group_scores, k=self.topk_group, dim=-1, sorted=False)[1]  # [n, top_k_group]
             group_mask = torch.zeros_like(group_scores)  # [n, n_group]
             group_mask.scatter_(1, group_idx, 1)  # [n, n_group]
             score_mask = (
@@ -111,9 +105,7 @@ class NoAuxRouter(nn.Module, RouterProtocol):
                 )
                 .reshape(bsz * seq_len, -1)
             )  # [n, e]
-            scores_for_choice = scores_for_choice.masked_fill(
-                ~score_mask.bool(), 0.0
-            )  # [n, e]
+            scores_for_choice = scores_for_choice.masked_fill(~score_mask.bool(), 0.0)  # [n, e]
 
         # select top-k experts
         # (only applicable when ep_size >= 64. when ep_size=32 (4 nodes), there is no need to employ this strategy)
@@ -176,6 +168,7 @@ class NoAuxGroupedRouter(NoAuxRouter):
         scores_for_choice = scores_for_choice.view(seq, self.n_routed_experts)
         topk_idx = topk_idx.view(seq, -1)  # [seq, top_k]
         topk_weight = scores_for_choice.gather(1, topk_idx)  # [seq, n_groups]
+        scores_for_choice = scores_for_choice.view(seq, self.n_routed_experts)
 
         if self.top_k > 1 and self.norm_topk_prob:
             denominator = topk_weight.sum(dim=-1, keepdim=True) + 1e-20
@@ -191,6 +184,7 @@ class NoAuxGroupedRouter(NoAuxRouter):
 
         return {
             "logits": logits,
+            "router_weights": scores_for_choice,
             "topk_weights": topk_weight,
             "topk_ids": topk_idx,
             "topkens_per_expert": tokens_per_expert,
