@@ -236,6 +236,11 @@ class LMDeployWorker(RolloutWorker):
         tp_size = self.config.tensor_parallel_size
         dp_size = ep_size = self.config.expert_parallel_size
         distributed_executor_backend = lmdeploy_config_kwargs.get("distributed_executor_backend", "ray")
+
+        extra_engine_config = {}
+        if backend == "pytorch" and self.config.enable_return_routed_experts:
+            extra_engine_config["enable_return_routed_experts"] = True
+
         backend_config = (
             PytorchEngineConfig(
                 tp=tp_size,
@@ -248,7 +253,7 @@ class LMDeployWorker(RolloutWorker):
                 device_type=accelerator_to_device_type[self.accelerator],
                 logprobs_mode="raw_logprobs",
                 session_len=self.config.context_length,
-                enable_return_routed_experts=self.enable_return_routed_experts,
+                **extra_engine_config,
             )
             if backend == "pytorch"
             else TurbomindEngineConfig(
