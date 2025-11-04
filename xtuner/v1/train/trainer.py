@@ -420,10 +420,6 @@ class Trainer:
             self._hf_interval = None
             self._checkpoint_interval = None
 
-        if debug_skip_save:
-            self._hf_interval = None
-            self._checkpoint_interval = None
-
         if self._resume_cfg.resume_from is not None:
             self._resume()
 
