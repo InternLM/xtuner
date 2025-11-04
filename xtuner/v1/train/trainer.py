@@ -786,6 +786,7 @@ class Trainer:
         current_exp.cur_epoch = self._cur_epoch
         current_exp.consumed_samples = self._consumed_samples
         current_exp.consumed_tokens = int(self._consumed_tokens)
+        current_exp.history[-1]["end"] = self.cur_step
 
         if self.rank == 0:
             with train_state_path.open("w") as f:
@@ -924,7 +925,7 @@ class Trainer:
             git_dir = exp_dir / f"git-info-begin-{begin}"
 
             staged_path, unstaged_path = git_dir / "staged.diff", git_dir / "unstaged.diff"
-            if not git_dir and self.rank == 0:
+            if not git_dir.exists() and self.rank == 0:
                 git_dir.mkdir(parents=True, exist_ok=True)
                 commit = record_git_info(staged_path, unstaged_path)
                 _commit_tmp = [commit]
