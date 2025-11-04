@@ -436,7 +436,7 @@ class RolloutWorker(SingleAcceleratorWorker):
             # generate API response
             last_token_ids = []
             last_logprobs = []
-            extra_info = None
+            extra_info = {}
             if "output_token_logprobs" in response["meta_info"]:
                 last_token_ids = [item[1] for item in response["meta_info"]["output_token_logprobs"]]
                 last_logprobs = [item[0] for item in response["meta_info"]["output_token_logprobs"]]
@@ -463,7 +463,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                 num_return_tokens=len(last_token_ids) if len(last_token_ids) > 0 else None,
                 finish_reason=finish_reason,
                 logprobs=last_logprobs if len(last_logprobs) > 0 else None,
-                extra_info=extra_info if extra_info else None
+                extra_info=extra_info
             )
             return rollout_response
         else:

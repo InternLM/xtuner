@@ -32,6 +32,7 @@ class SGLangWorker(RolloutWorker):
         self.tokenizer = AutoTokenizer.from_pretrained(self.config.model_path, trust_remote_code=True)
         self.api_keys = self.config.api_key
         self.model_name = self.config.model_name
+        self.enable_return_routed_experts = self.config.enable_return_routed_experts
 
     async def _create_request(
         self,
@@ -53,6 +54,9 @@ class SGLangWorker(RolloutWorker):
         payload = {"model": self.model_name}
         sglang_sample_params = self._transform_sample_params(sample_params)
         sglang_extra_params = self._transform_extra_params(extra_params)
+        if self.enable_return_routed_experts:
+            sglang_extra_params["return_routed_experts"] = True
+
         payload.update(sglang_extra_params)
         if stream:
             raise NotImplementedError("Streaming mode is not supported for SGLangWorker.")
@@ -172,6 +176,10 @@ class SGLangWorker(RolloutWorker):
         # note: 非共卡模式下无需设置,共卡模式下需要offload必须设置，否则显存释放不了
         sglang_server_args.enable_memory_saver = True
         sglang_server_args.max_running_requests = int(os.environ.get("XTUNER_MAX_CONCURRENCY", 2000))
+
+        if self.enable_return_routed_experts:
+            sglang_server_args.enable_return_routed_experts = True
+
         if grammar_backend is not None:
             sglang_server_args.grammar_backend = grammar_backend
 
