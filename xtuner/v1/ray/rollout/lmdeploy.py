@@ -248,7 +248,7 @@ class LMDeployWorker(RolloutWorker):
                 device_type=accelerator_to_device_type[self.accelerator],
                 logprobs_mode="raw_logprobs",
                 session_len=self.config.context_length,
-                enable_return_routed_experts=self.enable_return_routed_experts
+                enable_return_routed_experts=self.enable_return_routed_experts,
             )
             if backend == "pytorch"
             else TurbomindEngineConfig(

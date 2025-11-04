@@ -7,11 +7,11 @@ import traceback
 import uuid
 from abc import abstractmethod
 from typing import Any, Callable, Dict, List, Optional, Union
-import torch
 
 import httpx
 import ray
 import requests  # type: ignore[import-untyped]
+import torch
 from packaging.version import Version
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
@@ -463,7 +463,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                 num_return_tokens=len(last_token_ids) if len(last_token_ids) > 0 else None,
                 finish_reason=finish_reason,
                 logprobs=last_logprobs if len(last_logprobs) > 0 else None,
-                extra_info=extra_info
+                extra_info=extra_info,
             )
             return rollout_response
         else:

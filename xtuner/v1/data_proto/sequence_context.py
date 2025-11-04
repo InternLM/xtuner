@@ -137,7 +137,7 @@ class SequenceContext:
                 image_grid_thw=self.image_grid_thw,
                 inputs_embeds=self.inputs_embeds,
                 num_img_tokens=self.num_img_tokens,
-                rollout_routed_experts=self.rollout_routed_experts
+                rollout_routed_experts=self.rollout_routed_experts,
             )
             return sp_seq_ctx
         else:
@@ -211,7 +211,7 @@ class SequenceContext:
             image_grid_thw=torch.cat(image_grid_thw, dim=0) if image_grid_thw else None,  # type: ignore
             position_ids=torch.cat(position_ids, dim=-1) if position_ids else None,  # type: ignore
             image_flags=torch.cat(image_flags, dim=0) if image_flags else None,  # type: ignore
-            rollout_routed_experts=rollout_routed_experts if len(rollout_routed_experts) > 0 else None  # type: ignore
+            rollout_routed_experts=rollout_routed_experts if len(rollout_routed_experts) > 0 else None,  # type: ignore
         )
 
     @property

@@ -101,7 +101,9 @@ class MoEGate(nn.Module):
         if self.gate_bias:
             self.bias = nn.Parameter(torch.zeros(self.n_routed_experts))
 
-    def forward(self, hidden_states: torch.Tensor, rollout_routed_experts: torch.Tensor | None= None) -> RouterResults:
+    def forward(
+        self, hidden_states: torch.Tensor, rollout_routed_experts: torch.Tensor | None = None
+    ) -> RouterResults:
         _, _, h = hidden_states.shape
         ### compute gating score
         hidden_states = hidden_states.view(-1, h)

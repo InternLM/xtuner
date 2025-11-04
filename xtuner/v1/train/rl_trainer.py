@@ -519,11 +519,15 @@ class RLTrainer:
                     rollout_logprobs = None
 
                 seq_ctx = get_train_seq_ctx(input_ids, multimodal_train_info, len(response_ids))
-                data_dict = {'seq_ctx': seq_ctx, 'shifted_labels': shifted_labels, 'advantage': advantages[i].item(),
-                             'rollout_logprobs': rollout_logprobs}
+                data_dict = {
+                    "seq_ctx": seq_ctx,
+                    "shifted_labels": shifted_labels,
+                    "advantage": advantages[i].item(),
+                    "rollout_logprobs": rollout_logprobs,
+                }
 
-                if 'routed_experts' in group[i].env.rollout.extra_info:
-                    routed_experts = group[i].env.rollout.extra_info['routed_experts']  # n,layer*expert
+                if "routed_experts" in group[i].env.rollout.extra_info:
+                    routed_experts = group[i].env.rollout.extra_info["routed_experts"]  # n,layer*expert
                     seq_ctx.rollout_routed_experts = routed_experts  # n,layer,expert
 
                 data_batches.append(data_dict)
