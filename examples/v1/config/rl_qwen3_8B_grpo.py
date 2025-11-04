@@ -1,6 +1,5 @@
 import os
 from copy import deepcopy
-from pathlib import Path
 
 from transformers import AutoTokenizer
 from xtuner.v1.config import (

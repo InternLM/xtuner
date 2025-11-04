@@ -61,7 +61,7 @@ if [ "$RAY_RANK" -eq 0 ]; then
     --disable-usage-stats \
     --num-cpus=$total_cpus
 else
-    sleep 10
+  sleep 10
   ray start --address="$RAY_MASTER_ADDR:$RAY_HEAD_PORT" --block --disable-usage-stats
 fi
 
