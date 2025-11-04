@@ -176,13 +176,13 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
 
         self.add_eos_token = add_eos_token
         self.add_bos_token = add_bos_token
-        self.bos_token = None
+        self.bos_token_id = None
         if self.add_bos_token and tokenizer.bos_token is None:
             logger.warning("tokenizer has no bos_token, set add_bos_token=False")
             self.add_bos_token = False
         if self.add_bos_token:
-            self.bos_token = tokenizer.convert_tokens_to_ids(tokenizer.bos_token)
-        self.eos_token = tokenizer.convert_tokens_to_ids(tokenizer.eos_token)
+            self.bos_token_id = tokenizer.convert_tokens_to_ids(tokenizer.bos_token)
+        self.eos_token_id = tokenizer.convert_tokens_to_ids(tokenizer.eos_token)
 
         # 必须要最后调用
         super().__init__(tokenizer, self.chat_template, max_length, tokenizer_hash, hash)
@@ -256,9 +256,9 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
                 is_pretrain = True
             if is_pretrain:
                 if self.add_bos_token:
-                    input_ids = [self.bos_token] + input_ids
+                    input_ids = [self.bos_token_id] + input_ids
                 if self.add_eos_token:
-                    input_ids = input_ids + [self.eos_token]
+                    input_ids = input_ids + [self.eos_token_id]
 
             input_ids, _ = self._truncated_input_and_labels(input_ids)
             assert (torch.tensor(input_ids) == self.img_context_token_id).sum() == sum(num_image_tokens), (
@@ -326,11 +326,11 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
             is_pretrain = True
         if is_pretrain:
             if self.add_bos_token:
-                input_ids = [self.bos_token] + input_ids
-                labels = [self.bos_token] + labels
+                input_ids = [self.bos_token_id] + input_ids
+                labels = [self.bos_token_id] + labels
             if self.add_eos_token:
-                input_ids = input_ids + [self.eos_token]
-                labels = labels + [self.eos_token]
+                input_ids = input_ids + [self.eos_token_id]
+                labels = labels + [self.eos_token_id]
             np_labels = np.array(labels)
             np_labels[np_labels == self.img_start_token_id] = -100
             np_labels[np_labels == self.img_context_token_id] = -100
@@ -378,9 +378,9 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
                 is_pretrain = True
             if is_pretrain:
                 if self.add_bos_token:
-                    input_ids = [self.bos_token] + input_ids
+                    input_ids = [self.bos_token_id] + input_ids
                 if self.add_eos_token:
-                    input_ids = input_ids + [self.eos_token]
+                    input_ids = input_ids + [self.eos_token_id]
 
             input_ids, _ = self._truncated_input_and_labels(input_ids)
             assert (torch.tensor(input_ids) == self.video_context_token_id).sum() == sum(num_image_tokens), (
@@ -438,11 +438,11 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
             is_pretrain = True
         if is_pretrain:
             if self.add_bos_token:
-                input_ids = [self.bos_token] + input_ids
-                labels = [self.bos_token] + labels
+                input_ids = [self.bos_token_id] + input_ids
+                labels = [self.bos_token_id] + labels
             if self.add_eos_token:
-                input_ids = input_ids + [self.eos_token]
-                labels = labels + [self.eos_token]
+                input_ids = input_ids + [self.eos_token_id]
+                labels = labels + [self.eos_token_id]
             np_labels = np.array(labels)
             np_labels[np_labels == self.img_start_token_id] = -100
             np_labels[np_labels == self.video_context_token_id] = -100

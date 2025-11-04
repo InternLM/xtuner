@@ -195,7 +195,7 @@ def build_dataloader(
     else:
         raise NotImplementedError(f"Unsupported pack level: {dataloader_config.pack_level}")
 
-    if dataloader_config.pack_level in ("soft", "__legacy") and get_rank() == 0:
+    if dataloader_config.pack_level in ("mllm_hybrid", "soft", "__legacy") and get_rank() == 0:
         ori_samples = sum([len(dset) for dset in datasets])
         packed_samples = len(dataset)
         logger.info(f"[Dataset] (Original) {ori_samples} samples.")
@@ -384,7 +384,7 @@ class DataloaderConfig(BaseDataloaderConfig):
             else:
                 raise NotImplementedError(f"Unsupported pack level: {self.pack_level}")
 
-        if self.pack_level in ("soft", "__legacy") and get_rank() == 0:
+        if self.pack_level in ("mllm_hybrid", "soft", "__legacy") and get_rank() == 0:
             ori_samples = sum([len(dset) for dset in datasets])
             packed_samples = len(dataset)
             logger.info(f"[Dataset] (Original) {ori_samples} samples.")

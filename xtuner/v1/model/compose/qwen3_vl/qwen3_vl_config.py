@@ -10,7 +10,7 @@ from xtuner.v1.model.base import TransformerConfig
 from xtuner.v1.model.dense.qwen3vl_text import Qwen3VLTextDense4BConfig, Qwen3VLTextDense8BConfig
 from xtuner.v1.model.moe.qwen3vl_text import Qwen3VLTextMoE30BA3Config, Qwen3VLTextMoE235BA22Config
 from xtuner.v1.module.rope import RopeScalingConfig
-from xtuner.v1.utils import get_logger, get_device
+from xtuner.v1.utils import get_device, get_logger
 
 
 logger = get_logger()

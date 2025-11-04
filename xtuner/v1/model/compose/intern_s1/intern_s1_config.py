@@ -9,7 +9,7 @@ from xtuner.v1.float8 import Float8Config
 from xtuner.v1.model.dense.qwen3 import Qwen3Dense8BConfig
 from xtuner.v1.model.moe.moe import MoEConfig, TransformerConfig
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE235BA22Config
-from xtuner.v1.utils import get_logger, get_device
+from xtuner.v1.utils import get_device, get_logger
 
 
 if TYPE_CHECKING:
