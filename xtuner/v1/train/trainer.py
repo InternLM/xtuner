@@ -119,7 +119,8 @@ class ResumeConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     resume_from: str | Path | None = None
     auto_resume: bool = False
-    load_optimizer: bool = True
+    load_optimizer_states: bool = True
+    load_optimizer_arg_defaults: bool = True
     load_dataset: bool = True
     load_scheduler: bool = True
 
@@ -792,7 +793,11 @@ class Trainer:
 
         meta_path = self.work_dir / self._META_PATH
 
-        optimizer_path = checkpoint_path / self._SAVE_OPTIMIZER_DIR if self._resume_cfg.load_optimizer else None
+        optimizer_path = (
+            checkpoint_path / self._SAVE_OPTIMIZER_DIR
+            if self._resume_cfg.load_optimizer_states or self._resume_cfg.load_optimizer_arg_defaults
+            else None
+        )
         model_path = checkpoint_path / self._SAVE_MODEL_DIR
         dataloader_path = checkpoint_path / self._SAVE_DATALOADER_DIR
         scheduler_path = checkpoint_path / self._SAVE_SCHEDULER_DIR
@@ -1231,20 +1236,28 @@ class Trainer:
         resume_cfg = self._resume_cfg
 
         if (resume_from := resume_cfg.resume_from) is None:
+            logger.info("No checkpoint to resume from.")
             return
 
         if isinstance(resume_from, str):
             resume_from = Path(resume_from)
+        logger.info(f"Resume from checkpoint: {resume_from}")
 
         if not resume_from.exists():
             raise FileNotFoundError(f"Checkpoint path {resume_from} does not exist.")
 
         model_path = resume_from / self._SAVE_MODEL_DIR
-        optimizer_path = resume_from / self._SAVE_OPTIMIZER_DIR if self._resume_cfg.load_optimizer else None
+        optimizer_path = (
+            resume_from / self._SAVE_OPTIMIZER_DIR
+            if self._resume_cfg.load_optimizer_states or self._resume_cfg.load_optimizer_arg_defaults
+            else None
+        )
 
         self._engine.load_dcp(
             model_dir=model_path,
             optimizer_dir=optimizer_path,
+            load_states=self._resume_cfg.load_optimizer_states,
+            load_arg_defaults=self._resume_cfg.load_optimizer_arg_defaults,
         )
 
         if resume_cfg.load_dataset:

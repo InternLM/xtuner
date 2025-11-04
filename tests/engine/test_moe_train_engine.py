@@ -306,7 +306,8 @@ class TestMoEEngine(DeterministicDDPTestCase):
             num_hidden_layers=2,
         )
         lr1 = 1e-4
-        optim_cfg: AdamWConfig = AdamWConfig(lr=lr1)
+        eps1 = 1e-7
+        optim_cfg: AdamWConfig = AdamWConfig(lr=lr1, eps=eps1)
         fsdp_cfg: FSDPConfig = FSDPConfig()
         engine = TrainEngine(
             model_cfg=moe_cfg,
@@ -319,16 +320,35 @@ class TestMoEEngine(DeterministicDDPTestCase):
         time.sleep(1)
 
         lr2 = 1e-3
-        optim_cfg2: AdamWConfig = AdamWConfig(lr=lr2)
+        eps2 = 1e-5
+        optim_cfg2: AdamWConfig = AdamWConfig(lr=lr2, eps=eps2)
         engine2 = TrainEngine(
             model_cfg=moe_cfg,
             optim_cfg=optim_cfg2,
             fsdp_cfg=fsdp_cfg,
         )
-        engine2.load_dcp(model_dir=model_dir, optimizer_dir=optimizer_dir)
+        engine2.load_dcp(model_dir=model_dir, optimizer_dir=optimizer_dir, load_arg_defaults=False)
+        # print(f"len(engine.optimizer.state), len(engine2.optimizer.state): {len(engine.optimizer.state)}, {len(engine2.optimizer.state)}")
+        assert len(engine.optimizer.state) == len(engine2.optimizer.state)
+        assert len(engine.optimizer.state) != 0
         for param_group in engine2.optimizer.param_groups:
             # print(f"param_group['lr']: {param_group['lr']}")
             assert param_group['lr'] == lr2
+            assert param_group['eps'] == eps2
+        
+        lr3 = 1e-1
+        eps3 = 1e-3
+        optim_cfg3 = AdamWConfig(lr=lr3, eps=eps3)
+        engine3 = TrainEngine(
+            model_cfg=moe_cfg,
+            optim_cfg=optim_cfg3,
+            fsdp_cfg=fsdp_cfg,
+        )
+        engine3.load_dcp(model_dir=model_dir, optimizer_dir=optimizer_dir, load_states=False)
+        assert len(engine3.optimizer.state) == 0
+        for param_group in engine3.optimizer.param_groups:
+            assert param_group['lr'] == lr1
+            assert param_group['eps'] == eps1
 
         torch.cuda.empty_cache()
         try:
