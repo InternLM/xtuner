@@ -28,7 +28,7 @@ data_path = os.environ["DATA_PATH"]
 eval_data_path = os.environ["EVAL_DATA_PATH"]
 enable_evaluate = True if eval_data_path != "" else False
 enbale_partial_rollout = int(os.environ.get("ENBALE_PARTIAL_ROLLOUT", "0"))
-max_concurrent = int(os.environ.get("XTUNER_MAX_CONCURRENCY", "512"))
+max_concurrent = int(os.environ.get("XTUNER_MAX_CONCURRENCY", 512))
 
 # basic settings
 experimental_name = "dapo_math"
@@ -62,7 +62,7 @@ rollout_config = RolloutConfig(
     tensor_parallel_size=rollout_tp_size,
     expert_parallel_size=rollout_ep_size,
     gpu_memory_utilization=0.8,
-    context_length = max_response_length + 2048,
+    context_length = max_response_length + max_prompt_length,
     rollout_max_batch_size=max_concurrent,
     prompt_repeat_k=prompt_repeat_k,
 )
