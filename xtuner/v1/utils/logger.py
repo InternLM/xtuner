@@ -48,9 +48,9 @@ def get_logger(level="INFO", log_dir=None, tag=None):
         add_main_log_dir = True
         add_infer_log_dir = True
         for handler in _LOGGER._core.handlers.values():
-            if handler._name == str(log_dir / f"rank_{get_rank()}.log"):
+            if handler._name == repr(str(log_dir / f"rank_{get_rank()}.log")):
                 add_main_log_dir = False
-            if handler._name == str(log_dir / "infer_engine_error.log"):
+            if handler._name == repr(str(log_dir / "infer_engine_error.log")):
                 add_infer_log_dir = False
 
         # 保证只打印一次
