@@ -28,7 +28,7 @@ data_path = os.environ["DATA_PATH"]
 eval_data_path = os.environ["EVAL_DATA_PATH"]
 enable_evaluate = True if eval_data_path != "" else False
 enbale_partial_rollout = int(os.environ.get("ENBALE_PARTIAL_ROLLOUT", "0"))
-max_concurrent = int(os.environ.get("XTUNER_MAX_CONCURRENCY", "512"))
+max_concurrent = int(os.environ.get("XTUNER_MAX_CONCURRENCY", 512))
 
 # basic settings
 experimental_name = "grpo_gsm8k"
