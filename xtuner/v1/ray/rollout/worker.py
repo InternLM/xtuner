@@ -68,6 +68,7 @@ class RolloutWorker(SingleAcceleratorWorker):
         self.engine_bundle_idxs: list[int] = []
         self.server_process: Optional[multiprocessing.Process] = None
         self.logger = get_logger(log_dir=config.worker_log_dir, tag="RolloutWorker")
+        self.infer_logger = get_logger(log_dir=config.worker_log_dir, tag="InferEngine")
         self.tokenizer = AutoTokenizer.from_pretrained(self.config.tokenizer_path, trust_remote_code=True)
         self.check_flag = True  # only print once
         if self.rank == 0:
@@ -298,7 +299,7 @@ class RolloutWorker(SingleAcceleratorWorker):
         format: str,
         extra_info: dict,
     ) -> RLRolloutResponseItem:
-        uid = str(uuid.uuid4())
+        uid = extra_info.get("action_id", str(uuid.uuid4()))
         response = None
         failed_rollout_response = RLRolloutResponseItem(
             response="",
@@ -365,12 +366,18 @@ class RolloutWorker(SingleAcceleratorWorker):
                 "error_message": str(e),
                 "traceback": traceback.format_exc().splitlines(),
             }
-            self.logger.error(f"An unexpected error occurred in rollout_task: {json.dumps(error_details, indent=2)}")
+            self.infer_logger.bind(tag="InferEngine").error(
+                f"An unexpected error occurred in rollout_task: {json.dumps(error_details, indent=2)}"
+            )
             if response is not None:
                 try:
-                    self.logger.error(f"Response content on error: {await response.aread()}")
+                    self.infer_logger.bind(tag="InferEngine").error(
+                        f"Response content on error: {await response.aread()}"
+                    )
                 except Exception as resp_e:
-                    self.logger.error(f"Failed to read response content on error: {resp_e}")
+                    self.infer_logger.bind(tag="InferEngine").error(
+                        f"Failed to read response content on error: {resp_e}"
+                    )
             return failed_rollout_response
         finally:
             if response:
