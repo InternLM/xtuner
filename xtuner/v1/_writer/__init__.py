@@ -26,6 +26,8 @@ class Writer(Protocol):
         global_step: int,
     ): ...
 
+    def close(self) -> None: ...
+
 
 def get_writer(
     *,

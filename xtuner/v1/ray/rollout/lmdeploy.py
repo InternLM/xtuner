@@ -111,8 +111,13 @@ class LMDeployWorker(RolloutWorker):
             "tool_choice": tool_choice if tool_choice else None,
         }
         if "return_token_ids" in extra_params and extra_params["return_token_ids"]:
+            if "image_data" in extra_info:
+                assert input_ids is not None, "input_ids is required when image_data is provided."
+
             if input_ids is not None:
                 payload["input_ids"] = input_ids
+                if "image_data" in extra_info:
+                    payload["image_data"] = extra_info["image_data"]
             else:
                 text_prompt = self.tokenizer.apply_chat_template(prompt, tokenize=False, add_generation_prompt=True)
                 prompt_token_ids = self.tokenizer(text_prompt, add_special_tokens=False)["input_ids"]
