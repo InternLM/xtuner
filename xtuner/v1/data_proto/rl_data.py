@@ -151,6 +151,11 @@ def check_dataflow_item(group_data_items):
     if not group_data_items or len(group_data_items) == 0:
         return False
 
+    # 如果存在abort的状态，相当于跳过检查，下次会重新rollout
+    is_abort = any(item.env.rollout.finish_reason == "abort" for item in group_data_items)
+    if is_abort:
+        return True
+
     no_failures = all(item.env.rollout.finish_reason != "failed" for item in group_data_items)
     if not no_failures:
         return False

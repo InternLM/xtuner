@@ -383,8 +383,9 @@ class InternS1VisionModel(BaseModel):
                 layer = checkpoint_wrapper(layer,
                                            preserve_rng_state=checkpoint_preserve_rng_state,
                                            checkpoint_impl=CheckpointImpl.REENTRANT)
-                # __class__ without self attribute
-                layer.__class__.forward = maybe_compile(layer.__class__.forward, fullgraph=True)
+                if self.config.drop_path_rate == 0.0:
+                    # __class__ without self attribute
+                    layer.__class__.forward = maybe_compile(layer.__class__.forward, fullgraph=True)
 
             self.encoder.layer[layer_idx] = layer
 

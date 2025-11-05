@@ -86,7 +86,6 @@ class RLTokenizeFn(CachableTokenizeFunction[RLDatasetItem]):
             else:
                 raise ValueError(f"Unsupported model_name: {self.model_name}")
             if image_data:
-                assert len(image_data) == 1, "only support single image input."
                 extra_info["image_data"] = image_data
 
             raw_prompt = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)

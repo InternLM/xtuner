@@ -30,7 +30,7 @@ data_path = os.environ["DATA_PATH"]
 experimental_name = "grpo_gsm8k_tiny"
 total_epochs = 1
 global_batch_size = 128
-prompt_repeat_k = 1
+prompt_repeat_k = 8
 rollout_tp_size = 1
 rollout_ep_size = 1
 max_prompt_length = 512
@@ -70,8 +70,8 @@ train_dataset_cfg = [{"dataset": train_dataset, "tokenize_fn": tokenizer_config}
 dataloader_config = DataloaderConfig(pack_max_length=pack_max_length, collator="fake_collator", pack_level="none")
 
 # 3. judger
-dapomath_judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k")
-judger_cfg = JudgerConfig(reward_judger_configs=[dapomath_judger_config])
+gsm8k_judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k")
+judger_cfg = JudgerConfig(reward_judger_configs=[gsm8k_judger_config])
 
 # 4. dataflow and evaluator
 dataflow_config = DataFlowConfig(

@@ -76,7 +76,7 @@ class SessionRouter:
             return worker
 
 
-@ray.remote(max_concurrency=int(os.environ.get("XTUNER_MAX_CONCURRENCY", 2000)))
+@ray.remote(max_concurrency=int(os.environ.get("RAY_MAX_CONCURRENCY", 1000)))
 class RolloutController:
     """Controller for managing and coordinating multiple RolloutWorker
     actors."""

@@ -59,7 +59,7 @@ logger = get_logger()
 
 
 class GitInfo(TypedDict):
-    commit: str
+    commit: str | None
     staged: str
     unstaged: str
 
@@ -529,6 +529,9 @@ class Trainer:
             if self.cur_step % 50 == 0:
                 gc.collect()
 
+        # TODO: Should use flush rather than close
+        self._exp_tracker.close()
+
     @property
     def world_size(self) -> int:
         """Get the total number of processes in the distributed training group.
@@ -798,13 +801,17 @@ class Trainer:
                     )
                 )
 
+        if self._checkpoint_maxkeep > 0 and len(current_exp.checkpoint_list) > self._checkpoint_maxkeep:
+            deleted_checkpoints = current_exp.checkpoint_list[: -self._checkpoint_maxkeep]
+            current_exp.checkpoint_list = current_exp.checkpoint_list[-self._checkpoint_maxkeep :]
+            for ckp_dir in deleted_checkpoints:
+                if self.rank == 0 and Path(ckp_dir).exists():
+                    rmtree(ckp_dir)
+
+        # Must save meta after deleting checkpoints to ensure the checkpoint_list is updated in the meta file
+        if self.rank == 0:
             with meta_path.open("w") as f:
                 f.write(self.meta.model_dump_json(indent=2))
-
-        if self._checkpoint_maxkeep > 0 and len(current_exp.checkpoint_list) > self._checkpoint_maxkeep:
-            ckpt_to_remove = current_exp.checkpoint_list.pop(0)
-            if self.rank == 0:
-                rmtree(ckpt_to_remove)
 
         dist.barrier()
 
@@ -1070,7 +1077,7 @@ class Trainer:
             deleted_hf_checkpoints = self.meta.latest_exp.hf_checkpoint_list[: -self._hf_max_keep]
             self.meta.latest_exp.hf_checkpoint_list = self.meta.latest_exp.hf_checkpoint_list[-self._hf_max_keep :]
             for hf_dir in deleted_hf_checkpoints:
-                if self.rank == 0:
+                if self.rank == 0 and Path(hf_dir).exists():
                     rmtree(hf_dir)
 
         self._engine.save_hf(str(save_hf_path))
@@ -1238,6 +1245,7 @@ class Trainer:
             "XTUNER_USE_FA3": os.getenv("XTUNER_USE_FA3"),
             "XTUNER_DISPATCHER_DEBUG": os.getenv("XTUNER_DISPATCHER_DEBUG"),
             "XTUNER_ROUTER_DEBUG": os.getenv("XTUNER_ROUTER_DEBUG"),
+            "XTUNER_DECORD_VIDEO_THREADS": os.getenv("XTUNER_DECORD_VIDEO_THREADS"),
         }
 
         for k, v in env.items():

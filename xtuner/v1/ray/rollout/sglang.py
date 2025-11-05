@@ -11,7 +11,7 @@ from xtuner.v1.ray.config import RolloutConfig
 from .worker import RolloutWorker
 
 
-@ray.remote(max_concurrency=int(os.environ.get("XTUNER_MAX_CONCURRENCY", 2000)))
+@ray.remote(max_concurrency=int(os.environ.get("RAY_MAX_CONCURRENCY", 1000)))
 class SGLangWorker(RolloutWorker):
     def __init__(
         self,
@@ -54,32 +54,28 @@ class SGLangWorker(RolloutWorker):
         sglang_sample_params = self._transform_sample_params(sample_params)
         sglang_extra_params = self._transform_extra_params(extra_params)
         payload.update(sglang_extra_params)
-        if stream:
-            raise NotImplementedError("Streaming mode is not supported for SGLangWorker.")
-        else:
-            if "return_token_ids" in extra_params and extra_params["return_token_ids"]:
-                # 多模态场景下，由于 input_ids 处理比较复杂，现在不支持 prompt 输入，必须要有 input_ids
+
+        if "return_token_ids" in extra_params and extra_params["return_token_ids"]:
+            # 多模态场景下，由于 input_ids 处理比较复杂，现在不支持 prompt 输入，必须要有 input_ids
+            if "image_data" in extra_info:
+                assert input_ids is not None, "input_ids is required when image_data is provided."
+            if input_ids is not None:
+                payload["input_ids"] = input_ids
                 if "image_data" in extra_info:
-                    assert input_ids is not None, "input_ids is required when image_data is provided."
-                if input_ids is not None:
-                    payload["input_ids"] = input_ids
-                    if "image_data" in extra_info:
-                        payload["image_data"] = extra_info["image_data"]
-                else:
-                    text_prompt = self.tokenizer.apply_chat_template(
-                        prompt, tokenize=False, add_generation_prompt=True
-                    )
-                    prompt_token_ids = self.tokenizer(text_prompt, add_special_tokens=False)["input_ids"]
-                    payload["input_ids"] = prompt_token_ids
-                payload["sampling_params"] = sglang_sample_params
+                    payload["image_data"] = extra_info["image_data"]
             else:
-                payload["messages"] = prompt
-                payload.update(sglang_sample_params)
-                # note: chat completions 接口需要传入 max_tokens 和 min_tokens 参数
-                payload["max_tokens"] = sglang_sample_params["max_new_tokens"]
-                payload["min_tokens"] = sglang_sample_params["min_new_tokens"]
-                payload.pop("max_new_tokens", None)
-                payload.pop("min_new_tokens", None)
+                text_prompt = self.tokenizer.apply_chat_template(prompt, tokenize=False, add_generation_prompt=True)
+                prompt_token_ids = self.tokenizer(text_prompt, add_special_tokens=False)["input_ids"]
+                payload["input_ids"] = prompt_token_ids
+            payload["sampling_params"] = sglang_sample_params
+        else:
+            payload["messages"] = prompt
+            payload.update(sglang_sample_params)
+            # note: chat completions 接口需要传入 max_tokens 和 min_tokens 参数
+            payload["max_tokens"] = sglang_sample_params["max_new_tokens"]
+            payload["min_tokens"] = sglang_sample_params["min_new_tokens"]
+            payload.pop("max_new_tokens", None)
+            payload.pop("min_new_tokens", None)
 
         req = self.client.build_request(
             "POST",
@@ -134,16 +130,17 @@ class SGLangWorker(RolloutWorker):
         return self._make_request("resume_memory_occupation", {"tags": ["kv_cache"]})
 
     def pause_generation(self):
-        pass
+        return self._make_request("pause_generation")
 
     def continue_generation(self):
-        pass
+        return self._make_request("continue_generation")
 
     def shutdown(self):
         pass
 
     def reset_prefix_cache(self):
-        pass
+        self.flush_cache()
+        return self._make_request("release_memory_occupation")
 
     def _transform_rollout_config_to_server_configs(self):
         # remove the CUDA_VISIBLE_DEVICES set by ray and use base_gpu_id
@@ -157,6 +154,8 @@ class SGLangWorker(RolloutWorker):
         grammar_backend = sglang_config_kwargs.get(
             "grammar_backend", None
         )  # for intern-s1 series models, have to set the grammar_backend to "none"
+        log_level = sglang_config_kwargs.get("log_level", "critical")
+        log_level_http = sglang_config_kwargs.get("log_level_http", "critical")
 
         sglang_server_args = ServerArgs(model_path=self.config.model_path, trust_remote_code=True)
         sglang_server_args.host = self.host
@@ -171,7 +170,9 @@ class SGLangWorker(RolloutWorker):
         sglang_server_args.mem_fraction_static = self.config.gpu_memory_utilization
         # note: 非共卡模式下无需设置,共卡模式下需要offload必须设置，否则显存释放不了
         sglang_server_args.enable_memory_saver = True
-        sglang_server_args.max_running_requests = int(os.environ.get("XTUNER_MAX_CONCURRENCY", 2000))
+        sglang_server_args.max_running_requests = self.config.rollout_max_batch_size
+        sglang_server_args.log_level = log_level
+        sglang_server_args.log_level_http = log_level_http
         if grammar_backend is not None:
             sglang_server_args.grammar_backend = grammar_backend
 
