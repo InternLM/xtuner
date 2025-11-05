@@ -64,13 +64,16 @@ class SingleTurnEnvironment(BaseEnvironment):
         if self.rollout_controller:
             # 在env中对输入的数据进行转换，是为了支持rollout_controller单独作为rollout engine使用，使各个模块进行解耦
             # 每个模块返回独立的data item, 在env中进行更新
-            response_future = [
-                self.rollout_controller.rollout.remote(
+            response_futures = []
+            for sample in group_data_items:
+                extra_info = sample.data.extra_info if hasattr(sample.data, "extra_info") else {}
+                extra_info.update({"action_id": sample.uid.action_id})
+                response_future = self.rollout_controller.rollout.remote(
                     prompt=sample.data.messages,
                     input_ids=sample.data.input_ids,
                     sample_params=sample_params,
                     extra_params=extra_params,
-                    extra_info=sample.data.extra_info,
+                    extra_info=extra_info,
                 )
                 for sample in group_data_items
             ]

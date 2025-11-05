@@ -3,7 +3,6 @@ import os
 import sys
 import threading
 
-import loguru
 from loguru import logger
 from mmengine.dist import get_rank
 
@@ -44,19 +43,34 @@ def get_logger(level="INFO", log_dir=None, tag=None):
                 _LOGGER = logger
 
     # note: 部分推理后端会清除logger的handler，导致日志输出至文件有异常，所以这里重新add file handler
-    if log_dir is not None:
+    if log_dir:
         log_level = os.environ.get("XTUNER_LOG_LEVEL", level).upper()
-        add_log_dir = True
+        add_main_log_dir = True
+        add_infer_log_dir = True
         for handler in _LOGGER._core.handlers.values():
-            if isinstance(handler._sink, loguru._file_sink.FileSink):
-                add_log_dir = False
-                break
+            if handler._name == str(log_dir / f"rank_{get_rank()}.log"):
+                add_main_log_dir = False
+            if handler._name == str(log_dir / "infer_engine_error.log"):
+                add_infer_log_dir = False
+
         # 保证只打印一次
-        if add_log_dir:
-            _LOGGER.add(
+        if add_main_log_dir:
+            logger.add(
                 log_dir / f"rank_{get_rank()}.log",
+                filter=lambda record: record["extra"].get("tag") != "InferEngine",
                 format=log_format(rank=get_rank(), module=tag if tag else None),
                 level=log_level,
                 enqueue=True,
             )
+        if add_infer_log_dir:
+            logger.add(
+                log_dir / "infer_engine_error.log",
+                # 关键：过滤器只允许 tag 为 'infer engine' 的日志通过
+                filter=lambda record: record["extra"].get("tag") == "InferEngine",
+                format=log_format(module="infer_engine"),
+                level=log_level,
+                enqueue=True,
+            )
+    _LOGGER = logger
+
     return _LOGGER

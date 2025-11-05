@@ -253,7 +253,7 @@ class DataFlow:
                         if result[0].extra_info.retry_times < self.config.max_retry_times:
                             # If the retry count is less than max_retry_times, retry the task
                             self.logger.info(
-                                f"Retrying task for {result[0].data}. Retry count: {result[0].extra_info.retry_times}"
+                                f"Retrying task for {result[0].uid.action_id}. Retry count: {result[0].extra_info.retry_times}"
                             )
                             retry_task = create_task(self.worker_task(group_samples_for_retry=result))
                             pending_tasks.add(retry_task)
