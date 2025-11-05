@@ -394,7 +394,6 @@ class RLTrainer:
             # 1. Rollout
             with timer("generation", step_timer_dict):
                 data_groups, multimodal_train_infos = ray.get(self._rollout_dataflow.run.remote())
-
             # 2. Offload rollout models and save trajectories
             with timer("offload_and_dump", step_timer_dict):
                 ray.get(self._rollout_env_controller.offload.remote())

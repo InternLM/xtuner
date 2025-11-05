@@ -13,7 +13,7 @@ from xtuner.v1.ray.environment.base_env import BaseEnvironment
 from xtuner.v1.utils import get_logger
 
 
-@ray.remote(max_concurrency=int(os.environ.get("XTUNER_MAX_CONCURRENCY", 2000)))
+@ray.remote(max_concurrency=int(os.environ.get("RAY_MAX_CONCURRENCY", 1000)))
 class SingleTurnEnvironment(BaseEnvironment):
     """A single-turn environment for handling generation and evaluation tasks.
 
@@ -92,7 +92,11 @@ class SingleTurnEnvironment(BaseEnvironment):
             The format of the return value matches the format of the input `data`.
         """
         group_data_items = await self.generate(group_data_items, sample_params, extra_params)  # type: ignore[assignment]
-        if self.judger_controller:
+        skip_judger = any(
+            item.env.rollout.finish_reason == "abort" or item.env.rollout.finish_reason == "failed"
+            for item in group_data_items
+        )
+        if self.judger_controller and not skip_judger:
             judger_responses: RLJudgerResponseItem = await self.judger_controller.run.remote(group_data_items)
             group_data_items = update_dataflow_item(group_data_items, "env.judger", judger_responses)
         return group_data_items

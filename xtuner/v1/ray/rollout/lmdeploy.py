@@ -105,31 +105,25 @@ class LMDeployWorker(RolloutWorker):
             "Authorization": f"Bearer {self.api_keys}",  # 如果需要鉴权
         }
         stream = extra_params["stream"]
-        # note: 此处默认使用tokne_id的话，则不使用流式；异步rollout+token_id进出后续修复
         payload = {
             "model": self.model_name,
             "tools": tools if len(tools) > 0 else None,
             "tool_choice": tool_choice if tool_choice else None,
         }
-        if stream:
-            payload["messages"] = prompt
-        else:
-            if "return_token_ids" in extra_params and extra_params["return_token_ids"]:
-                # 多模态场景下，由于 input_ids 处理比较复杂，现在不支持 prompt 输入，必须要有 input_ids
+        if "return_token_ids" in extra_params and extra_params["return_token_ids"]:
+            if "image_data" in extra_info:
+                assert input_ids is not None, "input_ids is required when image_data is provided."
+
+            if input_ids is not None:
+                payload["input_ids"] = input_ids
                 if "image_data" in extra_info:
-                    assert input_ids is not None, "input_ids is required when image_data is provided."
-                if input_ids is not None:
-                    payload["input_ids"] = input_ids
-                    if "image_data" in extra_info:
-                        payload["image_data"] = extra_info["image_data"]
-                else:
-                    text_prompt = self.tokenizer.apply_chat_template(
-                        prompt, tokenize=False, add_generation_prompt=True
-                    )
-                    prompt_token_ids = self.tokenizer(text_prompt, add_special_tokens=False)["input_ids"]
-                    payload["input_ids"] = prompt_token_ids
+                    payload["image_data"] = extra_info["image_data"]
             else:
-                payload["messages"] = prompt
+                text_prompt = self.tokenizer.apply_chat_template(prompt, tokenize=False, add_generation_prompt=True)
+                prompt_token_ids = self.tokenizer(text_prompt, add_special_tokens=False)["input_ids"]
+                payload["input_ids"] = prompt_token_ids
+        else:
+            payload["messages"] = prompt
 
         lmdeploy_sample_params = self._transform_sample_params(sample_params, extra_params)
         payload.update(lmdeploy_sample_params)
