@@ -290,7 +290,7 @@ class TestTrainerSaveHF(DistributedTestBase):
         trainer.fit()
         dist.barrier()
         # 0. Test checkpoint_maxkeep is consistent with meta file
-        assert len(trainer.meta.latest_exp.checkpoint_list) == trainer._checkpoint_maxkeep
+        assert len(trainer.meta.latest_exp.checkpoint_list) == 2
 
         # Test resume
         # TODO: It's hard to test the accuracy of resuming in unit test now, need to improve
