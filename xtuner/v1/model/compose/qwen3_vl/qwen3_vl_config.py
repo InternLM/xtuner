@@ -10,7 +10,7 @@ from xtuner.v1.model.base import TransformerConfig
 from xtuner.v1.model.dense.qwen3vl_text import Qwen3VLTextDense4BConfig, Qwen3VLTextDense8BConfig
 from xtuner.v1.model.moe.qwen3vl_text import Qwen3VLTextMoE30BA3Config, Qwen3VLTextMoE235BA22Config
 from xtuner.v1.module.rope import RopeScalingConfig
-from xtuner.v1.utils import get_logger
+from xtuner.v1.utils import get_device, get_logger
 
 
 logger = get_logger()
@@ -38,7 +38,7 @@ class Qwen3VLVisionConfig(BaseModel):
     attn_impl: Literal["flash_attention", "flex_attention", "eager_attention"] = "flash_attention"
 
     def model_post_init(self, _):
-        if not is_installed("flash-attn") and self.attn_impl == "flash_attention":
+        if not is_installed("flash-attn") and self.attn_impl == "flash_attention" and get_device() == "cuda":
             logger.warning("flash-attn is not installed, using `flex_attention` instead.")
             self.attn_impl = "flex_attention"
         return self
