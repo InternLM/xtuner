@@ -165,7 +165,7 @@ class TestRollout(unittest.TestCase):
         self.assertEqual(finished_samples_count // self.dataflow_cfg.prompt_repeat_k, self.dataflow_cfg.global_batch_size)
         ray.get(self.test_env.shutdown.remote(), timeout=300)
     
-    @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
+    @unittest.skip("skip lmdeploy async dataflow after lmdeploy support abort_request")
     @prepare
     def test_lmdeploy_async_dataflow(self):
         self.dataflow_cfg.enable_partial_rollout = 1
