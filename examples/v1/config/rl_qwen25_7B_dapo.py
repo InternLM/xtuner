@@ -28,6 +28,7 @@ data_path = os.environ["DATA_PATH"]
 eval_data_path = os.environ["EVAL_DATA_PATH"]
 enable_evaluate = True if eval_data_path != "" else False
 enbale_partial_rollout = int(os.environ.get("ENBALE_PARTIAL_ROLLOUT", "0"))
+# TODO(@duanyanhui): change xtuner_max_concurrency to single rollout engine max concurrency
 max_concurrent = int(os.environ.get("XTUNER_MAX_CONCURRENCY", 512))
 
 # basic settings
