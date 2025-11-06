@@ -4,7 +4,7 @@ from typing import Annotated, Literal
 import torch
 import torch.nn as nn
 from cyclopts import Parameter
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from xtuner.v1.utils.device import get_device
 
@@ -12,6 +12,7 @@ from .protocol import RouterProtocol, RouterResults
 
 
 class NoAuxRouterConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     scoring_func: Annotated[Literal["sigmoid", "softmax"], Parameter(group="router")]
     router_scaling_factor: Annotated[float, Parameter(group="router")]
     norm_topk_prob: Annotated[bool, Parameter(group="router")]

@@ -12,7 +12,7 @@ import torch
 from mmengine import load
 from mmengine.dist import get_rank
 from mmengine.runner import set_random_seed
-from pydantic import BaseModel, field_serializer, model_validator
+from pydantic import BaseModel, ConfigDict, field_serializer, model_validator
 from ray.actor import ActorClass
 from typing_extensions import Self
 
@@ -51,6 +51,7 @@ def bind_train_rollout(
 
 
 class RLTrainerConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     load_from: str | Path
     resources: AcceleratorResourcesConfig
     rollout_config: RolloutConfig

@@ -2,13 +2,14 @@ from typing import Literal, Protocol, cast
 
 import torch
 import torch.nn as nn
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from typing_extensions import overload
 
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 
 
 class RopeScalingConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     type: Literal["default", "linear", "dynamic", "yarn", "longrope", "llama3", "qwen3_vl"] = "default"
 
     max_position_embeddings: int | None = None  # TODO: 无用参数考虑删除

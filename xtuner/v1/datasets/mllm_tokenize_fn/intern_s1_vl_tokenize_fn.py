@@ -443,7 +443,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
 
 
 class InternS1VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
-    model_config = ConfigDict(title="Base dataset config for xtuner", extra="allow")
+    model_config = ConfigDict(title="Base dataset config for xtuner", extra="forbid")
     model_cfg: (
         BaseModel  # TODO: (huanghaian)  Using model config protocol rather than directly using InternS1BaseConfig
     )

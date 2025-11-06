@@ -210,7 +210,7 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
 class BaseMLLMTokenizeFnConfig(BaseModel):
     model_config = ConfigDict(
         title="Base dataset config for xtuner",
-        extra="allow",
+        extra="forbid",
         protected_namespaces=(),
     )
     system_message: str | None = None
@@ -228,5 +228,6 @@ class BaseMLLMTokenizeFnConfig(BaseModel):
 
 
 class OSSLoaderConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     backend: Literal["petrel"] = "petrel"
     backend_kwargs: dict = {}

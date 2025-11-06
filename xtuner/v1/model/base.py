@@ -50,7 +50,7 @@ DEVICE = get_device()
 class TransformerConfig(PydanticBaseModel):
     model_config = ConfigDict(
         title="Base model config for xtuner",
-        extra="allow",
+        extra="forbid",
         protected_namespaces=(),
     )
     vocab_size: Annotated[int, Parameter(group="model")]

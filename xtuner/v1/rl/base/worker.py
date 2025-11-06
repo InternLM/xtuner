@@ -112,7 +112,7 @@ class WorkerConfig(BaseModel):
        for KL divergence computation during training.
     """
 
-    model_config = ConfigDict(title="Worker config", extra="allow", arbitrary_types_allowed=True)
+    model_config = ConfigDict(title="Worker config", extra="forbid", arbitrary_types_allowed=True)
     model_cfg: TransformerConfig | VisionComposeConfigProtocol
     optim_cfg: OptimConfig
     loss_cfg: BaseRLLossConfig

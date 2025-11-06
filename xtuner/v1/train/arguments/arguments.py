@@ -39,6 +39,7 @@ class TrainingArguments(BaseModel):
     model_config = ConfigDict(
         arbitrary_types_allowed=True,
         protected_namespaces=(),
+        extra="forbid",
     )
     # model
     load_from: Annotated[str | None, Parameter(group=model_group, help="load checkpoint from")] = None

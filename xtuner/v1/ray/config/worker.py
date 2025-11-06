@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import List, Literal, Optional, Union
 
 from cyclopts import Group, Parameter
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from typing_extensions import Annotated
 
 
@@ -17,6 +17,7 @@ infer_group = Group("inference", help="Inference worker configuration.")
 class TrainingWorkerConfig(BaseModel):
     """Configuration for the TrainingWorker."""
 
+    model_config = ConfigDict(extra="forbid")
     type: Literal["train"] = "train"
     train_model_path: Annotated[str, Parameter(group=train_group, help="Path to the training model.")]
 
@@ -69,6 +70,8 @@ class RolloutConfig(BaseModel):
             backend="lmdeploy",
         )
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     # base config
     env: Annotated[

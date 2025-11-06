@@ -204,6 +204,7 @@ def update_dataflow_item(group_data_items, target_key, target_value):
 
 
 class SampleParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     n: Annotated[int, Parameter(help="Number of samples to generate.")] = 1
     top_k: Annotated[
         int, Parameter(help="The number of highest probability vocabulary tokens to keep for top-k-filtering.")
@@ -233,6 +234,7 @@ class RolloutExtraParams(TypedDict):
 
 # 说明： 这里没定义API server情况数据格式，因为直接使用openai server的格式
 class RLRolloutRequestItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     messages: List[Dict[str, Any]]
     tools: List = Field(default_factory=list)
     tool_choice: str = "auto"
