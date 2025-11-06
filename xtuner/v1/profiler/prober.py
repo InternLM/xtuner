@@ -1,5 +1,6 @@
 import functools
 import json
+import pydoc
 import re
 import sys
 import time
@@ -24,17 +25,6 @@ else:
 
 
 logger = get_logger()
-
-
-def get_dtensor_meta(dtensor: torch.Tensor):
-    if not isinstance(dtensor, DTensor):
-        return {}
-
-    return {
-        "local_shape": dtensor._local_tensor.shape,
-        "device_mesh": str(dtensor.device_mesh),
-        "placements": str(dtensor.placements),
-    }
 
 
 class BaseProber(ABC):
@@ -208,7 +198,10 @@ class ProberList:
     def setup(cls, dump_home: Path, profile_step: list[int] | None, prober_class_names: list[str]):
         prober_classes = []
         for prober_class_name in prober_class_names:
-            prober_classes.append(getattr(sys.modules[__name__], prober_class_name))
+            prober_class = pydoc.locate(f"{__name__}.{prober_class_name}")
+            if prober_class is None:
+                raise ValueError(f"Prober class {prober_class_name} not found")
+            prober_classes.append(prober_class)
         cls.prober_list = prober_classes
 
         # 初始化每个Prober
