@@ -2,11 +2,10 @@ import functools
 import json
 import pydoc
 import re
-import sys
 import time
 from abc import ABC
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, ClassVar
+from typing import TYPE_CHECKING, Callable, ClassVar, cast
 
 import torch
 import torch.distributed as dist
@@ -32,6 +31,12 @@ class BaseProber(ABC):
     抽象基类 - 定义Prober接口规范
     每个子类都是单例（通过类方法实现）
     """
+
+    dump_dir: ClassVar[Path | None] = None
+    profile_step: ClassVar[list[int] | None] = None
+    initialized: ClassVar[bool] = False
+    cur_step: ClassVar[int] = 0
+    cur_micro_batch_iter: ClassVar[int] = 0
 
     @classmethod
     def setup(cls, dump_home: Path, profile_step: list[int]):
@@ -201,7 +206,7 @@ class ProberList:
             prober_class = pydoc.locate(f"{__name__}.{prober_class_name}")
             if prober_class is None:
                 raise ValueError(f"Prober class {prober_class_name} not found")
-            prober_classes.append(prober_class)
+            prober_classes.append(cast(type[BaseProber], prober_class))
         cls.prober_list = prober_classes
 
         # 初始化每个Prober
@@ -767,6 +772,7 @@ class TimeProber(BaseProber):
     """
     时间探测器 - 记录各阶段耗时
     """
+
     dump_dir: ClassVar[Path | None] = None
     profile_step: ClassVar[list[int] | None] = None
     initialized: ClassVar[bool] = False
