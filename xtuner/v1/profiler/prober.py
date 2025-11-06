@@ -45,18 +45,16 @@ class BaseProber(ABC):
 
     dump_dir: ClassVar[Path | None] = None
     profile_step: ClassVar[list[int] | None] = None
-    model: ClassVar[nn.Module | None] = None
     initialized: ClassVar[bool] = False
     cur_step: ClassVar[int] = 0
     cur_micro_batch_iter: ClassVar[int] = 0
 
     @classmethod
-    def setup(cls, dump_home: Path, profile_step: list[int], model: nn.Module):
+    def setup(cls, dump_home: Path, profile_step: list[int]):
         """子类必须实现setup方法，用于初始化自己的dump_dir."""
         cls.dump_dir = dump_home
         cls.dump_dir.mkdir(parents=True, exist_ok=True)
         cls.profile_step = profile_step
-        cls.model = model
         cls.initialized = True
 
     @classmethod
@@ -192,11 +190,11 @@ class BaseProber(ABC):
 
     ############################## hooks for gradient #################################
     @classmethod
-    def before_clip_grad_norm(cls):
+    def before_clip_grad_norm(cls, model: nn.Module):
         pass
 
     @classmethod
-    def after_clip_grad_norm(cls, grad_norm: torch.Tensor):
+    def after_clip_grad_norm(cls, model: nn.Module, grad_norm: torch.Tensor):
         pass
 
     ############################## hooks for step and iter #################################
@@ -213,7 +211,7 @@ class ProberList:
     prober_list: ClassVar[list[type[BaseProber]]] = []
 
     @classmethod
-    def setup(cls, dump_home: Path, profile_step: list[int] | None, model: nn.Module, prober_class_names: list[str]):
+    def setup(cls, dump_home: Path, profile_step: list[int] | None, prober_class_names: list[str]):
         prober_classes = []
         for prober_class_name in prober_class_names:
             prober_classes.append(getattr(sys.modules[__name__], prober_class_name))
@@ -222,7 +220,7 @@ class ProberList:
         # 初始化每个Prober
         profile_step = profile_step if profile_step is not None else []
         for prober_cls in cls.prober_list:
-            prober_cls.setup(dump_home, profile_step, model)
+            prober_cls.setup(dump_home, profile_step)
 
         logger.info(
             f"ProberList initialized with {len(cls.prober_list)} probers: {[p.__name__ for p in cls.prober_list]}"
@@ -525,14 +523,14 @@ class ProberList:
 
     ############################## hooks for gradient #################################
     @classmethod
-    def before_clip_grad_norm(cls):
+    def before_clip_grad_norm(cls, model: nn.Module):
         for prober_cls in cls.prober_list:
-            prober_cls.before_clip_grad_norm()
+            prober_cls.before_clip_grad_norm(model)
 
     @classmethod
-    def after_clip_grad_norm(cls, grad_norm: torch.Tensor):
+    def after_clip_grad_norm(cls, model: nn.Module, grad_norm: torch.Tensor):
         for prober_cls in cls.prober_list:
-            prober_cls.after_clip_grad_norm(grad_norm)
+            prober_cls.after_clip_grad_norm(model, grad_norm)
 
     ############################## hooks for step and iter #################################
     @classmethod
@@ -550,8 +548,8 @@ class AccProber(BaseProber):
     forward_records: ClassVar[list] = []
 
     @classmethod
-    def setup(cls, dump_home: Path, profile_step: list[int], model: nn.Module):
-        super().setup(dump_home, profile_step, model)
+    def setup(cls, dump_home: Path, profile_step: list[int]):
+        super().setup(dump_home, profile_step)
         cls.dump_dir = dump_home / "acc_prober"
         cls.dump_dir.mkdir(parents=True, exist_ok=True)
         cls.forward_records = []
@@ -724,15 +722,14 @@ class AccProber(BaseProber):
 
     ############################## hooks for gradient #################################
     @classmethod
-    def _grad_dump(cls, suffix: str, grad_norm: torch.Tensor | None = None):
+    def _grad_dump(cls, model: nn.Module, suffix: str, grad_norm: torch.Tensor | None = None):
         if cls.skip():
             return
         assert cls.initialized, "AccProber is not initialized, please call setup() first"
 
-        assert cls.model is not None
         assert cls.dump_dir is not None
         res = []
-        trainable_params = [(name, param) for name, param in cls.model.named_parameters() if param.requires_grad]
+        trainable_params = [(name, param) for name, param in model.named_parameters() if param.requires_grad]
         for name, param in trainable_params:
             assert param.grad is not None, f"Error: {name} param.grad must not be None"
             grad = param.grad.detach().clone().view(-1)
@@ -767,12 +764,12 @@ class AccProber(BaseProber):
         # logger.info(f"[AccProber] Dump {suffix} to {dump_file}")
 
     @classmethod
-    def before_clip_grad_norm(cls):
-        cls._grad_dump("before_clip_grad_norm")
+    def before_clip_grad_norm(cls, model: nn.Module):
+        cls._grad_dump(model, "before_clip_grad_norm")
 
     @classmethod
-    def after_clip_grad_norm(cls, grad_norm: torch.Tensor):
-        cls._grad_dump("after_clip_grad_norm", grad_norm)
+    def after_clip_grad_norm(cls, model: nn.Module, grad_norm: torch.Tensor):
+        cls._grad_dump(model, "after_clip_grad_norm", grad_norm)
 
 
 class TimeProber(BaseProber):
@@ -785,8 +782,8 @@ class TimeProber(BaseProber):
     max_step: ClassVar[int] = 0
 
     @classmethod
-    def setup(cls, dump_home: Path, profile_step: list[int], model: nn.Module):
-        super().setup(dump_home, profile_step, model)
+    def setup(cls, dump_home: Path, profile_step: list[int]):
+        super().setup(dump_home, profile_step)
         cls.dump_dir = dump_home / "time_prober"
         cls.dump_dir.mkdir(parents=True, exist_ok=True)
         cls.timings = {}
@@ -845,11 +842,11 @@ class TimeProber(BaseProber):
 
     ############################## hooks for gradient #################################
     @classmethod
-    def before_clip_grad_norm(cls):
+    def before_clip_grad_norm(cls, model: nn.Module):
         cls._start_timer("clip_grad_norm")
 
     @classmethod
-    def after_clip_grad_norm(cls, grad_norm: torch.Tensor):
+    def after_clip_grad_norm(cls, model: nn.Module, grad_norm: torch.Tensor):
         cls._end_timer("clip_grad_norm")
 
     @classmethod

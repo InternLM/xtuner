@@ -322,7 +322,7 @@ class TrainEngine:
 
     @_no_grad
     def clip_grad_norm(self, do_clip: bool = True, dtype=torch.float32):
-        ProberList.before_clip_grad_norm()
+        ProberList.before_clip_grad_norm(self.model)
         self.model.scale_and_reduce_grad()
         params = self.model.trainable_parameters()
         grads = [p.grad for _, p in params if p.grad is not None]
@@ -338,7 +338,7 @@ class TrainEngine:
                     clip_coef_clamped_device = clip_coef_clamped.to(device)
                     for g in grads:
                         g.mul_(clip_coef_clamped_device)
-        ProberList.after_clip_grad_norm(grad_norm)
+        ProberList.after_clip_grad_norm(self.model, grad_norm)
         return grad_norm
 
     def step_optimizer(self, grad_norm):
