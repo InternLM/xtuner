@@ -11,16 +11,6 @@ from pathlib import Path
 from shutil import rmtree
 from typing import Annotated, Literal, Sized, cast
 
-
-try:
-    import numa
-    from numa import memory, schedule
-    from pynvml_utils import nvidia_smi
-
-    HAS_NUMA = True
-except ImportError:
-    HAS_NUMA = False
-
 import torch
 import torch.distributed as dist
 import torch.nn as nn
@@ -321,6 +311,7 @@ class Trainer:
         self._train_time_offset = 0
 
         self._init_dist(backend)
+        self._try_bind_numa()
         self._set_deterministic()
         self._set_random_seed(seed)
         self._setup_env()
@@ -900,15 +891,16 @@ class Trainer:
         set_random_seed(seed)
 
     def _try_bind_numa(self):
-        if not HAS_NUMA:
-            logger.info("numa module not found, skip numa binding.")
+        if str(DEVICE) != "cuda":
+            logger.info("Current device is not cuda, skip numa binding.")
             return
 
         try:
+            import numa
+            from numa import memory, schedule
+
             numa_node_num = numa.info.get_max_node() + 1
-            # get total gpu number of current node
-            nvsmi = nvidia_smi.getInstance()
-            total_GPU_per_node = len(nvsmi.DeviceQuery("memory.total")["gpu"])
+            total_GPU_per_node = DEVICE_MODULE.device_count()
 
             # return while total_GPU_per_node is larger than numa_node_num or is not divisible by numa_node_num
             if total_GPU_per_node <= numa_node_num:
@@ -920,7 +912,6 @@ class Trainer:
                 return
 
             local_rank = self.rank % total_GPU_per_node
-
             # compute numa id for each locak rank
             per_numa = total_GPU_per_node // numa_node_num
             numa_id = local_rank // per_numa
@@ -946,8 +937,6 @@ class Trainer:
         if not dist.is_initialized():
             init_process_group(backend=backend)
         torch.accelerator.set_device_index(int(os.environ["LOCAL_RANK"]))
-
-        self._try_bind_numa()
 
     def _init_xtuner_meta(self, work_dir: Path, auto_resume: bool) -> XTunerMeta:
         if not work_dir.exists():
