@@ -30,6 +30,7 @@ class Qwen3Dense(Dense):
 
 class Qwen3DenseConfig(TransformerConfig):
     use_sliding_window: bool = False
+    pad_token_id: int | None = None
     bos_token_id: int
 
     def build(self) -> Qwen3Dense:
@@ -101,7 +102,6 @@ class Qwen3DenseConfig(TransformerConfig):
 class Qwen3Dense8BConfig(Qwen3DenseConfig):
     vocab_size: int = 151936
     max_position_embeddings: int = 40960
-    pad_token_id: int | None = None
     eos_token_id: int = 151645
     bos_token_id: int = 151643
     num_hidden_layers: int = 36
@@ -121,7 +121,6 @@ class Qwen3Dense8BConfig(Qwen3DenseConfig):
 class Qwen3Dense4BConfig(Qwen3DenseConfig):
     vocab_size: int = 151936
     max_position_embeddings: int = 262144
-    pad_token_id: int | None = None
     eos_token_id: int = 151645
     bos_token_id: int = 151643
     num_hidden_layers: int = 36
@@ -141,7 +140,6 @@ class Qwen3Dense4BConfig(Qwen3DenseConfig):
 class Qwen3Dense0P6BConfig(Qwen3DenseConfig):
     vocab_size: int = 151936
     max_position_embeddings: int = 40960
-    pad_token_id: int | None = None
     eos_token_id: int = 151645
     bos_token_id: int = 151643
     num_hidden_layers: int = 28

@@ -43,12 +43,6 @@ class BaseProber(ABC):
     每个子类都是单例（通过类方法实现）
     """
 
-    dump_dir: ClassVar[Path | None] = None
-    profile_step: ClassVar[list[int] | None] = None
-    initialized: ClassVar[bool] = False
-    cur_step: ClassVar[int] = 0
-    cur_micro_batch_iter: ClassVar[int] = 0
-
     @classmethod
     def setup(cls, dump_home: Path, profile_step: list[int]):
         """子类必须实现setup方法，用于初始化自己的dump_dir."""
@@ -545,13 +539,17 @@ class ProberList:
 
 
 class AccProber(BaseProber):
+    dump_dir: ClassVar[Path | None] = None
+    profile_step: ClassVar[list[int] | None] = None
+    initialized: ClassVar[bool] = False
+    cur_step: ClassVar[int] = 0
+    cur_micro_batch_iter: ClassVar[int] = 0
+
     forward_records: ClassVar[list] = []
 
     @classmethod
     def setup(cls, dump_home: Path, profile_step: list[int]):
-        super().setup(dump_home, profile_step)
-        cls.dump_dir = dump_home / "acc_prober"
-        cls.dump_dir.mkdir(parents=True, exist_ok=True)
+        super().setup(dump_home / "acc_prober", profile_step)
         cls.forward_records = []
         logger.info(f"AccProber initialized at {cls.dump_dir}")
 
@@ -776,6 +774,11 @@ class TimeProber(BaseProber):
     """
     时间探测器 - 记录各阶段耗时
     """
+    dump_dir: ClassVar[Path | None] = None
+    profile_step: ClassVar[list[int] | None] = None
+    initialized: ClassVar[bool] = False
+    cur_step: ClassVar[int] = 0
+    cur_micro_batch_iter: ClassVar[int] = 0
 
     timings: ClassVar[dict[str, list[float]]] = {}
     start_times: ClassVar[dict[str, float]] = {}
@@ -783,9 +786,7 @@ class TimeProber(BaseProber):
 
     @classmethod
     def setup(cls, dump_home: Path, profile_step: list[int]):
-        super().setup(dump_home, profile_step)
-        cls.dump_dir = dump_home / "time_prober"
-        cls.dump_dir.mkdir(parents=True, exist_ok=True)
+        super().setup(dump_home / "time_prober", profile_step)
         cls.timings = {}
         cls.start_times = {}
         cls.max_step = max(profile_step)
@@ -905,6 +906,12 @@ class TimeProber(BaseProber):
 
 
 class PdbProber(BaseProber):
+    dump_dir: ClassVar[Path | None] = None
+    profile_step: ClassVar[list[int] | None] = None
+    initialized: ClassVar[bool] = False
+    cur_step: ClassVar[int] = 0
+    cur_micro_batch_iter: ClassVar[int] = 0
+
     @classmethod
     def before_layer(cls, name: str, hidden_states: torch.Tensor):
         if cls.cur_step == 10 and cls.cur_micro_batch_iter == 0 and "layers.10" in name:

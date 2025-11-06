@@ -484,8 +484,7 @@ class Trainer:
         train_begin = time.time()
         time_before_get_data = time.time()
         for data_batch in self._data_iter():
-            self._cur_step += 1  # increment _cur_step at first, then can use correct self.cur_step everywhere below
-            ProberList.set_step(self._cur_step)
+            ProberList.set_step(self._cur_step + 1)
             DEVICE_MODULE.reset_peak_memory_stats()
 
             time_before_train_step = time.time()
@@ -541,7 +540,8 @@ class Trainer:
                 extra_info_updated = ModelForwardExtraLogInfo(extra_info)
                 extra_info_dict = extra_info_updated.get()
             loss_log.update(extra_info_dict)
-
+            
+            self._cur_step += 1
             self._consumed_tokens += step_consumed_tokens
             self._train_time = time_after_train_step - train_begin
 
