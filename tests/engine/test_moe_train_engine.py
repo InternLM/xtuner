@@ -327,7 +327,7 @@ class TestMoEEngine(DeterministicDDPTestCase):
             optim_cfg=optim_cfg2,
             fsdp_cfg=fsdp_cfg,
         )
-        engine2.load_dcp(model_dir=model_dir, optimizer_dir=optimizer_dir, load_arg_defaults=False)
+        engine2.load_dcp(model_dir=model_dir, optimizer_dir=optimizer_dir, load_args=False)
         # print(f"len(engine.optimizer.state), len(engine2.optimizer.state): {len(engine.optimizer.state)}, {len(engine2.optimizer.state)}")
         assert len(engine.optimizer.state) == len(engine2.optimizer.state)
         assert len(engine.optimizer.state) != 0

@@ -120,7 +120,7 @@ class ResumeConfig(BaseModel):
     resume_from: str | Path | None = None
     auto_resume: bool = False
     load_optimizer_states: bool = True
-    load_optimizer_arg_defaults: bool = True
+    load_optimizer_args: bool = True
     load_dataset: bool = True
     load_scheduler: bool = True
 
@@ -795,7 +795,7 @@ class Trainer:
 
         optimizer_path = (
             checkpoint_path / self._SAVE_OPTIMIZER_DIR
-            if self._resume_cfg.load_optimizer_states or self._resume_cfg.load_optimizer_arg_defaults
+            if self._resume_cfg.load_optimizer_states or self._resume_cfg.load_optimizer_args
             else None
         )
         model_path = checkpoint_path / self._SAVE_MODEL_DIR
@@ -1249,7 +1249,7 @@ class Trainer:
         model_path = resume_from / self._SAVE_MODEL_DIR
         optimizer_path = (
             resume_from / self._SAVE_OPTIMIZER_DIR
-            if self._resume_cfg.load_optimizer_states or self._resume_cfg.load_optimizer_arg_defaults
+            if self._resume_cfg.load_optimizer_states or self._resume_cfg.load_optimizer_args
             else None
         )
 
@@ -1257,7 +1257,7 @@ class Trainer:
             model_dir=model_path,
             optimizer_dir=optimizer_path,
             load_states=self._resume_cfg.load_optimizer_states,
-            load_arg_defaults=self._resume_cfg.load_optimizer_arg_defaults,
+            load_args=self._resume_cfg.load_optimizer_args,
         )
 
         if resume_cfg.load_dataset:

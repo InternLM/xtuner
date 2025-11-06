@@ -409,7 +409,7 @@ class TrainEngine:
         model_dir: Path,
         optimizer_dir: Path | None = None,
         load_states: bool = True,
-        load_arg_defaults: bool = True,
+        load_args: bool = True,
     ):
         """Load the dcp model from the given directory.
 
@@ -439,9 +439,15 @@ class TrainEngine:
                 if not load_states:
                     logger.info("Not loading optimizer states")
                     shard_optimizer_state_dict["state"] = {}
-                if not load_arg_defaults:
+                if not load_args:
                     logger.info("Not loading arg defaults")
-                    init_defaults = self.optimizer.state_dict()["param_groups"][0]
+                    param_groups = self.optimizer.state_dict()["param_groups"]
+                    # Now we only support one param_group. If we want to support different lr for different parameters,
+                    # we may use multiple param_groups like:
+                    # [{'params': ['net1.weight', 'net2.weight'], 'lr': 0.001}, {'params': ['net3.weight'], 'lr': 0.002}]
+                    # Then we need change the code here
+                    assert len(param_groups) == 1, "Only one param_group is supported now"
+                    init_defaults = param_groups[0]
                     init_defaults.pop("params")
                     for param_group in cast(List[Dict[str, Any]], shard_optimizer_state_dict["param_groups"]):
                         # param_group is like: {'params': ['net1.weight', 'net2.weight'], 'lr': 0.001, 'betas': (0.9, 0.999), 'eps': 1e-08, 'weight_decay': 0.01}

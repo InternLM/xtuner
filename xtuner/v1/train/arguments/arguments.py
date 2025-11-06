@@ -98,7 +98,7 @@ class TrainingArguments(BaseModel):
     load_optimizer_states: Annotated[
         bool, Parameter(group=checkpoint_group, help="load optimizer states from checkpoint")
     ] = True
-    load_optimizer_arg_defaults: Annotated[
+    load_optimizer_args: Annotated[
         bool, Parameter(group=checkpoint_group, help="load optimizer arg defaults from checkpoint")
     ] = True
     load_dataset: Annotated[bool, Parameter(group=checkpoint_group, help="load dataset state from checkpoint")] = True
