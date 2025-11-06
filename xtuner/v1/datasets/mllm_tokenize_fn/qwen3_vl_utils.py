@@ -1,7 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import io
 import os
-import random
 import re
 import time
 from typing import Literal
@@ -9,11 +8,13 @@ from typing import Literal
 import cv2
 import imageio
 import numpy as np
-from PIL import Image
-from transformers.video_utils import to_channel_dimension_format
-from transformers.image_utils import ChannelDimension
 import torch
+from PIL import Image
+
+from transformers.image_utils import ChannelDimension
+from transformers.video_utils import to_channel_dimension_format
 from xtuner.v1.utils.oss_utils import get_oss_backend
+
 
 try:
     from decord import VideoReader
@@ -48,11 +49,7 @@ def numpy_to_tensor(frames):
     return result
 
 
-def read_frames_folder(
-    video_path,
-    num_frames,
-    client=None
-):
+def read_frames_folder(video_path, num_frames, client=None):
     oss_read_time = 0
     if "s3://" in video_path:
         assert client is not None, "client should be provided for s3 backend"
@@ -149,17 +146,9 @@ def read_qwen3_vl_video(
     vlen = 0
     video_get_batch_time = 0
     if path.endswith("/"):
-        frames, oss_read_time, vlen, frame_indices = read_frames_folder(
-            path,
-            num_frames,
-            client=client
-        )
+        frames, oss_read_time, vlen, frame_indices = read_frames_folder(path, num_frames, client=client)
     elif path.endswith(".gif"):
-        frames, frame_indices = read_frames_gif(
-            path,
-            num_frames,
-            client=client
-        )
+        frames, frame_indices = read_frames_gif(path, num_frames, client=client)
     elif (
         path.endswith(".mp4")
         or path.endswith(".avi")
@@ -172,9 +161,7 @@ def read_qwen3_vl_video(
         or path.endswith(".ts")
     ):
         frames, oss_read_time, video_get_batch_time, vlen, frame_indices = read_frames_decord(
-            path,
-            num_frames,
-            client=client
+            path, num_frames, client=client
         )
     else:
         raise ValueError(f"Unsupported video format: {path}")
@@ -203,12 +190,7 @@ class Qwen3VLOSSLoader:
         self.debug = debug
         self.oss_time_log_thr = oss_time_log_thr
 
-    def __call__(
-        self,
-        path,
-        image_type="image",
-        num_frames=None
-    ):
+    def __call__(self, path, image_type="image", num_frames=None):
         if image_type == "image":
             start_time = time.time()
             img_value_str = self.client.get(path)

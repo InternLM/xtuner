@@ -48,22 +48,26 @@ def collect_image_video_paths_and_extra(messages: list[dict]):
                         video_wh = c["video_url"]["image_wh"]
                         if isinstance(video_wh[0], (list, tuple)):
                             assert len(video_wh) == 1, (
-                                    f"Only one video size is supported for each video. but got {video_wh}"
+                                f"Only one video size is supported for each video. but got {video_wh}"
                             )
                             video_wh = video_wh[0]
                         video_wh_list.append(video_wh)
                         assert len(video_wh) == 2, f"video_wh should be [width, height], but got {video_wh}"
 
                         video_extra_dict = {}
-                        if 'processed_video_length' in c["video_url"]:
+                        if "processed_video_length" in c["video_url"]:
                             video_extra_dict["origin_video_length"] = c["video_url"]["processed_video_length"]
-                        if 'processed_fps' in c["video_url"]:
+                        if "processed_fps" in c["video_url"]:
                             video_extra_dict["origin_fps"] = c["video_url"]["processed_fps"]
                         video_extra_info_list.append(video_extra_dict)
 
     if len(image_wh_list) > 0:
         assert len(image_wh_list) == len(image_paths), "If image_wh is provided, it should match the number of images."
-    return image_paths, video_paths, {"image_wh": image_wh_list, "video_wh": video_wh_list, "video_extra_info": video_extra_info_list}
+    return (
+        image_paths,
+        video_paths,
+        {"image_wh": image_wh_list, "video_wh": video_wh_list, "video_extra_info": video_extra_info_list},
+    )
 
 
 def replace_image_token(

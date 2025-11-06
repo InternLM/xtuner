@@ -1,15 +1,17 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 
 import copy
+import math
 import os
 from collections.abc import Sequence
+from types import SimpleNamespace
 from typing import Optional, Union
-import math
-from packaging import version
+
 import numpy as np
 import torch
+from packaging import version
 from pydantic import ConfigDict
-from types import SimpleNamespace
+
 import transformers
 from transformers import AutoProcessor, PreTrainedTokenizer
 from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
@@ -19,10 +21,18 @@ from xtuner.v1.utils import get_logger
 
 from ..data_item import CacheItem, QwenVL3DataItem
 from ..utils import apply_exif_orientation, generate_random_int_from_dict
-from .base_mllm_tokenize_fn import BaseMLLMTokenizeFnConfig, BaseMLLMTokenizeFunction, load_image, replace_image_token, \
-    IMAGE_TOKEN_ALIAS, OSSLoaderConfig, get_image_path
+from .base_mllm_tokenize_fn import (
+    IMAGE_TOKEN_ALIAS,
+    BaseMLLMTokenizeFnConfig,
+    BaseMLLMTokenizeFunction,
+    OSSLoaderConfig,
+    get_image_path,
+    load_image,
+    replace_image_token,
+)
 from .qwen3_vl_utils import Qwen3VLOSSLoader, read_qwen3_vl_video
 from .qwenvl_rope2d import get_rope_index_3
+
 
 logger = get_logger()
 
@@ -43,13 +53,13 @@ def smart_get_thw(image_size, image_processor):
 
 
 def video_smart_resize(
-        num_frames: int,
-        height: int,
-        width: int,
-        temporal_factor: int = 2,
-        factor: int = 32,
-        min_pixels: int = 128 * 128,
-        max_pixels: int = 16 * 16 * 2 * 2 * 2 * 6144,
+    num_frames: int,
+    height: int,
+    width: int,
+    temporal_factor: int = 2,
+    factor: int = 32,
+    min_pixels: int = 128 * 128,
+    max_pixels: int = 16 * 16 * 2 * 2 * 2 * 6144,
 ):
     if num_frames < temporal_factor:
         raise ValueError(f"t:{num_frames} must be larger than temporal_factor:{temporal_factor}")
@@ -76,12 +86,12 @@ def video_smart_resize(
 
 
 def sample_frames(
-        origin_total_num_frames: int,
-        origin_fps: Union[int, float],
-        num_frames: Optional[int] = None,
-        fps: Union[int, float] = 2,
-        min_frames: int = 4,
-        max_frames: int = 16
+    origin_total_num_frames: int,
+    origin_fps: Union[int, float],
+    num_frames: Optional[int] = None,
+    fps: Union[int, float] = 2,
+    min_frames: int = 4,
+    max_frames: int = 16,
 ):
     total_num_frames = origin_total_num_frames
 
@@ -104,13 +114,16 @@ def calculate_timestamps(indices: Union[list[int], np.ndarray], video_fps: float
     timestamps = [idx / video_fps for idx in indices]
     # @JJJYmmm frames are merged by self.merge_size, \
     # so we need to average the timestamps between the first/last frame within the temporal patch
-    timestamps = [
-        (timestamps[i] + timestamps[i + merge_size - 1]) / 2 for i in range(0, len(timestamps), merge_size)
-    ]
+    timestamps = [(timestamps[i] + timestamps[i + merge_size - 1]) / 2 for i in range(0, len(timestamps), merge_size)]
     return timestamps
 
 
-def replace_video_token(messages: ChatMessages, chat_template: HybridChatTemplate, num_image_token_list: list[int], timestamps: list[float] | None= None):
+def replace_video_token(
+    messages: ChatMessages,
+    chat_template: HybridChatTemplate,
+    num_image_token_list: list[int],
+    timestamps: list[float] | None = None,
+):
     current_image_idx = 0
     n_frames = len(num_image_token_list)
     if timestamps is not None:
@@ -148,29 +161,29 @@ def replace_video_token(messages: ChatMessages, chat_template: HybridChatTemplat
 
 class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
     def __init__(
-            self,
-            tokenizer: PreTrainedTokenizer,
-            processor_path: str,
-            anno_name: str,
-            min_pixels: int | None = None,  # Max image pixels (H*W) for image
-            max_pixels: int | None = None,  # Min image pixels (H*W) for image
-            video_min_frames: int | None = None,  # Min frames per video
-            video_max_frames: int | None = None,  # Max frames per video
-            # Max frames per video for random sampling when origin_video_length is None
-            # 当用户没有提供 origin_video_length 和 origin_fps 时候，不能采用 video_max_frames 值
-            # 因为默认的 video_max_frames 太大了，会导致采样的视频帧太多，导致显存不足
-            rand_video_max_frames: int = 24,
-            fps: int | None = None,  # Sampling time interval (seconds) between frames
-            video_max_total_pixels: int | None = None,  # Max pixels within a frame
-            video_min_total_pixels: int | None = None,  # Min pixels within a frame
-            system_message: str | None = None,
-            add_vision_id: bool = True,
-            max_length: int | None = None,
-            oss_loader_cfg: OSSLoaderConfig | None = None,
-            debug: bool = False,
-            oss_time_log_thr: int = 10,  # 10s
-            tokenizer_hash: str | None = None,
-            hash: str | None = None,
+        self,
+        tokenizer: PreTrainedTokenizer,
+        processor_path: str,
+        anno_name: str,
+        min_pixels: int | None = None,  # Max image pixels (H*W) for image
+        max_pixels: int | None = None,  # Min image pixels (H*W) for image
+        video_min_frames: int | None = None,  # Min frames per video
+        video_max_frames: int | None = None,  # Max frames per video
+        # Max frames per video for random sampling when origin_video_length is None
+        # 当用户没有提供 origin_video_length 和 origin_fps 时候，不能采用 video_max_frames 值
+        # 因为默认的 video_max_frames 太大了，会导致采样的视频帧太多，导致显存不足
+        rand_video_max_frames: int = 24,
+        fps: int | None = None,  # Sampling time interval (seconds) between frames
+        video_max_total_pixels: int | None = None,  # Max pixels within a frame
+        video_min_total_pixels: int | None = None,  # Min pixels within a frame
+        system_message: str | None = None,
+        add_vision_id: bool = True,
+        max_length: int | None = None,
+        oss_loader_cfg: OSSLoaderConfig | None = None,
+        debug: bool = False,
+        oss_time_log_thr: int = 10,  # 10s
+        tokenizer_hash: str | None = None,
+        hash: str | None = None,
     ):
         self.oss_loader = None
         self.debug = debug
@@ -208,7 +221,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         if fps is not None:  # default 2
             self.video_processor.fps = fps
 
-        self.merge_length = self.image_processor.merge_size ** 2
+        self.merge_length = self.image_processor.merge_size**2
         self.add_vision_id = add_vision_id
         self.rand_video_max_frames = rand_video_max_frames
         assert self.video_processor.min_frames <= rand_video_max_frames <= self.video_processor.max_frames, (
@@ -247,7 +260,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         super().__init__(tokenizer, self.chat_template, max_length, tokenizer_hash, hash)
 
     def _truncated_data_item(
-            self, input_ids: list[int], labels: list[int] | None = None, position_ids: torch.Tensor | None = None
+        self, input_ids: list[int], labels: list[int] | None = None, position_ids: torch.Tensor | None = None
     ):
         # 如果 input_ids 超过单条最大长度会被截断，那么 position_ids 也要被截断
         if position_ids is not None:
@@ -353,8 +366,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             grid_thw = [grid_thw]
         grid_thw_merged = [merged_thw.prod() // self.merge_length for merged_thw in grid_thw_merged]  # type: ignore
         messages = ChatMessages(messages=data_item["messages"])
-        replace_image_token(messages, self.chat_template, grid_thw_merged,
-                            add_vision_id=self.add_vision_id)  # type: ignore
+        replace_image_token(messages, self.chat_template, grid_thw_merged, add_vision_id=self.add_vision_id)  # type: ignore
         tokenized = messages.tokenize(self.tokenizer, self.chat_template)
         input_ids = tokenized["input_ids"]
         labels = tokenized["labels"]
@@ -440,12 +452,15 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             num_frames += self.video_processor.temporal_patch_size - 1
 
         grid_t = num_frames // self.video_processor.temporal_patch_size
-        grid_h, grid_w = resized_height // self.video_processor.patch_size, resized_width // self.video_processor.patch_size
+        grid_h, grid_w = (
+            resized_height // self.video_processor.patch_size,
+            resized_width // self.video_processor.patch_size,
+        )
         sum_media_grid_thw = grid_t * grid_h * grid_w // self.merge_length
         frame_seqlen = grid_h * grid_w // self.merge_length
 
         messages = ChatMessages(messages=data_item["messages"])
-        replace_video_token(messages, self.chat_template, [frame_seqlen]*grid_t, timestamps=timestamps)
+        replace_video_token(messages, self.chat_template, [frame_seqlen] * grid_t, timestamps=timestamps)
         tokenized = messages.tokenize(self.tokenizer, self.chat_template)
         input_ids = tokenized["input_ids"]
 
@@ -499,16 +514,9 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
 
         # 上面计算的 num_frames 是理论值，需要根据实际读取的数进行更新
         if self.oss_loader is not None:
-            image_list, frame_indices = self.oss_loader(
-                video_path,
-                image_type="video",
-                num_frames=num_frames
-            )
+            image_list, frame_indices = self.oss_loader(video_path, image_type="video", num_frames=num_frames)
         else:
-            image_list, frame_indices = read_qwen3_vl_video(
-                video_path,
-                num_frames=num_frames
-            )
+            image_list, frame_indices = read_qwen3_vl_video(video_path, num_frames=num_frames)
 
         video_data = torch.stack(image_list)  # num_patch,3,h,w
         num_frames = len(image_list)
@@ -516,15 +524,16 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         if origin_fps is not None and origin_video_length is not None:
             timestamps = calculate_timestamps(frame_indices, origin_fps, merge_size=self.video_processor.merge_size)
 
-        video_result = self.video_processor._preprocess([video_data],
-                                                        size=self.size,
-                                                        image_mean=tuple(self.video_processor.image_mean),
-                                                        image_std=tuple(self.video_processor.image_std),
-                                                        patch_size=self.video_processor.patch_size,
-                                                        temporal_patch_size=self.video_processor.temporal_patch_size,
-                                                        merge_size=self.video_processor.merge_size,
-                                                        return_tensors="pt"
-                                                        )
+        video_result = self.video_processor._preprocess(
+            [video_data],
+            size=self.size,
+            image_mean=tuple(self.video_processor.image_mean),
+            image_std=tuple(self.video_processor.image_std),
+            patch_size=self.video_processor.patch_size,
+            temporal_patch_size=self.video_processor.temporal_patch_size,
+            merge_size=self.video_processor.merge_size,
+            return_tensors="pt",
+        )
         image_tensor = video_result["pixel_values_videos"]
         if isinstance(image_tensor, list):
             image_tensor = image_tensor[0]
@@ -544,7 +553,10 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             max_pixels=self.video_processor.size["longest_edge"],
         )
         grid_t = num_frames // self.video_processor.temporal_patch_size
-        grid_h, grid_w = resized_height // self.video_processor.patch_size, resized_width // self.video_processor.patch_size
+        grid_h, grid_w = (
+            resized_height // self.video_processor.patch_size,
+            resized_width // self.video_processor.patch_size,
+        )
         sum_media_grid_thw_check = grid_t * grid_h * grid_w // self.merge_length
         assert sum_media_grid_thw == sum_media_grid_thw_check, (
             f"sum_media_grid_thw {sum_media_grid_thw} != sum_media_grid_thw_check {sum_media_grid_thw_check}, "
@@ -552,7 +564,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         )
 
         messages = ChatMessages(messages=data_item["messages"])
-        replace_video_token(messages, self.chat_template, [frame_seqlen]*grid_thw[0][0], timestamps=timestamps)
+        replace_video_token(messages, self.chat_template, [frame_seqlen] * grid_thw[0][0], timestamps=timestamps)
         tokenized = messages.tokenize(self.tokenizer, self.chat_template)
         input_ids = tokenized["input_ids"]
         labels = tokenized["labels"]
@@ -574,7 +586,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             f"data_name: {self.data_name}, data_id: {data_item.get('id', '')}. Discard this data."
         )
 
-        num_img_tokens = sum_media_grid_thw + num_frames*2
+        num_img_tokens = sum_media_grid_thw + num_frames * 2
 
         ret = QwenVL3DataItem(
             input_ids=input_ids,
@@ -606,7 +618,7 @@ class Qwen3VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
     add_vision_id: bool = True
 
     def build(
-            self, tokenizer, tokenizer_hash: str | None = None, anno_name: str = "", **kwargs
+        self, tokenizer, tokenizer_hash: str | None = None, anno_name: str = "", **kwargs
     ) -> Qwen3VLTokenizeFunction:
         return Qwen3VLTokenizeFunction(
             tokenizer,

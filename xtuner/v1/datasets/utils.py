@@ -5,8 +5,8 @@ import tempfile
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar
-import numpy as np
 
+import numpy as np
 import xxhash
 from PIL import Image
 from typing_extensions import TypedDict
