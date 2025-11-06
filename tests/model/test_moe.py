@@ -19,7 +19,6 @@ class TestMoE:
         router_config = NoAuxRouterConfig(
             scoring_func="sigmoid",
             router_scaling_factor=1.0,
-            routed_scaling_factor=1.0,
             n_group=8,
             topk_group=4,
             norm_topk_prob=True,
@@ -42,7 +41,6 @@ class TestMoE:
             hidden_act="silu",
             attention=attention_config,
             tie_word_embeddings=False,
-            training_dtype="bf16",
             n_routed_experts=32,
             n_shared_experts=1,
             num_experts_per_tok=2,
@@ -89,7 +87,6 @@ class TestDistributedMoE(DeterministicDDPTestCase):
         router_config = NoAuxRouterConfig(
             scoring_func="sigmoid",
             router_scaling_factor=1.0,
-            routed_scaling_factor=1.0,
             n_group=8,
             topk_group=4,
             norm_topk_prob=True,
@@ -112,7 +109,6 @@ class TestDistributedMoE(DeterministicDDPTestCase):
             hidden_act="silu",
             attention=attention_config,
             tie_word_embeddings=False,
-            training_dtype="bf16",
             n_routed_experts=32,
             n_shared_experts=n_shared_experts,
             num_experts_per_tok=2,

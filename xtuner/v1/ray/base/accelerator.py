@@ -5,7 +5,7 @@ import ray
 import torch
 import torch.distributed as dist
 from cyclopts import Parameter
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from ray.util.placement_group import PlacementGroup, placement_group, placement_group_table
 from typing_extensions import Annotated
 
@@ -49,6 +49,7 @@ class AcceleratorResourcesConfig(BaseModel):
         )
     """
 
+    model_config = ConfigDict(extra="forbid")
     accelerator: Annotated[AcceleratorType, Parameter(help="Architecture of accelerator to use (e.g., 'GPU', 'NPU').")]
     num_workers: Annotated[int, Parameter(help="Number of accelerators in the placement group.")]
     num_cpus_per_worker: Annotated[float, Parameter(help="Number of CPUs to allocate for the placement group.")] = 12

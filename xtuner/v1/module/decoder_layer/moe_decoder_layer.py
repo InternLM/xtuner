@@ -3,7 +3,7 @@ from typing import Literal, Protocol, TypeAlias
 
 import torch
 import torch.nn as nn
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from torch.autograd.function import Function
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
@@ -39,6 +39,7 @@ class MoEActFnProtocol(Protocol):
 
 
 class MoEActFnConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     act_type: Literal["clipped_swiglu", "swiglu"] = "swiglu"
 
     clip_alpha: float | None = None

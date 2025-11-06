@@ -4,7 +4,7 @@ import inspect
 from typing import Annotated, Union
 
 from cyclopts import Parameter
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1.datasets.data_item import CacheItem, DataItem
@@ -76,6 +76,7 @@ class PretrainTokenizeFunction(CachableTokenizeFunction[DataItem]):
 
 
 class PretrainTokenizeFunctionConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     add_eos_token: Annotated[bool, Parameter(group="tokenize_fn")] = True
     add_bos_token: Annotated[bool, Parameter(group="tokenize_fn")] = False
     hash: Annotated[str | None, Parameter(group="tokenize_fn")] = None

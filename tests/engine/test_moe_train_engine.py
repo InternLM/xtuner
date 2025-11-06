@@ -240,7 +240,6 @@ class TestMoEEngine(DeterministicDDPTestCase):
             torch_compile=False,
             cpu_offload=False,
             ep_size=ep_size,
-            max_length=8192,
             hsdp_sharding_size=hsdp_sharding_size,
         )
         engine = TrainEngine(

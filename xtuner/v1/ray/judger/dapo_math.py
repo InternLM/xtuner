@@ -1,7 +1,7 @@
 import re
 from typing import Any, List, Optional, Tuple
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from .native import NativeJudger
 
@@ -292,6 +292,7 @@ def compute_reward(response, label, extra_info):
 
 
 class DapoMathJudgerConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     judger_name: str = "dapo_math"
     eos_token: List[str] | str
     enable_overlong_buffer: bool

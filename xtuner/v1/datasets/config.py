@@ -37,7 +37,7 @@ logger = get_logger()
 
 # TODO: Enhance the configurable fields of dataset config
 class DatasetConfig(BaseModel):
-    model_config = ConfigDict(title="Base dataset config for xtuner", extra="allow")
+    model_config = ConfigDict(title="Base dataset config for xtuner", extra="forbid")
     anno_path: Annotated[str | Path, Parameter(group="dataset")]
     cache_dir: str | Path | None = None
     cache_tag: str | None = None
@@ -262,7 +262,7 @@ class BaseDataloaderConfig(BaseModel):
 
 
 class DataloaderConfig(BaseDataloaderConfig):
-    model_config = ConfigDict(title="Dataloader config for xtuner", extra="allow", arbitrary_types_allowed=True)
+    model_config = ConfigDict(title="Dataloader config for xtuner", extra="forbid", arbitrary_types_allowed=True)
 
     dataset_config_list: DatasetConfigList | None = None
 
