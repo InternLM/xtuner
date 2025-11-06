@@ -1,6 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 
-import hashlib
 import os
 import time
 from typing import Literal
@@ -16,7 +15,7 @@ from xtuner.v1.model import InternS1BaseConfig, InternVLBaseConfig
 from xtuner.v1.utils import get_logger
 
 from ..data_item import CacheItem, InternS1DataItem
-from ..utils import apply_exif_orientation
+from ..utils import apply_exif_orientation, generate_random_int_from_dict
 from .base_mllm_tokenize_fn import (
     IMAGE_TOKEN_ALIAS,
     BaseMLLMTokenizeFnConfig,
@@ -31,34 +30,6 @@ from .intern_s1_vl_utils import InternS1VLOSSLoader, pil_loader, read_interns1_v
 
 
 logger = get_logger()
-
-
-def dict_to_sorted_string(input_dict):
-    """Convert a potentially nested dictionary into a sorted string
-    representation."""
-
-    def process_value(value):
-        if isinstance(value, dict):
-            return dict_to_sorted_string(value)
-        elif isinstance(value, list):
-            return [process_value(v) for v in value]
-        return value
-
-    sorted_items = sorted((k, process_value(v)) for k, v in input_dict.items())
-    return str(sorted_items)
-
-
-def generate_random_int_from_dict(input_dict, min_num, max_num):
-    """Generate a deterministic random integer based on a nested dictionary
-    (using stable hashing)"""
-    dict_string = dict_to_sorted_string(input_dict)
-    input_bytes = dict_string.encode("utf-8")
-
-    hash_hex = hashlib.md5(input_bytes).hexdigest()
-    hash_int = int(hash_hex, 16)
-
-    rng = np.random.default_rng(hash_int)
-    return rng.integers(min_num, max_num + 1)
 
 
 def replace_video_token(messages: ChatMessages, chat_template: HybridChatTemplate, num_image_token_list: list[int]):
@@ -359,6 +330,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
 
     def calc_num_tokens_video_get_item(self, data_item) -> CacheItem:
         # TODO: 目前只支持一个视频
+        assert len(self._video_path) == 1, "Only one video is supported for now."
         # 根据 data_item 生成一个确定性的随机整数
         random_frame_num = generate_random_int_from_dict(data_item, self.min_num_frames, self.max_num_frames)
         # 根据采样的帧数（min_num_frames, max_num_frames+1），计算token数量，实际可能采样不到这么多帧（比如视频一共只有10帧），算出来num_tokens可能会偏大
