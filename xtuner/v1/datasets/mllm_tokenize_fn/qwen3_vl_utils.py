@@ -10,9 +10,10 @@ import cv2
 import imageio
 import numpy as np
 from PIL import Image
-
+from transformers.video_utils import to_channel_dimension_format
+from transformers.image_utils import ChannelDimension
+import torch
 from xtuner.v1.utils.oss_utils import get_oss_backend
-
 
 try:
     from decord import VideoReader
@@ -37,45 +38,14 @@ def sort_frames(frame_paths):
     return sorted(frame_paths, key=lambda x: extract_frame_number(os.path.basename(x)))
 
 
-def get_frame_indices(num_frames, vlen, sample="rand", fix_start=None, input_fps=1, max_num_frames=-1):
-    if sample in ["rand", "middle"]:  # uniform sampling
-        acc_samples = min(num_frames, vlen)
-        # split the video into `acc_samples` intervals, and sample from each interval.
-        intervals = np.linspace(start=0, stop=vlen, num=acc_samples + 1).astype(int)
-        ranges = []
-        for idx, interv in enumerate(intervals[:-1]):
-            ranges.append((interv, intervals[idx + 1] - 1))
-        if sample == "rand":
-            try:
-                frame_indices = [random.choice(range(x[0], x[1])) for x in ranges]
-            except Exception:
-                frame_indices = np.random.permutation(vlen)[:acc_samples]
-                frame_indices.sort()
-                frame_indices = list(frame_indices)
-        elif fix_start is not None:
-            frame_indices = [x[0] + fix_start for x in ranges]
-        elif sample == "middle":
-            frame_indices = [(x[0] + x[1]) // 2 for x in ranges]
-        else:
-            raise NotImplementedError
-
-        if len(frame_indices) < num_frames:  # padded with last frame
-            padded_frame_indices = [frame_indices[-1]] * num_frames
-            padded_frame_indices[: len(frame_indices)] = frame_indices
-            frame_indices = padded_frame_indices
-    elif "fps" in sample:  # fps0.5, sequentially sample frames at 0.5 fps
-        output_fps = float(sample[3:])
-        duration = float(vlen) / input_fps
-        delta = 1 / output_fps  # gap between frames, this is also the clip length each frame represents
-        frame_seconds = np.arange(0 + delta / 2, duration + delta / 2, delta)
-        frame_indices = np.around(frame_seconds * input_fps).astype(int)
-        frame_indices = [e for e in frame_indices if e < vlen]
-        if 0 < max_num_frames < len(frame_indices):
-            frame_indices = frame_indices[:max_num_frames]
-            # frame_indices = np.linspace(0 + delta / 2, duration + delta / 2, endpoint=False, num=max_num_frames)
-    else:
-        raise ValueError
-    return frame_indices
+def numpy_to_tensor(frames):
+    result = []
+    for frame in frames:
+        video = to_channel_dimension_format(frame, ChannelDimension.FIRST)
+        # not using F.to_tensor as it doesn't handle (C, H, W) numpy arrays
+        video = torch.from_numpy(video).contiguous()
+        result.append(video)
+    return result
 
 
 def read_frames_folder(
@@ -110,7 +80,7 @@ def read_frames_folder(
         frame_indices = np.linspace(0, vlen - 1, num_frames).round().astype(int)
     else:
         frame_indices = np.arange(vlen)
-    frames = [frames[i] for i in frame_indices]
+    frames = numpy_to_tensor([frames[i] for i in frame_indices])
     return frames, oss_read_time, vlen, frame_indices
 
 
@@ -135,6 +105,7 @@ def read_frames_gif(video_path, num_frames, client=None):
             frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2RGB).astype(np.uint8)
             frame = Image.fromarray(frame)
             frames.append(frame)
+    frames = numpy_to_tensor(frames)
     return frames, frame_indices
 
 
@@ -161,7 +132,7 @@ def read_frames_decord(
     frame_indices = np.linspace(0, vlen - 1, num_frames).round().astype(int)
     frames = video_reader.get_batch(frame_indices).asnumpy()  # (T, H, W, C), np.uint8
     video_get_batch_time = time.time() - start_time
-    frames = [Image.fromarray(frames[i]) for i in range(frames.shape[0])]
+    frames = numpy_to_tensor(frames)
     return frames, oss_read_time, video_get_batch_time, vlen, frame_indices
 
 

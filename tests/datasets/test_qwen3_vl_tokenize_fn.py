@@ -123,7 +123,7 @@ class TestMLLMTokenizeFn(TestCase):
         with open(data_path) as f:
             for i, line in enumerate(f):
                 if i not in total_index:
-                    break
+                    continue
                 raw_data = json.loads(line)
 
                 ret = self.tokenize_fn(raw_data, media_root=VIDEO_ROOT)
@@ -135,6 +135,7 @@ class TestMLLMTokenizeFn(TestCase):
                 messages = raw_data['messages']
                 messages[0]['content'][0]['type'] = 'video'
                 messages[0]['content'][0]['path'] = 'tests/' + messages[0]['content'][0]['video_url']['url']
+                messages[0]['content'][1]['text'] = messages[0]['content'][1]['text'].replace('<VIDEO_CONTEXT>', '')
                 del messages[0]['content'][0]['video_url']
                 for msg in messages:
                     if not isinstance(msg['content'], list):
@@ -143,8 +144,8 @@ class TestMLLMTokenizeFn(TestCase):
                 ret = self.processor.apply_chat_template(messages, add_generation_prompt=False, tokenize=True,
                                                          return_dict=True, return_tensors="pt")
                 input_ids_hf = ret['input_ids'][0]
-                pixel_values_hf = ret['pixel_values_videos'][0]
-                image_grid_thw_hf = ret['video_grid_thw'][0]
-                self.assertEqual(input_ids_xtuner, input_ids_hf)
+                pixel_values_hf = ret['pixel_values_videos']
+                image_grid_thw_hf = ret['video_grid_thw']
+                self.assertEqual(input_ids_xtuner, input_ids_hf.tolist())
                 self.assertTrue(torch.allclose(pixel_values_xtuner, pixel_values_hf))
                 self.assertTrue(torch.allclose(image_grid_thw_xtuner, image_grid_thw_hf))
