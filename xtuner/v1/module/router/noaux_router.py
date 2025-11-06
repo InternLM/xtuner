@@ -112,6 +112,10 @@ class NoAuxRouter(nn.Module, RouterProtocol):
         _, topk_idx = torch.topk(scores_for_choice, k=self.top_k, dim=-1)
         topk_weight = scores.gather(1, topk_idx)
 
+        # The returned `router_weights` is only used for computing balance loss
+        # It should be normalized
+        scores_for_choice = scores_for_choice / torch.sum(scores_for_choice, dim=-1, keepdim=True)
+
         if self.top_k > 1 and self.norm_topk_prob:
             denominator = topk_weight.sum(dim=-1, keepdim=True) + 1e-20
             topk_weight = topk_weight / denominator
@@ -169,6 +173,10 @@ class NoAuxGroupedRouter(NoAuxRouter):
         topk_idx = topk_idx.view(seq, -1)  # [seq, top_k]
         topk_weight = scores_for_choice.gather(1, topk_idx)  # [seq, n_groups]
         scores_for_choice = scores_for_choice.view(seq, self.n_routed_experts)
+
+        # The returned `router_weights` is only used for computing balance loss
+        # It should be normalized
+        scores_for_choice = scores_for_choice / torch.sum(scores_for_choice, dim=-1, keepdim=True)
 
         if self.top_k > 1 and self.norm_topk_prob:
             denominator = topk_weight.sum(dim=-1, keepdim=True) + 1e-20
