@@ -5,11 +5,12 @@ import os
 from collections.abc import Sequence
 from typing import Optional, Union
 import math
-
+from packaging import version
 import numpy as np
 import torch
 from pydantic import ConfigDict
 
+import transformers
 from transformers import AutoProcessor, PreTrainedTokenizer
 from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
 from xtuner.v1.data_proto.messages import ChatMessages
@@ -19,8 +20,8 @@ from xtuner.v1.utils import get_logger
 from ..data_item import CacheItem, QwenVL3DataItem
 from ..utils import apply_exif_orientation, generate_random_int_from_dict
 from .base_mllm_tokenize_fn import BaseMLLMTokenizeFnConfig, BaseMLLMTokenizeFunction, load_image, replace_image_token, \
-    IMAGE_TOKEN_ALIAS, OSSLoaderConfig
-from .qwen3_vl_utils import Qwen3VLOSSLoader,read_qwen3_vl_video
+    IMAGE_TOKEN_ALIAS, OSSLoaderConfig, get_image_path
+from .qwen3_vl_utils import Qwen3VLOSSLoader, read_qwen3_vl_video
 from .qwenvl_rope2d import get_rope_index_3
 
 logger = get_logger()
@@ -177,6 +178,9 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
                 oss_time_log_thr=self.oss_time_log_thr,
                 **oss_loader_cfg.backend_kwargs,
             )
+        version_str = transformers.__version__
+        if version.parse(version_str) < version.parse("4.57.0"):
+            raise ValueError(f"请升级 transformers 到 4.57.0 及其以上版本，当前版本为 {version_str}")
 
         _processor = AutoProcessor.from_pretrained(processor_path)
         self.image_processor = _processor.image_processor
@@ -253,9 +257,13 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
 
     def process_image_unified(self, image_file: str, media_root: str = ""):
         processor = copy.deepcopy(self.image_processor)
-        image = load_image(os.path.join(media_root, image_file))
+        image_path_ = get_image_path(image_file, media_root)
+        if self.oss_loader is not None and "s3://" in image_path_:
+            image = self.oss_loader.client.get(image_path_)
+        else:
+            assert "s3://" not in image_path_, "Please use oss_loader_cfg to load image from s3."
+            image = load_image(image_path_)
         image = apply_exif_orientation(image)
-
         visual_processed = processor.preprocess(image, return_tensors="pt")
         image_tensor = visual_processed["pixel_values"]
         if isinstance(image_tensor, list):
