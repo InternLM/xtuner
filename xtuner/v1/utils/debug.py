@@ -7,13 +7,15 @@ FOUND_NAN = False
 def register_grad_hook(tensor: torch.Tensor, message):
     if (grad_fn := tensor.grad_fn) is not None:
         message = f"{tensor.grad_fn}: {message}"
-        grad_fn.register_hook(get_grad_hook(message))
+        grad_fn.register_hook(get_grad_hook(message, tensor.grad_fn))
 
 
-def get_grad_hook(message: str):
-    def hook(g_in: tuple, g_out: tuple):
+def get_grad_hook(message: str, grad_fn):
+    def hook(g_out: tuple, g_in: tuple):
         global FOUND_NAN
-        # torch.distributed.breakpoint()
+        nextfunc = grad_fn.next_functions
+        print(f"nextfunc: {nextfunc}")
+        torch.distributed.breakpoint()
         # if torch.distributed.get_rank() == 0:
         if FOUND_NAN:
             return

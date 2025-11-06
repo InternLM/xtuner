@@ -76,7 +76,10 @@ class BalancingLoss(nn.Module):
             routing_weights_mean_global = routing_weights.mean(dim=1)
         loss = scale_global * (tokens_per_expert_global * routing_weights_mean_global).sum(-1)
         loss = loss.sum()
-
+        # from xtuner.v1.profiler.prober import ProberList
+        # ProberList.record_tensor(routing_weights_mean_global, "[balancing_loss][after]routing_weights_mean_global")
+        # ProberList.record_tensor(tokens_per_expert_global, "[balancing_loss][after]tokens_per_expert_global")
+        # ProberList.record_tensor(scale_global, "[balancing_loss][after]scale_global")
         return loss * self.loss_weight
 
 
@@ -92,6 +95,7 @@ def z_loss(router_logits: torch.Tensor, global_average: bool = False):
         unmasked_num_global = all_reduce(unmasked_num_rank, "sum", dist.group.WORLD)  # type: ignore
         world_size = dist.get_world_size()
         z_loss = z_loss * unmasked_num * world_size / unmasked_num_global
+
     return z_loss
 
 

@@ -11,6 +11,7 @@ from typing_extensions import Self
 
 from xtuner.v1.loss import BaseLossConfig, BaseLossContext, BaseLossKwargs
 
+# from xtuner.v1.profiler.prober import ProberList
 from .utils import sp_gather, sp_split
 
 
@@ -210,7 +211,8 @@ class CELossContext(BaseLossContext[CELossContextInputItem]):
             # liger kernel dont support reduction=="none"
             # step 2.b in the loss calculation: sum the loss over all tokens, then multiply the loss weight (i.e. divide by the global_denominator)
             loss = self.liger_loss_fct(head_weight, hidden_states, shifted_labels)
+            # ProberList.record_tensor(loss, "[lm_head.ce_loss][before calibration]loss")
             mask = loss_weight != 0
-            w = loss_weight.sum() / mask.sum()  # equal to the global_denominator
+            w = loss_weight.sum() / mask.sum()  # w equals to 1/global_denominator
             loss = loss * w
             return loss, (None, {})

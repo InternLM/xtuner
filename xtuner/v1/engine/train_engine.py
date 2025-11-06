@@ -3,13 +3,12 @@ import os
 import threading
 from concurrent.futures import wait
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, cast
+from typing import Any, Dict, Optional, cast
 
 import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
 from safetensors import safe_open
-from torch.distributed._tensor import DTensor, Replicate, Shard
 from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
     get_model_state_dict,
@@ -18,10 +17,9 @@ from torch.distributed.checkpoint.state_dict import (
     set_optimizer_state_dict,
 )
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.tensor.placement_types import Placement
+from torch.nn.utils.clip_grad import _no_grad
 from torch.utils._foreach_utils import (
     _device_has_foreach_support,
-    _has_foreach_support,
 )
 
 from xtuner.v1.config import FSDPConfig, OptimConfig
@@ -30,7 +28,9 @@ from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.model.base import BaseModel, ModelItem, TransformerConfig
 from xtuner.v1.model.utils import ModelForwardExtraLogInfo
 from xtuner.v1.module.router import NoAuxRouterConfig
+from xtuner.v1.profiler.prober import ProberList
 from xtuner.v1.utils import get_device, get_logger, get_torch_device_module, profile_time_and_memory
+from xtuner.v1.utils.grad_norm import cal_grad_norm
 
 
 logger = get_logger()
@@ -230,7 +230,10 @@ class TrainEngine:
             self._count += 1
 
         train_engine_extra_info = ModelForwardExtraLogInfo()
+        micro_batch_iter = 0
         for i in range(0, len(data_batches), intra_layer_micro_batch):
+            ProberList.set_micro_batch_iter(micro_batch_iter)
+            micro_batch_iter += 1
             data_batch = data_batches[i : i + intra_layer_micro_batch]
             seq_ctx_list = []
             loss_ctx_list = []
@@ -282,6 +285,8 @@ class TrainEngine:
 
             del output
             loss.backward()
+            # call dump_forward_records after backward to record the recomputed activations
+            ProberList.after_micro_iter_forward()
             step_loss += loss.detach().clone()
 
         if moe_need_update_bias:
@@ -315,75 +320,25 @@ class TrainEngine:
     def init_model_weights(self):
         self.model.init_weights()
 
-    @staticmethod
-    def group_tensors_by_device_mesh_and_placements(tensors: List[torch.Tensor]):
-        grouped_tensors: Dict[Tuple[DeviceMesh, Tuple[Placement, ...]], List[torch.Tensor]] = {}
-        for tensor in tensors:
-            assert isinstance(tensor, DTensor)
-            key = (tensor.device_mesh, tensor.placements)
-            if key in grouped_tensors:
-                grouped_tensors[key].append(tensor)
-            else:
-                grouped_tensors[key] = [tensor]
-        return grouped_tensors
-
-    def cal_total_norm(self, tensors: List[DTensor], norm_type: float = 2.0, foreach: Optional[bool] = None):
-        norm_type = float(norm_type)
-        if len(tensors) == 0:
-            return torch.tensor(0.0)
-
-        device_mesh: DeviceMesh = tensors[0].device_mesh
-        placements = tensors[0].placements
-        device = tensors[0].device
-        norms: Tuple[DTensor, ...]
-        if (foreach is None and _has_foreach_support(tensors, device)) or (  # type: ignore
-            foreach and _device_has_foreach_support(device)
-        ):
-            norms = torch._foreach_norm(tensors, norm_type)  # type: ignore
-        elif foreach:
-            raise RuntimeError(f"foreach=True was passed, but can't use the foreach API on {device.type} tensors")
-        else:
-            norms = tuple(torch.linalg.vector_norm(g, norm_type) for g in tensors)
-
-        local_norm = torch.linalg.vector_norm(
-            torch.stack([norm.to_local() for norm in norms]), norm_type, dtype=torch.float32
-        )
-        if norm_type == 2:
-            local_norm_squared = local_norm**2
-            for i, placement in enumerate(placements):
-                if isinstance(placement, Shard):
-                    # When using ep + fsdp, the placement corresponding to fsdp mesh is _StridedShard
-                    # isinstance(_StridedShard, Shard) is True
-                    dist.all_reduce(local_norm_squared, group=device_mesh.get_group(i))
-                elif isinstance(placement, Replicate):
-                    pass
-                else:
-                    raise ValueError(f"Unsupported placement type {placement} in clip_grad_norm")
-            global_norm = local_norm_squared**0.5
-        else:
-            raise NotImplementedError
-        return global_norm
-
-    def clip_grad_norm(self):
+    @_no_grad
+    def clip_grad_norm(self, do_clip: bool = True, dtype=torch.float32):
+        ProberList.before_clip_grad_norm(self.model)
         self.model.scale_and_reduce_grad()
         params = self.model.trainable_parameters()
         grads = [p.grad for _, p in params if p.grad is not None]
-        grouped_grads = self.group_tensors_by_device_mesh_and_placements(grads)
-        total_norms = []
-        for grads in grouped_grads.values():
-            total_norm = self.cal_total_norm(grads, norm_type=2.0, foreach=True)
-            total_norms.append(total_norm)
-        grad_norm = torch.linalg.vector_norm(torch.stack(total_norms), ord=2.0, dtype=torch.float32)
-        clip_coef = self.optim_cfg.max_grad_norm / (grad_norm + 1e-6)
-        clip_coef_clamped = torch.clamp(clip_coef, max=1.0)
-        for grads in grouped_grads.values():
-            device = grads[0].device
-            if _device_has_foreach_support(device):
-                torch._foreach_mul_(grads, clip_coef_clamped.to(device))
-            else:
-                clip_coef_clamped_device = clip_coef_clamped.to(device)
-                for g in grads:
-                    g.mul_(clip_coef_clamped_device)
+        grad_norm, grouped_grads = cal_grad_norm(grads, dtype=dtype)
+        if do_clip:
+            clip_coef = self.optim_cfg.max_grad_norm / (grad_norm + 1e-6)
+            clip_coef_clamped = torch.clamp(clip_coef, max=1.0)
+            for grads in grouped_grads.values():
+                device = grads[0].device
+                if _device_has_foreach_support(device):
+                    torch._foreach_mul_(grads, clip_coef_clamped.to(device))
+                else:
+                    clip_coef_clamped_device = clip_coef_clamped.to(device)
+                    for g in grads:
+                        g.mul_(clip_coef_clamped_device)
+        ProberList.after_clip_grad_norm(self.model, grad_norm)
         return grad_norm
 
     def step_optimizer(self, grad_norm):
