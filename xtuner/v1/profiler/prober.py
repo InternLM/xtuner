@@ -357,7 +357,7 @@ class ProberList:
             if len(args) >= 1:
                 router_logits = args[0]
             else:
-                router_logits = kwargs["router_logits"]
+                router_logits = kwargs["router_weights"]
             ProberList.before_balancing_loss(name, router_logits)
             loss = forward(*args, **kwargs)
             ProberList.after_balancing_loss(name, loss)
