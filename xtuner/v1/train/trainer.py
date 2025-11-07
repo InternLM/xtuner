@@ -1197,6 +1197,7 @@ class Trainer:
             return
 
         save_hf_path = self.exp_dir / f"hf-{self.cur_step}"
+        latest_hf_link = self.exp_dir / "hf-latest"
 
         self.meta.latest_exp.hf_checkpoint_list.append(str(save_hf_path))
 
@@ -1210,6 +1211,10 @@ class Trainer:
         self._engine.save_hf(str(save_hf_path))
         if isinstance(self.tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast)):
             self.tokenizer.save_pretrained(str(save_hf_path))
+        # 将 latest_hf_link 指向 save_hf_path
+        if self.rank == 0:
+            latest_hf_link.unlink(missing_ok=True)
+            latest_hf_link.symlink_to(save_hf_path.absolute(), target_is_directory=True)
 
         meta_path = self.work_dir / self._META_PATH
 
