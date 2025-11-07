@@ -59,8 +59,8 @@ class RolloutWorker(SingleAcceleratorWorker):
         self.server_func: Callable
         self.endpoints: dict[str, str] = dict()
         limits = httpx.Limits(
-            max_connections=config.rollout_max_batch_size * config.allow_over_concurrency,
-            max_keepalive_connections=int(config.rollout_max_batch_size / 5),
+            max_connections=config.rollout_max_batch_size_per_instance * config.allow_over_concurrency_ratio,
+            max_keepalive_connections=int(config.rollout_max_batch_size_per_instance / 5),
         )
         self.client = httpx.AsyncClient(limits=limits, timeout=self.config.rollout_timeout)
         self.paused = False

@@ -40,8 +40,8 @@ class RolloutConfig(BaseModel):
         gpu_memory_utilization (float): GPU memory utilization ratio. Defaults to 0.85.
         random_seed (int): Random seed for reproducible generation. Defaults to 1024.
         rollout_cross_node_comm (bool): Enable cross-node communication. Defaults to False.
-        rollout_max_batch_size (int): Maximum batch size for the rollout worker. If not set, it will be determined automatically based on `context_length`. Defaults to 512.
-        allow_over_concurrency (float): Factor to allow over-concurrency in HTTP requests for the rollout worker to improve GPU utilization. Defaults to 1.2.
+        rollout_max_batch_size_per_instance (int): Maximum batch size for the rollout worker. If not set, it will be determined automatically based on `context_length`. Defaults to 512.
+        allow_over_concurrency_ratio (float): Factor to allow over-concurrency in HTTP requests for the rollout worker to improve GPU utilization. Defaults to 1.2.
         tensor_parallel_size (int): GPUs per inference engine (tensor parallelism). Defaults to 1.
         expert_parallel_size (int): Experts per inference engine (expert parallelism). Defaults to 1.
         enable_chunked_prefill (bool): Enable chunked prefill for memory efficiency. Defaults to False.
@@ -110,14 +110,14 @@ class RolloutConfig(BaseModel):
             help="Whether to enable cross-node communication for the rollout worker.",
         ),
     ] = False
-    rollout_max_batch_size: Annotated[
+    rollout_max_batch_size_per_instance: Annotated[
         int,
         Parameter(
             group=infer_group,
             help="Maximum batch size for the rollout worker. If not set, it will be determined automatically based on the model and GPU memory.",
         ),
     ] = 512
-    allow_over_concurrency: Annotated[
+    allow_over_concurrency_ratio: Annotated[
         float,
         Parameter(
             group=infer_group,
@@ -243,18 +243,16 @@ class RolloutConfig(BaseModel):
             kwargs["launch_server_method"] = "ray"
             kwargs["rollout_cross_node_comm"] = True
 
-        if "rollout_max_batch_size" not in kwargs:
+        if "rollout_max_batch_size_per_instance" not in kwargs:
             context_length = kwargs["context_length"]
 
             # TODO(@duanyanhui): Provide better suggestions for different models/input-output lengths
-            if context_length <= 2048:
-                kwargs["rollout_max_batch_size"] = 1024
-            elif context_length <= 4096:
-                kwargs["rollout_max_batch_size"] = 512
+            if context_length <= 4096:
+                kwargs["rollout_max_batch_size_per_instance"] = 1024
             elif context_length <= 8192:
-                kwargs["rollout_max_batch_size"] = 256
+                kwargs["rollout_max_batch_size_per_instance"] = 512
             else:
-                kwargs["rollout_max_batch_size"] = 128
+                kwargs["rollout_max_batch_size_per_instance"] = 128
 
         super().__init__(**kwargs)
         self.worker_log_dir.mkdir(parents=True, exist_ok=True)

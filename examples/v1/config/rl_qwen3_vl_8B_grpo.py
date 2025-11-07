@@ -75,7 +75,7 @@ rollout_config = RolloutConfig(
     expert_parallel_size=rollout_ep_size,
     gpu_memory_utilization=0.75,
     context_length = max_response_length + max_prompt_length,
-    # rollout_max_batch_size=64,  # optional, will be determined automatically if not set
+    # rollout_max_batch_size_per_instance=64,  # optional, will be determined automatically if not set
 )
 
 # sampling params

@@ -78,7 +78,7 @@ rollout_config = RolloutConfig(
     extra_rollout_config={
             "sglang_grammar_backend": 'none',
         }
-    # rollout_max_batch_size=16,  # optional
+    # rollout_max_batch_size_per_instance=16,  # optional
 )
 
 # sampling params

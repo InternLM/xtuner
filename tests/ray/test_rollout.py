@@ -93,7 +93,6 @@ class TestRollout(unittest.TestCase):
             },
         ]
         self.dataloader_cfg = DataloaderConfig(
-            pack_max_length=self.max_prompt_length+self.max_response_length,
             collator='fake_collator',
             pack_level='none',
             group_by_length=False,

@@ -122,8 +122,12 @@ class DataFlow:
         self.logger.info(f"DataFlow connected to active rollout workers url: {self.worker_url_list}")
         rollout_config = rollout_info["rollout_config"]
         max_concurrent = int(
-            (rollout_config.rollout_max_batch_size * len(self.worker_url_list) / self.config.prompt_repeat_k)
-            * rollout_config.allow_over_concurrency
+            (
+                rollout_config.rollout_max_batch_size_per_instance
+                * len(self.worker_url_list)
+                / self.config.prompt_repeat_k
+            )
+            * rollout_config.allow_over_concurrency_ratio
         )
 
         if self.config.max_concurrent is None:
@@ -133,7 +137,7 @@ class DataFlow:
             )
         else:
             self.logger.warning(
-                f"Dataflow max_concurrent is set to {self.config.max_concurrent}, we proposed to set max_concurrent to {max_concurrent} based on rollout_max_batch_size."
+                f"Dataflow max_concurrent is set to {self.config.max_concurrent}, we proposed to set max_concurrent to {max_concurrent} based on rollout_max_batch_size_per_instance."
             )
 
     def get_train_dataset_length(self):
