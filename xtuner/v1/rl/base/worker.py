@@ -412,7 +412,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         logger_msg = f"Rollout {rollout_idx}: "
 
         if len(rollout_logprobs_list) > 0:
-            all_diffs_tensor = torch.stack([torch.tensor(d).to(DEVICE) for d in all_diffs])  # n, 4
+            all_diffs_tensor = torch.stack([torch.tensor(d).to(DEVICE) for d in all_diffs]).to(dtype=torch.float32)  # n, 4
             min_diff_val = torch.min(all_diffs_tensor[:, 0]).item()
             max_diff_val = torch.max(all_diffs_tensor[:, 1]).item()
             mean_diff_val = torch.mean(all_diffs_tensor[:, 2]).item()
@@ -856,21 +856,47 @@ class TrainingWorker(SingleAcceleratorWorker):
         cpu_mesh = self.rollout_device_mesh["engine_parallel"]
         cpu_group = cpu_mesh.get_group()
         head_rank = cpu_mesh.mesh[0].item()
+        num_tensors = len(state_dict)
 
         if self.rollout_cfg_info["backend"] == "pytorch":
             # TODO(chenchiyu): remove lmdeploy related code
             from lmdeploy.utils import serialize_state_dict
+            try:
+                from lmdeploy.utils import FlattenedTensorBucket
+
+                use_flattened_tensor_bucket = True
+            except Exception:
+                use_flattened_tensor_bucket = False
 
             if self.rollout_cfg_info["backend"] == "pytorch" and self.rollout_cfg_info["tp"] > 1:
                 serialized_data = [None] * self.rollout_cfg_info["tp"]
+                if use_flattened_tensor_bucket and num_tensors > 0:
+                    flattened_tensor_bucket = FlattenedTensorBucket(named_tensors=list(state_dict.items()))
+                    metadata = flattened_tensor_bucket.get_metadata()
+                    flattened_tensor_data = {
+                        "flattened_tensor": flattened_tensor_bucket.get_flattened_tensor(),
+                        "metadata": metadata,
+                    }
+                    tp_serialized_data = serialize_state_dict(flattened_tensor_data)
+                else:
+                    tp_serialized_data = serialize_state_dict(state_dict)
                 dist.gather_object(
-                    serialize_state_dict(state_dict),
+                    tp_serialized_data,
                     serialized_data if dist.get_rank() == head_rank else None,
                     dst=head_rank,
                     group=cpu_group,
                 )
             elif self.rollout_cfg_info["backend"] == "pytorch":
-                serialized_data = serialize_state_dict(state_dict)
+                if use_flattened_tensor_bucket and num_tensors > 0:
+                    flattened_tensor_bucket = FlattenedTensorBucket(named_tensors=list(state_dict.items()))
+                    metadata = flattened_tensor_bucket.get_metadata()
+                    flattened_tensor_data = {
+                        "flattened_tensor": flattened_tensor_bucket.get_flattened_tensor(),
+                        "metadata": metadata,
+                    }
+                    serialized_data = serialize_state_dict(flattened_tensor_data)
+                else:
+                    serialized_data = serialize_state_dict(state_dict)
             else:
                 # for turbomind backend, only head_rank should serialize data
                 serialized_data = serialize_state_dict(state_dict) if dist.get_rank() == head_rank else None
@@ -952,6 +978,15 @@ class TrainingWorker(SingleAcceleratorWorker):
                 response.raise_for_status()
             else:
                 data = dict(serialized_named_tensors=serialized_data, finished=finished)
+                try:
+                    from lmdeploy.utils import FlattenedTensorBucket
+
+                    use_flattened_tensor_bucket = True
+                except Exception:
+                    use_flattened_tensor_bucket = False
+                if use_flattened_tensor_bucket and num_tensors > 0:
+                    data["load_format"] = "flattened_bucket"
+
                 response = requests.post(
                     f"{self.rollout_url}/{self.endpoints['update_weights']}", headers=headers, json=data
                 )
