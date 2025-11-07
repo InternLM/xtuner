@@ -1,4 +1,4 @@
-# How to Configure Xtuner Inference Engine Concurrency to Improve Rollout Efficiency
+# How to Configure Xtuner Concurrency to Improve Rollout Efficiency
 
 During the Rollout phase of Xtuner, properly configuring concurrency-related parameters ensures that the inference engine maintains high load, fully utilizes hardware resources, and improves overall inference efficiency. This document introduces the main concurrency-related configuration options in Xtuner, explains their relationships, and provides best practice recommendations.
 
