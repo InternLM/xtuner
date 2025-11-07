@@ -80,6 +80,7 @@ class ExpInfo(BaseModel):
     exp_dir: str
     hf_checkpoint_list: list[str] = []
     checkpoint_list: list[str] = []
+    snap_checkpoint_list: list[str] = []
     cur_step: int = 0
     cur_epoch: int = 0
     consumed_tokens: int = 0
@@ -87,9 +88,25 @@ class ExpInfo(BaseModel):
 
     @property
     def latest_checkpoint(self) -> str | None:
+        # compare checkpoint_list and snap_checkpoint_list, return the latest checkpoint
+        latest_ckp = None
         if self.checkpoint_list:
-            return self.checkpoint_list[-1]
-        return None
+            latest_ckp = self.checkpoint_list[-1]
+        if self.snap_checkpoint_list:
+            snap_ckp = self.snap_checkpoint_list[-1]
+            latest_ckp = self._get_latest_checkpoint(latest_ckp, snap_ckp)
+        return latest_ckp
+
+    def _get_latest_checkpoint(self, ckp1: str | None, ckp2: str | None) -> str | None:
+        if ckp1 is None:
+            return ckp2
+        if ckp2 is None:
+            return ckp1
+        # compare the timestamp of ckp1 and ckp2, return the latest one
+        # ckp path is like: checkpoints/epoch-1-step-20 or checkpoints/snapshot-epoch-3-step-50
+        step1 = int(ckp1.split("-")[-1])
+        step2 = int(ckp2.split("-")[-1])
+        return ckp1 if step1 > step2 else ckp2
 
 
 class XTunerMeta(BaseModel):
@@ -154,6 +171,7 @@ class TrainerConfig(BaseModel):
     checkpoint_interval: int | None = -1
     checkpoint_maxkeep: int | None = -1
     skip_checkpoint_validation: bool = False  # Suggest enabled if fsdp_size is larger than 512
+    snapshot_interval: int | None = None
     hf_interval: int | None = None
     hf_max_keep: int | None = None
     exp_tracker: Literal["tensorboard", "jsonl"] = "jsonl"
@@ -270,6 +288,7 @@ class Trainer:
         checkpoint_interval: int | None = -1,
         checkpoint_maxkeep: int | None = -1,
         skip_checkpoint_validation: bool = False,  # Suggest enabled if fsdp_size is larger than 512
+        snapshot_interval: int | None = None,
         hf_interval: int | None = None,
         hf_max_keep: int | None = None,
         exp_tracker: Literal["tensorboard", "jsonl"] = "jsonl",
@@ -317,6 +336,7 @@ class Trainer:
 
         self._checkpoint_interval = checkpoint_interval
         self._checkpoint_maxkeep = checkpoint_maxkeep
+        self._snapshot_interval = snapshot_interval
         self._hf_max_keep = hf_max_keep
         self._hf_interval = hf_interval
 
@@ -422,6 +442,7 @@ class Trainer:
         if debug_skip_save:
             self._hf_interval = None
             self._checkpoint_interval = None
+            self._snapshot_interval = None
 
         if self._resume_cfg.resume_from is not None:
             self._resume()
@@ -459,6 +480,7 @@ class Trainer:
             checkpoint_interval=config.checkpoint_interval,
             checkpoint_maxkeep=config.checkpoint_maxkeep,
             skip_checkpoint_validation=config.skip_checkpoint_validation,
+            snapshot_interval=config.snapshot_interval,
             hf_interval=config.hf_interval,
             hf_max_keep=config.hf_max_keep,
             exp_tracker=config.exp_tracker,
@@ -565,7 +587,8 @@ class Trainer:
 
             self._lr_scheduler.step()
             self._maybe_save_hf()
-            self._maybe_save()
+            self._maybe_save(is_snapshot=False)
+            self._maybe_save(is_snapshot=True)
 
             time_before_get_data = time.time()
 
@@ -782,18 +805,21 @@ class Trainer:
         )
         return lr_scheduler
 
-    def _maybe_save(self):
-        if self._checkpoint_interval is None:
+    def _maybe_save(self, is_snapshot: bool = False):
+        ckp_interval = self._checkpoint_interval if not is_snapshot else self._snapshot_interval
+        if ckp_interval is None:
             return
 
-        if self._checkpoint_interval == -1:
+        if ckp_interval == -1:  # only save at the end of training
             if self._cur_step != self.total_step:
                 return
+        else:
+            if self.cur_step % ckp_interval != 0 and (is_snapshot or self._cur_step != self.total_step):
+                # if is_snapshot, only save at interval
+                # else save at interval or at the end of training
+                return
 
-        elif self.cur_step % self._checkpoint_interval != 0 and self._cur_step != self.total_step:
-            return
-
-        checkpoint_path = self._get_checkpoint_path(epoch=self._cur_epoch, step=self.cur_step)
+        checkpoint_path = self._get_checkpoint_path(epoch=self._cur_epoch, step=self.cur_step, is_snapshot=is_snapshot)
         checkpoint_path.mkdir(parents=True, exist_ok=True)
 
         meta_path = self.work_dir / self._META_PATH
@@ -808,17 +834,21 @@ class Trainer:
         scheduler_path = checkpoint_path / self._SAVE_SCHEDULER_DIR
         train_state_path = checkpoint_path / self._SAVE_TRAIN_STATE_PATH
 
+        # Save model and optimizer
         self._engine.save_dcp(
             model_dir=model_path,
             optimizer_dir=optimizer_path,
         )
 
+        # Save dataloader
         self._save_dataloader(dataloader_path)
 
+        # Save scheduler
         if self.rank == 0:
             lr_scheduler_state = self._lr_scheduler.state_dict()
             torch.save(lr_scheduler_state, scheduler_path)
 
+        # Save trainer config
         if self._trainer_cfg is not None and self.rank == 0:
             # TODO: Maybe we need a better way to serialize and deserialize config, rather than using pickle
             config_path = checkpoint_path / "trainer_config.json"
@@ -830,14 +860,8 @@ class Trainer:
                 pickle.dump(self._trainer_cfg, f)
 
         dist.barrier()
-        current_exp = self.meta.latest_exp
-        current_exp.checkpoint_list.append(str(checkpoint_path))
-        current_exp.cur_step = self.cur_step
-        current_exp.cur_epoch = self._cur_epoch
-        current_exp.consumed_samples = self._consumed_samples
-        current_exp.consumed_tokens = int(self._consumed_tokens)
-        current_exp.history[-1]["end"] = self.cur_step
 
+        # Save train state
         if self.rank == 0:
             with train_state_path.open("w") as f:
                 f.write(
@@ -852,14 +876,26 @@ class Trainer:
                     )
                 )
 
-        if self._checkpoint_maxkeep > 0 and len(current_exp.checkpoint_list) > self._checkpoint_maxkeep:
-            deleted_checkpoints = current_exp.checkpoint_list[: -self._checkpoint_maxkeep]
-            current_exp.checkpoint_list = current_exp.checkpoint_list[-self._checkpoint_maxkeep :]
-            for ckp_dir in deleted_checkpoints:
-                if self.rank == 0 and Path(ckp_dir).exists():
-                    rmtree(ckp_dir)
+        # Update meta
+        current_exp = self.meta.latest_exp
+        ckp_list = current_exp.checkpoint_list if not is_snapshot else current_exp.snap_checkpoint_list
+        ckp_list.append(str(checkpoint_path))
+        current_exp.cur_step = self.cur_step
+        current_exp.cur_epoch = self._cur_epoch
+        current_exp.consumed_samples = self._consumed_samples
+        current_exp.consumed_tokens = int(self._consumed_tokens)
+        current_exp.history[-1]["end"] = self.cur_step
 
-        # Must save meta after deleting checkpoints to ensure the checkpoint_list is updated in the meta file
+        # Delete checkpoints and update meta's checkpoint_list
+        ckp_maxkeep = self._checkpoint_maxkeep if not is_snapshot else 1
+        if ckp_maxkeep is not None and ckp_maxkeep > 0 and len(ckp_list) > ckp_maxkeep:
+            ckp_pop_num = len(ckp_list) - ckp_maxkeep
+            for _ in range(ckp_pop_num):
+                deleted_ckp = ckp_list.pop(0)
+                if self.rank == 0 and Path(deleted_ckp).exists():
+                    rmtree(deleted_ckp)
+
+        # Save meta, must after deleting checkpoints to ensure the checkpoint_list is updated in the meta file
         if self.rank == 0:
             with meta_path.open("w") as f:
                 f.write(self.meta.model_dump_json(indent=2))
@@ -918,6 +954,7 @@ class Trainer:
     def _data_iter(self):
         data_iter = iter(self._dataloader)
         while self._cur_step < self.total_step:
+            # dist.breakpoint(skip=14)
             try:
                 data = next(data_iter)
                 self._consumed_samples += len(data)
@@ -928,8 +965,12 @@ class Trainer:
                 data = next(data_iter)
             yield data
 
-    def _get_checkpoint_path(self, epoch: int, step: int) -> Path:
-        return self.checkpoint_dir / f"epoch-{epoch}-step-{step}"
+    def _get_checkpoint_path(self, epoch: int, step: int, is_snapshot: bool = False) -> Path:
+        prefix = "snapshot-" if is_snapshot else "ckpt-"
+        # TODO: epoch在不同rank间可能不一致，在这个问题下使用 epoch 会出错, 待解决。
+        #       先使用 step 作为 checkpoint 的命名。
+        # return self.checkpoint_dir / f"{prefix}epoch-{epoch}-step-{step}"
+        return self.checkpoint_dir / f"{prefix}step-{step}"
 
     def _set_deterministic(self):
         if XTUNER_DETERMINISTIC:
@@ -1117,7 +1158,7 @@ class Trainer:
         reserved_memory = DEVICE_MODULE.max_memory_reserved()  # type: ignore[attr-defined]
 
         self.logger.info(
-            f"Step {self.cur_step}/{self.total_step} data_time: {data_time:.4f} lr: {lr:.6e} time: {step_time:.4f} "
+            f"Epoch {self._cur_epoch} Step {self.cur_step}/{self.total_step} data_time: {data_time:.4f} lr: {lr:.6e} time: {step_time:.4f} "
             f"text_tokens: {step_consumed_tokens} "
             f"{loss_log_str} "
             f"grad_norm: {grad_norm:.8f} "
