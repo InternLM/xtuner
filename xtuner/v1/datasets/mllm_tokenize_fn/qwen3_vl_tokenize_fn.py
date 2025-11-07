@@ -403,11 +403,13 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         )
         return ret
 
-    def calc_num_tokens_video_get_item(self, data_item: dict) -> CacheItem:
+    def _calc_frame_info(self, data_item):
         # TODO: 目前只支持一个视频
         assert len(self._video_path) == 1, "Only one video is supported for now."
         assert len(self._video_wh_list) == 1, "Only one video is supported for now."
         num_frames = None
+        origin_fps = None
+        origin_video_length = None
         timestamps = None
         if len(self._video_extra_info_list) > 0:
             assert len(self._video_extra_info_list) == 1, "Only one video is supported for now."
@@ -426,14 +428,19 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
                     min_frames=self.video_processor.min_frames,
                     max_frames=self.video_processor.max_frames,
                 )
-                num_frames = len(indices)
                 timestamps = calculate_timestamps(indices, origin_fps, merge_size=self.video_processor.merge_size)
+                num_frames = len(indices)
 
         if num_frames is None:
             # 根据采样的帧数（min_num_frames, max_num_frames+1），计算token数量，实际可能采样不到这么多帧（比如视频一共只有10帧），算出来num_tokens可能会偏大
             num_frames = generate_random_int_from_dict(
                 data_item, self.video_processor.min_frames, self.rand_video_max_frames
             )
+        return num_frames, origin_fps, origin_video_length, timestamps
+
+    def calc_num_tokens_video_get_item(self, data_item: dict) -> CacheItem:
+        num_frames, _, _, timestamps = self._calc_frame_info(data_item)
+
         height, width = self._video_wh_list[0]
         resized_height, resized_width = video_smart_resize(
             num_frames=num_frames,
@@ -441,8 +448,8 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             width=width,
             temporal_factor=self.video_processor.temporal_patch_size,
             factor=self.video_processor.patch_size * self.video_processor.merge_size,
-            min_pixels=self.video_processor.size["shortest_edge"],
-            max_pixels=self.video_processor.size["longest_edge"],
+            min_pixels=self.size.shortest_edge,
+            max_pixels=self.size.longest_edge,
         )
 
         # 如果 num_frames 不是 temporal_patch_size 的整数倍，需要确保可以整除
@@ -479,38 +486,8 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         return {"num_tokens": len(input_ids)}
 
     def video_get_item(self, data_item: dict, media_root: str = "") -> QwenVL3DataItem:
-        # TODO: 目前只支持一个视频
-        assert len(self._video_path) == 1, "Only one video is supported for now."
-        assert len(self._video_wh_list) == 1, "Only one video is supported for now."
+        num_frames, origin_fps, origin_video_length, _ = self._calc_frame_info(data_item)
         video_path = os.path.join(media_root, self._video_path[0])
-
-        num_frames = None
-        origin_fps = None
-        origin_video_length = None
-        if len(self._video_extra_info_list) > 0:
-            assert len(self._video_extra_info_list) == 1, "Only one video is supported for now."
-            origin_fps = self._video_extra_info_list[0].get("origin_fps")
-            origin_video_length = self._video_extra_info_list[0].get("origin_video_length")
-            # 两个要不都存在，要么都不存在
-            assert (origin_fps is None) == (origin_video_length is None), (
-                f"origin_fps and origin_video_length must both exist or both not exist, "
-                f"data_name: {self.data_name}, data_id: {data_item.get('id', '')}. Discard this data."
-            )
-            if origin_fps is not None and origin_video_length is not None:
-                indices = sample_frames(
-                    origin_total_num_frames=origin_video_length,
-                    origin_fps=origin_fps,
-                    fps=self.video_processor.fps,
-                    min_frames=self.video_processor.min_frames,
-                    max_frames=self.video_processor.max_frames,
-                )
-                num_frames = len(indices)
-
-        if num_frames is None:
-            # 根据采样的帧数（min_num_frames, max_num_frames+1），计算token数量，实际可能采样不到这么多帧（比如视频一共只有10帧），算出来num_tokens可能会偏大
-            num_frames = generate_random_int_from_dict(
-                data_item, self.video_processor.min_frames, self.rand_video_max_frames
-            )
 
         # 上面计算的 num_frames 是理论值，需要根据实际读取的数进行更新
         if self.oss_loader is not None:
@@ -522,8 +499,10 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         num_frames = len(image_list)
         timestamps = None
         if origin_fps is not None and origin_video_length is not None:
+            # 如果 timestamps 无法被整除，则会追加, 官方代码写的有不少问题
             timestamps = calculate_timestamps(frame_indices, origin_fps, merge_size=self.video_processor.merge_size)
 
+        # 如果视频长度无法被整除，也会追加
         video_result = self.video_processor._preprocess(
             [video_data],
             size=self.size,
