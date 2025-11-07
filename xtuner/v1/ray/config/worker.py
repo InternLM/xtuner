@@ -246,6 +246,7 @@ class RolloutConfig(BaseModel):
         if "rollout_max_batch_size" not in kwargs:
             context_length = kwargs["context_length"]
 
+            # TODO(@duanyanhui): Provide better suggestions for different models/input-output lengths
             if context_length <= 2048:
                 kwargs["rollout_max_batch_size"] = 1024
             elif context_length <= 4096:
