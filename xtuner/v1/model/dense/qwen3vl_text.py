@@ -63,8 +63,8 @@ class Qwen3VLTextDense(Qwen3Dense):
         for idx, decoder_layer in self.layers.items():
             hidden_states = decoder_layer(
                 hidden_states,
-                position_embeddings=position_embeddings,
-                seq_ctx=seq_ctx,
+                position_embeddings,
+                seq_ctx,
             )
 
             if deepstack_visual_embeds is not None and idx in range(len(deepstack_visual_embeds)):
@@ -80,9 +80,10 @@ class Qwen3VLTextDense(Qwen3Dense):
 
         hidden_states = self.norm(hidden_states)
 
-        loss, logits = self.lm_head(hidden_states, loss_ctx)  # type: ignore
+        loss, (logits, extra_info) = self.lm_head(hidden_states, loss_ctx)
         output["loss"] = loss
         output["logits"] = logits
+        output["extra_info"] = extra_info
         return ModelOutputs(**output)  # type: ignore[typeddict-item]
 
 

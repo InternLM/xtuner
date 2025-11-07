@@ -50,13 +50,13 @@ DEVICE = get_device()
 class TransformerConfig(PydanticBaseModel):
     model_config = ConfigDict(
         title="Base model config for xtuner",
-        extra="allow",
+        extra="forbid",
         protected_namespaces=(),
     )
     vocab_size: Annotated[int, Parameter(group="model")]
     max_position_embeddings: Annotated[int, Parameter(group="model")]
     eos_token_id: Annotated[int, Parameter(group="model")]
-    pad_token_id: Annotated[int, Parameter(group="model")]
+    pad_token_id: Annotated[int | None, Parameter(group="model")] = None
     num_hidden_layers: Annotated[int, Parameter(group="model")]
     hidden_size: Annotated[int, Parameter(group="model")]
     intermediate_size: Annotated[int, Parameter(group="model")]
@@ -450,15 +450,16 @@ class BaseModel(nn.Module):
         for param, load_spec in params:
             local_tensor = param._local_tensor if isinstance(param, DTensor) else param
             local_tensor = local_tensor.to(dtype=dtype)
-            if safetensor_size + self._get_tensor_size(param, dtype) > self.SAFETENSOR_SIZE:
-                safetensor_size = 0
+            tensor_size = self._get_tensor_size(param, dtype)
+            if safetensor_size + tensor_size > self.SAFETENSOR_SIZE and tensor_list:
                 hf_params = _get_hf_params(tensor_list)
 
                 yield name_list, hf_params
+                safetensor_size = tensor_size
                 name_list = load_spec.hf_keys.copy()
                 tensor_list = [(local_tensor, load_spec)]
                 continue
-            safetensor_size += self._get_tensor_size(param, dtype)
+            safetensor_size += tensor_size
             tensor_list.append((local_tensor, load_spec))
             name_list.append(load_spec.hf_keys[0])
 
@@ -524,14 +525,15 @@ class BaseModel(nn.Module):
         for param, load_spec in params:
             local_tensor = param._local_tensor if isinstance(param, DTensor) else param
             local_tensor = local_tensor.bfloat16()
-            if safetensor_size + self._get_tensor_size(param, dtype) > bucket_size:
-                safetensor_size = 0
+            tensor_size = self._get_tensor_size(param, dtype)
+            if safetensor_size + tensor_size > bucket_size and tensor_list:
                 hf_params, name_list = _get_hf_params(tensor_list, name_list)
                 yield name_list, hf_params
+                safetensor_size = tensor_size
                 name_list = load_spec.hf_keys.copy()
                 tensor_list = [(local_tensor, load_spec)]
                 continue
-            safetensor_size += self._get_tensor_size(param, dtype)
+            safetensor_size += tensor_size
             tensor_list.append((local_tensor, load_spec))
             name_list.extend(load_spec.hf_keys)
 
@@ -558,12 +560,12 @@ class BaseModel(nn.Module):
         for param, load_spec in params:
             local_tensor = param._local_tensor if isinstance(param, DTensor) else param
             local_tensor = local_tensor.bfloat16()
-            if safetensor_size + self._get_tensor_size(param, dtype) > bucket_size:
+            tensor_size = self._get_tensor_size(param, dtype)
+            if safetensor_size + tensor_size > bucket_size and tensor_list:
                 if self.fsdp_mesh is not None:
                     gathered_tensor_list = self._fsdp_foreach_allgather(tensor_list, load_spec_list)
                 else:
                     gathered_tensor_list = tensor_list
-                safetensor_size = 0
                 gathered_tensor_list = [
                     self.param_to_safetensor(safetensor, name)
                     for safetensor, name in zip(gathered_tensor_list, name_list)
@@ -574,11 +576,12 @@ class BaseModel(nn.Module):
                     )
                 gathered_tensor_list = [t.to(device=device) for t in gathered_tensor_list]
                 yield name_list, gathered_tensor_list
+                safetensor_size = tensor_size
                 name_list = load_spec.hf_keys.copy()
                 tensor_list = [local_tensor]
                 load_spec_list = [load_spec]
                 continue
-            safetensor_size += self._get_tensor_size(param, dtype)
+            safetensor_size += tensor_size
             tensor_list.append(local_tensor)
             name_list.append(load_spec.hf_keys[0])
             load_spec_list.append(load_spec)
@@ -925,6 +928,7 @@ class BaseModel(nn.Module):
         if self.fsdp_mesh is not None:
             shape_before_fsdp = load_spec.shape
             if is_float8_weight(local_tensor):
+                # fp8 weights may be padded, so we need to calculate the hf_key_size base on local_tensor._ori_shape
                 if load_spec.group is None:
                     hf_key_size = local_tensor._ori_shape[self.FSDP_SHARD_DIM] / len(hf_keys)  # type: ignore
                 else:
@@ -961,6 +965,7 @@ class BaseModel(nn.Module):
             start = None
             end = None
 
+        # dist.breakpoint(1)
         missing_keys: list[str] = []
         _loaded_tensor: list[torch.Tensor] = []
         for hf_key in hf_keys:
@@ -975,9 +980,9 @@ class BaseModel(nn.Module):
         if not hf_keys:
             # fp8 pad
             assert self.config.float8_cfg is not None
-            assert self.fsdp_config is not None and self.fsdp_config.ep_size == 1, (
-                "Only support fp8 pad for MoE with ep_size == 1"
-            )
+            # assert self.fsdp_config is not None and self.fsdp_config.ep_size == 1, (
+            #     "Only support fp8 pad for MoE with ep_size == 1"
+            # )
             local_tensor.zero_()  # type: ignore  # padded part must be set to 0
             return missing_keys
 
@@ -1070,11 +1075,18 @@ class BaseModel(nn.Module):
 
         # Concatenate the tensors along the FSDP shard dim
         for tensors, size in zip(_fsdp_unsharded_tensor_list, origin_fsdp_size):
+            tensor = torch.cat(tensors, dim=self.FSDP_SHARD_DIM)
             cat_tensor = torch.index_select(
-                torch.cat(tensors, dim=self.FSDP_SHARD_DIM),
+                tensor,
                 dim=self.FSDP_SHARD_DIM,
                 index=torch.arange(0, size, dtype=torch.int64, device=tensors[0].device),
             )
+            pad_tensor = torch.index_select(
+                tensor,
+                dim=self.FSDP_SHARD_DIM,
+                index=torch.arange(size, tensor.shape[0], dtype=torch.int64, device=tensors[0].device),
+            )
+            assert (pad_tensor == 0).all(), f"Internal Error, padded tensor is not zero {pad_tensor}!"
             fsdp_unsharded_tensor_list.append(cat_tensor)
 
         return fsdp_unsharded_tensor_list

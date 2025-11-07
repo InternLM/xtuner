@@ -8,10 +8,10 @@ from xtuner.v1.config import (
     LRConfig,
 )
 from xtuner.v1.data_proto.rl_data import SampleParams
-from xtuner.v1.datasets import RLTextTokenizeFnConfig
+from xtuner.v1.datasets import RLTokenizeFnConfig
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.model.dense.qwen3 import Qwen3Dense8BConfig
-from xtuner.v1.ray.accelerator import AcceleratorResourcesConfig
+from xtuner.v1.ray.base import AcceleratorResourcesConfig
 from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.ray.dataflow import DataFlowConfig, ReplayBufferConfig
 from xtuner.v1.ray.evaluator import EvaluatorConfig
@@ -27,6 +27,8 @@ model_path = os.environ["MODEL_PATH"]
 data_path = os.environ["DATA_PATH"]
 eval_data_path = os.environ["EVAL_DATA_PATH"]
 enable_evaluate = True if eval_data_path != "" else False
+enbale_partial_rollout = int(os.environ.get("ENBALE_PARTIAL_ROLLOUT", "0"))
+max_concurrent = int(os.environ.get("XTUNER_MAX_CONCURRENCY", 512))
 
 # basic settings
 experimental_name = "grpo_gsm8k"
@@ -40,7 +42,6 @@ max_response_length = 1024
 pack_max_length = 32768
 train_optimizer_steps = 4
 hf_interval = 15
-enable_evaluate = True
 enable_initial_evaluate = True
 evaluate_step = 10
 
@@ -57,7 +58,6 @@ evaluate_step = 10
 # pack_max_length = 32768
 # train_optimizer_steps = 1
 # hf_interval = 100
-# enable_evaluate = True
 # enable_initial_evaluate = True
 # evaluate_step = 15
 
@@ -78,6 +78,9 @@ rollout_config = RolloutConfig(
     tensor_parallel_size=rollout_tp_size,
     expert_parallel_size=rollout_ep_size,
     gpu_memory_utilization=0.75,
+    context_length = max_response_length + max_prompt_length,
+    rollout_max_batch_size=max_concurrent,
+    prompt_repeat_k=prompt_repeat_k,
 )
 
 # sampling params
@@ -93,7 +96,7 @@ evaluation_sample_params.top_k = 1
 train_dataset = DatasetConfig(name=experimental_name, anno_path=data_path)
 eval_dataset = DatasetConfig(name=experimental_name, anno_path=eval_data_path) if enable_evaluate else None
 tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-tokenizer_config = RLTextTokenizeFnConfig(max_length=max_prompt_length)
+tokenizer_config = RLTokenizeFnConfig(max_length=max_prompt_length)
 
 train_dataset_cfg = [{"dataset": train_dataset, "tokenize_fn": tokenizer_config}]
 eval_dataset_cfg = [{"dataset": eval_dataset, "tokenize_fn": tokenizer_config}] if enable_evaluate else []
@@ -101,8 +104,8 @@ eval_dataset_cfg = [{"dataset": eval_dataset, "tokenize_fn": tokenizer_config}] 
 dataloader_config = DataloaderConfig(pack_max_length=pack_max_length, collator="fake_collator", pack_level="none")
 
 # 3. judger
-dapomath_judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k")
-judger_cfg = JudgerConfig(reward_judger_configs=[dapomath_judger_config])
+gsm8k_judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k")
+judger_cfg = JudgerConfig(reward_judger_configs=[gsm8k_judger_config])
 
 # 4. dataflow and evaluator
 dataflow_config = DataFlowConfig(
@@ -110,6 +113,8 @@ dataflow_config = DataFlowConfig(
     prompt_repeat_k=prompt_repeat_k,
     global_batch_size=global_batch_size,
     sample_params=training_sample_params,
+    enable_partial_rollout=enbale_partial_rollout,
+    max_concurrent=max_concurrent
 )
 
 evaluator_cfg = EvaluatorConfig(
@@ -128,7 +133,6 @@ replay_buffer_cfg = ReplayBufferConfig(
 )
 
 # 5. Train worker
-# NOTE: modify model_cfg
 model_cfg = Qwen3Dense8BConfig()
 optim_cfg = AdamWConfig(lr=1e-6, foreach=False)
 loss_cfg = GRPOLossConfig(

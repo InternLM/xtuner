@@ -2,6 +2,7 @@
 import os
 from typing import Any, Literal, TypeVar
 
+import torch
 import xxhash
 from PIL import Image
 from pydantic import BaseModel, ConfigDict
@@ -24,7 +25,7 @@ def collect_image_video_paths_and_extra(messages: list[dict]):
     image_wh_list = []
     video_paths = []
     for msg in messages:
-        if msg["role"] == "user":
+        if msg["role"] == "user" or msg["role"] == "pretrain":
             content = msg["content"]
             if isinstance(content, list):
                 for c in content:
@@ -54,7 +55,9 @@ def replace_image_token(
 ):
     current_image_idx = 0
     for msg in messages.messages:
-        if msg.role == "user":
+        if msg.role == "pretrain":
+            assert len(messages.messages) == 1, "pretrain message should only have one message"
+        if msg.role == "user" or msg.role == "pretrain":
             content = msg.content
             if isinstance(content, list):
                 for c in content:
@@ -100,8 +103,6 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
         tokenizer_hash: str | None = None,
         hash: str | None = None,
     ):
-        super().__init__()
-        self.tokenizer = tokenizer
         self.max_length = max_length
         self._tokenizer_hash = tokenizer_hash
         self._hash = hash
@@ -111,6 +112,7 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
         self._image_path: list[str] = []
         self._video_path: list[str] = []
         self._image_wh_list: list[list] = []
+        super().__init__(tokenizer)
 
     def calc_num_tokens_multi_modal_get_item(self, data_item: dict) -> CacheItem:
         raise NotImplementedError
@@ -135,13 +137,14 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
     def pure_text_get_item(self, data_item: Any) -> BaseMLLMDataItem:
         raise NotImplementedError
 
-    def _truncated_input_and_labels(self, input_ids, labels):
+    def _truncated_input_and_labels(self, input_ids, labels: torch.Tensor | None = None):
         if self.max_length is not None and len(input_ids) > self.max_length:
             logger.info(
                 f"WARNING: input_ids length {len(input_ids)} exceeds model_max_length {self.max_length}. truncated!"
             )
             input_ids = input_ids[: self.max_length]
-            labels = labels[: self.max_length]
+            if labels is not None:
+                labels = labels[: self.max_length]
         return input_ids, labels
 
     def __call__(self, item: dict, media_root: str = "", **kwargs) -> T | CacheItem:  # type: ignore[override]
@@ -184,12 +187,16 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
 class BaseMLLMTokenizeFnConfig(BaseModel):
     model_config = ConfigDict(
         title="Base dataset config for xtuner",
-        extra="allow",
+        extra="forbid",
         protected_namespaces=(),
     )
     system_message: str | None = None
     max_length: int | None = None
     hash: str | None = None
+    debug: bool = False
+    oss_time_log_thr: int = 10  # 10s
+    add_eos_token: bool = True  # for mllm pretrain
+    add_bos_token: bool = False  # for mllm pretrain
 
     def build(
         self, tokenizer, tokenizer_hash: str | None = None, anno_name: str = "", **kwargs
@@ -198,5 +205,6 @@ class BaseMLLMTokenizeFnConfig(BaseModel):
 
 
 class OSSLoaderConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     backend: Literal["petrel"] = "petrel"
     backend_kwargs: dict = {}

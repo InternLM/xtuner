@@ -1,6 +1,6 @@
 import re
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from .native import NativeJudger
 
@@ -81,7 +81,8 @@ def compute_reward(response, label, extra_info):
 class GSM8KJudgerConfig(BaseModel):
     """Configuration for the GSM8K judger."""
 
-    judger_name: str = "gsm8k_judger"
+    judger_name: str = "openai/gsm8k"
+    model_config = ConfigDict(extra="forbid")
     extra_info: dict = {"score": 1, "format_score": 0}
 
     def build(self):

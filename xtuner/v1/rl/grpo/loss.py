@@ -68,6 +68,10 @@ class GRPOLossContext(BaseLossContext[RLLossContextInputItem]):
     loss_cfg: GRPOLossConfig
     loss_kwargs: GRPOLossKwargs
 
+    def __init__(self, loss_cfg: GRPOLossConfig, loss_kwargs: GRPOLossKwargs):
+        super().__init__(loss_cfg, loss_kwargs)
+        self.policy_loss_fn = get_policy_loss_fn(self.loss_cfg.policy_loss_cfg.get("loss_type", "vanilla"))
+
     @classmethod
     def build_batches_loss_kwargs(
         cls,
@@ -136,8 +140,7 @@ class GRPOLossContext(BaseLossContext[RLLossContextInputItem]):
         policy_loss_weight = loss_kwargs.policy_loss_weight
 
         logprobs = gather_logprobs(logits, shifted_labels)
-        policy_loss_fn = get_policy_loss_fn(self.loss_cfg.policy_loss_cfg.get("loss_type", "vanilla"))
-        loss = policy_loss_fn(
+        loss = self.policy_loss_fn(
             logprobs,
             old_logprobs,
             advantages,

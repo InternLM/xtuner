@@ -57,7 +57,7 @@ class Qwen3MoEConfig(MoEConfig):
         config = cls(
             vocab_size=hf_config.vocab_size,
             max_position_embeddings=hf_config.max_position_embeddings,
-            pad_token_id=hf_config.eos_token_id,
+            pad_token_id=getattr(hf_config, "pad_token_id"),
             bos_token_id=hf_config.bos_token_id,
             eos_token_id=hf_config.eos_token_id,
             num_hidden_layers=hf_config.num_hidden_layers,
@@ -123,7 +123,10 @@ class Qwen3MoEConfig(MoEConfig):
 class Qwen3MoE30BA3Config(Qwen3MoEConfig):
     vocab_size: int = 151936
     max_position_embeddings: int = 40960
-    pad_token_id: int = 151643
+    # Qwen3 Model(dense and moe)'s pad_token_id is not set, so we need to set it to None.
+    # If this pad_token_id is not set, the embedding module will not act specially for pad token.
+    # Note: Qwen3 Model's pad_token_id may be different from Qwen tokenizer's pad_token_id.
+    pad_token_id: int | None = None
     eos_token_id: int = 151645
     bos_token_id: int = 151643
     num_hidden_layers: int = 48
@@ -155,7 +158,7 @@ class Qwen3MoE30BA3Config(Qwen3MoEConfig):
 class Qwen3MoE235BA22Config(Qwen3MoEConfig):
     vocab_size: int = 151936
     max_position_embeddings: int = 40960
-    pad_token_id: int = 151643
+    pad_token_id: int | None = None
     eos_token_id: int = 151645
     bos_token_id: int = 151643
     num_hidden_layers: int = 94

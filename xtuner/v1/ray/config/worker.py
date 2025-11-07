@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import List, Literal, Optional, Union
 
 from cyclopts import Group, Parameter
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from typing_extensions import Annotated
 
 
@@ -17,6 +17,7 @@ infer_group = Group("inference", help="Inference worker configuration.")
 class TrainingWorkerConfig(BaseModel):
     """Configuration for the TrainingWorker."""
 
+    model_config = ConfigDict(extra="forbid")
     type: Literal["train"] = "train"
     train_model_path: Annotated[str, Parameter(group=train_group, help="Path to the training model.")]
 
@@ -70,6 +71,8 @@ class RolloutConfig(BaseModel):
         )
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     # base config
     env: Annotated[
         str,
@@ -112,12 +115,19 @@ class RolloutConfig(BaseModel):
         ),
     ] = False
     rollout_max_batch_size: Annotated[
-        Optional[int],
+        int,
         Parameter(
             group=infer_group,
             help="Maximum batch size for the rollout worker. If not set, it will be determined automatically based on the model and GPU memory.",
         ),
-    ] = None
+    ] = 512
+    prompt_repeat_k: Annotated[
+        int,
+        Parameter(
+            group=infer_group,
+            help="Number of times to repeat the prompt for each request in the rollout worker.",
+        ),
+    ] = 8
     tensor_parallel_size: Annotated[
         int,
         Parameter(
@@ -167,7 +177,7 @@ class RolloutConfig(BaseModel):
             group=infer_group,
             help="Timeout duration (in seconds) for rollout requests.",
         ),
-    ] = 3600.0
+    ] = 1200.0
     context_length: Annotated[
         Optional[int],
         Parameter(
@@ -216,6 +226,8 @@ class RolloutConfig(BaseModel):
 
         if "device" in kwargs and kwargs["device"] == "NPU":
             kwargs["gpus_per_node"] = 16
+        else:
+            kwargs["gpus_per_node"] = 8
 
         rollout_backend = ""
         if os.environ.get("XTUNER_USE_SGLANG", "0") == "1":
@@ -235,6 +247,15 @@ class RolloutConfig(BaseModel):
             kwargs["launch_server_method"] = "ray"
             kwargs["rollout_cross_node_comm"] = True
 
+        # `rollout_max_batch_size` is the max batch size for each inference engine.
+        # In Xtuner, It is derived from `max_concurrent` in `DataflowConfig`. `max_concurrent` represents the concurrency level for group data batch.
+        # The total data received by all inference workers is `max_concurrent * prompt_repeat_k`.
+        # This is then divided by the number of inference engines (i.e., workers with TP_RANK=0) to determine the max batch size per engine.
+        kwargs["rollout_max_batch_size"] = (
+            kwargs.get("rollout_max_batch_size", 512)
+            * kwargs.get("prompt_repeat_k", 1)
+            / (int(os.environ.get("NODE_COUNT", 1)) * kwargs["gpus_per_node"] / kwargs.get("tensor_parallel_size", 1))
+        )
         super().__init__(**kwargs)
         self.worker_log_dir.mkdir(parents=True, exist_ok=True)
 

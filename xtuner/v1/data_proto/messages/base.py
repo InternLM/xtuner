@@ -2,7 +2,7 @@
 from abc import abstractmethod
 from typing import Dict
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from transformers import PreTrainedTokenizer
 
@@ -10,6 +10,8 @@ from ..templates import ChatTemplate
 
 
 class BaseMessages(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     @abstractmethod
     def add(self, role: str, content):
         pass

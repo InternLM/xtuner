@@ -38,7 +38,7 @@ class FakeEngine:
         self.grad_norm_calls = 0
         self.optimizer_step_calls = 0
 
-        model = nn.Linear(10, 10)
+        self.model = model = nn.Linear(10, 10)
         self.optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
     def grad_accumulation_steps(self, *args, **kwargs):
@@ -63,7 +63,7 @@ class FakeEngine:
         self.optimizer_step_calls += 1
         return 1.0
 
-    def clip_grad_norm(self):
+    def clip_grad_norm(self, do_clip: bool=True, dtype=torch.float32):
         self.grad_norm_calls += 1
         return torch.tensor(1.0)
 
@@ -277,21 +277,24 @@ class TestTrainerSaveHF(DistributedTestBase):
             lr_cfg=lr_cfg,
             tokenizer_path=self.tokenizer_path,
             global_batch_size=2,
-            total_step=10,
+            total_step=6,
             work_dir=str(self.work_dir),
             hf_interval=3,
             hf_max_keep=2,
             seed=42,
             debug=False,
-            checkpoint_interval=5,
+            checkpoint_interval=2,
+            checkpoint_maxkeep=2,
         )
 
         trainer.fit()
         dist.barrier()
+        # 0. Test checkpoint_maxkeep is consistent with meta file
+        assert len(trainer.meta.latest_exp.checkpoint_list) == 2
 
         # Test resume
         # TODO: It's hard to test the accuracy of resuming in unit test now, need to improve
-        # 1. Test auto resume
+        # 1. Test auto_resume
         resume_trainer1 = Trainer(
             load_from=str(self.fake_hf_model_dir),
             model_cfg=model_cfg,
@@ -308,14 +311,47 @@ class TestTrainerSaveHF(DistributedTestBase):
             hf_max_keep=2,
             seed=42,
             debug=False,
-            checkpoint_interval=3,
+            checkpoint_interval=2,
+            checkpoint_maxkeep=2,
             resume_cfg=ResumeConfig(
                 auto_resume=True,
             ),
         )
-        assert resume_trainer1.cur_step == 10
+        assert resume_trainer1.cur_step == 6
         assert resume_trainer1.exp_dir == trainer.exp_dir
+        resume_trainer1.fit()
+        dist.barrier()
 
+        # 1.1 auto_resume twice
+        resume_trainer1_2 = Trainer(
+            load_from=str(self.fake_hf_model_dir),
+            model_cfg=model_cfg,
+            optim_cfg=optim_cfg,
+            fsdp_cfg=fsdp_cfg,
+            dataset_cfg=dataset_cfg,
+            dataloader_cfg=dataloader_cfg,
+            lr_cfg=lr_cfg,
+            tokenizer_path=self.tokenizer_path,
+            global_batch_size=2,
+            total_step=16,
+            work_dir=str(self.work_dir),
+            hf_interval=3,
+            hf_max_keep=2,
+            seed=42,
+            debug=False,
+            checkpoint_interval=2,
+            checkpoint_maxkeep=2,
+            resume_cfg=ResumeConfig(
+                auto_resume=True,
+            ),
+        )
+        assert resume_trainer1_2.cur_step == 10
+        assert resume_trainer1_2.exp_dir == trainer.exp_dir
+        resume_trainer1_2.fit()
+        assert resume_trainer1_2.cur_step == 16
+        dist.barrier()
+
+        # 2. Test resume_from 
         resume_trainer2 = Trainer(
             load_from=str(self.fake_hf_model_dir),
             model_cfg=model_cfg,
@@ -326,20 +362,22 @@ class TestTrainerSaveHF(DistributedTestBase):
             lr_cfg=lr_cfg,
             tokenizer_path=self.tokenizer_path,
             global_batch_size=2,
-            total_step=10,
+            total_step=20,
             work_dir=str(self.work_dir),
             hf_interval=3,
             hf_max_keep=2,
             seed=42,
             debug=False,
-            checkpoint_interval=3,
+            checkpoint_interval=5,
+            checkpoint_maxkeep=2,
             resume_cfg=ResumeConfig(
-                resume_from=trainer.meta.latest_exp.checkpoint_list[-2],
+                resume_from=resume_trainer1_2.meta.latest_exp.checkpoint_list[-2],
             ),
         )
-        assert resume_trainer2.cur_step == 5 
+        assert resume_trainer2.cur_step == 14
         resume_trainer2.fit()
-        assert resume_trainer2.cur_step == 10
+        assert resume_trainer2.cur_step == 20
+        assert resume_trainer2.exp_dir != resume_trainer1_2.exp_dir
 
     @property
     def world_size(self) -> int:

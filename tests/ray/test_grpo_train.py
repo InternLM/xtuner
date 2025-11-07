@@ -8,7 +8,7 @@ import shutil
 import tempfile
 
 import ray
-from xtuner.v1.ray.accelerator import AcceleratorResourcesConfig, AutoAcceleratorWorkers
+from xtuner.v1.ray.base import AcceleratorResourcesConfig, AutoAcceleratorWorkers
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.config import (
     AdamWConfig,
@@ -77,11 +77,7 @@ class TestGRPOTrain(unittest.TestCase):
         ray.shutdown()
     
     def build_train_controller(self):
-        model_cfg = Qwen3Dense8BConfig(
-            ep_size=1,
-            balancing_loss_cfg=BalancingLossConfig(),
-            z_loss_cfg=ZLossConfig(),
-        )
+        model_cfg = Qwen3Dense8BConfig()
         optim_cfg: AdamWConfig = AdamWConfig(lr=5e-7, foreach=False)
         fsdp_cfg: FSDPConfig = FSDPConfig(
             torch_compile=True,
@@ -107,10 +103,7 @@ class TestGRPOTrain(unittest.TestCase):
             lr_cfg=lr_cfg,
             fsdp_cfg=fsdp_cfg,
             load_from=QWEN3_PATH,
-            tokenizer_path=QWEN3_PATH,
             sp_size=1,
-            global_batch_size=8,
-            work_dir=self.temp_dir,
             pack_max_length=8192,
         )
         
@@ -122,12 +115,11 @@ class TestGRPOTrain(unittest.TestCase):
                 }
             },
         )(BaseTrainingWorker)
-        train_workers = AutoAcceleratorWorkers.from_placement_group(
+        train_workers, _ = AutoAcceleratorWorkers.from_placement_group(
             TrainingWorker, worker_cfg, self.pg
         )
         futures = [ worker.test_all_reduce.remote() for worker in train_workers ]
         print(ray.get(futures))
-        train_workers = list(train_workers.keys())
         train_controller = TrainingController.remote(
             workers=train_workers,
         )

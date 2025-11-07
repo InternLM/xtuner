@@ -88,7 +88,7 @@ class RLLossContextInputItem(BaseModel):
         ref_logprobs (torch.Tensor | None): Reference log probabilities for KL penalty, if used.
     """
 
-    model_config = ConfigDict(title="RLLossContextInputItem", extra="allow", arbitrary_types_allowed=True)
+    model_config = ConfigDict(title="RLLossContextInputItem", extra="forbid", arbitrary_types_allowed=True)
     shifted_labels: torch.Tensor
     advantages: torch.Tensor
     old_logprobs: torch.Tensor | None = None

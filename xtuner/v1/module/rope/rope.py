@@ -2,13 +2,14 @@ from typing import Literal, Protocol, cast
 
 import torch
 import torch.nn as nn
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from typing_extensions import overload
 
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 
 
 class RopeScalingConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     type: Literal["default", "linear", "dynamic", "yarn", "longrope", "llama3", "qwen3_vl"] = "default"
 
     max_position_embeddings: int | None = None  # TODO: 无用参数考虑删除
@@ -87,14 +88,16 @@ class RotaryEmbedding(nn.Module):
             self._dynamic_frequency_update(position_ids, device=x.device)
 
         # Core RoPE block
-        inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1)
-        position_ids_expanded = position_ids[:, None, :].float()
+        inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1)  # [B, H/2, 1]
+        position_ids_expanded = position_ids[:, None, :].float()  # [B, 1, S]
         # Force float32 (see https://github.com/huggingface/transformers/pull/29285)
         device_type = x.device.type
         device_type = device_type if isinstance(device_type, str) and device_type != "mps" else "cpu"
         with torch.autocast(device_type=device_type, enabled=False):
-            freqs = (inv_freq_expanded.float().to(x.device) @ position_ids_expanded.float()).transpose(1, 2)
-            emb = torch.cat((freqs, freqs), dim=-1)
+            freqs = (inv_freq_expanded.float().to(x.device) @ position_ids_expanded.float()).transpose(
+                1, 2
+            )  # [B, S, H/2]
+            emb = torch.cat((freqs, freqs), dim=-1)  # [B, S, H]
             cos = emb.cos()
             sin = emb.sin()
 
@@ -102,7 +105,7 @@ class RotaryEmbedding(nn.Module):
         cos = cos * self.attention_scaling
         sin = sin * self.attention_scaling
 
-        return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
+        return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)  # [B, S, H]
 
     @overload  # type: ignore
     def __call__(  # type: ignore

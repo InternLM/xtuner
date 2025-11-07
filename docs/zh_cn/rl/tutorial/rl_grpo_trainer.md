@@ -57,7 +57,7 @@ dataflow_config = DataFlowConfig(
 from transformers import AutoTokenizer
 from xtuner.v1.config import DatasetConfig, DataloaderConfig
 from xtuner.v1.ray.dataflow import ReplayBufferConfig
-from xtuner.v1.datasets import RLTextTokenizeFnConfig
+from xtuner.v1.datasets import RLTokenizeFnConfig
 
 train_data_path = "./gsm8k/train.jsonl"    # 训练数据路径
 model_path = "/path/to/qwen3-8B"           # 模型路径
@@ -67,7 +67,7 @@ pack_max_length = 32768                    # 打包最大长度
 replay_buffer_cfg = ReplayBufferConfig(
     dataset_cfg=[{
         "dataset": DatasetConfig(name="gsm8k", anno_path=train_data_path),
-        "tokenize_fn": RLTextTokenizeFnConfig(max_length=max_prompt_length),
+        "tokenize_fn": RLTokenizeFnConfig(max_length=max_prompt_length),
     }],
     dataloader_cfg=DataloaderConfig(
         pack_max_length=pack_max_length,             
@@ -201,7 +201,7 @@ evaluator_cfg = EvaluatorConfig(
 除以上的生成和训练配置外，我们需要配置系统所需资源（如GPU、CPU、内存）等，此处我们使用默认的资源配置，示例如下。
 
 ```{code-block} python
-from xtuner.v1.ray.accelerator import AcceleratorResourcesConfig
+from xtuner.v1.ray.base import AcceleratorResourcesConfig
 resources = AcceleratorResourcesConfig(
     accelerator="GPU",
     num_accelerators_per_worker=1,

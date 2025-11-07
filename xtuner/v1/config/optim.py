@@ -3,13 +3,17 @@ from typing import Literal, Optional, Tuple
 
 import torch
 from cyclopts import Parameter
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from typing_extensions import Annotated
 
 
 class OptimConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     lr: Annotated[float, Parameter(help="Learning rate for optimization")] = 1e-5
     max_grad_norm: Annotated[float, Parameter(help="Maximum gradient norm for gradient clipping")] = 1.0
+    skip_grad_norm_threshold: Annotated[
+        float | None, Parameter(help="Gradient norm threshold for skipping optimizer step.")
+    ] = None
 
     @abstractmethod
     def build(self, params):
@@ -29,6 +33,7 @@ class AdamWConfig(OptimConfig):
 
 
 class LRConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     lr_type: Annotated[Literal["cosine", "linear", "constant"], Parameter(help="Type of learning rate schedule")] = (
         "constant"
     )

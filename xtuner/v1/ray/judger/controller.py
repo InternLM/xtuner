@@ -4,7 +4,7 @@ from typing import List
 
 import ray
 from cyclopts import Parameter
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from typing_extensions import Annotated
 
 from xtuner.v1.data_proto.rl_data import RLDataFlowItem, RLJudgerResponseItem
@@ -58,6 +58,8 @@ class JudgerConfig(BaseModel):
                 "reward_model": {"ground_truth": "..."}
             }
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     enable_batch_reward: Annotated[
         bool, Parameter(help="Whether to enable batch reward calculation for multiple samples at once.")

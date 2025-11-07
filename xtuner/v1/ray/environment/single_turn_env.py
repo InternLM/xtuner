@@ -4,12 +4,16 @@ from typing import List
 
 import ray
 
-from xtuner.v1.data_proto.rl_data import RLDataFlowItem, RLJudgerResponseItem, update_dataflow_item
+from xtuner.v1.data_proto.rl_data import (
+    RLDataFlowItem,
+    RLJudgerResponseItem,
+    update_dataflow_item,
+)
 from xtuner.v1.ray.environment.base_env import BaseEnvironment
 from xtuner.v1.utils import get_logger
 
 
-@ray.remote(max_concurrency=int(os.environ.get("XTUNER_MAX_CONCURRENCY", 2000)))
+@ray.remote(max_concurrency=int(os.environ.get("RAY_MAX_CONCURRENCY", 1000)))
 class SingleTurnEnvironment(BaseEnvironment):
     """A single-turn environment for handling generation and evaluation tasks.
 
@@ -19,13 +23,15 @@ class SingleTurnEnvironment(BaseEnvironment):
 
     Args:
         environment (str): The name of the environment.
-        placement_group: The placement group for scheduling Ray actors.
+        rollout_pg: The placement group for scheduling rollout Ray actors.
         rollout_cfg (optional): Configuration for the rollout controller. Defaults to None.
+        judger_pg (Any): The placement group for scheduling judger Ray actors.
+                         Defaults to None indicates using the rollout_pg.
         judger_cfg (optional): Configuration for the judger controller. Defaults to None.
     """
 
-    def __init__(self, environment: str, placement_group, rollout_cfg=None, judger_cfg=None):
-        super().__init__(environment, placement_group, rollout_cfg, judger_cfg)
+    def __init__(self, environment: str, rollout_pg, rollout_cfg=None, judger_pg=None, judger_cfg=None):
+        super().__init__(environment, rollout_pg, rollout_cfg, judger_pg, judger_cfg)
         worker_log_dir = rollout_cfg.worker_log_dir if rollout_cfg else judger_cfg.worker_log_dir
         self.logger = get_logger(log_dir=worker_log_dir, tag="SingleTurnEnv")
 
@@ -55,7 +61,11 @@ class SingleTurnEnvironment(BaseEnvironment):
             # 每个模块返回独立的data item, 在env中进行更新
             response_future = [
                 self.rollout_controller.rollout.remote(
-                    prompt=sample.data.messages, sample_params=sample_params, extra_params=extra_params
+                    prompt=sample.data.messages,
+                    input_ids=sample.data.input_ids,
+                    sample_params=sample_params,
+                    extra_params=extra_params,
+                    extra_info=sample.data.extra_info,
                 )
                 for sample in group_data_items
             ]
@@ -82,7 +92,11 @@ class SingleTurnEnvironment(BaseEnvironment):
             The format of the return value matches the format of the input `data`.
         """
         group_data_items = await self.generate(group_data_items, sample_params, extra_params)  # type: ignore[assignment]
-        if self.judger_controller:
+        skip_judger = any(
+            item.env.rollout.finish_reason == "abort" or item.env.rollout.finish_reason == "failed"
+            for item in group_data_items
+        )
+        if self.judger_controller and not skip_judger:
             judger_responses: RLJudgerResponseItem = await self.judger_controller.run.remote(group_data_items)
             group_data_items = update_dataflow_item(group_data_items, "env.judger", judger_responses)
         return group_data_items
