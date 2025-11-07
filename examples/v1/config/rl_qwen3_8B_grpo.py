@@ -44,7 +44,8 @@ hf_interval = 15
 enable_initial_evaluate = True
 evaluate_step = 10
 # TODO: 提供不同模型/不同输入输出长度下最优的rollout_max_batch_size配置建议
-# 目前Xtuner的数据流并发度由rollout_max_batch_size控制，具体逻辑可见 xtuner/v1/ray/dataflow/flow.py 中 max_concurrent 的计算方式
+# NOTE: 目前Xtuner的数据流并发度由rollout_max_batch_size控制，并且提供allow_over_concurrency来控制数据流并发度略大于推理引擎并发度，
+# 具体逻辑可见 xtuner/v1/ray/dataflow/flow.py 中 max_concurrent 的计算方式
 # 当然你也可以手动调整 dataflow_config 中的 max_concurrent 参数来控制数据流并发度
 rollout_max_batch_size = 128
 
