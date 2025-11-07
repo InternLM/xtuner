@@ -45,5 +45,7 @@ def register_prober_list(model: nn.Module):
 
 
 def setup_prober_list(exp_dir: Path, profile_step: list[int] | None, model: nn.Module, prober_list: list[str]):
+    if len(prober_list) == 0:
+        return
     ProberList.setup(exp_dir, profile_step, prober_list)
     register_prober_list(model)

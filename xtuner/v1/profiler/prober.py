@@ -158,7 +158,7 @@ class BaseProber(ABC):
         pass
 
     @classmethod
-    def before_balancing_loss(cls, name: str, router_logits: torch.Tensor):
+    def before_balancing_loss(cls, name: str, router_weights: torch.Tensor):
         pass
 
     @classmethod
@@ -355,10 +355,10 @@ class ProberList:
         @functools.wraps(forward)
         def wrapped_forward(self, *args, **kwargs):
             if len(args) >= 1:
-                router_logits = args[0]
+                router_weights = args[0]
             else:
-                router_logits = kwargs["router_logits"]
-            ProberList.before_balancing_loss(name, router_logits)
+                router_weights = kwargs["router_weights"]
+            ProberList.before_balancing_loss(name, router_weights)
             loss = forward(*args, **kwargs)
             ProberList.after_balancing_loss(name, loss)
             return loss
@@ -490,9 +490,9 @@ class ProberList:
             prober_cls.after_lm_head(name, loss, logits)
 
     @classmethod
-    def before_balancing_loss(cls, name: str, router_logits: torch.Tensor):
+    def before_balancing_loss(cls, name: str, router_weights: torch.Tensor):
         for prober_cls in cls.prober_list:
-            prober_cls.before_balancing_loss(name, router_logits)
+            prober_cls.before_balancing_loss(name, router_weights)
 
     @classmethod
     def after_balancing_loss(
@@ -676,8 +676,8 @@ class AccProber(BaseProber):
         cls.record_tensor(logits, f"[{name}][after]logits")
 
     @classmethod
-    def before_balancing_loss(cls, name: str, router_logits: torch.Tensor):
-        cls.record_tensor(router_logits, f"[{name}][before]router_logits")
+    def before_balancing_loss(cls, name: str, router_weights: torch.Tensor):
+        cls.record_tensor(router_weights, f"[{name}][before]router_weights")
 
     @classmethod
     def after_balancing_loss(
