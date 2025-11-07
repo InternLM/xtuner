@@ -119,7 +119,8 @@ class ResumeConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     resume_from: str | Path | None = None
     auto_resume: bool = False
-    load_optimizer: bool = True
+    load_optimizer_states: bool = True
+    load_optimizer_args: bool = True
     load_dataset: bool = True
     load_scheduler: bool = True
 
@@ -402,7 +403,8 @@ class Trainer:
             strict=strict_load,
             intra_layer_micro_batch=intra_layer_micro_batch,
         )
-        self._lr_scheduler = self.build_lr_scheduler(lr_cfg)
+        self._lr_cfg = lr_cfg
+        self._lr_scheduler = self.build_lr_scheduler(lr_cfg, self.total_step)
 
         if loss_cfg is None:
             loss_cfg = CELossConfig()
@@ -733,7 +735,7 @@ class Trainer:
             engine.model.set_hf(model_path)
         return engine
 
-    def build_lr_scheduler(self, lr_cfg: LRConfig) -> torch.optim.lr_scheduler.LRScheduler:
+    def build_lr_scheduler(self, lr_cfg: LRConfig, scheduler_step: int) -> torch.optim.lr_scheduler.LRScheduler:
         """Build the learning rate scheduler.
 
         Args:
@@ -742,8 +744,10 @@ class Trainer:
         Returns:
             torch.optim.lr_scheduler.LRScheduler: Configured learning rate scheduler.
         """
-        total_step = self.total_step
-        warmup_steps = int(lr_cfg.warmup_ratio * total_step)
+        if lr_cfg.warmup_ratio < 1:
+            warmup_steps = int(lr_cfg.warmup_ratio * scheduler_step)
+        else:
+            warmup_steps = int(lr_cfg.warmup_ratio)
 
         def warmup_fn(x):
             return x / warmup_steps if x < warmup_steps else 1
@@ -756,11 +760,11 @@ class Trainer:
                 self._engine.optimizer,
                 start_factor=1.0,
                 end_factor=lr_cfg.lr_min / self._engine.optimizer.defaults["lr"],
-                total_iters=total_step - warmup_steps,
+                total_iters=scheduler_step - warmup_steps,
             )
         elif lr_cfg.lr_type == "cosine":
             scheduler = CosineAnnealingLR(
-                self._engine.optimizer, T_max=total_step - warmup_steps, eta_min=lr_cfg.lr_min
+                self._engine.optimizer, T_max=scheduler_step - warmup_steps, eta_min=lr_cfg.lr_min
             )
         elif lr_cfg.lr_type == "constant":
             scheduler = LambdaLR(self._engine.optimizer, lambda x: 1.0)
@@ -789,7 +793,11 @@ class Trainer:
 
         meta_path = self.work_dir / self._META_PATH
 
-        optimizer_path = checkpoint_path / self._SAVE_OPTIMIZER_DIR if self._resume_cfg.load_optimizer else None
+        optimizer_path = (
+            checkpoint_path / self._SAVE_OPTIMIZER_DIR
+            if self._resume_cfg.load_optimizer_states or self._resume_cfg.load_optimizer_args
+            else None
+        )
         model_path = checkpoint_path / self._SAVE_MODEL_DIR
         dataloader_path = checkpoint_path / self._SAVE_DATALOADER_DIR
         scheduler_path = checkpoint_path / self._SAVE_SCHEDULER_DIR
@@ -1228,28 +1236,29 @@ class Trainer:
         resume_cfg = self._resume_cfg
 
         if (resume_from := resume_cfg.resume_from) is None:
+            logger.info("No checkpoint to resume from.")
             return
 
         if isinstance(resume_from, str):
             resume_from = Path(resume_from)
+        logger.info(f"Resume from checkpoint: {resume_from}")
 
         if not resume_from.exists():
             raise FileNotFoundError(f"Checkpoint path {resume_from} does not exist.")
 
         model_path = resume_from / self._SAVE_MODEL_DIR
-        optimizer_path = resume_from / self._SAVE_OPTIMIZER_DIR if self._resume_cfg.load_optimizer else None
+        optimizer_path = (
+            resume_from / self._SAVE_OPTIMIZER_DIR
+            if self._resume_cfg.load_optimizer_states or self._resume_cfg.load_optimizer_args
+            else None
+        )
 
         self._engine.load_dcp(
             model_dir=model_path,
             optimizer_dir=optimizer_path,
+            load_states=self._resume_cfg.load_optimizer_states,
+            load_args=self._resume_cfg.load_optimizer_args,
         )
-
-        if resume_cfg.load_scheduler:
-            scheduler_path = resume_from / self._SAVE_SCHEDULER_DIR
-            if not scheduler_path.exists():
-                raise FileNotFoundError(f"Scheduler path {scheduler_path} does not exist.")
-            lr_scheduler_state = torch.load(scheduler_path, map_location=DEVICE)
-            self._lr_scheduler.load_state_dict(lr_scheduler_state)
 
         if resume_cfg.load_dataset:
             dataloader_path = resume_from / self._SAVE_DATALOADER_DIR
@@ -1265,6 +1274,17 @@ class Trainer:
         self._consumed_samples = train_state["consumed_samples"]
         self._consumed_tokens = train_state["consumed_tokens"]
         self._train_time_offset = train_state["train_time_offset"]
+
+        if resume_cfg.load_scheduler:
+            scheduler_path = resume_from / self._SAVE_SCHEDULER_DIR
+            if not scheduler_path.exists():
+                raise FileNotFoundError(f"Scheduler path {scheduler_path} does not exist.")
+            lr_scheduler_state = torch.load(scheduler_path, map_location=DEVICE)
+            self._lr_scheduler.load_state_dict(lr_scheduler_state)
+        else:
+            assert self.total_step > self._cur_step
+            scheduler_step = self.total_step - self._cur_step
+            self._lr_scheduler = self.build_lr_scheduler(self._lr_cfg, scheduler_step)
 
     def _resume_dataloader(self, dataloader_path: Path):
         if not dataloader_path.exists():

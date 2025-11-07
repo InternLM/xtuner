@@ -3,7 +3,7 @@ import os
 import threading
 from concurrent.futures import wait
 from pathlib import Path
-from typing import Any, Dict, Optional, cast
+from typing import Any, Dict, List, Optional, cast
 
 import torch
 import torch.distributed as dist
@@ -404,7 +404,13 @@ class TrainEngine:
                     checkpoint_id=optimizer_dir,
                 )
 
-    def load_dcp(self, model_dir: Path, optimizer_dir: Path | None = None):
+    def load_dcp(
+        self,
+        model_dir: Path,
+        optimizer_dir: Path | None = None,
+        load_states: bool = True,
+        load_args: bool = True,
+    ):
         """Load the dcp model from the given directory.
 
         Args:
@@ -430,6 +436,26 @@ class TrainEngine:
                     state_dict=shard_optimizer_state_dict,
                     checkpoint_id=optimizer_dir,
                 )
+                if not load_states:
+                    logger.info("Not loading optimizer states")
+                    shard_optimizer_state_dict["state"] = {}
+                if not load_args:
+                    logger.info("Not loading arg defaults")
+                    param_groups = self.optimizer.state_dict()["param_groups"]
+                    # Now we only support one param_group. If we want to support different lr for different parameters,
+                    # we may use multiple param_groups like:
+                    # [{'params': ['net1.weight', 'net2.weight'], 'lr': 0.001}, {'params': ['net3.weight'], 'lr': 0.002}]
+                    # Then we need change the code here
+                    assert len(param_groups) == 1, "Only one param_group is supported now"
+                    init_defaults = param_groups[0]
+                    init_defaults.pop("params")
+                    for param_group in cast(List[Dict[str, Any]], shard_optimizer_state_dict["param_groups"]):
+                        # param_group is like: {'params': ['net1.weight', 'net2.weight'], 'lr': 0.001, 'betas': (0.9, 0.999), 'eps': 1e-08, 'weight_decay': 0.01}
+                        default_keys = list(filter(lambda x: x != "params", param_group.keys()))
+                        for key in default_keys:
+                            param_group.pop(key)
+                        param_group.update(init_defaults)  # lr, betas, eps, etc.
+
                 set_optimizer_state_dict(
                     self.model,
                     self.optimizer,
