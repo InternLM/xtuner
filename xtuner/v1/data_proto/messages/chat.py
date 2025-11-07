@@ -44,6 +44,9 @@ class VideoURL(BaseModel):
     url: str
     detail: Optional[Literal["auto", "low", "high"]] = None
     video_length: Optional[int] = None  # duration or frame count
+    image_wh: Optional[List[int]] = None  # width, height
+    processed_video_length: Optional[int] = None
+    processed_fps: Optional[float] = None
 
 
 class VideoContentItem(BaseModel):
