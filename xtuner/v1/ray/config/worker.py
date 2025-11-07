@@ -175,12 +175,12 @@ class RolloutConfig(BaseModel):
         ),
     ] = 1200.0
     context_length: Annotated[
-        int,
+        Optional[int],
         Parameter(
             group=infer_group,
             help="Context length for the rollout worker.",
         ),
-    ]
+    ] = None
     extra_rollout_config: Annotated[
         dict,
         Parameter(
@@ -244,6 +244,10 @@ class RolloutConfig(BaseModel):
             kwargs["rollout_cross_node_comm"] = True
 
         if "rollout_max_batch_size_per_instance" not in kwargs:
+            assert "context_length" in kwargs, (
+                "`context_length` must be provided to determine `rollout_max_batch_size_per_instance`."
+            )
+
             context_length = kwargs["context_length"]
 
             # TODO(@duanyanhui): Provide better suggestions for different models/input-output lengths
