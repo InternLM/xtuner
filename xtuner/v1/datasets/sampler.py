@@ -107,6 +107,7 @@ class ParallelSampler(Sampler):
 
     def __len__(self) -> int:
         """The number of samples in this rank."""
+        # TODO: not same with LengthGroupedSampler?
         return self.num_samples - self.step
 
     def set_epoch(self, epoch: int) -> None:
@@ -137,10 +138,11 @@ class ParallelSampler(Sampler):
             )
 
     def get_state_dict(self, step: int):
-        self.step = step % self.total_size
+        # Attention! Do not set self.step here, or it will cause the next __iter__ to get less samples.
+        # self.step = step % self.total_size
         return {
             "epoch": self.epoch,
-            "step": self.step,
+            "step": step,
             "world_size": self.world_size,
             "shuffle": self.shuffle,
             "round_up": self.round_up,
@@ -291,7 +293,8 @@ class LengthGroupedSampler(Sampler):
         Returns:
             dict: The state of the sampler.
         """
-        self.step = step % self.total_size
+        # Attention! Do not set self.step here, or it will cause the next __iter__ to get less samples.
+        # self.step = step % self.total_size
         return {
             "epoch": self.epoch,
             "step": self.step,
