@@ -188,11 +188,16 @@ class TestMLLMTokenizeFn(TestCase):
                 labels_xtuner = torch.tensor(ret['labels'])
                 input_str = self.tokenize_fn.tokenizer.decode(input_ids_xtuner, skip_special_tokens=False)
                 input_str = input_str.replace('<|image_pad|>', '')
-                input_xtuner_str = input_str.replace('<|vision_start|><|vision_end|>', '<|image_pad|>')
+                input_xtuner_str = input_str.replace('<|vision_start|><|vision_end|>', '<IMG_CONTEXT>')
                 ground_truth_content = raw_data['messages'][0]
                 for item in ground_truth_content['content']:
                     if item['type'] == 'text':
                         ground_truth_str = item['text'] + "<|im_end|>"
+                image_cnt = ground_truth_str.count('<IMG_CONTEXT>')
+                if image_cnt>1:
+                    for i in range(image_cnt):
+                        ground_truth_str = ground_truth_str.replace('<IMG_CONTEXT>', f'Picture {i+1}: <IMG_CONTEXT_1>', 1)
+                    ground_truth_str=ground_truth_str.replace('<IMG_CONTEXT_1>', '<IMG_CONTEXT>')
                 self.assertEqual(input_xtuner_str.strip(), ground_truth_str.strip())
                 self.assertTrue((labels_xtuner == self.tokenize_fn.img_context_token_id).sum() == 0)
 
