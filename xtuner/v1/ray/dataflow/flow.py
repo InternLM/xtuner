@@ -117,16 +117,12 @@ class DataFlow:
         self.logger = get_logger(log_dir=self.config.worker_log_dir, tag="DataFlow")
         self.target_batch_size = self.config.global_batch_size
         self.logger.info(f"DataFlowConfig:\n{self.config.model_dump_json(indent=2)}")
-        rollout_info = ray.get(self.env_controller.get_rollout_info.remote())["server_url_dict"]  # type: ignore[attr-defined]
+        rollout_info = ray.get(self.env_controller.get_rollout_info.remote())  # type: ignore[attr-defined]
         self.worker_url_list = list(rollout_info["server_url_dict"].values())
         self.logger.info(f"DataFlow connected to active rollout workers url: {self.worker_url_list}")
-        rollout_config = rollout_info["rollout_config"]  
+        rollout_config = rollout_info["rollout_config"]
         max_concurrent = int(
-            (
-                rollout_config.rollout_max_batch_size
-                * len(self.worker_url_list)
-                / self.config.prompt_repeat_k
-            )
+            (rollout_config.rollout_max_batch_size * len(self.worker_url_list) / self.config.prompt_repeat_k)
             * rollout_config.allow_over_concurrency
         )
 
